@@ -272,7 +272,16 @@ CENSUS_BLOCKS_ON_PRESENT = 70
 # 37.3's `blocks_on` is present but EMPTY: it is conditional on its subject
 # (two GDS files) rather than dependent on step 37's verdict, so it joins
 # PRESENT without joining NON_EMPTY. Measured: 67 -> 67.
-CENSUS_BLOCKS_ON_NON_EMPTY = 67
+#   2026-09-23: CENSUS_BLOCKS_ON_NON_EMPTY   67 -> 68  step 37.3 carries
+#   `blocks_on: [21]`. It was DELIBERATELY left at 67 for one revision of this
+#   branch, when 37.3 declared `blocks_on: []` -- present, as the flow contract
+#   requires of every step, and empty, so it counted toward
+#   CENSUS_BLOCKS_ON_PRESENT and not toward this one. That empty list was then
+#   refused by dimension 5 (D5-MISSING-EDGE: the step reads an artefact another
+#   step produces), the edge to its producer was declared, and the population
+#   moved with it. RE-DERIVED as a SET against origin/main: joined ['37.3'],
+#   left [].
+CENSUS_BLOCKS_ON_NON_EMPTY = 68
 # 60 -> 61 on 2026-08-08: step 12 gained a `program_exit_zero` exec clause
 # (dft_post_optimization_scan_survival_check), closing the files_exist-only
 # gap the flow_matrix dimension-2 audit named. Step 1 is still exec-free.
@@ -1137,20 +1146,28 @@ def test_output_entries_classify_into_the_four_kinds():
     # `si_crosstalk.rpt OR si_crosstalk.json`, which is an ANY_OF precisely
     # because two spellings satisfy it.
     # 189 -> 192, RE-DERIVED by the method this pin names (diff the
-    # (step, entry) SET, never type the total): step 37 gained
-    # phase3/stage3/pnr/stream_out.log and
-    # reports/phase3/pad_ring_route_evidence.json (both declared to close W2 on
-    # 37.3), and 37.3 itself declares reports/phase3/gds_xor.json. Three FILE
-    # entries, one arrival each, no entry left.
+    # (step, entry) SET against origin/main through $VIBE_IC_MATRIX_FLOW_YAML,
+    # never type the total). Three entries arrive, none leaves:
+    #   + ('37',   'reports/phase3/pad_ring_route_evidence.json')   FILE
+    #   + ('37.3', 'reports/phase3/gds_xor.json')                   FILE
+    #   + ('37',   'phase3/stage3/pnr/*stream_out.log')             GLOB
+    # The first two are declared to close W2 on 37.3, which CONSUMES both; the
+    # third is 37.3's own product.
     assert sum(seen.values()) == 192, (seen, REDERIVE)
-    # 136 -> 139, RE-DERIVED by diffing the (step, entry) SET, never typed:
-    # three FILE entries arrived, all of them declarations this change owes --
-    # step 37's phase3/stage3/pnr/stream_out.log and
-    # reports/phase3/pad_ring_route_evidence.json (declared to close W2 on
-    # 37.3, which CONSUMES both), and 37.3's own reports/phase3/gds_xor.json.
-    # No entry left, and no GLOB or ANY_OF entry moved.
-    assert seen[F.FILE] == 139, (seen, REDERIVE)
-    assert seen[F.GLOB] == 27, (seen, REDERIVE)
+    # 136 -> 138 FILE and 27 -> 28 GLOB, from the SAME set diff.
+    #
+    # AN EARLIER REVISION OF THIS PIN SAID FILE 139 / GLOB 27, and the arithmetic
+    # was right for a spelling that was wrong. The transcript was first declared
+    # as `phase3/stage3/pnr/stream_out.log`, a plain FILE -- but that name is
+    # written by the KLAYOUT stream-out only; Magic writes
+    # `<top>.magic_stream_out.log`, so the single name demanded of every
+    # Magic-streamed run a file its engine never writes. The declaration is now
+    # the engine-neutral glob, which is what the flow actually requires -- SOME
+    # transcript of what went into the sign-off GDS -- and it classifies as GLOB.
+    # One entry moved between two kinds; the total did not move, which is exactly
+    # why this test asserts the three kinds separately and not just their sum.
+    assert seen[F.FILE] == 138, (seen, REDERIVE)
+    assert seen[F.GLOB] == 28, (seen, REDERIVE)
     assert seen[F.ANY_OF] == 26, (seen, REDERIVE)
     # Reported to the orchestrator: the PROGRAM_EXIT form described in the brief
     # does NOT exist in required_outputs. It lives only in `gate` clauses. The
