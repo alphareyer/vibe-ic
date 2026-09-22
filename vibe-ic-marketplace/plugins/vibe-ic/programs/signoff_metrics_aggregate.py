@@ -696,17 +696,43 @@ def _die_bbox(project: Path) -> Cell:
                       f"{basis}, so this run has no die geometry to state")
 
 
-def _xor(project: Path) -> Cell:
-    """GDS-vs-layout XOR difference count.
+#: The XOR producer's receipt. R-0915-129 metric 2.
+_XOR_REL = "reports/phase3/gds_xor.json"
 
-    No step of this flow runs a layout-versus-GDS XOR today; there is no report
-    to read and this key is NOT_MEASURED for every design until one exists. It
-    is written anyway, with this reason, so that its absence is a stated fact of
-    the run rather than a key a reader silently never finds.
+
+def _xor(project: Path) -> Cell:
+    """GDS-vs-layout XOR difference count, from the producer's own receipt.
+
+    R-0915-129 ruled this metric NOT structural -- KLayout in the pinned image has
+    `xor`, so the flow CAN produce it and declaring it inapplicable would be
+    laundering. `gds_xor_check` now does: it XORs the shipped GDS against the
+    pre-finishing boundary of the same routed DB and counts DESIGN-layer
+    differences, with the layers each finishing step declares it added subtracted
+    and disclosed separately.
+
+    Three outcomes are passed through as the producer stated them, never
+    collapsed: a number (including 0), NOT_DETERMINED (the producer refused --
+    an unfaithful reference, a changed artefact, no runner), and absence. A
+    refusal is NOT a zero, and that distinction is the whole value of the key.
     """
+    rec = _json(project, _XOR_REL)
+    if not isinstance(rec, dict):
+        return unmeasured(
+            f"{_XOR_REL} is absent, so the XOR step did not run or did not write "
+            f"its receipt; an unrun XOR is not a difference count of zero")
+    verdict = rec.get("verdict")
+    count = rec.get("design__xor_difference__count")
+    if verdict in {"PASS", "FAIL"} and isinstance(count, int) \
+            and not isinstance(count, bool):
+        ref = (rec.get("reference") or {}).get("kind") or "unstated"
+        return Cell(count, source=_XOR_REL,
+                    basis=(f"design-layer XOR against the {ref} pre-finishing "
+                           f"reference; {len(rec.get('finishing_layer_differences') or [])} "
+                           f"finishing-declared layer(s) differ and are listed "
+                           f"separately in that report"))
     return unmeasured(
-        "no step of this flow produces a GDS-vs-layout XOR report, so no XOR "
-        "difference count exists for any design on this flow")
+        f"{_XOR_REL} reports {verdict!r} rather than a difference count"
+        + (f": {rec.get('reason')}" if rec.get("reason") else ""))
 
 
 # ── the table: one row per key the release readers read ─────────────────────

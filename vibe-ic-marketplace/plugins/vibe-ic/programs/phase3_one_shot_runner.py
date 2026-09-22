@@ -43072,6 +43072,34 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
                                                   gds_out))
                           if pdk.same_net_heal else
                           (False, "no same_net_heal config"))
+    # R-0915-129 — RETAIN THE FINISHING BOUNDARY. Every step from here down
+    # writes into `gds_out` IN PLACE: the seal ring, the three fill passes and
+    # the label restore all mutate the one artefact, so once the run finishes
+    # there is no longer any copy of what the design looked like BEFORE
+    # finishing, and stream-out/finishing fidelity cannot be measured. A
+    # re-stream can approximate it, but only approximately -- it depends on the
+    # library set resolving identically, and a re-stream missing one library
+    # produces a CONFIDENT WRONG ANSWER about the design (measured: 776,403 and
+    # then 348,392 phantom differences, neither of them about this chip). So the
+    # boundary is KEPT, here, as bytes this run wrote. The copy is taken AFTER
+    # snap/merge/heal because those produce the design geometry itself and are
+    # not finishing; finishing is what follows, and what declares the layers it
+    # adds. gds_xor_check reads this artefact; its absence is not fatal (older
+    # runs have none and it falls back to a re-stream), so a copy failure is
+    # disclosed and never fails the step.
+    prefinish_gds = pnr_dir / f"{top}.prefinish.gds"
+    try:
+        shutil.copy2(gds_out, prefinish_gds)
+        _pf_sha = _sha256_file(prefinish_gds)
+        prefinish_note = (f"retained {prefinish_gds.name} "
+                          f"({prefinish_gds.stat().st_size} bytes, "
+                          f"sha256 {_pf_sha})")
+    except Exception as _pf_exc:
+        prefinish_gds, _pf_sha = None, None
+        prefinish_note = (f"the finishing boundary was NOT retained "
+                          f"({type(_pf_exc).__name__}: {_pf_exc}); "
+                          f"gds_xor_check must fall back to a re-stream")
+    print(f"[gds] {prefinish_note}")
     # Step 26.5ic — die finishing (the PDK's OWN seal ring), after the merge
     # (so the ring's own geometry is not fused into the core's) and BEFORE the
     # fill passes, the density checks and the sign-off DRC/LVS consume this

@@ -8261,6 +8261,40 @@ steps:
   # route: the IP arm's documents and the `_ic_release_artefacts` substance
   # check read the same record, and a summary of a run belongs to the run, not
   # to one of the two ways it can be delivered.
+  # R-0915-129 metric 2 — STREAM-OUT / FINISHING FIDELITY, measured.
+  #
+  # `design__xor_difference__count` was NOT_MEASURED for every design on this
+  # flow, and the ruling refused the structural excuse: KLayout in the pinned
+  # image has `xor`, so the flow CAN produce the number and calling it
+  # inapplicable would be laundering. What there was no producer for is the
+  # comparison itself -- the shipped GDS against the same routed database before
+  # finishing touched it, on the DESIGN layers, with the layers each finishing
+  # step DECLARES it added subtracted and disclosed separately.
+  #
+  # Its own step, before 37.4, because 37.4 READS this receipt: the aggregator's
+  # `--check` refuses a record that no longer states what the run's own reports
+  # state, so the XOR must have written its answer first.
+  #
+  # BLOCKING via program_exit_zero, and the three outcomes are distinct. A
+  # design-layer difference is rc=1 FAIL. A refusal is rc=2 and also blocks --
+  # the program refuses rather than guesses when the reference it can build is
+  # not faithful to the shipped artefact, and an unverifiable claim is not a
+  # pass. Only a measured 0 on every design layer is rc=0.
+  - id: "37.3"
+    name: "GDS stream-out / finishing fidelity — the shipped GDS XOR'd against this run's own pre-finishing boundary"
+    stage: stage4
+    required_inputs:
+      - from: 37
+        path: "phase3/stage4/gds/*.gds"
+    required_outputs:
+      - "reports/phase3/gds_xor.json"
+    programs:
+      - gds_xor_check
+    gate:
+      all_of:
+        - program_exit_zero: "gds_xor_check . --json reports/phase3/gds_xor.json"
+    blocks_on: [37]
+
   - id: "37.4"
     name: "Sign-off metrics aggregation — the run's own checker verdicts, under the names the release documents read"
     stage: stage4
