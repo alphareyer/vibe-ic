@@ -45,6 +45,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+
+import pytest
 from pathlib import Path
 
 PROGRAMS = Path(__file__).resolve().parent.parent
@@ -73,28 +75,85 @@ def test_the_registry_stays_a_set_of_unique_gates():
 
 # ── it IS asked where its input exists ─────────────────────────────────────
 
+#: WHERE THE GATE IS ASKED, as the generator now spells it.
+#:
+#: RE-PINNED, and the reason is the fix that came after the move: the first tip
+#: of this branch CALLED the gate's `audit()` and PRINTED the result, and that
+#: dropped #834's record — so the call site became
+#: `flow_compliance_check.attestation_gate_record`, which builds the record the
+#: umbrella reads. The three anchors below were left on the old import line and
+#: `str.index` raised `ValueError: substring not found` — a test that cannot find
+#: its subject reports NOTHING about the ordering it exists to hold, which is why
+#: they are re-pinned rather than relaxed.
+#:
+#: THE ASSIGNMENT, NOT THE BARE NAME: `attestation_gate_record` also occurs in
+#: the comment that explains the call, one line earlier, so anchoring on the name
+#: alone would measure the position of my own prose. Asserted unique below.
+_GATE_CALL = "_att_record = _fcc_rec.attestation_gate_record(project)"
+_PREWRITE = "_prewrite_attestation(project, canonical)"
+_GUARD = "if not args.no_audit:"
+_RENDER = "md = _render(project, run_audit="
+
+
+def test_the_anchor_is_the_call_and_not_the_comment_about_it():
+    """The pin's own precondition. If `_GATE_CALL` ever matches twice, every
+    ordering claim below silently becomes a claim about whichever came first."""
+    src = GEN.read_text()
+    assert src.count(_GATE_CALL) == 1, (
+        f"{_GATE_CALL!r} occurs {src.count(_GATE_CALL)} times; the ordering "
+        f"anchors need exactly one call site")
+
+
+def _assert_gate_sits_between_its_input_and_the_rollup(src: str) -> None:
+    """PURE, so the mutation arm can drive it with a rearranged copy."""
+    i_pre = src.index(_PREWRITE)
+    i_gate = src.index(_GATE_CALL)
+    i_render = src.index(_RENDER)
+    assert i_pre < i_gate < i_render, (
+        f"order is pre-write={i_pre} gate={i_gate} render={i_render}; the gate "
+        f"must sit between its input and the roll-up")
+
+
+def _assert_gate_sits_under_the_audit_guard(src: str) -> None:
+    i_guard = src.index(_GUARD)
+    i_gate = src.index(_GATE_CALL)
+    i_render = src.index(_RENDER)
+    assert i_guard < i_gate < i_render, (
+        f"order is guard={i_guard} gate={i_gate} render={i_render}")
+
+
 def test_the_generator_asks_the_gate_after_the_prewrite():
     """SOURCE-level ordering, because this path only runs inside a real run: the
     call must come AFTER `_prewrite_attestation` (its input) and BEFORE `_render`
     (the audit roll-up that records its verdict)."""
+    _assert_gate_sits_between_its_input_and_the_rollup(GEN.read_text())
+
+
+def test_the_ordering_claim_goes_red_when_the_gate_moves_earlier():
+    """MUTATION for the test above. An ordering assertion that cannot be broken
+    is a comment; this moves the call site AHEAD of its input in a copy of the
+    source and requires the claim to refuse."""
     src = GEN.read_text()
-    i_pre = src.index("_prewrite_attestation(project, canonical)")
-    i_gate = src.index("from agent_report_sha256_attestation_check import audit")
-    i_render = src.index("md = _render(project, run_audit=")
-    assert i_pre < i_gate < i_render, (
-        f"order is pre-write={i_pre} gate={i_gate} render={i_render}; the gate "
-        f"must sit between its input and the roll-up")
+    moved = src.replace(_PREWRITE, _GATE_CALL + "\n        " + _PREWRITE, 1)
+    assert moved.index(_GATE_CALL) < moved.index(_PREWRITE)
+    with pytest.raises(AssertionError):
+        _assert_gate_sits_between_its_input_and_the_rollup(moved)
 
 
 def test_the_gate_is_not_asked_when_no_audit_will_run():
     """It lives under the same `not args.no_audit` guard as the pre-write: with
     no audit there is no pre-write, so asking would read a stale table — the very
     defect this moves away from."""
+    _assert_gate_sits_under_the_audit_guard(GEN.read_text())
+
+
+def test_the_guard_claim_goes_red_when_the_gate_escapes_it():
+    """MUTATION: hoist the call above the `not args.no_audit` guard."""
     src = GEN.read_text()
-    i_guard = src.index("if not args.no_audit:")
-    i_gate = src.index("from agent_report_sha256_attestation_check import audit")
-    i_render = src.index("md = _render(project, run_audit=")
-    assert i_guard < i_gate < i_render
+    hoisted = src.replace(_GUARD, _GATE_CALL + "\n    " + _GUARD, 1)
+    assert hoisted.index(_GATE_CALL) < hoisted.index(_GUARD)
+    with pytest.raises(AssertionError):
+        _assert_gate_sits_under_the_audit_guard(hoisted)
 
 
 # ── THE REFUSALS ARE UNCHANGED — moving WHERE a question is asked must not
@@ -141,12 +200,30 @@ def test_a_fail_stays_reachable_in_the_new_position():
         "only reachable FAIL in this position disappears")
 
 
-def test_the_verdict_is_surfaced_not_swallowed():
-    """A relocated gate whose verdict nothing prints is a gate nobody reads."""
-    src = GEN.read_text()
-    i = src.index("from agent_report_sha256_attestation_check import audit")
+def _assert_the_verdict_is_surfaced(src: str) -> None:
+    """PURE, for the same reason as the ordering helpers above."""
+    i = src.index(_GATE_CALL)
     body = src[i:i + 1600]
     assert "attestation gap(s)" in body
     assert "_att_verdict" in body
     assert "INCOMPLETE" in body, (
         "an unreadable gate must report INCOMPLETE, never imply a pass")
+
+
+def test_the_verdict_is_surfaced_not_swallowed():
+    """A relocated gate whose verdict nothing prints is a gate nobody reads."""
+    _assert_the_verdict_is_surfaced(GEN.read_text())
+
+
+def test_the_surfacing_claim_goes_red_when_the_verdict_is_swallowed():
+    """MUTATION: silence the two lines that publish the verdict and require the
+    claim to refuse. Without this, a call site that recorded the verdict and told
+    no one would satisfy the test above by carrying the words in a comment."""
+    src = GEN.read_text()
+    i = src.index(_GATE_CALL)
+    swallowed = (src[:i]
+                 + src[i:i + 1600].replace("attestation gap(s)", "")
+                                  .replace("_att_verdict", "_unread")
+                 + src[i + 1600:])
+    with pytest.raises(AssertionError):
+        _assert_the_verdict_is_surfaced(swallowed)
