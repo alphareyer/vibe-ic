@@ -133,7 +133,7 @@ def test_macro_gds_is_joined_with_the_separator_the_recipe_parses(tmp_path):
     """MEASURED DEFECT: the recipe reads MACRO_GDS as `.split(';')`. Joining the
     two recorded libraries with a SPACE handed it one unopenable path, both IO
     libraries were silently lost, and the only symptom was a small reference."""
-    log = tmp_path / g.STREAMOUT_LOG_REL
+    log = tmp_path / g.STREAMOUT_LOG_GLOB.replace("*", "")
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text(
         "LEFDEF_MAP applied: /pdk/tech.map\n"
@@ -146,6 +146,47 @@ def test_macro_gds_is_joined_with_the_separator_the_recipe_parses(tmp_path):
     assert " " not in env["MACRO_GDS"]
     assert env["CELL_GDS"] == "/pdk/cells.gds"
     assert len(cited) == 3
+
+
+def test_the_magic_engine_transcript_is_read_too(tmp_path):
+    """THE ENGINE SPLIT, and it is why the read is a glob.
+
+    `stream_out.log` is written by the KLAYOUT stream-out only; the Magic engine
+    beside it writes `<top>.magic_stream_out.log`. Reading only the KLayout name
+    meant a Magic-streamed run recovered NO library hints at all, so its
+    re-streamed reference came out thin -- refused by `reference_is_faithful`
+    rather than answered. Same glob the flow declares and step 37's gate asserts.
+    """
+    log = tmp_path / "phase3/stage3/pnr/spm.magic_stream_out.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(
+        "LEFDEF_MAP applied: /pdk/tech.map\n"
+        "CELL_GDS manual-substitute (post-read): /pdk/cells.gds\n"
+        "MACRO_GDS manual-substituted 2 macro(s): /pdk/ef_io.gds\n")
+    env, cited = g.restream_env_from_transcript(tmp_path)
+    assert env["CELL_GDS"] == "/pdk/cells.gds", env
+    assert env["MACRO_GDS"] == "/pdk/ef_io.gds", env
+    assert any("magic_stream_out.log" in c for c in cited), cited
+
+
+def test_the_negative_productions_of_the_transcript_are_not_read_as_values(
+        tmp_path):
+    """THE POLARITY CLAIM, asserted rather than argued in a comment.
+
+    The recipe DOES say the negative, in productions the anchored patterns cannot
+    reach. Every one of them is written here; not one may yield a key, because a
+    key that came from a denial would be handed to the re-stream as a real path.
+    """
+    log = tmp_path / "phase3/stage3/pnr/stream_out.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(
+        "LEFDEF_MAP not applied (none configured) - legacy numbering\n"
+        "LEFDEF_MAP_CONFIGURED_BUT_ABSENT: the PDK configured a map\n"
+        "CELL_GDS manual-substituted 229 std cell(s)\n"
+        "MACRO_GDS merged (no DEF master matched): /pdk/ef_io.gds\n")
+    env, cited = g.restream_env_from_transcript(tmp_path)
+    assert env == {}, env
+    assert cited == [], cited
 
 
 def test_a_recorded_host_path_is_reanchored_to_this_project(tmp_path):

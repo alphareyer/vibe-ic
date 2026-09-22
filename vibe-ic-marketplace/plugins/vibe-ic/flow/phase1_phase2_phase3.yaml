@@ -8391,6 +8391,21 @@ steps:
     condition:
       files_exist:
         - "phase3/stage3/pnr/routed.def"
+    # DECLARED, because the consumer branches on it and the default is the benign
+    # answer. `flow_gate_grid` named the omission: "1 step(s) declare a
+    # `condition` and no `condition_kind` ... every conditional skip falls to the
+    # benign default and 'this design legitimately has none' cannot be told from
+    # 'someone forgot to author the trigger'".
+    #
+    # `dependency_required`, NOT `design_dependent`, and the trigger decides which:
+    # `routed.def` is not a property of the design, it is an artefact step 21
+    # PRODUCES. So when it is absent the honest statement is not "this design has
+    # no such thing" -- it is that the producer did not deliver, and
+    # `_resolve_dependency_condition_results` says exactly that: MISSING plus
+    # `blocked-by-upstream(21)`, naming the producer and the absent artefact. A
+    # silent design-dependent skip would have made a failed route and a design
+    # with nothing to compare read identically.
+    condition_kind: dependency_required
     required_outputs:
       - "reports/phase3/gds_xor.json"
     programs:

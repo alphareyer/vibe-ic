@@ -140,6 +140,31 @@ def test_the_fidelity_step_is_conditional_on_the_routed_database():
         "which D5-MISSING-EDGE reports and only a blocks_on edge to 37 settles")
 
 
+def test_an_unmet_trigger_names_its_producer_instead_of_going_quiet():
+    """`condition_kind`, which the consumer branches on and whose default is the
+    benign answer.
+
+    `flow_gate_grid` named the omission when this step had none: "every
+    conditional skip falls to the benign default and 'this design legitimately
+    has none' cannot be told from 'someone forgot to author the trigger'".
+
+    `dependency_required` is the accurate kind BECAUSE OF WHAT THE TRIGGER IS:
+    `routed.def` is not a property of the design, it is an artefact step 21
+    produces, so its absence means the producer did not deliver. That kind routes
+    the unmet condition through `_resolve_dependency_condition_results`, which
+    states it as MISSING plus `blocked-by-upstream(21)` and names the artefact --
+    a design_dependent skip would have made a failed route and a design with
+    nothing to compare read identically.
+    """
+    assert _step("37.3").get("condition_kind") == "dependency_required", (
+        _step("37.3").get("condition_kind"))
+    import flow_compliance_check as FCC
+    src = Path(FCC.__file__).read_text()
+    assert 'step.get("condition_kind") != "dependency_required"' in src, (
+        "the consumer this kind was chosen for no longer reads it; the "
+        "classification above would silently become a plain skip")
+
+
 def test_the_trigger_has_a_loud_absence_and_a_declared_producer():
     """WHY THIS TRIGGER IS ADMISSIBLE, measured through the two indexes the
     reachability checker and dimension 5 actually read.
