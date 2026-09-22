@@ -1344,6 +1344,36 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
 # --------------------------------------------------------------------------- #
 # Evaluation
 # --------------------------------------------------------------------------- #
+def pdk_reader_for(project: Path, pdk_container: Optional[str]):
+    """(reader, why) for the filesystem this run's PDK volume lives on.
+
+    `--pdk-container` is how a caller names it, and the flow's own clause for
+    37.5ic carries none: the completion audit re-runs `tapeout_precheck` on the
+    HOST, so `container_reader(None)` read the host filesystem. MEASURED on spm
+    run19, from this program's own `technology` block:
+
+        volume_read_through   "local"
+        volume_tried          ["/foss/pdks/gf180mcuD", "/foss/pdks/gf180mcuD"]
+        volume_resolution     "no volume for 'gf180mcuD' in the registry ..."
+
+    That directory exists in the image the run recorded and on no host, so the
+    technology's layer table was unreadable, `General.ForbiddenLayers` was
+    NOT_DETERMINED, the arm was NOT_DETERMINED and step 37.5ic FAILed -- over a
+    layout whose 38 layer/datatype pairs the rung above had read successfully.
+    An unread layer table is not a forbidden layer.
+
+    A NAMED FUNCTION rather than three lines inside `evaluate`, because
+    `evaluate` returns before this point when the project has no layout: the
+    decision has to be reachable on its own to be tested at all.
+    """
+    if pdk_container:
+        return _pdkauth.container_reader(pdk_container), "the --pdk-container given"
+    recorded, why = _pdkauth.reader_the_run_recorded(project)
+    if recorded is not None:
+        return recorded, why
+    return _pdkauth.container_reader(None), why
+
+
 def evaluate(project: Path,
              layout: Optional[Path] = None,
              declaration_path: Optional[Path] = None,
@@ -1451,7 +1481,19 @@ def evaluate(project: Path,
     # tier and the forbidden-layer complement — are statements about the
     # PROCESS, so the volume is resolved a single time and every attempt is
     # carried into the evidence of whichever rung needed it.
-    _pdk_reader = _pdkauth.container_reader(pdk_container)
+    # WHERE THIS RUN'S PDK IS. `--pdk-container` is how a caller names it, and
+    # the flow's own clause for 37.5ic carries none: the completion audit re-runs
+    # `tapeout_precheck` on the HOST, so `container_reader(None)` read the host
+    # filesystem. MEASURED on spm run19, this report's own `technology` block:
+    #     volume_read_through  "local"
+    #     volume_tried         ["/foss/pdks/gf180mcuD", "/foss/pdks/gf180mcuD"]
+    #     volume_resolution    "no volume for 'gf180mcuD' in the registry ..."
+    # That directory exists in the image the run recorded and on no host, so the
+    # layer table was unreadable, `General.ForbiddenLayers` was NOT_DETERMINED,
+    # the arm was NOT_DETERMINED and step 37.5ic FAILed -- over a layout whose
+    # 38 layer/datatype pairs had been read successfully by the rung above.
+    # An unread layer table is not a forbidden layer.
+    _pdk_reader, _pdk_reader_why = pdk_reader_for(project, pdk_container)
     volume, volume_why, _volume_tried = _pdkauth.resolve_volume(
         pdk, reader=_pdk_reader)
     allowed, layer_authority, layer_tried = _pdkauth.layer_table(
@@ -1467,6 +1509,7 @@ def evaluate(project: Path,
         "label_layer": flow_markers[1], "tried": list(flow_markers[3])}
     rep.technology = {"pdk": pdk, "volume": str(volume) if volume else None,
                       "volume_read_through": _pdk_reader.name,
+                      "volume_read_through_why": _pdk_reader_why,
                       "volume_resolution": volume_why,
                       "volume_tried": _volume_tried,
                       "layer_table": layer_authority,
