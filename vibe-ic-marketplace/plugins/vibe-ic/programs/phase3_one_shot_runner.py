@@ -48879,6 +48879,34 @@ def _rebind_measured_drc_invocation_to_canonical_path(
                 "consumer reads. Matched by digest, never by name."),
             "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         }
+        # STATE THE THIRD VALUE ON THE ENTRY THE CHECK ACTUALLY BINDS TO.
+        # `provenance_check._find_entry` binds an artefact to its MOST RECENT
+        # matching entry, and this rebound row is written AFTER the reconstructed
+        # invocation row that carries the measurement -- so without this line the
+        # later row silently supersedes the earlier one and
+        # `provenance_check --require-measured` reports UNMEASURED over a run
+        # that WAS measured. That is exactly the failure `_runner_measurement.attach`
+        # was written for, in its own words: "a back-fill written seconds later
+        # SUPERSEDES the invocation record that carried the reading".
+        #
+        # MEASURED on run21 (clean copy), reports/phase3/drc_signoff.rpt:
+        #   provenance.jsonl line 58  09:54:21  klayout  reconstructed  measurement: YES
+        #   provenance.jsonl line 61  09:54:24  klayout  rebound_from   measurement: no
+        # Three seconds apart, and step 31 read the second one: "the run bound to
+        # this artefact declares no measurement record, so whether klayout
+        # performed its work is not stated anywhere". Meanwhile the artefact
+        # itself says plainly what happened -- `_runner_measurement.derive` over
+        # that same file yields `measured: true`, "rule-deck run — deck
+        # <gf180mcu.drc> enumerated, 0 violation item(s) recorded".
+        #
+        # THE FLAT `"measured": True` ABOVE IS NOT THAT VALUE, and must never be
+        # read as it: it is set beside `duration_ms` and says the DURATION was
+        # measured. `_runner_measurement`'s docstring names wiring that into the
+        # reader as the fabrication it exists to refuse. This line instead derives
+        # the record from the ARTEFACT ON DISK and labels it
+        # `stated_by: runner-derived`, so an empty or header-only report yields
+        # `measured: false` with a hard class rather than a pass.
+        _rmeas.attach(project, record)
         with prov.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, sort_keys=True) + "\n")
         return rpt_rel
