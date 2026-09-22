@@ -8412,7 +8412,31 @@ steps:
       - gds_xor_check
     gate:
       all_of:
-        - program_exit_zero: "gds_xor_check . --json reports/phase3/gds_xor.json"
+        # `--check`, NOT `--json`, AND THE DIFFERENCE IS A PUBLISHED FAIL.
+        #
+        # `--json <path>` made the completion audit RE-RUN the comparison. MEASURED
+        # on the SLT53D S arm, all five subjects: the producer's receipt
+        # reports/phase3/gds_xor.json recorded verdict PASS, rc 0, 0 design-layer
+        # differences across 46 layers, runner {"kind":"container","detail":
+        # "real-ic-arm-eda:klayout"} -- and the audit's own invocation of the same
+        # program, seconds later on the same host, could not reach KLayout and
+        # exited NOT_DETERMINED. The row read FAIL. One instrument, two
+        # invocations, two answers, and the audit published the one that did not
+        # measure.
+        #
+        # R-0915-126 already names the rule: PRODUCER WRITES, GATE READS. The
+        # receipt redirect protects the producer's BYTES and says nothing about
+        # which answer gets published, so a clause that re-measures is exactly the
+        # trap the redirect was built for. `--check` READS the receipt at its
+        # canonical path and judges it -- 0 differences -> rc 0, a measured
+        # difference -> rc 1, NOT_DETERMINED or absent -> rc 2 carrying the
+        # receipt's own reason -- and opens no layout, launches no tool and writes
+        # no byte.
+        #
+        # THE BLOCKING QUESTION STILL HAS A YES. Dimension 2 asks whether this
+        # gate can FAIL on anything a project DID: hand `--check` a receipt with
+        # one design-layer difference and it exits 1.
+        - program_exit_zero: "gds_xor_check . --check reports/phase3/gds_xor.json"
     # [21], NOT [37], AND NOT EMPTY -- the three spellings this key has had, and
     # each was corrected by a measurement rather than by an opinion.
     #

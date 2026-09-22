@@ -613,12 +613,106 @@ def stream_reference(runner, scratch: Path, dfile: Path, out: Path, timeout: int
     return runner.run(own, env, path_keys=("DEF", "GDS_OUT"), timeout=timeout)
 
 
+
+# ══════════════════════════════════════════════════════════════════════
+# THE JUDGE: read the run's own receipt, decide the step, measure nothing
+# ══════════════════════════════════════════════════════════════════════
+#: Typed so the flow's own taxonomy can classify the non-verdict instead of
+#: guessing at prose. `_flow_reason_taxonomy.CAPABILITY_ABSENT` is the class for
+#: a tool this checkout cannot reach; INPUT_ABSENT-shaped cases (no receipt at
+#: all) are `ASKED_BEFORE_PRODUCER`, which is what an audit clause asked before
+#: its producer ran actually is.
+_JUDGE_CAPABILITY_ABSENT = "CAPABILITY_ABSENT"
+_JUDGE_ASKED_BEFORE_PRODUCER = "ASKED_BEFORE_PRODUCER"
+
+
+def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
+    """Decide step 37.3 from the receipt the PRODUCER wrote. Returns (rc, line, doc).
+
+    WHY A JUDGE AND NOT A SECOND MEASUREMENT, measured on the SLT53D S arm. The
+    flow clause used to be `gds_xor_check . --json reports/phase3/gds_xor.json`,
+    so the completion audit RE-RAN the comparison. On that arm the producer's
+    receipt said PASS, rc 0, 0 design-layer differences across 46 layers, runner
+    {"kind": "container", "detail": "real-ic-arm-eda:klayout"} -- and the audit's
+    own invocation of the same program, seconds later on the same host, could not
+    reach KLayout (the static clause carries no `--container`) and exited
+    NOT_DETERMINED. The audit published the invocation that did not measure, and
+    every one of the five subjects read FAIL.
+
+    R-0915-126 already names the rule this broke: PRODUCER WRITES, GATE READS.
+    The receipt redirect exists precisely so a gate clause can never overwrite a
+    producer document -- and a clause that re-measures is the trap the redirect
+    was built for, because the redirect protects the BYTES and says nothing about
+    which of the two answers gets published.
+
+    THE MAPPING, and every branch is one a reader can check against the receipt:
+      * no receipt                  -> rc 2, ASKED_BEFORE_PRODUCER
+      * unreadable / not this gate  -> rc 2, EXECUTION_ERROR-shaped, named
+      * verdict NOT_DETERMINED      -> rc 2, carrying the receipt's OWN reason
+      * design-layer differences    -> rc 1  (a measured defect, and the answer
+                                       to dimension 2's question about this step)
+      * zero differences            -> rc 0
+    Nothing here opens a layout, launches a tool or writes a byte.
+    """
+    path = project / rel
+    if not path.is_file():
+        return 2, (
+            f"NOT_MEASURED [{_JUDGE_ASKED_BEFORE_PRODUCER}]: {rel} does not "
+            f"exist, so this step's own producer has not run yet; an absent "
+            f"receipt is a question nobody asked, not a clean comparison"), {}
+    try:
+        doc = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
+        return 2, (
+            f"NOT_MEASURED [EXECUTION_ERROR]: {rel} is not readable JSON "
+            f"({type(exc).__name__}: {exc}), so it states nothing this step can "
+            f"be judged on"), {}
+    if not isinstance(doc, dict) or doc.get("gate") != GATE:
+        return 2, (
+            f"NOT_MEASURED [EXECUTION_ERROR]: {rel} is not a {GATE} receipt "
+            f"(gate={doc.get('gate') if isinstance(doc, dict) else type(doc).__name__})"
+        ), (doc if isinstance(doc, dict) else {})
+
+    verdict = str(doc.get("verdict") or "")
+    diffs = doc.get("design_layer_differences")
+    count = doc.get("design__xor_difference__count")
+    reason = str(doc.get("reason") or "no reason recorded")
+    layers = doc.get("layers_compared")
+
+    if verdict == "NOT_DETERMINED" or not isinstance(diffs, list):
+        # THE RECEIPT'S OWN REASON, carried verbatim. The producer knows why it
+        # could not measure; re-deriving that here is how two readers come to
+        # disagree about one run.
+        return 2, (
+            f"NOT_MEASURED [{_JUDGE_CAPABILITY_ABSENT}]: the run's own receipt "
+            f"{rel} records verdict NOT_DETERMINED — {reason}"), doc
+    if diffs or (isinstance(count, int) and count > 0):
+        named = ", ".join(
+            f"{d.get('layer')}/{d.get('datatype')}={d.get('differences')}"
+            for d in diffs[:6] if isinstance(d, dict))
+        return 1, (
+            f"FAIL: the run's own receipt {rel} records {len(diffs)} DESIGN "
+            f"layer(s) differing between the shipped GDS and this run's "
+            f"pre-finishing reference ({count} differing polygon(s): {named})"), doc
+    return 0, (
+        f"PASS: the run's own receipt {rel} records 0 design-layer difference(s) "
+        f"across {layers} layer(s) compared — {reason}"), doc
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("project_dir")
     ap.add_argument("--json", default=None,
                     help=f"where to write the report (default {REPORT_REL})")
     ap.add_argument("--container", default=None)
+    ap.add_argument("--check", metavar="RECEIPT", default=None,
+                    help="JUDGE the receipt at RECEIPT (project-relative) "
+                         "instead of performing the comparison: 0 design-layer "
+                         "differences -> 0, a measured difference -> 1, a "
+                         "NOT_DETERMINED or absent receipt -> 2. Reads only; "
+                         "this is the form the flow's gate clause uses, so the "
+                         "audit judges the producer's measurement rather than "
+                         "re-running it with a resolver that may reach no tool.")
     ap.add_argument("--timeout", type=int, default=0,
                     help="0 (the default) means NO deadline: a 100 MB XOR is "
                          "working, not wedged, and the watchdog supervises "
@@ -629,21 +723,45 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not project.is_dir():
         print(f"[{GATE}] project dir not found: {project}", file=sys.stderr)
         return 1
+
+    if args.check:
+        rc, line, _doc = judge_receipt(project, args.check)
+        # THE CLASSIFIED LINE FIRST, AT COLUMN 0, AND THAT IS NOT COSMETIC.
+        # Every reader of a gate's non-verdict in this flow takes the FIRST line
+        # of stdout -- `_p0_skip_reason_from_output` does, and so does the output
+        # snippet the step row carries. Printing a decorative `=== gate ===`
+        # banner first hands all of them the banner: MEASURED on a run21 copy,
+        # the row read "gate program signalled VACUOUS_PASS (input not
+        # applicable)" and the receipt's own reason ("no KLayout runner reaches
+        # this project") reached nobody. The banner still prints, second, for a
+        # human reading a terminal.
+        print(line)
+        print(f"=== {GATE} --check ({project.name}) ===")
+        return rc
     out = Path(args.json) if args.json else (project / REPORT_REL)
     if not out.is_absolute():
         out = (Path.cwd() / out).resolve()
 
-    # rc 1, NOT 2, AND THE DIFFERENCE IS THE WHOLE POINT. This flow maps rc 2
-    # onto VACUOUS_PASS -- a NON-FAIL tier -- so a refusal that exited 2 let the
-    # step pass on a project where the comparison never happened. MEASURED by the
-    # matrix's own dimension 2, which is exactly the question it asks: "step 37.3
-    # gate CANNOT FAIL on anything a project DID: all 1 blocking clause(s)
-    # reached a non-FAIL tier on a deliberately-broken project". An unrun XOR is
-    # not a zero and an unverifiable claim is not a pass, so the refusal BLOCKS;
-    # the `verdict` field, which `signoff_metrics_aggregate` reads, is what keeps
-    # NOT_DETERMINED distinguishable from a measured FAIL.
+    # rc 2 FOR NOT_DETERMINED -- the not-checked convention every other gate in
+    # this flow uses -- and rc 1 ONLY for a measured design-layer difference.
+    #
+    # THIS WAS rc 1 FOR BOTH, AND THE COST WAS MEASURED. An earlier draft exited 2
+    # on a refusal, dimension 2 caught that ("step 37.3 gate CANNOT FAIL on
+    # anything a project DID"), and the over-correction was to make every refusal
+    # exit 1 -- which made "the tool was not reachable" indistinguishable from
+    # "the design's geometry changed". On the SLT53D S arm that published a FAIL
+    # over a PASS: the producer measured 0 differences across 46 layers and the
+    # audit's own re-invocation, which could not reach KLayout, exited 1 and the
+    # row read FAIL on all five subjects.
+    #
+    # The two questions are now separated where they belong. A REFUSAL is rc 2,
+    # which the audit maps to a typed non-verdict, never a defect -- an unrun XOR
+    # is not a zero and it is not a difference either. A MEASURED DIFFERENCE is
+    # rc 1 and blocks. And dimension 2's question is answered by `--check`, the
+    # judge the flow clause now names: hand it a receipt with one design-layer
+    # difference and it exits 1 on a project that DID something.
     report: Dict[str, Any] = {"gate": GATE, "project": str(project),
-                              "verdict": "NOT_DETERMINED", "rc": 1}
+                              "verdict": "NOT_DETERMINED", "rc": 2}
     shipped, dfile, att = shipped_and_source(project)
     report["attestation"] = att
     fill_pairs, seal_pairs, prov = declared_finishing_layers(project)
@@ -651,6 +769,16 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     def finish(verdict: str, rc: int, reason: str) -> int:
         report.update(verdict=verdict, rc=rc, reason=reason)
+        # THE CLASS, STATED BY THE GATE THAT KNOWS IT. `_flow_reason_taxonomy
+        # .report_reason_class` reads this field and `_p0_declared_reason_class`
+        # prefers it over every prose recogniser -- "branch-owned evidence
+        # outranks prose". Without it a refusal is typed by pattern-matching the
+        # sentence, which is how "the tool was unreachable" and "this design has
+        # no such thing" come to share a class.
+        if verdict == "NOT_DETERMINED":
+            report["reason_class"] = _JUDGE_CAPABILITY_ABSENT
+        else:
+            report.pop("reason_class", None)
         out.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_json(out, report)
         print(f"=== {GATE} ({project.name}) ===")
@@ -663,13 +791,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     # path never had, and they would read "missing attestation" where the truth is
     # "no shipped GDS anywhere".
     if shipped is None or not shipped.is_file():
-        return finish("NOT_DETERMINED", 1,
+        return finish("NOT_DETERMINED", 2,
                       f"no shipped GDS exists: neither {ROUTE_EVIDENCE_REL} nor "
                       f"{CANONICAL_GDS_GLOB} names one on disk, so there is "
                       f"nothing to compare; this is an absent input, not a clean "
                       f"XOR")
     if dfile is None or not dfile.is_file():
-        return finish("NOT_DETERMINED", 1,
+        return finish("NOT_DETERMINED", 2,
                       f"no routed DEF exists: neither {ROUTE_EVIDENCE_REL} nor "
                       f"{CANONICAL_DEF_REL} names one on disk, so no "
                       f"pre-finishing reference can be streamed")
@@ -681,7 +809,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     report["shipped_sha256_live"] = live
     recorded = att.get("gds_sha256_recorded")
     if isinstance(recorded, str) and recorded and recorded != live:
-        return finish("NOT_DETERMINED", 1,
+        return finish("NOT_DETERMINED", 2,
                       f"the shipped GDS changed since the run attested it "
                       f"({ROUTE_EVIDENCE_REL} records {recorded[:16]}..., on disk "
                       f"{live[:16]}...), so this run's own pairing no longer holds")
@@ -689,10 +817,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         import _klayout_launch as _kl
     except ImportError as exc:                             # pragma: no cover
-        return finish("NOT_DETERMINED", 1, f"KLayout launcher unavailable: {exc}")
-    runner = _kl.find_runner(args.container)
+        return finish("NOT_DETERMINED", 2, f"KLayout launcher unavailable: {exc}")
+    # THE ONE RESOLVER, project included: with no explicit --container the run's
+    # own `reports/container_image.json` names the container it used, so this
+    # invocation and the runner's resolve the same environment instead of falling
+    # through to a conventional default that mounts a different tree.
+    runner = _kl.find_runner(args.container, project=project)
     if runner is None or not runner.covers(shipped):
-        return finish("NOT_DETERMINED", 1,
+        return finish("NOT_DETERMINED", 2,
                       "no KLayout runner reaches this project, so the comparison "
                       "was not performed; an unrun XOR is not a zero")
     report["runner"] = {"kind": runner.kind, "detail": runner.detail}
@@ -709,7 +841,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             rc, so, se = stream_reference(runner, Path(scratch), dfile,
                                           reference, timeout)
             if rc != 0 or not reference.is_file():
-                return finish("NOT_DETERMINED", 1,
+                return finish("NOT_DETERMINED", 2,
                               f"re-streaming the pre-finishing reference from "
                               f"{att.get('def')} failed (rc={rc}): "
                               f"{(se or so or '').strip()[:220]}")
@@ -721,9 +853,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         ok, why, stats = reference_is_faithful(so)
         report["census"] = stats
         if done and not ok:
-            return finish("NOT_DETERMINED", 1, f"refusing to compare: {why}")
+            return finish("NOT_DETERMINED", 2, f"refusing to compare: {why}")
         if rc != 0 or not done:
-            return finish("NOT_DETERMINED", 1,
+            return finish("NOT_DETERMINED", 2,
                           f"the XOR did not run to completion (rc={rc}, "
                           f"XOR_DONE={'yes' if done else 'no'}): "
                           f"{(se or so or '').strip()[:200]}")

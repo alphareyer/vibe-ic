@@ -240,9 +240,176 @@ def test_the_layout_producer_gets_the_container_by_its_own_flag_name():
 
 
 def test_the_gate_still_refuses_when_it_cannot_measure():
-    """The teeth that survived: a receipt is not a pass. `--container` reaching the
-    gate does not make it optimistic — with no runner it still writes
-    NOT_DETERMINED and rc=1, which is what "an unrun XOR is not a zero" means."""
+    """The teeth that survived, RE-POINTED at the rc the convention gives them.
+
+    A receipt is still not a pass: with no runner the producer writes
+    NOT_DETERMINED, which is what "an unrun XOR is not a zero" means. What
+    changed is the EXIT CODE, and the reason is measured rather than stylistic.
+
+    This test pinned `rc=1` for every refusal, which made "the tool was not
+    reachable" indistinguishable from "the design's geometry changed" — and on
+    the SLT53D S arm that published a FAIL over a PASS on all five subjects. rc 2
+    is the not-checked convention every other gate in this flow uses and the
+    audit maps it to a typed non-verdict. The teeth are not removed, they are
+    moved to where a defect is actually measured: a receipt with a design-layer
+    difference exits 1, asserted directly in
+    `test_a_receipt_with_a_design_layer_difference_still_blocks`.
+    """
     src = (PROGRAMS / "gds_xor_check.py").read_text()
-    assert 'return finish("NOT_DETERMINED", 1,' in src
+    assert 'return finish("NOT_DETERMINED", 2,' in src
+    assert 'finish("NOT_DETERMINED", 1,' not in src, (
+        "an unreachable tool and a changed layout must not share an exit code")
     assert "an unrun XOR is not a zero" in src
+    # And the FAIL path keeps rc 1, so the gate can still refuse a real defect.
+    assert 'return finish("FAIL", 1,' in src
+
+
+# ── the audit JUDGES the producer's receipt; it does not re-measure ─────────
+
+_S_ARM_RECEIPT = {
+    # The shape of the receipt the SLT53D S arm actually produced, trimmed to the
+    # fields the judge reads. Kept here rather than copied from a run tree so the
+    # arms are hermetic.
+    "gate": "gds_xor_check", "verdict": "PASS", "rc": 0,
+    "layers_compared": 46, "design_layer_differences": [],
+    "design__xor_difference__count": 0,
+    "reason": "the shipped GDS matches the restreamed pre-finishing reference on "
+              "every design layer (0 differences across 46 layer(s) compared)",
+}
+
+
+def _receipt(tmp_path, **over):
+    import json
+    doc = dict(_S_ARM_RECEIPT)
+    doc.update(over)
+    out = tmp_path / "reports" / "phase3" / "gds_xor.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(doc, indent=2) + "\n")
+    return out
+
+
+def test_the_flow_clause_judges_the_receipt_instead_of_re_running_the_xor():
+    """THE DEFECT, and it published a FAIL over a PASS on all five subjects.
+
+    The clause was `gds_xor_check . --json reports/phase3/gds_xor.json`, so the
+    completion audit RE-RAN the comparison. On the SLT53D S arm the producer's
+    receipt said PASS with 0 design-layer differences across 46 layers (runner
+    real-ic-arm-eda:klayout) and the audit's own invocation, seconds later on the
+    same host, could not reach KLayout and exited NOT_DETERMINED. The audit
+    published the invocation that did not measure.
+
+    R-0915-126's rule is PRODUCER WRITES, GATE READS -- and the receipt redirect
+    protects the producer's BYTES while saying nothing about which answer gets
+    published, so a clause that re-measures is the trap the redirect was built
+    for.
+    """
+    clause = " ".join(str(c) for c in (_step("37.3").get("gate") or {}).get("all_of") or [])
+    assert "--check reports/phase3/gds_xor.json" in clause, clause
+    assert "--json" not in clause, (
+        "a `--json` clause makes the AUDIT the producer of this step's own "
+        "receipt and re-runs the measurement; that is what published a FAIL over "
+        "a PASS")
+
+
+def test_the_judge_reads_the_receipt_and_writes_nothing(tmp_path):
+    """PRODUCER WRITES, GATE READS — asserted on the bytes."""
+    import hashlib
+    import gds_xor_check as G
+    out = _receipt(tmp_path)
+    before = hashlib.sha256(out.read_bytes()).hexdigest()
+    rc, line, _ = G.judge_receipt(tmp_path, "reports/phase3/gds_xor.json")
+    assert rc == 0, line
+    assert hashlib.sha256(out.read_bytes()).hexdigest() == before, (
+        "the judge modified the producer's document")
+
+
+def test_a_receipt_with_a_design_layer_difference_still_blocks(tmp_path):
+    """DIMENSION 2'S QUESTION, and it is why the judge is not a rubber stamp: this
+    gate must be able to FAIL on something a project DID."""
+    import gds_xor_check as G
+    _receipt(tmp_path, verdict="FAIL", rc=1,
+             design_layer_differences=[{"layer": 50, "datatype": 0,
+                                        "differences": 3}],
+             design__xor_difference__count=3)
+    rc, line, _ = G.judge_receipt(tmp_path, "reports/phase3/gds_xor.json")
+    assert rc == 1, line
+    assert "50/0=3" in line, line
+
+
+def test_an_undetermined_receipt_is_not_measured_and_carries_its_own_reason(
+        tmp_path):
+    """rc 2, the not-checked convention — never rc 1, which the audit reads as a
+    defect. And the REASON is the receipt's own: re-deriving it here is how two
+    readers come to disagree about one run."""
+    import gds_xor_check as G
+    why = ("no KLayout runner reaches this project, so the comparison was not "
+           "performed; an unrun XOR is not a zero")
+    _receipt(tmp_path, verdict="NOT_DETERMINED", rc=2, reason=why,
+             design_layer_differences=None, design__xor_difference__count=None)
+    rc, line, _ = G.judge_receipt(tmp_path, "reports/phase3/gds_xor.json")
+    assert rc == 2, line
+    assert why in line, line
+    assert "CAPABILITY_ABSENT" in line, line
+
+
+def test_an_absent_receipt_is_not_measured_not_a_clean_comparison(tmp_path):
+    import gds_xor_check as G
+    rc, line, _ = G.judge_receipt(tmp_path, "reports/phase3/gds_xor.json")
+    assert rc == 2, line
+    assert "ASKED_BEFORE_PRODUCER" in line and "does not exist" in line, line
+
+
+def test_the_classified_line_is_the_first_line_of_stdout(capsys):
+    """WHERE A LINE IS PRINTED DECIDES WHO READS IT.
+
+    Every reader of a non-verdict in this flow takes the FIRST line of stdout.
+    A `=== gate ===` banner printed first hands all of them the banner —
+    MEASURED on a run21 copy, where the row read "gate program signalled
+    VACUOUS_PASS (input not applicable)" and the receipt's own reason reached
+    nobody.
+    """
+    import gds_xor_check as G
+    rc = G.main([str(PLUGIN), "--check", "nope/absent.json"])
+    first = capsys.readouterr().out.splitlines()[0]
+    assert rc == 2
+    assert first.startswith("NOT_MEASURED ["), first
+
+
+def test_a_refusal_states_its_reason_class_in_the_receipt(tmp_path):
+    """`_flow_reason_taxonomy.report_reason_class` reads this field and
+    `_p0_declared_reason_class` prefers it over every prose recogniser, so a
+    refusal is typed by the gate that knows rather than by pattern-matching."""
+    import json
+    import gds_xor_check as G
+    out = tmp_path / "reports" / "phase3" / "gds_xor.json"
+    rc = G.main([str(tmp_path), "--json", str(out)])
+    assert rc == 2, rc
+    doc = json.loads(out.read_text())
+    assert doc["verdict"] == "NOT_DETERMINED" and doc["rc"] == 2
+    assert doc["reason_class"] == "CAPABILITY_ABSENT", doc.get("reason_class")
+    import _flow_reason_taxonomy as T
+    assert T.report_reason_class(doc) == T.CAPABILITY_ABSENT
+
+
+def test_the_container_resolver_is_shared_and_reads_the_runs_own_record(tmp_path):
+    """THE THIRD DEFECT: one gate, two invocations, two answers, seconds apart.
+
+    The runner passed `--container real-ic-arm-eda` and the XOR ran; the flow's
+    static clause carries no `--container` because a per-host container name
+    cannot be written into the yaml, so `find_runner(None)` fell through to the
+    pinned DEFAULT_CONTAINER — a different container that does not mount that
+    project — and the gate said, correctly for what it was given, that no runner
+    reached it. The durable identity is the run's OWN receipt.
+    """
+    import json
+    import _klayout_launch as K
+    assert K.container_the_run_recorded(tmp_path) is None
+    rec = tmp_path / "reports" / "container_image.json"
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    rec.write_text(json.dumps({"container": "real-ic-arm-eda"}))
+    assert K.container_the_run_recorded(tmp_path) == "real-ic-arm-eda"
+    # And the gate asks through that one resolver rather than its own copy.
+    src = (PROGRAMS / "gds_xor_check.py").read_text()
+    assert "find_runner(args.container, project=project)" in src, (
+        "the gate must hand the project to the shared resolver, or the audit and "
+        "the runner resolve different environments again")
