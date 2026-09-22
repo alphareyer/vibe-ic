@@ -43960,10 +43960,18 @@ def _run_magic_signoff_drc(project: Path, top: str, physical_top: str,
     # WHICH RULES THE DECK CONTAINS, from the technology the TOOL said it
     # loaded -- read out of the transcript rather than re-derived, so the
     # report describes the deck that actually ran.
-    _tm = re.search(r"^tech file:\s*(\S+)\s*$", text, re.M)
+    # THE FIELD IS TYPED, NOT JUST ANCHORED. `(/\S*)` requires the value to
+    # BEGIN the field and to be an absolute path -- which is what Magic
+    # reports and what `(unavailable)` is not. MEASURED in
+    # `test_a_denial_spliced_into_the_magic_transcript_moves_nothing`: with a
+    # bare `\S+` a token spliced before the path was read AS the path
+    # (`not/pdk/...`), so the reader could be handed a RIVAL answer. Typed,
+    # the only two outcomes are the value the deck wrote and no value at all,
+    # and no value at all is already disclosed below.
+    _tm = re.search(r"^tech file:\s*(/\S*)\s*$", text, re.M)
     _tech_path = _tm.group(1) if _tm else ""
     _deck_rules: List[str] = []
-    if _tech_path and _tech_path != "(unavailable)":
+    if _tech_path:
         _rc_t, _tech_text, _ = _docker_exec(
             container, f"cat {shlex.quote(_tech_path)}", timeout=120)
         if _rc_t == 0 and _tech_text.strip():

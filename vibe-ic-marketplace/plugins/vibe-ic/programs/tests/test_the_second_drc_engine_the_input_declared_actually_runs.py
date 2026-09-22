@@ -481,38 +481,134 @@ def test_an_unreadable_technology_is_disclosed_not_hidden():
     assert "never silent" in src[i - 300:i]
 
 
-def test_the_flow_declares_the_receipt_without_making_it_mandatory():
-    """`required_outputs` is ALL-of-N with ` OR ` as its only any-of spelling,
-    so the magic receipt is declared as an alternative to the KLayout one this
-    step always writes: the path is NAMED (so a declared-record reader can see
-    it) and no design that passes today starts failing."""
+def test_a_denial_spliced_into_the_magic_transcript_moves_nothing():
+    """THE FALSIFIER the `_NOT_PROSE` entry is measured by, not asserted from.
+
+    The transcript is a fixed field grammar this module writes itself, so the
+    polarity question does not arise — but "does not arise" is a claim, and a
+    claim gets a measurement. Every token of `_prose_polarity`'s vocabulary,
+    the CJK spellings included, is spliced INTO each read field and appended
+    to it, and the reader's answers must not move. The negative control is the
+    last two asserts: deleting the trailer DOES move the verdict, so the zeros
+    below are about the grammar and not a fixture that cannot move."""
+    import _prose_polarity as pp
+
+    tokens = ["not", "no", "none", "without", "excluding", "never", "non",
+              "removed", "obsolete", "superseded", "n/a", "inapplicable",
+              "deprecated", "no longer", "does not apply",
+              "非", "无", "無", "不", "否"]
+    for tok in tokens:
+        assert pp.NEGATION_RE.search(tok), tok   # the vocabulary, not my list
+
+    base = _CLEAN_RPT + _DECK_RULES
+    tech = re.search(r"^tech file:\s*(/\S*)\s*$", base, re.M).group(1)
+    tiles = re.search(
+        r"^error tiles \(drc list count total\):\s*(-?\d+)\s*$",
+        base, re.M).group(1)
+    count = re.search(r"^COUNT:\s*(\d+)\s*$", base, re.M).group(1)
+    assert (tiles, count) == ("0", "0")
+    assert tech.endswith(".tech"), tech
+
+    moved = []
+    for tok in tokens:
+        for spelling in (f"{tok} ", f" {tok}", f"{tok}"):
+            for line, repl in (
+                    (f"tech file: {tech}",
+                     f"tech file: {spelling}{tech}"),
+                    ("error tiles (drc list count total): 0",
+                     f"error tiles (drc list count total): {spelling}0"),
+                    ("COUNT: 0", f"COUNT: {spelling}0"),
+                    (f"tech file: {tech}",
+                     f"tech file: {tech} {tok}"),
+                    ("error tiles (drc list count total): 0",
+                     f"error tiles (drc list count total): 0 {tok}"),
+                    ("COUNT: 0", f"COUNT: 0 {tok}")):
+                spliced = base.replace(line, repl, 1)
+                t = re.search(r"^tech file:\s*(/\S*)\s*$", spliced, re.M)
+                k = re.search(
+                    r"^error tiles \(drc list count total\):\s*(-?\d+)\s*$",
+                    spliced, re.M)
+                c = re.search(r"^COUNT:\s*\d+\s*$", spliced, re.M)
+                # A denial cannot make a field say something ELSE. Either the
+                # anchored field still reads exactly what the deck wrote, or
+                # the line stops parsing and the value is simply absent —
+                # which this runner reports as unmeasured, never as clean.
+                if t is not None and t.group(1) != tech:
+                    moved.append(("tech", tok, spelling, t.group(1)))
+                if k is not None and k.group(1) != "0":
+                    moved.append(("tiles", tok, spelling, k.group(1)))
+                # An UNPARSED field is a refusal, not a rival answer: the
+                # runner reports NOT_MEASURED and never a clean chip. What
+                # must never happen is a field reading something ELSE, which
+                # is what the two checks above look for.
+                if c is not None and c.group(0).strip() != "COUNT: 0":
+                    moved.append(("count", tok, spelling, c.group(0)))
+    assert not moved, moved[:8]
+
+    # NEGATIVE CONTROL: the trailer is load-bearing, so its absence MUST move
+    # the answer. If this passed too, the loop above would prove nothing.
+    assert re.search(r"^COUNT:\s*\d+\s*$", base, re.M)
+    assert not re.search(r"^COUNT:\s*\d+\s*$",
+                         base.replace("COUNT: 0", "COUNT:"), re.M)
+
+
+def test_the_register_entry_names_this_reader_and_carries_its_argument():
+    import prose_polarity_consulted_check as gate
+    key = "phase3_one_shot_runner::_run_magic_signoff_drc"
+    assert key in gate._NOT_PROSE, sorted(gate._NOT_PROSE)[:5]
+    reason = gate._NOT_PROSE[key]
+    assert len(reason) >= gate._EXEMPT_REASON_MIN
+    assert "test_a_denial_spliced_into_the_magic_transcript_moves_nothing" \
+        in reason, "the entry must name the measurement it rests on"
+
+
+def test_the_receipt_is_found_without_being_declared_in_the_flow():
+    """AND THE FLOW DOES NOT DECLARE IT — measured, and here is why.
+
+    The first version of this branch added
+    `reports/phase3/drc_signoff_magic.json OR reports/phase3/drc_signoff.json`
+    to step 31's `required_outputs`, spelled ` OR ` so a design whose input
+    never asked for a second engine would not start failing. Dimension 8
+    refused it, correctly:
+
+        step 31: entry 'reports/phase3/drc_signoff.json' shares EVERY one of
+        its alternatives with the dropped 'reports/phase3/drc_signoff_magic
+        .json OR reports/phase3/drc_signoff.json', so no tree satisfies one
+        and not the other and this cell's negative half is not measurable as
+        declared.
+
+    That is a finding about the DECLARATION. An entry whose every alternative
+    is already another entry cannot be measured in either direction, and the
+    honest answer is not to regenerate the census around it — it is to not
+    make the declaration.
+
+    IT BUYS NOTHING ANYWAY, and that is measurable: `signoff_record_paths_for`
+    derives declared records only from steps whose NAME says sign-off, and
+    step 31 is named "Physical Verification (DRC + LVS + ERC + Density)". So
+    DRC has no declared record at all today, `l24_signoff_evidence_backed_check`
+    falls back to its report-name scan, and the scan finds this receipt by its
+    filename. The engine evidence arrives either way.
+    """
+    from l24_signoff_requirements_extract import signoff_record_paths_for
+    assert signoff_record_paths_for("DRC") == (), (
+        "DRC now HAS a declared record — the scan is no longer the path this "
+        "receipt reaches the engine check by, and it must be declared after "
+        "all (with an entry dimension 8 can measure in both directions)")
     yaml_text = (PROGRAMS.parent / "flow"
                  / "phase1_phase2_phase3.yaml").read_text()
-    assert ('- "reports/phase3/drc_signoff_magic.json OR '
-            'reports/phase3/drc_signoff.json"') in yaml_text
-    assert yaml_text.count('"reports/phase3/drc_signoff_magic.json"') == 0, (
-        "declaring it on its own would make it mandatory for every design")
+    assert "drc_signoff_magic" not in yaml_text, (
+        "the flow declares an entry whose every alternative is another "
+        "entry's; dimension 8 cannot measure its negative half")
 
 
-def test_the_summary_can_state_a_magic_count_once_a_run_produces_one():
-    """`tapeout_docs_gen` reads `magic__drc_error__count`, and on run18L and
-    run19 it said "Magic DRC NOT_MEASURED" — correctly, because no report in
-    either run was attributed to magic. The metric reads a FIXED list of DRC
-    audits, so a receipt outside that list can never be counted."""
-    import signoff_metrics_aggregate as SMA
-    assert "reports/phase3/drc_signoff_magic.json" in SMA._DRC_AUDITS
-    assert "reports/phase3/drc_signoff.json" in SMA._DRC_AUDITS
-    assert "reports/phase3/drc_router.json" in SMA._DRC_AUDITS
-
-
-def test_a_run_without_a_magic_receipt_still_says_absent_is_not_zero(tmp_path):
-    """OVER-BREADTH CONTROL for the line above: adding a path to the list must
-    not invent a zero for a run that produced no magic report."""
-    import signoff_metrics_aggregate as SMA
-    cell = SMA._drc_for_tool(tmp_path, "magic")
-    assert cell.value == "NOT_MEASURED"
-    assert cell.measured is False
-    assert "absent is not zero" in cell.reason
+def test_the_receipt_filename_is_what_the_scan_matches_on():
+    """The scan keys on the report TOKEN in the path, so the name is load
+    bearing: rename it and the engine evidence silently stops arriving."""
+    from l24_signoff_requirements_extract import _path_names_token, \
+        report_tokens_for
+    tokens = report_tokens_for("DRC")
+    assert tokens, tokens
+    assert _path_names_token(R._MAGIC_SIGNOFF_DRC_JSON_REL, tokens)
 
 
 def test_the_two_paths_are_spelled_once():

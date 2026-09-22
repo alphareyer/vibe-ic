@@ -1185,10 +1185,6 @@
     "31": {
       "verdict": "ENFORCED",
       "entries": {
-        "reports/phase3/drc_signoff_magic.json OR reports/phase3/drc_signoff.json": {
-          "status": "UNPROVEN",
-          "note": "the SECOND DRC engine's receipt. spm's input declares DRC engines ['klayout','magic'] and every published run in this corpus ran only KLayout (MEASURED on run18L and run19: drc_signoff.log carries 179 klayout mentions and 0 magic), so no run here carries the artefact and UNPROVEN is the true statement of that gap rather than a hidden one. The producer lands with this entry; the first run of a magic-declaring input on it moves this to PRODUCED_BY_RUN."
-        },
         "reports/phase3/drc_signoff.rpt": {
           "status": "PRODUCED_BY_RUN",
           "run": "benchmark-data/ic/spm/v1.10.18_sky130A",

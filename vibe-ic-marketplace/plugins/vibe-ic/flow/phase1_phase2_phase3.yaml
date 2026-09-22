@@ -6969,25 +6969,6 @@ steps:
       # producer was contemporary with the roots that lacked the artefact and
       # the declaration was withdrawn for that reason.
       - "reports/phase3/drc_signoff.json"
-      # THE SECOND ENGINE'S RECEIPT, when the INPUT asked for a second engine.
-      # MEASURED on spm run18L and run19 (lane icspm5, 8HD-4, read-only): the
-      # input declares TWO DRC engines and the flow ran only KLayout --
-      # `drc_signoff.log` carries 179 klayout mentions and 0 magic, and
-      # `l24_signoff_evidence_backed_check` correctly reports the DRC half
-      # UNMET_ENGINE_EVIDENCE. That check judges the population the FLOW
-      # declares, so a magic receipt the flow never names cannot answer it, and
-      # this line is what names it.
-      #
-      # DECLARED AS AN ALTERNATIVE ON PURPOSE. A second engine is required by
-      # some inputs and by no others, and `required_outputs` is ALL-of-N with
-      # no per-entry `condition:` in the grammar. Spelled ` OR ` against the
-      # KLayout receipt this step always writes, the entry is satisfied on
-      # every design while still DECLARING the magic path, so
-      # `signoff_record_paths_for("DRC")` can see it and nothing that passes
-      # today starts failing. The requirement itself is not relaxed: it is
-      # `l24_signoff_evidence_backed_check` that demands an engine, and it
-      # demands it only from an input that named one.
-      - "reports/phase3/drc_signoff_magic.json OR reports/phase3/drc_signoff.json"
       # A SIXTH, and the newest producer on this step. The PERC corpus sweep
       # clause re-homed onto step 31 on 2026-08-25 writes
       # `reports/phase3/perc_sweep.json`, and the clause immediately after it —
