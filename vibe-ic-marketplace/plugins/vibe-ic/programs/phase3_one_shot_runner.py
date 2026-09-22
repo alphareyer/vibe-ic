@@ -1309,6 +1309,32 @@ def _docker_exec_raw(container: str, cmd: str, timeout: int = 1800
         return 127, "", f"COMMAND_NOT_FOUND: {e}"
 
 
+
+def _progress_paths_fn(log_path, progress_globs):
+    """A per-look resolver for the child transcripts of a transaction.
+
+    R-0915-131. Returns None when nothing was asked for, so every existing
+    call site keeps byte-identical behaviour. Otherwise it returns a CALLABLE,
+    because the whole point is that the set is resolved when the watchdog
+    looks, not when the job launches: `sdr_child_def_leg_*.log` did not exist
+    at launch, appeared four hours in, and was the only file with anything to
+    say when the kill decision was taken."""
+    if not progress_globs or log_path is None:
+        return None
+    base = Path(log_path).parent
+
+    def _resolve():
+        out = []
+        for pat in progress_globs:
+            try:
+                out.extend(sorted(base.glob(pat)))
+            except OSError:
+                continue
+        return out
+
+    return _resolve
+
+
 def _docker_exec(container: str, cmd: str, timeout: int = 1800, *,
                  marker: Optional[str] = None,
                  log_path: Optional[Path] = None,
@@ -1328,6 +1354,14 @@ def _docker_exec(container: str, cmd: str, timeout: int = 1800, *,
                  #: `isolate=` carries the transient.
                  isolate: Optional[List[Path]] = None,
                  inputs: Optional[List[Path]] = None,
+                 #: R-0915-131. Glob(s), relative to `log_path`'s directory,
+                 #: naming the CHILD transcripts of whatever transaction this
+                 #: tool may start. The stall watchdog's progress signal is the
+                 #: newest write across the parent log AND these, resolved at
+                 #: every look -- a child transcript does not exist when the
+                 #: parent launches. A parent that has handed the work to a
+                 #: child and gone quiet is not a stall.
+                 progress_globs: Optional[List[str]] = None,
                  transcript_path: Optional[Path] = None) -> Tuple[int, str, str]:
     """Run shell cmd inside a Docker container.
 
@@ -1408,6 +1442,7 @@ def _docker_exec(container: str, cmd: str, timeout: int = 1800, *,
         # one answer to "where does a tool run".
         exec_argv=_exec_argv,
         log_path=log_path,
+        progress_paths=_progress_paths_fn(log_path, progress_globs),
         stall_grace_s=grace, poll_s=poll, hard_ceiling_s=ceiling,
         term_grace_s=_WATCHDOG_TERM_GRACE_S,
         # the caller's OWN domain read, carried through rather than dropped
@@ -34688,6 +34723,14 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     for _retry_i in _pnr_loop:
         rc, out, err = _docker_exec(
             container, cmd, marker=pnr_tcl_c, log_path=_pnr_logp,
+            # R-0915-131. PnR hands post-route DRV repair to an SDR CHILD
+            # session and then waits. While that child runs, the parent's own
+            # transcript, argv marker and CPU all go quiet, and a watchdog
+            # reading only the parent called a working job hung and threw away
+            # seven hours of place-and-route (subservient, 2026-09-23). The
+            # child writes `sdr_child_*.log` next to this log, so the progress
+            # signal includes them, resolved at every look.
+            progress_globs=["sdr_child_*.log"],
             hard_ceiling_s=_pnr_ceiling)
         # vibe-ic#2108 — THIS APPROACH'S LOG, BEFORE THE NEXT ONE
         # TRUNCATES IT. `cmd` pipes into `tee` (not `tee -a`), so the

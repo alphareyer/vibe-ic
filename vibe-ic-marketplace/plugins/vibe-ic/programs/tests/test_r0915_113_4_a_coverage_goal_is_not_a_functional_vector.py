@@ -73,7 +73,14 @@ GOAL_BINDABLE = {"name": "line_coverage_goal", "kind": "coverage_goal",
                  "expected": ">= 90%"}
 TOTALS = {"line": {"covered": 107, "total": 112, "pct": 95.54},
           "toggle": {"covered": 3940, "total": 3976, "pct": 99.09},
-          "branch": {"covered": 14, "total": 14, "pct": 100.0}}
+          "branch": {"covered": 14, "total": 14, "pct": 100.0},
+          # R-0915-131. The fourth dimension arrives WITH its instrument
+          # (`instruction_coverage_measure`), which is the whole content of
+          # `test_the_measured_dimensions_are_the_ones_the_run_publishes`
+          # below: a dimension listed in DIMENSION_WORDS that nothing
+          # publishes a number for would turn a goal from NOT_MEASURED into a
+          # verdict over an empty population.
+          "instruction": {"covered": 41, "total": 41, "pct": 100.0}}
 
 
 # ── 1. classification is structural, and cites the line it read ───────────

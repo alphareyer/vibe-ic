@@ -9240,6 +9240,25 @@ def step_step4_functional_evidence(project: Path,
             extras=({"vacuous_disclosed_skip": _vacuous_skip}
                     if _vacuous_skip else {}))
 
+    # R-0915-131. PER-DIMENSION COVERAGE INSTRUMENTS RUN BEFORE THE GATE READS
+    # THE TOTALS. The verilator arm publishes line/toggle/branch; a goal whose
+    # scope names a dimension no instrument measures stays NOT_MEASURED, and
+    # NOT_MEASURED is not a pass, so the gate refuses -- correctly, but over a
+    # dimension nothing was even asked to measure. `instruction_coverage_measure`
+    # is the instrument for the INSTRUCTION dimension; it is DECLARATION-DERIVED
+    # (it runs only when a declared L10 goal's own scope binds to that
+    # dimension, asked through the same `bind_scope` the gate uses) and it
+    # publishes NOTHING unless a case that EXECUTED AND PASSED reported a tally.
+    # It is a PRODUCER: its own rc never changes this step's verdict, because
+    # an instrument that could not measure must leave the goal NOT_MEASURED
+    # with a reason, not fail the run on its own behalf.
+    instr_rc, instr_out, instr_err = _run([
+        sys.executable,
+        str(PROGRAMS_DIR / "instruction_coverage_measure.py"), str(project),
+    ], cwd=project, timeout=120)
+    instr_detail = (instr_out or instr_err).strip().splitlines()
+    instr_detail = instr_detail[-1] if instr_detail else f"rc={instr_rc}"
+
     oracle_report = _pl.report_path(
         project, "gates/cpu_functional_oracle_waiver.json")
     oracle_rc, oracle_out, oracle_err = _run([
@@ -9253,13 +9272,15 @@ def step_step4_functional_evidence(project: Path,
     if oracle_rc != 0:
         return StepResult(
             "step4_functional_evidence", "FAIL", time.time() - t0,
-            f"cpu functional evidence rc={oracle_rc}: {oracle_detail}",
+            f"cpu functional evidence rc={oracle_rc}: {oracle_detail}"
+            f" [{instr_detail}]",
             outputs,
             extras={"fallback_skill": "testbench-gen",
                     "program_first": "professional_tb_gen"})
     return StepResult(
         "step4_functional_evidence", "PASS", time.time() - t0,
         (f"Step 4 TB and functional evidence passed: {oracle_detail}"
+         + f" [{instr_detail}]"
          + (f" [{_vacuous_skip}]" if _vacuous_skip else "")), outputs,
         extras=({"vacuous_disclosed_skip": _vacuous_skip}
                 if _vacuous_skip else {}))
