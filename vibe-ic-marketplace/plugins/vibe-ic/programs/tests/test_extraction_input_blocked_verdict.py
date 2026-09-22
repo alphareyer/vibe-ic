@@ -944,16 +944,25 @@ def test_tcl_variable_tech_load_is_a_finding_not_a_silent_pass(tmp_path,
     assert eicap.tech_load_directive(
         "tech load generic.tech\n")[1] == eicap.TECH_LOAD_OK
 
-    # ... and the runner leaves EVIDENCE that it could not look.
+    # ... and when the technology CANNOT be found in the namespace the tool
+    # will resolve it in, the runner still leaves EVIDENCE that it could not
+    # look. `test -f` answering non-zero is what "cannot be found" means here.
     p = _proj(tmp_path)
 
-    def fake(container, cmd, timeout=0, **_):
+    def fake_unresolvable(container, cmd, timeout=0, **_):
+        # SCOPED to the candidates the resolver constructs. The step's own
+        # upstream existence probes use `test -f` too, and failing those would
+        # take the step down for an unrelated reason.
+        if cmd.startswith("test -f ") and "generic.tech" in cmd:
+            return (1, "", "")          # nothing the rc could name is there
+        if cmd.startswith("printenv"):
+            return (1, "", "")          # and no environment says otherwise
         if cmd.startswith("cat ") and ".magicrc" in cmd:
             return (0, "tech load $env(PDK_ROOT)/generic.tech\n", "")
         return _fake_docker(COMPLETE_GENERIC_TECH,
                             MATCH_TRANSCRIPT)(container, cmd, timeout)
 
-    monkeypatch.setattr(runner, "_docker_exec", fake)
+    monkeypatch.setattr(runner, "_docker_exec", fake_unresolvable)
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
     r = runner.step_lvs(p, "chip_top", _pdk(), "x")
     # never a false BLOCKED — we still cannot judge the technology
@@ -963,6 +972,42 @@ def test_tcl_variable_tech_load_is_a_finding_not_a_silent_pass(tmp_path,
     assert pre["performed"] is False
     assert pre["verdict"] == "INCONCLUSIVE"
     assert "Tcl variable" in pre["note"]
+
+
+def test_a_tcl_variable_tech_load_that_RESOLVES_is_checked(tmp_path,
+                                                           monkeypatch):
+    """THE OTHER HALF, and the reason the arm above had to name its condition.
+
+    MEASURED on spm run18L and run19 (lane icspm5, read-only): every run of a
+    PDK whose rc reads `tech load $PDK_ROOT/<...>.tech` reported
+    `performed: false, tech_load_path_is_unexpanded_tcl` — while magic 8.3.684,
+    handed that same rc headless in the pinned image, answers
+    `tech filename` without hesitating. The pre-flight was off on every such
+    run and the technology was beside the rc the whole time.
+
+    Nothing is guessed: the literal remainder is the rc's own text and the base
+    is PROVEN by `test -f` in the container, which is exactly the probe the arm
+    above makes fail."""
+    p = _proj(tmp_path)
+
+    def fake_resolvable(container, cmd, timeout=0, **_):
+        if cmd.startswith("test -f ") and "generic.tech" in cmd:
+            return (0, "", "")          # the rc's own tree holds it
+        if cmd.startswith("printenv"):
+            return (1, "", "")
+        if cmd.startswith("cat ") and ".magicrc" in cmd:
+            return (0, "tech load $PDK_ROOT/generic.tech\n", "")
+        return _fake_docker(COMPLETE_GENERIC_TECH,
+                            MATCH_TRANSCRIPT)(container, cmd, timeout)
+
+    monkeypatch.setattr(runner, "_docker_exec", fake_resolvable)
+    monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
+    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    assert r.status != "NOT_MEASURED"
+    pre = json.loads((p / "reports" / "phase3"
+                      / "lvs_extraction_preflight.json").read_text())
+    assert pre["performed"] is True, pre
+    assert "Tcl variable" not in (pre.get("note") or "")
 
 
 def test_magicrc_naming_a_nonexistent_tech_file_is_blocked(tmp_path,

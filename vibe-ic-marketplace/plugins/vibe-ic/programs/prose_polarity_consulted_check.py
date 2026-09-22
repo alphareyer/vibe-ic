@@ -119,6 +119,27 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "phase3_one_shot_runner::_run_magic_signoff_drc":
+        "A TRANSCRIPT THIS MODULE WROTE ITSELF, in a fixed field grammar, one "
+        "function away. `_magic_signoff_drc_tcl` emits every line this reader "
+        "reads -- `tech file: <path>`, `error tiles (drc list count total): "
+        "<n>`, `COUNT: <n>` -- with `puts $_fh` from values it fetched from "
+        "Magic, and both patterns here are anchored at line start AND line "
+        "end with a closed field type (`\\S+` for a path, `-?\\d+` for a "
+        "count). There is no free-text field in the grammar, so there is no "
+        "sentence in which a denial could be written: `error tiles ... : NOT "
+        "0` does not parse, it simply fails the anchor and the reader records "
+        "the count as unmeasured. A count that is absent is already how this "
+        "function answers -- a transcript with no `COUNT:` trailer is "
+        "NOT_MEASURED and never a clean chip, which is the one thing a denial "
+        "could otherwise try to buy. MEASURED, NOT ASSERTED, in "
+        "`test_a_denial_spliced_into_the_magic_transcript_moves_nothing`: "
+        "every token of `_prose_polarity`'s vocabulary, the CJK spellings "
+        "included, spliced into each of the three fields and appended to each "
+        "of them -- 0 rival answers and 0 values changed, with the negative "
+        "control that deleting the trailer DOES move the verdict to "
+        "NOT_MEASURED, so the zeros are about the grammar and not a fixture "
+        "that could not move.",
     "stated_vector_bus_oracle_gen::bus_contract":
         "A PORT SURFACE, not a sentence. The argument is the DUT's own "
         "`(direction, width, name)` triple list -- `testbench_gen.resolve_dut` "
