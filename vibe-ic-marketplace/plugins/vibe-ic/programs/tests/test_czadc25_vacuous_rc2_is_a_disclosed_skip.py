@@ -157,6 +157,12 @@ def step4(monkeypatch, tmp_path):
             rep.parent.mkdir(parents=True, exist_ok=True)
             rep.write_text("{}")
             return 0, "oracle ok", ""
+        if prog == "instruction_coverage_measure.py":
+            # R-0915-131. Step 4 runs the per-dimension coverage INSTRUMENTS
+            # before the gate reads the totals. It is a producer: its rc never
+            # changes this step's verdict, which is exactly what the rc0/rc2
+            # cases below still assert.
+            return 0, "instruction_coverage_measure: no instruction total", ""
         raise AssertionError(f"unexpected subprocess: {cmd}")
 
     monkeypatch.setattr(d, "_run", _fake_run)

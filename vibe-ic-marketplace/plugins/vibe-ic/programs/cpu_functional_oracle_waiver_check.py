@@ -490,9 +490,19 @@ _COVERAGE_TOTALS_RELS = (
 )
 
 
-def _coverage_totals(project: Path) -> "tuple[dict, str]":
-    """`(totals, source)` from the run's own coverage arm, or `({}, why)`."""
-    for rel in _COVERAGE_TOTALS_RELS:
+#: Instruments that publish their OWN dimensions, each in its own receipt.
+#: R-0915-131: a dimension belongs to exactly one instrument, so a second arm
+#: can never overwrite the first arm's numbers -- the totals are FUSED, and a
+#: receipt that publishes nothing contributes nothing rather than blanking
+#: what another arm measured.
+_COVERAGE_DIMENSION_RECEIPT_RELS = (
+    "reports/phase2/coverage/instruction_coverage.json",
+)
+
+
+def _totals_of(project: Path, rels) -> "tuple[dict, str]":
+    """The first readable `totals` among `rels`, with the one that supplied it."""
+    for rel in rels:
         f = Path(project) / rel
         if not f.is_file():
             continue
@@ -503,8 +513,38 @@ def _coverage_totals(project: Path) -> "tuple[dict, str]":
         totals = doc.get("totals") if isinstance(doc, dict) else None
         if isinstance(totals, dict) and totals:
             return totals, rel
+    return {}, ""
+
+
+def _coverage_totals(project: Path) -> "tuple[dict, str]":
+    """`(totals, source)` FUSED over the run's coverage instruments.
+
+    The verilator arm owns line/toggle/branch; a per-dimension instrument owns
+    its own (R-0915-131). Fusing rather than first-wins is what lets a second
+    instrument ADD a dimension without either arm having to know about the
+    other -- and an arm that published nothing simply adds nothing, so an
+    absent instrument is never a blank over a measured dimension."""
+    fused: dict = {}
+    sources: "list[str]" = []
+    base, base_src = _totals_of(project, _COVERAGE_TOTALS_RELS)
+    if base:
+        fused.update(base)
+        sources.append(base_src)
+    for rel in _COVERAGE_DIMENSION_RECEIPT_RELS:
+        extra, extra_src = _totals_of(project, (rel,))
+        if not extra:
+            continue
+        # A per-dimension receipt may only ADD its own dimension(s); it never
+        # restates one another arm already measured.
+        for dim, row in extra.items():
+            if dim not in fused:
+                fused[dim] = row
+        sources.append(extra_src)
+    if fused:
+        return fused, " + ".join(sources)
     return {}, ("the run published no coverage totals under "
-                + " or ".join(_COVERAGE_TOTALS_RELS))
+                + " or ".join(_COVERAGE_TOTALS_RELS
+                              + _COVERAGE_DIMENSION_RECEIPT_RELS))
 
 
 def _coverage_goal_summary(project: Path) -> dict:

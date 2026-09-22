@@ -102,6 +102,7 @@ chip-AGNOSTIC + tool-AGNOSTIC + pure: generic file/CPU counters only.
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -171,6 +172,136 @@ class SupervisedResult:
         different findings and must stay tellable apart."""
         return self.outcome == "aborted"
 
+
+#: A line that, by itself, proves a tool moved. The size/mtime of a transcript
+#: already advances when one is written, so this exists for the case size and
+#: mtime CANNOT show it: a transcript truncated and rewritten in place reads as
+#: smaller, and "smaller" is not progress to a size probe. The count below only
+#: ever increases, so a rewrite cannot erase progress already observed.
+#: `DRT-0199` is OpenROAD's detailed-route violation count -- the line the
+#: subservient SDR child was emitting, once per iteration, while its parent sat
+#: silent and the watchdog called the whole job hung (R-0915-131).
+PROGRESS_MARKER_RE = re.compile(
+    rb"\b(?:DRT-0199|DRT-0195|Completing\s+\d+%|elapsed time)\b")
+
+
+class TranscriptMeter:
+    """Forward progress across a SET of transcripts, newest write wins.
+
+    WHY A SET AND NOT ONE FILE (R-0915-131). MEASURED, subservient x gf180mcuD,
+    phase 3 on main 48bf6576b (lane icsub5, 2026-09-23 01:22:58):
+
+        WATCHDOG_STALLED: configured forward-progress signals did not advance
+        for > 1800s -- killed as hung, not slow.
+        watched=output+log+cpu since_last_progress_s=1820.137
+
+    The job was not hung. The watched transcript was the PARENT's
+    `pnr/openroad.log`, last written 00:47:00, because the parent had handed
+    the work to an SDR child session and was waiting on it. The CHILD's
+    transcript, `sdr_child_def_leg_postroute_drv_repair.log`, was written at
+    01:17:34 -- thirty minutes past the watchdog's last-progress mark and five
+    minutes before the kill -- and its own DRT-0199 counts were still falling,
+    10688 -> 9918 -> 9355 -> 9252, with OpenROAD at ~500% CPU throughout.
+    Seven hours of place-and-route were thrown away because the one file being
+    watched belonged to the process that had nothing to say.
+
+    A PARENT SILENT DURING A CHILD LEG IS NOT A STALL. The signal is the newest
+    write across the parent transcript AND every child transcript of the
+    transaction in flight. Paths are resolved AT EVERY LOOK, because a child
+    transcript does not exist when the parent is launched -- a set resolved
+    once at launch would watch the same empty set forever.
+
+    Pure except for the stat/read; monotonic by construction."""
+
+    def __init__(self, paths_fn, marker_re=PROGRESS_MARKER_RE):
+        self._paths_fn = paths_fn
+        self._marker_re = marker_re
+        self._offsets: dict = {}
+        self._markers = 0.0
+        self._bytes = 0.0
+        self._newest = 0.0
+        self._seen: dict = {}
+
+    def paths(self) -> list:
+        try:
+            got = self._paths_fn()
+        except Exception:  # noqa: BLE001 - a probe must never kill the job
+            return []
+        out = []
+        for p in (got or []):
+            try:
+                out.append(os.fspath(p))
+            except TypeError:
+                continue
+        return out
+
+    def inventory(self) -> list:
+        """What was read and when it last changed — for the KILL DISCLOSURE.
+
+        A kill that says only "no progress" cannot be checked by a reader. One
+        that names every transcript it read and each one's last mtime can."""
+        rows = []
+        for path, (size, mtime) in sorted(self._seen.items()):
+            rows.append({"transcript": path, "size": size, "mtime": mtime,
+                         "mtime_iso": (time.strftime(
+                             "%Y-%m-%dT%H:%M:%S",
+                             time.localtime(mtime)) if mtime else None)})
+        return rows
+
+    def sample(self):
+        """`(bytes_ever_seen, newest_mtime, marker_count)`.
+
+        EVERY component is NON-DECREASING, which is what `ProgressMeter`
+        documents its sources to be. The first is CUMULATIVE bytes observed,
+        not the current total size: a transcript truncated and rewritten in
+        place makes the current size go DOWN, and "down" read as a change
+        would make repeated truncation look like progress forever, while
+        "down" read as no-change would hide the rewrite entirely. Counting
+        what has ever been read past does neither."""
+        newest = self._newest
+        for path in self.paths():
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            newest = max(newest, st.st_mtime)
+            self._seen[path] = (st.st_size, st.st_mtime)
+            self._read_new(path, st.st_size)
+        self._newest = newest
+        return (self._bytes, newest, self._markers)
+
+    def _read_new(self, path: str, size: int) -> None:
+        """Consume the bytes appended since the last look, counting markers."""
+        start = self._offsets.get(path, 0)
+        if size < start:          # truncated/rewritten: re-read from the top
+            start = 0
+        if size <= start:
+            return
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(start)
+                chunk = fh.read(size - start)
+        except OSError:
+            return
+        self._offsets[path] = size
+        self._bytes += float(len(chunk))
+        self._markers += float(len(self._marker_re.findall(chunk)))
+
+
+
+def _transcripts_note(obs: dict) -> str:
+    """Every transcript the stall decision read, with its last write.
+
+    R-0915-131: a kill that names only a grace period cannot be checked. This
+    is what lets a reader see at a glance that the parent went quiet at 00:47
+    while a child was still being written at 01:17 -- i.e. that the set being
+    watched was wrong, not that the job was hung."""
+    rows = obs.get("transcripts") or []
+    if not rows:
+        return "none wired"
+    return "; ".join(
+        f"{r.get('transcript')}@{r.get('mtime_iso') or r.get('mtime')}"
+        f"({r.get('size')}B)" for r in rows)
 
 class ProgressMeter:
     """Fuse forward-progress signals into a MONOTONIC non-decreasing score so
@@ -491,7 +622,8 @@ def _as_text(v) -> str:
     return v
 
 
-def run_supervised(cmd, *, log_path=None, output_progress: bool = True,
+def run_supervised(cmd, *, log_path=None, progress_paths=None,
+                   output_progress: bool = True,
                    domain_progress_probe: Optional[Callable[[], object]] = None,
                    stall_grace_s: float = DEFAULT_STALL_GRACE_S,
                    poll_s: float = DEFAULT_POLL_S,
@@ -621,18 +753,44 @@ def run_supervised(cmd, *, log_path=None, output_progress: bool = True,
                                 _msg if as_text else _msg.encode("utf-8"),
                                 "launch_error", 0.0, scope=scope_meta)
 
+    # R-0915-131. THE TRANSCRIPT SIGNAL IS A SET, NOT A FILE. `log_path` is the
+    # parent's; `progress_paths` names the child transcripts of whatever
+    # transaction is in flight, resolved AT EVERY LOOK because they do not
+    # exist yet when the parent launches. Either one advancing is progress, so
+    # a parent that has handed the work to a child and gone quiet is no longer
+    # read as hung.
+    def _transcript_paths():
+        out = []
+        if log_path is not None:
+            out.append(os.fspath(log_path))
+        if progress_paths is not None:
+            extra = (progress_paths() if callable(progress_paths)
+                     else progress_paths)
+            for q in (extra or []):
+                try:
+                    out.append(os.fspath(q))
+                except TypeError:
+                    continue
+        # de-duplicate, preserving order: a child glob may re-name the parent
+        seen = set()
+        return [x for x in out if not (x in seen or seen.add(x))]
+
+    _tmeter = (TranscriptMeter(_transcript_paths)
+               if (log_path is not None or progress_paths is not None)
+               else None)
+
     def _domain_or_log():
         domain = (domain_progress_probe()
                   if domain_progress_probe is not None else None)
-        log = _log() if log_path is not None else None
-        if domain_progress_probe is not None and log_path is not None:
+        log = _tmeter.sample() if _tmeter is not None else None
+        if domain_progress_probe is not None and _tmeter is not None:
             return (domain, log)
         return domain if domain_progress_probe is not None else log
 
     meter = ProgressMeter(
         size_fn=(_size if output_progress else None),
         log_fn=(_domain_or_log if (domain_progress_probe is not None
-                                   or log_path is not None) else None),
+                                   or _tmeter is not None) else None),
         cpu_fn=((lambda: cpu_probe(proc)) if cpu_probe is not None else None))
 
     # The abort REASON belongs to the caller's predicate, so capture it as the
@@ -655,6 +813,9 @@ def run_supervised(cmd, *, log_path=None, output_progress: bool = True,
         abort_probe=(_abort_capture if abort_probe is not None else None),
         observations=_obs, ceiling_notice=ceiling_notice)
     _obs["watched"] = meter.watched()
+    # THE KILL NAMES WHAT IT READ (R-0915-131). "No progress" is not a finding
+    # a reader can check; "these transcripts, last written at these times" is.
+    _obs["transcripts"] = (_tmeter.inventory() if _tmeter is not None else [])
     # The same facts as numbers, so a consumer never has to parse the sentence
     # (vibe-ic#2113 O3).
     _obs["signal_reads"] = meter.readings()
@@ -716,7 +877,8 @@ def run_supervised(cmd, *, log_path=None, output_progress: bool = True,
                         f"watched={_obs.get('watched')} "
                         f"since_last_progress_s="
                         f"{_obs.get('since_last_progress_s')} "
-                        f"elapsed_s={_obs.get('elapsed_s')}"),
+                        f"elapsed_s={_obs.get('elapsed_s')} "
+                        f"transcripts=[{_transcripts_note(_obs)}]"),
             "stalled", elapsed, scope=scope_meta, supervision=_obs)
     if outcome == "ceiling":
         # UNREACHABLE from `supervise` since vibe-ic#2051 — the ceiling records

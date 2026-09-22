@@ -108,6 +108,16 @@ DIMENSION_WORDS: Dict[str, Tuple[str, ...]] = {
     "toggle": ("toggle", "toggles", "bit toggle", "signal toggle"),
     "branch": ("branch", "branches", "decision", "decisions", "condition",
                "conditions"),
+    # R-0915-131. A design that states an acceptance percentage over its own
+    # INSTRUCTION SET is naming a coverage dimension like any other; what was
+    # missing was an INSTRUMENT, not a word. `instruction_coverage_measure`
+    # is that instrument and publishes `totals.instruction`, so this entry and
+    # that producer stand or fall together -- which is what
+    # `set(DIMENSION_WORDS) == set(TOTALS)` in this module's deck pins. A
+    # dimension listed here with nothing publishing a number for it would turn
+    # a goal from NOT_MEASURED into a verdict over an empty population.
+    "instruction": ("instruction", "instructions", "opcode", "opcodes",
+                    "isa", "mnemonic", "mnemonics", "\u6307\u4ee4"),
 }
 
 

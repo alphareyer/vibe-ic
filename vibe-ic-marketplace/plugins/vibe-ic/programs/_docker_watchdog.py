@@ -787,6 +787,7 @@ def run_docker_supervised(container: str, cmd: str, marker: str, *,
                           docker_exec_raw: RawExec,
                           exec_argv: Optional[ExecArgv] = None,
                           log_path: Optional[Path] = None,
+                          progress_paths=None,
                           telemetry_path: Optional[Path] = None,
                           telemetry_stage_probe: Optional[Callable[[str], str]] = None,
                           telemetry_metric_probe: Optional[
@@ -1043,7 +1044,8 @@ def run_docker_supervised(container: str, cmd: str, marker: str, *,
 
     try:
         res = _wd.run_supervised(
-            full, log_path=log_path, cpu_probe=_cpu_probe, kill=_kill,
+            full, log_path=log_path, progress_paths=progress_paths,
+            cpu_probe=_cpu_probe, kill=_kill,
             stall_grace_s=stall_grace_s, poll_s=poll_s,
             hard_ceiling_s=hard_ceiling_s, ceiling_notice=_on_ceiling,
             # PASSED THROUGH, not reimplemented. `abort_probe` is the CALLER'S
