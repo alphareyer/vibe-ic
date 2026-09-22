@@ -100,7 +100,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
@@ -790,6 +790,100 @@ def tech_load_directive(text: str) -> Tuple[Optional[str], str, str]:
     if first_raw:
         return None, TECH_LOAD_UNEXPANDED, first_raw
     return None, TECH_LOAD_NONE, ""
+
+
+#: The leading `$VAR` / `${VAR}` / `$env(VAR)` of an unexpanded `tech load`
+#: argument, and the literal remainder after it. The remainder is what makes
+#: the resolution below a CONSTRUCTION rather than a guess: it comes from the
+#: rc's own text, and the only thing the resolver supplies is the prefix it
+#: then PROVES by existence.
+_TCL_VAR_HEAD_RE = re.compile(
+    r"^\$(?:\{(?P<braced>[A-Za-z_][A-Za-z0-9_]*)\}"
+    r"|env\((?P<env>[A-Za-z_][A-Za-z0-9_]*)\)"
+    r"|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))"
+    r"(?P<rest>/.*)?$")
+
+TECH_LOAD_RESOLVED_BY_ANCESTOR = "tech_load_resolved_by_rc_ancestor"
+
+
+def split_leading_tcl_var(raw: str) -> Optional[Tuple[str, str]]:
+    """`(variable name, literal remainder)` of a `$VAR/...` path, or None.
+
+    Pure text. The remainder never begins with a separator, so a caller can
+    join it to any base. A path whose variable is not at the FRONT (or that
+    holds a command substitution) returns None: only the root-prefix case is
+    reconstructible, and inventing the rest is the guess this module refuses.
+    """
+    m = _TCL_VAR_HEAD_RE.match((raw or "").strip())
+    if not m:
+        return None
+    name = m.group("braced") or m.group("env") or m.group("bare")
+    rest = (m.group("rest") or "").lstrip("/")
+    if not name or not rest or "$" in rest or "[" in rest:
+        return None
+    return name, rest
+
+
+def resolve_tech_load(raw: str, magicrc: str, exists,
+                      env: Optional[Dict[str, str]] = None
+                      ) -> Optional[str]:
+    """The technology file a `tech load` argument names, PROVEN to exist.
+
+    WHY THIS EXISTS. MEASURED on spm run18L and run19 (lane icspm5, 8HD-4,
+    read-only): `reports/phase3/lvs_extraction_preflight.json` reads
+    `performed: false`, `reason: tech_load_path_is_unexpanded_tcl`, because the
+    gf180mcuD rc loads its technology as
+
+        tech load $PDK_ROOT/gf180mcuD/libs.tech/magic/gf180mcuD.tech
+
+    and the reader would only take a literal. So the whole pre-flight was
+    skipped on every run of that PDK, and the extraction capability was never
+    asserted — while the technology file was sitting beside the rc the whole
+    time. MEASURED in the pinned image, magic 8.3.684 loading that very rc
+    headless:
+
+        MAGIC_TECH_NAME:     gf180mcuD
+        MAGIC_TECH_FILENAME: /foss/pdks/gf180mcuD/libs.tech/magic/gf180mcuD.tech
+
+    THIS IS NOT A GUESS, and the distinction is the whole design. The literal
+    REMAINDER (`gf180mcuD/libs.tech/magic/gf180mcuD.tech`) is the rc's own
+    text. The only thing supplied is the base it hangs from, and every
+    candidate base is then PROVEN by `exists`; a base that does not produce a
+    real file is discarded, and if none does the answer is still None and the
+    caller still reports the pre-flight as not performed.
+
+    Bases are tried in order of authority:
+      1. `env[VAR]`, when the caller knows the environment the tool will run
+         in — that is the value magic itself will expand.
+      2. each ancestor directory of the rc, nearest first. An rc distributed
+         INSIDE the tree it describes names its own root, which is why this
+         resolves the PDK case without any environment at all.
+
+    `exists` is supplied by the caller because the file lives in whichever
+    namespace the tool resolves it in — the host, or inside the container.
+    chip-AGNOSTIC: no PDK name, no node, no vendor path appears here.
+    """
+    split = split_leading_tcl_var(raw)
+    if split is None:
+        return None
+    name, rest = split
+    bases: List[str] = []
+    if env:
+        value = env.get(name)
+        if isinstance(value, str) and value.strip():
+            bases.append(value.rstrip("/"))
+    parent = PurePosixPath(magicrc).parent
+    for ancestor in [parent, *parent.parents]:
+        text = str(ancestor)
+        if text and text not in bases:
+            bases.append(text.rstrip("/") or "/")
+    for base in bases:
+        cand = f"{base.rstrip('/')}/{rest}" if base != "/" else f"/{rest}"
+        if exists(cand):
+            return cand
+        if not cand.endswith(".tech") and exists(cand + ".tech"):
+            return cand + ".tech"
+    return None
 
 
 def resolve_tech_from_magicrc(magicrc_path: Path) -> Optional[Path]:

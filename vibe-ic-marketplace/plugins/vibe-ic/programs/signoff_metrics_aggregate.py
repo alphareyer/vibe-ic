@@ -154,7 +154,16 @@ def _text(project: Path, rel: str) -> Optional[str]:
 #: The DRC audit reports this flow writes. Both are read for EVERY DRC key --
 #: which key a report answers is decided by the producer it RECORDS, not by
 #: which of these two names it has.
-_DRC_AUDITS = ("reports/phase3/drc_signoff.json", "reports/phase3/drc_router.json")
+#: The DRC audits this summary reads. The MAGIC receipt is here because
+#: `magic__drc_error__count` is read by `tapeout_docs_gen` and MEASURED on
+#: spm run18L and run19 it said "Magic DRC NOT_MEASURED" — correctly, since
+#: no report in either run was attributed to magic. A run that now produces
+#: one must be able to state its count; a run that does not is unchanged,
+#: because `_json` skips a file that is not there and the metric keeps the
+#: same "absent is not zero" answer it has today.
+_DRC_AUDITS = ("reports/phase3/drc_signoff.json",
+               "reports/phase3/drc_signoff_magic.json",
+               "reports/phase3/drc_router.json")
 
 
 def _drc_for_tool(project: Path, tool: str) -> Cell:

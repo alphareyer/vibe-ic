@@ -1110,10 +1110,28 @@ def test_output_entries_classify_into_the_four_kinds():
     # destination, so no wildcard and no alternative arises — unlike step 27's
     # `si_crosstalk.rpt OR si_crosstalk.json`, which is an ANY_OF precisely
     # because two spellings satisfy it.
-    assert sum(seen.values()) == 189, (seen, REDERIVE)
+    # RE-DERIVED AGAIN, by the same prescribed method, for the second DRC
+    # engine. spm's input declares DRC engines ['klayout','magic'] and the flow
+    # ran only KLayout (MEASURED on run18L and run19), so step 31 now also
+    # declares the Magic receipt. EXACTLY ONE entry moves this population:
+    #
+    #   (31, 'reports/phase3/drc_signoff_magic.json OR
+    #         reports/phase3/drc_signoff.json')                       ANY_OF
+    #
+    # ONE entry ADDED, nothing removed and nothing rewritten. FILE 136 and
+    # GLOB 27 are untouched, which is what keeps the per-kind asserts a check
+    # rather than a restatement of the sum.
+    #
+    # WHY IT IS AN ANY_OF AND NOT A FILE: `required_outputs` is ALL-of-N and
+    # ` OR ` is its only any-of spelling, and a second DRC engine is required
+    # by some inputs and by no others. Spelled against the KLayout receipt the
+    # step always writes, the path is DECLARED without becoming mandatory for
+    # a design whose input never asked for it — the same reason step 27's
+    # `si_crosstalk.rpt OR si_crosstalk.json` is an ANY_OF.
+    assert sum(seen.values()) == 190, (seen, REDERIVE)
     assert seen[F.FILE] == 136, (seen, REDERIVE)
     assert seen[F.GLOB] == 27, (seen, REDERIVE)
-    assert seen[F.ANY_OF] == 26, (seen, REDERIVE)
+    assert seen[F.ANY_OF] == 27, (seen, REDERIVE)
     # Reported to the orchestrator: the PROGRAM_EXIT form described in the brief
     # does NOT exist in required_outputs. It lives only in `gate` clauses. The
     # classifier still returns it for forward-compat, but a sibling branching on
