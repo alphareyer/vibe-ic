@@ -6261,7 +6261,12 @@ DECLARED_OUTSIDE_THE_PUBLISH_CONTRACT: Tuple[Tuple[str, str], ...] = (
     # by that rule. Declaring it is the fix; the publish scope was NOT widened,
     # so the declaration sits outside what a published cell carries and says so
     # here rather than quietly.
-    ("37", "phase3/stage3/pnr/stream_out.log"),
+    # The GLOB, not the KLayout name: `stream_out.log` is what the KLayout
+    # stream-out writes and `<top>.magic_stream_out.log` is what Magic writes, so
+    # the declaration is engine-neutral and this pin follows it. Still outside the
+    # publish contract either way -- `phase3/stage3/pnr/` is a prefix
+    # `benchmark_evidence_publish` does not stage.
+    ("37", "phase3/stage3/pnr/*stream_out.log"),
     # THE ROUTE ATTESTATION, `reports/phase3/pad_ring_route_evidence.json`, was
     # added here in the same edit and DOES NOT BELONG: `benchmark_evidence_
     # publish._COPY_SUBTREES` carries `reports`, so a published cell can stage

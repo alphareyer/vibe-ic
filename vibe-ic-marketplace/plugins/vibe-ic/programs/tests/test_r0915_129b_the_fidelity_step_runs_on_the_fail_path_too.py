@@ -78,55 +78,89 @@ def _step(sid: str) -> dict:
 
 # ── (1) conditional on its subject, not dependent on a verdict ──────────────
 
-def test_the_fidelity_step_has_no_verdict_dependency():
+def test_the_fidelity_step_has_no_verdict_dependency_on_stream_out():
     """THE DEFECT. `blocks_on: [37]` cascaded it away on the FAIL path.
 
-    Declared as `[]`, not omitted: the flow contract requires every step to carry
-    the key ("every step must declare `blocks_on`, even as an empty list", which
-    the ledger enforces and which omitting it made red on ['37.3']). An empty list
-    is also the better statement — it says "no verdict dependency" out loud.
+    The repair is NOT an empty list, which was this file's second draft.
+    `blocks_on` must be present (the flow contract: "every step must declare
+    `blocks_on`, even as an empty list") and it must carry the step's REAL data
+    dependency, which dimension 5 measures independently: the condition names
+    `phase3/stage3/pnr/routed.def`, step 21 produces it, so the edge is [21].
+
+    WHAT IS ASSERTED IS THE PROPERTY, NOT THE LITERAL: step 37 must not be in the
+    closure, because the ruling removed the dependency on 37's VERDICT, and the
+    closure must be non-empty, because a step that reads another step's output and
+    declares no edge is D5-MISSING-EDGE.
     """
-    assert _step("37.3").get("blocks_on") == []
+    parents = _step("37.3").get("blocks_on")
+    assert parents == [21], parents
+    assert 37 not in parents and "37" not in [str(p) for p in parents], (
+        "a verdict dependency on step 37 is what cascaded this step away on the "
+        "one run where the fidelity answer mattered most")
 
 
-def test_the_fidelity_step_is_conditional_on_its_subject():
-    """AND THE SUBJECT IS THE SHIPPED GDS, not the run's attestation about it.
+def test_the_step_is_not_listed_as_a_dependency_graph_root():
+    """The other half of the same fact, in the other file that states it.
 
-    RE-POINTED, because the first spelling was a defect the matrix named:
-    conditioning on `reports/phase3/pad_ring_route_evidence.json` is a
-    SELF-DISABLING CONDITION -- `flow_condition_reachability_check` measured its
-    absence as loud NOWHERE (T7=None, T3=None, T5=None) -- and the runner writes
-    that file only under `_chip_path_requests_pad_ring`, so every design off the
-    chip pad-ring path had no fidelity check and nothing said so.
+    While the step declared `blocks_on: []` it was added to
+    `flow_dependency_graph_check.DECLARED_ROOTS`. It has a real predecessor now,
+    so listing it there would declare the absence of an ordering constraint that
+    exists — and a root list that drifts from the yaml is how an orphan check
+    stops checking.
+    """
+    import flow_dependency_graph_check as G
+    assert "37.3" not in G.DECLARED_ROOTS, sorted(G.DECLARED_ROOTS)
 
-    `phase3/stage4/gds/*.gds` is the subject itself and its absence FAILs step 37,
-    which is asserted below rather than described: that is the whole reason this
-    trigger is admissible where the other was not.
+
+def test_the_fidelity_step_is_conditional_on_the_routed_database():
+    """THE TRIGGER, and the two answers the matrix refused before this one.
+
+    NOT the route attestation: `flow_condition_reachability_check` calls a trigger
+    the flow itself produces whose absence is loud NOWHERE a SELF-DISABLING
+    CONDITION, and the runner writes that file only under
+    `_chip_path_requests_pad_ring`, so every design off the chip pad-ring path had
+    no fidelity check and nothing said so.
+
+    NOT the shipped GDS: it is step 37's required_output, so naming it here IS a
+    data dependency on 37 (D5-MISSING-EDGE), and the only thing that satisfies
+    that clause is the verdict dependency the ruling removed.
+
+    The routed DEF is the precondition the comparison actually has -- its
+    REFERENCE is streamed from that database -- and it belongs to step 21, which
+    is upstream of stream-out.
     """
     cond = _step("37.3").get("condition") or {}
-    assert "phase3/stage4/gds/*.gds" in (cond.get("files_exist") or []), cond
-    assert "reports/phase3/pad_ring_route_evidence.json" not in (
-        cond.get("files_exist") or []), (
+    paths = cond.get("files_exist") or []
+    assert "phase3/stage3/pnr/routed.def" in paths, cond
+    assert "reports/phase3/pad_ring_route_evidence.json" not in paths, (
         "the attestation is the BINDING, not the subject; gating on it silently "
         "disables this step on every design without a chip pad ring")
+    assert "phase3/stage4/gds/*.gds" not in paths, (
+        "naming step 37's own required_output here is a data dependency on 37, "
+        "which D5-MISSING-EDGE reports and only a blocks_on edge to 37 settles")
 
 
-def test_the_trigger_has_a_loud_absence_somewhere():
-    """WHY THIS TRIGGER IS ADMISSIBLE AND THE OLD ONE WAS NOT, measured through
-    the same index the reachability checker reads.
+def test_the_trigger_has_a_loud_absence_and_a_declared_producer():
+    """WHY THIS TRIGGER IS ADMISSIBLE, measured through the two indexes the
+    reachability checker and dimension 5 actually read.
 
-    A condition may only be gated on an artefact whose disappearance is reported
-    by somebody. `phase3/stage4/gds/*.gds` is a hard `files_exist` in step 37's own
-    gate, so a run missing it FAILED there; the route attestation is in no step's
-    hard set at all.
+    A condition may only be gated on an artefact whose disappearance somebody
+    reports (T7: a hard `files_exist`), and a step may only read an artefact whose
+    producer is in its blocks_on closure. `phase3/stage3/pnr/routed.def` satisfies
+    both at the SAME step, 21, which is what makes it the one admissible trigger:
+    the route attestation satisfies neither.
     """
     import flow_condition_reachability_check as R
-    hard = R._build_hard_gate_index(_flow()["steps"])
-    assert hard.get("phase3/stage4/gds/*.gds") == "37", hard.get(
-        "phase3/stage4/gds/*.gds")
+    steps = _flow()["steps"]
+    hard = R._build_hard_gate_index(steps)
+    assert hard.get("phase3/stage3/pnr/routed.def") == "21", hard.get(
+        "phase3/stage3/pnr/routed.def")
     assert "reports/phase3/pad_ring_route_evidence.json" not in hard, (
         "if the attestation ever gains a hard clause this test should be "
         "revisited, not deleted -- the trigger choice was made on this fact")
+    assert _step("37.3").get("blocks_on") == [21], (
+        "the trigger's producer must be the declared edge, or the two halves of "
+        "this argument are about different steps")
 
 
 def test_its_sibling_keeps_its_own_dependency():

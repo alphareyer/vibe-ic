@@ -250,7 +250,14 @@ PREFINISH_REL_FMT = "phase3/stage3/pnr/{top}.prefinish.gds"
 #: produced 776,403 differences across 29 design layers on run21 -- placement boxes
 #: against real standard-cell geometry -- and it was mine, not the design's.
 STREAMOUT_SCRIPT_REL = "phase3/stage3/pnr/stream_out.py"
-STREAMOUT_LOG_REL = "phase3/stage3/pnr/stream_out.log"
+#: A GLOB, NOT ONE NAME, because the two stream-out engines write two names:
+#: KLayout writes `stream_out.log` and Magic writes `<top>.magic_stream_out.log`.
+#: Reading only the KLayout name meant a Magic-streamed run recovered NO library
+#: hints at all and its re-streamed reference came out thin -- caught, but caught
+#: as a refusal from `reference_is_faithful` rather than answered. This is also
+#: the spelling step 37 declares and its own gate asserts, so the read, the
+#: declaration and the assertion are the same set.
+STREAMOUT_LOG_GLOB = "phase3/stage3/pnr/*stream_out.log"
 
 #: The three field lines of the stream-out transcript that name a library input.
 #:
@@ -286,8 +293,17 @@ def restream_env_from_transcript(project: Path) -> Tuple[Dict[str, str], List[st
     """
     env: Dict[str, str] = {}
     cited: List[str] = []
+    # NEWEST LAST, and sorted so two candidates pick the same one on every host.
+    # A DRC re-stream leaves a second Magic transcript beside the first, and the
+    # library set that matters is the one the SHIPPED GDS came from.
+    found = sorted(project.glob(STREAMOUT_LOG_GLOB),
+                   key=lambda q: (q.stat().st_mtime, q.name))
+    if not found:
+        return env, cited
+    log = found[-1]
+    rel = log.relative_to(project).as_posix()
     try:
-        text = (project / STREAMOUT_LOG_REL).read_text(errors="replace")
+        text = log.read_text(errors="replace")
     except OSError:
         return env, cited
     for key, pattern, many in _LOG_PATTERNS:
@@ -300,7 +316,7 @@ def restream_env_from_transcript(project: Path) -> Tuple[Dict[str, str], List[st
         # hands it ONE unopenable path, both macro libraries are silently lost,
         # and the only symptom is a reference that is too small.
         env[key] = ";".join(dict.fromkeys(found)) if many else found[0]
-        cited.append(f"{STREAMOUT_LOG_REL}: {key} = {env[key][:120]}")
+        cited.append(f"{rel}: {key} = {env[key][:120]}")
     return env, cited
 
 
@@ -573,7 +589,7 @@ def stream_reference(runner, scratch: Path, dfile: Path, out: Path, timeout: int
             "pdk_registry.json's declared cell_lef_glob), and inventing one is how "
             "a reference ends up measuring the wrong thing")
     if "CELL_GDS" not in env:
-        return 127, "", (f"{STREAMOUT_LOG_REL} names no CELL_GDS substitution, so a "
+        return 127, "", (f"no {STREAMOUT_LOG_GLOB} names a CELL_GDS substitution, so a "
                          f"re-stream would resolve no standard-cell geometry and "
                          f"every layer would differ for that reason alone")
     top = dfile.stem

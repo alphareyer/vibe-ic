@@ -264,7 +264,38 @@ DIMENSIONS_DECLARING_SUBSTITUTION: Tuple[int, ...] = (8, 9)
 #: ENFORCED, both entries UNPROVEN because the producer is new), D5 deps (the
 #: edge 37.5ic -> 37.4 was MISSING and this dimension found it), D7 output
 #: list, and the remaining dimensions read the yaml live. No step left.
-GRID_AS_MEASURED: Tuple[int, int, int] = (69, 9, 621)
+#: 2026-09-23: (69, 9, 621) -> (70, 9, 630). ONE step arrives -- canonical 37.3,
+#: GDS stream-out / finishing fidelity (R-0915-129 metric 2) -- and its NINE cells
+#: were reviewed in every dimension in this same change, which is the condition
+#: the 37.4 move above set for a rising pin. No step left: measured against
+#: origin/main, arrived ['37.3'], departed [].
+#:
+#: D1 wiring: its gate names `gds_xor_check . --json reports/phase3/gds_xor.json`,
+#: which resolves to a program in this tree and to the step's own declared output.
+#: D2 falsifiability: the gate's one blocking clause reaches FAIL on a broken
+#: project -- it did NOT on the first draft, which exited rc 2 on a refusal and so
+#: landed on VACUOUS_PASS, a non-FAIL tier, and this dimension named it in its own
+#: words ("step 37.3 gate CANNOT FAIL on anything a project DID"); all eight
+#: refusals now exit 1.
+#: D3 outputs: recorded ENFORCED; the declaration is UNPROVEN because the producer
+#: is new, and the D3 replay is ALREADY_RED for exactly that reason.
+#: D4 criteria: two mutations REDDENED it (D4-UNGATED-DELIVERABLE, D4-CLI-CONTRACT).
+#: D5 deps: this dimension found a real defect -- the step read
+#: `phase3/stage4/gds/*.gds` with no edge to its producer (D5-MISSING-EDGE) -- and
+#: the repair is the condition on step 21's `routed.def` with `blocks_on: [21]`.
+#: D6 skip discipline: it found the OTHER real defect -- the original trigger, the
+#: run's pad-ring route attestation, was a SELF-DISABLING CONDITION whose absence
+#: is loud nowhere (T7/T3/T5 all None) and which the runner writes only on the chip
+#: pad-ring path.
+#: D7 output list: REDDENED after the two W2 declarations step 37 gained here
+#: (`phase3/stage3/pnr/stream_out.log` and the route attestation); it was
+#: ALREADY_RED before them, and that was the finding.
+#: D8 missing caught: REDDENED, and the step is in the measured single-entry
+#: population re-derived in this change.
+#: D9 verdict consumed: the receipt's `verdict` field is read by
+#: `signoff_metrics_aggregate`, which is why a refusal keeps NOT_DETERMINED
+#: distinguishable from a measured FAIL.
+GRID_AS_MEASURED: Tuple[int, int, int] = (70, 9, 630)
 
 #: The flow's step ids, in declaration order, as measured 2026-07-28. Pinned
 #: alongside the count so a rename or an add-plus-remove — which leaves the
@@ -294,7 +325,12 @@ STEP_IDS_AS_MEASURED: Tuple[str, ...] = (
     'A6', 'A7', 'A8', 'A9', '14', '15', '15.5ic', '16', '17', '18',
     '19', '20', '21', '22', 'DT2', 'DT3', '23', '24', '25', '26',
     '26.5ic', '27', '28', '29', '30', '31', '32', '33', '34', '35',
-    '36', '37', '37.4', '37.5ip', '37.5ic', '38', '39', 'M1', 'M2', 'M3', 'M4',
+    # 2026-09-23: '37.3' JOINS, in declaration order, between 37 and 37.4 --
+    # canonical GDS stream-out / finishing fidelity (R-0915-129 metric 2). The
+    # list is what distinguishes "a step arrived" from "a step was renamed", so
+    # it moves in the same change as GRID_AS_MEASURED above and names the member.
+    '36', '37', '37.3', '37.4', '37.5ip', '37.5ic', '38', '39',
+    'M1', 'M2', 'M3', 'M4',
     '40', '41', '42', '43', '44', 'P0',
 )
 

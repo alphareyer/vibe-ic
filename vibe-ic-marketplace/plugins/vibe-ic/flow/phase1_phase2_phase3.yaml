@@ -8110,7 +8110,17 @@ steps:
       #  required_outputs names it". Undeclared meant nothing checked it existed,
       # so its absence would have been invisible until a reader took the
       # empty-branch.
-      - "phase3/stage3/pnr/stream_out.log"
+      #
+      # A GLOB, AND THE ENGINE IS THE REASON. `stream_out.log` is written by the
+      # KLAYOUT stream-out only; the Magic engine beside it writes
+      # `<top>.magic_stream_out.log` at its own site ("the KLayout engine beside
+      # this one already writes `stream_out.log` and states why", at that write).
+      # Declaring the KLayout name alone would demand of every Magic-streamed run
+      # a file its engine never writes -- a false demand, and the kind that gets
+      # answered by weakening the gate rather than by fixing anything. The glob is
+      # what the flow actually requires: SOME transcript of what went into the
+      # sign-off GDS, whichever tool streamed it.
+      - "phase3/stage3/pnr/*stream_out.log"
       # THE ROUTE ATTESTATION, declared for the same reason and by the same rule.
       # `step_pad_ring_final_evidence` writes it in this phase-3 pass and it is an
       # attestation ABOUT THIS STEP'S OWN GDS -- the shipped path, its sha256, its
@@ -8159,6 +8169,19 @@ steps:
               command: "stage_on_pass_review . --stage stage3 --json reports/phase3/gates/stage3_on_pass_review.json --compliance reports/phase3/gates/stage3_compliance.json"
               advisory_reason: "DEMOTED, not designed advisory: wired blocking until da6fcd7fe (2026-08-30), moved here in the change that made the declared command actually execute; that push used --no-verify because the full tier did not stamp. Restore blocking once the six on-pass stage commands run green. Re-pointed at the per-stage compliance report in v1.13.78; notch re-measured rc 2 on that invocation, unchanged in class."
         - files_exist: ["phase3/stage4/gds/*.gds"]
+        # THE TRANSCRIPT, ASSERTED BY THE STEP THAT OWES IT. Declaring an artefact
+        # whose own gate never looks at it is an unchecked claim, and dimension 4
+        # says so by name: "1 of 4 declared required_outputs are named nowhere the
+        # gate can reach ... declared 'phase3/stage3/pnr/stream_out.log'". This is
+        # the clause that makes the claim checked, and the demand is real on its
+        # own terms -- the Magic write site records what a missing transcript cost:
+        # "a 106-byte GDS reached sign-off DRC, LVS and the hand-off pack with
+        # nothing at all to say why, while the three lines naming the cause
+        # (`Cell spm couldn't be read`) were discarded at the point of capture".
+        # ENGINE-NEUTRAL by the same glob the declaration uses, so no legitimate
+        # stream-out is reddened by it, and a cached-GDS run is satisfied by the
+        # transcript the session that streamed it left in the same tree.
+        - files_exist: ["phase3/stage3/pnr/*stream_out.log"]
         - program_exit_zero: "gds_size_check --gds-file phase3/stage4/gds/*.gds --json reports/phase3/gds_size.json"
         # Substance, not just size. gds_size_check compares against a
         # flow-wide 100 KB constant and demotes a bad GDSII header to a
@@ -8330,25 +8353,44 @@ steps:
     # NOT_APPLICABLE -- never FAIL/missing_artefact, which is what a cascaded-away
     # step with a declared output produced here.
     #
-    # THE TRIGGER IS THE SHIPPED GDS, NOT THE ROUTE ATTESTATION, and the first
-    # draft had it wrong in a way the matrix named precisely. Conditioning on
-    # `reports/phase3/pad_ring_route_evidence.json` was a SELF-DISABLING
-    # CONDITION: `flow_condition_reachability_check` classifies a trigger the flow
-    # itself produces whose absence is loud nowhere (measured: T7=None, T3=None,
-    # T5=None) as exactly the shape where "the artefact is missing" and "the check
-    # was never made" are indistinguishable downstream -- and the runner writes
-    # that attestation ONLY under `_chip_path_requests_pad_ring`, so every design
-    # off the chip pad-ring path silently had no fidelity check at all.
+    # THE TRIGGER IS THE ROUTED DATABASE, and getting here took two refusals from
+    # the matrix, both of them right.
     #
-    # `phase3/stage4/gds/*.gds` is the subject itself AND has a loud absence: it
-    # is a hard `files_exist` clause in step 37's own gate (T7, step 37), so a run
-    # that reached here without a shipped GDS already FAILED at the step that owed
-    # it. The attestation is still PREFERRED inside the checker -- it decides the
-    # GDS/DEF pairing and refuses on a sha256 that no longer holds -- but it is
-    # the BINDING, not the subject, and the receipt says which of the two it used.
+    # (1) NOT the route attestation. Conditioning on
+    # `reports/phase3/pad_ring_route_evidence.json` is a SELF-DISABLING CONDITION:
+    # `flow_condition_reachability_check` classifies a trigger the flow itself
+    # produces whose absence is loud NOWHERE (measured T7=None, T3=None, T5=None)
+    # as exactly the shape where "the artefact is missing" and "the check was never
+    # made" are indistinguishable to every reader downstream -- and the runner
+    # writes that attestation ONLY under `_chip_path_requests_pad_ring`, so every
+    # design off the chip pad-ring path silently had no fidelity check at all.
+    #
+    # (2) NOT the shipped GDS either, which was the obvious second answer and is
+    # the one dimension 5 refused: `phase3/stage4/gds/*.gds` is step 37's declared
+    # required_output, so naming it in this step's condition IS a data dependency
+    # on 37 -- "D5-MISSING-EDGE: step 37.3 reads 'phase3/stage4/gds/*.gds',
+    # declared as a required_output of step 37, but 37 is not in 37.3's blocks_on
+    # closure". The only thing that satisfies that clause is putting 37 in the
+    # closure, and that is the VERDICT dependency R-0915-129b removed: it is what
+    # cascaded this step away on the one run where the answer mattered most.
+    #
+    # `phase3/stage3/pnr/routed.def` is the honest precondition and it closes both.
+    # It is the ROUTED DATABASE the comparison's REFERENCE is streamed from -- with
+    # no route there is no reference and no comparison exists to make -- it is
+    # step 21's declared required_output AND a hard `files_exist` in step 21's own
+    # gate (T7, step 21), so its absence FAILs there, and 21 is upstream of
+    # stream-out, so `blocks_on: [21]` orders this step without making it wait on
+    # step 37's VERDICT. A DRC-failed 37 no longer takes the fidelity receipt with
+    # it.
+    #
+    # The shipped GDS is still the SUBJECT -- the checker resolves it from the
+    # attestation when the run wrote one and from the flow's own
+    # `phase3/stage4/gds/*.gds` declaration when it did not -- and its absence is a
+    # NAMED REFUSAL in the receipt (`verdict: NOT_DETERMINED`, rc=1, citing both
+    # places it looked), never a silent skip and never a missing_artefact.
     condition:
       files_exist:
-        - "phase3/stage4/gds/*.gds"
+        - "phase3/stage3/pnr/routed.def"
     required_outputs:
       - "reports/phase3/gds_xor.json"
     programs:
@@ -8356,18 +8398,30 @@ steps:
     gate:
       all_of:
         - program_exit_zero: "gds_xor_check . --json reports/phase3/gds_xor.json"
-    # EMPTY, NOT ABSENT. `blocks_on` declares a VERDICT dependency and a non-empty
-    # one is what cascaded this step away behind a failed 37; the real requirement
-    # is that the artefacts exist, which the `condition` above states directly and
-    # checks at evaluation time. Ordering is unaffected: the condition cannot be
-    # satisfied before step 37 has written the attestation it names.
+    # [21], NOT [37], AND NOT EMPTY -- the three spellings this key has had, and
+    # each was corrected by a measurement rather than by an opinion.
     #
-    # It is declared as `[]` rather than omitted because the flow contract says so
-    # and the ledger enforces it: "every step must declare `blocks_on`, even as an
-    # empty list". Omitting it made that check red on ['37.3'] -- and an empty list
-    # is the better statement anyway: it says "no verdict dependency" out loud
-    # instead of leaving a reader to infer it from a missing key.
-    blocks_on: []
+    # `[37]` was the original defect: `blocks_on` declares a VERDICT dependency, so
+    # a DRC-failed 37 cascaded this step away while BOTH of its inputs sat on disk
+    # (MEASURED on the S arm: `chip_top.prefinish.gds` at 73,850,000 B beside a
+    # shipped GDS at 102,921,972 B, and no receipt).
+    #
+    # `[]` was the second draft and it was declared, not omitted, because the flow
+    # contract requires every step to carry the key ("even as an empty list", which
+    # the ledger enforces and which omitting made red on ['37.3']). But an empty
+    # list here was ALSO wrong, for a reason dimension 5 stated: this step reads an
+    # artefact another step produces, and a read with no edge is D5-MISSING-EDGE
+    # whichever artefact it is.
+    #
+    # `[21]` satisfies both. Step 21 produces `phase3/stage3/pnr/routed.def`, the
+    # condition above names it, so the edge this step actually has is the edge it
+    # declares -- and 21 is not step 37, so no verdict of the sign-off stream-out
+    # can silence the fidelity question about its own output. It also anchors the
+    # step to the flow's declared roots through 21's own ancestry, which `[]` did
+    # only by being listed as a root in `flow_dependency_graph_check`; that entry
+    # comes back out in the same change, because a step with a real predecessor is
+    # not a root.
+    blocks_on: [21]
 
   - id: "37.4"
     name: "Sign-off metrics aggregation — the run's own checker verdicts, under the names the release documents read"
