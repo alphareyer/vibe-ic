@@ -1474,10 +1474,20 @@ class IoLibrary:
         #: by file order would pick the site width the whole spacing
         #: arithmetic rounds to out of a directory listing.
         self.site_declaration_conflicts: Dict[str, List[Dict[str, object]]] = {}
+        #: Tech-view declarations that were FOUND and could not be READ. The
+        #: same fact the LEF half keeps above, and for the same reason: this
+        #: loop used to read with a bare `cfg.read_text()` while the paths came
+        #: from `discover_io_site_declarations`, which asks the run's own
+        #: environment. A declaration discovered in the container and then read
+        #: on the host raises, was swallowed here, and left `declared_sites`
+        #: empty -- reported downstream as "PAD-class sites available: []",
+        #: which is a claim about what the PDK declares that nothing had read.
+        self.unread_site_declarations: List[Path] = []
         for cfg in self.site_declarations:
             try:
-                text = cfg.read_text(errors="replace")
+                text = _ask(cfg, "read", reader=reader)
             except OSError:
+                self.unread_site_declarations.append(cfg)
                 continue
             for name, size in parse_pad_site_declarations(text).items():
                 rec = {"class": DECLARED_SITE_CLASS, "size": size,

@@ -203,6 +203,68 @@ class ContainerReader:
         return out if rc == 0 else None
 
 
+class ImageReader:
+    """A named IMAGE's filesystem, read with a fresh `docker run --rm`.
+
+    WHY AN IMAGE AND NOT A CONTAINER. `ContainerReader` needs the run's
+    container to still be up, and after a run finishes it is not. A host-side
+    gate re-run by the completion audit therefore has no container to ask --
+    but the run wrote down WHICH IMAGE its tools read (`container_image.json`
+    carries the digest and `image_match`), and an image digest is a durable
+    identity in a way a container name is not. Reading that image answers "what
+    does the PDK this run used contain" for exactly the bytes the run used.
+
+    One `docker run` per distinct question, memoised, because a read-only image
+    cannot change under us inside a single gate. Nothing is started in the
+    background and nothing has to be torn down: `--rm` and no `-d` mean each
+    answer's container is gone before the answer is returned.
+
+    An unreachable image is None or False, never a default -- the caller must
+    be able to tell "the PDK does not ship this" from "nothing was read".
+    """
+
+    def __init__(self, image: str, runner=None) -> None:
+        self.image = str(image)
+        self.name = f"image:{self.image}"
+        self._run = runner or self._docker
+        self._seen: Dict[Tuple[str, str, str], Tuple[int, str]] = {}
+
+    @staticmethod
+    def _docker(image: str, argv: List[str]) -> Tuple[int, str]:
+        import subprocess
+        try:
+            cp = subprocess.run(
+                ["docker", "run", "--rm", "--init", "--entrypoint", "/bin/sh",
+                 image, "-c", " ".join(shlex.quote(a) for a in argv)],
+                capture_output=True, text=True, timeout=180)
+        except (OSError, subprocess.SubprocessError):
+            return 127, ""
+        return cp.returncode, cp.stdout
+
+    def _ask(self, op: str, *argv: str) -> Tuple[int, str]:
+        key = (op, argv[-1] if argv else "", " ".join(argv))
+        if key not in self._seen:
+            self._seen[key] = self._run(self.image, list(argv))
+        return self._seen[key]
+
+    def is_dir(self, path: str) -> bool:
+        return self._ask("is_dir", "test", "-d", path)[0] == 0
+
+    def is_file(self, path: str) -> bool:
+        return self._ask("is_file", "test", "-f", path)[0] == 0
+
+    def glob(self, root: str, pattern: str) -> List[str]:
+        rc, out = self._ask("glob", "sh", "-c",
+                            f"ls -1d {shlex.quote(root)}/{pattern} 2>/dev/null")
+        if rc != 0:
+            return []
+        return sorted(line for line in out.splitlines() if line.strip())
+
+    def read_text(self, path: str) -> Optional[str]:
+        rc, out = self._ask("read", "cat", path)
+        return out if rc == 0 else None
+
+
 def container_reader(container: Optional[str]):
     """`ContainerReader` for a named container, or the local one for None."""
     return ContainerReader(container) if container else LocalReader()
