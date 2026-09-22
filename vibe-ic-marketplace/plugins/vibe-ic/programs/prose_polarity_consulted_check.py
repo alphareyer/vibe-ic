@@ -119,6 +119,30 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "gds_xor_check::restream_env_from_transcript":
+        "A TRANSCRIPT THIS FLOW WROTE ITSELF, in a fixed field grammar, and the "
+        "same class as `_run_magic_signoff_drc` below. All three patterns read "
+        "`phase3/stage3/pnr/stream_out.log`, every line of which the run's own "
+        "stream-out recipe emits as `print(f\"<TOKEN> <verb phrase>: {value}\")` "
+        "from a value it had ALREADY resolved; each pattern is anchored at line "
+        "start AND line end around a closed field type (`\\S+`, one path), so "
+        "the grammar has no free-text field in which a denial could be written. "
+        "THE RECIPE DOES SAY THE NEGATIVE -- and it says it in productions these "
+        "patterns cannot reach: `LEFDEF_MAP not applied (none configured)`, "
+        "`LEFDEF_MAP_CONFIGURED_BUT_ABSENT: ...`, `MACRO_GDS merged (no DEF "
+        "master matched): <path>`, and `CELL_GDS manual-substituted <n> std "
+        "cell(s)` which carries no `: <path>` field at all. A denial therefore "
+        "fails the anchor, the key stays OUT of the env dict, and that is "
+        "precisely what the denial means: the re-stream passes no such variable "
+        "and reads what the run read. MEASURED on run21's real transcript "
+        "(spm x gf180mcuD): the tightened patterns return the same three keys "
+        "and both macro libraries as the loose ones did. "
+        "AND THE VALUE'S CONSEQUENCE IS CHECKED INDEPENDENTLY, which is the "
+        "falsifier: a library this reader failed to recover makes the re-streamed "
+        "reference too small, and `reference_is_faithful` refuses on the shape "
+        "census (rc=1, NOT_DETERMINED) rather than reporting a confident wrong "
+        "difference count. So even a grammar change that slipped a denial past "
+        "the anchor cannot buy a clean XOR.",
     "phase3_one_shot_runner::_run_magic_signoff_drc":
         "A TRANSCRIPT THIS MODULE WROTE ITSELF, in a fixed field grammar, one "
         "function away. `_magic_signoff_drc_tcl` emits every line this reader "

@@ -27,6 +27,7 @@ chip/PDK-AGNOSTIC: no design, vendor or PDK literal appears here.
 """
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -249,11 +250,52 @@ def _container_has_klayout(container: str) -> bool:
         return False
 
 
-def find_runner(container: Optional[str] = None) -> Optional[KLayoutRunner]:
+#: The run's OWN receipt of where its tools ran. `container_image_provenance`
+#: writes it and records the container NAME under "container".
+CONTAINER_IMAGE_REL = "reports/container_image.json"
+
+
+def container_the_run_recorded(project) -> Optional[str]:
+    """The container THIS RUN used, from its own receipt, or None.
+
+    THE ONE RESOLVER, and it exists because two invocations of one gate answered
+    differently on one host seconds apart. MEASURED on the SLT53D S arm: the
+    phase-3 runner dispatched `gds_xor_check --container real-ic-arm-eda` and the
+    XOR ran -- runner {"kind": "container", "detail": "real-ic-arm-eda:klayout"},
+    verdict PASS, 0 design-layer differences across 46 layers. Seconds later the
+    completion audit evaluated the SAME gate through the flow's static clause,
+    which carries no `--container` because a per-host container name cannot be
+    written into the yaml; `find_runner(None)` fell through to
+    `DEFAULT_CONTAINER` -- a DIFFERENT container that does not mount that project
+    -- and the gate said, correctly for what it was given, "no KLayout runner
+    reaches this project". The audit then published that answer over the
+    producer's measurement.
+
+    The durable identity is the run's own record, not the pinned default name:
+    `reports/container_image.json` is written by the run that used the container
+    and names it. So a caller with no explicit `--container` asks the RUN which
+    container it used before falling back to a name that is merely conventional.
+    """
+    try:
+        doc = json.loads(
+            (Path(project) / CONTAINER_IMAGE_REL).read_text(errors="replace"))
+    except (OSError, ValueError, TypeError):
+        return None
+    name = doc.get("container") if isinstance(doc, dict) else None
+    return str(name).strip() or None if isinstance(name, str) else None
+
+
+def find_runner(container: Optional[str] = None,
+                project=None) -> Optional[KLayoutRunner]:
     """Resolve a KLayout batch runner, host first then container.
 
     Returns None when neither is available — the caller MUST then emit a named,
     disclosed skip. Never silently succeed on a missing checker.
+
+    `project`, when given, lets the run's OWN container receipt answer before the
+    pinned default name does — see :func:`container_the_run_recorded` for the
+    measurement that made this necessary. `container` still wins: an explicit
+    argument is the caller stating which container it means.
     """
     if os.environ.get("VIBEIC_KLAYOUT_FORCE_ABSENT"):
         # Test hook: proves the honest-degrade path without uninstalling
@@ -264,9 +306,10 @@ def find_runner(container: Optional[str] = None) -> Optional[KLayoutRunner]:
         if found:
             return HostRunner(found, flags)
     if shutil.which("docker"):
-        name = container or DEFAULT_CONTAINER
-        if name and _container_has_klayout(name):
-            return ContainerRunner(name)
+        recorded = container_the_run_recorded(project) if project else None
+        for name in (container, recorded, DEFAULT_CONTAINER):
+            if name and _container_has_klayout(name):
+                return ContainerRunner(name)
     return None
 
 

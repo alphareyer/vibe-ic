@@ -97,6 +97,15 @@ except ImportError:                                     # pragma: no cover
 # of any prior step. Giving it a `blocks_on` edge to manufacture a predecessor
 # would declare an ordering constraint that does not exist, which is the defect
 # this checker exists to make visible, inverted.
+# 2026-09-23 — "37.3" WAS ADDED HERE AND IS TAKEN BACK OUT IN THE SAME CHANGE,
+# which is worth the three lines because the reasoning is the interesting part.
+# It was listed while the step declared `blocks_on: []`, on the reading that a
+# root is a step with no VERDICT dependency. Dimension 5 refused that: a step
+# whose condition names another step's required_output HAS a data dependency,
+# and 37.3's condition names `phase3/stage3/pnr/routed.def`, which step 21
+# produces. So 37.3 now declares `blocks_on: [21]` and reaches the roots through
+# 21's own ancestry. A step with a real predecessor is not a root, and adding it
+# here would have declared the absence of an ordering constraint that exists.
 DECLARED_ROOTS = {"D1", "0.5ic"}
 
 

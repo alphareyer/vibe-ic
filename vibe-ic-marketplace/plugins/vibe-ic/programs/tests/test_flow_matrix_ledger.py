@@ -144,8 +144,15 @@ from flow_matrix import waivers as W
 #
 # Re-derived, not multiplied out: measured on this tree against HEAD, the step
 # SET grew by the single member '37.4' and no member left.
-EXPECTED_CELLS = 621
-EXPECTED_STEPS = 69
+#
+#   len(F.step_ids())  69 -> 70      (step 37.3; no existing id changes)
+#   len(C.DIMENSIONS)   9 ->  9
+#   70 * 9            621 -> 630
+#
+# Re-derived, not multiplied out: measured on this tree against origin/main,
+# the step SET grew by the single member '37.3' and no member left.
+EXPECTED_CELLS = 630
+EXPECTED_STEPS = 70
 EXPECTED_DIMS = 9
 
 # Pinned census of the yaml as measured on 2026-07-27. These are TRIPWIRES, not
@@ -166,7 +173,10 @@ EXPECTED_DIMS = 9
 # same +1 lands on gate_present, required_outputs_present, blocks_on_present,
 # blocks_on_non_empty and gate_programs_non_empty. No existing step moved: the
 # diff adds a block and edits none.
-CENSUS_GATE_PRESENT = 68
+# 2026-09-23: step 37.3 (GDS stream-out / finishing fidelity) ARRIVED.
+# MEASURED on the live yaml, not incremented: arrived ['37.3'], departed [].
+# 37.3 declares a gate, so this census moves 68 -> 69.
+CENSUS_GATE_PRESENT = 69
 # UNCHANGED at 61. A 2026-07-28 change gave FS1 a `required_outputs` key and
 # was WITHDRAWN the same day: the only thing that made the declaration
 # satisfiable was `check_step` standing its early MISSING down so FS1's own
@@ -189,7 +199,10 @@ CENSUS_GATE_PRESENT = 68
 # same +1 lands on gate_present, required_outputs_present, blocks_on_present,
 # blocks_on_non_empty and gate_programs_non_empty. No existing step moved: the
 # diff adds a block and edits none.
-CENSUS_REQUIRED_OUTPUTS_PRESENT = 67
+# 2026-09-23: step 37.3 (GDS stream-out / finishing fidelity) ARRIVED.
+# MEASURED on the live yaml, not incremented: arrived ['37.3'], departed [].
+# 37.3 declares reports/phase3/gds_xor.json, so 67 -> 68.
+CENSUS_REQUIRED_OUTPUTS_PRESENT = 68
 # 62 -> 63 and 60 -> 61 on 2026-08-11 (`332b9985`, vibe-ic#923 via #929): step
 # P0 (the structural-RTL pre-flight) gained `blocks_on: [1]` deliberately —
 # P0 already declared `required_inputs: [{from: 1, ...}]`, so the ordering edge
@@ -214,7 +227,11 @@ CENSUS_REQUIRED_OUTPUTS_PRESENT = 67
 # same +1 lands on gate_present, required_outputs_present, blocks_on_present,
 # blocks_on_non_empty and gate_programs_non_empty. No existing step moved: the
 # diff adds a block and edits none.
-CENSUS_BLOCKS_ON_PRESENT = 69
+# 2026-09-23: step 37.3 (GDS stream-out / finishing fidelity) ARRIVED.
+# MEASURED on the live yaml, not incremented: arrived ['37.3'], departed [].
+# 37.3 declares `blocks_on: []` -- PRESENT, as the contract on this very
+# census requires of every step -- so 69 -> 70.
+CENSUS_BLOCKS_ON_PRESENT = 70
 # 61 -> 62 on 2026-08-14 (`73dfb68dd`, vibe-ic#1070 via #1258): step A1
 # gained `blocks_on: [D1]`. A1 already declared TWO `required_inputs` from
 # D1 while carrying `blocks_on: []`, so the ordering edge its own inputs
@@ -249,7 +266,22 @@ CENSUS_BLOCKS_ON_PRESENT = 69
 # same +1 lands on gate_present, required_outputs_present, blocks_on_present,
 # blocks_on_non_empty and gate_programs_non_empty. No existing step moved: the
 # diff adds a block and edits none.
-CENSUS_BLOCKS_ON_NON_EMPTY = 67
+# 2026-09-23: step 37.3 (GDS stream-out / finishing fidelity) ARRIVED.
+# MEASURED on the live yaml, not incremented: arrived ['37.3'], departed [].
+# AND THIS ONE DOES NOT MOVE, which is the point of the sibling census above.
+# 37.3's `blocks_on` is present but EMPTY: it is conditional on its subject
+# (two GDS files) rather than dependent on step 37's verdict, so it joins
+# PRESENT without joining NON_EMPTY. Measured: 67 -> 67.
+#   2026-09-23: CENSUS_BLOCKS_ON_NON_EMPTY   67 -> 68  step 37.3 carries
+#   `blocks_on: [21]`. It was DELIBERATELY left at 67 for one revision of this
+#   branch, when 37.3 declared `blocks_on: []` -- present, as the flow contract
+#   requires of every step, and empty, so it counted toward
+#   CENSUS_BLOCKS_ON_PRESENT and not toward this one. That empty list was then
+#   refused by dimension 5 (D5-MISSING-EDGE: the step reads an artefact another
+#   step produces), the edge to its producer was declared, and the population
+#   moved with it. RE-DERIVED as a SET against origin/main: joined ['37.3'],
+#   left [].
+CENSUS_BLOCKS_ON_NON_EMPTY = 68
 # 60 -> 61 on 2026-08-08: step 12 gained a `program_exit_zero` exec clause
 # (dft_post_optimization_scan_survival_check), closing the files_exist-only
 # gap the flow_matrix dimension-2 audit named. Step 1 is still exec-free.
@@ -292,7 +324,10 @@ CENSUS_BLOCKS_ON_NON_EMPTY = 67
 # same +1 lands on gate_present, required_outputs_present, blocks_on_present,
 # blocks_on_non_empty and gate_programs_non_empty. No existing step moved: the
 # diff adds a block and edits none.
-CENSUS_GATE_PROGRAMS_NON_EMPTY = 66
+# 2026-09-23: step 37.3 (GDS stream-out / finishing fidelity) ARRIVED.
+# MEASURED on the live yaml, not incremented: arrived ['37.3'], departed [].
+# 37.3 names gds_xor_check under `programs:`, so 66 -> 67.
+CENSUS_GATE_PROGRAMS_NON_EMPTY = 67
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1110,9 +1145,29 @@ def test_output_entries_classify_into_the_four_kinds():
     # destination, so no wildcard and no alternative arises — unlike step 27's
     # `si_crosstalk.rpt OR si_crosstalk.json`, which is an ANY_OF precisely
     # because two spellings satisfy it.
-    assert sum(seen.values()) == 189, (seen, REDERIVE)
-    assert seen[F.FILE] == 136, (seen, REDERIVE)
-    assert seen[F.GLOB] == 27, (seen, REDERIVE)
+    # 189 -> 192, RE-DERIVED by the method this pin names (diff the
+    # (step, entry) SET against origin/main through $VIBE_IC_MATRIX_FLOW_YAML,
+    # never type the total). Three entries arrive, none leaves:
+    #   + ('37',   'reports/phase3/pad_ring_route_evidence.json')   FILE
+    #   + ('37.3', 'reports/phase3/gds_xor.json')                   FILE
+    #   + ('37',   'phase3/stage3/pnr/*stream_out.log')             GLOB
+    # The first two are declared to close W2 on 37.3, which CONSUMES both; the
+    # third is 37.3's own product.
+    assert sum(seen.values()) == 192, (seen, REDERIVE)
+    # 136 -> 138 FILE and 27 -> 28 GLOB, from the SAME set diff.
+    #
+    # AN EARLIER REVISION OF THIS PIN SAID FILE 139 / GLOB 27, and the arithmetic
+    # was right for a spelling that was wrong. The transcript was first declared
+    # as `phase3/stage3/pnr/stream_out.log`, a plain FILE -- but that name is
+    # written by the KLAYOUT stream-out only; Magic writes
+    # `<top>.magic_stream_out.log`, so the single name demanded of every
+    # Magic-streamed run a file its engine never writes. The declaration is now
+    # the engine-neutral glob, which is what the flow actually requires -- SOME
+    # transcript of what went into the sign-off GDS -- and it classifies as GLOB.
+    # One entry moved between two kinds; the total did not move, which is exactly
+    # why this test asserts the three kinds separately and not just their sum.
+    assert seen[F.FILE] == 138, (seen, REDERIVE)
+    assert seen[F.GLOB] == 28, (seen, REDERIVE)
     assert seen[F.ANY_OF] == 26, (seen, REDERIVE)
     # Reported to the orchestrator: the PROGRAM_EXIT form described in the brief
     # does NOT exist in required_outputs. It lives only in `gate` clauses. The
@@ -1551,7 +1606,10 @@ def test_ledger_tracks_a_mutated_flow(tmp_path):
         C.rebuild()
 
         assert len(F.step_ids()) == EXPECTED_STEPS + 1
-        assert len(C.ALL_CELLS) == (EXPECTED_STEPS + 1) * EXPECTED_DIMS == 630
+        # The mutated flow adds ONE step to the live 70, so the product is
+        # (70 + 1) * 9 = 639. Derived from EXPECTED_STEPS, which the arrival
+        # above already moved; the literal is restated to match it.
+        assert len(C.ALL_CELLS) == (EXPECTED_STEPS + 1) * EXPECTED_DIMS == 639
         assert len(C.cells_for(1)) == EXPECTED_STEPS + 1
 
         # The added step has no audit history at all — surfaced, not swallowed.

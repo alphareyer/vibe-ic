@@ -628,10 +628,28 @@ def test_0_5ic_d3_live_replay_closes_the_exact_coverage_delta():
     d6 D6-UNCONDITIONAL-OPTIONAL REDDENED, d7 D7-GATE-PROBES-A-GHOST REDDENED,
     d8 D8-EMPTY-PROMISE REDDENED — so ``uncovered == []`` holds at 516 rather
     than holding over eight cells nobody had shown can fail.
+
+    MOVED 516 -> 524 on 2026-09-23, growing, and this one is a STEP arriving
+    again rather than a cell changing tier: canonical 37.3 (GDS stream-out /
+    finishing fidelity, R-0915-129 metric 2) brings eight cells, all eight are
+    ENFORCED, and the live not-ENFORCED set is the SAME 36 cells the inventory
+    pins -- pin-only [] and live-only [] -- so no existing cell moved.
+
+    THE THIRD ASSERTION IS AGAIN WHAT THE MOVE HAD TO BUY, and it was bought by
+    REPLAYING all eight on this tree: d1 REDDENED, d2 REDDENED, d3
+    D3-UNDECLARED-ARTEFACT ALREADY_RED (baseline_rc=1, corpus bound, recorded in
+    baseline_red -- its declared output is a brand-new producer no published run
+    carries), d4 D4-UNGATED-DELIVERABLE and D4-CLI-CONTRACT both REDDENED, d5
+    D5-PHANTOM-EDGE REDDENED, d6 D6-UNCONDITIONAL-OPTIONAL REDDENED, d7
+    D7-GATE-PROBES-A-GHOST REDDENED, d8 D8-EMPTY-PROMISE REDDENED. Two of the
+    eight were RED on earlier drafts of the step and both were real findings --
+    d6 named the trigger a self-disabling condition and d5 named the missing edge
+    to its producer -- so ``uncovered == []`` holds at 524 over eight cells that
+    have each been shown to fail.
     """
     rep = L.census(cell_states())
-    assert rep["considered"] == 516, rep
-    assert rep["covered"] == 516, rep
+    assert rep["considered"] == 524, rep
+    assert rep["covered"] == 524, rep
     assert rep["uncovered"] == [], rep
 
 

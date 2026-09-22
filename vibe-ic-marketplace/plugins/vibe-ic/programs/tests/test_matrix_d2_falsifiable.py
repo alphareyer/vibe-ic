@@ -196,8 +196,8 @@ RUN
 ``PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`` is mandatory in this tree (a stray
 ``pytest_ethereum`` plugin otherwise breaks collection).
 
-LIVE, not remembered: 190<!--figure:blocking_clauses--> blocking clauses over
-68<!--figure:gated_steps--> gated steps. This is the denominator a reader
+LIVE, not remembered: 192<!--figure:blocking_clauses--> blocking clauses over
+69<!--figure:gated_steps--> gated steps. This is the denominator a reader
 wants, and it moves with the yaml: the digits are written by
 ``tools/gen_flow_matrix_census.py`` and the ``<!--figure:...-->`` anchors name
 the bindings that produced them (vibe-ic#961). Do not hand-edit them.
@@ -2323,6 +2323,55 @@ def _f_declared_opcode_without_transition_evidence(p: Path) -> None:
        "module tb_arithmetic_core; initial #1 $finish; endmodule\n")
 
 
+def _f_xor_design_layer_differs(p: Path) -> None:
+    """The run's own fidelity receipt records a DESIGN-layer difference.
+
+    Reddens the step-37.3 clause
+    ``gds_xor_check . --check reports/phase3/gds_xor.json``.
+
+    EMPTY cannot reach it, and the reason is the gate working correctly: with no
+    receipt the judge answers rc 2 ``NOT_MEASURED [ASKED_BEFORE_PRODUCER]`` --
+    "this step's own producer has not run yet" -- which is a statement about the
+    run, not about the geometry, and is exactly the tier this suite refuses to
+    count as a red.
+
+    So the fixture makes the producer look RUN and its answer BAD. The clause is
+    a JUDGE (R-0915-126: producer writes, gate reads; the audit must not re-run
+    the XOR with a resolver that may reach no tool), so the only thing that can
+    redden it is the producer's own document saying the shipped GDS differs from
+    this run's pre-finishing reference on a layer FINISHING DID NOT DECLARE.
+
+    MEASURED, verbatim:
+
+        rc 1  FAIL: the run's own receipt reports/phase3/gds_xor.json records 1
+              DESIGN layer(s) differing between the shipped GDS and this run's
+              pre-finishing reference (3 differing polygon(s): 50/0=3)
+
+    Layer 50 is deliberately NOT one of the finishing-declared layers the same
+    receipt lists, which is the whole partition this metric rests on: fill and
+    seal ring may add geometry on the layers they declare, and a difference
+    anywhere else means the stream-out changed the design.
+    """
+    d = p / "reports" / "phase3"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "gds_xor.json").write_text(json.dumps({
+        "gate": "gds_xor_check",
+        "verdict": "FAIL",
+        "rc": 1,
+        "layers_compared": 46,
+        "design_layer_differences": [
+            {"layer": 50, "datatype": 0, "differences": 3},
+        ],
+        "finishing_layer_differences": [
+            {"layer": 22, "datatype": 4, "differences": 75175,
+             "declared_by": "density_fill"},
+        ],
+        "design__xor_difference__count": 3,
+        "reason": "the shipped GDS differs from the restreamed pre-finishing "
+                  "reference on 1 DESIGN layer(s)",
+    }, indent=2) + "\n")
+
+
 FIXTURES: Dict[str, Callable[[Path], None]] = {
     "EMPTY": _f_empty,
     "RTL_BAD": _f_rtl_bad,
@@ -2372,6 +2421,7 @@ FIXTURES: Dict[str, Callable[[Path], None]] = {
     "CROSSLAYER_REFUTED": _f_crosslayer_refuted,
     "PAD_DECL_PARTIAL": _f_pad_decl_partial,
     "SLOT_PAD_OVER_BUDGET": _f_slot_pad_over_budget,
+    "XOR_DESIGN_LAYER_DIFFERS": _f_xor_design_layer_differs,
     "DECLARED_OPCODE_UNMEASURED":
         _f_declared_opcode_without_transition_evidence,
 }
@@ -2382,6 +2432,21 @@ FIXTURES: Dict[str, Callable[[Path], None]] = {
 #: not redden it) fails loudly rather than silently keeping a stale recipe.
 #: Clauses absent from this table use ``EMPTY``.
 CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
+    # Step 37.3's clause is a JUDGE of the producer's receipt, not a second
+    # measurement -- R-0915-126, and the SLT53D S arm is the record of what a
+    # re-measuring clause costs: the producer measured 0 differences across 46
+    # layers and the audit's own invocation, which could not reach KLayout,
+    # published NOT_DETERMINED as a FAIL on all five subjects. So EMPTY cannot
+    # redden it by design (no receipt -> rc 2 ASKED_BEFORE_PRODUCER, "the
+    # producer has not run yet"), and the falsifiable arm is a receipt the
+    # producer wrote whose answer is bad.
+    #
+    # MEASURED through `_evaluate_clause` on this tree:
+    #   EMPTY                     tier=DISCLOSED_INCOMPLETE  rc 2 NOT_MEASURED
+    #                                                        [ASKED_BEFORE_PRODUCER]
+    #   XOR_DESIGN_LAYER_DIFFERS  tier=FAIL                  rc 1, layer 50/0
+    ("37.3", "gds_xor_check . --check reports/phase3/gds_xor.json"):
+        "XOR_DESIGN_LAYER_DIFFERS",
     # vibe-ic#1347 wired `slot_pad_budget_check` BLOCKING on Step 2 and shipped
     # it with no fixture, so it fell back to EMPTY and banked a VACUOUS_PASS —
     # a gate declared blocking that nothing could make block. EMPTY cannot

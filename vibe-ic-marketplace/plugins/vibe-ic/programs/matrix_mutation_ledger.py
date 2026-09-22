@@ -1081,9 +1081,13 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D1-BLIND-GATE-PROGRAMS --step 37.4 --jobs 1
             #   -> REDDENED (9.3 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-23 on this branch:
+            #   --replay D1-BLIND-GATE-PROGRAMS --step 37.3 --jobs 1
+            #   -> REDDENED (12.7s)
+            "37.3"),
         measured=Measurement(
-            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=65,
+            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=66,
             stayed_green=(),
             note="4 steps have no executable gate clause at all and are "
                  "structurally out of this entry's reach: 1 and 12 (files_exist "
@@ -1191,10 +1195,14 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D2-BLIND-GATE-PROGRAMS --step 37.4 --jobs 1
             #   -> REDDENED (2.5 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-23 on this branch:
+            #   --replay D2-BLIND-GATE-PROGRAMS --step 37.3 --jobs 1
+            #   -> REDDENED (3.5s, after the rc 2 -> 1 repair)
+            "37.3"),
         measured=Measurement(
             date="2026-08-11",
-            command=_SWEEP_THEN_ONE.replace("{added}", "12") + _THEN_FIVE, reddened=66,
+            command=_SWEEP_THEN_ONE.replace("{added}", "12") + _THEN_FIVE, reddened=67,
             stayed_green=("35",),
             note="60 red = every one of dimension 2's 60 ENFORCED cells, in one "
                  "sweep. The 2 waived cells (1, 35) and the NA cell (P0) are "
@@ -1250,9 +1258,23 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D3-UNDECLARED-ARTEFACT --step 37.4 --jobs 1
             #   -> ALREADY_RED (baseline_rc=1, 15.5 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-23 on this branch against the
+            # published corpus (VIBE_IC_BENCHMARK_DATA pointed at a clone):
+            #   --replay D3-UNDECLARED-ARTEFACT --step 37.3 --jobs 1
+            #   -> ALREADY_RED (baseline_rc=1, 19.3s)
+            # ITS CELL IS RED AT BASELINE, for the reason this dimension's own
+            # history already records for the 2026-08-20 arrivals: the step is NEW,
+            # so no published run has produced `reports/phase3/gds_xor.json` and
+            # the manifest entry is UNPROVEN. That is "the honest reading of a flow
+            # declaring an output nothing produces", not a state to waive away. So
+            # it joins baseline_red and is falsifiable BY DEFINITION rather than by
+            # this replay -- exactly how 26.5ic is recorded above. It clears itself:
+            # the UNPROVEN branch re-searches every admissible root on each run and
+            # says so the moment one carries the receipt.
+            "37.3"),
         measured=Measurement(
-            date="2026-09-02", command=_D3_THEN_LIVE_ONE, reddened=57,
+            date="2026-09-02", command=_D3_THEN_LIVE_ONE, reddened=58,
             baseline_red=("12", "15", "17", "19", "20", "21", "22", "23", "24",
                           "25", "26", "30", "32", "M2", "M3", "M4", "26.5ic", '37.4'),
             stayed_green=("6", "39", "M1"),
@@ -1332,9 +1354,13 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D4-UNGATED-DELIVERABLE --step 37.4 --jobs 1
             #   -> REDDENED (2.4 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-23 on this branch:
+            #   --replay D4-UNGATED-DELIVERABLE --step 37.3 --jobs 1
+            #   -> REDDENED (3.2s)
+            "37.3"),
         measured=Measurement(
-            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=67,
+            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=68,
             baseline_red=("1",),
             note="the 2 steps not reached declare no required_outputs at all "
                  "(FS1, P0) and are carried by D4-CLI-CONTRACT and "
@@ -1366,9 +1392,13 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D4-CLI-CONTRACT --step 37.4 --jobs 1
             #   -> REDDENED (2.4 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-23 on this branch:
+            #   --replay D4-CLI-CONTRACT --step 37.3 --jobs 1
+            #   -> REDDENED (2.7s)
+            "37.3"),
         measured=Measurement(
-            date="2026-08-06", command=_SWEEP, reddened=50,
+            date="2026-08-06", command=_SWEEP, reddened=51,
             stayed_green=("D1", "21", "33"),
             note="carries FS1, the one step with a gate and no required_outputs. "
                  "D1/21/33 stayed green because their first clause's program "
@@ -1430,10 +1460,22 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D5-PHANTOM-EDGE --step 37.4 --jobs 1
             #   -> REDDENED (8.2 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-23 on this branch:
+            #   --replay D5-PHANTOM-EDGE --step 37.3 --jobs 1
+            #   -> REDDENED (17.1s)
+            # RE-RUN TODAY, and the first run is why: on the draft before this
+            # one the pair was ALREADY_RED, because this dimension had a real
+            # finding on the step -- "D5-MISSING-EDGE: step 37.3 reads
+            # 'phase3/stage4/gds/*.gds', declared as a required_output of step
+            # 37, but 37 is not in 37.3's blocks_on closure". The condition now
+            # names step 21's `routed.def` and `blocks_on` is [21], so the edge
+            # the step has is the edge it declares, the cell is green at
+            # baseline, and the mutation reddens it.
+            "37.3"),
         measured=Measurement(
             date="2026-08-11",
-            command=_SWEEP_THEN_ONE.replace("{added}", "P0") + _THEN_FIVE, reddened=69,
+            command=_SWEEP_THEN_ONE.replace("{added}", "P0") + _THEN_FIVE, reddened=70,
             note="63 red = every one of dimension 5's 63 ENFORCED cells, in one "
                  "sweep, each reddening that cell alone. There is no longer an "
                  "NA cell in this dimension. "
@@ -1532,12 +1574,16 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D6-UNCONDITIONAL-OPTIONAL --step 37.4 --jobs 1
             #   -> REDDENED (30.0 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-23 on this branch:
+            #   --replay D6-UNCONDITIONAL-OPTIONAL --step 37.3 --jobs 1
+            #   -> REDDENED (24.0s)
+            "37.3"),
         params={"command":
                 "clock_plan_check . --json reports/phase2/gates/zzmatrixcanary.json"},
         measured=Measurement(
             date="2026-08-06", command=_SWEEP + _THEN_FIVE + _THEN_DT2,
-            reddened=68,
+            reddened=69,
             stayed_green=(),
             note="61 red = every ENFORCED dimension-6 cell except P0, which "
                  "declares no gate to append to and is carried by "
@@ -1670,9 +1716,21 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D7-GATE-PROBES-A-GHOST --step 37.4 --jobs 1
             #   -> REDDENED (66.7 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-23 on this branch against the
+            # published corpus, AFTER the two W2 declarations this change adds:
+            #   --replay D7-GATE-PROBES-A-GHOST --step 37.3 --jobs 1
+            #   -> REDDENED (78.6s)
+            # It was ALREADY_RED before those declarations, and the finding was
+            # this dimension's own W2: the gate consumed
+            # `phase3/stage3/pnr/stream_out.log` and
+            # `reports/phase3/pad_ring_route_evidence.json`, both produced by the
+            # flow and declared by no step. Declaring them on step 37, which
+            # writes them, is what turned the cell falsifiable -- so this pair is
+            # evidence the dimension WORKS, not a formality.
+            "37.3"),
         measured=Measurement(
-            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=64,
+            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=65,
             baseline_red=("D1", "21", "34"),
             stayed_green=("7", "FS1", "23", "M1"),
             note="58 red = every one of dimension 7's 58 ENFORCED cells, in one "
@@ -1831,9 +1889,13 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D8-EMPTY-PROMISE --step 37.4 --jobs 1
             #   -> REDDENED (2.4 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-23 on this branch:
+            #   --replay D8-EMPTY-PROMISE --step 37.3 --jobs 1
+            #   -> REDDENED (3.4s)
+            "37.3"),
         measured=Measurement(
-            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=67,
+            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=68,
             note="61 red = every one of dimension 8's 61 ENFORCED cells, in one "
                  "sweep. The 2 steps not reached (FS1, P0) declare no "
                  "required_outputs and are dimension 8's 2 NA cells. "
@@ -2478,7 +2540,41 @@ NOT_FALSIFIABLE: Tuple[NotFalsifiable, ...] = ()
 # of the eight is backed by a REPLAY RUN on this tree, not by an argument from
 # the shape of the step -- see the eight `# canonical step 37.4` comments in
 # MUTATIONS above for the command and the outcome of each.
-LEDGER_AS_MEASURED: Tuple[int, int, int] = (69, 8, 516)
+# 2026-09-23: (69, 8, 516) -> (70, 8, 524). ONE step arrives -- canonical 37.3,
+# GDS stream-out / finishing fidelity (R-0915-129 metric 2) -- and all EIGHT of
+# its cells are ENFORCED, so the ENFORCED total moves by exactly eight and the
+# dimension axis does not move at all. The step SET gained '37.3' and lost no
+# member, and NO EXISTING CELL CHANGED STATE: measured against
+# LEDGER_CELLS_NOT_ENFORCED, the live not-ENFORCED set and the pinned one are the
+# SAME 36 cells -- pin-only [] and live-only [] -- so 560 - 36 = 524 and this move
+# names a step, not a re-tiering.
+#
+# EVERY ONE OF THE EIGHT IS BACKED BY A REPLAY RUN on this tree, the same
+# standard 37.4 was held to, and two of them are recorded as what they measured
+# rather than as what would have been convenient:
+#   d1 D1-BLIND-GATE-PROGRAMS      REDDENED   (12.7s)
+#   d2 D2-BLIND-GATE-PROGRAMS      REDDENED   ( 3.5s, after the rc 2 -> 1 repair)
+#   d3 D3-UNDECLARED-ARTEFACT      ALREADY_RED (baseline_rc=1, 19.3s, corpus
+#      bound) -- recorded in that entry's baseline_red, exactly as 26.5ic and
+#      37.4 were. The cell is red at baseline because the step's declared output
+#      is a BRAND-NEW producer that no published run carries yet; the pair proves
+#      nothing either way and is not counted as a proof.
+#   d4 D4-UNGATED-DELIVERABLE      REDDENED   ( 3.2s)
+#      D4-CLI-CONTRACT             REDDENED   ( 2.7s)
+#   d5 D5-PHANTOM-EDGE             REDDENED   -- and it was ALREADY_RED on the
+#      draft before this one, for a real finding this dimension made:
+#      "D5-MISSING-EDGE: step 37.3 reads 'phase3/stage4/gds/*.gds', declared as a
+#      required_output of step 37, but 37 is not in 37.3's blocks_on closure". The
+#      condition now names step 21's routed.def and blocks_on is [21], so the
+#      edge the step has is the edge it declares.
+#   d6 D6-UNCONDITIONAL-OPTIONAL   REDDENED   (24.0s) -- and it too was red on an
+#      earlier draft: `flow_condition_reachability_check` classified the original
+#      trigger (the run's pad-ring route attestation) as a SELF-DISABLING
+#      CONDITION, absence loud nowhere (T7/T3/T5 all None).
+#   d7 D7-GATE-PROBES-A-GHOST      REDDENED   (78.6s, after the two W2
+#      declarations step 37 gained in this change; ALREADY_RED before them)
+#   d8 D8-EMPTY-PROMISE            REDDENED   ( 3.4s)
+LEDGER_AS_MEASURED: Tuple[int, int, int] = (70, 8, 524)
 
 #: Every cell of the live 63x8 grid that is NOT ENFORCED, with the state its
 #: owning dimension module answers. The COMPANION to the count above, and the
