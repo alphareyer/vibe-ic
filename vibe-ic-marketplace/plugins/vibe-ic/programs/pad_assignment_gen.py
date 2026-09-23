@@ -170,6 +170,7 @@ import _l_doc_pad_placement as LDOC
 import _pad_ring as PR
 import _submission_template as ST
 import _tapeout_declaration as TD
+import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
 
 PROGRAM = "pad_assignment_gen"
 SCHEMA = "vibe-ic/pad_assignment/1"
@@ -277,6 +278,11 @@ def _write_report(project: Path, json_arg: Optional[str],
     if not dest.is_absolute():
         dest = (Path.cwd() / dest).resolve()
     dest.parent.mkdir(parents=True, exist_ok=True)
+    # R-0915-152 -- the document states WHO INVOKED this writer. This is the
+    # `--json` REPORT, which is the declared required_output the step's own gate
+    # also targets; the `--out` config this program writes is a design artefact
+    # `pad_ring_gen` consumes and is deliberately left unstamped.
+    _ga.stamp(report)
     atomic_write_json(dest, report)
 
 

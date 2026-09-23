@@ -79,6 +79,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
+import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
 
 #: The human-readable projections step 28 declares, exactly as the flow yaml
 #: spells them, paired with the regex that extracts the verdict each states.
@@ -260,6 +261,9 @@ def main(argv=None) -> int:
     rep = audit(args.project_dir.resolve())
     rc = rep.pop("rc")
     rep = {"program": "perc_signoff_check", "version": "1.0.0", **rep}
+    # R-0915-152 -- the document states WHO INVOKED this writer, beside the verdict it
+    # already composes. Unstated role == producer, so the run's own path is unchanged.
+    _ga.stamp(rep)
     out = json.dumps(rep, indent=2, ensure_ascii=False)
     if args.json:
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)

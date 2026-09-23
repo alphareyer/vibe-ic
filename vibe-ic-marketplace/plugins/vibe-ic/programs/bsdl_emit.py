@@ -78,6 +78,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
+import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
 
 try:
     import _path_layout as _pl  # type: ignore
@@ -791,6 +792,10 @@ def main(argv: Optional[list] = None) -> int:
     json_path = Path(args.json) if args.json else _plan_path(project)
     try:
         json_path.parent.mkdir(parents=True, exist_ok=True)
+        # R-0915-152 -- the document states WHO INVOKED this writer, beside the
+        # verdict it already composes. Unstated role == producer, so the run's
+        # own path is unchanged.
+        _ga.stamp(plan)
         atomic_write_text(json_path, json.dumps(plan, indent=2, ensure_ascii=False)
                              + "\n")
     except OSError as exc:  # pragma: no cover - IO edge
