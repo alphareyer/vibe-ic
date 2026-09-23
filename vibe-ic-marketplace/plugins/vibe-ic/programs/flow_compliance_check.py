@@ -19382,6 +19382,20 @@ _NO_RTL_UMBRELLA_SCOPES = ("stage3", "stage4", "stage_phase1", "stage_analog",
                            "stage_mixed_signal", "stage5_manufacturing")
 
 
+#: R-0915-158. Which `--phase` scope a stage belongs to. Derived from what the
+#: integer-id rule has always meant: `--phase 2` is steps 1-6, and those six are
+#: exactly the `stage1` steps, so stage1 is phase 2 and every later stage is
+#: phase 3. A stage absent from this map is not guessed at — the step is kept in
+#: BOTH scopes and disclosed, so a new stage cannot vanish from an audit.
+_STAGE_PHASE = {
+    "stage1": "2",
+    "stage2": "3",
+    "stage3": "3",
+    "stage4": "3",
+    "stage5_manufacturing": "3",
+}
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     # One invocation owns one denominator.  Orchestrators and tests call this
     # entry point repeatedly in-process, so retaining prior rows would publish
@@ -19838,22 +19852,46 @@ def main(argv: Optional[List[str]] = None) -> int:
         phase_range = (1, 6) if args.phase == "2" else (7, _max_id)
         kept = []
         _agnostic = []
+        _by_stage = []
         for s in steps:
             sid = s.get("id")
             if isinstance(sid, int):
                 if phase_range[0] <= sid <= phase_range[1]:
                     kept.append(s)
-            else:
-                # Non-integer id (A* / DT* / FS* / M* / P0) — phase-agnostic,
-                # kept in BOTH scopes. That is a deliberate choice and it means
-                # `--phase 2` and `--phase 3` are NOT a partition of the flow:
-                # these steps are counted once in each. Assigning each of them
-                # to a phase is a judgement about that step, made by whoever
-                # knows it; guessing them here would bury the ambiguity instead
-                # of showing it. So it is DISCLOSED rather than resolved, and a
-                # reader adding the two scopes together is told not to.
+            elif str(s.get("phase_scope") or "").strip().lower() == "agnostic":
+                # R-0915-158. The step DECLARES itself phase-agnostic, so it is
+                # judged in BOTH scopes. `--phase 2` and `--phase 3` are then
+                # not a partition: these are counted once in each, and a reader
+                # adding the two scopes together is told so below.
                 kept.append(s)
                 _agnostic.append(str(sid))
+            else:
+                # R-0915-158. A NON-INTEGER ID IS NOT A STATEMENT ABOUT PHASE.
+                #
+                # MEASURED, subservient x gf180mcuD as a DIE and spm x
+                # gf180mcuD (lanes icsub5 / icspm5, 2026-09-23): a `--phase 2`
+                # audit reported
+                #   ✗ [FAIL] Step 15.5ic: Pad Ring                 (stage3)
+                #   ✗ [FAIL] Step 26.5ic: Die Finishing            (stage3)
+                #   ✗ [FAIL] Step 37.3/37.4/37.5ic                 (stage4)
+                # as `missing_artefact`, on BOTH ICs — steps whose outputs
+                # cannot exist until phase 3 has run. They reached a phase-2
+                # scope for one reason only: their ids are not `int`, so they
+                # fell into the branch meant for A*/DT*/FS*/M*/P0.
+                #
+                # Their own `stage:` has said which phase they belong to all
+                # along. Read it. A step that is genuinely phase-agnostic now
+                # SAYS SO (`phase_scope: agnostic`) rather than being guessed
+                # at from the shape of its id, and a step that declares neither
+                # is still kept in both scopes and DISCLOSED, so an unlabelled
+                # future step is never silently dropped from an audit.
+                _ph = _STAGE_PHASE.get(str(s.get("stage") or "").strip())
+                if _ph is None:
+                    kept.append(s)
+                    _agnostic.append(str(sid))
+                elif str(_ph) == args.phase:
+                    kept.append(s)
+                    _by_stage.append(f"{sid}({s.get('stage')})")
         steps = kept
         if _agnostic:
             print(f"flow_compliance_check: NOTE — {len(_agnostic)} "
