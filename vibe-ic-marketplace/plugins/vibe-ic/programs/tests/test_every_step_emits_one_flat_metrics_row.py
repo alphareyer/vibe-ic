@@ -169,15 +169,53 @@ def test_only_scalars_cross(tmp_path):
 
 
 def test_both_branches_emit():
-    """Sequential and threaded. `_compliance_workers` picks from the MACHINE,
-    so a row emitted on only one branch is a row that appears or vanishes with
-    the host — the worst possible property for a run-to-run diff."""
-    src = _FCC.read_text()
-    seq = src.index("results.append(_r)")
-    par = src.index("for _step, _fut in zip(_eval_steps, _futs):")
-    assert seq and par
-    assert src.count("_emit_step_metrics(project,") >= 2, (
-        "only one branch emits; which branch runs is not the design's choice")
+    """Sequential and threaded. `_compliance_workers` picks from the MACHINE, so a row emitted on
+    only one branch is a row that appears or vanishes with the host — the worst possible property
+    for a run-to-run diff.
+
+    RE-PINNED TO THE PROPERTY, BY AST. R-0915-160/168's scheduling change (#2548, d592895b1) split
+    the parallel branch into waves, so `for _step, _fut in zip(_eval_steps, _futs)` became
+    `zip(_wave, _futs)` and this arm's `src.index` of that literal raised `ValueError: substring not
+    found` — red on main, for a spelling rather than for its subject. MEASURED before re-pinning:
+    the emit is still present on BOTH branches; nothing was lost.
+
+    So the property is read from the syntax tree instead of from two string literals: every loop in
+    `main` that collects a step result must call `_emit_step_metrics`. That cannot be broken by a
+    re-spelling, and it catches the real defect — a branch that collects results without emitting —
+    which the old `count(...) >= 2` could not (two emits on one branch would have satisfied it).
+    """
+    import ast
+
+    tree = ast.parse(_FCC.read_text())
+    main_fn = next(n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+    def calls(node) -> set:
+        out = set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call):
+                f = sub.func
+                out.add(getattr(f, "attr", getattr(f, "id", "")))
+        return out
+
+    #: A loop that COLLECTS a step's result — it appends to `results` or fills the by-id map the
+    #: parallel path rebuilds `results` from. Either way it is a place a row must be emitted.
+    collectors = []
+    for node in ast.walk(main_fn):
+        if not isinstance(node, (ast.For, ast.AsyncFor)):
+            continue
+        body_src = ast.unparse(ast.Module(body=node.body, type_ignores=[]))
+        if "check_step(" in body_src or "_fut.result()" in body_src:
+            collectors.append((node.lineno, body_src))
+
+    assert len(collectors) >= 2, (
+        f"expected a sequential and a threaded collector in `main`; found {len(collectors)} "
+        f"at lines {[ln for ln, _ in collectors]}")
+    for lineno, body_src in collectors:
+        assert "_emit_step_metrics" in body_src, (
+            f"the step collector at line {lineno} does not emit a metrics row; which branch runs "
+            f"is not the design's choice, so a row that appears on only one of them appears or "
+            f"vanishes with the host")
 
 
 def test_the_wrapper_computes_nothing_of_its_own():
