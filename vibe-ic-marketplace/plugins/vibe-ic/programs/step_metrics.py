@@ -436,7 +436,12 @@ def reconcile(name: str, metric: Optional[Any], prose: Optional[Any], *,
 # '37.4' is the single member gained and no existing id changed spelling, so no
 # step left this census to make room for it.
 # Re-derived, not typed: `coverage()` counts 68 against the shipped flow.
-GATE_CARRYING_STEPS: int = 68
+# 68 -> 69 (#2514): canonical step 37.3, GDS stream-out / finishing fidelity.
+# It carries a `gate:` key (gds_xor_check --check), so this census moves by
+# exactly one; the flow's id set went 69 -> 70 with '37.3' the single member
+# gained, and EMITTING/CONSUMING are unchanged (re-measured equal).
+# Re-derived, not typed: `coverage()` counts 69 against the shipped flow.
+GATE_CARRYING_STEPS: int = 69
 
 #: EMITTING — gate-carrying steps whose gate runs a program that calls `emit`.
 #: Supply side only: emitting a number changes no verdict.
