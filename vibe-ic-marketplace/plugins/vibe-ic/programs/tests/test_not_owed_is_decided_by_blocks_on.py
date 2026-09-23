@@ -247,6 +247,12 @@ def _drive_main(tmp_path, monkeypatch, verdicts, extra=()):
                                        else [f"stub {status} {rc}"]))
 
     def _umbrella(_project, **kw):
+        # Two recorded PASSes, so P0 is a real PASS and not NOT_MEASURED
+        # (no_population) -- which would otherwise decide every lenient run.
+        out = kw.get("records_out")
+        if out is not None:
+            out.extend(FCC._p0_gate_record(g, "PASS", "", {})
+                       for g in list(FCC._STRUCTURAL_RTL_GATES)[:2])
         return (True, [], [], [])
 
     monkeypatch.setattr(FCC, "check_step", _check)
@@ -336,8 +342,12 @@ def test_the_real_coverage_gate_counts_demoted_rows_as_not_run(
             verdicts[sid] = (_FAIL, _MISSING)
     _rc, report, _audit = _drive_main(tmp_path, monkeypatch, verdicts)
     capsys.readouterr()
+    # the NOT-OWED rows (a voided pass -- P0 here, behind D1 -- carries no
+    # blocked-by-upstream note and is deliberately not counted as not-run)
     demoted = [s for s in report["steps"]
-               if (s["status"], s.get("reason_class")) == (_NM, _UPSTREAM)]
+               if (s["status"], s.get("reason_class")) == (_NM, _UPSTREAM)
+               and str(s.get("cascade_note") or "").startswith(
+                   "blocked-by-upstream(")]
     assert len(demoted) > 20, len(demoted)   # the premise: rows were demoted
     rep_path = tmp_path / "report.json"
     out_json = tmp_path / "coverage.json"
@@ -396,3 +406,33 @@ def test_the_real_coverage_gate_does_not_count_voided_passes_as_not_run(
     not_run = {str(s.get("id")) for s in cov["applicable_missing"]}
     assert not ({str(s["id"]) for s in voided} & not_run), sorted(not_run)
     assert (cov["verdict"], r.returncode) == ("PASS", 0), r.stdout[-1500:]
+
+
+# ── review wttwkqmyu (MEDIUM): lenient treats a not-owed row as its root ────
+
+def test_lenient_tolerates_not_owed_rows_exactly_as_it_tolerates_their_root(
+        tmp_path, monkeypatch, capsys):
+    """37.4 (blocks_on [37], 37 PASS) wrote nothing: an OWED missing root,
+    which lenient mode tolerates. 37.5ic waits on it and is not owed. Lenient
+    used to push Overall to NOT_MEASURED rc 1 on the dependent while the root
+    that caused it was tolerated -- the consequence stricter than its cause."""
+    verdicts = {"37.4": (_FAIL, _MISSING), "37.5ic": (_FAIL, _MISSING)}
+    rc, report, _a = _drive_main(tmp_path / "lenient", monkeypatch, verdicts,
+                                 extra=("--lenient",))
+    capsys.readouterr()
+    rows = {str(s["id"]): s for s in report["steps"]}
+    assert (rows["37.5ic"]["status"], rows["37.5ic"]["reason_class"]) == (
+        _NM, _UPSTREAM)
+    assert (report["overall"], rc) == (_PASS, 0), report["overall"]
+    # strict mode never goes quiet
+    rc, report, _a = _drive_main(tmp_path / "strict", monkeypatch, verdicts)
+    capsys.readouterr()
+    assert (report["overall"], rc) == (_FAIL, 1), report["overall"]
+
+
+def test_lenient_still_refuses_when_the_root_is_a_real_gate_fail(
+        tmp_path, monkeypatch, capsys):
+    rc, report, _a = _drive_main(tmp_path, monkeypatch, {
+        "37.4": (_FAIL, ""), "37.5ic": (_FAIL, _MISSING)}, extra=("--lenient",))
+    capsys.readouterr()
+    assert (report["overall"], rc) == (_FAIL, 1), report["overall"]

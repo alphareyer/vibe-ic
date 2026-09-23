@@ -20020,7 +20020,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     # does not have to be either.
     if not ok or forced_fail:
         overall = _T.Verdict.FAIL.value
-    elif any(r.status == _T.Verdict.NOT_MEASURED.value for r in scoped):
+    elif any(r.status == _T.Verdict.NOT_MEASURED.value
+             # R-0915-140 (review wttwkqmyu) — LENIENT TREATS A NOT-OWED ROW
+             # EXACTLY AS IT TREATS ITS ROOT. The root is always a FAIL: a gate
+             # defect is in `failing` and has already made `ok` false above; a
+             # missing output (or an informational-only FAIL) is what lenient
+             # tolerates. A dependent may not be stricter than its cause, and
+             # at base these rows sat in `missing`, which lenient tolerates.
+             and not (args.lenient and not_owed_root(r) is not None)
+             for r in scoped):
         # OVER `scoped`, NOT over `counts`. `counts` is the census of EVERY
         # row; `scoped` is what this invocation's verdict is ABOUT, and under
         # `--phase 2 --strict-structural` that is the P0 umbrella plus the
