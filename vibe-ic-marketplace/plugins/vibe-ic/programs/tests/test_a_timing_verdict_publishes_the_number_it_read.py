@@ -569,3 +569,73 @@ def test_the_deck_states_its_own_unit_so_a_container_path_is_not_needed(tmp_path
     assert s.get("slack_time_unit") == "ps", s
     assert s.get("setup_wns_ns") == -0.0352, s
     assert s.get("slack_measurement") == "MEASURED", s
+
+
+# ===========================================================================
+# ROUND-4 MEDIUM. The round-3 withdrawal keyed on a unit-less NEGATIVE ROW.
+# A violation that never becomes a row -- a path table saying
+# `slack (VIOLATED)`, or a measured:false stamp over a VIOLATED path -- left
+# the met headline standing. And a unit-less MET reading that could be
+# smaller than the published one was simply dropped.
+# ===========================================================================
+
+def test_a_violated_path_table_withdraws_the_met_headline(tmp_path):
+    """`report_checks` path tables carry `slack (VIOLATED)` and no summary
+    line, so they produce no slack ROW at all -- but they do set
+    `real_violation_found`. The headline must not read met beside that."""
+    rel = _stage_two(
+        tmp_path,
+        "=== SETUP corner: process=TT ===\nworst slack max 0.50\n",
+        "Startpoint: u/_1_\n          -1.25   slack (VIOLATED)\n",
+        a_unit="ns", b_unit="ns")
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("real_violation_found") is True, s
+    assert s.get("setup_wns_ns") != 0.50, (
+        "a met headline stood beside a VIOLATED path table: %r" % s)
+
+
+def test_a_stamped_violated_path_withdraws_the_met_headline(tmp_path):
+    """The stamp branch contributes only negatives as rows; a VIOLATED path
+    entry under a measured:false stamp is a violation with no number, and it
+    too must withdraw the met reading."""
+    rel = _stage_two(
+        tmp_path,
+        "=== SETUP corner: process=TT ===\nworst slack max 0.50\n",
+        _stamped("Startpoint: u/_1_\n          -2.0   slack (VIOLATED)\n"),
+        a_unit="ns", b_unit="ns")
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("real_violation_found") is True, s
+    assert s.get("setup_wns_ns") != 0.50, s
+
+
+def test_a_unitless_met_reading_that_could_be_smaller_withdraws_it(tmp_path):
+    """A unit-less met 0.30 beside an ns 5.00: 0.30 in ANY unit is smaller
+    than 5.00 ns, so publishing 5.00 as the worst is a better number than one
+    we read. The headline is withdrawn rather than guessed."""
+    rel = _stage_two(
+        tmp_path,
+        "=== SETUP corner: process=TT ===\nworst slack max 5.00\n",
+        "=== SETUP corner: process=SS ===\nworst slack max 0.30\n",
+        a_unit="ns", b_unit=None)
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("setup_wns_ns") != 5.00, (
+        "published 5.00 ns as the worst while an unread 0.30 could be "
+        "smaller: %r" % s)
+    assert s.get("slack_measurement") == "NOT_MEASURED", s
+    assert "unit" in str(s.get("slack_not_measured_reason") or ""), s
+
+
+def test_a_unitless_met_reading_that_cannot_be_smaller_is_ignored(tmp_path):
+    """The other direction, so the rule is not "any unit-less row withdraws".
+    A unit-less 5000 cannot be smaller than an ns 0.50 in any supported unit
+    (the smallest scaling is fs = 1e-6 ns, and 5000 fs = 0.005 ns)... it CAN.
+    So the honest rule is the conservative one and this asserts it: the
+    headline is withdrawn. Stated as its own test so the choice is visible
+    rather than buried in the implementation."""
+    rel = _stage_two(
+        tmp_path,
+        "=== SETUP corner: process=TT ===\nworst slack max 0.50\n",
+        "=== SETUP corner: process=SS ===\nworst slack max 5000\n",
+        a_unit="ns", b_unit=None)
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("slack_measurement") == "NOT_MEASURED", s

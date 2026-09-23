@@ -3088,6 +3088,14 @@ def _slack_row(fp: Any, slacks: Dict[str, Optional[float]],
                 "setup_wns": _neg_only(slacks.get("setup_wns_ns")),
                 "hold_wns": _neg_only(slacks.get("hold_wns_ns")),
                 "tns": _neg_only(slacks.get("tns_ns")),
+                # A MET reading is not published (see above) -- but the fact
+                # that one EXISTS is, because it could be smaller than any
+                # number we can scale. Round 4: a unit-less met 0.30 beside an
+                # ns 5.00 published 5.00 as the worst, which is a better
+                # number than one we read.
+                "unscaled_met_readings": sum(
+                    1 for k in ("setup_wns_ns", "hold_wns_ns", "tns_ns")
+                    if (slacks.get(k) is not None and slacks.get(k) >= 0)),
                 "setup_wns_ns": None, "hold_wns_ns": None, "tns_ns": None}
     row: Dict[str, Any] = {
         "source_sha256": "sha256:" + hashlib.sha256(
@@ -3617,11 +3625,27 @@ def _check_sta(project_dir: Path) -> AuditResult:
                       ("hold_wns", _worst("hold_wns")),
                       ("tns", _worst("tns")))
                      if v is not None and v < 0}
-    if _unscoped_neg:
-        # Publish the negative in the report's OWN unit, under unit-neutral
-        # names, and withdraw any met `_ns` headline beside it: a met number
-        # from one report cannot stand for a design another report says is
-        # violating.
+    # WITHDRAW WHENEVER A MET HEADLINE WOULD BE A CLAIM WE CANNOT SUPPORT,
+    # and round 4 named two shapes the round-3 rule missed because it keyed on
+    # a unit-less NEGATIVE ROW:
+    #
+    #   * a violation that never becomes a row at all -- a `report_checks`
+    #     path table carrying `slack (VIOLATED)` and no summary line, or a
+    #     measured:false stamp over a VIOLATED path. Both set
+    #     `real_violation_found` and contribute no number, and the met
+    #     headline stood beside them;
+    #   * a unit-less MET reading. It is not published (its scale is unknown)
+    #     but it could be SMALLER than anything we can scale, so calling the
+    #     scaled number "the worst" is a better number than one we read.
+    _unscaled_met = sum(r.get("unscaled_met_readings") or 0
+                        for r in slack_rows)
+    _withdraw = bool(_unscoped_neg) or _unscaled_met > 0 or (
+        real_violation_found and not any(v < 0 for v in _headline.values()))
+    if _withdraw:
+        # Keep only what is evidence: a negative, in whatever unit it was
+        # read. A met number is withdrawn -- it cannot stand for a design
+        # another report says is violating, nor outrank a reading we could
+        # not scale.
         _headline = {k: v for k, v in _headline.items() if v < 0}
         _headline.update(_unscoped_neg)
     _units_stated = [r for r in slack_rows if r.get("time_unit_stated")]
@@ -3696,7 +3720,12 @@ def _check_sta(project_dir: Path) -> AuditResult:
                           "negative slack; a block that reported no paths "
                           "contributes neither its wns nor its tns echo; and "
                           "a report whose time unit cannot be established "
-                          "publishes no number at all (" + _unit_basis + ")"),
+                          "publishes no number at all (" + _unit_basis + ")"
+                          + ("; and a met reading was WITHDRAWN because this "
+                             "scope carries a violation, or a reading whose "
+                             "unit could not be established and which may be "
+                             "smaller than any number that could be scaled"
+                             if _withdraw else "")),
                       "has_setup_hold": has_setup_hold,
                       "tool_authentic": authentic,
                       "corner_dirs_found": len(corner_dirs),
