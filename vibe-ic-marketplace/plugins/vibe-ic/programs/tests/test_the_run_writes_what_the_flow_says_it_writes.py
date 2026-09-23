@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import sys
+import ast
 from pathlib import Path
 
 PROGRAMS = Path(__file__).resolve().parents[1]
@@ -220,13 +221,97 @@ def test_a_document_only_the_AUDITOR_has_written_is_reclaimed(tmp_path,
 
 # ── the role boundary ─────────────────────────────────────────────────────
 
+def _imported_module_names(src: str) -> set:
+    """Every module name this source IMPORTS, by AST — not by substring.
+
+    `import x`, `import x as y`, `from x import ...`, `from .x import ...`, plus
+    the dynamic doors: `importlib.import_module("x")` and `__import__("x")`. A
+    dotted name contributes its full spelling and its root, so `a.b` is caught by
+    a check for either.
+    """
+    names: set = set()
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                names.add(a.name)
+                names.add(a.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                names.add(node.module)
+                names.add(node.module.split(".")[0])
+            for a in node.names:
+                names.add(a.name)
+        elif isinstance(node, ast.Call):
+            f = node.func
+            dynamic = (
+                (isinstance(f, ast.Name) and f.id == "__import__")
+                or (isinstance(f, ast.Attribute) and f.attr == "import_module"))
+            if dynamic:
+                for arg in node.args:
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        names.add(arg.value)
+                        names.add(arg.value.split(".")[0])
+    return names
+
+
 def test_the_auditor_does_not_import_this():
     """A run executing its own declared producers is what a flow does; an
     AUDITOR executing them and then grading its own output is exactly the
     self-certification the refused tier names. The boundary is asserted, not
-    assumed."""
+    assumed.
+
+    THE CLAIM IS ABOUT IMPORTS, AND THE INSTRUMENT NOW MEASURES IMPORTS. It used
+    to be `"flow_declared_producer_run" not in src`, a substring over the whole
+    file -- which a COMMENT could break without the boundary moving an inch. That
+    is what happened: R-0915-138 (#2518) added a comment to
+    `flow_compliance_check.py` citing the artefact path
+    `reports/audit/flow_declared_producer_run.json` as measured evidence, and this
+    test went red on main while the auditor imported nothing. A gate that cannot
+    tell an import from a sentence about one is not measuring its own claim, and
+    the remedy is the instrument, never the sentence: the prose is true and
+    load-bearing evidence, and deleting it to green a substring check would be
+    removing the measurement to protect the measurer.
+    """
     src = (PROGRAMS / "flow_compliance_check.py").read_text(errors="replace")
-    assert "flow_declared_producer_run" not in src
+    assert "flow_declared_producer_run" not in _imported_module_names(src), (
+        "flow_compliance_check IMPORTS the declared-producer runner; an auditor "
+        "that can execute a step's producers and then grade their output is the "
+        "self-certification the refused tier exists to name")
+
+
+def test_the_import_check_reddens_when_an_import_is_added():
+    """MUTATION, both directions, on the INSTRUMENT itself — the half whose
+    absence let a substring stand in for a claim for this long."""
+    for snippet in (
+            "import flow_declared_producer_run\n",
+            "import flow_declared_producer_run as P\n",
+            "from flow_declared_producer_run import owed\n",
+            "import importlib\n"
+            "m = importlib.import_module('flow_declared_producer_run')\n",
+            "m = __import__('flow_declared_producer_run')\n"):
+        assert "flow_declared_producer_run" in _imported_module_names(snippet), (
+            f"an import the auditor could really write is not detected:\n{snippet}")
+
+
+def test_the_import_check_ignores_prose_and_paths():
+    """And it stays green on the things that are NOT imports: a comment, a
+    docstring, a string literal naming the artefact, and an attribute access on
+    something else entirely. Each of these reddened the old substring check."""
+    for snippet in (
+            "# reports/audit/flow_declared_producer_run.json  step 31\n",
+            '"""the note flow_declared_producer_run writes."""\n',
+            'REL = "reports/audit/flow_declared_producer_run.json"\n',
+            'other.flow_declared_producer_run_note = 1\n'):
+        assert "flow_declared_producer_run" not in _imported_module_names(snippet), (
+            f"prose or a path is being read as an import:\n{snippet}")
+    # and the real file, whose comment is exactly the citation that broke it
+    src = (PROGRAMS / "flow_compliance_check.py").read_text(errors="replace")
+    assert "flow_declared_producer_run" in src, (
+        "the R-0915-138 citation is gone from the auditor's source; this arm "
+        "exists to prove the instrument tolerates it, so removing the prose "
+        "instead of fixing the instrument is the outcome it refuses")
+    assert "flow_declared_producer_run" not in _imported_module_names(src)
 
 
 def test_the_runner_invokes_it_before_the_completion_audit_refresh():
