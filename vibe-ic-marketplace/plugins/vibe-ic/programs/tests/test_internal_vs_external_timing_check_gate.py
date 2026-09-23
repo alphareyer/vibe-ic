@@ -38,4 +38,13 @@ def test_with_waveform(tmp_path):
     assert "NOT_APPLICABLE_BY_STRUCTURE" in r.stdout
     # AND THE EVIDENCE, not merely the token: a class with nothing behind it is
     # the thing that guard refuses, so assert the enumeration the line carries.
-    assert "enumerated 3" in r.stdout and "found 0" in r.stdout, r.stdout
+    #
+    # AMENDED, NOT WEAKENED (icspm5-s2 pre-landing review, 2026-09-23). This
+    # asserted "enumerated 3" over a fixture that stages exactly ONE canonical
+    # container (`waveforms`). The count came from `len(_CANONICAL)` -- the
+    # NAMES of three containers, two of which are not in the document -- and a
+    # container that is absent was never examined. The review named that as the
+    # reason a bad enumeration could be laundered into a decided state, so the
+    # scan now counts what it walked. The assertion is STRONGER here, not
+    # weaker: it pins the count to the fixture's own content.
+    assert "enumerated 1" in r.stdout and "found 0" in r.stdout, r.stdout

@@ -3256,13 +3256,21 @@ _GATE_LEDGER: List[Dict[str, Any]] = []
 
 
 def _record_gate_execution(cmd: str, rc: Optional[int], verdict: str,
-                           reason_class: Optional[str] = None) -> Dict[str, Any]:
+                           reason_class: Optional[str] = None,
+                           evidence: Optional[Mapping[str, Any]] = None
+                           ) -> Dict[str, Any]:
     """One row per gate INVOCATION. `rc=None` means the program could not be
-    launched at all — itself a distinct fact from any exit code."""
+    launched at all — itself a distinct fact from any exit code.
+
+    `evidence` is the gate's own report, passed by the caller that already
+    holds it. THE ROW IS ONE DECISION: this function re-runs the taxonomy, so
+    without the evidence `_guard_structural` fail-closes here exactly as it did
+    at the caller, and the row published EXECUTION_ERROR beside a verdict of
+    NOT_APPLICABLE — one gate, two answers, in the same record."""
     if verdict not in ("PASS", "FAIL", "PASS_WITH_WAIVERS",
                        _SUPERSEDED_VERDICT):
         reason_class = _reason_taxonomy.infer_nonverdict_reason(
-            verdict=verdict, explicit=reason_class)
+            verdict=verdict, explicit=reason_class, evidence=evidence)
     else:
         reason_class = _reason_taxonomy.normalise(reason_class)
     row = {"gate": _gate_name(cmd), "cmd": cmd,
@@ -3848,7 +3856,9 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
                              "classified reason")
                 out = (f"INCOMPLETE: {cmd_str} — reason_class={reason_class}; "
                        f"{detail}")
-    _ledger_row = _record_gate_execution(cmd_str, rc, verdict, reason_class)
+    _ledger_row = _record_gate_execution(
+        cmd_str, rc, verdict, reason_class,
+        evidence={_sa.EVIDENCE_KEY: _sa.evidence_of(report)})
     # Keep the legacy ``rc`` and ``verdict`` fields stable for existing ledger
     # consumers, and add the lossless #1980 facts without flattening #1978's
     # non-verdict classification into a generic skip.

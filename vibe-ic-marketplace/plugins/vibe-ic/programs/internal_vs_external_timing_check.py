@@ -547,12 +547,32 @@ def main() -> int:
     _PROTO_GROUP_TOKENS = ("rx_", "tx_", "host_", "dut_", "external_",
                            "internal_", "_counters", "_cycles", "symbol",
                            "_low", "_high", "break", "ibt")
+    # THE SCAN MUST READ WHAT `check()` READS. `check()` prefers the canonical
+    # `timing_groups` mapping and only falls back to top-level key names; this
+    # escape looked at top-level names ONLY, so a document that carries its RX
+    # and TX groups nested under `timing_groups` -- the shape `check()` calls
+    # "the new canonical L8 shape" -- was enumerated as if those groups were not
+    # there. A real RX/TX split could then be certified as an absence.
+    _group_items = list(waveform.items())
+    _tg = waveform.get("timing_groups")
+    if isinstance(_tg, dict):
+        _group_items += [(f"timing_groups.{k}", v) for k, v in _tg.items()]
     _has_proto_group = any(
         bool(v) and any(tok in str(k).lower() for tok in _PROTO_GROUP_TOKENS)
-        for k, v in waveform.items()
+        for k, v in _group_items
     )
     _CANONICAL = ("timing_windows", "timing_constants", "waveforms")
-    if (not _has_proto_group) and all(_empty(k) for k in _CANONICAL):
+    # AND THE ESCAPE MAY NOT OVERRIDE A DECLARATION. Its own comment says it
+    # "fires when L2 says NOTHING and the gate ENUMERATES the L8 document
+    # instead" -- but the condition never read L2 at all, so a design that
+    # DECLARES `protocol_overview.half_duplex=true` and whose L8 happens to have
+    # emitted its canonical containers empty reached this branch and was
+    # published as a structural absence. A declared half-duplex protocol has two
+    # sides by declaration; if its L8 carries no timing, that is a missing
+    # document, which `check()` already answers with missing_rx_group /
+    # missing_tx_group. Inference never outranks the design's own word.
+    if (half_duplex_l2 is not True
+            and (not _has_proto_group) and all(_empty(k) for k in _CANONICAL)):
         # THIS ESCAPE INFERS THE ABSENCE; IT IS NOT A DESIGN DECLARATION, and the
         # two were being reported with one word. The sibling escape above fires
         # when L2 EXPLICITLY declares `protocol_overview.half_duplex=false` --
@@ -570,8 +590,16 @@ def main() -> int:
         # whose own justification comment cites an L2 declaration this branch
         # never reads. The design genuinely is not a protocol IC and has no RX/TX
         # timing to split, so the ANSWER was right and only the word was wrong.
-        _scanned_names = list(_CANONICAL) + sorted(
-            str(k) for k in waveform.keys() if str(k) not in _CANONICAL)
+        # SCANNED COUNTS WHAT WAS WALKED, NOT WHAT COULD HAVE EXISTED. The
+        # previous list named all three canonical containers whether or not the
+        # document had them, so a document with none of them still published
+        # "scanned 3" -- an enumeration of NAMES, which is exactly the claim
+        # `_structural_absence` exists to refuse. A container that is absent was
+        # not examined; only a container that is PRESENT (and then found empty
+        # of protocol content) is evidence of an absence.
+        _scanned_names = sorted(
+            {str(k) for k in _CANONICAL if k in waveform}
+            | {str(k) for k, _v in _group_items if str(k) not in _CANONICAL})
         _absence = _sa.absence(
             population=("L8_TIMING_WAVEFORM container(s) and group key(s) that "
                         "could carry half-duplex protocol symbol timing"),
