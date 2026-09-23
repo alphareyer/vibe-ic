@@ -12034,6 +12034,74 @@ def _nested_audit_awaiting_rows(report: Any) -> List[Dict[str, Any]]:
     return awaiting
 
 
+#: The exit code of a nested audit that concluded NOT_MEASURED (it shares 1 with
+#: FAIL, by design: "THE EXIT CODE IS THE RUN WORD").
+_NESTED_AUDIT_NOT_MEASURED_EXIT = 1
+
+
+# R-0915-169 r2 — THE ROWS ARE READ ONLY OFF A RECEIPT THIS CLAUSE'S OWN PROCESS
+# WROTE. Review w85w0fp2p, verified on the first cut (e8d5cafc9): step 2's `--json`
+# target is ALSO a required_output the run's producer writes, so the clause is
+# redirected to a scratch copy SEEDED from the producer's document. A nested audit
+# killed from outside (rc -9/-15, no traceback) writes nothing, the scratch digest
+# equals the seed, `_written_receipts` drops the redirect, and
+# `_command_json_report` falls back to the PRODUCER's document -- which on run2 is
+# exactly the awaiting-only shape. The first cut then read a killed audit as
+# awaiting_agent_pass; the base read EXECUTION_ERROR. An earlier pass's document at
+# the canonical path is the same hazard, and `_stamp_publication` rewrites that one
+# with a `published_by` stamp even when the gate wrote nothing, so a changed mtime
+# or digest alone proves nothing either.
+#
+# So the rows are believed only when ALL of these are facts:
+#   * the clause exited with the nested audit's NOT_MEASURED code;
+#   * the document names THIS invocation (`invocation`, inherited by every clause
+#     this audit spawns) and was written in the AUDIT role (`invoked_as`) -- a
+#     producer's copy and an earlier pass's document both fail here;
+#   * it was written DURING THIS CALL: this call's redirect survived
+#     `_written_receipts` (its scratch changed), or, with no redirect, the
+#     canonical document's content other than the `published_by` stamp changed.
+# Anything else -> the rows are not read and the base behaviour stands.
+def _nested_receipt_content(path: Path) -> Optional[str]:
+    """The digest of a JSON document without its `published_by` stamp."""
+    doc = _json_report_at(path)
+    if doc is None:
+        return None
+    doc = {k: v for k, v in doc.items() if k != "published_by"}
+    return hashlib.sha256(
+        json.dumps(doc, sort_keys=True).encode()).hexdigest()
+
+
+def _nested_receipt_snapshot(project: Path, cmd: str) -> Dict[str, Any]:
+    """What this clause's receipt path holds BEFORE the nested audit runs."""
+    m = re.search(r"--json[= ]+(\S+)", cmd or "")
+    if not m:
+        return {}
+    p = Path(m.group(1).strip("'\""))
+    if not p.is_absolute():
+        p = project / p
+    key = _resolved_key(p)
+    return {"path": p, "key": key, "redirect": _RECEIPT_REDIRECTS.get(key),
+            "content": _nested_receipt_content(p)}
+
+
+def _nested_receipt_is_this_calls(before: Dict[str, Any], report: Any,
+                                  exit_code: Optional[int]) -> bool:
+    """Was `report` written by the nested audit this clause just ran?"""
+    if exit_code != _NESTED_AUDIT_NOT_MEASURED_EXIT:
+        return False
+    if not before or not isinstance(report, dict):
+        return False
+    if report.get("invocation") != _invocation_id():
+        return False
+    if _ga.role_of(report) != _ga.ROLE_AUDIT:
+        return False
+    after = _RECEIPT_REDIRECTS.get(before["key"])
+    if after is not None and after is not before["redirect"]:
+        return True
+    now = _nested_receipt_content(before["path"])
+    return now is not None and now != before["content"]
+
+
 def _nested_audit_awaiting_note(report: Dict[str, Any],
                                 rows: List[Dict[str, Any]]) -> str:
     """Which nested step(s) wait, and which gate(s) emitted the hand-off — the
@@ -12077,7 +12145,8 @@ def _clause_enforcement_label(rec: Dict[str, Any]) -> str:
 def _advisory_execution_record(cmd: str, ledger_start: int,
                                ok: bool, out: str,
                                project: Path,
-                               execution: Any = None) -> Dict[str, Any]:
+                               execution: Any = None,
+                               nested_awaiting: bool = False) -> Dict[str, Any]:
     """Build one lossless record for the advisory invocation just completed."""
     row: Dict[str, Any] = {}
     if len(_GATE_LEDGER) > ledger_start:
@@ -12127,8 +12196,9 @@ def _advisory_execution_record(cmd: str, ledger_start: int,
     # R-0915-169 — a nested audit that is only waiting keeps no class here: the
     # prose inference below has no recogniser for it and fail-closes to
     # EXECUTION_ERROR. NOT-MEASURED still lands on DISCLOSED_INCOMPLETE below.
-    _awaiting_only = (reason_class is None
-                      and bool(_nested_audit_awaiting_rows(report)))
+    # Decided by the caller, which alone saw the receipt before the audit ran
+    # (`_nested_receipt_is_this_calls`).
+    _awaiting_only = reason_class is None and nested_awaiting
     if (reason_class is None and not _awaiting_only
             and (norm in _ADVISORY_SKIP_VERDICTS
                  or norm in _ADVISORY_INCOMPLETE_VERDICTS
@@ -12635,10 +12705,20 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
                 return True, reasons
         cmd = _maybe_forward_skip_analog(project, cmd, skip_analog)
         _ledger_start = len(_GATE_LEDGER)
+        # R-0915-169 — see `_nested_receipt_is_this_calls`.
+        _receipt_before = _nested_receipt_snapshot(project, cmd)
         _execution = _check_program_exit_zero(project, cmd)
         ok, out = _execution
+        _nested = _command_json_report(project, cmd)
+        _awaiting = (
+            _nested_audit_awaiting_rows(_nested)
+            if _nested_receipt_is_this_calls(
+                _receipt_before, _nested,
+                getattr(_execution, "exit_code", None))
+            else [])
         record = _advisory_execution_record(
-            cmd, _ledger_start, ok, out, project, _execution)
+            cmd, _ledger_start, ok, out, project, _execution,
+            nested_awaiting=bool(_awaiting))
         reasons.append(f"{_RAN_HINT_PREFIX}{cmd}")
         reasons.append(
             f"{_ADVISORY_RECORD_HINT_PREFIX}"
@@ -12698,10 +12778,7 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
                 reasons.append(f"{_VACUOUS_HINT_PREFIX}{cmd}")
         elif enforcement == "DISCLOSED_INCOMPLETE":
             # R-0915-169 — see `_nested_audit_awaiting_rows`.
-            _nested = _command_json_report(project, cmd)
-            _awaiting = (_nested_audit_awaiting_rows(_nested)
-                         if record.get("reason_class") is None else [])
-            if _awaiting:
+            if _awaiting and record.get("reason_class") is None:
                 _note = _nested_audit_awaiting_note(_nested, _awaiting)
                 reasons.append(f"{_INCOMPLETE_HINT_PREFIX}{cmd} "
                                f"[verdict={record['verdict']}; {_note}]")
