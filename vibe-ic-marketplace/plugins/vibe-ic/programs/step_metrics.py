@@ -82,6 +82,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -277,6 +278,11 @@ def step_for_invocation(program: str, argv: List[str],
     except (OSError, ValueError) as exc:
         return None, f"cannot read {flow.name}: {exc}"
     want = _opt_value(list(argv), _OUTPUT_OPTS)
+    if want and Path(want).is_absolute() and argv and not str(argv[0]).startswith("-"):
+        try:
+            want = str(Path(want).resolve().relative_to(Path(argv[0]).resolve()))
+        except (ValueError, OSError):
+            pass
     hits = set()
     for step in doc.get("steps") or []:
         for clause in _gate_strings(step.get("gate")):
@@ -301,26 +307,85 @@ def _metric_name(key: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_") or "value"
 
 
+#: THE STEP A GATE PROGRAM WAS RUN FOR, stated by its CALLER (M2). A program
+#: cannot know which step invoked it, and inferring it from argv failed on every
+#: real call shape: the phase-3 runner passes an ABSOLUTE `--json`, and
+#: flow_compliance_check redirects `--json` to `/tmp/gate_receipt_*` when the
+#: target already exists -- so steps 23 and 25 never matched and 10/21/37
+#: matched only on a project's first run. Every legitimate caller KNOWS the
+#: step (the audit is judging it; the runner resolves it once from the
+#: canonical clause, `step_for_invocation`), so it says so here. An
+#: out-of-flow hand run carries no step and therefore never writes a
+#: project's metrics.
+GATE_STEP_ENV = "VIBEIC_GATE_STEP"
+#: The audit invocation that ran the gate, shared with flow_compliance_check
+#: and release_docs_check; stamped on every gate row so a row an earlier run
+#: wrote is recognisable as stale.
+INVOCATION_ENV = "VIBEIC_FCC_INVOCATION"
+
+
+def gate_env(step_id: str) -> Dict[str, str]:
+    """What a CALLER adds to a gate subprocess's environment to attribute it."""
+    return {GATE_STEP_ENV: str(step_id)} if step_id else {}
+
+
+def _step_runs_program(step_id: str, program: str,
+                       flow_yaml: Optional[Path] = None) -> bool:
+    """Does `step_id`'s own gate run `program`? An inherited step id reaching a
+    grandchild (e.g. step 37.5ic's `tapeout_precheck` spawning
+    `drc_report_check`) is not an attribution, and is refused."""
+    import shlex                                          # noqa: PLC0415
+    try:
+        import yaml                                       # noqa: PLC0415
+    except ImportError:
+        return False
+    flow = flow_yaml or (Path(__file__).resolve().parent.parent / "flow"
+                         / "phase1_phase2_phase3.yaml")
+    try:
+        doc = yaml.safe_load(flow.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return False
+    for step in doc.get("steps") or []:
+        if str(step.get("id")) != str(step_id):
+            continue
+        for clause in _gate_strings(step.get("gate")):
+            try:
+                tokens = shlex.split(clause)
+            except ValueError:
+                continue
+            if tokens and Path(tokens[0]).stem == program:
+                return True
+    return False
+
+
 def emit_gate_outcome(program: str, argv: List[str], rc: int, *,
                       report: Optional[str] = None,
-                      flow_yaml: Optional[Path] = None) -> Optional[Path]:
-    """Emit what a gate just decided, under the step whose clause ran it.
+                      flow_yaml: Optional[Path] = None,
+                      env: Optional[Dict[str, str]] = None) -> Optional[Path]:
+    """Emit what a gate just decided, under the step its CALLER named.
 
     The numbers are the gate's OWN: its exit code and the scalar facts of the
     verdict document it just wrote (`passed`, `verdict`, every numeric
-    `summary` field, finding counts per severity). Nothing is re-derived. When
-    the step cannot be attributed, or no verdict document exists, what CAN be
-    said is still said (the rc), and a missing step is reported on stderr --
-    never a silent skip (see `emit_best_effort`).
+    `summary` field, finding counts per severity) -- nothing re-derived. Every
+    row carries `invocation` (the audit run that asked) and `program`, so a row
+    that was NOT refreshed by this run is recognisable beside a fresh
+    `__flow__invocation`.
+
+    SILENT when there is nothing to attribute to: no `VIBEIC_GATE_STEP` (a hand
+    run), or a step whose own gate does not run this program (an inherited id).
+    Silence is correct there -- nothing was asked of this program on a step's
+    behalf -- and it keeps the gate's own stderr tail (which evidence readers
+    quote) unchanged. A write that WAS owed and failed still says so, through
+    `emit_best_effort`.
     """
-    step, why = step_for_invocation(program, argv, flow_yaml)
-    if step is None:
-        print(f"[step_metrics] NOT EMITTED ({program}): {why}",
-              file=sys.stderr)
+    e = os.environ if env is None else env
+    step = (e.get(GATE_STEP_ENV) or "").strip()
+    if not step or not _step_runs_program(step, program, flow_yaml):
         return None
     head = argv[0] if argv and not str(argv[0]).startswith("-") else "."
     project = Path(head)
-    metrics: Dict[str, Any] = {"rc": int(rc)}
+    metrics: Dict[str, Any] = {"rc": int(rc), "program": program,
+                               "invocation": (e.get(INVOCATION_ENV) or "").strip()}
     rel = report or _opt_value(list(argv), _OUTPUT_OPTS)
     payload: Any = None
     if rel:
@@ -330,9 +395,9 @@ def emit_gate_outcome(program: str, argv: List[str], rc: int, *,
         except (OSError, ValueError):
             payload = None
     if isinstance(payload, dict):
-        for k in ("passed", "verdict", "ok", "status", "rc"):
+        for k in ("passed", "verdict", "ok", "status"):
             v = payload.get(k)
-            if k != "rc" and isinstance(v, (bool, int, float, str)):
+            if isinstance(v, (bool, int, float, str)):
                 metrics[k] = v
         summary = payload.get("summary")
         if isinstance(summary, dict):
@@ -573,7 +638,14 @@ GATE_CARRYING_STEPS: int = 69
 
 #: EMITTING — gate-carrying steps whose gate runs a program that calls `emit`.
 #: Supply side only: emitting a number changes no verdict.
-EMITTING_STEPS: Tuple[str, ...] = ("17", "20", "31", "34")
+#: RE-DERIVED by `coverage()` (M2), never typed: 4 -> 13 for two reasons, both
+#: corrections to the census rather than new claims. (1) `emit_gate_outcome` is
+#: now counted as an emit (#2550 wired steps 10/21/23/24/25/37/37.3 through it
+#: and the census could not see it). (2) `_gate_programs` now also reads the
+#: advisory/optional `{"command": "<prog> ..."}` spelling -- step 37's
+#: `stage3_compliance`, and the programs of steps 2 and 14, sit in such clauses.
+EMITTING_STEPS: Tuple[str, ...] = ("10", "14", "17", "2", "20", "21", "23",
+                                   "24", "25", "31", "34", "37", "37.3")
 
 #: CONSUMING — steps whose VERDICT reconciles a tool metric against the log
 #: parse and FAILS when they disagree. This is the number that matters: a
@@ -625,7 +697,11 @@ def _program_emits(path: Path) -> bool:
     report coverage it does not have — which is precisely the failure mode the
     census exists to catch. A comment cannot create a Call node.
     """
-    return _program_calls(path, ("emit", "emit_best_effort"))
+    # `emit_gate_outcome` (M2): it IS an emit -- it ends in `emit_best_effort`
+    # under the step its caller named -- and leaving it out made the census list
+    # all eight gate programs that use it as not emitting.
+    return _program_calls(path, ("emit", "emit_best_effort",
+                                 "emit_gate_outcome"))
 
 
 def _program_consumes(path: Path) -> bool:
@@ -644,6 +720,10 @@ def _gate_programs(gate: Any, programs_dir: Path) -> List[str]:
     blob = json.dumps(gate)
     names = set(re.findall(r"([a-z0-9_]+)\.py", blob))
     names |= set(re.findall(r'"program_exit_zero":\s*"([a-z0-9_]+)', blob))
+    # The advisory / optional slots spell their command as a mapping
+    # (`{"command": "<prog> ..."}`); step 37's `stage3_compliance` sits in one,
+    # and a census that read only the bare-string spelling could not see it.
+    names |= set(re.findall(r'"command":\s*"([a-z0-9_]+)', blob))
     return sorted(n for n in names if (programs_dir / f"{n}.py").is_file())
 
 

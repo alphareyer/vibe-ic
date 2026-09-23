@@ -1,17 +1,27 @@
-"""Steps 10, 21, 23, 24, 25, 37 and 37.3 EMIT through `step_metrics` (ruling:
-adopt, never record).
+"""Steps 10, 21, 23, 24, 25, 37 and 37.3 EMIT through `step_metrics` on the
+call shapes a REAL run uses (M, #2550; M2).
 
-`step_metrics_adoption_check` is blocking on the delta: a step that gains a
-program and does not emit FAILS. #2261 (972c21233, 2026-09-15) gave steps 10,
-21, 23, 24, 25 and 37 their first `programs:` and #2514 gave 37.3 its own; none
-emitted, and the residual was never re-recorded, so the gate was red on main
-from 2026-09-15. Recording them in `_step_metrics_adoption_residual.json` would
-be a hand-written baseline, so each declared program now emits its OWN
-outcome, attributed to the step whose flow clause ran it.
+#2550 wired each program to `step_metrics.emit_gate_outcome` and attributed the
+row by matching the LITERAL clause argv. The pre-landing review measured that
+mostly ineffective on a real run:
+  (1) the phase-3 runner passes an ABSOLUTE `--json`, and flow_compliance_check
+      redirects `--json` to /tmp/gate_receipt_* when the target exists, so
+      steps 23 and 25 never emitted and 10/21/37 only on a first run -- and
+      then kept that first run's row beside a refreshed `__flow__invocation`;
+  (2) an out-of-flow hand run could write into a project's metrics;
+  (3) the unattributable run printed a stderr line that pushed the DRC PASS
+      denominator out of the 400-char tail 37.5ic's evidence quotes;
+  (4) `coverage()` did not count `emit_gate_outcome`.
+M2: the CALLER states the step (`VIBEIC_GATE_STEP`) -- flow_compliance_check
+for the step it is judging, the runner resolved once from the canonical
+clause -- every row carries the invocation, a hand run (no step) or an
+inherited id (a step whose gate does not run this program) is silent, and the
+census counts the call.
 """
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -70,66 +80,145 @@ def test_each_clause_is_attributed_to_its_own_step(step, program, argv):
     assert got == step, (program, argv, why)
 
 
-def test_a_program_two_steps_run_is_refused_without_its_output_path():
-    got, why = SM.step_for_invocation("sta_report_check", ["."])
-    assert got is None and "10" in why and "23" in why, why
+def test_the_census_counts_emit_gate_outcome():
+    """(4): all seven are EMITTING in `coverage()`, which is what
+    `test_step_metrics_coverage` pins against `EMITTING_STEPS`."""
+    from flow_compliance_check import _find_flow_def
+    rep = SM.coverage(_find_flow_def(), _PROGRAMS)
+    assert set(_STEPS) <= set(rep["emitting"]), rep["emitting"]
+
+
+# ── the real call shapes ────────────────────────────────────────────────────
+
+_STA_BODY = (
+    "OpenSTA 2.4.0 report_checks\n"
+    "Startpoint: reg_a (rising edge-triggered flip-flop clocked by clk)\n"
+    "Endpoint: reg_b (rising edge-triggered flip-flop clocked by clk)\n"
+    "Path Type: max\nWNS = 0.15 ns\nTNS = 0.0 ns\n"
+    "slack (MET)\nsetup check: PASS\nhold check: PASS\n"
+    "data arrival time: 2.34 ns\n" + "# " + ("=" * 78 + "\n") * 40)
 
 
 def _sta_project(tmp: Path) -> Path:
     sta = tmp / "phase3" / "stage3" / "sta"
     sta.mkdir(parents=True)
-    body = ("OpenSTA 2.4.0 report_checks\n"
-            "Startpoint: reg_a (rising edge-triggered flip-flop clocked by clk)\n"
-            "Endpoint: reg_b (rising edge-triggered flip-flop clocked by clk)\n"
-            "Path Type: max\nWNS = 0.15 ns\nTNS = 0.0 ns\n"
-            "slack (MET)\nsetup check: PASS\nhold check: PASS\n"
-            "data arrival time: 2.34 ns\n" + "# " + ("=" * 78 + "\n") * 40)
-    (sta / "post_route_timing.rpt").write_text(body)
+    (sta / "post_route_timing.rpt").write_text(_STA_BODY)
     return tmp
 
 
-def test_step23s_clause_writes_step23s_metrics_end_to_end(tmp_path):
+def _run(program, argv, cwd, env_extra):
+    env = {k: v for k, v in os.environ.items()
+           if k not in (SM.GATE_STEP_ENV, SM.INVOCATION_ENV)}
+    env.update(env_extra)
+    return subprocess.run([sys.executable, str(_PROGRAMS / f"{program}.py"),
+                           *argv], cwd=cwd, capture_output=True, text=True,
+                          env=env)
+
+
+def _row(proj: Path, sid: str) -> dict:
+    return json.loads((proj / "reports" / "metrics"
+                       / f"{SM.normalize_step(sid)}.json").read_text())
+
+
+def test_the_runners_absolute_json_shape_emits_under_23(tmp_path):
+    """(1) runner shape: absolute project + absolute --json, step resolved by
+    `phase3_one_shot_runner._signoff_gate_env` from the canonical clause."""
+    import phase3_one_shot_runner as R
+    proj = _sta_project(tmp_path)
+    rel = "reports/phase3/sta/post_route_summary.json"
+    env = R._signoff_gate_env(
+        "sta_report_check.py",
+        ("--mode", "sta", "--under", "phase3/stage3/sta/post_route_timing.rpt"),
+        rel)
+    assert env[SM.GATE_STEP_ENV] == "23"
+    r = _run("sta_report_check", [str(proj), "--mode", "sta", "--under",
+                                  "phase3/stage3/sta/post_route_timing.rpt",
+                                  "--json", str(proj / rel)],
+             cwd="/", env_extra={SM.GATE_STEP_ENV: env[SM.GATE_STEP_ENV],
+                                 SM.INVOCATION_ENV: "inv-runner"})
+    row = _row(proj, "23")
+    assert row["23__gate__rc"] == r.returncode, row
+    assert row["23__gate__invocation"] == "inv-runner", row
+    assert row["23__gate__program"] == "sta_report_check", row
+
+
+def test_the_audits_redirected_receipt_shape_emits_under_25(tmp_path):
+    """(1) audit shape: --json redirected OUTSIDE the project (the receipt
+    redirect), step stated by the audit that is judging step 25."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    receipt = tmp_path / "gate_receipt_x" / "em_signoff.json"
+    receipt.parent.mkdir()
+    r = _run("em_report_check", [".", "--mode", "em", "--json", str(receipt)],
+             cwd=proj, env_extra={SM.GATE_STEP_ENV: "25",
+                                  SM.INVOCATION_ENV: "inv-audit"})
+    row = _row(proj, "25")
+    assert row["25__gate__rc"] == r.returncode, row
+    assert row["25__gate__invocation"] == "inv-audit", row
+
+
+def test_a_second_run_refreshes_the_row_and_its_invocation(tmp_path):
+    """(1) the first-run-only row: run 2 (target already exists) must replace
+    run 1's gate row, and the invocation says which run wrote it."""
     proj = _sta_project(tmp_path)
     argv = next(a for s, p, a in _clauses() if s == "23")
-    r = subprocess.run([sys.executable, str(_PROGRAMS / "sta_report_check.py"),
-                        *argv], cwd=proj, capture_output=True, text=True)
-    m = proj / "reports" / "metrics" / "23.json"
-    assert m.is_file(), r.stdout[-2000:] + r.stderr[-2000:]
-    doc = json.loads(m.read_text())
-    assert doc["23__gate__rc"] == r.returncode, doc
-    assert doc["23__gate__passed"] is (r.returncode == 0), doc
-    assert not (proj / "reports" / "metrics" / "10.json").exists()
+    _run("sta_report_check", argv, proj,
+         {SM.GATE_STEP_ENV: "23", SM.INVOCATION_ENV: "inv-1"})
+    assert _row(proj, "23")["23__gate__invocation"] == "inv-1"
+    (proj / "phase3/stage3/sta/post_route_timing.rpt").write_text(
+        _STA_BODY.replace("slack (MET)", "slack (VIOLATED)").replace(
+            "WNS = 0.15 ns", "WNS = -0.40 ns"))
+    r2 = _run("sta_report_check", argv, proj,
+              {SM.GATE_STEP_ENV: "23", SM.INVOCATION_ENV: "inv-2"})
+    row = _row(proj, "23")
+    assert row["23__gate__invocation"] == "inv-2", row
+    assert row["23__gate__rc"] == r2.returncode == 1, row
 
 
-def test_the_same_program_under_step10s_clause_writes_step10s(tmp_path):
+def test_a_hand_run_writes_no_metrics_and_says_nothing(tmp_path):
+    """(2)+(3): no step stated -> no project metrics, and the gate's own
+    stderr is untouched (no `[step_metrics]` line to push an evidence tail)."""
     proj = _sta_project(tmp_path)
-    argv = next(a for s, p, a in _clauses() if s == "10")
-    r = subprocess.run([sys.executable, str(_PROGRAMS / "sta_report_check.py"),
-                        *argv], cwd=proj, capture_output=True, text=True)
-    doc = json.loads((proj / "reports/metrics/10.json").read_text())
-    assert doc["10__gate__rc"] == r.returncode, doc
-    assert not (proj / "reports" / "metrics" / "23.json").exists()
+    argv = next(a for s, p, a in _clauses() if s == "23")
+    r = _run("sta_report_check", argv, proj, {})
+    assert not (proj / "reports" / "metrics").exists()
+    assert "[step_metrics]" not in r.stderr, r.stderr[-800:]
+
+
+def test_an_inherited_step_id_does_not_attribute_a_grandchild(tmp_path):
+    """Step 37.5ic's gate is tapeout_precheck; a drc_report_check it spawns
+    inherits VIBEIC_GATE_STEP=37.5ic and must NOT emit under it."""
+    r = _run("drc_report_check", [".", "--json", "reports/x.json"], tmp_path,
+             {SM.GATE_STEP_ENV: "37.5ic", SM.INVOCATION_ENV: "inv"})
+    assert not (tmp_path / "reports" / "metrics").exists()
+    assert "[step_metrics]" not in r.stderr, r.stderr[-800:]
 
 
 def test_the_emit_never_changes_the_gates_rc(tmp_path):
-    """The same invocation with the metrics directory made unwritable exits
-    with the same rc: the metric is bookkeeping, never a verdict."""
     proj = _sta_project(tmp_path)
     argv = next(a for s, p, a in _clauses() if s == "23")
-    r1 = subprocess.run([sys.executable, str(_PROGRAMS / "sta_report_check.py"),
-                         *argv], cwd=proj, capture_output=True, text=True)
-    (proj / "reports" / "metrics").mkdir(parents=True, exist_ok=True)
-    (proj / "reports" / "metrics" / "23.json").unlink(missing_ok=True)
+    env = {SM.GATE_STEP_ENV: "23", SM.INVOCATION_ENV: "inv"}
+    r1 = _run("sta_report_check", argv, proj, env)
+    (proj / "reports" / "metrics" / "23.json").unlink()
     (proj / "reports" / "metrics" / "23.json").mkdir()   # blocks the write
-    r2 = subprocess.run([sys.executable, str(_PROGRAMS / "sta_report_check.py"),
-                         *argv], cwd=proj, capture_output=True, text=True)
+    r2 = _run("sta_report_check", argv, proj, env)
     assert r1.returncode == r2.returncode
     assert "EMIT FAILED" in r2.stderr, r2.stderr[-1500:]
 
 
-def test_gds_xor_check_emits_under_37_3_from_its_check_clause(tmp_path):
-    argv = next(a for s, p, a in _clauses() if s == "37.3")
-    r = subprocess.run([sys.executable, str(_PROGRAMS / "gds_xor_check.py"),
-                        *argv], cwd=tmp_path, capture_output=True, text=True)
-    doc = json.loads((tmp_path / "reports/metrics/37_3.json").read_text())
-    assert doc["37_3__gate__rc"] == r.returncode, doc
+def test_the_audit_hands_the_judged_step_to_its_gate(tmp_path):
+    """flow_compliance_check's spawn environment carries the step it is
+    judging, and "" outside a step (so an outer id cannot leak in)."""
+    import flow_compliance_check as F
+    assert F._child_env()[SM.GATE_STEP_ENV] == ""
+    seen = {}
+
+    @F._with_child_gate_step
+    def _judge(project, step, *_a, **_k):
+        seen["env"] = F._child_env()[SM.GATE_STEP_ENV]
+        return "judged"
+    assert _judge(tmp_path, {"id": "37.3"}, {}) == "judged"
+    assert seen["env"] == "37.3"
+    # and it is check_step that carries it
+    assert F.check_step.__wrapped__ is not None
+    assert F._child_env()[SM.GATE_STEP_ENV] == ""

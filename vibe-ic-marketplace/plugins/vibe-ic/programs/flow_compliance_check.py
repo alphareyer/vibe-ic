@@ -15906,6 +15906,32 @@ def _emit_step_metrics(project: Path, step: Dict[str, Any],
     _sm.emit_best_effort(project, step.get("id"), _keep)
 
 
+#: The step this audit is judging while it spawns that step's gate programs
+#: (M2). `_child_env` hands it to the child as `step_metrics.GATE_STEP_ENV`, so
+#: a gate can emit its outcome under the step that ran it without inferring it
+#: from an argv this module may have rewritten (`_receipt_off_a_produced_document`).
+_CHILD_GATE_STEP = ""
+
+
+def _with_child_gate_step(fn):
+    """Hold the judged step's id in `_CHILD_GATE_STEP` for the call's duration.
+
+    A decorator rather than a wrapper function so `check_step`'s own body --
+    which several guards read with `inspect.getsource` -- stays where it is
+    (`functools.wraps` makes `inspect` unwrap to it)."""
+    @functools.wraps(fn)
+    def _judge(project, step, *args, **kwargs):
+        global _CHILD_GATE_STEP
+        prior = _CHILD_GATE_STEP
+        _CHILD_GATE_STEP = str((step or {}).get("id") or "")
+        try:
+            return fn(project, step, *args, **kwargs)
+        finally:
+            _CHILD_GATE_STEP = prior
+    return _judge
+
+
+@_with_child_gate_step
 def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                skip_analog: bool = False, skip_hardware: bool = False,
                strict_audit_evidence: bool = True,
@@ -19372,6 +19398,10 @@ def _child_env():
     extra = dict(_ga.child_env_additions(_INVOCATION_ENV, _invocation_id()))
     if _CHILD_SCOPE_STACK:
         extra[_SCOPE_STACK_ENV] = _CHILD_SCOPE_STACK
+    # M2: the step being judged, so the gate emits under IT (see check_step).
+    # Always set -- to "" outside a step -- so an id inherited from an outer
+    # caller cannot leak into a gate this audit spawns for something else.
+    extra["VIBEIC_GATE_STEP"] = _CHILD_GATE_STEP
     return dict(os.environ, **extra)
 
 #: Scopes that contain no synthesis step, so the pre-PnR Yosys gate has nothing
