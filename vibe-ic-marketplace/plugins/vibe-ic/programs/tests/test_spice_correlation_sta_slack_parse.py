@@ -206,6 +206,28 @@ def _emit_bound_report(tmp_path, raw, stanza=_CORNER_LIBS):
     return pnr / 'sta.rpt'
 
 
+def _attested_copy(tmp_path, rpt):
+    """The writer's bytes WITHOUT its `PNR_SESSION_UNVERIFIED` line, placed
+    where attested sign-off STA lives, and the in-session original removed.
+
+    R-0915-154: the in-session `pnr/sta.rpt` is never a correlation source, so
+    the consumer half of these writer tests can no longer run on it. What they
+    test -- that the path is bound to the corner the WRITER chose, and that the
+    consumer correlates at that corner or refuses -- is unchanged, and it is
+    run on the same bytes minus exactly the one line that makes a report
+    ineligible. The line itself is asserted on the original before removal.
+    """
+    text = rpt.read_text()
+    assert 'STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED' in text
+    sta_dir = SCC._pl.sta_dir(tmp_path)
+    sta_dir.mkdir(parents=True, exist_ok=True)
+    out = sta_dir / 'sta_bound_attested.rpt'
+    out.write_text(''.join(l for l in text.splitlines(True)
+                           if 'PNR_SESSION_UNVERIFIED' not in l))
+    rpt.unlink()
+    return out
+
+
 def _consume_binding(tmp_path, monkeypatch, unreadable=''):
     pnr = tmp_path / 'phase3/stage3/pnr'
     (pnr / 'chip_pnr.v').write_text('module chip(input a, output z); BUF u1 (.A(a), .Z(z)); endmodule\n')
@@ -228,11 +250,12 @@ def _consume_binding(tmp_path, monkeypatch, unreadable=''):
 ], ids=['setup-slow-not-active-typ', 'setup-fast-not-label-assumption', 'single-corner'])
 def test_writer_binds_actual_selected_path(tmp_path, monkeypatch, corner, stanza, expected):
     rpt = _emit_bound_report(tmp_path, _native_path(corner), stanza)
+    assert 'STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED' in rpt.read_text()
+    rpt = _attested_copy(tmp_path, rpt)
     result = _consume_binding(tmp_path, monkeypatch)
     assert result['reason'] == 'critical path not stitchable', result
     assert SCC._pick_sta_report(tmp_path, {'BUF'}) == rpt
     assert SCC.parse_sta_corner_basis(rpt.read_text())['liberty'] == expected
-    assert 'STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED' in rpt.read_text()
 
 
 @pytest.mark.parametrize('case', ['missing-corner', 'unknown-corner', 'contradictory-corner',
@@ -253,13 +276,39 @@ def test_writer_binding_refusals(tmp_path, monkeypatch, case):
     if case == 'first-unbound-later-valid': raw = _native_path('') + '\n' + _native_path('slow')
     if case == 'missing-path-type': raw = raw.replace('Path Type: max\n', '')
     if case == 'unknown-read-syntax': stanza += '\nsource /pdk/extra-libs.tcl'
-    _emit_bound_report(tmp_path, raw, stanza)
+    rpt = _attested_copy(tmp_path, _emit_bound_report(tmp_path, raw, stanza))
     result = _consume_binding(tmp_path, monkeypatch, unreadable)
     assert result['status'] == 'ERROR', result
     assert 'corner' in result['reason'] and ('refusing' in result['reason']), result
     if case == 'unreadable-library' and SCC.parse_sta_corner_basis(
-            (tmp_path / 'phase3/stage3/pnr/sta.rpt').read_text())['liberty']:
+            rpt.read_text())['liberty']:
         assert 'slow.lib, which is unreadable' in result['reason']
+    # R-0915-154: when the WRITER refused the binding, the consumer's refusal
+    # names the stamp that says so.
+    if 'STA_CORNER_BINDING_REFUSED' in rpt.read_text() and not \
+            SCC.parse_sta_corner_basis(rpt.read_text())['liberty']:
+        assert 'STA_CORNER_BINDING_REFUSED' in result['reason'], result
+
+
+# ── R-0915-154: the in-session report is never a correlation source ────────
+
+def test_the_in_session_report_is_never_picked_and_the_refusal_says_why(
+        tmp_path, monkeypatch):
+    rpt = _emit_bound_report(tmp_path, _native_path('slow'))
+    assert 'STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED' in rpt.read_text()
+    assert SCC._pick_sta_report(tmp_path, {'BUF'}) is None
+    result = _consume_binding(tmp_path, monkeypatch)
+    assert result['status'] == 'ERROR', result
+    assert 'PNR_SESSION_UNVERIFIED' in result['reason'], result
+    assert 'phase3/stage3/pnr/sta.rpt' in result['reason'], result
+
+
+def test_without_the_stamp_the_same_report_is_still_a_source(tmp_path):
+    """The other direction: the line is what excludes it, not the location."""
+    rpt = _emit_bound_report(tmp_path, _native_path('slow'))
+    rpt.write_text(''.join(l for l in rpt.read_text().splitlines(True)
+                           if 'PNR_SESSION_UNVERIFIED' not in l))
+    assert SCC._pick_sta_report(tmp_path, {'BUF'}) == rpt
 
 
 def test_writer_sections_preserve_path_order_and_scope(tmp_path):

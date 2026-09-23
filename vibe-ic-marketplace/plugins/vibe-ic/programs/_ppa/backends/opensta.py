@@ -141,6 +141,14 @@ _BASIS_LIBERTY_RE = re.compile(
 #: an unbannered report was unreadable even when the artefact spelled it out.
 _BASIS_SPEF_RE = re.compile(
     r"^\s*#?\s*STA_BASIS_SPEF\s*:\s*(\S+)", re.MULTILINE)
+#: THE CONSTRAINTS the corner was timed under (R-0915-154). The declared-process
+#: multi-corner emitter stamps it per section; nothing read it, so two slacks
+#: timed under DIFFERENT SDCs could share one scope and be compared. Parsed here
+#: as NAMED (a path, possibly container-spelled); turning the name into an
+#: identity -- the file's content digest -- is `_ppa.timing`'s job, because a
+#: path says where a file was, not what it constrained.
+_BASIS_SDC_RE = re.compile(
+    r"^\s*#?\s*STA_BASIS_SDC\s*:\s*(\S+)", re.MULTILINE)
 _BASIS_CORNER_RE = re.compile(
     r"^[ \t]*#?[ \t]*STA_BASIS_CORNER[ \t]*:[ \t]*([^\r\n]*)$",
     re.MULTILINE)
@@ -275,6 +283,8 @@ class Section:
     #: key rather than writing a value that would compare equal to another
     #: silence.
     ocv_derate: Optional[str] = None
+    #: `STA_BASIS_SDC` inside this section, as NAMED, or None when it states none.
+    sdc: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -298,6 +308,7 @@ class Report:
     signoff_corner: Optional[str] = None
     basis_liberty: Optional[str] = None
     basis_spef: Optional[str] = None         # the parasitic file, as NAMED
+    basis_sdc: Optional[str] = None          # the constraints file, as NAMED
     # Every whole-file declaration, in source order. The timing domain owns
     # validation and reconciliation with per-section/banner declarations.
     basis_corners: Tuple[str, ...] = ()
@@ -523,7 +534,9 @@ def parse_report(text: Optional[str], *, path: Optional[str] = None,
             ocv = "early=%s,late=%s" % (mo.group(1), mo.group(2))
             if mo.group(3):
                 ocv += "," + mo.group(3)
+        msdc = _BASIS_SDC_RE.search(block)
         return Section(
+            sdc=msdc.group(1) if msdc else None,
             check=check, process=process, rc_corner=rc, spef=spef,
             basis_corners=basis_corners, liberty=lib,
             banner=banner, line=start + 1, measurements=tuple(meas),
@@ -544,6 +557,7 @@ def parse_report(text: Optional[str], *, path: Optional[str] = None,
     ms = _SIGNOFF_CORNER_RE.search(body)
     ml = _BASIS_LIBERTY_RE.search(body)
     msp = _BASIS_SPEF_RE.search(body)
+    msd = _BASIS_SDC_RE.search(body)
     basis_corners = tuple(
         match.group(1).strip()
         for match in _BASIS_CORNER_RE.finditer(body))
@@ -556,6 +570,7 @@ def parse_report(text: Optional[str], *, path: Optional[str] = None,
         signoff_corner=ms.group(1) if ms else None,
         basis_liberty=ml.group(1) if ml else None,
         basis_spef=msp.group(1) if msp else None,
+        basis_sdc=msd.group(1) if msd else None,
         basis_corners=basis_corners,
         signoff_corner_count=int(mc.group(1)) if mc else None,
         check_types_reported=(False if ct_fail else (True if ct_ok else None)),

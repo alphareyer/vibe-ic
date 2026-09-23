@@ -247,6 +247,46 @@ _NOT_ADOPTED_ACTIONS = frozenset({
 
 _DECISION_BASENAME = "postroute_timing_repair_decision.json"
 
+# ---------------------------------------------------------------------------
+# R-0915-154 — three stamps the phase-3 runner writes, READ HERE, because this
+# is the program that decides whether a report is sign-off timing.
+# ---------------------------------------------------------------------------
+#: The in-session PnR STA (`pnr/sta.rpt`) states that its RC is unattested --
+#: an estimate or an extraction, it does not say which. A report that says so
+#: about itself is NEVER a sign-off source. This gate's fallback globs
+#: (`sta.rpt`, `*sta*.rpt`) reached it whenever nothing richer existed: MEASURED
+#: on the shipped globs, a tree holding only `phase3/stage3/pnr/sta.rpt`
+#: resolved to it and was graded as sign-off.
+_PNR_SESSION_UNVERIFIED_RE = re.compile(
+    r"^\s*#?\s*STA_PARASITICS_PROVENANCE\s*:\s*PNR_SESSION_UNVERIFIED\b",
+    re.MULTILINE)
+#: `post_route_timing.rpt` written as a COPY of another basis
+#: (`# STA_ALIAS_BASIS: <file>`, when the single-corner SPEF STA refused). A copy
+#: is judged AS that basis and says so -- it is not a second, independent
+#: sign-off STA.
+_ALIAS_BASIS_RE = re.compile(
+    r"^\s*#?\s*STA_ALIAS_BASIS\s*:\s*(\S+)", re.MULTILINE)
+#: A path whose setup corner could not be bound to a loaded Liberty. It has no
+#: attributable corner, so it is never credited as corner-attributed timing.
+_CORNER_BINDING_REFUSED_RE = re.compile(
+    r"^\s*#?\s*STA_CORNER_BINDING_REFUSED\s*:\s*(\S+)", re.MULTILINE)
+
+
+def _is_unverified_session_report(path: Path) -> bool:
+    try:
+        return bool(_PNR_SESSION_UNVERIFIED_RE.search(
+            path.read_text(errors="replace")))
+    except OSError:
+        return False
+
+
+def _unverified_session_reports(target: Path) -> Set[Path]:
+    """Resolved candidates that declare `PNR_SESSION_UNVERIFIED` parasitics."""
+    if not target.is_dir():
+        return set()
+    return {p.resolve() for p in target.rglob("*.rpt")
+            if p.is_file() and _is_unverified_session_report(p)}
+
 
 def _non_adopted_reports(target: Path) -> Set[Path]:
     """Resolved STA reports belonging to a repair arm the flow did not adopt.
@@ -373,6 +413,14 @@ def evaluate(report_text: str) -> Dict[str, object]:
     if not mpw:
         missing.append("min-pulse-width check "
                        "(report_check_types -min_pulse_width)")
+    corner_refused = [m.group(1) for m in
+                      _CORNER_BINDING_REFUSED_RE.finditer(report_text)]
+    if corner_refused:
+        missing.append(
+            f"corner attribution — {len(corner_refused)} reported path(s) carry "
+            f"STA_CORNER_BINDING_REFUSED ({sorted(set(corner_refused))[0]}): a "
+            f"path with no attributable corner is not corner-attributed "
+            f"sign-off timing")
     violations = _check_types_violations(report_text)
     for v in violations:
         missing.append(f"real (VIOLATED) finding in report_check_types: {v}")
@@ -403,14 +451,33 @@ def evaluate(report_text: str) -> Dict[str, object]:
         "worst_path_evidence_source": path_source,   # "marker"|"path-dump"|None
         "worst_path_query_failures": path_failures,
         "check_types_violations": violations,
+        "corner_binding_refused": len(corner_refused),
         "missing": missing,
         "ocv_scope": ocv_scope,
     }
 
 
 def check(target: Path) -> Dict[str, object]:
+    if target.is_file() and _is_unverified_session_report(target):
+        return {"verdict": "IO_ERROR",
+                "error": (f"{target} declares STA_PARASITICS_PROVENANCE: "
+                          "PNR_SESSION_UNVERIFIED — an in-session STA whose RC "
+                          "is unattested is never a sign-off source (R-0915-154)"),
+                "unverified_session_reports": [str(target)]}
     excluded = _non_adopted_reports(target)
-    rpt = _find_report(target, excluded)
+    unverified = _unverified_session_reports(target)
+    rpt = _find_report(target, excluded | unverified)
+    if rpt is None and unverified:
+        return {
+            "verdict": "IO_ERROR",
+            "error": (
+                f"no sign-off STA report at {target}: the only candidate(s) "
+                "declare STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED ("
+                + ", ".join(sorted(p.name for p in unverified)) + "). An "
+                "in-session STA whose RC is unattested is never a sign-off "
+                "source, so this is NOT_MEASURED rather than a result "
+                "(R-0915-154)."),
+            "unverified_session_reports": sorted(str(p) for p in unverified)}
     if rpt is None:
         if excluded:
             return {
@@ -428,10 +495,41 @@ def check(target: Path) -> Dict[str, object]:
         text = rpt.read_text(errors="replace")
     except OSError as e:
         return {"verdict": "IO_ERROR", "error": f"cannot read {rpt}: {e}"}
+    alias = _ALIAS_BASIS_RE.search(text)
+    alias_note = None
+    if alias:
+        # JUDGED AS ITS BASIS. The basis is found by name under the target
+        # (the alias and its basis live in different stage directories), never
+        # the alias itself; when it is not reachable the copied bytes ARE the
+        # basis's bytes, and the verdict is attributed to the basis by name.
+        name = alias.group(1)
+        roots = [target] if target.is_dir() else [rpt.parent]
+        basis = next((b for r in roots for b in sorted(r.rglob(name))
+                      if b.is_file() and b.resolve() != rpt.resolve()
+                      and b.resolve() not in excluded), None)
+        if basis is not None:
+            try:
+                text = basis.read_text(errors="replace")
+            except OSError as e:
+                return {"verdict": "IO_ERROR",
+                        "error": f"{rpt} is a copy of {name}; cannot read {basis}: {e}"}
+            alias_note = (f"{rpt.name} is a COPY (STA_ALIAS_BASIS) of "
+                          f"{basis.name}; judged as that basis")
+        else:
+            alias_note = (f"{rpt.name} is a COPY (STA_ALIAS_BASIS) of {name}, "
+                          f"which is not under {roots[0]}; judged on the copied "
+                          f"content, attributed to {name}")
     res = evaluate(text)
     res["report"] = str(rpt)
+    if alias:
+        res["alias_of"] = alias.group(1)
+        res["alias_basis_report"] = str(basis) if basis is not None else None
+        res["alias_note"] = alias_note
     if excluded:
         res["non_adopted_reports_skipped"] = sorted(str(p) for p in excluded)
+    if unverified:
+        res["unverified_session_reports_skipped"] = sorted(
+            str(p) for p in unverified)
     return res
 
 
