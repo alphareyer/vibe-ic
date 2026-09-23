@@ -68,5 +68,21 @@ def build_argv(caller_argv):
     return argv
 
 
+def _run_and_emit(caller_argv):
+    """Run the audit, then hand its outcome to the one metrics schema.
+
+    step_metrics_adoption_check: a step that declares this program must emit
+    through `step_metrics`. The step is read from the flow clause that ran it
+    (program + `--json` path), never assumed -- this wrapper is step 10's gate
+    and step 23's. Best-effort by construction: the metric can never change
+    the gate's rc.
+    """
+    argv = build_argv(caller_argv)
+    rc = main(argv)
+    import step_metrics  # noqa: PLC0415
+    step_metrics.emit_gate_outcome(Path(__file__).stem, argv, rc)
+    return rc
+
+
 if __name__ == "__main__":
-    sys.exit(main(build_argv(sys.argv[1:])))
+    sys.exit(_run_and_emit(sys.argv[1:]))
