@@ -3754,6 +3754,39 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
         reason_class = _reason_taxonomy.EXECUTION_ERROR
     else:
         verdict, rc = ("PASS", 0) if ok else ("FAIL", 1)
+        # R-0915-125's WAIT, READ FROM THE FILE. A gate may report that the
+        # deterministic floor asked for an EXPERT pass and no receipt exists --
+        # "work not yet done", in its own words, reported by id rather than as
+        # a verdict. That is the AWAITING state the rc-4 branch above names:
+        # pass one completed, pass two is only an AGENT's to make.
+        #
+        # MEASURED on spm run22 (lane icspm5), step 5's
+        # `formal_proof_evidence_check`: exit 0, stdout beginning
+        # "INCOMPLETE: applicable formal declaration/property work remains",
+        # and a report carrying findings EXPERT_FALLBACK_OUTSTANDING
+        # (R-0915-125) + PROOF_CHAIN_PARTIAL (#1974), five
+        # `expert_fallback_outstanding` ids and `fallback_skill`
+        # "formal-verify". The step read NOT_MEASURED / partial_population.
+        # The population is not partial -- it is fully enumerated (six
+        # properties, five obligations open) and the WORK is outstanding.
+        #
+        # SYNTHESISED AT COLUMN 0, for the reason the rc-4 branch states about
+        # itself: `_stdout_signals_token` believes a token only where it begins
+        # a line, and stdout is the channel a snippet cut can delete (#901), so
+        # the declaration is read from the REPORT and the line is written here
+        # rather than depended upon from the producer. The existing AWAITING
+        # precedence then does the rest -- no new tier, and the INCOMPLETE
+        # sentinel the gate already prints still raises the INCOMPLETE tier, so
+        # this is never promoted to a bare PASS.
+        if verdict == "PASS" and _report_declares_expert_pass_outstanding(
+                report):
+            _skill = str((report or {}).get("fallback_skill") or "").strip()
+            _open = list((report or {}).get(
+                "expert_fallback_outstanding") or [])
+            out = (f"{_AWAITING_STDOUT_TOKEN}: the gate states an EXPERT pass "
+                   f"is outstanding ({len(_open)} obligation(s)"
+                   + (f", skill {_skill}" if _skill else "")
+                   + f") — stated by {cmd_str}\n" + out)
         if verdict == "FAIL":
             _sup = _sta_supersession.supersession(project, report)
             if _sup is not None:
@@ -4862,6 +4895,22 @@ def _hint_declares_execution_error(hints: List[str]) -> bool:
         if m and m.group(1) == _reason_taxonomy.EXECUTION_ERROR:
             return True
     return False
+def _report_declares_expert_pass_outstanding(report: Any) -> bool:
+    """Does a gate's own report state that an EXPERT pass is outstanding?
+
+    R-0915-125's shape, read from the FILE: a non-empty
+    `expert_fallback_outstanding` list is the gate saying "the deterministic
+    floor asked for authoring and no expert receipt is present". A BARE flag is
+    not enough and neither is a skill name on its own -- the list IS the claim,
+    because it enumerates the obligations the second pass owes. An empty list,
+    a missing key, or a non-list value all mean the gate said no such thing.
+    """
+    if not isinstance(report, Mapping):
+        return False
+    outstanding = report.get("expert_fallback_outstanding")
+    return isinstance(outstanding, (list, tuple)) and len(outstanding) > 0
+
+
 #: R-0915-85 / R-0915-88 — the AWAITING half of the INCOMPLETE tier, carried as
 #: its OWN typed hint so `check_step` can give the step
 #: `NOT_MEASURED(awaiting_agent_pass)` instead of the undifferentiated
