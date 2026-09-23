@@ -50,6 +50,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _shape_refusal as _sr  # noqa: E402  (#991)
+import _path_layout as _pl  # noqa: E402  R-0915-160 (one read-side resolver)
 
 # ── Liveness doctrine (v0.3.46, addressing the budget-guess critique) ───────
 # The STUCK signal is NOT "elapsed > a guessed per-step duration budget".
@@ -466,10 +467,13 @@ def _phase_was_reached(project: Path, phase: str) -> bool:
     was killed has the first two and not the third, and that is exactly the
     case `_detect_phase` used to be unable to see.
     """
-    for fname in (project / "reports" / "orchestrator" / _PHASE_REPORTS[phase],
-                  project / "reports" / _PHASE_REPORTS[phase]):
-        if fname.is_file():
-            return True
+    # ONE read-side resolver, not a hand-built pair. R-0915-160: this file spelled the
+    # routed-and-legacy pair three times, `step_write_ledger` once and `vibe_ic_entry_guard`
+    # twice, and `run_second_pass_only` spelled only the routed one -- which is how a project
+    # whose pass 1 predates R-0915-151 was reported as never having run phase 1.
+    _report, _ = _pl.report_path_for_reading(project, _PHASE_REPORTS[phase])
+    if _report.is_file():
+        return True
     if phase in ("phase2", "phase3") and (project / phase).is_dir():
         return True
     for pat in _PHASE_LOG_GLOBS.get(phase, []):
@@ -509,8 +513,8 @@ def _detect_phase(project: Path) -> str:
     # opentitan_aes on the commercial PDK) had an orchestrator verdict on disk.
     # Those are finished runs and calling them STUCK would be a false finding
     # of exactly the kind this program exists to remove.
-    for cand in (project / "reports" / "orchestrator" / _PHASE_REPORTS["orchestrator"],
-                 project / "reports" / _PHASE_REPORTS["orchestrator"]):
+    for cand in (_pl.report_path_for_reading(
+            project, _PHASE_REPORTS["orchestrator"])[0],):
         if cand.is_file():
             return "orchestrator"
 
@@ -521,8 +525,8 @@ def _detect_phase(project: Path) -> str:
     # which is correct when there is no linear phase to be further than.
     newest_phase, newest_m = None, -1.0
     for ph in ("phase23", "analog", "orchestrator"):
-        for cand in (project / "reports" / "orchestrator" / _PHASE_REPORTS[ph],
-                     project / "reports" / _PHASE_REPORTS[ph]):
+        for cand in (_pl.report_path_for_reading(
+                project, _PHASE_REPORTS[ph])[0],):
             if cand.is_file():
                 m = cand.stat().st_mtime
                 if m > newest_m:

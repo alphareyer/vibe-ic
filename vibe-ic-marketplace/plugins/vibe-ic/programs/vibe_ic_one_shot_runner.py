@@ -908,8 +908,28 @@ def _row_verdict(project: Path, report_name: str, rc: int, started_at: float,
     except OSError:                                        # pragma: no cover
         exists, fresh = False, False
     if not exists:
+        # THE PROCESS IS ALSO A WITNESS, and when it FAILED it is the only one. R-0915-160.
+        #
+        # My round-3 rule read "rc is an exit status, not a measurement" and returned
+        # NOT_MEASURED for every reportless phase. That is right for rc == 0 -- phase3's
+        # `[SKIP] no usable PDK` exits 0 without writing anything, and a PASS conjured from
+        # that is a claim nobody made. It is WRONG for rc != 0, and the mirror image of the
+        # defect I was closing: the phase's process DID tell us something, it told us it
+        # failed, and turning that into NOT_MEASURED silences the one witness there is.
+        #
+        # MEASURED consequence: phase1's oracle-leak guard exits `SystemExit(2)` and writes
+        # no report, as does any traceback. The halt fires on `verdict == "FAIL"`, so under
+        # the round-3 rule it did not fire, and phase 2 and 3 ran on oracle-contaminated L
+        # documents. Main gave FAIL and halted. This is the same principle as the freshness
+        # rule beside it -- a report that disagrees with its own process is not a pass -- read
+        # in the direction where there is no report at all.
+        if rc != 0:
+            return "FAIL", (
+                f"{phase}'s process exited {rc} and wrote no {report_name}: the phase did "
+                f"not publish a verdict, and its exit status is the only account of itself "
+                f"it gave. A failed process with no report is a FAIL, not an absence")
         return "NOT_MEASURED", (
-            f"{phase} ran in this invocation and left no {report_name}; rc={rc} is "
+            f"{phase} ran in this invocation, exited 0 and left no {report_name}; rc=0 is "
             f"an exit status, not a measurement")
     if not fresh:
         return "NOT_MEASURED", (

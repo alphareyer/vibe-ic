@@ -838,3 +838,80 @@ def test_a_legacy_audit_with_no_scope_block_is_accepted_but_disclosed(tmp_path):
     assert axis["state"] != "NOT_MEASURED", axis
     assert axis["scope_signal"] == _audit_scope.SIGNAL_LEGACY_PHASE, axis
     assert "weaker signal" in axis["scope_signal"]
+
+
+# ── a phase whose PROCESS failed and left no report ──────────────────────────
+
+def test_a_phase_whose_process_failed_with_no_report_is_a_fail_and_halts(project,
+                                                                        monkeypatch):
+    """R-0915-160. My round-3 rule silenced the only witness there was.
+
+    "rc is an exit status, not a measurement" is right for rc == 0 -- phase3's
+    `[SKIP] no usable PDK` exits 0 without writing anything, and a PASS conjured from that is
+    a claim nobody made. For rc != 0 it is the mirror of the defect it was closing: the
+    process DID tell us something, and NOT_MEASURED does not halt, so phase 2 and 3 ran on
+    oracle-contaminated L documents. phase1's oracle-leak guard exits `SystemExit(2)` and
+    writes no report; so does any traceback.
+    """
+    def fake_run_phase(label, runner, args, env=None):
+        if "phase1" in runner.name:
+            return 2                       # the leak guard's exit; NO report written
+        _report(project, "phase2_one_shot.json", {"verdict": "PASS"})
+        return 0
+
+    monkeypatch.setattr(V, "_run_phase", fake_run_phase)
+    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k: (True, "docs"))
+    monkeypatch.setattr(sys, "argv", ["vibe_ic_one_shot_runner", str(project),
+                                      "--no-dashboard", "--skip-hardware",
+                                      "--skip-phase3"])
+    rc = V.main()
+
+    doc = json.loads(_pl.report_path(project, "vibe_ic_one_shot.json").read_text())
+    rows = {r["name"]: r["verdict"] for r in doc["phases"]}
+    assert rows.get("phase1") == "FAIL", (rows, doc.get("advisories"))
+    assert doc["verdict"] != "PASS" and rc != 0, (doc["verdict"], rc)
+    assert doc.get("halted_at") == "phase1", (
+        f"the run did not halt at phase1, so phase 2/3 would build on whatever phase 1 "
+        f"left behind: halted_at={doc.get('halted_at')!r}")
+    # phase 2 must not even appear as having been measured
+    assert rows.get("phase2") in (None, "NOT_RUN", "SKIPPED"), rows
+
+
+def test_a_phase_that_exited_zero_with_no_report_is_still_not_measured(project,
+                                                                      monkeypatch):
+    """The half that must NOT move: rc 0 and no report is an absence, not a pass."""
+    def fake_run_phase(label, runner, args, env=None):
+        if "phase1" in runner.name:
+            _report(project, "phase1_one_shot.json", {"verdict": "PASS"})
+            return 0
+        return 0                            # phase2 exits 0 and writes NOTHING
+
+    monkeypatch.setattr(V, "_run_phase", fake_run_phase)
+    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k: (True, "docs"))
+    monkeypatch.setattr(sys, "argv", ["vibe_ic_one_shot_runner", str(project),
+                                      "--no-dashboard", "--skip-hardware",
+                                      "--skip-phase3"])
+    rc = V.main()
+
+    doc = json.loads(_pl.report_path(project, "vibe_ic_one_shot.json").read_text())
+    rows = {r["name"]: r["verdict"] for r in doc["phases"]}
+    assert rows.get("phase2") == "NOT_MEASURED", rows
+    assert doc["verdict"] != "PASS" and rc != 0, (doc["verdict"], rc)
+
+
+def test_the_split_turns_on_the_exit_status_and_nothing_else(project):
+    """Driven directly, both sides, with the report absent in both."""
+    import time
+    now = time.time()
+    assert V._row_verdict(project, "phase1_one_shot.json", 0, now, "phase1")[0] \
+        == "NOT_MEASURED"
+    for rc in (1, 2, 137):
+        verdict, why = V._row_verdict(project, "phase1_one_shot.json", rc, now, "phase1")
+        assert verdict == "FAIL", (rc, verdict)
+        assert str(rc) in why, (rc, why)
+
+    # and a report that IS there outranks the exit status -- the phase's own account
+    f = _pl.report_path(project, "phase1_one_shot.json")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"verdict": "PASS"}) + "\n")
+    assert V._row_verdict(project, "phase1_one_shot.json", 2, 0.0, "phase1")[0] == "PASS"

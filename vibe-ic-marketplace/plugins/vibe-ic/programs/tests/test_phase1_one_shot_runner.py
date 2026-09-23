@@ -39,6 +39,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+import _path_layout as _pl  # noqa: E402  R-0915-151
+
+#: WHERE THE PRODUCER WRITES IT, asked of the router rather than spelled here. R-0915-151/160.
+#: These five arms read `reports/phase1_one_shot.json` until R-0915-151 moved the producer onto
+#: `_path_layout`'s router -- the flat location is one the repo's own
+#: `reports_subfolder_taxonomy_check` calls a stray file. They were red on that landing and the
+#: regression set that landed it did not include this file, which is how they stayed red.
+def _phase1_report(project: Path) -> Path:
+    return _pl.report_path(project, "phase1_one_shot.json")
+
 
 PROG = Path(__file__).resolve().parent.parent / \
     "phase1_one_shot_runner.py"
@@ -117,7 +127,7 @@ def test_empty_fixture_is_blocked_not_a_pass(tmp_path):
     project.mkdir(parents=True, exist_ok=True)
     cp = _run([str(project), "--ic-name", "TST_CHIP"])
     assert cp.returncode == 1, cp.stderr
-    rep = project / "reports" / "phase1_one_shot.json"
+    rep = _phase1_report(project)
     assert rep.is_file()
     body = json.loads(rep.read_text())
     assert body["phase"] == 1
@@ -148,7 +158,7 @@ def test_reverse_one_staged_input_and_the_same_run_completes(tmp_path):
               timeout=_RUN_TIMEOUT_S)
     assert cp.returncode == 0, cp.stderr
     body = json.loads(
-        (project / "reports" / "phase1_one_shot.json").read_text())
+        _phase1_report(project).read_text())
     assert body["verdict"] in ("PASS", "PASS_WITH_WAIVERS")
     ingest = next(s for s in body["steps"]
                   if s["name"] == "phase1_ingest_render")
@@ -176,7 +186,7 @@ def test_integration_report_shape(tmp_path):
               timeout=_RUN_TIMEOUT_S)
     assert cp.returncode == 0
     body = json.loads(
-        (project / "reports" / "phase1_one_shot.json").read_text())
+        _phase1_report(project).read_text())
     for k in ("phase", "project", "ic_name", "steps", "verdict"):
         assert k in body, f"missing key {k} in report"
     assert body["ic_name"] == "TST_CHIP"
@@ -193,7 +203,7 @@ def test_step_detail_explains_missing_input(tmp_path):
     cp = _run([str(project)])
     assert cp.returncode == 1
     body = json.loads(
-        (project / "reports" / "phase1_one_shot.json").read_text())
+        _phase1_report(project).read_text())
     ingest = next(s for s in body["steps"]
                   if s["name"] == "phase1_ingest_render")
     detail = ingest["detail"].lower()
@@ -217,7 +227,7 @@ def test_input_docs_directory_changes_branch(tmp_path):
     (docs / "tst_chip_spec.txt").write_text(
         "TST_CHIP — minimal stub for orchestrator test\n")
     cp = _run([str(project), "--ic-name", "TST_CHIP"])
-    rep = project / "reports" / "phase1_one_shot.json"
+    rep = _phase1_report(project)
     assert rep.is_file()
     body = json.loads(rep.read_text())
     assert body["ic_name"] == "TST_CHIP"

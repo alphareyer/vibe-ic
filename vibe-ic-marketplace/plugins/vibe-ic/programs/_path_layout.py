@@ -758,6 +758,51 @@ def step_output_record_path(project: Path, sid) -> Path:
     except Exception:                                       # pragma: no cover
         name = str(sid).replace(".", "_").lower()
     return project / STEP_OUTPUT_RECORD_DIR / f"{name}.json"
+#: WHERE A REPORT USED TO BE WRITTEN, by filename. READ SIDE ONLY. R-0915-160.
+#:
+#: `report_path` above is the ONE answer to "where does this report go", and that is
+#: deliberately not negotiable: a producer and its readers disagreeing about a path is the
+#: defect R-0915-151 closed, and a reader that enumerates locations for the CURRENT run goes
+#: stale the next time a producer moves.
+#:
+#: Reading a project that ALREADY EXISTS is a different question. `phase1_one_shot_runner`
+#: wrote `reports/phase1_one_shot.json` until R-0915-151 moved it onto the router, and every
+#: project produced before that still has its pass-1 record there. A reader that cannot see
+#: it reports the pass as missing -- measured: `run_second_pass_only` read only the routed
+#: path, so on such a project pass 1 was NOT carried forward, the second pass published a
+#: record saying so, and the front door halted at phase 1 on a project that had in fact run.
+#: `vibe_ic_entry_guard` already tolerated both spellings and called this one "legacy"; this
+#: is that tolerance with ONE definition instead of four.
+LEGACY_REPORT_PATHS: dict = {
+    "phase1_one_shot.json": "reports/phase1_one_shot.json",
+}
+
+
+def report_path_for_reading(project: Path, filename: str):
+    """``(path, is_legacy)`` -- where to READ this report from on an existing project.
+
+    The routed path when something is there, else a legacy spelling when one exists and is
+    there, else the routed path again so a "not found" message names the canonical place.
+    `is_legacy` is returned rather than logged because the caller is the one that must
+    DISCLOSE it: a reader silently accepting an old layout is how two layouts survive.
+
+    This never decides where to WRITE. `report_path` is the only answer to that.
+    """
+    routed = report_path(project, filename)
+    try:
+        if routed.is_file():
+            return routed, False
+    except OSError:                                        # pragma: no cover
+        pass
+    legacy_rel = LEGACY_REPORT_PATHS.get(filename)
+    if legacy_rel:
+        legacy = project / legacy_rel
+        try:
+            if legacy.is_file():
+                return legacy, True
+        except OSError:                                    # pragma: no cover
+            pass
+    return routed, False
 
 
 # Ordered list of valid reports/ children (for the taxonomy whitelist

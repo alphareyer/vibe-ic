@@ -1339,11 +1339,26 @@ def run_second_pass_only(project: Path, ic_name: str) -> int:
     # reader learning a second place to look.
     out = _pl.report_path(project, "phase1_one_shot.json")
     out.parent.mkdir(parents=True, exist_ok=True)
+    # THE WRITE IS THE ROUTER'S (above). THE READ MUST ALSO SEE AN OLDER PROJECT.
+    # R-0915-160. Pass 1 of a project produced before R-0915-151 is at the flat path, and
+    # reading only the routed one reported that pass as MISSING: `carried=False`, a second
+    # pass publishing "UNREADABLE -- the pass-1 record could not be carried forward", and the
+    # front door halting at phase 1 on a project that had in fact run. One shared read-side
+    # resolver, and the legacy hit is DISCLOSED in the summary rather than accepted quietly.
+    _read_from, _read_legacy = _pl.report_path_for_reading(
+        project, "phase1_one_shot.json")
     try:
-        summary = json.loads(out.read_text(errors="replace"))
+        summary = json.loads(_read_from.read_text(errors="replace"))
         if not isinstance(summary, dict):
             raise ValueError("phase1_one_shot.json top level is not an object")
         carried = True
+        if _read_legacy:
+            summary["pass1_record_read_from"] = str(
+                _read_from.relative_to(project))
+            summary["pass1_record_layout"] = (
+                "LEGACY -- pass 1 was written at the pre-R-0915-151 flat path "
+                f"{_read_from.relative_to(project)}; it was carried forward, and this "
+                f"pass publishes at the routed path {out.relative_to(project)}")
     except (OSError, ValueError) as exc:
         # DEGRADE LOUDLY. A second pass over a project whose pass-1 summary is
         # gone or unreadable still reports, and it says so rather than
