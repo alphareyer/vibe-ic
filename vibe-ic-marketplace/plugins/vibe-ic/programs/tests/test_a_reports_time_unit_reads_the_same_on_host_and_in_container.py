@@ -222,3 +222,155 @@ def test_a_deck_gap_does_not_override_a_readable_liberty(tmp_path,
     unit, basis = E._sta_time_unit(text)
     assert unit == "ns", (unit, basis)
     assert "the deck stated it could not establish the unit" in basis, basis
+
+
+# ============================================================================
+# (3) THE PDK IS IMAGE CONTENT, NOT A MOUNT — review wrb6czvv3.
+#
+# The first cut translated mounts and its test FAKED one, so it proved nothing
+# about the real case. MEASURED on this host: the EDA container reports mounts
+# for the lane and for /foss/designs and NONE covering /foss/pdks; the liberty
+# lives at /foss/pdks/... INSIDE the image (20,416,204 bytes, time_unit at byte
+# offset 769) and exists on the host at no spelling. A host-side audit that
+# only translates mounts therefore still refuses — which is exactly what run23
+# did. These arms use the REAL path, with no mount faked anywhere.
+# ============================================================================
+
+import json as _json  # noqa: E402
+import os as _os      # noqa: E402
+import shutil as _shutil  # noqa: E402
+import subprocess as _sp  # noqa: E402
+
+import pytest  # noqa: E402
+
+#: The liberty spm run23 actually timed against, as the deck stamped it.
+_IMAGE_LIBERTY = (
+    "/foss/pdks/ciel/gf180mcu/versions/"
+    "b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0/gf180mcuD/libs.ref/"
+    "gf180mcu_fd_sc_mcu7t5v0/lib/gf180mcu_fd_sc_mcu7t5v0__ff_n40C_5v50.lib")
+
+
+def _image_ref_or_skip() -> str:
+    """The pinned image, or skip — this arm needs the real one."""
+    if not _shutil.which("docker"):
+        pytest.skip("docker is not available here")
+    try:
+        import _eda_pin as _pin
+        ref = _pin.image_reference()
+    except Exception:                                        # noqa: BLE001
+        pytest.skip("the pinned image reference could not be resolved")
+    if not ref:
+        pytest.skip("no pinned image reference")
+    r = _sp.run(["docker", "image", "inspect", ref],
+                capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        pytest.skip(f"the pinned image is not present locally: {ref}")
+    return ref
+
+
+def _skip_unless_image_content() -> None:
+    """These arms are about the HOST case and only exist there.
+
+    Run INSIDE the EDA image the path is ordinary image content and opens
+    directly, so there is nothing to translate and nothing to read from an
+    image — the arms would pass for the wrong reason. The suite's own harness
+    runs in that image, so they skip there and are exercised on the host.
+    That asymmetry is the POINT of this fix and is stated rather than hidden.
+    """
+    if Path(_IMAGE_LIBERTY).exists():
+        pytest.skip("running where the PDK is already readable (in-image); "
+                    "these arms exercise the host case")
+
+
+def test_the_pdk_path_is_image_content_not_a_mount():
+    """THE PREMISE, measured rather than assumed: wherever this runs, the
+    liberty is reachable EITHER directly (in-image) OR only through the image.
+    It is never a bind mount — no mount on this fleet covers /foss/pdks, which
+    is why translating mounts alone could not answer."""
+    import _designs_root as dr
+    try:
+        mounts = dr.container_mounts()
+    except Exception:                                        # noqa: BLE001
+        mounts = []
+    covering = [d for _s, d in mounts
+                if str(d).rstrip("/") and _IMAGE_LIBERTY.startswith(
+                    str(d).rstrip("/") + "/")]
+    assert not covering, (
+        f"a mount now covers the PDK ({covering}); the image-read path is no "
+        f"longer the only answer and this fix needs re-deriving")
+
+
+def test_an_image_internal_liberty_is_read_from_the_runs_own_image(tmp_path):
+    """THE run23 CASE, for real: no mount is faked, the path is image content,
+    and the image is the one the RUN recorded — not a default container."""
+    _skip_unless_image_content()
+    ref = _image_ref_or_skip()
+    project = tmp_path / "run"
+    (project / "reports").mkdir(parents=True)
+    (project / "reports" / "container_image.json").write_text(
+        _json.dumps({"container": "irrelevant-to-this-read",
+                     "image_ref": ref}))
+    unit, basis = E._liberty_time_unit(_report(_IMAGE_LIBERTY),
+                                       project=project)
+    assert unit == "ns", (unit, basis)
+    assert "read from image" in basis, basis
+    assert ref in basis, basis
+
+
+def test_the_explicit_image_beats_the_runs_record(tmp_path):
+    """`--image` states it outright; the run's record is the fallback, and the
+    caller's word wins when both are present."""
+    _skip_unless_image_content()
+    ref = _image_ref_or_skip()
+    project = tmp_path / "run"
+    (project / "reports").mkdir(parents=True)
+    (project / "reports" / "container_image.json").write_text(
+        _json.dumps({"image_ref": "ghcr.io/vibeic/vibeic-eda@sha256:" + "0" * 64}))
+    unit, basis = E._liberty_time_unit(_report(_IMAGE_LIBERTY),
+                                       project=project, image=ref)
+    assert unit == "ns", (unit, basis)
+    assert ref in basis, basis
+
+
+def test_no_recorded_image_stays_not_measured_by_name(tmp_path):
+    """A run that never recorded what it ran against cannot have its
+    image-internal PDK read, and says so — it does not fall back to a default
+    container, which would answer a different question."""
+    _skip_unless_image_content()
+    project = tmp_path / "run"
+    (project / "reports").mkdir(parents=True)
+    unit, basis = E._liberty_time_unit(_report(_IMAGE_LIBERTY),
+                                       project=project)
+    assert unit is None
+    assert "could not be read" in basis, basis
+    assert "container_image.json" in basis, basis
+
+
+def test_an_unreachable_image_stays_not_measured_by_name(tmp_path):
+    """A recorded image that is not here is not a unit."""
+    _skip_unless_image_content()
+    if not _shutil.which("docker"):
+        pytest.skip("docker is not available here")
+    project = tmp_path / "run"
+    (project / "reports").mkdir(parents=True)
+    (project / "reports" / "container_image.json").write_text(
+        _json.dumps({"image_ref":
+                     "ghcr.io/vibeic/vibeic-eda@sha256:" + "0" * 64}))
+    unit, basis = E._liberty_time_unit(_report(_IMAGE_LIBERTY),
+                                       project=project)
+    assert unit is None, (unit, basis)
+    assert "could not be read" in basis, basis
+
+
+def test_the_cli_carries_the_image_to_the_reader():
+    """Requirement 4: the caller states the image explicitly. The flag exists,
+    and setting it reaches the module the reader consults."""
+    src = (PROGRAMS / "eda_report_audit.py").read_text()
+    assert '"--image"' in src, "no --image flag to pass the run's image with"
+    assert "set_image_override(" in src, "the flag does not reach the reader"
+    E.set_image_override("ghcr.io/x@sha256:" + "1" * 64)
+    try:
+        assert E._STA_IMAGE_OVERRIDE == "ghcr.io/x@sha256:" + "1" * 64
+    finally:
+        E.set_image_override(None)
+    assert E._STA_IMAGE_OVERRIDE is None
