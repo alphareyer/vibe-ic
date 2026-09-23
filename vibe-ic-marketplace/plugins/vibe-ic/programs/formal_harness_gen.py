@@ -235,6 +235,38 @@ def _obligation(layer: str, key: str, description: str, path: Path) -> dict:
     }
 
 
+# R-0924-2 — AN OBLIGATION WHOSE CONTENT IS A NAME, NOT A BEHAVIOUR.
+#
+# `resets.N.name = rst` states WHICH PORT is the reset. A name is not a
+# property of any trace, so no assertion can discharge it, and demanding one
+# kept Step 5 partial forever (MEASURED on spm run23: 4 of 5 obligations proved
+# unbounded, the fifth `resets.0.name`). Such an obligation is discharged
+# STRUCTURALLY by `formal_proof_evidence_check`: the harness must bind the
+# declared port as the reset AND a PROVEN property of the same run must be
+# guarded by it. It is recorded DISCHARGED_BY_BINDING with that evidence, never
+# counted as a trace proof; absent / mismatched / unproven it stays outstanding.
+_BINDING_ID_RE = re.compile(r"L8\.(?:[\w.-]*\.)?(resets)\.\d+\.name")
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+BINDING_ROLES = {"resets": "reset"}
+
+
+def binding_obligation(row: dict) -> Optional[dict]:
+    """{"role", "port"} when this obligation's content is a port NAME, else None.
+
+    Read from the row itself (id + the declared value in its description), so
+    a results.json written before this classification is judged the same way."""
+    if not isinstance(row, dict):
+        return None
+    m = _BINDING_ID_RE.fullmatch(str(row.get("id", "")))
+    if not m:
+        return None
+    desc = str(row.get("description", ""))
+    value = desc.split("=", 1)[1].strip() if "=" in desc else ""
+    if not _IDENT_RE.fullmatch(value):
+        return None
+    return {"role": BINDING_ROLES[m.group(1)], "port": value}
+
+
 _TIMING_KEY_RE = re.compile(
     r"reset|latency|turnaround|timeout|cycle|holdoff|pulse", re.IGNORECASE)
 # A leaf VALUE that itself states sequencing (prose declarations such as
@@ -384,8 +416,13 @@ def declaration_obligations(project: Optional[Path]) -> dict:
                         "L6", f"reject_rule.{idx}", str(rule), path))
             else:
                 for key, text in _timing_semantics(data):
-                    obligations.append(_obligation(
-                        "L8", key, f"declared temporal behavior {key}={text}", path))
+                    row = _obligation(
+                        "L8", key, f"declared temporal behavior {key}={text}", path)
+                    binding = binding_obligation(row)
+                    if binding:
+                        row["kind"] = "binding"       # R-0924-2: a name
+                        row["binding"] = binding
+                    obligations.append(row)
 
     # Stable IDs are part of the handoff contract. Multiple L8 files can carry
     # the same declaration; de-duplicate rather than inflate the denominator.
