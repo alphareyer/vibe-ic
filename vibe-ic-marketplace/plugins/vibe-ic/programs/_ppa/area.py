@@ -808,6 +808,30 @@ _PLACEMENT_SPREAD_HEADROOM = 1.5
 #: the bin-density objective buys nothing and the solver gets numerically
 #: unhappy; the value is CLAMPED and the clamp is DISCLOSED, never silent.
 _PLACEMENT_DENSITY_FLOOR = 0.05
+#: How far the FLOOR may sit above the design's OWN natural density before the
+#: derived target stops describing this design at all.
+#:
+#: MEASURED, spm x gf180mcuD (lane icsub5, 2026-09-23), 273 cells in a
+#: 2376x2376 um ring-pinned core — natural density 0.064 %, so the 0.05 floor
+#: is 78x the natural. `global_placement -density 0.05` DIVERGED:
+#:     | iter | overflow | HPWL         | d(HPWL) | gradient
+#:     | 1880 |  0.4321  | 2.666727e+04 | +0.00%  | 3.00e+25
+#:     | 2060 |  0.4321  | 2.666727e+04 | +0.00%  | 1.96e+29
+#:     | 2080 |  0.3903  | 3.934455e+04 | +20.90% | 5.18e+29
+#:     [ERROR GPL-0305] RePlAce diverged during gradient descent calculation,
+#:     resulting in an invalid step length (Inf or NaN).
+#: Overflow sat at 0.4321 for ~200 iterations with wirelength flat while the
+#: density weight grew geometrically: the target was UNREACHABLE. 273 cells
+#: cannot be spread to a uniform 5 % across 5.6 mm^2 — the row/bin granularity
+#: cannot represent it — so the solver escalated the density force without
+#: bound until the step length overflowed. `routed.def` was never written.
+#: subservient, by contrast, sits at 2.09x (natural 2.39 %, floor 0.05) and
+#: converges to a VERIFIED router_drc=0.
+#: So the derived target is used only while the floor stays within this ratio
+#: of the design's own density. Past it the design is too sparse for any
+#: density target to describe, and today's number stands — DISCLOSED, never
+#: silently.
+_PLACEMENT_FLOOR_MAX_RATIO = 10.0
 
 
 def real_core_placement_density(cell_area_um2: float, core_w: int, core_h: int,
@@ -848,6 +872,19 @@ def real_core_placement_density(cell_area_um2: float, core_w: int, core_h: int,
     density = want
     clamped = ""
     if density < _PLACEMENT_DENSITY_FLOOR:
+        # REACHABILITY, measured (GPL-0305 on spm — see the constant above).
+        # A floor that towers over the design's own density is not a target the
+        # placer can reach; asking for it makes RePlAce escalate the density
+        # force until the step length overflows.
+        if _PLACEMENT_DENSITY_FLOOR > natural * _PLACEMENT_FLOOR_MAX_RATIO:
+            return None, (
+                f"cell area {cell_area_um2:.0f}um^2 / core {core_w}x{core_h}um "
+                f"= natural {100.0 * natural:.3f}%, and the placer floor "
+                f"{_PLACEMENT_DENSITY_FLOOR:g} is "
+                f"{_PLACEMENT_DENSITY_FLOOR / natural:.0f}x that — beyond the "
+                f"{_PLACEMENT_FLOOR_MAX_RATIO:g}x this design's density can "
+                f"reach, so no derived target describes it and the caller's "
+                f"own value stands (GPL-0305 divergence, measured on spm)")
         density = _PLACEMENT_DENSITY_FLOOR
         clamped = (f"; raised to the placer floor {_PLACEMENT_DENSITY_FLOOR:g}"
                    f" (asked {want:.4f})")

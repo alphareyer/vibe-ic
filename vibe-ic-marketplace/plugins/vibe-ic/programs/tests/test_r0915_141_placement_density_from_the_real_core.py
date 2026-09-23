@@ -160,22 +160,56 @@ SPM_CORE = (2376, 2376)              # the ring interior
 SPM_UTIL_TODAY = 0.40                # what run9 actually emitted
 
 
-def test_spm_is_ring_pinned_so_its_density_DOES_change_and_by_how_much():
-    """HONEST PIN, not a claim of no-change. If this number is ever to move,
-    a reader sees it here beside the run it came from."""
-    d, basis = P.real_core_placement_density(
+def test_spm_is_REFUSED_because_the_floor_is_unreachable_for_it():
+    """MEASURED REFUSAL, not a preference. `-density 0.05` DIVERGED on spm:
+
+        | 1880 | 0.4321 | 2.666727e+04 | +0.00%  | 3.00e+25
+        | 2060 | 0.4321 | 2.666727e+04 | +0.00%  | 1.96e+29
+        | 2080 | 0.3903 | 3.934455e+04 | +20.90% | 5.18e+29
+        [ERROR GPL-0305] RePlAce diverged during gradient descent calculation,
+        resulting in an invalid step length (Inf or NaN).
+
+    Overflow sat at 0.4321 for ~200 iterations with wirelength flat while the
+    density force grew geometrically, and `routed.def` was never written. 273
+    cells cannot be spread to a uniform 5 % over 5.6 mm^2. So the derived target
+    is REFUSED here and the caller's own value stands."""
+    d, why = P.real_core_placement_density(
         SPM_CELL_AREA, *SPM_CORE, SPM_UTIL_TODAY)
-    assert d == P._PLACEMENT_DENSITY_FLOOR       # 0.4 -> 0.05
-    assert "natural 0.06%" in basis
-    assert d < SPM_UTIL_TODAY
+    assert d is None, (d, why)
+    assert "natural 0.064%" in why
+    assert "beyond the 10x" in why
+    assert "GPL-0305" in why
+
+
+def test_the_reachability_bound_does_NOT_refuse_subservient():
+    """THE OTHER DIRECTION. subservient's floor is 2.09x its natural density,
+    well inside the bound, so the derivation still applies and the measured
+    41 -> 0 result stands."""
+    d, basis = P.real_core_placement_density(
+        SUB_CELL_AREA, *SUB_CORE, UTIL_TODAY)
+    assert d == P._PLACEMENT_DENSITY_FLOOR
+    assert "beyond the" not in basis
+
+
+@pytest.mark.parametrize("ratio,applies", [(2.0, True), (9.0, True),
+                                           (11.0, False), (80.0, False)])
+def test_the_bound_is_the_ratio_and_nothing_else(ratio, applies):
+    """Sweep the only thing the bound looks at: floor / natural."""
+    core = 1000
+    natural = P._PLACEMENT_DENSITY_FLOOR / ratio
+    cell_area = natural * core * core
+    d, _why = P.real_core_placement_density(cell_area, core, core, 0.30)
+    assert (d is not None) == applies
+
+
+def test_the_bound_is_pinned():
+    assert P._PLACEMENT_FLOOR_MAX_RATIO == 10.0
 
 
 def test_spm_shows_compression_alone_does_not_predict_DRVs():
     """The counter-evidence this change must not pretend away: spm ran at a
-    LARGER compression ratio than subservient and still signed off DRC 0.
-    So deriving the density from the real core is a principled fix, NOT a
-    proven cure for subservient's 41 -- that is what the copy-validation
-    measures, and it is reported whatever it says."""
+    LARGER compression ratio than subservient and still signed off DRC 0 —
+    which is also why refusing to touch it is the right answer."""
     sub_ratio = SUB_CELL_AREA / SUB_CORE[0] / SUB_CORE[1]
     spm_ratio = SPM_CELL_AREA / SPM_CORE[0] / SPM_CORE[1]
     assert spm_ratio < sub_ratio          # spm is the sparser of the two
