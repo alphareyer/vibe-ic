@@ -256,6 +256,10 @@ from __future__ import annotations
 import ast
 import functools
 import re
+import yaml
+import tempfile
+import os
+import copy
 import shlex
 from collections import Counter
 from typing import Dict, List, Set, Tuple
@@ -2223,3 +2227,40 @@ def test_the_scope_covers_outputs_conditions_and_gate_clauses():
     conditions on an artefact reads it just as surely as one that declares it."""
     named = paths_named_by_stage("stage3")
     assert any(p.endswith("routed.def") for p in named), sorted(named)[:6]
+
+
+def test_a_real_blocks_on_gap_still_reddens(monkeypatch):
+    """THE DIRECTION THAT MATTERS MOST: the narrowing must not have bought silence.
+
+    The scope rule only ever drops a read INFERRED from a shared program's string
+    constants. The YAML-DECLARED route -- a step's own gate or condition naming
+    another step's required_output -- is untouched, and that is the route a real
+    `blocks_on` gap travels on.
+
+    DRIVEN THROUGH `d5_problems`, the function that emits the finding, with ONE
+    declared read injected for step 2: step 21's `routed.def`, which step 2's
+    blocks_on closure (['0.5ic', '1', 'D1']) does not reach. Injecting at the
+    derivation rather than swapping the flow yaml is deliberate -- the first cut of
+    this arm rewrote a copy of the flow, `flowref`'s own caches did not pick it up,
+    and the arm's guard caught that it was measuring nothing. The emitter is the
+    subject; the derivation is its input.
+    """
+    real = derived_dependencies
+    gap = ("21", "phase3/stage3/pnr/routed.def",
+           "yaml gate/condition declares 'phase3/stage3/pnr/routed.def'")
+
+    def _with_gap(step_id):
+        rows = list(real(step_id))
+        if F.normalize_id(step_id) == "2":
+            rows.append(gap)
+        return tuple(rows)
+
+    monkeypatch.setitem(globals(), "derived_dependencies", _with_gap)
+    problems = d5_problems("2")
+    assert any("D5-MISSING-EDGE" in q and "routed.def" in q for q in problems), (
+        "a step that DECLARES it reads another step's required_output with no "
+        f"blocks_on edge must still be reported: {problems}")
+    # AND THE GAP IS WHAT PRODUCED IT: without the injection the same call is
+    # clean, so this arm cannot pass on some pre-existing finding.
+    monkeypatch.setitem(globals(), "derived_dependencies", real)
+    assert not [q for q in d5_problems("2") if "D5-MISSING-EDGE" in q]
