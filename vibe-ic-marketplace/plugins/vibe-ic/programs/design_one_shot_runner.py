@@ -22057,10 +22057,14 @@ def step_final_audit(project: Path, phase: int = 3,
             f"standalone; transcript: {transcript}",
             [str(transcript)],
             extras={"finding": "AUDIT_TIMEOUT", "timeout_s": budget})
-    # v1.6.100: check PASS_WITH_WAIVERS FIRST — "Overall: PASS" is a
-    # substring of "Overall: PASS_WITH_WAIVERS" so the previous order
-    # never reached the WAIVED branch (latent bug surfaced by the #33
-    # final_audit subprocess test).
+    # v1.6.100 USED TO SAY: "check PASS_WITH_WAIVERS FIRST — `Overall: PASS` is a
+    # substring of `Overall: PASS_WITH_WAIVERS` so the previous order never reached the
+    # WAIVED branch (latent bug surfaced by the #33 final_audit subprocess test)." That
+    # hazard is GONE, not merely avoided: nothing here matches substrings any more.
+    # `_final_audit_verdict_word` returns the audit's word, and the branches compare it
+    # for EQUALITY against `verdict.Verdict`, so no word can be a prefix of another and
+    # the ordering carries no meaning to get wrong. The note is kept because a reader who
+    # finds the old ordering in history deserves to know why it stopped mattering.
     # THE POPULATION THE VERDICT WAS COMPUTED OVER, carried as a field rather
     # than left in the transcript. Attached to EVERY outcome below — a FAIL
     # over a partial denominator is a different fact from a FAIL over a whole
@@ -22073,7 +22077,50 @@ def step_final_audit(project: Path, phase: int = 3,
                 f"sub-gate(s) returned a verdict; {no_verdict} returned NONE, "
                 f"so this verdict is over {meas['invoked']} gates, not "
                 f"{meas['registered']}.\n{head}")
-    if "Overall: PASS_WITH_WAIVERS" in out or "Overall: PASS" in out:
+    # THE AUDIT HAS TWO CHANNELS AND THIS STEP READ ONE. R-0915-? (next/icslot-fa).
+    #
+    # MEASURED, and it is a DESIGNED state of `flow_compliance_check`, not a corner: its
+    # vibe-ic#2092 canary prints the run's verdict line and then, if the report's own
+    # equations do not hold, prints "THIS REPORT DOES NOT RECONCILE ... do not quote its
+    # counts", says "(the run's own status is unchanged and still {overall}.)" and
+    # `return 1`. Its own contract spells this out -- "the report is still WRITTEN, with
+    # `reconciled: false` ..., and the run exits non-zero. `run_status` is untouched --
+    # what changes is that the artefact stops CERTIFYING its own arithmetic."
+    #
+    # So `Overall: PASS` printed WITH rc 1 is reachable by a shipped path whose whole
+    # purpose is to reach it. This step consulted rc only for 124 (timeout) and recorded
+    # PASS for it: the audit withdrew its certification in the same breath and the
+    # orchestrator wrote down a pass.
+    #
+    # AND A PASS OVER A WITHDRAWN AUDIT IS NOT A FAIL EITHER. Nothing was found wrong
+    # with the design; the AUDIT stopped vouching for its own numbers. That is
+    # "cannot certify", which is the same reading R-0915-159 applies twenty lines down
+    # and `_p0_umbrella_status` applies inside the audit: NOT_MEASURED, carrying the rc
+    # and the transcript so a reader sees which of the two it was.
+    #
+    # WHAT I DID NOT CHANGE, having no reachability for it: a stream with NO `Overall:`
+    # line at all still falls through to FAIL below. Every way I could construct that
+    # state also exits non-zero, and widening the absence case needs its own measurement.
+    _verdict_word = _final_audit_verdict_word(out)
+    _green_words = (_V.Verdict.PASS.value, _V.Verdict.PASS_WITH_WAIVERS.value)
+    if _verdict_word in _green_words and rc != 0:
+        return StepResult(
+            "final_audit", "NOT_MEASURED", time.time() - t0,
+            f"AUDIT DID NOT CERTIFY — the compliance audit printed "
+            f"`Overall: {_verdict_word}` and then exited {rc}. A run word and a "
+            f"non-zero exit are the audit's two accounts of itself and they "
+            f"disagree, so this is NOT a verdict on the project: the known shape "
+            f"is the audit's own reconciliation canary (vibe-ic#2092), which "
+            f"leaves the word standing and refuses to certify the arithmetic "
+            f"behind it (\"do not quote its counts\"). Recorded as an inability "
+            f"to certify, never as a pass and never as a defect found; "
+            f"transcript: {transcript}\n{head}",
+            [str(transcript)],
+            extras={"structural_measurement": meas,
+                    "finding": "AUDIT_DID_NOT_CERTIFY",
+                    "audit_rc": rc, "audit_word": _verdict_word},
+            reason_class=_V.ReasonClass.EXECUTION_ERROR)
+    if _verdict_word in _green_words:
         # vibe-ic — A VERDICT OVER A FRACTION OF THE POPULATION IS NOT A PASS.
         #
         # `flow_compliance_check` computes `Overall` from sub-gate records whose
@@ -22112,7 +22159,7 @@ def step_final_audit(project: Path, phase: int = 3,
         # the audit's `Overall: PASS_WITH_WAIVERS` and then wrote `WAIVED`,
         # which is the translation the ruling forbids and which the literal
         # ratchet could not see because the status argument is a variable.
-        _waived = "Overall: PASS_WITH_WAIVERS" in out
+        _waived = _verdict_word == _V.Verdict.PASS_WITH_WAIVERS.value
         status = (_V.Verdict.PASS_WITH_WAIVERS.value if _waived
                   else _V.Verdict.PASS.value)
         return StepResult("final_audit", status,
@@ -22142,7 +22189,7 @@ def step_final_audit(project: Path, phase: int = 3,
     # so the flow proceeds and still refuses to certify. What changes is that it
     # stops calling an absence a failure, and it CARRIES THE ROWS: a reader sees
     # which steps were not measured and why, instead of one translated word.
-    if "Overall: NOT_MEASURED" in out:
+    if _verdict_word == _V.Verdict.NOT_MEASURED.value:
         _nm_rows = _not_measured_rows(out)
         _nm_note = ""
         if _nm_rows:
@@ -22161,6 +22208,33 @@ def step_final_audit(project: Path, phase: int = 3,
                       head,
                       [str(transcript)],
                       extras={"structural_measurement": meas})
+
+
+#: THE AUDIT'S ONE FINAL VERDICT LINE. `flow_compliance_check` prints it exactly once,
+#: at its own tail: `print(f"\nOverall: {overall}  (strict={not args.lenient})")`.
+_FINAL_VERDICT_RE = re.compile(r"^Overall:\s+(?P<word>\S+)", re.M)
+
+
+def _final_audit_verdict_word(out: str) -> Optional[str]:
+    """The audit's OWN final verdict word, or `None` if it printed no verdict line.
+
+    THE SUBSTRING TEST THIS REPLACES, and why a substring was never the contract.
+    This step read `"Overall: PASS" in out` -- a search of the WHOLE captured stream for
+    a phrase. Three things follow from that, and the third is the one that bites:
+
+      * it cannot tell the audit's verdict line from the same phrase appearing anywhere
+        else in the stream;
+      * `"Overall: PASS"` is a prefix of `"Overall: PASS_WITH_WAIVERS"`, which is why the
+        branches had to be ordered by hand and why v1.6.100 found them ordered wrongly;
+      * and it reads a WORD while ignoring the audit's other channel entirely -- its EXIT
+        CODE. See `step_final_audit` for the measured path where those two disagree.
+
+    Anchored to the start of a line, and the LAST match wins: the auditor prints one such
+    line, so "the last one" is that line whenever there is one, and cannot be a phrase
+    quoted mid-stream. Pure; `None` for a stream with no verdict line at all.
+    """
+    matches = _FINAL_VERDICT_RE.findall(out or "")
+    return matches[-1] if matches else None
 
 
 #: A `flow_compliance_check` step line that measured nothing, and its reason.

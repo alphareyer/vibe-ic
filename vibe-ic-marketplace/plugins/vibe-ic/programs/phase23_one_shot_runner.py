@@ -53,6 +53,7 @@ from typing import Any, Dict
 import _path_layout as _pl
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
+import verdict as _V  # noqa: E402 — the ONE vocabulary and its precedence
 
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
@@ -63,6 +64,40 @@ def _run_phase(name: str, runner: Path, args: list[str]
     print(f"\n{'='*70}\n=== {name} → {runner.name}\n{'='*70}")
     cp = subprocess.run([sys.executable, str(runner), *args])
     return cp.returncode, {}
+
+
+def _phase_verdict_tiers() -> "dict[str, tuple[str, ...]]":
+    """`{chained tier: (phase verdict words that roll into it, ...)}` — THE ONE SOURCE.
+
+    ASKED RATHER THAN COPIED: every word `verdict.run_verdict` can hand up is a key here,
+    in `RUN_PRECEDENCE` order, so this table cannot fall behind the vocabulary the way a
+    hand-kept list does — which is exactly how it fell behind #2568 and refused
+    NOT_MEASURED as unrecognised.
+
+    `NOT_APPLICABLE` is deliberately absent. It is in `verdict.Verdict`, but
+    `run_verdict` never returns it (it contributes nothing, and a run of only N/A steps is
+    NOT_MEASURED), so a tier for it would be a tier with no member.
+
+    A MODULE-LEVEL FUNCTION AND NOT A CONSTANT, because it is also what a test has to ask:
+    the invariant "every word a phase can hand up is classified here" cannot be checked
+    against a local inside the aggregator, and building the table twice would reinstate the
+    drift this closes.
+    """
+    tiers: "dict[str, tuple[str, ...]]" = {v.value: (v.value,) for v in _V.RUN_PRECEDENCE}
+    # THE TWO LEGACY SPELLINGS, and they are qualified, not clean. They are stated here
+    # rather than derived because `verdict.parse` does not know them: they are this
+    # aggregator's own compatibility surface, not part of the vocabulary.
+    #   WAIVED — a phase-2 spelling kept from the original list.
+    #   PASS_WITH_OPEN_SOURCE_CONSTRAINTS — `phase3_one_shot_runner._VERDICT_RANK` and
+    #   `flow_compliance_check` both rank it QUALIFIED, so it is qualified here too.
+    tiers[_V.Verdict.PASS_WITH_WAIVERS.value] += (
+        "WAIVED", "PASS_WITH_OPEN_SOURCE_CONSTRAINTS")
+    return tiers
+
+
+def _known_phase_verdicts() -> "set[str]":
+    """Every phase verdict word this runner can classify. `union(_TIERS.values())`."""
+    return {w for words in _phase_verdict_tiers().values() for w in words}
 
 
 def _aggregate_verdict(p2: dict, p3: dict, ran_p2: bool, ran_p3: bool) -> str:
@@ -91,19 +126,33 @@ def _aggregate_verdict(p2: dict, p3: dict, ran_p2: bool, ran_p3: bool) -> str:
 
     The known set is DERIVED — `union(_TIERS.values())`, one source — so a
     phase verdict cannot be classified-but-unknown or known-but-unclassified.
+
+    AND SINCE #2568 IT WAS MISSING A WORD IT COULD BE HANDED. MEASURED, not read off a
+    review: `verdict.RUN_PRECEDENCE` is `[FAIL, NOT_MEASURED, PASS_WITH_WAIVERS, PASS]`
+    and `verdict.run_verdict` returns exactly those four; `design_one_shot_runner.
+    _aggregate_verdict` delegates to it, and `phase23_one_shot_runner.main` reads the
+    phase-2 report's `verdict` straight off disk. So NOT_MEASURED is directly reachable
+    -- `step_final_audit`'s R-0915-159 branch publishes a NOT_MEASURED step on a real run
+    (subservient x gf180mcuD as a DIE), and with no step FAILing the phase word is
+    NOT_MEASURED. This table knew three of the four words, so a phase that measured
+    nothing was refused as `UNKNOWN_PHASE_VERDICT` -- loud and non-zero, so nothing was
+    laundered, but it is the wrong answer: the word is not unrecognised, it is a state
+    this repo has a tier for.
+
+    CORRECTING THE REVIEW THAT FOUND THIS: it named "NOT_MEASURED/INCOMPLETE". There is
+    no `INCOMPLETE` at this level -- it is not in `verdict.Verdict` at all (the five are
+    PASS, PASS_WITH_WAIVERS, FAIL, NOT_MEASURED, NOT_APPLICABLE) and `verdict.parse`
+    refuses it, so a phase cannot hand it up. Adding a tier for it would be a tier with no
+    member, which is its own defect. One word was missing, and one is added.
+
+    THE THREE CORE TIERS ARE NOW DERIVED FROM `verdict`, not retyped. That is the point of
+    this function's own complaint about the runners' "hand-maintained lists": a fourth
+    hand-kept copy drifts the same way the first three did, and this is how it drifted.
+    Only the two LEGACY SPELLINGS are stated here, because `verdict.parse` does not know
+    them and they are this aggregator's own compatibility surface, not the vocabulary.
     """
-    # THE ONE SOURCE. Every verdict word a phase runner can hand up, and the
-    # chained tier it rolls into.
-    _TIERS = {
-        "FAIL": ("FAIL",),
-        # WAIVED is a phase-2 spelling kept from the original list.
-        # PASS_WITH_OPEN_SOURCE_CONSTRAINTS: see the docstring — qualified
-        # everywhere else in the repo, so qualified here.
-        "PASS_WITH_WAIVERS": ("PASS_WITH_WAIVERS", "WAIVED",
-                              "PASS_WITH_OPEN_SOURCE_CONSTRAINTS"),
-        "PASS": ("PASS",),
-    }
-    _known = {w for words in _TIERS.values() for w in words}
+    _TIERS = _phase_verdict_tiers()
+    _known = _known_phase_verdicts()
 
     verdicts: list[tuple[str, str]] = []
     if ran_p2:
@@ -124,12 +173,19 @@ def _aggregate_verdict(p2: dict, p3: dict, ran_p2: bool, ran_p3: bool) -> str:
               f"phase that emitted it.", file=sys.stderr)
         return "UNKNOWN_PHASE_VERDICT:" + ",".join(unknown)
 
-    if any(v in _TIERS["FAIL"] for _, v in verdicts):
-        return "FAIL"
-    if any(v in _TIERS["PASS_WITH_WAIVERS"] for _, v in verdicts):
-        return "PASS_WITH_WAIVERS"
-    # NOT a catch-all: everything else was refused above.
-    return "PASS"
+    # THE PRECEDENCE IS `verdict.RUN_PRECEDENCE`, WALKED — not three hand-written ifs in
+    # an order someone has to keep right. FAIL > NOT_MEASURED > PASS_WITH_WAIVERS > PASS,
+    # which is what `verdict.run_verdict` applies over STEPS and what the front door's
+    # roll-up applies over PHASES (`fails` -> `unmeasured` -> `notes` -> pass). A phase
+    # that measured nothing is therefore not green and not a failure, and the chained word
+    # cannot be greener than the weakest phase.
+    _words = {v for _, v in verdicts}
+    for _tier in _V.RUN_PRECEDENCE:
+        if _words & set(_TIERS[_tier.value]):
+            return _tier.value
+    # NOT a catch-all: every word was either matched above or refused by name before it.
+    # Reached only when NOTHING ran, which `main` decides separately.
+    return _V.Verdict.PASS.value
 
 
 def main() -> int:
