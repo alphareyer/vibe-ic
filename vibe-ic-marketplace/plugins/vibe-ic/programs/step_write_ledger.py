@@ -280,6 +280,10 @@ _SUMMARIES = (
     "reports/orchestrator/vibe_ic_one_shot.json",
     "reports/orchestrator/phase3_one_shot.json",
     "reports/orchestrator/phase2_one_shot.json",
+    # R-0915-151 -- phase1's runner resolves this through `_path_layout`, which
+    # categorises it `orchestrator` like phase2's and phase3's. The flat spelling
+    # below it is kept for trees written before that, which are still read.
+    "reports/orchestrator/phase1_one_shot.json",
     "reports/phase1_one_shot.json",
     "reports/phase2_one_shot.json",
     "reports/phase3_one_shot.json",

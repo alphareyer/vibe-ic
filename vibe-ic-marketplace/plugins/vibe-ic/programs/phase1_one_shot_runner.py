@@ -1321,7 +1321,24 @@ def run_second_pass_only(project: Path, ic_name: str) -> int:
           "answer; the doc-extraction track is NOT re-run")
     reports = project / "reports"
     reports.mkdir(parents=True, exist_ok=True)
-    out = reports / "phase1_one_shot.json"
+    # ONE DEFINITION OF WHERE THIS REPORT LIVES, and it is the router's. R-0915-151.
+    #
+    # This runner used to write `reports/phase1_one_shot.json` while `_path_layout`
+    # categorises the file as `orchestrator`, like phase2's and phase3's. The tree then
+    # carried FOUR answers: the router's, this producer's, `vibe_ic_entry_guard`'s (which
+    # accepts both and calls the flat one "legacy"), and the front door's, which read the
+    # routed path and so read a path nothing wrote -- every phase1-inclusive run came out
+    # NOT_MEASURED at exit 1, and a real phase1 FAIL became NOT_MEASURED, so the halt never
+    # fired and phase2/3 ran on bad L documents.
+    #
+    # The ROUTER is the sanctioned answer, and the repo says so twice without being asked:
+    # `reports_subfolder_taxonomy_check` FAILS on the flat location -- measured, it reports
+    # `1 stray file(s): phase1_one_shot.json` -- and `vibe_ic_entry_guard` already documents
+    # `reports/orchestrator/phase1_one_shot.json` as the standalone runner's location and the
+    # flat one as legacy. So the producer moves INTO its own repo's taxonomy rather than the
+    # reader learning a second place to look.
+    out = _pl.report_path(project, "phase1_one_shot.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
     try:
         summary = json.loads(out.read_text(errors="replace"))
         if not isinstance(summary, dict):
@@ -1597,7 +1614,9 @@ def main() -> int:
         summary["steps_view"] = _pl.emit_steps_view(
             project, PROGRAMS_DIR, runner="phase1_one_shot_runner")
         summary["step_0_5ic"] = "ran" if rc_route == 0 else "FAILED to run"
-        (reports / "phase1_one_shot.json").write_text(
+        _p1 = _pl.report_path(project, "phase1_one_shot.json")   # the router, always
+        _p1.parent.mkdir(parents=True, exist_ok=True)
+        _p1.write_text(
             json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
         return max(rc, rc_route)
 
@@ -1682,7 +1701,9 @@ def main() -> int:
     # reports/audit/steps_view.json either way.
     summary["steps_view"] = _pl.emit_steps_view(
         project, PROGRAMS_DIR, runner="phase1_one_shot_runner")
-    (reports / "phase1_one_shot.json").write_text(
+    _p1 = _pl.report_path(project, "phase1_one_shot.json")       # the router, always
+    _p1.parent.mkdir(parents=True, exist_ok=True)
+    _p1.write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     print(f"\n=== phase1_one_shot_runner DONE (mode={mode}) ===")
     print(f"verdict: {summary['verdict']}")

@@ -70,6 +70,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 import _path_layout as _pl
+import _audit_scope                     # R-0915-150 (one scope predicate)
 import _runner_lock
 import canonical_run_admission as _canonical_admission
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -870,38 +871,22 @@ _FRESHNESS_TOLERANCE_S = 1.0
 
 
 def _phase_report_path(project: Path, report_name: str) -> Path:
-    """Where the phase's report REALLY is — measured, not assumed. R-0915-151.
+    """Where the phase's report is -- THE ROUTER'S ANSWER, and only that. R-0915-151.
 
-    MEASURED on spm run22, and it is not one convention:
+    My round-3 cut of this probed two locations and took the newer, because phase1's runner
+    wrote `reports/phase1_one_shot.json` while `_path_layout` categorises the file as
+    `orchestrator`. That closed the symptom by adding a FIFTH answer to a question that
+    already had four, and it consecrated a location the repo's own
+    `reports_subfolder_taxonomy_check` FAILS on -- measured: `1 stray file(s):
+    phase1_one_shot.json`. It could also read a STALE file from the other location purely
+    because it happened to be newer.
 
-        reports/phase1_one_shot.json                  <- phase1's runner writes HERE
-        reports/orchestrator/phase2_one_shot.json
-        reports/orchestrator/phase3_one_shot.json
-
-    `_pl.report_path` auto-routes everything to `reports/orchestrator/`, and phase1's
-    runner does not use it. My freshness rule read the routed path, which for phase1
-    nothing writes, so EVERY phase1-inclusive run came out NOT_MEASURED at exit 1 -- and
-    worse, a real phase1 FAIL became NOT_MEASURED, so the halt never fired and phase2/3
-    ran on bad L documents. The base hid the same mismatch behind the rc fallback: it
-    read `{}` and then invented PASS-or-FAIL from the exit code.
-
-    Both locations are checked; the one that exists wins, and the newer one wins when
-    both do. `_pl.report_path` remains the answer when neither exists, so the "left no
-    report" message still names the canonical place a reader should look.
+    The producer now resolves through this same router, so there is one definition and this
+    function is a single call to it. Nothing here needs to know which phase it is asked
+    about, which is the point: a reader that enumerates locations is a reader that goes
+    stale the next time a producer moves.
     """
-    routed = _pl.report_path(project, report_name)
-    flat = project / "reports" / report_name
-    present = []
-    for cand in (routed, flat):
-        try:
-            if cand.is_file():
-                present.append((cand.stat().st_mtime, cand))
-        except OSError:                                    # pragma: no cover
-            continue
-    if not present:
-        return routed
-    present.sort()
-    return present[-1][1]
+    return _pl.report_path(project, report_name)
 
 
 def _row_verdict(project: Path, report_name: str, rc: int, started_at: float,
@@ -1009,30 +994,28 @@ def _completion_audit_axis(project: Path, *, phase3_ran: bool,
                 "ignored": ["reports/audit/phase23_completion_audit.json"],
                 "pointers": pointers}
     doc = _read_report(audit)
-    scope = doc.get("scope")
-    if isinstance(scope, Mapping):
-        whole = bool(scope.get("whole_flow"))
-        signal = "scope.whole_flow"
-        if not whole:
-            return {"state": "NOT_MEASURED",
-                    "reason": (f"the completion audit judged "
-                               f"{scope.get('step_count')} of "
-                               f"{scope.get('flow_step_total')} step(s) "
-                               f"(stage {scope.get('stage_id') or scope.get('stage')}"
-                               f"), so it is not this run's whole-flow verdict"),
-                    "sources": [], "ignored": [], "pointers": pointers,
-                    "scope_signal": signal}
-    else:
-        # No scope block: this document predates R-0915-147, so its population
-        # cannot be read off it. The weaker signal is used AND disclosed.
-        if str(doc.get("phase") or "all") != "all":
-            return {"state": "NOT_MEASURED",
-                    "reason": (f"the completion audit is stamped phase="
-                               f"{doc.get('phase')!r}, so it is not the whole run's"),
-                    "sources": [], "ignored": [], "pointers": pointers,
-                    "scope_signal": "phase"}
-        signal = "phase (no scope block: this audit predates R-0915-147, so its " \
-                 "population is taken on the weaker signal)"
+    # THE SAME PREDICATE THE OTHER READERS USE, not a fourth copy of it. R-0915-150.
+    #
+    # `_audit_scope.audit_scope_is_whole_flow` is the one definition of "did this audit
+    # judge the whole flow", and `benchmark_evidence_publish`, `phase3_one_shot_runner`
+    # and the FPGA pre-burn guard all refuse a scoped audit through it. This reader had
+    # the same rule written out a second time -- same answer today, and exactly the shape
+    # that goes stale the first time the rule moves. A front door that disagreed with the
+    # three readers beneath it about what the audit judged would be the worst place for
+    # that divergence to live.
+    #
+    # `signal` is still disclosed, because the legacy branch (`phase == "all"` on a
+    # document with no scope block, written before R-0915-147) is a WEAKER answer and a
+    # weak signal read silently is the mistake this whole axis exists to correct. The
+    # constant already SAYS that in words, so it is published verbatim rather than
+    # re-worded here -- two spellings of one disclosure is how they drift apart.
+    _whole, signal, _why = _audit_scope.audit_scope_is_whole_flow(doc)
+    if not _whole:
+        return {"state": "NOT_MEASURED",
+                "reason": (f"the completion audit is not this run's whole-flow verdict: "
+                           f"{_why}"),
+                "sources": [], "ignored": [], "pointers": pointers,
+                "scope_signal": signal}
     verdict = doc.get("verdict")
     if not verdict:
         return {"state": "NOT_MEASURED",

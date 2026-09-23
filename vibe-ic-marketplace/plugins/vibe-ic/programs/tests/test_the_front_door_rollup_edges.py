@@ -45,7 +45,8 @@ sys.path.insert(0, str(PROGRAMS))
 
 import _path_layout as _pl                                   # noqa: E402
 import vibe_ic_entry_guard as GUARD                          # noqa: E402
-import vibe_ic_one_shot_runner as V                          # noqa: E402
+import vibe_ic_one_shot_runner as V
+import _audit_scope                          # noqa: E402
 
 
 @pytest.fixture()
@@ -58,23 +59,33 @@ def project(tmp_path_factory):
     return p
 
 
-#: WHERE EACH PRODUCER REALLY WRITES, measured on spm run22 rather than assumed:
-#:   reports/phase1_one_shot.json                 <- phase1's runner, NOT routed
-#:   reports/orchestrator/phase2_one_shot.json
-#:   reports/orchestrator/phase3_one_shot.json
-#: `_pl.report_path` routes everything to `reports/orchestrator/`, and phase1's runner
-#: does not use it. My earlier fixtures wrote through the router, so they staged phase1's
-#: report where NO producer puts it — the tests passed while every real phase1-inclusive
-#: run came out NOT_MEASURED. A fixture that writes somewhere no producer writes proves
-#: nothing about the reader.
-_FLAT_REPORTS = {"phase1_one_shot.json", "phase1_exit_reason.json"}
+#: WHERE EACH PRODUCER REALLY WRITES -- and now that is ONE RULE, which is the point.
+#:
+#: Round 3 measured three locations and taught the fixtures all three:
+#:     reports/phase1_one_shot.json                 <- phase1's runner, NOT routed
+#:     reports/orchestrator/phase2_one_shot.json
+#:     reports/orchestrator/phase3_one_shot.json
+#: and I made the READER learn them too. That was the wrong half to change. `_path_layout`
+#: categorises all three `*_one_shot.json` files as `orchestrator`, and the repo says the
+#: flat location is not sanctioned, twice, without being asked:
+#:   * `reports_subfolder_taxonomy_check` FAILS on it -- measured against a staged layout:
+#:     `[FAIL] ... 1 stray file(s): phase1_one_shot.json`;
+#:   * `vibe_ic_entry_guard` documents `reports/orchestrator/phase1_one_shot.json` as the
+#:     standalone runner's location and calls the flat one "legacy".
+#: So the PRODUCER moved onto the router, and both sides now resolve through one call.
+#: These fixtures therefore write through the router too -- not because it is convenient,
+#: but because a real `phase1_one_shot_runner` invocation was measured landing there, which
+#: `test_phase1s_producer_resolves_its_report_through_the_router` pins against the source.
+#:
+#: `phase1_exit_reason.json` is NOT in that set and is deliberately staged by hand at the
+#: path its own consumer opens. Measured, it has three locations of its own -- its producer
+#: writes `reports/`, `_phase1_failure_is_coverage_only` reads `reports/phase1/`, and the
+#: router's catch-all would say `reports/audit/`. That is a separate mismatch, outside this
+#: change, and the fixture follows the CONSUMER because the consumer is what these arms test.
 
 
 def _report(project: Path, name: str, payload: dict) -> Path:
-    if name in _FLAT_REPORTS:
-        path = project / "reports" / name
-    else:
-        path = _pl.report_path(project, name)
+    path = _pl.report_path(project, name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload) + "\n")
     return path
@@ -606,23 +617,20 @@ def test_a_blocking_return_the_classifier_did_not_classify_drops_the_sidecar():
 
 
 def test_phase1s_report_is_read_where_its_producer_writes(project, monkeypatch):
-    """THE ARM THAT WOULD HAVE CAUGHT MY ROUND-3 REGRESSION.
+    """THE ARM THAT WOULD HAVE CAUGHT MY ROUND-3 REGRESSION, now against ONE definition.
 
-    `_pl.report_path` routes to `reports/orchestrator/`; phase1's runner writes
-    `reports/phase1_one_shot.json` and does not use the router. Reading the routed path
-    meant EVERY phase1-inclusive run came out NOT_MEASURED at exit 1 — and a real phase1
-    FAIL became NOT_MEASURED, so the halt never fired and phase2/3 ran on bad L
-    documents. The base hid the same mismatch behind the rc fallback.
-
-    This stages phase1's report at the producer's OWN path and requires the row to be
-    the verdict in it.
+    Round 3: `_pl.report_path` routed to `reports/orchestrator/` while phase1's runner
+    wrote `reports/phase1_one_shot.json`, so EVERY phase1-inclusive run came out
+    NOT_MEASURED at exit 1 -- and a real phase1 FAIL became NOT_MEASURED, so the halt never
+    fired and phase2/3 ran on bad L documents. My first fix taught the READER both
+    locations, which added a fifth answer to a question that already had four. The producer
+    now resolves through the router, so this stages the report the way the producer does --
+    through that same call -- and requires the row to be the verdict in it.
     """
     def fake_run_phase(label, runner, args, env=None):
         if "phase1" in runner.name:
-            # the producer's real path, not the router's
-            flat = project / "reports" / "phase1_one_shot.json"
-            flat.parent.mkdir(parents=True, exist_ok=True)
-            flat.write_text(json.dumps({"verdict": "PASS"}) + "\n")
+            # the producer's own resolution, which is now the router's
+            _report(project, "phase1_one_shot.json", {"verdict": "PASS"})
             return 0
         if "phase2" in runner.name:
             _report(project, "phase2_one_shot.json", {"verdict": "PASS"})
@@ -641,29 +649,192 @@ def test_phase1s_report_is_read_where_its_producer_writes(project, monkeypatch):
     assert doc["verdict"] == "PASS" and rc == 0, (doc["verdict"], doc["verdict_reasons"])
 
 
-def test_the_reader_finds_each_report_where_it_actually_lives(project):
-    """MEASURED on spm run22, and it is not one convention: phase1's report is at
-    `reports/`, phase2's and phase3's under `reports/orchestrator/`. The reader checks
-    both and the newer wins, so neither layout is assumed."""
+def test_the_reader_has_exactly_one_definition_of_where_a_report_lives(project):
+    """One call to the router, for every phase, and NO second location.
+
+    The arm is about what the reader does NOT do: a report staged at the unsanctioned flat
+    path must not be found, because finding it is what let the two layouts coexist. All
+    three `*_one_shot.json` names are categorised `orchestrator` by `_path_layout`, so the
+    reader needs no per-phase knowledge at all.
+    """
+    for name in ("phase1_one_shot.json", "phase2_one_shot.json", "phase3_one_shot.json"):
+        assert V._phase_report_path(project, name) == _pl.report_path(project, name), name
+
+    # a file at the flat path is NOT what the reader resolves to, even when it is the only
+    # one present and the routed one does not exist
     flat = project / "reports" / "phase1_one_shot.json"
     flat.parent.mkdir(parents=True, exist_ok=True)
-    flat.write_text("{}\n")
-    assert V._phase_report_path(project, "phase1_one_shot.json") == flat
+    flat.write_text(json.dumps({"verdict": "PASS"}) + "\n")
+    resolved = V._phase_report_path(project, "phase1_one_shot.json")
+    assert resolved != flat, (
+        "the reader still knows a second location; that is what made four answers")
+    assert not resolved.is_file()
 
-    routed = _pl.report_path(project, "phase2_one_shot.json")
-    routed.parent.mkdir(parents=True, exist_ok=True)
-    routed.write_text("{}\n")
-    assert V._phase_report_path(project, "phase2_one_shot.json") == routed
+    # and the resolver reads nothing off the disk, so a newer stale file cannot win it
+    import inspect
+    src = inspect.getsource(V._phase_report_path)
+    for forbidden in ("st_mtime", "is_file", "exists("):
+        assert forbidden not in src, (
+            f"`_phase_report_path` consults the filesystem ({forbidden}); a path resolver "
+            f"that picks by mtime can prefer a stale file from another location")
 
-    # with neither present, the canonical place is named so the message points there
-    assert V._phase_report_path(project, "phase3_one_shot.json") == \
-        _pl.report_path(project, "phase3_one_shot.json")
 
+def test_phase1s_producer_resolves_its_report_through_the_router():
+    """The premise, pinned against the producer itself, in BOTH directions.
 
-def test_phase1s_producer_still_writes_the_flat_path():
-    """The premise of the two arms above, pinned against the producer itself: if phase1
-    moves its report under the router, this fixture and that reader must move with it."""
+    No flat write may remain, and every write of this report must go through the router --
+    so if anyone reintroduces `reports / "phase1_one_shot.json"`, this arm says so instead
+    of the front door silently reading a path nothing writes again.
+    """
+    import ast
     src = (PROGRAMS / "phase1_one_shot_runner.py").read_text()
-    assert 'out = reports / "phase1_one_shot.json"' in src, (
-        "phase1's runner no longer writes reports/phase1_one_shot.json; re-measure "
-        "where it writes and update `_phase_report_path` and these fixtures together")
+    assert 'reports / "phase1_one_shot.json"' not in src, (
+        "phase1's runner writes the flat path again; `reports_subfolder_taxonomy_check` "
+        "FAILS on that location and the front door resolves only the router's")
+
+    tree = ast.parse(src)
+    routed = 0
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "report_path"
+                and any(isinstance(a, ast.Constant) and a.value == "phase1_one_shot.json"
+                        for a in node.args)):
+            routed += 1
+    assert routed >= 3, (
+        f"only {routed} of phase1's writes of this report resolve through the router; "
+        f"measured, the runner has three write sites")
+
+
+def test_the_sanctioned_location_is_the_one_the_taxonomy_gate_accepts(tmp_path):
+    """WHY the router's answer is the sanctioned one, driven through the shipped gate.
+
+    Not an appeal to the router's own table: `reports_subfolder_taxonomy_check` is run over
+    both layouts and only one of them passes. If the doctrine ever changes, this arm changes
+    with it instead of the claim quietly going stale.
+    """
+    import subprocess
+
+    def strays(rel: str) -> str:
+        proj = tmp_path / rel.replace("/", "_")
+        f = proj / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"verdict": "PASS"}) + "\n")
+        r = subprocess.run(
+            [sys.executable, str(PROGRAMS / "reports_subfolder_taxonomy_check.py"),
+             str(proj)], capture_output=True, text=True, timeout=300)
+        return r.stdout + r.stderr
+
+    assert "phase1_one_shot.json" in strays("reports/phase1_one_shot.json"), (
+        "the flat location is no longer reported as a stray file; re-measure which layout "
+        "the doctrine sanctions before trusting the router")
+    assert "phase1_one_shot.json" not in strays(
+        "reports/orchestrator/phase1_one_shot.json")
+
+
+# ── the round-2 M, now that 70 sits on 77 ────────────────────────────────────
+
+def test_a_scoped_audit_written_by_the_real_auditor_is_refused(tmp_path):
+    """THE ROUND-2 M, closed against a document the REAL auditor wrote.
+
+    My round-2 reader accepted an audit on the weak `phase == "all"` signal, because that
+    was the only signal there was: `flow_compliance_check` stamped every receipt
+    `phase: "all"` whatever `--stage` said, so a stage-scoped audit was indistinguishable
+    from the whole run's. R-0915-147 gave the document a `scope` block, and this asserts
+    the front door refuses a scoped one — driven by RUNNING a scoped pass, not by a
+    hand-built fixture, because the premise under test is what that program actually
+    writes.
+
+    MEASURED here: `flow_compliance_check . --stage-id stage_phase1` publishes the
+    canonical audit with `scope.whole_flow=false, step_count=2, flow_step_total=70`.
+    """
+    import subprocess
+    import time
+
+    project = tmp_path / "proj"
+    (project / "input").mkdir(parents=True)
+    (project / "input" / "spec.md").write_text("# a counter\n")
+
+    started_at = time.time()
+    time.sleep(0.05)                       # the audit must land at or after the start
+    subprocess.run(
+        [sys.executable, str(PROGRAMS / "flow_compliance_check.py"), str(project),
+         "--stage-id", "stage_phase1"],
+        capture_output=True, text=True, cwd=str(project), timeout=900)
+
+    audit = _pl.report_path(project, "phase23_completion_audit.json")
+    assert audit.is_file(), "the scoped pass wrote no canonical audit to refuse"
+    doc = json.loads(audit.read_text())
+    assert doc["scope"]["whole_flow"] is False, doc["scope"]
+    assert doc["scope"]["step_count"] < doc["scope"]["flow_step_total"], doc["scope"]
+
+    axis = V._completion_audit_axis(project, phase3_ran=True, started_at=started_at)
+
+    assert axis["state"] == "NOT_MEASURED", axis
+    assert axis["sources"] == [], axis
+    assert axis["scope_signal"] == _audit_scope.SIGNAL_SCOPE, axis
+    assert str(doc["scope"]["step_count"]) in axis["reason"], axis["reason"]
+    assert str(doc["scope"]["flow_step_total"]) in axis["reason"], axis["reason"]
+
+
+def test_the_front_door_refuses_a_scoped_audit_the_same_way_the_other_readers_do():
+    """ONE definition, not four. The front door must not be able to disagree with
+    `benchmark_evidence_publish`, `phase3_one_shot_runner` and the pre-burn guard about
+    what an audit judged — so it calls the same predicate, and this pins that it does.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    src = textwrap.dedent(inspect.getsource(V._completion_audit_axis))
+    fn = ast.parse(src).body[0]
+    assert "_audit_scope.audit_scope_is_whole_flow" in src, (
+        "the front door decides the audit's population by its own copy of the rule")
+
+    # CODE ONLY. The docstring explains the rule at length and must go on doing so -- it is
+    # the prose a reviewer reads. What must not exist is a SECOND READING of the block: the
+    # comment-and-docstring text is stripped and the remaining statements are checked.
+    body = [n for n in fn.body
+            if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+                    and isinstance(n.value.value, str))]
+    code = ast.unparse(ast.Module(body=body, type_ignores=[]))
+    # the CALL to the shared predicate is the one mention that must remain
+    code = code.replace("_audit_scope.audit_scope_is_whole_flow", "<the one predicate>")
+    assert "whole_flow" not in code, (
+        "a second reading of `scope.whole_flow` is still in this reader's code")
+    assert "'scope'" not in code and '"scope"' not in code, (
+        "the reader still reaches into the audit's scope block itself")
+
+    # and the predicate really is the one the other readers use
+    for consumer in ("benchmark_evidence_publish.py", "phase3_one_shot_runner.py"):
+        text = (PROGRAMS / consumer).read_text(errors="replace")
+        assert "audit_scope_is_whole_flow" in text, consumer
+
+
+def test_a_whole_flow_audit_from_the_real_auditor_is_still_accepted(tmp_path):
+    """The other direction, so the arm above is not satisfied by refusing everything."""
+    project = tmp_path / "proj"
+    audit = _pl.report_path(project, "phase23_completion_audit.json")
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    # the shape a whole-flow pass publishes, with the scope block R-0915-147 added
+    audit.write_text(json.dumps({
+        "verdict": "PASS",
+        "scope": {"phase": "all", "stage": None, "stage_id": None,
+                  "step_count": 70, "flow_step_total": 70, "whole_flow": True},
+    }) + "\n")
+    axis = V._completion_audit_axis(project, phase3_ran=True, started_at=0.0)
+    assert axis["state"] != "NOT_MEASURED", axis
+    assert axis["sources"] and axis["sources"][0]["verdict"] == "PASS", axis
+    assert axis["scope_signal"] == _audit_scope.SIGNAL_SCOPE, axis
+
+
+def test_a_legacy_audit_with_no_scope_block_is_accepted_but_disclosed(tmp_path):
+    """The weaker signal is still usable — and says so, in the predicate's own words."""
+    project = tmp_path / "proj"
+    audit = _pl.report_path(project, "phase23_completion_audit.json")
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text(json.dumps({"verdict": "PASS", "phase": "all"}) + "\n")
+    axis = V._completion_audit_axis(project, phase3_ran=True, started_at=0.0)
+    assert axis["state"] != "NOT_MEASURED", axis
+    assert axis["scope_signal"] == _audit_scope.SIGNAL_LEGACY_PHASE, axis
+    assert "weaker signal" in axis["scope_signal"]
