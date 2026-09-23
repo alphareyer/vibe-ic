@@ -90,6 +90,7 @@ __all__ = [
     "V_A_LOWER", "V_B_LOWER", "V_EQUAL", "V_UNDETERMINED",
     "pdn_ring_dimensions",
     "POWER_VERDICT_MEASURED", "signoff_record", "emit_signoff_record",
+    "retire_signoff_record",
     "verdict_is_backed_by_a_number",
 ]
 
@@ -1350,6 +1351,33 @@ def signoff_record(report: Optional[Dict[str, Any]], *,
         record["evidence"] = f"{source} (read, no total row)"
         return record
 
+    # ONE MODULE, ONE ANSWER. `activity_provenance` already decided whether
+    # this report's stated activity basis survives its own transcript, and
+    # `metric_records` already refuses a CONTRADICTED one as STATUS_INVALID --
+    # a vector claim refuted by `READ_VCD_FAIL` or `Annotated 0 pin
+    # activities.` is not silently a vectorless measurement either, because
+    # what the tool did with zero annotated activities is a claim this
+    # repository has not measured. Publishing MEASURED/PASS here while the
+    # neighbouring reader publishes INVALID for the same Total is the module
+    # disagreeing with itself, and `_power_class` would then present it as the
+    # run's vector-driven sign-off power. MEASURED by the pre-landing review,
+    # 2026-09-23.
+    _basis = str((report.get("activity") or {}).get("basis") or "")
+    if _basis == BASIS_CONTRADICTED:
+        _corr = str((report.get("activity") or {}).get("reason") or "").strip()
+        record["power_measurement"] = STATUS_NOT_MEASURED
+        record["verdict"] = STATUS_NOT_MEASURED
+        record["power_not_measured_reason"] = (
+            f"{source} states an activity basis its own transcript refutes "
+            f"(basis CONTRADICTED"
+            + (f": {_corr}" if _corr else "")
+            + "). The report's Total is not published: a vector claim its own "
+              "transcript denies is not a vectorless measurement either, and "
+              "this module's `metric_records` refuses the same number as "
+              "INVALID")
+        record["evidence"] = f"{source} (read; activity basis CONTRADICTED)"
+        return record
+
     record["power_measurement"] = STATUS_MEASURED
     record["total_power_w"] = total_w
     for cat in ("internal", "switching", "leakage"):
@@ -1384,6 +1412,47 @@ except Exception:  # pragma: no cover
     _atomic_write_text = None
 
 
+def retire_signoff_record(out: Path, reason: str,
+                          notes: Optional[List[str]] = None) -> None:
+    """Replace a power record whose report no longer exists or is not usable.
+
+    MEASURED by the pre-landing review (2026-09-23). A record OUTLIVES the
+    measurement it describes: run 1 succeeds and writes
+    `{verdict: PASS, total_power_w: 9.54e-3}`; run 2 comes after an RTL change,
+    the step regenerates, `sta` fails, `_emit_power_report` writes its
+    'not computed' fallback and returns False -- so the emitter never runs and
+    the file is never touched. The PREVIOUS LAYOUT's number now sits beside a
+    report that says nothing was computed, `_ic_release_artefacts._power_class`
+    finds it, and the release is documented with a power figure for a design
+    that no longer exists. Nothing refuses it anywhere.
+
+    A verdict about a measurement that has been superseded is the same defect
+    as a verdict with no measurement, one run later. So the record is REPLACED
+    -- not deleted, because silence would leave a reader unable to tell a run
+    that never measured power from one whose measurement was withdrawn -- by a
+    record that states NOT_MEASURED and carries no number under any key naming
+    power, total or watt.
+    """
+    doc = {
+        "source": None,
+        "power_measurement": STATUS_NOT_MEASURED,
+        "verdict": STATUS_NOT_MEASURED,
+        "power_not_measured_reason": reason,
+        "evidence": ("the previous record was retired: the measurement it "
+                     "stated is no longer the one this run produced"),
+    }
+    payload = json.dumps(doc, indent=2) + "\n"
+    try:
+        if _atomic_write_text is not None:
+            _atomic_write_text(out, payload)
+        else:  # pragma: no cover
+            Path(out).write_text(payload, encoding="utf-8")
+    except OSError:  # pragma: no cover - a tree we cannot write is not ours
+        return
+    if notes is not None:
+        notes.append(f"power.json retired (no usable power report): {reason}")
+
+
 def emit_signoff_record(project: Path, power_rpt: Path, out: Path,
                         analysis_mode: str,
                         notes: List[str]) -> Dict[str, Any]:
@@ -1415,6 +1484,13 @@ def emit_signoff_record(project: Path, power_rpt: Path, out: Path,
                             source=str(power_rpt.relative_to(project)),
                             analysis_mode=analysis_mode)
     if not verdict_is_backed_by_a_number(record):
+        # RETIRE BEFORE RAISING. Returning here without touching `out` leaves
+        # the PREVIOUS run's PASS and its number on disk -- the same stale
+        # record the review found on the `_emit_power_report` failure path,
+        # reached through the assertion instead.
+        retire_signoff_record(
+            out, f"the record this run would have written states a verdict "
+                 f"with no power number behind it: {record!r}")
         raise AssertionError(
             f"{out.name} would state a verdict with no power number: {record!r}")
     payload = json.dumps(record, indent=2) + "\n"

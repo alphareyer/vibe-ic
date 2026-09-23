@@ -55158,6 +55158,18 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                                            rpt_phase3 / "power.json",
                                            _mode, notes)
             written.append(str(rpt_phase3 / "power.json"))
+        else:
+            # THE STALE RECORD. `_emit_power_report` returning False means this
+            # run produced no usable power report -- it wrote its 'not
+            # computed' fallback over power.rpt. Leaving power.json alone
+            # leaves the PREVIOUS layout's `{verdict: PASS, total_power_w: ...}`
+            # beside it, and `_ic_release_artefacts._power_class` reads that
+            # number and publishes it as this run's power. MEASURED by the
+            # pre-landing review, 2026-09-23.
+            _ppa_power.retire_signoff_record(
+                rpt_phase3 / "power.json",
+                "report_power produced no usable output for this run "
+                "(see reports/phase3/power.rpt)", notes)
 
     # --- Step 21: routed.drc.rpt — derived from OpenROAD routing log ---
     # OpenROAD's detailed_route emits DRC violations to its log; the gate

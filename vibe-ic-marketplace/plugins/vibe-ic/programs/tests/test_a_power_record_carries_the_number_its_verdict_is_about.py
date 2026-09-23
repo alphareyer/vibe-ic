@@ -224,4 +224,126 @@ def test_the_step_refuses_rather_than_writes_an_unbacked_verdict(
     out = rpt.parent / "power.json"
     with pytest.raises(AssertionError, match="no power number"):
         P.emit_signoff_record(tmp_path, rpt, out, "vectorless_sdc", [])
-    assert not out.exists(), "a refused record must leave no file behind"
+    # AMENDED after the pre-landing review (2026-09-23), and the review is
+    # right. This asserted "a refused record must leave no file behind". That
+    # is correct only on a FIRST run; on a re-run, leaving no file behind means
+    # leaving the PREVIOUS run's file behind, PASS and number intact -- the
+    # stale-record defect, reached through the assertion path. And deleting
+    # outright would leave a reader unable to tell a run that never measured
+    # power from one whose measurement was withdrawn.
+    #
+    # The invariant that actually matters is unchanged and is asserted here:
+    # after a refusal NO number survives under any key naming power.
+    import json as _json
+    assert out.exists(), "the refusal must leave a record that says so"
+    doc = _json.loads(out.read_text())
+    assert doc["verdict"] == "NOT_MEASURED", doc
+    assert R._numbers_under_key(doc, ("power", "total", "watt")) == [], doc
+
+
+# ===========================================================================
+# PRE-LANDING REVIEW, 2026-09-23 — two CONFIRMED findings. Both are about the
+# record OUTLIVING the thing it describes.
+# ===========================================================================
+
+def test_a_failed_power_step_does_not_leave_the_previous_runs_number(tmp_path):
+    """HIGH. A stale record is worse than no record.
+
+    Run 1 succeeds: power.json says PASS / MEASURED / 9.54e-3 W. Run 2 comes
+    after an RTL change; the DEF is newer so the step regenerates, but `sta`
+    fails and `_emit_power_report` writes the 'not computed' fallback and
+    returns False -- so the emitter never runs and power.json is never
+    touched. The PREVIOUS LAYOUT's number now sits beside a report that says
+    nothing was computed, `_power_class` finds it, publishes it as this run's
+    power, and no refusal fires anywhere.
+
+    A verdict about a measurement that no longer exists is the same defect as
+    a verdict with no measurement, one run later."""
+    import json
+    rpt = tmp_path / "reports" / "phase3" / "power.rpt"
+    rpt.parent.mkdir(parents=True, exist_ok=True)
+    out = rpt.parent / "power.json"
+
+    rpt.write_text(_REPORT)
+    P.emit_signoff_record(tmp_path, rpt, out, "vectorless_sdc", [])
+    assert json.loads(out.read_text())["total_power_w"] == 9.54e-03
+
+    # Run 2: the power step could not produce a report.
+    notes = []
+    P.retire_signoff_record(out, "report_power did not run: sta exited 127",
+                            notes)
+    assert not out.exists() or "total_power_w" not in json.loads(
+        out.read_text()), "the previous run's number survived a failed step"
+    assert notes and "retired" in notes[0].lower(), notes
+    if out.exists():
+        doc = json.loads(out.read_text())
+        assert doc["verdict"] == "NOT_MEASURED", doc
+        assert "sta exited 127" in doc["power_not_measured_reason"], doc
+        assert R._numbers_under_key(doc, ("power", "total", "watt")) == [], doc
+
+
+def test_the_refused_write_also_retires_the_stale_record(tmp_path):
+    """The assertion path has the same hole: it raises and returns without
+    touching `out`, so a refused write leaves the previous run's PASS."""
+    import json
+    import pytest
+    rpt = tmp_path / "reports" / "phase3" / "power.rpt"
+    rpt.parent.mkdir(parents=True, exist_ok=True)
+    out = rpt.parent / "power.json"
+    rpt.write_text(_REPORT)
+    P.emit_signoff_record(tmp_path, rpt, out, "vectorless_sdc", [])
+
+    import unittest.mock as M
+    with M.patch.object(P, "signoff_record",
+                        lambda *a, **k: {"verdict": "PASS"}):
+        with pytest.raises(AssertionError, match="no power number"):
+            P.emit_signoff_record(tmp_path, rpt, out, "vectorless_sdc", [])
+    assert R._numbers_under_key(
+        json.loads(out.read_text()) if out.exists() else {},
+        ("power", "total", "watt")) == [], (
+            "a refused write left the previous run's number in place")
+
+
+#: A run whose TCL asked for VCD-driven activity and did not get it. The table
+#: is still printed, on the tool's default activity.
+_CONTRADICTED_VCD = _REPORT.replace(
+    "POWER_ANALYSIS_MODE: vectorless_sdc",
+    "POWER_ANALYSIS_MODE: vector_vcd\nREAD_VCD_FAIL: no such file\n"
+    "Annotated 0 pin activities.")
+
+
+def test_a_contradicted_vcd_basis_is_not_a_measured_signoff(tmp_path):
+    """MEDIUM — one module, one answer.
+
+    `activity_provenance` calls this basis CONTRADICTED and `metric_records`
+    marks the very same Total STATUS_INVALID, because a vector claim refuted
+    by its own transcript is not a vectorless measurement either -- what the
+    tool did with zero annotated activities is a claim nobody here has
+    measured. `signoff_record` published it MEASURED / PASS with the
+    disagreement buried in `activity.basis`, and `_power_class` then presented
+    it as the run's vector-driven sign-off power."""
+    rec = _record(tmp_path, _CONTRADICTED_VCD)
+    assert rec["power_measurement"] == "NOT_MEASURED", rec
+    assert rec["verdict"] == "NOT_MEASURED", rec
+    assert "CONTRADICTED" in rec["power_not_measured_reason"], rec
+    assert R._numbers_under_key(rec, ("power", "total", "watt")) == [], rec
+
+
+def test_the_two_readers_of_one_report_agree(tmp_path):
+    """The invariant behind that finding, asserted directly: for the same
+    report, `signoff_record` may not say MEASURED where `total_record` says
+    INVALID."""
+    from pathlib import Path as _P
+    for text in (_REPORT, _CONTRADICTED_VCD, _NO_TABLE):
+        rpt = tmp_path / "power.rpt"
+        rpt.write_text(text)
+        report = P.read_power_report(rpt)
+        rec = P.signoff_record(report, source="reports/phase3/power.rpt",
+                               analysis_mode=None)
+        tot = P.total_record(report) if report else None
+        signoff_says = rec["power_measurement"] == "MEASURED"
+        metric_says = bool(tot) and tot.get("status") == P.STATUS_MEASURED
+        assert signoff_says == metric_says, (
+            f"one module, two answers for the same report: "
+            f"signoff={rec['power_measurement']} "
+            f"metric={(tot or {}).get('status')}")
