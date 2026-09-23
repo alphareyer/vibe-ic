@@ -65,10 +65,15 @@ PHASE2_RUNNER = PROGRAMS / "design_one_shot_runner.py"
 PHASE3_RUNNER = PROGRAMS / "phase3_one_shot_runner.py"
 PRODUCER = "flow_declared_producer_run"
 
-#: The document r47 lost, and the step that owes it.
-OWED_TARGET = "reports/phase1/gates/stage_phase1_compliance.json"
+#: The document r47 lost was `reports/phase1/gates/stage_phase1_compliance.json`, and the
+#: tests below used step 2's clause for it as their example of a declared producer
+#: clause. That clause is GONE (2026-09-24, R-0915-141, the step-38 half, lane ictier1 (spm run23: "AUDIT-CREATED OUTPUT REFUSED: ['reports/phase1/gates/stage_phase1_compliance.json']")): the path is the nested clause's own verdict
+#: target and left step 2's declared set, so no producer is owed for it at all. The
+#: mechanism these tests pin is unchanged, and they now read it through step 2's OTHER
+#: declared producer clause -- same step, same phase-2-only run, a run document.
+OWED_TARGET = "reports/phase2/lint/rtl_hygiene.json"
 OWED_STEP = "2"
-OWED_PROGRAM = "flow_compliance_check"
+OWED_PROGRAM = "rtl_hygiene_lint"
 
 
 def _P():
@@ -127,6 +132,8 @@ def test_a_step_that_names_no_producer_yields_no_clause():
     targets = {c["target"] for c in clauses}
     assert OWED_TARGET in targets, (
         "step 2's producer declaration is the premise of this whole change")
+    # ...and the departed one is gone, not merely unexercised.
+    assert "reports/phase1/gates/stage_phase1_compliance.json" not in targets
     # A synthetic flow whose step declares the same output and NO producer must
     # produce no clause for it — the negative control on the reader itself.
     yaml = pytest.importorskip("yaml")

@@ -103,10 +103,14 @@ def test_the_artefact_is_not_promised_in_any_required_outputs():
 
 
 def test_step_2_required_outputs_is_unchanged():
+    # DEPARTED 2026-09-24: "reports/phase1/gates/stage_phase1_compliance.json",
+    # by R-0915-141, the step-38 half, lane ictier1 (spm run23: "AUDIT-CREATED OUTPUT REFUSED: ['reports/phase1/gates/stage_phase1_compliance.json']"). It is
+    # the nested stage_phase1 clause's own --json verdict target and left the
+    # declared set; the pad-budget document this file guards is still NOT
+    # promised here, which is what this pin exists to hold.
     assert [str(o) for o in _step2()["required_outputs"]] == [
         "reports/phase2/lint/rtl_hygiene.json",
         "reports/phase2/lint/rom_init_lint.json",
-        "reports/phase1/gates/stage_phase1_compliance.json",
         "reports/crosslayer/rewrite_equivalence_check.json",
     ]
 

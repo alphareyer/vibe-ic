@@ -437,7 +437,12 @@ def test_the_shared_producer_and_gate_population_is_declared_here():
         # population for the population's own stated reason: content cannot
         # decide their authorship, so the two timing facts have the last word
         # — and a declared producer is what makes those facts deterministic.
-        ("2", "reports/phase1/gates/stage_phase1_compliance.json"),
+        # DEPARTED 2026-09-24 (R-0915-141, step-38 half, lane ictier1): ("2",
+        # "reports/phase1/gates/stage_phase1_compliance.json"). Step 2 no longer
+        # DECLARES its nested stage_phase1 clause's own verdict target, so the
+        # auditor's pen no longer points at a declared run artefact there -- the
+        # same departure, for the same reason, as 36 and 38 below. spm run23
+        # measured the refusal it caused: "AUDIT-CREATED OUTPUT REFUSED".
         ("14", "reports/analog/stage_analog_compliance.json"),
         # DEPARTED 2026-09-23 (R-0915-141, lane icslot): ("36",
         # "reports/audit/tapeout_checklist.json") and ("38",

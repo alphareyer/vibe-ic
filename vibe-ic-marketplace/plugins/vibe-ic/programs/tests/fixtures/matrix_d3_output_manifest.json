@@ -273,16 +273,9 @@
      "alternative": "reports/phase2/lint/rom_init_lint.json",
      "path": "reports/phase2/lint/rom_init_lint.json",
      "size_bytes": 2
-    },
-    "reports/phase1/gates/stage_phase1_compliance.json": {
-     "status": "PRODUCED_BY_RUN",
-     "run": "benchmark-data/ic/spm/v1.14.88_gf180mcuD",
-     "alternative": "reports/phase1/gates/stage_phase1_compliance.json",
-     "path": "reports/phase1/gates/stage_phase1_compliance.json",
-     "size_bytes": 12873,
-     "note": "2026-09-02 \u2014 re-measured against benchmark-data/ic/spm/v1.14.88_gf180mcuD: reports/phase1/gates/stage_phase1_compliance.json tracked at HEAD, non-empty, and attributed to this step by the cell's write ledger. Previously UNPROVEN. Prior note: 2026-08-31 - UNPROVEN. Declared by `29e9c72796` [v1.13.96], which moved the flow yaml without moving this manifest; `d3_manifest_declaration_parity_check` has been reporting it as uncovered ever since (measured red on 781d24727 [v1.14.22] before this change, 7 uncovered paths). The stage-tier `*_com"
     }
-   }
+   },
+   "_history": "2026-09-24 (R-0915-141, step-38 half, lane ictier1) \u2014 REMOVED the entry for reports/phase1/gates/stage_phase1_compliance.json (PRODUCED_BY_RUN, benchmark-data/ic/spm/v1.14.88_gf180mcuD, 12873 bytes). That measurement is still true of that run; the entry had to go because step 2 NO LONGER DECLARES the path, and this fixture is a strict bijection with the declared set. The path is the --json verdict target of step 2's own nested flow_compliance_check --stage-id stage_phase1 clause, which still runs and still writes it; step 2's tier is that nested pass's own verdict."
   },
   "3": {
    "verdict": "ENFORCED",
