@@ -231,6 +231,32 @@ def test_caravel_harden_argv_carries_the_ceiling(tmp_path):
     assert argv.index("--memory") < argv.index("img:1")
 
 
+def test_pdk_image_reader_argv_carries_the_ceiling(monkeypatch):
+    """`_pdk_layer_authority.ImageReader` (bff32b63f, 15.5ic/37.5ic reading the
+    PDK where the run's tools looked) starts a container per probe. Driven, not
+    grepped: the argv it hands `subprocess.run` must carry both flags, equal,
+    before the image."""
+    import subprocess
+    import _pdk_layer_authority as pla
+    monkeypatch.setenv("VIBEIC_DOCKER_MEMORY", "3g")
+    seen = []
+
+    class _CP:
+        returncode, stdout = 0, ""
+
+    def _fake(argv, **_kw):
+        seen.append(list(argv))
+        return _CP()
+    monkeypatch.setattr(subprocess, "run", _fake)
+    rc, _ = pla.ImageReader._docker("img:1", ["ls", "/pdk"])
+    assert rc == 0 and len(seen) == 1, seen
+    argv = seen[0]
+    assert argv[:2] == ["docker", "run"], argv
+    assert argv[argv.index("--memory") + 1] == "3g", argv
+    assert argv[argv.index("--memory-swap") + 1] == "3g", argv
+    assert argv.index("--memory") < argv.index("img:1"), argv
+
+
 def test_technology_facts_argv_carries_the_ceiling(monkeypatch):
     """The tech-LEF read in `submission_template_fetch` (vibe-ic#2111).
 
