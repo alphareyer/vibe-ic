@@ -193,7 +193,14 @@ def _emit_bound_report(tmp_path, raw, stanza=_CORNER_LIBS):
     tail = full[start:end]
     # Tcl primitives perform real file IO. Only OpenSTA report generation is
     # replaced with neutral, input-derived report bytes.
-    (tmp_path / 'native.rpt').write_text(raw)
+    # R-0915-162 — POST-ROUTE BASIS. These cases are about CORNER BINDING, and
+    # a report that is not an eligible candidate refuses one step earlier for a
+    # different reason, so the fixture would stop measuring what it names. The
+    # PnR writer driven here stamps STA_BASIS_LIBERTY but no STA_BASIS line
+    # (run23's phase3/stage3/pnr/sta.rpt is the same), so the basis is supplied
+    # with the report body. See the page: whether that writer should stamp it
+    # is a producer question, not this test's.
+    (tmp_path / 'native.rpt').write_text('STA_BASIS: POST_ROUTE_SPEF\n' + raw)
     script = tmp_path / 'writer.tcl'
     script.write_text('proc report_checks {args} {\n'
                       ' set f [open native.rpt r]; set text [read $f]; close $f\n'

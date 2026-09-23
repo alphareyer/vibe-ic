@@ -291,7 +291,13 @@ def test_the_measured_xor3_ratio_lands_in_family_with_its_siblings():
 #
 # and after the tie-break the producer reports `pct_error -3.88 %` / CORRELATED
 # where it had reported -34.43 % / CRITICAL_MISMATCH.
+# R-0915-162 — POST-ROUTE BASIS, which this fixture was always about:
+# a post-layout correlation is only built on a post-route, SPEF-bearing
+# report. The claim under test is the SCORING, unchanged; without the
+# basis line the report is not a candidate at any score and the test
+# would be measuring eligibility instead.
 SUMMARY_RPT = """\
+STA_BASIS: POST_ROUTE_SPEF
 Startpoint: _395_ (rising edge-triggered flip-flop clocked by clk)
 Endpoint: _410_ (rising edge-triggered flip-flop clocked by clk)
 Path Group: clk
@@ -307,6 +313,7 @@ Path Type: max
 """
 
 DETAILED_RPT = """\
+STA_BASIS: POST_ROUTE_SPEF
 Startpoint: _395_ (rising edge-triggered flip-flop clocked by clk)
 Endpoint: _410_ (rising edge-triggered flip-flop clocked by clk)
 Path Group: clk
