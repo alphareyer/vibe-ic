@@ -1,51 +1,71 @@
 """A document the audit wrote stays the audit's after the audit rewrites it.
 
-THE REGRESSION THIS REFUSES, confirmed by a pre-landing adversarial review of the
-first cut of R-0915-141's re-stamp fix (2 reviewers + skeptics, read-only). That
-cut stamped the authorship note for `_absent_before_gate` ONLY, which left this
-sequence green -- and it is reachable inside ONE run:
+EVERY ARM HERE DRIVES THE REAL `check_step` / `_check_program_exit_zero` ON A
+STAGED TREE. A previous cut of this file re-implemented the audit's own
+computation in the test (`_audit_pass`, the gate faked as a boolean), so its arms
+passed on the base and on the fix alike and a reviewer had to find the regression
+by reading. A rule a test can only paraphrase is a rule nothing guards.
 
-    pass 1  the declared path is absent; this step's own gate clause writes it;
-            the note is stamped with the gate's bytes.        REFUSED, correctly.
-    pass 2  the path is present and the note still matches, so it is refused --
-            but the gate REWRITES its own target during this pass. The bytes move;
-            the note keeps pass 1's (size, mtime_ns).
-    pass 3  `_prior_audit_created` finds the note STALE and drops the path. It is
-            not absent either. Only the content branch is left, and for the 22
-            steps whose gate program is ALSO listed under `programs:` that branch
-            answers "the run's" by design -- so the auditor's own document is
-            CREDITED. "MISSING twice, PASS forever."
+THE REGRESSION, reproduced through the real code path. The first cut of R-0915-141's
+re-stamp fix stamped the authorship note for `_absent_before_gate` ONLY. MEASURED
+on a staged tree whose step declares two outputs -- a sibling the run produced and
+one its own gate writes -- with the gate being a real nested
+`flow_compliance_check` invocation, i.e. #2518's republish path, which by design
+does NOT receipt-redirect and therefore rewrites its target on every pass:
 
-TWO LANDED REWRITERS REACH IT, which is why this is not theoretical:
-  * #2518's republish path — the `stage_*_compliance` reports of steps 2, 14, 15
-    and 37 carry the `flow_compliance_check` program stamp, so they are
-    REPUBLISHED (not receipt-redirected) and re-stamped on every pass;
-  * the receipt redirect returning at the FIRST `--json`/`--report` flag, so a
-    clause naming two receipts was decided entirely by the first one and step 2's
-    crosslayer clause kept rewriting its target. Fixed in the same change, and
-    pinned in the last two arms of this file.
-A pass 2 can be the nested stage1_compliance inside step 7's own gate, so a
-single run reaches pass 3.
+    narrow rule (`absent` only)          the fix (`absent` UNION `prior`)
+    pass 1  REFUSED, note match=True     pass 1  REFUSED, note match=True
+    pass 2  REFUSED, note match=FALSE    pass 2  REFUSED, note match=True
+            (the republish moved the             (the note followed the bytes)
+             bytes; the note did not)
+    pass 3  CREDITED  <-- the audit's    pass 3  REFUSED, note match=True
+            own document accepted as
+            run evidence
+    pass 4  CREDITED                     pass 4  REFUSED, note match=True
 
-THE FIX: the re-stamp set is `_absent_before_gate UNION _prior_created`. When the
-bytes in front of this gate were already the audit's own, whatever this pass
-writes over them is also the audit's, and the note follows those bytes.
+"MISSING twice, PASS forever." The union is what closes it: when the bytes in
+front of this pass's gate were already the audit's own, whatever this pass writes
+over them is also the audit's, and the note must follow those bytes.
 
-AND THE HALF THAT MUST NOT COME BACK: the CONTENT-ONLY branch is still excluded.
-A path that is neither absent-before-gate nor carried by a prior note, and is in
-`_audit_produced` only because the document self-identifies as a gate verdict
-document, is refused on this pass but gets NO note — so when a producer rewrites
-it the refusal lifts. That is the run22 defect (step 36's note carried
-size=16738 mtime=08:51:23.557, exactly `tapeout_checklist_gen`'s own write) and
-the last arms here hold it in place from the other side.
+WHERE THE SEQUENCE CAN START, measured rather than assumed. A step ALL of whose
+declared outputs are missing never reaches this code: the early return refuses to
+run a gate that would manufacture its own completion ("PRODUCER GAP: ... The
+auditor will not run that gate to manufacture completion evidence"). So the
+reachable entry is the PARTIAL case -- one declared output already present -- which
+is the shape every arm below stages, and which the module's own comment names.
+
+AND THE HALF THAT MUST NOT COME BACK: the CONTENT-ONLY branch is still excluded
+from the re-stamp. A path that is in `_audit_produced` only because the document
+self-identifies as a gate verdict document is refused on this pass but earns no
+note, so a producer rewrite can still lift it. That is the run22 defect, where the
+note carried `tapeout_checklist_gen`'s own bytes (size=16738,
+mtime_ns=1790124683557869658 -- byte-identical to the live file) and the refusal
+therefore stood for ever.
+
+WHAT THE RE-STAMP FIX DOES NOT DO, stated plainly because a previous version of
+this docstring implied otherwise: it does NOT by itself lift run22's steps 36 and
+38. MEASURED through the real `check_step`, with the real producer's document on
+disk and run22's real step shape (the step declaring the CHECKER, not the writer):
+the producer's own document is NOT credited, because
+`_is_gate_verdict_document` falls through to its final `return True` when the
+document's stamp names a program the step does not declare. The refusal there is
+carried by the CONTENT branch and is independent of the note. The union stops it
+being permanent; only naming the producer -- R-0915-141's path split, in the commit
+after this one -- lifts it. Both directions are arms below.
 """
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
+
+import pytest
+import yaml
 
 PLUGIN = Path(__file__).resolve().parents[2]
 PROGRAMS = PLUGIN / "programs"
@@ -53,223 +73,253 @@ sys.path.insert(0, str(PROGRAMS))
 
 import flow_compliance_check as FCC                          # noqa: E402
 
-GATE = "zz_stage_check"
-PRODUCER = "zz_gen"
+CHECKLIST_REL = "reports/audit/tapeout_checklist.json"
+SIBLING_REL = "reports/zzsibling.json"
+
+#: The shipped step 2 clause that names TWO receipt flags: `--report <input the
+#: gate reads>` BEFORE `--json <where it writes its verdict>`.
+CROSSLAYER_CMD = (
+    "crosslayer_rewrite_equivalence_check . "
+    "--report reports/crosslayer/rewrite_equivalence.json "
+    "--baseline-marker reports/crosslayer/baseline_rtl "
+    "--search-space reports/crosslayer/search_space.json "
+    "--json reports/crosslayer/rewrite_equivalence_check.json")
+CROSSLAYER_INPUT = "reports/crosslayer/rewrite_equivalence.json"
+CROSSLAYER_RECEIPT = "reports/crosslayer/rewrite_equivalence_check.json"
 
 
-def _write(project: Path, rel: str, stamp: str, payload: str) -> None:
-    """Write the document and give it a stat STRICTLY LATER than its last one.
+@pytest.fixture()
+def project(tmp_path_factory):
+    return Path(tempfile.mkdtemp(prefix="restamp_",
+                                 dir=str(tmp_path_factory.mktemp("r"))))
 
-    THE BUMP IS MONOTONIC AGAINST THE FILE'S OWN PREVIOUS MTIME, not against
-    "now", and that is not fussiness. MEASURED while proving these arms bite: this
-    filesystem reports mtime in ~64 ms granules, so two writes inside one granule
-    produced BYTE-IDENTICAL (size, mtime_ns) pairs -- pass 1 and pass 2 got the
-    same stat, the pass-1 note still matched the pass-2 document by accident, and
-    `test_the_note_follows_the_bytes_it_describes` passed under the very mutation
-    it exists to catch. An arm that green-lights the defect on a fast machine is
-    worse than no arm.
+
+def _sibling(project: Path) -> None:
+    """One declared output the RUN produced, so the early return does not fire."""
+    p = project / SIBLING_REL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text('{"program": "zz_producer", "ok": true}\n')
+
+
+def _digest(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _note(project: Path):
+    d = project / FCC._AUDIT_AUTHORSHIP_DIR
+    notes = list(d.glob("*.json")) if d.is_dir() else []
+    return json.loads(notes[0].read_text()) if len(notes) == 1 else None
+
+
+def _refused(result) -> bool:
+    return any("SELF-CERTIFIED EVIDENCE EXCLUDED" in str(r)
+               for r in (result.reasons or []))
+
+
+# ── the three-pass sequence, through the real audit and a real rewriter ─────
+
+def test_a_republished_report_is_refused_on_every_pass(project):
+    """THE #2518 REPUBLISH SHAPE, with a real nested `flow_compliance_check` as the
+    gate: it rewrites its target every pass, which is what made the pass-1 note
+    stale under the narrow rule.
+
+    Four real passes, each a full `check_step`. The note must match the live file
+    after every one of them, and the document must be refused every time.
     """
-    f = project / rel
-    f.parent.mkdir(parents=True, exist_ok=True)
-    prev = os.stat(f).st_mtime_ns if f.exists() else 0
-    f.write_text(json.dumps({"program": stamp, "verdict": "PASS",
-                             "payload": payload}) + "\n")
-    nxt = max(os.stat(f).st_mtime_ns, prev) + 10 ** 9
-    os.utime(f, ns=(nxt, nxt))
-
-
-def _audit_pass(project: Path, sid: str, rel: str, *,
-                gate_rewrites: bool,
-                declared_programs: frozenset,
-                stamp: str = GATE,
-                payload: str = "") -> bool:
-    """One audit pass over one declared self-written path. Returns: refused?
-
-    Mirrors `check_step`'s audit-created block by calling that block's OWN
-    helpers, so the arms below measure the shipped rule rather than a paraphrase
-    of it. The expression the block actually passes to `_record_audit_created` is
-    pinned separately, by AST, in `test_the_shipped_restamp_set_is_the_union`.
-    """
-    absent_before = [] if (project / rel).exists() else [rel]
-    prior = FCC._prior_audit_created(project, sid, [rel])
-    if gate_rewrites:
-        _write(project, rel, stamp, payload or f"pass-{len(prior)}")
-    produced = []
-    if (project / rel).exists() and (
-            rel in absent_before or rel in prior
-            or FCC._is_gate_verdict_document(
-                project / rel, frozenset({GATE}), declared_programs)):
-        produced = [rel]
-    # THE SHIPPED RULE, CALLED — not restated. An earlier cut of these arms
-    # re-implemented the comprehension here and therefore passed on the base and
-    # on the fix alike; `restamp_set` exists so a test can drive the real decision.
-    FCC._record_audit_created(
-        project, sid, FCC.restamp_set(produced, absent_before, prior))
-    FCC._drop_audit_created_note(
-        project, sid, [r for r in [rel] if r not in produced])
-    return bool(produced)
-
-
-# ── the three-pass sequence, both rewriter shapes ──────────────────────────
-
-def test_a_republished_compliance_report_is_refused_on_every_pass(tmp_path):
-    """THE #2518 REPUBLISH SHAPE. The step's gate program is also its declared
-    producer (steps 2, 14, 15, 37 all are), so the content branch cannot help and
-    the note is the only thing standing between the auditor and its own document.
-    """
-    rel = "reports/phase1/gates/stage_phase1_compliance.json"
-    declared = frozenset({GATE})          # gate program IS a declared producer
-    assert _audit_pass(tmp_path, "2", rel, gate_rewrites=True,
-                       declared_programs=declared) is True, "pass 1"
-    assert _audit_pass(tmp_path, "2", rel, gate_rewrites=True,
-                       declared_programs=declared) is True, "pass 2"
-    assert _audit_pass(tmp_path, "2", rel, gate_rewrites=True,
-                       declared_programs=declared) is True, (
-        "pass 3 CREDITED the auditor's own document: the pass-2 rewrite made the "
-        "pass-1 note stale and nothing re-stamped it — MISSING twice, PASS "
-        "forever")
-    # and it does not stop at three
-    for n in range(4, 8):
-        assert _audit_pass(tmp_path, "2", rel, gate_rewrites=True,
-                           declared_programs=declared) is True, f"pass {n}"
-
-
-def test_the_crosslayer_clause_shape_is_refused_on_every_pass(tmp_path):
-    """THE SECOND REWRITER: a clause whose target is rewritten on every pass
-    because the receipt redirect never looked at its flag. Same three passes,
-    different document."""
-    rel = "reports/crosslayer/rewrite_equivalence_check.json"
-    declared = frozenset({GATE})
+    _sibling(project)
+    tiny = project / "zzflow.yaml"
+    tiny.write_text("flow: zzflow\nsteps:\n"
+                    "  - id: '1'\n    name: trivial\n    stage: stage1\n"
+                    f"    required_outputs: ['{SIBLING_REL}']\n"
+                    "    blocks_on: []\n")
+    rel = "reports/zzstage_compliance.json"
+    step = {"id": "zzrep", "name": "republish", "stage": "stage4",
+            "programs": ["flow_compliance_check"],
+            "required_outputs": [SIBLING_REL, rel],
+            "gate": {"all_of": [{"program_exit_zero":
+                                 f"flow_compliance_check . --flow-def {tiny} "
+                                 f"--json {rel}"}]}}
+    seen = []
     for n in (1, 2, 3, 4):
-        assert _audit_pass(tmp_path, "2", rel, gate_rewrites=True,
-                           declared_programs=declared) is True, f"pass {n}"
+        result = FCC.check_step(project, dict(step), {})
+        live = project / rel
+        assert live.is_file(), f"pass {n}: the gate wrote no report"
+        rec = _note(project)
+        seen.append(os.stat(live).st_mtime_ns)
+        assert _refused(result), (
+            f"pass {n} did NOT refuse the audit's own document. Under the narrow "
+            f"re-stamp rule this flips at pass 3: the pass-2 republish moves the "
+            f"bytes, the pass-1 note goes stale, and the auditor's own report is "
+            f"credited as run evidence — MISSING twice, PASS forever")
+        assert rel not in (result.evidence or []), f"pass {n} credited it"
+        assert rec is not None, f"pass {n}: the note is gone"
+        assert rec["mtime_ns"] == os.stat(live).st_mtime_ns, (
+            f"pass {n}: the note describes bytes that are no longer there, so the "
+            f"NEXT pass reads it as stale and credits the auditor's own document")
+    assert len(set(seen)) == 4, (
+        f"fixture defect: the gate did not rewrite its target on every pass "
+        f"({seen}) — without a real rewriter this arm cannot see the regression")
 
 
-def test_the_note_follows_the_bytes_it_describes(tmp_path):
-    """WHY the union works: after a pass that rewrote the document, the note must
-    carry THAT pass's stat — not pass 1's, and not a stat of nothing."""
-    rel = "reports/phase1/gates/stage_phase1_compliance.json"
-    declared = frozenset({GATE})
-    _audit_pass(tmp_path, "2", rel, gate_rewrites=True, declared_programs=declared)
-    _audit_pass(tmp_path, "2", rel, gate_rewrites=True, declared_programs=declared)
-    live = os.stat(tmp_path / rel)
-    notes = list((tmp_path / FCC._AUDIT_AUTHORSHIP_DIR).glob("*.json"))
-    assert len(notes) == 1, notes
-    rec = json.loads(notes[0].read_text())
-    assert rec["mtime_ns"] == live.st_mtime_ns, (
-        "the note describes bytes that are no longer there, so the next pass "
-        "will read it as stale and credit the auditor's own document")
-    assert rec["size"] == live.st_size
+def test_a_step_with_no_evidence_at_all_never_runs_its_own_gate(project):
+    """THE BOUNDARY, measured: where the sequence above can NOT start. A step all
+    of whose declared outputs are missing takes the early return and the auditor
+    refuses to run the gate at all, so no note is ever created that way."""
+    step = {"id": "zzgap", "name": "gap", "stage": "stage4",
+            "programs": ["tapeout_checklist_gen"],
+            "required_outputs": [CHECKLIST_REL],
+            "gate": {"all_of": [{"program_exit_zero":
+                                 f"tapeout_checklist_gen . --json {CHECKLIST_REL}"}]}}
+    result = FCC.check_step(project, dict(step), {})
+    assert result.status == "FAIL"
+    assert not (project / CHECKLIST_REL).exists(), (
+        "the auditor ran a gate whose only purpose here would be to manufacture "
+        "this step's completion evidence")
+    assert any("PRODUCER GAP" in str(r) for r in (result.reasons or []))
 
 
-# ── and the run22 defect must NOT come back ────────────────────────────────
+# ── run22's real shape, and what the re-stamp fix does NOT do ──────────────
 
-def test_a_producer_rewrite_between_passes_lifts_the_refusal(tmp_path):
-    """THE RUN22 SHAPE, the direction the union must not break: the gate is first
-    to write the path, the PRODUCER then rewrites it with its own measurement, and
-    the refusal must LIFT — a producer that runs late is still a producer.
+def _live_step(sid: str) -> dict:
+    doc = yaml.safe_load(
+        (PLUGIN / "flow" / "phase1_phase2_phase3.yaml").read_text())
+    step = dict(next(s for s in doc["steps"]
+                     if isinstance(s, dict) and str(s.get("id")) == sid))
+    for k in ("blocks_on", "closed_loop", "condition"):
+        step.pop(k, None)
+    return step
 
-    This is the arm the first cut of the fix bought correctly and the arm a
-    stamp-everything rule destroys: on run22 the note was re-stamped onto
-    `tapeout_checklist_gen`'s own bytes and the refusal became permanent.
+
+def _producer_wrote_the_checklist(project: Path) -> None:
+    """The RUN's producer writes its document, exactly as run22's mtimes show."""
+    r = subprocess.run(
+        [sys.executable, str(PROGRAMS / "tapeout_checklist_gen.py"), str(project),
+         "--json", str(project / CHECKLIST_REL)],
+        capture_output=True, text=True, timeout=900)
+    assert r.returncode == 0 and (project / CHECKLIST_REL).is_file(), r.stderr[-300:]
+    assert json.loads((project / CHECKLIST_REL).read_text())["program"] == \
+        "tapeout_checklist_gen"
+
+
+def test_run22s_real_shape_does_not_credit_the_producers_document(project):
+    """RUN22's ACTUAL SHAPE: the step declares the CHECKER under `programs:` while
+    the document is written by the PRODUCER. The stamp then matches neither the
+    gate set nor the producer set, `_is_gate_verdict_document` falls through to its
+    final `return True`, and the run's own document is excluded.
+
+    This is why the re-stamp fix alone cannot lift run22: the refusal here is on
+    the CONTENT branch and does not involve the note at all.
     """
-    rel = "reports/audit/tapeout_checklist.json"
-    declared = frozenset({PRODUCER})
-    assert _audit_pass(tmp_path, "36", rel, gate_rewrites=True,
-                       declared_programs=declared) is True, "pass 1"
-    # the RUN's producer rewrites the document with its own stamp
-    _write(tmp_path, rel, PRODUCER, "the producer's own measurement")
-    assert _audit_pass(tmp_path, "36", rel, gate_rewrites=False,
-                       declared_programs=declared) is False, (
-        "the producer rewrote the document and the audit still refuses it; no "
-        "producer can ever reclaim a path the audit touched first")
-    # and it stays credited on later passes
-    assert _audit_pass(tmp_path, "36", rel, gate_rewrites=False,
-                       declared_programs=declared) is False, "pass 3"
+    _producer_wrote_the_checklist(project)
+    step = _live_step("36")
+    step["programs"] = ["tapeout_signoff_check"]
+    step["required_outputs"] = [CHECKLIST_REL]
+    step["gate"] = {"all_of": [{"program_exit_zero":
+                                f"tapeout_signoff_check . --mode tapeout "
+                                f"--json {CHECKLIST_REL}"}]}
+    result = FCC.check_step(project, step, {})
+    assert CHECKLIST_REL not in (result.evidence or []), (
+        "in run22's own shape the producer's document must NOT be credited — if it "
+        "is, this arm is no longer measuring the state run22 was in")
+    assert _refused(result), [str(r)[:160] for r in (result.reasons or [])]
 
 
-def test_a_content_only_refusal_is_not_stamped(tmp_path):
-    """The excluded branch, on its own: a document that only LOOKS like a gate
-    verdict document is refused, but earns no note — so a later producer rewrite
-    can still lift it."""
-    rel = "reports/phase3/zz_only_content.json"
-    _write(tmp_path, rel, GATE, "written by nobody this pass")
-    assert _audit_pass(tmp_path, "9", rel, gate_rewrites=False,
-                       declared_programs=frozenset({PRODUCER})) is True
-    notes = list((tmp_path / FCC._AUDIT_AUTHORSHIP_DIR).glob("*.json"))
-    assert notes == [], (
-        "a content-only refusal was stamped; that is the run22 defect, and it "
-        "makes the refusal survive a producer rewrite")
+def test_the_shipped_step_36_credits_the_producers_document(project):
+    """THE SPLIT, on the SHIPPED step: the same producer's document, the same tree,
+    and now it IS run evidence — because step 36 declares the program that writes
+    it. Reddens on any tree where that declaration is reverted."""
+    _producer_wrote_the_checklist(project)
+    result = FCC.check_step(project, _live_step("36"), {})
+    assert CHECKLIST_REL in (result.evidence or []), (
+        f"step 36 does not credit its producer's document; reasons: "
+        f"{[str(r)[:160] for r in (result.reasons or [])]}")
+    assert not _refused(result), [str(r)[:160] for r in (result.reasons or [])]
 
 
-def test_a_document_the_run_produced_first_is_never_refused(tmp_path):
-    """The baseline that must stay true: producer writes, audit reads, audit
-    credits."""
-    rel = "reports/audit/tapeout_checklist.json"
-    _write(tmp_path, rel, PRODUCER, "produced before any audit")
-    assert _audit_pass(tmp_path, "36", rel, gate_rewrites=False,
-                       declared_programs=frozenset({PRODUCER})) is False
+# ── every receipt flag, through the real gate ──────────────────────────────
+
+def test_no_run_document_is_overwritten_by_a_two_receipt_clause(project):
+    """THE SHIPPED step-2 crosslayer clause, run for real.
+
+    It names `--report <input>` BEFORE `--json <receipt>`. The scanner used to
+    RETURN at the first flag, so the gate's `--json` still pointed at the run's own
+    document and overwrote it — while the disclosure said the opposite.
+
+    MEASURED at origin/main 1622ff87d with this same fixture:
+        reports/crosslayer/rewrite_equivalence.json        UNCHANGED
+        reports/crosslayer/rewrite_equivalence_check.json  OVERWRITTEN BY THE AUDIT
+    and on this tip both are UNCHANGED.
+    """
+    for rel, body in ((CROSSLAYER_INPUT,
+                       {"program": "crosslayer_rewrite_fidelity", "rewrites": []}),
+                      (CROSSLAYER_RECEIPT,
+                       {"program": "crosslayer_rewrite_fidelity",
+                        "verdict": "PASS"})):
+        p = project / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(body) + "\n")
+    before = {r: _digest(project / r)
+              for r in (CROSSLAYER_INPUT, CROSSLAYER_RECEIPT)}
+
+    outcome = FCC._check_program_exit_zero(project, CROSSLAYER_CMD)
+
+    for rel, was in before.items():
+        assert _digest(project / rel) == was, (
+            f"the audit overwrote the run's own document at {rel}; R-0915-126 is "
+            f"'producer writes, gate reads' and this clause names two receipt "
+            f"flags, so BOTH have to be redirected")
+    # `_check_program_exit_zero` answers a tuple whose second element is the
+    # snippet the audit publishes; read it that way rather than by attribute.
+    note = str(outcome[1] if isinstance(outcome, tuple)
+               else getattr(outcome, "output", "") or "")
+    assert "RECEIPT REDIRECTED" in note
+    assert "2 path(s)" in note, note[:300]
+    assert "--report" in note and "--json" in note, note[:300]
 
 
-# ── the shipped expressions, pinned where a refactor would move them ───────
+def test_the_receipt_is_the_flag_the_gate_wrote_not_the_first_one(project):
+    """WHICH of the two is the gate's receipt is decided by what it WROTE.
+
+    The reader takes the gate's structured verdict out of the receipt. Taking the
+    first flag meant reading a document the gate had only read.
+    """
+    for rel in (CROSSLAYER_INPUT, CROSSLAYER_RECEIPT):
+        p = project / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('{"program": "crosslayer_rewrite_fidelity"}\n')
+    argv = CROSSLAYER_CMD.split()
+    moved, disclosure, keep = FCC._receipt_off_a_produced_document(argv, project)
+    assert len(keep.records) == 2, keep.records
+    assert [r["flag"] for r in keep.records] == ["--report", "--json"]
+    # the gate writes only its receipt; simulate exactly that and ask the module
+    rec_json = next(r for r in keep.records if r["flag"] == "--json")
+    Path(rec_json["scratch"]).write_text('{"program": "x", "verdict": "FAIL"}\n')
+    written = FCC._written_receipts(keep)
+    assert [r["flag"] for r in written] == ["--json"], written
+    # and the one it only read is no longer offered to a reader as a receipt
+    rec_report = next(r for r in keep.records if r["flag"] == "--report")
+    assert rec_report["key"] not in FCC._RECEIPT_REDIRECTS
+    assert rec_json["key"] in FCC._RECEIPT_REDIRECTS
+
+
+# ── one source pin, on the rule a revert would inline again ────────────────
 
 def test_the_shipped_restamp_set_is_the_union():
-    """AST, not a text slice: find the `_record_audit_created` call inside
-    `check_step` and assert its third argument is the UNION comprehension. An
-    earlier anchor of mine on this exact call broke on a rename, so this pins the
-    call by NAME and reads the argument's structure."""
+    """AST, not a text slice: `check_step` must route its re-stamp through
+    `restamp_set`, and that rule must use BOTH sets and NOT the content branch."""
     tree = ast.parse((PROGRAMS / "flow_compliance_check.py").read_text())
     calls = [n for n in ast.walk(tree)
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
              and n.func.id == "_record_audit_created"]
-    assert calls, "the re-stamp call is gone"
-    routed = []
-    for c in calls:
-        if len(c.args) < 3:
-            continue
-        src = ast.unparse(c.args[2])
-        if "restamp_set(" in src:
-            routed.append(src)
-    assert routed, (
-        "check_step no longer routes its re-stamp through `restamp_set`; the rule "
-        "is back to being an inline comprehension no test can drive")
+    routed = [ast.unparse(c.args[2]) for c in calls
+              if len(c.args) >= 3 and "restamp_set(" in ast.unparse(c.args[2])]
+    assert routed, ("check_step no longer routes its re-stamp through "
+                    "`restamp_set`; the rule is back to an inline comprehension "
+                    "no test can drive")
     for src in routed:
         assert "_absent_before_gate" in src and "_prior_created" in src, src
         assert "_is_gate_verdict_document" not in src, src
-
-    # and the shipped rule itself uses BOTH sets
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == "restamp_set")
     body = ast.unparse(fn)
     assert "absent" in body and "prior" in body, body
-
-
-def test_the_redirect_and_the_republish_consider_every_receipt_flag():
-    """Both scanners used to `return` at the first `--json`/`--report`, so a
-    clause naming two receipts was decided entirely by the first. Pinned on the
-    loop body: the early exits inside the flag loop must be `continue`."""
-    src = (PROGRAMS / "flow_compliance_check.py").read_text()
-    tree = ast.parse(src)
-    fns = {n.name: n for n in ast.walk(tree)
-           if isinstance(n, ast.FunctionDef)}
-    for name in ("_publish_over_the_audits_own_document",
-                 "_receipt_off_a_produced_document"):
-        fn = fns[name]
-        loops = [n for n in ast.walk(fn) if isinstance(n, ast.For)]
-        assert loops, name
-        flag_loop = loops[0]
-        # The `is_file()` guard and the class guard sit directly in the loop body.
-        returns_in_guards = [
-            n for n in ast.walk(flag_loop)
-            if isinstance(n, ast.Return)
-            and any(isinstance(p, (ast.If, ast.Try))
-                    for p in ast.walk(flag_loop))]
-        # Structural, not a count: no `return` may be the handler of the
-        # not-a-file / not-our-class guards, because that abandons later flags.
-        for node in ast.walk(flag_loop):
-            if isinstance(node, ast.If) and isinstance(node.test, ast.UnaryOp):
-                body = node.body
-                assert not any(isinstance(b, ast.Return) for b in body), (
-                    f"{name}: a guard inside the receipt-flag loop still returns, "
-                    f"so only the FIRST receipt flag is ever considered")
-        assert returns_in_guards is not None       # the walk above is the check

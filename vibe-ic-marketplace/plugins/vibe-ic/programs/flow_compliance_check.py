@@ -3649,6 +3649,54 @@ _GATE_RECEIPT_FLAGS = ("--json", "--report")
 _RECEIPT_REDIRECTS: Dict[str, Tuple[str, Any]] = {}
 
 
+class _ReceiptRedirects:
+    """The scratch directories a clause's receipts went to, and their records.
+
+    Held by the outcome so the directories outlive the subprocess; `records` is
+    what lets `_written_receipts` answer, AFTER the gate exits, which redirected
+    paths the gate WROTE and which it only read.
+    """
+
+    __slots__ = ("tmps", "records")
+
+    def __init__(self, tmps: List[Any], records: List[Dict[str, Any]]) -> None:
+        self.tmps = tmps
+        self.records = records
+
+
+def _file_digest(path: Path) -> Optional[str]:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _written_receipts(keep: Any) -> List[Dict[str, Any]]:
+    """The redirected paths this gate actually WROTE — measured, not guessed.
+
+    A RECEIPT is a path the gate writes; an INPUT is one it only reads. Both are
+    spelled with the same flags (`--json`, `--report`) by different gates, so no
+    name list can separate them — and the previous code did not try: it took the
+    FIRST flag and called that the receipt, which for step 2's crosslayer clause
+    is the document the gate READS.
+
+    After the gate exits the difference is a fact on disk: the scratch copy whose
+    bytes changed is the one it wrote. The others are unregistered from
+    `_RECEIPT_REDIRECTS`, so a reader looking for the gate's structured verdict is
+    never handed a document the gate merely read.
+    """
+    if not isinstance(keep, _ReceiptRedirects):
+        return []
+    written: List[Dict[str, Any]] = []
+    for rec in keep.records:
+        now = _file_digest(Path(rec["scratch"]))
+        if now is not None and now != rec.get("seeded"):
+            written.append(rec)
+        else:
+            _RECEIPT_REDIRECTS.pop(rec["key"], None)
+    return written
+
+
 def _resolved_key(path: Path) -> str:
     """One spelling of a path, so the writer and the reader agree on the key."""
     try:
@@ -3876,23 +3924,37 @@ def _receipt_off_a_produced_document(argv: List[str], project: Path
     Returns `(argv, disclosure_or_None, keepalive)`; `keepalive` must outlive the
     subprocess call.
     """
+    moved = list(argv)
+    records: List[Dict[str, Any]] = []
+    tmps: List[Any] = []
     for i, tok in enumerate(argv[:-1]):
         if tok not in _GATE_RECEIPT_FLAGS:
             continue
         target = Path(argv[i + 1])
         abs_target = target if target.is_absolute() else (project / target)
-        # EVERY RECEIPT FLAG, NOT THE FIRST — same defect, same reason as in
-        # `_publish_over_the_audits_own_document`: a clause naming two receipts
-        # was decided by the first one, so a second flag pointing at a document
-        # the run had produced was never redirected and the auditor overwrote it.
+        # EVERY RECEIPT FLAG, NOT THE FIRST, and this is the half a second review
+        # confirmed was still broken on my previous tip. The loop used to RETURN at
+        # the first flag whose target existed, so a clause naming two of them was
+        # decided entirely by the first.
+        #
+        # MEASURED on the shipped flow: step 2's crosslayer clause names
+        # `--report reports/crosslayer/rewrite_equivalence.json` (which the gate
+        # READS) BEFORE `--json reports/crosslayer/rewrite_equivalence_check.json`
+        # (where it writes its verdict). The old loop moved the first and returned,
+        # so the gate's `--json` still pointed at the run's own document and
+        # overwrote it -- while the disclosure said the opposite, that the run's
+        # document had been left alone. Worse, `_receipt_path` in the caller then
+        # took the SAME first flag, so the reader looked for the gate's structured
+        # verdict in a document the gate had only read.
         try:
             if not abs_target.is_file():
                 continue
         except OSError:                                    # pragma: no cover
             continue
         tmp = tempfile.TemporaryDirectory(prefix="gate_receipt_")
-        moved = list(argv)
-        moved[i + 1] = str(Path(tmp.name) / abs_target.name)
+        tmps.append(tmp)
+        dest = str(Path(tmp.name) / abs_target.name)
+        moved[i + 1] = dest
         # SEED THE SCRATCH WITH THE DOCUMENT. For several gates this flag names
         # an INPUT as well as an output: `pad_ring_check`'s own help says the
         # path is "READ as the producer's claim, then written back with this
@@ -3906,21 +3968,30 @@ def _receipt_off_a_produced_document(argv: List[str], project: Path
         # Copying rather than enumerating which gates read their target: a list
         # is complete only until the next gate is wired, and a gate that ignores
         # its pre-seeded input is unaffected by finding one there.
+        seeded: Optional[str] = None
         try:
-            shutil.copy2(abs_target, moved[i + 1])
+            shutil.copy2(abs_target, dest)
+            seeded = _file_digest(Path(dest))
         except OSError:                                    # pragma: no cover
             # Unreadable/uncopyable is the pre-seed state, which is exactly what
             # a gate with a write-only flag expects. Never a reason to hand the
             # gate the real path back.
             pass
-        _RECEIPT_REDIRECTS[_resolved_key(abs_target)] = (moved[i + 1], tmp)
-        return moved, (
-            f"RECEIPT REDIRECTED: this clause's {tok} named "
-            f"{target.as_posix()}, which the run had already produced; the "
-            f"gate's own receipt went to a scratch path so the run's document is "
-            f"left byte-for-byte alone (R-0915-126: producer writes, gate reads)"
-        ), tmp
-    return argv, None, None
+        _RECEIPT_REDIRECTS[_resolved_key(abs_target)] = (dest, tmp)
+        records.append({"key": _resolved_key(abs_target), "flag": tok,
+                        "declared": target.as_posix(), "scratch": dest,
+                        "seeded": seeded})
+    if not records:
+        return argv, None, None
+    named = ", ".join(f"{r['flag']} {r['declared']}" for r in records)
+    return moved, (
+        f"RECEIPT REDIRECTED: this clause named {len(records)} path(s) the run "
+        f"had already produced ({named}); each went to its own scratch path, "
+        f"pre-seeded with the run's document, so every one of the run's documents "
+        f"is left byte-for-byte alone (R-0915-126: producer writes, gate reads). "
+        f"WHICH of them is this gate's receipt is decided after it exits, by "
+        f"which scratch copy it actually wrote"
+    ), _ReceiptRedirects(tmps, records)
 
 
 def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutcome:
@@ -3989,15 +4060,36 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
     #: step 14 went PASS -> NOT_MEASURED and seven FAILs went to NOT_MEASURED,
     #: because the redirect moved the receipt and the reader kept reading the
     #: clause string.
+    #: THE FIRST FLAG IS NOT THE RECEIPT, and taking it was a defect of its own.
+    #: Step 2's crosslayer clause names `--report <an input the gate reads>` before
+    #: `--json <where it writes its verdict>`, so reading the first meant looking
+    #: for the gate's structured verdict, reason class and message in a document
+    #: the gate had only read. The receipt is now whichever redirected scratch copy
+    #: the gate actually WROTE — a fact on disk once it has exited — resolved
+    #: inside `_outcome` for the same reason `_stamp_publication` is: that is the
+    #: one place every return path funnels through after the subprocess.
     _receipt_path: Optional[str] = None
+    _fallback_receipt: Optional[str] = None
     if _receipt_note:
         for _i, _tok in enumerate(argv[:-1]):
             if _tok in _GATE_RECEIPT_FLAGS:
-                _receipt_path = argv[_i + 1]
+                _fallback_receipt = argv[_i + 1]
                 break
 
     def _outcome(passed: bool, output: str,
                  exit_code: Optional[int]) -> _ProgramCheckOutcome:
+        nonlocal _receipt_path
+        # WHICH redirected path was this gate's receipt: the scratch copy whose
+        # bytes it changed. `_written_receipts` also unregisters the ones it only
+        # read, so no reader is handed an input as a verdict document. The LAST
+        # written one wins when a gate writes more than one, a clause's own verdict
+        # document being conventionally its last named output; with none written we
+        # keep the previous behaviour rather than inventing a path.
+        _written = _written_receipts(_receipt_tmp)
+        if _written:
+            _receipt_path = _written[-1]["scratch"]
+        elif _receipt_path is None:
+            _receipt_path = _fallback_receipt
         # STAMPED HERE, not at the write site, because the gate is a SUBPROCESS:
         # this function is the one place every return path funnels through after
         # it has exited, so the provenance cannot be attached on some paths and
@@ -14460,10 +14552,22 @@ def restamp_set(audit_produced: Sequence[str],
 
     NOT STAMPED: a path that is in `audit_produced` only because the document
     self-identifies as a gate verdict document. That is a refusal made on content
-    alone, and stamping it is what made run22's step 36 refusal permanent -- the
+    alone, and stamping it is what made run22's step 36 refusal PERMANENT -- the
     note took `tapeout_checklist_gen`'s own bytes (size=16738,
     mtime=08:51:23.557) and matched forever after. Such a path is still refused on
     this pass; it simply earns no note, so a producer rewrite can lift it.
+
+    WHAT THIS RULE DOES NOT DO, and an earlier version of this comment implied
+    otherwise. It does NOT by itself lift run22's steps 36 and 38. MEASURED through
+    `check_step` with the real producer's document on disk and run22's real step
+    shape -- the step declaring the CHECKER under `programs:`, not the program that
+    writes the document -- the document is still excluded, because
+    `_is_gate_verdict_document` falls through to its final `return True` when the
+    stamp names a program the step does not declare. That refusal is carried by the
+    CONTENT branch and does not involve this note at all. This rule stops the
+    refusal being permanent; what LIFTS it is the step naming its producer, which
+    is R-0915-141's path split. Both directions are arms in
+    `test_a_rewritten_audit_document_is_still_the_audits.py`.
     """
     absent = set(absent_before_gate)
     prior = set(prior_created or ())
