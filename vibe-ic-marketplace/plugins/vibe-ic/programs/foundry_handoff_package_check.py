@@ -534,6 +534,94 @@ RULE_GEOMETRY_PREDICATE_UNAVAILABLE = (
     'FOUNDRY_HANDOFF_GEOMETRY_PREDICATE_UNAVAILABLE')
 
 
+# ---------------------------------------------------------------------------
+# THE LAYOUT MEMBER IS THE SIGNED-OFF GDS, BYTE FOR BYTE.
+#
+# MEASURED on spm run23 (lane icspm5): a full phase-3 re-run moved pnr/spm.gds
+# and stage4/gds/spm.gds a7bf4526... -> 46459f4a... (signed off: DRC/LVS PASS),
+# while stage4/foundry_handoff/spm.gds kept a7bf4526... . The runner packaged
+# members copy-if-ABSENT (`if dst.is_file(): continue`) and by HARDLINK, so the
+# first run's member was never refreshed -- and the rename that rewrote the
+# source left the link pointing at the old inode. The package could ship a GDS
+# other than the one signed off, and nothing here compared them.
+# `layout_member_sources` is the ONE answer to "which file is member X derived
+# from" for the producer and this gate alike; `stale_layout_members` is the
+# comparison this gate now refuses on.
+# ---------------------------------------------------------------------------
+RULE_STALE_LAYOUT_MEMBER = "FOUNDRY_HANDOFF_STALE_LAYOUT_MEMBER"
+_LAYOUT_SCRIBE_HINTS = ("scribe_line", "scribeline", "scribe-line", "frame")
+_LAYOUT_ROOTS = ("phase3/stage4/gds", "phase3/stage3/pnr")   # signed-off first
+
+
+def sha256_file(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def layout_member_sources(project):
+    """{member name: the file it must be derived from}. The SIGNED-OFF GDS
+    (`phase3/stage4/gds/<name>`) wins; a PnR GDS only supplies a name the
+    signed-off set lacks. Scribe stubs and comparison references are never
+    members (their own rules name them)."""
+    project = Path(project)
+    out = {}
+    for rel in _LAYOUT_ROOTS:
+        root = project / rel
+        if not root.is_dir():
+            continue
+        for g in sorted(root.glob("*.gds")):
+            if any(h in g.stem.lower() for h in _LAYOUT_SCRIBE_HINTS):
+                continue
+            if any(g.name.lower().endswith(sfx)
+                   for sfx in REFERENCE_ONLY_SUFFIXES):
+                continue
+            out.setdefault(g.name, g)
+    return out
+
+
+def stale_layout_members(project):
+    """Package layout members whose bytes are not their source's -- by sha256,
+    against the signed-off GDS of the same name (else the member's own derived
+    source), plus any member whose recorded digest (mask_spec.json
+    `layout_members`) no longer matches it."""
+    project = Path(project)
+    hd = project / "phase3/stage4/foundry_handoff"
+    if not hd.is_dir():
+        return []
+    sources = layout_member_sources(project)
+    recorded = {}
+    try:
+        spec = json.loads((hd / "mask_spec.json").read_text(errors="replace"))
+        if isinstance(spec, dict) and isinstance(spec.get("layout_members"), dict):
+            recorded = spec["layout_members"]
+    except (OSError, ValueError):
+        recorded = {}
+    stale = []
+    for m in sorted(hd.glob("*.gds")):
+        if not m.is_file() or m.stat().st_size == 0:
+            continue
+        src = sources.get(m.name)
+        if src is None or not src.is_file():
+            continue
+        m_sha, s_sha = sha256_file(m), sha256_file(src)
+        rec = recorded.get(m.name) if isinstance(recorded.get(m.name), dict) else {}
+        why = None
+        if m_sha != s_sha:
+            why = "member bytes differ from the signed-off source"
+        elif rec and rec.get("sha256") and rec.get("sha256") != m_sha:
+            why = "mask_spec.json records a different digest for this member"
+        if why:
+            stale.append({"member": str(m.relative_to(project)),
+                          "member_sha256": m_sha,
+                          "source": str(src.relative_to(project)),
+                          "source_sha256": s_sha, "why": why})
+    return stale
+
+
 def gds_files_on_disk(project):
     """EVERY `*.gds` under the three roots — any size, any name, frame or die.
 
@@ -761,6 +849,32 @@ def main(argv=None):
     # it carries real geometry. The runner no longer packages one; this gate refuses
     # one however it arrived, because "the producer stopped doing it" is not the
     # same guarantee as "the package cannot contain it".
+    stale = stale_layout_members(project)
+    if stale:
+        verdict, rc = "FAIL", 1
+        _s0 = stale[0]
+        findings = [{
+            "severity": "ERROR",
+            "rule": RULE_STALE_LAYOUT_MEMBER,
+            "message": (
+                f"{len(stale)} handoff layout member(s) are not the signed-off "
+                f"GDS: {_s0['member']} sha256 {_s0['member_sha256'][:12]}... vs "
+                f"{_s0['source']} sha256 {_s0['source_sha256'][:12]}... "
+                f"({_s0['why']}). A foundry tapes out the package; a member "
+                f"that is not byte-identical to the signed-off layout ships a "
+                f"design nothing signed off. Re-run foundry_handoff_pack_gen, "
+                f"which re-derives every member from the signed-off GDS."),
+        }]
+        report = {"program": _GATE_NAME, "verdict": verdict,
+                  "findings": findings, "stale_layout_members": stale}
+        _ga.stamp(report)
+        out = json.dumps(report, indent=2, ensure_ascii=False)
+        if args.json:
+            Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(Path(args.json), out)
+        print(out)
+        return rc
+
     reference_members = []
     for hd in sorted(project.glob("phase3/stage4/foundry_handoff/**/*")):
         if not hd.is_file():

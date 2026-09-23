@@ -220,15 +220,30 @@ def test_a_pack_without_a_reference_layout_is_not_failed_for_this(tmp_path):
     assert not doc.get("reference_members"), doc
 
 
-def test_the_runner_excludes_the_reference_from_the_link_set():
-    """SOURCE PIN on the loop that did the packaging: the suffix check must sit in
-    the link loop, beside the scribe filter, and record what it skipped."""
+def test_the_runner_excludes_the_reference_from_the_link_set(tmp_path):
+    """The packaging moved: the runner's copy-if-absent hardlink loop was
+    replaced by `foundry_handoff_pack_gen.package_layout_members`, whose member
+    set is `foundry_handoff_package_check.layout_member_sources` (a stale
+    member measured on spm run23 -- see
+    test_foundry_handoff_layout_member_is_the_signed_off_gds.py). The claim is
+    unchanged and now DRIVEN: a comparison reference beside the shipped GDS is
+    never a member and is never written into the pack, and the runner still
+    RECORDS what it skipped."""
+    import foundry_handoff_pack_gen as G
+    for rel in ("phase3/stage4/gds/spm.gds",
+                "phase3/stage3/pnr/chip_top.prefinish.gds",
+                "phase3/stage3/pnr/spm.ring_reference.gds"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_bytes(b"GDS" * 64)
+    assert sorted(PKG.layout_member_sources(tmp_path)) == ["spm.gds"]
+    rec = G.package_layout_members(tmp_path)
+    assert sorted(rec["members"]) == ["spm.gds"], rec
+    hd = tmp_path / "phase3/stage4/foundry_handoff"
+    assert sorted(p.name for p in hd.glob("*.gds")) == ["spm.gds"]
     src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
     i = src.index("_REFERENCE_ONLY_SUFFIXES = ")
-    j = src.index("_zero_byte_members.append", i)
-    window = src[i:j]
-    assert "name_lo.endswith(sfx) for sfx in _REFERENCE_ONLY_SUFFIXES" in window, (
-        "the exclusion is no longer applied inside the handoff link loop")
-    assert "_reference_members.append(src_gds.name)" in window, (
+    window = src[i:src.index("PACKAGING_ERRORS.txt", i)]
+    assert "_reference_members = sorted(" in window and \
+        "for sfx in _REFERENCE_ONLY_SUFFIXES" in window, (
         "a skipped member must be RECORDED — 'the package does not contain this' "
         "and 'nobody looked' must not read the same")

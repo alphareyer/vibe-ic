@@ -53396,7 +53396,6 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # glob for any additional GDS the canonicalize step has
     # already produced. chip-AGNOSTIC: scribe stubs filtered via
     # the same hint list as foundry_handoff_package_check.
-    _SCRIBE_HINTS = ("scribe_line", "scribeline", "scribe-line", "frame")
     #: A COMPARISON REFERENCE IS NOT A DELIVERABLE, and must never enter the pack.
     #:
     #: MEASURED on spm run22: phase3/stage4/foundry_handoff/ carried
@@ -53433,35 +53432,25 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             if extra not in candidate_chip_gds:
                 candidate_chip_gds.append(extra)
     if handoff_out.is_dir():
-        _zero_byte_members: List[str] = []
-        _reference_members: List[str] = []
-        for src_gds in candidate_chip_gds:
-            stem_lo = src_gds.stem.lower()
-            if any(h in stem_lo for h in _SCRIBE_HINTS):
-                continue
-            name_lo = src_gds.name.lower()
-            if any(name_lo.endswith(sfx) for sfx in _REFERENCE_ONLY_SUFFIXES):
-                # Recorded by name, not silently skipped: "the package does not
-                # contain this" and "nobody looked" must not read the same.
-                _reference_members.append(src_gds.name)
-                continue
-            # ORGANIC-20260606 #433(d): a 0-byte member must never enter
-            # the foundry handoff pack — record it by name instead of
-            # silently packaging an empty mask source.
-            if src_gds.stat().st_size == 0:
-                _zero_byte_members.append(src_gds.name)
-                continue
-            dst_gds = handoff_out / src_gds.name
-            if dst_gds.is_file():
-                continue
-            try:
-                try:
-                    os.link(str(src_gds), str(dst_gds))
-                except (OSError, AttributeError):
-                    dst_gds.write_bytes(src_gds.read_bytes())
-                written.append(str(dst_gds))
-            except OSError:
-                pass
+        # THE LAYOUT MEMBERS COME FROM ONE PLACE: `foundry_handoff_pack_gen.
+        # package_layout_members`, which re-derives every member from the
+        # SIGNED-OFF GDS on every run, by copy. This block used to package
+        # copy-if-absent by hardlink -- MEASURED on spm run23, a phase-3 re-run
+        # moved the signed-off GDS a7bf4526... -> 46459f4a... and the package
+        # kept a7bf4526... . `candidate_chip_gds` is kept only to name the
+        # comparison references that are deliberately NOT packaged.
+        _reference_members = sorted(
+            g.name for g in candidate_chip_gds
+            if any(g.name.lower().endswith(sfx)
+                   for sfx in _REFERENCE_ONLY_SUFFIXES))
+        try:
+            import foundry_handoff_pack_gen as _fhpg   # noqa: PLC0415
+            _layout = _fhpg.package_layout_members(project)
+            written.extend(str(handoff_out / n) for n in _layout["written"])
+            _zero_byte_members = list(_layout["zero_byte_sources"])
+        except Exception as exc:                    # noqa: BLE001
+            notes.append(f"handoff layout members not (re)derived: {exc}")
+            _zero_byte_members = []
         if _reference_members:
             print(f"[handoff] comparison reference(s) NOT packaged: "
                   f"{', '.join(sorted(_reference_members))} — a retained "
