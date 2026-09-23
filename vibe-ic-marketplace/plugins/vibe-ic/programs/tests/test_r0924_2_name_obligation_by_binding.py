@@ -133,3 +133,62 @@ def test_a_real_port_that_is_not_bound_as_the_reset_stays_outstanding(tmp_path):
     assert "does not bind 'en' as the reset" in b["reason"]
     assert "does not connect" not in b["reason"]
     assert rep["verdict"] != "PASS"
+
+
+# ── r2: the proof must name the harness it proved ───────────────────────────
+SRST_RTL = RTL.replace("input rst", "input sys_rst").replace("if (rst)", "if (sys_rst)")
+
+
+def _cli_rerun(project: Path, extra: list) -> None:
+    """The documented Step-5 CLI sequence's second half: regenerate the
+    harness, then `formal_property_run.py` — whose proof does NOT run."""
+    gen = fhg.generate(project=project, top="ctr")
+    assert gen["verdict"] == "EMITTED", gen
+    try:
+        fpr.main([str(project), "--harness", gen["harness_path"],
+                  "--rtl", *gen["rtl_files"], "--top", gen["harness_module"],
+                  *extra])
+    except SystemExit:
+        pass
+
+
+def _stale_pairing(tmp_path: Path, extra: list) -> dict:
+    proj = _project(tmp_path)                      # L8 declares `rst`
+    (proj / "phase2/stage1/rtl/ctr.v").write_text(SRST_RTL)
+    res, rep = _step5(proj)                        # a real proof of the sys_rst harness
+    assert res["all_proved"] is True
+    assert _binding(rep)["status"] == gate.BINDING_OUTSTANDING   # binds sys_rst
+    results = (proj / "phase2/stage1/formal/results.json").read_text()
+    (proj / "phase2/stage1/rtl/ctr.v").write_text(RTL)          # port renamed to rst
+    _cli_rerun(proj, extra)
+    # the old proof survives untouched; the harness on disk is a new one
+    assert (proj / "phase2/stage1/formal/results.json").read_text() == results
+    assert "rst_active = rst;" in (proj / "phase2/stage1/formal/formal_ctr.sv").read_text()
+    return gate.audit(proj)
+
+
+def test_a_harness_rewritten_by_an_emit_only_run_is_not_the_one_proven(tmp_path):
+    rep = _stale_pairing(tmp_path, ["--emit-only"])
+    b = _binding(rep)
+    assert b["status"] == gate.BINDING_OUTSTANDING, b
+    assert "harness not the one proven" in b["reason"]
+    assert rep["verdict"] != "PASS"
+
+
+def test_a_harness_rewritten_by_an_env_unavailable_run_is_not_the_one_proven(tmp_path):
+    rep = _stale_pairing(tmp_path, ["--container", "vibeic-no-such-container-r0924"])
+    assert (tmp_path / "phase2/stage1/formal/formal_env_unavailable.json").is_file()
+    b = _binding(rep)
+    assert b["status"] == gate.BINDING_OUTSTANDING, b
+    assert "harness not the one proven" in b["reason"]
+    assert rep["verdict"] != "PASS"
+
+
+def test_the_discharge_names_the_proved_harness(tmp_path):
+    res, rep = _step5(_project(tmp_path))
+    b = _binding(rep)
+    assert b["status"] == gate.DISCHARGED_BY_BINDING, b
+    h = tmp_path / "phase2/stage1/formal/formal_ctr.sv"
+    import hashlib
+    assert b["proved_harness_sha256"]["formal_ctr.sv"] == hashlib.sha256(h.read_bytes()).hexdigest()
+    assert res["proof_inputs"]["source"].startswith("sby src")

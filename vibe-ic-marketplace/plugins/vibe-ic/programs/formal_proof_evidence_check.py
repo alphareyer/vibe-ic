@@ -347,8 +347,8 @@ def strip_comments(text: str) -> str:
     return _LINE_COMMENT_RE.sub("", _BLOCK_COMMENT_RE.sub("", text))
 
 
-def _harness_text(project: Path, formal_dir: Path, results: dict) -> str:
-    """The harness (and any expert fragment it includes) this run proved."""
+def _harness_files(project: Path, formal_dir: Path, results: dict) -> List[Path]:
+    """The harness (and any expert fragment it includes) the .sby names."""
     names: List[str] = []
     sby = results.get("sby")
     sby_path = project / sby if isinstance(sby, str) else None
@@ -357,12 +357,28 @@ def _harness_text(project: Path, formal_dir: Path, results: dict) -> str:
                            sby_path.read_text(errors="replace"), re.M)
     if not names:
         names = [p.name for p in sorted(formal_dir.glob("formal_*.sv"))]
-    texts = []
-    for n in dict.fromkeys(names):
-        f = formal_dir / Path(n).name
-        if f.is_file():
-            texts.append(f.read_text(errors="replace"))
-    return strip_comments("\n".join(texts))
+    return [formal_dir / Path(n).name for n in dict.fromkeys(names)
+            if (formal_dir / Path(n).name).is_file()]
+
+
+def _harness_not_proven(files: List[Path], results: dict) -> Optional[str]:
+    """None when every harness file on disk is byte-identical (sha256) to the
+    one the recorded proof read (`results["proof_inputs"]`); else why not."""
+    import hashlib
+    recorded = (results.get("proof_inputs") or {}).get("files")
+    if not isinstance(recorded, dict):
+        return "the proof does not name the harness it proved (no proof_inputs)"
+    if not files:
+        return "no harness file on disk"
+    for f in files:
+        try:
+            now = hashlib.sha256(f.read_bytes()).hexdigest()
+        except OSError:
+            now = None
+        if recorded.get(f.name) != now:
+            return (f"harness not the one proven: {f.name} sha256 {str(now)[:12]} "
+                    f"!= proved {str(recorded.get(f.name))[:12]}")
+    return None
 
 
 def _harness_connects(harness: str, port: str) -> bool:
@@ -397,7 +413,9 @@ def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List
     rows = [(r, b) for r, b in rows if b]
     if not rows:
         return []
-    harness = _harness_text(project, formal_dir, results)
+    hfiles = _harness_files(project, formal_dir, results)
+    stale = _harness_not_proven(hfiles, results)
+    harness = strip_comments("\n".join(f.read_text(errors="replace") for f in hfiles))
     tasks = [t for t in results.get("properties") or [] if isinstance(t, dict)]
     proven = (results.get("all_proved") is True and bool(tasks)
               and all(str(t.get("status")) == "PASS" for t in tasks)
@@ -408,7 +426,10 @@ def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List
     out: List[dict] = []
     for row, b in rows:
         rec = {"id": str(row.get("id")), "kind": "binding", "role": b["role"],
-               "port": b["port"], "property": None, "proof_status": proof_status}
+               "port": b["port"], "property": None, "proof_status": proof_status,
+               "proved_harness_sha256": {
+                   f.name: ((results.get("proof_inputs") or {}).get("files") or {}).get(f.name)
+                   for f in hfiles}}
         why = []
         if not _harness_connects(harness, b["port"]):
             why.append(f"the harness does not connect the DUT port {b['port']!r}")
@@ -419,6 +440,8 @@ def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List
             rec["property"] = covering[0]
         else:
             why.append("no asserted property is guarded by that reset")
+        if stale:
+            why.append(stale)
         if not proven:
             why.append(f"the covering property is not proven ({proof_status})")
         if why:

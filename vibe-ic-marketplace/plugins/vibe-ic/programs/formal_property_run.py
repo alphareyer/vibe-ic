@@ -1700,6 +1700,46 @@ def _stage_include_headers(rtl: List[Path], formal_dir: Path,
     return names
 
 
+def _sha256_file(path: Path) -> Optional[str]:
+    try:
+        import hashlib
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def proof_inputs(sby_path: Path, formal_dir: Path) -> dict:
+    """R-0924-2 r2 — THE SOURCES THIS PROOF READ, by content.
+
+    Every `[files]` entry of the .sby, hashed from sby's own `src/` copy in a
+    task work directory (what the engine actually read), else from the staged
+    file as it stands the moment sby returns. A consumer that inspects a
+    harness compares against this, so a harness rewritten after the proof —
+    by a later generate whose proof never ran (ENV_UNAVAILABLE / emit-only) —
+    is never paired with this proof."""
+    text = sby_path.read_text(errors="replace")
+    names: List[str] = []
+    in_files = False
+    for line in text.splitlines():
+        ls = line.strip()
+        if ls.startswith("[") and ls.endswith("]"):
+            in_files = ls == "[files]"
+            continue
+        if in_files and ls:
+            names.append(ls.split()[-1])
+    srcs = sorted(d / "src" for d in formal_dir.glob(f"{sby_path.stem}*")
+                  if (d / "src").is_dir())
+    files: Dict[str, Optional[str]] = {}
+    source = "staged"
+    for n in names:
+        base = Path(n).name
+        copy = next((d / base for d in srcs if (d / base).is_file()), None)
+        if copy is not None:
+            source = f"sby src ({copy.parent.parent.name})"
+        files[base] = _sha256_file(copy if copy is not None else formal_dir / base)
+    return {"source": source, "files": files}
+
+
 def run(project: Path, harness: Optional[Path] = None,
         rtl: Optional[List[Path]] = None, top: Optional[str] = None,
         sby: Optional[Path] = None, container: Optional[str] = _pin.default_container_name(),
@@ -1994,6 +2034,7 @@ def run(project: Path, harness: Optional[Path] = None,
     ev_rel = str(log_path.relative_to(project))
     sby_rel = str(sby_path.relative_to(project))
     results = build_results(top_name, cfg, lp, ev_rel, sby_rel)
+    results["proof_inputs"] = proof_inputs(sby_path, formal_dir)
     _attach_property_contract(results, formal_dir, harness or inv_h)
     results["mode"] = ("invariant-strengthened"
                        if inv_h is not None else "standard")
