@@ -127,3 +127,55 @@ def test_a_free_text_mention_is_not_an_in_session_basis(tmp_path):
             "# and it is never PNR_SESSION_UNVERIFIED\n" + _BODY)
     rc, rep = _audit(tmp_path, text)
     assert rc == 0 and rep["passed"] and "verdict" not in rep, rep
+
+
+# ── follow-up: R-0915-159 is a POST-ROUTE rule; Step 10 keeps its own finding ──
+#
+# Review of #2543: in the PRE_LAYOUT scope the in-session `continue` ran before
+# the pre-layout basis check, so Step 10 reported the post-route wording
+# (STA_SIGNOFF_BASIS_IS_IN_SESSION) instead of its own. MEASURED on a verbatim
+# in-session copy with no leading disclosure: before #2543 that scope PASSED
+# (rc 0) -- its own check cannot see the copy -- and after #2543 it read
+# NOT_MEASURED with the post-route wording. Now it is Step 10's own
+# STA_BASIS_CONTRADICTS_SCOPE: the in-session report is post-place-and-route
+# by construction.
+
+_PRE_SCOPE = "phase3/stage3/sta/pre_pnr_timing.rpt"
+
+
+def _pre_audit(tmp: Path, text: str):
+    sta = tmp / "phase3" / "stage3" / "sta"
+    sta.mkdir(parents=True, exist_ok=True)
+    (sta / "pre_pnr_timing.rpt").write_text(text)
+    out = tmp / "audit.json"
+    rc = ERA.main([str(tmp), "--mode", "sta", "--under", _PRE_SCOPE,
+                   "--json", str(out)])
+    return rc, json.loads(out.read_text())
+
+
+def test_step10_keeps_its_own_finding_for_an_in_session_copy(tmp_path):
+    rc, rep = _pre_audit(tmp_path, _UNVERIFIED + _BODY)
+    assert rc == 1 and not rep["passed"], rep
+    assert "STA_BASIS_CONTRADICTS_SCOPE" in _rules(rep), rep
+    assert "STA_SIGNOFF_BASIS_IS_IN_SESSION" not in _rules(rep), rep
+    assert rep.get("verdict") != "NOT_MEASURED", rep
+    f = next(x for x in rep["findings"]
+             if x["rule"] == "STA_BASIS_CONTRADICTS_SCOPE")
+    assert "in-session PnR STA" in f["message"], f
+
+
+def test_step10_keeps_the_header_reason_when_the_copy_discloses_it(tmp_path):
+    text = ("# pre_pnr_timing.rpt — copied from the post-PnR run\n"
+            + _UNVERIFIED + _BODY)
+    rc, rep = _pre_audit(tmp_path, text)
+    assert rc == 1 and "STA_BASIS_CONTRADICTS_SCOPE" in _rules(rep), rep
+    assert "STA_SIGNOFF_BASIS_IS_IN_SESSION" not in _rules(rep), rep
+    f = next(x for x in rep["findings"]
+             if x["rule"] == "STA_BASIS_CONTRADICTS_SCOPE")
+    assert "copied or approximated from the post-PnR run" in f["message"], f
+
+
+def test_step10_without_the_stamp_is_judged_as_before(tmp_path):
+    rc, rep = _pre_audit(tmp_path, _BODY)
+    assert "STA_BASIS_CONTRADICTS_SCOPE" not in _rules(rep), rep
+    assert "STA_SIGNOFF_BASIS_IS_IN_SESSION" not in _rules(rep), rep

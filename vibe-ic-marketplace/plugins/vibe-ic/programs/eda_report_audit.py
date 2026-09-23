@@ -3291,6 +3291,15 @@ def _check_sta(project_dir: Path) -> AuditResult:
             unreadable.append(f"{fp} ({exc.__class__.__name__})")
             continue
         _why_session = _sta_in_session_evidence(text)
+        # R-0915-159 is a POST-ROUTE rule. In a PRE_LAYOUT scope (Step 10) the
+        # in-session report is judged the way Step 10 judges a report: it is
+        # post-place-and-route by construction, so it contradicts the scope
+        # and is recorded below as Step 10's OWN finding
+        # (STA_BASIS_CONTRADICTS_SCOPE), never under the post-route wording.
+        _pre_layout_session = (_why_session
+                               if declared_basis == "PRE_LAYOUT" else None)
+        if _pre_layout_session:
+            _why_session = None
         if _why_session:
             in_session.append((str(fp), _why_session))
             if violated_re.search(text) or any(
@@ -3320,6 +3329,9 @@ def _check_sta(project_dir: Path) -> AuditResult:
                     and _self_discloses_post_layout_derivation(text)):
                 why = ("its own header discloses the number as copied or "
                        "approximated from the post-PnR run")
+            elif _pre_layout_session:
+                why = (f"it is the in-session PnR STA — {_pre_layout_session} "
+                       f"— which is post-place-and-route by construction")
             if why:
                 try:
                     key = str(fp.resolve())
