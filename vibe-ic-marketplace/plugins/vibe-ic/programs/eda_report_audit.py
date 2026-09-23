@@ -3109,6 +3109,37 @@ def _slack_row(fp: Any, slacks: Dict[str, Optional[float]],
     return row
 
 
+#: R-0915-159 -- POST-ROUTE SIGN-OFF IS NEVER CREDITED FROM THE IN-SESSION REPORT.
+#: `phase3_one_shot_runner` writes `post_route_timing.rpt` as a COPY
+#: (`# STA_ALIAS_BASIS: <name>`) of the first fresh basis in
+#: `_CANONICAL_POST_ROUTE_STA_BASES`, and the LAST of those is the in-session
+#: `pnr/sta.rpt` (named `sta.rpt` in the header), whose PnR corner-binding Tcl
+#: stamps `STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED`. Both lines are a
+#: closed grammar the flow writes itself, read between line anchors.
+_STA_ALIAS_BASIS_RE = re.compile(
+    r"^[ \t]*#?[ \t]*STA_ALIAS_BASIS[ \t]*:[ \t]*(sta(?:_[a-z0-9]+)*\.rpt)[ \t]*$",
+    re.MULTILINE)
+_STA_PNR_SESSION_UNVERIFIED_RE = re.compile(
+    r"^[ \t]*#?[ \t]*STA_PARASITICS_PROVENANCE[ \t]*:[ \t]*"
+    r"PNR_SESSION_UNVERIFIED[ \t]*$", re.MULTILINE)
+#: The one basis name that IS the in-session report.
+_STA_IN_SESSION_BASIS = "sta.rpt"
+
+
+def _sta_in_session_evidence(text: str) -> Optional[str]:
+    """Why this report is the in-session STA, or None when it is not."""
+    alias = _STA_ALIAS_BASIS_RE.search(text)
+    stamp = bool(_STA_PNR_SESSION_UNVERIFIED_RE.search(text))
+    if alias and alias.group(1) == _STA_IN_SESSION_BASIS:
+        return ("its STA_ALIAS_BASIS is sta.rpt (the in-session PnR report)"
+                + (" and it carries STA_PARASITICS_PROVENANCE: "
+                   "PNR_SESSION_UNVERIFIED" if stamp else ""))
+    if stamp:
+        return ("it carries STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED"
+                + (f" (STA_ALIAS_BASIS: {alias.group(1)})" if alias else ""))
+    return None
+
+
 def _check_sta(project_dir: Path) -> AuditResult:
     result = AuditResult(program="eda_report_audit:sta", passed=False)
     # THE DECISION POINT FOR THE TOOL-MEASUREMENT CONTRACT (STA half).
@@ -3248,12 +3279,27 @@ def _check_sta(project_dir: Path) -> AuditResult:
     #: it, which is a deleted gate; accept the first and this is unchanged.
     not_measured_hard: List[tuple] = []      # (path, class, reason)
     not_measured_benign: List[tuple] = []    # (path, reason)
+    #: R-0915-159: reports that ARE the in-session STA. They never vote as
+    #: sign-off evidence; a real violation written in one still counts (a
+    #: stamp can decline to ADD a verdict, never subtract one written down).
+    in_session: List[tuple] = []             # (path, why)
 
     for fp in files:
         try:
             text = fp.read_text(errors="replace")
         except OSError as exc:
             unreadable.append(f"{fp} ({exc.__class__.__name__})")
+            continue
+        _why_session = _sta_in_session_evidence(text)
+        if _why_session:
+            in_session.append((str(fp), _why_session))
+            if violated_re.search(text) or any(
+                    v < 0 for v in _sta_slack.extract_slacks(text).values()
+                    if v is not None):
+                real_violation_found = True
+                any_verdict_determined = True
+                if not violation_evidence:
+                    violation_evidence = str(fp)
             continue
         # UNDECLARED is its own state and changes nothing: a report with no
         # stamp is judged exactly as it was before this contract existed. It
@@ -3373,12 +3419,26 @@ def _check_sta(project_dir: Path) -> AuditResult:
     #: violation sets it, and must not then be dispositioned as vacuous.
     nothing_to_judge = (bool(not_measured_benign) and not not_measured_hard
                         and not any_verdict_determined)
-    if not has_wns_tns and not nothing_to_judge:
+    #: R-0915-159: every readable report is the in-session STA, so no
+    #: SPEF-based sign-off STA ran. That is NOT_MEASURED, never a shape defect
+    #: of the report and never PASS.
+    only_in_session = (bool(in_session) and not real_violation_found
+                       and len(in_session) == len(files) - len(unreadable))
+    if only_in_session:
+        _f0, _why0 = in_session[0]
+        result.findings.append(Finding(
+            rule="STA_SIGNOFF_BASIS_IS_IN_SESSION", severity="ERROR",
+            message=(f"no SPEF-based sign-off STA ran: {len(in_session)} "
+                     f"discovered report(s) are the in-session PnR STA — "
+                     f"{_why0}. Its RC is unattested, so post-route sign-off "
+                     f"is NOT MEASURED (R-0915-159), never credited from it"),
+            file=_f0))
+    if not has_wns_tns and not nothing_to_judge and not only_in_session:
         result.findings.append(Finding(
             rule="STA_WNS_TNS", severity="ERROR",
             message="No WNS/TNS slack values found in STA report",
             file=best_file))
-    if not has_setup_hold and not nothing_to_judge:
+    if not has_setup_hold and not nothing_to_judge and not only_in_session:
         result.findings.append(Finding(
             rule="STA_SETUP_HOLD", severity="ERROR",
             message="No setup/hold analysis found in STA report",
@@ -3404,7 +3464,9 @@ def _check_sta(project_dir: Path) -> AuditResult:
                      f"nothing to measure: {_why} — this is not a defect, and "
                      f"it is not a timing sign-off either"),
             file=_f))
-    if nothing_to_judge:
+    if only_in_session:
+        result.verdict = "NOT_MEASURED"
+    elif nothing_to_judge:
         # `STA_VALUE_UNDETERMINED` would be the WRONG finding here — it accuses
         # the report of resting on shape alone, when its producer has stated in
         # writing why there is no number. Say the true thing instead.
@@ -3598,7 +3660,8 @@ def _check_sta(project_dir: Path) -> AuditResult:
                       and (any_verdict_determined or nothing_to_judge)
                       and not real_violation_found
                       and not not_measured_hard
-                      and not basis_offenders and not unreadable)
+                      and not basis_offenders and not unreadable
+                      and not only_in_session)
 
     # THE GOVERNING NUMBERS, ONE PER ANALYSIS. `min` across the reports,
     # because a datasheet quotes the worst case and taking the worst can only
@@ -3666,6 +3729,8 @@ def _check_sta(project_dir: Path) -> AuditResult:
                       "sta_nothing_to_measure": [
                           {"file": f, "reason": r}
                           for f, r in not_measured_benign],
+                      "sta_in_session_reports": [
+                          {"file": f, "reason": r} for f, r in in_session],
                       "design_binding": design_binding,
                       # `files_found` counts DISCOVERED PATHS; this counts the
                       # ones that yielded bytes. They were the same number by
