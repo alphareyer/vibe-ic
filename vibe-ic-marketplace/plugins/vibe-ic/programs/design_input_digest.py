@@ -172,12 +172,22 @@ _AUDITOR_IDENTITY_KEYS = ("program", "written_by")
 AUDITOR_OUTPUT_PATHS = (
     "reports/audit/phase23_completion_audit.json",
 )
+#: The auditor writes that document through a temp sibling named `<final>.<pid>.tmp`, so a
+#: reader never sees a half-written audit. A crash between the write and the replace leaves
+#: that temp behind, and it is as much the auditor's output as the document it was about to
+#: become -- so it is recognised, by the EXACT shape the writer mints and nothing wider.
+#: NOT `*.tmp`: a producer's own temp anywhere in the tree is a design artefact and must
+#: keep counting, and a rule that swallowed every `.tmp` would be the directory mistake
+#: again in a new spelling.
+_AUDITOR_TMP_RE = re.compile(
+    r"^(?:" + "|".join(re.escape(_p) for _p in AUDITOR_OUTPUT_PATHS)
+    + r")\.\d+\.tmp$")
 
 
 def is_auditor_output(project: Path, path: Path) -> bool:
     """Is this file the AUDITOR's own output rather than a design input?"""
     rel = _rel(project, path)
-    if rel in AUDITOR_OUTPUT_PATHS:
+    if rel in AUDITOR_OUTPUT_PATHS or _AUDITOR_TMP_RE.match(rel):
         return True
     if _SUPERSEDED_RE.search(rel):
         return True

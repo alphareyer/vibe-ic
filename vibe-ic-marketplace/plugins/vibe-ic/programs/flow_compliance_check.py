@@ -21069,10 +21069,27 @@ def main(argv: Optional[List[str]] = None) -> int:
                   f"SCOPED (scope.whole_flow=false) and must NOT be read as this run's "
                   f"verdict", file=sys.stderr)
         audit_path.parent.mkdir(parents=True, exist_ok=True)
+        # THE TEMP THIS WRITE CREATES IS THIS WRITE'S TO REMOVE. The temp+replace shape
+        # exists so no reader ever sees a half-written audit; it must not pay for that
+        # with a file nobody owns. If the serialise or the write raises (ENOSPC is the
+        # ordinary way) the replace never happens, and without this the temp survives
+        # every later pass -- where, being neither `.json` nor a named auditor output, the
+        # next pre-scan reads it as a DESIGN INPUT and the design hash moves permanently
+        # on an unchanged design. The cleanup never masks the original error: it runs in
+        # `finally`, its own failure is swallowed, and nothing is raised from it.
         _audit_tmp = audit_path.with_name(
             f"{audit_path.name}.{os.getpid()}.tmp")
-        _audit_tmp.write_text(json.dumps(audit, indent=2, ensure_ascii=False))
-        os.replace(_audit_tmp, audit_path)
+        try:
+            _audit_tmp.write_text(json.dumps(audit, indent=2, ensure_ascii=False))
+            os.replace(_audit_tmp, audit_path)
+        finally:
+            # After a successful `os.replace` the temp no longer exists, so this is a
+            # no-op on the happy path; `missing_ok` rather than an `exists()` probe,
+            # because a peer sweeping the same prefix between the two is legitimate.
+            try:
+                _audit_tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
         # Printed, not only serialised: the reader who acts on the tally reads
         # the log, and a refusal that only exists in a JSON field is a refusal
         # nobody sees. Advisory — it never moves the verdict or the exit code,

@@ -25,6 +25,7 @@ The two halves, and both must hold at once:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -249,3 +250,105 @@ def test_an_authorship_note_written_by_the_real_writer_is_not_a_design_input(pro
     assert mid != before, "the noted artefact itself is part of the tree that is hashed"
     F._record_audit_created(project, "36", [noted_rel])
     assert _sha(project) == mid
+
+
+def test_a_leftover_audit_temp_is_the_auditors_and_does_not_move_the_design(project):
+    """The temp the auditor's own write mints is as much its output as the document.
+
+    R-0915-151. The canonical audit is written `<final>.<pid>.tmp` then `os.replace`d, so no
+    reader ever sees a half-written audit. A crash or ENOSPC between the two leaves that
+    temp behind -- and it is neither `.json` nor a named auditor output, so without this
+    the next pass's pre-scan hashes it as a DESIGN INPUT and the design hash moves
+    permanently on an unchanged design: `design_moved=True`, DESIGN_CHANGE where the honest
+    answer is UNEXPLAINED_TALLY_MOVE.
+    """
+    audit = _pl.report_path(project, "phase23_completion_audit.json")
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text(json.dumps({"verdict": "PASS"}))
+
+    w1 = _sha(project)
+
+    # exactly the name the writer mints, derived from the writer's own expression
+    leftover = audit.with_name(f"{audit.name}.{os.getpid()}.tmp")
+    leftover.write_text(json.dumps({"verdict": "PASS", "half": "written"}))
+    assert D.is_auditor_output(project, leftover) is True
+    assert str(leftover.relative_to(project)) not in _kept(project)
+
+    assert _sha(project) == w1, (
+        "a temp the auditor's own write left behind moved the design hash, so every later "
+        "pass reads an unchanged design as changed")
+
+
+def test_a_producers_own_temp_anywhere_is_still_a_design_input(project):
+    """The rule is the auditor's EXACT temp shape, not `*.tmp`."""
+    for rel in ("phase2/stage1/rtl/core.v.4242.tmp",
+                "reports/phase3/drc_signoff.json.4242.tmp"):
+        f = project / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        before = _sha(project)
+        f.write_text("a producer's own partial write\n")
+        assert D.is_auditor_output(project, f) is False, rel
+        assert _sha(project) != before, (
+            f"{rel} is a producer's temp and part of the tree that is hashed")
+
+
+def test_the_writer_removes_its_own_temp_when_the_replace_did_not_happen(tmp_path):
+    """Driven through the real writer's own expression, with the replace made to fail.
+
+    Not a hand-placed file: the arm reproduces the writer's shape -- write the temp, then
+    `os.replace` raises -- and asserts the `finally` removed it and re-raised the ORIGINAL
+    error rather than a cleanup error.
+    """
+    import os as _os
+    audit_path = tmp_path / "reports" / "audit" / "phase23_completion_audit.json"
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = audit_path.with_name(f"{audit_path.name}.{_os.getpid()}.tmp")
+
+    boom = OSError(28, "No space left on device")
+
+    def _replace(a, b):
+        raise boom
+
+    # the writer's shape, verbatim in structure
+    with pytest.raises(OSError) as caught:
+        try:
+            tmp.write_text('{"verdict": "PASS"}')
+            _replace(tmp, audit_path)
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+    assert caught.value is boom, "the cleanup masked the original failure"
+    assert not tmp.exists(), "the temp outlived the write that created it"
+    assert not audit_path.exists()
+
+
+def test_the_shipped_writer_has_the_cleanup_and_does_not_mask():
+    """The arm above proves the shape; this proves the SHIPPED code has it.
+
+    Read from the module's own source rather than asserted about a copy, so the two cannot
+    drift: the `os.replace` must sit in a `try` whose `finally` unlinks the temp, and the
+    `finally` must not raise.
+    """
+    import ast
+    src = (Path(__file__).resolve().parents[1]
+           / "flow_compliance_check.py").read_text()
+    tree = ast.parse(src)
+
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try) or not node.finalbody:
+            continue
+        body = ast.dump(ast.Module(body=node.body, type_ignores=[]))
+        if "os.replace" not in body and "'replace'" not in body:
+            continue
+        if "_audit_tmp" not in body:
+            continue
+        fin = ast.dump(ast.Module(body=node.finalbody, type_ignores=[]))
+        found.append(("unlink" in fin, "_audit_tmp" in fin,
+                      any(isinstance(n, ast.Raise) for n in ast.walk(
+                          ast.Module(body=node.finalbody, type_ignores=[])))))
+    assert found, "the audit temp write is not wrapped in a try/finally at all"
+    assert any(unlinks and names_tmp and not reraises
+               for unlinks, names_tmp, reraises in found), found
