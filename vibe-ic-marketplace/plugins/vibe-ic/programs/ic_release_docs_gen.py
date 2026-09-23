@@ -225,10 +225,18 @@ def interface_fields(audit: _art.ArtefactAudit) -> List[Field]:
     ``release_docs_check`` RE-DERIVES the signal count from the gate-level
     netlist the route produced — a DIFFERENT view, read by a DIFFERENT program
     — and refuses a disagreement naming both sides. It settles the TOTAL
-    against this document's own two component rows, because a gate-level
-    netlist conventionally carries the logical interface only and cannot speak
-    for the supplies. That cross-check is what makes these numbers worth
-    reading: they are not merely derived once, they are derived AGAIN.
+    against this document's own two component rows, because the total is
+    arithmetic and the netlist need not know about the supplies to settle it.
+
+    WHETHER A NETLIST CARRIES ITS SUPPLIES IS MEASURED, NOT ASSUMED. This
+    document used to state that a gate-level netlist "conventionally carries
+    the logical interface only". That is the IP arm's delivered blackbox; a
+    routed ``chip_top`` declares ``inout VDD; inout VSS;`` among its ports, so
+    its bit count is this document's TOTAL. Stating the convention as though
+    it were universal made a correct datasheet fail its own cross-check.
+
+    That cross-check is what makes these numbers worth reading: they are not
+    merely derived once, they are derived AGAIN.
     """
     state = audit.by_id("def")
     return [
@@ -544,9 +552,12 @@ def datasheet(rel: Release) -> Tuple[str, List[Field]]:
              + "\n\nThese counts are derived from the routed layout's own PINS "
                "section. `release_docs_check` re-derives the signal pin count "
                "from the gate-level netlist the route produced and refuses a "
-               "disagreement, naming both sides; it settles the total against "
-               "its own two component rows, because a gate-level netlist "
-               "conventionally carries the logical interface only."),
+               "disagreement, naming both sides; a routed top-level netlist "
+               "declares its supplies as ports, so that re-derivation is "
+               "accepted against either the signal row alone or the signal "
+               "and supply rows together, whichever the netlist counts. The "
+               "total is settled against this document's own two component "
+               "rows."),
             (spec.sections[3], physical_body),
             (spec.sections[4], table(timing)),
             (spec.sections[5], table(power)),
