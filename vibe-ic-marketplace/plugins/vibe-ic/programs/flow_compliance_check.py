@@ -15454,6 +15454,83 @@ def _collect_program_output_records(project: Path,
     return records
 
 
+#: Step verdicts that mean the step's own gate was NOT satisfied. Mirrors
+#: `release_docs_check._BLOCKING_STEP_STATUSES`, which is the reader of the record below; a
+#: step that PASSED has no complaint about any of its outputs.
+_NOT_SATISFIED_STATUSES = frozenset({"FAIL", "NOT_MEASURED", "BLOCKED", "INCOMPLETE"})
+
+
+def _emit_step_output_record(project: Path, step: Dict[str, Any],
+                             result: "StepResult") -> None:
+    """WHICH declared outputs this step's own gate found missing or unusable. R-0915-165.
+
+    The one fact no other record carries. `release_docs_check` excuses 37.5ic's missing release
+    documents when an UPSTREAM step is blocked, and until now it could not ask what that
+    blockage was ABOUT -- so step 33 publishing NOT_MEASURED because no power BUDGET was
+    declared excused 37.5ic's POWER_NO_TOTAL, a complaint about a file step 33 wrote exactly as
+    designed (`eda_report_audit`: "it carries no number of its own").
+
+    Written HERE, not plumbed through `StepResult`: `check_step` has nine return statements, and
+    a field set on some paths and not others is a record that lies on the paths it misses. The
+    set is a function of the declaration and the tree, so recomputing it AFTER the gate ran is
+    both correct and the moment that matters.
+
+    `missing` reuses `_check_files_exist`, the shipped resolver, one entry at a time -- so the
+    glob and `A OR B` shapes are read exactly as the step's own verdict read them, not by a
+    second spelling. `unusable` is an output that IS on disk and whose concrete path this step's
+    own gate NAMED while not being satisfied; measured on a geometry-less GDS,
+    `gds_substance_check` says `phase3/stage4/gds/zzdie.gds: [MALFORMED_RECORD] ...`, so the
+    path is there to match. A step that PASSED contributes nothing to either list.
+
+    Best-effort by construction: a record that failed to write must never move a verdict.
+    """
+    outputs = [o for o in (step.get("required_outputs") or []) if isinstance(o, str)]
+    try:
+        dest = _pl.step_output_record_path(project, step.get("id"))
+    except Exception:                                          # pragma: no cover
+        return
+    status = str(getattr(result, "status", "") or "")
+    reasons = " \n".join(str(r) for r in (getattr(result, "reasons", None) or []))
+    missing: List[str] = []
+    unusable: List[str] = []
+    for pat in outputs:
+        try:
+            _ok, _found, _miss = _check_files_exist(project, [pat], any_of=False)
+        except Exception:                                      # pragma: no cover
+            continue
+        if _miss:
+            missing.append(pat)
+            continue
+        if status in _NOT_SATISFIED_STATUSES and _found:
+            if any(str(h) and str(h) in reasons for h in _found):
+                unusable.append(pat)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
+        try:
+            _tmp.write_text(json.dumps({
+                "schema": 1,
+                "written_by": "flow_compliance_check",
+                "invocation": _invocation_id(),
+                "step": str(step.get("id")),
+                "status": status,
+                "declared": outputs,
+                "missing": sorted(missing),
+                "unusable": sorted(unusable),
+                "note": ("what THIS step's own gate found wanting among its declared "
+                         "outputs; a consumer asking whether an upstream blockage is about "
+                         "a given artefact reads these two lists and nothing else"),
+            }, indent=1) + "\n")
+            os.replace(_tmp, dest)
+        finally:
+            try:
+                _tmp.unlink(missing_ok=True)
+            except OSError:                                    # pragma: no cover
+                pass
+    except OSError:                                            # pragma: no cover
+        return
+
+
 def _emit_step_metrics(project: Path, step: Dict[str, Any],
                        result: "StepResult") -> None:
     """One flat metrics row per step, from the numbers the gate already wrote.
@@ -19806,6 +19883,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 strict_audit_evidence=strict_audit_evidence,
                 strict_step_binding=strict_step_binding)
             _emit_step_metrics(project, step, _r)
+            _emit_step_output_record(project, step, _r)
             results.append(_r)
     else:
         # Independent read-only gates → evaluate concurrently; collect the
@@ -19844,6 +19922,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for _step, _fut in zip(_wave, _futs):
                     _r = _fut.result()
                     _emit_step_metrics(project, _step, _r)
+                    _emit_step_output_record(project, _step, _r)
                     _by_id[str(_step.get("id"))] = _r
         for _step in _eval_steps:
             results.append(_by_id[str(_step.get("id"))])

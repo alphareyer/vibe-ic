@@ -329,6 +329,24 @@ def _step_status(project: Path, sid: str, status: str) -> None:
                             "invocation": _FCC._invocation_id()})
 
 
+def _step_outputs(project: Path, sid: str, status: str,
+                  required: "list[str]", reasons: "list[str]") -> None:
+    """The step's own per-step OUTPUT record, written the way the auditor writes it.
+
+    R-0915-165. Through `flow_compliance_check._emit_step_output_record`, not by hand: the
+    record's shape, its path (normalised sid), its invocation stamp and -- crucially -- WHICH of
+    the declared outputs land in `missing` versus `unusable` are all that function's decisions.
+    A fixture that spelled them itself would be asserting against its own opinion of the
+    producer.
+    """
+    class _R:                                                # the shape the writer reads
+        pass
+    r = _R()
+    r.status = status
+    r.reasons = list(reasons)
+    _FCC._emit_step_output_record(project, {"id": sid, "required_outputs": list(required)}, r)
+
+
 def _forget_step_status(project: Path, sid: str) -> None:
     """Remove a step's row, by the name `step_metrics` actually writes."""
     import step_metrics as _sm                              # noqa: PLC0415
@@ -403,6 +421,17 @@ def _blocked_upstream(project: Path, release: str = "zzdie") -> None:
     for sid in ("23", "33", "37.4"):
         _step_status(project, sid, "PASS")
     _step_status(project, "37", "FAIL")
+    # R-0915-165 — and the record that says WHAT step 37's failure is about. The layout is on
+    # disk and carries no geometry, so step 37's own gate names it: measured,
+    # `gds_substance_check` reports `phase3/stage4/gds/<release>.gds: [MALFORMED_RECORD] ...`.
+    # Without this the blockage is real but unattributable, and R-0915-165 withholds the excuse
+    # -- correctly, since "no record, no excuse" is the same direction as
+    # `test_a_step_with_no_published_verdict_is_not_an_excuse`.
+    _step_outputs(
+        project, "37", "FAIL",
+        required=["phase3/stage4/gds/*.gds"],
+        reasons=[f"phase3/stage4/gds/{release}.gds: [MALFORMED_RECORD] Record at offset 0 "
+                 f"declares length 0 (< 4); the stream is not a valid GDSII record chain"])
 
 
 def test_the_blockage_is_observable_on_the_current_tree(tmp_path):

@@ -33,6 +33,7 @@ sys.path.insert(0, str(PROGRAMS))
 import flow_compliance_check as FCC          # noqa: E402
 import release_docs_check as RDC             # noqa: E402
 import step_metrics as SM                    # noqa: E402
+import _path_layout as _PL                   # noqa: E402
 
 INV_ENV = "VIBEIC_FCC_INVOCATION"
 
@@ -312,3 +313,162 @@ def test_a_dependent_step_reads_a_row_written_before_it_runs(tmp_path, mine):
     empty.mkdir()
     for sid in ("23", "33", "37", "37.4"):
         assert RDC.step_verdict_now(empty, sid)[0] == RDC._VERDICT_UNREADABLE, sid
+
+
+# ── what an upstream blockage is ABOUT (R-0915-165) ──────────────────────────
+
+def _record(project: Path, sid: str, status: str, required, reasons) -> None:
+    """The per-step output record, written by the auditor's own writer."""
+    class _R:
+        pass
+    r = _R()
+    r.status = status
+    r.reasons = list(reasons)
+    FCC._emit_step_output_record(project, {"id": sid,
+                                           "required_outputs": list(required)}, r)
+
+
+def test_the_power_budget_scenario_is_this_steps_own_defect(tmp_path, mine):
+    """THE FIRST TEST R-0915-165 NAMES, and the one my presence proxy could not satisfy.
+
+    Step 33 publishes NOT_MEASURED because no power BUDGET was declared. The runner writes
+    `reports/phase3/power.json` regardless -- `eda_report_audit` says so in its own words, "it
+    carries no number of its own" -- so 37.5ic's POWER_NO_TOTAL is a complaint about that file's
+    CONTENT, which R-0915-149 already ruled is 37.5ic's own defect. Step 33's own gate has no
+    complaint about the file at all, and its record says so by naming it in neither list.
+    """
+    rel = "reports/phase3/power.json"
+    assert RDC._declaring_step(rel) == "33"
+
+    for f, body in ((rel, '{"summarises": "power.rpt"}'),
+                    ("reports/phase3/power.rpt", "power\n")):
+        q = tmp_path / f
+        q.parent.mkdir(parents=True, exist_ok=True)
+        q.write_text(body)
+    SM.emit(tmp_path, "33", {"step_status": "NOT_MEASURED", "invocation": mine})
+    _record(tmp_path, "33", "NOT_MEASURED",
+            ["reports/phase3/power.rpt", rel],
+            ["no power budget was declared for this design"])
+
+    about, why = RDC.upstream_blockage_is_about(tmp_path, "33", rel)
+    assert about is False, why
+    assert "neither" in why and rel in why, why
+
+    out = RDC.upstream_blockage_now(tmp_path, "a")
+    assert "33" not in (out.get("blocking_steps") or {}), (
+        "step 33's unrelated blockage still excuses this release")
+
+
+def test_an_upstream_gate_that_named_the_artefact_still_excuses(tmp_path, mine):
+    """The other direction, and it is four of 72c's accepted arms: a GDS on disk carrying no
+    geometry IS step 37's failure about that artefact. Its gate names it -- measured,
+    `gds_substance_check` prints `phase3/stage4/gds/zzdie.gds: [MALFORMED_RECORD] ...`.
+    """
+    g = tmp_path / "phase3/stage4/gds/zzdie.gds"
+    g.parent.mkdir(parents=True, exist_ok=True)
+    g.write_bytes(b"\x00" * 448)
+    SM.emit(tmp_path, "37", {"step_status": "FAIL", "invocation": mine})
+    _record(tmp_path, "37", "FAIL", ["phase3/stage4/gds/*.gds"],
+            ["phase3/stage4/gds/zzdie.gds: [MALFORMED_RECORD] length 0"])
+
+    about, why = RDC.upstream_blockage_is_about(
+        tmp_path, "37", "phase3/stage4/gds/zzdie.gds")
+    assert about is True, why
+    assert "unusable" in why, why
+
+
+def test_a_declaration_pattern_covers_the_concrete_file_the_producer_named(tmp_path):
+    """The record holds DECLARATION patterns; the producer names the file it read."""
+    assert RDC._entry_covers("phase3/stage4/gds/*.gds",
+                             "phase3/stage4/gds/zzdie.gds") is True
+    assert RDC._entry_covers("a.json OR b.json", "b.json") is True
+    assert RDC._entry_covers("reports/phase3/power.json",
+                             "reports/phase3/power.json") is True
+    assert RDC._entry_covers("reports/phase3/power.json", "reports/phase3/area.json") is False
+
+
+def test_no_record_is_no_excuse(tmp_path, mine):
+    """FAILS CLOSED, the same direction 72c already ruled for a missing verdict."""
+    SM.emit(tmp_path, "23", {"step_status": "FAIL", "invocation": mine})
+    about, why = RDC.upstream_blockage_is_about(
+        tmp_path, "23", "reports/phase3/sta/post_route_summary.json")
+    assert about is False
+    assert "published no per-step output record" in why, why
+
+
+def test_a_record_from_another_invocation_is_no_excuse(tmp_path, mine):
+    _record(tmp_path, "23", "FAIL", ["reports/phase3/sta/post_route_summary.json"],
+            ["reports/phase3/sta/post_route_summary.json: no slack"])
+    rec = _PL.step_output_record_path(tmp_path, "23")
+    doc = json.loads(rec.read_text())
+    doc["invocation"] = "AN-EARLIER-RUN"
+    rec.write_text(json.dumps(doc) + "\n")
+
+    about, why = RDC.upstream_blockage_is_about(
+        tmp_path, "23", "reports/phase3/sta/post_route_summary.json")
+    assert about is False
+    assert "AN-EARLIER-RUN" in why, why
+
+
+def test_the_step_folders_outputs_json_is_never_consulted():
+    """It restates the declaration and it LIES: measured, 7 of 90 entries on a converged run,
+    every folder marked "status": "pass", name a `rel` that is not in the run directory."""
+    import inspect
+    src = inspect.getsource(RDC.upstream_blockage_is_about)
+    assert "outputs.json" in src and "lies" in src, (
+        "the reason that record is untrusted must stay written where the reader is")
+    whole = (PROGRAMS / "release_docs_check.py").read_text()
+    assert "/outputs.json" not in whole, "release_docs_check reads the step folders' outputs.json"
+
+
+def test_the_record_is_written_on_both_branches_of_the_step_loop():
+    """Sequential and wave: a record that appears only single-threaded is one nobody can rely on.
+    The same contract the metrics row beside it already carries."""
+    import inspect
+    src = inspect.getsource(FCC.main)
+    assert src.count("_emit_step_output_record(project,") == 2, (
+        f"the record is written at {src.count('_emit_step_output_record(project,')} of the two "
+        f"step-loop branches")
+    for line in src.splitlines():
+        if "_emit_step_output_record" in line:
+            assert "_emit_step_metrics" not in line
+
+
+def test_the_record_class_is_declared_and_the_taxonomy_gate_accepts_it(tmp_path):
+    """R-0915-165 asks for the class to be added to the reports/audit whitelist with its reason.
+
+    MEASURED: there is no per-child whitelist for `reports/audit`. The taxonomy gate polices the
+    children of `reports/` only -- `REPORTS_VALID_SUBDIRS` -- and `audit` is already in it, so
+    the class needs no new entry there. What it DID need is to be declared rather than spelled at
+    the write site, which is `_path_layout.STEP_OUTPUT_RECORD_DIR`, carrying the reason the three
+    existing records cannot answer the question.
+
+    Both halves are driven: the gate PASSES over a project holding only the new record, and still
+    FAILS on a real stray, so this is not a gate that has stopped looking.
+    """
+    import subprocess
+
+    proj = tmp_path / "proj"
+    rec = _PL.step_output_record_path(proj, "37")
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    rec.write_text("{}\n")
+    assert _PL.STEP_OUTPUT_RECORD_DIR == "reports/audit/step_outputs"
+    assert str(rec.relative_to(proj)).startswith(_PL.STEP_OUTPUT_RECORD_DIR)
+    assert "audit" in _PL.REPORTS_VALID_SUBDIRS
+
+    def gate(p: Path) -> str:
+        r = subprocess.run(
+            [sys.executable, str(PROGRAMS / "reports_subfolder_taxonomy_check.py"), str(p)],
+            capture_output=True, text=True, timeout=300)
+        return r.stdout + r.stderr
+
+    assert "[PASS]" in gate(proj), gate(proj)
+
+    (proj / "reports" / "stray.json").write_text("{}\n")
+    out = gate(proj)
+    assert "[FAIL]" in out and "stray.json" in out, out
+
+    # and the reason for the class lives with the declaration
+    src = (PROGRAMS / "_path_layout.py").read_text()
+    for why in ("flat by design", "outputs.json", "LIES"):
+        assert why in src, why

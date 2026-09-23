@@ -1492,6 +1492,69 @@ def _artefact_present(project: Path, rel: str) -> bool:
     return False
 
 
+def _entry_covers(entry: str, rel: str) -> bool:
+    """Does a declared-output ENTRY cover the artefact path `rel`?
+
+    Same matching `_declaring_step` uses to find the entry in the first place -- `A OR B` split
+    then fnmatch -- because the record holds DECLARATION patterns
+    (`phase3/stage4/gds/*.gds`) while the producer names the concrete file it read
+    (`phase3/stage4/gds/zzdie.gds`). Two spellings of one match is how they come to disagree.
+    """
+    import fnmatch                                           # noqa: PLC0415
+    for alt in (a.strip() for a in str(entry).split(" OR ")):
+        if not alt:
+            continue
+        if alt == rel or fnmatch.fnmatch(rel, alt) or fnmatch.fnmatch(alt, rel):
+            return True
+    return False
+
+
+def upstream_blockage_is_about(project: Path, sid: str, rel: str) -> Tuple[bool, str]:
+    """`(is_about, why)` -- does step `sid`'s own record name `rel` as missing or unusable?
+
+    R-0915-165, and it is the condition that was missing. The upstream step's VERDICT stays the
+    authority (R-0915-149); this asks the separate question the verdict cannot answer, which is
+    what that verdict is ABOUT.
+
+    FAILS CLOSED, deliberately. No record, a record from another invocation, or a record naming
+    neither list -> NOT about this artefact, so no excuse. That is the direction
+    `test_a_step_with_no_published_verdict_is_not_an_excuse` already rules: "no evidence" must
+    never read as "blocked".
+
+    The step folders' `outputs.json` is NEVER consulted. It is a restatement of the declaration
+    and it lies -- measured on a converged run, 7 of 90 entries, every folder marked
+    `"status": "pass"`, name a `rel` that does not exist in the run directory.
+    """
+    try:
+        import _path_layout as _pl_                          # noqa: PLC0415
+        rec_path = _pl_.step_output_record_path(project, sid)
+    except Exception:                                        # pragma: no cover
+        return False, f"the per-step output record path for step {sid} is unresolvable"
+    try:
+        rec = json.loads(rec_path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return False, (
+            f"step {sid} published no per-step output record in this run, so what its "
+            f"blockage is about cannot be read; no record, no excuse")
+    if not isinstance(rec, dict):
+        return False, f"step {sid}'s output record is not an object"
+    mine = os.environ.get("VIBEIC_FCC_INVOCATION", "").strip()
+    wrote = str(rec.get("invocation") or "").strip()
+    if mine and wrote and wrote != mine:
+        return False, (
+            f"step {sid}'s output record was written by invocation {wrote}, not this one "
+            f"({mine}), so it describes an earlier run")
+    for field_ in ("missing", "unusable"):
+        for entry in (rec.get(field_) or []):
+            if isinstance(entry, str) and _entry_covers(entry, rel):
+                return True, (
+                    f"step {sid}'s own gate reported {entry} as {field_}, which covers "
+                    f"{rel}")
+    return False, (
+        f"step {sid} is blocked, but its own record names {rel} in neither `missing` nor "
+        f"`unusable` -- so its blockage is not about the artefact this release needed")
+
+
 def step_verdict_now(project: Path, sid: str) -> Tuple[str, str]:
     """The step's OWN published verdict IN THIS RUN, or why it cannot be read.
 
@@ -1638,6 +1701,7 @@ def upstream_blockage_now(project: Path, release: str) -> dict:
     blocking: dict = {}
     passing: dict = {}
     unreadable: dict = {}
+    not_about: dict = {}
     unattributed: List[str] = []
     for item in named:
         sid = _declaring_step(item["path"]) if item["path"] else None
@@ -1661,7 +1725,13 @@ def upstream_blockage_now(project: Path, release: str) -> dict:
             unreadable[sid] = dict(entry, reason=why)
             continue
         if status in _BLOCKING_STEP_STATUSES:
-            blocking[sid] = entry
+            _about, _about_why = upstream_blockage_is_about(project, sid, item["path"])
+            entry["blockage_is_about_this_artefact"] = _about
+            entry["about_why"] = _about_why
+            if _about:
+                blocking[sid] = entry
+            else:
+                not_about[sid] = entry
         else:
             passing[sid] = entry
     return {"release": release,
@@ -1674,6 +1744,10 @@ def upstream_blockage_now(project: Path, release: str) -> dict:
             # holding this record can tell an excuse founded on a measurement from one
             # founded on a gap.
             "upstream_verdicts_unreadable": unreadable,
+            # BLOCKED, BUT NOT ABOUT WHAT THIS RELEASE NEEDED. R-0915-165. An excuse WITHHELD
+            # has to be as visible as one granted, each with the reason read off the upstream
+            # step's own output record.
+            "upstream_blocked_but_not_about_the_artefact": not_about,
             "unattributed": unattributed}
 
 
