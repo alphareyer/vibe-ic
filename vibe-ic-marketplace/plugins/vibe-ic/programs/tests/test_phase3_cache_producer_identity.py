@@ -115,7 +115,7 @@ def _unit(tmp_path: Path) -> Path:
 def _valid(tmp_path: Path, out_dir: Path, kind: str, monkeypatch):
     return R._producer_cache_valid_for(
         out_dir, kind, project=tmp_path, pdk=_pdk(tmp_path), container="",
-        extra_inputs=_extra(tmp_path, kind))
+        top=TOP, args=_IdentityArgs())
 
 
 def test_matching_producer_is_reusable(tmp_path, monkeypatch):
@@ -218,7 +218,8 @@ def test_unresolvable_current_identity_fails_closed(tmp_path, monkeypatch):
     assert _valid(project, out, "synth", monkeypatch)[0] is True
     monkeypatch.setattr(R, "_step_image_digest", lambda c: None)
     ok, msg = R._producer_cache_valid_for(
-        out, "synth", project=project, pdk=_pdk(project), container="")
+        out, "synth", project=project, pdk=_pdk(project), container="",
+        top=TOP, args=_IdentityArgs())
     assert ok is False, "an unnameable image is not a proven image"
 
 
@@ -230,7 +231,8 @@ def test_a_pdk_that_cannot_be_read_still_refuses(tmp_path, monkeypatch):
     out.mkdir(parents=True, exist_ok=True)
     _stamp(project, out, "synth")
     ok, msg = R._producer_cache_valid_for(
-        out, "synth", project=project, pdk=_pdk(None), container="")
+        out, "synth", project=project, pdk=_pdk(None), container="",
+        top=TOP, args=_IdentityArgs())
     assert ok is False, msg
     assert "pdk" in msg
 
@@ -306,7 +308,12 @@ def _pdk(root: Path | None = None) -> R.PdkConfig:
                            tech_lef="/nonexistent/tech.lef",
                            cell_lef="/nonexistent/cells.lef", cell_gds=None,
                            site="unit", drc_deck=None)
-    pdk_dir = Path(root) / "_pdk"
+    # OUTSIDE the project, which is where a PDK lives. R-0924-3 r3 added a
+    # structural guard: a PDK path inside the run directory is this run's own
+    # derivation (the VIA-patch legalizer stages one there), not a PDK input,
+    # and it refuses. Writing the fixture's PDK inside the project tripped it —
+    # correctly.
+    pdk_dir = Path(root).parent / "_pdk_outside"
     pdk_dir.mkdir(parents=True, exist_ok=True)
     lib = pdk_dir / "tt.lib"
     tlef = pdk_dir / "tech.lef"
@@ -343,16 +350,12 @@ def _provenance(project: Path) -> None:
             ("klayout", "0.28", f"phase3/stage4/gds/{TOP}.gds"))))
 
 
-def _extra(project: Path, kind: str):
-    """The inputs a step demonstrably reads that no `required_inputs` names —
-    the DEF a stream-out consumes, and the netlist PnR is handed."""
-    if kind == "gds":
-        return (R._pl.pnr_dir(project) / f"{TOP}.def",)
-    if kind == "pnr":
-        return tuple(p for p in (
-            R._pl.synth_dir(project) / f"{TOP}_synth.v",
-            R._pl.synth_dir(project) / "netlist.v") if p.is_file())[:1]
-    return ()
+class _IdentityArgs:
+    """The knobs R-0924-3 r3 folds into a step's identity — `--spare-density`
+    and the env vars are inputs the step reads that are not files, so the
+    fixtures must name them as a real invocation would."""
+    spare_density = 0.02
+    container = ""
 
 
 def _stamp(project: Path, out_dir: Path, kind: str) -> None:
@@ -360,7 +363,7 @@ def _stamp(project: Path, out_dir: Path, kind: str) -> None:
     identity is computed from."""
     R._write_producer_identity(out_dir, kind, project=project,
                                pdk=_pdk(project), container="",
-                               extra_inputs=_extra(project, kind))
+                               top=TOP, args=_IdentityArgs())
 
 
 def _project(tmp_path: Path, *, stamp: bool) -> Path:
@@ -599,7 +602,7 @@ def test_a_real_rerun_stamps_the_producer(tmp_path, monkeypatch):
                       ("pnr", R._pl.pnr_dir(project)),
                       ("gds", R._pl.pnr_dir(project))):
         ok, msg = R._producer_cache_valid_for(
-            out, kind, extra_inputs=_extra(project, kind), **ctx)
+            out, kind, top=TOP, args=_IdentityArgs(), **ctx)
         assert ok is True, (
             f"after {kind} actually ran, the next run could not prove its "
             f"artefact current — the fix would re-run forever: {msg}")
@@ -619,7 +622,8 @@ def test_a_failed_step_does_not_stamp_a_producer(tmp_path, monkeypatch):
     # do with the failed step, which is a vacuous green, not a green.
     assert R._producer_cache_valid_for(
         R._pl.synth_dir(project), "synth", project=project,
-        pdk=_pdk(project), container="")[0] is False, (
+        pdk=_pdk(project), container="", top=TOP,
+        args=_IdentityArgs())[0] is False, (
         "a FAILED synth stamped a step identity onto the previous build's "
         "netlist — the next run would then reuse it as if it were current")
 

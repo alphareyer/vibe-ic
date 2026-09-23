@@ -53,6 +53,14 @@ class _Drive:
 
 
 
+class _IdentityArgs:
+    """The knobs R-0924-3 r3 folds into a step's identity — `--spare-density`
+    and the env vars are inputs the step reads that are not files, so the
+    fixtures must name them as a real invocation would."""
+    spare_density = 0.02
+    container = ""
+
+
 def _pdk(root: Path | None = None) -> R.PdkConfig:
     """R-0924-3 CATCH-UP. One of a step's four identity components is the
     sha256 of the PDK files it reads, and `/nonexistent` paths are (rightly)
@@ -65,7 +73,12 @@ def _pdk(root: Path | None = None) -> R.PdkConfig:
                            tech_lef="/nonexistent/tech.lef",
                            cell_lef="/nonexistent/cells.lef", cell_gds=None,
                            site="unit", drc_deck=None)
-    d = Path(root) / "_pdk"
+    # OUTSIDE the project, which is where a PDK lives. R-0924-3 r3 added a
+    # structural guard: a PDK path inside the run directory is this run's own
+    # derivation (the VIA-patch legalizer stages one there), not a PDK input,
+    # and it refuses. Writing the fixture's PDK inside the project tripped it —
+    # correctly.
+    d = Path(root).parent / "_pdk_outside"
     d.mkdir(parents=True, exist_ok=True)
     lib, tlef, clef = d / "tt.lib", d / "tech.lef", d / "cells.lef"
     for f, text in ((lib, "library(t){}\n"), (tlef, "VERSION 5.8 ;\n"),
@@ -166,13 +179,11 @@ def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
     # the original comment is left where it explains itself.)
     _declare(tmp_path, "DIE")
     _span_inputs(tmp_path, TOP)
-    _ctx = dict(project=tmp_path, pdk=_pdk(tmp_path), container="")
+    _ctx = dict(project=tmp_path, pdk=_pdk(tmp_path), container="",
+                top=TOP, args=_IdentityArgs())
     R._write_producer_identity(synth, "synth", **_ctx)
-    R._write_producer_identity(
-        pnr, "pnr",
-        extra_inputs=(synth / f"{TOP}_synth.v",), **_ctx)
-    R._write_producer_identity(
-        pnr, "gds", extra_inputs=(pnr / f"{TOP}.def",), **_ctx)
+    R._write_producer_identity(pnr, "pnr", **_ctx)
+    R._write_producer_identity(pnr, "gds", **_ctx)
     # The SECOND thing this fixture had to catch up with, and the same kind as
     # the post-DFT netlist above: v1.22.13 (#2376) made Phase 3 refuse a project
     # with no delivery declaration, BEFORE any step and before the report these

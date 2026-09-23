@@ -73,6 +73,7 @@ import ast
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -83,8 +84,18 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 # `test_r0924_3_*` asserts each seed resolves in the real runner.
 KIND_RECIPE_SEEDS: Dict[str, Tuple[str, ...]] = {
     "synth": ("step_synth",),
-    "pnr": ("step_pnr",),
-    "gds": ("step_gds",),
+    # r2 review finding B: `step_pnr` is not the only writer of the artefact
+    # this key protects. `step_signoff_spef_repair` and
+    # `step_signoff_drv_wire_length_repair` run AFTER the PnR stamp and
+    # `shutil.copy2` a repaired DEF straight over `routed.def` and
+    # `{top}.def`. A fix landed in either of them changed the cached DEF and
+    # changed nothing in the key that vouched for it. A step's code is every
+    # function that writes its artefact, not the one that is named after it.
+    "pnr": ("step_pnr", "step_signoff_spef_repair",
+            "step_signoff_drv_wire_length_repair"),
+    "gds": ("step_gds", "step_signoff_spef_repair",
+            "step_signoff_drv_wire_length_repair",
+            "step_canonicalize_artefacts"),
 }
 
 # Which DECLARED flow output identifies the step(s) that produce this kind.
@@ -324,6 +335,137 @@ def span_input_specs(steps: Sequence[Dict[str, Any]], kind: str
     return specs, sorted(produced)
 
 
+#: How a file's bytes are canonicalised before hashing, by a STATED rule.
+#:
+#: r2 review (wt0nrjhv6) findings C/E and D: two files a step genuinely READS
+#: are rewritten by the flow itself, so hashing them raw makes the step either
+#: never fresh or fresh on the wrong evidence.
+#:   * a SPEF carries `*DATE "14:51:35 Wednesday September 23, 2026"` — a wall
+#:     clock, so no two runs ever agree;
+#:   * `tapeout_declaration.json` is REWRITTEN by `step_gds`
+#:     (`publish_tapeout_declarations`) with the keys the flow DERIVED, after
+#:     the synth and PnR stamps — so synth and PnR could never be fresh on the
+#:     next run for a change they did not make.
+#: The rule is named at the call site, applied here, and DISCLOSED in the
+#: evidence, so nothing is quietly dropped.
+NORMALISERS: Tuple[str, ...] = ("raw", "spef_no_date", "declaration_as_asked")
+
+#: A `"something.py"` string literal — how a program run by file path
+#: names itself in the source that dispatches it.
+_PY_PATH_LITERAL_RE = re.compile(r"[\"']([A-Za-z0-9_./-]+\.py)[\"']")
+
+_SPEF_DATE_RE = re.compile(rb"^\*DATE\b.*$", re.MULTILINE)
+
+
+def canonical_bytes(path: Path, rule: str = "raw") -> Optional[bytes]:
+    """The bytes of `path` that are actually EVIDENCE, under a named rule."""
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return None
+    if rule == "raw":
+        return raw
+    if rule == "spef_no_date":
+        # The only volatile line in the format, and it is a clock.
+        return _SPEF_DATE_RE.sub(b'*DATE "<normalised>"', raw)
+    if rule == "declaration_as_asked":
+        # Everything the OPERATOR asked for, and nothing the flow wrote back.
+        #
+        # THE RULE IS NARROWER THAN "DROP THE PUBLISHED KEYS", and the first
+        # cut of it was WRONG in a way that mattered: `deliverable` is in
+        # `_DECLARATION_PUBLISH_KEYS`, so dropping every published key hid a
+        # genuine OPERATOR change from DIE to HARDMACRO — the single answer
+        # that changes the most about a run. `publish_tapeout_declarations`
+        # writes "only the fields it could derive AND THAT NOBODY HAS ALREADY
+        # ANSWERED", and the declaration records who answered what in
+        # `answer_provenance`. So an answer is dropped only when it is BOTH a
+        # key the flow may publish AND one no one has claimed. An
+        # operator-answered key is kept, because the flow will never overwrite
+        # it. `answer_provenance` itself is operator input and is hashed.
+        try:
+            doc = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return raw
+        if not isinstance(doc, dict):
+            return raw
+        answers = doc.get("answers")
+        if isinstance(answers, dict):
+            prov = doc.get("answer_provenance")
+            claimed = set(prov) if isinstance(prov, dict) else set()
+            doc = dict(doc)
+            doc["answers"] = {
+                k: v for k, v in answers.items()
+                if k in claimed or k not in _DECLARATION_FLOW_KEYS}
+        return json.dumps(doc, sort_keys=True).encode("utf-8")
+    return raw
+
+
+#: Set by the caller (the runner owns the list; this module must not restate
+#: it). Empty means "no key is known to be flow-written", which is the honest
+#: default and makes `declaration_as_asked` behave as `raw`.
+_DECLARATION_FLOW_KEYS: Set[str] = set()
+
+
+def set_declaration_flow_keys(keys: Iterable[str]) -> None:
+    """Tell this module which declaration answers the FLOW writes back."""
+    global _DECLARATION_FLOW_KEYS
+    _DECLARATION_FLOW_KEYS = set(keys)
+
+
+def resolved_inputs_digest(project: Path,
+                           inputs: Sequence[Tuple[str, Any, str]],
+                           knobs: Dict[str, str]
+                           ) -> Tuple[Optional[str], List[str]]:
+    """sha256 over what the step ACTUALLY READS, as the step resolved it.
+
+    r2 review finding A, and it is the reason this replaces the flow-derived
+    list rather than extending it. `step_pnr` does not read
+    `phase2/stage2/constraints/<top>.sdc` — that is a COPY the runner writes
+    once. It reads whatever `sdc_constraints.collect_sdc_files` resolves out of
+    `input/constraints/` and `input/reference_flow/`, or a file it builds from
+    L8/L9. It reads the slot and die rectangle out of
+    `reports/phase1/submission_template.json`. And its behaviour turns on
+    `--spare-density`, `VIBEIC_TAP_PITCH_UM` and `VIBEIC_FORCE_KLAYOUT_
+    STREAMOUT`, none of which is a file at all. A cache key that hashes a
+    stand-in the real path never opens is not a cache key.
+
+    So the RUNNER resolves its own inputs, the same way the step does, and
+    hands them here as `(label, path, rule)`. `knobs` are the non-file inputs.
+
+    FAILS CLOSED, and harder than before: an EMPTY input set is a refusal, not
+    an empty product. If the caller could not enumerate what the step reads,
+    this cannot answer whether it changed."""
+    if not inputs:
+        return None, ["the caller enumerated no input for this step, so what "
+                      "it reads cannot be established"]
+    pairs: List[Tuple[str, str]] = []
+    evidence: List[str] = []
+    for label, path, rule in inputs:
+        if path is None:
+            return None, [f"{label}: the step's own resolution produced no "
+                          f"path, so this input cannot be hashed"]
+        p = Path(path)
+        if not p.is_file():
+            return None, [f"{label}: {p} is read by this step but is not on "
+                          f"disk"]
+        data = canonical_bytes(p, rule)
+        if data is None:
+            return None, [f"{label}: {p} could not be read"]
+        d = _sha256_bytes(data)
+        try:
+            rel = os.path.relpath(p, Path(project))
+        except ValueError:
+            rel = str(p)
+        pairs.append((f"{label}:{rel}", d))
+        evidence.append(f"{label}={rel}@{d[:12]}"
+                        + ("" if rule == "raw" else f" [{rule}]"))
+    for name in sorted(knobs):
+        val = "" if knobs[name] is None else str(knobs[name])
+        pairs.append((f"knob:{name}", _sha256_bytes(val.encode("utf-8"))))
+        evidence.append(f"{name}={val!r}")
+    return _digest_pairs(pairs), evidence
+
+
 def inputs_digest(project: Path, steps: Sequence[Dict[str, Any]], kind: str,
                   extra: Sequence[Path] = ()
                   ) -> Tuple[Optional[str], List[str]]:
@@ -513,6 +655,18 @@ def runner_code_closure(runner_path: Path, kind: str
                     seen_mod.add(dotted)
                     mods.append(m)
                     break
+    # ...and the programs this closure runs BY FILE PATH. r2 review finding B:
+    # a program the runner dispatches as `python3 <programs>/x.py` is never
+    # imported, so no import binding names it and it sat outside the identity
+    # of the step that runs it. The reference is a STRING, so that is what is
+    # looked for — any `"...x.py"` literal inside a closure member that
+    # resolves to a file in `programs/`.
+    for name in seen:
+        for lit in _PY_PATH_LITERAL_RE.findall(members[name]):
+            m = _resolve_module(programs_dir, Path(lit).stem)
+            if m is not None and m.resolve() not in {x.resolve()
+                                                     for x in mods}:
+                mods.append(m)
     if mods:
         files, _notes = direct_modules(mods, programs_dir)
         for f in files:
@@ -765,7 +919,39 @@ def pdk_files(pdk: Any) -> List[Tuple[str, str]]:
     return out
 
 
-def pdk_digest(pdk: Any, hasher: Any = None
+def pdk_files_checked(pdk: Any, project: Optional[Path]
+                      ) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """`pdk_files`, plus a refusal for any path that is this RUN's own output.
+
+    BELT AND BRACES for finding 4, and it does not depend on the PDK's layout.
+    `<field>_source` is set by the one derivation we know about (the VIA-patch
+    legalizer), and the consumers that read it key off `/libs.ref/` — a
+    convention, not a guarantee. So the structural fact is checked directly
+    instead: a PDK path INSIDE THE PROJECT is a file this run produced, and a
+    file this run produced is not evidence about whether the run should
+    happen. With no `<field>_source` to fall back on, that is unanswerable and
+    refuses rather than hashing the derivation."""
+    files = pdk_files(pdk)
+    if project is None:
+        return files, []
+    bad: List[str] = []
+    try:
+        root = Path(project).resolve()
+    except OSError:
+        return files, []
+    for field, val in files:
+        try:
+            if Path(val).resolve().is_relative_to(root):
+                bad.append(f"{field}={val} is inside the run directory, so it "
+                           f"is this run's own derivation and no "
+                           f"{field}_source names what it came from")
+        except (OSError, ValueError):
+            continue
+    return files, bad
+
+
+def pdk_digest(pdk: Any, hasher: Any = None,
+               project: Optional[Path] = None
                ) -> Tuple[Optional[str], List[str]]:
     """sha256 of the PDK files this step reads.
 
@@ -788,7 +974,9 @@ def pdk_digest(pdk: Any, hasher: Any = None
     longer tripped by the ordinary case."""
     if pdk is None:
         return None, ["no PDK configuration in hand"]
-    want = pdk_files(pdk)
+    want, derived = pdk_files_checked(pdk, project)
+    if derived:
+        return None, derived
     if not want:
         return None, ["the PDK configuration names no file"]
     digests: Dict[str, str] = {}
@@ -823,19 +1011,26 @@ def pdk_digest(pdk: Any, hasher: Any = None
 def identity_now(*, project: Path, kind: str, runner_path: Path,
                  programs_dir: Path, flow_yaml: Path, pdk: Any = None,
                  image_digest: Optional[str] = None, pdk_hasher: Any = None,
-                 extra_inputs: Sequence[Path] = ()
+                 extra_inputs: Sequence[Path] = (),
+                 inputs: Optional[Sequence[Tuple[str, Any, str]]] = None,
+                 knobs: Optional[Dict[str, str]] = None
                  ) -> Tuple[Dict[str, Optional[str]], Dict[str, List[str]]]:
     """This build's identity for `kind`, plus per-component evidence."""
     steps = load_steps(Path(flow_yaml))
     why: Dict[str, List[str]] = {}
     ident: Dict[str, Optional[str]] = {}
-    ident["inputs"], why["inputs"] = inputs_digest(
-        Path(project), steps, kind, extra_inputs)
+    if inputs is not None:
+        # THE CALLER RESOLVED THEM, the way the step does. r2 review finding A.
+        ident["inputs"], why["inputs"] = resolved_inputs_digest(
+            Path(project), inputs, dict(knobs or {}))
+    else:
+        ident["inputs"], why["inputs"] = inputs_digest(
+            Path(project), steps, kind, extra_inputs)
     ident["code"], why["code"] = code_digest(
         Path(runner_path), Path(programs_dir), steps, kind)
     ident["tools"], why["tools"] = tools_digest(
         Path(project), kind, image_digest)
-    ident["pdk"], why["pdk"] = pdk_digest(pdk, pdk_hasher)
+    ident["pdk"], why["pdk"] = pdk_digest(pdk, pdk_hasher, Path(project))
     return ident, why
 
 

@@ -49,10 +49,23 @@ import pytest  # noqa: E402
 
 
 
+class _IdentityArgs:
+    """The knobs R-0924-3 r3 folds into a step's identity — `--spare-density`
+    and the env vars are inputs the step reads that are not files, so the
+    fixtures must name them as a real invocation would."""
+    spare_density = 0.02
+    container = ""
+
+
 def _pdk(root):
     """A PDK whose declared files can actually be read — R-0924-3 hashes them,
     and an unreadable PDK is (correctly) never a match."""
-    d = Path(root) / "_pdk"
+    # OUTSIDE the project, which is where a PDK lives. R-0924-3 r3 added a
+    # structural guard: a PDK path inside the run directory is this run's own
+    # derivation (the VIA-patch legalizer stages one there), not a PDK input,
+    # and it refuses. Writing the fixture's PDK inside the project tripped it —
+    # correctly.
+    d = Path(root).parent / "_pdk_outside"
     d.mkdir(parents=True, exist_ok=True)
     lib, tlef, clef = d / "tt.lib", d / "tech.lef", d / "cells.lef"
     for f, text in ((lib, "library(t){}\n"), (tlef, "VERSION 5.8 ;\n"),
@@ -138,8 +151,7 @@ def _valid_cache(tmp_path, kind="pnr", artefact="top.def",
     R._write_pnr_args_sidecar(out_dir, DIE, UTIL)
     R._write_producer_identity(
         out_dir, kind, project=project, pdk=_pdk(project), container="",
-        extra_inputs=((out_dir / "top.def",) if kind == "gds"
-                      else (project / "phase2/stage2/synth/netlist.v",)))
+        top="top", args=_IdentityArgs())
     art = out_dir / artefact
     art.write_text("VERSION 5.8 ;\n")
     return project, out_dir, art
@@ -152,9 +164,7 @@ def _decide(project, out_dir, art, **kw):
     kw.setdefault("util", UTIL)
     kw.setdefault("pdk", _pdk(project))
     kw.setdefault("container", "")
-    kw.setdefault("extra_inputs",
-                  ((out_dir / "top.def",) if kw["kind"] == "gds"
-                   else (project / "phase2/stage2/synth/netlist.v",)))
+    kw.setdefault("args", _IdentityArgs())
     return R._cached_stage_decision(project, out_dir, art, **kw)
 
 
@@ -301,7 +311,7 @@ def test_the_pad_ring_clause_belongs_to_the_pnr_stage_only(tmp_path):
     assert R._pad_ring_route_cache_valid(project, "top") is False
     R._write_producer_identity(out_dir, "gds", project=project,
                                pdk=_pdk(project), container="",
-                               extra_inputs=(out_dir / "top.def",))
+                               top="top", args=_IdentityArgs())
     gds = out_dir / "top.gds"
     gds.write_text("HEADER\n")
     _empty_antenna(out_dir, "antenna_iter_0.rpt")
