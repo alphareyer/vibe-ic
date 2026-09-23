@@ -47,18 +47,32 @@ _FAIL = _T.Verdict.FAIL.value
 _AWAIT = _T.ReasonClass.AWAITING_AGENT_PASS.value
 _EXEC = _T.ReasonClass.EXECUTION_ERROR.value
 
-_NESTED = '''import json, sys
+#: The stand-in stamps `invocation` and `invoked_as` from its environment exactly
+#: as the real audit does (`_invocation_id`, `_gate_authorship.stamp`), so a
+#: report it writes is THIS invocation's, in the role the clause spawned it in.
+#: MODE: "write" (the normal nested run), "kill9"/"kill15" (killed from outside
+#: before writing anything), "nowrite" (exits having written nothing).
+_NESTED = '''import json, os, signal, sys
 from pathlib import Path
 REPORT = {report!r}
+MODE = {mode!r}
+RC = {rc!r}
+if MODE == "kill9":
+    os.kill(os.getpid(), signal.SIGKILL)
+if MODE == "kill15":
+    os.kill(os.getpid(), signal.SIGTERM)
 argv = sys.argv[1:]
-if REPORT is not None and "--json" in argv:
+if MODE == "write" and REPORT is not None and "--json" in argv:
+    doc = dict(REPORT)
+    doc.setdefault("invocation", os.environ.get("VIBEIC_FCC_INVOCATION", ""))
+    doc.setdefault("invoked_as", os.environ.get("VIBEIC_FCC_ROLE", "producer"))
     p = Path(argv[argv.index("--json") + 1])
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(REPORT))
+    p.write_text(json.dumps(doc))
 print("=== Vibe-IC phase1_phase2_phase3 stage compliance ===")
 print("Overall: " + (REPORT or {{}}).get("overall", "NOT_MEASURED")
       + "  (strict=True)")
-sys.exit(1)
+sys.exit(RC)
 '''
 
 _EPT = "phase1_expert_parse_track . --check-report"
@@ -99,19 +113,30 @@ def _report(rows, blockers=None, overall=_NM, program="flow_compliance_check",
 _RUN2 = [_row("D1", _NM, _AWAIT), _row("0.5ic", "PASS")]
 
 
-def _nested(tmp_path: Path, report) -> str:
+def _nested(tmp_path: Path, report, mode="write", rc=1) -> str:
     p = tmp_path / "gates" / "flow_compliance_check.py"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(_NESTED.format(report=report))
+    p.write_text(_NESTED.format(report=report, mode=mode, rc=rc))
     return str(p)
 
 
-def _check(tmp_path: Path, report, stage_id="stage_phase1", step_id=2):
+def _receipt(stage_id="stage_phase1") -> str:
+    return f"reports/gates/{stage_id}_compliance.json"
+
+
+def _check(tmp_path: Path, report, stage_id="stage_phase1", step_id=2,
+           mode="write", rc=1, already_there=None):
+    """`already_there`: a document at the clause's receipt path BEFORE the
+    nested audit runs -- the run's producer copy, or an earlier pass's."""
     project = tmp_path / "proj"
     project.mkdir(exist_ok=True)
-    prog = _nested(tmp_path, report)
+    if already_there is not None:
+        target = project / _receipt(stage_id)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(already_there))
+    prog = _nested(tmp_path, report, mode=mode, rc=rc)
     cmd = (f"{prog} . --stage-id {stage_id} --strict "
-           f"--json reports/gates/{stage_id}_compliance.json")
+           f"--json {_receipt(stage_id)}")
     step = {"id": step_id, "name": "the step under audit", "stage": "stage1",
             "gate": {"all_of": [{"advisory_program_exit_zero": cmd}]}}
     return FCC.check_step(project, step, {})
@@ -234,3 +259,78 @@ def test_a_nested_audit_with_no_awaiting_row_is_not_awaiting(tmp_path):
     r = _check(tmp_path, _report(rows))
     assert (r.status, r.reason_class) == (_NM, _EXEC), (
         r.status, r.reason_class, r.reasons)
+
+
+# ── r2 (review w85w0fp2p): the rows are read only off THIS call's receipt ──
+
+def _stale(invoked_as, invocation="1629342-1790175098148"):
+    """The recorded run2 document, as another writer left it."""
+    doc = _report(_RUN2)
+    doc["invoked_as"] = invoked_as
+    doc["invocation"] = invocation
+    return doc
+
+
+def test_the_run2_shape_over_the_producers_copy_still_reads_awaiting(
+        tmp_path):
+    """The recorded case: the producer's document is at the receipt path, so
+    the clause is redirected to a seeded scratch copy, and the nested audit
+    writes its own answer there."""
+    r = _check(tmp_path, _report(_RUN2), already_there=_stale("producer"))
+    assert (r.status, r.reason_class) == (_NM, _AWAIT), (
+        r.status, r.reason_class, r.reasons)
+
+
+def test_a_killed_nested_audit_over_the_producers_copy_is_an_error(tmp_path):
+    """The review's sequence: SIGKILL before any write, the scratch equals its
+    seed, the redirect is dropped, and the reader falls back to the producer's
+    awaiting-only document."""
+    r = _check(tmp_path, _report(_RUN2), mode="kill9",
+               already_there=_stale("producer"))
+    assert r.status == _NM, (r.status, r.reasons)
+    assert r.reason_class == _EXEC, (r.reason_class, r.reasons)
+
+
+def test_a_sigtermed_nested_audit_over_the_producers_copy_is_an_error(
+        tmp_path):
+    r = _check(tmp_path, _report(_RUN2), mode="kill15",
+               already_there=_stale("producer"))
+    assert r.status == _NM, (r.status, r.reasons)
+    assert r.reason_class == _EXEC, (r.reason_class, r.reasons)
+
+
+def test_an_earlier_passs_document_under_a_killed_run_is_not_read(tmp_path):
+    """An AUDIT-role document from another invocation at the receipt path."""
+    r = _check(tmp_path, _report(_RUN2), mode="kill9",
+               already_there=_stale("audit"))
+    assert r.reason_class != _AWAIT, (r.status, r.reason_class, r.reasons)
+
+
+def test_an_earlier_passs_document_under_a_silent_exit_1_is_not_read(
+        tmp_path):
+    """The nested run exits 1 and writes nothing; the document there is an
+    earlier pass's. Nothing this call ran said it is waiting."""
+    r = _check(tmp_path, _report(_RUN2), mode="nowrite",
+               already_there=_stale("audit"))
+    assert r.reason_class != _AWAIT, (r.status, r.reason_class, r.reasons)
+
+
+def test_this_invocations_earlier_document_is_not_this_calls(tmp_path):
+    """Same invocation and role, but written by an EARLIER call: this call
+    wrote nothing, so the document's content did not change."""
+    r0 = _check(tmp_path, _report(_RUN2))
+    assert r0.reason_class == _AWAIT, r0.reasons
+    r = _check(tmp_path, _report(_RUN2), mode="nowrite")
+    assert r.reason_class != _AWAIT, (r.status, r.reason_class, r.reasons)
+
+
+def test_an_awaiting_report_under_an_exit_other_than_1_is_not_read(tmp_path):
+    r = _check(tmp_path, _report(_RUN2), rc=2)
+    assert r.reason_class != _AWAIT, (r.status, r.reason_class, r.reasons)
+
+
+def test_a_report_written_in_the_producer_role_is_not_read(tmp_path):
+    rep = _report(_RUN2)
+    rep["invoked_as"] = "producer"
+    r = _check(tmp_path, rep)
+    assert r.reason_class != _AWAIT, (r.status, r.reason_class, r.reasons)
