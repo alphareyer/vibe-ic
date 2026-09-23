@@ -3002,6 +3002,23 @@ def _check_sta(project_dir: Path) -> AuditResult:
 
     wns_tns_re = re.compile(r"WNS|TNS|worst\s*negative\s*slack|total\s*negative\s*slack",
                             re.I)
+    # THE NUMBER, NOT ONLY THAT THERE IS ONE.
+    #
+    # MEASURED on spm run22 (lane icspm5): this audit published
+    # `"has_wns_tns": true` over a transcript reading "worst slack max 14.31 /
+    # tns max 0.00 / worst slack min 0.51 / tns min 0.00", and its receipt
+    # `reports/phase3/sta/post_route_summary.json` carried no slack number at
+    # all. `_ic_release_artefacts._sta_class` reads that receipt, found none,
+    # and refused the release documents with STA_NO_SLACK -- "a timing report
+    # with no slack in it is a file" -- while the run's own sign-off reported
+    # +0.940 ns. A verdict that says it saw a number must publish the number
+    # it saw.
+    slack_value_re = re.compile(
+        r"(?:^|\n)\s*(?P<kind>worst\s+slack|wns|tns|worst\s*negative\s*slack"
+        r"|total\s*negative\s*slack)"
+        r"(?:\s+(?P<corner>[A-Za-z][A-Za-z0-9_]*))?"
+        r"\s*[:=]?\s*(?P<value>[-+]?\d+(?:\.\d+)?)\b", re.I)
+    slack_rows: List[Dict[str, Any]] = []
     setup_hold_re = re.compile(r"setup|hold", re.I)
     # An OpenSTA `report_checks` PATH-TABLE report is the per-path equivalent of
     # a WNS/TNS summary: it ends each path with "slack (MET)" / "slack
@@ -3100,6 +3117,19 @@ def _check_sta(project_dir: Path) -> AuditResult:
         has_pathtable = bool(pathtable_slack_re.search(text))
         if wns_tns_re.search(text) or has_pathtable:
             has_wns_tns = True
+        # `_sm`, not `_m`: this function already binds `_m` to a declared/
+        # measured record further down, and reusing the name made the audit
+        # crash on its own next statement.
+        for _sm in slack_value_re.finditer(text):
+            _kind = " ".join(_sm.group("kind").split()).lower()
+            slack_rows.append({
+                "file": str(fp),
+                "metric": ("tns" if _kind in ("tns", "total negative slack")
+                           else "wns"),
+                "corner": (_sm.group("corner") or "").lower() or None,
+                "value_ns": float(_sm.group("value")),
+                "stated_as": _kind,
+            })
         if setup_hold_re.search(text) or pathtype_re.search(text) or has_pathtable:
             has_setup_hold = True
         if not best_file:
@@ -3393,6 +3423,17 @@ def _check_sta(project_dir: Path) -> AuditResult:
                       and not real_violation_found
                       and not not_measured_hard
                       and not basis_offenders and not unreadable)
+
+    # THE GOVERNING NUMBERS: the worst of what was read, never a default.
+    # `min` over the values actually captured -- a datasheet quotes the corner
+    # that governs, and taking the worst can only be conservative. Both are
+    # computed only from what was captured; `slack_rows` empty means these
+    # names are never published at all (see the summary block below).
+    _wns_vals = [r["value_ns"] for r in slack_rows if r["metric"] == "wns"]
+    _tns_vals = [r["value_ns"] for r in slack_rows if r["metric"] == "tns"]
+    _governing_wns = min(_wns_vals) if _wns_vals else None
+    _governing_tns = min(_tns_vals) if _tns_vals else None
+
     result.subject_files = [str(f) for f in files]
     result.summary = {"files_found": len(files),
                       # The third value, published beside the verdict rather
@@ -3413,6 +3454,41 @@ def _check_sta(project_dir: Path) -> AuditResult:
                       "readable_files": len(files) - len(unreadable),
                       "unreadable_files": len(unreadable),
                       "has_wns_tns": has_wns_tns,
+                      # THE NUMBERS THIS AUDIT READ, or the named absence.
+                      # Never a verdict without its number: a consumer that
+                      # needs the slack can read it here, and a run whose
+                      # transcript really carries none says so BY NAME rather
+                      # than by an empty key a reader must interpret.
+                      #
+                      # NOTHING NUMERIC IS PUBLISHED UNDER A SLACK-NAMED KEY
+                      # WHEN NO SLACK WAS MEASURED, and that is the whole
+                      # discipline of this block rather than a style choice.
+                      # `_ic_release_artefacts._numbers_under_key` decides
+                      # STA_NO_SLACK by asking whether ANY number appears
+                      # anywhere under a key naming slack/wns/tns. A first
+                      # draft of this change published `"slack_datapoints":
+                      # len(slack_rows)` beside the rows; MEASURED by mutation
+                      # (lane icspm5, 2026-09-23) that key alone satisfied the
+                      # release reader -- a transcript with no timing in it
+                      # published `slack_datapoints: 0`, the reader found a
+                      # number under a slack key, and the refusal that exists
+                      # to stop exactly that run went silent. A counter is not
+                      # a measurement, so the count lives under `slack_scan`
+                      # where no key names the quantity, and the headline
+                      # numbers below appear ONLY when they were read.
+                      **({"wns_ns": _governing_wns,
+                          "tns_ns": _governing_tns} if slack_rows else {}),
+                      "slack_ns": slack_rows,
+                      "slack_scan": {"datapoints": len(slack_rows),
+                                     "reports_read": len(files) - len(unreadable)},
+                      "slack_measurement": (
+                          "MEASURED" if slack_rows else "NOT_MEASURED"),
+                      "slack_not_measured_reason": (
+                          None if slack_rows else
+                          "no WNS/TNS/worst-slack number appears in any "
+                          "discovered post-route timing report; the reports "
+                          "were read (see readable_files) and carried no "
+                          "slack value to publish"),
                       "has_setup_hold": has_setup_hold,
                       "tool_authentic": authentic,
                       "corner_dirs_found": len(corner_dirs),
