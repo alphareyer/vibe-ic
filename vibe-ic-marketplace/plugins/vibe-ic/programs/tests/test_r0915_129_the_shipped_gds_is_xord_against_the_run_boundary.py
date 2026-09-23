@@ -196,7 +196,13 @@ def test_a_recorded_host_path_is_reanchored_to_this_project(tmp_path):
     real = tmp_path / "phase3/stage3/pnr/active_via_legalized.tlef"
     real.parent.mkdir(parents=True, exist_ok=True)
     real.write_text("VERSION 5.8 ;\n")
-    recorded = "/home/someone/_lane_other/run21/phase3/stage3/pnr/active_via_legalized.tlef"
+    # ANOTHER run root, absolute and outside this project -- derived from
+    # tmp_path rather than spelled as a personal home, which the shipped-path
+    # portability gates refuse in shipped source (test_path_lint_fixtures_are_
+    # host_portable, test_shipped_path_portability_check).
+    other = tmp_path.parent / (tmp_path.name + "_lane_other") / "run21"
+    recorded = str(other / "phase3/stage3/pnr/active_via_legalized.tlef")
+    assert not Path(recorded).exists()
     assert g.reanchored(tmp_path, recorded) == str(real)
 
 
@@ -204,7 +210,8 @@ def test_reanchoring_never_invents_a_file(tmp_path):
     """Existence-tested: with no such tail under the project the recorded path is
     returned unchanged, so the caller's own open-failure names the real path
     instead of a plausible-looking one this function made up."""
-    recorded = "/home/someone/_lane_other/run21/phase3/stage3/pnr/absent.tlef"
+    other = tmp_path.parent / (tmp_path.name + "_lane_other") / "run21"
+    recorded = str(other / "phase3/stage3/pnr/absent.tlef")
     assert g.reanchored(tmp_path, recorded) == recorded
 
 
