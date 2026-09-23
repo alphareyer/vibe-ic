@@ -22451,6 +22451,15 @@ def main() -> int:
     _FORCE_RTL_REGEN = bool(args.force_rtl_regen)
 
     project = args.project.resolve()
+
+    # MARK THE RUN START when this runner is the entry point. See
+    # `vibe_ic_one_shot_runner` for why a derived window cannot answer
+    # "did THIS run write it".
+    try:
+        import step_write_ledger as _swl
+        _swl.mark_run_start(project)
+    except Exception:                                    # pragma: no cover
+        pass
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2

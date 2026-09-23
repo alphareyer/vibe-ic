@@ -914,6 +914,24 @@ def main() -> int:
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
 
+    # MARK THE RUN START, ONCE, BEFORE ANY PRODUCER RUNS.
+    #
+    # `step_write_ledger` can only answer "did THIS run write it" against a
+    # real mark. Without one it falls back to the EARLIEST surviving
+    # orchestrator summary, and an `--entry-step` run into phase 2 does not
+    # rewrite the phase-1 summary -- MEASURED on
+    # campaign_v1574/spm/converge_1.5.74_sky130A, where step 7's outputs are
+    # 12 days older than the latest run and would still read in-window.
+    #
+    # `mark_run_start` has existed for exactly this and had NO production
+    # caller, so every real ledger carried an unknown window. One tiny write,
+    # here, is what makes the fact recorded rather than inferred.
+    try:
+        import step_write_ledger as _swl
+        _swl.mark_run_start(project)
+    except Exception:                                    # pragma: no cover
+        pass                                             # never fatal
+
     # ---------------- Single-driver project lock (ORGANIC #498) ----------
     # Refuse a second concurrent invocation on a project already being
     # driven by a LIVE runner; clean a stale lock left by a dead one.

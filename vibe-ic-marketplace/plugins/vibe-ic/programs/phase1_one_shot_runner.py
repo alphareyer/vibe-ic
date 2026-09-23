@@ -1471,6 +1471,16 @@ def main() -> int:
                         "read it.")
     args, extras = p.parse_known_args()
     project = args.project.resolve()
+
+    # MARK THE RUN START when this runner is the entry point. The front door
+    # does it too; whichever runs first wins and the other overwrites with a
+    # later t0 only if it is genuinely a later run. See
+    # `vibe_ic_one_shot_runner` for why a derived window cannot answer this.
+    try:
+        import step_write_ledger as _swl
+        _swl.mark_run_start(project)
+    except Exception:                                    # pragma: no cover
+        pass
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2

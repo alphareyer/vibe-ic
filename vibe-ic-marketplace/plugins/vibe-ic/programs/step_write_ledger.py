@@ -692,7 +692,12 @@ def build(project: Path) -> Dict[str, Any]:
 
     t0 = window.get("t0_epoch")
     for e in entries.values():
-        e["in_run_window"] = (None if t0 is None else bool(e["mtime"] >= t0))
+        # A SMALL TOLERANCE, because the mark is written by the orchestrator
+        # and the first producer can land within the same filesystem timestamp
+        # tick. Only ever admits a write that is at most this far BEFORE the
+        # mark; it cannot admit a 12-day-old artefact.
+        e["in_run_window"] = (None if t0 is None
+                              else bool(e["mtime"] >= t0 - _T0_TOLERANCE_S))
         attribute(e, prov)
         if fidelity["flattened"] and e.get("producer_confidence") == "unattributable":
             e["producer_evidence"] = (
@@ -758,6 +763,25 @@ def build(project: Path) -> Dict[str, Any]:
                     produced.append({
                         "rel": e["rel"], "size": e["size"], "mtime": e["mtime"],
                         "kind": e["kind"], "spec": spec,
+                        # DID THIS RUN WRITE IT. Computed per entry above and
+                        # then dropped here, so no consumer of `produced`
+                        # could ever ask -- MEASURED across 929 ledgers on
+                        # this host, 368 with a known t0, and not one produced
+                        # entry carried the field.
+                        #
+                        # ASSERTED ONLY AGAINST A REAL MARK. The derived t0
+                        # takes the EARLIEST surviving orchestrator summary,
+                        # and an `--entry-step` run into phase 2 does not
+                        # rewrite the phase-1 summary -- so on
+                        # campaign_v1574/spm/converge_1.5.74_sky130A step 7's
+                        # outputs are 12 days older than the latest run and
+                        # would still read in-window. A derived window cannot
+                        # answer "did THIS run write it", so here it answers
+                        # `None`: unknown, and a consumer must not pretend
+                        # otherwise.
+                        "in_run_window": (
+                            e.get("in_run_window")
+                            if window.get("t0_source") == "marker" else None),
                         "producer": e.get("producer"),
                         "producer_confidence": e.get("producer_confidence"),
                         "producer_evidence": e.get("producer_evidence"),
@@ -935,6 +959,12 @@ def build(project: Path) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Emission — best-effort, never raises
 # --------------------------------------------------------------------------- #
+#: Seconds of slack between the run mark and the first producer write. The
+#: mark is taken before any producer runs, so this only absorbs filesystem
+#: timestamp granularity -- it cannot admit an artefact from a previous run.
+_T0_TOLERANCE_S = 2.0
+
+
 def mark_run_start(project: Path) -> bool:
     """Drop the t0 marker. One tiny write; call at run start if you want an
     EXACT run window instead of the derived one. Never raises."""
