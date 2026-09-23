@@ -2416,6 +2416,44 @@ def sta_path_states_its_operating_point(text: str) -> int:
                if r.get("cap_pf") is not None and r.get("slew_ns") is not None)
 
 
+#: R-0915-154. The in-session PnR STA (`phase3/stage3/pnr/sta.rpt`) stamps
+#: `STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED`: its RC is unattested (an
+#: estimate or an extraction, unsaid). A slack under unverified parasitics is
+#: NEVER a correlation source -- correlating SPICE against it measures the RC
+#: guess, not the model. `_pick_sta_report` used to add that file as a candidate
+#: unconditionally.
+_PNR_SESSION_UNVERIFIED_RE = re.compile(
+    r"^\s*#?\s*STA_PARASITICS_PROVENANCE\s*:\s*PNR_SESSION_UNVERIFIED\b",
+    re.MULTILINE)
+#: A path the writer could not bind to a loaded Liberty corner.
+_CORNER_BINDING_REFUSED_RE = re.compile(
+    r"^\s*#?\s*STA_CORNER_BINDING_REFUSED\s*:\s*(\S+)", re.MULTILINE)
+
+
+def _rel_or_name(project: Path, p: Path) -> str:
+    try:
+        return p.relative_to(project).as_posix()
+    except ValueError:
+        return p.name
+
+
+def _unverified_session_candidates(project: Path) -> List[Path]:
+    """The STA candidates `_pick_sta_report` refuses as correlation sources."""
+    out: List[Path] = []
+    sta_dir = _pl.sta_dir(project)
+    cands = sorted(sta_dir.glob("*.rpt")) if sta_dir.is_dir() else []
+    pnr_rpt = project / "phase3" / "stage3" / "pnr" / "sta.rpt"
+    if pnr_rpt.is_file():
+        cands.append(pnr_rpt)
+    for c in cands:
+        try:
+            if _PNR_SESSION_UNVERIFIED_RE.search(c.read_text(errors="replace")):
+                out.append(c)
+        except OSError:
+            continue
+    return out
+
+
 def _pick_sta_report(project: Path, subckt_names: set) -> Optional[Path]:
     """Pick the STA report whose critical path exposes the most stitchable
     combinational stages, and — AMONG REPORTS THAT TIE — the one that STATES
@@ -2470,6 +2508,8 @@ def _pick_sta_report(project: Path, subckt_names: set) -> Optional[Path]:
             text = c.read_text(errors="replace")
         except OSError:
             continue
+        if _PNR_SESSION_UNVERIFIED_RE.search(text):
+            continue                  # never a correlation source (R-0915-154)
         score = (sta_path_stitch_score(text, subckt_names),
                  sta_path_states_its_operating_point(text))
         if score[0] > 0 and score > best_score:
@@ -2789,7 +2829,14 @@ def run_installed_pdk_path_correlation(
 
     sta_report = _pick_sta_report(project, probe["subckt_names"])
     if not sta_report:
-        return _persist_declared_refusal(project, {"status": "ERROR", "reason": "critical STA path unresolved"})
+        _unv = _unverified_session_candidates(project)
+        return _persist_declared_refusal(project, {"status": "ERROR", "reason": (
+            "critical STA path unresolved" + (
+                "; refused as correlation source(s): "
+                + ", ".join(_rel_or_name(project, u) for u in _unv)
+                + " (STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED -- an "
+                "in-session STA with unattested RC is never a correlation "
+                "source)" if _unv else ""))})
     sta_text = sta_report.read_text(errors="replace")
     sta_path = parse_sta_path(sta_text)
     if not sta_path:
@@ -2816,10 +2863,15 @@ def run_installed_pdk_path_correlation(
                           f"than picking one of them"})
     corner_liberty = basis["liberty"] or ""
     if not corner_liberty:
+        _refused = _CORNER_BINDING_REFUSED_RE.findall(sta_text)
         return _persist_declared_refusal(project, {"status": "ERROR",
                 "reason": f"{sta_report.name} declares no corner liberty, so "
                           f"the corner the SPICE deck must be built at is "
-                          f"unknown; refusing a cross-corner correlation"})
+                          f"unknown; refusing a cross-corner correlation"
+                          + (f" -- its writer stamped STA_CORNER_BINDING_REFUSED "
+                             f"({sorted(set(_refused))[0]}) on {len(_refused)} "
+                             f"path(s): no attributable corner"
+                             if _refused else "")})
     corner_text = (liberty_text if corner_liberty == liberty_path
                    else _read_container_text(container, corner_liberty))
     if not corner_text:

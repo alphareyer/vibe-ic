@@ -170,7 +170,7 @@ _PATH_SCOPE_KEYS = ("path_startpoint", "path_endpoint", "path_ordinal")
 _PATH_METRIC_SUFFIX = ".worst_path_slack_ns"
 
 _SCOPE_KEYS = ("stage", "mode", "process", "voltage_v", "temperature_c",
-               "rc_corner", "clock", "check", "ocv_derate")
+               "rc_corner", "clock", "check", "ocv_derate", "sdc")
 
 #: The extraction producer's closed RC-corner vocabulary. These are flow
 #: roles, not PDK names: every active PDK maps its own extraction models onto
@@ -463,6 +463,9 @@ _SCOPE_OMISSION_REASON = {
     "ocv_derate": ("this section stamps no `OCV_DERATE_APPLIED`, so the "
                    "derating stance it was analysed under is unread. That is "
                    "NOT a statement that no derating was applied"),
+    "sdc": ("this section stamps no `STA_BASIS_SDC`, so the constraints it "
+            "was timed under are unread. That is NOT a statement that it was "
+            "timed under the same constraints as any other number"),
 }
 
 
@@ -470,7 +473,8 @@ def _scope(stage: Optional[str], mode: Optional[str], process: Optional[str],
            voltage_v: Optional[float], temperature_c: Optional[float],
            rc_corner: Optional[str], clock: Optional[str],
            check: Optional[str], *,
-           ocv_derate: Optional[str] = None) -> Dict[str, Any]:
+           ocv_derate: Optional[str] = None,
+           sdc: Optional[str] = None) -> Dict[str, Any]:
     """The scope keys this artefact ESTABLISHED, in the frozen order.
 
     A key the producer could not establish is ABSENT, never `null`. Until
@@ -498,7 +502,7 @@ def _scope(stage: Optional[str], mode: Optional[str], process: Optional[str],
     full = {"stage": stage, "mode": mode, "process": _ident(process),
             "voltage_v": voltage_v, "temperature_c": temperature_c,
             "rc_corner": _ident(rc_corner), "clock": clock, "check": check,
-            "ocv_derate": ocv_derate}
+            "ocv_derate": ocv_derate, "sdc": sdc}
     # `""` as well as None: the empty string is §6.1's third sentinel and
     # `"" == ""` compares equal exactly the way `null == null` does.
     return {k: v for k, v in full.items() if v is not None and v != ""}
@@ -578,6 +582,43 @@ def _path_scope(base: Dict[str, Any], obs: Any, ordinal: int,
     else:
         out["path_ordinal"] = ordinal
     return out
+
+
+def _sdc_identity(project: Path, named: Optional[str]
+                  ) -> Tuple[Optional[str], Optional[str]]:
+    """`("sha256:<digest>", None)` for the SDC a section NAMES, or `(None, why)`.
+
+    R-0915-154. Two slacks are comparable only if they were timed under the
+    same CONSTRAINTS, so the constraints are a scope axis -- and the axis value
+    is the file's CONTENT digest, never its path: the path is container-spelled
+    and differs per run, so keying on it would divide every cross-run pair, and
+    two runs under byte-identical constraints ARE comparable. The named path is
+    resolved inside THIS project by its longest tail that exists (the emitter
+    spells project files through the container mount); a name that resolves to
+    nothing here is a GAP, stated, and the key is omitted -- never a digest of
+    something else.
+    """
+    if not named:
+        return None, None
+    parts = [x for x in Path(named).parts if x not in ("/", "")]
+    root = project.resolve()
+    for i in range(len(parts)):
+        cand = root.joinpath(*parts[i:])
+        try:
+            cand.resolve().relative_to(root)
+        except ValueError:
+            continue
+        if cand.is_file():
+            try:
+                return ("sha256:" + hashlib.sha256(cand.read_bytes()).hexdigest(),
+                        None)
+            except OSError as exc:
+                return None, ("this section names its constraints as %r and "
+                              "%s could not be read (%s), so their identity "
+                              "is unknown" % (named, _rel(project, cand), exc))
+    return None, ("this section names its constraints as %r and no file under "
+                  "this project ends in that path, so their identity is unknown"
+                  % (named,))
 
 
 def _source(project: Path, path: Optional[Path], sha: Optional[str],
@@ -777,6 +818,9 @@ def rows_from_report(project: Path, path: Path, report: opensta.Report,
             spef = spef or report.basis_spef
         pvt = opensta.parse_liberty_pvt(liberty)
         gaps: Dict[str, str] = {}
+        sdc_id, sdc_gap = _sdc_identity(project, sec.sdc or report.basis_sdc)
+        if sdc_gap:
+            gaps["sdc"] = sdc_gap
         if stage_gap:
             gaps["stage"] = stage_gap
         if mode_gap:
@@ -837,7 +881,7 @@ def rows_from_report(project: Path, path: Path, report: opensta.Report,
         for check in checks:
             scope = _scope(stage, mode, process, pvt.voltage_v,
                            pvt.temperature_c, rc_corner, None, check,
-                           ocv_derate=sec.ocv_derate)
+                           ocv_derate=sec.ocv_derate, sdc=sdc_id)
             # ONE gap map per view, so every row of the view explains the same
             # absences the same way. `clock` is absent here by DESIGN, not by
             # failure -- `report_worst_slack` is a design-wide figure -- and
@@ -926,7 +970,7 @@ def rows_from_report(project: Path, path: Path, report: opensta.Report,
             ordinals[key] = ordinals.get(key, 0) + 1
             scope = _scope(stage, mode, process, pvt.voltage_v,
                            pvt.temperature_c, rc_corner, p.clock, check,
-                           ocv_derate=sec.ocv_derate)
+                           ocv_derate=sec.ocv_derate, sdc=sdc_id)
             start, end = _path_names(p)
             identifies = bool(start and end) and named_seen.get(
                 (start, end, p.clock, check), 0) == 1

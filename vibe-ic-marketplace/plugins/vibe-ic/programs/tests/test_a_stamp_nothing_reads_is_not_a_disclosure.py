@@ -59,7 +59,53 @@ NOT_READ_ON_PURPOSE = {
         "adding an unread field to the Report is the same disease this file "
         "exists to name. It is listed so the next reader finds it as a "
         "decision instead of as a silence.",
+    # R-0915-154 -- disclosure-only, each with the reason the ruling adopted.
+    "STA_BASIS_IO_LIBERTY":
+        "completeness evidence for the IO-pad views read beside the core "
+        "basis; the core basis (STA_BASIS_LIBERTY) is parsed, and the "
+        "producer already REFUSES a missing or ambiguous exact-PVT IO library, "
+        "so no verdict needs the list re-read.",
+    "STA_CORNER_BINDING_SOURCE":
+        "qualifies the STA_BASIS_LIBERTY line written beside it (which IS read, "
+        "by spice_correlation_check.parse_sta_corner_basis); it states where "
+        "the binding came from, not a second fact any verdict turns on.",
+    "STA_EXTRA_LIBERTY_READ":
+        "extra non-core IO/macro views loaded into the in-session STA; the same "
+        "argument as STA_BASIS_IO_LIBERTY -- disclosed for a human, and the "
+        "session it describes is never a sign-off or correlation source.",
 }
+
+#: R-0915-154 -- the report's DECLARED CONSUMER(S), for stamps whose reader is
+#: not the PPA backend. The PPA backend is the default reader, but five of the
+#: seven stamps this ruling decided live in reports the PPA reader never opens
+#: (`pnr/sta.rpt`, `post_route_timing.rpt`), so "parse it in opensta.py" was the
+#: wrong home for them. An entry here is NOT a free pass: every named consumer
+#: must carry the token in its EXECUTABLE text (comments and docstrings
+#: stripped), which `test_every_declared_consumer_actually_parses_its_stamp`
+#: checks, so a registry row naming a program that does not read the stamp is
+#: red.
+STAMP_CONSUMERS = {
+    "STA_ALIAS_BASIS": ("sta_signoff_rigor_check.py",),
+    "STA_BASIS_SDC": ("_ppa/backends/opensta.py",),
+    "STA_CORNER_BINDING_REFUSED": ("sta_signoff_rigor_check.py",
+                                   "spice_correlation_check.py"),
+    "STA_PARASITICS_PROVENANCE": ("sta_signoff_rigor_check.py",
+                                  "spice_correlation_check.py"),
+}
+
+
+def _consumer_reads(stamp: str) -> bool:
+    """Every declared consumer of `stamp` carries the token in executable text."""
+    names = STAMP_CONSUMERS.get(stamp) or ()
+    if not names:
+        return False
+    for rel in names:
+        path = _PROGRAMS / rel
+        if not path.is_file():
+            return False
+        if stamp not in _wiring.executable_text(path, path.read_text()):
+            return False
+    return True
 
 
 #: A stamp is a token the runner WRITES INTO A REPORT. Two things wear the same
@@ -111,14 +157,44 @@ def test_the_runner_really_does_stamp_things():
 def test_every_stamp_is_either_parsed_or_declared_unread():
     written = _stamps_written_by_the_runner()
     parsed = _stamps_parsed_by_the_reader()
-    orphaned = sorted(written - parsed - set(NOT_READ_ON_PURPOSE))
+    consumed = {s for s in written if _consumer_reads(s)}
+    orphaned = sorted(written - parsed - consumed - set(NOT_READ_ON_PURPOSE))
     assert not orphaned, (
         "these stamps are written into reports by the runner and read by "
         "nothing in the PPA reader: %s\n\n"
         "A stamp nothing parses is not a disclosure -- it looks like evidence "
         "from the emitter's side and is absent from the reader's. Either parse "
-        "it in _ppa/backends/opensta.py, or add it to NOT_READ_ON_PURPOSE in "
-        "this file, in the same commit, with the reason." % (orphaned,))
+        "it in _ppa/backends/opensta.py, parse it in the report's own consumer "
+        "and name that consumer in STAMP_CONSUMERS, or add it to "
+        "NOT_READ_ON_PURPOSE in this file, in the same commit, with the "
+        "reason." % (orphaned,))
+
+
+def test_every_declared_consumer_actually_parses_its_stamp():
+    """A registry row is a claim, and the claim is checked: each named consumer
+    must carry the token in code, not in a comment. A row naming a program that
+    does not read the stamp would otherwise be a free pass."""
+    bad = sorted((stamp, rel) for stamp, rels in STAMP_CONSUMERS.items()
+                 for rel in rels
+                 if not (_PROGRAMS / rel).is_file()
+                 or stamp not in _wiring.executable_text(
+                     _PROGRAMS / rel, (_PROGRAMS / rel).read_text()))
+    assert not bad, (
+        "STAMP_CONSUMERS names consumer(s) that do not parse the stamp: %s"
+        % (bad,))
+
+
+def test_the_consumer_registry_holds_only_stamps_the_runner_writes():
+    stale = sorted(set(STAMP_CONSUMERS) - _stamps_written_by_the_runner())
+    assert not stale, (
+        "STAMP_CONSUMERS lists stamps the runner no longer writes: %s" % (stale,))
+
+
+def test_a_stamp_is_consumed_or_disclosure_only_never_both():
+    both = sorted(set(STAMP_CONSUMERS) & set(NOT_READ_ON_PURPOSE))
+    assert not both, (
+        "these stamps are declared BOTH consumed and deliberately unread: %s"
+        % (both,))
 
 
 def test_the_spef_stamp_is_now_actually_read():
@@ -255,5 +331,6 @@ def test_a_genuinely_unread_new_stamp_still_fails_the_rule():
     written = set(_STAMP_RE.findall(text))
     assert planted in written, "the plant did not even reach the population"
     parsed = {s for s in written if s in BACKEND.read_text()}
-    orphaned = sorted(written - parsed - set(NOT_READ_ON_PURPOSE))
+    consumed = {s for s in written if _consumer_reads(s)}
+    orphaned = sorted(written - parsed - consumed - set(NOT_READ_ON_PURPOSE))
     assert orphaned == [planted], orphaned
