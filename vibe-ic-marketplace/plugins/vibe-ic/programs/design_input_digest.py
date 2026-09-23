@@ -106,7 +106,7 @@ SCHEMA_VERSION = 1
 #: the exclusion is never silent.
 EXCLUDED_DIR_NAMES: Tuple[str, ...] = (".git", "__pycache__", ".vibeic-state")
 
-#: ONE RULE: AN AUDITOR OUTPUT IS NEVER A DESIGN INPUT. R-0915-153.
+#: ONE RULE: AN AUDITOR OUTPUT IS NEVER A DESIGN INPUT. R-0915-151.
 #:
 #: Identified by WHAT IT IS, not by which chain last recorded it. Carrying footprints
 #: per chain was the mistake behind two rounds of the same finding:
@@ -119,23 +119,65 @@ EXCLUDED_DIR_NAMES: Tuple[str, ...] = (".git", "__pycache__", ".vibeic-state")
 #: Both are chains failing to tell each other what the auditor wrote. The fix is not a
 #: third carrying path: it is that these files are recognisable on sight.
 #:
-#: THREE SHAPES, and each is an auditor write by construction:
-#:   * anything under `reports/audit/` -- the canonical audit, the scoped ones, and the
-#:     superseded copies kept beside them;
+#: AND "ON SIGHT" IS NOT "IN THAT DIRECTORY". My first cut said anything under
+#: `reports/audit/`, which is the same mistake in a new place: `_path_layout.report_path`
+#: is an AUTO-ROUTER, and a report name whose head it does not recognise is routed THERE
+#: as the catch-all. So that directory holds producer records and human/AI answer files
+#: beside the audit -- measured, through the real router:
+#:     reports/audit/expert_parse_track.json                        D1's producer record
+#:     reports/audit/phase1_sufficiency.json, .../phase1/l21_rail_producers.json
+#:     reports/audit/phase2/gates/sdc_gen.json
+#:     reports/audit/xor_allow_macros.json                          a HUMAN XOR waiver list
+#:     reports/audit/phase1/expert_parse_track_pack/l_doc_expectations.json
+#:                                                                 THE AI's answer file;
+#:                                                                 no program writes it
+#: The cost of the prefix, end to end: W1 audits, the IC expert edits
+#: `l_doc_expectations.json` and nothing else, W2's tally moves -- and because the one
+#: edited file was subtracted from the design, both digests are byte-identical and the
+#: movement is published as unexplained. The design's own progress credited to the ruler,
+#: which is the exact defect this record exists to prevent, with the sign flipped.
+#:
+#: SO: IDENTITY, and where a write cannot state its own, its EXACT path -- never a
+#: directory, which is a claim about every file anyone ever routes into it.
 #:   * any `*.superseded-<n>.json` anywhere -- the republish keeps its old publication
 #:     under that name, and the name is only ever minted by the auditor;
 #:   * any JSON whose top level says `program: flow_compliance_check` -- a compliance
 #:     receipt, wherever the flow declares it. That is the same identity predicate
 #:     `_is_the_audits_own_compliance_report` uses, so the two cannot disagree about
-#:     what a receipt is.
+#:     what a receipt is;
+#:   * or `written_by: flow_compliance_check` -- the authorship notes under
+#:     `reports/audit/audit_created/`, which stamp themselves with THAT key and not
+#:     `program`. Read from the real artefacts of run21x, not assumed. They matter here
+#:     because each one records the noted file's `mtime_ns`, so its CONTENT moves every
+#:     pass: were they design inputs, the design hash would move on every pass that wrote
+#:     one, whatever the design did. The footprint already subtracts them for the pass that
+#:     writes them -- this keeps them subtracted in the chain case, where a prior audit that
+#:     is missing or unreadable carries nothing forward;
+#:   * and the completion audit BY ITS EXACT PATH. MEASURED: that document carries no
+#:     `program` key -- `flow_compliance_check` stamps the compliance RECEIPT (R-0915-138),
+#:     not the audit -- so identity alone cannot see it, and the next pass would read its
+#:     own previous verdict as a design change. Stamping it instead would make it answer
+#:     yes to `_is_the_audits_own_compliance_report` the day it grows a `steps` list, and
+#:     hand the republish a new document to supersede; one named path is the smaller risk.
+#:
+#: Everything else the auditor writes during a pass -- `reports/metrics/*`, the authorship
+#: notes, the per-check receipts -- is already subtracted by the FOOTPRINT, computed from
+#: that pass's own pre/post scan and carried forward. This rule is the belt for the CHAIN
+#: case alone: pass 1's audit is on disk before pass 2 begins.
 _SUPERSEDED_RE = re.compile(r"\.superseded-\d+\.json$")
 _AUDITOR_EMITTER = "flow_compliance_check"
+_AUDITOR_IDENTITY_KEYS = ("program", "written_by")
+#: The auditor write that cannot state its own identity, named exactly. Published, so the
+#: exclusion is never silent and a reviewer can see it is one file and not a directory.
+AUDITOR_OUTPUT_PATHS = (
+    "reports/audit/phase23_completion_audit.json",
+)
 
 
 def is_auditor_output(project: Path, path: Path) -> bool:
     """Is this file the AUDITOR's own output rather than a design input?"""
     rel = _rel(project, path)
-    if rel.startswith("reports/audit/") or rel == "reports/audit":
+    if rel in AUDITOR_OUTPUT_PATHS:
         return True
     if _SUPERSEDED_RE.search(rel):
         return True
@@ -147,8 +189,13 @@ def is_auditor_output(project: Path, path: Path) -> bool:
         doc = json.loads(path.read_text(errors="replace"))
     except (OSError, ValueError):
         return False
-    return (isinstance(doc, dict)
-            and str(doc.get("program") or "").strip() == _AUDITOR_EMITTER)
+    if not isinstance(doc, dict):
+        return False
+    # Two stamp keys, because the auditor uses two: `program` on the compliance receipt
+    # (R-0915-138) and `written_by` on the authorship notes. Only the AUDITOR's own name
+    # matches, so another program's `written_by` is untouched.
+    return any(str(doc.get(k) or "").strip() == _AUDITOR_EMITTER
+               for k in _AUDITOR_IDENTITY_KEYS)
 
 
 #: Bounds, so a pathological tree cannot hang a gate. Measured headroom on the
