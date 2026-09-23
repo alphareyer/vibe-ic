@@ -79,6 +79,24 @@ def test_the_re_homed_corpus_is_where_the_consumers_now_look():
     files = sorted(p.relative_to(home).as_posix()
                    for p in home.rglob("*") if p.is_file())
     assert len(files) == 14, files
+    # the MEMBERS, not only how many: an arrival and a departure in one change
+    # would leave 14 and move the corpus the consumers read.
+    assert sorted(files) == [
+        "_pending.json",
+        "acceptance_targets_local/verification_plan.md",
+        "address_space_endpoints_local/registers.md",
+        "coverage_goal_table_local/verification_plan.md",
+        "documented_register_ranges_local/L5_register_map.md",
+        "explicit_top_context_local/L8_submodule_integration.md",
+        "named_register_fields_local/L5_register_map.md",
+        "register_contract_local/L4_command_protocol.md",
+        "register_contract_local/L5_register_map.md",
+        "reset_historical_comparison/reset.md",
+        "scalar_register_width_local/registers.md",
+        "scalar_reset_binding_local/L2_architecture.md",
+        "scalar_reset_binding_local/L4_command_protocol.md",
+        "usage_continuation_local/register_usage.md",
+    ], files
     assert "_pending.json" in files
     for project in ("acceptance_targets_local", "scalar_reset_binding_local",
                     "named_register_fields_local", "reset_historical_comparison",

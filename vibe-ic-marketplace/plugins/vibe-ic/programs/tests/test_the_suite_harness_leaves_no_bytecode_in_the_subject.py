@@ -51,6 +51,9 @@ def _shipped_pin_read() -> str:
         "expected exactly one `_PIN_PY=` and one `_PIN_PARTS=` assignment in "
         f"{HARNESS}; found {lines!r}. If the pin read was restructured, this "
         "test must be pointed at whatever replaced it -- not deleted.")
+    # the MEMBERS, not only how many: one of EACH, not two of either
+    assert sorted(ln.split("=", 1)[0] for ln in lines) == [
+        "_PIN_PARTS", "_PIN_PY"], lines
     return "\n".join(lines)
 
 

@@ -118,6 +118,18 @@ MUST_NOT_BE_DESIGN_NA = (
 )
 
 
+#: The members of MUST_NOT_BE_DESIGN_NA that no program ships as a literal:
+#: a run COMPOSES them (an f-string with a count, a file name, a waiver tally).
+_RUN_COMPOSED = (
+    "spm_l7.txt is empty or unparseable",
+    "examined 0 A1-A9 step obligation(s) evaluated — no analog_block_list.json",
+    "K5 census: docs loaded NONE; 0/13 checks examined anything; 0 unit(s) "
+    "examined in total.",
+    "2 of 2 open waiver entries carry no parseable approved_at, so NONE could "
+    "be aged",
+)
+
+
 # ── direction 1: an honest absence is N/A-by-declaration ──────────────────
 
 #: A record that carries a DECLARED BASIS. The 2026-09-15 correction: the
@@ -226,7 +238,21 @@ def test_branch_owned_evidence_still_outranks_the_prose():
 def test_the_populations_are_non_empty_and_disjoint():
     """A denominator of zero would make both directions vacuously true."""
     assert len(MUST_BE_DESIGN_NA) >= 20
-    assert len(MUST_NOT_BE_DESIGN_NA) >= 20
+    # The refusing population is measured against what it DESCRIBES, in both
+    # directions, instead of `len(<this literal>) >= 20` -- a floor under a
+    # 27-entry literal in this same file, which `population_guard_asserts_
+    # equality_not_a_floor` rightly calls unfailable. Every member is either a
+    # literal this tree SHIPS in programs/, or one of the four sentences a run
+    # COMPOSES (declared below); a shipped one filed as run-composed, or an
+    # unshipped one not declared, both fail.
+    hay = "\n".join(
+        p.read_text(errors="replace") for p in PROGRAMS.glob("*.py")
+        if not p.name.startswith("test_"))
+    shipped = {m for m in MUST_NOT_BE_DESIGN_NA if m in hay}
+    assert shipped == set(MUST_NOT_BE_DESIGN_NA) - set(_RUN_COMPOSED), (
+        sorted(shipped ^ (set(MUST_NOT_BE_DESIGN_NA) - set(_RUN_COMPOSED))))
+    assert set(_RUN_COMPOSED) <= set(MUST_NOT_BE_DESIGN_NA)
+    assert shipped, "a refusing population of zero shipped literals"
     assert not (set(MUST_BE_DESIGN_NA) & set(MUST_NOT_BE_DESIGN_NA))
 
 

@@ -11,16 +11,22 @@ def test_neutral_continuation_and_repeat():
  assert steps[-1]['repeat_steps']=='1-4' and steps[-1]['next_state']=='step 1'
  assert steps[-1]['source_repeat_steps']=='1-3'
 
+_SHAPE=[(1,'read'),(2,'write'),(3,'write'),(4,'write'),
+        (5,'poll'),(6,'check'),(7,'read'),(8,'repeat')]
+
+#: the three-step block both separation tests repeat, as the extractor names it
+_BLOCK_ACTIONS=['write DATA = 1','poll READY until READY = 1','read RESULT']
+
 def test_original_prompt_order_and_repeat():
  text=(Path(__file__).resolve().parent/'fixtures/phase1_local/usage_continuation_local/register_usage.md').read_text()
- seqs=extract(text);assert len(seqs)==1;steps=seqs[0]['steps'];assert len(steps)==8
+ seqs=extract(text);assert len(seqs)==1;steps=seqs[0]['steps']
+ # count DERIVED from the pinned shape below, not a second literal
+ assert len(steps)==len(_SHAPE)
  # H5 -- the MEMBERS, not only how many. `len(steps)==8` is satisfied by eight
  # of anything: the defect this fixture was filed for (LOCAL:SHA2036) DROPPED an
  # indented launch write and SPLIT one procedure into two, and a re-split that
  # still totalled eight would read green. The shape is the claim.
- assert [(s['step'],s['action_type']) for s in steps]==[
-     (1,'read'),(2,'write'),(3,'write'),(4,'write'),
-     (5,'poll'),(6,'check'),(7,'read'),(8,'repeat')]
+ assert [(s['step'],s['action_type']) for s in steps]==_SHAPE
  assert 'write ADDR_CTRL bit0 = 1' in steps[3]['action'] and 'OR bit1 = 1' in steps[3]['action']
  assert steps[4]['action_type']=='poll' and steps[6]['action_type']=='read'
  assert steps[7]['repeat_steps']=='2-7' and steps[7]['next_state']=='step 2'
@@ -32,9 +38,10 @@ def test_continuations_do_not_satisfy_numbered_floor():
 def test_unindented_prose_keeps_sequences_separate():
  block='1. write DATA = 1\n2. poll READY until READY = 1\n3. read RESULT\n'
  seqs=extract(block+'Unrelated discussion\n'+block)
- assert len(seqs)==2 and all(len(s['steps'])==3 for s in seqs)
+ # the MEMBERS: two sequences, each exactly the block -- not any 2x3
+ assert [[st['action'] for st in s['steps']] for s in seqs]==[_BLOCK_ACTIONS]*2
 
 def test_noncommand_indented_prose_not_promoted():
  block='1. write DATA = 1\n2. poll READY until READY = 1\n3. read RESULT\n'
  seqs=extract(block+'   This explains the register layout.\n'+block)
- assert len(seqs)==2 and all(len(s['steps'])==3 for s in seqs)
+ assert [[st['action'] for st in s['steps']] for s in seqs]==[_BLOCK_ACTIONS]*2

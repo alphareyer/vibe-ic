@@ -232,6 +232,11 @@ def test_the_fs1_step_row_is_decided_and_never_not_measured(tmp_path):
     assert "DESIGN-DECLARED-N/A" not in joined, res.reasons
     assert len(res.executed_declared_not_applicable) == 2, \
         res.executed_declared_not_applicable
+    # the MEMBERS, not only how many: the two FS1 gates, each answered
+    assert sorted(str(e).split(" ", 1)[0]
+                  for e in res.executed_declared_not_applicable) == [
+        "fmeda_coverage_check", "fmeda_fault_injection_coverage"], \
+        res.executed_declared_not_applicable
 
 
 # ── 3. the other direction: a safety design keeps FS1 MEASURED ────────────
