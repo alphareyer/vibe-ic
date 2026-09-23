@@ -45862,15 +45862,29 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
     # the step MISSING even when DRC had run and found violations — the exact
     # "GDS emitted while DRC report invisible" integrity gap. Mirroring here
     # makes the sign-off verdict visible (PASS/FAIL), never silently MISSING.
+    #
+    # THE MIRROR IS CONDITIONED ON THE PRODUCER, NOT ON EXISTENCE (subservient
+    # run2, step 31). A report is published at the sign-off path only when its
+    # own bytes say a rule deck was applied to a layout -- the SAME predicate
+    # the step-31 detector reads (`_signoff_drc_format`); anything else stays
+    # at its own path and the sign-off path is left as it was.
     try:
         _canon = project / "reports" / "phase3" / "drc_signoff.rpt"
         _canon.parent.mkdir(parents=True, exist_ok=True)
         if rpt.is_file():
-            _canon.write_bytes(rpt.read_bytes())
-            extras["drc_signoff_report"] = str(_canon)
-            _native_log = rpt.with_suffix(".log")
-            if _native_log.is_file():
-                _canon.with_suffix(".log").write_bytes(_native_log.read_bytes())
+            _prod = _sdf.classify_file(rpt)
+            if _prod.is_signoff_deck:
+                _canon.write_bytes(rpt.read_bytes())
+                extras["drc_signoff_report"] = str(_canon)
+                _native_log = rpt.with_suffix(".log")
+                if _native_log.is_file():
+                    _canon.with_suffix(".log").write_bytes(
+                        _native_log.read_bytes())
+            else:
+                extras["drc_signoff_not_published"] = (
+                    f"{rpt.name} is not a sign-off rule deck's report "
+                    f"(producer={_prod.kind!r}, deck={_prod.deck!r}: "
+                    f"{_prod.evidence}); it stays at its own path")
     except Exception:  # nosec — canonical mirror is best-effort provenance
         pass
     return StepResult("drc", status, time.time() - t0,
@@ -55530,6 +55544,18 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             written.append(str(rpt_phase3 / "drc_router.rpt"))
 
     # --- ORGANIC-20260531: Step 31 sign-off DRC report-path alias -------
+    # THE ROUTER IS NO LONGER A SOURCE (subservient run2, step 31). Its third
+    # fallback below used to publish the OpenROAD detailed-route projection at
+    # the sign-off path whenever no deck had run -- MEASURED on run2:
+    # `# Source: phase3/stage3/pnr/routed.drc.rpt` / `# Tool: openroad` under
+    # the sign-off name, the router's routability DRC certifying step 31. Only a
+    # report whose own bytes say a rule deck was applied to the layout is
+    # published here (`_sdf.classify_file(...).is_signoff_deck`, the predicate
+    # the step-31 detector reads). With no such report the sign-off path is
+    # ABSENT -- the honest state the gate reads correctly -- and the router
+    # report stays at `routed.drc.rpt` / `reports/phase3/drc_router.rpt` under
+    # its own name. A non-deck report an earlier run left at the sign-off path
+    # is removed for the same reason; a deck's report is never touched by that.
     # The KLayout sign-off DRC step (step_drc) emits its report at
     # phase3/reports/drc.rpt, but Step 31's gate reads
     # reports/phase3/drc_signoff.rpt + requires a klayout/magic provenance
@@ -55558,8 +55584,22 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     elif klayout_drc.is_file():
         src_drc, _drc_tool, _drc_force = klayout_drc, "klayout", False
     else:
-        src_drc, _drc_tool, _drc_force = routed_drc, "openroad", False
-    if src_drc.is_file() and (_drc_force or not drc_signoff.is_file()):
+        src_drc, _drc_tool, _drc_force = None, None, False
+    if src_drc is not None and not _sdf.classify_file(src_drc).is_signoff_deck:
+        notes.append(
+            f"sign-off DRC NOT published: {src_drc.relative_to(project)} is "
+            f"not a sign-off rule deck's report "
+            f"({_sdf.classify_file(src_drc).evidence})")
+        src_drc = None
+    _canon_is_deck = (drc_signoff.is_file()
+                      and _sdf.classify_file(drc_signoff).is_signoff_deck)
+    if src_drc is None and drc_signoff.is_file() and not _canon_is_deck:
+        drc_signoff.unlink()
+        notes.append(
+            "sign-off DRC path cleared: it held a report no sign-off rule deck "
+            "produced, and no deck ran this time")
+    if src_drc is not None and (_drc_force or not drc_signoff.is_file()
+                                or not _canon_is_deck):
         header = (
             "# Sign-off DRC report (ORGANIC-20260531 Step 31 alias).\n"
             f"# Source: {src_drc.relative_to(project)}\n"
