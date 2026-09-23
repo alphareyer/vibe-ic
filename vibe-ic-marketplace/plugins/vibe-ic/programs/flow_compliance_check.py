@@ -10923,8 +10923,21 @@ def _p0_passed_count(records: List[Dict[str, Any]]) -> int:
     return sum(1 for r in records if r["verdict"] == "PASS")
 
 
+#: Gates moved OUT of `_STRUCTURAL_RTL_GATES` and asked late, each by one
+#: consumer (R-0915-130). A registry for the same reason that one is: it is the
+#: tree's own statement of which gates run where, and it is what
+#: `attestation_gate_record` dispatches from. A name left only as a parameter
+#: default read as invoked by nothing to `gate_is_wired_check` (invocation.v2
+#: credits a bare stem as a table element, an argument or a composed path), so
+#: the relocation showed up as "unwired 35 -> 36" while the gate ran on every
+#: final report.
+_RELOCATED_P0_GATES: tuple[str, ...] = (
+    "agent_report_sha256_attestation_check",
+)
+
+
 def attestation_gate_record(project: Path,
-                            gate_name: str = "agent_report_sha256_attestation_check",
+                            gate_name: str = _RELOCATED_P0_GATES[0],
                             ) -> Dict[str, Any]:
     """Run ONE relocated gate and return the record a roll-up consumes.
 
