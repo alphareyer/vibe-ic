@@ -2121,8 +2121,26 @@ def _index_ledger_row(row: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         rel = entry.get("rel")
         if not spec or not rel:
             continue
-        slot = specs.setdefault(spec, {"produced": [], "not_produced": None})
+        slot = specs.setdefault(spec, {"produced": [], "not_produced": None,
+                                       "in_run_window": None})
         slot["produced"].append(str(rel))
+        # WHETHER THIS RUN WROTE IT, carried rather than dropped. The ledger
+        # computes `in_run_window` (mtime >= the run's t0) and this indexer
+        # discarded it along with the per-row mtime, so `produced` degraded
+        # into "a non-empty file matching the glob exists" -- a POST-RUN
+        # SNAPSHOT. MEASURED by the round-5 review: on an --entry-step run, or
+        # a re-run whose producer does not rewrite its outputs, that reads as
+        # "this step produced everything" over files the run never touched.
+        #
+        # `None` is a THIRD STATE, not a False: the ledger sets it when it
+        # has no t0 to compare against (`t0_source="none"`). A window that
+        # could not be established is not evidence of production, and the
+        # caller treats it as such rather than guessing either way.
+        _win = entry.get("in_run_window")
+        if slot["in_run_window"] is None:
+            slot["in_run_window"] = _win
+        elif _win is False:
+            slot["in_run_window"] = False
     for finding in (row.get("findings") or []):
         if not isinstance(finding, dict):
             continue
@@ -2131,7 +2149,8 @@ def _index_ledger_row(row: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         spec = str(finding.get("spec", ""))
         if not spec:
             continue
-        slot = specs.setdefault(spec, {"produced": [], "not_produced": None})
+        slot = specs.setdefault(spec, {"produced": [], "not_produced": None,
+                                       "in_run_window": None})
         if slot["not_produced"] is None:
             slot["not_produced"] = str(finding.get("reason") or "not_produced")
     return specs
@@ -3307,6 +3326,23 @@ def _step_produced_every_declared_output(result: Any,
     # the count alone cannot answer this because it is taken before the gate.
     if audit_created:
         return False
+    # AND THIS RUN MUST HAVE WRITTEN THEM. `produced` in the step ledger is a
+    # POST-RUN SNAPSHOT -- every non-empty file matching the glob -- and the
+    # ledger's own `in_run_window` (mtime >= the run's t0) is what separates
+    # "this run wrote it" from "it was already there". MEASURED by the round-5
+    # review: without it, an `--entry-step` run, or a re-run whose producer
+    # does not rewrite its outputs, demoted the N/A clause on files this run
+    # never touched -- a bare PASS over old artefacts where the base reads
+    # NOT_APPLICABLE. The phase-2 acceptance audit can also read a phase-1
+    # steps snapshot taken before the step ran.
+    #
+    # A window that could NOT be established (`None`, when the ledger has no
+    # t0) is not evidence of production. It does not demote.
+    specs = b.get("specs")
+    if not isinstance(specs, list) or len(specs) != n:
+        return False
+    if not all(d.get("in_run_window") is True for d in specs):
+        return False
     # BOTH, and the second is the one the review added. `n_step_attributed`
     # answers "resolved against THIS step's own write record"; `n_satisfied`
     # answers "and the file is there". A binding that cannot answer the second
@@ -3370,8 +3406,14 @@ def _reason_names_command(reason: str) -> str:
             rec = json.loads(r[len(_ADVISORY_RECORD_HINT_PREFIX):])
         except (TypeError, ValueError):
             return ""
-        return str((rec or {}).get("cmd") or "").strip() if isinstance(
-            rec, dict) else ""
+        if not isinstance(rec, dict):
+            return ""
+        # `_advisory_execution_record` stores it as "command". Reading "cmd"
+        # meant this branch never matched -- harmless today, because those
+        # lines are true disclosure of the clause and are meant to stay, but
+        # a reader that silently matches nothing is the shape this whole
+        # function exists to remove. Both spellings, the real one first.
+        return str(rec.get("command") or rec.get("cmd") or "").strip()
     for pref in (_SKIP_HINT_PREFIX, _RAN_HINT_PREFIX, _VACUOUS_HINT_PREFIX,
                  _JSON_VACUOUS_HINT_PREFIX, _WAIVER_HINT_PREFIX,
                  _ADVISORY_HINT_PREFIX, _SUBSTANTIVE_HINT_PREFIX,
@@ -3395,30 +3437,6 @@ def _hint_command(hint: str, prefix: str) -> str:
     body = hint[len(prefix):] if hint.startswith(prefix) else hint
     cut = body.rfind(" [verdict=")
     return (body[:cut] if cut >= 0 else body).strip()
-
-
-def _ran_hints_minus_demoted(ran_hints: List[str],
-                             demoted: List[str]) -> List[str]:
-    """Drop the RAN hint of every clause whose skip was demoted.
-
-    MEASURED by the round-2 review, 2026-09-23. The demotion removed the
-    clause's `__SKIP_HINT__` and left the `__RAN_HINT__` that the advisory
-    branch appends for the SAME clause a few lines earlier. `ran_hints` is the
-    denominator for "did any clause examine anything", so the demoted clause
-    went on counting as a clause that examined the design: the vacuous and
-    json-vacuous branches were bypassed, the step fell through to the final
-    `else` as a bare PASS with NO disclosure at all, and it was added to the
-    executed-PASS count.
-
-    A clause that declared itself NOT APPLICABLE examined nothing. Removing it
-    from the tier is only half the statement; it must also leave the
-    numerator, or the step claims an examination that never happened.
-    """
-    if not demoted:
-        return ran_hints
-    gone = {_hint_command(h, _SKIP_HINT_PREFIX) for h in demoted}
-    return [r for r in ran_hints
-            if _hint_command(r, _RAN_HINT_PREFIX) not in gone]
 
 
 def _demoted_skip_disclosures(demoted: List[str]) -> List[str]:
@@ -15657,6 +15675,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     outputs = step.get("required_outputs", [])
     missing_entries: List[str] = []
     _binding = _load_step_binding(project) if outputs else None
+    binding_rows = (_binding or {}).get("rows") or {}
     _bind_notes: List[str] = []
     _bind_modes: Dict[str, str] = {}
     _bind_specs: List[Dict[str, Any]] = []
@@ -15674,8 +15693,14 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # `mode` alone conflated "this run predates the record" with "the
         # green rests on a file this step never recorded writing", and the
         # only place the difference lived was a sentence in `notes`.
-        _bind_specs.append(dict(_detail, spec=pat, mode=_mode,
-                                satisfied=bool(_sat)))
+        _bind_specs.append(dict(
+            _detail, spec=pat, mode=_mode, satisfied=bool(_sat),
+            # WHETHER THIS RUN WROTE IT. Carried from the ledger row (see
+            # `_index_ledger_row`); `None` means the ledger had no t0 to
+            # compare against and the window could not be established.
+            in_run_window=((binding_rows.get(str(sid)) or {})
+                           .get(str(pat), {}).get("in_run_window")
+                           if _mode == "step_attributed" else None)))
         if _note:
             _bind_notes.append(f"{pat}: {_note}")
         if _sat:
@@ -16091,8 +16116,6 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # didn't apply to this project). Surface that as VACUOUS_PASS
         # so the per-step listing labels it explicitly. Filter out the
         # internal markers before display either way.
-        vacuous_hints = [r for r in reasons
-                         if r.startswith(_VACUOUS_HINT_PREFIX)]
         # ORGANIC #608 — a gate whose evidence artifact honestly self-reports a
         # skip verdict emits a __SKIP_HINT__ marker; promote the step to
         # SKIPPED-CONDITION (not PASS, not FAIL) the same way VACUOUS_PASS is
@@ -16119,7 +16142,6 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # output" means produced by the RUN, and whether an output was written
         # by this step's own gate is only known once `_audit_produced` is.
         _demoted_skips: List[str] = []
-        _demoted_ran: List[str] = []
         if _step_produced_every_declared_output(result, _audit_produced):
             _cand = [r for r in reasons if r.startswith(_SKIP_HINT_PREFIX)]
             _keep, _demoted_skips = _skips_that_do_not_speak_for_the_step(
@@ -16129,9 +16151,14 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                          for h in _demoted_skips}
                 _demoted_reasons = [r for r in reasons
                                     if _reason_names_command(r) in _gone]
-                _demoted_ran = [r for r in _demoted_reasons
-                                if r.startswith(_RAN_HINT_PREFIX)]
                 reasons = [r for r in reasons if r not in _demoted_reasons]
+        # EVERY derived list is built AFTER the demotion, which is what makes
+        # the comment above true rather than aspirational. `vacuous_hints` was
+        # built above it -- harmless with the current reason shapes, and
+        # exactly the kind of ordering that let a clause leak three rounds
+        # running.
+        vacuous_hints = [r for r in reasons
+                         if r.startswith(_VACUOUS_HINT_PREFIX)]
         skip_hints = [r for r in reasons
                       if r.startswith(_SKIP_HINT_PREFIX)]
         # #651 — a gate program that PASSed-WITH-WAIVERS emits a
@@ -16197,12 +16224,6 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         #
         # So the clause leaves the TIER (it does not get to say the step was
         # skipped) and stays in the ARITHMETIC on BOTH sides: it ran, and it
-        # examined nothing. `_vacuous_denominator` and `_vacuous_numerator`
-        # are those two counts, and they move together.
-        _demoted_ran = [r for r in ran_hints
-                        if _hint_command(r, _RAN_HINT_PREFIX)
-                        in {_hint_command(h, _SKIP_HINT_PREFIX)
-                            for h in _demoted_skips}]
         # vibe-ic#901 - the NUMERATOR contributed by the structured channel,
         # kept apart from the legacy bucket above so it cannot alter any tier
         # the legacy bucket already decides.
