@@ -596,6 +596,8 @@ steps:
   - id: D1
     name: "Phase 1 Doc Extraction (17 skills + dialogue entry → L1-L27)"
     stage: stage_phase1
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+    phase_scope: agnostic
     # ── required_inputs: the DATA half of the step contract ──────────────
     # `blocks_on` is an ORDERING edge and says nothing about data; this says
     # what the step READS. `from:` names the producing step and `path:` is
@@ -1322,6 +1324,10 @@ steps:
   - id: 0.5ic
     name: "Submission Template Ingest — the operator's slot geometry and fixtures (chip/IC path only)"
     stage: stage_phase1
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+    phase_scope: agnostic
     # WHY A STEP AND NOT A CALCULATION. Two independent investigations landed on
     # the same missing input rather than a missing formula:
     #   * docs/research/wafer_space_id_cells.md — the four gf180mcu_ws_ip__* die-id
@@ -3534,6 +3540,8 @@ steps:
   - id: FS1
     name: "ISO-26262 FMEDA diagnostic-coverage (fault-injection; safety designs only)"
     stage: stage2
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+    phase_scope: agnostic
     # no flow.html prose exists for FS1. Resolved instead from this step's
     #  OWN gate command, which names its input verbatim:
     #  `fmeda_fault_injection_coverage . --rtl-dir phase2/stage1/rtl`.
@@ -3624,6 +3632,8 @@ steps:
   - id: DT1
     name: "Transition-delay-fault (at-speed LOC) ATPG"
     stage: stage2
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+    phase_scope: agnostic
     condition:
       # SAME DECLARATION, SAME CLASS AS STEP 11 (lane icspm3, 2026-09-15).
       # At-speed ATPG IS DFT: a design whose own L20 declares no scan chain,
@@ -3809,6 +3819,10 @@ steps:
   - id: A1
     name: "Analog Spec Extraction"
     stage: stage_analog
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+    phase_scope: agnostic
     required_inputs:
       - from: D1
         path: "phase1/generated_docs/L1_DATASHEET.json"
@@ -3839,6 +3853,10 @@ steps:
   - id: A2
     name: "Analog Topology Selection"
     stage: stage_analog
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+    phase_scope: agnostic
     required_inputs:
       - from: A1
         path: "phase3/analog/*/spec.json OR phase1/analog/*/spec.json"
@@ -3858,6 +3876,10 @@ steps:
   - id: A3
     name: "Analog Netlist Generation"
     stage: stage_analog
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+    phase_scope: agnostic
     required_inputs:
       - from: A2
         path: "phase3/analog/*/topology.md OR phase2/analog/*/topology.md"
@@ -3891,6 +3913,10 @@ steps:
   - id: A4
     name: "Analog Corner Sweep (PVT)"
     stage: stage_analog
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+    phase_scope: agnostic
     required_inputs:
       - from: A3
         path: "phase3/analog/*/*.sp OR phase2/analog/*/*.sp"
@@ -3982,6 +4008,10 @@ steps:
   - id: A5
     name: "Analog Layout"
     stage: stage_analog
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+    phase_scope: agnostic
     # prose credits A4, but A4 declares corner_results.json — the netlist
     #  artefact is A3's.
     required_inputs:
@@ -4059,6 +4089,8 @@ steps:
   - id: A6
     name: "Analog Physical Verification (per-block DRC + LVS before merge)"
     stage: stage_analog
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+    phase_scope: agnostic
     required_inputs:
       - from: A5
         path: "phase3/analog/*/layout.mag OR phase3/analog/*/*.gds"
@@ -4094,6 +4126,10 @@ steps:
   - id: A7
     name: "🔁 Post-Layout Resimulation"
     stage: stage_analog
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+    phase_scope: agnostic
     # prose credits A5 / A6; A6 declares the clean FLAGS, the layout
     #  artefact is A5's.
     required_inputs:
@@ -4117,6 +4153,10 @@ steps:
   - id: A8
     name: "Hardmacro Generation (LEF + Liberty + GDS + Verilog)"
     stage: stage_analog
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+    phase_scope: agnostic
     skills: [analog-hardmacro-gen]
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
@@ -4269,6 +4309,10 @@ steps:
     # bench data exists and DISCLOSED when it does not.
     name: "🔁 Co-Simulation (+ HW correlation when bench data exists)"
     stage: stage_analog
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+    phase_scope: agnostic
     closed_loop:
       fallback_to: A3
       trigger: "HW mismatch; netlist or analog/hardmacro fix"
@@ -5326,6 +5370,8 @@ steps:
   - id: DT2
     name: "Path-delay-fault (at-speed, timing-graded) ATPG"
     stage: stage2
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+    phase_scope: agnostic
     # A missing trigger is N/A only when the design's own DFT layer says so.
     # Otherwise these are declared dependency artefacts: their absence means
     # the upstream step did not deliver what DT2 consumes, and the compliance
@@ -5493,6 +5539,10 @@ steps:
   - id: DT3
     name: "Small-delay-defect (SDD) at-speed grade"
     stage: stage2
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+    phase_scope: agnostic
     # Same explicit-N/A/dependency split as DT2. If DT2 fails or never emits
     # its grade, DT3 is blocked by DT2; it is not silently inapplicable.
     condition_kind: dependency_required
@@ -9322,6 +9372,12 @@ steps:
   - id: M1
     name: "Mixed-Signal Top-Level Integration (A+D GDS merge + macro placement)"
     stage: stage_mixed_signal
+
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+
+    phase_scope: agnostic
     required_inputs:
       - from: 37
         path: "phase3/stage4/gds/*.gds"
@@ -9401,6 +9457,10 @@ steps:
   - id: M2
     name: "Mixed-Signal Power Domain + Level Shifter / Isolation Verification"
     stage: stage_mixed_signal
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+    phase_scope: agnostic
     required_inputs:
       - from: M1
         path: "phase3/mixed_signal/top_merged.gds"
@@ -9462,6 +9522,10 @@ steps:
   - id: M3
     name: "Mixed-Signal Verification (AMS co-sim + RNM + interface signal integrity)"
     stage: stage_mixed_signal
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+    phase_scope: agnostic
     required_inputs:
       - from: M1
         path: "phase3/mixed_signal/top_merged.gds"
@@ -9483,6 +9547,10 @@ steps:
   - id: M4
     name: "Mixed-Signal Sign-Off (top-level PV + final verdict)"
     stage: stage_mixed_signal
+
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+
+    phase_scope: agnostic
     # prose says "the merged, co-sim-verified top (M1-M3)"; the only named
     #  artefact is M1's merged top.
     required_inputs:
@@ -9682,6 +9750,8 @@ steps:
   - id: P0
     name: "Structural-RTL pre-flight (chip-AGNOSTIC structural gates)"
     stage: stage1
+    # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
+    phase_scope: agnostic
     # vibe-ic#923 — the ORDERING edge, written down to match the DATA edge one
     # line below. P0 reads step 1's RTL, so it cannot precede step 1, and step
     # 1 blocks on D1; without this edge P0 was a stage1 step whose ancestry did
