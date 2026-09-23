@@ -53345,6 +53345,51 @@ def _si_mcf_repair_promote(project: Path, top: str, pdk: "PdkConfig",
                  ", ".join(r["step"] for r in rederived))
 
 
+def _sha256_of_file(path: Path) -> Optional[str]:
+    """`sha256:<hex>` of a file, or None when it cannot be read."""
+    try:
+        h = __import__("hashlib").sha256()
+        with Path(path).open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return "sha256:" + h.hexdigest()
+    except OSError:
+        return None
+
+
+def _append_removal_event(project: Path, event: str,
+                          removed: List[Tuple[str, Optional[str]]],
+                          reason: str) -> None:
+    """Append a removal event for paths this runner deleted.
+
+    THE SHAPE `provenance_output_hash_completeness_check` ALREADY HONOURS and
+    `ip_catalog_pull.prune_catalog_ip` already writes: `op: remove`, empty
+    `outputs` (it produces nothing), a `removed` list of paths and
+    `removed_outputs` with each path's last sha. No new record type. Never
+    raises: bookkeeping must not break the run it documents."""
+    try:
+        prov = Path(project) / "provenance.jsonl"
+        if not prov.is_file() or not removed:
+            return
+        entry = {
+            "event": event,
+            "op": "remove",
+            "tool": "phase3_one_shot_runner",
+            "reason": reason,
+            "outputs": {},
+            "removed": [rel for rel, _sha in removed],
+            "removed_outputs": [{"path": rel, "sha256": sha}
+                                for rel, sha in removed],
+            "timestamp": __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc)
+                .strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        with prov.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:  # noqa: BLE001
+        return
+
+
 def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                                 container: str) -> StepResult:
     """v1.6.36 — stage runner outputs at the canonical paths the flow YAML expects.
@@ -55594,10 +55639,25 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     _canon_is_deck = (drc_signoff.is_file()
                       and _sdf.classify_file(drc_signoff).is_signoff_deck)
     if src_drc is None and drc_signoff.is_file() and not _canon_is_deck:
+        _rel = drc_signoff.relative_to(project).as_posix()
+        _sha_removed = _sha256_of_file(drc_signoff)
         drc_signoff.unlink()
+        # THE LEDGER IS TOLD (review w7st9pr2r). `_v1_6_620_append_pv_signoff_
+        # provenance` above keeps / re-stamps this path's row, so without an
+        # event the newest ledger declaration is a file that no longer exists
+        # and `provenance_output_hash_completeness_check` (a P0 structural gate)
+        # reports PROVENANCE_OUTPUT_FILE_MISSING -- the wrong root cause, on
+        # every reused tree a pre-fix no-deck run left behind. The event is the
+        # removal shape that check already honours (`ip_catalog_pull`'s prune:
+        # op=remove, empty outputs, `removed` + `removed_outputs`), appended
+        # AFTER the unlink so no declaration of the path is newer than it.
+        _append_removal_event(
+            project, "drc_signoff_prune", [(_rel, _sha_removed)],
+            "not a sign-off rule deck's report, and no deck ran this time")
         notes.append(
             "sign-off DRC path cleared: it held a report no sign-off rule deck "
-            "produced, and no deck ran this time")
+            "produced, and no deck ran this time (removal recorded in "
+            "provenance.jsonl)")
     if src_drc is not None and (_drc_force or not drc_signoff.is_file()
                                 or not _canon_is_deck):
         header = (
