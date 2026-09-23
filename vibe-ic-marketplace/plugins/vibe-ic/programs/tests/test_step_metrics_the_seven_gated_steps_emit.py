@@ -222,3 +222,52 @@ def test_the_audit_hands_the_judged_step_to_its_gate(tmp_path):
     # and it is check_step that carries it
     assert F.check_step.__wrapped__ is not None
     assert F._child_env()[SM.GATE_STEP_ENV] == ""
+
+
+# ── M2 r2 (dispatcher's read) ─────────────────────────────────────────────
+
+def test_two_steps_judged_concurrently_each_hand_their_own_step(tmp_path):
+    """(1) Since #2548 check_step runs in a thread pool. Two steps judged at the
+    same time, forced to interleave (each sets its step, then both wait at a
+    barrier, then each spawns): each gate environment carries ITS OWN step. A
+    module global made both read whichever step was set last."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    import flow_compliance_check as F
+    barrier = threading.Barrier(2)
+
+    @F._with_child_gate_step
+    def _judge(project, step, *_a, **_k):
+        barrier.wait(timeout=30)          # both steps are now "being judged"
+        return F._child_env()[SM.GATE_STEP_ENV]
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fa = ex.submit(_judge, tmp_path, {"id": "23"}, {})
+        fb = ex.submit(_judge, tmp_path, {"id": "25"}, {})
+        assert (fa.result(), fb.result()) == ("23", "25")
+    assert F._child_env()[SM.GATE_STEP_ENV] == ""
+
+
+def test_a_failing_attribution_never_changes_a_signoff_gates_verdict(
+        tmp_path, monkeypatch):
+    """(2) step_for_invocation raising must not turn a sign-off gate into
+    NOT CHECKED: the gate runs with the plain environment, its verdict is the
+    one it gives when attribution works, and it writes no metrics row."""
+    import phase3_one_shot_runner as R
+    args = ("sta_signoff", "sta_report_check.py",
+            "reports/phase3/sta/post_route_summary.json",
+            ("--mode", "sta", "--under",
+             "phase3/stage3/sta/post_route_timing.rpt"))
+    ok = _sta_project(tmp_path / "ok")
+    for k in (SM.GATE_STEP_ENV, SM.INVOCATION_ENV):
+        monkeypatch.delenv(k, raising=False)
+    base = R._run_declared_signoff_gate(ok, *args)
+    assert base.status == "PASS", base
+    assert (ok / "reports/metrics/23.json").is_file()
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("attribution exploded")
+    monkeypatch.setattr(SM, "step_for_invocation", _boom)
+    bad = _sta_project(tmp_path / "bad")
+    got = R._run_declared_signoff_gate(bad, *args)
+    assert got.status == base.status, got
+    assert not (bad / "reports" / "metrics").exists()
