@@ -118,9 +118,17 @@ def test_a_waived_ancestor_with_no_declared_relation_does_not_soften():
     lec = _res(13, "PASS_WITH_WAIVERS", reasons=["[ticket=t1]"])
     # M-track steps are excluded on purpose: #600 already stops them at M2's
     # declared `known_gap`, which is a different (and correct) attribution.
+    #
+    # R-0915-140 — each tail step is audited ON ITS OWN beside the waived 13.
+    # These five are chained (30 behind 23, 38 behind 30 ...), so in one call
+    # every one but 23 has a FAILED blocker and is not owed, which is a
+    # different question from the one this test asks about 13's waiver.
     tail = [_res(sid, "FAIL") for sid in (23, 30, 38, 41, 44)]
-    info = FCC._attribute_cascade_verdicts([lec] + tail, steps, waivers={})
-    assert info["deferred_by_upstream"] == [], info["deferred_by_upstream"]
+    deferred = []
+    for r in tail:
+        info = FCC._attribute_cascade_verdicts([lec, r], steps, waivers={})
+        deferred += info["deferred_by_upstream"]
+    assert deferred == [], deferred
     for r in tail:
         assert r.status == "FAIL", (r.id, r.status)
         assert r.cascade_note == "waived-ancestor-undeclared(13)", r.cascade_note
@@ -160,28 +168,89 @@ def _main_track_ids(steps):
 def test_post_fail_missing_is_annotated_blocked():
     # REAL shape: step 5 FAIL (first), step 6 FAIL, steps 7+ with their
     # declared output absent -> every post-5 one annotated
-    # blocked-by-upstream(5); status unchanged; summary keyed by the FIRST
-    # fail only.
+    # blocked-by-upstream(5); summary keyed by the FIRST fail only.
+    #
+    # R-0915-140 — THE STATUS MOVES NOW, AND THIS PIN MOVED WITH IT. This test
+    # asserted `r.status == "FAIL"  # strict semantics unchanged`, which pinned the
+    # #503 pass's old sentence: "Status stays MISSING — the work IS still missing
+    # and strict mode still fails — only the ATTRIBUTION changes". That sentence is
+    # what the ruling overrules, on the evidence of the row it produced: on a
+    # frozen FAIL-path tree step 37 read "[FAIL] … (missing_artefact)
+    # [blocked-by-upstream(2)]" — the audit knowing the step was blocked and
+    # publishing FAIL anyway, two tiers in one line.
+    #
+    # A step after the first mid-chain FAIL was never owed its outputs, so "did not
+    # produce" is not a fact about it. It reads NOT_MEASURED/upstream_failed.
+    #
+    # THE ATTRIBUTION HALF OF THIS TEST'S CLAIM IS UNCHANGED and is still asserted
+    # below: the note, the root it names, and the summary keyed on the first fail.
+    # Strict mode does not go quiet either — NOT_MEASURED is not a pass, and the
+    # cascade is still counted in `blocked_by_upstream`.
     #
     # R-0915-85 — the two roles the shape needs are two REASONS now, because
     # `MISSING` and `FAIL` became one word. Steps 5 and 6 are gate defects
     # (reason_class "", the root); 7+ are FAIL(missing_artefact), the cascade
     # targets. Spelled out rather than left to the helper's default, because
     # WHICH row is the root is the whole subject of this test.
+    #
+    # R-0915-140 (lane ictier1 rework) — "AFTER" MEANS blocks_on, NOT YAML
+    # ORDER. The fixture used to take the next five main-track ids after 6
+    # (7..11) as the cascade; none of them can reach 5 or 6 through blocks_on
+    # (7 blocks_on [1], 8 [7, 3], 9 [0.5ic, 2, 3, 8], 10 [9], 11 [10]), so they
+    # were OWED their outputs and their FAIL(missing_artefact) is their own.
+    # The real dependents of the two roots are computed from the YAML: 39
+    # (blocks_on [6, 13, 37]) is the one on the main track.
     steps = _steps()
     ids = _main_track_ids(steps)
+    parents = {s["id"]: list(s.get("blocks_on") or []) for s in steps
+               if s.get("id") is not None}
+
+    def _reaches(sid, targets):
+        seen, queue = set(), list(parents.get(sid, []))
+        while queue:
+            pid = queue.pop(0)
+            if pid in targets:
+                return True
+            if pid not in seen:
+                seen.add(pid)
+                queue.extend(parents.get(pid, []))
+        return False
+
     results = [_res(5, "FAIL", reason_class=""),
                _res(6, "FAIL", reason_class="")]
-    downstream = [i for i in ids if i > 6][:5]
+    candidates = [i for i in ids if i > 6]
+    downstream = [i for i in candidates if _reaches(i, {5, 6})]
+    unrelated = [i for i in candidates if not _reaches(i, {5, 6})][:5]
+    assert downstream == [39], downstream
+    assert unrelated == [7, 8, 9, 10, 11], unrelated
     results += [_res(i, "FAIL", reason_class="missing_artefact")
-                for i in downstream]
+                for i in downstream + unrelated]
     info = FCC._attribute_cascade_verdicts(results, steps, waivers={})
-    blocked = [r for r in results if r.cascade_note]
-    assert len(blocked) == len(downstream)
+    blocked = [r for r in results
+               if r.cascade_note in ("blocked-by-upstream(5)",
+                                     "blocked-by-upstream(6)")]
+    assert [r.id for r in blocked] == downstream
     for r in blocked:
-        assert r.status == "FAIL"          # strict semantics unchanged
-        assert r.cascade_note == "blocked-by-upstream(5)"
-    assert info["blocked_by_upstream"] == {5: len(downstream)}
+        # R-0915-140: the cascade tier, not the root's word.
+        assert r.status == "NOT_MEASURED", r.status
+        assert r.reason_class == "upstream_failed", r.reason_class
+        # THE ATTRIBUTION — the note names the NEAREST root on 39's closure.
+        assert r.cascade_note == "blocked-by-upstream(6)"
+        assert any("blocked-by-upstream(step 6)" in x for x in r.reasons), r.reasons
+        assert any("never owed its declared outputs" in x for x in r.reasons), (
+            r.reasons)
+    # The unrelated rows are never attributed to 5 or 6. Step 7 was owed and
+    # keeps its own FAIL, bare -- and it is in turn the root of 8..11, which
+    # wait on it through blocks_on.
+    got = {r.id: r for r in results}
+    assert (got[7].status, got[7].reason_class, got[7].cascade_note) == (
+        "FAIL", "missing_artefact", "")
+    for sid in (8, 9, 10, 11):
+        assert got[sid].cascade_note == "blocked-by-upstream(7)", (
+            sid, got[sid].cascade_note)
+    # The roots themselves are untouched: a gate defect is still a FAIL.
+    assert [r.status for r in results[:2]] == ["FAIL", "FAIL"]
+    assert info["blocked_by_upstream"] == {6: len(downstream), 7: 4}
 
 
 def test_missing_before_first_fail_stays_bare():
@@ -189,12 +258,19 @@ def test_missing_before_first_fail_stays_bare():
     # R-0915-85 — 3 and 7 are steps whose declared output is absent
     # (FAIL(missing_artefact), the cascade TARGETS); 5 is the gate defect that
     # is the ROOT. See `test_post_fail_missing_is_annotated_blocked`.
+    #
+    # R-0915-140 (lane ictier1 rework) — there is no "cut point": 7 comes after
+    # 5 in YAML order but blocks_on [1] only, so it was OWED and stays bare,
+    # exactly like 3. Step 6 (blocks_on [2, 4, 5]) is the one 5 blocks.
     results = [_res(3, "FAIL", reason_class="missing_artefact"),
                _res(5, "FAIL", reason_class=""),
-               _res(7, "FAIL", reason_class="missing_artefact")]
+               _res(7, "FAIL", reason_class="missing_artefact"),
+               _res(6, "FAIL", reason_class="missing_artefact")]
     FCC._attribute_cascade_verdicts(results, steps, waivers={})
-    assert results[0].cascade_note == ""      # before the cut point
-    assert results[2].cascade_note == "blocked-by-upstream(5)"
+    assert results[0].cascade_note == ""      # not blocked by 5
+    assert results[2].cascade_note == ""      # after 5 in YAML, not blocked
+    assert results[2].status == "FAIL"
+    assert results[3].cascade_note == "blocked-by-upstream(5)"
 
 
 def test_chains_are_isolated():

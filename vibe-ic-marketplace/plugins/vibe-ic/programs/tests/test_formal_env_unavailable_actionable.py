@@ -430,24 +430,37 @@ def test_cascade_defers_only_genuinely_dependent_steps(tmp_path):
     assert changed == {5} | _declared_formal_dependents(), (
         f"cascade touched steps it should not have: {sorted(changed)}")
 
+    # R-0915-140 — NOT_MEASURED is no longer only the deferred tier: a step
+    # whose blocks_on closure holds a FAILED step (on this empty project, D1
+    # and 0.5ic) reads NOT_MEASURED(upstream_failed). The deferral is the
+    # `upstream_refused` reason, and that is what this test is about.
     deferred = {s["id"] for s in waived["steps"]
-                if s["status"] == "NOT_MEASURED"}
+                if s["status"] == "NOT_MEASURED"
+                and s["reason_class"] == "upstream_refused"}
     assert deferred == _declared_formal_dependents()
     # And each deferral names the parent it inherited from, so a reader can
     # tell "skipped because a dependency was waived" from "ran, produced
     # nothing".
     for s in waived["steps"]:
-        if s["status"] == "NOT_MEASURED":
+        if s["id"] in deferred:
             assert "deferred-by-upstream(5" in s["cascade_note"]
 
     # #776 — the ordering fact is not thrown away, it is recorded WITHOUT
-    # softening: the steps ordered behind step 5 say so and stay MISSING. This
-    # is what keeps the assertions above from passing vacuously.
+    # softening: the steps ordered behind step 5 say so and are NOT deferred.
+    # This is what keeps the assertions above from passing vacuously. By
+    # R-0915-140 such a step is FAIL(missing_artefact) when it was owed, or
+    # NOT_MEASURED(upstream_failed) behind a FAILED blocker -- never the
+    # waiver's `upstream_refused`.
     ordered_behind = {s["id"] for s in waived["steps"]
-                      if "waived-ancestor-undeclared(5)" in s["cascade_note"]}
+                      if any(str(x).startswith("waived-ancestor-undeclared(5)")
+                             for x in s["reasons"])}
     assert ordered_behind, "the ordering fact must still be attributed"
-    for sid in ordered_behind:
-        assert waived_status[sid] == "FAIL", (sid, waived_status[sid])
+    for s in waived["steps"]:
+        if s["id"] not in ordered_behind:
+            continue
+        assert (s["status"], s["reason_class"]) in (
+            ("FAIL", "missing_artefact"), ("NOT_MEASURED", "upstream_failed")), (
+            s["id"], s["status"], s["reason_class"])
 
 
 def test_waived_formal_never_counts_as_a_pass_downstream(tmp_path):

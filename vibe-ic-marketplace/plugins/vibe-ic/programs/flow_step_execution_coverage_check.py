@@ -310,10 +310,30 @@ def analyze(report: dict, graph: dict | None = None,
         # R-0915-85 — a declared output that does not exist is
         # `FAIL(missing_artefact)`; the bucket is read off the reason, which is
         # where the fact now lives.
-        if (st not in _NOT_APPLICABLE
-                and st == _T.Verdict.FAIL.value
-                and str(s.get("reason_class") or "")
-                == _T.ReasonClass.MISSING_ARTEFACT.value):
+        #
+        # R-0915-140 — AND A STEP THAT NEVER RAN BECAUSE ITS BLOCKER FAILED IS
+        # NOT-RUN TOO. The ruling moved that row from FAIL(missing_artefact) to
+        # NOT_MEASURED(upstream_failed); the word is neither excused nor a
+        # done-claim, so read only as FAIL(missing_artefact) the whole cascade
+        # left this bucket and a run stopped at its first failed gate printed
+        # VERDICT: PASS over every step it never reached (review of
+        # next/ictier1a). The reason decides, not the word.
+        #
+        # AND ONLY THAT ROW. The VOID rule gives a PASS whose ancestor FAILED
+        # the same NOT_MEASURED(upstream_failed) word with NO cascade note --
+        # that step RAN, PASSED and has its outputs on disk. The not-owed row
+        # is the one the producer marks `blocked-by-upstream(<root>)` (review
+        # of 10023360e: keyed on reason_class alone, every voided pass read
+        # SILENTLY-SKIPPED and a PASS run went FAIL).
+        _rc = str(s.get("reason_class") or "")
+        _not_owed = str(s.get("cascade_note") or "").startswith(
+            "blocked-by-upstream(")
+        if st not in _NOT_APPLICABLE and (
+                (st == _T.Verdict.FAIL.value
+                 and _rc == _T.ReasonClass.MISSING_ARTEFACT.value)
+                or (st == _T.Verdict.NOT_MEASURED.value
+                    and _rc == _T.ReasonClass.UPSTREAM_FAILED.value
+                    and _not_owed)):
             applicable_missing.append(s)
         if _SIGNOFF_RE.search(name):
             signoff_steps.append(s)

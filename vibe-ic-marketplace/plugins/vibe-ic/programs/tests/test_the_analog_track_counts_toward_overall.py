@@ -397,9 +397,16 @@ def test_an_analog_track_that_produced_nothing_is_not_a_track_that_was_never_ask
     track = {s["id"]: (s.get("status"), s.get("reason_class"))
              for s in rep_declared["steps"]
              if str(s.get("id")) in set(_analog_ids(rep_declared))}
-    assert all(v == ("FAIL", "missing_artefact") for v in track.values()), (
+    # R-0915-140 — a row whose blocks_on closure holds a FAILED step (on this
+    # tree the missing-output step the track waits on) was never owed its
+    # outputs and reads NOT_MEASURED(upstream_failed). Either word says the
+    # same thing this precondition needs: the artefact is absent and no gate
+    # found a defect.
+    assert all(v in (("FAIL", "missing_artefact"),
+                     ("NOT_MEASURED", "upstream_failed"))
+               for v in track.values()), (
         f"PRECONDITION: the declared-but-empty track is not uniformly "
-        f"FAIL(missing_artefact) ({track})")
+        f"an absent artefact ({track})")
 
     assert rep_absent["overall"] == "PASS", rep_absent["overall"]
     assert rep_declared["_runner_final_audit"] == "FAIL", (

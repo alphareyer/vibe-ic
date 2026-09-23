@@ -358,7 +358,11 @@ def test_a_waiver_for_step_44_is_actually_honoured(tmp_path):
                 return st.get("status")
         pytest.fail("step 44 absent from the report")
 
-    assert build("bare", False) == "FAIL"
+    # R-0915-140 — on this bare tree every blocker of 44 (43, 42, ...) FAILED,
+    # so the un-waived step 44 was never owed its outputs: NOT_MEASURED
+    # (upstream_failed), not FAIL(missing_artefact). Still un-waived and
+    # non-green, which is the half of the pair this test needs.
+    assert build("bare", False) == "NOT_MEASURED"
     assert build("waived", True) == "PASS_WITH_WAIVERS"
 
 
@@ -428,7 +432,9 @@ def test_consumer_coerced_id_agrees_with_the_REAL_compliance_reader(
     after = [s for s in json.loads(waived_report.read_text())["steps"]
              if s.get("id") == 39][0]["status"]
 
-    assert before == "FAIL"
+    # R-0915-140 — step 39's blockers FAILED on the bare project, so the
+    # un-waived row reads NOT_MEASURED(upstream_failed); still un-waived.
+    assert before == "NOT_MEASURED"
     assert after == "PASS_WITH_WAIVERS", (
         f"the real compliance reader did NOT bind id={sid!r} to step "
         f"{predicted} (step 39 is {after!r}); `_consumer_coerced_id` has "

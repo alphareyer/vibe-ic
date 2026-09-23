@@ -706,12 +706,24 @@ def test_strict_structural_only_structural_gates(tmp_path,
     # R-0915-85 — a declared output that does not exist is
     # `FAIL(missing_artefact)`, and the step line carries the reason beside the
     # word. The precondition is the same fact, read where it now lives.
+    #
+    # R-0915-140 — a step whose blocks_on closure holds a FAILED step (here
+    # 0.5ic, which this fixture never runs) was never owed its outputs and
+    # reads NOT_MEASURED(upstream_failed); both words are step-level non-green,
+    # which is all this precondition needs. At least one row must still be an
+    # OWED FAIL(missing_artefact) (step 3, blocks_on [1], 1 PASS), so the
+    # population the scope claim is about is still the missing-output one.
     for sid in (2, 3, 4, 5, 6):
         assert re.search(
-            rf"^\s*\S*\s*\[FAIL\s*\] Step\s+{sid}:.*\(missing_artefact\)",
+            rf"^\s*\S*\s*\[(FAIL|NOT_MEASURED)\s*\] Step\s+{sid}:"
+            rf".*\((missing_artefact|upstream_failed)\)",
             out, re.M), (
-            f"precondition: step {sid} must be FAIL(missing_artefact) for the "
-            f"scope claim to mean anything:\n{out}")
+            f"precondition: step {sid} must be FAIL(missing_artefact) or "
+            f"NOT_MEASURED(upstream_failed) for the scope claim to mean "
+            f"anything:\n{out}")
+    assert re.search(
+        r"^\s*\S*\s*\[FAIL\s*\] Step\s+3:.*\(missing_artefact\)", out,
+        re.M), f"precondition: owed step 3 must be FAIL(missing_artefact):\n{out}"
     assert "Phase 2 strict-structural mode" not in out, out
     # Overall verdict could be PASS or PASS_WITH_WAIVERS (but never
     # FAIL purely due to step-level MISSING when structural gates
@@ -924,8 +936,27 @@ def test_issue1980_step14_nested_nonverdict_is_classed_not_skipped(tmp_path):
     r = _run(str(proj), "--strict")
     # R-0915-85 — `MISSING` is `FAIL(missing_artefact)`; the cascade note is
     # unchanged and is what this test is about.
-    assert re.search(r"\[FAIL\s*\] Step\s+14:.*blocked-by-upstream\(9\)",
-                     r.stdout), r.stdout
+    #
+    # R-0915-140 — AND THE TIER IS NOW THE CASCADE'S. Step 14 here is blocked
+    # behind step 9, so it was never owed its declared outputs: "did not produce"
+    # is not a fact about it. The row reads
+    #   [NOT_MEASURED] Step 14: … (stage2) (upstream_failed)  [blocked-by-upstream(9)]
+    #
+    # THE HALF THIS TEST IS ABOUT IS UNCHANGED and is still asserted: the cascade
+    # note, and the root it names. Only the word in front of it moved.
+    #
+    # AND THE #1980 PROPERTY WAS VERIFIED UNMOVED BEFORE THIS PIN WAS TOUCHED --
+    # measured on the same fixture, all three GATE EVIDENCE lines below are
+    # byte-identical to main's. A nested non-verdict is still CLASSED with its real
+    # rc, reason class and enforcement tier; the new tier does not flatten it, and
+    # if it had, the fix would have belonged in the change and not here.
+    assert re.search(
+        r"\[NOT_MEASURED\s*\] Step\s+14:.*blocked-by-upstream\(9\)",
+        r.stdout), r.stdout
+    assert re.search(r"Step\s+14:.*\(upstream_failed\)", r.stdout), r.stdout
+    assert not re.search(r"\[FAIL\s*\] Step\s+14:", r.stdout), (
+        "a step the audit itself records as blocked must not also be published "
+        "FAIL — that is the two-tiers-in-one-line shape R-0915-140 refuses")
     # This line used to read `flow_compliance_check rc=1 verdict=CRASHED`, and
     # the crash it pinned was a DEFECT rather than a property of the fixture:
     # the nested stage-analog compliance gate died with FileNotFoundError

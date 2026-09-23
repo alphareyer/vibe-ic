@@ -162,5 +162,13 @@ def test_e2e_without_skip_analog_mixed_signal_still_missing(tmp_path):
     # NO-LEAK end-to-end: without --skip-analog the M-steps are genuinely
     # MISSING (the fix only fires under the disclosed --skip-analog mode).
     project = _adc_like_project(tmp_path)
-    _, by, _ = _run(project, ["--skip-hardware"])
-    assert by.get("M1") == "FAIL"
+    _, by, data = _run(project, ["--skip-hardware"])
+    # R-0915-140 — M1's blocks_on closure (A8, 15, 37) FAILED in this empty
+    # project, so M1 was never owed its outputs and reads NOT_MEASURED
+    # (upstream_failed). What this test pins is unchanged: without the
+    # DISCLOSED --skip-analog mode the skip is NOT inherited -- no
+    # NOT_APPLICABLE, no skipped-by-upstream-analog note.
+    m1 = next(s for s in data["steps"] if str(s["id"]) == "M1")
+    assert (m1["status"], m1["reason_class"]) == ("NOT_MEASURED",
+                                                  "upstream_failed"), m1
+    assert "skipped-by-upstream-analog" not in m1["cascade_note"], m1

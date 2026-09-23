@@ -267,7 +267,16 @@ def test_detection_runs_before_the_table_is_printed():
     a reader ever saw, and this catches that specific regression for free.
     """
     src = CHECK.read_text(encoding="utf-8").splitlines()
+    # RE-ANCHORED ON THE DECISION, NOT ON ONE SPELLING OF THE ASSIGNMENT.
+    # R-0915-140 moved the demotion into `cascade_tier_for_dependent` so the void
+    # rule and the #503 cascade pass could not disagree about the tier, and the
+    # inline `_r.status = _T.Verdict.NOT_MEASURED.value` this used to find is now
+    # `_r.status, _r.reason_class = _tier[0], _tier[1]`. The anchor raised
+    # StopIteration -- a tripwire that cannot find its subject measures nothing,
+    # which is the same failure `test_issue682_gate_execution_attribution` was
+    # repaired for. The CALL is the stable anchor: wherever the assignment is
+    # spelled, the demotion is decided there.
     demote = next(i for i, l in enumerate(src)
-                  if "_r.status = _T.Verdict.NOT_MEASURED.value" in l)
+                  if "_tier = cascade_tier_for_dependent(" in l)
     printed = next(i for i, l in enumerate(src) if "_icon = {" in l)
     assert demote < printed, (demote, printed)
