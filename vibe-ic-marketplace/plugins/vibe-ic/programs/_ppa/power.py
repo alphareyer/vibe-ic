@@ -455,6 +455,10 @@ def parse_power_report(text: str, *, path: Optional[str] = None,
         "tool_version": tool_version,
         "liberty": _envelope(text, "liberty"),
         "netlist": _envelope(text, "netlist"),
+        # WHAT THE SESSION LINKED, read here beside the other envelope facts
+        # so every consumer of a parsed report gets the same answer.
+        "power_basis": (_POWER_BASIS_RE.search(text).group("basis")
+                        if _POWER_BASIS_RE.search(text) else None),
         "activity": activity_provenance(text),
         "rows": group_rows,
         "total_row": total_rows[0] if total_rows else None,
@@ -1283,6 +1287,24 @@ def power_document(report: Dict[str, Any], *, stage: Optional[str] = None,
 #: this spelling is a claim; everything else is a disclosure.
 POWER_VERDICT_MEASURED = "PASS"
 
+#: What the SESSION stamped about what it linked (`POWER_BASIS:` in the
+#: report's envelope, written by `_emit_power_report`).
+_POWER_BASIS_RE = re.compile(
+    r"(?:^|\n)\s*#?\s*POWER_BASIS\s*:\s*(?P<basis>[A-Z_]+)")
+
+#: The bases on which a number IS a measurement of the design being taped out.
+#: Both link the ROUTED netlist; the no-SPEF one computes switching power
+#: without parasitics and says so, which is a caveat on a real measurement.
+POWER_SIGNOFF_BASES = frozenset({"POST_ROUTE_SPEF", "POST_ROUTE_NO_SPEF"})
+
+#: And the one on which it is NOT. The runner's own note, at the point it
+#: stamps this basis, says why: the pre-PnR netlist "carries no clock tree, so
+#: its Clock group reads 0.000 and its total UNDERSTATES the routed design". A
+#: figure known to understate the thing being taped out is not that thing, and
+#: step 33 is a SIGN-OFF step. It may be published as an estimate; it may not
+#: stand as the sign-off number.
+POWER_ESTIMATE_BASIS = "PRE_LAYOUT_ESTIMATE"
+
 
 def _row_number(row: Optional[Dict[str, Any]], key: str) -> Optional[float]:
     if not isinstance(row, dict):
@@ -1362,6 +1384,31 @@ def signoff_record(report: Optional[Dict[str, Any]], *,
     # disagreeing with itself, and `_power_class` would then present it as the
     # run's vector-driven sign-off power. MEASURED by the pre-landing review,
     # 2026-09-23.
+    # WHAT THE SESSION LINKED, carried rather than inferred. MEASURED by the
+    # round-2 review: three different bases published the same MEASURED/PASS,
+    # with nothing in the record saying which one the number came from.
+    _power_basis = report.get("power_basis")
+    record["power_basis"] = _power_basis
+    record["signoff_basis"] = (_power_basis in POWER_SIGNOFF_BASES
+                               if _power_basis else None)
+
+    if _power_basis == POWER_ESTIMATE_BASIS:
+        record["power_measurement"] = STATUS_NOT_MEASURED
+        record["verdict"] = STATUS_NOT_MEASURED
+        record["power_not_measured_reason"] = (
+            f"{source} is stamped POWER_BASIS: {POWER_ESTIMATE_BASIS} — it "
+            f"was computed on the PRE-PnR netlist, which carries no clock "
+            f"tree, so its Clock group reads 0.000 and its total UNDERSTATES "
+            f"the routed design. Step 33 is a sign-off step; this figure is "
+            f"published as an estimate (pre_layout_estimate_w) and is not the "
+            f"sign-off number")
+        # The number is NOT lost. It is published under a name that says what
+        # it is, and under no key naming power/total/watt, so the release
+        # reader cannot mistake it for the sign-off total.
+        record["pre_layout_estimate_w"] = total_w
+        record["evidence"] = f"{source} (read; pre-layout estimate basis)"
+        return record
+
     _basis = str((report.get("activity") or {}).get("basis") or "")
     if _basis == BASIS_CONTRADICTED:
         _corr = str((report.get("activity") or {}).get("reason") or "").strip()
@@ -1388,7 +1435,19 @@ def signoff_record(report: Optional[Dict[str, Any]], *,
         {"group": r.get("group"),
          **{f"{c}_power_w": _row_number(r, f"{c}_w") for c in CATEGORIES}}
         for r in rows]
-    record["power_groups"] = len(rows)
+    # HOW MANY FIGURES THIS ANALYSIS PRODUCED, counted rather than inferred
+    # from a key scan. MEASURED by the round-2 review: the published 'Power
+    # datapoints' read 27 over a report carrying 24 -- the four totals plus
+    # 5 groups x 4 columns -- because the consumer counted every number under
+    # a power/total/watt key, which swept in `power_groups` (a COUNT) and the
+    # `total_w` inside each of the two consistency blocks. A reader takes that
+    # field as "how many numbers this analysis produced".
+    record["power_figures"] = (
+        sum(1 for k in ("total", "internal", "switching", "leakage")
+            if _row_number(total_row, f"{k}_w") is not None)
+        + sum(1 for r in rows for c in CATEGORIES
+              if _row_number(r, f"{c}_w") is not None))
+    record["power_scan"] = {"groups": len(rows)}
     # Published beside the number, never folded into it: the parser's own
     # arithmetic check that the split adds up and that the groups sum to the
     # total. A reader who distrusts the number can see whether the report

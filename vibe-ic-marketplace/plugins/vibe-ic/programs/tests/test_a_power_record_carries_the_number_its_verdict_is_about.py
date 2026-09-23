@@ -90,7 +90,11 @@ def test_the_group_breakdown_survives_into_the_record(tmp_path):
     assert set(by) == {"Sequential", "Combinational", "Clock", "Macro", "Pad"}
     assert by["Clock"]["total_power_w"] == 3.12e-03, by["Clock"]
     assert by["Pad"]["leakage_power_w"] == 1.64e-07, by["Pad"]
-    assert rec["power_groups"] == 5
+    # AMENDED at round 2: `power_groups` was a COUNT sitting under a
+    # power-named key, so the consumer swept it into 'Power datapoints'. The
+    # count moved to `power_scan`, where no key names the quantity -- the same
+    # discipline the sta branch applies to `slack_scan`.
+    assert rec["power_scan"]["groups"] == 5
 
 
 def test_the_release_reader_now_finds_the_measured_number(tmp_path):
@@ -495,3 +499,95 @@ def test_retiring_still_replaces_a_record_that_exists(tmp_path):
     doc = json.loads(out.read_text())
     assert doc["verdict"] == "NOT_MEASURED", doc
     assert R._numbers_under_key(doc, ("power", "total", "watt")) == [], doc
+
+
+# ===========================================================================
+# ROUND-2 LOWs. Both are about a number that is real arriving under a name
+# that claims more than it is.
+# ===========================================================================
+
+_PRE_LAYOUT = _REPORT.replace(
+    "POWER_ANALYSIS_MODE: vectorless_sdc",
+    "POWER_ANALYSIS_MODE: vectorless_sdc\nPOWER_BASIS: PRE_LAYOUT_ESTIMATE\n"
+    "POWER_BASIS_NETLIST: spm_synth.v")
+
+_POST_ROUTE_NO_SPEF = _REPORT.replace(
+    "POWER_ANALYSIS_MODE: vectorless_sdc",
+    "POWER_ANALYSIS_MODE: vectorless_sdc\nPOWER_BASIS: POST_ROUTE_NO_SPEF\n"
+    "POWER_BASIS_NETLIST: spm_pnr.v")
+
+_SIGNOFF = _REPORT.replace(
+    "POWER_ANALYSIS_MODE: vectorless_sdc",
+    "POWER_ANALYSIS_MODE: vectorless_sdc\nPOWER_BASIS: POST_ROUTE_SPEF\n"
+    "POWER_BASIS_NETLIST: spm_pnr.v\nPOWER_BASIS_SPEF: spm.spef")
+
+
+def test_the_basis_is_carried(tmp_path):
+    """ROUND-2 LOW #1, first half. The session stamps what it linked; the
+    record never read it, so three different bases published the same
+    MEASURED/PASS."""
+    for text, want in ((_SIGNOFF, "POST_ROUTE_SPEF"),
+                       (_POST_ROUTE_NO_SPEF, "POST_ROUTE_NO_SPEF"),
+                       (_PRE_LAYOUT, "PRE_LAYOUT_ESTIMATE")):
+        rec = _record(tmp_path, text)
+        assert rec.get("power_basis") == want, rec
+
+
+def test_a_pre_layout_estimate_is_not_the_signoff_number(tmp_path):
+    """ROUND-2 LOW #1, and the ruling that settles it: a pre-layout number may
+    be published as an ESTIMATE, never as step 33's sign-off.
+
+    The runner says why in its own note when it stamps the basis: the
+    pre-PnR netlist "carries no clock tree, so its Clock group reads 0.000 and
+    its total UNDERSTATES the routed design". A figure that is known to
+    understate the thing being taped out is not the thing being taped out."""
+    rec = _record(tmp_path, _PRE_LAYOUT)
+    assert rec["power_basis"] == "PRE_LAYOUT_ESTIMATE", rec
+    assert rec["signoff_basis"] is False, rec
+    assert rec["power_measurement"] == "NOT_MEASURED", rec
+    assert rec["verdict"] == "NOT_MEASURED", rec
+    assert "PRE_LAYOUT_ESTIMATE" in rec["power_not_measured_reason"], rec
+    # The number is NOT lost -- it is published under a name that says what it
+    # is -- but the release reader must not find it as the sign-off total.
+    assert rec["pre_layout_estimate_w"] == 9.54e-03, rec
+    assert R._numbers_under_key(rec, ("power", "total", "watt")) == [], rec
+
+
+def test_a_post_route_basis_is_the_signoff_number(tmp_path):
+    """Both post-route bases stand. The no-SPEF one carries its basis so a
+    reader knows switching power excludes parasitics; it is still a
+    measurement of the routed design."""
+    for text in (_SIGNOFF, _POST_ROUTE_NO_SPEF):
+        rec = _record(tmp_path, text)
+        assert rec["signoff_basis"] is True, rec
+        assert rec["power_measurement"] == "MEASURED", rec
+        assert rec["total_power_w"] == 9.54e-03, rec
+
+
+def test_power_datapoints_counts_figures_not_bookkeeping(tmp_path):
+    """ROUND-2 LOW #2. The published 'Power datapoints' read 27 over a report
+    carrying 24 figures: the four totals plus 5 groups x 4 columns. The extra
+    three are `power_groups` (a count) and the two consistency blocks, each of
+    which carries its own `total_w`.
+
+    A reader takes that field as "how many numbers this analysis produced"."""
+    rec = _record(tmp_path, _SIGNOFF)
+    assert rec["power_figures"] == 24, rec
+    state = R._power_class.__wrapped__ if hasattr(
+        R._power_class, "__wrapped__") else None
+    # through the consumer that publishes the field
+    import json as _json
+    p = tmp_path / "reports" / "phase3" / "power.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(_json.dumps(rec))
+    st = R._power_class(tmp_path)
+    assert st.facts["power_datapoints"] == 24, st.facts
+
+
+def test_a_not_measured_record_publishes_no_figure_count(tmp_path):
+    """And the count must not become the next fail-open: a record that
+    measured nothing carries no number under a power-named key, `power_figures`
+    included."""
+    rec = _record(tmp_path, _NO_TABLE)
+    assert "power_figures" not in rec, rec
+    assert R._numbers_under_key(rec, ("power", "total", "watt")) == [], rec
