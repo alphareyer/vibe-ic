@@ -58,8 +58,23 @@ def project(tmp_path_factory):
     return p
 
 
+#: WHERE EACH PRODUCER REALLY WRITES, measured on spm run22 rather than assumed:
+#:   reports/phase1_one_shot.json                 <- phase1's runner, NOT routed
+#:   reports/orchestrator/phase2_one_shot.json
+#:   reports/orchestrator/phase3_one_shot.json
+#: `_pl.report_path` routes everything to `reports/orchestrator/`, and phase1's runner
+#: does not use it. My earlier fixtures wrote through the router, so they staged phase1's
+#: report where NO producer puts it — the tests passed while every real phase1-inclusive
+#: run came out NOT_MEASURED. A fixture that writes somewhere no producer writes proves
+#: nothing about the reader.
+_FLAT_REPORTS = {"phase1_one_shot.json", "phase1_exit_reason.json"}
+
+
 def _report(project: Path, name: str, payload: dict) -> Path:
-    path = _pl.report_path(project, name)
+    if name in _FLAT_REPORTS:
+        path = project / "reports" / name
+    else:
+        path = _pl.report_path(project, name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload) + "\n")
     return path
@@ -588,3 +603,67 @@ def test_a_blocking_return_the_classifier_did_not_classify_drops_the_sidecar():
         if "_drop_v0_3_7_exit_reason(project)" in line and "def " not in line:
             nxt = next((l.strip() for l in lines[i + 1:i + 3] if l.strip()), "")
             assert nxt.startswith("return"), (i + 1, nxt)
+
+
+def test_phase1s_report_is_read_where_its_producer_writes(project, monkeypatch):
+    """THE ARM THAT WOULD HAVE CAUGHT MY ROUND-3 REGRESSION.
+
+    `_pl.report_path` routes to `reports/orchestrator/`; phase1's runner writes
+    `reports/phase1_one_shot.json` and does not use the router. Reading the routed path
+    meant EVERY phase1-inclusive run came out NOT_MEASURED at exit 1 — and a real phase1
+    FAIL became NOT_MEASURED, so the halt never fired and phase2/3 ran on bad L
+    documents. The base hid the same mismatch behind the rc fallback.
+
+    This stages phase1's report at the producer's OWN path and requires the row to be
+    the verdict in it.
+    """
+    def fake_run_phase(label, runner, args, env=None):
+        if "phase1" in runner.name:
+            # the producer's real path, not the router's
+            flat = project / "reports" / "phase1_one_shot.json"
+            flat.parent.mkdir(parents=True, exist_ok=True)
+            flat.write_text(json.dumps({"verdict": "PASS"}) + "\n")
+            return 0
+        if "phase2" in runner.name:
+            _report(project, "phase2_one_shot.json", {"verdict": "PASS"})
+            return 0
+        return 0
+
+    monkeypatch.setattr(V, "_run_phase", fake_run_phase)
+    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k: (True, "docs"))
+    monkeypatch.setattr(sys, "argv", ["vibe_ic_one_shot_runner", str(project),
+                                      "--no-dashboard", "--skip-hardware",
+                                      "--skip-phase3"])
+    rc = V.main()
+    doc = json.loads(_pl.report_path(project, "vibe_ic_one_shot.json").read_text())
+    rows = {r["name"]: r["verdict"] for r in doc["phases"]}
+    assert rows["phase1"] == "PASS", (rows, doc["verdict"], doc["advisories"])
+    assert doc["verdict"] == "PASS" and rc == 0, (doc["verdict"], doc["verdict_reasons"])
+
+
+def test_the_reader_finds_each_report_where_it_actually_lives(project):
+    """MEASURED on spm run22, and it is not one convention: phase1's report is at
+    `reports/`, phase2's and phase3's under `reports/orchestrator/`. The reader checks
+    both and the newer wins, so neither layout is assumed."""
+    flat = project / "reports" / "phase1_one_shot.json"
+    flat.parent.mkdir(parents=True, exist_ok=True)
+    flat.write_text("{}\n")
+    assert V._phase_report_path(project, "phase1_one_shot.json") == flat
+
+    routed = _pl.report_path(project, "phase2_one_shot.json")
+    routed.parent.mkdir(parents=True, exist_ok=True)
+    routed.write_text("{}\n")
+    assert V._phase_report_path(project, "phase2_one_shot.json") == routed
+
+    # with neither present, the canonical place is named so the message points there
+    assert V._phase_report_path(project, "phase3_one_shot.json") == \
+        _pl.report_path(project, "phase3_one_shot.json")
+
+
+def test_phase1s_producer_still_writes_the_flat_path():
+    """The premise of the two arms above, pinned against the producer itself: if phase1
+    moves its report under the router, this fixture and that reader must move with it."""
+    src = (PROGRAMS / "phase1_one_shot_runner.py").read_text()
+    assert 'out = reports / "phase1_one_shot.json"' in src, (
+        "phase1's runner no longer writes reports/phase1_one_shot.json; re-measure "
+        "where it writes and update `_phase_report_path` and these fixtures together")

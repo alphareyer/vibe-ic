@@ -869,6 +869,41 @@ def _audit_axis_from_verdicts(verdicts: Optional[List[str]]) -> Dict[str, Any]:
 _FRESHNESS_TOLERANCE_S = 1.0
 
 
+def _phase_report_path(project: Path, report_name: str) -> Path:
+    """Where the phase's report REALLY is — measured, not assumed. R-0915-151.
+
+    MEASURED on spm run22, and it is not one convention:
+
+        reports/phase1_one_shot.json                  <- phase1's runner writes HERE
+        reports/orchestrator/phase2_one_shot.json
+        reports/orchestrator/phase3_one_shot.json
+
+    `_pl.report_path` auto-routes everything to `reports/orchestrator/`, and phase1's
+    runner does not use it. My freshness rule read the routed path, which for phase1
+    nothing writes, so EVERY phase1-inclusive run came out NOT_MEASURED at exit 1 -- and
+    worse, a real phase1 FAIL became NOT_MEASURED, so the halt never fired and phase2/3
+    ran on bad L documents. The base hid the same mismatch behind the rc fallback: it
+    read `{}` and then invented PASS-or-FAIL from the exit code.
+
+    Both locations are checked; the one that exists wins, and the newer one wins when
+    both do. `_pl.report_path` remains the answer when neither exists, so the "left no
+    report" message still names the canonical place a reader should look.
+    """
+    routed = _pl.report_path(project, report_name)
+    flat = project / "reports" / report_name
+    present = []
+    for cand in (routed, flat):
+        try:
+            if cand.is_file():
+                present.append((cand.stat().st_mtime, cand))
+        except OSError:                                    # pragma: no cover
+            continue
+    if not present:
+        return routed
+    present.sort()
+    return present[-1][1]
+
+
 def _row_verdict(project: Path, report_name: str, rc: int, started_at: float,
                  phase: str) -> Tuple[str, Optional[str]]:
     """This phase's verdict, or NOT_MEASURED with the reason. R-0915-151.
@@ -880,7 +915,7 @@ def _row_verdict(project: Path, report_name: str, rc: int, started_at: float,
     from an earlier run or a PASS conjured from rc 0 -- for a phase that measured
     nothing at all.
     """
-    path = _pl.report_path(project, report_name)
+    path = _phase_report_path(project, report_name)
     try:
         exists = path.is_file()
         fresh = exists and (path.stat().st_mtime + _FRESHNESS_TOLERANCE_S
@@ -1528,7 +1563,7 @@ def main() -> int:
             _phase_started.get("phase1", t0), "phase1")
         if _fresh_why:
             advisories.append(_fresh_why)
-        rep = _read_report(_pl.report_path(project, "phase1_one_shot.json"))
+        rep = _read_report(_phase_report_path(project, "phase1_one_shot.json"))
         plan.append(("phase1", verdict, rc))
         reports["phase1"] = rep
         if verdict == "FAIL":
@@ -1685,7 +1720,7 @@ def main() -> int:
                 _phase_started.get("phase2", t0), "phase2")
             if _fresh_why:
                 advisories.append(_fresh_why)
-            rep = _read_report(_pl.report_path(project, "phase2_one_shot.json"))
+            rep = _read_report(_phase_report_path(project, "phase2_one_shot.json"))
             plan.append(("phase2", verdict, rc))
             reports["phase2"] = rep
             if verdict == "FAIL":
@@ -1833,7 +1868,7 @@ def main() -> int:
                 _phase_started.get("phase3", t0), "phase3")
             if _fresh_why:
                 advisories.append(_fresh_why)
-            rep = _read_report(_pl.report_path(project, "phase3_one_shot.json"))
+            rep = _read_report(_phase_report_path(project, "phase3_one_shot.json"))
             plan.append(("phase3", verdict, rc))
             reports["phase3"] = rep
             if verdict == "FAIL":
