@@ -112,27 +112,31 @@ def _classify_group(path_or_key: str) -> str | None:
 
 
 def _symbols_in(d: Any) -> set[str]:
-    """Return the symbol set (H0, H1, BR, IBT, etc.) covered by a dict or list."""
+    """Return the symbol set (H0, H1, BR, IBT) covered by a dict or list.
+
+    WHOLE WORDS (`_symbol_words`), not substrings: "LIBRARY", "CALIBRATION"
+    and "FABRIC" carry no BR and "CH0" no H0, which the substring reading
+    counted as coverage (review of next/ictier1c). `break` is the spelled-out
+    BR (`tB_break_us`).
+    """
+    def _syms(text: Any) -> set[str]:
+        words = _symbol_words(text)
+        got = {w.upper() for w in words if w.upper() in SYMBOLS_REQUIRED}
+        if "break" in words:
+            got.add("BR")
+        return got
+
     out: set[str] = set()
     if isinstance(d, dict):
         for k in d.keys():
-            ku = str(k).upper()
-            for sym in SYMBOLS_REQUIRED:
-                if sym in ku:
-                    out.add(sym)
+            out |= _syms(k)
     elif isinstance(d, list):
         for item in d:
             if isinstance(item, dict):
                 for k in item.keys():
-                    ku = str(k).upper()
-                    for sym in SYMBOLS_REQUIRED:
-                        if sym in ku:
-                            out.add(sym)
+                    out |= _syms(k)
             elif isinstance(item, str):
-                iu = item.upper()
-                for sym in SYMBOLS_REQUIRED:
-                    if sym in iu:
-                        out.add(sym)
+                out |= _syms(item)
     return out
 
 
@@ -190,6 +194,86 @@ def _find_numeric_us(obj: Any, needle: str) -> float | None:
                 if "us" in keys_str or p.lower().endswith("_us"):
                     return float(v[unit_key])
     return None
+
+
+#: THE FULL PROBE'S VOCABULARY, matched as WHOLE SYMBOLS (see `_symbol_words`),
+#: never as substrings: "LIBRARY"/"CALIBRATION"/"FABRIC" carry no BR and "CH0"
+#: no H0. Per-symbol names (and `break`, the spelled-out BR), and the direction
+#: words that name one side of a split.
+_TIMING_SYMBOL_WORDS = frozenset({"h0", "h1", "br", "ibt", "break"})
+_TIMING_SIDE_WORDS = frozenset({"rx", "tx", "host", "dut", "master", "slave",
+                                "external", "internal"})
+
+
+def _symbol_words(text: Any) -> set[str]:
+    """Lower-cased WHOLE words of an identifier or sentence: split on anything
+    that is not a letter or digit, then on lower->Upper case boundaries
+    (`tIBT_us` -> t, ibt, us; `H0_low_us` -> h0, low, us). A letter->digit run
+    stays one word, so `H0` is `h0` and `CH0` is `ch0`, never `h0`."""
+    import re
+    out: set[str] = set()
+    for part in re.split(r"[^A-Za-z0-9]+", str(text)):
+        for w in re.findall(r"[A-Z]+[0-9]*(?![a-z])|[A-Z]?[a-z]+[0-9]*|[0-9]+", part):
+            out.add(w.lower())
+    return out
+
+
+def _is_timing_word_set(words: set[str]) -> bool:
+    return bool(words & _TIMING_SYMBOL_WORDS or words & _TIMING_SIDE_WORDS)
+
+
+def _is_path_like(text: Any) -> bool:
+    """A file path or file name is provenance (`source_documents`,
+    `extraction_evidence` keyed by source file), not timing: measured on spm
+    run22, `input/docs/L3_external_interface.md` would otherwise read as an
+    `external` side."""
+    import re
+    t = str(text)
+    return "/" in t or bool(re.search(r"\.[A-Za-z0-9]{1,5}$", t))
+
+
+def _names_timing(text: Any) -> bool:
+    return (not _is_path_like(text)) and _is_timing_word_set(_symbol_words(text))
+
+
+def timing_content_probe(*docs: Any) -> list[str]:
+    """Every place in `docs` that carries protocol symbol timing, as paths.
+
+    THE ESCAPE'S EVIDENCE MUST COVER EVERYTHING THE GATE READS. The review of
+    next/ictier1c (8646e1862) measured the narrower reading certifying absences
+    that were on the page: scalar keys `H0_low_us`/`IBT_us`, a
+    `symbol_timing` list of `{"name": "H0", ...}`, `break_*`/`ibt_*` windows,
+    `master_side`/`slave_side` groups, `protocol_timing.rx_side`, and the
+    clause's own `--layer` constants (`TX_IBT_us`, `BR_MIN_us`) -- which
+    `check()` itself falls back to for the IBT<BR cross-check. This walks every
+    key at every depth and every string in a list or under a `name`, and
+    matches whole symbol / side words. A key only counts when it holds
+    something: `null` and a boolean (`"no_rx_classifier_ticks_in_input":
+    true`) are declarations of absence, not timing.
+    """
+    hits: list[str] = []
+
+    def _walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                sub = f"{path}.{k}" if path else str(k)
+                if (v is not None and not isinstance(v, bool)
+                        and _names_timing(k)):
+                    hits.append(sub)
+                if k in ("name", "symbol", "signal") and isinstance(v, str) \
+                        and _names_timing(v):
+                    hits.append(f"{sub}={v}")
+                _walk(v, sub)
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                if isinstance(item, str) and _names_timing(item):
+                    hits.append(f"{path}[{i}]={item}")
+                _walk(item, f"{path}[{i}]")
+
+    for i, doc in enumerate(docs):
+        if doc is not None:
+            _walk(doc, f"doc{i}")
+    return hits
 
 
 def classified_groups(waveform: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -563,11 +647,26 @@ def main() -> int:
     _tg = waveform.get("timing_groups")
     if isinstance(_tg, dict):
         _group_items += [(f"timing_groups.{k}", v) for k, v in _tg.items()]
+    #
+    # ROUND 2 (review of next/ictier1c, 8646e1862): the classifier and
+    # `_symbols_in` read only group KEYS and dict KEYS, so the escape went
+    # NARROWER than the token list it replaced -- scalar `H0_low_us`/`IBT_us`,
+    # a `symbol_timing` list of `{"name": "H0"}`, `break_*` windows,
+    # `master_side`/`slave_side`, `protocol_timing.rx_side`, and the clause's
+    # own `--layer` constants all reached NOT_APPLICABLE_BY_STRUCTURE. The
+    # escape now needs ALL of these to find nothing: check()'s classifier, the
+    # FULL probe over every key/name/list string of the L8 AND the --layer
+    # constants (`timing_content_probe`, whole-word), and the old group-name
+    # words at the level they were always read (top level + timing_groups).
     _rx, _tx = classified_groups(waveform)
-    _has_proto_group = bool(_rx or _tx) or any(
-        isinstance(v, (dict, list)) and _symbols_in(v)
-        for k, v in _group_items
-        if str(k) not in ("timing_windows", "timing_constants", "waveforms"))
+    _probe_hits = timing_content_probe(waveform, rtl_constants)
+    _legacy_words = _TIMING_SYMBOL_WORDS | _TIMING_SIDE_WORDS | {
+        "counters", "cycles", "symbol", "symbols", "low", "high"}
+    _legacy_hit = any(
+        v is not None and not isinstance(v, bool)
+        and not _is_path_like(k) and (_symbol_words(k) & _legacy_words)
+        for k, v in _group_items)
+    _has_proto_group = bool(_rx or _tx or _probe_hits or _legacy_hit)
     _CANONICAL = ("timing_windows", "timing_constants", "waveforms")
     # AND THE ESCAPE MAY NOT OVERRIDE A DECLARATION. Its own comment says it
     # "fires when L2 says NOTHING and the gate ENUMERATES the L8 document
@@ -606,16 +705,21 @@ def main() -> int:
         # of protocol content) is evidence of an absence.
         _scanned_names = sorted(
             {str(k) for k in _CANONICAL if k in waveform}
-            | {str(k) for k, _v in _group_items if str(k) not in _CANONICAL})
+            | {str(k) for k, _v in _group_items if str(k) not in _CANONICAL}
+            # the --layer constants were probed too, so they are enumerated
+            | ({f"layer:{k}" for k in rtl_constants}
+               if isinstance(rtl_constants, dict) else set()))
         _absence = _sa.absence(
             population=("L8_TIMING_WAVEFORM container(s) and group key(s) that "
                         "could carry half-duplex protocol symbol timing"),
             scanned=len(_scanned_names),
             found=0,
             names=_scanned_names,
-            detail=("no directional (rx_/tx_/host_/dut_/external_/internal_) or "
-                    "per-symbol (H0/H1/BR/IBT, *_counters, *_cycles) content in "
-                    "any of them, so there are no two sides to split"))
+            detail=("check()'s classifier found no RX and no TX group, and a "
+                    "whole-word probe of every key, name and list string of the "
+                    "L8 and the --layer constants found no side (rx/tx/host/dut/"
+                    "master/slave/external/internal) or symbol (H0/H1/BR/IBT/"
+                    "break) word, so there are no two sides to split"))
         msg = _sa.sentence(_absence, "internal_vs_external_timing")
         if args.json:
             txt = json.dumps({
