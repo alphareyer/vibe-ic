@@ -23339,6 +23339,14 @@ def main() -> int:
     #     voided step 4's 10/10 L10 oracles as `dependency [2] = FAIL`.
     # The differing variable was THE PHASE THE RUN REACHED, not a landing.
     #
+    # THAT DOCUMENT IS NO LONGER ONE THIS PASS WRITES (2026-09-24, R-0924-4; the
+    # step-38 half of R-0915-141). Step 2 stopped declaring
+    # `reports/phase1/gates/stage_phase1_compliance.json`: it is the verdict target
+    # of step 2's own nested stage_phase1 clause, and with it declared spm run23
+    # stopped at "AUDIT-CREATED OUTPUT REFUSED" again. So this pass no longer owes
+    # it; step 2's other declared documents are still written here. The r46/r47
+    # measurement above is kept as it was measured.
+    #
     # THIS IS THE RUNNER, NOT THE AUDITOR, and that is the whole distinction: a
     # run executing the producers its own flow declares is what a flow does; an
     # auditor executing them and then grading its own output is

@@ -1635,6 +1635,17 @@ steps:
       # Declaring the producer makes `flow_declared_producer_run` write the
       # document during the RUN, every time, so the race has no side to land
       # on. Same shape as the thirteen of #2261.
+      #
+      # SUPERSEDED FOR THIS STEP 2026-09-24 (R-0924-4; R-0915-141, the step-38
+      # half, lane ictier1). The race is gone a different way: step 2 no longer
+      # DECLARES `reports/phase1/gates/stage_phase1_compliance.json` (see
+      # `required_outputs` below), so there is no declared output for timing to
+      # decide, and `flow_declared_producer_run` -- which reads producers off
+      # `required_outputs` -- no longer writes that document for step 2. The
+      # program stays listed because step 2's nested stage_phase1 clause RUNS
+      # it; its receipt is the gate's verdict, and step 2's tier is that
+      # verdict. spm run23 measured why: with the path declared, the audit's
+      # refusal of self-certified evidence matched by construction.
       - flow_compliance_check
                                        # entry must carry spec_evidence
                                        # (doc + locator + verbatim quote).

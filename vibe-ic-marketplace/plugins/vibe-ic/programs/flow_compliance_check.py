@@ -4135,9 +4135,13 @@ def _publish_over_the_audits_own_document(argv: List[str], project: Path
         # `_is_the_audits_own_compliance_report` asks whether the document is a compliance
         # report. It cannot ask WHO RAN the program that wrote it, and for this one program
         # those are different questions: the flow lists `flow_compliance_check` under
-        # `programs:` for steps 2, 14, 15 and 37, so `flow_declared_producer_run` invokes it
-        # as the RUN's producer and its receipt IS the step's run evidence -- a document that
-        # satisfies the predicate above in every particular.
+        # `programs:` for steps 14, 15 and 37 with its receipt among their
+        # `required_outputs`, so `flow_declared_producer_run` invokes it as the RUN's
+        # producer and its receipt IS the step's run evidence -- a document that satisfies
+        # the predicate above in every particular. (Step 2 was the fourth until
+        # 2026-09-24: R-0924-4, the step-38 half of R-0915-141, took
+        # `stage_phase1_compliance.json` out of its `required_outputs`, so no producer
+        # writes it for step 2 any more; the history below is kept as measured.)
         #
         # MEASURED consequence of not asking, on the four steps above, EVERY pass and
         # permanently:
