@@ -192,12 +192,23 @@ def _find_numeric_us(obj: Any, needle: str) -> float | None:
     return None
 
 
-def check(waveform: Any, rtl_constants: Any | None) -> list[Finding]:
-    findings: list[Finding] = []
+def classified_groups(waveform: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(groups_rx, groups_tx)`` exactly as `check()` classifies them.
 
-    # v1.6.38 — first preference: explicit `timing_groups` field (new
-    # canonical L8 shape). When present, use its sub-keys verbatim and
-    # skip the heuristic key-name classifier.
+    THE ONE CLASSIFIER. `check()` and the structural-absence escape in `main()`
+    both call this, so the escape can never certify "no RX/TX timing here" on a
+    document `check()` would read as carrying (or naming) RX/TX timing. The
+    review of next/icspm5-s2 measured the cost of two vocabularies: a
+    `timing_groups` pair named `detect_thresholds` / `drive_widths` classified
+    RX/TX here and was certified absent by the escape's own token list.
+
+    v1.6.38 — first preference: explicit `timing_groups` field (new canonical
+    L8 shape); its sub-keys are classified by name. Fallback: top-level keys.
+    Only dicts and lists count as groups (free-form string notes often contain
+    "internal"/"external" substrings but carry no per-symbol values); an EMPTY
+    dict or list still counts -- a group that is named and empty is a missing-
+    symbols finding, not an absence.
+    """
     groups_rx: dict[str, Any] = {}
     groups_tx: dict[str, Any] = {}
     tg = waveform.get("timing_groups") if isinstance(waveform, dict) else None
@@ -210,13 +221,8 @@ def check(waveform: Any, rtl_constants: Any | None) -> list[Finding]:
                 groups_rx[key] = val
             elif cls == "tx":
                 groups_tx[key] = val
-
-    # (1) Scan top-level for a group that classifies as RX and another as TX.
     if not groups_rx and not groups_tx and isinstance(waveform, dict):
         for key, val in waveform.items():
-            # Only dicts and lists count as "groups" — free-form string notes
-            # often contain "internal"/"external" substrings but carry no
-            # actual per-symbol values.
             if not isinstance(val, (dict, list)):
                 continue
             cls = _classify_group(key)
@@ -224,6 +230,12 @@ def check(waveform: Any, rtl_constants: Any | None) -> list[Finding]:
                 groups_rx[key] = val
             elif cls == "tx":
                 groups_tx[key] = val
+    return groups_rx, groups_tx
+
+
+def check(waveform: Any, rtl_constants: Any | None) -> list[Finding]:
+    findings: list[Finding] = []
+    groups_rx, groups_tx = classified_groups(waveform)
 
     if not groups_rx:
         findings.append(Finding(
@@ -536,31 +548,26 @@ def main() -> int:
             return True  # scalar clock-frequency only, no protocol symbols (#655)
         return False
     # Only VACUOUS_PASS when there is genuinely NO protocol/symbol timing
-    # content by ANY name. Besides the canonical containers (timing_windows /
-    # timing_constants / waveforms), the gate's own check() also recognises
-    # group keys named rx_* / tx_* / host_* / dut_* / external_* / internal_*
-    # (and *_counters / *_cycles symbol-timing tables). If ANY such key carries
-    # content, the waveform DOES describe protocol timing and the strict
-    # RX/TX-split rule must run — do NOT short-circuit. Without this guard the
-    # escape mis-fired on legitimate half-duplex L8 docs that store timing
-    # under those group keys rather than the canonical containers.
-    _PROTO_GROUP_TOKENS = ("rx_", "tx_", "host_", "dut_", "external_",
-                           "internal_", "_counters", "_cycles", "symbol",
-                           "_low", "_high", "break", "ibt")
-    # THE SCAN MUST READ WHAT `check()` READS. `check()` prefers the canonical
-    # `timing_groups` mapping and only falls back to top-level key names; this
-    # escape looked at top-level names ONLY, so a document that carries its RX
-    # and TX groups nested under `timing_groups` -- the shape `check()` calls
-    # "the new canonical L8 shape" -- was enumerated as if those groups were not
-    # there. A real RX/TX split could then be certified as an absence.
+    # content -- and "none" is decided by `check()`'s OWN classifier, not by a
+    # second vocabulary. This escape used to keep its own token list
+    # (`_PROTO_GROUP_TOKENS`) over key NAMES only, requiring non-empty values;
+    # the review of next/icspm5-s2 CONFIRMED three documents it certified as a
+    # structural absence while `check()` over the SAME document FAILs: the v068
+    # flat `timing_parameters` {tDW0_us, tB_break_us, tIBT_us}; a
+    # `timing_groups` pair `detect_thresholds` / `drive_widths` missing IBT; and
+    # `timing_groups` {rx_timing: {}, tx_timing: {}}. Now the escape may fire
+    # ONLY when `classified_groups` finds no RX group and no TX group AND
+    # `_symbols_in` -- check()'s per-symbol reader -- finds no H0/H1/BR/IBT
+    # content in the VALUE of any walked non-canonical container.
     _group_items = list(waveform.items())
     _tg = waveform.get("timing_groups")
     if isinstance(_tg, dict):
         _group_items += [(f"timing_groups.{k}", v) for k, v in _tg.items()]
-    _has_proto_group = any(
-        bool(v) and any(tok in str(k).lower() for tok in _PROTO_GROUP_TOKENS)
+    _rx, _tx = classified_groups(waveform)
+    _has_proto_group = bool(_rx or _tx) or any(
+        isinstance(v, (dict, list)) and _symbols_in(v)
         for k, v in _group_items
-    )
+        if str(k) not in ("timing_windows", "timing_constants", "waveforms"))
     _CANONICAL = ("timing_windows", "timing_constants", "waveforms")
     # AND THE ESCAPE MAY NOT OVERRIDE A DECLARATION. Its own comment says it
     # "fires when L2 says NOTHING and the gate ENUMERATES the L8 document
