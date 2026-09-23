@@ -37,26 +37,8 @@ import flow_compliance_check as F  # noqa: E402
 
 
 class _R:
-    """The binding the rule reads.
-
-    ROUND-5: the rule now also asks whether THIS RUN wrote the outputs, which
-    the ledger answers per spec (`in_run_window`). A binding that states a
-    count but no per-spec list can no longer answer it, and does not demote --
-    so these fixtures build the list their counts imply. `window=None` is the
-    "could not be established" case and is tested explicitly.
-    """
-    def __init__(self, binding, window=True, specs=None):
-        if isinstance(binding, dict) and specs is None and binding.get("specs") is None:
-            n = binding.get("n_specs")
-            sat = binding.get("n_satisfied")
-            if isinstance(n, int) and n > 0:
-                k = sat if isinstance(sat, int) else n
-                binding = dict(binding, specs=[
-                    {"spec": f"s{i}", "satisfied": i < k,
-                     "in_run_window": window}
-                    for i in range(n)])
-        elif specs is not None:
-            binding = dict(binding, specs=specs)
+    """The binding the rule reads."""
+    def __init__(self, binding):
         self.output_binding = binding
 
 
@@ -268,7 +250,7 @@ def _gate_program(tmp_path, name, body):
     return p
 
 
-def _project(tmp_path, sid=None, in_run_window=True):
+def _project(tmp_path, sid=None):
     (tmp_path / "phase2" / "stage2" / "constraints").mkdir(parents=True,
                                                            exist_ok=True)
     (tmp_path / "phase2" / "stage2" / "constraints" / "spm.sdc").write_text(
@@ -290,11 +272,9 @@ def _project(tmp_path, sid=None, in_run_window=True):
             "id": sid,
             "produced": [
                 {"spec": "phase2/stage2/constraints/*.sdc",
-                 "rel": "phase2/stage2/constraints/spm.sdc",
-                 "in_run_window": in_run_window},
+                 "rel": "phase2/stage2/constraints/spm.sdc"},
                 {"spec": "phase2/stage2/constraints/pvt_matrix.json",
-                 "rel": "phase2/stage2/constraints/pvt_matrix.json",
-                 "in_run_window": in_run_window},
+                 "rel": "phase2/stage2/constraints/pvt_matrix.json"},
             ]}))
     return tmp_path
 
@@ -674,20 +654,25 @@ def test_an_audit_created_output_is_not_a_step_that_delivered(tmp_path):
         g2.unlink(missing_ok=True)
 
 
-def test_a_step_that_did_not_write_its_outputs_this_run_is_not_delivered(tmp_path):
-    """ROUND-5 MEDIUM. "Produced every declared output" was never established
-    as produced BY THIS RUN.
 
-    `_index_ledger_row` read `step_write_ledger`'s per-step `produced` list --
-    a POST-RUN SNAPSHOT of every non-empty file matching the glob -- and
-    dropped the ledger's own `in_run_window` flag and the per-row mtime. So an
-    `--entry-step` run, or a re-run whose producer does not rewrite its
-    outputs, demoted the N/A clause on files this run never touched: a bare
-    PASS over old artefacts where the base reads NOT_APPLICABLE.
+def test_an_entry_step_run_judges_the_step_as_the_clause_deleted_one(tmp_path):
+    """R-0915-152, and round 5's MEDIUM answered by the ruling rather than by
+    a run window.
 
-    Same step, same files, one bit different."""
-    g1 = _gate_program(tmp_path, "_t7r5_na", _NA_ADVISORY)
-    g2 = _gate_program(tmp_path, "_t7r5_vac", '''
+    An `--entry-step` run enters mid-flow over outputs an earlier run wrote.
+    Rounds 5-7 tried to make the demotion refuse that case, through a run
+    window and then a run identity, and each attempt opened a new hole. The
+    ruling says the demotion may not impose a standard the STEP ITSELF is not
+    held to: a clause-deleted step judges those same outputs through the same
+    binding and passes, so the demoted step must too. Cross-run freshness is
+    the flow's business -- the entry manifest and run admission -- and it
+    applies to every step's PASS equally.
+
+    So the invariant is the same one the property test asserts, measured on
+    the shape that drove eight rounds: outputs on disk from an earlier run,
+    no ledger window anywhere."""
+    g1 = _gate_program(tmp_path, "_t7r8_na", _NA_ADVISORY)
+    g2 = _gate_program(tmp_path, "_t7r8_vac", '''
         import json, sys
         i = sys.argv.index("--json")
         open(sys.argv[i + 1], "w").write(json.dumps(
@@ -697,19 +682,31 @@ def test_a_step_that_did_not_write_its_outputs_this_run_is_not_delivered(tmp_pat
         sys.exit(0)
         ''')
     try:
-        step = _step(g1.stem, g2.stem)
-        for window, should_demote in ((True, True), (False, False),
-                                      (None, False)):
-            root = tmp_path / f"win_{window}"
-            root.mkdir(parents=True, exist_ok=True)
-            (root / "reports").mkdir(exist_ok=True)
-            _project(root, "T7", in_run_window=window)
-            r = F.check_step(root, step, {}, None)
-            demoted = any("DISCLOSED-SKIP" in str(x) for x in r.reasons)
-            assert demoted is should_demote, (
-                f"in_run_window={window!r}: demoted={demoted}, "
-                f"expected {should_demote}; status={r.status}; "
-                f"reasons={r.reasons}")
+        import os as _os, time as _time
+        # An earlier run's outputs: present, step-attributed, and OLD.
+        with_na = _project(tmp_path / "with", "T7")
+        (with_na / "reports").mkdir(exist_ok=True)
+        without = _project(tmp_path / "without", "T7")
+        (without / "reports").mkdir(exist_ok=True)
+        old = _time.time() - 12 * 86400
+        for root in (with_na, without):
+            for f in (root / "phase2" / "stage2" / "constraints").iterdir():
+                _os.utime(f, (old, old))
+
+        step_with = _step(g1.stem, g2.stem)
+        step_without = {**step_with,
+                        "gate": {"all_of": [step_with["gate"]["all_of"][1]]}}
+        r_with = F.check_step(with_na, step_with, {}, None)
+        r_without = F.check_step(without, step_without, {}, None)
+
+        assert r_with.status == r_without.status, (
+            r_with.status, r_without.status, r_with.reasons)
+        assert r_with.reason_class == r_without.reason_class
+        assert tuple(r_with.disclosures or ()) == tuple(
+            r_without.disclosures or ())
+        kept = [x for x in r_with.reasons
+                if "DISCLOSED-SKIP" not in str(x) and g1.stem not in str(x)]
+        assert any("1 of 1 gate clause(s)" in str(x) for x in kept), kept
     finally:
         g1.unlink(missing_ok=True)
         g2.unlink(missing_ok=True)

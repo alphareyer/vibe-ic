@@ -22455,16 +22455,6 @@ def main() -> int:
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
 
-    # THE RUN'S IDENTITY, minted here -- AFTER the refusal gates above.
-    # See `vibe_ic_one_shot_runner` for the three defects round 7 measured in
-    # marking earlier and unconditionally. `begin_run` mints only when this
-    # process is the OUTERMOST runner and otherwise inherits, marking nothing.
-    try:
-        import step_write_ledger as _swl
-        _swl.begin_run(project)
-    except Exception:                                    # pragma: no cover
-        pass
-
     # ORGANIC #588 — single-driver lock honored by the standalone phase2
     # runner; re-enters the orchestrator's lock via the env token, or
     # refuses a second concurrent standalone phase2 on a live project.

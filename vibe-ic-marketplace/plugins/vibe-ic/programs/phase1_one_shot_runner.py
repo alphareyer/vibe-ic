@@ -1480,29 +1480,8 @@ def main() -> int:
     # orchestrator delegated this run (env token); refuses a SECOND
     # standalone phase1 on a project a live runner already drives.
     _lock = _runner_lock.acquire_or_reenter(project, "phase1_one_shot_runner")
-
-
     if _lock is None:
         return 3
-
-    # THE RUN'S IDENTITY, minted here -- AFTER the refusal gates above.
-    #
-    # Round 7 measured three defects in doing this earlier and unconditionally:
-    # `mark_run_start`'s mkdir CREATED a missing project, destroying the
-    # "not a directory" refusal; a run about to be REFUSED by the single-driver
-    # lock had already overwritten the LIVE run's t0; and every child runner
-    # re-marked, so the surviving t0 was the LAST phase's start and every
-    # earlier output of the same run read out-of-window.
-    #
-    # `begin_run` mints only when this process is the outermost runner (no run
-    # id in the environment) and otherwise INHERITS, marking nothing. The id
-    # travels to children through os.environ, which `_runner_lock.child_env`
-    # copies.
-    try:
-        import step_write_ledger as _swl
-        _swl.begin_run(project)
-    except Exception:                                    # pragma: no cover
-        pass                                             # never fatal
 
     # #2204 — the expert second pass short-circuits EVERYTHING below. Step
     # 0.5ic and D1 both already ran in the pass that emitted the hand-off;

@@ -2121,26 +2121,8 @@ def _index_ledger_row(row: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         rel = entry.get("rel")
         if not spec or not rel:
             continue
-        slot = specs.setdefault(spec, {"produced": [], "not_produced": None,
-                                       "in_run_window": None})
+        slot = specs.setdefault(spec, {"produced": [], "not_produced": None})
         slot["produced"].append(str(rel))
-        # WHETHER THIS RUN WROTE IT, carried rather than dropped. The ledger
-        # computes `in_run_window` (mtime >= the run's t0) and this indexer
-        # discarded it along with the per-row mtime, so `produced` degraded
-        # into "a non-empty file matching the glob exists" -- a POST-RUN
-        # SNAPSHOT. MEASURED by the round-5 review: on an --entry-step run, or
-        # a re-run whose producer does not rewrite its outputs, that reads as
-        # "this step produced everything" over files the run never touched.
-        #
-        # `None` is a THIRD STATE, not a False: the ledger sets it when it
-        # has no t0 to compare against (`t0_source="none"`). A window that
-        # could not be established is not evidence of production, and the
-        # caller treats it as such rather than guessing either way.
-        _win = entry.get("in_run_window")
-        if slot["in_run_window"] is None:
-            slot["in_run_window"] = _win
-        elif _win is False:
-            slot["in_run_window"] = False
     for finding in (row.get("findings") or []):
         if not isinstance(finding, dict):
             continue
@@ -2149,8 +2131,7 @@ def _index_ledger_row(row: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         spec = str(finding.get("spec", ""))
         if not spec:
             continue
-        slot = specs.setdefault(spec, {"produced": [], "not_produced": None,
-                                       "in_run_window": None})
+        slot = specs.setdefault(spec, {"produced": [], "not_produced": None})
         if slot["not_produced"] is None:
             slot["not_produced"] = str(finding.get("reason") or "not_produced")
     return specs
@@ -3315,6 +3296,26 @@ def _step_produced_every_declared_output(result: Any,
     sat = b.get("n_satisfied")
     if not isinstance(n, int) or not isinstance(k, int) or n <= 0:
         return False
+    # R-0915-152 — THE DEMOTION'S EVIDENCE STANDARD IS THE STEP'S OWN
+    # DELIVERY STANDARD, NOTHING STRICTER.
+    #
+    # A `DESIGN_DECLARED_NA` clause states a fact about the DESIGN (spm has no
+    # macros), not about the run, and demote-once-as-absence means the step is
+    # judged exactly as it would be with that clause deleted from the flow
+    # YAML. A clause-deleted step judges its outputs through the SAME output
+    # binding every other step uses -- step-attributed via the ledger, or
+    # project-glob per flow policy. Cross-run FRESHNESS of outputs is a
+    # flow-wide property (the entry manifest, run admission) that applies to
+    # every step's PASS equally; it is not this clause's to enforce.
+    #
+    # Rounds 5 through 7 tried to enforce it here anyway, through a run window
+    # and then a run identity, and each fix opened the next hole: a t0 that was
+    # really phase 3's start, a marker that created the project it was
+    # refusing, a marker a refused run overwrote, a persisted flag read without
+    # its run id. Eight rounds of machinery for a condition this decision was
+    # never entitled to impose. The ruling removed it; what remains is the
+    # step's own standard, plus the one exclusion that IS about delivery.
+    #
     # "PRODUCED EVERY DECLARED OUTPUT" MEANS PRODUCED BY THE RUN. An output
     # that is this step's own gate `--json` target was written by the AUDIT,
     # and the tree refuses it as run evidence a few lines later. Counting it
@@ -3325,23 +3326,6 @@ def _step_produced_every_declared_output(result: Any,
     # round-4 review. The caller passes what it knows at the moment it asks;
     # the count alone cannot answer this because it is taken before the gate.
     if audit_created:
-        return False
-    # AND THIS RUN MUST HAVE WRITTEN THEM. `produced` in the step ledger is a
-    # POST-RUN SNAPSHOT -- every non-empty file matching the glob -- and the
-    # ledger's own `in_run_window` (mtime >= the run's t0) is what separates
-    # "this run wrote it" from "it was already there". MEASURED by the round-5
-    # review: without it, an `--entry-step` run, or a re-run whose producer
-    # does not rewrite its outputs, demoted the N/A clause on files this run
-    # never touched -- a bare PASS over old artefacts where the base reads
-    # NOT_APPLICABLE. The phase-2 acceptance audit can also read a phase-1
-    # steps snapshot taken before the step ran.
-    #
-    # A window that could NOT be established (`None`, when the ledger has no
-    # t0) is not evidence of production. It does not demote.
-    specs = b.get("specs")
-    if not isinstance(specs, list) or len(specs) != n:
-        return False
-    if not all(d.get("in_run_window") is True for d in specs):
         return False
     # BOTH, and the second is the one the review added. `n_step_attributed`
     # answers "resolved against THIS step's own write record"; `n_satisfied`
@@ -15675,7 +15659,6 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     outputs = step.get("required_outputs", [])
     missing_entries: List[str] = []
     _binding = _load_step_binding(project) if outputs else None
-    binding_rows = (_binding or {}).get("rows") or {}
     _bind_notes: List[str] = []
     _bind_modes: Dict[str, str] = {}
     _bind_specs: List[Dict[str, Any]] = []
@@ -15693,14 +15676,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # `mode` alone conflated "this run predates the record" with "the
         # green rests on a file this step never recorded writing", and the
         # only place the difference lived was a sentence in `notes`.
-        _bind_specs.append(dict(
-            _detail, spec=pat, mode=_mode, satisfied=bool(_sat),
-            # WHETHER THIS RUN WROTE IT. Carried from the ledger row (see
-            # `_index_ledger_row`); `None` means the ledger had no t0 to
-            # compare against and the window could not be established.
-            in_run_window=((binding_rows.get(str(sid)) or {})
-                           .get(str(pat), {}).get("in_run_window")
-                           if _mode == "step_attributed" else None)))
+        _bind_specs.append(dict(_detail, spec=pat, mode=_mode,
+                                satisfied=bool(_sat)))
         if _note:
             _bind_notes.append(f"{pat}: {_note}")
         if _sat:
