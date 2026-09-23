@@ -14669,6 +14669,72 @@ def _write_note_atomically(note: Path, payload: str) -> None:
         raise
 
 
+#: THIS INVOCATION'S IDENTITY, inherited by every nested clause through the
+#: environment. A nested `stageN_compliance` subprocess resolves the SAME id as the
+#: parent that spawned it, which is what lets a note say "MY invocation created this
+#: file" to a reader that is a different PROCESS.
+_INVOCATION_ENV = "VIBEIC_FCC_INVOCATION"
+
+
+def _invocation_id() -> str:
+    inherited = os.environ.get(_INVOCATION_ENV, "").strip()
+    if inherited:
+        return inherited
+    minted = f"{os.getpid()}-{int(time.time() * 1000)}"
+    os.environ[_INVOCATION_ENV] = minted
+    return minted
+
+
+def _claim_audit_will_create(project: Path, sid: Any,
+                            rels: Sequence[str]) -> None:
+    """Claim, BEFORE the gate runs, that this audit is about to create these paths.
+
+    R-0915-152 second cut. THE RACE MY FIRST CUT DID NOT CLOSE, and the review is
+    right that the lock I added wrapped only single already-atomic syscalls. The
+    decision "was this file created by an audit?" spans READ -> GATE -> RECORD, and
+    nothing held across it:
+
+        T2 (outer) evaluates step 2: `stage_phase1_compliance.json` is ABSENT, so its
+            first clause writes it. T2 then runs its remaining clauses.
+        T7's first clause is a NESTED `stage1_compliance` subprocess that evaluates
+            step 2 too. It sees the file PRESENT with NO note, credits it as run
+            evidence, and drops a note that is not there.
+        T2 finally records — after a reader has already counted the auditor's own
+            document as the run's.
+
+    A lock across the gate is not the answer: the gate is a subprocess that can take
+    minutes, and holding a lock over it would serialise the audit. Instead the CLAIM is
+    published before the gate, keyed to THIS INVOCATION — which a nested subprocess
+    resolves to the same string — so any evaluation inside the same invocation sees
+    "my own audit is creating this" and cannot credit it.
+
+    A claim carries no stat yet: the file may not exist. `_prior_audit_created`
+    finalises that below.
+    """
+    invocation = _invocation_id()
+    for rel in rels:
+        note = _authorship_note_path(project, sid, rel)
+        try:
+            note.parent.mkdir(parents=True, exist_ok=True)
+            with _note_lock(note):
+                if note.is_file():
+                    # An existing note already answers the question, with a stat.
+                    continue
+                _write_note_atomically(note, json.dumps({
+                    "schema": 1,
+                    "written_by": "flow_compliance_check",
+                    "state": "in_flight",
+                    "invocation": invocation,
+                    "step": str(sid),
+                    "rel": rel,
+                    "note": ("this audit's own gate is about to write this declared "
+                             "required_output; no evaluation inside this invocation "
+                             "may credit it as the run's"),
+                }, indent=1) + "\n")
+        except OSError:
+            continue
+
+
 def _authorship_note_path(project: Path, sid: Any, rel: str) -> Path:
     key = hashlib.sha1(f"{sid}|{rel}".encode()).hexdigest()[:20]
     return project / _AUDIT_AUTHORSHIP_DIR / f"{key}.json"
@@ -14745,7 +14811,17 @@ def _prior_audit_created(project: Path, sid: Any, rels: Sequence[str]) -> Set[st
         if not isinstance(rec, dict) or rec.get("rel") != rel:
             continue
         live = _live_stat(project / rel)
-        if live is None:
+        if live is None and str(rec.get("state") or "") != "in_flight":
+            continue
+        # AN IN-FLIGHT CLAIM IS AN ANSWER, and it is the one that closes the
+        # read->gate->record window: a note with no stat says "an audit is creating
+        # this right now". From THIS invocation it is conclusive — my own audit is the
+        # author, so no evaluation of mine may credit the file. From another
+        # invocation it is taken conservatively for the same reason the rest of this
+        # function is: a false refusal costs a re-run, a false credit signs off the
+        # auditor's own document as the run's evidence.
+        if str(rec.get("state") or "") == "in_flight":
+            out.add(rel)
             continue
         if [live[0], live[1]] == [rec.get("size"), rec.get("mtime_ns")]:
             out.add(rel)
@@ -15521,6 +15597,12 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # `_prior_audit_created`: pass 1's refusal is recorded durably so pass 2
     # does not have to re-derive it from bytes that cannot carry it.
     _prior_created = _prior_audit_created(project, sid, _declared_self_written)
+    # PUBLISHED BEFORE THE GATE RUNS, so a concurrent evaluation inside this same
+    # invocation cannot credit a file this audit is in the middle of creating. See
+    # `_claim_audit_will_create`: the window is READ -> GATE -> RECORD, and a lock
+    # cannot be held across a gate that is a subprocess.
+    if _absent_before_gate:
+        _claim_audit_will_create(project, sid, _absent_before_gate)
     _audit_produced: List[str] = []
     if gate:
         # GAP-B (#789) — thread the run's skip_analog into the gate evaluation

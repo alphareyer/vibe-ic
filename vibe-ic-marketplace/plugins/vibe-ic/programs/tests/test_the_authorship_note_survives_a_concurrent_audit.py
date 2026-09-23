@@ -214,3 +214,140 @@ def test_the_recorder_and_the_dropper_both_take_the_lock():
                   if isinstance(n, ast.FunctionDef) and n.name == name)
         assert "_note_lock(" in ast.unparse(fn), (
             f"{name} mutates the note without holding its lock")
+
+
+# ── the race the commit NAMES: read -> gate -> record ───────────────────────
+#
+# The lock above protects single syscalls, and a review was right that those were
+# already atomic. The race that matters spans three steps with the GATE in the middle:
+#
+#   T2 (outer) evaluates step 2: the declared path is ABSENT, so its first clause
+#       writes it. T2 goes on running its remaining clauses.
+#   T7's first clause is a NESTED `stage1_compliance` SUBPROCESS which evaluates step 2
+#       too. It sees the file PRESENT with NO note, credits it as run evidence, and
+#       drops a note that is not there.
+#   T2 records — after a reader has already counted the auditor's own document as the
+#       run's.
+#
+# A lock cannot be held across the gate: the gate is a subprocess that can take
+# minutes, and holding one would serialise the whole audit. So the CLAIM is published
+# BEFORE the gate, keyed to this invocation — which a nested subprocess resolves to the
+# same string — and any evaluation inside that invocation refuses to credit it.
+
+
+def _claim_state(project, sid=SID, rel=REL):
+    note = FCC._authorship_note_path(project, sid, rel)
+    return json.loads(note.read_text()) if note.is_file() else None
+
+
+def test_a_file_this_invocation_is_creating_is_never_credited(tmp_path):
+    """THE OUTCOME, not the lock: while this invocation's gate is mid-write, a
+    concurrent evaluation of the same step must NOT credit the file."""
+    FCC._claim_audit_will_create(tmp_path, SID, [REL])
+    claim = _claim_state(tmp_path)
+    assert claim and claim["state"] == "in_flight", claim
+    assert claim["invocation"] == FCC._invocation_id()
+
+    # the gate has now written the file — the exact window T7 used to win
+    _artefact(tmp_path)
+    prior = FCC._prior_audit_created(tmp_path, SID, [REL])
+    assert REL in prior, (
+        "a concurrent evaluation credited a file THIS invocation's own audit was in "
+        "the middle of creating; that is the auditor signing off its own document")
+
+
+def test_a_nested_subprocess_sees_its_parents_claim(tmp_path):
+    """ACROSS PROCESSES, which is the shape that ships: T7's clause is a nested
+    `flow_compliance_check`, so the reader is a different PROCESS. It must resolve the
+    same invocation id and reach the same refusal."""
+    import subprocess
+    FCC._claim_audit_will_create(tmp_path, SID, [REL])
+    _artefact(tmp_path)
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import sys, json\n"
+        f"sys.path.insert(0, {str(PROGRAMS)!r})\n"
+        "from pathlib import Path\n"
+        "import flow_compliance_check as F\n"
+        f"prior = F._prior_audit_created(Path({str(tmp_path)!r}), {SID!r}, [{REL!r}])\n"
+        "print(json.dumps({'prior': sorted(prior), 'inv': F._invocation_id()}))\n")
+    out = subprocess.run([sys.executable, str(probe)], capture_output=True,
+                         text=True, timeout=300, env=dict(os.environ))
+    assert out.returncode == 0, out.stderr[-300:]
+    got = json.loads(out.stdout.strip().splitlines()[-1])
+    assert got["inv"] == FCC._invocation_id(), (
+        "the nested process minted a DIFFERENT invocation id, so it could not see its "
+        "parent's claim")
+    assert REL in got["prior"], (
+        "the nested evaluation credited a file its own invocation was creating")
+
+
+def test_a_run_produced_file_is_still_credited(tmp_path):
+    """THE OTHER DIRECTION, and the one a conservative claim could break: a file the
+    RUN produced, with no claim and no note, must still be credited."""
+    _artefact(tmp_path)
+    assert FCC._prior_audit_created(tmp_path, SID, [REL]) == set()
+
+
+def test_the_claim_is_published_before_the_gate_runs():
+    """SOURCE PIN on the ORDER, because that is the whole fix: the claim must precede
+    the gate evaluation, not follow it."""
+    src = (PROGRAMS / "flow_compliance_check.py").read_text()
+    claim_at = src.index("_claim_audit_will_create(project, sid, _absent_before_gate)")
+    gate_at = src.index("passed, reasons = _evaluate_gate(project, gate", claim_at - 4000)
+    assert claim_at < gate_at, (
+        "the claim is published AFTER the gate, which leaves the window exactly where "
+        "it was")
+
+
+def test_two_threads_racing_one_step_never_credit_the_auditors_file(tmp_path):
+    """REAL THREADS, asserting the outcome. One thread plays the outer pass (claim,
+    then write, then record); the other plays the nested evaluation reading in between.
+    No interleaving may yield 'credited'."""
+    # A CHEAP BARRIER TIMEOUT ON PURPOSE. On a tree WITHOUT the claim, the outer
+    # thread raises before reaching the barrier, so the nested thread waits it out --
+    # and my first cut paired 40 attempts with a 30 s timeout, which turned the
+    # base-arm measurement into a twenty-minute hang. It must fail FAST on the base,
+    # not slowly: the assertion is what discriminates, never the wall clock.
+    credited: list = []
+    for attempt in range(20):
+        proj = tmp_path / f"r{attempt}"
+        (proj / "reports/phase1/gates").mkdir(parents=True, exist_ok=True)
+        barrier = threading.Barrier(2, timeout=2)
+
+        def outer():
+            # A TREE WITHOUT THE CLAIM MUST STILL RUN THE RACE, or this arm measures
+            # nothing on the base: my first cut let the missing function stop the
+            # writer, so the nested thread never saw the file and the arm passed on
+            # main. The claim is attempted; the gate's write happens either way.
+            try:
+                FCC._claim_audit_will_create(proj, SID, [REL])
+            except AttributeError:
+                pass
+            finally:
+                try:
+                    barrier.wait()
+                except Exception:
+                    pass
+            _artefact(proj)                     # the gate writes it
+            FCC._record_audit_created(proj, SID, [REL])
+
+        def nested():
+            try:
+                barrier.wait()
+            except Exception:
+                pass
+            for _ in range(30):
+                if (proj / REL).is_file():
+                    if not FCC._prior_audit_created(proj, SID, [REL]):
+                        credited.append(attempt)
+                    return
+
+        ts = [threading.Thread(target=outer), threading.Thread(target=nested)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(timeout=60)
+    assert not credited, (
+        f"{len(credited)} of 20 interleavings credited the auditor's own document "
+        f"(attempts {credited[:5]})")
