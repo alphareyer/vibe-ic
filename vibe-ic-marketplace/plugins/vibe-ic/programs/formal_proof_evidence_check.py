@@ -454,6 +454,32 @@ def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List
     return out
 
 
+def _chip_read_stale(project: Path, results: dict) -> List[str]:
+    """What differs between the chip read the proof recorded and the chip
+    (R-0915-157 round 9). Empty = the proof is about the chip."""
+    import _chip_synth_read as _csr
+    proved = results.get("chip_read")
+    if not isinstance(proved, dict) or not proved.get("top"):
+        return ["the proof recorded no chip read"]
+    try:
+        now = _csr.current_chip_read(project, str(proved["top"]))
+    except Exception as e:  # noqa: BLE001 — unknown is not "the same"
+        return [f"the chip read could not be taken now ({e})"]
+    out = [f"now — {d}" for d in _csr.chip_read_differences(proved, now)]
+    built = _csr.built_record_path(project)
+    if built.is_file():
+        try:
+            rec = json.loads(built.read_text())
+        except (OSError, ValueError):
+            rec = None
+        if not isinstance(rec, dict):
+            out.append(f"phase-3 synthesis — {built.name} unreadable")
+        else:
+            out += [f"phase-3 synthesis — {d}"
+                    for d in _csr.chip_read_differences(proved, rec)]
+    return out
+
+
 def audit(project: Path) -> dict:
     formal_dir = _pl.formal_dir(project)
     results_path = _first_results_json(formal_dir)
@@ -582,6 +608,27 @@ def audit(project: Path) -> dict:
         if verdict_field == "INCOMPLETE" and not remaining:
             # the contract was open ONLY on what the binding just closed
             verdict_field = str(results.get("proof_verdict") or "PASS").upper()
+    # R-0915-157 round 9 — A PROGRAM-CLOSED PROOF MUST BE ABOUT THE CHIP. The
+    # proof recorded the exact read it proved (`chip_read`); it is compared
+    # with the chip read as it stands NOW and with the read phase-3 synthesis
+    # BUILT, when that exists. Any difference (the define decision, the file
+    # set or contents, the top) makes every program closure STALE: refused as
+    # NOT_DISCHARGED with what differs, never PASS.
+    _closed = [str(x) for x in results.get("program_discharged_obligations") or []]
+    if _closed:
+        _stale = _chip_read_stale(project, results)
+        if _stale:
+            _why = "proof read a different chip: " + "; ".join(_stale)
+            _rows = [r for r in results.get("unresolved_obligations") or []
+                     if isinstance(r, dict)]
+            _have = {str(r.get("id")) for r in _rows}
+            _rows += [{"id": oid, "status": "NOT_DISCHARGED", "description": _why}
+                      for oid in _closed if oid not in _have]
+            results = dict(results, unresolved_obligations=_rows)
+            rep["chip_read_stale"] = _stale
+            rep["findings"].append(
+                f"CHIP_READ_STALE (R-0915-157): {len(_closed)} program-closed "
+                f"obligation(s) NOT_DISCHARGED — {_why}")
     contract_incomplete = (verdict_field == "INCOMPLETE"
                            or bool(results.get("unresolved_obligations")))
     if results.get("all_proved") is not True:

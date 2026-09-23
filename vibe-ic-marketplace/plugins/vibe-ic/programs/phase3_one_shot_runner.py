@@ -16924,6 +16924,21 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         list(pdk.macro_libs) + list(pdk.macro_lefs) + list(pdk.macro_v))
     reads = "; ".join(_csr.chip_read_lines(
         rtl_files, _simdef, lambda f: _to_container_path(str(f), container)))
+    # R-0915-157 round 9: record the read this synthesis BUILDS and compare it
+    # with the read Step 5's program-closed proof recorded. A difference (the
+    # define decision flipped by A8's staged macros, the file set or contents,
+    # the top) makes those closures STALE — `formal_proof_evidence_check`
+    # refuses them; it is never a PASS about a different chip.
+    try:
+        _stale = _csr.write_built_record(
+            project, rtl_files,
+            list(pdk.macro_libs) + list(pdk.macro_lefs) + list(pdk.macro_v), top)
+    except Exception as _e:  # noqa: BLE001 — the record never blocks synth
+        _stale = []
+        print(f"[phase3] chip-read record not written: {_e}", file=sys.stderr)
+    for _d in _stale:
+        print(f"[phase3] STEP-5 PROOF STALE — the proof read a different chip: {_d}",
+              file=sys.stderr)
     # Read OTP image into the synth working directory so $readmemh resolves.
     otp_hex_dir = project / "input" / "otp"
     setup = ""
@@ -70975,32 +70990,24 @@ def main() -> int:
     # steps. step_synth's local override of `top` was not propagating
     # to step_pnr, so PnR looked for `<requested_top>_synth.v` while
     # synth had emitted `<asic_top>_synth.v`.
-    effective_top = args.top_name
-    for cand in (f"{args.top_name}_asic", f"{args.top_name}_pad_wrapper"):
-        if (_pl.rtl_dir(project) / f"{cand}.sv").is_file():
-            effective_top = cand
-            break
-    # ORGANIC — when the `_asic` / `_pad_wrapper` probe above did NOT fire (so
-    # effective_top is still the raw --top-name), fall back to the SAME
-    # structural resolver phase-2 uses. The orchestrator's --top-name is
-    # frequently the PROJECT / SKU name (e.g. `caravel_user_project`), whose
-    # synthesizable top module is actually a differently-named wrapper
-    # (`user_project_wrapper`). Without this, yosys `synth -top <project>` fails
-    # its HIERARCHY pass with "Module `<project>' not found!" and the whole
-    # phase-3 backend collapses (no netlist → no PnR → no pnr/constraint.sdc →
-    # the step-7 constraints/*.sdc gate FAILs → every downstream stage cascades),
-    # while phase-2 synth PASSES on the same rtl/ — a same-project divergence.
-    # The resolver returns --top-name unchanged when it IS a real module, so
-    # already-correct designs are untouched; it only overrides a phantom top.
-    if effective_top == args.top_name:
-        _structural_top = _resolve_asic_top_structural(
-            project, args.top_name, _l9_top_module_hint(project))
-        if _structural_top and _structural_top != effective_top:
-            print(f"[phase3] ASIC top {args.top_name!r} is not a module in "
-                  f"rtl/ — resolved synthesizable top to {_structural_top!r} "
-                  f"(instantiation-graph root; parity with phase-2 synth)",
-                  file=sys.stderr)
-            effective_top = _structural_top
+    # R-0915-157 round 9: the resolution lives in `_chip_synth_read.
+    # effective_top`, the ONE definition the Step-5 proof's record is compared
+    # against. `<top>_asic` / `<top>_pad_wrapper` when rtl/ carries one; else
+    # the SAME structural resolver phase-2 uses — the orchestrator's --top-name
+    # is frequently the PROJECT / SKU name (e.g. `caravel_user_project`), whose
+    # synthesizable top module is a differently-named wrapper
+    # (`user_project_wrapper`); without it `synth -top <project>` fails its
+    # HIERARCHY pass while phase-2 synth PASSES on the same rtl/. A --top-name
+    # that IS a real module is returned unchanged.
+    import _chip_synth_read as _csr_top
+    effective_top = _csr_top.effective_top(project, args.top_name)
+    if (effective_top != args.top_name
+            and effective_top not in (f"{args.top_name}_asic",
+                                      f"{args.top_name}_pad_wrapper")):
+        print(f"[phase3] ASIC top {args.top_name!r} is not a module in "
+              f"rtl/ — resolved synthesizable top to {effective_top!r} "
+              f"(instantiation-graph root; parity with phase-2 synth)",
+              file=sys.stderr)
 
     print(f"=== phase3_one_shot_runner — pdk={pdk.name} top={effective_top}"
           f"{' (override of '+args.top_name+')' if effective_top != args.top_name else ''} ===")

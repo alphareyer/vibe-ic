@@ -2062,6 +2062,19 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
         import _chip_synth_read as _csr
         _simdef, _simdec = _csr.chip_sim_define(
             rtl_files, _csr.staged_macro_files(project))
+        # R-0915-157 round 9: the define decision reads the macro views A8
+        # stages in phase 3. While a declared analog block has none staged,
+        # the chip's decision cannot be known here: outside the class, named.
+        _unstaged = _csr.unstaged_analog_blocks(project)
+        if _unstaged:
+            for o in declared:
+                if o.get("program_rule"):
+                    _pre_refused.setdefault(str(o["id"]), (
+                        f"outside the class: the design declares analog "
+                        f"block(s) {_unstaged} whose hard macros A8 has not "
+                        f"staged yet, so the chip's -DSIMULATION decision "
+                        f"cannot be known at Step 5; the program closes "
+                        f"nothing on a read that may not be the chip's"))
         _facts, _facts_why = netlist_state(
             rtl_files, _decl_top, _pl.formal_dir(project) / "l8_netlist",
             container, _resets, clock, _simdef)
@@ -2186,6 +2199,10 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
                               and c.get("signal") in _inputs}),
             "rtl_files": [str(f) for f in rtl_files],
         }
+    if _top_found and project is not None and _pl is not None:
+        # R-0915-157 round 9: the module the program-closed proof is ABOUT;
+        # `formal_property_run` records the exact chip read under it.
+        contract["chip_read_top"] = _decl_top
     if l8_obs:
         contract["observers"] = [
             {"wire": o.wire, "net": f"dut.{o.net}", "width": o.width}

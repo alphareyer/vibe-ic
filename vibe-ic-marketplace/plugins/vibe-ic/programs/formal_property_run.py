@@ -2235,6 +2235,7 @@ def run(project: Path, harness: Optional[Path] = None,
 
     # 1) locate/emit the .sby + stage sources into formal/ ------------------
     sby_path: Optional[Path] = None
+    chip_read: Optional[dict] = None
     if inv_h is not None and inv_h.is_file():
         # ---- invariant-strengthened (auxiliary-invariant) datapath proof ----
         if not rtl or top is None:
@@ -2354,7 +2355,17 @@ def run(project: Path, harness: Optional[Path] = None,
         _observers = parse_observers(_harness_texts(None, formal_dir, harness))
         # R-0915-157: the chip's own define decision for the DUT read
         import _chip_synth_read as _csr
-        _dut_simdef, _ = _csr.chip_sim_define(rtl, _csr.staged_macro_files(project))
+        _dut_macros = _csr.staged_macro_files(project)
+        _dut_simdef, _ = _csr.chip_sim_define(rtl, _dut_macros)
+        # R-0915-157 round 9: the exact chip read this proof proves, under
+        # the top the harness generator named (see results["chip_read"])
+        try:
+            _crtop = json.loads((formal_dir / "property_contract.json")
+                                .read_text()).get("chip_read_top")
+        except (OSError, ValueError):
+            _crtop = None
+        if _crtop:
+            chip_read = _csr.chip_read_record(rtl, _dut_macros, _crtop)
         sby_text = emit_sby(staged_rtl, harness.name, top,
                             safety_depth=safety_depth, bmc_depth=bmc_depth,
                             include_files=staged_hdrs, observers=_observers,
@@ -2537,6 +2548,8 @@ def run(project: Path, harness: Optional[Path] = None,
         _program_discharge(formal_dir, container, _htext,
                            _model_texts(sby_path, formal_dir, harness))
     _attach_property_contract(results, formal_dir, harness or inv_h)
+    if chip_read is not None:
+        results["chip_read"] = chip_read
     results["mode"] = ("invariant-strengthened"
                        if inv_h is not None else "standard")
     # HONEST engine record: which stronger OSS datapath engines were available,
