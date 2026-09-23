@@ -55087,8 +55087,13 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                     # re-run any of them, which is why the post-route repair netlist is not the
                     # shipped implementation (see _POSTROUTE_TIMING_REPAIR_MAX_DROUTE_ITERS).
                     # Written in the flow's own declaration order.
+                    # 37.3 (#2514) joins for 33's reason: it `blocks_on: [21]`
+                    # (the routed database is its reference), not on 32, so
+                    # nothing in the graph guarantees its XOR receipt describes
+                    # the post-repair layout.
                     "affected_steps": [21, 22, "DT2", "DT3", 23, 24, 25, 26,
-                                       "26.5ic", 27, 28, 29, 30, 31, 33],
+                                       "26.5ic", 27, 28, 29, 30, 31, 33,
+                                       "37.3"],
                     "repair_before": _repair_decision["repair_before"],
                     "repair_after": _repair_after,
                     "residual_violation": _repair_residual,
