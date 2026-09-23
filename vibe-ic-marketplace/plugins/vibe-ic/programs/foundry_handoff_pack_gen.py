@@ -865,6 +865,55 @@ def _routing_incomplete(project: Path):
     return bool(data.get("routing_incomplete"))
 
 
+def package_layout_members(project: Path) -> dict:
+    """(Re)derive every handoff LAYOUT member from its signed-off source.
+
+    EVERY time, never copy-if-absent, and by COPY, never hardlink. MEASURED on
+    spm run23: a phase-3 re-run moved the signed-off GDS a7bf4526... ->
+    46459f4a... and the package kept a7bf4526..., because the member was
+    written once (`if dst.is_file(): continue`) as a hardlink, and the source's
+    rewrite-by-rename left the link on the old inode. A member whose bytes equal
+    its source and share no inode with it is kept; anything else is replaced
+    atomically (temp + os.replace). Returns the per-member record the package
+    publishes: member sha256 and bytes, source path and source sha256.
+    """
+    import os
+    import shutil
+    project = Path(project)
+    hd = _pl.foundry_handoff_dir(project)
+    hd.mkdir(parents=True, exist_ok=True)
+    members, written, kept, zero = {}, [], [], []
+    for name, src in _fhpc.layout_member_sources(project).items():
+        if src.stat().st_size == 0:
+            zero.append(name)
+            continue
+        dst = hd / name
+        s_sha = _fhpc.sha256_file(src)
+        same_inode = False
+        if dst.is_file():
+            try:
+                same_inode = os.path.samefile(dst, src)
+            except OSError:
+                same_inode = False
+        if (dst.is_file() and not dst.is_symlink() and not same_inode
+                and _fhpc.sha256_file(dst) == s_sha):
+            kept.append(name)
+        else:
+            tmp = hd / f".{name}.tmp"
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, dst)
+            written.append(name)
+        members[name] = {
+            "sha256": _fhpc.sha256_file(dst),
+            "bytes": dst.stat().st_size,
+            "source": str(src.relative_to(project)),
+            "source_sha256": s_sha,
+            "signed_off_source": src.parent == _pl.gds_dir(project),
+        }
+    return {"members": members, "written": written, "kept": kept,
+            "zero_byte_sources": zero}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     p.add_argument("project", type=Path)
@@ -1036,6 +1085,14 @@ def main(argv=None) -> int:
             ("PENDING_FOUNDRY_mask_layers",
              "PENDING_FOUNDRY_reticle_steppers"), mode_info),
     }
+    # THE LAYOUT MEMBERS, derived from the signed-off GDS on EVERY run and
+    # recorded (member + source sha256) in the package's own spec, which
+    # foundry_handoff_package_check compares against the signed-off bytes.
+    _layout = package_layout_members(project)
+    mask_spec["layout_members"] = _layout["members"]
+    if _layout["written"]:
+        print(f"[handoff] layout member(s) (re)derived from the signed-off GDS: "
+              f"{', '.join(_layout['written'])}")
     _aa.write_text(handoff_dir / "mask_spec.json",
         json.dumps(mask_spec, indent=2, ensure_ascii=False) + "\n")
 
