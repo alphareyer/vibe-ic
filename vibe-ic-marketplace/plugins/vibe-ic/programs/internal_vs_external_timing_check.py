@@ -246,6 +246,59 @@ def _names_needle(text: Any, needle: str) -> bool:
     return True
 
 
+def symbol_family_hits(waveform: Any, rtl_constants: Any = None) -> list[str]:
+    """Where the L8 speaks the H0/H1/BR/IBT single-wire pulse-symbol family
+    this check reads, as paths (R-0915-164).
+
+    Read with the ONE symbol reader (`_identifier_tokens` / `_token_symbol`):
+    every key at every depth, every `name`/`symbol`/`signal` value and every
+    list string of the L8 outside the schema's non-protocol keys, plus
+    `symbol_directionality` and check()'s own classified RX/TX groups, plus
+    the --layer constants read ONLY as check()
+    reads them (`_find_numeric_us` TX_IBT / BR_MIN) -- never walked.
+    """
+    import l8_timing_schema as _schema
+    hits: list[str] = []
+
+    def _syms(text: Any) -> bool:
+        return any(_token_symbol(t) for t in _identifier_tokens(text))
+
+    def _walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                sub = f"{path}.{k}"
+                if _syms(k):
+                    hits.append(sub)
+                if (k in ("name", "symbol", "signal") and isinstance(v, str)
+                        and _syms(v)):
+                    hits.append(f"{sub}={v}")
+                _walk(v, sub)
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                if isinstance(item, str) and _syms(item):
+                    hits.append(f"{path}[{i}]={item}")
+                _walk(item, f"{path}[{i}]")
+
+    if isinstance(waveform, dict):
+        if waveform.get("symbol_directionality"):
+            hits.append("symbol_directionality")
+        # check()'s own RX/TX groups are the family's grouping vocabulary: a
+        # classified group that lacks its symbols is a real FAIL of this rule.
+        _rx, _tx = classified_groups(waveform)
+        hits += [f"rx_group:{k}" for k in _rx] + [f"tx_group:{k}" for k in _tx]
+        for k, v in waveform.items():
+            if k in _schema.NON_PROTOCOL_KEYS:
+                continue
+            if _syms(k):
+                hits.append(str(k))
+            _walk(v, str(k))
+    if rtl_constants is not None:
+        for needle in ("TX_IBT", "BR_MIN"):
+            if _find_numeric_us(rtl_constants, needle) is not None:
+                hits.append(f"layer:{needle}")
+    return hits
+
+
 def classified_groups(waveform: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     """``(groups_rx, groups_tx)`` exactly as `check()` classifies them.
 
@@ -747,6 +800,46 @@ def main() -> int:
                     "if_true": "RX/TX timing split checked (PASS/FAIL)"},
                 "reason": msg,
             }, indent=2)
+            if args.json == "-":
+                print(txt)
+            else:
+                Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.json).write_text(txt + "\n")
+        else:
+            print(msg)
+        return 2
+
+    # R-0915-164 — DECLARED HALF-DUPLEX, BUT NOT IN THIS SYMBOL FAMILY. check()
+    # reads ONE single-wire pulse-symbol family (H0/H1/BR/IBT groups,
+    # symbol_directionality, TX_IBT/BR_MIN). A design that declares
+    # half_duplex=true and expresses its turnaround timing otherwise
+    # (MIL-STD-1553 RT response time, DALI forward->backward delay, SD NCR)
+    # cannot have its split decided by this checker: INCOMPLETE naming that and
+    # listing the candidate keys -- never a FAIL for vocabulary it does not
+    # speak. When the family's vocabulary IS present, check() judges it and a
+    # missing group or a violated number still FAILs.
+    if not symbol_family_hits(waveform, rtl_constants):
+        import l8_timing_schema as _schema
+        candidates = sorted(
+            str(k) for k, v in waveform.items()
+            if k not in _schema.NON_PROTOCOL_KEYS and v not in (None, [], {}))
+        msg = ("INCOMPLETE: internal_vs_external_timing: L2 declares "
+               "half_duplex=true, but turnaround timing is not expressed in "
+               "the H0/H1/BR/IBT symbol family this check reads, so the RX/TX "
+               "split cannot be decided here. Candidate keys: "
+               + (", ".join(candidates) if candidates else "none"))
+        if args.json:
+            txt = json.dumps({
+                "source_file": waveform_path, "total_findings": 0,
+                "errors": 0, "findings": [], "verdict": "INCOMPLETE",
+                # The checker cannot read the design's timing vocabulary: the
+                # taxonomy's EXECUTION_ERROR is wrong (nothing errored) and
+                # BLOCKED_BY_UPSTREAM is wrong (the upstream produced it). The
+                # INCOMPLETE class for "the population this rule reads is
+                # empty" is ZERO_DENOMINATOR.
+                "reason_class": "ZERO_DENOMINATOR",
+                "candidate_keys": candidates,
+                "reason": msg}, indent=2)
             if args.json == "-":
                 print(txt)
             else:
