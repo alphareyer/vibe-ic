@@ -3272,21 +3272,25 @@ def _record_gate_execution(cmd: str, rc: Optional[int], verdict: str,
     return row
 
 
-def _step_produced_every_declared_output(result: Any,
-                                        audit_created: Any = None) -> bool:
+def _step_produced_every_declared_output(
+        result: Any,
+        audit_created: Any = None,
+        specs: Any = None,
+        strict_step_binding: bool = False) -> bool:
     """Did THIS step produce every output it declares, by its own binding?
 
-    Reads `output_binding`, which `_disclose_output_binding` already publishes
-    on the row: `n_specs` declared and `n_step_attributed` resolved against the
-    step's own write record and re-verified live. Both conditions are required
-    and neither is inferred:
+    BY ITS OWN BINDING, and that phrase is the whole rule (R-0915-152). The
+    question is answered with the SAME test `check_step` applies to the step's
+    own outputs a few hundred lines below -- every spec satisfied, and none
+    that `_binding_code_blocks` refuses -- plus the one exclusion that is
+    about delivery rather than attribution (an audit-created artefact).
 
       * a step that declares NO outputs cannot have produced them, so it is
         False -- the tier must keep coming from its clauses;
-      * project-wide resolution is not enough. `n_step_attributed` answers
-        "this step produced it", which is the question here; the project-wide
-        glob answers only "a file matching this pattern exists somewhere", and
-        that must never speak for a step.
+      * `specs` is the UNTRUNCATED per-spec list. `output_binding["specs"]` is
+        capped at 16 for report size and verdict logic must never inherit a
+        display cap, so a list that does not cover every declared output
+        cannot answer the blocking question and the answer is False.
     """
     b = getattr(result, "output_binding", None)
     if not isinstance(b, Mapping):
@@ -3294,6 +3298,8 @@ def _step_produced_every_declared_output(result: Any,
     n = b.get("n_specs")
     k = b.get("n_step_attributed")
     sat = b.get("n_satisfied")
+    # `k` is not a CONDITION any more (see below) but it is still a shape
+    # check: a binding that cannot say how it resolved is not read at all.
     if not isinstance(n, int) or not isinstance(k, int) or n <= 0:
         return False
     # R-0915-152 — THE DEMOTION'S EVIDENCE STANDARD IS THE STEP'S OWN
@@ -3327,17 +3333,40 @@ def _step_produced_every_declared_output(result: Any,
     # the count alone cannot answer this because it is taken before the gate.
     if audit_created:
         return False
-    # BOTH, and the second is the one the review added. `n_step_attributed`
-    # answers "resolved against THIS step's own write record"; `n_satisfied`
-    # answers "and the file is there". A binding that cannot answer the second
-    # question does not get the benefit of the doubt.
-    if not isinstance(sat, int):
+    # DELIVERY IS SATISFACTION, NOT ATTRIBUTION MODE, and this is where the
+    # final review found the branch inert. `n_step_attributed == n_specs` was
+    # required here: it answers "resolved against THIS step's own write
+    # record", which a run that emits no ledger can never satisfy. Every spec
+    # then resolves project_glob/`no_binding`, k is 0, and the demotion never
+    # fired -- on run22, and on every benchmark cell -- while the SAME step
+    # with the clause deleted PASSed, because `no_binding` blocks only under
+    # `--strict-step-binding`. A condition the step itself is not held to is
+    # exactly what R-0915-152 forbids, so the standard is the step's own:
+    # satisfied, and not blocked by `_binding_code_blocks`.
+    if not isinstance(sat, int) or sat != n:
         return False
-    return k == n and sat == n
+    _specs = b.get("specs") if specs is None else specs
+    if not isinstance(_specs, list) or len(_specs) != n:
+        return False
+    for _sp in _specs:
+        if not isinstance(_sp, Mapping):
+            return False
+        # THE SAME PREDICATE `check_step` USES (see the `_unbound` comprehension
+        # by `UNATTRIBUTED OUTPUT`): a satisfied project-glob spec whose code
+        # blocks. `no_step_record` always blocks -- the run DID emit a ledger
+        # and it does not mention this spec. `no_binding` blocks only under
+        # the producer-migration flag, and that flag is read, never guessed.
+        if (_sp.get("satisfied")
+                and _sp.get("mode") == "project_glob"
+                and _binding_code_blocks(_sp.get("code"),
+                                         strict_step_binding)):
+            return False
+    return True
 
 
 def _skips_that_do_not_speak_for_the_step(
-        skip_hints: List[str], result: Any) -> Tuple[List[str], List[str]]:
+        skip_hints: List[str], result: Any, specs: Any = None,
+        strict_step_binding: bool = False) -> Tuple[List[str], List[str]]:
     """Split skip hints into the ones that still set the tier and the ones
     that only describe themselves.
 
@@ -3362,7 +3391,11 @@ def _skips_that_do_not_speak_for_the_step(
     A hint that names no class at all is never demoted: not every skip site
     writes `reason_class=`, and silence is not evidence of an N/A.
     """
-    if not skip_hints or not _step_produced_every_declared_output(result):
+    # THE SAME EVIDENCE THE CALLER DECIDED ON. The caller asks the predicate
+    # first and only enters here on a yes; re-asking it with LESS than the
+    # caller had would let the two answers disagree.
+    if not skip_hints or not _step_produced_every_declared_output(
+            result, specs=specs, strict_step_binding=strict_step_binding):
         return list(skip_hints), []
     declared = [_HINT_DECLARED_CLASS_RE.search(h) for h in skip_hints]
     if not all(m and m.group(1) == _reason_taxonomy.DESIGN_DECLARED_NA
@@ -3406,7 +3439,17 @@ def _reason_names_command(reason: str) -> str:
                  _EXECUTED_DECLARED_NA_HINT_PREFIX,
                  _STRUCTURE_ONLY_HINT_PREFIX):
         if r.startswith(pref):
-            return _hint_command(r, pref)
+            cmd = _hint_command(r, pref)
+            # R-0915-135 — THE VACUOUS CHANNELS CARRY A DIAGNOSTIC LINE after
+            # the clause, and `_hint_command` strips only a `[verdict=...]`
+            # tail. Returning `clause + "\n" + diagnostic` here made this
+            # reader match nothing for those two channels, which is exactly
+            # the silent no-match the docstring above calls out. Keyed on the
+            # CLAUSE, the same handle `all_vacuous_cmds` uses, so the tier
+            # count and this reader can never disagree about a clause.
+            if pref in (_VACUOUS_HINT_PREFIX, _JSON_VACUOUS_HINT_PREFIX):
+                return split_vacuous_payload(cmd)[0]
+            return cmd
     if r.startswith("GATE EVIDENCE: "):
         # `GATE EVIDENCE: <program> rc=0 verdict=...` — the program name only,
         # which is how the advisory branch identifies its own clause here.
@@ -16119,10 +16162,13 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # output" means produced by the RUN, and whether an output was written
         # by this step's own gate is only known once `_audit_produced` is.
         _demoted_skips: List[str] = []
-        if _step_produced_every_declared_output(result, _audit_produced):
+        if _step_produced_every_declared_output(
+                result, _audit_produced, specs=_bind_specs,
+                strict_step_binding=strict_step_binding):
             _cand = [r for r in reasons if r.startswith(_SKIP_HINT_PREFIX)]
             _keep, _demoted_skips = _skips_that_do_not_speak_for_the_step(
-                _cand, result)
+                _cand, result, specs=_bind_specs,
+                strict_step_binding=strict_step_binding)
             if _demoted_skips:
                 _gone = {_hint_command(h, _SKIP_HINT_PREFIX)
                          for h in _demoted_skips}

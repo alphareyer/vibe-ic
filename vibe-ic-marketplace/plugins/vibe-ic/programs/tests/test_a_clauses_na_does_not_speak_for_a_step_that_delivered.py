@@ -42,6 +42,22 @@ class _R:
         self.output_binding = binding
 
 
+def _delivered(n=2, sat=None, k=None):
+    """A step that DELIVERED, in the shape the real producer publishes.
+
+    `_disclose_output_binding` always emits a per-spec list beside the counts
+    (`output_binding["specs"]`), and the predicate reads it to answer the one
+    question the counts cannot: is any satisfied output blocked by the step's
+    own binding policy. A fixture that omits it is not a delivered step, it is
+    an unanswerable binding -- so the fixtures below say what they mean.
+    """
+    sat = n if sat is None else sat
+    k = n if k is None else k
+    return _R({"n_specs": n, "n_step_attributed": k, "n_satisfied": sat,
+               "specs": [{"mode": "step_attributed", "code": "step_record",
+                          "satisfied": i < sat} for i in range(n)]})
+
+
 # ------------------------------------------------------------------ POSITIVE
 
 def test_every_declared_output_produced_by_this_step_is_the_only_yes():
@@ -49,8 +65,16 @@ def test_every_declared_output_produced_by_this_step_is_the_only_yes():
     is no longer enough on its own. It counts the resolution MODE, and a spec
     that was RECORDED AS WRITTEN AND IS ABSENT resolves step_attributed with
     satisfied=False. The delivery claim now needs `n_satisfied` too."""
+    _ok = {"mode": "step_attributed", "code": "step_record",
+           "satisfied": True}
     assert F._step_produced_every_declared_output(
-        _R({"n_specs": 2, "n_step_attributed": 2, "n_satisfied": 2})) is True
+        _R({"n_specs": 2, "n_step_attributed": 2, "n_satisfied": 2,
+            "specs": [dict(_ok), dict(_ok)]})) is True
+    # AMENDED AGAIN by the final review: without a spec list covering every
+    # declared output the blocking question cannot be answered, and an
+    # unanswerable binding is refused rather than assumed clean.
+    assert F._step_produced_every_declared_output(
+        _R({"n_specs": 2, "n_step_attributed": 2, "n_satisfied": 2})) is False
 
 
 # ------------------------------------------------------------------ NEGATIVE
@@ -70,15 +94,58 @@ def test_a_partially_delivered_step_is_not_a_delivered_one():
         _R({"n_specs": 2, "n_step_attributed": 0})) is False
 
 
-def test_project_wide_resolution_never_speaks_for_a_step():
-    """`n_step_attributed` answers "THIS step produced it". The project-wide
-    glob answers only "a file matching this pattern exists somewhere under the
-    project", and the flow's own OUTPUT ATTRIBUTION line says so. A step whose
-    outputs were resolved that way has not been shown to have produced
-    anything, so its clauses keep the tier."""
+def test_the_standard_is_the_steps_own_binding_not_step_attribution():
+    """REPLACED by the final review, and the replacement is the RULING.
+
+    The deleted version asserted that a project-glob resolution never speaks
+    for a step, and made `n_step_attributed == n_specs` a condition. That is
+    STRICTER than the standard the step itself is held to, which R-0915-152
+    forbids: `check_step` blocks a satisfied project-glob output only when
+    `_binding_code_blocks` says so -- always for `no_step_record`, and for
+    `no_binding` only under `--strict-step-binding`. A run with no step-write
+    ledger at all (every benchmark cell, and run22) resolves every spec
+    project-glob/`no_binding`, so the old condition made this branch INERT on
+    exactly the runs it exists for while the clause-deleted step passed.
+
+    So: satisfied and non-blocking is a yes, whatever the mode."""
+    _glob = {"mode": "project_glob", "code": "no_binding", "satisfied": True}
     assert F._step_produced_every_declared_output(
-        _R({"n_specs": 2, "n_step_attributed": 0, "mode": "project_wide"})
-    ) is False
+        _R({"n_specs": 2, "n_step_attributed": 0, "n_satisfied": 2,
+            "specs": [dict(_glob), dict(_glob)]})) is True
+
+
+def test_a_blocking_binding_code_is_not_a_step_that_delivered():
+    """The other direction, one spec at a time. `no_step_record` means this
+    run DID emit a ledger and it does not mention this spec -- always
+    blocking, so never a delivery. `no_binding` blocks only under the
+    producer-migration flag, and the predicate must read that flag rather
+    than guess."""
+    def _b(code, **kw):
+        sp = {"mode": "project_glob", "code": code, "satisfied": True}
+        return _R({"n_specs": 2, "n_step_attributed": 0, "n_satisfied": 2,
+                   "specs": [{"mode": "step_attributed",
+                              "code": "step_record", "satisfied": True},
+                             sp]}), kw
+    r, _ = _b("no_step_record")
+    assert F._step_produced_every_declared_output(r) is False
+    r, _ = _b("no_binding")
+    assert F._step_produced_every_declared_output(r) is True
+    assert F._step_produced_every_declared_output(
+        r, strict_step_binding=True) is False
+
+
+def test_an_unanswerable_binding_refuses_to_demote():
+    """FAIL CLOSED, and the direction is deliberate. `output_binding["specs"]`
+    is capped at 16 for report size and verdict logic must never inherit a
+    display cap, so a spec list that does not cover every declared output
+    cannot answer "is any of them blocked". Refusing leaves the N/A clause
+    speaking for the step, which makes the run look WORSE, never better."""
+    _ok = {"mode": "step_attributed", "code": "step_record",
+           "satisfied": True}
+    for specs in ([dict(_ok)], [], None, "2", [dict(_ok), "x"]):
+        assert F._step_produced_every_declared_output(
+            _R({"n_specs": 2, "n_step_attributed": 2, "n_satisfied": 2,
+                "specs": specs})) is False, specs
 
 
 def test_a_missing_or_malformed_binding_changes_nothing():
@@ -136,7 +203,7 @@ def test_only_a_declared_na_skip_is_demoted(tmp_path=None):
     stops speaking for its step leaves `oss_blocked_skipped`, loses
     `self_skip_disclosed`, and the run can publish PASS with the gap
     invisible -- which is the opposite of what this change is for."""
-    delivered = _R({"n_specs": 2, "n_step_attributed": 2, "n_satisfied": 2})
+    delivered = _delivered(2)
     kept, demoted = F._skips_that_do_not_speak_for_the_step(
         [_hint("macro_non_seq_arc_contract_check")], delivered)
     assert kept == [] and len(demoted) == 1
@@ -150,7 +217,7 @@ def test_only_a_declared_na_skip_is_demoted(tmp_path=None):
 def test_a_hint_that_names_no_class_is_never_demoted():
     """Fail closed: not every skip-hint site writes `reason_class=`, and a
     hint whose class cannot be read is not evidence that it is an N/A."""
-    delivered = _R({"n_specs": 1, "n_step_attributed": 1, "n_satisfied": 1})
+    delivered = _delivered(1)
     kept, demoted = F._skips_that_do_not_speak_for_the_step(
         [f"{F._SKIP_HINT_PREFIX}some_gate: artifact self-reports a skip"],
         delivered)
@@ -160,7 +227,7 @@ def test_a_hint_that_names_no_class_is_never_demoted():
 def test_a_mixed_set_is_not_demoted_at_all():
     """If ANY skip is a real capability gap, the step is still skipped and the
     tier must keep coming from the clauses."""
-    delivered = _R({"n_specs": 1, "n_step_attributed": 1, "n_satisfied": 1})
+    delivered = _delivered(1)
     kept, demoted = F._skips_that_do_not_speak_for_the_step(
         [_hint("a"), _hint("b", "CAPABILITY_ABSENT")], delivered)
     assert demoted == [] and len(kept) == 2
@@ -175,9 +242,9 @@ def test_step_attributed_is_not_satisfied():
     On the formal step that turned an honest SKIPPED-CONDITION into
     FAIL(missing_artefact), which is the #675 cascade this tree removed."""
     assert F._step_produced_every_declared_output(
-        _R({"n_specs": 3, "n_step_attributed": 3, "n_satisfied": 2})) is False
+        _delivered(3, sat=2)) is False
     assert F._step_produced_every_declared_output(
-        _R({"n_specs": 3, "n_step_attributed": 3, "n_satisfied": 3})) is True
+        _delivered(3, sat=3)) is True
     # A binding with no satisfaction count at all cannot answer the question.
     assert F._step_produced_every_declared_output(
         _R({"n_specs": 3, "n_step_attributed": 3})) is False
@@ -187,7 +254,7 @@ def test_the_demoted_skip_is_still_disclosed_on_the_row():
     """MEDIUM. The clause's skip is TRUE and a reader must see it. The guard
     skipped the only branch that appends those lines, so the disclosure
     vanished with the tier."""
-    delivered = _R({"n_specs": 1, "n_step_attributed": 1, "n_satisfied": 1})
+    delivered = _delivered(1)
     _kept, demoted = F._skips_that_do_not_speak_for_the_step(
         [_hint("macro_non_seq_arc_contract_check")], delivered)
     lines = F._demoted_skip_disclosures(demoted)
@@ -710,3 +777,122 @@ def test_an_entry_step_run_judges_the_step_as_the_clause_deleted_one(tmp_path):
     finally:
         g1.unlink(missing_ok=True)
         g2.unlink(missing_ok=True)
+
+
+# ===========================================================================
+# FINAL REVIEW, 2026-09-23 — the branch was INERT on the runs it exists for.
+#
+# `_step_produced_every_declared_output` demanded `n_step_attributed ==
+# n_specs`. A run with no step-write ledger resolves every spec project-glob
+# with code `no_binding`, so k=0 and the demotion never fired -- while the
+# same step with the clause DELETED passed, because `no_binding` blocks only
+# under `--strict-step-binding`. run22 is exactly that shape. These two drive
+# `check_step` on a project with NO ledger, which is the only fixture that
+# can tell the two standards apart.
+# ===========================================================================
+
+def _no_ledger_arms(tmp_path, tag, strict):
+    """(with the N/A clause, with it deleted) on a project that has no
+    step-write ledger anywhere -- outputs on disk, nothing attributing them."""
+    g1 = _gate_program(tmp_path, f"_{tag}_na", _NA_ADVISORY)
+    g2 = _gate_program(tmp_path, f"_{tag}_vac", _CHANNELS["legacy_vacuous"][0])
+    try:
+        step_with = {
+            "id": "NL", "name": "no-ledger fixture", "stage": "stage2",
+            "required_outputs": ["phase2/stage2/constraints/*.sdc",
+                                 "phase2/stage2/constraints/pvt_matrix.json"],
+            "gate": {"all_of": [
+                {"advisory_program_exit_zero": {
+                    "command": f"{g1.stem} . --json reports/{tag}_na.json",
+                    "advisory_reason": "no-ledger fixture"}},
+                {"program_exit_zero": f"{g2.stem} ."}]}}
+        step_without = {**step_with,
+                        "gate": {"all_of": [step_with["gate"]["all_of"][1]]}}
+        out = []
+        for name, step in (("with", step_with), ("without", step_without)):
+            root = tmp_path / f"{tag}_{name}"
+            root.mkdir(parents=True, exist_ok=True)
+            # sid=None: NO steps/index.json, NO written.json, NO run ledger.
+            _project(root)
+            (root / "reports").mkdir(exist_ok=True)
+            out.append(F.check_step(root, step, {}, None,
+                                    strict_step_binding=strict))
+        return out
+    finally:
+        g1.unlink(missing_ok=True)
+        g2.unlink(missing_ok=True)
+
+
+def test_a_run_without_a_step_write_ledger_judges_as_the_clause_deleted_one(
+        tmp_path):
+    """THE RUN22 SHAPE, and the invariant that was false on it.
+
+    Measured before the fix: `NOT_APPLICABLE / missing_artefact` with the
+    clause, `NOT_MEASURED / no_population` with it deleted. The clause spoke
+    for the step on every run that emits no ledger -- which is every run the
+    demotion was written for."""
+    r_with, r_without = _no_ledger_arms(tmp_path, "nl1", False)
+    assert (r_with.status, r_with.reason_class) == (
+        r_without.status, r_without.reason_class), (
+            f"a demoted N/A clause changed the judgement on a run with no "
+            f"step-write ledger.\n  with the clause : "
+            f"{r_with.status}/{r_with.reason_class} {r_with.reasons}\n"
+            f"  clause deleted  : "
+            f"{r_without.status}/{r_without.reason_class}")
+    # AND THE BINDING IS THE DEGRADED ONE, so the arm cannot pass by
+    # accidentally acquiring attribution and testing the other branch.
+    b = r_with.output_binding or {}
+    assert b.get("n_step_attributed") == 0 and b.get("codes") == ["no_binding"]
+    assert b.get("n_satisfied") == b.get("n_specs") == 2, b
+
+
+def test_strict_step_binding_blocks_the_demotion_as_it_blocks_the_step(
+        tmp_path):
+    """THE FLAG, BOTH DIRECTIONS, one project. Under `--strict-step-binding`
+    a satisfied `no_binding` output stops certifying its step, so the step has
+    NOT produced every declared output by its own standard and its N/A clause
+    keeps speaking for it.
+
+    The two arms are NOT asserted equal here, and deliberately: the
+    clause-deleted step takes the `UNATTRIBUTED OUTPUT` FAIL, which a
+    `NOT_APPLICABLE` row is structurally exempt from (`_credits_its_outputs`
+    excludes it). What must hold is that the demotion does not fire -- keyed
+    on the flag alone, with the non-strict arm above as the control."""
+    r_with, r_without = _no_ledger_arms(tmp_path, "nl2", True)
+    joined = " ".join(str(x) for x in r_with.reasons)
+    assert "SKIPPED-CONDITION" in joined, (
+        "under --strict-step-binding the N/A clause must still set the tier: "
+        f"{r_with.reasons}")
+    assert r_with.status == F._T.Verdict.NOT_APPLICABLE.value, r_with.status
+    assert r_without.status == F._T.Verdict.FAIL.value, r_without.status
+    assert "UNATTRIBUTED OUTPUT" in " ".join(
+        str(x) for x in r_without.reasons), r_without.reasons
+
+
+def test_the_one_reader_survives_a_two_line_vacuous_payload():
+    """REBASE RE-CHECK, and it found a latent leak the rebase introduced.
+
+    R-0915-135 gave a vacuous hint a payload of `<clause>` plus an optional
+    DIAGNOSTIC line. `_hint_command` only strips a trailing `[verdict=...]`
+    tail, so `_reason_names_command` returned `clause + "\\n" + diagnostic` for
+    those two channels -- a string no demoted clause's command can ever equal.
+    A demoted N/A clause that also spoke through the vacuous channel would
+    therefore keep its vacuous hint, and `all_vacuous_cmds` (which is keyed on
+    the CLAUSE, via `split_vacuous_payload`) would still count it. That is the
+    per-channel leak round 4 ruled out by making this the ONE reader; the fix
+    is the same one `all_vacuous_cmds` already uses.
+
+    BOTH DIRECTIONS: with and without the diagnostic, and against the SKIP
+    hint for the same clause, which is the equality the demotion performs."""
+    cmd = "macro_non_seq_arc_contract_check ."
+    skip = F._reason_names_command(
+        f"{F._SKIP_HINT_PREFIX}{cmd} [verdict=SKIP, reason_class={_NA}]")
+    assert skip == cmd
+    for pref in (F._VACUOUS_HINT_PREFIX, F._JSON_VACUOUS_HINT_PREFIX):
+        assert F._reason_names_command(f"{pref}{cmd}") == cmd, pref
+        assert F._reason_names_command(
+            f"{pref}{cmd}\nstated_class=NO_POPULATION; nothing to examine"
+        ) == cmd, pref
+        # ...and it is the SAME handle the tier count is keyed on, so the
+        # demotion and `all_vacuous_cmds` can never disagree about a clause.
+        assert F.split_vacuous_payload(f"{cmd}\ndiag")[0] == cmd
