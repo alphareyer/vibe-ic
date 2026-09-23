@@ -58,10 +58,26 @@ def _run(project, rel):
     return r.returncode, (doc.get("summary") or {})
 
 
-def _stage(tmp_path, text):
+def _stage(tmp_path, text, unit="ns"):
+    """Stage a report the way the RUNNER writes one.
+
+    ROUND-2: every canonical STA report this flow emits carries
+    `STA_BASIS_LIBERTY: <path>`, and the liberty declares the time unit the
+    numbers are in. The audit now takes the unit from there and REFUSES to
+    publish a number when it cannot, so a fixture without that line is not a
+    report this tree produces -- it is a report with no unit, and it is tested
+    as such by `test_an_unresolvable_unit_refuses_the_number`.
+    """
     d = tmp_path / "phase3" / "stage3" / "sta"
     d.mkdir(parents=True, exist_ok=True)
-    (d / "post_route_timing.rpt").write_text(text)
+    head = ""
+    if unit:
+        lib = tmp_path / f"corner_{unit}.lib"
+        lib.write_text("library (fixture) {\n"
+                       f"  time_unit : 1{unit} ;\n"
+                       "  voltage_unit : 1V ;\n}\n")
+        head = f"STA_BASIS_LIBERTY: {lib}\n"
+    (d / "post_route_timing.rpt").write_text(head + text)
     return "phase3/stage3/sta/post_route_timing.rpt"
 
 
@@ -258,16 +274,22 @@ def test_a_stamp_can_never_subtract_a_violation_that_is_written_down(tmp_path):
     assert s.get("slack_measurement") == "MEASURED", s
 
 
-def test_the_time_unit_is_read_or_named_as_unread(tmp_path):
+def test_a_report_that_states_its_own_unit_is_believed(tmp_path):
     """OpenSTA reports in the FIRST LIBERTY's time unit and the runner
     supports ps liberties. Labelling every number `_ns` without reading a unit
     publishes a 1000x error as a margin."""
-    rel = _stage(tmp_path, _TRANSCRIPT)
-    _rc, s = _run(tmp_path, rel)
-    assert s.get("slack_time_unit_stated") is False, s
-    assert "ns" in str(s.get("slack_time_unit_basis") or ""), s
-
-    ps = _stage(tmp_path, "time 1ps\nworst slack max -35.20\n")
+    # RETRACTED AND REVERSED by the round-2 review, 2026-09-23. This asserted
+    # `slack_time_unit_stated is False` over a runner-shaped report -- i.e. it
+    # pinned the DISCLOSURE as the correct outcome. The review's answer is
+    # that a flag beside a wrong number is still a wrong number: no deck in
+    # this tree prints a unit, so "not stated" was every real run, and the
+    # numbers went out under `_ns` names regardless. The unit now comes from
+    # the liberty the report names, and an unresolvable unit publishes NO
+    # number (see `test_an_unresolvable_unit_refuses_the_number`).
+    #
+    # What survives unchanged is the half that was right: a report that DOES
+    # state its own unit is believed, and the value is converted.
+    ps = _stage(tmp_path, "time 1ps\nworst slack max -35.20\n", unit=None)
     _rc2, s2 = _run(tmp_path, ps)
     assert s2.get("slack_time_unit") == "ps", s2
     assert s2.get("slack_time_unit_stated") is True, s2
@@ -293,3 +315,131 @@ def test_a_mirror_of_the_same_report_is_not_a_second_measurement(tmp_path):
     assert (s.get("slack_scan") or {}).get("datapoints") == 1, s
     assert "file" not in rows[0], rows[0]
     assert rows[0]["source_sha256"].startswith("sha256:"), rows[0]
+
+
+# ===========================================================================
+# ROUND-2 REVIEW, 2026-09-23. Round 1's fix handled round 1's exact input and
+# nothing more. These use the shapes THE RUNNER ITSELF WRITES, and the REAL
+# measurement stamp prefix -- my round-1 stamp tests wrote `VIBEIC_MEASURED:
+# false`, which is not a token this tree reads, so they never exercised the
+# branch they were named for.
+# ===========================================================================
+
+import _mcp_measurement as _mcp  # noqa: E402
+
+#: (a) step 23's aliased post_route_timing.rpt. The HOLD stanza runs
+#: `report_worst_slack -min` and then an UNFLAGGED `report_tns`, which prints
+#: `tns max 0.00` INSIDE the HOLD block. The max axis has no worst-slack line
+#: at all, so no sentinel marks it -- and a run that analysed nothing on setup
+#: published a met 0.00 TNS.
+_HOLD_BLOCK_UNFLAGGED_TNS = """\
+=== HOLD corner: process=FF ===
+No paths found.
+worst slack min INF
+tns max 0.00
+"""
+
+#: (b) per_corner/sta_<c>.rpt and pre_pnr_timing.rpt: report_checks /
+#: report_tns / report_wns with NO report_worst_slack, so there is no sentinel
+#: anywhere and both zeros are published.
+_NO_WORST_SLACK_AT_ALL = """\
+=== SETUP corner: process=TT ===
+No paths found.
+tns max 0.00
+wns max 0.00
+"""
+
+
+def test_a_hold_block_tns_echo_is_not_a_setup_measurement(tmp_path):
+    """ROUND-2 HIGH (a). The runner writes this; `extract_slacks` decides
+    vacuity per (block, axis) on the worst-slack sentinel and never reads
+    `No paths found.`, so the unflagged `tns max 0.00` inside a HOLD block
+    escaped and STA_NO_SLACK went silent on a run that timed nothing."""
+    rel = _stage(tmp_path, _HOLD_BLOCK_UNFLAGGED_TNS)
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("slack_measurement") == "NOT_MEASURED", s
+    assert R._numbers_under_key({"summary": s}, ("slack", "wns", "tns")) == [], s
+
+
+def test_a_report_with_no_worst_slack_line_publishes_nothing(tmp_path):
+    """ROUND-2 HIGH (b). No `report_worst_slack` anywhere means no sentinel
+    anywhere, so the round-1 rule had nothing to fire on."""
+    rel = _stage(tmp_path, _NO_WORST_SLACK_AT_ALL)
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("slack_measurement") == "NOT_MEASURED", s
+    assert R._numbers_under_key({"summary": s}, ("slack", "wns", "tns")) == [], s
+
+
+def test_no_paths_never_suppresses_a_violation(tmp_path):
+    """The other direction, and the one that must not regress: a report that
+    says it found no paths AND carries a negative slack still publishes it."""
+    rel = _stage(tmp_path,
+                 "=== SETUP corner: process=TT ===\n"
+                 "No paths found.\n"
+                 "tns max -8.40\nwns max -1.25\n")
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("setup_wns_ns") == -1.25, s
+    assert s.get("tns_ns") == -8.40, s
+
+
+# ------------------------------------------------- the REAL stamp, this time
+
+def _stamped(body, **fields):
+    rec = {"schema": _mcp.SCHEMA_FAMILY + "1", "measured": False,
+           "reason_class": "NOTHING_TO_MEASURE"}
+    rec.update(fields)
+    return _mcp.STAMP_PREFIX + _json_dumps(rec) + "\n" + body
+
+
+def _json_dumps(o):
+    import json as _j
+    return _j.dumps(o, sort_keys=True)
+
+
+def test_the_stamp_branch_uses_the_prefix_this_tree_actually_writes(tmp_path):
+    """MY ROUND-1 TEST ERROR, fixed. It wrote `VIBEIC_MEASURED: false`, a
+    token nothing in this tree reads, so the stamp branch was never entered
+    and both 'stamp' tests were green for the wrong reason. The real prefix is
+    `_mcp_measurement.STAMP_PREFIX` = '# MCP_MEASUREMENT: ' followed by the
+    record as JSON."""
+    rel = _stage(tmp_path, _stamped("worst slack max 3.20\ntns max 0.00\n"))
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("slack_measurement") == "NOT_MEASURED", s
+    assert R._numbers_under_key({"summary": s}, ("slack", "wns", "tns")) == [], s
+
+
+def test_a_real_stamp_still_cannot_subtract_a_violation(tmp_path):
+    rel = _stage(tmp_path, _stamped("worst slack max -2.50\n"))
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("setup_wns_ns") == -2.50, s
+    assert s.get("slack_measurement") == "MEASURED", s
+
+
+# ------------------------------------------------------------- the time unit
+
+def test_the_unit_comes_from_the_liberty_the_run_loaded(tmp_path):
+    """ROUND-2 HIGH/LOW. No deck in this tree prints `report_units` or
+    `set_cmd_units` -- `git grep` finds only this audit's own comments -- so
+    the round-1 reader could never find a unit and every run fell through to
+    'assumed ns'. A flag beside a wrong number is still a wrong number.
+
+    The report DOES name the liberty it timed against (`STA_BASIS_LIBERTY:`),
+    and a liberty declares `time_unit`. That is the authority."""
+    rel = _stage(tmp_path,
+                 "=== SETUP corner: process=TT ===\n"
+                 "worst slack max -35.20\n", unit="ps")
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("slack_time_unit") == "ps", s
+    assert s.get("slack_time_unit_stated") is True, s
+    assert s.get("setup_wns_ns") == -0.0352, s
+
+
+def test_an_unresolvable_unit_refuses_the_number(tmp_path):
+    """And when neither the report nor a liberty settles the unit, the number
+    is NOT published under an _ns name. Refuse, do not annotate."""
+    rel = _stage(tmp_path, "=== SETUP corner: process=TT ===\n"
+                           "worst slack max -35.20\n", unit=None)
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("slack_measurement") == "NOT_MEASURED", s
+    assert R._numbers_under_key({"summary": s}, ("slack", "wns", "tns")) == [], s
+    assert "time unit" in str(s.get("slack_not_measured_reason") or ""), s

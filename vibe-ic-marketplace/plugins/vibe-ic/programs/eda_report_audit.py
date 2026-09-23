@@ -2968,6 +2968,35 @@ _STA_TIME_TO_NS = {"s": 1e9, "ms": 1e6, "us": 1e3, "ns": 1.0,
                    "ps": 1e-3, "fs": 1e-6}
 
 
+#: The report names the liberty it timed against; a liberty DECLARES its time
+#: unit. After the round-2 review that is the only authority this tree has.
+_STA_BASIS_LIBERTY_RE = re.compile(
+    r"(?:^|\n)\s*#?\s*STA_BASIS_LIBERTY\s*:\s*(?P<path>\S+)", re.I)
+_LIBERTY_TIME_UNIT_RE = re.compile(
+    r"\btime_unit\s*:\s*\"?\s*1?\s*(?P<unit>[munpf]?s)\s*\"?\s*;", re.I)
+
+
+def _liberty_time_unit(text: str) -> Tuple[Optional[str], str]:
+    """The time unit of the liberty this report says it timed against."""
+    m = _STA_BASIS_LIBERTY_RE.search(text or "")
+    if not m:
+        return None, "the report names no STA_BASIS_LIBERTY"
+    lib = Path(m.group("path"))
+    try:
+        # A liberty is tens of MB; the declaration is in its opening lines.
+        with lib.open("r", errors="replace") as fh:
+            head = fh.read(65536)
+    except OSError as exc:
+        return None, (f"the report names liberty {lib.name} and it could not "
+                      f"be read ({type(exc).__name__})")
+    lm = _LIBERTY_TIME_UNIT_RE.search(head)
+    if not lm:
+        return None, f"liberty {lib.name} declares no time_unit"
+    return lm.group("unit").lower(), (f"read from the liberty this report "
+                                      f"timed against: {lib.name} "
+                                      f"time_unit {lm.group('unit')}")
+
+
 def _sta_time_unit(text: str) -> Tuple[Optional[str], str]:
     """The report's own time unit, or `None` with the reason it is unknown.
 
@@ -2983,9 +3012,16 @@ def _sta_time_unit(text: str) -> Tuple[Optional[str], str]:
         if unit in _STA_TIME_TO_NS:
             return unit, f"read from the report: {m.group(0).strip()}"
         return None, f"the report states an unrecognised time unit {unit!r}"
-    return None, ("the report states no time unit; OpenSTA reports in the "
-                  "first liberty's time unit, so these values are carried "
-                  "through unconverted and are ns only if that liberty is")
+    # NO DECK IN THIS TREE PRINTS ONE. `git grep report_units|set_cmd_units`
+    # over the plugin finds only this file's own comments, so the branch above
+    # never fires on a report the flow wrote -- which is why the round-2
+    # review called round 1 "disclosed, not fixed". The liberty the report
+    # NAMES is the authority, and it has one.
+    unit, basis = _liberty_time_unit(text)
+    if unit in _STA_TIME_TO_NS:
+        return unit, basis
+    return None, (basis + "; and the report states no time unit of its own, "
+                  "so no number is published under an _ns name")
 
 
 def _slack_row(fp: Any, slacks: Dict[str, Optional[float]],
@@ -3007,7 +3043,17 @@ def _slack_row(fp: Any, slacks: Dict[str, Optional[float]],
     carries the paths.
     """
     unit, basis = _sta_time_unit(text)
-    scale = _STA_TIME_TO_NS.get(unit or "ns", 1.0)
+    if unit is None:
+        # REFUSE, DO NOT ANNOTATE. Round 1 published the numbers under `_ns`
+        # keys with `slack_time_unit_stated: false` beside them -- a flag
+        # nobody reads, next to a number that is 1000x wrong on a ps liberty.
+        # A measurement whose unit is unknown is not a measurement.
+        return {"source_sha256": "sha256:" + hashlib.sha256(
+                    (text or "").encode("utf-8", errors="replace")).hexdigest(),
+                "time_unit": None, "time_unit_stated": False,
+                "time_unit_basis": basis,
+                "setup_wns_ns": None, "hold_wns_ns": None, "tns_ns": None}
+    scale = _STA_TIME_TO_NS.get(unit, 1.0)
     row: Dict[str, Any] = {
         "source_sha256": "sha256:" + hashlib.sha256(
             (text or "").encode("utf-8", errors="replace")).hexdigest(),
@@ -3589,9 +3635,10 @@ def _check_sta(project_dir: Path) -> AuditResult:
                           "no setup/hold worst-slack or TNS number survived "
                           "the same rules this audit's own verdict applies: a "
                           "report stamped not-measured contributes only a "
-                          "negative slack, and an axis whose worst slack is "
-                          "the no-paths sentinel contributes neither its wns "
-                          "nor its tns echo"),
+                          "negative slack; a block that reported no paths "
+                          "contributes neither its wns nor its tns echo; and "
+                          "a report whose time unit cannot be established "
+                          "publishes no number at all (" + _unit_basis + ")"),
                       "has_setup_hold": has_setup_hold,
                       "tool_authentic": authentic,
                       "corner_dirs_found": len(corner_dirs),
