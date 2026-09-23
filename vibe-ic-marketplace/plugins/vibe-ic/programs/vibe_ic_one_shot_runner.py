@@ -889,6 +889,42 @@ def _phase_report_path(project: Path, report_name: str) -> Path:
     return _pl.report_path(project, report_name)
 
 
+def _report_exists(project: Path, report_name: str) -> bool:
+    """Is there a `report_name` in this tree at all -- whoever wrote it, whenever?"""
+    try:
+        return _phase_report_path(project, report_name).is_file()
+    except OSError:                                        # pragma: no cover
+        return False
+
+
+def _published_here(project: Path, report_name: str, started_at: float) -> bool:
+    """Did THIS INVOCATION publish `report_name`? `exists AND fresh`, in ONE place.
+
+    R-0915-160, third cut. This was spelled inline inside `_row_verdict` and nowhere else, and it
+    is the test that decides whether a report on disk is this run's account of itself. A SECOND
+    reader then grew that needed the same answer -- the #505 coverage-only demotion, which reads
+    the phase-1 record for the sidecar name it carries -- and it did not ask this question at all.
+
+    THE HOLE THAT OPENED (review wkevxl71c, on r8). Invocation A: a fresh pass 1, coverage-only at
+    rc 1, its record naming the sidecar it wrote; the front door demotes, correctly. Invocation B
+    on the same tree, `--skip-phase3`: the expert second pass dies on an uncaught exception, exits
+    1 and writes NO record. `_row_verdict` says FAIL, which is right and halts -- and then the #505
+    branch read A's STALE record, found the name still matching the untouched sidecar, saw rc == 1,
+    and demoted. Phase 2 ran and the roll-up could publish PASS_WITH_WAIVERS for a run whose phase
+    1 had CRASHED. The same shape covers a pass-1 crash before `_forget_any_earlier_coverage_
+    sidecar` gets to run. It was unreachable before r8 only because nothing ever named a sidecar.
+
+    So the question has ONE implementation and both readers ask it. A stale record never authorises
+    a demotion, whatever it names.
+    """
+    try:
+        path = _phase_report_path(project, report_name)
+        return path.is_file() and (path.stat().st_mtime + _FRESHNESS_TOLERANCE_S
+                                   >= started_at)
+    except OSError:                                        # pragma: no cover
+        return False
+
+
 def _row_verdict(project: Path, report_name: str, rc: int, started_at: float,
                  phase: str) -> Tuple[str, Optional[str]]:
     """This phase's verdict, or NOT_MEASURED with the reason. R-0915-151.
@@ -901,12 +937,8 @@ def _row_verdict(project: Path, report_name: str, rc: int, started_at: float,
     nothing at all.
     """
     path = _phase_report_path(project, report_name)
-    try:
-        exists = path.is_file()
-        fresh = exists and (path.stat().st_mtime + _FRESHNESS_TOLERANCE_S
-                            >= started_at)
-    except OSError:                                        # pragma: no cover
-        exists, fresh = False, False
+    exists = _report_exists(project, report_name)
+    fresh = _published_here(project, report_name, started_at)
     # ONE DECISION, ON (rc, DID THIS INVOCATION PUBLISH A REPORT). R-0915-160, second cut.
     #
     # THE PROCESS IS ALSO A WITNESS, AND WHEN IT FAILED IT IS THE ONLY ONE. My round-3 rule read
@@ -1640,16 +1672,36 @@ def main() -> int:
             # phase 1, where main demoted and continued -- a re-invocation losing the very
             # exemption it was invoked to act on.
             #
-            # The sidecar is therefore judged against THE RECORD IT BELONGS TO, by content: the
-            # second pass stamps `pass1_coverage_sidecar.sha256` into the record it publishes, and
-            # only if the sidecar was at least as new as the record being carried. So a sidecar
-            # older than its own pass-1 record is never named and stays refused, and a sidecar
-            # someone swapped afterwards fails the sha. The record itself still has to be THIS
-            # invocation's -- `_row_verdict` already refuses a stale one, and `rep` below is read
-            # from the same path it judged.
+            # The sidecar is therefore judged against THE RECORD IT BELONGS TO, by content: PASS
+            # ONE stamps `pass1_coverage_sidecar.sha256` into the record it publishes, naming the
+            # sidecar its own D1 wrote (`phase1_one_shot_runner._name_the_sidecar_this_pass_wrote`,
+            # entitled by D1 having run in that pass, not by any clock); the second pass carries
+            # that name forward and computes nothing. A sidecar the carried record does not name
+            # stays refused, and one swapped afterwards fails the sha.
+            #
+            # TWO CLAIMS FROM r7 CORRECTED HERE, both of which this branch outgrew:
+            #   * it said the sidecar is named "only if the sidecar was at least as new as the
+            #     record being carried". That ordering is GONE: pass 1 writes the sidecar first and
+            #     its record last, so the test was false on every real re-invocation and nothing
+            #     was ever named (review wjn67aev3).
+            #   * it said "`_row_verdict` already refuses a stale one". It does not, and cannot:
+            #     `_row_verdict` RETURNS a verdict, and `rep` is read from that path unconditionally
+            #     a few lines above. A crashed phase 1 that wrote no record leaves an EARLIER run's
+            #     record in `rep`, whose name still matches the untouched sidecar -- which is how
+            #     r8 opened a route to PASS_WITH_WAIVERS for a run whose phase 1 died (review
+            #     wkevxl71c). The record has to be THIS invocation's, and now it is ASKED:
+            #     `_published_here`, the same `exists AND fresh` test `_row_verdict` uses, from the
+            #     one implementation both readers share.
             if cov_only and not _side_fresh:
+                _rec_is_ours = _published_here(
+                    project, "phase1_one_shot.json", _phase_started.get("phase1", t0))
                 _named = (rep.get("pass1_coverage_sidecar")
-                          if isinstance(rep, dict) else None)
+                          if (_rec_is_ours and isinstance(rep, dict)) else None)
+                if not _rec_is_ours and _report_exists(project, "phase1_one_shot.json"):
+                    advisories.append(
+                        "phase1 published no record in THIS invocation, so the pass-1 record on "
+                        "disk belongs to an earlier run: whatever it names, it cannot authorise a "
+                        "demotion of a phase that crashed here")
                 if isinstance(_named, dict) and _side.is_file():
                     try:
                         import hashlib as _hashlib          # noqa: PLC0415

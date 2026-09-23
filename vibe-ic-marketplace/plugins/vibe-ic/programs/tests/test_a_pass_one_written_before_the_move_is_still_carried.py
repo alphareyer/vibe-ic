@@ -409,3 +409,68 @@ def test_the_second_pass_orders_nothing_by_mtime(tmp_path):
 # The reader half is therefore driven END TO END, through the real `main()`, where the harness for
 # that already exists: `test_the_front_door_rollup_edges.py`, section H5 -- invocation A demotes,
 # invocation B's second pass still demotes, and a sidecar swapped after A is refused.
+
+
+# ── the wiring itself, through the REAL phase-1 main() ───────────────────────
+
+def test_the_real_pass_one_main_forgets_then_names(tmp_path, monkeypatch):
+    """BOTH WIRED CALLS, DRIVEN, not asserted about.
+
+    Every arm above exercises `_forget_any_earlier_coverage_sidecar` and
+    `_name_the_sidecar_this_pass_wrote` DIRECTLY, which proves the helpers and says nothing about
+    whether `main()` calls them -- the same gap that let r7's reader arm pass on a branch that could
+    not fire. So this one runs the real `phase1_one_shot_runner.main()` through the docs door and
+    watches the two things only the wiring can do:
+
+      * an EARLIER run's sidecar is gone by the time the record is written (the forget, wired below
+        the second-pass short-circuit);
+      * the published record names the sidecar THIS pass's D1 wrote -- proven by sha, which is the
+        NEW bytes and not the old ones.
+
+    Only D1 itself and the two heavy neighbours are stubbed. `_run_docs_mode` stands in for the doc
+    runner and writes the sidecar exactly where `phase1_doc_one_shot_runner` writes it, in the same
+    position in the pass: in-process, before the record.
+    """
+    import hashlib
+
+    import phase1_one_shot_runner as P1
+
+    project = tmp_path / "proj"
+    (project / "input" / "docs").mkdir(parents=True)
+    (project / "input" / "docs" / "spec.md").write_text("# a counter\n")
+
+    side = project / P1.COVERAGE_SIDECAR_REL
+    side.parent.mkdir(parents=True, exist_ok=True)
+    side.write_text(json.dumps({"coverage_only_failure": True, "run": "AN EARLIER ONE"}) + "\n")
+    stale_sha = hashlib.sha256(side.read_bytes()).hexdigest()
+
+    fresh_payload = json.dumps({"coverage_only_failure": True, "run": "this one"}) + "\n"
+
+    def fake_docs_mode(project_, ic_name, extras):
+        # what D1 does, where and when it does it: the sidecar first, in-process.
+        assert not side.exists(), (
+            "main() reached D1 with an earlier run's sidecar still on disk, so a pass that wrote "
+            "none could name one")
+        side.parent.mkdir(parents=True, exist_ok=True)
+        side.write_text(fresh_payload)
+        return 1                                        # coverage-only phase-1 failure
+
+    monkeypatch.setattr(P1, "_run_docs_mode", fake_docs_mode, raising=True)
+    monkeypatch.setattr(P1, "_run_step_0_5ic", lambda *a, **k: 0, raising=True)
+    monkeypatch.setattr(P1, "run_phase1_second_track", lambda p, rc: rc, raising=True)
+    monkeypatch.setattr(P1, "_expert_track_summary", lambda *a, **k: "stubbed", raising=True)
+    monkeypatch.setattr(P1._pl, "emit_steps_view", lambda *a, **k: {"stubbed": True},
+                        raising=False)
+    monkeypatch.setattr(sys, "argv",
+                        ["phase1_one_shot_runner", str(project), "--mode", "docs",
+                         "--ic-name", "zzdie"])
+    P1.main()
+
+    doc = json.loads(_pl.report_path(project, NAME).read_text())
+    named = doc.get("pass1_coverage_sidecar")
+    assert isinstance(named, dict), (
+        f"the real main() published a record that names no sidecar, so the second pass has "
+        f"nothing to carry: {doc.get('pass1_coverage_sidecar_refused')} / {sorted(doc)}")
+    assert named["sha256"] == hashlib.sha256(fresh_payload.encode()).hexdigest()
+    assert named["sha256"] != stale_sha, (
+        "the record named the EARLIER run's sidecar; the forget did not happen before D1")

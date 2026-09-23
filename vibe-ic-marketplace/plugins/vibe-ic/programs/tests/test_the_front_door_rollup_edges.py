@@ -1146,3 +1146,43 @@ def test_a_sidecar_swapped_after_pass_one_named_it_is_refused(project, monkeypat
     assert rc == 1, rc
     assert doc.get("demoted_phases") == {}, doc.get("demoted_phases")
     assert any("NOT demoting" in a for a in doc.get("advisories", [])), doc.get("advisories")
+
+
+def test_a_crashed_phase_one_cannot_borrow_an_earlier_runs_naming(project, monkeypatch):
+    """THE HOLE r8 OPENED, and the one this round closes (review wkevxl71c).
+
+    Invocation A left a fresh pass-1 record naming the sidecar it wrote, and the front door demoted
+    on it -- correctly. Invocation B, on the same tree: phase 1 dies on an uncaught exception, exits
+    1 and publishes NO record. `_row_verdict` says FAIL, which halts. But the #505 branch read the
+    record still on disk -- A's -- found its name matching the untouched sidecar, saw rc == 1, and
+    DEMOTED: phase 2 ran and the roll-up could publish PASS_WITH_WAIVERS for a run whose phase 1
+    had crashed. A stale record must never authorise a demotion, whatever it names.
+    """
+    _as_pass_one_leaves_it(project)                     # invocation A's leftovers
+
+    def crashed_phase1(label, runner, args, env=None):
+        if "phase1" in runner.name:
+            return 1                                    # exits 1, writes nothing
+        if "phase2" in runner.name:
+            _report(project, "phase2_one_shot.json", {"verdict": "PASS"})
+            return 0
+        return 0
+
+    monkeypatch.setattr(V, "_run_phase", crashed_phase1)
+    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k: (True, "docs"))
+    monkeypatch.setattr(sys, "argv",
+                        ["vibe_ic_one_shot_runner", str(project),
+                         "--no-dashboard", "--skip-hardware", "--skip-phase3"])
+    rc = V.main()
+    doc = json.loads(_pl.report_path(project, "vibe_ic_one_shot.json").read_text())
+
+    assert doc["verdict"] == "FAIL", (
+        f"a run whose phase 1 crashed and published nothing was demoted on an EARLIER run's "
+        f"naming: {doc['verdict']} / {doc.get('verdict_reasons')} / "
+        f"{[a for a in doc.get('advisories', []) if 'sidecar' in a or 'earlier run' in a]}")
+    assert rc == 1, rc
+    assert doc.get("demoted_phases") == {}, doc.get("demoted_phases")
+    assert any("belongs to an earlier run" in a for a in doc.get("advisories", [])), (
+        doc.get("advisories"))
+    # and the demotion route said so too, rather than falling silent
+    assert any("NOT demoting" in a for a in doc.get("advisories", [])), doc.get("advisories")
