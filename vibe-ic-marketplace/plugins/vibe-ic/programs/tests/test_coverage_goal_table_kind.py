@@ -3,17 +3,21 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from phase1_doc_one_shot_runner import _harvest_test_cases_from_input_tables as harvest
 
+_GOALS=['random_message_functional_equivalence_vs_nist_go',
+        'message_length','protocol','mode_switch']
+
 def test_original_coverage_goals_are_not_vectors():
  text=(Path(__file__).resolve().parent/'fixtures/phase1_local/coverage_goal_table_local/verification_plan.md').read_text()
- rows=harvest({'verification_plan.md':text});assert len(rows)==4
+ rows=harvest({'verification_plan.md':text})
+ # The count is DERIVED from the pinned member list below, not a second literal
+ # that could agree with any four rows.
+ assert len(rows)==len(_GOALS)
  # H5 -- the MEMBERS, not only how many. A count-only pin cannot tell four
  # distinct coverage goals from four copies of one, and the row this fixture
  # was filed for (LOCAL:SHA2055, `mode_switch`) could disappear without moving
  # the number. Pinned by NAME because the stimulus column of this captured
  # input is not English and does not belong in test source.
- assert [r['name'] for r in rows]==[
-     'random_message_functional_equivalence_vs_nist_go',
-     'message_length','protocol','mode_switch']
+ assert [r['name'] for r in rows]==_GOALS
  assert all(r['kind']=='coverage_goal' for r in rows)
  assert all('100%' in r['expected'] and r['stimulus'] for r in rows)
 
