@@ -274,6 +274,36 @@ def _varies_self_call(call: ast.Call, fn: ast.AST) -> List[str]:
     return out
 
 
+def _invariant_expr(a: ast.AST, invariant: Set[str]) -> bool:
+    """Is this argument the SAME VALUE on every iteration?
+
+    A literal, a name nothing in the region rebinds (or an attribute/subscript
+    read off one), and a list/tuple/set/dict DISPLAY built only from those.
+
+    THE DISPLAY CASE IS WHY THIS HELPER EXISTS. Only a bare `ast.Constant` used
+    to be invariant, so `progress_globs=["sdr_child_*.log"]` — a literal list,
+    added to `step_pnr`'s `_docker_exec` by f00869df3 (R-0915-131) — was read
+    as a varying argument and the site was credited ACTUATING. The loop still
+    re-enters with byte-identical inputs; what it has is its read-back
+    (`_sdr_adopt`), i.e. SELF_CHECKED_ONLY. The over-credit then surfaced as a
+    baseline REGRESSION (SELF_CHECKED_ONLY 1 -> 0) on a site that had lost
+    nothing — and, worse, a genuinely constant re-entry could have hidden its
+    INERTness behind any list literal. A display with ONE rebound element still
+    varies: `[_retry_i]` is not `["x"]`.
+    """
+    if isinstance(a, ast.Constant):
+        return True
+    if isinstance(a, (ast.List, ast.Tuple, ast.Set)):
+        return all(not isinstance(e, ast.Starred)
+                   and _invariant_expr(e, invariant) for e in a.elts)
+    if isinstance(a, ast.Dict):
+        return all(k is not None and _invariant_expr(k, invariant)
+                   and _invariant_expr(v, invariant)
+                   for k, v in zip(a.keys, a.values))
+    root = _root_name(a)
+    return root is not None and root in invariant
+
+
 def _varies_in_loop(call: ast.Call, invariant: Set[str]) -> List[str]:
     """A looping re-entry differs from the previous ITERATION when some argument
     is rebound inside the loop.
@@ -288,10 +318,7 @@ def _varies_in_loop(call: ast.Call, invariant: Set[str]) -> List[str]:
     for a in list(call.args) + [k.value for k in call.keywords]:
         if isinstance(a, ast.Starred):
             a = a.value
-        root = _root_name(a)
-        if root is not None and root in invariant:
-            continue
-        if root is None and isinstance(a, ast.Constant):
+        if _invariant_expr(a, invariant):
             continue
         try:
             out.append(ast.unparse(a))

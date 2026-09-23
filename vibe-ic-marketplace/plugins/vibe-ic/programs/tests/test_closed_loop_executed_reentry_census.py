@@ -237,3 +237,51 @@ def test_the_shipped_baseline_matches_the_shipped_tree():
     rc, out = _run(root)
     assert rc == 0, out
     assert "REGRESSION" not in out
+
+
+# ── a literal DISPLAY is a constant, not a variance (f00869df3 / R-0915-131) ──
+#
+# `progress_globs=["sdr_child_*.log"]` in `step_pnr`'s `_docker_exec` loop was
+# read as a varying argument, so a loop that re-enters with byte-identical
+# inputs was credited ACTUATING and the baseline reported SELF_CHECKED_ONLY
+# 1 -> 0 on a site that had lost nothing. Both directions: a constant display
+# grants nothing, and a display carrying a rebound name still varies.
+
+@pytest.mark.parametrize("literal", [
+    '["sdr_child_*.log"]', '("a", 1)', '{"a", "b"}', '{"k": ["v", None]}',
+    '[q]', '[]',
+])
+def test_a_constant_display_is_not_a_varying_argument(tmp_path, literal):
+    root = _tree(tmp_path,
+                 "def step_a(p, q):\n"
+                 "    for _i in range(3):\n"
+                 f"        step_b(p, q, globs={literal})\n"
+                 "def step_b(p, q, globs=None):\n"
+                 "    return 1\n")
+    rows = C.scan_module(root / "vibe-ic-marketplace" / "plugins" / "vibe-ic"
+                         / "programs" / "x_one_shot_runner.py")
+    assert [r["verdict"] for r in rows] == [C.INERT], rows
+    rc, out = _run(root, "--baseline", str(tmp_path / "none.json"))
+    assert rc == 1 and "[INERT]" in out, out
+
+
+@pytest.mark.parametrize("literal", ['[i]', '("a", i)', '{"k": i}', '[*q]'])
+def test_a_display_with_a_rebound_element_still_varies(tmp_path, literal):
+    root = _tree(tmp_path,
+                 "def step_a(p, q):\n"
+                 "    for i in range(3):\n"
+                 f"        step_b(p, q, globs={literal})\n"
+                 "def step_b(p, q, globs=None):\n"
+                 "    return 1\n")
+    rows = C.scan_module(root / "vibe-ic-marketplace" / "plugins" / "vibe-ic"
+                         / "programs" / "x_one_shot_runner.py")
+    # `[*q]`: a starred element is never read as a constant, even over an
+    # invariant name — unpacking is not a display the census can read by value.
+    assert [r["verdict"] for r in rows] == [C.ACTUATING], rows
+
+
+def test_the_pnr_retry_is_self_checked_not_actuating():
+    """The shipped site the over-credit was measured on, read directly."""
+    rows = _one(PHASE3, "step_pnr", "_docker_exec")
+    assert all(r["verdict"] == C.SELF_CHECKED_ONLY for r in rows), rows
+    assert all(r["measured_name"] for r in rows), rows
