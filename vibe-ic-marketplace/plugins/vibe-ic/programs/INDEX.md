@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1337
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1337)
+- **Total programs (excluding helpers / shims):** 1338
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1338)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1328 |
+| `any` | 1329 |
 
 ## Alphabetical listing
 
@@ -646,6 +646,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `l24_signoff_requirements_extract` | any | — | R-0915-38. |
 | `l25_reliability_envelope_actionable_check` | any | — | batch-8 / layergate-8 (L25_RELIABILITY_MISSION_PROFILE) |
 | `l26_mechanical_applicability_derived_check` | any | — | batch-8 / layergate-8 (L26_MECHANICAL_TRANSDUCTION) |
+| `l2_half_duplex_reconcile` | any | — | The L2's own `duplex` text may VETO a keyword-derived half_duplex=true (R-0915-164 b). |
 | `l2_named_constant_resolvable_check` | any | — | VERDICT SEMANTICS: **BLOCKS** (exit 1 on FAIL). |
 | `l2_timing_completeness_check` | any | v0.119.30 | gate (LL-32) catching frs-gen regressions that produce abstract-only L2_FRS.json with no concrete timing keys when the input docs clearly... |
 | `l3_opcode_argument_constraints_check` | any | Wave 37 | When extracted vendor docs mention an ADDR / LEN range constraint |
@@ -1409,7 +1410,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1328 programs)
+### `any` (1329 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2027,6 +2028,7 @@ _(no programs in this group)_
 - `l24_signoff_requirements_extract` — R-0915-38.
 - `l25_reliability_envelope_actionable_check` — batch-8 / layergate-8 (L25_RELIABILITY_MISSION_PROFILE)
 - `l26_mechanical_applicability_derived_check` — batch-8 / layergate-8 (L26_MECHANICAL_TRANSDUCTION)
+- `l2_half_duplex_reconcile` — The L2's own `duplex` text may VETO a keyword-derived half_duplex=true (R-0915-164 b).
 - `l2_named_constant_resolvable_check` — VERDICT SEMANTICS: **BLOCKS** (exit 1 on FAIL).
 - `l2_timing_completeness_check` — gate (LL-32) catching frs-gen regressions that produce abstract-only L2_FRS.json with no concrete timing keys when the input docs clearly...  _[v0.119.30]_
 - `l3_opcode_argument_constraints_check` — When extracted vendor docs mention an ADDR / LEN range constraint  _[Wave 37]_

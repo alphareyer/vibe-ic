@@ -1,0 +1,47 @@
+17 ('False', 'half')
+13 ('False', 'full')
+12 ('<absent>', 'half')
+10 ('False', '<no duplex field>')
+10 ('True', 'half')
+6 ('<absent>', '<no duplex field>')
+4 ('<absent>', 'unidirectional')
+4 ('<absent>', 'full')
+4 ('False', 'unidirectional')
+3 ('<absent>', 'none')
+3 ('True', 'full')
+3 ('<no po>', '-')
+2 ('False', 'mixed')
+2 ('True', 'either')
+1 ('False', 'none')
+1 ('<absent>', 'mixed')
+1 ('False', '<bool>')
+1 ('True', 'mixed')
+1 ('True', '<no duplex field>')
+
+CONTRADICTIONS (half_duplex=True but duplex text says full/dual-simplex/unidirectional, or False but says half):
+  onewire | half_duplex= False | duplex: half-duplex (single line shared TX/RX) | evidence: half-duplex/single-wire/1-wire keyword match
+  mipi | half_duplex= False | duplex: half-duplex per lane; Data Lanes carry source→sink HS payload but allow source↔sink LP escape (e.g. ULPS). | evidence: interface keyword match (i2c/spi/uart/...)
+  emmc | half_duplex= False | duplex: half-duplex on the shared CMD/DAT bus (single embedded device; one transaction at a time). DAT bus is bidirect | evidence: interface keyword match (i2c/spi/uart/...)
+  ufs | half_duplex= True | duplex: full-duplex (independent M-PHY TX and RX differential lane pairs per direction) | evidence: half-duplex/single-wire/1-wire keyword match
+  mipi_spmi_rffe | half_duplex= False | duplex: half-duplex (single bidirectional SDATA line turned around within a transaction; one transaction at a time, ma | evidence: interface keyword match (i2c/spi/uart/...)
+  smbus_pmbus | half_duplex= False | duplex: half-duplex (single bidirectional SMBDAT line shared by all devices; one transaction at a time, arbitrated). | evidence: interface keyword match (i2c/spi/uart/...)
+  lin | half_duplex= False | duplex: half-duplex on the shared single-wire bus | evidence: interface keyword match (i2c/spi/uart/...)
+  ddr4 | half_duplex= False | duplex: half-duplex on DQ (read or write, not both simultaneously); command/address/clock is unidirectional controller | evidence: interface keyword match (i2c/spi/uart/...)
+  ble | half_duplex= False | duplex: half-duplex (TX and RX time-multiplexed within each connection event) | evidence: interface keyword match (i2c/spi/uart/...)
+  canfd | half_duplex= False | duplex: half-duplex on a single shared channel | evidence: interface keyword match (i2c/spi/uart/...)
+  onfi | half_duplex= False | duplex: half-duplex (DQ bus shared for cmd/addr/data; W/R_n on NV-DDR selects bus owner) | evidence: interface keyword match (i2c/spi/uart/...)
+  flexray | half_duplex= False | duplex: Half-duplex per channel (a single differential bus pair BP/BM is shared; only the slot owner drives at a time) | evidence: half-duplex/single-wire/1-wire keyword match
+  lpddr5 | half_duplex= False | duplex: half-duplex on DQ (read or write, not both); CK / CA / CS / WCK are controller -> SDRAM; RDQS is SDRAM -> cont | evidence: interface keyword match (i2c/spi/uart/...)
+  pcie_gen5 | half_duplex= True | duplex: dual-simplex (independent TX + RX differential pairs per Lane; both directions transmit simultaneously and con | evidence: half-duplex/single-wire/1-wire keyword match
+  ddr | half_duplex= False | duplex: half-duplex on DQ (read or write, not both simultaneously); command/address/clock is unidirectional controller | evidence: interface keyword match (i2c/spi/uart/...)
+  hyperbus | half_duplex= False | duplex: Half-duplex: DQ[7:0] is a single shared bidirectional bus driven by the host during the CA and write-data phas | evidence: interface keyword match (i2c/spi/uart/...)
+  lora | half_duplex= False | duplex: half-duplex, end-device-initiated. Class A: each uplink is followed by two short downlink windows (RX1/RX2). C | evidence: interface keyword match (i2c/spi/uart/...)
+  can | half_duplex= False | duplex: half-duplex on a single shared channel | evidence: interface keyword match (i2c/spi/uart/...)
+  ~/_lane_ictier1/workC/vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/stage_phase1_on_pass_review/reject_pcie_gen5 | half_duplex= True | duplex: dual-simplex (independent TX + RX differential pairs per Lane; both directions transmit simultaneously and con | evidence: half-duplex/single-wire/1-wire keyword match
+  ~/_lane_ictier1/workC/vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/stage_phase1_on_pass_review/accept_lpddr5 | half_duplex= False | duplex: half-duplex on DQ (read or write, not both); CK / CA / CS / WCK are controller -> SDRAM; RDQS is SDRAM -> cont | evidence: interface keyword match (i2c/spi/uart/...)
+
+half_duplex=True with 'either' text:
+  hdlc | Half-duplex (NRM, ARM) or full-duplex (ABM); both modes carried over a single serial link (or multidrop bus in
+  ethernet | full duplex (modern switched dominant case) or half duplex (legacy CSMA/CD shared medium)
+  rs485 | Half-duplex on a 2-wire (1 differential-pair) bus; full-duplex on a 4-wire (2 differential-pairs) bus.
+spm rows: [('~/benchmark-data/ic/spm/v1.5.65_sky130A', '<no po>', '-', '-'), ('~/benchmark-data/ic/spm/v1.10.18_sky130A', '<no po>', '-', '-'), ('~/benchmark-data/ic/spm/v1.14.88_gf180mcuD', '<no po>', '-', '-')]

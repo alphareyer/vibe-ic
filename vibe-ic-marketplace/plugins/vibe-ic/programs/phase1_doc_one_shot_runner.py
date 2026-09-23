@@ -67349,6 +67349,22 @@ def main() -> int:
         print(f"      Tier-2 bus_interconnect synth FAILED (fail-open): {_r55b_err}",
               file=sys.stderr)
 
+    # R-0915-164 (b) — the protocol synths above write `protocol_overview.duplex`;
+    # a keyword-derived half_duplex=true that the design's own duplex text
+    # contradicts (full-duplex / dual-simplex / unidirectional, no half-duplex)
+    # is vetoed here, before anything downstream reads L2. Veto, never grant.
+    try:
+        import l2_half_duplex_reconcile as _l2hdx
+        _l2p_hdx = _pl.generated_docs_dir(project) / "L2_FRS.json"
+        # R-0915-167 — handed the design's OWN documents (`extracted`, what
+        # gen_l2_frs reads): the synth's duplex template never vetoes alone.
+        if _l2p_hdx.is_file() and _l2hdx.reconcile_file(_l2p_hdx, extracted):
+            print("      → L2 half_duplex=true vetoed: the design's own "
+                  "documents and its duplex text agree (R-0915-167)")
+    except Exception as _l2hdx_err:
+        print(f"      L2 half_duplex reconcile FAILED (fail-open): {_l2hdx_err}",
+              file=sys.stderr)
+
     # [14e3/15] Universal packet/PDU-protocol L10↔L3 opcode consistency sweep.
     #
     # gen_l10_test_cases (step [11/15]) stamps one synthetic `send_<name>`
