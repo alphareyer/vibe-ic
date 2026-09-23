@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1336
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1336)
+- **Total programs (excluding helpers / shims):** 1337
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1337)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1327 |
+| `any` | 1328 |
 
 ## Alphabetical listing
 
@@ -668,6 +668,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `l8_doc_clock_freq_synth` | any | — | bind a clock frequency the design STATES in a document table to the L8 clock records the SAME ROW names. |
 | `l8_frame_end_gap_derivation_check` | any | — | LL-3. |
 | `l8_sta_clock_period_design_owned_check` | any | — | L8 SEMANTIC completeness gate. |
+| `l8_timing_schema` | any | — | The L8_TIMING_WAVEFORM schema, as the emitters write it (R-0915-153). |
 | `l9_completeness_check` | any | — | Deterministic L9 Integration Spec completeness checker. |
 | `l9_floorplan_contract_check` | any | — | L9 SEMANTIC consumer-contract gate. |
 | `l9_l19_contract_carrythrough` | any | — | Carry design-owned cross-layer contracts into their L9/L19 consumers. |
@@ -1408,7 +1409,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1327 programs)
+### `any` (1328 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2047,6 +2048,7 @@ _(no programs in this group)_
 - `l8_doc_clock_freq_synth` — bind a clock frequency the design STATES in a document table to the L8 clock records the SAME ROW names.
 - `l8_frame_end_gap_derivation_check` — LL-3.
 - `l8_sta_clock_period_design_owned_check` — L8 SEMANTIC completeness gate.
+- `l8_timing_schema` — The L8_TIMING_WAVEFORM schema, as the emitters write it (R-0915-153).
 - `l9_completeness_check` — Deterministic L9 Integration Spec completeness checker.
 - `l9_floorplan_contract_check` — L9 SEMANTIC consumer-contract gate.
 - `l9_l19_contract_carrythrough` — Carry design-owned cross-layer contracts into their L9/L19 consumers.
