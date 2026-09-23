@@ -257,7 +257,15 @@ def test_the_recorded_set_matches_what_the_umbrella_classifies():
     measured = set(res["measured"])
     assert measured <= set(D.KNOWN_NOT_INVOCABLE), (
         f"un-recorded silent gates: {sorted(measured - set(D.KNOWN_NOT_INVOCABLE))}")
-    assert len(measured) == 0 and res["registered"] == 246, (
+    # 246 -> 245 (R-0915-130, 2b45d26cf): `agent_report_sha256_attestation_check`
+    # left `flow_compliance_check._STRUCTURAL_RTL_GATES` -- asked once in
+    # `final_report_generate` after its input exists, instead of by every stage's
+    # compliance call ten minutes before it. That landing's message said "no test
+    # pins the literal"; this one does. Re-derived: the tuple's set difference
+    # across 2b45d26cf is exactly that one name, and no gate arrived. Coverage
+    # stays total (0 silent of 245): the direction is a smaller registry, not a
+    # silence.
+    assert len(measured) == 0 and res["registered"] == 245, (
         f"P0 coverage moved: {res['registered'] - len(measured)} of "
         f"{res['registered']} gates return a verdict. Update this anchor "
         f"deliberately and say which direction it moved.")

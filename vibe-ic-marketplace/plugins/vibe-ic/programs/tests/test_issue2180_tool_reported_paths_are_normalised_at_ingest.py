@@ -362,7 +362,18 @@ def test_the_report_the_producer_writes_passes_the_real_gate(tmp_path,
 
     proj = _runnable_project(tmp_path)
     rtl = proj / "phase2" / "stage1" / "rtl"
-    dat = _dat(tmp_path, f"{CONT}/phase2/stage1/rtl/top.v",
+    # The coverage.dat sits where the producer builds it (`sim/cov_build`,
+    # INSIDE the project), so the gate below judges the WHOLE report the
+    # producer wrote. It used to sit at `tmp_path` and the test popped
+    # `coverage_dat` to hide it — which stopped covering the file the day the
+    # suite union (6307e236d) began citing each member's dat again under
+    # `per_testbench.<tb>.coverage_dat`: the gate then blocked on the
+    # FIXTURE's own input, not on a path the tool named. Stripping one more
+    # key would have chased the payload's shape; an in-tree input needs no
+    # stripping at all.
+    cov_build = proj / "phase2" / "stage1" / "sim" / "cov_build"
+    cov_build.mkdir(parents=True)
+    dat = _dat(cov_build, f"{CONT}/phase2/stage1/rtl/top.v",
                f"{CONT}/phase2/stage1/sim_full_stack/tb_top_full.v")
     monkeypatch.setattr(V, "verilate_tb_and_run", lambda *a, **k: str(dat))
     monkeypatch.setattr(R, "_container_mounts", lambda c: [(str(proj), CONT)])
@@ -373,14 +384,9 @@ def test_the_report_the_producer_writes_passes_the_real_gate(tmp_path,
     assert R.step_verilator_coverage(proj,
                                      container="vibeic-eda-test").status == "PASS"
 
-    # The coverage.dat itself lives outside the tree in this fixture, so it is
-    # removed from the report's own field before judging: the subject here is
-    # the SOURCE paths the tool named, not where the fixture put its input.
     cov_json = (proj / "reports" / "phase2" / "coverage"
                 / "coverage_verilator.json")
     payload = json.loads(cov_json.read_text())
-    payload.pop("coverage_dat", None)
-    cov_json.write_text(json.dumps(payload, indent=2))
 
     r = _gate(proj)
     assert r.returncode == 0, r.stdout + r.stderr

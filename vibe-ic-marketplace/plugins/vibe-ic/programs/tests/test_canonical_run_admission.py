@@ -15,6 +15,7 @@ if str(PROGRAMS) not in sys.path:
 
 import canonical_run_admission as cra  # noqa: E402
 import design_input_digest as did  # noqa: E402
+from _delivery_declaration import declare_delivery as _declare  # noqa: E402
 
 
 def test_standalone_isolated_path_load_resolves_required_siblings(tmp_path):
@@ -181,6 +182,12 @@ def test_direct_phase_runners_refuse_before_expensive_dispatch(tmp_path, monkeyp
     assert design.main() == 2
     assert "canonical Phase-2 admission" in capsys.readouterr().err
 
+    # Phase 3 refuses an UNDECLARED delivery before it asks admission (#2376,
+    # `_delivery_admission_refusal`), so without a declaration this arm was
+    # measuring that gate and never reached the admission it is about -- the
+    # same missing input 71fa6cea0 supplied to two other `main()` fixture
+    # families. The delivery gate stays enabled; the input is supplied.
+    _declare(project)
     phase3 = _load_runner("phase3_one_shot_runner.py", "_test_direct_phase3")
     monkeypatch.setattr(phase3._runner_lock, "acquire_or_reenter", lambda *_: object())
     monkeypatch.setattr(phase3._canonical_admission, "admit_span", lambda *a, **k: refused)

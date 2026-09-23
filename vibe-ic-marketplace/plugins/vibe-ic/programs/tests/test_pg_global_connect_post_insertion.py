@@ -37,6 +37,7 @@ These tests pin BOTH halves of the repair:
       whose PG terminals are orphaned, as a pass.
 """
 import importlib
+import re
 
 mod = importlib.import_module("phase3_one_shot_runner")
 
@@ -59,20 +60,47 @@ def _pnr_tcl(**over):
     return mod._build_pnr_tcl_text(**kw)
 
 
+#: A ROUTER INVOCATION in Tcl: `detailed_route`/`global_route` as a command
+#: word (line start, or after `[`, `{`, `;`), never the `_num_drvs` query.
+_ROUTER_CALL = re.compile(
+    r"(?:^|[\[{;])\s*(detailed_route|global_route)(?![\w])", re.MULTILINE)
+
+
+def _code(tcl: str) -> str:
+    """The executable Tcl: comment lines removed, so prose cannot satisfy or
+    break an assertion about what the block RUNS."""
+    return "\n".join(l for l in tcl.splitlines()
+                     if not l.lstrip().startswith("#"))
+
+
 class TestPgReconnectTcl:
     def test_reapplies_global_connect(self):
         tcl = mod._build_pg_reconnect_tcl()
         assert "global_connect" in tcl
 
-    def test_reroutes_after_reconnect(self):
-        # Re-connecting alone only makes the DEF honest: the signal wires were
-        # already laid against metal the router ignored, so they must be
-        # re-routed now that the physical-only cells' rails are net-owned.
-        tcl = mod._build_pg_reconnect_tcl()
-        assert tcl.index("{global_connect}") < tcl.index("detailed_route")
+    # R-0915-114(a) (8c71cd6ff, #2423): THIS BLOCK CONNECTS AND CHECKS; IT
+    # DOES NOT ROUTE. The three tests below used to assert the opposite -- a
+    # whole-design `detailed_route` after the re-connect -- and kept PASSING
+    # after the ruling removed it, because `str.index("detailed_route")` found
+    # the word in the block's own Tcl COMMENTS. 7efc25dda added the DRV-count
+    # query `detailed_route_num_drvs` ahead of `global_connect` and the
+    # substring match landed there instead, which is when they went red. They
+    # now read the EXECUTABLE Tcl only, and pin the contract the ruling set.
 
-    def test_reroute_is_optional(self):
-        assert "detailed_route" not in mod._build_pg_reconnect_tcl(reroute=False)
+    def test_the_post_connect_block_checks_and_never_routes(self):
+        tcl = _code(mod._build_pg_reconnect_tcl())
+        assert not _ROUTER_CALL.findall(tcl), _ROUTER_CALL.findall(tcl)
+        # the connect comes first, then the router's DRV count is RE-READ as
+        # the delta check -- a measurement of the router's state, not a route
+        assert (tcl.index("{global_connect}")
+                < tcl.index("set _pgdrc [detailed_route_num_drvs]"))
+        assert "PG_ABUTMENT_NOT_CONNECTED" in tcl
+
+    def test_the_preconnect_form_carries_no_post_connect_checks(self):
+        tcl = _code(mod._build_pg_reconnect_tcl(reroute=False))
+        assert not _ROUTER_CALL.findall(tcl), _ROUTER_CALL.findall(tcl)
+        assert "set _pgdrc [detailed_route_num_drvs]" not in tcl
+        assert "PG_ABUTMENT_NOT_CONNECTED" not in tcl
 
     def test_audit_is_emitted_unconditionally(self):
         # The audit must NOT be inside the success branch of the re-connect:
@@ -125,11 +153,12 @@ class TestPgReconnectTcl:
         restore = tcl.index("setDoNotTouch true")
         assert lift < conn < restore, "lift/connect/restore must be in order"
 
-    def test_do_not_touch_is_restored_before_the_reroute(self):
-        # The router must not be free to resize or drop a spare the flow has
-        # promised downstream ECO it preserved.
-        tcl = mod._build_pg_reconnect_tcl()
-        assert tcl.index("setDoNotTouch true") < tcl.index("detailed_route")
+    def test_do_not_touch_is_restored_before_the_post_connect_checks(self):
+        # Spares the flow promised downstream ECO are protected again before
+        # the block measures anything, and nothing in it may resize them.
+        tcl = _code(mod._build_pg_reconnect_tcl())
+        assert (tcl.index("setDoNotTouch true")
+                < tcl.index("set _pgdrc [detailed_route_num_drvs]"))
 
     def test_reports_how_many_were_lifted(self):
         tcl = mod._build_pg_reconnect_tcl()
