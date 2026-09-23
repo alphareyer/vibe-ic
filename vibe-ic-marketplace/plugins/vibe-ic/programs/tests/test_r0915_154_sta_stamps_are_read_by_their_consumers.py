@@ -237,3 +237,51 @@ def test_head_to_head_refuses_slacks_timed_under_different_sdcs():
 def test_head_to_head_accepts_the_same_sdc():
     BENCH.check_scope_parity([_arm("ours", "sha256:" + "a" * 64),
                               _arm("theirs", "sha256:" + "a" * 64)])
+
+
+# ── the stamp lines are a closed grammar, not prose (prose-polarity ratchet) ──
+
+_POLARITY_TOKENS = ["not", "no", "none", "without", "excluding", "never", "non",
+                    "removed", "obsolete", "superseded", "n/a", "inapplicable",
+                    "deprecated", "no longer", "does not apply",
+                    "非", "无", "無", "不", "否"]
+
+
+def test_a_denial_spliced_into_the_stamp_lines_is_not_read():
+    """THE FALSIFIER for the `_NOT_PROSE` entry on `sta_signoff_rigor_check::
+    check`. Every `_prose_polarity` token is spliced before, inside and after
+    each stamp's field; none of the resulting lines may be read as a stamp.
+    The controls: the two stamps exactly as the runner writes them ARE read."""
+    import _prose_polarity as pp
+    for tok in _POLARITY_TOKENS:
+        assert pp.NEGATION_RE.search(tok), tok      # the vocabulary, not my list
+    alias_ok = "# STA_ALIAS_BASIS: sta_mcorner_ocv.rpt\n"
+    unv_ok = "STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED\n"
+    assert RIG._ALIAS_BASIS_RE.search(alias_ok).group(1) == "sta_mcorner_ocv.rpt"
+    assert RIG._PNR_SESSION_UNVERIFIED_RE.search(unv_ok)
+    read = []
+    for tok in _POLARITY_TOKENS:
+        for sp in (f"{tok} ", f" {tok}", f"{tok}"):
+            for line in (f"# STA_ALIAS_BASIS: {sp}sta_mcorner_ocv.rpt\n",
+                         f"# STA_ALIAS_BASIS: sta_mcorner_ocv.rpt {tok}\n",
+                         f"# STA_ALIAS_BASIS: {tok}\n",
+                         f"the report is {tok} STA_ALIAS_BASIS: sta_mcorner_ocv.rpt\n"):
+                if RIG._ALIAS_BASIS_RE.search(line):
+                    read.append(line)
+            for line in (f"STA_PARASITICS_PROVENANCE: {sp}PNR_SESSION_UNVERIFIED\n",
+                         f"STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED {tok}\n",
+                         f"it is {tok} STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED\n"):
+                if RIG._PNR_SESSION_UNVERIFIED_RE.search(line):
+                    read.append(line)
+    assert read == [], read
+
+
+def test_a_free_text_mention_of_the_token_is_not_an_alias(tmp_path):
+    """End to end: a report whose PROSE mentions the token is judged on its own
+    bytes, exactly as if the token were absent."""
+    rpt = _put(tmp_path, "pnr/post_route_timing.rpt",
+               "# this report is not a STA_ALIAS_BASIS: sta_mcorner_ocv.rpt copy\n"
+               + _RIGOROUS)
+    _put(tmp_path, "pnr/sta_mcorner_ocv.rpt", _BASIS_WITHOUT_MPW)
+    res = RIG.check(rpt)
+    assert res["verdict"] == "PASS" and "alias_of" not in res, res

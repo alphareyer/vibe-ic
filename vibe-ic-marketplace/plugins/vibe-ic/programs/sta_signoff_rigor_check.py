@@ -258,14 +258,15 @@ _DECISION_BASENAME = "postroute_timing_repair_decision.json"
 #: on the shipped globs, a tree holding only `phase3/stage3/pnr/sta.rpt`
 #: resolved to it and was graded as sign-off.
 _PNR_SESSION_UNVERIFIED_RE = re.compile(
-    r"^\s*#?\s*STA_PARASITICS_PROVENANCE\s*:\s*PNR_SESSION_UNVERIFIED\b",
-    re.MULTILINE)
+    r"^[ \t]*#?[ \t]*STA_PARASITICS_PROVENANCE[ \t]*:[ \t]*"
+    r"PNR_SESSION_UNVERIFIED[ \t]*$", re.MULTILINE)
 #: `post_route_timing.rpt` written as a COPY of another basis
 #: (`# STA_ALIAS_BASIS: <file>`, when the single-corner SPEF STA refused). A copy
 #: is judged AS that basis and says so -- it is not a second, independent
 #: sign-off STA.
 _ALIAS_BASIS_RE = re.compile(
-    r"^\s*#?\s*STA_ALIAS_BASIS\s*:\s*(\S+)", re.MULTILINE)
+    r"^[ \t]*#?[ \t]*STA_ALIAS_BASIS[ \t]*:[ \t]*(sta(?:_[a-z0-9]+)*\.rpt)[ \t]*$",
+    re.MULTILINE)
 #: A path whose setup corner could not be bound to a loaded Liberty. It has no
 #: attributable corner, so it is never credited as corner-attributed timing.
 _CORNER_BINDING_REFUSED_RE = re.compile(

@@ -119,6 +119,27 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "sta_signoff_rigor_check::check":
+        "TWO STAMP LINES THIS FLOW WRITES ITSELF, in a closed field grammar "
+        "(R-0915-154). `# STA_ALIAS_BASIS: <file>` is written by "
+        "phase3_one_shot_runner's canonical-alias writer as "
+        "`\"# STA_ALIAS_BASIS: \" + _alt.name`, where `_alt` can only be one "
+        "of the four `_CANONICAL_POST_ROUTE_STA_BASES` (sta_spef_based.rpt, "
+        "sta_mcorner_ocv.rpt, sta_spef_multicorner.rpt, sta.rpt); the reader's "
+        "pattern is anchored at line start AND line end around exactly that "
+        "closed field, `sta(?:_[a-z0-9]+)*\\.rpt`. `STA_PARASITICS_PROVENANCE: "
+        "PNR_SESSION_UNVERIFIED` is emitted by the PnR corner-binding Tcl with "
+        "`puts $f` as a CONSTANT, and is matched as that literal between the "
+        "same two anchors. Neither grammar has a free-text field, so a denial "
+        "cannot be spelled inside one: `STA_ALIAS_BASIS: not sta_mcorner_ocv.rpt` "
+        "or `... PNR_SESSION_UNVERIFIED no` fails the anchor and is not read. "
+        "AND THE DIRECTION IS SAFE BY CONSTRUCTION, which is the falsifier's "
+        "other half: the unverified stamp only ever EXCLUDES a report from "
+        "sign-off, and the alias only ever REPLACES the graded bytes with its "
+        "basis's own -- neither read can manufacture a PASS. MEASURED in "
+        "`test_a_denial_spliced_into_the_stamp_lines_is_not_read`: every "
+        "`_prose_polarity` token, CJK included, spliced before, inside and after "
+        "each field leaves the reader's answer at 'not a stamp'.",
     "gds_xor_check::restream_env_from_transcript":
         "A TRANSCRIPT THIS FLOW WROTE ITSELF, in a fixed field grammar, and the "
         "same class as `_run_magic_signoff_drc` below. All three patterns read "
