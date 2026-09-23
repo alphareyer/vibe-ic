@@ -84,6 +84,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 import ast
 import argparse
 import fnmatch
+import contextvars
 import functools
 import glob
 import hashlib
@@ -15906,6 +15907,37 @@ def _emit_step_metrics(project: Path, step: Dict[str, Any],
     _sm.emit_best_effort(project, step.get("id"), _keep)
 
 
+#: The step this audit is judging while it spawns that step's gate programs
+#: (M2). `_child_env` hands it to the child as `step_metrics.GATE_STEP_ENV`, so
+#: a gate can emit its outcome under the step that ran it without inferring it
+#: from an argv this module may have rewritten (`_receipt_off_a_produced_document`).
+#:
+#: A CONTEXT VARIABLE, NOT A MODULE GLOBAL (M2 r2). Since #2548 `check_step`
+#: runs in a thread pool (the wave loop), and a global set by thread A is
+#: overwritten by thread B before A's gate is spawned -- A's gate then emitted
+#: under B's step. Each pool thread has its own context, `check_step` sets the
+#: value in the thread that judges the step, and `_child_env` reads it in that
+#: same thread when it spawns that step's gate.
+_CHILD_GATE_STEP = contextvars.ContextVar("vibeic_child_gate_step", default="")
+
+
+def _with_child_gate_step(fn):
+    """Hold the judged step's id in `_CHILD_GATE_STEP` for the call's duration.
+
+    A decorator rather than a wrapper function so `check_step`'s own body --
+    which several guards read with `inspect.getsource` -- stays where it is
+    (`functools.wraps` makes `inspect` unwrap to it)."""
+    @functools.wraps(fn)
+    def _judge(project, step, *args, **kwargs):
+        token = _CHILD_GATE_STEP.set(str((step or {}).get("id") or ""))
+        try:
+            return fn(project, step, *args, **kwargs)
+        finally:
+            _CHILD_GATE_STEP.reset(token)
+    return _judge
+
+
+@_with_child_gate_step
 def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                skip_analog: bool = False, skip_hardware: bool = False,
                strict_audit_evidence: bool = True,
@@ -19372,6 +19404,10 @@ def _child_env():
     extra = dict(_ga.child_env_additions(_INVOCATION_ENV, _invocation_id()))
     if _CHILD_SCOPE_STACK:
         extra[_SCOPE_STACK_ENV] = _CHILD_SCOPE_STACK
+    # M2: the step being judged, so the gate emits under IT (see check_step).
+    # Always set -- to "" outside a step -- so an id inherited from an outer
+    # caller cannot leak into a gate this audit spawns for something else.
+    extra["VIBEIC_GATE_STEP"] = _CHILD_GATE_STEP.get()
     return dict(os.environ, **extra)
 
 #: Scopes that contain no synthesis step, so the pre-PnR Yosys gate has nothing

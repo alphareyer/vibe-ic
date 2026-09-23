@@ -50216,6 +50216,22 @@ def run_pre_audit_producers(project: Path, container: str = "") -> List[StepResu
     return rows
 
 
+def _signoff_gate_env(program: str, extra_argv: tuple, out_rel: str):
+    """The child environment for an inline sign-off gate: which STEP it runs
+    for (M2), resolved ONCE from the flow clause that declares this program and
+    this project-relative output -- before the path is made absolute -- plus
+    the invocation id every gate row is stamped with. An unresolvable step is
+    simply not stated, and the gate then emits nothing (never a guess)."""
+    import step_metrics as _sm                               # noqa: PLC0415
+    step, _why = _sm.step_for_invocation(
+        Path(program).stem, [".", *extra_argv, "--json", out_rel])
+    env = dict(os.environ)
+    env[_sm.GATE_STEP_ENV] = step or ""
+    env.setdefault(_sm.INVOCATION_ENV,
+                   f"phase3-{os.getpid()}-{int(_RUN_STARTED_AT * 1000)}")
+    return env
+
+
 def _run_declared_signoff_gate(project: Path, name: str, program: str,
                                out_rel: str,
                                extra_argv: tuple = ()) -> StepResult:
@@ -50251,6 +50267,17 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
             name, t0, f"cannot create {out_json.parent}: {exc}")
     cmd = [sys.executable, str(prog), str(project), *extra_argv,
            "--json", str(out_json)]
+    # METRICS ARE BEST-EFFORT AND NEVER THE VERDICT (M2 r2). Attribution is
+    # computed OUTSIDE the try below, whose except turns any failure into
+    # "gate could not run" (NOT CHECKED): an exception in step_metrics must not
+    # turn a sign-off gate into an unanswered one. On any failure the gate runs
+    # with the plain environment -- no step stated, so it emits nothing.
+    try:
+        _gate_env = _signoff_gate_env(program, extra_argv, out_rel)
+    except Exception as exc:                                  # noqa: BLE001
+        print(f"[step_metrics] gate {name} runs unattributed: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        _gate_env = None
     try:
         # CZT2-16 — a 900 s PARAMETER DEFAULT (600 at one caller) on a
         # VERDICT-BEARING dispatch. This function invokes a flow-declared
@@ -50264,7 +50291,8 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
         # kill is still a kill, and a gate that would have answered in 901 s
         # answers nothing. Supervised instead; a genuine STALL still reaches
         # this same arm (`Stalled` is an Exception) and now says so.
-        cp = _pr.run(cmd, check=False, capture_output=True, text=True)
+        cp = _pr.run(cmd, check=False, capture_output=True, text=True,
+                     env=_gate_env)
     except Exception as exc:                                  # noqa: BLE001
         return _signoff_not_checked(name, t0, f"gate could not run: {exc}")
     detail = _gate_detail(out_json, cp.stdout or "", cp.stderr or "")
