@@ -159,6 +159,16 @@ REGRESSION = "REGRESSION"
 IMPROVEMENT = "IMPROVEMENT"
 LATERAL = "LATERAL"
 UNCHANGED = "UNCHANGED"
+#: R-0915-139 — a row the reference never had, on a subject that measures HOW
+#: EXISTING ROWS ARE READ. Its own direction, not LATERAL: a lateral is a move
+#: between two measured words, and there was no first word to move from. It
+#: belongs to `added` and to none of `regressions` / `improvements` / `laterals`.
+ADDED_NO_REFERENCE = "ADDED_NO_REFERENCE"
+
+#: The two subject kinds the real-IC arm runs, and the ONE thing they disagree
+#: about. See `diff_tables`.
+SUBJECT_AUDIT_REPLAY = "audit_replay"
+SUBJECT_REAL_IC_GATE = "real_ic_gate"
 
 #: Flags that do not change WHICH steps a compliance pass measures, so two
 #: invocations differing only in these are still comparable. Everything else —
@@ -512,7 +522,8 @@ def _run_shape_comparability(ref: Dict[str, Any],
 
 # ── the diff ─────────────────────────────────────────────────────────────────
 
-def diff_tables(ref: Dict[str, Any], cur: Dict[str, Any]) -> Dict[str, Any]:
+def diff_tables(ref: Dict[str, Any], cur: Dict[str, Any], *,
+                subject_kind: str = SUBJECT_REAL_IC_GATE) -> Dict[str, Any]:
     """Which steps moved, in both directions, plus the top-level verdict.
 
     A step present in one table and not the other is NOT a silent omission:
@@ -521,11 +532,41 @@ def diff_tables(ref: Dict[str, Any], cur: Dict[str, Any]) -> Dict[str, Any]:
                REGRESSION when the reference's word was a done-claim (rank >= 2)
                — a step that used to prove something and is now not even in the
                table is the laundering shape, seen from the other side.
-      ADDED    listed, and a REGRESSION only when the new step's own word is
-               NON_GREEN: a new red is a new red however it arrived.
+      ADDED    listed, and — on a `real_ic_gate` subject — a REGRESSION when the
+               new step's own word is NON_GREEN: a new red is a new red however
+               it arrived.
+
+    R-0915-139 — WHAT THE TWO SUBJECTS MEASURE IS NOT THE SAME THING, and one
+    rule for both booked a class of finding that cannot exist.
+
+    `real_ic_gate` runs the CANDIDATE TREE's own flow: every step it declares is a
+    step this tree owns, so a new row at NON_GREEN is a new red this change
+    brought and the rule above is right.
+
+    `audit_replay` replays a FROZEN run tree and measures HOW EXISTING ROWS ARE
+    READ. A step the frozen run's flow never declared has no reference and cannot
+    have one: the row can only read missing there, whatever the candidate does.
+    MEASURED on SLT53E: step 37.3 arrived with the fidelity producer, the
+    end-to-end subject read it PASS (0 design-layer differences across 46 layers),
+    and the four frozen replays read it None -> FAIL/missing_artefact — booked as
+    four regressions for a step those trees predate. Its siblings 37 and 37.5ip
+    read FAIL on the same trees for the same reason. (The design is deliberately
+    not named here: `test_no_chip_vendor_or_SKU_token_appears_in_the_LOGIC_of_any
+    _of_them` refuses a design token in this module, and it is right — the subject
+    comes from the call site, never from a literal.)
+
+    So on a replay subject a reference-None row is `ADDED_NO_REFERENCE`: recorded
+    under `added`, and in none of `regressions`, `improvements` or `laterals`. The
+    `real_ic_gate` rule is untouched, and it is the one that caught the
+    NOT_DETERMINED -> FAIL defect in SLT53D — which is exactly why this change
+    must not reach it.
 
     `regressed` is the single boolean a caller keys its exit code on.
     """
+    if subject_kind not in (SUBJECT_AUDIT_REPLAY, SUBJECT_REAL_IC_GATE):
+        # FAIL CLOSED on an unknown subject: keep the stricter rule rather than
+        # silently granting the replay exemption to a caller nobody reviewed.
+        subject_kind = SUBJECT_REAL_IC_GATE
     comparable, reason = comparability(ref, cur)
 
     rsteps: Dict[str, Any] = ref.get("steps") or {}
@@ -570,8 +611,10 @@ def diff_tables(ref: Dict[str, Any], cur: Dict[str, Any]) -> Dict[str, Any]:
         "current": csteps[sid].get("status"),
         "reference_rank": None,
         "current_rank": rank(csteps[sid].get("status")),
-        "direction": (REGRESSION if rank(csteps[sid].get("status")) == 0
-                      else LATERAL),
+        "direction": (
+            ADDED_NO_REFERENCE if subject_kind == SUBJECT_AUDIT_REPLAY
+            else REGRESSION if rank(csteps[sid].get("status")) == 0
+            else LATERAL),
     } for sid in sorted(set(csteps) - set(rsteps), key=_step_sort_key)]
 
     every = changed + removed + added
@@ -594,6 +637,10 @@ def diff_tables(ref: Dict[str, Any], cur: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "comparable": comparable,
         "comparability_reason": reason,
+        # WHICH RULE RAN, in the document itself: a reader of a diff that books
+        # no regression for an added red must be able to see WHY without knowing
+        # which program produced it.
+        "subject_kind": subject_kind,
         "verdict": {
             "reference": ref.get("verdict"),
             "current": cur.get("verdict"),

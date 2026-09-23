@@ -262,6 +262,14 @@ try:
     row["regressions"] = len(diff.get("regressions") or [])
     row["improvements"] = len(diff.get("improvements") or [])
     row["laterals"] = len(diff.get("laterals") or [])
+    # R-0915-139 — CARRIED, so a reader of the arm's own row can see that a
+    # replay subject had rows with no reference and which rule judged them. The
+    # count is reported, never summed into the verdict: `regressions` alone keys
+    # the exit code below, and on an `audit_replay` subject an added row is not
+    # one. Without these two fields a replay that added four rows and a replay
+    # that added none produce byte-identical arm rows.
+    row["added"] = len(diff.get("added") or [])
+    row["subject_kind"] = diff.get("subject_kind")
     row["comparable"] = diff.get("comparable")
 except Exception as exc:
     # THE EXIT CODE IS NOT THE MEASUREMENT. A subject that exits 0 and writes no
