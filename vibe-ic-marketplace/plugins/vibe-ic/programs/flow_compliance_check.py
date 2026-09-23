@@ -15263,7 +15263,36 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # auditor's bookkeeping about its OWN writes and must never outlive
         # them. Both directions, so the record self-heals when the RUN is
         # re-executed and legitimately reclaims one of these paths.
-        _record_audit_created(project, sid, _audit_produced)
+        # R-0915-141 — RE-STAMP ONLY WHAT THIS PASS ACTUALLY WROTE.
+        #
+        # `_audit_produced` is the union of three things: absent-before-the-gate,
+        # carried by a PRIOR note, and "holds a gate verdict document". Stamping
+        # the CURRENT stat for all three defeated the note's own
+        # self-invalidation, which this module promises in those words: "re-run
+        # the RUN, the producer rewrites the artefact, the size/mtime no longer
+        # match, the note is stale and the artefact is credited again".
+        #
+        # MEASURED on spm run22, read-only. Step 36's note records
+        # size=16738 mtime=08:51:23.557 -- which is EXACTLY the file
+        # `tapeout_checklist_gen` wrote at 08:51:23, not anything the audit wrote.
+        # The gate had written that path first at ~08:48 (a mid-run stage-4 pass),
+        # the note was created then, the PRODUCER rewrote the document at 08:51,
+        # and a later pass re-stamped the note onto the producer's own bytes. So
+        # the note matched again, the refusal stood at 09:02, and it would stand
+        # forever: once the audit is first to write a path, no producer can ever
+        # reclaim it. Step 38's note is the same shape (size=1831,
+        # mtime=08:51:23.505).
+        #
+        # The fix is to stamp only the paths this pass was the first writer of.
+        # A path carried by a prior note KEEPS that note -- untouched, with the
+        # stat of the write the audit really made -- so the moment a producer
+        # rewrites the file the recorded stat stops matching and the artefact is
+        # credited, exactly as documented. Nothing is forgiven: a path the audit
+        # wrote and nobody else has touched still matches its note and is still
+        # refused, on every pass.
+        _record_audit_created(
+            project, sid,
+            [r for r in _audit_produced if r in _absent_before_gate])
         _drop_audit_created_note(
             project, sid,
             [r for r in _declared_self_written if r not in _audit_produced])
