@@ -28,6 +28,7 @@ sys.path.insert(0, str(PROGRAMS))
 sys.path.insert(0, str(PROGRAMS / "tests"))
 
 import _signoff_drc_format as SDF                           # noqa: E402
+import provenance_output_hash_completeness_check as POHC      # noqa: E402
 import test_postlayout_lec_nameerror as H                   # noqa: E402
 
 R = H.R
@@ -140,3 +141,54 @@ def test_a_decks_report_replaces_a_router_report_left_at_the_path(
     project = _canonicalize(tmp_path, monkeypatch, deck_report=DECK_REPORT,
                             canon=stale)
     assert SDF.classify_file(project / CANON).is_signoff_deck
+
+
+# ── r2 (review w7st9pr2r): the ledger is told when the path is cleared ────
+
+def _run2_with_its_ledger(tmp_path, monkeypatch):
+    """subservient run2's shape: the router alias at the sign-off path AND the
+    ledger row that declares it, as the runner's back-fill stamped it."""
+    import hashlib
+    import json
+    stale = ("# Sign-off DRC report (ORGANIC-20260531 Step 31 alias).\n"
+             "# Source: phase3/stage3/pnr/routed.drc.rpt\n# Tool: openroad\n#\n"
+             "openroad / drt-pass: detailed_route invoked\n"
+             "[INFO DRT-0199]   Number of violations = 0.\n").encode()
+    project = H._canonicalize_project(tmp_path)
+    (project / "provenance.jsonl").write_text(json.dumps({
+        "tool": "openroad", "command": "sign-off DRC alias (back-filled)",
+        "exit_code": 0, "duration_ms": None, "reconstructed": True,
+        "timestamp": "2026-09-22T04:31:00Z",
+        "outputs": {CANON: "sha256:" + hashlib.sha256(stale).hexdigest()},
+    }) + "\n")
+    return _canonicalize(tmp_path, monkeypatch, canon=stale)
+
+
+def _missing_for_canon(project):
+    _verdict, findings = POHC.audit(project)
+    return [f for f in findings
+            if f.rule == "PROVENANCE_OUTPUT_FILE_MISSING" and CANON in f.detail]
+
+
+def test_clearing_the_path_leaves_no_missing_output_finding(
+        tmp_path, monkeypatch):
+    project = _run2_with_its_ledger(tmp_path, monkeypatch)
+    assert not (project / CANON).exists()
+    assert not _missing_for_canon(project), _missing_for_canon(project)
+
+
+def test_the_removal_event_is_newer_than_every_declaration_of_the_path(
+        tmp_path, monkeypatch):
+    import json
+    project = _run2_with_its_ledger(tmp_path, monkeypatch)
+    rows = [json.loads(ln) for ln in
+            (project / "provenance.jsonl").read_text().splitlines()
+            if ln.strip()]
+    removals = [i for i, r in enumerate(rows)
+                if r.get("op") == "remove" and CANON in (r.get("removed") or [])]
+    declares = [i for i, r in enumerate(rows)
+                if CANON in (r.get("outputs") or {})]
+    assert removals, rows
+    assert declares and max(declares) < removals[-1], (declares, removals)
+    ev = rows[removals[-1]]
+    assert ev["outputs"] == {} and ev["removed_outputs"][0]["path"] == CANON
