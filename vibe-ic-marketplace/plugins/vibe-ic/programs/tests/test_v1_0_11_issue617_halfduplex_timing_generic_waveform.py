@@ -98,7 +98,11 @@ def test_v068_flat_timing_still_fails(tmp_path):
                               "tIBT_us": {"nom": 22}},
         "internal_vs_external_note": "prose mentioning internal and external.",
     }
-    rc, verdict = _run(tmp_path, None, v068)
+    # R-0915-156 — check() applies when the design DECLARES half_duplex=true;
+    # a silent L2 is its own branch (INCOMPLETE), tested in
+    # test_one_classifier_decides_the_timing_split_absence.py.
+    rc, verdict = _run(tmp_path, {"protocol_overview": {"half_duplex": True}},
+                       v068)
     assert rc == 1 and verdict == "FAIL"
 
 

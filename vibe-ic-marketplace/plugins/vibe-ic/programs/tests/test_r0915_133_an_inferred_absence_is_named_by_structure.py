@@ -146,7 +146,11 @@ def test_an_explicit_l2_declaration_stays_design_declared_na(tmp_path):
 def test_a_half_duplex_design_is_not_excused(tmp_path):
     """The escape must not swallow a design the rule DOES apply to: directional
     groups are present, so the split is checked and this is not an N/A."""
-    rc, doc = _run(tmp_path, _stage(tmp_path, _PROTOCOL_L8))
+    # R-0915-156 — check() applies when the design DECLARES half_duplex=true;
+    # a silent L2 is its own branch (INCOMPLETE), tested in
+    # test_one_classifier_decides_the_timing_split_absence.py.
+    rc, doc = _run(tmp_path, _stage(
+        tmp_path, _PROTOCOL_L8, {"protocol_overview": {"half_duplex": True}}))
     assert doc.get("reason_class") != sa.NOT_APPLICABLE_BY_STRUCTURE, (
         "an L8 carrying rx_/tx_ groups was excused as having no such subject")
     # And it did not merely avoid the escape: the strict rule RAN and judged.

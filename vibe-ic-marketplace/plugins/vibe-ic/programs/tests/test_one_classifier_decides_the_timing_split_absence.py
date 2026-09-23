@@ -46,7 +46,13 @@ CMD = (f"internal_vs_external_timing_check {L8_REL} "
        "--json reports/phase2/gates/int_vs_ext_timing.json")
 
 
-def _project(tmp_path: Path, l8) -> Path:
+#: R-0915-156 — the declaration under which check() applies. A test about
+#: what check() finds declares it; a silent L2 is its own branch (INCOMPLETE).
+HD_TRUE = {"protocol_overview": {"half_duplex": True}}
+HD_FALSE = {"protocol_overview": {"half_duplex": False}}
+
+
+def _project(tmp_path: Path, l8, l2=None) -> Path:
     proj = tmp_path / "proj"
     doc = proj / L8_REL
     doc.parent.mkdir(parents=True, exist_ok=True)
@@ -54,11 +60,13 @@ def _project(tmp_path: Path, l8) -> Path:
         shutil.copyfile(l8, doc)
     else:
         doc.write_text(json.dumps(l8))
+    if l2 is not None:
+        (doc.parent / "L2_FRS.json").write_text(json.dumps(l2))
     return proj
 
 
-def _gate(tmp_path: Path, l8, layer=None):
-    proj = _project(tmp_path, l8)
+def _gate(tmp_path: Path, l8, layer=None, l2=None):
+    proj = _project(tmp_path, l8, l2=l2)
     rep = proj / "gate.json"
     argv = [sys.executable, str(GATE), str(proj / L8_REL), "--json", str(rep)]
     if layer is not None:
@@ -82,14 +90,27 @@ _DETECT_DRIVE = {"timing_groups": {
 _EMPTY_RX_TX = {"timing_groups": {"rx_timing": {}, "tx_timing": {}}}
 
 
+def _assert_incomplete(rc, rep):
+    """R-0915-156: silent L2 + protocol timing -> INCOMPLETE naming the
+    missing declaration; never NABS, never PASS, never FAIL."""
+    assert (rc, rep.get("verdict")) == (2, "INCOMPLETE"), rep
+    assert rep.get("reason_class") == "BLOCKED_BY_UPSTREAM", rep
+    assert rep["missing_declaration"]["key"] == "protocol_overview.half_duplex"
+    assert "L2_FRS.json" in rep["missing_declaration"]["path"]
+
+
 def _assert_fails(tmp_path, l8, *rules, layer=None):
-    rc, rep = _gate(tmp_path, l8, layer=layer)
+    """Timing on the page is never certified absent: with the design's
+    half_duplex=true declaration check() judges it (FAIL here), and with L2
+    silent it is INCOMPLETE (R-0915-156) -- never NABS either way."""
+    rc, rep = _gate(tmp_path / "hd_true", l8, layer=layer, l2=HD_TRUE)
     assert rep.get("reason_class") != NABS, rep
     assert rep["verdict"] == "FAIL", rep
     assert rc == 1, rep
     got = {f["rule"] for f in rep["findings"]}
     for rule in rules:
         assert rule in got, (rule, got)
+    _assert_incomplete(*_gate(tmp_path / "silent", l8, layer=layer))
 
 
 def test_v068_flat_shape_fails_instead_of_certifying_an_absence(tmp_path):
@@ -231,11 +252,13 @@ _CMD_LAYER = (f"internal_vs_external_timing_check {L8_REL} --layer "
 
 def test_through_the_wrapper_timing_on_the_page_is_never_not_applicable(
         tmp_path):
-    proj = _project(tmp_path, _H1_SCALARS)
+    proj = _project(tmp_path, _H1_SCALARS, l2=HD_TRUE)
     (proj / "phase1/generated_docs/L8_RTL_CONSTANTS.json").write_text("{}")
     res = F._check_program_exit_zero(proj, _CMD_LAYER)
     assert res.verdict == "FAIL", (res.verdict, res.reason_class, res[1])
     assert res.reason_class != NABS
+    res = _wrapper(tmp_path / "silent", _H1_SCALARS)
+    assert res.verdict in _INCOMPLETE_WORDS, (res.verdict, res[1])
 
 
 def test_through_the_wrapper_spm_with_its_layer_is_not_applicable(tmp_path):
@@ -251,12 +274,14 @@ def test_through_the_wrapper_layer_timing_is_never_not_applicable(tmp_path):
     """H2(a) end to end: an L8 with nothing in it, the clause's own --layer
     constants carrying TX_IBT_us >= BR_MIN_us. Base fail-closed (INCOMPLETE);
     8646e1862 published NOT_APPLICABLE; the gate must be asked instead."""
-    proj = _project(tmp_path, dict(_EMPTY_CANON))
+    proj = _project(tmp_path, dict(_EMPTY_CANON), l2=HD_TRUE)
     (proj / "phase1/generated_docs/L8_RTL_CONSTANTS.json").write_text(
         json.dumps(_H2_LAYER))
     res = F._check_program_exit_zero(proj, _CMD_LAYER)
     assert res.verdict == "FAIL", (res.verdict, res.reason_class, res[1])
     assert res.reason_class != NABS
+    res = _wrapper(tmp_path / "silent", dict(_EMPTY_CANON), layer=_H2_LAYER)
+    assert res.verdict in _INCOMPLETE_WORDS, (res.verdict, res[1])
 
 
 # ── round 3 (review ictier1c-r2): decide by FIELD, tokenize identifiers ─────
@@ -289,8 +314,14 @@ _TIMING_SHAPES = {
 }
 
 
-def _wrapper(tmp_path, l8, layer=None):
-    proj = _project(tmp_path, l8)
+#: The wrapper's word for an INCOMPLETE class: BLOCKED_BY_UPSTREAM reads
+#: BLOCKED, any other INCOMPLETE class reads INCOMPLETE. Never NOT_APPLICABLE,
+#: PASS or FAIL.
+_INCOMPLETE_WORDS = ("INCOMPLETE", "BLOCKED")
+
+
+def _wrapper(tmp_path, l8, layer=None, l2=None):
+    proj = _project(tmp_path, l8, l2=l2)
     lp = proj / "phase1/generated_docs/L8_RTL_CONSTANTS.json"
     lp.write_text(json.dumps(layer if layer is not None else {}))
     return F._check_program_exit_zero(proj, _CMD_LAYER)
@@ -310,17 +341,21 @@ def test_naming_and_provenance_never_block_the_absence(tmp_path, shape):
 
 @pytest.mark.parametrize("shape", sorted(_TIMING_SHAPES))
 def test_timing_the_gate_reads_is_never_certified_absent(tmp_path, shape):
-    rc, rep = _gate(tmp_path / "g", _TIMING_SHAPES[shape])
+    rc, rep = _gate(tmp_path / "g", _TIMING_SHAPES[shape], l2=HD_TRUE)
     assert rep.get("reason_class") != NABS and rc == 1, (shape, rep)
-    res = _wrapper(tmp_path / "w", _TIMING_SHAPES[shape])
+    res = _wrapper(tmp_path / "w", _TIMING_SHAPES[shape], l2=HD_TRUE)
     assert res.verdict == "FAIL", (shape, res.verdict, res.reason_class)
+    _assert_incomplete(*_gate(tmp_path / "gs", _TIMING_SHAPES[shape]))
+    res = _wrapper(tmp_path / "ws", _TIMING_SHAPES[shape])
+    assert res.verdict in _INCOMPLETE_WORDS, (shape, res.verdict)
 
 
 def test_fused_layer_constants_are_read_the_way_check_reads_them(tmp_path):
     """TBR_MIN_US is what check()'s _find_numeric_us reads from --layer."""
-    rc, rep = _gate(tmp_path, dict(_EMPTY_CANON),
-                    layer={"TX_IBT_us": 70, "TBR_MIN_US": 62})
+    layer = {"TX_IBT_us": 70, "TBR_MIN_US": 62}
+    rc, rep = _gate(tmp_path / "t", dict(_EMPTY_CANON), layer=layer, l2=HD_TRUE)
     assert rep.get("reason_class") != NABS and rc == 1, rep
+    _assert_incomplete(*_gate(tmp_path / "s", dict(_EMPTY_CANON), layer=layer))
 
 
 def test_fused_symbols_count_for_check_too():
@@ -382,3 +417,64 @@ def test_the_schema_is_the_emitters(tmp_path):
     assert set(doc) <= known, sorted(set(doc) - known)
     assert {crw.L8_KEY, clk.SCALAR_KEY, stamp.STAMP_KEY,
             *clk._CLOCK_LIST_KEYS} <= S.NON_PROTOCOL_KEYS
+
+
+# ── R-0915-156: the four branches of the contract ──────────────────────────
+
+#: A real half-duplex L8 shape: host-side (rx) and DUT-side (tx) groups.
+_SPLIT_GOOD = {"timing_groups": {
+    "rx_host_side": {"H0_us": [10, 30], "H1_us": [1, 9], "BR_us": [31, 65],
+                     "IBT_us": [5, 20]},
+    "tx_dut_side": {"H0_us": 20, "H1_us": 5, "BR_us": 40, "IBT_us": 10}}}
+_SPLIT_BAD = {"timing_groups": {
+    "rx_host_side": {"H0_us": [10, 30], "H1_us": [1, 9], "BR_us": [31, 65],
+                     "IBT_us": [5, 20]},
+    "tx_dut_side": {"H0_us": 20, "H1_us": 5, "BR_us": 40, "IBT_us": 70}}}
+
+
+def test_contract_silent_l2_is_incomplete_naming_the_declaration(tmp_path):
+    """L2 silent + protocol timing -> INCOMPLETE, the reason naming
+    L2 protocol_overview.half_duplex and what each answer does. Through the
+    wrapper it is an INCOMPLETE-class word; through check_step the step is
+    NOT_MEASURED -- never FAIL, never NABS, never PASS."""
+    rc, rep = _gate(tmp_path / "g", _SPLIT_BAD)
+    _assert_incomplete(rc, rep)
+    assert "protocol_overview.half_duplex" in rep["reason"]
+    assert "false" in rep["reason"] and "true" in rep["reason"]
+    res = _wrapper(tmp_path / "w", _SPLIT_BAD)
+    assert res.verdict in _INCOMPLETE_WORDS, (res.verdict, res[1])
+    proj = _project(tmp_path / "s", _SPLIT_BAD)
+    step = {"id": 2, "name": "probe", "stage": "stage1",
+            "gate": {"all_of": [{"optional_program_exit_zero": {
+                "command": CMD, "condition_files_exist": [L8_REL],
+                "absent_condition_reason": "Scoped to a Phase-1 declaration "
+                                           "that this probe always carries."}}]}}
+    r = F.check_step(proj, step, {})
+    assert r.status == "NOT_MEASURED", (r.status, r.reason_class, r.reasons)
+
+
+def test_contract_declared_false_is_not_applicable_by_declaration(tmp_path):
+    rc, rep = _gate(tmp_path, _SPLIT_BAD, l2=HD_FALSE)
+    assert (rc, rep["verdict"], rep["reason_class"]) == (
+        0, "VACUOUS_PASS", "DESIGN_DECLARED_NA"), rep
+    assert "half_duplex=false" in rep["rationale"]
+
+
+def test_contract_declared_true_with_a_bad_split_fails(tmp_path):
+    rc, rep = _gate(tmp_path, _SPLIT_BAD, l2=HD_TRUE)
+    assert (rc, rep["verdict"]) == (1, "FAIL"), rep
+    assert "ibt_exceeds_br_threshold" in {f["rule"] for f in rep["findings"]}
+
+
+def test_contract_declared_true_with_a_good_split_passes(tmp_path):
+    rc, rep = _gate(tmp_path, _SPLIT_GOOD, l2=HD_TRUE)
+    assert (rc, rep["verdict"]) == (0, "PASS"), rep
+
+
+def test_contract_spm_is_unchanged_by_the_silent_branch(tmp_path):
+    """spm's L2 is silent too (no protocol_overview), but its L8 carries no
+    protocol timing, so it is the schema escape's NABS -- not INCOMPLETE."""
+    rc, rep = _gate(tmp_path / "a", SPM_L8)
+    assert (rc, rep["reason_class"]) == (0, NABS), rep
+    assert (rep["structural_absence"]["scanned"],
+            rep["structural_absence"]["found"]) == (13, 0)
