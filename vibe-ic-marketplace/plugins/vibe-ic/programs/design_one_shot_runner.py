@@ -22122,11 +22122,67 @@ def step_final_audit(project: Path, phase: int = 3,
                           extras={"structural_measurement": meas},
                           attribution=("the compliance audit's own waiver "
                                        "rows" if _waived else ""))
+    # R-0915-159 — AN AUDIT THAT COULD NOT CERTIFY IS NOT AN AUDIT THAT FAILED.
+    #
+    # MEASURED, subservient x gf180mcuD as a DIE (lane icsub5, run2 on main
+    # 1f537b5c0, 2026-09-23). The phase-2 audit's own tally was
+    #   PASS=4 PASS_WITH_WAIVERS=1 WAIVED-DEFERRED=1 FAIL=4 NOT_MEASURED=5 …
+    # and its `Overall:` line read NOT_MEASURED, because five steps measured
+    # nothing: P0 (partial_population), D1 (awaiting_agent_pass), Step 2
+    # (execution_error), Step 4 and Step 5 (partial_population). This site had
+    # no branch for that word, so it fell through to FAIL, phase 2's verdict
+    # became FAIL, and `vibe_ic_one_shot_runner` halted before phase 3 — a DIE
+    # could never reach its own sign-off.
+    #
+    # NOT_MEASURED is "cannot certify", never "found a defect" — the same rule
+    # as R-0915-140/156, and the same one this function already applies twelve
+    # lines above for a partial structural population. It is NOT a softening:
+    # the front door's roll-up puts a NOT_MEASURED phase in `unmeasured`, and a
+    # run with anything unmeasured can never be PASS (it caps at NOT_MEASURED),
+    # so the flow proceeds and still refuses to certify. What changes is that it
+    # stops calling an absence a failure, and it CARRIES THE ROWS: a reader sees
+    # which steps were not measured and why, instead of one translated word.
+    if "Overall: NOT_MEASURED" in out:
+        _nm_rows = _not_measured_rows(out)
+        _nm_note = ""
+        if _nm_rows:
+            _nm_note = ("\nNOT MEASURED, and by what reason — this is an "
+                        "inability to certify, not a defect found:\n  "
+                        + "\n  ".join(_nm_rows))
+        return StepResult("final_audit", "NOT_MEASURED",
+                          time.time() - t0,
+                          head + _nm_note,
+                          [str(transcript)],
+                          extras={"structural_measurement": meas,
+                                  "not_measured_rows": _nm_rows},
+                          reason_class=_V.ReasonClass.PARTIAL_POPULATION)
     return StepResult("final_audit", "FAIL",
                       time.time() - t0,
                       head,
                       [str(transcript)],
                       extras={"structural_measurement": meas})
+
+
+#: A `flow_compliance_check` step line that measured nothing, and its reason.
+#: Shape, verbatim from the run above:
+#:   "… [NOT_MEASURED     ] Step  4: 🔁 Simulation …  (stage1) (partial_population)"
+_NOT_MEASURED_ROW_RE = re.compile(
+    r"^\s*\S*\s*\[\s*NOT_MEASURED\s*\]\s*(?P<row>Step\s+\S+:.*)$", re.M)
+
+
+def _not_measured_rows(out: str) -> "list[str]":
+    """The audit's own NOT_MEASURED step lines, trimmed, in order.
+
+    R-0915-159. A step verdict that says only "NOT_MEASURED" moves the word
+    without moving the information; the rows are what a reader has to act on.
+    Pure, and a transcript with none yields an empty list rather than a guess.
+    """
+    rows: "list[str]" = []
+    for m in _NOT_MEASURED_ROW_RE.finditer(out or ""):
+        row = " ".join(m.group("row").split())
+        if row not in rows:
+            rows.append(row)
+    return rows
 
 
 def stamp_verdict_mode(report_path: Path, blocking: bool) -> Optional[str]:
