@@ -60,8 +60,19 @@ def test_the_refusal_line_names_the_reference_and_its_file(tmp_path):
         assert r.returncode == 1, r.stdout
         head = [ln for ln in r.stdout.splitlines()
                 if ln.startswith("[FAIL]")][0]
-        assert str(live) in head, head
+        # AMENDED after the arm caught this breaking #2084's cap. My first
+        # version appended the full reference and pushed the deciding line to
+        # 267 chars against a 200 cap -- it made the refusal attributable by
+        # breaking the rule that makes it publishable at all.
+        #
+        # THE CITING FILE IS THE ATTRIBUTION THAT MATTERS: it names the
+        # WRITER, which is the question a reader of this line is asking. It is
+        # always present. The path is added when the remaining budget allows
+        # and is always in the detail block below, which is asserted by
+        # `test_the_detail_block_is_unchanged`.
         assert "reports/a_declared_output.json" in head, head
+        assert len(head) <= 200, (len(head), head)
+        assert head.endswith(":"), head
     finally:
         live.unlink(missing_ok=True)
 
@@ -82,5 +93,26 @@ def test_the_detail_block_is_unchanged(tmp_path):
         assert "live external-storage artifact(s)" in r.stdout, r.stdout
         assert f"referenced in reports/a_declared_output.json → {live}" \
             in r.stdout, r.stdout
+    finally:
+        live.unlink(missing_ok=True)
+
+
+def test_the_path_joins_the_header_when_the_budget_allows(tmp_path):
+    """And when there IS room, the path goes on the line too -- the degradation
+    is to the path, never to the file that names the writer."""
+    live = Path("/tmp") / "p0.gds"
+    live.write_text("x")
+    short = tmp_path / "s"
+    short.mkdir()
+    (short / "reports").mkdir()
+    (short / "reports" / "r.json").write_text(
+        json.dumps({"a": str(live)}))
+    try:
+        r = _run(short)
+        head = [ln for ln in r.stdout.splitlines()
+                if ln.startswith("[FAIL]")][0]
+        assert "reports/r.json" in head, head
+        assert str(live) in head, head
+        assert len(head) <= 200, (len(head), head)
     finally:
         live.unlink(missing_ok=True)

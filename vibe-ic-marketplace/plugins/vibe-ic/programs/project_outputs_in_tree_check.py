@@ -334,6 +334,11 @@ def names_a_relocated_copy(path_str: str, project: Path) -> bool:
 # child exits.  Telemetry keeps the marker name so the invocation can be
 # diagnosed later; that reference is not a deliverable location.  Keep the
 # match exact so an arbitrary /tmp JSON/GDS/netlist remains blocking.
+#: `flow_compliance_check._p0_first_line` truncates a gate's deciding line at
+#: this many characters (#2084). Named here so the header can be FITTED to it
+#: rather than discovered to overflow it by a test.
+_P0_LINE_CAP = 200
+
 _WATCHDOG_PIDFILE_RE = re.compile(
     r"^/tmp/\.vibeic-job-[A-Za-z0-9_-]+\.pid$"
 )
@@ -845,35 +850,52 @@ def main() -> int:
     # published reason mid-word; the term is spelled `outside-root` here and
     # written out in full in its own block below. Measured worst case, all three
     # counts four digits: 199 characters.
-    # NAME THE FIRST REFERENCE ON THE REFUSAL LINE ITSELF.
+    # NAME THE FIRST REFERENCE ON THE REFUSAL LINE ITSELF -- WITHIN THE CAP.
     #
     # MEASURED on spm (lane icspm5, 2026-09-23). Step P0 recorded this gate's
-    # refusal as
-    #
-    #   FAIL: project_outputs_in_tree_check — [FAIL] ... 1 blocking
-    #   external-storage reference(s) ... (1 live, 0 dangling, 0 outside-root)
-    #   — this is what the gate exits 1 on:
-    #
-    # and that was the WHOLE record. The path and its citing file are on the
+    # refusal as the header alone: the path and its citing file are on the
     # lines BELOW, and the umbrella's reader (`flow_compliance_check.
     # _p0_first_line`) keeps exactly one line. The volatile path was swept
     # minutes later, the gate then exited 0, and the occurrence became
-    # unattributable: I could not afterwards say which declared output carried
-    # the reference or which program wrote it.
+    # unattributable.
     #
-    # The gate was RIGHT to refuse. The refusal was simply unusable by the one
-    # consumer that stores it. Nothing below changes -- no classification, no
-    # count, no exit code, and the detail blocks are untouched; this only puts
-    # the first offender where a one-line reader will see it.
+    # AND THE CAP IS NOT NEGOTIABLE. `_p0_first_line` truncates at 200 chars
+    # and #2084 exists because a line cut mid-sentence is how
+    # `testbench_exists_check` came to publish `"{"`. My first version simply
+    # appended the reference and pushed the line to 267 -- it made the refusal
+    # attributable by breaking the rule that makes it publishable at all.
+    #
+    # So the reference is fitted to what is LEFT, and the sentence still ends
+    # in the colon the contract requires. When even an elided reference will
+    # not fit -- four-digit counts leave almost nothing -- the header is
+    # exactly what it was, and the detail blocks below still carry the path in
+    # full. The cap wins; attribution takes the room the cap leaves.
+    # "in this project's declaration file(s)" is dropped to make the room.
+    # It said nothing the rest of the line and the detail blocks do not: the
+    # gate's NAME is in the sentence, the counts follow, and every reference
+    # below is printed as "referenced in <file> → <path>". 38 characters of
+    # restatement, spent instead on the one thing the record could not carry.
+    _stem = (f"[FAIL] project_outputs_in_tree_check: "
+             f"{fail_count} blocking external-storage reference(s) "
+             f"({len(live)} live, {len(dangling)} dangling, "
+             f"{len(derived)} outside-root) — this is what the "
+             f"gate exits 1 on")
     _first = (live or dangling or derived or [(None, None)])[0]
-    _cited = (f" — first: {_first[1]} (referenced in {_first[0]})"
-              if _first[0] else "")
-    print(f"[FAIL] project_outputs_in_tree_check: "
-          f"{fail_count} blocking external-storage reference(s) in this "
-          f"project's declaration file(s) "
-          f"({len(live)} live, {len(dangling)} dangling, "
-          f"{len(derived)} outside-root) — this is what the "
-          f"gate exits 1 on:{_cited}")
+    _cited = ""
+    if _first[0]:
+        _budget = _P0_LINE_CAP - len(_stem) - 1          # 1 for the colon
+        # THE CITING FILE FIRST. It is what names the WRITER, which is the
+        # question a reader of this line is trying to answer; the path says
+        # what was written. Both when they fit, the file alone when they do
+        # not, and nothing when even that will not -- the detail blocks below
+        # always carry the pair in full.
+        _both = f", first in {_first[0]}: {_first[1]}"
+        _file_only = f", first in {_first[0]}"
+        if len(_both) <= _budget:
+            _cited = _both
+        elif len(_file_only) <= _budget:
+            _cited = _file_only
+    print(_stem + _cited + ":")
 
     if live:
         print(f"[FAIL] project_outputs_in_tree_check: "
