@@ -79,7 +79,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import _container_exec as _CE  # vibe-ic#628 — bound the solver, not the client
 
@@ -753,7 +753,9 @@ def emit_sby(rtl_files: List[str], harness_file: str, top: str,
              engine_prove: str = "abc pdr",
              engine_bmc: str = "abc bmc3",
              include_files: Optional[List[str]] = None,
-             frontend: str = "read_verilog") -> str:
+             frontend: str = "read_verilog",
+             observers: Optional[List[Tuple[str, str]]] = None,
+             dut_simdef: Optional[str] = None) -> str:
     """Emit a two-task .sby: a `safety` task (unbounded prove) and a `bmc`
     task (bounded model check). Files are listed under [files] so the Step-5
     evidence gate can resolve every referenced source.
@@ -814,6 +816,15 @@ def emit_sby(rtl_files: List[str], harness_file: str, top: str,
         # opt-OUT). Probed in the pinned image via `help read_slang`.
         _safety_read = f"read_slang --single-unit {safety_defs} {reads}"
         _bmc_read = f"read_slang --single-unit {bmc_defs} {reads}"
+    elif dut_simdef is not None:
+        # R-0915-157 — THE PROOF PROVES THE CHIP'S DESIGN. The DUT is read
+        # EXACTLY as the chip's synthesis reads it (`_chip_synth_read`: no
+        # `-formal`, the chip's `-DSIMULATION` decision); only the harness is
+        # read with `-formal` and the proof task's defines. FORMAL is never
+        # defined for the DUT, so an `ifdef FORMAL` arm the chip never builds
+        # cannot be what is proved.
+        _safety_read = f"read_verilog -formal -sv {safety_defs} {harness_file}"
+        _bmc_read = f"read_verilog -formal -sv {bmc_defs} {harness_file}"
     else:
         _safety_read = f"read_verilog -formal -sv {safety_defs} {reads}"
         _bmc_read = f"read_verilog -formal -sv {bmc_defs} {reads}"
@@ -844,6 +855,30 @@ def emit_sby(rtl_files: List[str], harness_file: str, top: str,
     # a `` `include `` resolves; `read_verilog` must not be handed a macro body.
     srcs = list(rtl_files) + [harness_file] + list(include_files or [])
     files_block = "\n".join(srcs)
+    # R-0915-144 — OBSERVERS: DUT state made visible the way the engine binds
+    # it (see `formal_harness_gen.OBSERVE_PRAGMA`). The design is flattened
+    # and each observer is `connect -set` to the flattened net, AFTER
+    # `select -assert-any` has proved that net exists: a net that is not there
+    # stops the task with an ERROR, so an observer can never be left undriven
+    # (a free variable) behind a proof. No observers → byte-identical script.
+    bind_lines = ""
+    dut_lines = ""
+    if dut_simdef is not None and frontend != "read_slang":
+        import _chip_synth_read as _csr
+        dut_lines = "\n".join(_csr.chip_read_lines(
+            [Path(f) for f in rtl_files], dut_simdef)) + "\n"
+    if observers or dut_lines:
+        _b = [f"hierarchy -top {top}", "proc", "flatten"]
+        if dut_lines:
+            # SILICON HAS NO INITIALIZERS (R-0915-157): every flattened DUT
+            # wire (`<inst>.<net>`) loses its `init`, so design flops start
+            # from ARBITRARY state. The harness's own registers (no dot) keep
+            # theirs — `f_past_valid` must start at 0.
+            _b.append(f"setattr -unset init {top}/w:*.*")
+        for lhs, rhs in observers or []:
+            _b.append(f"select -assert-any {top}/w:{rhs}")
+            _b.append(f"connect -set {lhs} {rhs}")
+        bind_lines = "\n".join(_b) + "\n"
     return f"""[tasks]
 safety   prove
 bmc      bmc
@@ -861,13 +896,23 @@ safety: {engine_prove}
 bmc:    {engine_bmc}
 
 [script]
-safety: {_safety_read}
+{dut_lines}safety: {_safety_read}
 ~safety: {_bmc_read}
-prep -top {top}
+{bind_lines}prep -top {top}
 
 [files]
 {files_block}
 """
+
+
+def proof_define_sets() -> tuple:
+    """The `-D` flags of every task `emit_sby` writes (safety, bmc), read from
+    its own defaults so the structural netlist is elaborated exactly as each
+    proof task reads the RTL — one spelling, never retyped."""
+    import inspect
+    params = inspect.signature(emit_sby).parameters
+    return tuple(dict.fromkeys(
+        (params["safety_defs"].default, params["bmc_defs"].default)))
 
 
 # ── invariant-strengthened harness (auxiliary-invariant / datapath proof) ──
@@ -1479,6 +1524,306 @@ def _assertion_count(path: Optional[Path],
                for x in texts)
 
 
+# ── R-0915-144 — observers, the `dut.*` refusal, and the program discharge ──
+PROGRAM_RECEIPT = "formal_program_discharge.json"
+STRUCTURAL_EVIDENCE = "formal_structural_evidence.json"
+DISCHARGED_BY_PROGRAM = "DISCHARGED_BY_PROGRAM"
+STRUCTURAL_REFUTED = "STRUCTURAL_REFUTED"
+# An `@observe` pragma is read WHOLE — to the end of its line — and only a
+# plain wire bound to a plain (dotted) net is accepted. Anything else is
+# UNREADABLE and refused, never truncated: the old pattern stopped at `$`, so
+# `= dut.a$b` bound to `dut.a` (round-6 review).
+_OBSERVE_LINE_RE = re.compile(r"//\s*@observe\b(?P<rest>[^\n]*)$", re.MULTILINE)
+_OBSERVE_BODY_RE = re.compile(
+    r"^\s+(?P<lhs>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+    r"(?P<rhs>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\s*$")
+_CONNECT_RE = re.compile(r"^\s*connect\s+-set\s+(?P<lhs>\S+)\s+(?P<rhs>\S+)\s*$",
+                         re.MULTILINE)
+_SV_KEYWORDS = {
+    "module", "property", "endproperty", "assert", "assume", "cover", "always",
+    "always_ff", "always_comb", "initial", "wire", "reg", "logic", "input",
+    "output", "inout", "parameter", "localparam", "assign", "if", "else",
+    "begin", "end", "sequence", "restrict", "genvar", "generate", "function",
+    "task", "return", "case", "default", "import", "bit", "int", "integer",
+}
+_IMPLICIT_HIER_RE = re.compile(
+    r"Identifier `\\?([A-Za-z_]\w*\.[A-Za-z_][\w.]*)' is implicitly declared")
+
+
+def parse_observers(text: str) -> List[Tuple[str, str]]:
+    """`// @observe <wire> = <inst>.<net>` pragmas of a harness (pure) — only
+    the ones read WHOLE. See `unreadable_observers` for the rest."""
+    out = []
+    for m in _OBSERVE_LINE_RE.finditer(text):
+        b = _OBSERVE_BODY_RE.match(m.group("rest"))
+        if b:
+            out.append((b.group("lhs"), b.group("rhs")))
+    return out
+
+
+def unreadable_observers(text: str) -> List[str]:
+    """Every `@observe` pragma this program cannot read whole (pure)."""
+    return [m.group(0).strip() for m in _OBSERVE_LINE_RE.finditer(text)
+            if not _OBSERVE_BODY_RE.match(m.group("rest"))]
+
+
+def observer_binding_mismatches(harness_text: str, sby_text: str) -> List[str]:
+    """(d) Every `connect -set` in the task file must be EXACTLY an observer the
+    harness declared (same wire, same net), each wire bound once, and every
+    declared observer bound. Anything else is named (pure)."""
+    # the harness's own `@connect` pragmas (the invariant-strengthened path)
+    # are declarations too — exact lhs/rhs, still checked both ways
+    declared = parse_observers(harness_text) + [
+        (l, r) for l, r in parse_harness_pragmas(harness_text)["connects"]]
+    decl = {}
+    probs = []
+    for lhs, rhs in declared:
+        if lhs in decl and decl[lhs] != rhs:
+            probs.append(f"observer {lhs} declared for two nets")
+        decl[lhs] = rhs
+    bound: Dict[str, List[str]] = {}
+    for m in _CONNECT_RE.finditer(sby_text):
+        bound.setdefault(m.group("lhs"), []).append(m.group("rhs"))
+    for lhs, rhss in bound.items():
+        if lhs not in decl:
+            probs.append(f"connect -set {lhs} binds a wire no observer declares")
+        elif len(rhss) != 1 or rhss[0] != decl[lhs]:
+            probs.append(f"connect -set {lhs} {' '.join(rhss)} != declared {decl[lhs]}")
+    for lhs, rhs in decl.items():
+        if lhs not in bound:
+            probs.append(f"{lhs} = {rhs} (the task file does not bind it)")
+    return probs
+
+
+def unbound_hierarchical_refs(text: str) -> List[str]:
+    """Hierarchical references INTO an instance the harness declares (pure).
+
+    `<inst>.<net>` in a property does not bind to the DUT in this flow's formal
+    path: yosys `read_verilog` has no hierarchical references and makes it an
+    implicitly declared, UNDRIVEN local wire — a free variable. A property over
+    it proves or refutes nothing about the design (MEASURED on spm, lane
+    icspm5 §48: `dut.pr` failed at frame 3 while the same claim over the port
+    `p = pr` proved). Comments are stripped first, so an `@observe` pragma —
+    which is how DUT state IS made visible — is never counted.
+    """
+    body = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+    body = re.sub(r"//[^\n]*", "", body)
+    insts = set()
+    for m in re.finditer(
+            r"(?:^|;)\s*([A-Za-z_]\w*)\s*(?:#\s*\((?:[^()]|\([^()]*\))*\)\s*)?"
+            r"([A-Za-z_]\w*)\s*\(", body, flags=re.MULTILINE):
+        if m.group(1) not in _SV_KEYWORDS and m.group(2) not in _SV_KEYWORDS:
+            insts.add(m.group(2))
+    refs: List[str] = []
+    for inst in sorted(insts):
+        for r in re.finditer(rf"(?<![\w.$]){re.escape(inst)}\.([A-Za-z_]\w*)",
+                             body):
+            ref = f"{inst}.{r.group(1)}"
+            if ref not in refs:
+                refs.append(ref)
+    return refs
+
+
+def _sha256(path: Path) -> Optional[str]:
+    import hashlib
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+# Case-INSENSITIVE: a `` `ASSUME(...) `` macro is an assumption too (review
+# round 2, M3).
+_ASSUME_RE = re.compile(r"\b(?:assume|restrict)\b", re.IGNORECASE)
+
+
+def foreign_assumptions(harness_text: str) -> List[str]:
+    """Assume/restrict statements in the harness (and its included fragment).
+
+    The PROGRAM authors none. Any assumption present came from someone else,
+    and it can make every generated property VACUOUS — `assume property
+    (!rst)` alone makes "zero one cycle after reset" true of any design
+    (review (a)). A program closure is therefore refused while one is present.
+    """
+    body = re.sub(r"/\*.*?\*/", " ", harness_text, flags=re.DOTALL)
+    body = re.sub(r"//[^\n]*", "", body)
+    return [ln.strip()[:160] for ln in body.splitlines() if _ASSUME_RE.search(ln)]
+
+
+def _program_routed(contract: dict) -> List[dict]:
+    return [o for o in (contract.get("unresolved_obligations") or [])
+            if isinstance(o, dict) and not o.get("program_refused")
+            and (o.get("program_rule") or {}).get("kind") in ("STRUCTURAL", "MIXED")]
+
+
+def _clear_program_receipt(formal_dir: Path) -> None:
+    """A receipt answers ONE run. Cleared at the start of every run, so a
+    previous run's pair can never be read back as this run's (review H3)."""
+    for name in (PROGRAM_RECEIPT, STRUCTURAL_EVIDENCE):
+        try:
+            (formal_dir / name).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _program_discharge(formal_dir: Path, container: Optional[str],
+                       harness_text: str,
+                       model_text: Optional[str] = None) -> Optional[dict]:
+    """Answer the STRUCTURAL / MIXED obligations the contract routes to the
+    program, and write the INVOKED_BY_PROGRAM receipt. None when there are
+    none. The receipt is never the expert's file: an AI answer and a program
+    answer are different records (R-0915-125(a)).
+
+    The receipt is BOUND to this run: the digest of the contract it answers,
+    of every RTL file measured and of the evidence file it cites. The read-back
+    refuses any pair that does not match (review H3)."""
+    contract_path = formal_dir / "property_contract.json"
+    try:
+        contract = json.loads(contract_path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    rows = _program_routed(contract)
+    subject = contract.get("structural_subject") or {}
+    if not rows or not subject.get("top"):
+        return None
+    import formal_structural_check as _fsc
+    claims: List[dict] = []
+    for o in rows:
+        for c in o["program_rule"].get("claims") or []:
+            if c.get("rule") in _fsc.STRUCTURAL_RULES:
+                key = {"rule": c["rule"], "signal": c.get("signal", ""),
+                       "value": c.get("value", "")}
+                if key not in claims:
+                    claims.append(key)
+    evidence = _fsc.check([Path(f) for f in subject.get("rtl_files") or []],
+                          subject["top"], claims,
+                          formal_dir / "structural_check", container,
+                          simdef=subject.get("simdef", ""),
+                          klass={"clock": subject.get("clock", ""),
+                                 "resets": subject.get("resets") or []})
+    evidence["work_dir"] = "structural_check"
+    _aa.write_json(formal_dir / STRUCTURAL_EVIDENCE, evidence)
+    answers = {(r["rule"], r.get("signal", ""), r.get("value", "")): r
+               for r in evidence.get("claims") or []}
+    body = re.sub(r"//[^\n]*", "", harness_text)
+    assumes = foreign_assumptions(model_text if model_text is not None
+                                  else harness_text)
+    dispositions = []
+    for o in rows:
+        per_claim, status = [], DISCHARGED_BY_PROGRAM
+        for c in o["program_rule"].get("claims") or []:
+            if c.get("rule") in _fsc.STRUCTURAL_RULES:
+                a = answers.get((c["rule"], c.get("signal", ""),
+                                 c.get("value", ""))) or {}
+                v = a.get("verdict", _fsc.NOT_DISCHARGED)
+                per_claim.append({"claim": c, "verdict": v,
+                                  "finding": a.get("finding", "not measured")})
+                if v == _fsc.REFUTED:
+                    status = STRUCTURAL_REFUTED
+                elif v != _fsc.PASS and status == DISCHARGED_BY_PROGRAM:
+                    status = _fsc.NOT_DISCHARGED
+        missing = [p for p in o.get("properties") or []
+                   if not re.search(rf"\bproperty\s+{re.escape(p)}\b", body)]
+        needs_props = any(c.get("rule") not in _fsc.STRUCTURAL_RULES
+                          for c in o["program_rule"].get("claims") or [])
+        if needs_props and (missing or not o.get("properties")):
+            if status == DISCHARGED_BY_PROGRAM:
+                status = _fsc.NOT_DISCHARGED
+            per_claim.append({"claim": "temporal", "verdict": _fsc.NOT_DISCHARGED,
+                              "finding": f"generated properties absent: {missing}"})
+        if needs_props and assumes and status == DISCHARGED_BY_PROGRAM:
+            status = _fsc.NOT_DISCHARGED
+            per_claim.append({"claim": "vacuity", "verdict": _fsc.NOT_DISCHARGED,
+                              "finding": ("the harness carries assumption(s) "
+                                          "the program did not author, which "
+                                          "can make its properties vacuous: "
+                                          + " | ".join(assumes))})
+        dispositions.append({
+            "id": o["id"], "status": status, "kind": o["program_rule"]["kind"],
+            "claims": per_claim, "properties": list(o.get("properties") or []),
+            "evidence": STRUCTURAL_EVIDENCE,
+            "reason": "; ".join(str(p["finding"]) for p in per_claim),
+        })
+    receipt = {
+        "program": "formal_property_run", "ruling": "R-0915-144",
+        "invocation_status": "INVOKED_BY_PROGRAM",
+        "structural_evidence": STRUCTURAL_EVIDENCE,
+        "binding": {
+            "contract_sha256": _sha256(contract_path),
+            "evidence_sha256": _sha256(formal_dir / STRUCTURAL_EVIDENCE),
+            "top": subject["top"],
+            "rtl_sha256": evidence.get("rtl_sha256") or {},
+        },
+        "foreign_assumptions": assumes,
+        "dispositions": dispositions,
+    }
+    _aa.write_json(formal_dir / PROGRAM_RECEIPT, receipt)
+    return receipt
+
+
+def _verified_program_closures(formal_dir: Path) -> Tuple[
+        Dict[str, dict], Dict[str, dict], Dict[str, dict]]:
+    """READ BACK the program receipt: (closed, refuted, undischarged) by id.
+
+    Refused wholesale unless the pair is THIS run's (review H3): the receipt's
+    contract digest is the current contract's, its evidence digest is the
+    evidence file's, the evidence measured the contract's subject top and
+    every RTL file still has the digest that was measured. Then, per
+    disposition: its id must be an obligation the CURRENT contract routes to
+    the program; it must cite at least one structural claim; and every cited
+    claim must carry the same verdict in the evidence on disk — the
+    disposition's own word is never taken."""
+    contract_path = formal_dir / "property_contract.json"
+    try:
+        receipt = json.loads((formal_dir / PROGRAM_RECEIPT).read_text(errors="replace"))
+        evidence = json.loads((formal_dir / STRUCTURAL_EVIDENCE)
+                              .read_text(errors="replace"))
+        contract = json.loads(contract_path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return {}, {}, {}
+    if not all(isinstance(x, dict) for x in (receipt, evidence, contract)):
+        return {}, {}, {}
+    if (receipt.get("program") != "formal_property_run"
+            or str(receipt.get("invocation_status", "")).upper() != "INVOKED_BY_PROGRAM"):
+        return {}, {}, {}
+    bind = receipt.get("binding") or {}
+    subject = contract.get("structural_subject") or {}
+    rtl = bind.get("rtl_sha256") or {}
+    if (not bind.get("contract_sha256")
+            or bind.get("contract_sha256") != _sha256(contract_path)
+            or bind.get("evidence_sha256") != _sha256(formal_dir / STRUCTURAL_EVIDENCE)
+            or bind.get("top") != subject.get("top")
+            or evidence.get("top") != subject.get("top")
+            or sorted(rtl) != sorted(str(f) for f in subject.get("rtl_files") or [])
+            or evidence.get("rtl_sha256") != rtl
+            or not rtl or any(_sha256(Path(f)) != h for f, h in rtl.items())):
+        return {}, {}, {}
+    routed = {str(o["id"]) for o in _program_routed(contract)}
+    verdicts = {(r.get("rule"), r.get("signal", ""), r.get("value", "")): r.get("verdict")
+                for r in evidence.get("claims") or []}
+    closed, refuted, undischarged = {}, {}, {}
+    for d in receipt.get("dispositions") or []:
+        if not isinstance(d, dict) or str(d.get("id")) not in routed:
+            continue
+        undischarged[str(d["id"])] = d
+        cited = [c["claim"] for c in d.get("claims") or []
+                 if isinstance(c.get("claim"), dict)]
+        if not cited:
+            continue
+        keys = [(c.get("rule"), c.get("signal", ""), c.get("value", "")) for c in cited]
+        if d.get("status") == STRUCTURAL_REFUTED:
+            if any(verdicts.get(k) == "REFUTED" for k in keys):
+                refuted[str(d["id"])] = d
+        elif (d.get("status") == DISCHARGED_BY_PROGRAM
+              and all(verdicts.get(k) == "PASS" for k in keys)
+              and not any(c.get("claim") in ("temporal", "vacuity")
+                          for c in d.get("claims") or [])):
+            closed[str(d["id"])] = d
+    for k in list(closed) + list(refuted):
+        undischarged.pop(k, None)
+    return closed, refuted, undischarged
+
+
 def _attach_property_contract(results: dict, formal_dir: Path,
                               harness: Optional[Path]) -> None:
     """Attach the auditable declaration/property denominator to a real run.
@@ -1523,6 +1868,59 @@ def _attach_property_contract(results: dict, formal_dir: Path,
         except (OSError, ValueError, TypeError):
             request_floor = 0
     unresolved = list(contract.get("unresolved_obligations") or [])
+    # R-0915-144 — the PROGRAM's answer, read back against its evidence. A
+    # closed id leaves the contract's open list; a refuted one stays, named.
+    program_closed, program_refuted, program_open = _verified_program_closures(
+        formal_dir)
+    # A closure that RESTS ON GENERATED PROPERTIES stands only if the proof
+    # proved them. A failed or inconclusive proof keeps the obligation open —
+    # the counterexample is the answer, not the structural half (review H1).
+    if results.get("all_proved") is not True:
+        for oid in [k for k, d in program_closed.items() if d.get("properties")]:
+            d = dict(program_closed.pop(oid))
+            d["reason"] = ("its generated properties did not all prove: "
+                           + ", ".join(d.get("properties") or []))
+            program_open[oid] = d
+    unresolved = [o for o in unresolved
+                  if str(o.get("id")) not in program_closed]
+    # An obligation the program looked at and could not discharge carries
+    # the program's own reason, so the expert starts from it.
+    _annotated = []
+    for o in unresolved:
+        d = program_open.get(str(o.get("id")))
+        if d is not None:
+            o = dict(o)
+            o["status"] = "PROGRAM_NOT_DISCHARGED"
+            o["description"] = (f"{o.get('description', '')} — program: "
+                                f"{d.get('reason', '')}")
+        _annotated.append(o)
+    unresolved = _annotated
+    # Review (a): an assumption the program did not author can make every
+    # generated property vacuous. The obligations the GENERATOR closed with
+    # its own properties are reopened while one is present — named, not
+    # silently counted as covered.
+    _root = formal_dir.parent.parent.parent
+    _sby_rel = results.get("sby")
+    _assumes = foreign_assumptions(_model_texts(
+        (_root / _sby_rel) if isinstance(_sby_rel, str) else None,
+        formal_dir, _harness))
+    if _assumes:
+        for row in contract.get("covered_obligations") or []:
+            if (isinstance(row, dict) and row.get("program_rule")
+                    and row.get("author") == "formal_harness_gen"):
+                reopened = dict(row)
+                reopened["status"] = "VACUITY_RISK_ASSUME"
+                reopened["description"] = (
+                    "program-authored property not counted: the harness carries "
+                    "assumption(s) the program did not author: "
+                    + " | ".join(_assumes))
+                unresolved.append(reopened)
+    # An obligation the program closed STRUCTURALLY has no assert statement:
+    # its evidence is the netlist check. It is counted as authored so a
+    # structural answer is not reported as a missing property — and ONLY one
+    # with no property of its own, so nothing is counted twice.
+    structural_only = sum(1 for d in program_closed.values()
+                          if not d.get("properties"))
     try:
         denominator = int(contract.get("property_denominator", actual))
     except (TypeError, ValueError):
@@ -1531,12 +1929,14 @@ def _attach_property_contract(results: dict, formal_dir: Path,
     # it may not shrink the denominator to make them disappear.
     denominator = max(denominator, request_floor, actual)
     covered = max(0, denominator - len(unresolved))
-    if actual < covered:
+    if actual + structural_only < covered:
         unresolved.append({
             "id": "formal.authored_property_count_mismatch",
             "layer": "formal",
             "description": (f"contract claims {covered} covered obligation(s) "
-                            f"but harness contains {actual} assert statement(s)"),
+                            f"but harness contains {actual} assert statement(s)"
+                            + (f" and the program closed {structural_only} "
+                               f"structurally" if structural_only else "")),
             "status": "UNAUTHORED",
             "author": "formal-verify",
         })
@@ -1571,18 +1971,34 @@ def _attach_property_contract(results: dict, formal_dir: Path,
     expert_invoked = bool(
         request_obligations
         and _invocation_status in ("INVOKED", "INVOKED_BY_PROGRAM"))
+    program_invoked = bool(request_obligations and (program_closed or program_refuted))
+    expert_used = False
     receipt_unresolved: List[dict] = []
     for requested in request_obligations:
         oid = str(requested["id"])
+        if oid in program_closed:
+            continue
+        if oid in program_refuted:
+            row = dict(requested)
+            row["status"] = STRUCTURAL_REFUTED
+            row["description"] = str(program_refuted[oid].get("reason") or
+                                     "the structural check refuted the declaration")
+            receipt_unresolved.append(row)
+            continue
         disposition = dispositions.get(oid) if expert_invoked else None
         status = str((disposition or {}).get("status", "")).upper()
         prop = str((disposition or {}).get("property", "")).strip()
         if status == "AUTHORED" and prop:
+            expert_used = True
             continue
         row = dict(requested)
         row["status"] = status or "EXPERT_NOT_REVIEWED"
         if disposition and disposition.get("reason"):
             row["description"] = str(disposition["reason"])
+        elif oid in program_open:
+            row["status"] = "PROGRAM_NOT_DISCHARGED"
+            row["description"] = (f"{requested.get('description', '')} — "
+                                  f"program: {program_open[oid].get('reason', '')}")
         receipt_unresolved.append(row)
     by_id = {
         str(row.get("id", f"unnamed.{idx}")): row
@@ -1592,20 +2008,46 @@ def _attach_property_contract(results: dict, formal_dir: Path,
     unresolved = list(by_id.values())
 
     results["property_denominator"] = denominator
-    results["authored_property_count"] = actual
+    # Review L9: never a numerator above its denominator. When the program
+    # closed obligations, the authored count is the number of OBLIGATIONS
+    # covered (asserts and structural closures are different units and are
+    # published separately); otherwise it is the assert count, as before.
+    _closed_obligations = max(0, denominator - len(unresolved))
+    results["authored_property_count"] = (
+        min(_closed_obligations, actual + structural_only)
+        if program_closed else actual)
+    results["assert_statement_count"] = actual
+    results["program_structural_discharge_count"] = structural_only
     results["covered_property_count"] = min(
-        actual, max(0, denominator - len(unresolved)))
+        actual + structural_only, _closed_obligations)
     results["unresolved_obligations"] = unresolved
     results["expert_fallback_required"] = bool(request_obligations)
-    results["expert_fallback_invoked"] = expert_invoked
+    results["expert_fallback_invoked"] = expert_invoked or program_invoked
     #: WHICH KIND of answer discharged it, or "" when none has. Published so the
     #: distinction survives into `formal_proof_evidence_check` and into anything
-    #: that reads results.json later (R-0915-125(a)).
-    results["expert_fallback_invocation_status"] = (
-        _invocation_status if expert_invoked else "")
-    results["expert_fallback_receipt"] = (
-        str(receipt_path.relative_to(formal_dir.parent.parent.parent))
-        if expert_invoked else None)
+    #: that reads results.json later (R-0915-125(a)). R-0915-144: when the
+    #: PROGRAM answered and no expert disposition was used, the status is
+    #: INVOKED_BY_PROGRAM and the receipt is the program's own file; the moment
+    #: an expert answer closes anything, the status is the expert's.
+    _root = formal_dir.parent.parent.parent
+    if expert_invoked and (expert_used or not program_invoked):
+        results["expert_fallback_invocation_status"] = _invocation_status
+        results["expert_fallback_receipt"] = str(receipt_path.relative_to(_root))
+    elif program_invoked:
+        results["expert_fallback_invocation_status"] = "INVOKED_BY_PROGRAM"
+        results["expert_fallback_receipt"] = str(
+            (formal_dir / PROGRAM_RECEIPT).relative_to(_root))
+    else:
+        results["expert_fallback_invocation_status"] = ""
+        results["expert_fallback_receipt"] = None
+    if program_invoked:
+        results["program_discharged_obligations"] = sorted(program_closed)
+    if program_refuted:
+        # A PROGRAM MEASURED that the design contradicts its declaration. That
+        # is a refutation, like a counterexample — never "work not yet done".
+        results["structural_refutations"] = [
+            {"id": oid, "reason": d.get("reason"),
+             "evidence": d.get("evidence")} for oid, d in sorted(program_refuted.items())]
     results["property_contract"] = (
         str(manifest_path.relative_to(formal_dir.parent.parent.parent))
         if manifest_path.is_file() else "derived from authored harness assertions")
@@ -1613,7 +2055,11 @@ def _attach_property_contract(results: dict, formal_dir: Path,
     results["proof_transcript"] = results.get("evidence")
     results["bounded_vs_unbounded_scope"] = list(
         results.get("bounded_vs_unbounded") or [])
-    if unresolved and results.get("verdict") == "PASS":
+    if program_refuted:
+        results["proof_verdict"] = results.get("verdict")
+        results["verdict"] = "FAIL"
+        results["formal_completion"] = "FAIL"
+    elif unresolved and results.get("verdict") == "PASS":
         results["proof_verdict"] = "PASS"
         results["verdict"] = "INCOMPLETE"
         results["formal_completion"] = "INCOMPLETE"
@@ -1771,6 +2217,7 @@ def run(project: Path, harness: Optional[Path] = None,
     """
     formal_dir = _pl.formal_dir(project)
     formal_dir.mkdir(parents=True, exist_ok=True)
+    _clear_program_receipt(formal_dir)
 
     # An emit-only run probes NOTHING: engine availability is evidence about an
     # environment we are not going to use, and probing it would spawn the one
@@ -1902,9 +2349,16 @@ def run(project: Path, harness: Optional[Path] = None,
             shutil.copy2(harness, hdst)
         staged_hdrs = _stage_include_headers(rtl, formal_dir,
                                              staged_rtl)
+        # Observers from the harness AND the expert fragment it includes — an
+        # expert's `@observe` is bound exactly like the generator's (review M8).
+        _observers = parse_observers(_harness_texts(None, formal_dir, harness))
+        # R-0915-157: the chip's own define decision for the DUT read
+        import _chip_synth_read as _csr
+        _dut_simdef, _ = _csr.chip_sim_define(rtl, _csr.staged_macro_files(project))
         sby_text = emit_sby(staged_rtl, harness.name, top,
                             safety_depth=safety_depth, bmc_depth=bmc_depth,
-                            include_files=staged_hdrs)
+                            include_files=staged_hdrs, observers=_observers,
+                            dut_simdef=_dut_simdef)
         sby_path = formal_dir / f"{top}_formal.sby"
         sby_path.write_text(sby_text)
     else:
@@ -1936,6 +2390,35 @@ def run(project: Path, harness: Optional[Path] = None,
             "rc": RC_EMIT_ONLY,
         }
 
+    # 1c) R-0915-144 — REFUSE A PROPERTY OVER `<inst>.<net>` BEFORE IT RUNS --
+    # Such a reference is an undriven local wire to the engine (see
+    # `unbound_hierarchical_refs`), so whatever the proof said would be about a
+    # free variable, not the design. Refused by name; nothing is proved.
+    _htext = _harness_texts(sby_path, formal_dir, harness)
+    _refusal_results_name = (
+        f"{top or (sby_path.stem if sby_path else 'formal')}_inductive_results.json"
+        if inv_h is not None else "results.json")
+    _hier = unbound_hierarchical_refs(_htext)
+    if _hier:
+        return _refuse_hierarchical(formal_dir, project, sby_path, _hier,
+                                    "the harness text",
+                                    results_name=_refusal_results_name)
+    # Every `@observe` anywhere in what the proof reads must be BOUND by the
+    # task file that runs it. An unbound observer is an undriven wire — the
+    # same free variable as `dut.<net>` — so it is refused the same way. This
+    # is what catches a REUSED .sby written before the observers existed.
+    _sby_text = sby_path.read_text(errors="replace") if sby_path else ""
+    _unreadable = unreadable_observers(_htext)
+    if _unreadable:
+        return _refuse_hierarchical(formal_dir, project, sby_path, _unreadable,
+                                    "observer pragma(s) that cannot be read whole",
+                                    results_name=_refusal_results_name)
+    _unbound = observer_binding_mismatches(_htext, _sby_text)
+    if _unbound:
+        return _refuse_hierarchical(formal_dir, project, sby_path, _unbound,
+                                    "observer binding(s) that do not match what the harness declares",
+                                    results_name=_refusal_results_name)
+
     # 2) run sby -------------------------------------------------------------
     eff_mem_kb = (mem_limit_kb if mem_limit_kb is not None
                   else memory_limit_kb())
@@ -1963,7 +2446,8 @@ def run(project: Path, harness: Optional[Path] = None,
             # the SAME design input — never rewritten in place, so the harness
             # on disk always matches the properties the proof is about.
             _regen = _fhg.generate(project=project, top=top,
-                                   assertion_form="immediate")
+                                   assertion_form="immediate",
+                                   container=container)
             _reemitted = _regen.get("verdict") == "EMITTED"
         except Exception:   # noqa: BLE001 — no regen, no retry
             _reemitted = False
@@ -1971,7 +2455,9 @@ def run(project: Path, harness: Optional[Path] = None,
             sby_path.write_text(emit_sby(
                 staged_rtl, harness.name, top,
                 safety_depth=safety_depth, bmc_depth=bmc_depth,
-                include_files=staged_hdrs, frontend="read_slang"))
+                include_files=staged_hdrs, frontend="read_slang",
+                observers=parse_observers(
+                    _harness_texts(None, formal_dir, harness))))
             transcript = _run_sby(sby_path, formal_dir, container, timeout,
                                   mem_limit_kb=eff_mem_kb)
             transcript = (f"# {_slang_note}\n" + transcript)
@@ -2027,6 +2513,15 @@ def run(project: Path, harness: Optional[Path] = None,
         env_manifest["rc"] = RC_ENV_UNAVAILABLE
         return env_manifest
 
+    # The same refusal, from the ENGINE's own words: a reference the text scan
+    # could not see (a macro, an include) still shows up as yosys declaring it
+    # implicitly. A proof over it is not reported.
+    _implicit = sorted(set(_IMPLICIT_HIER_RE.findall(transcript)))
+    if _implicit:
+        return _refuse_hierarchical(formal_dir, project, sby_path, _implicit,
+                                    "the yosys transcript",
+                                    results_name=_refusal_results_name)
+
     # 3) parse + build results ----------------------------------------------
     cfg = parse_sby_config(sby_path.read_text())
     lp = parse_sby_log(transcript, sby_stem=sby_path.stem, seed=cfg)
@@ -2035,6 +2530,12 @@ def run(project: Path, harness: Optional[Path] = None,
     sby_rel = str(sby_path.relative_to(project))
     results = build_results(top_name, cfg, lp, ev_rel, sby_rel)
     results["proof_inputs"] = proof_inputs(sby_path, formal_dir)
+    if inv_h is None:
+        # R-0915-144 — the program answers the structural obligations the
+        # contract routes to it, BEFORE the contract is attached, so the
+        # read-back below sees this run's receipt and evidence.
+        _program_discharge(formal_dir, container, _htext,
+                           _model_texts(sby_path, formal_dir, harness))
     _attach_property_contract(results, formal_dir, harness or inv_h)
     results["mode"] = ("invariant-strengthened"
                        if inv_h is not None else "standard")
@@ -2090,6 +2591,73 @@ def run(project: Path, harness: Optional[Path] = None,
         ("SKIPPED-CONDITION", "INCOMPLETE") else
         RC_RESOURCE_INCONCLUSIVE if resource_stop else RC_PROPERTY_FAILED))
     results["rc"] = rc
+    return results
+
+
+def _model_texts(sby_path: Optional[Path], formal_dir: Path,
+                 harness: Optional[Path]) -> str:
+    """EVERYTHING the proof model reads: the harness, the expert fragment and
+    every `[files]` entry of the task file — the RTL and its headers included.
+    `read_verilog -formal` defines FORMAL, so an `ifdef FORMAL assume(...)` in
+    the RTL is a live constraint; scanning only the harness missed it (review
+    round 2, M3)."""
+    texts = [_harness_texts(sby_path, formal_dir, harness)]
+    if sby_path is not None and sby_path.is_file():
+        _, _, files_block = sby_path.read_text(errors="replace").partition("[files]")
+        for line in files_block.splitlines():
+            name = line.strip().split()[-1] if line.strip() else ""
+            if not name:
+                continue
+            f = Path(name) if Path(name).is_absolute() else formal_dir / name
+            if f.is_file() and f.name != EXPERT_PROPERTIES_SVH:
+                texts.append(f.read_text(errors="replace"))
+    return "\n".join(texts)
+
+
+def _harness_texts(sby_path: Optional[Path], formal_dir: Path,
+                   harness: Optional[Path]) -> str:
+    """The harness a proof reads, plus the expert fragment it includes."""
+    texts = []
+    cands = [harness] if harness is not None else []
+    if sby_path is not None and sby_path.is_file():
+        for line in sby_path.read_text(errors="replace").splitlines():
+            ls = line.strip()
+            if ls.startswith("formal_") and ls.endswith((".sv", ".v")):
+                cands.append(formal_dir / ls)
+    cands.append(formal_dir / EXPERT_PROPERTIES_SVH)
+    seen = set()
+    for c in cands:
+        if c is None or not c.is_file() or c.resolve() in seen:
+            continue
+        seen.add(c.resolve())
+        texts.append(c.read_text(errors="replace"))
+    return "\n".join(texts)
+
+
+def _refuse_hierarchical(formal_dir: Path, project: Path,
+                         sby_path: Optional[Path], refs: List[str],
+                         where: str, results_name: str = "results.json") -> dict:
+    """Write the refusal as the canonical results.json and return it."""
+    reason = (
+        f"HIERARCHICAL_REFERENCE_UNBOUND (R-0915-144): {where} references "
+        f"{', '.join(refs)}. In this flow's formal path such a reference is an "
+        f"implicitly declared, undriven local wire -- a free variable -- so a "
+        f"property over it is not a statement about the design. Make DUT state "
+        f"observable with a `// @observe <wire> = <inst>.<net>` observer "
+        f"instead. NOTHING was proved and nothing was refuted.")
+    results = {
+        "program": "formal_property_run", "verdict": "ERROR",
+        "all_proved": False, "property_count": 0, "properties": [],
+        "refusal": reason, "hierarchical_references": refs,
+        "sby": (str(sby_path.relative_to(project))
+                if sby_path is not None else None),
+    }
+    # The INDUCTIVE path never writes the main results.json (it has its own
+    # `<top>_inductive_results.json`): an opt-in inductive run must never
+    # replace a standard Step-5 result (round-7 review).
+    _aa.write_json(formal_dir / results_name, results)
+    results["results_file"] = results_name
+    results["rc"] = RC_PROPERTY_FAILED
     return results
 
 

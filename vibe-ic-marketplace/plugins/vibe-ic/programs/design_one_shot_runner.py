@@ -21778,7 +21778,8 @@ def step_emit_phase2_manifests(project: Path,
                 _sys.path.insert(0, str(PROGRAMS_DIR))
             import formal_harness_gen as _fhg
             import formal_property_run as _fpr
-            _gen = _fhg.generate(project=project, top=top_name)
+            _gen = _fhg.generate(project=project, top=top_name,
+                                 container=(container or None))
             if _gen.get("verdict") == "EMITTED":
                 _res = _fpr.run(
                     project,

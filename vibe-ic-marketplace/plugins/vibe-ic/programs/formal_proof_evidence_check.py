@@ -545,6 +545,23 @@ def audit(project: Path) -> dict:
             "ran (#440 manifest shape) — vacuous for this gate")
         return rep
 
+    # R-0915-144 — two program answers that are NOT "work not yet done":
+    #   * a structural check that REFUTED a declaration measured the design
+    #     contradicting its own spec. That is a refutation, like a
+    #     counterexample, so it FAILS — it must never read as INCOMPLETE.
+    #   * a refused hierarchical reference: the proof would have been about a
+    #     free variable, so it did not run; the refusal is named.
+    refutations = results.get("structural_refutations") or []
+    if refutations:
+        rep.update(verdict="FAIL", rc=1, structural_refutations=refutations)
+        rep["findings"].append(
+            "STRUCTURAL_REFUTED (R-0915-144): the program's structural check "
+            "measured the RTL contradicting its declaration: "
+            + "; ".join(f"{r.get('id')}: {r.get('reason')}" for r in refutations
+                        if isinstance(r, dict)))
+        return rep
+    if results.get("refusal"):
+        rep["findings"].append(str(results["refusal"]))
     # R-0924-2 — name obligations, answered structurally before anything
     # counts the open denominator. Recorded either way; a discharged one leaves
     # `unresolved_obligations` and is published as DISCHARGED_BY_BINDING, never

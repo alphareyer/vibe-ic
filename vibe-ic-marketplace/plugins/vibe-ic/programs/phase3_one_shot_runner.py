@@ -16855,14 +16855,11 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # the ledger. A new process reusing a declared synth.log therefore wrote
     # it with no active sink and left the old hash as the newest declaration.
     set_invocation_provenance_sink(project)
-    all_rtl = sorted((_pl.rtl_dir(project)).glob("*.sv")) + \
-              sorted((_pl.rtl_dir(project)).glob("*.v"))
     # Phase 3 synth = silicon top only. Skip FPGA wrappers + test fixtures
-    # + non-synthesisable assertion files.
-    skip_substrs = ("assertions", "de10lite_top", "host_emulator", "_tb",
-                    "testbench", "stimulus")
-    silicon = [f for f in all_rtl
-               if not any(s in f.name.lower() for s in skip_substrs)]
+    # + non-synthesisable assertion files. R-0915-157: this selection lives in
+    # `_chip_synth_read.chip_rtl_files`, the ONE definition the Step-5 formal
+    # proof also reads the DUT with, so the proof and the chip cannot drift.
+    #
     # Drop include-hub aggregators — a file that `include`s a sibling which is
     # ALSO staged standalone. Reading both defines every included module twice
     # and the read ABORTS ("duplicate definition" / "already declared"), so
@@ -16870,11 +16867,9 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # want of a GDS. The name filter above cannot catch this: an aggregator is
     # identified by its `include grammar, not by its filename. Parity with
     # phase-2 synth's selector, which has excluded these since #614.
-    silicon = _drop_include_hubs(silicon)
     # Package files MUST come first so `import pkg::*` resolves.
-    pkg_files = [f for f in silicon if "pkg" in f.name.lower()]
-    other = [f for f in silicon if "pkg" not in f.name.lower()]
-    rtl_files = pkg_files + other
+    import _chip_synth_read as _csr
+    rtl_files = _csr.chip_rtl_files(_pl.rtl_dir(project))
 
     # ASIC top resolution moved to main() so all steps share the same
     # `top`. step_synth now receives the already-resolved name.
@@ -16924,14 +16919,11 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # "-DSIMULATION " and every command emitted here is BYTE-IDENTICAL to the
     # historical flow, so the behavioural path the define was added for is
     # untouched. See synth_frontend.decide_macro_aware_sim_define.
-    _macro_def = _sf.decide_macro_aware_sim_define(
-        _sf.read_text_blob(rtl_files),
+    _simdef, _macro_def = _csr.chip_sim_define(
+        rtl_files,
         list(pdk.macro_libs) + list(pdk.macro_lefs) + list(pdk.macro_v))
-    _simdef = "-DSIMULATION " if _macro_def["define_sim"] else ""
-    reads = "; ".join(
-        f"read_verilog -sv {_simdef}{_to_container_path(str(f), container)}"
-        for f in rtl_files
-    )
+    reads = "; ".join(_csr.chip_read_lines(
+        rtl_files, _simdef, lambda f: _to_container_path(str(f), container)))
     # Read OTP image into the synth working directory so $readmemh resolves.
     otp_hex_dir = project / "input" / "otp"
     setup = ""
