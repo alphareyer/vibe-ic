@@ -89,7 +89,9 @@ import glob
 import hashlib
 import datetime
 import json
+import contextlib
 import os
+import threading
 import re
 import shlex
 import shutil
@@ -14595,6 +14597,78 @@ def _is_gate_verdict_document(path: Path,
 _AUDIT_AUTHORSHIP_DIR = "reports/audit/audit_created"
 
 
+@contextlib.contextmanager
+def _note_lock(note: Path):
+    """Hold an exclusive lock for ONE authorship note, across threads AND processes.
+
+    R-0915-152 — THE NESTED-AUDIT RACE. Step 7's gate clause runs a NESTED
+    `flow_compliance_check`, which re-evaluates step 2 while the outer pass is
+    evaluating it too; on the default threaded path (`_compliance_workers`) two
+    threads of one pass can reach the same step's note as well. The note's key is
+    `sha1(f"{sid}|{rel}")`, so both arrive at the SAME file, and nothing serialised
+    them: one could read a half-written note (unreadable -> the artefact is credited
+    as the run's) or drop a note the other had just decided to rely on. That is
+    "MISSING twice, PASS forever" reached by concurrency instead of by staleness.
+
+    A LOCK FILE, not a lock on the note: locking the note itself would mean opening
+    the file being replaced, and `os.replace` swaps the inode out from under any
+    holder. The lock is per NOTE KEY, so two different notes never wait on each other.
+
+    Degrades to a no-op where `fcntl` is unavailable, because a platform without file
+    locks is not a reason to stop recording authorship -- the atomic write below still
+    guarantees a reader sees whole bytes.
+    """
+    lock_path = note.with_name(note.name + ".lock")
+    fh = None
+    # ACQUIRE OUTSIDE THE `yield`, AND YIELD EXACTLY ONCE. An earlier cut of this had
+    # a second `yield` in an `except OSError:` arm, so a body that raised -- a
+    # `note.unlink()` on an already-removed note, which is the ORDINARY drop case
+    # under concurrency -- threw into the generator, hit that arm and yielded again:
+    # "generator didn't stop after throw()". My own concurrency arm caught it. A
+    # context manager has one yield; failing to take the lock is handled here, before
+    # the body runs.
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(lock_path, "a+")
+        try:
+            import fcntl                                   # noqa: PLC0415
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except Exception:                                   # pragma: no cover
+            pass
+    except OSError:                                         # pragma: no cover
+        # A lock we cannot take must not stop the audit; the atomic write still keeps
+        # every reader seeing a whole note.
+        fh = None
+    try:
+        yield
+    finally:
+        if fh is not None:
+            try:
+                fh.close()
+            except OSError:                                 # pragma: no cover
+                pass
+
+
+def _write_note_atomically(note: Path, payload: str) -> None:
+    """Replace the note in ONE step, so no reader ever sees a partial one.
+
+    `write_text` truncates and then writes: a concurrent reader can observe zero
+    bytes or half a JSON object, and an unreadable note is treated as absent -- which
+    CREDITS the auditor's own document as the run's. Written to a sibling temp file
+    and `os.replace`d, which is atomic within a directory on POSIX.
+    """
+    tmp = note.with_name(f"{note.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(payload)
+        os.replace(tmp, note)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:                                     # pragma: no cover
+            pass
+        raise
+
+
 def _authorship_note_path(project: Path, sid: Any, rel: str) -> Path:
     key = hashlib.sha1(f"{sid}|{rel}".encode()).hexdigest()[:20]
     return project / _AUDIT_AUTHORSHIP_DIR / f"{key}.json"
@@ -14694,7 +14768,8 @@ def _record_audit_created(project: Path, sid: Any, rels: Sequence[str]) -> None:
         note = _authorship_note_path(project, sid, rel)
         try:
             note.parent.mkdir(parents=True, exist_ok=True)
-            note.write_text(json.dumps({
+            with _note_lock(note):
+                _write_note_atomically(note, json.dumps({
                 "schema": 1,
                 "written_by": "flow_compliance_check",
                 "step": str(sid),
@@ -14704,7 +14779,7 @@ def _record_audit_created(project: Path, sid: Any, rels: Sequence[str]) -> None:
                 "note": ("this audit's own gate was the first process to "
                          "write this declared required_output; it is the "
                          "auditor's document, not the run's"),
-            }, indent=1) + "\n")
+                }, indent=1) + "\n")
         except OSError:
             continue
 
@@ -14717,8 +14792,10 @@ def _drop_audit_created_note(project: Path, sid: Any, rels: Sequence[str]) -> No
     of the DECLARED artefact itself, which nothing here touches.
     """
     for rel in rels:
+        note = _authorship_note_path(project, sid, rel)
         try:
-            _authorship_note_path(project, sid, rel).unlink()
+            with _note_lock(note):
+                note.unlink()
         except OSError:
             continue
 
