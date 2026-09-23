@@ -914,32 +914,34 @@ def main() -> int:
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
 
-    # MARK THE RUN START, ONCE, BEFORE ANY PRODUCER RUNS.
-    #
-    # `step_write_ledger` can only answer "did THIS run write it" against a
-    # real mark. Without one it falls back to the EARLIEST surviving
-    # orchestrator summary, and an `--entry-step` run into phase 2 does not
-    # rewrite the phase-1 summary -- MEASURED on
-    # campaign_v1574/spm/converge_1.5.74_sky130A, where step 7's outputs are
-    # 12 days older than the latest run and would still read in-window.
-    #
-    # `mark_run_start` has existed for exactly this and had NO production
-    # caller, so every real ledger carried an unknown window. One tiny write,
-    # here, is what makes the fact recorded rather than inferred.
-    try:
-        import step_write_ledger as _swl
-        _swl.mark_run_start(project)
-    except Exception:                                    # pragma: no cover
-        pass                                             # never fatal
-
     # ---------------- Single-driver project lock (ORGANIC #498) ----------
     # Refuse a second concurrent invocation on a project already being
     # driven by a LIVE runner; clean a stale lock left by a dead one.
     # Acquired BEFORE any reports/manifests/provenance are written so two
     # racing orchestrators can never co-write the same reports/ tree.
     lock = _runner_lock.acquire_or_reenter(project, "vibe_ic_one_shot_runner")
+
     if lock is None:
         return 3
+
+    # THE RUN'S IDENTITY, minted here -- AFTER the refusal gates above.
+    #
+    # Round 7 measured three defects in doing this earlier and unconditionally:
+    # `mark_run_start`'s mkdir CREATED a missing project, destroying the
+    # "not a directory" refusal; a run about to be REFUSED by the single-driver
+    # lock had already overwritten the LIVE run's t0; and every child runner
+    # re-marked, so the surviving t0 was the LAST phase's start and every
+    # earlier output of the same run read out-of-window.
+    #
+    # `begin_run` mints only when this process is the outermost runner (no run
+    # id in the environment) and otherwise INHERITS, marking nothing. The id
+    # travels to children through os.environ, which `_runner_lock.child_env`
+    # copies.
+    try:
+        import step_write_ledger as _swl
+        _swl.begin_run(project)
+    except Exception:                                    # pragma: no cover
+        pass                                             # never fatal
     # ---------------- Container IMAGE provenance (capture always) ----------
     # Every containerised step downstream is dispatched as
     # `docker exec <container> ...`, so `--container` selects a CONTAINER and

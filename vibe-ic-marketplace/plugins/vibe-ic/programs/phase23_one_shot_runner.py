@@ -172,18 +172,19 @@ def main() -> int:
     args = p.parse_args()
 
     project = args.project.resolve()
-
-    # MARK THE RUN START when this runner is the entry point. See
-    # `vibe_ic_one_shot_runner` for why a derived window cannot answer
-    # "did THIS run write it".
-    try:
-        import step_write_ledger as _swl
-        _swl.mark_run_start(project)
-    except Exception:                                    # pragma: no cover
-        pass
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
+
+    # THE RUN'S IDENTITY, minted here -- AFTER the refusal gates above.
+    # See `vibe_ic_one_shot_runner` for the three defects round 7 measured in
+    # marking earlier and unconditionally. `begin_run` mints only when this
+    # process is the OUTERMOST runner and otherwise inherits, marking nothing.
+    try:
+        import step_write_ledger as _swl
+        _swl.begin_run(project)
+    except Exception:                                    # pragma: no cover
+        pass
 
     # v1.6.52 — `--detect-stable N`: if the previous N runs all produced
     # the same verdict, skip the heavy Phase 2 + 3 pipeline and emit a

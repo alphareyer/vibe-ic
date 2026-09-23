@@ -150,6 +150,7 @@ import datetime as _dt
 import fnmatch
 import json
 import os
+import uuid as _uuid
 import re
 import stat as _stat
 import sys
@@ -363,6 +364,10 @@ def resolve_run_window(project: Path) -> Dict[str, Any]:
             t0 = float(m.get("t0_epoch"))
             return {"t0_epoch": t0, "t0_source": "marker",
                     "t0_detail": str(marker.relative_to(project)),
+                    # WHOSE run this marker is. A marker from an earlier run
+                    # is a real timestamp and still not an answer to "did THIS
+                    # run write it" -- see `build`.
+                    "run_id": m.get("run_id"),
                     "known": True}
         except Exception:
             pass
@@ -779,9 +784,18 @@ def build(project: Path) -> Dict[str, Any]:
                         # answer "did THIS run write it", so here it answers
                         # `None`: unknown, and a consumer must not pretend
                         # otherwise.
+                        # ...AND ONLY WHEN THE MARKER IS THIS RUN'S. A
+                        # standalone rebuild (analog, a re-audit) inherits no
+                        # run id, so the marker left by a run twelve days ago
+                        # answers `None` here instead of asserting that its
+                        # day-0 outputs are in-window. MEASURED by the
+                        # round-7 review.
                         "in_run_window": (
                             e.get("in_run_window")
-                            if window.get("t0_source") == "marker" else None),
+                            if (window.get("t0_source") == "marker"
+                                and window.get("run_id")
+                                and window.get("run_id") == current_run_id())
+                            else None),
                         "producer": e.get("producer"),
                         "producer_confidence": e.get("producer_confidence"),
                         "producer_evidence": e.get("producer_evidence"),
@@ -965,21 +979,67 @@ def build(project: Path) -> Dict[str, Any]:
 _T0_TOLERANCE_S = 2.0
 
 
-def mark_run_start(project: Path) -> bool:
-    """Drop the t0 marker. One tiny write; call at run start if you want an
-    EXACT run window instead of the derived one. Never raises."""
+#: A RUN IS AN IDENTITY, NOT A TIMESTAMP. The outermost runner mints one and
+#: exports it; every child inherits it through the environment (the same shape
+#: `_runner_lock.REENTRANCY_ENV` already uses, and `child_env` copies
+#: os.environ, so propagation is automatic).
+#:
+#: MEASURED by the round-7 review. Marking on a timestamp alone was wrong in
+#: three reachable ways: the front door and phase23 launch phase1, design and
+#: phase3 as SUBPROCESSES, each of which re-marked unconditionally, so the
+#: surviving t0 was PHASE 3's start and every phase-1/2 output of the SAME RUN
+#: read out-of-window; a standalone analog rebuild reused whatever t0 was last
+#: written; and nothing tied a marker to the run that is actually asking.
+RUN_ID_ENV = "VIBEIC_RUN_ID"
+
+
+def current_run_id() -> Optional[str]:
+    """The run this process belongs to, or None when it belongs to none."""
+    return (os.environ.get(RUN_ID_ENV) or "").strip() or None
+
+
+def mark_run_start(project: Path, run_id: Optional[str] = None) -> bool:
+    """Drop the t0 marker for `run_id`. Never raises.
+
+    DOES NOT CREATE THE PROJECT. `mkdir(parents=True)` here used to conjure a
+    missing project directory, which destroyed the runners' own
+    "not a directory" refusal (rc 2) and left a stray tree behind on a typo.
+    A marker for a project that does not exist is not a fact worth writing.
+    """
     try:
-        d = Path(project) / "steps"
-        d.mkdir(parents=True, exist_ok=True)
+        proj = Path(project)
+        if not proj.is_dir():
+            return False
+        d = proj / "steps"
+        d.mkdir(exist_ok=True)
         (d / ".write_ledger_t0.json").write_text(json.dumps({
             "t0_epoch": time.time(),
             "t0_iso": _dt.datetime.now(_dt.timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"),
+            "run_id": run_id or current_run_id(),
             "pid": os.getpid(),
         }) + "\n")
         return True
     except Exception:
         return False
+
+
+def begin_run(project: Path) -> Optional[str]:
+    """Mint a run id and mark t0 — or INHERIT one and mark nothing.
+
+    Call this from a runner AFTER its refusal gates have passed (the directory
+    exists, the single-driver lock is held, admission is granted). A run that
+    is going to be refused must not overwrite the live run's marker, and a
+    nested runner must not overwrite its own parent's.
+    """
+    rid = current_run_id()
+    if rid:
+        return rid                      # nested: the parent owns the window
+    rid = _uuid.uuid4().hex
+    if not mark_run_start(project, rid):
+        return None                     # no marker -> no claim (see `build`)
+    os.environ[RUN_ID_ENV] = rid
+    return rid
 
 
 def _step_folders(project: Path) -> Dict[str, str]:

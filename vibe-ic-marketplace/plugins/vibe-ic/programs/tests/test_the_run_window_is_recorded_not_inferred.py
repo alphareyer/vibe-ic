@@ -81,10 +81,14 @@ def _produced_window(led, spec_tail="constraints"):
 def test_a_marked_run_records_that_it_wrote_its_own_output(tmp_path):
     """Runner marks -> producer writes -> ledger emits `in_run_window: True`."""
     proj = _project(tmp_path)
-    assert SWL.mark_run_start(proj) is True
-    _write_output(proj)
-    win, entry = _produced_window(_ledger(proj))
-    assert win is True, (win, entry)
+    os.environ.pop(SWL.RUN_ID_ENV, None)
+    try:
+        assert SWL.begin_run(proj)          # the call a RUNNER makes
+        _write_output(proj)
+        win, entry = _produced_window(_ledger(proj))
+        assert win is True, (win, entry)
+    finally:
+        os.environ.pop(SWL.RUN_ID_ENV, None)
 
 
 # ---------------------------------------------------------------- NEGATIVE
@@ -94,9 +98,13 @@ def test_an_output_older_than_the_mark_is_not_this_runs(tmp_path):
     than the run that is now auditing it."""
     proj = _project(tmp_path)
     _write_output(proj, age_days=12)
-    assert SWL.mark_run_start(proj) is True
-    win, entry = _produced_window(_ledger(proj))
-    assert win is False, (win, entry)
+    os.environ.pop(SWL.RUN_ID_ENV, None)
+    try:
+        assert SWL.begin_run(proj)
+        win, entry = _produced_window(_ledger(proj))
+        assert win is False, (win, entry)
+    finally:
+        os.environ.pop(SWL.RUN_ID_ENV, None)
 
 
 def test_an_unmarked_run_says_UNKNOWN_rather_than_guessing(tmp_path):
@@ -122,8 +130,100 @@ def test_the_field_reaches_the_produced_entry_at_all(tmp_path):
     """THE ROUND-6 HIGH, stated directly: the decision reads `produced[].
     in_run_window`, so it must BE there. 929 real ledgers carried none."""
     proj = _project(tmp_path)
-    SWL.mark_run_start(proj)
+    os.environ.pop(SWL.RUN_ID_ENV, None)
+    SWL.begin_run(proj)
     _write_output(proj)
     _win, entry = _produced_window(_ledger(proj))
+    os.environ.pop(SWL.RUN_ID_ENV, None)
     assert entry is not None, "no produced entry at all"
     assert "in_run_window" in entry, sorted(entry)
+
+
+# ===========================================================================
+# ROUND-7 — A RUN IS AN IDENTITY, NOT A TIMESTAMP.
+#
+# Marking on a timestamp alone was wrong in three reachable ways:
+#   H1 every runner re-marked unconditionally, and the front door launches
+#      phase1 / design / phase3 as SUBPROCESSES -- so the surviving t0 was
+#      PHASE 3's start and every phase-1/2 output of the SAME RUN (step-4/5
+#      sim, coverage, formal) read out-of-window in the final audit;
+#   H2 the mark was written BEFORE is_dir(), the single-driver lock and the
+#      admission refusals: `mkdir(parents=True)` CREATED a missing project,
+#      and a run about to be refused had already overwritten the LIVE run's
+#      t0;
+#   M  a standalone analog rebuild reused whatever marker was last written.
+# ===========================================================================
+
+def _clear_run_id():
+    os.environ.pop(SWL.RUN_ID_ENV, None)
+
+
+def test_a_nested_runner_inherits_and_never_re_marks(tmp_path):
+    """H1. The child must not move the window its parent established."""
+    proj = _project(tmp_path)
+    _clear_run_id()
+    try:
+        parent = SWL.begin_run(proj)                 # the front door
+        assert parent
+        t0_parent = json.loads(
+            (proj / "steps" / ".write_ledger_t0.json").read_text())["t0_epoch"]
+        time.sleep(0.05)
+        child = SWL.begin_run(proj)                  # phase3, as a subprocess
+        assert child == parent, (child, parent)
+        t0_after = json.loads(
+            (proj / "steps" / ".write_ledger_t0.json").read_text())["t0_epoch"]
+        assert t0_after == t0_parent, "a nested runner moved the run window"
+    finally:
+        _clear_run_id()
+
+
+def test_an_output_written_before_a_later_phase_is_still_this_runs(tmp_path):
+    """H1, at the level that matters: a phase-1 output written EARLY in the
+    run must still read in-window when the final audit asks, after phase 3
+    has started."""
+    proj = _project(tmp_path)
+    _clear_run_id()
+    try:
+        SWL.begin_run(proj)                          # front door marks t0
+        _write_output(proj)                          # phase-1/2 writes early
+        time.sleep(0.05)
+        SWL.begin_run(proj)                          # phase 3 starts (inherits)
+        win, entry = _produced_window(_ledger(proj))
+        assert win is True, (win, entry)
+    finally:
+        _clear_run_id()
+
+
+def test_marking_never_creates_the_project(tmp_path):
+    """H2. `mkdir(parents=True)` conjured a missing project, which destroyed
+    the runners' own rc=2 "not a directory" refusal and left a stray tree on
+    a typo."""
+    missing = tmp_path / "no_such_project"
+    _clear_run_id()
+    try:
+        assert SWL.mark_run_start(missing, "rid") is False
+        assert not missing.exists(), "the marker created the project"
+        assert SWL.begin_run(missing) is None
+        assert not missing.exists()
+        assert SWL.current_run_id() is None, (
+            "a run id was exported for a project that does not exist")
+    finally:
+        _clear_run_id()
+
+
+def test_a_standalone_rebuild_does_not_inherit_a_stale_marker(tmp_path):
+    """M. A later, unrelated invocation (analog rebuild, a re-audit) finds the
+    marker of a run it does not belong to. A real timestamp is still not an
+    answer to "did THIS run write it"."""
+    proj = _project(tmp_path)
+    _clear_run_id()
+    try:
+        SWL.begin_run(proj)
+        _write_output(proj)
+        assert _produced_window(_ledger(proj))[0] is True
+    finally:
+        _clear_run_id()
+    # ...and now a process that belongs to no run reads the same tree.
+    win, entry = _produced_window(_ledger(proj))
+    assert win is None, (
+        "a marker from another run was read as this one's: %r %r" % (win, entry))

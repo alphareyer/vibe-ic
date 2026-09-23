@@ -2108,6 +2108,16 @@ def main() -> int:
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
 
+    # THE RUN'S IDENTITY. An analog-only invocation is a TOP-LEVEL run when it
+    # inherits no run id, so it mints its own t0 rather than reusing whatever
+    # marker the last run left. MEASURED by the round-7 review: without this a
+    # day-12 analog rebuild asserted `in_run_window: True` over day-0 outputs.
+    try:
+        import step_write_ledger as _swl
+        _swl.begin_run(project)
+    except Exception:                                    # pragma: no cover
+        pass
+
     # BIND OR REFUSE. A `--pdk` that contradicts the design's own declaration
     # is a question this runner is not entitled to answer by itself, so it
     # answers with both names and stops rather than picking one in silence.
