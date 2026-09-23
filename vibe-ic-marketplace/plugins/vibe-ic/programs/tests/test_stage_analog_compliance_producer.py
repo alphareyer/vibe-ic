@@ -48,7 +48,28 @@ def test_runner_produces_scoped_analog_audit_after_analog(tmp_path, monkeypatch)
         "--no-dashboard",
     ])
 
-    assert runner.main() == 0
+    # R-0915-151 / icslot70 — WHAT THIS FIXTURE'S RUN LEGITIMATELY IS.
+    #
+    # This arm is about ORDERING and ARGV: analog runs before the compliance audit, and that
+    # audit is invoked with the project and `--strict`. Every one of those assertions is below
+    # and untouched.
+    #
+    # The `== 0` that used to stand here was scaffolding, and it encoded the behaviour the
+    # front-door ruling changed. The stub returns 0 for phase2 and phase3 and writes NO report
+    # for either, and it writes no completion audit at all -- so nothing in this run MEASURED
+    # phase 2 or phase 3. The front door used to invent `PASS if rc == 0` from that and exit 0;
+    # it now rolls the run up as NOT_MEASURED and says why, which is the whole point of
+    # "the front door's verdict is the conjunction of its phases and the completion audit".
+    # Asserting 0 here would be asserting the invented PASS back into existence.
+    rc = runner.main()
+    _doc = json.loads(
+        (project / "reports" / "orchestrator" / "vibe_ic_one_shot.json").read_text())
+    assert _doc["verdict"] == "NOT_MEASURED", (_doc["verdict"], _doc.get("verdict_reasons"))
+    assert rc != 0, rc
+    _why = " | ".join(_doc.get("verdict_reasons") or [])
+    assert "phase2 NOT_MEASURED" in _why and "phase3 NOT_MEASURED" in _why, _why
+    assert "completion audit is not a pass" in _why, _why
+
     names = [name for _label, name, _args in calls]
     analog_i = names.index("analog_one_shot_runner")
     audit_i = names.index("flow_compliance_check")

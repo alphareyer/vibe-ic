@@ -66,6 +66,25 @@ import phase1_one_shot_runner as P1           # noqa: E402
 import phase1_expert_parse_track as TRACK     # noqa: E402
 import _path_layout as _pl                    # noqa: E402
 
+#: WHERE PASS 1's RECORD LIVES, asked of the router. R-0915-151 moved
+#: `phase1_one_shot.json` onto `_path_layout`'s router, because the flat
+#: `reports/phase1_one_shot.json` is a location this repo's own
+#: `reports_subfolder_taxonomy_check` calls a stray file. These arms are about the SECOND PASS
+#: being reachable and consuming the delivered answer, not about layout: they staged pass 1 flat
+#: and then read the flat path back, so once the second pass began publishing at the routed path
+#: they were reading a file nobody had updated. The legacy-location behaviour has its own home,
+#: `test_a_pass_one_written_before_the_move_is_still_carried.py`; these ask the router so they
+#: are not accidentally testing two things.
+def _pass1_record(project: Path) -> Path:
+    # The parent is created because several of these call sites WRITE pass 1's record to stage a
+    # project. The flat location they used to write needed no mkdir -- `reports/` already existed
+    # -- and the routed one does; my first rewrite of these arms missed that and turned them into
+    # FileNotFoundError at `reports/orchestrator/`. Harmless on a read.
+    path = _pl.report_path(project, "phase1_one_shot.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 
 _INPUT_DOC = """# Block specification
 
@@ -259,7 +278,7 @@ def test_the_second_pass_runs_the_second_track_and_re_extracts_nothing(
     pass 1 recorded in the file every caller reads for Phase 1's verdict."""
     p = _project(tmp_path, "secondpass", answer=True, status="HANDOFF_EMITTED")
     (p / "reports").mkdir(exist_ok=True)
-    (p / "reports" / "phase1_one_shot.json").write_text(json.dumps({
+    _pass1_record(p).write_text(json.dumps({
         "phase": 1, "mode": "docs", "verdict": "PASS",
         "steps": [{"name": "doc_extract", "status": "PASS"}]}))
     gd = _pl.generated_docs_dir(p)
@@ -279,7 +298,7 @@ def test_the_second_pass_runs_the_second_track_and_re_extracts_nothing(
     after = {f.name: f.read_bytes() for f in gd.glob("L*.json")}
     assert after == before, "the doc-extraction track was re-run under the answer"
 
-    summary = json.loads((p / "reports" / "phase1_one_shot.json").read_text())
+    summary = json.loads(_pass1_record(p).read_text())
     assert summary["mode"] == "expert_second_pass"
     assert summary["second_pass"]["doc_extraction_rerun"] is False
     assert summary["second_pass"]["pass1_summary_carried_forward"] is True
@@ -401,7 +420,7 @@ def test_the_dispatched_argv_actually_consumes_the_answer(tmp_path):
         == TRACK.AI_HANDOFF_EMITTED
     # A pass-1 summary the second pass must carry forward, not overwrite.
     (p / "reports").mkdir(exist_ok=True)
-    (p / "reports" / "phase1_one_shot.json").write_text(json.dumps({
+    _pass1_record(p).write_text(json.dumps({
         "phase": 1, "mode": "docs", "verdict": "PASS",
         "steps": [{"name": "doc_extract", "status": "PASS"}]}))
     l_docs_before = {f.name: f.read_bytes() for f in gd.glob("L*.json")}
@@ -420,7 +439,7 @@ def test_the_dispatched_argv_actually_consumes_the_answer(tmp_path):
     rec = json.loads(_report(p).read_text())
     assert rec["ai_subtrack"]["status"] == TRACK.AI_CONSUMED, \
         rec["ai_subtrack"].get("reason")
-    summary = json.loads((p / "reports" / "phase1_one_shot.json").read_text())
+    summary = json.loads(_pass1_record(p).read_text())
     assert summary["mode"] == "expert_second_pass"
     assert summary["second_pass"]["doc_extraction_rerun"] is False
     assert summary["steps"] == [{"name": "doc_extract", "status": "PASS"}], \
@@ -454,7 +473,7 @@ def _invoke_lifecycle(project, label, *, track=False, first_pass=False,
     (project / f"{label}.stderr").write_text(cp.stderr)
     row = {"argv": argv, "rc": cp.returncode}
     for key, path in (("track", _report(project)),
-                      ("summary", project / "reports/phase1_one_shot.json")):
+                      ("summary", _pass1_record(project))):
         if path.is_file():
             row[key] = json.loads(path.read_text())
     (project / f"{label}.json").write_text(json.dumps(row, indent=2))
@@ -482,7 +501,7 @@ def refused_then_corrected(tmp_path, request):
     assert ORCH._phase1_decision(p, False) == (False, "")
     pass1 = {"phase": 1, "mode": "docs", "verdict": "PASS",
              "steps": [{"name": "doc_extract", "status": "PASS"}]}
-    (p / "reports/phase1_one_shot.json").write_text(json.dumps(pass1))
+    _pass1_record(p).write_text(json.dumps(pass1))
     malformed = "{" if request.param == "invalid_json" else '{"ports": ["REFCLK"]}'
     _answer_path(p).write_text(malformed)
     assert ORCH._phase1_decision(p, False) == (True, "expert_second_pass")
@@ -608,7 +627,7 @@ def test_initial_expert_failure_is_separate_from_extraction(tmp_path, extract_rc
 def test_unknown_first_pass_cannot_become_pass(tmp_path, prior):
     p = _project(tmp_path, "unknown_pass1", answer=True)
     if prior is not None:
-        (p / "reports/phase1_one_shot.json").write_text(json.dumps(prior))
+        _pass1_record(p).write_text(json.dumps(prior))
     result = _invoke_lifecycle(p, "01_consumed")
     assert result["track"]["ai_subtrack"]["status"] == TRACK.AI_CONSUMED
     assert result["rc"] == 1
@@ -618,7 +637,7 @@ def test_unknown_first_pass_cannot_become_pass(tmp_path, prior):
 
 def test_empty_answer_is_recorded_without_consumption_credit(tmp_path):
     p = _project(tmp_path, "empty_answer", answer=True)
-    (p / "reports/phase1_one_shot.json").write_text(json.dumps({
+    _pass1_record(p).write_text(json.dumps({
         "mode": "docs", "verdict": "PASS"}))
     _answer_path(p).write_text('{"expectations": []}')
     result = _invoke_lifecycle(p, "01_empty")

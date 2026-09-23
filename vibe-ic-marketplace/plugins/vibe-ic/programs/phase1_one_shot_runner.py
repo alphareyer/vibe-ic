@@ -1297,6 +1297,83 @@ def run_phase1_second_track(project: Path, rc_in: int) -> int:
     return max(int(rc_in or 0), rc_track)
 
 
+#: #505's COVERAGE-ONLY SIDECAR, AND WHO IS ENTITLED TO NAME IT. R-0915-160, third cut.
+#:
+#: The sidecar says a phase-1 failure was PURELY doc-coverage, which is what lets the front door
+#: demote instead of halting. It is therefore an EXEMPTION, and an exemption must belong to the
+#: pass that earned it.
+#:
+#: MY SECOND CUT ORDERED THE SIDECAR AGAINST THE RECORD, AND THAT ORDER IS ALWAYS WRONG.
+#: `run_second_pass_only` named the sidecar only when `sidecar.mtime >= record.mtime`, reasoning
+#: that a sidecar older than its own pass-1 record describes a still earlier run. But pass 1 writes
+#: the sidecar FIRST -- `phase1_doc_one_shot_runner` emits it in-process, from inside D1 -- and its
+#: record LAST, after the expert track and the steps view. So on every real re-invocation the
+#: sidecar IS older than the record, the name was never carried, and the front door read "NOT
+#: demoting": a `--skip-phase3` coverage-only project that was PASS_WITH_WAIVERS flipped to FAIL
+#: and halted at phase 1. The tests did not catch it because the fixture back-dated the sidecar to
+#: `record + 10s`, the reverse of the real order, and the front-door arm only grepped source text.
+#:
+#: SO NOTHING IS ORDERED BY MTIME HERE ANY MORE. PASS ONE NAMES ITS OWN SIDECAR, and the
+#: entitlement is structural instead of temporal:
+#:
+#:   * pass 1 FORGETS any earlier sidecar before it starts, so a file present when it writes its
+#:     record is one D1 wrote in THIS pass -- whatever the clock says, and whichever mode ran;
+#:   * pass 1 stamps that file's sha256 into the record it publishes;
+#:   * the second pass CARRIES the name forward with the record and computes nothing;
+#:   * the front door demotes only when the carried name matches the bytes on disk.
+#:
+#: A sidecar the carried record does not name stays refused, which is the half that keeps this from
+#: laundering a stale file -- the same guarantee the mtime rule was reaching for, from the one
+#: direction that is not guaranteed backwards.
+COVERAGE_SIDECAR_REL = "reports/phase1/phase1_exit_reason.json"
+
+
+def _forget_any_earlier_coverage_sidecar(project: Path) -> None:
+    """Drop a coverage-only sidecar left by an EARLIER run, before this pass begins.
+
+    This is what makes the naming below structural. Without it, a pass whose D1 never reached its
+    own classifier -- a refusal, or an early return inside the doc runner -- would find a previous
+    run's sidecar on disk and name it, and the name is an exemption. Absence is the honest state:
+    the front door treats "no sidecar" as "do not demote".
+
+    Never raises: this is housekeeping, and a run must not die because a stale advisory file could
+    not be removed. If it survives, the naming below is the only thing that could misread it, and a
+    reviewer reading this comment knows where to look.
+    """
+    try:
+        (project / COVERAGE_SIDECAR_REL).unlink()
+    except OSError:
+        pass
+
+
+def _name_the_sidecar_this_pass_wrote(project: Path, summary: Dict[str, Any],
+                                      *, d1_ran: bool) -> None:
+    """Stamp `pass1_coverage_sidecar` into THIS pass's record, or say why not.
+
+    `d1_ran` is the structural entitlement: D1 is the only thing that writes the sidecar, so a pass
+    in which D1 was REFUSED wrote none and must name none, even if a file is somehow there.
+    """
+    side = project / COVERAGE_SIDECAR_REL
+    if not d1_ran:
+        if side.is_file():
+            summary["pass1_coverage_sidecar_refused"] = (
+                f"D1 was REFUSED in this pass, so it wrote no {COVERAGE_SIDECAR_REL}; "
+                f"the file present belongs to an earlier run and is not named")
+        return
+    if not side.is_file():
+        return                                              # nothing written, nothing to name
+    try:
+        import hashlib as _hashlib                          # noqa: PLC0415
+        summary["pass1_coverage_sidecar"] = {
+            "rel": COVERAGE_SIDECAR_REL,
+            "sha256": _hashlib.sha256(side.read_bytes()).hexdigest(),
+            "named_by": "pass 1, which wrote it",
+        }
+    except OSError:                                         # pragma: no cover
+        summary["pass1_coverage_sidecar_refused"] = (
+            f"{COVERAGE_SIDECAR_REL} could not be read to name it")
+
+
 def run_second_pass_only(project: Path, ic_name: str) -> int:
     """PASS 2 of the Phase-1 expert hand-off, and NOTHING else (#2204).
 
@@ -1321,12 +1398,65 @@ def run_second_pass_only(project: Path, ic_name: str) -> int:
           "answer; the doc-extraction track is NOT re-run")
     reports = project / "reports"
     reports.mkdir(parents=True, exist_ok=True)
-    out = reports / "phase1_one_shot.json"
+    # ONE DEFINITION OF WHERE THIS REPORT LIVES, and it is the router's. R-0915-151.
+    #
+    # This runner used to write `reports/phase1_one_shot.json` while `_path_layout`
+    # categorises the file as `orchestrator`, like phase2's and phase3's. The tree then
+    # carried FOUR answers: the router's, this producer's, `vibe_ic_entry_guard`'s (which
+    # accepts both and calls the flat one "legacy"), and the front door's, which read the
+    # routed path and so read a path nothing wrote -- every phase1-inclusive run came out
+    # NOT_MEASURED at exit 1, and a real phase1 FAIL became NOT_MEASURED, so the halt never
+    # fired and phase2/3 ran on bad L documents.
+    #
+    # The ROUTER is the sanctioned answer, and the repo says so twice without being asked:
+    # `reports_subfolder_taxonomy_check` FAILS on the flat location -- measured, it reports
+    # `1 stray file(s): phase1_one_shot.json` -- and `vibe_ic_entry_guard` already documents
+    # `reports/orchestrator/phase1_one_shot.json` as the standalone runner's location and the
+    # flat one as legacy. So the producer moves INTO its own repo's taxonomy rather than the
+    # reader learning a second place to look.
+    out = _pl.report_path(project, "phase1_one_shot.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # THE WRITE IS THE ROUTER'S (above). THE READ MUST ALSO SEE AN OLDER PROJECT.
+    # R-0915-160. Pass 1 of a project produced before R-0915-151 is at the flat path, and
+    # reading only the routed one reported that pass as MISSING: `carried=False`, a second
+    # pass publishing "UNREADABLE -- the pass-1 record could not be carried forward", and the
+    # front door halting at phase 1 on a project that had in fact run. One shared read-side
+    # resolver, and the legacy hit is DISCLOSED in the summary rather than accepted quietly.
+    _read_from, _read_legacy = _pl.report_path_for_reading(
+        project, "phase1_one_shot.json")
     try:
-        summary = json.loads(out.read_text(errors="replace"))
+        summary = json.loads(_read_from.read_text(errors="replace"))
         if not isinstance(summary, dict):
             raise ValueError("phase1_one_shot.json top level is not an object")
         carried = True
+        # R-0915-160 — THE COVERAGE-ONLY SIDECAR'S NAME IS CARRIED, NOT RE-DERIVED.
+        #
+        # `summary` above IS pass 1's record, so a `pass1_coverage_sidecar` pass 1 stamped is
+        # already in it and this pass has nothing to compute: it carries the name forward, exactly
+        # as it carries the rest of the record. See `_name_the_sidecar_this_pass_wrote` for who is
+        # entitled to mint that name and why it is no longer an mtime question.
+        #
+        # THIS BLOCK USED TO RE-DERIVE IT HERE, ordering the sidecar against the record, and that
+        # order is ALWAYS wrong: pass 1 writes the sidecar first (in-process, from inside D1) and
+        # its record last, so `sidecar.mtime >= record.mtime` was false on every real
+        # re-invocation, no name was ever carried, and the front door refused the demotion the
+        # re-invocation existed to act on.
+        #
+        # A record that names nothing is DISCLOSED rather than quietly accepted: the front door
+        # will refuse the demotion, and a reader deserves to know it was the carried record that
+        # was silent, not the sidecar that was missing.
+        if not isinstance(summary.get("pass1_coverage_sidecar"), dict):
+            if (project / COVERAGE_SIDECAR_REL).is_file():
+                summary["pass1_coverage_sidecar_refused"] = (
+                    f"{COVERAGE_SIDECAR_REL} is on disk but the pass-1 record carried here does "
+                    f"not name it, so nothing says which pass wrote it: not carried")
+        if _read_legacy:
+            summary["pass1_record_read_from"] = str(
+                _read_from.relative_to(project))
+            summary["pass1_record_layout"] = (
+                "LEGACY -- pass 1 was written at the pre-R-0915-151 flat path "
+                f"{_read_from.relative_to(project)}; it was carried forward, and this "
+                f"pass publishes at the routed path {out.relative_to(project)}")
     except (OSError, ValueError) as exc:
         # DEGRADE LOUDLY. A second pass over a project whose pass-1 summary is
         # gone or unreadable still reports, and it says so rather than
@@ -1490,6 +1620,12 @@ def main() -> int:
     if args.second_track_only:
         return run_second_pass_only(project, args.ic_name)
 
+    # PASS 1 BEGINS HERE, so this is where an EARLIER pass's coverage-only sidecar stops being
+    # this project's answer. R-0915-160. Below the second-pass short-circuit on purpose: the
+    # second pass carries pass 1's sidecar and must not erase it. See
+    # `_name_the_sidecar_this_pass_wrote` for why the entitlement is structural and not a clock.
+    _forget_any_earlier_coverage_sidecar(project)
+
     # STEP 0.5ic — the route declaration. Dispatched before the mode branch
     # and on every path, because 0.5ic `blocks_on: []` and takes no input from
     # D1: which delivery route a design is on is a property of the DESIGN, not
@@ -1597,7 +1733,12 @@ def main() -> int:
         summary["steps_view"] = _pl.emit_steps_view(
             project, PROGRAMS_DIR, runner="phase1_one_shot_runner")
         summary["step_0_5ic"] = "ran" if rc_route == 0 else "FAILED to run"
-        (reports / "phase1_one_shot.json").write_text(
+        # R-0915-160 — PASS 1 NAMES THE SIDECAR IT WROTE, so the second pass can carry the name
+        # instead of re-deriving it from an ordering that is guaranteed backwards.
+        _name_the_sidecar_this_pass_wrote(project, summary, d1_ran=not refused)
+        _p1 = _pl.report_path(project, "phase1_one_shot.json")   # the router, always
+        _p1.parent.mkdir(parents=True, exist_ok=True)
+        _p1.write_text(
             json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
         return max(rc, rc_route)
 
@@ -1682,7 +1823,14 @@ def main() -> int:
     # reports/audit/steps_view.json either way.
     summary["steps_view"] = _pl.emit_steps_view(
         project, PROGRAMS_DIR, runner="phase1_one_shot_runner")
-    (reports / "phase1_one_shot.json").write_text(
+    # R-0915-160 — the SAME call as the docs branch. Wiring only one door would mean a design's
+    # demotion depended on which front door it came through, which is the shape #2052 exists to
+    # refuse. `--mode prompt` resolves to the docs door for D1, so this branch's D1 refusal is
+    # `_refused` under its own spelling.
+    _name_the_sidecar_this_pass_wrote(project, summary, d1_ran=not _refused)
+    _p1 = _pl.report_path(project, "phase1_one_shot.json")       # the router, always
+    _p1.parent.mkdir(parents=True, exist_ok=True)
+    _p1.write_text(
         json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     print(f"\n=== phase1_one_shot_runner DONE (mode={mode}) ===")
     print(f"verdict: {summary['verdict']}")

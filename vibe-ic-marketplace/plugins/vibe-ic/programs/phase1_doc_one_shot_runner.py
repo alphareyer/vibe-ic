@@ -63444,6 +63444,26 @@ def _backfill_auto_literals_into_typed(project: Path,
         _patch("L2_FRS", "auto_cited_sections", sections)
 
 
+def _drop_v0_3_7_exit_reason(project) -> None:
+    """Remove the coverage-only exit-reason sidecar. R-0915-151.
+
+    The sidecar is computed and written BEFORE the later blocking returns -- the L8
+    clock-period conflict, the extraction gap, the semantic layer gates -- and its
+    classifier knows nothing about any of them. All three return rc 1, the same rc the
+    coverage-only path returns, so a reader cannot tell them apart by exit code
+    either: `vibe_ic_one_shot_runner`'s #505 demotion would take a NON-coverage phase1
+    failure and publish PASS_WITH_WAIVERS at exit 0.
+
+    A blocking return the classifier did not classify therefore removes the sidecar it
+    would otherwise leave behind. Absence is the honest state: the front door treats
+    "no sidecar" as "do not demote".
+    """
+    try:
+        (project / "reports" / "phase1" / "phase1_exit_reason.json").unlink()
+    except (OSError, FileNotFoundError):
+        pass
+
+
 def _v0_3_7_classify_phase1_exit(cov_gate_failed: bool, strict: bool,
                                  pct: float, total_todo: int) -> dict:
     """v0.3.7 — ORGANIC #505. Classify the phase1 (doc-extraction) exit at
@@ -67928,6 +67948,7 @@ def main() -> int:
         print("FAIL: L8 declares a clock with conflicting periods — "
               f"{len(clock_contract_conflicts)} conflict(s); see "
               "clock_contract_conflicts[] in generated_docs/L8_*.json")
+        _drop_v0_3_7_exit_reason(project)
         return 1
     if _extraction_gap:
         # BLOCKING, by design, and NARROW. This is not the sufficiency gate
@@ -67946,6 +67967,7 @@ def main() -> int:
               "reads a port list would report a verdict over ZERO ports. See "
               "reports/phase1/phase1_sufficiency.json (ports_reason="
               "extraction_gap)")
+        _drop_v0_3_7_exit_reason(project)
         return 1
     if cov_gate_failed:
         # layergate-2: this flag is now raised by the l3 opcode-name
@@ -67963,6 +67985,7 @@ def main() -> int:
         # timing constant belongs / a dispatcher missing a command.
         print(f"FAIL: semantic layer gate(s) FAILed: "
               f"{', '.join(layer_gate_failures)} — see reports/phase1/")
+        _drop_v0_3_7_exit_reason(project)
         return 1
     if args.strict and (pct < 80.0 or total_todo > 0):
         reasons = []

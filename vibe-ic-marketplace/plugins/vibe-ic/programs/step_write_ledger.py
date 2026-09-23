@@ -280,6 +280,12 @@ _SUMMARIES = (
     "reports/orchestrator/vibe_ic_one_shot.json",
     "reports/orchestrator/phase3_one_shot.json",
     "reports/orchestrator/phase2_one_shot.json",
+    # R-0915-151/160 -- phase1's runner resolves this through `_path_layout`, which
+    # categorises it `orchestrator` like phase2's and phase3's. The flat spelling below is
+    # the LEGACY read-side location, and it is the same one
+    # `_path_layout.LEGACY_REPORT_PATHS` names, so this list and that resolver cannot come
+    # to disagree -- `test_the_legacy_spellings_are_the_resolvers_own` holds them together.
+    "reports/orchestrator/phase1_one_shot.json",
     "reports/phase1_one_shot.json",
     "reports/phase2_one_shot.json",
     "reports/phase3_one_shot.json",

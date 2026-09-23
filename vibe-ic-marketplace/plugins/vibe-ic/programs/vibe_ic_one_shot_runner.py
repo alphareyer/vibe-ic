@@ -68,8 +68,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 import _path_layout as _pl
+import _audit_scope                     # R-0915-150 (one scope predicate)
 import _runner_lock
 import canonical_run_admission as _canonical_admission
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -622,17 +623,510 @@ def _read_report(p: Path) -> Dict[str, Any]:
         return {"verdict": "FAIL", "error": f"parse failed: {p}"}
 
 
-def _aggregate(verdicts: List[str]) -> str:
-    if any(v == "FAIL" for v in verdicts):
-        return "FAIL"
-    # v0.3.7 — ORGANIC #505: COVERAGE-INCOMPLETE is a non-gating advisory
-    # tier (a demoted coverage-only phase1 failure in the standalone-design
-    # shape). It does NOT fail the run but DOES surface as PASS_WITH_WAIVERS
-    # so the overall verdict never hides the documented doc-extraction gap.
-    if any(v in ("PASS_WITH_WAIVERS", "WAIVED", "COVERAGE-INCOMPLETE")
-           for v in verdicts):
-        return "PASS_WITH_WAIVERS"
-    return "PASS"
+#: The ONLY phase verdicts that are a measurement of success. Everything else is
+#: not a pass, INCLUDING a token nobody taught this function: the roll-up is
+#: fail-closed, because the alternative is what #2523 measured -- a phase verdict
+#: outside every branch falling through the bottom of the function into PASS.
+_PHASE_PASS = frozenset({"PASS"})
+
+#: Passing, but not clean. Rule 11 forbids collapsing these onto a bare PASS.
+#: COVERAGE-INCOMPLETE is v0.3.7 ORGANIC #505: a demoted coverage-only phase1
+#: failure in the standalone-design shape. It does NOT fail the run but DOES
+#: surface as PASS_WITH_WAIVERS so the overall verdict never hides the
+#: documented doc-extraction gap.
+_PHASE_PASS_WITH_NOTE = frozenset({"PASS_WITH_WAIVERS", "WAIVED",
+                                   "COVERAGE-INCOMPLETE"})
+
+#: The ONE reason a pass-tier row may carry a non-zero rc. R-0915-145.
+#:
+#: #505's demotion rewrites phase1's verdict to COVERAGE-INCOMPLETE and KEEPS its
+#: rc, because a coverage-only phase1 failure always exits 1 -- the rc belongs to
+#: the verdict the row had BEFORE the demotion. The roll-up's "claims a pass but
+#: exited non-zero" rule is right for an UNDEMOTED row and wrong for this one, and
+#: it turned the #505 standalone shape (--skip-phase3, coverage-only phase1) from
+#: PASS_WITH_WAIVERS/exit 0 into FAIL/exit 1.
+#:
+#: DELIBERATELY NOT A GENERAL LAUNDERING PATH: `_roll_up` exempts a row only when
+#: the demotion record carries EXACTLY this token, and the only place that mints it
+#: is the #505 branch -- `_phase1_failure_is_coverage_only` AND `--skip-phase3`.
+#: Anything else that wants an rc forgiven has to come and argue for its own token.
+DEMOTION_COVERAGE_ONLY = "phase1_coverage_only_standalone"
+
+
+def _aggregate(rows: Any,
+               completion_audit_verdicts: Optional[List[str]] = None) -> str:
+    """The verdict alone, for callers that pass a plain list of phase verdicts.
+
+    THE ORIGINAL CONTRACT, KEPT. This function took `List[str]` and answered a
+    `str`, and #505's coverage-axis properties are stated directly against it:
+
+        _aggregate(["COVERAGE-INCOMPLETE", "PASS"]) == "PASS_WITH_WAIVERS"
+        _aggregate(["COVERAGE-INCOMPLETE", "FAIL"]) == "FAIL"
+        _aggregate(["PASS", "PASS"])               == "PASS"
+
+    Changing the signature under them broke all three with
+    `ValueError: too many values to unpack (expected 3)` -- a four-character
+    verdict string unpacked as a row. The properties are the point and they are
+    older than my change, so the adapter is here rather than in the tests: ONE
+    implementation (`_roll_up`), two calling conventions, and no second weaker
+    copy of the rule to drift.
+    """
+    return _roll_up(_as_rows(rows), completion_audit_verdicts)[0]
+
+
+def _as_rows(rows: Any) -> List[Tuple[str, str, int]]:
+    """Accept `["PASS", ...]`, `[(name, verdict, rc), ...]`, or a longer tuple.
+
+    A phase entry that is a bare verdict has no rc to disagree with, so it gets
+    rc 0; a longer tuple keeps its first three fields, which is what every caller
+    in this file and in `plan` uses.
+    """
+    out: List[Tuple[str, str, int]] = []
+    for i, row in enumerate(rows or []):
+        if isinstance(row, str):
+            out.append((("phase" + str(i + 1)), row, 0))
+            continue
+        if isinstance(row, (tuple, list)):
+            if len(row) == 1:
+                out.append((("phase" + str(i + 1)), str(row[0]), 0))
+            elif len(row) == 2:
+                out.append((str(row[0]), str(row[1]), 0))
+            else:
+                try:
+                    rc = int(row[2])
+                except (TypeError, ValueError):
+                    rc = 0
+                out.append((str(row[0]), str(row[1]), rc))
+            continue
+        out.append((("phase" + str(i + 1)), str(row), 0))
+    return out
+
+
+def _roll_up(rows: List[Tuple[str, str, int]],
+             completion_audit_verdicts: Optional[List[str]] = None,
+             demoted: Optional[Dict[str, Dict[str, Any]]] = None,
+             audit_axis: Optional[Dict[str, Any]] = None
+             ) -> Tuple[str, List[str]]:
+    """Roll the phases up into ONE verdict, and say why it is that verdict.
+
+    THE DEFECT THIS REPLACES, measured on spm run22 (READ-ONLY,
+    reports/orchestrator/vibe_ic_one_shot.json, byte-exact):
+
+        phases : phase1 PASS rc=0 | phase2 NOT_MEASURED rc=1
+                 phase3 NOT_MEASURED rc=1 | analog SKIPPED | mixed_signal SKIPPED
+        verdict: PASS                     <- and the process exited 0
+
+    Three independent holes produced that one line, and each is closed here:
+
+    1. NOT_MEASURED had no branch. The old body tested FAIL, then the
+       waiver-ish tier, then `return "PASS"` -- so any token outside those two
+       sets rolled up to PASS by falling off the end. Closed by inverting the
+       polarity: a verdict is a pass only if it is IN `_PHASE_PASS` /
+       `_PHASE_PASS_WITH_NOTE`, so an unknown token is not-measured, never a pass.
+
+    2. `rc` was recorded in the plan and in the report and consulted by nothing.
+       A phase that reports PASS while exiting non-zero is a REPORT DISAGREEING
+       WITH A PROCESS, which is not a pass either; it fails, and the disclosure
+       names both halves.
+
+    3. The completion audit was not in the conjunction. run22's
+       reports/audit/phase23_completion_audit.json says `verdict: FAIL` and
+       phase3's own orchestrator report carries `completion_audit_verdict: FAIL`
+       -- and the front door read neither. A completion audit that FAILS is a
+       FAIL here; an ABSENT one is disclosed but not gating, because a
+       phase1-only or phase2-only run legitimately has none.
+
+    Returns `(verdict, disclosures)`. A roll-up that moves a verdict without
+    saying which phase moved it is the same silence in a different place, so the
+    reasons travel into the report and onto stdout.
+    """
+    fails: List[str] = []
+    unmeasured: List[str] = []
+    notes: List[str] = []
+    #: Things a reader must be told that do NOT move the tier. A disclosure is not
+    #: a waiver, and a run with nothing to disclose is a clean PASS.
+    disclosed: List[str] = []
+    for name, verdict, rc in rows:
+        v = str(verdict or "").strip().upper()
+        try:
+            rc_i = int(rc)
+        except (TypeError, ValueError):
+            rc_i = 0
+        if v == "FAIL":
+            fails.append(f"{name} FAIL (rc={rc_i})")
+        elif v in _PHASE_PASS or v in _PHASE_PASS_WITH_NOTE:
+            _dem = (demoted or {}).get(name) or {}
+            _demoted_here = (str(_dem.get("token") or "")
+                             == DEMOTION_COVERAGE_ONLY)
+            if rc_i != 0 and not _demoted_here:
+                fails.append(
+                    f"{name} reported {v} but the phase exited rc={rc_i} — a "
+                    f"report disagreeing with its own process is not a pass")
+            elif rc_i != 0 and _demoted_here:
+                # The rc belongs to the verdict this row had BEFORE the demotion.
+                notes.append(
+                    f"{name} {v} (rc={rc_i} is the pre-demotion "
+                    f"{_dem.get('original_verdict', 'FAIL')}; "
+                    f"{_dem.get('reason', DEMOTION_COVERAGE_ONLY)})")
+            elif v in _PHASE_PASS_WITH_NOTE:
+                notes.append(f"{name} {v}")
+        else:
+            unmeasured.append(
+                f"{name} {verdict or 'NO VERDICT'} (rc={rc_i}) — not measured, "
+                f"so it cannot be rolled up as passing")
+
+    # THE AUDIT AXIS, AND IT MAY NOT FAIL OPEN. R-0915-145.
+    #
+    # `if ca == "FAIL"` meant NOT_MEASURED, INSUFFICIENT_DATA, an unparseable
+    # value and an ABSENT audit all read as "the axis is satisfied" -- so a phase3
+    # run whose --strict completion refresh raised or timed out inside a swallowed
+    # try published PASS at exit 0. Only PASS satisfies the axis; PASS_WITH_WAIVERS
+    # caps at the waiver tier; FAIL fails; anything else, absence included, is
+    # NOT_MEASURED with the reason stated.
+    # SCOPED TO THE CALLER THAT ACTUALLY DECIDED THE AXIS. `main` always passes
+    # `audit_axis`, computed by `_completion_audit_axis` from THIS invocation, so
+    # the fail-closed rule always applies to a real run (pinned by
+    # `test_main_always_supplies_the_axis`). A caller that passes no axis is not
+    # talking about the completion audit at all -- #505's properties are stated as
+    # `_aggregate(["COVERAGE-INCOMPLETE", "PASS"])`, with no audit in the sentence --
+    # and for those the phase conjunction alone answers, with the older
+    # "a FAIL token gates" behaviour kept for raw verdict lists. Applying the strict
+    # axis to them turned every audit-less call into NOT_MEASURED, which is a
+    # different claim than the one the caller made.
+    if audit_axis is not None:
+        axis = audit_axis
+    else:
+        _raw = [str(v or "").strip().upper()
+                for v in (completion_audit_verdicts or [])]
+        axis = ({"state": "FAIL", "reason": f"verdict(s) {sorted(set(_raw))}"}
+                if any(t == "FAIL" for t in _raw)
+                else {"state": "NOT_APPLICABLE", "reason": ""})
+    _axis_state = str(axis.get("state") or "NOT_MEASURED").upper()
+    _axis_why = str(axis.get("reason") or "")
+    if _axis_state == "FAIL":
+        fails.append(f"the phase2/3 completion audit says FAIL — {_axis_why}"
+                     if _axis_why else "the phase2/3 completion audit says FAIL")
+    elif _axis_state == "PASS_WITH_WAIVERS":
+        notes.append(f"the phase2/3 completion audit passed with waivers"
+                     + (f" — {_axis_why}" if _axis_why else ""))
+    elif _axis_state == "NOT_APPLICABLE" and not _axis_why:
+        pass            # no axis was in play and nothing to tell the reader
+    elif _axis_state == "NOT_APPLICABLE":
+        # phase3 did not run in this invocation, so there is no axis to read. SAID
+        # OUT LOUD but TIER-NEUTRAL: "no axis" and "a satisfied axis" must never
+        # look the same, and a phase1-only run must still be able to be a clean
+        # PASS. A disclosure is not a waiver.
+        disclosed.append(f"no phase2/3 completion audit axis — {_axis_why}"
+                         if _axis_why else "no phase2/3 completion audit axis")
+    elif _axis_state != "PASS":
+        unmeasured.append(
+            f"the phase2/3 completion audit is not a pass ({_axis_state})"
+            + (f" — {_axis_why}" if _axis_why else ""))
+
+    if fails:
+        return "FAIL", fails + unmeasured + disclosed
+    if unmeasured:
+        return "NOT_MEASURED", unmeasured + disclosed
+    if notes:
+        return "PASS_WITH_WAIVERS", notes + disclosed
+    return "PASS", disclosed
+
+
+#: The tokens a completion audit can publish that SATISFY the axis, and nothing
+#: else does. R-0915-145: a token this does not know is NOT_MEASURED, never a pass.
+_AUDIT_AXIS_PASS = frozenset({"PASS"})
+_AUDIT_AXIS_WAIVERS = frozenset({"PASS_WITH_WAIVERS", "WAIVED"})
+
+
+def _audit_axis_from_verdicts(verdicts: Optional[List[str]]) -> Dict[str, Any]:
+    """Collapse raw audit verdict tokens into one axis state, fail-closed.
+
+    FAIL wins, then an unknown/absent token (NOT_MEASURED), then waivers, then
+    PASS. `None` and `[]` are NOT a pass: an axis nobody could read is unmeasured.
+    """
+    toks = [str(v or "").strip().upper() for v in (verdicts or []) if str(v or "").strip()]
+    if not toks:
+        return {"state": "NOT_MEASURED",
+                "reason": "no completion audit verdict could be read"}
+    if any(t == "FAIL" for t in toks):
+        return {"state": "FAIL", "reason": f"verdict(s) {sorted(set(toks))}"}
+    unknown = [t for t in toks
+               if t not in _AUDIT_AXIS_PASS and t not in _AUDIT_AXIS_WAIVERS]
+    if unknown:
+        return {"state": "NOT_MEASURED",
+                "reason": f"verdict(s) {sorted(set(unknown))} are not a pass"}
+    if any(t in _AUDIT_AXIS_WAIVERS for t in toks):
+        return {"state": "PASS_WITH_WAIVERS", "reason": f"verdict(s) {sorted(set(toks))}"}
+    return {"state": "PASS", "reason": ""}
+
+
+#: How much earlier than a phase's start a report may be stamped and still count as
+#: that phase's. MEASURED on this host: the filesystem reports mtime in ~64 ms
+#: granules, so a file written microseconds AFTER `time.time()` was sampled can
+#: carry a stamp microseconds BEFORE it, and a zero-tolerance comparison calls a
+#: phase's own fresh report stale. One second is two orders of magnitude below the
+#: staleness this is for -- an earlier RUN, minutes or hours back -- so it cannot
+#: mask the case being detected.
+_FRESHNESS_TOLERANCE_S = 1.0
+
+
+def _phase_report_path(project: Path, report_name: str) -> Path:
+    """Where the phase's report is -- THE ROUTER'S ANSWER, and only that. R-0915-151.
+
+    My round-3 cut of this probed two locations and took the newer, because phase1's runner
+    wrote `reports/phase1_one_shot.json` while `_path_layout` categorises the file as
+    `orchestrator`. That closed the symptom by adding a FIFTH answer to a question that
+    already had four, and it consecrated a location the repo's own
+    `reports_subfolder_taxonomy_check` FAILS on -- measured: `1 stray file(s):
+    phase1_one_shot.json`. It could also read a STALE file from the other location purely
+    because it happened to be newer.
+
+    The producer now resolves through this same router, so there is one definition and this
+    function is a single call to it. Nothing here needs to know which phase it is asked
+    about, which is the point: a reader that enumerates locations is a reader that goes
+    stale the next time a producer moves.
+    """
+    return _pl.report_path(project, report_name)
+
+
+def _report_exists(project: Path, report_name: str) -> bool:
+    """Is there a `report_name` in this tree at all -- whoever wrote it, whenever?"""
+    try:
+        return _phase_report_path(project, report_name).is_file()
+    except OSError:                                        # pragma: no cover
+        return False
+
+
+def _published_here(project: Path, report_name: str, started_at: float) -> bool:
+    """Did THIS INVOCATION publish `report_name`? `exists AND fresh`, in ONE place.
+
+    R-0915-160, third cut. This was spelled inline inside `_row_verdict` and nowhere else, and it
+    is the test that decides whether a report on disk is this run's account of itself. A SECOND
+    reader then grew that needed the same answer -- the #505 coverage-only demotion, which reads
+    the phase-1 record for the sidecar name it carries -- and it did not ask this question at all.
+
+    THE HOLE THAT OPENED (review wkevxl71c, on r8). Invocation A: a fresh pass 1, coverage-only at
+    rc 1, its record naming the sidecar it wrote; the front door demotes, correctly. Invocation B
+    on the same tree, `--skip-phase3`: the expert second pass dies on an uncaught exception, exits
+    1 and writes NO record. `_row_verdict` says FAIL, which is right and halts -- and then the #505
+    branch read A's STALE record, found the name still matching the untouched sidecar, saw rc == 1,
+    and demoted. Phase 2 ran and the roll-up could publish PASS_WITH_WAIVERS for a run whose phase
+    1 had CRASHED. The same shape covers a pass-1 crash before `_forget_any_earlier_coverage_
+    sidecar` gets to run. It was unreachable before r8 only because nothing ever named a sidecar.
+
+    So the question has ONE implementation and both readers ask it. A stale record never authorises
+    a demotion, whatever it names.
+    """
+    try:
+        path = _phase_report_path(project, report_name)
+        return path.is_file() and (path.stat().st_mtime + _FRESHNESS_TOLERANCE_S
+                                   >= started_at)
+    except OSError:                                        # pragma: no cover
+        return False
+
+
+def _row_verdict(project: Path, report_name: str, rc: int, started_at: float,
+                 phase: str) -> Tuple[str, Optional[str]]:
+    """This phase's verdict, or NOT_MEASURED with the reason. R-0915-151.
+
+    A phase that RAN here and left no report written at or after its own start has
+    not published a verdict, and `("PASS" if rc == 0 else "FAIL")` invents one. The
+    case is real and shipped: phase3's `[SKIP] no usable PDK` returns 0 WITHOUT
+    writing a report, so the front door read either a stale `phase3_one_shot.json`
+    from an earlier run or a PASS conjured from rc 0 -- for a phase that measured
+    nothing at all.
+    """
+    path = _phase_report_path(project, report_name)
+    exists = _report_exists(project, report_name)
+    fresh = _published_here(project, report_name, started_at)
+    # ONE DECISION, ON (rc, DID THIS INVOCATION PUBLISH A REPORT). R-0915-160, second cut.
+    #
+    # THE PROCESS IS ALSO A WITNESS, AND WHEN IT FAILED IT IS THE ONLY ONE. My round-3 rule read
+    # "rc is an exit status, not a measurement" and returned NOT_MEASURED for every reportless
+    # phase. That is right for rc == 0 -- phase3's `[SKIP] no usable PDK` exits 0 without writing
+    # anything, and a PASS conjured from that is a claim nobody made. It is WRONG for rc != 0: the
+    # process DID tell us something, it told us it failed, and NOT_MEASURED does not halt.
+    #
+    # MY FIRST CUT PUT THAT ONLY UNDER `if not exists`, AND A REVIEW IS RIGHT THAT IT MISSES THE
+    # CASE THAT MATTERS MOST -- the RE-RUN. R-0915-151 moved phase 1's producer onto the routed
+    # path this reader reads, so on every re-run a report is already sitting there. A phase-1 crash
+    # after the L documents are written -- the oracle-leak `SystemExit(2)`, or a killed expert
+    # second pass at rc 137 -- then found `exists` true and `fresh` false, and the stale branch
+    # answered NOT_MEASURED while ignoring rc entirely. No halt; phases 2 and 3 ran on
+    # oracle-contaminated documents. Exactly the defect the rc!=0 rule exists to close, reached by
+    # the other door.
+    #
+    # So the two facts are decided TOGETHER, and "did this invocation publish a report" is
+    # `exists AND fresh` -- a stale file is not this run's account of itself, and nothing below
+    # ever reads its verdict.
+    #
+    # ONE CLASS FOR EVERY NON-ZERO rc, INCLUDING THE STALL (rc 2 UNDETERMINED), and it is FAIL on
+    # both paths. It used to be FAIL on a fresh project and NOT_MEASURED on a re-run, which is two
+    # answers to one question. FAIL is the right single answer because MEASURED, every non-zero rc
+    # a phase runner in this tree returns is a refusal or an error and none is benign: rc 1 is a
+    # verdict of FAIL, a NOT_MEASURED aggregate, or an UNCAUGHT EXCEPTION; rc 2 is "not a
+    # directory", the announced UNDETERMINED stall, or "REFUSED: canonical Phase-3 admission"; rc 3
+    # is the refusal of a second concurrent run on a live project; rc 4 comes WITH a fresh report,
+    # so it never reaches here.
+    #
+    # CORRECTING r7's OWN LIST: it put "an uncaught exception" under rc 2. It is rc 1. Each phase
+    # runner exits through `_progress_run.exit_undetermined_on_stall(main)`, which catches
+    # `Stalled` ONLY and returns RC_UNDETERMINED for it; anything else propagates and CPython
+    # exits 1. Nothing about this rule changes -- both classes are FAIL here -- but a comment that
+    # misfiles an exit code is how the next reader builds a wrong rule on top of it. A process that refused to run measured nothing AND said so, which is
+    # a failure to produce the phase, not an absence of information about it.
+    published_here = exists and fresh
+    if not published_here:
+        if rc != 0:
+            _what = ("wrote no " + report_name) if not exists else (
+                "left only a " + report_name + " from an earlier run")
+            return "FAIL", (
+                f"{phase}'s process exited {rc} and {_what}: this invocation published no "
+                f"verdict for {phase}, and its exit status is the only account of itself it "
+                f"gave. A failed process with no report OF ITS OWN is a FAIL, not an absence, "
+                f"and it halts the run")
+        if not exists:
+            return "NOT_MEASURED", (
+                f"{phase} ran in this invocation, exited 0 and left no {report_name}; rc=0 is "
+                f"an exit status, not a measurement")
+        return "NOT_MEASURED", (
+            f"{phase} exited 0 and its {report_name} predates {phase}'s start in this "
+            f"invocation, so that file describes an earlier run and its verdict is not read")
+    rep = _read_report(path)
+    verdict = rep.get("verdict")
+    if verdict:
+        return str(verdict), None
+    return ("PASS" if rc == 0 else "FAIL"), None
+
+
+def _completion_audit_axis(project: Path, *, phase3_ran: bool,
+                           started_at: float) -> Dict[str, Any]:
+    """The completion-audit axis for THIS invocation — or none, said out loud.
+
+    THE CANONICAL DOCUMENT, AND NOTHING THAT CARRIES ITS VERDICT. R-0915-151.
+    My round-2 version checked freshness on the CARRIER instead of the carried
+    verdict, which a review caught: `phase3_one_shot_runner`'s finalize refresh
+    swallows a TimeoutExpired (or any exception), and `_derive_headline_verdict`
+    then reads `reports/audit/phase23_completion_audit.json` with NO date check and
+    copies its verdict into a FRESH `phase3_one_shot.json` as
+    `completion_audit_verdict`. So on a re-run whose refresh failed, the OLD run's
+    audit PASS arrived at the front door dated today: my reader put the audit FILE in
+    `ignored` and then accepted the SAME verdict from the carrier, axis PASS, exit 0
+    -- precisely the swallowed-refresh case the rework claimed to close. The mirror
+    is worse: a stale FAIL gating a good run.
+
+    So a carrier is a POINTER, never a source. The axis reads the canonical audit
+    document itself, and accepts it only when:
+
+      * phase3 ran in THIS invocation (otherwise there is no axis at all), AND
+      * the document was written at or after PHASE 3's START in this invocation --
+        not merely after the run started, because the audit is phase3's to refresh,
+        AND
+      * the document says it judged the WHOLE FLOW.
+
+    THAT LAST CHECK IS WHAT 77 MADE POSSIBLE. `flow_compliance_check` stamped every
+    receipt `phase: "all"` regardless of `--stage`, so "who wrote this audit, over
+    what population" was unanswerable; a phase-2-scoped audit, or
+    `emit_final_summary`'s pre-Step-29 snapshot, was accepted as the phase2/3 axis.
+    With R-0915-147 the audit carries `scope.whole_flow`, and a scoped pass no longer
+    writes this path at all (R-0915-150). An audit with NO scope block predates that
+    work, so its population cannot be established from the document: it is accepted
+    only on the weaker `phase == "all"` signal, and WHICH signal was used is
+    disclosed, because a weak signal read silently is the same mistake again.
+    """
+    if not phase3_ran:
+        return {"state": "NOT_APPLICABLE",
+                "reason": "phase3 did not run in this invocation, so this run has "
+                          "no completion-audit axis; an earlier run's audit is not "
+                          "evidence about this one",
+                "sources": [], "ignored": [], "pointers": []}
+    # Carriers are recorded for a reader and never consulted for the verdict.
+    pointers: List[Dict[str, Any]] = []
+    for name in ("phase2_one_shot.json", "phase3_one_shot.json",
+                 "phase23_one_shot.json"):
+        rep = _read_report(_pl.report_path(project, name))
+        if rep.get("completion_audit_verdict"):
+            pointers.append({"path": f"reports/orchestrator/{name}",
+                             "carries": str(rep["completion_audit_verdict"]),
+                             "used_as_evidence": False})
+
+    audit = _pl.report_path(project, "phase23_completion_audit.json")
+    try:
+        fresh = audit.is_file() and (audit.stat().st_mtime
+                                     + _FRESHNESS_TOLERANCE_S >= started_at)
+    except OSError:                                        # pragma: no cover
+        fresh = False
+    if not audit.is_file():
+        return {"state": "NOT_MEASURED",
+                "reason": ("phase3 ran in this invocation and left no completion "
+                           "audit at reports/audit/phase23_completion_audit.json"),
+                "sources": [], "ignored": [], "pointers": pointers}
+    if not fresh:
+        return {"state": "NOT_MEASURED",
+                "reason": ("the completion audit predates phase3's start in this "
+                           "invocation, so it describes an earlier run -- a carrier "
+                           "repeating its verdict in a fresh report does not make it "
+                           "this run's measurement"),
+                "sources": [],
+                "ignored": ["reports/audit/phase23_completion_audit.json"],
+                "pointers": pointers}
+    doc = _read_report(audit)
+    # THE SAME PREDICATE THE OTHER READERS USE, not a fourth copy of it. R-0915-150.
+    #
+    # `_audit_scope.audit_scope_is_whole_flow` is the one definition of "did this audit
+    # judge the whole flow", and `benchmark_evidence_publish`, `phase3_one_shot_runner`
+    # and the FPGA pre-burn guard all refuse a scoped audit through it. This reader had
+    # the same rule written out a second time -- same answer today, and exactly the shape
+    # that goes stale the first time the rule moves. A front door that disagreed with the
+    # three readers beneath it about what the audit judged would be the worst place for
+    # that divergence to live.
+    #
+    # `signal` is still disclosed, because the legacy branch (`phase == "all"` on a
+    # document with no scope block, written before R-0915-147) is a WEAKER answer and a
+    # weak signal read silently is the mistake this whole axis exists to correct. The
+    # constant already SAYS that in words, so it is published verbatim rather than
+    # re-worded here -- two spellings of one disclosure is how they drift apart.
+    _whole, signal, _why = _audit_scope.audit_scope_is_whole_flow(doc)
+    if not _whole:
+        return {"state": "NOT_MEASURED",
+                "reason": (f"the completion audit is not this run's whole-flow verdict: "
+                           f"{_why}"),
+                "sources": [], "ignored": [], "pointers": pointers,
+                "scope_signal": signal}
+    verdict = doc.get("verdict")
+    if not verdict:
+        return {"state": "NOT_MEASURED",
+                "reason": "the completion audit carries no verdict",
+                "sources": [], "ignored": [], "pointers": pointers,
+                "scope_signal": signal}
+    axis = _audit_axis_from_verdicts([str(verdict)])
+    axis["sources"] = [{"path": "reports/audit/phase23_completion_audit.json",
+                        "verdict": str(verdict)}]
+    axis["ignored"] = []
+    axis["pointers"] = pointers
+    axis["scope_signal"] = signal
+    return axis
+
+
+def _completion_audit_verdicts(project: Path) -> List[str]:
+    """Kept for callers that only want the raw tokens (tests, and the report).
+
+    THE AXIS IS `_completion_audit_axis`, which is what the roll-up consumes: this
+    helper cannot know whether phase3 ran or when this invocation started, and
+    answering without those two facts is what produced the false FAIL on a
+    `--skip-phase3` run.
+    """
+    out: List[str] = []
+    audit = _pl.report_path(project, "phase23_completion_audit.json")
+    doc = _read_report(audit)
+    if doc.get("verdict"):
+        out.append(str(doc["verdict"]))
+    for name in ("phase2_one_shot.json", "phase3_one_shot.json",
+                 "phase23_one_shot.json"):
+        rep = _read_report(_pl.report_path(project, name))
+        if rep.get("completion_audit_verdict"):
+            out.append(str(rep["completion_audit_verdict"]))
+    return out
 
 
 def _phase1_failure_is_coverage_only(project: Path) -> Tuple[bool, dict]:
@@ -1035,6 +1529,16 @@ def main() -> int:
 
     t0 = time.time()
     plan: List[Tuple[str, str, int]] = []   # (phase, verdict, rc)
+    #: name -> the demotion record that explains a pass-tier row's non-zero rc.
+    #: Only the #505 branch writes here; see DEMOTION_COVERAGE_ONLY.
+    _demoted: Dict[str, Dict[str, Any]] = {}
+    #: Did phase3 RUN in THIS invocation? The completion-audit axis exists only
+    #: then, and reading an earlier run's audit is not a measurement of this one.
+    _phase3_ran = False
+    #: When each phase STARTED here. A phase's report counts as this run's only if
+    #: it was written at or after that phase began; `t0` is too weak, because a
+    #: report written by an earlier invocation of a LATER phase can postdate t0.
+    _phase_started: Dict[str, float] = {}
     halted_at: str = ""
     reports: Dict[str, Any] = {}
     advisories: List[str] = []   # v0.3.7 #505 — non-gating notes
@@ -1112,9 +1616,14 @@ def main() -> int:
                  if p1_mode == _P1_MODE_EXPERT_SECOND_PASS
                  else "PHASE 1 (vendor docs → L1-L23)" if p1_mode == "docs"
                  else "PHASE 1 (NL → L1-L23)")
+        _phase_started["phase1"] = time.time()
         rc = _run_phase(label, runner, p1_args, env=_phase_env)
-        rep = _read_report(_pl.report_path(project, "phase1_one_shot.json"))
-        verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
+        verdict, _fresh_why = _row_verdict(
+            project, "phase1_one_shot.json", rc,
+            _phase_started.get("phase1", t0), "phase1")
+        if _fresh_why:
+            advisories.append(_fresh_why)
+        rep = _read_report(_phase_report_path(project, "phase1_one_shot.json"))
         plan.append(("phase1", verdict, rc))
         reports["phase1"] = rep
         if verdict == "FAIL":
@@ -1128,8 +1637,139 @@ def main() -> int:
             # NOT coverage-only and still halts. Full-chip flows (phase3
             # in scope) keep halting — doc-extraction feeds the backend.
             cov_only, cov_reason = _phase1_failure_is_coverage_only(project)
+            # THE SIDECAR MUST BE THIS INVOCATION'S, AND THE rc MUST BE THE ONE THE
+            # COVERAGE-ONLY PATH RETURNS. R-0915-151.
+            #
+            # `_phase1_failure_is_coverage_only` reads
+            # reports/phase1/phase1_exit_reason.json with no date check, and phase1
+            # writes that sidecar BEFORE three later non-coverage blocking returns
+            # (the extraction gap, the L8 clock conflict, ...). So a stale sidecar --
+            # or a fresh one followed by a different failure -- demoted a
+            # non-coverage phase1 FAIL to PASS_WITH_WAIVERS at exit 0.
+            #
+            # CORRECTING MY OWN CLAIM: I wrote that this guarantees the exemption is "minted
+            # only behind the coverage-only predicate". That is too strong, and a review is
+            # right to say so -- #505 keys the exemption on rc == 1, and rc 1 cannot tell a
+            # coverage-only failure from an expert or 0.5ic failure. That is base behaviour;
+            # what the checks below do is NARROW it, not make it exact. So: the
+            # sidecar must have been written at or after phase1 STARTED in this
+            # invocation, and only rc 1 -- what the coverage-only path returns -- is
+            # exempt.
+            # AND BEFORE EITHER SIDECAR ROUTE: DID PHASE 1 PUBLISH A RECORD HERE AT ALL?
+            # R-0915-160, fourth cut (review w3nppqdpn).
+            #
+            # r9 put this question on the CARRIED-NAME route only, and the name route is reached
+            # solely when the sidecar is not fresh -- so the MTIME route walked past it. The sibling
+            # it left: a FIRST pass where D1 writes a fresh coverage-only sidecar and the pass then
+            # dies before publishing its record (`_run_expert_track` -> `_wd.run_host_supervised`
+            # raising, or the record write itself). rc 1, no record, `_side_fresh` True from the
+            # mtime alone -- demoted, and phase 2 ran on a phase 1 that crashed. Pre-existing on
+            # that route rather than introduced by r9, and worse on main, but the question is the
+            # same one and it belongs to the DEMOTION, not to either route into it.
+            #
+            # So it is a PRECONDITION now, asked once, and both routes sit behind it. Measured
+            # harmless: a legitimate coverage-only pass 1 always publishes its record before
+            # returning (the docs branch and the prompt branch each write it as their last act), and
+            # the expert second pass always rewrites it -- so no run that has earned the exemption
+            # is refused by this.
+            _rec_is_ours = _published_here(
+                project, "phase1_one_shot.json", _phase_started.get("phase1", t0))
+            if cov_only and not _rec_is_ours:
+                advisories.append(
+                    "phase1 exited " + str(rc) + " having published NO record in this invocation, "
+                    "so nothing here is phase 1's own account of itself: the coverage-only "
+                    "exemption needs a record from THIS pass and there is none. NOT demoting"
+                    + (" (the record on disk belongs to an earlier run)"
+                       if _report_exists(project, "phase1_one_shot.json") else ""))
+                cov_only = False
+            _side = project / "reports" / "phase1" / "phase1_exit_reason.json"
+            try:
+                _side_fresh = (_side.is_file()
+                               and _side.stat().st_mtime + _FRESHNESS_TOLERANCE_S
+                               >= _phase_started.get("phase1", t0))
+            except OSError:                                # pragma: no cover
+                _side_fresh = False
+            # OR THIS INVOCATION'S PASS-1 RECORD NAMES IT. R-0915-160, second cut.
+            #
+            # The mtime rule above is right for a FIRST pass and wrong for the expert second pass,
+            # which is the AI-backup re-invocation R-0915-161 exists for: `run_second_pass_only`
+            # CARRIES pass 1's record forward and never rewrites the sidecar, so the sidecar
+            # legitimately predates this invocation's phase-1 start. Refusing it flipped a
+            # `--skip-phase3` coverage-only project from PASS_WITH_WAIVERS to FAIL and halted at
+            # phase 1, where main demoted and continued -- a re-invocation losing the very
+            # exemption it was invoked to act on.
+            #
+            # The sidecar is therefore judged against THE RECORD IT BELONGS TO, by content: PASS
+            # ONE stamps `pass1_coverage_sidecar.sha256` into the record it publishes, naming the
+            # sidecar its own D1 wrote (`phase1_one_shot_runner._name_the_sidecar_this_pass_wrote`,
+            # entitled by D1 having run in that pass, not by any clock); the second pass carries
+            # that name forward and computes nothing. A sidecar the carried record does not name
+            # stays refused, and one swapped afterwards fails the sha.
+            #
+            # TWO CLAIMS FROM r7 CORRECTED HERE, both of which this branch outgrew:
+            #   * it said the sidecar is named "only if the sidecar was at least as new as the
+            #     record being carried". That ordering is GONE: pass 1 writes the sidecar first and
+            #     its record last, so the test was false on every real re-invocation and nothing
+            #     was ever named (review wjn67aev3).
+            #   * it said "`_row_verdict` already refuses a stale one". It does not, and cannot:
+            #     `_row_verdict` RETURNS a verdict, and `rep` is read from that path unconditionally
+            #     a few lines above. A crashed phase 1 that wrote no record leaves an EARLIER run's
+            #     record in `rep`, whose name still matches the untouched sidecar -- which is how
+            #     r8 opened a route to PASS_WITH_WAIVERS for a run whose phase 1 died (review
+            #     wkevxl71c). The record has to be THIS invocation's, and it is ASKED --
+            #     `_published_here`, the same `exists AND fresh` test `_row_verdict` uses, from the
+            #     one implementation both readers share -- as the PRECONDITION on the demotion
+            #     above, not as a test on this route. r9 put it here, on the name route, and a
+            #     review was right that the mtime route then walked past it (w3nppqdpn): the
+            #     question belongs to the demotion, which is the thing being authorised, and not to
+            #     either road into it.
+            if cov_only and not _side_fresh:
+                # `cov_only` is already false unless the record is THIS pass's (the precondition
+                # above), so `rep` here is this invocation's own account and the name it carries
+                # can be trusted as far as its digest. Asked once, not twice.
+                _named = (rep.get("pass1_coverage_sidecar")
+                          if isinstance(rep, dict) else None)
+                if isinstance(_named, dict) and _side.is_file():
+                    try:
+                        import hashlib as _hashlib          # noqa: PLC0415
+                        _have = _hashlib.sha256(_side.read_bytes()).hexdigest()
+                    except OSError:                        # pragma: no cover
+                        _have = None
+                    if _have and _have == str(_named.get("sha256") or ""):
+                        _side_fresh = True
+                        advisories.append(
+                            "phase1's coverage-only sidecar predates this invocation's phase-1 "
+                            "start, but THIS invocation's pass-1 record names it by content "
+                            "(pass1_coverage_sidecar.sha256) and the bytes match, so it is the "
+                            "sidecar that record was written against: demotion still available")
+            if cov_only and not _side_fresh:
+                advisories.append(
+                    "phase1's coverage-only sidecar predates phase1's start in this "
+                    "invocation and this invocation's pass-1 record does not name it, so it "
+                    "describes an earlier run: NOT demoting")
+                cov_only = False
+            if cov_only and rc != 1:
+                advisories.append(
+                    f"phase1 failed with rc={rc}, which is not the rc the "
+                    f"coverage-only path returns (1): NOT demoting")
+                cov_only = False
             if args.skip_phase3 and cov_only:
                 plan[-1] = ("phase1", "COVERAGE-INCOMPLETE", rc)
+                # R-0915-145 — the rc stays on the row (it is what phase1's
+                # process really did) and the DEMOTION is recorded beside it, so
+                # the roll-up can tell "a demoted row whose rc belongs to its
+                # pre-demotion FAIL" from "a row claiming a pass while its own
+                # process exited non-zero". This is the ONLY site that mints the
+                # token.
+                _demoted["phase1"] = {
+                    "token": DEMOTION_COVERAGE_ONLY,
+                    "original_verdict": "FAIL",
+                    "original_rc": rc,
+                    "reason": (f"doc-extraction coverage only "
+                               f"(coverage {cov_reason.get('coverage_pct')}%, "
+                               f"todo {cov_reason.get('total_todo')}), "
+                               f"standalone shape (--skip-phase3)"),
+                }
                 advisories.append(
                     f"phase1 doc-extraction COVERAGE-INCOMPLETE "
                     f"(coverage {cov_reason.get('coverage_pct')}%, "
@@ -1218,9 +1858,14 @@ def main() -> int:
         else:
             p2_env = _canonical_admission.child_env(
                 p2_admission.identity_sha256, _phase_env)
+            _phase_started["phase2"] = time.time()
             rc = _run_phase("PHASE 2 (= 2a + 2b)", runner, p2_args, env=p2_env)
-            rep = _read_report(_pl.report_path(project, "phase2_one_shot.json"))
-            verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
+            verdict, _fresh_why = _row_verdict(
+                project, "phase2_one_shot.json", rc,
+                _phase_started.get("phase2", t0), "phase2")
+            if _fresh_why:
+                advisories.append(_fresh_why)
+            rep = _read_report(_phase_report_path(project, "phase2_one_shot.json"))
             plan.append(("phase2", verdict, rc))
             reports["phase2"] = rep
             if verdict == "FAIL":
@@ -1266,6 +1911,7 @@ def main() -> int:
         _analog_args = [str(project), "--container", args.container]
         if args.pdk and str(args.pdk).strip().lower() != "auto":
             _analog_args += ["--pdk", str(args.pdk).strip()]
+        _phase_started["analog"] = time.time()
         rc = _run_phase("ANALOG A1..A8", runner, _analog_args, env=_phase_env)
         rep = _read_report(_pl.report_path(project, "analog_one_shot.json"))
         verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
@@ -1358,10 +2004,16 @@ def main() -> int:
         else:
             p3_env = _canonical_admission.child_env(
                 p3_admission.identity_sha256, _phase_env)
+            _phase3_ran = True
+            _phase_started["phase3"] = time.time()
             rc = _run_phase("PHASE 3 (synth → PnR → GDS → DRC → LVS)",
                             runner, p3_args, env=p3_env)
-            rep = _read_report(_pl.report_path(project, "phase3_one_shot.json"))
-            verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
+            verdict, _fresh_why = _row_verdict(
+                project, "phase3_one_shot.json", rc,
+                _phase_started.get("phase3", t0), "phase3")
+            if _fresh_why:
+                advisories.append(_fresh_why)
+            rep = _read_report(_phase_report_path(project, "phase3_one_shot.json"))
             plan.append(("phase3", verdict, rc))
             reports["phase3"] = rep
             if verdict == "FAIL":
@@ -1429,10 +2081,25 @@ def main() -> int:
             f"will REFUSE to stage it (see reports/pdk_revision.json)")
 
     # ---------------- Aggregate ----------------
-    digital_verdicts = [v for n, v, _ in plan
-                        if n not in ("analog", "mixed_signal")
-                        and v != "SKIPPED"]
-    overall = _aggregate(digital_verdicts) if digital_verdicts else "FAIL"
+    digital_rows = [(n, v, rc) for n, v, rc in plan
+                    if n not in ("analog", "mixed_signal")
+                    and v != "SKIPPED"]
+    _ca_verdicts = _completion_audit_verdicts(project)
+    _audit_axis = _completion_audit_axis(
+        project, phase3_ran=_phase3_ran,
+        # PHASE 3's start, not the run's: the audit is phase3's to refresh, and a
+        # document written before phase3 began cannot be its refresh.
+        started_at=_phase_started.get("phase3", t0))
+    if digital_rows:
+        overall, _rollup_why = _roll_up(digital_rows, _ca_verdicts,
+                                        demoted=_demoted,
+                                        audit_axis=_audit_axis)
+    else:
+        overall, _rollup_why = "FAIL", ["no digital phase ran"]
+    # A verdict that moved must say which phase moved it, in the report a reader
+    # actually opens — not only on stdout.
+    for _why in _rollup_why:
+        advisories.append(f"verdict {overall}: {_why}")
     summary = {
         "phase": "vibe-ic",
         "project": str(project),
@@ -1449,6 +2116,14 @@ def main() -> int:
         # the same attribution, and the half nothing recorded before.
         "pdk_revision": _pdk_rec,
         "verdict": overall,
+        # WHY the roll-up is what it is, phase by phase. Empty for a clean PASS.
+        "verdict_reasons": _rollup_why,
+        "completion_audit_verdicts": _ca_verdicts,
+        # EVERYTHING THE ROLL-UP CONSUMED, so a reader -- including
+        # `vibe_ic_entry_guard` -- can replay the same function instead of keeping
+        # a second copy of the rule that drifts from it.
+        "completion_audit_axis": _audit_axis,
+        "demoted_phases": _demoted,
     }
     # v1.6.32: emit canonical final_summary.md (best-effort). Note that
     # phase23_one_shot_runner ALSO calls this; vibe_ic delegates to
@@ -1518,6 +2193,8 @@ def main() -> int:
     print(f"\n{'='*72}")
     print(f"=== vibe_ic_one_shot_runner DONE — {out}")
     print(f"  overall verdict   : {overall}")
+    for _why in _rollup_why:
+        print(f"    because         : {_why}")
     if halted_at:
         print(f"  halted at         : {halted_at}")
     for n, v, _ in plan:

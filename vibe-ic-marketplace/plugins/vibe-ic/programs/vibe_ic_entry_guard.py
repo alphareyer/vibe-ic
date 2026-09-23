@@ -136,7 +136,10 @@ _CANONICAL_LAYER_FILES = {
     f"{spec.full_name}.json": spec.code
     for spec in _l_doc_taxonomy.L_DOCS_V2
 }
-_ORCHESTRATOR_VERDICTS = {"PASS", "PASS_WITH_WAIVERS", "FAIL"}
+#: NOT_MEASURED is a front-door verdict as of R-0915-145: a phase that was not
+#: measured can no longer roll up to PASS, so the runner publishes it and this
+#: guard must recognise it or discard genuine reports as forged.
+_ORCHESTRATOR_VERDICTS = {"PASS", "PASS_WITH_WAIVERS", "FAIL", "NOT_MEASURED"}
 _PHASE_VERDICTS = _ORCHESTRATOR_VERDICTS | {
     "WAIVED", "SKIP", "SKIPPED", "COVERAGE-INCOMPLETE"
 }
@@ -203,20 +206,72 @@ def _is_orchestrator_report(path: Path, expected_project: Path) -> bool:
                     "phase1", "phase2", "analog", "phase3", "mixed_signal"]
             or not all(_valid_phase_row(row) for row in phases)):
         return False
-    digital = [row["verdict"] for row in phases
-               if row["name"] not in {"analog", "mixed_signal"}
-               and row["verdict"] != "SKIPPED"]
-    if not digital:
-        expected_verdict = "FAIL"
-    elif "FAIL" in digital:
-        expected_verdict = "FAIL"
-    elif any(verdict in {"PASS_WITH_WAIVERS", "WAIVED",
-                         "COVERAGE-INCOMPLETE"}
-             for verdict in digital):
-        expected_verdict = "PASS_WITH_WAIVERS"
-    else:
-        expected_verdict = "PASS"
-    return data["verdict"] == expected_verdict
+    return data["verdict"] == _expected_front_door_verdict(data, phases)
+
+
+def _expected_front_door_verdict(data: dict, phases: list) -> str:
+    """The verdict this report SHOULD carry, derived by the runner's own roll-up.
+
+    ONE IMPLEMENTATION, R-0915-145. This guard used to re-derive the verdict with
+    its own copy of the rule -- FAIL if any FAIL, waiver tier if any waiver-ish,
+    else PASS -- and that copy did not know the conjunction the runner now applies.
+    A GENUINE report (NOT_MEASURED because a phase was not measured, or FAIL
+    because the completion audit failed while every phase passed) was therefore
+    discarded as FORGED, and `benchmark_dispatch --score` can refuse a real run on
+    that basis. So the guard calls the function the runner used.
+
+    A report carrying the roll-up's inputs (`completion_audit_axis`) is replayed
+    under the CURRENT rule, which is what makes forgery detectable: a report
+    claiming PASS over an axis its own body records as FAIL does not match.
+
+    A report that predates those fields is held to the rule that existed when it
+    was published -- the legacy derivation below -- because a guard cannot fairly
+    judge an old document by a rule it could not have followed. That is a
+    compatibility statement, not a weakening: such a report is exactly as trusted
+    as it was before this change, and no more.
+    """
+    rows = [(row["name"], row["verdict"], row.get("rc") or 0)
+            for row in phases
+            if row["name"] not in {"analog", "mixed_signal"}
+            and row["verdict"] != "SKIPPED"]
+    if not rows:
+        return "FAIL"
+    if "completion_audit_axis" in data:
+        try:
+            import vibe_ic_one_shot_runner as _front_door
+        except Exception:                                  # pragma: no cover
+            pass
+        else:
+            axis = data.get("completion_audit_axis")
+            return _front_door._roll_up(
+                rows,
+                data.get("completion_audit_verdicts") or [],
+                demoted=data.get("demoted_phases") or {},
+                audit_axis=axis if isinstance(axis, dict) else None)[0]
+    # LEGACY SHAPE — a report published before the conjunction rule existed.
+    digital = [v for _n, v, _rc in rows]
+    if "FAIL" in digital:
+        return "FAIL"
+    # AN UNMEASURED PHASE IS NOT A PASS UNDER ANY RULE, INCLUDING THE OLD ONE. R-0915-160.
+    #
+    # The legacy derivation below is a COMPATIBILITY statement: an old report is judged by the
+    # rule that existed when it was published. That is only fair while the old rule actually had
+    # an opinion. It had none about a NOT_MEASURED row, because the guard's row validation
+    # REFUSED such rows outright -- so this branch never saw one, and its `else: return "PASS"`
+    # was never a judgement about them.
+    #
+    # Once the guard started accepting NOT_MEASURED rows, that silence became a favourable
+    # answer: MEASURED on spm run22's report (phase2 and phase3 NOT_MEASURED, verdict PASS), which
+    # was refused before and would now be accepted as entry evidence. Inheriting a permission the
+    # old rule never granted is not compatibility, so the row type the old rule could not judge
+    # gets the answer its own content compels: nothing here measured phases 2 and 3, so the report
+    # cannot be a pass.
+    if any(v in {"NOT_MEASURED", "NOT_RUN", "UNKNOWN"} for v in digital):
+        return "NOT_MEASURED"
+    if any(v in {"PASS_WITH_WAIVERS", "WAIVED", "COVERAGE-INCOMPLETE"}
+           for v in digital):
+        return "PASS_WITH_WAIVERS"
+    return "PASS"
 
 
 def _valid_phase1_step(row: object) -> bool:

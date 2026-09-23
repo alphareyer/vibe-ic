@@ -666,3 +666,43 @@ def test_noleak_layer_doc_rejects_noncanonical_taxonomy_filename():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_an_old_format_report_cannot_pass_over_an_unmeasured_phase():
+    """R-0915-160 — the legacy derivation is a COMPATIBILITY statement, not an inheritance of a
+    permission the old rule never granted.
+
+    An old report (no `completion_audit_axis`) is judged by the rule that existed when it was
+    published. That is fair only while the old rule had an OPINION, and about a NOT_MEASURED row it
+    had none: the guard's row validation refused such rows outright, so the legacy branch never saw
+    one and its `else: return "PASS"` was never a judgement about them. Once the guard began
+    accepting NOT_MEASURED rows, that silence turned into a favourable answer.
+
+    MEASURED on spm run22's shape -- phase2 and phase3 NOT_MEASURED with verdict PASS -- which was
+    refused before and would otherwise now be accepted as entry evidence.
+    """
+    import vibe_ic_entry_guard as G
+
+    run22 = {"verdict": "PASS", "phases": [
+        {"name": "phase1", "verdict": "PASS", "rc": 0},
+        {"name": "phase2", "verdict": "NOT_MEASURED", "rc": 0},
+        {"name": "phase3", "verdict": "NOT_MEASURED", "rc": 0}]}
+    assert "completion_audit_axis" not in run22, "this arm is about the LEGACY path"
+    derived = G._expected_front_door_verdict(run22, run22["phases"])
+    assert derived == "NOT_MEASURED", (
+        f"an old-format report claiming PASS over an unmeasured phase derives {derived!r}, so it "
+        f"matches its own claim and is accepted as entry evidence")
+    assert derived != run22["verdict"], "the mismatch is what refuses it"
+
+    # and a genuine old all-PASS report is still accepted, so this is not a blanket refusal
+    clean = {"verdict": "PASS", "phases": [
+        {"name": "phase1", "verdict": "PASS", "rc": 0},
+        {"name": "phase2", "verdict": "PASS", "rc": 0}]}
+    assert G._expected_front_door_verdict(clean, clean["phases"]) == "PASS"
+
+    # a waiver tier still derives the waiver tier
+    waived = {"verdict": "PASS_WITH_WAIVERS", "phases": [
+        {"name": "phase1", "verdict": "PASS", "rc": 0},
+        {"name": "phase2", "verdict": "PASS_WITH_WAIVERS", "rc": 0}]}
+    assert G._expected_front_door_verdict(
+        waived, waived["phases"]) == "PASS_WITH_WAIVERS"
