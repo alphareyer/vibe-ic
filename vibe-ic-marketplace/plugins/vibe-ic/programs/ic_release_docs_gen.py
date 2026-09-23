@@ -914,6 +914,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         _vx.announce_vacuous(GENERATOR, "project_dir_absent")
         return _vx.RC_VACUOUS
 
+    # CLEARED BEFORE ANYTHING CAN RAISE. R-0915-146 / M2: `_clear_refusal` ran only
+    # on the success tail, so ANY exception below -- `_art.audit`, `_metrics`,
+    # `release_blockers`, `build_release` before `out_dir.mkdir` -- or a runner
+    # timeout left the PREVIOUS run's refusal record on disk, where a reader would
+    # find a stale account of an upstream that may since have been fixed. A record
+    # describes the run that wrote it; this run has not written one yet, so there
+    # must not be one here.
+    _clear_refusal(project)
+
     audit = _art.audit(project)
     releases = _art.releases(project)
 

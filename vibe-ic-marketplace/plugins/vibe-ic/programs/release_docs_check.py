@@ -116,6 +116,8 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import _ic_release_artefacts as _art
 import _flow_reason_taxonomy as _reason_taxonomy
+import _ic_release_artefacts as _art
+import tapeout_docs_gen as _tap
 import _vacuous_exit as _vx
 import digital_hardmacro_check as _hm
 from _atomic_artefact import write_text as atomic_write_text
@@ -1372,6 +1374,73 @@ def expected_releases(project: Path, arm: str) -> List[str]:
 PRODUCER_REFUSAL_REL = "reports/phase3/release_docs_producer_refusal.json"
 
 
+#: Where the producer's metrics live, read through the SAME loader the producer and
+#: `tapeout_docs_gen` use. A second metrics reader would be a second answer to
+#: "what did this run measure".
+PRODUCER_METRICS_REL = "phase3/final/metrics.json"
+
+
+def upstream_blockage_now(project: Path, release: str) -> dict:
+    """Is THIS release's upstream blocked, judged on the files as they are NOW?
+
+    R-0915-146. The first cut of this gate granted BLOCKED_BY_UPSTREAM on the
+    producer's RECORD — its shape alone: a `program`, a `verdict: REFUSED` and at
+    least one reason string. That is the mistake R-0915-136 names in one line: a
+    program's CLAIM about a state is not the state. Three ways it went wrong, all
+    confirmed:
+
+      * STALE. Run N refuses for STA_NO_SLACK / POWER_NO_TOTAL; the STA and power
+        records are then fixed (step 23's own gate clause rewrites
+        post_route_summary.json, or a plugin upgrade lands) without re-running the
+        producer — the audit never runs `ic_release_docs_gen`, it is not in
+        `_PRE_AUDIT_PRODUCERS`. Re-audit: NOT_MEASURED/BLOCKED, blaming an STA that
+        is fine, where the step genuinely owes its documents and the correct verdict
+        is FAIL. A hand-written record works identically, and the record was bound
+        to no file — no digest, no tree_sha.
+      * A CRASH READ AS BLOCKAGE. Any exception before the success tail left the
+        previous run's record in place, and rc 1 was read as "the producer
+        declined".
+      * A FOREIGN RELEASE. A leftover record for `spm` excused an absent `spm_v2`,
+        because nothing compared the record's releases with the ones that failed.
+
+    So the blockage is RE-DERIVED here, from the current tree, with the producer's
+    OWN predicates — `_ic_release_artefacts.audit(project, release).errors` and
+    `tapeout_docs_gen.release_blockers(load_metrics(...))`, both pure readers, both
+    imported rather than reimplemented. Per release, so one release's blockage can
+    never excuse another's absence. The record survives only as a POINTER in the
+    disclosure; it is never the evidence.
+    """
+    substance: List[str] = []
+    blockers: List[str] = []
+    try:
+        audit = _art.audit(project, release)
+        substance = [f.line() for f in (audit.errors or [])]
+    except Exception as exc:                               # pragma: no cover
+        # A predicate that cannot run is not a blockage: say so and let the
+        # documents stay owed. Guessing either way here is what this whole change
+        # is against.
+        return {"release": release, "blocked": False, "substance_refusals": [],
+                "release_blockers": [],
+                "predicate_error": f"{exc.__class__.__name__}: {exc}"}
+    try:
+        metrics = _tap.load_metrics(project / PRODUCER_METRICS_REL)
+        if metrics:
+            blockers = [str(b) for b in (_tap.release_blockers(metrics) or [])]
+        else:
+            # The producer's own words for this state, kept identical so the two
+            # programs cannot describe one tree two ways.
+            blockers = [f"{PRODUCER_METRICS_REL}: absent or unreadable, so no "
+                        f"sign-off property was decided by any artefact of this run"]
+    except Exception as exc:                               # pragma: no cover
+        return {"release": release, "blocked": False,
+                "substance_refusals": substance, "release_blockers": [],
+                "predicate_error": f"{exc.__class__.__name__}: {exc}"}
+    return {"release": release,
+            "blocked": bool(substance or blockers),
+            "substance_refusals": substance,
+            "release_blockers": blockers}
+
+
 def producer_refusal(project: Path) -> Optional[dict]:
     """The producer's stated refusal, or None.
 
@@ -1486,15 +1555,25 @@ def run_audit(project: Path, arm: str) -> Result:
     # a pass: the row is NOT_MEASURED with `reason_class BLOCKED_BY_UPSTREAM`,
     # which `_flow_reason_taxonomy` holds in `INCOMPLETE` -- not in
     # `SKIP_ELIGIBLE` -- so the step cannot be read as satisfied.
-    refusal = producer_refusal(project) if (failed and arm == "ic") else None
+    # RE-DERIVED, PER RELEASE, ON THE CURRENT FILES. The record is a pointer only.
     only_absent = bool(result.findings) and all(
         f.rule == "RELEASE_DOCUMENTATION_ABSENT" for f in result.findings)
-    if refusal is not None and only_absent:
+    blockage = {}
+    if failed and arm == "ic":
+        blockage = {rel: upstream_blockage_now(project, rel) for rel in failed}
+    #: EVERY failing release must be blocked NOW. One release whose upstream is
+    #: healthy owes its documents, and a sibling's blockage does not excuse it —
+    #: that is the foreign-release hole, closed by construction rather than by
+    #: comparing a record's `releases` list against anything.
+    all_blocked = bool(blockage) and all(b.get("blocked")
+                                        for b in blockage.values())
+    refusal = producer_refusal(project) if (failed and arm == "ic") else None
+    if all_blocked and only_absent:
         result.passed = False
         result.verdict_tier = "NOT_MEASURED"
         result.summary = {
             "skipped": False,
-            "reason": "release_docs_producer_refused",
+            "reason": "release_docs_upstream_blocked",
             "reason_class": _reason_taxonomy.BLOCKED_BY_UPSTREAM,
             "arm": arm,
             "documentation_root": root.as_posix(),
@@ -1502,9 +1581,17 @@ def run_audit(project: Path, arm: str) -> Result:
             "expected_releases": expected,
             "releases_examined": len(details),
             "failed": failed,
-            "producer": str(refusal.get("program")),
-            "producer_refusal": PRODUCER_REFUSAL_REL,
-            "producer_refusals": refusal["_reasons"],
+            # WHAT WAS OBSERVED NOW, per release — the evidence.
+            "upstream_blockage": blockage,
+            "producer_refusals": sorted({
+                r for b in blockage.values()
+                for r in (b.get("substance_refusals") or [])
+                + (b.get("release_blockers") or [])}),
+            # THE RECORD, IF ANY — a POINTER for a reader, never the evidence. A
+            # verdict that rested on it is the defect R-0915-146 closed.
+            "producer": (str(refusal.get("program")) if refusal else None),
+            "producer_refusal": (PRODUCER_REFUSAL_REL if refusal else None),
+            "producer_refusal_is_evidence": False,
             "rows_examined": sum(d["rows_examined"] for d in details),
             "derived_fields": sum(d["derived_fields"] for d in details),
             "not_measured_fields": sum(
@@ -1591,10 +1678,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     # SKIP_ELIGIBLE, so the row lands as NOT_MEASURED and the step stays owed.
     if (str(result.summary.get("reason_class") or "")
             == _reason_taxonomy.BLOCKED_BY_UPSTREAM):
-        print(f"  NOT MEASURED — {result.summary.get('producer')} recorded a "
-              f"refusal at {result.summary.get('producer_refusal')}, so this run "
-              f"has no document set to judge and the absence is not a "
-              f"documentation defect:", file=sys.stderr)
+        print(f"  NOT MEASURED — this gate RE-DERIVED the upstream state of "
+              f"{sorted(result.summary.get('upstream_blockage') or {})} from the "
+              f"current files and every failing release is blocked now, so the "
+              f"absence is not a documentation defect. The producer's own record "
+              f"({result.summary.get('producer_refusal') or 'absent'}) is a "
+              f"pointer, not the evidence:", file=sys.stderr)
         for why in result.summary.get("producer_refusals") or []:
             print(f"    - {why}", file=sys.stderr)
         return _vx.RC_VACUOUS
