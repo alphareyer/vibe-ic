@@ -311,7 +311,6 @@ _NAMING_SHAPES = {
 #: NARROW shapes: timing on the page that round 2 missed.
 _TIMING_SHAPES = {
     "slash_joined_key": dict(_EMPTY_CANON, **{"H0/H1/BR/IBT_low_us": 7.2}),
-    "list_sentence": dict(_EMPTY_CANON, timing_parameters=["H0 low 7.2us"]),
     "fused_TIBT_US": dict(_EMPTY_CANON, TIBT_US=22.0),
     "fused_TBR_MIN_US": dict(_EMPTY_CANON, TBR_MIN_US=13.0),
     "fused_IBTmin": dict(_EMPTY_CANON, IBTmin=20.0),
@@ -576,3 +575,69 @@ def test_declared_half_duplex_inside_the_family_still_fails(tmp_path):
     assert (rc, rep["verdict"]) == (1, "FAIL"), rep
     rc, rep = _gate(tmp_path / "good", _SPLIT_GOOD, l2=HD_TRUE)
     assert (rc, rep["verdict"]) == (0, "PASS"), rep
+
+
+# ── review w0z2lp3a7 (round 8) ──────────────────────────────────────────────
+
+#: The v068 host-only shape: family symbols carried as `parameter` labels.
+_V068_PARAMETER_ROWS = {"timing_windows": [
+    {"parameter": "H1_low", "min_us": 1, "max_us": 9},
+    {"parameter": "IBT", "max_us": 20}]}
+#: The same family written as ALLCAPS+Capital camel names.
+_CAMEL_NAMES = {"timing_parameters": {"tBRMin_us": 31, "tIBTMin_us": 20}}
+
+
+def test_family_symbols_under_a_parameter_label_are_read(tmp_path):
+    """MEDIUM (a). symbol_family_hits read labels only under name/symbol/signal,
+    so a `parameter`-labelled row (46 such records in corpus L8s) read as 'not
+    expressed in the family' -> INCOMPLETE where main FAILed."""
+    rc, rep = _gate(tmp_path, _V068_PARAMETER_ROWS, l2=HD_TRUE)
+    assert (rc, rep["verdict"]) == (1, "FAIL"), rep
+
+
+def test_acronym_then_capital_word_splits_at_the_acronym(tmp_path):
+    """MEDIUM (b). tBRMin -> t/br/min, tIBTMin -> t/ibt/min (was t/brm/in)."""
+    import internal_vs_external_timing_check as G
+    assert G._identifier_tokens("tBRMin_us") == ["t", "br", "min", "us"]
+    assert G._identifier_tokens("tIBTMin") == ["t", "ibt", "min"]
+    assert G._identifier_tokens("IBTmin") == ["ibt", "min"]
+    rc, rep = _gate(tmp_path, _CAMEL_NAMES, l2=HD_TRUE)
+    assert (rc, rep["verdict"]) == (1, "FAIL"), rep
+
+
+def test_the_record_labels_are_one_definition_in_the_schema():
+    import internal_vs_external_timing_check as G
+    import l8_timing_schema as S
+    assert {"name", "symbol", "signal", "parameter", "field"} <= set(
+        S.RECORD_LABEL_KEYS)
+    src = GATE.read_text().split("def symbol_family_hits(", 1)[1].split(
+        "\ndef ", 1)[0]
+    assert "RECORD_LABEL_KEYS" in src
+    assert G  # the module imports
+
+
+_RS485_LIKE = {"direction_control_timing_half_duplex": {
+    "TX_setup": "DE asserts before first start-bit edge",
+    "RX_to_TX_gap": "3.5 character times"}}
+
+
+def test_prose_break_does_not_pull_a_non_family_design_into_check(tmp_path):
+    """LOW. A note saying 'break' in prose, or a sized Verilog literal 4'h1 /
+    8'h0A, is not a family identifier: the design stays INCOMPLETE."""
+    for note in ("line break detection is handled by the UART",
+                 "reset value 4'h1, idle 8'h0A"):
+        l8 = dict(_RS485_LIKE, notes=[note])
+        rc, rep = _gate(tmp_path / str(abs(hash(note))), l8, l2=HD_TRUE)
+        assert (rc, rep["verdict"]) == (2, "INCOMPLETE"), (note, rep)
+
+
+def test_a_prose_list_sentence_is_never_nabs_and_not_family_vocabulary(tmp_path):
+    """Round 3 required 'H0 low 7.2us' in a list never be certified absent;
+    that still holds (silent -> INCOMPLETE). Round 8 (review w0z2lp3a7): free
+    prose is not an identifier, so declared half_duplex=true reads INCOMPLETE
+    (not expressed in the family), not check()'s FAIL."""
+    l8 = dict(_EMPTY_CANON, timing_parameters=["H0 low 7.2us"])
+    _assert_incomplete(*_gate(tmp_path / "s", l8))
+    rc, rep = _gate(tmp_path / "t", l8, l2=HD_TRUE)
+    assert (rc, rep["verdict"], rep.get("reason_class")) == (
+        2, "INCOMPLETE", "ZERO_DENOMINATOR"), rep
