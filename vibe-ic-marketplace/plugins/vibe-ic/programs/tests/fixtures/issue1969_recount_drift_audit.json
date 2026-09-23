@@ -8,7 +8,7 @@
     "PASS": 9,
     "PASS_WITH_WAIVERS": 2,
     "FAIL": 7,
-    "NOT_MEASURED": 28,
+    "NOT_MEASURED": 29,
     "NOT_APPLICABLE": 23
   },
   "steps": [
@@ -563,7 +563,7 @@
       "disclosures": []
     },
     {
-      "id": "37.4",
+      "id": "37.3",
       "name": "synthetic step 55",
       "stage": "stage1",
       "status": "NOT_MEASURED",
@@ -573,8 +573,18 @@
       "disclosures": []
     },
     {
-      "id": "37.5ip",
+      "id": "37.4",
       "name": "synthetic step 56",
+      "stage": "stage1",
+      "status": "NOT_MEASURED",
+      "reason_class": "upstream_failed",
+      "declared_by": "",
+      "attribution": "",
+      "disclosures": []
+    },
+    {
+      "id": "37.5ip",
+      "name": "synthetic step 57",
       "stage": "stage1",
       "status": "NOT_APPLICABLE",
       "reason_class": "",
@@ -584,7 +594,7 @@
     },
     {
       "id": "37.5ic",
-      "name": "synthetic step 57",
+      "name": "synthetic step 58",
       "stage": "stage1",
       "status": "FAIL",
       "reason_class": "",
@@ -594,7 +604,7 @@
     },
     {
       "id": "38",
-      "name": "synthetic step 58",
+      "name": "synthetic step 59",
       "stage": "stage1",
       "status": "NOT_MEASURED",
       "reason_class": "upstream_failed",
@@ -604,7 +614,7 @@
     },
     {
       "id": "39",
-      "name": "synthetic step 59",
+      "name": "synthetic step 60",
       "stage": "stage1",
       "status": "PASS_WITH_WAIVERS",
       "reason_class": "",
@@ -614,16 +624,6 @@
     },
     {
       "id": "M1",
-      "name": "synthetic step 60",
-      "stage": "stage1",
-      "status": "NOT_APPLICABLE",
-      "reason_class": "",
-      "declared_by": "the input declares this step is not applicable",
-      "attribution": "",
-      "disclosures": []
-    },
-    {
-      "id": "M2",
       "name": "synthetic step 61",
       "stage": "stage1",
       "status": "NOT_APPLICABLE",
@@ -633,7 +633,7 @@
       "disclosures": []
     },
     {
-      "id": "M3",
+      "id": "M2",
       "name": "synthetic step 62",
       "stage": "stage1",
       "status": "NOT_APPLICABLE",
@@ -643,7 +643,7 @@
       "disclosures": []
     },
     {
-      "id": "M4",
+      "id": "M3",
       "name": "synthetic step 63",
       "stage": "stage1",
       "status": "NOT_APPLICABLE",
@@ -653,7 +653,7 @@
       "disclosures": []
     },
     {
-      "id": "40",
+      "id": "M4",
       "name": "synthetic step 64",
       "stage": "stage1",
       "status": "NOT_APPLICABLE",
@@ -663,7 +663,7 @@
       "disclosures": []
     },
     {
-      "id": "41",
+      "id": "40",
       "name": "synthetic step 65",
       "stage": "stage1",
       "status": "NOT_APPLICABLE",
@@ -673,7 +673,7 @@
       "disclosures": []
     },
     {
-      "id": "42",
+      "id": "41",
       "name": "synthetic step 66",
       "stage": "stage1",
       "status": "NOT_APPLICABLE",
@@ -683,7 +683,7 @@
       "disclosures": []
     },
     {
-      "id": "43",
+      "id": "42",
       "name": "synthetic step 67",
       "stage": "stage1",
       "status": "NOT_APPLICABLE",
@@ -693,7 +693,7 @@
       "disclosures": []
     },
     {
-      "id": "44",
+      "id": "43",
       "name": "synthetic step 68",
       "stage": "stage1",
       "status": "NOT_APPLICABLE",
@@ -703,8 +703,18 @@
       "disclosures": []
     },
     {
-      "id": "P0",
+      "id": "44",
       "name": "synthetic step 69",
+      "stage": "stage1",
+      "status": "NOT_APPLICABLE",
+      "reason_class": "",
+      "declared_by": "the input declares this step is not applicable",
+      "attribution": "",
+      "disclosures": []
+    },
+    {
+      "id": "P0",
+      "name": "synthetic step 70",
       "stage": "stage1",
       "status": "NOT_MEASURED",
       "reason_class": "partial_population",

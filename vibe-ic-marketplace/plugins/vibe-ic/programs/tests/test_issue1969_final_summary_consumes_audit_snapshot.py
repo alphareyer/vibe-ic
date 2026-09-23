@@ -2,8 +2,8 @@
 
 The flow checker already owns the count and the per-step verdict.  Re-parsing
 its human stdout gave the renderer a second definition: bracketed ``Step`` text
-inside a gate's evidence could overwrite the real outer step line.  The 68-step
-fixture below is internally coherent, but its stdout is deliberately shaped so
+inside a gate's evidence could overwrite the real outer step line.  The fixture
+below (one row per step of the live flow) is internally coherent, but its stdout is deliberately shaped so
 that the retired recount sees the measured drift from the issue:
 
     SKIPPED-CONDITION 21 vs 23, INCOMPLETE 0 vs 1,
@@ -45,7 +45,7 @@ EXPECTED = {
     "PASS": 9,
     "PASS_WITH_WAIVERS": 2,
     "FAIL": 7,
-    "NOT_MEASURED": 28,
+    "NOT_MEASURED": 29,
     "NOT_APPLICABLE": 23,
 }
 #: `WAIVED-DEFERRED` is the CONTRACT label `final_report_generate` accepts as
@@ -96,7 +96,7 @@ def _stdout_that_recounts_wrong(audit: dict) -> str:
         "=== Vibe-IC synthetic compliance ===",
         "Project: /synthetic/project",
         "Flow def: /synthetic/flow.yaml",
-        "Steps: 69 total (4/43 executed PASS, 2 DEFERRED via waiver)",
+        f"Steps: {len(audit['steps'])} total (4/43 executed PASS, 2 DEFERRED via waiver)",
         tally,
     ]
     skip_overwrites = 0
@@ -144,8 +144,14 @@ def _render(monkeypatch, tmp_path: Path, audit: dict) -> str:
     return F._render(project, run_audit=True)
 
 
-def test_fixture_is_the_same_69_step_universe_as_the_live_flow():
-    """Real-artifact backing: fixture ids are the shipped flow's ids."""
+def test_fixture_is_the_same_step_universe_as_the_live_flow():
+    """Real-artifact backing: fixture ids are the shipped flow's ids.
+
+    The name no longer carries a count. It said "69" and went red the day the
+    flow grew step 37.3 (#2514, 9ef6a544e..a51ba6220) — correctly, because
+    the fixture had not grown with it; but a number in a test's NAME is one
+    more copy of the flow's size that has to be edited by hand, and this
+    assertion already derives the universe from the yaml."""
     flow_path = require_repo(
         "vibe-ic-marketplace", "plugins", "vibe-ic", "flow",
         "phase1_phase2_phase3.yaml")
@@ -167,7 +173,16 @@ def test_renderer_consumes_json_counts_not_the_drifting_stdout_recount(
     # is left exactly as it was -- SKIPPED-CONDITION still recounts to 21 and
     # the other four buckets still to 0. A row in an overwriting status would
     # have moved the alias cycle and quietly changed what the test measures.
-    assert total == 69
+    #
+    # 69 -> 70 (#2514): canonical step 37.3. Its row is DERIVED, not chosen:
+    # 37.3 `blocks_on: [21]` and step 21 is `NOT_MEASURED/upstream_failed` in
+    # this fixture, so 37.3 is the same -- which is what 37.4 already is here
+    # since R-0915-85 migrated `PASS_VOIDED_BY_DEPENDENCY` into NOT_MEASURED.
+    # That status IS in the overwrite set now, so it moves the alias cycle by
+    # one; every assertion below is over membership (PASS recounts to 0, the
+    # three synthetic classes appear), none over which alias lands where.
+    # step_counts NOT_MEASURED 28 -> 29 is the fixture's own per-step tally.
+    assert total == len(_fixture()["steps"]) == 70
     # THE PREMISE, restated over what the drift now looks like: the nested
     # evidence lines overwrite their outer step, so the stdout recount is not
     # the audit's own tally and must never be what the renderer publishes.
