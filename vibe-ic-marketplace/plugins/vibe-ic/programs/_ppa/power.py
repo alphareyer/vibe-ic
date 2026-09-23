@@ -89,7 +89,7 @@ __all__ = [
     "metric_records", "total_record", "comparable", "compare_total_power",
     "V_A_LOWER", "V_B_LOWER", "V_EQUAL", "V_UNDETERMINED",
     "pdn_ring_dimensions",
-    "POWER_VERDICT_MEASURED", "signoff_record",
+    "POWER_VERDICT_MEASURED", "signoff_record", "emit_signoff_record",
     "verdict_is_backed_by_a_number",
 ]
 
@@ -1372,4 +1372,57 @@ def signoff_record(report: Optional[Dict[str, Any]], *,
         f"{source}: OpenSTA report_power Total row "
         f"{total_row.get('total_raw') or total_w} W over "
         f"{len(rows)} group(s)")
+    return record
+
+
+# The atomic writer the runner uses, imported the way `_ppa/timing.py` already
+# does: `_ppa` is importable on its own (the tests do it), so the dependency is
+# optional and the fallback is a plain write rather than a failure to load.
+try:  # pragma: no cover - exercised by the runner, not by the unit path
+    from _atomic_artefact import write_text as _atomic_write_text
+except Exception:  # pragma: no cover
+    _atomic_write_text = None
+
+
+def emit_signoff_record(project: Path, power_rpt: Path, out: Path,
+                        analysis_mode: str,
+                        notes: List[str]) -> Dict[str, Any]:
+    """Write `reports/phase3/power.json` beside a `report_power` artefact.
+
+    HERE, NOT IN THE RUNNER, and the placement is the point.
+    `test_ppa_runner_extraction_ledger` MEASURED the first version of this
+    function sitting in `phase3_one_shot_runner.py` and named where it
+    belonged:
+
+        New PPA-named function(s) added to phase3_one_shot_runner.py:
+          _emit_power_signoff_json  (line 59648)  -> belongs in _ppa/power.py
+        The runner orchestrates: it calls `_ppa` modules, passes artefact
+        paths and collects return codes.
+
+    It was right, and the reason it was right is the reason this module exists:
+    "what does this power artefact say" has ONE owner, and a second answer
+    written inside the step that produced the artefact is how a report and its
+    companion come to disagree.
+
+    THE RULE IT ENFORCES, asserted rather than assumed: a verdict is a
+    statement ABOUT a number, so the record may not carry one without the
+    other. `signoff_record` makes the failing branch unreachable; if a later
+    edit makes it reachable, the run stops HERE rather than three phases later
+    in a release that cannot be documented, because the file this would write
+    outlives the run that wrote it.
+    """
+    record = signoff_record(read_power_report(power_rpt),
+                            source=str(power_rpt.relative_to(project)),
+                            analysis_mode=analysis_mode)
+    if not verdict_is_backed_by_a_number(record):
+        raise AssertionError(
+            f"{out.name} would state a verdict with no power number: {record!r}")
+    payload = json.dumps(record, indent=2) + "\n"
+    if _atomic_write_text is not None:
+        _atomic_write_text(out, payload)
+    else:  # pragma: no cover - only when _ppa is used standalone
+        Path(out).write_text(payload, encoding="utf-8")
+    if record.get("power_measurement") != STATUS_MEASURED:
+        notes.append("power.json states NOT_MEASURED: "
+                     + str(record.get("power_not_measured_reason") or ""))
     return record

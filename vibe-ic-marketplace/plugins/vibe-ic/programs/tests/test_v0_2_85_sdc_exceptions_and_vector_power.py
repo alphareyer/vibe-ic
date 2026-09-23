@@ -110,10 +110,41 @@ def test_power_emitter_uses_vcd_when_present():
 
 
 def test_power_json_discloses_analysis_mode():
-    i = _P3_SRC.index('"analysis_mode": _mode')
-    window = _P3_SRC[i - 800:i + 400]
-    assert "POWER_ANALYSIS_MODE: vector_vcd" in window
+    """AMENDED, NOT WEAKENED (lane icspm5, 2026-09-23).
+
+    This pinned the source literal `"analysis_mode": _mode` inside the
+    runner's inline power.json dict. That dict is gone: the record is now
+    built by `_ppa.power.signoff_record` and written by
+    `_ppa.power.emit_signoff_record`, because
+    `test_ppa_runner_extraction_ledger` names `_ppa/power.py` as where the
+    logic belongs and the runner as the thing that only orchestrates.
+
+    The QUESTION is unchanged and the answer is now checked one level
+    stronger: the source pin remains (the runner must still resolve the mode
+    from the transcript's own POWER_ANALYSIS_MODE line and hand it on), and
+    a BEHAVIOUR assertion is added beneath it, so a future edit that keeps
+    the literal while dropping the field from the emitted document is caught
+    here rather than by a reader of the file.
+    """
+    # The runner still derives the mode from the transcript and passes it on.
+    i = _P3_SRC.index("_mode = (\"vector_vcd\" if \"POWER_ANALYSIS_MODE: vector_vcd\"")
+    window = _P3_SRC[i - 200:i + 1600]
     assert "vectorless_sdc" in window
+    assert "emit_signoff_record" in window, (
+        "the runner must hand the resolved mode to the module that owns the "
+        "record")
+
+    # And the emitted document actually carries it.
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from _ppa import power as _P
+    for mode in ("vector_vcd", "vectorless_sdc"):
+        rec = _P.signoff_record({"total_row": {"total_w": 1.0,
+                                               "total_raw": "1.00e+00"},
+                                 "rows": []},
+                                source="reports/phase3/power.rpt",
+                                analysis_mode=mode)
+        assert rec["analysis_mode"] == mode, rec
 
 
 # ===========================================================================

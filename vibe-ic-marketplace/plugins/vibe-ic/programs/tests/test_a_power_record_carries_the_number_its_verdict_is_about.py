@@ -169,17 +169,20 @@ def test_the_shipped_record_shape_is_the_one_that_was_refused():
 
 
 # ------------------------------------------------- the emitter the step calls
+#
+# `_ppa/power.py`, NOT the runner. `test_ppa_runner_extraction_ledger` measured
+# the first version of this emitter sitting inside phase3_one_shot_runner.py
+# and named where it belonged; it was right, and these tests follow it there.
 
 def _emit(tmp_path, text, mode="vectorless_sdc"):
-    """Drive `phase3_one_shot_runner`'s own emitter, not just the helper."""
+    """Drive the emitter the step calls, not just the record builder."""
     import json
-    import phase3_one_shot_runner as RUN
     rpt = tmp_path / "reports" / "phase3" / "power.rpt"
     rpt.parent.mkdir(parents=True, exist_ok=True)
     rpt.write_text(text)
     out = rpt.parent / "power.json"
     notes = []
-    rec = RUN._emit_power_signoff_json(tmp_path, rpt, out, mode, notes)
+    rec = P.emit_signoff_record(tmp_path, rpt, out, mode, notes)
     return rec, json.loads(out.read_text()), notes
 
 
@@ -212,14 +215,13 @@ def test_the_step_refuses_rather_than_writes_an_unbacked_verdict(
     that ever returns a PASS with no total must stop the run at the write,
     not leave a durable file stating a judgement nobody measured."""
     import pytest
-    import phase3_one_shot_runner as RUN
     monkeypatch.setattr(
-        RUN._ppa_power, "signoff_record",
+        P, "signoff_record",
         lambda *a, **k: {"verdict": "PASS", "source": "reports/phase3/power.rpt"})
     rpt = tmp_path / "reports" / "phase3" / "power.rpt"
     rpt.parent.mkdir(parents=True, exist_ok=True)
     rpt.write_text(_REPORT)
     out = rpt.parent / "power.json"
     with pytest.raises(AssertionError, match="no power number"):
-        RUN._emit_power_signoff_json(tmp_path, rpt, out, "vectorless_sdc", [])
+        P.emit_signoff_record(tmp_path, rpt, out, "vectorless_sdc", [])
     assert not out.exists(), "a refused record must leave no file behind"
