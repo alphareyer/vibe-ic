@@ -3787,8 +3787,32 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
                 out, _SUBSTANTIVE_STDOUT_TOKEN):
             pass
         elif verdict == "PASS" and _json_report_declares_nonverdict(report):
+            # R-0915-119's GUARD NEEDS THE ENUMERATION, AND THIS CALL WITHHELD
+            # IT. `_guard_structural` accepts NOT_APPLICABLE_BY_STRUCTURE only
+            # when the record carries a valid structural-absence enumeration,
+            # and fail-closes to EXECUTION_ERROR without one -- deliberately,
+            # so a checker cannot reach the decided state by writing a word.
+            # The rc-2 sibling twenty lines up already hands it
+            # `evidence={_sa.EVIDENCE_KEY: _sa.evidence_of(report)}`; this rc-0
+            # branch passed only `explicit=`, so the guard was asked to honour
+            # a token with no evidence behind it and correctly refused.
+            #
+            # MEASURED on spm run22 (lane icspm5, plugin 182083d3d), step 2's
+            # `internal_vs_external_timing_check`: exit 0, stdout empty, its
+            # own report saying verdict VACUOUS_PASS, reason_class
+            # NOT_APPLICABLE_BY_STRUCTURE, structural_absence {scanned 13,
+            # found 0}. The ledger row read verdict INCOMPLETE / reason_class
+            # EXECUTION_ERROR and step 2 read NOT_MEASURED /
+            # partial_population -- "the gate reports its input was applicable
+            # and was NOT examined" over a checker that had enumerated
+            # thirteen containers and said so. With the evidence handed over,
+            # the same call returns NOT_APPLICABLE_BY_STRUCTURE.
+            #
+            # The argument is copied from the rc-2 site rather than rephrased,
+            # so the two exit codes cannot drift apart again.
             reason_class = _reason_taxonomy.infer_nonverdict_reason(
                 verdict="VACUOUS_PASS", message=report_message,
+                evidence={_sa.EVIDENCE_KEY: _sa.evidence_of(report)},
                 explicit=report_cls)
             # vibe-ic#901 — the ledger row is the GATE-granular verdict, and a
             # gate that wrote `{"verdict": "NOT_APPLICABLE"}` into the report
