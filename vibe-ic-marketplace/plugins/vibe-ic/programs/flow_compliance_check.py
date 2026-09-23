@@ -3339,6 +3339,39 @@ def _skips_that_do_not_speak_for_the_step(
     return [], list(skip_hints)
 
 
+def _hint_command(hint: str, prefix: str) -> str:
+    """The command a typed hint names, with any trailing `[verdict=...]` tail
+    removed. Both the SKIP and the RAN hint for one clause carry the same
+    command, and that is the only handle they share."""
+    body = hint[len(prefix):] if hint.startswith(prefix) else hint
+    cut = body.rfind(" [verdict=")
+    return (body[:cut] if cut >= 0 else body).strip()
+
+
+def _ran_hints_minus_demoted(ran_hints: List[str],
+                             demoted: List[str]) -> List[str]:
+    """Drop the RAN hint of every clause whose skip was demoted.
+
+    MEASURED by the round-2 review, 2026-09-23. The demotion removed the
+    clause's `__SKIP_HINT__` and left the `__RAN_HINT__` that the advisory
+    branch appends for the SAME clause a few lines earlier. `ran_hints` is the
+    denominator for "did any clause examine anything", so the demoted clause
+    went on counting as a clause that examined the design: the vacuous and
+    json-vacuous branches were bypassed, the step fell through to the final
+    `else` as a bare PASS with NO disclosure at all, and it was added to the
+    executed-PASS count.
+
+    A clause that declared itself NOT APPLICABLE examined nothing. Removing it
+    from the tier is only half the statement; it must also leave the
+    numerator, or the step claims an examination that never happened.
+    """
+    if not demoted:
+        return ran_hints
+    gone = {_hint_command(h, _SKIP_HINT_PREFIX) for h in demoted}
+    return [r for r in ran_hints
+            if _hint_command(r, _RAN_HINT_PREFIX) not in gone]
+
+
 def _demoted_skip_disclosures(demoted: List[str]) -> List[str]:
     """The row lines for a demoted skip. It is TRUE and a reader must see it.
 
@@ -15621,9 +15654,16 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # "every spec was resolved against this step's own record", never
             # "every declared output is there". MEASURED by the pre-landing
             # review, 2026-09-23.
-            "n_satisfied": sum(1 for d in _bind_specs
-                               if d.get("satisfied")
-                               and d.get("mode") == "step_attributed"),
+            # SATISFACTION, WHICH IS A DIFFERENT QUESTION FROM MODE -- and
+            # the mode belongs to the OTHER field. Counting only
+            # `step_attributed` specs here made every run without a step-write
+            # ledger (which is every benchmark cell) publish 0 satisfied
+            # outputs for a step whose outputs are all on disk. MEASURED by
+            # the round-2 review, 2026-09-23. `n_step_attributed` already
+            # answers "resolved against THIS step's own record"; the delivery
+            # predicate requires BOTH, so nothing is loosened by letting this
+            # field mean what its name says.
+            "n_satisfied": sum(1 for d in _bind_specs if d.get("satisfied")),
             "n_project_glob": _n_glob, "source": _src,
             # `codes` is the machine handle: a closed vocabulary (see
             # `_bind_detail`) that says WHICH degradation `mixed` is made of.
@@ -16069,6 +16109,9 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # clause having said it examined anything.
         ran_hints = [r for r in reasons
                      if r.startswith(_RAN_HINT_PREFIX)]
+        # A DEMOTED CLAUSE IS NOT AN EXAMINATION. The demotion above took the
+        # clause out of the tier; this takes it out of the numerator too.
+        ran_hints = _ran_hints_minus_demoted(ran_hints, _demoted_skips)
         # vibe-ic#901 - the NUMERATOR contributed by the structured channel,
         # kept apart from the legacy bucket above so it cannot alter any tier
         # the legacy bucket already decides.

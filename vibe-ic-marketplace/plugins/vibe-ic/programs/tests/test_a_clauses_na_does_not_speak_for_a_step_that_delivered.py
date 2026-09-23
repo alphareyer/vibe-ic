@@ -223,3 +223,154 @@ def test_the_tier_chain_sees_the_demotion_not_a_bypass():
                    "later tiers still see the skip hints")
     assert "skip_hints, _demoted_skips = " in src[i - 200:j], (
         "the demotion must rebind skip_hints, not merely compute a boolean")
+
+
+# ===========================================================================
+# ROUND-2 REVIEW, 2026-09-23 — through the REAL entry point this time.
+#
+# Round 1's acceptance drove two pure functions and asserted the branch order
+# by reading source. That could not see what the reviewer saw: the demotion
+# removes the clause's SKIP hint and leaves the RAN hint the advisory branch
+# appended for the SAME clause, so `ran_hints` still counts it as a clause
+# that examined something. These drive `check_step` itself.
+# ===========================================================================
+
+import json as _json  # noqa: E402
+
+_T_NOT_MEASURED = F._T.Verdict.NOT_MEASURED.value
+import textwrap as _tw  # noqa: E402
+
+
+def _gate_program(tmp_path, name, body):
+    """A real program on PROGRAMS_DIR that check_step will actually invoke."""
+    p = PROGRAMS / f"{name}.py"
+    p.write_text(_tw.dedent(body))
+    return p
+
+
+def _project(tmp_path, sid=None):
+    (tmp_path / "phase2" / "stage2" / "constraints").mkdir(parents=True,
+                                                           exist_ok=True)
+    (tmp_path / "phase2" / "stage2" / "constraints" / "spm.sdc").write_text(
+        "create_clock -period 10 [get_ports clk]\n")
+    (tmp_path / "phase2" / "stage2" / "constraints"
+     / "pvt_matrix.json").write_text('{"corners": ["tt"]}\n')
+    if sid:
+        # THE STEP-WRITE LEDGER, which is what makes the outputs
+        # STEP-ATTRIBUTED rather than merely present. Without it the step is
+        # not "delivered" and the demotion correctly never fires -- so the
+        # round-2 input needs it, and building it here is the difference
+        # between exercising the defect and exercising its guard.
+        folder = f"phase2/stage2/{sid}_round2_fixture"
+        d = tmp_path / "steps" / folder
+        d.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "steps" / "index.json").write_text(_json.dumps(
+            {"steps": [{"id": sid, "folder": folder}]}))
+        (d / "written.json").write_text(_json.dumps({
+            "id": sid,
+            "produced": [
+                {"spec": "phase2/stage2/constraints/*.sdc",
+                 "rel": "phase2/stage2/constraints/spm.sdc"},
+                {"spec": "phase2/stage2/constraints/pvt_matrix.json",
+                 "rel": "phase2/stage2/constraints/pvt_matrix.json"},
+            ]}))
+    return tmp_path
+
+
+#: The reviewer's input, verbatim in shape: declared outputs present and
+#: satisfied; one ADVISORY clause self-reporting SKIP / DESIGN_DECLARED_NA;
+#: one program clause exiting 0 with a --json report declaring NOT_APPLICABLE.
+def _step(g1, g2):
+    return {
+        "id": "T7",
+        "name": "round-2 fixture",
+        "stage": "stage2",
+        "required_outputs": ["phase2/stage2/constraints/*.sdc",
+                             "phase2/stage2/constraints/pvt_matrix.json"],
+        "gate": {"all_of": [
+            {"advisory_program_exit_zero": {
+                "command": f"{g1} . --json reports/t7_advisory.json",
+                "advisory_reason": "round-2 fixture: a declared-N/A clause"}},
+            {"program_exit_zero": f"{g2} . --json reports/t7.json"},
+        ]},
+    }
+
+
+def test_a_demoted_na_clause_does_not_count_as_examination(tmp_path):
+    """THE ROUND-2 HIGH.
+
+    The demoted clause examined NOTHING -- it declared itself N/A -- and the
+    only other clause is vacuous. A step where nothing was examined must not
+    be published as an executed PASS, and it must not lose the disclosure
+    either. On the round-2 tip the RAN hint for the demoted clause survives,
+    `ran_hints` is non-empty, the vacuous branches are bypassed, and the step
+    lands in the final `else` as a bare PASS with no disclosure at all."""
+    # The STRUCTURED channel, which is what `_advisory_execution_record`
+    # reads: a --json report whose verdict is SKIP and whose reason_class is
+    # DESIGN_DECLARED_NA. Printing the word alone is prose and is not read.
+    g1 = _gate_program(tmp_path, "_t7_advisory_na", '''
+        import json, sys
+        i = sys.argv.index("--json")
+        open(sys.argv[i + 1], "w").write(json.dumps(
+            {"verdict": "SKIP", "reason_class": "DESIGN_DECLARED_NA",
+             "examined": 0,
+             "message": "no macro in this design; nothing to contract-check"}))
+        print("SKIP: nothing here is applicable to this design")
+        sys.exit(0)
+        ''')
+    g2 = _gate_program(tmp_path, "_t7_vacuous", '''
+        import json, sys
+        i = sys.argv.index("--json")
+        open(sys.argv[i + 1], "w").write(json.dumps(
+            {"verdict": "NOT_APPLICABLE", "examined": 0,
+             "reason_class": "DESIGN_DECLARED_NA"}))
+        print("VACUOUS_PASS: examined nothing (reason: no_subject)")
+        sys.exit(0)
+        ''')
+    try:
+        (tmp_path / "reports").mkdir(exist_ok=True)
+        r = F.check_step(_project(tmp_path, "T7"),
+                         _step(g1.stem, g2.stem), {}, None)
+        joined = " ".join(r.reasons)
+
+        # THE DENOMINATOR IS THE ASSERTION. On the round-2 tip this step read
+        #   PASS | partial_vacuity | "1 of 2 gate clause(s) examined nothing"
+        # because the demoted N/A clause kept its RAN hint and so counted as a
+        # clause that examined the design. Only ONE clause ran, and it
+        # examined nothing, so the honest reading is
+        #   NOT_MEASURED | vacuity | "1 of 1 gate clause(s) that ran here".
+        assert r.status == _T_NOT_MEASURED, (
+            f"a step where nothing was examined was published {r.status}; "
+            f"reasons={r.reasons}")
+        assert "1 of 1 gate clause(s) that ran here" in joined, joined
+        assert "PARTIALLY-VACUOUS" not in joined, (
+            "the demoted clause was counted in the denominator: " + joined)
+        # and the skip is still disclosed, because it is true.
+        assert "DISCLOSED-SKIP" in joined, r.reasons
+    finally:
+        g1.unlink(missing_ok=True)
+        g2.unlink(missing_ok=True)
+
+
+def test_n_satisfied_counts_satisfaction_not_the_resolution_mode(tmp_path):
+    """ROUND-2 LOW. `n_satisfied` counted only step_attributed specs, so every
+    run without a step-write ledger -- which is every benchmark cell --
+    published 0 satisfied outputs for a step whose outputs are all present."""
+    g2 = _gate_program(tmp_path, "_t7_ok", '''
+        import sys
+        print("PASS")
+        sys.exit(0)
+        ''')
+    try:
+        step = {"id": "T7b", "name": "no-ledger", "stage": "stage2",
+                "required_outputs": ["phase2/stage2/constraints/*.sdc",
+                                     "phase2/stage2/constraints/pvt_matrix.json"],
+                "gate": {"program_exit_zero": f"{g2.stem} ."}}
+        r = F.check_step(_project(tmp_path), step, {}, None)
+        b = r.output_binding or {}
+        assert b.get("n_specs") == 2, b
+        assert b.get("n_satisfied") == 2, (
+            "both declared outputs are on disk; a run with no write-ledger "
+            f"must still report them satisfied: {b}")
+    finally:
+        g2.unlink(missing_ok=True)
