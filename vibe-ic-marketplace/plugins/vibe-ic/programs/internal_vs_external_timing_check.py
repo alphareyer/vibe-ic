@@ -662,6 +662,52 @@ def main() -> int:
             print(f"VACUOUS_PASS: {msg}")
         return 0
 
+    # R-0915-156 — THE QUESTION'S OWN DECLARATION IS MISSING: INCOMPLETE, NOT
+    # FAIL. Reaching here, the L8 carries protocol timing the schema cannot
+    # clear (a non-empty protocol container, an undeclared key, or a TX_IBT /
+    # BR_MIN constant). Whether the half-duplex RX/TX split applies to it is
+    # the design's own `L2_FRS.json protocol_overview.half_duplex`. With that
+    # declaration absent the gate has not read the input it needs: that is
+    # "cannot decide", and a FAIL would claim a defect nobody measured. Still
+    # fail-closed: never NABS, never PASS, never green. Measured on the corpus
+    # (101 real L8s): 27 protocol designs main certified NABS by name-token
+    # luck, and 4 it FAILed, read this.
+    if half_duplex_l2 is None:
+        l2_path = "phase1/generated_docs/L2_FRS.json"
+        msg = ("INCOMPLETE: internal_vs_external_timing: the L8 carries "
+               "protocol timing, and whether the half-duplex RX/TX split "
+               f"applies to it is undeclared -- {l2_path} "
+               "protocol_overview.half_duplex is absent. Declare it: false -> "
+               "the half-duplex question does not apply (NOT_APPLICABLE, basis "
+               "= the declaration); true -> the RX/TX timing split is checked "
+               "(PASS/FAIL on the numbers).")
+        if args.json:
+            txt = json.dumps({
+                "source_file": waveform_path,
+                "total_findings": 0,
+                "errors": 0,
+                "findings": [],
+                "verdict": "INCOMPLETE",
+                # The declaration this check needs is an UPSTREAM (Phase-1)
+                # output that was not produced: the taxonomy's
+                # BLOCKED_BY_UPSTREAM, an INCOMPLETE class (never skip-eligible).
+                "reason_class": "BLOCKED_BY_UPSTREAM",
+                "skip_kind": "missing-upstream-output",
+                "missing_declaration": {
+                    "path": l2_path, "key": "protocol_overview.half_duplex",
+                    "if_false": "NOT_APPLICABLE (basis: the declaration)",
+                    "if_true": "RX/TX timing split checked (PASS/FAIL)"},
+                "reason": msg,
+            }, indent=2)
+            if args.json == "-":
+                print(txt)
+            else:
+                Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.json).write_text(txt + "\n")
+        else:
+            print(msg)
+        return 2
+
     findings = check(waveform, rtl_constants)
     errors = [f for f in findings if f.severity == "ERROR"]
 
