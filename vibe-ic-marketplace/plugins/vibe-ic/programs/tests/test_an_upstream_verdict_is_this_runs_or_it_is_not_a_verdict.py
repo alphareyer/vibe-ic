@@ -209,3 +209,106 @@ def test_the_exemption_names_only_the_wrappers_own_keys():
         "the no-clobber exemption is spelled differently; check it still names only the "
         "keys this wrapper is the sole author of")
     assert "if k in _own_keys" in src
+
+
+# ── an upstream blockage is not yet scoped to the artefact, and why ──────────
+
+def test_the_presence_check_understands_the_flows_own_spec_shapes(tmp_path):
+    """`_artefact_present` is correct and is NOT what decides an excuse.
+
+    R-0915-160 asks that an upstream blockage excuse this step only when it is ABOUT the
+    artefact this step needed. Nothing on disk at gate time says which artefact an upstream
+    verdict is about -- `reports/metrics/<sid>.json` carries scalars, and this run's compliance
+    report is not written until after every step. "Did the step produce it" looked like a proxy
+    and the tree refuted it: a GDS PRESENT but carrying no geometry with step 37 FAIL must
+    excuse (four arms in `test_a_producers_stated_refusal_is_not_a_documentation_defect` hold
+    that), while `power.json` PRESENT and carrying no number by design with step 33
+    NOT_MEASURED must not. Both are "blocking tier + artefact present".
+
+    So the helper stays, correct and unused by the classification, and the reason is recorded
+    in `upstream_blockage_now`. This arm pins the helper's own behaviour and the fact that the
+    classification does not consult it -- so when the producer change that makes the rule
+    implementable lands, this is where it starts.
+    """
+    gds = tmp_path / "phase3/stage4/gds"
+    gds.mkdir(parents=True)
+    (gds / "zzdie.gds").write_bytes(b"\x00" * 64)
+    assert RDC._artefact_present(tmp_path, "phase3/stage4/gds/*.gds") is True
+    assert RDC._artefact_present(tmp_path, "nope/*.gds") is False
+    assert RDC._artefact_present(tmp_path,
+                                 "nope.json OR phase3/stage4/gds/zzdie.gds") is True
+    assert RDC._artefact_present(tmp_path, "") is False
+
+    import inspect
+    src = inspect.getsource(RDC.upstream_blockage_now)
+    assert "_artefact_present" not in src, (
+        "the excuse is being scoped by presence, which reverses four accepted arms")
+    assert "MEASURED refusal" in src, (
+        "the reason the excuse is not scoped must stay written where the rule would go")
+
+
+# ── the row a dependent step sees must not depend on the worker pool ─────────
+
+def test_the_steps_that_read_another_steps_verdict_are_derived_not_tabled():
+    """The set comes from the tree: a new such program is picked up without an edit."""
+    import yaml as _yaml
+    flow = _yaml.safe_load(
+        (Path(__file__).resolve().parents[2] / "flow"
+         / "phase1_phase2_phase3.yaml").read_text())
+    steps = flow.get("steps") or []
+
+    readers = FCC._reads_another_steps_verdict()
+    assert "release_docs_check" in readers, sorted(readers)
+    # the EMITTER is not a dependent reader of its own rows
+    assert "flow_compliance_check" not in readers
+    for wrapper in ("stage2_compliance", "stage3_compliance"):
+        assert wrapper not in readers, wrapper
+
+    dependent = FCC.steps_that_read_another_steps_verdict(steps)
+    assert dependent == ["37.5ip", "37.5ic"], dependent
+    assert len(dependent) < len(steps) / 4, (
+        f"{len(dependent)} of {len(steps)} steps in the second wave would cost real "
+        f"concurrency; the point of deriving the set is that it is small")
+
+
+def test_the_dependent_steps_are_evaluated_after_every_other_step():
+    """Pinned against the scheduler's source: two waves, dependent ones last.
+
+    A behaviour arm here would need a full 70-step audit twice; what must hold is the
+    ORDER, and that is a property of this block.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    src = textwrap.dedent(inspect.getsource(FCC.main))
+    assert "steps_that_read_another_steps_verdict" in src, (
+        "the parallel path no longer asks which steps depend on another's row")
+    assert "_wave1" in src and "_wave2" in src, src[:200]
+
+    # and the results are rebuilt in the ORIGINAL order, so the waves are invisible
+    assert "for _step in _eval_steps:" in src and "_by_id[str(_step.get(\"id\"))]" in src, (
+        "results are appended per wave, so the parallel path no longer produces the same "
+        "list as the sequential one")
+
+
+def test_a_dependent_step_reads_a_row_written_before_it_runs(tmp_path, mine):
+    """The property the waves buy, at the level the reader cares about.
+
+    Wave 1 emits every other step's row; wave 2 then evaluates the dependent ones. So by the
+    time `release_docs_check` runs, the rows for the steps it reads are on disk and carry THIS
+    invocation -- which is exactly what `step_verdict_now` requires. Here the upstream rows are
+    written first, as wave 1 does, and the read is the one the gate performs.
+    """
+    for sid in ("23", "33", "37", "37.4"):
+        SM.emit(tmp_path, sid, {"step_status": "PASS", "invocation": mine})
+    for sid in ("23", "33", "37", "37.4"):
+        status, why = RDC.step_verdict_now(tmp_path, sid)
+        assert (status, why) == ("PASS", ""), (sid, status, why)
+
+    # and with wave 1's rows NOT yet written -- the pre-fix parallel race -- every one of
+    # them is UNREADABLE rather than silently passing
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    for sid in ("23", "33", "37", "37.4"):
+        assert RDC.step_verdict_now(empty, sid)[0] == RDC._VERDICT_UNREADABLE, sid

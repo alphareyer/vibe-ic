@@ -1465,6 +1465,33 @@ def _metrics_row(project: Path, sid: str) -> Tuple[Optional[dict], str, str]:
     return doc, sid_n, ""
 
 
+def _artefact_present(project: Path, rel: str) -> bool:
+    """Did the run leave this declared artefact on disk?
+
+    NOT USED TO DECIDE AN EXCUSE, and the reason is measured -- see the note on
+    `upstream_blockage_now`. Kept because it is the correct spec-shape reader and the question
+    "did the step produce it at all" is one a reader of this gate's record will want.
+
+    Glob- and `A OR B`-aware, because that is the shape `required_outputs` uses, and
+    permissive in the same direction as `flow_declared_producer_run._glob_exists`: a false NO
+    grants an excuse that was not earned, so anything that matches counts as produced.
+    """
+    if not rel:
+        return False
+    for alt in (a.strip() for a in str(rel).split(" OR ")):
+        if not alt:
+            continue
+        if any(ch in alt for ch in "*?["):
+            try:
+                if next(iter(Path(project).glob(alt)), None) is not None:
+                    return True
+            except (OSError, ValueError):
+                continue
+        elif (Path(project) / alt).exists():
+            return True
+    return False
+
+
 def step_verdict_now(project: Path, sid: str) -> Tuple[str, str]:
     """The step's OWN published verdict IN THIS RUN, or why it cannot be read.
 
@@ -1580,6 +1607,34 @@ def upstream_blockage_now(project: Path, release: str) -> dict:
         named.append({"rule": "METRICS_UNREADABLE", "path": PRODUCER_METRICS_REL,
                       "detail": f"{exc.__class__.__name__}: {exc}"})
 
+    # WHY THE EXCUSE IS NOT SCOPED TO THE ARTEFACT, though it should be. R-0915-160, and
+    # this is a MEASURED refusal rather than an omission.
+    #
+    # The ruling asks that an upstream step excuse this one only when its blockage is ABOUT
+    # the artefact this step needed -- i.e. when the upstream verdict NAMES that artefact as
+    # missing or not produced. There is nothing on disk at gate time that says which artefact
+    # an upstream verdict is about: `reports/metrics/<sid>.json` carries SCALARS, and this
+    # run's compliance report is not written until after every step.
+    #
+    # I tried "did the upstream step PRODUCE the artefact" as a proxy, and the tree refuted it.
+    # Two shapes are indistinguishable by presence, and they need OPPOSITE answers:
+    #
+    #   step 37 FAIL, `phase3/stage4/gds/*.gds` PRESENT but carrying no geometry
+    #       -> the step's failure IS about that artefact; it must excuse, and
+    #          `test_a_step_that_published_not_measured_is_a_blockage` and three of its
+    #          neighbours hold exactly that.
+    #   step 33 NOT_MEASURED for "no power budget declared", `reports/phase3/power.json`
+    #   PRESENT and carrying no number BY DESIGN (`eda_report_audit`: "it carries no number
+    #   of its own")
+    #       -> the complaint is about that file's CONTENT, which R-0915-149 already ruled is
+    #          this step's own defect, so it must NOT excuse.
+    #
+    # Both are "blocking tier + artefact present". Only the upstream verdict's REASON
+    # separates them, and no step publishes one per artefact. Scoping the excuse therefore
+    # needs a producer change first -- each step recording which of its declared outputs its
+    # own gate found missing or unusable -- and that is a separate ruling. Reported rather
+    # than approximated: a proxy that reverses four accepted arms is not a narrower rule, it
+    # is a different and wrong one.
     blocking: dict = {}
     passing: dict = {}
     unreadable: dict = {}

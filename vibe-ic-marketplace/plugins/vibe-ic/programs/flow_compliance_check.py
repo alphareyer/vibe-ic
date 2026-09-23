@@ -14551,6 +14551,59 @@ def _waiver_step_name_mismatch(waiver: Dict[str, Any],
 # fork a gate subprocess, so we leave a core of headroom. `VIBE_IC_COMPLIANCE_
 # WORKERS` overrides (1 = the sequential fallback), mirroring the env-driven
 # `VIBE_IC_GATE_TIMEOUT_S` knob.
+#: Programs that read ANOTHER STEP's published verdict row (`reports/metrics/<sid>.json`).
+#: DERIVED from the tree, never tabled: a program is one of these if its source reads that
+#: directory and the step-status key. Today that is `release_docs_check` alone, and a new one
+#: is picked up without this line changing.
+def _reads_another_steps_verdict() -> "frozenset":
+    names = set()
+    _self = Path(__file__).stem
+    try:
+        for _f in sorted(PROGRAMS_DIR.glob("*.py")):
+            try:
+                _t = _f.read_text(errors="replace")
+            except OSError:                                # pragma: no cover
+                continue
+            # THE WRITER IS NOT A DEPENDENT READER. This module EMITS those rows, and its
+            # only read of the directory is `_emit_step_metrics`' no-clobber probe of the
+            # step it is emitting for -- never another step's. Without this exclusion the
+            # predicate named itself, and steps 2 and 14 (whose gates invoke it) were
+            # pushed into the second wave for no reason. Its thin wrappers
+            # (`stageN_compliance`) are excluded with it, for the same reason.
+            if _f.stem == _self:
+                continue
+            if re.search(r"^from\s+" + re.escape(_self) + r"\s+import\s+main\b",
+                         _t, re.M):
+                continue
+            if "reports/metrics" in _t and ("step_status" in _t
+                                            or "_STEP_STATUS" in _t):
+                names.add(_f.stem)
+    except OSError:                                        # pragma: no cover
+        return frozenset()
+    return frozenset(names)
+
+
+def steps_that_read_another_steps_verdict(steps: "List[Dict[str, Any]]") -> "List[str]":
+    """The step ids whose own gate invokes such a program. Public so a test can drive it.
+
+    These must be evaluated AFTER every other step, or what they see depends on the worker
+    pool. MEASURED on the shipped flow: exactly two, 37.5ip and 37.5ic, both through
+    `release_docs_check` -- so the other 68 keep full concurrency and this costs nothing.
+    """
+    readers = _reads_another_steps_verdict()
+    if not readers:
+        return []
+    out = []
+    for st in steps:
+        try:
+            names = {_gate_name(c) for c in _declared_gate_commands(st.get("gate") or {})}
+        except Exception:                                  # pragma: no cover
+            continue
+        if names & readers:
+            out.append(str(st.get("id")))
+    return out
+
+
 def _compliance_workers(n_steps: int) -> int:
     import os
     if n_steps <= 1:
@@ -19758,23 +19811,42 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Independent read-only gates → evaluate concurrently; collect the
         # futures in SUBMISSION order so `results` stays byte-for-byte the
         # same list the sequential path produced (see `_compliance_workers`).
-        with ThreadPoolExecutor(max_workers=_workers) as _ex:
-            _futs = [
-                _ex.submit(check_step, project, step, waivers,
-                           skip_analog=skip_analog,
-                           skip_hardware=skip_hardware,
-                           strict_audit_evidence=strict_audit_evidence,
-                           strict_step_binding=strict_step_binding)
-                for step in _eval_steps
-            ]
-            # THE SAME EMIT ON BOTH BRANCHES. A metrics row that appears only
-            # when the tree happens to run single-threaded is a row nobody can
-            # rely on for a run-to-run diff, and the branch taken is decided by
-            # `_compliance_workers` from the machine, not from the design.
-            for _step, _fut in zip(_eval_steps, _futs):
-                _r = _fut.result()
-                _emit_step_metrics(project, _step, _r)
-                results.append(_r)
+        #
+        # IN TWO WAVES, because not every gate IS independent. R-0915-160. A step whose gate
+        # reads ANOTHER step's published verdict row sees whatever the pool happened to have
+        # finished, so the sequential and parallel paths disagreed about its row -- which is
+        # the identity contract the comment above claims. MEASURED on the shipped flow: the
+        # dependent set is exactly two steps, 37.5ip and 37.5ic, both through
+        # `release_docs_check`, so 68 steps keep full concurrency and the second wave is two
+        # steps wide. `results` is rebuilt in the ORIGINAL order either way, so no consumer
+        # can tell which wave a row came from.
+        _dependent = set(steps_that_read_another_steps_verdict(_eval_steps))
+        _wave1 = [st for st in _eval_steps if str(st.get("id")) not in _dependent]
+        _wave2 = [st for st in _eval_steps if str(st.get("id")) in _dependent]
+        _by_id: Dict[str, Any] = {}
+        for _wave in (_wave1, _wave2):
+            if not _wave:
+                continue
+            with ThreadPoolExecutor(
+                    max_workers=max(1, min(_workers, len(_wave)))) as _ex:
+                _futs = [
+                    _ex.submit(check_step, project, step, waivers,
+                               skip_analog=skip_analog,
+                               skip_hardware=skip_hardware,
+                               strict_audit_evidence=strict_audit_evidence,
+                               strict_step_binding=strict_step_binding)
+                    for step in _wave
+                ]
+                # THE SAME EMIT ON BOTH BRANCHES. A metrics row that appears only
+                # when the tree happens to run single-threaded is a row nobody can
+                # rely on for a run-to-run diff, and the branch taken is decided by
+                # `_compliance_workers` from the machine, not from the design.
+                for _step, _fut in zip(_wave, _futs):
+                    _r = _fut.result()
+                    _emit_step_metrics(project, _step, _r)
+                    _by_id[str(_step.get("id"))] = _r
+        for _step in _eval_steps:
+            results.append(_by_id[str(_step.get("id"))])
 
     # v0.3.5 — ORGANIC #502/#503: cascade attribution AFTER all step
     # verdicts are final (waiver conversions included): waiver chains
