@@ -40,7 +40,6 @@ of this branch, 21 more times -- and a bare class-wide assertion would simply sh
 """
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
@@ -50,9 +49,23 @@ PLUGIN = Path(__file__).resolve().parents[2]
 PROGRAMS = PLUGIN / "programs"
 sys.path.insert(0, str(PROGRAMS))
 
-#: The flags a gate clause writes its own verdict document through. Kept equal to
-#: `flow_compliance_check._GATE_RECEIPT_FLAGS`, asserted below.
-_RECEIPT_FLAG_RE = re.compile(r"--(?:json|report)\s+(\S+)")
+import flow_compliance_check as FCC                          # noqa: E402
+
+#: THE CLASS IS THE AUDIT'S OWN PREDICATE, NOT A REGEX OF MY OWN.
+#:
+#: This file previously derived membership from `--(?:json|report)`, which is a
+#: WIDER set than the rule it is guarding. The audit's self-certified refusal is
+#: `_declared_self_written = set(outputs) & _gate_json_targets(step)` -- `--json`
+#: ONLY -- and the two disagreed on exactly one entry, which is why defining the
+#: class twice is the defect and not a detail: step 31's
+#: `reports/phase3/perc_sweep.json` is WRITTEN by its declared producer
+#: `perc_corpus_sweep` and only READ by the gate's `sweep_reach_check --report`.
+#: The regex called that a self-certified member and the failure text would have
+#: demanded "a real producer" for a document that already has one.
+#:
+#: So membership is taken from `flow_compliance_check._gate_json_targets`, the
+#: function the audit itself calls. A `--report` a gate READS is an input, and an
+#: input is not a verdict target.
 
 
 def _flow() -> dict:
@@ -80,18 +93,21 @@ def _clause_commands(gate) -> list:
 
 
 def steps_declaring_their_gates_verdict_target(steps) -> dict:
-    """``{step id: [declared outputs that are its own gate's receipt target]}``."""
+    """``{step id: [declared outputs that are its own gate's --json target]}``.
+
+    Asks `flow_compliance_check._gate_json_targets` — the audit's own function —
+    rather than re-deriving the set here. A guard that computes the population a
+    second way is a guard that can disagree with the rule it guards, and this one
+    did.
+    """
     out: dict = {}
     for st in steps:
         if not isinstance(st, dict):
             continue
-        declared = [str(x) for x in (st.get("required_outputs") or [])]
+        declared = set(str(x) for x in (st.get("required_outputs") or []))
         if not declared:
             continue
-        targets: set = set()
-        for cmd in _clause_commands(st.get("gate")):
-            targets.update(_RECEIPT_FLAG_RE.findall(cmd))
-        own = sorted(p for p in declared if p in targets)
+        own = sorted(declared & FCC._gate_json_targets(st))
         if own:
             out[str(st.get("id"))] = own
     return out
@@ -129,10 +145,14 @@ _RESIDUAL = {
     "26.5ic": ["reports/phase3/die_finishing.json"],
     "28": ["reports/phase2/gates/perc_signoff.json"],
     "29": ["reports/phase2/gates/post_layout_sim.json"],
+    # `reports/phase3/perc_sweep.json` is NOT here, and the reason is the point of
+    # this file: `perc_corpus_sweep` -- step 31's declared producer -- WRITES it
+    # (producer_command), and the gate's `sweep_reach_check --report` only READS
+    # it. It is a producer's document that a gate consults, which is exactly the
+    # shape R-0915-141 asks for, not a violation of it.
     "31": ["reports/phase2/gates/erc_density.json",
            "reports/phase3/drc_signoff.json",
-           "reports/phase3/lvs.json",
-           "reports/phase3/perc_sweep.json"],
+           "reports/phase3/lvs.json"],
     "37": ["reports/phase3/gates/stage3_compliance.json"],
     "37.5ic": ["reports/phase3/tapeout_precheck.json"],
     "37.5ip": ["reports/phase3/digital_hardmacro.json"],
@@ -229,17 +249,38 @@ def test_a_new_member_of_the_class_is_named():
     assert viol.get("zzsplit") == ["reports/audit/zzsplit.json"], viol.get("zzsplit")
 
 
-def test_the_receipt_flags_match_the_consumer():
-    import flow_compliance_check as FCC
-    for flag in FCC._GATE_RECEIPT_FLAGS:
-        assert _RECEIPT_FLAG_RE.match(f"{flag} some/path.json"), flag
+def test_the_class_is_the_predicate_the_audit_uses():
+    """TWO CONSUMERS, AND THEY ARE NOT THE SAME SET — which is why this file now
+    names which one it means.
+
+    `_gate_json_targets` (`--json`) decides SELF-CERTIFIED EVIDENCE: is this
+    declared output the document the gate writes its verdict to? That is the rule
+    R-0915-141 is about and the one this ratchet guards.
+
+    `_GATE_RECEIPT_FLAGS` (`--json` AND `--report`) decides RECEIPT REDIRECTION:
+    which paths must be moved to scratch so the audit cannot overwrite the run's
+    documents. That set is deliberately wider, because a gate that READS its
+    target must not have it overwritten either.
+
+    Conflating them put step 31's `perc_sweep.json` -- a producer's document the
+    gate only reads -- into a class that demands it be given a producer.
+    """
+    assert "--json" in FCC._GATE_RECEIPT_FLAGS
+    assert "--report" in FCC._GATE_RECEIPT_FLAGS, (
+        "the redirect no longer covers --report; a gate that reads its target "
+        "through that flag can now have the run's document overwritten")
+    # the narrower set really is narrower on the shipped flow: some step names a
+    # --report target it declares, and that step must NOT be a member here.
+    by_json = steps_declaring_their_gates_verdict_target(_flow()["steps"])
+    assert "reports/phase3/perc_sweep.json" not in by_json.get("31", []), (
+        "perc_sweep.json is back in the self-certified class; it is written by "
+        "step 31's declared producer and only read by its gate")
 
 
 def test_the_split_makes_the_audit_machinery_unreachable_for_step_36():
     """THE POINT OF THE SPLIT, at the audit's own predicate:
     `_declared_self_written = set(outputs) & _gate_json_targets(step)`. Empty for
     step 36 now, so no criterion of the self-certified refusal can reach it."""
-    import flow_compliance_check as FCC
     by_id = {str(s.get("id")): s for s in _flow()["steps"] if isinstance(s, dict)}
     for sid in ("36", "38"):
         step = by_id[sid]
@@ -259,7 +300,6 @@ def _refusal_is_reachable(project: Path, step: dict) -> bool:
     arm cannot drift from the module: an empty `_declared_self_written` is the
     whole point of the split -- no later condition can put a path back.
     """
-    import flow_compliance_check as FCC
     outputs = set(str(x) for x in (step.get("required_outputs") or []))
     self_written = outputs & FCC._gate_json_targets(step)
     if not self_written:
@@ -389,3 +429,43 @@ def test_a_not_ready_project_still_fails_step_36(tmp_path):
     assert (tmp_path / "reports/audit/tapeout_signoff.json").exists()
     assert not (tmp_path / "reports/audit/tapeout_checklist.json").exists(), (
         "the gate wrote the producer's declared path; the split is not real")
+
+
+# ── the two directions of the membership rule ──────────────────────────────
+
+def test_a_producer_written_document_a_gate_only_reads_is_not_a_member():
+    """STEP 31's SHAPE, on a synthetic copy: the producer writes X and the gate
+    consults X through `--report`. That is the rule working, not breaking, so X
+    must not be a member."""
+    doc = _flow()
+    doc["steps"].append({
+        "id": "zzread", "name": "synthetic", "stage": "stage3",
+        "programs": ["zzread_gen"],
+        "required_outputs": ["reports/phase3/zzread.json"],
+        "gate": {"all_of": [
+            {"program_exit_zero":
+                "zzread_check . --report reports/phase3/zzread.json "
+                "--json reports/phase3/zzread_check.json"}]},
+        "blocks_on": [],
+    })
+    viol = steps_declaring_their_gates_verdict_target(doc["steps"])
+    assert "zzread" not in viol, viol.get("zzread")
+
+
+def test_a_gate_written_json_target_is_a_member():
+    """THE OTHER DIRECTION on the same synthetic step: move the declared output to
+    the gate's own `--json` path and it IS a member."""
+    doc = _flow()
+    doc["steps"].append({
+        "id": "zzwrite", "name": "synthetic", "stage": "stage3",
+        "programs": ["zzwrite_check"],
+        "required_outputs": ["reports/phase3/zzwrite_check.json"],
+        "gate": {"all_of": [
+            {"program_exit_zero":
+                "zzwrite_check . --report reports/phase3/zzwrite.json "
+                "--json reports/phase3/zzwrite_check.json"}]},
+        "blocks_on": [],
+    })
+    viol = steps_declaring_their_gates_verdict_target(doc["steps"])
+    assert viol.get("zzwrite") == ["reports/phase3/zzwrite_check.json"], (
+        viol.get("zzwrite"))
