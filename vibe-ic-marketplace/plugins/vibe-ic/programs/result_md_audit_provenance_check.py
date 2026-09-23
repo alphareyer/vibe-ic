@@ -70,6 +70,9 @@ if str(_HERE) not in sys.path:
 # The gate that RENDERS a testbench into the project declares which paths it
 # regenerates; this program must not restate them (see _FLOW_REGENERATED_PATHS).
 import fmeda_fault_injection_coverage as _fmeda  # noqa: E402
+# The AUDITOR's own in-progress files are declared in ONE place (R-0915-168); a freshness judge
+# must ask that declaration rather than carry its own suffix list. See `_is_flow_output`.
+import _path_layout as _pl_shapes  # noqa: E402
 
 WAIVER_KEY = "result_md_audit_provenance_intentional"
 WAIVER_MIN_LEN = 40
@@ -362,6 +365,53 @@ _EVIDENCE_ROOTS = ("reports", "phase1", "phase2", "phase3")
 #: reference was "phase1/2/3 + root" and that the flow "does not mutate the
 #: project root". The walked set was `('phase1','phase2','phase3')` — the root
 #: was never walked, then or now. Only `_EVIDENCE_ROOTS` are walked.
+#: A FOURTH RULE, AND THE ONE THE THREE ABOVE COULD NOT REACH: THE AUDITOR'S
+#: OWN IN-PROGRESS FILES (R-0915-168).
+#:
+#: The three rules above are about DOCUMENTS -- a path, or a `.json`/`.md`
+#: suffix under `reports/`. The auditor also creates files that are not
+#: documents at all: the temp it publishes through and the lock it holds while
+#: publishing. Both are named after the document they serve, so neither ends in
+#: `.json` or `.md`:
+#:
+#:     reports/phase2/gates/stage1_compliance.json.fcc-lock
+#:     reports/phase2/gates/stage1_compliance.json.4242.4243.fcc-tmp
+#:
+#: Rule 2 asks the SUFFIX and rule 1 asks for `reports/audit/`, so a leftover
+#: beside a receipt anywhere else under `reports/` satisfied neither and became
+#: THE NEWEST DESIGN ARTEFACT -- exactly the run-count-dependent verdict the
+#: comment above says this exclusion exists to stop, returning through a door
+#: the exclusion was not watching.
+#:
+#: MEASURED, two consecutive `flow_compliance_check` passes over a copy of a
+#: completed run tree (`ic/subservient`, 369 files, `--lenient`): 94 lock files
+#: per pass, and pass 2 adds none (the same 94 paths, re-locked in place):
+#:
+#:     reports/audit/step_outputs/         69   one per step output record
+#:     reports/audit/audit_created/        20   one per authorship note
+#:     reports/audit/                       1   the canonical completion audit
+#:     reports/phase2/gates/                2   stage1, stage2 compliance
+#:     reports/phase1/gates/                1   stage_phase1 compliance
+#:     reports/analog/                      1   stage_analog compliance
+#:                                        ---
+#:                                         94   of which 4 OUTSIDE reports/audit
+#:
+#: The 90 under `reports/audit/` were already excluded by rule 1. The FOUR
+#: outside it are the defect, and a tree that reaches stage 3 and stage 4 adds
+#: their two receipts to the same list. Reproduced end to end: one consistent
+#: round four hours old, audited twice, PASS then
+#: `RESULT_MD_STALE_VS_EVIDENCE ... newest artefact
+#: (reports/phase3/gates/stage3_compliance.json.fcc-lock)` -- a FAIL on a tree
+#: where nothing about the design had been touched.
+#:
+#: SO THE RULE IS NOT A FIFTH SUFFIX LIST HERE. `_path_layout` already declares
+#: this shape for `design_input_digest`, which asks the same question for the
+#: same reason, and R-0915-168's whole point is that the next auditor mechanism
+#: is covered the day it is written rather than the day a reviewer finds it.
+#: This gate asks that declaration. It is also why the READ side must be fixed
+#: whatever the writer does: the temp MUST be a sibling (`os.replace` is atomic
+#: only within a filesystem), so a pass that is killed mid-publish leaves one
+#: beside any document the auditor was writing, anywhere in the tree.
 #: Sub-paths under `reports/` that hold the compliance flow's own regenerated
 #: documents.
 _FLOW_OUTPUT_SUBTREES = ("reports/audit",)
@@ -448,14 +498,23 @@ def _is_flow_output(rel: str, path: Optional[Path] = None) -> bool:
     """True when a project-relative path is something the COMPLIANCE FLOW
     regenerates, and so cannot date the DESIGN round.
 
-    Three rules, all measured (see `_FLOW_OUTPUT_SUBTREES`): anything under
-    the flow's own audit bucket; any gate/audit document (`.json` / `.md`)
-    under `reports/` that is not an EDA tool's own measurement; and the paths
-    the compliance gates regenerate outside `reports/`, as declared by the
-    gate that writes them. Everything else — every tool sign-off report, and
-    the rest of `phase1/`, `phase2/`, `phase3/` — dates the design round.
+    Four rules, all measured (see `_FLOW_OUTPUT_SUBTREES`): the auditor's own
+    in-progress files, wherever they are, as declared in `_path_layout`;
+    anything under the flow's own audit bucket; any gate/audit document
+    (`.json` / `.md`) under `reports/` that is not an EDA tool's own
+    measurement; and the paths the compliance gates regenerate outside
+    `reports/`, as declared by the gate that writes them. Everything else —
+    every tool sign-off report, and the rest of `phase1/`, `phase2/`,
+    `phase3/` — dates the design round.
+
+    The in-progress rule is FIRST because it is the only one that is true of a
+    file the auditor has not finished writing: a `.fcc-tmp` under
+    `phase3/analog/` is not a document, is not under `reports/`, and is not a
+    declared regenerated path, so no later rule can reach it.
     """
     rel = rel.replace(os.sep, "/")
+    if _pl_shapes.is_auditor_inprogress_name(rel):
+        return True
     if rel in _FLOW_REGENERATED_PATHS:
         return True
     for sub in _FLOW_OUTPUT_SUBTREES:

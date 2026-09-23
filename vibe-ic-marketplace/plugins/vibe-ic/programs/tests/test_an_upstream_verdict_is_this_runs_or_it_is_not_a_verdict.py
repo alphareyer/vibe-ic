@@ -532,50 +532,75 @@ def test_a_producers_temp_is_not_swallowed_by_the_step_output_rule(tmp_path):
 
 
 def test_the_record_writer_removes_its_temp_however_the_write_ends(tmp_path):
-    """`finally`, and it must not mask the write's own failure."""
+    """R-0915-168 moved WHERE this is guaranteed, not WHETHER it is.
+
+    This writer used to hand-roll temp+replace with its own `finally` -- the third such in the
+    module, with the third temp shape, and it cost its own review before `is_auditor_output`
+    learned to recognise the leftover. It now goes through `_auditor_write.publish`, so the
+    guarantee is asserted of the helper AND of the fact that this writer uses it, which is what
+    stops the two drifting.
+
+    The writer's own contract is unchanged and still deliberate: `_emit_step_output_record` is
+    BEST-EFFORT BY CONSTRUCTION ("a record that failed to write must never move a verdict"), so it
+    swallows the helper's error rather than letting it reach a verdict.
+    """
     import ast
     import inspect
     import textwrap
 
-    src = textwrap.dedent(inspect.getsource(FCC._emit_step_output_record))
-    tries = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Try) and n.finalbody]
-    good = [t for t in tries
-            if "unlink" in ast.unparse(ast.Module(body=t.finalbody, type_ignores=[]))
-            and not any(isinstance(x, ast.Raise)
-                        for x in ast.walk(ast.Module(body=t.finalbody, type_ignores=[])))]
-    assert good, "the record's temp is not removed in a non-raising `finally`"
+    import _auditor_write as _AW
 
-    # AND THE TEMP IS GONE WHEN THE REPLACE FAILS. This writer is BEST-EFFORT BY CONSTRUCTION --
-    # its own docstring says "a record that failed to write must never move a verdict" -- so
-    # unlike `_write_note_atomically` it SWALLOWS the error rather than propagating it. My first
-    # spelling of this arm asserted `pytest.raises`, borrowed from the note writer, and failed
-    # with DID NOT RAISE: the assertion was wrong, not the code. What must hold is that the
-    # failure changes nothing and leaves nothing.
-    real_replace = os.replace
+    tries = [n for n in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(_AW.publish))))
+             if isinstance(n, ast.Try) and n.finalbody]
+    assert any("_discard" in ast.unparse(ast.Module(body=t.finalbody, type_ignores=[]))
+               for t in tries), "the helper's finally does not remove the temp"
 
-    def exploding(a, b):
-        raise OSError(28, "No space left on device")
+    fsrc = (PROGRAMS / "flow_compliance_check.py").read_text()
+    assert "_aw.publish(dest, json.dumps({" in fsrc, (
+        "the per-step record no longer goes through the one auditor writer")
 
+    # the writer still swallows, so a failed write changes nothing and leaves nothing
+    real = os.replace
     try:
-        os.replace = exploding
+        os.replace = lambda a, b: (_ for _ in ()).throw(
+            OSError(28, "No space left on device"))
         FCC._emit_step_output_record(
             tmp_path, {"id": "37.4", "required_outputs": ["reports/phase3/x.json"]},
             type("R", (), {"status": "FAIL", "reasons": []})())
     finally:
-        os.replace = real_replace
-
-    assert not list((tmp_path / _PL.STEP_OUTPUT_RECORD_DIR).glob("*.tmp")), (
-        "the temp outlived the interrupted write")
-    assert not _PL.step_output_record_path(tmp_path, "37.4").exists(), (
-        "a failed write left a record behind")
-
+        os.replace = real
+    assert not _PL.step_output_record_path(tmp_path, "37.4").exists()
+    recdir = tmp_path / _PL.STEP_OUTPUT_RECORD_DIR
+    if recdir.is_dir():
+        assert not [q for q in recdir.iterdir()
+                    if _PL.AUDITOR_TMP_SUFFIX in q.name], "the temp outlived the write"
 
 def test_the_temp_shape_is_derived_from_the_writers_own_directory():
-    """The reader takes the directory from `_path_layout`, where the writer gets it."""
-    import inspect
+    """R-0915-168 — ONE declared shape, and the digest asks for it rather than spelling it.
+
+    My R-0915-165 cut had the digest build its own regex from `STEP_OUTPUT_RECORD_DIR` -- better
+    than a literal, still a fourth spelling of one idea. `_path_layout.is_auditor_inprogress_name`
+    is now the single answer and `_auditor_write` the only minter, so this asserts the digest
+    delegates and that the OLD step-output shape is still recognised, because leftovers in it
+    exist on every tree written before this change.
+    """
     import design_input_digest as D
 
-    src = inspect.getsource(D)
-    assert "STEP_OUTPUT_RECORD_DIR" in src, (
-        "the reader spells the step-output directory itself instead of importing it")
-    assert _PL.STEP_OUTPUT_RECORD_DIR in D._AUDITOR_STEP_OUTPUT_TMP_RE.pattern
+    dsrc = (PROGRAMS / "design_input_digest.py").read_text()
+    assert "is_auditor_inprogress_name" in dsrc, (
+        "the digest no longer asks `_path_layout` what an in-progress name is")
+    assert "_AUDITOR_STEP_OUTPUT_TMP_RE" not in dsrc, (
+        "the per-step temp shape is declared twice again")
+
+    import tempfile
+    t = Path(tempfile.mkdtemp())
+    for rel, why in (
+            (f"{_PL.STEP_OUTPUT_RECORD_DIR}/37_4.json.99.tmp", "the R-0915-165 shape"),
+            (f"{_PL.STEP_OUTPUT_RECORD_DIR}/37_4.json.1.2{_PL.AUDITOR_TMP_SUFFIX}",
+             "the declared shape"),
+            (f"{_PL.STEP_OUTPUT_RECORD_DIR}/37_4.json{_PL.AUDITOR_LOCK_SUFFIX}",
+             "its lock")):
+        f = t / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("")
+        assert D.is_auditor_output(t, f) is True, (rel, why)

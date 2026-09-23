@@ -2916,6 +2916,7 @@ from pathlib import Path
 import _atomic_output
 import _atomic_artefact
 import _atomic_artefact as _aa
+import _auditor_write as _aw
 from _atomic_output import atomic_write_text
 
 def a(project):
@@ -2944,7 +2945,10 @@ def h(project):
         project / "reports" / "NOT_A_DESTINATION.json")
 
 def i(project):
-    _aa.publish(project / "reports" / "omega.json", "{}")
+    _aa.checksum(project / "reports" / "omega.json")
+
+def j(project):
+    _aw.publish(project / "reports" / "iota.json", "{}")
 '''
 
 
@@ -3072,15 +3076,44 @@ def test_d7_the_shadowing_rule_is_a_vocabulary_too(monkeypatch):
 
     The cheap way to make the shapes above resolve is to count `args[0]` for
     every attribute call whose receiver is not a path. That would charge a
-    program for every helper it merely HANDS a path to. `_aa.publish(...)` is
-    not in `_SHADOWING_ATOMIC_WRITERS`, so it must not be counted, and this
-    fails the moment the implementation stops consulting the set.
+    program for every helper it merely HANDS a path to. `_aa.checksum(...)` is
+    in neither vocabulary, so it must not be counted, and this fails the moment
+    the implementation stops consulting the sets.
+
+    THE WITNESS USED TO BE `_aa.publish(...)`, AND IT STOPPED BEING ONE. R-0915-168 made
+    `_auditor_write.publish(final, payload)` a real atomic writer with the destination first, so
+    `publish` joined `_ATOMIC_WRITERS` and this fixture's "not a writer" example became a true
+    positive. Re-pointed at a name that is genuinely neither -- `checksum`, a helper HANDED a path
+    -- and the property is unchanged: a name outside both vocabularies is not counted. The
+    companion arm below is the other half, because a negative witness alone cannot tell "the set is
+    consulted" from "nothing is ever counted".
     """
     seen = _detected(_ATOMIC_CALL_SHAPES)
     assert "reports/omega.json" not in seen, (
-        "an attribute call NOT in the shadowing vocabulary had its first "
+        "an attribute call in NEITHER atomic vocabulary had its first "
         f"argument counted as a write. detected={sorted(seen)}")
+    assert "checksum" not in G._SHADOWING_ATOMIC_WRITERS
+    assert "checksum" not in G._ATOMIC_WRITERS
+    # `publish` is in the name-matched set, NOT the shadowing one: it does not collide with a
+    # `Path` method, so it needs no receiver discrimination.
     assert "publish" not in G._SHADOWING_ATOMIC_WRITERS
+    assert "publish" in G._ATOMIC_WRITERS
+
+
+def test_d7_the_auditors_one_writer_is_in_the_vocabulary(monkeypatch):
+    """THE POSITIVE HALF for R-0915-168's writer, and the arm the six lost targets needed.
+
+    `_auditor_write.publish(final, payload)` is temp-then-replace with the destination first --
+    the same shape as `atomic_write_text`. Before it was named here, converting a `--json` receipt
+    to it made `flag_value_is_written` answer None, `clause_output_targets` drop the target, and
+    the flow lose six gate-output pairs (steps 2, 7, 14, 15, 37, 39 -- the `stageN_compliance.json`
+    paths): 140 targets -> 134, 6 same-gate reads -> 0, and d7 reported that its extraction had
+    collapsed. A write that became MORE atomic read as no write at all.
+    """
+    assert "reports/iota.json" in _detected(_ATOMIC_CALL_SHAPES), (
+        "`_aw.publish(<dest>, ...)` is not counted as a write of its first argument, so a program "
+        "that publishes its own declared report through the auditor's one writer reads as writing "
+        "nothing")
 
 
 def test_d7_both_write_walks_share_one_atomic_vocabulary(monkeypatch):

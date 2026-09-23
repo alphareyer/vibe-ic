@@ -168,12 +168,19 @@ def test_the_lock_is_per_note_and_not_on_the_note_itself(tmp_path):
     So the lock is a sibling file, one per note key."""
     note = FCC._authorship_note_path(tmp_path, SID, REL)
     note.parent.mkdir(parents=True, exist_ok=True)
+    # R-0915-168 — the NAME comes from the declaration, not from this arm. The lock used to be
+    # spelled `<note>.lock` here and in `_note_lock`; both now ask
+    # `_path_layout.auditor_lock_name`, so the shape the digest recognises and the shape taken
+    # here cannot drift. The property is unchanged: a sibling, one per note key, never the note.
+    import _path_layout as _PL
     with FCC._note_lock(note):
-        lock = note.with_name(note.name + ".lock")
+        lock = _PL.auditor_lock_name(note)
         assert lock.is_file(), "no lock file was taken"
         assert lock != note, "the lock is the note itself"
+        assert lock.parent == note.parent, "the lock is not a sibling"
     other = FCC._authorship_note_path(tmp_path, "9", "reports/other.json")
-    assert other.with_name(other.name + ".lock") != note.with_name(note.name + ".lock")
+    assert _PL.auditor_lock_name(other) != _PL.auditor_lock_name(note), (
+        "two different notes share one lock, so unrelated steps serialise")
 
 
 def test_two_processes_do_not_interleave_one_note(tmp_path):

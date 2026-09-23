@@ -70,6 +70,7 @@ hardcoded strings) when reading or writing artefacts in subdirectories.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import sys
@@ -821,6 +822,80 @@ def report_path_for_reading(project: Path, filename: str):
         except OSError:                                    # pragma: no cover
             continue
     return routed, False
+#: THE AUDITOR'S OWN IN-PROGRESS FILES: ONE DECLARED SHAPE. R-0915-168.
+#:
+#: The auditor writes temp-then-replace so no reader sees a half-written document, and locks a
+#: note so two passes cannot interleave one. Every such mechanism creates a file that is the
+#: AUDITOR'S but carries no content a reader could identify it by -- and each was found by a
+#: reviewer AFTER it shipped, then patched with its own shape:
+#:
+#:   R-0915-151  <audit>.json.<pid>.tmp                     the canonical audit's temp
+#:   R-0915-152  audit_created/<hex>.json.lock              the note's lock
+#:   R-0915-152  audit_created/<hex>.json.<pid>.<tid>.tmp   the note's temp
+#:   R-0915-165  step_outputs/<sid>.json.<pid>.tmp          the per-step record's temp
+#:
+#: Four shapes for one idea, three incidents, and a fifth mechanism would have made a fifth. The
+#: shape is now a NAMED MARKER rather than a position: `.fcc-tmp` and `.fcc-lock` are minted by
+#: `_auditor_write` and by nothing else, so the digest recognises them ANYWHERE, with no directory
+#: list and no path table, and the next auditor mechanism is covered the day it is written.
+AUDITOR_TMP_SUFFIX: str = ".fcc-tmp"
+AUDITOR_LOCK_SUFFIX: str = ".fcc-lock"
+
+#: `<final>.<pid>.<tid>.fcc-tmp` and `<final>.fcc-lock`. The pid and tid stay because they are
+#: what let a human attribute a leftover to the process that abandoned it -- `_atomic_artefact`'s
+#: own reason for naming its temps rather than using an opaque `tmpXXXXXX`.
+_AUDITOR_TMP_RE_NEW = re.compile(r"\.\d+\.\d+" + re.escape(AUDITOR_TMP_SUFFIX) + r"$")
+_AUDITOR_LOCK_RE_NEW = re.compile(re.escape(AUDITOR_LOCK_SUFFIX) + r"$")
+
+#: THE FOUR OLD SHAPES, READ SIDE ONLY. Leftovers in them exist on every tree produced before
+#: this change, and a reader that stopped recognising them would let an old leftover move the
+#: design hash -- the same mistake as dropping a legacy report location, which cost a round on
+#: `next/icslot70`. The helper mints NONE of these; nothing new ever lands here.
+_LEGACY_AUDITOR_INPROGRESS_RES = (
+    re.compile(r"^reports/audit/phase23_completion_audit\.json\.\d+\.tmp$"),
+    re.compile(r"^reports/audit/audit_created/[0-9a-f]+\.json\.lock$"),
+    re.compile(r"^reports/audit/audit_created/[0-9a-f]+\.json\.\d+\.\d+\.tmp$"),
+    re.compile(r"^reports/audit/step_outputs/[0-9a-z_.]+\.json\.\d+\.tmp$"),
+)
+
+
+def auditor_temp_name(project_final: Path, pid: Optional[int] = None,
+                      tid: Optional[int] = None) -> Path:
+    """The temp sibling `_auditor_write` publishes `project_final` through.
+
+    A SIBLING, never a file in a temp directory: `os.replace` is atomic only WITHIN a
+    filesystem, and a temp elsewhere silently degrades to a copy, reinstating the half-written
+    window this exists to close. That is `_atomic_artefact`'s own reasoning, and it is why the
+    receipt redirect's `TemporaryDirectory` is a different thing entirely -- that one is not
+    publishing into the project at all.
+    """
+    import os as _os                                        # noqa: PLC0415
+    import threading as _threading                          # noqa: PLC0415
+    p_ = int(_os.getpid() if pid is None else pid)
+    t_ = int(_threading.get_ident() if tid is None else tid)
+    return project_final.with_name(
+        f"{project_final.name}.{p_}.{t_}{AUDITOR_TMP_SUFFIX}")
+
+
+def auditor_lock_name(project_final: Path) -> Path:
+    """The lock sibling for `project_final`.
+
+    A SIBLING, not a lock on the file itself: locking the document would mean opening the very
+    file a concurrent writer is about to replace.
+    """
+    return project_final.with_name(f"{project_final.name}{AUDITOR_LOCK_SUFFIX}")
+
+
+def is_auditor_inprogress_name(rel: str) -> bool:
+    """Is this project-relative name one the auditor mints WHILE writing something else?
+
+    The one question `design_input_digest` asks, answered from the declaration above so writer
+    and reader cannot drift. Deliberately NOT `*.tmp` or `*.lock`: a producer's own partial
+    write anywhere in the tree is a design artefact and must keep counting.
+    """
+    if _AUDITOR_TMP_RE_NEW.search(rel) or _AUDITOR_LOCK_RE_NEW.search(rel):
+        return True
+    return any(rx.match(rel) for rx in _LEGACY_AUDITOR_INPROGRESS_RES)
 
 
 # Ordered list of valid reports/ children (for the taxonomy whitelist
