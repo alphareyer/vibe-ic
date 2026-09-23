@@ -3749,11 +3749,18 @@ def _publish_over_the_audits_own_document(argv: List[str], project: Path
             continue
         target = Path(argv[i + 1])
         abs_target = target if target.is_absolute() else (project / target)
+        # EVERY RECEIPT FLAG, NOT THE FIRST. `--json A --report B` used to be
+        # decided entirely by A: the first flag whose target was absent, or was
+        # not the audit's own report, returned None and B was never looked at.
+        # The review confirmed what that costs -- step 2's crosslayer clause kept
+        # rewriting its target on every pass, which is one of the two rewriters
+        # that make the three-pass sequence above reachable. `continue` instead of
+        # returning, and the no-op is the loop falling through.
         try:
             if not abs_target.is_file():
-                return None
+                continue
         except OSError:                                    # pragma: no cover
-            return None
+            continue
         # THE CLASS IS DECIDED BY WHAT THE DOCUMENT IS, and two cuts of this got
         # it wrong before landing on the ruling's own words: "a stage compliance
         # report is the AUDIT'S OWN document".
@@ -3777,7 +3784,7 @@ def _publish_over_the_audits_own_document(argv: List[str], project: Path
         # `program: flow_compliance_check`. So the negative arm holds BY
         # CONSTRUCTION rather than by a set that has to be kept right.
         if not _is_the_audits_own_compliance_report(abs_target):
-            return None
+            continue
         try:
             stale = json.loads(abs_target.read_text(errors="replace"))
         except (OSError, ValueError):
@@ -3874,11 +3881,15 @@ def _receipt_off_a_produced_document(argv: List[str], project: Path
             continue
         target = Path(argv[i + 1])
         abs_target = target if target.is_absolute() else (project / target)
+        # EVERY RECEIPT FLAG, NOT THE FIRST — same defect, same reason as in
+        # `_publish_over_the_audits_own_document`: a clause naming two receipts
+        # was decided by the first one, so a second flag pointing at a document
+        # the run had produced was never redirected and the auditor overwrote it.
         try:
             if not abs_target.is_file():
-                return argv, None, None
+                continue
         except OSError:                                    # pragma: no cover
-            return argv, None, None
+            continue
         tmp = tempfile.TemporaryDirectory(prefix="gate_receipt_")
         moved = list(argv)
         moved[i + 1] = str(Path(tmp.name) / abs_target.name)
@@ -14428,6 +14439,37 @@ def _live_stat(path: Path) -> Optional[Tuple[int, int]]:
     return (int(st.st_size), int(st.st_mtime_ns))
 
 
+def restamp_set(audit_produced: Sequence[str],
+                absent_before_gate: Sequence[str],
+                prior_created: Set[str]) -> List[str]:
+    """WHICH refused paths get their authorship note (re-)stamped with the bytes
+    this pass just wrote. R-0915-141, second cut.
+
+    PUBLIC AND NAMED ON PURPOSE. The first cut of this rule lived as an inline
+    comprehension inside `check_step`, and the tests that were supposed to guard
+    it re-stated the comprehension in the test file -- so they passed on the base
+    and on the fix alike, and a pre-landing review had to find the regression by
+    reading. A rule a test can only paraphrase is a rule nothing guards.
+
+    THE RULE. Stamp a path when the bytes in front of this pass's gate were
+    already the audit's own -- either because the path was ABSENT before the gate
+    (this pass created it) or because a PRIOR note claimed it (an earlier pass
+    created it). Whatever this pass writes over the audit's own bytes is still the
+    audit's, and the note must follow those bytes or it goes stale and the next
+    pass credits the auditor's own document. "MISSING twice, PASS forever."
+
+    NOT STAMPED: a path that is in `audit_produced` only because the document
+    self-identifies as a gate verdict document. That is a refusal made on content
+    alone, and stamping it is what made run22's step 36 refusal permanent -- the
+    note took `tapeout_checklist_gen`'s own bytes (size=16738,
+    mtime=08:51:23.557) and matched forever after. Such a path is still refused on
+    this pass; it simply earns no note, so a producer rewrite can lift it.
+    """
+    absent = set(absent_before_gate)
+    prior = set(prior_created or ())
+    return [r for r in audit_produced if r in absent or r in prior]
+
+
 def _prior_audit_created(project: Path, sid: Any, rels: Sequence[str]) -> Set[str]:
     """Which of `rels` an EARLIER pass of this audit created, still unchanged.
 
@@ -15283,16 +15325,47 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # reclaim it. Step 38's note is the same shape (size=1831,
         # mtime=08:51:23.505).
         #
-        # The fix is to stamp only the paths this pass was the first writer of.
-        # A path carried by a prior note KEEPS that note -- untouched, with the
-        # stat of the write the audit really made -- so the moment a producer
-        # rewrites the file the recorded stat stops matching and the artefact is
-        # credited, exactly as documented. Nothing is forgiven: a path the audit
-        # wrote and nobody else has touched still matches its note and is still
-        # refused, on every pass.
+        # THE FIRST CUT OF THIS FIX WAS TOO NARROW, and a pre-landing
+        # adversarial review (2 reviewers + skeptics, read-only) CONFIRMED the
+        # regression it opened. Stamping only `_absent_before_gate` left this
+        # sequence green, and it is reachable in ONE run:
+        #
+        #   pass 1  path absent -> this gate writes it -> note stamped with the
+        #           gate's bytes. REFUSED, correctly.
+        #   pass 2  path present and carried by the note -> refused, correctly --
+        #           but the gate REWRITES its own target during this pass, so the
+        #           bytes move while the note keeps pass 1's stat.
+        #   pass 3  the note no longer matches, so `_prior_audit_created` drops
+        #           the path; it is not absent either; only the content branch is
+        #           left, and for a document that does not self-identify as a gate
+        #           verdict document the auditor's own output is CREDITED.
+        #           "MISSING twice, PASS forever."
+        #
+        # Two landed rewriters reach it: #2518's republish path (the
+        # `stage_*_compliance` reports of steps 2, 14, 15 and 37 carry the program
+        # stamp, so they are republished -- not redirected -- and re-stamped on
+        # every pass), and the receipt redirect returning at the FIRST receipt
+        # flag (fixed below), which leaves step 2's crosslayer clause rewriting
+        # its target every time. A pass 2 can be the nested stage1_compliance
+        # inside step 7's gate, so a single run reaches pass 3.
+        #
+        # So the re-stamp set is `_absent_before_gate UNION _prior_created`: when
+        # the bytes before this gate ran were already the audit's own, whatever
+        # this pass's gate writes over them is also the audit's, and the note must
+        # follow those bytes to stay true.
+        #
+        # EXCLUDED, and this is the half that fixes run22: the CONTENT-ONLY
+        # branch -- a path that is neither absent-before-gate nor carried by a
+        # prior note, and enters `_audit_produced` solely because the document
+        # self-identifies as a gate verdict document. That is the branch that
+        # stamped the note onto `tapeout_checklist_gen`'s own bytes (size=16738
+        # mtime=08:51:23.557, exactly the producer's write) and made the refusal
+        # permanent. Such a path is still REFUSED on this pass -- it is in
+        # `_audit_produced` -- it simply does not get its note re-stamped, so a
+        # producer rewrite can still lift it.
         _record_audit_created(
             project, sid,
-            [r for r in _audit_produced if r in _absent_before_gate])
+            restamp_set(_audit_produced, _absent_before_gate, _prior_created))
         _drop_audit_created_note(
             project, sid,
             [r for r in _declared_self_written if r not in _audit_produced])
