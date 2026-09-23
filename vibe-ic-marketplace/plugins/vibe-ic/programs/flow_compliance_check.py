@@ -16456,7 +16456,16 @@ def _attribute_condition_owner_blocks(
                 f"but the owner result is not authoritative")
 
         prior_status = row.status
+        prior_reason_class = row.reason_class
         prior_reasons = list(row.reasons)
+        # A gate that RAN and FAILED on its own subject is counter-evidence,
+        # and counter-evidence survives (review of next/ictier1a): the owner
+        # attribution is added, the FAIL keeps its own reason, and the row is
+        # never offered to the not-owed demotion below. Only a row whose
+        # failure is solely a missing output may become "never owed".
+        _gate_ran_and_failed = (
+            prior_status == _T.Verdict.FAIL.value
+            and prior_reason_class != _T.ReasonClass.MISSING_ARTEFACT.value)
         primary = (
             f"blocked-by-upstream(step {owner_id}): condition owner Step "
             f"{owner_id} verdict {owner_row.status}; {declaration_evidence}. "
@@ -16464,7 +16473,8 @@ def _attribute_condition_owner_blocks(
             f"row's unmet predicate cannot be interpreted as design-derived "
             f"N/A.")
         row.status = _T.Verdict.FAIL.value
-        row.reason_class = _T.ReasonClass.MISSING_ARTEFACT.value
+        row.reason_class = (prior_reason_class if _gate_ran_and_failed
+                            else _T.ReasonClass.MISSING_ARTEFACT.value)
         row.cascade_note = f"blocked-by-upstream({owner_id})"
         row.reasons = [primary]
         if prior_reasons:
@@ -16481,8 +16491,9 @@ def _attribute_condition_owner_blocks(
                         "matched": matched,
                         "prior_status": prior_status})
         counts[owner_id] = counts.get(owner_id, 0) + 1
-        written.append(row)
-        owners[sid] = [owner_id] if owner_id else []
+        if not _gate_ran_and_failed:
+            written.append(row)
+            owners[sid] = [owner_id] if owner_id else []
 
     # R-0915-140 — the SAME decision every blocked-by-upstream writer asks. The
     # owner is a declared dependency of the row: when it (or anything in the
@@ -16667,8 +16678,9 @@ def _demote_not_owed_rows(
     WRITER itself declares for that row. A step absent from ``results`` (a
     scoped audit) is walked through but never counts as failed.
 
-    THE ROOT NAMED ON THE ROW is the failed step the writer already named
-    (the producer of its missing input) when that step is a failed blocker,
+    THE ROOT NAMED ON THE ROW is the failed step the writer declared in
+    ``extra_blockers`` (the producer of its missing input, the condition
+    owner) when that step is a failed blocker,
     else the nearest failed blocker that is itself a root: a FAIL that is not
     merely a not-owed missing row. A root may itself
     be ``FAIL(missing_artefact)`` -- a step whose blockers all passed and which
@@ -16722,15 +16734,14 @@ def _demote_not_owed_rows(
         tier = cascade_tier_for_dependent(r.status, r.reason_class, blockers)
         if tier is None:
             continue
-        # A writer that already named the failed step this row waits on (the
-        # producer of its missing input) keeps that attribution; otherwise the
-        # nearest root is named.
-        _named = re.fullmatch(r"blocked-by-upstream\((.+)\)",
-                              str(r.cascade_note or ""))
-        if _named and _named.group(1) in blockers:
-            root_s = _named.group(1)
-        else:
-            root_s = next((b for b in blockers if b in roots), blockers[0])
+        # A writer that named the failed step this row waits on (the producer
+        # of its missing input, or its condition owner -- handed over in
+        # `extra_blockers`, never re-read from the note text) keeps that
+        # attribution; otherwise the nearest root is named.
+        _named = [str(x) for x in (extra_blockers.get(str(r.id)) or [])
+                  if str(x) in blockers]
+        root_s = (_named[0] if _named
+                  else next((b for b in blockers if b in roots), blockers[0]))
         root = raw_of.get(root_s, root_s)
         r.status, r.reason_class = tier[0], tier[1]
         r.cascade_note = f"blocked-by-upstream({root})"
