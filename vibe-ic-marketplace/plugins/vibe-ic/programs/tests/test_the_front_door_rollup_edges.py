@@ -252,7 +252,9 @@ def test_a_document_older_than_this_invocation_is_named_as_ignored(project):
     axis = V._completion_audit_axis(project, phase3_ran=True,
                                     started_at=os.stat(path).st_mtime + 5)
     assert axis["state"] == "NOT_MEASURED", axis
-    assert axis["ignored"] and "another run" in axis["ignored"][0]
+    assert axis["ignored"] == [
+        "reports/audit/phase23_completion_audit.json"], axis
+    assert "earlier run" in axis["reason"], axis
     assert axis["sources"] == []
 
 
@@ -349,5 +351,240 @@ def test_main_always_supplies_the_axis():
         f"unreachable on a real run; keywords seen: {kwargs}")
     # and the axis it supplies is the one tied to this invocation
     src = (PROGRAMS / "vibe_ic_one_shot_runner.py").read_text()
-    assert "_completion_audit_axis(project, phase3_ran=_phase3_ran" in src
-    assert "started_at=t0" in src
+    assert "_completion_audit_axis(" in src and "phase3_ran=_phase3_ran" in src
+    # PHASE 3's start, not the run's: a document written before phase3 began
+    # cannot be phase3's refresh of it.
+    assert 'started_at=_phase_started.get("phase3", t0)' in src
+
+
+# ── R-0915-151: freshness on the CARRIED verdict, and on the rows ───────────
+
+def _audit(project: Path, verdict: str, *, scope: dict = None,
+           phase: str = "all") -> Path:
+    doc = {"verdict": verdict, "phase": phase}
+    if scope is not None:
+        doc["scope"] = scope
+    return _report(project, "phase23_completion_audit.json", doc)
+
+
+WHOLE = {"whole_flow": True, "step_count": 70, "flow_step_total": 70}
+
+
+def test_a_stale_audit_pass_repeated_by_a_fresh_carrier_is_not_measured(
+        project, monkeypatch):
+    """THE HIGH, through main(). phase3's finalize refresh swallows a TimeoutExpired,
+    and `_derive_headline_verdict` then copies the OLD audit's verdict into a FRESH
+    phase3_one_shot.json. My round-2 reader put the audit FILE in `ignored` and then
+    accepted the SAME verdict from that carrier — axis PASS, exit 0.
+
+    Here the audit says PASS and predates phase3; the carrier repeats it and is
+    today's. The axis must be NOT_MEASURED, and the carrier must appear as a POINTER
+    that was not used as evidence.
+    """
+    import os
+    stale = _audit(project, "PASS", scope=dict(WHOLE))
+    old = os.stat(stale).st_mtime_ns - 10 ** 10
+    os.utime(stale, ns=(old, old))
+
+    def fake_run_phase(label, runner, args, env=None):
+        if "phase1" in runner.name:
+            _report(project, "phase1_one_shot.json", {"verdict": "PASS"})
+            return 0
+        if "phase2" in runner.name:
+            _report(project, "phase2_one_shot.json", {"verdict": "PASS"})
+            return 0
+        if "phase3" in runner.name:
+            # the swallowed refresh: a FRESH report carrying the OLD audit's verdict
+            _report(project, "phase3_one_shot.json",
+                    {"verdict": "PASS", "completion_audit_verdict": "PASS"})
+            return 0
+        return 0
+
+    monkeypatch.setattr(V, "_run_phase", fake_run_phase)
+    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k: (True, "docs"))
+    monkeypatch.setattr(sys, "argv", ["vibe_ic_one_shot_runner", str(project),
+                                      "--no-dashboard", "--skip-hardware"])
+    rc = V.main()
+    doc = json.loads(_pl.report_path(project, "vibe_ic_one_shot.json").read_text())
+    axis = doc["completion_audit_axis"]
+    assert axis["state"] == "NOT_MEASURED", axis
+    assert axis["sources"] == [], axis
+    assert "reports/audit/phase23_completion_audit.json" in axis["ignored"], axis
+    assert any(p["carries"] == "PASS" and p["used_as_evidence"] is False
+               for p in axis["pointers"]), axis
+    assert doc["verdict"] == "NOT_MEASURED" and rc == 1
+
+
+def test_a_stale_audit_fail_does_not_gate_a_good_run(project, monkeypatch):
+    """THE MIRROR, which matters just as much: a stale FAIL must not gate a run it
+    never measured. It is still NOT_MEASURED — never FAIL, and never PASS."""
+    import os
+    stale = _audit(project, "FAIL", scope=dict(WHOLE))
+    old = os.stat(stale).st_mtime_ns - 10 ** 10
+    os.utime(stale, ns=(old, old))
+
+    def fake_run_phase(label, runner, args, env=None):
+        for name in ("phase1", "phase2", "phase3"):
+            if name in runner.name:
+                _report(project, f"{name}_one_shot.json", {"verdict": "PASS"})
+        return 0
+
+    monkeypatch.setattr(V, "_run_phase", fake_run_phase)
+    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k: (True, "docs"))
+    monkeypatch.setattr(sys, "argv", ["vibe_ic_one_shot_runner", str(project),
+                                      "--no-dashboard", "--skip-hardware"])
+    V.main()
+    doc = json.loads(_pl.report_path(project, "vibe_ic_one_shot.json").read_text())
+    assert doc["completion_audit_axis"]["state"] == "NOT_MEASURED"
+    assert doc["verdict"] == "NOT_MEASURED", doc["verdict"]
+
+
+def test_a_scoped_audit_is_not_this_runs_axis(project):
+    """THE MEDIUM: who wrote the audit, over what population. R-0915-147 gives the
+    document a scope, so a phase-2-scoped audit or a pre-Step-29 snapshot is no
+    longer accepted as the phase2/3 axis."""
+    _audit(project, "PASS", scope={"whole_flow": False, "step_count": 13,
+                                   "flow_step_total": 70, "stage_id": "stage2"})
+    axis = V._completion_audit_axis(project, phase3_ran=True, started_at=0.0)
+    assert axis["state"] == "NOT_MEASURED", axis
+    assert "13 of 70" in axis["reason"], axis["reason"]
+
+
+def test_a_whole_flow_fresh_audit_is_the_axis(project):
+    """THE OTHER DIRECTION: the document that IS this run's whole-flow audit is
+    accepted, and says which signal established that."""
+    _audit(project, "PASS", scope=dict(WHOLE))
+    axis = V._completion_audit_axis(project, phase3_ran=True, started_at=0.0)
+    assert axis["state"] == "PASS", axis
+    assert axis["scope_signal"] == "scope.whole_flow"
+    assert axis["sources"][0]["verdict"] == "PASS"
+
+
+def test_an_audit_without_a_scope_block_is_taken_on_the_weaker_signal(project):
+    """A document predating R-0915-147 cannot state its population. It is accepted
+    only on `phase == "all"` AND the weaker signal is DISCLOSED, because a weak
+    signal read silently is the same mistake in a quieter voice."""
+    _audit(project, "PASS", phase="all")
+    axis = V._completion_audit_axis(project, phase3_ran=True, started_at=0.0)
+    assert axis["state"] == "PASS", axis
+    assert "weaker signal" in axis["scope_signal"], axis["scope_signal"]
+    _audit(project, "PASS", phase="2")
+    axis2 = V._completion_audit_axis(project, phase3_ran=True, started_at=0.0)
+    assert axis2["state"] == "NOT_MEASURED", axis2
+
+
+def test_a_phase_that_left_no_report_is_not_measured(project, monkeypatch):
+    """THE ROW SIDE of the same rule. phase3's `[SKIP] no usable PDK` returns 0
+    WITHOUT writing a report, and the front door then read a stale
+    phase3_one_shot.json or invented PASS from rc 0 — for a phase that measured
+    nothing."""
+    def fake_run_phase(label, runner, args, env=None):
+        if "phase3" in runner.name:
+            return 0                      # rc 0 and NO report, the shipped shape
+        for name in ("phase1", "phase2"):
+            if name in runner.name:
+                _report(project, f"{name}_one_shot.json", {"verdict": "PASS"})
+        return 0
+
+    monkeypatch.setattr(V, "_run_phase", fake_run_phase)
+    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k: (True, "docs"))
+    monkeypatch.setattr(sys, "argv", ["vibe_ic_one_shot_runner", str(project),
+                                      "--no-dashboard", "--skip-hardware"])
+    rc = V.main()
+    doc = json.loads(_pl.report_path(project, "vibe_ic_one_shot.json").read_text())
+    rows = {r["name"]: r["verdict"] for r in doc["phases"]}
+    assert rows["phase3"] == "NOT_MEASURED", (rows, doc["verdict"])
+    assert doc["verdict"] == "NOT_MEASURED" and rc == 1
+    assert any("left no phase3_one_shot.json" in a for a in doc["advisories"]), (
+        doc["advisories"])
+
+
+def test_a_stale_phase_report_is_not_this_runs_row(project, monkeypatch):
+    """And a report from an EARLIER run does not become this phase's verdict."""
+    import os
+    stale = _report(project, "phase3_one_shot.json", {"verdict": "PASS"})
+    old = os.stat(stale).st_mtime_ns - 10 ** 10
+    os.utime(stale, ns=(old, old))
+
+    def fake_run_phase(label, runner, args, env=None):
+        if "phase3" in runner.name:
+            return 0                      # leaves the stale report in place
+        for name in ("phase1", "phase2"):
+            if name in runner.name:
+                _report(project, f"{name}_one_shot.json", {"verdict": "PASS"})
+        return 0
+
+    monkeypatch.setattr(V, "_run_phase", fake_run_phase)
+    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k: (True, "docs"))
+    monkeypatch.setattr(sys, "argv", ["vibe_ic_one_shot_runner", str(project),
+                                      "--no-dashboard", "--skip-hardware"])
+    V.main()
+    doc = json.loads(_pl.report_path(project, "vibe_ic_one_shot.json").read_text())
+    rows = {r["name"]: r["verdict"] for r in doc["phases"]}
+    assert rows["phase3"] == "NOT_MEASURED", rows
+    assert any("predates phase3's start" in a for a in doc["advisories"]), (
+        doc["advisories"])
+
+
+def test_a_stale_coverage_sidecar_does_not_demote(project, monkeypatch):
+    """M/L: my H1 exemption rests on `_phase1_failure_is_coverage_only`, whose
+    sidecar is not tied to this invocation and is written BEFORE three later
+    non-coverage blocking returns. A stale sidecar must not demote a phase1 FAIL."""
+    import os
+    side = project / "reports" / "phase1" / "phase1_exit_reason.json"
+    side.parent.mkdir(parents=True, exist_ok=True)
+    side.write_text(json.dumps({"coverage_only_failure": True,
+                                "coverage_pct": 71.0, "total_todo": 0}) + "\n")
+    old = os.stat(side).st_mtime_ns - 10 ** 10
+    os.utime(side, ns=(old, old))
+
+    rc, doc = _drive_main(project, monkeypatch,
+                          phase1=("FAIL", 1, None), phase2=("PASS", 0),
+                          extra_argv=("--skip-phase3",))
+    assert doc["demoted_phases"] == {}, doc["demoted_phases"]
+    assert doc["verdict"] == "FAIL" and rc == 1
+    assert any("predates phase1's start" in a for a in doc["advisories"]), (
+        doc["advisories"])
+
+
+def test_only_rc_1_is_exempt_from_the_demotion(project, monkeypatch):
+    """The coverage-only path returns rc 1. Any other rc is a different failure, and
+    a fresh sidecar does not make it one."""
+    rc, doc = _drive_main(
+        project, monkeypatch,
+        phase1=("FAIL", 2, {"coverage_only_failure": True, "coverage_pct": 71.0,
+                            "total_todo": 0}),
+        phase2=("PASS", 0), extra_argv=("--skip-phase3",))
+    assert doc["demoted_phases"] == {}, doc["demoted_phases"]
+    assert doc["verdict"] == "FAIL" and rc == 1
+    assert any("not the rc the" in a for a in doc["advisories"]), doc["advisories"]
+
+
+def test_a_blocking_return_the_classifier_did_not_classify_drops_the_sidecar():
+    """THE OTHER HALF OF THE DEMOTION, in phase1's own runner.
+
+    The sidecar is written BEFORE three later blocking returns — the L8 clock-period
+    conflict, the extraction gap, the semantic layer gates — and its classifier knows
+    nothing about any of them. All three `return 1`, the same rc the coverage-only path
+    returns, so no reader can separate them by exit code: the #505 demotion would take
+    a NON-coverage phase1 failure and publish PASS_WITH_WAIVERS at exit 0. My rc==1
+    guard alone does NOT close that, which is why this half is here.
+
+    Each of those returns now removes the sidecar it would otherwise leave. Pinned by
+    AST on the call, and by position: the drop must precede the return it guards.
+    """
+    import ast
+    src = (PROGRAMS / "phase1_doc_one_shot_runner.py").read_text()
+    assert src.count("_drop_v0_3_7_exit_reason(project)") >= 3, (
+        "fewer than three unclassified blocking returns drop the sidecar")
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "_drop_v0_3_7_exit_reason")
+    assert "unlink" in ast.unparse(fn), "the drop does not remove anything"
+    # every drop sits immediately before a `return 1`, never after it
+    lines = src.splitlines()
+    for i, line in enumerate(lines):
+        if "_drop_v0_3_7_exit_reason(project)" in line and "def " not in line:
+            nxt = next((l.strip() for l in lines[i + 1:i + 3] if l.strip()), "")
+            assert nxt.startswith("return"), (i + 1, nxt)

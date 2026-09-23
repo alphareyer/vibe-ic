@@ -68,7 +68,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 import _path_layout as _pl
 import _runner_lock
 import canonical_run_admission as _canonical_admission
@@ -859,65 +859,157 @@ def _audit_axis_from_verdicts(verdicts: Optional[List[str]]) -> Dict[str, Any]:
     return {"state": "PASS", "reason": ""}
 
 
+#: How much earlier than a phase's start a report may be stamped and still count as
+#: that phase's. MEASURED on this host: the filesystem reports mtime in ~64 ms
+#: granules, so a file written microseconds AFTER `time.time()` was sampled can
+#: carry a stamp microseconds BEFORE it, and a zero-tolerance comparison calls a
+#: phase's own fresh report stale. One second is two orders of magnitude below the
+#: staleness this is for -- an earlier RUN, minutes or hours back -- so it cannot
+#: mask the case being detected.
+_FRESHNESS_TOLERANCE_S = 1.0
+
+
+def _row_verdict(project: Path, report_name: str, rc: int, started_at: float,
+                 phase: str) -> Tuple[str, Optional[str]]:
+    """This phase's verdict, or NOT_MEASURED with the reason. R-0915-151.
+
+    A phase that RAN here and left no report written at or after its own start has
+    not published a verdict, and `("PASS" if rc == 0 else "FAIL")` invents one. The
+    case is real and shipped: phase3's `[SKIP] no usable PDK` returns 0 WITHOUT
+    writing a report, so the front door read either a stale `phase3_one_shot.json`
+    from an earlier run or a PASS conjured from rc 0 -- for a phase that measured
+    nothing at all.
+    """
+    path = _pl.report_path(project, report_name)
+    try:
+        exists = path.is_file()
+        fresh = exists and (path.stat().st_mtime + _FRESHNESS_TOLERANCE_S
+                            >= started_at)
+    except OSError:                                        # pragma: no cover
+        exists, fresh = False, False
+    if not exists:
+        return "NOT_MEASURED", (
+            f"{phase} ran in this invocation and left no {report_name}; rc={rc} is "
+            f"an exit status, not a measurement")
+    if not fresh:
+        return "NOT_MEASURED", (
+            f"{phase}'s {report_name} predates {phase}'s start in this invocation, "
+            f"so it describes an earlier run")
+    rep = _read_report(path)
+    verdict = rep.get("verdict")
+    if verdict:
+        return str(verdict), None
+    return ("PASS" if rc == 0 else "FAIL"), None
+
+
 def _completion_audit_axis(project: Path, *, phase3_ran: bool,
                            started_at: float) -> Dict[str, Any]:
     """The completion-audit axis for THIS invocation — or none, said out loud.
 
-    TIED TO THIS RUN, which the first cut was not. `_completion_audit_verdicts`
-    read `reports/orchestrator/phase3_one_shot.json` unconditionally, so a leftover
-    FAIL from an EARLIER full run gated a later `--skip-phase3` invocation that
-    never touched phase3 — a false FAIL where the base rule read PASS. And with no
-    phase3 in scope there is no axis to read at all; borrowing somebody else's is
-    not a measurement of this run.
+    THE CANONICAL DOCUMENT, AND NOTHING THAT CARRIES ITS VERDICT. R-0915-151.
+    My round-2 version checked freshness on the CARRIER instead of the carried
+    verdict, which a review caught: `phase3_one_shot_runner`'s finalize refresh
+    swallows a TimeoutExpired (or any exception), and `_derive_headline_verdict`
+    then reads `reports/audit/phase23_completion_audit.json` with NO date check and
+    copies its verdict into a FRESH `phase3_one_shot.json` as
+    `completion_audit_verdict`. So on a re-run whose refresh failed, the OLD run's
+    audit PASS arrived at the front door dated today: my reader put the audit FILE in
+    `ignored` and then accepted the SAME verdict from the carrier, axis PASS, exit 0
+    -- precisely the swallowed-refresh case the rework claimed to close. The mirror
+    is worse: a stale FAIL gating a good run.
 
-    So: the axis exists only when phase3 ran in THIS invocation, and a document
-    counts only when it provably belongs to it — written at or after this
-    invocation started. A document that is older is another run's, and is named as
-    ignored rather than silently used.
+    So a carrier is a POINTER, never a source. The axis reads the canonical audit
+    document itself, and accepts it only when:
 
-    Absence when phase3 DID run is NOT_MEASURED, never PASS: that is exactly the
-    swallowed-refresh case (the --strict completion pass raised or timed out), and
-    it must not publish a green front door.
+      * phase3 ran in THIS invocation (otherwise there is no axis at all), AND
+      * the document was written at or after PHASE 3's START in this invocation --
+        not merely after the run started, because the audit is phase3's to refresh,
+        AND
+      * the document says it judged the WHOLE FLOW.
+
+    THAT LAST CHECK IS WHAT 77 MADE POSSIBLE. `flow_compliance_check` stamped every
+    receipt `phase: "all"` regardless of `--stage`, so "who wrote this audit, over
+    what population" was unanswerable; a phase-2-scoped audit, or
+    `emit_final_summary`'s pre-Step-29 snapshot, was accepted as the phase2/3 axis.
+    With R-0915-147 the audit carries `scope.whole_flow`, and a scoped pass no longer
+    writes this path at all (R-0915-150). An audit with NO scope block predates that
+    work, so its population cannot be established from the document: it is accepted
+    only on the weaker `phase == "all"` signal, and WHICH signal was used is
+    disclosed, because a weak signal read silently is the same mistake again.
     """
     if not phase3_ran:
         return {"state": "NOT_APPLICABLE",
                 "reason": "phase3 did not run in this invocation, so this run has "
                           "no completion-audit axis; an earlier run's audit is not "
                           "evidence about this one",
-                "sources": [], "ignored": []}
-    sources: List[Dict[str, Any]] = []
-    ignored: List[str] = []
-    candidates = [("reports/audit/phase23_completion_audit.json", "verdict")]
-    candidates += [(f"reports/orchestrator/{n}", "completion_audit_verdict")
-                   for n in ("phase2_one_shot.json", "phase3_one_shot.json",
-                             "phase23_one_shot.json")]
-    for rel, key in candidates:
-        path = _pl.report_path(project, Path(rel).name) if "/" not in rel else (
-            project / rel)
-        try:
-            if not path.is_file():
-                continue
-            mtime = path.stat().st_mtime
-        except OSError:                                    # pragma: no cover
-            continue
-        doc = _read_report(path)
-        value = doc.get(key)
-        if not value:
-            continue
-        if mtime + 1e-6 < started_at:
-            ignored.append(
-                f"{rel} carries {key}={value} but was written before this "
-                f"invocation started, so it describes another run")
-            continue
-        sources.append({"path": rel, "key": key, "verdict": str(value)})
-    axis = _audit_axis_from_verdicts([s["verdict"] for s in sources])
-    if not sources:
-        axis = {"state": "NOT_MEASURED",
-                "reason": ("phase3 ran in this invocation and no completion audit "
-                           "belonging to it could be read"
-                           + (f"; ignored: {ignored}" if ignored else ""))}
-    axis["sources"] = sources
-    axis["ignored"] = ignored
+                "sources": [], "ignored": [], "pointers": []}
+    # Carriers are recorded for a reader and never consulted for the verdict.
+    pointers: List[Dict[str, Any]] = []
+    for name in ("phase2_one_shot.json", "phase3_one_shot.json",
+                 "phase23_one_shot.json"):
+        rep = _read_report(_pl.report_path(project, name))
+        if rep.get("completion_audit_verdict"):
+            pointers.append({"path": f"reports/orchestrator/{name}",
+                             "carries": str(rep["completion_audit_verdict"]),
+                             "used_as_evidence": False})
+
+    audit = _pl.report_path(project, "phase23_completion_audit.json")
+    try:
+        fresh = audit.is_file() and (audit.stat().st_mtime
+                                     + _FRESHNESS_TOLERANCE_S >= started_at)
+    except OSError:                                        # pragma: no cover
+        fresh = False
+    if not audit.is_file():
+        return {"state": "NOT_MEASURED",
+                "reason": ("phase3 ran in this invocation and left no completion "
+                           "audit at reports/audit/phase23_completion_audit.json"),
+                "sources": [], "ignored": [], "pointers": pointers}
+    if not fresh:
+        return {"state": "NOT_MEASURED",
+                "reason": ("the completion audit predates phase3's start in this "
+                           "invocation, so it describes an earlier run -- a carrier "
+                           "repeating its verdict in a fresh report does not make it "
+                           "this run's measurement"),
+                "sources": [],
+                "ignored": ["reports/audit/phase23_completion_audit.json"],
+                "pointers": pointers}
+    doc = _read_report(audit)
+    scope = doc.get("scope")
+    if isinstance(scope, Mapping):
+        whole = bool(scope.get("whole_flow"))
+        signal = "scope.whole_flow"
+        if not whole:
+            return {"state": "NOT_MEASURED",
+                    "reason": (f"the completion audit judged "
+                               f"{scope.get('step_count')} of "
+                               f"{scope.get('flow_step_total')} step(s) "
+                               f"(stage {scope.get('stage_id') or scope.get('stage')}"
+                               f"), so it is not this run's whole-flow verdict"),
+                    "sources": [], "ignored": [], "pointers": pointers,
+                    "scope_signal": signal}
+    else:
+        # No scope block: this document predates R-0915-147, so its population
+        # cannot be read off it. The weaker signal is used AND disclosed.
+        if str(doc.get("phase") or "all") != "all":
+            return {"state": "NOT_MEASURED",
+                    "reason": (f"the completion audit is stamped phase="
+                               f"{doc.get('phase')!r}, so it is not the whole run's"),
+                    "sources": [], "ignored": [], "pointers": pointers,
+                    "scope_signal": "phase"}
+        signal = "phase (no scope block: this audit predates R-0915-147, so its " \
+                 "population is taken on the weaker signal)"
+    verdict = doc.get("verdict")
+    if not verdict:
+        return {"state": "NOT_MEASURED",
+                "reason": "the completion audit carries no verdict",
+                "sources": [], "ignored": [], "pointers": pointers,
+                "scope_signal": signal}
+    axis = _audit_axis_from_verdicts([str(verdict)])
+    axis["sources"] = [{"path": "reports/audit/phase23_completion_audit.json",
+                        "verdict": str(verdict)}]
+    axis["ignored"] = []
+    axis["pointers"] = pointers
+    axis["scope_signal"] = signal
     return axis
 
 
@@ -1348,6 +1440,10 @@ def main() -> int:
     #: Did phase3 RUN in THIS invocation? The completion-audit axis exists only
     #: then, and reading an earlier run's audit is not a measurement of this one.
     _phase3_ran = False
+    #: When each phase STARTED here. A phase's report counts as this run's only if
+    #: it was written at or after that phase began; `t0` is too weak, because a
+    #: report written by an earlier invocation of a LATER phase can postdate t0.
+    _phase_started: Dict[str, float] = {}
     halted_at: str = ""
     reports: Dict[str, Any] = {}
     advisories: List[str] = []   # v0.3.7 #505 — non-gating notes
@@ -1425,9 +1521,14 @@ def main() -> int:
                  if p1_mode == _P1_MODE_EXPERT_SECOND_PASS
                  else "PHASE 1 (vendor docs → L1-L23)" if p1_mode == "docs"
                  else "PHASE 1 (NL → L1-L23)")
+        _phase_started["phase1"] = time.time()
         rc = _run_phase(label, runner, p1_args, env=_phase_env)
+        verdict, _fresh_why = _row_verdict(
+            project, "phase1_one_shot.json", rc,
+            _phase_started.get("phase1", t0), "phase1")
+        if _fresh_why:
+            advisories.append(_fresh_why)
         rep = _read_report(_pl.report_path(project, "phase1_one_shot.json"))
-        verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
         plan.append(("phase1", verdict, rc))
         reports["phase1"] = rep
         if verdict == "FAIL":
@@ -1441,6 +1542,37 @@ def main() -> int:
             # NOT coverage-only and still halts. Full-chip flows (phase3
             # in scope) keep halting — doc-extraction feeds the backend.
             cov_only, cov_reason = _phase1_failure_is_coverage_only(project)
+            # THE SIDECAR MUST BE THIS INVOCATION'S, AND THE rc MUST BE THE ONE THE
+            # COVERAGE-ONLY PATH RETURNS. R-0915-151.
+            #
+            # `_phase1_failure_is_coverage_only` reads
+            # reports/phase1/phase1_exit_reason.json with no date check, and phase1
+            # writes that sidecar BEFORE three later non-coverage blocking returns
+            # (the extraction gap, the L8 clock conflict, ...). So a stale sidecar --
+            # or a fresh one followed by a different failure -- demoted a
+            # non-coverage phase1 FAIL to PASS_WITH_WAIVERS at exit 0. My H1
+            # guarantee that the exemption is "minted only behind the coverage-only
+            # predicate" rests on this predicate, so it is tightened here: the
+            # sidecar must have been written at or after phase1 STARTED in this
+            # invocation, and only rc 1 -- what the coverage-only path returns -- is
+            # exempt.
+            _side = project / "reports" / "phase1" / "phase1_exit_reason.json"
+            try:
+                _side_fresh = (_side.is_file()
+                               and _side.stat().st_mtime + _FRESHNESS_TOLERANCE_S
+                               >= _phase_started.get("phase1", t0))
+            except OSError:                                # pragma: no cover
+                _side_fresh = False
+            if cov_only and not _side_fresh:
+                advisories.append(
+                    "phase1's coverage-only sidecar predates phase1's start in this "
+                    "invocation, so it describes an earlier run: NOT demoting")
+                cov_only = False
+            if cov_only and rc != 1:
+                advisories.append(
+                    f"phase1 failed with rc={rc}, which is not the rc the "
+                    f"coverage-only path returns (1): NOT demoting")
+                cov_only = False
             if args.skip_phase3 and cov_only:
                 plan[-1] = ("phase1", "COVERAGE-INCOMPLETE", rc)
                 # R-0915-145 — the rc stays on the row (it is what phase1's
@@ -1546,9 +1678,14 @@ def main() -> int:
         else:
             p2_env = _canonical_admission.child_env(
                 p2_admission.identity_sha256, _phase_env)
+            _phase_started["phase2"] = time.time()
             rc = _run_phase("PHASE 2 (= 2a + 2b)", runner, p2_args, env=p2_env)
+            verdict, _fresh_why = _row_verdict(
+                project, "phase2_one_shot.json", rc,
+                _phase_started.get("phase2", t0), "phase2")
+            if _fresh_why:
+                advisories.append(_fresh_why)
             rep = _read_report(_pl.report_path(project, "phase2_one_shot.json"))
-            verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
             plan.append(("phase2", verdict, rc))
             reports["phase2"] = rep
             if verdict == "FAIL":
@@ -1594,6 +1731,7 @@ def main() -> int:
         _analog_args = [str(project), "--container", args.container]
         if args.pdk and str(args.pdk).strip().lower() != "auto":
             _analog_args += ["--pdk", str(args.pdk).strip()]
+        _phase_started["analog"] = time.time()
         rc = _run_phase("ANALOG A1..A8", runner, _analog_args, env=_phase_env)
         rep = _read_report(_pl.report_path(project, "analog_one_shot.json"))
         verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
@@ -1687,10 +1825,15 @@ def main() -> int:
             p3_env = _canonical_admission.child_env(
                 p3_admission.identity_sha256, _phase_env)
             _phase3_ran = True
+            _phase_started["phase3"] = time.time()
             rc = _run_phase("PHASE 3 (synth → PnR → GDS → DRC → LVS)",
                             runner, p3_args, env=p3_env)
+            verdict, _fresh_why = _row_verdict(
+                project, "phase3_one_shot.json", rc,
+                _phase_started.get("phase3", t0), "phase3")
+            if _fresh_why:
+                advisories.append(_fresh_why)
             rep = _read_report(_pl.report_path(project, "phase3_one_shot.json"))
-            verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
             plan.append(("phase3", verdict, rc))
             reports["phase3"] = rep
             if verdict == "FAIL":
@@ -1762,8 +1905,11 @@ def main() -> int:
                     if n not in ("analog", "mixed_signal")
                     and v != "SKIPPED"]
     _ca_verdicts = _completion_audit_verdicts(project)
-    _audit_axis = _completion_audit_axis(project, phase3_ran=_phase3_ran,
-                                         started_at=t0)
+    _audit_axis = _completion_audit_axis(
+        project, phase3_ran=_phase3_ran,
+        # PHASE 3's start, not the run's: the audit is phase3's to refresh, and a
+        # document written before phase3 began cannot be its refresh.
+        started_at=_phase_started.get("phase3", t0))
     if digital_rows:
         overall, _rollup_why = _roll_up(digital_rows, _ca_verdicts,
                                         demoted=_demoted,
