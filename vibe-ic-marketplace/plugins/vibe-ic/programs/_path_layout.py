@@ -822,6 +822,37 @@ def report_path_for_reading(project: Path, filename: str):
         except OSError:                                    # pragma: no cover
             continue
     return routed, False
+#: #505's COVERAGE-ONLY SIDECAR: ONE NAME, AND DELIBERATELY NOT A ROUTED ONE.
+#:
+#: `phase1_doc_one_shot_runner` writes this file from inside D1 to say that a phase-1 failure was
+#: PURELY doc-coverage; `vibe_ic_one_shot_runner` reads it to decide whether to demote instead of
+#: halting, and `phase1_one_shot_runner` names its digest in the record it publishes so an expert
+#: second pass can carry that name forward (R-0915-160). It is an EXEMPTION, which is why three
+#: programs care about it and why they must not disagree about where it is.
+#:
+#: MEASURED, the spelling count this replaces: FIVE hand-written copies of one path across three
+#: programs -- one constant in `phase1_one_shot_runner`, two `project / "reports" / "phase1" /
+#: "phase1_exit_reason.json"` chains in `vibe_ic_one_shot_runner` (the coverage predicate and the
+#: demotion branch), and the producer's own write and unlink in `phase1_doc_one_shot_runner`. That
+#: is the shape R-0915-151 closed for the phase reports and R-0915-168 closed for the auditor's
+#: temp and lock, still open for this one file.
+#:
+#: IT IS NOT `report_path`'s ANSWER, AND THAT IS STATED HERE RATHER THAN LEFT TO BE DISCOVERED.
+#: `report_path(project, "phase1_exit_reason.json")` returns `reports/audit/phase1_exit_reason.json`
+#: -- the catch-all for an unrecognised report name -- while the producer and both readers have
+#: always used `reports/phase1/`. Measured on this tree. So this constant is the LITERAL location,
+#: not a routing call, and every project that already has a sidecar keeps working. Moving the file
+#: onto the router is a PRODUCER move: it needs its own change, with a read-side tolerance for the
+#: old location the way `LEGACY_REPORT_PATHS` carries one, and it is not done here. What is done
+#: here is that the five copies become one, so the move -- if it is ever made -- is a one-line move.
+COVERAGE_ONLY_SIDECAR_REL: str = "reports/phase1/phase1_exit_reason.json"
+
+
+def coverage_only_sidecar_path(project: Path) -> Path:
+    """#505's coverage-only sidecar in `project`. The one place this path is assembled."""
+    return Path(project) / COVERAGE_ONLY_SIDECAR_REL
+
+
 #: THE AUDITOR'S OWN IN-PROGRESS FILES: ONE DECLARED SHAPE. R-0915-168.
 #:
 #: The auditor writes temp-then-replace so no reader sees a half-written document, and locks a

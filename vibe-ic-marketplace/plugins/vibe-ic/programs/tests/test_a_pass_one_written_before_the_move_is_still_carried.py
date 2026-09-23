@@ -210,7 +210,7 @@ def test_a_second_pass_over_a_routed_project_says_nothing_about_legacy(tmp_path,
 
 # ── (2) the D1 re-invocation's coverage-only sidecar ─────────────────────────
 
-SIDECAR_REL = "reports/phase1/phase1_exit_reason.json"
+SIDECAR_REL = _pl.COVERAGE_ONLY_SIDECAR_REL
 
 
 def _pass_one_as_it_really_leaves_a_project(
@@ -273,7 +273,7 @@ def test_pass_one_names_the_sidecar_it_wrote(tmp_path):
     import phase1_one_shot_runner as P1
 
     project = tmp_path / "proj"
-    side = project / P1.COVERAGE_SIDECAR_REL
+    side = _pl.coverage_only_sidecar_path(project)
     side.parent.mkdir(parents=True, exist_ok=True)
     side.write_text(json.dumps({"coverage_only_failure": True}) + "\n")
 
@@ -281,7 +281,7 @@ def test_pass_one_names_the_sidecar_it_wrote(tmp_path):
     P1._name_the_sidecar_this_pass_wrote(project, summary, d1_ran=True)
     named = summary.get("pass1_coverage_sidecar")
     assert isinstance(named, dict), summary
-    assert named["rel"] == P1.COVERAGE_SIDECAR_REL
+    assert named["rel"] == _pl.COVERAGE_ONLY_SIDECAR_REL
     assert named["sha256"] == hashlib.sha256(side.read_bytes()).hexdigest()
 
 
@@ -292,7 +292,7 @@ def test_a_pass_whose_d1_was_refused_names_nothing(tmp_path):
     import phase1_one_shot_runner as P1
 
     project = tmp_path / "proj"
-    side = project / P1.COVERAGE_SIDECAR_REL
+    side = _pl.coverage_only_sidecar_path(project)
     side.parent.mkdir(parents=True, exist_ok=True)
     side.write_text(json.dumps({"coverage_only_failure": True}) + "\n")
 
@@ -308,7 +308,7 @@ def test_pass_one_forgets_an_earlier_runs_sidecar_before_it_starts(tmp_path):
     import phase1_one_shot_runner as P1
 
     project = tmp_path / "proj"
-    side = project / P1.COVERAGE_SIDECAR_REL
+    side = _pl.coverage_only_sidecar_path(project)
     side.parent.mkdir(parents=True, exist_ok=True)
     side.write_text(json.dumps({"coverage_only_failure": True}) + "\n")
     assert side.is_file()
@@ -439,7 +439,7 @@ def test_the_real_pass_one_main_forgets_then_names(tmp_path, monkeypatch):
     (project / "input" / "docs").mkdir(parents=True)
     (project / "input" / "docs" / "spec.md").write_text("# a counter\n")
 
-    side = project / P1.COVERAGE_SIDECAR_REL
+    side = _pl.coverage_only_sidecar_path(project)
     side.parent.mkdir(parents=True, exist_ok=True)
     side.write_text(json.dumps({"coverage_only_failure": True, "run": "AN EARLIER ONE"}) + "\n")
     stale_sha = hashlib.sha256(side.read_bytes()).hexdigest()
@@ -474,3 +474,68 @@ def test_the_real_pass_one_main_forgets_then_names(tmp_path, monkeypatch):
     assert named["sha256"] == hashlib.sha256(fresh_payload.encode()).hexdigest()
     assert named["sha256"] != stale_sha, (
         "the record named the EARLIER run's sidecar; the forget did not happen before D1")
+
+
+# ── one location, asked by everyone who touches it ───────────────────────────
+
+def test_the_coverage_only_sidecar_has_exactly_one_spelling():
+    """THE FIVE COPIES, AND THE ARM THAT KEEPS THEM FROM COMING BACK.
+
+    The sidecar is an EXEMPTION -- it is what lets the front door demote a coverage-only phase-1
+    FAIL instead of halting -- so three programs care about where it is: the producer
+    (`phase1_doc_one_shot_runner`, which writes it and withdraws it), the front door
+    (`vibe_ic_one_shot_runner`, twice: the coverage predicate and the demotion branch) and
+    `phase1_one_shot_runner`, which names its digest in the record it publishes. Each spelled the
+    path for itself: five hand-written copies of one location.
+
+    That is the shape R-0915-151 closed for the phase reports and R-0915-168 for the auditor's temp
+    and lock. This closes it for this file: the path is declared once and every site ASKS. The
+    sweep is over `programs/*.py` source, because the failure mode is a NEW copy appearing in a
+    program that never read the declaration -- exactly how the five accumulated.
+    """
+    hits = []
+    for py in sorted(PROGRAMS.glob("*.py")):
+        if py.name == "_path_layout.py":
+            continue                            # the declaration itself, and its own commentary
+        src = py.read_text(errors="replace")
+        for lineno, line in enumerate(src.splitlines(), 1):
+            if "phase1_exit_reason" in line:
+                hits.append(f"{py.name}:{lineno}: {line.strip()[:110]}")
+    assert not hits, (
+        "the coverage-only sidecar's path is spelled outside `_path_layout` again -- ask "
+        "`_path_layout.coverage_only_sidecar_path(project)` / `COVERAGE_ONLY_SIDECAR_REL` "
+        "instead of rebuilding it:\n  " + "\n  ".join(hits))
+
+
+def test_the_declared_sidecar_location_is_pinned():
+    """THE OTHER HALF, and it is why the fixtures may safely ask the declaration.
+
+    Every fixture now stages the sidecar through `coverage_only_sidecar_path`, which means no
+    fixture can catch the path MOVING any more -- they would move with it. So the literal is
+    pinned here, once. A move is then a deliberate two-line change (this arm and the constant)
+    rather than something that happens quietly, and every project that already carries a sidecar
+    at the old place keeps being read.
+
+    NOT ROUTED, AND THE ARM SAYS SO: `report_path` sends an unrecognised report name to
+    `reports/audit/`, which is NOT where this file is or has ever been. Asserting the difference
+    keeps someone from "tidying" the constant into a routing call and moving the file by accident.
+    """
+    assert _pl.COVERAGE_ONLY_SIDECAR_REL == "reports/phase1/phase1_exit_reason.json"
+    project = Path("/nonexistent-project")
+    assert _pl.coverage_only_sidecar_path(project) == (
+        project / "reports" / "phase1" / "phase1_exit_reason.json")
+    routed = _pl.report_path(project, "phase1_exit_reason.json")
+    assert routed != _pl.coverage_only_sidecar_path(project), (
+        "the router now agrees with the sidecar's real location; if that is deliberate, move the "
+        "producer and give the reader a legacy tolerance -- do not let this arm pass by accident")
+    assert routed.parent.name == "audit", routed
+
+
+def test_the_producer_asks_the_declaration_too():
+    """A declaration the WRITER ignores is a comment. `phase1_doc_one_shot_runner` is the only
+    thing that creates this file, so it is the site whose silence would cost most: readers asking a
+    constant the producer does not use is precisely how a path acquires two locations."""
+    src = (PROGRAMS / "phase1_doc_one_shot_runner.py").read_text(errors="replace")
+    assert "coverage_only_sidecar_path" in src, (
+        "the sidecar's producer builds its own path again, so the declaration the readers ask is "
+        "no longer a contract with the writer")

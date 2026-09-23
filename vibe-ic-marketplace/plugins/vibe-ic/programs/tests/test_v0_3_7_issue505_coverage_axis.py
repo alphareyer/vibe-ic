@@ -26,6 +26,8 @@ from pathlib import Path
 
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
+
+import _path_layout as _pl                   # noqa: E402
 import phase1_doc_one_shot_runner as P1D  # noqa: E402
 import vibe_ic_one_shot_runner as ORCH  # noqa: E402
 
@@ -74,9 +76,11 @@ def test_full_coverage_passes():
 # ── orchestrator side: sidecar reader ────────────────────────────────
 
 def _write_sidecar(tmp_path: Path, payload: dict) -> Path:
-    d = tmp_path / "reports" / "phase1"
-    d.mkdir(parents=True)
-    (d / "phase1_exit_reason.json").write_text(json.dumps(payload))
+    # Staged through the ONE declaration the producer and both readers use, so this
+    # fixture cannot outlive a move of the path (next/icslot-sidecarpath).
+    side = _pl.coverage_only_sidecar_path(tmp_path)
+    side.parent.mkdir(parents=True, exist_ok=True)
+    side.write_text(json.dumps(payload))
     return tmp_path
 
 

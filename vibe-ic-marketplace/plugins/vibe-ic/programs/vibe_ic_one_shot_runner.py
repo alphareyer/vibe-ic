@@ -1131,13 +1131,13 @@ def _completion_audit_verdicts(project: Path) -> List[str]:
 
 def _phase1_failure_is_coverage_only(project: Path) -> Tuple[bool, dict]:
     """v0.3.7 — ORGANIC #505. Read the phase1 exit-reason sidecar
-    (``reports/phase1/phase1_exit_reason.json``, written by
+    (`_path_layout.COVERAGE_ONLY_SIDECAR_REL`, written by
     phase1_doc_one_shot_runner) and report whether phase1's FAIL is
     attributable SOLELY to doc-extraction coverage (orthogonal to the RTL
     deliverable). Returns ``(coverage_only, reason_dict)``; ``(False, {})``
     when the sidecar is absent/unreadable (e.g. prompt-mode phase1 that
     never wrote one) so the default halting behaviour is preserved."""
-    f = project / "reports" / "phase1" / "phase1_exit_reason.json"
+    f = _pl.coverage_only_sidecar_path(project)
     try:
         d = json.loads(f.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1641,7 +1641,7 @@ def main() -> int:
             # COVERAGE-ONLY PATH RETURNS. R-0915-151.
             #
             # `_phase1_failure_is_coverage_only` reads
-            # reports/phase1/phase1_exit_reason.json with no date check, and phase1
+            # `_path_layout.COVERAGE_ONLY_SIDECAR_REL` with no date check, and phase1
             # writes that sidecar BEFORE three later non-coverage blocking returns
             # (the extraction gap, the L8 clock conflict, ...). So a stale sidecar --
             # or a fresh one followed by a different failure -- demoted a
@@ -1682,7 +1682,7 @@ def main() -> int:
                     + (" (the record on disk belongs to an earlier run)"
                        if _report_exists(project, "phase1_one_shot.json") else ""))
                 cov_only = False
-            _side = project / "reports" / "phase1" / "phase1_exit_reason.json"
+            _side = _pl.coverage_only_sidecar_path(project)
             try:
                 _side_fresh = (_side.is_file()
                                and _side.stat().st_mtime + _FRESHNESS_TOLERANCE_S

@@ -63459,7 +63459,7 @@ def _drop_v0_3_7_exit_reason(project) -> None:
     "no sidecar" as "do not demote".
     """
     try:
-        (project / "reports" / "phase1" / "phase1_exit_reason.json").unlink()
+        _pl.coverage_only_sidecar_path(project).unlink()
     except (OSError, FileNotFoundError):
         pass
 
@@ -67929,9 +67929,15 @@ def main() -> int:
     _exit_reason = _v0_3_7_classify_phase1_exit(
         cov_gate_failed, bool(args.strict), pct, total_todo)
     try:
-        _rd = project / "reports" / "phase1"
-        _rd.mkdir(parents=True, exist_ok=True)
-        (_rd / "phase1_exit_reason.json").write_text(
+        # THE PRODUCER READS THE SAME DECLARATION AS ITS READERS
+        # (next/icslot-sidecarpath). This is the half that makes
+        # `_path_layout.COVERAGE_ONLY_SIDECAR_REL` a contract rather than a
+        # comment: a location the WRITER spells for itself is a location the
+        # readers can only hope about, which is the shape R-0915-151 closed for
+        # the phase reports.
+        _side = _pl.coverage_only_sidecar_path(project)
+        _side.parent.mkdir(parents=True, exist_ok=True)
+        _side.write_text(
             json.dumps(_exit_reason, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8")
     except OSError:
