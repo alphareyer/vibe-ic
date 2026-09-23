@@ -534,7 +534,10 @@ def test_the_driver_refuses_a_report_that_stamps_two_corners(tmp_path,
                                                "cell_text": "", "cell_spice": "",
                                                "model_file": "/m", "model_section": "ss",
                                                "model_preludes": []})
-    monkeypatch.setattr(scc, "_pick_sta_report", lambda proj, names: rpt)
+    # R-0915-166 — the picker now also takes the this-run freshness anchor;
+    # this stub is about WHICH report is returned, not about selection.
+    monkeypatch.setattr(scc, "_pick_sta_report",
+                        lambda proj, names, not_before=None: rpt)
     got = scc.run_installed_pdk_path_correlation(p, "/pdk/lib/x__tt.lib",
                                                  container="none")
     assert got["status"] == "ERROR", got
@@ -557,7 +560,10 @@ def test_the_driver_still_proceeds_past_a_single_declared_corner(tmp_path,
                                                "cell_text": "", "cell_spice": "",
                                                "model_file": "/m", "model_section": "ss",
                                                "model_preludes": []})
-    monkeypatch.setattr(scc, "_pick_sta_report", lambda proj, names: rpt)
+    # R-0915-166 — the picker now also takes the this-run freshness anchor;
+    # this stub is about WHICH report is returned, not about selection.
+    monkeypatch.setattr(scc, "_pick_sta_report",
+                        lambda proj, names, not_before=None: rpt)
     got = scc.run_installed_pdk_path_correlation(p, "/pdk/lib/x__tt.lib",
                                                  container="none")
     assert "DIFFERENT corner libraries" not in (got.get("reason") or ""), got

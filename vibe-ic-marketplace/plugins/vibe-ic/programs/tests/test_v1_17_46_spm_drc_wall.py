@@ -304,6 +304,7 @@ def test_lvs_neither_file_names_all_three(tmp_path):
 _OCV_REPORT = """\
 === SETUP corner: process=SS liberty=/pdk/lib/cell__ss_125C_4v50.lib, SPEF=x ===
 OCV_DERATE_APPLIED early=0.95 late=1.05 flat-OCV
+STA_BASIS: POST_ROUTE_SPEF
 STA_BASIS_LIBERTY: /pdk/lib/cell__ss_125C_4v50.lib
 """
 
@@ -391,7 +392,11 @@ def test_driver_declines_when_the_report_declares_no_corner(
         monkeypatch, tmp_path):
     """An undeclared corner is a REFUSAL, never a fallback to the active one."""
     calls = {"read": [], "discover": []}
+    # R-0915-162 — the basis is present so the report REACHES the corner
+    # check; this test is about the CORNER refusal, and a report that is not a
+    # candidate at all would refuse one step earlier, for a different reason.
     _stub_driver(monkeypatch, tmp_path,
+                 "STA_BASIS: POST_ROUTE_SPEF\n"
                  "Startpoint: a\nEndpoint: b\n  0.00 0.00 x\n", calls)
     out = scc.run_installed_pdk_path_correlation(
         tmp_path, liberty_path=ACTIVE_TT, container="none")

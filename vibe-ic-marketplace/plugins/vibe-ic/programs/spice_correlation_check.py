@@ -2453,8 +2453,79 @@ def _unverified_session_candidates(project: Path) -> List[Path]:
             continue
     return out
 
+#: R-0915-162 — the bases a POST-LAYOUT correlation may be built on. Both are
+#: post-route AND carry extracted parasitics, which is the whole point of
+#: correlating a post-layout SPICE deck. `POST_ROUTE_NO_SPEF` is post-route but
+#: has no parasitics, and `PRE_LAYOUT_ESTIMATE` is neither; both are named in
+#: the refusal rather than silently accepted.
+_POST_ROUTE_SPEF_BASES = ("POST_ROUTE_SPEF", "POST_ROUTE_MCF_SPEF")
 
-def _pick_sta_report(project: Path, subckt_names: set) -> Optional[Path]:
+_STA_BASIS_RE = re.compile(r"(?m)^\s*STA_BASIS:\s*(\S+)\s*$")
+
+
+def sta_basis(text: str) -> str:
+    """The basis an STA report DECLARES, or "" when it declares none."""
+    m = _STA_BASIS_RE.search(text or "")
+    return m.group(1).strip() if m else ""
+
+
+def is_post_route_spef_basis(text: str) -> bool:
+    """Whether this report was produced post-route WITH parasitics.
+
+    A POST-LAYOUT correlation must be correlated against a post-layout timing
+    basis. MEASURED on spm run23: `_pick_sta_report` scored
+    `pre_pnr_timing.rpt` at stitch 3 against 2 for every post-route report, so
+    the richer path won and a post-layout SPICE deck was about to be correlated
+    against a PRE-LAYOUT, NO-PARASITICS basis whose own note says it "timed the
+    pre-PnR synthesis netlist with NO parasitics". That report also declares no
+    corner liberty, so the run refused -- correctly, but for the second reason
+    rather than the first.
+
+    Stitch richness is not a licence to change the subject. A pre-layout report
+    can out-stitch every post-route report and still be the wrong document.
+    """
+    return sta_basis(text) in _POST_ROUTE_SPEF_BASES
+
+
+def this_run_layout_mtime(project: Path) -> Optional[float]:
+    """The moment THIS run's layout was written, or None when there is none.
+
+    THE ANCHOR A STANDALONE GATE CAN MEASURE. `phase3_one_shot_runner` binds
+    freshness to `_RUN_STARTED_AT`, a constant set when that module is
+    imported; a separate program cannot read it (importing would set it to
+    NOW and refuse everything). The layout itself is the durable equivalent:
+    a post-route STA report that PREDATES the routed netlist it claims to have
+    timed cannot be about that netlist.
+    """
+    net = _find_gate_netlist(project)
+    if net is None:
+        return None
+    try:
+        return net.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _is_fresh(path: Path, not_before: Optional[float]) -> bool:
+    """`canonical_post_route_sta`'s freshness rule, applied to one candidate.
+
+    THE SAME RULE, and `test_the_freshness_rule_agrees_with_the_canonical_one`
+    pins that by driving both readers over the same bytes. The rule itself is
+    one comparison -- a basis older than the binding moment is not this run's
+    measurement -- and the risk is not that it is complicated, it is that the
+    two copies DRIFT. So they are tested against each other rather than merely
+    commented at.
+    """
+    if not_before is None:
+        return True
+    try:
+        return path.stat().st_mtime >= not_before
+    except OSError:
+        return False
+
+
+def _pick_sta_report(project: Path, subckt_names: set,
+                     not_before: Optional[float] = None) -> Optional[Path]:
     """Pick the STA report whose critical path exposes the most stitchable
     combinational stages, and — AMONG REPORTS THAT TIE — the one that STATES
     the operating point it timed at.
@@ -2510,11 +2581,97 @@ def _pick_sta_report(project: Path, subckt_names: set) -> Optional[Path]:
             continue
         if _PNR_SESSION_UNVERIFIED_RE.search(text):
             continue                  # never a correlation source (R-0915-154)
+        # R-0915-162 — BASIS FIRST, SCORE SECOND. The score answers "which
+        # report exposes the richest path"; it cannot answer "is this the right
+        # document". A post-layout correlation is only ever built on a
+        # post-route, SPEF-bearing basis, so a report that is not one is not a
+        # candidate at any score. Refusing by name is the caller's job; see
+        # `post_route_basis_refusal`.
+        #
+        # TWO INDEPENDENT REFUSALS, BOTH APPLIED (rebase onto #2540/R-0915-154).
+        # They are not the same question: R-0915-154 refuses a report whose RC
+        # PROVENANCE is unattested; this one refuses a report whose BASIS is not
+        # post-route-with-parasitics. A report can fail either alone, so neither
+        # may stand in for the other.
+        if not is_post_route_spef_basis(text):
+            continue
+        # R-0915-166 — AND IT MUST BE THIS RUN'S. A report carrying the right
+        # basis label can still be a PREVIOUS layout's: a re-entered copy whose
+        # own route came out clean writes no new multi-corner STA, and the
+        # stale report is then credited as if this run had measured it.
+        # `canonical_post_route_sta` records that exact case (lane icsub2,
+        # 2026-09-21: three arms published a number no arm computed).
+        if not _is_fresh(c, not_before):
+            continue
         score = (sta_path_stitch_score(text, subckt_names),
                  sta_path_states_its_operating_point(text))
         if score[0] > 0 and score > best_score:
             best, best_score = c, score
     return best
+
+
+def post_route_basis_refusal(project: Path,
+                             subckt_names: set,
+                             not_before: Optional[float] = None) -> Optional[str]:
+    """Why no report was eligible, in the run's own terms — or None when one
+    was.
+
+    NAMED, never a fallback. The alternative to naming this is to correlate
+    against whatever report scored highest, which is how a pre-layout estimate
+    came to be the basis for a post-layout verification on spm run23. A run
+    that cannot say which corner and which parasitics it correlated at has not
+    measured the design, and it must say THAT rather than publish a number.
+    """
+    cands: List[Path] = []
+    sta_dir = _pl.sta_dir(project)
+    if sta_dir.is_dir():
+        cands += sorted(sta_dir.glob("*.rpt"))
+    pnr_rpt = project / "phase3" / "stage3" / "pnr" / "sta.rpt"
+    if pnr_rpt.is_file():
+        cands.append(pnr_rpt)
+    seen: List[Tuple[str, str]] = []
+    eligible = []
+    for c in cands:
+        try:
+            text = c.read_text(errors="replace")
+        except OSError:
+            continue
+        basis = sta_basis(text) or "(declares none)"
+        seen.append((c.name, basis))
+        if is_post_route_spef_basis(text):
+            eligible.append((c, text))
+    if not cands:
+        return ("no post-route STA basis: this project holds no STA report at "
+                "all, so there is nothing to correlate a post-layout deck "
+                "against")
+    if eligible and not any(_is_fresh(c, not_before) for c, _t in eligible):
+        # A DISTINCT SENTENCE. "there is no post-route report" and "the only
+        # post-route report is a previous layout's" are different facts, and a
+        # reader acts on them differently -- the second means re-run STA, not
+        # re-run the flow.
+        names = ", ".join(c.name for c, _t in eligible)
+        return (f"no post-route STA basis from THIS layout: "
+                f"{len(eligible)} post-route report(s) carry the right basis "
+                f"({names}) but every one of them predates the routed netlist "
+                f"they would be timing, so they are a previous layout's "
+                f"measurement. Refusing rather than correlating this run's "
+                f"SPICE deck against an earlier run's timing")
+    if not eligible:
+        listing = ", ".join(f"{n} [{b}]" for n, b in seen)
+        return (f"no post-route STA basis: a post-layout SPICE correlation "
+                f"must be built on a post-route report carrying extracted "
+                f"parasitics ({' or '.join(_POST_ROUTE_SPEF_BASES)}), and none "
+                f"of the {len(seen)} STA report(s) here declares one — "
+                f"{listing}. Refusing rather than falling back on a pre-layout "
+                f"estimate, which would correlate a post-layout deck against a "
+                f"no-parasitics basis and charge the difference to the design")
+    if not any(sta_path_stitch_score(t, subckt_names) > 0 for _c, t in eligible):
+        names = ", ".join(c.name for c, _t in eligible)
+        return (f"no post-route STA basis with a stitchable path: "
+                f"{len(eligible)} post-route report(s) carry the right basis "
+                f"({names}) but none exposes a combinational stage this gate "
+                f"can stitch, so there is no path to correlate")
+    return None
 
 
 def _find_gate_netlist(project: Path) -> Optional[Path]:
@@ -2556,7 +2713,8 @@ def run_commercial_pdk_path_correlation(
 
     cells_text = cells_spice.read_text(errors="replace")
     subckt_names = set(re.findall(r"(?im)^\.SUBCKT\s+(\S+)", cells_text))
-    sta_rpt = _pick_sta_report(project, subckt_names)
+    sta_rpt = _pick_sta_report(project, subckt_names,
+                               this_run_layout_mtime(project))
     if not sta_rpt:
         return None
     sta_path = parse_sta_path(sta_rpt.read_text(errors="replace"))
@@ -2827,16 +2985,28 @@ def run_installed_pdk_path_correlation(
         return _persist_declared_refusal(project, {"status": "ERROR",
                 "reason": "installed cell SPICE or model section unresolved"})
 
-    sta_report = _pick_sta_report(project, probe["subckt_names"])
+    _not_before = this_run_layout_mtime(project)
+    sta_report = _pick_sta_report(project, probe["subckt_names"], _not_before)
     if not sta_report:
+        # R-0915-162 — REFUSE BY NAME. "critical STA path unresolved" is true
+        # of a project with no STA at all AND of one holding four post-route
+        # reports whose basis was never checked; a reader cannot act on a
+        # sentence that covers both.
+        #
+        # AND R-0915-154's DISCLOSURE IS KEPT, APPENDED (rebase onto #2540).
+        # The two answer different questions -- "was there a usable basis at
+        # all" and "which candidates were refused for unattested RC" -- so the
+        # reason carries both. Folding one into the other would let whichever
+        # ran first silence the other's evidence.
+        _why = post_route_basis_refusal(project, probe["subckt_names"],
+                                        _not_before)
         _unv = _unverified_session_candidates(project)
-        return _persist_declared_refusal(project, {"status": "ERROR", "reason": (
-            "critical STA path unresolved" + (
-                "; refused as correlation source(s): "
-                + ", ".join(_rel_or_name(project, u) for u in _unv)
-                + " (STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED -- an "
-                "in-session STA with unattested RC is never a correlation "
-                "source)" if _unv else ""))})
+        _unv_note = ("; refused as correlation source(s): "
+                     + ", ".join(_rel_or_name(project, u) for u in _unv)
+                     + " (STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED -- "
+                     "an in-session STA with unattested RC is never a "
+                     "correlation source)") if _unv else ""
+        return _persist_declared_refusal(project, {"status": "ERROR", "reason": (_why or "critical STA path unresolved") + _unv_note})
     sta_text = sta_report.read_text(errors="replace")
     sta_path = parse_sta_path(sta_text)
     if not sta_path:
@@ -3453,7 +3623,8 @@ def run_commercial_pdk_topN_path_correlation(
                           f"-group_count {top_n} -endpoint_count 1")
     # ── fallback: single best pre-existing report (opensta absent) ──
     if not sta_paths:
-        rpt = _pick_sta_report(project, subckt_names)
+        rpt = _pick_sta_report(project, subckt_names,
+                               this_run_layout_mtime(project))
         if rpt:
             p = parse_sta_path(rpt.read_text(errors="replace"))
             if p and p["path_delay_ns"] > 0:
