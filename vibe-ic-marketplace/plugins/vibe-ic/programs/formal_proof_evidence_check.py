@@ -65,6 +65,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import List
 
 sys.path.insert(0, str(Path(__file__).parent))
 import _flow_reason_taxonomy as _reason_taxonomy  # noqa: E402
@@ -335,6 +336,124 @@ def _declared_skip_class(data) -> str:
     return _reason_taxonomy.DESIGN_DECLARED_NA
 
 
+DISCHARGED_BY_BINDING = "DISCHARGED_BY_BINDING"
+BINDING_OUTSTANDING = "BINDING_OUTSTANDING"
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+_PROPERTY_RE = re.compile(r"\bproperty\s+(\w+)\s*;(.*?)\bendproperty\b", re.S)
+
+
+def strip_comments(text: str) -> str:
+    return _LINE_COMMENT_RE.sub("", _BLOCK_COMMENT_RE.sub("", text))
+
+
+def _harness_files(project: Path, formal_dir: Path, results: dict) -> List[Path]:
+    """The harness (and any expert fragment it includes) the .sby names."""
+    names: List[str] = []
+    sby = results.get("sby")
+    sby_path = project / sby if isinstance(sby, str) else None
+    if sby_path is not None and sby_path.is_file():
+        names = re.findall(r"^\s*(formal_[\w.-]+\.svh?)\s*$",
+                           sby_path.read_text(errors="replace"), re.M)
+    if not names:
+        names = [p.name for p in sorted(formal_dir.glob("formal_*.sv"))]
+    return [formal_dir / Path(n).name for n in dict.fromkeys(names)
+            if (formal_dir / Path(n).name).is_file()]
+
+
+def _harness_not_proven(files: List[Path], results: dict) -> Optional[str]:
+    """None when every harness file on disk is byte-identical (sha256) to the
+    one the recorded proof read (`results["proof_inputs"]`); else why not."""
+    import hashlib
+    recorded = (results.get("proof_inputs") or {}).get("files")
+    if not isinstance(recorded, dict):
+        return "the proof does not name the harness it proved (no proof_inputs)"
+    if not files:
+        return "no harness file on disk"
+    for f in files:
+        try:
+            now = hashlib.sha256(f.read_bytes()).hexdigest()
+        except OSError:
+            now = None
+        if recorded.get(f.name) != now:
+            return (f"harness not the one proven: {f.name} sha256 {str(now)[:12]} "
+                    f"!= proved {str(recorded.get(f.name))[:12]}")
+    return None
+
+
+def _harness_connects(harness: str, port: str) -> bool:
+    """The DUT instance connects `port` (`.port(port)`)."""
+    p = re.escape(port)
+    return bool(re.search(rf"\.{p}\s*\(\s*{p}\s*\)", harness))
+
+
+def _harness_binds_reset(harness: str, port: str) -> bool:
+    """The generated reset-active expression reads `port` (`rst_active = [!]port`)."""
+    return bool(re.search(
+        rf"\bwire\s+rst_active\s*=\s*[!~]?\s*{re.escape(port)}\s*;", harness))
+
+
+def _reset_guarded_properties(harness: str) -> List[str]:
+    """Asserted properties whose body is guarded by the bound reset."""
+    asserted = set(re.findall(r"\bassert\s+property\s*\(\s*(\w+)\s*\)", harness))
+    return sorted(n for n, body in _PROPERTY_RE.findall(harness)
+                  if n in asserted and re.search(r"\brst_active(?:_q)?\b", body))
+
+
+def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List[dict]:
+    """R-0924-2 — a NAME obligation (`resets.N.name`) is discharged
+    STRUCTURALLY: the harness binds the declared port as the reset (the DUT
+    port is connected to it and the reset-active expression reads it) AND a
+    property guarded by that reset is asserted AND this run PROVED it
+    (every task PASS, at least one unbounded). Otherwise it stays outstanding
+    with the reason. Never a trace proof; never dropped silently."""
+    import formal_harness_gen as _fhg
+    rows = [(r, _fhg.binding_obligation(r, project))
+            for r in results.get("unresolved_obligations") or []]
+    rows = [(r, b) for r, b in rows if b]
+    if not rows:
+        return []
+    hfiles = _harness_files(project, formal_dir, results)
+    stale = _harness_not_proven(hfiles, results)
+    harness = strip_comments("\n".join(f.read_text(errors="replace") for f in hfiles))
+    tasks = [t for t in results.get("properties") or [] if isinstance(t, dict)]
+    proven = (results.get("all_proved") is True and bool(tasks)
+              and all(str(t.get("status")) == "PASS" for t in tasks)
+              and any(t.get("bound") == "unbounded" for t in tasks))
+    proof_status = ", ".join(f"{t.get('task')}:{t.get('status')}"
+                             f"({t.get('bound')})" for t in tasks) or "no proof task"
+    covering = _reset_guarded_properties(harness)
+    out: List[dict] = []
+    for row, b in rows:
+        rec = {"id": str(row.get("id")), "kind": "binding", "role": b["role"],
+               "port": b["port"], "property": None, "proof_status": proof_status,
+               "proved_harness_sha256": {
+                   f.name: ((results.get("proof_inputs") or {}).get("files") or {}).get(f.name)
+                   for f in hfiles}}
+        why = []
+        if not _harness_connects(harness, b["port"]):
+            why.append(f"the harness does not connect the DUT port {b['port']!r}")
+        if not _harness_binds_reset(harness, b["port"]):
+            why.append(f"the harness does not bind {b['port']!r} as the reset "
+                       f"(no `rst_active = [!]{b['port']}`)")
+        if covering:
+            rec["property"] = covering[0]
+        else:
+            why.append("no asserted property is guarded by that reset")
+        if stale:
+            why.append(stale)
+        if not proven:
+            why.append(f"the covering property is not proven ({proof_status})")
+        if why:
+            rec.update(status=BINDING_OUTSTANDING, reason="; ".join(why))
+        else:
+            rec.update(status=DISCHARGED_BY_BINDING, reason=(
+                f"harness binds DUT port {b['port']!r} as the reset and "
+                f"{covering[0]}, guarded by it, is PROVEN ({proof_status})"))
+        out.append(rec)
+    return out
+
+
 def audit(project: Path) -> dict:
     formal_dir = _pl.formal_dir(project)
     results_path = _first_results_json(formal_dir)
@@ -426,6 +545,26 @@ def audit(project: Path) -> dict:
             "ran (#440 manifest shape) — vacuous for this gate")
         return rep
 
+    # R-0924-2 — name obligations, answered structurally before anything
+    # counts the open denominator. Recorded either way; a discharged one leaves
+    # `unresolved_obligations` and is published as DISCHARGED_BY_BINDING, never
+    # as an authored (trace) property.
+    bindings = binding_dispositions(project, formal_dir, results)
+    by_binding: List[str] = []
+    if bindings:
+        rep["binding_obligations"] = bindings
+        by_binding = [b["id"] for b in bindings if b["status"] == DISCHARGED_BY_BINDING]
+        for b in bindings:
+            rep["findings"].append(
+                f"{b['status']} (R-0924-2): {b['id']} — {b['reason']}")
+    if by_binding:
+        remaining = [r for r in results.get("unresolved_obligations") or []
+                     if not (isinstance(r, dict) and str(r.get("id")) in by_binding)]
+        results = dict(results, unresolved_obligations=remaining)
+        rep["discharged_by_binding"] = by_binding
+        if verdict_field == "INCOMPLETE" and not remaining:
+            # the contract was open ONLY on what the binding just closed
+            verdict_field = str(results.get("proof_verdict") or "PASS").upper()
     contract_incomplete = (verdict_field == "INCOMPLETE"
                            or bool(results.get("unresolved_obligations")))
     if results.get("all_proved") is not True:
@@ -523,7 +662,8 @@ def audit(project: Path) -> dict:
             "PROPERTY_DENOMINATOR_MISSING (#1974): completed Step 5 must state "
             "the positive declaration/property denominator")
     if (not contract_incomplete and isinstance(denominator, int)
-            and (not isinstance(authored, int) or authored < denominator)):
+            and (not isinstance(authored, int)
+                 or authored + len(by_binding) < denominator)):
         contract_ok = False
         rep["findings"].append(
             f"PROPERTY_DENOMINATOR_OPEN (#1974): authored={authored!r}, "
@@ -659,7 +799,9 @@ def audit(project: Path) -> dict:
                 "PROOF_CHAIN_OK: all_proved substantiated by an "
                 "elaboratable .sby + SymbiYosys PASS transcript; property "
                 f"denominator {denominator}/{denominator} closed with "
-                "bounded/unbounded scope disclosed")
+                "bounded/unbounded scope disclosed"
+                + (f" ({len(by_binding)} by binding, R-0924-2 — not trace proofs)"
+                   if by_binding else ""))
     else:
         rep.update(verdict="FAIL", rc=1)
     return rep
