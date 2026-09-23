@@ -89,7 +89,9 @@ import glob
 import hashlib
 import datetime
 import json
+import contextlib
 import os
+import threading
 import re
 import shlex
 import shutil
@@ -102,6 +104,7 @@ from types import MappingProxyType
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor
 import _path_layout as _pl
+import _gate_authorship as _ga
 import _reused_ip_predicate as _reused_ip
 import _waiver_entries as _we
 import _evidence_independence as _ev_ind  # #524
@@ -3850,6 +3853,40 @@ def _publish_over_the_audits_own_document(argv: List[str], project: Path
         # `program: flow_compliance_check`. So the negative arm holds BY
         # CONSTRUCTION rather than by a set that has to be kept right.
         if not _is_the_audits_own_compliance_report(abs_target):
+            continue
+        # AND IT MUST NOT BE THE RUN'S OWN EVIDENCE. R-0915-152, and it is the missing
+        # half of the sentence the caller already prints: "A PRODUCER's document is never
+        # written over -- that is R-0915-126 and it is untouched".
+        #
+        # `_is_the_audits_own_compliance_report` asks whether the document is a compliance
+        # report. It cannot ask WHO RAN the program that wrote it, and for this one program
+        # those are different questions: the flow lists `flow_compliance_check` under
+        # `programs:` for steps 2, 14, 15 and 37, so `flow_declared_producer_run` invokes it
+        # as the RUN's producer and its receipt IS the step's run evidence -- a document that
+        # satisfies the predicate above in every particular.
+        #
+        # MEASURED consequence of not asking, on the four steps above, EVERY pass and
+        # permanently:
+        #   1. the producer writes REL, stamped `invoked_as: producer`;
+        #   2. the audit's clause reaches here, supersedes it, and the gate child -- which
+        #      `_child_env` tells `VIBEIC_FCC_ROLE=audit` -- rewrites REL as `audit`;
+        #   3. the role-first reader in `check_step` then classifies REL as the auditor's and
+        #      refuses it as self-certified evidence, so the step has NO run evidence;
+        #   4. the next run re-produces REL and step 2 happens again.
+        # No sequence of runs ever credits those steps. Before the role stamp existed the
+        # same file was credited, so this is a regression the stamp introduced, and the fix
+        # belongs here rather than in the reader: the reader is right that an `audit`-stamped
+        # document is the auditor's -- what is wrong is turning the run's document into one.
+        #
+        # Declining here is not a no-op: `_publication is None` sends the clause down
+        # `_receipt_off_a_produced_document`, so the audit's own receipt goes to scratch and
+        # the producer's bytes are left exactly as the run wrote them. That is R-0915-126
+        # doing what its own disclosure claims.
+        try:
+            _existing = json.loads(abs_target.read_text(errors="replace"))
+        except (OSError, ValueError):
+            _existing = None
+        if _ga.role_of(_existing) == _ga.ROLE_PRODUCER:
             continue
         # WHO WROTE THIS RECEIPT, AND OVER WHAT POPULATION. R-0915-150, second cut.
         #
@@ -14367,12 +14404,49 @@ def _is_gate_verdict_document(path: Path,
     refuse a real producer's artefact; a false negative only falls back to the
     absent-before-gate answer this sits beside.
     """
+    return authorship_answer(path, gate_programs, producer_programs)[0]
+
+
+#: How `authorship_answer` reached its verdict. Returned, not logged, so the caller can
+#: DISCLOSE which paths the document itself answered for and which fell back to timing --
+#: a fallback that is invisible is a fallback nobody audits.
+AUTHORSHIP_BY_ROLE = "role"
+AUTHORSHIP_BY_CONTENT = "content"
+AUTHORSHIP_UNREADABLE = "unreadable"
+#: The document was readable and said nothing that identifies its author -- so the
+#: classification fell back to the caller's timing facts, i.e. to the authorship note.
+AUTHORSHIP_NO_ANSWER = "no-answer"
+
+
+def authorship_answer(path: Path,
+                      gate_programs: Optional[frozenset] = None,
+                      producer_programs: Optional[frozenset] = None
+                      ) -> Tuple[bool, str]:
+    """`(is_the_auditors, what_answered_it)` for the document at `path`.
+
+    Public because the rule has to be DRIVEN by its tests rather than restated by them,
+    and because the caller discloses the second element.
+    """
     try:
         data = json.loads(path.read_text(errors="replace"))
     except (OSError, ValueError):
-        return False
+        return False, AUTHORSHIP_UNREADABLE
     if not isinstance(data, dict):
-        return False
+        return False, AUTHORSHIP_UNREADABLE
+
+    # THE DOCUMENT SAYS WHO INVOKED ITS WRITER: read that first, because it is the only
+    # evidence here that is not an inference. Every branch below reasons from a PROGRAM
+    # NAME, and MEASURED on the shipped flow, 28 of the 33 declared-output/own-gate-`--json`
+    # pairs are written by a program that is both a declared producer of the step and its
+    # own gate -- for which no name can distinguish the two invocations, which is why the
+    # `_shared` branch at the end correctly refuses to try.
+    #
+    # Last writer wins, and that is right in both directions: an audit that overwrites the
+    # run's document makes the file on disk the auditor's, and a re-run of the RUN that
+    # overwrites the auditor's reclaims it. The record self-heals with no bookkeeping.
+    _role = _ga.role_of(data)
+    if _role is not None:
+        return _role == _ga.ROLE_AUDIT, AUTHORSHIP_BY_ROLE
 
     # v1.15.45 (sha256 capture) — WHOSE stamp, not whether there is one.
     # MEASURED on sha256 x sky130A (v1.15.44): step 0.5ic's two producers
@@ -14405,9 +14479,11 @@ def _is_gate_verdict_document(path: Path,
     for v in data.values():
         stamps.extend(_stamp_values(v))
     if not stamps:
-        return False
+        # Nothing in the document identifies anybody. Not a claim that the run wrote it:
+        # the caller's timing facts are the only remaining evidence, and the source says so.
+        return False, AUTHORSHIP_NO_ANSWER
     if gate_programs is None and producer_programs is None:
-        return True
+        return True, AUTHORSHIP_BY_CONTENT
 
     def _names(stamp: str) -> set:
         head = stamp.split()[0]
@@ -14491,7 +14567,7 @@ def _is_gate_verdict_document(path: Path,
         # A producer's record IS the document, or survives inside it: the run
         # produced it. A gate that later writes its own verdict beside it does
         # not turn the run's evidence into the auditor's.
-        return False
+        return False, AUTHORSHIP_BY_CONTENT
     # AN EXPLICIT PRODUCER STAMP IS THE DOCUMENT SAYING WHOSE IT IS, read BEFORE
     # the fall-through below -- because that fall-through is the exact defect the
     # 2026-09-15 block above describes: "the stamp matched no name in either set
@@ -14518,9 +14594,9 @@ def _is_gate_verdict_document(path: Path,
             if isinstance(_pv, str) and _pv.strip():
                 _producer_stamps.append(_pv.strip())
     if any(_hits(st, _producers_only) for st in _producer_stamps):
-        return False
+        return False, AUTHORSHIP_BY_CONTENT
     if any(_hits(st, _gates_only) for st in stamps):
-        return True
+        return True, AUTHORSHIP_BY_CONTENT
     if any(_hits(st, _shared) for st in stamps) and _shared:
         # THE STAMP IS THE SAME EITHER WAY, SO CONTENT DOES NOT ANSWER HERE.
         # A program the flow lists BOTH under this step's `programs:` and as
@@ -14548,10 +14624,14 @@ def _is_gate_verdict_document(path: Path,
         # facts — "was it absent when this audit began" and "did an earlier
         # pass of this audit create it" (`_prior_audit_created`). Those answer
         # it without asking the document who wrote it.
-        return False
+        #
+        # THIS is the branch the role stamp exists to retire. Until the writer of this
+        # particular document is taught to state its role, the answer here rests entirely
+        # on the authorship note, and `check_step` discloses that by name.
+        return False, AUTHORSHIP_NO_ANSWER
     # Stamped by something that is neither this step's gate nor a declared
     # producer: keep the presence-only answer the callers relied on.
-    return True
+    return True, AUTHORSHIP_BY_CONTENT
 
 
 # ── THE AUDIT'S OWN AUTHORSHIP RECORD ───────────────────────────────────────
@@ -14593,6 +14673,154 @@ def _is_gate_verdict_document(path: Path,
 # One note per (step, declared path), so 63 steps evaluated in a thread pool
 # (and two audits racing on one tree) never write the same file.
 _AUDIT_AUTHORSHIP_DIR = "reports/audit/audit_created"
+
+
+@contextlib.contextmanager
+def _note_lock(note: Path):
+    """Hold an exclusive lock for ONE authorship note, across threads AND processes.
+
+    R-0915-152 — THE NESTED-AUDIT RACE. Step 7's gate clause runs a NESTED
+    `flow_compliance_check`, which re-evaluates step 2 while the outer pass is
+    evaluating it too; on the default threaded path (`_compliance_workers`) two
+    threads of one pass can reach the same step's note as well. The note's key is
+    `sha1(f"{sid}|{rel}")`, so both arrive at the SAME file, and nothing serialised
+    them: one could read a half-written note (unreadable -> the artefact is credited
+    as the run's) or drop a note the other had just decided to rely on. That is
+    "MISSING twice, PASS forever" reached by concurrency instead of by staleness.
+
+    A LOCK FILE, not a lock on the note: locking the note itself would mean opening
+    the file being replaced, and `os.replace` swaps the inode out from under any
+    holder. The lock is per NOTE KEY, so two different notes never wait on each other.
+
+    Degrades to a no-op where `fcntl` is unavailable, because a platform without file
+    locks is not a reason to stop recording authorship -- the atomic write below still
+    guarantees a reader sees whole bytes.
+    """
+    lock_path = note.with_name(note.name + ".lock")
+    fh = None
+    # ACQUIRE OUTSIDE THE `yield`, AND YIELD EXACTLY ONCE. An earlier cut of this had
+    # a second `yield` in an `except OSError:` arm, so a body that raised -- a
+    # `note.unlink()` on an already-removed note, which is the ORDINARY drop case
+    # under concurrency -- threw into the generator, hit that arm and yielded again:
+    # "generator didn't stop after throw()". My own concurrency arm caught it. A
+    # context manager has one yield; failing to take the lock is handled here, before
+    # the body runs.
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(lock_path, "a+")
+        try:
+            import fcntl                                   # noqa: PLC0415
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        except Exception:                                   # pragma: no cover
+            pass
+    except OSError:                                         # pragma: no cover
+        # A lock we cannot take must not stop the audit; the atomic write still keeps
+        # every reader seeing a whole note.
+        fh = None
+    try:
+        yield
+    finally:
+        if fh is not None:
+            try:
+                fh.close()
+            except OSError:                                 # pragma: no cover
+                pass
+
+
+def _write_note_atomically(note: Path, payload: str) -> None:
+    """Replace the note in ONE step, so no reader ever sees a partial one.
+
+    `write_text` truncates and then writes: a concurrent reader can observe zero
+    bytes or half a JSON object, and an unreadable note is treated as absent -- which
+    CREDITS the auditor's own document as the run's. Written to a sibling temp file
+    and `os.replace`d, which is atomic within a directory on POSIX.
+    """
+    tmp = note.with_name(f"{note.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(payload)
+        os.replace(tmp, note)
+    finally:
+        # `finally`, NOT `except OSError`. The narrower form missed the two ways a step
+        # actually dies -- `SystemExit` and `KeyboardInterrupt` are BaseException, not
+        # Exception, and `_atomic_artefact.writing` says exactly that about its own
+        # cleanup -- so an interrupted pass left `<hex>.json.<pid>.<tid>.tmp` behind. That
+        # leftover is the auditor's, carries no content a reader could identify it by, and
+        # until it was recognised it moved the DESIGN HASH on every later pass. Same shape,
+        # and the same two halves, as the canonical audit's own temp.
+        #
+        # A no-op on the happy path: `os.replace` has already consumed the temp. The
+        # cleanup's own failure is swallowed so it can never mask the write's error, and
+        # nothing is raised from here.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:                                     # pragma: no cover
+            pass
+
+
+#: THIS INVOCATION'S IDENTITY, inherited by every nested clause through the
+#: environment. A nested `stageN_compliance` subprocess resolves the SAME id as the
+#: parent that spawned it, which is what lets a note say "MY invocation created this
+#: file" to a reader that is a different PROCESS.
+_INVOCATION_ENV = "VIBEIC_FCC_INVOCATION"
+
+
+def _invocation_id() -> str:
+    inherited = os.environ.get(_INVOCATION_ENV, "").strip()
+    if inherited:
+        return inherited
+    minted = f"{os.getpid()}-{int(time.time() * 1000)}"
+    os.environ[_INVOCATION_ENV] = minted
+    return minted
+
+
+def _claim_audit_will_create(project: Path, sid: Any,
+                            rels: Sequence[str]) -> None:
+    """Claim, BEFORE the gate runs, that this audit is about to create these paths.
+
+    R-0915-152 second cut. THE RACE MY FIRST CUT DID NOT CLOSE, and the review is
+    right that the lock I added wrapped only single already-atomic syscalls. The
+    decision "was this file created by an audit?" spans READ -> GATE -> RECORD, and
+    nothing held across it:
+
+        T2 (outer) evaluates step 2: `stage_phase1_compliance.json` is ABSENT, so its
+            first clause writes it. T2 then runs its remaining clauses.
+        T7's first clause is a NESTED `stage1_compliance` subprocess that evaluates
+            step 2 too. It sees the file PRESENT with NO note, credits it as run
+            evidence, and drops a note that is not there.
+        T2 finally records — after a reader has already counted the auditor's own
+            document as the run's.
+
+    A lock across the gate is not the answer: the gate is a subprocess that can take
+    minutes, and holding a lock over it would serialise the audit. Instead the CLAIM is
+    published before the gate, keyed to THIS INVOCATION — which a nested subprocess
+    resolves to the same string — so any evaluation inside the same invocation sees
+    "my own audit is creating this" and cannot credit it.
+
+    A claim carries no stat yet: the file may not exist. `_prior_audit_created`
+    finalises that below.
+    """
+    invocation = _invocation_id()
+    for rel in rels:
+        note = _authorship_note_path(project, sid, rel)
+        try:
+            note.parent.mkdir(parents=True, exist_ok=True)
+            with _note_lock(note):
+                if note.is_file():
+                    # An existing note already answers the question, with a stat.
+                    continue
+                _write_note_atomically(note, json.dumps({
+                    "schema": 1,
+                    "written_by": "flow_compliance_check",
+                    "state": "in_flight",
+                    "invocation": invocation,
+                    "step": str(sid),
+                    "rel": rel,
+                    "note": ("this audit's own gate is about to write this declared "
+                             "required_output; no evaluation inside this invocation "
+                             "may credit it as the run's"),
+                }, indent=1) + "\n")
+        except OSError:
+            continue
 
 
 def _authorship_note_path(project: Path, sid: Any, rel: str) -> Path:
@@ -14652,6 +14880,51 @@ def restamp_set(audit_produced: Sequence[str],
     return [r for r in audit_produced if r in absent or r in prior]
 
 
+def in_flight_claim_is_this_invocations(rec: Any) -> bool:
+    """Was this un-finalised claim written by the invocation asking?
+
+    Public because `_prior_audit_created` decides with it and the disclosure below reports
+    on it, and the two must not be able to disagree.
+    """
+    if not isinstance(rec, dict):
+        return False
+    if str(rec.get("state") or "") != "in_flight":
+        return False
+    return str(rec.get("invocation") or "") == _invocation_id()
+
+
+def stale_in_flight_claims(project: Path, sid: Any,
+                           rels: Sequence[str]) -> List[Dict[str, Any]]:
+    """Claims left by ANOTHER invocation, which answer nothing and must be said out loud.
+
+    One of these is what a pass killed mid-gate leaves behind. Each is reported with the
+    invocation that wrote it and whether the file it names now exists -- because a claim
+    naming a file that IS on disk, with no stat any audit recorded, is precisely the case
+    where the old code refused a document the RUN had written.
+    """
+    found: List[Dict[str, Any]] = []
+    for rel in rels:
+        note = _authorship_note_path(project, sid, rel)
+        try:
+            rec = json.loads(note.read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict) or rec.get("rel") != rel:
+            continue
+        if str(rec.get("state") or "") != "in_flight":
+            continue
+        if in_flight_claim_is_this_invocations(rec):
+            continue
+        found.append({
+            "rel": rel,
+            "claimed_by": str(rec.get("invocation") or "") or None,
+            "file_exists": _live_stat(project / rel) is not None,
+            "note": str(note.relative_to(project)) if note.is_relative_to(project)
+                    else str(note),
+        })
+    return found
+
+
 def _prior_audit_created(project: Path, sid: Any, rels: Sequence[str]) -> Set[str]:
     """Which of `rels` an EARLIER pass of this audit created, still unchanged.
 
@@ -14671,7 +14944,31 @@ def _prior_audit_created(project: Path, sid: Any, rels: Sequence[str]) -> Set[st
         if not isinstance(rec, dict) or rec.get("rel") != rel:
             continue
         live = _live_stat(project / rel)
-        if live is None:
+        if live is None and str(rec.get("state") or "") != "in_flight":
+            continue
+        # AN IN-FLIGHT CLAIM IS AN ANSWER FOR THE INVOCATION THAT MADE IT, AND ONLY IT.
+        #
+        # A note with no stat says "an audit is creating this right now", and that closes
+        # the read->gate->record window: a nested clause inherits the invocation id, so it
+        # sees its own audit at work and cannot credit the file.
+        #
+        # I ORIGINALLY TOOK IT FOR ANY INVOCATION, on the ground that a false refusal only
+        # costs a re-run. That ground is wrong here, and the review is right: the claim
+        # NEVER EXPIRES and nothing finalises it if the pass that wrote it was killed
+        # mid-gate. So a single interrupted audit refuses that path in EVERY later audit,
+        # forever -- and the paths this bites hardest are the ones no stamp can rescue:
+        # `rtl_hygiene`/`rom_init_lint` write a top-level LIST, the reader answers
+        # UNREADABLE, and the decision falls straight through to this claim. A cost that
+        # does not decay is not conservative.
+        #
+        # Another invocation's in-flight claim is therefore STALE and says nothing about
+        # what is on disk now: it was never finalised with a stat, so no audit ever recorded
+        # that the file it names is its own. It is ignored and DISCLOSED by name -- not
+        # unlinked, because an invocation that is genuinely still running owns its claim and
+        # removing it would reopen the window for that pass.
+        if str(rec.get("state") or "") == "in_flight":
+            if in_flight_claim_is_this_invocations(rec):
+                out.add(rel)
             continue
         if [live[0], live[1]] == [rec.get("size"), rec.get("mtime_ns")]:
             out.add(rel)
@@ -14694,7 +14991,8 @@ def _record_audit_created(project: Path, sid: Any, rels: Sequence[str]) -> None:
         note = _authorship_note_path(project, sid, rel)
         try:
             note.parent.mkdir(parents=True, exist_ok=True)
-            note.write_text(json.dumps({
+            with _note_lock(note):
+                _write_note_atomically(note, json.dumps({
                 "schema": 1,
                 "written_by": "flow_compliance_check",
                 "step": str(sid),
@@ -14704,7 +15002,7 @@ def _record_audit_created(project: Path, sid: Any, rels: Sequence[str]) -> None:
                 "note": ("this audit's own gate was the first process to "
                          "write this declared required_output; it is the "
                          "auditor's document, not the run's"),
-            }, indent=1) + "\n")
+                }, indent=1) + "\n")
         except OSError:
             continue
 
@@ -14717,8 +15015,10 @@ def _drop_audit_created_note(project: Path, sid: Any, rels: Sequence[str]) -> No
     of the DECLARED artefact itself, which nothing here touches.
     """
     for rel in rels:
+        note = _authorship_note_path(project, sid, rel)
         try:
-            _authorship_note_path(project, sid, rel).unlink()
+            with _note_lock(note):
+                note.unlink()
         except OSError:
             continue
 
@@ -15444,6 +15744,12 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # `_prior_audit_created`: pass 1's refusal is recorded durably so pass 2
     # does not have to re-derive it from bytes that cannot carry it.
     _prior_created = _prior_audit_created(project, sid, _declared_self_written)
+    # PUBLISHED BEFORE THE GATE RUNS, so a concurrent evaluation inside this same
+    # invocation cannot credit a file this audit is in the middle of creating. See
+    # `_claim_audit_will_create`: the window is READ -> GATE -> RECORD, and a lock
+    # cannot be held across a gate that is a subprocess.
+    if _absent_before_gate:
+        _claim_audit_will_create(project, sid, _absent_before_gate)
     _audit_produced: List[str] = []
     if gate:
         # GAP-B (#789) — thread the run's skip_analog into the gate evaluation
@@ -15475,13 +15781,61 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         _own_producers = frozenset(
             str(p).strip() for p in (step.get("programs") or [])
             if isinstance(p, str) and str(p).strip())
-        _audit_produced = [
-            rel for rel in _declared_self_written
-            if (project / rel).exists()
-            and (rel in _absent_before_gate
-                 or rel in _prior_created
-                 or _is_gate_verdict_document(
-                     project / rel, _own_gate_programs, _own_producers))]
+        # R-0915-152 third cut -- THE DOCUMENT'S OWN ACCOUNT OF WHO INVOKED ITS WRITER
+        # OUTRANKS THE TIMING FACTS, and where it gives none, the fall-back is DISCLOSED.
+        #
+        # The order matters and this is why: `absent_before_gate` and `_prior_created` are
+        # both statements about WHEN, and both were shown to give the wrong answer on a
+        # re-run -- the first because pass 2's artefact is no longer absent, the second
+        # because it depends on a note surviving. A document that states `invoked_as:
+        # producer` is the RUN's evidence even though this audit's gate later overwrote
+        # something at that path, and one that states `invoked_as: audit` is the
+        # auditor's even on the first pass. Timing is consulted only for documents whose
+        # writer has not been taught to say.
+        _audit_produced = []
+        _answered_by_timing: List[str] = []
+        for rel in _declared_self_written:
+            if not (project / rel).exists():
+                continue
+            _is_audits, _why = authorship_answer(
+                project / rel, _own_gate_programs, _own_producers)
+            if _why == AUTHORSHIP_BY_ROLE:
+                if _is_audits:
+                    _audit_produced.append(rel)
+                continue
+            if _why in (AUTHORSHIP_NO_ANSWER, AUTHORSHIP_UNREADABLE):
+                # UNREADABLE BELONGS HERE TOO. A document the reader cannot take an
+                # identity from is not a document that said "producer" -- and the
+                # list-shaped ones are exactly that case: `rtl_hygiene_lint` and
+                # `rom_init_lint` write a top-level JSON LIST, so no key can be carried and
+                # `_gate_authorship.stamp` leaves them untouched by design. Those two paths
+                # therefore rest ENTIRELY on the note and the claim, which is where the
+                # stale-claim defect bit hardest, and a refusal resting on bookkeeping has
+                # to name itself.
+                _answered_by_timing.append(rel)
+            if (rel in _absent_before_gate or rel in _prior_created or _is_audits):
+                _audit_produced.append(rel)
+        # A CLAIM FROM A PASS THAT NEVER FINISHED, said out loud. Before this, such a
+        # claim silently refused its path in every later audit; now the log names the
+        # invocation that left it and whether the file it claims is on disk.
+        _stale_claims = stale_in_flight_claims(project, sid, _declared_self_written)
+        if _stale_claims:
+            for _c in _stale_claims:
+                print(f"flow_compliance_check: step {sid}: IGNORING a stale in-flight "
+                      f"authorship claim on {_c['rel']} left by invocation "
+                      f"{_c['claimed_by']} (this invocation is {_invocation_id()}); the "
+                      f"claim was never finalised with a stat, so it says nothing about "
+                      f"the file now on disk (exists={_c['file_exists']}). Note: "
+                      f"{_c['note']}", file=sys.stderr)
+        if _answered_by_timing:
+            # SAID OUT LOUD, per step. These are the paths whose classification rests on
+            # the authorship note alone, because their document states no role: if the
+            # note is lost the answer moves, and a reader of this log can see which paths
+            # that is true for instead of having to re-derive the set.
+            print(f"flow_compliance_check: step {sid}: the document at "
+                  f"{', '.join(sorted(_answered_by_timing))} states no `invoked_as`, so "
+                  f"whether the audit or the run wrote it rests on this audit's own "
+                  f"authorship note, not on the document", file=sys.stderr)
         # Re-stamp what this pass refused with the stat the gate just wrote,
         # and clear the note for anything this pass credited — the note is the
         # auditor's bookkeeping about its OWN writes and must never outlive
@@ -18256,10 +18610,25 @@ _CHILD_SCOPE_STACK = ""
 
 
 def _child_env():
-    """The environment for a spawned gate program, carrying the scope stack."""
-    if not _CHILD_SCOPE_STACK:
-        return None          # nothing to add; let the child inherit as before
-    return dict(os.environ, **{_SCOPE_STACK_ENV: _CHILD_SCOPE_STACK})
+    """The environment for a spawned gate program: the scope stack, and WHO IS ASKING.
+
+    R-0915-152 third cut. The role is added HERE because this is the one place the audit
+    spawns a gate, and because the role is a fact about the INVOCATION, which only the
+    caller holds: the same checker is run by the orchestrator so its exit status can block
+    (#306) and by this audit as a gate clause, and nothing inside it can tell the two
+    apart. A gate this audit spawns is therefore told `audit`; everything the run spawns
+    says nothing and so is a producer by default -- see `_gate_authorship.caller_role`.
+
+    It no longer returns None. It used to when there was no scope stack to carry, which
+    was the inherit-as-before path; there is now always something to say. Still passed
+    explicitly rather than by mutating `os.environ`, for the reason the spawn site gives:
+    this module's `main` is called IN PROCESS by `stageN_compliance`, and a process-global
+    mutation would outlive the call that made it and mark a later spawn as the auditor's.
+    """
+    extra = dict(_ga.child_env_additions(_INVOCATION_ENV, _invocation_id()))
+    if _CHILD_SCOPE_STACK:
+        extra[_SCOPE_STACK_ENV] = _CHILD_SCOPE_STACK
+    return dict(os.environ, **extra)
 
 #: Scopes that contain no synthesis step, so the pre-PnR Yosys gate has nothing
 #: to read. `stage1` is spelt as an int one line below for historical reasons;
@@ -20521,6 +20890,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             # measurement at the same path by anything except its name, and this
             # repo's own guard is content-based "not name-based".
             "program": "flow_compliance_check",
+            # R-0915-152 third cut -- WHO INVOKED THIS PASS. `program` says which
+            # program wrote the document; it cannot say whether the RUN ran it (the
+            # orchestrator lists `flow_compliance_check` under steps 2 and 14, so its
+            # exit status can block) or an AUDIT ran it as a gate clause. Those are the
+            # two answers the classification needs to tell apart, and this is the only
+            # field that differs between them. See `_gate_authorship`.
+            _ga.DOC_KEY: _ga.caller_role(),
             "flow": args.flow,
             "project": str(project),
             "strict": not args.lenient,

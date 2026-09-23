@@ -96,6 +96,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from _atomic_artefact import write_json as atomic_write_json  # vibe-ic#1082
+import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
 
 PASS, FAIL, SKIP = 0, 1, 2
 
@@ -247,6 +248,10 @@ def main(argv=None) -> int:
         if not o.is_absolute():
             o = project / o
         o.parent.mkdir(parents=True, exist_ok=True)
+        # R-0915-152 -- the document states WHO INVOKED this writer, beside the
+        # verdict it already composes. Unstated role == producer, so the run's
+        # own path is unchanged.
+        _ga.stamp(res)
         atomic_write_json(o, res)
 
     print(json.dumps({k: v for k, v in res.items() if k != "run"}, indent=2))

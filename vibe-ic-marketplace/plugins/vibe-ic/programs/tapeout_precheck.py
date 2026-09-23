@@ -162,6 +162,7 @@ import general_precheck as _ours                             # noqa: E402
 import plugin_manifest_discovery as _pmd                     # noqa: E402
 import tapeout_readiness_check as _theirs                    # noqa: E402
 from _atomic_artefact import write_text as atomic_write_text  # noqa: E402
+import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
 
 ATTRIBUTION = "tapeout_precheck"
 
@@ -1142,6 +1143,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                    image=args.image, allow_pull=args.pull,
                    timeout=args.timeout, pdk_container=args.pdk_container)
     payload = rep.as_dict()
+    # R-0915-152 -- the document states WHO INVOKED this writer, beside the
+    # verdict it already composes. Unstated role == producer, so the run's
+    # own path is unchanged.
+    _ga.stamp(payload)
     out_json = args.out_json or (args.project / MERGED_ARTEFACT)
     out_json.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(out_json, json.dumps(payload, indent=2) + "\n",

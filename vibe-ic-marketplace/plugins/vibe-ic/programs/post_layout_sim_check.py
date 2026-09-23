@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import List, Tuple
 import _path_layout as _pl
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
+import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
 
 
 @dataclass
@@ -219,6 +220,9 @@ def main(argv: list = None) -> int:
 
     findings, stats = audit(project_dir)
     report = build_report(findings, stats, str(project_dir))
+    # R-0915-152 -- the document states WHO INVOKED this writer, beside the verdict it
+    # already composes. Unstated role == producer, so the run's own path is unchanged.
+    _ga.stamp(report)
     out = json.dumps(report, indent=2, ensure_ascii=False)
 
     if args.json:

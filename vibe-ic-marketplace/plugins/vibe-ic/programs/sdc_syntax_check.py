@@ -53,6 +53,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Tuple
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
+import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +329,10 @@ def main():
     result = audit(args.project_dir)
 
     if args.json is not None:
-        payload = json.dumps(asdict(result), indent=2, ensure_ascii=False)
+        # R-0915-152 -- the document states WHO INVOKED this writer, beside the verdict it
+        # already composes. Unstated role == producer, so the run's own path is unchanged.
+        payload = json.dumps(_ga.stamp(asdict(result)), indent=2,
+                             ensure_ascii=False)
         if args.json == "-":
             print(payload)
         else:

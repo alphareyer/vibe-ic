@@ -97,6 +97,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082/#1470
+import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -211,6 +212,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                        "produced by a cross-layer search, so there is no "
                        "rewrite to check."),
                    "baseline_marker": str(marker), "report": str(rp)}
+        # R-0915-152 -- the document states WHO INVOKED this writer, beside the
+        # verdict it already composes. Unstated role == producer, so the run's
+        # own path is unchanged.
+        _ga.stamp(payload)
         out = project / args.json
         out.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(out,
@@ -256,6 +261,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                    "latency_freedom_evidence"),
                "search_space": str(sp),
                "search_space_problems": space_problems}
+    # R-0915-152 -- the document states WHO INVOKED this writer, beside the
+    # verdict it already composes. Unstated role == producer, so the run's
+    # own path is unchanged.
+    _ga.stamp(payload)
     out = project / args.json
     out.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(out,

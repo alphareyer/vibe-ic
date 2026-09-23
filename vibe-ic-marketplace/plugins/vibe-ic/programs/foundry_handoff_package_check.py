@@ -70,6 +70,7 @@ import re
 import sys
 from pathlib import Path
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
+import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
 
 
 def _load_waivers(project):
@@ -723,6 +724,10 @@ def main(argv=None):
         report = {"program": _GATE_NAME, "verdict": verdict,
                   "findings": findings,
                   "zero_byte_members": zero_members}
+        # R-0915-152 -- the document states WHO INVOKED this writer, beside the
+        # verdict it already composes. Unstated role == producer, so the run's
+        # own path is unchanged.
+        _ga.stamp(report)
         out = json.dumps(report, indent=2, ensure_ascii=False)
         if args.json:
             Path(args.json).parent.mkdir(parents=True, exist_ok=True)
@@ -969,6 +974,10 @@ def main(argv=None):
         findings = substance_findings
         report = {"program": _GATE_NAME, "verdict": verdict,
                   "findings": findings}
+        # R-0915-152 -- the document states WHO INVOKED this writer, beside the
+        # verdict it already composes. Unstated role == producer, so the run's
+        # own path is unchanged.
+        _ga.stamp(report)
         out = json.dumps(report, indent=2, ensure_ascii=False)
         if args.json:
             Path(args.json).parent.mkdir(parents=True, exist_ok=True)
@@ -1061,6 +1070,9 @@ def main(argv=None):
         "shuttle_operator": precheck_operator,
         "findings": findings,
     }
+    # R-0915-152 -- the THIRD write path in this program, and the one a real run
+    # takes: measured, the two early-return branches above are the refusal paths.
+    _ga.stamp(out)
     if args.json:
         out_path = Path(args.json)
         out_path.parent.mkdir(parents=True, exist_ok=True)

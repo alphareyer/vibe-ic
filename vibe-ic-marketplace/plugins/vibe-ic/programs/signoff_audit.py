@@ -82,6 +82,7 @@ if _PROGRAMS_DIR not in sys.path:
     sys.path.insert(0, _PROGRAMS_DIR)
 
 import _signoff_drc_format as _sdf  # noqa: E402  (path bootstrap above)
+import _gate_authorship as _ga  # R-0915-152 (who invoked this writer)
 
 # #651 — dedicated, documented exit code for the PASS_WITH_WAIVERS verdict
 # tier. Distinct from 0 (bare PASS) and 1 (FAIL); also distinct from the
@@ -2232,6 +2233,10 @@ def main(argv: list = None) -> int:
         result = checker(project_dir)
 
     report = asdict(result)
+    # R-0915-152 -- the document states WHO INVOKED this writer, beside the
+    # verdict it already composes. Unstated role == producer, so the run's
+    # own path is unchanged.
+    _ga.stamp(report)
     report_json = json.dumps(report, indent=2, ensure_ascii=False)
 
     if args.json:
