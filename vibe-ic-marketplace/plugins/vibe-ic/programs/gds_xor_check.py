@@ -245,6 +245,25 @@ def shipped_and_source(project: Path) -> Tuple[Optional[Path], Optional[Path],
 #: reason -- every finishing pass writes IN PLACE, so a "before" only exists if it
 #: was kept.
 PREFINISH_REL_FMT = "phase3/stage3/pnr/{top}.prefinish.gds"
+#: A GLOB, NOT ONE NAME, and for the same reason `STREAMOUT_LOG_GLOB` below is one.
+#:
+#: The runner retains `{top}.prefinish.gds` where `top` is the name PnR ran under;
+#: this checker resolved `{top}` from the DEF FILE'S STEM. Those are not the same
+#: string. MEASURED on spm run22: the shipped GDS is `spm.gds`, the source DEF is
+#: `spm.def` -- so this looked for `phase3/stage3/pnr/spm.prefinish.gds` -- while
+#: the boundary the run actually kept is `phase3/stage3/pnr/chip_top.prefinish.gds`
+#: (the runner's top was `chip_top`, and the front door's own advisory recorded
+#: "phase3 auto-derived top='spm' from --ic-name (no chip_top module)").
+#:
+#: The names could not meet, so the RETAINED boundary was never used and every run
+#: fell back to a re-stream. That fallback is the expensive path this artefact
+#: exists to avoid, and a re-stream missing one library produces a CONFIDENT WRONG
+#: ANSWER about the design -- 776,403 then 348,392 phantom differences, measured,
+#: and neither of them about that chip.
+#:
+#: One boundary per run, so a glob is exact rather than lenient: if it ever matches
+#: more than one, `resolve_reference` refuses instead of guessing.
+PREFINISH_GLOB = "phase3/stage3/pnr/*.prefinish.gds"
 #: The run's own retained stream-out recipe and its transcript. A fallback that
 #: re-streams must use THE RUN'S recipe, not a hand-rolled read: that mistake
 #: produced 776,403 differences across 29 design layers on run21 -- placement boxes
@@ -536,7 +555,63 @@ def lef_set_from_the_run(project: Path) -> Dict[str, str]:
     return {"LEFS": ";".join([tech] + sorted(cells) + macros)}
 
 
-def resolve_reference(project: Path, top: str) -> Tuple[Optional[Path], str,
+def _def_design_name(def_file: Optional[Path]) -> str:
+    """The DESIGN statement of a DEF — the name the runner writes the boundary under.
+
+    Read from the DEF itself rather than inferred from its filename, because those
+    are different strings on every pad-ring run and on every run whose DEF is
+    `routed.def`: that mismatch is the defect this resolver exists to close.
+    """
+    if def_file is None:
+        return ""
+    try:
+        with def_file.open("r", errors="replace") as fh:
+            for line in fh:
+                text = line.strip()
+                if text.startswith("DESIGN "):
+                    parts = text.split()
+                    if len(parts) >= 2:
+                        return parts[1].strip().rstrip(";").strip()
+                if text.startswith("COMPONENTS "):
+                    break            # DESIGN precedes COMPONENTS in a valid DEF
+    except OSError:
+        return ""
+    return ""
+
+
+def _boundary_is_this_runs(project: Path, kept: Path,
+                           dfile: Optional[Path]) -> Tuple[bool, str]:
+    """Is this retained boundary provably the one THIS run streamed?
+
+    The runner writes a receipt beside it carrying the sha256 it computed, the size,
+    and the DEF it streamed from with that DEF's sha256. A boundary whose receipt is
+    absent, unreadable, or disagrees with the bytes now on disk is not evidence about
+    this run; neither is one streamed from a DEF that is no longer the DEF being
+    compared. Refusing is cheap -- the caller re-streams, which is what it did before
+    any of this existed.
+    """
+    receipt = kept.with_suffix(".gds.receipt.json")
+    try:
+        rec = json.loads(receipt.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return False, (f"no readable receipt at "
+                       f"{receipt.relative_to(project).as_posix()}")
+    if not isinstance(rec, dict):
+        return False, "the receipt is not an object"
+    live = _sha256(kept)
+    if str(rec.get("sha256") or "") != live:
+        return False, ("the receipt describes different bytes "
+                       "(sha256 mismatch), so the file has been replaced since")
+    if dfile is not None and rec.get("def_sha256"):
+        if str(rec["def_sha256"]) != _sha256(dfile):
+            return False, (f"it was streamed from a different "
+                           f"{rec.get('streamed_from_def') or 'DEF'} than the one "
+                           f"being compared")
+    return True, ""
+
+
+def resolve_reference(project: Path, top: str,
+                     dfile: Optional[Path] = None) -> Tuple[Optional[Path], str,
                                                        Dict[str, Any]]:
     """(retained pre-finishing GDS, "retained"|"restreamed", provenance).
 
@@ -550,9 +625,49 @@ def resolve_reference(project: Path, top: str) -> Tuple[Optional[Path], str,
     calls it a fidelity finding -- which is why the receipt says WHICH reference it
     used and never lets the two be confused.
     """
-    rel = PREFINISH_REL_FMT.format(top=top)
-    kept = project / rel
-    if kept.is_file():
+    # NAMED BY THE DEF'S OWN DESIGN, AND PROVEN TO BE THIS RUN'S. R-0915-148.
+    #
+    # My first cut resolved the exact `{top}` spelling and then GLOBBED
+    # `*.prefinish.gds`. The glob fixed the name mismatch and opened a worse hole,
+    # which a pre-landing review caught: nothing tied the single match to THIS run.
+    # Only the KLayout stream-out branch retains a boundary; the Magic branch
+    # retained nothing and deleted nothing, and nothing in the plugin ever unlinked
+    # one. So a boundary left by an earlier KLayout invocation would be picked up by
+    # a later Magic run and compared under "design-layer differences expected to be
+    # exactly 0" -- turning any routing change between the two runs into a design
+    # FAIL about the wrong layout. Before my commit the stem lookup simply MISSED and
+    # the checker re-streamed, so the stale comparison would have been NEW.
+    #
+    # Two things close it. The name is DERIVED, not guessed: the runner names the
+    # file after the DEF's own DESIGN statement, so this reads that statement. And
+    # the artefact must be PROVABLE: the runner records a receipt beside it (sha256,
+    # size, the DEF it was streamed from and that DEF's sha), and a boundary whose
+    # receipt is absent, unreadable, or disagrees with the bytes on disk is NOT this
+    # run's. An unprovable boundary re-streams, exactly as an absent one does --
+    # never `retained`.
+    design = _def_design_name(dfile) if dfile is not None else ""
+    candidates = []
+    if design:
+        candidates.append(PREFINISH_REL_FMT.format(top=design))
+    if top and top != design:
+        candidates.append(PREFINISH_REL_FMT.format(top=top))
+    kept, rel = None, ""
+    for cand in candidates:
+        if (project / cand).is_file():
+            kept, rel = project / cand, cand
+            break
+    if kept is not None:
+        ok, why = _boundary_is_this_runs(project, kept, dfile)
+        if not ok:
+            return None, "unprovable", {
+                "kind": "unprovable",
+                "path": rel,
+                "note": (f"a retained finishing boundary is present but cannot be "
+                         f"proven to belong to this run ({why}), so it is NOT used "
+                         f"as the reference; the comparison re-streams the current "
+                         f"DEF instead"),
+            }
+    if kept is not None and kept.is_file():
         return kept, "retained", {
             "kind": "retained", "path": rel, "sha256": _sha256(kept),
             "note": ("the stream-out the gds step kept BEFORE fill, seal ring and "
@@ -830,7 +945,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     report["runner"] = {"kind": runner.kind, "detail": runner.detail}
 
     timeout = args.timeout if args.timeout > 0 else 24 * 3600
-    kept, kind, prov = resolve_reference(project, dfile.stem)
+    kept, kind, prov = resolve_reference(project, dfile.stem, dfile)
     report["reference"] = prov
     with tempfile.TemporaryDirectory(prefix="gds_xor_ref_",
                                      dir=str(project)) as scratch:

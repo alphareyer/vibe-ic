@@ -42934,6 +42934,37 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
         # sign-off GDS can be pin-matched. Last, so labels land on final geometry.
         label_ok, label_note = _restore_port_labels_if_missing(
             project, top, pdk, container, gds_out, def_file)
+        # R-0915-148 — THIS BRANCH RETAINS NO FINISHING BOUNDARY, SO IT MUST NOT
+        # LEAVE SOMEBODY ELSE'S LYING AROUND.
+        #
+        # Only the KLayout branch writes `{top}.prefinish.gds`. Magic retains
+        # nothing and, until now, deleted nothing -- and nothing anywhere in the
+        # plugin ever unlinked one. So an earlier KLayout invocation (or one forced
+        # with VIBEIC_FORCE_KLAYOUT_STREAMOUT=1) left a boundary in the project, a
+        # later Magic invocation in the same directory left it there STALE, and
+        # `gds_xor_check` would compare this run's GDS against the previous run's
+        # layout under the banner "design-layer differences expected to be exactly
+        # 0" -- reporting any routing change between the two runs as a design FAIL
+        # about a layout nobody asked about.
+        #
+        # An absent boundary is a KNOWN, handled state: the consumer re-streams.
+        # A stale one is not. So this branch removes what it did not produce, and
+        # says so.
+        for _stale in sorted(pnr_dir.glob("*.prefinish.gds")):
+            try:
+                _stale_rec = _stale.with_suffix(".gds.receipt.json")
+                _stale.unlink()
+                if _stale_rec.is_file():
+                    _stale_rec.unlink()
+                print(f"[gds] removed a finishing boundary this run did not "
+                      f"produce ({_stale.name}): the magic stream-out retains "
+                      f"none, and a stale one would be compared as if it were "
+                      f"this run's")
+            except OSError as _stale_exc:                  # pragma: no cover
+                print(f"[gds] could NOT remove the stale finishing boundary "
+                      f"{_stale.name} ({type(_stale_exc).__name__}: "
+                      f"{_stale_exc}); gds_xor_check must refuse it by receipt")
+
         # #306 — BOTH stream-out engines get the substance gate. A stub GDS
         # out of Magic is the same defect as a stub GDS out of KLayout, and
         # gating only the fall-back path would leave the primary one open.
@@ -43094,6 +43125,35 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     try:
         shutil.copy2(gds_out, prefinish_gds)
         _pf_sha = _sha256_file(prefinish_gds)
+        # R-0915-148 — THE SHA IS RECORDED, NOT ONLY PRINTED.
+        #
+        # This value was computed here and then only printed, so nothing
+        # downstream could tell THIS run's boundary from a leftover of an earlier
+        # one. `gds_xor_check` calls a retained boundary "design-layer differences
+        # expected to be exactly 0", and a stale file under that banner turns any
+        # routing change between two runs into a design FAIL about the wrong
+        # layout. The receipt is what makes the artefact provable, and it carries
+        # the DEF the boundary was streamed from so the consumer can check it is
+        # comparing like with like.
+        _pf_receipt = prefinish_gds.with_suffix(".gds.receipt.json")
+        try:
+            _pf_receipt.write_text(json.dumps({
+                "program": "phase3_one_shot_runner",
+                "artefact": prefinish_gds.name,
+                "sha256": _pf_sha,
+                "size": prefinish_gds.stat().st_size,
+                "mtime_ns": prefinish_gds.stat().st_mtime_ns,
+                "top": str(top),
+                "streamed_from_def": (def_file.name
+                                      if def_file.is_file() else None),
+                "def_sha256": (_sha256_file(def_file)
+                               if def_file.is_file() else None),
+                "engine": "klayout",
+            }, indent=2) + "\n")
+        except Exception as _pf_rexc:                      # pragma: no cover
+            print(f"[gds] the finishing boundary's receipt was NOT written "
+                  f"({type(_pf_rexc).__name__}: {_pf_rexc}); gds_xor_check will "
+                  f"treat the boundary as unprovable and re-stream")
         prefinish_note = (f"retained {prefinish_gds.name} "
                           f"({prefinish_gds.stat().st_size} bytes, "
                           f"sha256 {_pf_sha})")
@@ -53236,6 +53296,28 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # already produced. chip-AGNOSTIC: scribe stubs filtered via
     # the same hint list as foundry_handoff_package_check.
     _SCRIBE_HINTS = ("scribe_line", "scribeline", "scribe-line", "frame")
+    #: A COMPARISON REFERENCE IS NOT A DELIVERABLE, and must never enter the pack.
+    #:
+    #: MEASURED on spm run22: phase3/stage4/foundry_handoff/ carried
+    #: `chip_top.prefinish.gds` (73,850,996 B) hardlinked beside the shipped
+    #: `spm.gds` (102,923,002 B) -- the PRE-FINISHING layout, kept by the gds step
+    #: purely so stream-out/finishing fidelity can be measured against it, and 29 MB
+    #: smaller than the real mask set because fill, seal ring and snap had not
+    #: happened yet. A hand-off package is what a foundry taped out from; a second,
+    #: differently-named, plausible-looking GDS in it is an invitation to tape out
+    #: the wrong layout, and the run's own write ledger classes this file as
+    #: `written_never_declared` -- nothing declares it a deliverable.
+    #:
+    #: `*.ring_reference.gds` (65,851,036 B on the same run) is excluded for the
+    #: same stated reason: its name says reference.
+    #:
+    #: NOT EXCLUDED, and deliberately: `spm.filled.gds`, which on run22 is
+    #: byte-for-byte the same SIZE as the shipped GDS and is a stage OF the
+    #: deliverable rather than a reference to compare against. It is duplication in
+    #: the package, not a wrong-layout hazard, and it is reported rather than
+    #: quietly dropped -- excluding a file because I am unsure what it is would be
+    #: the same class of guess in the other direction.
+    _REFERENCE_ONLY_SUFFIXES = (".prefinish.gds", ".ring_reference.gds")
     candidate_chip_gds: List[Path] = []
     if primary_gds.is_file():
         candidate_chip_gds.append(primary_gds)
@@ -53251,9 +53333,16 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 candidate_chip_gds.append(extra)
     if handoff_out.is_dir():
         _zero_byte_members: List[str] = []
+        _reference_members: List[str] = []
         for src_gds in candidate_chip_gds:
             stem_lo = src_gds.stem.lower()
             if any(h in stem_lo for h in _SCRIBE_HINTS):
+                continue
+            name_lo = src_gds.name.lower()
+            if any(name_lo.endswith(sfx) for sfx in _REFERENCE_ONLY_SUFFIXES):
+                # Recorded by name, not silently skipped: "the package does not
+                # contain this" and "nobody looked" must not read the same.
+                _reference_members.append(src_gds.name)
                 continue
             # ORGANIC-20260606 #433(d): a 0-byte member must never enter
             # the foundry handoff pack — record it by name instead of
@@ -53272,6 +53361,11 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 written.append(str(dst_gds))
             except OSError:
                 pass
+        if _reference_members:
+            print(f"[handoff] comparison reference(s) NOT packaged: "
+                  f"{', '.join(sorted(_reference_members))} — a retained "
+                  f"pre-finishing or reference layout is evidence for fidelity "
+                  f"checking, not a mask deliverable")
         if _zero_byte_members:
             (handoff_out / "PACKAGING_ERRORS.txt").write_text(
                 "0-byte GDS source(s) REFUSED from the handoff pack "

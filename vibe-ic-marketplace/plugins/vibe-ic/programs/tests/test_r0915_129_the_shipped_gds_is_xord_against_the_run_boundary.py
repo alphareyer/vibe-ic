@@ -216,15 +216,64 @@ def test_a_path_that_already_resolves_is_left_alone(tmp_path):
 
 # --- the reference kind is always named --------------------------------------
 
-def test_the_retained_boundary_is_preferred_and_named(tmp_path):
-    kept_rel = g.PREFINISH_REL_FMT.format(top="spm")
-    kept = tmp_path / kept_rel
+def _staged_boundary(project, top="spm", body=b"GDS", *, with_receipt=True,
+                     def_file=None):
+    """A retained boundary as the RUNNER now stages it: the artefact PLUS the
+    receipt that binds it to the run that wrote it (R-0915-148).
+
+    The fixture gained the receipt because the resolver gained a proof
+    requirement: only the KLayout stream-out branch retains a boundary, the Magic
+    branch retained nothing and deleted nothing, and nothing ever unlinked one --
+    so an artefact alone could be a LEFTOVER of an earlier invocation, and calling
+    it "design-layer differences expected to be exactly 0" turned any routing
+    change between two runs into a design FAIL about the wrong layout. The claim
+    below is unchanged; what changed is that the fixture now stages a boundary the
+    run can PROVE is its own, which is what the claim was always about.
+    """
+    import hashlib
+    import json as _json
+    kept_rel = g.PREFINISH_REL_FMT.format(top=top)
+    kept = project / kept_rel
     kept.parent.mkdir(parents=True, exist_ok=True)
-    kept.write_bytes(b"GDS")
-    path, kind, prov = g.resolve_reference(tmp_path, "spm")
+    kept.write_bytes(body)
+    if with_receipt:
+        rec = {"program": "phase3_one_shot_runner", "artefact": kept.name,
+               "sha256": hashlib.sha256(body).hexdigest(), "size": len(body),
+               "engine": "klayout"}
+        if def_file is not None:
+            rec["streamed_from_def"] = def_file.name
+            rec["def_sha256"] = hashlib.sha256(def_file.read_bytes()).hexdigest()
+        kept.with_suffix(".gds.receipt.json").write_text(_json.dumps(rec) + "\n")
+    return kept, kept_rel
+
+
+def _def_named(project, filename="spm.def", design="spm"):
+    d = project / "phase3/stage3/pnr" / filename
+    d.parent.mkdir(parents=True, exist_ok=True)
+    d.write_text(f"VERSION 5.8 ;\nDESIGN {design} ;\nCOMPONENTS 0 ;\nEND DESIGN\n")
+    return d
+
+
+def test_the_retained_boundary_is_preferred_and_named(tmp_path):
+    dfile = _def_named(tmp_path)
+    kept, kept_rel = _staged_boundary(tmp_path, def_file=dfile)
+    path, kind, prov = g.resolve_reference(tmp_path, "spm", dfile)
     assert kind == "retained" and path == kept
     assert prov["sha256"] and prov["path"] == kept_rel
     assert "exactly 0" in prov["note"]
+
+
+def test_a_boundary_the_run_cannot_prove_is_re_streamed_not_preferred(tmp_path):
+    """THE NEGATIVE BESIDE IT, and the reason the fixture above now carries a
+    receipt: an artefact with nothing tying it to this run is exactly the leftover
+    case, and preferring it would assert zero differences about another run's
+    layout. It re-streams, and the kind is recorded so no reader mistakes one for
+    the other."""
+    dfile = _def_named(tmp_path)
+    _staged_boundary(tmp_path, def_file=dfile, with_receipt=False)
+    path, kind, prov = g.resolve_reference(tmp_path, "spm", dfile)
+    assert path is None and kind == "unprovable", (kind, prov)
+    assert "cannot be proven" in prov["note"]
 
 
 def test_without_the_boundary_the_receipt_says_it_re_streamed(tmp_path):
