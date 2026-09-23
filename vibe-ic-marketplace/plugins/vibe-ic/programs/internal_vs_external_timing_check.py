@@ -114,17 +114,14 @@ def _classify_group(path_or_key: str) -> str | None:
 def _symbols_in(d: Any) -> set[str]:
     """Return the symbol set (H0, H1, BR, IBT) covered by a dict or list.
 
-    WHOLE WORDS (`_symbol_words`), not substrings: "LIBRARY", "CALIBRATION"
+    IDENTIFIER TOKENS (`_identifier_tokens`), not substrings: "LIBRARY", "CALIBRATION"
     and "FABRIC" carry no BR and "CH0" no H0, which the substring reading
     counted as coverage (review of next/ictier1c). `break` is the spelled-out
     BR (`tB_break_us`).
     """
     def _syms(text: Any) -> set[str]:
-        words = _symbol_words(text)
-        got = {w.upper() for w in words if w.upper() in SYMBOLS_REQUIRED}
-        if "break" in words:
-            got.add("BR")
-        return got
+        return {sym for t in _identifier_tokens(text)
+                if (sym := _token_symbol(t)) is not None}
 
     out: set[str] = set()
     if isinstance(d, dict):
@@ -196,83 +193,120 @@ def _find_numeric_us(obj: Any, needle: str) -> float | None:
     return None
 
 
-#: THE FULL PROBE'S VOCABULARY, matched as WHOLE SYMBOLS (see `_symbol_words`),
-#: never as substrings: "LIBRARY"/"CALIBRATION"/"FABRIC" carry no BR and "CH0"
-#: no H0. Per-symbol names (and `break`, the spelled-out BR), and the direction
-#: words that name one side of a split.
-_TIMING_SYMBOL_WORDS = frozenset({"h0", "h1", "br", "ibt", "break"})
+#: THE FULL PROBE'S VOCABULARY. Symbols are matched against IDENTIFIER TOKENS
+#: (`_identifier_tokens`), never as substrings: "LIBRARY"/"CALIBRATION"/
+#: "FABRIC" carry no BR and "CH0" no H0, while the fused spellings a timing
+#: table really uses -- TIBT_US, TBR_MIN_US, IBTmin, H0low, tbreak_us -- do.
+_TIMING_SYMBOLS = frozenset({"h0", "h1", "br", "ibt", "break"})
 _TIMING_SIDE_WORDS = frozenset({"rx", "tx", "host", "dut", "master", "slave",
                                 "external", "internal"})
+#: The words main's escape read off top-level group names (its substring list
+#: `rx_ tx_ host_ dut_ external_ internal_ _counters _cycles symbol _low _high
+#: break ibt`), now as tokens. Kept so the escape is never narrower than main.
+_LEGACY_GROUP_WORDS = frozenset({"rx", "tx", "host", "dut", "external",
+                                 "internal", "counters", "cycles", "symbol",
+                                 "symbols", "low", "high", "break", "ibt"})
+
+#: PROVENANCE IS A SET OF FIELDS, NOT A SHAPE OF CONTENT (review of ictier1c
+#: round 2). Where the design came from, how a value was extracted and what a
+#: diagram is captioned say nothing about protocol timing, and reading them
+#: FAILED designs main passed ("Wishbone master read cycle",
+#: `L3_external_interface.asciidoc`). These fields are never probed; every
+#: other field is, whatever its content looks like.
+_PROVENANCE_FIELDS = frozenset({
+    "source", "sources", "source_file", "source_files", "source_documents",
+    "source_documents_derivation", "extraction_evidence",
+    "extraction_strategy", "evidence", "provenance", "_generator",
+    "caption", "title", "description", "desc", "comment", "comments", "note",
+    "notes", "literal", "matched_substring", "strategy", "role", "doc_class",
+    "ic_name", "schema_version",
+})
 
 
-def _symbol_words(text: Any) -> set[str]:
-    """Lower-cased WHOLE words of an identifier or sentence: split on anything
-    that is not a letter or digit, then on lower->Upper case boundaries
-    (`tIBT_us` -> t, ibt, us; `H0_low_us` -> h0, low, us). A letter->digit run
-    stays one word, so `H0` is `h0` and `CH0` is `ch0`, never `h0`."""
+def _identifier_tokens(text: Any) -> list[str]:
+    """Lower-cased tokens of an identifier or phrase: split on anything that is
+    not a letter or digit, on lower->Upper (`tIBT` -> t, ibt), on an upper run
+    followed by lower (`IBTmin` -> ibt, min) and on digit->letter (`H0low` ->
+    h0, low). Letter->digit never splits, so `H0` is `h0` and `CH0` is `ch0`."""
     import re
-    out: set[str] = set()
+    out: list[str] = []
     for part in re.split(r"[^A-Za-z0-9]+", str(text)):
-        for w in re.findall(r"[A-Z]+[0-9]*(?![a-z])|[A-Z]?[a-z]+[0-9]*|[0-9]+", part):
-            out.add(w.lower())
+        part = re.sub(r"([a-z])([A-Z])", r"\1 \2", part)
+        part = re.sub(r"([A-Z]{2,})([a-z])", r"\1 \2", part)
+        part = re.sub(r"([0-9])([A-Za-z])", r"\1 \2", part)
+        out += [w.lower() for w in part.split() if w]
     return out
 
 
-def _is_timing_word_set(words: set[str]) -> bool:
-    return bool(words & _TIMING_SYMBOL_WORDS or words & _TIMING_SIDE_WORDS)
+def _token_symbol(tok: str) -> str | None:
+    """The timing symbol a token names, or None. A leading `t` is the timing-
+    parameter prefix (`tIBT`, `TBR_MIN`, `tbreak`); `break` is the spelled-out
+    BR."""
+    for cand in (tok, tok[1:] if tok.startswith("t") else None):
+        if cand in _TIMING_SYMBOLS:
+            return "BR" if cand == "break" else cand.upper()
+    return None
 
 
-def _is_path_like(text: Any) -> bool:
-    """A file path or file name is provenance (`source_documents`,
-    `extraction_evidence` keyed by source file), not timing: measured on spm
-    run22, `input/docs/L3_external_interface.md` would otherwise read as an
-    `external` side."""
-    import re
-    t = str(text)
-    return "/" in t or bool(re.search(r"\.[A-Za-z0-9]{1,5}$", t))
+def _names_a_symbol(text: Any) -> bool:
+    return any(_token_symbol(t) for t in _identifier_tokens(text))
 
 
-def _names_timing(text: Any) -> bool:
-    return (not _is_path_like(text)) and _is_timing_word_set(_symbol_words(text))
+def _names_a_side(text: Any) -> bool:
+    return bool(set(_identifier_tokens(text)) & _TIMING_SIDE_WORDS)
 
 
-def timing_content_probe(*docs: Any) -> list[str]:
-    """Every place in `docs` that carries protocol symbol timing, as paths.
+def timing_content_probe(waveform: Any, rtl_constants: Any = None) -> list[str]:
+    """Every place that carries protocol symbol timing, as paths.
 
-    THE ESCAPE'S EVIDENCE MUST COVER EVERYTHING THE GATE READS. The review of
-    next/ictier1c (8646e1862) measured the narrower reading certifying absences
-    that were on the page: scalar keys `H0_low_us`/`IBT_us`, a
-    `symbol_timing` list of `{"name": "H0", ...}`, `break_*`/`ibt_*` windows,
-    `master_side`/`slave_side` groups, `protocol_timing.rx_side`, and the
-    clause's own `--layer` constants (`TX_IBT_us`, `BR_MIN_us`) -- which
-    `check()` itself falls back to for the IBT<BR cross-check. This walks every
-    key at every depth and every string in a list or under a `name`, and
-    matches whole symbol / side words. A key only counts when it holds
-    something: `null` and a boolean (`"no_rx_classifier_ticks_in_input":
-    true`) are declarations of absence, not timing.
+    DECIDED BY FIELD (review of ictier1c round 2). Provenance fields are never
+    read (`_PROVENANCE_FIELDS`, and a `waveforms[]` entry's own name, which is
+    its caption); every other field is:
+      * a key or a `name`/`symbol`/`signal` value, or a list string, that names
+        a timing SYMBOL (H0/H1/BR/IBT/break, fused or not) -- a key only when
+        it holds something (null/bool are declarations of absence);
+      * a key that names a SIDE (rx/tx/host/dut/master/slave/external/
+        internal) and holds a GROUP (dict or list) -- the shape `check()`
+        treats as a side. A caption or a constant NAMED `master_clk` is not a
+        side;
+      * the `--layer` constants read exactly as `check()` reads them for the
+        IBT<BR cross-check, through `_find_numeric_us`.
     """
     hits: list[str] = []
 
-    def _walk(node: Any, path: str) -> None:
+    def _walk(node: Any, path: str, in_waveforms: bool = False) -> None:
         if isinstance(node, dict):
             for k, v in node.items():
+                if str(k) in _PROVENANCE_FIELDS:
+                    continue
                 sub = f"{path}.{k}" if path else str(k)
-                if (v is not None and not isinstance(v, bool)
-                        and _names_timing(k)):
-                    hits.append(sub)
-                if k in ("name", "symbol", "signal") and isinstance(v, str) \
-                        and _names_timing(v):
+                if v is not None and not isinstance(v, bool):
+                    if _names_a_symbol(k):
+                        hits.append(sub)
+                    elif isinstance(v, (dict, list)) and _names_a_side(k):
+                        hits.append(sub)
+                if (k in ("name", "symbol", "signal") and isinstance(v, str)
+                        and not (in_waveforms and k == "name")
+                        and _names_a_symbol(v)):
                     hits.append(f"{sub}={v}")
-                _walk(v, sub)
+                _walk(v, sub, in_waveforms=False)
         elif isinstance(node, list):
             for i, item in enumerate(node):
-                if isinstance(item, str) and _names_timing(item):
+                if isinstance(item, str) and _names_a_symbol(item):
                     hits.append(f"{path}[{i}]={item}")
-                _walk(item, f"{path}[{i}]")
+                _walk(item, f"{path}[{i}]", in_waveforms=in_waveforms)
 
-    for i, doc in enumerate(docs):
-        if doc is not None:
-            _walk(doc, f"doc{i}")
+    if isinstance(waveform, dict):
+        for k, v in waveform.items():
+            if str(k) in _PROVENANCE_FIELDS:
+                continue
+            _walk({k: v}, "L8", in_waveforms=False) if k != "waveforms" \
+                else _walk(v, "L8.waveforms", in_waveforms=True)
+    if rtl_constants is not None:
+        _walk(rtl_constants, "layer")
+        for needle in ("TX_IBT", "BR_MIN"):
+            if _find_numeric_us(rtl_constants, needle) is not None:
+                hits.append(f"layer:{needle}")
     return hits
 
 
@@ -660,11 +694,11 @@ def main() -> int:
     # words at the level they were always read (top level + timing_groups).
     _rx, _tx = classified_groups(waveform)
     _probe_hits = timing_content_probe(waveform, rtl_constants)
-    _legacy_words = _TIMING_SYMBOL_WORDS | _TIMING_SIDE_WORDS | {
-        "counters", "cycles", "symbol", "symbols", "low", "high"}
     _legacy_hit = any(
         v is not None and not isinstance(v, bool)
-        and not _is_path_like(k) and (_symbol_words(k) & _legacy_words)
+        and str(k).rsplit(".", 1)[-1] not in _PROVENANCE_FIELDS
+        and (set(_identifier_tokens(k)) & _LEGACY_GROUP_WORDS
+             or _names_a_symbol(k))
         for k, v in _group_items)
     _has_proto_group = bool(_rx or _tx or _probe_hits or _legacy_hit)
     _CANONICAL = ("timing_windows", "timing_constants", "waveforms")
