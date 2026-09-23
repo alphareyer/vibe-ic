@@ -562,3 +562,336 @@ def test_mutation_comparing_unknowns_as_equal_is_caught():
     fresh, why = si.compare({c: "a" * 64 for c in si._COMPONENTS}, partial)
     assert fresh is False, why
     assert any("cannot be established" in w for w in why), why
+
+
+# ===========================================================================
+# r2 — THE REVIEW FINDINGS (wcxu446tu, 6 CONFIRMED)
+#
+# ROOT CAUSE of most of them: r1 tied each kind to the ONE flow step that
+# declares its artefact, but the runner FUNCTION implements a RANGE.
+# `step_pnr` is floorplan THROUGH routing; `step_gds` and the finishing around
+# it span die-finishing through stream-out. Keying pnr on step 21 alone made
+# its inputs `sha(post_hold.def)` — a file `step_pnr` WRITES ITSELF — so a new
+# netlist, SDC or slot left the routed DEF "fresh" and the disclosure said so.
+#
+# NOTHING BELOW PATCHES AN IDENTITY HELPER. The r1 suite pinned
+# `_step_image_digest`, and that is exactly what hid finding 5.
+# ===========================================================================
+import phase3_one_shot_runner as _R  # noqa: E402
+
+_REAL_STEPS = si.load_steps(FLOW)
+
+
+def _pdk_with_real_files(root: Path):
+    d = root / "_pdk"
+    d.mkdir(parents=True, exist_ok=True)
+    lib, tlef = d / "tt.lib", d / "tech.lef"
+    for f, t in ((lib, "library(t){}\n"), (tlef, "VERSION 5.8 ;\n")):
+        if not f.is_file():
+            f.write_text(t)
+
+    class _Pdk:
+        liberty = str(lib)
+        tech_lef = str(tlef)
+        cell_lef = cell_gds = drc_deck = None
+    return _Pdk()
+
+
+def _span_project(tmp_path: Path) -> Path:
+    """A finished tree carrying what every span declares and reads."""
+    for rel, text in (
+        ("input/submission_template/tapeout_declaration.json",
+         '{"answers": {"deliverable": "DIE"}}\n'),
+        ("phase2/stage1/rtl/top.v", "module top(); endmodule\n"),
+        ("phase2/stage2/constraints/top.sdc", "create_clock -period 10\n"),
+        ("phase2/stage2/synth/netlist.v", "module top(); endmodule\n"),
+        ("phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\nEND DESIGN\n"),
+        ("phase3/stage3/pnr/top.def", "VERSION 5.8 ;\nEND DESIGN\n"),
+        ("phase3/stage3/pnr/spare_cells.json", "{}\n"),
+        ("phase3/stage3/extracted/parasitic.spef", "*SPEF\n"),
+    ):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    (tmp_path / "provenance.jsonl").write_text("".join(
+        json.dumps({"tool": t, "version": v,
+                    "outputs": {o: "sha256:" + "0" * 64}}) + "\n"
+        for t, v, o in (
+            ("yosys", "0.38", "phase2/stage2/synth/netlist.v"),
+            ("openroad", "2.0", "phase3/stage3/pnr/routed.def"),
+            ("klayout", "0.28", "phase3/stage4/gds/top.gds"))))
+    return tmp_path
+
+
+def _ident(project: Path, kind: str):
+    extra = ()
+    if kind == "gds":
+        extra = (project / "phase3/stage3/pnr/top.def",)
+    elif kind == "pnr":
+        extra = (project / "phase2/stage2/synth/netlist.v",)
+    return si.identity_now(
+        project=project, kind=kind, runner_path=RUNNER, programs_dir=PROGRAMS,
+        flow_yaml=FLOW, pdk=_pdk_with_real_files(project),
+        image_digest=_R._step_image_digest(""),      # REAL, not patched
+        extra_inputs=extra)[0]
+
+
+# --- the span itself -------------------------------------------------------
+def test_each_kind_spans_the_steps_its_function_implements():
+    got = {k: [str(s["id"]) for s in si.steps_in_span(_REAL_STEPS, k)]
+           for k in ("synth", "pnr", "gds")}
+    assert got["synth"] == ["9"]
+    assert got["pnr"] == ["15", "15.5ic", "16", "17", "18", "19", "20", "21"]
+    assert "26.5ic" in got["gds"] and "37" in got["gds"]
+    assert "34" in got["gds"], "metal fill is inside the stream-out span"
+
+
+def test_a_span_does_not_hash_what_it_produces_itself():
+    """FINDING 1. `post_hold.def` is step 20's output and step 21's declared
+    input, and `step_pnr` implements both — so hashing it asked the routed DEF
+    whether the routed DEF had changed. A key that cannot fire."""
+    specs, produced = si.span_input_specs(_REAL_STEPS, "pnr")
+    paths = [p for p, _cond in specs]
+    assert "phase3/stage3/pnr/post_hold.def" in produced
+    assert not any("post_hold.def" in p for p in paths), (
+        f"pnr still hashes a file it writes itself: {paths}")
+    assert any("constraints" in p for p in paths), "the SDC must be an input"
+    assert any("tapeout_declaration" in p for p in paths), (
+        "the slot declaration must be an input")
+
+
+def test_the_gds_span_subtracts_the_fill_it_makes_itself():
+    """FINDING 2/6. Step 37 declares `filled.def OR metal_fill.done`, which
+    `step_canonicalize_artefacts` writes AFTER the stamp — so the stamp
+    recorded the PREVIOUS run's fill and the stream-out was re-run for
+    nothing. Step 34 is inside the span, so the rule subtracts it."""
+    specs, produced = si.span_input_specs(_REAL_STEPS, "gds")
+    paths = [p for p, _c in specs]
+    assert any("metal_fill.done" in p for p in produced)
+    assert not any("filled.def" in p or "metal_fill.done" in p
+                   for p in paths), paths
+
+
+def test_an_input_whose_producer_is_conditional_is_absent_not_unanswerable(
+        tmp_path):
+    """MEASURED: a finished gf180 tree has no `post_dft_netlist.v`, because
+    step 12 is `condition_kind: design_dependent`. Refusing on its absence
+    would mean PnR is never reused on any design without DFT."""
+    specs, _ = si.span_input_specs(_REAL_STEPS, "pnr")
+    conds = {p: c for p, c in specs}
+    dft = [p for p in conds if "post_dft_netlist" in p]
+    assert dft, "the flow still declares the post-DFT netlist to PnR"
+    assert conds[dft[0]] is True, "step 12 is conditional, so this input is"
+    project = _span_project(tmp_path)
+    dig, why = si.inputs_digest(project, _REAL_STEPS, "pnr")
+    assert dig is not None, why
+    assert any("absent(conditional producer)" in w for w in why), why
+
+
+def test_a_conditional_input_that_appears_still_invalidates(tmp_path):
+    """`absent` is a VALUE, not a pass: if the file shows up, the step moves."""
+    project = _span_project(tmp_path)
+    before, _ = si.inputs_digest(project, _REAL_STEPS, "pnr")
+    p = project / "phase2/stage2/synth/post_dft_netlist.v"
+    p.write_text("module top(); endmodule\n")
+    after, _ = si.inputs_digest(project, _REAL_STEPS, "pnr")
+    assert before != after, "a conditional input appearing must invalidate"
+
+
+def test_an_unconditional_missing_input_still_refuses(tmp_path):
+    project = _span_project(tmp_path)
+    (project / "phase2/stage2/constraints/top.sdc").unlink()
+    dig, why = si.inputs_digest(project, _REAL_STEPS, "pnr")
+    assert dig is None, "a broken tree is not a design choice"
+    assert any("resolves to no file" in w for w in why), why
+
+
+# --- (a) a new netlist / SDC / slot must invalidate PnR --------------------
+def test_a_new_netlist_invalidates_the_routed_def(tmp_path):
+    """FINDING 1, the headline. PnR reads the NETLIST, not the RTL — hashing
+    the RTL would re-run PnR for an edit synthesis proved changed nothing. So
+    the chain is RTL -> synth re-runs -> new netlist -> PnR re-runs, and this
+    holds the link that was broken."""
+    project = _span_project(tmp_path)
+    base = _ident(project, "pnr")
+    nl = project / "phase2/stage2/synth/netlist.v"
+    nl.write_text("module top(); wire w; endmodule\n")
+    fresh, why = si.compare(base, _ident(project, "pnr"))
+    assert fresh is False, f"a new netlist left the routed DEF fresh: {why}"
+
+
+def test_a_new_sdc_invalidates_pnr_and_synth(tmp_path):
+    project = _span_project(tmp_path)
+    base = {k: _ident(project, k) for k in ("synth", "pnr")}
+    sdc = project / "phase2/stage2/constraints/top.sdc"
+    sdc.write_text("create_clock -period 5\n")
+    for kind in ("synth", "pnr"):
+        fresh, why = si.compare(base[kind], _ident(project, kind))
+        assert fresh is False, f"{kind} survived an SDC change: {why}"
+
+
+def test_a_new_slot_declaration_invalidates_every_kind(tmp_path):
+    project = _span_project(tmp_path)
+    base = {k: _ident(project, k) for k in ("synth", "pnr", "gds")}
+    td = project / "input/submission_template/tapeout_declaration.json"
+    td.write_text('{"answers": {"deliverable": "HARDMACRO"}}\n')
+    for kind in ("synth", "pnr", "gds"):
+        fresh, why = si.compare(base[kind], _ident(project, kind))
+        assert fresh is False, f"{kind} survived a slot change: {why}"
+
+
+def test_the_def_the_gds_streams_is_part_of_its_identity(tmp_path):
+    """FINDING 2. No `required_inputs` entry names it, and
+    `step_signoff_spef_repair` promotes it IN PLACE — so without this a GDS
+    stayed fresh across a DEF that had been replaced underneath it."""
+    project = _span_project(tmp_path)
+    base = _ident(project, "gds")
+    d = project / "phase3/stage3/pnr/top.def"
+    d.write_text("VERSION 5.8 ;\n# promoted in place\nEND DESIGN\n")
+    fresh, why = si.compare(base, _ident(project, "gds"))
+    assert fresh is False, f"an in-place DEF promotion was missed: {why}"
+
+
+def test_a_rerouted_def_invalidates_the_gds(tmp_path):
+    project = _span_project(tmp_path)
+    base = _ident(project, "gds")
+    (project / "phase3/stage3/pnr/routed.def").write_text(
+        "VERSION 5.8 ;\n# rerouted\nEND DESIGN\n")
+    fresh, why = si.compare(base, _ident(project, "gds"))
+    assert fresh is False, why
+
+
+# --- (b) a no-op version bump still reuses, with NOTHING patched -----------
+def test_a_no_op_version_bump_reuses_every_kind_unpatched(tmp_path,
+                                                          monkeypatch):
+    project = _span_project(tmp_path)
+    base = {k: _ident(project, k) for k in ("synth", "pnr", "gds")}
+    for kind, ident in base.items():
+        assert all(v is not None for v in ident.values()), (
+            f"{kind} has an uncomputable component with NOTHING patched — "
+            f"that is the 'never fresh' shape finding 5 was about: {ident}")
+    monkeypatch.setattr(_R, "_plugin_version", lambda: "99.99.99-brand-new")
+    for kind in ("synth", "pnr", "gds"):
+        fresh, why = si.compare(base[kind], _ident(project, kind))
+        assert fresh is True, f"{kind} re-ran for a release alone: {why}"
+
+
+def test_the_image_identity_ladder_answers_without_a_registry_digest():
+    """FINDING 5. `image_identity` returns a REGISTRY digest or
+    IMAGE_UNAVAILABLE; r1 turned anything else into None, so a locally built
+    image — or running inside the image, where there is no docker client —
+    meant every step re-ran for ever. The r1 tests patched this away."""
+    assert _R._step_image_digest("") == "NO_CONTAINER", (
+        "a container nobody named has no identity to fail closed on")
+    assert _R._step_image_digest("no-such-container-xyz-0924") is None, (
+        "a container that WAS named and cannot be identified still refuses")
+
+
+# --- (c) the Tcl emitters must be inside pnr's code ------------------------
+def test_from_imports_resolve_to_their_module():
+    """FINDING 3. `from X import f` was bound only to `"X.f"`, which resolves
+    to no file, so `_route_wire_transaction`, `pad_signal_route_repair` and
+    `_pdk_via_analyzer` — the Tcl emitters behind every PnR script — were
+    outside pnr's code identity and a landed fix to them was silently
+    skipped."""
+    members, err = si._module_members(RUNNER)
+    assert not err, err
+    bindings = si._import_bindings(RUNNER)
+
+    def directs(kind: str) -> set[str]:
+        seen: set[str] = set()
+        stack = list(si.KIND_RECIPE_SEEDS[kind])
+        while stack:
+            name = stack.pop()
+            if name in seen or name not in members:
+                continue
+            seen.add(name)
+            for ref in si._referenced_names(members[name]):
+                if ref in members and ref not in seen:
+                    stack.append(ref)
+        out: set[str] = set()
+        for name in seen:
+            for ref in si._referenced_names(members[name]):
+                for dotted in (bindings.get(ref),
+                               bindings.get(si._FROM_FALLBACK + ref)):
+                    if not dotted:
+                        continue
+                    m = si._resolve_module(PROGRAMS, dotted)
+                    if m is not None:
+                        out.add(m.name)
+                        break
+        return out
+
+    pnr = directs("pnr")
+    for emitter in ("_route_wire_transaction.py", "pad_signal_route_repair.py",
+                    "_pdk_via_analyzer.py"):
+        assert emitter in pnr, (
+            f"{emitter} is outside pnr's code identity, so a landed fix to it "
+            f"would be silently skipped. pnr names {len(pnr)} module(s).")
+
+
+def test_editing_a_tcl_emitter_invalidates_pnr(tmp_path):
+    """The same finding, driven rather than inspected."""
+    target = PROGRAMS / "_route_wire_transaction.py"
+    before, why = si.code_digest(RUNNER, PROGRAMS, _REAL_STEPS, "pnr")
+    assert before is not None, why
+    original = target.read_bytes()
+    try:
+        target.write_bytes(original + b"\n# R-0924-3 r2 proof edit\n")
+        after, _ = si.code_digest(RUNNER, PROGRAMS, _REAL_STEPS, "pnr")
+    finally:
+        target.write_bytes(original)
+    assert before != after, (
+        "an edit to a Tcl emitter behind every PnR script did not invalidate "
+        "PnR")
+
+
+# --- the PDK that the step itself derives ----------------------------------
+def test_the_pdk_is_hashed_as_the_flow_received_it(tmp_path):
+    """FINDING 4. `step_pnr` stages a VIA-legalised tech LEF into the RUN
+    directory and MUTATES the shared PdkConfig to point at it. The stamp is
+    written after the step, so the recorded PDK was the derived file, which
+    differs every run — PnR was NEVER reused. `<field>_source` is the
+    plugin's own record of the original."""
+    derived = tmp_path / "active_via_legalized.tlef"
+    derived.write_text("VERSION 5.8 ;\n# derived by this run\n")
+    source = tmp_path / "nom.tlef"
+    source.write_text("VERSION 5.8 ;\n")
+
+    class _Pdk:
+        liberty = None
+        tech_lef = str(derived)
+        tech_lef_source = str(source)
+        cell_lef = cell_gds = drc_deck = None
+
+    first, why = si.pdk_digest(_Pdk())
+    assert first is not None, why
+    # The run derives it again, differently — as it does on every run.
+    derived.write_text("VERSION 5.8 ;\n# derived again, different bytes\n")
+    second, _ = si.pdk_digest(_Pdk())
+    assert first == second, (
+        "the PDK identity moved because the STEP derived a file — that is an "
+        "output, and it made the component never match")
+    # ...but a real PDK change still moves it.
+    source.write_text("VERSION 5.8 ;\n# a different PDK\n")
+    third, _ = si.pdk_digest(_Pdk())
+    assert third != first, "a real PDK change must still invalidate"
+
+
+def test_mutation_hashing_the_derived_pdk_again_is_caught(tmp_path):
+    """The mutation for finding 4: read `tech_lef` in preference to
+    `tech_lef_source` and the component goes back to moving every run."""
+    derived = tmp_path / "active_via_legalized.tlef"
+    derived.write_text("a\n")
+    source = tmp_path / "nom.tlef"
+    source.write_text("b\n")
+
+    class _Pdk:
+        liberty = None
+        tech_lef = str(derived)
+        tech_lef_source = str(source)
+        cell_lef = cell_gds = drc_deck = None
+
+    assert si.pdk_files(_Pdk()) == [("tech_lef", str(source))], (
+        "pdk_files must name the SOURCE; naming the derived file is the "
+        "regression that made PnR never reusable")

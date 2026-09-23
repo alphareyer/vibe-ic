@@ -97,12 +97,36 @@ KIND_OUTPUT_MARK: Dict[str, str] = {
     "gds": ".gds",
 }
 
+# THE SPAN each runner function implements, as the flow's own endpoints.
+#
+# REVIEW FINDING (R-0924-3 r1, wcxu446tu — 6 CONFIRMED, root cause here): the
+# first cut tied each kind to the ONE step that declares its artefact, and that
+# is not what the code does. `step_pnr` is floorplan THROUGH routing; `step_gds`
+# plus the in-place finishing around it spans die finishing through stream-out.
+# Keying pnr on step 21 alone made its inputs `sha(post_hold.def)` — a file
+# `step_pnr` WRITES ITSELF — so a new netlist, a new SDC or a new slot left the
+# routed DEF "fresh" and the disclosure said `inputs unchanged`. A self-
+# referential cache key is worse than no key: it is a key that cannot fire.
+#
+# Endpoints only; MEMBERSHIP is derived from the flow's own ordering, so a step
+# inserted into a span joins it without anything here being edited. A test
+# asserts each endpoint resolves and that the interior members it must contain
+# are present.
+KIND_SPAN: Dict[str, Tuple[str, str]] = {
+    "synth": ("9", "9"),
+    "pnr": ("15", "21"),
+    "gds": ("26.5ic", "37"),
+}
+
 # Where each kind's artefacts live, for selecting its provenance entries.
 KIND_DIR_PREFIX: Dict[str, Tuple[str, ...]] = {
     "synth": ("phase2/stage2/synth/",),
     "pnr": ("phase3/stage3/pnr/",),
     "gds": ("phase3/stage4/gds/", "phase3/stage3/gds/"),
 }
+
+#: Marks the "resolve `from X import f` as module X" fallback binding.
+_FROM_FALLBACK = "\0from:"
 
 SIDECAR = "step_identity.json"
 _COMPONENTS = ("inputs", "code", "tools", "pdk")
@@ -225,50 +249,144 @@ def _glob_first(project: Path, spec: str) -> List[Path]:
 # --------------------------------------------------------------------------
 # component: inputs
 # --------------------------------------------------------------------------
-def inputs_digest(project: Path, steps: Sequence[Dict[str, Any]], kind: str
+def steps_in_span(steps: Sequence[Dict[str, Any]], kind: str
+                  ) -> List[Dict[str, Any]]:
+    """Every flow step the runner function for `kind` implements.
+
+    Derived from the flow's ORDER between the declared endpoints, so this does
+    not have to be re-listed when a step is inserted."""
+    span = KIND_SPAN.get(kind)
+    if not span:
+        return []
+    ids = [str(s.get("id")) for s in steps]
+    try:
+        lo, hi = ids.index(span[0]), ids.index(span[1])
+    except ValueError:
+        return []
+    if lo > hi:
+        return []
+    return list(steps[lo:hi + 1])
+
+
+def _declared_paths(entries: Any) -> List[str]:
+    out: List[str] = []
+    for e in entries or ():
+        spec = e.get("path") if isinstance(e, dict) else e
+        if isinstance(spec, str) and spec:
+            out.append(spec)
+    return out
+
+
+def span_input_specs(steps: Sequence[Dict[str, Any]], kind: str
+                     ) -> Tuple[List[Tuple[str, bool]], List[str]]:
+    """`([(spec, producer_is_conditional)], produced_inside)` for the span.
+
+    THE UNION of every `required_inputs` path declared by any step in the span,
+    MINUS everything the span PRODUCES itself. The subtraction is the point: a
+    step's own output is not evidence about whether that step should re-run,
+    and hashing it is what made the first cut unable to fire.
+
+    THE CONDITIONAL FLAG, which measurement forced. `step_pnr`'s span declares
+    `phase2/stage2/synth/post_dft_netlist.v`, owed by step 12 — and step 12 is
+    `condition_kind: design_dependent`, owed only where the design declares
+    DFT. A real finished gf180 tree (probeSPM_A3) does not have that file, so
+    treating its absence as an unanswerable question would refuse for ever and
+    PnR would NEVER be reused on any design without DFT, which is most of them.
+    An input whose producer is conditional is therefore recorded as ABSENT
+    rather than refused — and `absent` is a VALUE, so if the file ever appears
+    the identity moves and the step re-runs. Nothing is lost; a change is still
+    always detected. An UNCONDITIONAL declared input that is missing still
+    refuses, because that is a broken tree, not a design choice."""
+    members = steps_in_span(steps, kind)
+    by_id = {str(s.get("id")): s for s in steps}
+    produced: Set[str] = set()
+    for s in members:
+        for spec in _declared_paths(s.get("required_outputs")):
+            for alt in (x.strip() for x in spec.split(" OR ")):
+                produced.add(alt)
+    specs: List[Tuple[str, bool]] = []
+    seen: Set[str] = set()
+    for s in members:
+        for e in (s.get("required_inputs") or ()):
+            spec = e.get("path") if isinstance(e, dict) else e
+            if not isinstance(spec, str) or not spec:
+                continue
+            alts = [x.strip() for x in spec.split(" OR ")]
+            if all(a in produced for a in alts):
+                continue          # made inside the span: not an input to it
+            if spec in seen:
+                continue
+            seen.add(spec)
+            producer = by_id.get(str(e.get("from"))) if isinstance(e, dict) \
+                else None
+            conditional = bool(producer and producer.get("condition"))
+            specs.append((spec, conditional))
+    return specs, sorted(produced)
+
+
+def inputs_digest(project: Path, steps: Sequence[Dict[str, Any]], kind: str,
+                  extra: Sequence[Path] = ()
                   ) -> Tuple[Optional[str], List[str]]:
-    """sha256 over the step's DECLARED inputs as they exist in this run.
+    """sha256 over everything the SPAN reads, as it exists in this run.
 
     Returns `(digest, evidence)`. `digest` is None — meaning re-run — when the
-    kind has no declared producer step, when a declared input resolves to
-    nothing, or when a resolved file cannot be read. A declared input that is
-    not there is not "no input": it is an unanswerable question."""
-    producers = steps_for_kind(steps, kind)
-    if not producers:
-        return None, [f"no flow step declares an output matching "
-                      f"{KIND_OUTPUT_MARK.get(kind, '?')!r}, so this kind has "
-                      f"no declared inputs to hash"]
+    kind has no span, when a declared input resolves to nothing, or when a
+    resolved file cannot be read. A declared input that is not there is not
+    "no input": it is an unanswerable question.
+
+    `extra` carries inputs the flow does not declare but the step demonstrably
+    reads — the DEF a stream-out consumes, which other steps promote IN PLACE
+    (`step_signoff_spef_repair`) and which no `required_inputs` entry names."""
+    specs, _produced = span_input_specs(steps, kind)
+    if not specs and not extra:
+        return None, [f"no flow step in {kind}'s span declares an input that "
+                      f"the span does not also produce, so there is nothing "
+                      f"to hash"]
     pairs: List[Tuple[str, str]] = []
     evidence: List[str] = []
-    for s in producers:
-        entries = s.get("required_inputs") or []
-        for e in entries:
-            if not isinstance(e, dict):
+    seen: Set[str] = set()
+
+    def _take(path: Path) -> Optional[str]:
+        d = _sha256_file(path)
+        if d is None:
+            return None
+        try:
+            rel = os.path.relpath(path, Path(project))
+        except ValueError:
+            rel = str(path)
+        if rel not in seen:
+            seen.add(rel)
+            pairs.append((rel, d))
+            evidence.append(f"{rel}={d[:12]}")
+        return d
+
+    for spec, conditional in specs:
+        hits: List[Path] = []
+        for alt in (x.strip() for x in spec.split(" OR ")):
+            hits = _glob_first(Path(project), alt)
+            if hits:
+                break
+        if not hits:
+            if conditional:
+                # A VALUE, not a refusal — see `span_input_specs`. If the file
+                # ever appears, this pair changes and the step re-runs.
+                pairs.append((spec, "absent"))
+                evidence.append(f"{spec}=absent(conditional producer)")
                 continue
-            spec = e.get("path")
-            if not isinstance(spec, str) or not spec:
-                # A declared external input with no project-relative path is
-                # recorded by the flow as unprobeable; it cannot be hashed and
-                # it is not pretended to be satisfied.
-                continue
-            hits: List[Path] = []
-            for alt in (x.strip() for x in spec.split(" OR ")):
-                hits = _glob_first(Path(project), alt)
-                if hits:
-                    break
-            if not hits:
-                return None, [f"declared input {spec!r} (from step "
-                              f"{e.get('from')}) resolves to no file in this "
-                              f"run, so this step's inputs cannot be hashed"]
-            for h in hits:
-                d = _sha256_file(h)
-                if d is None:
-                    return None, [f"declared input {h} could not be read"]
-                rel = os.path.relpath(h, Path(project))
-                pairs.append((rel, d))
-                evidence.append(f"{rel}={d[:12]}")
+            return None, [f"declared input {spec!r} resolves to no file in "
+                          f"this run, so this step's inputs cannot be hashed"]
+        for h in hits:
+            if _take(h) is None:
+                return None, [f"declared input {h} could not be read"]
+    for path in extra:
+        p = Path(path)
+        if not p.is_file():
+            return None, [f"{p} is read by this step but is not on disk, so "
+                          f"its inputs cannot be hashed"]
+        if _take(p) is None:
+            return None, [f"{p} could not be read"]
     if not pairs:
-        return None, ["the declared producer step(s) name no hashable input"]
+        return None, [f"{kind}'s span names no hashable input"]
     return _digest_pairs(pairs), evidence
 
 
@@ -381,17 +499,20 @@ def runner_code_closure(runner_path: Path, kind: str
     # are resolved against the runner's import bindings, and anything that
     # lands inside `programs/` is digested with its own transitive closure.
     bindings = _import_bindings(Path(runner_path))
-    reached: Set[str] = set()
+    programs_dir = Path(runner_path).resolve().parent
+    mods: List[Path] = []
+    seen_mod: Set[str] = set()
     for name in seen:
         for ref in _referenced_names(members[name]):
-            if ref in bindings:
-                reached.add(bindings[ref])
-    mods: List[Path] = []
-    programs_dir = Path(runner_path).resolve().parent
-    for dotted in sorted(reached):
-        m = _resolve_module(programs_dir, dotted)
-        if m is not None:
-            mods.append(m)
+            for dotted in (bindings.get(ref),
+                           bindings.get(_FROM_FALLBACK + ref)):
+                if not dotted or dotted in seen_mod:
+                    continue
+                m = _resolve_module(programs_dir, dotted)
+                if m is not None:
+                    seen_mod.add(dotted)
+                    mods.append(m)
+                    break
     if mods:
         files, _notes = direct_modules(mods, programs_dir)
         for f in files:
@@ -426,7 +547,19 @@ def _import_bindings(path: Path) -> Dict[str, str]:
         elif isinstance(node, ast.ImportFrom) and node.module and \
                 not node.level:
             for a in node.names:
+                # REVIEW FINDING 3 (r1): binding the name to `"<module>.<name>"`
+                # and nothing else meant `from _route_wire_transaction import f`
+                # resolved to a module path that does not exist, so
+                # `_route_wire_transaction.py`, `pad_signal_route_repair.py`
+                # (the Tcl emitters behind every PnR script) and
+                # `_pdk_via_analyzer.py` were OUTSIDE pnr's code identity — a
+                # landed fix to any of them would have been silently skipped.
+                # `X.f` is tried first because `from _ppa import area` really
+                # does name a submodule; `X` is the fallback and is the case
+                # that was missing.
                 out[a.asname or a.name] = f"{node.module}.{a.name}"
+                out.setdefault(_FROM_FALLBACK + (a.asname or a.name),
+                               node.module)
                 out.setdefault(node.module.split(".")[0], node.module)
     return out
 
@@ -511,8 +644,8 @@ def direct_modules(entries: Iterable[Path], programs_dir: Path
 
 def program_code_digest(programs_dir: Path, steps: Sequence[Dict[str, Any]],
                         kind: str) -> Tuple[Optional[str], List[str]]:
-    """Digest of the step's declared `programs:` plus their import closure."""
-    producers = steps_for_kind(steps, kind)
+    """Digest of the SPAN's declared `programs:` plus their direct imports."""
+    producers = steps_in_span(steps, kind)
     if not producers:
         return None, ["no declared producer step, so no declared programs"]
     entries: List[Path] = []
@@ -612,10 +745,21 @@ _PDK_FIELDS = ("liberty", "tech_lef", "cell_lef", "cell_gds", "drc_deck")
 
 
 def pdk_files(pdk: Any) -> List[Tuple[str, str]]:
-    """`(field, path)` for every PDK file this flow declares, in order."""
+    """`(field, path)` for every PDK file this flow declares, in order.
+
+    THE SOURCE, NOT THE DERIVATION. REVIEW FINDING 4 (r1): `step_pnr` stages a
+    VIA-legalised tech LEF into the RUN directory and MUTATES the shared
+    `PdkConfig` to point at it (`phase3_one_shot_runner:33391`, which also sets
+    `tech_lef_source` to the original). The stamp is written after the step, so
+    the recorded PDK was the derived file — which differs every run, so the PDK
+    component never matched and PnR was NEVER reused. `<field>_source` is the
+    plugin's own record of what the field was before the flow touched it, so it
+    is preferred wherever it is set: a file this run produced is an OUTPUT, and
+    an output is not evidence about whether the step that made it should run."""
     out: List[Tuple[str, str]] = []
     for field in _PDK_FIELDS:
-        val = getattr(pdk, field, None)
+        src = getattr(pdk, f"{field}_source", None)
+        val = src or getattr(pdk, field, None)
         if val:
             out.append((field, str(val)))
     return out
@@ -678,13 +822,15 @@ def pdk_digest(pdk: Any, hasher: Any = None
 # --------------------------------------------------------------------------
 def identity_now(*, project: Path, kind: str, runner_path: Path,
                  programs_dir: Path, flow_yaml: Path, pdk: Any = None,
-                 image_digest: Optional[str] = None, pdk_hasher: Any = None
+                 image_digest: Optional[str] = None, pdk_hasher: Any = None,
+                 extra_inputs: Sequence[Path] = ()
                  ) -> Tuple[Dict[str, Optional[str]], Dict[str, List[str]]]:
     """This build's identity for `kind`, plus per-component evidence."""
     steps = load_steps(Path(flow_yaml))
     why: Dict[str, List[str]] = {}
     ident: Dict[str, Optional[str]] = {}
-    ident["inputs"], why["inputs"] = inputs_digest(Path(project), steps, kind)
+    ident["inputs"], why["inputs"] = inputs_digest(
+        Path(project), steps, kind, extra_inputs)
     ident["code"], why["code"] = code_digest(
         Path(runner_path), Path(programs_dir), steps, kind)
     ident["tools"], why["tools"] = tools_digest(

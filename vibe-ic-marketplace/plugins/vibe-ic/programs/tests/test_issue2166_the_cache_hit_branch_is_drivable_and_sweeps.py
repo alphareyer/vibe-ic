@@ -35,6 +35,7 @@ if str(PROGRAMS) not in sys.path:
     sys.path.insert(0, str(PROGRAMS))
 
 import phase3_one_shot_runner as R  # noqa: E402
+from _delivery_declaration import declare_delivery as _declare  # noqa: E402
 
 SRC = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
 
@@ -44,17 +45,8 @@ UTIL = 0.4
 
 import pytest  # noqa: E402
 
-_IMAGE = "sha256:" + "e" * 64
 
 
-@pytest.fixture(autouse=True)
-def _nameable_image(monkeypatch):
-    """R-0924-3 — a step whose container image cannot be named is not a proven
-    step, so it re-runs. This suite is about the SWEEP and the two stages'
-    disagreement, not about container discovery, so the digest is supplied.
-    The fail-closed rule itself is asserted in
-    `test_phase3_cache_producer_identity`."""
-    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
 
 
 def _pdk(root):
@@ -72,7 +64,37 @@ def _pdk(root):
                        drc_deck=None)
 
 
-def _valid_cache(tmp_path, kind="pnr", artefact="top.def"):
+def _span_inputs(project, top: str = "top") -> None:
+    """Everything the three SPANS declare that they do not produce themselves.
+
+    R-0924-3 r2 CATCH-UP. The review (wcxu446tu) found that keying a kind on
+    the ONE step declaring its artefact made pnr hash `post_hold.def` — a file
+    `step_pnr` writes itself — so a new netlist, SDC or slot never invalidated
+    the routed DEF. Freshness is now keyed on the whole SPAN the runner
+    function implements (pnr = 15..21, gds = 26.5ic..37), so "a tree from a
+    previous run" means a tree carrying what those spans READ: the slot
+    declaration, the RTL, the SDC, the netlist, the routed DEF, the spare-cell
+    record and the SPEF. Same catch-up as the ones above, for the same reason.
+    """
+    from pathlib import Path as _P
+    project = _P(project)
+    for rel, text in (
+        ("phase2/stage1/rtl/%s.v" % top, "module %s(); endmodule\n" % top),
+        ("phase2/stage2/constraints/%s.sdc" % top,
+         "create_clock -period 10\n"),
+        ("phase2/stage2/synth/netlist.v", "module %s(); endmodule\n" % top),
+        ("phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\nEND DESIGN\n"),
+        ("phase3/stage3/pnr/spare_cells.json", "{}\n"),
+        ("phase3/stage3/extracted/parasitic.spef", "*SPEF\n"),
+    ):
+        p = project / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not p.is_file():
+            p.write_text(text)
+
+
+def _valid_cache(tmp_path, kind="pnr", artefact="top.def",
+                 deliverable="HARDMACRO"):
     """A directory that is GENUINELY reusable — and stays that way.
 
     Every key the decision reads is satisfied by the runner's OWN writers, so
@@ -99,9 +121,25 @@ def _valid_cache(tmp_path, kind="pnr", artefact="top.def"):
         ) + "\n" for t, v, o in (
             ("openroad", "2.0", "phase3/stage3/pnr/top.def"),
             ("klayout", "0.28", "phase3/stage4/gds/top.gds"))))
+    # The DEF the stream-out reads. A GDS is always streamed FROM a DEF, so a
+    # directory holding a GDS and no DEF is not a state a real run leaves —
+    # and R-0924-3 r2 makes that DEF part of the GDS step's identity, because
+    # other steps promote it IN PLACE and no `required_inputs` entry names it.
+    top_def = out_dir / "top.def"
+    if not top_def.is_file():
+        top_def.write_text("VERSION 5.8 ;\nEND DESIGN\n")
+    _span_inputs(project, "top")
+    # The slot declaration is step 0.5ic's output and is UNCONDITIONAL, so the
+    # span must be able to hash it. HARDMACRO keeps this fixture's original
+    # premise: it is not a chip path, so the pad-ring clause stays out of the
+    # way of the sweep these tests are about. The one test that DOES want the
+    # chip path declares DIE for itself.
+    _declare(project, deliverable)
     R._write_pnr_args_sidecar(out_dir, DIE, UTIL)
-    R._write_producer_identity(out_dir, kind, project=project,
-                               pdk=_pdk(project), container="")
+    R._write_producer_identity(
+        out_dir, kind, project=project, pdk=_pdk(project), container="",
+        extra_inputs=((out_dir / "top.def",) if kind == "gds"
+                      else (project / "phase2/stage2/synth/netlist.v",)))
     art = out_dir / artefact
     art.write_text("VERSION 5.8 ;\n")
     return project, out_dir, art
@@ -114,6 +152,9 @@ def _decide(project, out_dir, art, **kw):
     kw.setdefault("util", UTIL)
     kw.setdefault("pdk", _pdk(project))
     kw.setdefault("container", "")
+    kw.setdefault("extra_inputs",
+                  ((out_dir / "top.def",) if kw["kind"] == "gds"
+                   else (project / "phase2/stage2/synth/netlist.v",)))
     return R._cached_stage_decision(project, out_dir, art, **kw)
 
 
@@ -249,14 +290,18 @@ def test_the_pad_ring_clause_belongs_to_the_pnr_stage_only(tmp_path):
     step 15.5ic's own condition: `input/submission_template/SELF_TAPEOUT.txt`)
     and has no pad-ring route evidence, so the two stages must DISAGREE about
     the same directory — which a single shared conjunct could not produce."""
-    project, out_dir, art = _valid_cache(tmp_path)
+    # A pad ring is die furniture (#2112): a HARDMACRO never requests one, so
+    # this case declares the DIE it is actually about — and declares it BEFORE
+    # the stamp, because the declaration is one of the inputs the stamp hashes.
+    project, out_dir, art = _valid_cache(tmp_path, deliverable="DIE")
     tmpl = project / "input" / "submission_template"
     tmpl.mkdir(parents=True, exist_ok=True)
     (tmpl / "SELF_TAPEOUT.txt").write_text("x\n")
     assert R._chip_path_requests_pad_ring(project) is True
     assert R._pad_ring_route_cache_valid(project, "top") is False
     R._write_producer_identity(out_dir, "gds", project=project,
-                               pdk=_pdk(project), container="")
+                               pdk=_pdk(project), container="",
+                               extra_inputs=(out_dir / "top.def",))
     gds = out_dir / "top.gds"
     gds.write_text("HEADER\n")
     _empty_antenna(out_dir, "antenna_iter_0.rpt")

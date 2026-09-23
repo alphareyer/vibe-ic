@@ -49,17 +49,8 @@ class _Drive:
         self.called = []
 
 
-_IMAGE = "sha256:" + "e" * 64
 
 
-@pytest.fixture(autouse=True)
-def _nameable_image(monkeypatch):
-    """R-0924-3 — a step whose container image cannot be NAMED is not a proven
-    step, so it re-runs. This suite has no container, and the fixture below
-    stamps the tree before `_drive` installs any patches, so the digest is
-    pinned here for the whole test. The fail-closed rule itself is asserted in
-    `test_phase3_cache_producer_identity`, which keeps the unnameable case."""
-    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
 
 
 def _pdk(root: Path | None = None) -> R.PdkConfig:
@@ -84,6 +75,35 @@ def _pdk(root: Path | None = None) -> R.PdkConfig:
     return R.PdkConfig(name="testpdk", liberty=str(lib), tech_lef=str(tlef),
                        cell_lef=str(clef), cell_gds=None, site="unit",
                        drc_deck=None)
+
+
+def _span_inputs(project, top: str = "top") -> None:
+    """Everything the three SPANS declare that they do not produce themselves.
+
+    R-0924-3 r2 CATCH-UP. The review (wcxu446tu) found that keying a kind on
+    the ONE step declaring its artefact made pnr hash `post_hold.def` — a file
+    `step_pnr` writes itself — so a new netlist, SDC or slot never invalidated
+    the routed DEF. Freshness is now keyed on the whole SPAN the runner
+    function implements (pnr = 15..21, gds = 26.5ic..37), so "a tree from a
+    previous run" means a tree carrying what those spans READ: the slot
+    declaration, the RTL, the SDC, the netlist, the routed DEF, the spare-cell
+    record and the SPEF. Same catch-up as the ones above, for the same reason.
+    """
+    from pathlib import Path as _P
+    project = _P(project)
+    for rel, text in (
+        ("phase2/stage1/rtl/%s.v" % top, "module %s(); endmodule\n" % top),
+        ("phase2/stage2/constraints/%s.sdc" % top,
+         "create_clock -period 10\n"),
+        ("phase2/stage2/synth/netlist.v", "module %s(); endmodule\n" % top),
+        ("phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\nEND DESIGN\n"),
+        ("phase3/stage3/pnr/spare_cells.json", "{}\n"),
+        ("phase3/stage3/extracted/parasitic.spef", "*SPEF\n"),
+    ):
+        p = project / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not p.is_file():
+            p.write_text(text)
 
 
 def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
@@ -145,10 +165,14 @@ def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
     # below where it was originally added; declaring twice is idempotent and
     # the original comment is left where it explains itself.)
     _declare(tmp_path, "DIE")
+    _span_inputs(tmp_path, TOP)
     _ctx = dict(project=tmp_path, pdk=_pdk(tmp_path), container="")
     R._write_producer_identity(synth, "synth", **_ctx)
-    R._write_producer_identity(pnr, "pnr", **_ctx)
-    R._write_producer_identity(pnr, "gds", **_ctx)
+    R._write_producer_identity(
+        pnr, "pnr",
+        extra_inputs=(synth / f"{TOP}_synth.v",), **_ctx)
+    R._write_producer_identity(
+        pnr, "gds", extra_inputs=(pnr / f"{TOP}.def",), **_ctx)
     # The SECOND thing this fixture had to catch up with, and the same kind as
     # the post-DFT netlist above: v1.22.13 (#2376) made Phase 3 refuse a project
     # with no delivery declaration, BEFORE any step and before the report these
@@ -252,7 +276,6 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
 
     monkeypatch.setattr(R, "_detect_pdk",
                         lambda *a, **k: _pdk(project))
-    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
     monkeypatch.setattr(R._runner_lock, "acquire_or_reenter",
                         lambda *a, **k: object())
     monkeypatch.setattr(R, "commercial_pdk_fallback_guard",

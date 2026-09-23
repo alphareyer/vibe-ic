@@ -17914,7 +17914,8 @@ def _producer_identity_now() -> Dict[str, str]:
 def _write_producer_identity(out_dir: Path, kind: str, *,
                              project: Optional[Path] = None,
                              pdk: Any = None,
-                             container: str = "") -> None:
+                             container: str = "",
+                             extra_inputs: Sequence[Path] = ()) -> None:
     """Stamp the build that just produced ``kind``'s artefact in ``out_dir``.
 
     Best-effort, exactly like the sibling sidecars: a stamp failure must never
@@ -17958,7 +17959,8 @@ def _write_producer_identity(out_dir: Path, kind: str, *,
             flow_yaml=PROGRAMS_DIR.parent / "flow" /
             "phase1_phase2_phase3.yaml",
             pdk=pdk, image_digest=_step_image_digest(container),
-            pdk_hasher=_step_pdk_hasher(container))
+            pdk_hasher=_step_pdk_hasher(container),
+            extra_inputs=extra_inputs)
         _si.write_sidecar(out_dir, kind, ident, why)
     except Exception:  # nosec — sidecar is best-effort
         pass
@@ -17984,7 +17986,9 @@ def _read_producer_identity(out_dir: Path,
 def _producer_cache_valid_for(out_dir: Path, kind: str, *,
                               project: Optional[Path] = None,
                               pdk: Any = None,
-                              container: str = "") -> Tuple[bool, str]:
+                              container: str = "",
+                              extra_inputs: Sequence[Path] = ()
+                              ) -> Tuple[bool, str]:
     """May a cached ``kind`` artefact in ``out_dir`` be reused by THIS build?
 
     Returns (valid, disclosure). The disclosure is carried into the step's own
@@ -18055,7 +18059,8 @@ def _producer_cache_valid_for(out_dir: Path, kind: str, *,
             flow_yaml=PROGRAMS_DIR.parent / "flow" /
             "phase1_phase2_phase3.yaml",
             pdk=pdk, image_digest=_step_image_digest(container),
-            pdk_hasher=_step_pdk_hasher(container))
+            pdk_hasher=_step_pdk_hasher(container),
+            extra_inputs=extra_inputs)
     except Exception as exc:  # noqa: BLE001 — an error is never freshness
         return _deny_unless_forced(
             f"the {kind} step's identity could not be computed "
@@ -18130,17 +18135,58 @@ def _step_pdk_hasher(container: str):
 
 
 def _step_image_digest(container: str) -> Optional[str]:
-    """The container image digest, or None when it cannot be established.
+    """The identity of the tool environment, for a LOCAL freshness comparison.
 
-    None is not a soft failure: `_step_identity.tools_digest` refuses to build
-    a tools component without it, so an unknown image means the step re-runs.
-    An artefact built by an image nobody can name is not a proven artefact."""
+    A LADDER, and it exists because the first cut had only its top rung.
+    REVIEW FINDING 5 (r1): `canonical_run_admission.image_identity` answers with
+    a REGISTRY digest or `IMAGE_UNAVAILABLE`, and the first cut turned anything
+    but a digest into None — so on a locally built image, and inside the image
+    (where there is no docker client at all), the tools component was never
+    computable and EVERY step re-ran for ever. The tests hid it by patching
+    this function, which is exactly the kind of green that does not survive
+    contact with a real box; the r2 tests do not patch it.
+
+      1. the registry digest, when the image has one — portable and best;
+      2. the LOCAL image Id — not portable, and it does not need to be: a
+         freshness key is compared on this machine against a stamp written on
+         this machine;
+      3. `LOCAL_EXEC`, when there is no container route at all because the
+         runner is running INSIDE the image. There is no second image to be
+         confused with, and the tool VERSIONS in `provenance.jsonl` still carry
+         the identity that matters.
+
+    None only when a container IS the route and nothing about it can be named —
+    which remains a re-run, because an artefact built by an environment nobody
+    can name is not a proven artefact."""
     try:
         import canonical_run_admission as _cra  # noqa: PLC0415
         v = _cra.image_identity(container or "")
-        return None if (not v or v.startswith("IMAGE_UNAVAILABLE")) else v
+        if v and not v.startswith("IMAGE_UNAVAILABLE"):
+            return v
     except Exception:  # noqa: BLE001
-        return None
+        pass
+    try:
+        import _eda_pin as _pin  # noqa: PLC0415
+        image_id, _why = _pin.container_image_id(container or "")
+        if image_id:
+            return f"imageid:{image_id}"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import _container_exec as _cx  # noqa: PLC0415
+        if _cx.no_container_route():
+            return "LOCAL_EXEC"
+    except Exception:  # noqa: BLE001
+        pass
+    if not container:
+        # NOBODY NAMED A CONTAINER, so there is no container identity to fail
+        # closed ON. Failing closed is for a question that HAS an answer this
+        # process could not obtain; "which image is the container you did not
+        # name running" has none. The tools component still carries the tool
+        # versions from `provenance.jsonl`, which is the identity that decides
+        # whether the work would come out the same.
+        return "NO_CONTAINER"
+    return None
 
 
 def _extract_overutil_pct(log_text: str) -> Optional[float]:
@@ -32784,7 +32830,9 @@ class CachedStageDecision(NamedTuple):
 def _cached_stage_decision(project: Path, out_dir: Path, artefact: Path, *,
                            kind: str, top: str, die_um: str, util: float,
                            blocked_by: str = "", pdk: Any = None,
-                           container: str = "") -> CachedStageDecision:
+                           container: str = "",
+                           extra_inputs: Sequence[Path] = ()
+                           ) -> CachedStageDecision:
     """THE cache-reuse decision for a phase-3 stage, as a function.
 
     WHY IT IS A FUNCTION AT ALL — vibe-ic#2166.  This decision used to be
@@ -32830,7 +32878,8 @@ def _cached_stage_decision(project: Path, out_dir: Path, artefact: Path, *,
     """
     ok, reason = _pnr_cache_valid_for(out_dir, die_um, util)
     prod_ok, prod_reason = _producer_cache_valid_for(
-        out_dir, kind, project=project, pdk=pdk, container=container)
+        out_dir, kind, project=project, pdk=pdk, container=container,
+        extra_inputs=extra_inputs)
     ok = ok and prod_ok
     reason = f"{reason}; {prod_reason}"
     if kind == "pnr" and (_chip_path_requests_pad_ring(project)
@@ -68011,10 +68060,23 @@ def main() -> int:
             # where a 0-byte antenna report inherited from the cached run is
             # removed: on this path `step_pnr` never runs, so #2157's sweep,
             # which lives inside its approach loop, is never reached.
+            # REVIEW FINDING 1 residual (r2): the NETLIST PnR actually reads.
+            # The flow declares step 15's netlist input as
+            # `phase2/stage2/synth/post_dft_netlist.v`, owed by step 12 — and
+            # step 12 is `condition_kind: design_dependent`, so on a design
+            # with no DFT (measured: a finished gf180 spm tree) that file does
+            # not exist and the span carries NO netlist at all. An RTL edit
+            # then produced a new netlist and left the routed DEF "fresh".
+            # This names the file the runner hands to PnR, the same way the
+            # GDS site names the DEF it streams.
+            _pnr_netlist = [p for p in (
+                _pl.synth_dir(project) / f"{effective_top}_synth.v",
+                _pl.synth_dir(project) / "netlist.v") if p.is_file()][:1]
             _pnr_cache = _cached_stage_decision(
                 project, _pnr_out, def_existing, kind="pnr",
                 top=effective_top, die_um=args.die_um, util=args.util,
-                pdk=pdk, container=args.container)
+                pdk=pdk, container=args.container,
+                extra_inputs=tuple(_pnr_netlist))
             _cache_msg = _pnr_cache.reason
             if _pnr_cache.accept:
                 plan.append(StepResult(
@@ -68046,7 +68108,13 @@ def main() -> int:
                 if _pnr_dispatched.status == "PASS":
                     _write_producer_identity(
                         _pnr_out, "pnr", project=project, pdk=pdk,
-                        container=args.container)
+                        container=args.container,
+                        extra_inputs=tuple(
+                            p for p in (
+                                _pl.synth_dir(project) /
+                                f"{effective_top}_synth.v",
+                                _pl.synth_dir(project) / "netlist.v")
+                            if p.is_file())[:1])
         # ── PROVENANCE SNAPSHOT of the PnR outcome ─────────────────────────
         # Everything downstream (the #527 SPEF repair, the DRV escalation and
         # — critically — the ORGANIC #593 stale-GDS guard) used to read
@@ -68126,7 +68194,13 @@ def main() -> int:
                 if _pnr_redispatched.status == "PASS":
                     _write_producer_identity(
                         _pl.pnr_dir(project), "pnr", project=project,
-                        pdk=pdk, container=args.container)
+                        pdk=pdk, container=args.container,
+                        extra_inputs=tuple(
+                            p for p in (
+                                _pl.synth_dir(project) /
+                                f"{effective_top}_synth.v",
+                                _pl.synth_dir(project) / "netlist.v")
+                            if p.is_file())[:1])
                 # Publish the COST beside the arithmetic, measured not
                 # estimated: the second PnR's wall-clock is the price of this
                 # fix and belongs in the artefact a reviewer reads.
@@ -68279,6 +68353,13 @@ def main() -> int:
                 project, _pnr_out, gds_existing, kind="gds",
                 top=effective_top, die_um=args.die_um, util=args.util,
                 pdk=pdk, container=args.container,
+                # REVIEW FINDING 2 (r1): the DEF the stream-out actually reads.
+                # No `required_inputs` entry names it — step 37 declares
+                # `filled.def`, which this span PRODUCES and which the rule
+                # therefore subtracts — and `step_signoff_spef_repair` promotes
+                # this DEF IN PLACE. Without it a GDS stayed "fresh" across a
+                # DEF that had been replaced underneath it.
+                extra_inputs=(def_existing,),
                 blocked_by=("PnR re-ran in this session, so a cached GDS is "
                             "from the previous DEF" if _pnr_reran else ""))
             _gds_prod_msg = _gds_cache.producer_reason
@@ -68304,7 +68385,8 @@ def main() -> int:
                 if _gds_dispatched.status == "PASS":
                     _write_producer_identity(
                         _pnr_out, "gds", project=project, pdk=pdk,
-                        container=args.container)
+                        container=args.container,
+                        extra_inputs=(def_existing,))
             if _chip_path_requests_pad_ring(project):
                 _pad_final = step_pad_ring_final_evidence(
                     project, effective_top, _gds_dispatched, args.container)

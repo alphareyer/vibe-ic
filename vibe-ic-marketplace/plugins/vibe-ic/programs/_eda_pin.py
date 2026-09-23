@@ -672,6 +672,31 @@ def container_image_digest(container: str) -> Tuple[Optional[str], str]:
                   + (f" ({why})" if why else ""))
 
 
+def container_image_id(container: str) -> Tuple[Optional[str], str]:
+    """`(image_id, why_not)` — the LOCAL content address of the image bytes.
+
+    A COMPANION to `container_image_digest`, not a replacement, and the
+    difference is the whole point of having both. That one answers "which
+    bytes, portably" and refuses an Id because a VERDICT naming an Id means
+    nothing on another host. This one answers "which bytes, here", which is
+    exactly the right question for a LOCAL cache key: a freshness comparison
+    never leaves this machine, and an image built locally (or any image with no
+    RepoDigest) has an Id and no digest at all. Refusing to reuse anything on
+    such a host is not caution, it is a permanent re-run.
+
+    Never promoted into a published verdict or handed to a child to run.
+    """
+    rc, out, err = _docker("inspect", "--format", "{{.Image}}", container)
+    if rc == -1:
+        return None, err
+    if rc != 0:
+        return None, f"{CONTAINER_ABSENT}: no container named {container}"
+    image_id = out.strip().splitlines()[0].strip() if out.strip() else ""
+    if not image_id:
+        return None, f"docker inspect {container} named no image"
+    return image_id, ""
+
+
 def container_image_reference(container: str) -> Tuple[Optional[str], str]:
     """`(reference, why_not)` — a REGISTRY-PORTABLE `<repo>@sha256:<digest>` for
     the bytes `container` is running, or the reason there is none.
