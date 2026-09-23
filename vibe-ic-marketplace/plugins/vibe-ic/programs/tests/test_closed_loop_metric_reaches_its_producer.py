@@ -168,6 +168,51 @@ def test_the_producer_test_is_deliberately_generous():
     assert "any(n in text for n in metric_names)" in src
 
 
+def _plugin_shaped(root, steps_yaml: str):
+    plug = root / "vibe-ic-marketplace" / "plugins" / "vibe-ic"
+    (plug / "programs").mkdir(parents=True)
+    (plug / "flow").mkdir(parents=True)
+    (plug / "flow" / "phase1_phase2_phase3.yaml").write_text(steps_yaml)
+    return root
+
+
 def test_a_zero_denominator_refuses(tmp_path):
-    """Nothing to examine is not everything examined and clean."""
+    """Nothing to examine is not everything examined and clean -- measured on a
+    flow that GENUINELY declares no closed_loop edge. (This used to pass an
+    empty directory, which on the fixed resolution is a project and reads the
+    plugin's own flow; the empty dir was only ever "no flow found", which is
+    the defect below, not an empty denominator.)"""
+    root = _plugin_shaped(tmp_path, "steps:\n  - id: '1'\n    name: a\n"
+                                     "  - id: '2'\n    name: b\n")
+    assert _mod().main([str(root)]) == 2
+
+
+def test_a_project_root_reads_the_plugins_own_flow(tmp_path):
+    """spm run23 (lane icspm5): step 37.5ic runs this gate as `... .` from the
+    PROJECT, and the flow was looked up under the project -> zero edges -> rc 2
+    on every real run. A project-shaped directory (no plugin tree inside) must
+    judge the plugin's own declared edges -- all of them, counted from the
+    shipped flow rather than typed here."""
+    import json
+    import yaml
+    flow = (_PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml")
+    declared = sum(1 for st in yaml.safe_load(flow.read_text())["steps"]
+                   if isinstance(st.get("closed_loop"), dict)
+                   or isinstance(st.get("closed_loop"), list))
+    proj = tmp_path / "project"
+    (proj / "reports").mkdir(parents=True)
+    (proj / "phase3" / "stage3" / "pnr").mkdir(parents=True)
+    (proj / "phase3" / "stage3" / "pnr" / "routed.def").write_text("DESIGN top ;\n")
+    out = proj / "reports" / "phase3" / "closed_loop_metric_reach.json"
+    rc = _mod().main([str(proj), "--json", str(out)])
+    assert rc == 0, rc
+    rep = json.loads(out.read_text())
+    assert rep["denominator"] == len(rep["edges"]) > 0, rep["denominator"]
+    assert rep["denominator"] == declared > 0, (rep["denominator"], declared)
+
+
+def test_a_tree_with_no_design_is_still_refused(tmp_path):
+    """The other direction of the fix: resolving the flow to the plugin must
+    not hand the shipped answer to a tree that produced nothing (no phase3/)."""
+    (tmp_path / "input").mkdir()
     assert _mod().main([str(tmp_path)]) == 2
