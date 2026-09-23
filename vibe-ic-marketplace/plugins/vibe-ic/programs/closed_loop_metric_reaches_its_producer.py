@@ -105,14 +105,34 @@ UNREACHABLE = "UNREACHABLE"
 UNSTATED = "UNSTATED"
 
 
+def _plugin_root(root: Path) -> Path:
+    """The tree whose closed_loop EDGES are the question.
+
+    A flow gate is invoked with the PROJECT directory as its root (step 37.5ic's
+    clause runs `closed_loop_metric_reaches_its_producer .`), and the edges live
+    in the shipped plugin's flow, not in the project. MEASURED on spm run23
+    (lane icspm5): resolving the flow under the project root found none, so
+    every real run got the zero-denominator refusal (rc 2, "this tree declares
+    no closed_loop edge") and 37.5ic went NOT_MEASURED -- while the sibling
+    `closed_loop_executed_reentry_census`, which already resolves this way, saw
+    21 edges on the same tree. A root that carries a plugin tree (a checkout) is
+    still used as given; any other root resolves to THIS FILE'S OWN plugin.
+    """
+    if (root / "vibe-ic-marketplace" / "plugins" / "vibe-ic"
+            / "programs").is_dir():
+        return root
+    return Path(__file__).resolve().parents[4]
+
+
 def _flow_path(root: Path) -> Optional[Path]:
-    p = (root / "vibe-ic-marketplace" / "plugins" / "vibe-ic" / "flow"
-         / "phase1_phase2_phase3.yaml")
+    p = (_plugin_root(root) / "vibe-ic-marketplace" / "plugins" / "vibe-ic"
+         / "flow" / "phase1_phase2_phase3.yaml")
     return p if p.is_file() else None
 
 
 def _programs_dir(root: Path) -> Optional[Path]:
-    p = root / "vibe-ic-marketplace" / "plugins" / "vibe-ic" / "programs"
+    p = (_plugin_root(root) / "vibe-ic-marketplace" / "plugins" / "vibe-ic"
+         / "programs")
     return p if p.is_dir() else None
 
 
@@ -250,6 +270,23 @@ def main(argv=None) -> int:
     root = Path(args.root)
     if not root.is_dir():
         print(f"ERROR: not a directory: {root}", file=sys.stderr)
+        return 2
+
+    # THE SAME GUARD `closed_loop_executed_reentry_census` carries, for the same
+    # reason: resolving the flow to THIS plugin (see `_plugin_root`) must not
+    # let a tree that is neither a plugin checkout nor a project that produced
+    # any phase-3 artefact receive the shipped flow's answer -- that would be a
+    # verdict about a project nobody opened. Keyed on `phase3/`, never on
+    # `reports/phase3/`, which an earlier clause of the same gate creates.
+    _is_checkout = (root / "vibe-ic-marketplace" / "plugins" / "vibe-ic"
+                    / "programs").is_dir()
+    _ran_phase3 = any((root / "phase3").rglob("*")) if (
+        root / "phase3").is_dir() else False
+    if not _is_checkout and not _ran_phase3:
+        print(f"[CANNOT CHECK] closed_loop_metric_reaches_its_producer: {root} "
+              f"is neither a plugin checkout nor a project that produced any "
+              f"phase-3 artefact (nothing under phase3/), so this clause has no "
+              f"design to answer for.")
         return 2
 
     rep = audit(root)
