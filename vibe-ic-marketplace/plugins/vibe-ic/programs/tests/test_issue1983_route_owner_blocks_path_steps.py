@@ -236,6 +236,15 @@ def test_a_declaration_naming_an_artefact_the_step_does_not_produce_still_fails(
         "input/submission_template/NO_TEMPLATE.txt"}
 
 
+# R-0915-140 — the owner 0.5ic FAILED in the three fixtures below, so the four
+# path steps were never owed their outputs: NOT_MEASURED(upstream_failed), never
+# FAIL(missing_artefact) + blocked-by-upstream(0.5ic). What #1983 pins is
+# unchanged and still asserted: a hard, non-green row (never the false
+# SKIPPED-CONDITION), attributed to the owner, naming its verdict and the
+# declaration's state, and the run stays red.
+_NOT_OWED = ("NOT_MEASURED", "upstream_failed")
+
+
 def test_unresolved_route_blocks_all_four_and_names_owner_verdict(tmp_path):
     rc, report = _run(tmp_path, routes=(), owner_valid=False)
     rows = _rows(report)
@@ -244,7 +253,7 @@ def test_unresolved_route_blocks_all_four_and_names_owner_verdict(tmp_path):
 
     for sid in PATH_STEPS:
         row = rows[sid]
-        assert row["status"] == "FAIL", (sid, row)
+        assert (row["status"], row["reason_class"]) == _NOT_OWED, (sid, row)
         assert row["cascade_note"] == "blocked-by-upstream(0.5ic)"
         reason = " ".join(row["reasons"])
         assert "Step 0.5ic" in reason
@@ -280,7 +289,8 @@ def test_failed_owner_blocks_even_when_one_route_file_exists(tmp_path):
     assert rc == 1
     assert rows[OWNER]["status"] == "FAIL"
     for sid in PATH_STEPS:
-        assert rows[sid]["status"] == "FAIL", (sid, rows[sid])
+        assert (rows[sid]["status"], rows[sid]["reason_class"]) == _NOT_OWED, (
+            sid, rows[sid])
         reason = " ".join(rows[sid]["reasons"])
         assert "verdict FAIL" in reason
         assert "present as input/route/IP_DELIVERY.txt" in reason
@@ -293,7 +303,8 @@ def test_conflicting_routers_block_both_paths_instead_of_running_both(tmp_path):
     assert rc == 1
     assert rows[OWNER]["status"] == "FAIL"
     for sid in PATH_STEPS:
-        assert rows[sid]["status"] == "FAIL", (sid, rows[sid])
+        assert (rows[sid]["status"], rows[sid]["reason_class"]) == _NOT_OWED, (
+            sid, rows[sid])
         reason = " ".join(rows[sid]["reasons"])
         assert "verdict FAIL" in reason
         assert "delivery_route declaration is CONFLICTING" in reason
@@ -316,4 +327,5 @@ def test_removing_owner_distinction_reproduces_exactly_four_false_skips(
     assert {sid for sid in PATH_STEPS
             if mutated_rows[sid]["status"] == "NOT_APPLICABLE"} == set(
                 PATH_STEPS)
-    assert all(fixed_rows[sid]["status"] == "FAIL" for sid in PATH_STEPS)
+    assert all((fixed_rows[sid]["status"], fixed_rows[sid]["reason_class"])
+               == _NOT_OWED for sid in PATH_STEPS)

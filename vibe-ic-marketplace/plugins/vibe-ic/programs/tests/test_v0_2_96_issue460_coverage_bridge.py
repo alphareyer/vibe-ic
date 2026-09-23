@@ -361,7 +361,12 @@ def test_e2e_oracle_pass_is_deferred_not_counted_without_coverage(tmp_path):
     assert "FAIL" in _step4_line(base_out), _step4_line(base_out)
     _base_cause = _step4_block(base_out)
     _good_cause = _step4_block(good_out)
-    assert "missing_artefact" in _good_cause, (
+    # R-0915-140 — on this replica step 2 FAILED, so step 4 (blocks_on [2])
+    # was never owed its coverage artefact and reads NOT_MEASURED
+    # (upstream_failed): the same "absent, not a design defect" statement,
+    # with the cause named.
+    assert ("missing_artefact" in _good_cause
+            or "(upstream_failed)" in _good_cause), (
         f"an oracle PASS with no coverage measurement must read as an absent "
         f"artefact, not as a design defect:\n{_good_cause}")
     assert _good_cause != _base_cause, (

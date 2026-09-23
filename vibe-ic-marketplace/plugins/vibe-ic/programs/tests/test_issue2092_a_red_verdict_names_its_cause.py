@@ -153,6 +153,10 @@ _RED_INPUTS = {
     "missing": "status FAIL is in verdict.NON_GREEN",
     "setup_required_skipped":
         "status NOT_MEASURED is in verdict.NON_GREEN",
+    # R-0915-140 — a row demoted behind a FAILED blocker keeps counting in
+    # `ok` exactly where it counted as `missing`; its word is NOT_MEASURED, so
+    # it reaches the cause set through the statuses.
+    "not_owed": "status NOT_MEASURED is in verdict.NON_GREEN",
     # `ok = ...` — the one that is NOT a status
     "oss_blocked_skipped": "self_skipped_signoff_steps",
     # `forced_fail = True` — the lists

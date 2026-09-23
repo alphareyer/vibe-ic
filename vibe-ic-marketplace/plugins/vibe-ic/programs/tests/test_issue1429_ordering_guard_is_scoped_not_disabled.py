@@ -358,7 +358,12 @@ def test_a_failing_analog_track_still_reds_structural_only_mode(
     analog_steps = {s["id"]: s["status"] for s in doc["steps"]
                     if str(s.get("stage")) == "stage_analog"}
     assert analog_steps, "PRECONDITION: the analog track must be in scope"
-    assert any(st in ("FAIL", "MISSING") for st in analog_steps.values()), (
+    # R-0915-140 — here D1 FAILED, so A1..A9 (blocks_on reaches D1) were never
+    # owed their outputs and read NOT_MEASURED(upstream_failed). Still
+    # non-green, and — the #634 boundary this test pins — still counted: the
+    # run is FAIL rc 1 above.
+    assert any(st in ("FAIL", "MISSING", "NOT_MEASURED")
+               for st in analog_steps.values()), (
         f"PRECONDITION: the analog track must be non-green here; "
         f"got {analog_steps!r}")
 

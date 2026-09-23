@@ -763,14 +763,21 @@ def test_a_disclosed_not_run_is_never_cost_free_at_the_flow_level(tmp_path):
     # and `NOT_APPLICABLE` (its own condition was evaluated and not met). What
     # is still refused is unchanged and is the line this assertion exists for:
     # DT2 may never come out of this tree GREEN.
+    #
+    # R-0915-140 — DT1 FAILED (it owed a grade and wrote none), so DT2 and DT3,
+    # whose blocks_on closure holds it, were never owed theirs: each reads
+    # NOT_MEASURED(upstream_failed) — the cascade of DT1, which carries the red
+    # above — never FAIL(missing_artefact). Still not green, still inside the
+    # denominator (NOT_MEASURED is not excused), and still not the
+    # SKIPPED-CONDITION discount this test exists to refuse.
     for _sid in ("DT2", "DT3"):
         _st = _status_of(doc, _sid)
-        assert _st == "FAIL", (
-            f"{_sid} reported something other than red-or-deferred on a tree "
-            f"where no at-speed grade exists at all:\n" + doc["_stdout"])
-        assert _reason_of(doc, _sid) == "missing_artefact", (
-            f"{_sid} is FAIL for a reason other than its absent coverage "
-            f"artefact:\n" + doc["_stdout"])
+        assert _st == "NOT_MEASURED", (
+            f"{_sid} reported something other than the cascade of DT1 on a "
+            f"tree where no at-speed grade exists at all:\n" + doc["_stdout"])
+        assert _reason_of(doc, _sid) == "upstream_failed", (
+            f"{_sid} is NOT_MEASURED for a reason other than its FAILED "
+            f"blocker:\n" + doc["_stdout"])
         assert _st not in ("PASS", "PASS_WITH_WAIVERS"), (
             f"{_sid} came out of this tree GREEN:\n" + doc["_stdout"])
 
@@ -856,9 +863,21 @@ def test_dt2_arms_and_goes_red_when_its_own_grade_is_absent(tmp_path):
     # still has no at-speed grade of its own, which is the state being pinned.
     # The tree WITHOUT it is pinned separately, by
     # `test_dt2_defers_when_dt1_produced_no_grade_and_dt1_carries_the_red`.
-    _coverage(tmp_path, "DT1")
+    #
+    # R-0915-140 — AND DT1'S GRADE MUST BE ONE DT1'S OWN GATE ACCEPTS. The bare
+    # `{"verdict": "PASS"}` stub carries no fault counts, so
+    # `transition_coverage_check` REFUSES it ("no TDF fault verdicts present")
+    # and DT1 FAILS; with a FAILED blocker DT2 was never owed its grade and
+    # reads NOT_MEASURED(upstream_failed). This test's premise is that DT2 has
+    # EVERYTHING it needs, so DT1 gets a grade that passes its gate -- the
+    # premise made true, not the assertion moved.
+    _cov = _coverage(tmp_path, "DT1")
+    _cov.write_text(json.dumps({"verdict": "PASS", "scan_flops": 8,
+                                "detected": 98, "redundant": 1,
+                                "aborted": 1}))
 
     rc, doc = _fcc(tmp_path, _dt_subflow(tmp_path))
+    assert _status_of(doc, "DT1") == "PASS", doc["_stdout"]
     assert _status_of(doc, "DT2") == "FAIL", (
         "a design carrying DT2's scan cut, its SPEF and its routed netlist, "
         "with NO at-speed grade on disk, did not go red — the step whose only "
@@ -895,9 +914,13 @@ def test_dt2_blocks_when_dt1_produced_no_grade_and_names_the_dependency(tmp_path
     assert _status_of(doc, "DT1") == "FAIL", (
         "DT1 armed on the scan cut and owes a transition grade this tree does "
         "not have; it must carry the red:\n" + doc["_stdout"])
-    assert _status_of(doc, "DT2") == "FAIL", (
+    # R-0915-140 — DT1 FAILED, so DT2 was never owed its grade: it reads
+    # NOT_MEASURED(upstream_failed), still blocked by and naming DT1, and
+    # still NEVER the design-inapplicability skip this test refuses.
+    assert _status_of(doc, "DT2") == "NOT_MEASURED", (
         "DT2 treated DT1's missing grade as design inapplicability:\n"
         + doc["_stdout"])
+    assert _reason_of(doc, "DT2") == "upstream_failed", doc["_stdout"]
     dt2 = next(step for step in doc["steps"] if str(step.get("id")) == "DT2")
     assert dt2["cascade_note"] == "blocked-by-upstream(DT1)", dt2
     reason = "\n".join(dt2["reasons"])
