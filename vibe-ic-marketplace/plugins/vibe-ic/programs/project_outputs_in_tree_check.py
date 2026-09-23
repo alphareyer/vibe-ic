@@ -104,8 +104,22 @@ import os
 import re
 import sys
 from pathlib import Path
-import _inplace_chain as _chain
 from typing import Any, List, Optional, Set, Tuple
+
+# --- sibling-import path (vibe-ic#2104) ------------------------------------
+# `programs/` is a flat directory whose modules import each other by BARE name.
+# Python puts a file's own directory on `sys.path` only when that file is run
+# as `__main__`; under `importlib.util.spec_from_file_location` — how the
+# gates, the wiring audit and much of the suite load a program — it does not,
+# so a bare sibling import raises ModuleNotFoundError. MEASURED: adding
+# `_inplace_chain` without this made THIS program the one failure in
+# `test_every_shipped_program_loads_by_path` (`unresolved_sibling:
+# _inplace_chain`). Idempotent, and the same shape the sibling programs that
+# already carry it use.
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import _inplace_chain as _chain                                   # noqa: E402
 
 
 WAIVER_KEY = "project_artifacts_external_storage_intentional"
