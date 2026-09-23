@@ -2827,8 +2827,12 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
     # VACUOUS_PASS. See `_f_gds_no_labels`.
     ("37", "gds_port_label_check . --json reports/phase3/gds_port_labels.json"):
         "GDS_NO_LABELS",
+    # RE-KEYED 2026-09-23 (R-0915-141): step 38's gate writes its verdict to its
+    # OWN path now, and `reports/phase3/foundry_handoff_audit.json` is no longer
+    # one of the step's declared outputs. The fixture is unchanged -- a 0-byte
+    # deliverable still makes this gate FAIL -- only the clause spelling moved.
     ("38", "foundry_handoff_package_check . --json "
-           "reports/phase3/foundry_handoff_audit.json"): "GDS_BAD",
+           "reports/phase3/foundry_handoff_check.json"): "GDS_BAD",
     ("M1", "mixed_signal_merge_check . --json "
            "reports/analog/mixed_signal/merge.json"): "MS_BAD",
     ("M2", "power_domain_crossing_check . --json "

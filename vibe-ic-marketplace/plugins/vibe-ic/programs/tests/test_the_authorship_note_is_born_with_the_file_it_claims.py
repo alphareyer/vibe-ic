@@ -126,7 +126,16 @@ def test_the_note_is_written_by_the_same_pass_that_evaluates_the_gate():
     believed had already happened."""
     src = (PROGRAMS / "flow_compliance_check.py").read_text()
     i_eval = src.index("passed, reasons = _evaluate_gate(project, gate")
-    i_note = src.index("_record_audit_created(project, sid, _audit_produced)")
+    # ANCHORED ON THE CALL NAME, NOT ON ITS ARGUMENT SPELLING. R-0915-141 changed
+    # the argument to a filtered list -- the note may only be stamped for paths the
+    # pass actually wrote -- and this anchor raised "substring not found". The
+    # ORDERING is the property; the argument list is not. (Third time this class of
+    # anchor has moved under a legitimate refactor in this lane: see
+    # `test_issue682_gate_execution_attribution` and
+    # `test_pass_voided_by_dependency`.)
+    i_note = src.index("_record_audit_created(\n", i_eval) if \
+        "_record_audit_created(\n" in src[i_eval:] else \
+        src.index("_record_audit_created(", i_eval)
     i_next_step = src.index("def _check_step", i_eval) if "def _check_step" in src[i_eval:] else len(src)
     assert i_eval < i_note < i_next_step, (
         f"the authorship note is recorded at {i_note}, outside the gate "
@@ -178,3 +187,49 @@ def test_a_step_the_run_never_performed_is_not_owed(tmp_path):
                                                  "reports/zz/sibling.json")])
     assert to_run == [], to_run
     assert "the run did not perform this step" in skipped[0]["why"]
+
+
+# ── R-0915-141: the note records the audit's own write, never a later one ───
+
+def test_the_note_is_stamped_only_for_paths_this_pass_wrote(tmp_path):
+    """THE DEFECT, measured on spm run22 read-only.
+
+    Step 36's authorship note records `size=16738 mtime=08:51:23.557` -- EXACTLY
+    the file `tapeout_checklist_gen` wrote at 08:51:23, not anything the audit
+    wrote. The gate had written that path first at ~08:48 (a mid-run stage-4
+    pass), the note was created then, the PRODUCER rewrote the document at 08:51,
+    and a later pass RE-STAMPED the note onto the producer's own bytes. Step 38's
+    note is the same shape (size=1831, mtime=08:51:23.505).
+
+    That defeats the promise this module makes in its own words: "re-run the RUN,
+    the producer rewrites the artefact, the size/mtime no longer match, the note
+    is stale and the artefact is credited again". Re-stamped, the note matches
+    again and the refusal becomes permanent: once the audit is first to write a
+    path, no producer can ever reclaim it.
+
+    The call site now passes only the paths that were absent before this pass's
+    gate ran, which is the set the audit really wrote. Asserted at source because
+    the filter is one expression inside a 2000-line function.
+    """
+    src = (PROGRAMS / "flow_compliance_check.py").read_text()
+    i = src.index("_record_audit_created(\n")
+    window = src[i:i + 260]
+    assert "_absent_before_gate" in window, (
+        "the note must be stamped only for paths this pass was the first writer "
+        f"of; it is being stamped for: {window[:160]!r}")
+    # And the DROP side is unchanged: a path this pass credited loses its note.
+    assert "_drop_audit_created_note(" in src[i:i + 600]
+
+
+def test_a_note_the_audit_earned_is_still_refused(tmp_path):
+    """THE NEGATIVE ARM. Nothing is forgiven: a path the audit wrote and nobody
+    else has touched still matches its note, on every pass."""
+    rel = "reports/audit/zz_verdict.json"
+    doc = tmp_path / rel
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text('{"program": "zz_check", "verdict": "FAIL"}\n')
+    FCC._record_audit_created(tmp_path, "zz", [rel])
+    assert FD._audit_claims(tmp_path, "zz", rel) is True
+    # A second pass that re-stamps nothing leaves the claim standing.
+    FCC._record_audit_created(tmp_path, "zz", [])
+    assert FD._audit_claims(tmp_path, "zz", rel) is True
