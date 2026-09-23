@@ -104,6 +104,7 @@ from types import MappingProxyType
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor
 import _path_layout as _pl
+import _gate_authorship as _ga
 import _reused_ip_predicate as _reused_ip
 import _waiver_entries as _we
 import _evidence_independence as _ev_ind  # #524
@@ -14369,12 +14370,49 @@ def _is_gate_verdict_document(path: Path,
     refuse a real producer's artefact; a false negative only falls back to the
     absent-before-gate answer this sits beside.
     """
+    return authorship_answer(path, gate_programs, producer_programs)[0]
+
+
+#: How `authorship_answer` reached its verdict. Returned, not logged, so the caller can
+#: DISCLOSE which paths the document itself answered for and which fell back to timing --
+#: a fallback that is invisible is a fallback nobody audits.
+AUTHORSHIP_BY_ROLE = "role"
+AUTHORSHIP_BY_CONTENT = "content"
+AUTHORSHIP_UNREADABLE = "unreadable"
+#: The document was readable and said nothing that identifies its author -- so the
+#: classification fell back to the caller's timing facts, i.e. to the authorship note.
+AUTHORSHIP_NO_ANSWER = "no-answer"
+
+
+def authorship_answer(path: Path,
+                      gate_programs: Optional[frozenset] = None,
+                      producer_programs: Optional[frozenset] = None
+                      ) -> Tuple[bool, str]:
+    """`(is_the_auditors, what_answered_it)` for the document at `path`.
+
+    Public because the rule has to be DRIVEN by its tests rather than restated by them,
+    and because the caller discloses the second element.
+    """
     try:
         data = json.loads(path.read_text(errors="replace"))
     except (OSError, ValueError):
-        return False
+        return False, AUTHORSHIP_UNREADABLE
     if not isinstance(data, dict):
-        return False
+        return False, AUTHORSHIP_UNREADABLE
+
+    # THE DOCUMENT SAYS WHO INVOKED ITS WRITER: read that first, because it is the only
+    # evidence here that is not an inference. Every branch below reasons from a PROGRAM
+    # NAME, and MEASURED on the shipped flow, 28 of the 33 declared-output/own-gate-`--json`
+    # pairs are written by a program that is both a declared producer of the step and its
+    # own gate -- for which no name can distinguish the two invocations, which is why the
+    # `_shared` branch at the end correctly refuses to try.
+    #
+    # Last writer wins, and that is right in both directions: an audit that overwrites the
+    # run's document makes the file on disk the auditor's, and a re-run of the RUN that
+    # overwrites the auditor's reclaims it. The record self-heals with no bookkeeping.
+    _role = _ga.role_of(data)
+    if _role is not None:
+        return _role == _ga.ROLE_AUDIT, AUTHORSHIP_BY_ROLE
 
     # v1.15.45 (sha256 capture) — WHOSE stamp, not whether there is one.
     # MEASURED on sha256 x sky130A (v1.15.44): step 0.5ic's two producers
@@ -14407,9 +14445,11 @@ def _is_gate_verdict_document(path: Path,
     for v in data.values():
         stamps.extend(_stamp_values(v))
     if not stamps:
-        return False
+        # Nothing in the document identifies anybody. Not a claim that the run wrote it:
+        # the caller's timing facts are the only remaining evidence, and the source says so.
+        return False, AUTHORSHIP_NO_ANSWER
     if gate_programs is None and producer_programs is None:
-        return True
+        return True, AUTHORSHIP_BY_CONTENT
 
     def _names(stamp: str) -> set:
         head = stamp.split()[0]
@@ -14493,7 +14533,7 @@ def _is_gate_verdict_document(path: Path,
         # A producer's record IS the document, or survives inside it: the run
         # produced it. A gate that later writes its own verdict beside it does
         # not turn the run's evidence into the auditor's.
-        return False
+        return False, AUTHORSHIP_BY_CONTENT
     # AN EXPLICIT PRODUCER STAMP IS THE DOCUMENT SAYING WHOSE IT IS, read BEFORE
     # the fall-through below -- because that fall-through is the exact defect the
     # 2026-09-15 block above describes: "the stamp matched no name in either set
@@ -14520,9 +14560,9 @@ def _is_gate_verdict_document(path: Path,
             if isinstance(_pv, str) and _pv.strip():
                 _producer_stamps.append(_pv.strip())
     if any(_hits(st, _producers_only) for st in _producer_stamps):
-        return False
+        return False, AUTHORSHIP_BY_CONTENT
     if any(_hits(st, _gates_only) for st in stamps):
-        return True
+        return True, AUTHORSHIP_BY_CONTENT
     if any(_hits(st, _shared) for st in stamps) and _shared:
         # THE STAMP IS THE SAME EITHER WAY, SO CONTENT DOES NOT ANSWER HERE.
         # A program the flow lists BOTH under this step's `programs:` and as
@@ -14550,10 +14590,14 @@ def _is_gate_verdict_document(path: Path,
         # facts — "was it absent when this audit began" and "did an earlier
         # pass of this audit create it" (`_prior_audit_created`). Those answer
         # it without asking the document who wrote it.
-        return False
+        #
+        # THIS is the branch the role stamp exists to retire. Until the writer of this
+        # particular document is taught to state its role, the answer here rests entirely
+        # on the authorship note, and `check_step` discloses that by name.
+        return False, AUTHORSHIP_NO_ANSWER
     # Stamped by something that is neither this step's gate nor a declared
     # producer: keep the presence-only answer the callers relied on.
-    return True
+    return True, AUTHORSHIP_BY_CONTENT
 
 
 # ── THE AUDIT'S OWN AUTHORSHIP RECORD ───────────────────────────────────────
@@ -15634,13 +15678,41 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         _own_producers = frozenset(
             str(p).strip() for p in (step.get("programs") or [])
             if isinstance(p, str) and str(p).strip())
-        _audit_produced = [
-            rel for rel in _declared_self_written
-            if (project / rel).exists()
-            and (rel in _absent_before_gate
-                 or rel in _prior_created
-                 or _is_gate_verdict_document(
-                     project / rel, _own_gate_programs, _own_producers))]
+        # R-0915-152 third cut -- THE DOCUMENT'S OWN ACCOUNT OF WHO INVOKED ITS WRITER
+        # OUTRANKS THE TIMING FACTS, and where it gives none, the fall-back is DISCLOSED.
+        #
+        # The order matters and this is why: `absent_before_gate` and `_prior_created` are
+        # both statements about WHEN, and both were shown to give the wrong answer on a
+        # re-run -- the first because pass 2's artefact is no longer absent, the second
+        # because it depends on a note surviving. A document that states `invoked_as:
+        # producer` is the RUN's evidence even though this audit's gate later overwrote
+        # something at that path, and one that states `invoked_as: audit` is the
+        # auditor's even on the first pass. Timing is consulted only for documents whose
+        # writer has not been taught to say.
+        _audit_produced = []
+        _answered_by_timing: List[str] = []
+        for rel in _declared_self_written:
+            if not (project / rel).exists():
+                continue
+            _is_audits, _why = authorship_answer(
+                project / rel, _own_gate_programs, _own_producers)
+            if _why == AUTHORSHIP_BY_ROLE:
+                if _is_audits:
+                    _audit_produced.append(rel)
+                continue
+            if _why == AUTHORSHIP_NO_ANSWER:
+                _answered_by_timing.append(rel)
+            if (rel in _absent_before_gate or rel in _prior_created or _is_audits):
+                _audit_produced.append(rel)
+        if _answered_by_timing:
+            # SAID OUT LOUD, per step. These are the paths whose classification rests on
+            # the authorship note alone, because their document states no role: if the
+            # note is lost the answer moves, and a reader of this log can see which paths
+            # that is true for instead of having to re-derive the set.
+            print(f"flow_compliance_check: step {sid}: the document at "
+                  f"{', '.join(sorted(_answered_by_timing))} states no `invoked_as`, so "
+                  f"whether the audit or the run wrote it rests on this audit's own "
+                  f"authorship note, not on the document", file=sys.stderr)
         # Re-stamp what this pass refused with the stat the gate just wrote,
         # and clear the note for anything this pass credited — the note is the
         # auditor's bookkeeping about its OWN writes and must never outlive
@@ -18415,10 +18487,25 @@ _CHILD_SCOPE_STACK = ""
 
 
 def _child_env():
-    """The environment for a spawned gate program, carrying the scope stack."""
-    if not _CHILD_SCOPE_STACK:
-        return None          # nothing to add; let the child inherit as before
-    return dict(os.environ, **{_SCOPE_STACK_ENV: _CHILD_SCOPE_STACK})
+    """The environment for a spawned gate program: the scope stack, and WHO IS ASKING.
+
+    R-0915-152 third cut. The role is added HERE because this is the one place the audit
+    spawns a gate, and because the role is a fact about the INVOCATION, which only the
+    caller holds: the same checker is run by the orchestrator so its exit status can block
+    (#306) and by this audit as a gate clause, and nothing inside it can tell the two
+    apart. A gate this audit spawns is therefore told `audit`; everything the run spawns
+    says nothing and so is a producer by default -- see `_gate_authorship.caller_role`.
+
+    It no longer returns None. It used to when there was no scope stack to carry, which
+    was the inherit-as-before path; there is now always something to say. Still passed
+    explicitly rather than by mutating `os.environ`, for the reason the spawn site gives:
+    this module's `main` is called IN PROCESS by `stageN_compliance`, and a process-global
+    mutation would outlive the call that made it and mark a later spawn as the auditor's.
+    """
+    extra = dict(_ga.child_env_additions(_INVOCATION_ENV, _invocation_id()))
+    if _CHILD_SCOPE_STACK:
+        extra[_SCOPE_STACK_ENV] = _CHILD_SCOPE_STACK
+    return dict(os.environ, **extra)
 
 #: Scopes that contain no synthesis step, so the pre-PnR Yosys gate has nothing
 #: to read. `stage1` is spelt as an int one line below for historical reasons;
@@ -20680,6 +20767,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             # measurement at the same path by anything except its name, and this
             # repo's own guard is content-based "not name-based".
             "program": "flow_compliance_check",
+            # R-0915-152 third cut -- WHO INVOKED THIS PASS. `program` says which
+            # program wrote the document; it cannot say whether the RUN ran it (the
+            # orchestrator lists `flow_compliance_check` under steps 2 and 14, so its
+            # exit status can block) or an AUDIT ran it as a gate clause. Those are the
+            # two answers the classification needs to tell apart, and this is the only
+            # field that differs between them. See `_gate_authorship`.
+            _ga.DOC_KEY: _ga.caller_role(),
             "flow": args.flow,
             "project": str(project),
             "strict": not args.lenient,
