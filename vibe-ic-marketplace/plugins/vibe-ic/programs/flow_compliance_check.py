@@ -3292,9 +3292,64 @@ def _step_produced_every_declared_output(result: Any) -> bool:
         return False
     n = b.get("n_specs")
     k = b.get("n_step_attributed")
+    sat = b.get("n_satisfied")
     if not isinstance(n, int) or not isinstance(k, int) or n <= 0:
         return False
-    return k == n
+    # BOTH, and the second is the one the review added. `n_step_attributed`
+    # answers "resolved against THIS step's own write record"; `n_satisfied`
+    # answers "and the file is there". A binding that cannot answer the second
+    # question does not get the benefit of the doubt.
+    if not isinstance(sat, int):
+        return False
+    return k == n and sat == n
+
+
+def _skips_that_do_not_speak_for_the_step(
+        skip_hints: List[str], result: Any) -> Tuple[List[str], List[str]]:
+    """Split skip hints into the ones that still set the tier and the ones
+    that only describe themselves.
+
+    A DEMOTION, NOT A BYPASS, and the pre-landing review is why. The first
+    version put `and not _step_produced_every_declared_output(result)` on the
+    skip BRANCH. Every branch after it requires `not skip_hints` -- waiver,
+    substantive-vacuous, vacuous, json-vacuous -- so skipping that one branch
+    dropped the step past ALL of them into the final `else`, which sets a bare
+    PASS. An all-vacuous step with one N/A clause was RAISED from NOT_MEASURED
+    to an executed PASS, and a step carrying a waiver lost PASS_WITH_WAIVERS.
+    The ordering broke in the direction that makes a run look better.
+
+    So the hints are removed from the population BEFORE the chain runs, and
+    the remaining tiers judge the step by its OTHER clauses -- which is what
+    "this clause does not speak for the step" actually means.
+
+    ONLY `DESIGN_DECLARED_NA`, and only when EVERY skip is one. Advisory
+    DISCLOSED_SKIP covers every SKIP_ELIGIBLE class and `CAPABILITY_ABSENT` /
+    `EXTERNAL` emit the same hint shape. A capability gap that stopped
+    speaking for its step would leave `oss_blocked_skipped`, lose
+    `self_skip_disclosed`, and let a run publish PASS with the gap invisible.
+    A hint that names no class at all is never demoted: not every skip site
+    writes `reason_class=`, and silence is not evidence of an N/A.
+    """
+    if not skip_hints or not _step_produced_every_declared_output(result):
+        return list(skip_hints), []
+    declared = [_HINT_DECLARED_CLASS_RE.search(h) for h in skip_hints]
+    if not all(m and m.group(1) == _reason_taxonomy.DESIGN_DECLARED_NA
+               for m in declared):
+        return list(skip_hints), []
+    return [], list(skip_hints)
+
+
+def _demoted_skip_disclosures(demoted: List[str]) -> List[str]:
+    """The row lines for a demoted skip. It is TRUE and a reader must see it.
+
+    The first version skipped the only branch that appends these, so the
+    disclosure vanished together with the tier -- the step said nothing at all
+    about a clause that had honestly reported it examined nothing.
+    """
+    return [(f"DISCLOSED-SKIP (did not set this step's tier: the step "
+             f"produced every output it declares): "
+             f"{h[len(_SKIP_HINT_PREFIX):]}")
+            for h in demoted]
 
 
 def _gate_ledger_payload() -> List[Dict[str, Any]]:
@@ -15559,6 +15614,16 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             "mode": ("step_attributed" if _n_glob == 0 else
                      "project_glob" if _n_attr == 0 else "mixed"),
             "n_specs": len(outputs), "n_step_attributed": _n_attr,
+            # SATISFACTION, WHICH IS A DIFFERENT QUESTION FROM MODE.
+            # `_resolve_required_output` returns mode `step_attributed` with
+            # satisfied=False for wildcard_unbound, recorded_but_absent and
+            # not_produced -- so `n_step_attributed == n_specs` says only
+            # "every spec was resolved against this step's own record", never
+            # "every declared output is there". MEASURED by the pre-landing
+            # review, 2026-09-23.
+            "n_satisfied": sum(1 for d in _bind_specs
+                               if d.get("satisfied")
+                               and d.get("mode") == "step_attributed"),
             "n_project_glob": _n_glob, "source": _src,
             # `codes` is the machine handle: a closed vocabulary (see
             # `_bind_detail`) that says WHICH degradation `mixed` is made of.
@@ -15945,6 +16010,12 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # promoted from __VACUOUS_HINT__.
         skip_hints = [r for r in reasons
                       if r.startswith(_SKIP_HINT_PREFIX)]
+        # A CLAUSE'S N/A IS THAT CLAUSE'S, NOT THE STEP'S — and the split has
+        # to happen HERE, before the tier chain, because every branch below
+        # the skip branch requires `not skip_hints`. See
+        # `_skips_that_do_not_speak_for_the_step` for the measurement.
+        skip_hints, _demoted_skips = _skips_that_do_not_speak_for_the_step(
+            skip_hints, result)
         # #651 — a gate program that PASSed-WITH-WAIVERS emits a
         # __WAIVER_HINT__ marker; promote the step to WAIVED-DEFERRED so the
         # Overall verdict resolves to PASS_WITH_WAIVERS, never a bare PASS.
@@ -16105,8 +16176,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                     f"(#651 — a slot credited via a waiver, NOT a bare PASS; "
                     f"production tapeout review must close it): "
                     f"{h[len(_WAIVER_HINT_PREFIX):]}")
-        elif (passed and skip_hints and not non_hint_reasons
-                and not _step_produced_every_declared_output(result)):
+        elif passed and skip_hints and not non_hint_reasons:
             # A CLAUSE'S N/A IS THAT CLAUSE'S, NOT THE STEP'S.
             #
             # MEASURED on spm run22 (lane icspm5), step 7 "Constraint setup
@@ -16350,6 +16420,13 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # A gate that RAN and did not pass is a defect, not an absence.
             result.reason_class = ""
             result.reasons.extend(non_hint_reasons)
+        # THE DEMOTED SKIP IS STILL TRUE, so it is still on the row. It no
+        # longer sets the tier -- the step produced everything it declares --
+        # but a clause that honestly reported it examined nothing is exactly
+        # the fact #901 says one label cannot carry and a reader must still
+        # see. The same shape as the partial-vacuity disclosure below.
+        if _demoted_skips:
+            result.reasons.extend(_demoted_skip_disclosures(_demoted_skips))
         # vibe-ic#901 - the tier is a per-STEP word and a partially vacuous step
         # has no such word: some of its clauses examined the design and some
         # examined nothing. Both facts are true and one label can carry only
