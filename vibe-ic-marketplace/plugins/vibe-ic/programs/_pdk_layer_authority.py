@@ -232,9 +232,15 @@ class ImageReader:
     @staticmethod
     def _docker(image: str, argv: List[str]) -> Tuple[int, str]:
         import subprocess
+        # The memory ceiling every container-creating argv in programs/ carries
+        # (`test_container_memory_ceiling`). A one-line `ls`/`cat` probe cannot
+        # plausibly grow, but "this one is small" is the judgement that rule
+        # refuses to re-make per call site.
+        import _docker_memory as _dmem
         try:
             cp = subprocess.run(
-                ["docker", "run", "--rm", "--init", "--entrypoint", "/bin/sh",
+                ["docker", "run", *_dmem.docker_memory_flags(),
+                 "--rm", "--init", "--entrypoint", "/bin/sh",
                  image, "-c", " ".join(shlex.quote(a) for a in argv)],
                 capture_output=True, text=True, timeout=180)
         except (OSError, subprocess.SubprocessError):
