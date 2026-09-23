@@ -64,6 +64,20 @@ class _Res:
     outcome = "ok"
 
 
+@pytest.fixture(autouse=True)
+def _restore_the_shared_watchdog():
+    """`_fcc` gives each test a fresh flow_compliance_check, but every copy
+    imports the SAME `_watchdog` module object, so `_stub_gate` patching
+    `mod._watchdog.*` patched it for the whole process. MEASURED (lane
+    ictier1): under xdist a later test in the same worker that ran a real gate
+    in-process got this file's stub back -- `(False, 'some unrelated program
+    output', 4, ...)`. Restore it after every test."""
+    import _watchdog
+    saved = (_watchdog.run_host_supervised, _watchdog.completed_process)
+    yield
+    _watchdog.run_host_supervised, _watchdog.completed_process = saved
+
+
 def _stub_gate(mod, rc: int, stdout: str) -> None:
     """Make every gate invocation return (rc, stdout).
 
