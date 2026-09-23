@@ -255,6 +255,11 @@ from __future__ import annotations
 
 import ast
 import functools
+import re
+import yaml
+import tempfile
+import os
+import copy
 import shlex
 from collections import Counter
 from typing import Dict, List, Set, Tuple
@@ -723,6 +728,90 @@ def step_run_programs(step_id) -> Tuple[str, ...]:
     return tuple(out)
 
 
+#: R-0915-140 candidate (numbered by the orchestrator) — A SCOPED INVOCATION
+#: READS ITS OWN SCOPE.
+#:
+#: `flow_compliance_check` is the compliance AUDITOR, and it is a gate program of
+#: many steps. Its source names the path of practically every artefact the flow
+#: has, because that is its job -- so the whole-program string anchor made EVERY
+#: step whose gate invokes it read EVERYTHING it mentions.
+#:
+#: MEASURED on main 93b2d10fa, the two ids this closes:
+#:   D5-MISSING-EDGE: step 2 reads 'phase3/stage3/pnr/routed.def', declared as a
+#:   required_output of step 21, but 21 is not in 2's blocks_on closure ...
+#:   Evidence: gate program flow_compliance_check.py names the string constant
+#:   'routed.def'; the edge cannot simply be added -- 21 already has 2 in its own
+#:   ancestry, so the real dependency is CIRCULAR and one side of it is wrong
+#: and the same sentence for step 14. THE MESSAGE ITSELF SAYS THE READ CANNOT BE
+#: TRUE: adding the edge would make the graph circular, so the inference is what
+#: is wrong, not the flow.
+#:
+#: AND THE INVOCATION ALREADY SAYS SO. Step 2's clause is
+#: `flow_compliance_check . --stage-id stage_phase1 --strict --json ...` and step
+#: 14's is `--stage-id stage_analog`; step 21, which produces `routed.def`, is
+#: `stage3`. A compliance invocation confined to one stage cannot be reading the
+#: outputs of steps in another.
+#:
+#: This is the SAME MOVE `_FLOW_DECLARED_READ_PROGRAMS` makes and the docstring's
+#: own words for it: "the anchor is INTERSECTED with what the flow declares for
+#: THIS invocation. This does not forgive; it substitutes a better source." Here
+#: the better source is the scope flag in the clause the flow itself writes.
+_STAGE_SCOPED_READ_PROGRAMS: Tuple[str, ...] = ("flow_compliance_check",)
+_STAGE_SCOPE_RE = re.compile(r"--stage-id\s+(\S+)")
+
+
+@functools.lru_cache(maxsize=None)
+def invocation_stage_scope(step_id, prog: str):
+    """The stage id a scoped invocation of `prog` in this step is confined to.
+
+    Returns None when there is no scope to read -- an unscoped invocation, a
+    program not in the scoped set, or a clause this cannot parse -- and None means
+    NO NARROWING, so an unreadable clause keeps today's behaviour rather than
+    quietly excusing a step.
+    """
+    if prog not in _STAGE_SCOPED_READ_PROGRAMS:
+        return None
+    for c in F.gate_clauses(step_id):
+        cmd = getattr(c, "command", None) or ""
+        if not cmd.split()[:1] == [prog]:
+            continue
+        m = _STAGE_SCOPE_RE.search(cmd)
+        if m:
+            return m.group(1)
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def paths_named_by_stage(stage_id: str) -> frozenset:
+    """Every path the steps of `stage_id` name -- outputs, conditions, gate clauses.
+
+    THE SCOPE IS WHAT IT NAMES, NOT WHERE ITS PRODUCERS SIT, and the difference is
+    a real one I got wrong first. A stage's compliance invocation legitimately
+    reads artefacts produced in OTHER stages -- that is most of what it does:
+    step 2's `--stage-id stage_phase1` invocation reads the L-docs D1 produces,
+    and D1 is not a member of the stage whose steps name them. A
+    "producer must be in the scope" rule drops those too.
+
+    MEASURED, and on this tree the two rules happen to agree -- both remove the
+    same six evidence rows -- so this is a change of REASON, not of outcome. It is
+    made anyway because the reason is what the next reader inherits, and
+    "producer in scope" is wrong in principle.
+    """
+    out: Set[str] = set()
+    for sid in F.step_ids():
+        if str(F.step_stage(sid) or "") != stage_id:
+            continue
+        out.update(str(x) for x in (F.required_outputs(sid) or []))
+        step = F.step_by_id(sid) or {}
+        for spec in ((step.get("condition") or {}).get("files_exist") or []):
+            out.update(str(alt) for alt in F.split_any_of(str(spec)))
+        for c in F.gate_clauses(sid):
+            for tok in (getattr(c, "command", None) or "").split():
+                if "/" in tok:
+                    out.add(tok)
+    return frozenset(out)
+
+
 def derived_dependencies(step_id) -> Tuple[Tuple[str, str, str], ...]:
     """``((producer_step, artefact, evidence), ...)`` for one consumer step.
 
@@ -744,8 +833,18 @@ def derived_dependencies(step_id) -> Tuple[Tuple[str, str, str], ...]:
     for prog in step_run_programs(step_id):
         constants = program_string_constants(prog)
         declared = by_flow.get(prog)
+        scope = invocation_stage_scope(step_id, prog)
+        scope_paths = paths_named_by_stage(scope) if scope else None
         for base, art in anchors.items():
             if base not in constants:
+                continue
+            if scope_paths is not None and art not in scope_paths:
+                # A SCOPED INVOCATION READS ITS OWN SCOPE. No step of the stage
+                # this clause is confined to names this artefact, so this
+                # invocation is not the reader -- the whole-program anchor is the
+                # union over every OTHER invocation of the same program. See
+                # `_STAGE_SCOPED_READ_PROGRAMS` for the two ids this closes and
+                # why the alternative (adding the edge) is circular.
                 continue
             if declared is not None and not _declared_by_flow(art, declared):
                 # The flow declares what THIS invocation reads and this is not
@@ -1416,9 +1515,32 @@ def test_d5_state_census_is_exhaustive():
 # deliberately, with the reason written into the docstring the way the last
 # three removals were. Upward moves (a new declared read, a new step) are
 # free: this is a floor, not an equality pin.
-_DERIVED_DEP_STEPS_FLOOR = 23
-_DERIVED_DEP_PAIRS_FLOOR = 29
-_DERIVED_DEP_ROWS_FLOOR = 70
+# RE-DERIVED 2026-09-23 onto the live post-fix baseline, which is what this
+# file's own docstring did the last time these moved ("The three floors below
+# were re-derived at the same time... They now sit on the live post-fix
+# baseline"). They are `>=` guards, so they had gone slack in the same way it
+# records: live 29/44/95 against floors 23/29/70, i.e. six steps, fifteen pairs
+# and twenty-five rows of drift that would never have reddened anything.
+#
+# THE MOVE IS A TIGHTENING IN THE ONLY DIRECTION THAT MATTERS. Raising a `>=`
+# floor can only make a future shrink louder; it cannot excuse one. And the
+# shrink THIS change causes is measured and named: -2 pairs, -6 rows, 0 added --
+#   2 -> 21   phase3/stage3/pnr/routed.def        (the red this closes)
+#   14 -> 21  phase3/stage3/pnr/routed.def        (the red this closes)
+#   14 -> D1  phase1/extraction_patterns.json
+#   14 -> D1  phase1/generated_docs/L5_ADI_SPEC.json
+#   14 -> D1  phase1/generated_docs/L6_CONTROL_LOGIC.json
+#   14 -> D1  phase1/generated_docs/L9_INTEGRATION_SPEC.json
+# The last four are the SAME correction this file already made for
+# `stage_on_pass_review` -- "an L-doc a DIFFERENT stage's review reads ... it was
+# being charged with reading L1, L5 and L8 because some other stage's rule does"
+# -- now applied to `flow_compliance_check`: step 14's invocation is scoped to
+# `stage_analog`, and no stage_analog step names any of those four. Step 2's
+# invocation is scoped to `stage_phase1`, which DOES name them, so step 2 keeps
+# its D1 rows: the narrowing is per-invocation, not per-program.
+_DERIVED_DEP_STEPS_FLOOR = 29
+_DERIVED_DEP_PAIRS_FLOOR = 44
+_DERIVED_DEP_ROWS_FLOOR = 95
 
 # Cells whose layer-1+2 data-dependency clause is EMPTY BY CONSTRUCTION, and
 # why. Both were closed by DELETING a cross-step read, so for exactly these
@@ -2037,3 +2159,108 @@ def test_d5_the_deferred_register_is_the_only_thing_holding_those_cells_green():
             f"{sorted(ancestors(sid))}). The debt this register recorded has "
             f"come back; re-open the entry rather than re-deleting this check."
         )
+
+
+# ── the scoped-invocation narrowing, driven in both directions ──────────────
+
+def test_a_scoped_compliance_invocation_does_not_read_another_stage():
+    """THE TWO IDS THIS CLOSES, as the property rather than as their absence.
+
+    Both were `D5-MISSING-EDGE: reads 'phase3/stage3/pnr/routed.def', declared as
+    a required_output of step 21`, and both messages said the repair was
+    impossible: "21 already has 2 in its own ancestry, so the real dependency is
+    CIRCULAR and one side of it is wrong". The inference was the wrong side.
+    """
+    for sid in ("2", "14"):
+        arts = [art for _p, art, _e in derived_dependencies(sid)]
+        assert "phase3/stage3/pnr/routed.def" not in arts, (sid, arts)
+
+
+def test_the_scope_is_read_from_the_clause_the_flow_writes():
+    """Not from a table in this file: the scope is in the invocation, so a clause
+    re-scoped upstream moves this narrowing with it."""
+    assert invocation_stage_scope("2", "flow_compliance_check") == "stage_phase1"
+    assert invocation_stage_scope("14", "flow_compliance_check") == "stage_analog"
+    # A program that is not scope-bearing gets no narrowing at all.
+    assert invocation_stage_scope("2", "rtl_hygiene_lint") is None
+
+
+def test_the_narrowing_is_per_invocation_not_per_program():
+    """THE ARM THAT KEEPS THIS FROM BEING A BLANKET EXEMPTION. The same program,
+    scoped two ways, keeps the reads its own scope names and loses the others:
+    step 2 (`stage_phase1`) KEEPS its D1 L-doc rows because stage_phase1 steps
+    name them; step 14 (`stage_analog`) loses them because no stage_analog step
+    does. A per-program exemption would have dropped both.
+    """
+    # ON THE EVIDENCE, NOT ON THE ARTEFACT. Step 14 still reaches
+    # `L5_ADI_SPEC.json` through `stage_on_pass_review`'s anchor, which is a
+    # different reader with its own declaration -- so asserting the ARTEFACT is
+    # gone would be asserting that this change broke something it must not touch.
+    # What moved is the flow_compliance_check row.
+    def _fcc(sid):
+        return {art for _p, art, ev in derived_dependencies(sid)
+                if "flow_compliance_check" in ev}
+    assert "phase1/generated_docs/L5_ADI_SPEC.json" in _fcc("2"), sorted(_fcc("2"))
+    assert "phase1/generated_docs/L5_ADI_SPEC.json" not in _fcc("14"), sorted(_fcc("14"))
+    # And the other reader is untouched, which is the control on the line above.
+    assert any("stage_on_pass_review" in ev
+               for _p, art, ev in derived_dependencies("14")
+               if "L5_ADI_SPEC" in art), "the sibling reader's anchor was lost too"
+    named = paths_named_by_stage("stage_phase1")
+    assert "phase1/generated_docs/L5_ADI_SPEC.json" in named
+    assert "phase3/stage3/pnr/routed.def" not in named
+    assert "phase3/stage3/pnr/routed.def" not in paths_named_by_stage("stage_analog")
+
+
+def test_an_unscoped_invocation_keeps_the_whole_program_anchor():
+    """FAIL CLOSED. The narrowing needs a scope in the clause; without one the
+    inference is unchanged, so a clause that loses its `--stage-id` cannot buy
+    silence."""
+    assert invocation_stage_scope("2", "flow_compliance_check") is not None
+    # A step whose compliance clause carries no scope keeps every anchor: asserted
+    # through the helper, since fabricating such a step would test a fiction.
+    assert paths_named_by_stage("a_stage_the_flow_does_not_have") == frozenset()
+
+
+def test_the_scope_covers_outputs_conditions_and_gate_clauses():
+    """What a stage NAMES is read from all three places, because a stage that
+    conditions on an artefact reads it just as surely as one that declares it."""
+    named = paths_named_by_stage("stage3")
+    assert any(p.endswith("routed.def") for p in named), sorted(named)[:6]
+
+
+def test_a_real_blocks_on_gap_still_reddens(monkeypatch):
+    """THE DIRECTION THAT MATTERS MOST: the narrowing must not have bought silence.
+
+    The scope rule only ever drops a read INFERRED from a shared program's string
+    constants. The YAML-DECLARED route -- a step's own gate or condition naming
+    another step's required_output -- is untouched, and that is the route a real
+    `blocks_on` gap travels on.
+
+    DRIVEN THROUGH `d5_problems`, the function that emits the finding, with ONE
+    declared read injected for step 2: step 21's `routed.def`, which step 2's
+    blocks_on closure (['0.5ic', '1', 'D1']) does not reach. Injecting at the
+    derivation rather than swapping the flow yaml is deliberate -- the first cut of
+    this arm rewrote a copy of the flow, `flowref`'s own caches did not pick it up,
+    and the arm's guard caught that it was measuring nothing. The emitter is the
+    subject; the derivation is its input.
+    """
+    real = derived_dependencies
+    gap = ("21", "phase3/stage3/pnr/routed.def",
+           "yaml gate/condition declares 'phase3/stage3/pnr/routed.def'")
+
+    def _with_gap(step_id):
+        rows = list(real(step_id))
+        if F.normalize_id(step_id) == "2":
+            rows.append(gap)
+        return tuple(rows)
+
+    monkeypatch.setitem(globals(), "derived_dependencies", _with_gap)
+    problems = d5_problems("2")
+    assert any("D5-MISSING-EDGE" in q and "routed.def" in q for q in problems), (
+        "a step that DECLARES it reads another step's required_output with no "
+        f"blocks_on edge must still be reported: {problems}")
+    # AND THE GAP IS WHAT PRODUCED IT: without the injection the same call is
+    # clean, so this arm cannot pass on some pre-existing finding.
+    monkeypatch.setitem(globals(), "derived_dependencies", real)
+    assert not [q for q in d5_problems("2") if "D5-MISSING-EDGE" in q]
