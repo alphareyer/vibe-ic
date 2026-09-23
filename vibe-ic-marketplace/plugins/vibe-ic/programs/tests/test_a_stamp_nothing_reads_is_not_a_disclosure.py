@@ -91,6 +91,12 @@ STAMP_CONSUMERS = {
                                    "spice_correlation_check.py"),
     "STA_PARASITICS_PROVENANCE": ("sta_signoff_rigor_check.py",
                                   "spice_correlation_check.py"),
+    # #2537 (icspm5 STA, landed the same day as this registry, #2540): the deck
+    # stamps its own time unit after read_liberty and `eda_report_audit.
+    # _sta_time_unit` reads it (`_STA_TIME_UNIT_RE`) before publishing any
+    # number under an `_ns` name. The two landings crossed; this row is the
+    # join, and the consumer check below still requires the token in code.
+    "STA_TIME_UNIT": ("eda_report_audit.py",),
 }
 
 
