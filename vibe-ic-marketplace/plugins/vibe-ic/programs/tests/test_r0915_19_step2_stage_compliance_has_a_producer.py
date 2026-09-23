@@ -33,12 +33,23 @@ import pytest  # noqa: E402
 
 FLOW_YAML = PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml"
 
-#: (step, program, target) — the two clauses this commit declares.
+#: (step, program, target) — the clauses this ruling declared that still stand.
+#:
+#: DEPARTED 2026-09-24: step 2's ("2", "flow_compliance_check",
+#: "reports/phase1/gates/stage_phase1_compliance.json"), by R-0915-141, the step-38 half, lane ictier1 (spm run23: "AUDIT-CREATED OUTPUT REFUSED: ['reports/phase1/gates/stage_phase1_compliance.json']").
+#: The declaration closed the race by making the RUN write the audit's own verdict
+#: document -- the gate-as-producer shape R-0915-141 names -- and on spm run23 the
+#: refusal came back anyway. The path left step 2's `required_outputs`, so there is
+#: no longer a declared output for a race to decide; step 2's tier is its nested
+#: pass's own verdict. Step 14's declaration is untouched. `DEPARTED` is asserted
+#: below, so the step-2 clause cannot quietly come back.
 ADDED = (
-    ("2", "flow_compliance_check",
-     "reports/phase1/gates/stage_phase1_compliance.json"),
     ("14", "flow_compliance_check",
      "reports/analog/stage_analog_compliance.json"),
+)
+DEPARTED = (
+    ("2", "flow_compliance_check",
+     "reports/phase1/gates/stage_phase1_compliance.json"),
 )
 
 
@@ -80,10 +91,10 @@ def test_the_run_owes_the_document_when_the_step_was_performed(tmp_path):
     P = _P()
     clause = [c for c in P.declared_producer_clauses()
               if (c["step"], c["program"], c["target"]) == ADDED[0]]
-    assert clause, "step 2's clause is gone"
+    assert clause, "step 14's clause is gone"
     sib = clause[0]["siblings"][0]
     (tmp_path / sib).parent.mkdir(parents=True, exist_ok=True)
-    (tmp_path / sib).write_text("the run performed step 2\n")
+    (tmp_path / sib).write_text("the run performed the step\n")
     to_run, skipped = P.owed(tmp_path, clause)
     assert [r["target"] for r in to_run] == [clause[0]["target"]], skipped
 
@@ -109,7 +120,7 @@ def test_a_step_the_run_never_performed_is_still_not_owed(tmp_path):
     the step, and its document is not owed."""
     P = _P()
     clause = [c for c in P.declared_producer_clauses()
-              if (c["step"], c["program"], c["target"]) == ADDED[1]]
+              if (c["step"], c["program"], c["target"]) == ADDED[0]]
     assert clause
     to_run, skipped = P.owed(tmp_path, clause)
     assert not to_run
@@ -122,3 +133,22 @@ def test_the_documents_identity_gap_is_still_real():
     import flow_compliance_check as F  # noqa: PLC0415
     assert "flow_compliance_check" not in "".join(
         str(k) for k in F._GATE_DOCUMENT_IDENTITY_KEYS)
+
+
+def test_the_departed_step_2_clause_is_not_a_producer_clause():
+    """R-0915-141's step-38 half: step 2 no longer DECLARES its nested clause's
+    verdict target, so the runner owes nothing for it -- while the clause itself
+    still runs and still writes its receipt there."""
+    P = _P()
+    got = {(c["step"], c["program"], c["target"])
+           for c in P.declared_producer_clauses()}
+    back = [row for row in DEPARTED if row in got]
+    assert not back, back
+    step = _steps()["2"]
+    for _sid, program, target in DEPARTED:
+        assert target not in [str(o) for o in (step.get("required_outputs")
+                                                or [])]
+        cmds = P._iter_commands(step.get("gate") or {}, [])
+        assert any(c.split()[:1] == [program] and P._JSON_RE.search(c)
+                   and P._JSON_RE.search(c).group(1) == target
+                   for c in cmds), "the nested clause must still write it"

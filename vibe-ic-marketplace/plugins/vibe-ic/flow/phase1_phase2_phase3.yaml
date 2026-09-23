@@ -1715,7 +1715,18 @@ steps:
     required_outputs:
       - "reports/phase2/lint/rtl_hygiene.json"
       - "reports/phase2/lint/rom_init_lint.json"
-      - "reports/phase1/gates/stage_phase1_compliance.json"
+      # R-0915-141, THE STEP-38 HALF — `reports/phase1/gates/stage_phase1_compliance.json`
+      # LEFT this list. It is the `--json` VERDICT TARGET of this step's own
+      # nested `flow_compliance_check --stage-id stage_phase1` clause below, and a
+      # step declares what the RUN produces, never its gate's verdict target: with
+      # the path declared, the audit's refusal of self-certified evidence matched by
+      # CONSTRUCTION whenever the nested pass wrote it (MEASURED on spm run23: D1
+      # credited, step 2 stopped at "AUDIT-CREATED OUTPUT REFUSED:
+      # ['reports/phase1/gates/stage_phase1_compliance.json']", 3/4 satisfied).
+      # Step 36 could name a separate producer; this document has none -- it IS the
+      # audit's verdict -- so the transfer is step 38's: the path leaves the
+      # declared set, the clause still runs the nested pass and writes its receipt
+      # there, and step 2's tier comes from that pass's own verdict.
       # Always written, including NOT_APPLICABLE, so "no cross-layer search"
       # remains distinct from "the fidelity check never ran". Appended after
       # the two long-standing lint outputs to preserve their stable ordering.

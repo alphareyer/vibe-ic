@@ -1164,7 +1164,19 @@ def test_output_entries_classify_into_the_four_kinds():
     # A deliberate, ruled removal, so the pin moves; FILE 138 -> 137, GLOB and
     # ANY_OF untouched. The same entry moved flowref's anchored figure
     # `required_output_entries` 192 -> 191 in next/icmainred8-batch2 (#2532).
-    assert sum(seen.values()) == 191, (seen, REDERIVE)
+    # 191 -> 190, RE-DERIVED by the same method: the (step, entry) SET of the
+    # yaml at 5511c51e6 (the last commit that touched this pin) against
+    # next/ictier1-s2own, classified through `flowref.classify_output`. ONE
+    # entry leaves, none arrives:
+    #   - ('2', 'reports/phase1/gates/stage_phase1_compliance.json')    FILE
+    # removed by the step-38 half of ruling R-0915-141 (lane ictier1, spm
+    # run23: "AUDIT-CREATED OUTPUT REFUSED"): it is step 2's nested
+    # stage_phase1 clause's own --json verdict target. Of the yaml revisions in
+    # that window, 947ccb671 moves no `required_outputs` entry. FILE 137 ->
+    # 136, GLOB and ANY_OF untouched; flowref's anchored
+    # `required_output_entries` moved 191 -> 190 by
+    # `gen_flow_matrix_census.py --fix-figures` in the same change.
+    assert sum(seen.values()) == 190, (seen, REDERIVE)
     # 136 -> 138 FILE and 27 -> 28 GLOB, from the SAME set diff.
     #
     # AN EARLIER REVISION OF THIS PIN SAID FILE 139 / GLOB 27, and the arithmetic
@@ -1177,7 +1189,7 @@ def test_output_entries_classify_into_the_four_kinds():
     # transcript of what went into the sign-off GDS -- and it classifies as GLOB.
     # One entry moved between two kinds; the total did not move, which is exactly
     # why this test asserts the three kinds separately and not just their sum.
-    assert seen[F.FILE] == 137, (seen, REDERIVE)
+    assert seen[F.FILE] == 136, (seen, REDERIVE)
     assert seen[F.GLOB] == 28, (seen, REDERIVE)
     assert seen[F.ANY_OF] == 26, (seen, REDERIVE)
     # Reported to the orchestrator: the PROGRAM_EXIT form described in the brief

@@ -222,10 +222,15 @@ def test_the_audit_never_takes_authorship_of_the_runs_own_document(tmp_path):
     assert FCC.authorship_answer(f, shared, shared) == (False, FCC.AUTHORSHIP_BY_ROLE)
 
 
-#: The four steps whose own producer is a compliance program, with the receipt the flow's
+#: The steps whose own producer is a compliance program, with the receipt the flow's
 #: gate clause names -- read off `flow/phase1_phase2_phase3.yaml`, not typed from memory.
+#:
+#: DEPARTED 2026-09-24: ("2", "reports/phase1/gates/stage_phase1_compliance.json"), by
+#: R-0915-141, the step-38 half, lane ictier1 (spm run23: "AUDIT-CREATED OUTPUT REFUSED: ['reports/phase1/gates/stage_phase1_compliance.json']"). Step 2 no
+#: longer declares its nested clause's verdict target, so the flow-derived arm below no
+#: longer finds it. A producer-role document at that path is still left alone -- the
+#: single-path test above (SID "2") pins that and is untouched.
 PRODUCER_IS_A_COMPLIANCE_PROGRAM = [
-    ("2", "reports/phase1/gates/stage_phase1_compliance.json"),
     ("14", "reports/analog/stage_analog_compliance.json"),
     ("15", "reports/phase2/gates/stage2_compliance.json"),
     ("37", "reports/phase3/gates/stage3_compliance.json"),

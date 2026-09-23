@@ -123,8 +123,12 @@ def steps_declaring_their_gates_verdict_target(steps) -> dict:
 _RESIDUAL = {
     "0.5ic": ["reports/phase1/submission_template.json",
               "reports/phase1/tapeout_declaration.json"],
+    # `reports/phase1/gates/stage_phase1_compliance.json` LEFT step 2 by the
+    # step-38 half of this ruling (lane ictier1, spm run23): it is the nested
+    # stage_phase1 clause's verdict target and has no separate producer, so it
+    # left the declared set. See test_step2_does_not_declare_its_nested_gates_
+    # verdict_target.py.
     "2": ["reports/crosslayer/rewrite_equivalence_check.json",
-          "reports/phase1/gates/stage_phase1_compliance.json",
           "reports/phase2/lint/rom_init_lint.json",
           "reports/phase2/lint/rtl_hygiene.json"],
     "8": ["reports/phase2/sdc_check.json"],
