@@ -89,6 +89,9 @@ __all__ = [
     "metric_records", "total_record", "comparable", "compare_total_power",
     "V_A_LOWER", "V_B_LOWER", "V_EQUAL", "V_UNDETERMINED",
     "pdn_ring_dimensions",
+    "POWER_VERDICT_MEASURED", "signoff_record", "emit_signoff_record",
+    "retire_signoff_record",
+    "verdict_is_backed_by_a_number",
 ]
 
 
@@ -452,6 +455,10 @@ def parse_power_report(text: str, *, path: Optional[str] = None,
         "tool_version": tool_version,
         "liberty": _envelope(text, "liberty"),
         "netlist": _envelope(text, "netlist"),
+        # WHAT THE SESSION LINKED, read here beside the other envelope facts
+        # so every consumer of a parsed report gets the same answer.
+        "power_basis": (_POWER_BASIS_RE.search(text).group("basis")
+                        if _POWER_BASIS_RE.search(text) else None),
         "activity": activity_provenance(text),
         "rows": group_rows,
         "total_row": total_rows[0] if total_rows else None,
@@ -1240,3 +1247,367 @@ def power_document(report: Dict[str, Any], *, stage: Optional[str] = None,
         "group_sum_consistency": report.get("group_sum_consistency"),
         "source": _source(report),
     }
+
+
+# ── the sign-off companion: reports/phase3/power.json ──────────────────────
+#
+# THE DEFECT THIS EXISTS TO CLOSE. MEASURED on a signed-off run: the runner
+# wrote a 2,616-byte `power.rpt` carrying OpenSTA's own group table --
+#
+#     Group            Internal  Switching   Leakage     Total
+#     Sequential       1.41e-03   6.97e-05  2.62e-08  1.48e-03  15.6%
+#     ...
+#     Total            7.35e-03   2.19e-03  1.37e-06  9.54e-03 100.0%
+#
+# -- and beside it a 152-byte `power.json` reading, in full,
+#
+#     {"tool": "opensta", "source": "reports/phase3/power.rpt",
+#      "analysis_mode": "vectorless_sdc", "verdict": "PASS",
+#      "evidence": "report_power output below"}
+#
+# A verdict, a pointer, and the word "evidence" over a document with no
+# evidence in it -- there is no output below, the file ends there. The
+# release reader asked the only question that matters of a power record,
+# "is there a power number in here", and refused the product documents:
+#
+#     POWER_NO_TOTAL [power] reports/phase3/power.json: the power record
+#     carries no power number anywhere -- no total, no per-group figure. A
+#     Power section written over it prints a consumption nobody estimated.
+#
+# It was right to. 9.54 mW was measured, by this tree, and no machine-readable
+# artefact of the run said so.
+#
+# THE RULE, and it is the whole point of the function: a verdict is a
+# statement ABOUT a number, so a record may not carry one without carrying the
+# other. When the report yields no total, this writer does not downgrade the
+# claim and it does not invent a zero -- it declines to state a verdict at
+# all and says, by name, that nothing was measured and why.
+
+#: The verdict a power record carries when it has a total to stand on. Only
+#: this spelling is a claim; everything else is a disclosure.
+POWER_VERDICT_MEASURED = "PASS"
+
+#: What the SESSION stamped about what it linked (`POWER_BASIS:` in the
+#: report's envelope, written by `_emit_power_report`).
+_POWER_BASIS_RE = re.compile(
+    r"(?:^|\n)\s*#?\s*POWER_BASIS\s*:\s*(?P<basis>[A-Z_]+)")
+
+#: The bases on which a number IS a measurement of the design being taped out.
+#: Both link the ROUTED netlist; the no-SPEF one computes switching power
+#: without parasitics and says so, which is a caveat on a real measurement.
+POWER_SIGNOFF_BASES = frozenset({"POST_ROUTE_SPEF", "POST_ROUTE_NO_SPEF"})
+
+#: And the one on which it is NOT. The runner's own note, at the point it
+#: stamps this basis, says why: the pre-PnR netlist "carries no clock tree, so
+#: its Clock group reads 0.000 and its total UNDERSTATES the routed design". A
+#: figure known to understate the thing being taped out is not that thing, and
+#: step 33 is a SIGN-OFF step. It may be published as an estimate; it may not
+#: stand as the sign-off number.
+POWER_ESTIMATE_BASIS = "PRE_LAYOUT_ESTIMATE"
+
+
+def _row_number(row: Optional[Dict[str, Any]], key: str) -> Optional[float]:
+    if not isinstance(row, dict):
+        return None
+    val = row.get(key)
+    return float(val) if isinstance(val, (int, float)) and not isinstance(
+        val, bool) else None
+
+
+def verdict_is_backed_by_a_number(record: Optional[Dict[str, Any]]) -> bool:
+    """Does this power record state a verdict it has a measurement for?
+
+    ONE function, called by the writer before it emits and by the test that
+    proves the writer cannot emit otherwise. A second copy of this question
+    would be a second answer, and the two would drift the way the report and
+    its companion already did.
+    """
+    if not isinstance(record, dict):
+        return False
+    verdict = str(record.get("verdict") or "").strip().upper()
+    if verdict != POWER_VERDICT_MEASURED:
+        # Not a claim: a record that declines to judge owes no number.
+        return True
+    return isinstance(record.get("total_power_w"), (int, float)) and \
+        not isinstance(record.get("total_power_w"), bool)
+
+
+def signoff_record(report: Optional[Dict[str, Any]], *,
+                   source: str,
+                   analysis_mode: Optional[str] = None,
+                   tool: str = "opensta") -> Dict[str, Any]:
+    """The `reports/phase3/power.json` companion to a `report_power` artefact.
+
+    `report` is `read_power_report`'s output, or None when the file could not
+    be read -- and those are different facts, kept different here.
+    """
+    unreadable = report is None
+    report = report or {}
+    total_row = report.get("total_row")
+    rows = [r for r in (report.get("rows") or []) if isinstance(r, dict)]
+
+    total_w = _row_number(total_row, "total_w")
+    record: Dict[str, Any] = {
+        "tool": (report.get("tool") or tool),
+        "tool_version": report.get("tool_version"),
+        "source": source,
+        "analysis_mode": analysis_mode,
+        # The basis, CORROBORATED against the transcript rather than taken
+        # from its own label -- see this module's header on why a declared
+        # `vector_vcd` is a claim and not a measurement.
+        "activity": report.get("activity") or {},
+    }
+
+    if total_w is None:
+        record["power_measurement"] = STATUS_NOT_MEASURED
+        # NO VERDICT. The writer refuses rather than downgrades: "PASS" here
+        # would be a judgement with nothing behind it, and "FAIL" would be a
+        # judgement this writer has no standing to make.
+        record["verdict"] = STATUS_NOT_MEASURED
+        record["power_not_measured_reason"] = (
+            f"{source} could not be read, so no power figure was recovered"
+            if unreadable else
+            f"{source} was read and carries no OpenSTA report_power total "
+            f"row, so there is no power number to publish; a verdict is not "
+            f"stated over an absent measurement")
+        record["evidence"] = f"{source} (read, no total row)"
+        return record
+
+    # ONE MODULE, ONE ANSWER. `activity_provenance` already decided whether
+    # this report's stated activity basis survives its own transcript, and
+    # `metric_records` already refuses a CONTRADICTED one as STATUS_INVALID --
+    # a vector claim refuted by `READ_VCD_FAIL` or `Annotated 0 pin
+    # activities.` is not silently a vectorless measurement either, because
+    # what the tool did with zero annotated activities is a claim this
+    # repository has not measured. Publishing MEASURED/PASS here while the
+    # neighbouring reader publishes INVALID for the same Total is the module
+    # disagreeing with itself, and `_power_class` would then present it as the
+    # run's vector-driven sign-off power. MEASURED by the pre-landing review,
+    # 2026-09-23.
+    # WHAT THE SESSION LINKED, carried rather than inferred. MEASURED by the
+    # round-2 review: three different bases published the same MEASURED/PASS,
+    # with nothing in the record saying which one the number came from.
+    _power_basis = report.get("power_basis")
+    record["power_basis"] = _power_basis
+    record["signoff_basis"] = (_power_basis in POWER_SIGNOFF_BASES
+                               if _power_basis else None)
+
+    if _power_basis == POWER_ESTIMATE_BASIS:
+        record["power_measurement"] = STATUS_NOT_MEASURED
+        record["verdict"] = STATUS_NOT_MEASURED
+        record["power_not_measured_reason"] = (
+            f"{source} is stamped POWER_BASIS: {POWER_ESTIMATE_BASIS} — it "
+            f"was computed on the PRE-PnR netlist, which carries no clock "
+            f"tree, so its Clock group reads 0.000 and its total UNDERSTATES "
+            f"the routed design. Step 33 is a sign-off step; this figure is "
+            f"published as an estimate (pre_layout_estimate_w) and is not the "
+            f"sign-off number")
+        # The number is NOT lost. It is published under a name that says what
+        # it is, and under no key naming power/total/watt, so the release
+        # reader cannot mistake it for the sign-off total.
+        record["pre_layout_estimate_w"] = total_w
+        record["evidence"] = f"{source} (read; pre-layout estimate basis)"
+        return record
+
+    _basis = str((report.get("activity") or {}).get("basis") or "")
+    if _basis == BASIS_CONTRADICTED:
+        _corr = str((report.get("activity") or {}).get("reason") or "").strip()
+        record["power_measurement"] = STATUS_NOT_MEASURED
+        record["verdict"] = STATUS_NOT_MEASURED
+        record["power_not_measured_reason"] = (
+            f"{source} states an activity basis its own transcript refutes "
+            f"(basis CONTRADICTED"
+            + (f": {_corr}" if _corr else "")
+            + "). The report's Total is not published: a vector claim its own "
+              "transcript denies is not a vectorless measurement either, and "
+              "this module's `metric_records` refuses the same number as "
+              "INVALID")
+        record["evidence"] = f"{source} (read; activity basis CONTRADICTED)"
+        return record
+
+    record["power_measurement"] = STATUS_MEASURED
+    record["total_power_w"] = total_w
+    for cat in ("internal", "switching", "leakage"):
+        val = _row_number(total_row, f"{cat}_w")
+        if val is not None:
+            record[f"{cat}_power_w"] = val
+    record["power_by_group"] = [
+        {"group": r.get("group"),
+         **{f"{c}_power_w": _row_number(r, f"{c}_w") for c in CATEGORIES}}
+        for r in rows]
+    # HOW MANY FIGURES THIS ANALYSIS PRODUCED, counted rather than inferred
+    # from a key scan. MEASURED by the round-2 review: the published 'Power
+    # datapoints' read 27 over a report carrying 24 -- the four totals plus
+    # 5 groups x 4 columns -- because the consumer counted every number under
+    # a power/total/watt key, which swept in `power_groups` (a COUNT) and the
+    # `total_w` inside each of the two consistency blocks. A reader takes that
+    # field as "how many numbers this analysis produced".
+    record["power_figures"] = (
+        sum(1 for k in ("total", "internal", "switching", "leakage")
+            if _row_number(total_row, f"{k}_w") is not None)
+        + sum(1 for r in rows for c in CATEGORIES
+              if _row_number(r, f"{c}_w") is not None))
+    record["power_scan"] = {"groups": len(rows)}
+    # Published beside the number, never folded into it: the parser's own
+    # arithmetic check that the split adds up and that the groups sum to the
+    # total. A reader who distrusts the number can see whether the report
+    # was self-consistent without re-parsing it.
+    record["split_consistency"] = report.get("split_consistency")
+    record["group_sum_consistency"] = report.get("group_sum_consistency")
+    record["verdict"] = POWER_VERDICT_MEASURED
+    record["evidence"] = (
+        f"{source}: OpenSTA report_power Total row "
+        f"{total_row.get('total_raw') or total_w} W over "
+        f"{len(rows)} group(s)")
+    return record
+
+
+# The atomic writer the runner uses, imported the way `_ppa/timing.py` already
+# does: `_ppa` is importable on its own (the tests do it), so the dependency is
+# optional and the fallback is a plain write rather than a failure to load.
+try:  # pragma: no cover - exercised by the runner, not by the unit path
+    from _atomic_artefact import write_text as _atomic_write_text
+except Exception:  # pragma: no cover
+    _atomic_write_text = None
+
+
+def retire_signoff_record(out: Path, reason: str,
+                          notes: Optional[List[str]] = None) -> None:
+    """Replace a power record whose report no longer exists or is not usable.
+
+    MEASURED by the pre-landing review (2026-09-23). A record OUTLIVES the
+    measurement it describes: run 1 succeeds and writes
+    `{verdict: PASS, total_power_w: 9.54e-3}`; run 2 comes after an RTL change,
+    the step regenerates, `sta` fails, `_emit_power_report` writes its
+    'not computed' fallback and returns False -- so the emitter never runs and
+    the file is never touched. The PREVIOUS LAYOUT's number now sits beside a
+    report that says nothing was computed, `_ic_release_artefacts._power_class`
+    finds it, and the release is documented with a power figure for a design
+    that no longer exists. Nothing refuses it anywhere.
+
+    A verdict about a measurement that has been superseded is the same defect
+    as a verdict with no measurement, one run later. So the record is REPLACED
+    -- not deleted, because silence would leave a reader unable to tell a run
+    that never measured power from one whose measurement was withdrawn -- by a
+    record that states NOT_MEASURED and carries no number under any key naming
+    power, total or watt.
+    """
+    # RETIRING MEANS REPLACING SOMETHING. With nothing to replace it must do
+    # NOTHING, and the asymmetry is not cosmetic: `_ic_release_artefacts.
+    # _power_class` reads NUMBERS, never the record's own
+    # `power_measurement`, so an ABSENT power.json means "Power rows
+    # NOT_MEASURED, documents written" while a PRESENT one carrying no number
+    # means POWER_NO_TOTAL and ALL release documents refused. Writing
+    # unconditionally therefore made a FIRST-run power failure fatal to the
+    # whole release, and flipped D3 step 33 from ABSENT to SUBSTANTIVE.
+    # MEASURED by the round-2 review, 2026-09-23.
+    if not Path(out).is_file():
+        if notes is not None:
+            notes.append(f"power.json: no record to retire (the run produced "
+                         f"none): {reason}")
+        return
+    doc = {
+        "source": None,
+        "power_measurement": STATUS_NOT_MEASURED,
+        "verdict": STATUS_NOT_MEASURED,
+        "power_not_measured_reason": reason,
+        "evidence": ("the previous record was retired: the measurement it "
+                     "stated is no longer the one this run produced"),
+    }
+    payload = json.dumps(doc, indent=2) + "\n"
+    try:
+        if _atomic_write_text is not None:
+            _atomic_write_text(out, payload)
+        else:  # pragma: no cover
+            Path(out).write_text(payload, encoding="utf-8")
+    except OSError:  # pragma: no cover - a tree we cannot write is not ours
+        return
+    if notes is not None:
+        notes.append(f"power.json retired (no usable power report): {reason}")
+
+
+def emit_signoff_record(project: Path, power_rpt: Path, out: Path,
+                        analysis_mode: str,
+                        notes: List[str],
+                        produced_after: Optional[float] = None,
+                        tool_rc: Optional[int] = None) -> Dict[str, Any]:
+    """Write `reports/phase3/power.json` beside a `report_power` artefact.
+
+    HERE, NOT IN THE RUNNER, and the placement is the point.
+    `test_ppa_runner_extraction_ledger` MEASURED the first version of this
+    function sitting in `phase3_one_shot_runner.py` and named where it
+    belonged:
+
+        New PPA-named function(s) added to phase3_one_shot_runner.py:
+          _emit_power_signoff_json  (line 59648)  -> belongs in _ppa/power.py
+        The runner orchestrates: it calls `_ppa` modules, passes artefact
+        paths and collects return codes.
+
+    It was right, and the reason it was right is the reason this module exists:
+    "what does this power artefact say" has ONE owner, and a second answer
+    written inside the step that produced the artefact is how a report and its
+    companion come to disagree.
+
+    THE RULE IT ENFORCES, asserted rather than assumed: a verdict is a
+    statement ABOUT a number, so the record may not carry one without the
+    other. `signoff_record` makes the failing branch unreachable; if a later
+    edit makes it reachable, the run stops HERE rather than three phases later
+    in a release that cannot be documented, because the file this would write
+    outlives the run that wrote it.
+    """
+    # THE RECORD IS BOUND TO THIS INVOCATION, and round 2 is why. A power
+    # step can fail WITHOUT THE RUNNER KNOWING: `docker exec` fails before
+    # bash starts, so the `> power.rpt` redirect never truncates, the previous
+    # layout's report is still on disk, it clears both size floors, and the
+    # non-zero rc is never read. A fresh power.json was then written
+    # MEASURED/PASS from a report describing a design that no longer exists --
+    # the same stale-record defect round 1 closed, reached through the one
+    # path where nothing signals failure.
+    #
+    # Two independent bindings, because either alone leaves a hole: the tool's
+    # own exit status, and whether the artefact was written by THIS call.
+    _rel = str(power_rpt.relative_to(project))
+    if tool_rc is not None and tool_rc != 0:
+        retire_signoff_record(
+            out, f"the power tool exited {tool_rc}; no measurement was "
+                 f"produced by this run", notes)
+        return {"verdict": STATUS_NOT_MEASURED,
+                "power_measurement": STATUS_NOT_MEASURED,
+                "power_not_measured_reason": f"the power tool exited {tool_rc}"}
+    if produced_after is not None:
+        try:
+            _mtime = power_rpt.stat().st_mtime
+        except OSError:
+            _mtime = None
+        if _mtime is None or _mtime < produced_after:
+            retire_signoff_record(
+                out, f"this run did not produce {_rel}: the file on disk "
+                     f"predates this power step, so its number describes an "
+                     f"earlier layout", notes)
+            return {"verdict": STATUS_NOT_MEASURED,
+                    "power_measurement": STATUS_NOT_MEASURED,
+                    "power_not_measured_reason": (
+                        f"this run did not produce {_rel}")}
+
+    record = signoff_record(read_power_report(power_rpt),
+                            source=_rel,
+                            analysis_mode=analysis_mode)
+    if not verdict_is_backed_by_a_number(record):
+        # RETIRE BEFORE RAISING. Returning here without touching `out` leaves
+        # the PREVIOUS run's PASS and its number on disk -- the same stale
+        # record the review found on the `_emit_power_report` failure path,
+        # reached through the assertion instead.
+        retire_signoff_record(
+            out, f"the record this run would have written states a verdict "
+                 f"with no power number behind it: {record!r}")
+        raise AssertionError(
+            f"{out.name} would state a verdict with no power number: {record!r}")
+    payload = json.dumps(record, indent=2) + "\n"
+    if _atomic_write_text is not None:
+        _atomic_write_text(out, payload)
+    else:  # pragma: no cover - only when _ppa is used standalone
+        Path(out).write_text(payload, encoding="utf-8")
+    if record.get("power_measurement") != STATUS_MEASURED:
+        notes.append("power.json states NOT_MEASURED: "
+                     + str(record.get("power_not_measured_reason") or ""))
+    return record

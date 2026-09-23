@@ -559,7 +559,20 @@ def _power_class(project: Path, release: str = "") -> ClassState:
             "per-group figure. A Power section written over it prints a "
             "consumption nobody estimated."))
         return state
-    state.facts["power_datapoints"] = len(numbers)
+    # HOW MANY FIGURES, NOT HOW MANY MATCHING KEYS. `_numbers_under_key` is
+    # the right question for PRESENCE ("is there a power number in here at
+    # all") and the wrong one for a COUNT: it sweeps in the record's own
+    # bookkeeping. MEASURED by the round-2 review of icspm5-power: it
+    # published 27 over a report carrying 24 figures -- four totals plus
+    # 5 groups x 4 columns -- the extra three being `power_groups` (itself a
+    # count) and the `total_w` inside each of the two consistency blocks.
+    # A reader takes 'Power datapoints' as "how many numbers this analysis
+    # produced", so the record now states that and this reads it. The scan
+    # remains the fallback for records written before it did.
+    _figures = doc.get("power_figures") if isinstance(doc, dict) else None
+    state.facts["power_datapoints"] = (
+        _figures if isinstance(_figures, int) and not isinstance(_figures, bool)
+        else len(numbers))
     totals = [v for k, v in numbers if "total" in k.lower()]
     if totals:
         state.facts["total_power_w"] = max(totals)
