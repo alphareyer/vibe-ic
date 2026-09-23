@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -112,27 +113,28 @@ def _classify_group(path_or_key: str) -> str | None:
 
 
 def _symbols_in(d: Any) -> set[str]:
-    """Return the symbol set (H0, H1, BR, IBT, etc.) covered by a dict or list."""
+    """Return the symbol set (H0, H1, BR, IBT) covered by a dict or list.
+
+    IDENTIFIER TOKENS (`_identifier_tokens`), not substrings: "LIBRARY", "CALIBRATION"
+    and "FABRIC" carry no BR and "CH0" no H0, which the substring reading
+    counted as coverage (review of next/ictier1c). `break` is the spelled-out
+    BR (`tB_break_us`).
+    """
+    def _syms(text: Any) -> set[str]:
+        return {sym for t in _identifier_tokens(text)
+                if (sym := _token_symbol(t)) is not None}
+
     out: set[str] = set()
     if isinstance(d, dict):
         for k in d.keys():
-            ku = str(k).upper()
-            for sym in SYMBOLS_REQUIRED:
-                if sym in ku:
-                    out.add(sym)
+            out |= _syms(k)
     elif isinstance(d, list):
         for item in d:
             if isinstance(item, dict):
                 for k in item.keys():
-                    ku = str(k).upper()
-                    for sym in SYMBOLS_REQUIRED:
-                        if sym in ku:
-                            out.add(sym)
+                    out |= _syms(k)
             elif isinstance(item, str):
-                iu = item.upper()
-                for sym in SYMBOLS_REQUIRED:
-                    if sym in iu:
-                        out.add(sym)
+                out |= _syms(item)
     return out
 
 
@@ -146,7 +148,6 @@ def _find_numeric_us(obj: Any, needle: str) -> float | None:
     rather than raise a false positive on tick-count values).
     """
     import re
-    n = needle.upper()
 
     def _as_scalar(v):
         """Coerce a list/tuple [min, max] to its minimum; pass scalars through."""
@@ -162,15 +163,16 @@ def _find_numeric_us(obj: Any, needle: str) -> float | None:
         if val is None:
             continue
         pu = p.upper()
-        if n in pu and ("_US" in pu or "US_" in pu or pu.endswith("US")):
+        if _names_needle(p, needle) and (
+                "_US" in pu or "US_" in pu or pu.endswith("US")):
             return val
     # Pass 2: look for dict entries {name: ..., value: ...} where name contains needle
     # and sibling has explicit μs context.
     for p, v in _walk(obj):
         if not isinstance(v, dict):
             continue
-        name = str(v.get("name", "")).upper()
-        if n in name:
+        name = str(v.get("name", ""))
+        if name and _names_needle(name, needle):
             comment = str(v.get("comment", "")) + " " + str(v.get("desc", ""))
             m = re.search(r'(\d+(?:\.\d+)?)\s*us', comment, re.IGNORECASE)
             if m:
@@ -180,7 +182,7 @@ def _find_numeric_us(obj: Any, needle: str) -> float | None:
     for p, v in _walk(obj):
         if not isinstance(v, dict):
             continue
-        if n not in p.upper():
+        if not _names_needle(p, needle):
             continue
         # pick nom else min else max
         for unit_key in ("nom_us", "nom", "min_us", "min", "max_us"):
@@ -192,12 +194,151 @@ def _find_numeric_us(obj: Any, needle: str) -> float | None:
     return None
 
 
-def check(waveform: Any, rtl_constants: Any | None) -> list[Finding]:
-    findings: list[Finding] = []
+#: Per-symbol names read by check()'s `_symbols_in`, matched against
+#: IDENTIFIER TOKENS (`_identifier_tokens`), never as substrings.
+_TIMING_SYMBOLS = frozenset({"h0", "h1", "br", "ibt", "break", "brk"})
+#: Spellings of BR (the break / packet-end symbol).
+_BR_SPELLINGS = frozenset({"br", "break", "brk"})
 
-    # v1.6.38 — first preference: explicit `timing_groups` field (new
-    # canonical L8 shape). When present, use its sub-keys verbatim and
-    # skip the heuristic key-name classifier.
+
+def _split_caps_run(m: "re.Match[str]") -> str:
+    run, tail = m.group(1), m.group(2)
+    if _token_symbol(run.lower()) is not None:
+        return f"{run} {tail}"
+    return f"{run[:-1]} {run[-1]}{tail}"
+
+
+def _identifier_tokens(text: Any) -> list[str]:
+    """Lower-cased tokens of an identifier or phrase: split on anything that is
+    not a letter or digit, on lower->Upper (`tIBT` -> t, ibt), on an upper run
+    followed by lower (`IBTmin` -> ibt, min), before a Capitalised word that
+    follows an acronym (`tBRMin` -> t, br, min) and on digit->letter (`H0low`
+    -> h0, low). Letter->digit never splits, so `H0` is `h0` and `CH0` is `ch0`."""
+    import re
+    out: list[str] = []
+    for part in re.split(r"[^A-Za-z0-9]+", str(text)):
+        part = re.sub(r"([a-z])([A-Z])", r"\1 \2", part)
+        # A capitals run followed by lowercase is AMBIGUOUS by shape: `IBTmin`
+        # is IBT+min, `BRMin` is BR+Min (review w0z2lp3a7: tBRMin read as
+        # t/brm/in). Prefer the split that names a timing symbol -- the whole
+        # run, else the run minus its last capital -- and otherwise the camel
+        # convention (an acronym ends before a Capitalised word).
+        part = re.sub(r"([A-Z]{2,})([a-z]+)", _split_caps_run, part)
+        part = re.sub(r"([0-9])([A-Za-z])", r"\1 \2", part)
+        out += [w.lower() for w in part.split() if w]
+    return out
+
+
+def _token_symbol(tok: str) -> str | None:
+    """The timing symbol a token names, or None. A leading `t` is the timing-
+    parameter prefix (`tIBT`, `TBR_MIN`, `tbreak`); `break` is the spelled-out
+    BR."""
+    for cand in (tok, tok[1:] if tok.startswith("t") else None):
+        if cand in _TIMING_SYMBOLS:
+            return "BR" if cand in _BR_SPELLINGS else cand.upper()
+    return None
+
+
+def _names_needle(text: Any, needle: str) -> bool:
+    """Does `text` (a key path or a record name) name `needle` -- a symbol
+    ("IBT", "BR") or a symbol with qualifiers ("TX_IBT", "BR_MIN")?
+
+    THE ONE READER FOR A SYMBOL (review wd54r7zx6). `_symbols_in` (coverage)
+    and `_find_numeric_us` (the IBT<BR number) used to read symbols two ways:
+    coverage by token, the number by SUBSTRING, so `BRK_us` was "BR missing"
+    to one and the BR threshold to the other. Both now go through
+    `_identifier_tokens` / `_token_symbol`: each needle part that is a symbol
+    must be a symbol of the text, every other part a token of it."""
+    toks = _identifier_tokens(text)
+    syms = {sym for t in toks if (sym := _token_symbol(t)) is not None}
+    for part in str(needle).split("_"):
+        if part.upper() in SYMBOLS_REQUIRED:
+            if part.upper() not in syms:
+                return False
+        elif part.lower() not in toks:
+            return False
+    return True
+
+
+def symbol_family_hits(waveform: Any, rtl_constants: Any = None) -> list[str]:
+    """Where the L8 speaks the H0/H1/BR/IBT single-wire pulse-symbol family
+    this check reads, as paths (R-0915-164).
+
+    Read with the ONE symbol reader (`_identifier_tokens` / `_token_symbol`):
+    every key at every depth, every identifier-shaped value under a schema
+    record label (`l8_timing_schema.RECORD_LABEL_KEYS`) and every
+    identifier-shaped list string of the L8 outside the schema's non-protocol
+    keys, plus
+    `symbol_directionality` and check()'s own classified RX/TX groups, plus
+    the --layer constants read ONLY as check()
+    reads them (`_find_numeric_us` TX_IBT / BR_MIN) -- never walked.
+    """
+    import l8_timing_schema as _schema
+    hits: list[str] = []
+
+    def _syms(text: Any) -> bool:
+        return any(_token_symbol(t) for t in _identifier_tokens(text))
+
+    def _is_identifier(text: Any) -> bool:
+        # A label or list VALUE counts only when it is identifier-shaped: free
+        # prose ('line break detection …') and sized literals (4'h1, 8'h0A) are
+        # not family identifiers (review w0z2lp3a7).
+        return isinstance(text, str) and bool(
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text.strip()))
+
+    def _walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                sub = f"{path}.{k}"
+                if _syms(k):
+                    hits.append(sub)
+                if (k in _schema.RECORD_LABEL_KEYS and _is_identifier(v)
+                        and _syms(v)):
+                    hits.append(f"{sub}={v}")
+                _walk(v, sub)
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                if _is_identifier(item) and _syms(item):
+                    hits.append(f"{path}[{i}]={item}")
+                _walk(item, f"{path}[{i}]")
+
+    if isinstance(waveform, dict):
+        if waveform.get("symbol_directionality"):
+            hits.append("symbol_directionality")
+        # check()'s own RX/TX groups are the family's grouping vocabulary: a
+        # classified group that lacks its symbols is a real FAIL of this rule.
+        _rx, _tx = classified_groups(waveform)
+        hits += [f"rx_group:{k}" for k in _rx] + [f"tx_group:{k}" for k in _tx]
+        for k, v in waveform.items():
+            if k in _schema.NON_PROTOCOL_KEYS:
+                continue
+            if _syms(k):
+                hits.append(str(k))
+            _walk(v, str(k))
+    if rtl_constants is not None:
+        for needle in ("TX_IBT", "BR_MIN"):
+            if _find_numeric_us(rtl_constants, needle) is not None:
+                hits.append(f"layer:{needle}")
+    return hits
+
+
+def classified_groups(waveform: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(groups_rx, groups_tx)`` exactly as `check()` classifies them.
+
+    THE ONE CLASSIFIER. `check()` and the structural-absence escape in `main()`
+    both call this, so the escape can never certify "no RX/TX timing here" on a
+    document `check()` would read as carrying (or naming) RX/TX timing. The
+    review of next/icspm5-s2 measured the cost of two vocabularies: a
+    `timing_groups` pair named `detect_thresholds` / `drive_widths` classified
+    RX/TX here and was certified absent by the escape's own token list.
+
+    v1.6.38 — first preference: explicit `timing_groups` field (new canonical
+    L8 shape); its sub-keys are classified by name. Fallback: top-level keys.
+    Only dicts and lists count as groups (free-form string notes often contain
+    "internal"/"external" substrings but carry no per-symbol values); an EMPTY
+    dict or list still counts -- a group that is named and empty is a missing-
+    symbols finding, not an absence.
+    """
     groups_rx: dict[str, Any] = {}
     groups_tx: dict[str, Any] = {}
     tg = waveform.get("timing_groups") if isinstance(waveform, dict) else None
@@ -210,13 +351,8 @@ def check(waveform: Any, rtl_constants: Any | None) -> list[Finding]:
                 groups_rx[key] = val
             elif cls == "tx":
                 groups_tx[key] = val
-
-    # (1) Scan top-level for a group that classifies as RX and another as TX.
     if not groups_rx and not groups_tx and isinstance(waveform, dict):
         for key, val in waveform.items():
-            # Only dicts and lists count as "groups" — free-form string notes
-            # often contain "internal"/"external" substrings but carry no
-            # actual per-symbol values.
             if not isinstance(val, (dict, list)):
                 continue
             cls = _classify_group(key)
@@ -224,6 +360,12 @@ def check(waveform: Any, rtl_constants: Any | None) -> list[Finding]:
                 groups_rx[key] = val
             elif cls == "tx":
                 groups_tx[key] = val
+    return groups_rx, groups_tx
+
+
+def check(waveform: Any, rtl_constants: Any | None) -> list[Finding]:
+    findings: list[Finding] = []
+    groups_rx, groups_tx = classified_groups(waveform)
 
     if not groups_rx:
         findings.append(Finding(
@@ -535,52 +677,74 @@ def main() -> int:
                 not _timing_constants_carry_protocol_symbols(v):
             return True  # scalar clock-frequency only, no protocol symbols (#655)
         return False
-    # Only VACUOUS_PASS when there is genuinely NO protocol/symbol timing
-    # content by ANY name. Besides the canonical containers (timing_windows /
-    # timing_constants / waveforms), the gate's own check() also recognises
-    # group keys named rx_* / tx_* / host_* / dut_* / external_* / internal_*
-    # (and *_counters / *_cycles symbol-timing tables). If ANY such key carries
-    # content, the waveform DOES describe protocol timing and the strict
-    # RX/TX-split rule must run — do NOT short-circuit. Without this guard the
-    # escape mis-fired on legitimate half-duplex L8 docs that store timing
-    # under those group keys rather than the canonical containers.
-    _PROTO_GROUP_TOKENS = ("rx_", "tx_", "host_", "dut_", "external_",
-                           "internal_", "_counters", "_cycles", "symbol",
-                           "_low", "_high", "break", "ibt")
-    _has_proto_group = any(
-        bool(v) and any(tok in str(k).lower() for tok in _PROTO_GROUP_TOKENS)
-        for k, v in waveform.items()
-    )
+    # R-0915-153 — DECIDED BY THE L8 SCHEMA, NOT BY WORDS. Three rounds of
+    # deciding "no protocol timing here" from key-name / content tokens each
+    # traded a false FAIL for a false NABS. The escape now fires ONLY when:
+    #   * every protocol-timing container the emitter defines
+    #     (`l8_timing_schema.PROTOCOL_TIMING_CONTAINERS`) is empty -- the
+    #     canonical lists still read through the #617/#655 content
+    #     discriminators above, `timing_groups`/`symbol_directionality` empty;
+    #   * EVERY other top-level key is one an emitter declares non-protocol
+    #     (`l8_timing_schema.NON_PROTOCOL_KEYS`); an UNKNOWN key is not
+    #     evidence of absence, so check() runs (fail closed);
+    #   * the --layer constants hold neither value check() reads from them
+    #     (`_find_numeric_us` TX_IBT / BR_MIN) -- the layer is read ONLY that
+    #     way, never walked.
+    # No token vocabulary is consulted here.
+    import l8_timing_schema as _schema
     _CANONICAL = ("timing_windows", "timing_constants", "waveforms")
-    if (not _has_proto_group) and all(_empty(k) for k in _CANONICAL):
-        # THIS ESCAPE INFERS THE ABSENCE; IT IS NOT A DESIGN DECLARATION, and the
-        # two were being reported with one word. The sibling escape above fires
-        # when L2 EXPLICITLY declares `protocol_overview.half_duplex=false` --
-        # there DESIGN_DECLARED_NA is exactly right and it keeps it. This one
-        # fires when L2 says NOTHING and the gate ENUMERATES the L8 document
-        # instead: the three canonical containers, plus every key of `waveform`
-        # scanned for a directional / per-symbol token. Zero found. That is a
-        # structural absence, and R-0915-124/125 require it be NAMED as one WITH
-        # the enumeration behind it -- `_structural_absence.absence()` refuses a
-        # claim that cannot say what it walked, which is the whole guard.
-        #
-        # MEASURED on run21, a signed serial-parallel multiplier: this clause was
-        # one of the two step 2 reported as "PARTIALLY-VACUOUS (2 of 18 gate
-        # clause(s) examined nothing)" while filing DESIGN_DECLARED_NA -- a class
-        # whose own justification comment cites an L2 declaration this branch
-        # never reads. The design genuinely is not a protocol IC and has no RX/TX
-        # timing to split, so the ANSWER was right and only the word was wrong.
-        _scanned_names = list(_CANONICAL) + sorted(
-            str(k) for k in waveform.keys() if str(k) not in _CANONICAL)
+    _containers_empty = all(
+        _empty(k) if k in _CANONICAL else not waveform.get(k)
+        for k in _schema.PROTOCOL_TIMING_CONTAINERS)
+    _unknown_keys = sorted(
+        str(k) for k in waveform
+        if k not in _schema.PROTOCOL_TIMING_CONTAINERS
+        and k not in _schema.NON_PROTOCOL_KEYS)
+    _layer_timing = rtl_constants is not None and any(
+        _find_numeric_us(rtl_constants, needle) is not None
+        for needle in ("TX_IBT", "BR_MIN"))
+    if (half_duplex_l2 is not True and _containers_empty
+            and not _unknown_keys and not _layer_timing):
+        # The enumeration is exactly what was decided on: every top-level key
+        # of the document, each one either an empty protocol container or a
+        # schema-declared non-protocol key.
+        _scanned_names = sorted(str(k) for k in waveform)
+        if not _scanned_names:
+            # Review wd54r7zx6 (LOW 1) — NOTHING WAS WALKED, so nothing can be
+            # certified absent: `_structural_absence` refuses scanned=0 and the
+            # gate used to die with a traceback (CRASHED -> step FAIL). An empty
+            # L8 is "cannot decide": INCOMPLETE, naming it.
+            msg = ("INCOMPLETE: internal_vs_external_timing: "
+                   f"{waveform_path} (L8_TIMING_WAVEFORM) is empty -- there is "
+                   "nothing to walk, so the absence of protocol timing cannot "
+                   "be established; regenerate the L8 (Phase 1) or declare "
+                   "L2 protocol_overview.half_duplex=false.")
+            if args.json:
+                txt = json.dumps({
+                    "source_file": waveform_path, "total_findings": 0,
+                    "errors": 0, "findings": [], "verdict": "INCOMPLETE",
+                    "reason_class": "BLOCKED_BY_UPSTREAM",
+                    "skip_kind": "missing-upstream-output",
+                    "reason": msg}, indent=2)
+                if args.json == "-":
+                    print(txt)
+                else:
+                    Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+                    Path(args.json).write_text(txt + "\n")
+            else:
+                print(msg)
+            return 2
         _absence = _sa.absence(
-            population=("L8_TIMING_WAVEFORM container(s) and group key(s) that "
-                        "could carry half-duplex protocol symbol timing"),
+            population=("L8_TIMING_WAVEFORM top-level key(s), classified by "
+                        "the L8 schema (l8_timing_schema)"),
             scanned=len(_scanned_names),
             found=0,
             names=_scanned_names,
-            detail=("no directional (rx_/tx_/host_/dut_/external_/internal_) or "
-                    "per-symbol (H0/H1/BR/IBT, *_counters, *_cycles) content in "
-                    "any of them, so there are no two sides to split"))
+            detail=("every protocol-timing container the L8 schema defines is "
+                    "empty, every other key is one the emitters declare "
+                    "non-protocol, and the --layer constants carry no TX_IBT / "
+                    "BR_MIN value, so there are no two sides to split "
+                    "(R-0915-153)"))
         msg = _sa.sentence(_absence, "internal_vs_external_timing")
         if args.json:
             txt = json.dumps({
@@ -621,6 +785,92 @@ def main() -> int:
             # needs to check the claim.
             print(f"VACUOUS_PASS: {msg}")
         return 0
+
+    # R-0915-156 — THE QUESTION'S OWN DECLARATION IS MISSING: INCOMPLETE, NOT
+    # FAIL. Reaching here, the L8 carries protocol timing the schema cannot
+    # clear (a non-empty protocol container, an undeclared key, or a TX_IBT /
+    # BR_MIN constant). Whether the half-duplex RX/TX split applies to it is
+    # the design's own `L2_FRS.json protocol_overview.half_duplex`. With that
+    # declaration absent the gate has not read the input it needs: that is
+    # "cannot decide", and a FAIL would claim a defect nobody measured. Still
+    # fail-closed: never NABS, never PASS, never green. Measured on the corpus
+    # (101 real L8s): 27 protocol designs main certified NABS by name-token
+    # luck, and 4 it FAILed, read this.
+    if half_duplex_l2 is None:
+        l2_path = "phase1/generated_docs/L2_FRS.json"
+        msg = ("INCOMPLETE: internal_vs_external_timing: the L8 carries "
+               "protocol timing, and whether the half-duplex RX/TX split "
+               f"applies to it is undeclared -- {l2_path} "
+               "protocol_overview.half_duplex is absent. Declare it: false -> "
+               "the half-duplex question does not apply (NOT_APPLICABLE, basis "
+               "= the declaration); true -> the RX/TX timing split is checked "
+               "(PASS/FAIL on the numbers).")
+        if args.json:
+            txt = json.dumps({
+                "source_file": waveform_path,
+                "total_findings": 0,
+                "errors": 0,
+                "findings": [],
+                "verdict": "INCOMPLETE",
+                # The declaration this check needs is an UPSTREAM (Phase-1)
+                # output that was not produced: the taxonomy's
+                # BLOCKED_BY_UPSTREAM, an INCOMPLETE class (never skip-eligible).
+                "reason_class": "BLOCKED_BY_UPSTREAM",
+                "skip_kind": "missing-upstream-output",
+                "missing_declaration": {
+                    "path": l2_path, "key": "protocol_overview.half_duplex",
+                    "if_false": "NOT_APPLICABLE (basis: the declaration)",
+                    "if_true": "RX/TX timing split checked (PASS/FAIL)"},
+                "reason": msg,
+            }, indent=2)
+            if args.json == "-":
+                print(txt)
+            else:
+                Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.json).write_text(txt + "\n")
+        else:
+            print(msg)
+        return 2
+
+    # R-0915-164 — DECLARED HALF-DUPLEX, BUT NOT IN THIS SYMBOL FAMILY. check()
+    # reads ONE single-wire pulse-symbol family (H0/H1/BR/IBT groups,
+    # symbol_directionality, TX_IBT/BR_MIN). A design that declares
+    # half_duplex=true and expresses its turnaround timing otherwise
+    # (MIL-STD-1553 RT response time, DALI forward->backward delay, SD NCR)
+    # cannot have its split decided by this checker: INCOMPLETE naming that and
+    # listing the candidate keys -- never a FAIL for vocabulary it does not
+    # speak. When the family's vocabulary IS present, check() judges it and a
+    # missing group or a violated number still FAILs.
+    if not symbol_family_hits(waveform, rtl_constants):
+        import l8_timing_schema as _schema
+        candidates = sorted(
+            str(k) for k, v in waveform.items()
+            if k not in _schema.NON_PROTOCOL_KEYS and v not in (None, [], {}))
+        msg = ("INCOMPLETE: internal_vs_external_timing: L2 declares "
+               "half_duplex=true, but turnaround timing is not expressed in "
+               "the H0/H1/BR/IBT symbol family this check reads, so the RX/TX "
+               "split cannot be decided here. Candidate keys: "
+               + (", ".join(candidates) if candidates else "none"))
+        if args.json:
+            txt = json.dumps({
+                "source_file": waveform_path, "total_findings": 0,
+                "errors": 0, "findings": [], "verdict": "INCOMPLETE",
+                # The checker cannot read the design's timing vocabulary: the
+                # taxonomy's EXECUTION_ERROR is wrong (nothing errored) and
+                # BLOCKED_BY_UPSTREAM is wrong (the upstream produced it). The
+                # INCOMPLETE class for "the population this rule reads is
+                # empty" is ZERO_DENOMINATOR.
+                "reason_class": "ZERO_DENOMINATOR",
+                "candidate_keys": candidates,
+                "reason": msg}, indent=2)
+            if args.json == "-":
+                print(txt)
+            else:
+                Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.json).write_text(txt + "\n")
+        else:
+            print(msg)
+        return 2
 
     findings = check(waveform, rtl_constants)
     errors = [f for f in findings if f.severity == "ERROR"]

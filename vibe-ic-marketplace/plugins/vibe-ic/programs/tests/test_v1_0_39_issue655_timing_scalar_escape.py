@@ -149,7 +149,11 @@ def test_protocol_timing_constants_still_fails(tmp_path):
         "timing_windows": [],
         "waveforms": [],
     }
-    rc, verdict, rules = _run(tmp_path, {"protocol_overview": None}, hd)
+    # R-0915-156 — check() applies when the design DECLARES half_duplex=true;
+    # a silent L2 is its own branch (INCOMPLETE), tested in
+    # test_one_classifier_decides_the_timing_split_absence.py.
+    rc, verdict, rules = _run(
+        tmp_path, {"protocol_overview": {"half_duplex": True}}, hd)
     assert rc == 1 and verdict == "FAIL"
     assert "missing_tx_group" in rules  # only an rx-flavoured group present
 
@@ -173,7 +177,11 @@ def test_v068_flat_half_duplex_still_fails(tmp_path):
                               "tIBT_us": {"nom": 22}},
         "internal_vs_external_note": "prose mentioning internal and external.",
     }
-    rc, verdict, _ = _run(tmp_path, None, v068)
+    # R-0915-156 — check() applies when the design DECLARES half_duplex=true;
+    # a silent L2 is its own branch (INCOMPLETE), tested in
+    # test_one_classifier_decides_the_timing_split_absence.py.
+    rc, verdict, _ = _run(
+        tmp_path, {"protocol_overview": {"half_duplex": True}}, v068)
     assert rc == 1 and verdict == "FAIL"
 
 

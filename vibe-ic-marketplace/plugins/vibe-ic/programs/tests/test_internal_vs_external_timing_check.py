@@ -17,6 +17,11 @@ PROGRAM = Path(__file__).parent.parent / "internal_vs_external_timing_check.py"
 
 
 def _run(tmp_path, waveform, rtl_constants=None):
+    # R-0915-156 — check() applies when the design DECLARES half_duplex=true;
+    # a silent L2 is its own branch (INCOMPLETE), tested in
+    # test_one_classifier_decides_the_timing_split_absence.py.
+    (tmp_path / "L2_FRS.json").write_text(
+        json.dumps({"protocol_overview": {"half_duplex": True}}))
     w = tmp_path / "L8_TIMING_WAVEFORM.json"
     w.write_text(json.dumps(waveform))
     cmd = [sys.executable, str(PROGRAM), str(w), "--json"]

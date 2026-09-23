@@ -29,6 +29,7 @@ OBSERVABILITY open.
 """
 from __future__ import annotations
 
+import re
 import importlib.util
 import pathlib
 import sys
@@ -182,10 +183,17 @@ def test_the_record_is_not_conditional_on_the_outcome():
     """The same property, read off the source: `_record_gate_execution` must sit
     at the wrapper's body indent, not under any branch."""
     wrapper = _wrapper_source()
-    line = next(l for l in wrapper.splitlines()
-                if "_record_gate_execution(cmd_str" in l)
-    assert line.startswith("    _ledger_row = _record_gate_execution("), (
-        f"the record is nested under a branch: {line!r}")
+    # R-0915-119 (icspm5 change 1) passes the gate report's enumeration as
+    # `evidence=`, so the call spans lines; the call is found by its opening,
+    # and it must still sit at the wrapper's body indent.
+    lines = wrapper.splitlines()
+    i = next(n for n, l in enumerate(lines)
+             if "_record_gate_execution(" in l
+             and not l.lstrip().startswith(("#", "def ")))
+    assert lines[i].startswith("    _ledger_row = _record_gate_execution("), (
+        f"the record is nested under a branch: {lines[i]!r}")
+    assert lines[i + 1].strip().startswith("cmd_str, rc, verdict, reason_class"), (
+        lines[i:i + 3])
 
 
 def test_the_evaluator_records_every_return_by_WRAPPING():
@@ -194,7 +202,10 @@ def test_the_evaluator_records_every_return_by_WRAPPING():
     defect. The wrapper cannot be bypassed by a new return."""
     wrapper = _code_only(_wrapper_source())
     assert "__check_program_exit_zero(project, cmd_str)" in wrapper
-    assert "_record_gate_execution(cmd_str, rc, verdict, reason_class)" in wrapper
+    # the four facts it records, whatever else (R-0915-119's `evidence=`) rides
+    # along with them
+    assert re.search(r"_record_gate_execution\(\s*cmd_str, rc, verdict, "
+                     r"reason_class\b", wrapper), wrapper[-600:]
 
 
 def test_the_verdict_is_read_from_the_snippet_not_re_derived():
