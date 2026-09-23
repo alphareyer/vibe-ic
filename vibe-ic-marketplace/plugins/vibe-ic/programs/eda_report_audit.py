@@ -56,7 +56,7 @@ from pathlib import Path
 
 import _atomic_output  # noqa: E402  (#1082 same-dir temp + atomic rename)
 import _audit_receipt  # noqa: E402  (#2057 content-addressed subject digest)
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import lvs_verdict_tokens as _lvt  # #524 — shared netgen terminal-verdict tokens
 import _signoff_drc_format as _sdf  # the ONE producer/dialect answer
@@ -2956,6 +2956,57 @@ def _signoff_basis_corners_elsewhere(project_dir: Path, declared_basis: str) -> 
     })
 
 
+#: OpenSTA reports in the time unit of the FIRST LIBERTY it read and never
+#: calls `set_cmd_units` unless a deck asks. `report_units` prints `time 1ps`;
+#: a deck that sets them prints `set_cmd_units -time ps`. Both are read.
+_STA_TIME_UNIT_RE = re.compile(
+    r"(?:^|\n)\s*(?:set_cmd_units\s+-time\s+|time\s+1)"
+    r"(?P<unit>[munpf]?s)\b", re.I)
+
+#: Multiplier onto NANOSECONDS.
+_STA_TIME_TO_NS = {"s": 1e9, "ms": 1e6, "us": 1e3, "ns": 1.0,
+                   "ps": 1e-3, "fs": 1e-6}
+
+
+def _sta_time_unit(text: str) -> Tuple[Optional[str], str]:
+    """The report's own time unit, or `None` with the reason it is unknown.
+
+    MEASURED by the pre-landing review (2026-09-23): the runner supports
+    liberties declaring `time_unit : "1ps"` and never calls `set_cmd_units`, so
+    a canonical report on such a flow reads `wns max -35.20` in PICOSECONDS.
+    Publishing that under a key named `_ns` states 1000x the real violation --
+    and in the met direction turns 45.2 ps of headroom into 45.2 ns of it.
+    """
+    m = _STA_TIME_UNIT_RE.search(text or "")
+    if m:
+        unit = m.group("unit").lower()
+        if unit in _STA_TIME_TO_NS:
+            return unit, f"read from the report: {m.group(0).strip()}"
+        return None, f"the report states an unrecognised time unit {unit!r}"
+    return None, ("the report states no time unit; OpenSTA reports in the "
+                  "first liberty's time unit, so these values are carried "
+                  "through unconverted and are ns only if that liberty is")
+
+
+def _slack_row(fp: Any, slacks: Dict[str, Optional[float]],
+               text: str) -> Dict[str, Any]:
+    """One report's setup / hold / TNS, in ns where the unit is established.
+
+    The three field NAMES are `extract_slacks`' own, kept verbatim so the
+    audit's receipt and the completeness gate cannot drift into two
+    vocabularies for one measurement.
+    """
+    unit, basis = _sta_time_unit(text)
+    scale = _STA_TIME_TO_NS.get(unit or "ns", 1.0)
+    row: Dict[str, Any] = {"file": str(fp), "time_unit": unit,
+                           "time_unit_stated": unit is not None,
+                           "time_unit_basis": basis}
+    for key in ("setup_wns_ns", "hold_wns_ns", "tns_ns"):
+        val = slacks.get(key)
+        row[key] = None if val is None else round(val * scale, 12)
+    return row
+
+
 def _check_sta(project_dir: Path) -> AuditResult:
     result = AuditResult(program="eda_report_audit:sta", passed=False)
     # THE DECISION POINT FOR THE TOOL-MEASUREMENT CONTRACT (STA half).
@@ -3007,18 +3058,31 @@ def _check_sta(project_dir: Path) -> AuditResult:
     # MEASURED on spm run22 (lane icspm5): this audit published
     # `"has_wns_tns": true` over a transcript reading "worst slack max 14.31 /
     # tns max 0.00 / worst slack min 0.51 / tns min 0.00", and its receipt
-    # `reports/phase3/sta/post_route_summary.json` carried no slack number at
-    # all. `_ic_release_artefacts._sta_class` reads that receipt, found none,
-    # and refused the release documents with STA_NO_SLACK -- "a timing report
-    # with no slack in it is a file" -- while the run's own sign-off reported
-    # +0.940 ns. A verdict that says it saw a number must publish the number
-    # it saw.
-    slack_value_re = re.compile(
-        r"(?:^|\n)\s*(?P<kind>worst\s+slack|wns|tns|worst\s*negative\s*slack"
-        r"|total\s*negative\s*slack)"
-        r"(?:\s+(?P<corner>[A-Za-z][A-Za-z0-9_]*))?"
-        r"\s*[:=]?\s*(?P<value>[-+]?\d+(?:\.\d+)?)\b", re.I)
+    # carried no slack number at all. `_ic_release_artefacts._sta_class` reads
+    # that receipt, found none, and refused the release documents with
+    # STA_NO_SLACK while the run's own sign-off reported +0.940 ns.
+    #
+    # THE NUMBERS COME FROM `extract_slacks`, NOT FROM A SECOND PARSER HERE,
+    # and the pre-landing review (2026-09-23) is why. The first version of this
+    # change matched slack lines with a regex of its own and disagreed with the
+    # function this audit's OWN VERDICT already uses, in three ways:
+    #
+    #   * it harvested before the `measured is False` stamp filter and without
+    #     the no-paths rule, so an unconstrained run -- which prints
+    #     `tns max 0.00 / wns max 0.00` under `worst slack max INF` -- published
+    #     0.0 / 0.0 as MEASURED. That run's own verdict is
+    #     STA_VALUE_UNDETERMINED, and STA_NO_SLACK went silent on it: the exact
+    #     fail-open this change removed, rebuilt through the echo of an empty
+    #     path set;
+    #   * its number pattern had no exponent, so OpenSTA's numeric infinity
+    #     `1.0e+30` was read as a 1.0 ns worst slack;
+    #   * it labelled OpenSTA's `max`/`min` as CORNERS. They are the SETUP and
+    #     HOLD analyses. Taking the worse of the two published run22's HOLD
+    #     0.51 as the design's WNS while the setup margin was 14.31.
+    #
+    # One question, one answer.
     slack_rows: List[Dict[str, Any]] = []
+
     setup_hold_re = re.compile(r"setup|hold", re.I)
     # An OpenSTA `report_checks` PATH-TABLE report is the per-path equivalent of
     # a WNS/TNS summary: it ends each path with "slack (MET)" / "slack
@@ -3117,19 +3181,6 @@ def _check_sta(project_dir: Path) -> AuditResult:
         has_pathtable = bool(pathtable_slack_re.search(text))
         if wns_tns_re.search(text) or has_pathtable:
             has_wns_tns = True
-        # `_sm`, not `_m`: this function already binds `_m` to a declared/
-        # measured record further down, and reusing the name made the audit
-        # crash on its own next statement.
-        for _sm in slack_value_re.finditer(text):
-            _kind = " ".join(_sm.group("kind").split()).lower()
-            slack_rows.append({
-                "file": str(fp),
-                "metric": ("tns" if _kind in ("tns", "total negative slack")
-                           else "wns"),
-                "corner": (_sm.group("corner") or "").lower() or None,
-                "value_ns": float(_sm.group("value")),
-                "stated_as": _kind,
-            })
         if setup_hold_re.search(text) or pathtype_re.search(text) or has_pathtable:
             has_setup_hold = True
         if not best_file:
@@ -3165,6 +3216,15 @@ def _check_sta(project_dir: Path) -> AuditResult:
                              f"negative slack). A tool's statement about a run "
                              f"cannot delete the run's own output"),
                     file=str(fp)))
+                # A STAMP CANNOT SUBTRACT A VIOLATION THAT IS WRITTEN DOWN.
+                # It declines to ADD a verdict, so the non-negative summaries
+                # in a not-measured report are not published -- but a negative
+                # slack in the producer's own output is evidence, and this is
+                # the branch where it survives.
+                _neg = {k: (v if (v is not None and v < 0) else None)
+                        for k, v in _slacks.items()}
+                if any(v is not None for v in _neg.values()):
+                    slack_rows.append(_slack_row(fp, _neg, text))
             continue
 
         if has_pathtable:
@@ -3180,6 +3240,11 @@ def _check_sta(project_dir: Path) -> AuditResult:
         vals = [v for v in slacks.values() if v is not None]
         if vals:
             any_verdict_determined = True
+            # THE SAME NUMBERS THE VERDICT IS MADE OF, published rather than
+            # discarded. `vals` is what decides `any_verdict_determined` on the
+            # line above; publishing anything else would be a second answer to
+            # a question already answered here.
+            slack_rows.append(_slack_row(fp, slacks, text))
             if any(v < 0 for v in vals):
                 real_violation_found = True
                 if not violation_evidence:
@@ -3424,15 +3489,25 @@ def _check_sta(project_dir: Path) -> AuditResult:
                       and not not_measured_hard
                       and not basis_offenders and not unreadable)
 
-    # THE GOVERNING NUMBERS: the worst of what was read, never a default.
-    # `min` over the values actually captured -- a datasheet quotes the corner
-    # that governs, and taking the worst can only be conservative. Both are
-    # computed only from what was captured; `slack_rows` empty means these
-    # names are never published at all (see the summary block below).
-    _wns_vals = [r["value_ns"] for r in slack_rows if r["metric"] == "wns"]
-    _tns_vals = [r["value_ns"] for r in slack_rows if r["metric"] == "tns"]
-    _governing_wns = min(_wns_vals) if _wns_vals else None
-    _governing_tns = min(_tns_vals) if _tns_vals else None
+    # THE GOVERNING NUMBERS, ONE PER ANALYSIS. `min` across the reports,
+    # because a datasheet quotes the worst case and taking the worst can only
+    # be conservative -- but NEVER across the two analyses. In OpenSTA `max` is
+    # the SETUP analysis and `min` is HOLD; they answer different questions and
+    # a single key meaning both is a key no reader can use. The pre-landing
+    # review measured the cost on this very run: the merged key published the
+    # hold worst slack 0.51 while the setup margin was 14.31.
+    def _worst(field: str) -> Optional[float]:
+        vals = [r[field] for r in slack_rows if r.get(field) is not None]
+        return min(vals) if vals else None
+
+    _headline = {k: v for k, v in (("setup_wns_ns", _worst("setup_wns_ns")),
+                                   ("hold_wns_ns", _worst("hold_wns_ns")),
+                                   ("tns_ns", _worst("tns_ns")))
+                 if v is not None}
+    _units_stated = [r for r in slack_rows if r.get("time_unit_stated")]
+    _unit_basis = (_units_stated[0]["time_unit_basis"] if _units_stated
+                   else (slack_rows[0]["time_unit_basis"] if slack_rows
+                         else "no report carried a slack to attach a unit to"))
 
     result.subject_files = [str(f) for f in files]
     result.summary = {"files_found": len(files),
@@ -3476,19 +3551,25 @@ def _check_sta(project_dir: Path) -> AuditResult:
                       # a measurement, so the count lives under `slack_scan`
                       # where no key names the quantity, and the headline
                       # numbers below appear ONLY when they were read.
-                      **({"wns_ns": _governing_wns,
-                          "tns_ns": _governing_tns} if slack_rows else {}),
+                      **_headline,
                       "slack_ns": slack_rows,
                       "slack_scan": {"datapoints": len(slack_rows),
                                      "reports_read": len(files) - len(unreadable)},
                       "slack_measurement": (
-                          "MEASURED" if slack_rows else "NOT_MEASURED"),
+                          "MEASURED" if _headline else "NOT_MEASURED"),
+                      "slack_time_unit": (
+                          _units_stated[0]["time_unit"] if _units_stated
+                          else None),
+                      "slack_time_unit_stated": bool(_units_stated),
+                      "slack_time_unit_basis": _unit_basis,
                       "slack_not_measured_reason": (
-                          None if slack_rows else
-                          "no WNS/TNS/worst-slack number appears in any "
-                          "discovered post-route timing report; the reports "
-                          "were read (see readable_files) and carried no "
-                          "slack value to publish"),
+                          None if _headline else
+                          "no setup/hold worst-slack or TNS number survived "
+                          "the same rules this audit's own verdict applies: a "
+                          "report stamped not-measured contributes only a "
+                          "negative slack, and an axis whose worst slack is "
+                          "the no-paths sentinel contributes neither its wns "
+                          "nor its tns echo"),
                       "has_setup_hold": has_setup_hold,
                       "tool_authentic": authentic,
                       "corner_dirs_found": len(corner_dirs),
