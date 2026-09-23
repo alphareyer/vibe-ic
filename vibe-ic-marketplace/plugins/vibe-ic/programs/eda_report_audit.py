@@ -2959,9 +2959,16 @@ def _signoff_basis_corners_elsewhere(project_dir: Path, declared_basis: str) -> 
 #: OpenSTA reports in the time unit of the FIRST LIBERTY it read and never
 #: calls `set_cmd_units` unless a deck asks. `report_units` prints `time 1ps`;
 #: a deck that sets them prints `set_cmd_units -time ps`. Both are read.
+#: `STA_TIME_UNIT: ns` — the deck's OWN statement, stamped after read_liberty
+#: from `sta::unit_scale_abbreviation time` + `sta::unit_suffix time`. Added at
+#: round 3 because `STA_BASIS_LIBERTY` is a CONTAINER path on image-PDK runs:
+#: a host-side reader cannot open that liberty, so the branch below could not
+#: settle the unit and the number was refused on every such run. OpenSTA knows
+#: the unit inside the deck; one line makes the artefact self-describing, and
+#: this is then simply "the report states its own unit".
 _STA_TIME_UNIT_RE = re.compile(
-    r"(?:^|\n)\s*(?:set_cmd_units\s+-time\s+|time\s+1)"
-    r"(?P<unit>[munpf]?s)\b", re.I)
+    r"(?:^|\n)\s*#?\s*(?:STA_TIME_UNIT\s*:\s*|set_cmd_units\s+-time\s+"
+    r"|time\s+1)(?P<unit>[munpf]?s)\b", re.I)
 
 #: Multiplier onto NANOSECONDS.
 _STA_TIME_TO_NS = {"s": 1e9, "ms": 1e6, "us": 1e3, "ns": 1.0,
@@ -3024,6 +3031,11 @@ def _sta_time_unit(text: str) -> Tuple[Optional[str], str]:
                   "so no number is published under an _ns name")
 
 
+def _neg_only(v: Optional[float]) -> Optional[float]:
+    """The value if it is a violation, else nothing. See `_slack_row`."""
+    return v if (v is not None and v < 0) else None
+
+
 def _slack_row(fp: Any, slacks: Dict[str, Optional[float]],
                text: str) -> Dict[str, Any]:
     """One report's setup / hold / TNS, in ns where the unit is established.
@@ -3043,17 +3055,40 @@ def _slack_row(fp: Any, slacks: Dict[str, Optional[float]],
     carries the paths.
     """
     unit, basis = _sta_time_unit(text)
+    # A MEASUREMENT WHOSE UNIT IS UNKNOWN IS NOT A MEASUREMENT -- round 2's
+    # rule, and it still holds for a MET number. It does NOT hold for a
+    # VIOLATION, and round 3 is where that showed: a violation's SIGN does not
+    # depend on the unit. -1.20 is negative in ps, ns and seconds alike.
+    #
+    # MEASURED by the round-3 review: dropping a unit-less row removed its
+    # negative from the headline, so an unscoped audit over
+    # post_route_timing.rpt (ns liberty, met 0.50) plus per_corner/sta_SS.rpt
+    # (no liberty, wns -1.20) published `setup_wns_ns: 0.50, MEASURED` beside
+    # `real_violation_found: true`. And in the stamp branch it subtracted the
+    # very negative whose survival that branch's own comment promises.
+    #
+    # So the row ALWAYS carries what was read. `_ns` names are used only when
+    # the unit is established; otherwise the values ride under unit-neutral
+    # names with `time_unit: null` beside them, and the headline decides what
+    # may be published.
+    scale = _STA_TIME_TO_NS.get(unit, 1.0) if unit else 1.0
     if unit is None:
-        # REFUSE, DO NOT ANNOTATE. Round 1 published the numbers under `_ns`
-        # keys with `slack_time_unit_stated: false` beside them -- a flag
-        # nobody reads, next to a number that is 1000x wrong on a ps liberty.
-        # A measurement whose unit is unknown is not a measurement.
         return {"source_sha256": "sha256:" + hashlib.sha256(
                     (text or "").encode("utf-8", errors="replace")).hexdigest(),
                 "time_unit": None, "time_unit_stated": False,
                 "time_unit_basis": basis,
+                # UNIT-NEUTRAL NAMES, AND ONLY FOR A VIOLATION. No `_ns`
+                # claim is made and the value is exactly what the report
+                # printed. A MET number with no unit is still refused --
+                # round 2's rule, which was right: 35.20 could be 35.20 ns of
+                # headroom or 0.0352 ns of it, and publishing the larger
+                # reading is exactly "a better number than one you read".
+                # A NEGATIVE number needs no unit to be evidence: it is a
+                # violation in every unit, and that is why it survives.
+                "setup_wns": _neg_only(slacks.get("setup_wns_ns")),
+                "hold_wns": _neg_only(slacks.get("hold_wns_ns")),
+                "tns": _neg_only(slacks.get("tns_ns")),
                 "setup_wns_ns": None, "hold_wns_ns": None, "tns_ns": None}
-    scale = _STA_TIME_TO_NS.get(unit, 1.0)
     row: Dict[str, Any] = {
         "source_sha256": "sha256:" + hashlib.sha256(
             (text or "").encode("utf-8", errors="replace")).hexdigest(),
@@ -3572,6 +3607,23 @@ def _check_sta(project_dir: Path) -> AuditResult:
                                    ("hold_wns_ns", _worst("hold_wns_ns")),
                                    ("tns_ns", _worst("tns_ns")))
                  if v is not None}
+
+    # NEVER A BETTER NUMBER THAN ONE YOU READ. A row whose unit did not settle
+    # still knows the SIGN of what it read, and a negative is a violation in
+    # every unit. Publishing a met headline while such a row exists is the
+    # audit stating a margin the design does not have.
+    _unscoped_neg = {k: v for k, v in
+                     (("setup_wns", _worst("setup_wns")),
+                      ("hold_wns", _worst("hold_wns")),
+                      ("tns", _worst("tns")))
+                     if v is not None and v < 0}
+    if _unscoped_neg:
+        # Publish the negative in the report's OWN unit, under unit-neutral
+        # names, and withdraw any met `_ns` headline beside it: a met number
+        # from one report cannot stand for a design another report says is
+        # violating.
+        _headline = {k: v for k, v in _headline.items() if v < 0}
+        _headline.update(_unscoped_neg)
     _units_stated = [r for r in slack_rows if r.get("time_unit_stated")]
     _unit_basis = (_units_stated[0]["time_unit_basis"] if _units_stated
                    else (slack_rows[0]["time_unit_basis"] if slack_rows
@@ -3625,6 +3677,12 @@ def _check_sta(project_dir: Path) -> AuditResult:
                                      "reports_read": len(files) - len(unreadable)},
                       "slack_measurement": (
                           "MEASURED" if _headline else "NOT_MEASURED"),
+                      # Which of the published numbers are in nanoseconds.
+                      # A unit-neutral name above means the report stated no
+                      # unit and none could be derived; its SIGN is still
+                      # evidence and is why it is published at all.
+                      "slack_values_in_ns": sorted(
+                          k for k in _headline if k.endswith("_ns")),
                       "slack_time_unit": (
                           _units_stated[0]["time_unit"] if _units_stated
                           else None),

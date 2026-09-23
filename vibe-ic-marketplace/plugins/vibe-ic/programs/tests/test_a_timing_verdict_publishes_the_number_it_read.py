@@ -437,9 +437,135 @@ def test_the_unit_comes_from_the_liberty_the_run_loaded(tmp_path):
 def test_an_unresolvable_unit_refuses_the_number(tmp_path):
     """And when neither the report nor a liberty settles the unit, the number
     is NOT published under an _ns name. Refuse, do not annotate."""
+    # AMENDED at round 3. The fixture was `-35.20` -- a VIOLATION -- and the
+    # round-2 rule refused it. That was the defect: a violation's sign does
+    # not depend on its unit, and refusing it let a met number from another
+    # report stand for a violating design. The refusal is about a MET number,
+    # where the unit decides whether 35.20 is 35 ns of headroom or 0.035 ns
+    # of it; the violation case is now
+    # `test_a_stamped_report_keeps_the_negative_the_comment_promises` and
+    # `test_a_violation_is_not_lost_when_no_report_settles_its_unit`.
     rel = _stage(tmp_path, "=== SETUP corner: process=TT ===\n"
-                           "worst slack max -35.20\n", unit=None)
+                           "worst slack max 35.20\n", unit=None)
     _rc, s = _run(tmp_path, rel)
     assert s.get("slack_measurement") == "NOT_MEASURED", s
     assert R._numbers_under_key({"summary": s}, ("slack", "wns", "tns")) == [], s
     assert "time unit" in str(s.get("slack_not_measured_reason") or ""), s
+
+
+# ===========================================================================
+# ROUND-3 REVIEW, 2026-09-23 — MEDIUM. The round-2 unit refusal was right
+# about units and wrong about VIOLATIONS. A violation's SIGN does not depend
+# on the unit: -1.20 is negative in ps, ns and seconds alike. Dropping a row
+# whose unit did not settle removed its negative from the headline, so the
+# audit published a met worst slack, MEASURED, beside
+# `real_violation_found: true`.
+# ===========================================================================
+
+def _stage_two(tmp_path, a_text, b_text, a_unit="ns", b_unit=None):
+    """Two reports under one scope, as an unscoped audit discovers them."""
+    d = tmp_path / "phase3" / "stage3" / "sta"
+    d.mkdir(parents=True, exist_ok=True)
+    head = ""
+    if a_unit:
+        lib = tmp_path / f"a_{a_unit}.lib"
+        lib.write_text(f"library (a) {{\n  time_unit : 1{a_unit} ;\n}}\n")
+        head = f"STA_BASIS_LIBERTY: {lib}\n"
+    (d / "post_route_timing.rpt").write_text(head + a_text)
+    pc = d / "per_corner"
+    pc.mkdir(exist_ok=True)
+    head_b = ""
+    if b_unit:
+        lib2 = tmp_path / f"b_{b_unit}.lib"
+        lib2.write_text(f"library (b) {{\n  time_unit : 1{b_unit} ;\n}}\n")
+        head_b = f"STA_BASIS_LIBERTY: {lib2}\n"
+    (pc / "sta_SS.rpt").write_text(head_b + b_text)
+    return "phase3/stage3/sta"
+
+
+def test_a_violation_in_an_unresolved_unit_is_never_published_as_met(tmp_path):
+    """ROUND-3 MEDIUM, the reviewer's first input. post_route_timing.rpt names
+    an ns liberty and reports a met 0.50; per_corner/sta_SS.rpt names no
+    liberty and reports wns -1.20 / tns -8.00. Dropping the second row left
+    the headline reading setup_wns_ns 0.50, MEASURED -- a met margin over a
+    design with a violation in it."""
+    rel = _stage_two(tmp_path,
+                     "=== SETUP corner: process=TT ===\nworst slack max 0.50\n",
+                     "=== SETUP corner: process=SS ===\n"
+                     "wns max -1.20\ntns max -8.00\n")
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("real_violation_found") is True, s
+    assert s.get("setup_wns_ns") != 0.50, (
+        "a met margin was published over a report carrying a violation: %r" % s)
+    # Never a better number than one you read: either the negative is
+    # published with its unit named, or the headline is refused and says why.
+    if s.get("slack_measurement") == "MEASURED":
+        got = [v for _k, v in R._numbers_under_key({"summary": s},
+                                                   ("slack", "wns", "tns"))]
+        assert any(v < 0 for v in got), s
+    else:
+        assert "violation" in str(s.get("slack_not_measured_reason") or ""), s
+
+
+def test_a_violation_is_not_lost_when_no_report_settles_its_unit(tmp_path):
+    """The reviewer's second input: step-10 scope, where NO report names a
+    liberty. Round 2 published NOT_MEASURED with a unit reason and said
+    nothing about the violation sitting in the same scope."""
+    rel = _stage_two(tmp_path,
+                     "=== SETUP corner: process=TT ===\nwns max -1.20\n",
+                     "=== SETUP corner: process=SS ===\ntns max -8.00\n",
+                     a_unit=None, b_unit=None)
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("real_violation_found") is True, s
+    reason = str(s.get("slack_not_measured_reason") or "")
+    assert s.get("slack_measurement") != "MEASURED" or any(
+        v < 0 for _k, v in R._numbers_under_key({"summary": s},
+                                                ("slack", "wns", "tns"))), s
+    assert "violation" in reason or any(
+        v < 0 for _k, v in R._numbers_under_key({"summary": s},
+                                                ("slack", "wns", "tns"))), s
+
+
+def test_a_stamped_report_keeps_the_negative_the_comment_promises(tmp_path):
+    """The reviewer's third input, and it is the audit contradicting its own
+    docstring: the stamp branch exists so that 'a stamp can decline to ADD a
+    verdict; it can never subtract one that is written down'. With the unit
+    unresolved, round 2 subtracted it."""
+    rel = _stage(tmp_path, _stamped("worst slack max -2.50\n"), unit=None)
+    _rc, s = _run(tmp_path, rel)
+    got = [v for _k, v in R._numbers_under_key({"summary": s},
+                                               ("slack", "wns", "tns"))]
+    assert any(v == -2.50 for v in got), (
+        "the stamp branch dropped the negative it promises to keep: %r" % s)
+
+
+def test_a_met_report_with_no_unit_still_publishes_nothing(tmp_path):
+    """And the round-2 rule survives where it was right: with no violation and
+    no unit, no number goes out under an _ns name."""
+    rel = _stage(tmp_path, "=== SETUP corner: process=TT ===\n"
+                           "worst slack max 35.20\n", unit=None)
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("slack_measurement") == "NOT_MEASURED", s
+    assert R._numbers_under_key({"summary": s}, ("slack", "wns", "tns")) == [], s
+
+
+def test_the_deck_states_its_own_unit_so_a_container_path_is_not_needed(tmp_path):
+    """ROUND-3 NOTE, closed. `STA_BASIS_LIBERTY` is a CONTAINER path on
+    image-PDK runs, so a host-side audit cannot open it and the unit could
+    never settle -- STA_NO_SLACK again, for every run whose PDK is not staged
+    under input/pdk. spm only worked because its liberty is identity-mounted.
+
+    OpenSTA knows the unit inside the deck, after read_liberty. The runner now
+    stamps `STA_TIME_UNIT:` from `sta::unit_scale_abbreviation time` +
+    `sta::unit_suffix time` (measured in the image: `ns` for the shipped
+    GF180 corner), and this reads it as the report stating its own unit --
+    with no liberty file needed at all."""
+    rel = _stage(tmp_path,
+                 "STA_BASIS_LIBERTY: /foss/pdks/unreachable/from/the/host.lib\n"
+                 "STA_TIME_UNIT: ps\n"
+                 "=== SETUP corner: process=TT ===\n"
+                 "worst slack max -35.20\n", unit=None)
+    _rc, s = _run(tmp_path, rel)
+    assert s.get("slack_time_unit") == "ps", s
+    assert s.get("setup_wns_ns") == -0.0352, s
+    assert s.get("slack_measurement") == "MEASURED", s
