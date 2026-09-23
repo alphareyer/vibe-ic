@@ -258,3 +258,74 @@ def test_through_the_wrapper_layer_timing_is_never_not_applicable(tmp_path):
     res = F._check_program_exit_zero(proj, _CMD_LAYER)
     assert res.verdict == "FAIL", (res.verdict, res.reason_class, res[1])
     assert res.reason_class != NABS
+
+
+# ── round 3 (review ictier1c-r2): decide by FIELD, tokenize identifiers ─────
+
+def _spm_plus(**extra):
+    doc = json.loads(SPM_L8.read_text())
+    doc.update(extra)
+    return doc
+
+
+#: FALSE-FAIL shapes: naming / provenance, where main returned VACUOUS_PASS.
+_NAMING_SHAPES = {
+    "waveform_caption": _spm_plus(waveforms=[
+        {"name": "Wishbone master read cycle",
+         "signal": [{"name": "clk", "wave": "p...."}]}]),
+    "constant_named_master_clk": _spm_plus(timing_constants=[
+        {"name": "master_clk", "value": 10.0, "unit": "MHz"}]),
+    "asciidoc_source_document": _spm_plus(source_documents=[
+        "L3_external_interface.asciidoc"]),
+}
+#: NARROW shapes: timing on the page that round 2 missed.
+_TIMING_SHAPES = {
+    "slash_joined_key": dict(_EMPTY_CANON, **{"H0/H1/BR/IBT_low_us": 7.2}),
+    "list_sentence": dict(_EMPTY_CANON, timing_parameters=["H0 low 7.2us"]),
+    "fused_TIBT_US": dict(_EMPTY_CANON, TIBT_US=22.0),
+    "fused_TBR_MIN_US": dict(_EMPTY_CANON, TBR_MIN_US=13.0),
+    "fused_IBTmin": dict(_EMPTY_CANON, IBTmin=20.0),
+    "fused_H0low": dict(_EMPTY_CANON, H0low=7.2),
+    "fused_tbreak_us": dict(_EMPTY_CANON, tbreak_us=13.8),
+}
+
+
+def _wrapper(tmp_path, l8, layer=None):
+    proj = _project(tmp_path, l8)
+    lp = proj / "phase1/generated_docs/L8_RTL_CONSTANTS.json"
+    lp.write_text(json.dumps(layer if layer is not None else {}))
+    return F._check_program_exit_zero(proj, _CMD_LAYER)
+
+
+import pytest                                                 # noqa: E402
+
+
+@pytest.mark.parametrize("shape", sorted(_NAMING_SHAPES))
+def test_naming_and_provenance_never_block_the_absence(tmp_path, shape):
+    rc, rep = _gate(tmp_path / "g", _NAMING_SHAPES[shape])
+    assert (rc, rep.get("reason_class")) == (0, NABS), (shape, rep)
+    res = _wrapper(tmp_path / "w", _NAMING_SHAPES[shape])
+    assert (res.verdict, res.reason_class) == ("NOT_APPLICABLE", NABS), (
+        shape, res.verdict, res.reason_class, res[1])
+
+
+@pytest.mark.parametrize("shape", sorted(_TIMING_SHAPES))
+def test_timing_the_gate_reads_is_never_certified_absent(tmp_path, shape):
+    rc, rep = _gate(tmp_path / "g", _TIMING_SHAPES[shape])
+    assert rep.get("reason_class") != NABS and rc == 1, (shape, rep)
+    res = _wrapper(tmp_path / "w", _TIMING_SHAPES[shape])
+    assert res.verdict == "FAIL", (shape, res.verdict, res.reason_class)
+
+
+def test_fused_layer_constants_are_read_the_way_check_reads_them(tmp_path):
+    """TBR_MIN_US is what check()'s _find_numeric_us reads from --layer."""
+    rc, rep = _gate(tmp_path, dict(_EMPTY_CANON),
+                    layer={"TX_IBT_us": 70, "TBR_MIN_US": 62})
+    assert rep.get("reason_class") != NABS and rc == 1, rep
+
+
+def test_fused_symbols_count_for_check_too():
+    import internal_vs_external_timing_check as G
+    assert G._symbols_in({"TIBT_US": 1, "TBR_MIN_US": 1, "H0low": 1,
+                          "H1_ns": 1}) == {"IBT", "BR", "H0", "H1"}
+    assert G._symbols_in({"LIBRARY": 1, "BRAM": 1, "CH0": 1}) == set()
