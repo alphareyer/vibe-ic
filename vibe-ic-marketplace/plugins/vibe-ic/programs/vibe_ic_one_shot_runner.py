@@ -1655,6 +1655,33 @@ def main() -> int:
             # sidecar must have been written at or after phase1 STARTED in this
             # invocation, and only rc 1 -- what the coverage-only path returns -- is
             # exempt.
+            # AND BEFORE EITHER SIDECAR ROUTE: DID PHASE 1 PUBLISH A RECORD HERE AT ALL?
+            # R-0915-160, fourth cut (review w3nppqdpn).
+            #
+            # r9 put this question on the CARRIED-NAME route only, and the name route is reached
+            # solely when the sidecar is not fresh -- so the MTIME route walked past it. The sibling
+            # it left: a FIRST pass where D1 writes a fresh coverage-only sidecar and the pass then
+            # dies before publishing its record (`_run_expert_track` -> `_wd.run_host_supervised`
+            # raising, or the record write itself). rc 1, no record, `_side_fresh` True from the
+            # mtime alone -- demoted, and phase 2 ran on a phase 1 that crashed. Pre-existing on
+            # that route rather than introduced by r9, and worse on main, but the question is the
+            # same one and it belongs to the DEMOTION, not to either route into it.
+            #
+            # So it is a PRECONDITION now, asked once, and both routes sit behind it. Measured
+            # harmless: a legitimate coverage-only pass 1 always publishes its record before
+            # returning (the docs branch and the prompt branch each write it as their last act), and
+            # the expert second pass always rewrites it -- so no run that has earned the exemption
+            # is refused by this.
+            _rec_is_ours = _published_here(
+                project, "phase1_one_shot.json", _phase_started.get("phase1", t0))
+            if cov_only and not _rec_is_ours:
+                advisories.append(
+                    "phase1 exited " + str(rc) + " having published NO record in this invocation, "
+                    "so nothing here is phase 1's own account of itself: the coverage-only "
+                    "exemption needs a record from THIS pass and there is none. NOT demoting"
+                    + (" (the record on disk belongs to an earlier run)"
+                       if _report_exists(project, "phase1_one_shot.json") else ""))
+                cov_only = False
             _side = project / "reports" / "phase1" / "phase1_exit_reason.json"
             try:
                 _side_fresh = (_side.is_file()
@@ -1689,19 +1716,19 @@ def main() -> int:
             #     a few lines above. A crashed phase 1 that wrote no record leaves an EARLIER run's
             #     record in `rep`, whose name still matches the untouched sidecar -- which is how
             #     r8 opened a route to PASS_WITH_WAIVERS for a run whose phase 1 died (review
-            #     wkevxl71c). The record has to be THIS invocation's, and now it is ASKED:
+            #     wkevxl71c). The record has to be THIS invocation's, and it is ASKED --
             #     `_published_here`, the same `exists AND fresh` test `_row_verdict` uses, from the
-            #     one implementation both readers share.
+            #     one implementation both readers share -- as the PRECONDITION on the demotion
+            #     above, not as a test on this route. r9 put it here, on the name route, and a
+            #     review was right that the mtime route then walked past it (w3nppqdpn): the
+            #     question belongs to the demotion, which is the thing being authorised, and not to
+            #     either road into it.
             if cov_only and not _side_fresh:
-                _rec_is_ours = _published_here(
-                    project, "phase1_one_shot.json", _phase_started.get("phase1", t0))
+                # `cov_only` is already false unless the record is THIS pass's (the precondition
+                # above), so `rep` here is this invocation's own account and the name it carries
+                # can be trusted as far as its digest. Asked once, not twice.
                 _named = (rep.get("pass1_coverage_sidecar")
-                          if (_rec_is_ours and isinstance(rep, dict)) else None)
-                if not _rec_is_ours and _report_exists(project, "phase1_one_shot.json"):
-                    advisories.append(
-                        "phase1 published no record in THIS invocation, so the pass-1 record on "
-                        "disk belongs to an earlier run: whatever it names, it cannot authorise a "
-                        "demotion of a phase that crashed here")
+                          if isinstance(rep, dict) else None)
                 if isinstance(_named, dict) and _side.is_file():
                     try:
                         import hashlib as _hashlib          # noqa: PLC0415

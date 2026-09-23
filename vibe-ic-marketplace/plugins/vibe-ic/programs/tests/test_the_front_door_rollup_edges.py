@@ -1186,3 +1186,53 @@ def test_a_crashed_phase_one_cannot_borrow_an_earlier_runs_naming(project, monke
         doc.get("advisories"))
     # and the demotion route said so too, rather than falling silent
     assert any("NOT demoting" in a for a in doc.get("advisories", [])), doc.get("advisories")
+
+
+def test_a_first_pass_that_crashes_after_writing_the_sidecar_is_not_demoted(
+        project, monkeypatch):
+    """THE SIBLING ON THE MTIME ROUTE (review w3nppqdpn), which r9 left open.
+
+    A FIRST pass, nothing stale anywhere: D1 writes a fresh coverage-only sidecar, and the pass then
+    dies before publishing its record -- `_run_expert_track` raising, or the record write itself.
+    rc 1, NO record, and `_side_fresh` is True from the sidecar's own mtime, so r9's check (which
+    sat on the carried-name route, reached only when the sidecar is NOT fresh) was never asked. The
+    run demoted and phase 2 ran on a phase 1 that had crashed.
+
+    `_drive_main` cannot express this: its fake always writes a record. That is the whole point of
+    the case, so the fake here writes the sidecar and nothing else.
+    """
+    def crashes_after_the_sidecar(label, runner, args, env=None):
+        if "phase1" in runner.name:
+            side = _sidecar(project)
+            side.parent.mkdir(parents=True, exist_ok=True)
+            side.write_text(json.dumps({"coverage_only_failure": True,
+                                        "coverage_pct": 71.0, "total_todo": 0}) + "\n")
+            return 1                                    # ... and then it dies. No record.
+        if "phase2" in runner.name:
+            _report(project, "phase2_one_shot.json", {"verdict": "PASS"})
+            return 0
+        return 0
+
+    monkeypatch.setattr(V, "_run_phase", crashes_after_the_sidecar)
+    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k: (True, "docs"))
+    monkeypatch.setattr(sys, "argv",
+                        ["vibe_ic_one_shot_runner", str(project),
+                         "--no-dashboard", "--skip-hardware", "--skip-phase3"])
+    rc = V.main()
+    doc = json.loads(_pl.report_path(project, "vibe_ic_one_shot.json").read_text())
+
+    # the premise: the sidecar really is fresh, so the mtime route really was open
+    assert _sidecar(project).is_file()
+    assert not _pl.report_path(project, "phase1_one_shot.json").is_file(), (
+        "the arm must leave phase 1 with NO record; a record makes this a different case")
+
+    assert doc["verdict"] == "FAIL", (
+        f"a phase 1 that crashed before publishing its record was demoted on its own fresh "
+        f"sidecar: {doc['verdict']} / {doc.get('verdict_reasons')}")
+    assert rc == 1, rc
+    assert doc.get("demoted_phases") == {}, doc.get("demoted_phases")
+    assert any("published NO record in this invocation" in a
+               for a in doc.get("advisories", [])), doc.get("advisories")
+    # and it is NOT excused as "the record belongs to an earlier run" -- there is no record at all
+    assert not any("belongs to an earlier run" in a for a in doc.get("advisories", [])), (
+        doc.get("advisories"))
