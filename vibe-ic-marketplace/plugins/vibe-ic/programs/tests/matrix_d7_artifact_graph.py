@@ -267,8 +267,31 @@ _WRITE_MODE_RE = re.compile(r"[waxWAX+]")
 #: is the context-manager form (`with atomic_output(p) as tmp:`); its
 #: destination is likewise the first argument, and the inner `tmp.write_text`
 #: names a TEMP path that no declared-artefact walk should follow.
+#: ``publish`` is `_auditor_write.publish(final, payload)` -- R-0915-168's ONE auditor writer,
+#: temp-then-replace with the destination first, and the same shape as the three above. It is here
+#: and not in :data:`_SHADOWING_ATOMIC_WRITERS` because that set is specifically for names that
+#: COLLIDE with a ``Path`` method and therefore cannot be matched by name; ``publish`` does not, so
+#: the plain rule applies and no receiver discrimination is needed.
+#:
+#: MEASURED WHEN IT WAS ADDED, because adding a name here can invent a write. Converting
+#: `flow_compliance_check` and `design_input_digest`'s `--json` receipts from
+#: `Path(args.json).write_text(...)` to `_aw.publish(Path(args.json), ...)` made this walk stop
+#: recognising them as writers of their own flag value, so `flag_value_is_written` answered None,
+#: `clause_output_targets` dropped the target, and the flow lost SIX gate-output pairs -- steps 2,
+#: 7, 14, 15, 37 and 39, which are exactly the six `stageN_compliance.json` paths whose same-gate
+#: read `_consumers_of_output`'s `owner` argument exists to excuse. 140 targets -> 134 and 6
+#: self-reads -> 0, so `test_a_same_gate_reader_is_the_only_thing_the_owner_argument_excuses`
+#: reported "the extraction has collapsed" and four `test_flow_matrix_coverage` cells cascaded off
+#: it. The vocabulary was the cause: a true answer looked false because the write had moved behind
+#: a helper this set had not been told about.
+#:
+#: The other `publish` in this tree is `benchmark_evidence_publish.publish(args)`, whose first
+#: argument is an `argparse.Namespace` and not a path. It resolves to no path and so adds nothing
+#: -- verified by diffing the whole extraction over every step before and after this line.
+#: `_auditor_write.copy_aside(src, final)` is deliberately NOT here: its first argument is the
+#: SOURCE, and naming it would charge a program with writing the file it reads.
 _ATOMIC_WRITERS: FrozenSet[str] = frozenset(
-    {"atomic_write_text", "atomic_write_json", "atomic_output"})
+    {"atomic_write_text", "atomic_write_json", "atomic_output", "publish"})
 
 #: Atomic writers that KEEP the name of the ``Path`` method they replace and
 #: move the destination to the first argument, because they are drop-in
