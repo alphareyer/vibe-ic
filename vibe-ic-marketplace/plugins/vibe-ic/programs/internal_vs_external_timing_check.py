@@ -147,7 +147,6 @@ def _find_numeric_us(obj: Any, needle: str) -> float | None:
     rather than raise a false positive on tick-count values).
     """
     import re
-    n = needle.upper()
 
     def _as_scalar(v):
         """Coerce a list/tuple [min, max] to its minimum; pass scalars through."""
@@ -163,15 +162,16 @@ def _find_numeric_us(obj: Any, needle: str) -> float | None:
         if val is None:
             continue
         pu = p.upper()
-        if n in pu and ("_US" in pu or "US_" in pu or pu.endswith("US")):
+        if _names_needle(p, needle) and (
+                "_US" in pu or "US_" in pu or pu.endswith("US")):
             return val
     # Pass 2: look for dict entries {name: ..., value: ...} where name contains needle
     # and sibling has explicit μs context.
     for p, v in _walk(obj):
         if not isinstance(v, dict):
             continue
-        name = str(v.get("name", "")).upper()
-        if n in name:
+        name = str(v.get("name", ""))
+        if name and _names_needle(name, needle):
             comment = str(v.get("comment", "")) + " " + str(v.get("desc", ""))
             m = re.search(r'(\d+(?:\.\d+)?)\s*us', comment, re.IGNORECASE)
             if m:
@@ -181,7 +181,7 @@ def _find_numeric_us(obj: Any, needle: str) -> float | None:
     for p, v in _walk(obj):
         if not isinstance(v, dict):
             continue
-        if n not in p.upper():
+        if not _names_needle(p, needle):
             continue
         # pick nom else min else max
         for unit_key in ("nom_us", "nom", "min_us", "min", "max_us"):
@@ -195,7 +195,9 @@ def _find_numeric_us(obj: Any, needle: str) -> float | None:
 
 #: Per-symbol names read by check()'s `_symbols_in`, matched against
 #: IDENTIFIER TOKENS (`_identifier_tokens`), never as substrings.
-_TIMING_SYMBOLS = frozenset({"h0", "h1", "br", "ibt", "break"})
+_TIMING_SYMBOLS = frozenset({"h0", "h1", "br", "ibt", "break", "brk"})
+#: Spellings of BR (the break / packet-end symbol).
+_BR_SPELLINGS = frozenset({"br", "break", "brk"})
 
 
 def _identifier_tokens(text: Any) -> list[str]:
@@ -219,8 +221,29 @@ def _token_symbol(tok: str) -> str | None:
     BR."""
     for cand in (tok, tok[1:] if tok.startswith("t") else None):
         if cand in _TIMING_SYMBOLS:
-            return "BR" if cand == "break" else cand.upper()
+            return "BR" if cand in _BR_SPELLINGS else cand.upper()
     return None
+
+
+def _names_needle(text: Any, needle: str) -> bool:
+    """Does `text` (a key path or a record name) name `needle` -- a symbol
+    ("IBT", "BR") or a symbol with qualifiers ("TX_IBT", "BR_MIN")?
+
+    THE ONE READER FOR A SYMBOL (review wd54r7zx6). `_symbols_in` (coverage)
+    and `_find_numeric_us` (the IBT<BR number) used to read symbols two ways:
+    coverage by token, the number by SUBSTRING, so `BRK_us` was "BR missing"
+    to one and the BR threshold to the other. Both now go through
+    `_identifier_tokens` / `_token_symbol`: each needle part that is a symbol
+    must be a symbol of the text, every other part a token of it."""
+    toks = _identifier_tokens(text)
+    syms = {sym for t in toks if (sym := _token_symbol(t)) is not None}
+    for part in str(needle).split("_"):
+        if part.upper() in SYMBOLS_REQUIRED:
+            if part.upper() not in syms:
+                return False
+        elif part.lower() not in toks:
+            return False
+    return True
 
 
 def classified_groups(waveform: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -610,6 +633,31 @@ def main() -> int:
         # of the document, each one either an empty protocol container or a
         # schema-declared non-protocol key.
         _scanned_names = sorted(str(k) for k in waveform)
+        if not _scanned_names:
+            # Review wd54r7zx6 (LOW 1) — NOTHING WAS WALKED, so nothing can be
+            # certified absent: `_structural_absence` refuses scanned=0 and the
+            # gate used to die with a traceback (CRASHED -> step FAIL). An empty
+            # L8 is "cannot decide": INCOMPLETE, naming it.
+            msg = ("INCOMPLETE: internal_vs_external_timing: "
+                   f"{waveform_path} (L8_TIMING_WAVEFORM) is empty -- there is "
+                   "nothing to walk, so the absence of protocol timing cannot "
+                   "be established; regenerate the L8 (Phase 1) or declare "
+                   "L2 protocol_overview.half_duplex=false.")
+            if args.json:
+                txt = json.dumps({
+                    "source_file": waveform_path, "total_findings": 0,
+                    "errors": 0, "findings": [], "verdict": "INCOMPLETE",
+                    "reason_class": "BLOCKED_BY_UPSTREAM",
+                    "skip_kind": "missing-upstream-output",
+                    "reason": msg}, indent=2)
+                if args.json == "-":
+                    print(txt)
+                else:
+                    Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+                    Path(args.json).write_text(txt + "\n")
+            else:
+                print(msg)
+            return 2
         _absence = _sa.absence(
             population=("L8_TIMING_WAVEFORM top-level key(s), classified by "
                         "the L8 schema (l8_timing_schema)"),
