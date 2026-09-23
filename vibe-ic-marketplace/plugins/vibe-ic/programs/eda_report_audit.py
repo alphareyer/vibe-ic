@@ -2995,12 +2995,25 @@ def _slack_row(fp: Any, slacks: Dict[str, Optional[float]],
     The three field NAMES are `extract_slacks`' own, kept verbatim so the
     audit's receipt and the completeness gate cannot drift into two
     vocabularies for one measurement.
+
+    PROVENANCE IS THE REPORT'S OWN BYTES, NOT ITS PATH, and an existing test
+    is why. `test_sta_gate_step_scope::test_the_step_mirror_does_not_cost_the_
+    gate_its_declared_report` publishes the SAME report at a second, mirrored
+    path and asserts the gate's summary does not move. A `file` field made it
+    move -- same numbers, different string -- so the answer depended on which
+    copy the walk happened to reach first. A digest is stable across mirrors
+    by construction, and it is the better provenance anyway: it says WHAT was
+    read, which a path renamed tomorrow no longer does. `subject_files` still
+    carries the paths.
     """
     unit, basis = _sta_time_unit(text)
     scale = _STA_TIME_TO_NS.get(unit or "ns", 1.0)
-    row: Dict[str, Any] = {"file": str(fp), "time_unit": unit,
-                           "time_unit_stated": unit is not None,
-                           "time_unit_basis": basis}
+    row: Dict[str, Any] = {
+        "source_sha256": "sha256:" + hashlib.sha256(
+            (text or "").encode("utf-8", errors="replace")).hexdigest(),
+        "time_unit": unit,
+        "time_unit_stated": unit is not None,
+        "time_unit_basis": basis}
     for key in ("setup_wns_ns", "hold_wns_ns", "tns_ns"):
         val = slacks.get(key)
         row[key] = None if val is None else round(val * scale, 12)
@@ -3224,7 +3237,10 @@ def _check_sta(project_dir: Path) -> AuditResult:
                 _neg = {k: (v if (v is not None and v < 0) else None)
                         for k, v in _slacks.items()}
                 if any(v is not None for v in _neg.values()):
-                    slack_rows.append(_slack_row(fp, _neg, text))
+                    _nrow = _slack_row(fp, _neg, text)
+                    if not any(r["source_sha256"] == _nrow["source_sha256"]
+                               for r in slack_rows):
+                        slack_rows.append(_nrow)
             continue
 
         if has_pathtable:
@@ -3244,7 +3260,13 @@ def _check_sta(project_dir: Path) -> AuditResult:
             # discarded. `vals` is what decides `any_verdict_determined` on the
             # line above; publishing anything else would be a second answer to
             # a question already answered here.
-            slack_rows.append(_slack_row(fp, slacks, text))
+            _row = _slack_row(fp, slacks, text)
+            # A MIRROR IS NOT A SECOND MEASUREMENT. Byte-identical reports
+            # discovered at two paths are one reading, and counting them twice
+            # would inflate `datapoints` with the run's own bookkeeping.
+            if not any(r["source_sha256"] == _row["source_sha256"]
+                       for r in slack_rows):
+                slack_rows.append(_row)
             if any(v < 0 for v in vals):
                 real_violation_found = True
                 if not violation_evidence:

@@ -272,3 +272,24 @@ def test_the_time_unit_is_read_or_named_as_unread(tmp_path):
     assert s2.get("slack_time_unit") == "ps", s2
     assert s2.get("slack_time_unit_stated") is True, s2
     assert s2.get("setup_wns_ns") == -0.0352, s2
+
+
+def test_a_mirror_of_the_same_report_is_not_a_second_measurement(tmp_path):
+    """MEASURED by an existing test (`test_sta_gate_step_scope::
+    test_the_step_mirror_does_not_cost_the_gate_its_declared_report`), which
+    went red on the branch tip: the row recorded the report's PATH, so
+    publishing the same bytes at a mirrored step path moved the gate's
+    summary. Same numbers, different string, different answer.
+
+    Provenance is the bytes now, so two mirrors are one reading -- and the
+    count does not double either."""
+    rel = _stage(tmp_path, _TRANSCRIPT)
+    mirror = tmp_path / "steps" / "10_pre_layout_sta" / "post_route_timing.rpt"
+    mirror.parent.mkdir(parents=True, exist_ok=True)
+    mirror.write_text(_TRANSCRIPT)
+    _rc, s = _run(tmp_path, rel)
+    rows = s.get("slack_ns") or []
+    assert len(rows) == 1, rows
+    assert (s.get("slack_scan") or {}).get("datapoints") == 1, s
+    assert "file" not in rows[0], rows[0]
+    assert rows[0]["source_sha256"].startswith("sha256:"), rows[0]
