@@ -3352,10 +3352,10 @@ class _ProgramCheckResult(tuple):
 
     def __new__(cls, passed: bool, output: str, exit_code: Optional[int],
                 structured_verdict: Optional[str], verdict: str,
-                reason_class: Optional[str]):
+                reason_class: Optional[str], vacuous_diagnostic: str = ""):
         return super().__new__(cls, (passed, output, exit_code,
                                      structured_verdict, verdict,
-                                     reason_class))
+                                     reason_class, vacuous_diagnostic))
 
     def __iter__(self):
         yield self[0]
@@ -3372,6 +3372,16 @@ class _ProgramCheckResult(tuple):
     @property
     def verdict(self) -> str:
         return self[4]
+
+    @property
+    def vacuous_diagnostic(self) -> str:
+        """R-0915-135 — the callee's classified first line (and the class it
+        STATED, if any) for a VACUOUS_PASS clause. A SIDE CHANNEL on purpose:
+        `output` is scanned by the line-start token readers in `_evaluate_gate`
+        (`INCOMPLETE:`, `STRUCTURE_ONLY:`, `SUBSTANTIVE_PASS`), and callee text
+        placed there re-tiers the step on text alone (review of next/icslot61,
+        finding 1). Empty for every other outcome."""
+        return self[6] if len(self) > 6 else ""
 
     @property
     def reason_class(self) -> Optional[str]:
@@ -3398,6 +3408,7 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
     report_message = _report_reason_text(report)
     _structured_verdict = _report_verdict(report)
     reason_class: Optional[str] = None
+    vacuous_diagnostic = ""
     if out.startswith(_VACUOUS_HINT_PREFIX):
         legacy_message = out.partition("\n")[2]
         rc = 2
@@ -3476,29 +3487,30 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
                        f"{report_message or ''}".rstrip(" ;"))
             else:
                 verdict = "VACUOUS_PASS"
-                # R-0915-135 — THE CLASSIFIED LINE AND THE CLASS TRAVEL WITH THE
-                # HINT, on a SECOND line.
+                # R-0915-135 — THE CALLEE'S CLASSIFIED LINE AND THE CLASS IT
+                # STATED TRAVEL WITH THE HINT, BUT NOT IN `out`.
                 #
-                # This used to read "Downstream aggregation treats everything
-                # after the prefix as the command identity. The diagnostic suffix
-                # was needed here for classification, not in that marker payload"
-                # -- and the cost was measured: the step row said "vacuous: gate
-                # program signalled VACUOUS_PASS (input not applicable) ... :
-                # <clause>" while the CALLEE had said "NOT_MEASURED
-                # [CAPABILITY_ABSENT]: the run's own receipt records verdict
-                # NOT_DETERMINED — no KLayout runner reaches this project". The
-                # instrument's own reason reached nobody, and the row's class read
-                # `no_population` for a tool that was simply not there.
+                # The row used to say "vacuous: ... : <clause>" while the callee
+                # had said "NOT_MEASURED [CAPABILITY_ABSENT]: ... no KLayout
+                # runner reaches this project", and its class read
+                # `no_population`. The first cut of the fix put the line into
+                # `out`, where the line-start token readers in `_evaluate_gate`
+                # scan every line: a callee line starting `INCOMPLETE:` moved a
+                # step PASS -> NOT_MEASURED(partial_population) on text alone
+                # (review of next/icslot61, finding 1). So `out` stays the bare
+                # identity, exactly as before, and the diagnostic rides on the
+                # result's own `vacuous_diagnostic`, which only the hint builders
+                # read.
                 #
-                # THE COMMAND IDENTITY IS STILL THE FIRST LINE, which is what
-                # `all_vacuous_cmds` counts and what decides `unanimous`; the
-                # diagnostic goes after a newline, exactly as the rc==2 producer
-                # already appends its snippet. Same spelling as the
-                # executed-declared-N/A branch two cases above, so one convention
-                # covers both.
-                out = (f"{_VACUOUS_HINT_PREFIX}{cmd_str}\n"
-                       f"reason_class={reason_class}; "
-                       f"{report_message or legacy_message or ''}".rstrip(" ;"))
+                # The class the audit INFERRED from prose is tagged as such and
+                # is never elected (finding 3): only a class the callee STATED
+                # -- its report's `reason_class`, or an explicit `[CLASS]` token
+                # in its own line -- is.
+                out = f"{_VACUOUS_HINT_PREFIX}{cmd_str}"
+                vacuous_diagnostic = vacuous_diagnostic_line(
+                    stated_nonverdict_class(
+                        report_cls, report_message or legacy_message),
+                    reason_class, report_message or legacy_message)
         else:
             verdict = ("BLOCKED" if reason_class
                        == _reason_taxonomy.BLOCKED_BY_UPSTREAM
@@ -3610,7 +3622,7 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
     _ledger_row["structured_verdict"] = _structured_verdict
     return _ProgramCheckResult(
         ok, out, _exact_rc, _structured_verdict, verdict,
-        _ledger_row.get("reason_class"))
+        _ledger_row.get("reason_class"), vacuous_diagnostic)
 
 
 
@@ -4148,10 +4160,16 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
 # vs. were vacuously satisfied.
 _VACUOUS_HINT_PREFIX = "__VACUOUS_HINT__: "
 
-#: R-0915-135 — a vacuous hint's payload is `<clause>` then optional DIAGNOSTIC
-#: lines. Two producers write it: the classifier (which knows the callee's class
-#: and message) and the raw rc==2 path (which has only the callee's snippet).
-_VACUOUS_CLASS_RE = re.compile(r"^reason_class=([A-Za-z_]+)\s*;?\s*(.*)$", re.S)
+#: R-0915-135 — a vacuous hint's payload (in `reasons`, never in a gate's
+#: `out`) is `<clause>` then an optional DIAGNOSTIC line built by
+#: `vacuous_diagnostic_line`. Only `stated_class=` is a class the CALLEE stated;
+#: `inferred_class=` is the audit's own prose reading, carried for the reader and
+#: never elected (review of next/icslot61, finding 3).
+_VACUOUS_STATED_RE = re.compile(r"^stated_class=([A-Za-z_]+)\s*;?\s*(.*)$",
+                                re.S)
+#: An explicit class token in the callee's own line: `NOT_MEASURED [CLASS]: …`
+#: (`gds_xor_check` prints exactly this shape).
+_BRACKET_CLASS_RE = re.compile(r"\[([A-Za-z][A-Za-z_]*)\]")
 
 
 def split_vacuous_payload(payload: str):
@@ -4160,25 +4178,110 @@ def split_vacuous_payload(payload: str):
     THE CLAUSE IS THE FIRST LINE AND NOTHING ELSE, and that is load-bearing:
     `all_vacuous_cmds` is a SET whose length decides `unanimous`, and therefore
     the step's TIER. Counting `clause + diagnostic` would make two invocations of
-    one clause with different diagnostics read as two clauses. That is not
-    hypothetical -- the rc==2 producer has appended `\n<snippet>` to this payload
-    all along, so the miscount was already reachable; this split closes it.
+    one clause with different diagnostics read as two clauses.
     """
     clause, _, rest = str(payload or "").partition("\n")
     return clause.strip(), rest.strip()
 
 
-def vacuous_stated_class(diagnostic: str):
-    """The reason class the CALLEE stated, or None.
+def stated_nonverdict_class(report_cls: Any, message: Any) -> Optional[str]:
+    """The class the CALLEE STATED, or None — never an inference.
 
-    Conservative: anything this cannot read as `reason_class=<CLASS>` leaves the
-    caller's own classification alone, so a producer that says nothing cannot
-    silently re-tier a step.
+    Two channels count as a statement: the `reason_class` of the callee's own
+    report (`report_reason_class`), and an explicit `[CLASS]` token naming a
+    taxonomy class in the callee's own FIRST line. Prose ("no tool", "no
+    simulator") is a clue the audit reads, not a class the callee stated: a
+    callee saying `NOT_MEASURED [EXTERNAL]: ... needs no tool here` stated
+    EXTERNAL, whatever `_CAPABILITY_RE` matches first. Two different bracketed
+    classes on the line state nothing.
     """
-    m = _VACUOUS_CLASS_RE.match(str(diagnostic or "").strip())
+    cls = _reason_taxonomy.normalise(report_cls)
+    if cls:
+        return cls
+    first = _first_line(message)
+    tokens = {_reason_taxonomy.normalise(t)
+              for t in _BRACKET_CLASS_RE.findall(first)} - {None}
+    return tokens.pop() if len(tokens) == 1 else None
+
+
+def _first_line(text: Any) -> str:
+    for line in str(text or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def vacuous_diagnostic_line(stated: Optional[str], inferred: Optional[str],
+                            message: Any) -> str:
+    """The ONE diagnostic line a vacuous hint carries: the callee's classified
+    first line, prefixed by the class it stated (`stated_class=`) or, when it
+    stated none, by the audit's inference tagged as such (`inferred_class=`)."""
+    line = _first_line(message)
+    if stated:
+        head = f"stated_class={stated}"
+    elif inferred:
+        head = f"inferred_class={inferred} (the audit's reading; not stated)"
+    else:
+        head = ""
+    return "; ".join(x for x in (head, line) if x)
+
+
+def vacuous_stated_class(diagnostic: str):
+    """The reason class the CALLEE stated in one hint diagnostic, or None.
+
+    Conservative: only a `stated_class=<CLASS>` head is read. An
+    `inferred_class=` head, a bare line, or anything unreadable is SILENT, so a
+    producer that says nothing -- or an audit that guessed -- cannot re-tier a
+    step.
+    """
+    m = _VACUOUS_STATED_RE.match(str(diagnostic or "").strip())
     if not m:
         return None
     return _reason_taxonomy.normalise(m.group(1))
+
+
+def vacuous_clause_votes(vacuous_payloads, json_payloads) -> Dict[str, Any]:
+    """``{clause: stated class | None}`` for EVERY vacuous clause, by whichever
+    channel it disclosed through.
+
+    Every member of `all_vacuous_cmds` votes (review of next/icslot61, finding
+    2): a clause vacuous only through its JSON report is a voter too, with the
+    class its report stated, or silent. A clause heard on both channels votes
+    the class they agree on; two different stated classes for one clause is a
+    disagreement and votes `_VOTE_CONFLICT`.
+    """
+    stated: Dict[str, set] = {}
+    for payload in list(vacuous_payloads) + list(json_payloads):
+        clause, diag = split_vacuous_payload(payload)
+        cls = vacuous_stated_class(diag)
+        stated.setdefault(clause, set())
+        if cls:
+            stated[clause].add(cls)
+    return {c: (next(iter(v)) if len(v) == 1
+                else None if not v else _VOTE_CONFLICT)
+            for c, v in stated.items()}
+
+
+_VOTE_CONFLICT = object()
+
+
+def _vacuous_hint_with_diagnostic(out: str, execution: Any) -> str:
+    """The `__VACUOUS_HINT__` reason for a clause whose `out` is the bare
+    identity, with the callee's diagnostic (the result's side channel) on the
+    line after it. `out` itself is never changed: the token readers scan it."""
+    diag = (execution.vacuous_diagnostic
+            if isinstance(execution, _ProgramCheckResult) else "")
+    return f"{out}\n{diag}" if diag else out
+
+
+def _json_vacuous_hint(project: Path, cmd: str) -> str:
+    """The `__JSON_VACUOUS_HINT__` reason, carrying the class the clause's own
+    report STATED (its `reason_class`), so a JSON-only vacuous clause is a voter
+    in the class election and not an abstention nobody counts."""
+    cls = _reason_taxonomy.report_reason_class(
+        _command_json_report(project, cmd))
+    return (f"{_JSON_VACUOUS_HINT_PREFIX}{cmd}"
+            + (f"\nstated_class={cls}" if cls else ""))
 
 
 #: R-0915-135 — ONE VOCABULARY PER CHANNEL. The callee states a class from
@@ -4198,16 +4301,20 @@ _VACUOUS_CLASS_TO_ROW_CLASS = {
 }
 
 
-def elected_vacuous_class(diagnostics) -> Optional[str]:
-    """The one class every vacuous clause here agrees on, or None.
+def elected_vacuous_class(votes) -> Optional[str]:
+    """The one class every vacuous clause here STATED, mapped to the row word,
+    or None.
 
-    UNANIMITY OR NOTHING. Two clauses that went vacuous for DIFFERENT reasons do
-    not license either reason as the step's class -- "no population" is then the
-    honest word, because the step has no single stated cause. One dissenting or
-    silent clause is enough to decline.
+    `votes` holds one entry per vacuous clause (`vacuous_clause_votes`): the
+    class it stated, or None when it was silent. UNANIMITY OR NOTHING. Two
+    clauses that went vacuous for DIFFERENT reasons do not license either
+    reason as the step's class -- "no population" is then the honest word. One
+    dissenting, conflicting or silent clause is enough to decline, and so is a
+    class with no row word.
     """
-    stated = [vacuous_stated_class(d) for d in diagnostics]
-    if not stated or any(c is None for c in stated):
+    stated = list(votes)
+    if (not stated or any(c is None or c is _VOTE_CONFLICT
+                          for c in stated)):
         return None
     uniq = set(stated)
     if len(uniq) != 1:
@@ -11638,7 +11745,8 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         # FAIL it. No-op when skip_analog is False or the program doesn't
         # accept the flag (byte-identical command otherwise).
         _cmd = _maybe_forward_skip_analog(project, _cmd, skip_analog)
-        passed, out = _check_program_exit_zero(project, _cmd)
+        _execution = _check_program_exit_zero(project, _cmd)
+        passed, out = _execution
         # vibe-ic#901 - this clause DISPATCHED A PROGRAM. Recorded before
         # anything is decided about it, so the denominator cannot depend on the
         # outcome.
@@ -11653,7 +11761,7 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
             # length can truncate is not a disclosure channel. Recorded
             # unconditionally alongside whatever the legacy channels say, and
             # counted - never tiered - below.
-            reasons.append(f"{_JSON_VACUOUS_HINT_PREFIX}{_cmd}")
+            reasons.append(_json_vacuous_hint(project, _cmd))
         # Read BEFORE the pass/fail split and on the FULL snippet: the
         # 200-char truncation below would drop the sentinel, and the
         # disclosure is about what the gate certified, not about whether it
@@ -11669,7 +11777,8 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         elif out.startswith(_VACUOUS_HINT_PREFIX):
             # Wave 93 — bubble the rc=2 vacuous signal up so check_step
             # promotes the step's status to VACUOUS_PASS instead of PASS.
-            reasons.append(out)
+            # R-0915-135 — with the callee's diagnostic, from the side channel.
+            reasons.append(_vacuous_hint_with_diagnostic(out, _execution))
         elif out.startswith(_WAIVER_HINT_PREFIX):
             # #651 — bubble the rc=3 PASS_WITH_WAIVERS signal up so check_step
             # promotes the step's status to WAIVED-DEFERRED instead of a bare
@@ -11790,7 +11899,8 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         # intents, so a digital intent with no evidence STILL FAILs; this only
         # hands over the flag the gate already knows how to honour.
         cmd = _maybe_forward_skip_analog(project, cmd, skip_analog)
-        passed, out = _check_program_exit_zero(project, cmd)
+        _execution = _check_program_exit_zero(project, cmd)
+        passed, out = _execution
         # vibe-ic#901 - the clause's condition files existed, so it dispatched
         # a program. An optional clause whose condition is UNMET returns above
         # without reaching here and is deliberately NOT counted: it examined
@@ -11802,7 +11912,7 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
             # vibe-ic#901 - the same structured disclosure, read in the OPTIONAL
             # slot too. A disclosure only counts if the consumer reads it in
             # BOTH slots; the same programs are wired through each.
-            reasons.append(f"{_JSON_VACUOUS_HINT_PREFIX}{cmd}")
+            reasons.append(_json_vacuous_hint(project, cmd))
         if _stdout_signals_structure_only(out):
             reasons.append(f"{_STRUCTURE_ONLY_HINT_PREFIX}"
                            f"{_structure_only_note(out) or cmd}")
@@ -11827,7 +11937,8 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
             # longer see the program's own `VACUOUS_PASS:` line and the
             # disclosure was silently downgraded to a bare pass. Forward the
             # marker instead — mirrors the `__WAIVER_HINT__` branch above.
-            reasons.append(out)
+            # R-0915-135 — with the callee's diagnostic, from the side channel.
+            reasons.append(_vacuous_hint_with_diagnostic(out, _execution))
         elif _stdout_signals_vacuous(out):
             # Wave 93 — preserve the VACUOUS signal for upstream verdict
             # aggregation. The hint is filtered out before display so the
@@ -11991,7 +12102,7 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
                                f"[verdict={record['verdict']}, "
                                f"reason_class={record['reason_class']}]")
             elif out.startswith(_VACUOUS_HINT_PREFIX):
-                reasons.append(out)
+                reasons.append(_vacuous_hint_with_diagnostic(out, _execution))
             else:
                 reasons.append(f"{_VACUOUS_HINT_PREFIX}{cmd}")
         elif enforcement == "DISCLOSED_INCOMPLETE":
@@ -12003,7 +12114,7 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
         elif out.startswith(_EXECUTED_DECLARED_NA_HINT_PREFIX):
             reasons.append(out)
         elif out.startswith(_VACUOUS_HINT_PREFIX):
-            reasons.append(out)
+            reasons.append(_vacuous_hint_with_diagnostic(out, _execution))
         elif enforcement == "NON_BLOCKING_ADVISORY":
             reasons.append(
                 f"{_ADVISORY_HINT_PREFIX}verdict={record['verdict']} "
@@ -15429,9 +15540,15 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 # `elected_vacuous_class` declines on disagreement or silence, so
                 # this can only ever replace the blanket word with a more specific
                 # one that every clause agreed on.
+                # EVERY vacuous clause votes, by whichever channel it disclosed
+                # through (review of next/icslot61, finding 2), and only a class
+                # the callee STATED is a vote (finding 3).
+                _votes = vacuous_clause_votes(
+                    [h[len(_VACUOUS_HINT_PREFIX):] for h in vacuous_hints],
+                    [h[len(_JSON_VACUOUS_HINT_PREFIX):]
+                     for h in json_vacuous_hints])
                 _stated = elected_vacuous_class(
-                    split_vacuous_payload(h[len(_VACUOUS_HINT_PREFIX):])[1]
-                    for h in vacuous_hints)
+                    _votes.get(c) for c in all_vacuous_cmds)
                 result.reason_class = (
                     _stated or _T.ReasonClass.NO_POPULATION.value)
                 result.disclosures = [_T.Disclosure.VACUITY.value]
@@ -15534,7 +15651,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                     f"PARTIALLY-VACUOUS ({len(all_vacuous_cmds)} of "
                     f"{max(len(ran_hints), len(all_vacuous_cmds))} gate "
                     f"clause(s) examined nothing): "
-                    f"{h[len(_JSON_VACUOUS_HINT_PREFIX):]}")
+                    f"{split_vacuous_payload(h[len(_JSON_VACUOUS_HINT_PREFIX):])[0]}")
         if executed_declared_na_hints:
             result.executed_declared_not_applicable = [
                 h[len(_EXECUTED_DECLARED_NA_HINT_PREFIX):]

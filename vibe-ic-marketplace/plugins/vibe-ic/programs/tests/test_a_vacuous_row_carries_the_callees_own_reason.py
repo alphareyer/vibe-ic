@@ -92,10 +92,14 @@ def test_two_invocations_of_one_clause_count_as_one():
 
 # ── the class: unanimity or nothing, and one vocabulary ────────────────────
 
+# (lane ictier1 rework) `elected_vacuous_class` now takes one VOTE per vacuous
+# clause -- the class it STATED, or None when silent -- built by
+# `vacuous_clause_votes` over BOTH hint channels (review of next/icslot61,
+# finding 2). The claims below are unchanged; only the input shape moved.
+
 def test_a_unanimous_stated_class_is_elected_and_mapped_to_the_row_word():
     got = FCC.elected_vacuous_class(
-        ["reason_class=CAPABILITY_ABSENT; no runner",
-         "reason_class=CAPABILITY_ABSENT; still no runner"])
+        [TAX.CAPABILITY_ABSENT, TAX.CAPABILITY_ABSENT])
     assert got == _T.ReasonClass.TOOL_ABSENT.value, got
     assert got != TAX.CAPABILITY_ABSENT, (
         "the row must not carry the callee's vocabulary — one vocabulary per "
@@ -106,13 +110,11 @@ def test_two_different_stated_classes_elect_nothing():
     """Two clauses vacuous for DIFFERENT reasons do not license either as the
     step's class; `no_population` is then the honest word."""
     assert FCC.elected_vacuous_class(
-        ["reason_class=CAPABILITY_ABSENT; a",
-         "reason_class=EXECUTION_ERROR; b"]) is None
+        [TAX.CAPABILITY_ABSENT, TAX.EXECUTION_ERROR]) is None
 
 
 def test_one_silent_clause_declines_the_election():
-    assert FCC.elected_vacuous_class(
-        ["reason_class=CAPABILITY_ABSENT; a", "a bare snippet"]) is None
+    assert FCC.elected_vacuous_class([TAX.CAPABILITY_ABSENT, None]) is None
     assert FCC.elected_vacuous_class([]) is None
 
 
@@ -121,13 +123,19 @@ def test_a_class_with_no_row_word_declines_rather_than_inventing_one():
     counterpart, so the row keeps `no_population`. Declining is the conservative
     direction: it leaves the row exactly as it read before."""
     assert FCC.elected_vacuous_class(
-        ["reason_class=DESIGN_DECLARED_NA; the design declared none",
-         "reason_class=DESIGN_DECLARED_NA; likewise"]) is None
+        [TAX.DESIGN_DECLARED_NA, TAX.DESIGN_DECLARED_NA]) is None
 
 
 def test_an_unreadable_diagnostic_states_no_class():
-    for bad in ("", "   ", "no class here", "reason_class=; empty"):
+    for bad in ("", "   ", "no class here", "stated_class=; empty",
+                # the audit's inference is carried, never read as stated
+                "inferred_class=CAPABILITY_ABSENT (the audit's reading; not "
+                "stated); no simulator",
+                # the icslot61 spelling was the audit's own inference too
+                "reason_class=CAPABILITY_ABSENT; no runner"):
         assert FCC.vacuous_stated_class(bad) is None, bad
+    assert FCC.vacuous_stated_class(
+        "stated_class=CAPABILITY_ABSENT; no runner") == TAX.CAPABILITY_ABSENT
 
 
 def test_every_mapped_class_is_a_real_member_of_both_vocabularies():
@@ -140,14 +148,18 @@ def test_every_mapped_class_is_a_real_member_of_both_vocabularies():
 
 # ── the producer carries what the consumer reads ───────────────────────────
 
-def test_the_classifier_puts_the_class_and_message_in_the_payload():
+def test_the_classifier_puts_the_class_and_message_on_the_side_channel():
     """The half that made the row blind: the classifier had both and dropped
-    them. Asserted at source, because the alternative is to run a whole audit."""
+    them. (lane ictier1 rework) It now carries them on the result's
+    `vacuous_diagnostic`, NOT in `out`: `out` is scanned by the line-start token
+    readers, and callee text there re-tiered the step on text alone (review of
+    next/icslot61, finding 1). Asserted at source; the behaviour is driven end
+    to end in test_a_vacuous_row_election_is_the_callees_statement.py."""
     src = (PROGRAMS / "flow_compliance_check.py").read_text()
     i = src.index('verdict = "VACUOUS_PASS"')
-    window = src[i:i + 1800]
-    assert "_VACUOUS_HINT_PREFIX}{cmd_str}" in window
-    assert "reason_class={reason_class}" in window, window[-400:]
+    window = src[i:i + 2600]
+    assert 'out = f"{_VACUOUS_HINT_PREFIX}{cmd_str}"\n' in window, window
+    assert "vacuous_diagnostic = vacuous_diagnostic_line(" in window
     assert "report_message or legacy_message" in window
 
 
