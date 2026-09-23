@@ -478,3 +478,51 @@ def test_contract_spm_is_unchanged_by_the_silent_branch(tmp_path):
     assert (rc, rep["reason_class"]) == (0, NABS), rep
     assert (rep["structural_absence"]["scanned"],
             rep["structural_absence"]["found"]) == (13, 0)
+
+
+# ── review wd54r7zx6 (round 6) ──────────────────────────────────────────────
+
+def test_an_empty_l8_with_a_silent_l2_is_incomplete_not_a_crash(tmp_path):
+    """LOW 1. Nothing was walked, so nothing can be certified absent: the
+    structural-absence guard refuses scanned=0 and the gate used to die with
+    a traceback (rc 1 -> CRASHED -> step 2 FAIL). 'Cannot decide' is
+    INCOMPLETE, naming the empty L8 -- never NABS, never a crash."""
+    rc, rep = _gate(tmp_path / "g", {})
+    assert (rc, rep.get("verdict")) == (2, "INCOMPLETE"), rep
+    assert rep.get("reason_class") == "BLOCKED_BY_UPSTREAM", rep
+    assert "empty" in rep["reason"] and "L8_TIMING_WAVEFORM" in rep["reason"]
+    res = _wrapper(tmp_path / "w", {})
+    assert res.verdict in _INCOMPLETE_WORDS, (res.verdict, res[1])
+
+
+#: The mdio / espi shape: top-level rx_timing / tx_timing groups, BR spelled
+#: BRK. Coverage (`_symbols_in`) and the IBT<BR number (`_find_numeric_us`)
+#: must read the SAME symbol from the same key.
+_BRK_GOOD = {"rx_timing": {"H0_us": [10, 30], "H1_us": [1, 9],
+                           "BRK_us": [31, 65], "IBT_us": [5, 20]},
+             "tx_timing": {"H0_us": 20, "H1_us": 5, "BRK_us": 40,
+                           "IBT_us": 10}}
+_BRK_BAD = {"rx_timing": dict(_BRK_GOOD["rx_timing"]),
+            "tx_timing": dict(_BRK_GOOD["tx_timing"], IBT_us=70)}
+
+
+def test_one_reader_for_a_symbol_brk_is_br_for_coverage_and_numbers(tmp_path):
+    """LOW 2. Coverage said BR missing (BRK not a BR spelling) while the
+    numeric rule substring-matched BRK_us=31 as the BR threshold: two
+    readers, two vocabularies. One reader now: BRK is BR for both."""
+    rc, rep = _gate(tmp_path / "good", _BRK_GOOD, l2=HD_TRUE)
+    assert (rc, rep["verdict"]) == (0, "PASS"), rep
+    rc, rep = _gate(tmp_path / "bad", _BRK_BAD, l2=HD_TRUE)
+    assert (rc, rep["verdict"]) == (1, "FAIL"), rep
+    assert {f["rule"] for f in rep["findings"]} == {
+        "ibt_exceeds_br_threshold"}, rep["findings"]
+
+
+def test_the_numeric_rule_and_coverage_share_the_symbol_reader():
+    import internal_vs_external_timing_check as G
+    for key in ("BRK_us", "tB_break_us", "TBR_MIN_US", "BR_low_us"):
+        assert "BR" in G._symbols_in({key: 1}), key
+    assert G._find_numeric_us({"rx": {"BRK_us": 31}}, "BR") == 31.0
+    # and a word that merely CONTAINS the letters is neither
+    assert G._symbols_in({"LIBRARY_us": 1}) == set()
+    assert G._find_numeric_us({"rx": {"LIBRARY_us": 99}}, "BR") is None
