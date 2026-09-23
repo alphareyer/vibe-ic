@@ -63,7 +63,14 @@ VALUE_FLAGS: Tuple[str, ...] = ("--mode", "--json", "--under",
                                 # project dir and silently re-points the
                                 # audit. See drc_report_check
                                 # WRAPPER_VALUE_FLAGS.
-                                "--require-report")
+                                "--require-report",
+                                # R-0915-154 follow-up: `--image` states the
+                                # image THIS RUN timed against, so a host-side
+                                # audit can read PDK files that are IMAGE
+                                # CONTENT rather than mounted. It takes a
+                                # value, so it belongs here for the same
+                                # reason as the rest.
+                                "--image")
 
 
 def split_argv(

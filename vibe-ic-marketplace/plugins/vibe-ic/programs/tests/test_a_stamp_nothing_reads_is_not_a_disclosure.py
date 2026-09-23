@@ -97,6 +97,17 @@ STAMP_CONSUMERS = {
     # number under an `_ns` name. The two landings crossed; this row is the
     # join, and the consumer check below still requires the token in code.
     "STA_TIME_UNIT": ("eda_report_audit.py",),
+    # R-0915-154 join for the deck's NAMED GAP. `catch {puts ...}` swallowed a
+    # failed substitution and left NOTHING, so "this deck could not state its
+    # unit" and "this deck was never asked" arrived as the same silence —
+    # MEASURED on spm run23, where three STA reports carry STA_TIME_UNIT and
+    # `sta_spef_based.rpt` (which the canonical post_route_timing.rpt aliases)
+    # carries none, from the identical idiom. The decks now compute the unit
+    # first and always write a line; when they cannot, they write this one, and
+    # `eda_report_audit._sta_time_unit` quotes it in the reason it publishes
+    # (`_STA_TIME_UNIT_NOT_STATED_RE`). That is what makes it a disclosure
+    # rather than a decoration.
+    "STA_TIME_UNIT_NOT_STATED": ("eda_report_audit.py",),
 }
 
 

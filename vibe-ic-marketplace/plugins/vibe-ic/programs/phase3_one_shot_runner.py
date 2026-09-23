@@ -30061,7 +30061,13 @@ proc _vic_stamp_sta_path {f chunk mapping single extra} {
     if {$lib ne ""} {
         puts $f "=== SETUP corner: native_path ==="
         puts $f "STA_BASIS_LIBERTY: $lib"
-        catch {puts $f "STA_TIME_UNIT: [sta::unit_scale_abbreviation time][sta::unit_suffix time]"}
+        set _tu ""
+        catch {set _tu "[sta::unit_scale_abbreviation time][sta::unit_suffix time]"}
+        if {$_tu ne ""} {
+            puts $f "STA_TIME_UNIT: $_tu"
+        } else {
+            puts $f "STA_TIME_UNIT_NOT_STATED: this interpreter could not answer sta::unit_scale_abbreviation/unit_suffix for time"
+        }
         puts $f "STA_CORNER_BINDING_SOURCE: loaded_primary_liberty/native_path_corner"
     } else {
         puts $f "=== UNVERIFIED corner: native_path ==="
@@ -56438,7 +56444,13 @@ def _emit_spef_sta(project: Path, top: str, pdk: PdkConfig, container: str,
         f"puts $_bf \"STA_BASIS: POST_ROUTE_SPEF\"\n"
         f"puts $_bf \"STA_SIGNOFF_CORNER: {_signoff_corner}\"\n"
         f"puts $_bf \"STA_BASIS_LIBERTY: {lib_c}\"\n"
-        "catch {puts $_bf \"STA_TIME_UNIT: [sta::unit_scale_abbreviation time][sta::unit_suffix time]\"}\n"
+        "set _tu \"\"\n"
+        "catch {set _tu \"[sta::unit_scale_abbreviation time][sta::unit_suffix time]\"}\n"
+        "if {$_tu ne \"\"} {\n"
+        "    puts $_bf \"STA_TIME_UNIT: $_tu\"\n"
+        "} else {\n"
+        "    puts $_bf \"STA_TIME_UNIT_NOT_STATED: this interpreter could not answer sta::unit_scale_abbreviation/unit_suffix for time\"\n"
+        "}\n"
         # …and the RC axis too. Stamping only the PROCESS corner left the one
         # axis on which this report differs from `sta_mcorner_ocv.rpt` -- which
         # reads `spef_corners/<top>.max.spef` while this reads the un-cornered
@@ -57836,7 +57848,13 @@ def _emit_corner_spef_sta(project: Path, top: str, pdk: PdkConfig,
             # claiming a sign-off basis it does not have.
             f"puts $_f \"STA_BASIS: {_basis_stamp}\"\n"
             f"puts $_f \"STA_BASIS_LIBERTY: {lib_c}\"\n"
-            "catch {puts $_f \"STA_TIME_UNIT: [sta::unit_scale_abbreviation time][sta::unit_suffix time]\"}\n"
+            "set _tu \"\"\n"
+            "catch {set _tu \"[sta::unit_scale_abbreviation time][sta::unit_suffix time]\"}\n"
+            "if {$_tu ne \"\"} {\n"
+            "    puts $_f \"STA_TIME_UNIT: $_tu\"\n"
+            "} else {\n"
+            "    puts $_f \"STA_TIME_UNIT_NOT_STATED: this interpreter could not answer sta::unit_scale_abbreviation/unit_suffix for time\"\n"
+            "}\n"
             f"puts $_f \"STA_BASIS_NETLIST: {netlist.name}\"\n"
             f"puts $_f \"STA_BASIS_SPEF: {Path(corner_spefs[corner]).name}\"\n"
             f"puts $_f \"STA_BASIS_CORNER: {corner}\"\n"
@@ -58137,7 +58155,13 @@ def _emit_mcorner_ocv_sta(project: Path, top: str, pdk: PdkConfig,
             f'late={_FLAT_OCV_DERATE_LATE} flat-OCV"\n'
             f'puts $_f "STA_BASIS: {basis_stamp}"\n'
             f'puts $_f "STA_BASIS_LIBERTY: {lib_c}"\n'
-            'catch {puts $_f "STA_TIME_UNIT: [sta::unit_scale_abbreviation time][sta::unit_suffix time]"}\n'
+            'set _tu ""\n'
+            'catch {set _tu "[sta::unit_scale_abbreviation time][sta::unit_suffix time]"}\n'
+            'if {$_tu ne ""} {\n'
+            '    puts $_f "STA_TIME_UNIT: $_tu"\n'
+            '} else {\n'
+            '    puts $_f "STA_TIME_UNIT_NOT_STATED: this interpreter could not answer sta::unit_scale_abbreviation/unit_suffix for time"\n'
+            '}\n'
             f'puts $_f "STA_BASIS_NETLIST: {netlist.name}"\n'
             f'puts $_f "STA_BASIS_SPEF: {spef_disc}"\n'
             f"{corner_stamp}"

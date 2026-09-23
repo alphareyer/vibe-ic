@@ -47,6 +47,7 @@ import glob
 import hashlib
 import io
 import json
+import subprocess
 import os
 import re
 import sys
@@ -2966,6 +2967,15 @@ def _signoff_basis_corners_elsewhere(project_dir: Path, declared_basis: str) -> 
 #: settle the unit and the number was refused on every such run. OpenSTA knows
 #: the unit inside the deck; one line makes the artefact self-describing, and
 #: this is then simply "the report states its own unit".
+#: R-0915-154 — THE DECK'S OWN NAMED GAP, AND IT IS READ HERE. A deck that
+#: cannot answer `sta::unit_scale_abbreviation` writes this instead of writing
+#: nothing, so "this deck could not state its unit" and "this deck was never
+#: asked" stop being the same silence. `_sta_time_unit` quotes it in the reason
+#: it publishes, which is what makes the stamp a disclosure rather than a
+#: decoration nothing consumes.
+_STA_TIME_UNIT_NOT_STATED_RE = re.compile(
+    r"(?:^|\n)\s*#?\s*STA_TIME_UNIT_NOT_STATED\s*:\s*(?P<why>[^\n]*)")
+
 _STA_TIME_UNIT_RE = re.compile(
     r"(?:^|\n)\s*#?\s*(?:STA_TIME_UNIT\s*:\s*|set_cmd_units\s+-time\s+"
     r"|time\s+1)(?P<unit>[munpf]?s)\b", re.I)
@@ -2983,28 +2993,188 @@ _LIBERTY_TIME_UNIT_RE = re.compile(
     r"\btime_unit\s*:\s*\"?\s*1?\s*(?P<unit>[munpf]?s)\s*\"?\s*;", re.I)
 
 
-def _liberty_time_unit(text: str) -> Tuple[Optional[str], str]:
-    """The time unit of the liberty this report says it timed against."""
+#: How many bytes of a liberty are read to find its `time_unit`. A liberty is
+#: tens of MB; the declaration is in its opening lines (MEASURED on
+#: gf180mcu_fd_sc_mcu7t5v0__ff_n40C_5v50.lib: byte offset 769 of 20,416,204).
+_LIBERTY_HEAD_BYTES = 65536
+
+#: The image a CALLER states this audit should read image-internal PDK files
+#: from, set by `sta_report_check --image`. `None` means "ask the run's own
+#: `reports/container_image.json`". It is never a default container name: a
+#: default answers for whatever is running on this host now, which is a
+#: different question from "what did this run time against".
+_STA_IMAGE_OVERRIDE: Optional[str] = None
+
+
+def set_image_override(ref: Optional[str]) -> None:
+    """State the image this audit may read image-internal PDK files from."""
+    global _STA_IMAGE_OVERRIDE
+    _STA_IMAGE_OVERRIDE = (ref or "").strip() or None
+
+
+def _run_image_ref(project: Optional[Path]) -> Tuple[Optional[str], str]:
+    """The image THIS RUN used, from the run's own record — never a default.
+
+    `reports/container_image.json` is where the runner writes the identity it
+    actually ran against (`image_ref`, a repo@digest). That is the authority: a
+    guessed default container answers for whatever happens to be running on
+    this host NOW, which is a different question and can be a different image.
+    """
+    if project is None:
+        return None, "no project was given, so the run's own image is unknown"
+    rec = Path(project) / "reports" / "container_image.json"
+    try:
+        doc = json.loads(rec.read_text())
+    except (OSError, ValueError) as exc:
+        return None, (f"the run records no readable image identity at "
+                      f"reports/container_image.json ({type(exc).__name__})")
+    ref = doc.get("image_ref") or doc.get("image") or ""
+    if not isinstance(ref, str) or not ref.strip():
+        return None, ("reports/container_image.json names no image_ref, so "
+                      "the image this run used is unstated")
+    return ref.strip(), ""
+
+
+def _liberty_head_from_image(lib: Path, image: str) -> Tuple[Optional[str], str]:
+    """The liberty's opening bytes read FROM the image, or None with a reason.
+
+    THE PDK IS IMAGE CONTENT, NOT A MOUNT, and that is why the mount map alone
+    could not answer. MEASURED on this host: the EDA container reports mounts
+    for the lane and for `/foss/designs` and NONE covering `/foss/pdks`; the
+    liberty lives at `/foss/pdks/...` INSIDE the image (20,416,204 bytes) and
+    does not exist on the host at any spelling. So a host-side audit that only
+    translates mounts still cannot read it, and the review that found this was
+    right: the first cut's test faked a mount and proved nothing about the real
+    case.
+
+    Read-only and side-effect free: `--rm`, no volumes, no network use beyond
+    what docker already has locally, and the image is the one the RUN recorded.
+    """
+    try:
+        import shlex as _shlex
+        try:
+            import _docker_memory as _dmem
+        except ImportError:                                  # pragma: no cover
+            from . import _docker_memory as _dmem            # type: ignore
+        # EVERY `docker run` CARRIES THE CEILING. This one reads 64 KB out of a
+        # 20 MB liberty and will never approach it — but the rule is about the
+        # SITE, not this site's appetite: a container created without a ceiling
+        # is one the host cannot bound, and an audit is exactly the place a
+        # future edit would grow. Spliced in after the run verb, as
+        # `test_no_docker_run_escapes_the_ceiling` requires.
+        argv = (["docker", "run"] + _dmem.docker_memory_flags()
+                + ["--rm", "--entrypoint", "/bin/sh", image,
+                   "-c",
+                   f"head -c {_LIBERTY_HEAD_BYTES} {_shlex.quote(str(lib))}"])
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           errors="replace", timeout=180)
+    except Exception as exc:                                 # noqa: BLE001
+        return None, (f"the image could not be reached to read it "
+                      f"({type(exc).__name__})")
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        _why = (r.stderr or "").strip().splitlines()
+        return None, (f"the image was reached but the path is not readable in "
+                      f"it (rc={r.returncode}"
+                      + (f": {_why[0][:120]}" if _why else "") + ")")
+    return r.stdout, ""
+
+
+def _liberty_as_this_process_can_open_it(lib: Path) -> Tuple[Path, str]:
+    """The liberty path THIS process can open, and how it got there.
+
+    THE SAME REPORT MUST READ THE SAME ON THE HOST AND IN THE CONTAINER, and
+    before this it did not. An STA deck runs inside the EDA image and stamps
+    `STA_BASIS_LIBERTY: /foss/pdks/...`, which is a CONTAINER path. This audit
+    runs wherever its caller runs -- and the phase-3 runner calls it on the
+    HOST, where `/foss/pdks` does not exist. So the liberty was unreadable, no
+    time unit could be established, and a report carrying `worst slack max
+    15.20` published NO slack number at all. MEASURED on spm run23 after the
+    2026-09-24 phase-3 re-run: `ic_release_docs_gen` refused with STA_NO_SLACK
+    over a report whose numbers were right there in the transcript.
+
+    TRANSLATED, NEVER GUESSED. `_designs_root.host_spelling` is the one
+    definition of "what is this container path on the host", derived from the
+    mounts docker actually reports; this does not strip a prefix or assume
+    `/foss` maps anywhere. Every failure -- no docker, no mount covering the
+    path, a translated path that still is not there -- returns the ORIGINAL
+    path, so the caller's own "could not be read" branch still fires and the
+    unit stays unestablished BY NAME. A translation that cannot be made is not
+    a unit.
+    """
+    try:
+        if lib.exists():
+            return lib, ""
+    except OSError:
+        return lib, ""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _designs_root as _dr
+        tr = _dr.host_spelling(lib, mounts=_dr.container_mounts())
+        cand = Path(tr.path) if getattr(tr, "path", None) else None
+        if cand is not None and cand.exists():
+            return cand, (f"; the container path was resolved to the host "
+                          f"through the mount docker reports ({tr.basis})")
+    except Exception:                                        # noqa: BLE001
+        # No docker, no daemon, no mount that covers it -- all the same
+        # answer here: this process cannot open it, and says so below.
+        pass
+    return lib, ""
+
+
+def _liberty_time_unit(text: str,
+                       project: Optional[Path] = None,
+                       image: Optional[str] = None) -> Tuple[Optional[str], str]:
+    """The time unit of the liberty this report says it timed against.
+
+    THREE PLACES THE SAME FILE CAN BE, IN ORDER, AND NONE OF THEM GUESSED:
+      1. readable at the name the report states — the in-container case;
+      2. a mount docker reports maps it onto this host — a bind-mounted tree;
+      3. it is IMAGE CONTENT (`/foss/pdks/...`), so it is read from the image
+         THE RUN RECORDED. On a standard host the PDK is in the image and is
+         mounted nowhere, which is why (2) alone left the unit unestablished
+         and a report full of slack numbers published none.
+    Whichever answers, the basis SAYS SO. If none does, the unit stays
+    unestablished by name — a file that cannot be read is not a unit.
+    """
     m = _STA_BASIS_LIBERTY_RE.search(text or "")
     if not m:
         return None, "the report names no STA_BASIS_LIBERTY"
     lib = Path(m.group("path"))
+    lib, _mapped = _liberty_as_this_process_can_open_it(lib)
+    head = None
     try:
-        # A liberty is tens of MB; the declaration is in its opening lines.
         with lib.open("r", errors="replace") as fh:
-            head = fh.read(65536)
+            head = fh.read(_LIBERTY_HEAD_BYTES)
     except OSError as exc:
-        return None, (f"the report names liberty {lib.name} and it could not "
-                      f"be read ({type(exc).__name__})")
+        _local_why = f"{type(exc).__name__}"
+        ref, _ref_why = (image, "") if image else _run_image_ref(project)
+        if ref:
+            head, _img_why = _liberty_head_from_image(lib, ref)
+            if head is not None:
+                _mapped = (f"; read from image {ref}:{lib} because the path is "
+                           f"image content and no mount maps it onto this host")
+            else:
+                return None, (f"the report names liberty {lib.name} and it "
+                              f"could not be read ({_local_why}); {_img_why}")
+        else:
+            return None, (f"the report names liberty {lib.name} and it could "
+                          f"not be read ({_local_why}); and {_ref_why}")
     lm = _LIBERTY_TIME_UNIT_RE.search(head)
     if not lm:
-        return None, f"liberty {lib.name} declares no time_unit"
+        return None, f"liberty {lib.name} declares no time_unit{_mapped}"
+    # THE TRANSLATION IS DISCLOSED ON THE SUCCESS PATH TOO. A reader comparing
+    # two runs must be able to see that one of them read the liberty through a
+    # mount translation rather than at the name the report states; a note that
+    # appears only when the read FAILS would hide exactly the case where the
+    # answer depended on this process's view of the filesystem.
     return lm.group("unit").lower(), (f"read from the liberty this report "
                                       f"timed against: {lib.name} "
-                                      f"time_unit {lm.group('unit')}")
+                                      f"time_unit {lm.group('unit')}{_mapped}")
 
 
-def _sta_time_unit(text: str) -> Tuple[Optional[str], str]:
+def _sta_time_unit(text: str,
+                   project: Optional[Path] = None,
+                   image: Optional[str] = None) -> Tuple[Optional[str], str]:
     """The report's own time unit, or `None` with the reason it is unknown.
 
     MEASURED by the pre-landing review (2026-09-23): the runner supports
@@ -3019,15 +3189,25 @@ def _sta_time_unit(text: str) -> Tuple[Optional[str], str]:
         if unit in _STA_TIME_TO_NS:
             return unit, f"read from the report: {m.group(0).strip()}"
         return None, f"the report states an unrecognised time unit {unit!r}"
+    # THE DECK SAID IT COULD NOT ANSWER. That is a measurement about the
+    # INTERPRETER, not about the design, and it is carried into the reason so a
+    # reader is told which of the two silences this is (R-0915-154: a stamp
+    # nothing reads is not a disclosure — this one is read, here).
+    _ns = _STA_TIME_UNIT_NOT_STATED_RE.search(text or "")
+    _deck_said = ""
+    if _ns:
+        _deck_said = (f"; the deck stated it could not establish the unit "
+                      f"({_ns.group('why').strip()})")
     # NO DECK IN THIS TREE PRINTS ONE. `git grep report_units|set_cmd_units`
     # over the plugin finds only this file's own comments, so the branch above
     # never fires on a report the flow wrote -- which is why the round-2
     # review called round 1 "disclosed, not fixed". The liberty the report
     # NAMES is the authority, and it has one.
-    unit, basis = _liberty_time_unit(text)
+    unit, basis = _liberty_time_unit(text, project=project, image=image)
     if unit in _STA_TIME_TO_NS:
-        return unit, basis
-    return None, (basis + "; and the report states no time unit of its own, "
+        return unit, basis + _deck_said
+    return None, (basis + _deck_said
+                  + "; and the report states no time unit of its own, "
                   "so no number is published under an _ns name")
 
 
@@ -3037,7 +3217,8 @@ def _neg_only(v: Optional[float]) -> Optional[float]:
 
 
 def _slack_row(fp: Any, slacks: Dict[str, Optional[float]],
-               text: str) -> Dict[str, Any]:
+               text: str, project: Optional[Path] = None,
+               image: Optional[str] = None) -> Dict[str, Any]:
     """One report's setup / hold / TNS, in ns where the unit is established.
 
     The three field NAMES are `extract_slacks`' own, kept verbatim so the
@@ -3054,7 +3235,7 @@ def _slack_row(fp: Any, slacks: Dict[str, Optional[float]],
     read, which a path renamed tomorrow no longer does. `subject_files` still
     carries the paths.
     """
-    unit, basis = _sta_time_unit(text)
+    unit, basis = _sta_time_unit(text, project=project, image=image)
     # A MEASUREMENT WHOSE UNIT IS UNKNOWN IS NOT A MEASUREMENT -- round 2's
     # rule, and it still holds for a MET number. It does NOT hold for a
     # VIOLATION, and round 3 is where that showed: a violation's SIGN does not
@@ -3384,7 +3565,9 @@ def _check_sta(project_dir: Path) -> AuditResult:
                 _neg = {k: (v if (v is not None and v < 0) else None)
                         for k, v in _slacks.items()}
                 if any(v is not None for v in _neg.values()):
-                    _nrow = _slack_row(fp, _neg, text)
+                    _nrow = _slack_row(fp, _neg, text,
+                                      project=project_dir,
+                                      image=_STA_IMAGE_OVERRIDE)
                     if not any(r["source_sha256"] == _nrow["source_sha256"]
                                for r in slack_rows):
                         slack_rows.append(_nrow)
@@ -3407,7 +3590,9 @@ def _check_sta(project_dir: Path) -> AuditResult:
             # discarded. `vals` is what decides `any_verdict_determined` on the
             # line above; publishing anything else would be a second answer to
             # a question already answered here.
-            _row = _slack_row(fp, slacks, text)
+            _row = _slack_row(fp, slacks, text,
+                              project=project_dir,
+                              image=_STA_IMAGE_OVERRIDE)
             # A MIRROR IS NOT A SECOND MEASUREMENT. Byte-identical reports
             # discovered at two paths are one reading, and counting them twice
             # would inflate `datapoints` with the run's own bookkeeping.
@@ -4122,6 +4307,14 @@ def main(argv: list = None) -> int:
                         help="Report type to check")
     parser.add_argument("--json", default=None, help="Output JSON report path")
     parser.add_argument(
+        "--image", default=None,
+        help="The image this run timed against, used to read PDK files "
+             "that are IMAGE CONTENT rather than mounted (a repo@digest). "
+             "Defaults to the run's own reports/container_image.json. "
+             "Never a default container name: a default answers for "
+             "whatever runs on this host now, not for what this run "
+             "timed against.")
+    parser.add_argument(
         "--under", action="append", default=None, metavar="REL",
         help="restrict report discovery to this project-relative subtree "
              "(repeatable). Omitted, discovery is project-wide. Use it to scope "
@@ -4129,6 +4322,7 @@ def main(argv: list = None) -> int:
              "step's report cannot carry — or fail — this one.")
     args = parser.parse_args(argv)
 
+    set_image_override(getattr(args, "image", None))
     project_dir = Path(args.project_dir)
     if not project_dir.is_dir():
         result = AuditResult(program=f"eda_report_audit:{args.mode}", passed=False)
