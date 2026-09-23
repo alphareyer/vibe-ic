@@ -463,6 +463,18 @@ def _without_this_gates_own_records(txt: str) -> str:
     except (TypeError, ValueError):                      # pragma: no cover
         return txt
 
+def _is_a_scoped_audit(relative: Path) -> bool:
+    """Is this a SCOPED completion audit rather than the run's own evidence?
+
+    R-0915-150: a pass that judged part of the flow writes its audit under
+    `reports/audit/scoped/`, because it is a different measurement, not a smaller
+    version of the run's. This corpus reader rglobs `reports/audit`, so without this
+    filter a stage-scoped audit would be bubbled up as if it described the run.
+    """
+    parts = relative.parts
+    return len(parts) >= 3 and parts[:3] == ("reports", "audit", "scoped")
+
+
 def _bubbled_corpus(project: Path) -> str:
     """Concatenate searchable text from orchestrator + completion-audit
     JSONs. A FAIL report is "bubbled up" if a top-level audit also
@@ -474,6 +486,8 @@ def _bubbled_corpus(project: Path) -> str:
             try:
                 relative = path.relative_to(project)
             except ValueError:
+                continue
+            if _is_a_scoped_audit(relative):
                 continue
             if (relative == Path("reports/phase23_completion_audit.json")
                     or (len(relative.parts) >= 3
@@ -488,7 +502,9 @@ def _bubbled_corpus(project: Path) -> str:
             candidates.extend(sorted(odir.rglob("*.json")))
         audit_dir = project / "reports" / "audit"
         if audit_dir.is_dir():
-            candidates.extend(sorted(audit_dir.rglob("*.json")))
+            candidates.extend(
+                q for q in sorted(audit_dir.rglob("*.json"))
+                if not _is_a_scoped_audit(q.relative_to(project)))
         cad = project / "reports" / "phase23_completion_audit.json"
         if cad.is_file():
             candidates.append(cad)

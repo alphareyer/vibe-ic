@@ -156,12 +156,15 @@ def test_a_scoped_pass_leaves_the_canonical_completion_audit_alone(project):
     assert not canonical.exists(), (
         "a stage-scoped pass published the whole run's completion audit; every "
         "reader of that path then treats one stage's tally as the run's verdict")
-    scoped = sorted((project / "reports/audit").glob(
-        "phase23_completion_audit.scoped-*.json"))
+    scoped = sorted((project / "reports/audit/scoped").glob("*.json"))
     assert scoped, "the scoped pass wrote no audit at all — it must write its own"
     for path in scoped:
         doc = json.loads(path.read_text())
         assert doc["scope"]["whole_flow"] is False, (path.name, doc["scope"])
+        assert doc["invocation"], path.name
+        # NAMED BY THE POPULATION, not by a flag: a whole-flow pass leaves several of
+        # these from its nested stage clauses, and they judged different step sets.
+        assert ("stage-" in path.name or "phase-" in path.name), path.name
 
 
 def test_a_whole_flow_pass_does_publish_the_canonical_audit(project):
@@ -175,55 +178,75 @@ def test_a_whole_flow_pass_does_publish_the_canonical_audit(project):
     assert canonical.is_file(), "the whole-flow pass published no completion audit"
     doc = json.loads(canonical.read_text())
     assert doc["scope"]["whole_flow"] is True, doc["scope"]
-    assert not sorted((project / "reports/audit").glob(
-        "phase23_completion_audit.scoped-*.json")), (
+    assert not sorted((project / "reports/audit/scoped").glob("*.json")), (
         "a whole-flow pass also wrote a scoped copy; there is one canonical audit")
 
 
-def test_the_republish_leaves_another_invocations_receipt_alone(tmp_path):
-    """THE MECHANISM, through the shipped function.
+def test_the_republish_names_the_invocation_it_superseded(tmp_path):
+    """WHO wrote a receipt, and over what, is recorded ON THE DOCUMENT.
 
-    R-0915-138 supersedes the audit's OWN earlier publication inside one invocation.
-    A receipt written by a DIFFERENT invocation is somebody else's measurement of a
-    different population, so it must be left untouched.
+    My first cut gated the republish on a set in the parent's memory, filled after the
+    step loop. Every `stageN_compliance` clause is a separate SUBPROCESS with its own
+    empty set, so the republish could never fire in a real run and R-0915-138 was
+    silently reverted — three of its own tests went red, and my positive arm passed
+    only because it filled the set by hand.
+
+    Authorship therefore lives where a subprocess can read it: the receipt carries the
+    invocation that wrote it, and a republish names both sides.
     """
     import flow_compliance_check as FCC
     rel = "reports/phase2/gates/stage1_compliance.json"
     doc = tmp_path / rel
     doc.parent.mkdir(parents=True, exist_ok=True)
-    doc.write_text(json.dumps({"program": "flow_compliance_check",
-                               "overall": "NOT_MEASURED", "steps": [{"id": "1"}]}) + "\n")
-    argv = ["stage1_compliance", ".", "--json", rel]
-    before = doc.read_bytes()
+    doc.write_text(json.dumps({
+        "program": "flow_compliance_check", "overall": "NOT_MEASURED",
+        "steps": [{"id": "1"}], "invocation": "some-earlier-invocation",
+        "scope": {"stage_id": "stage1", "step_count": 7, "whole_flow": False},
+    }) + "\n")
 
-    FCC._THIS_INVOCATION_PUBLISHED.clear()
-    assert FCC._publish_over_the_audits_own_document(argv, tmp_path) is None, (
-        "the republish claimed a receipt this invocation never wrote")
-    assert doc.read_bytes() == before, "and it must not have touched the bytes"
-
-    # the same call, once THIS invocation owns that receipt: R-0915-138 applies
-    FCC._THIS_INVOCATION_PUBLISHED.add(FCC._resolved_key(doc))
-    prov = FCC._publish_over_the_audits_own_document(argv, tmp_path)
+    prov = FCC._publish_over_the_audits_own_document(
+        ["stage1_compliance", ".", "--json", rel], tmp_path)
     assert prov is not None, (
-        "the audit can no longer supersede its OWN publication, which is the "
-        "mechanism R-0915-138 exists for")
+        "the republish declined the audit's own compliance report; R-0915-138 exists "
+        "to supersede it WITH provenance, not to leave a stale verdict standing")
     assert prov["supersedes"]["verdict"] == "NOT_MEASURED", prov
-    FCC._THIS_INVOCATION_PUBLISHED.clear()
+    assert prov["supersedes"]["by_invocation"] == "some-earlier-invocation", prov
+    assert prov["supersedes"]["scope"]["stage_id"] == "stage1", prov
+    assert prov["by_invocation"] and prov["by_invocation"] != \
+        "some-earlier-invocation", prov
+    # and the superseded copy is kept beside it, as R-0915-138 requires
+    assert (tmp_path / prov["supersedes"]["kept_at"]).is_file()
 
 
-def test_a_pass_records_the_receipt_it_publishes(project):
-    """`--json` is the pass's own receipt: it is written by that pass AND registered,
-    so a later clause in the SAME invocation may supersede it while another
-    invocation's may not."""
+def test_the_invocation_id_is_inherited_by_a_nested_clause():
+    """A nested clause must resolve the SAME invocation id as its parent, or the
+    document cannot say which invocation published it. Inherited through the
+    environment, which is what a subprocess can actually see."""
+    import flow_compliance_check as FCC
+    import os as _os
+    mine = FCC._invocation_id()
+    assert _os.environ.get(FCC._INVOCATION_ENV) == mine, (
+        "the id is not exported, so a child would mint a different one")
+    # a child process resolving it must get the same string
+    import subprocess
+    out = subprocess.run(
+        [sys.executable, "-c",
+         f"import sys; sys.path.insert(0, {str(PROGRAMS)!r});"
+         " import flow_compliance_check as F; print(F._invocation_id())"],
+        capture_output=True, text=True, timeout=300)
+    assert out.stdout.strip() == mine, (out.stdout, out.stderr[-200:])
+
+
+def test_a_pass_stamps_its_receipt_with_its_own_invocation(project):
+    """The pass writes its own receipt AND says who wrote it, so a later reader can
+    tell this stage's own pass from a clause inside somebody else's."""
     import flow_compliance_check as FCC
     out = project / "reports/zz_own.json"
-    FCC._THIS_INVOCATION_PUBLISHED.clear()
     FCC.main([str(project), "--stage-id", "stage1", "--json", str(out)])
     assert out.is_file(), "the pass did not write its own receipt"
-    assert FCC._resolved_key(out) in FCC._THIS_INVOCATION_PUBLISHED, (
-        "the pass wrote its receipt without recording it, so its own later pass "
-        "could not supersede it")
-    FCC._THIS_INVOCATION_PUBLISHED.clear()
+    doc = json.loads(out.read_text())
+    assert doc["invocation"], doc.get("invocation")
+    assert doc["scope"]["stage_id"] == "stage1"
 
 
 def test_whole_flow_is_membership_not_a_count(project, tmp_path):
@@ -249,3 +272,66 @@ def test_whole_flow_is_membership_not_a_count(project, tmp_path):
         f"a stage-2 pass over a 3-step flow judged {scope['step_count']} row(s) and "
         f"called itself whole-flow; step 1 was never judged. {scope}")
     assert "1" not in scope["steps_judged"], scope
+
+
+def test_a_scoped_audit_is_replaced_not_accumulated(project):
+    """One file per POPULATION, replaced. Accumulating one per invocation would turn
+    `reports/audit/` into a pile a reader has to date-sort, which is the problem this
+    is meant to remove."""
+    for _ in range(3):
+        subprocess.run(
+            [sys.executable, str(PROGRAMS / "flow_compliance_check.py"),
+             str(project), "--stage-id", "stage4",
+             "--json", str(project / "reports/zz_s4.json")],
+            capture_output=True, text=True, timeout=2400)
+    files = sorted((project / "reports/audit/scoped").glob("*.json"))
+    assert [f.name for f in files] == [
+        "phase23_completion_audit.stage-stage4.json"], [f.name for f in files]
+    assert not list((project / "reports/audit/scoped").glob("*.tmp")), (
+        "an atomic write left its temp file behind")
+
+
+def test_the_bubble_up_corpus_does_not_read_a_scoped_audit(project):
+    """A reader that rglobs `reports/audit` must not take a stage's audit as the
+    run's evidence — the whole reason the scoped files live in their own subtree."""
+    import step_internal_fail_bubble_up_check as B
+    assert B._is_a_scoped_audit(
+        Path("reports/audit/scoped/phase23_completion_audit.stage-stage4.json"))
+    assert not B._is_a_scoped_audit(
+        Path("reports/audit/phase23_completion_audit.json"))
+    assert not B._is_a_scoped_audit(Path("reports/orchestrator/phase3_one_shot.json"))
+
+
+def test_the_fpga_pre_burn_guard_reads_its_own_pass_not_the_whole_runs_audit():
+    """H1, at the consumer. The guard runs `--phase 2` (32 of 70 steps) and used to
+    read the CANONICAL audit as its primary verdict, falling back to stdout only when
+    that file was absent — so in `design_one_shot_runner` every burn was blocked by
+    the whole-flow `--strict` pass that precedes it, and through the MCP program tool
+    an OLD canonical PASS let a structurally failing design burn.
+
+    Source-pinned because driving a real burn needs the board: the guard must name the
+    SCOPED path, and must not accept the canonical document without dating it against
+    its own pass.
+    """
+    src = (PLUGIN / "mcp-eda/src/devices/fpga/terasic-de10lite"
+           / "driver.py").read_text()
+    assert 'os.path.join(\n        project_root, "reports", "audit", "scoped",' in src \
+        or '"reports", "audit", "scoped",' in src, (
+        "the pre-burn guard does not read its own pass's scoped audit")
+    assert "_pass_started" in src, (
+        "the guard does not date the audit against its own pass, so a stale one can "
+        "still decide a burn")
+    # ORDER, not a window: the pass is dated BEFORE it runs, and its own scoped audit
+    # is consulted BEFORE any canonical path appears in the verdict logic.
+    started_at = src.index("_pass_started = time.time()")
+    scoped_at = src.index("phase23_completion_audit.phase-2.json")
+    assert started_at < scoped_at, "the guard reads its audit before dating the pass"
+    # and every canonical read that remains is gated on the same timestamp
+    canonical_at = src.index('"reports", "audit",\n                             '
+                             '"phase23_completion_audit.json"')
+    assert scoped_at < canonical_at, (
+        "the canonical whole-run audit is consulted before this pass's own")
+    tail = src[canonical_at - 600:canonical_at + 600]
+    assert "_pass_started" in tail, (
+        "a canonical read survives with no freshness gate, so another population's "
+        "verdict can still decide a burn")

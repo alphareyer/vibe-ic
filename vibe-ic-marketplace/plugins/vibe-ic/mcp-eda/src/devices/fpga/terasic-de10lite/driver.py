@@ -44,6 +44,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -557,6 +558,12 @@ def _run_flow_compliance_pre_burn(
     # function so the same gates remain strict for foundry handoff.
     env = dict(os.environ)
     env["PHASE23_ANALOG_FPGA_STUB"] = "1"
+    # WHEN THIS PASS STARTED. R-0915-150: this guard runs a SCOPED pass
+    # (`--phase 2`, 32 of the flow's 70 steps), and a scoped pass does not publish the
+    # whole run's completion audit -- it writes its own
+    # `phase23_completion_audit.scoped-2.json`. So the verdict must come from THIS
+    # pass's document, and a timestamp is how "this pass's" is decided.
+    _pass_started = time.time()
     try:
         r = _pr.run(
             argv, capture_output=True, text=True, env=env,
@@ -584,15 +591,54 @@ def _run_flow_compliance_pre_burn(
     # (`reports/phase23_completion_audit.json`) is retained as fallback
     # for older project trees that still hold the artefact at the root
     # of `reports/`.
-    canonical_audit_path = os.path.join(
-        project_root, "reports", "audit", "phase23_completion_audit.json")
-    legacy_audit_path = os.path.join(
-        project_root, "reports", "phase23_completion_audit.json")
-    if os.path.isfile(canonical_audit_path):
-        audit_json_path = canonical_audit_path
-    else:
-        audit_json_path = legacy_audit_path
-    audit_json_present = os.path.isfile(audit_json_path)
+    # THIS PASS'S OWN AUDIT, NEVER THE WHOLE RUN'S. R-0915-150.
+    #
+    # This guard used to read `reports/audit/phase23_completion_audit.json` as its
+    # PRIMARY verdict, falling back to stdout only when that file was absent. That
+    # document belongs to whichever pass last judged the WHOLE flow, and this guard
+    # judges 32 of 70 steps -- so it was reading somebody else's measurement, in both
+    # directions:
+    #
+    #   * in `design_one_shot_runner`, every `step_fpga_burn` follows
+    #     `emit_final_summary`'s whole-flow `--strict` pass, whose verdict on a
+    #     phase-2 project cannot be PASS -- so EVERY burn was blocked by an audit of a
+    #     population this guard never asked about;
+    #   * through the MCP program tool, with no such pass before it, an OLD canonical
+    #     PASS let a structurally failing design burn.
+    #
+    # The scoped document this pass itself caused is the one that answers, and it is
+    # accepted only when it postdates the pass. The 1 s tolerance is the filesystem's
+    # mtime granularity (measured ~64 ms on the campaign host), two orders below the
+    # staleness being excluded. If it is not there, the verdict comes from THIS pass's
+    # own stdout/rc -- never from the whole-run file.
+    scoped_audit_path = os.path.join(
+        project_root, "reports", "audit", "scoped",
+        "phase23_completion_audit.phase-2.json")
+    audit_json_path = scoped_audit_path
+    audit_json_present = False
+    try:
+        audit_json_present = (
+            os.path.isfile(scoped_audit_path)
+            and os.stat(scoped_audit_path).st_mtime + 1.0 >= _pass_started)
+    except OSError:
+        audit_json_present = False
+    if not audit_json_present:
+        # Older plugin trees (before the scoped split) published this pass's own
+        # audit at the canonical path. Accept THAT only if it postdates this pass,
+        # which is the same question asked of the same document.
+        for _legacy in (
+                os.path.join(project_root, "reports", "audit",
+                             "phase23_completion_audit.json"),
+                os.path.join(project_root, "reports",
+                             "phase23_completion_audit.json")):
+            try:
+                if (os.path.isfile(_legacy)
+                        and os.stat(_legacy).st_mtime + 1.0 >= _pass_started):
+                    audit_json_path = _legacy
+                    audit_json_present = True
+                    break
+            except OSError:
+                continue
     audit_json_data: Optional[Dict[str, Any]] = None
     audit_json_error: Optional[str] = None
 

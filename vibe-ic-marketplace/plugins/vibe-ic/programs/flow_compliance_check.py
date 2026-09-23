@@ -95,6 +95,7 @@ import shlex
 import shutil
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from types import MappingProxyType
@@ -3648,10 +3649,22 @@ _GATE_RECEIPT_FLAGS = ("--json", "--report")
 #: before anyone could read it.
 _RECEIPT_REDIRECTS: Dict[str, Tuple[str, Any]] = {}
 
-#: Compliance receipts THIS process has published. R-0915-150 — the republish path
-#: may supersede only a document this invocation itself wrote, never another
-#: invocation's record of a different population.
-_THIS_INVOCATION_PUBLISHED: Set[str] = set()
+#: THIS INVOCATION'S IDENTITY, inherited by every nested clause. R-0915-150.
+#:
+#: A top-level pass mints one; a `stageN_compliance` clause spawned by it inherits the
+#: same id through the environment, so "which invocation published this receipt" is a
+#: question a SUBPROCESS can answer -- unlike a set in the parent's memory, which is
+#: what my first cut used and which no child could see.
+_INVOCATION_ENV = "VIBEIC_FCC_INVOCATION"
+
+
+def _invocation_id() -> str:
+    inherited = os.environ.get(_INVOCATION_ENV, "").strip()
+    if inherited:
+        return inherited
+    minted = f"{os.getpid()}-{int(time.time() * 1000)}"
+    os.environ[_INVOCATION_ENV] = minted
+    return minted
 
 
 class _ReceiptRedirects:
@@ -3838,37 +3851,31 @@ def _publish_over_the_audits_own_document(argv: List[str], project: Path
         # CONSTRUCTION rather than by a set that has to be kept right.
         if not _is_the_audits_own_compliance_report(abs_target):
             continue
-        # ONLY A RECEIPT THIS INVOCATION WROTE. R-0915-150.
+        # WHO WROTE THIS RECEIPT, AND OVER WHAT POPULATION. R-0915-150, second cut.
         #
-        # MEASURED with three sequential stage-scoped passes over a copy of spm
-        # run22 (its stage1 receipt present at 08:52:02), on PLAIN MAIN:
+        # MY FIRST CUT GATED THIS ON PROCESS MEMORY -- a set filled at `main()` AFTER
+        # the step loop -- and a review showed it could never fire in a real run:
+        # every `stageN_compliance` clause is a separate SUBPROCESS with its own empty
+        # set, so the republish always declined and R-0915-138 was silently reverted.
+        # Three of R-0915-138's own tests went red at that tip and my positive arm
+        # passed only because it filled the set by hand: the same "the test restates
+        # the rule" mistake I had already been warned about.
         #
-        #   stage1 pass  exits 12:58:10, wrote its OWN receipt at 12:58:08 —
-        #                overall NOT_MEASURED, 7 steps: the pass's own verdict
-        #   stage2 pass  step 7's `stage1_compliance --json <stage1 receipt>` clause
-        #                REPUBLISHES it at 12:58:50 as overall FAIL      (pass 2)
-        #   stage4 pass  republishes it again at 12:59:45                (pass 3)
+        # MEASURED on a copy of spm run22 with icspm5's three-pass driver, on plain
+        # main: `GATE_RAN stage1_compliance` appears ONLY in the stage2 pass's log, and
+        # a stage4-ONLY pass over a fresh copy leaves stage1's receipt byte-identical.
+        # So the cross-stage write comes from a clause whose OWN population is stage1,
+        # running inside a pass whose population is not -- and re-publishing there is
+        # not wrong in itself: two evaluations of stage1 disagreeing (its own pass said
+        # NOT_MEASURED, the clause said FAIL) is a real disagreement about stage1, and
+        # R-0915-138's provenance is exactly how a reader sees it.
         #
-        # So the receipt reads FAIL for a stage whose own pass said NOT_MEASURED, and
-        # its mtime says it was authored while a different stage was being judged.
-        # That is the "stage1 stdout disagrees with the stage1 receipt" report in its
-        # real form — and the mechanism is this republish, which I wrote for
-        # R-0915-138, reaching across invocations it was never about.
-        #
-        # R-0915-138's subject is a SECOND PASS INSIDE ONE INVOCATION: the audit
-        # superseding its OWN earlier publication, keeping the old one beside it.
-        # Another invocation's receipt is not that: it is somebody else's measurement
-        # of a different population. So it is LEFT ALONE, and the clause's receipt is
-        # redirected to scratch like any other document the run already produced.
-        #
-        # PER TARGET, NOT PER CALL. `--json A --report B` is decided for A AND for B:
-        # main's b543dd1a6 made this a loop over every receipt flag the gate writes,
-        # because deciding the call on the first flag meant B was never looked at. So a
-        # target this invocation did not write is SKIPPED and the loop goes on to the
-        # next one; returning here would drop the remaining receipts on the floor and
-        # silently reinstate the defect that loop exists to fix.
-        if _resolved_key(abs_target) not in _THIS_INVOCATION_PUBLISHED:
-            continue
+        # What was missing is WHOSE verdict the reader is looking at. So authorship is
+        # recorded where a subprocess can see it -- in the document -- rather than
+        # asserted from memory: every publication carries the invocation that wrote it
+        # and the scope it judged, and the nested clause inherits the invocation id
+        # through the environment. Nothing is refused here on identity; the reader is
+        # told.
         try:
             stale = json.loads(abs_target.read_text(errors="replace"))
         except (OSError, ValueError):
@@ -3880,11 +3887,19 @@ def _publish_over_the_audits_own_document(argv: List[str], project: Path
             shutil.copy2(abs_target, keep)
         except OSError:                                    # pragma: no cover
             return None
+        _stale_scope = (stale.get("scope") if isinstance(stale, dict) else None)
         return {
             "path": str(abs_target),
             "pass": n + 1,
+            # WHO is publishing, and WHAT THEY JUDGED. A reader comparing a stage's own
+            # stdout with its receipt could not tell whether the two describe the same
+            # population or even the same invocation; both are now on the document.
+            "by_invocation": _invocation_id(),
             "supersedes": {
                 "pass": n,
+                "by_invocation": (stale.get("invocation")
+                                  if isinstance(stale, dict) else None),
+                "scope": _stale_scope,
                 # THE VERDICT UNDER EITHER OF ITS TWO NAMES. A compliance report
                 # spells it `overall`; the other gate documents spell it
                 # `verdict`. Reading only one of them recorded `null` for exactly
@@ -18587,6 +18602,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"flow_compliance_check: YAML parse error: {exc}", file=sys.stderr)
         return 2
 
+    # MINTED HERE, BEFORE ANY CLAUSE RUNS, so every nested `stageN_compliance`
+    # subprocess inherits this invocation's id through the environment. Minting it at
+    # report-writing time (my first cut) was too late: the children had already run.
+    _this_invocation = _invocation_id()
     steps = flow.get("steps", [])
     if not steps:
         print("flow_compliance_check: flow has no steps defined", file=sys.stderr)
@@ -20531,6 +20550,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             # `whole_flow` is DERIVED from the population against the flow size read
             # BEFORE narrowing, never from the argument -- the argument is what was
             # already wrong.
+            "invocation": _this_invocation,
             "scope": {
                 "phase": args.phase,
                 "stage": (str(args.stage) if getattr(args, "stage", None)
@@ -20606,10 +20626,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         # writer in this flow creates its parent; this one did not.
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)
         Path(args.json).write_text(json.dumps(out, indent=2))
-        # THIS PASS'S OWN RECEIPT, ALWAYS WRITTEN BY THIS PASS — and recorded, so a
-        # later clause inside THIS invocation may still supersede it (R-0915-138)
-        # while another invocation's receipt stays untouched (R-0915-150).
-        _THIS_INVOCATION_PUBLISHED.add(_resolved_key(Path(args.json)))
+        # THIS PASS'S OWN RECEIPT, ALWAYS WRITTEN BY THIS PASS. Its `scope` block
+        # already says what it judged; `invocation` says who wrote it, so a later
+        # reader can tell "this stage's own pass" from "a clause in somebody else's".
 
     # Wave 30 (v0.119.62) — emit a canonical machine-readable audit
     # artifact at `<project>/reports/phase23_completion_audit.json`
@@ -21020,19 +21039,38 @@ def main(argv: Optional[List[str]] = None) -> int:
             "flow_step_total": _flow_step_total,
             "whole_flow": _audit_is_whole_flow,
         }
+        audit["invocation"] = _this_invocation
         if not _audit_is_whole_flow:
-            audit_path = audit_path.with_name(
-                audit_path.name[:-len(".json")]
-                + f".scoped-{target_stage or args.phase}.json")
+            # ITS OWN SUBTREE, NAMED BY WHAT IT JUDGED, REPLACED PER SCOPE.
+            #
+            # A scoped audit is not a smaller version of the run's audit; it is a
+            # different measurement. Four things follow, and each was a real hazard in
+            # my first cut, which dropped these files beside the canonical one:
+            #   * `reports/audit/scoped/` keeps them out of every reader that treats
+            #     `reports/audit/*.json` as the run's own evidence -- the bubble-up
+            #     corpus reader rglobs exactly that;
+            #   * the name carries the POPULATION (`stage4`, `phase-2`), not just a
+            #     flag, because a whole-flow pass leaves several of these from its
+            #     nested stage clauses and they judged different step sets;
+            #   * one file per population, REPLACED, so they do not accumulate across
+            #     invocations -- and `invocation` inside says whose it is;
+            #   * written atomically, because a reader rglobbing the tree can arrive
+            #     mid-write and a truncated JSON reads as a broken audit.
+            _scope_name = (f"stage-{target_stage}" if target_stage
+                           else f"phase-{args.phase}")
+            audit_path = (audit_path.parent / "scoped"
+                          / f"phase23_completion_audit.{_scope_name}.json")
             print(f"flow_compliance_check: this pass judged {len(results)} of "
                   f"{_flow_step_total} step(s), so it does NOT publish the whole "
-                  f"run's completion audit; its scoped audit is at "
-                  f"{audit_path.name} and the canonical "
+                  f"run's completion audit; its own scoped audit is at "
+                  f"reports/audit/scoped/{audit_path.name} and the canonical "
                   f"reports/audit/phase23_completion_audit.json is left untouched",
                   file=sys.stderr)
         audit_path.parent.mkdir(parents=True, exist_ok=True)
-        audit_path.write_text(
-            json.dumps(audit, indent=2, ensure_ascii=False))
+        _audit_tmp = audit_path.with_name(
+            f"{audit_path.name}.{os.getpid()}.tmp")
+        _audit_tmp.write_text(json.dumps(audit, indent=2, ensure_ascii=False))
+        os.replace(_audit_tmp, audit_path)
         # Printed, not only serialised: the reader who acts on the tally reads
         # the log, and a refusal that only exists in a JSON field is a refusal
         # nobody sees. Advisory — it never moves the verdict or the exit code,
