@@ -289,6 +289,27 @@ _TNS_RE = re.compile(r"\btns\s*[:=]?\s*(max|min)?\s*(-?\d+(?:\.\d+)?)", re.IGNOR
 # `=== SETUP (max-RC corner, SPEF=max) ===`  (multicorner SPEF report)
 # `=== SETUP corner: process=SS liberty, SPEF=x.max.spef ===` (mcorner OCV)
 _SECTION_RE = re.compile(r"===\s*(SETUP|HOLD)\b", re.IGNORECASE)
+# `No paths found.` — OpenSTA's OTHER way of saying the same thing the INF
+# sentinel says, and the one the RUNNER's own reports carry.
+#
+# MEASURED by the round-2 review of icspm5-sta (2026-09-23). Vacuity was
+# decided per (block, axis) from `worst slack <axis> INF` alone, and two shapes
+# this tree WRITES carry no such line:
+#
+#   * step 23's aliased post_route_timing.rpt: the HOLD stanza runs
+#     `report_worst_slack -min` and then an UNFLAGGED `report_tns`, which
+#     prints `tns max 0.00` inside the HOLD block. The max axis has no
+#     worst-slack line at all, so nothing marked it vacuous;
+#   * per_corner/sta_<c>.rpt and pre_pnr_timing.rpt run report_checks /
+#     report_tns / report_wns with NO report_worst_slack anywhere.
+#
+# Both print `No paths found.` and both published a met 0.00. The sentence is
+# the tool's own, it is unambiguous, and it is about the BLOCK rather than one
+# axis -- so it marks both, and an axis that then produces a finite
+# `worst slack` of its own un-marks itself through the existing
+# `vacuous = no_path[axis] and not ws[axis]` rule. A NEGATIVE summary is still
+# never withheld: it cannot be the echo of an empty path set.
+_NO_PATHS_RE = re.compile(r"\bno\s+paths?\s+found\b", re.IGNORECASE)
 _SECTION_PROCESS_RE = re.compile(
     r"===\s*(SETUP|HOLD)\s+corner:\s*process=([\w.+-]+)", re.IGNORECASE)
 # `# SETUP corner: max-RC   HOLD corner: min-RC`
@@ -456,6 +477,12 @@ def extract_slacks(text: str) -> Dict[str, Optional[float]]:
         mnp = _WORST_SLACK_NO_PATH_RE.search(line)
         if mnp:
             b_np[-1][mnp.group(1).lower()] = True
+            continue
+
+        if _NO_PATHS_RE.search(line):
+            # About the BLOCK, so it marks both axes; see `_NO_PATHS_RE`.
+            b_np[-1]["max"] = True
+            b_np[-1]["min"] = True
             continue
 
         mws = _WORST_SLACK_RE.search(line)

@@ -56,7 +56,7 @@ from pathlib import Path
 
 import _atomic_output  # noqa: E402  (#1082 same-dir temp + atomic rename)
 import _audit_receipt  # noqa: E402  (#2057 content-addressed subject digest)
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import lvs_verdict_tokens as _lvt  # #524 — shared netgen terminal-verdict tokens
 import _signoff_drc_format as _sdf  # the ONE producer/dialect answer
@@ -2956,6 +2956,159 @@ def _signoff_basis_corners_elsewhere(project_dir: Path, declared_basis: str) -> 
     })
 
 
+#: OpenSTA reports in the time unit of the FIRST LIBERTY it read and never
+#: calls `set_cmd_units` unless a deck asks. `report_units` prints `time 1ps`;
+#: a deck that sets them prints `set_cmd_units -time ps`. Both are read.
+#: `STA_TIME_UNIT: ns` — the deck's OWN statement, stamped after read_liberty
+#: from `sta::unit_scale_abbreviation time` + `sta::unit_suffix time`. Added at
+#: round 3 because `STA_BASIS_LIBERTY` is a CONTAINER path on image-PDK runs:
+#: a host-side reader cannot open that liberty, so the branch below could not
+#: settle the unit and the number was refused on every such run. OpenSTA knows
+#: the unit inside the deck; one line makes the artefact self-describing, and
+#: this is then simply "the report states its own unit".
+_STA_TIME_UNIT_RE = re.compile(
+    r"(?:^|\n)\s*#?\s*(?:STA_TIME_UNIT\s*:\s*|set_cmd_units\s+-time\s+"
+    r"|time\s+1)(?P<unit>[munpf]?s)\b", re.I)
+
+#: Multiplier onto NANOSECONDS.
+_STA_TIME_TO_NS = {"s": 1e9, "ms": 1e6, "us": 1e3, "ns": 1.0,
+                   "ps": 1e-3, "fs": 1e-6}
+
+
+#: The report names the liberty it timed against; a liberty DECLARES its time
+#: unit. After the round-2 review that is the only authority this tree has.
+_STA_BASIS_LIBERTY_RE = re.compile(
+    r"(?:^|\n)\s*#?\s*STA_BASIS_LIBERTY\s*:\s*(?P<path>\S+)", re.I)
+_LIBERTY_TIME_UNIT_RE = re.compile(
+    r"\btime_unit\s*:\s*\"?\s*1?\s*(?P<unit>[munpf]?s)\s*\"?\s*;", re.I)
+
+
+def _liberty_time_unit(text: str) -> Tuple[Optional[str], str]:
+    """The time unit of the liberty this report says it timed against."""
+    m = _STA_BASIS_LIBERTY_RE.search(text or "")
+    if not m:
+        return None, "the report names no STA_BASIS_LIBERTY"
+    lib = Path(m.group("path"))
+    try:
+        # A liberty is tens of MB; the declaration is in its opening lines.
+        with lib.open("r", errors="replace") as fh:
+            head = fh.read(65536)
+    except OSError as exc:
+        return None, (f"the report names liberty {lib.name} and it could not "
+                      f"be read ({type(exc).__name__})")
+    lm = _LIBERTY_TIME_UNIT_RE.search(head)
+    if not lm:
+        return None, f"liberty {lib.name} declares no time_unit"
+    return lm.group("unit").lower(), (f"read from the liberty this report "
+                                      f"timed against: {lib.name} "
+                                      f"time_unit {lm.group('unit')}")
+
+
+def _sta_time_unit(text: str) -> Tuple[Optional[str], str]:
+    """The report's own time unit, or `None` with the reason it is unknown.
+
+    MEASURED by the pre-landing review (2026-09-23): the runner supports
+    liberties declaring `time_unit : "1ps"` and never calls `set_cmd_units`, so
+    a canonical report on such a flow reads `wns max -35.20` in PICOSECONDS.
+    Publishing that under a key named `_ns` states 1000x the real violation --
+    and in the met direction turns 45.2 ps of headroom into 45.2 ns of it.
+    """
+    m = _STA_TIME_UNIT_RE.search(text or "")
+    if m:
+        unit = m.group("unit").lower()
+        if unit in _STA_TIME_TO_NS:
+            return unit, f"read from the report: {m.group(0).strip()}"
+        return None, f"the report states an unrecognised time unit {unit!r}"
+    # NO DECK IN THIS TREE PRINTS ONE. `git grep report_units|set_cmd_units`
+    # over the plugin finds only this file's own comments, so the branch above
+    # never fires on a report the flow wrote -- which is why the round-2
+    # review called round 1 "disclosed, not fixed". The liberty the report
+    # NAMES is the authority, and it has one.
+    unit, basis = _liberty_time_unit(text)
+    if unit in _STA_TIME_TO_NS:
+        return unit, basis
+    return None, (basis + "; and the report states no time unit of its own, "
+                  "so no number is published under an _ns name")
+
+
+def _neg_only(v: Optional[float]) -> Optional[float]:
+    """The value if it is a violation, else nothing. See `_slack_row`."""
+    return v if (v is not None and v < 0) else None
+
+
+def _slack_row(fp: Any, slacks: Dict[str, Optional[float]],
+               text: str) -> Dict[str, Any]:
+    """One report's setup / hold / TNS, in ns where the unit is established.
+
+    The three field NAMES are `extract_slacks`' own, kept verbatim so the
+    audit's receipt and the completeness gate cannot drift into two
+    vocabularies for one measurement.
+
+    PROVENANCE IS THE REPORT'S OWN BYTES, NOT ITS PATH, and an existing test
+    is why. `test_sta_gate_step_scope::test_the_step_mirror_does_not_cost_the_
+    gate_its_declared_report` publishes the SAME report at a second, mirrored
+    path and asserts the gate's summary does not move. A `file` field made it
+    move -- same numbers, different string -- so the answer depended on which
+    copy the walk happened to reach first. A digest is stable across mirrors
+    by construction, and it is the better provenance anyway: it says WHAT was
+    read, which a path renamed tomorrow no longer does. `subject_files` still
+    carries the paths.
+    """
+    unit, basis = _sta_time_unit(text)
+    # A MEASUREMENT WHOSE UNIT IS UNKNOWN IS NOT A MEASUREMENT -- round 2's
+    # rule, and it still holds for a MET number. It does NOT hold for a
+    # VIOLATION, and round 3 is where that showed: a violation's SIGN does not
+    # depend on the unit. -1.20 is negative in ps, ns and seconds alike.
+    #
+    # MEASURED by the round-3 review: dropping a unit-less row removed its
+    # negative from the headline, so an unscoped audit over
+    # post_route_timing.rpt (ns liberty, met 0.50) plus per_corner/sta_SS.rpt
+    # (no liberty, wns -1.20) published `setup_wns_ns: 0.50, MEASURED` beside
+    # `real_violation_found: true`. And in the stamp branch it subtracted the
+    # very negative whose survival that branch's own comment promises.
+    #
+    # So the row ALWAYS carries what was read. `_ns` names are used only when
+    # the unit is established; otherwise the values ride under unit-neutral
+    # names with `time_unit: null` beside them, and the headline decides what
+    # may be published.
+    scale = _STA_TIME_TO_NS.get(unit, 1.0) if unit else 1.0
+    if unit is None:
+        return {"source_sha256": "sha256:" + hashlib.sha256(
+                    (text or "").encode("utf-8", errors="replace")).hexdigest(),
+                "time_unit": None, "time_unit_stated": False,
+                "time_unit_basis": basis,
+                # UNIT-NEUTRAL NAMES, AND ONLY FOR A VIOLATION. No `_ns`
+                # claim is made and the value is exactly what the report
+                # printed. A MET number with no unit is still refused --
+                # round 2's rule, which was right: 35.20 could be 35.20 ns of
+                # headroom or 0.0352 ns of it, and publishing the larger
+                # reading is exactly "a better number than one you read".
+                # A NEGATIVE number needs no unit to be evidence: it is a
+                # violation in every unit, and that is why it survives.
+                "setup_wns": _neg_only(slacks.get("setup_wns_ns")),
+                "hold_wns": _neg_only(slacks.get("hold_wns_ns")),
+                "tns": _neg_only(slacks.get("tns_ns")),
+                # A MET reading is not published (see above) -- but the fact
+                # that one EXISTS is, because it could be smaller than any
+                # number we can scale. Round 4: a unit-less met 0.30 beside an
+                # ns 5.00 published 5.00 as the worst, which is a better
+                # number than one we read.
+                "unscaled_met_readings": sum(
+                    1 for k in ("setup_wns_ns", "hold_wns_ns", "tns_ns")
+                    if (slacks.get(k) is not None and slacks.get(k) >= 0)),
+                "setup_wns_ns": None, "hold_wns_ns": None, "tns_ns": None}
+    row: Dict[str, Any] = {
+        "source_sha256": "sha256:" + hashlib.sha256(
+            (text or "").encode("utf-8", errors="replace")).hexdigest(),
+        "time_unit": unit,
+        "time_unit_stated": unit is not None,
+        "time_unit_basis": basis}
+    for key in ("setup_wns_ns", "hold_wns_ns", "tns_ns"):
+        val = slacks.get(key)
+        row[key] = None if val is None else round(val * scale, 12)
+    return row
+
+
 def _check_sta(project_dir: Path) -> AuditResult:
     result = AuditResult(program="eda_report_audit:sta", passed=False)
     # THE DECISION POINT FOR THE TOOL-MEASUREMENT CONTRACT (STA half).
@@ -3002,6 +3155,36 @@ def _check_sta(project_dir: Path) -> AuditResult:
 
     wns_tns_re = re.compile(r"WNS|TNS|worst\s*negative\s*slack|total\s*negative\s*slack",
                             re.I)
+    # THE NUMBER, NOT ONLY THAT THERE IS ONE.
+    #
+    # MEASURED on spm run22 (lane icspm5): this audit published
+    # `"has_wns_tns": true` over a transcript reading "worst slack max 14.31 /
+    # tns max 0.00 / worst slack min 0.51 / tns min 0.00", and its receipt
+    # carried no slack number at all. `_ic_release_artefacts._sta_class` reads
+    # that receipt, found none, and refused the release documents with
+    # STA_NO_SLACK while the run's own sign-off reported +0.940 ns.
+    #
+    # THE NUMBERS COME FROM `extract_slacks`, NOT FROM A SECOND PARSER HERE,
+    # and the pre-landing review (2026-09-23) is why. The first version of this
+    # change matched slack lines with a regex of its own and disagreed with the
+    # function this audit's OWN VERDICT already uses, in three ways:
+    #
+    #   * it harvested before the `measured is False` stamp filter and without
+    #     the no-paths rule, so an unconstrained run -- which prints
+    #     `tns max 0.00 / wns max 0.00` under `worst slack max INF` -- published
+    #     0.0 / 0.0 as MEASURED. That run's own verdict is
+    #     STA_VALUE_UNDETERMINED, and STA_NO_SLACK went silent on it: the exact
+    #     fail-open this change removed, rebuilt through the echo of an empty
+    #     path set;
+    #   * its number pattern had no exponent, so OpenSTA's numeric infinity
+    #     `1.0e+30` was read as a 1.0 ns worst slack;
+    #   * it labelled OpenSTA's `max`/`min` as CORNERS. They are the SETUP and
+    #     HOLD analyses. Taking the worse of the two published run22's HOLD
+    #     0.51 as the design's WNS while the setup margin was 14.31.
+    #
+    # One question, one answer.
+    slack_rows: List[Dict[str, Any]] = []
+
     setup_hold_re = re.compile(r"setup|hold", re.I)
     # An OpenSTA `report_checks` PATH-TABLE report is the per-path equivalent of
     # a WNS/TNS summary: it ends each path with "slack (MET)" / "slack
@@ -3135,6 +3318,18 @@ def _check_sta(project_dir: Path) -> AuditResult:
                              f"negative slack). A tool's statement about a run "
                              f"cannot delete the run's own output"),
                     file=str(fp)))
+                # A STAMP CANNOT SUBTRACT A VIOLATION THAT IS WRITTEN DOWN.
+                # It declines to ADD a verdict, so the non-negative summaries
+                # in a not-measured report are not published -- but a negative
+                # slack in the producer's own output is evidence, and this is
+                # the branch where it survives.
+                _neg = {k: (v if (v is not None and v < 0) else None)
+                        for k, v in _slacks.items()}
+                if any(v is not None for v in _neg.values()):
+                    _nrow = _slack_row(fp, _neg, text)
+                    if not any(r["source_sha256"] == _nrow["source_sha256"]
+                               for r in slack_rows):
+                        slack_rows.append(_nrow)
             continue
 
         if has_pathtable:
@@ -3150,6 +3345,17 @@ def _check_sta(project_dir: Path) -> AuditResult:
         vals = [v for v in slacks.values() if v is not None]
         if vals:
             any_verdict_determined = True
+            # THE SAME NUMBERS THE VERDICT IS MADE OF, published rather than
+            # discarded. `vals` is what decides `any_verdict_determined` on the
+            # line above; publishing anything else would be a second answer to
+            # a question already answered here.
+            _row = _slack_row(fp, slacks, text)
+            # A MIRROR IS NOT A SECOND MEASUREMENT. Byte-identical reports
+            # discovered at two paths are one reading, and counting them twice
+            # would inflate `datapoints` with the run's own bookkeeping.
+            if not any(r["source_sha256"] == _row["source_sha256"]
+                       for r in slack_rows):
+                slack_rows.append(_row)
             if any(v < 0 for v in vals):
                 real_violation_found = True
                 if not violation_evidence:
@@ -3393,6 +3599,60 @@ def _check_sta(project_dir: Path) -> AuditResult:
                       and not real_violation_found
                       and not not_measured_hard
                       and not basis_offenders and not unreadable)
+
+    # THE GOVERNING NUMBERS, ONE PER ANALYSIS. `min` across the reports,
+    # because a datasheet quotes the worst case and taking the worst can only
+    # be conservative -- but NEVER across the two analyses. In OpenSTA `max` is
+    # the SETUP analysis and `min` is HOLD; they answer different questions and
+    # a single key meaning both is a key no reader can use. The pre-landing
+    # review measured the cost on this very run: the merged key published the
+    # hold worst slack 0.51 while the setup margin was 14.31.
+    def _worst(field: str) -> Optional[float]:
+        vals = [r[field] for r in slack_rows if r.get(field) is not None]
+        return min(vals) if vals else None
+
+    _headline = {k: v for k, v in (("setup_wns_ns", _worst("setup_wns_ns")),
+                                   ("hold_wns_ns", _worst("hold_wns_ns")),
+                                   ("tns_ns", _worst("tns_ns")))
+                 if v is not None}
+
+    # NEVER A BETTER NUMBER THAN ONE YOU READ. A row whose unit did not settle
+    # still knows the SIGN of what it read, and a negative is a violation in
+    # every unit. Publishing a met headline while such a row exists is the
+    # audit stating a margin the design does not have.
+    _unscoped_neg = {k: v for k, v in
+                     (("setup_wns", _worst("setup_wns")),
+                      ("hold_wns", _worst("hold_wns")),
+                      ("tns", _worst("tns")))
+                     if v is not None and v < 0}
+    # WITHDRAW WHENEVER A MET HEADLINE WOULD BE A CLAIM WE CANNOT SUPPORT,
+    # and round 4 named two shapes the round-3 rule missed because it keyed on
+    # a unit-less NEGATIVE ROW:
+    #
+    #   * a violation that never becomes a row at all -- a `report_checks`
+    #     path table carrying `slack (VIOLATED)` and no summary line, or a
+    #     measured:false stamp over a VIOLATED path. Both set
+    #     `real_violation_found` and contribute no number, and the met
+    #     headline stood beside them;
+    #   * a unit-less MET reading. It is not published (its scale is unknown)
+    #     but it could be SMALLER than anything we can scale, so calling the
+    #     scaled number "the worst" is a better number than one we read.
+    _unscaled_met = sum(r.get("unscaled_met_readings") or 0
+                        for r in slack_rows)
+    _withdraw = bool(_unscoped_neg) or _unscaled_met > 0 or (
+        real_violation_found and not any(v < 0 for v in _headline.values()))
+    if _withdraw:
+        # Keep only what is evidence: a negative, in whatever unit it was
+        # read. A met number is withdrawn -- it cannot stand for a design
+        # another report says is violating, nor outrank a reading we could
+        # not scale.
+        _headline = {k: v for k, v in _headline.items() if v < 0}
+        _headline.update(_unscoped_neg)
+    _units_stated = [r for r in slack_rows if r.get("time_unit_stated")]
+    _unit_basis = (_units_stated[0]["time_unit_basis"] if _units_stated
+                   else (slack_rows[0]["time_unit_basis"] if slack_rows
+                         else "no report carried a slack to attach a unit to"))
+
     result.subject_files = [str(f) for f in files]
     result.summary = {"files_found": len(files),
                       # The third value, published beside the verdict rather
@@ -3413,6 +3673,59 @@ def _check_sta(project_dir: Path) -> AuditResult:
                       "readable_files": len(files) - len(unreadable),
                       "unreadable_files": len(unreadable),
                       "has_wns_tns": has_wns_tns,
+                      # THE NUMBERS THIS AUDIT READ, or the named absence.
+                      # Never a verdict without its number: a consumer that
+                      # needs the slack can read it here, and a run whose
+                      # transcript really carries none says so BY NAME rather
+                      # than by an empty key a reader must interpret.
+                      #
+                      # NOTHING NUMERIC IS PUBLISHED UNDER A SLACK-NAMED KEY
+                      # WHEN NO SLACK WAS MEASURED, and that is the whole
+                      # discipline of this block rather than a style choice.
+                      # `_ic_release_artefacts._numbers_under_key` decides
+                      # STA_NO_SLACK by asking whether ANY number appears
+                      # anywhere under a key naming slack/wns/tns. A first
+                      # draft of this change published `"slack_datapoints":
+                      # len(slack_rows)` beside the rows; MEASURED by mutation
+                      # (lane icspm5, 2026-09-23) that key alone satisfied the
+                      # release reader -- a transcript with no timing in it
+                      # published `slack_datapoints: 0`, the reader found a
+                      # number under a slack key, and the refusal that exists
+                      # to stop exactly that run went silent. A counter is not
+                      # a measurement, so the count lives under `slack_scan`
+                      # where no key names the quantity, and the headline
+                      # numbers below appear ONLY when they were read.
+                      **_headline,
+                      "slack_ns": slack_rows,
+                      "slack_scan": {"datapoints": len(slack_rows),
+                                     "reports_read": len(files) - len(unreadable)},
+                      "slack_measurement": (
+                          "MEASURED" if _headline else "NOT_MEASURED"),
+                      # Which of the published numbers are in nanoseconds.
+                      # A unit-neutral name above means the report stated no
+                      # unit and none could be derived; its SIGN is still
+                      # evidence and is why it is published at all.
+                      "slack_values_in_ns": sorted(
+                          k for k in _headline if k.endswith("_ns")),
+                      "slack_time_unit": (
+                          _units_stated[0]["time_unit"] if _units_stated
+                          else None),
+                      "slack_time_unit_stated": bool(_units_stated),
+                      "slack_time_unit_basis": _unit_basis,
+                      "slack_not_measured_reason": (
+                          None if _headline else
+                          "no setup/hold worst-slack or TNS number survived "
+                          "the same rules this audit's own verdict applies: a "
+                          "report stamped not-measured contributes only a "
+                          "negative slack; a block that reported no paths "
+                          "contributes neither its wns nor its tns echo; and "
+                          "a report whose time unit cannot be established "
+                          "publishes no number at all (" + _unit_basis + ")"
+                          + ("; and a met reading was WITHDRAWN because this "
+                             "scope carries a violation, or a reading whose "
+                             "unit could not be established and which may be "
+                             "smaller than any number that could be scaled"
+                             if _withdraw else "")),
                       "has_setup_hold": has_setup_hold,
                       "tool_authentic": authentic,
                       "corner_dirs_found": len(corner_dirs),
