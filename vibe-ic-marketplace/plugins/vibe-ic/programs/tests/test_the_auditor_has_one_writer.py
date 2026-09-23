@@ -258,8 +258,9 @@ def test_the_temp_is_a_sibling_so_the_rename_cannot_cross_a_filesystem(tmp_path)
 def test_a_lock_left_by_a_killed_pass_does_not_block_a_later_pass(tmp_path):
     """MEASURED, because the failure mode here is a HANG, which is worse than a wrong verdict.
 
-    The helper takes a per-document lock on every publish, so an interrupted pass leaves the lock
-    FILE behind. That file must not stop the next pass: `flock` is held by the open file
+    A publish that asks for a lock (`_stamp_publication`, the one read-modify-write) leaves the
+    lock FILE behind when the pass is interrupted -- `flock` lives on the inode and cannot be
+    unlinked on release without a race. That file must not stop the next pass: `flock` is held by the open file
     description, and the kernel releases it when the holder dies, so a leftover file is just a
     file. Driven with a real child that is killed while holding it.
     """

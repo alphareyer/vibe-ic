@@ -26,10 +26,16 @@ written rather than the day someone notices.
 
 WHAT IT GUARANTEES, AND WHAT IT DELIBERATELY DOES NOT
 =====================================================
-It guarantees that the final name never refers to a partial document, and that two writers of one
-document serialise. It does NOT make a write succeed, and it never changes what is written: this
-module is not the place to alter a payload -- the same boundary `_atomic_artefact.write_text`
-draws for itself.
+It guarantees that the final name never refers to a partial document. It does NOT make a write
+succeed, and it never changes what is written: this module is not the place to alter a payload --
+the same boundary `_atomic_artefact.write_text` draws for itself.
+
+AND IT DOES NOT SERIALISE TWO WRITERS UNLESS ASKED. An earlier cut of this paragraph said it did.
+That was wrong twice over: `publish` is handed a finished document, so a reader of the final name
+sees one complete document with or without a lock, and every lock taken leaves a file in the run
+tree for the life of the tree -- 94 of them per full pass, four of them where a freshness judge
+dated the design round by one. `lock=True` is the opt-in for the one READ-MODIFY-WRITE the auditor
+has, and `holding_lock` is the door for a sequence wider than a single write.
 
 THE CLEANUP NEVER MASKS THE ORIGINAL ERROR. The temp is removed in a `finally`, its own failure is
 swallowed, and nothing is raised from the cleanup -- so the caller sees the write's error, not the
@@ -104,13 +110,38 @@ def holding_lock(final: Union[str, Path]) -> Iterator[None]:
 
 
 def publish(final: Union[str, Path], payload: str, *,
-            encoding: str = "utf-8", lock: bool = True) -> Path:
+            encoding: str = "utf-8", lock: bool = False) -> Path:
     """Write `payload` so that `final` never refers to a partial document.
 
     temp -> (lock) -> write -> `os.replace` -> `finally` remove the temp. Returns `final`.
 
     The temp is a SIBLING so the rename cannot cross a filesystem, where `os.replace` degrades to
     a copy and the window reopens.
+
+    `lock` DEFAULTS TO FALSE, and the default is the whole point of the parameter.
+    ===============================================================================
+    A lock is for a READ-MODIFY-WRITE. This function composes nothing: it is handed a finished
+    document and hands it over in one `os.replace`, so two publishers write differently-named
+    temps and a reader of `final` sees one complete document either way. The lock would only
+    decide WHICH complete document wins, and neither order is more correct when both come from the
+    same pass.
+
+    What it DOES buy, always, is a file that stays in the run tree for the life of the tree:
+    `flock` lives on the inode, so releasing a lock cannot unlink it without a race (between one
+    pass's release and its `unlink`, a second pass can already hold the same inode; the unlink
+    then lets a third create a NEW inode and take a lock that serialises against nobody).
+    Measured on two consecutive `--lenient` passes over a copy of a completed `ic/subservient` run
+    tree with `lock=True` everywhere: 94 lock files, 69 of them one-per-step-output-record, four
+    of them beside stage receipts OUTSIDE `reports/audit/` where `result_md_audit_provenance_check`
+    read them as the newest DESIGN artefact and failed a tree nobody had touched. The same two
+    passes with this default: 24 -- 20 authorship-note locks and the four the one read-modify-write
+    still takes. The 91 gate verdicts, the step tally and the blocker classification are IDENTICAL
+    between the two arms, in both passes, so the 70 that went bought nothing that was measured.
+
+    So the whole-document callers pass nothing and leave no lock; the ONE read-modify-write the
+    auditor has (`flow_compliance_check._stamp_publication`) passes `lock=True` and says why.
+    `holding_lock` remains the door for a caller that must serialise a sequence WIDER than one
+    write -- the authorship note's, which is why the note itself publishes with `lock=False`.
     """
     dest = Path(final)
     dest.parent.mkdir(parents=True, exist_ok=True)
