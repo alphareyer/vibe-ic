@@ -114,8 +114,12 @@ def test_a_failed_database_write_is_disclosed_and_does_not_forge_a_verdict():
     assert "SDR_CHILD_CANDIDATE_ODB_NONFATAL" in line
     assert "SDR_CHILD_CANDIDATE_ODB_WRITTEN" in line
     assert "set _sdr_tx_route_ok 0" not in line
-    # the DEF's own failure branch is UNCHANGED and still clears route_ok
-    j = blk.index("write_def /c/out/" + R._SDR_TXN_DIRS[SITE1])
+    # the DEF's own failure branch is UNCHANGED and still clears route_ok.
+    # Anchored on the CANDIDATE's DEF by name: 7a99cf8d9 added a boundary
+    # snapshot (`boundary_before_extract_*.def`) under the same directory,
+    # ahead of it, and a prefix match read that line instead.
+    j = blk.index("write_def /c/out/" + R._SDR_TXN_DIRS[SITE1]
+                  + "/candidate.def")
     def_line = blk[blk.rindex("\n", 0, j) + 1:blk.index("\n", j)]
     assert "set _sdr_tx_route_ok 0" in def_line
 
