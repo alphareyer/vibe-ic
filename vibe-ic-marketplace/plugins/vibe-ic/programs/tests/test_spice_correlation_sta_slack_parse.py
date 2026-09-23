@@ -174,6 +174,22 @@ def _native_path(corner='slow', kind='max'):
             '  2.00 slack (MET)\n')
 
 
+def _production_basis_stamp() -> str:
+    """The basis line `_emit_spef_sta` really writes, read out of its source.
+
+    `phase3_one_shot_runner` builds that report's Tcl inline, so there is no
+    builder to call; the literal `puts` is the production statement and is what
+    this reads. Returns it as the report line it produces.
+    """
+    import re as _re
+    import phase3_one_shot_runner as _runner
+    src = Path(_runner.__file__).read_text(encoding='utf-8')
+    m = _re.search(r'puts \$_bf \\"(STA_BASIS: [A-Z_]+)\\"', src)
+    assert m, ("no production `STA_BASIS` stamp found in phase3_one_shot_runner "
+               "— the fixture must not invent one")
+    return m.group(1) + "\n"
+
+
 def _emit_bound_report(tmp_path, raw, stanza=_CORNER_LIBS):
     import inspect
     import phase3_one_shot_runner as runner
@@ -193,14 +209,15 @@ def _emit_bound_report(tmp_path, raw, stanza=_CORNER_LIBS):
     tail = full[start:end]
     # Tcl primitives perform real file IO. Only OpenSTA report generation is
     # replaced with neutral, input-derived report bytes.
-    # R-0915-162 — POST-ROUTE BASIS. These cases are about CORNER BINDING, and
-    # a report that is not an eligible candidate refuses one step earlier for a
-    # different reason, so the fixture would stop measuring what it names. The
-    # PnR writer driven here stamps STA_BASIS_LIBERTY but no STA_BASIS line
-    # (run23's phase3/stage3/pnr/sta.rpt is the same), so the basis is supplied
-    # with the report body. See the page: whether that writer should stamp it
-    # is a producer question, not this test's.
-    (tmp_path / 'native.rpt').write_text('STA_BASIS: POST_ROUTE_SPEF\n' + raw)
+    # R-0915-166 — THE BASIS LINE COMES FROM THE PRODUCER THAT REALLY WRITES
+    # IT, not from this fixture. Round 1 prepended `STA_BASIS: POST_ROUTE_SPEF`
+    # by hand, which modelled a `pnr/sta.rpt` production never writes: that
+    # writer stamps STA_BASIS_LIBERTY and no STA_BASIS (run23's own
+    # phase3/stage3/pnr/sta.rpt is exactly that). The stamp is taken out of
+    # `_emit_spef_sta`'s source — the post-route SPEF emitter that does stamp it
+    # — so if production ever stops, `test_the_basis_stamp_is_productions_own`
+    # goes red instead of this fixture quietly inventing a reachable path.
+    (tmp_path / 'native.rpt').write_text(_production_basis_stamp() + raw)
     script = tmp_path / 'writer.tcl'
     script.write_text('proc report_checks {args} {\n'
                       ' set f [open native.rpt r]; set text [read $f]; close $f\n'
@@ -237,7 +254,17 @@ def _attested_copy(tmp_path, rpt):
 
 def _consume_binding(tmp_path, monkeypatch, unreadable=''):
     pnr = tmp_path / 'phase3/stage3/pnr'
-    (pnr / 'chip_pnr.v').write_text('module chip(input a, output z); BUF u1 (.A(a), .Z(z)); endmodule\n')
+    _net = pnr / 'chip_pnr.v'
+    _net.write_text('module chip(input a, output z); BUF u1 (.A(a), .Z(z)); endmodule\n')
+    # R-0915-166 — PRODUCTION ORDER: route first, THEN time it. These fixtures
+    # emit the report before this helper runs, so the netlist would otherwise be
+    # NEWER than the STA that timed it and the freshness rule would (correctly)
+    # call the report a previous layout's. Backdated so the fixture models the
+    # order a real run has, and the cases keep measuring CORNER BINDING.
+    import os as _os
+    _rpt_t = max((f.stat().st_mtime for f in tmp_path.rglob('*.rpt')),
+                 default=_net.stat().st_mtime)
+    _os.utime(_net, (_rpt_t - 60, _rpt_t - 60))
     extracted = SCC._pl.extracted_dir(tmp_path)
     extracted.mkdir(parents=True, exist_ok=True)
     (extracted / 'chip.spef').write_text('*SPEF "IEEE 1481-1998"\n')
@@ -329,3 +356,22 @@ def test_writer_sections_preserve_path_order_and_scope(tmp_path):
     assert '/pdk/io.lib' in text
     assert text.count('Startpoint: in') == 2
     assert text.index('Corner: quick') < text.index('Corner: slow')
+
+
+def test_the_basis_stamp_is_productions_own(tmp_path):
+    """R-0915-166 — the fixture may not invent a reachable path.
+
+    The basis line these cases rely on must be one a shipped producer writes.
+    If `_emit_spef_sta` stops stamping it, this fails here rather than leaving
+    13 cases exercising a report shape production cannot emit."""
+    stamp = _production_basis_stamp().strip()
+    assert stamp == "STA_BASIS: POST_ROUTE_SPEF", stamp
+    assert SCC.is_post_route_spef_basis(stamp + "\n") is True
+    # ...and the OTHER writer, the one these cases' bodies come from, really
+    # does NOT stamp it — which is why round 1's hand-written line was wrong.
+    import phase3_one_shot_runner as runner
+    import inspect
+    pnr_src = inspect.getsource(runner._build_pnr_tcl_text)
+    assert "STA_BASIS:" not in pnr_src, (
+        "the PnR writer now stamps a basis; this fixture's reasoning needs "
+        "re-deriving")

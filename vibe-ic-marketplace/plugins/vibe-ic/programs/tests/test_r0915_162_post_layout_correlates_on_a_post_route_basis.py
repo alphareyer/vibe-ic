@@ -213,3 +213,90 @@ def test_the_basis_refusal_and_the_corner_refusal_stay_distinct(tmp_path):
     # ...and the corner question is then asked, and answered honestly
     basis = S.parse_sta_corner_basis(no_corner)
     assert basis["liberty"] == "", basis
+
+
+# =========================================================================
+# R-0915-166 round 2 — THE LABEL IS NOT ENOUGH: IT MUST BE THIS RUN'S LAYOUT.
+#
+# Eligibility by `STA_BASIS` alone credits a STALE post-route report. The case
+# is recorded in `canonical_post_route_sta`'s own docstring (lane icsub2,
+# 2026-09-21): three arms re-entered phase 3 on a COPY, their routes came out
+# clean so no new multi-corner STA was written, and the earlier run's
+# `sta_mcorner_ocv.rpt` was republished under a freshly-written name. Three arms
+# "measured" a number no arm had computed. Here that would read CORRELATED
+# where main refused.
+# =========================================================================
+
+import os as _os  # noqa: E402
+
+
+def _with_layout(root: Path, *, report_age: float = 0.0,
+                 netlist_age: float = 0.0) -> Path:
+    """A project carrying a routed netlist and one post-route report, each aged
+    by the given number of seconds relative to now."""
+    pnr = root / "phase3" / "stage3" / "pnr"
+    pnr.mkdir(parents=True, exist_ok=True)
+    net = pnr / "spm_pnr.v"
+    net.write_text("module spm (); endmodule\n")
+    rpt = root / "phase3" / "stage3" / "sta" / "sta_mcorner_ocv.rpt"
+    rpt.parent.mkdir(parents=True, exist_ok=True)
+    rpt.write_text(_POST_ROUTE)
+    now = _os.path.getmtime(net)
+    _os.utime(net, (now - netlist_age, now - netlist_age))
+    _os.utime(rpt, (now - report_age, now - report_age))
+    return root
+
+
+def test_a_post_route_report_older_than_the_layout_is_refused(tmp_path):
+    """THE STALE CASE. Right basis label, wrong layout: the report predates the
+    routed netlist it would be timing, so it is a previous run's measurement."""
+    root = _with_layout(tmp_path / "run23", report_age=600.0)
+    assert S._pick_sta_report(root, _SUBCKT,
+                              S.this_run_layout_mtime(root)) is None
+    why = S.post_route_basis_refusal(root, _SUBCKT,
+                                     S.this_run_layout_mtime(root))
+    assert why and why.startswith("no post-route STA basis from THIS layout:"), why
+    assert "previous layout's measurement" in why, why
+    # ...and WITHOUT the anchor it would have been credited — which is the
+    # defect, stated as a measurement rather than as a worry.
+    assert S._pick_sta_report(root, _SUBCKT) is not None
+
+
+def test_a_post_route_report_newer_than_the_layout_is_this_runs(tmp_path):
+    """The other direction: STA written after the route is this run's."""
+    root = _with_layout(tmp_path / "run23", netlist_age=600.0)
+    picked = S._pick_sta_report(root, _SUBCKT, S.this_run_layout_mtime(root))
+    assert picked is not None and picked.name == "sta_mcorner_ocv.rpt"
+    assert S.post_route_basis_refusal(
+        root, _SUBCKT, S.this_run_layout_mtime(root)) is None
+
+
+def test_the_freshness_rule_agrees_with_the_canonical_one(tmp_path):
+    """ONE RULE, PINNED BY AGREEMENT. `canonical_post_route_sta` owns the
+    freshness rule; this module applies it per candidate. Two copies of a rule
+    drift, so both readers are driven over the SAME bytes and must agree --
+    stale and fresh, and on the boundary."""
+    import phase3_one_shot_runner as p3
+    for age, expect_fresh in ((600.0, False), (0.0, True)):
+        root = _with_layout(tmp_path / f"run_{int(age)}", report_age=age)
+        nb = S.this_run_layout_mtime(root)
+        rpt = root / "phase3" / "stage3" / "sta" / "sta_mcorner_ocv.rpt"
+        mine = S._is_fresh(rpt, nb)
+        theirs, _basis = p3.canonical_post_route_sta(
+            root / "phase3" / "stage3", nb)
+        assert mine is expect_fresh, (age, mine)
+        # the canonical reader reaches the same verdict about the same file
+        assert (theirs is not None) is expect_fresh, (age, theirs)
+
+
+def test_no_anchor_means_no_refusal_on_freshness(tmp_path):
+    """A project with no routed netlist has no this-run binding to apply. The
+    freshness question is then UNANSWERABLE, and an unanswerable question must
+    not become a silent refusal here -- the basis check still applies, and the
+    absent layout is somebody else's finding."""
+    root = tmp_path / "run23"
+    (root / "phase3" / "stage3" / "sta").mkdir(parents=True, exist_ok=True)
+    (root / "phase3" / "stage3" / "sta"
+     / "sta_mcorner_ocv.rpt").write_text(_POST_ROUTE)
+    assert S.this_run_layout_mtime(root) is None
+    assert S._pick_sta_report(root, _SUBCKT, None) is not None
