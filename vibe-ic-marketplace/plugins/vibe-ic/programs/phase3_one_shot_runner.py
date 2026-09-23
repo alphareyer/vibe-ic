@@ -17911,7 +17911,10 @@ def _producer_identity_now() -> Dict[str, str]:
             "source_sha": _plugin_source_sha()}
 
 
-def _write_producer_identity(out_dir: Path, kind: str) -> None:
+def _write_producer_identity(out_dir: Path, kind: str, *,
+                             project: Optional[Path] = None,
+                             pdk: Any = None,
+                             container: str = "") -> None:
     """Stamp the build that just produced ``kind``'s artefact in ``out_dir``.
 
     Best-effort, exactly like the sibling sidecars: a stamp failure must never
@@ -17937,6 +17940,28 @@ def _write_producer_identity(out_dir: Path, kind: str) -> None:
         p.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
     except Exception:  # nosec — sidecar is best-effort
         pass
+    # R-0924-3 — and the PER-STEP identity beside it, which is what the reuse
+    # predicate now reads. The build stamp above is kept: it is provenance a
+    # reader may still want ("which release wrote this?"), it just no longer
+    # decides freshness. Both are best-effort for the same reason: a stamp
+    # failure must never fail a step that succeeded, and an absent stamp reads
+    # as unknown -> re-run, which can only cause more work, never a reuse that
+    # was not already earned.
+    if project is None:
+        return
+    try:
+        import _step_identity as _si  # noqa: PLC0415
+        ident, why = _si.identity_now(
+            project=Path(project), kind=kind,
+            runner_path=Path(__file__).resolve(),
+            programs_dir=PROGRAMS_DIR,
+            flow_yaml=PROGRAMS_DIR.parent / "flow" /
+            "phase1_phase2_phase3.yaml",
+            pdk=pdk, image_digest=_step_image_digest(container),
+            pdk_hasher=_step_pdk_hasher(container))
+        _si.write_sidecar(out_dir, kind, ident, why)
+    except Exception:  # nosec — sidecar is best-effort
+        pass
 
 
 def _read_producer_identity(out_dir: Path,
@@ -17956,7 +17981,10 @@ def _read_producer_identity(out_dir: Path,
     return rec if isinstance(rec, dict) else None
 
 
-def _producer_cache_valid_for(out_dir: Path, kind: str) -> Tuple[bool, str]:
+def _producer_cache_valid_for(out_dir: Path, kind: str, *,
+                              project: Optional[Path] = None,
+                              pdk: Any = None,
+                              container: str = "") -> Tuple[bool, str]:
     """May a cached ``kind`` artefact in ``out_dir`` be reused by THIS build?
 
     Returns (valid, disclosure). The disclosure is carried into the step's own
@@ -17966,9 +17994,6 @@ def _producer_cache_valid_for(out_dir: Path, kind: str) -> Tuple[bool, str]:
 
     chip-AGNOSTIC: plugin version + source digest, no design/PDK/vendor token.
     """
-    now = _producer_identity_now()
-    cur_v, cur_r = now["plugin_version"], now["recipe_sha256"]
-    rec = _read_producer_identity(out_dir, kind)
 
     # vibe-ic#1097 S6 — `--force-step <kind>`. ORFS ships `do-2_1_floorplan`
     # beside `2_1_floorplan` (`flow/Makefile:366-405`) so an external caller can
@@ -18000,35 +18025,122 @@ def _producer_cache_valid_for(out_dir: Path, kind: str) -> Tuple[bool, str]:
                           f"{_STALE_PRODUCER_ENV}=1 — {msg}")
         return (False, msg)
 
-    if not cur_v or not cur_r:
+    # R-0924-3 — THE STEP'S OWN IDENTITY, NOT THE BUILD'S.
+    # What used to stand here compared `_plugin_version()` and
+    # `_recipe_sha256()`: the released version, and the sha256 of this WHOLE
+    # ~66k-line file. Both are facts about the BUILD, so every landed fix
+    # invalidated every cached step whatever it touched — MEASURED on spm
+    # run23, where `--force-step gds` on a finished tree re-ran synthesis and
+    # started PnR. The same key was simultaneously too NARROW: an in-tree edit
+    # to a helper module with no version bump was not detected at all, which
+    # the old comment disclosed rather than fixed.
+    # `_step_identity` answers the step's own question instead — its declared
+    # inputs, its own code (derived closure), the tools it ran, the PDK it
+    # reads — and both halves close with one key.
+    if project is None:
         return _deny_unless_forced(
-            f"the producer of the cached {kind} artefact cannot be compared: "
-            f"THIS build's identity is unresolvable "
-            f"(plugin_version={cur_v or '<unknown>'}, "
-            f"recipe_sha256={(cur_r or '<unknown>')[:12]}) — re-running "
-            f"rather than reusing an artefact whose provenance cannot be "
-            f"established")
-    if rec is None:
+            f"the {kind} step's identity cannot be computed without the "
+            f"project in hand, so a cached artefact cannot be proven current")
+    try:
+        import _step_identity as _si  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001 — a missing helper is not a pass
         return _deny_unless_forced(
-            f"the cached {kind} artefact carries NO producer stamp — it was "
-            f"written by an unknown build of the recipe (any run predating "
-            f"{_PRODUCER_SIDECAR}); re-running so this build's recipe "
-            f"actually applies")
-    old_v = str(rec.get("plugin_version") or "")
-    old_r = str(rec.get("recipe_sha256") or "")
-    if old_v == cur_v and old_r == cur_r:
-        return (True, f"producer unchanged (plugin {cur_v}, "
-                      f"recipe {cur_r[:12]})")
-    why = []
-    if old_v != cur_v:
-        why.append(f"plugin {old_v or '<unknown>'} -> {cur_v}")
-    if old_r != cur_r:
-        why.append(f"recipe {(old_r or '<unknown>')[:12]} -> {cur_r[:12]}")
+            f"the per-step identity module is unavailable ({exc}), so no "
+            f"cached {kind} artefact can be proven current")
+    try:
+        ident, _why = _si.identity_now(
+            project=Path(project), kind=kind,
+            runner_path=Path(__file__).resolve(),
+            programs_dir=PROGRAMS_DIR,
+            flow_yaml=PROGRAMS_DIR.parent / "flow" /
+            "phase1_phase2_phase3.yaml",
+            pdk=pdk, image_digest=_step_image_digest(container),
+            pdk_hasher=_step_pdk_hasher(container))
+    except Exception as exc:  # noqa: BLE001 — an error is never freshness
+        return _deny_unless_forced(
+            f"the {kind} step's identity could not be computed "
+            f"({type(exc).__name__}: {exc}), so the cached artefact cannot be "
+            f"proven current")
+    fresh, reasons = _si.compare(_si.read_sidecar(out_dir, kind), ident)
+    detail = "; ".join(reasons)
+    if fresh:
+        return (True, f"{kind} step unchanged — {detail}")
     return _deny_unless_forced(
-        f"the cached {kind} artefact was produced by a DIFFERENT build "
-        f"({'; '.join(why)}) — re-running so the landed recipe changes "
-        f"actually execute instead of being reported as a PASS they never "
-        f"ran")
+        f"the cached {kind} artefact is not current for THIS step ({detail}) "
+        f"— re-running so the landed changes actually execute instead of "
+        f"being reported as a PASS they never ran")
+
+
+_STEP_PDK_HASH_CACHE: Dict[Tuple[str, Tuple[str, ...]], Dict[str, str]] = {}
+
+
+def _step_pdk_hasher(container: str):
+    """A callable `paths -> {path: sha256}` that reads the PDK where it IS.
+
+    MEASURED, and the reason this exists at all: on the configuration this was
+    built against the PDK is container-only — run2's liberty is under
+    `/foss/pdks/...` and the host has no `/foss/pdks`. Hashing PDK files
+    host-side therefore fails for every one of them, which would make the step
+    identity permanently uncomputable and turn the whole change into "always
+    re-run". So each path is hashed where it resolves: on the host when it is
+    there, otherwise inside the container.
+
+    Cached per (container, paths) for the life of the process, so the three
+    kinds do not pay for the same five files three times.
+
+    A probe that fails returns nothing for that path, and
+    `_step_identity.pdk_digest` then REFUSES — an unreadable PDK is not a
+    matching PDK."""
+    def _hash(paths: Sequence[str]) -> Dict[str, str]:
+        key = (container or "", tuple(paths))
+        hit = _STEP_PDK_HASH_CACHE.get(key)
+        if hit is not None:
+            return hit
+        out: Dict[str, str] = {}
+        remote: List[str] = []
+        for path in paths:
+            hp = Path(path)
+            if hp.is_file():
+                try:
+                    h = hashlib.sha256()
+                    with open(hp, "rb") as fh:
+                        for chunk in iter(lambda: fh.read(1 << 20), b""):
+                            h.update(chunk)
+                    out[path] = h.hexdigest()
+                    continue
+                except OSError:
+                    pass
+            remote.append(path)
+        if remote and container:
+            try:
+                import _container_exec as _cx  # noqa: PLC0415
+                quoted = " ".join(shlex.quote(r) for r in remote)
+                cp = _cx.run_in_container(
+                    container, f"sha256sum {quoted} 2>/dev/null || true",
+                    deadline_s=120)
+                for line in (cp.stdout or "").splitlines():
+                    parts = line.split(None, 1)
+                    if len(parts) == 2 and len(parts[0]) == 64:
+                        out[parts[1].strip()] = parts[0]
+            except Exception:  # noqa: BLE001 — a failed probe is not a match
+                pass
+        _STEP_PDK_HASH_CACHE[key] = out
+        return out
+    return _hash
+
+
+def _step_image_digest(container: str) -> Optional[str]:
+    """The container image digest, or None when it cannot be established.
+
+    None is not a soft failure: `_step_identity.tools_digest` refuses to build
+    a tools component without it, so an unknown image means the step re-runs.
+    An artefact built by an image nobody can name is not a proven artefact."""
+    try:
+        import canonical_run_admission as _cra  # noqa: PLC0415
+        v = _cra.image_identity(container or "")
+        return None if (not v or v.startswith("IMAGE_UNAVAILABLE")) else v
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _extract_overutil_pct(log_text: str) -> Optional[float]:
@@ -32671,7 +32783,8 @@ class CachedStageDecision(NamedTuple):
 
 def _cached_stage_decision(project: Path, out_dir: Path, artefact: Path, *,
                            kind: str, top: str, die_um: str, util: float,
-                           blocked_by: str = "") -> CachedStageDecision:
+                           blocked_by: str = "", pdk: Any = None,
+                           container: str = "") -> CachedStageDecision:
     """THE cache-reuse decision for a phase-3 stage, as a function.
 
     WHY IT IS A FUNCTION AT ALL — vibe-ic#2166.  This decision used to be
@@ -32686,7 +32799,9 @@ def _cached_stage_decision(project: Path, out_dir: Path, artefact: Path, *,
 
     WHAT IT DECIDES, unchanged from the two inline copies it replaces:
       * `_pnr_cache_valid_for` — the REQUESTED floorplan geometry (#593/#596);
-      * `_producer_cache_valid_for(kind)` — which BUILD of the recipe wrote it;
+      * `_producer_cache_valid_for(kind)` — whether THIS STEP is unchanged
+        (R-0924-3: its declared inputs, its own code, its tools, its PDK —
+        no longer which BUILD of the recipe wrote the artefact);
       * for `kind == "pnr"` only, and only on a chip path, the pad-ring route
         evidence (the GDS site never carried this clause and still does not);
       * `blocked_by`, a caller-supplied refusal already decided elsewhere —
@@ -32714,7 +32829,8 @@ def _cached_stage_decision(project: Path, out_dir: Path, artefact: Path, *,
     the caller still owns what to do with the answer.
     """
     ok, reason = _pnr_cache_valid_for(out_dir, die_um, util)
-    prod_ok, prod_reason = _producer_cache_valid_for(out_dir, kind)
+    prod_ok, prod_reason = _producer_cache_valid_for(
+        out_dir, kind, project=project, pdk=pdk, container=container)
     ok = ok and prod_ok
     reason = f"{reason}; {prod_reason}"
     if kind == "pnr" and (_chip_path_requests_pad_ring(project)
@@ -67796,7 +67912,8 @@ def main() -> int:
         # `_producer_cache_valid_for`.
         _synth_dir = _pl.synth_dir(project)
         _synth_prod_ok, _synth_prod_msg = _producer_cache_valid_for(
-            _synth_dir, "synth")
+            _synth_dir, "synth", project=project, pdk=pdk,
+            container=args.container)
         if _nl_pdk_ok and not _synth_prod_ok:
             _nl_pdk_ok = False
             print(f"[synth] {_synth_prod_msg}", file=sys.stderr)
@@ -67841,7 +67958,9 @@ def main() -> int:
             # happen. One stamp per producing call covers every internal path.
             # Appends NOTHING, so the `plan[-1]` idiom below is untouched.
             if plan[-1].status == "PASS":
-                _write_producer_identity(_synth_dir, "synth")
+                _write_producer_identity(
+                    _synth_dir, "synth", project=project, pdk=pdk,
+                    container=args.container)
         if plan[-1].status == "PASS":
             # ── canonical Step 11 (DFT / stuck-at ATPG) ────────────────────
             # The phase-2/phase-3 ORDERING repair. Placed HERE because this is
@@ -67894,7 +68013,8 @@ def main() -> int:
             # which lives inside its approach loop, is never reached.
             _pnr_cache = _cached_stage_decision(
                 project, _pnr_out, def_existing, kind="pnr",
-                top=effective_top, die_um=args.die_um, util=args.util)
+                top=effective_top, die_um=args.die_um, util=args.util,
+                pdk=pdk, container=args.container)
             _cache_msg = _pnr_cache.reason
             if _pnr_cache.accept:
                 plan.append(StepResult(
@@ -67924,7 +68044,9 @@ def main() -> int:
                 plan.extend(_pad_ring_rows)
                 plan.append(_pnr_dispatched)
                 if _pnr_dispatched.status == "PASS":
-                    _write_producer_identity(_pnr_out, "pnr")
+                    _write_producer_identity(
+                        _pnr_out, "pnr", project=project, pdk=pdk,
+                        container=args.container)
         # ── PROVENANCE SNAPSHOT of the PnR outcome ─────────────────────────
         # Everything downstream (the #527 SPEF repair, the DRV escalation and
         # — critically — the ORGANIC #593 stale-GDS guard) used to read
@@ -68002,7 +68124,9 @@ def main() -> int:
                 plan.extend(_pnr_rows2)
                 plan.append(_pnr_redispatched)
                 if _pnr_redispatched.status == "PASS":
-                    _write_producer_identity(_pl.pnr_dir(project), "pnr")
+                    _write_producer_identity(
+                        _pl.pnr_dir(project), "pnr", project=project,
+                        pdk=pdk, container=args.container)
                 # Publish the COST beside the arithmetic, measured not
                 # estimated: the second PnR's wall-clock is the price of this
                 # fix and belongs in the artefact a reviewer reads.
@@ -68154,6 +68278,7 @@ def main() -> int:
             _gds_cache = _cached_stage_decision(
                 project, _pnr_out, gds_existing, kind="gds",
                 top=effective_top, die_um=args.die_um, util=args.util,
+                pdk=pdk, container=args.container,
                 blocked_by=("PnR re-ran in this session, so a cached GDS is "
                             "from the previous DEF" if _pnr_reran else ""))
             _gds_prod_msg = _gds_cache.producer_reason
@@ -68177,7 +68302,9 @@ def main() -> int:
                     step_gds, project, effective_top, pdk, args.container)
                 plan.append(_gds_dispatched)
                 if _gds_dispatched.status == "PASS":
-                    _write_producer_identity(_pnr_out, "gds")
+                    _write_producer_identity(
+                        _pnr_out, "gds", project=project, pdk=pdk,
+                        container=args.container)
             if _chip_path_requests_pad_ring(project):
                 _pad_final = step_pad_ring_final_evidence(
                     project, effective_top, _gds_dispatched, args.container)

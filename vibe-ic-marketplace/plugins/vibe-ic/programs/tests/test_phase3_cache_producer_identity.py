@@ -43,6 +43,8 @@ import ast
 import inspect
 import json
 import sys
+
+import pytest
 from pathlib import Path
 
 PROGS = Path(__file__).resolve().parent.parent
@@ -57,75 +59,184 @@ DIE, UTIL = "200x200", 0.45
 
 # ── unit level: the key itself ──────────────────────────────────────────────
 
-def test_matching_producer_is_reusable(tmp_path):
-    """Control: an artefact stamped by THIS build stays reusable — the fix
-    must not degenerate into 'always re-run'."""
-    R._write_producer_identity(tmp_path, "synth")
-    ok, msg = R._producer_cache_valid_for(tmp_path, "synth")
+def _unit(tmp_path: Path) -> Path:
+    """A minimal project the step identity can actually be computed for."""
+    rtl = R._pl.rtl_dir(tmp_path)
+    rtl.mkdir(parents=True, exist_ok=True)
+    (rtl / f"{TOP}.v").write_text(f"module {TOP}(); endmodule\n")
+    _declare(tmp_path, "DIE")
+    cons = tmp_path / "phase2" / "stage2" / "constraints"
+    cons.mkdir(parents=True, exist_ok=True)
+    (cons / "chip.sdc").write_text("create_clock -period 10 [get_ports clk]\n")
+    # The DECLARED inputs of the three cached steps, per the flow itself:
+    # step 9 reads the declaration, the RTL and the SDC (above); step 21 reads
+    # `post_hold.def`; step 37 reads `filled.def OR metal_fill.done`. R-0924-3
+    # hashes a step's declared inputs, and a declared input that is absent is
+    # an unanswerable question, not an empty one — so a tree missing them
+    # re-runs for that reason rather than the one under test.
+    pnr = R._pl.pnr_dir(tmp_path)
+    pnr.mkdir(parents=True, exist_ok=True)
+    (pnr / "post_hold.def").write_text("VERSION 5.8 ;\nEND DESIGN\n")
+    (pnr / "metal_fill.done").write_text("fill complete\n")
+    _provenance(tmp_path)
+    return tmp_path
+
+
+def _valid(tmp_path: Path, out_dir: Path, kind: str, monkeypatch):
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
+    return R._producer_cache_valid_for(out_dir, kind, project=tmp_path,
+                                       pdk=_pdk(tmp_path), container="")
+
+
+def test_matching_producer_is_reusable(tmp_path, monkeypatch):
+    """Control, and it is the load-bearing one: an artefact THIS build wrote
+    stays reusable — the fix must not degenerate into 'always re-run'.
+
+    This assertion caught a real defect in the R-0924-3 change while it was
+    being written: the PDK component was hashed host-side, every PDK file on
+    the measured configuration lives only inside the container, so the
+    component was permanently uncomputable and nothing would ever have been
+    reused. Do not weaken it."""
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
+    project = _unit(tmp_path)
+    out = R._pl.synth_dir(project)
+    out.mkdir(parents=True, exist_ok=True)
+    _stamp(project, out, "synth")
+    ok, msg = _valid(project, out, "synth", monkeypatch)
     assert ok is True, msg
-    assert "producer unchanged" in msg
+    assert "step unchanged" in msg
 
 
-def test_older_plugin_version_invalidates(tmp_path):
-    """THE defect: the artefact was produced by an earlier plugin build, so
-    every recipe change landed since then is absent from it."""
-    now = R._producer_identity_now()
-    (tmp_path / R._PRODUCER_SIDECAR).write_text(json.dumps({
-        "synth": {"plugin_version": "0.0.1-older",
-                  "recipe_sha256": now["recipe_sha256"]}}))
-    ok, msg = R._producer_cache_valid_for(tmp_path, "synth")
-    assert ok is False, (
-        "a netlist produced by an OLDER plugin build was judged reusable — "
-        "every fix landed since then is a silent no-op")
-    assert "0.0.1-older" in msg and "re-running" in msg
+def test_a_version_bump_alone_no_longer_invalidates(tmp_path, monkeypatch):
+    """SUPERSEDED AND INVERTED BY OWNER RULING R-0924-3 (2026-09-24).
+
+    This test used to be `test_older_plugin_version_invalidates`, and it
+    asserted that an artefact written by an earlier plugin build was never
+    reusable. That WAS the contract, and it was the wrong one: because every
+    landed fix bumps the version, it invalidated every cached step in the flow
+    whatever the fix touched. MEASURED on spm run23 — `--force-step gds` on a
+    finished tree re-ran synthesis and started PnR.
+
+    R-0924-3: "freshness is judged PER STEP by what that step actually depends
+    on ... not by the whole-plugin version." So the assertion is inverted, and
+    deliberately kept HERE rather than deleted, so the history of the contract
+    is visible at the place that used to enforce the opposite.
+
+    What replaced it is not weaker: a step whose CODE changed still
+    invalidates, which is what a version bump was ever a proxy for, and
+    `test_edited_code_invalidates_without_a_version_bump` below holds that
+    directly instead of by proxy."""
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
+    project = _unit(tmp_path)
+    out = R._pl.synth_dir(project)
+    out.mkdir(parents=True, exist_ok=True)
+    _stamp(project, out, "synth")
+    monkeypatch.setattr(R, "_plugin_version", lambda: "99.99.99-brand-new")
+    ok, msg = _valid(project, out, "synth", monkeypatch)
+    assert ok is True, (
+        "a release with no change to this step's inputs, code, tools or PDK "
+        f"re-ran it anyway — R-0924-3 forbids exactly this. {msg}")
 
 
-def test_edited_recipe_invalidates_without_a_version_bump(tmp_path):
+def test_edited_code_invalidates_without_a_version_bump(tmp_path, monkeypatch):
     """The in-tree case a released version number cannot see: same version,
-    edited runner source. This is the shape an agent testing its own fix hits
-    on every iteration."""
-    now = R._producer_identity_now()
-    (tmp_path / R._PRODUCER_SIDECAR).write_text(json.dumps({
-        "pnr": {"plugin_version": now["plugin_version"],
-                "recipe_sha256": "0" * 64}}))
-    ok, msg = R._producer_cache_valid_for(tmp_path, "pnr")
+    edited code. This is the shape an agent testing its own fix hits on every
+    iteration, and it is now held DIRECTLY rather than through a version
+    proxy — including for a helper module, which the old key could not see at
+    all and said so in a comment instead of fixing."""
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
+    project = _unit(tmp_path)
+    out = R._pl.pnr_dir(project)
+    out.mkdir(parents=True, exist_ok=True)
+    _stamp(project, out, "pnr")
+    assert _valid(project, out, "pnr", monkeypatch)[0] is True
+    import _step_identity as _si
+    rec = _si.read_sidecar(out, "pnr")
+    rec["code"] = "0" * 64          # what an edit to this step's code does
+    _si.write_sidecar(out, "pnr", rec)
+    ok, msg = _valid(project, out, "pnr", monkeypatch)
     assert ok is False, msg
-    assert "recipe" in msg
+    assert "code:" in msg
 
 
-def test_unstamped_artefact_fails_closed(tmp_path):
+def test_unstamped_artefact_fails_closed(tmp_path, monkeypatch):
     """Every artefact that exists TODAY has no stamp. Absence of evidence is
     not evidence of freshness: reuse requires positive proof."""
-    ok, msg = R._producer_cache_valid_for(tmp_path, "gds")
+    project = _unit(tmp_path)
+    out = R._pl.pnr_dir(project)
+    out.mkdir(parents=True, exist_ok=True)
+    ok, msg = _valid(project, out, "gds", monkeypatch)
     assert ok is False
-    assert "NO producer stamp" in msg
+    assert "no recorded step identity" in msg, msg
 
 
-def test_unreadable_stamp_fails_closed(tmp_path):
+def test_unreadable_stamp_fails_closed(tmp_path, monkeypatch):
     """A corrupt stamp is unreadable evidence, therefore no evidence."""
-    (tmp_path / R._PRODUCER_SIDECAR).write_text("{not json")
-    ok, _ = R._producer_cache_valid_for(tmp_path, "synth")
-    assert ok is False
+    import _step_identity as _si
+    project = _unit(tmp_path)
+    out = R._pl.synth_dir(project)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / _si.SIDECAR).write_text("{not json")
+    assert _valid(project, out, "synth", monkeypatch)[0] is False
 
 
 def test_unresolvable_current_identity_fails_closed(tmp_path, monkeypatch):
-    """If THIS build cannot name itself, it cannot prove a match either."""
-    R._write_producer_identity(tmp_path, "synth")
-    monkeypatch.setattr(R, "_plugin_version", lambda: "")
-    ok, msg = R._producer_cache_valid_for(tmp_path, "synth")
-    assert ok is False
-    assert "unresolvable" in msg
+    """If THIS build cannot name what it is running, it cannot prove a match
+    either. Under R-0924-3 the thing it must be able to name is no longer a
+    version string but the image its tools ran in."""
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
+    project = _unit(tmp_path)
+    out = R._pl.synth_dir(project)
+    out.mkdir(parents=True, exist_ok=True)
+    _stamp(project, out, "synth")
+    assert _valid(project, out, "synth", monkeypatch)[0] is True
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: None)
+    ok, msg = R._producer_cache_valid_for(
+        out, "synth", project=project, pdk=_pdk(project), container="")
+    assert ok is False, "an unnameable image is not a proven image"
 
 
-def test_kinds_are_recorded_separately(tmp_path):
+def test_a_pdk_that_cannot_be_read_still_refuses(tmp_path, monkeypatch):
+    """The fail-closed rule the readable-PDK fixture must not be mistaken for
+    relaxing: a PDK whose files cannot be hashed is not a matching PDK."""
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
+    project = _unit(tmp_path)
+    out = R._pl.synth_dir(project)
+    out.mkdir(parents=True, exist_ok=True)
+    _stamp(project, out, "synth")
+    ok, msg = R._producer_cache_valid_for(
+        out, "synth", project=project, pdk=_pdk(None), container="")
+    assert ok is False, msg
+    assert "pdk" in msg
+
+
+def test_a_tree_with_no_tool_ledger_re_runs(tmp_path, monkeypatch):
+    """A tree that cannot say which tools made its artefacts cannot prove they
+    are current."""
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
+    project = _unit(tmp_path)
+    out = R._pl.synth_dir(project)
+    out.mkdir(parents=True, exist_ok=True)
+    _stamp(project, out, "synth")
+    assert _valid(project, out, "synth", monkeypatch)[0] is True
+    (project / "provenance.jsonl").unlink()
+    ok, msg = _valid(project, out, "synth", monkeypatch)
+    assert ok is False, msg
+
+
+def test_kinds_are_recorded_separately(tmp_path, monkeypatch):
     """A run that re-derived the DEF but reused the GDS is exactly the #593
     shape; one shared record could not express it."""
-    R._write_producer_identity(tmp_path, "pnr")
-    assert R._producer_cache_valid_for(tmp_path, "pnr")[0] is True
-    assert R._producer_cache_valid_for(tmp_path, "gds")[0] is False, (
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
+    project = _unit(tmp_path)
+    out = R._pl.pnr_dir(project)
+    out.mkdir(parents=True, exist_ok=True)
+    _stamp(project, out, "pnr")
+    assert _valid(project, out, "pnr", monkeypatch)[0] is True
+    assert _valid(project, out, "gds", monkeypatch)[0] is False, (
         "stamping the DEF must not silently vouch for the GDS")
-    R._write_producer_identity(tmp_path, "gds")
-    assert R._producer_cache_valid_for(tmp_path, "pnr")[0] is True, (
+    _stamp(project, out, "gds")
+    assert _valid(project, out, "pnr", monkeypatch)[0] is True, (
         "stamping the GDS must not erase the DEF's stamp")
 
 
@@ -154,11 +265,75 @@ def test_one_version_reader_for_the_whole_repo():
 
 # ── end-to-end: all THREE call sites, driven through main() ─────────────────
 
-def _pdk() -> R.PdkConfig:
-    return R.PdkConfig(name="testpdk", liberty="/nonexistent/tt.lib",
-                       tech_lef="/nonexistent/tech.lef",
-                       cell_lef="/nonexistent/cells.lef", cell_gds=None,
-                       site="unit", drc_deck=None)
+def _pdk(root: Path | None = None) -> R.PdkConfig:
+    """THE FOURTH FIXTURE CATCH-UP, and the same kind as the three below.
+
+    R-0924-3 made freshness the STEP's own identity, and one of its four
+    components is the sha256 of the PDK files the step reads. `/nonexistent`
+    paths are, correctly, unreadable, and an unreadable PDK is not a matching
+    PDK — so with them nothing can ever be judged fresh and every test here
+    would assert about a re-run that happened for the wrong reason. Given a
+    root, the three declared PDK files are written for real, so the component
+    is computable and the cache verdict under test is the one observed.
+
+    NOTHING IS RELAXED: `test_a_pdk_that_cannot_be_read_still_refuses` keeps
+    the unreadable case, which is the fail-closed rule itself."""
+    if root is None:
+        return R.PdkConfig(name="testpdk", liberty="/nonexistent/tt.lib",
+                           tech_lef="/nonexistent/tech.lef",
+                           cell_lef="/nonexistent/cells.lef", cell_gds=None,
+                           site="unit", drc_deck=None)
+    pdk_dir = Path(root) / "_pdk"
+    pdk_dir.mkdir(parents=True, exist_ok=True)
+    lib = pdk_dir / "tt.lib"
+    tlef = pdk_dir / "tech.lef"
+    clef = pdk_dir / "cells.lef"
+    for f, text in ((lib, "library(testpdk){}\n"),
+                    (tlef, "VERSION 5.8 ;\n"), (clef, "MACRO unit\n")):
+        if not f.is_file():
+            f.write_text(text)
+    return R.PdkConfig(name="testpdk", liberty=str(lib), tech_lef=str(tlef),
+                       cell_lef=str(clef), cell_gds=None, site="unit",
+                       drc_deck=None)
+
+
+_IMAGE = "sha256:" + "e" * 64
+
+
+@pytest.fixture(autouse=True)
+def _nameable_image(monkeypatch):
+    """R-0924-3 — a step whose container image cannot be NAMED is not a proven
+    step, so it re-runs. This suite has no container, and the fixture below
+    stamps the tree before `_drive` installs any patches, so the digest is
+    pinned here for the whole test. The fail-closed rule itself is asserted in
+    `test_phase3_cache_producer_identity`, which keeps the unnameable case."""
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
+
+
+def _provenance(project: Path) -> None:
+    """The run ledger a tree that has already produced these artefacts carries.
+
+    R-0924-3's `tools` component asks the run's OWN `provenance.jsonl` which
+    tools this step invoked, rather than trusting a list kept in sync by hand.
+    A tree with no ledger cannot answer, so it re-runs — which is right, and is
+    why `test_a_tree_with_no_tool_ledger_re_runs` keeps that case. This fixture
+    supplies what a real tree has: measured on a real stream-out run, the
+    output prefixes are exactly `phase2/stage2/synth/`, `phase3/stage3/pnr/`
+    and `phase3/stage4/gds/`."""
+    (project / "provenance.jsonl").write_text("".join(
+        json.dumps({"tool": tool, "version": ver,
+                    "outputs": {out: "sha256:" + "0" * 64}}) + "\n"
+        for tool, ver, out in (
+            ("yosys", "0.38", f"phase2/stage2/synth/{TOP}_synth.v"),
+            ("openroad", "2.0", f"phase3/stage3/pnr/{TOP}.def"),
+            ("klayout", "0.28", f"phase3/stage4/gds/{TOP}.gds"))))
+
+
+def _stamp(project: Path, out_dir: Path, kind: str) -> None:
+    """Stamp `kind` the way a real run does — with the context the step
+    identity is computed from."""
+    R._write_producer_identity(out_dir, kind, project=project,
+                               pdk=_pdk(project), container="")
 
 
 def _project(tmp_path: Path, *, stamp: bool) -> Path:
@@ -186,12 +361,28 @@ def _project(tmp_path: Path, *, stamp: bool) -> Path:
     (pnr / f"{TOP}.def").write_text(
         "DIEAREA ( 0 0 ) ( 200000 200000 ) ;\nPINS 0 ;\nEND PINS\n")
     (pnr / f"{TOP}.gds").write_text("cached GDS\n")
+    # The DECLARED inputs of the two phase-3 cached steps — step 21 reads
+    # `post_hold.def`, step 37 reads `filled.def OR metal_fill.done`. Same
+    # kind of catch-up as the post-DFT netlist above: R-0924-3 hashes a step's
+    # declared inputs, and a tree that has already routed and streamed out
+    # carries them.
+    (pnr / "post_hold.def").write_text("VERSION 5.8 ;\nEND DESIGN\n")
+    (pnr / "metal_fill.done").write_text("fill complete\n")
+    # ...and step 9's third declared input, the SDC owed by step 7.
+    cons = tmp_path / "phase2" / "stage2" / "constraints"
+    cons.mkdir(parents=True, exist_ok=True)
+    (cons / "chip.sdc").write_text("create_clock -period 10 [get_ports clk]\n")
     R._write_pnr_args_sidecar(pnr, DIE, UTIL)
     R._write_synth_inputs_sidecar(synth / f"{TOP}_synth.v", rtl)
+    _provenance(tmp_path)
+    # Step 9's first declared input; it must exist before the identity that
+    # hashes it is stamped. Declared again below, where the comment that
+    # explains why it is here at all lives; declaring twice is idempotent.
+    _declare(tmp_path, "DIE")
     if stamp:
-        R._write_producer_identity(synth, "synth")
-        R._write_producer_identity(pnr, "pnr")
-        R._write_producer_identity(pnr, "gds")
+        _stamp(tmp_path, synth, "synth")
+        _stamp(tmp_path, pnr, "pnr")
+        _stamp(tmp_path, pnr, "gds")
     # The SECOND thing this fixture had to catch up with, and the same kind as
     # the post-DFT netlist above: v1.22.13 (#2376) made Phase 3 refuse a project
     # with no delivery declaration, BEFORE any step and before the report these
@@ -251,7 +442,13 @@ def _drive(monkeypatch, project: Path) -> list:
     monkeypatch.setattr(R, "step_signoff_spef_repair", lambda *a, **k: None)
     monkeypatch.setattr(R, "step_signoff_drv_wire_length_repair",
                         lambda *a, **k: None)
-    monkeypatch.setattr(R, "_detect_pdk", lambda *a, **k: _pdk())
+    monkeypatch.setattr(R, "_detect_pdk",
+                        lambda *a, **k: _pdk(project))
+    # R-0924-3: an image nobody can name is not a proven image, so the
+    # tools component refuses without one and every step re-runs. A real
+    # run has a digest; these tests are about the CACHE verdict, so it is
+    # supplied rather than left to a container this suite does not have.
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
     monkeypatch.setattr(R._runner_lock, "acquire_or_reenter",
                         lambda *a, **k: object())
     monkeypatch.setattr(R, "commercial_pdk_fallback_guard",
@@ -297,7 +494,7 @@ def test_unstamped_def_forces_a_pnr_rerun(tmp_path, monkeypatch):
     """MUTATION CAUGHT: deleting the producer key at the PnR call site.
     The netlist IS stamped, so only the PnR key can force this re-run."""
     project = _project(tmp_path, stamp=False)
-    R._write_producer_identity(R._pl.synth_dir(project), "synth")
+    _stamp(project, R._pl.synth_dir(project), "synth")
     called = _drive(monkeypatch, project)
     R.main()
     assert "synth" not in called, "control: the stamped netlist must be reused"
@@ -310,8 +507,8 @@ def test_unstamped_gds_forces_a_gds_rerun(tmp_path, monkeypatch):
     Netlist and DEF are stamped, so only the GDS key can force this re-run —
     and the stream-out recipe can change while the router does not."""
     project = _project(tmp_path, stamp=False)
-    R._write_producer_identity(R._pl.synth_dir(project), "synth")
-    R._write_producer_identity(R._pl.pnr_dir(project), "pnr")
+    _stamp(project, R._pl.synth_dir(project), "synth")
+    _stamp(project, R._pl.pnr_dir(project), "pnr")
     called = _drive(monkeypatch, project)
     R.main()
     assert "synth" not in called and "pnr" not in called, (
@@ -370,12 +567,14 @@ def test_a_real_rerun_stamps_the_producer(tmp_path, monkeypatch):
     called = _drive(monkeypatch, project)
     R.main()
     assert {"synth", "pnr", "gds"} <= set(called)
-    assert R._producer_cache_valid_for(
-        R._pl.synth_dir(project), "synth")[0] is True
-    assert R._producer_cache_valid_for(
-        R._pl.pnr_dir(project), "pnr")[0] is True
-    assert R._producer_cache_valid_for(
-        R._pl.pnr_dir(project), "gds")[0] is True
+    ctx = dict(project=project, pdk=_pdk(project), container="")
+    for kind, out in (("synth", R._pl.synth_dir(project)),
+                      ("pnr", R._pl.pnr_dir(project)),
+                      ("gds", R._pl.pnr_dir(project))):
+        ok, msg = R._producer_cache_valid_for(out, kind, **ctx)
+        assert ok is True, (
+            f"after {kind} actually ran, the next run could not prove its "
+            f"artefact current — the fix would re-run forever: {msg}")
 
 
 def test_a_failed_step_does_not_stamp_a_producer(tmp_path, monkeypatch):
@@ -387,9 +586,13 @@ def test_a_failed_step_does_not_stamp_a_producer(tmp_path, monkeypatch):
         R, "step_synth",
         lambda *a, **k: R.StepResult("synth", "FAIL", 0.0, "yosys died"))
     R.main()
+    # WITH the full context — without it the predicate refuses for want of a
+    # project and this assertion would pass for a reason that has nothing to
+    # do with the failed step, which is a vacuous green, not a green.
     assert R._producer_cache_valid_for(
-        R._pl.synth_dir(project), "synth")[0] is False, (
-        "a FAILED synth stamped a producer identity onto the previous build's "
+        R._pl.synth_dir(project), "synth", project=project,
+        pdk=_pdk(project), container="")[0] is False, (
+        "a FAILED synth stamped a step identity onto the previous build's "
         "netlist — the next run would then reuse it as if it were current")
 
 
@@ -401,12 +604,18 @@ def test_reused_rows_name_the_producing_build(tmp_path, monkeypatch):
     _drive(monkeypatch, project)
     R.main()
     plan = _plan(project)
-    version = R._plugin_version()
     for name in ("synth", "pnr", "gds"):
-        assert "producer" in plan[name]["detail"], (
-            f"the reused {name} row does not disclose its producer: "
-            f"{plan[name]['detail']!r}")
-        assert version in plan[name]["detail"]
+        detail = plan[name]["detail"]
+        # R-0924-3: the row discloses WHY the step was judged unchanged, which
+        # is strictly more than the build string it used to carry — a reader
+        # can now see which of the four components was compared.
+        assert "step unchanged" in detail, (
+            f"the reused {name} row does not disclose its freshness basis: "
+            f"{detail!r}")
+        for component in ("inputs", "code", "tools", "pdk"):
+            assert component in detail, (
+                f"the reused {name} row names no {component} evidence: "
+                f"{detail!r}")
 
 
 #: The producer KINDS this runner has. Not a count of call sites — see

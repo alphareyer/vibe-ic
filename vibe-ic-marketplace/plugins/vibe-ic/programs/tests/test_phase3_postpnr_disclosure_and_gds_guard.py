@@ -49,11 +49,41 @@ class _Drive:
         self.called = []
 
 
-def _pdk() -> R.PdkConfig:
-    return R.PdkConfig(name="testpdk", liberty="/nonexistent/tt.lib",
-                       tech_lef="/nonexistent/tech.lef",
-                       cell_lef="/nonexistent/cells.lef", cell_gds=None,
-                       site="unit", drc_deck=None)
+_IMAGE = "sha256:" + "e" * 64
+
+
+@pytest.fixture(autouse=True)
+def _nameable_image(monkeypatch):
+    """R-0924-3 — a step whose container image cannot be NAMED is not a proven
+    step, so it re-runs. This suite has no container, and the fixture below
+    stamps the tree before `_drive` installs any patches, so the digest is
+    pinned here for the whole test. The fail-closed rule itself is asserted in
+    `test_phase3_cache_producer_identity`, which keeps the unnameable case."""
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
+
+
+def _pdk(root: Path | None = None) -> R.PdkConfig:
+    """R-0924-3 CATCH-UP. One of a step's four identity components is the
+    sha256 of the PDK files it reads, and `/nonexistent` paths are (rightly)
+    unreadable — with them nothing is ever judged fresh and the GEOMETRY guard
+    this file exists to test is never the reason anything re-runs. Given a
+    root the declared files are written for real. The unreadable case is not
+    lost: `test_phase3_cache_producer_identity` owns it."""
+    if root is None:
+        return R.PdkConfig(name="testpdk", liberty="/nonexistent/tt.lib",
+                           tech_lef="/nonexistent/tech.lef",
+                           cell_lef="/nonexistent/cells.lef", cell_gds=None,
+                           site="unit", drc_deck=None)
+    d = Path(root) / "_pdk"
+    d.mkdir(parents=True, exist_ok=True)
+    lib, tlef, clef = d / "tt.lib", d / "tech.lef", d / "cells.lef"
+    for f, text in ((lib, "library(t){}\n"), (tlef, "VERSION 5.8 ;\n"),
+                    (clef, "MACRO unit\n")):
+        if not f.is_file():
+            f.write_text(text)
+    return R.PdkConfig(name="testpdk", liberty=str(lib), tech_lef=str(tlef),
+                       cell_lef=str(clef), cell_gds=None, site="unit",
+                       drc_deck=None)
 
 
 def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
@@ -95,9 +125,30 @@ def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
     # current build keeps this file testing what it was written to test, the
     # #593 GEOMETRY guard, instead of tripping on the producer guard first.
     # test_phase3_cache_producer_identity.py owns the producer key's coverage.
-    R._write_producer_identity(synth, "synth")
-    R._write_producer_identity(pnr, "pnr")
-    R._write_producer_identity(pnr, "gds")
+    # R-0924-3 made that key the STEP's identity, so "a previous run produced
+    # these" now also means: its declared inputs are on disk, its tool ledger
+    # exists and its PDK is readable. Same catch-up, same reason.
+    (pnr / "post_hold.def").write_text("VERSION 5.8 ;\nEND DESIGN\n")
+    (pnr / "metal_fill.done").write_text("fill complete\n")
+    cons = tmp_path / "phase2" / "stage2" / "constraints"
+    cons.mkdir(parents=True, exist_ok=True)
+    (cons / "chip.sdc").write_text("create_clock -period 10 [get_ports clk]\n")
+    (tmp_path / "provenance.jsonl").write_text("".join(
+        json.dumps({"tool": t, "version": v,
+                    "outputs": {o: "sha256:" + "0" * 64}}) + "\n"
+        for t, v, o in (
+            ("yosys", "0.38", f"phase2/stage2/synth/{TOP}_synth.v"),
+            ("openroad", "2.0", f"phase3/stage3/pnr/{TOP}.def"),
+            ("klayout", "0.28", f"phase3/stage4/gds/{TOP}.gds"))))
+    # The declaration is step 9's FIRST declared input, so it must exist
+    # before the identity that hashes it is stamped. (It is declared again
+    # below where it was originally added; declaring twice is idempotent and
+    # the original comment is left where it explains itself.)
+    _declare(tmp_path, "DIE")
+    _ctx = dict(project=tmp_path, pdk=_pdk(tmp_path), container="")
+    R._write_producer_identity(synth, "synth", **_ctx)
+    R._write_producer_identity(pnr, "pnr", **_ctx)
+    R._write_producer_identity(pnr, "gds", **_ctx)
     # The SECOND thing this fixture had to catch up with, and the same kind as
     # the post-DFT netlist above: v1.22.13 (#2376) made Phase 3 refuse a project
     # with no delivery declaration, BEFORE any step and before the report these
@@ -199,7 +250,9 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
     monkeypatch.setattr(R, "step_signoff_drv_wire_length_repair",
                         lambda *a, **k: None)
 
-    monkeypatch.setattr(R, "_detect_pdk", lambda *a, **k: _pdk())
+    monkeypatch.setattr(R, "_detect_pdk",
+                        lambda *a, **k: _pdk(project))
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
     monkeypatch.setattr(R._runner_lock, "acquire_or_reenter",
                         lambda *a, **k: object())
     monkeypatch.setattr(R, "commercial_pdk_fallback_guard",

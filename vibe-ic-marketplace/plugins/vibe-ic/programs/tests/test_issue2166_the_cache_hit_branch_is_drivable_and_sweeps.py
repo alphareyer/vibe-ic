@@ -42,20 +42,66 @@ DIE = "200x200"
 UTIL = 0.4
 
 
+import pytest  # noqa: E402
+
+_IMAGE = "sha256:" + "e" * 64
+
+
+@pytest.fixture(autouse=True)
+def _nameable_image(monkeypatch):
+    """R-0924-3 — a step whose container image cannot be named is not a proven
+    step, so it re-runs. This suite is about the SWEEP and the two stages'
+    disagreement, not about container discovery, so the digest is supplied.
+    The fail-closed rule itself is asserted in
+    `test_phase3_cache_producer_identity`."""
+    monkeypatch.setattr(R, "_step_image_digest", lambda c: _IMAGE)
+
+
+def _pdk(root):
+    """A PDK whose declared files can actually be read — R-0924-3 hashes them,
+    and an unreadable PDK is (correctly) never a match."""
+    d = Path(root) / "_pdk"
+    d.mkdir(parents=True, exist_ok=True)
+    lib, tlef, clef = d / "tt.lib", d / "tech.lef", d / "cells.lef"
+    for f, text in ((lib, "library(t){}\n"), (tlef, "VERSION 5.8 ;\n"),
+                    (clef, "MACRO unit\n")):
+        if not f.is_file():
+            f.write_text(text)
+    return R.PdkConfig(name="testpdk", liberty=str(lib), tech_lef=str(tlef),
+                       cell_lef=str(clef), cell_gds=None, site="unit",
+                       drc_deck=None)
+
+
 def _valid_cache(tmp_path, kind="pnr", artefact="top.def"):
     """A directory that is GENUINELY reusable — and stays that way.
 
     Every key the decision reads is satisfied by the runner's OWN writers, so
     this state does not depend on the defect and cannot become unreachable when
     the defect is fixed: `_write_pnr_args_sidecar` for the geometry key and
-    `_write_producer_identity` for the recipe key. That is what makes the
-    accept assertions below non-vacuous.
+    `_write_producer_identity` for the step key. That is what makes the accept
+    assertions below non-vacuous.
+
+    R-0924-3 CATCH-UP: the step key is now the STEP's identity, so a reusable
+    directory is one whose declared inputs are present, whose tool ledger
+    exists and whose PDK can be read. All three are written here — by the
+    runner's own writer for the stamp, and as real files for the rest. Nothing
+    is stubbed past the decision: the decision still runs for real.
     """
     project = tmp_path / "proj"
     out_dir = project / "phase3" / "stage3" / "pnr"
     out_dir.mkdir(parents=True, exist_ok=True)
+    # step 21 reads post_hold.def; step 37 reads filled.def OR metal_fill.done
+    (out_dir / "post_hold.def").write_text("VERSION 5.8 ;\nEND DESIGN\n")
+    (out_dir / "metal_fill.done").write_text("fill complete\n")
+    (project / "provenance.jsonl").write_text("".join(
+        __import__("json").dumps(
+            {"tool": t, "version": v, "outputs": {o: "sha256:" + "0" * 64}}
+        ) + "\n" for t, v, o in (
+            ("openroad", "2.0", "phase3/stage3/pnr/top.def"),
+            ("klayout", "0.28", "phase3/stage4/gds/top.gds"))))
     R._write_pnr_args_sidecar(out_dir, DIE, UTIL)
-    R._write_producer_identity(out_dir, kind)
+    R._write_producer_identity(out_dir, kind, project=project,
+                               pdk=_pdk(project), container="")
     art = out_dir / artefact
     art.write_text("VERSION 5.8 ;\n")
     return project, out_dir, art
@@ -66,6 +112,8 @@ def _decide(project, out_dir, art, **kw):
     kw.setdefault("top", "top")
     kw.setdefault("die_um", DIE)
     kw.setdefault("util", UTIL)
+    kw.setdefault("pdk", _pdk(project))
+    kw.setdefault("container", "")
     return R._cached_stage_decision(project, out_dir, art, **kw)
 
 
@@ -207,7 +255,8 @@ def test_the_pad_ring_clause_belongs_to_the_pnr_stage_only(tmp_path):
     (tmpl / "SELF_TAPEOUT.txt").write_text("x\n")
     assert R._chip_path_requests_pad_ring(project) is True
     assert R._pad_ring_route_cache_valid(project, "top") is False
-    R._write_producer_identity(out_dir, "gds")
+    R._write_producer_identity(out_dir, "gds", project=project,
+                               pdk=_pdk(project), container="")
     gds = out_dir / "top.gds"
     gds.write_text("HEADER\n")
     _empty_antenna(out_dir, "antenna_iter_0.rpt")
