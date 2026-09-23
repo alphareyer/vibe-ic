@@ -65,10 +65,19 @@ import subprocess  # nosec B404 — declared flow programs, argv from the yaml
 import sys
 import time
 from pathlib import Path
+
 from typing import Any, Dict, List, Optional, Tuple
 
 if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# BELOW the path setup above, not at the top of the file. `programs/` is flat and its modules
+# import each other by BARE name; Python only puts a file's own directory on `sys.path` when
+# that file is `__main__`, so under `spec_from_file_location` -- how the gates and much of the
+# suite load a program -- a bare sibling import placed before that block raises
+# ModuleNotFoundError. `test_issue2104_programs_load_by_path` names the offender, and it named
+# `design_input_digest` for exactly this on next/icslot75-dig.
+import _gate_authorship as _ga  # noqa: E402  R-0915-160 (who invoked the writer)
 
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
 
@@ -133,6 +142,11 @@ def declared_producer_clauses(flow_yaml: Path = FLOW_YAML
     except (OSError, ValueError):
         return []
     found: List[Dict[str, str]] = []
+    #: THE FLOW'S OWN ORDER, taken once from the definition. R-0915-160. The two channels
+    #: below are collected in separate passes and used to be CONCATENATED, which put every
+    #: `program_outputs` clause after every gate clause regardless of step -- see the sort at
+    #: the end of this function for what that cost.
+    order = {str(_s.get("id")): _i for _i, _s in enumerate(_iter_steps(doc))}
     for step in _iter_steps(doc):
         outs = set(step.get("required_outputs") or [])
         producers = {str(p).strip() for p in (step.get("programs") or [])
@@ -208,6 +222,39 @@ def declared_producer_clauses(flow_yaml: Path = FLOW_YAML
             found.append({"step": str(step.get("id")), "program": program,
                           "command": cmd, "target": target,
                           "siblings": sorted(outs - {target})})
+
+    # MERGED IN FLOW ORDER, NOT CONCATENATED. R-0915-160. This function's own docstring has
+    # always said "in flow order"; it was not, and nothing checked.
+    #
+    # The gate channel is collected in the first pass and `program_outputs` in the second, so
+    # every clause of the second channel ran after every clause of the first whatever step it
+    # belonged to. MEASURED on the shipped flow: of 27 clauses, indices 0..24 were already in
+    # perfect flow order, and there is exactly ONE `program_outputs` clause --
+    #
+    #     step 31  perc_corpus_sweep -> reports/phase3/perc_sweep.json
+    #
+    # -- which belongs beside step 31's other three clauses and landed last, after step 37's
+    # `stage3_compliance` clause. That single misplacement produced all the disorder: three
+    # inversions, against steps 37, 37.5ip and 37.5ic.
+    #
+    # WHAT IT COST, by differential on one project, running the real `stage3_compliance`
+    # twice. Step 37's clause publishes a verdict about STAGE 3 -- which contains step 31 --
+    # so it judged step 31 while step 31's own artefact did not yet exist:
+    #
+    #   perc_sweep.json ABSENT   sweep_reach_check  verdict=NOT_APPLICABLE
+    #                            reason_class=DESIGN_DECLARED_NA enforcement=NOT_RUN_DECLARED
+    #   perc_sweep.json PRESENT  sweep_reach_check  rc=2 verdict=INCOMPLETE
+    #                            reason_class=EXECUTION_ERROR enforcement=DISCLOSED_INCOMPLETE
+    #
+    # So the published report recorded a declared gate as "this design does not have that"
+    # when the run writes the artefact four clauses later. A FALSE NA, not a stale number --
+    # and `owed()` never regenerated the report, so it survived every later run.
+    #
+    # `list.sort` is STABLE, which is the whole reason this is a sort and not a re-collection:
+    # within one step the gate clauses keep their position ahead of that step's
+    # `program_outputs` clauses, which is the order the flow states them in. A step id the
+    # flow does not contain sorts last, deterministically, rather than raising.
+    found.sort(key=lambda r: order.get(str(r.get("step")), len(order)))
     return found
 
 
@@ -231,6 +278,23 @@ def _glob_exists(project: Path, spec: str) -> bool:
         elif (project / alt).exists():
             return True
     return False
+
+
+def _document_role(path: Path) -> Optional[str]:
+    """What the document at `path` says about who invoked its writer, or None.
+
+    None is not `producer`: a document written before the stamp existed says nothing, and the
+    caller falls back to the note for exactly those. Anything unreadable, non-JSON or not an
+    object also says nothing -- the conservative direction, which leaves the run's artefact
+    alone rather than manufacturing work from a parse failure.
+    """
+    try:
+        import json as _json                                # noqa: PLC0415
+        if path.stat().st_size > 4 * 1024 * 1024:
+            return None
+        return _ga.role_of(_json.loads(path.read_text(errors="replace")))
+    except (OSError, ValueError):
+        return None
 
 
 def _audit_claims(project: Path, sid: str, rel: str) -> bool:
@@ -291,10 +355,34 @@ def owed(project: Path, clauses: List[Dict[str, str]]
         if not target.exists():
             row = dict(c); row["why"] = "target absent"
             to_run.append(row)
+            continue
+        # THE DOCUMENT'S OWN ACCOUNT OF WHO INVOKED ITS WRITER ANSWERS FIRST. R-0915-160.
+        #
+        # Same precedence as `flow_compliance_check.authorship_answer`, and for the same
+        # reason: the role is the only evidence here that is not an inference. The note is
+        # bookkeeping ABOUT a write; the stamp is the write saying what it was.
+        #
+        # MEASURED before this: an `invoked_as: audit` document with no note, a
+        # `producer`-stamped one, and an unstamped one all answered "the run already produced
+        # it" -- the stamp was invisible to this function, which asked only "absent?" and
+        # "does a note claim it?". So a report the AUDIT wrote was never regenerated by the
+        # run, and a stale one (the false-NA stage-3 report R-0915-160's other half is about)
+        # survived every later run, because `_audit_claims` needs a note and a note is a file
+        # that can be swept or lost.
+        _role = _document_role(target)
+        if _role == _ga.ROLE_AUDIT:
+            row = dict(c)
+            row["why"] = ("present, but the document states `invoked_as: audit`: the only "
+                          "writer so far is the auditor, so the run still owes it")
+            to_run.append(row)
+        elif _role == _ga.ROLE_PRODUCER:
+            row = dict(c)
+            row["why"] = "the run already produced it, and the document says so"
+            skipped.append(row)
         elif _audit_claims(project, c["step"], c["target"]):
             row = dict(c)
-            row["why"] = ("present, but the audit's own authorship note claims "
-                          "it: the only writer so far is the auditor")
+            row["why"] = ("present and stating no role, but the audit's own authorship note "
+                          "claims it: the only writer so far is the auditor")
             to_run.append(row)
         else:
             row = dict(c); row["why"] = "the run already produced it"
