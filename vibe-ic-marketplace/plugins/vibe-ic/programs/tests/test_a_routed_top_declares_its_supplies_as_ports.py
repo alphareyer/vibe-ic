@@ -102,9 +102,21 @@ def _run(tmp_path, signal, supply, total, netlist=_ROUTED_TOP, arm="ic"):
 # ------------------------------------------------------------------ POSITIVE
 
 def test_the_run_that_was_refused_now_agrees(tmp_path):
-    state, codes, _ = _run(tmp_path, 36, 2, 38)
+    """AMENDED after the pre-landing review: the second reading is now
+    anchored to the routed DEF's own USE SIGNAL / USE POWER|GROUND split, so
+    this staging carries the DEF the datasheet cites. Without it the reading
+    is refused, which is the point -- see
+    `test_the_second_reading_needs_the_design_behind_it`."""
+    state, codes, _ = _run_def(tmp_path, 36, 2, 38)
     assert state == "AGREES", codes
     assert codes == []
+
+
+def test_the_second_reading_needs_the_design_behind_it(tmp_path):
+    """And with no DEF to settle the split there IS no second reading: the
+    check falls back to the netlist-equals-signal question it always asked."""
+    state, codes, _ = _run(tmp_path, 36, 2, 38)
+    assert state == "DISAGREES", codes
 
 
 def test_a_netlist_that_omits_its_supplies_still_agrees(tmp_path):
@@ -144,12 +156,14 @@ def test_an_inflated_supply_row_cannot_close_the_gap(tmp_path):
     """And the supply row is not a free variable either: claiming 8 supplies
     to make 30 + 8 reach 38 is caught by the parts check against the total
     the same document states."""
-    state, codes, _ = _run(tmp_path, 30, 8, 38)
-    assert "PIN_COUNT_DISAGREES_WITH_NETLIST" not in codes, codes
-    # 30 + 8 == 38 == the netlist, so the cross-check is satisfied -- and the
-    # document is refused anyway, by its own arithmetic against a stated
-    # total it no longer matches. Both halves are needed; neither is enough.
-    state2, codes2, _ = _run(tmp_path, 30, 8, 40)
+    # AMENDED after the pre-landing review, which showed this was the HOLE,
+    # not the guard: 30 + 8 == 38 == the netlist satisfied the old second
+    # reading, and the parts check passed too, so a datasheet claiming eight
+    # supply pins on a two-supply die was ACCEPTED. The supply row is now read
+    # from the routed DEF, so it is not a free variable.
+    state, codes, _ = _run_def(tmp_path, 30, 8, 38)
+    assert "PIN_COUNT_DISAGREES_WITH_NETLIST" in codes, codes
+    state2, codes2, _ = _run_def(tmp_path, 30, 8, 40)
     assert "PIN_COUNT_INTERNALLY_INCONSISTENT" in codes2, codes2
 
 
@@ -174,3 +188,106 @@ def test_the_finding_names_all_three_numbers(tmp_path):
     assert "'Signal pins' = 30" in msg, msg
     assert "38 logical pin bit(s)" in msg, msg
     assert "sum to 32" in msg, msg
+
+
+# ===========================================================================
+# PRE-LANDING REVIEW, 2026-09-23 — two CONFIRMED highs and a medium. My
+# "second reading" was a free variable: nothing anchored it to the design.
+# ===========================================================================
+
+_DEF = """\
+VERSION 5.8 ;
+DESIGN chip_top ;
+UNITS DISTANCE MICRONS 2000 ;
+PINS 38 ;
+- clk + NET clk + DIRECTION INPUT + USE SIGNAL ;
+- p + NET p + DIRECTION OUTPUT + USE SIGNAL ;
+- rst + NET rst + DIRECTION INPUT + USE SIGNAL ;
+- y + NET y + DIRECTION INPUT + USE SIGNAL ;
+%s
+- VDD + NET VDD + DIRECTION INOUT + USE POWER ;
+- VSS + NET VSS + DIRECTION INOUT + USE GROUND ;
+END PINS
+COMPONENTS 100 ;
+END COMPONENTS
+END DESIGN
+""" % "\n".join(f"- x[{i}] + NET x[{i}] + DIRECTION INPUT + USE SIGNAL ;"
+                for i in range(32))
+
+
+def _project_with_def(tmp_path, netlist=_ROUTED_TOP):
+    d = tmp_path / "phase3" / "stage3" / "pnr"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "spm_pnr.v").write_text(netlist)
+    (d / "routed.def").write_text(_DEF)
+    return tmp_path
+
+
+def _run_def(tmp_path, signal, supply, total, netlist=_ROUTED_TOP, arm="ic"):
+    findings = []
+    state = C._check_pin_count(_project_with_def(tmp_path, netlist), arm,
+                               "spm", _rows(signal, supply, total), findings)
+    return state, [f.rule for f in findings], findings
+
+
+def test_the_honest_run_still_agrees_with_the_def_behind_it(tmp_path):
+    state, codes, _ = _run_def(tmp_path, 36, 2, 38)
+    assert state == "AGREES", codes
+
+
+def test_moving_pins_into_the_supply_row_no_longer_passes(tmp_path):
+    """HIGH. 30 signal + 8 supply = 38 = the netlist's bits, and the parts
+    check is satisfied, so the old second reading said AGREES over a datasheet
+    claiming this die has eight supply pins. The DEF marks exactly two
+    USE POWER/GROUND. Nothing decided from the design's own data which ports
+    are supplies; the supply row was a free variable."""
+    state, codes, findings = _run_def(tmp_path, 30, 8, 38)
+    assert state == "DISAGREES", codes
+    assert "PIN_COUNT_DISAGREES_WITH_NETLIST" in codes, codes
+    assert "USE POWER" in findings[0].message or "supply" in findings[0].message
+
+
+def test_the_ip_arm_never_gets_the_second_reading(tmp_path):
+    """HIGH. The IP arm's delivered blackbox omits supplies BY CONTRACT, so
+    `netlist == signal + supply` there means the signal row is short by
+    exactly the supply count. The old code accepted it on both arms."""
+    findings = []
+    d = tmp_path / "hardmacro"
+    d.mkdir(parents=True, exist_ok=True)
+    state = C._check_pin_count(_project_with_def(tmp_path, _BLACKBOX), "ip",
+                               "spm", _rows(34, 2, 36), findings)
+    assert state != "AGREES", [f.rule for f in findings]
+
+
+def test_a_netlist_without_power_ports_gets_no_second_reading(tmp_path):
+    """The same false accept on the IC arm: OpenROAD `write_verilog` omits
+    power ports unless asked, so a 38-bit netlist of pure signal beside a
+    datasheet carried forward from a build with two fewer signals (36/2/38)
+    matched 36+2 and passed. The second reading is only available when the
+    netlist actually DECLARES the pins the DEF marks as supplies."""
+    no_pg = ("module chip_top (clk, p, rst, y, x, dbg);\n"
+             " input clk;\n output p;\n input rst;\n input y;\n"
+             " input [31:0] x;\n input [1:0] dbg;\n"
+             "endmodule\n")          # 38 bits, none of them a supply
+    state, codes, _ = _run_def(tmp_path, 36, 2, 38, netlist=no_pg)
+    assert state == "DISAGREES", codes
+
+
+def test_an_absent_total_row_does_not_skip_the_arithmetic(tmp_path):
+    """MEDIUM (a). The comment claimed `signal + supply` was only reachable
+    once the three rows were consistent. The parts check only runs when the
+    total row is present, and the second reading never required it. With the
+    total written NOT_MEASURED, 30/8/- matched a 38-bit netlist with no
+    arithmetic check at all."""
+    state, codes, _ = _run_def(tmp_path, 30, 8, None)
+    assert state == "DISAGREES", codes
+
+
+def test_an_inconsistent_document_is_not_also_reported_as_agreeing(tmp_path):
+    """MEDIUM (b). 30/8/40 appended INTERNALLY_INCONSISTENT and then the
+    second reading appended AGREES and `continue`d, suppressing the
+    disagreement finding for the same document."""
+    state, codes, _ = _run_def(tmp_path, 30, 8, 40)
+    assert "PIN_COUNT_INTERNALLY_INCONSISTENT" in codes, codes
+    assert "PIN_COUNT_DISAGREES_WITH_NETLIST" in codes, codes
+    assert state == "DISAGREES", state

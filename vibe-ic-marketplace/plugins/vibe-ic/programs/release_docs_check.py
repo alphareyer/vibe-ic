@@ -112,7 +112,7 @@ import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import _ic_release_artefacts as _art
 import _vacuous_exit as _vx
@@ -698,8 +698,8 @@ def _stated(rows: Sequence[Row], document: str,
 IC_NETLIST_GLOB = "phase3/stage3/pnr/*_pnr.v"
 
 
-def _netlist_signal_ports(project: Path, arm: str,
-                          release: str) -> Optional[Tuple[int, Path]]:
+def _netlist_signal_ports(project: Path, arm: str, release: str
+                          ) -> Optional[Tuple[int, Path, Set[str]]]:
     """The logical pin-bit count a SECOND view declares, re-derived here.
 
     IP arm: the delivered blackbox Verilog beside the LEF the document was
@@ -729,8 +729,71 @@ def _netlist_signal_ports(project: Path, arm: str,
         v_path.read_text(encoding="utf-8", errors="replace"))
     if ports is None:
         return None
-    return sum(width for _name, _direction, width in ports), v_path
+    # The NAMES come back too: whether this netlist declares the pins the DEF
+    # marks as supplies is a question about names, and it is the only thing
+    # that decides which of the two conventions it follows. Assuming either
+    # one was the defect.
+    return (sum(width for _name, _direction, width in ports), v_path,
+            {str(n) for n, _d, _w in ports})
 
+
+
+def _supplies_are_the_designs(project: Path, arm: str, release: str,
+                              signal, supply, total,
+                              netlist_count: int,
+                              netlist_port_names: Set[str]
+                              ) -> Tuple[bool, str]:
+    """May the netlist's bit count be read as signal + supply for THIS design?
+
+    Every clause here closes a hole the pre-landing review (2026-09-23) opened
+    and reproduced. The first version asked only `netlist_count == signal +
+    supply`, which anchors to nothing: the supply row was a free variable the
+    document itself supplied, so a datasheet could move pins out of the signal
+    row into the supply row and the arithmetic would follow it.
+
+      * IC ARM ONLY. The IP arm's delivered blackbox omits supplies BY
+        CONTRACT, so `netlist == signal + supply` there means the signal row is
+        SHORT by exactly the supply count. The old code accepted it on both
+        arms.
+      * THE NETLIST MUST ACTUALLY DECLARE THEM. OpenROAD `write_verilog` omits
+        power ports unless asked (`-include_pwr_gnd`), so a routed netlist of
+        pure signal bits could still match signal + supply on a datasheet
+        carried forward from a build with fewer signals. Whether this netlist
+        follows the convention is decided by whether the pins the DEF MARKS as
+        supplies appear among its ports -- measured, from two different files.
+      * BOTH ROWS COME FROM THE DESIGN. `signal` and `supply` are checked
+        against the DEF's own USE SIGNAL / USE POWER|GROUND split, so neither
+        is a free variable and pins cannot be moved between them.
+      * THE ARITHMETIC IS REQUIRED, NOT ASSUMED. The comment used to claim the
+        parts check guarded this; it does not -- it runs only when the total
+        row is present. A document whose total is absent or NOT_MEASURED
+        reached the second reading with no arithmetic check at all.
+    """
+    if arm != "ic":
+        return False, "the second reading is the IC arm's; this is the IP arm"
+    if supply is None:
+        return False, "the document states no supply row to read the netlist with"
+    try:
+        facts = _art.audit(project, release).by_id("def").facts
+    except Exception:  # pragma: no cover - an unreadable audit is not an OK
+        return False, "the routed DEF could not be read to settle the split"
+    def_signal = facts.get("signal_pins")
+    def_supply = facts.get("supply_pins")
+    def_supply_names = set(facts.get("supply_pin_names") or ())
+    if not isinstance(def_signal, int) or not isinstance(def_supply, int):
+        return False, "the routed DEF states no signal/supply pin split"
+    if not def_supply_names or not def_supply_names <= netlist_port_names:
+        return False, ("the netlist does not declare the pin(s) the routed DEF "
+                       "marks USE POWER/GROUND, so its bit count is the "
+                       "logical interface alone")
+    if signal[1] != def_signal or supply[1] != def_supply:
+        return False, (f"the routed DEF marks {def_signal} signal and "
+                       f"{def_supply} supply pin(s), not "
+                       f"{signal[1]} and {supply[1]}")
+    if total is None or total[1] != signal[1] + supply[1]:
+        return False, ("the document states no total equal to its own signal "
+                       "plus supply rows")
+    return netlist_count == signal[1] + supply[1], ""
 
 
 def _check_pin_count(project: Path, arm: str, release: str,
@@ -809,7 +872,7 @@ def _check_pin_count(project: Path, arm: str, release: str,
                 f"DETERMINED, not accepted."))
             states.append("NOT_DETERMINED")
             continue
-        netlist_count, v_path = netlist
+        netlist_count, v_path, netlist_port_names = netlist
         if netlist_count == signal[1]:
             states.append("AGREES")
             continue
@@ -848,7 +911,10 @@ def _check_pin_count(project: Path, arm: str, release: str,
         # DISAGREES. The only case newly accepted is the one where the
         # netlist's bits ARE the document's stated total.
         with_supplies = (signal[1] + supply[1]) if supply is not None else None
-        if with_supplies is not None and netlist_count == with_supplies:
+        second_reading, second_refusal = _supplies_are_the_designs(
+            project, arm, release, signal, supply, total,
+            netlist_count, netlist_port_names)
+        if second_reading:
             states.append("AGREES")
             continue
         findings.append(Finding(
@@ -861,6 +927,7 @@ def _check_pin_count(project: Path, arm: str, release: str,
                f"{with_supplies}, so the netlist matches neither the logical "
                f"interface alone nor the interface with its supplies"
                if with_supplies is not None else "")
+            + (f" ({second_refusal})" if second_refusal else "")
             + ". A datasheet with a pin count no view supports is stale on "
               "arrival."))
         states.append("DISAGREES")
