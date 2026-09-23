@@ -202,8 +202,14 @@ def test_break_and_ibt_windows_fail_instead_of_nabs(tmp_path):
     _assert_fails(tmp_path, _H1_WINDOWS, "missing_rx_group")
 
 
-def test_master_and_slave_sides_fail_instead_of_nabs(tmp_path):
-    _assert_fails(tmp_path, _H2_MASTER_SLAVE, "missing_rx_group")
+def test_master_and_slave_sides_are_never_nabs(tmp_path):
+    """R-0915-164: bit0/bit1 low times under master_side/slave_side are not
+    the H0/H1/BR/IBT family, so declared half_duplex=true is INCOMPLETE
+    (candidate keys listed) and silent is INCOMPLETE -- never NABS."""
+    rc, rep = _gate(tmp_path / "t", _H2_MASTER_SLAVE, l2=HD_TRUE)
+    assert (rc, rep["verdict"]) == (2, "INCOMPLETE"), rep
+    assert rep["candidate_keys"] == ["timing_groups"], rep
+    _assert_incomplete(*_gate(tmp_path / "s", _H2_MASTER_SLAVE))
 
 
 def test_nested_rx_tx_sides_fail_instead_of_nabs(tmp_path):
@@ -368,9 +374,14 @@ def test_fused_symbols_count_for_check_too():
 # ── R-0915-153: the L8 schema decides; --layer only as check() reads it ─────
 
 def test_an_unknown_l8_key_fails_closed(tmp_path):
-    """A key no emitter declares non-protocol is not evidence of absence."""
-    _assert_fails(tmp_path, dict(_EMPTY_CANON, frame_waveform={"a": 1}),
-                  "missing_rx_group")
+    """A key no emitter declares non-protocol is not evidence of absence:
+    never NABS. Declared true with no H0/H1/BR/IBT vocabulary -> INCOMPLETE
+    (R-0915-164); silent -> INCOMPLETE (R-0915-156)."""
+    l8 = dict(_EMPTY_CANON, frame_waveform={"a": 1})
+    rc, rep = _gate(tmp_path / "t", l8, l2=HD_TRUE)
+    assert (rc, rep["verdict"]) == (2, "INCOMPLETE"), rep
+    assert rep["candidate_keys"] == ["frame_waveform"], rep
+    _assert_incomplete(*_gate(tmp_path / "s", l8))
 
 
 _LAYER_WORDS_THAT_ARE_NOT_TIMING = {
@@ -526,3 +537,42 @@ def test_the_numeric_rule_and_coverage_share_the_symbol_reader():
     # and a word that merely CONTAINS the letters is neither
     assert G._symbols_in({"LIBRARY_us": 1}) == set()
     assert G._find_numeric_us({"rx": {"LIBRARY_us": 99}}, "BR") is None
+
+
+# ── R-0915-164 (round 7): declared half-duplex, but not in THIS symbol family ─
+
+#: Real corpus shapes (values abridged): turnaround timing that is real but not
+#: expressed in the H0/H1/BR/IBT single-wire pulse-symbol family.
+_MILSTD1553_LIKE = {"timing_intervals": {"RT_RESPONSE_TIME_MIN_us": 4.0,
+                                         "RT_RESPONSE_TIME_MAX_us": 12.0,
+                                         "BC_NO_RESPONSE_TIMEOUT_us": 14.0}}
+_DALI_LIKE = {"request_response_timing": {"forward_to_backward_min_ms": 2.92,
+                                          "forward_to_backward_max_ms": 9.17}}
+_SDMMC_LIKE = {"cmd_frame_waveform": {"response_timing_NCR":
+                                      "Card responds 2..64 CLK after CMD end"}}
+
+
+@pytest.mark.parametrize("l8", [_MILSTD1553_LIKE, _DALI_LIKE, _SDMMC_LIKE],
+                         ids=["milstd1553", "dali", "sdmmc"])
+def test_declared_half_duplex_outside_the_symbol_family_is_incomplete(
+        tmp_path, l8):
+    """L2 says half_duplex=true, but the L8 carries none of the H0/H1/BR/IBT
+    vocabulary this check reads: it cannot decide the split -> INCOMPLETE
+    naming that and listing the candidate keys. Never FAIL."""
+    rc, rep = _gate(tmp_path / "g", l8, l2=HD_TRUE)
+    assert (rc, rep.get("verdict")) == (2, "INCOMPLETE"), rep
+    assert "H0/H1/BR/IBT" in rep["reason"], rep["reason"]
+    assert set(rep["candidate_keys"]) == set(l8), rep["candidate_keys"]
+    res = _wrapper(tmp_path / "w", l8, l2=HD_TRUE)
+    assert res.verdict in _INCOMPLETE_WORDS, (res.verdict, res[1])
+
+
+def test_declared_half_duplex_inside_the_family_still_fails(tmp_path):
+    """FAIL stays when the family's vocabulary IS present: a group missing
+    (v068 flat: tIBT/tB_break, no rx/tx group) or the numbers violate."""
+    rc, rep = _gate(tmp_path / "flat", _V068_FLAT, l2=HD_TRUE)
+    assert (rc, rep["verdict"]) == (1, "FAIL"), rep
+    rc, rep = _gate(tmp_path / "bad", _SPLIT_BAD, l2=HD_TRUE)
+    assert (rc, rep["verdict"]) == (1, "FAIL"), rep
+    rc, rep = _gate(tmp_path / "good", _SPLIT_GOOD, l2=HD_TRUE)
+    assert (rc, rep["verdict"]) == (0, "PASS"), rep

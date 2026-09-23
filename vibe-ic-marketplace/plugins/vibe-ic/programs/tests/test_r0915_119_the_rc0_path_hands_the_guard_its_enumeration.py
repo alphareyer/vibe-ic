@@ -81,9 +81,13 @@ def test_a_declared_half_duplex_design_is_never_certified_as_an_absence(tmp_path
                     l2={"protocol_overview": {"half_duplex": True}})
     rc, doc = _run(docs, tmp_path / "out.json")
     assert doc.get("reason_class") != _t.NOT_APPLICABLE_BY_STRUCTURE
-    assert doc.get("verdict") == "FAIL"
+    # R-0915-164 — the design declared half-duplex, but its (empty) L8 carries
+    # none of the H0/H1/BR/IBT family this check reads, so the split cannot be
+    # decided: INCOMPLETE, never a structural absence and never green. (Before
+    # the ruling this read FAIL with missing_rx/tx_group findings.)
+    assert doc.get("verdict") == "INCOMPLETE"
     assert rc != 0
-    assert len(doc.get("findings") or []) >= 1
+    assert "H0/H1/BR/IBT" in doc.get("reason", "")
 
 
 def test_a_design_that_declares_nothing_still_reaches_the_escape(tmp_path):
