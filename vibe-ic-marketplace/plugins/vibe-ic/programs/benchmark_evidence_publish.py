@@ -298,6 +298,7 @@ import re
 import shutil
 import subprocess
 
+import _audit_scope
 import _published_tree
 import _release_docs_contract
 import _submission_template
@@ -531,6 +532,23 @@ def _audit_verdict(run_dir: Path, verdict_json: Optional[Path]) -> Tuple[str, Pa
         data = json.loads(cand.read_text(encoding="utf-8", errors="replace"))
     except Exception as exc:
         raise Refuse(f"cannot parse audit verdict {cand}: {exc}")
+    # A SCOPED AUDIT IS NOT THE RUN'S VERDICT. R-0915-150.
+    #
+    # Every `flow_compliance_check` pass writes this path, scoped or not: a `--stage 4`
+    # pass judges 10 of the flow's 70 steps and a `--phase 2` pass 32. Publishing
+    # convergence off one of those reads a different question's answer, and the owner's
+    # bar for spm -- "completion audit 0 failed gates" -- is only true of the whole flow.
+    # The frozen subservient_r26 and sha256_run16_pass2 snapshots already hold 9-step
+    # audits of exactly that kind.
+    #
+    # REFUSED, not downgraded: this function's caller is publishing evidence, and an
+    # unanswerable question must stop a publication rather than colour it.
+    _whole, _signal, _why = _audit_scope.audit_scope_is_whole_flow(data)
+    if not _whole:
+        raise Refuse(
+            f"the audit at {cand} is not this run's whole-flow verdict — {_why} "
+            f"(signal: {_signal}). Re-run flow_compliance_check.py --strict over the "
+            f"whole flow before publishing convergence.")
     verdict = str(data.get("verdict", "")).upper().replace("-", "_")
     if not verdict:
         raise Refuse(f"audit verdict at {cand} has no 'verdict' field")

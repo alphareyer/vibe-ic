@@ -443,6 +443,13 @@ def test_a_voided_but_measured_p0_over_a_broken_chain_stays_green(
     # evidence — a terminal this very violation voided is not a terminal that
     # "returned no verdict of its own", and the reason_class is what keeps
     # them apart now that the word does not.
+    # THE CANONICAL AUDIT, which this pass writes like any other. R-0915-150 ruled
+    # reader-side: every pass keeps writing `reports/audit/phase23_completion_audit.json`
+    # and stamps `scope`, so consumers like this one are untouched, and the four readers
+    # that treat that document as THE RUN'S VERDICT are the ones that refuse a scoped one.
+    # An earlier cut of this branch had a scoped pass write elsewhere and I re-pointed this
+    # reader at it; the measurement that overturned that choice was 16 cases across 5
+    # shipped test files breaking exactly here.
     assert "[P0]" not in " ".join(json.loads(
         (project / "reports" / "audit"
          / "phase23_completion_audit.json").read_text(encoding="utf-8")

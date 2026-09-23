@@ -44,6 +44,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -557,6 +558,12 @@ def _run_flow_compliance_pre_burn(
     # function so the same gates remain strict for foundry handoff.
     env = dict(os.environ)
     env["PHASE23_ANALOG_FPGA_STUB"] = "1"
+    # WHEN THIS PASS STARTED. R-0915-150: this guard runs a SCOPED pass
+    # (`--phase 2`, 32 of the flow's 70 steps), and a scoped pass does not publish the
+    # whole run's completion audit -- it writes its own
+    # `phase23_completion_audit.scoped-2.json`. So the verdict must come from THIS
+    # pass's document, and a timestamp is how "this pass's" is decided.
+    _pass_started = time.time()
     try:
         r = _pr.run(
             argv, capture_output=True, text=True, env=env,
@@ -584,15 +591,53 @@ def _run_flow_compliance_pre_burn(
     # (`reports/phase23_completion_audit.json`) is retained as fallback
     # for older project trees that still hold the artefact at the root
     # of `reports/`.
+    # THIS PASS'S OWN AUDIT — dated, and its SCOPE checked. R-0915-150.
+    #
+    # This guard runs `--phase 2 --strict-structural`, which judges 32 of the flow's 70
+    # steps, and every pass writes `reports/audit/phase23_completion_audit.json`. Two
+    # things therefore have to hold before that document may decide a burn:
+    #
+    #   * it must be THIS pass's — written at or after this pass started. Reading it
+    #     unconditionally meant, in `design_one_shot_runner`, that every burn was judged
+    #     by `emit_final_summary`'s preceding whole-flow `--strict` pass (whose verdict on
+    #     a phase-2 project cannot be PASS, so EVERY burn was blocked); and through the
+    #     MCP program tool, with no such pass before it, an OLD PASS let a structurally
+    #     failing design burn.
+    #   * and its scope must be THIS pass's population. A whole-flow audit is not an
+    #     answer about the 32 steps this guard asked about, and a scoped audit from some
+    #     other scope is not either. Accepted only when `scope` says it judged what this
+    #     pass judged.
+    #
+    # When neither holds the verdict comes from THIS pass's own stdout/rc, which is the
+    # backup parser below — never from a document another population produced.
+    #
+    # The 1 s tolerance is the filesystem's mtime granularity (measured ~64 ms on the
+    # campaign host), two orders below the staleness being excluded.
     canonical_audit_path = os.path.join(
         project_root, "reports", "audit", "phase23_completion_audit.json")
     legacy_audit_path = os.path.join(
         project_root, "reports", "phase23_completion_audit.json")
-    if os.path.isfile(canonical_audit_path):
-        audit_json_path = canonical_audit_path
-    else:
-        audit_json_path = legacy_audit_path
-    audit_json_present = os.path.isfile(audit_json_path)
+    audit_json_path = canonical_audit_path
+    audit_json_present = False
+    for _cand in (canonical_audit_path, legacy_audit_path):
+        try:
+            if not os.path.isfile(_cand):
+                continue
+            if os.stat(_cand).st_mtime + 1.0 < _pass_started:
+                continue                      # another pass's document
+            with open(_cand, "r", encoding="utf-8") as _fh:
+                _doc = json.load(_fh)
+        except Exception:
+            continue
+        _scope = _doc.get("scope") if isinstance(_doc, dict) else None
+        if isinstance(_scope, dict):
+            # THIS pass judged `--phase 2`; the document must say the same.
+            if str(_scope.get("phase")) != "2" or _scope.get("whole_flow") is True:
+                continue
+        audit_json_path = _cand
+        audit_json_present = True
+        break
+
     audit_json_data: Optional[Dict[str, Any]] = None
     audit_json_error: Optional[str] = None
 

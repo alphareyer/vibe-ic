@@ -95,6 +95,7 @@ import shlex
 import shutil
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from types import MappingProxyType
@@ -3648,6 +3649,23 @@ _GATE_RECEIPT_FLAGS = ("--json", "--report")
 #: before anyone could read it.
 _RECEIPT_REDIRECTS: Dict[str, Tuple[str, Any]] = {}
 
+#: THIS INVOCATION'S IDENTITY, inherited by every nested clause. R-0915-150.
+#:
+#: A top-level pass mints one; a `stageN_compliance` clause spawned by it inherits the
+#: same id through the environment, so "which invocation published this receipt" is a
+#: question a SUBPROCESS can answer -- unlike a set in the parent's memory, which is
+#: what my first cut used and which no child could see.
+_INVOCATION_ENV = "VIBEIC_FCC_INVOCATION"
+
+
+def _invocation_id() -> str:
+    inherited = os.environ.get(_INVOCATION_ENV, "").strip()
+    if inherited:
+        return inherited
+    minted = f"{os.getpid()}-{int(time.time() * 1000)}"
+    os.environ[_INVOCATION_ENV] = minted
+    return minted
+
 
 class _ReceiptRedirects:
     """The scratch directories a clause's receipts went to, and their records.
@@ -3833,6 +3851,31 @@ def _publish_over_the_audits_own_document(argv: List[str], project: Path
         # CONSTRUCTION rather than by a set that has to be kept right.
         if not _is_the_audits_own_compliance_report(abs_target):
             continue
+        # WHO WROTE THIS RECEIPT, AND OVER WHAT POPULATION. R-0915-150, second cut.
+        #
+        # MY FIRST CUT GATED THIS ON PROCESS MEMORY -- a set filled at `main()` AFTER
+        # the step loop -- and a review showed it could never fire in a real run:
+        # every `stageN_compliance` clause is a separate SUBPROCESS with its own empty
+        # set, so the republish always declined and R-0915-138 was silently reverted.
+        # Three of R-0915-138's own tests went red at that tip and my positive arm
+        # passed only because it filled the set by hand: the same "the test restates
+        # the rule" mistake I had already been warned about.
+        #
+        # MEASURED on a copy of spm run22 with icspm5's three-pass driver, on plain
+        # main: `GATE_RAN stage1_compliance` appears ONLY in the stage2 pass's log, and
+        # a stage4-ONLY pass over a fresh copy leaves stage1's receipt byte-identical.
+        # So the cross-stage write comes from a clause whose OWN population is stage1,
+        # running inside a pass whose population is not -- and re-publishing there is
+        # not wrong in itself: two evaluations of stage1 disagreeing (its own pass said
+        # NOT_MEASURED, the clause said FAIL) is a real disagreement about stage1, and
+        # R-0915-138's provenance is exactly how a reader sees it.
+        #
+        # What was missing is WHOSE verdict the reader is looking at. So authorship is
+        # recorded where a subprocess can see it -- in the document -- rather than
+        # asserted from memory: every publication carries the invocation that wrote it
+        # and the scope it judged, and the nested clause inherits the invocation id
+        # through the environment. Nothing is refused here on identity; the reader is
+        # told.
         try:
             stale = json.loads(abs_target.read_text(errors="replace"))
         except (OSError, ValueError):
@@ -3844,11 +3887,19 @@ def _publish_over_the_audits_own_document(argv: List[str], project: Path
             shutil.copy2(abs_target, keep)
         except OSError:                                    # pragma: no cover
             return None
+        _stale_scope = (stale.get("scope") if isinstance(stale, dict) else None)
         return {
             "path": str(abs_target),
             "pass": n + 1,
+            # WHO is publishing, and WHAT THEY JUDGED. A reader comparing a stage's own
+            # stdout with its receipt could not tell whether the two describe the same
+            # population or even the same invocation; both are now on the document.
+            "by_invocation": _invocation_id(),
             "supersedes": {
                 "pass": n,
+                "by_invocation": (stale.get("invocation")
+                                  if isinstance(stale, dict) else None),
+                "scope": _stale_scope,
                 # THE VERDICT UNDER EITHER OF ITS TWO NAMES. A compliance report
                 # spells it `overall`; the other gate documents spell it
                 # `verdict`. Reading only one of them recorded `null` for exactly
@@ -18551,10 +18602,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"flow_compliance_check: YAML parse error: {exc}", file=sys.stderr)
         return 2
 
+    # MINTED HERE, BEFORE ANY CLAUSE RUNS, so every nested `stageN_compliance`
+    # subprocess inherits this invocation's id through the environment. Minting it at
+    # report-writing time (my first cut) was too late: the children had already run.
+    _this_invocation = _invocation_id()
     steps = flow.get("steps", [])
     if not steps:
         print("flow_compliance_check: flow has no steps defined", file=sys.stderr)
         return 2
+    #: THE WHOLE FLOW'S SIZE, captured BEFORE any narrowing, because `steps` is
+    #: rebound by the --stage filter below and comparing the population with
+    #: itself would call every scoped pass whole-flow. R-0915-147.
+    _flow_step_total = len([x for x in steps if isinstance(x, dict)])
+    _flow_step_ids = [str(x.get("id")) for x in steps if isinstance(x, dict)]
 
     # Apply --stage / --stage-id filter if requested.
     target_stage: Optional[str] = None
@@ -20467,6 +20527,47 @@ def main(argv: Optional[List[str]] = None) -> int:
             "strict_structural": args.strict_structural,
             "strict_step_artifacts": args.strict_step_artifacts,
             "phase": args.phase,
+            # R-0915-147 — THE SCOPE THIS RECEIPT ACTUALLY JUDGED.
+            #
+            # `phase` alone is the ARGUMENT, and it defaults to "all". `--stage` /
+            # `--stage-id` narrow the population and were recorded NOWHERE, so a
+            # stage-scoped pass published a receipt stamped `phase: "all"` with no
+            # stage key at all.
+            #
+            # MEASURED on spm run22, read-only, on five shipped receipts:
+            #   reports/phase1/gates/stage_phase1_compliance.json   2 steps
+            #   reports/phase2/gates/stage1_compliance.json         7 steps
+            #   reports/phase2/gates/stage2_compliance.json        13 steps
+            #   reports/phase3/gates/stage3_compliance.json        20 steps
+            #   reports/phase3/gates/stage4_compliance.json        10 steps
+            # every one stamped `phase="all"`, none carrying a `stage` key, over a
+            # 70-step flow -- a stage-scoped record labelled whole-flow, five times.
+            # A reader comparing a stage's own stdout with its receipt then has no
+            # way to tell whether the two describe the same population, which is the
+            # disagreement this was found through (stage1 stdout PASS beside a
+            # receipt saying FAIL on a combined tree).
+            #
+            # `whole_flow` is DERIVED from the population against the flow size read
+            # BEFORE narrowing, never from the argument -- the argument is what was
+            # already wrong.
+            "invocation": _this_invocation,
+            "scope": {
+                "phase": args.phase,
+                "stage": (str(args.stage) if getattr(args, "stage", None)
+                          else None),
+                "stage_id": (getattr(args, "stage_id", None) or None),
+                "steps_judged": [str(getattr(r, "id", "")) for r in results],
+                "step_count": len(results),
+                "flow_step_total": _flow_step_total,
+                # MEMBERSHIP, NOT A COUNT. A count is inflated by rows the flow does
+                # not declare — the synthetic P0 umbrella and the pre-PnR rows — so
+                # on a flow definition without P0 a `--stage 2` pass could reach the
+                # count and call itself whole-flow with step 1 never judged. Nothing
+                # reads this field yet and it is new in my own commit, so it is fixed
+                # before a reader appears.
+                "whole_flow": bool(_flow_step_ids) and set(_flow_step_ids) <= {
+                    str(getattr(r, "id", "")) for r in results},
+            },
             "counts": counts,
             "overall": overall,
             "advisories": advisories,
@@ -20525,6 +20626,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         # writer in this flow creates its parent; this one did not.
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)
         Path(args.json).write_text(json.dumps(out, indent=2))
+        # THIS PASS'S OWN RECEIPT, ALWAYS WRITTEN BY THIS PASS. Its `scope` block
+        # already says what it judged; `invocation` says who wrote it, so a later
+        # reader can tell "this stage's own pass" from "a clause in somebody else's".
 
     # Wave 30 (v0.119.62) — emit a canonical machine-readable audit
     # artifact at `<project>/reports/phase23_completion_audit.json`
@@ -20640,6 +20744,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         # cannot see it, and leaving it in would make the PREVIOUS run's audit
         # an input to THIS run's design hash.
         audit_path = _pl.report_path(project, "phase23_completion_audit.json")
+        # ONE CANONICAL AUDIT, AND IT SAYS WHAT IT JUDGED. R-0915-150, second cut.
+        #
+        # My first cut had a SCOPED pass write its audit elsewhere, so a reader asking for
+        # the run's audit found a whole-flow one or none. MEASURED: that costs 16 cases
+        # across 5 shipped test files (plus 2 collection errors), because "run a scoped
+        # pass, then read this document" is a common and legitimate shape -- and restoring
+        # the canonical write turned every one of them green (409 passed / 3 failed, the 3
+        # being my own arms asserting the split). 20+ consumers against 4 readers that
+        # treat this document as THE RUN'S VERDICT, so the refusal belongs in those four:
+        #   benchmark_evidence_publish._audit_verdict and its convergence guard,
+        #   phase3_one_shot_runner._derive_headline_verdict,
+        #   and the FPGA pre-burn guard, which reads its OWN pass's audit.
+        # What makes that possible is the `scope` block this pass records below.
+        _audit_is_whole_flow = (
+            target_stage is None
+            and bool(_flow_step_ids)
+            and set(_flow_step_ids) <= {str(getattr(r, "id", "")) for r in results})
 
         # ── what this tally was computed OVER ────────────────────────────
         # Two hashes, because "did the design change?" and "did the ruler
@@ -20670,14 +20791,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         except (OSError, ValueError):
             _prior_audit = None
         _carried = []
+        # The prior footprint, carried from the one canonical audit. The
+        # union-across-chains machinery went with the scoped split; `is_auditor_output`
+        # keeps an auditor write out of the design inputs now, and it does not depend on
+        # any chain having recorded it.
         try:
             _pb = (_prior_audit or {}).get("design_input_digest") or {}
-            _carried = [p for p in (_pb.get("auditor_written_paths") or [])
-                        if isinstance(p, str)]
+            _carried = [q for q in (_pb.get("auditor_written_paths") or [])
+                        if isinstance(q, str)]
         except Exception:
             _carried = []
         if _did is not None and _did_scan is not None:
             try:
+                # THE AUDITOR'S OWN WRITES. `audit_path` is already this pass's real
+                # destination -- scoped or canonical -- because the decision was moved
+                # above, so the footprint names the file this pass actually writes.
                 _also_written = [str(audit_path.relative_to(project))]
                 if args.json:
                     _rep = Path(args.json).resolve()
@@ -20904,9 +21032,64 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not audit["reconciliation"]["reconciled"]:
             _audit_did_not_reconcile = audit["reconciliation"]
 
+        # A SCOPED PASS DOES NOT PUBLISH THE WHOLE RUN'S COMPLETION AUDIT.
+        # R-0915-150.
+        #
+        # This document was written on EVERY invocation with no scope guard, stamped
+        # `phase: "all"`, and its readers take it as the WHOLE RUN's verdict:
+        # `benchmark_evidence_publish._audit_verdict` and its convergence guard, and
+        # phase3's `_derive_headline_verdict`, which copies it into
+        # phase3_one_shot.json as `completion_audit_verdict`. So a `--stage 4` pass
+        # left a 10-step audit that reads as the run's own, and the frozen
+        # subservient_r26 / sha256_run16_pass2 snapshots already hold 9-step audits of
+        # exactly that kind. The owner's bar for spm is "completion audit 0 failed
+        # gates", and that sentence is only true of the whole flow.
+        #
+        # THE PRODUCER IS MADE HONEST rather than every reader made suspicious: a
+        # scoped pass writes its own SCOPED copy beside the canonical one and leaves
+        # the canonical document alone, so a reader asking for the run's audit either
+        # finds a whole-flow one or finds none. (audit_replay already copes
+        # consumer-side; that is no reason for the producer to keep publishing a
+        # partial audit under the whole run's name.)
+        audit["scope"] = {
+            "phase": args.phase,
+            "stage": (str(args.stage) if getattr(args, "stage", None) else None),
+            "stage_id": (getattr(args, "stage_id", None) or None),
+            "step_count": len(results),
+            "flow_step_total": _flow_step_total,
+            "whole_flow": _audit_is_whole_flow,
+        }
+        audit["invocation"] = _this_invocation
+        if not _audit_is_whole_flow:
+            # SAID OUT LOUD, so a reader of the log knows what is on disk. The REFUSAL
+            # lives with the four readers named above; this document records `scope`,
+            # which is what lets them refuse it.
+            print(f"flow_compliance_check: this pass judged {len(results)} of "
+                  f"{_flow_step_total} step(s), so the completion audit it publishes is "
+                  f"SCOPED (scope.whole_flow=false) and must NOT be read as this run's "
+                  f"verdict", file=sys.stderr)
         audit_path.parent.mkdir(parents=True, exist_ok=True)
-        audit_path.write_text(
-            json.dumps(audit, indent=2, ensure_ascii=False))
+        # THE TEMP THIS WRITE CREATES IS THIS WRITE'S TO REMOVE. The temp+replace shape
+        # exists so no reader ever sees a half-written audit; it must not pay for that
+        # with a file nobody owns. If the serialise or the write raises (ENOSPC is the
+        # ordinary way) the replace never happens, and without this the temp survives
+        # every later pass -- where, being neither `.json` nor a named auditor output, the
+        # next pre-scan reads it as a DESIGN INPUT and the design hash moves permanently
+        # on an unchanged design. The cleanup never masks the original error: it runs in
+        # `finally`, its own failure is swallowed, and nothing is raised from it.
+        _audit_tmp = audit_path.with_name(
+            f"{audit_path.name}.{os.getpid()}.tmp")
+        try:
+            _audit_tmp.write_text(json.dumps(audit, indent=2, ensure_ascii=False))
+            os.replace(_audit_tmp, audit_path)
+        finally:
+            # After a successful `os.replace` the temp no longer exists, so this is a
+            # no-op on the happy path; `missing_ok` rather than an `exists()` probe,
+            # because a peer sweeping the same prefix between the two is legitimate.
+            try:
+                _audit_tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
         # Printed, not only serialised: the reader who acts on the tally reads
         # the log, and a refusal that only exists in a JSON field is a refusal
         # nobody sees. Advisory — it never moves the verdict or the exit code,
