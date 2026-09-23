@@ -327,15 +327,17 @@ def test_the_writer_removes_its_own_temp_when_the_replace_did_not_happen(tmp_pat
 def test_the_shipped_writer_has_the_cleanup_and_does_not_mask():
     """The arm above proves the shape; this proves the SHIPPED code has it.
 
-    Read from the module's own source rather than asserted about a copy, so the two cannot
-    drift: the `os.replace` must sit in a `try` whose `finally` unlinks the temp, and the
-    `finally` must not raise.
+    R-0915-168 MOVED WHERE "the shipped code" IS. The canonical audit used to be published by a
+    hand-rolled temp+replace inside `main`, and this arm read that function's AST for a `try`
+    whose `finally` unlinked `_audit_tmp`. There is now ONE auditor writer, `_auditor_write`, and
+    the same property is asserted of it -- plus that `main` really does go through it, so the two
+    halves cannot drift. The intent is unchanged: the replace sits in a `try` whose `finally`
+    removes the temp, and the `finally` must not raise.
     """
     import ast
-    src = (Path(__file__).resolve().parents[1]
-           / "flow_compliance_check.py").read_text()
-    tree = ast.parse(src)
 
+    helper = (Path(__file__).resolve().parents[1] / "_auditor_write.py").read_text()
+    tree = ast.parse(helper)
     found = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Try) or not node.finalbody:
@@ -343,12 +345,16 @@ def test_the_shipped_writer_has_the_cleanup_and_does_not_mask():
         body = ast.dump(ast.Module(body=node.body, type_ignores=[]))
         if "os.replace" not in body and "'replace'" not in body:
             continue
-        if "_audit_tmp" not in body:
-            continue
         fin = ast.dump(ast.Module(body=node.finalbody, type_ignores=[]))
-        found.append(("unlink" in fin, "_audit_tmp" in fin,
+        found.append(("_discard" in fin or "unlink" in fin,
                       any(isinstance(n, ast.Raise) for n in ast.walk(
                           ast.Module(body=node.finalbody, type_ignores=[])))))
-    assert found, "the audit temp write is not wrapped in a try/finally at all"
-    assert any(unlinks and names_tmp and not reraises
-               for unlinks, names_tmp, reraises in found), found
+    assert found, "the helper's replace is not wrapped in a try/finally at all"
+    assert any(cleans and not reraises for cleans, reraises in found), found
+
+    # and the auditor publishes the canonical audit THROUGH it
+    src = (Path(__file__).resolve().parents[1] / "flow_compliance_check.py").read_text()
+    assert "_aw.publish(audit_path" in src, (
+        "`main` no longer publishes the canonical audit through the one auditor writer")
+    assert "_audit_tmp" not in src, (
+        "the hand-rolled temp is back beside the helper; that is two shapes again")

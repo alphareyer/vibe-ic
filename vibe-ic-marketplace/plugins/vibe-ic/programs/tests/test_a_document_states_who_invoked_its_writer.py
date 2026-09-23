@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -353,7 +354,11 @@ def test_noting_authorship_does_not_move_the_design_hash(tmp_path):
     FCC._record_audit_created(project, SID, [noted_rel])
 
     made = sorted((project / "reports/audit/audit_created").iterdir())
-    assert [f.suffix for f in made] == [".json", ".lock"], [f.name for f in made]
+    # R-0915-168 — the lock's suffix comes from the declaration now (`.fcc-lock`), because ONE
+    # shape is minted by `_auditor_write` and imported by the digest. The property is unchanged:
+    # the note and exactly one sibling lock, both the auditor's.
+    import _path_layout as _PL
+    assert [f.suffix for f in made] == [".json", _PL.AUDITOR_LOCK_SUFFIX], [f.name for f in made]
     for f in made:
         assert D.is_auditor_output(project, f) is True, f.name
 
@@ -548,37 +553,45 @@ def test_an_interrupted_note_write_leaves_nothing_that_moves_the_design_hash(tmp
 
 
 def test_the_note_writer_removes_its_temp_however_the_write_ends(tmp_path):
-    """`finally`, not `except OSError`: SystemExit and KeyboardInterrupt are how a step dies."""
+    """R-0915-168 moved WHERE this is guaranteed, not WHETHER it is.
+
+    `_write_note_atomically` used to hand-roll temp+replace with its own `finally`; this arm read
+    that function's AST. It now delegates to `_auditor_write.publish`, so the guarantee is
+    asserted of the helper -- and that the note writer really goes through it, so the two cannot
+    drift. Intent unchanged: the temp is removed however the write ends, and the cleanup never
+    masks the write's own error.
+    """
     import ast
     import inspect
 
-    src = inspect.getsource(FCC._write_note_atomically)
-    tree = ast.parse(src.lstrip())
-    tries = [n for n in ast.walk(tree) if isinstance(n, ast.Try)]
-    assert any(t.finalbody and "unlink" in ast.unparse(
-        ast.Module(body=t.finalbody, type_ignores=[])) for t in tries), (
-        "the temp is not removed in a `finally`, so an interrupted write leaks it")
+    import _auditor_write as _AW
 
-    # and it does not mask the write's own failure
-    note = tmp_path / "n.json"
+    src = inspect.getsource(_AW.publish)
+    tries = [n for n in ast.walk(ast.parse(textwrap.dedent(src)))
+             if isinstance(n, ast.Try) and n.finalbody]
+    assert tries, "the helper's write is not wrapped in a try/finally"
+    assert any("_discard" in ast.unparse(ast.Module(body=t.finalbody, type_ignores=[]))
+               for t in tries), "the helper's finally does not remove the temp"
+
+    fsrc = (Path(__file__).resolve().parents[1] / "flow_compliance_check.py").read_text()
+    assert "_aw.publish(note, payload" in fsrc, (
+        "the note writer no longer goes through the one auditor writer")
+
+    # and the guarantee holds when the replace fails: original error out, nothing left behind
+    note = tmp_path / "reports" / "audit" / "audit_created" / "deadbeef.json"
     boom = OSError(28, "No space left on device")
-    real = Path.write_text
-
-    def exploding(self, *a, **k):
-        if self.name.endswith(".tmp"):
-            real(self, *a, **k)
-            raise boom
-        return real(self, *a, **k)
-
-    import pytest as _pytest
-    with _pytest.MonkeyPatch.context() as mp:
-        mp.setattr(Path, "write_text", exploding)
-        with _pytest.raises(OSError) as caught:
-            FCC._write_note_atomically(note, '{"a": 1}')
-    assert caught.value is boom
-    assert not list(tmp_path.glob("*.tmp")), "the temp outlived the interrupted write"
+    real = os.replace
+    try:
+        os.replace = lambda a, b: (_ for _ in ()).throw(boom)
+        with pytest.raises(OSError) as caught:
+            _AW.publish(note, '{"schema": 1}')
+    finally:
+        os.replace = real
+    assert caught.value is boom, "the cleanup masked the original failure"
+    import _path_layout as _PL
+    assert not [q for q in note.parent.iterdir()
+                if _PL.AUDITOR_TMP_SUFFIX in q.name], "the temp outlived the write"
     assert not note.exists()
-
 
 def test_a_producers_temp_in_the_note_directory_shape_is_not_swallowed(tmp_path):
     """The rule is the note directory plus the writer's exact shape, not `*.tmp`."""

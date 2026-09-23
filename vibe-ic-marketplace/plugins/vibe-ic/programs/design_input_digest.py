@@ -115,6 +115,8 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 # ---------------------------------------------------------------------------
 
 import _gate_authorship as _ga   # noqa: E402  R-0915-152 (who invoked the writer)
+import _path_layout as _pl_shapes  # noqa: E402  R-0915-168 (one in-progress shape)
+import _auditor_write as _aw       # noqa: E402  R-0915-168 (the one auditor writer)
 
 SCHEMA_VERSION = 1
 
@@ -190,66 +192,20 @@ _AUDITOR_IDENTITY_KEYS = ("program", "written_by")
 AUDITOR_OUTPUT_PATHS = (
     "reports/audit/phase23_completion_audit.json",
 )
-#: The auditor writes that document through a temp sibling named `<final>.<pid>.tmp`, so a
-#: reader never sees a half-written audit. A crash between the write and the replace leaves
-#: that temp behind, and it is as much the auditor's output as the document it was about to
-#: become -- so it is recognised, by the EXACT shape the writer mints and nothing wider.
-#: NOT `*.tmp`: a producer's own temp anywhere in the tree is a design artefact and must
-#: keep counting, and a rule that swallowed every `.tmp` would be the directory mistake
-#: again in a new spelling.
-_AUDITOR_TMP_RE = re.compile(
-    r"^(?:" + "|".join(re.escape(_p) for _p in AUDITOR_OUTPUT_PATHS)
-    + r")\.\d+\.tmp$")
 
-#: The authorship notes are locked per note key, and the lock is a SIBLING FILE
-#: (`<note>.json.lock`) because locking the note itself would mean opening the very file a
-#: concurrent writer is replacing. That lock has no content and no stamp -- it cannot have
-#: one, it is a 0-byte flock target -- so identity cannot see it, and it persists after the
-#: lock is released.
-#:
-#: MEASURED: with it unrecognised, `_record_audit_created` moves the design hash. A pass
-#: that merely NOTED its own authorship would publish `design_moved=True` on a byte-identical
-#: design -- the defect this record exists to prevent, caused by the record's own
-#: bookkeeping. Found by running this branch's suite together with the authorship-note
-#: branch: neither alone has both halves.
-#:
-#: This names ONE DIRECTORY, and that is not the mistake R-0915-151 corrected. The
-#: difference is ownership: `reports/audit/` is the auto-router's catch-all, shared with
-#: producers and with the IC expert's own answer files, while `reports/audit/audit_created/`
-#: is created by `_record_audit_created` alone and holds nothing else -- and the shape is
-#: pinned to the note filename the auditor mints, not to "anything in here".
-_AUDIT_AUTHORSHIP_DIR = "reports/audit/audit_created"
-_AUDITOR_LOCK_RE = re.compile(
-    r"^" + re.escape(_AUDIT_AUTHORSHIP_DIR) + r"/[0-9a-f]+\.json\.lock$")
-#: And the note's own atomic temp, `<hex>.json.<pid>.<tid>.tmp`, left behind when the pass
-#: writing it was interrupted. Recognised for the same reason as the lock and the canonical
-#: audit's temp: it is the auditor's own file, it has no stamp to be identified by, and
-#: unrecognised it moves the design hash on every later pass. Pinned to the shape the writer
-#: mints inside the note directory -- never `*.tmp`, which is a producer's partial write.
-_AUDITOR_NOTE_TMP_RE = re.compile(
-    r"^" + re.escape(_AUDIT_AUTHORSHIP_DIR) + r"/[0-9a-f]+\.json\.\d+\.\d+\.tmp$")
-#: And the per-step OUTPUT record's atomic temp, `<sid>.json.<pid>.tmp`, left behind when the
-#: pass writing it was interrupted. R-0915-165's record is written temp-then-replace for the same
-#: reason the audit document is -- no reader may see a half-written one -- and the leftover is as
-#: much the auditor's as the record it was about to become. Third time this shape has bitten: the
-#: canonical audit's temp, the authorship note's temp, and now this one. The directory is taken
-#: from `_path_layout`, which is where the writer gets it, so the two cannot drift; the step name
-#: is whatever `step_metrics.normalize_step` produced, hence the permissive `[0-9a-z_.]+`.
-#: NOT `*.tmp`: a producer's own partial write anywhere in the tree is a design artefact.
-try:
-    from _path_layout import STEP_OUTPUT_RECORD_DIR as _STEP_OUT_DIR
-except Exception:                                          # pragma: no cover
-    _STEP_OUT_DIR = "reports/audit/step_outputs"
-_AUDITOR_STEP_OUTPUT_TMP_RE = re.compile(
-    r"^" + re.escape(_STEP_OUT_DIR) + r"/[0-9a-z_.]+\.json\.\d+\.tmp$")
 
 
 def is_auditor_output(project: Path, path: Path) -> bool:
     """Is this file the AUDITOR's own output rather than a design input?"""
     rel = _rel(project, path)
-    if (rel in AUDITOR_OUTPUT_PATHS or _AUDITOR_TMP_RE.match(rel)
-            or _AUDITOR_LOCK_RE.match(rel) or _AUDITOR_NOTE_TMP_RE.match(rel)
-            or _AUDITOR_STEP_OUTPUT_TMP_RE.match(rel)):
+    # ONE QUESTION, ASKED OF THE DECLARATION. R-0915-168. The three shape rules that used to
+    # stand here -- the canonical audit's temp, the note's lock, the note's temp -- were written
+    # one per incident, each after a reviewer found the previous one, and a fourth arrived with
+    # the per-step record. `_path_layout.is_auditor_inprogress_name` is now the single answer,
+    # minted by `_auditor_write` and by nothing else, so a new auditor mechanism is covered the
+    # day it is written instead of the day somebody notices. It still recognises all four OLD
+    # shapes, because leftovers in them exist on every tree produced before this change.
+    if rel in AUDITOR_OUTPUT_PATHS or _pl_shapes.is_auditor_inprogress_name(rel):
         return True
     if _SUPERSEDED_RE.search(rel):
         return True
@@ -944,7 +900,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         block = build_digest(scan_inputs(project), [])
         print(json.dumps(block, indent=2))
         if args.json:
-            Path(args.json).write_text(json.dumps(block, indent=2))
+            _aw.publish(Path(args.json), json.dumps(block, indent=2))
         return 2 if block.get("sha256") is None else 0
 
     prior_path, current_path = args.compare
@@ -956,7 +912,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     result = classify(prior, current)
     print(json.dumps(result, indent=2))
     if args.json:
-        Path(args.json).write_text(json.dumps(result, indent=2))
+        _aw.publish(Path(args.json), json.dumps(result, indent=2))
     return exit_code_for(result["classification"])
 
 

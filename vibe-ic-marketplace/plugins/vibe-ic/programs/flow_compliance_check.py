@@ -106,6 +106,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor
 import _path_layout as _pl
 import _gate_authorship as _ga
+import _auditor_write as _aw   # R-0915-168 (the one auditor writer)
 import _reused_ip_predicate as _reused_ip
 import _waiver_entries as _we
 import _evidence_independence as _ev_ind  # #524
@@ -4200,7 +4201,7 @@ def _publish_over_the_audits_own_document(argv: List[str], project: Path
         keep = abs_target.with_name(
             abs_target.name[:-len(".json")] + _SUPERSEDED_SUFFIX.format(n=n))
         try:
-            shutil.copy2(abs_target, keep)
+            _aw.copy_aside(abs_target, keep)
         except OSError:                                    # pragma: no cover
             return None
         _stale_scope = (stale.get("scope") if isinstance(stale, dict) else None)
@@ -4262,7 +4263,11 @@ def _stamp_publication(provenance: Optional[Dict[str, Any]]) -> None:
                      "above (R-0915-138). A compliance report is the auditor's "
                      "own document; a producer's document is never written over"),
         }
-        path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+        # R-0915-168 (D1) — INTENDED BEHAVIOUR CHANGE, ATOMICITY ONLY. This was a bare
+        # read-modify-write onto the SAME path `main` publishes temp+replace, so a reader could
+        # see a half-written completion audit through this second door, which is exactly what the
+        # first door exists to prevent. Nothing about the document changes.
+        _aw.publish(path, json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
     except (OSError, ValueError):                          # pragma: no cover
         return
 
@@ -15211,52 +15216,14 @@ _AUDIT_AUTHORSHIP_DIR = "reports/audit/audit_created"
 def _note_lock(note: Path):
     """Hold an exclusive lock for ONE authorship note, across threads AND processes.
 
-    R-0915-152 — THE NESTED-AUDIT RACE. Step 7's gate clause runs a NESTED
-    `flow_compliance_check`, which re-evaluates step 2 while the outer pass is
-    evaluating it too; on the default threaded path (`_compliance_workers`) two
-    threads of one pass can reach the same step's note as well. The note's key is
-    `sha1(f"{sid}|{rel}")`, so both arrive at the SAME file, and nothing serialised
-    them: one could read a half-written note (unreadable -> the artefact is credited
-    as the run's) or drop a note the other had just decided to rely on. That is
-    "MISSING twice, PASS forever" reached by concurrency instead of by staleness.
-
-    A LOCK FILE, not a lock on the note: locking the note itself would mean opening
-    the file being replaced, and `os.replace` swaps the inode out from under any
-    holder. The lock is per NOTE KEY, so two different notes never wait on each other.
-
-    Degrades to a no-op where `fcntl` is unavailable, because a platform without file
-    locks is not a reason to stop recording authorship -- the atomic write below still
-    guarantees a reader sees whole bytes.
+    R-0915-168 — DELEGATED to `_auditor_write.holding_lock`, the only thing that mints a lock
+    name, so the shape written here and the shape `design_input_digest` recognises cannot drift
+    apart. The reasoning that shaped this -- a SIBLING lock file rather than a lock on the note
+    itself, acquired before a SINGLE yield, and a lock we cannot take never stopping the audit --
+    now lives with the helper, once, instead of here and in two other places.
     """
-    lock_path = note.with_name(note.name + ".lock")
-    fh = None
-    # ACQUIRE OUTSIDE THE `yield`, AND YIELD EXACTLY ONCE. An earlier cut of this had
-    # a second `yield` in an `except OSError:` arm, so a body that raised -- a
-    # `note.unlink()` on an already-removed note, which is the ORDINARY drop case
-    # under concurrency -- threw into the generator, hit that arm and yielded again:
-    # "generator didn't stop after throw()". My own concurrency arm caught it. A
-    # context manager has one yield; failing to take the lock is handled here, before
-    # the body runs.
-    try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(lock_path, "a+")
-        try:
-            import fcntl                                   # noqa: PLC0415
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        except Exception:                                   # pragma: no cover
-            pass
-    except OSError:                                         # pragma: no cover
-        # A lock we cannot take must not stop the audit; the atomic write still keeps
-        # every reader seeing a whole note.
-        fh = None
-    try:
+    with _aw.holding_lock(note):
         yield
-    finally:
-        if fh is not None:
-            try:
-                fh.close()
-            except OSError:                                 # pragma: no cover
-                pass
 
 
 def _write_note_atomically(note: Path, payload: str) -> None:
@@ -15267,26 +15234,10 @@ def _write_note_atomically(note: Path, payload: str) -> None:
     CREDITS the auditor's own document as the run's. Written to a sibling temp file
     and `os.replace`d, which is atomic within a directory on POSIX.
     """
-    tmp = note.with_name(f"{note.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    try:
-        tmp.write_text(payload)
-        os.replace(tmp, note)
-    finally:
-        # `finally`, NOT `except OSError`. The narrower form missed the two ways a step
-        # actually dies -- `SystemExit` and `KeyboardInterrupt` are BaseException, not
-        # Exception, and `_atomic_artefact.writing` says exactly that about its own
-        # cleanup -- so an interrupted pass left `<hex>.json.<pid>.<tid>.tmp` behind. That
-        # leftover is the auditor's, carries no content a reader could identify it by, and
-        # until it was recognised it moved the DESIGN HASH on every later pass. Same shape,
-        # and the same two halves, as the canonical audit's own temp.
-        #
-        # A no-op on the happy path: `os.replace` has already consumed the temp. The
-        # cleanup's own failure is swallowed so it can never mask the write's error, and
-        # nothing is raised from here.
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:                                     # pragma: no cover
-            pass
+    # R-0915-168 — through the one auditor writer. Its temp and lock follow the single shape
+    # `_path_layout` declares and `design_input_digest` imports, so an interrupted write leaves
+    # nothing the digest reads as a design input.
+    _aw.publish(note, payload, lock=False)
 
 
 #: THIS INVOCATION'S IDENTITY, inherited by every nested clause through the
@@ -15731,26 +15682,25 @@ def _emit_step_output_record(project: Path, step: Dict[str, Any],
                 unusable.append(pat)
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        _tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
-        try:
-            _tmp.write_text(json.dumps({
-                "schema": 1,
-                "written_by": "flow_compliance_check",
-                "invocation": _invocation_id(),
-                "step": str(step.get("id")),
-                "status": status,
-                "declared": outputs,
-                "missing": sorted(missing),
-                "unusable": sorted(unusable),
-                "note": ("what THIS step's own gate found wanting among its declared "
-                         "outputs; a consumer asking whether an upstream blockage is about "
-                         "a given artefact reads these two lists and nothing else"),
-            }, indent=1) + "\n")
-            os.replace(_tmp, dest)
-        finally:
-            try:
-                _tmp.unlink(missing_ok=True)
-            except OSError:                                    # pragma: no cover
+        # R-0915-168 — THROUGH THE ONE AUDITOR WRITER. This was the third hand-rolled
+        # temp+replace in this module, with the third temp shape, and it cost its own review
+        # (wxxk320qx) before `is_auditor_output` learned to recognise the leftover. It now mints
+        # the single declared shape, so an interrupted write leaves nothing the digest reads as a
+        # design input -- and no fourth mechanism has to be found by a fourth reviewer.
+        _aw.publish(dest, json.dumps({
+            "schema": 1,
+            "written_by": "flow_compliance_check",
+            "invocation": _invocation_id(),
+            "step": str(step.get("id")),
+            "status": status,
+            "declared": outputs,
+            "missing": sorted(missing),
+            "unusable": sorted(unusable),
+            "note": ("what THIS step's own gate found wanting among its declared "
+                     "outputs; a consumer asking whether an upstream blockage is about "
+                     "a given artefact reads these two lists and nothing else"),
+        }, indent=1) + "\n")
+    except OSError:                                    # pragma: no cover
                 pass
     except OSError:                                            # pragma: no cover
         return
@@ -21839,8 +21789,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         # created `reports/analog/` — a clean stage verdict was turned into
         # a phase-2 FAIL that halted the whole run. Every other report
         # writer in this flow creates its parent; this one did not.
-        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.json).write_text(json.dumps(out, indent=2))
+        # R-0915-168 (D2) — INTENDED BEHAVIOUR CHANGE, ATOMICITY ONLY. A bare write_text here
+        # meant a concurrent reader of this receipt could see it half written. The payload is
+        # byte-for-byte what it was.
+        _aw.publish(Path(args.json), json.dumps(out, indent=2))
         # THIS PASS'S OWN RECEIPT, ALWAYS WRITTEN BY THIS PASS. Its `scope` block
         # already says what it judged; `invocation` says who wrote it, so a later
         # reader can tell "this stage's own pass" from "a clause in somebody else's".
@@ -22292,19 +22244,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         # next pre-scan reads it as a DESIGN INPUT and the design hash moves permanently
         # on an unchanged design. The cleanup never masks the original error: it runs in
         # `finally`, its own failure is swallowed, and nothing is raised from it.
-        _audit_tmp = audit_path.with_name(
-            f"{audit_path.name}.{os.getpid()}.tmp")
-        try:
-            _audit_tmp.write_text(json.dumps(audit, indent=2, ensure_ascii=False))
-            os.replace(_audit_tmp, audit_path)
-        finally:
-            # After a successful `os.replace` the temp no longer exists, so this is a
-            # no-op on the happy path; `missing_ok` rather than an `exists()` probe,
-            # because a peer sweeping the same prefix between the two is legitimate.
-            try:
-                _audit_tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
+        # R-0915-168 — through the one auditor writer, which mints the declared temp shape and
+        # holds the per-document lock so this and `_stamp_publication` cannot interleave.
+        _aw.publish(audit_path,
+                    json.dumps(audit, indent=2, ensure_ascii=False))
         # Printed, not only serialised: the reader who acts on the tally reads
         # the log, and a refusal that only exists in a JSON field is a refusal
         # nobody sees. Advisory — it never moves the verdict or the exit code,
