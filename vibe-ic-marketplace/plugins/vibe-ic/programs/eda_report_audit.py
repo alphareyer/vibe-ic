@@ -3052,8 +3052,20 @@ def _liberty_head_from_image(lib: Path, image: str) -> Tuple[Optional[str], str]
     """
     try:
         import shlex as _shlex
-        argv = ["docker", "run", "--rm", "--entrypoint", "/bin/sh", image,
-                "-c", f"head -c {_LIBERTY_HEAD_BYTES} {_shlex.quote(str(lib))}"]
+        try:
+            import _docker_memory as _dmem
+        except ImportError:                                  # pragma: no cover
+            from . import _docker_memory as _dmem            # type: ignore
+        # EVERY `docker run` CARRIES THE CEILING. This one reads 64 KB out of a
+        # 20 MB liberty and will never approach it — but the rule is about the
+        # SITE, not this site's appetite: a container created without a ceiling
+        # is one the host cannot bound, and an audit is exactly the place a
+        # future edit would grow. Spliced in after the run verb, as
+        # `test_no_docker_run_escapes_the_ceiling` requires.
+        argv = (["docker", "run"] + _dmem.docker_memory_flags()
+                + ["--rm", "--entrypoint", "/bin/sh", image,
+                   "-c",
+                   f"head -c {_LIBERTY_HEAD_BYTES} {_shlex.quote(str(lib))}"])
         r = subprocess.run(argv, capture_output=True, text=True,
                            errors="replace", timeout=180)
     except Exception as exc:                                 # noqa: BLE001
