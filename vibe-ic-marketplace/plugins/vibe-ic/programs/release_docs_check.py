@@ -115,6 +115,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import _ic_release_artefacts as _art
+import yaml
+
 import _flow_reason_taxonomy as _reason_taxonomy
 import _ic_release_artefacts as _art
 import tapeout_docs_gen as _tap
@@ -1380,65 +1382,143 @@ PRODUCER_REFUSAL_REL = "reports/phase3/release_docs_producer_refusal.json"
 PRODUCER_METRICS_REL = "phase3/final/metrics.json"
 
 
-def upstream_blockage_now(project: Path, release: str) -> dict:
-    """Is THIS release's upstream blocked, judged on the files as they are NOW?
+#: The metrics record the producer reads, and the flow step that DECLARES it.
+PRODUCER_METRICS_REL = "phase3/final/metrics.json"
 
-    R-0915-146. The first cut of this gate granted BLOCKED_BY_UPSTREAM on the
-    producer's RECORD — its shape alone: a `program`, a `verdict: REFUSED` and at
-    least one reason string. That is the mistake R-0915-136 names in one line: a
-    program's CLAIM about a state is not the state. Three ways it went wrong, all
-    confirmed:
+#: A step's own published verdict for THIS run lives here, keyed by the step id --
+#: `reports/metrics/<sid>.json` carrying `<sid>__flow__step_status`. That is the
+#: record `flow_compliance_check` writes for the step itself, which is why it is the
+#: right authority: it is the step's verdict, not another program's opinion of the
+#: step's files.
+_STEP_STATUS_REL_FMT = "reports/metrics/{sid}.json"
+_STEP_STATUS_KEY_FMT = "{sid}__flow__step_status"
+#: A step's verdict counts as a BLOCKAGE only in these tiers. R-0915-140's shape.
+_BLOCKING_STEP_STATUSES = frozenset({"FAIL", "NOT_MEASURED", "BLOCKED",
+                                     "INCOMPLETE"})
 
-      * STALE. Run N refuses for STA_NO_SLACK / POWER_NO_TOTAL; the STA and power
-        records are then fixed (step 23's own gate clause rewrites
-        post_route_summary.json, or a plugin upgrade lands) without re-running the
-        producer — the audit never runs `ic_release_docs_gen`, it is not in
-        `_PRE_AUDIT_PRODUCERS`. Re-audit: NOT_MEASURED/BLOCKED, blaming an STA that
-        is fine, where the step genuinely owes its documents and the correct verdict
-        is FAIL. A hand-written record works identically, and the record was bound
-        to no file — no digest, no tree_sha.
-      * A CRASH READ AS BLOCKAGE. Any exception before the success tail left the
-        previous run's record in place, and rc 1 was read as "the producer
-        declined".
-      * A FOREIGN RELEASE. A leftover record for `spm` excused an absent `spm_v2`,
-        because nothing compared the record's releases with the ones that failed.
 
-    So the blockage is RE-DERIVED here, from the current tree, with the producer's
-    OWN predicates — `_ic_release_artefacts.audit(project, release).errors` and
-    `tapeout_docs_gen.release_blockers(load_metrics(...))`, both pure readers, both
-    imported rather than reimplemented. Per release, so one release's blockage can
-    never excuse another's absence. The record survives only as a POINTER in the
-    disclosure; it is never the evidence.
+def _declaring_step(rel: str) -> Optional[str]:
+    """The flow step that DECLARES this path as a required_output, glob-aware.
+
+    DERIVED FROM THE FLOW, not tabled: a table mapping a refusal class to a step
+    goes stale the first time a step is renumbered, and this question already has an
+    answer in the flow definition. `reports/phase3/sta/post_route_summary.json` is
+    step 23's; `reports/phase3/power.json` is step 33's;
+    `phase3/stage4/gds/*.gds` is step 37's; `phase3/final/metrics.json` is 37.4's.
     """
-    substance: List[str] = []
-    blockers: List[str] = []
+    import fnmatch
+    try:
+        doc = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent
+             / "flow" / "phase1_phase2_phase3.yaml").read_text())
+    except (OSError, ValueError):                          # pragma: no cover
+        return None
+    for step in (doc or {}).get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        for declared in (step.get("required_outputs") or []):
+            for alt in str(declared).split(" OR "):
+                alt = alt.strip()
+                if not alt:
+                    continue
+                if alt == rel or fnmatch.fnmatch(rel, alt):
+                    return str(step.get("id"))
+    return None
+
+
+def step_verdict_now(project: Path, sid: str) -> Tuple[str, str]:
+    """The step's OWN published verdict in this run, or why it cannot be read."""
+    path = project / _STEP_STATUS_REL_FMT.format(sid=sid)
+    try:
+        doc = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return "ABSENT", f"no step record at {path.name}"
+    if not isinstance(doc, dict):
+        return "ABSENT", f"{path.name} is not an object"
+    status = doc.get(_STEP_STATUS_KEY_FMT.format(sid=sid))
+    if status:
+        return str(status).strip().upper(), ""
+    # Some steps publish measurements and a `passed` flag instead of a status word.
+    passed = doc.get(f"{sid}__flow__passed")
+    if isinstance(passed, bool):
+        return ("PASS" if passed else "FAIL"), ""
+    return "ABSENT", f"{path.name} carries no status for step {sid}"
+
+
+def upstream_blockage_now(project: Path, release: str) -> dict:
+    """Is THIS release's upstream blocked — judged by the upstream STEP's own verdict?
+
+    R-0915-146 established that the producer's RECORD is not evidence: a program's
+    claim about a state is not the state. R-0915-149 fixes what I replaced it with.
+
+    RE-DERIVING THE PRODUCER'S PREDICATES WAS THE WRONG AUTHORITY, and a review
+    caught it with the one measurement that settles it: the flow's OWN healthy
+    records do not satisfy those predicates. The runner's `reports/phase3/power.json`
+    carries no number BY DESIGN (`eda_report_audit`: "It carries no number of its
+    own"), and step 23's `post_route_summary.json` carries the BOOL `has_wns_tns`,
+    which the producer's number scan skips. So on every real tree that reaches steps
+    23 and 33 the predicates answered STA_NO_SLACK + POWER_NO_TOTAL, the producer
+    refused, and my gate reported BLOCKED_BY_UPSTREAM -- blaming two steps whose OWN
+    gates PASS on those same files. My "healthy" fixture passed only because it wrote
+    no STA or power file at all: a fixture that avoided the defect instead of
+    exercising it.
+
+    "The release-docs reader cannot digest the declared format" is 37.5ic's OWN
+    defect, and it is a FAIL. It is not upstream blockage.
+
+    SO THE AUTHORITY IS THE UPSTREAM STEP. The producer's findings are used ONLY to
+    NAME which artefacts are at issue; each artefact's DECLARING step comes from the
+    flow; and that step's own published verdict for this run decides. A step that
+    PASSES can never be the excuse for missing documents, however loudly another
+    program complains about its files.
+    """
+    named: List[dict] = []
     try:
         audit = _art.audit(project, release)
-        substance = [f.line() for f in (audit.errors or [])]
+        for f in (audit.errors or []):
+            named.append({"rule": getattr(f, "rule", ""),
+                          "path": str(getattr(f, "path", "") or ""),
+                          "detail": f.line()})
     except Exception as exc:                               # pragma: no cover
-        # A predicate that cannot run is not a blockage: say so and let the
-        # documents stay owed. Guessing either way here is what this whole change
-        # is against.
-        return {"release": release, "blocked": False, "substance_refusals": [],
-                "release_blockers": [],
-                "predicate_error": f"{exc.__class__.__name__}: {exc}"}
+        return {"release": release, "blocked": False, "named": [],
+                "blocking_steps": {}, "unattributed": [],
+                "note": f"the artefact reader raised: "
+                        f"{exc.__class__.__name__}: {exc}"}
     try:
         metrics = _tap.load_metrics(project / PRODUCER_METRICS_REL)
-        if metrics:
-            blockers = [str(b) for b in (_tap.release_blockers(metrics) or [])]
-        else:
-            # The producer's own words for this state, kept identical so the two
-            # programs cannot describe one tree two ways.
-            blockers = [f"{PRODUCER_METRICS_REL}: absent or unreadable, so no "
-                        f"sign-off property was decided by any artefact of this run"]
+        for b in (_tap.release_blockers(metrics) if metrics else []):
+            named.append({"rule": "RELEASE_BLOCKER", "path": PRODUCER_METRICS_REL,
+                          "detail": str(b)})
+        if not metrics:
+            named.append({"rule": "METRICS_ABSENT", "path": PRODUCER_METRICS_REL,
+                          "detail": f"{PRODUCER_METRICS_REL}: absent or unreadable"})
     except Exception as exc:                               # pragma: no cover
-        return {"release": release, "blocked": False,
-                "substance_refusals": substance, "release_blockers": [],
-                "predicate_error": f"{exc.__class__.__name__}: {exc}"}
+        named.append({"rule": "METRICS_UNREADABLE", "path": PRODUCER_METRICS_REL,
+                      "detail": f"{exc.__class__.__name__}: {exc}"})
+
+    blocking: dict = {}
+    passing: dict = {}
+    unattributed: List[str] = []
+    for item in named:
+        sid = _declaring_step(item["path"]) if item["path"] else None
+        if sid is None:
+            # Nothing in the flow declares this path, so no step owns it and no
+            # step's verdict can excuse anything. Named, never absorbed.
+            unattributed.append(item["detail"])
+            continue
+        status, why = step_verdict_now(project, sid)
+        entry = {"status": status, "why": why, "because": item["detail"],
+                 "artefact": item["path"]}
+        if status in _BLOCKING_STEP_STATUSES:
+            blocking[sid] = entry
+        else:
+            passing[sid] = entry
     return {"release": release,
-            "blocked": bool(substance or blockers),
-            "substance_refusals": substance,
-            "release_blockers": blockers}
+            "blocked": bool(blocking),
+            "named": [i["detail"] for i in named],
+            "blocking_steps": blocking,
+            "upstream_steps_passing": passing,
+            "unattributed": unattributed}
 
 
 def producer_refusal(project: Path) -> Optional[dict]:
@@ -1561,12 +1641,23 @@ def run_audit(project: Path, arm: str) -> Result:
     blockage = {}
     if failed and arm == "ic":
         blockage = {rel: upstream_blockage_now(project, rel) for rel in failed}
-    #: EVERY failing release must be blocked NOW. One release whose upstream is
-    #: healthy owes its documents, and a sibling's blockage does not excuse it —
-    #: that is the foreign-release hole, closed by construction rather than by
-    #: comparing a record's `releases` list against anything.
-    all_blocked = bool(blockage) and all(b.get("blocked")
-                                        for b in blockage.values())
+    # THE PRODUCER'S OWN SCOPE, R-0915-149 / F2. `ic_release_docs_gen` audits the
+    # WHOLE RUN and writes NOTHING when any artefact class refuses, so judging per
+    # release asked a question the producer never answers: with release `b` hollow,
+    # release `a`'s documents cannot be written either, and reporting `a` as "carries
+    # no release documentation" blamed `a` for `b`'s breakage. My previous arm pinned
+    # exactly that, and it was wrong.
+    #
+    # So one blocking upstream STEP anywhere blocks the run's documents -- and every
+    # excused release NAMES the step and the artefact that blocked it, so nothing is
+    # excused anonymously.
+    _all_blocking: dict = {}
+    for _rel, _b in blockage.items():
+        for _sid, _entry in (_b.get("blocking_steps") or {}).items():
+            _all_blocking.setdefault(_sid, dict(_entry, release=_rel))
+    for _b in blockage.values():
+        _b["blocked_by"] = {sid: e for sid, e in _all_blocking.items()}
+    all_blocked = bool(_all_blocking)
     refusal = producer_refusal(project) if (failed and arm == "ic") else None
     if all_blocked and only_absent:
         result.passed = False
@@ -1583,10 +1674,11 @@ def run_audit(project: Path, arm: str) -> Result:
             "failed": failed,
             # WHAT WAS OBSERVED NOW, per release — the evidence.
             "upstream_blockage": blockage,
+            # WHICH upstream steps blocked this run's documents, by their OWN
+            # published verdict, and which artefact named each one.
+            "blocking_steps": _all_blocking,
             "producer_refusals": sorted({
-                r for b in blockage.values()
-                for r in (b.get("substance_refusals") or [])
-                + (b.get("release_blockers") or [])}),
+                str(e.get("because")) for e in _all_blocking.values()}),
             # THE RECORD, IF ANY — a POINTER for a reader, never the evidence. A
             # verdict that rested on it is the defect R-0915-146 closed.
             "producer": (str(refusal.get("program")) if refusal else None),

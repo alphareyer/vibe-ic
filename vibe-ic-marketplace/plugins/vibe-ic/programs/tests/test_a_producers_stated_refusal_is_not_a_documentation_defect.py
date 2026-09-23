@@ -243,9 +243,11 @@ def test_the_producer_writes_the_record_when_it_refuses(tmp_path):
         assert doc["verdict"] == "REFUSED"
         assert doc["substance_refusals"] or doc["release_blockers"], doc
         assert doc["documents_written"] == []
-        # and the gate reads exactly this document
+        # and the RECORD is still only a pointer: with no upstream step publishing a
+        # blocking verdict on this tree, the documents are owed and the verdict is
+        # FAIL however emphatic the record is.
         assert CHK.producer_refusal(tmp_path) is not None
-        assert CHK.run_audit(tmp_path, "ic").verdict_tier == "NOT_MEASURED"
+        assert CHK.run_audit(tmp_path, "ic").verdict_tier == "FAIL"
     else:
         # The producer took a different path on this fixture (vacuous: no
         # artefact class at all). Then it must NOT have written a refusal —
@@ -308,6 +310,46 @@ def _passing_metrics() -> dict:
     return out
 
 
+def _step_status(project: Path, sid: str, status: str) -> None:
+    """A step's OWN published verdict for this run, in the format
+    `flow_compliance_check` writes: reports/metrics/<sid>.json carrying
+    `<sid>__flow__step_status`. This is the authority R-0915-149 moved to."""
+    f = project / f"reports/metrics/{sid}.json"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({f"{sid}__flow__step_status": status}) + "\n")
+
+
+def _real_writer_formats(project: Path) -> None:
+    """THE FLOW'S OWN HEALTHY RECORDS, in the formats the real writers use.
+
+    This is the fixture my previous cut did not have, and its absence is why the
+    defect survived: I wrote NO sta/power files at all and called that healthy.
+
+      * the runner writes reports/phase3/power.json with
+        {tool, source, analysis_mode, verdict, evidence} and NO NUMBER -- by design;
+        `eda_report_audit` says so in as many words ("It carries no number of its
+        own").
+      * `sta_report_check` writes a summary carrying the BOOL `has_wns_tns`, which
+        the producer's number scan skips because `_numbers_under_key` ignores bools.
+
+    So both records are HEALTHY and the producer's predicates still call them hollow.
+    A gate that reads those predicates as blockage blames steps 23 and 33 while their
+    own gates PASS -- which is the whole finding.
+    """
+    pw = project / "reports/phase3/power.json"
+    pw.parent.mkdir(parents=True, exist_ok=True)
+    pw.write_text(json.dumps({"tool": "opensta",
+                              "source": "phase3/stage3/pnr/power.rpt",
+                              "analysis_mode": "vectorless_sdc",
+                              "verdict": "PASS",
+                              "evidence": "report_power output below"},
+                             indent=2) + "\n")
+    sta = project / "reports/phase3/sta/post_route_summary.json"
+    sta.parent.mkdir(parents=True, exist_ok=True)
+    sta.write_text(json.dumps({"files_found": 1, "has_wns_tns": True,
+                               "verdict": "PASS"}, indent=2) + "\n")
+
+
 def _healthy_upstream(project: Path, release: str = "zzdie") -> None:
     """Everything the producer's OWN predicates need to report NO blockage.
 
@@ -324,14 +366,26 @@ def _healthy_upstream(project: Path, release: str = "zzdie") -> None:
     metrics = project / CHK.PRODUCER_METRICS_REL
     metrics.parent.mkdir(parents=True, exist_ok=True)
     metrics.write_text(json.dumps(_passing_metrics()) + "\n")
+    _real_writer_formats(project)
+    # and the upstream steps publish their OWN verdicts for this run
+    for sid in ("23", "33", "37", "37.4"):
+        _step_status(project, sid, "PASS")
 
 
 def _blocked_upstream(project: Path, release: str = "zzdie") -> None:
-    """The run22 state: a sign-off layout with NO geometry — the producer's own
-    GDS_NO_GEOMETRY refusal, re-derivable from the tree."""
+    """A genuinely blocked upstream: the layout has no geometry AND the step that
+    DECLARES it (37) says so in its own published verdict. Both halves, because the
+    verdict is now what decides and the artefact only names which step to read."""
     gds = project / "phase3/stage4/gds"
     gds.mkdir(parents=True, exist_ok=True)
     (gds / f"{release}.gds").write_bytes(b"\x00" * 448)
+    _real_writer_formats(project)
+    metrics = project / CHK.PRODUCER_METRICS_REL
+    metrics.parent.mkdir(parents=True, exist_ok=True)
+    metrics.write_text(json.dumps(_passing_metrics()) + "\n")
+    for sid in ("23", "33", "37.4"):
+        _step_status(project, sid, "PASS")
+    _step_status(project, "37", "FAIL")
 
 
 def test_the_blockage_is_observable_on_the_current_tree(tmp_path):
@@ -340,10 +394,48 @@ def test_the_blockage_is_observable_on_the_current_tree(tmp_path):
     _blocked_upstream(tmp_path)
     blocked = CHK.upstream_blockage_now(tmp_path, "zzdie")
     assert blocked["blocked"] is True, blocked
-    assert any("GDS_NO_GEOMETRY" in r or "geometry" in r.lower()
-               for r in blocked["substance_refusals"] + blocked["release_blockers"]
-               ), blocked
-    assert "predicate_error" not in blocked, blocked
+    # the artefact NAMES the step; the step's own verdict DECIDES
+    assert "37" in blocked["blocking_steps"], blocked
+    assert blocked["blocking_steps"]["37"]["status"] == "FAIL"
+    assert any("GDS_NO_GEOMETRY" in n or "geometry" in n.lower()
+               for n in blocked["named"]), blocked
+
+
+def test_a_named_artefact_whose_step_PASSES_is_not_an_excuse(tmp_path):
+    """THE FINDING, DIRECTLY. The flow's own healthy records do not satisfy the
+    producer's predicates — the runner's power.json carries no number by design, and
+    step 23's summary carries the bool `has_wns_tns`, which the number scan skips. So
+    the producer refuses and NAMES steps 23 and 33 while those steps' own verdicts
+    say PASS. A reader that cannot digest a declared format is 37.5ic's OWN defect:
+    FAIL, never upstream blockage."""
+    _healthy_upstream(tmp_path)
+    b = CHK.upstream_blockage_now(tmp_path, "zzdie")
+    assert b["named"], "the predicates no longer complain at all; fixture drift"
+    assert b["blocked"] is False, b
+    assert b["upstream_steps_passing"], b
+    assert CHK.run_audit(tmp_path, "ic").verdict_tier == "FAIL"
+
+
+def test_a_step_that_published_not_measured_is_a_blockage(tmp_path):
+    """R-0915-140's other tier: a step that did not measure is blocking, exactly as
+    a FAILing one is."""
+    _blocked_upstream(tmp_path)
+    _step_status(tmp_path, "37", "NOT_MEASURED")
+    b = CHK.upstream_blockage_now(tmp_path, "zzdie")
+    assert b["blocked"] is True and b["blocking_steps"]["37"]["status"] == "NOT_MEASURED"
+
+
+def test_a_step_with_no_published_verdict_is_not_an_excuse(tmp_path):
+    """DELIBERATE, and the conservative direction: a step that has published NOTHING
+    in this run has no verdict, so there is no evidence of blockage and the documents
+    are still owed. "No evidence" must never read as "blocked"."""
+    _healthy_upstream(tmp_path)
+    (tmp_path / "phase3/stage4/gds/zzdie.gds").write_bytes(b"\x00" * 448)
+    for sid in ("23", "33", "37", "37.4"):
+        (tmp_path / f"reports/metrics/{sid}.json").unlink(missing_ok=True)
+    b = CHK.upstream_blockage_now(tmp_path, "zzdie")
+    assert b["blocked"] is False, b
+    assert CHK.run_audit(tmp_path, "ic").verdict_tier == "FAIL"
 
 
 def test_a_stale_record_over_a_fixed_upstream_is_a_fail(tmp_path):
@@ -381,16 +473,27 @@ def test_a_genuine_blockage_needs_no_record_at_all(tmp_path):
     assert result.summary["upstream_blockage"]["zzdie"]["blocked"] is True
 
 
-def test_one_releases_blockage_does_not_excuse_another(tmp_path):
-    """THE FOREIGN-RELEASE HOLE: `zzdie` is blocked, `zzdie_v2` is healthy, and a
-    record naming only `zzdie` used to excuse both. Every failing release must be
-    blocked NOW, so this is FAIL."""
-    _blocked_upstream(tmp_path, "zzdie")
+def test_a_siblings_blockage_excuses_but_must_name_the_step(tmp_path):
+    """RE-PINNED, and my previous arm here was wrong. It asserted FAIL for a healthy
+    release beside a blocked one — but `ic_release_docs_gen` audits the WHOLE RUN and
+    writes NOTHING when any class refuses, so `zzdie_v2`'s documents cannot be written
+    while `zzdie` is hollow, and calling that a documentation defect blamed v2 for
+    zzdie's breakage. The producer's scope is the run.
+
+    What must NOT happen is an ANONYMOUS excuse, so every excused release names the
+    step and the artefact that blocked it."""
     _healthy_upstream(tmp_path, "zzdie_v2")
-    _refusal(tmp_path, reasons=("STA_NO_SLACK [sta] ...",))
+    _blocked_upstream(tmp_path, "zzdie")          # sets step 37 FAIL
     result = CHK.run_audit(tmp_path, "ic")
-    assert result.verdict_tier == "FAIL", (result.verdict_tier,
-                                           result.summary.get("upstream_blockage"))
+    assert result.verdict_tier == "NOT_MEASURED", (result.verdict_tier,
+                                                   result.summary)
+    blocking = result.summary["blocking_steps"]
+    assert "37" in blocking, blocking
+    assert blocking["37"]["status"] == "FAIL"
+    assert blocking["37"]["artefact"].endswith(".gds"), blocking
+    # and each release carries the same named attribution, so none is excused silently
+    for rel, b in result.summary["upstream_blockage"].items():
+        assert b["blocked_by"], (rel, b)
 
 
 def test_a_producer_crash_leaves_no_record_to_misread(tmp_path):
