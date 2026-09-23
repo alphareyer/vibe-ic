@@ -3272,7 +3272,8 @@ def _record_gate_execution(cmd: str, rc: Optional[int], verdict: str,
     return row
 
 
-def _step_produced_every_declared_output(result: Any) -> bool:
+def _step_produced_every_declared_output(result: Any,
+                                        audit_created: Any = None) -> bool:
     """Did THIS step produce every output it declares, by its own binding?
 
     Reads `output_binding`, which `_disclose_output_binding` already publishes
@@ -3294,6 +3295,17 @@ def _step_produced_every_declared_output(result: Any) -> bool:
     k = b.get("n_step_attributed")
     sat = b.get("n_satisfied")
     if not isinstance(n, int) or not isinstance(k, int) or n <= 0:
+        return False
+    # "PRODUCED EVERY DECLARED OUTPUT" MEANS PRODUCED BY THE RUN. An output
+    # that is this step's own gate `--json` target was written by the AUDIT,
+    # and the tree refuses it as run evidence a few lines later. Counting it
+    # as produced let a step claim both "produced every output it declares"
+    # and, in the same row, `n_satisfied 1/2` with a FAIL reading
+    # "AUDIT-CREATED OUTPUT REFUSED" -- shipped step 14's
+    # stage_analog_compliance.json is exactly that shape. MEASURED by the
+    # round-4 review. The caller passes what it knows at the moment it asks;
+    # the count alone cannot answer this because it is taken before the gate.
+    if audit_created:
         return False
     # BOTH, and the second is the one the review added. `n_step_attributed`
     # answers "resolved against THIS step's own write record"; `n_satisfied`
@@ -3337,6 +3349,43 @@ def _skips_that_do_not_speak_for_the_step(
                for m in declared):
         return list(skip_hints), []
     return [], list(skip_hints)
+
+
+def _reason_names_command(reason: str) -> str:
+    """The gate command a reason line is ABOUT, whatever channel wrote it.
+
+    Every typed hint carries the command it came from, but each carries it in
+    its own shape: a bare prefix (`__RAN_HINT__: <cmd>`), a prefix plus a
+    `[verdict=...]` tail (`__SKIP_HINT__:`), a JSON payload
+    (`__ADVISORY_RECORD_HINT__:` with a `cmd` key), or plain prose
+    (`GATE EVIDENCE: <program> rc=...`).
+
+    One reader for all of them, because the round-4 review's finding is that
+    asking this question per-channel is how a clause keeps leaking: rounds 2,
+    3 and 4 each closed one channel and the next one opened.
+    """
+    r = reason or ""
+    if r.startswith(_ADVISORY_RECORD_HINT_PREFIX):
+        try:
+            rec = json.loads(r[len(_ADVISORY_RECORD_HINT_PREFIX):])
+        except (TypeError, ValueError):
+            return ""
+        return str((rec or {}).get("cmd") or "").strip() if isinstance(
+            rec, dict) else ""
+    for pref in (_SKIP_HINT_PREFIX, _RAN_HINT_PREFIX, _VACUOUS_HINT_PREFIX,
+                 _JSON_VACUOUS_HINT_PREFIX, _WAIVER_HINT_PREFIX,
+                 _ADVISORY_HINT_PREFIX, _SUBSTANTIVE_HINT_PREFIX,
+                 _INCOMPLETE_HINT_PREFIX, _AWAITING_HINT_PREFIX,
+                 _NOT_APPLICABLE_HINT_PREFIX,
+                 _EXECUTED_DECLARED_NA_HINT_PREFIX,
+                 _STRUCTURE_ONLY_HINT_PREFIX):
+        if r.startswith(pref):
+            return _hint_command(r, pref)
+    if r.startswith("GATE EVIDENCE: "):
+        # `GATE EVIDENCE: <program> rc=0 verdict=...` — the program name only,
+        # which is how the advisory branch identifies its own clause here.
+        return r[len("GATE EVIDENCE: "):].split(" rc=")[0].strip()
+    return ""
 
 
 def _hint_command(hint: str, prefix: str) -> str:
@@ -16048,14 +16097,43 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # skip verdict emits a __SKIP_HINT__ marker; promote the step to
         # SKIPPED-CONDITION (not PASS, not FAIL) the same way VACUOUS_PASS is
         # promoted from __VACUOUS_HINT__.
+        # A CLAUSE'S N/A IS THAT CLAUSE'S, NOT THE STEP'S — APPLIED ONCE,
+        # HERE, AS ABSENCE FROM THE GATE.
+        #
+        # Rounds 2, 3 and 4 each patched ONE channel and the clause leaked
+        # through the next: first the tier (round 2, via `skip_hints`), then
+        # the legacy count sentences (round 3, via `ran_hints`), then the
+        # json-vacuous branch, the post-hoc PARTIALLY-VACUOUS sentence and the
+        # NOT-APPLICABLE(declared) sentence (round 4). Every one of those
+        # derives its list from `reasons`, so the only place the question has
+        # ONE answer is `reasons` itself.
+        #
+        # A demoted clause is therefore removed from the REASON STREAM before
+        # any list, count or sentence is built. The step is then judged
+        # EXACTLY as it would be with that clause deleted from the flow YAML --
+        # which is the invariant, and is what the property test asserts. The
+        # clause is disclosed separately after the tier chain, because it is
+        # true and a reader must see it.
+        #
+        # AND THE DECISION IS TAKEN HERE, not earlier: "produced every declared
+        # output" means produced by the RUN, and whether an output was written
+        # by this step's own gate is only known once `_audit_produced` is.
+        _demoted_skips: List[str] = []
+        _demoted_ran: List[str] = []
+        if _step_produced_every_declared_output(result, _audit_produced):
+            _cand = [r for r in reasons if r.startswith(_SKIP_HINT_PREFIX)]
+            _keep, _demoted_skips = _skips_that_do_not_speak_for_the_step(
+                _cand, result)
+            if _demoted_skips:
+                _gone = {_hint_command(h, _SKIP_HINT_PREFIX)
+                         for h in _demoted_skips}
+                _demoted_reasons = [r for r in reasons
+                                    if _reason_names_command(r) in _gone]
+                _demoted_ran = [r for r in _demoted_reasons
+                                if r.startswith(_RAN_HINT_PREFIX)]
+                reasons = [r for r in reasons if r not in _demoted_reasons]
         skip_hints = [r for r in reasons
                       if r.startswith(_SKIP_HINT_PREFIX)]
-        # A CLAUSE'S N/A IS THAT CLAUSE'S, NOT THE STEP'S — and the split has
-        # to happen HERE, before the tier chain, because every branch below
-        # the skip branch requires `not skip_hints`. See
-        # `_skips_that_do_not_speak_for_the_step` for the measurement.
-        skip_hints, _demoted_skips = _skips_that_do_not_speak_for_the_step(
-            skip_hints, result)
         # #651 — a gate program that PASSed-WITH-WAIVERS emits a
         # __WAIVER_HINT__ marker; promote the step to WAIVED-DEFERRED so the
         # Overall verdict resolves to PASS_WITH_WAIVERS, never a bare PASS.
@@ -16334,13 +16412,13 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # identical to origin/main, which is exactly the property the
             # guards were written to protect and is asserted directly in them
             # now, instead of being approximated by pinning a label.
-            # THE NUMERATOR INCLUDES THE DEMOTED CLAUSE, because it ran and
-            # it examined nothing. Round 2 took that clause out of the
-            # DENOMINATOR instead, which reached the same verdict here by
-            # making the sentence beside it false. Counting it on both sides
-            # keeps the arithmetic honest and the tier unchanged.
-            unanimous = (len(all_vacuous_cmds) + len(_demoted_ran)
-                         >= len(ran_hints))
+            # ROUND 4: the demoted clause is absent from BOTH sides now --
+            # it never reaches `reasons`, so neither `all_vacuous_cmds` nor
+            # `ran_hints` contains it and this arithmetic is simply the gate
+            # as judged. Round 3 added it to the numerator while it was still
+            # in the denominator, which was true of the step but not of the
+            # gate; doing it once, upstream, makes both readings the same.
+            unanimous = len(all_vacuous_cmds) >= len(ran_hints)
             # SPELLED AS TWO STATEMENTS, NOT A TERNARY, ON PURPOSE.
             # `test_issue634verdict::test_the_producers_vocabulary_
             # is_pinned` discovers this file's vocabulary by scanning its SOURCE
@@ -16391,7 +16469,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                     result.reasons.append(
                         f"vacuous: gate program signalled VACUOUS_PASS "
                         f"(input not applicable), and it is "
-                        f"{len(all_vacuous_cmds) + len(_demoted_ran)} of "
+                        f"{len(all_vacuous_cmds)} of "
                         f"{len(ran_hints)} gate "
                         f"clause(s) that ran here: {cmd}"
                         + (f" — {_diag}" if _diag else "")
@@ -16415,7 +16493,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                     # and nothing about why it examined nothing.
                     result.reasons.append(
                         f"PARTIALLY-VACUOUS "
-                        f"({len(all_vacuous_cmds) + len(_demoted_ran)} of "
+                        f"({len(all_vacuous_cmds)} of "
                         f"{max(len(ran_hints), len(all_vacuous_cmds))} gate "
                         f"clause(s) examined nothing): {cmd}"
                         + (f" — {_diag}" if _diag else "")

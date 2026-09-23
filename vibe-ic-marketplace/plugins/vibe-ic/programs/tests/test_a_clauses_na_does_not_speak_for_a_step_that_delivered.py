@@ -221,8 +221,10 @@ def test_the_tier_chain_sees_the_demotion_not_a_bypass():
     j = src.index("elif passed and skip_hints and not non_hint_reasons:")
     assert i < j, ("the demotion must happen BEFORE the tier chain, or the "
                    "later tiers still see the skip hints")
-    assert "skip_hints, _demoted_skips = " in src[i - 200:j], (
-        "the demotion must rebind skip_hints, not merely compute a boolean")
+    assert "reasons = [r for r in reasons if r not in _demoted_reasons]" \
+        in src[i - 3000:j], (
+            "the demotion must remove the clause from the REASON STREAM, so "
+            "every channel derived from it is covered at once")
 
 
 # ===========================================================================
@@ -348,7 +350,12 @@ def test_a_demoted_na_clause_does_not_count_as_examination(tmp_path):
         # was protecting -- the step must not read PARTIALLY-VACUOUS, because
         # every clause that ran examined nothing -- is unchanged and asserted
         # below; the count beside it is now true as well.
-        assert "2 of 2 gate clause(s) that ran here" in joined, joined
+        # ROUND 4: the demoted clause is now ABSENT FROM THE GATE, so the
+        # step is judged exactly as it would be with that clause deleted from
+        # the YAML -- one clause, vacuous, "1 of 1". Round 3 asserted "2 of 2"
+        # because the clause was then in the denominator's world but not the
+        # numerator's; removing it from both is what makes one sentence true.
+        assert "1 of 1 gate clause(s) that ran here" in joined, joined
         assert "PARTIALLY-VACUOUS" not in joined, (
             "the demoted clause was counted in the denominator: " + joined)
         # and the skip is still disclosed, because it is true.
@@ -421,8 +428,8 @@ def test_the_published_clause_counts_are_true(tmp_path):
         joined = " ".join(r.reasons)
         assert r.status == _T_NOT_MEASURED, (r.status, r.reasons)
         # BOTH clauses dispatched and BOTH examined nothing.
-        assert "2 of 2 gate clause(s)" in joined, joined
-        assert "1 of 1 gate clause(s)" not in joined, joined
+        assert "1 of 1 gate clause(s)" in joined, joined
+        assert "PARTIALLY-VACUOUS" not in joined, joined
     finally:
         g1.unlink(missing_ok=True)
         g2.unlink(missing_ok=True)
@@ -466,3 +473,173 @@ def test_n_satisfied_follows_the_audit_created_retype(tmp_path):
             f"{len(specs)} specs are satisfied; specs={specs}")
     finally:
         g.unlink(missing_ok=True)
+
+
+# ===========================================================================
+# ROUND-4 — THE INVARIANT, not another per-shape test.
+#
+# Rounds 2, 3 and 4 each closed ONE channel and the clause leaked through the
+# next: the tier (via skip_hints), the legacy count sentences (via ran_hints),
+# then the json-vacuous branch, the post-hoc PARTIALLY-VACUOUS sentence and
+# the NOT-APPLICABLE(declared) sentence. Three rounds of per-shape tests never
+# found the next channel, because each one asserted the shape it was written
+# for.
+#
+# The property is simple and covers all of them at once:
+#
+#   A STEP WITH A DEMOTED CLAUSE MUST BE JUDGED EXACTLY AS THE SAME STEP WITH
+#   THAT CLAUSE DELETED FROM THE FLOW YAML.
+#
+# Same status, same reason_class, same disclosures, same count sentences. The
+# only permitted difference is the DISCLOSED-SKIP line, which exists precisely
+# to say the clause was there.
+# ===========================================================================
+
+import itertools as _it  # noqa: E402
+
+_NA_ADVISORY = '''
+    import json, sys
+    i = sys.argv.index("--json")
+    open(sys.argv[i + 1], "w").write(json.dumps(
+        {"verdict": "SKIP", "reason_class": "DESIGN_DECLARED_NA",
+         "examined": 0}))
+    print("SKIP: n/a"); sys.exit(0)
+    '''
+
+#: The other clause, in each channel it can speak through.
+_CHANNELS = {
+    "legacy_vacuous": ('''
+        import sys
+        print("VACUOUS_PASS: examined nothing (reason: no_subject)")
+        sys.exit(0)
+        ''', False),
+    "json_vacuous": ('''
+        import json, sys
+        i = sys.argv.index("--json")
+        open(sys.argv[i + 1], "w").write(json.dumps(
+            {"verdict": "NOT_APPLICABLE", "examined": 0,
+             "reason_class": "DESIGN_DECLARED_NA"}))
+        print("PASS"); sys.exit(0)
+        ''', True),
+    "substantive": ('''
+        import json, sys
+        i = sys.argv.index("--json")
+        open(sys.argv[i + 1], "w").write(json.dumps(
+            {"verdict": "PASS", "examined": 7}))
+        print("PASS"); sys.exit(0)
+        ''', True),
+}
+
+
+def _judge(tmp_path, other_body, other_json, with_na, tag):
+    """check_step over a delivered step, with or without the N/A clause."""
+    progs = []
+    clauses = []
+    if with_na:
+        g1 = _gate_program(tmp_path, f"_p_{tag}_na", _NA_ADVISORY)
+        progs.append(g1)
+        clauses.append({"advisory_program_exit_zero": {
+            "command": f"{g1.stem} . --json reports/{tag}_na.json",
+            "advisory_reason": "property fixture"}})
+    g2 = _gate_program(tmp_path, f"_p_{tag}_other", other_body)
+    progs.append(g2)
+    clauses.append({"program_exit_zero": (
+        f"{g2.stem} . --json reports/{tag}_o.json" if other_json
+        else f"{g2.stem} .")})
+    root = tmp_path / ("with" if with_na else "without")
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "reports").mkdir(exist_ok=True)
+    _project(root, "PT")
+    step = {"id": "PT", "name": "property", "stage": "stage2",
+            "required_outputs": ["phase2/stage2/constraints/*.sdc",
+                                 "phase2/stage2/constraints/pvt_matrix.json"],
+            "gate": {"all_of": clauses}}
+    try:
+        r = F.check_step(root, step, {}, None)
+        # THE ONLY PERMITTED DIFFERENCE IS DISCLOSURE *OF THAT CLAUSE*. Both
+        # the `DISCLOSED-SKIP` line and the clause's own `GATE EVIDENCE` line
+        # exist to say it was there, which is the point -- a demoted clause
+        # must not vanish from the row. Everything else, including every count
+        # sentence, must be identical to the step without it.
+        _na_name = f"_p_{tag}_na"
+        lines = [x for x in r.reasons
+                 if "DISCLOSED-SKIP" not in str(x) and _na_name not in str(x)]
+        # The fixture's own program names differ between arms only by the
+        # clause that is meant to be absent; normalise so the comparison is
+        # about the JUDGEMENT, not the spelling.
+        lines = [str(x).replace(f"_p_{tag}_", "_p_") for x in lines]
+        return (r.status, r.reason_class, tuple(r.disclosures or ()),
+                tuple(sorted(lines)))
+    finally:
+        for g in progs:
+            g.unlink(missing_ok=True)
+
+
+def test_a_demoted_clause_is_judged_as_if_it_were_not_declared(tmp_path):
+    """THE INVARIANT. Every channel, one assertion."""
+    for name, (body, uses_json) in _CHANNELS.items():
+        with_na = _judge(tmp_path / name, body, uses_json, True, name)
+        without = _judge(tmp_path / (name + "_x"), body, uses_json, False, name)
+        assert with_na == without, (
+            f"channel {name}: a demoted N/A clause changed the judgement.\n"
+            f"  with the clause : {with_na}\n"
+            f"  clause deleted  : {without}")
+
+
+def test_an_audit_created_output_is_not_a_step_that_delivered(tmp_path):
+    """ROUND-4 MEDIUM. "Produced every declared output" means produced by the
+    RUN. An output that is this step's own gate `--json` target was written by
+    the AUDIT, and the tree refuses it as run evidence a few lines later --
+    shipped step 14's `stage_analog_compliance.json` is exactly that shape.
+
+    Deciding the demotion from the pre-gate count let one row say both
+    "produced every output it declares" and `n_satisfied 1/2`, with a FAIL
+    reading "AUDIT-CREATED OUTPUT REFUSED". Such a step is not delivered, so
+    its N/A clause keeps speaking for it and the tier stays where the base
+    puts it."""
+    g1 = _gate_program(tmp_path, "_t7r4_na", _NA_ADVISORY)
+    g2 = _gate_program(tmp_path, "_t7r4_gate", '''
+        import json, sys
+        i = sys.argv.index("--json")
+        open(sys.argv[i + 1], "w").write(json.dumps({"verdict": "PASS"}))
+        print("PASS"); sys.exit(0)
+        ''')
+    try:
+        (tmp_path / "reports").mkdir(exist_ok=True)
+        step = {"id": "T7d", "name": "audit-created + N/A", "stage": "stage2",
+                "required_outputs": ["phase2/stage2/constraints/*.sdc",
+                                     "reports/t7d_gate.json"],
+                "gate": {"all_of": [
+                    {"advisory_program_exit_zero": {
+                        "command": f"{g1.stem} . --json reports/t7d_na.json",
+                        "advisory_reason": "round-4 fixture"}},
+                    {"program_exit_zero":
+                     f"{g2.stem} . --json reports/t7d_gate.json"}]}}
+        proj = _project(tmp_path)
+        # A LEDGER THAT ATTRIBUTES BOTH SPECS, so the ONLY thing that can stop
+        # the demotion is the audit-created one. Without this the predicate is
+        # already False for an unrelated reason and the test passes without
+        # exercising anything -- which is how my first version of it passed
+        # against the defect.
+        folder = "phase2/stage2/T7d_f"
+        (proj / "steps" / folder).mkdir(parents=True, exist_ok=True)
+        (proj / "steps" / "index.json").write_text(_json.dumps(
+            {"steps": [{"id": "T7d", "folder": folder}]}))
+        (proj / "steps" / folder / "written.json").write_text(_json.dumps({
+            "id": "T7d", "produced": [
+                {"spec": "phase2/stage2/constraints/*.sdc",
+                 "rel": "phase2/stage2/constraints/spm.sdc"},
+                {"spec": "reports/t7d_gate.json",
+                 "rel": "reports/t7d_gate.json"}]}))
+        F.check_step(proj, step, {}, None)          # pass 1 records it
+        r = F.check_step(proj, step, {}, None)      # pass 2 retypes it
+        joined = " ".join(str(x) for x in r.reasons)
+        assert "DISCLOSED-SKIP" not in joined, (
+            "a step whose declared output was written by its own gate did not "
+            f"produce every output it declares: {r.reasons}")
+        b = r.output_binding or {}
+        assert b.get("n_satisfied") == sum(
+            1 for d in (b.get("specs") or []) if d.get("satisfied")), b
+    finally:
+        g1.unlink(missing_ok=True)
+        g2.unlink(missing_ok=True)
