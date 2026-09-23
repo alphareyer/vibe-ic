@@ -622,17 +622,115 @@ def _read_report(p: Path) -> Dict[str, Any]:
         return {"verdict": "FAIL", "error": f"parse failed: {p}"}
 
 
-def _aggregate(verdicts: List[str]) -> str:
-    if any(v == "FAIL" for v in verdicts):
-        return "FAIL"
-    # v0.3.7 — ORGANIC #505: COVERAGE-INCOMPLETE is a non-gating advisory
-    # tier (a demoted coverage-only phase1 failure in the standalone-design
-    # shape). It does NOT fail the run but DOES surface as PASS_WITH_WAIVERS
-    # so the overall verdict never hides the documented doc-extraction gap.
-    if any(v in ("PASS_WITH_WAIVERS", "WAIVED", "COVERAGE-INCOMPLETE")
-           for v in verdicts):
-        return "PASS_WITH_WAIVERS"
-    return "PASS"
+#: The ONLY phase verdicts that are a measurement of success. Everything else is
+#: not a pass, INCLUDING a token nobody taught this function: the roll-up is
+#: fail-closed, because the alternative is what #2523 measured -- a phase verdict
+#: outside every branch falling through the bottom of the function into PASS.
+_PHASE_PASS = frozenset({"PASS"})
+
+#: Passing, but not clean. Rule 11 forbids collapsing these onto a bare PASS.
+#: COVERAGE-INCOMPLETE is v0.3.7 ORGANIC #505: a demoted coverage-only phase1
+#: failure in the standalone-design shape. It does NOT fail the run but DOES
+#: surface as PASS_WITH_WAIVERS so the overall verdict never hides the
+#: documented doc-extraction gap.
+_PHASE_PASS_WITH_NOTE = frozenset({"PASS_WITH_WAIVERS", "WAIVED",
+                                   "COVERAGE-INCOMPLETE"})
+
+
+def _aggregate(rows: List[Tuple[str, str, int]],
+               completion_audit_verdicts: Optional[List[str]] = None
+               ) -> Tuple[str, List[str]]:
+    """Roll the phases up into ONE verdict, and say why it is that verdict.
+
+    THE DEFECT THIS REPLACES, measured on spm run22 (READ-ONLY,
+    reports/orchestrator/vibe_ic_one_shot.json, byte-exact):
+
+        phases : phase1 PASS rc=0 | phase2 NOT_MEASURED rc=1
+                 phase3 NOT_MEASURED rc=1 | analog SKIPPED | mixed_signal SKIPPED
+        verdict: PASS                     <- and the process exited 0
+
+    Three independent holes produced that one line, and each is closed here:
+
+    1. NOT_MEASURED had no branch. The old body tested FAIL, then the
+       waiver-ish tier, then `return "PASS"` -- so any token outside those two
+       sets rolled up to PASS by falling off the end. Closed by inverting the
+       polarity: a verdict is a pass only if it is IN `_PHASE_PASS` /
+       `_PHASE_PASS_WITH_NOTE`, so an unknown token is not-measured, never a pass.
+
+    2. `rc` was recorded in the plan and in the report and consulted by nothing.
+       A phase that reports PASS while exiting non-zero is a REPORT DISAGREEING
+       WITH A PROCESS, which is not a pass either; it fails, and the disclosure
+       names both halves.
+
+    3. The completion audit was not in the conjunction. run22's
+       reports/audit/phase23_completion_audit.json says `verdict: FAIL` and
+       phase3's own orchestrator report carries `completion_audit_verdict: FAIL`
+       -- and the front door read neither. A completion audit that FAILS is a
+       FAIL here; an ABSENT one is disclosed but not gating, because a
+       phase1-only or phase2-only run legitimately has none.
+
+    Returns `(verdict, disclosures)`. A roll-up that moves a verdict without
+    saying which phase moved it is the same silence in a different place, so the
+    reasons travel into the report and onto stdout.
+    """
+    fails: List[str] = []
+    unmeasured: List[str] = []
+    notes: List[str] = []
+    for name, verdict, rc in rows:
+        v = str(verdict or "").strip().upper()
+        try:
+            rc_i = int(rc)
+        except (TypeError, ValueError):
+            rc_i = 0
+        if v == "FAIL":
+            fails.append(f"{name} FAIL (rc={rc_i})")
+        elif v in _PHASE_PASS or v in _PHASE_PASS_WITH_NOTE:
+            if rc_i != 0:
+                fails.append(
+                    f"{name} reported {v} but the phase exited rc={rc_i} — a "
+                    f"report disagreeing with its own process is not a pass")
+            elif v in _PHASE_PASS_WITH_NOTE:
+                notes.append(f"{name} {v}")
+        else:
+            unmeasured.append(
+                f"{name} {verdict or 'NO VERDICT'} (rc={rc_i}) — not measured, "
+                f"so it cannot be rolled up as passing")
+
+    for ca in (completion_audit_verdicts or []):
+        if str(ca or "").strip().upper() == "FAIL":
+            fails.append("the phase2/3 completion audit says FAIL "
+                         "(reports/audit/phase23_completion_audit.json)")
+            break
+
+    if fails:
+        return "FAIL", fails + unmeasured
+    if unmeasured:
+        return "NOT_MEASURED", unmeasured
+    if notes:
+        return "PASS_WITH_WAIVERS", notes
+    return "PASS", []
+
+
+def _completion_audit_verdicts(project: Path) -> List[str]:
+    """Every source that can state the completion audit's verdict, fail-closed.
+
+    The audit's own document is the authority. A phase orchestrator report's
+    `completion_audit_verdict` is the value that phase took from the same file at
+    the moment its own verdict was decided, so it is read too: if EITHER says
+    FAIL the roll-up fails, and a stale disagreement can only make the front door
+    stricter, never greener.
+    """
+    out: List[str] = []
+    audit = _pl.report_path(project, "phase23_completion_audit.json")
+    doc = _read_report(audit)
+    if doc.get("verdict"):
+        out.append(str(doc["verdict"]))
+    for name in ("phase2_one_shot.json", "phase3_one_shot.json",
+                 "phase23_one_shot.json"):
+        rep = _read_report(_pl.report_path(project, name))
+        if rep.get("completion_audit_verdict"):
+            out.append(str(rep["completion_audit_verdict"]))
+    return out
 
 
 def _phase1_failure_is_coverage_only(project: Path) -> Tuple[bool, dict]:
@@ -1429,10 +1527,18 @@ def main() -> int:
             f"will REFUSE to stage it (see reports/pdk_revision.json)")
 
     # ---------------- Aggregate ----------------
-    digital_verdicts = [v for n, v, _ in plan
-                        if n not in ("analog", "mixed_signal")
-                        and v != "SKIPPED"]
-    overall = _aggregate(digital_verdicts) if digital_verdicts else "FAIL"
+    digital_rows = [(n, v, rc) for n, v, rc in plan
+                    if n not in ("analog", "mixed_signal")
+                    and v != "SKIPPED"]
+    _ca_verdicts = _completion_audit_verdicts(project)
+    if digital_rows:
+        overall, _rollup_why = _aggregate(digital_rows, _ca_verdicts)
+    else:
+        overall, _rollup_why = "FAIL", ["no digital phase ran"]
+    # A verdict that moved must say which phase moved it, in the report a reader
+    # actually opens — not only on stdout.
+    for _why in _rollup_why:
+        advisories.append(f"verdict {overall}: {_why}")
     summary = {
         "phase": "vibe-ic",
         "project": str(project),
@@ -1449,6 +1555,9 @@ def main() -> int:
         # the same attribution, and the half nothing recorded before.
         "pdk_revision": _pdk_rec,
         "verdict": overall,
+        # WHY the roll-up is what it is, phase by phase. Empty for a clean PASS.
+        "verdict_reasons": _rollup_why,
+        "completion_audit_verdicts": _ca_verdicts,
     }
     # v1.6.32: emit canonical final_summary.md (best-effort). Note that
     # phase23_one_shot_runner ALSO calls this; vibe_ic delegates to
@@ -1518,6 +1627,8 @@ def main() -> int:
     print(f"\n{'='*72}")
     print(f"=== vibe_ic_one_shot_runner DONE — {out}")
     print(f"  overall verdict   : {overall}")
+    for _why in _rollup_why:
+        print(f"    because         : {_why}")
     if halted_at:
         print(f"  halted at         : {halted_at}")
     for n, v, _ in plan:
