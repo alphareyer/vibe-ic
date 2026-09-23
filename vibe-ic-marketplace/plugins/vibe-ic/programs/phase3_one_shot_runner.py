@@ -9339,14 +9339,51 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         # A DIFFERENT net's neighbour does not count, and the same instance's
         # own other terminal does not count -- a cell whose two PG pins touch
         # each other is not thereby connected to anything.
+        # R-0915-142 — THE AUDIT MUST BE VISIBLE WHILE IT WORKS, AND IT MUST
+        # NOT RE-ASK THE SAME QUESTION 187,948 TIMES.
+        #
+        # MEASURED, subservient x gf180mcuD as a DIE (lane icsub5, run2 on main
+        # 1f537b5c0, 2026-09-23): this block emitted NOTHING for 1823 s and the
+        # progress watchdog killed the PnR as hung — correctly, on the evidence
+        # it had, because every transcript was silent:
+        #   WATCHDOG_STALLED: ... since_last_progress_s=1822.908
+        #   transcripts=[openroad.log@17:33:43; sdr_child_def_leg_*@17:33:20; ...]
+        # The parent's last line was PG_CONNECT_OWED, i.e. it had just entered
+        # here, and no child was running. 19,189 placed components and (per
+        # R-0915-120's own int8 measurement) 187,948 PG terminals, each of which
+        # re-fetched `getSWires` for its net and re-walked every stripe.
+        #
+        # TWO CHANGES, NEITHER OF WHICH TOUCHES THE ANSWER:
+        # (1) the net's stripe rectangles are read ONCE PER NET into a cache and
+        #     the overlap test reads the cache. Same wires, same comparisons,
+        #     same verdict — only the number of times ODB is asked changes.
+        # (2) it SAYS WHERE IT IS, every `_pgab_every` instances. A silent step
+        #     is indistinguishable from a hung one to any progress meter, and
+        #     the answer to that is for the work to report, not for the
+        #     watchdog's grace to be raised.
         "set _pgab_bad {}\n"
         "set _pgab_nr {}\n"
+        "set _pgab_cache [dict create]\n"
+        "set _pgab_n_inst 0\n"
+        "set _pgab_n_term 0\n"
+        "set _pgab_every 2000\n"
         "catch {\n"
-        "  foreach _pgab_i [[ord::get_db_block] getInsts] {\n"
+        "  set _pgab_insts [[ord::get_db_block] getInsts]\n"
+        "  set _pgab_tot [llength $_pgab_insts]\n"
+        "  puts \"PG_AUDIT_BEGIN: $_pgab_tot instance(s) to check\"\n"
+        "  foreach _pgab_i $_pgab_insts {\n"
+        "    incr _pgab_n_inst\n"
+        "    if {$_pgab_n_inst % $_pgab_every == 0} {\n"
+        "      puts \"PG_AUDIT_PROGRESS: $_pgab_n_inst of $_pgab_tot "
+        "instance(s), $_pgab_n_term PG terminal(s), "
+        "[llength $_pgab_bad] on no net, [llength $_pgab_nr] on no rail\"\n"
+        "      flush stdout\n"
+        "    }\n"
         "    foreach _pgab_t [$_pgab_i getITerms] {\n"
         "      set _pgab_sg [[$_pgab_t getMTerm] getSigType]\n"
         "      if {$_pgab_sg ne \"POWER\" && $_pgab_sg ne \"GROUND\"} "
         "{ continue }\n"
+        "      incr _pgab_n_term\n"
         "      set _pgab_n [$_pgab_t getNet]\n"
         "      if {$_pgab_n eq \"NULL\"} {\n"
         "        lappend _pgab_bad \"[$_pgab_i getName]/"
@@ -9354,24 +9391,43 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         "        continue\n"
         "      }\n"
         "      set _pgab_b [$_pgab_t getBBox]\n"
-        "      set _pgab_hit 0\n"
-        "      foreach _pgab_s [$_pgab_n getSWires] {\n"
-        "        foreach _pgab_w [$_pgab_s getWires] {\n"
-        "          if {[catch {set _pgab_x0 [$_pgab_w xMin]}]} { continue }\n"
-        "          if {$_pgab_x0 <= [$_pgab_b xMax] && "
-        "[$_pgab_w xMax] >= [$_pgab_b xMin] && "
-        "[$_pgab_w yMin] <= [$_pgab_b yMax] && "
-        "[$_pgab_w yMax] >= [$_pgab_b yMin]} { set _pgab_hit 1; break }\n"
+        "      set _pgab_nn [$_pgab_n getName]\n"
+        "      if {![dict exists $_pgab_cache $_pgab_nn]} {\n"
+        "        set _pgab_boxes {}\n"
+        "        foreach _pgab_s [$_pgab_n getSWires] {\n"
+        "          foreach _pgab_w [$_pgab_s getWires] {\n"
+        "            if {[catch {set _pgab_x0 [$_pgab_w xMin]}]} { continue }\n"
+        "            lappend _pgab_boxes [list $_pgab_x0 [$_pgab_w yMin] "
+        "[$_pgab_w xMax] [$_pgab_w yMax]]\n"
+        "          }\n"
         "        }\n"
-        "        if {$_pgab_hit} { break }\n"
+        "        dict set _pgab_cache $_pgab_nn $_pgab_boxes\n"
+        "        puts \"PG_AUDIT_NET: $_pgab_nn [llength $_pgab_boxes] "
+        "stripe rectangle(s) cached\"\n"
+        "        flush stdout\n"
+        "      }\n"
+        "      set _pgab_bx0 [$_pgab_b xMin]\n"
+        "      set _pgab_by0 [$_pgab_b yMin]\n"
+        "      set _pgab_bx1 [$_pgab_b xMax]\n"
+        "      set _pgab_by1 [$_pgab_b yMax]\n"
+        "      set _pgab_hit 0\n"
+        "      foreach _pgab_r [dict get $_pgab_cache $_pgab_nn] {\n"
+        "        if {[lindex $_pgab_r 0] <= $_pgab_bx1 && "
+        "[lindex $_pgab_r 2] >= $_pgab_bx0 && "
+        "[lindex $_pgab_r 1] <= $_pgab_by1 && "
+        "[lindex $_pgab_r 3] >= $_pgab_by0} { set _pgab_hit 1; break }\n"
         "      }\n"
         "      if {!$_pgab_hit} {\n"
         "        lappend _pgab_nr [list [$_pgab_i getName] "
-        "[[$_pgab_t getMTerm] getName] [$_pgab_n getName] "
-        "[$_pgab_b xMin] [$_pgab_b yMin] [$_pgab_b xMax] [$_pgab_b yMax]]\n"
+        "[[$_pgab_t getMTerm] getName] $_pgab_nn "
+        "$_pgab_bx0 $_pgab_by0 $_pgab_bx1 $_pgab_by1]\n"
         "      }\n"
         "    }\n"
         "  }\n"
+        "  puts \"PG_AUDIT_DONE: $_pgab_n_inst instance(s), "
+        "$_pgab_n_term PG terminal(s), [llength $_pgab_bad] on no net, "
+        "[llength $_pgab_nr] on no rail\"\n"
+        "  flush stdout\n"
         "}\n"
         # R-0915-120's second question, asked ONLY of the no-rail set, so a
         # design where that set is empty pays nothing for it.
