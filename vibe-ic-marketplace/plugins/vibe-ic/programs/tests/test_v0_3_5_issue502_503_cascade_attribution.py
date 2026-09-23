@@ -160,8 +160,24 @@ def _main_track_ids(steps):
 def test_post_fail_missing_is_annotated_blocked():
     # REAL shape: step 5 FAIL (first), step 6 FAIL, steps 7+ with their
     # declared output absent -> every post-5 one annotated
-    # blocked-by-upstream(5); status unchanged; summary keyed by the FIRST
-    # fail only.
+    # blocked-by-upstream(5); summary keyed by the FIRST fail only.
+    #
+    # R-0915-140 — THE STATUS MOVES NOW, AND THIS PIN MOVED WITH IT. This test
+    # asserted `r.status == "FAIL"  # strict semantics unchanged`, which pinned the
+    # #503 pass's old sentence: "Status stays MISSING — the work IS still missing
+    # and strict mode still fails — only the ATTRIBUTION changes". That sentence is
+    # what the ruling overrules, on the evidence of the row it produced: on a
+    # frozen FAIL-path tree step 37 read "[FAIL] … (missing_artefact)
+    # [blocked-by-upstream(2)]" — the audit knowing the step was blocked and
+    # publishing FAIL anyway, two tiers in one line.
+    #
+    # A step after the first mid-chain FAIL was never owed its outputs, so "did not
+    # produce" is not a fact about it. It reads NOT_MEASURED/upstream_failed.
+    #
+    # THE ATTRIBUTION HALF OF THIS TEST'S CLAIM IS UNCHANGED and is still asserted
+    # below: the note, the root it names, and the summary keyed on the first fail.
+    # Strict mode does not go quiet either — NOT_MEASURED is not a pass, and the
+    # cascade is still counted in `blocked_by_upstream`.
     #
     # R-0915-85 — the two roles the shape needs are two REASONS now, because
     # `MISSING` and `FAIL` became one word. Steps 5 and 6 are gate defects
@@ -179,8 +195,18 @@ def test_post_fail_missing_is_annotated_blocked():
     blocked = [r for r in results if r.cascade_note]
     assert len(blocked) == len(downstream)
     for r in blocked:
-        assert r.status == "FAIL"          # strict semantics unchanged
+        # R-0915-140: the cascade tier, not the root's word.
+        assert r.status == "NOT_MEASURED", r.status
+        assert r.reason_class == "upstream_failed", r.reason_class
+        # THE ATTRIBUTION, UNCHANGED — the note and the root it names.
         assert r.cascade_note == "blocked-by-upstream(5)"
+        # AND THE PRODUCER IS NAMED IN THE ROW'S OWN REASON, which is the half of
+        # the ruling the tier change would otherwise have cost.
+        assert any("blocked-by-upstream(step 5)" in x for x in r.reasons), r.reasons
+        assert any("never owed its declared outputs" in x for x in r.reasons), (
+            r.reasons)
+    # The root itself is untouched: a gate defect is still a FAIL.
+    assert [r.status for r in results[:2]] == ["FAIL", "FAIL"]
     assert info["blocked_by_upstream"] == {5: len(downstream)}
 
 

@@ -924,8 +924,27 @@ def test_issue1980_step14_nested_nonverdict_is_classed_not_skipped(tmp_path):
     r = _run(str(proj), "--strict")
     # R-0915-85 — `MISSING` is `FAIL(missing_artefact)`; the cascade note is
     # unchanged and is what this test is about.
-    assert re.search(r"\[FAIL\s*\] Step\s+14:.*blocked-by-upstream\(9\)",
-                     r.stdout), r.stdout
+    #
+    # R-0915-140 — AND THE TIER IS NOW THE CASCADE'S. Step 14 here is blocked
+    # behind step 9, so it was never owed its declared outputs: "did not produce"
+    # is not a fact about it. The row reads
+    #   [NOT_MEASURED] Step 14: … (stage2) (upstream_failed)  [blocked-by-upstream(9)]
+    #
+    # THE HALF THIS TEST IS ABOUT IS UNCHANGED and is still asserted: the cascade
+    # note, and the root it names. Only the word in front of it moved.
+    #
+    # AND THE #1980 PROPERTY WAS VERIFIED UNMOVED BEFORE THIS PIN WAS TOUCHED --
+    # measured on the same fixture, all three GATE EVIDENCE lines below are
+    # byte-identical to main's. A nested non-verdict is still CLASSED with its real
+    # rc, reason class and enforcement tier; the new tier does not flatten it, and
+    # if it had, the fix would have belonged in the change and not here.
+    assert re.search(
+        r"\[NOT_MEASURED\s*\] Step\s+14:.*blocked-by-upstream\(9\)",
+        r.stdout), r.stdout
+    assert re.search(r"Step\s+14:.*\(upstream_failed\)", r.stdout), r.stdout
+    assert not re.search(r"\[FAIL\s*\] Step\s+14:", r.stdout), (
+        "a step the audit itself records as blocked must not also be published "
+        "FAIL — that is the two-tiers-in-one-line shape R-0915-140 refuses")
     # This line used to read `flow_compliance_check rc=1 verdict=CRASHED`, and
     # the crash it pinned was a DEFECT rather than a property of the fixture:
     # the nested stage-analog compliance gate died with FileNotFoundError
