@@ -879,7 +879,16 @@ def main() -> int:
              f"{fail_count} blocking external-storage reference(s) "
              f"({len(live)} live, {len(dangling)} dangling, "
              f"{len(derived)} outside-root) — this is what the "
-             f"gate exits 1 on")
+             f"gate exits 1 on:")
+    # THE ANCHOR PHRASE STAYS VERBATIM, COLON INCLUDED.
+    # `test_r0915_126_an_absent_in_tree_reference_is_disclosed_not_blocked`
+    # splits the output on "this is what the gate exits 1 on:" and asserts the
+    # absent in-tree reference does not appear in the BLOCKING text after it.
+    # My first attempt put the reference BEFORE that colon, which deleted the
+    # anchor and raised IndexError -- I moved a phrase another reader parses.
+    # `grep` over the plugin finds two readers, both tests; the phrase is now
+    # treated as the fixed landmark it evidently is, and the reference goes
+    # AFTER it, where that test's claim is measured and still holds.
     _first = (live or dangling or derived or [(None, None)])[0]
     _cited = ""
     if _first[0]:
@@ -889,8 +898,8 @@ def main() -> int:
         # what was written. Both when they fit, the file alone when they do
         # not, and nothing when even that will not -- the detail blocks below
         # always carry the pair in full.
-        _both = f", first in {_first[0]}: {_first[1]}"
-        _file_only = f", first in {_first[0]}"
+        _both = f" {_first[0]} → {_first[1]}"
+        _file_only = f" {_first[0]}"
         if len(_both) <= _budget:
             _cited = _both
         elif len(_file_only) <= _budget:

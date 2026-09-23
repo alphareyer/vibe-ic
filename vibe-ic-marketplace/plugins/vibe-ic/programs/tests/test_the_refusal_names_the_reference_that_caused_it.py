@@ -116,3 +116,41 @@ def test_the_path_joins_the_header_when_the_budget_allows(tmp_path):
         assert len(head) <= 200, (len(head), head)
     finally:
         live.unlink(missing_ok=True)
+
+
+#: The landmark other readers split the gate's output on. Two in the plugin
+#: today (`test_r0915_126_...` and `test_r0915_130_...`), and the point of
+#: pinning it here is that the NEXT one does not have to be found by an arm.
+_ANCHOR = "this is what the gate exits 1 on:"
+
+
+def test_the_anchor_phrase_survives_verbatim(tmp_path):
+    """MY REGRESSION, pinned so it cannot recur silently.
+
+    `test_r0915_126_an_absent_in_tree_reference_is_disclosed_not_blocked`
+    splits the output on this phrase and asserts the absent in-tree reference
+    does not appear in the BLOCKING text after it. My first version of the
+    reference suffix went BEFORE the colon, which deleted the landmark and
+    raised IndexError in that reader.
+
+    A phrase another program splits on is an interface. It stays verbatim, and
+    anything added goes AFTER it."""
+    live = Path("/tmp") / "p0anchor.gds"
+    live.write_text("x")
+    short = tmp_path / "s"
+    short.mkdir()
+    (short / "reports").mkdir()
+    (short / "reports" / "r.json").write_text(json.dumps({"a": str(live)}))
+    try:
+        r = _run(short)
+        assert r.returncode == 1, r.stdout
+        head = [ln for ln in r.stdout.splitlines()
+                if ln.startswith("[FAIL]")][0]
+        assert _ANCHOR in head, head
+        # and the reference is AFTER it, where the R-0915-126 claim is measured
+        tail = r.stdout.split(_ANCHOR)[1]
+        assert "reports/r.json" in tail, tail[:200]
+        assert len(head) <= 200, (len(head), head)
+        assert head.endswith(":"), head
+    finally:
+        live.unlink(missing_ok=True)
