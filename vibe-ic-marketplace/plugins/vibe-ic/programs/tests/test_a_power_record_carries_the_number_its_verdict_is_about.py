@@ -234,8 +234,37 @@ def test_the_step_refuses_rather_than_writes_an_unbacked_verdict(
     #
     # The invariant that actually matters is unchanged and is asserted here:
     # after a refusal NO number survives under any key naming power.
+    #
+    # AMENDED AGAIN at round 2, and the two reviews together give the exact
+    # rule: retiring REPLACES, it does not MANUFACTURE. On a first run there
+    # is nothing to replace, so the correct outcome is no file -- and on a
+    # re-run it is a file carrying no number. The invariant across both, and
+    # the only one worth asserting, is that NO NUMBER SURVIVES A REFUSAL.
     import json as _json
-    assert out.exists(), "the refusal must leave a record that says so"
+    assert not out.exists(), (
+        "a first-run refusal must not manufacture a record; see "
+        "test_a_refusal_replaces_a_record_that_exists for the re-run arm")
+    assert R._numbers_under_key(
+        _json.loads(out.read_text()) if out.exists() else {},
+        ("power", "total", "watt")) == []
+
+
+def test_a_refusal_replaces_a_record_that_exists(tmp_path, monkeypatch):
+    """The RE-RUN arm of the same refusal: with a previous record on disk, a
+    refused write must replace it, not leave the old PASS and its number."""
+    import json as _json
+    import pytest
+    rpt = tmp_path / "reports" / "phase3" / "power.rpt"
+    rpt.parent.mkdir(parents=True, exist_ok=True)
+    rpt.write_text(_REPORT)
+    out = rpt.parent / "power.json"
+    out.write_text(_json.dumps({"verdict": "PASS",
+                                "total_power_w": 9.54e-03}))
+    monkeypatch.setattr(
+        P, "signoff_record",
+        lambda *a, **k: {"verdict": "PASS", "source": "reports/phase3/power.rpt"})
+    with pytest.raises(AssertionError, match="no power number"):
+        P.emit_signoff_record(tmp_path, rpt, out, "vectorless_sdc", [])
     doc = _json.loads(out.read_text())
     assert doc["verdict"] == "NOT_MEASURED", doc
     assert R._numbers_under_key(doc, ("power", "total", "watt")) == [], doc
@@ -347,3 +376,122 @@ def test_the_two_readers_of_one_report_agree(tmp_path):
             f"one module, two answers for the same report: "
             f"signoff={rec['power_measurement']} "
             f"metric={(tot or {}).get('status')}")
+
+
+# ===========================================================================
+# ROUND-2 REVIEW, 2026-09-23. Round 1 closed the two paths where the runner
+# KNOWS the step failed. These are the path where it does not know, and the
+# one where retiring invents a record.
+# ===========================================================================
+
+def test_a_first_run_failure_still_manufactures_nothing(tmp_path):
+    """The two round-2 MEDIUMs meet here, and they agree: on a FIRST run there
+    is no record to replace, so a stale/absent report must leave the tree
+    exactly as it found it -- no power.json, hence Power rows NOT_MEASURED and
+    the release documents still written."""
+    import os, time
+    rpt = tmp_path / "reports" / "phase3" / "power.rpt"
+    rpt.parent.mkdir(parents=True, exist_ok=True)
+    out = rpt.parent / "power.json"
+    rpt.write_text(_REPORT)
+    stale = time.time() - 3600
+    os.utime(rpt, (stale, stale))
+    P.emit_signoff_record(tmp_path, rpt, out, "vectorless_sdc", [],
+                          produced_after=time.time() - 60)
+    assert not out.exists(), "a first-run failure manufactured a record"
+
+
+def test_a_report_this_run_did_not_write_is_not_this_run_s_measurement(tmp_path):
+    """ROUND-2 MEDIUM #1 — the UNDETECTED failure.
+
+    `docker exec` fails before bash starts, so the `> power.rpt` redirect
+    never truncates. The PREVIOUS layout's 2,616-byte report is still there,
+    it passes both size floors, rc=1 is ignored, and a FRESH power.json is
+    written MEASURED/PASS from the OLD report. Nothing anywhere says the
+    number belongs to a design that no longer exists.
+
+    The record must be bound to THIS invocation: a report that predates it is
+    not this run's measurement, however well-formed it is."""
+    import json
+    rpt = tmp_path / "reports" / "phase3" / "power.rpt"
+    rpt.parent.mkdir(parents=True, exist_ok=True)
+    out = rpt.parent / "power.json"
+    rpt.write_text(_REPORT)                      # the PREVIOUS run's report
+    import os, time
+    stale = time.time() - 3600
+    os.utime(rpt, (stale, stale))
+    # ... and the PREVIOUS run's record beside it, which is the scenario: run 1
+    # succeeded and wrote both. Run 2's docker exec fails before bash starts.
+    out.write_text(json.dumps({"verdict": "PASS", "power_measurement": "MEASURED",
+                               "total_power_w": 9.54e-03}))
+
+    notes = []
+    P.emit_signoff_record(tmp_path, rpt, out, "vectorless_sdc", notes,
+                          produced_after=time.time() - 60)
+    doc = json.loads(out.read_text())
+    assert doc["verdict"] == "NOT_MEASURED", doc
+    assert R._numbers_under_key(doc, ("power", "total", "watt")) == [], doc
+    assert "did not produce" in doc["power_not_measured_reason"], doc
+
+
+def test_a_report_this_run_did_write_is_accepted(tmp_path):
+    """The other direction: the binding must not refuse a real measurement."""
+    import json, time
+    rpt = tmp_path / "reports" / "phase3" / "power.rpt"
+    rpt.parent.mkdir(parents=True, exist_ok=True)
+    out = rpt.parent / "power.json"
+    t0 = time.time() - 5
+    rpt.write_text(_REPORT)
+    P.emit_signoff_record(tmp_path, rpt, out, "vectorless_sdc", [],
+                          produced_after=t0)
+    assert json.loads(out.read_text())["total_power_w"] == 9.54e-03
+
+
+def test_a_nonzero_tool_status_is_not_a_measurement(tmp_path):
+    """And the half the runner already had in hand: `_docker_exec` returns an
+    rc nobody read. A tool that exited non-zero did not measure anything,
+    whatever is on disk."""
+    import json, time
+    rpt = tmp_path / "reports" / "phase3" / "power.rpt"
+    rpt.parent.mkdir(parents=True, exist_ok=True)
+    out = rpt.parent / "power.json"
+    rpt.write_text(_REPORT)
+    out.write_text(json.dumps({"verdict": "PASS", "total_power_w": 9.54e-03}))
+    P.emit_signoff_record(tmp_path, rpt, out, "vectorless_sdc", [],
+                          produced_after=time.time() - 60, tool_rc=1)
+    doc = json.loads(out.read_text())
+    assert doc["verdict"] == "NOT_MEASURED", doc
+    assert "exited 1" in doc["power_not_measured_reason"], doc
+
+
+def test_retiring_does_not_manufacture_a_record(tmp_path):
+    """ROUND-2 MEDIUM #2. `retire_signoff_record` wrote unconditionally, so a
+    FIRST-run power failure CREATED a power.json{NOT_MEASURED} where none had
+    existed. `_power_class` reads numbers, never the record's own
+    `power_measurement`, so an absent file means "Power rows NOT_MEASURED,
+    documents written" while a present-but-empty one means POWER_NO_TOTAL and
+    ALL release documents refused. Retiring a record that never existed made
+    a first-run power failure fatal to the whole release, and flipped D3
+    step 33 from ABSENT to SUBSTANTIVE.
+
+    Retiring means replacing something. With nothing to replace, it must do
+    nothing."""
+    out = tmp_path / "reports" / "phase3" / "power.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    notes = []
+    P.retire_signoff_record(out, "the power step produced nothing", notes)
+    assert not out.exists(), (
+        "retiring manufactured a record where the run had none")
+    assert notes and "no record to retire" in notes[0].lower(), notes
+
+
+def test_retiring_still_replaces_a_record_that_exists(tmp_path):
+    """The direction round 1 added, unchanged."""
+    import json
+    out = tmp_path / "reports" / "phase3" / "power.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"verdict": "PASS", "total_power_w": 9.54e-03}))
+    P.retire_signoff_record(out, "sta exited 127", [])
+    doc = json.loads(out.read_text())
+    assert doc["verdict"] == "NOT_MEASURED", doc
+    assert R._numbers_under_key(doc, ("power", "total", "watt")) == [], doc

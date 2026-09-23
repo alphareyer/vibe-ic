@@ -55138,6 +55138,13 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # get while its own header claimed the post-PnR netlist.
     power_rpt = rpt_phase3 / "power.rpt"
     if _signoff_regen(power_rpt, primary_def) and primary_def.is_file():
+        # THE MOMENT THIS STEP BEGAN. A power step can fail WITHOUT the runner
+        # knowing -- `docker exec` fails before bash starts, so the
+        # `> power.rpt` redirect never truncates and the PREVIOUS layout's
+        # report is still on disk, clearing every size floor. Binding the
+        # record to this timestamp is what tells the two apart. MEASURED by
+        # the round-2 review, 2026-09-23.
+        _power_t0 = time.time()
         ok = _emit_power_report(project, top, pdk, container, power_rpt, notes,
                                 basis="post_pnr")
         if ok:
@@ -55156,8 +55163,10 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             # first time round, when the emitter was written here.
             _ppa_power.emit_signoff_record(project, power_rpt,
                                            rpt_phase3 / "power.json",
-                                           _mode, notes)
-            written.append(str(rpt_phase3 / "power.json"))
+                                           _mode, notes,
+                                           produced_after=_power_t0)
+            if (rpt_phase3 / "power.json").is_file():
+                written.append(str(rpt_phase3 / "power.json"))
         else:
             # THE STALE RECORD. `_emit_power_report` returning False means this
             # run produced no usable power report -- it wrote its 'not
@@ -59929,7 +59938,30 @@ exit
             f"absolute path(s) INTO the run root (first: line {_leaked[0][0]}, "
             f"{_leaked[0][1]}) — it will not re-run from a copy of this tree "
             f"and any hash over it is defeated by the run directory")
+    _t0 = time.time()
     rc, out, err = _docker_exec(container, cmd, marker=tcl_c)
+    # THE EXIT STATUS, WHICH WAS READ AND DISCARDED. MEASURED by the round-2
+    # review, 2026-09-23: when `docker exec` fails before bash starts, the
+    # `> power.rpt` redirect never truncates, so the PREVIOUS layout's report
+    # is still on disk and clears every size floor below. `rc` was the one
+    # signal that said so, and nothing consulted it.
+    #
+    # The conjunction matters: a non-zero rc beside a report THIS CALL wrote
+    # is a tool that complained and still produced output, which the substance
+    # checks below can judge. A non-zero rc beside a report that PREDATES this
+    # call is a step that did not run, and its artefact belongs to an earlier
+    # layout.
+    if rc != 0:
+        try:
+            _fresh = power_rpt.is_file() and power_rpt.stat().st_mtime >= _t0
+        except OSError:
+            _fresh = False
+        if not _fresh:
+            notes.append(
+                f"report_power did not run (exit {rc}) and "
+                f"{power_rpt.name} was not written by this step — the file on "
+                f"disk, if any, describes an earlier layout")
+            return False
     # If OpenSTA ran successfully but the file is small (just the
     # categorical breakdown), prepend an envelope so the report carries
     # the full provenance context. This brings the file ≥ 2048 B which

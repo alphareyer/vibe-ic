@@ -1433,6 +1433,20 @@ def retire_signoff_record(out: Path, reason: str,
     record that states NOT_MEASURED and carries no number under any key naming
     power, total or watt.
     """
+    # RETIRING MEANS REPLACING SOMETHING. With nothing to replace it must do
+    # NOTHING, and the asymmetry is not cosmetic: `_ic_release_artefacts.
+    # _power_class` reads NUMBERS, never the record's own
+    # `power_measurement`, so an ABSENT power.json means "Power rows
+    # NOT_MEASURED, documents written" while a PRESENT one carrying no number
+    # means POWER_NO_TOTAL and ALL release documents refused. Writing
+    # unconditionally therefore made a FIRST-run power failure fatal to the
+    # whole release, and flipped D3 step 33 from ABSENT to SUBSTANTIVE.
+    # MEASURED by the round-2 review, 2026-09-23.
+    if not Path(out).is_file():
+        if notes is not None:
+            notes.append(f"power.json: no record to retire (the run produced "
+                         f"none): {reason}")
+        return
     doc = {
         "source": None,
         "power_measurement": STATUS_NOT_MEASURED,
@@ -1455,7 +1469,9 @@ def retire_signoff_record(out: Path, reason: str,
 
 def emit_signoff_record(project: Path, power_rpt: Path, out: Path,
                         analysis_mode: str,
-                        notes: List[str]) -> Dict[str, Any]:
+                        notes: List[str],
+                        produced_after: Optional[float] = None,
+                        tool_rc: Optional[int] = None) -> Dict[str, Any]:
     """Write `reports/phase3/power.json` beside a `report_power` artefact.
 
     HERE, NOT IN THE RUNNER, and the placement is the point.
@@ -1480,8 +1496,42 @@ def emit_signoff_record(project: Path, power_rpt: Path, out: Path,
     in a release that cannot be documented, because the file this would write
     outlives the run that wrote it.
     """
+    # THE RECORD IS BOUND TO THIS INVOCATION, and round 2 is why. A power
+    # step can fail WITHOUT THE RUNNER KNOWING: `docker exec` fails before
+    # bash starts, so the `> power.rpt` redirect never truncates, the previous
+    # layout's report is still on disk, it clears both size floors, and the
+    # non-zero rc is never read. A fresh power.json was then written
+    # MEASURED/PASS from a report describing a design that no longer exists --
+    # the same stale-record defect round 1 closed, reached through the one
+    # path where nothing signals failure.
+    #
+    # Two independent bindings, because either alone leaves a hole: the tool's
+    # own exit status, and whether the artefact was written by THIS call.
+    _rel = str(power_rpt.relative_to(project))
+    if tool_rc is not None and tool_rc != 0:
+        retire_signoff_record(
+            out, f"the power tool exited {tool_rc}; no measurement was "
+                 f"produced by this run", notes)
+        return {"verdict": STATUS_NOT_MEASURED,
+                "power_measurement": STATUS_NOT_MEASURED,
+                "power_not_measured_reason": f"the power tool exited {tool_rc}"}
+    if produced_after is not None:
+        try:
+            _mtime = power_rpt.stat().st_mtime
+        except OSError:
+            _mtime = None
+        if _mtime is None or _mtime < produced_after:
+            retire_signoff_record(
+                out, f"this run did not produce {_rel}: the file on disk "
+                     f"predates this power step, so its number describes an "
+                     f"earlier layout", notes)
+            return {"verdict": STATUS_NOT_MEASURED,
+                    "power_measurement": STATUS_NOT_MEASURED,
+                    "power_not_measured_reason": (
+                        f"this run did not produce {_rel}")}
+
     record = signoff_record(read_power_report(power_rpt),
-                            source=str(power_rpt.relative_to(project)),
+                            source=_rel,
                             analysis_mode=analysis_mode)
     if not verdict_is_backed_by_a_number(record):
         # RETIRE BEFORE RAISING. Returning here without touching `out` leaves
