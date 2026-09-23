@@ -43,3 +43,11 @@ NON_PROTOCOL_KEYS = frozenset({
     # IC class tag — the phase-1 class detector
     "class_path",
 })
+
+#: The keys whose VALUE names a row of a protocol-timing table (its identity
+#: label). MEASURED over the 101 corpus L8s: list records lead with `name`
+#: (215), `parameter` (22) and `field` (7); `symbol` / `signal` are the WaveDrom
+#: and per-symbol spellings. `literal`, `source`, `extraction_strategy` are
+#: provenance, not identity. ONE definition, read by the step-2 gate's family
+#: detector (R-0915-164, review w0z2lp3a7).
+RECORD_LABEL_KEYS = ("name", "symbol", "signal", "parameter", "field")

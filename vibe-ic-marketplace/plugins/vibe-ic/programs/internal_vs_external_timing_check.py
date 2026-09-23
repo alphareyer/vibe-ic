@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -200,16 +201,29 @@ _TIMING_SYMBOLS = frozenset({"h0", "h1", "br", "ibt", "break", "brk"})
 _BR_SPELLINGS = frozenset({"br", "break", "brk"})
 
 
+def _split_caps_run(m: "re.Match[str]") -> str:
+    run, tail = m.group(1), m.group(2)
+    if _token_symbol(run.lower()) is not None:
+        return f"{run} {tail}"
+    return f"{run[:-1]} {run[-1]}{tail}"
+
+
 def _identifier_tokens(text: Any) -> list[str]:
     """Lower-cased tokens of an identifier or phrase: split on anything that is
     not a letter or digit, on lower->Upper (`tIBT` -> t, ibt), on an upper run
-    followed by lower (`IBTmin` -> ibt, min) and on digit->letter (`H0low` ->
-    h0, low). Letter->digit never splits, so `H0` is `h0` and `CH0` is `ch0`."""
+    followed by lower (`IBTmin` -> ibt, min), before a Capitalised word that
+    follows an acronym (`tBRMin` -> t, br, min) and on digit->letter (`H0low`
+    -> h0, low). Letter->digit never splits, so `H0` is `h0` and `CH0` is `ch0`."""
     import re
     out: list[str] = []
     for part in re.split(r"[^A-Za-z0-9]+", str(text)):
         part = re.sub(r"([a-z])([A-Z])", r"\1 \2", part)
-        part = re.sub(r"([A-Z]{2,})([a-z])", r"\1 \2", part)
+        # A capitals run followed by lowercase is AMBIGUOUS by shape: `IBTmin`
+        # is IBT+min, `BRMin` is BR+Min (review w0z2lp3a7: tBRMin read as
+        # t/brm/in). Prefer the split that names a timing symbol -- the whole
+        # run, else the run minus its last capital -- and otherwise the camel
+        # convention (an acronym ends before a Capitalised word).
+        part = re.sub(r"([A-Z]{2,})([a-z]+)", _split_caps_run, part)
         part = re.sub(r"([0-9])([A-Za-z])", r"\1 \2", part)
         out += [w.lower() for w in part.split() if w]
     return out
@@ -251,8 +265,10 @@ def symbol_family_hits(waveform: Any, rtl_constants: Any = None) -> list[str]:
     this check reads, as paths (R-0915-164).
 
     Read with the ONE symbol reader (`_identifier_tokens` / `_token_symbol`):
-    every key at every depth, every `name`/`symbol`/`signal` value and every
-    list string of the L8 outside the schema's non-protocol keys, plus
+    every key at every depth, every identifier-shaped value under a schema
+    record label (`l8_timing_schema.RECORD_LABEL_KEYS`) and every
+    identifier-shaped list string of the L8 outside the schema's non-protocol
+    keys, plus
     `symbol_directionality` and check()'s own classified RX/TX groups, plus
     the --layer constants read ONLY as check()
     reads them (`_find_numeric_us` TX_IBT / BR_MIN) -- never walked.
@@ -263,19 +279,26 @@ def symbol_family_hits(waveform: Any, rtl_constants: Any = None) -> list[str]:
     def _syms(text: Any) -> bool:
         return any(_token_symbol(t) for t in _identifier_tokens(text))
 
+    def _is_identifier(text: Any) -> bool:
+        # A label or list VALUE counts only when it is identifier-shaped: free
+        # prose ('line break detection …') and sized literals (4'h1, 8'h0A) are
+        # not family identifiers (review w0z2lp3a7).
+        return isinstance(text, str) and bool(
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text.strip()))
+
     def _walk(node: Any, path: str) -> None:
         if isinstance(node, dict):
             for k, v in node.items():
                 sub = f"{path}.{k}"
                 if _syms(k):
                     hits.append(sub)
-                if (k in ("name", "symbol", "signal") and isinstance(v, str)
+                if (k in _schema.RECORD_LABEL_KEYS and _is_identifier(v)
                         and _syms(v)):
                     hits.append(f"{sub}={v}")
                 _walk(v, sub)
         elif isinstance(node, list):
             for i, item in enumerate(node):
-                if isinstance(item, str) and _syms(item):
+                if _is_identifier(item) and _syms(item):
                     hits.append(f"{path}[{i}]={item}")
                 _walk(item, f"{path}[{i}]")
 
