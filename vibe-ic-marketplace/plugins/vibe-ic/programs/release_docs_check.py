@@ -751,6 +751,13 @@ def _check_pin_count(project: Path, arm: str, release: str,
     equal signal + supply was typed, not derived, and that is caught without
     pretending the netlist knew about the supplies.
 
+    AND WHETHER A GIVEN NETLIST FOLLOWS THAT CONVENTION IS MEASURED. The IP
+    arm's delivered blackbox omits the supplies; a routed `chip_top` declares
+    them as ports (`inout VDD; inout VSS;`) and its bit count is therefore the
+    TOTAL, not the signal count. Assuming the IP convention on the IC arm
+    failed a correct datasheet — see the comment at the comparison below, which
+    carries the measurement.
+
     EVERY DOCUMENT THAT STATES A COUNT IS CHECKED, not the first one found. Two
     documents in this set carry the interface table; taking the first match
     would let a correct datasheet mask an edited integration guide, which is
@@ -806,14 +813,56 @@ def _check_pin_count(project: Path, arm: str, release: str,
         if netlist_count == signal[1]:
             states.append("AGREES")
             continue
+        # WHICH CONVENTION THIS NETLIST FOLLOWS IS MEASURED, NOT ASSUMED.
+        #
+        # MEASURED on a signed-off IC-arm run (lane icspm5, 2026-09-23). The
+        # datasheet stated, all three from the same routed DEF and internally
+        # consistent,
+        #
+        #     Pin count (total) 38 · Signal pins 36 · Supply pins 2
+        #
+        # and this check refused it: the gate-level netlist the route produced
+        # declares 38 logical pin bits, so 36 "disagreed". It did not. The
+        # netlist is
+        #
+        #     module chip_top (VDD, VSS, clk, p, rst, y, x);
+        #       inout VDD; inout VSS; ...
+        #
+        # — the two supplies are ports of it, and 38 is the TOTAL, which is
+        # exactly what the document says the total is. The premise written
+        # into the docstring above and into the generated datasheet's own
+        # prose — "a gate-level netlist conventionally carries the logical
+        # interface only" — holds for the IP arm's delivered blackbox and does
+        # not hold for a routed chip_top. A cross-check that fails a correct
+        # datasheet is the kind that gets deleted rather than the document
+        # fixed, and it would have been deleted for a reason that was not
+        # true.
+        #
+        # So the count is compared against BOTH readings of what this netlist
+        # could be counting, and the one it matches is reported. THIS IS NOT A
+        # SECOND CHANCE TO PASS: `signal + supply` is only reachable when the
+        # document's own three rows are arithmetically consistent (checked
+        # above, in this same loop, before this point), so an edited signal
+        # count cannot reach it — 30/2/32 is caught by the parts check, and
+        # 30/2/32 against a 38-bit netlist matches neither reading and still
+        # DISAGREES. The only case newly accepted is the one where the
+        # netlist's bits ARE the document's stated total.
+        with_supplies = (signal[1] + supply[1]) if supply is not None else None
+        if with_supplies is not None and netlist_count == with_supplies:
+            states.append("AGREES")
+            continue
         findings.append(Finding(
             "PIN_COUNT_DISAGREES_WITH_NETLIST", "ERROR", release,
             f"{document} states '{SIGNAL_PIN_LABEL}' = {signal[1]}, derived "
             f"from {signal[0].third}; the netlist view "
             f"`{v_path.relative_to(project).as_posix()}` declares "
-            f"{netlist_count} logical pin bit(s). A datasheet with a pin "
-            f"count no "
-            f"view supports is stale on arrival."))
+            f"{netlist_count} logical pin bit(s)"
+            + (f", and the document's signal + supply rows sum to "
+               f"{with_supplies}, so the netlist matches neither the logical "
+               f"interface alone nor the interface with its supplies"
+               if with_supplies is not None else "")
+            + ". A datasheet with a pin count no view supports is stale on "
+              "arrival."))
         states.append("DISAGREES")
 
     if not states:
