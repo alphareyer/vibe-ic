@@ -342,7 +342,13 @@ def test_a_demoted_na_clause_does_not_count_as_examination(tmp_path):
         assert r.status == _T_NOT_MEASURED, (
             f"a step where nothing was examined was published {r.status}; "
             f"reasons={r.reasons}")
-        assert "1 of 1 gate clause(s) that ran here" in joined, joined
+        # AMENDED at round 3, and the review is right: this pinned
+        # "1 of 1 gate clause(s) that ran here" as correct. g1 DID dispatch
+        # and DID examine nothing, so the truth is 2 of 2. What the assertion
+        # was protecting -- the step must not read PARTIALLY-VACUOUS, because
+        # every clause that ran examined nothing -- is unchanged and asserted
+        # below; the count beside it is now true as well.
+        assert "2 of 2 gate clause(s) that ran here" in joined, joined
         assert "PARTIALLY-VACUOUS" not in joined, (
             "the demoted clause was counted in the denominator: " + joined)
         # and the skip is still disclosed, because it is true.
@@ -374,3 +380,89 @@ def test_n_satisfied_counts_satisfaction_not_the_resolution_mode(tmp_path):
             f"must still report them satisfied: {b}")
     finally:
         g2.unlink(missing_ok=True)
+
+
+# ===========================================================================
+# ROUND-3 REVIEW, 2026-09-23 — two LOWs. Both are the same mistake in two
+# fields: a number published beside a fact it no longer matches.
+# ===========================================================================
+
+def test_the_published_clause_counts_are_true(tmp_path):
+    """ROUND-3 L1. The demoted clause LEAVES the 'clauses that ran'
+    denominator but never JOINS the 'examined nothing' numerator, so the
+    sentence the step prints is arithmetically false about the step.
+
+    My round-2 test pinned exactly the wrong sentence: it asserted
+    "1 of 1 gate clause(s) that ran here" as the correct reading. g1 DID
+    dispatch and DID examine nothing, so the truth is 2 of 2. Removing the
+    clause from the tier is right; erasing it from the count is not -- it
+    examined nothing, which is a fact worth counting, not a fact to hide."""
+    g1 = _gate_program(tmp_path, "_t7r3_na", '''
+        import json, sys
+        i = sys.argv.index("--json")
+        open(sys.argv[i + 1], "w").write(json.dumps(
+            {"verdict": "SKIP", "reason_class": "DESIGN_DECLARED_NA",
+             "examined": 0}))
+        print("SKIP: n/a"); sys.exit(0)
+        ''')
+    g2 = _gate_program(tmp_path, "_t7r3_vac", '''
+        import json, sys
+        i = sys.argv.index("--json")
+        open(sys.argv[i + 1], "w").write(json.dumps(
+            {"verdict": "NOT_APPLICABLE", "examined": 0,
+             "reason_class": "DESIGN_DECLARED_NA"}))
+        print("VACUOUS_PASS: examined nothing (reason: no_subject)")
+        sys.exit(0)
+        ''')
+    try:
+        (tmp_path / "reports").mkdir(exist_ok=True)
+        r = F.check_step(_project(tmp_path, "T7"),
+                         _step(g1.stem, g2.stem), {}, None)
+        joined = " ".join(r.reasons)
+        assert r.status == _T_NOT_MEASURED, (r.status, r.reasons)
+        # BOTH clauses dispatched and BOTH examined nothing.
+        assert "2 of 2 gate clause(s)" in joined, joined
+        assert "1 of 1 gate clause(s)" not in joined, joined
+    finally:
+        g1.unlink(missing_ok=True)
+        g2.unlink(missing_ok=True)
+
+
+def test_n_satisfied_follows_the_audit_created_retype(tmp_path):
+    """ROUND-3 L2. `n_satisfied` is computed once, BEFORE the gate runs. The
+    audit_created retype afterwards sets `specs[].satisfied = False` for an
+    output that turns out to be the step's own gate `--json` target, and never
+    recomputes the count. So a pass-2 row publishes `n_satisfied: 2` beside a
+    spec marked audit_created/unsatisfied and a FAIL reading 'AUDIT-CREATED
+    OUTPUT REFUSED'. The count contradicts the list it is a count of."""
+    g = _gate_program(tmp_path, "_t7r3_auditcreated", '''
+        import json, sys
+        i = sys.argv.index("--json")
+        open(sys.argv[i + 1], "w").write(json.dumps({"verdict": "PASS"}))
+        print("PASS"); sys.exit(0)
+        ''')
+    try:
+        (tmp_path / "reports").mkdir(exist_ok=True)
+        step = {"id": "T7c", "name": "audit-created", "stage": "stage2",
+                "required_outputs": ["phase2/stage2/constraints/*.sdc",
+                                     "reports/t7c_gate.json"],
+                "gate": {"program_exit_zero":
+                         f"{g.stem} . --json reports/t7c_gate.json"}}
+        # TWO PASSES, which is the reviewer's scenario and the only way the
+        # defect shows. Pass 1 creates the gate's --json target and RECORDS it
+        # as audit-created. Pass 2 then resolves it PRESENT (so
+        # `_resolve_required_output`, which runs before the gate, counts it
+        # satisfied and `n_satisfied` is computed as 2) and the audit_created
+        # retype AFTER the tier chain marks it unsatisfied -- without
+        # recomputing the count.
+        F.check_step(_project(tmp_path), step, {}, None)
+        r = F.check_step(_project(tmp_path), step, {}, None)
+        b = r.output_binding or {}
+        specs = b.get("specs") or []
+        n_sat_listed = sum(1 for d in specs if d.get("satisfied"))
+        assert b.get("n_satisfied") == n_sat_listed, (
+            f"the count contradicts the list it counts: "
+            f"n_satisfied={b.get('n_satisfied')} but {n_sat_listed} of "
+            f"{len(specs)} specs are satisfied; specs={specs}")
+    finally:
+        g.unlink(missing_ok=True)

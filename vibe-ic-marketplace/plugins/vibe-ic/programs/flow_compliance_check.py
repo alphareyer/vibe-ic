@@ -16109,9 +16109,22 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # clause having said it examined anything.
         ran_hints = [r for r in reasons
                      if r.startswith(_RAN_HINT_PREFIX)]
-        # A DEMOTED CLAUSE IS NOT AN EXAMINATION. The demotion above took the
-        # clause out of the tier; this takes it out of the numerator too.
-        ran_hints = _ran_hints_minus_demoted(ran_hints, _demoted_skips)
+        # A DEMOTED CLAUSE IS NOT AN EXAMINATION -- but it IS a clause that
+        # ran, and it DID examine nothing. Round 2 took it out of the
+        # denominator only, which made the published sentence false about the
+        # step: "1 of 1 gate clause(s) that ran here" over a step where TWO
+        # clauses dispatched and BOTH examined nothing. MEASURED by the
+        # round-3 review, which also caught that my round-2 test pinned that
+        # wrong sentence as correct.
+        #
+        # So the clause leaves the TIER (it does not get to say the step was
+        # skipped) and stays in the ARITHMETIC on BOTH sides: it ran, and it
+        # examined nothing. `_vacuous_denominator` and `_vacuous_numerator`
+        # are those two counts, and they move together.
+        _demoted_ran = [r for r in ran_hints
+                        if _hint_command(r, _RAN_HINT_PREFIX)
+                        in {_hint_command(h, _SKIP_HINT_PREFIX)
+                            for h in _demoted_skips}]
         # vibe-ic#901 - the NUMERATOR contributed by the structured channel,
         # kept apart from the legacy bucket above so it cannot alter any tier
         # the legacy bucket already decides.
@@ -16321,7 +16334,13 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # identical to origin/main, which is exactly the property the
             # guards were written to protect and is asserted directly in them
             # now, instead of being approximated by pinning a label.
-            unanimous = len(all_vacuous_cmds) >= len(ran_hints)
+            # THE NUMERATOR INCLUDES THE DEMOTED CLAUSE, because it ran and
+            # it examined nothing. Round 2 took that clause out of the
+            # DENOMINATOR instead, which reached the same verdict here by
+            # making the sentence beside it false. Counting it on both sides
+            # keeps the arithmetic honest and the tier unchanged.
+            unanimous = (len(all_vacuous_cmds) + len(_demoted_ran)
+                         >= len(ran_hints))
             # SPELLED AS TWO STATEMENTS, NOT A TERNARY, ON PURPOSE.
             # `test_issue634verdict::test_the_producers_vocabulary_
             # is_pinned` discovers this file's vocabulary by scanning its SOURCE
@@ -16372,7 +16391,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                     result.reasons.append(
                         f"vacuous: gate program signalled VACUOUS_PASS "
                         f"(input not applicable), and it is "
-                        f"{len(all_vacuous_cmds)} of {len(ran_hints)} gate "
+                        f"{len(all_vacuous_cmds) + len(_demoted_ran)} of "
+                        f"{len(ran_hints)} gate "
                         f"clause(s) that ran here: {cmd}"
                         + (f" — {_diag}" if _diag else "")
                     )
@@ -16394,7 +16414,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                     # l9_floorplan_contract_check -- each printed its clause string
                     # and nothing about why it examined nothing.
                     result.reasons.append(
-                        f"PARTIALLY-VACUOUS ({len(all_vacuous_cmds)} of "
+                        f"PARTIALLY-VACUOUS "
+                        f"({len(all_vacuous_cmds) + len(_demoted_ran)} of "
                         f"{max(len(ran_hints), len(all_vacuous_cmds))} gate "
                         f"clause(s) examined nothing): {cmd}"
                         + (f" — {_diag}" if _diag else "")
@@ -16643,6 +16664,14 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 _sp["audit_created"] = _sp.get("spec")
                 _sp.pop("credited", None)
         _ob["codes"] = sorted({str(d.get("code")) for d in _bind_specs})
+        # THE COUNT FOLLOWS THE LIST IT COUNTS. `n_satisfied` is computed
+        # once, BEFORE the gate runs; this retype happens after the tier chain
+        # and sets `satisfied = False` for an output that turns out to be the
+        # step's own gate `--json` target. MEASURED by the round-3 review: on
+        # a second pass the row published `n_satisfied: 2` beside a spec
+        # marked audit_created/unsatisfied and a FAIL reading "AUDIT-CREATED
+        # OUTPUT REFUSED" -- a count contradicting its own list.
+        _ob["n_satisfied"] = sum(1 for d in _bind_specs if d.get("satisfied"))
         _ob["notes"] = (_ob["notes"] + [
             f"{rel}: audit_created; excluded from run evidence because it is "
             f"this step's own gate `--json` target and holds that gate's "
