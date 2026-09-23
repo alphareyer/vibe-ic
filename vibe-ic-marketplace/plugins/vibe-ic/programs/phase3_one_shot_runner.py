@@ -4250,18 +4250,34 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
     # fanout cap is a per-PDK quantity); else fall back to the design's own
     # RTL-declared broadcast-replication bound (FANOUT_GROUP) that synth
     # necessarily collapses — see _rtl_replication_fanout_bound.
-    _l9_fanout = (_l9_declared_max_fanout(project, pdk_name)
-                  or _rtl_replication_fanout_bound(project))
+    # ONE LADDER, the same one synthesis uses (`_synth_max_fanout`): what the
+    # DESIGN declares first and never overridden, then the flow's shipped
+    # PDK-family default, then the ACTIVE liberty's own `default_max_fanout`.
+    # Before this, THIS path stopped at the design-declared tiers while the
+    # AUGMENT path (:3398-3420) already carried the other two — so on ONE PDK
+    # a design whose L9 happened to mention fanout got a cap and one whose L9
+    # did not got none. Measured: subservient 10, spm none, same gf180mcuD.
+    _l9_fanout, _fanout_src, _fanout_unread = _synth_max_fanout(
+        project, pdk_name, liberty_path)
     _fanout_note = ""
     if _l9_fanout is not None:
         _fanout_note = (
             f"max_fanout={_l9_fanout} — "
-            + _LAST_FANOUT_SOURCE.get("note", "design-declared fanout cap")
+            + (_fanout_src or _LAST_FANOUT_SOURCE.get(
+                "note", "design-declared fanout cap"))
             + "; set_max_fanout makes repair_design split high-fanout nets so "
               "the ss-corner setup slew does not explode (a fanout cap is a "
               "hard structural count, immune to the placement-stage parasitic "
               "under-estimate). Without it the sign-off max-fanout table is "
               "empty BY CONSTRUCTION and the violation count is UNMEASURED.")
+    # UNREAD IS NOT EMPTY: a tier that could not be consulted is DISCLOSED in
+    # the SDC's own provenance, never collapsed into "the PDK declares none".
+    for _u in _fanout_unread:
+        _fanout_note = (_fanout_note + "; " if _fanout_note else "") + _u
+    if _l9_fanout is None and _fanout_unread:
+        drv_note = ((drv_note + "; ") if drv_note else "") + \
+            "max_fanout UNRESOLVED and at least one tier could not be READ: " \
+            + "; ".join(_fanout_unread)
     sdc_text += _drv_constraints_sdc_block(
         drv_slew_ns, drv_cap_pf, drv_note,
         max_fanout=_l9_fanout, fanout_note=_fanout_note,
@@ -16593,6 +16609,34 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     if _rf_knobs.get("REMOVE_ABC_BUFFERS") == "1":
         _remove_abc_buf_clause = "opt_clean -purge; "
         _rf_notes.append("REMOVE_ABC_BUFFERS -> opt_clean -purge")
+    # FANOUT-BOUNDED MAPPING. The stock `abc -liberty` script (no `-constr`)
+    # ends `&nf {D}; &put` and buffers nothing, so synthesis emitted nets far
+    # over the cap the run's OWN SDC declares and Step 10 timed a netlist
+    # nothing had repaired. This substitutes ABC's own `-constr` tail with the
+    # bound supplied — see `_ABC_FANOUT_SCRIPT` for the measurement.
+    # NO SILENT DEFAULT: when no cap resolves, the recipe is byte-identical to
+    # before and the ledger says why, naming any tier that could not be READ
+    # (unread is not empty).
+    _fo_cap, _fo_why, _fo_unread = _synth_max_fanout(
+        project, str(getattr(pdk, "name", "") or ""),
+        str(getattr(pdk, "liberty", "") or ""), container)
+    # Its OWN channel: this is not a reference-flow knob, and
+    # `reference_flow_qor_knobs` means "what the design's staged flow asked
+    # for". Mixing them made two existing assertions about an EMPTY knob list
+    # fail, correctly.
+    _fo_notes: List[str] = []
+    _abc_fanout = ""
+    if _fo_cap:
+        _abc_fanout = _ABC_FANOUT_SCRIPT.format(cap=int(_fo_cap))
+        _fo_notes.append(
+            f"max_fanout {_fo_cap} -> abc `buffer -N {_fo_cap}; upsize; "
+            f"dnsize` (ABC's own -constr tail); cap from {_fo_why}")
+    else:
+        _fo_notes.append(
+            "max_fanout UNRESOLVED -> abc recipe UNCHANGED (no fabricated "
+            "cap)")
+    for _u in _fo_unread:
+        _fo_notes.append(f"tier unavailable: {_u}")
     # FASTROUTE_LAYER_ADJUST is a ROUTING knob (the routing step is owned by a
     # sibling agent); ingested + surfaced here for provenance, NOT applied in
     # synth.
@@ -16615,7 +16659,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         f"{_fsm_synth_clause}"
         f"dfflibmap{_du_flags} -liberty {liberty_c}; "
         f"{dlatch_clause}"
-        f"abc -liberty {liberty_c}{_abc_timing}; "
+        f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
         f"{_remove_abc_buf_clause}"
         f"{hilomap_clause}"
         f"clean; stat -liberty {liberty_c}; "
@@ -16723,7 +16767,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
             f"{_fsm_synth_clause}"
             f"dfflibmap{_du_flags} -liberty {liberty_c}; "
             f"{dlatch_clause}"
-            f"abc -liberty {liberty_c}{_abc_timing}; "
+            f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
             f"{_remove_abc_buf_clause}"
             f"{hilomap_clause}"
             f"clean; stat -liberty {liberty_c}; "
@@ -16755,7 +16799,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 f"{_fsm_synth_clause}"
                 f"dfflibmap{_du_flags} -liberty {liberty_c}; "
                 f"{dlatch_clause}"
-                f"abc -liberty {liberty_c}{_abc_timing}; "
+                f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
                 f"{_remove_abc_buf_clause}"
                 f"{hilomap_clause}"
                 f"clean; stat -liberty {liberty_c}; "
@@ -16809,7 +16853,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 f"{_fsm_synth_clause}"
                 f"dfflibmap{_du_flags} -liberty {liberty_c}; "
                 f"{dlatch_clause}"
-                f"abc -liberty {liberty_c}{_abc_timing}; "
+                f"abc -liberty {liberty_c}{_abc_timing}{_abc_fanout}; "
                 f"{_remove_abc_buf_clause}"
                 f"{hilomap_clause}"
                 f"clean; stat -liberty {liberty_c}; "
@@ -17167,6 +17211,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                       _synth_evidence,
                       extras={"synth_frontend": synth_frontend,
                               "reference_flow_qor_knobs": _rf_notes,
+                              "synth_max_fanout": _fo_notes,
                               "macro_define_decision": _macro_def,
                               "area_stats": (str(_area_stats)
                                              if _area_stats else None)})
@@ -18542,6 +18587,128 @@ def parse_flow_pdk_max_fanout(text: str, pdk: str):
                 f"{_FLOW_PDK_DEFAULTS_PATH}:{i} "
                 f"(guarded by PDK family {'/'.join(fams)})")
     return None, ""
+
+
+#: ABC's OWN stock `-liberty -constr` recipe, with its fanout bound supplied.
+#:
+#: `yosys -p "help abc"` documents two stock scripts for standard-cell mapping:
+#: WITHOUT `-constr` it ends `&nf {D}; &put` — no buffering, no sizing — and
+#: WITH `-constr` it ends `&put; buffer; upsize {D}; dnsize {D}; stime -p`. The
+#: flow has always taken the first, so nothing bounded fanout before PnR.
+#: MEASURED (subservient x gf180mcuD, run2): synthesis emitted a net with 207
+#: loads driven by one `clkinv_1`, that inverter alone cost 16.03 ns of a
+#: 28.00 ns path, and Step 10 pre-layout STA read -8.85 ns against the design's
+#: own 20 ns — blocking nine downstream steps on a netlist the flow had not yet
+#: repaired. With `buffer -N 10` the same RTL, same SDC and same ss corner give
+#: +4.36 ns MET (tns -2044.80 -> 0.00) for +143 cells (+5.7 %) and +4.9 % area.
+#:
+#: This is NOT a new pass: it is the recipe ABC already ships, with the cap the
+#: run itself declares. `{D}` is yosys's own delay-target substitution, and
+#: commas become blanks inside a `-script +…` string (documented in that help).
+_ABC_FANOUT_SCRIPT = (
+    " -script +strash;&get,-n;&fraig,-x;&put;scorr;dc2;dretime;strash;"
+    "&get,-n;&dch,-f;&nf,{{D}};&put;buffer,-N,{cap};upsize,{{D}};"
+    "dnsize,{{D}};stime,-p")
+
+
+def _flow_default_max_fanout_read(project: Path, pdk: str):
+    """``(cap|None, evidence, unread_reason)`` — like
+    :func:`_flow_default_max_fanout` but it DISTINGUISHES "this PDK family has
+    no default" from "the file could not be read".
+
+    UNREAD IS NOT EMPTY, and I nearly shipped the confusion: reading the cap on
+    the HOST returns None for every design, because `pdk_compat.py` lives
+    INSIDE the container and the host has no copy — which reads exactly like
+    "this PDK declares no default" and would have had me conclude that main no
+    longer emits a cap at all. A tier that could not be consulted must say so,
+    in the SDC provenance and in the ledger, or a silence gets mistaken for an
+    answer."""
+    try:
+        rec_path = project / "reports" / "container_image.json"
+        if not rec_path.is_file():
+            return None, "", (f"{_FLOW_PDK_DEFAULTS_PATH} NOT READ: this run "
+                              f"records no container image, so the flow's "
+                              f"shipped PDK defaults could not be consulted")
+        container = str(json.loads(rec_path.read_text()).get("container") or "")
+        if not container:
+            return None, "", (f"{_FLOW_PDK_DEFAULTS_PATH} NOT READ: the run's "
+                              f"container record names no container")
+        out = subprocess.run(
+            _cex.docker_exec_argv(container, "cat", _FLOW_PDK_DEFAULTS_PATH),
+            capture_output=True, text=True, timeout=60)
+        if out.returncode != 0 or not (out.stdout or "").strip():
+            return None, "", (f"{_FLOW_PDK_DEFAULTS_PATH} NOT READ in "
+                              f"{container} (rc={out.returncode}), so the "
+                              f"flow's shipped PDK defaults could not be "
+                              f"consulted — this is NOT the same as the PDK "
+                              f"declaring none")
+        cap, why = parse_flow_pdk_max_fanout(out.stdout, pdk)
+        if cap:
+            return int(cap), why, ""
+        return None, "", ""          # READ, and this family genuinely has none
+    except Exception as exc:  # noqa: BLE001
+        return None, "", (f"{_FLOW_PDK_DEFAULTS_PATH} NOT READ "
+                          f"({type(exc).__name__}: {exc})")
+
+
+def _synth_max_fanout(project: Path, pdk_name: str, liberty_path: str = "",
+                      container: str = ""):
+    """``(cap|None, evidence, unread)`` — ONE resolution of the fanout cap, for
+    every design on a PDK. ``unread`` lists tiers that could not be CONSULTED.
+
+    THE DEFECT THIS CLOSES, measured on main 7a63a037f. The AUTO-SDC path
+    (`_build_auto_silicon_sdc`, :4033) resolved the cap from DESIGN-DECLARED
+    sources only — `_l9_declared_max_fanout` or `_rtl_replication_fanout_bound`
+    — so the cap a design got depended on whether its prose happened to mention
+    fanout. subservient's L9 says "fanout 限制由 OpenLane / PDK 預設處理", an
+    explicit deferral, so its deferral tier fired and it got 10. spm's L9 says
+    nothing, so on the SAME PDK it got no cap at all. Meanwhile the AUGMENT
+    path (for a design that stages its own SDC, :3398-3420) already carried two
+    further tiers that need no design statement. Two paths, two ladders, one
+    PDK: that asymmetry was the whole of it.
+
+    The ladder here is the AUGMENT path's, and every rung READS a file the flow
+    already depends on — no new constant, nothing fabricated (§4.05: reading is
+    not inventing):
+
+      1. what the DESIGN declares (L9 number, its staged flow config, or an L9
+         deferral) — never overridden by anything below;
+      2. the flow's own PDK-family default, parsed out of the shipped
+         ``pdk_compat.py`` inside this run's recorded container;
+      3. the ACTIVE liberty's own ``default_max_fanout`` — the library-wide
+         characterised ceiling on the same liberty STA signs off against.
+
+    Nothing resolves → ``(None, "", unread)`` and the caller leaves synthesis
+    BYTE-IDENTICAL and says so, naming any tier it could not read. A cap nobody
+    stated is not a cap to invent; a cap nobody could READ is not a cap nobody
+    stated, and the two are reported differently.
+    """
+    unread: List[str] = []
+    try:
+        fo = (_l9_declared_max_fanout(project, pdk_name)
+              or _rtl_replication_fanout_bound(project))
+    except Exception as exc:  # noqa: BLE001
+        fo = None
+        unread.append(f"the design's own declaration NOT READ "
+                      f"({type(exc).__name__}: {exc})")
+    if fo:
+        return int(fo), _LAST_FANOUT_SOURCE.get(
+            "note", "the design's own declaration"), unread
+    cap, why, why_unread = _flow_default_max_fanout_read(project, pdk_name)
+    if why_unread:
+        unread.append(why_unread)
+    if cap:
+        return int(cap), (why or "the flow's shipped PDK-family default"), unread
+    try:
+        drv = _liberty_drv_limits(str(liberty_path or ""), container)
+        fo = drv.get("max_fanout")
+        if fo:
+            return int(fo), (drv.get("fanout_source")
+                             or "the active liberty's default_max_fanout"), unread
+    except Exception as exc:  # noqa: BLE001
+        unread.append(f"the active liberty NOT READ "
+                      f"({type(exc).__name__}: {exc})")
+    return None, "", unread
 
 
 def _flow_default_max_fanout(project: Path, pdk: str):
