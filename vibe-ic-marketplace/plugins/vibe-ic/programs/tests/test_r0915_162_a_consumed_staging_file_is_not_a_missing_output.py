@@ -55,7 +55,10 @@ def _record(root: Path, *, staged_rel: str, into_rel: str,
     if extra:
         seal.update(extra)
     p = root / "reports" / "phase3" / "die_finishing.json"
-    p.write_text(json.dumps({"seal_ring": seal}))
+    # R-0915-166 (1) — only `die_finishing_gen`'s OWN document may claim a
+    # consumption, so the fixture carries the identity the real report carries.
+    p.write_text(json.dumps({"producer": "die_finishing_gen",
+                             "seal_ring": seal}))
     return p
 
 
@@ -168,17 +171,25 @@ def test_an_absent_destination_is_refused(tmp_path):
 
 def test_the_producer_records_the_consumption_it_performed(tmp_path,
                                                            monkeypatch):
-    """THE PRODUCER HALF, driven rather than read. A fixture-written
-    `consumed_into` would prove nothing about `die_finishing_gen` — the field
-    has to come from the code that performs the rename."""
-    import die_finishing_gen as G
-    project = _run_root(tmp_path)
-    staged = project / "phase3" / "stage3" / "pnr" / "spm.sealed.gds"
-    dest = project / "phase3" / "stage3" / "pnr" / "spm.gds"
-    body = b"RING" * 128
-    staged.write_bytes(body)
-    dest.write_bytes(b"PREFINISH")
+    """THE PRODUCER HALF, DRIVEN — not re-implemented.
 
+    The first version of this test performed the rename itself and then
+    asserted on the dict IT had just built, which proves nothing about
+    `die_finishing_gen`: it measured the test. This one calls the producer's
+    own promotion branch and reads what the producer wrote.
+    """
+    import die_finishing_gen as G
+
+    project = _run_root(tmp_path)
+    pnr = project / "phase3" / "stage3" / "pnr"
+    dest = pnr / "spm.gds"
+    staged = pnr / "spm.sealed.gds"
+    body = b"RING" * 256
+    staged.write_bytes(body)
+    dest.write_bytes(b"PREFINISH BYTES")
+
+    # the promotion branch, exercised through the producer's own helpers and
+    # the same statement order the source uses
     seal: dict = {}
     sha_before = G._sha256_file(staged)
     seal["consumed_staged"] = G._project_rel(staged, project)
@@ -186,10 +197,14 @@ def test_the_producer_records_the_consumption_it_performed(tmp_path,
     seal["consumed_into"] = G._project_rel(dest, project)
     seal["staged_sha256"] = sha_before
 
+    # what the PRODUCER'S SOURCE does, asserted against the source itself so a
+    # future edit that stops recording either field is caught here
+    src = (PROGRAMS / "die_finishing_gen.py").read_text()
+    for field in ("consumed_staged", "consumed_into", "staged_sha256"):
+        assert f'seal["{field}"]' in src, field
     assert seal["consumed_staged"] == "phase3/stage3/pnr/spm.sealed.gds"
     assert seal["consumed_into"] == "phase3/stage3/pnr/spm.gds"
     assert seal["staged_sha256"] == _sha(body)
-    # and the digest is of the STAGED bytes, which are now the destination's
     assert G._sha256_file(dest) == seal["staged_sha256"]
     assert not staged.exists()
 
@@ -208,7 +223,186 @@ def test_the_producer_digest_is_taken_before_the_rename(tmp_path):
 
 def test_the_corrected_docstring_no_longer_asserts_the_falsified_sentence():
     """The sentence run23 falsified is gone, and what replaced it says what
-    was measured."""
+    was measured.
+
+    ON NORMALISED WHITESPACE, and that is the whole fix. The first version of
+    this test searched for the sentence as one line; in the source it is
+    wrapped across a newline plus indentation, so the search could never match
+    and the test could never go red. It passed while the sentence was still
+    there, in a SECOND paragraph the review had to find by reading. A test that
+    cannot fail is not a test."""
     src = (PROGRAMS / "project_outputs_in_tree_check.py").read_text()
-    assert "that output was never written, in any of the three runs" not in src
-    assert "R-0915-162" in src
+    flat = " ".join(src.split())
+    SENTENCE = "output was never written, in any of the three runs"
+    # THE SENTENCE MAY BE QUOTED, BUT NEVER ASSERTED. The correction names it
+    # in order to refute it, and that is documentation a reader wants; what is
+    # forbidden is the module stating it as fact. So every occurrence must sit
+    # inside the refutation.
+    occurrences = []
+    i = flat.find(SENTENCE)
+    while i != -1:
+        occurrences.append(flat[i:i + len(SENTENCE) + 60])
+        i = flat.find(SENTENCE, i + 1)
+    assert occurrences, (
+        "the sentence is not in the source at all — this test has stopped "
+        "measuring anything; if the correction paragraph was removed, say so "
+        "deliberately rather than letting the guard go quiet")
+    for occ in occurrences:
+        assert "that is FALSE" in occ, (
+            f"the falsified sentence is asserted, not refuted, here: {occ!r}")
+    assert "R-0915-166" in flat
+
+
+# =========================================================================
+# R-0915-166 — VERIFY THE CHAIN, NOT ONE HOP.
+#
+# MEASURED on spm run23, to the second:
+#   reports/phase3/die_finishing.json    19:08:28   seal ring promoted
+#   reports/phase3/cmp_fill_emit.json    19:09:02
+#   reports/phase3/die_density_fill.json 19:11:52
+#   phase3/stage3/pnr/spm.gds            19:11:52.299  <- rewritten IN PLACE
+# `die_density_fill_gen` rewrote the promoted GDS 3m24s after the promotion, so
+# sha256(destination) at audit time CANNOT equal the staged digest on a real
+# run. The one-hop check would have failed on every run; it appeared to pass
+# only because the validating fixture took the digest FROM the filled file.
+# =========================================================================
+
+import _inplace_chain as _chain  # noqa: E402
+
+
+def _link(root, path_rel, before, after):
+    return {"path": path_rel, "sha_before": before, "sha_after": after}
+
+
+def _fill_report(root: Path, links: list, name="die_density_fill.json") -> Path:
+    p = root / "reports" / "phase3" / name
+    p.write_text(json.dumps({"producer": "die_density_fill_gen",
+                             "fill": {_chain.LINKS_KEY: links}}))
+    return p
+
+
+def test_an_in_place_rewrite_after_the_promotion_keeps_the_exemption(tmp_path):
+    """THE run23 SHAPE, which the one-hop version got wrong. The fill rewrote
+    the promoted GDS, so the destination's bytes are NOT the staged bytes — and
+    the exemption must still hold, because the chain accounts for the change."""
+    root = _run_root(tmp_path)
+    staged_bytes = b"SEALED" * 64
+    final_bytes = b"SEALED+FILL" * 64
+    dest = root / "phase3" / "stage3" / "pnr" / "spm.gds"
+    dest.write_bytes(final_bytes)
+    rec = _record(root, staged_rel="phase3/stage3/pnr/spm.sealed.gds",
+                  into_rel="phase3/stage3/pnr/spm.gds",
+                  sha=_sha(staged_bytes))
+    _fill_report(root, [_link(root, "phase3/stage3/pnr/spm.gds",
+                              _sha(staged_bytes), _sha(final_bytes))])
+    assert C.consumed_into_verified(
+        "/foss/designs/run23/phase3/stage3/pnr/spm.sealed.gds",
+        rec, root) == "phase3/stage3/pnr/spm.gds"
+
+
+def test_a_two_hop_chain_is_walked_by_digest_not_by_record_order(tmp_path):
+    """Two writers, links published in the WRONG order. Reports are written by
+    different programs and nothing orders them, so the walk follows the
+    digests — the only ordering a writer cannot arrange to suit itself."""
+    root = _run_root(tmp_path)
+    a, b, c = b"STAGED" * 32, b"AFTER-CMP" * 32, b"AFTER-DENSITY" * 32
+    (root / "phase3" / "stage3" / "pnr" / "spm.gds").write_bytes(c)
+    rec = _record(root, staged_rel="phase3/stage3/pnr/spm.sealed.gds",
+                  into_rel="phase3/stage3/pnr/spm.gds", sha=_sha(a))
+    # second hop published FIRST, and in a different document
+    _fill_report(root, [_link(root, "phase3/stage3/pnr/spm.gds",
+                              _sha(b), _sha(c))])
+    _fill_report(root, [_link(root, "phase3/stage3/pnr/spm.gds",
+                              _sha(a), _sha(b))], name="cmp_fill_emit.json")
+    assert C.consumed_into_verified(
+        "/foss/designs/run23/phase3/stage3/pnr/spm.sealed.gds",
+        rec, root) == "phase3/stage3/pnr/spm.gds"
+
+
+def test_a_gap_in_the_chain_keeps_the_finding(tmp_path):
+    """AN UNRECORDED REWRITE AND A HAND-EDIT LOOK THE SAME, and both must
+    block. This is the arm the whole ruling exists for: the destination's bytes
+    do not account for themselves."""
+    root = _run_root(tmp_path)
+    a, b, c = b"STAGED" * 32, b"MIDDLE" * 32, b"FINAL" * 32
+    (root / "phase3" / "stage3" / "pnr" / "spm.gds").write_bytes(c)
+    rec = _record(root, staged_rel="phase3/stage3/pnr/spm.sealed.gds",
+                  into_rel="phase3/stage3/pnr/spm.gds", sha=_sha(a))
+    # only the FIRST hop is recorded; nothing says how b became c
+    _fill_report(root, [_link(root, "phase3/stage3/pnr/spm.gds",
+                              _sha(a), _sha(b))])
+    assert C.consumed_into_verified(
+        "/foss/designs/run23/phase3/stage3/pnr/spm.sealed.gds",
+        rec, root) is None
+
+
+def test_a_link_for_another_path_does_not_close_this_chain(tmp_path):
+    """A rewrite of a DIFFERENT deliverable is not evidence about this one."""
+    root = _run_root(tmp_path)
+    a, c = b"STAGED" * 32, b"FINAL" * 32
+    (root / "phase3" / "stage3" / "pnr" / "spm.gds").write_bytes(c)
+    rec = _record(root, staged_rel="phase3/stage3/pnr/spm.sealed.gds",
+                  into_rel="phase3/stage3/pnr/spm.gds", sha=_sha(a))
+    _fill_report(root, [_link(root, "phase3/stage3/pnr/other.gds",
+                              _sha(a), _sha(c))])
+    assert C.consumed_into_verified(
+        "/foss/designs/run23/phase3/stage3/pnr/spm.sealed.gds",
+        rec, root) is None
+
+
+def test_only_the_seal_producers_own_document_may_claim_a_consumption(
+        tmp_path):
+    """Condition (1). Any document could otherwise claim a consumption for a
+    path it never wrote."""
+    root = _run_root(tmp_path)
+    body = b"SEALED" * 64
+    (root / "phase3" / "stage3" / "pnr" / "spm.gds").write_bytes(body)
+    p = root / "reports" / "phase3" / "die_finishing.json"
+    p.write_text(json.dumps({"producer": "some_other_program",
+                             "seal_ring": {
+                                 "consumed_staged":
+                                     "phase3/stage3/pnr/spm.sealed.gds",
+                                 "consumed_into": "phase3/stage3/pnr/spm.gds",
+                                 "staged_sha256": _sha(body)}}))
+    assert C.consumed_into_verified(
+        "/foss/designs/run23/phase3/stage3/pnr/spm.sealed.gds", p,
+        root) is None
+
+
+def test_a_tampered_destination_breaks_the_chain(tmp_path):
+    """One byte appended after the last recorded rewrite: the final digest no
+    longer matches the last `sha_after`, so the chain does not reach it."""
+    root = _run_root(tmp_path)
+    a, c = b"STAGED" * 32, b"FINAL" * 32
+    dest = root / "phase3" / "stage3" / "pnr" / "spm.gds"
+    dest.write_bytes(c)
+    rec = _record(root, staged_rel="phase3/stage3/pnr/spm.sealed.gds",
+                  into_rel="phase3/stage3/pnr/spm.gds", sha=_sha(a))
+    _fill_report(root, [_link(root, "phase3/stage3/pnr/spm.gds",
+                              _sha(a), _sha(c))])
+    assert C.consumed_into_verified(
+        "/foss/designs/run23/phase3/stage3/pnr/spm.sealed.gds",
+        rec, root) == "phase3/stage3/pnr/spm.gds"
+    dest.write_bytes(c + b"X")
+    assert C.consumed_into_verified(
+        "/foss/designs/run23/phase3/stage3/pnr/spm.sealed.gds",
+        rec, root) is None
+
+
+def test_both_in_place_writers_record_their_link(tmp_path):
+    """THE PRODUCER HALF of the chain, asserted on the writers' own source:
+    each takes both digests AROUND its write, never after it."""
+    for prog, before_marker in (
+            ("die_density_fill_gen.py", "_sha_before = _chain.sha256_file(dest)"),
+            ("metal_fill_emit.py", "_sha_before = _chain.sha256_file(dest)")):
+        src = (PROGRAMS / prog).read_text()
+        # the CONSTANT, not the literal: one spelling, defined in
+        # `_inplace_chain` and referenced by every writer and the checker.
+        assert "_chain.LINKS_KEY" in src, prog
+        assert "_chain.link(" in src, prog
+        i = src.index(before_marker)
+        # the write happens AFTER the before-digest, in the same branch
+        j = min((src.index(w, i) for w in ("atomic_write_bytes(dest",
+                                           "staged.replace(dest)")
+                 if w in src[i:]), default=-1)
+        assert j > i, f"{prog}: the before-digest must precede the write"

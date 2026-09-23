@@ -104,6 +104,7 @@ import os
 import re
 import sys
 from pathlib import Path
+import _inplace_chain as _chain
 from typing import Any, List, Optional, Set, Tuple
 
 
@@ -272,8 +273,11 @@ def preserved_in_the_run_root(path_str: str, project: Path) -> Optional[Path]:
     The tail is derived from the run root's own directory NAME, exactly as
     `names_a_relocated_copy` derives condition (2); no prefix list is consulted.
     Returns the run-relative path when it exists in the run root, else None --
-    so `spm.sealed.gds` keeps its finding, which is the honest answer: that
-    output was never written, in any of the three runs.
+    so a staged path whose tail is absent keeps its finding here. Whether that
+    is honest depends on WHY it is absent, and this function cannot tell: on
+    run23 `spm.sealed.gds` was written and then consumed by a successful
+    promotion, and only `consumed_into_verified` -- walking the recorded digest
+    chain -- can separate that from an output nothing ever produced.
     """
     parts = Path(path_str).parts
     name = project.name
@@ -291,64 +295,94 @@ def preserved_in_the_run_root(path_str: str, project: Path) -> Optional[Path]:
         return None
 
 
+#: R-0915-166 — only this producer's own document may claim a consumption.
+_SEAL_PRODUCER = "die_finishing_gen"
+
+
 def consumed_into_verified(path_str: str, record: Path,
                            project: Path) -> Optional[str]:
-    """The destination `path_str`'s bytes were PROMOTED into, when `record`
-    proves it. None otherwise — and None is the default in every doubt.
+    """The destination `path_str`'s bytes were PROMOTED into, when an unbroken
+    CHAIN of recorded rewrites proves the bytes are still there. None otherwise
+    -- and None is the default in every doubt.
 
-    R-0915-162. A producer that promotes a staging file with `os.replace`
-    leaves a reference to a path that is GONE BY DESIGN: the bytes are under
-    the final name. MEASURED on spm run23 — the seal-ring leg blocked this gate
-    on `.../spm.sealed.gds (NOT found on disk)` while its own record said
-    `state: PASS`, `generator_rc: 0`, `ring_check.verdict: PASS`. Nothing was
-    lost; the ring had been promoted onto `spm.gds`.
+    R-0915-166 AMENDS R-0915-162, which checked ONE HOP and would have failed
+    on every real run. A deliverable is not written once: MEASURED on spm
+    run23, `die_density_fill_gen` rewrote the promoted GDS IN PLACE 3 m 24 s
+    after the seal ring promoted it (`die_finishing.json` 19:08:28,
+    `die_density_fill.json` 19:11:52, `spm.gds` 19:11:52.299), so
+    `sha256(destination)` at audit time can never equal the digest taken before
+    the rename. The one-hop version appeared to pass only because its
+    validating fixture computed the digest FROM the already-filled file, which
+    is circular.
 
-    A CLAIM IS NOT ENOUGH, so this is not "the record says it was consumed".
-    FOUR conditions, all necessary, and the reference keeps its finding unless
-    every one holds:
+    FIVE conditions, all necessary:
 
-      (1) the record names THIS staged path (`consumed_staged`). Without it one
-          consumption would exempt every missing path in the same document;
-      (2) it names where the bytes went (`consumed_into`);
-      (3) that destination EXISTS in the tree;
-      (4) `sha256(destination) == staged_sha256` — the digest taken of the
-          staged bytes BEFORE the rename. This is what makes the exemption a
-          measurement: the bytes are provably the same bytes, still there under
-          the final name. Edit the destination afterwards and the digest stops
-          matching, so the finding comes back.
+      (1) the consumption record is `die_finishing_gen`'s own document. Any
+          document could otherwise claim a consumption for a path it never
+          wrote;
+      (2) the record names THIS staged path. Without it one consumption would
+          exempt every missing path in the same document;
+      (3) it names where the bytes went;
+      (4) that destination EXISTS inside the tree;
+      (5) a CONTINUOUS chain `staged_sha256 -> (each in-place writer's
+          before -> after) -> sha256(destination now)` is present, with no gap.
+          Each link is published by the writer that made it, under
+          `_inplace_chain.LINKS_KEY`, and the walk is driven by the DIGESTS
+          rather than by the order the links were written -- the only ordering
+          a writer cannot arrange to suit itself.
 
-    Anything else — no record, a record without a digest, a digest that does
-    not match, a destination outside the tree — returns None and the caller
-    keeps its finding. This is deliberately NOT a general "the producer says it
-    is fine" escape hatch.
+    A GAP IS A FINDING. An unrecorded rewrite and a hand-edited deliverable
+    produce exactly the same gap, which is the point: this is not "the producer
+    says it is fine", it is "the bytes account for themselves".
     """
     try:
         doc = json.loads(record.read_text())
     except (OSError, ValueError):
         return None
+    if not isinstance(doc, dict) or doc.get("producer") != _SEAL_PRODUCER:
+        return None                                   # (1)
     tail = _run_relative_tail(path_str, project)
     for rec in _dicts_in(doc):
         staged = rec.get("consumed_staged")
         dest = rec.get("consumed_into")
         want = rec.get("staged_sha256")
         if not isinstance(staged, str) or not isinstance(dest, str):
-            continue
+            continue                                  # (3)
         if not isinstance(want, str) or not want:
-            continue                      # stated but not verifiable
+            continue                                  # stated, not verifiable
         if not _same_reference(staged, path_str, tail):
-            continue
+            continue                                  # (2)
         dpath = (project / dest) if not os.path.isabs(dest) else Path(dest)
         try:
             if not dpath.is_file():
-                return None
+                return None                           # (4)
             if not _inside_project(str(dpath), project):
-                return None
-            if _sha256_file(dpath) != want:
                 return None
         except OSError:
             return None
+        now = _chain.sha256_file(dpath)
+        links = _chain.links_for(dest, _reports_documents(project))
+        ok, _why = _chain.chain_reaches(want, now or "", links)   # (5)
+        if not ok:
+            return None
         return dest
     return None
+
+
+def _reports_documents(project: Path) -> List[Any]:
+    """Every readable JSON document under `reports/` — where in-place writers
+    publish their links. Read once per call site; the population is the run's
+    own reports, never a list of program names."""
+    out: List[Any] = []
+    root = project / "reports"
+    if not root.is_dir():
+        return out
+    for f in sorted(root.rglob("*.json")):
+        try:
+            out.append(json.loads(f.read_text()))
+        except (OSError, ValueError):
+            continue
+    return out
 
 
 def _dicts_in(obj: Any):
@@ -902,11 +936,12 @@ def main() -> int:
         # path that is NOT on disk stops being a finding.
         block = [f"[INFO] project_outputs_in_tree_check: "
                  f"{len(consumed)} staged path(s) CONSUMED by an in-place "
-                 f"promotion — non-blocking, because the producer recorded "
-                 f"where the bytes went and sha256(destination) matches the "
-                 f"digest taken of the staged bytes before the rename, so the "
-                 f"evidence is provably still in the tree under its final "
-                 f"name (R-0915-162):"]
+                 f"promotion — non-blocking, because an UNBROKEN chain of "
+                 f"recorded digests runs from the staged bytes, through every "
+                 f"in-place rewrite that touched the destination afterwards, "
+                 f"to the destination's content now, so the evidence is "
+                 f"provably still in the tree under its final name "
+                 f"(R-0915-166):"]
         for f_rel, path_s, into in consumed:
             block.append(f"  - {f_rel} → {path_s} (consumed into {into}, "
                          f"sha256 verified)")

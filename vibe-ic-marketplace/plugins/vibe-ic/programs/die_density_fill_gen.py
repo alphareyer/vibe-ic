@@ -106,6 +106,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 
 import argparse
+import hashlib as _hashlib
 import json
 import os
 import re
@@ -113,6 +114,7 @@ import sys
 import hashlib
 import tempfile
 from pathlib import Path
+import _inplace_chain as _chain
 from typing import Any, Dict, List, Optional, Tuple
 
 from _atomic_artefact import (  # vibe-ic#1082
@@ -706,7 +708,20 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
             # vibe-ic#1082/#1470: a declared output is renamed into place only on
             # success. A half-written promoted layout is worse than none — a reader
             # cannot tell a truncated GDS from a small one.
-            atomic_write_bytes(dest, filled.read_bytes())
+            #
+            # R-0915-166 — RECORD WHAT THIS REWRITE FOUND AND WHAT IT LEFT.
+            # When `--in-place`, `dest` is a deliverable another producer already
+            # wrote (on spm run23 this overwrote the seal-ring's promoted GDS
+            # 3 m 24 s later), so a consumer asking "are these still the bytes
+            # the run produced" needs this hop to exist. Taken around the write,
+            # never after it: a digest read afterwards can only agree with
+            # itself.
+            _sha_before = _chain.sha256_file(dest)
+            _bytes = filled.read_bytes()
+            atomic_write_bytes(dest, _bytes)
+            common.setdefault(_chain.LINKS_KEY, []).append(
+                _chain.link(dest, project, _sha_before,
+                            _hashlib.sha256(_bytes).hexdigest()))
             common["promoted_to"] = str(dest)
         except OSError as exc:                               # noqa: BLE001
             return done(dict(common, state="FAIL",
