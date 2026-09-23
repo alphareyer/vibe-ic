@@ -6,6 +6,17 @@ Step 35 → 38 by the later renumbering the flow yaml already carries).
 
 Step 38 — foundry-handoff kit completeness
 
+ENFORCEMENT: advisory
+
+WHERE THE VERDICT IS CONSUMED: the flow's step 38 gate clause
+(`program_exit_zero: "foundry_handoff_package_check . --json
+reports/phase3/foundry_handoff_check.json"`), judged by flow_compliance_check.
+No runner spawns this gate inline: R-0915-141 (#2525) moved phase3_one_shot_runner's
+pre-audit producer slot to `foundry_handoff_pack_gen`, the program that PRODUCES
+the kit, because a gate's own `--json` verdict can never be the step's produced
+evidence. The runner never withheld the release on this exit status even before
+that, so the step-38 clause is, and was, where it decides.
+
 Behaviour
 ---------
 * WAIVED (rc=0) — `waivers.json` declares step waived (evidence + ticket).

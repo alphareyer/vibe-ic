@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 """Tapeout signoff check — wrapper for signoff_audit --mode tapeout.
 
+ENFORCEMENT: advisory
+
+WHERE THE VERDICT IS CONSUMED: the flow's step 36 gate clause
+(`program_exit_zero: "tapeout_signoff_check . --mode tapeout --json
+reports/audit/tapeout_signoff.json"`), judged by flow_compliance_check. No
+runner spawns this gate inline: R-0915-141 (#2525) moved phase3_one_shot_runner's
+pre-audit producer slot to `tapeout_checklist_gen`, the program that PRODUCES the
+step's declared checklist, because a gate's own `--json` verdict can never be
+the step's produced evidence. The runner never withheld the release on this
+exit status even before that ("these steps' own yaml clauses already decide
+them in the audit"), so the step-36 clause is, and was, where it decides.
+
 Forwards all passthrough arguments (--json, --lenient, --strict, etc.) to
 the underlying signoff_audit entry point. Prior versions hardcoded only
 the project_dir + --mode and silently dropped --json PATH, preventing
