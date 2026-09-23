@@ -203,13 +203,20 @@ _AUDITOR_TMP_RE = re.compile(
 _AUDIT_AUTHORSHIP_DIR = "reports/audit/audit_created"
 _AUDITOR_LOCK_RE = re.compile(
     r"^" + re.escape(_AUDIT_AUTHORSHIP_DIR) + r"/[0-9a-f]+\.json\.lock$")
+#: And the note's own atomic temp, `<hex>.json.<pid>.<tid>.tmp`, left behind when the pass
+#: writing it was interrupted. Recognised for the same reason as the lock and the canonical
+#: audit's temp: it is the auditor's own file, it has no stamp to be identified by, and
+#: unrecognised it moves the design hash on every later pass. Pinned to the shape the writer
+#: mints inside the note directory -- never `*.tmp`, which is a producer's partial write.
+_AUDITOR_NOTE_TMP_RE = re.compile(
+    r"^" + re.escape(_AUDIT_AUTHORSHIP_DIR) + r"/[0-9a-f]+\.json\.\d+\.\d+\.tmp$")
 
 
 def is_auditor_output(project: Path, path: Path) -> bool:
     """Is this file the AUDITOR's own output rather than a design input?"""
     rel = _rel(project, path)
     if (rel in AUDITOR_OUTPUT_PATHS or _AUDITOR_TMP_RE.match(rel)
-            or _AUDITOR_LOCK_RE.match(rel)):
+            or _AUDITOR_LOCK_RE.match(rel) or _AUDITOR_NOTE_TMP_RE.match(rel)):
         return True
     if _SUPERSEDED_RE.search(rel):
         return True

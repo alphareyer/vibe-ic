@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 PROGRAMS = Path(__file__).resolve().parents[1]
+PLUGIN = PROGRAMS.parent
 sys.path.insert(0, str(PROGRAMS))
 
 import flow_compliance_check as FCC          # noqa: E402
@@ -185,20 +186,122 @@ def test_three_consecutive_audits_agree_even_when_the_note_is_destroyed(tmp_path
     assert why == FCC.AUTHORSHIP_NO_ANSWER
 
 
-def test_an_audit_overwriting_the_runs_document_takes_authorship_with_it(tmp_path):
-    """Last writer wins, and the record self-heals in both directions."""
-    f = _doc(tmp_path, REL, {"program": "flow_compliance_check",
-                             GA.DOC_KEY: GA.ROLE_PRODUCER})
+def test_the_audit_never_takes_authorship_of_the_runs_own_document(tmp_path):
+    """THE OPPOSITE OF WHAT I ASSERTED IN ROUND 3, and round 3 was the defect.
+
+    I wrote an arm calling the overwrite "last writer wins ... the record self-heals", and
+    it encoded a permanent failure. The flow lists `flow_compliance_check` under
+    `programs:` for steps 2, 14, 15 and 37, so the RUN invokes it as the step's producer and
+    its receipt IS the step's run evidence. Publishing over that, then re-stamping it
+    `audit`, means the role-first reader refuses the step's only evidence -- every pass, and
+    the next run just re-produces it. No sequence of runs ever credits those steps.
+
+    The caller's own disclosure already said the rule: "A PRODUCER's document is never
+    written over -- that is R-0915-126 and it is untouched". This holds it to that.
+    """
+    project = tmp_path / "proj"
+    rel = "reports/phase1/gates/stage_phase1_compliance.json"
+    f = project / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    produced = {"program": "flow_compliance_check",
+                "steps": [{"id": "2", "status": "PASS"}],
+                "overall": "PASS",
+                GA.DOC_KEY: GA.ROLE_PRODUCER}
+    f.write_text(json.dumps(produced) + "\n")
+    before = f.read_bytes()
+
+    assert FCC._publish_over_the_audits_own_document(
+        ["flow_compliance_check", "--json", rel], project) is None, (
+        "the audit claimed the run's own evidence as its previous publication")
+    assert f.read_bytes() == before
+    assert not list(f.parent.glob("*superseded*")), (
+        "the run's document was copied aside, which is the first half of overwriting it")
+
+    # the reader still reads it as the RUN's, which is the whole point of declining
     shared = frozenset({"flow_compliance_check"})
     assert FCC.authorship_answer(f, shared, shared) == (False, FCC.AUTHORSHIP_BY_ROLE)
 
-    # the audit's gate runs and publishes over it
-    _doc(tmp_path, REL, {"program": "flow_compliance_check", GA.DOC_KEY: GA.ROLE_AUDIT})
-    assert FCC.authorship_answer(f, shared, shared) == (True, FCC.AUTHORSHIP_BY_ROLE)
 
-    # the RUN re-executes and legitimately reclaims the path
-    _doc(tmp_path, REL, {"program": "flow_compliance_check", GA.DOC_KEY: GA.ROLE_PRODUCER})
-    assert FCC.authorship_answer(f, shared, shared) == (False, FCC.AUTHORSHIP_BY_ROLE)
+#: The four steps whose own producer is a compliance program, with the receipt the flow's
+#: gate clause names -- read off `flow/phase1_phase2_phase3.yaml`, not typed from memory.
+PRODUCER_IS_A_COMPLIANCE_PROGRAM = [
+    ("2", "reports/phase1/gates/stage_phase1_compliance.json"),
+    ("14", "reports/analog/stage_analog_compliance.json"),
+    ("15", "reports/phase2/gates/stage2_compliance.json"),
+    ("37", "reports/phase3/gates/stage3_compliance.json"),
+]
+
+
+@pytest.mark.parametrize("sid,rel", PRODUCER_IS_A_COMPLIANCE_PROGRAM,
+                         ids=[s for s, _ in PRODUCER_IS_A_COMPLIANCE_PROGRAM])
+def test_each_of_the_four_steps_keeps_its_producers_document(sid, rel, tmp_path):
+    """All four paths, and the population is derived from the flow by the arm below."""
+    project = tmp_path / "proj"
+    f = project / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"program": "flow_compliance_check",
+                             "steps": [{"id": sid, "status": "PASS"}],
+                             "overall": "PASS",
+                             GA.DOC_KEY: GA.ROLE_PRODUCER}) + "\n")
+    before = f.read_bytes()
+    assert FCC._publish_over_the_audits_own_document(
+        ["compliance", "--json", rel], project) is None, sid
+    assert f.read_bytes() == before
+    assert not list(f.parent.glob("*superseded*")), sid
+
+
+def test_the_four_steps_are_the_ones_the_flow_declares(tmp_path):
+    """The list above is not a guess: the flow is read and the two must agree.
+
+    A fifth step gaining a compliance program under `programs:` arrives red here instead of
+    silently losing its evidence.
+    """
+    import yaml
+    flow = yaml.safe_load(
+        (PLUGIN / "flow" / "phase1_phase2_phase3.yaml").read_text())
+
+    def gate_cmds(node, out=None):
+        out = [] if out is None else out
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k.endswith("program_exit_zero"):
+                    out.append(v if isinstance(v, str)
+                               else str((v or {}).get("command", "")))
+                else:
+                    gate_cmds(v, out)
+        elif isinstance(node, list):
+            for i in node:
+                gate_cmds(i, out)
+        return out
+
+    found = set()
+    for st in flow.get("steps") or []:
+        declared = {str(x).strip() for x in (st.get("programs") or [])
+                    if isinstance(x, str)}
+        req = set(st.get("required_outputs") or [])
+        for cmd in gate_cmds(st.get("gate") or {}):
+            toks = cmd.split()
+            if not toks:
+                continue
+            prog = toks[0]
+            if prog not in declared:
+                continue
+            # the writing module, following a thin wrapper
+            src = (PROGRAMS / f"{prog}.py")
+            if not src.is_file():
+                continue
+            import re as _re
+            m = _re.search(r"^from\s+(\w+)\s+import\s+main\b",
+                           src.read_text(errors="replace"), _re.M)
+            if (m.group(1) if m else prog) != "flow_compliance_check":
+                continue
+            for i, tok in enumerate(toks[:-1]):
+                if tok == "--json" and toks[i + 1] in req:
+                    found.add((str(st.get("id")), toks[i + 1]))
+
+    assert found == set(PRODUCER_IS_A_COMPLIANCE_PROGRAM), (
+        f"the flow declares {sorted(found)}; the parametrised list is "
+        f"{sorted(PRODUCER_IS_A_COMPLIANCE_PROGRAM)}")
 
 
 def test_the_stamp_is_additive_and_idempotent():
@@ -270,3 +373,218 @@ def test_a_lock_file_outside_the_note_directory_is_still_a_design_input(tmp_path
         assert D.is_auditor_output(project, f) is False, (
             f"{rel} is not a lock this auditor mints and must keep counting as a design "
             f"input")
+
+
+def test_running_the_real_clause_leaves_the_producers_receipt_byte_identical(tmp_path):
+    """END TO END, through `_check_program_exit_zero` -- the clause, its subprocess, and
+    the redirect -- not `authorship_answer` on a file staged by hand.
+
+    This is the shape spm run23 hits on steps 2, 14, 15 and 37: the run's producer has
+    already written the step's receipt, and the audit then evaluates the step's own gate
+    clause, whose `--json` names that same path. The gate child runs with
+    `VIBEIC_FCC_ROLE=audit`, so if the audit publishes over the file the bytes come back
+    stamped `audit` and the step loses its only evidence.
+
+    TWO CONSECUTIVE PASSES, because the round-1 lesson on this branch is that a
+    classification which changes with the number of passes is not a measurement.
+    """
+    project = tmp_path / "proj"
+    (project / "input").mkdir(parents=True)
+    (project / "input" / "spec.md").write_text("# a counter\n")
+    rel = "reports/phase1/gates/stage_phase1_compliance.json"
+    receipt = project / rel
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    # what `flow_declared_producer_run` leaves behind: the program's own receipt, stamped
+    # `producer` because the RUN invoked it and stated no role.
+    receipt.write_text(json.dumps({
+        "program": "flow_compliance_check",
+        "steps": [{"id": "2", "status": "PASS"}],
+        "overall": "PASS",
+        GA.DOC_KEY: GA.ROLE_PRODUCER,
+    }, indent=2) + "\n")
+    before = receipt.read_bytes()
+
+    # the step's own gate clause, verbatim from the flow
+    clause = ("flow_compliance_check . --stage-id stage_phase1 --strict "
+              f"--json {rel}")
+
+    for pass_no in (1, 2):
+        outcome = FCC._check_program_exit_zero(project, clause)
+        note = str(outcome[1] if isinstance(outcome, tuple)
+                   else getattr(outcome, "output", "") or "")
+
+        assert receipt.read_bytes() == before, (
+            f"pass {pass_no}: the audit rewrote the run's own receipt; it now says "
+            f"invoked_as="
+            f"{GA.role_of(json.loads(receipt.read_text(errors='replace')))!r}")
+        assert not list(receipt.parent.glob("*superseded*")), (
+            f"pass {pass_no}: the run's document was copied aside")
+        assert "RE-PUBLISHED" not in note, (
+            f"pass {pass_no}: the clause claimed the run's evidence as its own previous "
+            f"publication -- {note[:200]}")
+
+        # and the reader credits the step: the document is the RUN's, by its own account
+        shared = frozenset({"flow_compliance_check"})
+        assert FCC.authorship_answer(receipt, shared, shared) == (
+            False, FCC.AUTHORSHIP_BY_ROLE), f"pass {pass_no}"
+
+
+# ── a claim from a pass that never finished ──────────────────────────────────
+
+def _foreign_claim(project: Path, sid: str, rel: str, invocation: str = "77777-1") -> Path:
+    """Exactly what a pass killed between its claim and its record leaves on disk."""
+    note = FCC._authorship_note_path(project, sid, rel)
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(json.dumps({
+        "schema": 1,
+        "written_by": "flow_compliance_check",
+        "state": "in_flight",
+        "invocation": invocation,
+        "step": sid,
+        "rel": rel,
+    }, indent=1) + "\n")
+    return note
+
+
+def test_a_killed_passs_claim_does_not_refuse_the_runs_document_forever(tmp_path, capsys):
+    """The MEDIUM. An in-flight claim never expires and nothing finalises it.
+
+    I took such a claim as an answer for ANY invocation, arguing a false refusal only costs
+    a re-run. It does not: the claim outlives the pass that wrote it, so ONE interrupted
+    audit refuses that path in every later audit, permanently. And the paths it bites are the
+    ones no stamp can rescue -- `rtl_hygiene_lint` and `rom_init_lint` write a top-level JSON
+    LIST, the reader answers UNREADABLE, and the decision falls straight through to here.
+    """
+    project = tmp_path / "proj"
+    rel = "reports/phase2/lint/rtl_hygiene.json"
+    produced = project / rel
+    produced.parent.mkdir(parents=True, exist_ok=True)
+    # the REAL shape of that producer's output: a top-level list, so it can carry no role
+    produced.write_text(json.dumps([{"rule": "x", "severity": "ERROR"}]) + "\n")
+    import design_input_digest as D
+    assert GA.role_of(json.loads(produced.read_text())) is None
+
+    note = _foreign_claim(project, "2", rel)
+
+    assert FCC._prior_audit_created(project, "2", [rel]) == set(), (
+        "another invocation's un-finalised claim still refuses the run's own document")
+
+    # and it is DISCLOSED by name, with the invocation that left it
+    stale = FCC.stale_in_flight_claims(project, "2", [rel])
+    assert len(stale) == 1, stale
+    assert stale[0]["claimed_by"] == "77777-1"
+    assert stale[0]["file_exists"] is True
+    assert stale[0]["rel"] == rel
+
+    # the claim is IGNORED, not deleted: an invocation still running owns its own claim
+    assert note.is_file()
+
+
+def test_my_own_in_flight_claim_still_closes_the_window(tmp_path):
+    """The half that must not move: the race the claim exists for is within ONE invocation,
+    where a nested clause inherits the id."""
+    project = tmp_path / "proj"
+    rel = "reports/phase1/gates/stage_phase1_compliance.json"
+    FCC._claim_audit_will_create(project, "2", [rel])
+
+    assert FCC._prior_audit_created(project, "2", [rel]) == {rel}
+    assert FCC.stale_in_flight_claims(project, "2", [rel]) == []
+
+    rec = json.loads(FCC._authorship_note_path(project, "2", rel).read_text())
+    assert FCC.in_flight_claim_is_this_invocations(rec) is True
+    # the same record seen by a DIFFERENT invocation answers nothing
+    rec["invocation"] = "a-different-one"
+    assert FCC.in_flight_claim_is_this_invocations(rec) is False
+
+
+def test_an_unreadable_document_is_disclosed_as_resting_on_bookkeeping(tmp_path):
+    """A list-shaped document cannot state a role, so the refusal must name itself."""
+    project = tmp_path / "proj"
+    rel = "reports/phase2/lint/rtl_hygiene.json"
+    f = project / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps([{"rule": "x"}]) + "\n")
+    shared = frozenset({"rtl_hygiene_lint"})
+    is_audits, why = FCC.authorship_answer(f, shared, shared)
+    assert (is_audits, why) == (False, FCC.AUTHORSHIP_UNREADABLE)
+    # and check_step's disclosure covers this source too, read from the shipped source
+    import inspect
+    src = inspect.getsource(FCC.check_step)
+    assert "AUTHORSHIP_UNREADABLE" in src and "AUTHORSHIP_NO_ANSWER" in src, (
+        "the per-step disclosure does not cover a document nothing can identify")
+
+
+# ── the note's own atomic temp ───────────────────────────────────────────────
+
+def test_an_interrupted_note_write_leaves_nothing_that_moves_the_design_hash(tmp_path):
+    """The LOW, both halves, and the leftover is named by the WRITER's own expression."""
+    import design_input_digest as D
+    import threading as _th
+
+    project = tmp_path / "proj"
+    (project / "input").mkdir(parents=True)
+    (project / "input" / "spec.md").write_text("# a counter\n")
+
+    def sha() -> str:
+        blk = D.build_digest(D.scan_inputs(project), [])
+        assert blk["unusable_reason"] is None, blk
+        return blk["sha256"]
+
+    before = sha()
+    note = FCC._authorship_note_path(project, "36", "reports/audit/tapeout_checklist.json")
+    note.parent.mkdir(parents=True, exist_ok=True)
+    leftover = note.with_name(f"{note.name}.{os.getpid()}.{_th.get_ident()}.tmp")
+    leftover.write_text('{"schema": 1, "written')          # a half-written note
+
+    assert D.is_auditor_output(project, leftover) is True
+    assert sha() == before, (
+        "a temp left by an interrupted note write moved the design hash, so every later "
+        "pass reads an unchanged design as changed")
+
+
+def test_the_note_writer_removes_its_temp_however_the_write_ends(tmp_path):
+    """`finally`, not `except OSError`: SystemExit and KeyboardInterrupt are how a step dies."""
+    import ast
+    import inspect
+
+    src = inspect.getsource(FCC._write_note_atomically)
+    tree = ast.parse(src.lstrip())
+    tries = [n for n in ast.walk(tree) if isinstance(n, ast.Try)]
+    assert any(t.finalbody and "unlink" in ast.unparse(
+        ast.Module(body=t.finalbody, type_ignores=[])) for t in tries), (
+        "the temp is not removed in a `finally`, so an interrupted write leaks it")
+
+    # and it does not mask the write's own failure
+    note = tmp_path / "n.json"
+    boom = OSError(28, "No space left on device")
+    real = Path.write_text
+
+    def exploding(self, *a, **k):
+        if self.name.endswith(".tmp"):
+            real(self, *a, **k)
+            raise boom
+        return real(self, *a, **k)
+
+    import pytest as _pytest
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Path, "write_text", exploding)
+        with _pytest.raises(OSError) as caught:
+            FCC._write_note_atomically(note, '{"a": 1}')
+    assert caught.value is boom
+    assert not list(tmp_path.glob("*.tmp")), "the temp outlived the interrupted write"
+    assert not note.exists()
+
+
+def test_a_producers_temp_in_the_note_directory_shape_is_not_swallowed(tmp_path):
+    """The rule is the note directory plus the writer's exact shape, not `*.tmp`."""
+    import design_input_digest as D
+    project = tmp_path / "proj"
+    (project / "input").mkdir(parents=True)
+    (project / "input" / "spec.md").write_text("x\n")
+    for rel in ("phase2/stage1/rtl/core.v.123.456.tmp",
+                "reports/audit/audit_created/NOT-HEX.json.1.2.tmp",
+                "reports/audit/audit_created/6be9e044.json.tmp"):
+        f = project / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("")
+        assert D.is_auditor_output(project, f) is False, rel
