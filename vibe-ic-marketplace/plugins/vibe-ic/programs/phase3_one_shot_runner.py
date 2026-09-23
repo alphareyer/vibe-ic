@@ -80,6 +80,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path, PurePosixPath
 from typing import (Any, Callable, Dict, FrozenSet, Iterable, List,
                     NamedTuple, Optional, Sequence, Set, Tuple)
+import _audit_scope
 import _path_layout as _pl
 import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
@@ -66174,10 +66175,30 @@ def _derive_headline_verdict(project: Path, steps_verdict: str
     """
     audit_path = _pl.report_path(project, "phase23_completion_audit.json")
     audit_verdict = None
+    _audit_doc = None
     try:
-        audit_verdict = json.loads(audit_path.read_text()).get("verdict")
+        _audit_doc = json.loads(audit_path.read_text())
+        audit_verdict = _audit_doc.get("verdict")
     except (OSError, ValueError):
         pass
+    # A SCOPED AUDIT IS NOT THIS RUN'S AUDIT. R-0915-150.
+    #
+    # Every `flow_compliance_check` pass writes that path, scoped or not — a `--stage 4`
+    # pass judges 10 of the flow's 70 steps, a `--phase 2` pass 32. This function copies
+    # the verdict it finds into `phase3_one_shot.json` as `completion_audit_verdict`, and
+    # the front door reads THAT as the run's audit axis. So a scoped document travelling
+    # under that name is a different question's answer arriving where nobody can tell.
+    #
+    # NOT DISCARDED, and not downgraded either: the audit's word never moves the design's
+    # headline here (R-0915-126), so the honest thing is to refuse to carry it as the
+    # run's and say why in the note the caller publishes.
+    if _audit_doc is not None:
+        _whole, _signal, _why = _audit_scope.audit_scope_is_whole_flow(_audit_doc)
+        if not _whole:
+            return steps_verdict, None, (
+                f"the completion audit on disk is not this run's whole-flow audit — "
+                f"{_why} (signal: {_signal}); the design verdict stands on its own "
+                f"steps and no audit verdict is carried (R-0915-150)")
     if not isinstance(audit_verdict, str) or \
             audit_verdict not in _VERDICT_RANK:
         return steps_verdict, audit_verdict, (

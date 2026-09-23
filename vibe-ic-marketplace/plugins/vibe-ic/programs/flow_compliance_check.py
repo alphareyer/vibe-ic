@@ -20744,24 +20744,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         # cannot see it, and leaving it in would make the PREVIOUS run's audit
         # an input to THIS run's design hash.
         audit_path = _pl.report_path(project, "phase23_completion_audit.json")
-        # THE DESTINATION IS DECIDED HERE, NOT AFTER THE FOOTPRINT. R-0915-150.
+        # ONE CANONICAL AUDIT, AND IT SAYS WHAT IT JUDGED. R-0915-150, second cut.
         #
-        # A scoped pass writes its own audit under `reports/audit/scoped/`, and the two
-        # blocks below both depend on knowing that NOW: `_prior_audit` carries the
-        # previous footprint FROM THIS FILE, and `_also_written` declares what this pass
-        # wrote. Deciding it later (my first cut) meant a scoped pass read its prior from
-        # a canonical document it never writes, so it carried nothing -- and two
-        # identical `--phase 2` passes over an unchanged tree produced DIFFERENT design
-        # digests, because each counted the other's outputs as design inputs.
+        # My first cut had a SCOPED pass write its audit elsewhere, so a reader asking for
+        # the run's audit found a whole-flow one or none. MEASURED: that costs 16 cases
+        # across 5 shipped test files (plus 2 collection errors), because "run a scoped
+        # pass, then read this document" is a common and legitimate shape -- and restoring
+        # the canonical write turned every one of them green (409 passed / 3 failed, the 3
+        # being my own arms asserting the split). 20+ consumers against 4 readers that
+        # treat this document as THE RUN'S VERDICT, so the refusal belongs in those four:
+        #   benchmark_evidence_publish._audit_verdict and its convergence guard,
+        #   phase3_one_shot_runner._derive_headline_verdict,
+        #   and the FPGA pre-burn guard, which reads its OWN pass's audit.
+        # What makes that possible is the `scope` block this pass records below.
         _audit_is_whole_flow = (
             target_stage is None
             and bool(_flow_step_ids)
             and set(_flow_step_ids) <= {str(getattr(r, "id", "")) for r in results})
-        if not _audit_is_whole_flow:
-            _scope_name = (f"stage-{target_stage}" if target_stage
-                           else f"phase-{args.phase}")
-            audit_path = (audit_path.parent / "scoped"
-                          / f"phase23_completion_audit.{_scope_name}.json")
 
         # ── what this tally was computed OVER ────────────────────────────
         # Two hashes, because "did the design change?" and "did the ruler
@@ -20792,31 +20791,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         except (OSError, ValueError):
             _prior_audit = None
         _carried = []
-        # THE UNION ACROSS ALL CHAINS, not the one this pass happens to read.
-        # R-0915-153: a scoped pass reads its prior from the scoped document and a
-        # whole-flow pass from the canonical one, so each chain knew only its own
-        # footprint -- and the OTHER chain's writes then looked like design inputs.
-        # `is_auditor_output` already recognises these files on sight, which is the
-        # real fix; this keeps the recorded footprint complete as well, so a reader of
-        # either document sees what the auditor wrote in both.
-        _carried = []
+        # The prior footprint, carried from the one canonical audit. The
+        # union-across-chains machinery went with the scoped split; `is_auditor_output`
+        # keeps an auditor write out of the design inputs now, and it does not depend on
+        # any chain having recorded it.
         try:
-            _audit_dir = _pl.report_path(project, "phase23_completion_audit.json").parent
-            _chain_docs = [_audit_dir / "phase23_completion_audit.json"]
-            _scoped_dir = _audit_dir / "scoped"
-            if _scoped_dir.is_dir():
-                _chain_docs.extend(sorted(_scoped_dir.glob("*.json")))
-            _seen = set()
-            for _doc_path in _chain_docs:
-                try:
-                    _d = json.loads(_doc_path.read_text(errors="replace"))
-                except (OSError, ValueError):
-                    continue
-                _pb = (_d or {}).get("design_input_digest") or {}
-                for _q in (_pb.get("auditor_written_paths") or []):
-                    if isinstance(_q, str) and _q not in _seen:
-                        _seen.add(_q)
-                        _carried.append(_q)
+            _pb = (_prior_audit or {}).get("design_input_digest") or {}
+            _carried = [q for q in (_pb.get("auditor_written_paths") or [])
+                        if isinstance(q, str)]
         except Exception:
             _carried = []
         if _did is not None and _did_scan is not None:
@@ -21079,28 +21061,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         }
         audit["invocation"] = _this_invocation
         if not _audit_is_whole_flow:
-            # (the path was chosen above; this only tells the reader)
-            # ITS OWN SUBTREE, NAMED BY WHAT IT JUDGED, REPLACED PER SCOPE.
-            #
-            # A scoped audit is not a smaller version of the run's audit; it is a
-            # different measurement. Four things follow, and each was a real hazard in
-            # my first cut, which dropped these files beside the canonical one:
-            #   * `reports/audit/scoped/` keeps them out of every reader that treats
-            #     `reports/audit/*.json` as the run's own evidence -- the bubble-up
-            #     corpus reader rglobs exactly that;
-            #   * the name carries the POPULATION (`stage4`, `phase-2`), not just a
-            #     flag, because a whole-flow pass leaves several of these from its
-            #     nested stage clauses and they judged different step sets;
-            #   * one file per population, REPLACED, so they do not accumulate across
-            #     invocations -- and `invocation` inside says whose it is;
-            #   * written atomically, because a reader rglobbing the tree can arrive
-            #     mid-write and a truncated JSON reads as a broken audit.
+            # SAID OUT LOUD, so a reader of the log knows what is on disk. The REFUSAL
+            # lives with the four readers named above; this document records `scope`,
+            # which is what lets them refuse it.
             print(f"flow_compliance_check: this pass judged {len(results)} of "
-                  f"{_flow_step_total} step(s), so it does NOT publish the whole "
-                  f"run's completion audit; its own scoped audit is at "
-                  f"reports/audit/scoped/{audit_path.name} and the canonical "
-                  f"reports/audit/phase23_completion_audit.json is left untouched",
-                  file=sys.stderr)
+                  f"{_flow_step_total} step(s), so the completion audit it publishes is "
+                  f"SCOPED (scope.whole_flow=false) and must NOT be read as this run's "
+                  f"verdict", file=sys.stderr)
         audit_path.parent.mkdir(parents=True, exist_ok=True)
         _audit_tmp = audit_path.with_name(
             f"{audit_path.name}.{os.getpid()}.tmp")

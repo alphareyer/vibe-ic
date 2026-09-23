@@ -591,54 +591,53 @@ def _run_flow_compliance_pre_burn(
     # (`reports/phase23_completion_audit.json`) is retained as fallback
     # for older project trees that still hold the artefact at the root
     # of `reports/`.
-    # THIS PASS'S OWN AUDIT, NEVER THE WHOLE RUN'S. R-0915-150.
+    # THIS PASS'S OWN AUDIT — dated, and its SCOPE checked. R-0915-150.
     #
-    # This guard used to read `reports/audit/phase23_completion_audit.json` as its
-    # PRIMARY verdict, falling back to stdout only when that file was absent. That
-    # document belongs to whichever pass last judged the WHOLE flow, and this guard
-    # judges 32 of 70 steps -- so it was reading somebody else's measurement, in both
-    # directions:
+    # This guard runs `--phase 2 --strict-structural`, which judges 32 of the flow's 70
+    # steps, and every pass writes `reports/audit/phase23_completion_audit.json`. Two
+    # things therefore have to hold before that document may decide a burn:
     #
-    #   * in `design_one_shot_runner`, every `step_fpga_burn` follows
-    #     `emit_final_summary`'s whole-flow `--strict` pass, whose verdict on a
-    #     phase-2 project cannot be PASS -- so EVERY burn was blocked by an audit of a
-    #     population this guard never asked about;
-    #   * through the MCP program tool, with no such pass before it, an OLD canonical
-    #     PASS let a structurally failing design burn.
+    #   * it must be THIS pass's — written at or after this pass started. Reading it
+    #     unconditionally meant, in `design_one_shot_runner`, that every burn was judged
+    #     by `emit_final_summary`'s preceding whole-flow `--strict` pass (whose verdict on
+    #     a phase-2 project cannot be PASS, so EVERY burn was blocked); and through the
+    #     MCP program tool, with no such pass before it, an OLD PASS let a structurally
+    #     failing design burn.
+    #   * and its scope must be THIS pass's population. A whole-flow audit is not an
+    #     answer about the 32 steps this guard asked about, and a scoped audit from some
+    #     other scope is not either. Accepted only when `scope` says it judged what this
+    #     pass judged.
     #
-    # The scoped document this pass itself caused is the one that answers, and it is
-    # accepted only when it postdates the pass. The 1 s tolerance is the filesystem's
-    # mtime granularity (measured ~64 ms on the campaign host), two orders below the
-    # staleness being excluded. If it is not there, the verdict comes from THIS pass's
-    # own stdout/rc -- never from the whole-run file.
-    scoped_audit_path = os.path.join(
-        project_root, "reports", "audit", "scoped",
-        "phase23_completion_audit.phase-2.json")
-    audit_json_path = scoped_audit_path
+    # When neither holds the verdict comes from THIS pass's own stdout/rc, which is the
+    # backup parser below — never from a document another population produced.
+    #
+    # The 1 s tolerance is the filesystem's mtime granularity (measured ~64 ms on the
+    # campaign host), two orders below the staleness being excluded.
+    canonical_audit_path = os.path.join(
+        project_root, "reports", "audit", "phase23_completion_audit.json")
+    legacy_audit_path = os.path.join(
+        project_root, "reports", "phase23_completion_audit.json")
+    audit_json_path = canonical_audit_path
     audit_json_present = False
-    try:
-        audit_json_present = (
-            os.path.isfile(scoped_audit_path)
-            and os.stat(scoped_audit_path).st_mtime + 1.0 >= _pass_started)
-    except OSError:
-        audit_json_present = False
-    if not audit_json_present:
-        # Older plugin trees (before the scoped split) published this pass's own
-        # audit at the canonical path. Accept THAT only if it postdates this pass,
-        # which is the same question asked of the same document.
-        for _legacy in (
-                os.path.join(project_root, "reports", "audit",
-                             "phase23_completion_audit.json"),
-                os.path.join(project_root, "reports",
-                             "phase23_completion_audit.json")):
-            try:
-                if (os.path.isfile(_legacy)
-                        and os.stat(_legacy).st_mtime + 1.0 >= _pass_started):
-                    audit_json_path = _legacy
-                    audit_json_present = True
-                    break
-            except OSError:
+    for _cand in (canonical_audit_path, legacy_audit_path):
+        try:
+            if not os.path.isfile(_cand):
                 continue
+            if os.stat(_cand).st_mtime + 1.0 < _pass_started:
+                continue                      # another pass's document
+            with open(_cand, "r", encoding="utf-8") as _fh:
+                _doc = json.load(_fh)
+        except Exception:
+            continue
+        _scope = _doc.get("scope") if isinstance(_doc, dict) else None
+        if isinstance(_scope, dict):
+            # THIS pass judged `--phase 2`; the document must say the same.
+            if str(_scope.get("phase")) != "2" or _scope.get("whole_flow") is True:
+                continue
+        audit_json_path = _cand
+        audit_json_present = True
+        break
+
     audit_json_data: Optional[Dict[str, Any]] = None
     audit_json_error: Optional[str] = None
 
