@@ -684,11 +684,11 @@ def _as_rows(rows: Any) -> List[Tuple[str, str, int]]:
     out: List[Tuple[str, str, int]] = []
     for i, row in enumerate(rows or []):
         if isinstance(row, str):
-            out.append((f"phase{i + 1}", row, 0))
+            out.append((("phase" + str(i + 1)), row, 0))
             continue
         if isinstance(row, (tuple, list)):
             if len(row) == 1:
-                out.append((f"phase{i + 1}", str(row[0]), 0))
+                out.append((("phase" + str(i + 1)), str(row[0]), 0))
             elif len(row) == 2:
                 out.append((str(row[0]), str(row[1]), 0))
             else:
@@ -698,7 +698,7 @@ def _as_rows(rows: Any) -> List[Tuple[str, str, int]]:
                     rc = 0
                 out.append((str(row[0]), str(row[1]), rc))
             continue
-        out.append((f"phase{i + 1}", str(row), 0))
+        out.append((("phase" + str(i + 1)), str(row), 0))
     return out
 
 

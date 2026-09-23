@@ -60,14 +60,49 @@ def test_with_nothing_on_disk_the_canonical_place_is_named(tmp_path):
 
 
 def test_a_report_with_no_legacy_spelling_is_unaffected(tmp_path):
-    """The tolerance is per filename, never a blanket second location."""
-    for name in ("phase2_one_shot.json", "phase3_one_shot.json"):
-        f = tmp_path / "reports" / name          # the flat spelling, which nothing wrote
+    """The tolerance is PER FILENAME, never a blanket second location.
+
+    My first spelling of this arm used phase2's and phase3's reports as the examples, on the
+    assumption that only phase1 had ever moved. That was wrong and it cost a regression: old
+    `run_status` accepted the flat spelling for ALL SIX of its phase reports, so when I replaced
+    its hand-built pairs with this resolver, five tolerances vanished and
+    `test_issue590_auto_picks_the_furthest_phase` -- which stages every report flat -- got
+    "UNKNOWN ... there is no run here to report on". The table now names all six; the property
+    this arm is really about is that a name NOT in the table gets no second location at all.
+    """
+    for name in ("synth_netlist.json", "drc_signoff.json"):
+        assert name not in _pl.LEGACY_REPORT_PATHS, name
+        f = tmp_path / "reports" / name          # a flat spelling nothing ever wrote
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("{}")
         got, legacy = _pl.report_path_for_reading(tmp_path, name)
         assert got == _pl.report_path(tmp_path, name), (name, got)
         assert legacy is False, name
+
+
+def test_every_pair_run_status_used_to_accept_is_in_the_table(tmp_path):
+    """The regression, pinned: replacing N candidates with a resolver means it must know all N.
+
+    `run_status` reads a project's phase reports, and it accepted each at the routed location AND
+    at the flat `reports/<name>.json`. Every one of those names must therefore have a legacy
+    entry, or converting that reader silently narrows it.
+    """
+    import run_status as _rs
+
+    for name in _rs._PHASE_REPORTS.values():
+        assert name in _pl.LEGACY_REPORT_PATHS, (
+            f"{name} lost the flat spelling `run_status` used to accept")
+        f = tmp_path / "reports" / name
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("{}")
+        got, legacy = _pl.report_path_for_reading(tmp_path, name)
+        assert got == f and legacy is True, (name, got, legacy)
+
+    # analog is the one whose ROUTED location is neither of the two that reader checked, so it
+    # needs both of them, in preference order
+    assert _pl.report_path(tmp_path, "analog_one_shot.json").parent.name == "phase3"
+    assert _pl.LEGACY_REPORT_PATHS["analog_one_shot.json"] == (
+        "reports/orchestrator/analog_one_shot.json", "reports/analog_one_shot.json")
 
 
 def test_the_resolver_never_decides_where_to_write():
@@ -83,7 +118,7 @@ def test_the_legacy_spellings_are_the_resolvers_own():
     Before this there were six hand-built pairs across four modules. Any that remain must
     agree with `LEGACY_REPORT_PATHS`, or the layouts diverge again where nobody is looking.
     """
-    declared = set(_pl.LEGACY_REPORT_PATHS.values())
+    declared = {rel for rels in _pl.LEGACY_REPORT_PATHS.values() for rel in rels}
     assert LEGACY in declared, sorted(declared)
     for module in ("step_write_ledger.py", "vibe_ic_entry_guard.py"):
         text = (PROGRAMS / module).read_text(errors="replace")

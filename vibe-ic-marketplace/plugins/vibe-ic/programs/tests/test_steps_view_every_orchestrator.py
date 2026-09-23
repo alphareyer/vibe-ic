@@ -50,6 +50,25 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 
 import _path_layout as _pl   # noqa: E402
+
+#: WHERE PASS 1's RECORD LIVES, asked of the router. R-0915-151 moved
+#: `phase1_one_shot.json` onto `_path_layout`'s router, because the flat
+#: `reports/phase1_one_shot.json` is a location this repo's own
+#: `reports_subfolder_taxonomy_check` calls a stray file. These arms are about the SECOND PASS
+#: being reachable and consuming the delivered answer, not about layout: they staged pass 1 flat
+#: and then read the flat path back, so once the second pass began publishing at the routed path
+#: they were reading a file nobody had updated. The legacy-location behaviour has its own home,
+#: `test_a_pass_one_written_before_the_move_is_still_carried.py`; these ask the router so they
+#: are not accidentally testing two things.
+def _pass1_record(project: Path) -> Path:
+    # The parent is created because several of these call sites WRITE pass 1's record to stage a
+    # project. The flat location they used to write needed no mkdir -- `reports/` already existed
+    # -- and the routed one does; my first rewrite of these arms missed that and turned them into
+    # FileNotFoundError at `reports/orchestrator/`. Harmless on a read.
+    path = _pl.report_path(project, "phase1_one_shot.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
 import _watchdog  # noqa: E402
 
 
@@ -273,7 +292,7 @@ def test_real_orchestrator_run_leaves_the_tree(tmp_path):
     # The runner's own report carries the same record, so a reader who opens
     # only the summary still sees the view's state.
     summary = json.loads(
-        (project / "reports" / "phase1_one_shot.json").read_text())
+        _pass1_record(project).read_text())
     assert summary["steps_view"]["status"] == "OK", summary["steps_view"]
 
 
@@ -343,7 +362,7 @@ def test_run_survives_a_view_that_cannot_be_built(tmp_path):
 
     assert cp.returncode == 0, (
         "bookkeeping killed the run:\n" + cp.stdout + cp.stderr)
-    assert (project / "reports" / "phase1_one_shot.json").is_file()
+    assert _pass1_record(project).is_file()
     rec = json.loads(_pl.steps_view_report_path(project).read_text())
     assert rec["status"] != "OK", rec
     assert rec["error"], rec

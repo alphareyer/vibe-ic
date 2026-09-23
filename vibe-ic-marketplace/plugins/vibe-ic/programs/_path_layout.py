@@ -773,8 +773,27 @@ def step_output_record_path(project: Path, sid) -> Path:
 #: record saying so, and the front door halted at phase 1 on a project that had in fact run.
 #: `vibe_ic_entry_guard` already tolerated both spellings and called this one "legacy"; this
 #: is that tolerance with ONE definition instead of four.
+#: MAPS ONE NAME TO EVERY OLDER LOCATION A READER USED TO ACCEPT, in order of preference.
+#:
+#: It is a TUPLE per name because `analog_one_shot.json` needs two: the router categorises it
+#: `phase3`, and `run_status` accepted it at `reports/orchestrator/` and at `reports/` -- neither
+#: of which is where the router points.
+#:
+#: MEASURED, and this table is the shape of a regression I caused. `run_status` had the
+#: routed-and-flat pair hand-written three times, for ALL SIX of its phase reports. I replaced
+#: those loops with a single call to the resolver below while this table knew ONE name, so five
+#: tolerances vanished silently: `test_issue590_auto_picks_the_furthest_phase` stages every report
+#: at the flat `reports/<name>.json` and `run_status` answered "UNKNOWN -- no final verdict, no
+#: recorded PID and no log or artifact of any kind under this project". Replacing N candidates
+#: with a resolver means the resolver must know all N.
 LEGACY_REPORT_PATHS: dict = {
-    "phase1_one_shot.json": "reports/phase1_one_shot.json",
+    "phase1_one_shot.json": ("reports/phase1_one_shot.json",),
+    "phase2_one_shot.json": ("reports/phase2_one_shot.json",),
+    "phase3_one_shot.json": ("reports/phase3_one_shot.json",),
+    "phase23_one_shot.json": ("reports/phase23_one_shot.json",),
+    "vibe_ic_one_shot.json": ("reports/vibe_ic_one_shot.json",),
+    "analog_one_shot.json": ("reports/orchestrator/analog_one_shot.json",
+                             "reports/analog_one_shot.json"),
 }
 
 
@@ -794,14 +813,13 @@ def report_path_for_reading(project: Path, filename: str):
             return routed, False
     except OSError:                                        # pragma: no cover
         pass
-    legacy_rel = LEGACY_REPORT_PATHS.get(filename)
-    if legacy_rel:
+    for legacy_rel in (LEGACY_REPORT_PATHS.get(filename) or ()):
         legacy = project / legacy_rel
         try:
             if legacy.is_file():
                 return legacy, True
         except OSError:                                    # pragma: no cover
-            pass
+            continue
     return routed, False
 
 
