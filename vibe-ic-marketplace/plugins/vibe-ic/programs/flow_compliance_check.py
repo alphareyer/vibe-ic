@@ -18555,6 +18555,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not steps:
         print("flow_compliance_check: flow has no steps defined", file=sys.stderr)
         return 2
+    #: THE WHOLE FLOW'S SIZE, captured BEFORE any narrowing, because `steps` is
+    #: rebound by the --stage filter below and comparing the population with
+    #: itself would call every scoped pass whole-flow. R-0915-147.
+    _flow_step_total = len([x for x in steps if isinstance(x, dict)])
 
     # Apply --stage / --stage-id filter if requested.
     target_stage: Optional[str] = None
@@ -20467,6 +20471,39 @@ def main(argv: Optional[List[str]] = None) -> int:
             "strict_structural": args.strict_structural,
             "strict_step_artifacts": args.strict_step_artifacts,
             "phase": args.phase,
+            # R-0915-147 — THE SCOPE THIS RECEIPT ACTUALLY JUDGED.
+            #
+            # `phase` alone is the ARGUMENT, and it defaults to "all". `--stage` /
+            # `--stage-id` narrow the population and were recorded NOWHERE, so a
+            # stage-scoped pass published a receipt stamped `phase: "all"` with no
+            # stage key at all.
+            #
+            # MEASURED on spm run22, read-only, on five shipped receipts:
+            #   reports/phase1/gates/stage_phase1_compliance.json   2 steps
+            #   reports/phase2/gates/stage1_compliance.json         7 steps
+            #   reports/phase2/gates/stage2_compliance.json        13 steps
+            #   reports/phase3/gates/stage3_compliance.json        20 steps
+            #   reports/phase3/gates/stage4_compliance.json        10 steps
+            # every one stamped `phase="all"`, none carrying a `stage` key, over a
+            # 70-step flow -- a stage-scoped record labelled whole-flow, five times.
+            # A reader comparing a stage's own stdout with its receipt then has no
+            # way to tell whether the two describe the same population, which is the
+            # disagreement this was found through (stage1 stdout PASS beside a
+            # receipt saying FAIL on a combined tree).
+            #
+            # `whole_flow` is DERIVED from the population against the flow size read
+            # BEFORE narrowing, never from the argument -- the argument is what was
+            # already wrong.
+            "scope": {
+                "phase": args.phase,
+                "stage": (str(args.stage) if getattr(args, "stage", None)
+                          else None),
+                "stage_id": (getattr(args, "stage_id", None) or None),
+                "steps_judged": [str(getattr(r, "id", "")) for r in results],
+                "step_count": len(results),
+                "flow_step_total": _flow_step_total,
+                "whole_flow": len(results) >= _flow_step_total,
+            },
             "counts": counts,
             "overall": overall,
             "advisories": advisories,
