@@ -98,6 +98,24 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# --- sibling-import path (vibe-ic#2104) ------------------------------------
+# `programs/` is a flat directory whose modules import each other by BARE name. Python puts a
+# file's own directory on `sys.path` only when that file is run as `__main__`; under
+# `importlib.util.spec_from_file_location` -- how the gates, the wiring audit and much of the
+# suite load a program -- it does not, so a bare sibling import raises ModuleNotFoundError.
+# My first cut put `import _gate_authorship` at the top of this file and
+# `test_issue2104_programs_load_by_path` named it: this module became the one program that
+# cannot resolve a sibling when loaded by path. Same shape as the sibling programs that
+# already carry it, and idempotent.
+import os as _os                                                    # noqa: E402
+import sys as _sys                                                  # noqa: E402
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# ---------------------------------------------------------------------------
+
+import _gate_authorship as _ga   # noqa: E402  R-0915-152 (who invoked the writer)
+
 SCHEMA_VERSION = 1
 
 #: Directory names never part of a design. `.git` is version-control
@@ -230,6 +248,27 @@ def is_auditor_output(project: Path, path: Path) -> bool:
         return False
     if not isinstance(doc, dict):
         return False
+    # WHO INVOKED THE WRITER OUTRANKS WHICH PROGRAM WROTE IT. R-0915-152.
+    #
+    # `program: flow_compliance_check` says which program produced the document. It does
+    # NOT say whether the RUN ran it or the AUDIT did, and for this one program those are
+    # different answers: the flow lists `flow_compliance_check` under `programs:` for steps
+    # 2, 14, 15 and 37, so `flow_declared_producer_run` invokes it as the step's producer
+    # and its receipt IS the step's run evidence.
+    #
+    # MEASURED on a real producer-invoked pass (`--stage-id stage_phase1 --json <receipt>`,
+    # no role stated): the receipt is written `invoked_as: producer`, and the name-only rule
+    # above answered `auditor_output=True` -- so the run's own evidence was SUBTRACTED from
+    # the design the digest hashes. The cost runs both ways and neither is visible: an edit
+    # to that receipt never moves the design hash, so a tally that moves with it is filed as
+    # unexplained; and the file count the block publishes silently omits it.
+    #
+    # So the role decides WHEN THE DOCUMENT STATES ONE, and the name-based rule stays for
+    # every document written before the stamp existed -- `role_of` returns None for those,
+    # never `producer`, precisely so silence is not read as a claim.
+    _role = _ga.role_of(doc)
+    if _role is not None:
+        return _role == _ga.ROLE_AUDIT
     # Two stamp keys, because the auditor uses two: `program` on the compliance receipt
     # (R-0915-138) and `written_by` on the authorship notes. Only the AUDITOR's own name
     # matches, so another program's `written_by` is untouched.
