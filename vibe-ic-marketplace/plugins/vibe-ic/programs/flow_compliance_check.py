@@ -3648,6 +3648,11 @@ _GATE_RECEIPT_FLAGS = ("--json", "--report")
 #: before anyone could read it.
 _RECEIPT_REDIRECTS: Dict[str, Tuple[str, Any]] = {}
 
+#: Compliance receipts THIS process has published. R-0915-150 — the republish path
+#: may supersede only a document this invocation itself wrote, never another
+#: invocation's record of a different population.
+_THIS_INVOCATION_PUBLISHED: Set[str] = set()
+
 
 class _ReceiptRedirects:
     """The scratch directories a clause's receipts went to, and their records.
@@ -3832,6 +3837,37 @@ def _publish_over_the_audits_own_document(argv: List[str], project: Path
         # `program: flow_compliance_check`. So the negative arm holds BY
         # CONSTRUCTION rather than by a set that has to be kept right.
         if not _is_the_audits_own_compliance_report(abs_target):
+            continue
+        # ONLY A RECEIPT THIS INVOCATION WROTE. R-0915-150.
+        #
+        # MEASURED with three sequential stage-scoped passes over a copy of spm
+        # run22 (its stage1 receipt present at 08:52:02), on PLAIN MAIN:
+        #
+        #   stage1 pass  exits 12:58:10, wrote its OWN receipt at 12:58:08 —
+        #                overall NOT_MEASURED, 7 steps: the pass's own verdict
+        #   stage2 pass  step 7's `stage1_compliance --json <stage1 receipt>` clause
+        #                REPUBLISHES it at 12:58:50 as overall FAIL      (pass 2)
+        #   stage4 pass  republishes it again at 12:59:45                (pass 3)
+        #
+        # So the receipt reads FAIL for a stage whose own pass said NOT_MEASURED, and
+        # its mtime says it was authored while a different stage was being judged.
+        # That is the "stage1 stdout disagrees with the stage1 receipt" report in its
+        # real form — and the mechanism is this republish, which I wrote for
+        # R-0915-138, reaching across invocations it was never about.
+        #
+        # R-0915-138's subject is a SECOND PASS INSIDE ONE INVOCATION: the audit
+        # superseding its OWN earlier publication, keeping the old one beside it.
+        # Another invocation's receipt is not that: it is somebody else's measurement
+        # of a different population. So it is LEFT ALONE, and the clause's receipt is
+        # redirected to scratch like any other document the run already produced.
+        #
+        # PER TARGET, NOT PER CALL. `--json A --report B` is decided for A AND for B:
+        # main's b543dd1a6 made this a loop over every receipt flag the gate writes,
+        # because deciding the call on the first flag meant B was never looked at. So a
+        # target this invocation did not write is SKIPPED and the loop goes on to the
+        # next one; returning here would drop the remaining receipts on the floor and
+        # silently reinstate the defect that loop exists to fix.
+        if _resolved_key(abs_target) not in _THIS_INVOCATION_PUBLISHED:
             continue
         try:
             stale = json.loads(abs_target.read_text(errors="replace"))
@@ -18559,6 +18595,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     #: rebound by the --stage filter below and comparing the population with
     #: itself would call every scoped pass whole-flow. R-0915-147.
     _flow_step_total = len([x for x in steps if isinstance(x, dict)])
+    _flow_step_ids = [str(x.get("id")) for x in steps if isinstance(x, dict)]
 
     # Apply --stage / --stage-id filter if requested.
     target_stage: Optional[str] = None
@@ -20502,7 +20539,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "steps_judged": [str(getattr(r, "id", "")) for r in results],
                 "step_count": len(results),
                 "flow_step_total": _flow_step_total,
-                "whole_flow": len(results) >= _flow_step_total,
+                # MEMBERSHIP, NOT A COUNT. A count is inflated by rows the flow does
+                # not declare — the synthetic P0 umbrella and the pre-PnR rows — so
+                # on a flow definition without P0 a `--stage 2` pass could reach the
+                # count and call itself whole-flow with step 1 never judged. Nothing
+                # reads this field yet and it is new in my own commit, so it is fixed
+                # before a reader appears.
+                "whole_flow": bool(_flow_step_ids) and set(_flow_step_ids) <= {
+                    str(getattr(r, "id", "")) for r in results},
             },
             "counts": counts,
             "overall": overall,
@@ -20562,6 +20606,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         # writer in this flow creates its parent; this one did not.
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)
         Path(args.json).write_text(json.dumps(out, indent=2))
+        # THIS PASS'S OWN RECEIPT, ALWAYS WRITTEN BY THIS PASS — and recorded, so a
+        # later clause inside THIS invocation may still supersede it (R-0915-138)
+        # while another invocation's receipt stays untouched (R-0915-150).
+        _THIS_INVOCATION_PUBLISHED.add(_resolved_key(Path(args.json)))
 
     # Wave 30 (v0.119.62) — emit a canonical machine-readable audit
     # artifact at `<project>/reports/phase23_completion_audit.json`
@@ -20941,6 +20989,47 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not audit["reconciliation"]["reconciled"]:
             _audit_did_not_reconcile = audit["reconciliation"]
 
+        # A SCOPED PASS DOES NOT PUBLISH THE WHOLE RUN'S COMPLETION AUDIT.
+        # R-0915-150.
+        #
+        # This document was written on EVERY invocation with no scope guard, stamped
+        # `phase: "all"`, and its readers take it as the WHOLE RUN's verdict:
+        # `benchmark_evidence_publish._audit_verdict` and its convergence guard, and
+        # phase3's `_derive_headline_verdict`, which copies it into
+        # phase3_one_shot.json as `completion_audit_verdict`. So a `--stage 4` pass
+        # left a 10-step audit that reads as the run's own, and the frozen
+        # subservient_r26 / sha256_run16_pass2 snapshots already hold 9-step audits of
+        # exactly that kind. The owner's bar for spm is "completion audit 0 failed
+        # gates", and that sentence is only true of the whole flow.
+        #
+        # THE PRODUCER IS MADE HONEST rather than every reader made suspicious: a
+        # scoped pass writes its own SCOPED copy beside the canonical one and leaves
+        # the canonical document alone, so a reader asking for the run's audit either
+        # finds a whole-flow one or finds none. (audit_replay already copes
+        # consumer-side; that is no reason for the producer to keep publishing a
+        # partial audit under the whole run's name.)
+        _audit_is_whole_flow = (
+            target_stage is None
+            and bool(_flow_step_ids)
+            and set(_flow_step_ids) <= {str(getattr(r, "id", "")) for r in results})
+        audit["scope"] = {
+            "phase": args.phase,
+            "stage": (str(args.stage) if getattr(args, "stage", None) else None),
+            "stage_id": (getattr(args, "stage_id", None) or None),
+            "step_count": len(results),
+            "flow_step_total": _flow_step_total,
+            "whole_flow": _audit_is_whole_flow,
+        }
+        if not _audit_is_whole_flow:
+            audit_path = audit_path.with_name(
+                audit_path.name[:-len(".json")]
+                + f".scoped-{target_stage or args.phase}.json")
+            print(f"flow_compliance_check: this pass judged {len(results)} of "
+                  f"{_flow_step_total} step(s), so it does NOT publish the whole "
+                  f"run's completion audit; its scoped audit is at "
+                  f"{audit_path.name} and the canonical "
+                  f"reports/audit/phase23_completion_audit.json is left untouched",
+                  file=sys.stderr)
         audit_path.parent.mkdir(parents=True, exist_ok=True)
         audit_path.write_text(
             json.dumps(audit, indent=2, ensure_ascii=False))
