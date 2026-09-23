@@ -88,6 +88,7 @@ import _runner_measurement as _rmeas
 from _route_wire_transaction import wire_transaction_tcl
 import _reference_flow_boundary as _rfb
 import _source_record_merge as _srm  # per-source merge: silence cannot erase
+from _ppa import power as _ppa_power                              # noqa: E402
 from _ppa.power import pdn_ring_dimensions as _pdn_ring_dimensions
 import floorplan_contract as _fpc  # design-declared fixed floorplan + DRV limits
 from _rtl_include_hub import drop_include_hubs as _drop_include_hubs  # shared aggregator filter
@@ -55147,13 +55148,9 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             _pwr_txt = power_rpt.read_text(errors="replace")
             _mode = ("vector_vcd" if "POWER_ANALYSIS_MODE: vector_vcd"
                      in _pwr_txt else "vectorless_sdc")
-            _aa.write_text(rpt_phase3 / "power.json", json.dumps({
-                "tool": "opensta",
-                "source": str(power_rpt.relative_to(project)),
-                "analysis_mode": _mode,
-                "verdict": "PASS",
-                "evidence": "report_power output below",
-            }, indent=2) + "\n")
+            _emit_power_signoff_json(project, power_rpt,
+                                      rpt_phase3 / "power.json",
+                                      _mode, notes)
             written.append(str(rpt_phase3 / "power.json"))
 
     # --- Step 21: routed.drc.rpt — derived from OpenROAD routing log ---
@@ -59756,6 +59753,47 @@ exit
         notes.append(f"SDF emit failed (rc={rc}); no stub written (#441)")
         return False
     return True
+
+
+def _emit_power_signoff_json(project: Path, power_rpt: Path, out: Path,
+                             analysis_mode: str,
+                             notes: List[str]) -> Dict[str, Any]:
+    """The machine-readable companion to `report_power`, carrying its number.
+
+    MEASURED on a signed-off run: step 33 wrote 152 bytes of verdict —
+    ``{"verdict": "PASS", "evidence": "report_power output below"}`` — beside a
+    2,616-byte report whose Total row read ``9.54e-03`` W. There is no output
+    below; the file ends there. `_ic_release_artefacts._power_class` asked the
+    one question worth asking of a power record and refused the product
+    documents with POWER_NO_TOTAL, correctly: 9.54 mW had been measured by this
+    very step and no machine-readable artefact of the run said so.
+
+    A FUNCTION RATHER THAN FOUR LINES INSIDE A 55,000-LINE STEP, because the
+    rule below is the kind that gets switched off by accident and there has to
+    be somewhere to prove it still holds.
+
+    `_ppa/power.py` is where "what does this power artefact say" already lives,
+    with the activity-basis corroboration that keeps a declared ``vector_vcd``
+    from being taken at its word. Parsing the table a second time here would be
+    a second answer to a question that has one.
+    """
+    record = _ppa_power.signoff_record(
+        _ppa_power.read_power_report(power_rpt),
+        source=str(power_rpt.relative_to(project)),
+        analysis_mode=analysis_mode)
+    # THE RULE, asserted rather than assumed: the failure it guards is silent
+    # and durable — a file that outlives the run, carrying a judgement nobody
+    # measured. `signoff_record` makes this unreachable; if a later edit makes
+    # it reachable, the run stops here rather than three phases later in a
+    # release that cannot be documented.
+    if not _ppa_power.verdict_is_backed_by_a_number(record):
+        raise AssertionError(
+            f"{out.name} would state a verdict with no power number: {record!r}")
+    _aa.write_text(out, json.dumps(record, indent=2) + "\n")
+    if record.get("power_measurement") != _ppa_power.STATUS_MEASURED:
+        notes.append("power.json states NOT_MEASURED: "
+                     + str(record.get("power_not_measured_reason") or ""))
+    return record
 
 
 def _emit_power_report(project: Path, top: str, pdk: PdkConfig,

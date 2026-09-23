@@ -89,6 +89,8 @@ __all__ = [
     "metric_records", "total_record", "comparable", "compare_total_power",
     "V_A_LOWER", "V_B_LOWER", "V_EQUAL", "V_UNDETERMINED",
     "pdn_ring_dimensions",
+    "POWER_VERDICT_MEASURED", "signoff_record",
+    "verdict_is_backed_by_a_number",
 ]
 
 
@@ -1240,3 +1242,134 @@ def power_document(report: Dict[str, Any], *, stage: Optional[str] = None,
         "group_sum_consistency": report.get("group_sum_consistency"),
         "source": _source(report),
     }
+
+
+# ── the sign-off companion: reports/phase3/power.json ──────────────────────
+#
+# THE DEFECT THIS EXISTS TO CLOSE. MEASURED on a signed-off run: the runner
+# wrote a 2,616-byte `power.rpt` carrying OpenSTA's own group table --
+#
+#     Group            Internal  Switching   Leakage     Total
+#     Sequential       1.41e-03   6.97e-05  2.62e-08  1.48e-03  15.6%
+#     ...
+#     Total            7.35e-03   2.19e-03  1.37e-06  9.54e-03 100.0%
+#
+# -- and beside it a 152-byte `power.json` reading, in full,
+#
+#     {"tool": "opensta", "source": "reports/phase3/power.rpt",
+#      "analysis_mode": "vectorless_sdc", "verdict": "PASS",
+#      "evidence": "report_power output below"}
+#
+# A verdict, a pointer, and the word "evidence" over a document with no
+# evidence in it -- there is no output below, the file ends there. The
+# release reader asked the only question that matters of a power record,
+# "is there a power number in here", and refused the product documents:
+#
+#     POWER_NO_TOTAL [power] reports/phase3/power.json: the power record
+#     carries no power number anywhere -- no total, no per-group figure. A
+#     Power section written over it prints a consumption nobody estimated.
+#
+# It was right to. 9.54 mW was measured, by this tree, and no machine-readable
+# artefact of the run said so.
+#
+# THE RULE, and it is the whole point of the function: a verdict is a
+# statement ABOUT a number, so a record may not carry one without carrying the
+# other. When the report yields no total, this writer does not downgrade the
+# claim and it does not invent a zero -- it declines to state a verdict at
+# all and says, by name, that nothing was measured and why.
+
+#: The verdict a power record carries when it has a total to stand on. Only
+#: this spelling is a claim; everything else is a disclosure.
+POWER_VERDICT_MEASURED = "PASS"
+
+
+def _row_number(row: Optional[Dict[str, Any]], key: str) -> Optional[float]:
+    if not isinstance(row, dict):
+        return None
+    val = row.get(key)
+    return float(val) if isinstance(val, (int, float)) and not isinstance(
+        val, bool) else None
+
+
+def verdict_is_backed_by_a_number(record: Optional[Dict[str, Any]]) -> bool:
+    """Does this power record state a verdict it has a measurement for?
+
+    ONE function, called by the writer before it emits and by the test that
+    proves the writer cannot emit otherwise. A second copy of this question
+    would be a second answer, and the two would drift the way the report and
+    its companion already did.
+    """
+    if not isinstance(record, dict):
+        return False
+    verdict = str(record.get("verdict") or "").strip().upper()
+    if verdict != POWER_VERDICT_MEASURED:
+        # Not a claim: a record that declines to judge owes no number.
+        return True
+    return isinstance(record.get("total_power_w"), (int, float)) and \
+        not isinstance(record.get("total_power_w"), bool)
+
+
+def signoff_record(report: Optional[Dict[str, Any]], *,
+                   source: str,
+                   analysis_mode: Optional[str] = None,
+                   tool: str = "opensta") -> Dict[str, Any]:
+    """The `reports/phase3/power.json` companion to a `report_power` artefact.
+
+    `report` is `read_power_report`'s output, or None when the file could not
+    be read -- and those are different facts, kept different here.
+    """
+    unreadable = report is None
+    report = report or {}
+    total_row = report.get("total_row")
+    rows = [r for r in (report.get("rows") or []) if isinstance(r, dict)]
+
+    total_w = _row_number(total_row, "total_w")
+    record: Dict[str, Any] = {
+        "tool": (report.get("tool") or tool),
+        "tool_version": report.get("tool_version"),
+        "source": source,
+        "analysis_mode": analysis_mode,
+        # The basis, CORROBORATED against the transcript rather than taken
+        # from its own label -- see this module's header on why a declared
+        # `vector_vcd` is a claim and not a measurement.
+        "activity": report.get("activity") or {},
+    }
+
+    if total_w is None:
+        record["power_measurement"] = STATUS_NOT_MEASURED
+        # NO VERDICT. The writer refuses rather than downgrades: "PASS" here
+        # would be a judgement with nothing behind it, and "FAIL" would be a
+        # judgement this writer has no standing to make.
+        record["verdict"] = STATUS_NOT_MEASURED
+        record["power_not_measured_reason"] = (
+            f"{source} could not be read, so no power figure was recovered"
+            if unreadable else
+            f"{source} was read and carries no OpenSTA report_power total "
+            f"row, so there is no power number to publish; a verdict is not "
+            f"stated over an absent measurement")
+        record["evidence"] = f"{source} (read, no total row)"
+        return record
+
+    record["power_measurement"] = STATUS_MEASURED
+    record["total_power_w"] = total_w
+    for cat in ("internal", "switching", "leakage"):
+        val = _row_number(total_row, f"{cat}_w")
+        if val is not None:
+            record[f"{cat}_power_w"] = val
+    record["power_by_group"] = [
+        {"group": r.get("group"),
+         **{f"{c}_power_w": _row_number(r, f"{c}_w") for c in CATEGORIES}}
+        for r in rows]
+    record["power_groups"] = len(rows)
+    # Published beside the number, never folded into it: the parser's own
+    # arithmetic check that the split adds up and that the groups sum to the
+    # total. A reader who distrusts the number can see whether the report
+    # was self-consistent without re-parsing it.
+    record["split_consistency"] = report.get("split_consistency")
+    record["group_sum_consistency"] = report.get("group_sum_consistency")
+    record["verdict"] = POWER_VERDICT_MEASURED
+    record["evidence"] = (
+        f"{source}: OpenSTA report_power Total row "
+        f"{total_row.get('total_raw') or total_w} W over "
+        f"{len(rows)} group(s)")
+    return record
