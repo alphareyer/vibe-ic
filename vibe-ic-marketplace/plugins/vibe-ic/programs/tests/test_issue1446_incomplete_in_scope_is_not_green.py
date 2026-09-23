@@ -443,9 +443,19 @@ def test_a_voided_but_measured_p0_over_a_broken_chain_stays_green(
     # evidence — a terminal this very violation voided is not a terminal that
     # "returned no verdict of its own", and the reason_class is what keeps
     # them apart now that the word does not.
+    # ITS OWN PASS'S AUDIT, not the whole run's. R-0915-150: this test runs
+    # `--phase 2 --strict-structural`, which judges 32 of the flow's 70 steps, and a
+    # scoped pass writes `reports/audit/scoped/phase23_completion_audit.phase-2.json`
+    # and leaves the canonical document alone. Reading the canonical path here was
+    # reading whichever pass last judged the WHOLE flow — on a fresh fixture, nothing
+    # at all. The CLAIM is unchanged: this pass must not read its own cascade back as
+    # gating evidence.
+    _own_audit = (project / "reports" / "audit" / "scoped"
+                  / "phase23_completion_audit.phase-2.json")
+    assert _own_audit.is_file(), (
+        f"this pass wrote no audit of its own at {_own_audit.name}:\n" + out)
     assert "[P0]" not in " ".join(json.loads(
-        (project / "reports" / "audit"
-         / "phase23_completion_audit.json").read_text(encoding="utf-8")
+        _own_audit.read_text(encoding="utf-8")
     ).get("ordering_violations_gating", [])), out
     # The run is still not green — but because P0 certifies nothing, not
     # because the guard forced it. FAIL would say the design failed; it did

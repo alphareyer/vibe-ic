@@ -20792,10 +20792,31 @@ def main(argv: Optional[List[str]] = None) -> int:
         except (OSError, ValueError):
             _prior_audit = None
         _carried = []
+        # THE UNION ACROSS ALL CHAINS, not the one this pass happens to read.
+        # R-0915-153: a scoped pass reads its prior from the scoped document and a
+        # whole-flow pass from the canonical one, so each chain knew only its own
+        # footprint -- and the OTHER chain's writes then looked like design inputs.
+        # `is_auditor_output` already recognises these files on sight, which is the
+        # real fix; this keeps the recorded footprint complete as well, so a reader of
+        # either document sees what the auditor wrote in both.
+        _carried = []
         try:
-            _pb = (_prior_audit or {}).get("design_input_digest") or {}
-            _carried = [p for p in (_pb.get("auditor_written_paths") or [])
-                        if isinstance(p, str)]
+            _audit_dir = _pl.report_path(project, "phase23_completion_audit.json").parent
+            _chain_docs = [_audit_dir / "phase23_completion_audit.json"]
+            _scoped_dir = _audit_dir / "scoped"
+            if _scoped_dir.is_dir():
+                _chain_docs.extend(sorted(_scoped_dir.glob("*.json")))
+            _seen = set()
+            for _doc_path in _chain_docs:
+                try:
+                    _d = json.loads(_doc_path.read_text(errors="replace"))
+                except (OSError, ValueError):
+                    continue
+                _pb = (_d or {}).get("design_input_digest") or {}
+                for _q in (_pb.get("auditor_written_paths") or []):
+                    if isinstance(_q, str) and _q not in _seen:
+                        _seen.add(_q)
+                        _carried.append(_q)
         except Exception:
             _carried = []
         if _did is not None and _did_scan is not None:

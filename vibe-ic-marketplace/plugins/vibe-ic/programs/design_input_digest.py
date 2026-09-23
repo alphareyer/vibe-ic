@@ -92,6 +92,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import os
 import sys
 from pathlib import Path
@@ -104,6 +105,51 @@ SCHEMA_VERSION = 1
 #: Python; both move without the design moving. Published in the artefact so
 #: the exclusion is never silent.
 EXCLUDED_DIR_NAMES: Tuple[str, ...] = (".git", "__pycache__", ".vibeic-state")
+
+#: ONE RULE: AN AUDITOR OUTPUT IS NEVER A DESIGN INPUT. R-0915-153.
+#:
+#: Identified by WHAT IT IS, not by which chain last recorded it. Carrying footprints
+#: per chain was the mistake behind two rounds of the same finding:
+#:   * a whole-flow W1 -> a scoped guard pass -> W2 read design_moved=True, because the
+#:     guard's step-2 clause republished a compliance receipt and left a NEW
+#:     `.superseded-<n>.json` name, recorded only in the SCOPED audit's footprint, which
+#:     W2 does not carry;
+#:   * and S1 -> W -> S2 read design_moved=True, because moving the scoped prior read to
+#:     the scoped document dropped the canonical footprint from the scoped chain.
+#: Both are chains failing to tell each other what the auditor wrote. The fix is not a
+#: third carrying path: it is that these files are recognisable on sight.
+#:
+#: THREE SHAPES, and each is an auditor write by construction:
+#:   * anything under `reports/audit/` -- the canonical audit, the scoped ones, and the
+#:     superseded copies kept beside them;
+#:   * any `*.superseded-<n>.json` anywhere -- the republish keeps its old publication
+#:     under that name, and the name is only ever minted by the auditor;
+#:   * any JSON whose top level says `program: flow_compliance_check` -- a compliance
+#:     receipt, wherever the flow declares it. That is the same identity predicate
+#:     `_is_the_audits_own_compliance_report` uses, so the two cannot disagree about
+#:     what a receipt is.
+_SUPERSEDED_RE = re.compile(r"\.superseded-\d+\.json$")
+_AUDITOR_EMITTER = "flow_compliance_check"
+
+
+def is_auditor_output(project: Path, path: Path) -> bool:
+    """Is this file the AUDITOR's own output rather than a design input?"""
+    rel = _rel(project, path)
+    if rel.startswith("reports/audit/") or rel == "reports/audit":
+        return True
+    if _SUPERSEDED_RE.search(rel):
+        return True
+    if not rel.endswith(".json"):
+        return False
+    try:
+        if path.stat().st_size > 4 * 1024 * 1024:
+            return False            # a receipt is small; do not parse a huge artefact
+        doc = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return False
+    return (isinstance(doc, dict)
+            and str(doc.get("program") or "").strip() == _AUDITOR_EMITTER)
+
 
 #: Project-relative directories that hold the AUDITOR'S OWN outputs, and therefore are
 #: not design inputs. R-0915-150.
@@ -275,6 +321,9 @@ def scan_inputs(project: Path) -> InputScan:
     """
     scan = InputScan()
     for path in _walk(project):
+        # AN AUDITOR OUTPUT IS NEVER A DESIGN INPUT — see `is_auditor_output`.
+        if is_auditor_output(project, path):
+            continue
         rel = _rel(project, path)
         try:
             st = os.lstat(path)

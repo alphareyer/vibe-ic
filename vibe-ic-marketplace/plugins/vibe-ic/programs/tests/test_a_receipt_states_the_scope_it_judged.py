@@ -387,3 +387,107 @@ def test_the_scoped_subtree_is_excluded_from_the_design_scan(project):
     design_scoped.parent.mkdir(parents=True, exist_ok=True)
     design_scoped.write_text("module thing(); endmodule\n")
     assert "input/rtl/scoped/thing.v" in set(D.scan_inputs(project).hashes)
+
+
+# ── R-0915-153: an auditor output is never a design input ───────────────────
+
+def _seeded_step2_project(tmp_path: Path) -> Path:
+    """A project where step 2's outputs EXIST, so its advisory clause actually runs.
+
+    On a bare fixture step 2 returns MISSING early and the republish never happens, so
+    the pair the finding is about never forms — which is why the bare fixture hid it.
+    """
+    proj = tmp_path / "seeded"
+    rtl = proj / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "d.v").write_text("module d(); endmodule\n")
+    for rel, body in (
+            ("reports/phase1/gates/stage_phase1_compliance.json",
+             {"program": "flow_compliance_check", "overall": "PASS", "steps": []}),
+            ("reports/crosslayer/rewrite_equivalence.json", {"rewrites": []}),
+            ("reports/crosslayer/rewrite_equivalence_check.json",
+             {"program": "crosslayer_rewrite_fidelity", "verdict": "PASS"}),
+            ("reports/phase2/lint/rtl_hygiene.json", {"verdict": "PASS"}),
+            ("reports/phase2/lint/rom_init_lint.json", {"verdict": "PASS"})):
+        f = proj / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(body) + "\n")
+    return proj
+
+
+def _pass(project: Path, *scope_argv: str) -> dict:
+    """One flow_compliance_check pass; returns the audit it wrote."""
+    out = project / "reports/zz_pass.json"
+    subprocess.run(
+        [sys.executable, str(PROGRAMS / "flow_compliance_check.py"), str(project),
+         *scope_argv, "--json", str(out)],
+        capture_output=True, text=True, timeout=2400)
+    # THE DOCUMENT THIS PASS WROTE, named deterministically. Taking "the last scoped
+    # file" (my first cut) picked up `stage-stage_phase1.json` — an audit a NESTED
+    # clause wrote — so the comparison was between two documents neither pass owned, and
+    # its `ruler_flags` said `stage_id: stage_phase1` while the pass was `--phase 2`.
+    if scope_argv:
+        assert scope_argv[0] == "--phase", scope_argv
+        doc_path = (project / "reports/audit/scoped"
+                    / f"phase23_completion_audit.phase-{scope_argv[1]}.json")
+    else:
+        doc_path = project / "reports/audit/phase23_completion_audit.json"
+    assert doc_path.is_file(), f"the pass wrote no audit at {doc_path}"
+    doc = json.loads(doc_path.read_text())
+    flags = ((doc.get("tally_delta") or {}).get("current") or {}).get("ruler_flags")
+    if flags and scope_argv:
+        assert str(flags.get("phase")) == scope_argv[1], (
+            f"read an audit written by a different pass: ruler_flags={flags}")
+    return doc
+
+
+def _moved(audit: dict) -> object:
+    """`design_moved` lives in `tally_delta` — the CLASSIFICATION block — not in
+    `design_input_digest`, which only carries this pass's own hash.
+
+    Read from the wrong block my first cut returned None for every sequence, so the
+    four-sequence arm passed VACUOUSLY: `None is not True` is satisfied by a key that
+    does not exist. The RTL-edit arm is what exposed it, which is the whole reason a
+    positive direction sits beside the negative one."""
+    return ((audit.get("tally_delta") or {}).get("design_moved"))
+
+
+def _classification(audit: dict) -> object:
+    return ((audit.get("tally_delta") or {}).get("classification"))
+
+
+def test_no_sequence_of_passes_moves_the_design_on_an_unchanged_tree(tmp_path):
+    """THE FOUR SEQUENCES, on a tree where step 2's outputs exist so its clause really
+    republishes. W = whole flow, S = scoped (`--phase 2`, the FPGA guard's shape).
+
+    Each pass writes an audit, a receipt, a superseded copy and a report; none of that
+    is a design input, so an unchanged tree must never read design_moved=True — whichever
+    order the passes come in, and whichever chain each one reads its prior from.
+    """
+    for label, seq in (("W->S->W", ((), ("--phase", "2"), ())),
+                       ("S->W->S", (("--phase", "2"), (), ("--phase", "2"))),
+                       ("S->S", (("--phase", "2"), ("--phase", "2"))),
+                       ("W->W", ((), ()))):
+        proj = _seeded_step2_project(tmp_path / label.replace("->", "_"))
+        audits = [_pass(proj, *argv) for argv in seq]
+        last = audits[-1]
+        assert _moved(last) is False, (
+            f"{label}: design_moved={_moved(last)!r} on an UNCHANGED tree — True means "
+            f"an auditor output is counted as a design input, and None means the two "
+            f"passes were not comparable at all, which is not a pass either. "
+            f"tally_delta={last.get('tally_delta')}")
+        assert _classification(last) != "DESIGN_CHANGE", (
+            f"{label}: classified {_classification(last)!r} on an unchanged tree")
+
+
+def test_a_real_design_edit_still_moves_the_design(tmp_path):
+    """THE DIRECTION THAT MUST NOT BE LOST: if the exclusion swallowed real inputs, this
+    would go quiet. A change to the RTL is a design change."""
+    proj = _seeded_step2_project(tmp_path / "edit")
+    _pass(proj)
+    (proj / "phase2/stage1/rtl/d.v").write_text(
+        "module d(input a, output y); assign y = ~a; endmodule\n")
+    after = _pass(proj)
+    assert _moved(after) is True, (
+        f"an RTL edit did not register as a design change; the exclusion is too wide. "
+        f"digest={after.get('design_input_digest')}")
