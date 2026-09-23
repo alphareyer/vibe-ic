@@ -115,6 +115,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import _ic_release_artefacts as _art
+import _flow_reason_taxonomy as _reason_taxonomy
 import _vacuous_exit as _vx
 import digital_hardmacro_check as _hm
 from _atomic_artefact import write_text as atomic_write_text
@@ -1366,6 +1367,48 @@ def expected_releases(project: Path, arm: str) -> List[str]:
     return []
 
 
+#: The producer's own refusal record. R-0915-144, and the IC arm only, because
+#: `ic_release_docs_gen` is the producer that writes one.
+PRODUCER_REFUSAL_REL = "reports/phase3/release_docs_producer_refusal.json"
+
+
+def producer_refusal(project: Path) -> Optional[dict]:
+    """The producer's stated refusal, or None.
+
+    WHY THIS EXISTS. MEASURED on spm run22: `ic_release_docs_gen` RAN (2.26 s,
+    rc 1) and declined to write any document, because
+    `reports/phase3/sta/post_route_summary.json` carried no slack number anywhere
+    and `reports/phase3/power.json` carried no power number -- and it said so, in
+    those words, with the right reason ("a release document for a run that did not
+    pass is worse than no document"). This gate could read NEITHER the producer's
+    log nor the orchestrator report, so it published
+    FAIL / RELEASE_DOCUMENTATION_ABSENT: true, and readable as "nobody wrote them".
+
+    A producer's refusal is an UPSTREAM fact about this run, not a documentation
+    defect. Read strictly: a document that is unreadable, is not this producer's,
+    or does not say REFUSED is not a refusal, and the FAIL below stands.
+    """
+    try:
+        doc = json.loads((project / PRODUCER_REFUSAL_REL).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    if str(doc.get("program") or "") != "ic_release_docs_gen":
+        return None
+    if str(doc.get("verdict") or "").strip().upper() != "REFUSED":
+        return None
+    reasons = [str(x) for x in (doc.get("substance_refusals") or [])]
+    reasons += [str(x) for x in (doc.get("release_blockers") or [])]
+    if not reasons:
+        # A refusal that names no reason is not evidence of an upstream cause;
+        # crediting it would be exactly the "trust the callee's word" this repo
+        # refuses elsewhere.
+        return None
+    doc["_reasons"] = reasons
+    return doc
+
+
 def run_audit(project: Path, arm: str) -> Result:
     result = Result()
     root = project / doc_dir(arm)
@@ -1432,6 +1475,48 @@ def run_audit(project: Path, arm: str) -> Result:
         details.append(detail)
 
     failed = [d["release"] for d in details if not d["pass"]]
+
+    # R-0915-144 — A PRODUCER'S STATED REFUSAL IS AN UPSTREAM FACT.
+    #
+    # Only when EVERY error this gate found is the absence of the document set,
+    # and the producer recorded why it declined to write it. A release that HAS
+    # documents and fails on their content is a documentation defect and stays a
+    # FAIL; so does an absence with no refusal record, which is the case this
+    # gate was written for. The refusal is not a waiver and nothing here becomes
+    # a pass: the row is NOT_MEASURED with `reason_class BLOCKED_BY_UPSTREAM`,
+    # which `_flow_reason_taxonomy` holds in `INCOMPLETE` -- not in
+    # `SKIP_ELIGIBLE` -- so the step cannot be read as satisfied.
+    refusal = producer_refusal(project) if (failed and arm == "ic") else None
+    only_absent = bool(result.findings) and all(
+        f.rule == "RELEASE_DOCUMENTATION_ABSENT" for f in result.findings)
+    if refusal is not None and only_absent:
+        result.passed = False
+        result.verdict_tier = "NOT_MEASURED"
+        result.summary = {
+            "skipped": False,
+            "reason": "release_docs_producer_refused",
+            "reason_class": _reason_taxonomy.BLOCKED_BY_UPSTREAM,
+            "arm": arm,
+            "documentation_root": root.as_posix(),
+            "documentation_root_exists": root.is_dir(),
+            "expected_releases": expected,
+            "releases_examined": len(details),
+            "failed": failed,
+            "producer": str(refusal.get("program")),
+            "producer_refusal": PRODUCER_REFUSAL_REL,
+            "producer_refusals": refusal["_reasons"],
+            "rows_examined": sum(d["rows_examined"] for d in details),
+            "derived_fields": sum(d["derived_fields"] for d in details),
+            "not_measured_fields": sum(
+                d["not_measured_fields"] for d in details),
+            "same_source_count_comparisons": sum(
+                d["same_source_count_comparisons"] for d in details),
+            "releases": details,
+            "verdict_tier": "NOT_MEASURED",
+            "pass": False,
+        }
+        return result
+
     result.passed = not failed
     result.verdict_tier = "PASS" if result.passed else "FAIL"
     result.summary = {
@@ -1496,6 +1581,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         if finding.severity in ("ERROR", "WARNING"):
             print(f"  [{finding.severity}] {finding.rule} "
                   f"({finding.release}): {finding.message}")
+
+    # R-0915-144 — THE NON-VERDICT EXIT, and deliberately NOT the vacuous
+    # announcement. `announce_vacuous` prints the VACUOUS_PASS sentinel, which the
+    # audit promotes to a PASS tier; an upstream-blocked step is not a pass. rc 2
+    # carries "this is not a verdict" and the report's own
+    # `reason_class = BLOCKED_BY_UPSTREAM` decides which non-verdict it is --
+    # `_flow_reason_taxonomy` holds that class in INCOMPLETE, never in
+    # SKIP_ELIGIBLE, so the row lands as NOT_MEASURED and the step stays owed.
+    if (str(result.summary.get("reason_class") or "")
+            == _reason_taxonomy.BLOCKED_BY_UPSTREAM):
+        print(f"  NOT MEASURED — {result.summary.get('producer')} recorded a "
+              f"refusal at {result.summary.get('producer_refusal')}, so this run "
+              f"has no document set to judge and the absence is not a "
+              f"documentation defect:", file=sys.stderr)
+        for why in result.summary.get("producer_refusals") or []:
+            print(f"    - {why}", file=sys.stderr)
+        return _vx.RC_VACUOUS
 
     if result.passed and skipped:
         _vx.announce_vacuous(GATE, reason)
