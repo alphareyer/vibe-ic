@@ -4377,14 +4377,27 @@ def _vacuous_hint_with_diagnostic(out: str, execution: Any) -> str:
     return f"{out}\n{diag}" if diag else out
 
 
+def _json_vacuous_diagnostics(json_hints) -> Dict[str, str]:
+    """``{clause: diagnostic}`` off the `__JSON_VACUOUS_HINT__` reasons."""
+    out: Dict[str, str] = {}
+    for h in json_hints:
+        clause, diag = split_vacuous_payload(h[len(_JSON_VACUOUS_HINT_PREFIX):])
+        if diag and clause not in out:
+            out[clause] = diag
+    return out
+
+
 def _json_vacuous_hint(project: Path, cmd: str) -> str:
     """The `__JSON_VACUOUS_HINT__` reason, carrying the class the clause's own
     report STATED (its `reason_class`), so a JSON-only vacuous clause is a voter
     in the class election and not an abstention nobody counts."""
-    cls = _reason_taxonomy.report_reason_class(
-        _command_json_report(project, cmd))
-    return (f"{_JSON_VACUOUS_HINT_PREFIX}{cmd}"
-            + (f"\nstated_class={cls}" if cls else ""))
+    report = _command_json_report(project, cmd)
+    cls = _reason_taxonomy.report_reason_class(report)
+    # R-0915-135 follow-up (lane ictier1d) — AND THE REPORT'S OWN LINE, in the
+    # same `stated_class=<CLASS>; <line>` shape the rc-2 side channel writes, so
+    # the row reads the same whichever exit code carried the statement.
+    diag = vacuous_diagnostic_line(cls, None, _report_reason_text(report))
+    return f"{_JSON_VACUOUS_HINT_PREFIX}{cmd}" + (f"\n{diag}" if diag else "")
 
 
 #: R-0915-135 — ONE VOCABULARY PER CHANNEL. The callee states a class from
@@ -15803,6 +15816,20 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                         f"clause(s) examined nothing): {cmd}"
                         + (f" — {_diag}" if _diag else "")
                     )
+            # R-0915-135 follow-up (lane ictier1d) — EVERY VOTER IS NAMED. A
+            # clause that went vacuous only through its JSON report votes in the
+            # election above; on the unanimous row it was named nowhere, because
+            # the VACUITY disclosure suppresses the JSON-only listing below.
+            if unanimous:
+                _legacy = {split_vacuous_payload(
+                    h[len(_VACUOUS_HINT_PREFIX):])[0] for h in vacuous_hints}
+                _json_diag = _json_vacuous_diagnostics(json_vacuous_hints)
+                for c in sorted(all_vacuous_cmds - _legacy):
+                    result.reasons.append(
+                        f"vacuous: the gate's own --json report declares it "
+                        f"examined nothing, and it is {len(all_vacuous_cmds)} "
+                        f"of {len(ran_hints)} gate clause(s) that ran here: {c}"
+                        + (f" — {_json_diag[c]}" if _json_diag.get(c) else ""))
         elif passed and structure_only_hints and not non_hint_reasons:
             # The step ran and produced its declared artefact — from a library
             # default. PASS would say the artefact is design-bound; it is not.
@@ -15826,14 +15853,27 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # step some clause substantively examined, never grant it to one no
             # clause did.
             result.status = _T.Verdict.NOT_MEASURED.value
-            result.reason_class = _T.ReasonClass.NO_POPULATION.value
+            # R-0915-135 follow-up (lane ictier1d) — THE SAME ELECTION AS THE
+            # rc-2 CHANNEL. This branch wrote no_population unconditionally, so
+            # a clause whose report STATED a mapped class read one class alone
+            # and another beside an rc-2 sibling stating the same thing (review
+            # of next/ictier1b, LOW). Every vacuous clause votes; silence,
+            # dissent or an unmapped class still declines to no_population.
+            _votes = vacuous_clause_votes(
+                [], [h[len(_JSON_VACUOUS_HINT_PREFIX):]
+                     for h in json_vacuous_hints])
+            result.reason_class = (
+                elected_vacuous_class(_votes.get(c) for c in all_vacuous_cmds)
+                or _T.ReasonClass.NO_POPULATION.value)
             result.disclosures = [_T.Disclosure.VACUITY.value]
             result.json_vacuity_promoted = True
+            _json_diag = _json_vacuous_diagnostics(json_vacuous_hints)
             for c in sorted(all_vacuous_cmds):
                 result.reasons.append(
                     f"vacuous: the gate's own --json report declares it "
                     f"examined nothing, and it is {len(all_vacuous_cmds)} of "
-                    f"{len(ran_hints)} gate clause(s) that ran here: {c}")
+                    f"{len(ran_hints)} gate clause(s) that ran here: {c}"
+                    + (f" — {_json_diag[c]}" if _json_diag.get(c) else ""))
         else:
             result.status = (_T.Verdict.PASS.value if passed
                              else _T.Verdict.FAIL.value)
@@ -15853,11 +15893,13 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 and json_vacuous_hints):
             result.partial_vacuity_disclosed = True
             for h in json_vacuous_hints:
+                _c, _d = split_vacuous_payload(
+                    h[len(_JSON_VACUOUS_HINT_PREFIX):])
                 result.reasons.append(
                     f"PARTIALLY-VACUOUS ({len(all_vacuous_cmds)} of "
                     f"{max(len(ran_hints), len(all_vacuous_cmds))} gate "
-                    f"clause(s) examined nothing): "
-                    f"{split_vacuous_payload(h[len(_JSON_VACUOUS_HINT_PREFIX):])[0]}")
+                    f"clause(s) examined nothing): {_c}"
+                    + (f" — {_d}" if _d else ""))
         if executed_declared_na_hints:
             result.executed_declared_not_applicable = [
                 h[len(_EXECUTED_DECLARED_NA_HINT_PREFIX):]
