@@ -1153,7 +1153,18 @@ def test_output_entries_classify_into_the_four_kinds():
     #   + ('37',   'phase3/stage3/pnr/*stream_out.log')             GLOB
     # The first two are declared to close W2 on 37.3, which CONSUMES both; the
     # third is 37.3's own product.
-    assert sum(seen.values()) == 192, (seen, REDERIVE)
+    # 192 -> 191, RE-DERIVED by the method this pin names: the (step, entry)
+    # SET of the yaml at b88a1401e (the last commit that touched this pin)
+    # against ec313cde7, classified through `flowref.classify_output`. ONE entry
+    # leaves, none arrives:
+    #   - ('38', 'reports/phase3/foundry_handoff_audit.json')          FILE
+    # removed by 560a7427a (#2525, ruling R-0915-141: "a step declares what the
+    # RUN produces, never its gate's verdict target"). Of the two yaml
+    # revisions in that window, 5844ab7cc moves no `required_outputs` entry.
+    # A deliberate, ruled removal, so the pin moves; FILE 138 -> 137, GLOB and
+    # ANY_OF untouched. The same entry moved flowref's anchored figure
+    # `required_output_entries` 192 -> 191 in next/icmainred8-batch2 (#2532).
+    assert sum(seen.values()) == 191, (seen, REDERIVE)
     # 136 -> 138 FILE and 27 -> 28 GLOB, from the SAME set diff.
     #
     # AN EARLIER REVISION OF THIS PIN SAID FILE 139 / GLOB 27, and the arithmetic
@@ -1166,7 +1177,7 @@ def test_output_entries_classify_into_the_four_kinds():
     # transcript of what went into the sign-off GDS -- and it classifies as GLOB.
     # One entry moved between two kinds; the total did not move, which is exactly
     # why this test asserts the three kinds separately and not just their sum.
-    assert seen[F.FILE] == 138, (seen, REDERIVE)
+    assert seen[F.FILE] == 137, (seen, REDERIVE)
     assert seen[F.GLOB] == 28, (seen, REDERIVE)
     assert seen[F.ANY_OF] == 26, (seen, REDERIVE)
     # Reported to the orchestrator: the PROGRAM_EXIT form described in the brief
