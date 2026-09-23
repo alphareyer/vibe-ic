@@ -3272,6 +3272,213 @@ def _record_gate_execution(cmd: str, rc: Optional[int], verdict: str,
     return row
 
 
+def _step_produced_every_declared_output(
+        result: Any,
+        audit_created: Any = None,
+        specs: Any = None,
+        strict_step_binding: bool = False) -> bool:
+    """Did THIS step produce every output it declares, by its own binding?
+
+    BY ITS OWN BINDING, and that phrase is the whole rule (R-0915-152). The
+    question is answered with the SAME test `check_step` applies to the step's
+    own outputs a few hundred lines below -- every spec satisfied, and none
+    that `_binding_code_blocks` refuses -- plus the one exclusion that is
+    about delivery rather than attribution (an audit-created artefact).
+
+      * a step that declares NO outputs cannot have produced them, so it is
+        False -- the tier must keep coming from its clauses;
+      * `specs` is the UNTRUNCATED per-spec list. `output_binding["specs"]` is
+        capped at 16 for report size and verdict logic must never inherit a
+        display cap, so a list that does not cover every declared output
+        cannot answer the blocking question and the answer is False.
+    """
+    b = getattr(result, "output_binding", None)
+    if not isinstance(b, Mapping):
+        return False
+    n = b.get("n_specs")
+    k = b.get("n_step_attributed")
+    sat = b.get("n_satisfied")
+    # `k` is not a CONDITION any more (see below) but it is still a shape
+    # check: a binding that cannot say how it resolved is not read at all.
+    if not isinstance(n, int) or not isinstance(k, int) or n <= 0:
+        return False
+    # R-0915-152 — THE DEMOTION'S EVIDENCE STANDARD IS THE STEP'S OWN
+    # DELIVERY STANDARD, NOTHING STRICTER.
+    #
+    # A `DESIGN_DECLARED_NA` clause states a fact about the DESIGN (spm has no
+    # macros), not about the run, and demote-once-as-absence means the step is
+    # judged exactly as it would be with that clause deleted from the flow
+    # YAML. A clause-deleted step judges its outputs through the SAME output
+    # binding every other step uses -- step-attributed via the ledger, or
+    # project-glob per flow policy. Cross-run FRESHNESS of outputs is a
+    # flow-wide property (the entry manifest, run admission) that applies to
+    # every step's PASS equally; it is not this clause's to enforce.
+    #
+    # Rounds 5 through 7 tried to enforce it here anyway, through a run window
+    # and then a run identity, and each fix opened the next hole: a t0 that was
+    # really phase 3's start, a marker that created the project it was
+    # refusing, a marker a refused run overwrote, a persisted flag read without
+    # its run id. Eight rounds of machinery for a condition this decision was
+    # never entitled to impose. The ruling removed it; what remains is the
+    # step's own standard, plus the one exclusion that IS about delivery.
+    #
+    # "PRODUCED EVERY DECLARED OUTPUT" MEANS PRODUCED BY THE RUN. An output
+    # that is this step's own gate `--json` target was written by the AUDIT,
+    # and the tree refuses it as run evidence a few lines later. Counting it
+    # as produced let a step claim both "produced every output it declares"
+    # and, in the same row, `n_satisfied 1/2` with a FAIL reading
+    # "AUDIT-CREATED OUTPUT REFUSED" -- shipped step 14's
+    # stage_analog_compliance.json is exactly that shape. MEASURED by the
+    # round-4 review. The caller passes what it knows at the moment it asks;
+    # the count alone cannot answer this because it is taken before the gate.
+    if audit_created:
+        return False
+    # DELIVERY IS SATISFACTION, NOT ATTRIBUTION MODE, and this is where the
+    # final review found the branch inert. `n_step_attributed == n_specs` was
+    # required here: it answers "resolved against THIS step's own write
+    # record", which a run that emits no ledger can never satisfy. Every spec
+    # then resolves project_glob/`no_binding`, k is 0, and the demotion never
+    # fired -- on run22, and on every benchmark cell -- while the SAME step
+    # with the clause deleted PASSed, because `no_binding` blocks only under
+    # `--strict-step-binding`. A condition the step itself is not held to is
+    # exactly what R-0915-152 forbids, so the standard is the step's own:
+    # satisfied, and not blocked by `_binding_code_blocks`.
+    if not isinstance(sat, int) or sat != n:
+        return False
+    _specs = b.get("specs") if specs is None else specs
+    if not isinstance(_specs, list) or len(_specs) != n:
+        return False
+    for _sp in _specs:
+        if not isinstance(_sp, Mapping):
+            return False
+        # THE SAME PREDICATE `check_step` USES (see the `_unbound` comprehension
+        # by `UNATTRIBUTED OUTPUT`): a satisfied project-glob spec whose code
+        # blocks. `no_step_record` always blocks -- the run DID emit a ledger
+        # and it does not mention this spec. `no_binding` blocks only under
+        # the producer-migration flag, and that flag is read, never guessed.
+        if (_sp.get("satisfied")
+                and _sp.get("mode") == "project_glob"
+                and _binding_code_blocks(_sp.get("code"),
+                                         strict_step_binding)):
+            return False
+    return True
+
+
+def _skips_that_do_not_speak_for_the_step(
+        skip_hints: List[str], result: Any, specs: Any = None,
+        strict_step_binding: bool = False) -> Tuple[List[str], List[str]]:
+    """Split skip hints into the ones that still set the tier and the ones
+    that only describe themselves.
+
+    A DEMOTION, NOT A BYPASS, and the pre-landing review is why. The first
+    version put `and not _step_produced_every_declared_output(result)` on the
+    skip BRANCH. Every branch after it requires `not skip_hints` -- waiver,
+    substantive-vacuous, vacuous, json-vacuous -- so skipping that one branch
+    dropped the step past ALL of them into the final `else`, which sets a bare
+    PASS. An all-vacuous step with one N/A clause was RAISED from NOT_MEASURED
+    to an executed PASS, and a step carrying a waiver lost PASS_WITH_WAIVERS.
+    The ordering broke in the direction that makes a run look better.
+
+    So the hints are removed from the population BEFORE the chain runs, and
+    the remaining tiers judge the step by its OTHER clauses -- which is what
+    "this clause does not speak for the step" actually means.
+
+    ONLY `DESIGN_DECLARED_NA`, and only when EVERY skip is one. Advisory
+    DISCLOSED_SKIP covers every SKIP_ELIGIBLE class and `CAPABILITY_ABSENT` /
+    `EXTERNAL` emit the same hint shape. A capability gap that stopped
+    speaking for its step would leave `oss_blocked_skipped`, lose
+    `self_skip_disclosed`, and let a run publish PASS with the gap invisible.
+    A hint that names no class at all is never demoted: not every skip site
+    writes `reason_class=`, and silence is not evidence of an N/A.
+    """
+    # THE SAME EVIDENCE THE CALLER DECIDED ON. The caller asks the predicate
+    # first and only enters here on a yes; re-asking it with LESS than the
+    # caller had would let the two answers disagree.
+    if not skip_hints or not _step_produced_every_declared_output(
+            result, specs=specs, strict_step_binding=strict_step_binding):
+        return list(skip_hints), []
+    declared = [_HINT_DECLARED_CLASS_RE.search(h) for h in skip_hints]
+    if not all(m and m.group(1) == _reason_taxonomy.DESIGN_DECLARED_NA
+               for m in declared):
+        return list(skip_hints), []
+    return [], list(skip_hints)
+
+
+def _reason_names_command(reason: str) -> str:
+    """The gate command a reason line is ABOUT, whatever channel wrote it.
+
+    Every typed hint carries the command it came from, but each carries it in
+    its own shape: a bare prefix (`__RAN_HINT__: <cmd>`), a prefix plus a
+    `[verdict=...]` tail (`__SKIP_HINT__:`), a JSON payload
+    (`__ADVISORY_RECORD_HINT__:` with a `cmd` key), or plain prose
+    (`GATE EVIDENCE: <program> rc=...`).
+
+    One reader for all of them, because the round-4 review's finding is that
+    asking this question per-channel is how a clause keeps leaking: rounds 2,
+    3 and 4 each closed one channel and the next one opened.
+    """
+    r = reason or ""
+    if r.startswith(_ADVISORY_RECORD_HINT_PREFIX):
+        try:
+            rec = json.loads(r[len(_ADVISORY_RECORD_HINT_PREFIX):])
+        except (TypeError, ValueError):
+            return ""
+        if not isinstance(rec, dict):
+            return ""
+        # `_advisory_execution_record` stores it as "command". Reading "cmd"
+        # meant this branch never matched -- harmless today, because those
+        # lines are true disclosure of the clause and are meant to stay, but
+        # a reader that silently matches nothing is the shape this whole
+        # function exists to remove. Both spellings, the real one first.
+        return str(rec.get("command") or rec.get("cmd") or "").strip()
+    for pref in (_SKIP_HINT_PREFIX, _RAN_HINT_PREFIX, _VACUOUS_HINT_PREFIX,
+                 _JSON_VACUOUS_HINT_PREFIX, _WAIVER_HINT_PREFIX,
+                 _ADVISORY_HINT_PREFIX, _SUBSTANTIVE_HINT_PREFIX,
+                 _INCOMPLETE_HINT_PREFIX, _AWAITING_HINT_PREFIX,
+                 _NOT_APPLICABLE_HINT_PREFIX,
+                 _EXECUTED_DECLARED_NA_HINT_PREFIX,
+                 _STRUCTURE_ONLY_HINT_PREFIX):
+        if r.startswith(pref):
+            cmd = _hint_command(r, pref)
+            # R-0915-135 — THE VACUOUS CHANNELS CARRY A DIAGNOSTIC LINE after
+            # the clause, and `_hint_command` strips only a `[verdict=...]`
+            # tail. Returning `clause + "\n" + diagnostic` here made this
+            # reader match nothing for those two channels, which is exactly
+            # the silent no-match the docstring above calls out. Keyed on the
+            # CLAUSE, the same handle `all_vacuous_cmds` uses, so the tier
+            # count and this reader can never disagree about a clause.
+            if pref in (_VACUOUS_HINT_PREFIX, _JSON_VACUOUS_HINT_PREFIX):
+                return split_vacuous_payload(cmd)[0]
+            return cmd
+    if r.startswith("GATE EVIDENCE: "):
+        # `GATE EVIDENCE: <program> rc=0 verdict=...` — the program name only,
+        # which is how the advisory branch identifies its own clause here.
+        return r[len("GATE EVIDENCE: "):].split(" rc=")[0].strip()
+    return ""
+
+
+def _hint_command(hint: str, prefix: str) -> str:
+    """The command a typed hint names, with any trailing `[verdict=...]` tail
+    removed. Both the SKIP and the RAN hint for one clause carry the same
+    command, and that is the only handle they share."""
+    body = hint[len(prefix):] if hint.startswith(prefix) else hint
+    cut = body.rfind(" [verdict=")
+    return (body[:cut] if cut >= 0 else body).strip()
+
+
+def _demoted_skip_disclosures(demoted: List[str]) -> List[str]:
+    """The row lines for a demoted skip. It is TRUE and a reader must see it.
+
+    The first version skipped the only branch that appends these, so the
+    disclosure vanished together with the tier -- the step said nothing at all
+    about a clause that had honestly reported it examined nothing.
+    """
+    return [(f"DISCLOSED-SKIP (did not set this step's tier: the step "
+             f"produced every output it declares): "
+             f"{h[len(_SKIP_HINT_PREFIX):]}")
+            for h in demoted]
+
+
 def _gate_ledger_payload() -> List[Dict[str, Any]]:
     """Deterministic machine-readable view of concurrently appended rows."""
     return sorted((dict(row) for row in _GATE_LEDGER), key=lambda row: (
@@ -15534,6 +15741,23 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             "mode": ("step_attributed" if _n_glob == 0 else
                      "project_glob" if _n_attr == 0 else "mixed"),
             "n_specs": len(outputs), "n_step_attributed": _n_attr,
+            # SATISFACTION, WHICH IS A DIFFERENT QUESTION FROM MODE.
+            # `_resolve_required_output` returns mode `step_attributed` with
+            # satisfied=False for wildcard_unbound, recorded_but_absent and
+            # not_produced -- so `n_step_attributed == n_specs` says only
+            # "every spec was resolved against this step's own record", never
+            # "every declared output is there". MEASURED by the pre-landing
+            # review, 2026-09-23.
+            # SATISFACTION, WHICH IS A DIFFERENT QUESTION FROM MODE -- and
+            # the mode belongs to the OTHER field. Counting only
+            # `step_attributed` specs here made every run without a step-write
+            # ledger (which is every benchmark cell) publish 0 satisfied
+            # outputs for a step whose outputs are all on disk. MEASURED by
+            # the round-2 review, 2026-09-23. `n_step_attributed` already
+            # answers "resolved against THIS step's own record"; the delivery
+            # predicate requires BOTH, so nothing is loosened by letting this
+            # field mean what its name says.
+            "n_satisfied": sum(1 for d in _bind_specs if d.get("satisfied")),
             "n_project_glob": _n_glob, "source": _src,
             # `codes` is the machine handle: a closed vocabulary (see
             # `_bind_detail`) that says WHICH degradation `mixed` is made of.
@@ -15912,12 +16136,52 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # didn't apply to this project). Surface that as VACUOUS_PASS
         # so the per-step listing labels it explicitly. Filter out the
         # internal markers before display either way.
-        vacuous_hints = [r for r in reasons
-                         if r.startswith(_VACUOUS_HINT_PREFIX)]
         # ORGANIC #608 — a gate whose evidence artifact honestly self-reports a
         # skip verdict emits a __SKIP_HINT__ marker; promote the step to
         # SKIPPED-CONDITION (not PASS, not FAIL) the same way VACUOUS_PASS is
         # promoted from __VACUOUS_HINT__.
+        # A CLAUSE'S N/A IS THAT CLAUSE'S, NOT THE STEP'S — APPLIED ONCE,
+        # HERE, AS ABSENCE FROM THE GATE.
+        #
+        # Rounds 2, 3 and 4 each patched ONE channel and the clause leaked
+        # through the next: first the tier (round 2, via `skip_hints`), then
+        # the legacy count sentences (round 3, via `ran_hints`), then the
+        # json-vacuous branch, the post-hoc PARTIALLY-VACUOUS sentence and the
+        # NOT-APPLICABLE(declared) sentence (round 4). Every one of those
+        # derives its list from `reasons`, so the only place the question has
+        # ONE answer is `reasons` itself.
+        #
+        # A demoted clause is therefore removed from the REASON STREAM before
+        # any list, count or sentence is built. The step is then judged
+        # EXACTLY as it would be with that clause deleted from the flow YAML --
+        # which is the invariant, and is what the property test asserts. The
+        # clause is disclosed separately after the tier chain, because it is
+        # true and a reader must see it.
+        #
+        # AND THE DECISION IS TAKEN HERE, not earlier: "produced every declared
+        # output" means produced by the RUN, and whether an output was written
+        # by this step's own gate is only known once `_audit_produced` is.
+        _demoted_skips: List[str] = []
+        if _step_produced_every_declared_output(
+                result, _audit_produced, specs=_bind_specs,
+                strict_step_binding=strict_step_binding):
+            _cand = [r for r in reasons if r.startswith(_SKIP_HINT_PREFIX)]
+            _keep, _demoted_skips = _skips_that_do_not_speak_for_the_step(
+                _cand, result, specs=_bind_specs,
+                strict_step_binding=strict_step_binding)
+            if _demoted_skips:
+                _gone = {_hint_command(h, _SKIP_HINT_PREFIX)
+                         for h in _demoted_skips}
+                _demoted_reasons = [r for r in reasons
+                                    if _reason_names_command(r) in _gone]
+                reasons = [r for r in reasons if r not in _demoted_reasons]
+        # EVERY derived list is built AFTER the demotion, which is what makes
+        # the comment above true rather than aspirational. `vacuous_hints` was
+        # built above it -- harmless with the current reason shapes, and
+        # exactly the kind of ordering that let a clause leak three rounds
+        # running.
+        vacuous_hints = [r for r in reasons
+                         if r.startswith(_VACUOUS_HINT_PREFIX)]
         skip_hints = [r for r in reasons
                       if r.startswith(_SKIP_HINT_PREFIX)]
         # #651 — a gate program that PASSed-WITH-WAIVERS emits a
@@ -15973,6 +16237,16 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # clause having said it examined anything.
         ran_hints = [r for r in reasons
                      if r.startswith(_RAN_HINT_PREFIX)]
+        # A DEMOTED CLAUSE IS NOT AN EXAMINATION -- but it IS a clause that
+        # ran, and it DID examine nothing. Round 2 took it out of the
+        # denominator only, which made the published sentence false about the
+        # step: "1 of 1 gate clause(s) that ran here" over a step where TWO
+        # clauses dispatched and BOTH examined nothing. MEASURED by the
+        # round-3 review, which also caught that my round-2 test pinned that
+        # wrong sentence as correct.
+        #
+        # So the clause leaves the TIER (it does not get to say the step was
+        # skipped) and stays in the ARITHMETIC on BOTH sides: it ran, and it
         # vibe-ic#901 - the NUMERATOR contributed by the structured channel,
         # kept apart from the legacy bucket above so it cannot alter any tier
         # the legacy bucket already decides.
@@ -16081,6 +16355,31 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                     f"production tapeout review must close it): "
                     f"{h[len(_WAIVER_HINT_PREFIX):]}")
         elif passed and skip_hints and not non_hint_reasons:
+            # A CLAUSE'S N/A IS THAT CLAUSE'S, NOT THE STEP'S.
+            #
+            # MEASURED on spm run22 (lane icspm5), step 7 "Constraint setup
+            # (SDC + PVT matrix)". Its declared required_outputs are
+            # `phase2/stage2/constraints/*.sdc` and
+            # `.../pvt_matrix.json`, and BOTH were on disk -- the step's own
+            # row says so in the flow's own words, "OUTPUT ATTRIBUTION:
+            # step-attributed (2/2 declared output(s) resolved against THIS
+            # step's own write record ... re-verified live)". One of its
+            # nineteen clauses, `macro_non_seq_arc_contract_check`, honestly
+            # self-reported [verdict=SKIP, reason_class=DESIGN_DECLARED_NA],
+            # and that single clause set the tier of the WHOLE STEP to
+            # NOT_APPLICABLE. The stage-2 classifier then read that N/A and
+            # published it as a stage-BLOCKING MISSING_CAPABILITY /
+            # disclosed-capability-gap -- "the runner disclosed a named
+            # capability gap in place of the sign-off artefact this step
+            # declares", over a step that had produced that artefact.
+            #
+            # A step that produced everything it declared was not skipped. The
+            # clause's skip is still DISCLOSED on the row below, because it is
+            # true and a reader must see it; what it no longer does is speak
+            # for the step. When the step produced NOTHING it declared, or
+            # declares no outputs at all, this branch is reached exactly as
+            # before -- that is the negative arm, and it is the common case.
+            #
             # ORGANIC #675 — a skip is MORE specific than a vacuous-pass: when
             # an all_of step carries BOTH an honest sibling-self-skip hint and a
             # vacuous-pass hint (e.g. the formal step where the absent
@@ -16157,6 +16456,12 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # identical to origin/main, which is exactly the property the
             # guards were written to protect and is asserted directly in them
             # now, instead of being approximated by pinning a label.
+            # ROUND 4: the demoted clause is absent from BOTH sides now --
+            # it never reaches `reasons`, so neither `all_vacuous_cmds` nor
+            # `ran_hints` contains it and this arithmetic is simply the gate
+            # as judged. Round 3 added it to the numerator while it was still
+            # in the denominator, which was true of the step but not of the
+            # gate; doing it once, upstream, makes both readings the same.
             unanimous = len(all_vacuous_cmds) >= len(ran_hints)
             # SPELLED AS TWO STATEMENTS, NOT A TERNARY, ON PURPOSE.
             # `test_issue634verdict::test_the_producers_vocabulary_
@@ -16208,7 +16513,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                     result.reasons.append(
                         f"vacuous: gate program signalled VACUOUS_PASS "
                         f"(input not applicable), and it is "
-                        f"{len(all_vacuous_cmds)} of {len(ran_hints)} gate "
+                        f"{len(all_vacuous_cmds)} of "
+                        f"{len(ran_hints)} gate "
                         f"clause(s) that ran here: {cmd}"
                         + (f" — {_diag}" if _diag else "")
                     )
@@ -16230,7 +16536,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                     # l9_floorplan_contract_check -- each printed its clause string
                     # and nothing about why it examined nothing.
                     result.reasons.append(
-                        f"PARTIALLY-VACUOUS ({len(all_vacuous_cmds)} of "
+                        f"PARTIALLY-VACUOUS "
+                        f"({len(all_vacuous_cmds)} of "
                         f"{max(len(ran_hints), len(all_vacuous_cmds))} gate "
                         f"clause(s) examined nothing): {cmd}"
                         + (f" — {_diag}" if _diag else "")
@@ -16299,6 +16606,13 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # A gate that RAN and did not pass is a defect, not an absence.
             result.reason_class = ""
             result.reasons.extend(non_hint_reasons)
+        # THE DEMOTED SKIP IS STILL TRUE, so it is still on the row. It no
+        # longer sets the tier -- the step produced everything it declares --
+        # but a clause that honestly reported it examined nothing is exactly
+        # the fact #901 says one label cannot carry and a reader must still
+        # see. The same shape as the partial-vacuity disclosure below.
+        if _demoted_skips:
+            result.reasons.extend(_demoted_skip_disclosures(_demoted_skips))
         # vibe-ic#901 - the tier is a per-STEP word and a partially vacuous step
         # has no such word: some of its clauses examined the design and some
         # examined nothing. Both facts are true and one label can carry only
@@ -16472,6 +16786,14 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 _sp["audit_created"] = _sp.get("spec")
                 _sp.pop("credited", None)
         _ob["codes"] = sorted({str(d.get("code")) for d in _bind_specs})
+        # THE COUNT FOLLOWS THE LIST IT COUNTS. `n_satisfied` is computed
+        # once, BEFORE the gate runs; this retype happens after the tier chain
+        # and sets `satisfied = False` for an output that turns out to be the
+        # step's own gate `--json` target. MEASURED by the round-3 review: on
+        # a second pass the row published `n_satisfied: 2` beside a spec
+        # marked audit_created/unsatisfied and a FAIL reading "AUDIT-CREATED
+        # OUTPUT REFUSED" -- a count contradicting its own list.
+        _ob["n_satisfied"] = sum(1 for d in _bind_specs if d.get("satisfied"))
         _ob["notes"] = (_ob["notes"] + [
             f"{rel}: audit_created; excluded from run evidence because it is "
             f"this step's own gate `--json` target and holds that gate's "
