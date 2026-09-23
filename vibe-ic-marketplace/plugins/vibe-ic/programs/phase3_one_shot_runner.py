@@ -90,6 +90,7 @@ from _route_wire_transaction import wire_transaction_tcl
 import _reference_flow_boundary as _rfb
 import _source_record_merge as _srm  # per-source merge: silence cannot erase
 from _ppa import power as _ppa_power                              # noqa: E402
+from _ppa import area as _ppa_area                                # noqa: E402
 from _ppa.power import pdn_ring_dimensions as _pdn_ring_dimensions
 import floorplan_contract as _fpc  # design-declared fixed floorplan + DRV limits
 from _rtl_include_hub import drop_include_hubs as _drop_include_hubs  # shared aggregator filter
@@ -18740,7 +18741,8 @@ def _effective_die_um(die_um_flag: str,
 def _resolve_auto_die_um(die_um: str, netlist: Path, util: float,
                          pdk: "PdkConfig",
                          project: Optional[Path] = None,
-                         top: str = "", container: str = ""
+                         top: str = "", container: str = "",
+                         metrics: Optional[dict] = None
                          ) -> Tuple[str, Optional[str]]:
     """If `die_um` is the sentinel 'auto', compute a real 'WxH' from the synth
     netlist's cell count + the PDK site area + a target util. Otherwise return
@@ -18877,6 +18879,17 @@ def _resolve_auto_die_um(die_um: str, netlist: Path, util: float,
     elif pin_bits > 0:
         _pin_note = (f"; pin-perimeter side {pin_side} ≤ cell-area side "
                      f"{cell_side} (cell-area-dominated)")
+    # R-0915-141. REPORT the cell area this function already MEASURED, so the
+    # placement-density decision downstream reads the same number instead of
+    # measuring it a second time. A second reader is a second answer waiting to
+    # disagree with this one. Filled only when a caller asks (default None), so
+    # every existing caller is byte-identical.
+    if metrics is not None:
+        metrics.update(cells=cells, avg_cell_um2=avg_cell,
+                       avg_cell_source=_avg_cell_src,
+                       cell_area_um2=float(cells) * float(avg_cell),
+                       die_target_util=util_frac, die_target_util_source=_util_src,
+                       auto_side_um=side)
     return (f"{side}x{side}",
             f"die-um=auto → {side}x{side} (cells={cells}, "
             f"avg_cell={avg_cell:.2f}µm² [{_avg_cell_src}], "
@@ -33569,9 +33582,10 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     if _l9_die_note:
         print(f"[phase3] {_l9_die_note}", file=sys.stderr)
     _auto_die_requested = str(die_um).lower() == "auto"
-    die_um, _auto_die_note = _resolve_auto_die_um(die_um, netlist, util, pdk,
-                                                  project, top=top,
-                                                  container=container)
+    _auto_die_metrics: dict = {}
+    die_um, _auto_die_note = _resolve_auto_die_um(
+        die_um, netlist, util, pdk, project, top=top, container=container,
+        metrics=_auto_die_metrics)
     if _auto_die_note:
         print(f"[phase3] {_auto_die_note}", file=sys.stderr)
     # THE PAD RING'S FLOOR. A die is a free parameter only until the design has
@@ -33735,6 +33749,34 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
 
     core_w = die_w - 2 * core_pad
     core_h = die_h - 2 * core_pad
+
+    # === R-0915-141 — THE PLACER'S DENSITY COMES FROM THE CORE IT WILL USE ===
+    # `-density` is an upper bound on bin occupancy and the wirelength/timing
+    # objective packs right up to it. When the core is NOT the rectangle the
+    # auto-sizer produced -- a ring-pinned die (R-0915-103) or a die the caller
+    # mandated -- the auto-sizer's `--util` describes a die nobody placed into,
+    # and handing it to the placer compresses the design into a fraction of the
+    # core it was given. Derive the target from the core that will actually be
+    # used; the result is capped by `--util` itself, so this can only SPREAD.
+    # A core the auto-sizer DID size keeps today's number untouched, and the
+    # untouched path is asserted by this change's own deck.
+    _placement_core_is_auto = _auto_die_requested and not _ring_pinned_die
+    _placement_density_note = ""
+    if not _placement_core_is_auto:
+        _pd, _pd_basis = _ppa_area.real_core_placement_density(
+            float(_auto_die_metrics.get("cell_area_um2") or 0.0),
+            core_w, core_h, util)
+        if _pd is None:
+            _placement_density_note = (
+                f"placement density UNCHANGED at {util:g}: {_pd_basis}")
+        elif abs(_pd - util) < 1e-9:
+            _placement_density_note = (
+                f"placement density unchanged at {util:g} — {_pd_basis}")
+        else:
+            _placement_density_note = (
+                f"placement density {util:g} -> {_pd:g} — {_pd_basis}")
+            util = _pd
+        print(f"[phase3] {_placement_density_note}", file=sys.stderr)
 
     # === fix 1 — THE SLOT CONTRACT DECIDES THE FLOORPLAN RECTANGLE ==========
     # A design that declared a shuttle slot is not free to choose its die: the

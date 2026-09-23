@@ -798,6 +798,69 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return 1
 
 
+#: R-0915-141. How much room over the THEORETICAL minimum the placer is given
+#: when the core is not the one the auto-sizer produced. The natural density
+#: (cell area / core area) is the fully-spread solution and the placer cannot
+#: do better than it anywhere, so asking for exactly that leaves no slack for
+#: row granularity or local clustering; 1.5x is slack without being a pack.
+_PLACEMENT_SPREAD_HEADROOM = 1.5
+#: The lowest `-density` worth asking OpenROAD's global placer for. Below this
+#: the bin-density objective buys nothing and the solver gets numerically
+#: unhappy; the value is CLAMPED and the clamp is DISCLOSED, never silent.
+_PLACEMENT_DENSITY_FLOOR = 0.05
+
+
+def real_core_placement_density(cell_area_um2: float, core_w: int, core_h: int,
+                                ceiling: float) -> Tuple[Optional[float], str]:
+    """`(density, basis)` for a core the auto-sizer did NOT size.
+
+    R-0915-141. MEASURED, subservient x gf180mcuD as a DIE (lane icsub5, run2
+    on main 1f537b5c0): the pad ring pinned the die at 1962x1962 um, R-0915-103
+    made the core the 1176x1176 um interior, and `global_placement` was still
+    handed `-density 0.30` -- the placement default, whose own help justifies it
+    on a "spm 200x200 die". `-density` is an UPPER BOUND on bin occupancy, and
+    the wirelength + timing objective packs right up to it, so on a core whose
+    natural density is 2.39 % the placer compressed 2510 cells into
+    33,057/0.30 = 110,190 um^2. The measured island was 42 tiles of 50x50 um =
+    105,000 um^2 -- within 5 % of that prediction -- and ALL 3808 post-repair
+    router violations, and all 41 of the shipped route's, fell inside it.
+
+    The rectangle was never the problem: R-0915-103 is right that the core is
+    the interior and the auto-sizer's answer is "never a lever on the
+    rectangle". What survived the ring adoption was the DENSITY that belonged
+    to the die nobody used.
+
+    So when the core is not the auto-sized one, the target is derived from what
+    will actually be placed in THAT core. It is CLAMPED ABOVE by the caller's
+    own `--util`, which means this can only ever SPREAD a design, never pack
+    one: a core that is already dense keeps today's number exactly.
+
+    Returns `(None, why)` when it cannot be computed, and the caller then keeps
+    the existing behaviour -- an unmeasurable density is not a licence to guess.
+    """
+    if cell_area_um2 <= 0:
+        return None, "no measured cell area, so no natural density to derive"
+    core_area = float(core_w) * float(core_h)
+    if core_area <= 0:
+        return None, "core area is not positive"
+    natural = cell_area_um2 / core_area
+    want = natural * _PLACEMENT_SPREAD_HEADROOM
+    density = want
+    clamped = ""
+    if density < _PLACEMENT_DENSITY_FLOOR:
+        density = _PLACEMENT_DENSITY_FLOOR
+        clamped = (f"; raised to the placer floor {_PLACEMENT_DENSITY_FLOOR:g}"
+                   f" (asked {want:.4f})")
+    if density > ceiling:
+        density = ceiling
+        clamped = (f"; capped at the caller's --util {ceiling:g} — this rule "
+                   f"only ever SPREADS, never packs (asked {want:.4f})")
+    basis = (f"cell area {cell_area_um2:.0f}um^2 / core {core_w}x{core_h}um "
+             f"({core_area:.0f}um^2) = natural {100.0 * natural:.2f}%, "
+             f"x{_PLACEMENT_SPREAD_HEADROOM:g} headroom{clamped}")
+    return density, basis
+
+
 def _write_json(path_s: Optional[str], doc: Mapping[str, Any]) -> None:
     if not path_s:
         return
