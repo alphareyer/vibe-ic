@@ -346,4 +346,90 @@ def test_ordering_ancestry_is_two_orders_of_magnitude_wider():
     # against 1567 ordering-licensed ones is still two orders of magnitude, and
     # the one new declared pair is listed and justified in
     # `test_declared_dependency_relation_is_small` above.
-    assert total == 1567, total
+    #
+    # 1567 -> 1595 (2026-09-23): ONE new STEP, 37.3 (the stream-out/finishing
+    # fidelity step, `blocks_on: [21]`, landed v1.23.51). RE-DERIVED from the graph
+    # on this tree by rebuilding the pre-37.3 graph from this same YAML -- drop the
+    # '37.3' step and drop '37.3' from every `blocks_on` -- and diffing the per-step
+    # ancestry, exactly as the 1494 -> 1537 entry above was derived:
+    #
+    #   whole-flow edge count      109 -> 110   (exactly one new edge)
+    #   37.3's own ancestry          0 -> 28    (step 21 and its 27)
+    #   steps whose ancestry moved   EXACTLY ONE: 37.3 itself
+    #   37.3 is an ancestor of       NOTHING, so the +28 cannot cascade
+    #
+    #   28 + 0 = 28.
+    #
+    # The CLAIM is unchanged and the DECLARED list does not move: 37.3 reads
+    # `phase3/stage3/pnr/routed.def`, step 21's declared output, which is already
+    # one of the listed declared pairs -- so this step licensed no NEW declared
+    # read. 7 pairs against 1595 is still two orders of magnitude.
+    assert total == 1595, total
+
+
+def _ordering_parents(steps, drop_step=None):
+    """The ordering graph as `{step: [parents]}`, optionally without one step."""
+    out = {}
+    for st in steps:
+        sid = str(st.get("id"))
+        if sid == "P0" or sid == drop_step:
+            continue
+        parents = [str(x) for x in (st.get("blocks_on") or [])]
+        if drop_step:
+            parents = [x for x in parents if x != drop_step]
+        out[sid] = parents
+    return out
+
+
+def _ancestry(parents):
+    out = {}
+    for sid in parents:
+        seen, queue = set(), list(parents.get(sid, []))
+        while queue:
+            pid = queue.pop(0)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            queue.extend(parents.get(pid, []))
+        out[sid] = seen
+    return out
+
+
+def test_the_latest_delta_is_derived_and_not_asserted_in_prose():
+    """THE DERIVATION ABOVE, MADE CHECKABLE.
+
+    Every entry in that comment block claims the total moved by exactly the amount
+    the shape of the edit predicts. Until now those claims were prose: a reader had
+    to trust that somebody had rebuilt the pre-edit graph. This arm rebuilds it,
+    so the NEXT step addition cannot be waved through with a plausible sentence.
+
+    For 1567 -> 1595, the shape is ONE new step (37.3, `blocks_on: [21]`) that
+    nothing depends on:
+        exactly one step's ancestry size changes -- 37.3's own, 0 -> 28
+        37.3 is an ancestor of nothing, so the change cannot cascade
+        the whole-flow edge count moves by exactly one
+    """
+    steps = _steps()
+    cur = _ordering_parents(steps)
+    pre = _ordering_parents(steps, drop_step="37.3")
+    assert "37.3" in cur and "37.3" not in pre, (
+        "step 37.3 is no longer in the flow; re-derive this delta against whatever "
+        "the latest entry in the comment block above describes")
+
+    a_cur, a_pre = _ancestry(cur), _ancestry(pre)
+    total_cur = sum(len(v) for v in a_cur.values())
+    total_pre = sum(len(v) for v in a_pre.values())
+    assert total_cur == 1595 and total_pre == 1567, (total_cur, total_pre)
+    assert total_cur - total_pre == 28
+
+    moved = {k for k, v in a_cur.items() if len(a_pre.get(k, set())) != len(v)}
+    assert moved == {"37.3"}, (
+        f"more than one step's ancestry moved with 37.3: {sorted(moved)} — the "
+        f"delta is then not the shape the comment describes and must be "
+        f"re-derived, not re-typed")
+    assert len(a_cur["37.3"]) == 28
+    assert not [k for k, v in a_cur.items() if "37.3" in v], (
+        "something now depends on 37.3, so its ancestry DOES cascade and the +28 "
+        "arithmetic above no longer holds")
+    assert (sum(len(v) for v in cur.values())
+            - sum(len(v) for v in pre.values())) == 1, "more than one new edge"
