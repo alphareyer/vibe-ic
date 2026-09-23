@@ -67356,9 +67356,11 @@ def main() -> int:
     try:
         import l2_half_duplex_reconcile as _l2hdx
         _l2p_hdx = _pl.generated_docs_dir(project) / "L2_FRS.json"
-        if _l2p_hdx.is_file() and _l2hdx.reconcile_file(_l2p_hdx):
-            print("      → L2 half_duplex=true vetoed by its own duplex text "
-                  "(R-0915-164 b)")
+        # R-0915-167 — handed the design's OWN documents (`extracted`, what
+        # gen_l2_frs reads): the synth's duplex template never vetoes alone.
+        if _l2p_hdx.is_file() and _l2hdx.reconcile_file(_l2p_hdx, extracted):
+            print("      → L2 half_duplex=true vetoed: the design's own "
+                  "documents and its duplex text agree (R-0915-167)")
     except Exception as _l2hdx_err:
         print(f"      L2 half_duplex reconcile FAILED (fail-open): {_l2hdx_err}",
               file=sys.stderr)
