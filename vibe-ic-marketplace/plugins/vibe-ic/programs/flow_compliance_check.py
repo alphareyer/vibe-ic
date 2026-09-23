@@ -11971,6 +11971,85 @@ def _refusal_examined_nothing(report: Any) -> bool:
 
 
 
+#: R-0915-169 — the rows of a nested audit that leave it waiting and do not fail it.
+_NESTED_AUDIT_SETTLED_STATUSES = frozenset({
+    _T.Verdict.PASS.value, _T.Verdict.NOT_APPLICABLE.value})
+_NESTED_AUDIT_AWAITING_BASIS = "awaiting-agent-pass"
+
+
+# R-0915-169 — A NESTED AUDIT THAT IS ONLY WAITING ON AN AGENT DID NOT ERR.
+#
+# MEASURED on subservient run2 (lane ictier1, main f757abef7): step 2's advisory
+# `flow_compliance_check . --stage-id stage_phase1 --strict` exits 1, and its own
+# report says `overall` NOT_MEASURED, D1 NOT_MEASURED / awaiting_agent_pass,
+# 0.5ic PASS, and D1's blocker basis `awaiting-agent-pass`. Nothing in it errored:
+# `phase1_expert_parse_track` emitted its hand-off and exited 4. But the report
+# carries no report-level `reason_class`, so `_advisory_execution_record` inferred
+# one from prose, matched no recogniser, fail-closed to EXECUTION_ERROR, and step 2
+# was published NOT_MEASURED / execution_error — a crash, over a run waiting on a
+# pass the flow itself designed.
+#
+# READ THE NESTED AUDIT BY ITS OWN TYPED ROWS, AND ONLY IN THE ONE SHAPE THAT IS
+# UNAMBIGUOUS: the report is this program's (`program`), its `overall` is
+# NOT_MEASURED, and EVERY row that is neither PASS nor a declared N/A is
+# NOT_MEASURED and awaiting — by its own `reason_class`, or, where the row states
+# no class, by its blocker's `basis`. Any other mix returns nothing and the caller
+# keeps exactly what it did before: a FAIL row still blocks, any other NOT_MEASURED
+# class, an unreadable report or another program's report still reads
+# EXECUTION_ERROR. The verdict is untouched; only the class the row names changes.
+def _nested_audit_awaiting_rows(report: Any) -> List[Dict[str, Any]]:
+    """The awaiting rows of a nested audit that is waiting and nothing else.
+
+    Empty unless `report` is a flow-compliance report whose `overall` is
+    NOT_MEASURED and whose every unsettled row awaits an agent pass.
+    """
+    if not isinstance(report, dict):
+        return []
+    if report.get("program") != Path(__file__).stem:
+        return []
+    if str(report.get("overall")) != _T.Verdict.NOT_MEASURED.value:
+        return []
+    rows = report.get("steps")
+    if not isinstance(rows, list) or not rows:
+        return []
+    basis = {str(b.get("step_id")): str(b.get("basis") or "")
+             for b in (report.get("blockers") or []) if isinstance(b, dict)}
+    awaiting: List[Dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return []
+        status = str(row.get("status"))
+        if status in _NESTED_AUDIT_SETTLED_STATUSES:
+            continue
+        if status != _T.Verdict.NOT_MEASURED.value:
+            return []
+        row_class = row.get("reason_class")
+        if row_class == _T.ReasonClass.AWAITING_AGENT_PASS.value or (
+                not row_class
+                and basis.get(str(row.get("id")))
+                == _NESTED_AUDIT_AWAITING_BASIS):
+            awaiting.append(row)
+            continue
+        return []
+    return awaiting
+
+
+def _nested_audit_awaiting_note(report: Dict[str, Any],
+                                rows: List[Dict[str, Any]]) -> str:
+    """Which nested step(s) wait, and which gate(s) emitted the hand-off — the
+    nested ledger's rows that exited with the AWAITING code."""
+    steps = ", ".join(f"{r.get('id')} ({r.get('name')})" if r.get("name")
+                      else str(r.get("id")) for r in rows)
+    handoffs = [str(g.get("cmd")) for g in
+                (report.get("gate_execution_ledger") or [])
+                if isinstance(g, dict)
+                and g.get("exit_code") == _AWAITING_EXIT_CODE and g.get("cmd")]
+    note = f"nested step(s) awaiting an agent pass: {steps}"
+    if handoffs:
+        note += f"; hand-off emitted by: {'; '.join(handoffs)}"
+    return note
+
+
 def _clause_enforcement_label(rec: Dict[str, Any]) -> str:
     """What the reader needs: the disposition of the CLAUSE, not of the rc.
 
@@ -12045,7 +12124,12 @@ def _advisory_execution_record(cmd: str, ledger_start: int,
     else:
         verdict = "PASS" if ok else "FAIL"
     norm = str(verdict).strip().upper().replace("_", "-")
-    if (reason_class is None
+    # R-0915-169 — a nested audit that is only waiting keeps no class here: the
+    # prose inference below has no recogniser for it and fail-closes to
+    # EXECUTION_ERROR. NOT-MEASURED still lands on DISCLOSED_INCOMPLETE below.
+    _awaiting_only = (reason_class is None
+                      and bool(_nested_audit_awaiting_rows(report)))
+    if (reason_class is None and not _awaiting_only
             and (norm in _ADVISORY_SKIP_VERDICTS
                  or norm in _ADVISORY_INCOMPLETE_VERDICTS
                  or norm == "BLOCKED"
@@ -12613,9 +12697,19 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
             else:
                 reasons.append(f"{_VACUOUS_HINT_PREFIX}{cmd}")
         elif enforcement == "DISCLOSED_INCOMPLETE":
-            reasons.append(f"{_INCOMPLETE_HINT_PREFIX}{cmd} "
-                           f"[verdict={record['verdict']}, "
-                           f"reason_class={record['reason_class']}]")
+            # R-0915-169 — see `_nested_audit_awaiting_rows`.
+            _nested = _command_json_report(project, cmd)
+            _awaiting = (_nested_audit_awaiting_rows(_nested)
+                         if record.get("reason_class") is None else [])
+            if _awaiting:
+                _note = _nested_audit_awaiting_note(_nested, _awaiting)
+                reasons.append(f"{_INCOMPLETE_HINT_PREFIX}{cmd} "
+                               f"[verdict={record['verdict']}; {_note}]")
+                reasons.append(f"{_AWAITING_HINT_PREFIX}{cmd} — {_note}")
+            else:
+                reasons.append(f"{_INCOMPLETE_HINT_PREFIX}{cmd} "
+                               f"[verdict={record['verdict']}, "
+                               f"reason_class={record['reason_class']}]")
         elif enforcement == "APPROVED_WAIVER":
             reasons.append(f"{_WAIVER_HINT_PREFIX}{cmd}")
         elif out.startswith(_EXECUTED_DECLARED_NA_HINT_PREFIX):
