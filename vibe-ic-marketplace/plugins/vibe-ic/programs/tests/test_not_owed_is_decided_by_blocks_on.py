@@ -26,6 +26,7 @@ each pinned here by the review's own scenario, RED on that tip:
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -312,3 +313,60 @@ def test_a_demoted_row_the_promotion_cannot_defer_keeps_the_run_red(
     assert rows["90"]["status"] == _NM, rows["90"]["status"]
     assert report["overall"] == _FAIL, report["overall"]
     assert rc == 1
+
+
+# ── review of next/ictier1a (HIGH): every reader of the rows counts not-run ──
+
+def test_the_real_coverage_gate_counts_demoted_rows_as_not_run(
+        tmp_path, monkeypatch, capsys):
+    """`flow_step_execution_coverage_check` reads the per-step rows and ignores
+    Overall. It counted "did not run" only as FAIL(missing_artefact), and a
+    NOT_MEASURED row is neither excused nor a done-claim — so on a run stopped
+    at a failed gate every demoted row left its bucket and the gate printed
+    VERDICT: PASS rc 0 over steps that never ran (base: FAIL rc 1).
+
+    Review scenario: D1's gate fails, 0.5ic PASSes, nothing else produced. The
+    compliance report is written by the REAL `main()`, and the REAL coverage
+    gate reads it through its own CLI."""
+    verdicts = {"D1": (_FAIL, ""), "0.5ic": (_PASS, "")}
+    flow = yaml.safe_load(_FLOW.read_text())
+    for st in flow["steps"]:
+        sid = str(st.get("id"))
+        if sid not in verdicts and sid != "P0":
+            verdicts[sid] = (_FAIL, _MISSING)
+    _rc, report, _audit = _drive_main(tmp_path, monkeypatch, verdicts)
+    capsys.readouterr()
+    demoted = [s for s in report["steps"]
+               if (s["status"], s.get("reason_class")) == (_NM, _UPSTREAM)]
+    assert len(demoted) > 20, len(demoted)   # the premise: rows were demoted
+    rep_path = tmp_path / "report.json"
+    out_json = tmp_path / "coverage.json"
+    r = subprocess.run(
+        [sys.executable, str(PROGRAMS / "flow_step_execution_coverage_check.py"),
+         str(tmp_path / "proj"), "--compliance-json", str(rep_path),
+         "--json", str(out_json)], capture_output=True, text=True)
+    cov = json.loads(out_json.read_text())
+    assert cov["verdict"] == "FAIL", r.stdout[-1500:]
+    assert r.returncode == 1, r.stdout[-1500:]
+    not_run = {str(s.get("id")) for s in cov["applicable_missing"]}
+    assert {str(s["id"]) for s in demoted} <= not_run, (
+        sorted({str(s["id"]) for s in demoted} - not_run))
+
+
+# ── review of next/ictier1a (MEDIUM): a gate that RAN and FAILED stays FAIL ──
+
+def test_the_condition_owner_writer_keeps_a_real_gate_fail(tmp_path):
+    """15.5ic's own gate RAN and FAILED while its owner 0.5ic also failed. The
+    writer used to overwrite it to FAIL(missing_artefact) and the demotion then
+    called it "never owed" — real counter-evidence erased. Only a row whose
+    failure is SOLELY missing outputs may be demoted."""
+    steps = _steps()
+    rows = [_gate_fail("0.5ic"), _row(15, _PASS),
+            _row("15.5ic", _FAIL, "", reasons=["program failed: pad_ring_check"])]
+    FCC._attribute_condition_owner_blocks(tmp_path, rows, steps)
+    r = _by_id(rows)["15.5ic"]
+    assert r.status == _FAIL, (r.status, r.reason_class)
+    assert r.reason_class != _MISSING, r.reason_class
+    assert any("pad_ring_check" in x for x in r.reasons), r.reasons
+    # and the owner attribution is still on the row
+    assert r.cascade_note == "blocked-by-upstream(0.5ic)", r.cascade_note
