@@ -85,6 +85,15 @@ def _mini_tree(tmp_path: Path) -> Path:
     authority = src.with_name("project_outputs_in_tree_check.py")
     (root / authority.name).write_text(authority.read_text(encoding="utf-8"),
                                        encoding="utf-8")
+    # R-0915-166 — and the authority's OWN imports travel with it, for the same
+    # reason it travels with the guard. `project_outputs_in_tree_check` now
+    # imports `_inplace_chain` (the digest-chain definition); without it the
+    # authority fails to import here, the third condition answers UNKNOWN, and
+    # the volatile arms below go quiet exactly as this docstring warns.
+    for dep in ("_inplace_chain.py",):
+        d = src.with_name(dep)
+        (root / dep).write_text(d.read_text(encoding="utf-8"),
+                                encoding="utf-8")
     (root / "conftest.py").write_text(_MINI_CONFTEST, encoding="utf-8")
     (root / "test_mini.py").write_text(_MINI_TEST, encoding="utf-8")
     return root

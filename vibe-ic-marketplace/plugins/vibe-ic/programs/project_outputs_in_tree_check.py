@@ -98,12 +98,28 @@ Exit codes:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import sys
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
+from typing import Any, List, Optional, Set, Tuple
+
+# --- sibling-import path (vibe-ic#2104) ------------------------------------
+# `programs/` is a flat directory whose modules import each other by BARE name.
+# Python puts a file's own directory on `sys.path` only when that file is run
+# as `__main__`; under `importlib.util.spec_from_file_location` — how the
+# gates, the wiring audit and much of the suite load a program — it does not,
+# so a bare sibling import raises ModuleNotFoundError. MEASURED: adding
+# `_inplace_chain` without this made THIS program the one failure in
+# `test_every_shipped_program_loads_by_path` (`unresolved_sibling:
+# _inplace_chain`). Idempotent, and the same shape the sibling programs that
+# already carry it use.
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import _inplace_chain as _chain                                   # noqa: E402
 
 
 WAIVER_KEY = "project_artifacts_external_storage_intentional"
@@ -255,11 +271,27 @@ def preserved_in_the_run_root(path_str: str, project: Path) -> Optional[Path]:
     never showed -- the reference set changed because a PRODUCER changed, not
     because anything regressed.
 
+    CORRECTED 2026-09-23 (R-0915-162), and the correction is the point of this
+    paragraph. This docstring used to end by saying of `spm.sealed.gds` that it
+    "keeps its finding, which is the honest answer: that output was never
+    written, in any of the three runs". MEASURED on spm run23, that is FALSE:
+    the seal ring succeeded (`state: PASS`, `generator_rc: 0`,
+    `ring_check.verdict: PASS`) and the staging file was written and then
+    PROMOTED onto `spm.gds` by `staged.replace(dest)` -- 102,923,002 bytes
+    where the prefinish stream was 73,850,996. The file is absent because it
+    was consumed, not because nothing was produced. A reader acting on the old
+    sentence would have gone looking for a seal-ring failure that never
+    happened. `consumed_into_verified` is how that case is now told apart, and
+    it is told apart by the BYTES, not by the producer's word.
+
     The tail is derived from the run root's own directory NAME, exactly as
     `names_a_relocated_copy` derives condition (2); no prefix list is consulted.
     Returns the run-relative path when it exists in the run root, else None --
-    so `spm.sealed.gds` keeps its finding, which is the honest answer: that
-    output was never written, in any of the three runs.
+    so a staged path whose tail is absent keeps its finding here. Whether that
+    is honest depends on WHY it is absent, and this function cannot tell: on
+    run23 `spm.sealed.gds` was written and then consumed by a successful
+    promotion, and only `consumed_into_verified` -- walking the recorded digest
+    chain -- can separate that from an output nothing ever produced.
     """
     parts = Path(path_str).parts
     name = project.name
@@ -274,6 +306,147 @@ def preserved_in_the_run_root(path_str: str, project: Path) -> Optional[Path]:
     try:
         return tail if (project / tail).exists() else None
     except OSError:                                        # pragma: no cover
+        return None
+
+
+#: R-0915-166 — only this producer's own document may claim a consumption.
+_SEAL_PRODUCER = "die_finishing_gen"
+
+
+def consumed_into_verified(path_str: str, record: Path,
+                           project: Path) -> Optional[str]:
+    """The destination `path_str`'s bytes were PROMOTED into, when an unbroken
+    CHAIN of recorded rewrites proves the bytes are still there. None otherwise
+    -- and None is the default in every doubt.
+
+    R-0915-166 AMENDS R-0915-162, which checked ONE HOP and would have failed
+    on every real run. A deliverable is not written once: MEASURED on spm
+    run23, `die_density_fill_gen` rewrote the promoted GDS IN PLACE 3 m 24 s
+    after the seal ring promoted it (`die_finishing.json` 19:08:28,
+    `die_density_fill.json` 19:11:52, `spm.gds` 19:11:52.299), so
+    `sha256(destination)` at audit time can never equal the digest taken before
+    the rename. The one-hop version appeared to pass only because its
+    validating fixture computed the digest FROM the already-filled file, which
+    is circular.
+
+    FIVE conditions, all necessary:
+
+      (1) the consumption record is `die_finishing_gen`'s own document. Any
+          document could otherwise claim a consumption for a path it never
+          wrote;
+      (2) the record names THIS staged path. Without it one consumption would
+          exempt every missing path in the same document;
+      (3) it names where the bytes went;
+      (4) that destination EXISTS inside the tree;
+      (5) a CONTINUOUS chain `staged_sha256 -> (each in-place writer's
+          before -> after) -> sha256(destination now)` is present, with no gap.
+          Each link is published by the writer that made it, under
+          `_inplace_chain.LINKS_KEY`, and the walk is driven by the DIGESTS
+          rather than by the order the links were written -- the only ordering
+          a writer cannot arrange to suit itself.
+
+    A GAP IS A FINDING. An unrecorded rewrite and a hand-edited deliverable
+    produce exactly the same gap, which is the point: this is not "the producer
+    says it is fine", it is "the bytes account for themselves".
+    """
+    try:
+        doc = json.loads(record.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("producer") != _SEAL_PRODUCER:
+        return None                                   # (1)
+    tail = _run_relative_tail(path_str, project)
+    for rec in _dicts_in(doc):
+        staged = rec.get("consumed_staged")
+        dest = rec.get("consumed_into")
+        want = rec.get("staged_sha256")
+        if not isinstance(staged, str) or not isinstance(dest, str):
+            continue                                  # (3)
+        if not isinstance(want, str) or not want:
+            continue                                  # stated, not verifiable
+        if not _same_reference(staged, path_str, tail):
+            continue                                  # (2)
+        dpath = (project / dest) if not os.path.isabs(dest) else Path(dest)
+        try:
+            if not dpath.is_file():
+                return None                           # (4)
+            if not _inside_project(str(dpath), project):
+                return None
+        except OSError:
+            return None
+        now = _chain.sha256_file(dpath)
+        links = _chain.links_for(dest, _reports_documents(project))
+        ok, _why = _chain.chain_reaches(want, now or "", links)   # (5)
+        if not ok:
+            return None
+        return dest
+    return None
+
+
+def _reports_documents(project: Path) -> List[Any]:
+    """Every readable JSON document under `reports/` — where in-place writers
+    publish their links. Read once per call site; the population is the run's
+    own reports, never a list of program names."""
+    out: List[Any] = []
+    root = project / "reports"
+    if not root.is_dir():
+        return out
+    for f in sorted(root.rglob("*.json")):
+        try:
+            out.append(json.loads(f.read_text()))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def _dicts_in(obj: Any):
+    """Every dict inside `obj`, at any depth — the consumption record may sit
+    under any key the producer chose."""
+    if isinstance(obj, dict):
+        yield obj
+        for v in obj.values():
+            yield from _dicts_in(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _dicts_in(v)
+
+
+def _run_relative_tail(path_str: str, project: Path) -> Optional[str]:
+    """`path_str` as a run-relative spelling, via the run root's own name.
+
+    The reference may be recorded in the CONTAINER spelling
+    (`/foss/designs/<run>/...`) while the producer records the project-relative
+    one, so the two are compared on the run-relative tail they share. Reuses
+    the derivation `names_a_relocated_copy` already uses — one rule, not a
+    second prefix list."""
+    parts = Path(path_str).parts
+    name = project.name
+    if name not in parts:
+        return None
+    index = len(parts) - 1 - parts[::-1].index(name)
+    if index + 1 >= len(parts):
+        return None
+    return str(Path(*parts[index + 1:]))
+
+
+def _same_reference(staged: str, path_str: str,
+                    tail: Optional[str]) -> bool:
+    """Whether the producer's `consumed_staged` names the reference at hand."""
+    if staged == path_str:
+        return True
+    if tail is not None and staged == tail:
+        return True
+    return False
+
+
+def _sha256_file(path: Path) -> Optional[str]:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
         return None
 
 
@@ -491,6 +664,8 @@ def main() -> int:
     # project root that is not on disk, whatever prefix it carries.
     # (file, path) — always dangling by construction.
     derived: List[Tuple[str, str]] = []
+    #: R-0915-162 — staged paths whose bytes were verified under the final name.
+    consumed: List[Tuple[str, str, str]] = []
     # THE SCAN SIZE, kept because the exit code alone cannot carry it
     # (#511/#564). `no /tmp ... paths referenced` is a statement about the
     # FINDING and is exactly as true of a project with nothing in it as of a
@@ -595,6 +770,13 @@ def main() -> int:
                 if _kept is not None:
                     other_mount.append(
                         (str(f.relative_to(project)), p, str(_kept)))
+                    continue
+                # R-0915-162 — promoted, not lost. Verified against the bytes,
+                # never taken on the producer's word; see
+                # `consumed_into_verified`.
+                _into = consumed_into_verified(p, f, project)
+                if _into is not None:
+                    consumed.append((str(f.relative_to(project)), p, _into))
                     continue
                 if from_log:
                     # Same rule as #622: a log cites transient tool paths by
@@ -760,6 +942,23 @@ def main() -> int:
                  f"line carries the container spelling):"]
         for f_rel, path_s, kept in other_mount:
             block.append(f"  - {f_rel} → {path_s} (present as {kept})")
+        print("\n".join(block))
+    if consumed:
+        # DISCLOSED, never silent. An exemption a reader cannot see is
+        # indistinguishable from a reference the scan missed, and this one is
+        # load-bearing enough to say out loud: it is the only class where a
+        # path that is NOT on disk stops being a finding.
+        block = [f"[INFO] project_outputs_in_tree_check: "
+                 f"{len(consumed)} staged path(s) CONSUMED by an in-place "
+                 f"promotion — non-blocking, because an UNBROKEN chain of "
+                 f"recorded digests runs from the staged bytes, through every "
+                 f"in-place rewrite that touched the destination afterwards, "
+                 f"to the destination's content now, so the evidence is "
+                 f"provably still in the tree under its final name "
+                 f"(R-0915-166):"]
+        for f_rel, path_s, into in consumed:
+            block.append(f"  - {f_rel} → {path_s} (consumed into {into}, "
+                         f"sha256 verified)")
         print("\n".join(block))
 
     if process_markers:

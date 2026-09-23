@@ -133,6 +133,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -725,6 +726,36 @@ _BLOCKAGE_TAG = "# vibe-ic die-finishing: seal-ring band (placement blockage)"
 def _def_scale(text: str) -> float:
     m = re.search(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)", text)
     return float(m.group(1)) if m else 1000.0
+
+
+def _sha256_file(path: Path) -> Optional[str]:
+    """sha256 of `path`, or None when it cannot be read.
+
+    None is a THIRD STATE and callers must treat it as one: "I could not
+    digest this" is not "the digest did not match".
+    """
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _project_rel(path: Path, project: Path) -> str:
+    """`path` spelled relative to the project root when it is inside it.
+
+    A record that a CHECKER must resolve owes it a project-relative spelling;
+    an absolute one is a second thing to translate. Falls back to the absolute
+    spelling rather than inventing a relative one for a path that is genuinely
+    outside the tree.
+    """
+    try:
+        return str(Path(path).resolve().relative_to(Path(project).resolve()))
+    except (ValueError, OSError):
+        return str(path)
 
 
 def seal_ring_bands(extent: Dict[str, Any]) -> Optional[List[List[float]]]:
@@ -1391,7 +1422,45 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
         # swapped in: the sign-off DRC/LVS would then be measuring geometry
         # nothing has confirmed is a seal ring.
         if in_place:
+            # R-0915-162 — A CONSUMED STAGING FILE IS NOT A MISSING OUTPUT.
+            #
+            # `staged.replace(dest)` is a rename: after it, the staging path is
+            # GONE BY DESIGN and its bytes live under `dest`. But this record
+            # still names the staging path (in `argv`, and in the generator's
+            # own `ring_check`), and a reader that only sees "this path is not
+            # on disk" cannot tell a promoted ring from an output that was
+            # never written. MEASURED on spm run23:
+            # `project_outputs_in_tree_check` blocked on
+            # `/foss/designs/run23/phase3/stage3/pnr/spm.sealed.gds (NOT found
+            # on disk)` while `seal_ring.state` was PASS, `generator_rc` 0 and
+            # `ring_check.verdict` PASS -- the ring had succeeded and the
+            # staging file had been consumed into `spm.gds`.
+            #
+            # So the producer states the consumption, and states it in a form
+            # a reader can VERIFY rather than trust: the destination it went
+            # to, and the sha256 of the staged bytes taken BEFORE the rename.
+            # A consumer can then confirm the bytes are still there under the
+            # final name. Recording only "it was consumed" would be a claim;
+            # recording the digest makes it a measurement.
+            _staged_sha = _sha256_file(staged)
             staged.replace(dest)
+            # THE STAGING PATH IS NAMED TOO, and that is not decoration. A
+            # consumption record that says only "something was consumed into
+            # dest" would let a consumer exempt ANY missing path in this
+            # document. Naming the path this record is about keeps the
+            # exemption pinned to the one reference it earned.
+            seal["consumed_staged"] = _project_rel(staged, project)
+            seal["consumed_into"] = _project_rel(dest, project)
+            if _staged_sha:
+                seal["staged_sha256"] = _staged_sha
+            else:
+                # NAMED, not silently omitted. Without the digest the
+                # consumption cannot be verified, and a consumer must keep its
+                # finding rather than take the claim on faith.
+                seal["staged_sha256_unavailable"] = (
+                    f"could not read {_project_rel(staged, project)} to digest "
+                    f"it before the promotion, so this consumption is stated "
+                    f"but NOT verifiable")
         seal["gds_out"] = str(dest)
         seal["state"] = "PASS"
     else:

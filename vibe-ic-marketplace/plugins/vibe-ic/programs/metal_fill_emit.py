@@ -59,6 +59,8 @@ try:
 except ImportError:                                          # standalone gate
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import _klayout_launch as _kl                            # type: ignore
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _inplace_chain as _chain                              # noqa: E402
 
 PASS, FAIL, SKIP = 0, 1, 2
 
@@ -517,7 +519,18 @@ def run(project: Path, gds: Optional[str], config: Optional[str],
                 promote = True
     if promote and staged.is_file():
         if in_place:
+            # R-0915-166 — RECORD WHAT THIS REWRITE FOUND AND WHAT IT LEFT.
+            # `staged.replace(dest)` overwrites a deliverable another producer
+            # already wrote, so a consumer asking "are these still the bytes
+            # the run produced" needs this hop. Both digests are taken AROUND
+            # the rename: `sha_before` off the destination while it still holds
+            # the previous content, `sha_after` off the staged file that is
+            # about to become it.
+            _sha_before = _chain.sha256_file(dest)
+            _sha_after = _chain.sha256_file(staged)
             staged.replace(dest)
+            res.setdefault(_chain.LINKS_KEY, []).append(
+                _chain.link(dest, project, _sha_before, _sha_after))
         res["gds_out"] = str(dest)
     elif staged.is_file() and staged != dest:
         res["gds_out_partial"] = str(staged)
