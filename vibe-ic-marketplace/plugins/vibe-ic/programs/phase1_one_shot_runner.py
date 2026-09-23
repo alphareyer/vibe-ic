@@ -1325,7 +1325,10 @@ def run_phase1_second_track(project: Path, rc_in: int) -> int:
 #: A sidecar the carried record does not name stays refused, which is the half that keeps this from
 #: laundering a stale file -- the same guarantee the mtime rule was reaching for, from the one
 #: direction that is not guaranteed backwards.
-COVERAGE_SIDECAR_REL = "reports/phase1/phase1_exit_reason.json"
+#: THE PATH ITSELF LIVES IN `_path_layout` NOW (next/icslot-sidecarpath). This module used to
+#: spell it, and `vibe_ic_one_shot_runner` spelled it twice more, and the producer twice more
+#: again -- five copies of one exemption's location. Retired rather than re-exported: an alias
+#: here would be a second NAME for one path, which is the defect being closed.
 
 
 def _forget_any_earlier_coverage_sidecar(project: Path) -> None:
@@ -1341,7 +1344,7 @@ def _forget_any_earlier_coverage_sidecar(project: Path) -> None:
     reviewer reading this comment knows where to look.
     """
     try:
-        (project / COVERAGE_SIDECAR_REL).unlink()
+        _pl.coverage_only_sidecar_path(project).unlink()
     except OSError:
         pass
 
@@ -1353,11 +1356,11 @@ def _name_the_sidecar_this_pass_wrote(project: Path, summary: Dict[str, Any],
     `d1_ran` is the structural entitlement: D1 is the only thing that writes the sidecar, so a pass
     in which D1 was REFUSED wrote none and must name none, even if a file is somehow there.
     """
-    side = project / COVERAGE_SIDECAR_REL
+    side = _pl.coverage_only_sidecar_path(project)
     if not d1_ran:
         if side.is_file():
             summary["pass1_coverage_sidecar_refused"] = (
-                f"D1 was REFUSED in this pass, so it wrote no {COVERAGE_SIDECAR_REL}; "
+                f"D1 was REFUSED in this pass, so it wrote no {_pl.COVERAGE_ONLY_SIDECAR_REL}; "
                 f"the file present belongs to an earlier run and is not named")
         return
     if not side.is_file():
@@ -1365,13 +1368,13 @@ def _name_the_sidecar_this_pass_wrote(project: Path, summary: Dict[str, Any],
     try:
         import hashlib as _hashlib                          # noqa: PLC0415
         summary["pass1_coverage_sidecar"] = {
-            "rel": COVERAGE_SIDECAR_REL,
+            "rel": _pl.COVERAGE_ONLY_SIDECAR_REL,
             "sha256": _hashlib.sha256(side.read_bytes()).hexdigest(),
             "named_by": "pass 1, which wrote it",
         }
     except OSError:                                         # pragma: no cover
         summary["pass1_coverage_sidecar_refused"] = (
-            f"{COVERAGE_SIDECAR_REL} could not be read to name it")
+            f"{_pl.COVERAGE_ONLY_SIDECAR_REL} could not be read to name it")
 
 
 def run_second_pass_only(project: Path, ic_name: str) -> int:
@@ -1446,10 +1449,10 @@ def run_second_pass_only(project: Path, ic_name: str) -> int:
         # will refuse the demotion, and a reader deserves to know it was the carried record that
         # was silent, not the sidecar that was missing.
         if not isinstance(summary.get("pass1_coverage_sidecar"), dict):
-            if (project / COVERAGE_SIDECAR_REL).is_file():
+            if _pl.coverage_only_sidecar_path(project).is_file():
                 summary["pass1_coverage_sidecar_refused"] = (
-                    f"{COVERAGE_SIDECAR_REL} is on disk but the pass-1 record carried here does "
-                    f"not name it, so nothing says which pass wrote it: not carried")
+                    f"{_pl.COVERAGE_ONLY_SIDECAR_REL} is on disk but the pass-1 record carried "
+                    f"here does not name it, so nothing says which pass wrote it: not carried")
         if _read_legacy:
             summary["pass1_record_read_from"] = str(
                 _read_from.relative_to(project))

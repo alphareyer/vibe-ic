@@ -79,11 +79,18 @@ def project(tmp_path_factory):
 #: but because a real `phase1_one_shot_runner` invocation was measured landing there, which
 #: `test_phase1s_producer_resolves_its_report_through_the_router` pins against the source.
 #:
-#: `phase1_exit_reason.json` is NOT in that set and is deliberately staged by hand at the
-#: path its own consumer opens. Measured, it has three locations of its own -- its producer
-#: writes `reports/`, `_phase1_failure_is_coverage_only` reads `reports/phase1/`, and the
-#: router's catch-all would say `reports/audit/`. That is a separate mismatch, outside this
-#: change, and the fixture follows the CONSUMER because the consumer is what these arms test.
+#: The coverage-only sidecar is NOT in that set and is not routed at all: it is declared
+#: literally, as `_path_layout.COVERAGE_ONLY_SIDECAR_REL`, and staged through
+#: `coverage_only_sidecar_path` like everything else that touches it.
+#:
+#: CORRECTING WHAT THIS NOTE USED TO SAY. It claimed three locations -- "its producer writes
+#: `reports/`, `_phase1_failure_is_coverage_only` reads `reports/phase1/`, and the router's
+#: catch-all would say `reports/audit/`". Measured: the producer writes `reports/phase1/`, the
+#: same place the reader reads, so there were never three LOCATIONS -- there were FIVE
+#: hand-written COPIES of one location, across three programs, which is a different defect and
+#: the one next/icslot-sidecarpath closed. The router's catch-all really would say
+#: `reports/audit/`, and that remains a live mismatch: moving the file there is a producer move
+#: needing a read-side tolerance for the old place, and it is not done.
 
 
 def _report(project: Path, name: str, payload: dict) -> Path:
@@ -104,12 +111,16 @@ def _drive_main(project: Path, monkeypatch, *, phase1, phase2, phase3=None,
         if "phase1" in runner.name:
             _report(project, "phase1_one_shot.json", {"verdict": phase1[0]})
             if phase1[2] is not None:
-                # THE SIDECAR'S OWN PATH AND KEY, read from the consumer:
-                # `_phase1_failure_is_coverage_only` opens
-                # reports/phase1/phase1_exit_reason.json and asks for
-                # `coverage_only_failure`. Writing it anywhere else, or under any
-                # other key, stages a fixture the demotion branch cannot see.
-                side = project / "reports" / "phase1" / "phase1_exit_reason.json"
+                # THE SIDECAR'S OWN PATH AND KEY. The path is now ONE declaration
+                # (`_path_layout.coverage_only_sidecar_path`) that the producer, both
+                # readers and this fixture all ask, so a fixture can no longer drift
+                # from the code by staging the old place; the LITERAL is pinned once,
+                # in `test_a_pass_one_written_before_the_move_is_still_carried`, which
+                # is what still catches a silent relocation. The KEY is read from the
+                # consumer: `_phase1_failure_is_coverage_only` asks for
+                # `coverage_only_failure`, and any other key stages a fixture the
+                # demotion branch cannot see.
+                side = _pl.coverage_only_sidecar_path(project)
                 side.parent.mkdir(parents=True, exist_ok=True)
                 side.write_text(json.dumps(phase1[2]) + "\n")
             return phase1[1]
@@ -559,7 +570,7 @@ def test_a_stale_coverage_sidecar_does_not_demote(project, monkeypatch):
     sidecar is not tied to this invocation and is written BEFORE three later
     non-coverage blocking returns. A stale sidecar must not demote a phase1 FAIL."""
     import os
-    side = project / "reports" / "phase1" / "phase1_exit_reason.json"
+    side = _pl.coverage_only_sidecar_path(project)
     side.parent.mkdir(parents=True, exist_ok=True)
     side.write_text(json.dumps({"coverage_only_failure": True,
                                 "coverage_pct": 71.0, "total_todo": 0}) + "\n")
@@ -1017,7 +1028,7 @@ def test_rc_zero_over_a_stale_report_is_still_not_measured(project):
 # REAL `run_second_pass_only` doing the carrying.
 
 def _sidecar(project: Path) -> Path:
-    return project / "reports" / "phase1" / "phase1_exit_reason.json"
+    return _pl.coverage_only_sidecar_path(project)
 
 
 def _as_pass_one_leaves_it(project: Path, *, age_s: float = 5000.0) -> str:
