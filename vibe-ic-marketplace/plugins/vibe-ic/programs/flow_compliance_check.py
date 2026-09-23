@@ -16582,6 +16582,46 @@ def _flow_paths_meet(a: str, b: str) -> bool:
     return bool(_flow_glob_re(a).match(b) or _flow_glob_re(b).match(a))
 
 
+def cascade_tier_for_dependent(status: Any, reason_class: Any):
+    """R-0915-140 — what a VOIDING upstream does to one dependent's tier.
+
+    Returns ``(new_status, new_reason_class, sentence)`` or ``None`` when the
+    dependent keeps the verdict it earned. PURE, and deliberately so: the caller
+    is a loop inside a 2000-line function, and a rule that can only be exercised
+    by running a whole audit is a rule nobody re-checks. The control drives it in
+    both directions.
+
+    THE THREE ANSWERS:
+      PASS                      -> NOT_MEASURED(upstream_failed). A pass that
+                                   rests on a broken chain certifies nothing.
+      FAIL(missing_artefact)    -> NOT_MEASURED(upstream_failed). The step never
+                                   ran, so its declared outputs were never due:
+                                   this is the cascade, not a defect of the step.
+                                   MEASURED on a frozen FAIL-path tree
+                                   (subservient r33, step 31 FAIL): step 37 read
+                                   "[FAIL] ... (missing_artefact)
+                                   [blocked-by-upstream(2)]" -- the audit knowing
+                                   the step was blocked and publishing FAIL
+                                   anyway, two tiers in one line.
+      anything else             -> None. A gate that RAN and refused keeps its
+                                   FAIL: "a FAIL never converts -- real
+                                   counter-evidence survives" is the rule this
+                                   narrows, not the rule it replaces.
+
+    `sentence` names which disclosure the caller must append, because "PASS
+    voided" is FALSE of a row that never reached PASS -- it names a verdict the
+    row never had, and a reader chasing it finds nothing.
+    """
+    if status == _T.Verdict.PASS.value:
+        return (_T.Verdict.NOT_MEASURED.value,
+                _T.ReasonClass.UPSTREAM_FAILED.value, "pass_voided")
+    if (status == _T.Verdict.FAIL.value
+            and str(reason_class or "") == _T.ReasonClass.MISSING_ARTEFACT.value):
+        return (_T.Verdict.NOT_MEASURED.value,
+                _T.ReasonClass.UPSTREAM_FAILED.value, "not_owed")
+    return None
+
+
 def _attribute_cascade_verdicts(
         results: List["StepResult"],
         steps: List[Dict[str, Any]],
@@ -16944,10 +16984,39 @@ def _attribute_cascade_verdicts(
                     and r.reason_class
                     == _T.ReasonClass.MISSING_ARTEFACT.value):
                 r.cascade_note = f"blocked-by-upstream({first_fail})"
+                # R-0915-140 — AND THE TIER MOVES WITH THE ATTRIBUTION.
+                #
+                # This pass used to say, in its own docstring, "Status stays
+                # MISSING — the work IS still missing and strict mode still fails
+                # — only the ATTRIBUTION changes". That is the sentence the ruling
+                # overrules, and the row it produced is the evidence: on a frozen
+                # FAIL-path tree (subservient r33, step 31 FAIL) step 37 read
+                # "[FAIL] ... (missing_artefact) [blocked-by-upstream(2)]" -- the
+                # audit knowing the step was blocked and publishing FAIL anyway,
+                # two tiers in ONE LINE.
+                #
+                # A step after the first mid-chain FAIL was never owed its
+                # outputs, so "did not produce" is not a fact about it.
+                # `FAIL(missing_artefact)` is reserved for a step that WAS owed --
+                # blockers passed -- and did not produce, which is exactly the
+                # negative arm: a step with no failed blocker never reaches this
+                # branch and keeps its FAIL.
+                #
+                # STRICT MODE DOES NOT GO QUIET. `NOT_MEASURED` is not a pass:
+                # the run's own verdict still refuses, the cascade is still
+                # counted in `blocked_by_upstream`, and the root cause is still
+                # named on the row. What changes is that the row no longer claims
+                # this step failed at something it never reached.
+                _tier = cascade_tier_for_dependent(r.status, r.reason_class)
+                if _tier is not None:
+                    r.status, r.reason_class = _tier[0], _tier[1]
                 r.reasons.append(
                     f"blocked-by-upstream(step {first_fail}): cascade of "
                     f"the first mid-chain FAIL — the chain stops at step "
-                    f"{first_fail}; fix that root cause first"
+                    f"{first_fail}; fix that root cause first. This step was "
+                    f"never owed its declared outputs, so their absence is that "
+                    f"failure's consequence and not a defect of this step "
+                    f"(R-0915-140)"
                 )
                 info["blocked_by_upstream"][first_fail] = (
                     info["blocked_by_upstream"].get(first_fail, 0) + 1)
@@ -19054,9 +19123,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if _note not in _r.reasons:
                     _r.reasons.append(_note)
                 continue
-            if _r.status == _T.Verdict.PASS.value:
-                _r.status = _T.Verdict.NOT_MEASURED.value
-                _r.reason_class = _T.ReasonClass.UPSTREAM_FAILED.value
+            # R-0915-140 — THE RULE LIVES IN ONE PURE FUNCTION, and the loop
+            # applies it. See `cascade_tier_for_dependent` for the three answers
+            # and the measurement behind the middle one.
+            _tier = cascade_tier_for_dependent(
+                _r.status, getattr(_r, "reason_class", ""))
+            _was_missing_only = bool(_tier and _tier[2] == "not_owed")
+            if _tier is not None:
+                _r.status, _r.reason_class = _tier[0], _tier[1]
             elif _r.status in (_T.Verdict.NOT_MEASURED.value,
                                _T.Verdict.NOT_APPLICABLE.value):
                 # R-0915-85 — THE DISCLOSURE IS NOT THE STATUS, and this is
@@ -19087,9 +19161,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             # One line per DISTINCT dependency. The violation list carries one
             # entry per (terminal, dependency) pair and a step can reach the same
             # failed dependency by several paths, so appending blindly repeats it.
-            _why = (f"PASS voided: dependency [{_v.get('signoff_id')}] "
+            # R-0915-140 — AND THE SENTENCE HAS TO MATCH WHAT HAPPENED. "PASS
+            # voided" is false for a step that never reached PASS: it names a
+            # verdict the row never had, and a reader chasing it finds nothing.
+            # The producer is named in BOTH spellings, which is the half of the
+            # ruling the tier change would otherwise have cost -- naming the
+            # producer was right; doing it on a FAIL row was not.
+            if _was_missing_only:
+                _why = (
+                    f"NOT OWED: dependency [{_v.get('signoff_id')}] "
                     f"{_v.get('signoff')} = {_v.get('signoff_status')}, so this "
-                    f"step's PASS certifies nothing about the design")
+                    f"step never ran and its declared outputs were never due — "
+                    f"the missing-output finding is the cascade of that failure, "
+                    f"not a defect of this step (R-0915-140)")
+            else:
+                _why = (f"PASS voided: dependency [{_v.get('signoff_id')}] "
+                        f"{_v.get('signoff')} = {_v.get('signoff_status')}, so this "
+                        f"step's PASS certifies nothing about the design")
             _r.reasons = list(getattr(_r, "reasons", []) or [])
             if _why not in _r.reasons:
                 _r.reasons.append(_why)
