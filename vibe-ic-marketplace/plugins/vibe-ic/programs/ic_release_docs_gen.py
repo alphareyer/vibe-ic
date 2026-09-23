@@ -108,6 +108,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 
 import argparse
+import json as _json
 import sys
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
@@ -802,7 +803,72 @@ def emit(project: Path, out_dir: Path, name: str,
     return written, derived, len(all_fields) - derived
 
 
-def _refuse(audit: _art.ArtefactAudit, blockers: Sequence[str],
+#: Where this producer records a refusal so a READER can find it. R-0915-144.
+#:
+#: MEASURED on spm run22: this producer ran (2.26 s, rc 1) and declined to write
+#: any document, for two correct reasons -- `reports/phase3/sta/post_route_summary.json`
+#: carried no slack number anywhere and `reports/phase3/power.json` carried no power
+#: number. Its reasons survived ONLY as prose, in
+#: `reports/orchestrator/phase3_one_shot.json` and its own producer log. So
+#: `release_docs_check` -- which has no way to read either -- reported
+#: FAIL / RELEASE_DOCUMENTATION_ABSENT, "carries no release documentation", which
+#: is TRUE and reads as "nobody wrote them". A refusal nobody can read is a refusal
+#: that gets re-described by the next program as negligence.
+REFUSAL_REL = "reports/phase3/release_docs_producer_refusal.json"
+
+
+def refusal_path(project: Path) -> Path:
+    return project / REFUSAL_REL
+
+
+def _write_refusal(project: Path, audit: _art.ArtefactAudit,
+                   blockers: Sequence[str], releases: Sequence[str]) -> None:
+    """Record the refusal as data, beside the prose this function already prints.
+
+    Written with the SAME reasons the stderr text carries -- one source, two
+    renderings -- so the document can never say something the log does not.
+    """
+    doc = {
+        "program": GENERATOR,
+        "verdict": "REFUSED",
+        "releases_examined": len(releases),
+        "releases": sorted(str(r) for r in releases),
+        "substance_refusals": [f.line() for f in audit.errors],
+        "release_blockers": [str(b) for b in blockers],
+        "documents_written": [],
+        "why": ("a release document for a run that did not pass is worse than no "
+                "document: it becomes a file that outlives the run it came from, "
+                "and nothing in the copy says the run was refused"),
+    }
+    try:
+        atomic_write_text(refusal_path(project),
+                          _json.dumps(doc, indent=2) + "\n")
+    except OSError as exc:                                 # pragma: no cover
+        # A record of the refusal is not the refusal. Failing to write it must
+        # never turn a refusal into a pass, so this is disclosed and rc is
+        # unchanged.
+        print(f"  (could not record the refusal at {REFUSAL_REL}: "
+              f"{exc.__class__.__name__}: {exc})", file=sys.stderr)
+
+
+def _clear_refusal(project: Path) -> None:
+    """A refusal record outlives its refusal unless the next success removes it.
+
+    THE OTHER DIRECTION, and the one that would have made this a fail-open: a
+    stale record would tell `release_docs_check` for ever that the producer had
+    declined, on a run where it went on to write the documents.
+    """
+    try:
+        refusal_path(project).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:                                 # pragma: no cover
+        print(f"  (could not clear a previous refusal record at "
+              f"{REFUSAL_REL}: {exc.__class__.__name__}: {exc})",
+              file=sys.stderr)
+
+
+def _refuse(project: Path, audit: _art.ArtefactAudit, blockers: Sequence[str],
             releases: Sequence[str]) -> int:
     """No documents, and every reason named. Both halves report together.
 
@@ -811,6 +877,7 @@ def _refuse(audit: _art.ArtefactAudit, blockers: Sequence[str],
     thing and is refused again for a reason it could have been told the first
     time.
     """
+    _write_refusal(project, audit, blockers, releases)
     print(f"NOT RELEASABLE — no product documents written. "
           f"{len(releases)} release(s) examined.", file=sys.stderr)
     if audit.errors:
@@ -847,6 +914,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         _vx.announce_vacuous(GENERATOR, "project_dir_absent")
         return _vx.RC_VACUOUS
 
+    # CLEARED BEFORE ANYTHING CAN RAISE. R-0915-146 / M2: `_clear_refusal` ran only
+    # on the success tail, so ANY exception below -- `_art.audit`, `_metrics`,
+    # `release_blockers`, `build_release` before `out_dir.mkdir` -- or a runner
+    # timeout left the PREVIOUS run's refusal record on disk, where a reader would
+    # find a stale account of an upstream that may since have been fixed. A record
+    # describes the run that wrote it; this run has not written one yet, so there
+    # must not be one here.
+    _clear_refusal(project)
+
     audit = _art.audit(project)
     releases = _art.releases(project)
 
@@ -873,7 +949,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"decided by any artefact of this run"]
 
     if audit.errors or blockers:
-        return _refuse(audit, blockers, releases)
+        return _refuse(project, audit, blockers, releases)
 
     if not releases:
         # THE ARTEFACTS HAVE SUBSTANCE AND THERE IS NO SIGN-OFF LAYOUT TO NAME
@@ -901,6 +977,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         total_derived += derived
         total_holes += holes
         written_names.extend(str(p) for _, p in written)
+
+    # The documents exist, so any refusal record from an earlier run of this
+    # producer describes a state that is no longer true. See `_clear_refusal`.
+    _clear_refusal(project)
 
     print(f"[PASS] {GENERATOR} — {len(releases)} release(s), "
           f"{len(written_names)} document(s), "

@@ -14551,6 +14551,59 @@ def _waiver_step_name_mismatch(waiver: Dict[str, Any],
 # fork a gate subprocess, so we leave a core of headroom. `VIBE_IC_COMPLIANCE_
 # WORKERS` overrides (1 = the sequential fallback), mirroring the env-driven
 # `VIBE_IC_GATE_TIMEOUT_S` knob.
+#: Programs that read ANOTHER STEP's published verdict row (`reports/metrics/<sid>.json`).
+#: DERIVED from the tree, never tabled: a program is one of these if its source reads that
+#: directory and the step-status key. Today that is `release_docs_check` alone, and a new one
+#: is picked up without this line changing.
+def _reads_another_steps_verdict() -> "frozenset":
+    names = set()
+    _self = Path(__file__).stem
+    try:
+        for _f in sorted(PROGRAMS_DIR.glob("*.py")):
+            try:
+                _t = _f.read_text(errors="replace")
+            except OSError:                                # pragma: no cover
+                continue
+            # THE WRITER IS NOT A DEPENDENT READER. This module EMITS those rows, and its
+            # only read of the directory is `_emit_step_metrics`' no-clobber probe of the
+            # step it is emitting for -- never another step's. Without this exclusion the
+            # predicate named itself, and steps 2 and 14 (whose gates invoke it) were
+            # pushed into the second wave for no reason. Its thin wrappers
+            # (`stageN_compliance`) are excluded with it, for the same reason.
+            if _f.stem == _self:
+                continue
+            if re.search(r"^from\s+" + re.escape(_self) + r"\s+import\s+main\b",
+                         _t, re.M):
+                continue
+            if "reports/metrics" in _t and ("step_status" in _t
+                                            or "_STEP_STATUS" in _t):
+                names.add(_f.stem)
+    except OSError:                                        # pragma: no cover
+        return frozenset()
+    return frozenset(names)
+
+
+def steps_that_read_another_steps_verdict(steps: "List[Dict[str, Any]]") -> "List[str]":
+    """The step ids whose own gate invokes such a program. Public so a test can drive it.
+
+    These must be evaluated AFTER every other step, or what they see depends on the worker
+    pool. MEASURED on the shipped flow: exactly two, 37.5ip and 37.5ic, both through
+    `release_docs_check` -- so the other 68 keep full concurrency and this costs nothing.
+    """
+    readers = _reads_another_steps_verdict()
+    if not readers:
+        return []
+    out = []
+    for st in steps:
+        try:
+            names = {_gate_name(c) for c in _declared_gate_commands(st.get("gate") or {})}
+        except Exception:                                  # pragma: no cover
+            continue
+        if names & readers:
+            out.append(str(st.get("id")))
+    return out
+
+
 def _compliance_workers(n_steps: int) -> int:
     import os
     if n_steps <= 1:
@@ -15401,6 +15454,83 @@ def _collect_program_output_records(project: Path,
     return records
 
 
+#: Step verdicts that mean the step's own gate was NOT satisfied. Mirrors
+#: `release_docs_check._BLOCKING_STEP_STATUSES`, which is the reader of the record below; a
+#: step that PASSED has no complaint about any of its outputs.
+_NOT_SATISFIED_STATUSES = frozenset({"FAIL", "NOT_MEASURED", "BLOCKED", "INCOMPLETE"})
+
+
+def _emit_step_output_record(project: Path, step: Dict[str, Any],
+                             result: "StepResult") -> None:
+    """WHICH declared outputs this step's own gate found missing or unusable. R-0915-165.
+
+    The one fact no other record carries. `release_docs_check` excuses 37.5ic's missing release
+    documents when an UPSTREAM step is blocked, and until now it could not ask what that
+    blockage was ABOUT -- so step 33 publishing NOT_MEASURED because no power BUDGET was
+    declared excused 37.5ic's POWER_NO_TOTAL, a complaint about a file step 33 wrote exactly as
+    designed (`eda_report_audit`: "it carries no number of its own").
+
+    Written HERE, not plumbed through `StepResult`: `check_step` has nine return statements, and
+    a field set on some paths and not others is a record that lies on the paths it misses. The
+    set is a function of the declaration and the tree, so recomputing it AFTER the gate ran is
+    both correct and the moment that matters.
+
+    `missing` reuses `_check_files_exist`, the shipped resolver, one entry at a time -- so the
+    glob and `A OR B` shapes are read exactly as the step's own verdict read them, not by a
+    second spelling. `unusable` is an output that IS on disk and whose concrete path this step's
+    own gate NAMED while not being satisfied; measured on a geometry-less GDS,
+    `gds_substance_check` says `phase3/stage4/gds/zzdie.gds: [MALFORMED_RECORD] ...`, so the
+    path is there to match. A step that PASSED contributes nothing to either list.
+
+    Best-effort by construction: a record that failed to write must never move a verdict.
+    """
+    outputs = [o for o in (step.get("required_outputs") or []) if isinstance(o, str)]
+    try:
+        dest = _pl.step_output_record_path(project, step.get("id"))
+    except Exception:                                          # pragma: no cover
+        return
+    status = str(getattr(result, "status", "") or "")
+    reasons = " \n".join(str(r) for r in (getattr(result, "reasons", None) or []))
+    missing: List[str] = []
+    unusable: List[str] = []
+    for pat in outputs:
+        try:
+            _ok, _found, _miss = _check_files_exist(project, [pat], any_of=False)
+        except Exception:                                      # pragma: no cover
+            continue
+        if _miss:
+            missing.append(pat)
+            continue
+        if status in _NOT_SATISFIED_STATUSES and _found:
+            if any(str(h) and str(h) in reasons for h in _found):
+                unusable.append(pat)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
+        try:
+            _tmp.write_text(json.dumps({
+                "schema": 1,
+                "written_by": "flow_compliance_check",
+                "invocation": _invocation_id(),
+                "step": str(step.get("id")),
+                "status": status,
+                "declared": outputs,
+                "missing": sorted(missing),
+                "unusable": sorted(unusable),
+                "note": ("what THIS step's own gate found wanting among its declared "
+                         "outputs; a consumer asking whether an upstream blockage is about "
+                         "a given artefact reads these two lists and nothing else"),
+            }, indent=1) + "\n")
+            os.replace(_tmp, dest)
+        finally:
+            try:
+                _tmp.unlink(missing_ok=True)
+            except OSError:                                    # pragma: no cover
+                pass
+    except OSError:                                            # pragma: no cover
+        return
+
+
 def _emit_step_metrics(project: Path, step: Dict[str, Any],
                        result: "StepResult") -> None:
     """One flat metrics row per step, from the numbers the gate already wrote.
@@ -15442,7 +15572,15 @@ def _emit_step_metrics(project: Path, step: Dict[str, Any],
     # name they become `17__flow__verdict` twice and `emit`'s `prior.update`
     # lets the last writer win, so the gate's own measurement would be
     # silently replaced by a different quantity. Two instruments, two names.
-    metrics: Dict[str, Any] = {"step_status": getattr(result, "status", "")}
+    metrics: Dict[str, Any] = {"step_status": getattr(result, "status", ""),
+                               # WHICH INVOCATION MEASURED IT. R-0915-152. Without this a
+                               # reader cannot tell this run's verdict from the last run's
+                               # at the same path, and `release_docs_check` attributed
+                               # upstream blockage from a row a previous run wrote.
+                               "invocation": _invocation_id()}
+    #: THE WRAPPER'S OWN KEYS, which the no-clobber filter below must never protect from
+    #: the wrapper itself -- see the measurement in that filter's comment.
+    _own_keys = ("step_status", "invocation")
 
     # AND NOTHING ALREADY EMITTED IS OVERWRITTEN. A program that emitted for
     # this step measured something it stands behind; this wrapper forwards a
@@ -15482,8 +15620,21 @@ def _emit_step_metrics(project: Path, step: Dict[str, Any],
     if already:
         _sm_ = _sm
         _prefix = f"{_sm_.normalize_step(step.get('id'))}__"
+        # EXCEPT THE WRAPPER'S OWN, which it is the sole author of. The filter protects a
+        # PROGRAM's measurement from being replaced by this wrapper's forwarded value;
+        # applied to `step_status` it protected the wrapper from ITSELF, and because the key
+        # is already there from the previous pass, that FROZE it.
+        #
+        # MEASURED by driving this function twice over one project: pass 1 emits FAIL, pass
+        # 2 emits PASS, and the file still says FAIL. So a step that failed once read FAIL
+        # for the rest of that tree's life, and `release_docs_check` -- which takes upstream
+        # blockage from exactly this key -- reported BLOCKED_BY_UPSTREAM against a step that
+        # had since passed. There is no other author to defer to: nothing else emits
+        # `step_status`, which is why the comment above spells it that way and not
+        # `verdict`.
         metrics = {k: v for k, v in metrics.items()
-                   if not any(e.startswith(_prefix) and e.endswith(f"__{k}")
+                   if k in _own_keys
+                   or not any(e.startswith(_prefix) and e.endswith(f"__{k}")
                               for e in already)}
     # ONE NON-CONFORMING NAME MUST NOT COST THE WHOLE STEP'S METRICS.
     # `emit` validates every key and raises on the FIRST defect, before it
@@ -19732,28 +19883,49 @@ def main(argv: Optional[List[str]] = None) -> int:
                 strict_audit_evidence=strict_audit_evidence,
                 strict_step_binding=strict_step_binding)
             _emit_step_metrics(project, step, _r)
+            _emit_step_output_record(project, step, _r)
             results.append(_r)
     else:
         # Independent read-only gates → evaluate concurrently; collect the
         # futures in SUBMISSION order so `results` stays byte-for-byte the
         # same list the sequential path produced (see `_compliance_workers`).
-        with ThreadPoolExecutor(max_workers=_workers) as _ex:
-            _futs = [
-                _ex.submit(check_step, project, step, waivers,
-                           skip_analog=skip_analog,
-                           skip_hardware=skip_hardware,
-                           strict_audit_evidence=strict_audit_evidence,
-                           strict_step_binding=strict_step_binding)
-                for step in _eval_steps
-            ]
-            # THE SAME EMIT ON BOTH BRANCHES. A metrics row that appears only
-            # when the tree happens to run single-threaded is a row nobody can
-            # rely on for a run-to-run diff, and the branch taken is decided by
-            # `_compliance_workers` from the machine, not from the design.
-            for _step, _fut in zip(_eval_steps, _futs):
-                _r = _fut.result()
-                _emit_step_metrics(project, _step, _r)
-                results.append(_r)
+        #
+        # IN TWO WAVES, because not every gate IS independent. R-0915-160. A step whose gate
+        # reads ANOTHER step's published verdict row sees whatever the pool happened to have
+        # finished, so the sequential and parallel paths disagreed about its row -- which is
+        # the identity contract the comment above claims. MEASURED on the shipped flow: the
+        # dependent set is exactly two steps, 37.5ip and 37.5ic, both through
+        # `release_docs_check`, so 68 steps keep full concurrency and the second wave is two
+        # steps wide. `results` is rebuilt in the ORIGINAL order either way, so no consumer
+        # can tell which wave a row came from.
+        _dependent = set(steps_that_read_another_steps_verdict(_eval_steps))
+        _wave1 = [st for st in _eval_steps if str(st.get("id")) not in _dependent]
+        _wave2 = [st for st in _eval_steps if str(st.get("id")) in _dependent]
+        _by_id: Dict[str, Any] = {}
+        for _wave in (_wave1, _wave2):
+            if not _wave:
+                continue
+            with ThreadPoolExecutor(
+                    max_workers=max(1, min(_workers, len(_wave)))) as _ex:
+                _futs = [
+                    _ex.submit(check_step, project, step, waivers,
+                               skip_analog=skip_analog,
+                               skip_hardware=skip_hardware,
+                               strict_audit_evidence=strict_audit_evidence,
+                               strict_step_binding=strict_step_binding)
+                    for step in _wave
+                ]
+                # THE SAME EMIT ON BOTH BRANCHES. A metrics row that appears only
+                # when the tree happens to run single-threaded is a row nobody can
+                # rely on for a run-to-run diff, and the branch taken is decided by
+                # `_compliance_workers` from the machine, not from the design.
+                for _step, _fut in zip(_wave, _futs):
+                    _r = _fut.result()
+                    _emit_step_metrics(project, _step, _r)
+                    _emit_step_output_record(project, _step, _r)
+                    _by_id[str(_step.get("id"))] = _r
+        for _step in _eval_steps:
+            results.append(_by_id[str(_step.get("id"))])
 
     # v0.3.5 — ORGANIC #502/#503: cascade attribution AFTER all step
     # verdicts are final (waiver conversions included): waiver chains

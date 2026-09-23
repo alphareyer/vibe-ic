@@ -729,6 +729,37 @@ def report_path(project: Path, filename: str) -> Path:
     return reports_dir(project) / "audit" / filename
 
 
+#: THE AUDITOR'S PER-STEP OUTPUT RECORD. R-0915-165.
+#:
+#: One file per step, written by `flow_compliance_check` beside that step's metrics row, naming
+#: the declared outputs the step's OWN gate found `missing` or `unusable`, stamped with the
+#: invocation that measured them. It exists because no other record can answer "which artefact
+#: is this upstream verdict ABOUT":
+#:   * `reports/metrics/<sid>.json` cannot -- `step_metrics.emit` refuses a list, "the schema is
+#:     flat by design", and a path is not a valid key component;
+#:   * this run's compliance report cannot -- it is written after every step, and a step's gate
+#:     needs the answer while the run is still going;
+#:   * and the step folders' `outputs.json` must NEVER be trusted: it is a restatement of the
+#:     declaration and it LIES. Measured on a converged run, the step folders list 90 outputs and
+#:     7 of them -- steps 15, 17, 19, 20, 21, 22 and 34, every folder marked `"status": "pass"`
+#:     -- name a `rel` that does not exist in the run directory at all.
+#:
+#: It sits under `reports/audit/`, which the taxonomy whitelist below already allows, and which
+#: is the auditor's own directory. Declared here rather than spelled at the write site so the
+#: writer and `release_docs_check` cannot come to disagree about where it is.
+STEP_OUTPUT_RECORD_DIR: str = "reports/audit/step_outputs"
+
+
+def step_output_record_path(project: Path, sid) -> Path:
+    """The per-step output record for `sid`, named the way `step_metrics` names a step."""
+    try:
+        import step_metrics as _sm                          # noqa: PLC0415
+        name = _sm.normalize_step(sid)
+    except Exception:                                       # pragma: no cover
+        name = str(sid).replace(".", "_").lower()
+    return project / STEP_OUTPUT_RECORD_DIR / f"{name}.json"
+
+
 # Ordered list of valid reports/ children (for the taxonomy whitelist
 # gate). Anything else under reports/ is a violation.
 REPORTS_VALID_SUBDIRS: tuple = (

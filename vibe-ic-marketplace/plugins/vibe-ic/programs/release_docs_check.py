@@ -108,6 +108,7 @@ import argparse
 import ast
 import hashlib
 import json
+import os
 import re
 import sys
 from dataclasses import asdict, dataclass, field
@@ -115,6 +116,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import _ic_release_artefacts as _art
+import yaml
+
+import _flow_reason_taxonomy as _reason_taxonomy
+import _ic_release_artefacts as _art
+import tapeout_docs_gen as _tap
 import _vacuous_exit as _vx
 import digital_hardmacro_check as _hm
 from _atomic_artefact import write_text as atomic_write_text
@@ -1366,6 +1372,422 @@ def expected_releases(project: Path, arm: str) -> List[str]:
     return []
 
 
+#: The producer's own refusal record. R-0915-144, and the IC arm only, because
+#: `ic_release_docs_gen` is the producer that writes one.
+PRODUCER_REFUSAL_REL = "reports/phase3/release_docs_producer_refusal.json"
+
+
+#: Where the producer's metrics live, read through the SAME loader the producer and
+#: `tapeout_docs_gen` use. A second metrics reader would be a second answer to
+#: "what did this run measure".
+PRODUCER_METRICS_REL = "phase3/final/metrics.json"
+
+
+#: The metrics record the producer reads, and the flow step that DECLARES it.
+PRODUCER_METRICS_REL = "phase3/final/metrics.json"
+
+#: A step's own published verdict for THIS run lives here, keyed by the step id --
+#: `reports/metrics/<sid>.json` carrying `<sid>__flow__step_status`. That is the
+#: record `flow_compliance_check` writes for the step itself, which is why it is the
+#: right authority: it is the step's verdict, not another program's opinion of the
+#: step's files.
+_STEP_STATUS_REL_FMT = "reports/metrics/{sid}.json"
+_STEP_STATUS_KEY_FMT = "{sid}__flow__step_status"
+#: NOT a step's verdict: this reader's statement that it could not read one for this run.
+#: Deliberately outside `_BLOCKING_STEP_STATUSES` -- see `step_verdict_now`.
+_VERDICT_UNREADABLE = "UNREADABLE"
+
+#: A step's verdict counts as a BLOCKAGE only in these tiers. R-0915-140's shape.
+_BLOCKING_STEP_STATUSES = frozenset({"FAIL", "NOT_MEASURED", "BLOCKED",
+                                     "INCOMPLETE"})
+
+
+def _declaring_step(rel: str) -> Optional[str]:
+    """The flow step that DECLARES this path as a required_output, glob-aware.
+
+    DERIVED FROM THE FLOW, not tabled: a table mapping a refusal class to a step
+    goes stale the first time a step is renumbered, and this question already has an
+    answer in the flow definition. `reports/phase3/sta/post_route_summary.json` is
+    step 23's; `reports/phase3/power.json` is step 33's;
+    `phase3/stage4/gds/*.gds` is step 37's; `phase3/final/metrics.json` is 37.4's.
+    """
+    import fnmatch
+    try:
+        doc = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent
+             / "flow" / "phase1_phase2_phase3.yaml").read_text())
+    except (OSError, ValueError):                          # pragma: no cover
+        return None
+    for step in (doc or {}).get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        for declared in (step.get("required_outputs") or []):
+            for alt in str(declared).split(" OR "):
+                alt = alt.strip()
+                if not alt:
+                    continue
+                if alt == rel or fnmatch.fnmatch(rel, alt):
+                    return str(step.get("id"))
+    return None
+
+
+def _metrics_row(project: Path, sid: str) -> Tuple[Optional[dict], str, str]:
+    """`(row, normalised_sid, why_not)` for the step's metrics record.
+
+    THE NAME IS `step_metrics`' TO SPELL, not this reader's. R-0915-152.
+    `_STEP_STATUS_REL_FMT.format(sid=sid)` builds `reports/metrics/37.4.json`, and the file
+    `step_metrics.emit` actually writes is `reports/metrics/37_4.json` -- it normalises a
+    step id before using it as a filename or a key component. MEASURED across the ids this
+    flow uses:
+
+        23     -> 23        37.4   -> 37_4      0.5ic -> 0_5ic
+        33     -> 33        37.5ic -> 37_5ic    M1    -> m1
+
+    So every dotted or suffixed step -- and `M1`, which also lowercases -- was looked for at
+    a path nothing writes and under a key nothing emits: the verdict read ABSENT, which is
+    not in `_BLOCKING_STEP_STATUSES`, so an upstream step that had genuinely FAILED was
+    recorded as passing and 37.5ic took the blame for it. The normalisation is imported from
+    the module that owns it rather than reproduced here, so the two cannot drift.
+    """
+    try:
+        import step_metrics as _sm                          # noqa: PLC0415
+        sid_n = _sm.normalize_step(sid)
+        rel = f"{_sm.METRICS_REL}/{sid_n}.json"
+    except Exception:                                       # pragma: no cover
+        sid_n, rel = sid, _STEP_STATUS_REL_FMT.format(sid=sid)
+    path = project / rel
+    try:
+        doc = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None, sid_n, f"no step record at {rel}"
+    if not isinstance(doc, dict):
+        return None, sid_n, f"{rel} is not an object"
+    return doc, sid_n, ""
+
+
+def _artefact_present(project: Path, rel: str) -> bool:
+    """Did the run leave this declared artefact on disk?
+
+    NOT USED TO DECIDE AN EXCUSE, and the reason is measured -- see the note on
+    `upstream_blockage_now`. Kept because it is the correct spec-shape reader and the question
+    "did the step produce it at all" is one a reader of this gate's record will want.
+
+    Glob- and `A OR B`-aware, because that is the shape `required_outputs` uses, and
+    permissive in the same direction as `flow_declared_producer_run._glob_exists`: a false NO
+    grants an excuse that was not earned, so anything that matches counts as produced.
+    """
+    if not rel:
+        return False
+    for alt in (a.strip() for a in str(rel).split(" OR ")):
+        if not alt:
+            continue
+        if any(ch in alt for ch in "*?["):
+            try:
+                if next(iter(Path(project).glob(alt)), None) is not None:
+                    return True
+            except (OSError, ValueError):
+                continue
+        elif (Path(project) / alt).exists():
+            return True
+    return False
+
+
+def _entry_covers(entry: str, rel: str) -> bool:
+    """Does a declared-output ENTRY cover the artefact path `rel`?
+
+    Same matching `_declaring_step` uses to find the entry in the first place -- `A OR B` split
+    then fnmatch -- because the record holds DECLARATION patterns
+    (`phase3/stage4/gds/*.gds`) while the producer names the concrete file it read
+    (`phase3/stage4/gds/zzdie.gds`). Two spellings of one match is how they come to disagree.
+    """
+    import fnmatch                                           # noqa: PLC0415
+    for alt in (a.strip() for a in str(entry).split(" OR ")):
+        if not alt:
+            continue
+        if alt == rel or fnmatch.fnmatch(rel, alt) or fnmatch.fnmatch(alt, rel):
+            return True
+    return False
+
+
+def upstream_blockage_is_about(project: Path, sid: str, rel: str) -> Tuple[bool, str]:
+    """`(is_about, why)` -- does step `sid`'s own record name `rel` as missing or unusable?
+
+    R-0915-165, and it is the condition that was missing. The upstream step's VERDICT stays the
+    authority (R-0915-149); this asks the separate question the verdict cannot answer, which is
+    what that verdict is ABOUT.
+
+    FAILS CLOSED, deliberately. No record, a record from another invocation, or a record naming
+    neither list -> NOT about this artefact, so no excuse. That is the direction
+    `test_a_step_with_no_published_verdict_is_not_an_excuse` already rules: "no evidence" must
+    never read as "blocked".
+
+    The step folders' `outputs.json` is NEVER consulted. It is a restatement of the declaration
+    and it lies -- measured on a converged run, 7 of 90 entries, every folder marked
+    `"status": "pass"`, name a `rel` that does not exist in the run directory.
+    """
+    try:
+        import _path_layout as _pl_                          # noqa: PLC0415
+        rec_path = _pl_.step_output_record_path(project, sid)
+    except Exception:                                        # pragma: no cover
+        return False, f"the per-step output record path for step {sid} is unresolvable"
+    try:
+        rec = json.loads(rec_path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return False, (
+            f"step {sid} published no per-step output record in this run, so what its "
+            f"blockage is about cannot be read; no record, no excuse")
+    if not isinstance(rec, dict):
+        return False, f"step {sid}'s output record is not an object"
+    mine = os.environ.get("VIBEIC_FCC_INVOCATION", "").strip()
+    wrote = str(rec.get("invocation") or "").strip()
+    if mine and wrote and wrote != mine:
+        return False, (
+            f"step {sid}'s output record was written by invocation {wrote}, not this one "
+            f"({mine}), so it describes an earlier run")
+    for field_ in ("missing", "unusable"):
+        for entry in (rec.get(field_) or []):
+            if isinstance(entry, str) and _entry_covers(entry, rel):
+                return True, (
+                    f"step {sid}'s own gate reported {entry} as {field_}, which covers "
+                    f"{rel}")
+    return False, (
+        f"step {sid} is blocked, but its own record names {rel} in neither `missing` nor "
+        f"`unusable` -- so its blockage is not about the artefact this release needed")
+
+
+def step_verdict_now(project: Path, sid: str) -> Tuple[str, str]:
+    """The step's OWN published verdict IN THIS RUN, or why it cannot be read.
+
+    "IN THIS RUN" is the part that was missing, and it is the difference between a
+    measurement and a leftover. `reports/metrics/<sid>.json` persists across runs, so a row
+    written by an EARLIER run reads exactly like this one's -- and a step that failed once
+    then excused 37.5ic's missing documents on every later run, however well that step went
+    afterwards. Two separate defects fed it:
+
+      * `_emit_step_metrics` could not refresh its OWN `step_status`, because its
+        no-clobber filter -- written to stop the wrapper overwriting a PROGRAM's
+        measurement -- also stopped it overwriting the wrapper's previous value. Fixed at
+        the source, with its own arm.
+      * and nothing in the row said WHICH invocation measured it. It does now, and this
+        reader requires it to be the invocation the audit spawned it from
+        (`VIBEIC_FCC_INVOCATION`, inherited through the environment exactly as the gate
+        child inherits its role).
+
+    A row from another invocation, or one with no invocation at all, is NOT this run's
+    verdict. It is reported as `UNREADABLE`, WITH the reason, and `UNREADABLE` IS ITS OWN
+    TIER: deliberately not `NOT_MEASURED`, and deliberately not blocking.
+
+    WHY NOT `NOT_MEASURED`, WHICH IS WHAT A READER WOULD EXPECT. `NOT_MEASURED` is one of
+    `_BLOCKING_STEP_STATUSES` -- a tier a step publishes ABOUT ITSELF, having measured and
+    refused, and that genuinely blocks. "I could not read this step's verdict" is a
+    different statement, made by this reader about its own evidence, and folding the two
+    together would make an unreadable record an EXCUSE: delete every
+    `reports/metrics/*.json` and 37.5ic's missing documents are forgiven for ever. That
+    inverts the ruling `test_a_step_with_no_published_verdict_is_not_an_excuse` already
+    holds -- "a step that has published NOTHING in this run has no verdict, so there is no
+    evidence of blockage and the documents are still owed; 'no evidence' must never read as
+    'blocked'". So `UNREADABLE` does not excuse, and it is NAMED in
+    `upstream_verdicts_unreadable` so that a reader can see the gap rather than infer it
+    from silence. That is the whole change: absence was silently PASSING before, and now it
+    is silently nothing but said out loud.
+
+    THE THREADED PATH IS THE SAME ANSWER. When steps are evaluated concurrently an upstream
+    step's row may legitimately not exist yet when this gate runs -- neither evidence that
+    it failed nor that it passed. `UNREADABLE`, disclosed, absence named.
+    """
+    doc, sid_n, why = _metrics_row(project, sid)
+    if doc is None:
+        return _VERDICT_UNREADABLE, why
+    mine = os.environ.get("VIBEIC_FCC_INVOCATION", "").strip()
+    wrote = str(doc.get(f"{sid_n}__flow__invocation") or "").strip()
+    if mine and wrote and wrote != mine:
+        return _VERDICT_UNREADABLE, (
+            f"reports/metrics/{sid_n}.json records step {sid}'s verdict from invocation "
+            f"{wrote}, not this one ({mine}), so it describes an earlier run")
+    if mine and not wrote:
+        return _VERDICT_UNREADABLE, (
+            f"reports/metrics/{sid_n}.json names no invocation, so it cannot be shown to "
+            f"be this run's measurement of step {sid}")
+    status = doc.get(f"{sid_n}__flow__step_status")
+    if status:
+        return str(status).strip().upper(), ""
+    # Some steps publish measurements and a `passed` flag instead of a status word.
+    passed = doc.get(f"{sid_n}__flow__passed")
+    if isinstance(passed, bool):
+        return ("PASS" if passed else "FAIL"), ""
+    return _VERDICT_UNREADABLE, (
+        f"reports/metrics/{sid_n}.json carries no status for step {sid}")
+
+
+def upstream_blockage_now(project: Path, release: str) -> dict:
+    """Is THIS release's upstream blocked — judged by the upstream STEP's own verdict?
+
+    R-0915-146 established that the producer's RECORD is not evidence: a program's
+    claim about a state is not the state. R-0915-149 fixes what I replaced it with.
+
+    RE-DERIVING THE PRODUCER'S PREDICATES WAS THE WRONG AUTHORITY, and a review
+    caught it with the one measurement that settles it: the flow's OWN healthy
+    records do not satisfy those predicates. The runner's `reports/phase3/power.json`
+    carries no number BY DESIGN (`eda_report_audit`: "It carries no number of its
+    own"), and step 23's `post_route_summary.json` carries the BOOL `has_wns_tns`,
+    which the producer's number scan skips. So on every real tree that reaches steps
+    23 and 33 the predicates answered STA_NO_SLACK + POWER_NO_TOTAL, the producer
+    refused, and my gate reported BLOCKED_BY_UPSTREAM -- blaming two steps whose OWN
+    gates PASS on those same files. My "healthy" fixture passed only because it wrote
+    no STA or power file at all: a fixture that avoided the defect instead of
+    exercising it.
+
+    "The release-docs reader cannot digest the declared format" is 37.5ic's OWN
+    defect, and it is a FAIL. It is not upstream blockage.
+
+    SO THE AUTHORITY IS THE UPSTREAM STEP. The producer's findings are used ONLY to
+    NAME which artefacts are at issue; each artefact's DECLARING step comes from the
+    flow; and that step's own published verdict for this run decides. A step that
+    PASSES can never be the excuse for missing documents, however loudly another
+    program complains about its files.
+    """
+    named: List[dict] = []
+    try:
+        audit = _art.audit(project, release)
+        for f in (audit.errors or []):
+            named.append({"rule": getattr(f, "rule", ""),
+                          "path": str(getattr(f, "path", "") or ""),
+                          "detail": f.line()})
+    except Exception as exc:                               # pragma: no cover
+        return {"release": release, "blocked": False, "named": [],
+                "blocking_steps": {}, "unattributed": [],
+                "note": f"the artefact reader raised: "
+                        f"{exc.__class__.__name__}: {exc}"}
+    try:
+        metrics = _tap.load_metrics(project / PRODUCER_METRICS_REL)
+        for b in (_tap.release_blockers(metrics) if metrics else []):
+            named.append({"rule": "RELEASE_BLOCKER", "path": PRODUCER_METRICS_REL,
+                          "detail": str(b)})
+        if not metrics:
+            named.append({"rule": "METRICS_ABSENT", "path": PRODUCER_METRICS_REL,
+                          "detail": f"{PRODUCER_METRICS_REL}: absent or unreadable"})
+    except Exception as exc:                               # pragma: no cover
+        named.append({"rule": "METRICS_UNREADABLE", "path": PRODUCER_METRICS_REL,
+                      "detail": f"{exc.__class__.__name__}: {exc}"})
+
+    # WHY THE EXCUSE IS NOT SCOPED TO THE ARTEFACT, though it should be. R-0915-160, and
+    # this is a MEASURED refusal rather than an omission.
+    #
+    # The ruling asks that an upstream step excuse this one only when its blockage is ABOUT
+    # the artefact this step needed -- i.e. when the upstream verdict NAMES that artefact as
+    # missing or not produced. There is nothing on disk at gate time that says which artefact
+    # an upstream verdict is about: `reports/metrics/<sid>.json` carries SCALARS, and this
+    # run's compliance report is not written until after every step.
+    #
+    # I tried "did the upstream step PRODUCE the artefact" as a proxy, and the tree refuted it.
+    # Two shapes are indistinguishable by presence, and they need OPPOSITE answers:
+    #
+    #   step 37 FAIL, `phase3/stage4/gds/*.gds` PRESENT but carrying no geometry
+    #       -> the step's failure IS about that artefact; it must excuse, and
+    #          `test_a_step_that_published_not_measured_is_a_blockage` and three of its
+    #          neighbours hold exactly that.
+    #   step 33 NOT_MEASURED for "no power budget declared", `reports/phase3/power.json`
+    #   PRESENT and carrying no number BY DESIGN (`eda_report_audit`: "it carries no number
+    #   of its own")
+    #       -> the complaint is about that file's CONTENT, which R-0915-149 already ruled is
+    #          this step's own defect, so it must NOT excuse.
+    #
+    # Both are "blocking tier + artefact present". Only the upstream verdict's REASON
+    # separates them, and no step publishes one per artefact. Scoping the excuse therefore
+    # needs a producer change first -- each step recording which of its declared outputs its
+    # own gate found missing or unusable -- and that is a separate ruling. Reported rather
+    # than approximated: a proxy that reverses four accepted arms is not a narrower rule, it
+    # is a different and wrong one.
+    blocking: dict = {}
+    passing: dict = {}
+    unreadable: dict = {}
+    not_about: dict = {}
+    unattributed: List[str] = []
+    for item in named:
+        sid = _declaring_step(item["path"]) if item["path"] else None
+        if sid is None:
+            # Nothing in the flow declares this path, so no step owns it and no
+            # step's verdict can excuse anything. Named, never absorbed.
+            unattributed.append(item["detail"])
+            continue
+        status, why = step_verdict_now(project, sid)
+        # WHETHER THE VERDICT WAS READ, beside the verdict. R-0915-152. `NOT_MEASURED` is a
+        # blocking tier (R-0915-140), so an UNREADABLE upstream record excuses this step's
+        # missing documents -- which is the right direction, since a step that cannot be
+        # shown to have passed cannot be the thing that should have produced them. But an
+        # excuse nobody can see the basis of is the defect this whole gate exists to
+        # correct, so each entry says whether its verdict was measured or merely unreadable,
+        # and the unreadable ones are collected under their own name below.
+        entry = {"status": status, "why": why, "because": item["detail"],
+                 "artefact": item["path"], "verdict_readable": not why}
+        if status == _VERDICT_UNREADABLE:
+            # Its own bucket: not a blockage, and not recorded as the step passing either.
+            unreadable[sid] = dict(entry, reason=why)
+            continue
+        if status in _BLOCKING_STEP_STATUSES:
+            _about, _about_why = upstream_blockage_is_about(project, sid, item["path"])
+            entry["blockage_is_about_this_artefact"] = _about
+            entry["about_why"] = _about_why
+            if _about:
+                blocking[sid] = entry
+            else:
+                not_about[sid] = entry
+        else:
+            passing[sid] = entry
+    return {"release": release,
+            "blocked": bool(blocking),
+            "named": [i["detail"] for i in named],
+            "blocking_steps": blocking,
+            "upstream_steps_passing": passing,
+            # EVERY STEP WHOSE VERDICT COULD NOT BE READ IN THIS RUN, by name and reason:
+            # an absent row, one from another invocation, or one that names none. A reader
+            # holding this record can tell an excuse founded on a measurement from one
+            # founded on a gap.
+            "upstream_verdicts_unreadable": unreadable,
+            # BLOCKED, BUT NOT ABOUT WHAT THIS RELEASE NEEDED. R-0915-165. An excuse WITHHELD
+            # has to be as visible as one granted, each with the reason read off the upstream
+            # step's own output record.
+            "upstream_blocked_but_not_about_the_artefact": not_about,
+            "unattributed": unattributed}
+
+
+def producer_refusal(project: Path) -> Optional[dict]:
+    """The producer's stated refusal, or None.
+
+    WHY THIS EXISTS. MEASURED on spm run22: `ic_release_docs_gen` RAN (2.26 s,
+    rc 1) and declined to write any document, because
+    `reports/phase3/sta/post_route_summary.json` carried no slack number anywhere
+    and `reports/phase3/power.json` carried no power number -- and it said so, in
+    those words, with the right reason ("a release document for a run that did not
+    pass is worse than no document"). This gate could read NEITHER the producer's
+    log nor the orchestrator report, so it published
+    FAIL / RELEASE_DOCUMENTATION_ABSENT: true, and readable as "nobody wrote them".
+
+    A producer's refusal is an UPSTREAM fact about this run, not a documentation
+    defect. Read strictly: a document that is unreadable, is not this producer's,
+    or does not say REFUSED is not a refusal, and the FAIL below stands.
+    """
+    try:
+        doc = json.loads((project / PRODUCER_REFUSAL_REL).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    if str(doc.get("program") or "") != "ic_release_docs_gen":
+        return None
+    if str(doc.get("verdict") or "").strip().upper() != "REFUSED":
+        return None
+    reasons = [str(x) for x in (doc.get("substance_refusals") or [])]
+    reasons += [str(x) for x in (doc.get("release_blockers") or [])]
+    if not reasons:
+        # A refusal that names no reason is not evidence of an upstream cause;
+        # crediting it would be exactly the "trust the callee's word" this repo
+        # refuses elsewhere.
+        return None
+    doc["_reasons"] = reasons
+    return doc
+
+
 def run_audit(project: Path, arm: str) -> Result:
     result = Result()
     root = project / doc_dir(arm)
@@ -1432,6 +1854,78 @@ def run_audit(project: Path, arm: str) -> Result:
         details.append(detail)
 
     failed = [d["release"] for d in details if not d["pass"]]
+
+    # R-0915-144 — A PRODUCER'S STATED REFUSAL IS AN UPSTREAM FACT.
+    #
+    # Only when EVERY error this gate found is the absence of the document set,
+    # and the producer recorded why it declined to write it. A release that HAS
+    # documents and fails on their content is a documentation defect and stays a
+    # FAIL; so does an absence with no refusal record, which is the case this
+    # gate was written for. The refusal is not a waiver and nothing here becomes
+    # a pass: the row is NOT_MEASURED with `reason_class BLOCKED_BY_UPSTREAM`,
+    # which `_flow_reason_taxonomy` holds in `INCOMPLETE` -- not in
+    # `SKIP_ELIGIBLE` -- so the step cannot be read as satisfied.
+    # RE-DERIVED, PER RELEASE, ON THE CURRENT FILES. The record is a pointer only.
+    only_absent = bool(result.findings) and all(
+        f.rule == "RELEASE_DOCUMENTATION_ABSENT" for f in result.findings)
+    blockage = {}
+    if failed and arm == "ic":
+        blockage = {rel: upstream_blockage_now(project, rel) for rel in failed}
+    # THE PRODUCER'S OWN SCOPE, R-0915-149 / F2. `ic_release_docs_gen` audits the
+    # WHOLE RUN and writes NOTHING when any artefact class refuses, so judging per
+    # release asked a question the producer never answers: with release `b` hollow,
+    # release `a`'s documents cannot be written either, and reporting `a` as "carries
+    # no release documentation" blamed `a` for `b`'s breakage. My previous arm pinned
+    # exactly that, and it was wrong.
+    #
+    # So one blocking upstream STEP anywhere blocks the run's documents -- and every
+    # excused release NAMES the step and the artefact that blocked it, so nothing is
+    # excused anonymously.
+    _all_blocking: dict = {}
+    for _rel, _b in blockage.items():
+        for _sid, _entry in (_b.get("blocking_steps") or {}).items():
+            _all_blocking.setdefault(_sid, dict(_entry, release=_rel))
+    for _b in blockage.values():
+        _b["blocked_by"] = {sid: e for sid, e in _all_blocking.items()}
+    all_blocked = bool(_all_blocking)
+    refusal = producer_refusal(project) if (failed and arm == "ic") else None
+    if all_blocked and only_absent:
+        result.passed = False
+        result.verdict_tier = "NOT_MEASURED"
+        result.summary = {
+            "skipped": False,
+            "reason": "release_docs_upstream_blocked",
+            "reason_class": _reason_taxonomy.BLOCKED_BY_UPSTREAM,
+            "arm": arm,
+            "documentation_root": root.as_posix(),
+            "documentation_root_exists": root.is_dir(),
+            "expected_releases": expected,
+            "releases_examined": len(details),
+            "failed": failed,
+            # WHAT WAS OBSERVED NOW, per release — the evidence.
+            "upstream_blockage": blockage,
+            # WHICH upstream steps blocked this run's documents, by their OWN
+            # published verdict, and which artefact named each one.
+            "blocking_steps": _all_blocking,
+            "producer_refusals": sorted({
+                str(e.get("because")) for e in _all_blocking.values()}),
+            # THE RECORD, IF ANY — a POINTER for a reader, never the evidence. A
+            # verdict that rested on it is the defect R-0915-146 closed.
+            "producer": (str(refusal.get("program")) if refusal else None),
+            "producer_refusal": (PRODUCER_REFUSAL_REL if refusal else None),
+            "producer_refusal_is_evidence": False,
+            "rows_examined": sum(d["rows_examined"] for d in details),
+            "derived_fields": sum(d["derived_fields"] for d in details),
+            "not_measured_fields": sum(
+                d["not_measured_fields"] for d in details),
+            "same_source_count_comparisons": sum(
+                d["same_source_count_comparisons"] for d in details),
+            "releases": details,
+            "verdict_tier": "NOT_MEASURED",
+            "pass": False,
+        }
+        return result
+
     result.passed = not failed
     result.verdict_tier = "PASS" if result.passed else "FAIL"
     result.summary = {
@@ -1496,6 +1990,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         if finding.severity in ("ERROR", "WARNING"):
             print(f"  [{finding.severity}] {finding.rule} "
                   f"({finding.release}): {finding.message}")
+
+    # R-0915-144 — THE NON-VERDICT EXIT, and deliberately NOT the vacuous
+    # announcement. `announce_vacuous` prints the VACUOUS_PASS sentinel, which the
+    # audit promotes to a PASS tier; an upstream-blocked step is not a pass. rc 2
+    # carries "this is not a verdict" and the report's own
+    # `reason_class = BLOCKED_BY_UPSTREAM` decides which non-verdict it is --
+    # `_flow_reason_taxonomy` holds that class in INCOMPLETE, never in
+    # SKIP_ELIGIBLE, so the row lands as NOT_MEASURED and the step stays owed.
+    if (str(result.summary.get("reason_class") or "")
+            == _reason_taxonomy.BLOCKED_BY_UPSTREAM):
+        print(f"  NOT MEASURED — this gate RE-DERIVED the upstream state of "
+              f"{sorted(result.summary.get('upstream_blockage') or {})} from the "
+              f"current files and every failing release is blocked now, so the "
+              f"absence is not a documentation defect. The producer's own record "
+              f"({result.summary.get('producer_refusal') or 'absent'}) is a "
+              f"pointer, not the evidence:", file=sys.stderr)
+        for why in result.summary.get("producer_refusals") or []:
+            print(f"    - {why}", file=sys.stderr)
+        return _vx.RC_VACUOUS
 
     if result.passed and skipped:
         _vx.announce_vacuous(GATE, reason)
