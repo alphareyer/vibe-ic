@@ -907,10 +907,18 @@ SELF_CERTIFYING_AUDIT_PROBE: Dict[str, Tuple[str, ...]] = {
     #     and the audit no longer leaves the file behind on this root
     #     (measured: absent from the after-list). Not endorsed as fixed:
     #     "the audit did not create it here" is the whole of what was measured.
+    #
+    # 2026-09-24 (R-0924-4; R-0915-141, the step-38 half, lane ictier1) --
+    # "2::reports/phase1/gates/stage_phase1_compliance.json" LEFT the set.
+    # Step 2 no longer DECLARES that path: it is the --json verdict target of
+    # step 2's own nested `flow_compliance_check --stage-id stage_phase1`
+    # clause, which still runs and still writes it, so the audit still creates
+    # the FILE on this root -- but it is no longer any step's required_output,
+    # and this probe counts only declared outputs. A strict shrink by a ruled
+    # removal of the declaration, not a relaxed match; nothing joined.
     "benchmark-data/ic/spm/v1.10.18_sky130A": (
         "14::reports/analog/stage_analog_compliance.json",
         "25::reports/phase3/em_current_authority.json",
-        "2::reports/phase1/gates/stage_phase1_compliance.json",
         "37::reports/phase3/gates/stage3_compliance.json",
     ),
     # THE CONTROL the rows above always promised: "a run published AFTER the
