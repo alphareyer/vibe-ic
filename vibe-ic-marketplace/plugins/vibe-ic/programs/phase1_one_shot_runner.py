@@ -1352,6 +1352,39 @@ def run_second_pass_only(project: Path, ic_name: str) -> int:
         if not isinstance(summary, dict):
             raise ValueError("phase1_one_shot.json top level is not an object")
         carried = True
+        # R-0915-160 — CARRY THE COVERAGE-ONLY SIDECAR'S IDENTITY WITH THE RECORD IT BELONGS TO.
+        #
+        # `#505`'s sidecar (`reports/phase1/phase1_exit_reason.json`) says a phase-1 failure was
+        # PURELY doc-coverage, which the front door uses to demote instead of halting. The front
+        # door checks that sidecar against THIS invocation's phase-1 start -- correct for a first
+        # pass, wrong for this one: the expert second pass carries pass 1's record forward and
+        # never rewrites the sidecar, so on an AI-backup re-invocation the sidecar is older than
+        # the phase start and the demotion was refused. A `--skip-phase3` coverage-only project
+        # that was PASS_WITH_WAIVERS flipped to FAIL and halted at phase 1, where main demoted and
+        # continued.
+        #
+        # So the record NAMES the sidecar, by content, and the front door verifies that name --
+        # judging the sidecar against the record it belongs to rather than against a clock. The
+        # sidecar is carried ONLY if it is at least as new as that record: one older than its own
+        # pass-1 record describes a still earlier run and stays refused, which is the half of the
+        # rule that keeps this from being a way to launder a stale file.
+        try:
+            _side_rel = "reports/phase1/phase1_exit_reason.json"
+            _side = project / _side_rel
+            _rec_mtime = _read_from.stat().st_mtime
+            if _side.is_file() and _side.stat().st_mtime >= _rec_mtime:
+                import hashlib as _hashlib                  # noqa: PLC0415
+                summary["pass1_coverage_sidecar"] = {
+                    "rel": _side_rel,
+                    "sha256": _hashlib.sha256(_side.read_bytes()).hexdigest(),
+                    "carried_with_record_mtime": _rec_mtime,
+                }
+            elif _side.is_file():
+                summary["pass1_coverage_sidecar_refused"] = (
+                    f"{_side_rel} is OLDER than the pass-1 record it would belong to, so it "
+                    f"describes a still earlier run and is not carried")
+        except OSError:                                     # pragma: no cover
+            pass
         if _read_legacy:
             summary["pass1_record_read_from"] = str(
                 _read_from.relative_to(project))

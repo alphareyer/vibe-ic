@@ -33,6 +33,8 @@ L4  ONE IMPLEMENTATION. `vibe_ic_entry_guard` re-derived the verdict with its ow
 from __future__ import annotations
 
 import json
+import time
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -915,3 +917,82 @@ def test_the_split_turns_on_the_exit_status_and_nothing_else(project):
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps({"verdict": "PASS"}) + "\n")
     assert V._row_verdict(project, "phase1_one_shot.json", 2, 0.0, "phase1")[0] == "PASS"
+
+
+# ── the RE-RUN cases (R-0915-160 second cut) ─────────────────────────────────
+
+def _stale(path: Path, payload: dict, age_s: float = 9999.0) -> Path:
+    """A report on disk from an EARLIER run: written, then back-dated."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload) + "\n")
+    old = time.time() - age_s
+    os.utime(path, (old, old))
+    return path
+
+
+def test_a_phase_that_crashed_over_a_stale_report_is_a_fail_and_halts(project,
+                                                                     monkeypatch):
+    """(1) THE RE-RUN CASE, and the one that matters most.
+
+    R-0915-151 moved phase 1's producer onto the routed path this reader reads, so on EVERY
+    re-run a report is already sitting there. A phase-1 crash after the L documents are written --
+    the oracle-leak `SystemExit(2)`, or a killed expert second pass at rc 137 -- then found the
+    file present and stale, and my first cut answered NOT_MEASURED while ignoring rc. NOT_MEASURED
+    does not halt, so phases 2 and 3 ran on oracle-contaminated documents.
+    """
+    _stale(_pl.report_path(project, "phase1_one_shot.json"),
+           {"verdict": "PASS", "from": "an earlier run"})
+
+    def fake_run_phase(label, runner, args, env=None):
+        if "phase1" in runner.name:
+            return 2                       # the leak guard's exit; writes nothing NEW
+        _report(project, "phase2_one_shot.json", {"verdict": "PASS"})
+        return 0
+
+    monkeypatch.setattr(V, "_run_phase", fake_run_phase)
+    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k: (True, "docs"))
+    monkeypatch.setattr(sys, "argv", ["vibe_ic_one_shot_runner", str(project),
+                                      "--no-dashboard", "--skip-hardware",
+                                      "--skip-phase3"])
+    rc = V.main()
+    doc = json.loads(_pl.report_path(project, "vibe_ic_one_shot.json").read_text())
+    rows = {r["name"]: r["verdict"] for r in doc["phases"]}
+
+    assert rows.get("phase1") == "FAIL", (rows, doc.get("advisories"))
+    assert doc.get("halted_at") == "phase1", (
+        f"the run did not halt, so phases 2/3 would build on whatever phase 1 left: "
+        f"halted_at={doc.get('halted_at')!r}")
+    assert rc != 0
+    # and the stale report's verdict was never read
+    assert doc["verdict"] != "PASS", doc["verdict"]
+    assert rows.get("phase2") in (None, "NOT_RUN", "SKIPPED"), rows
+
+
+@pytest.mark.parametrize("rc", [1, 2, 3, 137])
+def test_the_class_is_the_same_fresh_or_re_run(project, rc):
+    """(1b) ONE CLASS FOR EVERY NON-ZERO rc, INCLUDING THE STALL.
+
+    It used to be FAIL on a fresh project and NOT_MEASURED on a re-run -- two answers to one
+    question. MEASURED, every non-zero rc a phase runner in this tree returns is a refusal or an
+    error and none is benign: rc 2 is "not a directory", an uncaught exception, or "REFUSED:
+    canonical Phase-3 admission"; rc 3 refuses a second concurrent run. So FAIL on both paths.
+    """
+    now = time.time()
+    fresh_answer = V._row_verdict(project, "phase1_one_shot.json", rc, now, "phase1")
+    _stale(_pl.report_path(project, "phase1_one_shot.json"), {"verdict": "PASS"})
+    rerun_answer = V._row_verdict(project, "phase1_one_shot.json", rc, now, "phase1")
+
+    assert fresh_answer[0] == "FAIL", (rc, fresh_answer)
+    assert rerun_answer[0] == "FAIL", (rc, rerun_answer)
+    assert str(rc) in (rerun_answer[1] or ""), rerun_answer[1]
+    assert "earlier run" in (rerun_answer[1] or ""), rerun_answer[1]
+
+
+def test_rc_zero_over_a_stale_report_is_still_not_measured(project):
+    """The half that must NOT move: exit 0 and no report OF ITS OWN is an absence, not a pass,
+    and the stale file's verdict is never read."""
+    _stale(_pl.report_path(project, "phase1_one_shot.json"), {"verdict": "PASS"})
+    verdict, why = V._row_verdict(project, "phase1_one_shot.json", 0, time.time(), "phase1")
+    assert verdict == "NOT_MEASURED", (verdict, why)
+    assert "describes an earlier run" in (why or ""), why
+    assert "verdict is not read" in (why or ""), why

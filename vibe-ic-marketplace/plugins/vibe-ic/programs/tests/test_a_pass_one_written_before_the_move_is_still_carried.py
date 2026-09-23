@@ -206,3 +206,116 @@ def test_a_second_pass_over_a_routed_project_says_nothing_about_legacy(tmp_path,
     doc = json.loads(routed.read_text())
     assert doc.get("pass1_marker") == "routed"
     assert "pass1_record_layout" not in doc, doc.get("pass1_record_layout")
+
+
+# ── (2) the D1 re-invocation's coverage-only sidecar ─────────────────────────
+
+SIDECAR_REL = "reports/phase1/phase1_exit_reason.json"
+
+
+def _coverage_only_project(tmp_path: Path, *, sidecar_newer: bool = True) -> Path:
+    """A project as an AI-backup re-invocation finds it: pass 1 recorded, sidecar beside it."""
+    import os
+    import time
+
+    p = tmp_path / "proj"
+    (p / "input").mkdir(parents=True)
+    (p / "input" / "spec.md").write_text("# a counter\n")
+
+    record = _pl.report_path(p, NAME)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({
+        "phase": 1, "mode": "docs", "verdict": "FAIL",
+        "steps": [{"name": "doc_extract", "status": "FAIL"}],
+    }) + "\n")
+
+    side = p / SIDECAR_REL
+    side.parent.mkdir(parents=True, exist_ok=True)
+    side.write_text(json.dumps({"coverage_only_failure": True}) + "\n")
+
+    # the record is back-dated so both files predate any later invocation's phase start;
+    # `sidecar_newer` decides whether the sidecar belongs to THAT record or to an older one.
+    base = time.time() - 5000
+    os.utime(record, (base, base))
+    os.utime(side, (base + 10, base + 10) if sidecar_newer else (base - 10, base - 10))
+    return p
+
+
+def test_the_second_pass_names_the_coverage_sidecar_it_carried(tmp_path, monkeypatch):
+    """The second pass must hand the sidecar's identity forward with the record.
+
+    `run_second_pass_only` carries pass 1's record and never rewrites the sidecar, so the front
+    door's mtime rule -- correct for a first pass -- refused it on a re-invocation and a
+    `--skip-phase3` coverage-only project flipped from PASS_WITH_WAIVERS to FAIL. The record now
+    NAMES the sidecar by content.
+    """
+    import phase1_one_shot_runner as P1
+
+    project = _coverage_only_project(tmp_path)
+    monkeypatch.setattr(P1._pl, "emit_steps_view", lambda *a, **k: {"stubbed": True},
+                        raising=False)
+    monkeypatch.setattr(P1, "_consume_expert_answer",
+                        lambda *a, **k: (0, {"consumed": True}), raising=False)
+    P1.run_second_pass_only(project, "zzdie")
+
+    doc = json.loads(_pl.report_path(project, NAME).read_text())
+    named = doc.get("pass1_coverage_sidecar")
+    assert isinstance(named, dict), doc.get("pass1_coverage_sidecar_refused") or doc.keys()
+    assert named["rel"] == SIDECAR_REL
+    import hashlib
+    assert named["sha256"] == hashlib.sha256(
+        (project / SIDECAR_REL).read_bytes()).hexdigest()
+
+
+def test_a_sidecar_older_than_its_own_record_is_not_carried(tmp_path, monkeypatch):
+    """The half that keeps this from laundering a stale file.
+
+    A sidecar older than the pass-1 record it would belong to describes a STILL earlier run. It is
+    not named, and the refusal is recorded so a reader can see why the demotion was unavailable.
+    """
+    import phase1_one_shot_runner as P1
+
+    project = _coverage_only_project(tmp_path, sidecar_newer=False)
+    monkeypatch.setattr(P1._pl, "emit_steps_view", lambda *a, **k: {"stubbed": True},
+                        raising=False)
+    monkeypatch.setattr(P1, "_consume_expert_answer",
+                        lambda *a, **k: (0, {"consumed": True}), raising=False)
+    P1.run_second_pass_only(project, "zzdie")
+
+    doc = json.loads(_pl.report_path(project, NAME).read_text())
+    assert "pass1_coverage_sidecar" not in doc, doc.get("pass1_coverage_sidecar")
+    assert "OLDER than the pass-1 record" in (
+        doc.get("pass1_coverage_sidecar_refused") or ""), doc.keys()
+
+
+def test_the_front_door_demotes_on_a_named_sidecar_and_refuses_an_unnamed_one(tmp_path):
+    """The reader half, both directions, driven on `_expected`-shaped inputs.
+
+    The sidecar legitimately predates this invocation's phase-1 start on a re-invocation; what
+    makes it trustworthy is that THIS invocation's pass-1 record names it by content. A record that
+    does not name it, or a sidecar whose bytes no longer match, stays refused.
+    """
+    import hashlib
+
+    import vibe_ic_one_shot_runner as VV
+
+    project = _coverage_only_project(tmp_path)
+    side = project / SIDECAR_REL
+    sha = hashlib.sha256(side.read_bytes()).hexdigest()
+
+    # the demotion predicate itself still sees a coverage-only sidecar. It answers a TUPLE
+    # (is_coverage_only, the sidecar it read) -- read it that way rather than as a bool.
+    _cov, _payload = VV._phase1_failure_is_coverage_only(project)
+    assert _cov is True, (_cov, _payload)
+    assert _payload.get("coverage_only_failure") is True, _payload
+
+    # named + bytes match -> the front door may demote; the source says so in one place
+    src = (PROGRAMS / "vibe_ic_one_shot_runner.py").read_text()
+    assert "pass1_coverage_sidecar" in src, (
+        "the front door does not consult the record's naming of the sidecar")
+    assert "_have == str(_named.get(\"sha256\") or \"\")" in src, (
+        "the front door accepts the naming without checking the bytes")
+
+    # and a swapped sidecar no longer matches the sha the record named
+    side.write_text(json.dumps({"coverage_only_failure": True, "swapped": True}) + "\n")
+    assert hashlib.sha256(side.read_bytes()).hexdigest() != sha

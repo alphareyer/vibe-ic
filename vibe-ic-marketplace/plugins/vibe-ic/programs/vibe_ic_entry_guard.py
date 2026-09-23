@@ -252,6 +252,22 @@ def _expected_front_door_verdict(data: dict, phases: list) -> str:
     digital = [v for _n, v, _rc in rows]
     if "FAIL" in digital:
         return "FAIL"
+    # AN UNMEASURED PHASE IS NOT A PASS UNDER ANY RULE, INCLUDING THE OLD ONE. R-0915-160.
+    #
+    # The legacy derivation below is a COMPATIBILITY statement: an old report is judged by the
+    # rule that existed when it was published. That is only fair while the old rule actually had
+    # an opinion. It had none about a NOT_MEASURED row, because the guard's row validation
+    # REFUSED such rows outright -- so this branch never saw one, and its `else: return "PASS"`
+    # was never a judgement about them.
+    #
+    # Once the guard started accepting NOT_MEASURED rows, that silence became a favourable
+    # answer: MEASURED on spm run22's report (phase2 and phase3 NOT_MEASURED, verdict PASS), which
+    # was refused before and would now be accepted as entry evidence. Inheriting a permission the
+    # old rule never granted is not compatibility, so the row type the old rule could not judge
+    # gets the answer its own content compels: nothing here measured phases 2 and 3, so the report
+    # cannot be a pass.
+    if any(v in {"NOT_MEASURED", "NOT_RUN", "UNKNOWN"} for v in digital):
+        return "NOT_MEASURED"
     if any(v in {"PASS_WITH_WAIVERS", "WAIVED", "COVERAGE-INCOMPLETE"}
            for v in digital):
         return "PASS_WITH_WAIVERS"

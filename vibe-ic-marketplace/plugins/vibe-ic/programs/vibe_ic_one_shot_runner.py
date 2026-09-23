@@ -907,34 +907,52 @@ def _row_verdict(project: Path, report_name: str, rc: int, started_at: float,
                             >= started_at)
     except OSError:                                        # pragma: no cover
         exists, fresh = False, False
-    if not exists:
-        # THE PROCESS IS ALSO A WITNESS, and when it FAILED it is the only one. R-0915-160.
-        #
-        # My round-3 rule read "rc is an exit status, not a measurement" and returned
-        # NOT_MEASURED for every reportless phase. That is right for rc == 0 -- phase3's
-        # `[SKIP] no usable PDK` exits 0 without writing anything, and a PASS conjured from
-        # that is a claim nobody made. It is WRONG for rc != 0, and the mirror image of the
-        # defect I was closing: the phase's process DID tell us something, it told us it
-        # failed, and turning that into NOT_MEASURED silences the one witness there is.
-        #
-        # MEASURED consequence: phase1's oracle-leak guard exits `SystemExit(2)` and writes
-        # no report, as does any traceback. The halt fires on `verdict == "FAIL"`, so under
-        # the round-3 rule it did not fire, and phase 2 and 3 ran on oracle-contaminated L
-        # documents. Main gave FAIL and halted. This is the same principle as the freshness
-        # rule beside it -- a report that disagrees with its own process is not a pass -- read
-        # in the direction where there is no report at all.
+    # ONE DECISION, ON (rc, DID THIS INVOCATION PUBLISH A REPORT). R-0915-160, second cut.
+    #
+    # THE PROCESS IS ALSO A WITNESS, AND WHEN IT FAILED IT IS THE ONLY ONE. My round-3 rule read
+    # "rc is an exit status, not a measurement" and returned NOT_MEASURED for every reportless
+    # phase. That is right for rc == 0 -- phase3's `[SKIP] no usable PDK` exits 0 without writing
+    # anything, and a PASS conjured from that is a claim nobody made. It is WRONG for rc != 0: the
+    # process DID tell us something, it told us it failed, and NOT_MEASURED does not halt.
+    #
+    # MY FIRST CUT PUT THAT ONLY UNDER `if not exists`, AND A REVIEW IS RIGHT THAT IT MISSES THE
+    # CASE THAT MATTERS MOST -- the RE-RUN. R-0915-151 moved phase 1's producer onto the routed
+    # path this reader reads, so on every re-run a report is already sitting there. A phase-1 crash
+    # after the L documents are written -- the oracle-leak `SystemExit(2)`, or a killed expert
+    # second pass at rc 137 -- then found `exists` true and `fresh` false, and the stale branch
+    # answered NOT_MEASURED while ignoring rc entirely. No halt; phases 2 and 3 ran on
+    # oracle-contaminated documents. Exactly the defect the rc!=0 rule exists to close, reached by
+    # the other door.
+    #
+    # So the two facts are decided TOGETHER, and "did this invocation publish a report" is
+    # `exists AND fresh` -- a stale file is not this run's account of itself, and nothing below
+    # ever reads its verdict.
+    #
+    # ONE CLASS FOR EVERY NON-ZERO rc, INCLUDING THE STALL (rc 2 UNDETERMINED), and it is FAIL on
+    # both paths. It used to be FAIL on a fresh project and NOT_MEASURED on a re-run, which is two
+    # answers to one question. FAIL is the right single answer because MEASURED, every non-zero rc
+    # a phase runner in this tree returns is a refusal or an error and none is benign: rc 2 is
+    # "not a directory", an uncaught exception, or "REFUSED: canonical Phase-3 admission"; rc 3 is
+    # the refusal of a second concurrent run on a live project; rc 4 comes WITH a fresh report, so
+    # it never reaches here. A process that refused to run measured nothing AND said so, which is
+    # a failure to produce the phase, not an absence of information about it.
+    published_here = exists and fresh
+    if not published_here:
         if rc != 0:
+            _what = ("wrote no " + report_name) if not exists else (
+                "left only a " + report_name + " from an earlier run")
             return "FAIL", (
-                f"{phase}'s process exited {rc} and wrote no {report_name}: the phase did "
-                f"not publish a verdict, and its exit status is the only account of itself "
-                f"it gave. A failed process with no report is a FAIL, not an absence")
+                f"{phase}'s process exited {rc} and {_what}: this invocation published no "
+                f"verdict for {phase}, and its exit status is the only account of itself it "
+                f"gave. A failed process with no report OF ITS OWN is a FAIL, not an absence, "
+                f"and it halts the run")
+        if not exists:
+            return "NOT_MEASURED", (
+                f"{phase} ran in this invocation, exited 0 and left no {report_name}; rc=0 is "
+                f"an exit status, not a measurement")
         return "NOT_MEASURED", (
-            f"{phase} ran in this invocation, exited 0 and left no {report_name}; rc=0 is "
-            f"an exit status, not a measurement")
-    if not fresh:
-        return "NOT_MEASURED", (
-            f"{phase}'s {report_name} predates {phase}'s start in this invocation, "
-            f"so it describes an earlier run")
+            f"{phase} exited 0 and its {report_name} predates {phase}'s start in this "
+            f"invocation, so that file describes an earlier run and its verdict is not read")
     rep = _read_report(path)
     verdict = rep.get("verdict")
     if verdict:
@@ -1588,9 +1606,13 @@ def main() -> int:
             # writes that sidecar BEFORE three later non-coverage blocking returns
             # (the extraction gap, the L8 clock conflict, ...). So a stale sidecar --
             # or a fresh one followed by a different failure -- demoted a
-            # non-coverage phase1 FAIL to PASS_WITH_WAIVERS at exit 0. My H1
-            # guarantee that the exemption is "minted only behind the coverage-only
-            # predicate" rests on this predicate, so it is tightened here: the
+            # non-coverage phase1 FAIL to PASS_WITH_WAIVERS at exit 0.
+            #
+            # CORRECTING MY OWN CLAIM: I wrote that this guarantees the exemption is "minted
+            # only behind the coverage-only predicate". That is too strong, and a review is
+            # right to say so -- #505 keys the exemption on rc == 1, and rc 1 cannot tell a
+            # coverage-only failure from an expert or 0.5ic failure. That is base behaviour;
+            # what the checks below do is NARROW it, not make it exact. So: the
             # sidecar must have been written at or after phase1 STARTED in this
             # invocation, and only rc 1 -- what the coverage-only path returns -- is
             # exempt.
@@ -1601,10 +1623,44 @@ def main() -> int:
                                >= _phase_started.get("phase1", t0))
             except OSError:                                # pragma: no cover
                 _side_fresh = False
+            # OR THIS INVOCATION'S PASS-1 RECORD NAMES IT. R-0915-160, second cut.
+            #
+            # The mtime rule above is right for a FIRST pass and wrong for the expert second pass,
+            # which is the AI-backup re-invocation R-0915-161 exists for: `run_second_pass_only`
+            # CARRIES pass 1's record forward and never rewrites the sidecar, so the sidecar
+            # legitimately predates this invocation's phase-1 start. Refusing it flipped a
+            # `--skip-phase3` coverage-only project from PASS_WITH_WAIVERS to FAIL and halted at
+            # phase 1, where main demoted and continued -- a re-invocation losing the very
+            # exemption it was invoked to act on.
+            #
+            # The sidecar is therefore judged against THE RECORD IT BELONGS TO, by content: the
+            # second pass stamps `pass1_coverage_sidecar.sha256` into the record it publishes, and
+            # only if the sidecar was at least as new as the record being carried. So a sidecar
+            # older than its own pass-1 record is never named and stays refused, and a sidecar
+            # someone swapped afterwards fails the sha. The record itself still has to be THIS
+            # invocation's -- `_row_verdict` already refuses a stale one, and `rep` below is read
+            # from the same path it judged.
+            if cov_only and not _side_fresh:
+                _named = (rep.get("pass1_coverage_sidecar")
+                          if isinstance(rep, dict) else None)
+                if isinstance(_named, dict) and _side.is_file():
+                    try:
+                        import hashlib as _hashlib          # noqa: PLC0415
+                        _have = _hashlib.sha256(_side.read_bytes()).hexdigest()
+                    except OSError:                        # pragma: no cover
+                        _have = None
+                    if _have and _have == str(_named.get("sha256") or ""):
+                        _side_fresh = True
+                        advisories.append(
+                            "phase1's coverage-only sidecar predates this invocation's phase-1 "
+                            "start, but THIS invocation's pass-1 record names it by content "
+                            "(pass1_coverage_sidecar.sha256) and the bytes match, so it is the "
+                            "sidecar that record was written against: demotion still available")
             if cov_only and not _side_fresh:
                 advisories.append(
                     "phase1's coverage-only sidecar predates phase1's start in this "
-                    "invocation, so it describes an earlier run: NOT demoting")
+                    "invocation and this invocation's pass-1 record does not name it, so it "
+                    "describes an earlier run: NOT demoting")
                 cov_only = False
             if cov_only and rc != 1:
                 advisories.append(
