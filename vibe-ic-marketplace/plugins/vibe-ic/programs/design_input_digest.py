@@ -228,13 +228,28 @@ _AUDITOR_LOCK_RE = re.compile(
 #: mints inside the note directory -- never `*.tmp`, which is a producer's partial write.
 _AUDITOR_NOTE_TMP_RE = re.compile(
     r"^" + re.escape(_AUDIT_AUTHORSHIP_DIR) + r"/[0-9a-f]+\.json\.\d+\.\d+\.tmp$")
+#: And the per-step OUTPUT record's atomic temp, `<sid>.json.<pid>.tmp`, left behind when the
+#: pass writing it was interrupted. R-0915-165's record is written temp-then-replace for the same
+#: reason the audit document is -- no reader may see a half-written one -- and the leftover is as
+#: much the auditor's as the record it was about to become. Third time this shape has bitten: the
+#: canonical audit's temp, the authorship note's temp, and now this one. The directory is taken
+#: from `_path_layout`, which is where the writer gets it, so the two cannot drift; the step name
+#: is whatever `step_metrics.normalize_step` produced, hence the permissive `[0-9a-z_.]+`.
+#: NOT `*.tmp`: a producer's own partial write anywhere in the tree is a design artefact.
+try:
+    from _path_layout import STEP_OUTPUT_RECORD_DIR as _STEP_OUT_DIR
+except Exception:                                          # pragma: no cover
+    _STEP_OUT_DIR = "reports/audit/step_outputs"
+_AUDITOR_STEP_OUTPUT_TMP_RE = re.compile(
+    r"^" + re.escape(_STEP_OUT_DIR) + r"/[0-9a-z_.]+\.json\.\d+\.tmp$")
 
 
 def is_auditor_output(project: Path, path: Path) -> bool:
     """Is this file the AUDITOR's own output rather than a design input?"""
     rel = _rel(project, path)
     if (rel in AUDITOR_OUTPUT_PATHS or _AUDITOR_TMP_RE.match(rel)
-            or _AUDITOR_LOCK_RE.match(rel) or _AUDITOR_NOTE_TMP_RE.match(rel)):
+            or _AUDITOR_LOCK_RE.match(rel) or _AUDITOR_NOTE_TMP_RE.match(rel)
+            or _AUDITOR_STEP_OUTPUT_TMP_RE.match(rel)):
         return True
     if _SUPERSEDED_RE.search(rel):
         return True

@@ -472,3 +472,110 @@ def test_the_record_class_is_declared_and_the_taxonomy_gate_accepts_it(tmp_path)
     src = (PROGRAMS / "_path_layout.py").read_text()
     for why in ("flat by design", "outputs.json", "LIES"):
         assert why in src, why
+
+
+# ── the record's own atomic temp ─────────────────────────────────────────────
+
+def test_an_interrupted_record_write_leaves_nothing_that_moves_the_design_hash(tmp_path):
+    """THE THIRD TIME THIS SHAPE HAS BITTEN, and it is worth naming as a pattern.
+
+    R-0915-165's per-step record is written temp-then-replace for the same reason the canonical
+    audit is: no reader may see a half-written one. A pass killed between the write and the
+    replace leaves `<sid>.json.<pid>.tmp`, which is the auditor's own file, carries no content a
+    reader could identify it by, and -- unrecognised -- is hashed as a DESIGN INPUT, so the
+    design hash moves permanently on an unchanged design.
+
+    The canonical audit's temp was the first (R-0915-151), the authorship note's the second, this
+    is the third. Any atomicity mechanism the auditor adds creates a file its own identity rule
+    cannot see.
+    """
+    import os as _os
+    import design_input_digest as D
+
+    project = tmp_path / "proj"
+    (project / "input").mkdir(parents=True)
+    (project / "input" / "spec.md").write_text("# a counter\n")
+
+    def sha() -> str:
+        blk = D.build_digest(D.scan_inputs(project), [])
+        assert blk["unusable_reason"] is None, blk
+        return blk["sha256"]
+
+    before = sha()
+    # named by the WRITER's own path definition, not spelled here
+    rec = _PL.step_output_record_path(project, "37.4")
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    leftover = rec.with_name(f"{rec.name}.{_os.getpid()}.tmp")
+    leftover.write_text('{"schema": 1, "writ')          # a half-written record
+
+    assert D.is_auditor_output(project, leftover) is True, leftover
+    assert sha() == before, (
+        "a temp left by an interrupted record write moved the design hash, so every later pass "
+        "reads an unchanged design as changed")
+
+
+def test_a_producers_temp_is_not_swallowed_by_the_step_output_rule(tmp_path):
+    """The rule is that directory plus the writer's exact shape, never `*.tmp`."""
+    import design_input_digest as D
+
+    project = tmp_path / "proj"
+    (project / "input").mkdir(parents=True)
+    (project / "input" / "spec.md").write_text("x\n")
+    for rel in ("phase2/stage1/rtl/core.v.99.tmp",
+                f"{_PL.STEP_OUTPUT_RECORD_DIR}/37_4.json.tmp",       # no pid
+                f"{_PL.STEP_OUTPUT_RECORD_DIR}/37_4.json.abc.tmp",   # pid not digits
+                "reports/audit/37_4.json.99.tmp"):                   # wrong directory
+        f = project / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("")
+        assert D.is_auditor_output(project, f) is False, rel
+
+
+def test_the_record_writer_removes_its_temp_however_the_write_ends(tmp_path):
+    """`finally`, and it must not mask the write's own failure."""
+    import ast
+    import inspect
+    import textwrap
+
+    src = textwrap.dedent(inspect.getsource(FCC._emit_step_output_record))
+    tries = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Try) and n.finalbody]
+    good = [t for t in tries
+            if "unlink" in ast.unparse(ast.Module(body=t.finalbody, type_ignores=[]))
+            and not any(isinstance(x, ast.Raise)
+                        for x in ast.walk(ast.Module(body=t.finalbody, type_ignores=[])))]
+    assert good, "the record's temp is not removed in a non-raising `finally`"
+
+    # AND THE TEMP IS GONE WHEN THE REPLACE FAILS. This writer is BEST-EFFORT BY CONSTRUCTION --
+    # its own docstring says "a record that failed to write must never move a verdict" -- so
+    # unlike `_write_note_atomically` it SWALLOWS the error rather than propagating it. My first
+    # spelling of this arm asserted `pytest.raises`, borrowed from the note writer, and failed
+    # with DID NOT RAISE: the assertion was wrong, not the code. What must hold is that the
+    # failure changes nothing and leaves nothing.
+    real_replace = os.replace
+
+    def exploding(a, b):
+        raise OSError(28, "No space left on device")
+
+    try:
+        os.replace = exploding
+        FCC._emit_step_output_record(
+            tmp_path, {"id": "37.4", "required_outputs": ["reports/phase3/x.json"]},
+            type("R", (), {"status": "FAIL", "reasons": []})())
+    finally:
+        os.replace = real_replace
+
+    assert not list((tmp_path / _PL.STEP_OUTPUT_RECORD_DIR).glob("*.tmp")), (
+        "the temp outlived the interrupted write")
+    assert not _PL.step_output_record_path(tmp_path, "37.4").exists(), (
+        "a failed write left a record behind")
+
+
+def test_the_temp_shape_is_derived_from_the_writers_own_directory():
+    """The reader takes the directory from `_path_layout`, where the writer gets it."""
+    import inspect
+    import design_input_digest as D
+
+    src = inspect.getsource(D)
+    assert "STEP_OUTPUT_RECORD_DIR" in src, (
+        "the reader spells the step-output directory itself instead of importing it")
+    assert _PL.STEP_OUTPUT_RECORD_DIR in D._AUDITOR_STEP_OUTPUT_TMP_RE.pattern
