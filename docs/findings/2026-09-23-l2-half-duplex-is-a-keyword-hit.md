@@ -34,10 +34,9 @@ in words. The two are never reconciled.
 
 | half_duplex | duplex text says | count |
 |---|---|---|
-| true | half | 10 |
+| true | half (incl. sent's "half-duplex / unidirectional") | 10 |
 | true | full / dual-simplex / unidirectional | **3** (ufs, pcie_gen5, fixture reject_pcie_gen5) |
-| true | "half or full" (hdlc, ethernet, rs485) | 3 |
-| true | mixed "half / unidirectional" (sent) | 1 |
+| true | half AND full, as alternatives (hdlc, ethernet, rs485) | 3 |
 | true | no duplex field (dali) | 1 |
 | false | half | **17** (onewire, can, canfd, lin, flexray, smbus_pmbus, mipi_spmi_rffe, ble, lora, mipi, emmc, onfi, hyperbus, ddr, ddr4, lpddr5, fixture accept_lpddr5) |
 | false | full | 13 |
