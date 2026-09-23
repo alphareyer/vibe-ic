@@ -60,44 +60,103 @@ def _pnr(project: Path) -> Path:
 
 # ── (a) the boundary is found by the name the RUN wrote ────────────────────
 
-def test_the_boundary_is_found_when_the_pnr_top_differs_from_the_def_stem(tmp_path):
-    """RUN22'S EXACT SHAPE: the DEF is `spm.def`, the retained boundary is
-    `chip_top.prefinish.gds`. Before this fix `resolve_reference` looked for
-    `spm.prefinish.gds`, found nothing, and fell back to a re-stream."""
-    (_pnr(tmp_path) / "chip_top.prefinish.gds").write_bytes(b"HEADER\x00" * 32)
-    kept, kind, prov = GX.resolve_reference(tmp_path, "spm")
+def _def(project: Path, name: str, design: str) -> Path:
+    """A DEF whose FILENAME and whose DESIGN statement differ — run22's shape."""
+    d = _pnr(project) / name
+    d.write_text(f"VERSION 5.8 ;\nDESIGN {design} ;\nCOMPONENTS 0 ;\nEND DESIGN\n")
+    return d
+
+
+def _boundary(project: Path, design: str, body: bytes = b"HEADER\x00" * 32, *,
+              def_file: Path = None, receipt: bool = True) -> Path:
+    """A retained boundary, with the receipt the runner now writes beside it."""
+    import hashlib
+    b = _pnr(project) / f"{design}.prefinish.gds"
+    b.write_bytes(body)
+    if receipt:
+        rec = {"program": "phase3_one_shot_runner", "artefact": b.name,
+               "sha256": hashlib.sha256(body).hexdigest(),
+               "size": len(body), "engine": "klayout"}
+        if def_file is not None:
+            rec["streamed_from_def"] = def_file.name
+            rec["def_sha256"] = hashlib.sha256(def_file.read_bytes()).hexdigest()
+        b.with_suffix(".gds.receipt.json").write_text(json.dumps(rec) + "\n")
+    return b
+
+
+def test_the_boundary_is_named_by_the_defs_own_DESIGN(tmp_path):
+    """RUN22'S EXACT SHAPE, and the name is DERIVED rather than globbed: the DEF is
+    `spm.def` whose DESIGN is `chip_top`, and the retained boundary is
+    `chip_top.prefinish.gds`. Before this, the stem lookup missed and every run
+    re-streamed."""
+    dfile = _def(tmp_path, "spm.def", "chip_top")
+    _boundary(tmp_path, "chip_top", def_file=dfile)
+    kept, kind, prov = GX.resolve_reference(tmp_path, "spm", dfile)
     assert kind == "retained", (kind, prov)
     assert kept is not None and kept.name == "chip_top.prefinish.gds"
-    assert prov["path"] == "phase3/stage3/pnr/chip_top.prefinish.gds"
 
 
-def test_the_exact_name_still_wins_when_it_exists(tmp_path):
-    """A run whose PnR top and DEF stem DO agree must resolve to exactly the
-    artefact it always did — the glob only reaches the case where they differ."""
-    d = _pnr(tmp_path)
-    (d / "spm.prefinish.gds").write_bytes(b"EXACT\x00" * 32)
-    kept, kind, _prov = GX.resolve_reference(tmp_path, "spm")
-    assert kind == "retained" and kept.name == "spm.prefinish.gds"
+def test_a_boundary_with_no_receipt_is_not_this_runs(tmp_path):
+    """THE HOLE MY GLOB OPENED, closed: a leftover boundary with nothing tying it to
+    this run must NOT be used as "design-layer differences expected to be exactly 0".
+    It re-streams instead, which is what an absent one has always done."""
+    dfile = _def(tmp_path, "spm.def", "chip_top")
+    _boundary(tmp_path, "chip_top", def_file=dfile, receipt=False)
+    kept, kind, prov = GX.resolve_reference(tmp_path, "spm", dfile)
+    assert kept is None and kind == "unprovable", (kind, prov)
+    assert "cannot be proven" in prov["note"]
 
 
-def test_two_retained_boundaries_are_refused_not_guessed(tmp_path):
-    """A run keeps ONE finishing boundary. Two means something staged a second
-    layout, and picking one would be a guess about which design the comparison is
-    even about."""
-    d = _pnr(tmp_path)
-    (d / "chip_top.prefinish.gds").write_bytes(b"A" * 64)
-    (d / "other_top.prefinish.gds").write_bytes(b"B" * 64)
-    kept, kind, prov = GX.resolve_reference(tmp_path, "spm")
-    assert kept is None and kind == "ambiguous", (kind, prov)
-    assert len(prov["candidates"]) == 2
+def test_a_boundary_whose_bytes_changed_since_its_receipt_is_refused(tmp_path):
+    dfile = _def(tmp_path, "spm.def", "chip_top")
+    b = _boundary(tmp_path, "chip_top", def_file=dfile)
+    b.write_bytes(b"SOMETHING ELSE" * 8)          # replaced after the receipt
+    kept, kind, prov = GX.resolve_reference(tmp_path, "spm", dfile)
+    assert kept is None and kind == "unprovable", (kind, prov)
+    assert "sha256 mismatch" in prov["note"]
+
+
+def test_a_boundary_streamed_from_a_different_def_is_refused(tmp_path):
+    """The stale-run case exactly: the boundary is intact and its receipt is
+    honest, but it was streamed from a DEF that is not the one being compared."""
+    old_def = _def(tmp_path, "spm.def", "chip_top")
+    _boundary(tmp_path, "chip_top", def_file=old_def)
+    # the routing changed: same DEF path, different content
+    old_def.write_text("VERSION 5.8 ;\nDESIGN chip_top ;\nCOMPONENTS 1 ;\n"
+                       "- u1 INV ;\nEND COMPONENTS\nEND DESIGN\n")
+    kept, kind, prov = GX.resolve_reference(tmp_path, "spm", old_def)
+    assert kept is None and kind == "unprovable", (kind, prov)
+    assert "streamed from a different" in prov["note"]
 
 
 def test_no_boundary_at_all_still_falls_back(tmp_path):
     """The absent case is untouched: no retained boundary means the re-stream path,
     exactly as before."""
-    _pnr(tmp_path)
-    kept, kind, _prov = GX.resolve_reference(tmp_path, "spm")
+    dfile = _def(tmp_path, "spm.def", "chip_top")
+    kept, kind, _prov = GX.resolve_reference(tmp_path, "spm", dfile)
     assert kept is None and kind != "retained"
+
+
+def test_the_runner_records_the_sha_it_already_computes():
+    """SOURCE PIN: `_pf_sha` was computed and only PRINTED, which is why nothing
+    downstream could tell this run's boundary from a leftover."""
+    src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
+    i = src.index("_pf_sha = _sha256_file(prefinish_gds)")
+    window = src[i:i + 2500]
+    assert '.gds.receipt.json' in window, "the boundary's sha is still only printed"
+    assert '"def_sha256"' in window and '"streamed_from_def"' in window, (
+        "the receipt does not bind the boundary to the DEF it was streamed from")
+
+
+def test_the_magic_branch_removes_a_boundary_it_did_not_produce():
+    """SOURCE PIN on the other half: only the KLayout branch retains a boundary, so
+    the Magic branch must not leave an earlier run's behind."""
+    src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
+    i = src.index('extras={"streamout_engine": "magic"')
+    window = src[max(0, i - 4000):i]
+    assert 'glob("*.prefinish.gds")' in window, (
+        "the magic stream-out branch does not clear a stale finishing boundary")
+    assert "_stale.unlink()" in window
 
 
 # ── (b) a reference layout never enters the pack ───────────────────────────

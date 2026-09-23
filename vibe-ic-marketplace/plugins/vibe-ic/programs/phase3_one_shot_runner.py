@@ -42934,6 +42934,37 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
         # sign-off GDS can be pin-matched. Last, so labels land on final geometry.
         label_ok, label_note = _restore_port_labels_if_missing(
             project, top, pdk, container, gds_out, def_file)
+        # R-0915-148 — THIS BRANCH RETAINS NO FINISHING BOUNDARY, SO IT MUST NOT
+        # LEAVE SOMEBODY ELSE'S LYING AROUND.
+        #
+        # Only the KLayout branch writes `{top}.prefinish.gds`. Magic retains
+        # nothing and, until now, deleted nothing -- and nothing anywhere in the
+        # plugin ever unlinked one. So an earlier KLayout invocation (or one forced
+        # with VIBEIC_FORCE_KLAYOUT_STREAMOUT=1) left a boundary in the project, a
+        # later Magic invocation in the same directory left it there STALE, and
+        # `gds_xor_check` would compare this run's GDS against the previous run's
+        # layout under the banner "design-layer differences expected to be exactly
+        # 0" -- reporting any routing change between the two runs as a design FAIL
+        # about a layout nobody asked about.
+        #
+        # An absent boundary is a KNOWN, handled state: the consumer re-streams.
+        # A stale one is not. So this branch removes what it did not produce, and
+        # says so.
+        for _stale in sorted(pnr_dir.glob("*.prefinish.gds")):
+            try:
+                _stale_rec = _stale.with_suffix(".gds.receipt.json")
+                _stale.unlink()
+                if _stale_rec.is_file():
+                    _stale_rec.unlink()
+                print(f"[gds] removed a finishing boundary this run did not "
+                      f"produce ({_stale.name}): the magic stream-out retains "
+                      f"none, and a stale one would be compared as if it were "
+                      f"this run's")
+            except OSError as _stale_exc:                  # pragma: no cover
+                print(f"[gds] could NOT remove the stale finishing boundary "
+                      f"{_stale.name} ({type(_stale_exc).__name__}: "
+                      f"{_stale_exc}); gds_xor_check must refuse it by receipt")
+
         # #306 — BOTH stream-out engines get the substance gate. A stub GDS
         # out of Magic is the same defect as a stub GDS out of KLayout, and
         # gating only the fall-back path would leave the primary one open.
@@ -43094,6 +43125,35 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     try:
         shutil.copy2(gds_out, prefinish_gds)
         _pf_sha = _sha256_file(prefinish_gds)
+        # R-0915-148 — THE SHA IS RECORDED, NOT ONLY PRINTED.
+        #
+        # This value was computed here and then only printed, so nothing
+        # downstream could tell THIS run's boundary from a leftover of an earlier
+        # one. `gds_xor_check` calls a retained boundary "design-layer differences
+        # expected to be exactly 0", and a stale file under that banner turns any
+        # routing change between two runs into a design FAIL about the wrong
+        # layout. The receipt is what makes the artefact provable, and it carries
+        # the DEF the boundary was streamed from so the consumer can check it is
+        # comparing like with like.
+        _pf_receipt = prefinish_gds.with_suffix(".gds.receipt.json")
+        try:
+            _pf_receipt.write_text(json.dumps({
+                "program": "phase3_one_shot_runner",
+                "artefact": prefinish_gds.name,
+                "sha256": _pf_sha,
+                "size": prefinish_gds.stat().st_size,
+                "mtime_ns": prefinish_gds.stat().st_mtime_ns,
+                "top": str(top),
+                "streamed_from_def": (def_file.name
+                                      if def_file.is_file() else None),
+                "def_sha256": (_sha256_file(def_file)
+                               if def_file.is_file() else None),
+                "engine": "klayout",
+            }, indent=2) + "\n")
+        except Exception as _pf_rexc:                      # pragma: no cover
+            print(f"[gds] the finishing boundary's receipt was NOT written "
+                  f"({type(_pf_rexc).__name__}: {_pf_rexc}); gds_xor_check will "
+                  f"treat the boundary as unprovable and re-stream")
         prefinish_note = (f"retained {prefinish_gds.name} "
                           f"({prefinish_gds.stat().st_size} bytes, "
                           f"sha256 {_pf_sha})")
