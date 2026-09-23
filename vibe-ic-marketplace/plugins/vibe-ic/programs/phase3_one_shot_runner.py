@@ -39789,6 +39789,120 @@ def _cvg_restore_decision(pnr_out: Path, log: str) -> dict:
     return decision
 
 
+# ── A PROMOTED ROUTE KEEPS THE NAME OF THE RUN THAT PRODUCED IT ─────────────
+#
+# MEASURED on spm run23 after a phase-3 re-run: step 21 FAILED
+# `provenance_check --output phase3/stage3/pnr/routed.def --tool openroad
+# --require-measured` with "hash mismatch: log=sha256:d7b41629... disk=
+# sha256:b5bfaf42...". provenance.jsonl held two records of routed.def: the
+# ORIGINAL route by openroad (d7b41629) and a bulk re-emit by this runner
+# (b5bfaf42). The bytes on disk WERE openroad's -- a sign-off repair session
+# wrote them as `routed_repaired.def` and this runner copied them over
+# routed.def -- but the repair's `openroad` invocation declared no outputs, so
+# no record anywhere carried b5bfaf42 under the tool that made it.
+#
+# The check was right and is untouched: it already binds an artefact to a run
+# BY CONTENT (`provenance_check._declares`), so once the producing invocation
+# declares what it wrote, the promoted copy binds to it by sha. What was
+# missing was the producing record. Two helpers close the chain:
+#   * `_run_route_producer` runs a route-producing openroad session and DECLARES
+#     the files it writes, after removing any copy an earlier run left there --
+#     `_hash_declared_outputs` hashes whatever sits at a declared path, so a
+#     stale file would otherwise be attested as this session's work;
+#   * `_record_route_promotion` appends, at every copy, a `promotion` record
+#     naming the source path, its sha and the exit-0 record that produced those
+#     bytes -- or `entry: null` when no record did, which binds nothing.
+def _run_route_producer(container: str, tcl_c: str, produced: List[Path],
+                        marker: Optional[str] = None) -> Tuple[int, str, str]:
+    """Run `openroad -no_init -exit <tcl_c>` declaring `produced` as its outputs."""
+    for _p in produced:
+        try:
+            Path(_p).unlink()
+        except FileNotFoundError:
+            pass
+    return _docker_exec(container, f"openroad -no_init -exit {tcl_c}",
+                        marker=marker or tcl_c,
+                        outputs=[str(_p) for _p in produced])
+
+
+def _record_route_promotion(project: Path, source: Path,
+                            targets: List[Path], step: str) -> None:
+    """Append the provenance record of copying `source` over `targets`.
+
+    Never raises: bookkeeping must not break the run it documents."""
+    try:
+        import hashlib as _hl
+        import datetime as _dtm
+        prov = Path(project) / "provenance.jsonl"
+        if not prov.is_file() or not Path(source).is_file():
+            return
+        root = Path(project).resolve()
+
+        def _sha(fp: Path) -> str:
+            h = _hl.sha256()
+            with Path(fp).open("rb") as f:
+                for ch in iter(lambda: f.read(1 << 20), b""):
+                    h.update(ch)
+            return "sha256:" + h.hexdigest()
+
+        src_rel = Path(source).resolve().relative_to(root).as_posix()
+        sha = _sha(Path(source))
+        link = None
+        for ln in prov.read_text().splitlines():
+            if not ln.strip():
+                continue
+            try:
+                rec = json.loads(ln)
+            except Exception:  # noqa: BLE001 — an unreadable line is skipped
+                continue
+            try:
+                if int(rec.get("exit_code", -1)) != 0:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if rec.get("record") == "promotion":
+                continue
+            # The producer may have written these bytes under another name
+            # (the convergence restore writes `routed_cvg_restored.def`, which
+            # is then copied to `routed_repaired.def`): the SHA is the key and
+            # the producer's own path is recorded beside it. The newest wins.
+            _outs = rec.get("outputs") or {}
+            _hit = (src_rel if _outs.get(src_rel) == sha else
+                    next((k for k, v in _outs.items() if v == sha), None))
+            if _hit is not None:
+                link = {"tool": rec.get("tool"),
+                        "timestamp": rec.get("timestamp"),
+                        "command": rec.get("command"),
+                        "path": _hit}
+        outs = {}
+        for t in targets:
+            t = Path(t)
+            if t.is_file() and _sha(t) == sha:
+                outs[t.resolve().relative_to(root).as_posix()] = sha
+        if not outs:
+            return
+        rec = {
+            "record": "promotion",
+            "tool": "phase3_one_shot_runner",
+            "command": f"promote {src_rel} -> {', '.join(sorted(outs))} ({step})",
+            "exit_code": 0,
+            "duration_ms": None,
+            # #365: a record the RUNNER writes, not an observed invocation.
+            "reconstructed": True,
+            "timestamp": _dtm.datetime.now(_dtm.timezone.utc)
+                            .strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "outputs": outs,
+            "promoted_from": {"path": src_rel, "sha256": sha, "entry": link},
+            "note": ("a byte-exact copy of `promoted_from.path`; the bytes were "
+                     "produced by `promoted_from.entry`" if link else
+                     "a byte-exact copy of a file NO recorded run produced"),
+        }
+        with prov.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except Exception:  # noqa: BLE001
+        return
+
+
 def _cvg_apply_restore(pnr_out: Path, top: str, decision: dict,
                        restore_log: str, parsed: dict) -> Tuple[bool, str]:
     """Promote the RESTORED artefacts — only after the re-measurement agrees.
@@ -40507,8 +40621,10 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
         # sign-off route, so a still-progressing repair reroute runs to
         # completion and only a genuinely-stalled job is killed (loop-watchdog
         # compliance; matches the other openroad -exit call sites).
-        rc, out, err = _docker_exec(
-            container, f"openroad -no_init -exit {tcl_c}", marker=tcl_c)
+        rc, out, err = _run_route_producer(
+            container, tcl_c,
+            [pnr_out / "routed_repaired.def",
+             pnr_out / f"{top}_pnr_repaired.v"])
     except Exception as exc:
         _drv_promotion_disclose(
             pnr_out, "producer_execution_error",
@@ -40561,9 +40677,10 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
         _rtcl_path.write_text(_rtcl)
         _rtcl_c = _to_container_path(str(_rtcl_path), container)
         try:
-            _rrc, _rout, _rerr = _docker_exec(
-                container, f"openroad -no_init -exit {_rtcl_c}",
-                marker=_rtcl_c)
+            _rrc, _rout, _rerr = _run_route_producer(
+                container, _rtcl_c,
+                [pnr_out / "routed_cvg_restored.def",
+                 pnr_out / f"{top}_pnr_cvg_restored.v"])
             _rlog = (_rout or "") + "\n" + (_rerr or "")
         except Exception as exc:
             # "the restore could not be attempted" is not "the restore was
@@ -40600,6 +40717,10 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
         _topdef = pnr_out / f"{top}.def"
         if _topdef.is_file():
             shutil.copy2(repaired_def, _topdef)
+        _record_route_promotion(project, repaired_def, [routed, _topdef],
+                                "signoff_spef_repair")
+        _record_route_promotion(project, repaired_v, [_pnr_v],
+                                "signoff_spef_repair")
         _gds = pnr_out / f"{top}.gds"
         if _gds.is_file():
             _gds.unlink()   # force step_gds to re-derive from the repaired route
@@ -41131,8 +41252,10 @@ def step_signoff_drv_wire_length_repair(
     tcl_path.write_text(tcl)
     tcl_c = _to_container_path(str(tcl_path), container)
     try:
-        rc, out, err = _docker_exec(
-            container, f"openroad -no_init -exit {tcl_c}", marker=tcl_c)
+        rc, out, err = _run_route_producer(
+            container, tcl_c,
+            [pnr_out / "routed_escalated.def",
+             pnr_out / f"{top}_pnr_escalated.v"])
     except Exception as exc:
         return StepResult("signoff_drv_wire_length_repair", "PASS",
                           time.time() - t0,
@@ -41189,6 +41312,10 @@ def step_signoff_drv_wire_length_repair(
         def_ok, v_ok)
 
     if promote:
+        _record_route_promotion(project, escalated_def, [routed, _topdef],
+                                "signoff_drv_wire_length_repair")
+        _record_route_promotion(project, escalated_v, [_pnr_v],
+                                "signoff_drv_wire_length_repair")
         _gds = pnr_out / f"{top}.gds"
         if _gds.is_file():
             _gds.unlink()   # force step_gds to re-derive from the new route
