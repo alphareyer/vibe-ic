@@ -636,6 +636,21 @@ _PHASE_PASS = frozenset({"PASS"})
 _PHASE_PASS_WITH_NOTE = frozenset({"PASS_WITH_WAIVERS", "WAIVED",
                                    "COVERAGE-INCOMPLETE"})
 
+#: The ONE reason a pass-tier row may carry a non-zero rc. R-0915-145.
+#:
+#: #505's demotion rewrites phase1's verdict to COVERAGE-INCOMPLETE and KEEPS its
+#: rc, because a coverage-only phase1 failure always exits 1 -- the rc belongs to
+#: the verdict the row had BEFORE the demotion. The roll-up's "claims a pass but
+#: exited non-zero" rule is right for an UNDEMOTED row and wrong for this one, and
+#: it turned the #505 standalone shape (--skip-phase3, coverage-only phase1) from
+#: PASS_WITH_WAIVERS/exit 0 into FAIL/exit 1.
+#:
+#: DELIBERATELY NOT A GENERAL LAUNDERING PATH: `_roll_up` exempts a row only when
+#: the demotion record carries EXACTLY this token, and the only place that mints it
+#: is the #505 branch -- `_phase1_failure_is_coverage_only` AND `--skip-phase3`.
+#: Anything else that wants an rc forgiven has to come and argue for its own token.
+DEMOTION_COVERAGE_ONLY = "phase1_coverage_only_standalone"
+
 
 def _aggregate(rows: Any,
                completion_audit_verdicts: Optional[List[str]] = None) -> str:
@@ -687,7 +702,9 @@ def _as_rows(rows: Any) -> List[Tuple[str, str, int]]:
 
 
 def _roll_up(rows: List[Tuple[str, str, int]],
-             completion_audit_verdicts: Optional[List[str]] = None
+             completion_audit_verdicts: Optional[List[str]] = None,
+             demoted: Optional[Dict[str, Dict[str, Any]]] = None,
+             audit_axis: Optional[Dict[str, Any]] = None
              ) -> Tuple[str, List[str]]:
     """Roll the phases up into ONE verdict, and say why it is that verdict.
 
@@ -725,6 +742,9 @@ def _roll_up(rows: List[Tuple[str, str, int]],
     fails: List[str] = []
     unmeasured: List[str] = []
     notes: List[str] = []
+    #: Things a reader must be told that do NOT move the tier. A disclosure is not
+    #: a waiver, and a run with nothing to disclose is a clean PASS.
+    disclosed: List[str] = []
     for name, verdict, rc in rows:
         v = str(verdict or "").strip().upper()
         try:
@@ -734,10 +754,19 @@ def _roll_up(rows: List[Tuple[str, str, int]],
         if v == "FAIL":
             fails.append(f"{name} FAIL (rc={rc_i})")
         elif v in _PHASE_PASS or v in _PHASE_PASS_WITH_NOTE:
-            if rc_i != 0:
+            _dem = (demoted or {}).get(name) or {}
+            _demoted_here = (str(_dem.get("token") or "")
+                             == DEMOTION_COVERAGE_ONLY)
+            if rc_i != 0 and not _demoted_here:
                 fails.append(
                     f"{name} reported {v} but the phase exited rc={rc_i} — a "
                     f"report disagreeing with its own process is not a pass")
+            elif rc_i != 0 and _demoted_here:
+                # The rc belongs to the verdict this row had BEFORE the demotion.
+                notes.append(
+                    f"{name} {v} (rc={rc_i} is the pre-demotion "
+                    f"{_dem.get('original_verdict', 'FAIL')}; "
+                    f"{_dem.get('reason', DEMOTION_COVERAGE_ONLY)})")
             elif v in _PHASE_PASS_WITH_NOTE:
                 notes.append(f"{name} {v}")
         else:
@@ -745,29 +774,160 @@ def _roll_up(rows: List[Tuple[str, str, int]],
                 f"{name} {verdict or 'NO VERDICT'} (rc={rc_i}) — not measured, "
                 f"so it cannot be rolled up as passing")
 
-    for ca in (completion_audit_verdicts or []):
-        if str(ca or "").strip().upper() == "FAIL":
-            fails.append("the phase2/3 completion audit says FAIL "
-                         "(reports/audit/phase23_completion_audit.json)")
-            break
+    # THE AUDIT AXIS, AND IT MAY NOT FAIL OPEN. R-0915-145.
+    #
+    # `if ca == "FAIL"` meant NOT_MEASURED, INSUFFICIENT_DATA, an unparseable
+    # value and an ABSENT audit all read as "the axis is satisfied" -- so a phase3
+    # run whose --strict completion refresh raised or timed out inside a swallowed
+    # try published PASS at exit 0. Only PASS satisfies the axis; PASS_WITH_WAIVERS
+    # caps at the waiver tier; FAIL fails; anything else, absence included, is
+    # NOT_MEASURED with the reason stated.
+    # SCOPED TO THE CALLER THAT ACTUALLY DECIDED THE AXIS. `main` always passes
+    # `audit_axis`, computed by `_completion_audit_axis` from THIS invocation, so
+    # the fail-closed rule always applies to a real run (pinned by
+    # `test_main_always_supplies_the_axis`). A caller that passes no axis is not
+    # talking about the completion audit at all -- #505's properties are stated as
+    # `_aggregate(["COVERAGE-INCOMPLETE", "PASS"])`, with no audit in the sentence --
+    # and for those the phase conjunction alone answers, with the older
+    # "a FAIL token gates" behaviour kept for raw verdict lists. Applying the strict
+    # axis to them turned every audit-less call into NOT_MEASURED, which is a
+    # different claim than the one the caller made.
+    if audit_axis is not None:
+        axis = audit_axis
+    else:
+        _raw = [str(v or "").strip().upper()
+                for v in (completion_audit_verdicts or [])]
+        axis = ({"state": "FAIL", "reason": f"verdict(s) {sorted(set(_raw))}"}
+                if any(t == "FAIL" for t in _raw)
+                else {"state": "NOT_APPLICABLE", "reason": ""})
+    _axis_state = str(axis.get("state") or "NOT_MEASURED").upper()
+    _axis_why = str(axis.get("reason") or "")
+    if _axis_state == "FAIL":
+        fails.append(f"the phase2/3 completion audit says FAIL — {_axis_why}"
+                     if _axis_why else "the phase2/3 completion audit says FAIL")
+    elif _axis_state == "PASS_WITH_WAIVERS":
+        notes.append(f"the phase2/3 completion audit passed with waivers"
+                     + (f" — {_axis_why}" if _axis_why else ""))
+    elif _axis_state == "NOT_APPLICABLE" and not _axis_why:
+        pass            # no axis was in play and nothing to tell the reader
+    elif _axis_state == "NOT_APPLICABLE":
+        # phase3 did not run in this invocation, so there is no axis to read. SAID
+        # OUT LOUD but TIER-NEUTRAL: "no axis" and "a satisfied axis" must never
+        # look the same, and a phase1-only run must still be able to be a clean
+        # PASS. A disclosure is not a waiver.
+        disclosed.append(f"no phase2/3 completion audit axis — {_axis_why}"
+                         if _axis_why else "no phase2/3 completion audit axis")
+    elif _axis_state != "PASS":
+        unmeasured.append(
+            f"the phase2/3 completion audit is not a pass ({_axis_state})"
+            + (f" — {_axis_why}" if _axis_why else ""))
 
     if fails:
-        return "FAIL", fails + unmeasured
+        return "FAIL", fails + unmeasured + disclosed
     if unmeasured:
-        return "NOT_MEASURED", unmeasured
+        return "NOT_MEASURED", unmeasured + disclosed
     if notes:
-        return "PASS_WITH_WAIVERS", notes
-    return "PASS", []
+        return "PASS_WITH_WAIVERS", notes + disclosed
+    return "PASS", disclosed
+
+
+#: The tokens a completion audit can publish that SATISFY the axis, and nothing
+#: else does. R-0915-145: a token this does not know is NOT_MEASURED, never a pass.
+_AUDIT_AXIS_PASS = frozenset({"PASS"})
+_AUDIT_AXIS_WAIVERS = frozenset({"PASS_WITH_WAIVERS", "WAIVED"})
+
+
+def _audit_axis_from_verdicts(verdicts: Optional[List[str]]) -> Dict[str, Any]:
+    """Collapse raw audit verdict tokens into one axis state, fail-closed.
+
+    FAIL wins, then an unknown/absent token (NOT_MEASURED), then waivers, then
+    PASS. `None` and `[]` are NOT a pass: an axis nobody could read is unmeasured.
+    """
+    toks = [str(v or "").strip().upper() for v in (verdicts or []) if str(v or "").strip()]
+    if not toks:
+        return {"state": "NOT_MEASURED",
+                "reason": "no completion audit verdict could be read"}
+    if any(t == "FAIL" for t in toks):
+        return {"state": "FAIL", "reason": f"verdict(s) {sorted(set(toks))}"}
+    unknown = [t for t in toks
+               if t not in _AUDIT_AXIS_PASS and t not in _AUDIT_AXIS_WAIVERS]
+    if unknown:
+        return {"state": "NOT_MEASURED",
+                "reason": f"verdict(s) {sorted(set(unknown))} are not a pass"}
+    if any(t in _AUDIT_AXIS_WAIVERS for t in toks):
+        return {"state": "PASS_WITH_WAIVERS", "reason": f"verdict(s) {sorted(set(toks))}"}
+    return {"state": "PASS", "reason": ""}
+
+
+def _completion_audit_axis(project: Path, *, phase3_ran: bool,
+                           started_at: float) -> Dict[str, Any]:
+    """The completion-audit axis for THIS invocation — or none, said out loud.
+
+    TIED TO THIS RUN, which the first cut was not. `_completion_audit_verdicts`
+    read `reports/orchestrator/phase3_one_shot.json` unconditionally, so a leftover
+    FAIL from an EARLIER full run gated a later `--skip-phase3` invocation that
+    never touched phase3 — a false FAIL where the base rule read PASS. And with no
+    phase3 in scope there is no axis to read at all; borrowing somebody else's is
+    not a measurement of this run.
+
+    So: the axis exists only when phase3 ran in THIS invocation, and a document
+    counts only when it provably belongs to it — written at or after this
+    invocation started. A document that is older is another run's, and is named as
+    ignored rather than silently used.
+
+    Absence when phase3 DID run is NOT_MEASURED, never PASS: that is exactly the
+    swallowed-refresh case (the --strict completion pass raised or timed out), and
+    it must not publish a green front door.
+    """
+    if not phase3_ran:
+        return {"state": "NOT_APPLICABLE",
+                "reason": "phase3 did not run in this invocation, so this run has "
+                          "no completion-audit axis; an earlier run's audit is not "
+                          "evidence about this one",
+                "sources": [], "ignored": []}
+    sources: List[Dict[str, Any]] = []
+    ignored: List[str] = []
+    candidates = [("reports/audit/phase23_completion_audit.json", "verdict")]
+    candidates += [(f"reports/orchestrator/{n}", "completion_audit_verdict")
+                   for n in ("phase2_one_shot.json", "phase3_one_shot.json",
+                             "phase23_one_shot.json")]
+    for rel, key in candidates:
+        path = _pl.report_path(project, Path(rel).name) if "/" not in rel else (
+            project / rel)
+        try:
+            if not path.is_file():
+                continue
+            mtime = path.stat().st_mtime
+        except OSError:                                    # pragma: no cover
+            continue
+        doc = _read_report(path)
+        value = doc.get(key)
+        if not value:
+            continue
+        if mtime + 1e-6 < started_at:
+            ignored.append(
+                f"{rel} carries {key}={value} but was written before this "
+                f"invocation started, so it describes another run")
+            continue
+        sources.append({"path": rel, "key": key, "verdict": str(value)})
+    axis = _audit_axis_from_verdicts([s["verdict"] for s in sources])
+    if not sources:
+        axis = {"state": "NOT_MEASURED",
+                "reason": ("phase3 ran in this invocation and no completion audit "
+                           "belonging to it could be read"
+                           + (f"; ignored: {ignored}" if ignored else ""))}
+    axis["sources"] = sources
+    axis["ignored"] = ignored
+    return axis
 
 
 def _completion_audit_verdicts(project: Path) -> List[str]:
-    """Every source that can state the completion audit's verdict, fail-closed.
+    """Kept for callers that only want the raw tokens (tests, and the report).
 
-    The audit's own document is the authority. A phase orchestrator report's
-    `completion_audit_verdict` is the value that phase took from the same file at
-    the moment its own verdict was decided, so it is read too: if EITHER says
-    FAIL the roll-up fails, and a stale disagreement can only make the front door
-    stricter, never greener.
+    THE AXIS IS `_completion_audit_axis`, which is what the roll-up consumes: this
+    helper cannot know whether phase3 ran or when this invocation started, and
+    answering without those two facts is what produced the false FAIL on a
+    `--skip-phase3` run.
     """
     out: List[str] = []
     audit = _pl.report_path(project, "phase23_completion_audit.json")
@@ -1182,6 +1342,12 @@ def main() -> int:
 
     t0 = time.time()
     plan: List[Tuple[str, str, int]] = []   # (phase, verdict, rc)
+    #: name -> the demotion record that explains a pass-tier row's non-zero rc.
+    #: Only the #505 branch writes here; see DEMOTION_COVERAGE_ONLY.
+    _demoted: Dict[str, Dict[str, Any]] = {}
+    #: Did phase3 RUN in THIS invocation? The completion-audit axis exists only
+    #: then, and reading an earlier run's audit is not a measurement of this one.
+    _phase3_ran = False
     halted_at: str = ""
     reports: Dict[str, Any] = {}
     advisories: List[str] = []   # v0.3.7 #505 — non-gating notes
@@ -1277,6 +1443,21 @@ def main() -> int:
             cov_only, cov_reason = _phase1_failure_is_coverage_only(project)
             if args.skip_phase3 and cov_only:
                 plan[-1] = ("phase1", "COVERAGE-INCOMPLETE", rc)
+                # R-0915-145 — the rc stays on the row (it is what phase1's
+                # process really did) and the DEMOTION is recorded beside it, so
+                # the roll-up can tell "a demoted row whose rc belongs to its
+                # pre-demotion FAIL" from "a row claiming a pass while its own
+                # process exited non-zero". This is the ONLY site that mints the
+                # token.
+                _demoted["phase1"] = {
+                    "token": DEMOTION_COVERAGE_ONLY,
+                    "original_verdict": "FAIL",
+                    "original_rc": rc,
+                    "reason": (f"doc-extraction coverage only "
+                               f"(coverage {cov_reason.get('coverage_pct')}%, "
+                               f"todo {cov_reason.get('total_todo')}), "
+                               f"standalone shape (--skip-phase3)"),
+                }
                 advisories.append(
                     f"phase1 doc-extraction COVERAGE-INCOMPLETE "
                     f"(coverage {cov_reason.get('coverage_pct')}%, "
@@ -1505,6 +1686,7 @@ def main() -> int:
         else:
             p3_env = _canonical_admission.child_env(
                 p3_admission.identity_sha256, _phase_env)
+            _phase3_ran = True
             rc = _run_phase("PHASE 3 (synth → PnR → GDS → DRC → LVS)",
                             runner, p3_args, env=p3_env)
             rep = _read_report(_pl.report_path(project, "phase3_one_shot.json"))
@@ -1580,8 +1762,12 @@ def main() -> int:
                     if n not in ("analog", "mixed_signal")
                     and v != "SKIPPED"]
     _ca_verdicts = _completion_audit_verdicts(project)
+    _audit_axis = _completion_audit_axis(project, phase3_ran=_phase3_ran,
+                                         started_at=t0)
     if digital_rows:
-        overall, _rollup_why = _roll_up(digital_rows, _ca_verdicts)
+        overall, _rollup_why = _roll_up(digital_rows, _ca_verdicts,
+                                        demoted=_demoted,
+                                        audit_axis=_audit_axis)
     else:
         overall, _rollup_why = "FAIL", ["no digital phase ran"]
     # A verdict that moved must say which phase moved it, in the report a reader
@@ -1607,6 +1793,11 @@ def main() -> int:
         # WHY the roll-up is what it is, phase by phase. Empty for a clean PASS.
         "verdict_reasons": _rollup_why,
         "completion_audit_verdicts": _ca_verdicts,
+        # EVERYTHING THE ROLL-UP CONSUMED, so a reader -- including
+        # `vibe_ic_entry_guard` -- can replay the same function instead of keeping
+        # a second copy of the rule that drifts from it.
+        "completion_audit_axis": _audit_axis,
+        "demoted_phases": _demoted,
     }
     # v1.6.32: emit canonical final_summary.md (best-effort). Note that
     # phase23_one_shot_runner ALSO calls this; vibe_ic delegates to
