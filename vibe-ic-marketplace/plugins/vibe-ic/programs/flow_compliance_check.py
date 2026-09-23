@@ -3272,6 +3272,31 @@ def _record_gate_execution(cmd: str, rc: Optional[int], verdict: str,
     return row
 
 
+def _step_produced_every_declared_output(result: Any) -> bool:
+    """Did THIS step produce every output it declares, by its own binding?
+
+    Reads `output_binding`, which `_disclose_output_binding` already publishes
+    on the row: `n_specs` declared and `n_step_attributed` resolved against the
+    step's own write record and re-verified live. Both conditions are required
+    and neither is inferred:
+
+      * a step that declares NO outputs cannot have produced them, so it is
+        False -- the tier must keep coming from its clauses;
+      * project-wide resolution is not enough. `n_step_attributed` answers
+        "this step produced it", which is the question here; the project-wide
+        glob answers only "a file matching this pattern exists somewhere", and
+        that must never speak for a step.
+    """
+    b = getattr(result, "output_binding", None)
+    if not isinstance(b, Mapping):
+        return False
+    n = b.get("n_specs")
+    k = b.get("n_step_attributed")
+    if not isinstance(n, int) or not isinstance(k, int) or n <= 0:
+        return False
+    return k == n
+
+
 def _gate_ledger_payload() -> List[Dict[str, Any]]:
     """Deterministic machine-readable view of concurrently appended rows."""
     return sorted((dict(row) for row in _GATE_LEDGER), key=lambda row: (
@@ -16080,7 +16105,33 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                     f"(#651 — a slot credited via a waiver, NOT a bare PASS; "
                     f"production tapeout review must close it): "
                     f"{h[len(_WAIVER_HINT_PREFIX):]}")
-        elif passed and skip_hints and not non_hint_reasons:
+        elif (passed and skip_hints and not non_hint_reasons
+                and not _step_produced_every_declared_output(result)):
+            # A CLAUSE'S N/A IS THAT CLAUSE'S, NOT THE STEP'S.
+            #
+            # MEASURED on spm run22 (lane icspm5), step 7 "Constraint setup
+            # (SDC + PVT matrix)". Its declared required_outputs are
+            # `phase2/stage2/constraints/*.sdc` and
+            # `.../pvt_matrix.json`, and BOTH were on disk -- the step's own
+            # row says so in the flow's own words, "OUTPUT ATTRIBUTION:
+            # step-attributed (2/2 declared output(s) resolved against THIS
+            # step's own write record ... re-verified live)". One of its
+            # nineteen clauses, `macro_non_seq_arc_contract_check`, honestly
+            # self-reported [verdict=SKIP, reason_class=DESIGN_DECLARED_NA],
+            # and that single clause set the tier of the WHOLE STEP to
+            # NOT_APPLICABLE. The stage-2 classifier then read that N/A and
+            # published it as a stage-BLOCKING MISSING_CAPABILITY /
+            # disclosed-capability-gap -- "the runner disclosed a named
+            # capability gap in place of the sign-off artefact this step
+            # declares", over a step that had produced that artefact.
+            #
+            # A step that produced everything it declared was not skipped. The
+            # clause's skip is still DISCLOSED on the row below, because it is
+            # true and a reader must see it; what it no longer does is speak
+            # for the step. When the step produced NOTHING it declared, or
+            # declares no outputs at all, this branch is reached exactly as
+            # before -- that is the negative arm, and it is the common case.
+            #
             # ORGANIC #675 — a skip is MORE specific than a vacuous-pass: when
             # an all_of step carries BOTH an honest sibling-self-skip hint and a
             # vacuous-pass hint (e.g. the formal step where the absent
