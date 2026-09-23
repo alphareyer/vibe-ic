@@ -39,6 +39,7 @@ import _flow_reason_taxonomy as TAX                          # noqa: E402
 
 GATE = PROGRAMS / "internal_vs_external_timing_check.py"
 SPM_L8 = PROGRAMS / "tests" / "fixtures" / "spm_run22_L8_TIMING_WAVEFORM.json"
+SPM_LAYER = PROGRAMS / "tests" / "fixtures" / "spm_run22_L8_RTL_CONSTANTS.json"
 L8_REL = "phase1/generated_docs/L8_TIMING_WAVEFORM.json"
 NABS = TAX.NOT_APPLICABLE_BY_STRUCTURE
 CMD = (f"internal_vs_external_timing_check {L8_REL} "
@@ -56,11 +57,15 @@ def _project(tmp_path: Path, l8) -> Path:
     return proj
 
 
-def _gate(tmp_path: Path, l8):
+def _gate(tmp_path: Path, l8, layer=None):
     proj = _project(tmp_path, l8)
     rep = proj / "gate.json"
-    r = subprocess.run([sys.executable, str(GATE), str(proj / L8_REL),
-                        "--json", str(rep)], capture_output=True, text=True)
+    argv = [sys.executable, str(GATE), str(proj / L8_REL), "--json", str(rep)]
+    if layer is not None:
+        lp = proj / "phase1/generated_docs/L8_RTL_CONSTANTS.json"
+        lp.write_text(json.dumps(layer))
+        argv += ["--layer", str(lp)]
+    r = subprocess.run(argv, capture_output=True, text=True)
     return r.returncode, json.loads(rep.read_text())
 
 
@@ -77,8 +82,8 @@ _DETECT_DRIVE = {"timing_groups": {
 _EMPTY_RX_TX = {"timing_groups": {"rx_timing": {}, "tx_timing": {}}}
 
 
-def _assert_fails(tmp_path, l8, *rules):
-    rc, rep = _gate(tmp_path, l8)
+def _assert_fails(tmp_path, l8, *rules, layer=None):
+    rc, rep = _gate(tmp_path, l8, layer=layer)
     assert rep.get("reason_class") != NABS, rep
     assert rep["verdict"] == "FAIL", rep
     assert rc == 1, rep
@@ -108,12 +113,14 @@ def test_spm_run22_l8_still_reads_a_structural_absence(tmp_path):
     assert (sa["scanned"], sa["found"]) == (13, 0), sa
 
 
-def test_the_escape_has_no_vocabulary_of_its_own():
-    """ONE CLASSIFIER. The escape must ask check()'s functions, not a second
-    token list that can drift from RX_NAME_HINTS / TX_NAME_HINTS."""
-    src = GATE.read_text()
-    assert "_PROTO_GROUP_TOKENS =" not in src
-    assert "classified_groups(waveform)" in src.split("def main(", 1)[1]
+def test_the_escape_consults_the_classifier_and_the_full_probe():
+    """ONE CLASSIFIER, AND NOTHING NARROWER THAN WHAT THE GATE READS. Round 1
+    pinned only "no second token list", which the round-2 review showed pins a
+    NARROWING. The escape must ask check()'s classifier AND the full probe
+    over the L8 and the --layer constants."""
+    src = GATE.read_text().split("def main(", 1)[1]
+    assert "classified_groups(waveform)" in src
+    assert "timing_content_probe(waveform, rtl_constants)" in src
 
 
 # ── the wrapper: the rc-0 site honours the enumeration ─────────────────────
@@ -141,3 +148,113 @@ def test_step_2_clause_is_not_filed_incomplete(tmp_path):
     r = F.check_step(proj, step, {})
     assert r.status == "PASS", (r.status, r.reason_class, r.reasons)
     assert not any(str(x).startswith("INCOMPLETE") for x in r.reasons), r.reasons
+
+
+# ── round 2 (review of 8646e1862): the escape may not be NARROWER than the gate ──
+
+_EMPTY_CANON = {"timing_windows": [], "timing_constants": [], "waveforms": []}
+_H1_SCALARS = dict(_EMPTY_CANON, H0_low_us=7.2, H1_low_us=1.8, BR_low_us=13.8,
+                   IBT_us=22.0)
+_H1_SYMBOL_LIST = dict(_EMPTY_CANON, symbol_timing=[
+    {"name": "H0", "low_us": 7.2}, {"name": "H1", "low_us": 1.8},
+    {"name": "BR", "low_us": 13.8}, {"name": "IBT", "low_us": 22.0}])
+_H1_WINDOWS = dict(_EMPTY_CANON, break_window={"min_us": 13, "max_us": 20},
+                   ibt_window={"min_us": 20, "max_us": 30})
+_H2_MASTER_SLAVE = {"timing_groups": {
+    "master_side": {"bit0_low_us": 7.2, "bit1_low_us": 1.8},
+    "slave_side": {"bit0_low_us": 7.0, "bit1_low_us": 2.0}}}
+_H2_PROTOCOL = {"protocol_timing": {"rx_side": {"H0": 7, "H1": 2},
+                                    "tx_side": {"H0": 7, "H1": 2}}}
+_H2_LAYER = {"TX_IBT_us": 70, "BR_MIN_us": 62}
+
+
+def test_scalar_symbol_keys_fail_instead_of_nabs(tmp_path):
+    _assert_fails(tmp_path, _H1_SCALARS, "missing_rx_group")
+
+
+def test_a_symbol_timing_list_fails_instead_of_nabs(tmp_path):
+    _assert_fails(tmp_path, _H1_SYMBOL_LIST, "missing_rx_group")
+
+
+def test_break_and_ibt_windows_fail_instead_of_nabs(tmp_path):
+    _assert_fails(tmp_path, _H1_WINDOWS, "missing_rx_group")
+
+
+def test_master_and_slave_sides_fail_instead_of_nabs(tmp_path):
+    _assert_fails(tmp_path, _H2_MASTER_SLAVE, "missing_rx_group")
+
+
+def test_nested_rx_tx_sides_fail_instead_of_nabs(tmp_path):
+    _assert_fails(tmp_path, _H2_PROTOCOL, "missing_rx_group")
+
+
+def test_the_layer_constants_are_read_before_any_absence(tmp_path):
+    """The clause passes --layer; check() falls back to it for IBT<BR. An L8
+    with nothing in it and constants TX_IBT_us=70 >= BR_MIN_us=62 must go to
+    check(), not be certified absent."""
+    _assert_fails(tmp_path, dict(_EMPTY_CANON), "missing_rx_group",
+                  layer=_H2_LAYER)
+
+
+def test_whole_symbols_not_substrings():
+    import internal_vs_external_timing_check as G
+    assert G._symbols_in({"LIBRARY": 1, "CALIBRATION": 1, "FABRIC": 1,
+                          "CH0": 1}) == set()
+    assert G._symbols_in({"tIBT_us": 1, "tB_break_us": 1, "H0_low": 1,
+                          "H1": 1}) == {"H0", "H1", "BR", "IBT"}
+    assert G.timing_content_probe({"source_documents": ["L2_fabric.md"],
+                                   "calibration": {"LIBRARY": 3}}) == []
+
+
+def test_spm_run22_with_its_layer_constants_still_reads_nabs(tmp_path):
+    """The flow clause passes --layer; spm's constants carry
+    `rx_classifier_ticks: null` and `no_rx_classifier_ticks_in_input: true`
+    -- declarations of absence, not timing."""
+    proj = _project(tmp_path, SPM_L8)
+    lp = proj / "phase1/generated_docs/L8_RTL_CONSTANTS.json"
+    shutil.copyfile(SPM_LAYER, lp)
+    rep = proj / "gate.json"
+    r = subprocess.run([sys.executable, str(GATE), str(proj / L8_REL),
+                        "--layer", str(lp), "--json", str(rep)],
+                       capture_output=True, text=True)
+    doc = json.loads(rep.read_text())
+    assert r.returncode == 0, doc
+    assert doc["reason_class"] == NABS, doc
+    assert doc["structural_absence"]["found"] == 0, doc
+
+
+# ── both directions through the wrapper ────────────────────────────────────
+
+_CMD_LAYER = (f"internal_vs_external_timing_check {L8_REL} --layer "
+              "phase1/generated_docs/L8_RTL_CONSTANTS.json "
+              "--json reports/phase2/gates/int_vs_ext_timing.json")
+
+
+def test_through_the_wrapper_timing_on_the_page_is_never_not_applicable(
+        tmp_path):
+    proj = _project(tmp_path, _H1_SCALARS)
+    (proj / "phase1/generated_docs/L8_RTL_CONSTANTS.json").write_text("{}")
+    res = F._check_program_exit_zero(proj, _CMD_LAYER)
+    assert res.verdict == "FAIL", (res.verdict, res.reason_class, res[1])
+    assert res.reason_class != NABS
+
+
+def test_through_the_wrapper_spm_with_its_layer_is_not_applicable(tmp_path):
+    proj = _project(tmp_path, SPM_L8)
+    shutil.copyfile(SPM_LAYER,
+                    proj / "phase1/generated_docs/L8_RTL_CONSTANTS.json")
+    res = F._check_program_exit_zero(proj, _CMD_LAYER)
+    assert (res.verdict, res.reason_class) == ("NOT_APPLICABLE", NABS), (
+        res.verdict, res.reason_class, res[1])
+
+
+def test_through_the_wrapper_layer_timing_is_never_not_applicable(tmp_path):
+    """H2(a) end to end: an L8 with nothing in it, the clause's own --layer
+    constants carrying TX_IBT_us >= BR_MIN_us. Base fail-closed (INCOMPLETE);
+    8646e1862 published NOT_APPLICABLE; the gate must be asked instead."""
+    proj = _project(tmp_path, dict(_EMPTY_CANON))
+    (proj / "phase1/generated_docs/L8_RTL_CONSTANTS.json").write_text(
+        json.dumps(_H2_LAYER))
+    res = F._check_program_exit_zero(proj, _CMD_LAYER)
+    assert res.verdict == "FAIL", (res.verdict, res.reason_class, res[1])
+    assert res.reason_class != NABS
