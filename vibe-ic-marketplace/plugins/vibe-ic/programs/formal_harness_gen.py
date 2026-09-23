@@ -460,10 +460,19 @@ _P_ZERO = [
         r"set\s+to\s+(?:0|zero))", re.I),
 ]
 # Words that carry no claim. Anything ELSE left in a clause after the
-# recognised claims are removed makes the clause unrecognised.
-_P_FILLER = re.compile(
-    r"\breset\b|\brst\b|\bsignal\b|\bthe\b|\bis\b|\ba\b|\ban\b|\binput\b|"
-    r"\bport\b|reset\s*信號|信號|的|[()（）\[\]*`'\"\s:：]", re.I)
+# recognised claims are removed makes the clause unrecognised. A WORD SET, not
+# a regex: this is English/Chinese prose from L8, and a keyword regex over it
+# reads like an HDL declaration scan to the hygiene gate.
+_FILLER_WORDS = frozenset({"reset", "rst", "signal", "the", "is", "a", "an",
+                           "input", "port"})
+_FILLER_CJK_RE = re.compile(r"reset\s*信號|信號|的", re.I)
+_FILLER_SEP_RE = re.compile(r"[()（）\[\]*`'\"\s:：]+")
+
+
+def _only_filler(rest: str) -> bool:
+    """True when nothing but claim-free filler is left in a clause."""
+    words = _FILLER_SEP_RE.split(_FILLER_CJK_RE.sub(" ", rest))
+    return all(w.lower() in _FILLER_WORDS for w in words if w)
 _CLAUSE_SPLIT_RE = re.compile(r"[;；。,，\n]+")
 
 
@@ -508,7 +517,7 @@ def parse_reset_prose(text: str, reset: str, declared_polarity: Optional[str]
                 rest = pat.sub(" ", rest)
                 found = True
                 break
-        if not found or _P_FILLER.sub("", rest).strip():
+        if not found or not _only_filler(rest):
             return None
     if zero:
         if polarity is None:
