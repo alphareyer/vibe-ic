@@ -113,14 +113,15 @@ def test_spm_run22_l8_still_reads_a_structural_absence(tmp_path):
     assert (sa["scanned"], sa["found"]) == (13, 0), sa
 
 
-def test_the_escape_consults_the_classifier_and_the_full_probe():
-    """ONE CLASSIFIER, AND NOTHING NARROWER THAN WHAT THE GATE READS. Round 1
-    pinned only "no second token list", which the round-2 review showed pins a
-    NARROWING. The escape must ask check()'s classifier AND the full probe
-    over the L8 and the --layer constants."""
+def test_the_escape_decides_by_the_l8_schema_not_by_words():
+    """R-0915-153. Three rounds of deciding by words traded a false FAIL for a
+    false NABS. The escape reads the L8 SCHEMA the emitters declare, and no
+    token vocabulary at all."""
     src = GATE.read_text().split("def main(", 1)[1]
-    assert "classified_groups(waveform)" in src
-    assert "timing_content_probe(waveform, rtl_constants)" in src
+    assert "import l8_timing_schema as _schema" in src
+    for gone in ("timing_content_probe", "_PROTO_GROUP_TOKENS",
+                 "_TIMING_SIDE_WORDS", "_PROVENANCE_FIELDS"):
+        assert gone not in GATE.read_text(), gone
 
 
 # ── the wrapper: the rc-0 site honours the enumeration ─────────────────────
@@ -202,8 +203,6 @@ def test_whole_symbols_not_substrings():
                           "CH0": 1}) == set()
     assert G._symbols_in({"tIBT_us": 1, "tB_break_us": 1, "H0_low": 1,
                           "H1": 1}) == {"H0", "H1", "BR", "IBT"}
-    assert G.timing_content_probe({"source_documents": ["L2_fabric.md"],
-                                   "calibration": {"LIBRARY": 3}}) == []
 
 
 def test_spm_run22_with_its_layer_constants_still_reads_nabs(tmp_path):
@@ -329,3 +328,57 @@ def test_fused_symbols_count_for_check_too():
     assert G._symbols_in({"TIBT_US": 1, "TBR_MIN_US": 1, "H0low": 1,
                           "H1_ns": 1}) == {"IBT", "BR", "H0", "H1"}
     assert G._symbols_in({"LIBRARY": 1, "BRAM": 1, "CH0": 1}) == set()
+
+
+# ── R-0915-153: the L8 schema decides; --layer only as check() reads it ─────
+
+def test_an_unknown_l8_key_fails_closed(tmp_path):
+    """A key no emitter declares non-protocol is not evidence of absence."""
+    _assert_fails(tmp_path, dict(_EMPTY_CANON, frame_waveform={"a": 1}),
+                  "missing_rx_group")
+
+
+_LAYER_WORDS_THAT_ARE_NOT_TIMING = {
+    # wishbone_protocol_synth (review wttwkqmyu): "master" on a list key
+    "key_constants_for_RTL_authoring": {
+        "wishbone_min_master_signals": ["CLK_I", "RST_I", "ADR_O"]},
+    "SHA256_H0_0": "0x6a09e667",      # SHA-2 H(0)
+    "TH1_RELOAD": 253,                # 8051 timer reload
+    "OPCODE_BR": 22,                  # a branch opcode
+}
+
+
+def test_the_layer_is_read_only_as_check_reads_it(tmp_path):
+    """check() reads --layer ONLY through _find_numeric_us TX_IBT / BR_MIN;
+    the escape may not walk it with any vocabulary. Red on f75e3161b."""
+    proj = _project(tmp_path, SPM_L8)
+    lp = proj / "phase1/generated_docs/L8_RTL_CONSTANTS.json"
+    lp.write_text(json.dumps(_LAYER_WORDS_THAT_ARE_NOT_TIMING))
+    rep = proj / "gate.json"
+    r = subprocess.run([sys.executable, str(GATE), str(proj / L8_REL),
+                        "--layer", str(lp), "--json", str(rep)],
+                       capture_output=True, text=True)
+    doc = json.loads(rep.read_text())
+    assert (r.returncode, doc.get("reason_class")) == (0, NABS), doc
+    res = _wrapper(tmp_path / "w", SPM_L8, layer=_LAYER_WORDS_THAT_ARE_NOT_TIMING)
+    assert (res.verdict, res.reason_class) == ("NOT_APPLICABLE", NABS), (
+        res.verdict, res.reason_class)
+
+
+def test_the_schema_is_the_emitters(tmp_path):
+    """The allowlist is checked against the emitters, not trusted: the base
+    L8 emitter's document holds only schema keys, and the clock emitters'
+    key names are the schema's."""
+    import l8_timing_schema as S
+    import l8_clock_reset_waveform_emit as crw
+    import l8_doc_clock_freq_synth as clk
+    import l_doc_generator_stamp as stamp
+    import phase1_doc_one_shot_runner as P1
+    proj = tmp_path / "proj"
+    (proj / "phase1" / "generated_docs").mkdir(parents=True)
+    P1.gen_l8_timing_waveform_doc(proj, {})
+    doc = json.loads((proj / L8_REL).read_text())
+    known = set(S.NON_PROTOCOL_KEYS) | set(S.PROTOCOL_TIMING_CONTAINERS)
+    assert set(doc) <= known, sorted(set(doc) - known)
+    assert {crw.L8_KEY, clk.SCALAR_KEY, stamp.STAMP_KEY,
+            *clk._CLOCK_LIST_KEYS} <= S.NON_PROTOCOL_KEYS
