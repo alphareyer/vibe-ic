@@ -210,3 +210,63 @@ def test_the_stamp_is_additive_and_idempotent():
     assert doc[GA.DOC_KEY] == GA.ROLE_PRODUCER
     del doc[GA.DOC_KEY]
     assert json.dumps(doc, sort_keys=True) == before
+
+
+# ── the note LOCK this branch introduced, met against the digest's identity rule ──
+
+def test_noting_authorship_does_not_move_the_design_hash(tmp_path):
+    """Found by running this branch's suite together with R-0915-151's; neither alone has
+    both halves.
+
+    The notes are locked per note key, and the lock is a SIBLING FILE (`<note>.json.lock`)
+    because locking the note itself would mean opening the file a concurrent writer is
+    replacing. That lock is a 0-byte flock target: it has no content and no stamp, so the
+    digest's IDENTITY rule cannot see it, and it persists after release. Unrecognised, a
+    pass that merely NOTED its own authorship published `design_moved=True` on a
+    byte-identical design -- the record's own bookkeeping causing the defect the record
+    exists to prevent.
+    """
+    import design_input_digest as D
+
+    project = tmp_path / "proj"
+    (project / "input").mkdir(parents=True)
+    (project / "input" / "spec.md").write_text("# a counter\n")
+    noted_rel = "reports/audit/tapeout_checklist.json"
+    noted = project / noted_rel
+    noted.parent.mkdir(parents=True, exist_ok=True)
+    noted.write_text(json.dumps({"checks": []}))
+
+    def sha() -> str:
+        blk = D.build_digest(D.scan_inputs(project), [])
+        assert blk["unusable_reason"] is None, blk
+        return blk["sha256"]
+
+    before = sha()
+    FCC._record_audit_created(project, SID, [noted_rel])
+
+    made = sorted((project / "reports/audit/audit_created").iterdir())
+    assert [f.suffix for f in made] == [".json", ".lock"], [f.name for f in made]
+    for f in made:
+        assert D.is_auditor_output(project, f) is True, f.name
+
+    assert sha() == before, (
+        "recording the audit's own authorship moved the design hash, so every pass that "
+        "wrote a note would read an unchanged design as changed")
+
+
+def test_a_lock_file_outside_the_note_directory_is_still_a_design_input(tmp_path):
+    """The rule is the note directory's exact filename shape, not `*.lock` anywhere."""
+    import design_input_digest as D
+
+    project = tmp_path / "proj"
+    (project / "input").mkdir(parents=True)
+    (project / "input" / "spec.md").write_text("x\n")
+    for rel in ("phase2/stage1/rtl/core.v.lock",
+                "reports/audit/tapeout_checklist.json.lock",
+                "reports/audit/audit_created/not-hex-NAME.json.lock"):
+        f = project / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("")
+        assert D.is_auditor_output(project, f) is False, (
+            f"{rel} is not a lock this auditor mints and must keep counting as a design "
+            f"input")

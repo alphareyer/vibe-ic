@@ -183,11 +183,33 @@ _AUDITOR_TMP_RE = re.compile(
     r"^(?:" + "|".join(re.escape(_p) for _p in AUDITOR_OUTPUT_PATHS)
     + r")\.\d+\.tmp$")
 
+#: The authorship notes are locked per note key, and the lock is a SIBLING FILE
+#: (`<note>.json.lock`) because locking the note itself would mean opening the very file a
+#: concurrent writer is replacing. That lock has no content and no stamp -- it cannot have
+#: one, it is a 0-byte flock target -- so identity cannot see it, and it persists after the
+#: lock is released.
+#:
+#: MEASURED: with it unrecognised, `_record_audit_created` moves the design hash. A pass
+#: that merely NOTED its own authorship would publish `design_moved=True` on a byte-identical
+#: design -- the defect this record exists to prevent, caused by the record's own
+#: bookkeeping. Found by running this branch's suite together with the authorship-note
+#: branch: neither alone has both halves.
+#:
+#: This names ONE DIRECTORY, and that is not the mistake R-0915-151 corrected. The
+#: difference is ownership: `reports/audit/` is the auto-router's catch-all, shared with
+#: producers and with the IC expert's own answer files, while `reports/audit/audit_created/`
+#: is created by `_record_audit_created` alone and holds nothing else -- and the shape is
+#: pinned to the note filename the auditor mints, not to "anything in here".
+_AUDIT_AUTHORSHIP_DIR = "reports/audit/audit_created"
+_AUDITOR_LOCK_RE = re.compile(
+    r"^" + re.escape(_AUDIT_AUTHORSHIP_DIR) + r"/[0-9a-f]+\.json\.lock$")
+
 
 def is_auditor_output(project: Path, path: Path) -> bool:
     """Is this file the AUDITOR's own output rather than a design input?"""
     rel = _rel(project, path)
-    if rel in AUDITOR_OUTPUT_PATHS or _AUDITOR_TMP_RE.match(rel):
+    if (rel in AUDITOR_OUTPUT_PATHS or _AUDITOR_TMP_RE.match(rel)
+            or _AUDITOR_LOCK_RE.match(rel)):
         return True
     if _SUPERSEDED_RE.search(rel):
         return True
