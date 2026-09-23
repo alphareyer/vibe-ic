@@ -2966,6 +2966,15 @@ def _signoff_basis_corners_elsewhere(project_dir: Path, declared_basis: str) -> 
 #: settle the unit and the number was refused on every such run. OpenSTA knows
 #: the unit inside the deck; one line makes the artefact self-describing, and
 #: this is then simply "the report states its own unit".
+#: R-0915-154 — THE DECK'S OWN NAMED GAP, AND IT IS READ HERE. A deck that
+#: cannot answer `sta::unit_scale_abbreviation` writes this instead of writing
+#: nothing, so "this deck could not state its unit" and "this deck was never
+#: asked" stop being the same silence. `_sta_time_unit` quotes it in the reason
+#: it publishes, which is what makes the stamp a disclosure rather than a
+#: decoration nothing consumes.
+_STA_TIME_UNIT_NOT_STATED_RE = re.compile(
+    r"(?:^|\n)\s*#?\s*STA_TIME_UNIT_NOT_STATED\s*:\s*(?P<why>[^\n]*)")
+
 _STA_TIME_UNIT_RE = re.compile(
     r"(?:^|\n)\s*#?\s*(?:STA_TIME_UNIT\s*:\s*|set_cmd_units\s+-time\s+"
     r"|time\s+1)(?P<unit>[munpf]?s)\b", re.I)
@@ -2983,25 +2992,73 @@ _LIBERTY_TIME_UNIT_RE = re.compile(
     r"\btime_unit\s*:\s*\"?\s*1?\s*(?P<unit>[munpf]?s)\s*\"?\s*;", re.I)
 
 
+def _liberty_as_this_process_can_open_it(lib: Path) -> Tuple[Path, str]:
+    """The liberty path THIS process can open, and how it got there.
+
+    THE SAME REPORT MUST READ THE SAME ON THE HOST AND IN THE CONTAINER, and
+    before this it did not. An STA deck runs inside the EDA image and stamps
+    `STA_BASIS_LIBERTY: /foss/pdks/...`, which is a CONTAINER path. This audit
+    runs wherever its caller runs -- and the phase-3 runner calls it on the
+    HOST, where `/foss/pdks` does not exist. So the liberty was unreadable, no
+    time unit could be established, and a report carrying `worst slack max
+    15.20` published NO slack number at all. MEASURED on spm run23 after the
+    2026-09-24 phase-3 re-run: `ic_release_docs_gen` refused with STA_NO_SLACK
+    over a report whose numbers were right there in the transcript.
+
+    TRANSLATED, NEVER GUESSED. `_designs_root.host_spelling` is the one
+    definition of "what is this container path on the host", derived from the
+    mounts docker actually reports; this does not strip a prefix or assume
+    `/foss` maps anywhere. Every failure -- no docker, no mount covering the
+    path, a translated path that still is not there -- returns the ORIGINAL
+    path, so the caller's own "could not be read" branch still fires and the
+    unit stays unestablished BY NAME. A translation that cannot be made is not
+    a unit.
+    """
+    try:
+        if lib.exists():
+            return lib, ""
+    except OSError:
+        return lib, ""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _designs_root as _dr
+        tr = _dr.host_spelling(lib, mounts=_dr.container_mounts())
+        cand = Path(tr.path) if getattr(tr, "path", None) else None
+        if cand is not None and cand.exists():
+            return cand, (f"; the container path was resolved to the host "
+                          f"through the mount docker reports ({tr.basis})")
+    except Exception:                                        # noqa: BLE001
+        # No docker, no daemon, no mount that covers it -- all the same
+        # answer here: this process cannot open it, and says so below.
+        pass
+    return lib, ""
+
+
 def _liberty_time_unit(text: str) -> Tuple[Optional[str], str]:
     """The time unit of the liberty this report says it timed against."""
     m = _STA_BASIS_LIBERTY_RE.search(text or "")
     if not m:
         return None, "the report names no STA_BASIS_LIBERTY"
     lib = Path(m.group("path"))
+    lib, _mapped = _liberty_as_this_process_can_open_it(lib)
     try:
         # A liberty is tens of MB; the declaration is in its opening lines.
         with lib.open("r", errors="replace") as fh:
             head = fh.read(65536)
     except OSError as exc:
         return None, (f"the report names liberty {lib.name} and it could not "
-                      f"be read ({type(exc).__name__})")
+                      f"be read ({type(exc).__name__}){_mapped}")
     lm = _LIBERTY_TIME_UNIT_RE.search(head)
     if not lm:
-        return None, f"liberty {lib.name} declares no time_unit"
+        return None, f"liberty {lib.name} declares no time_unit{_mapped}"
+    # THE TRANSLATION IS DISCLOSED ON THE SUCCESS PATH TOO. A reader comparing
+    # two runs must be able to see that one of them read the liberty through a
+    # mount translation rather than at the name the report states; a note that
+    # appears only when the read FAILS would hide exactly the case where the
+    # answer depended on this process's view of the filesystem.
     return lm.group("unit").lower(), (f"read from the liberty this report "
                                       f"timed against: {lib.name} "
-                                      f"time_unit {lm.group('unit')}")
+                                      f"time_unit {lm.group('unit')}{_mapped}")
 
 
 def _sta_time_unit(text: str) -> Tuple[Optional[str], str]:
@@ -3019,6 +3076,15 @@ def _sta_time_unit(text: str) -> Tuple[Optional[str], str]:
         if unit in _STA_TIME_TO_NS:
             return unit, f"read from the report: {m.group(0).strip()}"
         return None, f"the report states an unrecognised time unit {unit!r}"
+    # THE DECK SAID IT COULD NOT ANSWER. That is a measurement about the
+    # INTERPRETER, not about the design, and it is carried into the reason so a
+    # reader is told which of the two silences this is (R-0915-154: a stamp
+    # nothing reads is not a disclosure — this one is read, here).
+    _ns = _STA_TIME_UNIT_NOT_STATED_RE.search(text or "")
+    _deck_said = ""
+    if _ns:
+        _deck_said = (f"; the deck stated it could not establish the unit "
+                      f"({_ns.group('why').strip()})")
     # NO DECK IN THIS TREE PRINTS ONE. `git grep report_units|set_cmd_units`
     # over the plugin finds only this file's own comments, so the branch above
     # never fires on a report the flow wrote -- which is why the round-2
@@ -3026,8 +3092,9 @@ def _sta_time_unit(text: str) -> Tuple[Optional[str], str]:
     # NAMES is the authority, and it has one.
     unit, basis = _liberty_time_unit(text)
     if unit in _STA_TIME_TO_NS:
-        return unit, basis
-    return None, (basis + "; and the report states no time unit of its own, "
+        return unit, basis + _deck_said
+    return None, (basis + _deck_said
+                  + "; and the report states no time unit of its own, "
                   "so no number is published under an _ns name")
 
 
