@@ -106,6 +106,9 @@ _L8_DOCS = ("L8_TIMING_WAVEFORM", "L8_RTL_CONSTANTS")
 #: The two list keys that hold clock records. `clock_domains` is what
 #: `sdc_gen._clock_mhz_from_l8_domains` reads; `clocks` is the sibling view.
 _CLOCK_LIST_KEYS = ("clock_domains", "clocks")
+#: The scalar this emitter writes beside them. `l8_timing_schema` reads both
+#: names from here, so the timing gate's allowlist is the emitter's spelling.
+SCALAR_KEY = "clock_mhz"
 
 #: Frequency units and their multiplier into Hz. Structural, not chip-specific.
 _FREQ_UNITS: Dict[str, float] = {
@@ -494,8 +497,8 @@ def _apply(project: Path, derived: Dict[str, Any]) -> Dict[str, Any]:
         if _conflict:
             report["clock_mhz_conflict"] = True
         if (scalar_mhz is not None and not _conflict
-                and d.get("clock_mhz") in (None, "", 0)):
-            d["clock_mhz"] = scalar_mhz
+                and d.get(SCALAR_KEY) in (None, "", 0)):
+            d[SCALAR_KEY] = scalar_mhz
             if "no_clock_mhz_in_input" in d:
                 d["no_clock_mhz_in_input"] = False
             report["clock_mhz_set"] = scalar_mhz

@@ -193,34 +193,9 @@ def _find_numeric_us(obj: Any, needle: str) -> float | None:
     return None
 
 
-#: THE FULL PROBE'S VOCABULARY. Symbols are matched against IDENTIFIER TOKENS
-#: (`_identifier_tokens`), never as substrings: "LIBRARY"/"CALIBRATION"/
-#: "FABRIC" carry no BR and "CH0" no H0, while the fused spellings a timing
-#: table really uses -- TIBT_US, TBR_MIN_US, IBTmin, H0low, tbreak_us -- do.
+#: Per-symbol names read by check()'s `_symbols_in`, matched against
+#: IDENTIFIER TOKENS (`_identifier_tokens`), never as substrings.
 _TIMING_SYMBOLS = frozenset({"h0", "h1", "br", "ibt", "break"})
-_TIMING_SIDE_WORDS = frozenset({"rx", "tx", "host", "dut", "master", "slave",
-                                "external", "internal"})
-#: The words main's escape read off top-level group names (its substring list
-#: `rx_ tx_ host_ dut_ external_ internal_ _counters _cycles symbol _low _high
-#: break ibt`), now as tokens. Kept so the escape is never narrower than main.
-_LEGACY_GROUP_WORDS = frozenset({"rx", "tx", "host", "dut", "external",
-                                 "internal", "counters", "cycles", "symbol",
-                                 "symbols", "low", "high", "break", "ibt"})
-
-#: PROVENANCE IS A SET OF FIELDS, NOT A SHAPE OF CONTENT (review of ictier1c
-#: round 2). Where the design came from, how a value was extracted and what a
-#: diagram is captioned say nothing about protocol timing, and reading them
-#: FAILED designs main passed ("Wishbone master read cycle",
-#: `L3_external_interface.asciidoc`). These fields are never probed; every
-#: other field is, whatever its content looks like.
-_PROVENANCE_FIELDS = frozenset({
-    "source", "sources", "source_file", "source_files", "source_documents",
-    "source_documents_derivation", "extraction_evidence",
-    "extraction_strategy", "evidence", "provenance", "_generator",
-    "caption", "title", "description", "desc", "comment", "comments", "note",
-    "notes", "literal", "matched_substring", "strategy", "role", "doc_class",
-    "ic_name", "schema_version",
-})
 
 
 def _identifier_tokens(text: Any) -> list[str]:
@@ -246,68 +221,6 @@ def _token_symbol(tok: str) -> str | None:
         if cand in _TIMING_SYMBOLS:
             return "BR" if cand == "break" else cand.upper()
     return None
-
-
-def _names_a_symbol(text: Any) -> bool:
-    return any(_token_symbol(t) for t in _identifier_tokens(text))
-
-
-def _names_a_side(text: Any) -> bool:
-    return bool(set(_identifier_tokens(text)) & _TIMING_SIDE_WORDS)
-
-
-def timing_content_probe(waveform: Any, rtl_constants: Any = None) -> list[str]:
-    """Every place that carries protocol symbol timing, as paths.
-
-    DECIDED BY FIELD (review of ictier1c round 2). Provenance fields are never
-    read (`_PROVENANCE_FIELDS`, and a `waveforms[]` entry's own name, which is
-    its caption); every other field is:
-      * a key or a `name`/`symbol`/`signal` value, or a list string, that names
-        a timing SYMBOL (H0/H1/BR/IBT/break, fused or not) -- a key only when
-        it holds something (null/bool are declarations of absence);
-      * a key that names a SIDE (rx/tx/host/dut/master/slave/external/
-        internal) and holds a GROUP (dict or list) -- the shape `check()`
-        treats as a side. A caption or a constant NAMED `master_clk` is not a
-        side;
-      * the `--layer` constants read exactly as `check()` reads them for the
-        IBT<BR cross-check, through `_find_numeric_us`.
-    """
-    hits: list[str] = []
-
-    def _walk(node: Any, path: str, in_waveforms: bool = False) -> None:
-        if isinstance(node, dict):
-            for k, v in node.items():
-                if str(k) in _PROVENANCE_FIELDS:
-                    continue
-                sub = f"{path}.{k}" if path else str(k)
-                if v is not None and not isinstance(v, bool):
-                    if _names_a_symbol(k):
-                        hits.append(sub)
-                    elif isinstance(v, (dict, list)) and _names_a_side(k):
-                        hits.append(sub)
-                if (k in ("name", "symbol", "signal") and isinstance(v, str)
-                        and not (in_waveforms and k == "name")
-                        and _names_a_symbol(v)):
-                    hits.append(f"{sub}={v}")
-                _walk(v, sub, in_waveforms=False)
-        elif isinstance(node, list):
-            for i, item in enumerate(node):
-                if isinstance(item, str) and _names_a_symbol(item):
-                    hits.append(f"{path}[{i}]={item}")
-                _walk(item, f"{path}[{i}]", in_waveforms=in_waveforms)
-
-    if isinstance(waveform, dict):
-        for k, v in waveform.items():
-            if str(k) in _PROVENANCE_FIELDS:
-                continue
-            _walk({k: v}, "L8", in_waveforms=False) if k != "waveforms" \
-                else _walk(v, "L8.waveforms", in_waveforms=True)
-    if rtl_constants is not None:
-        _walk(rtl_constants, "layer")
-        for needle in ("TX_IBT", "BR_MIN"):
-            if _find_numeric_us(rtl_constants, needle) is not None:
-                hits.append(f"layer:{needle}")
-    return hits
 
 
 def classified_groups(waveform: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -665,95 +578,49 @@ def main() -> int:
                 not _timing_constants_carry_protocol_symbols(v):
             return True  # scalar clock-frequency only, no protocol symbols (#655)
         return False
-    # Only VACUOUS_PASS when there is genuinely NO protocol/symbol timing
-    # content -- and "none" is decided by `check()`'s OWN classifier, not by a
-    # second vocabulary. This escape used to keep its own token list
-    # (`_PROTO_GROUP_TOKENS`) over key NAMES only, requiring non-empty values;
-    # the review of next/icspm5-s2 CONFIRMED three documents it certified as a
-    # structural absence while `check()` over the SAME document FAILs: the v068
-    # flat `timing_parameters` {tDW0_us, tB_break_us, tIBT_us}; a
-    # `timing_groups` pair `detect_thresholds` / `drive_widths` missing IBT; and
-    # `timing_groups` {rx_timing: {}, tx_timing: {}}. Now the escape may fire
-    # ONLY when `classified_groups` finds no RX group and no TX group AND
-    # `_symbols_in` -- check()'s per-symbol reader -- finds no H0/H1/BR/IBT
-    # content in the VALUE of any walked non-canonical container.
-    _group_items = list(waveform.items())
-    _tg = waveform.get("timing_groups")
-    if isinstance(_tg, dict):
-        _group_items += [(f"timing_groups.{k}", v) for k, v in _tg.items()]
-    #
-    # ROUND 2 (review of next/ictier1c, 8646e1862): the classifier and
-    # `_symbols_in` read only group KEYS and dict KEYS, so the escape went
-    # NARROWER than the token list it replaced -- scalar `H0_low_us`/`IBT_us`,
-    # a `symbol_timing` list of `{"name": "H0"}`, `break_*` windows,
-    # `master_side`/`slave_side`, `protocol_timing.rx_side`, and the clause's
-    # own `--layer` constants all reached NOT_APPLICABLE_BY_STRUCTURE. The
-    # escape now needs ALL of these to find nothing: check()'s classifier, the
-    # FULL probe over every key/name/list string of the L8 AND the --layer
-    # constants (`timing_content_probe`, whole-word), and the old group-name
-    # words at the level they were always read (top level + timing_groups).
-    _rx, _tx = classified_groups(waveform)
-    _probe_hits = timing_content_probe(waveform, rtl_constants)
-    _legacy_hit = any(
-        v is not None and not isinstance(v, bool)
-        and str(k).rsplit(".", 1)[-1] not in _PROVENANCE_FIELDS
-        and (set(_identifier_tokens(k)) & _LEGACY_GROUP_WORDS
-             or _names_a_symbol(k))
-        for k, v in _group_items)
-    _has_proto_group = bool(_rx or _tx or _probe_hits or _legacy_hit)
+    # R-0915-153 — DECIDED BY THE L8 SCHEMA, NOT BY WORDS. Three rounds of
+    # deciding "no protocol timing here" from key-name / content tokens each
+    # traded a false FAIL for a false NABS. The escape now fires ONLY when:
+    #   * every protocol-timing container the emitter defines
+    #     (`l8_timing_schema.PROTOCOL_TIMING_CONTAINERS`) is empty -- the
+    #     canonical lists still read through the #617/#655 content
+    #     discriminators above, `timing_groups`/`symbol_directionality` empty;
+    #   * EVERY other top-level key is one an emitter declares non-protocol
+    #     (`l8_timing_schema.NON_PROTOCOL_KEYS`); an UNKNOWN key is not
+    #     evidence of absence, so check() runs (fail closed);
+    #   * the --layer constants hold neither value check() reads from them
+    #     (`_find_numeric_us` TX_IBT / BR_MIN) -- the layer is read ONLY that
+    #     way, never walked.
+    # No token vocabulary is consulted here.
+    import l8_timing_schema as _schema
     _CANONICAL = ("timing_windows", "timing_constants", "waveforms")
-    # AND THE ESCAPE MAY NOT OVERRIDE A DECLARATION. Its own comment says it
-    # "fires when L2 says NOTHING and the gate ENUMERATES the L8 document
-    # instead" -- but the condition never read L2 at all, so a design that
-    # DECLARES `protocol_overview.half_duplex=true` and whose L8 happens to have
-    # emitted its canonical containers empty reached this branch and was
-    # published as a structural absence. A declared half-duplex protocol has two
-    # sides by declaration; if its L8 carries no timing, that is a missing
-    # document, which `check()` already answers with missing_rx_group /
-    # missing_tx_group. Inference never outranks the design's own word.
-    if (half_duplex_l2 is not True
-            and (not _has_proto_group) and all(_empty(k) for k in _CANONICAL)):
-        # THIS ESCAPE INFERS THE ABSENCE; IT IS NOT A DESIGN DECLARATION, and the
-        # two were being reported with one word. The sibling escape above fires
-        # when L2 EXPLICITLY declares `protocol_overview.half_duplex=false` --
-        # there DESIGN_DECLARED_NA is exactly right and it keeps it. This one
-        # fires when L2 says NOTHING and the gate ENUMERATES the L8 document
-        # instead: the three canonical containers, plus every key of `waveform`
-        # scanned for a directional / per-symbol token. Zero found. That is a
-        # structural absence, and R-0915-124/125 require it be NAMED as one WITH
-        # the enumeration behind it -- `_structural_absence.absence()` refuses a
-        # claim that cannot say what it walked, which is the whole guard.
-        #
-        # MEASURED on run21, a signed serial-parallel multiplier: this clause was
-        # one of the two step 2 reported as "PARTIALLY-VACUOUS (2 of 18 gate
-        # clause(s) examined nothing)" while filing DESIGN_DECLARED_NA -- a class
-        # whose own justification comment cites an L2 declaration this branch
-        # never reads. The design genuinely is not a protocol IC and has no RX/TX
-        # timing to split, so the ANSWER was right and only the word was wrong.
-        # SCANNED COUNTS WHAT WAS WALKED, NOT WHAT COULD HAVE EXISTED. The
-        # previous list named all three canonical containers whether or not the
-        # document had them, so a document with none of them still published
-        # "scanned 3" -- an enumeration of NAMES, which is exactly the claim
-        # `_structural_absence` exists to refuse. A container that is absent was
-        # not examined; only a container that is PRESENT (and then found empty
-        # of protocol content) is evidence of an absence.
-        _scanned_names = sorted(
-            {str(k) for k in _CANONICAL if k in waveform}
-            | {str(k) for k, _v in _group_items if str(k) not in _CANONICAL}
-            # the --layer constants were probed too, so they are enumerated
-            | ({f"layer:{k}" for k in rtl_constants}
-               if isinstance(rtl_constants, dict) else set()))
+    _containers_empty = all(
+        _empty(k) if k in _CANONICAL else not waveform.get(k)
+        for k in _schema.PROTOCOL_TIMING_CONTAINERS)
+    _unknown_keys = sorted(
+        str(k) for k in waveform
+        if k not in _schema.PROTOCOL_TIMING_CONTAINERS
+        and k not in _schema.NON_PROTOCOL_KEYS)
+    _layer_timing = rtl_constants is not None and any(
+        _find_numeric_us(rtl_constants, needle) is not None
+        for needle in ("TX_IBT", "BR_MIN"))
+    if (half_duplex_l2 is not True and _containers_empty
+            and not _unknown_keys and not _layer_timing):
+        # The enumeration is exactly what was decided on: every top-level key
+        # of the document, each one either an empty protocol container or a
+        # schema-declared non-protocol key.
+        _scanned_names = sorted(str(k) for k in waveform)
         _absence = _sa.absence(
-            population=("L8_TIMING_WAVEFORM container(s) and group key(s) that "
-                        "could carry half-duplex protocol symbol timing"),
+            population=("L8_TIMING_WAVEFORM top-level key(s), classified by "
+                        "the L8 schema (l8_timing_schema)"),
             scanned=len(_scanned_names),
             found=0,
             names=_scanned_names,
-            detail=("check()'s classifier found no RX and no TX group, and a "
-                    "whole-word probe of every key, name and list string of the "
-                    "L8 and the --layer constants found no side (rx/tx/host/dut/"
-                    "master/slave/external/internal) or symbol (H0/H1/BR/IBT/"
-                    "break) word, so there are no two sides to split"))
+            detail=("every protocol-timing container the L8 schema defines is "
+                    "empty, every other key is one the emitters declare "
+                    "non-protocol, and the --layer constants carry no TX_IBT / "
+                    "BR_MIN value, so there are no two sides to split "
+                    "(R-0915-153)"))
         msg = _sa.sentence(_absence, "internal_vs_external_timing")
         if args.json:
             txt = json.dumps({

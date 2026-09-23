@@ -37,6 +37,10 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
 import l_doc_generator_stamp as _stamp  # noqa: E402
+
+#: The L8 key this emitter writes. `l8_timing_schema` reads it from here, so
+#: the timing gate's non-protocol allowlist is the emitter's own spelling.
+L8_KEY = "clock_and_reset_waveform"
 import _atomic_artefact as _aa  # noqa: E402
 
 TOOL = "l8_clock_reset_waveform_emit"
@@ -159,7 +163,7 @@ def run(project: Path) -> Dict[str, Any]:
                 "emitted_count": 0}
 
     for scope in _scopes(l8):
-        if _nonempty(scope.get("clock_and_reset_waveform")):
+        if _nonempty(scope.get(L8_KEY)):
             return {"tool": TOOL, "status": "OK", "emitted_count": 0,
                     "reason": "existing clock_and_reset_waveform preserved"}
 
@@ -169,7 +173,7 @@ def run(project: Path) -> Dict[str, Any]:
                 "reason": "typed clock and reset records are not both present",
                 "emitted_count": 0}
 
-    l8["clock_and_reset_waveform"] = value
+    l8[L8_KEY] = value
     sources = l8.get("source_documents")
     sources = list(sources) if isinstance(sources, list) else []
     if L9_REL not in sources:
