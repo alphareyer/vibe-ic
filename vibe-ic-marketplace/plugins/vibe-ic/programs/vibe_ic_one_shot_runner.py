@@ -931,10 +931,17 @@ def _row_verdict(project: Path, report_name: str, rc: int, started_at: float,
     # ONE CLASS FOR EVERY NON-ZERO rc, INCLUDING THE STALL (rc 2 UNDETERMINED), and it is FAIL on
     # both paths. It used to be FAIL on a fresh project and NOT_MEASURED on a re-run, which is two
     # answers to one question. FAIL is the right single answer because MEASURED, every non-zero rc
-    # a phase runner in this tree returns is a refusal or an error and none is benign: rc 2 is
-    # "not a directory", an uncaught exception, or "REFUSED: canonical Phase-3 admission"; rc 3 is
-    # the refusal of a second concurrent run on a live project; rc 4 comes WITH a fresh report, so
-    # it never reaches here. A process that refused to run measured nothing AND said so, which is
+    # a phase runner in this tree returns is a refusal or an error and none is benign: rc 1 is a
+    # verdict of FAIL, a NOT_MEASURED aggregate, or an UNCAUGHT EXCEPTION; rc 2 is "not a
+    # directory", the announced UNDETERMINED stall, or "REFUSED: canonical Phase-3 admission"; rc 3
+    # is the refusal of a second concurrent run on a live project; rc 4 comes WITH a fresh report,
+    # so it never reaches here.
+    #
+    # CORRECTING r7's OWN LIST: it put "an uncaught exception" under rc 2. It is rc 1. Each phase
+    # runner exits through `_progress_run.exit_undetermined_on_stall(main)`, which catches
+    # `Stalled` ONLY and returns RC_UNDETERMINED for it; anything else propagates and CPython
+    # exits 1. Nothing about this rule changes -- both classes are FAIL here -- but a comment that
+    # misfiles an exit code is how the next reader builds a wrong rule on top of it. A process that refused to run measured nothing AND said so, which is
     # a failure to produce the phase, not an absence of information about it.
     published_here = exists and fresh
     if not published_here:

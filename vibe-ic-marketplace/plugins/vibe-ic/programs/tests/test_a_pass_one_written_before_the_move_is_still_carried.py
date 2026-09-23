@@ -213,8 +213,21 @@ def test_a_second_pass_over_a_routed_project_says_nothing_about_legacy(tmp_path,
 SIDECAR_REL = "reports/phase1/phase1_exit_reason.json"
 
 
-def _coverage_only_project(tmp_path: Path, *, sidecar_newer: bool = True) -> Path:
-    """A project as an AI-backup re-invocation finds it: pass 1 recorded, sidecar beside it."""
+def _pass_one_as_it_really_leaves_a_project(
+        tmp_path: Path, *, names_the_sidecar: bool = True,
+        d1_refused: bool = False) -> Path:
+    """A project as a real pass 1 leaves it, IN THE REAL WRITE ORDER.
+
+    THE ORDER IS THE WHOLE POINT, and the previous fixture had it backwards. Pass 1 writes the
+    sidecar FIRST -- `phase1_doc_one_shot_runner` emits it in-process from inside D1 -- and its
+    record LAST, after the expert track and the steps view. The old fixture staged the sidecar at
+    `record + 10s`, so the producer's `sidecar.mtime >= record.mtime` test passed here and was
+    false on every real re-invocation: the defect lived entirely in the gap between this fixture
+    and the write order it claimed to reproduce.
+
+    Both files are back-dated so they predate any later invocation's phase-1 start, which is the
+    situation the second pass is actually in.
+    """
     import os
     import time
 
@@ -222,36 +235,109 @@ def _coverage_only_project(tmp_path: Path, *, sidecar_newer: bool = True) -> Pat
     (p / "input").mkdir(parents=True)
     (p / "input" / "spec.md").write_text("# a counter\n")
 
-    record = _pl.report_path(p, NAME)
-    record.parent.mkdir(parents=True, exist_ok=True)
-    record.write_text(json.dumps({
-        "phase": 1, "mode": "docs", "verdict": "FAIL",
-        "steps": [{"name": "doc_extract", "status": "FAIL"}],
-    }) + "\n")
-
+    # 1. D1 writes the sidecar, in-process, before anything else is published.
     side = p / SIDECAR_REL
     side.parent.mkdir(parents=True, exist_ok=True)
     side.write_text(json.dumps({"coverage_only_failure": True}) + "\n")
 
-    # the record is back-dated so both files predate any later invocation's phase start;
-    # `sidecar_newer` decides whether the sidecar belongs to THAT record or to an older one.
+    # 2. pass 1 publishes its record LAST, naming the sidecar it wrote.
+    record = _pl.report_path(p, NAME)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    doc = {
+        "phase": 1, "mode": "docs", "verdict": "FAIL",
+        "steps": [{"name": "doc_extract", "status": "FAIL"}],
+    }
+    if names_the_sidecar and not d1_refused:
+        import hashlib
+        doc["pass1_coverage_sidecar"] = {
+            "rel": SIDECAR_REL,
+            "sha256": hashlib.sha256(side.read_bytes()).hexdigest(),
+            "named_by": "pass 1, which wrote it",
+        }
+    record.write_text(json.dumps(doc) + "\n")
+
     base = time.time() - 5000
-    os.utime(record, (base, base))
-    os.utime(side, (base + 10, base + 10) if sidecar_newer else (base - 10, base - 10))
+    os.utime(side, (base, base))                    # sidecar first ...
+    os.utime(record, (base + 10, base + 10))        # ... record last. The real order.
     return p
 
 
-def test_the_second_pass_names_the_coverage_sidecar_it_carried(tmp_path, monkeypatch):
-    """The second pass must hand the sidecar's identity forward with the record.
+def test_pass_one_names_the_sidecar_it_wrote(tmp_path):
+    """THE PRODUCER HALF, at the site that is entitled to mint the name.
 
-    `run_second_pass_only` carries pass 1's record and never rewrites the sidecar, so the front
-    door's mtime rule -- correct for a first pass -- refused it on a re-invocation and a
-    `--skip-phase3` coverage-only project flipped from PASS_WITH_WAIVERS to FAIL. The record now
-    NAMES the sidecar by content.
+    D1 ran and left a sidecar, so the record names it by content. No clock is consulted: the
+    entitlement is that D1 ran in THIS pass.
     """
+    import hashlib
+
     import phase1_one_shot_runner as P1
 
-    project = _coverage_only_project(tmp_path)
+    project = tmp_path / "proj"
+    side = project / P1.COVERAGE_SIDECAR_REL
+    side.parent.mkdir(parents=True, exist_ok=True)
+    side.write_text(json.dumps({"coverage_only_failure": True}) + "\n")
+
+    summary: dict = {}
+    P1._name_the_sidecar_this_pass_wrote(project, summary, d1_ran=True)
+    named = summary.get("pass1_coverage_sidecar")
+    assert isinstance(named, dict), summary
+    assert named["rel"] == P1.COVERAGE_SIDECAR_REL
+    assert named["sha256"] == hashlib.sha256(side.read_bytes()).hexdigest()
+
+
+def test_a_pass_whose_d1_was_refused_names_nothing(tmp_path):
+    """THE ENTITLEMENT, in the direction that matters. D1 is the only thing that writes the
+    sidecar, so a pass in which D1 was REFUSED wrote none and must name none -- naming it would
+    hand an earlier run's exemption to this one."""
+    import phase1_one_shot_runner as P1
+
+    project = tmp_path / "proj"
+    side = project / P1.COVERAGE_SIDECAR_REL
+    side.parent.mkdir(parents=True, exist_ok=True)
+    side.write_text(json.dumps({"coverage_only_failure": True}) + "\n")
+
+    summary: dict = {}
+    P1._name_the_sidecar_this_pass_wrote(project, summary, d1_ran=False)
+    assert "pass1_coverage_sidecar" not in summary, summary
+    assert "REFUSED" in (summary.get("pass1_coverage_sidecar_refused") or ""), summary
+
+
+def test_pass_one_forgets_an_earlier_runs_sidecar_before_it_starts(tmp_path):
+    """What makes the naming above structural rather than temporal. Without this, a pass whose D1
+    never reached its own classifier would find a previous run's sidecar and name it."""
+    import phase1_one_shot_runner as P1
+
+    project = tmp_path / "proj"
+    side = project / P1.COVERAGE_SIDECAR_REL
+    side.parent.mkdir(parents=True, exist_ok=True)
+    side.write_text(json.dumps({"coverage_only_failure": True}) + "\n")
+    assert side.is_file()
+
+    P1._forget_any_earlier_coverage_sidecar(project)
+    assert not side.exists(), (
+        "an earlier run's coverage-only sidecar survived into this pass, so a pass that wrote "
+        "none could still name one")
+    P1._forget_any_earlier_coverage_sidecar(project)     # and it is idempotent
+
+
+def test_the_second_pass_carries_the_name_pass_one_gave_it(tmp_path, monkeypatch):
+    """THE REGRESSION, in the real write order.
+
+    At r7 this arm's subject named the sidecar only when `sidecar.mtime >= record.mtime`. With the
+    sidecar written FIRST -- as it really is -- that test is false, no name was carried, and the
+    front door read 'NOT demoting': a `--skip-phase3` coverage-only project that was
+    PASS_WITH_WAIVERS flipped to FAIL and halted at phase 1. The second pass now CARRIES the name
+    and computes nothing.
+    """
+    import hashlib
+
+    import phase1_one_shot_runner as P1
+
+    project = _pass_one_as_it_really_leaves_a_project(tmp_path)
+    assert (project / SIDECAR_REL).stat().st_mtime < _pl.report_path(
+        project, NAME).stat().st_mtime, (
+        "the fixture must stage the REAL order (sidecar first); otherwise it reproduces nothing")
+
     monkeypatch.setattr(P1._pl, "emit_steps_view", lambda *a, **k: {"stubbed": True},
                         raising=False)
     monkeypatch.setattr(P1, "_consume_expert_answer",
@@ -262,20 +348,20 @@ def test_the_second_pass_names_the_coverage_sidecar_it_carried(tmp_path, monkeyp
     named = doc.get("pass1_coverage_sidecar")
     assert isinstance(named, dict), doc.get("pass1_coverage_sidecar_refused") or doc.keys()
     assert named["rel"] == SIDECAR_REL
-    import hashlib
     assert named["sha256"] == hashlib.sha256(
         (project / SIDECAR_REL).read_bytes()).hexdigest()
 
 
-def test_a_sidecar_older_than_its_own_record_is_not_carried(tmp_path, monkeypatch):
+def test_a_sidecar_the_carried_record_does_not_name_stays_refused(tmp_path, monkeypatch):
     """The half that keeps this from laundering a stale file.
 
-    A sidecar older than the pass-1 record it would belong to describes a STILL earlier run. It is
-    not named, and the refusal is recorded so a reader can see why the demotion was unavailable.
+    A sidecar on disk that the carried pass-1 record says nothing about has nothing saying which
+    pass wrote it. It is not named, and the refusal is recorded so a reader can see why the
+    demotion was unavailable rather than wondering where the sidecar went.
     """
     import phase1_one_shot_runner as P1
 
-    project = _coverage_only_project(tmp_path, sidecar_newer=False)
+    project = _pass_one_as_it_really_leaves_a_project(tmp_path, names_the_sidecar=False)
     monkeypatch.setattr(P1._pl, "emit_steps_view", lambda *a, **k: {"stubbed": True},
                         raising=False)
     monkeypatch.setattr(P1, "_consume_expert_answer",
@@ -284,38 +370,42 @@ def test_a_sidecar_older_than_its_own_record_is_not_carried(tmp_path, monkeypatc
 
     doc = json.loads(_pl.report_path(project, NAME).read_text())
     assert "pass1_coverage_sidecar" not in doc, doc.get("pass1_coverage_sidecar")
-    assert "OLDER than the pass-1 record" in (
+    assert "does not name it" in (
         doc.get("pass1_coverage_sidecar_refused") or ""), doc.keys()
 
 
-def test_the_front_door_demotes_on_a_named_sidecar_and_refuses_an_unnamed_one(tmp_path):
-    """The reader half, both directions, driven on `_expected`-shaped inputs.
+def test_the_second_pass_orders_nothing_by_mtime(tmp_path):
+    """THE MUTATION NO FIXTURE CAN CATCH ONCE IT IS STAGED CORRECTLY.
 
-    The sidecar legitimately predates this invocation's phase-1 start on a re-invocation; what
-    makes it trustworthy is that THIS invocation's pass-1 record names it by content. A record that
-    does not name it, or a sidecar whose bytes no longer match, stays refused.
+    An mtime comparison between the sidecar and the record is wrong in a direction no arm can
+    detect unless the arm happens to stage the real order -- which the previous fixture did not,
+    for exactly this reason. So the ordering is pinned OUT of the function by AST: nothing in
+    `run_second_pass_only` may read the sidecar's mtime.
     """
-    import hashlib
+    import ast as _ast
 
-    import vibe_ic_one_shot_runner as VV
+    src = (PROGRAMS / "phase1_one_shot_runner.py").read_text()
+    fn = next((n for n in _ast.walk(_ast.parse(src))
+               if isinstance(n, _ast.FunctionDef) and n.name == "run_second_pass_only"), None)
+    assert fn is not None, "run_second_pass_only is gone; re-pin this arm on its replacement"
+    body = _ast.unparse(fn)
+    for spelling in ("st_mtime", "getmtime"):
+        assert spelling not in body, (
+            f"run_second_pass_only reads {spelling} again; the sidecar's name is CARRIED from "
+            f"pass 1, and ordering it against the record it belongs to is backwards on every "
+            f"real re-invocation")
 
-    project = _coverage_only_project(tmp_path)
-    side = project / SIDECAR_REL
-    sha = hashlib.sha256(side.read_bytes()).hexdigest()
 
-    # the demotion predicate itself still sees a coverage-only sidecar. It answers a TUPLE
-    # (is_coverage_only, the sidecar it read) -- read it that way rather than as a bool.
-    _cov, _payload = VV._phase1_failure_is_coverage_only(project)
-    assert _cov is True, (_cov, _payload)
-    assert _payload.get("coverage_only_failure") is True, _payload
-
-    # named + bytes match -> the front door may demote; the source says so in one place
-    src = (PROGRAMS / "vibe_ic_one_shot_runner.py").read_text()
-    assert "pass1_coverage_sidecar" in src, (
-        "the front door does not consult the record's naming of the sidecar")
-    assert "_have == str(_named.get(\"sha256\") or \"\")" in src, (
-        "the front door accepts the naming without checking the bytes")
-
-    # and a swapped sidecar no longer matches the sha the record named
-    side.write_text(json.dumps({"coverage_only_failure": True, "swapped": True}) + "\n")
-    assert hashlib.sha256(side.read_bytes()).hexdigest() != sha
+# ── the READER half is not here, and that is deliberate ──────────────────────
+#
+# r7 ended this file with an arm called
+# `test_the_front_door_demotes_on_a_named_sidecar_and_refuses_an_unnamed_one`, and a review was
+# right that it proved nothing about the front door: it asserted two SOURCE SUBSTRINGS
+# (`"pass1_coverage_sidecar" in src`, and the sha comparison spelled exactly as written) and never
+# called `main()`. A source-substring arm goes green on code that is never reached, which is what
+# happened -- the producer half never named the sidecar, so the branch those substrings live in
+# could not fire, and this file still passed.
+#
+# The reader half is therefore driven END TO END, through the real `main()`, where the harness for
+# that already exists: `test_the_front_door_rollup_edges.py`, section H5 -- invocation A demotes,
+# invocation B's second pass still demotes, and a sidecar swapped after A is refused.

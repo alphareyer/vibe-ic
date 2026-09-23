@@ -996,3 +996,153 @@ def test_rc_zero_over_a_stale_report_is_still_not_measured(project):
     assert verdict == "NOT_MEASURED", (verdict, why)
     assert "describes an earlier run" in (why or ""), why
     assert "verdict is not read" in (why or ""), why
+
+
+# ── H5: the AI-backup re-invocation, driven END TO END ──────────────────────
+#
+# THE DEFECT (review wjn67aev3, MEDIUM #2). The front door may demote a coverage-only phase-1
+# FAIL, and for a FIRST pass it decides the sidecar is this invocation's by mtime against the
+# phase-1 start. On the expert SECOND pass that is wrong -- the pass carries pass 1's record and
+# never rewrites the sidecar -- so the record NAMES the sidecar by content instead.
+#
+# r7 got the producer half backwards: the second pass named it only when
+# `sidecar.mtime >= record.mtime`, while pass 1 writes the sidecar FIRST (in-process, from inside
+# D1) and its record LAST. So on every real re-invocation nothing was named, the front door read
+# "NOT demoting", and a `--skip-phase3` coverage-only project that was PASS_WITH_WAIVERS flipped
+# to FAIL and halted at phase 1.
+#
+# AND NEITHER HALF'S ARMS COULD SEE IT: the producer fixture staged the sidecar at `record + 10s`,
+# the reverse of the real order, and the reader arm asserted source substrings without ever
+# calling `main()`. These three arms drive the REAL `main()`, in the REAL write order, with the
+# REAL `run_second_pass_only` doing the carrying.
+
+def _sidecar(project: Path) -> Path:
+    return project / "reports" / "phase1" / "phase1_exit_reason.json"
+
+
+def _as_pass_one_leaves_it(project: Path, *, age_s: float = 5000.0) -> str:
+    """Stage what a completed pass 1 leaves behind, IN THE REAL ORDER, and return the sha it named.
+
+    Sidecar first, record last, both old enough to predate any later invocation's phase-1 start --
+    which is exactly the situation the second pass is in and the one the mtime rule got wrong.
+    """
+    import hashlib
+    import os
+
+    import phase1_one_shot_runner as P1
+
+    side = _sidecar(project)
+    side.parent.mkdir(parents=True, exist_ok=True)
+    side.write_text(json.dumps({"coverage_only_failure": True,
+                                "coverage_pct": 71.0, "total_todo": 0}) + "\n")
+    sha = hashlib.sha256(side.read_bytes()).hexdigest()
+
+    summary = {"phase": 1, "mode": "docs", "verdict": "FAIL",
+               "steps": [{"name": "doc_extract", "status": "FAIL"}]}
+    # THE PRODUCER'S OWN CALL, not a hand-written field: if pass 1 stops naming the sidecar, or
+    # names it differently, these arms follow it instead of describing a shape nobody writes.
+    P1._name_the_sidecar_this_pass_wrote(project, summary, d1_ran=True)
+    assert summary.get("pass1_coverage_sidecar", {}).get("sha256") == sha, summary
+    _report(project, "phase1_one_shot.json", summary)
+
+    then = time.time() - age_s
+    os.utime(side, (then, then))                                  # sidecar first ...
+    record = _pl.report_path(project, "phase1_one_shot.json")
+    os.utime(record, (then + 10, then + 10))                      # ... record last
+    assert side.stat().st_mtime < record.stat().st_mtime, (
+        "the fixture must stage the REAL order, or it reproduces nothing")
+    return sha
+
+
+def _drive_second_pass(project: Path, monkeypatch, *, extra_argv=()) -> tuple:
+    """`main()` where phase 1 is the REAL `run_second_pass_only`.
+
+    Only the expert consumption and the steps view are stubbed -- the two things that would need a
+    delivered subagent answer and a full step tree. The carrying, the naming and every line of the
+    front door's demotion branch are the shipped ones.
+    """
+    import phase1_one_shot_runner as P1
+
+    monkeypatch.setattr(P1._pl, "emit_steps_view", lambda *a, **k: {"stubbed": True},
+                        raising=False)
+    monkeypatch.setattr(P1, "_consume_expert_answer",
+                        lambda *a, **k: (0, {"consumed": True}), raising=False)
+
+    def fake_run_phase(label, runner, args, env=None):
+        if "phase1" in runner.name:
+            return P1.run_second_pass_only(project, "zzdie")
+        if "phase2" in runner.name:
+            _report(project, "phase2_one_shot.json", {"verdict": "PASS"})
+            return 0
+        return 0
+
+    monkeypatch.setattr(V, "_run_phase", fake_run_phase)
+    monkeypatch.setattr(V, "_phase1_decision", lambda *a, **k: (True, "docs"))
+    monkeypatch.setattr(sys, "argv",
+                        ["vibe_ic_one_shot_runner", str(project),
+                         "--no-dashboard", "--skip-hardware", "--skip-phase3", *extra_argv])
+    rc = V.main()
+    out = _pl.report_path(project, "vibe_ic_one_shot.json")
+    return rc, json.loads(out.read_text())
+
+
+def test_invocation_a_demotes_on_a_sidecar_this_pass_wrote(project, monkeypatch):
+    """INVOCATION A. A first pass writes the sidecar in this invocation, so the front door's own
+    freshness rule carries the demotion. The baseline the re-invocation must not lose."""
+    rc, doc = _drive_main(
+        project, monkeypatch,
+        phase1=("FAIL", 1, {"coverage_only_failure": True,
+                            "coverage_pct": 71.0, "total_todo": 0}),
+        phase2=("PASS", 0),
+        extra_argv=("--skip-phase3",))
+    assert doc["verdict"] == "PASS_WITH_WAIVERS", (doc["verdict"], doc.get("verdict_reasons"))
+    assert rc == 0, rc
+    assert doc["demoted_phases"]["phase1"]["token"] == V.DEMOTION_COVERAGE_ONLY
+
+
+def test_invocation_b_second_pass_still_demotes(project, monkeypatch):
+    """INVOCATION B, THE REGRESSION. The same project, re-entered as the expert second pass: the
+    sidecar now predates this invocation's phase-1 start by an hour and a half, and what makes it
+    trustworthy is that the carried record names it by content.
+
+    At r7 this exits 1 with verdict FAIL and the advisory 'NOT demoting', because the carried
+    record named nothing."""
+    _as_pass_one_leaves_it(project)
+    rc, doc = _drive_second_pass(project, monkeypatch)
+
+    assert doc["verdict"] == "PASS_WITH_WAIVERS", (
+        doc["verdict"], doc.get("verdict_reasons"),
+        [a for a in doc.get("advisories", []) if "sidecar" in a])
+    assert rc == 0, rc
+    assert doc["demoted_phases"]["phase1"]["token"] == V.DEMOTION_COVERAGE_ONLY
+    assert any("names it by content" in a for a in doc.get("advisories", [])), (
+        doc.get("advisories"))
+    assert not any("NOT demoting" in a for a in doc.get("advisories", [])), (
+        doc.get("advisories"))
+
+
+def test_a_sidecar_swapped_after_pass_one_named_it_is_refused(project, monkeypatch):
+    """THE NEGATIVE CONTROL, and the reason the name is a DIGEST and not a path. Pass 1 named one
+    set of bytes; something replaced them afterwards. The carried name no longer matches, so the
+    demotion is refused and the run halts at phase 1 as it should."""
+    sha = _as_pass_one_leaves_it(project)
+    side = _sidecar(project)
+    then = side.stat().st_mtime
+    side.write_text(json.dumps({"coverage_only_failure": True, "swapped": True}) + "\n")
+    # THE ARM HAS TO CLOSE THE OTHER ROUTE, and my first cut did not. The front door has TWO ways
+    # to accept a sidecar: this invocation's phase-1 start (by mtime) OR the carried record's name
+    # (by digest). Writing the bytes moved the mtime to now, and `main()` starts milliseconds
+    # later, so `_FRESHNESS_TOLERANCE_S` legitimately made the swapped file "this invocation's" --
+    # the run demoted, and the arm was measuring the mtime route while claiming to measure the
+    # digest. Back-dated so the DIGEST is the only thing that could authorise it.
+    os.utime(side, (then, then))
+    import hashlib
+    assert hashlib.sha256(side.read_bytes()).hexdigest() != sha
+    assert side.stat().st_mtime < time.time() - 100, (
+        "the swapped sidecar must still look old, or the mtime route decides this arm")
+
+    rc, doc = _drive_second_pass(project, monkeypatch)
+    assert doc["verdict"] == "FAIL", (doc["verdict"], doc.get("verdict_reasons"))
+    assert rc == 1, rc
+    assert doc.get("demoted_phases") == {}, doc.get("demoted_phases")
+    assert any("NOT demoting" in a for a in doc.get("advisories", [])), doc.get("advisories")
