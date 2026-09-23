@@ -845,12 +845,35 @@ def main() -> int:
     # published reason mid-word; the term is spelled `outside-root` here and
     # written out in full in its own block below. Measured worst case, all three
     # counts four digits: 199 characters.
+    # NAME THE FIRST REFERENCE ON THE REFUSAL LINE ITSELF.
+    #
+    # MEASURED on spm (lane icspm5, 2026-09-23). Step P0 recorded this gate's
+    # refusal as
+    #
+    #   FAIL: project_outputs_in_tree_check — [FAIL] ... 1 blocking
+    #   external-storage reference(s) ... (1 live, 0 dangling, 0 outside-root)
+    #   — this is what the gate exits 1 on:
+    #
+    # and that was the WHOLE record. The path and its citing file are on the
+    # lines BELOW, and the umbrella's reader (`flow_compliance_check.
+    # _p0_first_line`) keeps exactly one line. The volatile path was swept
+    # minutes later, the gate then exited 0, and the occurrence became
+    # unattributable: I could not afterwards say which declared output carried
+    # the reference or which program wrote it.
+    #
+    # The gate was RIGHT to refuse. The refusal was simply unusable by the one
+    # consumer that stores it. Nothing below changes -- no classification, no
+    # count, no exit code, and the detail blocks are untouched; this only puts
+    # the first offender where a one-line reader will see it.
+    _first = (live or dangling or derived or [(None, None)])[0]
+    _cited = (f" — first: {_first[1]} (referenced in {_first[0]})"
+              if _first[0] else "")
     print(f"[FAIL] project_outputs_in_tree_check: "
           f"{fail_count} blocking external-storage reference(s) in this "
           f"project's declaration file(s) "
           f"({len(live)} live, {len(dangling)} dangling, "
           f"{len(derived)} outside-root) — this is what the "
-          f"gate exits 1 on:")
+          f"gate exits 1 on:{_cited}")
 
     if live:
         print(f"[FAIL] project_outputs_in_tree_check: "
