@@ -68,14 +68,14 @@ _UPSTREAM = _T.ReasonClass.UPSTREAM_FAILED.value
 
 def test_a_missing_output_under_a_failed_blocker_becomes_the_cascade():
     """THE RULING."""
-    got = FCC.cascade_tier_for_dependent(_FAIL, _MISSING)
+    got = FCC.cascade_tier_for_dependent(_FAIL, _MISSING, [31])
     assert got == (_NM, _UPSTREAM, "not_owed"), got
 
 
 def test_a_pass_under_a_failed_blocker_is_still_voided():
     """The rule this narrows is not replaced: a PASS resting on a broken chain
     certifies nothing and still converts."""
-    got = FCC.cascade_tier_for_dependent(_PASS, "")
+    got = FCC.cascade_tier_for_dependent(_PASS, "", [31])
     assert got == (_NM, _UPSTREAM, "pass_voided"), got
 
 
@@ -84,45 +84,51 @@ def test_a_real_refusal_still_survives_a_failed_blocker():
     is counter-evidence, and counter-evidence survives — that is the existing
     doctrine, narrowed here and not repealed."""
     for rc in ("", "execution_error", "no_population", "partial_population"):
-        assert FCC.cascade_tier_for_dependent(_FAIL, rc) is None, rc
+        assert FCC.cascade_tier_for_dependent(_FAIL, rc, [31]) is None, rc
 
 
 def test_a_step_that_already_measured_nothing_keeps_its_own_word():
     """R-0915-85's half: there is no PASS here to void, and the disclosure is not
     the status."""
-    assert FCC.cascade_tier_for_dependent(_NM, "partial_population") is None
-    assert FCC.cascade_tier_for_dependent(_NA, "") is None
+    assert FCC.cascade_tier_for_dependent(_NM, "partial_population", [31]) is None
+    assert FCC.cascade_tier_for_dependent(_NA, "", [31]) is None
 
 
 def test_the_rule_is_one_function_both_passes_call():
     """Two passes decided this row and disagreed; one of them is why the defect
     shipped. A second copy of the rule is a second place for them to disagree
-    again, so the source is asserted to hold exactly one definition and two
-    call sites."""
+    again, so the source is asserted to hold exactly one definition, called by
+    the VOID rule and by the ONE applier every blocked-by-upstream writer uses
+    (lane ictier1 rework: the #503 pass, `_resolve_dependency_condition_results`
+    and `_attribute_condition_owner_blocks`)."""
     src = (PROGRAMS / "flow_compliance_check.py").read_text()
     assert src.count("def cascade_tier_for_dependent(") == 1
     assert src.count("cascade_tier_for_dependent(") == 3, (
-        "expected one definition and two call sites — the void rule and the "
-        "#503 cascade pass")
+        "expected one definition and two call sites — the void rule and "
+        "`_demote_not_owed_rows`")
+    assert src.count("def _demote_not_owed_rows(") == 1
+    assert src.count("_demote_not_owed_rows(") == 4, (
+        "expected one definition and three writers")
 
 
 def test_the_cascade_row_names_the_root_and_says_it_was_not_owed():
     """The attribution is not lost when the tier moves: the row must still name
     the root cause, and must now say WHY its outputs are absent."""
     src = (PROGRAMS / "flow_compliance_check.py").read_text()
-    i = src.index("blocked-by-upstream(step {first_fail}): cascade of")
+    i = src.index("blocked-by-upstream(step {root}): its blocks_on closure")
     window = src[i:i + 700]
     assert "never owed its declared outputs" in window, window[:300]
     assert "R-0915-140" in window
 
 
 def test_the_voided_sentence_is_not_printed_over_a_row_that_never_passed():
-    """"PASS voided" names a verdict the row never had, and a reader chasing it
-    finds nothing. The two spellings are chosen by the same rule that chose the
-    tier."""
+    """"PASS voided" names a verdict the row never had. The VOID rule only ever
+    meets a done-claim (analyze() raises violations for PASS/PASS_WITH_WAIVERS
+    terminals), so its sentence is the PASS-voided one and the not-owed tier is
+    decided -- and worded -- by the blocked-by-upstream writers. The dead
+    'NOT OWED' arm the VOID loop carried (review of next/icslot66, finding 3)
+    is gone."""
     src = (PROGRAMS / "flow_compliance_check.py").read_text()
-    assert 'if _was_missing_only:' in src
-    i = src.index('_why = (\n                    f"NOT OWED:')
-    assert "never ran and its declared outputs were never due" in src[i:i + 500]
-    # and the original sentence is still there for the row that DID pass
+    assert "_was_missing_only" not in src
+    assert 'f"NOT OWED: dependency' not in src
     assert 'f"PASS voided: dependency [{_v.get(\'signoff_id\')}] "' in src

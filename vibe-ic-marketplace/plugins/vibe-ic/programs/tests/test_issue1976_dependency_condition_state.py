@@ -149,6 +149,13 @@ def test_explicit_no_dft_remains_skip_and_cites_its_declaration(tmp_path):
         assert "NOT_APPLICABLE" in reason, reason
 
 
+# R-0915-140 — a row whose producer (a blocks_on blocker) FAILED was never owed
+# its input and reads NOT_MEASURED(upstream_failed), never FAIL(missing_artefact)
+# + blocked-by-upstream(<failed producer>). The attribution these tests pin --
+# the note, the producer named, the missing artefact named -- is unchanged.
+_NOT_OWED = ("NOT_MEASURED", "upstream_failed")
+
+
 def test_failed_dft_blocks_dt2_and_dt3_on_the_missing_upstream_grades(tmp_path):
     _l20(tmp_path, "APPLICABLE")
     # Route/extraction completed, isolating the missing DT1 grade.
@@ -165,14 +172,14 @@ def test_failed_dft_blocks_dt2_and_dt3_on_the_missing_upstream_grades(tmp_path):
     by_id = _resolve(tmp_path, results)
 
     dt2 = by_id["DT2"]
-    assert dt2.status == "FAIL", dt2
+    assert (dt2.status, dt2.reason_class) == _NOT_OWED, dt2
     assert dt2.cascade_note == "blocked-by-upstream(DT1)", dt2
     dt2_reason = "\n".join(dt2.reasons)
     assert "step DT1" in dt2_reason, dt2_reason
     assert "reports/phase2/dft/transition_coverage.json" in dt2_reason, dt2_reason
 
     dt3 = by_id["DT3"]
-    assert dt3.status == "FAIL", dt3
+    assert (dt3.status, dt3.reason_class) == _NOT_OWED, dt3
     assert dt3.cascade_note == "blocked-by-upstream(DT2)", dt3
     dt3_reason = "\n".join(dt3.reasons)
     assert "step DT2" in dt3_reason, dt3_reason
@@ -193,7 +200,7 @@ def test_pre_route_dft_blocks_dt2_on_step22_missing_spef(tmp_path):
     by_id = _resolve(tmp_path, results)
 
     dt2 = by_id["DT2"]
-    assert dt2.status == "FAIL", dt2
+    assert (dt2.status, dt2.reason_class) == _NOT_OWED, dt2
     assert dt2.cascade_note == "blocked-by-upstream(22)", dt2
     reason = "\n".join(dt2.reasons)
     assert "step 22" in reason, reason
@@ -215,9 +222,12 @@ def test_completed_dt1_and_step22_reach_dt2s_own_missing_grade(tmp_path):
 
     by_id = _resolve(tmp_path, results)
 
+    # DT2 WAS owed (DT1 and 22 passed): its own missing grade stays FAIL.
     assert by_id["DT2"].status == "FAIL", by_id["DT2"]
     assert not by_id["DT2"].cascade_note, by_id["DT2"]
-    assert by_id["DT3"].status == "FAIL", by_id["DT3"]
+    # DT3 waits on DT2, which FAILED: not owed.
+    assert (by_id["DT3"].status, by_id["DT3"].reason_class) == _NOT_OWED, (
+        by_id["DT3"])
     assert by_id["DT3"].cascade_note == "blocked-by-upstream(DT2)", by_id["DT3"]
 
 

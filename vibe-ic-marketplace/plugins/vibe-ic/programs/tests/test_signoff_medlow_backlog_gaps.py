@@ -1129,7 +1129,21 @@ def test_step33_gate_audit_trail_is_not_written_over_its_own_input():
                 f"with a different schema: {cmd}")
 
 
-def _all_missing_results(fcc, waived=(), failed=()):
+def _ancestors_of(sid):
+    """Transitive blocks_on ancestors of `sid` in the shipped flow."""
+    parents = {st.get("id"): list(st.get("blocks_on") or [])
+               for st in _flow_steps() if st.get("id") is not None}
+    seen, queue = set(), list(parents.get(sid, []))
+    while queue:
+        pid = queue.pop(0)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        queue.extend(parents.get(pid, []))
+    return seen
+
+
+def _all_missing_results(fcc, waived=(), failed=(), passed=()):
     """One StepResult per real flow step, all MISSING except as directed.
 
     R-0915-85 — `MISSING` is `FAIL(missing_artefact)`: a required OUTPUT that
@@ -1147,11 +1161,12 @@ def _all_missing_results(fcc, waived=(), failed=()):
         if sid is None or str(sid) == "P0":
             continue
         status = ("PASS_WITH_WAIVERS" if sid in waived
+                  else "PASS" if sid in passed
                   else "FAIL" if sid in failed else "FAIL")
         out.append(fcc.StepResult(
             id=sid, name=st.get("name", ""), stage=st.get("stage", ""),
             status=status,
-            reason_class=("" if sid in waived
+            reason_class=("" if sid in waived or sid in passed
                           else fcc._T.ReasonClass.MISSING_ARTEFACT.value)))
     return out
 
@@ -1179,7 +1194,11 @@ def test_step39_does_not_inherit_a_step6_waiver(fcc):
     ordering edge is the mechanism #776 removed: on this flow it made 1153
     such deductions, of which 6 are declared.
     """
-    results = _all_missing_results(fcc, waived=(6,))
+    # R-0915-140 — every OTHER ancestor of 39 PASSED, so the waived step 6 is
+    # the only thing 39 could inherit from; with the rest missing, 39 would be
+    # not-owed behind those FAILED rows and this would stop asking about 6.
+    results = _all_missing_results(
+        fcc, waived=(6,), passed=_ancestors_of(39) - {6})
     info = fcc._attribute_cascade_verdicts(
         results, _flow_steps(), {6: {"ticket": "TKT-FPGA-6"}})
     by_id = {r.id: r for r in results}
@@ -1194,7 +1213,9 @@ def test_step39_does_not_inherit_a_step6_waiver(fcc):
 
 def test_no_waiver_leaves_step39_in_the_denominator(fcc):
     """DIRECTION-1 guard: without a waiver the edge deducts nothing."""
-    results = _all_missing_results(fcc)
+    # R-0915-140 — every ancestor of 39 PASSED, so 39 was owed and its
+    # missing output is its own FAIL; nothing deducts it.
+    results = _all_missing_results(fcc, passed=_ancestors_of(39))
     info = fcc._attribute_cascade_verdicts(results, _flow_steps(), {})
     by_id = {r.id: r for r in results}
     assert by_id[39].status == "FAIL"
@@ -1207,10 +1228,22 @@ def test_a_step6_fail_does_not_deduct_step39(fcc):
     A FAILED step 6 must leave 39 MISSING — the denominator moves only for a
     WAIVER, never for a failure.
     """
-    results = _all_missing_results(fcc, failed=(6,))
+    #
+    # R-0915-140 — a FAILED blocker makes 39 not-owed: NOT_MEASURED
+    # (upstream_failed), which is NOT excused (it stays in the denominator)
+    # and is NOT the deferred tier (upstream_refused). The claim stands: a
+    # failure never deducts.
+    results = _all_missing_results(
+        fcc, failed=(6,), passed=_ancestors_of(39) - {6})
+    results = [r if r.id != 6 else fcc.StepResult(
+        id=6, name=r.name, stage=r.stage, status="FAIL", reason_class="")
+        for r in results]
     info = fcc._attribute_cascade_verdicts(results, _flow_steps(), {})
     by_id = {r.id: r for r in results}
-    assert by_id[39].status == "FAIL", by_id[39].status
+    assert (by_id[39].status, by_id[39].reason_class) == (
+        "NOT_MEASURED", "upstream_failed"), by_id[39].status
+    assert not fcc._T.is_excused(by_id[39].status)
+    assert by_id[39].cascade_note == "blocked-by-upstream(6)"
     assert info["deferred_by_upstream"] == []
 
 

@@ -706,12 +706,24 @@ def test_strict_structural_only_structural_gates(tmp_path,
     # R-0915-85 — a declared output that does not exist is
     # `FAIL(missing_artefact)`, and the step line carries the reason beside the
     # word. The precondition is the same fact, read where it now lives.
+    #
+    # R-0915-140 — a step whose blocks_on closure holds a FAILED step (here
+    # 0.5ic, which this fixture never runs) was never owed its outputs and
+    # reads NOT_MEASURED(upstream_failed); both words are step-level non-green,
+    # which is all this precondition needs. At least one row must still be an
+    # OWED FAIL(missing_artefact) (step 3, blocks_on [1], 1 PASS), so the
+    # population the scope claim is about is still the missing-output one.
     for sid in (2, 3, 4, 5, 6):
         assert re.search(
-            rf"^\s*\S*\s*\[FAIL\s*\] Step\s+{sid}:.*\(missing_artefact\)",
+            rf"^\s*\S*\s*\[(FAIL|NOT_MEASURED)\s*\] Step\s+{sid}:"
+            rf".*\((missing_artefact|upstream_failed)\)",
             out, re.M), (
-            f"precondition: step {sid} must be FAIL(missing_artefact) for the "
-            f"scope claim to mean anything:\n{out}")
+            f"precondition: step {sid} must be FAIL(missing_artefact) or "
+            f"NOT_MEASURED(upstream_failed) for the scope claim to mean "
+            f"anything:\n{out}")
+    assert re.search(
+        r"^\s*\S*\s*\[FAIL\s*\] Step\s+3:.*\(missing_artefact\)", out,
+        re.M), f"precondition: owed step 3 must be FAIL(missing_artefact):\n{out}"
     assert "Phase 2 strict-structural mode" not in out, out
     # Overall verdict could be PASS or PASS_WITH_WAIVERS (but never
     # FAIL purely due to step-level MISSING when structural gates

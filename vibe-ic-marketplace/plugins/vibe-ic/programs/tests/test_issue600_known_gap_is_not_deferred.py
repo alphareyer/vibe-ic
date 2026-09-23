@@ -118,10 +118,20 @@ def test_a_descendant_of_a_declared_gap_is_attributed_to_it_not_to_the_waiver():
     results = [_res(13, "PASS_WITH_WAIVERS"), _res("M2", "FAIL"),
                _res("M3", "FAIL"), _res("M4", "FAIL")]
     _cascade(steps, results)
+    # The gap-declaring step itself: its blocker 13 did not FAIL, so it stays
+    # the MISSING row that carries the gap.
+    assert results[1].status == "FAIL", results[1].status
     for r in results[2:]:
-        assert r.status == "FAIL", f"{r.id}: {r.status}"
-        assert r.cascade_note == "blocked-by-known-gap(M2)", r.cascade_note
+        # R-0915-140 — M3/M4 wait on M2, which FAILED, so they were never owed
+        # their outputs: NOT_MEASURED(upstream_failed), attributed to M2 -- the
+        # declared gap -- and never to 13's waiver. The #600 attribution is
+        # still the first reason on the row.
+        assert (r.status, r.reason_class) == (
+            "NOT_MEASURED", "upstream_failed"), f"{r.id}: {r.status}"
+        assert r.cascade_note == "blocked-by-upstream(M2)", r.cascade_note
+        assert r.reasons[0].startswith("blocked-by-known-gap(M2)"), r.reasons
         assert "no emitter" in " ".join(r.reasons)
+        assert "13" not in r.cascade_note
 
 
 def test_the_softer_verdict_is_not_reachable_through_a_declared_gap():
@@ -134,7 +144,16 @@ def test_the_softer_verdict_is_not_reachable_through_a_declared_gap():
     info = _cascade(steps, results)
     assert not [x for x in info["deferred_by_upstream"]
                 if x[0] in ("M2", "M3")], info["deferred_by_upstream"]
-    assert all(r.status != "NOT_MEASURED" for r in results[1:])
+    # R-0915-85: the softer DEFERRED word is NOT_MEASURED(upstream_refused).
+    # It is unreachable through the gap. R-0915-140: M3, whose blocker M2
+    # FAILED, reads NOT_MEASURED(upstream_failed) -- the cascade of M2, whose
+    # roadmap ("close M2") is TRUE, unlike "close 13".
+    assert all(r.reason_class != "upstream_refused" for r in results[1:])
+    assert not any("deferred-by-upstream" in r.cascade_note
+                   for r in results[1:])
+    assert results[1].status == "FAIL"
+    assert (results[2].status, results[2].cascade_note) == (
+        "NOT_MEASURED", "blocked-by-upstream(M2)")
 
 
 # ── the legitimate cascade is untouched ─────────────────────────────────────

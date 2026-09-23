@@ -397,7 +397,13 @@ def test_the_forgotten_route_blocks_all_four_dependents_after_owner_rollup(
         proj, results, list(steps.values()))
     assert info["blocked_by_upstream"] == {"0.5ic": 4}
     for row in results[1:]:
-        assert row.status == MISSING, (row.id, row.status, row.reasons)
+        # R-0915-140 — the owner 0.5ic FAILED, so these four were never owed
+        # their outputs: NOT_MEASURED(upstream_failed), still a hard non-green
+        # row and still NEVER the SKIPPED-CONDITION this test exists to refuse.
+        assert (row.status, row.reason_class) == (
+            "NOT_MEASURED", "upstream_failed"), (row.id, row.status,
+                                                 row.reasons)
+        assert row.status != SKIPPED
         assert row.cascade_note == "blocked-by-upstream(0.5ic)"
         reason = " ".join(row.reasons)
         assert "Step 0.5ic verdict FAIL" in reason
