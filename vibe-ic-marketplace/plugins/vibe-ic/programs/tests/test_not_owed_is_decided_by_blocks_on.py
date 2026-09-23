@@ -370,3 +370,29 @@ def test_the_condition_owner_writer_keeps_a_real_gate_fail(tmp_path):
     assert any("pad_ring_check" in x for x in r.reasons), r.reasons
     # and the owner attribution is still on the row
     assert r.cascade_note == "blocked-by-upstream(0.5ic)", r.cascade_note
+
+
+def test_the_real_coverage_gate_does_not_count_voided_passes_as_not_run(
+        tmp_path, monkeypatch, capsys):
+    """NEGATIVE ARM (review of 10023360e, MEDIUM). The VOID loop gives a PASS
+    row whose ancestor FAILED the same NOT_MEASURED(upstream_failed) word with
+    an EMPTY cascade_note: that step RAN, PASSED and has its outputs. Keyed on
+    reason_class alone, the coverage gate booked every such step as
+    SILENTLY-SKIPPED and flipped PASS rc 0 -> FAIL rc 1. Step 2's gate FAILs,
+    every other step ran and PASSED: the gate must stay as it was at base."""
+    _rc, report, _audit = _drive_main(tmp_path, monkeypatch, {"2": (_FAIL, "")})
+    capsys.readouterr()
+    voided = [s for s in report["steps"]
+              if (s["status"], s.get("reason_class")) == (_NM, _UPSTREAM)]
+    assert voided, "premise: the VOID loop voided PASS rows"
+    assert all(not s.get("cascade_note") for s in voided), voided[:2]
+    out_json = tmp_path / "coverage.json"
+    r = subprocess.run(
+        [sys.executable, str(PROGRAMS / "flow_step_execution_coverage_check.py"),
+         str(tmp_path / "proj"), "--compliance-json",
+         str(tmp_path / "report.json"), "--json", str(out_json)],
+        capture_output=True, text=True)
+    cov = json.loads(out_json.read_text())
+    not_run = {str(s.get("id")) for s in cov["applicable_missing"]}
+    assert not ({str(s["id"]) for s in voided} & not_run), sorted(not_run)
+    assert (cov["verdict"], r.returncode) == ("PASS", 0), r.stdout[-1500:]
