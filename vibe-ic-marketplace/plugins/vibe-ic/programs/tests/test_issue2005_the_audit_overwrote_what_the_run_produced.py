@@ -403,8 +403,6 @@ def test_the_shared_producer_and_gate_population_is_declared_here():
         ("28", "reports/phase2/gates/perc_signoff.json"),
         ("29", "reports/phase2/gates/post_layout_sim.json"),
         ("31", "reports/phase2/gates/erc_density.json"),
-        ("36", "reports/audit/tapeout_checklist.json"),
-        ("38", "reports/phase3/foundry_handoff_audit.json"),
         ("M1", "reports/analog/mixed_signal/merge.json"),
         # ARRIVED with the 13 producer declarations (lane icspm3, measured
         # 2026-09-15 on spm x gf180mcuD at main b47917a47). Each of these was
@@ -441,6 +439,20 @@ def test_the_shared_producer_and_gate_population_is_declared_here():
         # — and a declared producer is what makes those facts deterministic.
         ("2", "reports/phase1/gates/stage_phase1_compliance.json"),
         ("14", "reports/analog/stage_analog_compliance.json"),
+        # DEPARTED 2026-09-23 (R-0915-141, lane icslot): ("36",
+        # "reports/audit/tapeout_checklist.json") and ("38",
+        # "reports/phase3/foundry_handoff_audit.json"). They left for the reason
+        # this population's own message gives -- "the flow stopped pointing the
+        # auditor's pen at a declared run artefact" -- which here is the fix, not
+        # the regression. Step 36 now declares the checklist that
+        # `tapeout_checklist_gen` ASSEMBLES while its gate writes its verdict to
+        # `reports/audit/tapeout_signoff.json`; step 38 declares the four package
+        # artefacts `foundry_handoff_pack_gen` assembles and no longer declares
+        # its gate's own `foundry_handoff_audit.json` at all. Content no longer
+        # has to decide their authorship, because one document is no longer two
+        # documents at one path -- so the two timing facts are not needed, and
+        # these two entries cannot be in this population by construction.
+        # See test_a_declared_output_is_not_its_gates_verdict_target.py.
     }
     assert measured == pinned, (
         f"the BOTH-producer-and-gate population moved — arrived: "

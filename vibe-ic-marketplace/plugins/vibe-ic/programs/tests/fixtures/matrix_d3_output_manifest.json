@@ -1555,15 +1555,9 @@
      "path": "phase3/stage4/foundry_handoff/corner_test_vectors.json",
      "size_bytes": 2336,
      "note": "2026-09-02 \u2014 re-measured against benchmark-data/ic/spm/v1.14.88_gf180mcuD: phase3/stage4/foundry_handoff/corner_test_vectors.json tracked at HEAD, non-empty, and attributed to this step by the cell's write ledger. Previously PRODUCED_BY_RUN citing 'benchmark-data/ic/sha256/clean_run_v1427_20260715', a root of kind 'home' this dimension searches on no host."
-    },
-    "reports/phase3/foundry_handoff_audit.json": {
-     "status": "PRODUCED_BY_RUN",
-     "run": "benchmark-data/ic/spm/v1.10.18_sky130A",
-     "alternative": "reports/phase3/foundry_handoff_audit.json",
-     "path": "reports/phase3/foundry_handoff_audit.json",
-     "size_bytes": 3089
     }
-   }
+   },
+   "_history": "2026-09-23 (R-0915-141) \u2014 REMOVED the entry for reports/phase3/foundry_handoff_audit.json (PRODUCED_BY_RUN, benchmark-data/ic/spm/v1.10.18_sky130A, 3089 bytes). That measurement is still true of that run; the entry had to go because step 38 NO LONGER DECLARES the path, and this fixture is a strict bijection with the declared set. The path was the step's own gate's --json verdict target, which is the defect R-0915-141 names: step 38 now declares the four package artefacts foundry_handoff_pack_gen assembles, and the gate writes its verdict to reports/phase3/foundry_handoff_check.json."
   },
   "39": {
    "verdict": "WAIVED",

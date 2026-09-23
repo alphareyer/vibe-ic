@@ -49976,10 +49976,26 @@ def _signoff_not_checked(name: str, t0: float, why: str,
 _KLAYOUT_CONTAINER_SIGNOFF_GATES = frozenset({"gds_xor"})
 
 _PRE_AUDIT_PRODUCERS = (
-    ("tapeout_checklist", "tapeout_signoff_check.py",
-     "reports/audit/tapeout_checklist.json", ("--mode", "tapeout")),
-    ("foundry_handoff", "foundry_handoff_package_check.py",
-     "reports/phase3/foundry_handoff_audit.json", ()),
+    # R-0915-141 — THESE ARE PRODUCERS, SO THEY NAME THE PRODUCING PROGRAMS.
+    #
+    # Both entries used to name the step's own GATE -- `tapeout_signoff_check.py`
+    # and `foundry_handoff_package_check.py` -- writing into the step's declared
+    # output. That closed the "nobody ran it" half of the gap and left the other
+    # half open BY CONSTRUCTION: what a gate writes to its `--json` target IS "a
+    # verdict document only this step's gate emits", the audit's third criterion
+    # for refusing self-certified evidence. It refused the document however early
+    # it was written and whoever wrote it, which is why ordering could never settle
+    # it -- MEASURED on spm run22: the producer rewrote the checklist at 08:51:23
+    # and the 09:02 audit still refused it.
+    #
+    # The declared outputs are now produced by the programs that ASSEMBLE them, and
+    # each step's gate writes its verdict to its own path (see the two clauses in
+    # the flow yaml). `tapeout_checklist_gen` takes `--json` as an alias for `--out`
+    # so this runner's one spelling reaches it.
+    ("tapeout_checklist", "tapeout_checklist_gen.py",
+     "reports/audit/tapeout_checklist.json", ()),
+    ("foundry_handoff", "foundry_handoff_pack_gen.py",
+     "phase3/stage4/foundry_handoff/mask_spec.json", ()),
     # R-0915-129 / SLT53B handback — step 37.3's receipt must be PRODUCED, and by
     # something other than the step's own gate clause. A step whose declared
     # output IS its gate's product can never satisfy the audit: compliance reads

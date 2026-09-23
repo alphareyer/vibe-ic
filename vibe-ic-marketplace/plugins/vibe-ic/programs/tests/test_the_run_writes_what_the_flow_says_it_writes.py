@@ -131,9 +131,20 @@ def test_the_shipped_flow_declares_the_measured_set():
     got = {(c["step"], c["program"]) for c in P.declared_producer_clauses()}
     for pair in (("26", "antenna_report_check"),
                  ("28", "perc_signoff_check"),
-                 ("31", "erc_density_check"),
-                 ("36", "tapeout_signoff_check")):
+                 ("31", "erc_density_check")):
         assert pair in got, f"{pair} is no longer a declared producer clause"
+    # WAS ("36", "tapeout_signoff_check"), and it left for the right reason
+    # (R-0915-141, 2026-09-23). A "declared producer clause" is a step declaring
+    # ONE program under `programs:` whose own gate clause writes a declared
+    # `required_output` -- so the clause is the producer. Step 36 no longer has
+    # that shape: `tapeout_checklist_gen` ASSEMBLES the checklist the step
+    # declares, and the gate writes its verdict to its own
+    # `reports/audit/tapeout_signoff.json`. The step still has a producer the run
+    # executes -- `phase3_one_shot_runner._PRE_AUDIT_PRODUCERS` drives it -- and
+    # that is asserted in test_a_declared_output_is_not_its_gates_verdict_target.py.
+    assert ("36", "tapeout_signoff_check") not in got, (
+        "step 36 is a declared-producer clause again, which means its gate's "
+        "--json target is one of its declared required_outputs once more")
     # WAS `("21", "drc_report_check")` and `("10", "sta_report_check")`, and
     # both were THE DEFECT rather than the rule. Steps 10 and 21 declare the
     # gate `--json` target as a `required_output` and named no producer, so

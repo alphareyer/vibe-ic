@@ -163,7 +163,18 @@ def _sets(step):
 
 @pytest.mark.parametrize("sid,stamp", [
     ("26", "eda_report_audit:antenna"),
-    ("36", "signoff_audit:tapeout"),
+    # RE-POINTED 2026-09-23 (R-0915-141). This row WAS
+    # ("36", "signoff_audit:tapeout"), and it was right while step 36 declared the
+    # document its own `tapeout_signoff_check` gate wrote -- the wrapper alias then
+    # had to resolve, or the run's own checklist was refused as self-certified.
+    # Step 36 no longer has that shape: `tapeout_checklist_gen` ASSEMBLES
+    # reports/audit/tapeout_checklist.json and the gate writes its verdict to
+    # reports/audit/tapeout_signoff.json. MEASURED on this tree: the checklist the
+    # producer writes carries `program: tapeout_checklist_gen`, so this arm asks
+    # the same question about the same step with the stamp the run now really
+    # writes. The wrapper-alias rule itself is unchanged and still covered by
+    # `test_a_wrapper_with_the_mode_in_argv_is_also_resolved` and by step 26.
+    ("36", "tapeout_checklist_gen"),
 ])
 def test_the_shipped_step_credits_its_own_producers_document(sid, stamp,
                                                              tmp_path):
@@ -172,6 +183,27 @@ def test_the_shipped_step_credits_its_own_producers_document(sid, stamp,
         pytest.skip(f"step {sid} is not in the shipped flow any more")
     gp, pp = _sets(step)
     assert F._is_gate_verdict_document(_doc(tmp_path, stamp), gp, pp) is False
+
+
+def test_step_36s_gate_document_is_now_refused_for_step_36(tmp_path):
+    """THE OTHER DIRECTION OF THE SAME SPLIT, and the arm that makes the
+    re-pointing above a measurement rather than a convenience.
+
+    `signoff_audit:tapeout` used to be step 36's PRODUCER stamp and had to be
+    credited. Under R-0915-141 it is the stamp of the step's GATE and nothing
+    else, so the same document must now be REFUSED as run evidence for step 36 --
+    the run's evidence is the checklist. If this ever returns False again, the
+    gate's verdict document is creditable as the step's own output once more,
+    which is the defect the split removed.
+    """
+    step = _flow_steps().get("36")
+    if step is None:
+        pytest.skip("step 36 is not in the shipped flow any more")
+    gp, pp = _sets(step)
+    assert "tapeout_signoff_check" in gp, gp
+    assert "tapeout_signoff_check" not in pp, pp
+    assert F._is_gate_verdict_document(
+        _doc(tmp_path, "signoff_audit:tapeout"), gp, pp) is True
 
 
 def _gate_only_cases():

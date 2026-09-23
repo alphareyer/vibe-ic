@@ -7720,7 +7720,12 @@ steps:
     stage: stage4
     skills: [tapeout-checklist]
     programs:
-      - tapeout_signoff_check
+      # R-0915-141 — THE PRODUCER, not the checker. `tapeout_signoff_check` is a
+      # 22-line shim over `signoff_audit --mode tapeout` whose job is to JUDGE;
+      # naming it here made the step's only declared producer its own gate, which
+      # is the shape the ruling forbids. `tapeout_checklist_gen` assembles the
+      # checklist from the sign-off results the run already holds.
+      - tapeout_checklist_gen
     required_outputs:
       - "reports/audit/tapeout_checklist.json"
     # #651 — `tapeout_signoff_check` (= signoff_audit --mode tapeout) carries
@@ -7774,7 +7779,22 @@ steps:
     # advisory ones after a failure (#306/#297).
     gate:
       all_of:
-        - program_exit_zero: "tapeout_signoff_check . --mode tapeout --json reports/audit/tapeout_checklist.json"
+        # R-0915-141 — THE GATE'S VERDICT GOES TO THE GATE'S OWN PATH.
+        #
+        # This clause used to write `--json reports/audit/tapeout_checklist.json`,
+        # which is THIS STEP'S DECLARED REQUIRED OUTPUT. So the document the run was
+        # supposed to produce was the file the gate wrote its verdict to, and the
+        # audit refused it for exactly what it was: "present, but written by this
+        # step's own gate rather than by the run … holding a verdict document only
+        # this step's gate emits". No ordering could fix that -- whoever wrote it,
+        # the third criterion matched by CONSTRUCTION.
+        #
+        # The checklist is an ASSEMBLY of sign-off results the run already holds,
+        # and `tapeout_checklist_gen` is the program that assembles it (MEASURED on
+        # spm run22: the document on disk carries `program: tapeout_checklist_gen`).
+        # It is now this step's declared producer, and this gate READS the checklist
+        # and writes its own verdict beside it.
+        - program_exit_zero: "tapeout_signoff_check . --mode tapeout --json reports/audit/tapeout_signoff.json"
         - advisory_program_exit_zero:
               command: "report_belongs_to_project_check . --json reports/audit/report_belongs_to_project.json"
               advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
@@ -9032,7 +9052,8 @@ steps:
         path: "phase3/stage4/gds/*.gds"
     skills: [tapeout-checklist]
     programs:
-      - foundry_handoff_package_check
+      # R-0915-141 — the PRODUCER of the package, not its checker.
+      - foundry_handoff_pack_gen
     required_outputs:
       - "phase3/stage4/foundry_handoff/mask_spec.json"
       - "phase3/stage4/foundry_handoff/wat_plan.json"
@@ -9049,9 +9070,15 @@ steps:
       # PENDING_FOUNDRY_scribe_line_layout so the tapeout checklist tracks it.
       - "phase3/stage4/foundry_handoff/scribe_line_layout.gds OR phase3/stage4/foundry_handoff/scribe_line_layout.PENDING_FOUNDRY.txt"
       - "phase3/stage4/foundry_handoff/corner_test_vectors.json"
-      - "reports/phase3/foundry_handoff_audit.json"
+      # R-0915-141 — `reports/phase3/foundry_handoff_audit.json` STOOD HERE and is
+      # REMOVED. It is this step's gate's own `--json` verdict target, so declaring
+      # it made the step owe the document its gate writes -- and the audit refused
+      # it as "a verdict document only this step's gate emits", whoever wrote it.
+      # The PACKAGE is the four artefacts above, which `foundry_handoff_pack_gen`
+      # assembles and which this step's gate reads; the gate's verdict now goes to
+      # its own path (see the clause below).
     gate:
-      program_exit_zero: "foundry_handoff_package_check . --json reports/phase3/foundry_handoff_audit.json"
+      program_exit_zero: "foundry_handoff_package_check . --json reports/phase3/foundry_handoff_check.json"
     blocks_on: [37]
     notes: |
       Final foundry-deliverable kit: mask reticle spec, WAT

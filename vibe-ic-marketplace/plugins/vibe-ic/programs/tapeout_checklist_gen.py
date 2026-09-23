@@ -260,6 +260,16 @@ def _waivers_referencing(project: Path) -> dict:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     p.add_argument("project", type=Path)
+    # R-0915-141 — `--json` IS AN ALIAS FOR `--out`, because the flow's producer
+    # runner names the destination with `--json` for every document it drives
+    # (`_run_declared_signoff_gate` builds `[prog, project, *argv, "--json", out]`).
+    # This generator is now step 36's declared PRODUCER -- the step's declared
+    # output must be a document the RUN assembles, never the file its gate writes
+    # its verdict to -- and a producer that cannot be told where to write in the
+    # runner's own vocabulary cannot be wired without teaching the runner a second
+    # spelling per program. One alias here is cheaper and reads the same.
+    p.add_argument("--json", dest="out", default=None,
+                   help="alias for --out (the flow's producer runner's spelling)")
     p.add_argument("--out", default=None,
                    help="Override the output path (default: "
                         "reports/audit/tapeout_checklist.json)")

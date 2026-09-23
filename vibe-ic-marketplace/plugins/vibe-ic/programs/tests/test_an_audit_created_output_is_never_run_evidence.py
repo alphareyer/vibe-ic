@@ -227,13 +227,24 @@ def test_every_self_written_output_has_a_declared_producer_somewhere():
         "refusal is not the remedy — the document really is the auditor's.")
 
 
-def test_the_narrow_class_is_the_nine_steps_measured():
+def test_the_narrow_class_is_the_six_steps_measured():
     """The members whose ONLY declared program is their own gate program — the
     shape the `_PRE_AUDIT_PRODUCERS` docstring describes in those words ("each
     declare their OWN gate as their only producer").
 
-    Pinned as a SET, not a count, because two steps trading places moves nothing:
-    measured 2026-09-23 on this tree as 10, 21, 23, 24, 28, 29, 36, 37, 38.
+    Pinned as a SET, not a count, because two steps trading places moves nothing.
+
+    IT SHRANK FROM EIGHT TO SIX, and the two that left are the point of R-0915-141
+    (`test_a_declared_output_is_not_its_gates_verdict_target.py`): steps 36 and 38
+    no longer declare an output that is one of their own gate clauses' receipt
+    targets at all, so they are outside `self_written_outputs()` entirely — not
+    merely covered by a mechanism. 36 declares the checklist its
+    `tapeout_checklist_gen` producer assembles while its gate writes its verdict
+    to `reports/audit/tapeout_signoff.json`; 38 declares the four package
+    artefacts `foundry_handoff_pack_gen` assembles and no longer declares the
+    gate's own `foundry_handoff_audit.json`. This test was renamed from
+    `..._is_the_nine_steps_measured` in the same change, because a name that says
+    nine while the set holds six is a false statement in shipped source.
     """
     steps = _flow()["steps"]
     by_id = {str(s.get("id")): s for s in steps if isinstance(s, dict)}
@@ -249,11 +260,17 @@ def test_the_narrow_class_is_the_nine_steps_measured():
     # producer that is not the writer of those two, and this narrow predicate —
     # "every self-written output's writer is the step's only declared program" —
     # correctly excludes it.
-    assert narrow == ["10", "21", "24", "28", "29", "36", "37", "38"], narrow
-    # And the two the pre-audit table carries are inside it.
+    assert narrow == ["10", "21", "24", "28", "29", "37"], narrow
+    # The two that LEFT are gone for the structural reason, not by exemption.
+    assert {"36", "38"}.isdisjoint(narrow), narrow
+    # The pre-audit table still drives both of them, now at a producer's path
+    # rather than at a gate's receipt path.
     covered = _pre_audit_outputs()
-    assert "reports/audit/tapeout_checklist.json" in covered
-    assert "reports/phase3/foundry_handoff_audit.json" in covered
+    assert "reports/audit/tapeout_checklist.json" in covered, covered
+    assert "phase3/stage4/foundry_handoff/mask_spec.json" in covered, covered
+    assert "reports/phase3/foundry_handoff_audit.json" not in covered, (
+        "the pre-audit table must not produce a gate's own verdict document; "
+        "that is the defect R-0915-141 names")
 
 
 def test_the_population_is_swept_not_assumed():
@@ -263,7 +280,9 @@ def test_the_population_is_swept_not_assumed():
         f"the sweep found only {len(members)} member(s); a receipt-flag spelling "
         f"this regex no longer matches would empty the population and make the "
         f"gate above vacuous")
-    assert {"36", "38"} <= set(members)
+    # 36 and 38 are OUT of the class as of R-0915-141, and this is the assertion
+    # that would catch the split being quietly reverted.
+    assert {"36", "38"}.isdisjoint(set(members)), sorted(set(members))
 
 
 def test_the_receipt_flags_match_the_consumer():
