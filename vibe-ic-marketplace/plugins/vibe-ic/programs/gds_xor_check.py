@@ -852,6 +852,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         # human reading a terminal.
         print(line)
         print(f"=== {GATE} --check ({project.name}) ===")
+        # step_metrics_adoption_check: step 37.3 declares this program, so the
+        # verdict it just judged is emitted through the one metrics schema,
+        # attributed to the clause that ran it (`--check <receipt>`). The
+        # receipt IS the verdict document. Best-effort: cannot change rc.
+        import step_metrics  # noqa: PLC0415
+        step_metrics.emit_gate_outcome(
+            "gds_xor_check", list(argv if argv is not None else sys.argv[1:]),
+            rc, report=args.check)
         return rc
     out = Path(args.json) if args.json else (project / REPORT_REL)
     if not out.is_absolute():

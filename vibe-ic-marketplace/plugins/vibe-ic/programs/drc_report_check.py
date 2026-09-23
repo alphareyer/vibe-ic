@@ -817,5 +817,14 @@ def run(caller_argv, _audit=None) -> int:
     return rc
 
 
+def _run_and_emit(argv):
+    """`run`, then the gate's outcome through the one metrics schema
+    (step_metrics_adoption_check; step read from the clause that ran it)."""
+    rc = run(argv)
+    import step_metrics  # noqa: PLC0415
+    step_metrics.emit_gate_outcome("drc_report_check", list(argv), rc)
+    return rc
+
+
 if __name__ == "__main__":
-    sys.exit(run(sys.argv[1:]))
+    sys.exit(_run_and_emit(sys.argv[1:]))

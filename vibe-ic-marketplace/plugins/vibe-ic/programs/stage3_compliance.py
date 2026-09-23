@@ -26,4 +26,10 @@ from flow_compliance_check import main  # noqa: E402
 
 if __name__ == "__main__":
     argv = sys.argv[1:] + ["--stage", "3", "--strict"]
-    sys.exit(main(argv))
+    rc = main(argv)
+    # step_metrics_adoption_check: step 37 declares this program, so its
+    # outcome is emitted through the one metrics schema, attributed to the step
+    # whose clause ran it. Best-effort: it cannot change the gate's rc.
+    import step_metrics  # noqa: E402
+    step_metrics.emit_gate_outcome("stage3_compliance", argv, rc)
+    sys.exit(rc)

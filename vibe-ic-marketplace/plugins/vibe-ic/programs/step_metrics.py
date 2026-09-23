@@ -225,6 +225,134 @@ def emit_best_effort(project: Path, step: Any, metrics: Dict[str, Any],
 
 
 # --------------------------------------------------------------------------- #
+# A gate's outcome, attributed to the step whose clause ran it
+# --------------------------------------------------------------------------- #
+#: The options a flow gate clause uses to name the file its verdict goes to.
+#: Matching on the program AND that path is what attributes one invocation to
+#: one step: `sta_report_check` is step 10's gate and step 23's, and only the
+#: `--json` path tells the two apart.
+_OUTPUT_OPTS = ("--json", "--check")
+
+
+def _opt_value(tokens: List[str], names: Tuple[str, ...]) -> Optional[str]:
+    for i, tok in enumerate(tokens):
+        for name in names:
+            if tok == name and i + 1 < len(tokens):
+                return tokens[i + 1]
+            if tok.startswith(name + "="):
+                return tok.split("=", 1)[1]
+    return None
+
+
+def _gate_strings(node: Any) -> List[str]:
+    if isinstance(node, str):
+        return [node]
+    if isinstance(node, dict):
+        return [x for v in node.values() for x in _gate_strings(v)]
+    if isinstance(node, list):
+        return [x for v in node for x in _gate_strings(v)]
+    return []
+
+
+def step_for_invocation(program: str, argv: List[str],
+                        flow_yaml: Optional[Path] = None
+                        ) -> Tuple[Optional[str], str]:
+    """`(step_id, "")` for the ONE step whose gate clause runs `program` with
+    this output path, or `(None, why)`.
+
+    Read from the flow yaml, never assumed: a program cannot know which step
+    invoked it, and guessing is how a number lands under the wrong step. No
+    match, or more than one, is an honest None -- the caller then emits
+    nothing and says so.
+    """
+    import shlex                                          # noqa: PLC0415
+    try:
+        import yaml                                       # noqa: PLC0415
+    except ImportError:
+        return None, "PyYAML is not importable here"
+    flow = flow_yaml or (Path(__file__).resolve().parent.parent / "flow"
+                         / "phase1_phase2_phase3.yaml")
+    try:
+        doc = yaml.safe_load(flow.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError) as exc:
+        return None, f"cannot read {flow.name}: {exc}"
+    want = _opt_value(list(argv), _OUTPUT_OPTS)
+    hits = set()
+    for step in doc.get("steps") or []:
+        for clause in _gate_strings(step.get("gate")):
+            try:
+                tokens = shlex.split(clause)
+            except ValueError:
+                continue
+            if not tokens or Path(tokens[0]).stem != program:
+                continue
+            if want is None or _opt_value(tokens, _OUTPUT_OPTS) == want:
+                hits.add(str(step.get("id")))
+    if len(hits) == 1:
+        return next(iter(hits)), ""
+    if not hits:
+        return None, (f"no gate clause in {flow.name} runs {program} with "
+                      f"output {want!r}")
+    return None, (f"{len(hits)} steps ({', '.join(sorted(hits))}) run "
+                  f"{program} with output {want!r}; not attributable")
+
+
+def _metric_name(key: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_") or "value"
+
+
+def emit_gate_outcome(program: str, argv: List[str], rc: int, *,
+                      report: Optional[str] = None,
+                      flow_yaml: Optional[Path] = None) -> Optional[Path]:
+    """Emit what a gate just decided, under the step whose clause ran it.
+
+    The numbers are the gate's OWN: its exit code and the scalar facts of the
+    verdict document it just wrote (`passed`, `verdict`, every numeric
+    `summary` field, finding counts per severity). Nothing is re-derived. When
+    the step cannot be attributed, or no verdict document exists, what CAN be
+    said is still said (the rc), and a missing step is reported on stderr --
+    never a silent skip (see `emit_best_effort`).
+    """
+    step, why = step_for_invocation(program, argv, flow_yaml)
+    if step is None:
+        print(f"[step_metrics] NOT EMITTED ({program}): {why}",
+              file=sys.stderr)
+        return None
+    head = argv[0] if argv and not str(argv[0]).startswith("-") else "."
+    project = Path(head)
+    metrics: Dict[str, Any] = {"rc": int(rc)}
+    rel = report or _opt_value(list(argv), _OUTPUT_OPTS)
+    payload: Any = None
+    if rel:
+        path = Path(rel) if Path(rel).is_absolute() else project / rel
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = None
+    if isinstance(payload, dict):
+        for k in ("passed", "verdict", "ok", "status", "rc"):
+            v = payload.get(k)
+            if k != "rc" and isinstance(v, (bool, int, float, str)):
+                metrics[k] = v
+        summary = payload.get("summary")
+        if isinstance(summary, dict):
+            for k, v in summary.items():
+                if isinstance(v, (bool, int, float)):
+                    metrics["summary_" + _metric_name(k)] = v
+        findings = payload.get("findings")
+        if isinstance(findings, list):
+            counts: Dict[str, int] = {}
+            for f in findings:
+                sev = (f.get("severity") if isinstance(f, dict) else None) \
+                    or "unspecified"
+                counts[_metric_name(sev)] = counts.get(_metric_name(sev), 0) + 1
+            metrics["findings_count"] = len(findings)
+            for sev, n in counts.items():
+                metrics["findings_" + sev] = n
+    return emit_best_effort(project, step, metrics, domain="gate")
+
+
+# --------------------------------------------------------------------------- #
 # Collect — glob and merge, and NOTHING else
 # --------------------------------------------------------------------------- #
 def collect(project: Path) -> Tuple[Dict[str, Any], Dict[str, Any]]:
