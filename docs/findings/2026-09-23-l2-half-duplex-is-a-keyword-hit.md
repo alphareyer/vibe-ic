@@ -1,8 +1,7 @@
 # L2 `protocol_overview.half_duplex` is a document-level keyword hit (investigation, no fix)
 
 Lane ictier1, for the dispatcher's ruling. Measured on 98 real L2_FRS.json
-(benchmark-data 87 with a protocol_overview or not, 2 frozen replays, 9 plugin
-fixtures). spm has no protocol_overview in any published cell and is untouched
+(87 in benchmark-data, 2 frozen replays, 9 plugin fixtures). spm has no protocol_overview in any published cell and is untouched
 by anything below.
 
 ## Mechanism (phase1_doc_one_shot_runner.py ~23871-23905)
@@ -44,6 +43,7 @@ in words. The two are never reconciled.
 | false | full | 13 |
 | false | unidirectional | 4 |
 | false | no duplex field | 10 |
+| false | mixed / none / non-string duplex field | 4 |
 | absent | half | 12 |
 | absent | other / none | 18 |
 | no protocol_overview | – | 3 (spm ×3) |
