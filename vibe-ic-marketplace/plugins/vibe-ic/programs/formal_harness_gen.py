@@ -250,21 +250,59 @@ _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
 BINDING_ROLES = {"resets": "reset"}
 
 
-def binding_obligation(row: dict) -> Optional[dict]:
+def _binding_of(oid: str, value: Any) -> Optional[dict]:
+    """{"role", "port"} when `oid` is a name obligation and its declared
+    (structured, L8-leaf) value is an identifier."""
+    m = _BINDING_ID_RE.fullmatch(str(oid))
+    v = value.strip() if isinstance(value, str) else ""
+    if m and _IDENT_RE.fullmatch(v):
+        return {"role": BINDING_ROLES[m.group(1)], "port": v}
+    return None
+
+
+def _value_at(doc: Any, path: str) -> Any:
+    """The leaf at a dotted path (digits index lists) of a parsed document."""
+    cur = doc
+    for part in path.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        elif isinstance(cur, list) and part.isdigit() and int(part) < len(cur):
+            cur = cur[int(part)]
+        else:
+            return None
+    return cur
+
+
+def binding_obligation(row: dict, project: Optional[Path] = None) -> Optional[dict]:
     """{"role", "port"} when this obligation's content is a port NAME, else None.
 
-    Read from the row itself (id + the declared value in its description), so
-    a results.json written before this classification is judged the same way."""
+    The declared value is read STRUCTURALLY — the row's own `binding` tag, else
+    the L8 document's leaf at the obligation's path (its `source`, else the
+    project's L8 files) — never parsed out of the description sentence. So a
+    results.json written before the tag existed is judged the same way."""
     if not isinstance(row, dict):
         return None
-    m = _BINDING_ID_RE.fullmatch(str(row.get("id", "")))
-    if not m:
+    oid = str(row.get("id", ""))
+    if _binding_of(oid, "x") is None:
         return None
-    desc = str(row.get("description", ""))
-    value = desc.split("=", 1)[1].strip() if "=" in desc else ""
-    if not _IDENT_RE.fullmatch(value):
-        return None
-    return {"role": BINDING_ROLES[m.group(1)], "port": value}
+    tag = row.get("binding")
+    if isinstance(tag, dict) and _binding_of(oid, tag.get("port")):
+        return _binding_of(oid, tag.get("port"))
+    path = oid.split(".", 1)[1]
+    docs: List[Any] = []
+    src = Path(str(row.get("source") or ""))
+    if src.name and src.is_file():
+        try:
+            docs.append(json.loads(src.read_text(errors="replace")))
+        except (OSError, ValueError):
+            pass
+    if project is not None:
+        docs += [d for _p, d in _read_l_docs(project)[0].get("L8", [])]
+    for doc in docs:
+        found = _binding_of(oid, _value_at(doc, path))
+        if found:
+            return found
+    return None
 
 
 _TIMING_KEY_RE = re.compile(
@@ -418,7 +456,7 @@ def declaration_obligations(project: Optional[Path]) -> dict:
                 for key, text in _timing_semantics(data):
                     row = _obligation(
                         "L8", key, f"declared temporal behavior {key}={text}", path)
-                    binding = binding_obligation(row)
+                    binding = _binding_of(row["id"], text)
                     if binding:
                         row["kind"] = "binding"       # R-0924-2: a name
                         row["binding"] = binding

@@ -365,6 +365,25 @@ def _harness_text(project: Path, formal_dir: Path, results: dict) -> str:
     return strip_comments("\n".join(texts))
 
 
+def _harness_connects(harness: str, port: str) -> bool:
+    """The DUT instance connects `port` (`.port(port)`)."""
+    p = re.escape(port)
+    return bool(re.search(rf"\.{p}\s*\(\s*{p}\s*\)", harness))
+
+
+def _harness_binds_reset(harness: str, port: str) -> bool:
+    """The generated reset-active expression reads `port` (`rst_active = [!]port`)."""
+    return bool(re.search(
+        rf"\bwire\s+rst_active\s*=\s*[!~]?\s*{re.escape(port)}\s*;", harness))
+
+
+def _reset_guarded_properties(harness: str) -> List[str]:
+    """Asserted properties whose body is guarded by the bound reset."""
+    asserted = set(re.findall(r"\bassert\s+property\s*\(\s*(\w+)\s*\)", harness))
+    return sorted(n for n, body in _PROPERTY_RE.findall(harness)
+                  if n in asserted and re.search(r"\brst_active(?:_q)?\b", body))
+
+
 def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List[dict]:
     """R-0924-2 — a NAME obligation (`resets.N.name`) is discharged
     STRUCTURALLY: the harness binds the declared port as the reset (the DUT
@@ -373,7 +392,7 @@ def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List
     (every task PASS, at least one unbounded). Otherwise it stays outstanding
     with the reason. Never a trace proof; never dropped silently."""
     import formal_harness_gen as _fhg
-    rows = [(r, _fhg.binding_obligation(r))
+    rows = [(r, _fhg.binding_obligation(r, project))
             for r in results.get("unresolved_obligations") or []]
     rows = [(r, b) for r, b in rows if b]
     if not rows:
@@ -385,20 +404,17 @@ def binding_dispositions(project: Path, formal_dir: Path, results: dict) -> List
               and any(t.get("bound") == "unbounded" for t in tasks))
     proof_status = ", ".join(f"{t.get('task')}:{t.get('status')}"
                              f"({t.get('bound')})" for t in tasks) or "no proof task"
-    asserted = set(re.findall(r"\bassert\s+property\s*\(\s*(\w+)\s*\)", harness))
+    covering = _reset_guarded_properties(harness)
     out: List[dict] = []
     for row, b in rows:
-        port = re.escape(b["port"])
         rec = {"id": str(row.get("id")), "kind": "binding", "role": b["role"],
                "port": b["port"], "property": None, "proof_status": proof_status}
         why = []
-        if not re.search(rf"\.{port}\s*\(\s*{port}\s*\)", harness):
+        if not _harness_connects(harness, b["port"]):
             why.append(f"the harness does not connect the DUT port {b['port']!r}")
-        if not re.search(rf"\bwire\s+rst_active\s*=\s*[!~]?\s*{port}\s*;", harness):
+        if not _harness_binds_reset(harness, b["port"]):
             why.append(f"the harness does not bind {b['port']!r} as the reset "
                        f"(no `rst_active = [!]{b['port']}`)")
-        covering = sorted(n for n, body in _PROPERTY_RE.findall(harness)
-                          if re.search(r"\brst_active(?:_q)?\b", body) and n in asserted)
         if covering:
             rec["property"] = covering[0]
         else:

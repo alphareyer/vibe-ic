@@ -74,13 +74,19 @@ def _binding(rep: dict) -> dict:
     return rows[0]
 
 
-def test_the_name_obligation_is_classified_as_a_binding():
-    row = {"id": NAME_ID, "description":
-           "declared temporal behavior clock_and_reset_waveform.resets.0.name=rst"}
-    assert fhg.binding_obligation(row) == {"role": "reset", "port": "rst"}
+def test_the_name_obligation_is_classified_as_a_binding(tmp_path):
+    proj = _project(tmp_path)
+    rows = {o["id"]: o for o in fhg.declaration_obligations(proj)["obligations"]}
+    assert rows[NAME_ID]["kind"] == "binding"
+    assert rows[NAME_ID]["binding"] == {"role": "reset", "port": "rst"}
+    # an untagged row (a results.json written before the tag) is read from
+    # the L8 document at its own path, not from its description sentence
+    bare = {"id": NAME_ID, "description": "unrelated words"}
+    assert fhg.binding_obligation(bare, proj) == {"role": "reset", "port": "rst"}
     # behaviour is not a name; prose is not an identifier
-    assert fhg.binding_obligation(dict(row, id=NAME_ID.replace("name", "sync"))) is None
-    assert fhg.binding_obligation(dict(row, description="x=the reset pin")) is None
+    assert fhg.binding_obligation(dict(bare, id=NAME_ID.replace("name", "sync")), proj) is None
+    prose = _project(tmp_path / "p", reset_name="the reset pin")
+    assert fhg.binding_obligation(bare, prose) is None
 
 
 def test_bound_and_proven_is_discharged_by_binding(tmp_path):
