@@ -610,6 +610,13 @@ def packageable_chip_gds(project):
         f"{chip_gds.name}: {records} GDS geometry/placement record(s)")
 
 
+#: Suffixes that name a layout kept for COMPARISON, never for delivery. Same set
+#: the runner refuses to package (`phase3_one_shot_runner._REFERENCE_ONLY_SUFFIXES`),
+#: asserted equal by test so the producer and the gate cannot drift apart.
+REFERENCE_ONLY_SUFFIXES = (".prefinish.gds", ".ring_reference.gds")
+RULE_REFERENCE_LAYOUT_IN_PACK = "FOUNDRY_HANDOFF_REFERENCE_LAYOUT_IN_PACK"
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("project_dir")
@@ -716,6 +723,51 @@ def main(argv=None):
         report = {"program": _GATE_NAME, "verdict": verdict,
                   "findings": findings,
                   "zero_byte_members": zero_members}
+        out = json.dumps(report, indent=2, ensure_ascii=False)
+        if args.json:
+            Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(Path(args.json), out)
+        print(out)
+        return rc
+
+    # R-0915-146 — A COMPARISON REFERENCE IS NOT A DELIVERABLE.
+    #
+    # MEASURED on spm run22: the handoff pack carried `chip_top.prefinish.gds`
+    # (73,850,996 B) hardlinked beside the shipped `spm.gds` (102,923,002 B). That
+    # is the PRE-FINISHING layout, retained by the gds step so stream-out/finishing
+    # fidelity can be measured against it, and 29 MB smaller than the real mask set
+    # because fill, seal ring and snap had not happened yet. The run's own write
+    # ledger classes it `written_never_declared`: nothing declares it a deliverable.
+    #
+    # A hand-off package is what a foundry taped out FROM. A second, differently
+    # named, entirely plausible GDS inside it is an invitation to tape out the wrong
+    # layout, and no downstream check would notice: it is non-empty, it parses, and
+    # it carries real geometry. The runner no longer packages one; this gate refuses
+    # one however it arrived, because "the producer stopped doing it" is not the
+    # same guarantee as "the package cannot contain it".
+    reference_members = []
+    for hd in sorted(project.glob("phase3/stage4/foundry_handoff/**/*")):
+        if not hd.is_file():
+            continue
+        name_lo = hd.name.lower()
+        if any(name_lo.endswith(sfx) for sfx in REFERENCE_ONLY_SUFFIXES):
+            reference_members.append(str(hd.relative_to(project)))
+    if reference_members:
+        verdict, rc = "FAIL", 1
+        findings = [{
+            "severity": "ERROR",
+            "rule": RULE_REFERENCE_LAYOUT_IN_PACK,
+            "message": (
+                f"comparison-reference layout(s) inside the handoff pack: "
+                f"{reference_members[:6]}. A retained pre-finishing or reference "
+                f"GDS exists so fidelity can be MEASURED against it; shipping it "
+                f"beside the mask set offers a foundry a second plausible layout "
+                f"to tape out. Keep it under phase3/stage3/pnr/ where the fidelity "
+                f"step reads it."),
+        }]
+        report = {"program": _GATE_NAME, "verdict": verdict,
+                  "findings": findings,
+                  "reference_members": reference_members}
         out = json.dumps(report, indent=2, ensure_ascii=False)
         if args.json:
             Path(args.json).parent.mkdir(parents=True, exist_ok=True)

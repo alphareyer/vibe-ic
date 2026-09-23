@@ -245,6 +245,25 @@ def shipped_and_source(project: Path) -> Tuple[Optional[Path], Optional[Path],
 #: reason -- every finishing pass writes IN PLACE, so a "before" only exists if it
 #: was kept.
 PREFINISH_REL_FMT = "phase3/stage3/pnr/{top}.prefinish.gds"
+#: A GLOB, NOT ONE NAME, and for the same reason `STREAMOUT_LOG_GLOB` below is one.
+#:
+#: The runner retains `{top}.prefinish.gds` where `top` is the name PnR ran under;
+#: this checker resolved `{top}` from the DEF FILE'S STEM. Those are not the same
+#: string. MEASURED on spm run22: the shipped GDS is `spm.gds`, the source DEF is
+#: `spm.def` -- so this looked for `phase3/stage3/pnr/spm.prefinish.gds` -- while
+#: the boundary the run actually kept is `phase3/stage3/pnr/chip_top.prefinish.gds`
+#: (the runner's top was `chip_top`, and the front door's own advisory recorded
+#: "phase3 auto-derived top='spm' from --ic-name (no chip_top module)").
+#:
+#: The names could not meet, so the RETAINED boundary was never used and every run
+#: fell back to a re-stream. That fallback is the expensive path this artefact
+#: exists to avoid, and a re-stream missing one library produces a CONFIDENT WRONG
+#: ANSWER about the design -- 776,403 then 348,392 phantom differences, measured,
+#: and neither of them about that chip.
+#:
+#: One boundary per run, so a glob is exact rather than lenient: if it ever matches
+#: more than one, `resolve_reference` refuses instead of guessing.
+PREFINISH_GLOB = "phase3/stage3/pnr/*.prefinish.gds"
 #: The run's own retained stream-out recipe and its transcript. A fallback that
 #: re-streams must use THE RUN'S recipe, not a hand-rolled read: that mistake
 #: produced 776,403 differences across 29 design layers on run21 -- placement boxes
@@ -550,8 +569,28 @@ def resolve_reference(project: Path, top: str) -> Tuple[Optional[Path], str,
     calls it a fidelity finding -- which is why the receipt says WHICH reference it
     used and never lets the two be confused.
     """
+    # THE RUNNER'S SPELLING FIRST, then the glob, because a run whose PnR top and
+    # DEF stem DO agree must keep resolving to exactly the same artefact it always
+    # did; the glob only reaches the case where they differ.
     rel = PREFINISH_REL_FMT.format(top=top)
     kept = project / rel
+    if not kept.is_file():
+        matches = sorted(project.glob(PREFINISH_GLOB))
+        if len(matches) == 1:
+            kept = matches[0]
+            rel = kept.relative_to(project).as_posix()
+        elif len(matches) > 1:
+            # A run keeps ONE finishing boundary. Two means something staged a
+            # second layout here, and picking one of them would be a guess about
+            # which design the comparison is even about.
+            return None, "ambiguous", {
+                "kind": "ambiguous",
+                "candidates": [m.relative_to(project).as_posix()
+                               for m in matches],
+                "note": ("more than one retained finishing boundary is present, "
+                         "so which layout the comparison is about cannot be "
+                         "decided from the tree"),
+            }
     if kept.is_file():
         return kept, "retained", {
             "kind": "retained", "path": rel, "sha256": _sha256(kept),

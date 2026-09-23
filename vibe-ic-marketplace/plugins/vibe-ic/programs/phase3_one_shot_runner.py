@@ -53236,6 +53236,28 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # already produced. chip-AGNOSTIC: scribe stubs filtered via
     # the same hint list as foundry_handoff_package_check.
     _SCRIBE_HINTS = ("scribe_line", "scribeline", "scribe-line", "frame")
+    #: A COMPARISON REFERENCE IS NOT A DELIVERABLE, and must never enter the pack.
+    #:
+    #: MEASURED on spm run22: phase3/stage4/foundry_handoff/ carried
+    #: `chip_top.prefinish.gds` (73,850,996 B) hardlinked beside the shipped
+    #: `spm.gds` (102,923,002 B) -- the PRE-FINISHING layout, kept by the gds step
+    #: purely so stream-out/finishing fidelity can be measured against it, and 29 MB
+    #: smaller than the real mask set because fill, seal ring and snap had not
+    #: happened yet. A hand-off package is what a foundry taped out from; a second,
+    #: differently-named, plausible-looking GDS in it is an invitation to tape out
+    #: the wrong layout, and the run's own write ledger classes this file as
+    #: `written_never_declared` -- nothing declares it a deliverable.
+    #:
+    #: `*.ring_reference.gds` (65,851,036 B on the same run) is excluded for the
+    #: same stated reason: its name says reference.
+    #:
+    #: NOT EXCLUDED, and deliberately: `spm.filled.gds`, which on run22 is
+    #: byte-for-byte the same SIZE as the shipped GDS and is a stage OF the
+    #: deliverable rather than a reference to compare against. It is duplication in
+    #: the package, not a wrong-layout hazard, and it is reported rather than
+    #: quietly dropped -- excluding a file because I am unsure what it is would be
+    #: the same class of guess in the other direction.
+    _REFERENCE_ONLY_SUFFIXES = (".prefinish.gds", ".ring_reference.gds")
     candidate_chip_gds: List[Path] = []
     if primary_gds.is_file():
         candidate_chip_gds.append(primary_gds)
@@ -53251,9 +53273,16 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 candidate_chip_gds.append(extra)
     if handoff_out.is_dir():
         _zero_byte_members: List[str] = []
+        _reference_members: List[str] = []
         for src_gds in candidate_chip_gds:
             stem_lo = src_gds.stem.lower()
             if any(h in stem_lo for h in _SCRIBE_HINTS):
+                continue
+            name_lo = src_gds.name.lower()
+            if any(name_lo.endswith(sfx) for sfx in _REFERENCE_ONLY_SUFFIXES):
+                # Recorded by name, not silently skipped: "the package does not
+                # contain this" and "nobody looked" must not read the same.
+                _reference_members.append(src_gds.name)
                 continue
             # ORGANIC-20260606 #433(d): a 0-byte member must never enter
             # the foundry handoff pack — record it by name instead of
@@ -53272,6 +53301,11 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 written.append(str(dst_gds))
             except OSError:
                 pass
+        if _reference_members:
+            print(f"[handoff] comparison reference(s) NOT packaged: "
+                  f"{', '.join(sorted(_reference_members))} — a retained "
+                  f"pre-finishing or reference layout is evidence for fidelity "
+                  f"checking, not a mask deliverable")
         if _zero_byte_members:
             (handoff_out / "PACKAGING_ERRORS.txt").write_text(
                 "0-byte GDS source(s) REFUSED from the handoff pack "
