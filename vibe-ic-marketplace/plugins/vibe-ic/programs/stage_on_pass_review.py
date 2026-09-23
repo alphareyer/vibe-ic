@@ -876,10 +876,30 @@ def stage_passed(compliance: Optional[Path], stage_id: str,
         why += ("; proceeded past "
                 + ", ".join(f"{r['id']}={r['status']}" for r in waived_rows)
                 + " (a previous stage's declined review, disclosed there)")
+    # R-0915-138 — NAME THE PASS THIS VERDICT CAME FROM. A stage compliance
+    # report can be re-published by a later audit pass: the canonical path holds
+    # the LATEST verdict and the earlier one is kept beside it with its own
+    # verdict named. A reader that reports "stage3 said X" without saying WHICH
+    # publication said it cannot be checked -- and on spm run21 the difference was
+    # the whole answer, because the first publication judged step 31's ninth
+    # required output missing five seconds before the declared producer wrote it.
+    #
+    # Absent stamp = a first publication, which is the overwhelmingly common case
+    # and is stated as such rather than left blank.
+    _pub = rep.get("published_by") if isinstance(rep, dict) else None
+    if isinstance(_pub, dict):
+        _sup = _pub.get("supersedes") or {}
+        why += (f"; read from publication pass {_pub.get('pass')} "
+                f"(supersedes pass {_sup.get('pass')} verdict "
+                f"{_sup.get('verdict')}, kept at {_sup.get('kept_at')})")
+    else:
+        why += "; read from the first publication of this report"
     return {"passed": not bad,
             "why": why,
             "non_green_rows": rows,
             "proceeded_past_inherited_decline": waived_rows,
+            "publication": (_pub if isinstance(_pub, dict)
+                            else {"pass": 1, "supersedes": None}),
             "source": str(compliance)}
 
 
