@@ -20744,6 +20744,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         # cannot see it, and leaving it in would make the PREVIOUS run's audit
         # an input to THIS run's design hash.
         audit_path = _pl.report_path(project, "phase23_completion_audit.json")
+        # THE DESTINATION IS DECIDED HERE, NOT AFTER THE FOOTPRINT. R-0915-150.
+        #
+        # A scoped pass writes its own audit under `reports/audit/scoped/`, and the two
+        # blocks below both depend on knowing that NOW: `_prior_audit` carries the
+        # previous footprint FROM THIS FILE, and `_also_written` declares what this pass
+        # wrote. Deciding it later (my first cut) meant a scoped pass read its prior from
+        # a canonical document it never writes, so it carried nothing -- and two
+        # identical `--phase 2` passes over an unchanged tree produced DIFFERENT design
+        # digests, because each counted the other's outputs as design inputs.
+        _audit_is_whole_flow = (
+            target_stage is None
+            and bool(_flow_step_ids)
+            and set(_flow_step_ids) <= {str(getattr(r, "id", "")) for r in results})
+        if not _audit_is_whole_flow:
+            _scope_name = (f"stage-{target_stage}" if target_stage
+                           else f"phase-{args.phase}")
+            audit_path = (audit_path.parent / "scoped"
+                          / f"phase23_completion_audit.{_scope_name}.json")
 
         # ── what this tally was computed OVER ────────────────────────────
         # Two hashes, because "did the design change?" and "did the ruler
@@ -20782,6 +20800,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             _carried = []
         if _did is not None and _did_scan is not None:
             try:
+                # THE AUDITOR'S OWN WRITES. `audit_path` is already this pass's real
+                # destination -- scoped or canonical -- because the decision was moved
+                # above, so the footprint names the file this pass actually writes.
                 _also_written = [str(audit_path.relative_to(project))]
                 if args.json:
                     _rep = Path(args.json).resolve()
@@ -21027,10 +21048,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         # finds a whole-flow one or finds none. (audit_replay already copes
         # consumer-side; that is no reason for the producer to keep publishing a
         # partial audit under the whole run's name.)
-        _audit_is_whole_flow = (
-            target_stage is None
-            and bool(_flow_step_ids)
-            and set(_flow_step_ids) <= {str(getattr(r, "id", "")) for r in results})
         audit["scope"] = {
             "phase": args.phase,
             "stage": (str(args.stage) if getattr(args, "stage", None) else None),
@@ -21041,6 +21058,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         }
         audit["invocation"] = _this_invocation
         if not _audit_is_whole_flow:
+            # (the path was chosen above; this only tells the reader)
             # ITS OWN SUBTREE, NAMED BY WHAT IT JUDGED, REPLACED PER SCOPE.
             #
             # A scoped audit is not a smaller version of the run's audit; it is a
@@ -21056,10 +21074,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             #     invocations -- and `invocation` inside says whose it is;
             #   * written atomically, because a reader rglobbing the tree can arrive
             #     mid-write and a truncated JSON reads as a broken audit.
-            _scope_name = (f"stage-{target_stage}" if target_stage
-                           else f"phase-{args.phase}")
-            audit_path = (audit_path.parent / "scoped"
-                          / f"phase23_completion_audit.{_scope_name}.json")
             print(f"flow_compliance_check: this pass judged {len(results)} of "
                   f"{_flow_step_total} step(s), so it does NOT publish the whole "
                   f"run's completion audit; its own scoped audit is at "

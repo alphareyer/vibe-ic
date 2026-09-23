@@ -105,6 +105,25 @@ SCHEMA_VERSION = 1
 #: the exclusion is never silent.
 EXCLUDED_DIR_NAMES: Tuple[str, ...] = (".git", "__pycache__", ".vibeic-state")
 
+#: Project-relative directories that hold the AUDITOR'S OWN outputs, and therefore are
+#: not design inputs. R-0915-150.
+#:
+#: `reports/audit/scoped/` holds the completion audit a SCOPED pass writes about itself.
+#: Every such file carries `run_at` and `invocation`, so its bytes differ on every pass
+#: even over an unchanged tree — and the digest's whole premise is that a re-run over an
+#: unchanged design produces the SAME sha256. MEASURED consequence before this exclusion:
+#:   * two FPGA pre-burn guard passes (`--phase 2`) on an unchanged tree produced
+#:     DIFFERENT design_input_digest.sha256 values;
+#:   * and a whole-flow W1 -> a guard pass -> an unchanged-tree whole-flow W2 read
+#:     design_moved=True, so W2 published DESIGN_CHANGE ("this movement is about the
+#:     design") where the honest answer is UNEXPLAINED_TALLY_MOVE, and the TALLY_DELTA
+#:     warning was suppressed.
+#: Excluded by RELATIVE PATH rather than by directory NAME: a bare "scoped" would prune
+#: any directory with that name anywhere in a design's own sources.
+EXCLUDED_REL_DIRS: Tuple[str, ...] = (
+    "reports/audit/scoped",
+)
+
 #: Bounds, so a pathological tree cannot hang a gate. Measured headroom on the
 #: tracked corpus: the largest project is 873 files / 66.8 MB and the whole
 #: 28-project corpus is 7175 files / 394 MB, hashed in well under a second.
@@ -227,6 +246,15 @@ def _walk(project: Path):
     would either double-count its target or escape the project entirely."""
     for root, dirs, files in os.walk(project, followlinks=False):
         dirs[:] = sorted(d for d in dirs if d not in EXCLUDED_DIR_NAMES)
+        # THE AUDITOR'S OWN OUTPUT SUBTREES, pruned by relative path. See
+        # EXCLUDED_REL_DIRS: these carry `run_at`/`invocation` and so differ on every
+        # pass, which would make "did the design move?" answer yes to an audit.
+        try:
+            _here = Path(root).relative_to(project).as_posix()
+        except ValueError:                                 # pragma: no cover
+            _here = ""
+        dirs[:] = [d for d in dirs
+                   if f"{_here}/{d}".lstrip("/") not in EXCLUDED_REL_DIRS]
         for name in sorted(files):
             yield Path(root) / name
 

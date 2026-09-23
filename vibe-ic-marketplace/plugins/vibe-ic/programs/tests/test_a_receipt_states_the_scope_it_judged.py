@@ -335,3 +335,55 @@ def test_the_fpga_pre_burn_guard_reads_its_own_pass_not_the_whole_runs_audit():
     assert "_pass_started" in tail, (
         "a canonical read survives with no freshness gate, so another population's "
         "verdict can still decide a burn")
+
+
+# ── the auditor's own scoped output is not a design input ───────────────────
+
+def test_two_identical_scoped_passes_produce_the_same_design_digest(project):
+    """A scoped audit carries `run_at` and `invocation`, so its bytes differ on every
+    pass. The digest's premise is that a re-run over an UNCHANGED design yields the SAME
+    sha256 — so the auditor's own output must not be a design input.
+
+    MEASURED before the exclusion: two FPGA pre-burn guard passes (`--phase 2`) on an
+    unchanged tree produced different `design_input_digest.sha256` values.
+    """
+    digests = []
+    for _ in range(2):
+        out = project / "reports/zz_p2.json"
+        subprocess.run(
+            [sys.executable, str(PROGRAMS / "flow_compliance_check.py"), str(project),
+             "--phase", "2", "--strict-structural", "--json", str(out)],
+            capture_output=True, text=True, timeout=2400)
+        # THE DIGEST LIVES IN THE AUDIT DOCUMENT, not in the compliance report —
+        # measured rather than assumed, which cost me a red here.
+        audit = (project / "reports/audit/scoped"
+                 / "phase23_completion_audit.phase-2.json")
+        adoc = json.loads(audit.read_text())
+        digests.append((adoc.get("design_input_digest") or {}).get("sha256"))
+    assert digests[0] and digests[1], digests
+    assert digests[0] == digests[1], (
+        f"two identical scoped passes over an unchanged tree produced different design "
+        f"digests ({digests}); the auditor's own scoped output is being counted as a "
+        f"design input")
+
+
+def test_the_scoped_subtree_is_excluded_from_the_design_scan(project):
+    """The exclusion itself, both directions: a file under the auditor's scoped subtree
+    is not scanned, and an ordinary report still is."""
+    import design_input_digest as D
+    assert "reports/audit/scoped" in D.EXCLUDED_REL_DIRS
+    scoped = project / "reports/audit/scoped/phase23_completion_audit.phase-2.json"
+    scoped.parent.mkdir(parents=True, exist_ok=True)
+    scoped.write_text('{"verdict": "PASS"}\n')
+    ordinary = project / "reports/phase3/drc_signoff.json"
+    ordinary.parent.mkdir(parents=True, exist_ok=True)
+    ordinary.write_text('{"verdict": "PASS"}\n')
+    scanned = set(D.scan_inputs(project).hashes)
+    assert "reports/phase3/drc_signoff.json" in scanned
+    assert not [r for r in scanned if r.startswith("reports/audit/scoped/")], (
+        sorted(r for r in scanned if "scoped" in r))
+    # and a directory merely NAMED "scoped" in the design's own sources is untouched
+    design_scoped = project / "input/rtl/scoped/thing.v"
+    design_scoped.parent.mkdir(parents=True, exist_ok=True)
+    design_scoped.write_text("module thing(); endmodule\n")
+    assert "input/rtl/scoped/thing.v" in set(D.scan_inputs(project).hashes)
