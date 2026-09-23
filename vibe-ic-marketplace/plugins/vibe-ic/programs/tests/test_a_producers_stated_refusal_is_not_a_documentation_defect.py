@@ -90,6 +90,7 @@ sys.path.insert(0, str(PROGRAMS))
 import _flow_reason_taxonomy as _T                            # noqa: E402
 import ic_release_docs_gen as GEN                             # noqa: E402
 import release_docs_check as CHK                              # noqa: E402
+import flow_compliance_check as _FCC       # noqa: E402
 
 
 def _signed_off_die(project: Path, release: str = "zzdie") -> None:
@@ -311,12 +312,28 @@ def _passing_metrics() -> dict:
 
 
 def _step_status(project: Path, sid: str, status: str) -> None:
-    """A step's OWN published verdict for this run, in the format
-    `flow_compliance_check` writes: reports/metrics/<sid>.json carrying
-    `<sid>__flow__step_status`. This is the authority R-0915-149 moved to."""
-    f = project / f"reports/metrics/{sid}.json"
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps({f"{sid}__flow__step_status": status}) + "\n")
+    """A step's OWN published verdict for THIS RUN, written the way the flow writes it.
+
+    THROUGH `step_metrics.emit`, not by hand. R-0915-152. My earlier spelling built
+    `reports/metrics/{sid}.json` and the key `{sid}__flow__step_status` itself, and both
+    are wrong for a dotted or suffixed id: `emit` NORMALISES first, so step 37.4's row is
+    `37_4.json` under `37_4__flow__step_status` and M1's is `m1.json`. A fixture that spells
+    a producer's filename itself proves nothing about the reader -- the same mistake as
+    writing a report where no producer writes it.
+
+    It also carries the INVOCATION, because that is what makes the row this run's rather
+    than a leftover, and the reader now requires it.
+    """
+    import step_metrics as _sm                              # noqa: PLC0415
+    _sm.emit(project, sid, {"step_status": status,
+                            "invocation": _FCC._invocation_id()})
+
+
+def _forget_step_status(project: Path, sid: str) -> None:
+    """Remove a step's row, by the name `step_metrics` actually writes."""
+    import step_metrics as _sm                              # noqa: PLC0415
+    (project / _sm.METRICS_REL / f"{_sm.normalize_step(sid)}.json").unlink(
+        missing_ok=True)
 
 
 def _real_writer_formats(project: Path) -> None:
@@ -432,7 +449,7 @@ def test_a_step_with_no_published_verdict_is_not_an_excuse(tmp_path):
     _healthy_upstream(tmp_path)
     (tmp_path / "phase3/stage4/gds/zzdie.gds").write_bytes(b"\x00" * 448)
     for sid in ("23", "33", "37", "37.4"):
-        (tmp_path / f"reports/metrics/{sid}.json").unlink(missing_ok=True)
+        _forget_step_status(tmp_path, sid)
     b = CHK.upstream_blockage_now(tmp_path, "zzdie")
     assert b["blocked"] is False, b
     assert CHK.run_audit(tmp_path, "ic").verdict_tier == "FAIL"

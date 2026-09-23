@@ -15442,7 +15442,15 @@ def _emit_step_metrics(project: Path, step: Dict[str, Any],
     # name they become `17__flow__verdict` twice and `emit`'s `prior.update`
     # lets the last writer win, so the gate's own measurement would be
     # silently replaced by a different quantity. Two instruments, two names.
-    metrics: Dict[str, Any] = {"step_status": getattr(result, "status", "")}
+    metrics: Dict[str, Any] = {"step_status": getattr(result, "status", ""),
+                               # WHICH INVOCATION MEASURED IT. R-0915-152. Without this a
+                               # reader cannot tell this run's verdict from the last run's
+                               # at the same path, and `release_docs_check` attributed
+                               # upstream blockage from a row a previous run wrote.
+                               "invocation": _invocation_id()}
+    #: THE WRAPPER'S OWN KEYS, which the no-clobber filter below must never protect from
+    #: the wrapper itself -- see the measurement in that filter's comment.
+    _own_keys = ("step_status", "invocation")
 
     # AND NOTHING ALREADY EMITTED IS OVERWRITTEN. A program that emitted for
     # this step measured something it stands behind; this wrapper forwards a
@@ -15482,8 +15490,21 @@ def _emit_step_metrics(project: Path, step: Dict[str, Any],
     if already:
         _sm_ = _sm
         _prefix = f"{_sm_.normalize_step(step.get('id'))}__"
+        # EXCEPT THE WRAPPER'S OWN, which it is the sole author of. The filter protects a
+        # PROGRAM's measurement from being replaced by this wrapper's forwarded value;
+        # applied to `step_status` it protected the wrapper from ITSELF, and because the key
+        # is already there from the previous pass, that FROZE it.
+        #
+        # MEASURED by driving this function twice over one project: pass 1 emits FAIL, pass
+        # 2 emits PASS, and the file still says FAIL. So a step that failed once read FAIL
+        # for the rest of that tree's life, and `release_docs_check` -- which takes upstream
+        # blockage from exactly this key -- reported BLOCKED_BY_UPSTREAM against a step that
+        # had since passed. There is no other author to defer to: nothing else emits
+        # `step_status`, which is why the comment above spells it that way and not
+        # `verdict`.
         metrics = {k: v for k, v in metrics.items()
-                   if not any(e.startswith(_prefix) and e.endswith(f"__{k}")
+                   if k in _own_keys
+                   or not any(e.startswith(_prefix) and e.endswith(f"__{k}")
                               for e in already)}
     # ONE NON-CONFORMING NAME MUST NOT COST THE WHOLE STEP'S METRICS.
     # `emit` validates every key and raises on the FIRST defect, before it

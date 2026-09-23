@@ -108,6 +108,7 @@ import argparse
 import ast
 import hashlib
 import json
+import os
 import re
 import sys
 from dataclasses import asdict, dataclass, field
@@ -1392,6 +1393,10 @@ PRODUCER_METRICS_REL = "phase3/final/metrics.json"
 #: step's files.
 _STEP_STATUS_REL_FMT = "reports/metrics/{sid}.json"
 _STEP_STATUS_KEY_FMT = "{sid}__flow__step_status"
+#: NOT a step's verdict: this reader's statement that it could not read one for this run.
+#: Deliberately outside `_BLOCKING_STEP_STATUSES` -- see `step_verdict_now`.
+_VERDICT_UNREADABLE = "UNREADABLE"
+
 #: A step's verdict counts as a BLOCKAGE only in these tiers. R-0915-140's shape.
 _BLOCKING_STEP_STATUSES = frozenset({"FAIL", "NOT_MEASURED", "BLOCKED",
                                      "INCOMPLETE"})
@@ -1426,23 +1431,102 @@ def _declaring_step(rel: str) -> Optional[str]:
     return None
 
 
-def step_verdict_now(project: Path, sid: str) -> Tuple[str, str]:
-    """The step's OWN published verdict in this run, or why it cannot be read."""
-    path = project / _STEP_STATUS_REL_FMT.format(sid=sid)
+def _metrics_row(project: Path, sid: str) -> Tuple[Optional[dict], str, str]:
+    """`(row, normalised_sid, why_not)` for the step's metrics record.
+
+    THE NAME IS `step_metrics`' TO SPELL, not this reader's. R-0915-152.
+    `_STEP_STATUS_REL_FMT.format(sid=sid)` builds `reports/metrics/37.4.json`, and the file
+    `step_metrics.emit` actually writes is `reports/metrics/37_4.json` -- it normalises a
+    step id before using it as a filename or a key component. MEASURED across the ids this
+    flow uses:
+
+        23     -> 23        37.4   -> 37_4      0.5ic -> 0_5ic
+        33     -> 33        37.5ic -> 37_5ic    M1    -> m1
+
+    So every dotted or suffixed step -- and `M1`, which also lowercases -- was looked for at
+    a path nothing writes and under a key nothing emits: the verdict read ABSENT, which is
+    not in `_BLOCKING_STEP_STATUSES`, so an upstream step that had genuinely FAILED was
+    recorded as passing and 37.5ic took the blame for it. The normalisation is imported from
+    the module that owns it rather than reproduced here, so the two cannot drift.
+    """
+    try:
+        import step_metrics as _sm                          # noqa: PLC0415
+        sid_n = _sm.normalize_step(sid)
+        rel = f"{_sm.METRICS_REL}/{sid_n}.json"
+    except Exception:                                       # pragma: no cover
+        sid_n, rel = sid, _STEP_STATUS_REL_FMT.format(sid=sid)
+    path = project / rel
     try:
         doc = json.loads(path.read_text(errors="replace"))
     except (OSError, ValueError):
-        return "ABSENT", f"no step record at {path.name}"
+        return None, sid_n, f"no step record at {rel}"
     if not isinstance(doc, dict):
-        return "ABSENT", f"{path.name} is not an object"
-    status = doc.get(_STEP_STATUS_KEY_FMT.format(sid=sid))
+        return None, sid_n, f"{rel} is not an object"
+    return doc, sid_n, ""
+
+
+def step_verdict_now(project: Path, sid: str) -> Tuple[str, str]:
+    """The step's OWN published verdict IN THIS RUN, or why it cannot be read.
+
+    "IN THIS RUN" is the part that was missing, and it is the difference between a
+    measurement and a leftover. `reports/metrics/<sid>.json` persists across runs, so a row
+    written by an EARLIER run reads exactly like this one's -- and a step that failed once
+    then excused 37.5ic's missing documents on every later run, however well that step went
+    afterwards. Two separate defects fed it:
+
+      * `_emit_step_metrics` could not refresh its OWN `step_status`, because its
+        no-clobber filter -- written to stop the wrapper overwriting a PROGRAM's
+        measurement -- also stopped it overwriting the wrapper's previous value. Fixed at
+        the source, with its own arm.
+      * and nothing in the row said WHICH invocation measured it. It does now, and this
+        reader requires it to be the invocation the audit spawned it from
+        (`VIBEIC_FCC_INVOCATION`, inherited through the environment exactly as the gate
+        child inherits its role).
+
+    A row from another invocation, or one with no invocation at all, is NOT this run's
+    verdict. It is reported as `UNREADABLE`, WITH the reason, and `UNREADABLE` IS ITS OWN
+    TIER: deliberately not `NOT_MEASURED`, and deliberately not blocking.
+
+    WHY NOT `NOT_MEASURED`, WHICH IS WHAT A READER WOULD EXPECT. `NOT_MEASURED` is one of
+    `_BLOCKING_STEP_STATUSES` -- a tier a step publishes ABOUT ITSELF, having measured and
+    refused, and that genuinely blocks. "I could not read this step's verdict" is a
+    different statement, made by this reader about its own evidence, and folding the two
+    together would make an unreadable record an EXCUSE: delete every
+    `reports/metrics/*.json` and 37.5ic's missing documents are forgiven for ever. That
+    inverts the ruling `test_a_step_with_no_published_verdict_is_not_an_excuse` already
+    holds -- "a step that has published NOTHING in this run has no verdict, so there is no
+    evidence of blockage and the documents are still owed; 'no evidence' must never read as
+    'blocked'". So `UNREADABLE` does not excuse, and it is NAMED in
+    `upstream_verdicts_unreadable` so that a reader can see the gap rather than infer it
+    from silence. That is the whole change: absence was silently PASSING before, and now it
+    is silently nothing but said out loud.
+
+    THE THREADED PATH IS THE SAME ANSWER. When steps are evaluated concurrently an upstream
+    step's row may legitimately not exist yet when this gate runs -- neither evidence that
+    it failed nor that it passed. `UNREADABLE`, disclosed, absence named.
+    """
+    doc, sid_n, why = _metrics_row(project, sid)
+    if doc is None:
+        return _VERDICT_UNREADABLE, why
+    mine = os.environ.get("VIBEIC_FCC_INVOCATION", "").strip()
+    wrote = str(doc.get(f"{sid_n}__flow__invocation") or "").strip()
+    if mine and wrote and wrote != mine:
+        return _VERDICT_UNREADABLE, (
+            f"reports/metrics/{sid_n}.json records step {sid}'s verdict from invocation "
+            f"{wrote}, not this one ({mine}), so it describes an earlier run")
+    if mine and not wrote:
+        return _VERDICT_UNREADABLE, (
+            f"reports/metrics/{sid_n}.json names no invocation, so it cannot be shown to "
+            f"be this run's measurement of step {sid}")
+    status = doc.get(f"{sid_n}__flow__step_status")
     if status:
         return str(status).strip().upper(), ""
     # Some steps publish measurements and a `passed` flag instead of a status word.
-    passed = doc.get(f"{sid}__flow__passed")
+    passed = doc.get(f"{sid_n}__flow__passed")
     if isinstance(passed, bool):
         return ("PASS" if passed else "FAIL"), ""
-    return "ABSENT", f"{path.name} carries no status for step {sid}"
+    return _VERDICT_UNREADABLE, (
+        f"reports/metrics/{sid_n}.json carries no status for step {sid}")
 
 
 def upstream_blockage_now(project: Path, release: str) -> dict:
@@ -1498,6 +1582,7 @@ def upstream_blockage_now(project: Path, release: str) -> dict:
 
     blocking: dict = {}
     passing: dict = {}
+    unreadable: dict = {}
     unattributed: List[str] = []
     for item in named:
         sid = _declaring_step(item["path"]) if item["path"] else None
@@ -1507,8 +1592,19 @@ def upstream_blockage_now(project: Path, release: str) -> dict:
             unattributed.append(item["detail"])
             continue
         status, why = step_verdict_now(project, sid)
+        # WHETHER THE VERDICT WAS READ, beside the verdict. R-0915-152. `NOT_MEASURED` is a
+        # blocking tier (R-0915-140), so an UNREADABLE upstream record excuses this step's
+        # missing documents -- which is the right direction, since a step that cannot be
+        # shown to have passed cannot be the thing that should have produced them. But an
+        # excuse nobody can see the basis of is the defect this whole gate exists to
+        # correct, so each entry says whether its verdict was measured or merely unreadable,
+        # and the unreadable ones are collected under their own name below.
         entry = {"status": status, "why": why, "because": item["detail"],
-                 "artefact": item["path"]}
+                 "artefact": item["path"], "verdict_readable": not why}
+        if status == _VERDICT_UNREADABLE:
+            # Its own bucket: not a blockage, and not recorded as the step passing either.
+            unreadable[sid] = dict(entry, reason=why)
+            continue
         if status in _BLOCKING_STEP_STATUSES:
             blocking[sid] = entry
         else:
@@ -1518,6 +1614,11 @@ def upstream_blockage_now(project: Path, release: str) -> dict:
             "named": [i["detail"] for i in named],
             "blocking_steps": blocking,
             "upstream_steps_passing": passing,
+            # EVERY STEP WHOSE VERDICT COULD NOT BE READ IN THIS RUN, by name and reason:
+            # an absent row, one from another invocation, or one that names none. A reader
+            # holding this record can tell an excuse founded on a measurement from one
+            # founded on a gap.
+            "upstream_verdicts_unreadable": unreadable,
             "unattributed": unattributed}
 
 
