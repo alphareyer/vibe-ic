@@ -363,7 +363,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "there is nothing to diff against, and a gate with no reference "
                 "must refuse rather than pass" % AUDIT_REL)
 
-        diff = _svt.diff_tables(ref, cur)
+        # R-0915-139 — THIS SUBJECT REPLAYS A FROZEN TREE. A step the frozen
+        # run's flow never declared has no reference and can only read missing
+        # here, so such a row is `added`, never a regression. The
+        # `real_ic_gate` subject keeps the stricter rule -- see `diff_tables`.
+        diff = _svt.diff_tables(ref, cur,
+                                subject_kind=_svt.SUBJECT_AUDIT_REPLAY)
         report["diff"] = diff
         print(_svt.render(cur, diff))
 
