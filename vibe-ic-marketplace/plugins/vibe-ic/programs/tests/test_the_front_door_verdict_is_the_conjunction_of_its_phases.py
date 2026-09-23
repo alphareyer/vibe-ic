@@ -65,7 +65,7 @@ RUN22_ROWS = [("phase1", "PASS", 0),
 # ── hole 1: NOT_MEASURED never rolls up to PASS ────────────────────────────
 
 def test_run22s_own_rows_do_not_roll_up_to_pass():
-    verdict, why = V._aggregate(RUN22_ROWS)
+    verdict, why = V._roll_up(RUN22_ROWS)
     assert verdict != "PASS", (verdict, why)
     assert verdict == "NOT_MEASURED", (verdict, why)
     assert len(why) == 2, why
@@ -74,7 +74,7 @@ def test_run22s_own_rows_do_not_roll_up_to_pass():
 
 def test_run22s_rows_with_its_own_completion_audit_are_a_fail():
     """The whole truth about run22: the audit had already said FAIL."""
-    verdict, why = V._aggregate(RUN22_ROWS, ["FAIL"])
+    verdict, why = V._roll_up(RUN22_ROWS, ["FAIL"])
     assert verdict == "FAIL", (verdict, why)
     assert any("completion audit" in r for r in why), why
 
@@ -84,7 +84,7 @@ def test_an_unknown_verdict_token_is_not_a_pass():
     the ways to fail and passed everything else."""
     for token in ("NOT_MEASURED", "NOT_DETERMINED", "IN_PROGRESS", "INCOMPLETE",
                   "ERROR", "VACUOUS_PASS", "", "greenish", None):
-        verdict, why = V._aggregate([("phase2", token, 0)])
+        verdict, why = V._roll_up([("phase2", token, 0)])
         assert verdict != "PASS", (token, verdict)
         assert verdict != "PASS_WITH_WAIVERS", (token, verdict)
         assert why, token
@@ -102,7 +102,7 @@ def test_the_passing_sets_are_the_only_way_to_pass():
 def test_a_clean_run_still_passes_and_says_nothing():
     """The other direction, so the fix is not just "everything fails now": a run
     whose phases all passed is a PASS with an EMPTY reason list."""
-    verdict, why = V._aggregate([("phase1", "PASS", 0), ("phase2", "PASS", 0),
+    verdict, why = V._roll_up([("phase1", "PASS", 0), ("phase2", "PASS", 0),
                                  ("phase3", "PASS", 0)], ["PASS"])
     assert (verdict, why) == ("PASS", []), (verdict, why)
 
@@ -110,14 +110,14 @@ def test_a_clean_run_still_passes_and_says_nothing():
 def test_waivers_still_travel_as_waivers():
     """Rule 11: PASS_WITH_WAIVERS is passing but not clean, and must not be
     collapsed onto a bare PASS."""
-    verdict, why = V._aggregate([("phase1", "COVERAGE-INCOMPLETE", 0),
+    verdict, why = V._roll_up([("phase1", "COVERAGE-INCOMPLETE", 0),
                                  ("phase2", "PASS", 0)])
     assert verdict == "PASS_WITH_WAIVERS", (verdict, why)
     assert why, "a non-clean pass must say why it is not clean"
 
 
 def test_a_fail_outranks_an_unmeasured_phase():
-    verdict, why = V._aggregate([("phase2", "FAIL", 1),
+    verdict, why = V._roll_up([("phase2", "FAIL", 1),
                                  ("phase3", "NOT_MEASURED", 1)])
     assert verdict == "FAIL", (verdict, why)
     # and the unmeasured phase is still disclosed, not swallowed by the FAIL
@@ -127,27 +127,27 @@ def test_a_fail_outranks_an_unmeasured_phase():
 # ── hole 2: rc is read ─────────────────────────────────────────────────────
 
 def test_a_phase_reporting_pass_while_exiting_nonzero_is_a_fail():
-    verdict, why = V._aggregate([("phase2", "PASS", 1)])
+    verdict, why = V._roll_up([("phase2", "PASS", 1)])
     assert verdict == "FAIL", (verdict, why)
     assert any("rc=1" in r for r in why), why
 
 
 def test_a_nonzero_rc_under_a_waiver_tier_also_fails():
-    verdict, why = V._aggregate([("phase1", "PASS_WITH_WAIVERS", 3)])
+    verdict, why = V._roll_up([("phase1", "PASS_WITH_WAIVERS", 3)])
     assert verdict == "FAIL", (verdict, why)
 
 
 def test_a_non_integer_rc_does_not_crash_the_rollup():
     """A report is JSON someone else wrote; `rc` can be null. A roll-up that
     raises here would take the whole front-door report with it."""
-    verdict, _ = V._aggregate([("phase2", "PASS", None)])
+    verdict, _ = V._roll_up([("phase2", "PASS", None)])
     assert verdict == "PASS"
 
 
 # ── hole 3: the completion audit is in the conjunction ─────────────────────
 
 def test_a_failing_completion_audit_fails_a_fully_passing_run():
-    verdict, why = V._aggregate([("phase1", "PASS", 0), ("phase3", "PASS", 0)],
+    verdict, why = V._roll_up([("phase1", "PASS", 0), ("phase3", "PASS", 0)],
                                ["PASS", "FAIL"])
     assert verdict == "FAIL", (verdict, why)
 
@@ -156,7 +156,7 @@ def test_an_absent_completion_audit_is_not_gating(tmp_path):
     """A phase1-only run has no phase2/3 completion audit, and failing it for
     that would be a different false statement."""
     assert V._completion_audit_verdicts(tmp_path) == []
-    verdict, why = V._aggregate([("phase1", "PASS", 0)], [])
+    verdict, why = V._roll_up([("phase1", "PASS", 0)], [])
     assert (verdict, why) == ("PASS", []), (verdict, why)
 
 
@@ -173,7 +173,7 @@ def test_the_audit_document_and_the_phase_report_are_both_read(tmp_path):
                               "completion_audit_verdict": "FAIL"}) + "\n")
     got = V._completion_audit_verdicts(tmp_path)
     assert "PASS" in got and "FAIL" in got, got
-    assert V._aggregate([("phase3", "PASS", 0)], got)[0] == "FAIL"
+    assert V._roll_up([("phase3", "PASS", 0)], got)[0] == "FAIL"
 
 
 # ── the exit code, and the reasons reaching the report ─────────────────────
@@ -227,4 +227,31 @@ def test_the_old_body_would_call_run22_a_pass():
         return "PASS"
 
     assert old_aggregate([v for _n, v, _rc in RUN22_ROWS]) == "PASS"
-    assert V._aggregate(RUN22_ROWS)[0] != "PASS"
+    assert V._roll_up(RUN22_ROWS)[0] != "PASS"
+
+
+# ── the older calling convention, which #505's properties are stated in ────
+
+def test_the_plain_verdict_list_contract_is_kept():
+    """`_aggregate(List[str]) -> str` predates this change and #505's
+    coverage-axis properties are stated directly against it. Changing the
+    signature under them broke all three with "too many values to unpack
+    (expected 3)" — a four-character verdict string unpacked as a row. The
+    adapter keeps the contract; this arm keeps the adapter."""
+    assert V._aggregate(["COVERAGE-INCOMPLETE", "PASS"]) == "PASS_WITH_WAIVERS"
+    assert V._aggregate(["COVERAGE-INCOMPLETE", "FAIL"]) == "FAIL"
+    assert V._aggregate(["PASS", "PASS"]) == "PASS"
+    # and the new rule is reachable through the same door
+    assert V._aggregate(["PASS", "NOT_MEASURED"]) == "NOT_MEASURED"
+
+
+def test_rows_of_every_shape_normalise():
+    """`plan` rows are 3-tuples; a longer tuple keeps its first three fields, and
+    a bare verdict has no rc to disagree with."""
+    assert V._as_rows(["PASS"]) == [("phase1", "PASS", 0)]
+    assert V._as_rows([("phase2", "PASS", 1)]) == [("phase2", "PASS", 1)]
+    assert V._as_rows([("phase2", "PASS", 0, "extra")]) == [("phase2", "PASS", 0)]
+    assert V._as_rows([("phase2", "PASS")]) == [("phase2", "PASS", 0)]
+    assert V._as_rows([("PASS",)]) == [("phase1", "PASS", 0)]
+    # a non-integer rc must not crash the normaliser
+    assert V._as_rows([("phase2", "PASS", None)]) == [("phase2", "PASS", 0)]

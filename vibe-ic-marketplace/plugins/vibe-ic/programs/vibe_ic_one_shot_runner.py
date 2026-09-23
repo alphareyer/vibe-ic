@@ -637,9 +637,58 @@ _PHASE_PASS_WITH_NOTE = frozenset({"PASS_WITH_WAIVERS", "WAIVED",
                                    "COVERAGE-INCOMPLETE"})
 
 
-def _aggregate(rows: List[Tuple[str, str, int]],
-               completion_audit_verdicts: Optional[List[str]] = None
-               ) -> Tuple[str, List[str]]:
+def _aggregate(rows: Any,
+               completion_audit_verdicts: Optional[List[str]] = None) -> str:
+    """The verdict alone, for callers that pass a plain list of phase verdicts.
+
+    THE ORIGINAL CONTRACT, KEPT. This function took `List[str]` and answered a
+    `str`, and #505's coverage-axis properties are stated directly against it:
+
+        _aggregate(["COVERAGE-INCOMPLETE", "PASS"]) == "PASS_WITH_WAIVERS"
+        _aggregate(["COVERAGE-INCOMPLETE", "FAIL"]) == "FAIL"
+        _aggregate(["PASS", "PASS"])               == "PASS"
+
+    Changing the signature under them broke all three with
+    `ValueError: too many values to unpack (expected 3)` -- a four-character
+    verdict string unpacked as a row. The properties are the point and they are
+    older than my change, so the adapter is here rather than in the tests: ONE
+    implementation (`_roll_up`), two calling conventions, and no second weaker
+    copy of the rule to drift.
+    """
+    return _roll_up(_as_rows(rows), completion_audit_verdicts)[0]
+
+
+def _as_rows(rows: Any) -> List[Tuple[str, str, int]]:
+    """Accept `["PASS", ...]`, `[(name, verdict, rc), ...]`, or a longer tuple.
+
+    A phase entry that is a bare verdict has no rc to disagree with, so it gets
+    rc 0; a longer tuple keeps its first three fields, which is what every caller
+    in this file and in `plan` uses.
+    """
+    out: List[Tuple[str, str, int]] = []
+    for i, row in enumerate(rows or []):
+        if isinstance(row, str):
+            out.append((f"phase{i + 1}", row, 0))
+            continue
+        if isinstance(row, (tuple, list)):
+            if len(row) == 1:
+                out.append((f"phase{i + 1}", str(row[0]), 0))
+            elif len(row) == 2:
+                out.append((str(row[0]), str(row[1]), 0))
+            else:
+                try:
+                    rc = int(row[2])
+                except (TypeError, ValueError):
+                    rc = 0
+                out.append((str(row[0]), str(row[1]), rc))
+            continue
+        out.append((f"phase{i + 1}", str(row), 0))
+    return out
+
+
+def _roll_up(rows: List[Tuple[str, str, int]],
+             completion_audit_verdicts: Optional[List[str]] = None
+             ) -> Tuple[str, List[str]]:
     """Roll the phases up into ONE verdict, and say why it is that verdict.
 
     THE DEFECT THIS REPLACES, measured on spm run22 (READ-ONLY,
@@ -1532,7 +1581,7 @@ def main() -> int:
                     and v != "SKIPPED"]
     _ca_verdicts = _completion_audit_verdicts(project)
     if digital_rows:
-        overall, _rollup_why = _aggregate(digital_rows, _ca_verdicts)
+        overall, _rollup_why = _roll_up(digital_rows, _ca_verdicts)
     else:
         overall, _rollup_why = "FAIL", ["no digital phase ran"]
     # A verdict that moved must say which phase moved it, in the report a reader
