@@ -1768,7 +1768,7 @@ def test_probe_declared_programs_array_orphans_are_pinned():
     Dimension 1 as briefed asks about a step's GATE, so every cell is
     correctly green on the steps below: their gates are wired. But the step's
     ``programs:`` array is a second, independent wiring claim, and measured
-    live on this tree nine of its entries resolve to a real
+    live on this tree some of its entries resolve to a real
     ``programs/<name>.py`` while being named by no gate, registered in no
     umbrella registry, and dispatched by none of the one-shot runners.
 
@@ -1776,7 +1776,7 @@ def test_probe_declared_programs_array_orphans_are_pinned():
     cover it would have needed four new waivers and would have been the same
     substitution this campaign exists to stop — changing a predicate so a
     finding lands. So the finding is recorded HERE, pinned, outside the cell
-    grid: a tenth orphan appearing reddens this test, and one of these nine
+    grid: a new orphan appearing reddens this test, and a pinned orphan
     getting wired also reddens it, so the population cannot drift in either
     direction unnoticed. It is reported as an open gap, not as coverage.
     """
