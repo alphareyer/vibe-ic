@@ -32018,15 +32018,10 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
            f"tee {out_dir_c}/{tail_log}")
     # This tail writes the shipped route too; it names itself as the producer
     # exactly as the SDR adopt tail does (`_pnr_tail_products`).
-    _tail_products = _pnr_tail_products(out_dir, out_dir_c, tail_text)
-    _aside = _set_aside_session_products(_tail_products)
-    try:
-        t_rc, t_out, t_err = _docker_exec(
-            container, cmd, marker=f"{out_dir_c}/{tail_name}",
-            log_path=out_dir / tail_log, hard_ceiling_s=hard_ceiling_s,
-            outputs=[str(_p) for _p in _tail_products])
-    finally:
-        _restore_unwritten_products(_aside)
+    t_rc, t_out, t_err = _declared_session_exec(
+        container, cmd, _pnr_tail_products(out_dir, out_dir_c, tail_text),
+        marker=f"{out_dir_c}/{tail_name}",
+        log_path=out_dir / tail_log, hard_ceiling_s=hard_ceiling_s)
     rec["combined_log"] = ("\n=== PNR ANTENNA ROLLBACK (from "
                            f"{ckpt}, {', '.join(_ANTENNA_STAGES)} omitted) "
                            "===\n" + (t_out or "") + (t_err or ""))
@@ -32159,6 +32154,39 @@ def _restore_unwritten_products(aside: Dict[Path, Path]) -> None:
                 os.replace(a, p)
         except OSError:
             pass
+
+
+def _declared_session_exec(container: str, cmd: str, products: List[Path],
+                           **kw: Any) -> Tuple[int, str, str]:
+    """THE ONE WAY a tool session that writes provenance-bearing files runs:
+    it DECLARES them (`outputs=`, hashed by `_log_invocation` when it exits),
+    with every earlier copy set aside for the session and put back if the
+    session did not rewrite it -- so only bytes this session wrote are
+    attested, and the files on disk are exactly what they would have been."""
+    products = [Path(p) for p in products]
+    aside = _set_aside_session_products(products)
+    try:
+        return _docker_exec(container, cmd,
+                            outputs=[str(p) for p in products], **kw)
+    finally:
+        _restore_unwritten_products(aside)
+
+
+def _pnr_session_products(out_dir: Path, out_dir_c: str, tcl_text: str,
+                          log_name: str = "openroad.log") -> List[Path]:
+    """Every artefact a full PnR session writes into its own directory: the
+    stage DEFs and netlist its Tcl names (`write_def` / `write_verilog`), plus
+    the transcript the command tees. Writes elsewhere (an SDR transaction
+    directory, a checkpoint) are not this session's shipped products."""
+    prefix = out_dir_c.rstrip("/") + "/"
+    names: List[str] = []
+    for m in re.finditer(r"write_(?:def|verilog)\s+(\S+?\.(?:def|v))(?=[\s}]|$)",
+                         tcl_text or ""):
+        full = m.group(1)
+        if full.startswith(prefix) and "/" not in full[len(prefix):]:
+            names.append(full[len(prefix):])
+    names.append(log_name)
+    return [out_dir / n for n in dict.fromkeys(names)]
 
 
 def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
@@ -32309,15 +32337,10 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
         # writes, with any earlier copy set ASIDE for the session (and put back
         # if the session did not rewrite it), so a declared path is never
         # hashed over bytes this session did not write.
-        _tail_products = _pnr_tail_products(out_dir, out_dir_c, tail_text)
-        _aside = _set_aside_session_products(_tail_products)
-        try:
-            t_rc, t_out, t_err = _docker_exec(
-                container, cmd, marker=f"{out_dir_c}/{tail_name}",
-                log_path=out_dir / tail_log, hard_ceiling_s=hard_ceiling_s,
-                outputs=[str(_p) for _p in _tail_products])
-        finally:
-            _restore_unwritten_products(_aside)
+        t_rc, t_out, t_err = _declared_session_exec(
+            container, cmd, _pnr_tail_products(out_dir, out_dir_c, tail_text),
+            marker=f"{out_dir_c}/{tail_name}",
+            log_path=out_dir / tail_log, hard_ceiling_s=hard_ceiling_s)
         this_log = (t_out or "") + (t_err or "")
         combined += (f"\n=== PNR SDR ADOPT (from {cand}, "
                      f"{', '.join(omitted)} omitted) ===\n" + this_log)
@@ -32450,15 +32473,10 @@ def _pnr_resume_after_fatal_signal(*, project: Path, top: str, container: str,
            f"tee {out_dir_c}/{_PNR_RESUME_LOG}")
     # The resume tail writes the shipped route too; it names itself as the
     # producer exactly as the SDR adopt tail does (`_pnr_tail_products`).
-    _tail_products = _pnr_tail_products(out_dir, out_dir_c, resume_text)
-    _aside = _set_aside_session_products(_tail_products)
-    try:
-        r_rc, r_out, r_err = _docker_exec(
-            container, cmd, marker=resume_tcl_c,
-            log_path=out_dir / _PNR_RESUME_LOG, hard_ceiling_s=hard_ceiling_s,
-            outputs=[str(_p) for _p in _tail_products])
-    finally:
-        _restore_unwritten_products(_aside)
+    r_rc, r_out, r_err = _declared_session_exec(
+        container, cmd, _pnr_tail_products(out_dir, out_dir_c, resume_text),
+        marker=resume_tcl_c,
+        log_path=out_dir / _PNR_RESUME_LOG, hard_ceiling_s=hard_ceiling_s)
     rec["rc"] = r_rc
     rec["log_tail"] = ((r_out or "") + (r_err or ""))[-2000:]
     # Fold the resume transcript into openroad.log so every gate that reads
@@ -34928,8 +34946,15 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # byte-for-byte unchanged; loop_guard just makes the bound explicit + named.
     _pnr_loop = _wd.loop_guard("pnr_route_feedback", max_iter=_PNR_RETRY_ITERS)
     for _retry_i in _pnr_loop:
-        rc, out, err = _docker_exec(
-            container, cmd, marker=pnr_tcl_c, log_path=_pnr_logp,
+        # THE MAIN PnR SESSION DECLARES WHAT IT WRITES (review wo6zpfboe):
+        # every stage DEF and the netlist its own Tcl names, and the transcript
+        # it tees -- re-read each attempt, because the ladder rewrites the deck.
+        rc, out, err = _declared_session_exec(
+            container, cmd,
+            _pnr_session_products(out_dir, out_dir_c,
+                                  pnr_tcl.read_text(errors="replace")
+                                  if pnr_tcl.is_file() else ""),
+            marker=pnr_tcl_c, log_path=_pnr_logp,
             # R-0915-131. PnR hands post-route DRV repair to an SDR CHILD
             # session and then waits. While that child runs, the parent's own
             # transcript, argv marker and CPU all go quiet, and a watchdog
@@ -47755,17 +47780,18 @@ def _run_klayout_lvs(project: Path, top: str, pdk: PdkConfig,
     base = "export QT_QPA_PLATFORM=offscreen && "
 
     # 1. cell library -> per-cell SPICE (learns each cell's pin order)
-    rc_l, out_l, err_l = _docker_exec(
+    # Each KLayout-LVS invocation declares the file it writes.
+    rc_l, out_l, err_l = _declared_session_exec(
         container, base
         + f"python3 {klvs_c} lib {_to_container_path(str(pdk.cell_gds), container)} "
         f"--out {_to_container_path(str(cells_sp), container)} "
-        f"--threads {threads}{lm_arg}{pdk_map_arg}", marker=klvs_c)
+        f"--threads {threads}{lm_arg}{pdk_map_arg}", [cells_sp], marker=klvs_c)
     # 2. flat sign-off GDS -> transistor SPICE (power_shorts REPORTED, never hidden)
-    rc_e, out_e, err_e = _docker_exec(
+    rc_e, out_e, err_e = _declared_session_exec(
         container, base
         + f"python3 {klvs_c} extract {_to_container_path(str(gds_path), container)} "
         f"--out {_to_container_path(str(layout_sp), container)} "
-        f"--threads {threads}{lm_arg}{pdk_map_arg}", marker=klvs_c)
+        f"--threads {threads}{lm_arg}{pdk_map_arg}", [layout_sp], marker=klvs_c)
     power_shorts = None
     power_short_locs = []
     _m = re.search(r"power_shorts=(-?\d+)", out_e or "")
@@ -47800,11 +47826,12 @@ def _run_klayout_lvs(project: Path, top: str, pdk: PdkConfig,
                     "lvs_verdict": verdict,
                     "transcript_tail": (out_l + err_l)[-600:]})
     # 3. gate netlist -> SPICE reference (pin order from the cell SPICE)
-    rc_v, out_v, err_v = _docker_exec(
+    rc_v, out_v, err_v = _declared_session_exec(
         container, base
         + f"python3 {v2s_c} --verilog {_to_container_path(str(netlist), container)} "
         f"--cells {_to_container_path(str(cells_sp), container)} "
-        f"--out {_to_container_path(str(source_sp), container)}", marker=v2s_c)
+        f"--out {_to_container_path(str(source_sp), container)}", [source_sp],
+        marker=v2s_c)
     if not source_sp.is_file() or source_sp.stat().st_size == 0:
         verdict = _write_lvs_verdict(
             project, "FAIL", "LVS_NO_SOURCE_NETLIST",
@@ -47829,11 +47856,11 @@ def _run_klayout_lvs(project: Path, top: str, pdk: PdkConfig,
         f'lvs "$lay {top}" "$src {top}" '
         f'{_to_container_path(str(setup), container)} '
         f'{_to_container_path(str(lvs_rpt), container)}\n')
-    rc_n, out_n, err_n = _docker_exec(
+    rc_n, out_n, err_n = _declared_session_exec(
         container,
         f"export PATH={TOOLS_IN_CONTAINER}/bin:$PATH && "
         f"netgen -batch source {_to_container_path(str(run_tcl), container)}",
-        marker=_to_container_path(str(run_tcl), container))
+        [lvs_rpt], marker=_to_container_path(str(run_tcl), container))
     transcript = (out_n or "") + "\n" + (err_n or "")
     # ORGANIC v1462 — bounded flush retry (see _read_lvs_report_flushed): the
     # netgen report can lag the process exit on a docker-overlay FS, so wait for
@@ -47856,13 +47883,13 @@ def _run_klayout_lvs(project: Path, top: str, pdk: PdkConfig,
     compare_verdict, compare_extra = None, {}
     try:
         cmp_json = ext_dir / f"{top}_klayout_compare.json"
-        rc_c, out_c, err_c = _docker_exec(
+        rc_c, out_c, err_c = _declared_session_exec(
             container,
             f"export PATH={TOOLS_IN_CONTAINER}/bin:$PATH && "
             f"python3 {klvs_c} compare {_to_container_path(str(layout_sp), container)} "
             f"--source {_to_container_path(str(source_sp), container)} "
             f"--top {top} --out {_to_container_path(str(cmp_json), container)}",
-            marker=klvs_c)
+            [cmp_json], marker=klvs_c)
         _mc = re.search(r"LVS_COMPARE\s+(\{.*\})", (out_c or ""))
         if _mc:
             import json as _json
@@ -48439,9 +48466,10 @@ def _run_extraction_lvs(project: Path, top: str, pdk: PdkConfig,
     # fixed 14400s kill): magic ext2spice on a big extraction that keeps
     # writing ext2spice.log / burning CPU is never killed; only a hang dies.
     # marker = the tcl path (in magic's argv); log_path = the tee'd log.
-    rc, out, err = _docker_exec(
-        container, cmd, marker=_magic_tcl_c,
-        log_path=ext_dir / "ext2spice.log")
+    # The extraction declares the netlist LVS compares, its feedback and its log.
+    rc, out, err = _declared_session_exec(
+        container, cmd, [spice_out, feedback_out, ext_dir / "ext2spice.log"],
+        marker=_magic_tcl_c, log_path=ext_dir / "ext2spice.log")
     # v1.3.47 — a stall/ceiling kill must NOT be scored from a PARTIAL extracted
     # netlist (a half-written .spice would drive a false LVS verdict). Isolate
     # the partial output and FAIL as extraction-incomplete.
