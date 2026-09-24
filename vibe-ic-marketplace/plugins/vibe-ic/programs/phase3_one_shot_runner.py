@@ -7384,6 +7384,78 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
 #: only when its recorded floor is present in the current routed DEF.
 _PDN_EM_RESIZE_SENTINEL = ".pdn_em_resize_done"
 _PDN_EM_RUN_ID = os.urandom(16).hex()
+_PDN_EM_LAYOUT_IDENTITY = ".pdn_em_layout_identity.json"
+
+
+def _pdn_em_input_identity(project: Path, top: str, pdk: "PdkConfig",
+                           container: str, die_um: str, util: float,
+                           spare_density: Any) -> Optional[Dict[str, Any]]:
+    """Identity of the inputs that can change a PnR layout. Unknown is no reuse.
+
+    The tool image and producer recipe are resolved by the same helpers used
+    for phase-3 provenance. All declared input and generated L-doc bytes are
+    included, so a new floorplan declaration invalidates the old floor.
+    """
+    try:
+        import _eda_pin
+        image, _ = _eda_pin.container_image_digest(container)
+        producer = _producer_identity_now()
+        netlist, _, _ = pnr_input_netlist(project, top)
+        sdc = _resolve_staged_silicon_sdc(project)
+        if (not image or not producer.get("plugin_version")
+                or not producer.get("recipe_sha256") or not netlist.is_file()
+                or (sdc is not None and not sdc.is_file())):
+            return None
+        files = {"netlist": hashlib.sha256(netlist.read_bytes()).hexdigest(),
+                 "sdc": (hashlib.sha256(sdc.read_bytes()).hexdigest()
+                         if sdc else "AUTO_FROM_DESIGN_DOCS")}
+        for root_name, root in (("input", project / "input"),
+                                ("docs", _pl.generated_docs_dir(project))):
+            if root.is_dir():
+                for path in sorted(p for p in root.rglob("*") if p.is_file()):
+                    files[f"{root_name}/{path.relative_to(root)}"] = hashlib.sha256(
+                        path.read_bytes()).hexdigest()
+        pdk_fields = vars(pdk).copy()
+        for key in ("tech_lef", "cell_lef", "liberty"):
+            source = pdk_fields.get(key)
+            content = _read_pdk_text(source, container) if source else None
+            if not content:
+                return None
+            pdk_fields[key + "_sha256"] = hashlib.sha256(
+                content.encode()).hexdigest()
+        payload = {"files": files, "top": top, "die_um": die_um,
+                   "util": util, "spare_density": spare_density,
+                   "pdk": pdk_fields, "tool_image": image,
+                   "producer": producer}
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True,
+                                            default=str).encode()).hexdigest()
+        return {"sha256": digest, "tool_image": image,
+                "producer": producer}
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _pdn_em_reusable_floor(project: Path, identity: Optional[Dict[str, Any]]
+                           ) -> Optional[Dict[str, Any]]:
+    """Reuse only a measured floor whose source and final drawn layout bind."""
+    if identity is None:
+        return None
+    pnr = _pl.pnr_dir(project)
+    sentinel = pnr / _PDN_EM_RESIZE_SENTINEL
+    try:
+        doc = json.loads(sentinel.read_text())
+        layout = json.loads((pnr / _PDN_EM_LAYOUT_IDENTITY).read_text())
+        floor = doc.get("floor")
+        if (doc.get("input_identity") != identity
+                or layout.get("input_identity") != identity
+                or layout.get("def_sha256") != _ppa_power._pdn_em_subject_digest(project)
+                or not isinstance(floor, dict) or not floor.get("per_layer")
+                or doc.get("measurement_subject_sha256") != doc.get("spent_on_def")):
+            return None
+        binds, _ = _ppa_power._pdn_em_sentinel_binds(sentinel, project)
+        return floor if binds else None
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def _record_pdn_em_resize_spend(project: Path, decision: Mapping[str, Any]
@@ -7392,11 +7464,27 @@ def _record_pdn_em_resize_spend(project: Path, decision: Mapping[str, Any]
     sentinel = decision["sentinel"]
     try:
         sentinel.parent.mkdir(parents=True, exist_ok=True)
+        proof: Dict[str, Any] = {}
+        try:
+            layout = json.loads((sentinel.parent /
+                                 _PDN_EM_LAYOUT_IDENTITY).read_text())
+            measured = json.loads((_pl.reports_phase3_dir(project) /
+                                   "em.json").read_text())
+            subject = _ppa_power._pdn_em_spent_on(project)
+            if (layout.get("def_sha256") == subject
+                    and measured.get("subject_def_sha256") == subject
+                    and layout.get("input_identity")):
+                proof = {"input_identity": layout["input_identity"],
+                         "measurement_subject_sha256": subject,
+                         "floor": decision["floor"]}
+        except (OSError, ValueError, AttributeError):
+            pass
         sentinel.write_text(json.dumps({
             "reason": "pdn_em_first_pass_resize",
             "spent_on_def": _ppa_power._pdn_em_spent_on(project),
             "run_id": _PDN_EM_RUN_ID,
             "short": decision["short"],
+            **proof,
         }, indent=2) + "\n")
         return True
     except OSError as exc:
@@ -36106,11 +36194,15 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # its derived floor directly to this re-dispatch. Re-deriving here with
     # layout_will_be_replaced=True would reject that same measurement as a
     # previous layout and silently draw the original narrow straps again.
+    _pdn_em_identity_before = _pdn_em_input_identity(
+        project, top, pdk, container, die_um, util, spare_density)
     _pdn_em_floor = em_floor_for_resize
     if _pdn_em_floor is None:
         try:
-            _pdn_em_floor = _pdn_em_width_floor(
-                project, pdk, container, layout_will_be_replaced=True)
+            _pdn_em_floor = _pdn_em_reusable_floor(project, _pdn_em_identity_before)
+            if _pdn_em_floor is None:
+                _pdn_em_floor = _pdn_em_width_floor(
+                    project, pdk, container, layout_will_be_replaced=True)
         except Exception as _em_exc:  # pragma: no cover - defensive
             print(f"[phase3] PDN EM floor derivation skipped (nonfatal): {_em_exc}")
             _pdn_em_floor = None
@@ -38192,7 +38284,16 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             (f"survivable fatal signal in best-effort stage "
              f"{(_sig_diag or {}).get('stage')}" if _sig_survivable else
              "the runner shipped the main session's route despite its "
-             "non-zero exit"))
+            "non-zero exit"))
+    if _status == "PASS" and _pdn_em_identity_before is not None:
+        _identity_after = _pdn_em_input_identity(
+            project, top, pdk, container, die_um, util, spare_density)
+        _def_sha = _ppa_power._pdn_em_subject_digest(project)
+        if _identity_after == _pdn_em_identity_before and _def_sha:
+            _aa.write_text(out_dir / _PDN_EM_LAYOUT_IDENTITY, json.dumps({
+                "input_identity": _identity_after,
+                "def_sha256": _def_sha,
+            }, sort_keys=True) + "\n")
     if resize_history:
         return StepResult("pnr", _status, time.time() - t0,
                           detail,
