@@ -16,8 +16,8 @@ rail sat at 0.53.
 tests pin the three properties that make it safe:
 
   * THE BOUND IS STRUCTURAL. A sentinel in the pnr dir, written by the caller
-    BEFORE the re-dispatch, makes a second resize impossible -- including after
-    a crash, and including when the second pass is STILL short.
+    BEFORE the re-dispatch, makes a second resize in this run impossible --
+    including a failed or STILL short second pass.
   * THE TRIGGER IS NOT A VERDICT. It fires on `drawn DEF width < derived w_em`,
     a comparison of two widths. No gate's PASS/FAIL is read.
   * IT NEVER WIDENS WHAT IT SHOULD NOT. A strap already at or above its floor
@@ -205,7 +205,8 @@ def test_the_sentinel_bounds_the_resize_at_exactly_one_pass(
     # design rather than the tree for ever). Simulate what the caller writes.
     first["sentinel"].write_text(json.dumps(
         {"reason": "pdn_em_first_pass_resize",
-         "spent_on_def": __PW._pdn_em_spent_on(proj), "short": []}))
+         "spent_on_def": __PW._pdn_em_spent_on(proj),
+         "run_id": R._PDN_EM_RUN_ID, "short": first["short"]}))
     assert first["sentinel"].name == R._PDN_EM_RESIZE_SENTINEL
     # Same still-short widths -- a counter-free bound must still refuse.
     assert R._pdn_em_first_pass_resize(proj, "spm", object(), "c") is None
@@ -219,7 +220,9 @@ def test_the_bound_holds_even_when_the_second_pass_is_still_short(
     proj = _tree(tmp_path)
     (R._pl.pnr_dir(proj) / R._PDN_EM_RESIZE_SENTINEL).write_text(json.dumps(
         {"reason": "pdn_em_first_pass_resize",
-         "spent_on_def": __PW._pdn_em_spent_on(proj), "short": []}))
+         "spent_on_def": __PW._pdn_em_spent_on(proj),
+         "run_id": R._PDN_EM_RUN_ID,
+         "short": [{"layer": "Metal4", "w_em_um": 7.27}]}))
     assert R._pdn_em_first_pass_resize(proj, "spm", object(), "c") is None
 
 
