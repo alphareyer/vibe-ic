@@ -605,8 +605,6 @@ class StepResult:
 
     def __post_init__(self) -> None:
         _V.validate_step_row(self)
-        _register_pass_outputs(self.name, self.status, self.duration_s,
-                               self.output_files)
 
 
 # v1.6.54 — verdict-tier vocabulary. ENV_UNAVAILABLE distinguishes
@@ -689,24 +687,36 @@ def _preflight_refusal(name: str):
 # token, never a known-tools list.
 _PROV_SINK: Optional[Path] = None
 
-# ── WHAT THIS PASS DEMONSTRABLY PRODUCED ─────────────────────────────────────
+# ── ONE RULE FOR RE-DECLARING A PATH'S BYTES (review wo6zpfboe, design approved) ──
 #
 # `_record_reemitted_outputs` used to append a fresh declaration for ANY declared
-# output whose bytes had drifted from its newest record. MEASURED on main
-# 240c0a353: a declared `reports/phase3/lvs.rpt`, rewritten with no invocation,
-# read PROVENANCE_HASH_MISMATCH before that pass and PASS after it -- the ledger
-# laundered an unexplained rewrite into a declaration, and the `reconstructed`
-# flag it carries is read by nobody.
+# output whose bytes had drifted. MEASURED on main 240c0a353: a declared
+# `reports/phase3/lvs.rpt`, rewritten with no invocation, read
+# PROVENANCE_HASH_MISMATCH before that pass and PASS after it -- the ledger
+# laundered an unexplained rewrite.
 #
-# A back-fill may only re-declare what THIS pass produced, with the producing
-# step named. The evidence is the step's own row: every StepResult of a step
-# that RAN (PASS / FAIL) lists the files it wrote, and a file counts only if it
-# was modified inside that step's own run window. Its sha is taken when the
-# step returns. A later drift is re-declared only when the disk still holds
-# exactly those bytes; anything else is an unexplained change.
-#: resolved absolute path -> (producing step, sha256 when the step returned)
-_PASS_PRODUCED: Dict[str, Tuple[str, str]] = {}
-_PASS_PRODUCING_STATUSES = ("PASS", "PASS_WITH_WAIVERS", "FAIL")
+# EVIDENCE COMES FROM THE PRODUCER, COMPLETELY. Three entry points, one rule:
+#   * a tool session writing FRESH files declares them (`_declared_session_exec`);
+#   * an IN-PLACE transform of a declared file (`_declared_transform_exec`) is
+#     credited only when the file's bytes BEFORE it equal the newest declared sha
+#     of that path -- the chain declared -> transform -> new;
+#   * a RUNNER-side transform passes `writer=(step, since, input_path, input_sha)`
+#     to `_restamp_provenance_output`, credited only on the same chain.
+# Nothing else re-declares a path: a StepResult's `output_files` list is not
+# evidence (it is whatever a row happens to list), and the re-emit pass is a
+# DETECTOR that records unexplained drift and never declares it.
+#
+# CENSUS of the in-place rewriters this rule had to reach (rebased tree): in
+# step_gds, after the declared stream-out -- _gds_grid_snap, _klayout_merge_layers,
+# _klayout_same_net_heal, _die_finishing, _klayout_dummy_fill, _density_metal_fill
+# (host subprocess), _die_density_fill (host subprocess, --in-place),
+# _restore_port_labels_if_missing; runner-side -- the lvs.rpt KLayout render and
+# power-aware copy, the openroad.log transcript folds (SDR adopt, resume), the
+# structural-reader netlist normaliser, the canonical stage4 GDS copy, and the
+# sign-off DRC alias.
+
+#: (producing step, since, input path, input sha BEFORE the transform)
+_TransformWriter = Tuple[str, float, Path, Optional[str]]
 
 
 def _file_sha256(path: Path) -> Optional[str]:
@@ -720,53 +730,78 @@ def _file_sha256(path: Path) -> Optional[str]:
         return None
 
 
-def _register_pass_outputs(step: str, status: str, duration_s: float,
-                           files: Iterable[str],
-                           since: Optional[float] = None) -> None:
-    """Record the files `step` wrote in this pass. Never raises."""
+def _is_removal_record(rec: Dict[str, Any]) -> bool:
+    return (str(rec.get("op") or "").lower() in ("remove", "prune", "delete")
+            or bool(rec.get("removed")))
+
+
+def _newest_declared_sha(project: Path, rel: str) -> Optional[str]:
+    """The sha the NEWEST production record of `rel` declares (failed
+    invocations and removal events excluded), or None when none declares it."""
+    prov = Path(project) / "provenance.jsonl"
+    newest: Optional[str] = None
     try:
-        if str(status) not in _PASS_PRODUCING_STATUSES:
-            return
-        now = time.time()
-        t_start = (since if since is not None
-                   else now - max(float(duration_s or 0.0), 0.0)) - 2.0
-        for f in files or ():
-            fp = Path(f)
-            try:
-                if not fp.is_file() or fp.stat().st_mtime < t_start:
-                    continue          # not written inside this step's window
-            except OSError:
+        for ln in prov.read_text().splitlines():
+            if not ln.strip():
                 continue
-            sha = _file_sha256(fp)
-            if sha:
-                _PASS_PRODUCED[str(fp.resolve())] = (str(step), sha)
-    except Exception:  # noqa: BLE001 — bookkeeping never breaks the run
-        return
+            try:
+                rec = json.loads(ln)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict) or _is_removal_record(rec):
+                continue
+            try:
+                if int(rec.get("exit_code", 0)) != 0:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            v = (rec.get("outputs") or {}).get(rel)
+            if isinstance(v, str):
+                newest = v
+    except OSError:
+        return None
+    return newest
 
 
-def _redeclaration_evidence(path: Path, cur_sha: str,
-                            writer: Optional[Tuple[str, float]] = None
+def _project_rel(project: Path, path: Path) -> Optional[str]:
+    try:
+        return Path(path).resolve().relative_to(
+            Path(project).resolve()).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
+def _redeclaration_evidence(project: Path, path: Path, cur_sha: str,
+                            writer: Optional[_TransformWriter] = None
                             ) -> Optional[str]:
     """THE ONE ANSWER to "may the runner re-declare `path`'s current bytes, and
-    as whose work?" -- the producing step, or None.
+    as whose work?" -- the transforming step, or None.
 
-    Two kinds of evidence, both about THIS pass:
-      * `writer=(step, since)`: the CALLER wrote the file itself, in this pass,
-        at or after `since` (checked against the file's own mtime) -- e.g. the
-        canonical GDS copy restamped by the code that just made it;
-      * otherwise a step of this pass that returned with exactly these bytes
-        (`_PASS_PRODUCED`, filled from each step's own row and run window).
-    Anything else is an unexplained change, and the caller records it with
-    `_record_unexplained_rewrite` instead of declaring it."""
-    if writer is not None:
-        try:
-            if Path(path).stat().st_mtime >= float(writer[1]) - 2.0:
-                return str(writer[0])
-        except OSError:
-            pass
-    who = _PASS_PRODUCED.get(str(Path(path).resolve()))
-    if who is not None and who[1] == cur_sha:
-        return who[0]
+    Only a verified transform chain answers yes: `writer=(step, since,
+    input_path, input_sha)`, where the file was written at or after `since`
+    (its own mtime) and `input_sha` -- the input's bytes BEFORE the transform --
+    equals the newest declared sha of `input_path`. A broken chain records the
+    INPUT drift as unexplained. With no writer the answer is always None: a
+    producer that wrote fresh bytes declared them itself."""
+    if writer is None:
+        return None
+    step, since, input_path, input_sha = writer
+    try:
+        if Path(path).stat().st_mtime < float(since) - 2.0:
+            return None
+    except OSError:
+        return None
+    in_rel = _project_rel(project, input_path)
+    if in_rel is None or not input_sha:
+        return None
+    declared = _newest_declared_sha(project, in_rel)
+    if declared is not None and declared == input_sha:
+        return str(step)
+    if declared is not None:
+        _record_unexplained_rewrite(
+            project, in_rel, declared, input_sha, f"{step} (its input)",
+            why=("the transform's INPUT was not the declared bytes: it changed "
+                 "with no declaration before this step read it"))
     return None
 
 
@@ -774,9 +809,10 @@ _UNEXPLAINED_REWRITES_REL = "reports/phase3/provenance_unexplained_rewrites.json
 
 
 def _record_unexplained_rewrite(project: Path, rel: str, declared_sha: str,
-                                disk_sha: str, site: str) -> None:
-    """Record a declared output whose bytes changed with no evidence of which
-    step of this pass wrote them. It is NOT declared, so the hash check still
+                                disk_sha: str, site: str,
+                                why: Optional[str] = None) -> None:
+    """Record a declared path whose bytes changed with no producer declaration
+    and no verified transform chain. It is NOT declared, so the hash check still
     reports it; this report says where the runner declined. Never raises."""
     try:
         out = Path(project) / _UNEXPLAINED_REWRITES_REL
@@ -787,13 +823,11 @@ def _record_unexplained_rewrite(project: Path, rel: str, declared_sha: str,
             except ValueError:
                 doc = {}
         rows = [r for r in (doc.get("rewrites") or []) if isinstance(r, dict)]
-        who = _PASS_PRODUCED.get(str((Path(project) / rel).resolve()))
         row = {"path": rel, "declared_sha256": declared_sha,
                "disk_sha256": disk_sha, "declined_by": site,
-               "why": ("no step of this pass wrote these bytes"
-                       if who is None else
-                       f"step {who[0]!r} wrote this path, but it changed "
-                       f"after that step returned")}
+               "why": why or ("no producer declared these bytes, and no "
+                              "transform chain from a declared input reaches "
+                              "them")}
         if not any(r.get("path") == rel and r.get("disk_sha256") == disk_sha
                    for r in rows):
             rows.append(row)
@@ -801,13 +835,43 @@ def _record_unexplained_rewrite(project: Path, rel: str, declared_sha: str,
         out.write_text(json.dumps({
             "program": "phase3_one_shot_runner",
             "verdict": "FINDING",
-            "note": ("declared outputs whose bytes changed with no invocation "
-                     "this pass can account for; they are NOT re-declared, so "
-                     "provenance_output_hash_completeness_check reports each as "
-                     "a hash mismatch"),
+            "note": ("declared outputs whose bytes changed with no producer "
+                     "declaration and no verified transform chain; they are NOT "
+                     "re-declared, so provenance_output_hash_completeness_check "
+                     "reports each as a hash mismatch"),
             "rewrites": rows}, indent=2) + "\n")
     except Exception:  # noqa: BLE001
         return
+
+
+def _declared_transform_exec(project: Optional[Path], path: Path, step: str,
+                             tool: str, command: str,
+                             run: Callable[[], Any],
+                             input_path: Optional[Path] = None) -> Any:
+    """Run a transform that REWRITES a declared file and declare its result only
+    on the chain: the bytes it read -- `input_path`, or the file itself for an
+    in-place transform -- must be the newest declared bytes of that input.
+    Otherwise it runs undeclared and the input drift is recorded, so the hash
+    check still fails the tampered artefact. A FIRST write (the file did not
+    exist) is left to the path's first-declaration writer. Returns whatever
+    `run` does."""
+    path = Path(path)
+    source = Path(input_path) if input_path is not None else path
+    pre = _file_sha256(path) if path.is_file() else None
+    in_pre = _file_sha256(source) if source.is_file() else None
+    t0 = time.time()
+    result = run()
+    try:
+        if project is not None and pre is not None and path.is_file():
+            post = _file_sha256(path)
+            rel = _project_rel(project, path)
+            if post and post != pre and rel is not None:
+                _restamp_provenance_output(
+                    project, rel, path, tool, command,
+                    writer=(step, t0, source, in_pre))
+    except Exception:  # noqa: BLE001 — bookkeeping never breaks the run
+        pass
+    return result
 
 
 def set_invocation_provenance_sink(project: Optional[Path]) -> None:
@@ -15939,6 +16003,7 @@ def _ensure_structural_reader_readable(netlist: Path,
     if n_signed <= 0:
         return 0
     _t_write = time.time()
+    _pre_sha = _file_sha256(netlist)
     try:
         netlist.write_text(new_text, encoding="utf-8")
     except Exception:
@@ -15947,7 +16012,9 @@ def _ensure_structural_reader_readable(netlist: Path,
         try:
             _restamp_provenance_output(
                 project, str(netlist.relative_to(project)), netlist,
-                "yosys", writer=("structural_reader_normalise", _t_write),
+                "yosys",
+                writer=("structural_reader_normalise", _t_write, netlist,
+                        _pre_sha),
                 command=
                 "phase3_one_shot_runner: `signed` net qualifiers stripped for "
                 "the structural Verilog reader (syntactic no-op for PnR/STA)")
@@ -32856,11 +32923,19 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
         rec["rc"] = rc if rec["status"] != "FAILED" else (rc or 1)
     # Fold the adopt transcript into openroad.log so every gate that reads that
     # one file sees the session that actually shipped the design.
-    try:
-        with (out_dir / "openroad.log").open("a") as fh:
-            fh.write(combined)
-    except OSError:
-        pass
+    def _fold() -> None:
+        try:
+            with (out_dir / "openroad.log").open("a") as fh:
+                fh.write(combined)
+        except OSError:
+            pass
+    # A runner-side transform of the session's declared transcript: credited
+    # only on the chain (`_declared_transform_exec`).
+    _declared_transform_exec(
+        _PROV_SINK, out_dir / "openroad.log", "pnr:sdr_adopt_fold",
+        "phase3_one_shot_runner",
+        "fold the SDR adopt transcript into openroad.log "
+        "(phase3_one_shot_runner)", _fold)
     return rec
 
 
@@ -32974,12 +33049,18 @@ def _pnr_resume_after_fatal_signal(*, project: Path, top: str, container: str,
     # Fold the resume transcript into openroad.log so every gate that reads
     # that one file sees the whole session. Appended under a banner, never
     # overwriting: the crash transcript is evidence and stays.
-    try:
-        with (out_dir / "openroad.log").open("a") as fh:
-            fh.write(f"\n=== PNR RESUME (from {ckpt}, {stage} omitted) ===\n")
-            fh.write((out_dir / _PNR_RESUME_LOG).read_text(errors="replace"))
-    except OSError:
-        pass
+    def _fold() -> None:
+        try:
+            with (out_dir / "openroad.log").open("a") as fh:
+                fh.write(f"\n=== PNR RESUME (from {ckpt}, {stage} omitted) ===\n")
+                fh.write((out_dir / _PNR_RESUME_LOG).read_text(errors="replace"))
+        except OSError:
+            pass
+    _declared_transform_exec(
+        project, out_dir / "openroad.log", "pnr:resume_fold",
+        "phase3_one_shot_runner",
+        "fold the resume transcript into openroad.log "
+        "(phase3_one_shot_runner)", _fold)
     r_sig = _fatal_signal_from_rc(r_rc)
     if r_sig is not None:
         # The resumed tail can itself die in the final estimate-only stage,
@@ -43790,30 +43871,40 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
             "avoid the stacked-via met2-enclosure merge artefact")
     if magic_ok and gds_out.is_file():
         # ORGANIC #600 — manufacturing-grid snap before signoff DRC.
-        snap_ok, snap_note = _gds_grid_snap(project, top, pdk, container,
-                                            gds_out)
+        snap_ok, snap_note = _declared_transform_exec(project, gds_out, "gds:grid_snap", "klayout",
+        "grid_snap (in place) (phase3_one_shot_runner step_gds)",
+        lambda: _gds_grid_snap(project, top, pdk, container,
+                                            gds_out))
         # Step 26.5ic — die finishing (the PDK's OWN seal ring), BEFORE the
         # fill and before the sign-off DRC/LVS read this GDS, so the ring is
         # verified with the rest of the die instead of appearing after its
         # evidence.
-        seal_ok, seal_note = _die_finishing(project, top, pdk, gds_out,
-                                            container)
+        seal_ok, seal_note = _declared_transform_exec(project, gds_out, "gds:die_finishing", "klayout",
+        "die_finishing (in place) (phase3_one_shot_runner step_gds)",
+        lambda: _die_finishing(project, top, pdk, gds_out,
+                                            container))
         # Per-layer density fill BEFORE the density checks / sign-off DRC read
         # this GDS. Config-gated + NONFATAL; the note always discloses.
-        dfill_ok, dfill_note = _density_metal_fill(project, top, pdk, gds_out, container)
+        dfill_ok, dfill_note = _declared_transform_exec(project, gds_out, "gds:density_metal_fill", "klayout",
+        "density_metal_fill (in place) (phase3_one_shot_runner step_gds)",
+        lambda: _density_metal_fill(project, top, pdk, gds_out, container))
         # DIE-WIDE fill by the PDK's own generator, LAST of the fill passes
         # and still before the density checks / sign-off DRC read this GDS.
         # The pass above measures and fills the streamed geometry's BOUNDING
         # BOX; a foundry minimum-density rule is written over the entire DIE,
         # and on a slot submission those are different rectangles. NONFATAL.
-        ddfill_ok, ddfill_note = _die_density_fill(project, top, pdk, gds_out,
-                                                   container)
+        ddfill_ok, ddfill_note = _declared_transform_exec(project, gds_out, "gds:die_density_fill", "klayout",
+        "die_density_fill (in place) (phase3_one_shot_runner step_gds)",
+        lambda: _die_density_fill(project, top, pdk, gds_out,
+                                                   container))
         # vibe-ic#613 — the port-label restore is a POST-streamout pass over the
         # finished GDS, so it belongs on BOTH engines. Gating it on the KLayout
         # path alone would have made "which streamout ran" decide whether a
         # sign-off GDS can be pin-matched. Last, so labels land on final geometry.
-        label_ok, label_note = _restore_port_labels_if_missing(
-            project, top, pdk, container, gds_out, def_file)
+        label_ok, label_note = _declared_transform_exec(project, gds_out, "gds:port_labels", "klayout",
+        "port_labels (in place) (phase3_one_shot_runner step_gds)",
+        lambda: _restore_port_labels_if_missing(
+            project, top, pdk, container, gds_out, def_file))
         # R-0915-148 — THIS BRANCH RETAINS NO FINISHING BOUNDARY, SO IT MUST NOT
         # LEAVE SOMEBODY ELSE'S LYING AROUND.
         #
@@ -43970,20 +44061,26 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
         return StepResult("gds", "FAIL", time.time() - t0,
                           f"rc={rc} log_tail={(out+err)[-1500:]}")
     # ORGANIC #600 — manufacturing-grid snap before signoff DRC.
-    snap_ok, snap_note = _gds_grid_snap(project, top, pdk, container, gds_out)
+    snap_ok, snap_note = _declared_transform_exec(project, gds_out, "gds:grid_snap", "klayout",
+        "grid_snap (in place) (phase3_one_shot_runner step_gds)",
+        lambda: _gds_grid_snap(project, top, pdk, container, gds_out))
     # ORGANIC #601 — KLayout streamout does NOT merge abutting same-layer
     # geometry (Magic does); a MUST flatten + per-layer merge before signoff
     # DRC removes boundary edge-pair false m1.2. Magic-merge cannot be
     # assumed (it core-dumps on the very DEFs that force this fallback), so
     # the merge is KLayout-native. Never ship an un-merged KLayout GDS.
-    merge_ok, merge_note = _klayout_merge_layers(project, top, pdk, container,
-                                                 gds_out)
+    merge_ok, merge_note = _declared_transform_exec(project, gds_out, "gds:layer_merge", "klayout",
+        "layer_merge (in place) (phase3_one_shot_runner step_gds)",
+        lambda: _klayout_merge_layers(project, top, pdk, container,
+                                                 gds_out))
     # Same-net routing-metal near-miss heal AFTER merge — bridges the OSS
     # router's same-net metal shapes left in the (0, min-space) no-man's land
     # (config-gated; each max_bridge_um < the layer min-space so it can only
     # merge same-net shapes, never short or mask a different-net violation).
-    heal_ok, heal_note = ((_klayout_same_net_heal(project, top, pdk, container,
-                                                  gds_out))
+    heal_ok, heal_note = ((_declared_transform_exec(project, gds_out, "gds:same_net_heal", "klayout",
+        "same_net_heal (in place) (phase3_one_shot_runner step_gds)",
+        lambda: _klayout_same_net_heal(project, top, pdk, container,
+                                                  gds_out)))
                           if pdk.same_net_heal else
                           (False, "no same_net_heal config"))
     # R-0915-129 — RETAIN THE FINISHING BOUNDARY. Every step from here down
@@ -44049,32 +44146,42 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     # GDS. That is LibreLane's chip-flow order, SealRing -> Filler -> Density;
     # adding the ring later would put metal on the die after Step 31 signed it
     # off — the artefact changing after the evidence.
-    seal_ok, seal_note = _die_finishing(project, top, pdk, gds_out, container)
+    seal_ok, seal_note = _declared_transform_exec(project, gds_out, "gds:die_finishing", "klayout",
+        "die_finishing (in place) (phase3_one_shot_runner step_gds)",
+        lambda: _die_finishing(project, top, pdk, gds_out, container))
     # v1.3.83 — config-driven dummy-METAL fill AFTER merge, BEFORE the
     # sign-off DRC consumes this GDS (the deck's own density + spacing +
     # wide-metal rules then verify the fill honestly — no rule is waived).
-    fill_ok, fill_note = ((_klayout_dummy_fill(project, top, pdk, container,
-                                               gds_out))
+    fill_ok, fill_note = ((_declared_transform_exec(project, gds_out, "gds:dummy_fill", "klayout",
+        "dummy_fill (in place) (phase3_one_shot_runner step_gds)",
+        lambda: _klayout_dummy_fill(project, top, pdk, container,
+                                               gds_out)))
                           if pdk.dummy_fill else
                           (False, "no dummy_fill config"))
     # Per-layer DENSITY-TARGETED fill: measures each layer's worst density
     # window and tops it up to the foundry target, after the fixed dummy-fill
     # PATTERN above and before the density checks / sign-off DRC consume this
     # GDS. Config-gated + NONFATAL; the note always discloses the outcome.
-    dfill_ok, dfill_note = _density_metal_fill(project, top, pdk, gds_out, container)
+    dfill_ok, dfill_note = _declared_transform_exec(project, gds_out, "gds:density_metal_fill", "klayout",
+        "density_metal_fill (in place) (phase3_one_shot_runner step_gds)",
+        lambda: _density_metal_fill(project, top, pdk, gds_out, container))
     # DIE-WIDE fill by the PDK's own generator, LAST of the fill passes and
     # still before the density checks / sign-off DRC read this GDS. The pass
     # above measures and fills the streamed geometry's BOUNDING BOX; a foundry
     # minimum-density rule is written over the entire DIE, and on a slot
     # submission those are different rectangles. NONFATAL, always disclosed.
-    ddfill_ok, ddfill_note = _die_density_fill(project, top, pdk, gds_out,
-                                               container)
+    ddfill_ok, ddfill_note = _declared_transform_exec(project, gds_out, "gds:die_density_fill", "klayout",
+        "die_density_fill (in place) (phase3_one_shot_runner step_gds)",
+        lambda: _die_density_fill(project, top, pdk, gds_out,
+                                               container))
     # v1.3.91 — restore top PORT text labels + VDD/VSS rail markers LAST (after
     # merge/heal/fill so the labels/markers land on the final geometry): makes
     # the KLayout-streamed GDS LVS-able by the geometric extractor. Config-gated
     # (no-op for OSS PDKs).
-    label_ok, label_note = _restore_port_labels_if_missing(
-        project, top, pdk, container, gds_out, def_file)
+    label_ok, label_note = _declared_transform_exec(project, gds_out, "gds:port_labels", "klayout",
+        "port_labels (in place) (phase3_one_shot_runner step_gds)",
+        lambda: _restore_port_labels_if_missing(
+        project, top, pdk, container, gds_out, def_file))
     # A map can also be present but WRONG or partial, which the pre-flight
     # gate above cannot see. Verify the finished artifact instead: every layer
     # carrying shapes must be accounted for by the map, the library GDS or the
@@ -48210,10 +48317,17 @@ def _try_power_aware_lvs(project: Path, top: str, pdk: PdkConfig,
     npatch = stats.get("instances_patched", 0)
     # Genuine POWER-VERIFIED match — copy the power-aware report to the canonical
     # lvs.rpt so the runner and the Step-31 gate read the same matching report.
-    try:
-        lvs_rpt.write_text(pa_txt)
-    except OSError:
-        pass
+    def _write_pa() -> None:
+        try:
+            lvs_rpt.write_text(pa_txt)
+        except OSError:
+            pass
+    # A runner-side rewrite of the declared lvs.rpt: credited only on the chain.
+    _declared_transform_exec(
+        project, lvs_rpt, "lvs:power_aware", "netgen",
+        "write the power-aware netgen result into lvs.rpt "
+        "(phase3_one_shot_runner)", _write_pa,
+        input_path=project / "reports" / "phase3" / "lvs_power_aware.rpt")
     verdict = _write_lvs_verdict(
         project, "PASS", "LVS_MATCH_POWER_VERIFIED",
         f"netgen LVS: circuits match uniquely with a POWER-AWARE gate netlist "
@@ -48478,8 +48592,15 @@ def _run_klayout_lvs(project: Path, top: str, pdk: PdkConfig,
                                / "netgen_compare.txt")
                 if lvs_rpt.is_file():
                     _netgen_txt.write_text(lvs_rpt.read_text(errors="replace"))
-                lvs_rpt.write_text(_render_klayout_lvs_report(
-                    _cmp, gds_path.name, netlist.name))
+                # A runner-side rewrite of netgen's declared report: credited
+                # only on the chain.
+                _declared_transform_exec(
+                    project, lvs_rpt, "lvs:klayout_render", "klayout",
+                    "render the KLayout LVS compare into lvs.rpt "
+                    "(phase3_one_shot_runner)",
+                    lambda: lvs_rpt.write_text(_render_klayout_lvs_report(
+                        _cmp, gds_path.name, netlist.name)),
+                    input_path=_cmpp)
             except Exception:
                 pass  # never abort LVS on the report rewrite
         verdict = _write_lvs_verdict(
@@ -50067,12 +50188,13 @@ def _v1_6_620_append_pv_signoff_provenance(project: Path, top: str) -> List[str]
             _prev_sha = str((_prev.get("outputs") or {}).get(rel, ""))
             if _prev_sha == _sha(fp) and str(_prev.get("tool")) == tool:
                 continue        # the ledger already says exactly this
-            # THE BYTES CHANGED under a back-filled record: re-declared only
-            # with evidence this pass wrote them (`_redeclaration_evidence`).
-            # Same bytes with a corrected tool is a re-attribution, not a
-            # re-declaration, and needs none.
+            # THE BYTES CHANGED under a back-filled record. A back-fill observes;
+            # it never re-declares changed bytes (`_redeclaration_evidence` with
+            # no transform chain answers no) -- the producer or the transform
+            # that changed them declares them itself. Same bytes with a
+            # corrected tool is a re-attribution, not a re-declaration.
             if _prev_sha != _sha(fp):
-                if _redeclaration_evidence(fp, _sha(fp)) is None:
+                if _redeclaration_evidence(project, fp, _sha(fp)) is None:
                     _record_unexplained_rewrite(
                         project, rel, _prev_sha, _sha(fp),
                         "_v1_6_620_append_pv_signoff_provenance")
@@ -50151,7 +50273,7 @@ def step_drv_promotion_corroboration(project: Path) -> StepResult:
 
 def _restamp_provenance_output(project: Path, rel: str, path: Path,
                                tool: str, command: str,
-                               writer: Optional[Tuple[str, float]] = None
+                               writer: Optional["_TransformWriter"] = None
                                ) -> None:
     """Make provenance.jsonl declare `rel` with the REAL current sha256 of
     `path`.
@@ -50212,7 +50334,7 @@ def _restamp_provenance_output(project: Path, rel: str, path: Path,
             # EVIDENCE FIRST (`_redeclaration_evidence`): only bytes this pass
             # demonstrably wrote are re-declared; anything else is recorded as
             # an unexplained rewrite and left for the hash check to report.
-            _step = _redeclaration_evidence(path, _sha, writer)
+            _step = _redeclaration_evidence(project, path, _sha, writer)
             if _step is None:
                 _record_unexplained_rewrite(
                     project, rel, str(_newest_sha), _sha,
@@ -50255,9 +50377,12 @@ def _restamp_provenance_output(project: Path, rel: str, path: Path,
 
 
 def _record_reemitted_outputs(project: Path) -> Optional[str]:
-    """APPEND one record for every declared output whose bytes on disk no
-    longer match the newest record that PRODUCED it. Returns a note on
-    failure, `None` on success.
+    """DETECT every declared output whose bytes on disk no longer match the
+    newest record that PRODUCED it, and record each in
+    `provenance_unexplained_rewrites.json`. It appends NOTHING to the ledger
+    (review wo6zpfboe): a legitimate rewrite was declared by its producer or by
+    a verified transform chain, so what is left here is unexplained. Returns a
+    note naming them, or `None` when there are none.
 
     Pulled out of `step_canonicalize_artefacts` deliberately. Inline, this
     was the second of the two places that reconciled a re-emit, and being
@@ -50311,47 +50436,20 @@ def _record_reemitted_outputs(project: Path) -> Optional[str]:
                 for rel, declared_sha in outs.items():
                     if isinstance(rel, str) and isinstance(declared_sha, str):
                         newest[rel] = declared_sha
-        drifted = {}
-        producing: Dict[str, str] = {}
+        # A DETECTOR, NOT A DECLARER (review wo6zpfboe): every declared output
+        # whose bytes differ from its newest record is an unexplained change --
+        # a producer or a verified transform would have declared it already.
         unexplained: List[Dict[str, str]] = []
         for rel, declared_sha in newest.items():
             fp = project / rel
             if fp.is_file():
                 cur = _sha(fp)
                 if cur != declared_sha:
-                    # Re-declared ONLY when a step of this pass wrote exactly
-                    # these bytes -- see `_PASS_PRODUCED`. Anything else is an
-                    # unexplained change: recorded as a finding, never as a
-                    # fresh declaration, so the hash check still sees it.
-                    _step = _redeclaration_evidence(fp, cur)
-                    if _step is not None:
-                        drifted[rel] = cur
-                        producing[rel] = _step
-                    else:
-                        unexplained.append({"path": rel})
-                        _record_unexplained_rewrite(
-                            project, rel, declared_sha, cur,
-                            "_record_reemitted_outputs")
+                    unexplained.append({"path": rel})
+                    _record_unexplained_rewrite(
+                        project, rel, declared_sha, cur,
+                        "_record_reemitted_outputs")
         _unexplained_path = project / _UNEXPLAINED_REWRITES_REL
-        if drifted:
-            _bulk = {
-                "tool": "phase3_one_shot_runner",
-                "command": "re-emit (phase3 iteration)",
-                "exit_code": 0,
-                "duration_ms": None,
-                "reconstructed": True,
-                "timestamp": _dt.datetime.now(_dt.timezone.utc)
-                                .strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "note": "outputs re-emitted by a re-run of this "
-                        "runner; the earlier record of each path "
-                        "is superseded, not amended",
-                "outputs": drifted,
-                # which step of THIS pass wrote each path's current bytes
-                "producing_step": producing,
-            }
-            _rmeas.attach(project, _bulk)
-            with prov_path.open("a") as f:
-                f.write(json.dumps(_bulk) + "\n")
         if unexplained:
             return (f"provenance: {len(unexplained)} declared output(s) changed "
                     f"with no invocation this pass accounts for and were NOT "
@@ -50418,9 +50516,15 @@ def _step37_declare_streamout_gds_provenance(project: Path, top: str) -> None:
             return
     except OSError:
         return
+    # The chain (review wo6zpfboe): the stage4 bytes ARE the stream-out's bytes
+    # (checked above), so they are credited against the stream-out's own
+    # newest declaration. `since=0.0`: byte identity to a declared artefact is
+    # the evidence here, not when the copy was made.
     _restamp_provenance_output(
         project, canon_rel, canon_gds, "klayout",
-        "klayout streamout (canonical GDS) (phase3_one_shot_runner step37)")
+        "klayout streamout (canonical GDS) (phase3_one_shot_runner step37)",
+        writer=("step37_declare_streamout", 0.0, pnr_gds,
+                _file_sha256(pnr_gds)))
 
 # ---------------------------------------------------------------------------
 # Steps 23 / 25 — the sign-off gates the flow DECLARES that no runner ran.
@@ -51407,7 +51511,7 @@ def declared_signoff_rollup(plan: List[StepResult]) -> Dict[str, Any]:
 
 def _step37_restamp_canon_gds_provenance(project: Path, top: str,
                                          canon_gds: Path,
-                                        writer: Optional[Tuple[str, float]] = None) -> None:
+                                        writer: Optional["_TransformWriter"] = None) -> None:
     """After Step 37 writes phase3/stage4/gds/<top>.gds, update provenance.jsonl
     so the declared hash matches the freshly-written file.
 
@@ -55347,10 +55451,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # 1. Record any declared output that still exists on disk but whose
     #    bytes no longer match its newest record — by APPENDING a fresh
     #    record of what is there now, never by editing an older one.
-    # This step's own writes so far are this pass's too; it has no StepResult
-    # yet, so they are registered here, inside its own window.
-    _register_pass_outputs("canonicalize_artefacts", "PASS", 0.0, written,
-                           since=t0)
+    # A detector: any declared output that changed without a producer or a
+    # verified transform declaring it is recorded as unexplained.
     _reemit_note = _record_reemitted_outputs(project)
     if _reemit_note:
         notes.append(_reemit_note)
@@ -55436,7 +55538,6 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # GDS) so Step-31 provenance_check does not false-FAIL a clean layout
         # on missing bookkeeping. Only real on-disk outputs are declared
         # (anti-fabrication); idempotent.
-        _register_pass_outputs("canonicalize_artefacts", "PASS", 0.0, written, since=t0)
         _pv_declared = _v1_6_620_append_pv_signoff_provenance(project, top)
         _rebind_measured_drc_invocation_to_canonical_path(project)
         if _pv_declared and str(prov_path) not in written:
@@ -56379,7 +56480,16 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             f"# Source: {src_drc.relative_to(project)}\n"
             f"# Tool: {_drc_tool}\n"
             "#\n")
-        drc_signoff.write_text(header + src_drc.read_text(errors="ignore"))
+        # A runner-side rewrite of an EXISTING declared sign-off report (the
+        # SVRF force-refresh) is credited only on the chain; a first write is
+        # declared by the sign-off back-fill below.
+        _declared_transform_exec(
+            project, drc_signoff, "canonicalize_artefacts:drc_alias",
+            str(_drc_tool), f"sign-off DRC alias of {src_drc.name} "
+            f"(phase3_one_shot_runner)",
+            lambda: drc_signoff.write_text(
+                header + src_drc.read_text(errors="ignore")),
+            input_path=src_drc)
         if str(drc_signoff) not in written:
             written.append(str(drc_signoff))
         # --- ORGANIC #693: provenance stamp at emit time -------------------
@@ -56396,7 +56506,6 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # sha256), so a report that was never produced (or a stale/absent
         # one) is NOT fabricated and Step-31 provenance still FAILs correctly.
         _rebind_measured_drc_invocation_to_canonical_path(project)
-        _register_pass_outputs("canonicalize_artefacts", "PASS", 0.0, written, since=t0)
         _drc_prov_declared = _v1_6_620_append_pv_signoff_provenance(
             project, top)
         if _drc_prov_declared:
@@ -56431,6 +56540,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         if not canon_gds.is_file() or _stale:
             # Use binary copy so KLayout sees a real GDS, not a symlink.
             _t_canon_copy = time.time()
+            _primary_sha = _file_sha256(primary_gds)
             with primary_gds.open("rb") as src, canon_gds.open("wb") as dst:
                 while True:
                     chunk = src.read(1024 * 1024)
@@ -56444,7 +56554,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             # _step37_restamp_canon_gds_provenance.
             _step37_restamp_canon_gds_provenance(
                 project, top, canon_gds,
-                writer=("canonicalize_artefacts", _t_canon_copy))
+                writer=("canonicalize_artefacts", _t_canon_copy, primary_gds,
+                        _primary_sha))
             if _stale:
                 notes.append(
                     "canonical GDS refreshed: the staged "
@@ -56462,7 +56573,6 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # a file written 10 minutes earlier, and phase3/stage3/pnr/<top>.gds —
         # the layout DRC and LVS actually verified — had no record at all.
         # Re-hashes; never copies an older digest (#365).
-        _register_pass_outputs("canonicalize_artefacts", "PASS", 0.0, written, since=t0)
         _step37_declare_streamout_gds_provenance(project, top)
 
     # --- Step 39: FPGA on_board_pass.json schema alignment --------------
