@@ -438,7 +438,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `flow_step_can_fail_check` | any | — | Ratchet flow steps whose declared gate cannot fail on output content. |
 | `flow_step_execution_coverage_check` | any | — | enforce "every applicable step ran, in order". |
 | `flow_step_executor_coverage_check` | any | — | "every step has an executor that runs it". |
-| `flow_step_output_content_check` | any | — | BLOCKING content check for flow step outputs; refusal exits nonzero. |
+| `flow_step_output_content_check` | any | — | Content check for flow step outputs; refusal exits nonzero. |
 | `fmeda_coverage_check` | any | — | independent anti-fabrication gate over the FMEDA diagnostic-coverage report emitted by `fmeda_fault_injection_coverage.py`. |
 | `fmeda_fault_injection_coverage` | any | — | REAL ISO-26262 FMEDA diagnostic-coverage (DC) measurement by single-stuck-at FAULT INJECTION against a declared safety mechanism (ECC / p... |
 | `fork_downgrade_visibility_check` | any | — | Every abort our EDA fork downgrades to a warning must still be visible to the flow. |
@@ -1822,7 +1822,7 @@ _(no programs in this group)_
 - `flow_step_can_fail_check` — Ratchet flow steps whose declared gate cannot fail on output content.
 - `flow_step_execution_coverage_check` — enforce "every applicable step ran, in order".
 - `flow_step_executor_coverage_check` — "every step has an executor that runs it".
-- `flow_step_output_content_check` — BLOCKING content check for flow step outputs; refusal exits nonzero.
+- `flow_step_output_content_check` — Content check for flow step outputs; refusal exits nonzero.
 - `fmeda_coverage_check` — independent anti-fabrication gate over the FMEDA diagnostic-coverage report emitted by `fmeda_fault_injection_coverage.py`.
 - `fmeda_fault_injection_coverage` — REAL ISO-26262 FMEDA diagnostic-coverage (DC) measurement by single-stuck-at FAULT INJECTION against a declared safety mechanism (ECC / p...
 - `fork_downgrade_visibility_check` — Every abort our EDA fork downgrades to a warning must still be visible to the flow.
