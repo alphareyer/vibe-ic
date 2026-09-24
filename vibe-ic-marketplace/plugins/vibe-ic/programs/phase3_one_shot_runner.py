@@ -20311,7 +20311,9 @@ _PNR_RETRY_ITERS = (1 + _PNR_UPSIZE_RETRIES + 1 + 1
                     + _ROUTE_LOOSEN_MAX_RUNGS)
 
 
-def _sparse_gpl_retry_deck(deck: str, log: str) -> Optional[Tuple[str, dict]]:
+def _sparse_gpl_retry_deck(
+        deck: str, log: str,
+        decline_reasons: Optional[List[str]] = None) -> Optional[Tuple[str, dict]]:
     """One disclosed numerical-stability retry, using GPL's measured area.
 
     The first attempt always keeps timing-driven placement. On GPL-0305 only,
@@ -20321,21 +20323,29 @@ def _sparse_gpl_retry_deck(deck: str, log: str) -> Optional[Tuple[str, dict]]:
     fanout constraint, later timing repair and all signoff checks stay active.
     A second failure is final. Do not reuse a corrupted OpenROAD session.
     """
-    if "[ERROR GPL-0305]" not in log:
+    def decline(reason: str) -> None:
+        if decline_reasons is not None:
+            decline_reasons.append(reason)
         return None
+
+    if "[ERROR GPL-0305]" not in log:
+        return decline("failed session did not report GPL-0305")
     area = re.search(r"\[INFO GPL-0018\] Movable instances area:\s*([\d.]+)", log)
     region = re.search(r"\[INFO GPL-0015\] Region area:\s*([\d.]+)", log)
     if not area or not region:
-        return None
+        return decline("GPL-0305 log lacks measured movable or region area")
     movable, core = float(area.group(1)), float(region.group(1))
     sparse_limit = (_ppa_area._PLACEMENT_DENSITY_FLOOR
                     / _ppa_area._PLACEMENT_FLOOR_MAX_RATIO)
-    if movable <= 0 or core <= 0 or movable / core >= sparse_limit:
-        return None
+    if movable <= 0 or core <= 0:
+        return decline("GPL-0305 reported non-positive movable or region area")
+    if movable / core >= sparse_limit:
+        return decline(f"natural density {movable / core:.6g} is at or above "
+                       f"the sparse limit {sparse_limit:.6g}")
     command = re.compile(r"(?m)^global_placement(?=[^\n]* -timing_driven)([^\n]*)$")
     match = command.search(deck)
     if not match:
-        return None
+        return decline("placement deck has no timing-driven GPL command to disable")
     old = match.group(0)
     new = old.replace(" -timing_driven", "", 1)
     record = {
@@ -36908,8 +36918,10 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         # cannot contaminate the retry. The GPL log supplies the actual area
         # after synthesis and any timing-driven buffering, not an area guess.
         if rc != 0 and not _gpl_retry_done:
+            _gpl_decline_reasons: List[str] = []
             _gpl_retry = _sparse_gpl_retry_deck(
-                _generic_pnr_tcl, (out or "") + "\n" + (err or ""))
+                _generic_pnr_tcl, (out or "") + "\n" + (err or ""),
+                _gpl_decline_reasons)
             if _gpl_retry is not None:
                 _generic_pnr_tcl, _gpl_record = _gpl_retry
                 _gpl_record["invocation"] = _pnr_invocation
@@ -36924,6 +36936,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                     return _pad_install_failure
                 _gpl_retry_done = True
                 continue
+            else:
+                print(f"[pnr] GPL_SPARSE_RETRY_DECLINED: "
+                      f"{_gpl_decline_reasons[0]}", file=sys.stderr)
         # A CLOCK TREE THAT HAD TO BE DOWNSIZED IS A CORE THAT IS TOO TIGHT.
         # The in-session legalization ladder's last resort swaps over-wide
         # clock buffers down to the sink so the design legalizes. It works, and
