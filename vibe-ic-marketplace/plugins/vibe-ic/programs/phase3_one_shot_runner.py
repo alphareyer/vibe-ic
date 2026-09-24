@@ -16830,6 +16830,9 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         if sig:
             detail += f" error={sig}"
         detail += f" log_tail={(out+err)[-1200:]}"
+        _log_surviving_artefact([str(log)],
+                                produced_by="phase3_one_shot_runner.step_synth",
+                                tool="phase3_one_shot_runner")
         return StepResult("synth", "FAIL", time.time() - t0, detail,
                           [str(log)],
                           extras={"synth_frontend": "none",
@@ -16896,6 +16899,9 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # ≤1-register top-level wrappers) is deferred — see future
     # enhancement BACKLOG-v12.
     if cell_count_int == 0:
+        _log_surviving_artefact([str(log)],
+                                produced_by="phase3_one_shot_runner.step_synth",
+                                tool="phase3_one_shot_runner")
         return StepResult("synth", "FAIL", time.time() - t0,
                           (f"empty netlist (Number of cells=0); "
                            "Yosys mapping eliminated all logic. "
@@ -17124,6 +17130,10 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                               f"budget of {_budget} at "
                               f"period_relax={AREA_RETRY_PERIOD_RELAX}; the "
                               f"relaxed-timing netlist is NOT adopted as a fix")
+                _log_surviving_artefact(
+                    [str(log)],
+                    produced_by="phase3_one_shot_runner.step_synth",
+                    tool="phase3_one_shot_runner")
                 return StepResult(
                     "synth", "FAIL", time.time() - t0,
                     f"netlist={netlist.name} cells={cell_count} "
@@ -17137,6 +17147,12 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                             "area_loop_adopted": False})
             _area_verdict = (" area_budget=ok" if _acp.returncode == 0
                              else f" area_budget=INCOMPLETE(rc={_acp.returncode})")
+    # The runner formats this log AFTER Yosys returns. Its final bytes are a
+    # runner product, so declare them after every successful synthesis, even
+    # when a previous phase-3 pass already declared the same path.
+    _log_surviving_artefact([str(log)],
+                            produced_by="phase3_one_shot_runner.step_synth",
+                            tool="phase3_one_shot_runner")
     return StepResult("synth", "PASS", time.time() - t0,
                       f"netlist={netlist.name} cells={cell_count} "
                       f"frontend={synth_frontend}"
@@ -32584,6 +32600,30 @@ def _pnr_tail_products(out_dir: Path, out_dir_c: str,
     return [out_dir / n for n in dict.fromkeys(keep)]
 
 
+def _pnr_sdr_boundary_products(out_dir: Path, out_dir_c: str,
+                               tail_text: str) -> List[Path]:
+    """Return only boundary DEFs the SDR tail itself writes.
+
+    A rejected candidate can rewrite these snapshots after the full PnR
+    session declared them. `_declared_session_exec` sets old copies aside and
+    records only files this tail actually writes; stale snapshots cannot be
+    attributed to the new session. Other stage DEFs retain their original
+    producer and the three shipped products keep their existing contract.
+    """
+    products: List[Path] = []
+    prefix = out_dir_c.rstrip("/") + "/"
+    for match in re.finditer(
+            r"(?<!\w)write_def\s+(\S+/boundary_[^/\s}]+\.def)"
+            r"(?=[\s}]|$)",
+            tail_text or "", re.M):
+        full = match.group(1)
+        if full.startswith(prefix):
+            name = full[len(prefix):]
+            if "/" not in name:
+                products.append(out_dir / name)
+    return list(dict.fromkeys(products))
+
+
 def _set_aside_session_products(products: List[Path]) -> Dict[Path, Path]:
     """Move a PnR tail's products aside BEFORE the session runs.
 
@@ -32851,7 +32891,9 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
         # if the session did not rewrite it), so a declared path is never
         # hashed over bytes this session did not write.
         t_rc, t_out, t_err = _declared_session_exec(
-            container, cmd, _pnr_tail_products(out_dir, out_dir_c, tail_text),
+            container, cmd, (_pnr_tail_products(out_dir, out_dir_c, tail_text)
+                             + _pnr_sdr_boundary_products(out_dir, out_dir_c,
+                                                          tail_text)),
             marker=f"{out_dir_c}/{tail_name}",
             log_path=out_dir / tail_log, hard_ceiling_s=hard_ceiling_s)
         this_log = (t_out or "") + (t_err or "")
@@ -32901,7 +32943,9 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
                                   f"tee {out_dir_c}/{reject_log}")
                     r_rc, r_out, r_err = _declared_session_exec(
                         container, reject_cmd,
-                        _pnr_tail_products(out_dir, out_dir_c, incumbent_tcl),
+                        (_pnr_tail_products(out_dir, out_dir_c, incumbent_tcl)
+                         + _pnr_sdr_boundary_products(out_dir, out_dir_c,
+                                                      incumbent_tcl)),
                         marker=f"{out_dir_c}/{reject_name}",
                         log_path=out_dir / reject_log,
                         hard_ceiling_s=hard_ceiling_s)
