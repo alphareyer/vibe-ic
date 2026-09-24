@@ -147,6 +147,7 @@ import _flow_reason_taxonomy as _reason_taxonomy
 import _l10_execution as _l10x
 import _path_layout as _pl
 import _sim_results_bridge as _sim_results
+import cpu_functional_oracle_waiver_check as _w
 
 
 _L10_CASE_LIST_KEYS = ("test_cases", "cases", "vectors", "cmd_response",
@@ -260,6 +261,47 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
             "reason": "L10 execution record is not bound to the canonical JUnit",
         }
 
+    # A CASE THE DESIGN DECLARED IT DOES NOT HAVE (R-0915-102, applied here).
+    #
+    # MEASURED on subservient x gf180mcuD (run2, main 240c0a353): 7 of the 10
+    # declared cases carry a `sim_executed=true` PASS row, and the other three
+    # are `(若 Plugin 選 M / Zicsr / C)` rows whose L10 entry carries
+    # `applies_when: {option: M | Zicsr | C}` while the design's own
+    # `plugin_output/declaration.json` records `isa_extensions: ["I",
+    # "Zifencei"]`. Step 4's sibling gate `cpu_functional_oracle_waiver_check`
+    # already takes those three out of ITS denominator on that declared basis;
+    # this gate did not, so the SAME step judged two different case populations
+    # and blocked on three oracles no RV32I-Zifencei build can execute.
+    #
+    # ONE NARROWING, NOT TWO: the sibling's own public helpers decide it, so the
+    # two gates cannot drift. Fail-closed both ways, exactly as there: no
+    # declaration / no selection field decides nothing, a row with no
+    # `applies_when` stays, and an option the design DID select is demanded.
+    # A narrowed case is DISCLOSED by name with its basis, never dropped
+    # silently, and a FAIL anywhere -- narrowed case or not -- is still a FAIL.
+    selected = _w.design_selected_options(project)
+    _app_rows, _na_rows = _w.split_design_declared_na(list(cases), selected)
+    _na_ref = {id(row) for row in _na_rows}
+    na_cases = [(cid, case) for cid, case in zip(ids, cases)
+                if id(case) in _na_ref]
+    na_ids = {cid for cid, _case in na_cases}
+    applicable = [cid for cid in ids if cid not in na_ids]
+    design_declared_na = {
+        "decided": selected is not None,
+        "design_selected": sorted(selected) if selected is not None else None,
+        "declaration": _w._DECLARATION_REL,
+        "cases": [{"case": cid,
+                   "option": (case.get("applies_when") or {}).get("option"),
+                   "stated": (case.get("applies_when") or {}).get("stated"),
+                   "source": (case.get("applies_when") or {}).get("source"),
+                   "record_state": _l10x.case_state(cid, record)[0]}
+                  for cid, case in na_cases],
+        "note": ("DESIGN_DECLARED_NA: the case declares an option and the "
+                 "design declares it does not have it; two declared documents "
+                 "agree the case does not apply, so it is not demanded. Not a "
+                 "waiver and not a pass: nothing about it is claimed verified."),
+    }
+
     states = [_l10x.case_state(case_id, record)[0] for case_id in ids]
     if _l10x.FAIL in states:
         return {
@@ -267,7 +309,18 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
             "professional_track": "l10_unit_tb_execution",
             "reason": "independent L10 execution record contains a failed case",
         }
-    if any(state != _l10x.PASS for state in states):
+    if not applicable:
+        return {
+            "gate": "professional_tb", "verdict": "NOT_CHECKED",
+            "reason_class": _reason_taxonomy.BLOCKED_BY_UPSTREAM,
+            "professional_track": "l10_unit_tb_execution",
+            "reason": (f"every one of the {len(ids)} declared L10 case(s) is "
+                       f"design-declared not applicable; nothing was verified"),
+            "design_declared_na": design_declared_na,
+            "declared_case_count": len(ids),
+        }
+    if any(_l10x.case_state(cid, record)[0] != _l10x.PASS
+           for cid in applicable):
         # R-0915-39: REFUSE BY NAME, NEVER "one or more".
         #
         # The old sentence was a block with no subject: a reader could not tell
@@ -285,7 +338,7 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
         not_passed = [
             {"case": cid, "state": st, "reason": why}
             for cid, (st, why) in
-            ((cid, _l10x.case_state(cid, record)) for cid in ids)
+            ((cid, _l10x.case_state(cid, record)) for cid in applicable)
             if st != _l10x.PASS]
         shown = ", ".join(f"{r['case']} [{r['state']}]" for r in not_passed[:6])
         more = (f" (+{len(not_passed) - 6} more)"
@@ -294,10 +347,14 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
             "gate": "professional_tb", "verdict": "NOT_CHECKED",
             "reason_class": _reason_taxonomy.BLOCKED_BY_UPSTREAM,
             "professional_track": "l10_unit_tb_execution",
-            "reason": (f"{len(not_passed)} of {len(ids)} declared L10 case(s) "
-                       f"did not execute their declared oracle: {shown}{more}"),
+            "reason": (f"{len(not_passed)} of {len(applicable)} declared L10 "
+                       f"case(s) did not execute their declared oracle: "
+                       f"{shown}{more}"
+                       + (f" ({len(na_ids)} more design-declared not "
+                          f"applicable)" if na_ids else "")),
             "cases_not_executed": not_passed,
             "declared_case_count": len(ids),
+            "design_declared_na": design_declared_na,
         }
 
     return {
@@ -306,7 +363,9 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
         "evidence": _L10_UNIT_JUNIT_REL.as_posix(),
         "execution_record": Path(str(record["path"])).relative_to(project).as_posix(),
         "producer": record.get("producer"),
-        "l10_cases": len(ids),
+        "l10_cases": len(applicable),
+        "declared_case_count": len(ids),
+        "design_declared_na": design_declared_na,
         "junit": {k: int(summary.get(k, 0) or 0)
                   for k in ("tests", "passed", "failures", "errors")},
     }
@@ -541,6 +600,11 @@ def main(argv=None) -> int:
               f"model's own declared closure policy {fc.get('required_pct')}% "
               f"({fc.get('export')}) — DISCLOSED, not blocking; see this "
               f"program's docstring for why.")
+    _na = (res.get("design_declared_na") or {}).get("cases") or []
+    if _na:
+        print(f"[disclosed] {len(_na)} declared L10 case(s) DESIGN_DECLARED_NA "
+              f"— not demanded, nothing claimed verified: "
+              + ", ".join(f"{r['case']} (option {r['option']})" for r in _na))
     verdict = res.get("verdict")
     if verdict == "NOT_CHECKED":
         # rc=2, the disclosed-skip tier. `flow_compliance_check` maps rc=2
