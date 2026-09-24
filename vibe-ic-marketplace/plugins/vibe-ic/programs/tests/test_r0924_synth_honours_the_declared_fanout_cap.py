@@ -11,12 +11,15 @@ flow had not yet repaired. The run's own SDC declared `set_max_fanout 10` the
 whole time; nothing enforced it until `repair_design`, which runs in PnR,
 AFTER the gate that fails for its absence.
 
-MEASURED FIX, same RTL, same auto-SDC, same ss corner:
-    subservient  -8.85 VIOLATED (tns -2044.80)  ->  +4.36 MET (tns 0.00)
-                 2,510 cells / 61,599 area      ->  2,653 (+5.7%) / 64,611 (+4.9%)
-                 worst signal fanout 207        ->  26;  nets over 10: 51 -> 3
-    spm          +15.93 MET                     ->  +15.93 MET, netlist unchanged
-This is NOT a new pass: it is ABC's own `-constr` tail with the bound supplied.
+MEASURED FIX — re-measured with the runner's EXACT command (`-D 20000` /
+`-D 24000`, as the runner emits it), step-10 basis, one arm at a time:
+    subservient  -8.85 VIOLATED (tns -2044.80)  ->  +2.55 MET (tns 0.00)
+                 2,510 cells / 61,600 area      ->  2,653 / 66,271
+    spm          +15.93 MET                     ->  +15.59 MET (no cell added)
+The recipe is the stock mapping + ABC's `buffer -N <cap>` ONLY. The `-constr`
+tail's `upsize {D}; dnsize {D}` is the synth-time sizing the in-source
+post-route A/B measured as a regression, so it is NOT taken (an earlier cut of
+this branch took it, and its +4.36 was measured WITHOUT the runner's -D).
 
 AND ONE LADDER FOR THE CAP. Before this, the AUTO-SDC path resolved the cap
 from design-declared sources only, so on ONE PDK subservient got 10 (its L9
@@ -46,15 +49,17 @@ RUNNER = PROGRAMS / "phase3_one_shot_runner.py"
 
 
 # --- the recipe itself -----------------------------------------------------
-def test_the_script_is_abcs_own_constr_tail_with_the_bound_supplied():
+def test_the_script_is_the_stock_mapping_plus_buffer_only():
     got = R._ABC_FANOUT_SCRIPT.format(cap=10)
-    assert "buffer,-N,10" in got, got
-    assert "upsize,{D}" in got and "dnsize,{D}" in got, (
-        "yosys's own delay-target substitution must survive .format(); "
-        f"got {got}")
+    assert got.rstrip().endswith("buffer,-N,10"), got
     assert got.lstrip().startswith("-script +"), got
-    assert "stime,-p" in got
-    assert "&nf,{D}" in got, "the stock mapping must still be the mapping"
+    assert "&nf,{D}" in got, (
+        "the stock mapping must still be the mapping, and yosys's own "
+        f"delay-target substitution must survive .format(); got {got}")
+    for sizing in ("upsize", "dnsize", "-sizing", "area_recover"):
+        assert sizing not in got, (
+            f"{sizing} is the synth-time sizing the post-route A/B measured "
+            f"as a regression; it is not part of the fanout bound: {got}")
 
 
 def test_the_cap_reaches_the_script_verbatim():
