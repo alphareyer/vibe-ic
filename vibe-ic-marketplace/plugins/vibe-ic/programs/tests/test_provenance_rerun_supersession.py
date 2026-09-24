@@ -477,7 +477,14 @@ def test_canonicalize_reemit_helper_appends_and_keeps_history_verbatim(
     with prov.open("ab") as f:
         f.write((json.dumps(_record(rel, _sha(art))) + "\n").encode())
     before = prov.read_bytes()
+    # 2026-09-24 (lane ictier1, reemit): the second pass is written BY A STEP
+    # of this pass. A re-emit now re-declares only bytes a step of this pass
+    # demonstrably wrote (`_PASS_PRODUCED`); a drift nobody produced is a
+    # finding, not a re-run -- see test_a_reemit_redeclares_only_what_this_
+    # pass_produced.py. The assertions below are unchanged.
+    mod._PASS_PRODUCED.clear()
     art.write_text("second pass\n")
+    mod.StepResult("demo", "PASS", 1.0, "re-run", [str(art)])
 
     assert mod._record_reemitted_outputs(tmp_path) is None
 
@@ -495,7 +502,14 @@ def test_canonicalize_reemit_produces_a_ledger_the_checker_accepts(tmp_path):
     rel = "reports/out.rpt"
     art = _artefact(tmp_path, rel, "first pass\n")
     _ledger(tmp_path, _record(rel, _sha(art)))
+    # 2026-09-24 (lane ictier1, reemit): the second pass is written BY A STEP
+    # of this pass. A re-emit now re-declares only bytes a step of this pass
+    # demonstrably wrote (`_PASS_PRODUCED`); a drift nobody produced is a
+    # finding, not a re-run -- see test_a_reemit_redeclares_only_what_this_
+    # pass_produced.py. The assertions below are unchanged.
+    mod._PASS_PRODUCED.clear()
     art.write_text("second pass\n")
+    mod.StepResult("demo", "PASS", 1.0, "re-run", [str(art)])
     assert _run(tmp_path).returncode == 1        # drifted: FAIL before
 
     assert mod._record_reemitted_outputs(tmp_path) is None
