@@ -33,9 +33,7 @@ For every `program_exit_zero` gate in the flow definition:
               spawn it and throw the status away, or the status's journey may
               leave the set of shapes this analysis can decide.
   DECLARED    the gate program declares its own intent in its docstring via
-              `ENFORCEMENT: blocking`, `ENFORCEMENT: step-blocking`, or
-              `ENFORCEMENT: advisory`. Step-blocking denies the step's final
-              compliance tier but does not claim the runner stopped inline.
+              `ENFORCEMENT: blocking` or `ENFORCEMENT: advisory`
   UNDECLARED  no declaration — the intent is unknown, which is how 66 of 72
               gates ended up de-facto advisory without anyone deciding that
 
@@ -227,7 +225,7 @@ def declaration_re(token: str, value: str) -> "re.Pattern[str]":
         re.IGNORECASE | re.MULTILINE)
 
 
-_DECL_RE = declaration_re("ENFORCEMENT", r"(step-blocking|blocking|advisory)\b")
+_DECL_RE = declaration_re("ENFORCEMENT", r"(blocking|advisory)\b")
 # The second channel: intent stated in the JSON the gate emits. Captures the
 # WHOLE right-hand side, not just a leading string literal — see
 # `declared_intent` for why a value-only match reads a conditional expression
@@ -1994,16 +1992,10 @@ def audit(flow: Path, programs: Path) -> dict:
         wiring = (gate_wiring(mods, g)
                   if _named_in(src_names, src, stem_g, _invoked)
                   else NOT_INVOKED)
-        # A required clause in the canonical steps tree denies that STEP its
-        # PASS tier at final compliance. This is distinct from an inline runner
-        # stop, which remains the sole meaning of ENFORCED above.
-        step_blocking = any(c["gate"] == g and c["slot"] == "program_exit_zero"
-                            and c["dispatchable"] for c in clauses)
         rows.append({
             "gate": g,
             "enforcement": ("ENFORCED" if wiring == BLOCKING_WIRING
                             else "AUDIT_ONLY"),
-            "step_tier": "BLOCKING" if step_blocking else "ADVISORY",
             "wiring": wiring,
             "declared": declared_intent(programs, g),
             "slots": sorted(slots[g]),
@@ -2119,9 +2111,6 @@ def audit(flow: Path, programs: Path) -> dict:
     contradictions = [r for r in rows
                       if r["declared"] == "blocking"
                       and r["enforcement"] == "AUDIT_ONLY"]
-    contradictions += [r for r in rows
-                       if r["declared"] == "step-blocking"
-                       and r["step_tier"] != "BLOCKING"]
     # What the ORPHANED verdict actually consulted. Reported so the claim is
     # falsifiable: "nothing invokes it" is only as strong as the list of places
     # looked at, and a venue that was EMPTY on this tree (a synthetic fixture
@@ -2154,7 +2143,6 @@ def audit(flow: Path, programs: Path) -> dict:
         "total_clauses": len(clauses),
         "enforced": sum(1 for r in rows if r["enforcement"] == "ENFORCED"),
         "audit_only": sum(1 for r in rows if r["enforcement"] == "AUDIT_ONLY"),
-        "step_blocking": sum(1 for r in rows if r["step_tier"] == "BLOCKING"),
         # #884 — the breakdown BEHIND `audit_only`. `status_ignored` is the
         # class this audit used to score as ENFORCED: a real gate really is
         # spawned, and its verdict is thrown away. `unproven` is the honest
@@ -2308,7 +2296,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"gates in flow definition : {rep['total_gates']}")
     print(f"  ENFORCED (can block)   : {rep['enforced']}")
     print(f"  AUDIT_ONLY (describes) : {rep['audit_only']}  ({pct}%)")
-    print(f"  STEP_BLOCKING (tier)   : {rep['step_blocking']}")
     print(f"declared intent          : {rep['declared']} "
           f"({rep['undeclared']} UNDECLARED)")
     if rep.get("malformed_clauses"):

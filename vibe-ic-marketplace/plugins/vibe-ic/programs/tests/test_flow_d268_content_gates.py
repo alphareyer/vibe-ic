@@ -122,10 +122,10 @@ def test_content_refusal_denies_the_owning_step_pass_tier(tmp_path, step_id):
     assert absent.status in {"FAIL", "NOT_MEASURED"}, (step_id, absent.reasons)
 
 
-def test_content_gate_declares_its_actual_step_tier():
+def test_content_gate_declares_runner_advisory_and_required_step_clauses():
     programs = Path(__file__).resolve().parents[1]
     assert enforcement.declared_intent(
-        programs, "flow_step_output_content_check") == "step-blocking"
+        programs, "flow_step_output_content_check") == "advisory"
     clauses = enforcement.clauses_in_flow(FLOW)
     required = [c for c in clauses if c["gate"] ==
                 "flow_step_output_content_check" and

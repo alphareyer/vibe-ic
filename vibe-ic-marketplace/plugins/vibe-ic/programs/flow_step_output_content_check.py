@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Content check for flow step outputs; refusal exits nonzero.
 
-ENFORCEMENT: step-blocking
+ENFORCEMENT: advisory — step runners do not invoke this gate inline.
 
 The required ``program_exit_zero`` clauses deny their owning step a PASS tier
-in flow_compliance_check. Step runners do not invoke this gate inline, so it
-cannot stop a producer step while that step is running.
+in flow_compliance_check, but this gate cannot stop a producer step while
+that step is running.
 
 This checks the producer's actual bytes, never a previous gate report. It is
 limited to structural evidence; design quality stays with the owning checks.
