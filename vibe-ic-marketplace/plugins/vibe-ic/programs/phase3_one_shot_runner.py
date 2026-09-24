@@ -32016,9 +32016,17 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
            f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
            f"openroad -no_init -exit {out_dir_c}/{tail_name} 2>&1 | "
            f"tee {out_dir_c}/{tail_log}")
-    t_rc, t_out, t_err = _docker_exec(
-        container, cmd, marker=f"{out_dir_c}/{tail_name}",
-        log_path=out_dir / tail_log, hard_ceiling_s=hard_ceiling_s)
+    # This tail writes the shipped route too; it names itself as the producer
+    # exactly as the SDR adopt tail does (`_pnr_tail_products`).
+    _tail_products = _pnr_tail_products(out_dir, out_dir_c, tail_text)
+    _aside = _set_aside_session_products(_tail_products)
+    try:
+        t_rc, t_out, t_err = _docker_exec(
+            container, cmd, marker=f"{out_dir_c}/{tail_name}",
+            log_path=out_dir / tail_log, hard_ceiling_s=hard_ceiling_s,
+            outputs=[str(_p) for _p in _tail_products])
+    finally:
+        _restore_unwritten_products(_aside)
     rec["combined_log"] = ("\n=== PNR ANTENNA ROLLBACK (from "
                            f"{ckpt}, {', '.join(_ANTENNA_STAGES)} omitted) "
                            "===\n" + (t_out or "") + (t_err or ""))
@@ -32098,8 +32106,8 @@ _SDR_TAIL_PRODUCT_RE = re.compile(
     r"[^/\s}]+\.def))\s*$", re.M)
 
 
-def _sdr_adopt_tail_products(out_dir: Path, out_dir_c: str,
-                             tail_text: str) -> List[Path]:
+def _pnr_tail_products(out_dir: Path, out_dir_c: str,
+                       tail_text: str) -> List[Path]:
     """The shipped route files the adopt tail writes, read off its own Tcl.
 
     `routed.def` and `<top>_pnr.v`, plus `<top>.def` -- the one `.def` written
@@ -32119,6 +32127,38 @@ def _sdr_adopt_tail_products(out_dir: Path, out_dir_c: str,
             if n == "routed.def" or n.endswith("_pnr.v")
             or (n.endswith(".def") and n[:-len(".def")] in tops)]
     return [out_dir / n for n in dict.fromkeys(keep)]
+
+
+def _set_aside_session_products(products: List[Path]) -> Dict[Path, Path]:
+    """Move a PnR tail's products aside BEFORE the session runs.
+
+    The session then declares them as its outputs, and `_log_invocation` hashes
+    only what exists when it exits -- so a product it did NOT write is absent at
+    that moment and is never attested as its work. `_restore_unwritten_products`
+    puts every unwritten one back afterwards, so what is on disk is exactly what
+    it was before this change (the antenna rollback's contract: "routed.def is
+    whatever the refusing session left")."""
+    aside: Dict[Path, Path] = {}
+    for p in products:
+        if p.is_file():
+            a = p.with_name(p.name + ".pre_session")
+            try:
+                os.replace(p, a)
+                aside[p] = a
+            except OSError:
+                pass
+    return aside
+
+
+def _restore_unwritten_products(aside: Dict[Path, Path]) -> None:
+    for p, a in aside.items():
+        try:
+            if p.exists():
+                a.unlink()
+            else:
+                os.replace(a, p)
+        except OSError:
+            pass
 
 
 def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
@@ -32266,19 +32306,18 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
         # a nameless runner re-emit described the adopted bytes (6f8e3d27):
         # `provenance_check --tool openroad` read "hash mismatch". Same shape as
         # `_run_route_producer` (#2569): declare the products this session
-        # writes, after removing any copy an earlier session left there, so a
-        # declared path is never hashed over bytes this session did not write.
-        _tail_products = _sdr_adopt_tail_products(out_dir, out_dir_c,
-                                                  tail_text)
-        for _p in _tail_products:
-            try:
-                _p.unlink()
-            except FileNotFoundError:
-                pass
-        t_rc, t_out, t_err = _docker_exec(
-            container, cmd, marker=f"{out_dir_c}/{tail_name}",
-            log_path=out_dir / tail_log, hard_ceiling_s=hard_ceiling_s,
-            outputs=[str(_p) for _p in _tail_products])
+        # writes, with any earlier copy set ASIDE for the session (and put back
+        # if the session did not rewrite it), so a declared path is never
+        # hashed over bytes this session did not write.
+        _tail_products = _pnr_tail_products(out_dir, out_dir_c, tail_text)
+        _aside = _set_aside_session_products(_tail_products)
+        try:
+            t_rc, t_out, t_err = _docker_exec(
+                container, cmd, marker=f"{out_dir_c}/{tail_name}",
+                log_path=out_dir / tail_log, hard_ceiling_s=hard_ceiling_s,
+                outputs=[str(_p) for _p in _tail_products])
+        finally:
+            _restore_unwritten_products(_aside)
         this_log = (t_out or "") + (t_err or "")
         combined += (f"\n=== PNR SDR ADOPT (from {cand}, "
                      f"{', '.join(omitted)} omitted) ===\n" + this_log)
@@ -32409,9 +32448,17 @@ def _pnr_resume_after_fatal_signal(*, project: Path, top: str, container: str,
            f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
            f"openroad -no_init -exit {resume_tcl_c} 2>&1 | "
            f"tee {out_dir_c}/{_PNR_RESUME_LOG}")
-    r_rc, r_out, r_err = _docker_exec(
-        container, cmd, marker=resume_tcl_c,
-        log_path=out_dir / _PNR_RESUME_LOG, hard_ceiling_s=hard_ceiling_s)
+    # The resume tail writes the shipped route too; it names itself as the
+    # producer exactly as the SDR adopt tail does (`_pnr_tail_products`).
+    _tail_products = _pnr_tail_products(out_dir, out_dir_c, resume_text)
+    _aside = _set_aside_session_products(_tail_products)
+    try:
+        r_rc, r_out, r_err = _docker_exec(
+            container, cmd, marker=resume_tcl_c,
+            log_path=out_dir / _PNR_RESUME_LOG, hard_ceiling_s=hard_ceiling_s,
+            outputs=[str(_p) for _p in _tail_products])
+    finally:
+        _restore_unwritten_products(_aside)
     rec["rc"] = r_rc
     rec["log_tail"] = ((r_out or "") + (r_err or ""))[-2000:]
     # Fold the resume transcript into openroad.log so every gate that reads
@@ -53252,8 +53299,14 @@ def _si_mcf_repair_seam(project: Path, top: str, pdk: "PdkConfig",
         # Long, open-ended repair+reroute — supervised by the progress-stall
         # WATCHDOG (marker=tcl_c), never by a clock that terminates a solve
         # that is still solving.
-        rc, out, err = _docker_exec(
-            container, f"openroad -no_init -exit {tcl_c}", marker=tcl_c)
+        # The child is the openroad session that PRODUCES the candidate the
+        # promotion below copies over the shipped route: it declares what it
+        # writes (#2569's `_run_route_producer`; its own transaction directory,
+        # so an earlier child's candidate is removed rather than attested).
+        rc, out, err = _run_route_producer(
+            container, tcl_c,
+            [txn / _SI_MCF_CANDIDATE_DEF, txn / f"{top}_pnr.v",
+             txn / _SI_MCF_CANDIDATE_SPEF, txn / _SI_MCF_CANDIDATE_ODB])
         log = (out or "") + "\n" + (err or "")
         (txn / "si_mcf_repair_child.log").write_text(log)
         # R-0915-50 (2) — the child's OWN account of how it ended, carried out
@@ -53375,6 +53428,9 @@ def _si_mcf_repair_promote(project: Path, top: str, pdk: "PdkConfig",
             sidelined = str(side)
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
+        # A copy names the run that produced its bytes (#2569's promotion
+        # record): the si_mcf child's declared candidate.
+        _record_route_promotion(project, Path(src), [dst], "si_mcf_repair")
         promoted.append({"from": str(src), "to": str(dst),
                          "sidelined": sidelined})
     rederived: List[Dict[str, Any]] = []
