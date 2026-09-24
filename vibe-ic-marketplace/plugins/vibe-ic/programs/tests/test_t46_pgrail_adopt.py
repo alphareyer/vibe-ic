@@ -99,6 +99,7 @@ def test_successful_scoped_antenna_route_cannot_drop_a_held_net(tmp_path):
     assert r.returncode != 0
     assert "ANTENNA_SCOPED_HELD_WIRE_DAMAGE" in r.stdout
     assert "ANTENNA_DIODE_ROLLED_BACK" in r.stdout
+    assert "ANTENNA_REPAIR_REFUSED_ROLLBACK_REQUEST:" in r.stdout
     assert "nX" in r.stdout
 
 
