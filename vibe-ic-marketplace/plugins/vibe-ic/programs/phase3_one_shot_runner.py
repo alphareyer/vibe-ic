@@ -35025,25 +35025,36 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # former range(), so the internal resize/loosen convergence logic below is
     # byte-for-byte unchanged; loop_guard just makes the bound explicit + named.
     _pnr_loop = _wd.loop_guard("pnr_route_feedback", max_iter=_PNR_RETRY_ITERS)
+    # THE MAIN PnR SESSION DECLARES WHAT IT WRITES (review wo6zpfboe): every
+    # stage DEF and the netlist its own Tcl names, and the transcript it tees.
+    # The FILE NAMES do not change across ladder rungs (a rung changes the
+    # floorplan, not what the deck writes), so the list is taken once here.
+    _pnr_products = _pnr_session_products(
+        out_dir, out_dir_c,
+        pnr_tcl.read_text(errors="replace") if pnr_tcl.is_file() else "")
+    _pnr_outputs = [str(p) for p in _pnr_products]
     for _retry_i in _pnr_loop:
-        # THE MAIN PnR SESSION DECLARES WHAT IT WRITES (review wo6zpfboe):
-        # every stage DEF and the netlist its own Tcl names, and the transcript
-        # it tees -- re-read each attempt, because the ladder rewrites the deck.
-        rc, out, err = _declared_session_exec(
-            container, cmd,
-            _pnr_session_products(out_dir, out_dir_c,
-                                  pnr_tcl.read_text(errors="replace")
-                                  if pnr_tcl.is_file() else ""),
-            marker=pnr_tcl_c, log_path=_pnr_logp,
-            # R-0915-131. PnR hands post-route DRV repair to an SDR CHILD
-            # session and then waits. While that child runs, the parent's own
-            # transcript, argv marker and CPU all go quiet, and a watchdog
-            # reading only the parent called a working job hung and threw away
-            # seven hours of place-and-route (subservient, 2026-09-23). The
-            # child writes `sdr_child_*.log` next to this log, so the progress
-            # signal includes them, resolved at every look.
-            progress_globs=["sdr_child_*.log"],
-            hard_ceiling_s=_pnr_ceiling)
+        # Spelled as the direct `_docker_exec` call (not the
+        # `_declared_session_exec` wrapper) so the closed-loop re-entry census
+        # still reads this site as step_pnr's self-checked retry; the set-aside
+        # / outputs= / put-back are the wrapper's, inline. `_pnr_products` is
+        # loop-invariant (computed once, above the loop).
+        _pnr_aside = _set_aside_session_products(_pnr_products)
+        try:
+            rc, out, err = _docker_exec(
+                container, cmd, outputs=_pnr_outputs,
+                marker=pnr_tcl_c, log_path=_pnr_logp,
+                # R-0915-131. PnR hands post-route DRV repair to an SDR CHILD
+                # session and then waits. While that child runs, the parent's own
+                # transcript, argv marker and CPU all go quiet, and a watchdog
+                # reading only the parent called a working job hung and threw away
+                # seven hours of place-and-route (subservient, 2026-09-23). The
+                # child writes `sdr_child_*.log` next to this log, so the progress
+                # signal includes them, resolved at every look.
+                progress_globs=["sdr_child_*.log"],
+                hard_ceiling_s=_pnr_ceiling)
+        finally:
+            _restore_unwritten_products(_pnr_aside)
         # vibe-ic#2108 — THIS APPROACH'S LOG, BEFORE THE NEXT ONE
         # TRUNCATES IT. `cmd` pipes into `tee` (not `tee -a`), so the
         # next iteration reopens `openroad.log` for writing and this
