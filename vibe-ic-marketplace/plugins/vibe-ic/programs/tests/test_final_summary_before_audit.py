@@ -22,6 +22,14 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 RUNNER = PROGRAMS / "design_one_shot_runner.py"
 
 
+# THE ACT, NOT ONE SPELLING OF IT. R-0924-1 routed all five call sites in
+# design_one_shot_runner.main through `_emit_final_summary_or_disclose`, which
+# emits the summary unless the run declared a window (in which case no audit
+# runs either, and the ordering question is vacuous). A matcher that knows only
+# the old name reports the ordering as broken while it holds.
+_SUMMARY_CALLS = ("emit_final_summary", "_emit_final_summary_or_disclose")
+
+
 def _call_name(node: ast.Call) -> str:
     fn = node.func
     if isinstance(fn, ast.Attribute):
@@ -64,7 +72,7 @@ def _ordering_sites(tree: ast.AST):
                 if any(isinstance(p, ast.Constant) and p.value == 2
                        for p in phases):
                     audits.append(node.lineno)
-            elif name == "emit_final_summary":
+            elif name in _SUMMARY_CALLS:
                 emits.append(node.lineno)
         if audits:
             yield fn.name, sorted(audits), sorted(emits)
@@ -135,6 +143,7 @@ def test_fpga_burn_pattern_still_present():
     assert m_burn is not None
     # An emit_final_summary call within 200 chars before the burn append
     head = src[max(0, m_burn.start() - 500):m_burn.start()]
-    assert "_pl.emit_final_summary" in head, (
+    assert any(s in head for s in ("_pl.emit_final_summary",
+                                   "_emit_final_summary_or_disclose")), (
         "FPGA-burn path lost its pre-burn emit_final_summary — that pattern "
         "is also load-bearing for the SOF attestation gate.")

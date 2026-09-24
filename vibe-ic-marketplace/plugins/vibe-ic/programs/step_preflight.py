@@ -488,6 +488,45 @@ def _probe_waived(project: Path, dec: Decision,
     return absent
 
 
+def window_is_effective(entry_step=None, exit_step=None,
+                        runner: Optional[str] = None) -> bool:
+    """Does this `--entry-step`/`--exit-step` window PRUNE any dispatch?
+
+    For callers that hold only the FLAGS. `design_one_shot_runner.main` asks the
+    same question of the signals it dispatched on (`run_is_bounded`), and a test
+    pins the two to agree over a table of windows; this exists because the front
+    door decides before any runner has computed those signals.
+
+    A flag that prunes nothing is not a window (review w437hob32). MEASURED
+    against this module's own table: `design_one_shot_runner`'s last site heads
+    step 11, so `--exit-step 11` and every larger id prune NOTHING of it, and
+    `--entry-step 1` names its first site. Such a run dispatches exactly what a
+    flagless run dispatches, and its whole-flow documents are exactly as true.
+
+    `runner` scopes the question to one plan; omitted, it asks whether the
+    window prunes anything ANYWHERE in the flow -- which is the front door's
+    question, because an exit inside phase 2 prunes every phase-3 site.
+
+    WHAT THIS CANNOT SEE, and the caller must OR in for itself: a phase the
+    ORCHESTRATOR skips wholesale. `vibe_ic_one_shot_runner` skips Phase 1 for any
+    entry owned by `design_one_shot_runner` -- `--entry-step 1` included -- and
+    that decision lives in the front door, not in this table."""
+    if runner is not None:
+        plan = RUNNER_PLANS.get(runner)
+        plans = [plan] if plan is not None else []
+    else:
+        plans = list(RUNNER_PLANS.values())
+    for plan in plans:
+        if exit_step and exit_pruned_sites(plan.sites, str(exit_step)):
+            return True
+        if entry_step:
+            names = [n for n, _ in plan.sites]
+            site = site_for_step(plan.name, str(entry_step))
+            if site and names and site != names[0]:
+                return True
+    return False
+
+
 def site_for_step(runner: str, step_id: str) -> Optional[str]:
     """The dispatch site whose span STARTS at `step_id`, or None.
 

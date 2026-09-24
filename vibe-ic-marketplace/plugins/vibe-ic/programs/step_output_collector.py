@@ -146,25 +146,51 @@ def _prune_stale_folders(steps_root: Path, old_folders: List[str],
             parent = parent.parent
 
 
-def materialize(project: Path) -> Dict[str, Any]:
+def materialize(project: Path, only_steps=None) -> Dict[str, Any]:
+    """Build the steps view. `only_steps` (a set of canonical step ids) limits
+    the REFRESH to those steps, for a run that declared a window.
+
+    WHY A WINDOWED REFRESH IS NOT A WINDOWED VIEW. A run that dispatched step 4
+    alone has nothing new to say about the other 69 steps, and rebuilding their
+    folders spends the whole flow's collection cost to restate what was already
+    on disk — MEASURED: 139 of the 432 files a `--entry-step 4 --exit-step 4`
+    run wrote outside step 4 were this tree. But the VIEW must still describe
+    the whole flow, because a reader opening `steps/` after a bounded run is
+    entitled to the same tree they had before it. So a windowed call:
+      * materializes folders ONLY for the steps in the window;
+      * CARRIES every other row from the prior index unchanged, marked
+        `refreshed_here: false`, instead of dropping it;
+      * does NOT prune, because outside the window this call has no opinion
+        about which folders are stale, and pruning on a partial view would
+        delete the rest of the flow's tree.
+    `only_steps=None` is the whole-flow build, byte-for-byte as before: the
+    extra keys exist only on the windowed path."""
     project = Path(project).expanduser().resolve()
     steps_root = project / "steps"
     steps_root.mkdir(parents=True, exist_ok=True)
+    window = None if only_steps is None else {str(s) for s in only_steps}
 
     prior_index_path = steps_root / "index.json"
     prior_folders: List[str] = []
+    prior_rows: List[Dict[str, Any]] = []
     if prior_index_path.is_file():
         try:
             prior = json.loads(prior_index_path.read_text())
-            prior_folders = [s.get("folder", "") for s in prior.get("steps", [])
+            prior_rows = [s for s in prior.get("steps", []) if isinstance(s, dict)]
+            prior_folders = [s.get("folder", "") for s in prior_rows
                              if s.get("folder")]
         except Exception:
             prior_folders = []
+            prior_rows = []
 
     index: List[Dict[str, Any]] = []
     new_folders: set = set()
+    skipped_ids: List[str] = []
 
     for sid, name, status, phase, stage, outputs in _iter_step_records(project):
+        if window is not None and str(sid) not in window:
+            skipped_ids.append(str(sid))
+            continue
         # `phase` is drawn from flow_dashboard_data's fixed 6-entry _PHASES
         # table and `stage` defaults to "stage" in _iter_step_records — never
         # empty in practice — but a path built from external data must not
@@ -223,10 +249,22 @@ def materialize(project: Path) -> Dict[str, Any]:
                       "stage": stage, "folder": folder,
                       "n_outputs": len(present)})
 
-    _prune_stale_folders(steps_root, prior_folders, new_folders)
+    if window is None:
+        _prune_stale_folders(steps_root, prior_folders, new_folders)
+        payload: Dict[str, Any] = {"steps": index}
+    else:
+        # CARRY, do not drop. A row this call did not refresh is still a true
+        # record of what is on disk for that step; saying nothing about it
+        # would turn a bounded refresh into a deletion of the view.
+        fresh_ids = {str(r.get("id")) for r in index}
+        carried = [dict(r, refreshed_here=False) for r in prior_rows
+                   if str(r.get("id")) not in fresh_ids]
+        payload = {"steps": [dict(r, refreshed_here=True) for r in index] + carried,
+                   "refreshed_steps": sorted(fresh_ids),
+                   "not_refreshed_here": sorted(str(r.get("id")) for r in carried)}
 
     (steps_root / "index.json").write_text(
-        json.dumps({"steps": index}, indent=2) + "\n")
+        json.dumps(payload, indent=2) + "\n")
 
     # Everything above this line is DERIVED FROM `required_outputs` — it is a
     # restatement of the declaration and cannot witness anything the
@@ -244,17 +282,34 @@ def materialize(project: Path) -> Dict[str, Any]:
     except Exception as exc:                      # noqa: BLE001
         ledger = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
-    return {"steps_root": str(steps_root), "n_steps": len(index),
-            "n_with_outputs": sum(1 for s in index if s["n_outputs"] > 0),
-            "write_ledger": ledger}
+    res: Dict[str, Any] = {
+        "steps_root": str(steps_root), "n_steps": len(index),
+        "n_with_outputs": sum(1 for s in index if s["n_outputs"] > 0),
+        "write_ledger": ledger}
+    if window is not None:
+        res["bounded_to"] = sorted(window)
+        res["n_not_refreshed"] = len(skipped_ids)
+    return res
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("project", type=Path)
     ap.add_argument("--json", type=Path, default=None)
+    ap.add_argument("--only-steps", default=None,
+                    help="Comma-separated canonical step ids: refresh ONLY "
+                         "these steps' folders and carry every other row from "
+                         "the prior index unchanged. For a run that declared "
+                         "--entry-step/--exit-step. Omitted: whole-flow build.")
     a = ap.parse_args(argv)
-    res = materialize(a.project)
+    only = None
+    if a.only_steps:
+        only = {s.strip() for s in a.only_steps.split(",") if s.strip()}
+        if not only:
+            print("REFUSED: --only-steps was given but names no step id",
+                  file=sys.stderr)
+            return 2
+    res = materialize(a.project, only_steps=only)
     txt = json.dumps(res, indent=2)
     if a.json:
         a.json.parent.mkdir(parents=True, exist_ok=True)

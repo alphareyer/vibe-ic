@@ -63,6 +63,21 @@ the source of truth for:
 - § 6 Mandatory RESULT.md sections
 - § 7 Tie-breakers; § 8 re-run obligations
 
+## What a bounded run's exit code answers for
+
+Every solve this harness dispatches carries a window: `_solver_argv` sends
+`--exit-step 2/4/9` or `--entry-step 2`, and all of those prune real dispatch
+sites. With a window, rc reflects the DISPATCHED STEPS ONLY; whole-flow verdicts come from --refresh-only or an unbounded run. A whole-flow phase-2 audit FAIL on such a run would be a verdict
+over the ~69 steps that did not run — the previous run's state re-attributed to
+this one — so a bounded run books it `NOT_APPLICABLE` and says so in its report
+(`declared_window`, `bounded_disclosures`, and the `final_audit` row).
+
+This changes nothing about how a solve is SCORED: the scorer's contract reads the
+report row — `steps[]`, the `rtl_gen` WAIVED row and its `extras.fallback_skill`
+(`benchmark_dispatch._rtl_gen_waive`) — and never the exit code. Measured on a
+benchmark-shaped solve before and after the change: rc 1 both ways, 32 step rows
+both ways, and that row byte-identical.
+
 ## What this harness deliberately does NOT do
 
 - It does NOT clone datasets automatically (you confirm + run `git clone`
