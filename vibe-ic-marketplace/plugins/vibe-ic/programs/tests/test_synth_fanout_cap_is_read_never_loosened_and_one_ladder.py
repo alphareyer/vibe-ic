@@ -201,3 +201,22 @@ def test_an_unread_tier_is_disclosed_in_the_sdc_without_a_drv_block(tmp_path,
     assert "NOT READ" in sdc and "max_fanout UNRESOLVED" in sdc, sdc[-800:]
     assert "TAPEOUT-SIGNOFF (DRV)" not in sdc
     assert "set_max_fanout" not in sdc
+
+
+def test_a_flow_written_sdc_is_read_but_not_called_a_design_declaration(
+        tmp_path, monkeypatch):
+    """MEASURED on arm B (subservient): the resolver returned the FLOW-written
+    phase-2 SDC, and the ledger called it "the design's own staged SDC".
+    Synthesis still reads it (PnR keeps its cap, so the two must agree), but
+    the provenance says who wrote it."""
+    _lib(monkeypatch)
+    _pdk_default(monkeypatch, 10)
+    proj = _proj(tmp_path)
+    flow = proj / "phase2" / "stage2" / "constraints"
+    flow.mkdir(parents=True)
+    (flow / "top.sdc").write_text("set_max_fanout 10 [current_design]\n")
+    monkeypatch.setattr(R, "_resolve_staged_silicon_sdc",
+                        lambda p: flow / "top.sdc")
+    cap, why, _ = R._synth_max_fanout(proj, "gf180mcuD")
+    assert cap == 10, (cap, why)
+    assert "flow-written" in why and "design's own" not in why, why

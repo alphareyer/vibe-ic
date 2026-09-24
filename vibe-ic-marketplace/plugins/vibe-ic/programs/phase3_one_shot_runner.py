@@ -18741,8 +18741,23 @@ def _synth_max_fanout(project: Path, pdk_name: str, liberty_path: str = "",
             _vals = [int(v) for v in _vals if v >= 1]
             if _vals:
                 staged = min(_vals)
-                staged_src = (f"the design's own staged SDC declares "
-                              f"set_max_fanout {staged} ({_st.name})")
+                # WHO WROTE IT. The resolver also returns the FLOW-written
+                # phase-2 SDC when the design stages none (MEASURED on arm B:
+                # phase2/stage2/constraints/subservient.sdc). PnR keeps that
+                # SDC's set_max_fanout too, so synthesis still reads it (the
+                # two must agree) — but it is only called the DESIGN's
+                # declaration when it lives in the design's own input tree.
+                try:
+                    _rel = _st.resolve().relative_to(project.resolve()).as_posix()
+                except ValueError:
+                    _rel = str(_st)
+                if _rel.startswith("input/"):
+                    staged_src = (f"the design's own staged SDC declares "
+                                  f"set_max_fanout {staged} ({_rel})")
+                else:
+                    staged_src = (f"the run's resolved sign-off SDC ({_rel}, "
+                                  f"flow-written — not a design declaration) "
+                                  f"carries set_max_fanout {staged}")
     except Exception as exc:  # noqa: BLE001
         unread.append(f"the design's staged SDC NOT READ "
                       f"({type(exc).__name__}: {exc})")
