@@ -112,6 +112,26 @@ def test_a_zero_count_passes_and_is_recorded_as_the_verdict(tmp_path):
     assert summary["check_placement_violations"] == [["SPARE", 0]]
 
 
+def test_discarded_sdr_child_cannot_fail_final_legal_placement(tmp_path):
+    p = _mk(tmp_path, "INITIAL_DPL_LEGALIZE_OK disp=default",
+            "PNR_PLACEMENT_VIOLATIONS: 0")
+    child = p / "phase3/stage3/pnr/sdr_child_trial.log"
+    child.write_text("SDR_DPL_LEGALIZE_FAILED\n"
+                     "SDR_CHECK_PLACEMENT_VIOLATIONS 12\n")
+    verdict, rc, rules, summary = _run(p)
+    assert (verdict, rc) == ("PASS", 0)
+    assert summary["check_placement_violations"] == [["PNR_FINAL", 0]]
+    assert "LEGALIZER_REPORTED_FAILURE" not in rules
+
+
+def test_final_pnr_placement_violation_still_fails(tmp_path):
+    p = _mk(tmp_path, "PNR_PLACEMENT_VIOLATIONS: 1")
+    verdict, rc, rules, summary = _run(p)
+    assert (verdict, rc) == ("FAIL", 1)
+    assert summary["check_placement_violations"] == [["PNR_FINAL", 1]]
+    assert "CHECK_PLACEMENT_VIOLATIONS" in rules
+
+
 def test_no_record_at_all_is_not_determined_not_a_failure(tmp_path):
     """A run that never recorded the tool's verdict is not thereby illegal —
     but the gate must SAY that legality was not determined rather than let the

@@ -26434,16 +26434,22 @@ _POSTROUTE_TIMING_REPAIR_DECK_STAMP = "# POSTROUTE_TIMING_REPAIR_DECK_GENERATOR:
 
 
 def _repair_deck_fingerprint() -> str:
-    """A digest of `_build_postroute_timing_repair_tcl`'s own source."""
-    import inspect
+    """Digest the emitter and its helpers as one code provenance unit.
+
+    The builder calls shared filler, well-tie and legalization helpers. A
+    helper-only fix must invalidate a deck emitted by the old implementation.
+    Hashing this module also covers indirect helpers without maintaining a
+    fragile hand-written dependency list.
+    """
     try:
-        src = inspect.getsource(_build_postroute_timing_repair_tcl)
-    except (OSError, TypeError):      # frozen / exec'd — cannot fingerprint
+        src = Path(__file__).read_bytes()
+    except OSError:      # frozen / unreadable — cannot fingerprint
         return ""
-    return hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(src).hexdigest()[:16]
 
 
-def _repair_deck_is_stale(deck: Path) -> bool:
+def _repair_deck_is_stale(deck: Path, *, start_def: Optional[str] = None,
+                          output_dir: Optional[str] = None) -> bool:
     """Should this post-route repair deck be re-emitted?
 
     The call site used to ask `if not deck.is_file()` — EXISTENCE standing in
@@ -26469,10 +26475,20 @@ def _repair_deck_is_stale(deck: Path) -> bool:
     if not fp:
         return False        # cannot fingerprint -> keep the old behaviour
     try:
-        head = deck.read_text(errors="replace")[:4096]
+        body = deck.read_text(errors="replace")
     except OSError:
         return True
-    return f"{_POSTROUTE_TIMING_REPAIR_DECK_STAMP}{fp}" not in head
+    if f"{_POSTROUTE_TIMING_REPAIR_DECK_STAMP}{fp}" not in body[:4096]:
+        return True
+    # A copied/resumed run may carry a deck stamped by this same code but
+    # hard-wired to another run's DEF and output directory. Re-emitting is
+    # required even when the generator source itself has not changed.
+    if start_def is not None and f"read_def {start_def}\n" not in body:
+        return True
+    if output_dir is not None and (
+            f"write_def {output_dir}/timing_repaired.def\n" not in body):
+        return True
+    return False
 
 def _build_postroute_timing_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
                           liberty_c: str, pnr_dir_c: str, postroute_timing_repair_dir_c: str,
@@ -57358,7 +57374,12 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     except Exception:
         _repair_captables_c = {}
     repair_tcl_path = postroute_timing_repair_out / "postroute_timing_repair.tcl"
-    if _repair_deck_is_stale(repair_tcl_path):
+    if _repair_deck_is_stale(
+            repair_tcl_path,
+            start_def=(_to_container_path(str(_repair_start_def), container)
+                       if _repair_start_def is not None else None),
+            output_dir=_to_container_path(str(postroute_timing_repair_out),
+                                          container)):
         try:
             _pnr_dir_c = _to_container_path(str(pnr_out), container)
             _postroute_timing_repair_dir_c = _to_container_path(str(postroute_timing_repair_out), container)

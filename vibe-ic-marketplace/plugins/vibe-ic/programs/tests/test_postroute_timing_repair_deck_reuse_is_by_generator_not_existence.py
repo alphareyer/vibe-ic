@@ -56,6 +56,21 @@ def test_a_deck_this_generator_wrote_is_not_re_emitted(tmp_path):
     assert m._repair_deck_is_stale(p) is False
 
 
+def test_copied_run_deck_must_use_this_runs_paths(tmp_path):
+    import inspect
+    p = tmp_path / "postroute_timing_repair.tcl"
+    p.write_text(_deck())
+    def stale(start, out):
+        # Call the pre-fix consumer too: it ignores run paths and returns a
+        # value, rather than making the control fail on an absent argument.
+        if "start_def" not in inspect.signature(m._repair_deck_is_stale).parameters:
+            return m._repair_deck_is_stale(p)
+        return m._repair_deck_is_stale(p, start_def=start, output_dir=out)
+    assert stale("/pnr/post_hold.def", "/postroute_timing_repair") is False
+    assert stale("/other/pnr/post_hold.def", "/postroute_timing_repair") is True
+    assert stale("/pnr/post_hold.def", "/other/postroute_timing_repair") is True
+
+
 def test_a_deck_from_a_different_generator_is_re_emitted(tmp_path):
     p = tmp_path / "postroute_timing_repair.tcl"
     p.write_text(_deck().replace(m._repair_deck_fingerprint(), "0" * 16))
@@ -84,17 +99,16 @@ def test_an_unreadable_deck_is_stale_not_current(tmp_path):
     assert m._repair_deck_is_stale(p) is True
 
 
-def test_the_digest_tracks_the_generator_not_a_hand_bumped_constant():
-    """The stamp must change when the emission logic changes, without anyone
-    remembering to bump it — that forgetting is how the original defect
-    survived. Verified by fingerprinting a modified copy of the source."""
-    import hashlib
-    import inspect
-    src = inspect.getsource(m._build_postroute_timing_repair_tcl)
-    mutated = src.replace("repair_timing", "repair_timing_v2", 1)
-    assert mutated != src, "the mutation did not apply; the check is vacuous"
-    assert (hashlib.sha256(mutated.encode()).hexdigest()[:16]
-            != m._repair_deck_fingerprint())
+def test_a_helper_only_change_invalidates_the_old_deck(tmp_path, monkeypatch):
+    """The emission helper can change while the top-level builder does not."""
+    deck = tmp_path / "postroute_timing_repair.tcl"
+    deck.write_text(_deck())
+    assert m._repair_deck_is_stale(deck) is False
+    source = tmp_path / "phase3_one_shot_runner.py"
+    source.write_bytes(Path(m.__file__).read_bytes())
+    monkeypatch.setattr(m, "__file__", str(source))
+    source.write_bytes(source.read_bytes() + b"\n# helper revision\n")
+    assert m._repair_deck_is_stale(deck) is True
 
 
 def test_the_stamp_carries_no_design_or_pdk_literal():
