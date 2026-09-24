@@ -56,6 +56,10 @@ def _tree(tmp_path: Path, top: str = "spm", *, pnr_tcl: str = _PNR_TCL) -> Path:
     pnr = R._pl.pnr_dir(tmp_path)
     pnr.mkdir(parents=True, exist_ok=True)
     (pnr / f"{top}.def").write_text("DESIGN spm ;\nEND DESIGN\n")
+    # The resize is bounded by the LAYOUT it was spent on, and that layout is
+    # the routed DEF the EM deck reads -- a real project reaching this point
+    # has one.
+    (pnr / __PW._PDN_EM_SUBJECT_DEF).write_text("DESIGN spm ;\nEND DESIGN\n")
     # The bound is one resize PER DESIGN STATE, and the design state is the
     # synthesis netlist digest, so a project fixture must have one -- a real
     # project reaching PnR always does.
@@ -201,7 +205,7 @@ def test_the_sentinel_bounds_the_resize_at_exactly_one_pass(
     # design rather than the tree for ever). Simulate what the caller writes.
     first["sentinel"].write_text(json.dumps(
         {"reason": "pdn_em_first_pass_resize",
-         "design": __PW._pdn_em_design_state(proj), "short": []}))
+         "spent_on_def": __PW._pdn_em_spent_on(proj), "short": []}))
     assert first["sentinel"].name == R._PDN_EM_RESIZE_SENTINEL
     # Same still-short widths -- a counter-free bound must still refuse.
     assert R._pdn_em_first_pass_resize(proj, "spm", object(), "c") is None
@@ -215,7 +219,7 @@ def test_the_bound_holds_even_when_the_second_pass_is_still_short(
     proj = _tree(tmp_path)
     (R._pl.pnr_dir(proj) / R._PDN_EM_RESIZE_SENTINEL).write_text(json.dumps(
         {"reason": "pdn_em_first_pass_resize",
-         "design": __PW._pdn_em_design_state(proj), "short": []}))
+         "spent_on_def": __PW._pdn_em_spent_on(proj), "short": []}))
     assert R._pdn_em_first_pass_resize(proj, "spm", object(), "c") is None
 
 

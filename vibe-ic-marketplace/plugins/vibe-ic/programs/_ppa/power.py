@@ -1628,44 +1628,28 @@ def emit_signoff_record(project: Path, power_rpt: Path, out: Path,
 _PDN_EM_SUBJECT_DEF = "routed.def"
 
 
-def _pdn_em_design_state(project: Path) -> Optional[str]:
-    """The digest of the DESIGN the PDN is being built for.
+def _pdn_em_spent_on(project: Path) -> Optional[str]:
+    """The layout a resize is spent ON — the DEF that was measured.
 
-    THE KEY HAD TO BE THIS, AND NOT THE RUN. The bound is "one EM resize", and
-    the question is one-per-WHAT. Three candidates, and only one works:
+    WHY NOT A DESIGN DIGEST, AND WHY NOT A GLOB. r2 keyed the sentinel on
+    `phase2/stage2/synth/*.v`. Two things were wrong with it: canonicalize ADDS
+    `netlist.v` to that directory after the sentinel is written, so the key
+    moved under the sentinel and it never bound again; and a design digest
+    cannot tell the pass-1 layout from the pass-2 layout, which is the thing
+    the bound is actually about.
 
-      * per TREE (the original): a sentinel nothing ever removes, so the
-        corrector retires for the life of the project. MEASURED on spm run23 --
-        a sentinel dated 2026-09-23 18:50 meant two later runs had no
-        corrector at all.
-      * per RUN (an earlier draft of this fix): restores the corrector, but a
-        run that crashes after the second PnR and is resumed in the same tree
-        sees a foreign sentinel and can dispatch a THIRD PnR -- breaking the
-        promise "a crashed second pass cannot buy a third".
-      * per DESIGN STATE (this): the synthesis netlist is STABLE across the
-        passes of one run, so a crash-resume finds the sentinel still matching
-        and buys nothing; and it CHANGES when the design does, so the corrector
-        is never retired.
+    The DEF the resize measured answers all four cases directly:
 
-    None when no netlist can be read — the caller then treats the bound as
-    unspent, because a sentinel that cannot be matched to a design cannot be
-    shown to bound this one.
+        fresh run      pass 1 writes a NEW DEF -> the old sentinel names a
+                       different one -> does not bind -> corrector fires.
+        cache-hit      the DEF is unchanged; if it already meets the floor the
+                       resize returns None on the WIDTH comparison anyway, so
+                       the bound is not what stops it.
+        netlist change PnR re-runs, new DEF, new resize. Correct.
+        crash-resume   pass 2 never wrote its DEF, so the DEF on disk is still
+                       the one the sentinel names -> BINDS -> no third pass.
     """
-    try:
-        cands = sorted((project / "phase2" / "stage2" / "synth").glob("*.v"))
-    except OSError:
-        return None
-    h = hashlib.sha256()
-    found = False
-    for c in cands:
-        try:
-            h.update(c.name.encode())
-            h.update(c.read_bytes())
-            found = True
-        except OSError:
-            continue
-    return h.hexdigest() if found else None
-
+    return _pdn_em_subject_digest(project)
 
 def _pdn_em_sentinel_binds(sentinel: Path,
                            project: Path) -> Tuple[bool, str]:
@@ -1683,17 +1667,18 @@ def _pdn_em_sentinel_binds(sentinel: Path,
     except (OSError, ValueError):
         return False, ("the sentinel could not be read, so it cannot be shown "
                        "to bound this design; the resize is not spent")
-    recorded = doc.get("design") if isinstance(doc, Mapping) else None
+    recorded = doc.get("spent_on_def") if isinstance(doc, Mapping) else None
     if not isinstance(recorded, str) or not recorded:
-        return False, ("the sentinel names no design state (written before "
-                       "this rule), so it cannot be shown to bound this one")
-    now = _pdn_em_design_state(project)
+        return False, ("the sentinel names no layout (written before this "
+                       "rule), so it cannot be shown to bound this pass")
+    now = _pdn_em_spent_on(project)
     if now is None:
-        return False, ("this design's synthesis netlist could not be read, so "
-                       "the sentinel cannot be matched to it")
+        return False, ("the routed DEF could not be read, so the sentinel "
+                       "cannot be matched to a layout")
     if recorded == now:
-        return True, "this design has already spent its one EM resize"
-    return False, (f"the sentinel was spent on another design state "
+        return True, ("the resize for this layout is already spent (a resumed "
+                      "run cannot buy a second re-PnR)")
+    return False, (f"the sentinel was spent on another layout "
                    f"({recorded[:12]}…, now {now[:12]}…)")
 
 

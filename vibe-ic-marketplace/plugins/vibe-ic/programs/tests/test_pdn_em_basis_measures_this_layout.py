@@ -88,64 +88,70 @@ def _sentinel(project: Path, payload) -> Path:
     return s
 
 
-def test_this_designs_own_sentinel_binds(tmp_path):
+def test_this_layouts_own_sentinel_binds(tmp_path):
     """THE CONTRACT. One resize per design state — a resume in the same tree,
     or any later pass over the same design, buys nothing."""
-    proj = _design(tmp_path)
+    proj = tmp_path / "p"
+    _layout(proj)
     s = _sentinel(proj, {"reason": "pdn_em_first_pass_resize",
-                         "design": PW._pdn_em_design_state(proj), "short": []})
+                         "spent_on_def": PW._pdn_em_spent_on(proj), "short": []})
     binds, why = PW._pdn_em_sentinel_binds(s, proj)
     assert binds is True, why
 
 
-def test_a_sentinel_spent_on_another_design_does_not_bind(tmp_path):
+def test_a_sentinel_spent_on_another_layout_does_not_bind(tmp_path):
     """THE DEFECT. A sentinel nothing removes retired the corrector for the
     life of the tree, whatever the design became."""
-    proj = _design(tmp_path)
+    proj = tmp_path / "p"
+    _layout(proj)
     s = _sentinel(proj, {"reason": "pdn_em_first_pass_resize",
-                         "design": "0" * 64, "short": []})
+                         "spent_on_def": "0" * 64, "short": []})
     binds, why = PW._pdn_em_sentinel_binds(s, proj)
     assert binds is False
-    assert "another design state" in why
+    assert "another layout" in why
 
 
-def test_the_design_state_actually_tracks_the_design(tmp_path):
+def test_the_key_tracks_the_layout(tmp_path):
     """A key that never changes is a tree key wearing a different name."""
-    proj = _design(tmp_path, b"module spm; endmodule\n")
-    before = PW._pdn_em_design_state(proj)
-    _design(proj, b"module spm; wire w; endmodule\n")
-    after = PW._pdn_em_design_state(proj)
-    assert before and after and before != after
+    proj = tmp_path / "p"
+    before = _layout(proj, b"DESIGN chip_top ; # pass 1\n")
+    _layout(proj, b"DESIGN chip_top ; # pass 2 re-routed\n")
+    assert PW._pdn_em_spent_on(proj) != before
 
 
-def test_the_design_state_is_stable_across_passes_of_one_run(tmp_path):
-    """The half that keeps a crash-resume from buying a third PnR: PnR does not
-    rewrite the synthesis netlist, so the key does not move between passes."""
-    proj = _design(tmp_path)
-    first = PW._pdn_em_design_state(proj)
-    _layout(proj, b"DESIGN chip_top ; # pass 2 wrote a new DEF\n")
-    assert PW._pdn_em_design_state(proj) == first
+def test_a_crash_resume_cannot_buy_a_second_re_pnr(tmp_path):
+    """Pass 2 never wrote its DEF, so the layout on disk is still the one the
+    sentinel names — and the bound must hold."""
+    proj = tmp_path / "p"
+    _layout(proj, b"DESIGN chip_top ; # pass 1\n")
+    s = _sentinel(proj, {"reason": "pdn_em_first_pass_resize",
+                         "spent_on_def": PW._pdn_em_spent_on(proj)})
+    binds, why = PW._pdn_em_sentinel_binds(s, proj)
+    assert binds is True, why
 
 
 def test_a_legacy_sentinel_naming_no_design_does_not_bind(tmp_path):
     """Migration, and it is the case run23 was found in: every sentinel already
     on disk predates this rule. Reading it as binding would leave those trees
     permanently un-corrected."""
-    proj = _design(tmp_path)
+    proj = tmp_path / "p"
+    _layout(proj)
     s = _sentinel(proj, {"reason": "pdn_em_first_pass_resize", "short": []})
     binds, why = PW._pdn_em_sentinel_binds(s, proj)
     assert binds is False
-    assert "names no design state" in why
+    assert "names no layout" in why
 
 
 def test_an_unreadable_sentinel_does_not_bind(tmp_path):
-    proj = _design(tmp_path)
+    proj = tmp_path / "p"
+    _layout(proj)
     binds, why = PW._pdn_em_sentinel_binds(_sentinel(proj, "{ not json"), proj)
     assert binds is False and "could not be read" in why
 
 
 def test_no_sentinel_does_not_bind(tmp_path):
-    proj = _design(tmp_path)
+    proj = tmp_path / "p"
+    _layout(proj)
     binds, _ = PW._pdn_em_sentinel_binds(R._pl.pnr_dir(proj) / "absent", proj)
     assert binds is False
 
@@ -156,7 +162,7 @@ def test_the_writer_records_the_design_it_spent_the_resize_on():
     src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
     i = src.find('"reason": "pdn_em_first_pass_resize"')
     assert i > 0, "the sentinel write site moved; this test must follow it"
-    assert '"design": _ppa_power._pdn_em_design_state(project)' in src[i:i + 500], (
+    assert '"spent_on_def": _ppa_power._pdn_em_spent_on(project)' in src[i:i + 500], (
         "the sentinel is written without a design tag, so it will bound every "
         "future run in this tree")
 
@@ -293,3 +299,51 @@ def test_a_stale_basis_derives_no_floor_and_discloses_the_precise_gap(
     assert rec["derived"] is False
     assert "power_budget_uw" in rec["declared_budget_gap"]
     assert any("em.json" in s for s in rec["declined_stale_sources"])
+
+
+# ---------------------------------------------------------------------------
+# r3 item 1 — a subject match is not enough when the subject is about to go
+# ---------------------------------------------------------------------------
+def test_a_matching_measurement_is_declined_when_pnr_will_replace_the_layout(
+        tmp_path, capsys, monkeypatch):
+    """THE DEFECT r2 STILL HAD. `step_pnr` runs only when the PnR cache was
+    REJECTED, so the routed DEF on disk is about to be replaced. A measurement
+    of it matches by digest and is STILL the previous layout's current — which
+    is how run23 drifted 2.900e-03 -> 2.600e-03 -> 2.860e-03 on an unchanged
+    design while every subject check looked satisfied.
+    """
+    proj = _l19(tmp_path / "p", {"power_budget_uw": None})
+    sha = _layout(proj)
+    _em_json(proj, sha)                       # matches the layout, exactly
+    monkeypatch.setattr(R, "_pdk_nominal_voltage", lambda pdk, c=None: 5.0)
+
+    assert R._pdn_em_width_floor(proj, _Pdk(), None,
+                                 layout_will_be_replaced=True) is None
+    err = capsys.readouterr().err
+    assert "about to replace" in err, err
+    assert "PDN_EM_FLOOR_NOT_DERIVED" in err, err
+
+
+def test_the_same_measurement_is_ACCEPTED_when_the_layout_stays(tmp_path,
+                                                                capsys):
+    """THE PAIRED HALF. On a cache hit the layout is not replaced and the
+    measurement describes it, so refusing it would discard an accurate number
+    and republish the record as NOT_DERIVED for a DEF that WAS floored."""
+    proj = _l19(tmp_path / "p", {"power_budget_uw": None})
+    sha = _layout(proj)
+    _em_json(proj, sha)
+
+    R._pdn_em_width_floor(proj, _Pdk(), None, layout_will_be_replaced=False)
+
+    err = capsys.readouterr().err
+    assert "PDN_EM_FLOOR_NOT_DERIVED" not in err, (
+        "a measurement of the layout that STAYS was refused\n" + err)
+
+
+def test_step_pnr_passes_the_flag():
+    """The flag only defends anything if the one caller that replaces the
+    layout actually sets it."""
+    src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
+    assert "layout_will_be_replaced=True" in src, (
+        "step_pnr no longer tells the floor that it is about to re-route, so "
+        "the previous layout's current is back in the basis")

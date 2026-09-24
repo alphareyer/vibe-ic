@@ -6779,7 +6779,8 @@ def _pdn_em_measured_subject(project: Path, rpt3: Path) -> Dict[str, Any]:
 
 
 def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
-                        container: Optional[str] = None
+                        container: Optional[str] = None,
+                        layout_will_be_replaced: bool = False
                         ) -> Optional[Dict[str, Any]]:
     """#1215-PDN — DERIVE the per-layer minimum PDN strap width from the
     PDK's own Jmax and the design's MEASURED supply current. Never tuned.
@@ -6849,7 +6850,21 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
     # ONE subject question for the whole EM family: em.rpt, em.json and
     # em_current_authority.json are all products of the same measurement pass,
     # so they stand or fall together on WHICH LAYOUT that pass measured.
-    _measures_now, _subject_why = _ppa_power._pdn_em_measures_this_layout(rpt3, project)
+    _measures_now, _subject_why = _ppa_power._pdn_em_measures_this_layout(
+        rpt3, project)
+    # A SUBJECT MATCH IS NOT ENOUGH WHEN THE SUBJECT IS ABOUT TO BE DISCARDED.
+    # `step_pnr` runs only when the PnR cache was REJECTED, so reaching it
+    # means the routed DEF on disk is about to be replaced. A measurement of
+    # that DEF matches it by digest and is still the PREVIOUS layout's current
+    # -- which is how run23's drift survived a subject check that looked right:
+    # 2.900e-03 -> 2.600e-03 -> 2.860e-03 on an unchanged design. Declining it
+    # here makes pass 1 floorless and therefore DETERMINISTIC, which is exactly
+    # what a clean slate does; the corrector then measures THIS run's own pass-1
+    # layout and re-dispatches once with a floor derived from it.
+    if layout_will_be_replaced and _measures_now:
+        _measures_now = False
+        _subject_why = ("it measures the layout this PnR is about to replace, "
+                        "so it is the previous layout's current")
     auth_json = rpt3 / "em_current_authority.json"
     # An authority derived from another layout is not this layout's current.
     if auth_json.exists() and not _measures_now:
@@ -34357,7 +34372,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # project's own prior measurement + the PDK's own Jmax; None on a first
     # pass (no measurement yet) keeps the PDN byte-identical. NONFATAL.
     try:
-        _pdn_em_floor = _pdn_em_width_floor(project, pdk, container)
+        _pdn_em_floor = _pdn_em_width_floor(
+            project, pdk, container, layout_will_be_replaced=True)
     except Exception as _em_exc:  # pragma: no cover - defensive
         print(f"[phase3] PDN EM floor derivation skipped (nonfatal): {_em_exc}")
         _pdn_em_floor = None
@@ -65998,7 +66014,7 @@ def main() -> int:
                                     # Without it the sentinel bounds every
                                     # future run in this tree, not just the
                                     # passes that build this design.
-                                    "design": _ppa_power._pdn_em_design_state(project),
+                                    "spent_on_def": _ppa_power._pdn_em_spent_on(project),
                                     "short": _rz["short"]}, indent=2) + "\n")
                 except OSError:
                     pass
