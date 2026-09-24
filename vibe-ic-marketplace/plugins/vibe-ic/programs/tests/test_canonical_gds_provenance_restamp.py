@@ -124,9 +124,21 @@ def _step37_fixed(project: Path, top: str) -> None:
     primary_gds = project / "phase3" / "stage3" / "pnr" / f"{top}.gds"
     canon_gds = project / "phase3" / "stage4" / "gds" / f"{top}.gds"
     if primary_gds.is_file() and not canon_gds.is_file():
-        # 2026-09-24 (lane ictier1, reemit r2): a back-fill re-declares changed bytes only with evidence this pass wrote them (`_redeclaration_evidence`). The fixture now supplies the evidence the production call site does; the assertions are unchanged.
-        # Production passes writer= from the copy just below.
+        # 2026-09-24 (lane ictier1, reemit r3; review wo6zpfboe, design
+        # approved): a re-declaration is credited only on the chain from the
+        # INPUT's own declaration. In production the stream-out declared the
+        # primary GDS it wrote (outputs=[gds_out]) before Step 37 runs; that
+        # record is added here, and writer= is passed from the copy below.
+        with (project / "provenance.jsonl").open("a") as _f:
+            _f.write(json.dumps({
+                "record": "invocation", "tool": "klayout",
+                "command": "klayout streamout (phase3_one_shot_runner step_gds)",
+                "exit_code": 0, "timestamp": "2026-01-01T00:00:10Z",
+                "outputs": {f"phase3/stage3/pnr/{top}.gds": "sha256:"
+                            + hashlib.sha256(primary_gds.read_bytes())
+                            .hexdigest()}}) + "\n")
         _t_copy = time.time()
+        _src_sha = "sha256:" + hashlib.sha256(primary_gds.read_bytes()).hexdigest()
         with primary_gds.open("rb") as src, canon_gds.open("wb") as dst:
             while True:
                 chunk = src.read(1 << 20)
@@ -135,7 +147,8 @@ def _step37_fixed(project: Path, top: str) -> None:
                 dst.write(chunk)
         # call the REAL helper from phase3_one_shot_runner — mutations here kill
         _restamp(project, top, canon_gds,
-                 writer=("canonicalize_artefacts", _t_copy))
+                 writer=("canonicalize_artefacts", _t_copy, primary_gds,
+                         _src_sha))
 
 
 # ── (a) DEFECT DIRECTION ──────────────────────────────────────────────────────
@@ -364,6 +377,15 @@ def _rerun_project(tmp_path: Path, top: str = "chip_top") -> tuple:
     (pnr / f"{top}.gds").write_bytes(b"\x00\x06\x00\x02THIS-DESIGN"
                                      + b"\x22" * 400)
     os.utime(pnr / f"{top}.gds", None)
+    # 2026-09-24 (lane ictier1, reemit r3; review wo6zpfboe, design approved): evidence comes from the PRODUCER -- a re-declaration is credited only on the chain (the bytes a transform read equal the newest declared sha of its input). This fixture supplies what the production flow has: the producer's own record, and the chained writer.
+    # Run N's stream-out declares the bytes it wrote, as step_gds does.
+    with (project / "provenance.jsonl").open("a") as _f:
+        _f.write(json.dumps({
+            "record": "invocation", "tool": "klayout",
+            "command": "klayout streamout (phase3_one_shot_runner step_gds)",
+            "exit_code": 0, "timestamp": "2026-09-24T00:00:00Z",
+            "outputs": {f"phase3/stage3/pnr/{top}.gds": "sha256:" + hashlib.sha256(
+                (pnr / f"{top}.gds").read_bytes()).hexdigest()}}) + "\n")
     # The in-place refresh loop of step_canonicalize_artefacts runs HERE, before
     # Step 37. It re-hashes whatever is on disk AT THAT MOMENT: the stream-out
     # (correctly, to this design) and the stage4 alias (still the PREVIOUS
@@ -432,11 +454,12 @@ def test_fixed_direction_rerun_stale_refresh_is_restamped(
     overwritten by it."""
     project, primary, canon = _rerun_project(tmp_path)
     before = (project / "provenance.jsonl").read_text().splitlines()
-    # 2026-09-24 (lane ictier1, reemit r2): a back-fill re-declares changed bytes only with evidence this pass wrote them (`_redeclaration_evidence`). The fixture now supplies the evidence the production call site does; the assertions are unchanged.
+    # 2026-09-24 (lane ictier1, reemit r3; review wo6zpfboe, design approved): evidence comes from the PRODUCER -- a re-declaration is credited only on the chain (the bytes a transform read equal the newest declared sha of its input). This fixture supplies what the production flow has: the producer's own record, and the chained writer.
     _t_copy = time.time()
+    _src_sha = "sha256:" + hashlib.sha256(primary.read_bytes()).hexdigest()
     _real_step37_copy(primary, canon)
     _restamp(project, "chip_top", canon,
-             writer=("canonicalize_artefacts", _t_copy))
+             writer=("canonicalize_artefacts", _t_copy, primary, _src_sha))
 
     prov_lines = [l for l in (project / "provenance.jsonl")
                   .read_text().splitlines() if l.strip()]

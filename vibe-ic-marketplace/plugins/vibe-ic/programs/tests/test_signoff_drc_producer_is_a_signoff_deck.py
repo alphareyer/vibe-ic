@@ -478,22 +478,41 @@ def test_attribution_is_corrected_in_place_when_the_artefact_changes(tmp_path):
     proj = project(tmp_path, signoff_alias("pnr/routed.drc.rpt", "openroad",
                                            router_projection(0)))
     assert runner._v1_6_620_append_pv_signoff_provenance(proj, "top")
-    # 2026-09-24 (lane ictier1, reemit r2): a back-fill re-declares changed bytes only with evidence this pass wrote them (`_redeclaration_evidence`). The fixture now supplies the evidence the production call site does; the assertions are unchanged.
-    # Production: the SVRF refresh is written by step_canonicalize_artefacts,
-    # which registers its writes before calling the back-fill.
-    _t = time.time()
-    (proj / "reports" / "phase3" / "drc_signoff.rpt").write_text(
-        signoff_alias("reports/drc_svrf.rpt", "svrfdrc", svrf_report(0, 40)))
-    runner._register_pass_outputs(
-        "canonicalize_artefacts", "PASS", 0.0,
-        [str(proj / "reports" / "phase3" / "drc_signoff.rpt")], since=_t)
+    # 2026-09-24 (lane ictier1, reemit r3; review wo6zpfboe, design approved):
+    # the sign-off back-fill observes and never re-declares CHANGED bytes. The
+    # SVRF force-refresh is written by step_canonicalize_artefacts' alias
+    # writer through `_declared_transform_exec`, chained to the SVRF report the
+    # svrfdrc run declared -- that write is what makes the ledger follow the
+    # artefact now, so the back-fill that follows has nothing left to add.
+    # Asserted: the ledger follows (tools, newest record, step 31 PASSes);
+    # changed: the follow is the transform's record (producing_step), not the
+    # back-fill's (`again`, `supersedes`).
+    rpt3 = proj / "reports" / "phase3"
+    src = proj / "reports" / "drc_svrf.rpt"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text(svrf_report(0, 40))
+    with (proj / "provenance.jsonl").open("a") as f:
+        f.write(json.dumps({"record": "invocation", "tool": "svrfdrc",
+                            "command": "svrfdrc run", "exit_code": 0,
+                            "timestamp": "2026-09-24T00:00:00Z",
+                            "outputs": {"reports/drc_svrf.rpt":
+                                        "sha256:" + hashlib.sha256(
+                                            src.read_bytes()).hexdigest()}})
+                + "\n")
+    runner._declared_transform_exec(
+        proj, rpt3 / "drc_signoff.rpt", "canonicalize_artefacts:drc_alias",
+        "svrfdrc", "sign-off DRC alias of drc_svrf.rpt",
+        lambda: (rpt3 / "drc_signoff.rpt").write_text(signoff_alias(
+            "reports/drc_svrf.rpt", "svrfdrc", svrf_report(0, 40))),
+        input_path=src)
     again = runner._v1_6_620_append_pv_signoff_provenance(proj, "top")
-    assert again == ["reports/phase3/drc_signoff.rpt"], (
-        "the ledger did not follow the artefact")
+    assert again == [], again
     entries = [json.loads(l) for l in
                (proj / "provenance.jsonl").read_text().splitlines() if l.strip()]
-    assert [e["tool"] for e in entries] == ["openroad", "svrfdrc"]
-    assert entries[-1]["supersedes"]["tool"] == "openroad"
+    drc = [e for e in entries
+           if "reports/phase3/drc_signoff.rpt" in (e.get("outputs") or {})]
+    assert [e["tool"] for e in drc] == ["openroad", "svrfdrc"]
+    assert drc[-1]["producing_step"] == "canonicalize_artefacts:drc_alias"
     assert prov(proj, "klayout,magic,svrfdrc")[0] == 0
 
 
