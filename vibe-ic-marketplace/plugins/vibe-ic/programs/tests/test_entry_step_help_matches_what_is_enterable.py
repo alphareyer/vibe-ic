@@ -29,7 +29,8 @@ import step_preflight as spf              # noqa: E402
 import vibe_ic_one_shot_runner as runner  # noqa: E402
 
 PHASE12_STEPS = ['D1', '2', '4', '9', '11']
-ELSEWHERE_STEPS = ['15', '31', '37', 'A1']
+PHASE3_STEPS = ['15', '31', '37']
+ELSEWHERE_STEPS = ['A1']
 
 
 def help_text():
@@ -62,25 +63,16 @@ def _observe(tmp_path, step):
 def test_the_help_describes_the_entries_the_CLI_actually_accepts(tmp_path):
     """The load-bearing test, and it depends on NOTHING this fix introduced: it
     compares the shipped help text against the CLI's OBSERVED accept/refuse
-    behaviour. On the pre-fix code the help says Phase-3 steps route here and
-    the CLI refuses them, so this fails for exactly the reason the defect is a
-    defect."""
+    behaviour for each runner class."""
     txt = help_text()
     refused = [s for s in ELSEWHERE_STEPS if not _observe(tmp_path, s)]
     accepted = [s for s in PHASE12_STEPS if _observe(tmp_path, s)]
-    assert refused, 'expected the Phase-3/analog steps to be refused here'
+    assert refused, 'expected analog steps to be refused here'
     assert accepted, 'expected the Phase-1/2 steps to be accepted here'
-    # Whatever the help says, it must not present a REFUSED step as one this
-    # orchestrator routes.
-    routes_claim = re.search(r'routes to that runner', txt)
-    assert routes_claim is None or 'REFUSED' in txt, (
-        f'help claims it routes to the owning runner but {refused} are refused '
-        f'and no refusal is disclosed: {txt}')
-    for step in refused:
-        seg = re.search(r'(Phase-3[^.]*\.|analog[^.]*\.)', txt)
-        assert 'REFUSED' in txt, (
-            f'step {step} is refused by the CLI but the help does not say so: '
-            f'{txt}')
+    assert re.search(r'Analog \(A1\.\.A9\).*?REFUSED', txt), txt
+    for step in PHASE3_STEPS:
+        assert _observe(tmp_path, step), f'Phase-3 step {step} was refused'
+    assert re.search(r'Phase-3 \(15/31/37\).*?--exit-step', txt), txt
 
 
 def test_every_step_the_help_calls_enterable_really_is():
@@ -103,26 +95,24 @@ def test_a_step_this_orchestrator_refuses_is_disclosed_as_refused_in_the_help():
 
 
 def test_the_help_does_not_promise_that_a_refused_step_routes():
-    """The exact defect: the old help said the orchestrator 'routes to that
-    runner' for 15/31/37 and A1..A9. It must not claim that for a step the
-    guard rejects."""
+    """Every named class in help must agree with the runner ownership guard."""
     txt = help_text()
-    m = re.search(r'Phase-3 \(([^)]*)\)', txt)
-    assert m, f'the help must name the Phase-3 steps it refuses: {txt}'
-    for step in re.findall(r'\d+', m.group(1)):
-        assert spf.runner_for_step(step) not in \
-            runner.ENTRY_STEP_ENTERABLE_RUNNERS, (
-            f'step {step} is listed as refused but the guard accepts it')
+    for step in PHASE3_STEPS:
+        assert spf.runner_for_step(step) in runner.ENTRY_STEP_ENTERABLE_RUNNERS
+    for step in ELSEWHERE_STEPS:
+        assert spf.runner_for_step(step) not in runner.ENTRY_STEP_ENTERABLE_RUNNERS
+    assert re.search(r'Phase-3 \(15/31/37\).*?--exit-step', txt), txt
+    assert re.search(r'Analog \(A1\.\.A9\).*?REFUSED', txt), txt
 
 
-def test_BEHAVIOUR_a_phase3_entry_is_refused_with_the_exact_code(tmp_path):
+def test_BEHAVIOUR_a_phase3_entry_requires_a_bounded_exit(tmp_path):
     (tmp_path / 'input').mkdir()
     res = subprocess.run(
         [sys.executable, str(RUNNER), str(tmp_path), '--entry-step', '15',
          '--no-dashboard', '--skip-hardware'],
         capture_output=True, text=True)
     assert res.returncode == 2, (res.stdout, res.stderr)
-    assert 'REFUSED' in res.stderr
+    assert 'needs --exit-step' in res.stderr
 
 
 def test_CONTROL_a_phase1_entry_is_not_refused_by_this_guard(tmp_path):

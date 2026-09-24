@@ -1289,11 +1289,8 @@ def _line_buffer_own_stream() -> None:
 
 
 #: The runners THIS orchestrator can start a run inside. A step owned by any
-#: other runner is refused by `--entry-step` (see the guard in main()), so this
-#: tuple is the single source of truth for BOTH the refusal and the help text —
-#: they drifted apart once (the help advertised Phase-3 15/31/37 and analog
-#: A1..A9 as routable while the guard refused every one of them), and a reader
-#: has no way to tell which half is lying.
+#: other runner is refused by `--entry-step` (see the guard in main()).
+#: Phase 3 additionally requires an exit step to bound its dispatch.
 ENTRY_STEP_ENTERABLE_RUNNERS = ("phase1_one_shot_runner",
                                 "design_one_shot_runner",
                                 "phase3_one_shot_runner")
@@ -1324,22 +1321,24 @@ def main() -> int:
     p.add_argument("--entry-step", default=None,
                    help="START the flow at this canonical step id. The step "
                         "decides WHICH runner owns the entry, and THIS "
-                        "orchestrator can be entered at the Phase 1 and Phase "
-                        "2 spans only — D1 for Phase 1, 2/4/1/9/11 for Phase "
-                        "2. Phase-3 (15/31/37) and analog (A1..A9) steps are "
-                        "owned by phase3_one_shot_runner / "
+                        "orchestrator can be entered at D1 for Phase 1, "
+                        "2/4/1/9/11 for Phase 2, and Phase-3 (15/31/37) "
+                        "with --exit-step for a bounded backend window. "
+                        "Analog (A1..A9) steps are owned by "
                         "analog_one_shot_runner and are REFUSED here: run "
                         "that runner directly. Only a step that HEADS a "
                         "dispatch span is enterable; a mid-span step is "
                         "refused rather than approximated. With a window, rc reflects the DISPATCHED STEPS ONLY; whole-flow verdicts come from --refresh-only or an unbounded run.")
     p.add_argument("--exit-step", default=None,
-                   help="STOP the Phase-2 dispatch after this canonical step "
-                        "id: forwarded verbatim to the phase2 runner, whose "
-                        "dispatch sites wholly past it are recorded as "
-                        "SKIPPED-BY-EXIT instead of run (the site holding "
-                        "the exit still runs in full). Omitted: behaviour is "
-                        "unchanged. Pair with --skip-phase3 when the exit "
-                        "precedes physical design. With a window, rc reflects the DISPATCHED STEPS ONLY; whole-flow verdicts come from --refresh-only or an unbounded run.")
+                   help="STOP dispatch after this canonical step id. Phase-2 "
+                        "exits are forwarded to the phase2 runner; Phase-3 "
+                        "entries require an exit and are forwarded to the "
+                        "phase3 runner as a bounded backend window. Sites "
+                        "wholly past the exit are SKIPPED-BY-EXIT (the site "
+                        "holding the exit still runs in full). Omitted: "
+                        "unbounded behavior. With a window, rc reflects the "
+                        "DISPATCHED STEPS ONLY; whole-flow verdicts come from "
+                        "--refresh-only or an unbounded run.")
     p.add_argument("--skip-phase1", action="store_true")
     p.add_argument("--skip-analog", action="store_true")
     p.add_argument("--skip-phase3", action="store_true")
@@ -1575,9 +1574,8 @@ def main() -> int:
                   file=sys.stderr)
             return 2
         if _entry_runner not in ENTRY_STEP_ENTERABLE_RUNNERS:
-            # Phase-3 and analog entries are NOT wired here yet. Say so rather
-            # than routing to the nearest phase and reporting as if it were what
-            # was asked.
+            # Entries owned by other runners are not wired here. Say so rather
+            # than routing to the nearest phase.
             print(f"REFUSED: step {args.entry_step!r} is owned by "
                   f"{_entry_runner}, which this orchestrator cannot yet be "
                   f"entered at. Run that runner directly, or enter at a Phase "

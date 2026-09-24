@@ -44,12 +44,13 @@ def _drive_main(monkeypatch, project: Path, argv_extra, need_analog: bool):
     Returns a dict {phase_label: args_list} of the argv each child phase
     runner was invoked with, plus the captured "analog ran?" flag.
     """
-    captured = {"phase_args": {}, "analog_ran": False}
+    captured = {"phase_args": {}, "analog_ran": False, "events": []}
 
     def fake_run_phase(label, runner, args, env=None):
         # #588 — _run_phase gained an env= kwarg (re-entrancy token);
         # the stub accepts and ignores it.
         captured["phase_args"][runner.name] = list(args)
+        captured["events"].append(runner.name)
         if runner.name.startswith("analog"):
             captured["analog_ran"] = True
         return 0  # pretend every child phase succeeded
@@ -60,6 +61,7 @@ def _drive_main(monkeypatch, project: Path, argv_extra, need_analog: bool):
         return {"verdict": "PASS"}
 
     def fake_need_analog(_project, force_skip):
+        captured["events"].append("analog_decision")
         if force_skip:
             return False
         return need_analog
@@ -167,32 +169,32 @@ def test_skip_analog_appears_once(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# DECISION ORDERING: the analog decision must be computed BEFORE phase2 so it
-# can feed the phase2 argv. We pin this structurally on the source.
+# DECISION ORDERING: observe the real main() path for both applicability values
+# and both explicit-skip values. The decision must feed Phase 2's argv.
 # ---------------------------------------------------------------------------
-def test_analog_decision_precedes_phase2_in_source():
-    src = (Path(__file__).resolve().parents[1]
-           / "vibe_ic_one_shot_runner.py").read_text()
-    idx_decision = src.find("run_analog = _need_analog(")
-    idx_phase2 = src.find("# ---------------- Phase 2 ----------------")
-    assert idx_decision != -1, "run_analog single-source decision must exist"
-    assert idx_phase2 != -1
-    assert idx_decision < idx_phase2, (
-        "run_analog must be decided BEFORE the Phase 2 block so it can feed "
-        "phase2's --skip-analog forwarding (#459)")
-    # The phase2 forwarding must consult the orchestrator's own decision:
-    # the auto-injection branch keys off `not run_analog` (the #459 fix).
-    assert "elif not run_analog:" in src, (
-        "phase2 must inject --skip-analog when _need_analog()==False "
-        "(auto-injection branch missing)")
-    # Back-compat anchors required by the prior forwarding regression test.
-    assert "if args.skip_analog:" in src
-    assert 'p2_args.append("--skip-analog")' in src
-    # Analog A-track must dispatch off the SAME single decision. GAP-ANALOG-1
-    # relaxed the halt gate so an analog IC's EXPECTED digital phase2 FAIL
-    # (rtl_gen=null) no longer skips its own A-track; the condition tolerates a
-    # phase2 halt but still excludes a phase1 halt (no L5_ADI_SPEC).
-    assert 'run_analog and halted_at in ("", "phase2")' in src
+@pytest.mark.parametrize("need_analog", [False, True])
+@pytest.mark.parametrize("explicit_skip", [False, True])
+@pytest.mark.parametrize("run_phase1", [False, True])
+def test_analog_decision_precedes_phase2_in_source(
+        tmp_path, monkeypatch, need_analog, explicit_skip, run_phase1):
+    project = _empty_project(tmp_path)
+    flags = ["--skip-phase3", "--no-dashboard"]
+    if run_phase1:
+        (project / "input").mkdir()
+        (project / "input" / "phase1_prompt.md").write_text("A generic block")
+    else:
+        flags.append("--skip-phase1")
+    if explicit_skip:
+        flags.append("--skip-analog")
+    cap = _drive_main(monkeypatch, project, flags, need_analog)
+    events = cap["events"]
+    assert ("phase1_one_shot_runner.py" in events) == run_phase1, events
+    assert events.count("analog_decision") == 1, events
+    assert events.index("analog_decision") < events.index(
+        "phase2_one_shot_runner.py"), events
+    p2 = cap["phase_args"]["phase2_one_shot_runner.py"]
+    assert ("--skip-analog" in p2) == (explicit_skip or not need_analog)
+    assert cap["analog_ran"] == (need_analog and not explicit_skip)
 
 
 if __name__ == "__main__":
@@ -254,14 +256,22 @@ def test_analog_track_runs_despite_phase2_digital_fail(tmp_path, monkeypatch):
         "(rtl_gen=null FAIL is the EXPECTED digital outcome for an analog IC)")
 
 
-def test_analog_dispatch_condition_excludes_phase1_halt():
-    """NEGATIVE no-leak (source): the analog-dispatch condition tolerates a
-    phase2 halt but NOT a phase1 halt (a phase1 FAIL means no L5_ADI_SPEC, which
-    the A-track needs) — `halted_at in ("", "phase2")` excludes "phase1"."""
-    src = (Path(__file__).resolve().parents[1]
-           / "vibe_ic_one_shot_runner.py").read_text()
-    assert 'run_analog and halted_at in ("", "phase2")' in src
-    assert '"phase1"' not in 'run_analog and halted_at in ("", "phase2")'
+@pytest.mark.parametrize("need_analog", [False, True])
+@pytest.mark.parametrize("skip_phase3", [False, True])
+def test_analog_dispatch_condition_excludes_phase1_halt(
+        tmp_path, monkeypatch, need_analog, skip_phase3):
+    """A Phase-1 failure blocks Phase 2 and analog on every backend shape."""
+    project = _empty_project(tmp_path)
+    (project / "input").mkdir()
+    (project / "input" / "phase1_prompt.md").write_text("A generic block")
+    flags = ["--skip-hardware", "--no-dashboard"]
+    if skip_phase3:
+        flags.append("--skip-phase3")
+    cap = _drive_main_verdicts(
+        monkeypatch, project, argv_extra=flags,
+        need_analog=need_analog, verdicts={"phase1": "FAIL"})
+    assert cap["order"] == ["phase1_one_shot_runner.py"], cap["order"]
+    assert cap["analog_ran"] is False
 
 
 def test_pure_digital_phase2_fail_still_skips_analog(tmp_path, monkeypatch):
