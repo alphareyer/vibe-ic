@@ -116,6 +116,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import _path_layout as _pl
 import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
+import _audit_verdict  # the ONE reader of the compliance audit's verdict + exit code
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _rtl_include_hub as _hub  # shared include-hub aggregator predicate
 import _commercial_pdk as _cpdk  # config-driven commercial-PDK id (NDA: no SKU in source)
@@ -21926,9 +21927,15 @@ def _final_audit_verdict_block(lines):
     """
     start = -1
     for i, ln in enumerate(lines):
-        if ln.startswith("Overall:"):
+        if _audit_verdict.is_verdict_line(ln):
             start = i          # LAST one wins: a nested sub-audit may print
                                # its own, and the run's verdict is the final.
+                               # (MEASURED: it cannot today -- every site that
+                               # embeds a nested clause's stdout truncates to
+                               # `out[:200]`, which the audit's own header plus
+                               # two absolute paths already exceed. The rule is
+                               # kept because last-wins is right either way,
+                               # and `_audit_verdict` applies the same one.)
     if start < 0:
         return -1, []
     block = [lines[start]]
@@ -22101,9 +22108,10 @@ def step_final_audit(project: Path, phase: int = 3,
     # WHAT I DID NOT CHANGE, having no reachability for it: a stream with NO `Overall:`
     # line at all still falls through to FAIL below. Every way I could construct that
     # state also exits non-zero, and widening the absence case needs its own measurement.
-    _verdict_word = _final_audit_verdict_word(out)
-    _green_words = (_V.Verdict.PASS.value, _V.Verdict.PASS_WITH_WAIVERS.value)
-    if _verdict_word in _green_words and rc != 0:
+    _av_verdict = _audit_verdict.read(out, rc)
+    _verdict_word = _av_verdict.word
+    if _verdict_word is not None and not _av_verdict.certified \
+            and (_verdict_word or "").upper() in _audit_verdict.GREEN_WORDS:
         return StepResult(
             "final_audit", "NOT_MEASURED", time.time() - t0,
             f"AUDIT DID NOT CERTIFY — the compliance audit printed "
@@ -22120,7 +22128,7 @@ def step_final_audit(project: Path, phase: int = 3,
                     "finding": "AUDIT_DID_NOT_CERTIFY",
                     "audit_rc": rc, "audit_word": _verdict_word},
             reason_class=_V.ReasonClass.EXECUTION_ERROR)
-    if _verdict_word in _green_words:
+    if _av_verdict.is_green:
         # vibe-ic — A VERDICT OVER A FRACTION OF THE POPULATION IS NOT A PASS.
         #
         # `flow_compliance_check` computes `Overall` from sub-gate records whose
@@ -22210,33 +22218,15 @@ def step_final_audit(project: Path, phase: int = 3,
                       extras={"structural_measurement": meas})
 
 
-#: THE AUDIT'S ONE FINAL VERDICT LINE. `flow_compliance_check` prints it exactly once,
-#: at its own tail: `print(f"\nOverall: {overall}  (strict={not args.lenient})")`.
-_FINAL_VERDICT_RE = re.compile(r"^Overall:\s+(?P<word>\S+)", re.M)
-
-
-def _final_audit_verdict_word(out: str) -> Optional[str]:
-    """The audit's OWN final verdict word, or `None` if it printed no verdict line.
-
-    THE SUBSTRING TEST THIS REPLACES, and why a substring was never the contract.
-    This step read `"Overall: PASS" in out` -- a search of the WHOLE captured stream for
-    a phrase. Three things follow from that, and the third is the one that bites:
-
-      * it cannot tell the audit's verdict line from the same phrase appearing anywhere
-        else in the stream;
-      * `"Overall: PASS"` is a prefix of `"Overall: PASS_WITH_WAIVERS"`, which is why the
-        branches had to be ordered by hand and why v1.6.100 found them ordered wrongly;
-      * and it reads a WORD while ignoring the audit's other channel entirely -- its EXIT
-        CODE. See `step_final_audit` for the measured path where those two disagree.
-
-    Anchored to the start of a line, and the LAST match wins: the auditor prints one such
-    line, so "the last one" is that line whenever there is one, and cannot be a phrase
-    quoted mid-stream. Pure; `None` for a stream with no verdict line at all.
-    """
-    matches = _FINAL_VERDICT_RE.findall(out or "")
-    return matches[-1] if matches else None
-
-
+#: THE AUDIT'S VERDICT IS READ BY `_audit_verdict`, AND NOT HERE ANY MORE.
+#:
+#: #2572 put `_FINAL_VERDICT_RE` and `_final_audit_verdict_word` in this file, because this
+#: was the reader being fixed. Two SIBLING readers then turned out to have the same defect
+#: -- `phase23_completion_self_audit_check` (the sole acceptance gate) and
+#: `final_report_generate._run_audit` -- so keeping the rule here would have made three
+#: private copies of one question, and after #2572 landed they DISAGREED: this runner said
+#: NOT_MEASURED while the acceptance gate still certified "Phase 2+3 complete". The rule
+#: MOVED to `_audit_verdict`; it was not copied. See that module for the measurement.
 #: A `flow_compliance_check` step line that measured nothing, and its reason.
 #: Shape, verbatim from the run above:
 #:   "… [NOT_MEASURED     ] Step  4: 🔁 Simulation …  (stage1) (partial_population)"

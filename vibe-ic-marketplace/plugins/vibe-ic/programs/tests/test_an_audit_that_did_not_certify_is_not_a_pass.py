@@ -41,6 +41,7 @@ sys.path.insert(0, str(PROGRAMS))
 
 import verdict as _V                              # noqa: E402
 import design_one_shot_runner as D                # noqa: E402
+import _audit_verdict as _AV                      # noqa: E402 — the rule's owner
 import phase23_one_shot_runner as P23             # noqa: E402
 
 
@@ -143,17 +144,23 @@ def test_the_verdict_is_read_from_the_line_not_from_the_stream(monkeypatch, tmp_
 
 
 def test_the_parser_takes_the_verdict_line_and_nothing_else():
-    """The helper, directly: anchored, last-match-wins, and `None` for no verdict line."""
-    assert D._final_audit_verdict_word("\nOverall: PASS  (strict=True)\n") == "PASS"
+    """The parser, directly: anchored, last-match-wins, and `None` for no verdict line.
+
+    THE HELPER MOVED, and this arm followed it rather than being deleted. #2572 put the rule
+    in `design_one_shot_runner`; two SIBLING readers turned out to have the same defect, so
+    the rule moved to `_audit_verdict` — one owner, asked by all three — and it was MOVED, not
+    copied. The property is unchanged; only its address is.
+    """
+    assert _AV.verdict_word("\nOverall: PASS  (strict=True)\n") == "PASS"
     # the decoy LAST, which is where the blocker list puts it — see the arm above
-    assert D._final_audit_verdict_word(
+    assert _AV.verdict_word(
         "\nOverall: NOT_MEASURED  (strict=True)\n"
         "       observed : ... | output: Overall: PASS  (strict=True)\n") == "NOT_MEASURED"
     # and the last VERDICT LINE wins when there really are two of them
-    assert D._final_audit_verdict_word(
+    assert _AV.verdict_word(
         "Overall: PASS  (strict=True)\nOverall: FAIL  (strict=True)\n") == "FAIL"
-    assert D._final_audit_verdict_word("no verdict here at all\n") is None
-    assert D._final_audit_verdict_word("") is None
+    assert _AV.verdict_word("no verdict here at all\n") is None
+    assert _AV.verdict_word("") is None
 
 
 def test_the_timeout_tier_is_untouched(monkeypatch, tmp_path):

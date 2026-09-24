@@ -46,6 +46,11 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _path_layout as _pl  # noqa: E402  — #525 shared timeout resolver
+import _audit_verdict  # noqa: E402  — the ONE reader of the audit's verdict + rc
+import verdict as _V  # noqa: E402  — the five-word vocabulary
+
+#: The audit word that means 'could not measure', from the vocabulary, not a literal.
+_V_NOT_MEASURED = _V.Verdict.NOT_MEASURED.value
 
 
 @dataclass
@@ -100,8 +105,30 @@ _SUMMARY_LEGACY_RE = re.compile(
     r"Steps:\s*(\d+)\s*total\s*\((\d+)/(\d+)\s*non-waived\s*PASS\)",
     re.IGNORECASE,
 )
-_OVERALL_RE = re.compile(
-    r"Overall:\s*(PASS_WITH_WAIVERS|PASS|FAIL|AUDIT_TIMEOUT)", re.IGNORECASE)
+#: `_OVERALL_RE` IS GONE, AND THE ACCEPTANCE GATE NOW ASKS `_audit_verdict`.
+#:
+#: It read `Overall:\s*(PASS_WITH_WAIVERS|PASS|FAIL|AUDIT_TIMEOUT)` with `.search` over
+#: `proc.stdout + proc.stderr`, took the FIRST match, and the `rc` this file binds at the
+#: `_run_compliance` call was read NOWHERE ELSE. Three consequences, all MEASURED on main
+#: 7a63a037f by driving this gate's own `main()`:
+#:
+#:   * UNANCHORED and first-match-wins: the audit prints its blocker list AFTER the verdict
+#:     line and those rows quote gate output, so a quoted `Overall: …` could be read as the
+#:     run's verdict.
+#:   * rc IGNORED: handed the audit's reconciliation-canary stdout (a green word beside
+#:     "do not quote its counts") with rc 1, this gate exited 0 and printed
+#:     "Overall: PASS — every canonical step executed and verified.", never mentioning the
+#:     canary. This file calls itself "the ONLY signal that authorises a 'Phase 2+3
+#:     complete' claim", so that was the one verdict in the tree that most needed both
+#:     channels.
+#:   * NO `NOT_MEASURED` ALTERNATIVE: after #2572 the orchestrator publishes that word, and
+#:     here it matched nothing, became "UNKNOWN", and printed `[FAIL]` at exit 1. Failing
+#:     closed, so never a false pass -- but it labelled "could not measure" as a defect
+#:     found, which is the mislabel R-0915-159 removed from `step_final_audit`.
+#:
+#: The timeout still arrives as TEXT, not as an rc: `_run_compliance` catches
+#: `TimeoutExpired` and synthesises `Overall: AUDIT_TIMEOUT` into the output. `_audit_verdict`
+#: names that word for exactly that reason.
 _TOTAL_REQ = 34
 
 
@@ -127,10 +154,12 @@ def main():
     rc, output = _run_compliance(project, strict=True)
 
     findings = []
-    overall_match = _OVERALL_RE.search(output)
+    # BOTH CHANNELS, FROM THE ONE OWNER. `audit.word` is the audit's own word out of the
+    # full vocabulary; `audit.certified` is whether it stands behind it.
+    audit = _audit_verdict.read(output, rc)
     summary_match = _SUMMARY_RE.search(output) or _SUMMARY_LEGACY_RE.search(output)
 
-    overall = overall_match.group(1).upper() if overall_match else "UNKNOWN"
+    overall = (audit.word or "UNKNOWN").upper()
     waived_count = 0
     if summary_match:
         steps_total = int(summary_match.group(1))
@@ -143,7 +172,18 @@ def main():
 
     # Three verdict states. Waivers are NOT pass — production tapeout
     # review must close them with the foundry's commercial deck.
-    structurally_complete = overall in ("PASS", "PASS_WITH_WAIVERS")
+    # AND THE GATE'S OWN QUESTION IS `is_green`, NOT "is the word one of two". A green word
+    # the audit refused to certify does not authorise a completion claim: that is the whole
+    # of this gate's job.
+    structurally_complete = audit.is_green
+    if not audit.certified and audit.why:
+        findings.append(Finding(
+            severity="ERROR",
+            category="AUDIT_DID_NOT_CERTIFY",
+            message=f"the compliance audit did not certify this run: {audit.why}",
+            details=("A 'Phase 2+3 complete' claim needs an audit that CERTIFIED, not a "
+                     "word printed beside a refusal to vouch for it. Resolve what the "
+                     "audit withdrew and re-run it.")))
 
     if overall == "FAIL":
         findings.append(Finding(
@@ -199,7 +239,45 @@ def main():
     }
 
     if args.json is None:
-        if overall == "PASS":
+        # THE PRINTED WORD AND THE EXIT CODE ARE ONE DECISION. These branches used to key
+        # on `overall` alone while the exit code keyed on `structurally_complete`, so the
+        # moment those two could differ -- which is exactly what reading the rc introduced
+        # -- this gate printed `[PASS]` and exited 1. A human reading the line and a script
+        # reading `$?` must not get opposite answers from the same run.
+        if (overall == _audit_verdict.TIMEOUT_WORD):
+            # THE TIMEOUT KEEPS ITS OWN NAME, AND IT GOES FIRST. #525 named this state on
+            # purpose -- 審不完 (timed out) is not 沒審 (never audited) and neither is a
+            # verdict about the design -- and `_audit_verdict` reports it as uncertified,
+            # which is true but not specific. Folding it into the generic branch below
+            # relabelled it `[AUDIT_DID_NOT_CERTIFY]` and lost the distinction #525 bought;
+            # a regression arm catches that now. The exit code is the same either way.
+            print(f"[{_audit_verdict.TIMEOUT_WORD}] phase23_completion_self_audit_check")
+            print(f"  Overall: {overall} — the audit did not run to completion, so this is")
+            print(f"  NOT a verdict on the project (INCONCLUSIVE, #525).")
+            print()
+            print("  ⛔ Phase 2+3 completion is NOT authorised, and nothing here is a")
+            print(f"     finding about the design. Raise {_pl.AUDIT_TIMEOUT_ENV} and re-run.")
+        elif not audit.certified:
+            # NOT `[FAIL]`: nothing was found wrong with the design. The audit declined to
+            # vouch for its own answer, which is an inability to certify -- the same
+            # reading R-0915-159 gave `step_final_audit`.
+            print("[AUDIT_DID_NOT_CERTIFY] phase23_completion_self_audit_check")
+            print(f"  Overall: {overall} — but the audit did not certify it.")
+            print(f"  {audit.why}")
+            print()
+            print("  ⛔ Phase 2+3 completion is NOT authorised. This is an inability to")
+            print("     certify, NOT a defect found in the design.")
+        elif overall == _V_NOT_MEASURED:
+            # THE WORD #2572 MADE REACHABLE. It used to match no alternative in the old
+            # regex, read as "UNKNOWN", and print `[FAIL]` -- an absence labelled a defect.
+            print("[NOT_MEASURED] phase23_completion_self_audit_check")
+            print(f"  Overall: NOT_MEASURED — the audit could not measure every step, so")
+            print(f"  it makes no completion claim either way.")
+            print(f"  executed PASS: {executed_pass}/{executed_total} (canonical 34)")
+            print()
+            print("  ⛔ Phase 2+3 completion is NOT authorised, and this is NOT a FAIL:")
+            print("     an unmeasured step said nothing about the design.")
+        elif overall == "PASS":
             print("[PASS] phase23_completion_self_audit_check")
             print(f"  Overall: PASS — every canonical step executed and verified.")
             print(f"  executed PASS: {executed_pass}/{executed_total} (canonical 34)")

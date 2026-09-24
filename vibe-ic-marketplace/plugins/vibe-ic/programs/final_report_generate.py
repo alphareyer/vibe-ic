@@ -79,6 +79,7 @@ import _path_layout as _pl
 import _analog_a_check_common as _acc
 import verdict as _T
 import _watchdog as _wd  # progress-stall process supervision
+import _audit_verdict  # the ONE reader of the compliance audit's verdict + exit code
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -110,6 +111,12 @@ AUDIT_TIMEOUT_VERDICT = "AUDIT_TIMEOUT"
 # The verdict used only when the audit was never run at all (--no-audit
 # or the compliance tool is missing). Kept distinct from AUDIT_TIMEOUT.
 AUDIT_NOT_RUN_VERDICT = "UNKNOWN"
+#: A THIRD NAMED NON-VERDICT, and it is not a softer FAIL. The audit printed a green
+#: word and exited non-zero -- its reconciliation canary (vibe-ic#2092) leaves the word
+#: standing and says "do not quote its counts". So the headline must not read PASS, and
+#: the per-step snapshot must NOT be quoted: this word joins the set below that
+#: withholds it, for the same reason AUDIT_TIMEOUT does.
+AUDIT_DID_NOT_CERTIFY_VERDICT = _audit_verdict.DID_NOT_CERTIFY
 
 # ORGANIC #428 / #1969 — the bucket used only when no fresh canonical audit
 # snapshot (or no per-step record in it) can answer. This is NOT the compliance
@@ -825,11 +832,15 @@ def _extract_overall_token(overall_line: str) -> str:
     ``Overall: FA``). The correct token is everything after ``Overall:``
     up to the trailing ``(strict=…)`` annotation (or end of line),
     stripped — never sliced on the first internal space. chip-AGNOSTIC."""
-    body = overall_line.split(":", 1)[1] if ":" in overall_line else overall_line
-    # Drop the trailing "(strict=…)" / "(…)" annotation the checker appends.
-    body = re.split(r"\s*\(", body, maxsplit=1)[0]
-    token = body.strip()
-    return token or AUDIT_NOT_RUN_VERDICT
+    # THE LINE RULE MOVED TO `_audit_verdict` AND THIS DELEGATES TO IT. #483's fix -- the
+    # token is everything up to the trailing annotation, never the first whitespace chunk --
+    # is the most careful of the three readers' rules, so it is the one the owner carries.
+    # This wrapper stays because it is a LINE-level helper with its own pinned behaviour
+    # (`test_483_extract_overall_token_full_verdict`); it is not a second rule.
+    line = overall_line if _audit_verdict.is_verdict_line(overall_line) else (
+        "Overall:" + overall_line.split(":", 1)[1] if ":" in overall_line
+        else "Overall:" + overall_line)
+    return _audit_verdict.verdict_word(line) or AUDIT_NOT_RUN_VERDICT
 
 
 def _run_audit(project: Path,
@@ -884,13 +895,23 @@ def _run_audit(project: Path,
             f"{AUDIT_TIMEOUT_ENV} and re-run.)"
         )
         return text, AUDIT_TIMEOUT_VERDICT
+    # BOTH CHANNELS, FROM THE ONE OWNER. This loop read the FIRST `Overall:` line and never
+    # looked at `res.rc`: handed the audit's reconciliation-canary stdout with rc 1, the
+    # headline in `final_summary.md` read `Overall: PASS` for a run whose audit had just
+    # refused to vouch for its own counts. MEASURED on main 7a63a037f through this very
+    # function. `res.rc` was available the whole time -- `_watchdog.SupervisedResult` carries
+    # it, and this function already reads `res.outcome` and `res.stalled` off the same object.
     text = res.out
-    overall = AUDIT_NOT_RUN_VERDICT
-    for ln in text.splitlines():
-        if ln.startswith("Overall:"):
-            overall = _extract_overall_token(ln)
-            break
-    return text, overall
+    audit = _audit_verdict.read(text, getattr(res, "rc", None))
+    if audit.word is None:
+        return text, AUDIT_NOT_RUN_VERDICT
+    if not audit.certified and audit.is_green is False and \
+            (audit.word or "").upper() in _audit_verdict.GREEN_WORDS:
+        # The word stands in the transcript; the HEADLINE says the audit did not certify it,
+        # and the snapshot is withheld by the set above.
+        return (f"{text}\n(AUDIT DID NOT CERTIFY: {audit.why})",
+                AUDIT_DID_NOT_CERTIFY_VERDICT)
+    return text, audit.word
 
 
 # ORGANIC #428 — the step-id half of the verdict-line matcher.
@@ -2011,7 +2032,8 @@ def _render(project: Path, run_audit: bool = True,
     audit_snapshot: Optional[Dict[str, Any]] = None
     snapshot_problem: Optional[str] = None
     if run_audit and overall not in {
-            AUDIT_TIMEOUT_VERDICT, AUDIT_NOT_RUN_VERDICT}:
+            AUDIT_TIMEOUT_VERDICT, AUDIT_NOT_RUN_VERDICT,
+            AUDIT_DID_NOT_CERTIFY_VERDICT}:
         audit_snapshot, snapshot_problem = _load_fresh_audit_snapshot(
             project, audit_before)
     elif not run_audit:
