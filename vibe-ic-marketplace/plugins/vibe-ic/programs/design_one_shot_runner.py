@@ -22600,6 +22600,34 @@ def run_is_bounded(entry_site, exit_pruned, site_order) -> bool:
     return False
 
 
+def _audit_after_declared_producers(project: Path, skip_analog: bool) -> StepResult:
+    """Run declared producers before the audit; their rc is a recorded fact.
+
+    The audit and its step gates own the verdict. A producer pass that returns
+    nonzero, or cannot launch, must still leave the audit able to inspect the
+    run's actual documents and report the gap itself.
+    """
+    try:
+        _dp = subprocess.run(
+            [sys.executable,
+             str(PROGRAMS_DIR / "flow_declared_producer_run.py"), str(project)],
+            timeout=_pl.audit_timeout_s(project) + 120,
+            check=False, capture_output=True, text=True)
+        for _ln in (_dp.stdout or "").strip().splitlines():
+            print(f"[phase2] {_ln}")
+        if _dp.returncode != 0:
+            print(f"[INFO] flow_declared_producer_run rc={_dp.returncode}: a "
+                  f"declared producer could not be EXECUTED (not a verdict "
+                  f"about the design); {(_dp.stderr or '').strip()[-300:]}",
+                  file=sys.stderr)
+    except Exception as _dp_exc:  # nosec — must not abort the audit
+        print(f"[WARN] flow_declared_producer_run did NOT run ({_dp_exc}); the "
+              f"documents the flow declares this run's steps to produce may "
+              f"still be authored by the audit and refused as its own "
+              f"evidence", file=sys.stderr)
+    return step_final_audit(project, phase=2, skip_analog=skip_analog)
+
+
 def _run_refresh_only(project: Path, args) -> int:
     """`--refresh-only`: run EXACTLY the whole-flow refreshes a bounded run
     discloses as skipped, dispatch no step, and record what was rebuilt.
@@ -23863,26 +23891,6 @@ def main() -> int:
             "flow_declared_producer_run",
             "the documents the flow declares every step to produce, for the "
             "steps this run did not dispatch")
-    else:
-        try:
-            _dp = subprocess.run(
-                [sys.executable,
-                 str(PROGRAMS_DIR / "flow_declared_producer_run.py"),
-                 str(project)],
-                timeout=_pl.audit_timeout_s(project) + 120,
-                check=False, capture_output=True, text=True)
-            for _ln in (_dp.stdout or "").strip().splitlines():
-                print(f"[phase2] {_ln}")
-            if _dp.returncode != 0:
-                print(f"[INFO] flow_declared_producer_run rc={_dp.returncode}: a "
-                      f"declared producer could not be EXECUTED (not a verdict "
-                      f"about the design); {(_dp.stderr or '').strip()[-300:]}",
-                      file=sys.stderr)
-        except Exception as _dp_exc:  # nosec — must not abort the audit
-            print(f"[WARN] flow_declared_producer_run did NOT run ({_dp_exc}); the "
-                  f"documents the flow declares this run's steps to produce may "
-                  f"still be authored by the audit and refused as its own "
-                  f"evidence", file=sys.stderr)
 
     if _bounded:
         # A WHOLE-FLOW VERDICT OVER A TREE 69 OF WHOSE 70 STEPS DID NOT RUN is
@@ -23900,8 +23908,7 @@ def main() -> int:
                 "the gate reports every step's YAML checker re-emits"),
             declared_by=" ".join(_window_flags)))
     else:
-        plan.append(step_final_audit(project, phase=2,
-                                     skip_analog=args.skip_analog))
+        plan.append(_audit_after_declared_producers(project, args.skip_analog))
 
     # vibe-ic#2080 — the run's report card, asked by a gate that nothing ran.
     # Dispatched right after the final audit, where the report card is the

@@ -446,31 +446,20 @@ def test_the_helper_refuses_to_write_the_report_card_when_bounded():
 def test_the_whole_flow_final_audit_is_guarded_by_the_window():
     """A whole-flow verdict over a tree 69 of whose 70 steps did not run is the
     PREVIOUS run's state re-attributed to this one."""
-    assert _guarded_by_bounded(_main_node(), "step_final_audit"), (
-        "step_final_audit is reachable without consulting _bounded")
+    assert _guarded_by_bounded(_main_node(), "_audit_after_declared_producers"), (
+        "the whole-flow audit is reachable without consulting _bounded")
 
 
 def test_the_declared_producer_sweep_is_guarded_by_the_window():
     """It executes the producers the flow declares for EVERY step."""
     main = _main_node()
-    sweeps = [c for c in _calls(main)
-              if any(isinstance(a, ast.Call) or isinstance(a, ast.List)
-                     for a in c.args)
-              and "flow_declared_producer_run.py" in ast.dump(c)]
-    assert sweeps, "the declared-producer sweep call was not found in main()"
-    guarded = []
-    for node in ast.walk(main):
-        if not isinstance(node, ast.If):
-            continue
-        if "_bounded" not in {n.id for n in ast.walk(node.test)
-                              if isinstance(n, ast.Name)}:
-            continue
-        for branch in (node.body, node.orelse):
-            for stmt in branch:
-                guarded.extend(c for c in _calls(stmt)
-                               if "flow_declared_producer_run.py" in ast.dump(c))
-    assert all(any(g is c for g in guarded) for c in sweeps), (
+    assert _guarded_by_bounded(main, "_audit_after_declared_producers"), (
         "the declared-producer sweep runs without consulting _bounded")
+    tree = ast.parse(RUNNER.read_text())
+    helper = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                  and n.name == "_audit_after_declared_producers")
+    assert "flow_declared_producer_run.py" in ast.dump(helper), (
+        "the bounded guard no longer encloses the declared-producer sweep")
 
 
 def test_the_narrowed_refreshes_are_disclosed_as_narrowed_not_as_skipped():

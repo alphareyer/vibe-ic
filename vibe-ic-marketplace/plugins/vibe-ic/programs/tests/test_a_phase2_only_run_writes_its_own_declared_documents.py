@@ -95,27 +95,48 @@ def test_the_phase2_runner_invokes_the_declared_producer_pass():
 def test_the_producer_pass_runs_BEFORE_the_final_audit():
     """Order is the whole point: the audit is what READS these documents, so a
     pass that ran after it would change nothing this run is graded on."""
-    src = PHASE2_RUNNER.read_text()
-    assert src.count("step_final_audit(project, phase=2") == 1
-    assert src.index(f"{PRODUCER}.py") < src.index(
-        "step_final_audit(project, phase=2")
+    tree = ast.parse(PHASE2_RUNNER.read_text())
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                and n.name == "main")
+    calls = [n.func.id for n in ast.walk(main) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name)]
+    assert calls.count("_audit_after_declared_producers") == 1
+    assert "step_final_audit" not in calls  # no second audit before the pass
+
+    import design_one_shot_runner as runner
+    # The actual producer runs on an empty scratch project and writes its
+    # ZERO_POPULATION receipt with rc=2. The audit callback observes the file
+    # on disk; its return is only a controlled step verdict for this test.
+    with pytest.MonkeyPatch.context() as mp:
+        seen = []
+        def audit(project, phase, skip_analog):
+            receipt = project / "reports/audit/flow_declared_producer_run.json"
+            seen.append(json.loads(receipt.read_text())["verdict"])
+            assert phase == 2 and skip_analog is True
+            return runner.StepResult("final_audit", "PASS")
+        mp.setattr(runner, "step_final_audit", audit)
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as directory:
+            result = runner._audit_after_declared_producers(Path(directory), True)
+    assert seen == ["ZERO_POPULATION"]
+    assert result.name == "final_audit" and result.status == "PASS"
 
 
-def test_the_pass_is_recorded_not_gating():
+def test_the_pass_is_recorded_not_gating(tmp_path, monkeypatch, capsys):
     """It never decides a verdict: the step gates re-run these programs and keep
-    their own. A non-zero rc is reported as an execution fact and the run
-    continues — asserted on the source, because there is no verdict object to
-    inspect."""
-    src = PHASE2_RUNNER.read_text()
-    i = src.index(f"{PRODUCER}.py")
-    window = src[i - 2000:i + 2000]
-    assert "check=False" in window
-    assert "not a verdict" in window
-    # and it cannot abort the audit that follows it
-    assert "must not abort" in window
-    # no `plan.append(...)` wraps it — it contributes no step row and therefore
-    # no verdict to the aggregate
-    assert "plan.append" not in src[i:i + 900]
+    their own. The real producer's empty-population rc=2 is reported, then the
+    audit still runs and owns the returned verdict."""
+    import design_one_shot_runner as runner
+    seen = []
+    def audit(project, phase, skip_analog):
+        seen.append(json.loads((project / "reports/audit/flow_declared_producer_run.json")
+                               .read_text())["verdict"])
+        return runner.StepResult("final_audit", "PASS")
+    monkeypatch.setattr(runner, "step_final_audit", audit)
+    result = runner._audit_after_declared_producers(tmp_path, False)
+    assert seen == ["ZERO_POPULATION"]
+    assert "flow_declared_producer_run rc=2" in capsys.readouterr().err
+    assert result.name == "final_audit" and result.status == "PASS"
 
 
 # --------------------------------------------------------------------------- #
