@@ -119,7 +119,7 @@ def test_the_default_is_a_digest_or_an_honest_refusal():
 
 @_skip
 def test_bare_tag_prepends_repo():
-    assert _resolve("0.1.99").stdout.strip() == "vibeic/vibeic-eda:0.1.99"
+    assert _resolve("0.1.99").stdout.strip() == "ghcr.io/vibeic/vibeic-eda:0.1.99"
 
 
 @_skip
@@ -130,7 +130,7 @@ def test_full_ref_honored_as_is():
 
 @_skip
 def test_explicit_latest_still_honored_as_opt_in():
-    assert _resolve("latest").stdout.strip() == "vibeic/vibeic-eda:latest"
+    assert _resolve("latest").stdout.strip() == "ghcr.io/vibeic/vibeic-eda:latest"
 
 
 @_skip

@@ -295,7 +295,7 @@ def test_306_drv_promotion_trigger_is_reachable_not_dead_code():
     promotion marker is still CALLED by the runner. A gate guarding a code
     path that cannot execute would be wiring for its own sake."""
     src = (_PROGRAMS / _RUNNER).read_text(errors="replace")
-    assert "_sr = step_signoff_spef_repair(" in src, (
+    assert "_sr = _recorded((\"pnr\", \"gds\"), step_signoff_spef_repair)(" in src, (
         "the promoting step is no longer invoked — re-assess whether this "
         "gate still guards anything")
     assert 'routed_base_prerepair.def"' in src, (
