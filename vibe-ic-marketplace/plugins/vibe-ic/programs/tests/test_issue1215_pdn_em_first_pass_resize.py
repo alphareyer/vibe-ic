@@ -27,13 +27,15 @@ tests pin the three properties that make it safe:
 from __future__ import annotations
 
 import sys
+import json
 from pathlib import Path
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
 if str(_PROGRAMS) not in sys.path:
     sys.path.insert(0, str(_PROGRAMS))
 
-import phase3_one_shot_runner as R  # noqa: E402
+import phase3_one_shot_runner as R
+from _ppa import power as __PW  # noqa: E402
 
 
 #: The PDN script the flow itself emits: ONE follow-pin rail plus two straps.
@@ -54,6 +56,16 @@ def _tree(tmp_path: Path, top: str = "spm", *, pnr_tcl: str = _PNR_TCL) -> Path:
     pnr = R._pl.pnr_dir(tmp_path)
     pnr.mkdir(parents=True, exist_ok=True)
     (pnr / f"{top}.def").write_text("DESIGN spm ;\nEND DESIGN\n")
+    # The resize is bounded by the LAYOUT it was spent on, and that layout is
+    # the routed DEF the EM deck reads -- a real project reaching this point
+    # has one.
+    (pnr / __PW._PDN_EM_SUBJECT_DEF).write_text("DESIGN spm ;\nEND DESIGN\n")
+    # The bound is one resize PER DESIGN STATE, and the design state is the
+    # synthesis netlist digest, so a project fixture must have one -- a real
+    # project reaching PnR always does.
+    _synth = tmp_path / "phase2" / "stage2" / "synth"
+    _synth.mkdir(parents=True, exist_ok=True)
+    (_synth / f"{top}_synth.v").write_text("module spm; endmodule\n")
     if pnr_tcl is not None:
         (pnr / "pnr.tcl").write_text(pnr_tcl)
     R._pl.reports_phase3_dir(tmp_path).mkdir(parents=True, exist_ok=True)
@@ -188,8 +200,12 @@ def test_the_sentinel_bounds_the_resize_at_exactly_one_pass(
     proj = _tree(tmp_path)
     first = R._pdn_em_first_pass_resize(proj, "spm", object(), "c")
     assert first is not None, "the first pass must be offered"
-    # The caller writes the sentinel BEFORE re-dispatching. Simulate that.
-    first["sentinel"].write_text("{}")
+    # The caller writes the sentinel BEFORE re-dispatching, RECORDING the
+    # design state it is spent on (that is what bounds the passes of this
+    # design rather than the tree for ever). Simulate what the caller writes.
+    first["sentinel"].write_text(json.dumps(
+        {"reason": "pdn_em_first_pass_resize",
+         "spent_on_def": __PW._pdn_em_spent_on(proj), "short": []}))
     assert first["sentinel"].name == R._PDN_EM_RESIZE_SENTINEL
     # Same still-short widths -- a counter-free bound must still refuse.
     assert R._pdn_em_first_pass_resize(proj, "spm", object(), "c") is None
@@ -201,7 +217,9 @@ def test_the_bound_holds_even_when_the_second_pass_is_still_short(
     # That must NOT buy a third pass -- it must be reported, not retried.
     _arm(monkeypatch, floor=_FLOOR, drawn={"metal4": 2.0, "metal5": 1.8})
     proj = _tree(tmp_path)
-    (R._pl.pnr_dir(proj) / R._PDN_EM_RESIZE_SENTINEL).write_text("{}")
+    (R._pl.pnr_dir(proj) / R._PDN_EM_RESIZE_SENTINEL).write_text(json.dumps(
+        {"reason": "pdn_em_first_pass_resize",
+         "spent_on_def": __PW._pdn_em_spent_on(proj), "short": []}))
     assert R._pdn_em_first_pass_resize(proj, "spm", object(), "c") is None
 
 

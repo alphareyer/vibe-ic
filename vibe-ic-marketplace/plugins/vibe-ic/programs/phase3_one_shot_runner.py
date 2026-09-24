@@ -78,7 +78,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path, PurePosixPath
-from typing import (Any, Callable, Dict, FrozenSet, Iterable, List,
+from typing import (Any, Callable, Dict, FrozenSet, Iterable, List, Mapping,
                     NamedTuple, Optional, Sequence, Set, Tuple)
 import _audit_scope
 import _path_layout as _pl
@@ -6700,6 +6700,39 @@ def _build_macro_pdn_grid_tcl(plan: Optional[Dict[str, Any]]) -> str:
 _EM_MEASURED_SAFETY = 2.0
 
 
+# ── A MEASUREMENT SIZES ONLY THE RUN THAT TOOK IT ───────────────────────────
+#
+# THE DEFECT THESE CLOSE, MEASURED on spm run23 (2026-09-24, 8HD-4).
+# `step_pnr` reads the EM floor (this file, in `step_pnr`); `em.rpt`,
+# `em.json` and `em_current_authority.json` are written by
+# `step_canonicalize_artefacts`, which runs AFTER PnR. So the first PnR of any
+# run can only ever read a PREVIOUS run's measurement — verified statically
+# (enclosing defs) and from two real run logs (`pnr` precedes
+# `canonicalize_artefacts` in both).
+#
+# `_pdn_em_first_pass_resize` exists to close exactly that gap INSIDE one run:
+# it re-measures, re-derives and re-dispatches PnR once. It was bounded by a
+# sentinel written into `phase3/stage3/pnr/`, and NOTHING in the corpus ever
+# removes it (grep: no unlink, no rmtree, tests included). So a bound meant to
+# cap ONE RUN at one extra PnR capped THE TREE, permanently:
+#
+#     run 1     sentinel absent -> corrector fires -> PDN sized from this
+#               run's own measurement.                       As designed.
+#     run 2+    `sentinel.exists()` -> return None at the first statement.
+#               The corrector never runs again, and the only current reaching
+#               the floor is run 1's leftover.
+#
+# MEASURED: run23 carried a sentinel dated 2026-09-23 18:50, so NEITHER the
+# 00:46 run NOR the 09:27 run had the corrector, and the I_total the PDN was
+# sized from drifted 2.900e-03 -> 2.600e-03 -> 2.860e-03 across three runs
+# with the design unchanged. A control (the same plugin commit re-run on the
+# drifted tree) reproduced the drifted number, which is what proves the value
+# follows the TREE and not the code.
+#
+# The rule these restore: a measurement is evidence for the run that TOOK it.
+# A previous run measured a layout that no longer exists.
+
+
 def _pdn_em_measured_subject(project: Path, rpt3: Path) -> Dict[str, Any]:
     """Identity of the LAYOUT the EM measurement was taken on.
 
@@ -6760,7 +6793,8 @@ def _pdn_em_measured_subject(project: Path, rpt3: Path) -> Dict[str, Any]:
 
 
 def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
-                        container: Optional[str] = None
+                        container: Optional[str] = None,
+                        layout_will_be_replaced: bool = False
                         ) -> Optional[Dict[str, Any]]:
     """#1215-PDN — DERIVE the per-layer minimum PDN strap width from the
     PDK's own Jmax and the design's MEASURED supply current. Never tuned.
@@ -6824,17 +6858,42 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
     # em.rpt with the gate's own module regexes.
     i_total: Optional[float] = None
     i_src: Optional[str] = None
+    # STALE-BASIS REFUSALS, recorded so "no floor" can be told from "no floor
+    # DERIVED". Each entry names a source this run declined and why.
+    stale: List[str] = []
+    # ONE subject question for the whole EM family: em.rpt, em.json and
+    # em_current_authority.json are all products of the same measurement pass,
+    # so they stand or fall together on WHICH LAYOUT that pass measured.
+    _measures_now, _subject_why = _ppa_power._pdn_em_measures_this_layout(
+        rpt3, project)
+    # A SUBJECT MATCH IS NOT ENOUGH WHEN THE SUBJECT IS ABOUT TO BE DISCARDED.
+    # `step_pnr` runs only when the PnR cache was REJECTED, so reaching it
+    # means the routed DEF on disk is about to be replaced. A measurement of
+    # that DEF matches it by digest and is still the PREVIOUS layout's current
+    # -- which is how run23's drift survived a subject check that looked right:
+    # 2.900e-03 -> 2.600e-03 -> 2.860e-03 on an unchanged design. Declining it
+    # here makes pass 1 floorless and therefore DETERMINISTIC, which is exactly
+    # what a clean slate does; the corrector then measures THIS run's own pass-1
+    # layout and re-dispatches once with a floor derived from it.
+    if layout_will_be_replaced and _measures_now:
+        _measures_now = False
+        _subject_why = ("it measures the layout this PnR is about to replace, "
+                        "so it is the previous layout's current")
     auth_json = rpt3 / "em_current_authority.json"
-    try:
-        doc = json.loads(auth_json.read_text())
-        vals = [v.get("supply_current_A") for v in doc.get("supply_authority", [])
-                if isinstance(v, dict)
-                and isinstance(v.get("supply_current_A"), (int, float))]
-        if vals:
-            i_total = max(vals)
-            i_src = "reports/phase3/em_current_authority.json supply_authority"
-    except (OSError, ValueError):
-        pass
+    # An authority derived from another layout is not this layout's current.
+    if auth_json.exists() and not _measures_now:
+        stale.append(f"reports/phase3/em_current_authority.json ({_subject_why})")
+    else:
+        try:
+            doc = json.loads(auth_json.read_text())
+            vals = [v.get("supply_current_A") for v in doc.get("supply_authority", [])
+                    if isinstance(v, dict)
+                    and isinstance(v.get("supply_current_A"), (int, float))]
+            if vals:
+                i_total = max(vals)
+                i_src = "reports/phase3/em_current_authority.json supply_authority"
+        except (OSError, ValueError):
+            pass
     if i_total is None:
         # A missing/unparseable I_total is no longer fatal on its own: the
         # MEASURED per-segment maximum read below can size the strap by
@@ -6842,19 +6901,22 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
         # available" returns None, and that decision is made after both
         # have been attempted.
         em_rpt = rpt3 / "em.rpt"
-        try:
-            txt = em_rpt.read_text(errors="replace")
-            import em_peak_current_authority_check as _empc
-            powers = [float(m.group(1))
-                      for m in _empc._TOTAL_POWER_RE.finditer(txt)]
-            volts = [float(m.group(1))
-                     for m in _empc._SUPPLY_V_RE.finditer(txt)]
-            pairs = [p / v for p, v in zip(powers, volts) if v > 0]
-            if pairs:
-                i_total = max(pairs)
-                i_src = "reports/phase3/em.rpt Total power / Supply voltage"
-        except Exception:
-            i_total = None
+        if em_rpt.exists() and not _measures_now:
+            stale.append(f"reports/phase3/em.rpt ({_subject_why})")
+        else:
+            try:
+                txt = em_rpt.read_text(errors="replace")
+                import em_peak_current_authority_check as _empc
+                powers = [float(m.group(1))
+                          for m in _empc._TOTAL_POWER_RE.finditer(txt)]
+                volts = [float(m.group(1))
+                         for m in _empc._SUPPLY_V_RE.finditer(txt)]
+                pairs = [p / v for p, v in zip(powers, volts) if v > 0]
+                if pairs:
+                    i_total = max(pairs)
+                    i_src = "reports/phase3/em.rpt Total power / Supply voltage"
+            except Exception:
+                i_total = None
     # THE MEASURED per-segment maximum for THIS layout, if the EM step ran.
     # openroad-psm walks every segment of the grid; this is the largest
     # current any one of them actually carries, not an assumption about how
@@ -6863,18 +6925,35 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
     i_meas_src: Optional[str] = None
     i_meas_segments: Optional[int] = None
     i_meas_subject: Dict[str, Any] = {}
-    try:
-        _em = json.loads((rpt3 / "em.json").read_text())
-        _v = _em.get("max_segment_current_A")
-        if isinstance(_v, (int, float)) and _v > 0:
-            i_meas = float(_v)
-            i_meas_src = "reports/phase3/em.json max_segment_current_A"
-            _s = _em.get("segments_analysed")
-            if isinstance(_s, int):
-                i_meas_segments = _s
-            i_meas_subject = _pdn_em_measured_subject(project, rpt3)
-    except Exception:
-        i_meas = None
+    _em_json = rpt3 / "em.json"
+    # The PREFERRED basis, and so the one that most needs to be this run's:
+    # it carries a 2.0x safety factor rather than a conservation bound, so a
+    # stale value is trusted MORE than a stale I_total, not less.
+    if _em_json.exists() and not _measures_now:
+        stale.append(f"reports/phase3/em.json ({_subject_why})")
+    else:
+        try:
+            _em = json.loads(_em_json.read_text())
+            _v = _em.get("max_segment_current_A")
+            if isinstance(_v, (int, float)) and _v > 0:
+                i_meas = float(_v)
+                i_meas_src = "reports/phase3/em.json max_segment_current_A"
+                _s = _em.get("segments_analysed")
+                if isinstance(_s, int):
+                    i_meas_segments = _s
+                i_meas_subject = _pdn_em_measured_subject(project, rpt3)
+        except Exception:
+            i_meas = None
+
+    # BASIS ORDER (R-0924-3): this run's own measurement, then the DESIGN's
+    # declared budget, then nothing — and "nothing" is SAID, not returned in
+    # silence. A previous run's measurement is never a basis.
+    i_decl: Optional[float] = None
+    i_decl_src: Optional[str] = None
+    _decl_gap = "the declared-budget rung was not reached"
+    if i_meas is None and not (i_total and i_total > 0):
+        i_decl, i_decl_src, _decl_gap = _ppa_power._pdn_em_declared_current(
+            project, _pdk_nominal_voltage(pdk, container))
 
     if i_meas is not None:
         i_drive = i_meas * _EM_MEASURED_SAFETY
@@ -6882,7 +6961,41 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
     elif i_total and i_total > 0:
         i_drive = i_total
         sizing_basis = "i_total_conservation_bound"
+    elif i_decl and i_decl > 0:
+        i_drive = i_decl
+        i_src = i_decl_src
+        sizing_basis = "design_declared_power_budget"
     else:
+        # FAIL CLOSED AND SAY SO. Returning None silently made "this design
+        # needs no floor" and "this run could not derive one" the same
+        # observable, which is how the stale basis went unnoticed for three
+        # runs. The run is not failed on it -- the Step-25 EM gate still
+        # judges the grid that gets built -- but the reader is told.
+        _why = ("; ".join(stale) if stale
+                else "this run has no EM measurement of the layout it has")
+        print(f"[phase3] PDN_EM_FLOOR_NOT_DERIVED: no measured supply current "
+              f"describes the layout this pass is sizing ({_why}); and the "
+              f"design-declared fallback is unavailable because {_decl_gap}. "
+              f"No EM-derived strap floor is applied this pass; the Step-25 "
+              f"EM gate still judges the grid that is built.",
+              file=sys.stderr)
+        try:
+            rpt3.mkdir(parents=True, exist_ok=True)
+            _aa.write_text(rpt3 / "pdn_em_sizing.json", json.dumps({
+                "schema": "pdn_em_sizing/not_derived",
+                "derived": False,
+                "code": "PDN_EM_FLOOR_NOT_DERIVED",
+                "declined_stale_sources": stale,
+                # The PRECISE gap, not a blanket "no budget declared": a budget
+                # WITH no voltage to divide it by sends a reader to a different
+                # file than a budget that was never stated.
+                "declared_budget_gap": _decl_gap,
+                "consequence": ("no EM-derived floor was applied on this "
+                                "pass; strap widths are the ratio/registry "
+                                "widths and the Step-25 gate judges them"),
+            }, indent=2) + "\n")
+        except OSError:
+            pass
         return None
 
     tlef_txt = _read_pdk_text(getattr(pdk, "tech_lef", None), container)
@@ -6990,6 +7103,11 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
         "width_quantum_um": quantum,
         "i_total_A": i_total,
         "i_total_source": i_src,
+        # Sources this run DECLINED because a previous run wrote them. Present
+        # even on a successful derivation: "which basis was used" and "what was
+        # refused" are different facts, and the second is the one that shows a
+        # re-run is not silently inheriting the last run's layout.
+        "declined_stale_sources": stale or None,
         "jmax_source": str(getattr(pdk, "tech_lef", None)),
         "margin": margin,
         "applied_as": ("FLOOR on strap widths only (max with the "
@@ -7008,8 +7126,11 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
 
 
 #: #1215-PDN-FIRSTPASS — the sentinel that BOUNDS the resize at exactly one
-#: extra PnR. Written into the pnr dir the moment a resize pass is decided on,
-#: BEFORE the re-dispatch, so a crash mid-re-PnR cannot buy a second one.
+#: extra PnR PER DESIGN STATE. Written into the pnr dir the moment a resize
+#: pass is decided on, BEFORE the re-dispatch, so a crash mid-re-PnR cannot
+#: buy a second one, and RECORDING the design it was spent on, so it bounds
+#: the passes that build THIS design rather than the tree for ever — see
+#: `_pdn_em_design_state`.
 _PDN_EM_RESIZE_SENTINEL = ".pdn_em_resize_done"
 
 
@@ -7054,18 +7175,29 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
     under ANY distribution and there is nothing to converge. A second pass could
     only re-measure a slightly different I_total (spm: 4.36 mA -> 4.32 mA across
     two layouts), which is tracking, not iteration. The bound is enforced
-    STRUCTURALLY by `_PDN_EM_RESIZE_SENTINEL`, written before the re-dispatch:
-    a crashed or a still-narrow second pass cannot buy a third.
+    STRUCTURALLY by `_PDN_EM_RESIZE_SENTINEL`, written before the re-dispatch
+    and keyed on the DESIGN STATE: a crashed or a still-narrow second pass
+    cannot buy a third, because a resume in the same tree finds the sentinel
+    still naming the design it is building. A DIFFERENT design gets its own
+    resize, which is why the sentinel no longer retires the corrector for the
+    life of the project.
 
-    Returns None — no resize, behaviour unchanged — when the sentinel is
-    already present, when no EM measurement can be produced, when the tech LEF
+    Returns None — no resize, behaviour unchanged — when this design has
+    already spent its resize, when no EM measurement can be produced, when the tech LEF
     states no Jmax, or when every drawn strap already meets its floor.
     chip-AGNOSTIC: every number is the project's own measurement or the PDK's
     own LEF."""
     pnr_out = _pl.pnr_dir(project)
     sentinel = pnr_out / _PDN_EM_RESIZE_SENTINEL
-    if sentinel.exists():
+    # The bound is ONE RESIZE PER RUN, and it is spent only by THIS run. A
+    # sentinel left by a previous run used to end the function here, which
+    # retired the corrector for the lifetime of the tree — see
+    # `_pdn_em_sentinel_binds`.
+    _binds, _why = _ppa_power._pdn_em_sentinel_binds(sentinel, project)
+    if _binds:
         return None
+    print(f"[phase3] PDN EM first-pass resize is AVAILABLE: {_why}",
+          file=sys.stderr)
     def_file = pnr_out / f"{top}.def"
     if not def_file.is_file():
         return None
@@ -32290,11 +32422,64 @@ def _pnr_session_products(out_dir: Path, out_dir_c: str, tcl_text: str,
     return [out_dir / n for n in dict.fromkeys(names)]
 
 
+def _sdr_candidate_signoff_clean(project: Path, top: Optional[str],
+                                 pdk: Optional[PdkConfig],
+                                 container: str) -> Tuple[bool, str]:
+    """Demand measured zero deck DRC and a real LVS match on the candidate.
+
+    A strict clean candidate cannot be worse than any incumbent on either
+    invariant. The probe runs the same consumers the normal Phase-3 flow runs;
+    their reports are regenerated from the candidate's just-written DEF.
+    Missing context, layout, deck output or compare verdict refuses adoption.
+    """
+    if not top or pdk is None:
+        return False, "signoff_context_missing"
+    if not getattr(pdk, "drc_deck", None):
+        return False, "signoff_deck_missing"
+    try:
+        started_ns = time.time_ns()
+        gds = step_gds(project, top, pdk, container)
+        layout = _pl.pnr_dir(project) / f"{top}.gds"
+        if (gds.status != "PASS" or not layout.is_file()
+                or layout.stat().st_mtime_ns < started_ns):
+            return False, f"gds_{gds.status.lower()}"
+        drc = step_drc(project, top, pdk, container)
+        rpt = project / "phase3" / "reports" / "drc.rpt"
+        if (drc.status != "PASS" or not rpt.is_file()
+                or rpt.stat().st_mtime_ns < started_ns):
+            return False, f"drc_{drc.status.lower()}_or_report_missing"
+        # The existing count helper deliberately maps malformed XML to zero
+        # for downstream audit compatibility. Admission cannot do that: zero
+        # is meaningful only for a parseable KLayout report database.
+        import xml.etree.ElementTree as _ET
+        root = _ET.parse(rpt).getroot()
+        if root.tag != "report-database" or root.find("items") is None:
+            return False, "drc_report_unreadable"
+        count, _ = _v1_6_597_count_klayout_xml_violations(rpt)
+        if count != 0:
+            return False, f"drc_count_{count if count is not None else 'unmeasured'}"
+        lvs = step_lvs(project, top, pdk, container)
+        if lvs.status != "PASS":
+            return False, f"lvs_{lvs.status.lower()}"
+        verdict = project / "reports" / "phase3" / "lvs_verdict.json"
+        if not verdict.is_file() or verdict.stat().st_mtime_ns < started_ns:
+            return False, "lvs_verdict_missing"
+        data = json.loads(verdict.read_text())
+        if data.get("status") != "PASS":
+            return False, "lvs_verdict_not_pass"
+        return True, "deck_drc_zero_lvs_match"
+    except Exception as exc:
+        return False, f"signoff_unmeasured_{type(exc).__name__}"
+
+
 def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
                               out_dir_c: str, pnr_tcl: Path,
                               log_text: str,
                               hard_ceiling_s: int,
-                              spare_plan: Optional[Dict[str, Any]] = None
+                              spare_plan: Optional[Dict[str, Any]] = None,
+                              project: Optional[Path] = None,
+                              top: Optional[str] = None,
+                              pdk: Optional[PdkConfig] = None
                               ) -> Dict[str, Any]:
     """#2253 — finish PnR from an ACCEPTED SDR candidate the shipping session
     could not read back.
@@ -32449,7 +32634,89 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
         rec["adoptions"].append({"stage": stage, "candidate": str(cand),
                                  "tcl": tail_name, "log": tail_log,
                                  "rc": t_rc})
+        # A router-clean candidate can still introduce well/implant violations
+        # or disconnect supply nets. Probe the exact post-route tail through
+        # the flow's normal streamout, sign-off deck and LVS consumers before
+        # allowing its DEF to become the shipped one. Production callers must
+        # supply the design context; a missing or inconclusive measurement is
+        # a refusal, never an implicit clean result.
         nxt = _sdr_adopt_request(this_log)
+        if t_rc == 0 and nxt is None and project is not None:
+            admitted, reason = _sdr_candidate_signoff_clean(
+                project, top, pdk, container)
+            rec["adoptions"][-1]["signoff_admission"] = reason
+            if not admitted:
+                # If a later SDR site also proposed a candidate, restore the
+                # state from before the FIRST proposal. Otherwise an earlier
+                # unmeasured candidate would remain in the rejected tail.
+                first_stage = rec["adoptions"][0]["stage"]
+                first_txn = out_dir / _SDR_TXN_DIRS[first_stage]
+                ckpt = first_txn / _SDR_CHECKPOINT_ODB_NAME
+                if not ckpt.is_file():
+                    rec.update(status="FAILED", rc=1,
+                               reason=f"signoff_refused:{reason}; incumbent checkpoint missing")
+                    break
+                try:
+                    incumbent_tcl = _build_pnr_resume_tcl_text(
+                        deck,
+                        checkpoint_def_c=_to_container_path(
+                            str(first_txn / "pre_repair.def"), container),
+                        omit_stages=list(_SDR_CHILD_OMIT),
+                        restore_odb_c=_to_container_path(str(ckpt), container),
+                        after_restore_tcl=_after_restore_tcl(
+                            deck, spare_plan, reroutes_immediately=False))
+                    reject_name = f"pnr_sdr_reject_{len(omitted)}.tcl"
+                    reject_log = f"pnr_sdr_reject_{len(omitted)}.log"
+                    (out_dir / reject_name).write_text(incumbent_tcl)
+                    reject_cmd = (f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
+                                  f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
+                                  f"openroad -no_init -exit {out_dir_c}/{reject_name} 2>&1 | "
+                                  f"tee {out_dir_c}/{reject_log}")
+                    r_rc, r_out, r_err = _declared_session_exec(
+                        container, reject_cmd,
+                        _pnr_tail_products(out_dir, out_dir_c, incumbent_tcl),
+                        marker=f"{out_dir_c}/{reject_name}",
+                        log_path=out_dir / reject_log,
+                        hard_ceiling_s=hard_ceiling_s)
+                    combined += (f"\n=== PNR SDR REJECT (incumbent) ===\n"
+                                 + (r_out or "") + (r_err or ""))
+                    if r_rc != 0:
+                        rec.update(status="FAILED", rc=r_rc,
+                                   reason=f"signoff_refused:{reason}; incumbent tail failed")
+                    else:
+                        # The probe may have streamed the rejected candidate
+                        # already. Remove that layout from the canonical PnR
+                        # names so the normal GDS step must stream the restored
+                        # incumbent; keep the bytes under the transaction for
+                        # diagnosis. A failed move is a failed rollback.
+                        for name in (f"{top}.gds", f"{top}.prefinish.gds",
+                                     f"{top}.prefinish.gds.receipt.json"):
+                            probe_file = out_dir / name
+                            if probe_file.is_file():
+                                os.replace(probe_file,
+                                           first_txn / f"invalidated_{name}")
+                        for proposal in rec["adoptions"]:
+                            proposal_txn = out_dir / _SDR_TXN_DIRS[proposal["stage"]]
+                            receipt = proposal_txn / "receipt.tsv"
+                            lines = receipt.read_text().splitlines()
+                            if (len(lines) != 2 or lines[0].split("\t") !=
+                                    ["status", "reason", "before_router_drc",
+                                     "after_router_drc"]):
+                                raise ValueError("SDR receipt unreadable")
+                            fields = lines[1].split("\t")
+                            if len(fields) != 4:
+                                raise ValueError("SDR receipt values unreadable")
+                            receipt.write_text(
+                                lines[0] + "\n" +
+                                f"REJECTED_CANDIDATE_DISCARDED\tsignoff_{reason}"
+                                f"\t{fields[2]}\t{fields[3]}\n")
+                        rec.update(status="REJECTED", rc=0,
+                                   reason=f"signoff_refused:{reason}")
+                    rc = r_rc
+                except (OSError, ValueError, PnrResumeUnavailable) as exc:
+                    rec.update(status="FAILED", rc=1,
+                               reason=f"signoff_refused:{reason}; rollback unavailable: {exc}")
+                break
         if t_rc != 0 or nxt is None or nxt.get("stage") in omitted:
             rec["status"] = "ADOPTED" if t_rc == 0 else "FAILED"
             break
@@ -34456,7 +34723,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # project's own prior measurement + the PDK's own Jmax; None on a first
     # pass (no measurement yet) keeps the PDN byte-identical. NONFATAL.
     try:
-        _pdn_em_floor = _pdn_em_width_floor(project, pdk, container)
+        _pdn_em_floor = _pdn_em_width_floor(
+            project, pdk, container, layout_will_be_replaced=True)
     except Exception as _em_exc:  # pragma: no cover - defensive
         print(f"[phase3] PDN EM floor derivation skipped (nonfatal): {_em_exc}")
         _pdn_em_floor = None
@@ -35102,7 +35370,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         _sdr_adopt = _pnr_adopt_sdr_candidates(
             container=container, out_dir=out_dir, out_dir_c=out_dir_c,
             pnr_tcl=pnr_tcl, log_text=(out or "") + (err or ""),
-            hard_ceiling_s=_pnr_ceiling, spare_plan=spare_plan)
+            hard_ceiling_s=_pnr_ceiling, spare_plan=spare_plan,
+            project=project, top=top, pdk=pdk)
         if _sdr_adopt.get("status") != "NOT_REQUESTED":
             # R-0915-69 — AND SWEEP AGAIN, BECAUSE THE ADOPT TAIL IS A SESSION
             # TOO. The sweep above runs the instant `_docker_exec` returns, which
@@ -61361,6 +61630,13 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "segments_analysed": seg_count,
             "max_segment_current_A": max_cur,
             "source": str(em_rpt.relative_to(project)),
+            # WHICH LAYOUT THIS NUMBER IS ABOUT, digested HERE, at measurement
+            # time. Without it a consumer can only re-digest whatever DEF is on
+            # disk later and compare it with itself, which is why the PDN floor
+            # could be sized from a previous run's current with nothing able to
+            # notice. See `_pdn_em_measures_this_layout`.
+            "subject_def": f"phase3/stage3/pnr/{_ppa_power._PDN_EM_SUBJECT_DEF}",
+            "subject_def_sha256": _ppa_power._pdn_em_subject_digest(project),
             # NOT a sign-off verdict — see the ir_drop.json note above. The EM
             # sign-off PASS/FAIL (segment current density vs PDK Jmax) is
             # decided downstream by em_report_check (eda_report_audit --mode em)
@@ -66125,6 +66401,11 @@ def main() -> int:
                     _rz["sentinel"].parent.mkdir(parents=True, exist_ok=True)
                     _rz["sentinel"].write_text(
                         json.dumps({"reason": "pdn_em_first_pass_resize",
+                                    # WHICH DESIGN this resize is spent on.
+                                    # Without it the sentinel bounds every
+                                    # future run in this tree, not just the
+                                    # passes that build this design.
+                                    "spent_on_def": _ppa_power._pdn_em_spent_on(project),
                                     "short": _rz["short"]}, indent=2) + "\n")
                 except OSError:
                     pass
@@ -66154,9 +66435,12 @@ def main() -> int:
                         "layers_short_on_pass_1": _rz["short"],
                         "second_pnr_status": _pnr_redispatched.status,
                         "second_pnr_wall_clock_s": round(_rz_secs, 1),
-                        "bound": ("exactly one extra PnR; enforced by the "
-                                  f"{_PDN_EM_RESIZE_SENTINEL} sentinel written "
-                                  "before the re-dispatch"),
+                        "bound": ("exactly one extra PnR PER DESIGN STATE; "
+                                  f"enforced by the {_PDN_EM_RESIZE_SENTINEL} "
+                                  "sentinel written before the re-dispatch and "
+                                  "keyed on the synthesis netlist digest, so a "
+                                  "crash-resume buys nothing and a new design "
+                                  "is not bound by the previous one's spend"),
                         "trigger": ("drawn DEF strap width < derived w_em; a "
                                     "comparison of two widths, never a gate "
                                     "verdict"),
