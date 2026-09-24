@@ -2,6 +2,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 PROG = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROG))
 import phase3_one_shot_runner as R  # noqa: E402
@@ -58,3 +60,27 @@ def test_non_sparse_or_other_failure_does_not_change_placement(tmp_path):
     assert _decision(deck, log.read_text()) is None
     _fake_openroad(deck, log, fail=False)
     assert _decision(deck, log.read_text()) is None
+
+
+@pytest.mark.parametrize("log,deck_change,reason", [
+    ("[ERROR GPL-0001] another placement error\n", None,
+     "did not report GPL-0305"),
+    ("[ERROR GPL-0305] numerical divergence\n", None,
+     "lacks measured movable or region area"),
+    ("[INFO GPL-0015] Region area: 5000000.000 um^2\n"
+     "[INFO GPL-0018] Movable instances area: 100000.000 um^2\n"
+     "[ERROR GPL-0305] numerical divergence\n", None,
+     "at or above the sparse limit"),
+    ("[INFO GPL-0015] Region area: 5000000.000 um^2\n"
+     "[INFO GPL-0018] Movable instances area: 10000.000 um^2\n"
+     "[ERROR GPL-0305] numerical divergence\n", " -timing_driven",
+     "no timing-driven GPL command"),
+])
+def test_refused_retry_names_the_failed_eligibility_fact(log, deck_change, reason):
+    deck = _build(util=0.30)
+    if deck_change:
+        deck = deck.replace(deck_change, "")
+    declines = []
+    assert R._sparse_gpl_retry_deck(deck, log, declines) is None
+    assert len(declines) == 1
+    assert reason in declines[0]
