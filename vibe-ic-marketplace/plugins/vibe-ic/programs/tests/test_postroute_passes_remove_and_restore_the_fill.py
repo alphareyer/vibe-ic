@@ -188,3 +188,110 @@ def test_a_net_that_already_carries_a_diode_is_diode_futile():
     assert "set _ant_mode -jumper_only" in pre
     assert "{*}$_ant_mode" in t[ra:ra + 200]
     assert "ANTENNA_DIODE_ON_FUTILE_NET" in t
+
+
+# --- 5. RULING: mixed case -> futile diodes destroyed by name (DRIVEN) ---------
+_MIXED_HARNESS = r"""
+set ::calls 0
+set ::reports {{nA nB} {nA nB} {nA} {nA}}
+set ::counts {2 2 1 1}
+proc check_antennas {args} {
+  set i [expr {min($::calls, [llength $::counts]-1)}]
+  set f [lindex $args [expr {[lsearch $args -report_file]+1}]]
+  if {[lsearch $args -report_file] >= 0} {
+    set fh [open $f w]
+    foreach n [lindex $::reports $i] { puts $fh "Net: $n" }
+    close $fh
+  }
+  incr ::calls
+  return [lindex $::counts $i]
+}
+proc detailed_route {args} { return "" }
+proc write_db {args} { return "" }
+proc remove_fillers {args} { puts "CALL_REMOVE_FILLERS" }
+set ::insts {d0}
+proc repair_antennas {args} {
+  puts "CALL_REPAIR_ANTENNAS $args"
+  if {[lsearch $args -jumper_only] >= 0} { return "" }
+  if {![info exists ::inserted]} { set ::inserted 1; lappend ::insts d1 d2 }
+  return ""
+}
+namespace eval ord { proc get_db_block {} { return ::BLK } }
+namespace eval odb {
+  proc dbInst_destroy {i} {
+    set n [$i getName]
+    puts "DESTROYED_ONE $n"
+    set x [lsearch $::insts $n]
+    if {$x >= 0} { set ::insts [lreplace $::insts $x $x] }
+  }
+}
+proc ::BLK {method args} {
+  switch -- $method {
+    getInsts { set r {}; foreach n $::insts { lappend r ::INST_$n }; return $r }
+    findInst { set n [lindex $args 0]
+               if {[lsearch $::insts $n] < 0} { return NULL }; return ::INST_$n }
+    findNet  { set n [lindex $args 0]
+               if {$n ne "nA" && $n ne "nB"} { return NULL }; return ::NET_$n }
+    getNets  { return {} }
+  }
+  return NULL
+}
+proc ::MASTER_D {method args} { if {$method eq "getName"} { return fx__antenna }; return "" }
+foreach d {d0 d1 d2} net {nA nA nB} {
+  proc ::INST_$d [list method args] [string map [list @D@ $d @N@ $net] {
+    switch -- $method {
+      getName   { return @D@ }
+      getMaster { return ::MASTER_D }
+      getITerms { return {::IT_@D@} }
+    }
+    return 0
+  }]
+  proc ::IT_$d [list method args] [string map [list @D@ $d @N@ $net] {
+    switch -- $method { getInst { return ::INST_@D@ } getNet { return ::NET_@N@ } }
+    return NULL
+  }]
+}
+proc ::NET_nA {method args} {
+  switch -- $method {
+    getName { return nA } isSpecial { return 0 } getWire { return W }
+    getITerms { set r {}; foreach d {d0 d1} { if {[lsearch $::insts $d] >= 0} { lappend r ::IT_$d } }; return $r }
+  }
+  return 0
+}
+proc ::NET_nB {method args} {
+  switch -- $method {
+    getName { return nB } isSpecial { return 0 } getWire { return W }
+    getITerms { if {[lsearch $::insts d2] >= 0} { return {::IT_d2} }; return {} }
+  }
+  return 0
+}
+"""
+
+
+def test_mixed_case_destroys_the_futile_diode_by_name_and_keeps_the_other():
+    """RULING: the pass runs (nB needs a diode), then the diode that landed on
+    nA -- which already carried one and still violated (ANT-0019) -- is
+    destroyed by name before the refill and disclosed; nA still violating at
+    the next measurement is routed to jumper/reroute, never counted repaired."""
+    tclsh = shutil.which("tclsh")
+    if tclsh is None:                                   # pragma: no cover
+        pytest.skip("tclsh not installed")
+    deck = R._antenna_repair_tcl(A._pdk(), "/o", filler_spec=SPEC)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "ant.tcl"
+        p.write_text(_MIXED_HARNESS.replace("/o", td) + deck.replace("/o", td)
+                     + '\nputs "INSTS={$::insts}"\n')
+        r = subprocess.run([tclsh, str(p)], capture_output=True, text=True,
+                           cwd=td)
+    out = r.stdout
+    assert "ANTENNA_DIODE_FUTILE: 1 net(s)" in out and "nA" in out, out[-3000:]
+    assert "ANTENNA_DIODE_FUTILE_MIXED" in out, out[-3000:]
+    assert "-jumper_only" not in out.split("CALL_REPAIR_ANTENNAS", 1)[1].splitlines()[0]
+    assert "ANTENNA_DIODE_ON_FUTILE_NET_REMOVED: net=nA inst=d1 master=fx__antenna" \
+        in out, out[-3000:]
+    assert "DESTROYED_ONE d1" in out and "DESTROYED_ONE d2" not in out, out[-3000:]
+    assert out.index("DESTROYED_ONE d1") < out.index("ANTENNA_REFILL_DONE"), (
+        "the futile diode must be gone before the fill is restored")
+    assert "ANTENNA_FUTILE_NET_STILL_VIOLATING" in out and \
+        "NOT counted as repaired" in out, out[-3000:]
+    assert "INSTS={d0 d2}" in out, out[-500:]

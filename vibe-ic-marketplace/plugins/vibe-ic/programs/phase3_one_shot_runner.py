@@ -26141,6 +26141,59 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "      array unset _ant_fd_before\n"
         "    }\n")
     _ant_refill_if = _ant_futile_disclose + _ant_refill_if
+    # RULING (mixed ANT-0019 case): the pass runs, then every diode it
+    # inserted on a FUTILE net (one that already carried a diode and still
+    # violated) is DESTROYED BY NAME before the fill is restored, and each
+    # removal is disclosed. Collected first, destroyed after, so the iterm walk
+    # never runs over an instance it just removed.
+    _ant_futile_remove = (
+        "    if {[array size _ant_fd_before] > 0} {\n"
+        "      set _ant_rmq {}\n"
+        "      catch {\n"
+        "        foreach _ant_rn [array names _ant_fd_before] {\n"
+        "          set _ant_rnet [$_ant_blk findNet $_ant_rn]\n"
+        "          if {$_ant_rnet eq \"NULL\"} { continue }\n"
+        "          foreach _ant_rit [$_ant_rnet getITerms] {\n"
+        "            set _ant_ri [$_ant_rit getInst]\n"
+        "            set _ant_rin [$_ant_ri getName]\n"
+        "            set _ant_rmn [[$_ant_ri getMaster] getName]\n"
+        f"            if {{$_ant_rmn ne \"{pdk.antenna_diode_cell}\"}} {{ continue }}\n"
+        "            if {[info exists _ant_pre_inst($_ant_rin)]} { continue }\n"
+        "            lappend _ant_rmq [list $_ant_rn $_ant_rin $_ant_rmn]\n"
+        "          }\n"
+        "        }\n"
+        "      }\n"
+        "      foreach _ant_rq $_ant_rmq {\n"
+        "        lassign $_ant_rq _ant_rn _ant_rin _ant_rmn\n"
+        "        set _ant_ri [$_ant_blk findInst $_ant_rin]\n"
+        "        if {$_ant_ri eq \"NULL\"} { continue }\n"
+        "        if {![catch {odb::dbInst_destroy $_ant_ri}]} {\n"
+        "          puts \"ANTENNA_DIODE_ON_FUTILE_NET_REMOVED: net=$_ant_rn "
+        "inst=$_ant_rin master=$_ant_rmn -- ANT-0019: a diode cannot help this "
+        "net; removed by name before the fill is restored\"\n"
+        "          lappend _ant_futile_removed $_ant_rn\n"
+        "          if {[info exists _ant_fd_before($_ant_rn)]} "
+        "{ incr _ant_fd_before($_ant_rn) 0 }\n"
+        "        }\n"
+        "      }\n"
+        "    }\n")
+    # ...and a futile net whose diode was removed is judged by the NEXT
+    # measurement: still violating -> reported as routed to the jumper /
+    # reroute path, never counted as repaired.
+    _ant_futile_still = (
+        "    if {[llength $_ant_futile_removed] > 0} {\n"
+        "      set _ant_sv {}\n"
+        "      foreach _ant_sn [lsort -unique $_ant_futile_removed] {\n"
+        "        if {[lsearch -exact $_ant_now $_ant_sn] >= 0} "
+        "{ lappend _ant_sv $_ant_sn }\n"
+        "      }\n"
+        "      if {[llength $_ant_sv] > 0} {\n"
+        "        puts \"ANTENNA_FUTILE_NET_STILL_VIOLATING: [llength $_ant_sv] "
+        "net(s) whose futile diode was removed still violate -- routed to the "
+        "jumper/reroute path, NOT counted as repaired: [join $_ant_sv {, }]\"\n"
+        "      }\n"
+        "      set _ant_futile_removed {}\n"
+        "    }\n")
     return (
         # The design-for-ECO spare tie nets are `setDoNotTouch true` so the
         # RESIZER SKIPS them instead of erroring on a dont_touch load pin
@@ -26410,6 +26463,8 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "    puts \"ANTENNA_PRE_REPAIR_CHECKPOINT: $_ant_ckpt\"\n"
         "  }\n"
         "  set _ant_fill_removed 0\n"
+        "  set _ant_futile_removed {}\n"
+        "  array unset _ant_fd_before\n"
         "  for {set _i 0} {$_i < $_ant_cap} {incr _i} {\n"
         + _ant_refill_if +
         "    set _nv -1\n"
@@ -26425,6 +26480,7 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "    set _ant_now [_vic_ant_nets $_ant_rf $_nv]\n"
         "    _vic_ant_rm_empty $_ant_rf\n"
         "    _vic_ant_sign $_ant_rf $_i\n"
+        + _ant_futile_still +
         "    if {$_nv > 0 && [llength $_ant_now] == 0} {\n"
         "      if {$_ant_membership} {\n"
         "        puts \"ANTENNA_LOOP_MEMBERSHIP_UNAVAILABLE: iter=$_i -- the "
@@ -26708,6 +26764,7 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "      # incremental detailed_route of the diode-dirty nets.\n"
         "      puts \"ANTENNA_NATIVE_REROUTE_NONFATAL: $_ra_native\"\n"
         "      set _ant_refused \"ANTENNA_NATIVE_REROUTE_NONFATAL: $_ra_native\"\n"
+        + _ant_futile_remove.replace("\n    ", "\n      ").replace("    if {[array", "      if {[array", 1) +
         # R-0915-116(2) — THE OBJECTIVE IS THE VIOLATION COUNT, AND THE
         # WHOLE-DESIGN FALLBACK IS DELETED.
         #
@@ -26941,6 +26998,7 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "      }\n"
         "      break\n"
         "    }\n"
+        + _ant_futile_remove +
         f"    puts \"REPAIR_ANTENNA_DONE: diode={pdk.antenna_diode_cell} iter=$_i margin=$_ant_margin\"\n"
         "    # Escalate head-room each turn (cap 40) vs reroute re-introduction.\n"
         "    if {$_ant_margin < 40} { set _ant_margin [expr {$_ant_margin + 10}] }\n"
