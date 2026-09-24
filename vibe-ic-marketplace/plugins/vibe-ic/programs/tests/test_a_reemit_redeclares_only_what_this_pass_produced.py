@@ -1,60 +1,58 @@
-"""The re-emit back-fill re-declares only what THIS pass demonstrably produced.
+"""No back-fill launders a rewrite: evidence comes from the PRODUCER, completely.
 
 MEASURED on main 240c0a353: a declared `reports/phase3/lvs.rpt`, rewritten with
 no invocation, read PROVENANCE_HASH_MISMATCH under
 `provenance_output_hash_completeness_check` -- and PASS after the runner's
-`_record_reemitted_outputs` appended a `reconstructed` re-emit row declaring the
-new bytes. The ledger laundered an unexplained rewrite; nobody reads
-`reconstructed`.
+`_record_reemitted_outputs` appended a `reconstructed` row declaring the new bytes.
 
-The rule now: a drifted declared output is re-declared only when a step of this
-pass wrote exactly those bytes (its StepResult lists the file, the file was
-modified inside the step's run window, and the disk still holds the sha taken
-when the step returned). The row names the producing step. Anything else is
-written to `reports/phase3/provenance_unexplained_rewrites.json` and NOT
-declared, so the hash check still reports it.
-
-The real runner function and the real checker decide; nothing is stubbed.
+Review wo6zpfboe then refused r2's evidence (a StepResult's `output_files`) and
+set the rule this file pins, approved as one rule with three entry points:
+  * a tool session writing FRESH files declares them (`_declared_session_exec`);
+  * an IN-PLACE / runner-side transform (`_declared_transform_exec`, or
+    `_restamp_provenance_output(writer=(step, since, input_path, input_sha))`)
+    is credited only on the CHAIN: the bytes it read equal the newest declared
+    sha of its input -- otherwise it runs undeclared and the input drift is
+    recorded;
+  * the re-emit pass is a DETECTOR: it records unexplained drift and never
+    declares it. A StepResult row is not evidence.
+Every verdict below is the real `provenance_output_hash_completeness_check`.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sys
 import time
 from pathlib import Path
 
-import pytest
-
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
+sys.path.insert(0, str(PROGRAMS / "tests"))
 
 import phase3_one_shot_runner as R                              # noqa: E402
 import provenance_output_hash_completeness_check as C           # noqa: E402
 
 REL = "reports/phase3/lvs.rpt"
 ORIGINAL = b"LVS: circuits match uniquely\n"
+TOP = "spm"
+PNR = "phase3/stage3/pnr"
+GDS = f"{PNR}/{TOP}.gds"
+REPORT = "reports/phase3/provenance_unexplained_rewrites.json"
 
 
 def _sha(b: bytes) -> str:
     return "sha256:" + hashlib.sha256(b).hexdigest()
 
 
-@pytest.fixture(autouse=True)
-def _fresh_registry(monkeypatch):
-    monkeypatch.setattr(R, "_PASS_PRODUCED", {}, raising=False)
-
-
-def _project(tmp_path: Path) -> Path:
+def _project(tmp_path: Path, rel: str = REL, data: bytes = ORIGINAL) -> Path:
     proj = tmp_path / "proj"
-    f = proj / REL
-    f.parent.mkdir(parents=True)
-    f.write_bytes(ORIGINAL)
+    f = proj / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(data)
     (proj / "provenance.jsonl").write_text(json.dumps({
-        "tool": "netgen", "command": "netgen -batch lvs", "exit_code": 0,
-        "timestamp": "2026-09-24T01:00:00Z",
-        "outputs": {REL: _sha(ORIGINAL)}}) + "\n")
+        "record": "invocation", "tool": "netgen", "command": "netgen -batch lvs",
+        "exit_code": 0, "timestamp": "2026-09-24T01:00:00Z",
+        "outputs": {rel: _sha(data)}}) + "\n")
     return proj
 
 
@@ -68,191 +66,211 @@ def _rules(proj: Path):
     return verdict, sorted({f.rule for f in findings})
 
 
-# ── the laundering: RED on main ─────────────────────────────────────────────
+def _declined(proj: Path):
+    rep = proj / REPORT
+    return ([r["path"] for r in json.loads(rep.read_text())["rewrites"]]
+            if rep.is_file() else [])
+
+
+# ── the detector: RED on main ──────────────────────────────────────────────
 
 def test_an_undeclared_rewrite_is_not_laundered_into_a_declaration(tmp_path):
     proj = _project(tmp_path)
-    (proj / REL).write_bytes(b"LVS: circuits match uniquely (edited)\n")
+    (proj / REL).write_bytes(b"LVS: edited by hand\n")
     note = R._record_reemitted_outputs(proj)
-    verdict, rules = _rules(proj)
-    assert verdict == "FAIL" and "PROVENANCE_HASH_MISMATCH" in rules, rules
+    assert _rules(proj)[0] == "FAIL"
+    assert "PROVENANCE_HASH_MISMATCH" in _rules(proj)[1]
     assert len(_rows(proj)) == 1, _rows(proj)
     assert note and REL in note, note
+    assert _declined(proj) == [REL]
 
 
-def test_the_unexplained_rewrite_is_recorded_as_a_finding(tmp_path):
+def test_a_step_row_listing_the_file_is_not_evidence(tmp_path):
+    """r2 credited this; the review refused it: a StepResult lists whatever it
+    lists."""
     proj = _project(tmp_path)
-    edited = b"LVS: circuits match uniquely (edited)\n"
-    (proj / REL).write_bytes(edited)
-    R._record_reemitted_outputs(proj)
-    rep = json.loads((proj / "reports/phase3/"
-                      "provenance_unexplained_rewrites.json").read_text())
-    assert rep["verdict"] == "FINDING"
-    assert rep["rewrites"] == [{
-        "path": REL, "declared_sha256": _sha(ORIGINAL),
-        "disk_sha256": _sha(edited),
-        "declined_by": "_record_reemitted_outputs",
-        "why": "no step of this pass wrote these bytes"}]
-
-
-def test_a_change_after_the_producing_step_returned_is_unexplained(tmp_path):
-    proj = _project(tmp_path)
-    (proj / REL).write_bytes(b"LVS by the step\n")
+    (proj / REL).write_bytes(b"LVS written by nobody who declared it\n")
     R.StepResult("lvs", "PASS", 1.0, "ran", [str(proj / REL)])
-    (proj / REL).write_bytes(b"LVS changed afterwards\n")
     R._record_reemitted_outputs(proj)
-    verdict, rules = _rules(proj)
-    assert verdict == "FAIL" and "PROVENANCE_HASH_MISMATCH" in rules, rules
-
-
-def test_a_file_a_step_lists_but_did_not_write_is_not_credited(tmp_path):
-    """A step that REUSED a file (not modified in its window) did not produce
-    its bytes, even though its row lists the path."""
-    proj = _project(tmp_path)
-    (proj / REL).write_bytes(b"edited before the step\n")
-    old = time.time() - 3600
-    os.utime(proj / REL, (old, old))
-    R.StepResult("lvs", "PASS", 1.0, "reused", [str(proj / REL)])
-    R._record_reemitted_outputs(proj)
+    assert len(_rows(proj)) == 1
     assert _rules(proj)[0] == "FAIL"
 
 
-# ── the legitimate re-emit is kept ─────────────────────────────────────────
+# ── the chain: a transform of declared bytes is credited ───────────────────
 
-def test_a_rewrite_by_a_step_of_this_pass_is_re_declared_naming_it(tmp_path):
-    proj = _project(tmp_path)
-    (proj / REL).write_bytes(b"LVS by the step\n")
-    R.StepResult("lvs", "PASS", 1.0, "ran", [str(proj / REL)])
-    assert R._record_reemitted_outputs(proj) is None
-    assert _rules(proj)[0] == "PASS"
+def test_a_transform_of_declared_bytes_is_declared_naming_its_step(tmp_path):
+    proj = _project(tmp_path, GDS, b"GDS as streamed\n")
+    R._declared_transform_exec(
+        proj, proj / GDS, "gds:layer_merge", "klayout", "merge",
+        lambda: (proj / GDS).write_bytes(b"GDS merged\n"))
     last = _rows(proj)[-1]
-    assert last["command"] == "re-emit (phase3 iteration)"
-    assert last["producing_step"] == {REL: "lvs"}
-    assert last["reconstructed"] is True
+    assert last["outputs"] == {GDS: _sha(b"GDS merged\n")}
+    assert last["producing_step"] == "gds:layer_merge"
+    assert _rules(proj)[0] == "PASS" and _declined(proj) == []
 
 
-def test_a_failed_step_still_names_what_it_wrote(tmp_path):
-    """A FAIL row still ran and still wrote its report."""
-    proj = _project(tmp_path)
-    (proj / REL).write_bytes(b"LVS: mismatch\n")
-    R.StepResult("lvs", "FAIL", 1.0, "mismatch", [str(proj / REL)])
-    R._record_reemitted_outputs(proj)
-    assert _rules(proj)[0] == "PASS"
-
-
-def test_a_step_that_did_not_run_credits_nothing(tmp_path):
-    proj = _project(tmp_path)
-    (proj / REL).write_bytes(b"LVS by nobody\n")
-    R.StepResult("lvs", "NOT_MEASURED", 1.0, "no netlist",
-                 [str(proj / REL)], reason_class="missing_artefact")
-    R._record_reemitted_outputs(proj)
-    assert _rules(proj)[0] == "FAIL"
-
-
-# ── r2 (ruling): the same rule through every back-fill, ONE helper ─────────
-#
-# `_v1_6_620_append_pv_signoff_provenance`, `_restamp_provenance_output` and
-# `_step37_restamp_canon_gds_provenance` re-declared a path's CURRENT sha
-# whenever the newest record disagreed. Each now asks `_redeclaration_evidence`
-# and records a decline in the same findings report.
-
-TOP = "widget"
-GDS_PNR = f"phase3/stage3/pnr/{TOP}.gds"
-GDS_CANON = f"phase3/stage4/gds/{TOP}.gds"
-
-
-def _backfilled(proj: Path, rel: str, data: bytes, tool: str) -> Path:
-    """A path whose newest record is a runner BACK-FILL (not a measurement)."""
-    f = proj / rel
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_bytes(data)
-    with (proj / "provenance.jsonl").open("a") as fh:
-        fh.write(json.dumps({
-            "tool": tool, "command": f"{tool} (back-filled)", "exit_code": 0,
-            "duration_ms": None, "reconstructed": True,
-            "timestamp": "2026-09-24T01:00:01Z",
-            "outputs": {rel: _sha(data)}}) + "\n")
-    return f
-
-
-def _declined(proj: Path, rel: str) -> bool:
-    rep = proj / "reports/phase3/provenance_unexplained_rewrites.json"
-    return rep.is_file() and any(
-        r["path"] == rel for r in json.loads(rep.read_text())["rewrites"])
-
-
-def test_the_signoff_backfill_does_not_launder_a_rewritten_gds(tmp_path):
-    proj = _project(tmp_path)
-    f = _backfilled(proj, GDS_PNR, b"GDS as streamed\n", "magic")
-    f.write_bytes(b"GDS edited by hand\n")
-    before = len(_rows(proj))
-    R._v1_6_620_append_pv_signoff_provenance(proj, TOP)
-    assert len(_rows(proj)) == before, _rows(proj)[before:]
-    assert _declined(proj, GDS_PNR)
+def test_a_transform_of_tampered_bytes_runs_undeclared(tmp_path):
+    proj = _project(tmp_path, GDS, b"GDS as streamed\n")
+    (proj / GDS).write_bytes(b"GDS edited by hand\n")
+    ran = []
+    R._declared_transform_exec(
+        proj, proj / GDS, "gds:dummy_fill", "klayout", "fill",
+        lambda: (ran.append(1), (proj / GDS).write_bytes(b"GDS filled\n")))
+    assert ran == [1], "the transform still RUNS"
+    assert len(_rows(proj)) == 1, _rows(proj)
+    assert GDS in _declined(proj)
     assert "PROVENANCE_HASH_MISMATCH" in _rules(proj)[1]
 
 
-def test_the_signoff_backfill_redeclares_a_gds_this_pass_wrote(tmp_path):
-    proj = _project(tmp_path)
-    f = _backfilled(proj, GDS_PNR, b"GDS as streamed\n", "magic")
-    f.write_bytes(b"GDS re-streamed by the gds step\n")
-    R.StepResult("gds", "PASS", 1.0, "streamed", [str(f)])
+def test_the_netlist_normaliser_does_not_launder_its_input(tmp_path):
+    """Review item 3: the transform ran over an undeclared rewrite."""
+    rel = "phase2/stage2/synth/netlist.v"
+    body = "module m(x);\n  wire signed [3:0] a;\nendmodule\n"
+    proj = _project(tmp_path, rel, body.encode())
+    (proj / rel).write_text(body + "// edited by hand\n")
+    R._ensure_structural_reader_readable(proj / rel, proj)
+    assert len(_rows(proj)) == 1, _rows(proj)
+    assert rel in _declined(proj)
+
+
+def test_the_netlist_normaliser_is_credited_on_declared_input(tmp_path):
+    rel = "phase2/stage2/synth/netlist.v"
+    body = "module m(x);\n  wire signed [3:0] a;\nendmodule\n"
+    proj = _project(tmp_path, rel, body.encode())
+    R._ensure_structural_reader_readable(proj / rel, proj)
+    assert _rows(proj)[-1]["producing_step"] == "structural_reader_normalise"
+    assert _rules(proj)[0] == "PASS"
+
+
+def test_the_canonical_copy_is_credited_only_from_a_declared_pnr_gds(tmp_path):
+    canon_rel = f"phase3/stage4/gds/{TOP}.gds"
+    for tampered in (False, True):
+        proj = _project(tmp_path / str(tampered), GDS, b"GDS final\n")
+        canon = proj / canon_rel
+        canon.parent.mkdir(parents=True)
+        canon.write_bytes(b"canonical from an earlier run\n")
+        with (proj / "provenance.jsonl").open("a") as f:
+            f.write(json.dumps({"tool": "klayout", "command": "copy",
+                                "exit_code": 0, "reconstructed": True,
+                                "timestamp": "2026-09-24T01:00:01Z",
+                                "outputs": {canon_rel: _sha(
+                                    b"canonical from an earlier run\n")}})
+                    + "\n")
+        if tampered:
+            (proj / GDS).write_bytes(b"GDS final, edited by hand\n")
+        t, src = time.time(), (proj / GDS).read_bytes()
+        canon.write_bytes(src)
+        n = len(_rows(proj))
+        R._step37_restamp_canon_gds_provenance(
+            proj, TOP, canon,
+            writer=("canonicalize_artefacts", t, proj / GDS, _sha(src)))
+        added = _rows(proj)[n:]
+        declared = any(canon_rel in (r.get("outputs") or {}) for r in added)
+        assert declared is (not tampered), (tampered, added)
+        assert (GDS in _declined(proj)) is tampered
+
+
+def test_the_signoff_backfill_never_redeclares_changed_bytes(tmp_path):
+    proj = _project(tmp_path, GDS, b"GDS as streamed\n")
+    rows0 = _rows(proj)
+    rows0[0]["reconstructed"] = True               # a BACK-FILLED record
+    rows0[0].pop("record")
+    (proj / "provenance.jsonl").write_text(json.dumps(rows0[0]) + "\n")
+    (proj / GDS).write_bytes(b"GDS edited by hand\n")
     R._v1_6_620_append_pv_signoff_provenance(proj, TOP)
-    assert _rows(proj)[-1]["outputs"] == {GDS_PNR: _sha(
-        b"GDS re-streamed by the gds step\n")}
-    assert not _declined(proj, GDS_PNR)
+    assert len(_rows(proj)) == 1, _rows(proj)
+    assert GDS in _declined(proj)
 
 
-def test_the_signoff_backfill_still_corrects_a_tool_on_the_same_bytes(
+def test_the_signoff_backfill_still_corrects_a_tool_on_unchanged_bytes(
         tmp_path):
-    """A re-attribution of unchanged bytes is not a re-declaration."""
-    proj = _project(tmp_path)
-    _backfilled(proj, GDS_PNR, b"GDS as streamed\n", "phase3_one_shot_runner")
+    proj = tmp_path / "proj"
+    f = proj / GDS
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"GDS as streamed\n")
+    (proj / "provenance.jsonl").write_text(json.dumps({
+        "tool": "phase3_one_shot_runner", "command": "back-fill",
+        "exit_code": 0, "duration_ms": None, "reconstructed": True,
+        "timestamp": "2026-09-24T01:00:00Z",
+        "outputs": {GDS: _sha(b"GDS as streamed\n")}}) + "\n")
     R._v1_6_620_append_pv_signoff_provenance(proj, TOP)
     last = _rows(proj)[-1]
     assert last["tool"] == "magic" and last["outputs"] == {
-        GDS_PNR: _sha(b"GDS as streamed\n")}
+        GDS: _sha(b"GDS as streamed\n")}
 
 
-def test_restamp_declines_an_unexplained_rewrite(tmp_path):
-    proj = _project(tmp_path)
-    f = _backfilled(proj, GDS_CANON, b"canonical\n", "klayout")
-    f.write_bytes(b"canonical, edited\n")
-    before = len(_rows(proj))
-    R._restamp_provenance_output(proj, GDS_CANON, f, "klayout", "restamp")
-    assert len(_rows(proj)) == before
-    assert _declined(proj, GDS_CANON)
+# ── full-flow shape: the REAL step_gds over a tree WITH a ledger ───────────
+
+_REWRITERS = ("_gds_grid_snap", "_klayout_merge_layers", "_die_finishing",
+              "_density_metal_fill", "_die_density_fill",
+              "_restore_port_labels_if_missing")
 
 
-def test_restamp_redeclares_what_its_caller_just_wrote(tmp_path):
-    proj = _project(tmp_path)
-    f = _backfilled(proj, GDS_CANON, b"canonical\n", "klayout")
-    t = time.time()
-    f.write_bytes(b"canonical, re-copied\n")
-    R._step37_restamp_canon_gds_provenance(
-        proj, TOP, f, writer=("canonicalize_artefacts", t))
-    last = _rows(proj)[-1]
-    assert last["outputs"] == {GDS_CANON: _sha(b"canonical, re-copied\n")}
-    assert last["producing_step"] == "canonicalize_artefacts"
+def _run_step_gds(tmp_path: Path, monkeypatch, *, tamper_after_stream: bool):
+    from test_kspm43_streamout_top_cell_is_the_def_design import (  # noqa
+        _Pdk, _def)
+    proj = tmp_path / "proj"
+    pnr = R._pl.pnr_dir(proj)
+    _def(pnr / f"{TOP}.def", TOP)
+    (proj / "provenance.jsonl").write_text("")
+    monkeypatch.setattr(R, "_PROV_SINK", proj)
+    gds = pnr / f"{TOP}.gds"
+
+    def _exec(container, cmd, *a, **kw):
+        outs = kw.get("outputs") or []
+        if any(Path(o) == gds for o in outs):      # the stream-out session
+            gds.write_bytes(b"GDS as streamed\n")
+            R._log_invocation(cmd, 0, 1, marker=kw.get("marker"),
+                              container=None, outputs=outs)
+            if tamper_after_stream:                # between stream-out and fill
+                with gds.open("ab") as fh:
+                    fh.write(b"edited by hand\n")
+        return 0, "", ""
+
+    monkeypatch.setattr(R, "_docker_exec", _exec)
+    monkeypatch.setattr(R, "_tool_in_path", lambda c, t: True)
+    monkeypatch.setattr(R, "_to_container_path", lambda p, c: str(p))
+    monkeypatch.setattr(R, "_vacuous_on_unrouted", lambda *a, **k: None)
+    monkeypatch.setattr(R, "_magic_def_to_gds",
+                        lambda *a, **k: (False, "forced"))
+    for name in _REWRITERS:                        # each rewrites the GDS
+        def _rewrite(*a, _n=name, **k):
+            with gds.open("ab") as fh:
+                fh.write(f"{_n}\n".encode())
+            return True, f"{_n} ok"
+        monkeypatch.setattr(R, name, _rewrite)
+    R.step_gds(proj, TOP, _Pdk(), "cnt")
+    R._record_reemitted_outputs(proj)
+    return proj, gds
 
 
-def test_a_writer_claim_older_than_the_file_is_not_evidence(tmp_path):
-    """`writer` is checked against the file: a caller cannot vouch for bytes
-    that were already there before it started."""
-    proj = _project(tmp_path)
-    f = _backfilled(proj, GDS_CANON, b"canonical\n", "klayout")
-    f.write_bytes(b"canonical, edited earlier\n")
-    old = time.time() - 3600
-    os.utime(f, (old, old))
-    R._step37_restamp_canon_gds_provenance(
-        proj, TOP, f, writer=("canonicalize_artefacts", time.time()))
-    assert _declined(proj, GDS_CANON)
+def test_an_untampered_gds_flow_leaves_zero_unexplained_rows(tmp_path,
+                                                             monkeypatch):
+    """The false-FAIL guard: every rewrite after the declared stream-out is a
+    chained transform, so nothing is unexplained and the GDS verifies."""
+    proj, gds = _run_step_gds(tmp_path, monkeypatch, tamper_after_stream=False)
+    assert b"_die_density_fill" in gds.read_bytes(), "the rewriters ran"
+    assert _declined(proj) == [], _declined(proj)
+    _v, findings = C.audit(proj)
+    assert not [f for f in findings if GDS in f.detail
+                and f.rule == "PROVENANCE_HASH_MISMATCH"], findings
+    steps = [r.get("producing_step") for r in _rows(proj)
+             if GDS in (r.get("outputs") or {})]
+    assert "gds:layer_merge" in steps and "gds:die_density_fill" in steps, steps
 
 
-def test_one_helper_decides_for_every_backfill():
+def test_a_gds_edited_between_stream_out_and_fill_fails(tmp_path, monkeypatch):
+    proj, gds = _run_step_gds(tmp_path, monkeypatch, tamper_after_stream=True)
+    assert b"_density_metal_fill" in gds.read_bytes(), "the fill still RAN"
+    assert GDS in _declined(proj)
+    declared = [r for r in _rows(proj) if GDS in (r.get("outputs") or {})]
+    assert len(declared) == 1, declared            # only the stream-out
+    assert "PROVENANCE_HASH_MISMATCH" in _rules(proj)[1]
+
+
+def test_one_helper_decides_for_every_redeclaration():
     import inspect
-    for fn in (R._record_reemitted_outputs, R._restamp_provenance_output,
+    for fn in (R._restamp_provenance_output,
                R._v1_6_620_append_pv_signoff_provenance):
         assert "_redeclaration_evidence(" in inspect.getsource(fn), fn.__name__
-        assert "_record_unexplained_rewrite(" in inspect.getsource(fn), (
-            fn.__name__)
+    assert not hasattr(R, "_PASS_PRODUCED"), "a step row is not evidence"
