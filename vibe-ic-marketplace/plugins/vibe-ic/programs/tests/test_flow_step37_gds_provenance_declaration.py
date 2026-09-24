@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import sys
 from pathlib import Path
 
@@ -284,6 +285,7 @@ def test_producer_supersedes_a_stale_record_without_amending_it(tmp_path):
     an in-place edit is what made a tampered artefact indistinguishable from a
     re-emitted one. The checker now judges a path by its NEWEST record."""
     from provenance_output_hash_completeness_check import audit
+    _t = time.time()
     project = _shipped_project(tmp_path, stale=True)
     before = (project / "provenance.jsonl").read_text().splitlines()
     _runner._step37_declare_streamout_gds_provenance(project, "chip_top")
@@ -307,6 +309,7 @@ def test_producer_supersedes_a_stale_record_without_amending_it(tmp_path):
 def test_producer_is_idempotent(tmp_path):
     """A second call must add nothing. A producer that appends unconditionally
     would grow the ledger on every pass."""
+    _t = time.time()
     project = _shipped_project(tmp_path, stale=True)
     _runner._step37_declare_streamout_gds_provenance(project, "chip_top")
     first = (project / "provenance.jsonl").read_text()
@@ -437,8 +440,20 @@ def test_guard_wrong_tool_attribution_still_fails(tmp_path):
 def test_guard_original_restamp_helper_still_works(tmp_path):
     """`_step37_restamp_canon_gds_provenance` keeps its signature and effect —
     test_canonical_gds_provenance_restamp.py calls it directly."""
+    _t = time.time()
     project = _shipped_project(tmp_path, stale=True)
     canon = project / "phase3/stage4/gds/chip_top.gds"
-    _runner._step37_restamp_canon_gds_provenance(project, "chip_top", canon)
+    # 2026-09-24 (lane ictier1, reemit r3; review wo6zpfboe, design approved): evidence comes from the PRODUCER -- a re-declaration is credited only on the chain (the bytes a transform read equal the newest declared sha of its input). This fixture supplies what the production flow has: the producer's own record, and the chained writer.
+    # The stream-out declared the primary GDS; the canonical copy chains to it.
+    pnr = project / "phase3/stage3/pnr/chip_top.gds"
+    with (project / "provenance.jsonl").open("a") as f:
+        f.write(json.dumps({"record": "invocation", "tool": "klayout",
+                            "command": "klayout streamout", "exit_code": 0,
+                            "timestamp": "2026-07-26T14:52:10Z",
+                            "outputs": {"phase3/stage3/pnr/chip_top.gds":
+                                        _sha(pnr.read_bytes())}}) + "\n")
+    _runner._step37_restamp_canon_gds_provenance(
+        project, "chip_top", canon,
+        writer=("canonicalize_artefacts", _t, pnr, _sha(pnr.read_bytes())))
     assert _sha(canon.read_bytes()) in \
         (project / "provenance.jsonl").read_text()

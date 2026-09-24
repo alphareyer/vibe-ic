@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -261,9 +262,12 @@ def test_runner_reemit_appends_and_leaves_history_byte_intact(tmp_path):
     original_line = json.dumps(_record(rel, _sha(art)))
     (tmp_path / "provenance.jsonl").write_text(original_line + "\n")
 
+    # 2026-09-24 (lane ictier1, reemit r3; review wo6zpfboe, design approved): evidence comes from the PRODUCER -- a re-declaration is credited only on the chain (the bytes a transform read equal the newest declared sha of its input). This fixture supplies what the production flow has: the producer's own record, and the chained writer.
+    _pre, _t = _sha(art), time.time()
     art.write_text("second pass\n")
     mod._restamp_provenance_output(
-        tmp_path, rel, art, "demotool", "demotool --out")
+        tmp_path, rel, art, "demotool", "demotool --out",
+        writer=("demotool", _t, art, _pre))
 
     lines = [l for l in (tmp_path / "provenance.jsonl")
              .read_text().splitlines() if l.strip()]
@@ -346,10 +350,15 @@ def _heterogeneous_ledger(project: Path) -> bytes:
 def _drive_reemit_twice(mod, project: Path, rel: str, art: Path):
     """Two re-emits of the same path, the second after the bytes change
     again — i.e. drive the runner twice."""
+    # 2026-09-24 (lane ictier1, reemit r3; review wo6zpfboe, design approved): evidence comes from the PRODUCER -- a re-declaration is credited only on the chain (the bytes a transform read equal the newest declared sha of its input). This fixture supplies what the production flow has: the producer's own record, and the chained writer.
+    _pre, _t = _sha(art), time.time()
     art.write_text("second pass\n")
-    mod._restamp_provenance_output(project, rel, art, "demotool", "demotool -o")
+    mod._restamp_provenance_output(project, rel, art, "demotool", "demotool -o",
+                                   writer=("demotool", _t, art, _pre))
+    _pre, _t = _sha(art), time.time()
     art.write_text("third pass\n")
-    mod._restamp_provenance_output(project, rel, art, "demotool", "demotool -o")
+    mod._restamp_provenance_output(project, rel, art, "demotool", "demotool -o",
+                                   writer=("demotool", _t, art, _pre))
 
 
 def test_runner_reemit_twice_grows_the_ledger_and_never_rewrites_it(tmp_path):
@@ -477,9 +486,21 @@ def test_canonicalize_reemit_helper_appends_and_keeps_history_verbatim(
     with prov.open("ab") as f:
         f.write((json.dumps(_record(rel, _sha(art))) + "\n").encode())
     before = prov.read_bytes()
+    # 2026-09-24 (lane ictier1, reemit r3; review wo6zpfboe, design approved):
+    # the re-emit is now a DETECTOR and never declares; a re-run's bytes are
+    # declared by the transform that wrote them, on the chain from the first
+    # pass's declaration. The second pass is performed that way here, and the
+    # re-emit helper is asserted to add nothing on top of it.
+    _pre, _t = _sha(art), time.time()
     art.write_text("second pass\n")
+    mod._restamp_provenance_output(tmp_path, rel, art, "demotool",
+                                   "demotool --out",
+                                   writer=("demotool", _t, art, _pre))
 
+    n_before_reemit = len(prov.read_bytes().decode().splitlines())
     assert mod._record_reemitted_outputs(tmp_path) is None
+    assert len(prov.read_bytes().decode().splitlines()) == n_before_reemit, (
+        "the re-emit detector declared something")
 
     after = prov.read_bytes()
     assert after.startswith(before), "history was amended, not appended to"
@@ -495,8 +516,17 @@ def test_canonicalize_reemit_produces_a_ledger_the_checker_accepts(tmp_path):
     rel = "reports/out.rpt"
     art = _artefact(tmp_path, rel, "first pass\n")
     _ledger(tmp_path, _record(rel, _sha(art)))
+    # 2026-09-24 (lane ictier1, reemit r3; review wo6zpfboe, design approved):
+    # the re-emit is now a DETECTOR and never declares; a re-run's bytes are
+    # declared by the transform that wrote them, on the chain from the first
+    # pass's declaration. The second pass is performed that way here, and the
+    # re-emit helper is asserted to add nothing on top of it.
+    _pre, _t = _sha(art), time.time()
     art.write_text("second pass\n")
     assert _run(tmp_path).returncode == 1        # drifted: FAIL before
+    mod._restamp_provenance_output(tmp_path, rel, art, "demotool",
+                                   "demotool --out",
+                                   writer=("demotool", _t, art, _pre))
 
     assert mod._record_reemitted_outputs(tmp_path) is None
 
