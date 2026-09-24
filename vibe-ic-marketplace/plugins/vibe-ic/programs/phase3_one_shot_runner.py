@@ -33121,6 +33121,36 @@ def _preserve_pnr_approach_log(out_dir: Path, log_path: Path, index: int,
 _PNR_ANTENNA_ITER_REPORT_GLOB = "antenna_iter_*.rpt"
 
 
+def _archive_antenna_iteration_reports(out_dir: Path) -> List[str]:
+    """Set aside diagnostics from a route that will not be shipped.
+
+    A re-entered PnR or a successful antenna rollback can leave nonempty
+    iteration reports from an earlier or rejected route. They are useful
+    evidence, but the sign-off reader must only see reports for the shipped
+    route. Keep the originals in a hidden history directory rather than
+    altering their contents or silently treating their counts as zero.
+    """
+    archived: List[str] = []
+    history = out_dir / ".antenna_report_history"
+    for rpt in sorted(out_dir.glob(_PNR_ANTENNA_ITER_REPORT_GLOB)):
+        try:
+            if not rpt.is_file():
+                continue
+            history.mkdir(exist_ok=True)
+            index = 0
+            while (history / f"{rpt.stem}.{index}{rpt.suffix}").exists():
+                index += 1
+            rpt.replace(history / f"{rpt.stem}.{index}{rpt.suffix}")
+            archived.append(rpt.name)
+        except OSError as exc:
+            print(f"[pnr] ANTENNA_ITER_ARCHIVE_FAILED file={rpt} "
+                  f"reason={type(exc).__name__}: {exc}", file=sys.stderr)
+    if archived:
+        print(f"[pnr] ANTENNA_ITER_ARCHIVED: {' '.join(archived)} -- "
+              "these diagnostics do not describe the route being shipped")
+    return archived
+
+
 def _drop_empty_antenna_reports(out_dir: Path) -> List[str]:
     """Remove any 0-byte antenna iteration report left in the PnR directory.
 
@@ -34039,6 +34069,7 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
                f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
                f"openroad -no_init -exit {out_dir_c}/{tail_name} 2>&1 | "
                f"tee {out_dir_c}/{tail_log}")
+        _archive_antenna_iteration_reports(out_dir)
         # THE TAIL IS THE SESSION THAT WRITES THE SHIPPED ROUTE, AND IT SAYS SO
         # (spm run23, step 21). The parent stops at the accept "having written
         # nothing", so routed.def / <top>.def / <top>_pnr.v come from THIS
@@ -36811,6 +36842,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         pnr_tcl.read_text(errors="replace") if pnr_tcl.is_file() else "")
     _pnr_outputs = [str(p) for p in _pnr_products]
     for _retry_i in _pnr_loop:
+        _archive_antenna_iteration_reports(out_dir)
         # Spelled as the direct `_docker_exec` call (not the
         # `_declared_session_exec` wrapper) so the closed-loop re-entry census
         # still reads this site as step_pnr's self-checked retry; the set-aside
@@ -36897,7 +36929,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             if _ant_roll.get("status") == "ROLLED_BACK":
                 rc = _ant_roll.get("rc", rc)
                 out = (out or "") + _ant_roll.get("combined_log", "")
-                _drop_empty_antenna_reports(out_dir)
+                _archive_antenna_iteration_reports(out_dir)
             print(f"[pnr] ANTENNA_ROLLBACK {_ant_roll.get('status')} "
                   f"antenna_repair={_ant_roll.get('antenna_repair')} "
                   f"reason={_ant_roll.get('reason')}", file=sys.stderr)
