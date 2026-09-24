@@ -6719,88 +6719,6 @@ _EM_MEASURED_SAFETY = 2.0
 # A previous run measured a layout that no longer exists.
 
 
-def _pdn_em_this_run_tag() -> str:
-    """This run's identity, in the spelling the runner already uses.
-
-    Same basis as the scratch-prefix tag at `_RUN_STARTED_AT`: the process and
-    its start instant. Two runs cannot share it, and it costs no new state.
-    """
-    return f"phase3-{os.getpid()}-{int(_RUN_STARTED_AT * 1000)}"
-
-
-def _pdn_em_sentinel_binds(sentinel: Path) -> Tuple[bool, str]:
-    """Does `sentinel` bind THIS run? Returns (binds, why).
-
-    BINDS only when this run wrote it. A sentinel from a previous run is not a
-    bound on this one — that was the defect. A sentinel that cannot be read, or
-    that predates this change and carries no run tag, is treated as a PREVIOUS
-    run's: the conservative reading is the one that restores the corrector,
-    and it is also the only reading that lets an existing tree recover.
-    """
-    if not sentinel.exists():
-        return False, "no resize has been spent in this tree"
-    try:
-        doc = json.loads(sentinel.read_text())
-    except (OSError, ValueError):
-        return False, ("the sentinel could not be read, so it cannot be shown "
-                       "to be this run's; the resize is not spent")
-    tag = doc.get("run") if isinstance(doc, Mapping) else None
-    if not isinstance(tag, str) or not tag:
-        return False, ("the sentinel names no run (written before this rule), "
-                       "so it is a PREVIOUS run's and does not bind this one")
-    if tag == _pdn_em_this_run_tag():
-        return True, "this run has already spent its one resize"
-    return False, (f"the sentinel was written by another run ({tag}), so it "
-                   f"does not bind this one")
-
-
-def _pdn_em_is_this_runs(path: Path) -> bool:
-    """Was `path` written during THIS run?
-
-    Same `not_before` discipline `canonical_post_route_sta` already applies to
-    the post-route STA report. An unreadable mtime is NOT this run's: absent
-    evidence is not evidence.
-    """
-    try:
-        return path.stat().st_mtime >= _RUN_STARTED_AT
-    except OSError:
-        return False
-
-
-def _pdn_em_declared_current(project: Path) -> Tuple[Optional[float],
-                                                     Optional[str]]:
-    """The supply current the DESIGN declares, as I = P / V.
-
-    R-0924-3: `input/` and `phase1/` are the design's; a file the FLOW wrote is
-    not evidence for the next run's decisions. The declared power budget is the
-    only current that is BOTH available at PDN time (before any route exists)
-    and not written by a previous run, so it is the fallback basis when this
-    run has no measurement of its own.
-
-    Returns (None, None) when the design declares no budget — which is not a
-    failure, it is the design not having answered. The caller then derives no
-    floor and SAYS so.
-    """
-    for rel in ("phase1/generated_docs/L19_CONSTRAINTS_PDK.json",
-                "input/docs/L19_CONSTRAINTS_PDK.json"):
-        try:
-            doc = json.loads((project / rel).read_text())
-        except (OSError, ValueError):
-            continue
-        for holder in (doc, doc.get("fields") if isinstance(doc, Mapping)
-                       else None, doc.get("power") if isinstance(doc, Mapping)
-                       else None):
-            if not isinstance(holder, Mapping):
-                continue
-            p_uw = holder.get("power_budget_uw")
-            v = holder.get("supply_voltage_v") or holder.get("nominal_voltage_v")
-            if isinstance(p_uw, (int, float)) and p_uw > 0 \
-                    and isinstance(v, (int, float)) and v > 0:
-                return (float(p_uw) * 1e-6) / float(v), (
-                    f"{rel} power_budget_uw / supply voltage (design-declared)")
-    return None, None
-
-
 def _pdn_em_measured_subject(project: Path, rpt3: Path) -> Dict[str, Any]:
     """Identity of the LAYOUT the EM measurement was taken on.
 
@@ -6928,11 +6846,14 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
     # STALE-BASIS REFUSALS, recorded so "no floor" can be told from "no floor
     # DERIVED". Each entry names a source this run declined and why.
     stale: List[str] = []
+    # ONE subject question for the whole EM family: em.rpt, em.json and
+    # em_current_authority.json are all products of the same measurement pass,
+    # so they stand or fall together on WHICH LAYOUT that pass measured.
+    _measures_now, _subject_why = _ppa_power._pdn_em_measures_this_layout(rpt3, project)
     auth_json = rpt3 / "em_current_authority.json"
-    # A previous run's authority describes a layout that no longer exists.
-    if auth_json.exists() and not _pdn_em_is_this_runs(auth_json):
-        stale.append("reports/phase3/em_current_authority.json (written by an "
-                     "earlier run; it measures a layout this run replaces)")
+    # An authority derived from another layout is not this layout's current.
+    if auth_json.exists() and not _measures_now:
+        stale.append(f"reports/phase3/em_current_authority.json ({_subject_why})")
     else:
         try:
             doc = json.loads(auth_json.read_text())
@@ -6951,8 +6872,8 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
         # available" returns None, and that decision is made after both
         # have been attempted.
         em_rpt = rpt3 / "em.rpt"
-        if em_rpt.exists() and not _pdn_em_is_this_runs(em_rpt):
-            stale.append("reports/phase3/em.rpt (written by an earlier run)")
+        if em_rpt.exists() and not _measures_now:
+            stale.append(f"reports/phase3/em.rpt ({_subject_why})")
         else:
             try:
                 txt = em_rpt.read_text(errors="replace")
@@ -6979,10 +6900,8 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
     # The PREFERRED basis, and so the one that most needs to be this run's:
     # it carries a 2.0x safety factor rather than a conservation bound, so a
     # stale value is trusted MORE than a stale I_total, not less.
-    if _em_json.exists() and not _pdn_em_is_this_runs(_em_json):
-        stale.append("reports/phase3/em.json (written by an earlier run; "
-                     "max_segment_current_A measures a layout this run "
-                     "replaces)")
+    if _em_json.exists() and not _measures_now:
+        stale.append(f"reports/phase3/em.json ({_subject_why})")
     else:
         try:
             _em = json.loads(_em_json.read_text())
@@ -7002,8 +6921,10 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
     # silence. A previous run's measurement is never a basis.
     i_decl: Optional[float] = None
     i_decl_src: Optional[str] = None
+    _decl_gap = "the declared-budget rung was not reached"
     if i_meas is None and not (i_total and i_total > 0):
-        i_decl, i_decl_src = _pdn_em_declared_current(project)
+        i_decl, i_decl_src, _decl_gap = _ppa_power._pdn_em_declared_current(
+            project, _pdk_nominal_voltage(pdk, container))
 
     if i_meas is not None:
         i_drive = i_meas * _EM_MEASURED_SAFETY
@@ -7022,12 +6943,12 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
         # runs. The run is not failed on it -- the Step-25 EM gate still
         # judges the grid that gets built -- but the reader is told.
         _why = ("; ".join(stale) if stale
-                else "no EM measurement and no declared power budget")
-        print("[phase3] PDN_EM_FLOOR_NOT_DERIVED: no supply current is "
-              f"attributable to THIS run ({_why}), and "
-              "phase1/generated_docs/L19_CONSTRAINTS_PDK.json declares no "
-              "power_budget_uw. No EM-derived strap floor is applied this "
-              "pass; the Step-25 EM gate still judges the grid that is built.",
+                else "this run has no EM measurement of the layout it has")
+        print(f"[phase3] PDN_EM_FLOOR_NOT_DERIVED: no measured supply current "
+              f"describes the layout this pass is sizing ({_why}); and the "
+              f"design-declared fallback is unavailable because {_decl_gap}. "
+              f"No EM-derived strap floor is applied this pass; the Step-25 "
+              f"EM gate still judges the grid that is built.",
               file=sys.stderr)
         try:
             rpt3.mkdir(parents=True, exist_ok=True)
@@ -7036,7 +6957,10 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
                 "derived": False,
                 "code": "PDN_EM_FLOOR_NOT_DERIVED",
                 "declined_stale_sources": stale,
-                "declared_budget_present": False,
+                # The PRECISE gap, not a blanket "no budget declared": a budget
+                # WITH no voltage to divide it by sends a reader to a different
+                # file than a budget that was never stated.
+                "declared_budget_gap": _decl_gap,
                 "consequence": ("no EM-derived floor was applied on this "
                                 "pass; strap widths are the ratio/registry "
                                 "widths and the Step-25 gate judges them"),
@@ -7173,8 +7097,11 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
 
 
 #: #1215-PDN-FIRSTPASS — the sentinel that BOUNDS the resize at exactly one
-#: extra PnR. Written into the pnr dir the moment a resize pass is decided on,
-#: BEFORE the re-dispatch, so a crash mid-re-PnR cannot buy a second one.
+#: extra PnR PER DESIGN STATE. Written into the pnr dir the moment a resize
+#: pass is decided on, BEFORE the re-dispatch, so a crash mid-re-PnR cannot
+#: buy a second one, and RECORDING the design it was spent on, so it bounds
+#: the passes that build THIS design rather than the tree for ever — see
+#: `_pdn_em_design_state`.
 _PDN_EM_RESIZE_SENTINEL = ".pdn_em_resize_done"
 
 
@@ -7219,11 +7146,15 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
     under ANY distribution and there is nothing to converge. A second pass could
     only re-measure a slightly different I_total (spm: 4.36 mA -> 4.32 mA across
     two layouts), which is tracking, not iteration. The bound is enforced
-    STRUCTURALLY by `_PDN_EM_RESIZE_SENTINEL`, written before the re-dispatch:
-    a crashed or a still-narrow second pass cannot buy a third.
+    STRUCTURALLY by `_PDN_EM_RESIZE_SENTINEL`, written before the re-dispatch
+    and keyed on the DESIGN STATE: a crashed or a still-narrow second pass
+    cannot buy a third, because a resume in the same tree finds the sentinel
+    still naming the design it is building. A DIFFERENT design gets its own
+    resize, which is why the sentinel no longer retires the corrector for the
+    life of the project.
 
-    Returns None — no resize, behaviour unchanged — when the sentinel is
-    already present, when no EM measurement can be produced, when the tech LEF
+    Returns None — no resize, behaviour unchanged — when this design has
+    already spent its resize, when no EM measurement can be produced, when the tech LEF
     states no Jmax, or when every drawn strap already meets its floor.
     chip-AGNOSTIC: every number is the project's own measurement or the PDK's
     own LEF."""
@@ -7233,7 +7164,7 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
     # sentinel left by a previous run used to end the function here, which
     # retired the corrector for the lifetime of the tree — see
     # `_pdn_em_sentinel_binds`.
-    _binds, _why = _pdn_em_sentinel_binds(sentinel)
+    _binds, _why = _ppa_power._pdn_em_sentinel_binds(sentinel, project)
     if _binds:
         return None
     print(f"[phase3] PDN EM first-pass resize is AVAILABLE: {_why}",
@@ -61292,6 +61223,13 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "segments_analysed": seg_count,
             "max_segment_current_A": max_cur,
             "source": str(em_rpt.relative_to(project)),
+            # WHICH LAYOUT THIS NUMBER IS ABOUT, digested HERE, at measurement
+            # time. Without it a consumer can only re-digest whatever DEF is on
+            # disk later and compare it with itself, which is why the PDN floor
+            # could be sized from a previous run's current with nothing able to
+            # notice. See `_pdn_em_measures_this_layout`.
+            "subject_def": f"phase3/stage3/pnr/{_ppa_power._PDN_EM_SUBJECT_DEF}",
+            "subject_def_sha256": _ppa_power._pdn_em_subject_digest(project),
             # NOT a sign-off verdict — see the ir_drop.json note above. The EM
             # sign-off PASS/FAIL (segment current density vs PDK Jmax) is
             # decided downstream by em_report_check (eda_report_audit --mode em)
@@ -66056,10 +65994,11 @@ def main() -> int:
                     _rz["sentinel"].parent.mkdir(parents=True, exist_ok=True)
                     _rz["sentinel"].write_text(
                         json.dumps({"reason": "pdn_em_first_pass_resize",
-                                    # WHOSE resize this spends. Without it the
-                                    # sentinel bounds every future run in this
-                                    # tree, not just this one.
-                                    "run": _pdn_em_this_run_tag(),
+                                    # WHICH DESIGN this resize is spent on.
+                                    # Without it the sentinel bounds every
+                                    # future run in this tree, not just the
+                                    # passes that build this design.
+                                    "design": _ppa_power._pdn_em_design_state(project),
                                     "short": _rz["short"]}, indent=2) + "\n")
                 except OSError:
                     pass
@@ -66089,9 +66028,12 @@ def main() -> int:
                         "layers_short_on_pass_1": _rz["short"],
                         "second_pnr_status": _pnr_redispatched.status,
                         "second_pnr_wall_clock_s": round(_rz_secs, 1),
-                        "bound": ("exactly one extra PnR; enforced by the "
-                                  f"{_PDN_EM_RESIZE_SENTINEL} sentinel written "
-                                  "before the re-dispatch"),
+                        "bound": ("exactly one extra PnR PER DESIGN STATE; "
+                                  f"enforced by the {_PDN_EM_RESIZE_SENTINEL} "
+                                  "sentinel written before the re-dispatch and "
+                                  "keyed on the synthesis netlist digest, so a "
+                                  "crash-resume buys nothing and a new design "
+                                  "is not bound by the previous one's spend"),
                         "trigger": ("drawn DEF strap width < derived w_em; a "
                                     "comparison of two widths, never a gate "
                                     "verdict"),

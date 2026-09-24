@@ -69,7 +69,11 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from typing import (Any, Dict, List, Mapping, Optional, Sequence,
+                    Tuple)
+
+import _path_layout as _pl
 
 from . import canonical_json as _cj
 # The vocabulary of "nobody established this" lives in ONE place, with the
@@ -1611,3 +1615,200 @@ def emit_signoff_record(project: Path, power_rpt: Path, out: Path,
         notes.append("power.json states NOT_MEASURED: "
                      + str(record.get("power_not_measured_reason") or ""))
     return record
+
+
+# ── PDN/EM SIZING BASIS: whose measurement, and which layout ───────────────
+# Lifted out of phase3_one_shot_runner by that file's own taxonomy gate
+# (test_ppa_runner_extraction_ledger): the runner orchestrates, PPA logic
+# lives here.
+
+#: The DEF every EM/IR measurement deck reads (`read_def .../routed.def`). One
+#: spelling, so the producer that RECORDS the subject and the consumer that
+#: CHECKS it cannot drift apart.
+_PDN_EM_SUBJECT_DEF = "routed.def"
+
+
+def _pdn_em_design_state(project: Path) -> Optional[str]:
+    """The digest of the DESIGN the PDN is being built for.
+
+    THE KEY HAD TO BE THIS, AND NOT THE RUN. The bound is "one EM resize", and
+    the question is one-per-WHAT. Three candidates, and only one works:
+
+      * per TREE (the original): a sentinel nothing ever removes, so the
+        corrector retires for the life of the project. MEASURED on spm run23 --
+        a sentinel dated 2026-09-23 18:50 meant two later runs had no
+        corrector at all.
+      * per RUN (an earlier draft of this fix): restores the corrector, but a
+        run that crashes after the second PnR and is resumed in the same tree
+        sees a foreign sentinel and can dispatch a THIRD PnR -- breaking the
+        promise "a crashed second pass cannot buy a third".
+      * per DESIGN STATE (this): the synthesis netlist is STABLE across the
+        passes of one run, so a crash-resume finds the sentinel still matching
+        and buys nothing; and it CHANGES when the design does, so the corrector
+        is never retired.
+
+    None when no netlist can be read — the caller then treats the bound as
+    unspent, because a sentinel that cannot be matched to a design cannot be
+    shown to bound this one.
+    """
+    try:
+        cands = sorted((project / "phase2" / "stage2" / "synth").glob("*.v"))
+    except OSError:
+        return None
+    h = hashlib.sha256()
+    found = False
+    for c in cands:
+        try:
+            h.update(c.name.encode())
+            h.update(c.read_bytes())
+            found = True
+        except OSError:
+            continue
+    return h.hexdigest() if found else None
+
+
+def _pdn_em_sentinel_binds(sentinel: Path,
+                           project: Path) -> Tuple[bool, str]:
+    """Is the one EM resize already spent FOR THIS DESIGN? (binds, why)
+
+    Binds only when the sentinel records the design state we are building now.
+    A sentinel from another design, or one written before this rule and so
+    naming no design, does not bind — that is what gives an existing tree its
+    corrector back.
+    """
+    if not sentinel.exists():
+        return False, "no resize has been spent in this tree"
+    try:
+        doc = json.loads(sentinel.read_text())
+    except (OSError, ValueError):
+        return False, ("the sentinel could not be read, so it cannot be shown "
+                       "to bound this design; the resize is not spent")
+    recorded = doc.get("design") if isinstance(doc, Mapping) else None
+    if not isinstance(recorded, str) or not recorded:
+        return False, ("the sentinel names no design state (written before "
+                       "this rule), so it cannot be shown to bound this one")
+    now = _pdn_em_design_state(project)
+    if now is None:
+        return False, ("this design's synthesis netlist could not be read, so "
+                       "the sentinel cannot be matched to it")
+    if recorded == now:
+        return True, "this design has already spent its one EM resize"
+    return False, (f"the sentinel was spent on another design state "
+                   f"({recorded[:12]}…, now {now[:12]}…)")
+
+
+def _pdn_em_subject_digest(project: Path) -> Optional[str]:
+    """sha256 of the layout an EM measurement is being taken on, RIGHT NOW.
+
+    Called by the emitter at measurement time, so the digest it records is the
+    subject's, and by the consumer to digest the layout in front of it. None
+    when the DEF cannot be read — which is a third state, not a mismatch.
+    """
+    try:
+        return hashlib.sha256(
+            (_pl.pnr_dir(project) / _PDN_EM_SUBJECT_DEF).read_bytes()
+        ).hexdigest()
+    except OSError:
+        return None
+
+
+def _pdn_em_measures_this_layout(rpt3: Path, project: Path) -> Tuple[bool, str]:
+    """Does the EM measurement on disk describe the layout we have NOW?
+
+    WHY NOT mtime, AND WHY NOT `_pdn_em_measured_subject`. An earlier draft of
+    this fix asked "was the file written during this run?". That is not
+    identity: a same-build re-run that cache-hits the PnR DEF has a measurement
+    of EXACTLY this layout, and refusing it by clock would discard an accurate
+    number and republish the sizing record as NOT_DERIVED for a DEF that WAS
+    drawn with the floor -- two runs, identical inputs, different artefacts.
+
+    `_pdn_em_measured_subject` cannot answer either, and the reason is worth
+    stating because it looks like it can: it digests the DEF **at read time**,
+    so comparing its `def_sha256` to the DEF on disk compares the file with
+    itself and is TRUE always. A check that cannot fail is not a check.
+
+    So the subject digest has to be RECORDED BY THE PRODUCER at measurement
+    time (`subject_def_sha256` in em.json), and a measurement that does not
+    carry one cannot be shown to describe this layout. That is declined, not
+    accepted: a legacy artefact is exactly the stale-basis case this closes.
+    """
+    try:
+        doc = json.loads((rpt3 / "em.json").read_text())
+    except (OSError, ValueError):
+        return False, "reports/phase3/em.json could not be read"
+    recorded = doc.get("subject_def_sha256") if isinstance(doc, Mapping) else None
+    if not isinstance(recorded, str) or not recorded:
+        return False, ("reports/phase3/em.json records no subject_def_sha256 "
+                       "(written before this rule), so it cannot be shown to "
+                       "measure the layout this pass has")
+    now = _pdn_em_subject_digest(project)
+    if now is None:
+        return False, (f"phase3/stage3/pnr/{_PDN_EM_SUBJECT_DEF} could not be "
+                       f"read, so the measurement's subject cannot be checked")
+    if now != recorded:
+        return False, (f"reports/phase3/em.json measures {recorded[:12]}… but "
+                       f"the layout on disk is {now[:12]}… — a different "
+                       f"design state")
+    return True, (f"reports/phase3/em.json measures {recorded[:12]}…, which is "
+                  f"the layout this pass has")
+
+
+def _pdn_em_declared_current(project: Path,
+                             pdk_nominal_v: Optional[float] = None
+                             ) -> Tuple[Optional[float], Optional[str], str]:
+    """The supply current the DESIGN declares, as I = P / V. (I, source, gap)
+
+    R-0924-3: `input/` and `phase1/` are the design's; a file the FLOW wrote is
+    not evidence for the next run's decisions. The declared power budget is the
+    only current that is BOTH available at PDN time (before any route exists)
+    and not written by a previous run.
+
+    WHERE THE VOLTAGE COMES FROM, AND WHY NOT THE L DOC. An earlier draft read
+    `supply_voltage_v` from L19 and was UNREACHABLE on every flow-produced
+    project: the generated L19 carries `fields.power_budget_uw` and NO voltage
+    field at all (measured on spm run23 -- the only power/voltage key in the
+    whole document is `fields.power_budget_uw`). A rung no real design can
+    climb is not a fallback. The voltage therefore comes from the PDK's own
+    liberty `nom_voltage`, which the run has already resolved for timing, and
+    the L doc is consulted first only so a design MAY override it.
+
+    `gap` names precisely what is missing, because "no budget declared" and
+    "a budget with no voltage to divide it by" are different facts and a
+    reader who is told the wrong one goes looking in the wrong file.
+    """
+    p_uw: Optional[float] = None
+    v: Optional[float] = None
+    src = ""
+    for rel in ("phase1/generated_docs/L19_CONSTRAINTS_PDK.json",
+                "input/docs/L19_CONSTRAINTS_PDK.json"):
+        try:
+            doc = json.loads((project / rel).read_text())
+        except (OSError, ValueError):
+            continue
+        for holder in (doc.get("fields") if isinstance(doc, Mapping) else None,
+                       doc.get("power") if isinstance(doc, Mapping) else None,
+                       doc):
+            if not isinstance(holder, Mapping):
+                continue
+            if p_uw is None and isinstance(holder.get("power_budget_uw"),
+                                           (int, float)):
+                p_uw = float(holder["power_budget_uw"])
+                src = f"{rel} power_budget_uw"
+            for vk in ("supply_voltage_v", "nominal_voltage_v"):
+                if v is None and isinstance(holder.get(vk), (int, float)):
+                    v = float(holder[vk])
+                    src += f" / {vk}"
+        if p_uw is not None:
+            break
+    if p_uw is None or p_uw <= 0:
+        return None, None, ("phase1/generated_docs/L19_CONSTRAINTS_PDK.json "
+                            "declares no power_budget_uw")
+    if v is None and pdk_nominal_v is not None:
+        v = float(pdk_nominal_v)
+        src += " / PDK liberty nom_voltage"
+    if v is None or v <= 0:
+        return None, None, (
+            f"a power budget IS declared ({p_uw} uW) but no supply voltage to "
+            f"divide it by: the L doc states none and the PDK liberty states "
+            f"no nom_voltage")
+    return (p_uw * 1e-6) / v, src, ""

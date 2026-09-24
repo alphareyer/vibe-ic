@@ -170,11 +170,23 @@ def test_a_cell_lef_with_no_pin_geometry_derives_nothing():
 def _em_project(tmp: Path, *, i_total_A: float, max_seg_A=None) -> Path:
     r3 = tmp / "reports" / "phase3"
     r3.mkdir(parents=True, exist_ok=True)
+    # The floor is only derived from a measurement that describes the layout
+    # being sized, so the fixture must be a project with a layout AND an
+    # em.json recording it as its subject -- which is exactly what the EM
+    # emitter now writes. Without this the project models a measurement of
+    # SOME OTHER layout, which is the stale basis the sizing must refuse.
+    _m = _p3()
+    pnr = _m._pl.pnr_dir(tmp)
+    pnr.mkdir(parents=True, exist_ok=True)
+    _def = pnr / _m._ppa_power._PDN_EM_SUBJECT_DEF
+    _def.write_text("DESIGN chip_top ;\nEND DESIGN\n")
+    _subject = _m._ppa_power._pdn_em_subject_digest(tmp)
     (r3 / "em_current_authority.json").write_text(json.dumps(
         {"supply_authority": [{"supply_current_A": i_total_A}]}))
-    if max_seg_A is not None:
-        (r3 / "em.json").write_text(json.dumps(
-            {"max_segment_current_A": max_seg_A, "segments_analysed": 1234}))
+    (r3 / "em.json").write_text(json.dumps(
+        ({"max_segment_current_A": max_seg_A, "segments_analysed": 1234}
+         if max_seg_A is not None else {"max_segment_current_A": None})
+        | {"subject_def_sha256": _subject}))
     return tmp
 
 
