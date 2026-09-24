@@ -46,19 +46,9 @@ WHAT IS RECOMPUTED, AND WHAT IS NOT
                 cannot fail; the step then rests on whatever else the gate has.
   D2 runnable   delegated to `flow_step_can_fail_check` — one implementation.
   D5 deps       delegated to `flow_dependency_graph_check` — one implementation.
-  D6 skip       a step with a `condition` must declare `condition_kind`. The
-                consumer branches on it (`design_dependent` -> silent skip;
-                `setup_required` -> SKIPPED-SETUP-REQUIRED unless waived).
-
-                RE-MEASURED on `40d0e14c0`: FOUR steps now declare it -- 15.5ic,
-                26.5ic, 37.5ip, 37.5ic, all `design_dependent` -- and 22 still do
-                not. The previous sentence here said NO step declares it and is
-                corrected rather than left standing. HALF the discriminator is
-                alive: `setup_required` is still declared by ZERO steps, so
-                "someone forgot to author the trigger" remains unreachable while
-                "this design legitimately has none" can now be said. Classifying
-                the remaining 22 is a per-step judgement by whoever knows the
-                step and is NOT done here; only the false claim is repaired.
+  D6 skip       a step with a `condition` must declare `condition_kind`.
+                Every current conditional step now declares a kind; new
+                omissions fail because the baseline is empty.
   D8 catcher    every `required_outputs` entry must have a gate criterion that
                 would fail on its absence.
 
@@ -115,31 +105,11 @@ PROGRAM_KEYS = {"program_exit_zero", "advisory_program_exit_zero",
 BLOCKING = {"program_exit_zero", "files_exist", "json_field_true"}
 COMBINATORS = {"all_of", "any_of"}
 
-# Steps that declare a `condition` and no `condition_kind`. MAY ONLY SHRINK.
-#
-# Not a list of permissions: most of these ARE design-dependent (analog on a
-# digital design, manufacturing steps that need a fab). The defect is that none
-# of them SAYS so, so the field the consumer branches on is never set and the
-# `setup_required` path — the one that tells "this design legitimately has none"
-# from "someone forgot to author the trigger" — is unreachable.
-#
-# Declaring the kind per step is a judgement about that step, made by whoever
-# knows it. Guessing 22 classifications here would put the same silence back
-# under a different name.
-D6_BASELINE = {
-    "40", "41", "42", "43", "44",              # manufacturing, need a fab
-    "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9",   # analog track
-    "DT1",                                      # transition-delay ATPG
-    "FS1",                                     # ISO-26262 FMEDA
-    "M1", "M2", "M3", "M4",                    # mixed-signal
-}
+# Recorded condition-kind omissions. May only shrink; now empty.
+D6_BASELINE: Set[str] = set()
 
-# Steps declaring outputs with no criterion that would fail on their absence.
-# MAY ONLY SHRINK. Step 14's gate is `optional_program_exit_zero` only, which is
-# the same finding `flow_step_can_fail_check` records — kept here too because
-# the two ask different questions and a reader of one should not have to know
-# about the other.
-D8_BASELINE = {"14"}
+# Recorded output-catcher omissions. May only shrink; now empty.
+D8_BASELINE: Set[str] = set()
 
 #: THE DECLARED POPULATION. The denominator is this tuple's length times the
 #: flow's step count -- both derived, neither typed. `flow_matrix.cells`

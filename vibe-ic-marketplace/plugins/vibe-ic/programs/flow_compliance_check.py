@@ -20126,6 +20126,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             gate_records=structural_gate_records,
         )
 
+    # P0 is a synthetic in-process step, so the ordinary YAML step loop below
+    # suppresses it. Evaluate its declared content gate here on the same run.
+    if (structural_result is not None and
+            structural_result.status != _T.Verdict.NOT_APPLICABLE.value):
+        p0_step = next((s for s in steps if s.get("id") == "P0"), None)
+        if p0_step is not None:
+            p0_passed, p0_reasons = _evaluate_gate(project, p0_step.get("gate"))
+            if not p0_passed:
+                structural_result.status = _T.Verdict.FAIL.value
+                structural_result.reasons.extend(p0_reasons)
+
     results: List[StepResult] = []
     if structural_result is not None:
         results.append(structural_result)
