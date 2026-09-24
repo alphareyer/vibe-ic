@@ -91,8 +91,11 @@ def test_canonical_flow_remains_69_steps_without_a_1_6x_step():
 def test_step_1_remains_the_irreducible_authoring_step():
     step1 = _by_id()["1"]
     assert step1["gate"] == {
-        "files_exist": ["phase2/stage1/rtl/*.sv", "phase2/stage1/rtl/*.v"],
-        "any_of": True,
+        "all_of": [
+            {"files_exist": ["phase2/stage1/rtl/*.sv", "phase2/stage1/rtl/*.v"],
+             "any_of": True},
+            {"program_exit_zero": "flow_step_output_content_check . --mode rtl"},
+        ],
     }
     assert not any(
         "crosslayer" in str(value)

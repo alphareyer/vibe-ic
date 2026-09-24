@@ -39,7 +39,7 @@ cells exist.
     recursed into a clause. Running the real one can.
 
     Channel (a) holds when the executor dispatched >= 1 resolvable program, or
-    (steps 1 and 12, whose gates are legitimately program-free) evaluated >= 1
+    (a step with a legitimately program-free gate) evaluated >= 1
     native predicate clause.
 
 (b) **P0 umbrella registration** — measured by IMPORTING
@@ -71,10 +71,9 @@ cells exist.
         their programs; the runner then builds `PROGRAMS_DIR / prog`)
       * `<dir>.glob("*_protocol_synth.py")` — expanded against `programs/`
 
-For the ONE step that declares no `gate:` at all (P0, the structural-RTL
-pre-flight umbrella) the three-channel question is malformed: P0 IS the
-umbrella. Its cell asserts the umbrella wiring instead, and the identity of the
-umbrella step is DERIVED from `flow_compliance_check`'s own source rather than
+P0 is the structural-RTL pre-flight umbrella even when it also declares a
+content gate. Its cell checks the umbrella wiring and its declared gate. The
+identity of the umbrella step is DERIVED from `flow_compliance_check`'s source rather than
 hard-coded — see `umbrella_step_id()`. A second gate-less step appearing later
 does not silently inherit that treatment: it fails and forces a human look.
 
@@ -1338,16 +1337,8 @@ def test_d1_gate_is_wired_in(cell):
         f"BETTER for having lost it. Its gate wiring below is moot"
     )
 
-    # ── The gate-less step: P0, the umbrella itself ───────────────────
-    if not F.has_gate(sid):
-        # Self-invalidating precondition. A NEW gate-less step must not
-        # silently inherit the umbrella's exemption.
-        assert F.normalize_id(sid) == umbrella_step_id(), (
-            f"step {sid!r} declares no `gate:` but is not the umbrella step "
-            f"{umbrella_step_id()!r} that {compliance_module().__name__} emits "
-            f"its structural verdict under; it is reachable through no channel "
-            f"at all and needs a wiring decision"
-        )
+    # ── The umbrella has its own dispatch, even when it also has a gate. ──
+    if F.normalize_id(sid) == umbrella_step_id():
         registries = umbrella_registries()
         total = umbrella_gate_names()
         assert total, (
@@ -1406,6 +1397,15 @@ def test_d1_gate_is_wired_in(cell):
             f"{MIN_UMBRELLA_DISPATCHES} the umbrella is not a dispatcher, and "
             f"an 'all gates passed' verdict from it means nothing"
         )
+    elif not F.has_gate(sid):
+        pytest.fail(
+            f"step {sid!r} declares no `gate:` but is not the umbrella step "
+            f"{umbrella_step_id()!r} that {compliance_module().__name__} emits "
+            f"its structural verdict under; it is reachable through no channel "
+            f"at all and needs a wiring decision"
+        )
+
+    if not F.has_gate(sid):
         return
 
     # ── Gated steps ───────────────────────────────────────────────────

@@ -646,10 +646,17 @@ def test_0_5ic_d3_live_replay_closes_the_exact_coverage_delta():
     d6 named the trigger a self-disabling condition and d5 named the missing edge
     to its producer -- so ``uncovered == []`` holds at 524 over eight cells that
     have each been shown to fail.
+
+    MOVED 524 -> 527 on 2026-09-25: Step 1, Step 35 and P0 each gained an
+    executable content clause, so their d2 cells are now ENFORCED. The repo's
+    D2-BLIND-GATE-PROGRAMS replay REDDENED all three before the ledger was
+    updated. The three cells were removed from its not-ENFORCED inventory.
     """
+    # The three content clauses added to 1, 35 and P0 moved their d2 cells
+    # into ENFORCED. Each was replayed through the ledger's own D2 mutation.
     rep = L.census(cell_states())
-    assert rep["considered"] == 524, rep
-    assert rep["covered"] == 524, rep
+    assert rep["considered"] == 527, rep
+    assert rep["covered"] == 527, rep
     assert rep["uncovered"] == [], rep
 
 
