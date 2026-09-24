@@ -49,11 +49,96 @@ class _Drive:
         self.called = []
 
 
-def _pdk() -> R.PdkConfig:
-    return R.PdkConfig(name="testpdk", liberty="/nonexistent/tt.lib",
-                       tech_lef="/nonexistent/tech.lef",
-                       cell_lef="/nonexistent/cells.lef", cell_gds=None,
-                       site="unit", drc_deck=None)
+
+
+
+
+class _IdentityArgs:
+    """The knobs R-0924-3 r3 folds into a step's identity — `--spare-density`
+    and the env vars are inputs the step reads that are not files, so the
+    fixtures must name them as a real invocation would."""
+    spare_density = 0.02
+    container = ""
+
+
+def _pdk(root: Path | None = None) -> R.PdkConfig:
+    """R-0924-3 CATCH-UP. One of a step's four identity components is the
+    sha256 of the PDK files it reads, and `/nonexistent` paths are (rightly)
+    unreadable — with them nothing is ever judged fresh and the GEOMETRY guard
+    this file exists to test is never the reason anything re-runs. Given a
+    root the declared files are written for real. The unreadable case is not
+    lost: `test_phase3_cache_producer_identity` owns it."""
+    if root is None:
+        return R.PdkConfig(name="testpdk", liberty="/nonexistent/tt.lib",
+                           tech_lef="/nonexistent/tech.lef",
+                           cell_lef="/nonexistent/cells.lef", cell_gds=None,
+                           site="unit", drc_deck=None)
+    # OUTSIDE the project, which is where a PDK lives. R-0924-3 r3 added a
+    # structural guard: a PDK path inside the run directory is this run's own
+    # derivation (the VIA-patch legalizer stages one there), not a PDK input,
+    # and it refuses. Writing the fixture's PDK inside the project tripped it —
+    # correctly.
+    d = Path(root).parent / "_pdk_outside"
+    d.mkdir(parents=True, exist_ok=True)
+    lib, tlef, clef = d / "tt.lib", d / "tech.lef", d / "cells.lef"
+    for f, text in ((lib, "library(t){}\n"), (tlef, "VERSION 5.8 ;\n"),
+                    (clef, "MACRO unit\n")):
+        if not f.is_file():
+            f.write_text(text)
+    return R.PdkConfig(name="testpdk", liberty=str(lib), tech_lef=str(tlef),
+                       cell_lef=str(clef), cell_gds=None, site="unit",
+                       drc_deck=None)
+
+
+def _span_inputs(project, top: str = "top") -> None:
+    """Everything the three SPANS declare that they do not produce themselves.
+
+    R-0924-3 r2 CATCH-UP. The review (wcxu446tu) found that keying a kind on
+    the ONE step declaring its artefact made pnr hash `post_hold.def` — a file
+    `step_pnr` writes itself — so a new netlist, SDC or slot never invalidated
+    the routed DEF. Freshness is now keyed on the whole SPAN the runner
+    function implements (pnr = 15..21, gds = 26.5ic..37), so "a tree from a
+    previous run" means a tree carrying what those spans READ: the slot
+    declaration, the RTL, the SDC, the netlist, the routed DEF, the spare-cell
+    record and the SPEF. Same catch-up as the ones above, for the same reason.
+    """
+    from pathlib import Path as _P
+    project = _P(project)
+    for rel, text in (
+        ("phase2/stage1/rtl/%s.v" % top, "module %s(); endmodule\n" % top),
+        ("phase2/stage2/constraints/%s.sdc" % top,
+         "create_clock -period 10\n"),
+        ("phase2/stage2/synth/netlist.v", "module %s(); endmodule\n" % top),
+        # r4: the netlist PnR ACTUALLY reads, per `pnr_input_netlist`.
+        ("phase2/stage2/synth/%s_synth.v" % top,
+         "module %s(); endmodule\n" % top),
+        ("phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\nEND DESIGN\n"),
+        ("phase3/stage3/pnr/spare_cells.json", "{}\n"),
+        ("phase3/stage3/extracted/parasitic.spef", "*SPEF\n"),
+    ):
+        p = project / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not p.is_file():
+            p.write_text(text)
+
+
+def _seed_recording(kind: str) -> None:
+    """R-0924-3 r5: `code` comes from what the step RAN, and a step with no
+    recording gets NO cache — which is the point of r5. A fixture that stamps
+    a tree without running the step through `_recorded` must therefore supply
+    the recording a real run would have left. The recorder's own behaviour is
+    covered by the r5 tests that drive it for real."""
+    import _step_recorder as _sr
+    # DERIVED, not invented: a hand-written digest would not survive
+    # re-derivation (the check side recomputes these keys from CURRENT
+    # source), so the stand-in is computed the same way a real recording is.
+    _d, _err = _sr.check_digests(R.PROGRAMS_DIR / "_step_identity.py", [])
+    assert not _err, _err
+    R._STEP_RECORDING[kind] = ({
+        "_step_identity.py": _d,
+        "__engine_env__": {name: _sr._engine_marker(name)
+                           for name in _sr.ENGINE_ENV},
+    }, "")
 
 
 def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
@@ -95,9 +180,35 @@ def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
     # current build keeps this file testing what it was written to test, the
     # #593 GEOMETRY guard, instead of tripping on the producer guard first.
     # test_phase3_cache_producer_identity.py owns the producer key's coverage.
-    R._write_producer_identity(synth, "synth")
-    R._write_producer_identity(pnr, "pnr")
-    R._write_producer_identity(pnr, "gds")
+    # R-0924-3 made that key the STEP's identity, so "a previous run produced
+    # these" now also means: its declared inputs are on disk, its tool ledger
+    # exists and its PDK is readable. Same catch-up, same reason.
+    (pnr / "post_hold.def").write_text("VERSION 5.8 ;\nEND DESIGN\n")
+    (pnr / "metal_fill.done").write_text("fill complete\n")
+    cons = tmp_path / "phase2" / "stage2" / "constraints"
+    cons.mkdir(parents=True, exist_ok=True)
+    (cons / "chip.sdc").write_text("create_clock -period 10 [get_ports clk]\n")
+    (tmp_path / "provenance.jsonl").write_text("".join(
+        json.dumps({"tool": t, "version": v,
+                    "outputs": {o: "sha256:" + "0" * 64}}) + "\n"
+        for t, v, o in (
+            ("yosys", "0.38", f"phase2/stage2/synth/{TOP}_synth.v"),
+            ("openroad", "2.0", f"phase3/stage3/pnr/{TOP}.def"),
+            ("klayout", "0.28", f"phase3/stage4/gds/{TOP}.gds"))))
+    # The declaration is step 9's FIRST declared input, so it must exist
+    # before the identity that hashes it is stamped. (It is declared again
+    # below where it was originally added; declaring twice is idempotent and
+    # the original comment is left where it explains itself.)
+    _declare(tmp_path, "DIE")
+    _span_inputs(tmp_path, TOP)
+    _ctx = dict(project=tmp_path, pdk=_pdk(tmp_path), container="",
+                top=TOP, args=_IdentityArgs())
+    _seed_recording("synth")
+    R._write_producer_identity(synth, "synth", **_ctx)
+    _seed_recording("pnr")
+    R._write_producer_identity(pnr, "pnr", **_ctx)
+    _seed_recording("gds")
+    R._write_producer_identity(pnr, "gds", **_ctx)
     # The SECOND thing this fixture had to catch up with, and the same kind as
     # the post-DFT netlist above: v1.22.13 (#2376) made Phase 3 refuse a project
     # with no delivery declaration, BEFORE any step and before the report these
@@ -199,7 +310,8 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
     monkeypatch.setattr(R, "step_signoff_drv_wire_length_repair",
                         lambda *a, **k: None)
 
-    monkeypatch.setattr(R, "_detect_pdk", lambda *a, **k: _pdk())
+    monkeypatch.setattr(R, "_detect_pdk",
+                        lambda *a, **k: _pdk(project))
     monkeypatch.setattr(R._runner_lock, "acquire_or_reenter",
                         lambda *a, **k: object())
     monkeypatch.setattr(R, "commercial_pdk_fallback_guard",
@@ -407,6 +519,20 @@ def _with_pad_table(project: Path, pins: dict) -> None:
     # the record still describes the exact DEF and GDS on disk, and a record
     # that does not is still rejected.
     _pad_ring_evidence(project)
+    # R-0924-3 r4: `input/docs/L9*` is a DESIGN input and is now hashed, so
+    # writing the pad table legitimately invalidates PnR — and a re-run would
+    # overwrite the very DEF this helper just placed. The premise is "a
+    # previous run that ALREADY had this table", so the stamp is taken after
+    # it, exactly as a real previous run's would have been. Same fixture
+    # catch-up as the four above, and the identity is doing its job.
+    _ctx = dict(project=project, pdk=_pdk(project), container="",
+                top=TOP, args=_IdentityArgs())
+    pnr = R._pl.pnr_dir(project)
+    R._write_producer_identity(R._pl.synth_dir(project), "synth", **_ctx)
+    _seed_recording("pnr")
+    R._write_producer_identity(pnr, "pnr", **_ctx)
+    _seed_recording("gds")
+    R._write_producer_identity(pnr, "gds", **_ctx)
 
 
 def test_pad_side_violation_is_disclosed_as_a_fail_row(tmp_path, monkeypatch):

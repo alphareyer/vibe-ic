@@ -3745,9 +3745,27 @@ def _resolve_staged_silicon_sdc(project: Path) -> Optional[Path]:
             head = candidate.read_text(errors="replace")[:4096]
         except OSError:
             continue
+        # THE BANNER IS NOT ALWAYS THE FIRST LINE. `_stamp_sdc_provenance`
+        # PREPENDS `# VIBEIC_SDC_PDK_PROVENANCE: <pdk>` (see :3159), and
+        # `step_canonicalize_artefacts` runs it over the deck the flow itself
+        # emitted — so after canonicalization the auto banner sits on line 2
+        # and a `startswith` on the whole text no longer matched. MEASURED
+        # (r4 review finding 5, pre-existing on main): the flow's OWN stamped
+        # auto-SDC was then read back as DESIGN-STAGED, `sdc_staged` flipped
+        # no -> yes after the stamps, and the re-run took the design-staged
+        # branch on the flow's own deck — exactly the laundering the comment
+        # above says this guard prevents. The banner is recognised wherever
+        # the stamp left it: in the leading COMMENT BLOCK.
+        _lead = []
+        for _line in head.splitlines():
+            if _line.startswith("#") or not _line.strip():
+                _lead.append(_line)
+                continue
+            break
+        _lead_text = "\n".join(_lead)
         flow_owned = (
             _sdc.generated_top_entity(head) is not None
-            or head.startswith("# Auto-generated minimal SDC for silicon top ")
+            or "# Auto-generated minimal SDC for silicon top " in _lead_text
         )
         if not flow_owned:
             return candidate
@@ -17911,7 +17929,13 @@ def _producer_identity_now() -> Dict[str, str]:
             "source_sha": _plugin_source_sha()}
 
 
-def _write_producer_identity(out_dir: Path, kind: str) -> None:
+def _write_producer_identity(out_dir: Path, kind: str, *,
+                             project: Optional[Path] = None,
+                             pdk: Any = None,
+                             container: str = "",
+                             top: str = "",
+                             args: Any = None,
+                             cache_hit: bool = False) -> None:
     """Stamp the build that just produced ``kind``'s artefact in ``out_dir``.
 
     Best-effort, exactly like the sibling sidecars: a stamp failure must never
@@ -17937,6 +17961,60 @@ def _write_producer_identity(out_dir: Path, kind: str) -> None:
         p.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
     except Exception:  # nosec — sidecar is best-effort
         pass
+    # R-0924-3 — and the PER-STEP identity beside it, which is what the reuse
+    # predicate now reads. The build stamp above is kept: it is provenance a
+    # reader may still want ("which release wrote this?"), it just no longer
+    # decides freshness. Both are best-effort for the same reason: a stamp
+    # failure must never fail a step that succeeded, and an absent stamp reads
+    # as unknown -> re-run, which can only cause more work, never a reuse that
+    # was not already earned.
+    if project is None:
+        return
+    try:
+        import _step_identity as _si  # noqa: PLC0415
+        _si.set_declaration_flow_keys(_DECLARATION_PUBLISH_KEYS)
+        _si_inputs, _si_knobs, _si_bad = _step_inputs(
+            Path(project), kind, top, args)
+        if _si_bad:
+            return          # no stamp for a read-set we could not establish
+        _rec, _rec_why = _STEP_RECORDING.get(kind, (None, "the step was not "
+                                                     "run through the "
+                                                     "recorder"))
+        _probed = _probed_tool_versions(Path(project), kind)
+        # A cache hit retains the code that made the reused base artefact;
+        # repair spans alone cannot describe it. A cache miss ran the base
+        # producer again, so its old keys must be discarded. Re-derive every
+        # carried key from current bytes: copying an old digest would keep an
+        # edited or deleted, unexecuted helper stale forever after re-stamp.
+        if cache_hit and _rec is not None:
+            _prior = (_si.read_sidecar(out_dir, kind) or {}).get("recording")
+            if not isinstance(_prior, dict):
+                return
+            import _step_recorder as _sr  # noqa: PLC0415
+            _current, _error = _sr.rederive(_prior, PROGRAMS_DIR)
+            if _error or _current is None or _current != _prior or any(
+                    value == "ABSENT" for entries in _current.values()
+                    for value in entries.values()):
+                return  # unprovable old code is never a new cache stamp
+            for _rel, _entries in _rec.items():
+                _current.setdefault(_rel, {}).update(_entries)
+            _rec = _current
+        ident, why = _si.identity_now(
+            project=Path(project), kind=kind,
+            runner_path=Path(__file__).resolve(),
+            programs_dir=PROGRAMS_DIR,
+            flow_yaml=PROGRAMS_DIR.parent / "flow" /
+            "phase1_phase2_phase3.yaml",
+            pdk=pdk, image_digest=_step_image_digest(container),
+            pdk_hasher=_step_pdk_hasher(container),
+            inputs=_si_inputs, knobs=_si_knobs,
+            recording=_rec, stored_tools=_probed)
+        if _rec_why:
+            why.setdefault("code", []).append(_rec_why)
+        _si.write_sidecar(out_dir, kind, ident, why,
+                          extra={"recording": _rec, "probed_tools": _probed})
+    except Exception:  # nosec — sidecar is best-effort
+        pass
 
 
 def _read_producer_identity(out_dir: Path,
@@ -17956,7 +18034,12 @@ def _read_producer_identity(out_dir: Path,
     return rec if isinstance(rec, dict) else None
 
 
-def _producer_cache_valid_for(out_dir: Path, kind: str) -> Tuple[bool, str]:
+def _producer_cache_valid_for(out_dir: Path, kind: str, *,
+                              project: Optional[Path] = None,
+                              pdk: Any = None,
+                              container: str = "",
+                              top: str = "",
+                              args: Any = None) -> Tuple[bool, str]:
     """May a cached ``kind`` artefact in ``out_dir`` be reused by THIS build?
 
     Returns (valid, disclosure). The disclosure is carried into the step's own
@@ -17966,9 +18049,6 @@ def _producer_cache_valid_for(out_dir: Path, kind: str) -> Tuple[bool, str]:
 
     chip-AGNOSTIC: plugin version + source digest, no design/PDK/vendor token.
     """
-    now = _producer_identity_now()
-    cur_v, cur_r = now["plugin_version"], now["recipe_sha256"]
-    rec = _read_producer_identity(out_dir, kind)
 
     # vibe-ic#1097 S6 — `--force-step <kind>`. ORFS ships `do-2_1_floorplan`
     # beside `2_1_floorplan` (`flow/Makefile:366-405`) so an external caller can
@@ -18000,35 +18080,435 @@ def _producer_cache_valid_for(out_dir: Path, kind: str) -> Tuple[bool, str]:
                           f"{_STALE_PRODUCER_ENV}=1 — {msg}")
         return (False, msg)
 
-    if not cur_v or not cur_r:
+    # R-0924-3 — THE STEP'S OWN IDENTITY, NOT THE BUILD'S.
+    # What used to stand here compared `_plugin_version()` and
+    # `_recipe_sha256()`: the released version, and the sha256 of this WHOLE
+    # ~66k-line file. Both are facts about the BUILD, so every landed fix
+    # invalidated every cached step whatever it touched — MEASURED on spm
+    # run23, where `--force-step gds` on a finished tree re-ran synthesis and
+    # started PnR. The same key was simultaneously too NARROW: an in-tree edit
+    # to a helper module with no version bump was not detected at all, which
+    # the old comment disclosed rather than fixed.
+    # `_step_identity` answers the step's own question instead — its declared
+    # inputs, its own code (derived closure), the tools it ran, the PDK it
+    # reads — and both halves close with one key.
+    if project is None:
         return _deny_unless_forced(
-            f"the producer of the cached {kind} artefact cannot be compared: "
-            f"THIS build's identity is unresolvable "
-            f"(plugin_version={cur_v or '<unknown>'}, "
-            f"recipe_sha256={(cur_r or '<unknown>')[:12]}) — re-running "
-            f"rather than reusing an artefact whose provenance cannot be "
-            f"established")
-    if rec is None:
+            f"the {kind} step's identity cannot be computed without the "
+            f"project in hand, so a cached artefact cannot be proven current")
+    try:
+        import _step_identity as _si  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001 — a missing helper is not a pass
         return _deny_unless_forced(
-            f"the cached {kind} artefact carries NO producer stamp — it was "
-            f"written by an unknown build of the recipe (any run predating "
-            f"{_PRODUCER_SIDECAR}); re-running so this build's recipe "
-            f"actually applies")
-    old_v = str(rec.get("plugin_version") or "")
-    old_r = str(rec.get("recipe_sha256") or "")
-    if old_v == cur_v and old_r == cur_r:
-        return (True, f"producer unchanged (plugin {cur_v}, "
-                      f"recipe {cur_r[:12]})")
-    why = []
-    if old_v != cur_v:
-        why.append(f"plugin {old_v or '<unknown>'} -> {cur_v}")
-    if old_r != cur_r:
-        why.append(f"recipe {(old_r or '<unknown>')[:12]} -> {cur_r[:12]}")
+            f"the per-step identity module is unavailable ({exc}), so no "
+            f"cached {kind} artefact can be proven current")
+    _si.set_declaration_flow_keys(_DECLARATION_PUBLISH_KEYS)
+    _si_inputs, _si_knobs, _si_bad = _step_inputs(
+        Path(project), kind, top, args)
+    if _si_bad:
+        # A resolver that could not be CALLED means the read-set is unknown,
+        # and an unknown read-set is not a freshness answer (r3 review).
+        return _deny_unless_forced(
+            f"the {kind} step's read-set cannot be established: "
+            + "; ".join(_si_bad))
+    try:
+        ident, _why = _si.identity_now(
+            project=Path(project), kind=kind,
+            runner_path=Path(__file__).resolve(),
+            programs_dir=PROGRAMS_DIR,
+            flow_yaml=PROGRAMS_DIR.parent / "flow" /
+            "phase1_phase2_phase3.yaml",
+            pdk=pdk, image_digest=_step_image_digest(container),
+            pdk_hasher=_step_pdk_hasher(container),
+            inputs=_si_inputs, knobs=_si_knobs,
+            stored_recording=(_si.read_sidecar(out_dir, kind) or {}).get(
+                "recording"),
+            stored_tools=(_si.read_sidecar(out_dir, kind) or {}).get(
+                "probed_tools"))
+    except Exception as exc:  # noqa: BLE001 — an error is never freshness
+        return _deny_unless_forced(
+            f"the {kind} step's identity could not be computed "
+            f"({type(exc).__name__}: {exc}), so the cached artefact cannot be "
+            f"proven current")
+    _rec_side = _si.read_sidecar(out_dir, kind)
+    fresh, reasons = _si.compare(_rec_side, ident)
+    detail = "; ".join(reasons)
+    if fresh:
+        return (True, f"{kind} step unchanged — {detail}")
     return _deny_unless_forced(
-        f"the cached {kind} artefact was produced by a DIFFERENT build "
-        f"({'; '.join(why)}) — re-running so the landed recipe changes "
-        f"actually execute instead of being reported as a PASS they never "
-        f"ran")
+        f"the cached {kind} artefact is not current for THIS step ({detail}) "
+        f"— re-running so the landed changes actually execute instead of "
+        f"being reported as a PASS they never ran")
+
+
+_STEP_PDK_HASH_CACHE: Dict[Tuple[str, Tuple[str, ...]], Dict[str, str]] = {}
+
+
+def _step_pdk_hasher(container: str):
+    """A callable `paths -> {path: sha256}` that reads the PDK where it IS.
+
+    MEASURED, and the reason this exists at all: on the configuration this was
+    built against the PDK is container-only — run2's liberty is under
+    `/foss/pdks/...` and the host has no `/foss/pdks`. Hashing PDK files
+    host-side therefore fails for every one of them, which would make the step
+    identity permanently uncomputable and turn the whole change into "always
+    re-run". So each path is hashed where it resolves: on the host when it is
+    there, otherwise inside the container.
+
+    Cached per (container, paths) for the life of the process, so the three
+    kinds do not pay for the same five files three times.
+
+    A probe that fails returns nothing for that path, and
+    `_step_identity.pdk_digest` then REFUSES — an unreadable PDK is not a
+    matching PDK."""
+    def _hash(paths: Sequence[str]) -> Dict[str, str]:
+        key = (container or "", tuple(paths))
+        hit = _STEP_PDK_HASH_CACHE.get(key)
+        if hit is not None:
+            return hit
+        out: Dict[str, str] = {}
+        remote: List[str] = []
+        for path in paths:
+            hp = Path(path)
+            if hp.is_file():
+                try:
+                    h = hashlib.sha256()
+                    with open(hp, "rb") as fh:
+                        for chunk in iter(lambda: fh.read(1 << 20), b""):
+                            h.update(chunk)
+                    out[path] = h.hexdigest()
+                    continue
+                except OSError:
+                    pass
+            remote.append(path)
+        if remote and container:
+            try:
+                import _container_exec as _cx  # noqa: PLC0415
+                quoted = " ".join(shlex.quote(r) for r in remote)
+                cp = _cx.run_in_container(
+                    container, f"sha256sum {quoted} 2>/dev/null || true",
+                    deadline_s=120)
+                for line in (cp.stdout or "").splitlines():
+                    parts = line.split(None, 1)
+                    if len(parts) == 2 and len(parts[0]) == 64:
+                        out[parts[1].strip()] = parts[0]
+            except Exception:  # noqa: BLE001 — a failed probe is not a match
+                pass
+        _STEP_PDK_HASH_CACHE[key] = out
+        return out
+    return _hash
+
+
+#: What each kind's step ACTUALLY RAN, filled by `_recorded` as the step runs.
+#: `(recording | None, why_not)`.
+_STEP_RECORDING: Dict[str, Tuple[Optional[Dict[str, Dict[str, str]]], str]] = {}
+
+
+def _probed_tool_versions(project: Path, kind: str) -> str:
+    """The tool versions this step's own run put in the ledger, read AT STAMP
+    TIME and then CARRIED in the stamp.
+
+    r4 review finding 4: re-reading `provenance.jsonl` at freshness time made
+    this component move on every no-op re-run, because
+    `step_canonicalize_artefacts` keeps APPENDING to that ledger AFTER the
+    stamps, with version-less reconstructed rows (measured: yosys -> "",
+    pnr tools -> None). The ledger grows; a freshness key may not be read from
+    a growing file. Captured once, here, while it still describes only this
+    step's own work."""
+    try:
+        import _step_identity as _si  # noqa: PLC0415
+        prefixes = _si.KIND_DIR_PREFIX.get(kind) or ()
+        prov = Path(project) / "provenance.jsonl"
+        if not prov.is_file():
+            return ""
+        seen: Dict[str, str] = {}
+        for line in prov.read_text(errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            outs = rec.get("outputs") or {}
+            if not isinstance(outs, dict):
+                continue
+            if not any(str(k).startswith(pfx) for k in outs
+                       for pfx in prefixes):
+                continue
+            tool = str(rec.get("tool") or "")
+            if tool:
+                seen[tool] = str(rec.get("version") or "")
+        return json.dumps(seen, sort_keys=True)
+    except Exception:  # noqa: BLE001 — a probe we cannot take is empty
+        return ""
+
+
+def _merge_recording(kind: str, rec, why: str) -> None:
+    """Fold one more recorded span into ``kind``'s recording.
+
+    A kind's identity must cover EVERY step that writes that kind's artefacts
+    (r5 review finding 1). `step_signoff_spef_repair` and
+    `step_signoff_drv_wire_length_repair` run AFTER `step_pnr` and copy a
+    repaired DEF over `routed.def` and `{top}.def` — so a fix landed in either
+    changed the shipped DEF while the key that vouched for it read
+    "pnr unchanged", and the next run shipped the old repaired DEF. Recording
+    them INTO pnr (and into gds, which streams that same DEF) is what makes
+    the span match the artefact."""
+    have, have_why = _STEP_RECORDING.get(kind, (None, ""))
+    if rec is None:
+        # One span we could not record poisons the kind: a partial recording
+        # would look like a complete one.
+        _STEP_RECORDING[kind] = (None, why or have_why or "a span of this "
+                                 "kind could not be recorded")
+        return
+    if have is None and (have_why or kind in _STEP_RECORDING):
+        return                      # already poisoned; keep the reason
+    merged: Dict[str, Dict[str, str]] = {k: dict(v) for k, v in
+                                         (have or {}).items()}
+    for rel, entries in rec.items():
+        merged.setdefault(rel, {}).update(entries)
+    _STEP_RECORDING[kind] = (merged, "")
+
+
+def _recorded(kinds, fn):
+    """Wrap a step so the code it RUNS is recorded (R-0924-3 r5).
+
+    Four review rounds found the same hole class in a static AST closure, and
+    the fourth said the quiet part: Python's dynamism guarantees a fifth.
+    `from X import f as g`, `importlib.import_module(...)`, `getattr`,
+    callbacks and a `PdkConfig` assembled in `main()` are all invisible to a
+    walk over the source, and every one of them was a measured escape into a
+    shipped artefact. They are not invisible to the interpreter, so the step
+    runs and what ran is recorded.
+
+    The wrapper NEVER changes the step's result or raises on the step's
+    behalf; a recording that could not be taken is reported as such and that
+    kind simply gets no cache."""
+    def _wrapped(*a, **k):
+        try:
+            import _step_recorder as _sr  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            for _k in ((kinds,) if isinstance(kinds, str) else kinds):
+                _merge_recording(
+                    _k, None,
+                    f"the recorder is unavailable ({type(exc).__name__})")
+            return fn(*a, **k)
+        rec = _sr.Recorder(PROGRAMS_DIR)
+        try:
+            with rec:
+                return fn(*a, **k)
+        finally:
+            try:
+                _got, _why = rec.recorded()
+            except Exception as exc:  # noqa: BLE001 — never fail the step
+                _got, _why = None, (f"the recording could not be read "
+                                    f"({type(exc).__name__}: {exc})")
+            for _k in ((kinds,) if isinstance(kinds, str) else kinds):
+                _merge_recording(_k, _got, _why)
+    return _wrapped
+
+
+def _step_inputs(project: Path, kind: str, top: str, args: Any,
+                 ) -> Tuple[List[Tuple[str, Optional[Path], str]],
+                            Dict[str, str], List[str]]:
+    """What `kind` reads — BY CALLING THE STEP'S OWN RESOLVERS.
+
+    r3 review (w18fc56v9) finding 1, and it is the last restatement: r3 still
+    NAMED each input instead of asking the step. Every miss it found is the
+    same mistake — the identity said `{top}_synth.v` while `step_pnr` routes
+    `pnr_input_netlist()` (which returns `post_dft_netlist.v` when the L20 scan
+    contract authorises it); it never looked at the reference-flow QoR knobs
+    that reshape synthesis (`SWAP_ARITH_OPERATORS`, `ADDER_MAP_FILE` — whose
+    file `_resolve_adder_map_file` may resolve to an ABSOLUTE path outside the
+    project), nor at `_reference_flow_pnr_audit`'s knobs into the PnR deck, nor
+    at `input/pdk_local` macros (which become synth blackboxes AND PnR/GDS
+    macro LEF/GDS), nor at `input/otp/*.hex` (copied into the synth working
+    directory so `$readmemh` resolves).
+
+    So this calls the resolvers instead of restating them. A resolver is asked
+    exactly as the step asks it; when one RAISES, that kind gets NO cache and
+    the reason is returned in `unresolvable` — a step whose read-set cannot be
+    established is not a step anyone can prove current.
+
+    Returns `(inputs, knobs, unresolvable)`.
+    """
+    inputs: List[Tuple[str, Optional[Path], str]] = []
+    knobs: Dict[str, str] = {}
+    unresolvable: List[str] = []
+
+    def _ask(label: str, fn, *a):
+        """Call one of the step's own resolvers, or record why we cannot."""
+        try:
+            return fn(*a)
+        except Exception as exc:  # noqa: BLE001 — a read-set we cannot get
+            unresolvable.append(
+                f"{label}: {type(exc).__name__}: {exc}")
+            return None
+
+    def _add(label: str, path, rule: str = "raw") -> None:
+        if path is None:
+            return
+        inputs.append((label, Path(path), rule))
+
+    decl = (project / "input" / "submission_template"
+            / "tapeout_declaration.json")
+
+    # ---- what EVERY kind reads -------------------------------------------
+    _add("declaration", decl, "declaration_as_asked")
+    for f in sorted((project / "input" / "submission_template"
+                     / "slots").glob("*.yaml")):
+        _add("slot", f)
+    _ans = (project / "input" / "submission_template"
+            / "operator_answers.json")
+    if _ans.is_file():
+        _add("operator_answers", _ans)
+    # The phase-1 timing/integration docs are hashed ALWAYS, not only when no
+    # SDC is staged: `_ensure_staged_sdc_drv` reads L9's SYNTH_MAX_FANOUT
+    # regardless of whether an SDC is staged (r3 review finding 1).
+    for name in ("L8_TIMING_WAVEFORM.json", "L8_RTL_CONSTANTS.json",
+                 "L9_INTEGRATION_SPEC.json"):
+        d = project / "phase1" / "generated_docs" / name
+        if d.is_file():
+            _add("phase1_doc", d)
+    for d in sorted((project / "input" / "docs").glob("L9*")):
+        _add("input_doc", d)
+    # Hard macros the design stages: synth blackboxes them and PnR/GDS read
+    # their LEF/GDS. They are a DESIGN input and are not in `_PDK_FIELDS`.
+    _pdk_local = project / "input" / "pdk_local"
+    if _pdk_local.is_dir():
+        _macros = sorted(q for q in _pdk_local.rglob("*")
+                         if q.is_file()
+                         and q.suffix.lower() in (".lef", ".gds", ".lib", ".v"))
+        for q in _macros:
+            _add("macro", q)
+        knobs["pdk_local_files"] = str(len(_macros))
+    else:
+        knobs["pdk_local_files"] = "0"
+    # The design's reference-flow QoR knobs reshape synthesis and the PnR deck.
+    _qor = _ask("_reference_flow_qor_knobs", _reference_flow_qor_knobs, project)
+    if isinstance(_qor, dict):
+        for k in sorted(_qor):
+            knobs[f"rf:{k}"] = str(_qor.get(k))
+        _adder = _qor.get("ADDER_MAP_FILE")
+        if isinstance(_adder, str) and _adder:
+            # May resolve to an ABSOLUTE path outside the project.
+            _add("adder_map",
+                 _ask("_resolve_adder_map_file", _resolve_adder_map_file,
+                      project, _adder))
+    _audit = _ask("_reference_flow_pnr_audit", _reference_flow_pnr_audit,
+                  project)
+    if isinstance(_audit, dict):
+        for k in sorted(_audit):
+            knobs[f"rfpnr:{k}"] = str(_audit.get(k))
+
+    if kind == "synth":
+        for f in _synth_rtl_sources(_pl.rtl_dir(project)):
+            _add("rtl", f)
+        # `$readmemh` images the synth step copies into its working directory.
+        _otp = project / "input" / "otp"
+        if _otp.is_dir():
+            for hx in sorted(_otp.glob("*.hex")):
+                _add("otp", hx)
+        _sdc = _ask("_resolve_staged_silicon_sdc",
+                    _resolve_staged_silicon_sdc, project)
+        _add("sdc", _sdc)
+        knobs["sdc_staged"] = "yes" if _sdc else "no"
+    elif kind == "pnr":
+        # THE NETLIST THE STEP ITSELF ROUTES TO — `post_dft_netlist.v` when the
+        # L20 scan contract authorises it, not always `{top}_synth.v`.
+        _nl = _ask("pnr_input_netlist", pnr_input_netlist, project, top)
+        if _nl is None:
+            unresolvable.append(
+                "pnr_input_netlist could not be resolved, so the netlist PnR "
+                "reads is unknown")
+        else:
+            _add("netlist", _nl[0] if isinstance(_nl, tuple) else _nl)
+            if isinstance(_nl, tuple) and len(_nl) > 1:
+                knobs["pnr_netlist_basis"] = str(_nl[1])
+        _sdc = _ask("_resolve_staged_silicon_sdc",
+                    _resolve_staged_silicon_sdc, project)
+        # WHEREVER THE RESOLVER SAYS. r3 review finding 2: the r3 rule kept
+        # only `input/` paths while this resolver still hands PnR an SDC from
+        # its retained legacy locations, so the identity and the step
+        # disagreed about which file the run is constrained by. Identity
+        # follows the resolver; where it came from is DISCLOSED instead.
+        _add("sdc", _sdc)
+        knobs["sdc_staged"] = "yes" if _sdc else "no"
+        if _sdc is not None:
+            try:
+                _in_design = Path(_sdc).resolve().is_relative_to(
+                    (project / "input").resolve())
+            except (OSError, ValueError):
+                _in_design = False
+            knobs["sdc_origin"] = ("design" if _in_design
+                                   else "flow_emitted_or_legacy")
+        knobs["spare_density"] = str(getattr(args, "spare_density", ""))
+        knobs[_TAP_PITCH_ENV] = os.environ.get(_TAP_PITCH_ENV, "")
+        # r5 review finding 5: this one changes `step_pnr`'s filler Tcl and
+        # therefore the DEF, and was in no component at all.
+        knobs["VIBEIC_SPARSE_DIE_FILL_PCT"] = os.environ.get(
+            "VIBEIC_SPARSE_DIE_FILL_PCT", "")
+    elif kind == "gds":
+        _add("streamed_def", _pl.pnr_dir(project) / f"{top}.def")
+        knobs["VIBEIC_FORCE_KLAYOUT_STREAMOUT"] = os.environ.get(
+            "VIBEIC_FORCE_KLAYOUT_STREAMOUT", "")
+    return inputs, knobs, unresolvable
+
+
+def _step_image_digest(container: str) -> Optional[str]:
+    """The identity of the tool environment, for a LOCAL freshness comparison.
+
+    A LADDER, and it exists because the first cut had only its top rung.
+    REVIEW FINDING 5 (r1): `canonical_run_admission.image_identity` answers with
+    a REGISTRY digest or `IMAGE_UNAVAILABLE`, and the first cut turned anything
+    but a digest into None — so on a locally built image, and inside the image
+    (where there is no docker client at all), the tools component was never
+    computable and EVERY step re-ran for ever. The tests hid it by patching
+    this function, which is exactly the kind of green that does not survive
+    contact with a real box; the r2 tests do not patch it.
+
+      1. the registry digest, when the image has one — portable and best;
+      2. the LOCAL image Id — not portable, and it does not need to be: a
+         freshness key is compared on this machine against a stamp written on
+         this machine;
+      3. `LOCAL_EXEC`, when there is no container route at all because the
+         runner is running INSIDE the image. There is no second image to be
+         confused with, and the tool VERSIONS in `provenance.jsonl` still carry
+         the identity that matters.
+
+    None only when a container IS the route and nothing about it can be named —
+    which remains a re-run, because an artefact built by an environment nobody
+    can name is not a proven artefact."""
+    try:
+        import canonical_run_admission as _cra  # noqa: PLC0415
+        v = _cra.image_identity(container or "")
+        if v and not v.startswith("IMAGE_UNAVAILABLE"):
+            return v
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import _eda_pin as _pin  # noqa: PLC0415
+        image_id, _why = _pin.container_image_id(container or "")
+        if image_id:
+            return f"imageid:{image_id}"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import _container_exec as _cx  # noqa: PLC0415
+        if _cx.no_container_route():
+            return "LOCAL_EXEC"
+    except Exception:  # noqa: BLE001
+        pass
+    if not container:
+        # NOBODY NAMED A CONTAINER, so there is no container identity to fail
+        # closed ON. Failing closed is for a question that HAS an answer this
+        # process could not obtain; "which image is the container you did not
+        # name running" has none. The tools component still carries the tool
+        # versions from `provenance.jsonl`, which is the identity that decides
+        # whether the work would come out the same.
+        return "NO_CONTAINER"
+    return None
 
 
 def _extract_overutil_pct(log_text: str) -> Optional[float]:
@@ -32671,7 +33151,9 @@ class CachedStageDecision(NamedTuple):
 
 def _cached_stage_decision(project: Path, out_dir: Path, artefact: Path, *,
                            kind: str, top: str, die_um: str, util: float,
-                           blocked_by: str = "") -> CachedStageDecision:
+                           blocked_by: str = "", pdk: Any = None,
+                           container: str = "",
+                           args: Any = None) -> CachedStageDecision:
     """THE cache-reuse decision for a phase-3 stage, as a function.
 
     WHY IT IS A FUNCTION AT ALL — vibe-ic#2166.  This decision used to be
@@ -32686,7 +33168,9 @@ def _cached_stage_decision(project: Path, out_dir: Path, artefact: Path, *,
 
     WHAT IT DECIDES, unchanged from the two inline copies it replaces:
       * `_pnr_cache_valid_for` — the REQUESTED floorplan geometry (#593/#596);
-      * `_producer_cache_valid_for(kind)` — which BUILD of the recipe wrote it;
+      * `_producer_cache_valid_for(kind)` — whether THIS STEP is unchanged
+        (R-0924-3: its declared inputs, its own code, its tools, its PDK —
+        no longer which BUILD of the recipe wrote the artefact);
       * for `kind == "pnr"` only, and only on a chip path, the pad-ring route
         evidence (the GDS site never carried this clause and still does not);
       * `blocked_by`, a caller-supplied refusal already decided elsewhere —
@@ -32714,7 +33198,9 @@ def _cached_stage_decision(project: Path, out_dir: Path, artefact: Path, *,
     the caller still owns what to do with the answer.
     """
     ok, reason = _pnr_cache_valid_for(out_dir, die_um, util)
-    prod_ok, prod_reason = _producer_cache_valid_for(out_dir, kind)
+    prod_ok, prod_reason = _producer_cache_valid_for(
+        out_dir, kind, project=project, pdk=pdk, container=container,
+        top=top, args=args)
     ok = ok and prod_ok
     reason = f"{reason}; {prod_reason}"
     if kind == "pnr" and (_chip_path_requests_pad_ring(project)
@@ -67796,7 +68282,8 @@ def main() -> int:
         # `_producer_cache_valid_for`.
         _synth_dir = _pl.synth_dir(project)
         _synth_prod_ok, _synth_prod_msg = _producer_cache_valid_for(
-            _synth_dir, "synth")
+            _synth_dir, "synth", project=project, pdk=pdk,
+            container=args.container, top=effective_top, args=args)
         if _nl_pdk_ok and not _synth_prod_ok:
             _nl_pdk_ok = False
             print(f"[synth] {_synth_prod_msg}", file=sys.stderr)
@@ -67834,14 +68321,17 @@ def main() -> int:
             plan.append(_spf.gate(
                 project, "phase3_one_shot_runner", "synth",
                 _preflight_refusal("synth"),
-                step_synth, project, effective_top, pdk, args.container))
+                _recorded("synth", step_synth), project,
+                effective_top, pdk, args.container))
             # Stamp the producer at the CALL SITE, not inside the step:
             # step_gds alone has two PASS returns and step_synth/step_pnr have
             # many, so a per-return stamp is a class of missed sites waiting to
             # happen. One stamp per producing call covers every internal path.
             # Appends NOTHING, so the `plan[-1]` idiom below is untouched.
             if plan[-1].status == "PASS":
-                _write_producer_identity(_synth_dir, "synth")
+                _write_producer_identity(
+                    _synth_dir, "synth", project=project, pdk=pdk,
+                    container=args.container, top=effective_top, args=args)
         if plan[-1].status == "PASS":
             # ── canonical Step 11 (DFT / stuck-at ATPG) ────────────────────
             # The phase-2/phase-3 ORDERING repair. Placed HERE because this is
@@ -67894,7 +68384,8 @@ def main() -> int:
             # which lives inside its approach loop, is never reached.
             _pnr_cache = _cached_stage_decision(
                 project, _pnr_out, def_existing, kind="pnr",
-                top=effective_top, die_um=args.die_um, util=args.util)
+                top=effective_top, die_um=args.die_um, util=args.util,
+                pdk=pdk, container=args.container, args=args)
             _cache_msg = _pnr_cache.reason
             if _pnr_cache.accept:
                 plan.append(StepResult(
@@ -67916,7 +68407,8 @@ def main() -> int:
                 _pnr_dispatched = _spf.gate(
                     project, "phase3_one_shot_runner", "pnr",
                     _preflight_refusal("pnr"),
-                    step_pnr, project, effective_top, pdk, args.container,
+                    _recorded("pnr", step_pnr), project,
+                    effective_top, pdk, args.container,
                     args.die_um, args.util,
                     spare_density=args.spare_density,
                     pad_ring_step=step_pad_ring_gen,
@@ -67924,7 +68416,9 @@ def main() -> int:
                 plan.extend(_pad_ring_rows)
                 plan.append(_pnr_dispatched)
                 if _pnr_dispatched.status == "PASS":
-                    _write_producer_identity(_pnr_out, "pnr")
+                    _write_producer_identity(
+                        _pnr_out, "pnr", project=project, pdk=pdk,
+                        container=args.container, top=effective_top, args=args)
         # ── PROVENANCE SNAPSHOT of the PnR outcome ─────────────────────────
         # Everything downstream (the #527 SPEF repair, the DRV escalation and
         # — critically — the ORGANIC #593 stale-GDS guard) used to read
@@ -67992,7 +68486,8 @@ def main() -> int:
                 _pnr_redispatched = _spf.gate(
                     project, "phase3_one_shot_runner", "pnr",
                     _preflight_refusal("pnr"),
-                    step_pnr, project, effective_top, pdk, args.container,
+                    _recorded("pnr", step_pnr), project,
+                    effective_top, pdk, args.container,
                     args.die_um, args.util,
                     spare_density=args.spare_density,
                     pad_ring_step=step_pad_ring_gen,
@@ -68002,7 +68497,10 @@ def main() -> int:
                 plan.extend(_pnr_rows2)
                 plan.append(_pnr_redispatched)
                 if _pnr_redispatched.status == "PASS":
-                    _write_producer_identity(_pl.pnr_dir(project), "pnr")
+                    _write_producer_identity(
+                        _pl.pnr_dir(project), "pnr", project=project,
+                        pdk=pdk, container=args.container, top=effective_top,
+                        args=args)
                 # Publish the COST beside the arithmetic, measured not
                 # estimated: the second PnR's wall-clock is the price of this
                 # fix and belongs in the artefact a reviewer reads.
@@ -68110,7 +68608,8 @@ def main() -> int:
             # the slow sign-off corner, BEFORE gds/drc/lvs so the shipped design is
             # the repaired one. No-op (base route kept) unless it reaches setup>=0
             # AND the reroute is DRC-clean. Fail-safe: never a DRC regression.
-            _sr = step_signoff_spef_repair(project, effective_top, pdk,
+            _sr = _recorded(("pnr", "gds"), step_signoff_spef_repair)(
+                project, effective_top, pdk,
                                            args.container)
             if _sr is not None:
                 plan.append(_sr)
@@ -68131,11 +68630,25 @@ def main() -> int:
             # Runs BEFORE gds/drc/lvs, so the shipped GDS and the LVS/DRC
             # sign-off see whatever this promotes; if nothing improves on the
             # downstream number the incumbent route is restored byte-for-byte.
-            _esc = step_signoff_drv_wire_length_repair(
+            _esc = _recorded(("pnr", "gds"),
+                             step_signoff_drv_wire_length_repair)(
                 project, effective_top, pdk, args.container)
             if _esc is not None:
                 plan.append(_esc)
                 _chain_ok = (_esc.status == "PASS")
+        # RE-STAMP PnR AFTER ITS LAST WRITER. r5 review finding 1: the stamp
+        # was taken when `step_pnr` returned, and the two repair/escalation
+        # steps above then copied a repaired DEF over `routed.def` and
+        # `{top}.def`. The artefact on disk was therefore NOT the artefact the
+        # stamp vouched for, and an edit to the repair path read "pnr
+        # unchanged" and shipped the old repaired DEF. A kind's stamp belongs
+        # after the last step that writes that kind's artefacts; the recording
+        # merged above now covers those steps too.
+        if _STEP_RECORDING.get("pnr", (None, ""))[0] is not None:
+            _write_producer_identity(
+                _pl.pnr_dir(project), "pnr", project=project, pdk=pdk,
+                container=args.container, top=effective_top, args=args,
+                cache_hit=not _pnr_reran)
         if _chain_ok:
             # #593 — the GDS is derived from the DEF, so it shares the
             # PnR geometry cache verdict: a geometry change that forced a
@@ -68154,6 +68667,7 @@ def main() -> int:
             _gds_cache = _cached_stage_decision(
                 project, _pnr_out, gds_existing, kind="gds",
                 top=effective_top, die_um=args.die_um, util=args.util,
+                pdk=pdk, container=args.container, args=args,
                 blocked_by=("PnR re-ran in this session, so a cached GDS is "
                             "from the previous DEF" if _pnr_reran else ""))
             _gds_prod_msg = _gds_cache.producer_reason
@@ -68174,10 +68688,14 @@ def main() -> int:
                 _gds_dispatched = _spf.gate(
                     project, "phase3_one_shot_runner", "gds",
                     _preflight_refusal("gds"),
-                    step_gds, project, effective_top, pdk, args.container)
+                    _recorded("gds", step_gds), project,
+                    effective_top, pdk, args.container)
                 plan.append(_gds_dispatched)
                 if _gds_dispatched.status == "PASS":
-                    _write_producer_identity(_pnr_out, "gds")
+                    _write_producer_identity(
+                        _pnr_out, "gds", project=project, pdk=pdk,
+                        container=args.container, top=effective_top,
+                        args=args)
             if _chip_path_requests_pad_ring(project):
                 _pad_final = step_pad_ring_final_evidence(
                     project, effective_top, _gds_dispatched, args.container)

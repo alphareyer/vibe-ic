@@ -54,6 +54,7 @@ def _mk(tmp_path, netlist_mtime, rtl_mtime, rtl_name="top.v"):
 #: again. It is NOT a weakening — at least one must match or the block cannot
 #: be located and every test that reads it fails loudly, by design.
 _SYNTH_DISPATCH_MARKERS = (
+    '_recorded("synth", step_synth), project,',  # recorded preflight dispatch
     'step_synth, project, effective_top',   # v1.10.x: handed to _spf.gate()
     'plan.append(step_synth(',              # pre-step_preflight direct call
 )
