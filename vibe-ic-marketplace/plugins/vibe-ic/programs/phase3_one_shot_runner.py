@@ -78,7 +78,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path, PurePosixPath
-from typing import (Any, Callable, Dict, FrozenSet, Iterable, List,
+from typing import (Any, Callable, Dict, FrozenSet, Iterable, List, Mapping,
                     NamedTuple, Optional, Sequence, Set, Tuple)
 import _audit_scope
 import _path_layout as _pl
@@ -6686,6 +6686,121 @@ def _build_macro_pdn_grid_tcl(plan: Optional[Dict[str, Any]]) -> str:
 _EM_MEASURED_SAFETY = 2.0
 
 
+# ── A MEASUREMENT SIZES ONLY THE RUN THAT TOOK IT ───────────────────────────
+#
+# THE DEFECT THESE CLOSE, MEASURED on spm run23 (2026-09-24, 8HD-4).
+# `step_pnr` reads the EM floor (this file, in `step_pnr`); `em.rpt`,
+# `em.json` and `em_current_authority.json` are written by
+# `step_canonicalize_artefacts`, which runs AFTER PnR. So the first PnR of any
+# run can only ever read a PREVIOUS run's measurement — verified statically
+# (enclosing defs) and from two real run logs (`pnr` precedes
+# `canonicalize_artefacts` in both).
+#
+# `_pdn_em_first_pass_resize` exists to close exactly that gap INSIDE one run:
+# it re-measures, re-derives and re-dispatches PnR once. It was bounded by a
+# sentinel written into `phase3/stage3/pnr/`, and NOTHING in the corpus ever
+# removes it (grep: no unlink, no rmtree, tests included). So a bound meant to
+# cap ONE RUN at one extra PnR capped THE TREE, permanently:
+#
+#     run 1     sentinel absent -> corrector fires -> PDN sized from this
+#               run's own measurement.                       As designed.
+#     run 2+    `sentinel.exists()` -> return None at the first statement.
+#               The corrector never runs again, and the only current reaching
+#               the floor is run 1's leftover.
+#
+# MEASURED: run23 carried a sentinel dated 2026-09-23 18:50, so NEITHER the
+# 00:46 run NOR the 09:27 run had the corrector, and the I_total the PDN was
+# sized from drifted 2.900e-03 -> 2.600e-03 -> 2.860e-03 across three runs
+# with the design unchanged. A control (the same plugin commit re-run on the
+# drifted tree) reproduced the drifted number, which is what proves the value
+# follows the TREE and not the code.
+#
+# The rule these restore: a measurement is evidence for the run that TOOK it.
+# A previous run measured a layout that no longer exists.
+
+
+def _pdn_em_this_run_tag() -> str:
+    """This run's identity, in the spelling the runner already uses.
+
+    Same basis as the scratch-prefix tag at `_RUN_STARTED_AT`: the process and
+    its start instant. Two runs cannot share it, and it costs no new state.
+    """
+    return f"phase3-{os.getpid()}-{int(_RUN_STARTED_AT * 1000)}"
+
+
+def _pdn_em_sentinel_binds(sentinel: Path) -> Tuple[bool, str]:
+    """Does `sentinel` bind THIS run? Returns (binds, why).
+
+    BINDS only when this run wrote it. A sentinel from a previous run is not a
+    bound on this one — that was the defect. A sentinel that cannot be read, or
+    that predates this change and carries no run tag, is treated as a PREVIOUS
+    run's: the conservative reading is the one that restores the corrector,
+    and it is also the only reading that lets an existing tree recover.
+    """
+    if not sentinel.exists():
+        return False, "no resize has been spent in this tree"
+    try:
+        doc = json.loads(sentinel.read_text())
+    except (OSError, ValueError):
+        return False, ("the sentinel could not be read, so it cannot be shown "
+                       "to be this run's; the resize is not spent")
+    tag = doc.get("run") if isinstance(doc, Mapping) else None
+    if not isinstance(tag, str) or not tag:
+        return False, ("the sentinel names no run (written before this rule), "
+                       "so it is a PREVIOUS run's and does not bind this one")
+    if tag == _pdn_em_this_run_tag():
+        return True, "this run has already spent its one resize"
+    return False, (f"the sentinel was written by another run ({tag}), so it "
+                   f"does not bind this one")
+
+
+def _pdn_em_is_this_runs(path: Path) -> bool:
+    """Was `path` written during THIS run?
+
+    Same `not_before` discipline `canonical_post_route_sta` already applies to
+    the post-route STA report. An unreadable mtime is NOT this run's: absent
+    evidence is not evidence.
+    """
+    try:
+        return path.stat().st_mtime >= _RUN_STARTED_AT
+    except OSError:
+        return False
+
+
+def _pdn_em_declared_current(project: Path) -> Tuple[Optional[float],
+                                                     Optional[str]]:
+    """The supply current the DESIGN declares, as I = P / V.
+
+    R-0924-3: `input/` and `phase1/` are the design's; a file the FLOW wrote is
+    not evidence for the next run's decisions. The declared power budget is the
+    only current that is BOTH available at PDN time (before any route exists)
+    and not written by a previous run, so it is the fallback basis when this
+    run has no measurement of its own.
+
+    Returns (None, None) when the design declares no budget — which is not a
+    failure, it is the design not having answered. The caller then derives no
+    floor and SAYS so.
+    """
+    for rel in ("phase1/generated_docs/L19_CONSTRAINTS_PDK.json",
+                "input/docs/L19_CONSTRAINTS_PDK.json"):
+        try:
+            doc = json.loads((project / rel).read_text())
+        except (OSError, ValueError):
+            continue
+        for holder in (doc, doc.get("fields") if isinstance(doc, Mapping)
+                       else None, doc.get("power") if isinstance(doc, Mapping)
+                       else None):
+            if not isinstance(holder, Mapping):
+                continue
+            p_uw = holder.get("power_budget_uw")
+            v = holder.get("supply_voltage_v") or holder.get("nominal_voltage_v")
+            if isinstance(p_uw, (int, float)) and p_uw > 0 \
+                    and isinstance(v, (int, float)) and v > 0:
+                return (float(p_uw) * 1e-6) / float(v), (
+                    f"{rel} power_budget_uw / supply voltage (design-declared)")
+    return None, None
+
+
 def _pdn_em_measured_subject(project: Path, rpt3: Path) -> Dict[str, Any]:
     """Identity of the LAYOUT the EM measurement was taken on.
 
@@ -6810,17 +6925,25 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
     # em.rpt with the gate's own module regexes.
     i_total: Optional[float] = None
     i_src: Optional[str] = None
+    # STALE-BASIS REFUSALS, recorded so "no floor" can be told from "no floor
+    # DERIVED". Each entry names a source this run declined and why.
+    stale: List[str] = []
     auth_json = rpt3 / "em_current_authority.json"
-    try:
-        doc = json.loads(auth_json.read_text())
-        vals = [v.get("supply_current_A") for v in doc.get("supply_authority", [])
-                if isinstance(v, dict)
-                and isinstance(v.get("supply_current_A"), (int, float))]
-        if vals:
-            i_total = max(vals)
-            i_src = "reports/phase3/em_current_authority.json supply_authority"
-    except (OSError, ValueError):
-        pass
+    # A previous run's authority describes a layout that no longer exists.
+    if auth_json.exists() and not _pdn_em_is_this_runs(auth_json):
+        stale.append("reports/phase3/em_current_authority.json (written by an "
+                     "earlier run; it measures a layout this run replaces)")
+    else:
+        try:
+            doc = json.loads(auth_json.read_text())
+            vals = [v.get("supply_current_A") for v in doc.get("supply_authority", [])
+                    if isinstance(v, dict)
+                    and isinstance(v.get("supply_current_A"), (int, float))]
+            if vals:
+                i_total = max(vals)
+                i_src = "reports/phase3/em_current_authority.json supply_authority"
+        except (OSError, ValueError):
+            pass
     if i_total is None:
         # A missing/unparseable I_total is no longer fatal on its own: the
         # MEASURED per-segment maximum read below can size the strap by
@@ -6828,19 +6951,22 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
         # available" returns None, and that decision is made after both
         # have been attempted.
         em_rpt = rpt3 / "em.rpt"
-        try:
-            txt = em_rpt.read_text(errors="replace")
-            import em_peak_current_authority_check as _empc
-            powers = [float(m.group(1))
-                      for m in _empc._TOTAL_POWER_RE.finditer(txt)]
-            volts = [float(m.group(1))
-                     for m in _empc._SUPPLY_V_RE.finditer(txt)]
-            pairs = [p / v for p, v in zip(powers, volts) if v > 0]
-            if pairs:
-                i_total = max(pairs)
-                i_src = "reports/phase3/em.rpt Total power / Supply voltage"
-        except Exception:
-            i_total = None
+        if em_rpt.exists() and not _pdn_em_is_this_runs(em_rpt):
+            stale.append("reports/phase3/em.rpt (written by an earlier run)")
+        else:
+            try:
+                txt = em_rpt.read_text(errors="replace")
+                import em_peak_current_authority_check as _empc
+                powers = [float(m.group(1))
+                          for m in _empc._TOTAL_POWER_RE.finditer(txt)]
+                volts = [float(m.group(1))
+                         for m in _empc._SUPPLY_V_RE.finditer(txt)]
+                pairs = [p / v for p, v in zip(powers, volts) if v > 0]
+                if pairs:
+                    i_total = max(pairs)
+                    i_src = "reports/phase3/em.rpt Total power / Supply voltage"
+            except Exception:
+                i_total = None
     # THE MEASURED per-segment maximum for THIS layout, if the EM step ran.
     # openroad-psm walks every segment of the grid; this is the largest
     # current any one of them actually carries, not an assumption about how
@@ -6849,18 +6975,35 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
     i_meas_src: Optional[str] = None
     i_meas_segments: Optional[int] = None
     i_meas_subject: Dict[str, Any] = {}
-    try:
-        _em = json.loads((rpt3 / "em.json").read_text())
-        _v = _em.get("max_segment_current_A")
-        if isinstance(_v, (int, float)) and _v > 0:
-            i_meas = float(_v)
-            i_meas_src = "reports/phase3/em.json max_segment_current_A"
-            _s = _em.get("segments_analysed")
-            if isinstance(_s, int):
-                i_meas_segments = _s
-            i_meas_subject = _pdn_em_measured_subject(project, rpt3)
-    except Exception:
-        i_meas = None
+    _em_json = rpt3 / "em.json"
+    # The PREFERRED basis, and so the one that most needs to be this run's:
+    # it carries a 2.0x safety factor rather than a conservation bound, so a
+    # stale value is trusted MORE than a stale I_total, not less.
+    if _em_json.exists() and not _pdn_em_is_this_runs(_em_json):
+        stale.append("reports/phase3/em.json (written by an earlier run; "
+                     "max_segment_current_A measures a layout this run "
+                     "replaces)")
+    else:
+        try:
+            _em = json.loads(_em_json.read_text())
+            _v = _em.get("max_segment_current_A")
+            if isinstance(_v, (int, float)) and _v > 0:
+                i_meas = float(_v)
+                i_meas_src = "reports/phase3/em.json max_segment_current_A"
+                _s = _em.get("segments_analysed")
+                if isinstance(_s, int):
+                    i_meas_segments = _s
+                i_meas_subject = _pdn_em_measured_subject(project, rpt3)
+        except Exception:
+            i_meas = None
+
+    # BASIS ORDER (R-0924-3): this run's own measurement, then the DESIGN's
+    # declared budget, then nothing — and "nothing" is SAID, not returned in
+    # silence. A previous run's measurement is never a basis.
+    i_decl: Optional[float] = None
+    i_decl_src: Optional[str] = None
+    if i_meas is None and not (i_total and i_total > 0):
+        i_decl, i_decl_src = _pdn_em_declared_current(project)
 
     if i_meas is not None:
         i_drive = i_meas * _EM_MEASURED_SAFETY
@@ -6868,7 +7011,38 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
     elif i_total and i_total > 0:
         i_drive = i_total
         sizing_basis = "i_total_conservation_bound"
+    elif i_decl and i_decl > 0:
+        i_drive = i_decl
+        i_src = i_decl_src
+        sizing_basis = "design_declared_power_budget"
     else:
+        # FAIL CLOSED AND SAY SO. Returning None silently made "this design
+        # needs no floor" and "this run could not derive one" the same
+        # observable, which is how the stale basis went unnoticed for three
+        # runs. The run is not failed on it -- the Step-25 EM gate still
+        # judges the grid that gets built -- but the reader is told.
+        _why = ("; ".join(stale) if stale
+                else "no EM measurement and no declared power budget")
+        print("[phase3] PDN_EM_FLOOR_NOT_DERIVED: no supply current is "
+              f"attributable to THIS run ({_why}), and "
+              "phase1/generated_docs/L19_CONSTRAINTS_PDK.json declares no "
+              "power_budget_uw. No EM-derived strap floor is applied this "
+              "pass; the Step-25 EM gate still judges the grid that is built.",
+              file=sys.stderr)
+        try:
+            rpt3.mkdir(parents=True, exist_ok=True)
+            _aa.write_text(rpt3 / "pdn_em_sizing.json", json.dumps({
+                "schema": "pdn_em_sizing/not_derived",
+                "derived": False,
+                "code": "PDN_EM_FLOOR_NOT_DERIVED",
+                "declined_stale_sources": stale,
+                "declared_budget_present": False,
+                "consequence": ("no EM-derived floor was applied on this "
+                                "pass; strap widths are the ratio/registry "
+                                "widths and the Step-25 gate judges them"),
+            }, indent=2) + "\n")
+        except OSError:
+            pass
         return None
 
     tlef_txt = _read_pdk_text(getattr(pdk, "tech_lef", None), container)
@@ -6976,6 +7150,11 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
         "width_quantum_um": quantum,
         "i_total_A": i_total,
         "i_total_source": i_src,
+        # Sources this run DECLINED because a previous run wrote them. Present
+        # even on a successful derivation: "which basis was used" and "what was
+        # refused" are different facts, and the second is the one that shows a
+        # re-run is not silently inheriting the last run's layout.
+        "declined_stale_sources": stale or None,
         "jmax_source": str(getattr(pdk, "tech_lef", None)),
         "margin": margin,
         "applied_as": ("FLOOR on strap widths only (max with the "
@@ -7050,8 +7229,15 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
     own LEF."""
     pnr_out = _pl.pnr_dir(project)
     sentinel = pnr_out / _PDN_EM_RESIZE_SENTINEL
-    if sentinel.exists():
+    # The bound is ONE RESIZE PER RUN, and it is spent only by THIS run. A
+    # sentinel left by a previous run used to end the function here, which
+    # retired the corrector for the lifetime of the tree — see
+    # `_pdn_em_sentinel_binds`.
+    _binds, _why = _pdn_em_sentinel_binds(sentinel)
+    if _binds:
         return None
+    print(f"[phase3] PDN EM first-pass resize is AVAILABLE: {_why}",
+          file=sys.stderr)
     def_file = pnr_out / f"{top}.def"
     if not def_file.is_file():
         return None
@@ -65870,6 +66056,10 @@ def main() -> int:
                     _rz["sentinel"].parent.mkdir(parents=True, exist_ok=True)
                     _rz["sentinel"].write_text(
                         json.dumps({"reason": "pdn_em_first_pass_resize",
+                                    # WHOSE resize this spends. Without it the
+                                    # sentinel bounds every future run in this
+                                    # tree, not just this one.
+                                    "run": _pdn_em_this_run_tag(),
                                     "short": _rz["short"]}, indent=2) + "\n")
                 except OSError:
                     pass
