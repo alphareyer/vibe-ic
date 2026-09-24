@@ -91,6 +91,7 @@ def test_the_unexplained_rewrite_is_recorded_as_a_finding(tmp_path):
     assert rep["rewrites"] == [{
         "path": REL, "declared_sha256": _sha(ORIGINAL),
         "disk_sha256": _sha(edited),
+        "declined_by": "_record_reemitted_outputs",
         "why": "no step of this pass wrote these bytes"}]
 
 
@@ -146,3 +147,112 @@ def test_a_step_that_did_not_run_credits_nothing(tmp_path):
                  [str(proj / REL)], reason_class="missing_artefact")
     R._record_reemitted_outputs(proj)
     assert _rules(proj)[0] == "FAIL"
+
+
+# ── r2 (ruling): the same rule through every back-fill, ONE helper ─────────
+#
+# `_v1_6_620_append_pv_signoff_provenance`, `_restamp_provenance_output` and
+# `_step37_restamp_canon_gds_provenance` re-declared a path's CURRENT sha
+# whenever the newest record disagreed. Each now asks `_redeclaration_evidence`
+# and records a decline in the same findings report.
+
+TOP = "widget"
+GDS_PNR = f"phase3/stage3/pnr/{TOP}.gds"
+GDS_CANON = f"phase3/stage4/gds/{TOP}.gds"
+
+
+def _backfilled(proj: Path, rel: str, data: bytes, tool: str) -> Path:
+    """A path whose newest record is a runner BACK-FILL (not a measurement)."""
+    f = proj / rel
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(data)
+    with (proj / "provenance.jsonl").open("a") as fh:
+        fh.write(json.dumps({
+            "tool": tool, "command": f"{tool} (back-filled)", "exit_code": 0,
+            "duration_ms": None, "reconstructed": True,
+            "timestamp": "2026-09-24T01:00:01Z",
+            "outputs": {rel: _sha(data)}}) + "\n")
+    return f
+
+
+def _declined(proj: Path, rel: str) -> bool:
+    rep = proj / "reports/phase3/provenance_unexplained_rewrites.json"
+    return rep.is_file() and any(
+        r["path"] == rel for r in json.loads(rep.read_text())["rewrites"])
+
+
+def test_the_signoff_backfill_does_not_launder_a_rewritten_gds(tmp_path):
+    proj = _project(tmp_path)
+    f = _backfilled(proj, GDS_PNR, b"GDS as streamed\n", "magic")
+    f.write_bytes(b"GDS edited by hand\n")
+    before = len(_rows(proj))
+    R._v1_6_620_append_pv_signoff_provenance(proj, TOP)
+    assert len(_rows(proj)) == before, _rows(proj)[before:]
+    assert _declined(proj, GDS_PNR)
+    assert "PROVENANCE_HASH_MISMATCH" in _rules(proj)[1]
+
+
+def test_the_signoff_backfill_redeclares_a_gds_this_pass_wrote(tmp_path):
+    proj = _project(tmp_path)
+    f = _backfilled(proj, GDS_PNR, b"GDS as streamed\n", "magic")
+    f.write_bytes(b"GDS re-streamed by the gds step\n")
+    R.StepResult("gds", "PASS", 1.0, "streamed", [str(f)])
+    R._v1_6_620_append_pv_signoff_provenance(proj, TOP)
+    assert _rows(proj)[-1]["outputs"] == {GDS_PNR: _sha(
+        b"GDS re-streamed by the gds step\n")}
+    assert not _declined(proj, GDS_PNR)
+
+
+def test_the_signoff_backfill_still_corrects_a_tool_on_the_same_bytes(
+        tmp_path):
+    """A re-attribution of unchanged bytes is not a re-declaration."""
+    proj = _project(tmp_path)
+    _backfilled(proj, GDS_PNR, b"GDS as streamed\n", "phase3_one_shot_runner")
+    R._v1_6_620_append_pv_signoff_provenance(proj, TOP)
+    last = _rows(proj)[-1]
+    assert last["tool"] == "magic" and last["outputs"] == {
+        GDS_PNR: _sha(b"GDS as streamed\n")}
+
+
+def test_restamp_declines_an_unexplained_rewrite(tmp_path):
+    proj = _project(tmp_path)
+    f = _backfilled(proj, GDS_CANON, b"canonical\n", "klayout")
+    f.write_bytes(b"canonical, edited\n")
+    before = len(_rows(proj))
+    R._restamp_provenance_output(proj, GDS_CANON, f, "klayout", "restamp")
+    assert len(_rows(proj)) == before
+    assert _declined(proj, GDS_CANON)
+
+
+def test_restamp_redeclares_what_its_caller_just_wrote(tmp_path):
+    proj = _project(tmp_path)
+    f = _backfilled(proj, GDS_CANON, b"canonical\n", "klayout")
+    t = time.time()
+    f.write_bytes(b"canonical, re-copied\n")
+    R._step37_restamp_canon_gds_provenance(
+        proj, TOP, f, writer=("canonicalize_artefacts", t))
+    last = _rows(proj)[-1]
+    assert last["outputs"] == {GDS_CANON: _sha(b"canonical, re-copied\n")}
+    assert last["producing_step"] == {GDS_CANON: "canonicalize_artefacts"}
+
+
+def test_a_writer_claim_older_than_the_file_is_not_evidence(tmp_path):
+    """`writer` is checked against the file: a caller cannot vouch for bytes
+    that were already there before it started."""
+    proj = _project(tmp_path)
+    f = _backfilled(proj, GDS_CANON, b"canonical\n", "klayout")
+    f.write_bytes(b"canonical, edited earlier\n")
+    old = time.time() - 3600
+    os.utime(f, (old, old))
+    R._step37_restamp_canon_gds_provenance(
+        proj, TOP, f, writer=("canonicalize_artefacts", time.time()))
+    assert _declined(proj, GDS_CANON)
+
+
+def test_one_helper_decides_for_every_backfill():
+    import inspect
+    for fn in (R._record_reemitted_outputs, R._restamp_provenance_output,
+               R._v1_6_620_append_pv_signoff_provenance):
+        assert "_redeclaration_evidence(" in inspect.getsource(fn), fn.__name__
+        assert "_record_unexplained_rewrite(" in inspect.getsource(fn), (
+            fn.__name__)
