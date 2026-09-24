@@ -274,3 +274,42 @@ def test_one_helper_decides_for_every_redeclaration():
                R._v1_6_620_append_pv_signoff_provenance):
         assert "_redeclaration_evidence(" in inspect.getsource(fn), fn.__name__
     assert not hasattr(R, "_PASS_PRODUCED"), "a step row is not evidence"
+
+
+# ── a removal event ends a path's declared life (ledger order) ────────────
+#
+# The hash check reads a removal by its ledger index: it retires the
+# declarations OLDER than it. The re-declaration rule reads it the same way, so
+# a path the runner pruned and a later run re-published is a FIRST declaration,
+# not a rewrite of the pruned bytes; and a removed input credits no chain.
+
+def _prune(proj: Path, rel: str, data: bytes) -> None:
+    (proj / rel).unlink()
+    with (proj / "provenance.jsonl").open("a") as f:
+        f.write(json.dumps({
+            "event": "drc_signoff_prune", "op": "remove", "outputs": {},
+            "removed": [rel], "removed_outputs": [{"path": rel,
+                                                   "sha256": _sha(data)}],
+            "timestamp": "2026-09-24T02:00:00Z"}) + "\n")
+
+
+def test_a_path_republished_after_its_prune_is_a_first_declaration(tmp_path):
+    proj = _project(tmp_path)
+    _prune(proj, REL, ORIGINAL)
+    (proj / REL).write_bytes(b"LVS: a later run's report\n")
+    R._restamp_provenance_output(proj, REL, proj / REL, "netgen", "lvs")
+    assert _rows(proj)[-1]["outputs"] == {
+        REL: _sha(b"LVS: a later run's report\n")}
+    assert _declined(proj) == []
+    assert R._newest_declared_sha(proj, REL) == _sha(
+        b"LVS: a later run's report\n")
+
+
+def test_a_removed_input_credits_no_transform_chain(tmp_path):
+    proj = _project(tmp_path, GDS, b"GDS as streamed\n")
+    _prune(proj, GDS, b"GDS as streamed\n")
+    assert R._newest_declared_sha(proj, GDS) is None
+    (proj / GDS).write_bytes(b"GDS as streamed\n")
+    assert R._redeclaration_evidence(
+        proj, proj / GDS, _sha(b"GDS as streamed\n"),
+        ("gds:dummy_fill", 0.0, proj / GDS, _sha(b"GDS as streamed\n"))) is None
