@@ -184,3 +184,128 @@ def test_a_failed_antenna_rollback_ships_a_route_step_21_accepts(
     assert res.status == "PASS", (res.status, (res.detail or "")[:300])
     rc, check = _step21(project)
     assert (rc, check["status"]) == (0, "PASS"), check
+
+
+# ── r4 (review wh6wcx64v): the reason is the matched SESSION's, per row ─────
+
+def _survivors(project: Path):
+    rows = [json.loads(ln) for ln in
+            (project / "provenance.jsonl").read_text().splitlines()
+            if ln.strip()]
+    return [r for r in rows if r.get("record") == "artefact"
+            and ROUTED in (r.get("outputs") or {})]
+
+
+def test_a_resume_tail_that_dies_after_its_writes_is_named_as_the_producer(
+        tmp_path, monkeypatch):
+    """The main session dies in a best-effort stage BEFORE the sign-off writes;
+    the RESUME tail writes the trio and then dies in the estimate stage; the
+    step ships the tail's bytes. The row must name the resume tail -- the main
+    session never wrote what shipped."""
+    project = _build_project(tmp_path, TOP)
+    (project / "provenance.jsonl").write_text("")
+    monkeypatch.setattr(R, "_PROV_SINK", project)
+    monkeypatch.setattr(R, "_openroad_supports_postroute_spef_repair",
+                        lambda *_a, **_k: True)
+    calls = []
+
+    def _openroad(container, cmd, timeout=None, **kw):
+        if "openroad -no_init" not in cmd:
+            return 0, "", ""
+        out_dir = R._pl.pnr_dir(project)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        calls.append(cmd)
+        if len(calls) == 1:
+            for pre in ("floorplan.def", "placed.def", "post_cts.def",
+                        "post_hold.def", "routed_preantenna.def"):
+                (out_dir / pre).write_text(_def_text(routed=True))
+            log = _crash_log("postroute_drv_repair")
+            (out_dir / "openroad.log").write_text(log)
+            R._log_invocation(cmd, 139, 1, marker=kw.get("marker"),
+                              container=None, outputs=kw.get("outputs"))
+            return 139, log, ""
+        for name in _SIGNOFF_SET:                  # the resume tail's writes
+            if name.endswith(".def"):
+                (out_dir / name).write_text(_def_text(routed=True))
+            elif name.endswith(".v"):
+                (out_dir / name).write_text(f"module {TOP}(); endmodule\n")
+            else:
+                (out_dir / name).write_text("worst slack 0.42\n")
+        log = _crash_log("postroute_setup_repair_estimate") + _PG_OK
+        if kw.get("log_path"):
+            Path(kw["log_path"]).write_text(log)
+        R._log_invocation(cmd, 139, 1, marker=kw.get("marker"),
+                          container=None, outputs=kw.get("outputs"))
+        return 139, log, ""
+
+    monkeypatch.setattr(R, "_docker_exec", _openroad)
+    res = R.step_pnr(project, TOP, _sky130_pdk(), "iic", "200x200", 0.30)
+    assert len(calls) == 2 and R._PNR_RESUME_TCL in calls[1]
+    assert res.status == "PASS", (res.status, (res.detail or "")[:300])
+    surv = _survivors(project)
+    assert len(surv) == 1, surv
+    assert R._PNR_RESUME_TCL in surv[0]["survived"]["session_command"]
+    assert "RESUME tail" in surv[0]["survived"]["reason"], surv[0]
+    rc, check = _step21(project)
+    assert (rc, check["status"]) == (0, "PASS"), check
+
+
+def test_a_rollback_tail_that_wrote_then_failed_is_named_as_the_producer(
+        tmp_path, monkeypatch):
+    """The refusing session writes its route (rc 0); the rollback tail writes
+    the trio AGAIN and then exits 1. Put-back keeps the tail's bytes (it wrote
+    them), so what ships is the TAIL's route -- and the row must say that, not
+    that the refusing session's route was kept."""
+    from test_pnr_tool_fatal_signal_and_checkpoint_resume import _ROUTE_OK
+    project = _build_project(tmp_path, TOP)
+    (project / "provenance.jsonl").write_text("")
+    monkeypatch.setattr(R, "_PROV_SINK", project)
+    calls = []
+
+    def _write_set(out_dir, tag):
+        for name in _SIGNOFF_SET:
+            if name.endswith(".def"):
+                (out_dir / name).write_text(_def_text(routed=True)
+                                            + f"# {tag}\n")
+            elif name.endswith(".v"):
+                (out_dir / name).write_text(f"module {TOP}(); endmodule // {tag}\n")
+            else:
+                (out_dir / name).write_text(f"worst slack 0.42 {tag}\n")
+
+    def _openroad(container, cmd, timeout=None, **kw):
+        if "openroad -no_init" not in cmd:
+            return 0, "", ""
+        out_dir = R._pl.pnr_dir(project)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        calls.append(cmd)
+        if len(calls) == 1:
+            for pre in ("floorplan.def", "placed.def", "post_cts.def",
+                        "post_hold.def", "routed_preantenna.def"):
+                (out_dir / pre).write_text(_def_text(routed=True))
+            (out_dir / R._ANTENNA_CHECKPOINT_NAME).write_bytes(b"odb")
+            _write_set(out_dir, "refusing session")
+            log = (_ROUTE_OK + _PG_OK
+                   + "ANTENNA_REPAIR_REFUSED_ROLLBACK_REQUEST: checkpoint="
+                   + f"{out_dir}/{R._ANTENNA_CHECKPOINT_NAME} "
+                   + "reason=REPAIR_ANTENNA_REROUTE_NONFATAL: DRT-1010\n")
+            (out_dir / "openroad.log").write_text(log)
+            R._log_invocation(cmd, 0, 1, marker=kw.get("marker"),
+                              container=None, outputs=kw.get("outputs"))
+            return 0, log, ""
+        _write_set(R._pl.pnr_dir(project), "rollback tail")
+        R._log_invocation(cmd, 1, 1, marker=kw.get("marker"), container=None,
+                          outputs=kw.get("outputs"))
+        return 1, "", ""
+
+    monkeypatch.setattr(R, "_docker_exec", _openroad)
+    res = R.step_pnr(project, TOP, _sky130_pdk(), "iic", "200x200", 0.30)
+    assert len(calls) == 2 and "pnr_antenna_rollback" in calls[1]
+    assert "rollback tail" in (project / ROUTED).read_text(), \
+        "the tail's bytes are what ships"
+    assert res.status == "PASS", (res.status, (res.detail or "")[:300])
+    surv = _survivors(project)
+    assert len(surv) == 1, surv
+    reason = surv[0]["survived"]["reason"]
+    assert "antenna-rollback tail" in reason and "not kept" in reason, reason
+    rc, check = _step21(project)
+    assert (rc, check["status"]) == (0, "PASS"), check
