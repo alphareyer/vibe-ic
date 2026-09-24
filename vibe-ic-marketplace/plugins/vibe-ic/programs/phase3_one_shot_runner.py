@@ -19000,9 +19000,16 @@ def _l9_declared_max_fanout(project: Path,
                 txt = p.read_text(errors="ignore")
             except OSError:
                 continue
-            for line in txt.splitlines():
-                if (_L9_FANOUT_DEFER_RE.search(line)
-                        and _L9_FANOUT_DEFER_OWNER_RE.search(line)):
+            offset = 0
+            for line in txt.splitlines(keepends=True):
+                defer = _L9_FANOUT_DEFER_RE.search(line)
+                if (defer and _L9_FANOUT_DEFER_OWNER_RE.search(line)):
+                    lo, hi = _pp.sentence_scope(
+                        txt, offset + defer.start(), offset + defer.end(),
+                        extra_breaks=_pp.LINE_END_BREAKS)
+                    if _pp.is_denied(txt[lo:hi]):
+                        offset += len(line)
+                        continue
                     fo, _ev = _flow_default_max_fanout(project, pdk or "")
                     if fo and fo > 0:
                         _LAST_FANOUT_SOURCE["note"] = (
@@ -19010,6 +19017,7 @@ def _l9_declared_max_fanout(project: Path,
                             f"(no number in L9); value READ from {_ev}")
                         return fo
                     return None
+                offset += len(line)
     return None
 
 

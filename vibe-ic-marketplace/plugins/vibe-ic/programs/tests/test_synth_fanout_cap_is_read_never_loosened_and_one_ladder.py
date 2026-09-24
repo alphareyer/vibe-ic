@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import pytest
 
 PROGRAMS = Path(__file__).resolve().parent.parent
 if str(PROGRAMS) not in sys.path:
@@ -63,6 +64,37 @@ def _pdk_default(monkeypatch, cap=10):
     monkeypatch.setattr(R, "_flow_default_max_fanout",
                         lambda *a, **k: (cap, "pdk_compat.py:322"))
     monkeypatch.setattr(R, "_liberty_drv_limits", lambda *a, **k: {})
+
+
+@pytest.mark.parametrize("sentence", [
+    "No fanout limit is imposed by the OpenLane/PDK default.",
+    "Fanout is not constrained by the OpenLane/PDK default.",
+])
+def test_denied_prose_default_declares_no_fanout_cap(tmp_path, monkeypatch,
+                                                      sentence):
+    _lib(monkeypatch)
+    monkeypatch.setattr(R, "_flow_default_max_fanout",
+                        lambda *a, **k: (8, "flow default"))
+    project = _proj(tmp_path, "## Synthesis constraints\n" + sentence + "\n")
+    assert R._l9_declared_max_fanout(project, "gf180mcuD") is None
+
+
+def test_stated_prose_default_declares_its_fanout_cap(tmp_path, monkeypatch):
+    _lib(monkeypatch)
+    monkeypatch.setattr(R, "_flow_default_max_fanout",
+                        lambda *a, **k: (8, "flow default"))
+    project = _proj(tmp_path, "## Synthesis constraints\n"
+                    "Fanout is constrained by the OpenLane/PDK default.\n")
+    assert R._l9_declared_max_fanout(project, "gf180mcuD") == 8
+
+
+def test_prior_denial_does_not_retract_next_stated_sentence(tmp_path, monkeypatch):
+    _lib(monkeypatch)
+    monkeypatch.setattr(R, "_flow_default_max_fanout",
+                        lambda *a, **k: (8, "flow default"))
+    project = _proj(tmp_path, "No fanout limit from this PDK default.\n"
+                    "Fanout uses the OpenLane/PDK default.\n")
+    assert R._l9_declared_max_fanout(project, "gf180mcuD") == 8
 
 
 # --- finding 3: a per-library L9 table is a declaration ---------------------
