@@ -192,3 +192,54 @@ def test_the_removal_event_is_newer_than_every_declaration_of_the_path(
     assert declares and max(declares) < removals[-1], (declares, removals)
     ev = rows[removals[-1]]
     assert ev["outputs"] == {} and ev["removed_outputs"][0]["path"] == CANON
+
+
+# ── r3 (review wi6jgolcm): the checker judges a removal by LEDGER ORDER ────
+#
+# The ledger only grows, so run N (no deck) prunes the alias and run N+1 in the
+# same directory (a deck now runs) publishes and re-declares the path. The
+# checker used to re-check every removal against today's disk and suppress
+# FILE_MISSING for that path forever. Both now read the index of the NEWEST
+# declaration against the index of the removal.
+
+def _rules_for_canon(project):
+    _verdict, findings = POHC.audit(project)
+    return sorted({f.rule for f in findings if CANON in f.detail})
+
+
+def test_prune_then_a_deck_publishes_is_clean(tmp_path, monkeypatch):
+    project = _run2_with_its_ledger(tmp_path, monkeypatch)       # run N
+    assert not (project / CANON).exists()
+    d = project / "phase3" / "reports" / "drc.rpt"                 # run N+1
+    d.parent.mkdir(parents=True, exist_ok=True)
+    d.write_text(DECK_REPORT)
+    R.step_canonicalize_artefacts(
+        project, H.TOP,
+        H._pdk(str(tmp_path / "x.lib"), str(tmp_path / "x.lef")),
+        "nocontainer")
+    assert SDF.classify_file(project / CANON).is_signoff_deck
+    assert "PROVENANCE_REMOVAL_FILE_STILL_PRESENT" not in _rules_for_canon(
+        project), _rules_for_canon(project)
+    assert "PROVENANCE_OUTPUT_FILE_MISSING" not in _rules_for_canon(project)
+
+
+def test_prune_then_the_file_reappears_undeclared_is_still_an_error(
+        tmp_path, monkeypatch):
+    project = _run2_with_its_ledger(tmp_path, monkeypatch)
+    (project / CANON).write_text("# nobody declared this\n")
+    assert "PROVENANCE_REMOVAL_FILE_STILL_PRESENT" in _rules_for_canon(
+        project), _rules_for_canon(project)
+
+
+def test_a_declaration_newer_than_the_removal_is_checked_for_its_file(
+        tmp_path, monkeypatch):
+    import json
+    project = _run2_with_its_ledger(tmp_path, monkeypatch)
+    with (project / "provenance.jsonl").open("a") as f:
+        f.write(json.dumps({
+            "tool": "klayout", "command": "klayout -b -r deck.drc",
+            "exit_code": 0, "timestamp": "2026-09-24T09:00:00Z",
+            "outputs": {CANON: "sha256:" + "0" * 64}}) + "\n")
+    assert not (project / CANON).exists()
+    assert "PROVENANCE_OUTPUT_FILE_MISSING" in _rules_for_canon(project), (
+        _rules_for_canon(project))
