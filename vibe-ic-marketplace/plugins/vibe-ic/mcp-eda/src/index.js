@@ -8128,6 +8128,18 @@ server.tool(
       return notMeasured("TOOL_DID_NOT_RUN",
         "timed out before completing; INCONCLUSIVE, not a verdict");
     }
+    // AND THE OTHER WAY THE AUDIT DECLINES TO ANSWER: it printed a verdict word and then
+    // exited non-zero, withdrawing its own arithmetic. The gate publishes that as
+    // `summary.certified` (its Python owner, `_audit_verdict`, decides it from the word AND
+    // the exit code), so this reads the FIELD rather than mirroring the rule in a second
+    // language — there is nothing here to keep in step with the Python side.
+    if (parsed && parsed.summary && parsed.summary.certified === false) {
+      return notMeasured("TOOL_DID_NOT_RUN",
+        "the audit did not certify its own verdict" +
+        (parsed.summary.certification_note
+          ? ": " + parsed.summary.certification_note
+          : "; INCONCLUSIVE, not a verdict"));
+    }
     return {
       content: [{
         type: "text",

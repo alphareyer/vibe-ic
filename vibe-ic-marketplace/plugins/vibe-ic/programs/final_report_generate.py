@@ -79,6 +79,7 @@ import _path_layout as _pl
 import _analog_a_check_common as _acc
 import verdict as _T
 import _watchdog as _wd  # progress-stall process supervision
+import _audit_verdict  # the ONE reader of the compliance audit's verdict + exit code
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
@@ -110,6 +111,16 @@ AUDIT_TIMEOUT_VERDICT = "AUDIT_TIMEOUT"
 # The verdict used only when the audit was never run at all (--no-audit
 # or the compliance tool is missing). Kept distinct from AUDIT_TIMEOUT.
 AUDIT_NOT_RUN_VERDICT = "UNKNOWN"
+#: A line of the audit's stdout that CARRIES COUNTS. Shape, not spelling: `Steps: N total (…)`
+#: and the `PASS=… FAIL=…` tally, whatever words the tally happens to contain -- asserting one
+#: spelling is how a withheld count gets quoted anyway under a bucket name nobody listed.
+_TALLY_LINE_RE = re.compile(r"^\s*(?:Steps:\s*\d+\s*total\b|(?:\S+\s*=\s*\d+\s*){2,})")
+#: A THIRD NAMED NON-VERDICT, and it is not a softer FAIL. The audit printed a green
+#: word and exited non-zero -- its reconciliation canary (vibe-ic#2092) leaves the word
+#: standing and says "do not quote its counts". So the headline must not read PASS, and
+#: the per-step snapshot must NOT be quoted: this word joins the set below that
+#: withholds it, for the same reason AUDIT_TIMEOUT does.
+AUDIT_DID_NOT_CERTIFY_VERDICT = _audit_verdict.DID_NOT_CERTIFY
 
 # ORGANIC #428 / #1969 — the bucket used only when no fresh canonical audit
 # snapshot (or no per-step record in it) can answer. This is NOT the compliance
@@ -825,11 +836,15 @@ def _extract_overall_token(overall_line: str) -> str:
     ``Overall: FA``). The correct token is everything after ``Overall:``
     up to the trailing ``(strict=…)`` annotation (or end of line),
     stripped — never sliced on the first internal space. chip-AGNOSTIC."""
-    body = overall_line.split(":", 1)[1] if ":" in overall_line else overall_line
-    # Drop the trailing "(strict=…)" / "(…)" annotation the checker appends.
-    body = re.split(r"\s*\(", body, maxsplit=1)[0]
-    token = body.strip()
-    return token or AUDIT_NOT_RUN_VERDICT
+    # THE LINE RULE MOVED TO `_audit_verdict` AND THIS DELEGATES TO IT. #483's fix -- the
+    # token is everything up to the trailing annotation, never the first whitespace chunk --
+    # is the most careful of the three readers' rules, so it is the one the owner carries.
+    # This wrapper stays because it is a LINE-level helper with its own pinned behaviour
+    # (`test_483_extract_overall_token_full_verdict`); it is not a second rule.
+    line = overall_line if _audit_verdict.is_verdict_line(overall_line) else (
+        "Overall:" + overall_line.split(":", 1)[1] if ":" in overall_line
+        else "Overall:" + overall_line)
+    return _audit_verdict.verdict_word(line) or AUDIT_NOT_RUN_VERDICT
 
 
 def _run_audit(project: Path,
@@ -884,13 +899,23 @@ def _run_audit(project: Path,
             f"{AUDIT_TIMEOUT_ENV} and re-run.)"
         )
         return text, AUDIT_TIMEOUT_VERDICT
+    # BOTH CHANNELS, FROM THE ONE OWNER. This loop read the FIRST `Overall:` line and never
+    # looked at `res.rc`: handed the audit's reconciliation-canary stdout with rc 1, the
+    # headline in `final_summary.md` read `Overall: PASS` for a run whose audit had just
+    # refused to vouch for its own counts. MEASURED on main 7a63a037f through this very
+    # function. `res.rc` was available the whole time -- `_watchdog.SupervisedResult` carries
+    # it, and this function already reads `res.outcome` and `res.stalled` off the same object.
     text = res.out
-    overall = AUDIT_NOT_RUN_VERDICT
-    for ln in text.splitlines():
-        if ln.startswith("Overall:"):
-            overall = _extract_overall_token(ln)
-            break
-    return text, overall
+    audit = _audit_verdict.read(text, getattr(res, "rc", None))
+    if audit.word is None:
+        return text, AUDIT_NOT_RUN_VERDICT
+    if not audit.certified and audit.is_green is False and \
+            (audit.word or "").upper() in _audit_verdict.GREEN_WORDS:
+        # The word stands in the transcript; the HEADLINE says the audit did not certify it,
+        # and the snapshot is withheld by the set above.
+        return (f"{text}\n(AUDIT DID NOT CERTIFY: {audit.why})",
+                AUDIT_DID_NOT_CERTIFY_VERDICT)
+    return text, audit.word
 
 
 # ORGANIC #428 — the step-id half of the verdict-line matcher.
@@ -2008,8 +2033,25 @@ def _render(project: Path, run_audit: bool = True,
     # overwrote the real outer line and manufactured a second tally over the
     # same 68 steps.  Never fall back to that parser here.  If this invocation
     # did not write a fresh snapshot, degrade to named NO-VERDICT data.
+    # WITHHOLD THE COUNTS, NOT THE DISCLOSURE. My first cut put
+    # AUDIT_DID_NOT_CERTIFY in the skip set beside the two NO-VERDICT words, and that hid the
+    # one disclosure this state is ABOUT: the "⛔ The audit does not reconcile" banner and the
+    # "Reported, NOT gating" block below both render only `if isinstance(audit_snapshot,
+    # dict)`, so a skipped snapshot meant the headline refused and never said why -- while
+    # vibe-ic#2092 requires that banner to be the FIRST thing under Verdict, naming the broken
+    # equations. A refusal whose reason is hidden is worse than the PASS it replaced.
+    #
+    # So this state LOADS the snapshot, for the disclosures, and suppresses the COUNTS
+    # separately below. The two NO-VERDICT words keep skipping it, because there is no fresh
+    # snapshot to load at all when the audit timed out or never ran.
     audit_snapshot: Optional[Dict[str, Any]] = None
     snapshot_problem: Optional[str] = None
+    counts_withheld: Optional[str] = None
+    if overall == AUDIT_DID_NOT_CERTIFY_VERDICT:
+        counts_withheld = (
+            "the audit printed a verdict word and then exited non-zero, withdrawing its own "
+            "arithmetic (\"do not quote its counts\"); the reconciliation disclosure below "
+            "names what it withdrew")
     if run_audit and overall not in {
             AUDIT_TIMEOUT_VERDICT, AUDIT_NOT_RUN_VERDICT}:
         audit_snapshot, snapshot_problem = _load_fresh_audit_snapshot(
@@ -2023,7 +2065,9 @@ def _render(project: Path, run_audit: bool = True,
 
     snapshot_problems: List[str] = []
     row_counts: Dict[str, int] = {}
-    if audit_snapshot is not None:
+    if counts_withheld:
+        snapshot_problems.append(counts_withheld)
+    if audit_snapshot is not None and not counts_withheld:
         rollup, count_problems = _audit_step_counts(audit_snapshot)
         verdicts, row_counts, row_problems = _audit_step_verdicts(
             audit_snapshot)
@@ -2118,8 +2162,21 @@ def _render(project: Path, run_audit: bool = True,
     md.append("```")
     audit_lines = audit_text.strip().splitlines()
     # First 5 lines of the audit are the header + Steps + tally
-    for ln in audit_lines[:5]:
-        md.append(ln)
+    #
+    # AND THOSE ARE COUNTS TOO. This fence quotes the audit's own `Steps: … executed PASS` and
+    # `PASS= … FAIL=` headline, which are exactly the numbers the audit withdrew when it
+    # refused to certify them -- so withholding the per-step table while reproducing the tally
+    # verbatim four lines above it would defeat the withholding. Reviewed and correct: the
+    # fence keeps the HEADER lines (what was audited) and drops any line carrying a tally.
+    if counts_withheld:
+        md.append(f"(the audit's own tally lines are withheld: {counts_withheld})")
+        for ln in audit_lines[:5]:
+            if _TALLY_LINE_RE.search(ln):
+                continue
+            md.append(ln)
+    else:
+        for ln in audit_lines[:5]:
+            md.append(ln)
     md.append("```")
     md.append("")
     # ORGANIC #428 / vibe-ic#1969 — reconciliation is now ONLY an integrity
@@ -2130,7 +2187,24 @@ def _render(project: Path, run_audit: bool = True,
     # Human stdout is deliberately absent from this decision: parsing it was
     # the second definition that caused #1969.
     _recon = _reconcile_audit_snapshot(rollup, row_counts)
-    if audit_snapshot is None:
+    # NOT OVER WITHHELD COUNTS, AND THE BRANCH BELOW IS WHAT DOES THAT. When the counts are
+    # withheld this renderer supplies its own placeholder roll-up (every step
+    # NO-VERDICT-IN-AUDIT) and leaves `row_counts` empty; the `elif snapshot_problems or _recon`
+    # arm then renders "Roll-up reconciliation FAILED ... genuinely torn audit artifact" -- a
+    # tear INVENTED by the renderer, about an artefact it did not read, and reached through the
+    # withholding note itself, which is one of those `snapshot_problems`. The tripwire only
+    # means something over counts that were actually quoted, so this state answers first.
+    #
+    # (A `_recon = {} if counts_withheld` guard was tried here and is DEAD: the branch below
+    # short-circuits before `_recon` is consulted, and a mutation proved the guard changed
+    # nothing. Removed rather than left as defensiveness nobody can reach.)
+    if counts_withheld:
+        md.append(f"> ℹ️ **Roll-up reconciliation: not applicable** — "
+                  f"{counts_withheld}. The per-step counts are withheld, so there are no "
+                  f"two views of them to reconcile; the disclosure above names what the "
+                  f"audit withdrew.")
+        md.append("")
+    elif audit_snapshot is None:
         md.append(f"> ℹ️ **Roll-up reconciliation: not possible** — "
                   f"{snapshot_problem or 'no fresh canonical audit JSON was available'}. "
                   f"The renderer did not fall back to recounting human stdout; "
@@ -2510,14 +2584,24 @@ def _render(project: Path, run_audit: bool = True,
     md.append(_render_step_tables(flow, verdicts))
     md.append("### Verdict roll-up")
     md.append("")
+    # THE PROSE MUST NOT PROMISE A TALLY THAT WAS WITHHELD. It said "the same bucket
+    # definitions as the `flow_compliance_check.py` tally quoted under **Verdict** above",
+    # which is false in the did-not-certify state: nothing is quoted up there, because the
+    # audit withdrew those numbers and the fence drops every line carrying them. A reader sent
+    # to compare against a tally that is not on the page would conclude the report had lost it.
+    _tally_ref = ("as `reports/audit/phase23_completion_audit.json[step_counts]`"
+                  if counts_withheld else
+                  "as the `flow_compliance_check.py` tally quoted under **Verdict** above and "
+                  "as `reports/audit/phase23_completion_audit.json[step_counts]`")
     md.append(f"_Same {total_steps}-step universe, same audit run, and the "
-              f"same bucket definitions as the `flow_compliance_check.py` "
-              f"tally quoted under **Verdict** above and as "
-              f"`reports/audit/phase23_completion_audit.json[step_counts]`. "
-              f"This table consumes that JSON object directly; the per-step "
-              f"table consumes the same artifact's `steps[]`. Any internal "
-              f"tear is reported explicitly under **Verdict** — it is never "
-              f"reconciled by adjusting a count._")
+              f"same bucket definitions {_tally_ref}. "
+              + ("The audit's own tally is NOT quoted under **Verdict**: it withdrew those "
+                 "counts, and the roll-up below is this renderer's degraded stand-in, not the "
+                 "audit's numbers. " if counts_withheld else
+                 "This table consumes that JSON object directly; the per-step "
+                 "table consumes the same artifact's `steps[]`. ")
+              + f"Any internal tear is reported explicitly under **Verdict** — it is never "
+                f"reconciled by adjusting a count._")
     md.append("")
     md.append("| Verdict | Count |")
     md.append("|---|---:|")

@@ -173,8 +173,10 @@ def test_phase23_self_audit_timeout_no_crash(tmp_path, monkeypatch):
             monkeypatch.setattr(_launcher, "run", boom)
     rc, out = SA._run_compliance(tmp_path)
     assert rc == 124
-    m = SA._OVERALL_RE.search(out)
-    assert m and m.group(1).upper() == "AUDIT_TIMEOUT"
+    # the gate's private `_OVERALL_RE` MOVED to `_audit_verdict` (one owner for the audit's
+    # verdict, asked by all three readers). Same property, read through the owner.
+    import _audit_verdict as _AV
+    assert (_AV.verdict_word(out) or "").upper() == "AUDIT_TIMEOUT"
     assert "NOT a verdict" in out
 
 

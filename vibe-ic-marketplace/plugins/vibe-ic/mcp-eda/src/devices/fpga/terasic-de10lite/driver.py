@@ -499,6 +499,98 @@ def _resolve_project_root_from_sof(sof_path: str) -> Optional[str]:
     return candidates[0][1]
 
 
+def _audit_verdict_owner():
+    """`_audit_verdict`, the ONE reader of the compliance audit's verdict + exit code.
+
+    LOADED, NOT MIRRORED. This driver already resolves the plugin's `programs/` dir to RUN
+    `flow_compliance_check.py`, so the rule for reading that program's answer is reachable
+    from the same place -- there is no second copy of it here, and no shared test-vector file
+    to keep in step. Returns `None` when the plugin tree is not reachable; the caller then
+    treats the verdict as UNKNOWN, which already BLOCKS the burn (fail closed).
+    """
+    global _AUDIT_VERDICT_MOD
+    if _AUDIT_VERDICT_MOD is not None:
+        return _AUDIT_VERDICT_MOD or None
+    path = _find_plugin_program("_audit_verdict.py")
+    if not path:
+        _AUDIT_VERDICT_MOD = False
+        return None
+    try:
+        import importlib.util as _ilu
+        import sys as _sys
+        spec = _ilu.spec_from_file_location("_vibeic_audit_verdict", path)
+        mod = _ilu.module_from_spec(spec)
+        # REGISTERED BEFORE EXEC. A by-path import must be in `sys.modules` before the module
+        # body runs, or any `@dataclass` in it dies resolving
+        # `sys.modules[cls.__module__].__dict__`. The owner no longer needs this (it dropped
+        # the postponed-annotations future import for exactly that reason), and this stays so
+        # the next thing it grows does not need the importer to have been careful.
+        _sys.modules.setdefault("_vibeic_audit_verdict", mod)
+        spec.loader.exec_module(mod)          # type: ignore[union-attr]
+        # WHAT CAME BACK MUST BE THE OWNER, AND THAT IS CHECKED. A path is not an identity:
+        # this resolver is overridable (`VIBE_IC_PROGRAMS_DIR`, `VIBE_IC_D_PROGRAMS_DIR`) and a
+        # tree that answers the name with something else -- a different `_audit_verdict.py`, or
+        # a stub that answers EVERY name, which is exactly what
+        # `test_pre_burn_audit_forwards_allow_thin_input` does -- used to be loaded, cached, and
+        # then called: `AttributeError: module '_vibeic_audit_verdict' has no attribute
+        # 'verdict_word'`, escaping from the middle of the pre-burn audit and ERRORing three
+        # shipped tests that are green on main.
+        #
+        # An unusable module is UNREACHABLE, which is a state this loader already has and whose
+        # meaning is already decided: the caller falls back to the word-and-rc rule and keeps
+        # failing closed. So the check is for the two functions the callers actually use, and
+        # nothing is cached until it passes -- a wrong module must not become the answer for the
+        # life of the process.
+        if not (callable(getattr(mod, "read", None))
+                and callable(getattr(mod, "verdict_word", None))):
+            _AUDIT_VERDICT_MOD = False
+            return None
+        _AUDIT_VERDICT_MOD = mod
+        return mod
+    except Exception:
+        _AUDIT_VERDICT_MOD = False
+        return None
+
+
+_AUDIT_VERDICT_MOD: Any = None
+
+
+def _certified_from_word_and_rc(verdict: str, fc_rc: int) -> bool:
+    """The rule expressed over the WORD and the rc alone, for when the text is not available.
+
+    A GREEN word with a positive rc is not certified -- that is the audit printing a verdict and
+    then withdrawing it. Anything else keeps its own identity: a FAIL or an UNKNOWN is blocked by
+    the arm that exists for it, under that arm's own error code, and must NOT be relabelled
+    "did not certify". Measured: a blunt `fc_rc <= 0` fallback stole the structural-FAIL block's
+    name from four of this file's own tests.
+    """
+    return not ((verdict or "").upper() in ("PASS", "PASS_WITH_WAIVERS") and fc_rc > 0)
+
+
+def pre_burn_audit_certified(fc_rc: int, out_text: str = "",
+                             verdict: str = "") -> bool:
+    """Did the pre-burn compliance audit CERTIFY its own answer? False blocks the burn.
+
+    EXTRACTED SO IT CAN BE DRIVEN. The rule used to live inline in `mode_program`, beside the
+    device calls, where the only thing a test could do was look for a string in the source --
+    and a source-presence arm does not notice `if False and ...`. Measured: disabling the
+    guard left every such arm green. This predicate is the rule, `mode_program` calls it, and
+    an AST arm pins that the call actually gates the block.
+
+    `_audit_verdict` decides it when reachable -- ONE rule for the orchestrator and for a
+    hardware action. When it is not (a foreign tree, no plugin dir), the rc alone decides,
+    because a POSITIVE rc from this audit is never benign and this function's own docstring has
+    always said so: ">0 = FAIL -> reject burn". Negative codes mean the gate could not run and
+    are handled separately, as they always were.
+    """
+    if fc_rc <= 0:
+        return True
+    own = _audit_verdict_owner()
+    if own is None:
+        return _certified_from_word_and_rc(verdict, fc_rc)
+    return bool(own.read(out_text, fc_rc).certified)
+
+
 def _run_flow_compliance_pre_burn(
     project_root: str, timeout_s: int = 180,
 ) -> Tuple[int, Dict[str, Any]]:
@@ -661,17 +753,28 @@ def _run_flow_compliance_pre_burn(
         except Exception as e:
             audit_json_error = str(e)
 
-    # Backup: stdout-regex parser (chip-AGNOSTIC, robust to whitespace
-    # and em-dash separators). Only used if the JSON artifact is
-    # absent or malformed. We still fail closed downstream when the
-    # audit JSON is missing — this branch only refines diagnostics.
+    # Backup verdict source, used only when the JSON artifact is absent or malformed.
+    #
+    # THE OLD NOTE SAID "this branch only refines diagnostics" AND THAT IS NO LONGER TRUE, so
+    # it is corrected rather than left to reassure a reader. `verdict` is what the burn decision
+    # below reads, so what this branch produces GATES A HARDWARE ACTION -- and the sentence
+    # about failing closed "when the audit JSON is missing" describes a downstream arm that
+    # keys on the VERDICT, not on the JSON's presence: what actually fails closed is a verdict
+    # of UNKNOWN, which is where this branch leaves it when nothing can be read.
     if verdict == "UNKNOWN":
-        if "Overall: PASS_WITH_WAIVERS" in out_text:
-            verdict = "PASS_WITH_WAIVERS"
-        elif "Overall: PASS" in out_text:
-            verdict = "PASS"
-        elif "Overall: FAIL" in out_text:
-            verdict = "FAIL"
+        # THE SUBSTRING LADDER IS GONE. It searched the whole stream unanchored and tested
+        # PASS BEFORE FAIL, so a `Overall: PASS` quoted anywhere -- the audit prints its
+        # blocker list after the verdict and those rows quote gate output -- outranked the
+        # run's real FAIL, on the path that decides whether to drive a device. The owner
+        # anchors to a verdict LINE, takes the last one, and is told the exit code.
+        _own = _audit_verdict_owner()
+        if _own is not None:
+            # `_audit_verdict_owner` returns None unless `read` and `verdict_word` are both
+            # callable, so this call is safe by that contract rather than by hope.
+            _word = _own.verdict_word(out_text)
+            if _word:
+                verdict = _word.upper()
+        # No owner reachable -> verdict stays UNKNOWN, which BLOCKS below. Fail closed.
 
     if not failed_gates:
         # Robust regex: matches `<gate_name>_check` anywhere on a line
@@ -721,8 +824,26 @@ def _run_flow_compliance_pre_burn(
                 if stripped.startswith(("•", "-")):
                     step_level_warnings.append(stripped.lstrip("•- "))
 
+    # THE DECISION IS MADE HERE, WHERE BOTH CHANNELS ARE IN SCOPE, AND PUBLISHED.
+    #
+    # `mode_program` used to call `pre_burn_audit_certified(fc_rc, out_text)` -- and `out_text`
+    # is a LOCAL of this function, not of that one. Arguments evaluate before the call, so it
+    # raised `NameError` before the predicate's own `fc_rc <= 0` early return could answer:
+    # EVERY audited burn became a DeviceProtocolError, including a genuine rc-0 PASS. It failed
+    # closed and therefore looked safe, but it left `bypass_pre_burn_check` -- which skips the
+    # audit entirely -- as the only way to burn, making the unsafe path the only path.
+    #
+    # Reproduced by `mcp-eda/test/test_device_program_rtl_repair_guard.py`, which DRIVES
+    # `mode_program` with a fake pre-burn runner: `NameError: name 'out_text' is not defined`
+    # at the call site. My own arms tested the predicate and AST-matched the `if`, and never ran
+    # the entry point -- the same gap that cost icslot70 a round.
+    #
+    # `stdout_tail` is NOT the fix: it is the last 2500 characters, and the audit prints its
+    # blocker list after the verdict, so the `Overall:` line can fall off the front of it. The
+    # decision travels instead of the text.
     return r.returncode, {
         "flow_compliance_verdict": verdict,
+        "audit_certified": pre_burn_audit_certified(r.returncode, out_text, verdict),
         "exit_code": r.returncode,
         "failed_gates": failed_gates,
         "step_level_warnings": step_level_warnings,
@@ -884,6 +1005,45 @@ def mode_program(args: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
             # then required a leading delimiter that no longer
             # existed, so 14 real FAILs were parsed as 0 and the burn
             # was allowed under a "step-level only" rationale.
+            # THE DOCSTRING'S OWN RULE, NOW ENFORCED: ">0 = FAIL -> reject burn". Only
+            # `fc_rc < 0` was ever checked, so a POSITIVE rc -- the audit's reconciliation
+            # canary exits 1 while leaving a green word standing, saying "do not quote its
+            # counts" -- reached the `verdict in ("PASS", "PASS_WITH_WAIVERS")` arm below and
+            # THE BURN PROCEEDED. A hardware action taken on an audit that withdrew its own
+            # certification, against this function's own documented contract.
+            #
+            # `_audit_verdict` is the rule, and it is ASKED rather than restated: a green word
+            # with a non-zero exit is not certified. When the owner is unreachable the rc test
+            # alone still blocks, because a positive rc from this audit is never benign.
+            # The decider published it (see `_run_flow_compliance_pre_burn`'s return). Absent
+            # -- a caller or a test that builds the report itself -- the SAME rule is applied
+            # over the word and the rc, which is the half that never needs the text. Note what
+            # this must NOT do: relabel a genuine FAIL. That is blocked below under its own
+            # error code, and four of this file's own tests say so.
+            _certified = flow_report.get("audit_certified")
+            if _certified is None:
+                _certified = _certified_from_word_and_rc(verdict, fc_rc)
+            # NOT `pre_burn_audit_certified(fc_rc, "", verdict)` here: with no text the owner
+            # sees no verdict line, answers "uncertified", and would steal the FAIL block's
+            # name again. The decision is the published one, or the word-and-rc rule.
+            if not _certified:
+                return 1, {
+                    "ok": False,
+                    "success": False,
+                    "error": "BURN_BLOCKED_PRE_BURN_AUDIT_DID_NOT_CERTIFY",
+                    "error_code": "burn_blocked_pre_burn_audit_did_not_certify",
+                    "recoverable": False,
+                    "message": (
+                        f"Pre-burn flow_compliance audit exited {fc_rc} while its verdict "
+                        f"line said {verdict!r}. A run word and a non-zero exit are the "
+                        f"audit's two accounts of itself; when they disagree the audit did "
+                        f"NOT certify this design, and a burn is a hardware action taken on "
+                        f"its word. Blocked (fail-closed). Resolve what the audit withdrew "
+                        f"and re-run, or pass bypass_pre_burn_check=true deliberately."
+                    ),
+                    "flow_compliance": flow_report,
+                    "rtl_precheck": precheck_report,
+                }
             if fc_rc < 0:
                 # Gate itself could not run (subprocess timeout / not
                 # found) — fail closed.
