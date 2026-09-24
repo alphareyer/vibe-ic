@@ -10096,10 +10096,12 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         # So: take the count BEFORE the block, take it AFTER, and judge the
         # DIFFERENCE. Both numbers and the counter regime are disclosed, and a
         # counter with no state is UNKNOWN BY NAME, never a silent pass.
-        "set _pgdrc0 -1\n"
-        "catch { set _pgdrc0 [detailed_route_num_drvs] }\n"
-        "puts \"PG_DELTA_DRC_BEFORE: $_pgdrc0\"\n"
-        "set _pg_dnt {}\n"
+        + ("set _pgdrc0 -1\n"
+         "catch { set _pgdrc0 [detailed_route_num_drvs] }\n"
+         "puts \"PG_DELTA_DRC_BEFORE: $_pgdrc0\"\n"
+         if reroute else
+         "puts \"PG_DELTA_DRC_NOT_APPLICABLE: preroute connect has no detailed-route state\"\n")
+        + "set _pg_dnt {}\n"
         "if {[catch {\n"
         "  foreach _pg_i [[ord::get_db_block] getInsts] {\n"
         "    if {[$_pg_i isDoNotTouch]} {\n"
@@ -25965,6 +25967,7 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
         "  while {$_a($_x) != $_x} { set _x $_a($_x) }\n"
         "  return $_x\n"
         "}\n"
+        "set ::_vic_routing_integrity_complete 0\n"
         "if {[catch {\n"
         "  set _unr 0; set _abut 0; set _blind 0; set _unrn {}; set _abn {}\n"
         "  set _unra {}; set _abna {}\n"
@@ -26056,6 +26059,7 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
             "  }\n"
             if membership_path else ""
         )
+        + "  set ::_vic_routing_integrity_complete 1\n"
         + f"}} e]}} {{ puts \"{marker_prefix}_UNROUTED_CHECK_NONFATAL: $e\" }}\n"
     )
 
@@ -26359,6 +26363,33 @@ def _unrouted_probe_tcl(tag: str, out_dir_c: Optional[str] = None) -> str:
     path = f"{out_dir_c.rstrip('/')}/{name}" if out_dir_c else name
     return _routing_integrity_check_tcl(
         "UNROUTED_PROBE", membership_path=path, stage=safe)
+
+
+def _unrouted_boundary_guard_tcl(tag: str) -> str:
+    """Refuse the next stage after a measurement found an incomplete route."""
+    safe = "".join(c if (c.isalnum() or c in "_-") else "_" for c in tag)
+    return (f'if {{!$::_vic_routing_integrity_complete || $_unr != 0}} {{\n'
+            f'  error "POSTROUTE_UNROUTED: stage={safe} count=$_unr; '
+            f'next stage cannot use detailed routing on this incomplete DB"\n'
+            f'}}\n')
+
+
+def _adopt_route_presence_guard_tcl() -> str:
+    """An adopted ODB must retain every route it carried into the tail.
+
+    A wireless net can initially pass the geometric abutment probe and become
+    disconnected when antenna repair moves one terminal. Check the checkpoint
+    wire census before that repair is allowed to use detailed routing.
+    """
+    return (
+        "if {[array exists _vic_adopt_wire]} {\n"
+        + _wire_content_compare_tcl("_vic_adopt_wire", "ADOPT_ROUTE_PRESENCE")
+        + "  if {$_wcc_shr > 0} {\n"
+        "    error \"ADOPT_ROUTE_LOST: $_wcc_shr net(s) lost wire content "
+        "between the accepted checkpoint and antenna repair; "
+        "refusing detailed routing on this DB\"\n"
+        "  }\n"
+        "}\n")
 
 
 def _resizer_bound_flag(pct: Optional[float]) -> str:
@@ -29683,7 +29714,8 @@ def _after_restore_tcl(deck: str, spare_plan: Optional[Dict[str, Any]],
     # DROP those wires, for the same reason it keeps the spare wiring -- run7's
     # pnr_sdr_adopt_2 restored a checkpoint and ran ZERO detailed_route, so a
     # dropped conductor would simply never be laid again.
-    return common + _ext_wire_relay_deferred_tcl()
+    return (_wire_content_census_tcl("_vic_adopt_wire") + common
+            + _ext_wire_relay_deferred_tcl())
 
 
 def _ext_wire_census_tcl() -> str:
@@ -32393,16 +32425,16 @@ if {{[catch {{write_def {out_dir_c}/routed_preantenna.def}} _cp_err]}} {{
 # route checkpoint — which is what the NONFATAL guard was written to do and
 # cannot.
 puts "{_PNR_STAGE_MARKER} postroute_spef_extract"
-{spef_repair_block}{_pin_access_probe_tcl("after_postroute_spef_extract")}{_unrouted_probe_tcl("after_postroute_spef_extract", out_dir_c)}{_boundary_def_tcl("after_postroute_spef_extract", out_dir_c)}# === v0.2.14 — antenna repair (diode insertion) after detailed_route ===
+{spef_repair_block}{_adopt_route_presence_guard_tcl()}{_pin_access_probe_tcl("after_postroute_spef_extract")}{_unrouted_probe_tcl("after_postroute_spef_extract", out_dir_c)}{_boundary_def_tcl("after_postroute_spef_extract", out_dir_c)}# === v0.2.14 — antenna repair (diode insertion) after detailed_route ===
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 {_pnr_stage_begin("postroute_antenna_repair")}
 puts "{_PNR_STAGE_MARKER} postroute_antenna_repair"
-{antenna_repair_block}{_pin_access_probe_tcl("after_postroute_antenna_repair")}{_unrouted_probe_tcl("after_postroute_antenna_repair", out_dir_c)}{_boundary_def_tcl("after_postroute_antenna_repair", out_dir_c)}{_pnr_stage_end("postroute_antenna_repair")}
+{antenna_repair_block}{_pin_access_probe_tcl("after_postroute_antenna_repair")}{_unrouted_probe_tcl("after_postroute_antenna_repair", out_dir_c)}{_unrouted_boundary_guard_tcl("after_postroute_antenna_repair")}{_boundary_def_tcl("after_postroute_antenna_repair", out_dir_c)}{_pnr_stage_end("postroute_antenna_repair")}
 {drv_reconverge_block}{_pin_access_probe_tcl("after_postroute_drv_reconverge")}{_unrouted_probe_tcl("after_postroute_drv_reconverge", out_dir_c)}{_boundary_def_tcl("after_postroute_drv_reconverge", out_dir_c)}
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 {_pnr_stage_begin("postroute_antenna_reconverge")}
 puts "{_PNR_STAGE_MARKER} postroute_antenna_reconverge"
-{post_reconverge_antenna_block}{_pin_access_probe_tcl("after_postroute_antenna_reconverge")}{_unrouted_probe_tcl("after_postroute_antenna_reconverge", out_dir_c)}{_boundary_def_tcl("after_postroute_antenna_reconverge", out_dir_c)}{_pnr_stage_end("postroute_antenna_reconverge")}
+{post_reconverge_antenna_block}{_pin_access_probe_tcl("after_postroute_antenna_reconverge")}{_unrouted_probe_tcl("after_postroute_antenna_reconverge", out_dir_c)}{_unrouted_boundary_guard_tcl("after_postroute_antenna_reconverge")}{_boundary_def_tcl("after_postroute_antenna_reconverge", out_dir_c)}{_pnr_stage_end("postroute_antenna_reconverge")}
 # === v0.1.48 — decap + filler insertion ===
 # spm pilot Tier 2 EM/decap finding: prior runs (v0.1.25 → v0.1.47) emitted
 # ZERO decap or filler cells. Empty std-cell-row gaps left an MPW-rejecting
