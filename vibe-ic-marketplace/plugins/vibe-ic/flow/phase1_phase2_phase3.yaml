@@ -6853,9 +6853,766 @@ steps:
         - program_exit_zero: "spice_correlation_check . --json reports/phase2/gates/spice_correlation.json"
     blocks_on: [22, 23]
 
+  # ── Step 32: Post-route timing repair pass ───────────────────
+  # RENAMED (owner call). This step was called "ECO (Engineering Change Order)"
+  # and the line here claimed it was industry standard. Both were wrong, and the
+  # name was doing real damage.
+  #
+  # What it MEASURABLY does, read off the OpenROAD script it generates:
+  #   read_def(routed) -> read_liberty(ss/tt/ff) -> estimate_parasitics
+  #   -> repair_design -> repair_timing -setup -> global_route
+  #   -> detailed_route -> write_def/write_verilog
+  #
+  # It RE-ROUTES THE WHOLE DESIGN. An ECO is by definition incremental and
+  # PRESERVES the existing implementation — that preservation is the entire
+  # point, because it is what makes a metal-only mask revision possible. A step
+  # that re-runs detailed_route is not an ECO under any definition; it is a
+  # second optimisation pass. And an "Engineering Change Order" is a change
+  # order against a RELEASED design: this flow has no tapeout, no mask set and
+  # no frozen revision, so there is nothing for an order to change.
+  #
+  # WHY THE NAME MATTERED, not just cosmetics: an ECO is assumed incremental,
+  # safe and improving, so the step inherited that trust. That is why nobody
+  # ever compared its own before/after — `repair_before` and `repair_after` sat
+  # adjacent in one JSON record and were never subtracted, and a pass that made
+  # setup 12x WORSE was recorded as applied (fixed v1.8.62). Same defect family
+  # as naming an ATPG cut netlist a "scan netlist": a name asserting a property
+  # the thing does not have.
+  #
+  # The rename is complete across the executable contract: module names, Python
+  # identifiers, decision keys, gate names, directory names and artefact names
+  # all use `postroute_timing_repair` / `repair`. There is no `eco_*` alias;
+  # accepting both vocabularies would recreate the ambiguity at the API edge.
+  #
+  # CORRECTLY named and untouched: Step 18 "Spare-cell + ECO-prep insertion
+  # (Design-for-ECO)" — inserting spares pre-tapeout so a FUTURE ECO is
+  # possible is exactly what Design-for-ECO means; and `metal_eco` /
+  # `base_layer_eco` in yield_fix_cost_rank, which are genuine post-tapeout
+  # remediation classes sitting alongside `respin`.
+  #
+  # FIXED 2026-07-31 (was: KNOWN MISMATCH, recorded not fixed). This step used
+  # to list `skills: [eco-plan]`, whose premise is "minimise disruption to an
+  # already-placed-and-routed netlist, prefer metal-only" — the exact opposite of
+  # what the automated path does, which is re-route everything. `eco-plan` is
+  # correctly named for what IT does; it was simply not the thing this step needs.
+  #
+  # It now lists `sta-review`, which reads STA reports, triages setup/hold/
+  # recovery/removal violations and proposes fixes. That IS the question a human
+  # or agent faces when this repair pass fails to close: not "how do I plan a
+  # change order against a released design" (there is no released design) but
+  # "which paths did not close, and what would close them".
+  #
+  # `eco-plan` and `design-for-eco` remain, unchanged, for the case they were
+  # written for: a real post-tapeout change against a frozen revision.
+  # A timing failure can fire this whole-design repair and reroute pass. A hard
+  # failure in a non-timing sign-off domain withholds the no-repair certificate
+  # and leaves the named domain red; Step 32 does not pretend its timing deck
+  # can repair IR, EM, SI or PV. If all sign-off domains pass, the step records
+  # `no_repair_needed` and passes through.
+  #
+  # v1.7.64 — what the AUTO-trigger actually does vs what the skill does.
+  # `postroute_timing_repair_decision.decide()` is the single shared policy used
+  # by `phase3_one_shot_runner` and `postroute_timing_repair_status_gen`. It:
+  #   * DECIDES ON TIMING from the multi-corner OCV sign-off (ss/ff), falling
+  #     back to single-corner tt when the PDK exposes one corner (§4.05), and
+  #     AUTO-RUNS `postroute_timing_repair.tcl` for a timing violation;
+  #   * FAILS CLOSED on the NON-timing domains — it reads the sign-off
+  #     verdicts this run already wrote (reports/phase3/{ir_drop,em,
+  #     si_crosstalk,lvs,lvs_verdict,erc,antenna}.json,
+  #     reports/phase2/gates/{erc_density,perc_signoff}.json) and REFUSES to
+  #     write `no_repair_needed.flag` while any of them reports a HARD failure.
+  #     It does NOT auto-repair those domains: the flag is withheld, this
+  #     step's gate goes red (NO_REPAIR_ARTIFACT), and `sta-review` owns
+  #     the repair. Before v1.7.64 the decision read STA alone, so a run with
+  #     a failed IR-drop / EM / SI / PV sign-off still certified "no repair
+  #     needed" and `postroute_timing_repair_audit` short-circuited to PASS.
+  #   Only explicit hard-fail signals count (verdict/status/result FAIL,
+  #   VIOLATED, MISMATCH…, or passed/pass/summary.pass == false). Missing,
+  #   unparseable, advisory and review-tier artefacts do NOT demand repair.
+  - id: 32
+    name: "🔁 Post-route timing repair pass (multi-corner repair_design + repair_timing + reroute)"
+    stage: stage3
+    closed_loop:
+      fallback_to: 32
+      trigger: "Aggregator: re-run #21-#28 after post-route timing repair"
+    skills: [sta-review]
+    required_outputs:
+      - "phase3/stage3/postroute_timing_repair/repair_log.json OR phase3/stage3/postroute_timing_repair/no_repair_needed.flag"
+      # The trigger DECISION itself is a durable §4.05 audit-trail artefact and
+      # is written on EVERY branch of the repair block (no repair needed,
+      # repair fired, and the single-corner required-but-not-auto-run fallback —
+      # the one branch that writes NEITHER repair_log.json NOR
+      # no_repair_needed.flag). It records the basis, whether multi-corner OCV was available, and the
+      # violated corners; without it a reviewer cannot tell WHY repair did or
+      # did not fire. Nothing verified it before.
+      # NOT declared here, deliberately: no_repair_summary.json (postroute_timing_repair_status_gen
+      # writes it only on the no-repair branch) and postroute_timing_repair.tcl (a
+      # best-effort pre-stage inside try/except) — both are branch-conditional,
+      # so declaring them would manufacture a MISSING on a legitimate run.
+      - "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json"
+    gate:
+      all_of:
+        - program_exit_zero: "flow_step_output_content_check . --mode repair"
+        - files_exist: ["phase3/stage3/postroute_timing_repair/repair_log.json", "phase3/stage3/postroute_timing_repair/no_repair_needed.flag"]
+          any_of: true
+        # `condition_files_exist` is ANY-of: the program runs when at least one
+        # listed path exists. It used to list repair_log.json ALONE, which made
+        # the gate unreachable in precisely the state the audit exists to
+        # judge — a run that wrote `no_repair_needed.flag` has no repair log, so the
+        # audit was skipped and the flag certified the step by itself. That is
+        # the false-clean the decision record's fail-close was written to
+        # prevent, one artefact downstream: measured on a project holding
+        # the flag next to a decision record saying `repair_needed: true` with a
+        # hard IR-drop failure, `postroute_timing_repair_audit` returned rc=1 while
+        # `_evaluate_gate` returned passed=True with no reasons.
+        #
+        # The decision record is what is added, and only it: it is the artefact
+        # the cross-check reads, and `phase3_one_shot_runner` writes it on
+        # EVERY canonicalize pass regardless of which repair branch was taken, so
+        # the gate is now reachable on both branches of a real run — including
+        # the no-repair branch, where the contradiction can appear.
+        #
+        # `no_repair_needed.flag` is deliberately NOT listed. Adding it would only
+        # cover a tree holding the flag and NO decision record, where the audit
+        # has nothing to cross-check and exits 0 anyway — and it would cost
+        # something real: `test_matrix_d2_falsifiable` proves each blocking
+        # clause can FAIL by materialising every `condition_files_exist` path
+        # as a substanceless file, so listing the flag hands the audit a
+        # flag-certified no-repair run and the clause stops being reddenable at
+        # all. Listing only the record keeps the clause falsifiable and loses
+        # no reachable state.
+        - program_exit_zero:
+            command: "postroute_timing_repair_audit . --json reports/phase2/gates/postroute_timing_repair_audit.json"
+            condition_files_exist:
+              - "phase3/stage3/postroute_timing_repair/repair_log.json"
+              - "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json"
+            absent_condition_reason: >-
+              Step 32's required_outputs is the single any-of pattern
+              `repair_log.json OR no_repair_needed.flag`, so a repair that ran and
+              wrote no log leaves NEITHER and the step resolves MISSING,
+              loudly. The condition's false branch therefore coincides with an
+              honestly declared no-repair run, not with a silent loss of a repair
+              that happened.
+    blocks_on: [23, 24, 25, 26, 27, 29, 30]
+
+  - id: 33
+    name: "Power analysis (pre/post-layout)"
+    stage: stage4
+    # THE POWER AXIS HAD A COMPARISON AND NO EDGE.
+    # `power_total_vs_budget_check` (below) computes the verdict and, until this
+    # declaration, handed it to nobody: 19 closed_loop edges existed in this
+    # flow and FOUR of them served timing (10->7, 20->19, 23->32, 32->32) while
+    # power had exactly ONE (24->15, IR drop) and area had NONE. Step 33
+    # measured total power and the number was recorded and then dropped.
+    #
+    # 17 is the fallback because PLACEMENT is the first lever that moves total
+    # power: switching power is dominated by the capacitance the placer decides,
+    # and 17 is a transitive blocks_on ancestor of 33, so the edge re-enters
+    # this step (`closed_loop_edge_check.CL-NOT-A-LOOP`).
+    #
+    # The trigger names the DECLARED budget and nothing else. When L19 declares
+    # no `power_budget_uw` the gate below REFUSES (rc 2, INCOMPLETE) and this
+    # edge is not taken — it is not taken on a derived ceiling either, because a
+    # threshold nobody declared is a ruler fitted to the answer
+    # (`matrix_mutation_ledger.ART-POWER-FIGURES-X1000`).
+    closed_loop:
+      fallback_to: 17
+      trigger: "power__total above the design's DECLARED budget (L19.power_budget_uw); re-place to cut switching capacitance"
+    required_inputs:
+      - from: 22
+        path: "phase3/stage3/extracted/parasitic.spef OR phase3/stage3/extracted/*.spef"
+    # power-analysis never shipped. ppa-measure does, and it is the reader
+    # of exactly this step's artefact: "Read PPA artefacts that the tools
+    # already wrote -- STA reports, power reports, area reports".
+    skills: [ppa-measure]
+    required_outputs:
+      - "reports/phase3/power.rpt"
+      - "reports/phase3/power.json"
+    gate:
+      # The audit trail goes to the gates/ directory, NOT to
+      # reports/phase3/power.json. That path is this step's declared
+      # required_output and holds the RUNNER's power summary
+      # ({tool: opensta, source, analysis_mode, verdict}); the checker writes a
+      # different schema ({program: eda_report_audit:power, passed, findings}),
+      # so pointing --json at it would overwrite the power data with the audit
+      # of that data. It never actually did, because power_report_check.py
+      # rebuilt its own argv and dropped every flag after the project dir — the
+      # declared --json was dead, and no audit trail was written anywhere. The
+      # wrapper now forwards its flags (same fix lvs_report_check got in #507),
+      # so this path had to become a real, separate one at the same time.
+      all_of:
+        - program_exit_zero: "power_report_check . --mode power --json reports/phase2/gates/power_report.json"
+        # THE FIGURES WERE NEVER COMPARED TO ANYTHING. The clause above proves
+        # the report came from a real power tool and carries leakage plus
+        # dynamic categories; it never reads the numbers.
+        # `matrix_mutation_ledger.ART-POWER-FIGURES-X1000` recorded a 1000x
+        # rewrite of all 12 non-zero figures staying green.
+        #
+        # This clause carries the comparison — total power against L19's
+        # `power_budget_uw`. MEASURED over the corpus: 0 of the 17 published
+        # runs carrying a power report declare that budget (3 of 195 L19 copies
+        # do, and that design has no power report), so on today's corpus this
+        # clause REFUSES: it prints `INCOMPLETE:` naming the budget it lacks
+        # and exits 0. That is the honest verdict and it is not a green — a
+        # budget is a REQUIREMENT that has to arrive in the design's own input
+        # documents, and deriving one from die area or supply voltage would be
+        # a threshold nobody declared. Corpus blast radius: 0 PASS->FAIL.
+        - program_exit_zero: "power_total_vs_budget_check . --json reports/phase2/gates/power_budget.json"
+        # ORPHANED, RE-HOMED (2026-08-25). Step 33 owns power, and UPF is the
+        # power-intent format, so this is the step that can hold a UPF file to
+        # its syntax. Its producer is step 7's `l21_to_upf_emit`, which writes
+        # `phase2/stage2/constraints/<top>.upf` and declares nothing
+        # unconditionally, so this consumer is scoped to the same population.
+        #
+        # THE CONDITION IS MEASURED, not decorative: run against a directory
+        # with no `.upf` the program returns rc 1, not a skip
+        # (`return 0 if result.passed else 1`, and `UPF_FILE_EXISTS` is the
+        # failing sub-check). Wired unconditionally it is a finding on every
+        # design with no power intent — forever, on the majority of them —
+        # which is the shape that trains a reader to stop reading advisories.
+        #
+        # `--json` IS LOAD-BEARING AND ITS PATH IS NOT ONE OF THIS STEP'S
+        # DECLARED OUTPUTS. The step declares `reports/phase3/power.rpt` and
+        # `reports/phase3/power.json`, and the second holds the RUNNER's power
+        # summary; a checker pointed at it would overwrite that summary with an
+        # audit of it, which is why every arm of this gate writes into
+        # `reports/phase2/gates/` instead — the same footing as the two
+        # blocking arms above. Without a sink the program prints its report and
+        # keeps no audit trail at all, so a gate arm that ran and a gate arm
+        # that did not are indistinguishable afterwards. The report is written
+        # on both branches (the write precedes the verdict), and nothing else
+        # in the flow reads it, so it stays evidence and adds no
+        # `required_outputs` row.
+        - advisory_program_exit_zero:
+            command: "upf_syntax_check . --json reports/phase2/gates/upf_syntax.json"
+            advisory_reason: "DEMOTED from optional_program_exit_zero in 0291e92f1 (2026-08-25): the optional slot REFUSES when its inputs are present, and an unmet condition there still denied the step its PASS tier (test_matrix_d8). Enforcement was traded for the tier, not for a reason about this gate."
+            condition_files_exist:
+              - "phase2/stage2/constraints/*.upf"
+            absent_condition_reason: >-
+              Scoped to a design that declares power intent. Step 7's UPF emit
+              SKIPs whenever L21 declares no power domains, so a design without
+              them carries no `.upf` and there is no power-intent file to hold
+              to its syntax — a state this program reports as a FAILING
+              `UPF_FILE_EXISTS` sub-check rather than as a skip. The condition
+              keeps the finding on the designs the question is about; on a
+              design that does carry power intent the clause cannot be
+              silenced, because the emit that writes the file is what turns it
+              on.
+    blocks_on: [23]
+
+  # ── Step 34: Metal Fill (ECO-aware density fill insertion) ───
+  # Industry standard (pre-GDS): Insert dummy metal fill to meet
+  # foundry density requirements. Without metal fill, CMP
+  # (Chemical-Mechanical Polishing) causes uneven planarization and
+  # the foundry rejects the tapeout.
+  # ECO-AWARE: when Step 18 inserted spare cells, the metal fill MUST
+  # use ECO-swappable (removable / non-merged) filler cells and MUST
+  # NOT overlap or delete the dont_touch-protected spare instances —
+  # otherwise a future metal-only ECO that re-wires a spare would
+  # collide with fixed fill. Fill is placed around the spare halos;
+  # spares stay reserved as the ECO budget through tapeout. After
+  # fill, spare_cell_preservation_check re-confirms every spare from
+  # phase3/stage3/pnr/spare_cells.json survives in filled.def / GDS
+  # with its keep attribute intact.
+  - id: 34
+    name: "Metal Fill (ECO-aware density fill insertion)"
+    stage: stage4
+    required_inputs:
+      - from: 21
+        path: "phase3/stage3/pnr/routed.def"
+      - from: 18
+        path: "phase3/stage3/pnr/spare_cells.json"
+    mcp_tools: [eda_pnr]
+    programs:
+      - metal_fill_density_check
+      # ECO-aware: re-confirm spares survive fill (no overlap / removal).
+      - spare_cell_preservation_check
+      # Per-layer DENSITY-TARGETED metal fill on the streamed GDS. The
+      # checks above only MEASURE density; OpenROAD filler_placement fills
+      # std-cell ROWS. Neither computes how much metal a sparse LAYER needs,
+      # so a die under the foundry CMP floor was flagged and left sparse.
+      # The emitter runs inside streamout (phase3_one_shot_runner.step_gds),
+      # before the density checks and sign-off DRC consume the GDS; the gate
+      # below only VERIFIES its report so an audit never mutates the layout.
+      - metal_fill_emit
+    required_outputs:
+      - "phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done"
+      # The density report is STEP 34's artefact — `_emit_metal_fill` writes
+      # reports/density.{rpt,json} on the same success path that produces
+      # filled.def, and returns False (writing neither) on every failure path.
+      # Two gates READ it — metal_fill_density_check here and erc_density_check
+      # at Step 31 — and until now NO step declared it, so a run that lost the
+      # density report would have both gates degrade silently instead of any
+      # step reporting MISSING. `report_path` routes the canonical name to
+      # reports/phase3/ while the runner writes reports/ root, and BOTH readers
+      # accept either location, so both are accepted here too.
+      - "reports/density.json OR reports/phase3/density.json"
+      - "reports/density.rpt OR reports/phase3/density.rpt"
+      # `reports/spare_preservation.json` IS NOT DECLARED HERE, and the attempt
+      # to declare it is what this note replaces. It was added on 2026-08-25
+      # because a newly-wired consumer at step 37.5ic began READING it and d7
+      # named the pair (`W2:produced_consumed_undeclared`). The declaration
+      # cannot stand: this step's only producer of that file is the
+      # `optional_program_exit_zero` clause below, which runs only when
+      # `phase3/stage3/pnr/spare_cells.json` is present, while
+      # `required_outputs` is UNCONDITIONAL — `flow_compliance_check` returns
+      # MISSING for a declared entry that is absent, on every project, with no
+      # escape. Declaring it asserts a production the same gate denies four
+      # lines down, and reds every spare-less design over an artefact nobody
+      # owes. Step 7's `.upf` note above refuses the identical shape.
+      #
+      # The consumer went with it rather than the declaration being kept: this
+      # step's own sign-off notes name "declare an undeclared artefact and
+      # relocate the red" as a shape to refuse, and that is exactly what the
+      # pair amounted to. See the step-37.5ic note for what is required before
+      # that consumer can be wired again.
+    gate:
+      all_of:
+        - files_exist: ["phase3/stage3/pnr/filled.def", "phase3/stage3/pnr/metal_fill.done"]
+          any_of: true
+        - program_exit_zero: "metal_fill_density_check . --json reports/phase2/gates/metal_fill_density.json"
+        # Spares must survive ECO-aware fill (fillers swappable, no
+        # overlap / removal of dont_touch spares). No-op when Step 18
+        # was skipped (no spare_cells.json).
+        - optional_program_exit_zero:
+            command: "spare_cell_preservation_check . --json reports/phase2/gates/spare_preservation_postfill.json"
+            condition_files_exist: ["phase3/stage3/pnr/spare_cells.json"]
+            absent_condition_reason: >-
+              Scoped to a design that inserted spares at step 18: with no
+              spare_cells.json there is no spare pool for ECO-aware fill to
+              preserve. A design that DID insert spares carries the manifest,
+              because step 18's gate hard-requires it through files_exist, so
+              this clause cannot be silenced on the runs it is about.
+        # Density-targeted fill VERDICT. `--verify-only` re-reports what the
+        # streamout emitter already wrote — it never re-runs the fill, so
+        # auditing a finished project cannot mutate its GDS. PARTIAL (a layer
+        # that never reached its target) FAILs with the achieved worst-window
+        # density disclosed; a missing report exits 2 with a NAMED disclosure
+        # (VACUOUS-PASS), never a silent "filled". Opt-in per PDK, same as the
+        # Step-26 geometry deck: no fill config, no claim.
+        - optional_program_exit_zero:
+            command: "metal_fill_emit . --verify-only --json reports/phase2/gates/cmp_fill_emit.json"
+            condition_files_exist: ["signoff/cmp_fill_targets.json", "input/pdk/bridge/cmp_fill_targets.json"]
+            absent_condition_reason: >-
+              Both triggers are PDK-PROVIDED fill-target decks -- opt-in
+              inputs, not results of this step: no fill config, no claim. A
+              filled design is still judged without them by the UNCONDITIONAL
+              metal_fill_density_check clause in this same gate. When the deck
+              IS present and the report is missing, this gate exits 2 with a
+              NAMED disclosure (VACUOUS-PASS), never a silent 'filled'.
+    blocks_on: [32]
+
+  # ── Step 35: DFM screen ──────────────────────────────────────────
+  # v2.3 — Design-for-Manufacturability, scoped HONESTLY for an
+  # open-source 130-180nm flow: the designer-side measurables run
+  # (per-layer CMP density window, redundant-via ratio counted from
+  # the routed DEF, litho/min-width margins cross-referenced to the
+  # Step-31 DRC deck); the foundry-side mask-synthesis items
+  # (OPC / RET / SRAF / PSM) are NAMED FOUNDRY_SIDE disclosure items —
+  # they appear at their correct flow position without pretending the
+  # designer executes them. At <=28nm they become designer-collaboration
+  # items (conditional note in the report).
+  - id: 35
+    name: "DFM screen (CMP density + redundant-via ratio + foundry-side OPC/RET disclosure)"
+    stage: stage4
+    required_inputs:
+      - from: 34
+        outputs: all
+    programs:
+      - dfm_screen_check
+    program_outputs:
+      - program: dfm_screen_check
+        path: "reports/phase3/dfm_screen.json"
+        verdict_field: verdict
+    required_outputs:
+      - "reports/phase3/dfm_screen.json"
+    gate:
+      all_of:
+        # The producer remains advisory; the content gate validates its
+        # emitted document's shape without promoting yield advice to FAIL.
+        # BLOCKING half: the screen must have produced its artefact. A step
+        # that never ran cannot be certified done.
+        - files_exist: ["reports/phase3/dfm_screen.json"]
+        - program_exit_zero: "flow_step_output_content_check . --mode dfm"
+        # dfm_screen_check is a producer/classifier with PASS,
+        # PASS_WITH_ADVISORIES and SKIP outputs but no refusal predicate.
+        # Issue #1980 keeps its structured output above and excludes it from
+        # the gate denominator. Presence remains the blocking predicate.
+    blocks_on: [34]
+
+  - id: 37
+    name: "GDSII output (after routed-layout pre-stream admission)"
+    stage: stage4
+    required_inputs:
+      - from: 34
+        path: "phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done"
+    mcp_tools: [eda_gds]
+    programs:
+      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
+      # This step's own gate clause below invokes the program with
+      # `--json <path>` and `<path>` is one of this step's `required_outputs`
+      # -- the flow already says in TWO places that the run writes that
+      # document. It did not say it in the third, `programs:`, which is the
+      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
+      # the AUDIT's evaluation of the gate wrote it, and the audit then
+      # correctly refused its own output:
+      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
+      #   no pre-audit producer supplied these paths; wire them into the
+      #   owning runner before claiming this step complete.
+      # Naming the producer here is that wiring: it makes the three
+      # declarations agree, and `flow_declared_producer_run` (invoked by the
+      # phase-3 runner, never by the auditor) then executes the clause when
+      # -- and only when -- the document is absent or the audit's own
+      # authorship note claims it. A document the run already produced is
+      # left byte-for-byte alone.
+      - stage3_compliance
+      - layout_receipt_identity_check
+    required_outputs:
+      - "phase3/stage4/gds/*.gds"
+      # THE STREAM-OUT TRANSCRIPT, declared because it is CONSUMED. This step
+      # writes it ("the resolution prints are the only evidence of WHAT went
+      # into the sign-off GDS", at the write site), and step 37.3 reads it to
+      # recover the library set for a re-streamed fidelity reference. An
+      # artefact the flow produces and a gate consumes, declared by no step, is
+      # exactly W2 -- and the matrix named it on 37.3:
+      # "W2:produced_consumed_undeclared phase3/stage3/pnr/stream_out.log --
+      #  the step's own gate asserts this file exists; no step's
+      #  required_outputs names it". Undeclared meant nothing checked it existed,
+      # so its absence would have been invisible until a reader took the
+      # empty-branch.
+      #
+      # A GLOB, AND THE ENGINE IS THE REASON. `stream_out.log` is written by the
+      # KLAYOUT stream-out only; the Magic engine beside it writes
+      # `<top>.magic_stream_out.log` at its own site ("the KLayout engine beside
+      # this one already writes `stream_out.log` and states why", at that write).
+      # Declaring the KLayout name alone would demand of every Magic-streamed run
+      # a file its engine never writes -- a false demand, and the kind that gets
+      # answered by weakening the gate rather than by fixing anything. The glob is
+      # what the flow actually requires: SOME transcript of what went into the
+      # sign-off GDS, whichever tool streamed it.
+      - "phase3/stage3/pnr/*stream_out.log"
+      # THE ROUTE ATTESTATION, declared for the same reason and by the same rule.
+      # `step_pad_ring_final_evidence` writes it in this phase-3 pass and it is an
+      # attestation ABOUT THIS STEP'S OWN GDS -- the shipped path, its sha256, its
+      # byte count and the stream-out engine -- so it cannot exist before step 37
+      # and belongs to no earlier step. Step 37.3 reads it to learn WHICH GDS and
+      # WHICH routed DEF the run shipped, and refuses on a sha256 mismatch; that
+      # is what makes the fidelity comparison about the artefact the run attested
+      # rather than whatever file happens to be on disk. W2 named it on 37.3:
+      # "produced by the flow and read by a gate, but no step's required_outputs
+      # names it".
+      - "reports/phase3/pad_ring_route_evidence.json"
+      - "reports/phase3/gates/stage3_compliance.json"
+      - "reports/phase3/layout_receipts.json"
+    gate:
+      all_of:
+        - program_exit_zero: "layout_receipt_identity_check . --json reports/phase3/layout_receipt_identity.json"
+        # ── ON-PASS REVIEW of stage3 ─────────────────────────────────
+        # Declared on the stage (`stages[].on_pass_review`), DISPATCHED here:
+        # the step that already carries `stage3_compliance .`.
+        # `advisory_`, NOT `program_exit_zero`, and that is the whole point:
+        # the block declares `verdict: advisory` and the program declares
+        # `DECLARED_ENFORCEMENT = "advisory"`. The blocking slot would make a
+        # rejection stop the step -- turning "unverified" into "blocking",
+        # which #1253 refuses -- and would additionally read the program's
+        # rc=2 NOT CHECKED as VACUOUS_PASS. The advisory slot RUNS it and
+        # RECORDS the verdict without changing the step's tier.
+        # THE VERDICT SOURCE, PRODUCED HERE AND READ ON THE NEXT LINE.
+        # It used to be `--compliance reports/flow_compliance.json`, which
+        # ONLY the flow's `final_gate:` block declares -- and NOTHING
+        # EXECUTES `final_gate`. Both runners invoke this program without
+        # `--json` (design_one_shot_runner._build_final_audit_cmd,
+        # phase3_one_shot_runner), `--json` has no default, and even when a
+        # caller does pass it the report is written AFTER the step loop that
+        # hosts these clauses. MEASURED: the review returned rc=2 NOT CHECKED
+        # -- "[Errno 2] No such file or directory" -- on every real run, which
+        # is v1.13.42's outcome reached through a different door.
+        # A scoped pass run as the clause BEFORE the review is a verdict
+        # source with an executed producer AND a defined order: `_evaluate_gate`
+        # walks `all_of` in sequence, so the report exists when the next
+        # clause reads it.
+        # `stage3_compliance` was ALREADY in this `all_of`, last, with no `--json`.
+        # It is the same clause, moved to the front and asked to write what
+        # it measured. Nothing new runs.
+        - advisory_program_exit_zero:
+              command: "stage3_compliance . --json reports/phase3/gates/stage3_compliance.json"
+              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 1 on a real spm run (2026-08-31): it REFUSES TODAY on real input; the advisory slot is currently swallowing a live finding. Promote to blocking once this run is clean. It reported: STRUCTURAL MEASUREMENT: registered=null invoked=null no_verdict=null — the structural-RTL umbrella was NOT ASKED to run in this invocation, so this re"
+        - advisory_program_exit_zero:
+              command: "stage_on_pass_review . --stage stage3 --json reports/phase3/gates/stage3_on_pass_review.json --compliance reports/phase3/gates/stage3_compliance.json"
+              advisory_reason: "DEMOTED, not designed advisory: wired blocking until da6fcd7fe (2026-08-30), moved here in the change that made the declared command actually execute; that push used --no-verify because the full tier did not stamp. Restore blocking once the six on-pass stage commands run green. Re-pointed at the per-stage compliance report in v1.13.78; notch re-measured rc 2 on that invocation, unchanged in class."
+        - files_exist: ["phase3/stage4/gds/*.gds"]
+        # THE TRANSCRIPT, ASSERTED BY THE STEP THAT OWES IT. Declaring an artefact
+        # whose own gate never looks at it is an unchecked claim, and dimension 4
+        # says so by name: "1 of 4 declared required_outputs are named nowhere the
+        # gate can reach ... declared 'phase3/stage3/pnr/stream_out.log'". This is
+        # the clause that makes the claim checked, and the demand is real on its
+        # own terms -- the Magic write site records what a missing transcript cost:
+        # "a 106-byte GDS reached sign-off DRC, LVS and the hand-off pack with
+        # nothing at all to say why, while the three lines naming the cause
+        # (`Cell spm couldn't be read`) were discarded at the point of capture".
+        # ENGINE-NEUTRAL by the same glob the declaration uses, so no legitimate
+        # stream-out is reddened by it, and a cached-GDS run is satisfied by the
+        # transcript the session that streamed it left in the same tree.
+        - files_exist: ["phase3/stage3/pnr/*stream_out.log"]
+        - program_exit_zero: "gds_size_check --gds-file phase3/stage4/gds/*.gds --json reports/phase3/gds_size.json"
+        # Substance, not just size. gds_size_check compares against a
+        # flow-wide 100 KB constant and demotes a bad GDSII header to a
+        # WARNING, so 150 KB of os.urandom() behind a 4-byte HEADER, and a
+        # zero-padded library with no structures at all, both signed off
+        # `pass: true, errors: 0, warnings: 0`. This gate walks the whole
+        # record stream (HEADER..ENDLIB, no trailing padding) and requires
+        # layout elements >= the design's OWN placed-instance count read
+        # from phase3/stage3/pnr/routed.def — a derived floor, never a
+        # per-design constant. Hard FAIL; VACUOUS_PASS before stream-out.
+        - program_exit_zero: "gds_substance_check . --json reports/phase3/gds_substance.json"
+        # vibe-ic#613 — substance is not nameability. A structurally valid,
+        # substance-carrying sign-off GDS whose TOP CELL has no text labels
+        # cannot be pin-matched by any top-level LVS: extraction emits
+        # `.subckt <top>` with no ports at all, so every schematic port
+        # resolves to an anonymous node and the comparison fails regardless of
+        # whether the layout is correct. Measured on a real run: DEF `PINS 20 ;`
+        # against 0 labels in the streamed top cell.
+        # PER-STRUCTURE and BY NAME: a chip GDS carries the std cells' own pin
+        # texts (sha256: 2,314 library labels), so a library-wide count is
+        # non-zero for a top cell with none, and a count alone cannot say WHICH
+        # port is unnamed. Pairs the DEF to the GDS by the DEF's own
+        # `DESIGN <name> ;` — sha256's pnr dir holds DEFs for two designs.
+        # VACUOUS_PASS (rc 2) when no DEF describes the layout; blocks only on a
+        # PLACED port with no label. Flips 0 of the 4 real sign-off GDS here.
+        - program_exit_zero: "gds_port_label_check . --json reports/phase3/gds_port_labels.json"
+        # ORPHANED, RE-HOMED (2026-08-25). Step 37 is where a design publishes
+        # its numbers, so it is the step that can ask whether every figure in
+        # the final report is backed by an artefact on disk rather than typed
+        # in. Conditioned on the report existing: a project that has not written
+        # one has no claim to check, which is a different statement from "its
+        # claims are backed".
+        - advisory_program_exit_zero:
+              command: "reported_figure_artifact_backing_check . --report FINAL_REPORT.md"
+              advisory_reason: "DEMOTED from optional_program_exit_zero in 0291e92f1 (2026-08-25): the optional slot REFUSES when its inputs are present, and an unmet condition there still denied the step its PASS tier (test_matrix_d8). Enforcement was traded for the tier, not for a reason about this gate."
+        # Provenance required: GDS must be produced by a real streamer
+        # (KLayout def2gds, Magic gds write, etc.). This closes the
+        # "rename old .def to .gds" loophole.
+        #
+        # It did not. `--require-entries 1` is the COARSE mode: it counts
+        # exit-0 entries anywhere in provenance.jsonl with NO output-path and
+        # NO tool filtering, so it passes on any run that logged a single
+        # yosys/openroad/sta/netgen invocation — the GDS itself is never
+        # looked at. Of the six provenance gates in this flow, this was the
+        # ONLY coarse one; lines 701/1302/1330/1611/1612 all use the strict
+        # `--output ... --tool ...` form. Measured on the real
+        # spm x ihp-sg13g2 run: coarse -> `44 / 1 exit-0 entries OK`, rc=0;
+        # strict -> rc=1, `hash mismatch: log=sha256:a5f4537a59e...
+        # disk=sha256:b8cb431c24d...` — the shipped GDS post-dates the only
+        # log entry that claims to describe it.
+        #
+        # `--output=`/`--tool=` (the `=` form) is deliberate: an argument
+        # starting with `-` is NOT touched by flow_compliance_check's
+        # `_expand_globs`, so the pattern reaches provenance_check intact and
+        # is expanded by ITS glob branch, which FAILs "no file on disk matches
+        # pattern" when nothing matches and checks EVERY match when several
+        # do. The space-separated form would be pre-expanded with nullglob
+        # semantics: zero matches drops the argument entirely and argparse
+        # then exits 2, which this runner reads as VACUOUS_PASS.
+        - program_exit_zero: "provenance_check . --output=phase3/stage4/gds/*.gds --tool=klayout,magic,openroad --require-measured"
+        # TWO ORPHANED FINAL-STAGE GATES, RE-HOMED (2026-08-25). Step 37 is
+        # where a design claims it is done, which is the only place these two
+        # questions can be asked: does the stage evidence actually exist, and
+        # does every gate a FINAL_REPORT calls PASS have an evidence file
+        # behind it.
+        #
+        # ADVISORY. `flow_stage_check` is RED on a real completed project —
+        # `stage_count 3, threshold 4, synth: False` — because that project has
+        # no synthesis evidence directory. A gate nothing ran could not say so.
+        # `gate_evidence_completeness_check` needs a FINAL_REPORT.md and says so
+        # rather than passing when there is none.
+        - advisory_program_exit_zero:
+              command: "flow_stage_check ."
+              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
+        - advisory_program_exit_zero:
+              command: "gate_evidence_completeness_check ."
+              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 1 on a real spm run (2026-08-31): it REFUSES TODAY on real input; the advisory slot is currently swallowing a live finding. Promote to blocking once this run is clean. It reported: FAIL: nothing to audit"
+        # ORPHANED, RE-HOMED. Step 37 is where the GDS is published, so it is
+        # where "which of these polygons came from someone else's IP" can be
+        # asked. `build-text` prints and writes nothing, so no required_outputs
+        # change. Measured: rc=2 with no `plugin_output/declaration.json` (a
+        # project reusing no catalogue IP — correctly vacuous), rc=0 on a
+        # complete blob, rc=3 when the blob carries a REFUSED line.
+        - advisory_program_exit_zero:
+              command: "gds_ip_attribution build-text ."
+              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
+        # THE STAGE-3 BOUNDARY, ASKED BY THE STEP ITS OWN DOCSTRING NAMES.
+        # `stage3_compliance` is the end-of-stage gate the README names for
+        # stage3, and it does not merely say "run me after stage 3" — it names
+        # its consumer: "GDS ... is in Stage 4 and is gated on Stage 3 being
+        # fully clean — do NOT produce GDS if this gate fails." This is the
+        # GDSII output step. No other step in this flow owns that sentence, and
+        # until now nothing invoked the wrapper at all, so the prohibition was
+        # published and never measured.
+        #
+        # ADVISORY. Step 37 already carries FOUR blocking clauses of its own on
+        # the artefact it produces (size, substance, port labels, provenance);
+        # the stage-3 verdict is a second opinion about upstream steps that
+        # each have their own gate, and re-blocking here would refuse this
+        # step's tier for a finding that already refused another step's. The
+        # wrapper also hardcodes `--strict`, a stricter reading than the run's
+        # own invocation may have chosen.
+        #
+        # NO RECURSION: `flow_compliance_check --stage 3` evaluates stage3
+        # steps only, and step 37 is stage4 — outside the filter, so this
+        # clause cannot re-enter itself. It would recurse without bound if
+        # wired onto any stage3 step, which is why it is not.
+    blocks_on: [34]
+
+  # ── the sign-off SUMMARY, and why it is its own step ─────────────────
+  # MEASURED at v1.16.2: `phase3/final/metrics.json` had FIVE readers
+  # (tapeout_docs_gen, ic_release_docs_gen, _ic_release_artefacts,
+  # release_docs_check, and a comment in this file) and ZERO writers, and
+  # `phase3/final/` was not a directory `_path_layout` defined. Its 18 keys are
+  # OpenLane-2/LibreLane metric names; this flow drives OpenROAD, magic, netgen,
+  # KLayout and OpenSTA directly and never runs LibreLane's Classic flow, which
+  # is what would have written that file. So step 37.5ic could not produce ONE
+  # of its six document outputs for ANY design, and no completed route could
+  # change that: the missing artefact is not a layout, it is the summary of the
+  # checks run ON the layout.
+  #
+  # It is its OWN step and not a clause of 37.5ic because it runs on EVERY
+  # route: the IP arm's documents and the `_ic_release_artefacts` substance
+  # check read the same record, and a summary of a run belongs to the run, not
+  # to one of the two ways it can be delivered.
+  # R-0915-129 metric 2 — STREAM-OUT / FINISHING FIDELITY, measured.
+  #
+  # `design__xor_difference__count` was NOT_MEASURED for every design on this
+  # flow, and the ruling refused the structural excuse: KLayout in the pinned
+  # image has `xor`, so the flow CAN produce the number and calling it
+  # inapplicable would be laundering. What there was no producer for is the
+  # comparison itself -- the shipped GDS against the same routed database before
+  # finishing touched it, on the DESIGN layers, with the layers each finishing
+  # step DECLARES it added subtracted and disclosed separately.
+  #
+  # Its own step, before 37.4, because 37.4 READS this receipt: the aggregator's
+  # `--check` refuses a record that no longer states what the run's own reports
+  # state, so the XOR must have written its answer first.
+  #
+  # BLOCKING via program_exit_zero. A design-layer difference is rc=1, and a
+  # REFUSAL IS ALSO rc=1 -- not rc=2, which this flow maps onto VACUOUS_PASS, a
+  # non-FAIL tier. An earlier draft of this step exited 2 on a refusal and the
+  # matrix's dimension 2 caught it in the words of its own question: "step 37.3
+  # gate CANNOT FAIL on anything a project DID". An unrun XOR is not a zero, so
+  # the refusal blocks; the receipt's `verdict` field keeps NOT_DETERMINED
+  # distinguishable from a measured FAIL for the readers that need the
+  # difference. Only a measured 0 on every design layer is rc=0.
+  - id: "37.3"
+    name: "GDS stream-out / finishing fidelity — the shipped GDS XOR'd against this run's own pre-finishing boundary"
+    stage: stage4
+    # ITS SUBJECT NEEDS TWO GDS FILES, NOT A CLEAN PV. Whether the shipped GDS
+    # differs from this run's own pre-finishing boundary on the design layers is
+    # answerable from those two artefacts alone; step 37's PV-clean condition is
+    # not an input to it. MEASURED on the S arm (spm end-to-end, 0.3.67, the
+    # rollback path): step 37 FAILed on DRC and this step was cascaded away --
+    # while BOTH inputs sat on disk, `chip_top.prefinish.gds` at 73,850,000 B (the
+    # retained boundary fired) and the shipped GDS at 102,921,972 B. The one run
+    # where the answer matters MOST produced no receipt.
+    #
+    # And it matters most there for a reason that is not bookkeeping: a fidelity
+    # defect -- finishing corrupting design geometry -- is a candidate CAUSE of
+    # the DRC violations that failed PV. Gating this check on PV being clean means
+    # it can never help diagnose the failure it might explain. R-0915-129's own
+    # words: "a metric with no producer, not a metric that cannot be produced".
+    #
+    # So the step is CONDITIONAL on its subject existing rather than DEPENDENT on
+    # a verdict: with a shipped GDS on disk there is something to audit and the
+    # step runs, PV clean or not; with none there is no subject and the step is
+    # NOT_APPLICABLE -- never FAIL/missing_artefact, which is what a cascaded-away
+    # step with a declared output produced here.
+    #
+    # THE TRIGGER IS THE ROUTED DATABASE, and getting here took two refusals from
+    # the matrix, both of them right.
+    #
+    # (1) NOT the route attestation. Conditioning on
+    # `reports/phase3/pad_ring_route_evidence.json` is a SELF-DISABLING CONDITION:
+    # `flow_condition_reachability_check` classifies a trigger the flow itself
+    # produces whose absence is loud NOWHERE (measured T7=None, T3=None, T5=None)
+    # as exactly the shape where "the artefact is missing" and "the check was never
+    # made" are indistinguishable to every reader downstream -- and the runner
+    # writes that attestation ONLY under `_chip_path_requests_pad_ring`, so every
+    # design off the chip pad-ring path silently had no fidelity check at all.
+    #
+    # (2) The shipped GDS is step 37's declared output. The dependency graph
+    # now names 37 explicitly, while the runner still emits the XOR receipt
+    # after stream-out even if a separate PV reader fails.
+    #
+    # `phase3/stage3/pnr/routed.def` is the honest precondition and it closes both.
+    # It is the ROUTED DATABASE the comparison's REFERENCE is streamed from -- with
+    # no route there is no reference and no comparison exists to make -- it is
+    # step 21's declared required_output AND a hard `files_exist` in step 21's own
+    # gate (T7, step 21), so its absence FAILs there, and 21 is upstream of
+    # stream-out, so `blocks_on: [21]` orders this step without making it wait on
+    # step 37's VERDICT. A DRC-failed 37 no longer takes the fidelity receipt with
+    # it.
+    #
+    # The shipped GDS is still the SUBJECT -- the checker resolves it from the
+    # attestation when the run wrote one and from the flow's own
+    # `phase3/stage4/gds/*.gds` declaration when it did not -- and its absence is a
+    # NAMED REFUSAL in the receipt (`verdict: NOT_DETERMINED`, rc=1, citing both
+    # places it looked), never a silent skip and never a missing_artefact.
+    condition:
+      files_exist:
+        - "phase3/stage3/pnr/routed.def"
+    # DECLARED, because the consumer branches on it and the default is the benign
+    # answer. `flow_gate_grid` named the omission: "1 step(s) declare a
+    # `condition` and no `condition_kind` ... every conditional skip falls to the
+    # benign default and 'this design legitimately has none' cannot be told from
+    # 'someone forgot to author the trigger'".
+    #
+    # `dependency_required`, NOT `design_dependent`, and the trigger decides which:
+    # `routed.def` is not a property of the design, it is an artefact step 21
+    # PRODUCES. So when it is absent the honest statement is not "this design has
+    # no such thing" -- it is that the producer did not deliver, and
+    # `_resolve_dependency_condition_results` says exactly that: MISSING plus
+    # `blocked-by-upstream(21)`, naming the producer and the absent artefact. A
+    # silent design-dependent skip would have made a failed route and a design
+    # with nothing to compare read identically.
+    condition_kind: dependency_required
+    required_outputs:
+      - "reports/phase3/gds_xor.json"
+    programs:
+      - gds_xor_check
+    gate:
+      all_of:
+        # `--check`, NOT `--json`, AND THE DIFFERENCE IS A PUBLISHED FAIL.
+        #
+        # `--json <path>` made the completion audit RE-RUN the comparison. MEASURED
+        # on the SLT53D S arm, all five subjects: the producer's receipt
+        # reports/phase3/gds_xor.json recorded verdict PASS, rc 0, 0 design-layer
+        # differences across 46 layers, runner {"kind":"container","detail":
+        # "real-ic-arm-eda:klayout"} -- and the audit's own invocation of the same
+        # program, seconds later on the same host, could not reach KLayout and
+        # exited NOT_DETERMINED. The row read FAIL. One instrument, two
+        # invocations, two answers, and the audit published the one that did not
+        # measure.
+        #
+        # R-0915-126 already names the rule: PRODUCER WRITES, GATE READS. The
+        # receipt redirect protects the producer's BYTES and says nothing about
+        # which answer gets published, so a clause that re-measures is exactly the
+        # trap the redirect was built for. `--check` READS the receipt at its
+        # canonical path and judges it -- 0 differences -> rc 0, a measured
+        # difference -> rc 1, NOT_DETERMINED or absent -> rc 2 carrying the
+        # receipt's own reason -- and opens no layout, launches no tool and writes
+        # no byte.
+        #
+        # THE BLOCKING QUESTION STILL HAS A YES. Dimension 2 asks whether this
+        # gate can FAIL on anything a project DID: hand `--check` a receipt with
+        # one design-layer difference and it exits 1.
+        - program_exit_zero: "gds_xor_check . --check reports/phase3/gds_xor.json"
+    # The routed DEF supplies the pre-finishing reference; Step 37 supplies
+    # the shipped GDS. Both inputs must be named in the dependency closure.
+    # The runner produces this XOR receipt independently of the later PV
+    # verdict, so a DRC/LVS failure does not erase the diagnostic evidence.
+    blocks_on: [21, 37]
+
   - id: 31
     name: "🔁 Physical Verification (DRC + LVS + ERC + Density)"
-    stage: stage3
+    stage: stage4
     required_inputs:
       - from: 21
         path: "phase3/stage3/pnr/routed.def"
@@ -7293,9 +8050,9 @@ steps:
         - program_exit_zero: "provenance_check . --output reports/phase3/lvs.rpt --tool netgen,magic,klayout --require-measured"
         # Step-31 ERC + sign-off density substance (replaces the dangling
         # density_check that referenced a non-existent program). This is a
-        # DIFFERENT check from metal_fill_density_check (Step 34): the flow's
-        # step ORDER puts Step 31 before Step 34, so this gate must never key
-        # off filled.def / metal_fill.done.
+        # DIFFERENT check from metal_fill_density_check (Step 34): Step 31
+        # follows the delivered GDS and fill, so its density/ERC receipt
+        # covers the post-fill layout.
         # erc_density_check (a) verifies any PER-LAYER metal CMP density is in
         # the foundry 20-80% window (foundry rejects at CMP otherwise), (b) when
         # the artefact only carries OpenROAD filler_placement std-cell ROW
@@ -7405,394 +8162,7 @@ steps:
               The DRC and LVS artefacts, and the two blocking provenance slots
               above that require those artefacts to name the tool that made
               them, are what evidence a tool run on that path.
-    blocks_on: [23, 24, 25, 26, 27, 29, 30]
-
-  # ── Step 32: Post-route timing repair pass ───────────────────
-  # RENAMED (owner call). This step was called "ECO (Engineering Change Order)"
-  # and the line here claimed it was industry standard. Both were wrong, and the
-  # name was doing real damage.
-  #
-  # What it MEASURABLY does, read off the OpenROAD script it generates:
-  #   read_def(routed) -> read_liberty(ss/tt/ff) -> estimate_parasitics
-  #   -> repair_design -> repair_timing -setup -> global_route
-  #   -> detailed_route -> write_def/write_verilog
-  #
-  # It RE-ROUTES THE WHOLE DESIGN. An ECO is by definition incremental and
-  # PRESERVES the existing implementation — that preservation is the entire
-  # point, because it is what makes a metal-only mask revision possible. A step
-  # that re-runs detailed_route is not an ECO under any definition; it is a
-  # second optimisation pass. And an "Engineering Change Order" is a change
-  # order against a RELEASED design: this flow has no tapeout, no mask set and
-  # no frozen revision, so there is nothing for an order to change.
-  #
-  # WHY THE NAME MATTERED, not just cosmetics: an ECO is assumed incremental,
-  # safe and improving, so the step inherited that trust. That is why nobody
-  # ever compared its own before/after — `repair_before` and `repair_after` sat
-  # adjacent in one JSON record and were never subtracted, and a pass that made
-  # setup 12x WORSE was recorded as applied (fixed v1.8.62). Same defect family
-  # as naming an ATPG cut netlist a "scan netlist": a name asserting a property
-  # the thing does not have.
-  #
-  # The rename is complete across the executable contract: module names, Python
-  # identifiers, decision keys, gate names, directory names and artefact names
-  # all use `postroute_timing_repair` / `repair`. There is no `eco_*` alias;
-  # accepting both vocabularies would recreate the ambiguity at the API edge.
-  #
-  # CORRECTLY named and untouched: Step 18 "Spare-cell + ECO-prep insertion
-  # (Design-for-ECO)" — inserting spares pre-tapeout so a FUTURE ECO is
-  # possible is exactly what Design-for-ECO means; and `metal_eco` /
-  # `base_layer_eco` in yield_fix_cost_rank, which are genuine post-tapeout
-  # remediation classes sitting alongside `respin`.
-  #
-  # FIXED 2026-07-31 (was: KNOWN MISMATCH, recorded not fixed). This step used
-  # to list `skills: [eco-plan]`, whose premise is "minimise disruption to an
-  # already-placed-and-routed netlist, prefer metal-only" — the exact opposite of
-  # what the automated path does, which is re-route everything. `eco-plan` is
-  # correctly named for what IT does; it was simply not the thing this step needs.
-  #
-  # It now lists `sta-review`, which reads STA reports, triages setup/hold/
-  # recovery/removal violations and proposes fixes. That IS the question a human
-  # or agent faces when this repair pass fails to close: not "how do I plan a
-  # change order against a released design" (there is no released design) but
-  # "which paths did not close, and what would close them".
-  #
-  # `eco-plan` and `design-for-eco` remain, unchanged, for the case they were
-  # written for: a real post-tapeout change against a frozen revision.
-  # A timing failure can fire this whole-design repair and reroute pass. A hard
-  # failure in a non-timing sign-off domain withholds the no-repair certificate
-  # and leaves the named domain red; Step 32 does not pretend its timing deck
-  # can repair IR, EM, SI or PV. If all sign-off domains pass, the step records
-  # `no_repair_needed` and passes through.
-  #
-  # v1.7.64 — what the AUTO-trigger actually does vs what the skill does.
-  # `postroute_timing_repair_decision.decide()` is the single shared policy used
-  # by `phase3_one_shot_runner` and `postroute_timing_repair_status_gen`. It:
-  #   * DECIDES ON TIMING from the multi-corner OCV sign-off (ss/ff), falling
-  #     back to single-corner tt when the PDK exposes one corner (§4.05), and
-  #     AUTO-RUNS `postroute_timing_repair.tcl` for a timing violation;
-  #   * FAILS CLOSED on the NON-timing domains — it reads the sign-off
-  #     verdicts this run already wrote (reports/phase3/{ir_drop,em,
-  #     si_crosstalk,lvs,lvs_verdict,erc,antenna}.json,
-  #     reports/phase2/gates/{erc_density,perc_signoff}.json) and REFUSES to
-  #     write `no_repair_needed.flag` while any of them reports a HARD failure.
-  #     It does NOT auto-repair those domains: the flag is withheld, this
-  #     step's gate goes red (NO_REPAIR_ARTIFACT), and `sta-review` owns
-  #     the repair. Before v1.7.64 the decision read STA alone, so a run with
-  #     a failed IR-drop / EM / SI / PV sign-off still certified "no repair
-  #     needed" and `postroute_timing_repair_audit` short-circuited to PASS.
-  #   Only explicit hard-fail signals count (verdict/status/result FAIL,
-  #   VIOLATED, MISMATCH…, or passed/pass/summary.pass == false). Missing,
-  #   unparseable, advisory and review-tier artefacts do NOT demand repair.
-  - id: 32
-    name: "🔁 Post-route timing repair pass (multi-corner repair_design + repair_timing + reroute)"
-    stage: stage3
-    closed_loop:
-      fallback_to: 32
-      trigger: "Aggregator: re-run #21-#28 after post-route timing repair"
-    skills: [sta-review]
-    required_outputs:
-      - "phase3/stage3/postroute_timing_repair/repair_log.json OR phase3/stage3/postroute_timing_repair/no_repair_needed.flag"
-      # The trigger DECISION itself is a durable §4.05 audit-trail artefact and
-      # is written on EVERY branch of the repair block (no repair needed,
-      # repair fired, and the single-corner required-but-not-auto-run fallback —
-      # the one branch that writes NEITHER repair_log.json NOR
-      # no_repair_needed.flag). It records the basis, whether multi-corner OCV was available, and the
-      # violated corners; without it a reviewer cannot tell WHY repair did or
-      # did not fire. Nothing verified it before.
-      # NOT declared here, deliberately: no_repair_summary.json (postroute_timing_repair_status_gen
-      # writes it only on the no-repair branch) and postroute_timing_repair.tcl (a
-      # best-effort pre-stage inside try/except) — both are branch-conditional,
-      # so declaring them would manufacture a MISSING on a legitimate run.
-      - "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json"
-    gate:
-      all_of:
-        - program_exit_zero: "flow_step_output_content_check . --mode repair"
-        - files_exist: ["phase3/stage3/postroute_timing_repair/repair_log.json", "phase3/stage3/postroute_timing_repair/no_repair_needed.flag"]
-          any_of: true
-        # `condition_files_exist` is ANY-of: the program runs when at least one
-        # listed path exists. It used to list repair_log.json ALONE, which made
-        # the gate unreachable in precisely the state the audit exists to
-        # judge — a run that wrote `no_repair_needed.flag` has no repair log, so the
-        # audit was skipped and the flag certified the step by itself. That is
-        # the false-clean the decision record's fail-close was written to
-        # prevent, one artefact downstream: measured on a project holding
-        # the flag next to a decision record saying `repair_needed: true` with a
-        # hard IR-drop failure, `postroute_timing_repair_audit` returned rc=1 while
-        # `_evaluate_gate` returned passed=True with no reasons.
-        #
-        # The decision record is what is added, and only it: it is the artefact
-        # the cross-check reads, and `phase3_one_shot_runner` writes it on
-        # EVERY canonicalize pass regardless of which repair branch was taken, so
-        # the gate is now reachable on both branches of a real run — including
-        # the no-repair branch, where the contradiction can appear.
-        #
-        # `no_repair_needed.flag` is deliberately NOT listed. Adding it would only
-        # cover a tree holding the flag and NO decision record, where the audit
-        # has nothing to cross-check and exits 0 anyway — and it would cost
-        # something real: `test_matrix_d2_falsifiable` proves each blocking
-        # clause can FAIL by materialising every `condition_files_exist` path
-        # as a substanceless file, so listing the flag hands the audit a
-        # flag-certified no-repair run and the clause stops being reddenable at
-        # all. Listing only the record keeps the clause falsifiable and loses
-        # no reachable state.
-        - program_exit_zero:
-            command: "postroute_timing_repair_audit . --json reports/phase2/gates/postroute_timing_repair_audit.json"
-            condition_files_exist:
-              - "phase3/stage3/postroute_timing_repair/repair_log.json"
-              - "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json"
-            absent_condition_reason: >-
-              Step 32's required_outputs is the single any-of pattern
-              `repair_log.json OR no_repair_needed.flag`, so a repair that ran and
-              wrote no log leaves NEITHER and the step resolves MISSING,
-              loudly. The condition's false branch therefore coincides with an
-              honestly declared no-repair run, not with a silent loss of a repair
-              that happened.
-    blocks_on: [23, 24, 25, 26, 27, 29, 30, 31]
-
-  - id: 33
-    name: "Power analysis (pre/post-layout)"
-    stage: stage4
-    # THE POWER AXIS HAD A COMPARISON AND NO EDGE.
-    # `power_total_vs_budget_check` (below) computes the verdict and, until this
-    # declaration, handed it to nobody: 19 closed_loop edges existed in this
-    # flow and FOUR of them served timing (10->7, 20->19, 23->32, 32->32) while
-    # power had exactly ONE (24->15, IR drop) and area had NONE. Step 33
-    # measured total power and the number was recorded and then dropped.
-    #
-    # 17 is the fallback because PLACEMENT is the first lever that moves total
-    # power: switching power is dominated by the capacitance the placer decides,
-    # and 17 is a transitive blocks_on ancestor of 33, so the edge re-enters
-    # this step (`closed_loop_edge_check.CL-NOT-A-LOOP`).
-    #
-    # The trigger names the DECLARED budget and nothing else. When L19 declares
-    # no `power_budget_uw` the gate below REFUSES (rc 2, INCOMPLETE) and this
-    # edge is not taken — it is not taken on a derived ceiling either, because a
-    # threshold nobody declared is a ruler fitted to the answer
-    # (`matrix_mutation_ledger.ART-POWER-FIGURES-X1000`).
-    closed_loop:
-      fallback_to: 17
-      trigger: "power__total above the design's DECLARED budget (L19.power_budget_uw); re-place to cut switching capacitance"
-    required_inputs:
-      - from: 22
-        path: "phase3/stage3/extracted/parasitic.spef OR phase3/stage3/extracted/*.spef"
-    # power-analysis never shipped. ppa-measure does, and it is the reader
-    # of exactly this step's artefact: "Read PPA artefacts that the tools
-    # already wrote -- STA reports, power reports, area reports".
-    skills: [ppa-measure]
-    required_outputs:
-      - "reports/phase3/power.rpt"
-      - "reports/phase3/power.json"
-    gate:
-      # The audit trail goes to the gates/ directory, NOT to
-      # reports/phase3/power.json. That path is this step's declared
-      # required_output and holds the RUNNER's power summary
-      # ({tool: opensta, source, analysis_mode, verdict}); the checker writes a
-      # different schema ({program: eda_report_audit:power, passed, findings}),
-      # so pointing --json at it would overwrite the power data with the audit
-      # of that data. It never actually did, because power_report_check.py
-      # rebuilt its own argv and dropped every flag after the project dir — the
-      # declared --json was dead, and no audit trail was written anywhere. The
-      # wrapper now forwards its flags (same fix lvs_report_check got in #507),
-      # so this path had to become a real, separate one at the same time.
-      all_of:
-        - program_exit_zero: "power_report_check . --mode power --json reports/phase2/gates/power_report.json"
-        # THE FIGURES WERE NEVER COMPARED TO ANYTHING. The clause above proves
-        # the report came from a real power tool and carries leakage plus
-        # dynamic categories; it never reads the numbers.
-        # `matrix_mutation_ledger.ART-POWER-FIGURES-X1000` recorded a 1000x
-        # rewrite of all 12 non-zero figures staying green.
-        #
-        # This clause carries the comparison — total power against L19's
-        # `power_budget_uw`. MEASURED over the corpus: 0 of the 17 published
-        # runs carrying a power report declare that budget (3 of 195 L19 copies
-        # do, and that design has no power report), so on today's corpus this
-        # clause REFUSES: it prints `INCOMPLETE:` naming the budget it lacks
-        # and exits 0. That is the honest verdict and it is not a green — a
-        # budget is a REQUIREMENT that has to arrive in the design's own input
-        # documents, and deriving one from die area or supply voltage would be
-        # a threshold nobody declared. Corpus blast radius: 0 PASS->FAIL.
-        - program_exit_zero: "power_total_vs_budget_check . --json reports/phase2/gates/power_budget.json"
-        # ORPHANED, RE-HOMED (2026-08-25). Step 33 owns power, and UPF is the
-        # power-intent format, so this is the step that can hold a UPF file to
-        # its syntax. Its producer is step 7's `l21_to_upf_emit`, which writes
-        # `phase2/stage2/constraints/<top>.upf` and declares nothing
-        # unconditionally, so this consumer is scoped to the same population.
-        #
-        # THE CONDITION IS MEASURED, not decorative: run against a directory
-        # with no `.upf` the program returns rc 1, not a skip
-        # (`return 0 if result.passed else 1`, and `UPF_FILE_EXISTS` is the
-        # failing sub-check). Wired unconditionally it is a finding on every
-        # design with no power intent — forever, on the majority of them —
-        # which is the shape that trains a reader to stop reading advisories.
-        #
-        # `--json` IS LOAD-BEARING AND ITS PATH IS NOT ONE OF THIS STEP'S
-        # DECLARED OUTPUTS. The step declares `reports/phase3/power.rpt` and
-        # `reports/phase3/power.json`, and the second holds the RUNNER's power
-        # summary; a checker pointed at it would overwrite that summary with an
-        # audit of it, which is why every arm of this gate writes into
-        # `reports/phase2/gates/` instead — the same footing as the two
-        # blocking arms above. Without a sink the program prints its report and
-        # keeps no audit trail at all, so a gate arm that ran and a gate arm
-        # that did not are indistinguishable afterwards. The report is written
-        # on both branches (the write precedes the verdict), and nothing else
-        # in the flow reads it, so it stays evidence and adds no
-        # `required_outputs` row.
-        - advisory_program_exit_zero:
-            command: "upf_syntax_check . --json reports/phase2/gates/upf_syntax.json"
-            advisory_reason: "DEMOTED from optional_program_exit_zero in 0291e92f1 (2026-08-25): the optional slot REFUSES when its inputs are present, and an unmet condition there still denied the step its PASS tier (test_matrix_d8). Enforcement was traded for the tier, not for a reason about this gate."
-            condition_files_exist:
-              - "phase2/stage2/constraints/*.upf"
-            absent_condition_reason: >-
-              Scoped to a design that declares power intent. Step 7's UPF emit
-              SKIPs whenever L21 declares no power domains, so a design without
-              them carries no `.upf` and there is no power-intent file to hold
-              to its syntax — a state this program reports as a FAILING
-              `UPF_FILE_EXISTS` sub-check rather than as a skip. The condition
-              keeps the finding on the designs the question is about; on a
-              design that does carry power intent the clause cannot be
-              silenced, because the emit that writes the file is what turns it
-              on.
-    blocks_on: [23]
-
-  # ── Step 34: Metal Fill (ECO-aware density fill insertion) ───
-  # Industry standard (pre-GDS): Insert dummy metal fill to meet
-  # foundry density requirements. Without metal fill, CMP
-  # (Chemical-Mechanical Polishing) causes uneven planarization and
-  # the foundry rejects the tapeout.
-  # ECO-AWARE: when Step 18 inserted spare cells, the metal fill MUST
-  # use ECO-swappable (removable / non-merged) filler cells and MUST
-  # NOT overlap or delete the dont_touch-protected spare instances —
-  # otherwise a future metal-only ECO that re-wires a spare would
-  # collide with fixed fill. Fill is placed around the spare halos;
-  # spares stay reserved as the ECO budget through tapeout. After
-  # fill, spare_cell_preservation_check re-confirms every spare from
-  # phase3/stage3/pnr/spare_cells.json survives in filled.def / GDS
-  # with its keep attribute intact.
-  - id: 34
-    name: "Metal Fill (ECO-aware density fill insertion)"
-    stage: stage4
-    required_inputs:
-      - from: 21
-        path: "phase3/stage3/pnr/routed.def"
-      - from: 18
-        path: "phase3/stage3/pnr/spare_cells.json"
-    mcp_tools: [eda_pnr]
-    programs:
-      - metal_fill_density_check
-      # ECO-aware: re-confirm spares survive fill (no overlap / removal).
-      - spare_cell_preservation_check
-      # Per-layer DENSITY-TARGETED metal fill on the streamed GDS. The
-      # checks above only MEASURE density; OpenROAD filler_placement fills
-      # std-cell ROWS. Neither computes how much metal a sparse LAYER needs,
-      # so a die under the foundry CMP floor was flagged and left sparse.
-      # The emitter runs inside streamout (phase3_one_shot_runner.step_gds),
-      # before the density checks and sign-off DRC consume the GDS; the gate
-      # below only VERIFIES its report so an audit never mutates the layout.
-      - metal_fill_emit
-    required_outputs:
-      - "phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done"
-      # The density report is STEP 34's artefact — `_emit_metal_fill` writes
-      # reports/density.{rpt,json} on the same success path that produces
-      # filled.def, and returns False (writing neither) on every failure path.
-      # Two gates READ it — metal_fill_density_check here and erc_density_check
-      # at Step 31 — and until now NO step declared it, so a run that lost the
-      # density report would have both gates degrade silently instead of any
-      # step reporting MISSING. `report_path` routes the canonical name to
-      # reports/phase3/ while the runner writes reports/ root, and BOTH readers
-      # accept either location, so both are accepted here too.
-      - "reports/density.json OR reports/phase3/density.json"
-      - "reports/density.rpt OR reports/phase3/density.rpt"
-      # `reports/spare_preservation.json` IS NOT DECLARED HERE, and the attempt
-      # to declare it is what this note replaces. It was added on 2026-08-25
-      # because a newly-wired consumer at step 37.5ic began READING it and d7
-      # named the pair (`W2:produced_consumed_undeclared`). The declaration
-      # cannot stand: this step's only producer of that file is the
-      # `optional_program_exit_zero` clause below, which runs only when
-      # `phase3/stage3/pnr/spare_cells.json` is present, while
-      # `required_outputs` is UNCONDITIONAL — `flow_compliance_check` returns
-      # MISSING for a declared entry that is absent, on every project, with no
-      # escape. Declaring it asserts a production the same gate denies four
-      # lines down, and reds every spare-less design over an artefact nobody
-      # owes. Step 7's `.upf` note above refuses the identical shape.
-      #
-      # The consumer went with it rather than the declaration being kept: this
-      # step's own sign-off notes name "declare an undeclared artefact and
-      # relocate the red" as a shape to refuse, and that is exactly what the
-      # pair amounted to. See the step-37.5ic note for what is required before
-      # that consumer can be wired again.
-    gate:
-      all_of:
-        - files_exist: ["phase3/stage3/pnr/filled.def", "phase3/stage3/pnr/metal_fill.done"]
-          any_of: true
-        - program_exit_zero: "metal_fill_density_check . --json reports/phase2/gates/metal_fill_density.json"
-        # Spares must survive ECO-aware fill (fillers swappable, no
-        # overlap / removal of dont_touch spares). No-op when Step 18
-        # was skipped (no spare_cells.json).
-        - optional_program_exit_zero:
-            command: "spare_cell_preservation_check . --json reports/phase2/gates/spare_preservation_postfill.json"
-            condition_files_exist: ["phase3/stage3/pnr/spare_cells.json"]
-            absent_condition_reason: >-
-              Scoped to a design that inserted spares at step 18: with no
-              spare_cells.json there is no spare pool for ECO-aware fill to
-              preserve. A design that DID insert spares carries the manifest,
-              because step 18's gate hard-requires it through files_exist, so
-              this clause cannot be silenced on the runs it is about.
-        # Density-targeted fill VERDICT. `--verify-only` re-reports what the
-        # streamout emitter already wrote — it never re-runs the fill, so
-        # auditing a finished project cannot mutate its GDS. PARTIAL (a layer
-        # that never reached its target) FAILs with the achieved worst-window
-        # density disclosed; a missing report exits 2 with a NAMED disclosure
-        # (VACUOUS-PASS), never a silent "filled". Opt-in per PDK, same as the
-        # Step-26 geometry deck: no fill config, no claim.
-        - optional_program_exit_zero:
-            command: "metal_fill_emit . --verify-only --json reports/phase2/gates/cmp_fill_emit.json"
-            condition_files_exist: ["signoff/cmp_fill_targets.json", "input/pdk/bridge/cmp_fill_targets.json"]
-            absent_condition_reason: >-
-              Both triggers are PDK-PROVIDED fill-target decks -- opt-in
-              inputs, not results of this step: no fill config, no claim. A
-              filled design is still judged without them by the UNCONDITIONAL
-              metal_fill_density_check clause in this same gate. When the deck
-              IS present and the report is missing, this gate exits 2 with a
-              NAMED disclosure (VACUOUS-PASS), never a silent 'filled'.
-    blocks_on: [32]
-
-  # ── Step 35: DFM screen ──────────────────────────────────────────
-  # v2.3 — Design-for-Manufacturability, scoped HONESTLY for an
-  # open-source 130-180nm flow: the designer-side measurables run
-  # (per-layer CMP density window, redundant-via ratio counted from
-  # the routed DEF, litho/min-width margins cross-referenced to the
-  # Step-31 DRC deck); the foundry-side mask-synthesis items
-  # (OPC / RET / SRAF / PSM) are NAMED FOUNDRY_SIDE disclosure items —
-  # they appear at their correct flow position without pretending the
-  # designer executes them. At <=28nm they become designer-collaboration
-  # items (conditional note in the report).
-  - id: 35
-    name: "DFM screen (CMP density + redundant-via ratio + foundry-side OPC/RET disclosure)"
-    stage: stage4
-    required_inputs:
-      - from: 34
-        outputs: all
-    programs:
-      - dfm_screen_check
-    program_outputs:
-      - program: dfm_screen_check
-        path: "reports/phase3/dfm_screen.json"
-        verdict_field: verdict
-    required_outputs:
-      - "reports/phase3/dfm_screen.json"
-    gate:
-      all_of:
-        # The producer remains advisory; the content gate validates its
-        # emitted document's shape without promoting yield advice to FAIL.
-        # BLOCKING half: the screen must have produced its artefact. A step
-        # that never ran cannot be certified done.
-        - files_exist: ["reports/phase3/dfm_screen.json"]
-        - program_exit_zero: "flow_step_output_content_check . --mode dfm"
-        # dfm_screen_check is a producer/classifier with PASS,
-        # PASS_WITH_ADVISORIES and SKIP outputs but no refusal predicate.
-        # Issue #1980 keeps its structured output above and excludes it from
-        # the gate denominator. Presence remains the blocking predicate.
-    blocks_on: [34]
+    blocks_on: [23, 24, 25, 26, 27, 29, 30, 34, 37]
 
   - id: 36
     name: "Tapeout checklist (final sign-off confirmation)"
@@ -8106,7 +8476,7 @@ steps:
         # 34 fill/area — so the triple exists by the time it is judged. And it
         # is UNCONDITIONAL, so it stands on both the chip and the IP path,
         # unlike 37.5ic / 37.5ip / 38. A refusal lands BEFORE stream-out,
-        # because step 37 blocks_on 36: a false comparison never reaches a GDS.
+        # because step 36 remains a final checklist dependency of release.
         #
         # rc 2 SKIPS, AND THAT IS A DECISION, NOT AN OVERSIGHT.
         # `__check_program_exit_zero` reads rc 2 as VACUOUS_PASS, so a gate that
@@ -8169,397 +8539,6 @@ steps:
               glob, so a record that exists is always judged: there is no state
               in which a claim was filed and this clause did not look at it.
     blocks_on: [31, 32, 33, 34]
-
-  - id: 37
-    name: "GDSII output (only if Step 31 PV fully clean)"
-    stage: stage4
-    required_inputs:
-      - from: 34
-        path: "phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done"
-    mcp_tools: [eda_gds]
-    programs:
-      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
-      # This step's own gate clause below invokes the program with
-      # `--json <path>` and `<path>` is one of this step's `required_outputs`
-      # -- the flow already says in TWO places that the run writes that
-      # document. It did not say it in the third, `programs:`, which is the
-      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
-      # the AUDIT's evaluation of the gate wrote it, and the audit then
-      # correctly refused its own output:
-      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
-      #   no pre-audit producer supplied these paths; wire them into the
-      #   owning runner before claiming this step complete.
-      # Naming the producer here is that wiring: it makes the three
-      # declarations agree, and `flow_declared_producer_run` (invoked by the
-      # phase-3 runner, never by the auditor) then executes the clause when
-      # -- and only when -- the document is absent or the audit's own
-      # authorship note claims it. A document the run already produced is
-      # left byte-for-byte alone.
-      - stage3_compliance
-    required_outputs:
-      - "phase3/stage4/gds/*.gds"
-      # THE STREAM-OUT TRANSCRIPT, declared because it is CONSUMED. This step
-      # writes it ("the resolution prints are the only evidence of WHAT went
-      # into the sign-off GDS", at the write site), and step 37.3 reads it to
-      # recover the library set for a re-streamed fidelity reference. An
-      # artefact the flow produces and a gate consumes, declared by no step, is
-      # exactly W2 -- and the matrix named it on 37.3:
-      # "W2:produced_consumed_undeclared phase3/stage3/pnr/stream_out.log --
-      #  the step's own gate asserts this file exists; no step's
-      #  required_outputs names it". Undeclared meant nothing checked it existed,
-      # so its absence would have been invisible until a reader took the
-      # empty-branch.
-      #
-      # A GLOB, AND THE ENGINE IS THE REASON. `stream_out.log` is written by the
-      # KLAYOUT stream-out only; the Magic engine beside it writes
-      # `<top>.magic_stream_out.log` at its own site ("the KLayout engine beside
-      # this one already writes `stream_out.log` and states why", at that write).
-      # Declaring the KLayout name alone would demand of every Magic-streamed run
-      # a file its engine never writes -- a false demand, and the kind that gets
-      # answered by weakening the gate rather than by fixing anything. The glob is
-      # what the flow actually requires: SOME transcript of what went into the
-      # sign-off GDS, whichever tool streamed it.
-      - "phase3/stage3/pnr/*stream_out.log"
-      # THE ROUTE ATTESTATION, declared for the same reason and by the same rule.
-      # `step_pad_ring_final_evidence` writes it in this phase-3 pass and it is an
-      # attestation ABOUT THIS STEP'S OWN GDS -- the shipped path, its sha256, its
-      # byte count and the stream-out engine -- so it cannot exist before step 37
-      # and belongs to no earlier step. Step 37.3 reads it to learn WHICH GDS and
-      # WHICH routed DEF the run shipped, and refuses on a sha256 mismatch; that
-      # is what makes the fidelity comparison about the artefact the run attested
-      # rather than whatever file happens to be on disk. W2 named it on 37.3:
-      # "produced by the flow and read by a gate, but no step's required_outputs
-      # names it".
-      - "reports/phase3/pad_ring_route_evidence.json"
-      - "reports/phase3/gates/stage3_compliance.json"
-    gate:
-      all_of:
-        # ── ON-PASS REVIEW of stage3 ─────────────────────────────────
-        # Declared on the stage (`stages[].on_pass_review`), DISPATCHED here:
-        # the step that already carries `stage3_compliance .`.
-        # `advisory_`, NOT `program_exit_zero`, and that is the whole point:
-        # the block declares `verdict: advisory` and the program declares
-        # `DECLARED_ENFORCEMENT = "advisory"`. The blocking slot would make a
-        # rejection stop the step -- turning "unverified" into "blocking",
-        # which #1253 refuses -- and would additionally read the program's
-        # rc=2 NOT CHECKED as VACUOUS_PASS. The advisory slot RUNS it and
-        # RECORDS the verdict without changing the step's tier.
-        # THE VERDICT SOURCE, PRODUCED HERE AND READ ON THE NEXT LINE.
-        # It used to be `--compliance reports/flow_compliance.json`, which
-        # ONLY the flow's `final_gate:` block declares -- and NOTHING
-        # EXECUTES `final_gate`. Both runners invoke this program without
-        # `--json` (design_one_shot_runner._build_final_audit_cmd,
-        # phase3_one_shot_runner), `--json` has no default, and even when a
-        # caller does pass it the report is written AFTER the step loop that
-        # hosts these clauses. MEASURED: the review returned rc=2 NOT CHECKED
-        # -- "[Errno 2] No such file or directory" -- on every real run, which
-        # is v1.13.42's outcome reached through a different door.
-        # A scoped pass run as the clause BEFORE the review is a verdict
-        # source with an executed producer AND a defined order: `_evaluate_gate`
-        # walks `all_of` in sequence, so the report exists when the next
-        # clause reads it.
-        # `stage3_compliance` was ALREADY in this `all_of`, last, with no `--json`.
-        # It is the same clause, moved to the front and asked to write what
-        # it measured. Nothing new runs.
-        - advisory_program_exit_zero:
-              command: "stage3_compliance . --json reports/phase3/gates/stage3_compliance.json"
-              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 1 on a real spm run (2026-08-31): it REFUSES TODAY on real input; the advisory slot is currently swallowing a live finding. Promote to blocking once this run is clean. It reported: STRUCTURAL MEASUREMENT: registered=null invoked=null no_verdict=null — the structural-RTL umbrella was NOT ASKED to run in this invocation, so this re"
-        - advisory_program_exit_zero:
-              command: "stage_on_pass_review . --stage stage3 --json reports/phase3/gates/stage3_on_pass_review.json --compliance reports/phase3/gates/stage3_compliance.json"
-              advisory_reason: "DEMOTED, not designed advisory: wired blocking until da6fcd7fe (2026-08-30), moved here in the change that made the declared command actually execute; that push used --no-verify because the full tier did not stamp. Restore blocking once the six on-pass stage commands run green. Re-pointed at the per-stage compliance report in v1.13.78; notch re-measured rc 2 on that invocation, unchanged in class."
-        - files_exist: ["phase3/stage4/gds/*.gds"]
-        # THE TRANSCRIPT, ASSERTED BY THE STEP THAT OWES IT. Declaring an artefact
-        # whose own gate never looks at it is an unchecked claim, and dimension 4
-        # says so by name: "1 of 4 declared required_outputs are named nowhere the
-        # gate can reach ... declared 'phase3/stage3/pnr/stream_out.log'". This is
-        # the clause that makes the claim checked, and the demand is real on its
-        # own terms -- the Magic write site records what a missing transcript cost:
-        # "a 106-byte GDS reached sign-off DRC, LVS and the hand-off pack with
-        # nothing at all to say why, while the three lines naming the cause
-        # (`Cell spm couldn't be read`) were discarded at the point of capture".
-        # ENGINE-NEUTRAL by the same glob the declaration uses, so no legitimate
-        # stream-out is reddened by it, and a cached-GDS run is satisfied by the
-        # transcript the session that streamed it left in the same tree.
-        - files_exist: ["phase3/stage3/pnr/*stream_out.log"]
-        - program_exit_zero: "gds_size_check --gds-file phase3/stage4/gds/*.gds --json reports/phase3/gds_size.json"
-        # Substance, not just size. gds_size_check compares against a
-        # flow-wide 100 KB constant and demotes a bad GDSII header to a
-        # WARNING, so 150 KB of os.urandom() behind a 4-byte HEADER, and a
-        # zero-padded library with no structures at all, both signed off
-        # `pass: true, errors: 0, warnings: 0`. This gate walks the whole
-        # record stream (HEADER..ENDLIB, no trailing padding) and requires
-        # layout elements >= the design's OWN placed-instance count read
-        # from phase3/stage3/pnr/routed.def — a derived floor, never a
-        # per-design constant. Hard FAIL; VACUOUS_PASS before stream-out.
-        - program_exit_zero: "gds_substance_check . --json reports/phase3/gds_substance.json"
-        # vibe-ic#613 — substance is not nameability. A structurally valid,
-        # substance-carrying sign-off GDS whose TOP CELL has no text labels
-        # cannot be pin-matched by any top-level LVS: extraction emits
-        # `.subckt <top>` with no ports at all, so every schematic port
-        # resolves to an anonymous node and the comparison fails regardless of
-        # whether the layout is correct. Measured on a real run: DEF `PINS 20 ;`
-        # against 0 labels in the streamed top cell.
-        # PER-STRUCTURE and BY NAME: a chip GDS carries the std cells' own pin
-        # texts (sha256: 2,314 library labels), so a library-wide count is
-        # non-zero for a top cell with none, and a count alone cannot say WHICH
-        # port is unnamed. Pairs the DEF to the GDS by the DEF's own
-        # `DESIGN <name> ;` — sha256's pnr dir holds DEFs for two designs.
-        # VACUOUS_PASS (rc 2) when no DEF describes the layout; blocks only on a
-        # PLACED port with no label. Flips 0 of the 4 real sign-off GDS here.
-        - program_exit_zero: "gds_port_label_check . --json reports/phase3/gds_port_labels.json"
-        # ORPHANED, RE-HOMED (2026-08-25). Step 37 is where a design publishes
-        # its numbers, so it is the step that can ask whether every figure in
-        # the final report is backed by an artefact on disk rather than typed
-        # in. Conditioned on the report existing: a project that has not written
-        # one has no claim to check, which is a different statement from "its
-        # claims are backed".
-        - advisory_program_exit_zero:
-              command: "reported_figure_artifact_backing_check . --report FINAL_REPORT.md"
-              advisory_reason: "DEMOTED from optional_program_exit_zero in 0291e92f1 (2026-08-25): the optional slot REFUSES when its inputs are present, and an unmet condition there still denied the step its PASS tier (test_matrix_d8). Enforcement was traded for the tier, not for a reason about this gate."
-        # Provenance required: GDS must be produced by a real streamer
-        # (KLayout def2gds, Magic gds write, etc.). This closes the
-        # "rename old .def to .gds" loophole.
-        #
-        # It did not. `--require-entries 1` is the COARSE mode: it counts
-        # exit-0 entries anywhere in provenance.jsonl with NO output-path and
-        # NO tool filtering, so it passes on any run that logged a single
-        # yosys/openroad/sta/netgen invocation — the GDS itself is never
-        # looked at. Of the six provenance gates in this flow, this was the
-        # ONLY coarse one; lines 701/1302/1330/1611/1612 all use the strict
-        # `--output ... --tool ...` form. Measured on the real
-        # spm x ihp-sg13g2 run: coarse -> `44 / 1 exit-0 entries OK`, rc=0;
-        # strict -> rc=1, `hash mismatch: log=sha256:a5f4537a59e...
-        # disk=sha256:b8cb431c24d...` — the shipped GDS post-dates the only
-        # log entry that claims to describe it.
-        #
-        # `--output=`/`--tool=` (the `=` form) is deliberate: an argument
-        # starting with `-` is NOT touched by flow_compliance_check's
-        # `_expand_globs`, so the pattern reaches provenance_check intact and
-        # is expanded by ITS glob branch, which FAILs "no file on disk matches
-        # pattern" when nothing matches and checks EVERY match when several
-        # do. The space-separated form would be pre-expanded with nullglob
-        # semantics: zero matches drops the argument entirely and argparse
-        # then exits 2, which this runner reads as VACUOUS_PASS.
-        - program_exit_zero: "provenance_check . --output=phase3/stage4/gds/*.gds --tool=klayout,magic,openroad --require-measured"
-        # TWO ORPHANED FINAL-STAGE GATES, RE-HOMED (2026-08-25). Step 37 is
-        # where a design claims it is done, which is the only place these two
-        # questions can be asked: does the stage evidence actually exist, and
-        # does every gate a FINAL_REPORT calls PASS have an evidence file
-        # behind it.
-        #
-        # ADVISORY. `flow_stage_check` is RED on a real completed project —
-        # `stage_count 3, threshold 4, synth: False` — because that project has
-        # no synthesis evidence directory. A gate nothing ran could not say so.
-        # `gate_evidence_completeness_check` needs a FINAL_REPORT.md and says so
-        # rather than passing when there is none.
-        - advisory_program_exit_zero:
-              command: "flow_stage_check ."
-              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
-        - advisory_program_exit_zero:
-              command: "gate_evidence_completeness_check ."
-              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 1 on a real spm run (2026-08-31): it REFUSES TODAY on real input; the advisory slot is currently swallowing a live finding. Promote to blocking once this run is clean. It reported: FAIL: nothing to audit"
-        # ORPHANED, RE-HOMED. Step 37 is where the GDS is published, so it is
-        # where "which of these polygons came from someone else's IP" can be
-        # asked. `build-text` prints and writes nothing, so no required_outputs
-        # change. Measured: rc=2 with no `plugin_output/declaration.json` (a
-        # project reusing no catalogue IP — correctly vacuous), rc=0 on a
-        # complete blob, rc=3 when the blob carries a REFUSED line.
-        - advisory_program_exit_zero:
-              command: "gds_ip_attribution build-text ."
-              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
-        # THE STAGE-3 BOUNDARY, ASKED BY THE STEP ITS OWN DOCSTRING NAMES.
-        # `stage3_compliance` is the end-of-stage gate the README names for
-        # stage3, and it does not merely say "run me after stage 3" — it names
-        # its consumer: "GDS ... is in Stage 4 and is gated on Stage 3 being
-        # fully clean — do NOT produce GDS if this gate fails." This is the
-        # GDSII output step. No other step in this flow owns that sentence, and
-        # until now nothing invoked the wrapper at all, so the prohibition was
-        # published and never measured.
-        #
-        # ADVISORY. Step 37 already carries FOUR blocking clauses of its own on
-        # the artefact it produces (size, substance, port labels, provenance);
-        # the stage-3 verdict is a second opinion about upstream steps that
-        # each have their own gate, and re-blocking here would refuse this
-        # step's tier for a finding that already refused another step's. The
-        # wrapper also hardcodes `--strict`, a stricter reading than the run's
-        # own invocation may have chosen.
-        #
-        # NO RECURSION: `flow_compliance_check --stage 3` evaluates stage3
-        # steps only, and step 37 is stage4 — outside the filter, so this
-        # clause cannot re-enter itself. It would recurse without bound if
-        # wired onto any stage3 step, which is why it is not.
-    blocks_on: [34, 36]
-
-  # ── the sign-off SUMMARY, and why it is its own step ─────────────────
-  # MEASURED at v1.16.2: `phase3/final/metrics.json` had FIVE readers
-  # (tapeout_docs_gen, ic_release_docs_gen, _ic_release_artefacts,
-  # release_docs_check, and a comment in this file) and ZERO writers, and
-  # `phase3/final/` was not a directory `_path_layout` defined. Its 18 keys are
-  # OpenLane-2/LibreLane metric names; this flow drives OpenROAD, magic, netgen,
-  # KLayout and OpenSTA directly and never runs LibreLane's Classic flow, which
-  # is what would have written that file. So step 37.5ic could not produce ONE
-  # of its six document outputs for ANY design, and no completed route could
-  # change that: the missing artefact is not a layout, it is the summary of the
-  # checks run ON the layout.
-  #
-  # It is its OWN step and not a clause of 37.5ic because it runs on EVERY
-  # route: the IP arm's documents and the `_ic_release_artefacts` substance
-  # check read the same record, and a summary of a run belongs to the run, not
-  # to one of the two ways it can be delivered.
-  # R-0915-129 metric 2 — STREAM-OUT / FINISHING FIDELITY, measured.
-  #
-  # `design__xor_difference__count` was NOT_MEASURED for every design on this
-  # flow, and the ruling refused the structural excuse: KLayout in the pinned
-  # image has `xor`, so the flow CAN produce the number and calling it
-  # inapplicable would be laundering. What there was no producer for is the
-  # comparison itself -- the shipped GDS against the same routed database before
-  # finishing touched it, on the DESIGN layers, with the layers each finishing
-  # step DECLARES it added subtracted and disclosed separately.
-  #
-  # Its own step, before 37.4, because 37.4 READS this receipt: the aggregator's
-  # `--check` refuses a record that no longer states what the run's own reports
-  # state, so the XOR must have written its answer first.
-  #
-  # BLOCKING via program_exit_zero. A design-layer difference is rc=1, and a
-  # REFUSAL IS ALSO rc=1 -- not rc=2, which this flow maps onto VACUOUS_PASS, a
-  # non-FAIL tier. An earlier draft of this step exited 2 on a refusal and the
-  # matrix's dimension 2 caught it in the words of its own question: "step 37.3
-  # gate CANNOT FAIL on anything a project DID". An unrun XOR is not a zero, so
-  # the refusal blocks; the receipt's `verdict` field keeps NOT_DETERMINED
-  # distinguishable from a measured FAIL for the readers that need the
-  # difference. Only a measured 0 on every design layer is rc=0.
-  - id: "37.3"
-    name: "GDS stream-out / finishing fidelity — the shipped GDS XOR'd against this run's own pre-finishing boundary"
-    stage: stage4
-    # ITS SUBJECT NEEDS TWO GDS FILES, NOT A CLEAN PV. Whether the shipped GDS
-    # differs from this run's own pre-finishing boundary on the design layers is
-    # answerable from those two artefacts alone; step 37's PV-clean condition is
-    # not an input to it. MEASURED on the S arm (spm end-to-end, 0.3.67, the
-    # rollback path): step 37 FAILed on DRC and this step was cascaded away --
-    # while BOTH inputs sat on disk, `chip_top.prefinish.gds` at 73,850,000 B (the
-    # retained boundary fired) and the shipped GDS at 102,921,972 B. The one run
-    # where the answer matters MOST produced no receipt.
-    #
-    # And it matters most there for a reason that is not bookkeeping: a fidelity
-    # defect -- finishing corrupting design geometry -- is a candidate CAUSE of
-    # the DRC violations that failed PV. Gating this check on PV being clean means
-    # it can never help diagnose the failure it might explain. R-0915-129's own
-    # words: "a metric with no producer, not a metric that cannot be produced".
-    #
-    # So the step is CONDITIONAL on its subject existing rather than DEPENDENT on
-    # a verdict: with a shipped GDS on disk there is something to audit and the
-    # step runs, PV clean or not; with none there is no subject and the step is
-    # NOT_APPLICABLE -- never FAIL/missing_artefact, which is what a cascaded-away
-    # step with a declared output produced here.
-    #
-    # THE TRIGGER IS THE ROUTED DATABASE, and getting here took two refusals from
-    # the matrix, both of them right.
-    #
-    # (1) NOT the route attestation. Conditioning on
-    # `reports/phase3/pad_ring_route_evidence.json` is a SELF-DISABLING CONDITION:
-    # `flow_condition_reachability_check` classifies a trigger the flow itself
-    # produces whose absence is loud NOWHERE (measured T7=None, T3=None, T5=None)
-    # as exactly the shape where "the artefact is missing" and "the check was never
-    # made" are indistinguishable to every reader downstream -- and the runner
-    # writes that attestation ONLY under `_chip_path_requests_pad_ring`, so every
-    # design off the chip pad-ring path silently had no fidelity check at all.
-    #
-    # (2) NOT the shipped GDS either, which was the obvious second answer and is
-    # the one dimension 5 refused: `phase3/stage4/gds/*.gds` is step 37's declared
-    # required_output, so naming it in this step's condition IS a data dependency
-    # on 37 -- "D5-MISSING-EDGE: step 37.3 reads 'phase3/stage4/gds/*.gds',
-    # declared as a required_output of step 37, but 37 is not in 37.3's blocks_on
-    # closure". The only thing that satisfies that clause is putting 37 in the
-    # closure, and that is the VERDICT dependency R-0915-129b removed: it is what
-    # cascaded this step away on the one run where the answer mattered most.
-    #
-    # `phase3/stage3/pnr/routed.def` is the honest precondition and it closes both.
-    # It is the ROUTED DATABASE the comparison's REFERENCE is streamed from -- with
-    # no route there is no reference and no comparison exists to make -- it is
-    # step 21's declared required_output AND a hard `files_exist` in step 21's own
-    # gate (T7, step 21), so its absence FAILs there, and 21 is upstream of
-    # stream-out, so `blocks_on: [21]` orders this step without making it wait on
-    # step 37's VERDICT. A DRC-failed 37 no longer takes the fidelity receipt with
-    # it.
-    #
-    # The shipped GDS is still the SUBJECT -- the checker resolves it from the
-    # attestation when the run wrote one and from the flow's own
-    # `phase3/stage4/gds/*.gds` declaration when it did not -- and its absence is a
-    # NAMED REFUSAL in the receipt (`verdict: NOT_DETERMINED`, rc=1, citing both
-    # places it looked), never a silent skip and never a missing_artefact.
-    condition:
-      files_exist:
-        - "phase3/stage3/pnr/routed.def"
-    # DECLARED, because the consumer branches on it and the default is the benign
-    # answer. `flow_gate_grid` named the omission: "1 step(s) declare a
-    # `condition` and no `condition_kind` ... every conditional skip falls to the
-    # benign default and 'this design legitimately has none' cannot be told from
-    # 'someone forgot to author the trigger'".
-    #
-    # `dependency_required`, NOT `design_dependent`, and the trigger decides which:
-    # `routed.def` is not a property of the design, it is an artefact step 21
-    # PRODUCES. So when it is absent the honest statement is not "this design has
-    # no such thing" -- it is that the producer did not deliver, and
-    # `_resolve_dependency_condition_results` says exactly that: MISSING plus
-    # `blocked-by-upstream(21)`, naming the producer and the absent artefact. A
-    # silent design-dependent skip would have made a failed route and a design
-    # with nothing to compare read identically.
-    condition_kind: dependency_required
-    required_outputs:
-      - "reports/phase3/gds_xor.json"
-    programs:
-      - gds_xor_check
-    gate:
-      all_of:
-        # `--check`, NOT `--json`, AND THE DIFFERENCE IS A PUBLISHED FAIL.
-        #
-        # `--json <path>` made the completion audit RE-RUN the comparison. MEASURED
-        # on the SLT53D S arm, all five subjects: the producer's receipt
-        # reports/phase3/gds_xor.json recorded verdict PASS, rc 0, 0 design-layer
-        # differences across 46 layers, runner {"kind":"container","detail":
-        # "real-ic-arm-eda:klayout"} -- and the audit's own invocation of the same
-        # program, seconds later on the same host, could not reach KLayout and
-        # exited NOT_DETERMINED. The row read FAIL. One instrument, two
-        # invocations, two answers, and the audit published the one that did not
-        # measure.
-        #
-        # R-0915-126 already names the rule: PRODUCER WRITES, GATE READS. The
-        # receipt redirect protects the producer's BYTES and says nothing about
-        # which answer gets published, so a clause that re-measures is exactly the
-        # trap the redirect was built for. `--check` READS the receipt at its
-        # canonical path and judges it -- 0 differences -> rc 0, a measured
-        # difference -> rc 1, NOT_DETERMINED or absent -> rc 2 carrying the
-        # receipt's own reason -- and opens no layout, launches no tool and writes
-        # no byte.
-        #
-        # THE BLOCKING QUESTION STILL HAS A YES. Dimension 2 asks whether this
-        # gate can FAIL on anything a project DID: hand `--check` a receipt with
-        # one design-layer difference and it exits 1.
-        - program_exit_zero: "gds_xor_check . --check reports/phase3/gds_xor.json"
-    # [21], NOT [37], AND NOT EMPTY -- the three spellings this key has had, and
-    # each was corrected by a measurement rather than by an opinion.
-    #
-    # `[37]` was the original defect: `blocks_on` declares a VERDICT dependency, so
-    # a DRC-failed 37 cascaded this step away while BOTH of its inputs sat on disk
-    # (MEASURED on the S arm: `chip_top.prefinish.gds` at 73,850,000 B beside a
-    # shipped GDS at 102,921,972 B, and no receipt).
-    #
-    # `[]` was the second draft and it was declared, not omitted, because the flow
-    # contract requires every step to carry the key ("even as an empty list", which
-    # the ledger enforces and which omitting made red on ['37.3']). But an empty
-    # list here was ALSO wrong, for a reason dimension 5 stated: this step reads an
-    # artefact another step produces, and a read with no edge is D5-MISSING-EDGE
-    # whichever artefact it is.
-    #
-    # `[21]` satisfies both. Step 21 produces `phase3/stage3/pnr/routed.def`, the
-    # condition above names it, so the edge this step actually has is the edge it
-    # declares -- and 21 is not step 37, so no verdict of the sign-off stream-out
-    # can silence the fidelity question about its own output. It also anchors the
-    # step to the flow's declared roots through 21's own ancestry, which `[]` did
-    # only by being listed as a root in `flow_dependency_graph_check`; that entry
-    # comes back out in the same change, because a step with a real predecessor is
-    # not a root.
-    blocks_on: [21]
 
   - id: "37.4"
     name: "Sign-off metrics aggregation — the run's own checker verdicts, under the names the release documents read"

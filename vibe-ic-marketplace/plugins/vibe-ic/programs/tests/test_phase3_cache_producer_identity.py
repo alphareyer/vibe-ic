@@ -527,6 +527,12 @@ def _drive(monkeypatch, project: Path) -> list:
     monkeypatch.setattr(R, "step_signoff_spef_repair", lambda *a, **k: None)
     monkeypatch.setattr(R, "step_signoff_drv_wire_length_repair",
                         lambda *a, **k: None)
+    # This fixture tests cache identity with synthetic route and timing data.
+    # Its independent pre-stream admission is supplied as a measured premise;
+    # the cache and GDS dispatch assertions below remain unchanged.
+    monkeypatch.setattr(R, "step_prestream_gate", lambda *a, **k:
+                        R.StepResult("prestream_gate", "PASS", 0.0,
+                                     "fixture routed basis admitted"))
     monkeypatch.setattr(R, "_detect_pdk",
                         lambda *a, **k: _pdk(project))
     # R-0924-3: an image nobody can name is not a proven image, so the

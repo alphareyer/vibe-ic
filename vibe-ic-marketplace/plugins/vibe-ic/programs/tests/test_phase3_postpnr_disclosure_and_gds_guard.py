@@ -309,6 +309,13 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
     monkeypatch.setattr(R, "step_signoff_spef_repair", lambda *a, **k: None)
     monkeypatch.setattr(R, "step_signoff_drv_wire_length_repair",
                         lambda *a, **k: None)
+    # This suite owns the geometry-cache decision. Its synthetic DEF has no
+    # extracted STA, IR/EM or antenna evidence, so the independent pre-stream
+    # admission is supplied as an already-measured PASS for this fixture.
+    # T47's runner tests exercise that gate's blocking/diagnostic branches.
+    monkeypatch.setattr(R, "step_prestream_gate", lambda *a, **k:
+                        R.StepResult("prestream_gate", "PASS", 0.0,
+                                     "fixture's routed basis admitted"))
 
     monkeypatch.setattr(R, "_detect_pdk",
                         lambda *a, **k: _pdk(project))
