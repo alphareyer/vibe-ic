@@ -435,7 +435,8 @@ def test_every_on_disk_sample_exists():
                    "magic_overlap_negative.feedback",
                    "route_completed_positive.log", "route_aborted_negative.log",
                    "route_verified_negative.log",
-                   "mpw_violating_positive.rpt", "mpw_clean_negative.rpt")]
+                   "mpw_violating_positive.rpt", "mpw_clean_negative.rpt",
+                   "gpl_sparse_diverged_positive.log")]
                if not p.is_file()]
     assert missing == [], missing
 
@@ -449,6 +450,15 @@ def test_the_route_logs_are_the_tools_own_words():
     assert "DRT-0702" not in bad, (
         "the aborted fixture now carries a verification line — it is no longer "
         "the other half of this pair")
+
+
+def test_the_sparse_gpl_sample_carries_measured_area_and_divergence():
+    log = (C.FIXTURES / "gpl_sparse_diverged_positive.log").read_text()
+    assert "[INFO GPL-0015] Region area:" in log
+    assert "[INFO GPL-0018] Movable instances area:" in log
+    assert "[ERROR GPL-0305]" in log
+    assert C.check("phase3_one_shot_runner::_sparse_gpl_retry_deck").state \
+        == C.CALIBRATED
 
 
 def test_the_sdf_pair_differs_only_in_the_include_typ_flag():
