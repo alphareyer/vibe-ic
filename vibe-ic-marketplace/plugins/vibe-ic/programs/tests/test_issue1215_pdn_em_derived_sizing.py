@@ -133,6 +133,17 @@ def _mk_measured_project(i_total_a: float) -> Path:
     (rpt3 / "em_current_authority.json").write_text(json.dumps({
         "supply_authority": [{"net": "VDD",
                               "supply_current_A": i_total_a}]}))
+    # A current only sizes the layout it was measured on, so the fixture needs
+    # a layout and an em.json naming it as the subject -- what the EM emitter
+    # now writes. Without it this models a measurement of some OTHER layout,
+    # which is precisely the stale basis the sizing must refuse.
+    pnr = R._pl.pnr_dir(proj)
+    pnr.mkdir(parents=True, exist_ok=True)
+    (pnr / R._ppa_power._PDN_EM_SUBJECT_DEF).write_text(
+        "DESIGN chip_top ;\nEND DESIGN\n")
+    (rpt3 / "em.json").write_text(json.dumps({
+        "max_segment_current_A": None,
+        "subject_def_sha256": R._ppa_power._pdn_em_subject_digest(proj)}))
     return proj
 
 
