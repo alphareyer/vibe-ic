@@ -15,8 +15,9 @@ session restored from the candidate database -- writes routed.def, <top>.def and
 <top>_pnr.v. It declared no outputs, so no openroad record carried those bytes.
 
 The tail now declares the shipped products it writes (read off its own Tcl),
-after removing any copy an earlier session left there -- the shape #2569 gave
-the sign-off repair sessions. Driven through the REAL `_pnr_adopt_sdr_candidates`
+with any earlier copy set aside for the session and put back if it was not
+rewritten -- so only bytes the session wrote are attested, and the file on disk
+is what main would leave. The shape #2569 gave the sign-off repair sessions. Driven through the REAL `_pnr_adopt_sdr_candidates`
 over the REAL PnR template; the container is faked only where openroad writes
 its files, and logs the invocation exactly as `_docker_exec` does. The verdict
 is the real `provenance_check`.
@@ -160,7 +161,9 @@ def test_a_tail_that_writes_nothing_is_not_credited_with_stale_bytes(
     """The earlier re-run's routed.def must not be hashed as the tail's work."""
     proj = _run23(tmp_path, monkeypatch)
     _adopt(proj, monkeypatch, writes=False)
-    assert not (proj / ROUTED).exists()
+    # put back exactly as it was: the file on disk is what main would leave
+    assert (proj / ROUTED).read_bytes() == EARLIER
+    assert not list((proj / PNR).glob("*.pre_session"))
     assert not any(_sha(EARLIER) in (r.get("outputs") or {}).values()
                    and r.get("tool") == "openroad" for r in _rows(proj))
 
@@ -183,6 +186,89 @@ def test_run23s_ledger_as_it_stands_still_fails(tmp_path, monkeypatch):
 
 def test_the_product_list_is_read_off_the_real_template(tmp_path):
     out = tmp_path / "out"
-    names = [p.name for p in R._sdr_adopt_tail_products(
+    names = [p.name for p in R._pnr_tail_products(
         out, str(out), _full_pnr_tcl(tmp_path))]
     assert names == ["routed.def", f"{TOP}.def", f"{TOP}_pnr.v"], names
+
+
+# ── r2 (ruling): every route-producing path names its producer ─────────────
+
+def test_the_rollback_and_resume_tails_declare_their_products_too():
+    """The antenna rollback and the fatal-signal resume are PnR tails exactly
+    like the adopt tail: same product list, same set-aside, same outputs=."""
+    import inspect
+    for fn in (R._pnr_adopt_sdr_candidates,
+               R._pnr_rollback_refused_antenna_repair,
+               R._pnr_resume_after_fatal_signal):
+        src = inspect.getsource(fn)
+        assert "_pnr_tail_products(" in src, fn.__name__
+        assert "_set_aside_session_products(" in src, fn.__name__
+        assert "_restore_unwritten_products(" in src, fn.__name__
+        assert "outputs=[str(_p) for _p in _tail_products]" in src, fn.__name__
+
+
+def _si_mcf_promote(proj: Path, monkeypatch):
+    """The si_mcf child writes its candidate (declared), then the REAL
+    `_si_mcf_repair_promote` copies it over the shipped route."""
+    pnr = proj / PNR
+    txn = pnr / "si_mcf_txn"
+    txn.mkdir(parents=True)
+    products = {txn / R._SI_MCF_CANDIDATE_DEF: ADOPTED,
+                txn / f"{TOP}_pnr.v": b"module chip_top; endmodule\n",
+                txn / R._SI_MCF_CANDIDATE_SPEF: b"*SPEF\n",
+                txn / R._SI_MCF_CANDIDATE_ODB: b"ODB\n"}
+
+    def _child(container, cmd, **kw):
+        for path, data in products.items():
+            path.write_bytes(data)
+        R._log_invocation(cmd, 0, 1, marker=kw.get("marker"), container=None,
+                          outputs=kw.get("outputs"))
+        return 0, "", ""
+
+    monkeypatch.setattr(R, "_docker_exec", _child)
+    R._run_route_producer("c", str(txn / "si_mcf_repair_child.tcl"),
+                          list(products))
+    for name in ("step_gds", "step_drc", "step_lvs"):
+        monkeypatch.setattr(R, name, lambda *a, **k: R.StepResult(
+            "rederive", "PASS", 0.0, "stub"))
+    after = {"candidate_def": str(txn / R._SI_MCF_CANDIDATE_DEF),
+             "candidate_netlist": str(txn / f"{TOP}_pnr.v"),
+             "candidate_spef": str(txn / R._SI_MCF_CANDIDATE_SPEF),
+             "candidate_odb": str(txn / R._SI_MCF_CANDIDATE_ODB)}
+    R._si_mcf_repair_promote(proj, TOP, None, "c", after, [])
+
+
+def test_an_si_mcf_promotion_binds_routed_def_to_the_child_session(
+        tmp_path, monkeypatch):
+    proj = _run23(tmp_path, monkeypatch)
+    _si_mcf_promote(proj, monkeypatch)
+    assert (proj / ROUTED).read_bytes() == ADOPTED
+    rc, check = _step21(proj)
+    assert (rc, check["status"]) == (0, "PASS"), check
+
+
+def test_the_si_mcf_copy_is_a_promotion_naming_the_child(tmp_path,
+                                                         monkeypatch):
+    proj = _run23(tmp_path, monkeypatch)
+    _si_mcf_promote(proj, monkeypatch)
+    promos = [r for r in _rows(proj) if r.get("record") == "promotion"
+              and ROUTED in (r.get("outputs") or {})]
+    assert len(promos) == 1, _rows(proj)
+    src = promos[0]["promoted_from"]
+    assert src["sha256"] == _sha(ADOPTED)
+    assert src["entry"]["tool"] == "openroad"
+    assert "si_mcf_repair_child.tcl" in src["entry"]["command"]
+
+
+def test_the_si_mcf_child_session_declares_its_candidate():
+    """The binding tests above drive `_run_route_producer` directly; this pins
+    that the REAL seam runs its child through it, declaring all four products
+    the promotion copies."""
+    import inspect
+    src = inspect.getsource(R._si_mcf_repair_seam)
+    call = src.split("_run_route_producer(", 1)[1].split(")", 2)
+    body = ")".join(call[:2])
+    for name in ("_SI_MCF_CANDIDATE_DEF", '_pnr.v"', "_SI_MCF_CANDIDATE_SPEF",
+                 "_SI_MCF_CANDIDATE_ODB"):
+        assert name in body, (name, body)
+    assert 'f"openroad -no_init -exit {tcl_c}", marker=tcl_c)' not in src
