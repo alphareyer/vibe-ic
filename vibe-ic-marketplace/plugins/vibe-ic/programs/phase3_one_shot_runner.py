@@ -6761,7 +6761,8 @@ def _pdn_em_stripe_plan(*, i_seg_A: float, drawn_width_um: float,
                         min_pitch_um: float = 0.0,
                         max_width_um: Optional[float] = None,
                         concentration_k: Optional[float] = None,
-                        grid_um: float = 0.0
+                        grid_um: float = 0.0,
+                        i_total_A: Optional[float] = None
                         ) -> Dict[str, Any]:
     """R-0915-111 — the EM answer as STRIPE COUNT first, width second.
 
@@ -6789,6 +6790,12 @@ def _pdn_em_stripe_plan(*, i_seg_A: float, drawn_width_um: float,
     cells sit in a 2376um core. k is REPORTED beside the plan, never used to
     inflate a promise: a caller that needs certainty re-measures after the
     build, which is what the EM gate already does.
+
+    When the caller supplies this layout's measured I_total, use the
+    conservation bound instead.  Stripe multiplication is then never treated
+    as a guaranteed division of the worst current; the strap is wide enough
+    for all injected current on one segment, or the technology's MAXWIDTH
+    yields PDN_EM_INFEASIBLE.  The second DEF is still remeasured.
     """
     def _w_needed(i: float) -> float:
         return i * safety / (jmax_A_per_um * max(1e-12, (1.0 - margin)))
@@ -6819,6 +6826,42 @@ def _pdn_em_stripe_plan(*, i_seg_A: float, drawn_width_um: float,
         "max_width_um": max_width_um, "concentration_k": concentration_k,
         "w_needed_at_drawn_stripes_um": round(_w_needed(i_seg_A), 4),
     }
+    if i_total_A is not None and i_total_A > 0:
+        # A denser grid does not prove that the worst segment's current is
+        # divided by the new stripe count.  The injected current is an upper
+        # bound for ANY one passive-grid segment, independent of distribution.
+        drive = max(i_total_A, i_seg_A * safety)
+        bound = drive / (jmax_A_per_um * (1.0 - margin))
+        quantum = 2.0 * grid_um if grid_um > 0 else 0.001
+        width = math.ceil(bound / quantum - 1e-9) * quantum
+        if width <= bound + 1e-12:
+            width += quantum
+        width = round(width, 6)
+        out["conservation_current_A"] = drive
+        out["required_width_um"] = width
+        if max_width_um is not None and width > max_width_um + 1e-9:
+            out.update(verdict="INFEASIBLE", new_width_um=None,
+                       buildable_width_cap_um=max_width_um,
+                       reason=("PDN_EM_INFEASIBLE: conservation-bound width "
+                               f"{width}um exceeds tech LEF MAXWIDTH "
+                               f"{max_width_um}um"))
+            return out
+        # Power and ground occupy one pitch.  Expand pitch only when required;
+        # its quarter-offset must also fit the manufacturing grid.
+        pitch = max(pitch_um, min_pitch_um,
+                    2.0 * (width + min_spacing_um))
+        if grid_um > 0:
+            pitch_q = 4.0 * grid_um
+            pitch = math.ceil(pitch / pitch_q - 1e-9) * pitch_q
+        pitch = round(pitch, 6)
+        out.update(verdict="WIDER_STRAP" if width > drawn_width_um
+                   else "ALREADY_MET", stripe_multiplier=1,
+                   new_pitch_um=pitch,
+                   new_width_um=max(width, drawn_width_um),
+                   reason=("conservation-bound width carries the whole "
+                           "measured supply current on any one segment; "
+                           "pitch and offset satisfy spacing and grid"))
+        return out
     if _w_needed(i_seg_A) <= drawn_width_um:
         out.update(verdict="ALREADY_MET", stripe_multiplier=1,
                    new_pitch_um=pitch_um, new_width_um=drawn_width_um,
@@ -7381,6 +7424,41 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
 #: this process invocation binds immediately; an earlier run's spend binds
 #: only when its recorded floor is present in the current routed DEF.
 _PDN_EM_RESIZE_SENTINEL = _ppa_power._PDN_EM_RESIZE_SENTINEL
+
+
+def _pdn_em_post_resize_check(project: Path, top: str, pdk: "PdkConfig",
+                              container: str) -> Tuple[str, str]:
+    """Measure the second DEF before it can advance to GDS."""
+    rpt3 = _pl.reports_phase3_dir(project)
+    def_file = _pl.pnr_dir(project) / f"{top}.def"
+    if not def_file.is_file():
+        return "NOT_MEASURED", "PDN_EM_POSTCHECK_NO_DEF"
+    notes: List[str] = []
+    try:
+        rpt3.mkdir(parents=True, exist_ok=True)
+        em_rpt = rpt3 / "em.rpt"
+        _emit_ir_em_reports(project, top, pdk, container,
+                            rpt3 / "ir_drop.rpt", em_rpt, notes)
+        if not em_rpt.is_file() or em_rpt.stat().st_mtime < def_file.stat().st_mtime:
+            return "NOT_MEASURED", "PDN_EM_POSTCHECK_STALE_REPORT"
+        if not _emit_em_current_authority(project, pdk, container, notes):
+            return "NOT_MEASURED", "PDN_EM_POSTCHECK_AUTHORITY_MISSING: " + "; ".join(notes)
+        doc = json.loads((rpt3 / "em_current_authority.json").read_text())
+        verdict = doc.get("verdict")
+        if verdict == "PASS":
+            return "PASS", "PDN_EM_JMAX_CLOSED: final DEF segment screen PASS"
+        if verdict == "FAIL":
+            count = (doc.get("jmax_screen") or {}).get("offender_count")
+            return "FAIL", f"PDN_EM_JMAX_UNCLOSED: {count} final DEF segment(s) exceed Jmax"
+        return "NOT_MEASURED", f"PDN_EM_POSTCHECK_UNRESOLVED: {verdict}"
+    except Exception as exc:
+        return "NOT_MEASURED", f"PDN_EM_POSTCHECK_ERROR: {exc}"
+
+
+def _pdn_em_resize_chain_continues(pnr_row: Optional["StepResult"],
+                                   post_status: str) -> bool:
+    """A one-shot resize may proceed to GDS only after measured EM closure."""
+    return _pnr_chain_continues(pnr_row) and post_status == "PASS"
 _PDN_EM_RUN_ID = _ppa_power._PDN_EM_RUN_ID
 _PDN_EM_LAYOUT_IDENTITY = _ppa_power._PDN_EM_LAYOUT_IDENTITY
 _pdn_em_input_identity = _ppa_power._pdn_em_input_identity
@@ -8635,11 +8713,11 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
         # per-row rails with zero straps and zero vias, and said PDN_INSERTED.
         _auto_note = ""
         _no_strap_why = ""
+        _tlef_txt = _read_pdk_text(getattr(pdk, "tech_lef", None), container)
         if not straps.get("stripes"):
             # `_read_pdk_text` reads the host copy first, then the container,
             # so a PDK whose tech LEF exists only inside the EDA image still
             # resolves here.
-            _tlef_txt = _read_pdk_text(getattr(pdk, "tech_lef", None))
             _auto = _auto_pdn_straps_from_techlef(_tlef_txt or "", fpl)
             if _auto:
                 straps = _auto
@@ -8686,6 +8764,17 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                     _jm = _lay_em.get("jmax_A_per_um")
                     if _iseg and _jm and st.get("pitch"):
                         try:
+                            _layer_body = re.search(
+                                r"^\s*LAYER\s+" + re.escape(str(st["layer"]))
+                                + r"\s*$(.*?)^\s*END\s+"
+                                + re.escape(str(st["layer"])) + r"\s*$",
+                                _tlef_txt or "", re.M | re.S | re.I)
+                            _body = _layer_body.group(1) if _layer_body else ""
+                            _spaces = [float(x) for x in re.findall(
+                                r"\bSPACING\s+([0-9.]+)\b", _body, re.I)]
+                            _maxw = re.search(
+                                r"^\s*MAXWIDTH\s+([0-9.]+)\s*;",
+                                _body, re.M | re.I)
                             _plan_em = _pdn_em_stripe_plan(
                                 i_seg_A=float(_iseg),
                                 drawn_width_um=float(_sw0),
@@ -8694,15 +8783,16 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                                 margin=float((em_floor or {}).get("margin", 0.1)),
                                 safety=float((em_floor or {}).get(
                                     "safety_factor", _EM_MEASURED_SAFETY)),
-                                min_spacing_um=float(
-                                    (em_floor or {}).get("min_spacing_um", {})
-                                    .get(str(st["layer"]).lower(), 0.0)
-                                    if isinstance((em_floor or {}).get("min_spacing_um"), dict)
-                                    else 0.0),
+                                min_spacing_um=max(_spaces, default=0.0),
+                                max_width_um=(float(_maxw.group(1))
+                                              if _maxw else None),
                                 grid_um=float((em_floor or {}).get(
-                                    "manufacturing_grid_um", 0.0) or 0.0))
+                                    "manufacturing_grid_um", 0.0) or 0.0),
+                                i_total_A=(em_floor or {}).get("i_total_A"))
                         except Exception:
                             _plan_em = None
+                if _plan_em and _plan_em.get("verdict") == "INFEASIBLE":
+                    raise ValueError(_plan_em["reason"])
                 if isinstance(em_floor, dict) and _plan_em:
                     # R-0915-111 — WHAT WAS APPLIED, recorded where the step
                     # that reports the resize can read it. MEASURED on spm
@@ -8736,12 +8826,14 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                         f"{st['layer']} {_plan_em['stripe_multiplier']}x "
                         f"stripes (pitch {st['pitch']}um, width {_sw0} kept)")
                 elif _hit:
-                    st["width"] = round(_swf, 3)
+                    st["width"] = round(float(_plan_em["new_width_um"])
+                                        if _plan_em else _swf, 6)
                     _np = max(float(st.get("pitch") or 0.0),
-                              _PDN_STRAP_MIN_PITCH_X_WIDTH * _swf)
+                              float(_plan_em["new_pitch_um"])
+                              if _plan_em else _PDN_STRAP_MIN_PITCH_X_WIDTH * _swf)
                     if _np != float(st.get("pitch") or 0.0):
-                        st["pitch"] = round(_np, 3)
-                        st["offset"] = round(_np / _PDN_STRAP_OFFSET_DIV, 3)
+                        st["pitch"] = round(_np, 6)
+                        st["offset"] = round(_np / _PDN_STRAP_OFFSET_DIV, 6)
                     _em_widened.append(
                         f"{st['layer']} {_sw0}->{st['width']}")
         if _stripes:
@@ -68873,6 +68965,8 @@ def main() -> int:
         # gate's verdict — so this is derivation, not fitting.
         # Placed BEFORE the `_pnr_row` snapshot below on purpose: that lookup
         # is by NAME over `reversed(plan)`, so it picks up the re-run's row.
+        _rz_post_status = "PASS"
+        _rz_post_detail = ""
         _pnr_pre = next((s for s in reversed(plan) if s.name == "pnr"), None)
         if _pnr_pre is not None and _pnr_pre.status == "PASS":
             _rz_decline_reason: List[str] = []
@@ -68921,6 +69015,8 @@ def main() -> int:
                         _pl.pnr_dir(project), "pnr", project=project,
                         pdk=pdk, container=args.container, top=effective_top,
                         args=args)
+                    _rz_post_status, _rz_post_detail = _pdn_em_post_resize_check(
+                        project, effective_top, pdk, args.container)
                 # Publish the COST beside the arithmetic, measured not
                 # estimated: the second PnR's wall-clock is the price of this
                 # fix and belongs in the artefact a reviewer reads.
@@ -68967,13 +69063,18 @@ def main() -> int:
                     f" PnR re-run once "
                     f"({_rz_secs:.0f}s). Bound: one extra pass, sentinel-"
                     f"enforced. Arithmetic in reports/phase3/pdn_em_sizing.json"))
+                if _pnr_redispatched.status == "PASS":
+                    plan.append(StepResult(
+                        "pdn_em_postcheck", _rz_post_status, 0.0,
+                        _rz_post_detail))
             else:
                 if _rz_spend_failed:
                     print("[pnr] PDN_EM_RESIZE_NOT_DISPATCHED: sentinel "
                           "write failed; no safe one-pass bound", file=sys.stderr)
 
         _pnr_row = next((s for s in reversed(plan) if s.name == "pnr"), None)
-        _pnr_step_passed = _pnr_chain_continues(_pnr_row)
+        _pnr_step_passed = _pdn_em_resize_chain_continues(
+            _pnr_row, _rz_post_status)
         _pnr_reran = (_pnr_row is not None
                       and "skipped" not in _pnr_row.detail)
         _chain_ok = _pnr_step_passed
