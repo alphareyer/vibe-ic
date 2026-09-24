@@ -245,8 +245,9 @@ def test_name_set_size_tracks_failure_count(n):
 
 def _run_main(tmp_path, monkeypatch, records):
     proj = tmp_path / "proj"
-    (proj / "rtl").mkdir(parents=True)
-    (proj / "rtl" / "top.v").write_text(
+    rtl_dir = proj / "phase2/stage1/rtl"
+    rtl_dir.mkdir(parents=True)
+    (rtl_dir / "top.v").write_text(
         "module top(input a, output b); assign b = a; endmodule\n")
 
     def _stub(_project, **kw):
