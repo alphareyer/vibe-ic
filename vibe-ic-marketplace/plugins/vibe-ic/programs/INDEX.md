@@ -706,6 +706,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `latency_conformance_check` | any | — | v1.0 plugin gate (ORGANIC #705). |
 | `layer_extension_presence_check` | any | v0.50 | v0.50 plugin gate |
 | `layer_membership_is_declared_not_inferred_from_a_filename_prefix` | any | — | A layer population selected by a filename prefix instead of by the relation. |
+| `layout_receipt_identity_check` | any | — | Refuse release credit for diagnostic or stale Phase-3 layout receipts. |
 | `leaf_typo_alias_emit` | any | v0.3.18 | v0.3.18 (ORGANIC #517). |
 | `lec_equivalence_check` | any | — | Step 13 deterministic LEC substance gate. |
 | `lec_gate_netlist_select` | any | — | Truthful diagnosis of a structural LEC abort. |
@@ -2090,6 +2091,7 @@ _(no programs in this group)_
 - `latency_conformance_check` — v1.0 plugin gate (ORGANIC #705).
 - `layer_extension_presence_check` — v0.50 plugin gate  _[v0.50]_
 - `layer_membership_is_declared_not_inferred_from_a_filename_prefix` — A layer population selected by a filename prefix instead of by the relation.
+- `layout_receipt_identity_check` — Refuse release credit for diagnostic or stale Phase-3 layout receipts.
 - `leaf_typo_alias_emit` — v0.3.18 (ORGANIC #517).  _[v0.3.18]_
 - `lec_equivalence_check` — Step 13 deterministic LEC substance gate.
 - `lec_gate_netlist_select` — Truthful diagnosis of a structural LEC abort.
