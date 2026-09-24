@@ -231,7 +231,7 @@ proc ::NET_nB {method args} {
 """
 
 
-def _drive(seq, wired, inserts):
+def _drive(seq, wired, inserts, native_error="DRT-0206 checkConnectivity"):
     """Run the emitted block under tclsh against the emulated ODB."""
     import shutil
     import subprocess
@@ -240,8 +240,10 @@ def _drive(seq, wired, inserts):
     if tclsh is None:                                   # pragma: no cover
         import pytest
         pytest.skip("tclsh not installed")
-    script = (_ODB_HARNESS % {"seq": seq, "wired": 1 if wired else 0,
-                              "inserts": " ".join(inserts)}
+    script = ((_ODB_HARNESS % {"seq": seq, "wired": 1 if wired else 0,
+                               "inserts": " ".join(inserts)})
+              .replace('error "DRT-0206 checkConnectivity"',
+                       f'error "{native_error}"')
               + _tcl()
               + '\nputs "DESTROYED={$::destroyed}"\n')
     with tempfile.TemporaryDirectory() as td:
@@ -272,6 +274,22 @@ def test_driven_a_raise_that_unwired_a_net_rolls_that_pass_back_and_stops():
     assert "nA" in r.stdout                            # the net is named
     assert "DESTROYED_ONE d1" in r.stdout              # the diode, by name
     assert "ANTENNA_LOOP_CONVERGED" not in r.stdout    # the violation stands
+    assert "ANTENNA_REPAIR_REFUSED_STOP" in r.stdout + r.stderr
+    # The parent persists this exact reason in antenna_repair_transaction.json.
+    # A damage count alone cannot distinguish a router DRC regression from a
+    # placement failure or a missing routing capability.
+    request = R.antenna_rollback_request(r.stdout)
+    assert request is not None
+    assert "native_error=DRT-0206" in request["reason"]
+
+
+def test_scoped_router_drc_delta_is_named_in_rollback_request():
+    """A DRC-worsening scoped reroute must leave a usable cause in the receipt."""
+    r = _drive("3 3 1", wired=False, inserts=["d1"], native_error="DRT-0712")
+    assert r.returncode != 0
+    request = R.antenna_rollback_request(r.stdout)
+    assert request is not None
+    assert "native_error=DRT-0712" in request["reason"]
     assert "ANTENNA_REPAIR_REFUSED_STOP" in r.stdout + r.stderr
 
 

@@ -27852,7 +27852,8 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "the whole design to hide it: a legible antenna FAIL at sign-off beats "
         "a run with no routed.def.\"\n"
         "      set _ant_refused \"ANTENNA_DIODE_ROLLED_BACK: $_ant_full "
-        "net(s) -- [join [lrange $_ant_broken 0 7] {, }]\"\n"
+        "net(s) -- [join [lrange $_ant_broken 0 7] {, }]; "
+        "native_error=$_ra_native\"\n"
         # ONLY MEASURED DAMAGE STOPS THE DECK. `_ant_refused` is also set by
         # ANTENNA_NATIVE_ERROR_UNJUDGED, and UNJUDGED means the census found
         # NO net that lost a wire and none that lost part of one -- only that
