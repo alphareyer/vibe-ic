@@ -233,7 +233,7 @@ def test_restamp_redeclares_what_its_caller_just_wrote(tmp_path):
         proj, TOP, f, writer=("canonicalize_artefacts", t))
     last = _rows(proj)[-1]
     assert last["outputs"] == {GDS_CANON: _sha(b"canonical, re-copied\n")}
-    assert last["producing_step"] == {GDS_CANON: "canonicalize_artefacts"}
+    assert last["producing_step"] == "canonicalize_artefacts"
 
 
 def test_a_writer_claim_older_than_the_file_is_not_evidence(tmp_path):

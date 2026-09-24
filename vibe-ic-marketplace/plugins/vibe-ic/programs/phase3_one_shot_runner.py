@@ -50230,7 +50230,8 @@ def _restamp_provenance_output(project: Path, rel: str, path: Path,
                 "note": "output re-emitted; the earlier record of "
                         "this path is superseded, not amended",
                 "outputs": {rel: _sha},
-                "producing_step": {rel: _step},
+                # one path per row, so the step is named directly
+                "producing_step": _step,
             }
             _rmeas.attach(project, _reemit)
             with prov_path.open("a") as _f:

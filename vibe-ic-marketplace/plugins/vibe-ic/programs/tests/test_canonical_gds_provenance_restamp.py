@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import time
 import sys
 from pathlib import Path
 
@@ -123,6 +124,9 @@ def _step37_fixed(project: Path, top: str) -> None:
     primary_gds = project / "phase3" / "stage3" / "pnr" / f"{top}.gds"
     canon_gds = project / "phase3" / "stage4" / "gds" / f"{top}.gds"
     if primary_gds.is_file() and not canon_gds.is_file():
+        # 2026-09-24 (lane ictier1, reemit r2): a back-fill re-declares changed bytes only with evidence this pass wrote them (`_redeclaration_evidence`). The fixture now supplies the evidence the production call site does; the assertions are unchanged.
+        # Production passes writer= from the copy just below.
+        _t_copy = time.time()
         with primary_gds.open("rb") as src, canon_gds.open("wb") as dst:
             while True:
                 chunk = src.read(1 << 20)
@@ -130,7 +134,8 @@ def _step37_fixed(project: Path, top: str) -> None:
                     break
                 dst.write(chunk)
         # call the REAL helper from phase3_one_shot_runner — mutations here kill
-        _restamp(project, top, canon_gds)
+        _restamp(project, top, canon_gds,
+                 writer=("canonicalize_artefacts", _t_copy))
 
 
 # ── (a) DEFECT DIRECTION ──────────────────────────────────────────────────────
@@ -427,8 +432,11 @@ def test_fixed_direction_rerun_stale_refresh_is_restamped(
     overwritten by it."""
     project, primary, canon = _rerun_project(tmp_path)
     before = (project / "provenance.jsonl").read_text().splitlines()
+    # 2026-09-24 (lane ictier1, reemit r2): a back-fill re-declares changed bytes only with evidence this pass wrote them (`_redeclaration_evidence`). The fixture now supplies the evidence the production call site does; the assertions are unchanged.
+    _t_copy = time.time()
     _real_step37_copy(primary, canon)
-    _restamp(project, "chip_top", canon)
+    _restamp(project, "chip_top", canon,
+             writer=("canonicalize_artefacts", _t_copy))
 
     prov_lines = [l for l in (project / "provenance.jsonl")
                   .read_text().splitlines() if l.strip()]

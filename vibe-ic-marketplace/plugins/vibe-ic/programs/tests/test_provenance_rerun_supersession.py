@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -261,9 +262,12 @@ def test_runner_reemit_appends_and_leaves_history_byte_intact(tmp_path):
     original_line = json.dumps(_record(rel, _sha(art)))
     (tmp_path / "provenance.jsonl").write_text(original_line + "\n")
 
+    # 2026-09-24 (lane ictier1, reemit r2): a back-fill re-declares changed bytes only with evidence this pass wrote them (`_redeclaration_evidence`). The fixture now supplies the evidence the production call site does; the assertions are unchanged.
+    _t = time.time()
     art.write_text("second pass\n")
     mod._restamp_provenance_output(
-        tmp_path, rel, art, "demotool", "demotool --out")
+        tmp_path, rel, art, "demotool", "demotool --out",
+        writer=("demotool", _t))
 
     lines = [l for l in (tmp_path / "provenance.jsonl")
              .read_text().splitlines() if l.strip()]
@@ -346,10 +350,15 @@ def _heterogeneous_ledger(project: Path) -> bytes:
 def _drive_reemit_twice(mod, project: Path, rel: str, art: Path):
     """Two re-emits of the same path, the second after the bytes change
     again — i.e. drive the runner twice."""
+    # 2026-09-24 (lane ictier1, reemit r2): a back-fill re-declares changed bytes only with evidence this pass wrote them (`_redeclaration_evidence`). The fixture now supplies the evidence the production call site does; the assertions are unchanged.
+    _t = time.time()
     art.write_text("second pass\n")
-    mod._restamp_provenance_output(project, rel, art, "demotool", "demotool -o")
+    mod._restamp_provenance_output(project, rel, art, "demotool", "demotool -o",
+                                   writer=("demotool", _t))
+    _t = time.time()
     art.write_text("third pass\n")
-    mod._restamp_provenance_output(project, rel, art, "demotool", "demotool -o")
+    mod._restamp_provenance_output(project, rel, art, "demotool", "demotool -o",
+                                   writer=("demotool", _t))
 
 
 def test_runner_reemit_twice_grows_the_ledger_and_never_rewrites_it(tmp_path):

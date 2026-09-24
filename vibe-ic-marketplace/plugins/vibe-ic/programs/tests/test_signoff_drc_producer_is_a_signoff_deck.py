@@ -26,6 +26,7 @@ import hashlib
 import importlib
 import io
 import json
+import time
 import contextlib
 
 import pytest
@@ -477,8 +478,15 @@ def test_attribution_is_corrected_in_place_when_the_artefact_changes(tmp_path):
     proj = project(tmp_path, signoff_alias("pnr/routed.drc.rpt", "openroad",
                                            router_projection(0)))
     assert runner._v1_6_620_append_pv_signoff_provenance(proj, "top")
+    # 2026-09-24 (lane ictier1, reemit r2): a back-fill re-declares changed bytes only with evidence this pass wrote them (`_redeclaration_evidence`). The fixture now supplies the evidence the production call site does; the assertions are unchanged.
+    # Production: the SVRF refresh is written by step_canonicalize_artefacts,
+    # which registers its writes before calling the back-fill.
+    _t = time.time()
     (proj / "reports" / "phase3" / "drc_signoff.rpt").write_text(
         signoff_alias("reports/drc_svrf.rpt", "svrfdrc", svrf_report(0, 40)))
+    runner._register_pass_outputs(
+        "canonicalize_artefacts", "PASS", 0.0,
+        [str(proj / "reports" / "phase3" / "drc_signoff.rpt")], since=_t)
     again = runner._v1_6_620_append_pv_signoff_provenance(proj, "top")
     assert again == ["reports/phase3/drc_signoff.rpt"], (
         "the ledger did not follow the artefact")
