@@ -4121,9 +4121,13 @@ def _check_antenna(project_dir: Path) -> AuditResult:
     # Same gap, same reason, same measurement: KLayout's antenna check writes
     # `antenna.klayout.lyrdb` beside its .json, and the .lyrdb is the one that
     # carries the per-rule item list.
-    files = _discover(project_dir, ["*antenna*.rpt", "*antenna*.json",
-                                     "*antenna*.lyrdb",
-                                     "*ANT*.rpt", "*ANT*.lyrdb"])
+    files = [p for p in _discover(project_dir, [
+        "*antenna*.rpt", "*antenna*.json", "*antenna*.lyrdb",
+        "*ANT*.rpt", "*ANT*.lyrdb"])
+        if p.name != "antenna_repair_transaction.json"]
+    # A rollback transaction is a runner decision, not an antenna-tool report.
+    # The measurement remains in the iteration reports and antenna.rpt; asking
+    # this metadata document for an OpenROAD signature invents a tool refusal.
     if not files:
         result.findings.append(Finding(
             rule="ANTENNA_REPORT_EXISTS", severity="ERROR",
