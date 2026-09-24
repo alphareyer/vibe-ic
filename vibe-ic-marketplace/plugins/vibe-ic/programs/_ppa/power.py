@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 
@@ -1629,36 +1630,20 @@ _PDN_EM_SUBJECT_DEF = "routed.def"
 
 
 def _pdn_em_spent_on(project: Path) -> Optional[str]:
-    """The layout a resize is spent ON — the DEF that was measured.
+    """Digest of the DEF measured before re-PnR, retained for provenance.
 
-    WHY NOT A DESIGN DIGEST, AND WHY NOT A GLOB. r2 keyed the sentinel on
-    `phase2/stage2/synth/*.v`. Two things were wrong with it: canonicalize ADDS
-    `netlist.v` to that directory after the sentinel is written, so the key
-    moved under the sentinel and it never bound again; and a design digest
-    cannot tell the pass-1 layout from the pass-2 layout, which is the thing
-    the bound is actually about.
-
-    The DEF the resize measured answers all four cases directly:
-
-        fresh run      pass 1 writes a NEW DEF -> the old sentinel names a
-                       different one -> does not bind -> corrector fires.
-        cache-hit      the DEF is unchanged; if it already meets the floor the
-                       resize returns None on the WIDTH comparison anyway, so
-                       the bound is not what stops it.
-        netlist change PnR re-runs, new DEF, new resize. Correct.
-        crash-resume   pass 2 never wrote its DEF, so the DEF on disk is still
-                       the one the sentinel names -> BINDS -> no third pass.
+    This digest alone cannot prove the resize took effect: a failed re-PnR may
+    leave that exact DEF on disk. Binding needs the recorded width floor too.
     """
     return _pdn_em_subject_digest(project)
 
-def _pdn_em_sentinel_binds(sentinel: Path,
-                           project: Path) -> Tuple[bool, str]:
-    """Is the one EM resize already spent FOR THIS DESIGN? (binds, why)
+def _pdn_em_sentinel_binds(sentinel: Path, project: Path,
+                           run_id: Optional[str] = None) -> Tuple[bool, str]:
+    """Bind a spent resize only if its floor reached this DEF, or this run spent it.
 
-    Binds only when the sentinel records the design state we are building now.
-    A sentinel from another design, or one written before this rule and so
-    naming no design, does not bind — that is what gives an existing tree its
-    corrector back.
+    The run id is the anti-loop bound while pass 2 is in flight or still narrow.
+    A prior run's sentinel is evidence of an effective resize only when every
+    recorded strap floor is present in the currently routed DEF.
     """
     if not sentinel.exists():
         return False, "no resize has been spent in this tree"
@@ -1667,6 +1652,10 @@ def _pdn_em_sentinel_binds(sentinel: Path,
     except (OSError, ValueError):
         return False, ("the sentinel could not be read, so it cannot be shown "
                        "to bound this design; the resize is not spent")
+    if (run_id and isinstance(doc, Mapping)
+            and doc.get("run_id") == run_id):
+        return True, ("this run already spent its one resize; a crashed or "
+                      "still-narrow second pass cannot buy a third")
     recorded = doc.get("spent_on_def") if isinstance(doc, Mapping) else None
     if not isinstance(recorded, str) or not recorded:
         return False, ("the sentinel names no layout (written before this "
@@ -1675,11 +1664,35 @@ def _pdn_em_sentinel_binds(sentinel: Path,
     if now is None:
         return False, ("the routed DEF could not be read, so the sentinel "
                        "cannot be matched to a layout")
-    if recorded == now:
-        return True, ("the resize for this layout is already spent (a resumed "
-                      "run cannot buy a second re-PnR)")
-    return False, (f"the sentinel was spent on another layout "
-                   f"({recorded[:12]}…, now {now[:12]}…)")
+    short = doc.get("short")
+    if not isinstance(short, list) or not short:
+        return False, "the sentinel records no strap-width floor to verify"
+    try:
+        import em_current_density_check as _emcd
+        drawn = _emcd._def_pg_widths_of(
+            _pl.pnr_dir(project) / _PDN_EM_SUBJECT_DEF)
+    except Exception:
+        drawn = {}
+    floors = {}
+    for row in short:
+        if not isinstance(row, Mapping) or not isinstance(row.get("layer"), str):
+            return False, "the sentinel has an invalid strap-width floor"
+        try:
+            width = float(row["w_em_um"])
+        except (KeyError, TypeError, ValueError):
+            return False, "the sentinel has an invalid strap-width floor"
+        if not math.isfinite(width) or width <= 0:
+            return False, "the sentinel has an invalid strap-width floor"
+        layer = row["layer"].lower()
+        floors[layer] = max(width, floors.get(layer, 0.0))
+    missing = [layer for layer, floor in floors.items()
+               if drawn.get(layer, 0.0) + 1e-9 < floor]
+    if missing:
+        return False, ("the previous resize did not take effect: the routed "
+                       "DEF is below its recorded floor on "
+                       + ", ".join(sorted(missing)))
+    return True, ("the previous resize took effect: every recorded strap "
+                  "floor is present in the routed DEF")
 
 
 def _pdn_em_subject_digest(project: Path) -> Optional[str]:

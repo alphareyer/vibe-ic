@@ -1,5 +1,5 @@
-"""The PDN's supply current must describe the layout being sized, and the one
-EM resize is bounded per DESIGN STATE — not per tree, and not per run.
+"""The PDN's supply current must describe the layout being sized, and a prior
+EM resize binds only when its recorded strap floor reached the drawn DEF.
 
 THE TWO DEFECTS THIS FILE DEFENDS AGAINST
 =========================================
@@ -17,15 +17,10 @@ later runs with no corrector, and the current the PDN was sized from drifted
 proves it is not the code: the SAME commit re-run on the drifted tree
 reproduced the drifted number.
 
-WHY THE KEY IS THE DESIGN STATE. Three candidate bounds, and only one holds
-both ends:
-  * per TREE (original)  — corrector retires for ever.               Defect.
-  * per RUN (first fix)  — a run that crashes after the second PnR and resumes
-                           in the same tree sees a foreign sentinel and can buy
-                           a THIRD PnR, breaking the stated contract.
-  * per DESIGN STATE     — the synthesis netlist is stable across the passes of
-                           one run (so a resume buys nothing) and changes when
-                           the design does (so the corrector is never retired).
+The sentinel records the DEF it measured and the floor it requested. A same-run
+token blocks a third PnR even while the second pass has not applied that floor.
+On a later run, the recorded DEF digest alone is insufficient: a failed second
+pass can leave the same narrow DEF on disk. The drawn strap widths decide.
 
 WHY NOT mtime, AND WHY NOT `measured_subject.def_sha256`. "Written during this
 run" is not identity: a same-build re-run that cache-hits the PnR DEF holds a
@@ -59,7 +54,11 @@ def _design(project: Path, body: bytes = b"module spm; endmodule\n") -> Path:
     return project
 
 
-def _layout(project: Path, body: bytes = b"DESIGN chip_top ;\n") -> str:
+def _layout(project: Path, body: bytes = (
+        b"VERSION 5.8 ;\nUNITS DISTANCE MICRONS 2000 ;\n"
+        b"SPECIALNETS 1 ;\n- supply + USE POWER\n"
+        b"+ ROUTED MetalA 3200 + SHAPE STRIPE ( 0 0 ) ( 1000 0 ) ;\n"
+        b"END SPECIALNETS\nEND DESIGN\n")) -> str:
     pnr = R._pl.pnr_dir(project)
     pnr.mkdir(parents=True, exist_ok=True)
     (pnr / PW._PDN_EM_SUBJECT_DEF).write_bytes(body)
@@ -89,13 +88,14 @@ def _sentinel(project: Path, payload) -> Path:
 
 
 def test_this_layouts_own_sentinel_binds(tmp_path):
-    """THE CONTRACT. One resize per design state — a resume in the same tree,
-    or any later pass over the same design, buys nothing."""
+    """A sentinel binds this run even before its floor reaches the DEF."""
     proj = tmp_path / "p"
     _layout(proj)
     s = _sentinel(proj, {"reason": "pdn_em_first_pass_resize",
-                         "spent_on_def": PW._pdn_em_spent_on(proj), "short": []})
-    binds, why = PW._pdn_em_sentinel_binds(s, proj)
+                         "spent_on_def": PW._pdn_em_spent_on(proj),
+                         "run_id": "same-run",
+                         "short": [{"layer": "MetalA", "w_em_um": 3.95}]})
+    binds, why = PW._pdn_em_sentinel_binds(s, proj, run_id="same-run")
     assert binds is True, why
 
 
@@ -105,10 +105,11 @@ def test_a_sentinel_spent_on_another_layout_does_not_bind(tmp_path):
     proj = tmp_path / "p"
     _layout(proj)
     s = _sentinel(proj, {"reason": "pdn_em_first_pass_resize",
-                         "spent_on_def": "0" * 64, "short": []})
+                         "spent_on_def": "0" * 64,
+                         "short": [{"layer": "MetalA", "w_em_um": 3.95}]})
     binds, why = PW._pdn_em_sentinel_binds(s, proj)
     assert binds is False
-    assert "another layout" in why
+    assert "did not take effect" in why
 
 
 def test_the_key_tracks_the_layout(tmp_path):
@@ -120,13 +121,14 @@ def test_the_key_tracks_the_layout(tmp_path):
 
 
 def test_a_crash_resume_cannot_buy_a_second_re_pnr(tmp_path):
-    """Pass 2 never wrote its DEF, so the layout on disk is still the one the
-    sentinel names — and the bound must hold."""
+    """Within this run, pass 2 did not write a DEF; the spend still binds."""
     proj = tmp_path / "p"
     _layout(proj, b"DESIGN chip_top ; # pass 1\n")
     s = _sentinel(proj, {"reason": "pdn_em_first_pass_resize",
-                         "spent_on_def": PW._pdn_em_spent_on(proj)})
-    binds, why = PW._pdn_em_sentinel_binds(s, proj)
+                         "spent_on_def": PW._pdn_em_spent_on(proj),
+                         "run_id": "same-run",
+                         "short": [{"layer": "MetalA", "w_em_um": 3.95}]})
+    binds, why = PW._pdn_em_sentinel_binds(s, proj, run_id="same-run")
     assert binds is True, why
 
 

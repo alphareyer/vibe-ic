@@ -7331,13 +7331,30 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
     return floor
 
 
-#: #1215-PDN-FIRSTPASS — the sentinel that BOUNDS the resize at exactly one
-#: extra PnR PER DESIGN STATE. Written into the pnr dir the moment a resize
-#: pass is decided on, BEFORE the re-dispatch, so a crash mid-re-PnR cannot
-#: buy a second one, and RECORDING the design it was spent on, so it bounds
-#: the passes that build THIS design rather than the tree for ever — see
-#: `_pdn_em_design_state`.
+#: #1215-PDN-FIRSTPASS — the sentinel for the one extra PnR. A spend from
+#: this process invocation binds immediately; an earlier run's spend binds
+#: only when its recorded floor is present in the current routed DEF.
 _PDN_EM_RESIZE_SENTINEL = ".pdn_em_resize_done"
+_PDN_EM_RUN_ID = os.urandom(16).hex()
+
+
+def _record_pdn_em_resize_spend(project: Path, decision: Mapping[str, Any]
+                                ) -> bool:
+    """Record this run's spend before re-PnR; refuse the pass if it cannot bind."""
+    sentinel = decision["sentinel"]
+    try:
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_text(json.dumps({
+            "reason": "pdn_em_first_pass_resize",
+            "spent_on_def": _ppa_power._pdn_em_spent_on(project),
+            "run_id": _PDN_EM_RUN_ID,
+            "short": decision["short"],
+        }, indent=2) + "\n")
+        return True
+    except OSError as exc:
+        print(f"[pnr] PDN_EM_RESIZE_SENTINEL_WRITE_FAILED: {exc}; "
+              "no re-PnR dispatched", file=sys.stderr)
+        return False
 
 
 def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
@@ -7381,25 +7398,24 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
     under ANY distribution and there is nothing to converge. A second pass could
     only re-measure a slightly different I_total (spm: 4.36 mA -> 4.32 mA across
     two layouts), which is tracking, not iteration. The bound is enforced
-    STRUCTURALLY by `_PDN_EM_RESIZE_SENTINEL`, written before the re-dispatch
-    and keyed on the DESIGN STATE: a crashed or a still-narrow second pass
-    cannot buy a third, because a resume in the same tree finds the sentinel
-    still naming the design it is building. A DIFFERENT design gets its own
-    resize, which is why the sentinel no longer retires the corrector for the
-    life of the project.
+    STRUCTURALLY by `_PDN_EM_RESIZE_SENTINEL`, written before the re-dispatch.
+    Its run id blocks any second attempt by this invocation, even if the
+    second pass crashes or stays narrow. On a later invocation, only a floor
+    actually present in the routed DEF remains spent; a failed prior resize
+    cannot retire the corrector for the life of the project.
 
-    Returns None — no resize, behaviour unchanged — when this design has
-    already spent its resize, when no EM measurement can be produced, when the tech LEF
+    Returns None — no resize, behaviour unchanged — when this run already
+    spent its resize or an earlier one took effect, when no EM measurement can
+    be produced, when the tech LEF
     states no Jmax, or when every drawn strap already meets its floor.
     chip-AGNOSTIC: every number is the project's own measurement or the PDK's
     own LEF."""
     pnr_out = _pl.pnr_dir(project)
     sentinel = pnr_out / _PDN_EM_RESIZE_SENTINEL
-    # The bound is ONE RESIZE PER RUN, and it is spent only by THIS run. A
-    # sentinel left by a previous run used to end the function here, which
-    # retired the corrector for the lifetime of the tree — see
-    # `_pdn_em_sentinel_binds`.
-    _binds, _why = _ppa_power._pdn_em_sentinel_binds(sentinel, project)
+    # This run's sentinel is an immediate anti-loop bound. A prior sentinel
+    # binds only after the drawn DEF proves that its floor took effect.
+    _binds, _why = _ppa_power._pdn_em_sentinel_binds(
+        sentinel, project, run_id=_PDN_EM_RUN_ID)
     if _binds:
         return None
     print(f"[phase3] PDN EM first-pass resize is AVAILABLE: {_why}",
@@ -66733,23 +66749,14 @@ def main() -> int:
                 _short_txt = ", ".join(
                     f"{d['layer']} {d['drawn_um']}->{d['w_em_um']}um "
                     f"({d['shortfall_x']}x short)" for d in _rz["short"])
+                # Sentinel FIRST. Without a written bound, refuse re-PnR.
+                if not _record_pdn_em_resize_spend(project, _rz):
+                    _rz = None
+            if _rz:
                 print(f"[pnr] PDN EM resize: this run's own measured current "
                       f"needs wider straps than it drew ({_short_txt}) — "
                       f"re-running PnR ONCE with the derived floor",
                       flush=True)
-                # Sentinel FIRST. This is the bound.
-                try:
-                    _rz["sentinel"].parent.mkdir(parents=True, exist_ok=True)
-                    _rz["sentinel"].write_text(
-                        json.dumps({"reason": "pdn_em_first_pass_resize",
-                                    # WHICH DESIGN this resize is spent on.
-                                    # Without it the sentinel bounds every
-                                    # future run in this tree, not just the
-                                    # passes that build this design.
-                                    "spent_on_def": _ppa_power._pdn_em_spent_on(project),
-                                    "short": _rz["short"]}, indent=2) + "\n")
-                except OSError:
-                    pass
                 _rz_t0 = time.time()
                 _pnr_rows2: List[StepResult] = []
                 _pnr_redispatched = _spf.gate(
@@ -66777,12 +66784,11 @@ def main() -> int:
                         "layers_short_on_pass_1": _rz["short"],
                         "second_pnr_status": _pnr_redispatched.status,
                         "second_pnr_wall_clock_s": round(_rz_secs, 1),
-                        "bound": ("exactly one extra PnR PER DESIGN STATE; "
-                                  f"enforced by the {_PDN_EM_RESIZE_SENTINEL} "
-                                  "sentinel written before the re-dispatch and "
-                                  "keyed on the synthesis netlist digest, so a "
-                                  "crash-resume buys nothing and a new design "
-                                  "is not bound by the previous one's spend"),
+                        "bound": ("exactly one extra PnR per run; "
+                                  f"enforced by {_PDN_EM_RESIZE_SENTINEL} "
+                                  "written before re-dispatch. A prior run's "
+                                  "spend binds only if its recorded strap "
+                                  "floor is present in the routed DEF"),
                         "trigger": ("drawn DEF strap width < derived w_em; a "
                                     "comparison of two widths, never a gate "
                                     "verdict"),
