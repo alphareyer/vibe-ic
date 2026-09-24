@@ -303,6 +303,8 @@ _LEGALIZE_MARKER_RE = re.compile(
 # marker prefix; no chip, PDK, library or design literal.
 _CP_VIOLATIONS_RE = re.compile(
     r"\b([A-Z0-9_]+)_CHECK_PLACEMENT_VIOLATIONS\s+(\d+)\b")
+_FINAL_PNR_PLACEMENT_RE = re.compile(
+    r"^PNR_PLACEMENT_VIOLATIONS:\s*(\d+)\s*$")
 _CP_RAISED_RE = re.compile(
     r"\b([A-Z0-9_]+)_CHECK_PLACEMENT_(?:RAISED|WARN)\s*:\s*(.*)")
 _CP_UNAVAILABLE_RE = re.compile(
@@ -327,11 +329,20 @@ def _verdict_logs(project: Path) -> List[Path]:
     """Every stage transcript that can carry a placement verdict, sorted and
     de-duplicated. Missing directories are simply absent, not an error."""
     out: List[Path] = []
+    # The parent measures the final shipped placement after candidate adoption
+    # or rejection. Once that count exists, child/intermediate PnR logs are
+    # evidence about discarded states and cannot determine the shipped verdict.
+    parent = project / "phase3/stage3/pnr/openroad.log"
+    final_placement = (parent.is_file() and any(
+        _FINAL_PNR_PLACEMENT_RE.match(line)
+        for line in parent.read_text(errors="replace").splitlines()))
     for parts in _VERDICT_LOG_DIRS:
         d = project.joinpath(*parts)
         if not d.is_dir():
             continue
         for log in sorted(d.rglob("*.log")):
+            if final_placement and parts[-1] == "pnr" and log != parent:
+                continue
             if log not in out:
                 out.append(log)
     return out
@@ -351,6 +362,12 @@ def _check_placement_verdicts(project: Path) -> dict:
         try:
             with log.open(errors="replace") as fh:
                 for line in fh:
+                    final = _FINAL_PNR_PLACEMENT_RE.match(line)
+                    if final:
+                        rec = ["PNR_FINAL", int(final.group(1))]
+                        if rec not in counts:
+                            counts.append(rec)
+                        continue
                     m = _CP_VIOLATIONS_RE.search(line)
                     if m:
                         rec = [m.group(1), int(m.group(2))]
