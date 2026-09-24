@@ -17093,6 +17093,27 @@ def _pnr_stages_after_signoff_writes(pnr_tcl_text: str) -> FrozenSet[str]:
 # declares itself to run after. A "the artifacts are complete" verdict states
 # a fact about the filesystem, so it is MEASURED against these, never inferred
 # from the stage name alone.
+def _survivor_reason(rec: Dict[str, Any], main_reason: str) -> str:
+    """WHY this crashed session's bytes shipped -- chosen from THAT session's
+    own record (its script), never from the main session's state (review
+    wh6wcx64v: one reason for every row named a kept route where a tail's
+    bytes had in fact replaced it)."""
+    raw = rec.get("exit_code")
+    where = f"{rec.get('marker') or ''} {rec.get('command') or ''}"
+    if "pnr_antenna_rollback" in where:
+        return (f"the antenna-rollback tail exited rc={raw} AFTER writing "
+                f"these products; step_pnr shipped the tail's bytes (the "
+                f"refusing session's copies were not kept)")
+    if _PNR_RESUME_TCL in where:
+        return (f"the fatal-signal RESUME tail exited rc={raw} after writing "
+                f"these products; step_pnr judged the resumed run survivable "
+                f"and shipped them")
+    if "pnr_sdr_adopt_" in where:
+        return (f"the SDR adopt tail exited rc={raw} after writing these "
+                f"products; step_pnr shipped them")
+    return main_reason
+
+
 def _declare_pnr_survivors(out_dir: Path, top: str, reason: str) -> List[str]:
     """Record the sign-off artefacts a SHIPPING step_pnr keeps from a session
     that exited NON-ZERO (review we8o6v9hg).
@@ -17154,7 +17175,7 @@ def _declare_pnr_survivors(out_dir: Path, top: str, reason: str) -> List[str]:
             survived={"session_command": str(r.get("command") or "")[:300],
                       "session_timestamp": r.get("timestamp"),
                       "raw_exit_code": r.get("exit_code"),
-                      "reason": reason})
+                      "reason": _survivor_reason(r, reason)})
         recorded.extend(str(p) for p in paths)
     return recorded
 
@@ -36500,9 +36521,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             out_dir, top,
             (f"survivable fatal signal in best-effort stage "
              f"{(_sig_diag or {}).get('stage')}" if _sig_survivable else
-             "the runner shipped this session's route despite its non-zero "
-             "exit (e.g. a failed antenna rollback keeps the refusing "
-             "session's route)"))
+             "the runner shipped the main session's route despite its "
+             "non-zero exit"))
     if resize_history:
         return StepResult("pnr", _status, time.time() - t0,
                           detail,
