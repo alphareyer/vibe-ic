@@ -7358,7 +7358,7 @@ def _record_pdn_em_resize_spend(project: Path, decision: Mapping[str, Any]
 
 
 def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
-                              container: str
+                              container: str, decline_reason: Optional[List[str]] = None
                               ) -> Optional[Dict[str, Any]]:
     """#1215-PDN-FIRSTPASS — decide, ONCE, whether this run must rebuild its
     PDN because the straps it drew are narrower than its own measured current
@@ -7411,18 +7411,23 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
     chip-AGNOSTIC: every number is the project's own measurement or the PDK's
     own LEF."""
     pnr_out = _pl.pnr_dir(project)
+    def decline(reason: str) -> None:
+        if decline_reason is not None:
+            decline_reason.append(reason)
+        return None
+
     sentinel = pnr_out / _PDN_EM_RESIZE_SENTINEL
     # This run's sentinel is an immediate anti-loop bound. A prior sentinel
     # binds only after the drawn DEF proves that its floor took effect.
     _binds, _why = _ppa_power._pdn_em_sentinel_binds(
         sentinel, project, run_id=_PDN_EM_RUN_ID)
     if _binds:
-        return None
+        return decline(f"resize already spent: {_why}")
     print(f"[phase3] PDN EM first-pass resize is AVAILABLE: {_why}",
           file=sys.stderr)
     def_file = pnr_out / f"{top}.def"
     if not def_file.is_file():
-        return None
+        return decline(f"routed DEF missing: {def_file}")
 
     # (1) an EM measurement OF THIS LAYOUT. `_pdn_em_width_floor` reads
     # em_current_authority.json first and falls back to em.rpt, so emitting
@@ -7441,10 +7446,10 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
             rpt3.mkdir(parents=True, exist_ok=True)
             _emit_ir_em_reports(project, top, pdk, container,
                                 rpt3 / "ir_drop.rpt", em_rpt, _notes)
-        except Exception:
-            return None
+        except Exception as exc:
+            return decline(f"EM report generation failed: {exc}")
         if not em_rpt.is_file():
-            return None
+            return decline(f"EM report missing after generation: {em_rpt}")
         # The authority JSON, if any, is now older than em.rpt and describes
         # the PREVIOUS layout. Remove it so the floor reads the fresh number
         # rather than silently preferring the stale one.
@@ -7459,20 +7464,20 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
     # (2) derive
     try:
         floor = _pdn_em_width_floor(project, pdk, container)
-    except Exception:
-        return None
+    except Exception as exc:
+        return decline(f"EM width floor derivation failed: {exc}")
     if not floor or not floor.get("per_layer"):
-        return None
+        return decline("EM width floor has no per-layer measurements")
 
     # (3) what did the DEF actually draw? Read it with the SAME helper the
     # Step-25 gate uses, so the two can never disagree about the subject.
     try:
         import em_current_density_check as _emcd
         drawn = _emcd._def_pg_widths_of(def_file) or {}
-    except Exception:
-        return None
+    except Exception as exc:
+        return decline(f"routed DEF strap width read failed: {exc}")
     if not drawn:
-        return None
+        return decline(f"routed DEF has no readable PG widths: {def_file}")
 
     # (4) which STRAP layers were drawn narrower than their own floor?
     #
@@ -7498,7 +7503,7 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
     except OSError:
         # Without the PDN script the strap/rail split cannot be established,
         # and guessing it is how the false trigger comes back. Refuse instead.
-        return None
+        return decline(f"PDN script unavailable for strap/rail split: {pnr_tcl}")
     followpin_layers = {
         m.group(1).lower()
         for m in re.finditer(
@@ -7519,7 +7524,7 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
                           "w_em_um": float(w_em),
                           "shortfall_x": round(float(w_em) / float(w_drawn), 4)})
     if not short:
-        return None
+        return decline("all measured strap widths meet their EM floors")
     return {"floor": floor, "short": short, "sentinel": sentinel}
 
 
@@ -67619,20 +67624,27 @@ def main() -> int:
         # is by NAME over `reversed(plan)`, so it picks up the re-run's row.
         _pnr_pre = next((s for s in reversed(plan) if s.name == "pnr"), None)
         if _pnr_pre is not None and _pnr_pre.status == "PASS":
+            _rz_decline_reason: List[str] = []
+            _rz_spend_failed = False
             try:
                 _rz = _pdn_em_first_pass_resize(
-                    project, effective_top, pdk, args.container)
+                    project, effective_top, pdk, args.container,
+                    _rz_decline_reason)
             except Exception as _rz_exc:  # pragma: no cover - defensive
                 _rz = None
-                print(f"[pnr] EM resize decision skipped (nonfatal): {_rz_exc}",
-                      file=sys.stderr)
+                _rz_decline_reason.append(f"decision raised: {_rz_exc}")
             if _rz:
                 _short_txt = ", ".join(
                     f"{d['layer']} {d['drawn_um']}->{d['w_em_um']}um "
                     f"({d['shortfall_x']}x short)" for d in _rz["short"])
                 # Sentinel FIRST. Without a written bound, refuse re-PnR.
                 if not _record_pdn_em_resize_spend(project, _rz):
+                    _rz_spend_failed = True
                     _rz = None
+            else:
+                print("[pnr] PDN_EM_RESIZE_DECLINED: "
+                      + (_rz_decline_reason[0] if _rz_decline_reason
+                         else "decision returned no reason"), file=sys.stderr)
             if _rz:
                 print(f"[pnr] PDN EM resize: this run's own measured current "
                       f"needs wider straps than it drew ({_short_txt}) — "
@@ -67700,6 +67712,10 @@ def main() -> int:
                     f" PnR re-run once "
                     f"({_rz_secs:.0f}s). Bound: one extra pass, sentinel-"
                     f"enforced. Arithmetic in reports/phase3/pdn_em_sizing.json"))
+            else:
+                if _rz_spend_failed:
+                    print("[pnr] PDN_EM_RESIZE_NOT_DISPATCHED: sentinel "
+                          "write failed; no safe one-pass bound", file=sys.stderr)
 
         _pnr_row = next((s for s in reversed(plan) if s.name == "pnr"), None)
         _pnr_step_passed = _pnr_chain_continues(_pnr_row)
