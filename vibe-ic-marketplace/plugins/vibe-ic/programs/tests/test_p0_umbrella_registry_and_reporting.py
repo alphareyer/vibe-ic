@@ -52,8 +52,9 @@ import _spawn_stub  # noqa: E402
 
 def _project_with_rtl(tmp_path: Path) -> Path:
     proj = tmp_path / "proj"
-    (proj / "rtl").mkdir(parents=True)
-    (proj / "rtl" / "top.v").write_text(
+    rtl_dir = proj / "phase2/stage1/rtl"
+    rtl_dir.mkdir(parents=True)
+    (rtl_dir / "top.v").write_text(
         "module top(input a, output b); assign b = a; endmodule\n")
     return proj
 
