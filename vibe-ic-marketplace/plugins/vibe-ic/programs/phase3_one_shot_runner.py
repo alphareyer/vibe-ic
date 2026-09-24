@@ -52479,6 +52479,42 @@ def _signoff_not_checked(name: str, t0: float, why: str,
                       f"{_SIGNOFF_NOT_CHECKED}: {why}", list(outputs), reason_class=_V.ReasonClass.NOT_EXECUTED)
 
 
+def _layout_signoff_refusal(project: Path, top: str,
+                            pnr: Optional[StepResult],
+                            gds: Optional[StepResult],
+                            started_at: float) -> str:
+    """Require this invocation's completed physical layout before sign-off.
+
+    The producer identity sidecars decide whether a cached PnR/GDS must be
+    rebuilt.  They do not assert that a report from a *previous invocation*
+    was measured in this one.  The step rows and the actual layout writes are
+    the run-local evidence; a surviving old file cannot substitute for either.
+    """
+    for name, row in (("pnr", pnr), ("gds", gds)):
+        complete = (_pnr_chain_continues(row) if name == "pnr"
+                    else row is not None and row.status == "PASS")
+        if not complete:
+            status = row.status if row is not None else "NOT_RUN"
+            return f"upstream {name} step is {status}; this run produced no sign-off layout"
+    layout = _pl.pnr_dir(project)
+    for path in (layout / "routed.def", layout / f"{top}.def",
+                 layout / f"{top}.gds"):
+        try:
+            if not path.is_file() or path.stat().st_mtime_ns < int(started_at * 1_000_000_000):
+                return (f"upstream layout {path.name} was not written in this run "
+                        f"after its start; prior-run evidence cannot sign off")
+        except OSError as exc:
+            return f"upstream layout {path.name} cannot be verified: {exc}"
+    return ""
+
+
+def _upstream_signoff_not_measured(name: str, why: str) -> StepResult:
+    return StepResult(name, "NOT_MEASURED", 0.0,
+                      f"sign-off skipped: {why}",
+                      extras={"finding": "UPSTREAM_LAYOUT_NOT_THIS_RUN"},
+                      reason_class=_V.ReasonClass.UPSTREAM_FAILED)
+
+
 #: PRE-AUDIT PRODUCERS: run so the document EXISTS, never folded into the
 #: release roll-up. Same (name, program, output, argv) shape as
 #: `_DECLARED_SIGNOFF_GATES`, deliberately a SEPARATE tuple.
@@ -52691,7 +52727,8 @@ _PDK_AWARE_SIGNOFF_GATES = frozenset({"tapeout_precheck"})
 
 def step_declared_signoff_gates(project: Path,
                                 pdk_name: str = "",
-                                container: str = "") -> List[StepResult]:
+                                container: str = "",
+                                upstream_refusal: Optional[str] = None) -> List[StepResult]:
     """Every flow-declared step-23/25 sign-off gate, one StepResult each.
 
     `pdk_name` is the run's OWN `PdkConfig.name` — the distribution the flow was
@@ -52710,6 +52747,24 @@ def step_declared_signoff_gates(project: Path,
     resolved; `tapeout_precheck.resolve_pdk` still owns deciding what to do when
     nobody says.
     """
+    if upstream_refusal is None:
+        # Direct callers also need to refuse an inherited physical tree.  The
+        # runner supplies actual step rows above; this arm checks the files
+        # when a direct caller supplies no rows.  Projects without a physical
+        # tree retain the checkers' own missing-input verdicts.
+        _layout = _pl.pnr_dir(project)
+        _gds_files = list(_layout.glob("*.gds")) if _layout.is_dir() else []
+        if _gds_files or (_layout / "routed.def").exists():
+            if len(_gds_files) != 1:
+                upstream_refusal = "upstream GDS identity is absent or ambiguous"
+            else:
+                _completed = StepResult("layout", "PASS", 0.0, "")
+                upstream_refusal = _layout_signoff_refusal(
+                    project, _gds_files[0].stem, _completed, _completed,
+                    _RUN_STARTED_AT)
+    if upstream_refusal:
+        return [_upstream_signoff_not_measured(name, upstream_refusal)
+                for name, *_ in _DECLARED_SIGNOFF_GATES]
     # ── vibe-ic#2091 — a sign-off measured against an ASSUMED clock says so ──
     #
     # MEASURED, opentitan_aes x sky130A: the input states no target clock period
@@ -68410,6 +68465,7 @@ def main() -> int:
         and not _container_path_covered(str(project), args.container))
 
     is_pure_analog, pa_reason = _is_pure_analog_no_rtl_track(project)
+    _layout_refusal = ""
     if _mount_preflight_failed:
         msg = (f"container mount-coverage preflight FAILED: project path "
                f"{project} is not covered by any bind mount of container "
@@ -68929,25 +68985,43 @@ def main() -> int:
         # a sign-off that runs with no routed design produces a verdict about
         # an absence upstream, which is the exact substitution this pre-flight
         # exists to stop.
-        plan.append(_spf.gate(
-            project, "phase3_one_shot_runner", "drc",
-            _preflight_refusal("drc"),
-            step_drc, project, effective_top, pdk, args.container))
+        _pnr_result = next((s for s in reversed(plan) if s.name == "pnr"), None)
+        _gds_result = next((s for s in reversed(plan) if s.name == "gds"), None)
+        _layout_refusal = _layout_signoff_refusal(
+            project, effective_top, _pnr_result, _gds_result,
+            _RUN_STARTED_AT)
+        if _layout_refusal:
+            plan.append(_upstream_signoff_not_measured("drc", _layout_refusal))
+        else:
+            plan.append(_spf.gate(
+                project, "phase3_one_shot_runner", "drc",
+                _preflight_refusal("drc"),
+                step_drc, project, effective_top, pdk, args.container))
         # ORGANIC #590 — hand step_lvs the pnr outcome so an upstream
         # mid-tcl death SKIPs the compare instead of mislabelling the
         # inevitable mismatch a design/extraction defect.
-        _pnr_result = next((s for s in reversed(plan) if s.name == "pnr"),
-                           None)
-        plan.append(_spf.gate(
-            project, "phase3_one_shot_runner", "lvs",
-            _preflight_refusal("lvs"),
-            step_lvs, project, effective_top, pdk, args.container,
-            upstream_pnr=_pnr_result))
+        if _layout_refusal and _pnr_result is not None and _pnr_result.status == "PASS":
+            plan.append(_upstream_signoff_not_measured("lvs", _layout_refusal))
+        else:
+            plan.append(_spf.gate(
+                project, "phase3_one_shot_runner", "lvs",
+                _preflight_refusal("lvs"),
+                step_lvs, project, effective_top, pdk, args.container,
+                upstream_pnr=_pnr_result))
+
+    if not _layout_refusal:
+        _layout_refusal = _layout_signoff_refusal(
+            project, effective_top,
+            next((s for s in reversed(plan) if s.name == "pnr"), None),
+            next((s for s in reversed(plan) if s.name == "gds"), None),
+            _RUN_STARTED_AT)
 
     # v1.6.36 — stage runner outputs at canonical flow-YAML paths.
     # Closes the runner-vs-flow drift waivers from the v10634 benchmark.
-    plan.append(step_canonicalize_artefacts(
-        project, effective_top, pdk, args.container))
+    plan.append(_upstream_signoff_not_measured("canonicalize_artefacts",
+                 _layout_refusal) if _layout_refusal else
+                step_canonicalize_artefacts(
+                    project, effective_top, pdk, args.container))
 
     # Canonical step 37.5ic — dispatch the release-document producer on the
     # chip path before the compliance auditor evaluates the step's gate. The
@@ -68968,7 +69042,9 @@ def main() -> int:
     # BEFORE the derived-artefact generators build the hand-off pack and
     # tape-out checklist on top of a route whose claimed improvement the
     # sign-off may contradict.
-    plan.append(step_drv_promotion_corroboration(project))
+    plan.append(_upstream_signoff_not_measured("drv_promotion_corroboration",
+                 _layout_refusal) if _layout_refusal else
+                step_drv_promotion_corroboration(project))
 
     # Steps 23 / 25 — the sign-off gates the flow DECLARES but that no runner
     # ever executed (see `_DECLARED_SIGNOFF_GATES` for the measured blast
@@ -68977,7 +69053,9 @@ def main() -> int:
     # what emits `phase3/stage3/sta/*.rpt` and `reports/phase3/em.rpt`, and
     # BEFORE the derived-artefact generators build the hand-off pack and
     # tape-out checklist on top of a sign-off nobody checked.
-    plan.extend(step_declared_signoff_gates(project, pdk.name, args.container))
+    plan.extend(step_declared_signoff_gates(
+        project, pdk.name, args.container,
+        upstream_refusal=_layout_refusal))
     # PRE-AUDIT PRODUCERS, run and REPORTED, never planned. Steps 36 and 38 each
     # declare their own gate as their only producer, so without this the only
     # writer of their documents is the audit's own clause and the audit refuses
@@ -68985,8 +69063,9 @@ def main() -> int:
     # `_PRE_AUDIT_PRODUCERS` -- these are producers, and producing a document is
     # not signing off on it. A refusal here is printed and does not withhold the
     # release, because each step's own yaml clause still decides it in the audit.
-    for _row in run_pre_audit_producers(project, args.container):
-        print(f"[phase3] pre-audit producer {_row.name}: {_row.status}")
+    if not _layout_refusal:
+        for _row in run_pre_audit_producers(project, args.container):
+            print(f"[phase3] pre-audit producer {_row.name}: {_row.status}")
 
     # ORDERING (measured on `spm`, image 0.3.46, plugin v1.17.42): the
     # sign-off gates below WRITE three of the reports the sign-off metrics
@@ -69005,28 +69084,38 @@ def main() -> int:
     # before the derived-artefact generators.  None of the six reads
     # `phase3/final/metrics.json` or any release document, so nothing that
     # depended on 37.4 preceding 37.5ic moved.
-    plan.append(step_signoff_metrics_aggregate(project))
+    plan.append(_upstream_signoff_not_measured("signoff_metrics_aggregate",
+                 _layout_refusal) if _layout_refusal else
+                step_signoff_metrics_aggregate(project))
 
-    plan.append(step_tapeout_docs_gen(project))
+    plan.append(_upstream_signoff_not_measured("tapeout_docs_gen",
+                 _layout_refusal) if _layout_refusal else
+                step_tapeout_docs_gen(project))
 
     # And the PRODUCT documents beside the sign-off evidence. The generator
     # above writes what was CHECKED; this writes what the part IS — and refuses
     # to write anything when an artefact class this run signed off carries no
     # substance, which is a population the metrics-only sign-off cannot see.
-    plan.append(step_ic_release_docs_gen(project))
+    plan.append(_upstream_signoff_not_measured("ic_release_docs_gen",
+                 _layout_refusal) if _layout_refusal else
+                step_ic_release_docs_gen(project))
 
     # Canonical step 37.5ip — the cell/IP path terminal. The four-view kit is
     # what an IP delivery IS, and until this was wired nothing this flow
     # produced digitally could be placed by anybody: a completed sign-off run
     # contained no `.lef` anywhere. Immediately after canonicalisation, which
     # is what puts the sign-off GDS at this producer's declared input path.
-    plan.append(step_digital_hardmacro_gen(project, pdk, args.container))
+    plan.append(_upstream_signoff_not_measured("digital_hardmacro_gen",
+                 _layout_refusal) if _layout_refusal else
+                step_digital_hardmacro_gen(project, pdk, args.container))
 
     # And the documents that make the kit usable by somebody who was not in the
     # room. AFTER the kit producer above, because it reads the four views it
     # documents; the gate at step 37.5ip then judges what this wrote.
-    plan.append(step_ip_release_docs_gen(
-        project, args.ic_name or args.top_name, pdk.name))
+    plan.append(_upstream_signoff_not_measured("ip_release_docs_gen",
+                 _layout_refusal) if _layout_refusal else
+                step_ip_release_docs_gen(
+                    project, args.ic_name or args.top_name, pdk.name))
 
 
     # v1.6.36 — invoke the derived-artefact generators (each emits its
