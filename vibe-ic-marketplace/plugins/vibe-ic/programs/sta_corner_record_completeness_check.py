@@ -115,6 +115,13 @@ R5 DRV (max_slew / max_capacitance / max_fanout) MUST BE SURFACED — measured:
        indistinguishable from a met one — the same disease as an unreported
        corner, which is what R2 already says about slack.
 
+R6 REQUIRED PVT POST-ROUTE COVERAGE — every PVT corner that the design's
+   sign-off requirement extractor names needs post-route SPEF
+   setup and hold measurements. A pre-layout estimate is NOT_MEASURED for this
+   purpose. The step-23 SPEF report may contain named PVT sections; this gate
+   indexes them separately from its nominal-RC view. Missing coverage exits
+   nonzero and never produces PASS.
+
 How sign-off corners are learned (READ from the flow, never hardcoded)
 ----------------------------------------------------------------------
 This was determined by reading `phase3_one_shot_runner.py`, not assumed. The
@@ -142,15 +149,13 @@ Two consequences are load-bearing and are the reason this gate is not a naive
 set-difference:
 
   * `corners_extracted` / `corners_available` / the `pvt_matrix` corner list are
-    AVAILABILITY lists, not run lists. `nom` is extracted on every run and
-    deliberately never analysed (setup is signed off at the slow corner and hold
-    at the fast one — correct practice). Such corners are shown in the evidence
-    table as `available_not_selected` and NEVER trigger R2. Treating availability
-    as configuration would make this gate fire on every run in the corpus.
+    AVAILABILITY lists, not run lists, and do not trigger R2 by themselves.
+    The design's explicit STA requirement names the required set for R6;
+    RC availability remains separate.
 
-  * a corner is judged for the ROLE it was declared to serve. Demanding hold
-    slack at the slow setup corner would be a fabricated violation, not a found
-    one. A corner carrying NO declared role must still carry both.
+  * R2/R3 judge a corner for its declared ROLE. R6 additionally requires both
+    measurements for each explicitly required PVT corner. A corner
+    carrying NO declared role must still carry both under R1.
 
 A declared corner whose label is `unknown`, or a run that declares no primary,
 is treated as SIGN-OFF, never as nominal: silently demoting an unclassifiable
@@ -844,6 +849,16 @@ def read_declarations(project: Path) -> Dict[str, object]:
     aliases: Dict[Tuple[str, str], List[str]] = {}   # (axis, corner) -> names
     sources: Dict[str, Optional[str]] = {}
     primary: Optional[Dict[str, str]] = None
+    # The producer uses this extractor to decide which PVT corners to run.
+    # Share its prompt-derived contract so the producer and gate cannot choose
+    # different required sets from the same design input.
+    from l24_signoff_requirements_extract import extract_signoff_requirements
+    obligations = extract_signoff_requirements(project) or {}
+    required_pvt_corners = sorted({
+        c for row in obligations.get("signoff_requirements", [])
+        if row.get("check") == "STA" and row.get("stated")
+        for c in row.get("corners", [])
+    })
 
     # -- PROCESS axis: mcorner_ocv_stance.json names setup/hold process corners
     p_stance_path = _first_existing(project, _PROCESS_STANCE_CANDIDATES)
@@ -911,6 +926,7 @@ def read_declarations(project: Path) -> Dict[str, object]:
     pvt = _load_json(pvt_path)
     sources["pvt_matrix"] = _rel(project, pvt_path) if pvt_path else None
     labels: Dict[str, str] = {}
+    pvt_liberties: Dict[str, str] = {}
     if pvt:
         src = sources["pvt_matrix"] or ""
         prim = pvt.get("primary_corner")
@@ -933,6 +949,8 @@ def read_declarations(project: Path) -> Dict[str, object]:
                         if isinstance(label, str) and label.strip():
                             lbl = label.strip()
                             labels[lbl.lower()] = lbl
+                            if isinstance(c.get("liberty"), str):
+                                pvt_liberties[lbl.lower()] = c["liberty"].strip()
                             aliases.setdefault(
                                 _key(AXIS_PROCESS, lbl), []).append(name.strip())
                             available.append({"axis": AXIS_PROCESS,
@@ -966,6 +984,8 @@ def read_declarations(project: Path) -> Dict[str, object]:
     return {
         "declared": declared, "available": available, "primary": primary,
         "labels": labels, "aliases": aliases, "sources": sources,
+        "required_pvt_corners": required_pvt_corners,
+        "pvt_liberties": pvt_liberties,
         "dangling_citations": dangling,
     }
 
@@ -1113,6 +1133,26 @@ def read_records(project: Path,
             body = nom.read_text(errors="replace")
         except OSError:
             body = ""
+        # The producer can append an entire PVT sweep to this same file. Its
+        # section headers identify the process liberty and each body carries
+        # the post-route SPEF basis. Index those sections on the process axis;
+        # the RC nominal summary below is a separate view of the same file.
+        for kind, corner, section in _split_sections(body):
+            if not corner or "STA_BASIS: POST_ROUTE_SPEF" not in section:
+                continue
+            if not re.search(r"^STA_BASIS_SPEF:\s*\S+", section, re.M):
+                continue
+            expected = (decl.get("pvt_liberties") or {}).get(corner.lower())
+            actual = re.search(r"^STA_BASIS_LIBERTY:\s*(\S+)", section, re.M)
+            if expected and (actual is None or actual.group(1) != expected):
+                continue
+            vals = extract_slacks(section)
+            role = "setup" if kind == "SETUP" else "hold"
+            _put(AXIS_PROCESS, corner, _rel(project, nom), {
+                "setup_wns_ns": vals["setup_wns_ns"] if role == "setup" else None,
+                "hold_wns_ns": vals["hold_wns_ns"] if role == "hold" else None,
+                "tns_ns": vals["tns_ns"] if role == "setup" else None,
+            }, BASIS_SIGNOFF)
         _put(AXIS_RC, name, _rel(project, nom), extract_slacks(body),
              report_basis(body))
 
@@ -1380,6 +1420,31 @@ def evaluate(project: Path,
                     f"the {role.upper()} corner but its record carries no worst "
                     f"{role} slack (source: {rec.get('source')})")
 
+    # A PVT matrix is the design's required corner set for post-route STA.
+    # A pre-layout estimate is useful context, but cannot close either timing
+    # check after routing. Judge each matrix member on the process axis and
+    # leave RC corner availability to the separate RC sign-off roles above.
+    required_pvt = {
+        _key(AXIS_PROCESS, name): name
+        for name in decl.get("required_pvt_corners") or []
+    }
+    if required_pvt and not any(a["axis"] == AXIS_PROCESS for a in available):
+        rules.append("R6_REQUIRED_PVT_NOT_MEASURED")
+        findings.append(
+            "R6 the design requires PVT corners, but the PVT matrix is absent or "
+            "empty; required post-route coverage is NOT_MEASURED")
+    for k, name in sorted(required_pvt.items()):
+        rec = records.get(k)
+        used = (rec or {}).get("basis_used") or {}
+        for field, label in (("setup_wns_ns", "setup"),
+                             ("hold_wns_ns", "hold")):
+            if rec is None or rec.get(field) is None or used.get(field) != BASIS_SIGNOFF:
+                rules.append("R6_REQUIRED_PVT_NOT_MEASURED")
+                findings.append(
+                    f"R6 required PVT corner '{name}' {label} is NOT_MEASURED "
+                    f"post-route (source: {(rec or {}).get('source') or 'none'}); "
+                    "a pre-layout estimate cannot certify sign-off")
+
     # ---- R1: reported corners must be named + complete when unroled --------
     for row in table:
         if not row.get("reported"):
@@ -1615,9 +1680,13 @@ def evaluate(project: Path,
                            "R4_MULTI_CORNER_CLAIM_UNSUPPORTED",
                            "R4_LIBRARY_RESOLUTION_UNRECORDED",
                            "R5_DRV_UNQUERIED",
-                           "R5_DRV_VIOLATION") if r in rules]
+                           "R5_DRV_VIOLATION",
+                           "R6_REQUIRED_PVT_NOT_MEASURED") if r in rules]
 
-    if ordered:
+    if "R6_REQUIRED_PVT_NOT_MEASURED" in ordered and set(ordered) <= {
+            "R2_DECLARED_BUT_UNREPORTED", "R6_REQUIRED_PVT_NOT_MEASURED"}:
+        verdict = "NOT_MEASURED"
+    elif ordered:
         verdict = "FAIL"
     elif degraded_disclosed:
         # Not a failure, but never a multi-corner sign-off either. The verdict
