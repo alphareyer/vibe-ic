@@ -15,8 +15,14 @@ The FPGA path at line 3545 already followed the correct pattern
 missing the parallel.
 """
 import ast
+import importlib.util
 import re
+import subprocess
+import sys
+from types import SimpleNamespace
 from pathlib import Path
+
+import pytest
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 RUNNER = PROGRAMS / "design_one_shot_runner.py"
@@ -147,3 +153,42 @@ def test_fpga_burn_pattern_still_present():
                                    "_emit_final_summary_or_disclose")), (
         "FPGA-burn path lost its pre-burn emit_final_summary — that pattern "
         "is also load-bearing for the SOF attestation gate.")
+
+
+@pytest.mark.parametrize("entry", ["normal", "refresh"])
+@pytest.mark.parametrize("producer_rc", [0, 2])
+def test_audit_reads_summary_after_declared_producers(
+        monkeypatch, tmp_path, entry, producer_rc):
+    """Both whole-flow entry paths attest the producer's latest output.
+
+    A nonzero producer exit still permits the audit to report its own verdict;
+    it does not permit that audit to read the old summary.
+    """
+    spec = importlib.util.spec_from_file_location("design_one_shot_runner", RUNNER)
+    runner = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = runner
+    spec.loader.exec_module(runner)
+    artifact = tmp_path / "declared.txt"
+    artifact.write_text("old")
+    attested = []
+
+    def produce(*args, **kwargs):
+        artifact.write_text("new")
+        return subprocess.CompletedProcess(args[0], producer_rc, "", "producer failed")
+
+    def emit(*args):
+        attested.append(artifact.read_text())
+        return True
+
+    def audit(*args, **kwargs):
+        assert attested and attested[-1] == artifact.read_text() == "new"
+        raise RuntimeError("audit reached with fresh attestation")
+
+    monkeypatch.setattr(runner.subprocess, "run", produce)
+    monkeypatch.setattr(runner._pl, "emit_final_summary", emit)
+    monkeypatch.setattr(runner, "step_final_audit", audit)
+    with pytest.raises(RuntimeError, match="audit reached"):
+        if entry == "normal":
+            runner._audit_after_declared_producers(tmp_path, False)
+        else:
+            runner._run_refresh_only(tmp_path, SimpleNamespace(skip_analog=False))
