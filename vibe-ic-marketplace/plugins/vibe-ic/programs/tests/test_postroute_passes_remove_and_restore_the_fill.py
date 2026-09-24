@@ -135,6 +135,19 @@ def test_the_pnr_builder_hands_every_post_route_pass_the_same_fill_facts():
         ["_postroute_filler_spec", "filler_spec"]
 
 
+def test_fill_complete_candidates_and_checkpoints_are_session_products():
+    """The session that writes the refilled state declares those files."""
+    deck = "\n".join((R._pnr_stage_begin(stage)
+                      for stage in R._SDR_TXN_DIRS))
+    deck += "\nANTENNA_PRE_REPAIR_CHECKPOINT\n"
+    paths = set(R._pnr_session_products(Path("/tmp/pnr"), "/o", deck))
+    for dirname in R._SDR_TXN_DIRS.values():
+        assert Path("/tmp/pnr") / dirname / R._SDR_CANDIDATE_DEF_NAME in paths
+        assert Path("/tmp/pnr") / dirname / R._SDR_CANDIDATE_ODB_NAME in paths
+    for name in R._ANTENNA_CHECKPOINT_NAMES:
+        assert Path("/tmp/pnr") / name in paths
+
+
 # --- 3. a failed legalize is never spurious (DRIVEN) ---------------------------
 def _drive_dpl(seq="5 5 0"):
     tclsh = shutil.which("tclsh")

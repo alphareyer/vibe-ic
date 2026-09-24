@@ -32938,7 +32938,21 @@ def _pnr_session_products(out_dir: Path, out_dir_c: str, tcl_text: str,
         if full.startswith(prefix) and "/" not in full[len(prefix):]:
             names.append(full[len(prefix):])
     names.append(log_name)
-    return [out_dir / n for n in dict.fromkeys(names)]
+    products = [out_dir / n for n in dict.fromkeys(names)]
+    # The SDR child is launched by this OpenROAD session, inside its Tcl. Its
+    # fill-complete candidate is still a product of this declared session,
+    # even though it lives in a transaction subdirectory. Likewise the native
+    # antenna pass writes checkpoints after/before its fill bracket. Declaring
+    # these paths makes the v1.24.19 session ledger hash the actual writes.
+    for stage, dirname in _SDR_TXN_DIRS.items():
+        if _pnr_stage_begin(stage) in tcl_text:
+            products.extend((out_dir / dirname / _SDR_CANDIDATE_DEF_NAME,
+                             out_dir / dirname / _SDR_CANDIDATE_ODB_NAME,
+                             out_dir / _sdr_child_log_name(stage),
+                             out_dir / _sdr_child_def_leg_log_name(stage)))
+    if "ANTENNA_PRE_REPAIR_CHECKPOINT" in tcl_text:
+        products.extend(out_dir / name for name in _ANTENNA_CHECKPOINT_NAMES)
+    return products
 
 
 def _sdr_candidate_signoff_clean(project: Path, top: Optional[str],
