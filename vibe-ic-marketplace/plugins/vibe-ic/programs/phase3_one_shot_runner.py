@@ -66138,18 +66138,25 @@ def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
     if entry not in heads.values() and entry not in heads:
         raise ValueError(f"step {entry!r} has no independent Phase-3 dispatch; "
                          f"enterable steps: {list(heads.values())}")
-    if exit_ not in tails.values() and exit_ not in heads:
-        raise ValueError(f"step {exit_!r} has no independent Phase-3 dispatch; "
-                         f"exitable steps: {list(tails.values())}")
     from decimal import Decimal
-    lo = Decimal(heads.get(entry, entry))
-    hi = Decimal(tails.get(exit_, exit_))
+    try:
+        lo = Decimal(heads.get(entry, entry))
+        hi = Decimal(tails.get(exit_, exit_))
+    except Exception as exc:
+        raise ValueError(f"invalid Phase-3 exit step {exit_!r}") from exc
     if lo > hi:
         raise ValueError(f"Phase-3 window {entry!r}..{exit_!r} is reversed")
+    if hi > Decimal("37"):
+        raise ValueError(f"Phase-3 exit {exit_!r} is beyond this runner's "
+                         "independent dispatch sites")
     # The physical dispatch order places GDS before DRC/LVS even though its
     # canonical id is 37.  Filter by flow id, then retain the runner's order.
-    return [name for name, _ in sites
-            if lo <= Decimal(heads[name]) and Decimal(tails[name]) <= hi]
+    selected = [name for name, _ in sites
+                if lo <= Decimal(heads[name]) and Decimal(tails[name]) <= hi]
+    if not selected:
+        raise ValueError(f"Phase-3 window {entry!r}..{exit_!r} contains no "
+                         "independently dispatched site")
+    return selected
 
 
 def _phase3_file_manifest(project: Path) -> Dict[str, str]:
@@ -66178,6 +66185,25 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     site_before = before
     window_gate = _spf.gate
     for site in selected:
+        # A narrower numeric window can omit a producer between two selected
+        # sites (for example PnR 15..22 and PV 31, with GDS 37 omitted).
+        # Never sign off the old GDS after this run changed the routed DEF.
+        missing_link = None
+        if site == "gds" and "synth" in changed_sites and "pnr" not in selected:
+            missing_link = "pnr"
+        if site in ("drc", "lvs"):
+            if "pnr" in changed_sites and "gds" not in selected:
+                missing_link = "gds"
+            elif "synth" in changed_sites and (
+                    "pnr" not in selected or "gds" not in selected):
+                missing_link = "pnr/gds"
+        if missing_link:
+            rows.append(StepResult(
+                site, "NOT_MEASURED", 0.0,
+                f"upstream step {changed_sites[-1]} changed output; "
+                f"{missing_link} is outside this window, so this gate cannot "
+                "measure the new artefact", reason_class=_V.ReasonClass.UPSTREAM_FAILED))
+            break
         if site == "synth":
             row = window_gate(project, "phase3_one_shot_runner", site,
                             _preflight_refusal(site), step_synth,

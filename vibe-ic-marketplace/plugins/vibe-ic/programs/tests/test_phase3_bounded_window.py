@@ -60,9 +60,46 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
 def test_window_rejects_interior_and_excludes_gds_from_15_to_31():
     assert p3._phase3_window_sites("15", "31") == ["pnr", "drc", "lvs"]
     assert p3._phase3_window_sites("15", "22") == ["pnr"]
+    assert p3._phase3_window_sites("9", "23") == ["synth", "pnr"]
     try:
         p3._phase3_window_sites("18", "22")
     except ValueError as exc:
         assert "no independent Phase-3 dispatch" in str(exc)
     else:
         raise AssertionError("interior PnR step accepted as an entry")
+
+
+def test_changed_route_cannot_sign_off_old_gds(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    (project / "phase3" / "synth").mkdir(parents=True)
+    (project / "phase3" / "pnr").mkdir(parents=True)
+    (project / "phase3" / "synth" / "top_synth.v").write_text("netlist")
+    (project / "phase3" / "pnr" / "top.gds").write_bytes(b"old GDS")
+    (project / "phase2" / "stage2" / "synth").mkdir(parents=True)
+    (project / "phase2" / "stage2" / "synth" /
+     "post_dft_netlist.v").write_text("netlist")
+
+    def route(project_, top, pdk, container, **kwargs):
+        out = project_ / "phase3" / "pnr" / f"{top}.def"
+        out.write_text("new route")
+        canonical = project_ / "phase3" / "stage3" / "pnr" / "routed.def"
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text("new route")
+        return p3.StepResult("pnr", "PASS", 0.0, "routed", [str(out)])
+
+    def should_not_run(*args, **kwargs):
+        raise AssertionError("PV consumed the old GDS")
+
+    monkeypatch.setattr(p3, "step_pnr", route)
+    monkeypatch.setattr(p3, "step_drc", should_not_run)
+    monkeypatch.setattr(p3, "step_lvs", should_not_run)
+    args = SimpleNamespace(entry_step="15", exit_step="31", container="fake-eda",
+                           die_um="auto", util=0.3, spare_density=0.02)
+    selected = p3._phase3_window_sites("15", "31")
+    assert p3._run_phase3_window(project, "top", object(), args, selected) == 1
+    report = json.loads((project / "reports" / "orchestrator" /
+                         "phase3_one_shot.json").read_text())
+    assert report["steps"][-1]["name"] == "drc"
+    assert report["steps"][-1]["status"] == "NOT_MEASURED"
+    assert "gds is outside this window" in report["steps"][-1]["detail"]
+    assert (project / "phase3" / "pnr" / "top.gds").read_bytes() == b"old GDS"
