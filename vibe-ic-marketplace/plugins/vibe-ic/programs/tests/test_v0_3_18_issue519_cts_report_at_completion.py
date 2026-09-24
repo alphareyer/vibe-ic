@@ -19,6 +19,7 @@ complete (no post_cts.def).
 chip-AGNOSTIC: synthetic project + synthetic OpenROAD log, no chip literal.
 """
 import sys
+import os
 from pathlib import Path
 
 PROGRAMS = Path(__file__).resolve().parent.parent
@@ -88,6 +89,46 @@ def test_idempotent_does_not_overwrite_existing(tmp_path):
     out = R._emit_cts_report_if_complete(tmp_path, "top")
     assert out is None                              # no re-write
     assert (cts / "clock_tree.rpt").read_text() == "PRE-EXISTING REPORT\n"
+
+
+def test_second_pnr_rebuilds_cts_report_for_its_new_post_cts_def(tmp_path):
+    pnr = _pnr(tmp_path)
+    post_cts = pnr / "post_cts.def"
+    log = pnr / "openroad.log"
+    log.write_text(_CTS_LOG.replace("Inserted: 42", "Inserted: 77"))
+    post_cts.write_text("DESIGN top ;\n")
+    cts = R._pl.cts_dir(tmp_path)
+    cts.mkdir(parents=True)
+    report = cts / "clock_tree.rpt"
+    report.write_text("[INFO CTS-0004] Total number of Buffers Inserted: 11.\n")
+    os.utime(report, (100, 100))
+    os.utime(post_cts, (200, 200))
+    os.utime(log, (200, 200))
+
+    result = R._emit_cts_report_if_complete(tmp_path, "top")
+    assert R._parse_cts_metrics(report.read_text())["inserted_buffers"] == "77"
+    assert "Inserted: 11" not in report.read_text()
+    assert result == str(report)
+
+
+def test_second_pnr_with_lost_cts_log_refuses_old_report(tmp_path):
+    pnr = _pnr(tmp_path)
+    post_cts = pnr / "post_cts.def"
+    log = pnr / "openroad.log"
+    log.write_text("[INFO DRT-0267] detailed_route ...\n")
+    post_cts.write_text("DESIGN top ;\n")
+    cts = R._pl.cts_dir(tmp_path)
+    cts.mkdir(parents=True)
+    report = cts / "clock_tree.rpt"
+    report.write_text("[INFO CTS-0004] Total number of Buffers Inserted: 11.\n")
+    os.utime(report, (100, 100))
+    os.utime(post_cts, (200, 200))
+    os.utime(log, (200, 200))
+
+    result = R._emit_cts_report_if_complete(tmp_path, "top")
+    assert report.read_text().splitlines()[0] == (
+        "# CTS sign-off report — EVIDENCE LOST (#568)")
+    assert result == str(report)
 
 
 def test_nonfatal_noop_cts_recorded_honestly(tmp_path):

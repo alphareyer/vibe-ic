@@ -31257,15 +31257,20 @@ def _emit_cts_report_if_complete(project: Path, top: str):
     log_path = pnr_out / "openroad.log"
     post_cts = pnr_out / "post_cts.def"
     rpt = cts_out / "clock_tree.rpt"
-    # Already durable → nothing to do.
-    if rpt.is_file() and rpt.stat().st_size > 0:
-        return None
     # CTS must have ACTUALLY completed: post_cts.def is the geometric proof.
     # No post_cts.def (or no log) → CTS did not finish → do NOT fabricate a
     # report.
     if not post_cts.is_file() or not log_path.is_file():
         return None
-    log = log_path.read_text(errors="ignore")
+    # A second PnR can replace post_cts.def while leaving the first pass's
+    # clock_tree.rpt in place. A durable report is valid only for the CTS DEF
+    # that was present when it was emitted. Regenerate from this pass's log;
+    # if that evidence was lost, publish the explicit refusal below.
+    if (rpt.is_file() and rpt.stat().st_size > 0
+            and rpt.stat().st_mtime >= post_cts.stat().st_mtime):
+        return None
+    log_is_current = log_path.stat().st_mtime >= post_cts.stat().st_mtime
+    log = log_path.read_text(errors="ignore") if log_is_current else ""
     cts_lines = [ln for ln in log.splitlines()
                  if "cts" in ln.lower() or "clock_tree" in ln.lower()
                  or "CTS_" in ln]
