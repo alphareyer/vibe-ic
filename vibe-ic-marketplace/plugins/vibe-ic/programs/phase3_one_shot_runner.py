@@ -36219,6 +36219,15 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     if _pdn_em_floor is None:
         try:
             _pdn_em_floor = _pdn_em_reusable_floor(project, _pdn_em_identity_before)
+            if _pdn_em_floor is not None:
+                print("[phase3] PDN_EM_PRIOR_FLOOR_REUSED: prior measurement, "
+                      "input/tool identity and drawn strap widths verified",
+                      file=sys.stderr)
+            elif (_pl.pnr_dir(project) / _PDN_EM_RESIZE_SENTINEL).exists():
+                print("[phase3] PDN_EM_PRIOR_FLOOR_DECLINED: identity, "
+                      "measurement subject or effective-width proof is "
+                      "incomplete; using the existing floorless first pass",
+                      file=sys.stderr)
             if _pdn_em_floor is None:
                 _pdn_em_floor = _pdn_em_width_floor(
                     project, pdk, container, layout_will_be_replaced=True)
