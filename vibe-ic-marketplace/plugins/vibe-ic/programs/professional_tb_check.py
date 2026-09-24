@@ -156,6 +156,53 @@ _L10_UNIT_JUNIT_REL = Path(
     "phase2/stage1/sim_professional/l10_unit_tb/results.xml")
 
 
+#: The only option spellings this gate narrows on: RISC-V base/extension
+#: names that no other name in the set overlaps. A token outside it (a
+#: subset/superset extension such as Zmmul or Zca, a combined string such as
+#: RV32IMC or G, or free text) is never decided by string equality.
+_NARROWING_VOCABULARY = frozenset(
+    {"i", "e", "m", "a", "f", "d", "q", "c", "v", "h", "zicsr", "zifencei"})
+
+_DECLARATION_PROVENANCE_REL = "plugin_output/declaration.provenance.json"
+
+
+def _selection_basis_provenance(project: Path) -> Dict[str, Any]:
+    """The provenance record of the declaration field the narrowing read.
+
+    Same field lookup as the sibling's `design_selected_options` (first of
+    `_SELECTION_FIELDS` holding a list); the record comes from the emitter's
+    own sidecar. Absent sidecar / field -> said, never assumed verified."""
+    field = None
+    try:
+        obj = json.loads((project / _w._DECLARATION_REL).read_text(
+            errors="replace"))
+        fields = obj.get("fields") if isinstance(obj.get("fields"), dict) else obj
+        field = next((k for k in _w._SELECTION_FIELDS
+                      if isinstance(fields.get(k), list)), None)
+    except (OSError, ValueError, AttributeError):
+        pass
+    out: Dict[str, Any] = {"field": field,
+                           "sidecar": _DECLARATION_PROVENANCE_REL,
+                           "provenance": None, "provenance_verified": None}
+    try:
+        side = json.loads((project / _DECLARATION_PROVENANCE_REL).read_text(
+            errors="replace"))
+        rec = (side.get("fields") or {}).get(field) if field else None
+    except (OSError, ValueError, AttributeError):
+        out["why"] = "no readable provenance sidecar -- the basis is UNVERIFIED"
+        return out
+    if not isinstance(rec, dict):
+        out["why"] = (f"the sidecar carries no record for {field!r} -- the "
+                      f"basis is UNVERIFIED")
+        return out
+    out["provenance"] = rec.get("provenance")
+    out["provenance_verified"] = rec.get("provenance_verified") is True
+    if not out["provenance_verified"]:
+        out["why"] = ("the sidecar does not verify who chose this selection "
+                      "-- the basis is UNVERIFIED")
+    return out
+
+
 def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
     """Return the independently executed L10 unit-TB track, when present.
 
@@ -282,20 +329,54 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
     selected = _w.design_selected_options(project)
     _app_rows, _na_rows = _w.split_design_declared_na(list(cases), selected)
     _na_ref = {id(row) for row in _na_rows}
-    na_cases = [(cid, case) for cid, case in zip(ids, cases)
-                if id(case) in _na_ref]
+    # ONE VOCABULARY, FAIL-CLOSED (review w3u4f4z66 #3). The sibling compares
+    # the option token with the declaration list as exact strings; this gate
+    # narrows only when BOTH are spelled in a closed vocabulary. An option such
+    # as `RV32M`, `Zmmul` (a SUBSET of M -- declaring M does not make a Zmmul
+    # case absent, and declaring Zmmul does not make an M case absent) or
+    # `M (optional)`, or a declaration entry such as `RV32IMC` or `G`, cannot
+    # be decided by string equality, so the case stays DEMANDED and the reason
+    # is recorded. The sibling's own policy is not changed here.
+    not_narrowed = []
+    _undecodable = sorted(o for o in (selected or ())
+                          if o not in _NARROWING_VOCABULARY)
+    na_cases = []
+    for cid, case in zip(ids, cases):
+        if id(case) not in _na_ref:
+            continue
+        opt = str((case.get("applies_when") or {}).get("option") or "")
+        why = None
+        if _undecodable:
+            why = (f"the declaration's selection is not parseable in the "
+                   f"vocabulary {sorted(_NARROWING_VOCABULARY)}: "
+                   f"{_undecodable}")
+        elif opt.strip().lower() not in _NARROWING_VOCABULARY:
+            why = (f"option token {opt!r} is not in the vocabulary "
+                   f"{sorted(_NARROWING_VOCABULARY)}")
+        if why:
+            not_narrowed.append({"case": cid, "option": opt,
+                                 "why": why + " -- the case is DEMANDED"})
+        else:
+            na_cases.append((cid, case))
     na_ids = {cid for cid, _case in na_cases}
     applicable = [cid for cid in ids if cid not in na_ids]
     design_declared_na = {
         "decided": selected is not None,
         "design_selected": sorted(selected) if selected is not None else None,
         "declaration": _w._DECLARATION_REL,
+        # WHO CHOSE THE BASIS (review w3u4f4z66 #2). `declaration.json` is
+        # FLOW-written; its sidecar says per field whether the value's
+        # provenance was verified. Carried verbatim, so a reader sees an
+        # unverified basis as unverified.
+        "basis": _selection_basis_provenance(project),
+        "vocabulary": sorted(_NARROWING_VOCABULARY),
         "cases": [{"case": cid,
                    "option": (case.get("applies_when") or {}).get("option"),
                    "stated": (case.get("applies_when") or {}).get("stated"),
                    "source": (case.get("applies_when") or {}).get("source"),
                    "record_state": _l10x.case_state(cid, record)[0]}
                   for cid, case in na_cases],
+        "not_narrowed": not_narrowed,
         "note": ("DESIGN_DECLARED_NA: the case declares an option and the "
                  "design declares it does not have it; two declared documents "
                  "agree the case does not apply, so it is not demanded. Not a "
@@ -600,11 +681,18 @@ def main(argv=None) -> int:
               f"model's own declared closure policy {fc.get('required_pct')}% "
               f"({fc.get('export')}) — DISCLOSED, not blocking; see this "
               f"program's docstring for why.")
-    _na = (res.get("design_declared_na") or {}).get("cases") or []
+    _dna = res.get("design_declared_na") or {}
+    _na = _dna.get("cases") or []
     if _na:
+        _basis = _dna.get("basis") or {}
         print(f"[disclosed] {len(_na)} declared L10 case(s) DESIGN_DECLARED_NA "
               f"— not demanded, nothing claimed verified: "
-              + ", ".join(f"{r['case']} (option {r['option']})" for r in _na))
+              + ", ".join(f"{r['case']} (option {r['option']})" for r in _na)
+              + f"; basis {_basis.get('field')} provenance="
+                f"{_basis.get('provenance')} verified="
+                f"{_basis.get('provenance_verified')}")
+    for _r in _dna.get("not_narrowed") or []:
+        print(f"[demanded] {_r['case']}: {_r['why']}")
     verdict = res.get("verdict")
     if verdict == "NOT_CHECKED":
         # rc=2, the disclosed-skip tier. `flow_compliance_check` maps rc=2

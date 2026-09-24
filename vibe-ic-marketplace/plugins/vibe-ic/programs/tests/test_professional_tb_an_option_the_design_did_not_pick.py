@@ -139,3 +139,90 @@ def test_one_narrowing_the_siblings_own_helper():
     assert "_w.design_selected_options(" in src
     assert "def design_selected_options" not in src
     assert "def split_design_declared_na" not in src
+
+
+# --- review w3u4f4z66 -------------------------------------------------------
+import pytest  # noqa: E402
+
+
+def _row(name, option):
+    return {"name": name, "applies_when": {"option": option,
+                                           "stated": f"(若 Plugin 選 {option})",
+                                           "source": "L7 table"}}
+
+
+@pytest.mark.parametrize("option,declared", [
+    ("Zmmul", ["I", "M"]),          # a SUBSET of M: declaring M does not make it absent
+    ("M", ["I", "Zmmul"]),          # ...and declaring Zmmul does not make M absent
+    ("RV32M", ["I", "Zifencei"]),
+    ("M (optional)", ["I", "Zifencei"]),
+    ("M", ["RV32IMC"]),
+    ("M", ["G"]),
+])
+def test_an_unrecognised_spelling_never_narrows(tmp_path, monkeypatch,
+                                                option, declared):
+    """#3: fail closed -- narrow only when the option AND every declared entry
+    are in the closed vocabulary; otherwise the case is DEMANDED, with why."""
+    out = _run(tmp_path, monkeypatch, [{"name": "rv32i"}, _row("x", option)],
+               {"isa_extensions": declared},
+               {"rv32i": PASS, "x": UNRUN})
+    assert out["verdict"] == "NOT_CHECKED", out
+    assert [r["case"] for r in out["cases_not_executed"]] == ["x"]
+    dna = out["design_declared_na"]
+    assert dna["cases"] == []
+    assert [r["case"] for r in dna["not_narrowed"]] == ["x"]
+    assert "DEMANDED" in dna["not_narrowed"][0]["why"]
+
+
+def _sidecar(project, verified):
+    (project / "plugin_output" / "declaration.provenance.json").write_text(
+        json.dumps({"fields": {"isa_extensions": {
+            "provenance": "author_declared" if verified else "unknown",
+            "provenance_verified": verified}}}))
+
+
+def test_an_unverified_basis_is_disclosed_as_unverified(tmp_path, monkeypatch):
+    """#2: the narrowing still follows the sibling's policy, but a reader sees
+    that the declaration's selection is not verified."""
+    proj, ids = _project(tmp_path, [{"name": "rv32i"}, M_ROW], RV)
+    _sidecar(proj, False)
+    _wire(monkeypatch, proj, ids, {"rv32i": PASS, "mul_div": UNRUN})
+    basis = P.l10_unit_tb_track(proj)["design_declared_na"]["basis"]
+    assert basis["field"] == "isa_extensions"
+    assert basis["provenance_verified"] is False
+    assert "UNVERIFIED" in basis["why"]
+
+
+def test_a_verified_basis_says_so_and_a_missing_sidecar_is_unverified(
+        tmp_path, monkeypatch):
+    proj, ids = _project(tmp_path, [{"name": "rv32i"}, M_ROW], RV)
+    _wire(monkeypatch, proj, ids, {"rv32i": PASS, "mul_div": UNRUN})
+    assert "no readable provenance sidecar" in \
+        P.l10_unit_tb_track(proj)["design_declared_na"]["basis"]["why"]
+    _sidecar(proj, True)
+    basis = P.l10_unit_tb_track(proj)["design_declared_na"]["basis"]
+    assert basis["provenance_verified"] is True and "why" not in basis
+
+
+def test_the_coverage_payload_does_not_list_a_narrowed_case_as_covered(
+        tmp_path, monkeypatch):
+    """#1, RED BEFORE THE FIX: the runner's coverage_actual payload built
+    scenarios_covered from every JUnit testcase, so a DESIGN_DECLARED_NA case
+    whose oracle never ran was listed as covered, and the disclosure never
+    reached the artefact. run2-shaped: 2 applicable + 1 narrowed."""
+    import design_one_shot_runner as D
+    import _sim_results_bridge as _srb
+    rows = [{"name": "rv32i"}, {"name": "zifencei"}, M_ROW]
+    proj, ids = _project(tmp_path, rows, RV)
+    _wire(monkeypatch, proj, ids,
+          {"rv32i": PASS, "zifencei": PASS, "mul_div": UNRUN})
+    monkeypatch.setattr(_srb, "find_professional_tb_pass", lambda p: {
+        "tests": 3, "failures": 0, "errors": 0,
+        "rel_path": P._L10_UNIT_JUNIT_REL.as_posix(),
+        "rel_paths": [P._L10_UNIT_JUNIT_REL.as_posix()]})
+    pay = D._v1_6_609_functional_tb_pass_payload(proj)
+    assert pay and pay["verdict"] == "PASS", pay
+    assert pay["scenarios_covered"] == ["rv32i", "zifencei"], pay
+    assert pay["l10_conformance"] == {"ok": 2, "total": 2}
+    assert pay["declared_case_count"] == 3
+    assert [c["case"] for c in pay["design_declared_na"]["cases"]] == ["mul_div"]
