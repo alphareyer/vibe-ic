@@ -744,6 +744,72 @@ def _register_pass_outputs(step: str, status: str, duration_s: float,
         return
 
 
+def _redeclaration_evidence(path: Path, cur_sha: str,
+                            writer: Optional[Tuple[str, float]] = None
+                            ) -> Optional[str]:
+    """THE ONE ANSWER to "may the runner re-declare `path`'s current bytes, and
+    as whose work?" -- the producing step, or None.
+
+    Two kinds of evidence, both about THIS pass:
+      * `writer=(step, since)`: the CALLER wrote the file itself, in this pass,
+        at or after `since` (checked against the file's own mtime) -- e.g. the
+        canonical GDS copy restamped by the code that just made it;
+      * otherwise a step of this pass that returned with exactly these bytes
+        (`_PASS_PRODUCED`, filled from each step's own row and run window).
+    Anything else is an unexplained change, and the caller records it with
+    `_record_unexplained_rewrite` instead of declaring it."""
+    if writer is not None:
+        try:
+            if Path(path).stat().st_mtime >= float(writer[1]) - 2.0:
+                return str(writer[0])
+        except OSError:
+            pass
+    who = _PASS_PRODUCED.get(str(Path(path).resolve()))
+    if who is not None and who[1] == cur_sha:
+        return who[0]
+    return None
+
+
+_UNEXPLAINED_REWRITES_REL = "reports/phase3/provenance_unexplained_rewrites.json"
+
+
+def _record_unexplained_rewrite(project: Path, rel: str, declared_sha: str,
+                                disk_sha: str, site: str) -> None:
+    """Record a declared output whose bytes changed with no evidence of which
+    step of this pass wrote them. It is NOT declared, so the hash check still
+    reports it; this report says where the runner declined. Never raises."""
+    try:
+        out = Path(project) / _UNEXPLAINED_REWRITES_REL
+        doc = {}
+        if out.is_file():
+            try:
+                doc = json.loads(out.read_text())
+            except ValueError:
+                doc = {}
+        rows = [r for r in (doc.get("rewrites") or []) if isinstance(r, dict)]
+        who = _PASS_PRODUCED.get(str((Path(project) / rel).resolve()))
+        row = {"path": rel, "declared_sha256": declared_sha,
+               "disk_sha256": disk_sha, "declined_by": site,
+               "why": ("no step of this pass wrote these bytes"
+                       if who is None else
+                       f"step {who[0]!r} wrote this path, but it changed "
+                       f"after that step returned")}
+        if not any(r.get("path") == rel and r.get("disk_sha256") == disk_sha
+                   for r in rows):
+            rows.append(row)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({
+            "program": "phase3_one_shot_runner",
+            "verdict": "FINDING",
+            "note": ("declared outputs whose bytes changed with no invocation "
+                     "this pass can account for; they are NOT re-declared, so "
+                     "provenance_output_hash_completeness_check reports each as "
+                     "a hash mismatch"),
+            "rewrites": rows}, indent=2) + "\n")
+    except Exception:  # noqa: BLE001
+        return
+
+
 def set_invocation_provenance_sink(project: Optional[Path]) -> None:
     """Point per-invocation logging at `<project>/provenance.jsonl`, or None to
     disable. Unset means no logging at all — a library caller (several gates
@@ -15872,6 +15938,7 @@ def _ensure_structural_reader_readable(netlist: Path,
     new_text, n_signed = _strip_signed_net_decls(nl_text)
     if n_signed <= 0:
         return 0
+    _t_write = time.time()
     try:
         netlist.write_text(new_text, encoding="utf-8")
     except Exception:
@@ -15880,7 +15947,8 @@ def _ensure_structural_reader_readable(netlist: Path,
         try:
             _restamp_provenance_output(
                 project, str(netlist.relative_to(project)), netlist,
-                "yosys",
+                "yosys", writer=("structural_reader_normalise", _t_write),
+                command=
                 "phase3_one_shot_runner: `signed` net qualifiers stripped for "
                 "the structural Verilog reader (syntactic no-op for PnR/STA)")
         except Exception:
@@ -49999,6 +50067,16 @@ def _v1_6_620_append_pv_signoff_provenance(project: Path, top: str) -> List[str]
             _prev_sha = str((_prev.get("outputs") or {}).get(rel, ""))
             if _prev_sha == _sha(fp) and str(_prev.get("tool")) == tool:
                 continue        # the ledger already says exactly this
+            # THE BYTES CHANGED under a back-filled record: re-declared only
+            # with evidence this pass wrote them (`_redeclaration_evidence`).
+            # Same bytes with a corrected tool is a re-attribution, not a
+            # re-declaration, and needs none.
+            if _prev_sha != _sha(fp):
+                if _redeclaration_evidence(fp, _sha(fp)) is None:
+                    _record_unexplained_rewrite(
+                        project, rel, _prev_sha, _sha(fp),
+                        "_v1_6_620_append_pv_signoff_provenance")
+                    continue
         entry = {
             "tool": tool,
             "command": f"{cmd} (phase3_one_shot_runner)",
@@ -50072,7 +50150,9 @@ def step_drv_promotion_corroboration(project: Path) -> StepResult:
 
 
 def _restamp_provenance_output(project: Path, rel: str, path: Path,
-                               tool: str, command: str) -> None:
+                               tool: str, command: str,
+                               writer: Optional[Tuple[str, float]] = None
+                               ) -> None:
     """Make provenance.jsonl declare `rel` with the REAL current sha256 of
     `path`.
 
@@ -50127,6 +50207,17 @@ def _restamp_provenance_output(project: Path, rel: str, path: Path,
             if isinstance(_outs, dict) and rel in _outs:
                 _found = True
                 _newest_sha = _outs[rel]
+        _step = None
+        if _found and _newest_sha != _sha:
+            # EVIDENCE FIRST (`_redeclaration_evidence`): only bytes this pass
+            # demonstrably wrote are re-declared; anything else is recorded as
+            # an unexplained rewrite and left for the hash check to report.
+            _step = _redeclaration_evidence(path, _sha, writer)
+            if _step is None:
+                _record_unexplained_rewrite(
+                    project, rel, str(_newest_sha), _sha,
+                    "_restamp_provenance_output")
+                return
         if _found and _newest_sha != _sha:
             _reemit = {
                 "tool": tool,
@@ -50139,6 +50230,7 @@ def _restamp_provenance_output(project: Path, rel: str, path: Path,
                 "note": "output re-emitted; the earlier record of "
                         "this path is superseded, not amended",
                 "outputs": {rel: _sha},
+                "producing_step": {rel: _step},
             }
             _rmeas.attach(project, _reemit)
             with prov_path.open("a") as _f:
@@ -50230,30 +50322,16 @@ def _record_reemitted_outputs(project: Path) -> Optional[str]:
                     # these bytes -- see `_PASS_PRODUCED`. Anything else is an
                     # unexplained change: recorded as a finding, never as a
                     # fresh declaration, so the hash check still sees it.
-                    _who = _PASS_PRODUCED.get(str(fp.resolve()))
-                    if _who is not None and _who[1] == cur:
+                    _step = _redeclaration_evidence(fp, cur)
+                    if _step is not None:
                         drifted[rel] = cur
-                        producing[rel] = _who[0]
+                        producing[rel] = _step
                     else:
-                        unexplained.append({
-                            "path": rel, "declared_sha256": declared_sha,
-                            "disk_sha256": cur,
-                            "why": ("no step of this pass wrote these bytes"
-                                    if _who is None else
-                                    f"step {_who[0]!r} wrote this path, but "
-                                    f"it changed after that step returned")})
-        _unexplained_path = project / "reports" / "phase3" / \
-            "provenance_unexplained_rewrites.json"
-        if unexplained:
-            _unexplained_path.parent.mkdir(parents=True, exist_ok=True)
-            _unexplained_path.write_text(json.dumps({
-                "program": "phase3_one_shot_runner",
-                "verdict": "FINDING",
-                "note": ("declared outputs whose bytes changed with no "
-                         "invocation this pass can account for; they are NOT "
-                         "re-declared, so provenance_output_hash_completeness_"
-                         "check reports each as a hash mismatch"),
-                "rewrites": unexplained}, indent=2) + "\n")
+                        unexplained.append({"path": rel})
+                        _record_unexplained_rewrite(
+                            project, rel, declared_sha, cur,
+                            "_record_reemitted_outputs")
+        _unexplained_path = project / _UNEXPLAINED_REWRITES_REL
         if drifted:
             _bulk = {
                 "tool": "phase3_one_shot_runner",
@@ -51327,7 +51405,8 @@ def declared_signoff_rollup(plan: List[StepResult]) -> Dict[str, Any]:
 
 
 def _step37_restamp_canon_gds_provenance(project: Path, top: str,
-                                         canon_gds: Path) -> None:
+                                         canon_gds: Path,
+                                        writer: Optional[Tuple[str, float]] = None) -> None:
     """After Step 37 writes phase3/stage4/gds/<top>.gds, update provenance.jsonl
     so the declared hash matches the freshly-written file.
 
@@ -51364,7 +51443,8 @@ def _step37_restamp_canon_gds_provenance(project: Path, top: str,
     """
     _restamp_provenance_output(
         project, f"phase3/stage4/gds/{top}.gds", canon_gds, "klayout",
-        "klayout streamout (canonical GDS) (phase3_one_shot_runner step37)")
+        "klayout streamout (canonical GDS) (phase3_one_shot_runner step37)",
+        writer=writer)
 
 
 def _canonical_gds_is_stale(primary_gds: Path, canon_gds: Path) -> bool:
@@ -55355,6 +55435,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # GDS) so Step-31 provenance_check does not false-FAIL a clean layout
         # on missing bookkeeping. Only real on-disk outputs are declared
         # (anti-fabrication); idempotent.
+        _register_pass_outputs("canonicalize_artefacts", "PASS", 0.0, written, since=t0)
         _pv_declared = _v1_6_620_append_pv_signoff_provenance(project, top)
         _rebind_measured_drc_invocation_to_canonical_path(project)
         if _pv_declared and str(prov_path) not in written:
@@ -56314,6 +56395,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # sha256), so a report that was never produced (or a stale/absent
         # one) is NOT fabricated and Step-31 provenance still FAILs correctly.
         _rebind_measured_drc_invocation_to_canonical_path(project)
+        _register_pass_outputs("canonicalize_artefacts", "PASS", 0.0, written, since=t0)
         _drc_prov_declared = _v1_6_620_append_pv_signoff_provenance(
             project, top)
         if _drc_prov_declared:
@@ -56347,6 +56429,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         _stale = _canonical_gds_is_stale(primary_gds, canon_gds)
         if not canon_gds.is_file() or _stale:
             # Use binary copy so KLayout sees a real GDS, not a symlink.
+            _t_canon_copy = time.time()
             with primary_gds.open("rb") as src, canon_gds.open("wb") as dst:
                 while True:
                     chunk = src.read(1024 * 1024)
@@ -56358,7 +56441,9 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             # was JUST written. Both provenance writers above ran BEFORE this
             # copy, so neither could describe (or refresh) it — see
             # _step37_restamp_canon_gds_provenance.
-            _step37_restamp_canon_gds_provenance(project, top, canon_gds)
+            _step37_restamp_canon_gds_provenance(
+                project, top, canon_gds,
+                writer=("canonicalize_artefacts", _t_canon_copy))
             if _stale:
                 notes.append(
                     "canonical GDS refreshed: the staged "
@@ -56376,6 +56461,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # a file written 10 minutes earlier, and phase3/stage3/pnr/<top>.gds —
         # the layout DRC and LVS actually verified — had no record at all.
         # Re-hashes; never copies an older digest (#365).
+        _register_pass_outputs("canonicalize_artefacts", "PASS", 0.0, written, since=t0)
         _step37_declare_streamout_gds_provenance(project, top)
 
     # --- Step 39: FPGA on_board_pass.json schema alignment --------------
