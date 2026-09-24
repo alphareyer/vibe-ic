@@ -147,12 +147,60 @@ import _flow_reason_taxonomy as _reason_taxonomy
 import _l10_execution as _l10x
 import _path_layout as _pl
 import _sim_results_bridge as _sim_results
+import cpu_functional_oracle_waiver_check as _w
 
 
 _L10_CASE_LIST_KEYS = ("test_cases", "cases", "vectors", "cmd_response",
                        "tests")
 _L10_UNIT_JUNIT_REL = Path(
     "phase2/stage1/sim_professional/l10_unit_tb/results.xml")
+
+
+#: The only option spellings this gate narrows on: RISC-V base/extension
+#: names that no other name in the set overlaps. A token outside it (a
+#: subset/superset extension such as Zmmul or Zca, a combined string such as
+#: RV32IMC or G, or free text) is never decided by string equality.
+_NARROWING_VOCABULARY = frozenset(
+    {"i", "e", "m", "a", "f", "d", "q", "c", "v", "h", "zicsr", "zifencei"})
+
+_DECLARATION_PROVENANCE_REL = "plugin_output/declaration.provenance.json"
+
+
+def _selection_basis_provenance(project: Path) -> Dict[str, Any]:
+    """The provenance record of the declaration field the narrowing read.
+
+    Same field lookup as the sibling's `design_selected_options` (first of
+    `_SELECTION_FIELDS` holding a list); the record comes from the emitter's
+    own sidecar. Absent sidecar / field -> said, never assumed verified."""
+    field = None
+    try:
+        obj = json.loads((project / _w._DECLARATION_REL).read_text(
+            errors="replace"))
+        fields = obj.get("fields") if isinstance(obj.get("fields"), dict) else obj
+        field = next((k for k in _w._SELECTION_FIELDS
+                      if isinstance(fields.get(k), list)), None)
+    except (OSError, ValueError, AttributeError):
+        pass
+    out: Dict[str, Any] = {"field": field,
+                           "sidecar": _DECLARATION_PROVENANCE_REL,
+                           "provenance": None, "provenance_verified": None}
+    try:
+        side = json.loads((project / _DECLARATION_PROVENANCE_REL).read_text(
+            errors="replace"))
+        rec = (side.get("fields") or {}).get(field) if field else None
+    except (OSError, ValueError, AttributeError):
+        out["why"] = "no readable provenance sidecar -- the basis is UNVERIFIED"
+        return out
+    if not isinstance(rec, dict):
+        out["why"] = (f"the sidecar carries no record for {field!r} -- the "
+                      f"basis is UNVERIFIED")
+        return out
+    out["provenance"] = rec.get("provenance")
+    out["provenance_verified"] = rec.get("provenance_verified") is True
+    if not out["provenance_verified"]:
+        out["why"] = ("the sidecar does not verify who chose this selection "
+                      "-- the basis is UNVERIFIED")
+    return out
 
 
 def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
@@ -260,6 +308,81 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
             "reason": "L10 execution record is not bound to the canonical JUnit",
         }
 
+    # A CASE THE DESIGN DECLARED IT DOES NOT HAVE (R-0915-102, applied here).
+    #
+    # MEASURED on subservient x gf180mcuD (run2, main 240c0a353): 7 of the 10
+    # declared cases carry a `sim_executed=true` PASS row, and the other three
+    # are `(若 Plugin 選 M / Zicsr / C)` rows whose L10 entry carries
+    # `applies_when: {option: M | Zicsr | C}` while the design's own
+    # `plugin_output/declaration.json` records `isa_extensions: ["I",
+    # "Zifencei"]`. Step 4's sibling gate `cpu_functional_oracle_waiver_check`
+    # already takes those three out of ITS denominator on that declared basis;
+    # this gate did not, so the SAME step judged two different case populations
+    # and blocked on three oracles no RV32I-Zifencei build can execute.
+    #
+    # ONE NARROWING, NOT TWO: the sibling's own public helpers decide it, so the
+    # two gates cannot drift. Fail-closed both ways, exactly as there: no
+    # declaration / no selection field decides nothing, a row with no
+    # `applies_when` stays, and an option the design DID select is demanded.
+    # A narrowed case is DISCLOSED by name with its basis, never dropped
+    # silently, and a FAIL anywhere -- narrowed case or not -- is still a FAIL.
+    selected = _w.design_selected_options(project)
+    _app_rows, _na_rows = _w.split_design_declared_na(list(cases), selected)
+    _na_ref = {id(row) for row in _na_rows}
+    # ONE VOCABULARY, FAIL-CLOSED (review w3u4f4z66 #3). The sibling compares
+    # the option token with the declaration list as exact strings; this gate
+    # narrows only when BOTH are spelled in a closed vocabulary. An option such
+    # as `RV32M`, `Zmmul` (a SUBSET of M -- declaring M does not make a Zmmul
+    # case absent, and declaring Zmmul does not make an M case absent) or
+    # `M (optional)`, or a declaration entry such as `RV32IMC` or `G`, cannot
+    # be decided by string equality, so the case stays DEMANDED and the reason
+    # is recorded. The sibling's own policy is not changed here.
+    not_narrowed = []
+    _undecodable = sorted(o for o in (selected or ())
+                          if o not in _NARROWING_VOCABULARY)
+    na_cases = []
+    for cid, case in zip(ids, cases):
+        if id(case) not in _na_ref:
+            continue
+        opt = str((case.get("applies_when") or {}).get("option") or "")
+        why = None
+        if _undecodable:
+            why = (f"the declaration's selection is not parseable in the "
+                   f"vocabulary {sorted(_NARROWING_VOCABULARY)}: "
+                   f"{_undecodable}")
+        elif opt.strip().lower() not in _NARROWING_VOCABULARY:
+            why = (f"option token {opt!r} is not in the vocabulary "
+                   f"{sorted(_NARROWING_VOCABULARY)}")
+        if why:
+            not_narrowed.append({"case": cid, "option": opt,
+                                 "why": why + " -- the case is DEMANDED"})
+        else:
+            na_cases.append((cid, case))
+    na_ids = {cid for cid, _case in na_cases}
+    applicable = [cid for cid in ids if cid not in na_ids]
+    design_declared_na = {
+        "decided": selected is not None,
+        "design_selected": sorted(selected) if selected is not None else None,
+        "declaration": _w._DECLARATION_REL,
+        # WHO CHOSE THE BASIS (review w3u4f4z66 #2). `declaration.json` is
+        # FLOW-written; its sidecar says per field whether the value's
+        # provenance was verified. Carried verbatim, so a reader sees an
+        # unverified basis as unverified.
+        "basis": _selection_basis_provenance(project),
+        "vocabulary": sorted(_NARROWING_VOCABULARY),
+        "cases": [{"case": cid,
+                   "option": (case.get("applies_when") or {}).get("option"),
+                   "stated": (case.get("applies_when") or {}).get("stated"),
+                   "source": (case.get("applies_when") or {}).get("source"),
+                   "record_state": _l10x.case_state(cid, record)[0]}
+                  for cid, case in na_cases],
+        "not_narrowed": not_narrowed,
+        "note": ("DESIGN_DECLARED_NA: the case declares an option and the "
+                 "design declares it does not have it; two declared documents "
+                 "agree the case does not apply, so it is not demanded. Not a "
+                 "waiver and not a pass: nothing about it is claimed verified."),
+    }
+
     states = [_l10x.case_state(case_id, record)[0] for case_id in ids]
     if _l10x.FAIL in states:
         return {
@@ -267,7 +390,18 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
             "professional_track": "l10_unit_tb_execution",
             "reason": "independent L10 execution record contains a failed case",
         }
-    if any(state != _l10x.PASS for state in states):
+    if not applicable:
+        return {
+            "gate": "professional_tb", "verdict": "NOT_CHECKED",
+            "reason_class": _reason_taxonomy.BLOCKED_BY_UPSTREAM,
+            "professional_track": "l10_unit_tb_execution",
+            "reason": (f"every one of the {len(ids)} declared L10 case(s) is "
+                       f"design-declared not applicable; nothing was verified"),
+            "design_declared_na": design_declared_na,
+            "declared_case_count": len(ids),
+        }
+    if any(_l10x.case_state(cid, record)[0] != _l10x.PASS
+           for cid in applicable):
         # R-0915-39: REFUSE BY NAME, NEVER "one or more".
         #
         # The old sentence was a block with no subject: a reader could not tell
@@ -285,7 +419,7 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
         not_passed = [
             {"case": cid, "state": st, "reason": why}
             for cid, (st, why) in
-            ((cid, _l10x.case_state(cid, record)) for cid in ids)
+            ((cid, _l10x.case_state(cid, record)) for cid in applicable)
             if st != _l10x.PASS]
         shown = ", ".join(f"{r['case']} [{r['state']}]" for r in not_passed[:6])
         more = (f" (+{len(not_passed) - 6} more)"
@@ -294,10 +428,14 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
             "gate": "professional_tb", "verdict": "NOT_CHECKED",
             "reason_class": _reason_taxonomy.BLOCKED_BY_UPSTREAM,
             "professional_track": "l10_unit_tb_execution",
-            "reason": (f"{len(not_passed)} of {len(ids)} declared L10 case(s) "
-                       f"did not execute their declared oracle: {shown}{more}"),
+            "reason": (f"{len(not_passed)} of {len(applicable)} declared L10 "
+                       f"case(s) did not execute their declared oracle: "
+                       f"{shown}{more}"
+                       + (f" ({len(na_ids)} more design-declared not "
+                          f"applicable)" if na_ids else "")),
             "cases_not_executed": not_passed,
             "declared_case_count": len(ids),
+            "design_declared_na": design_declared_na,
         }
 
     return {
@@ -306,7 +444,9 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
         "evidence": _L10_UNIT_JUNIT_REL.as_posix(),
         "execution_record": Path(str(record["path"])).relative_to(project).as_posix(),
         "producer": record.get("producer"),
-        "l10_cases": len(ids),
+        "l10_cases": len(applicable),
+        "declared_case_count": len(ids),
+        "design_declared_na": design_declared_na,
         "junit": {k: int(summary.get(k, 0) or 0)
                   for k in ("tests", "passed", "failures", "errors")},
     }
@@ -541,6 +681,18 @@ def main(argv=None) -> int:
               f"model's own declared closure policy {fc.get('required_pct')}% "
               f"({fc.get('export')}) — DISCLOSED, not blocking; see this "
               f"program's docstring for why.")
+    _dna = res.get("design_declared_na") or {}
+    _na = _dna.get("cases") or []
+    if _na:
+        _basis = _dna.get("basis") or {}
+        print(f"[disclosed] {len(_na)} declared L10 case(s) DESIGN_DECLARED_NA "
+              f"— not demanded, nothing claimed verified: "
+              + ", ".join(f"{r['case']} (option {r['option']})" for r in _na)
+              + f"; basis {_basis.get('field')} provenance="
+                f"{_basis.get('provenance')} verified="
+                f"{_basis.get('provenance_verified')}")
+    for _r in _dna.get("not_narrowed") or []:
+        print(f"[demanded] {_r['case']}: {_r['why']}")
     verdict = res.get("verdict")
     if verdict == "NOT_CHECKED":
         # rc=2, the disclosed-skip tier. `flow_compliance_check` maps rc=2

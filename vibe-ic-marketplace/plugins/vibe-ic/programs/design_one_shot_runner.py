@@ -18688,7 +18688,15 @@ def _v1_6_609_functional_tb_pass_payload(project: Path):
                 or unit_track.get("evidence") != rel_evidence):
             return None
         ok = total = int(unit_track.get("l10_cases", 0) or 0)
+        # A case the design declared absent is NOT covered: its oracle never
+        # ran. `scenarios_covered` is built from every JUnit <testcase> below,
+        # so the narrowed ids are removed there and the disclosure travels
+        # with the artefact (review w3u4f4z66 #1).
+        _dna = unit_track.get("design_declared_na") or {}
+        _narrowed = {str(r.get("case")) for r in (_dna.get("cases") or [])}
+        _declared_count = unit_track.get("declared_case_count")
     else:
+        _dna, _narrowed, _declared_count = {}, set(), None
         l10 = _v1_6_609_l10_conformance_ok(project)
         if l10 is None:
             return None
@@ -18696,12 +18704,17 @@ def _v1_6_609_functional_tb_pass_payload(project: Path):
         if not (total > 0 and ok == total):
             return None
     cases = re.findall(r"<testcase[^>]*\bname=[\"']([A-Za-z0-9_./-]+)[\"']", txt)
+    _payload_extra = {}
+    if _narrowed or _declared_count is not None:
+        _payload_extra = {"declared_case_count": _declared_count,
+                          "design_declared_na": _dna}
     return {
         "verdict": "PASS",
         "verification_track": "authored_functional_tb",
         "evidence": rel_evidence,
-        "scenarios_covered": sorted(set(cases))[:24],
+        "scenarios_covered": sorted(set(cases) - _narrowed)[:24],
         "l10_conformance": {"ok": ok, "total": total},
+        **_payload_extra,
         "note": ("authored self-checking functional TB PASS "
                  f"({counted_from} "
                  f"tests={tests}/failures={failures}/errors={errors}, "
