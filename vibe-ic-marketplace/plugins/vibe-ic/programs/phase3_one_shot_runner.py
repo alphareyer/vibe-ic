@@ -7453,8 +7453,27 @@ def _pdn_em_reusable_floor(project: Path, identity: Optional[Dict[str, Any]]
                 or doc.get("measurement_subject_sha256") != doc.get("spent_on_def")):
             return None
         binds, _ = _ppa_power._pdn_em_sentinel_binds(sentinel, project)
-        return floor if binds else None
-    except (OSError, ValueError, AttributeError):
+        if not binds:
+            return None
+        # The sentinel's `short` names only layers that needed widening on
+        # pass 1. Prove the FULL reusable floor on every stripe the final
+        # PnR deck drew; otherwise a partial/mismatched record could borrow
+        # a floor that the final DEF never implemented.
+        import em_current_density_check as _emcd
+        drawn = _emcd._def_pg_widths_of(
+            pnr / _ppa_power._PDN_EM_SUBJECT_DEF) or {}
+        deck = (pnr / "pnr.tcl").read_text(errors="replace")
+        straps = {m.group(1).lower() for m in re.finditer(
+            r"add_pdn_stripe\b[^\n]*?-layer\s+(\S+)[^\n]*", deck)
+            if "-followpins" not in m.group(0)}
+        if not straps:
+            return None
+        for layer in straps:
+            row = floor["per_layer"].get(layer)
+            if row and drawn.get(layer, 0.0) + 1e-9 < float(row["w_em_um"]):
+                return None
+        return floor
+    except Exception:  # nosec — uncertain proof must keep the old floorless path
         return None
 
 

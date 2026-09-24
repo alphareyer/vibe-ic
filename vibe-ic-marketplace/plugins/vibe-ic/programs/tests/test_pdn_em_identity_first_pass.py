@@ -23,6 +23,8 @@ def _setup(tmp_path, monkeypatch, prior_width=4.0):
     pnr.mkdir(parents=True, exist_ok=True)
     for name in ("routed.def", "widget.def"):
         (pnr / name).write_text(_def(prior_width))
+    (pnr / "pnr.tcl").write_text(
+        "add_pdn_stripe -grid grid -layer met4 -width 4.0 -pitch 20\n")
     digest = hashlib.sha256((pnr / "routed.def").read_bytes()).hexdigest()
     identity = {"sha256": "same-input", "tool_image": "sha256:fixture",
                 "producer": {"plugin_version": "test", "recipe_sha256": "recipe"}}
@@ -73,6 +75,16 @@ def test_each_identity_change_refuses_prior_floor(tmp_path, monkeypatch, change)
 
 def test_ineffective_floor_is_redrawn_narrow(tmp_path, monkeypatch):
     project, _, _, calls = _setup(tmp_path, monkeypatch, prior_width=1.6)
+    R.step_pnr(project, "widget", _pdk(), "fixture", "200x200", 0.30)
+    assert calls and calls[0] < 3.95
+
+
+def test_full_floor_must_have_taken_effect(tmp_path, monkeypatch):
+    project, pnr, _, calls = _setup(tmp_path, monkeypatch)
+    sentinel = pnr / R._PDN_EM_RESIZE_SENTINEL
+    doc = json.loads(sentinel.read_text())
+    doc["floor"]["per_layer"]["met4"]["w_em_um"] = 4.2
+    sentinel.write_text(json.dumps(doc))
     R.step_pnr(project, "widget", _pdk(), "fixture", "200x200", 0.30)
     assert calls and calls[0] < 3.95
 
