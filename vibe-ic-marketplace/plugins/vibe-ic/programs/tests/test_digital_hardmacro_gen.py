@@ -359,8 +359,9 @@ def test_the_runner_invokes_this_producer(tmp_path):
     # dispatched into the container; this step is a plain host subprocess, so
     # without the container name the producer probes the one environment
     # magic is known not to be in and reports the tool absent.
-    assert ("plan.append(step_digital_hardmacro_gen(project, pdk, "
-            "args.container))" in src)
+    from _phase3_main_dispatch import guarded_producer_line
+    assert guarded_producer_line("step_digital_hardmacro_gen",
+                                 "digital_hardmacro_gen")
 
 
 def test_the_gate_never_invokes_this_producer():

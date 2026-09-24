@@ -86,9 +86,14 @@ def test_failed_blocked_and_absent_pnr_do_not_continue():
 def test_the_chain_gate_is_wired_to_the_predicate():
     """A predicate nothing calls is not a fix."""
     src = inspect.getsource(R.main)
-    assert "_pnr_chain_continues(_pnr_row)" in src, (
-        "main() no longer derives the phase-3 chain from _pnr_chain_continues; "
-        "the stream-out gate is not wired to it")
+    assert "_pdn_em_resize_chain_continues(\n            _pnr_row, _rz_post_status)" in src, (
+        "main() no longer derives the stream-out chain from PnR and the "
+        "post-resize EM verdict")
+    waived = _row("PASS_WITH_WAIVERS", pnr_signoff_writes_complete=True,
+                  route_residual_waiver={"ticket": "vibe-ic#1412"})
+    assert R._pdn_em_resize_chain_continues(waived, "PASS") is True
+    assert R._pdn_em_resize_chain_continues(waived, "FAIL") is False
+    assert R._pdn_em_resize_chain_continues(_row("FAIL"), "PASS") is False
     assert '_pnr_row.status == "PASS"' not in src, (
         "main() still tests the PnR row's status literally against PASS -- "
         "that is the exact test that dropped the WAIVED stream-out")
@@ -100,10 +105,8 @@ def test_step_gds_is_dispatched_under_the_chain_gate():
     this test should be rewritten, not deleted -- but it must not silently
     become vacuous."""
     src = inspect.getsource(R.main)
-    assert "step_gds, project, effective_top, pdk, args.container" in src, (
-        "step_gds is no longer dispatched from main() at all")
-    head = src.split("step_gds, project, effective_top, pdk, args.container")[0]
-    assert "_chain_ok" in head, "the gds dispatch is not gated by _chain_ok"
+    from _phase3_main_dispatch import gds_chain_dispatch_line
+    assert gds_chain_dispatch_line()
     assert "_chain_ok = _pnr_step_passed" in src, (
         "_chain_ok no longer derives from the PnR chain predicate")
 
