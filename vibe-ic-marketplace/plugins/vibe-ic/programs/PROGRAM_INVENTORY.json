@@ -15,8 +15,8 @@
     },
     "programs_tree_all_py": {
       "definition": "Every *.py at ANY depth under plugins/vibe-ic/programs/, including programs/tests/ and the sub-packages. Roughly programs_top_level + test_files + sub-package modules.",
-      "count": 5525,
-      "sha256_of_sorted_paths": "9bd7dac472b616fb559a3274816bc88ef87caa65735a8af95c4a016eef96cea0"
+      "count": 5526,
+      "sha256_of_sorted_paths": "d1b34e53bb1c76199384dcc0957c7eb01a224feb212cfc6ff589051c089b768f"
     },
     "test_files": {
       "definition": "Every test_*.py at any depth under plugins/vibe-ic/programs/tests/.",
