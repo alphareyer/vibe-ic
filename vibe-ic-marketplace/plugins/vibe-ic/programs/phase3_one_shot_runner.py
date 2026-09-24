@@ -66228,6 +66228,20 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                             _preflight_refusal(site), step_lvs,
                             project, top, pdk, args.container,
                             upstream_pnr=None)
+        if site == "gds" and row.status == "PASS":
+            # The full runner normally reaches this alias through the broad
+            # canonicalizer.  A window may publish only Step 37's own GDS,
+            # never call that canonicalizer (which rewrites other steps).
+            source = _pl.pnr_dir(project) / f"{top}.gds"
+            target = _pl.gds_dir(project) / f"{top}.gds"
+            if source.is_file():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                row.output_files.append(str(target))
+            else:
+                row = StepResult("gds", "NOT_MEASURED", row.duration_s,
+                                 f"stream-out reported PASS without {source}",
+                                 reason_class=_V.ReasonClass.INPUT_ABSENT)
         rows.append(row)
         site_after = _phase3_file_manifest(project)
         if any(site_before.get(k) != site_after.get(k)

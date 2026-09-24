@@ -17,9 +17,10 @@ def test_real_runner_cli_exposes_window():
 
 def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monkeypatch):
     project = tmp_path / "project"
-    (project / "phase3" / "pnr").mkdir(parents=True)
+    pnr = p3._pl.pnr_dir(project)
+    pnr.mkdir(parents=True)
     (project / "phase3" / "synth").mkdir(parents=True)
-    (project / "phase3" / "pnr" / "top.def").write_text("supplied route\n")
+    (pnr / "top.def").write_text("supplied route\n")
     (project / "phase3" / "synth" / "top_synth.v").write_text("supplied netlist\n")
     (project / "reports" / "phase3").mkdir(parents=True)
     (project / "reports" / "phase3" / "drc.rpt").write_text("old DRC\n")
@@ -28,7 +29,7 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
     # This is the EDA container's stream-out write.  Dispatch, preflight,
     # manifest comparison, stale marking and report publication are real.
     def streamout(project_, top, pdk, container):
-        out = project_ / "phase3" / "pnr" / f"{top}.gds"
+        out = p3._pl.pnr_dir(project_) / f"{top}.gds"
         out.write_bytes(b"new layout")
         return p3.StepResult("gds", "PASS", 0.0, "streamed", [str(out)])
 
@@ -48,13 +49,14 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
         "reports/orchestrator/phase3_one_shot.json",
         "reports/write_ledger.json",
     }
-    assert all(name == "phase3/pnr/top.gds" or
+    assert all(name in ("phase3/stage3/pnr/top.gds", "phase3/stage4/gds/top.gds") or
                name in allowed_reports or name.startswith("steps/")
                for name in changed), changed
-    assert after["phase3/pnr/top.def"] == before["phase3/pnr/top.def"]
+    assert after["phase3/stage3/pnr/top.def"] == before["phase3/stage3/pnr/top.def"]
     assert after["phase3/synth/top_synth.v"] == before["phase3/synth/top_synth.v"]
     assert after["reports/phase3/drc.rpt"] == before["reports/phase3/drc.rpt"]
-    assert "phase3/pnr/top.gds" in after
+    assert "phase3/stage3/pnr/top.gds" in after
+    assert after["phase3/stage4/gds/top.gds"] == after["phase3/stage3/pnr/top.gds"]
     report = json.loads((project / "reports" / "orchestrator" /
                          "phase3_one_shot.json").read_text())
     assert report["bounded"] is True
@@ -161,7 +163,8 @@ def test_real_gds_step_with_container_write_keeps_other_stage_files(tmp_path, mo
         "reports/phase3/technology_units.json",
         "reports/write_ledger.json",
     }
-    assert all(name.startswith(("phase3/stage3/pnr/", "steps/")) or
+    assert all(name.startswith(("phase3/stage3/pnr/", "phase3/stage4/gds/",
+                                "steps/")) or
                name in allowed_reports for name in changed), sorted(changed)
     assert calls, "the real GDS step never reached the container"
     assert any(name.endswith(".gds") for name in after)
