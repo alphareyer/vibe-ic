@@ -460,3 +460,105 @@ class TestASharedDirectoryIsNeverAProjectRoot:
         monkeypatch.setattr(driver, "_SHARED_ROOTS",
                             driver._SHARED_ROOTS + (str(shared),))
         assert driver._resolve_project_root_from_sof(str(sof)) == str(project)
+
+
+# ── the pre-burn guard, DRIVEN through mode_program ────────────────────────
+#
+# WHY THESE ARMS EXIST AT ALL. The did-not-certify guard was added with arms that tested its
+# predicate and AST-matched its `if`, and never ran `mode_program`. The call site passed
+# `out_text` -- a local of `_run_flow_compliance_pre_burn`, not of `mode_program` -- so EVERY
+# audited burn raised `NameError` before the predicate could answer, including a genuine rc-0
+# PASS. It failed closed and therefore looked safe, while leaving `bypass_pre_burn_check`
+# (which skips the audit entirely) as the only way to burn: the unsafe path became the only
+# path. A guard on a hardware action has to be graded through the entry point.
+
+def _flow_report(verdict: str, rc: int, certified=None, **extra):
+    """A pre-burn report as the decider publishes it. `certified=None` omits the key, which is
+    what an older caller that builds the dict itself produces."""
+    def fake(project_root, timeout_s=180):
+        rep = {
+            "flow_compliance_verdict": verdict,
+            "exit_code": rc,
+            "failed_gates": [],
+            "audit_json_present": True,
+            "audit_json_path": f"{project_root}/reports/phase23_completion_audit.json",
+            "stdout_tail": f"Overall: {verdict}\n",
+            "stderr_tail": "",
+            "command": ["flow_compliance_check.py"],
+        }
+        if certified is not None:
+            rep["audit_certified"] = certified
+        rep.update(extra)
+        return rc, rep
+    return fake
+
+
+def test_an_audited_rc_zero_pass_still_burns(driver, fake_project, monkeypatch):
+    """THE REGRESSION. This is the arm the NameError would have failed: a clean audit must
+    still reach the programmer."""
+    _proj, sof = fake_project
+    monkeypatch.setattr(driver, "_run_flow_compliance_pre_burn",
+                        _flow_report("PASS", 0, certified=True))
+    _stub_quartus_pgm(driver, monkeypatch)
+    rc, body = driver.mode_program({"sof_path": str(sof),
+                                    "skip_rtl_precheck": True})
+    assert rc == 0, body
+    assert body.get("success") is True, body
+
+
+def test_a_green_word_with_a_positive_rc_is_refused(driver, fake_project, monkeypatch):
+    """The canary state, through the entry point: the audit printed PASS and exited 1, so it
+    withdrew its own certification and the burn must not proceed on its word."""
+    _proj, sof = fake_project
+    monkeypatch.setattr(driver, "_run_flow_compliance_pre_burn",
+                        _flow_report("PASS", 1, certified=False))
+    _stub_quartus_pgm(driver, monkeypatch)
+    rc, body = driver.mode_program({"sof_path": str(sof),
+                                    "skip_rtl_precheck": True})
+    assert rc == 1, body
+    assert body.get("success") is not True, body
+    assert body.get("error_code") == "burn_blocked_pre_burn_audit_did_not_certify", body
+
+
+def test_an_older_report_without_the_key_is_refused_on_the_rc_alone(
+        driver, fake_project, monkeypatch):
+    """The fallback, which is the half that needs no text: a report that does not carry the
+    decision is judged on its exit code, and a positive rc from this audit is never benign."""
+    _proj, sof = fake_project
+    monkeypatch.setattr(driver, "_run_flow_compliance_pre_burn",
+                        _flow_report("PASS", 1))          # no `audit_certified`
+    _stub_quartus_pgm(driver, monkeypatch)
+    rc, body = driver.mode_program({"sof_path": str(sof),
+                                    "skip_rtl_precheck": True})
+    assert rc == 1, body
+    assert body.get("error_code") == "burn_blocked_pre_burn_audit_did_not_certify", body
+
+
+def test_the_decider_publishes_the_decision(driver, monkeypatch, tmp_path):
+    """And the fallback must not be the only path: the function that HAS both channels puts the
+    decision in its report, so the caller never needs the stdout -- whose tail can drop the
+    `Overall:` line, being the last 2500 characters while the blocker list comes after it."""
+    class _Result:
+        returncode = 1
+        stdout = ("Steps: 1 total\n\nOverall: PASS  (strict=True)\n"
+                  "flow_compliance_check: THIS REPORT DOES NOT RECONCILE\n")
+        stderr = ""
+
+    # PATCH THE SEAM THE DRIVER ACTUALLY USES. It runs the audit through `_pr.run` (the
+    # progress-supervised wrapper), not `subprocess.run`, so a `subprocess.run` stub is simply
+    # never consulted: the first cut of this arm stubbed that and measured the real invocation
+    # returning rc 0. Same seam that blinds a `subprocess.run` stub anywhere in this tree.
+    monkeypatch.setattr(driver._pr, "run", lambda *a, **k: _Result())
+    rc, rep = driver._run_flow_compliance_pre_burn(str(tmp_path))
+    assert rc == 1, rep
+    assert "audit_certified" in rep, (
+        "the decider does not publish its decision, so the caller is left to re-derive it "
+        "from text it may not have")
+    assert rep["audit_certified"] is False, rep
+    # the clean control: the same path publishes True when the audit certified
+    class _Ok(_Result):
+        returncode = 0
+        stdout = "Steps: 1 total\n\nOverall: PASS  (strict=True)\n"
+    monkeypatch.setattr(driver._pr, "run", lambda *a, **k: _Ok())
+    rc2, rep2 = driver._run_flow_compliance_pre_burn(str(tmp_path))
+    assert rc2 == 0 and rep2["audit_certified"] is True, rep2

@@ -208,7 +208,7 @@ def test_the_acceptance_gate_keeps_the_timeouts_own_name(monkeypatch, tmp_path):
 
     `_audit_verdict` reports a timeout as uncertified — true, but not specific — so folding it
     into the generic did-not-certify branch relabelled it `[AUDIT_DID_NOT_CERTIFY]` and threw
-    away #525's distinction (審不完 timed out, versus 沒審 never audited; neither a verdict
+    away #525's distinction (stopped before finishing, versus never audited; neither a verdict
     about the design). The exit code was right either way, which is exactly why only an arm
     about the LABEL catches it. Same shape as `test_the_timeout_tier_is_untouched` in #2572.
     """
@@ -500,13 +500,42 @@ def test_the_fpga_guards_rule_actually_gates_the_burn():
             continue
         test_src = _ast.unparse(node.test)
         guarded.append(test_src)
-        assert "pre_burn_audit_certified" in test_src, (
-            f"the did-not-certify refusal is not guarded by the rule: if {test_src}")
+        # THE GUARD MUST BE THE DECISION, and the decision is now a VALUE the decider
+        # published (`audit_certified`), with the word-and-rc rule as the fallback when a
+        # caller built the report itself. My first cut of this arm demanded the predicate be
+        # CALLED in the test expression, and I briefly added a call there to satisfy it --
+        # writing code to please a test. That call re-broke the genuine-FAIL case, because with
+        # no text the owner sees no verdict line and answers "uncertified". The arm asks for the
+        # decision instead.
+        assert ("_certified" in test_src
+                or "audit_certified" in test_src
+                or "pre_burn_audit_certified" in test_src), (
+            f"the did-not-certify refusal is not guarded by the audit's decision: if {test_src}")
         for sub in _ast.walk(node.test):
             assert not (isinstance(sub, _ast.Constant) and sub.value is False), (
                 f"the guard is disabled by a constant: if {test_src}")
     assert len(guarded) == 1, (
         f"expected exactly one did-not-certify refusal branch, found {len(guarded)}")
+    # and the value it is guarded by must come from the RULE, not from thin air
+    src = path.read_text(errors="replace")
+    assert "_certified_from_word_and_rc(verdict, fc_rc)" in src, (
+        "the fallback decision is not derived from the shared word-and-rc rule")
+
+
+def test_a_genuine_fail_keeps_its_own_error_code():
+    """THE ORDERING THIS GUARD MUST NOT BREAK, and it broke it once.
+
+    A structural FAIL at rc 1 is blocked by the arm that exists for it, under its own code. My
+    first fallback was `fc_rc <= 0`, which called every positive rc uncertified and so stole
+    that arm's name — four of `test_device_program_rtl_repair_guard.py`'s own tests went red
+    saying so. The rule is over the WORD and the rc together.
+    """
+    drv = _driver()
+    assert drv._certified_from_word_and_rc("FAIL", 1) is True
+    assert drv._certified_from_word_and_rc("UNKNOWN", 1) is True
+    assert drv._certified_from_word_and_rc("PASS", 1) is False
+    assert drv._certified_from_word_and_rc("PASS_WITH_WAIVERS", 1) is False
+    assert drv._certified_from_word_and_rc("PASS", 0) is True
 
 
 def test_the_fpga_guard_blocks_before_it_allows():

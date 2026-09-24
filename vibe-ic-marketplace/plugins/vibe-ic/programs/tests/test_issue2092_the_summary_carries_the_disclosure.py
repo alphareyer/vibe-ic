@@ -237,10 +237,27 @@ def test_the_did_not_certify_headline_withholds_the_counts(monkeypatch, tmp_path
     # so. Asserting the absence of a substring measured the rendering, not the withdrawal.
     assert "NO-VERDICT-IN-AUDIT=3" in md, (
         "the degraded roll-up is absent, so the reader is given no count row at all")
-    # the audit's OWN numbers were PASS=1 / FAIL=1 / MISSING=1 — none may be quoted
-    assert "- PASS=1" not in md, "the withdrawn PASS count was quoted"
-    assert "executed PASS=1" not in md, "the withdrawn executed-PASS count was quoted"
-    # and the certified control DOES quote them, so this arm is not vacuous
+
+    # ASSERT ON THE TALLY SHAPE, NOT ON ONE SPELLING. My first cut asserted `"- PASS=1" not in
+    # md`, and it MISSED the Verdict fence, which quotes the audit's own first five stdout lines
+    # -- `Steps: 3 total (…executed PASS…)` and `  PASS=1  FAIL=1  MISSING=1`, the very numbers
+    # the audit withdrew. A spelling-specific assertion cannot see a count rendered under a
+    # bucket name it did not list, which is exactly how one gets quoted anyway.
+    withheld = [ln for ln in md.splitlines() if F._TALLY_LINE_RE.search(ln)]
+    assert not withheld, (
+        f"the audit's withdrawn tally lines were quoted anyway: {withheld}")
+    assert "the audit's own tally lines are withheld" in md, (
+        "the fence drops the tally without telling the reader it did")
+
+    # AND NO RECONCILIATION VERDICT OVER A PLACEHOLDER. With counts withheld the renderer
+    # supplies its own roll-up and no row counts, so reconciling them reported a "genuinely
+    # torn audit artifact" it had invented about an artefact it did not read.
+    assert "Roll-up reconciliation FAILED" not in md, (
+        "the renderer reconciled its own placeholder against nothing and reported a tear")
+    assert "Roll-up reconciliation: not applicable" in md, md[-1200:]
+
+    # and the certified control DOES quote the tally, so the arm above is not vacuous
     clean = _render_with_overall(monkeypatch, tmp_path, _audit(), "PASS_WITH_WAIVERS")
-    assert "- PASS=1" in clean, (
+    assert [ln for ln in clean.splitlines() if F._TALLY_LINE_RE.search(ln)], (
         "the control stopped quoting the audit's counts, so the arm above proves nothing")
+    assert "- PASS=1" in clean

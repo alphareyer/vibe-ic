@@ -111,6 +111,10 @@ AUDIT_TIMEOUT_VERDICT = "AUDIT_TIMEOUT"
 # The verdict used only when the audit was never run at all (--no-audit
 # or the compliance tool is missing). Kept distinct from AUDIT_TIMEOUT.
 AUDIT_NOT_RUN_VERDICT = "UNKNOWN"
+#: A line of the audit's stdout that CARRIES COUNTS. Shape, not spelling: `Steps: N total (…)`
+#: and the `PASS=… FAIL=…` tally, whatever words the tally happens to contain -- asserting one
+#: spelling is how a withheld count gets quoted anyway under a bucket name nobody listed.
+_TALLY_LINE_RE = re.compile(r"^\s*(?:Steps:\s*\d+\s*total\b|(?:\S+\s*=\s*\d+\s*){2,})")
 #: A THIRD NAMED NON-VERDICT, and it is not a softer FAIL. The audit printed a green
 #: word and exited non-zero -- its reconciliation canary (vibe-ic#2092) leaves the word
 #: standing and says "do not quote its counts". So the headline must not read PASS, and
@@ -2158,8 +2162,21 @@ def _render(project: Path, run_audit: bool = True,
     md.append("```")
     audit_lines = audit_text.strip().splitlines()
     # First 5 lines of the audit are the header + Steps + tally
-    for ln in audit_lines[:5]:
-        md.append(ln)
+    #
+    # AND THOSE ARE COUNTS TOO. This fence quotes the audit's own `Steps: … executed PASS` and
+    # `PASS= … FAIL=` headline, which are exactly the numbers the audit withdrew when it
+    # refused to certify them -- so withholding the per-step table while reproducing the tally
+    # verbatim four lines above it would defeat the withholding. Reviewed and correct: the
+    # fence keeps the HEADER lines (what was audited) and drops any line carrying a tally.
+    if counts_withheld:
+        md.append(f"(the audit's own tally lines are withheld: {counts_withheld})")
+        for ln in audit_lines[:5]:
+            if _TALLY_LINE_RE.search(ln):
+                continue
+            md.append(ln)
+    else:
+        for ln in audit_lines[:5]:
+            md.append(ln)
     md.append("```")
     md.append("")
     # ORGANIC #428 / vibe-ic#1969 — reconciliation is now ONLY an integrity
@@ -2170,7 +2187,24 @@ def _render(project: Path, run_audit: bool = True,
     # Human stdout is deliberately absent from this decision: parsing it was
     # the second definition that caused #1969.
     _recon = _reconcile_audit_snapshot(rollup, row_counts)
-    if audit_snapshot is None:
+    # NOT OVER WITHHELD COUNTS, AND THE BRANCH BELOW IS WHAT DOES THAT. When the counts are
+    # withheld this renderer supplies its own placeholder roll-up (every step
+    # NO-VERDICT-IN-AUDIT) and leaves `row_counts` empty; the `elif snapshot_problems or _recon`
+    # arm then renders "Roll-up reconciliation FAILED ... genuinely torn audit artifact" -- a
+    # tear INVENTED by the renderer, about an artefact it did not read, and reached through the
+    # withholding note itself, which is one of those `snapshot_problems`. The tripwire only
+    # means something over counts that were actually quoted, so this state answers first.
+    #
+    # (A `_recon = {} if counts_withheld` guard was tried here and is DEAD: the branch below
+    # short-circuits before `_recon` is consulted, and a mutation proved the guard changed
+    # nothing. Removed rather than left as defensiveness nobody can reach.)
+    if counts_withheld:
+        md.append(f"> ℹ️ **Roll-up reconciliation: not applicable** — "
+                  f"{counts_withheld}. The per-step counts are withheld, so there are no "
+                  f"two views of them to reconcile; the disclosure above names what the "
+                  f"audit withdrew.")
+        md.append("")
+    elif audit_snapshot is None:
         md.append(f"> ℹ️ **Roll-up reconciliation: not possible** — "
                   f"{snapshot_problem or 'no fresh canonical audit JSON was available'}. "
                   f"The renderer did not fall back to recounting human stdout; "

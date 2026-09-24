@@ -537,7 +537,20 @@ def _audit_verdict_owner():
 _AUDIT_VERDICT_MOD: Any = None
 
 
-def pre_burn_audit_certified(fc_rc: int, out_text: str = "") -> bool:
+def _certified_from_word_and_rc(verdict: str, fc_rc: int) -> bool:
+    """The rule expressed over the WORD and the rc alone, for when the text is not available.
+
+    A GREEN word with a positive rc is not certified -- that is the audit printing a verdict and
+    then withdrawing it. Anything else keeps its own identity: a FAIL or an UNKNOWN is blocked by
+    the arm that exists for it, under that arm's own error code, and must NOT be relabelled
+    "did not certify". Measured: a blunt `fc_rc <= 0` fallback stole the structural-FAIL block's
+    name from four of this file's own tests.
+    """
+    return not ((verdict or "").upper() in ("PASS", "PASS_WITH_WAIVERS") and fc_rc > 0)
+
+
+def pre_burn_audit_certified(fc_rc: int, out_text: str = "",
+                             verdict: str = "") -> bool:
     """Did the pre-burn compliance audit CERTIFY its own answer? False blocks the burn.
 
     EXTRACTED SO IT CAN BE DRIVEN. The rule used to live inline in `mode_program`, beside the
@@ -556,7 +569,7 @@ def pre_burn_audit_certified(fc_rc: int, out_text: str = "") -> bool:
         return True
     own = _audit_verdict_owner()
     if own is None:
-        return False
+        return _certified_from_word_and_rc(verdict, fc_rc)
     return bool(own.read(out_text, fc_rc).certified)
 
 
@@ -787,8 +800,26 @@ def _run_flow_compliance_pre_burn(
                 if stripped.startswith(("•", "-")):
                     step_level_warnings.append(stripped.lstrip("•- "))
 
+    # THE DECISION IS MADE HERE, WHERE BOTH CHANNELS ARE IN SCOPE, AND PUBLISHED.
+    #
+    # `mode_program` used to call `pre_burn_audit_certified(fc_rc, out_text)` -- and `out_text`
+    # is a LOCAL of this function, not of that one. Arguments evaluate before the call, so it
+    # raised `NameError` before the predicate's own `fc_rc <= 0` early return could answer:
+    # EVERY audited burn became a DeviceProtocolError, including a genuine rc-0 PASS. It failed
+    # closed and therefore looked safe, but it left `bypass_pre_burn_check` -- which skips the
+    # audit entirely -- as the only way to burn, making the unsafe path the only path.
+    #
+    # Reproduced by `mcp-eda/test/test_device_program_rtl_repair_guard.py`, which DRIVES
+    # `mode_program` with a fake pre-burn runner: `NameError: name 'out_text' is not defined`
+    # at the call site. My own arms tested the predicate and AST-matched the `if`, and never ran
+    # the entry point -- the same gap that cost icslot70 a round.
+    #
+    # `stdout_tail` is NOT the fix: it is the last 2500 characters, and the audit prints its
+    # blocker list after the verdict, so the `Overall:` line can fall off the front of it. The
+    # decision travels instead of the text.
     return r.returncode, {
         "flow_compliance_verdict": verdict,
+        "audit_certified": pre_burn_audit_certified(r.returncode, out_text, verdict),
         "exit_code": r.returncode,
         "failed_gates": failed_gates,
         "step_level_warnings": step_level_warnings,
@@ -960,7 +991,18 @@ def mode_program(args: Dict[str, Any]) -> Tuple[int, Dict[str, Any]]:
             # `_audit_verdict` is the rule, and it is ASKED rather than restated: a green word
             # with a non-zero exit is not certified. When the owner is unreachable the rc test
             # alone still blocks, because a positive rc from this audit is never benign.
-            if not pre_burn_audit_certified(fc_rc, out_text):
+            # The decider published it (see `_run_flow_compliance_pre_burn`'s return). Absent
+            # -- a caller or a test that builds the report itself -- the SAME rule is applied
+            # over the word and the rc, which is the half that never needs the text. Note what
+            # this must NOT do: relabel a genuine FAIL. That is blocked below under its own
+            # error code, and four of this file's own tests say so.
+            _certified = flow_report.get("audit_certified")
+            if _certified is None:
+                _certified = _certified_from_word_and_rc(verdict, fc_rc)
+            # NOT `pre_burn_audit_certified(fc_rc, "", verdict)` here: with no text the owner
+            # sees no verdict line, answers "uncertified", and would steal the FAIL block's
+            # name again. The decision is the published one, or the word-and-rc rule.
+            if not _certified:
                 return 1, {
                     "ok": False,
                     "success": False,

@@ -255,8 +255,8 @@ def main():
         # reading `$?` must not get opposite answers from the same run.
         if (overall == _audit_verdict.TIMEOUT_WORD):
             # THE TIMEOUT KEEPS ITS OWN NAME, AND IT GOES FIRST. #525 named this state on
-            # purpose -- 審不完 (timed out) is not 沒審 (never audited) and neither is a
-            # verdict about the design -- and `_audit_verdict` reports it as uncertified,
+            # purpose -- "stopped before it finished" is not "never audited", and neither is
+            # a verdict about the design -- and `_audit_verdict` reports it as uncertified,
             # which is true but not specific. Folding it into the generic branch below
             # relabelled it `[AUDIT_DID_NOT_CERTIFY]` and lost the distinction #525 bought;
             # a regression arm catches that now. The exit code is the same either way.
