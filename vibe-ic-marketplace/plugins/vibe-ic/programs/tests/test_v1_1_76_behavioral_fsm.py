@@ -271,11 +271,13 @@ endmodule
     work.mkdir(parents=True)
     (work / "spec.yaml").write_text("design:\n  name: TopModule\n")
     (work / "sample.sv").write_text(wrong)
-    proc = _pr.run(
-        [sys.executable, str(_GATES), "--prob", "ProbWalker",
-         "--workdir", str(run / "work"), "--dataset", str(ds),
-         "--prompt-suffix", "_prompt.txt", "--top-module", "TopModule"],
-        capture_output=True, text=True)
+    from _ai_judgement_fixture import run_atomic_gate_with_expert_answer
+    cmd = [sys.executable, str(_GATES), "--prob", "ProbWalker",
+           "--workdir", str(run / "work"), "--dataset", str(ds),
+           "--prompt-suffix", "_prompt.txt", "--top-module", "TopModule"]
+    proc = run_atomic_gate_with_expert_answer(
+        cmd, _pr.run, work / "phase1_proj", work / "spec.yaml",
+        ds / "ProbWalker_prompt.txt", capture_output=True, text=True)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     gates = json.loads((work / "gates.json").read_text())
     assert gates["hard_gates_pass"] is True

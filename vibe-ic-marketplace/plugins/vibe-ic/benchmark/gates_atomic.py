@@ -12,7 +12,7 @@ The agent authors `spec.yaml` + `sample.sv` in `<workdir>/<prob>/`; this driver
 runs the deterministic pipeline + gates and copies the scoreable sample on PASS.
 
 Hard gates (must pass to emit the sample):
-  1. phase1_engine run-all  <spec.yaml> → generated_docs/L*.json   (PROGRAM)
+  1. phase1_engine run-all, then the canonical Phase-1 runner for signed D1
   2. spec_self_consistency_check --spec <prompt>                  (PROGRAM, pre-RTL lint)
   3. iverilog -g2012 syntax compile of sample.sv                  (PROGRAM)
   4. spec_conformance_check --rtl-dir . --spec <prompt> --top <M> (PROGRAM, ports/widths/reset)
@@ -226,36 +226,27 @@ def main():
     # v0.1.38 fix (Bucket A — 3 agents reported): pass `env=cli_env` so PYTHONPATH
     # propagates. Without env=, subprocess inherits a copy that DOES NOT include
     # cli_env modifications and `tools.phase1_engine` import fails.
-    rc, out = run([sys.executable, "-m", "tools.phase1_engine.cli",
-                   "run-all", str(spec), str(wd / "out")],
-                  cwd=str(cli_cwd), timeout=180, env=cli_env)
-    # v0.2.58 (#429): the engine is now BUNDLED in the plugin payload, so
-    # the primary `-m tools.phase1_engine.cli` import SUCCEEDS everywhere —
-    # including on the minimal Shape-C spec.yaml, where the structured
-    # ingester legitimately yields 0 facts and renders 0 layer docs with
-    # rc=0. Pre-bundle, the import failure (rc!=0) was what routed those
-    # cases to the runner fallback (whose Path-A prose bridge + stub chain
-    # DOES emit the L docs). Trigger the fallback on "no L9 rendered" too,
-    # not only on a nonzero rc.
-    if rc != 0 or not _l9_rendered(wd):
-        # v0.1.38 fix (Bucket A — Human b7): phase1_one_shot_runner.py takes a
-        # PROJECT DIR (positional), NOT --spec <yaml>. The Path-A bridge inside
-        # the runner converts input/phase1_prompt.md → input/docs/design_description.md.
-        # For Shape C we stage a minimal project: <wd>/input/docs/spec.md (copy of spec).
-        proj = wd / "phase1_proj"
-        (proj / "input" / "docs").mkdir(parents=True, exist_ok=True)
-        try:
-            (proj / "input" / "docs" / "design_description.md").write_text(spec.read_text())
-        except Exception:
-            pass
-        rc, out = run([sys.executable, str(PROGRAMS / "phase1_one_shot_runner.py"),
-                       str(proj)], timeout=180, env=cli_env)
-    # L9 may land in the primary engine's out/ dir OR the bundled fallback's
-    # phase1_proj/phase1/ dir — probe BOTH so a clean plugin install passes the
-    # phase1 hard gate self-contained (see _l9_rendered).
-    l9_ok = _l9_rendered(wd)
+    engine_rc, engine_out = run([sys.executable, "-m", "tools.phase1_engine.cli",
+                                "run-all", str(spec), str(wd / "out")],
+                               cwd=str(cli_cwd), timeout=180, env=cli_env)
+    # v0.2.58 (#429): the bundled engine can return rc=0 while rendering zero
+    # layer docs from a minimal Shape-C spec. It remains a deterministic
+    # producer, but its rc alone cannot credit Phase 1 or its D1 sign-off.
+    # The engine's L9 proves only document rendering. D1 is an AI-key step:
+    # the canonical runner must consume a signed expert answer on every emit,
+    # including a repeat call where an earlier L9 is still on disk. Probing
+    # both output directories to decide whether to call it let a stale L9
+    # bypass unsigned D1 on the second invocation.
+    proj = wd / "phase1_proj"
+    (proj / "input" / "docs").mkdir(parents=True, exist_ok=True)
+    (proj / "input" / "docs" / "design_description.md").write_text(spec.read_text())
+    rc, out = run([sys.executable, str(PROGRAMS / "phase1_one_shot_runner.py"),
+                   str(proj)], timeout=180, env=cli_env)
+    l9_dir = proj / "phase1" / "generated_docs"
+    l9_ok = l9_dir.is_dir() and any(l9_dir.glob("L9*.json"))
     steps["phase1_run_all"] = {"verdict": "PASS" if rc == 0 and l9_ok else "FAIL",
-                               "rc": rc, "l9_rendered": l9_ok, "log": out[-400:]}
+                               "rc": rc, "l9_rendered": l9_ok, "log": out[-400:],
+                               "engine_rc": engine_rc, "engine_log": engine_out[-200:]}
 
     # 2. pre-RTL spec self-consistency lint (prompt alone)
     rc, out = run([sys.executable, str(PROGRAMS / "spec_self_consistency_check.py"),

@@ -641,11 +641,14 @@ def _stage(tmp_path, prompt_text, sample_body):
 
 
 def _run_gate(ds, run):
-    return _pr.run(
-        [sys.executable, str(GATES), "--prob", "ProbP",
-         "--workdir", str(run / "work"), "--dataset", str(ds),
-         "--prompt-suffix", "_prompt.txt", "--top-module", "TopModule"],
-        capture_output=True, text=True)
+    from _ai_judgement_fixture import run_atomic_gate_with_expert_answer
+    cmd = [sys.executable, str(GATES), "--prob", "ProbP",
+           "--workdir", str(run / "work"), "--dataset", str(ds),
+           "--prompt-suffix", "_prompt.txt", "--top-module", "TopModule"]
+    wd = run / "work" / "ProbP"
+    return run_atomic_gate_with_expert_answer(
+        cmd, _pr.run, wd / "phase1_proj", wd / "spec.yaml",
+        ds / "ProbP_prompt.txt", capture_output=True, text=True)
 
 
 def _block_rules(run):

@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import yaml
+
 import ai_signed_judgement
 
 
@@ -19,6 +21,50 @@ def sign(project: Path, step_id: str) -> None:
         "signed_by": "synthetic-fixture-reviewer",
         "judgement": "Reviewed the synthetic evidence staged by this test fixture.",
     }) + "\n")
+
+
+def run_atomic_gate_with_expert_answer(cmd: list[str], run,
+                                       project: Path, spec: Path,
+                                       prompt: Path, *, prove_unsigned: bool = False,
+                                       **kwargs):
+    """Finish the real Phase-1 handoff before an atomic RTL emit assertion.
+
+    Keep the design prompt in the Phase-1 input. The old two-line spec gave
+    the expert no design facts to review, while the RTL gate read a separate
+    prompt file. The answer is tied to the generated L9 and its exact digest.
+    """
+    source = prompt.read_text()
+    doc = yaml.safe_load(spec.read_text()) or {}
+    assert doc["design"]["name"] == "TopModule"
+    doc["design"]["description"] = source
+    spec.write_text(yaml.safe_dump(doc, sort_keys=False))
+    first = run(cmd, **kwargs)
+    l9 = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    assert l9.is_file(), (first.stdout or "") + (first.stderr or "")
+    notes = json.loads(l9.read_text()).get("notes") or ""
+    assert yaml.safe_load(notes)["design"]["description"].strip() == source.strip(), (
+        "Phase-1 input lost the fixture's design prompt")
+    report = project / "reports/audit/phase1/expert_parse_track.json"
+    assert report.is_file(), "Phase-1 did not emit an expert handoff"
+    assert json.loads(report.read_text())["ai_subtrack"]["status"] == "HANDOFF_EMITTED"
+    answer = report.parent / "expert_parse_track_pack/l_doc_expectations.json"
+    assert answer.parent.is_dir(), "Phase-1 did not emit an expert pack"
+    answer.write_text(json.dumps({"expectations": [{
+        "id": "atomic-prompt-retained-in-l9",
+        "layer": "L9_INTERFACE",
+        "field_path": "notes",
+        "requirement": "the design prompt reaches the Phase-1 integration document",
+        "expected_tokens": [source.strip().splitlines()[0]],
+        "evidence": [prompt.name],
+    }]}))
+    if prove_unsigned:
+        unsigned = run(cmd, **kwargs)
+        gates = json.loads((project.parent / "gates.json").read_text())
+        assert unsigned.returncode != 0 and not gates["hard_gates_pass"], (
+            "an unsigned expert answer passed the atomic emit gate")
+        assert gates["steps"]["phase1_run_all"]["verdict"] == "FAIL", gates
+    sign(project, "D1")
+    return run(cmd, **kwargs)
 
 
 def run_phase1_with_expert_answer(project: Path, argv: list[str], run,
