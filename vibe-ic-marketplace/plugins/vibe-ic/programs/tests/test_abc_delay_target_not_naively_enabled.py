@@ -69,3 +69,24 @@ def test_the_measured_regression_is_documented_where_the_lever_lives():
     assert "SHIP_WNS_POSTROUTE" in context, (
         "the post-route A/B result is not recorded next to the delay-target "
         "lever; without it the next reader re-runs the same regression")
+
+
+def test_no_abc_site_brings_sizing_back_through_another_variable():
+    """The guard above reads only `_abc_timing =`. The fanout bound added a
+    SECOND variable on the same `abc -liberty` line (`_abc_fanout`), and a
+    first cut of it carried ABC's `upsize {D}; dnsize {D}` — the same synth-time
+    sizing the A/B measured as a regression — straight past this file. So
+    every variable interpolated after `abc -liberty` is checked, and the
+    fanout script's own text too."""
+    import phase3_one_shot_runner as R
+    tails = set(re.findall(r"abc -liberty \{liberty_c\}((?:\{\w+\})+)", RUNNER_SRC))
+    assert tails, "no `abc -liberty {liberty_c}...` site found"
+    names = {n for t in tails for n in re.findall(r"\{(\w+)\}", t)}
+    assert "_abc_fanout" in names, names
+    script = R._ABC_FANOUT_SCRIPT.format(cap=10)
+    for sizing in ("upsize", "dnsize", "-sizing", "area_recover"):
+        assert sizing not in script, (sizing, script)
+    for n in names:
+        for m in re.finditer(rf"\b{n}\s*=\s*(.+)", RUNNER_SRC):
+            assert "-sizing" not in m.group(1) and "upsize" not in m.group(1), (
+                n, m.group(0))
