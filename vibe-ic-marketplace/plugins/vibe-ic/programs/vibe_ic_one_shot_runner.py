@@ -1289,13 +1289,11 @@ def _line_buffer_own_stream() -> None:
 
 
 #: The runners THIS orchestrator can start a run inside. A step owned by any
-#: other runner is refused by `--entry-step` (see the guard in main()), so this
-#: tuple is the single source of truth for BOTH the refusal and the help text —
-#: they drifted apart once (the help advertised Phase-3 15/31/37 and analog
-#: A1..A9 as routable while the guard refused every one of them), and a reader
-#: has no way to tell which half is lying.
+#: other runner is refused by `--entry-step` (see the guard in main()).
+#: Phase 3 additionally requires an exit step to bound its dispatch.
 ENTRY_STEP_ENTERABLE_RUNNERS = ("phase1_one_shot_runner",
-                                "design_one_shot_runner")
+                                "design_one_shot_runner",
+                                "phase3_one_shot_runner")
 
 
 def main() -> int:
@@ -1323,22 +1321,24 @@ def main() -> int:
     p.add_argument("--entry-step", default=None,
                    help="START the flow at this canonical step id. The step "
                         "decides WHICH runner owns the entry, and THIS "
-                        "orchestrator can be entered at the Phase 1 and Phase "
-                        "2 spans only — D1 for Phase 1, 2/4/1/9/11 for Phase "
-                        "2. Phase-3 (15/31/37) and analog (A1..A9) steps are "
-                        "owned by phase3_one_shot_runner / "
+                        "orchestrator can be entered at D1 for Phase 1, "
+                        "2/4/1/9/11 for Phase 2, and Phase-3 (15/31/37) "
+                        "with --exit-step for a bounded backend window. "
+                        "Analog (A1..A9) steps are owned by "
                         "analog_one_shot_runner and are REFUSED here: run "
                         "that runner directly. Only a step that HEADS a "
                         "dispatch span is enterable; a mid-span step is "
                         "refused rather than approximated. With a window, rc reflects the DISPATCHED STEPS ONLY; whole-flow verdicts come from --refresh-only or an unbounded run.")
     p.add_argument("--exit-step", default=None,
-                   help="STOP the Phase-2 dispatch after this canonical step "
-                        "id: forwarded verbatim to the phase2 runner, whose "
-                        "dispatch sites wholly past it are recorded as "
-                        "SKIPPED-BY-EXIT instead of run (the site holding "
-                        "the exit still runs in full). Omitted: behaviour is "
-                        "unchanged. Pair with --skip-phase3 when the exit "
-                        "precedes physical design. With a window, rc reflects the DISPATCHED STEPS ONLY; whole-flow verdicts come from --refresh-only or an unbounded run.")
+                   help="STOP dispatch after this canonical step id. Phase-2 "
+                        "exits are forwarded to the phase2 runner; Phase-3 "
+                        "entries require an exit and are forwarded to the "
+                        "phase3 runner as a bounded backend window. Sites "
+                        "wholly past the exit are SKIPPED-BY-EXIT (the site "
+                        "holding the exit still runs in full). Omitted: "
+                        "unbounded behavior. With a window, rc reflects the "
+                        "DISPATCHED STEPS ONLY; whole-flow verdicts come from "
+                        "--refresh-only or an unbounded run.")
     p.add_argument("--skip-phase1", action="store_true")
     p.add_argument("--skip-analog", action="store_true")
     p.add_argument("--skip-phase3", action="store_true")
@@ -1574,15 +1574,64 @@ def main() -> int:
                   file=sys.stderr)
             return 2
         if _entry_runner not in ENTRY_STEP_ENTERABLE_RUNNERS:
-            # Phase-3 and analog entries are NOT wired here yet. Say so rather
-            # than routing to the nearest phase and reporting as if it were what
-            # was asked.
+            # Entries owned by other runners are not wired here. Say so rather
+            # than routing to the nearest phase.
             print(f"REFUSED: step {args.entry_step!r} is owned by "
                   f"{_entry_runner}, which this orchestrator cannot yet be "
                   f"entered at. Run that runner directly, or enter at a Phase "
                   f"1/2 step.", file=sys.stderr)
             return 2
         print(f"[entry] step {args.entry_step} -> {_entry_runner}")
+
+    if _entry_runner == "phase3_one_shot_runner":
+        # A Phase-3 entry is an isolated backend repair.  Do not run Phase 1,
+        # Phase 2, analog, mixed signal or the whole-flow finalize tail here.
+        # The backend owns the exact dispatch and its bounded audit.
+        if not args.exit_step:
+            print("REFUSED: a Phase-3 entry needs --exit-step", file=sys.stderr)
+            return 2
+        p3_args = [str(project), "--top-name", args.top_name,
+                   "--ic-name", args.ic_name, "--container", args.container,
+                   "--die-um", args.die_um, "--util", str(args.util),
+                   "--pdk", args.pdk, "--entry-step", str(args.entry_step),
+                   "--exit-step", str(args.exit_step)]
+        if args.allow_oss_pdk_fallback:
+            p3_args.append("--allow-oss-pdk-fallback")
+        if args.allow_pdk_target_mismatch:
+            p3_args.append("--allow-pdk-target-mismatch")
+        import secrets
+        window_run_id = secrets.token_hex(16)
+        p3_env = dict(_phase_env)
+        p3_env["VIBEIC_PHASE3_WINDOW_RUN_ID"] = window_run_id
+        phase3_started = time.time()
+        rc = _run_phase("PHASE 3 bounded window", _phase_runner("phase3"),
+                        p3_args, env=p3_env)
+        phase3_report = _phase_report_path(project, "phase3_one_shot.json")
+        p3 = (_read_report(phase3_report)
+              if _pl.published_here(phase3_report, phase3_started) else {})
+        if p3.get("window_run_id") != window_run_id:
+            p3 = {}
+        phase3_verdict = p3.get("verdict", "NOT_MEASURED")
+        p3_stale = p3.get("stale_downstream") or {}
+        summary = {"program": "vibe_ic_one_shot_runner", "bounded": bool(p3),
+                   "declared_window": {"entry_step": args.entry_step,
+                                       "exit_step": args.exit_step,
+                                       "entry_runner": _entry_runner},
+                   "phases": [{"name": "phase3", "verdict": phase3_verdict,
+                               "rc": rc}],
+                   "dispatched_verdict": phase3_verdict,
+                   "verdict": ("FAIL" if phase3_verdict == "FAIL" else
+                               "NOT_MEASURED" if p3_stale else phase3_verdict),
+                   "audit_verdict": "NOT_MEASURED",
+                   "audit_scope": ("bounded; whole-flow audit not refreshed"
+                                   if p3 else "not measured; child report absent"),
+                   "bounded_disclosures": p3.get("bounded_disclosures", []),
+                   "stale_downstream": p3_stale}
+        out = _pl.report_path(project, "vibe_ic_one_shot.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(summary, indent=2) + "\n")
+        lock.release()
+        return rc if p3 else (rc or 2)
 
     # An entry owned by Phase 2 means Phase 1 is not this run's work: its
     # artefacts were supplied, not produced here. Force the skip through the
@@ -1599,39 +1648,33 @@ def main() -> int:
     # phase-2 report's `not_refreshed_here` was contradicted on disk moments
     # later by this function rewriting the very file it named.
     #
-    # Decided from the signals THIS function already has, the same way
-    # `design_one_shot_runner.run_is_bounded` is: an entry owned by phase 2
-    # means Phase 1 does not run here at all (the line above), and
-    # `window_is_effective` answers whether the exit prunes any site ANYWHERE in
-    # the flow -- an exit inside phase 2 prunes every phase-3 site. A flag that
-    # prunes nothing is not a window and this run carries the full burden.
+    # Phase 2's cut is decided from its own sites.  The Phase-3 cut below is
+    # credited only after the child publishes a fresh bounded report, so an
+    # argv flag cannot make a whole backend run appear narrow.
     _fd_window_flags = tuple(
         f"--{n} {v}" for n, v in (("entry-step", getattr(args, "entry_step", None)),
                                   ("exit-step", getattr(args, "exit_step", None))) if v)
     _fd_bounded = False
+    _p3_exit_cut = None
+    if args.exit_step:
+        try:
+            from decimal import Decimal
+            _p3_exit_cut = Decimal(str(args.exit_step))
+        except Exception:
+            pass
+    # A canonical exit before physical design suppresses Phase 3 altogether.
+    # An exit inside physical design is forwarded to its runner; only a child
+    # report from THIS invocation may make the front door call that bounded.
+    _p3_skip_by_exit = (_p3_exit_cut is not None and _p3_exit_cut < 15)
+    _p3_forward_window = (not args.skip_phase3 and
+                          _p3_exit_cut is not None and
+                          15 <= _p3_exit_cut < 37)
+    _p3_window_ran = False
     if _fd_window_flags:
         try:
             import step_preflight as _spf_w            # noqa: PLC0415
-            # SCOPED TO PHASE 2, DELIBERATELY (review w6wr2g6di, MEDIUM 1).
-            # My r2 cut asked `window_is_effective` with runner=None, i.e. "does
-            # this window prune any site ANYWHERE in the flow". That reads
-            # phase-3 spans -- MEASURED: phase3_one_shot_runner's site heads are
-            # synth 9, pnr 15, gds 37, drc 31, lvs 31 -- so `--exit-step 23/31/33`
-            # came back "bounded". But THIS runner never forwards a window to
-            # phase 3: the phase-3 gate below is `not halted_at and not
-            # args.skip_phase3`, `p3_args` carries top-name/ic-name/container/
-            # die-um/util/pdk and no --entry-step or --exit-step, and
-            # phase3_one_shot_runner has no such flag to receive. So phase 3 ran
-            # IN FULL while this function skipped its tail and published
-            # "dispatched only its declared window" for a 70-step run, with
-            # `not_refreshed_here` empty because phase 3's own tail had just
-            # written both documents. A self-contradicting top-level report.
-            #
-            # Until phase 3 has a window, an exit inside phase 3's spans prunes
-            # nothing, so it must not count. What DOES count is this
-            # orchestrator's own decisions: an entry owned by phase 2 means
-            # Phase 1 does not run here (the line above), and a window that
-            # prunes phase-2 dispatch sites is a window this run acted on.
+            # Scope this question to Phase 2.  Phase 3's own result is folded
+            # in after its dispatch, from the report written by THIS run.
             _fd_bounded = bool(
                 (args.entry_step and _entry_runner == "design_one_shot_runner")
                 or _spf_w.window_is_effective(
@@ -1647,7 +1690,7 @@ def main() -> int:
     def _fd_disclose(refresh: str, writes: str) -> str:
         why = (f"run declared {' '.join(_fd_window_flags)}; {refresh} is a "
                f"WHOLE-FLOW refresh ({writes}) and was not run. That window "
-               f"bounded this run's PHASE-2 dispatch (see `phases` for what each "
+               f"bounded this run's phase dispatch (see `phases` for what each "
                f"phase did and `declared_window` for the flags), so a document "
                f"restating every step in the flow is outside this run's declared "
                f"proof burden, not missing. Ask for it with "
@@ -1965,7 +2008,8 @@ def main() -> int:
     # L5_ADI_SPEC the A-track needs); a phase2 digital halt does NOT block it. The
     # A-track stays non-blocking, and phase3's digital PnR remains correctly gated
     # on halted_at (a pure-analog IC still skips the digital PnR).
-    _analog_dispatch = run_analog and halted_at in ("", "phase2")
+    _analog_dispatch = (run_analog and not _p3_skip_by_exit
+                        and halted_at in ("", "phase2"))
     if _analog_dispatch:
         runner = _phase_runner("analog")
         # `--pdk` REACHES THE ANALOG TRACK. Until now this was the only phase
@@ -2021,7 +2065,7 @@ def main() -> int:
     # ``audit_created`` and cannot count as evidence produced by the run it is
     # judging.  This pre-production is non-blocking: the A-track and the
     # Step-14 gate retain ownership of their own verdicts.
-    if halted_at != "phase1":
+    if halted_at != "phase1" and not _p3_skip_by_exit:
         _analog_stage_json = (project / "reports" / "analog"
                               / "stage_analog_compliance.json")
         _analog_stage_rc = _run_phase(
@@ -2039,7 +2083,7 @@ def main() -> int:
 
     # ---------------- Phase 3 ----------------
     phase3_top = flow_top
-    if not halted_at and not args.skip_phase3:
+    if not halted_at and not args.skip_phase3 and not _p3_skip_by_exit:
         runner = _phase_runner("phase3")
         # Reuse the flow-level resolved top. If phase 2 GENERATED the RTL (the
         # from-docs path, where no RTL existed at the flow-resolution point
@@ -2059,6 +2103,8 @@ def main() -> int:
                    "--die-um", args.die_um,
                    "--util", str(args.util),
                    "--pdk", args.pdk]
+        if _p3_forward_window:
+            p3_args += ["--entry-step", "9", "--exit-step", str(args.exit_step)]
         if getattr(args, "allow_oss_pdk_fallback", False):
             p3_args.append("--allow-oss-pdk-fallback")
         if getattr(args, "allow_pdk_target_mismatch", False):
@@ -2078,6 +2124,11 @@ def main() -> int:
         else:
             p3_env = _canonical_admission.child_env(
                 p3_admission.identity_sha256, _phase_env)
+            window_run_id = None
+            if _p3_forward_window:
+                import secrets
+                window_run_id = secrets.token_hex(16)
+                p3_env["VIBEIC_PHASE3_WINDOW_RUN_ID"] = window_run_id
             _phase3_ran = True
             _phase_started["phase3"] = time.time()
             rc = _run_phase("PHASE 3 (synth → PnR → GDS → DRC → LVS)",
@@ -2090,10 +2141,63 @@ def main() -> int:
             rep = _read_report(_phase_report_path(project, "phase3_one_shot.json"))
             plan.append(("phase3", verdict, rc))
             reports["phase3"] = rep
+            _p3_window_ran = bool(_p3_forward_window and rep.get("bounded")
+                                  and rep.get("window_run_id") == window_run_id
+                                  and _pl.published_here(
+                                      _phase_report_path(project, "phase3_one_shot.json"),
+                                      _phase_started["phase3"]))
             if verdict == "FAIL":
                 halted_at = "phase3"
     else:
         plan.append(("phase3", "SKIPPED", 0))
+
+    if _p3_forward_window and _phase3_ran and not _p3_window_ran:
+        # The child refused or failed before publishing a fresh window
+        # account.  An old Phase-3 report must not turn that into a bounded
+        # PASS, and the unbounded finalize tail must not run after refusal.
+        out = _pl.report_path(project, "vibe_ic_one_shot.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({
+            "program": "vibe_ic_one_shot_runner", "bounded": False,
+            "window_requested": {"entry_step": args.entry_step,
+                                 "exit_step": args.exit_step},
+            "verdict": "NOT_MEASURED",
+            "reason": "Phase-3 child did not publish a fresh bounded report",
+            "phases": [{"name": n, "verdict": v, "rc": rc}
+                       for n, v, rc in plan],
+        }, indent=2) + "\n")
+        lock.release()
+        return next((rc or 2 for name, _, rc in reversed(plan)
+                     if name == "phase3"), 2)
+
+    if _p3_window_ran:
+        # A physical window ends here.  Mixed-signal merge, PDK finalisation
+        # and the front-door whole-flow tail consume outputs beyond the cut.
+        # They cannot run and still claim the same narrow window.
+        p3_window = reports["phase3"]
+        stale = p3_window.get("stale_downstream") or {}
+        window_verdict = p3_window.get("verdict", "NOT_MEASURED")
+        summary = {
+            "program": "vibe_ic_one_shot_runner", "bounded": True,
+            "declared_window": {"entry_step": args.entry_step,
+                                "exit_step": args.exit_step,
+                                "entry_runner": _entry_runner},
+            "phases": [{"name": n, "verdict": v, "rc": rc}
+                       for n, v, rc in plan],
+            "dispatched_verdict": window_verdict,
+            "verdict": ("FAIL" if window_verdict == "FAIL" else
+                        "NOT_MEASURED" if stale else window_verdict),
+            "audit_verdict": "NOT_MEASURED",
+            "audit_scope": "bounded; whole-flow audit not refreshed",
+            "stale_downstream": stale,
+            "bounded_disclosures": p3_window.get("bounded_disclosures", []),
+            "not_refreshed_here": ["reports/final_summary.md"],
+        }
+        out = _pl.report_path(project, "vibe_ic_one_shot.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(summary, indent=2) + "\n")
+        lock.release()
+        return next(rc for name, _, rc in reversed(plan) if name == "phase3")
 
     # ---------------- Mixed-signal M1 (A+D top merge + top-level LVS) ------
     # M1-d4. `mixed_signal_top_lvs_run` is the ONLY writer of
@@ -2112,7 +2216,7 @@ def main() -> int:
     # audit); a merge that cannot run here must not halt the digital chain.
     # Its inputs are the analog hardmacro GDS/Verilog (A8) and the phase-3
     # sign-off GDS + gate netlist, so it runs only when BOTH tracks ran.
-    _ms_dispatch = (run_analog and not args.skip_phase3
+    _ms_dispatch = (run_analog and not args.skip_phase3 and not _p3_skip_by_exit
                     and halted_at not in ("phase1", "phase2"))
     if _ms_dispatch:
         _ms_json = (project / "reports" / "analog" / "mixed_signal"
@@ -2199,6 +2303,8 @@ def main() -> int:
         "completion_audit_axis": _audit_axis,
         "demoted_phases": _demoted,
     }
+    _fd_bounded = _fd_bounded or _p3_window_ran or _p3_skip_by_exit
+
     # v1.6.32: emit canonical final_summary.md (best-effort). Note that
     # phase23_one_shot_runner ALSO calls this; vibe_ic delegates to
     # phase23 today, so the final summary will be regenerated here on

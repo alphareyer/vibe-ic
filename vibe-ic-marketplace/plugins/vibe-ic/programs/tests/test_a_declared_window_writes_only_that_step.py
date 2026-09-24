@@ -109,7 +109,7 @@ def test_an_exit_inside_phase_3_does_not_bound_the_front_door():
 
 
 def test_the_front_door_asks_the_phase2_scoped_question():
-    """It must pass runner=, because phase 3 has no window to receive one."""
+    """Phase-2 and Phase-3 windows use their own dispatch signals."""
     src = (PROGRAMS / "vibe_ic_one_shot_runner.py").read_text()
     tree = ast.parse(src)
     main = next(n for n in tree.body
@@ -127,13 +127,13 @@ def test_the_front_door_asks_the_phase2_scoped_question():
         assert isinstance(runner_kw.value, ast.Constant) and \
             runner_kw.value.value == "design_one_shot_runner", (
             "the front door must scope the question to the phase it can bound")
-    # WHY the scoping is needed, pinned so it cannot rot silently: phase 3 is
-    # dispatched without a window. If that ever changes, revisit _fd_bounded.
-    i = src.index("p3_args = [")
-    block = src[i:src.index("runner, p3_args", i)]
-    assert "--entry-step" not in block and "--exit-step" not in block, (
-        "phase 3 now receives a window -- revisit the front door's _fd_bounded "
-        "scoping, which assumes it cannot")
+    # Phase 3 now receives the physical-design cut, but a flag alone cannot
+    # make the front door bounded.  The child must have published a fresh
+    # bounded report from this invocation before the top-level tail is pruned.
+    assert 'p3_args += ["--entry-step", "9", "--exit-step", str(args.exit_step)]' in src
+    assert '_p3_window_ran = bool(_p3_forward_window and rep.get("bounded")' in src
+    assert 'rep.get("window_run_id") == window_run_id' in src
+    assert '_fd_bounded = _fd_bounded or _p3_window_ran or _p3_skip_by_exit' in src
 
 
 def test_dispatched_step_ids_come_from_the_runs_own_record(_=None):
