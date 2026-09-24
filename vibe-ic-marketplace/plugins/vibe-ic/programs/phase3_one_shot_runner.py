@@ -66253,6 +66253,7 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                                    "reason": f"upstream step {changed_site} changed output"})
     report = {
         "program": "phase3_one_shot_runner", "bounded": True,
+        "window_run_id": os.environ.get("VIBEIC_PHASE3_WINDOW_RUN_ID"),
         "declared_window": {"entry_step": args.entry_step,
                             "exit_step": args.exit_step,
                             "dispatched_sites": selected},

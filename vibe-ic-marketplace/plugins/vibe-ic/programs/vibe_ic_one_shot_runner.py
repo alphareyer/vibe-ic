@@ -1601,15 +1601,21 @@ def main() -> int:
             p3_args.append("--allow-oss-pdk-fallback")
         if args.allow_pdk_target_mismatch:
             p3_args.append("--allow-pdk-target-mismatch")
+        import secrets
+        window_run_id = secrets.token_hex(16)
+        p3_env = dict(_phase_env)
+        p3_env["VIBEIC_PHASE3_WINDOW_RUN_ID"] = window_run_id
         phase3_started = time.time()
         rc = _run_phase("PHASE 3 bounded window", _phase_runner("phase3"),
-                        p3_args, env=_phase_env)
+                        p3_args, env=p3_env)
         phase3_report = _phase_report_path(project, "phase3_one_shot.json")
         p3 = (_read_report(phase3_report)
               if _pl.published_here(phase3_report, phase3_started) else {})
+        if p3.get("window_run_id") != window_run_id:
+            p3 = {}
         phase3_verdict = p3.get("verdict", "NOT_MEASURED")
         p3_stale = p3.get("stale_downstream") or {}
-        summary = {"program": "vibe_ic_one_shot_runner", "bounded": True,
+        summary = {"program": "vibe_ic_one_shot_runner", "bounded": bool(p3),
                    "declared_window": {"entry_step": args.entry_step,
                                        "exit_step": args.exit_step,
                                        "entry_runner": _entry_runner},
@@ -1619,14 +1625,15 @@ def main() -> int:
                    "verdict": ("FAIL" if phase3_verdict == "FAIL" else
                                "NOT_MEASURED" if p3_stale else phase3_verdict),
                    "audit_verdict": "NOT_MEASURED",
-                   "audit_scope": "bounded; whole-flow audit not refreshed",
+                   "audit_scope": ("bounded; whole-flow audit not refreshed"
+                                   if p3 else "not measured; child report absent"),
                    "bounded_disclosures": p3.get("bounded_disclosures", []),
                    "stale_downstream": p3_stale}
         out = _pl.report_path(project, "vibe_ic_one_shot.json")
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(summary, indent=2) + "\n")
         lock.release()
-        return rc
+        return rc if p3 else (rc or 2)
 
     # An entry owned by Phase 2 means Phase 1 is not this run's work: its
     # artefacts were supplied, not produced here. Force the skip through the
@@ -2119,6 +2126,11 @@ def main() -> int:
         else:
             p3_env = _canonical_admission.child_env(
                 p3_admission.identity_sha256, _phase_env)
+            window_run_id = None
+            if _p3_forward_window:
+                import secrets
+                window_run_id = secrets.token_hex(16)
+                p3_env["VIBEIC_PHASE3_WINDOW_RUN_ID"] = window_run_id
             _phase3_ran = True
             _phase_started["phase3"] = time.time()
             rc = _run_phase("PHASE 3 (synth → PnR → GDS → DRC → LVS)",
@@ -2132,6 +2144,7 @@ def main() -> int:
             plan.append(("phase3", verdict, rc))
             reports["phase3"] = rep
             _p3_window_ran = bool(_p3_forward_window and rep.get("bounded")
+                                  and rep.get("window_run_id") == window_run_id
                                   and _pl.published_here(
                                       _phase_report_path(project, "phase3_one_shot.json"),
                                       _phase_started["phase3"]))

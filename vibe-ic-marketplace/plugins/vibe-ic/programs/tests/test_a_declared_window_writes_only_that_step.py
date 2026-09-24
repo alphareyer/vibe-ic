@@ -132,6 +132,7 @@ def test_the_front_door_asks_the_phase2_scoped_question():
     # bounded report from this invocation before the top-level tail is pruned.
     assert 'p3_args += ["--entry-step", "9", "--exit-step", str(args.exit_step)]' in src
     assert '_p3_window_ran = bool(_p3_forward_window and rep.get("bounded")' in src
+    assert 'rep.get("window_run_id") == window_run_id' in src
     assert '_fd_bounded = _fd_bounded or _p3_window_ran or _p3_skip_by_exit' in src
 
 
