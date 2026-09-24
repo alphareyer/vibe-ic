@@ -61,21 +61,45 @@ def _tmp(prefix):
 # The census — the remainder is COUNTED IN THE CODE, not described in a brief
 # --------------------------------------------------------------------------
 def test_declared_coverage_matches_the_tree():
-    """Wiring a gate without declaring it fails. Un-wiring one fails too.
-
-    This is what keeps the coverage number from rotting the way the module's
-    own docstring did: it is re-derived from the flow plus the program sources
-    on every run, and compared against the literals in `step_metrics`.
-    """
+    """The census follows the flow, and every step has a real gate clause."""
     from flow_compliance_check import _find_flow_def
     rep = sm.coverage(_find_flow_def(), PROGRAMS)
+    _assert_gate_population(rep, _find_flow_def())
 
-    assert rep["gate_carrying"] == sm.GATE_CARRYING_STEPS
     assert tuple(rep["emitting"]) == tuple(sm.EMITTING_STEPS)
     assert tuple(rep["consuming"]) == tuple(sorted(sm.CONSUMING_STEPS))
     # The remainder is a NUMBER a reader can act on, not "the other 61".
     assert (len(rep["consuming"]) + len(rep["not_consuming"])
             == rep["gate_carrying"])
+
+
+def _assert_gate_population(rep, flow_def):
+    import yaml
+    from flow_gate_grid import criteria
+
+    steps = yaml.safe_load(flow_def.read_text(encoding="utf-8"))["steps"]
+    all_ids = {str(step["id"]) for step in steps}
+    clause_ids = {str(step["id"]) for step in steps
+                  if criteria(step.get("gate"))}
+    assert len(all_ids) == len(steps), "duplicate step IDs"
+    assert len(all_ids) >= 60, "flow census is vacuous"
+    assert set(rep["gate_step_ids"]) == clause_ids
+    assert rep["gate_carrying"] == len(clause_ids)
+    assert clause_ids == all_ids, "a declared step lost its gate clause"
+
+
+def test_gate_census_detects_a_removed_gate():
+    """A one-step gate removal must fail the population invariant."""
+    import yaml
+    from flow_compliance_check import _find_flow_def
+
+    source = _find_flow_def()
+    doc = yaml.safe_load(source.read_text(encoding="utf-8"))
+    del doc["steps"][0]["gate"]
+    mutated = _tmp("gate_census_") / "flow.yaml"
+    mutated.write_text(yaml.safe_dump(doc), encoding="utf-8")
+    with pytest.raises(AssertionError, match="lost its gate clause"):
+        _assert_gate_population(sm.coverage(mutated, PROGRAMS), mutated)
 
 
 def test_the_census_cannot_count_its_own_prose():

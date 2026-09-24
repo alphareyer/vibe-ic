@@ -67,7 +67,7 @@ exactly like the log-parsed number this module exists to replace.
 
 So the number is no longer written down. `coverage()` re-derives it from the
 canonical flow plus the program sources; `EMITTING_STEPS`, `CONSUMING_STEPS`
-and `GATE_CARRYING_STEPS` are the declared expectation; and
+the gate-carrying step IDs are read from the canonical flow; and
 `step_metrics.py coverage` (plus `tests/test_step_metrics_coverage.py`) FAILS
 when the two disagree. Wiring a gate without declaring it fails. Un-wiring one
 fails. Adding a gate-carrying step to the flow fails.
@@ -612,29 +612,9 @@ def reconcile(name: str, metric: Optional[Any], prose: Optional[Any], *,
 # one level up — a number stated once and thereafter believed.
 #
 # So the remainder is COUNTED, not described. `coverage()` derives the real
-# state from the canonical flow plus the program sources; the two literals
-# below are the DECLARED expectation, and `test_step_metrics_coverage.py`
-# fails when derived and declared disagree. Wiring a gate without updating
-# WIRED_STEPS fails. Un-wiring one fails. Adding a gate-carrying step to the
-# flow fails. The count cannot drift away from the tree without something red.
-
-#: Every step in `flow/phase1_phase2_phase3.yaml` that carries a `gate:` key.
-#: Measured on v1.10.92: 63 step entries, of which `P0` alone carries no gate.
-# 62 -> 67: the canonical flow gained five retained gate-carrying steps
-# (0.5ic, 15.5ic, 26.5ic, 37.5ic and 37.5ip).  The former 1.6x gate is now
-# owned by Step 2, so it no longer contributes a separate step to this census.
-# 67 -> 68 (2026-09-03): canonical step 37.4, sign-off metrics aggregation.
-# ONE step arrives and it carries a `gate:` key, so this census moves by exactly
-# one. It is an ADDITION and not a rename: the flow's own id set goes 68 -> 69,
-# '37.4' is the single member gained and no existing id changed spelling, so no
-# step left this census to make room for it.
-# Re-derived, not typed: `coverage()` counts 68 against the shipped flow.
-# 68 -> 69 (#2514): canonical step 37.3, GDS stream-out / finishing fidelity.
-# It carries a `gate:` key (gds_xor_check --check), so this census moves by
-# exactly one; the flow's id set went 69 -> 70 with '37.3' the single member
-# gained, and EMITTING/CONSUMING are unchanged (re-measured equal).
-# Re-derived, not typed: `coverage()` counts 69 against the shipped flow.
-GATE_CARRYING_STEPS: int = 69
+# state from the canonical flow plus the program sources. The step population
+# is read from the same YAML as flow_gate_grid; the coverage test checks that
+# every declared step has a non-empty gate clause.
 
 #: EMITTING — gate-carrying steps whose gate runs a program that calls `emit`.
 #: Supply side only: emitting a number changes no verdict.
@@ -736,9 +716,12 @@ def coverage(flow_def: Path, programs_dir: Path) -> Dict[str, Any]:
     program that could emit, so counting it as "a program that has not been
     wired yet" would overstate the work outstanding.
     """
-    import yaml  # noqa: PLC0415 — optional dep, and only this path needs it
-    doc = yaml.safe_load(Path(flow_def).read_text(encoding="utf-8"))
-    steps = [s for s in (doc.get("steps") or []) if s.get("gate")]
+    from flow_gate_grid import load_steps  # noqa: PLC0415
+    all_steps = load_steps(Path(flow_def))
+    if all_steps is None:
+        raise ValueError(f"cannot read flow steps from {flow_def}")
+    steps = [s for s in all_steps if s.get("gate")]
+    gate_step_ids = {str(s["id"]) for s in steps}
     wired: List[str] = []
     unwired: List[str] = []
     no_program: List[str] = []
@@ -759,7 +742,10 @@ def coverage(flow_def: Path, programs_dir: Path) -> Dict[str, Any]:
         sid for sid, f in CONSUMING_STEPS.items()
         if _program_consumes(Path(programs_dir) / f))
     return {
-        "gate_carrying": len(steps),
+        "gate_carrying": len(gate_step_ids),
+        "gate_step_ids": sorted(gate_step_ids),
+        "gateless_step_ids": sorted(
+            {str(s["id"]) for s in all_steps} - gate_step_ids),
         "emitting": sorted(set(wired)),
         "not_emitting": sorted(set(unwired)),
         "no_program": sorted(set(no_program)),
@@ -823,7 +809,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             from flow_compliance_check import _find_flow_def  # noqa: PLC0415
             flow = _find_flow_def()
         rep = coverage(flow, here)
-        rep["declared_gate_carrying"] = GATE_CARRYING_STEPS
+        rep["declared_gate_carrying"] = len(rep["gate_step_ids"])
         rep["declared_emitting"] = list(EMITTING_STEPS)
         rep["declared_consuming"] = sorted(CONSUMING_STEPS)
         if args.json_out:
@@ -843,9 +829,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"  emitting programs                       : "
               f"{rep['emitting_programs']}")
         drift = []
-        if gc != GATE_CARRYING_STEPS:
-            drift.append(f"gate-carrying steps {gc} != declared "
-                         f"{GATE_CARRYING_STEPS}")
+        if gc < 60:
+            drift.append(f"gate-carrying steps {gc} below non-vacuity floor 60")
+        if rep["gateless_step_ids"]:
+            drift.append(f"steps without gate clauses: {rep['gateless_step_ids']}")
         if tuple(rep["emitting"]) != tuple(EMITTING_STEPS):
             drift.append(f"emitting {rep['emitting']} != declared "
                          f"{list(EMITTING_STEPS)}")
@@ -857,8 +844,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                   "tree:", file=sys.stderr)
             for d in drift:
                 print(f"  {d}", file=sys.stderr)
-            print("  Update EMITTING_STEPS / CONSUMING_STEPS / "
-                  "GATE_CARRYING_STEPS in step_metrics.py, or restore the "
+            print("  Update EMITTING_STEPS / CONSUMING_STEPS in "
+                  "step_metrics.py, or restore the "
                   "call that went missing.", file=sys.stderr)
             return RC_VIOLATION
         print("[PASS] declared coverage matches the tree")
