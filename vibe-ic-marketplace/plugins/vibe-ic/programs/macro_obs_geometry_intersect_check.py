@@ -1127,7 +1127,36 @@ def _reader_the_run_recorded(project: Path):
     except ImportError as exc:                              # pragma: no cover
         return None, f"PDK authority unavailable: {exc}"
     try:
-        return authority.reader_the_run_recorded(project)
+        reader, why = authority.reader_the_run_recorded(project)
+        # The shared authority returns None when EDA_CONTAINER is set because
+        # its ordinary _query path uses that environment itself. This gate
+        # needs a reader object for BOTH inventory existence and LEF content;
+        # a None here makes it ask the host for container-only paths instead.
+        selected = (_os.environ.get("EDA_CONTAINER") or
+                    _os.environ.get("VIBEIC_EDA_CONTAINER"))
+        if not selected:
+            return reader, why
+        receipt = project / authority.CONTAINER_IMAGE_REL
+        try:
+            doc = json.loads(receipt.read_text(errors="replace"))
+        except (OSError, ValueError) as exc:
+            return None, f"recorded container identity unreadable: {exc}"
+        if not isinstance(doc, dict) or doc.get("container") != selected:
+            return None, (f"selected container {selected!r} differs from the "
+                          f"container in {authority.CONTAINER_IMAGE_REL}")
+        if doc.get("image_match") is not True:
+            return None, f"{authority.CONTAINER_IMAGE_REL} has no matching image receipt"
+        import _eda_pin as pin
+        expected = pin.reference_digest(doc.get("require_image") or
+                                        doc.get("image_ref"))
+        if not expected:
+            return None, f"{authority.CONTAINER_IMAGE_REL} has no image digest"
+        actual, identity_why = pin.container_image_digest(selected)
+        if actual != expected:
+            return None, (f"recorded container {selected!r} image is "
+                          f"{actual or 'unreadable'}; expected {expected}; "
+                          f"{identity_why}")
+        return authority.container_reader(selected), f"recorded container {selected!r}"
     except Exception as exc:                                # pragma: no cover
         return None, f"PDK authority refused: {exc}"
 
@@ -1209,7 +1238,7 @@ def main(argv=None) -> int:
     ap.add_argument("--json", dest="json_out", type=Path, default=None)
     a = ap.parse_args(argv)
 
-    global _ACTIVE_INPUT_PLAN
+    global _ACTIVE_INPUT_PLAN, _ACTIVE_PDK_READER
     with _semantic_progress.child_progress(PROGRESS_SCOPE) as progress:
         try:
             if progress.enabled:
@@ -1227,6 +1256,7 @@ def main(argv=None) -> int:
             return rc
         finally:
             _ACTIVE_INPUT_PLAN = None
+            _ACTIVE_PDK_READER = None
 
 
 def _main_parsed(a) -> int:
