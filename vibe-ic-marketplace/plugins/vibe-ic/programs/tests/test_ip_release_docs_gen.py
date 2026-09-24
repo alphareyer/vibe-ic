@@ -409,8 +409,9 @@ def test_the_producer_is_dispatched_by_the_runner_and_a_refusal_publishes_nothin
     runner_path = Path(__file__).resolve().parents[1] / "phase3_one_shot_runner.py"
     runner_text = runner_path.read_text(encoding="utf-8")
     assert runner_text.count('PROGRAMS_DIR / "ip_release_docs_gen.py"') == 1
-    assert runner_text.count("plan.append(step_ip_release_docs_gen(") == 1, (
-        "a producer helper that main never calls is still an orphan")
+    from _phase3_main_dispatch import guarded_producer_line
+    assert guarded_producer_line("step_ip_release_docs_gen",
+                                 "ip_release_docs_gen")
 
     import phase3_one_shot_runner as runner
 

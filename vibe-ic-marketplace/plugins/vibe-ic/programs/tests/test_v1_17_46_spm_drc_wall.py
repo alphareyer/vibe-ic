@@ -170,11 +170,11 @@ def test_declared_signoff_gates_run_before_the_metrics_record():
     """MEASURED: `signoff_metrics_aggregate` was produced over reports that did
     not exist yet -- 7 of 18 keys NOT_MEASURED, its own `--check` green because
     both sides were empty, and rc=1 FAIL in the SAME run's gate ledger."""
-    src = (PROGS / "phase3_one_shot_runner.py").read_text()
-    # `step_declared_signoff_gates(project, pdk.name)` since FP-20 — this test
-    # is about ORDER, so it locates the call by name and not by its arguments.
-    gates = src.index("plan.extend(step_declared_signoff_gates(")
-    record = src.index("plan.append(step_signoff_metrics_aggregate(project))")
+    from _phase3_main_dispatch import _main, _calls, guarded_producer_line
+    main, _ = _main()
+    gates = _calls(main, "step_declared_signoff_gates")[0].lineno
+    record = guarded_producer_line("step_signoff_metrics_aggregate",
+                                   "signoff_metrics_aggregate")
     assert gates < record, (
         "the gates that write post_route_signoff_corner.json, "
         "sta_corner_record_completeness.json and tapeout_precheck.json must "
@@ -183,9 +183,11 @@ def test_declared_signoff_gates_run_before_the_metrics_record():
 
 def test_metrics_record_still_precedes_the_release_documents():
     """37.5ic blocks_on 37.4; the reorder must not have moved that."""
-    src = (PROGS / "phase3_one_shot_runner.py").read_text()
-    record = src.index("plan.append(step_signoff_metrics_aggregate(project))")
-    docs = src.index("plan.append(step_tapeout_docs_gen(project))")
+    from _phase3_main_dispatch import guarded_producer_line
+    record = guarded_producer_line("step_signoff_metrics_aggregate",
+                                   "signoff_metrics_aggregate")
+    docs = guarded_producer_line("step_tapeout_docs_gen",
+                                 "tapeout_docs_gen")
     assert record < docs
 
 

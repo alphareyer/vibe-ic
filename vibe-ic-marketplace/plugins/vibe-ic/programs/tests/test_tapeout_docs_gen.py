@@ -247,11 +247,9 @@ def test_phase3_dispatches_the_real_37_5ic_producer_and_mutation_refuses(tmp_pat
     assert executable_refs == 1, (
         f"observed executable tapeout_docs_gen references={executable_refs}; "
         "the YAML gate is an auditor channel, not the phase-3 producer dispatch")
-    dispatch_calls = runner_text.count(
-        "plan.append(step_tapeout_docs_gen(project))")
-    assert dispatch_calls == 1, (
-        f"observed main-path tapeout_docs_gen dispatches={dispatch_calls}; "
-        "a producer helper that main never calls is still an orphan")
+    from _phase3_main_dispatch import guarded_producer_line
+    assert guarded_producer_line("step_tapeout_docs_gen",
+                                 "tapeout_docs_gen")
 
     import phase3_one_shot_runner as runner
 
