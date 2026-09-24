@@ -410,7 +410,7 @@ def test_the_identity_does_not_contain_the_plugin_version(
 
     kw = dict(project=project, kind="synth", runner_path=runner,
               programs_dir=prog, flow_yaml=flow, pdk=_Pdk(),
-              image_digest="sha256:img")
+              image_digest="sha256:img", recording=_fake_recording())
     first, _ = si.identity_now(**kw)
     assert all(v is not None for v in first.values()), first
     # A RELEASE, and nothing else: no file this step reads has moved.
@@ -646,6 +646,20 @@ def _span_project(tmp_path: Path) -> Path:
     return tmp_path
 
 
+
+def _fake_recording():
+    """A minimal RECORDING, so `identity_now` has a `code` to compute.
+
+    r5 makes `code` come from what the step RAN, and a step with no recording
+    gets no cache — which is the point. Tests that are about the OTHER three
+    components supply a stable stand-in here; the recorder's own behaviour is
+    covered by the r5 tests that drive it for real."""
+    import _step_recorder as _sr
+    d, err = _sr.source_digests(PROGRAMS / "_step_identity.py", [])
+    assert not err, err
+    return {"_step_identity.py": d}
+
+
 def _ident(project: Path, kind: str):
     extra = ()
     if kind == "gds":
@@ -656,7 +670,7 @@ def _ident(project: Path, kind: str):
         project=project, kind=kind, runner_path=RUNNER, programs_dir=PROGRAMS,
         flow_yaml=FLOW, pdk=_pdk_with_real_files(project),
         image_digest=_R._step_image_digest(""),      # REAL, not patched
-        extra_inputs=extra)[0]
+        extra_inputs=extra, recording=_fake_recording())[0]
 
 
 # --- the span itself -------------------------------------------------------
@@ -1030,7 +1044,7 @@ def _r3_ident(project: Path, kind: str, args=None):
         project=project, kind=kind, runner_path=RUNNER, programs_dir=PROGRAMS,
         flow_yaml=FLOW, pdk=_pdk_with_real_files(project),
         image_digest=_R._step_image_digest(""),
-        inputs=inputs, knobs=knobs)[0]
+        inputs=inputs, knobs=knobs, recording=_fake_recording())[0]
 
 
 # --- A: the SDC the step ACTUALLY resolves --------------------------------
@@ -1512,3 +1526,251 @@ def test_the_declaration_rule_covers_the_top_level_keys_too(tmp_path):
     after = si.canonical_bytes(decl, "declaration_as_asked")
     assert before == after, (
         "the flow's own top-level writes must not move a step's input hash")
+
+
+# ===========================================================================
+# r5 — ROUND-4 REVIEW (wlfte9cfq, 6 confirmed)
+#
+# "Stop patching the static closure; this is round 4 of the same hole class,
+# and Python's dynamism guarantees a round 5." So the closure stops being the
+# authority: the step RUNS and what ran is RECORDED.
+# ===========================================================================
+import _step_recorder as sr  # noqa: E402
+
+
+def _mini_tree(tmp_path: Path) -> Path:
+    root = tmp_path / "progs"
+    root.mkdir()
+    (root / "m_alias.py").write_text("TUNING = 7\ndef helper():\n    return TUNING\n")
+    (root / "m_dyn.py").write_text("def dynamic():\n    return 2\n")
+    (root / "m_top.py").write_text(
+        "from m_alias import helper as _h\n"
+        "import importlib\n"
+        "def run():\n"
+        "    mod = importlib.import_module('m_dyn')\n"
+        "    return _h() + mod.dynamic()\n")
+    return root
+
+
+def _record_run(root: Path):
+    import importlib
+    sys.path.insert(0, str(root))
+    try:
+        for name in ("m_top", "m_alias", "m_dyn"):
+            sys.modules.pop(name, None)
+        mod = importlib.import_module("m_top")
+        with sr.Recorder(root) as r:
+            mod.run()
+        return r.recorded()
+    finally:
+        sys.path.remove(str(root))
+
+
+def test_an_aliased_import_is_recorded_because_it_ran(tmp_path):
+    """ROUND-4 FINDING 1. `from X import f as g` was recorded by the static
+    closure as a member named `g`, which does not exist — so it was DROPPED
+    WITH NO NOTE. Real escapes: `routing_layer_upper_bound as _rub` (shapes
+    the routed DEF), `pdn_ring_dimensions` (the PDN ring), `drop_include_hubs`
+    (synth's read set)."""
+    root = _mini_tree(tmp_path)
+    record, why = _record_run(root)
+    assert record is not None, why
+    assert "m_alias.py" in record, record
+    assert any(k.startswith("helper@") for k in record["m_alias.py"]), record
+    base = sr.digest_of(record)
+    (root / "m_alias.py").write_text(
+        "TUNING = 7\ndef helper():\n    return TUNING + 1\n")
+    now, err = sr.rederive(record, root)
+    assert not err, err
+    assert sr.digest_of(now) != base, (
+        "an edit to a function reached only through an ALIAS went unnoticed")
+
+
+def test_an_importlib_loaded_module_is_recorded(tmp_path):
+    """ROUND-4 FINDING 1. `importlib.import_module("<literal>")` is invisible
+    to any import-graph walk — measured on the GDS label restore
+    (`gds_port_label_check`)."""
+    root = _mini_tree(tmp_path)
+    record, why = _record_run(root)
+    assert record is not None, why
+    assert "m_dyn.py" in record, record
+    base = sr.digest_of(record)
+    (root / "m_dyn.py").write_text("def dynamic():\n    return 3\n")
+    now, _ = sr.rederive(record, root)
+    assert sr.digest_of(now) != base
+
+
+def test_a_module_level_constant_is_recorded_though_it_never_runs(tmp_path):
+    """Constants, compiled regex tables and dict dispatch tables are not
+    functions and never appear as a call, yet changing one changes what every
+    function in the file does. Earlier rounds had to special-case exactly
+    this; the module-body digest covers it by construction."""
+    root = _mini_tree(tmp_path)
+    record, why = _record_run(root)
+    assert record is not None, why
+    base = sr.digest_of(record)
+    (root / "m_alias.py").write_text(
+        "TUNING = 8\ndef helper():\n    return TUNING\n")
+    now, _ = sr.rederive(record, root)
+    assert sr.digest_of(now) != base, (
+        "a module-level constant the step's code READS was not covered")
+
+
+def test_an_unrelated_edit_in_a_recorded_file_changes_nothing(tmp_path):
+    """The other half: function-level, so a function the step never ran does
+    not cost a re-run even in a file it did."""
+    root = _mini_tree(tmp_path)
+    record, why = _record_run(root)
+    assert record is not None, why
+    base = sr.digest_of(record)
+    (root / "m_alias.py").write_text(
+        "TUNING = 7\ndef helper():\n    return TUNING\n"
+        "def never_called():\n    return 999\n")
+    now, _ = sr.rederive(record, root)
+    assert sr.digest_of(now) == base, (
+        "adding a function the step never runs re-ran it anyway")
+
+
+def test_a_recorded_function_that_vanished_is_the_strongest_stale(tmp_path):
+    root = _mini_tree(tmp_path)
+    record, why = _record_run(root)
+    assert record is not None, why
+    (root / "m_alias.py").write_text("TUNING = 7\n")
+    now, _ = sr.rederive(record, root)
+    assert any(v == "ABSENT" for d in now.values() for v in d.values()), now
+    assert sr.digest_of(now) != sr.digest_of(record)
+
+
+def test_no_recording_means_no_cache(tmp_path):
+    """A step whose code could not be recorded is not a step anyone can prove
+    current."""
+    dig, why = si.code_from_stored(None, PROGRAMS)
+    assert dig is None
+    assert any("carries no recording" in w for w in why), why
+    dig, why = si.code_from_recording(None)
+    assert dig is None and why
+
+
+def test_the_pdk_identity_is_every_field_the_step_received(tmp_path):
+    """ROUND-4 FINDING 2. The recipe-shaping fields are built in `main()`
+    (`_detect_pdk` -> `_pdk_config_from_registry` -> `_derive_tapcell_master`),
+    outside every seed closure — so a `pdk_registry.json` edit
+    (`clk_buf_cell`, `pdn_straps`, `pdn_ring`) or a tap-master rule change
+    altered the DEF with all four components unchanged."""
+    lib = tmp_path / "x.lib"
+    lib.write_text("library(a){}\n")
+
+    class _Pdk:
+        name = "gf180mcuD"
+        liberty = str(lib)
+        tech_lef = cell_lef = cell_gds = drc_deck = None
+        clk_buf_cell = "gf180mcu_fd_sc_mcu7t5v0__clkbuf_1"
+        tapcell_master = "gf180mcu_fd_sc_mcu7t5v0__filltie"
+        macro_lefs: list = []
+
+    pdk = _Pdk()
+    base, why = si.pdk_digest(pdk, None, tmp_path / "proj")
+    assert base is not None, why
+    pdk.clk_buf_cell = "gf180mcu_fd_sc_mcu7t5v0__clkbuf_4"
+    assert si.pdk_digest(pdk, None, tmp_path / "proj")[0] != base, (
+        "a registry-derived master changed and the PDK identity did not")
+    pdk.clk_buf_cell = "gf180mcu_fd_sc_mcu7t5v0__clkbuf_1"
+    pdk.macro_lefs = ["/some/macro.lef"]
+    assert si.pdk_digest(pdk, None, tmp_path / "proj")[0] != base, (
+        "the macro set is part of the PDK the step received")
+
+
+def test_the_tools_component_is_carried_not_re_read(tmp_path, monkeypatch):
+    """ROUND-4 FINDING 4. `step_canonicalize_artefacts` keeps APPENDING to
+    `provenance.jsonl` after the stamps, with version-less reconstructed rows
+    (measured: yosys -> "", pnr tools -> None), so re-reading the ledger made
+    this component move on every no-op re-run. The ledger is a record of the
+    past and it grows; a freshness key may not be read from it."""
+    project = _staged_project(tmp_path)
+    stored = json.dumps({"yosys": "0.38"}, sort_keys=True)
+    ident, why = si.identity_now(
+        project=project, kind="synth", runner_path=RUNNER,
+        programs_dir=PROGRAMS, flow_yaml=FLOW,
+        pdk=_pdk_with_real_files(project), image_digest="sha256:img",
+        inputs=[("declaration",
+                 project / "input/submission_template/tapeout_declaration.json",
+                 "raw")],
+        knobs={}, recording=_fake_recording(), stored_tools=stored)
+    assert ident["tools"] is not None, why["tools"]
+    # the ledger grows underneath — and it must not matter
+    (project / "provenance.jsonl").write_text(
+        (project / "provenance.jsonl").read_text()
+        + json.dumps({"tool": "klayout", "version": "",
+                      "outputs": {"phase2/stage2/synth/x.v": "sha256:0"}})
+        + "\n")
+    again, _ = si.identity_now(
+        project=project, kind="synth", runner_path=RUNNER,
+        programs_dir=PROGRAMS, flow_yaml=FLOW,
+        pdk=_pdk_with_real_files(project), image_digest="sha256:img",
+        inputs=[("declaration",
+                 project / "input/submission_template/tapeout_declaration.json",
+                 "raw")],
+        knobs={}, recording=_fake_recording(), stored_tools=stored)
+    assert again["tools"] == ident["tools"], (
+        "the tools component moved because the ledger grew after the stamp")
+
+
+def test_the_flows_own_stamped_auto_sdc_is_not_design_staged(tmp_path):
+    """ROUND-4 FINDING 5, pre-existing on main. `_stamp_sdc_provenance`
+    PREPENDS `# VIBEIC_SDC_PDK_PROVENANCE`, and
+    `step_canonicalize_artefacts` runs it over the deck the flow itself
+    emitted — so the auto banner stopped being the first line and a
+    `startswith` no longer matched. The flow's own deck then read back as
+    DESIGN-STAGED: `sdc_staged` flipped no -> yes after the stamps and the
+    re-run took the design-staged branch on the flow's own file, which is the
+    laundering this guard exists to prevent."""
+    d = tmp_path / "phase2" / "stage2" / "constraints"
+    d.mkdir(parents=True)
+    (d / "top.sdc").write_text(
+        "# VIBEIC_SDC_PDK_PROVENANCE: gf180mcuD\n"
+        "# Auto-generated minimal SDC for silicon top (no constraints/*.sdc "
+        "supplied; clk_period_ns=20.0)\n"
+        "create_clock -name clk -period 20.0 [get_ports i_clk]\n")
+    assert _R._resolve_staged_silicon_sdc(tmp_path) is None, (
+        "the flow's own CANONICALIZED auto-SDC was read back as the design's")
+
+
+def test_an_unstamped_auto_sdc_is_still_recognised(tmp_path):
+    """The pre-existing case must keep working: the banner on line 1."""
+    d = tmp_path / "phase2" / "stage2" / "constraints"
+    d.mkdir(parents=True)
+    (d / "top.sdc").write_text(
+        "# Auto-generated minimal SDC for silicon top (no constraints/*.sdc "
+        "supplied; clk_period_ns=20.0)\n"
+        "create_clock -name clk -period 20.0 [get_ports i_clk]\n")
+    assert _R._resolve_staged_silicon_sdc(tmp_path) is None
+
+
+def test_a_hand_authored_sdc_is_still_the_designs(tmp_path):
+    """And the other direction, so the guard cannot become a blanket refusal:
+    a deck with no flow banner is the design's and must be returned."""
+    d = tmp_path / "input" / "constraints"
+    d.mkdir(parents=True)
+    (d / "silicon.sdc").write_text(
+        "# hand written by the designer\ncreate_clock -period 10 [get_ports clk]\n")
+    got = _R._resolve_staged_silicon_sdc(tmp_path)
+    assert got is not None and got.name == "silicon.sdc", got
+
+
+def test_mutation_recording_only_calls_would_miss_the_module_body(tmp_path):
+    """The mutation for the recorder: drop the module-body digest and a
+    constant edit becomes invisible again."""
+    root = _mini_tree(tmp_path)
+    record, _why = _record_run(root)
+    stripped = {f: {k: v for k, v in d.items() if k != sr.MODULE_BODY}
+                for f, d in record.items()}
+    base = sr.digest_of(stripped)
+    (root / "m_alias.py").write_text(
+        "TUNING = 8\ndef helper():\n    return TUNING\n")
+    now, _ = sr.rederive(record, root)
+    now_stripped = {f: {k: v for k, v in d.items() if k != sr.MODULE_BODY}
+                    for f, d in now.items()}
+    assert sr.digest_of(now_stripped) == base, (
+        "sanity: without the module body, the constant edit is invisible")
+    assert sr.digest_of(now) != sr.digest_of(record), (
+        "and WITH it, the same edit is caught — which is why it is there")

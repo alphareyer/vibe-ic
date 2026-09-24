@@ -109,6 +109,21 @@ def _span_inputs(project, top: str = "top") -> None:
             p.write_text(text)
 
 
+def _seed_recording(kind: str) -> None:
+    """R-0924-3 r5: `code` comes from what the step RAN, and a step with no
+    recording gets NO cache — which is the point of r5. A fixture that stamps
+    a tree without running the step through `_recorded` must therefore supply
+    the recording a real run would have left. The recorder's own behaviour is
+    covered by the r5 tests that drive it for real."""
+    import _step_recorder as _sr
+    # DERIVED, not invented: a hand-written digest would not survive
+    # re-derivation (the check side recomputes these keys from CURRENT
+    # source), so the stand-in is computed the same way a real recording is.
+    _d, _err = _sr.source_digests(R.PROGRAMS_DIR / "_step_identity.py", [])
+    assert not _err, _err
+    R._STEP_RECORDING[kind] = ({"_step_identity.py": _d}, "")
+
+
 def _valid_cache(tmp_path, kind="pnr", artefact="top.def",
                  deliverable="HARDMACRO"):
     """A directory that is GENUINELY reusable — and stays that way.
@@ -152,6 +167,7 @@ def _valid_cache(tmp_path, kind="pnr", artefact="top.def",
     # chip path declares DIE for itself.
     _declare(project, deliverable)
     R._write_pnr_args_sidecar(out_dir, DIE, UTIL)
+    _seed_recording(kind)
     R._write_producer_identity(
         out_dir, kind, project=project, pdk=_pdk(project), container="",
         top="top", args=_IdentityArgs())
@@ -312,6 +328,7 @@ def test_the_pad_ring_clause_belongs_to_the_pnr_stage_only(tmp_path):
     (tmpl / "SELF_TAPEOUT.txt").write_text("x\n")
     assert R._chip_path_requests_pad_ring(project) is True
     assert R._pad_ring_route_cache_valid(project, "top") is False
+    _seed_recording("gds")
     R._write_producer_identity(out_dir, "gds", project=project,
                                pdk=_pdk(project), container="",
                                top="top", args=_IdentityArgs())

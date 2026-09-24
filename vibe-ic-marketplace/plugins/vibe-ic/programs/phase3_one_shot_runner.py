@@ -3745,9 +3745,27 @@ def _resolve_staged_silicon_sdc(project: Path) -> Optional[Path]:
             head = candidate.read_text(errors="replace")[:4096]
         except OSError:
             continue
+        # THE BANNER IS NOT ALWAYS THE FIRST LINE. `_stamp_sdc_provenance`
+        # PREPENDS `# VIBEIC_SDC_PDK_PROVENANCE: <pdk>` (see :3159), and
+        # `step_canonicalize_artefacts` runs it over the deck the flow itself
+        # emitted — so after canonicalization the auto banner sits on line 2
+        # and a `startswith` on the whole text no longer matched. MEASURED
+        # (r4 review finding 5, pre-existing on main): the flow's OWN stamped
+        # auto-SDC was then read back as DESIGN-STAGED, `sdc_staged` flipped
+        # no -> yes after the stamps, and the re-run took the design-staged
+        # branch on the flow's own deck — exactly the laundering the comment
+        # above says this guard prevents. The banner is recognised wherever
+        # the stamp left it: in the leading COMMENT BLOCK.
+        _lead = []
+        for _line in head.splitlines():
+            if _line.startswith("#") or not _line.strip():
+                _lead.append(_line)
+                continue
+            break
+        _lead_text = "\n".join(_lead)
         flow_owned = (
             _sdc.generated_top_entity(head) is not None
-            or head.startswith("# Auto-generated minimal SDC for silicon top ")
+            or "# Auto-generated minimal SDC for silicon top " in _lead_text
         )
         if not flow_owned:
             return candidate
@@ -17958,6 +17976,10 @@ def _write_producer_identity(out_dir: Path, kind: str, *,
             Path(project), kind, top, args)
         if _si_bad:
             return          # no stamp for a read-set we could not establish
+        _rec, _rec_why = _STEP_RECORDING.get(kind, (None, "the step was not "
+                                                     "run through the "
+                                                     "recorder"))
+        _probed = _probed_tool_versions(Path(project), kind)
         ident, why = _si.identity_now(
             project=Path(project), kind=kind,
             runner_path=Path(__file__).resolve(),
@@ -17966,8 +17988,12 @@ def _write_producer_identity(out_dir: Path, kind: str, *,
             "phase1_phase2_phase3.yaml",
             pdk=pdk, image_digest=_step_image_digest(container),
             pdk_hasher=_step_pdk_hasher(container),
-            inputs=_si_inputs, knobs=_si_knobs)
-        _si.write_sidecar(out_dir, kind, ident, why)
+            inputs=_si_inputs, knobs=_si_knobs,
+            recording=_rec, stored_tools=_probed)
+        if _rec_why:
+            why.setdefault("code", []).append(_rec_why)
+        _si.write_sidecar(out_dir, kind, ident, why,
+                          extra={"recording": _rec, "probed_tools": _probed})
     except Exception:  # nosec — sidecar is best-effort
         pass
 
@@ -18075,13 +18101,18 @@ def _producer_cache_valid_for(out_dir: Path, kind: str, *,
             "phase1_phase2_phase3.yaml",
             pdk=pdk, image_digest=_step_image_digest(container),
             pdk_hasher=_step_pdk_hasher(container),
-            inputs=_si_inputs, knobs=_si_knobs)
+            inputs=_si_inputs, knobs=_si_knobs,
+            stored_recording=(_si.read_sidecar(out_dir, kind) or {}).get(
+                "recording"),
+            stored_tools=(_si.read_sidecar(out_dir, kind) or {}).get(
+                "probed_tools"))
     except Exception as exc:  # noqa: BLE001 — an error is never freshness
         return _deny_unless_forced(
             f"the {kind} step's identity could not be computed "
             f"({type(exc).__name__}: {exc}), so the cached artefact cannot be "
             f"proven current")
-    fresh, reasons = _si.compare(_si.read_sidecar(out_dir, kind), ident)
+    _rec_side = _si.read_sidecar(out_dir, kind)
+    fresh, reasons = _si.compare(_rec_side, ident)
     detail = "; ".join(reasons)
     if fresh:
         return (True, f"{kind} step unchanged — {detail}")
@@ -18147,6 +18178,86 @@ def _step_pdk_hasher(container: str):
         _STEP_PDK_HASH_CACHE[key] = out
         return out
     return _hash
+
+
+#: What each kind's step ACTUALLY RAN, filled by `_recorded` as the step runs.
+#: `(recording | None, why_not)`.
+_STEP_RECORDING: Dict[str, Tuple[Optional[Dict[str, Dict[str, str]]], str]] = {}
+
+
+def _probed_tool_versions(project: Path, kind: str) -> str:
+    """The tool versions this step's own run put in the ledger, read AT STAMP
+    TIME and then CARRIED in the stamp.
+
+    r4 review finding 4: re-reading `provenance.jsonl` at freshness time made
+    this component move on every no-op re-run, because
+    `step_canonicalize_artefacts` keeps APPENDING to that ledger AFTER the
+    stamps, with version-less reconstructed rows (measured: yosys -> "",
+    pnr tools -> None). The ledger grows; a freshness key may not be read from
+    a growing file. Captured once, here, while it still describes only this
+    step's own work."""
+    try:
+        import _step_identity as _si  # noqa: PLC0415
+        prefixes = _si.KIND_DIR_PREFIX.get(kind) or ()
+        prov = Path(project) / "provenance.jsonl"
+        if not prov.is_file():
+            return ""
+        seen: Dict[str, str] = {}
+        for line in prov.read_text(errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            outs = rec.get("outputs") or {}
+            if not isinstance(outs, dict):
+                continue
+            if not any(str(k).startswith(pfx) for k in outs
+                       for pfx in prefixes):
+                continue
+            tool = str(rec.get("tool") or "")
+            if tool:
+                seen[tool] = str(rec.get("version") or "")
+        return json.dumps(seen, sort_keys=True)
+    except Exception:  # noqa: BLE001 — a probe we cannot take is empty
+        return ""
+
+
+def _recorded(kind: str, fn):
+    """Wrap a step so the code it RUNS is recorded (R-0924-3 r5).
+
+    Four review rounds found the same hole class in a static AST closure, and
+    the fourth said the quiet part: Python's dynamism guarantees a fifth.
+    `from X import f as g`, `importlib.import_module(...)`, `getattr`,
+    callbacks and a `PdkConfig` assembled in `main()` are all invisible to a
+    walk over the source, and every one of them was a measured escape into a
+    shipped artefact. They are not invisible to the interpreter, so the step
+    runs and what ran is recorded.
+
+    The wrapper NEVER changes the step's result or raises on the step's
+    behalf; a recording that could not be taken is reported as such and that
+    kind simply gets no cache."""
+    def _wrapped(*a, **k):
+        try:
+            import _step_recorder as _sr  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001
+            _STEP_RECORDING[kind] = (
+                None, f"the recorder is unavailable ({type(exc).__name__})")
+            return fn(*a, **k)
+        rec = _sr.Recorder(PROGRAMS_DIR)
+        try:
+            with rec:
+                return fn(*a, **k)
+        finally:
+            try:
+                _STEP_RECORDING[kind] = rec.recorded()
+            except Exception as exc:  # noqa: BLE001 — never fail the step
+                _STEP_RECORDING[kind] = (
+                    None, f"the recording could not be read "
+                          f"({type(exc).__name__}: {exc})")
+    return _wrapped
 
 
 def _step_inputs(project: Path, kind: str, top: str, args: Any,
@@ -68157,7 +68268,8 @@ def main() -> int:
             plan.append(_spf.gate(
                 project, "phase3_one_shot_runner", "synth",
                 _preflight_refusal("synth"),
-                step_synth, project, effective_top, pdk, args.container))
+                _recorded("synth", step_synth), project,
+                effective_top, pdk, args.container))
             # Stamp the producer at the CALL SITE, not inside the step:
             # step_gds alone has two PASS returns and step_synth/step_pnr have
             # many, so a per-return stamp is a class of missed sites waiting to
@@ -68242,7 +68354,8 @@ def main() -> int:
                 _pnr_dispatched = _spf.gate(
                     project, "phase3_one_shot_runner", "pnr",
                     _preflight_refusal("pnr"),
-                    step_pnr, project, effective_top, pdk, args.container,
+                    _recorded("pnr", step_pnr), project,
+                    effective_top, pdk, args.container,
                     args.die_um, args.util,
                     spare_density=args.spare_density,
                     pad_ring_step=step_pad_ring_gen,
@@ -68320,7 +68433,8 @@ def main() -> int:
                 _pnr_redispatched = _spf.gate(
                     project, "phase3_one_shot_runner", "pnr",
                     _preflight_refusal("pnr"),
-                    step_pnr, project, effective_top, pdk, args.container,
+                    _recorded("pnr", step_pnr), project,
+                    effective_top, pdk, args.container,
                     args.die_um, args.util,
                     spare_density=args.spare_density,
                     pad_ring_step=step_pad_ring_gen,
@@ -68506,7 +68620,8 @@ def main() -> int:
                 _gds_dispatched = _spf.gate(
                     project, "phase3_one_shot_runner", "gds",
                     _preflight_refusal("gds"),
-                    step_gds, project, effective_top, pdk, args.container)
+                    _recorded("gds", step_gds), project,
+                    effective_top, pdk, args.container)
                 plan.append(_gds_dispatched)
                 if _gds_dispatched.status == "PASS":
                     _write_producer_identity(

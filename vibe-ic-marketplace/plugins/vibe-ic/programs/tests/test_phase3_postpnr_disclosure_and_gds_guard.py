@@ -122,6 +122,21 @@ def _span_inputs(project, top: str = "top") -> None:
             p.write_text(text)
 
 
+def _seed_recording(kind: str) -> None:
+    """R-0924-3 r5: `code` comes from what the step RAN, and a step with no
+    recording gets NO cache — which is the point of r5. A fixture that stamps
+    a tree without running the step through `_recorded` must therefore supply
+    the recording a real run would have left. The recorder's own behaviour is
+    covered by the r5 tests that drive it for real."""
+    import _step_recorder as _sr
+    # DERIVED, not invented: a hand-written digest would not survive
+    # re-derivation (the check side recomputes these keys from CURRENT
+    # source), so the stand-in is computed the same way a real recording is.
+    _d, _err = _sr.source_digests(R.PROGRAMS_DIR / "_step_identity.py", [])
+    assert not _err, _err
+    R._STEP_RECORDING[kind] = ({"_step_identity.py": _d}, "")
+
+
 def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
     """A project in the 'everything already exists from the previous run'
     state: cached netlist, cached DEF, cached GDS, and a geometry sidecar
@@ -184,8 +199,11 @@ def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
     _span_inputs(tmp_path, TOP)
     _ctx = dict(project=tmp_path, pdk=_pdk(tmp_path), container="",
                 top=TOP, args=_IdentityArgs())
+    _seed_recording("synth")
     R._write_producer_identity(synth, "synth", **_ctx)
+    _seed_recording("pnr")
     R._write_producer_identity(pnr, "pnr", **_ctx)
+    _seed_recording("gds")
     R._write_producer_identity(pnr, "gds", **_ctx)
     # The SECOND thing this fixture had to catch up with, and the same kind as
     # the post-DFT netlist above: v1.22.13 (#2376) made Phase 3 refuse a project
@@ -507,7 +525,9 @@ def _with_pad_table(project: Path, pins: dict) -> None:
                 top=TOP, args=_IdentityArgs())
     pnr = R._pl.pnr_dir(project)
     R._write_producer_identity(R._pl.synth_dir(project), "synth", **_ctx)
+    _seed_recording("pnr")
     R._write_producer_identity(pnr, "pnr", **_ctx)
+    _seed_recording("gds")
     R._write_producer_identity(pnr, "gds", **_ctx)
 
 

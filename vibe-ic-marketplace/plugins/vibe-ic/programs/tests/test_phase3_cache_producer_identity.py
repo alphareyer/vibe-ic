@@ -240,17 +240,40 @@ def test_a_pdk_that_cannot_be_read_still_refuses(tmp_path, monkeypatch):
     assert "pdk" in msg
 
 
-def test_a_tree_with_no_tool_ledger_re_runs(tmp_path, monkeypatch):
-    """A tree that cannot say which tools made its artefacts cannot prove they
-    are current."""
+def test_the_tool_ledger_is_not_the_source_of_the_tools_component(
+        tmp_path, monkeypatch):
+    """SUPERSEDED BY ROUND-4 REVIEW FINDING 4, and the replacement is the
+    stronger contract.
+
+    This test used to delete `provenance.jsonl` and require a re-run, on the
+    reasoning that a tree which cannot say which tools made its artefacts
+    cannot prove them current. That reasoning still holds — but the LEDGER is
+    the wrong place to ask. `step_canonicalize_artefacts` keeps APPENDING to
+    it AFTER the stamps, with version-less reconstructed rows (measured on
+    spm_gf180_cleanrun_20260829_1819: yosys -> "", pnr tools -> None), so
+    re-reading it made the component move on every no-op re-run. The ledger is
+    a record of the past and it grows; a freshness key may not be read from it.
+
+    The tools a step ran are now PROBED at stamp time and CARRIED in the
+    stamp, so the tree still says which tools made the artefact — it just says
+    it in the stamp, which does not grow underneath the answer. The ledger
+    vanishing afterwards is therefore correctly irrelevant, and what still
+    forces a re-run is an environment that cannot be named at all (the image),
+    which `test_unresolvable_current_identity_fails_closed` holds."""
     project = _unit(tmp_path)
     out = R._pl.synth_dir(project)
     out.mkdir(parents=True, exist_ok=True)
     _stamp(project, out, "synth")
     assert _valid(project, out, "synth", monkeypatch)[0] is True
+    import _step_identity as _si
+    rec = _si.read_sidecar(out, "synth")
+    assert rec.get("probed_tools") is not None, (
+        "the stamp must CARRY what it probed, or the ledger is still the "
+        f"source: {sorted(rec)}")
     (project / "provenance.jsonl").unlink()
-    ok, msg = _valid(project, out, "synth", monkeypatch)
-    assert ok is False, msg
+    ok, why = _valid(project, out, "synth", monkeypatch)
+    assert ok is True, (
+        f"the ledger vanished and the stamp still knows what ran: {why}")
 
 
 def test_kinds_are_recorded_separately(tmp_path, monkeypatch):
@@ -361,9 +384,25 @@ class _IdentityArgs:
     container = ""
 
 
+def _seed_recording(kind: str) -> None:
+    """R-0924-3 r5: `code` comes from what the step RAN, and a step with no
+    recording gets NO cache — which is the point of r5. A fixture that stamps
+    a tree without running the step through `_recorded` must therefore supply
+    the recording a real run would have left. The recorder's own behaviour is
+    covered by the r5 tests that drive it for real."""
+    import _step_recorder as _sr
+    # DERIVED, not invented: a hand-written digest would not survive
+    # re-derivation (the check side recomputes these keys from CURRENT
+    # source), so the stand-in is computed the same way a real recording is.
+    _d, _err = _sr.source_digests(R.PROGRAMS_DIR / "_step_identity.py", [])
+    assert not _err, _err
+    R._STEP_RECORDING[kind] = ({"_step_identity.py": _d}, "")
+
+
 def _stamp(project: Path, out_dir: Path, kind: str) -> None:
     """Stamp `kind` the way a real run does — with the context the step
     identity is computed from."""
+    _seed_recording(kind)
     R._write_producer_identity(out_dir, kind, project=project,
                                pdk=_pdk(project), container="",
                                top=TOP, args=_IdentityArgs())

@@ -948,6 +948,48 @@ def program_code_digest(programs_dir: Path, steps: Sequence[Dict[str, Any]],
                                   f"and their direct in-tree imports"] + notes
 
 
+def code_from_recording(recording) -> Tuple[Optional[str], List[str]]:
+    """`code` at STAMP time: a digest over what the step actually ran."""
+    if not recording:
+        return None, ["nothing was recorded for this step"]
+    try:
+        import _step_recorder as _sr  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        return None, [f"the recorder is unavailable ({type(exc).__name__})"]
+    n_fn = sum(len(v) - 1 for v in recording.values())
+    return _sr.digest_of(recording), [
+        f"{n_fn} function(s) recorded across {len(recording)} file(s) "
+        f"(plus each file's module body)"]
+
+
+def code_from_stored(stored, programs_dir: Path
+                     ) -> Tuple[Optional[str], List[str]]:
+    """`code` at CHECK time: RE-DERIVE the recorded keys from CURRENT source.
+
+    The step has not run, so there is nothing to record — what exists is the
+    recording the LAST run left, and the question is whether the code it names
+    still says the same thing. A recorded function that has changed, or that
+    is GONE from the file, or a module body that moved, all make this differ.
+    No recording at all means no cache: a step whose code was never recorded
+    is not a step anyone can prove current."""
+    if not stored:
+        return None, ["the cached artefact carries no recording of what its "
+                      "step ran, so its code cannot be compared"]
+    try:
+        import _step_recorder as _sr  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        return None, [f"the recorder is unavailable ({type(exc).__name__})"]
+    now, err = _sr.rederive(stored, Path(programs_dir))
+    if err:
+        return None, [err]
+    missing = [f"{rel}:{k}" for rel, d in now.items()
+               for k, v in d.items() if v == "ABSENT"]
+    note = f"{len(now)} recorded file(s) re-derived"
+    if missing:
+        note += f"; {len(missing)} recorded function(s) no longer in source"
+    return _sr.digest_of(now), [note]
+
+
 def code_digest(runner_path: Path, programs_dir: Path,
                 steps: Sequence[Dict[str, Any]], kind: str
                 ) -> Tuple[Optional[str], List[str]]:
@@ -1086,59 +1128,127 @@ def pdk_files_checked(pdk: Any, project: Optional[Path]
     return files, bad
 
 
+def pdk_field_values(pdk: Any) -> List[Tuple[str, str]]:
+    """EVERY resolved field of the PdkConfig the step RECEIVED.
+
+    r4 review finding 2: the recipe-shaping fields are computed in `main()` —
+    `_detect_pdk` -> `_pdk_config_from_registry` -> `_derive_tapcell_master` —
+    which is outside every seed closure, and the old `pdk` component hashed
+    only five FILE paths. So an edit to `pdk_registry.json` (`clk_buf_cell`,
+    `pdn_straps`, `pdn_ring`) or a change in the tap-master rule altered the
+    DEF with all four identity components unchanged: a regression against the
+    whole-runner key it replaced.
+
+    The object the step was handed is the authority, so all of its fields are
+    hashed — including `macro_*` lists, which also closes the macro half of
+    finding 3 without a glob."""
+    out: List[Tuple[str, str]] = []
+    names = getattr(pdk, "__dataclass_fields__", None)
+    if names is None:
+        names = [n for n in dir(pdk)
+                 if not n.startswith("__") and not callable(getattr(pdk, n,
+                                                                   None))]
+    for name in sorted(names):
+        try:
+            val = getattr(pdk, name)
+        except Exception:  # noqa: BLE001
+            continue
+        if callable(val):
+            continue
+        try:
+            out.append((name, json.dumps(val, sort_keys=True, default=str)))
+        except Exception:  # noqa: BLE001
+            out.append((name, repr(val)))
+    return out
+
+
+def _paths_in(values: Sequence[Tuple[str, str]]) -> List[str]:
+    """Every value that looks like a filesystem path, in field order."""
+    out: List[str] = []
+    for _name, raw in values:
+        for tok in re.findall(r'"([^"]{3,})"|^([^"\s]{3,})$', raw,
+                              re.MULTILINE):
+            cand = tok[0] or tok[1]
+            if cand.startswith("/") and cand not in out:
+                out.append(cand)
+    return out
+
+
 def pdk_digest(pdk: Any, hasher: Any = None,
                project: Optional[Path] = None
                ) -> Tuple[Optional[str], List[str]]:
-    """sha256 of the PDK files this step reads.
+    """The PDK identity: every field the step received, plus the BYTES of
+    every file among them.
 
-    WHERE THE FILES ACTUALLY ARE — a MEASURED correction to my own first cut.
-    `PdkConfig.liberty` and its siblings are documented as "path inside
-    container (or host, if absolute exists)", and on the measured
-    configuration they are container-ONLY: run2's liberty is
-    `/foss/pdks/ciel/.../gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00.lib` and THE
-    HOST HAS NO `/foss/pdks` AT ALL. A host-side `is_file()` therefore answers
-    False for every PDK file, this component is never computable, and the
-    whole change degenerates into "always re-run" — strictly WORSE than the
-    predicate it replaces. The existing deck's control assertion
-    (`test_matching_producer_is_reusable`: "the fix must not degenerate into
-    'always re-run'") is what caught it, which is the argument for never
-    deleting a test one's own change has inconvenienced.
+    WHERE THE FILES ACTUALLY ARE. `PdkConfig.liberty` and its siblings are
+    documented as "path inside container (or host, if absolute exists)", and
+    on the measured configuration they are container-ONLY: the host has no
+    `/foss/pdks` at all. Hashing them host-side made the component permanently
+    uncomputable and the whole change "always re-run" — worse than what it
+    replaced. So the caller supplies a `hasher` that reads them where they
+    live.
 
-    So the caller supplies a `hasher` that reads the files where they live.
-    With no hasher only host-resolvable paths are used, and an unresolvable
-    one still refuses: the fail-closed rule is unchanged, it is simply no
-    longer tripped by the ordinary case."""
+    A path under the run's OUTPUT tree is this run's own derivation and
+    refuses; a path the design STAGED under `input/` is a design input and is
+    hashed (r3 review finding 5 — asap7 measured)."""
     if pdk is None:
         return None, ["no PDK configuration in hand"]
-    want, derived = pdk_files_checked(pdk, project)
-    if derived:
-        return None, derived
-    if not want:
-        return None, ["the PDK configuration names no file"]
+    fields = pdk_field_values(pdk)
+    if not fields:
+        return None, ["the PDK configuration exposes no field"]
+    # Prefer `<field>_source` over a field the FLOW derived in-run.
+    by_name = dict(fields)
+    resolved: List[Tuple[str, str]] = []
+    for name, raw in fields:
+        if name.endswith("_source"):
+            continue
+        src = by_name.get(f"{name}_source")
+        resolved.append((name, src if src and src != "null" else raw))
+    paths = _paths_in(resolved)
     digests: Dict[str, str] = {}
-    if hasher is not None:
+    if hasher is not None and paths:
         try:
-            got = hasher([path for _f, path in want])
+            got = hasher(paths)
         except Exception as exc:  # noqa: BLE001 — a failed probe is not a pass
             return None, [f"the PDK hasher failed ({type(exc).__name__}: "
                           f"{exc}), so the PDK cannot be proven unchanged"]
         if isinstance(got, dict):
             digests.update({str(k): str(v) for k, v in got.items() if v})
-    pairs: List[Tuple[str, str]] = []
+    pairs: List[Tuple[str, str]] = [
+        (f"field:{n}", _sha256_bytes(v.encode("utf-8"))) for n, v in resolved]
     unresolved: List[str] = []
-    for field, path in want:
+    try:
+        root = Path(project).resolve() if project is not None else None
+        design = (root / "input").resolve() if root is not None else None
+    except OSError:
+        root = design = None
+    for path in paths:
+        # ASKED BEFORE IT IS READ. A file this run PRODUCED is not evidence
+        # about whether the run should happen, and it is perfectly readable —
+        # so testing readability first would hash it and never refuse.
+        try:
+            rp = Path(path).resolve()
+            if root is not None and rp.is_relative_to(root) and (
+                    design is None or not rp.is_relative_to(design)):
+                unresolved.append(
+                    f"{path} is inside the run's OUTPUT tree, so it is this "
+                    f"run's own derivation")
+                continue
+        except (OSError, ValueError):
+            pass
         d = digests.get(path)
         if d is None:
-            p_ = Path(path)
-            d = _sha256_file(p_) if p_.is_file() else None
+            q = Path(path)
+            d = _sha256_file(q) if q.is_file() else None
         if d is None:
-            unresolved.append(f"{field}={path}")
+            unresolved.append(f"{path} could not be read")
             continue
-        pairs.append((field, d))
+        pairs.append((f"file:{path}", d))
     if unresolved:
-        return None, [f"PDK file(s) could not be read, so the PDK cannot be "
-                      f"proven unchanged: {'; '.join(unresolved)}"]
-    return _digest_pairs(pairs), [f"{len(pairs)} PDK file(s)"]
+        return None, [f"the PDK cannot be proven unchanged: "
+                      f"{'; '.join(unresolved)}"]
+    return _digest_pairs(pairs), [
+        f"{len(resolved)} PDK field(s) and {len(paths)} file(s)"]
 
 
 # --------------------------------------------------------------------------
@@ -1149,7 +1259,9 @@ def identity_now(*, project: Path, kind: str, runner_path: Path,
                  image_digest: Optional[str] = None, pdk_hasher: Any = None,
                  extra_inputs: Sequence[Path] = (),
                  inputs: Optional[Sequence[Tuple[str, Any, str]]] = None,
-                 knobs: Optional[Dict[str, str]] = None
+                 knobs: Optional[Dict[str, str]] = None,
+                 recording: Any = None, stored_recording: Any = None,
+                 stored_tools: Optional[str] = None
                  ) -> Tuple[Dict[str, Optional[str]], Dict[str, List[str]]]:
     """This build's identity for `kind`, plus per-component evidence."""
     steps = load_steps(Path(flow_yaml))
@@ -1162,10 +1274,35 @@ def identity_now(*, project: Path, kind: str, runner_path: Path,
     else:
         ident["inputs"], why["inputs"] = inputs_digest(
             Path(project), steps, kind, extra_inputs)
-    ident["code"], why["code"] = code_digest(
-        Path(runner_path), Path(programs_dir), steps, kind)
-    ident["tools"], why["tools"] = tools_digest(
-        Path(project), kind, image_digest)
+    # CODE — what the step RAN, never a static approximation of it. The
+    # closure stays available as a disclosed cross-check but is not the
+    # authority (R-0924-3 r5).
+    if recording is not None:
+        ident["code"], why["code"] = code_from_recording(recording)
+    elif stored_recording is not None:
+        ident["code"], why["code"] = code_from_stored(
+            stored_recording, Path(programs_dir))
+    else:
+        ident["code"], why["code"] = (
+            None, ["no recording of what this step ran, and none stored"])
+    # TOOLS — the versions this step PROBED, carried in the stamp, plus the
+    # live image identity. r4 review finding 4: re-reading `provenance.jsonl`
+    # made this move on every no-op re-run, because
+    # `step_canonicalize_artefacts` keeps APPENDING to that ledger after the
+    # stamps, with version-less reconstructed rows. The ledger is a record of
+    # the past and kept growing; a freshness key may not be read from it.
+    if stored_tools:
+        ident["tools"], why["tools"] = (
+            _digest_pairs((("probed", stored_tools),
+                           ("image", image_digest or ""))) if image_digest
+            else None,
+            ["the probed tool versions carried in the stamp, plus the live "
+             "image identity"] if image_digest else
+            ["the container image cannot be named, so the tool identity "
+             "cannot be established"])
+    else:
+        ident["tools"], why["tools"] = tools_digest(
+            Path(project), kind, image_digest)
     ident["pdk"], why["pdk"] = pdk_digest(pdk, pdk_hasher, Path(project))
     return ident, why
 
@@ -1209,7 +1346,8 @@ def read_sidecar(out_dir: Path, kind: str) -> Optional[Dict[str, Any]]:
 
 
 def write_sidecar(out_dir: Path, kind: str, ident: Dict[str, Optional[str]],
-                  why: Optional[Dict[str, List[str]]] = None) -> None:
+                  why: Optional[Dict[str, List[str]]] = None,
+                  extra: Optional[Dict[str, Any]] = None) -> None:
     """Stamp `kind`'s identity. Best-effort, exactly like its predecessor: a
     stamp failure must never fail a step that succeeded, and an absent stamp
     reads as 'unknown' -> re-run, which can only cause more work."""
@@ -1226,6 +1364,11 @@ def write_sidecar(out_dir: Path, kind: str, ident: Dict[str, Optional[str]],
         rec: Dict[str, Any] = dict(ident)
         if why:
             rec["evidence"] = {k: list(v) for k, v in why.items()}
+        if extra:
+            # The RECORDING itself lives here: freshness re-derives its keys
+            # from current source, so the stamp has to carry it, not just a
+            # digest of it.
+            rec.update({k: v for k, v in extra.items() if v is not None})
         doc[kind] = rec
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
