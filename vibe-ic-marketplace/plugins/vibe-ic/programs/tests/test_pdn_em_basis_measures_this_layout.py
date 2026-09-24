@@ -161,10 +161,10 @@ def test_no_sentinel_does_not_bind(tmp_path):
 def test_the_writer_records_the_design_it_spent_the_resize_on():
     """A sentinel that does not name its design cannot bound one design rather
     than the tree, so the write site is part of the contract."""
-    src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
+    src = (PROGRAMS / "_ppa" / "power.py").read_text()
     i = src.find('"reason": "pdn_em_first_pass_resize"')
     assert i > 0, "the sentinel write site moved; this test must follow it"
-    assert '"spent_on_def": _ppa_power._pdn_em_spent_on(project)' in src[i:i + 500], (
+    assert '"spent_on_def": _pdn_em_spent_on(project)' in src[i:i + 500], (
         "the sentinel is written without a design tag, so it will bound every "
         "future run in this tree")
 
