@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from programs import flow_compliance_check as compliance
+from programs import flow_gate_enforcement_audit as enforcement
 
 FLOW = Path(__file__).resolve().parents[2] / "flow/phase1_phase2_phase3.yaml"
 
@@ -79,6 +80,52 @@ def test_step14_blocks_corrupt_declared_analog_report(tmp_path):
     assert not compliance._evaluate_gate(tmp_path, clause)[0]
     report.unlink()
     assert not compliance._evaluate_gate(tmp_path, clause)[0]
+
+
+@pytest.mark.parametrize("step_id", CASES)
+def test_content_refusal_denies_the_owning_step_pass_tier(tmp_path, step_id):
+    """Exercise the actual step judge with its canonical content clause."""
+    rel, good, damaged = CASES[step_id]
+    path = _write(tmp_path, rel, good)
+    step = _steps()[step_id]
+    gate = step["gate"]
+    if step_id == "27":
+        # The SI content clause has independent SPEF/MCF siblings. Supply its
+        # own real-shaped report and judge that clause at the owning step.
+        _write(tmp_path, "reports/phase3/si_mcf_sta.json", {
+            "nominal": {"worst_setup_slack_ns": 1.0},
+            "corners": {"setup": {"worst_slack_after_ns": 0.9}}})
+        gate = {"all_of": gate["all_of"][:2]}
+    elif step_id == "32":
+        _write(tmp_path,
+               "phase3/stage3/postroute_timing_repair/no_repair_needed.flag",
+               "no repair required\n")
+    elif step_id == "14":
+        gate = {"program_exit_zero": next(
+            clause["program_exit_zero"] for clause in gate["all_of"]
+            if clause.get("program_exit_zero", "").endswith("--mode netlist"))}
+    subject = {"id": step_id, "name": step["name"],
+               "stage": step["stage"], "required_outputs": [rel],
+               "gate": gate}
+    healthy = compliance.check_step(tmp_path, subject, {})
+    assert healthy.status == "PASS", (step_id, healthy.reasons)
+    path.write_text(damaged)
+    broken = compliance.check_step(tmp_path, subject, {})
+    assert broken.status == "FAIL", (step_id, broken.reasons)
+    path.unlink()
+    absent = compliance.check_step(tmp_path, subject, {})
+    assert absent.status in {"FAIL", "NOT_MEASURED"}, (step_id, absent.reasons)
+
+
+def test_content_gate_declares_its_actual_step_tier():
+    programs = Path(__file__).resolve().parents[1]
+    assert enforcement.declared_intent(
+        programs, "flow_step_output_content_check") == "step-blocking"
+    clauses = enforcement.clauses_in_flow(FLOW)
+    required = [c for c in clauses if c["gate"] ==
+                "flow_step_output_content_check" and
+                c["slot"] == "program_exit_zero" and c["dispatchable"]]
+    assert len(required) == 7  # 1, 14 twice, 27, 32, 35, P0
 
 
 @pytest.mark.parametrize("step_id", ("1", "14", "18", "27", "32", "35", "P0"))
