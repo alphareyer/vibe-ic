@@ -151,6 +151,7 @@ laundered into a PASS on the way out.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -311,10 +312,30 @@ def jmax_tier(project: Path, jmax: Optional[Path], tech_lef: Optional[Path],
     # wire the router actually drew instead of the LEF minimum. Lower bound
     # -> J overstated -> conservative direction preserved (a PASS through it
     # is trustworthy; a FAIL is strictly less pessimistic than before).
-    defw = emc.discover_def_pg_min_widths(project)
+    local_def = None
+    net_hint = None
+    # The EM producer records exactly which DEF PSM read. Local wire widths
+    # may supersede the layer minimum only when that identity still matches.
+    try:
+        em_doc = json.loads((project / "reports/phase3/em.json").read_text())
+        nets = em_doc.get("power_nets")
+        if isinstance(nets, list) and len(nets) == 1:
+            net_hint = str(nets[0])
+        rel = Path(str(em_doc["subject_def"]))
+        candidate = project / rel
+        digest = em_doc["subject_def_sha256"]
+        if (not rel.is_absolute() and ".." not in rel.parts and
+                candidate.is_file() and
+                hashlib.sha256(candidate.read_bytes()).hexdigest() == digest):
+            local_def = candidate
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    defw = (emc._def_pg_widths_of(local_def) if local_def else
+            emc.discover_def_pg_min_widths(project))
     verdict, rep = emc.evaluate(em_path, jpath, tlef, margin,
-                                emc._DEFAULT_BLACKS_N, None, 20,
-                                def_widths=defw or None)
+                                emc._DEFAULT_BLACKS_N, net_hint, 20,
+                                def_widths=defw or None,
+                                def_path=local_def)
     return {"verdict": verdict, "skip_reason": rep.get("skip_reason"),
             "def_pg_min_widths_um": defw or None,
             "jmax_source": rep.get("jmax_source"),
