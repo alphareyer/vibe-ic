@@ -2029,11 +2029,27 @@ def _render(project: Path, run_audit: bool = True,
     # overwrote the real outer line and manufactured a second tally over the
     # same 68 steps.  Never fall back to that parser here.  If this invocation
     # did not write a fresh snapshot, degrade to named NO-VERDICT data.
+    # WITHHOLD THE COUNTS, NOT THE DISCLOSURE. My first cut put
+    # AUDIT_DID_NOT_CERTIFY in the skip set beside the two NO-VERDICT words, and that hid the
+    # one disclosure this state is ABOUT: the "⛔ The audit does not reconcile" banner and the
+    # "Reported, NOT gating" block below both render only `if isinstance(audit_snapshot,
+    # dict)`, so a skipped snapshot meant the headline refused and never said why -- while
+    # vibe-ic#2092 requires that banner to be the FIRST thing under Verdict, naming the broken
+    # equations. A refusal whose reason is hidden is worse than the PASS it replaced.
+    #
+    # So this state LOADS the snapshot, for the disclosures, and suppresses the COUNTS
+    # separately below. The two NO-VERDICT words keep skipping it, because there is no fresh
+    # snapshot to load at all when the audit timed out or never ran.
     audit_snapshot: Optional[Dict[str, Any]] = None
     snapshot_problem: Optional[str] = None
+    counts_withheld: Optional[str] = None
+    if overall == AUDIT_DID_NOT_CERTIFY_VERDICT:
+        counts_withheld = (
+            "the audit printed a verdict word and then exited non-zero, withdrawing its own "
+            "arithmetic (\"do not quote its counts\"); the reconciliation disclosure below "
+            "names what it withdrew")
     if run_audit and overall not in {
-            AUDIT_TIMEOUT_VERDICT, AUDIT_NOT_RUN_VERDICT,
-            AUDIT_DID_NOT_CERTIFY_VERDICT}:
+            AUDIT_TIMEOUT_VERDICT, AUDIT_NOT_RUN_VERDICT}:
         audit_snapshot, snapshot_problem = _load_fresh_audit_snapshot(
             project, audit_before)
     elif not run_audit:
@@ -2045,7 +2061,9 @@ def _render(project: Path, run_audit: bool = True,
 
     snapshot_problems: List[str] = []
     row_counts: Dict[str, int] = {}
-    if audit_snapshot is not None:
+    if counts_withheld:
+        snapshot_problems.append(counts_withheld)
+    if audit_snapshot is not None and not counts_withheld:
         rollup, count_problems = _audit_step_counts(audit_snapshot)
         verdicts, row_counts, row_problems = _audit_step_verdicts(
             audit_snapshot)

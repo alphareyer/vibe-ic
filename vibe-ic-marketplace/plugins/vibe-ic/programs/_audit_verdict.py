@@ -61,8 +61,20 @@ THE LINE RULE IS THE MOST CAREFUL OF THE THREE IT REPLACES:
 
 chip-AGNOSTIC: nothing here reasons about any IC, vendor, SKU or process.
 """
-from __future__ import annotations
-
+# NO `from __future__ import annotations` IN THIS FILE, AND THAT IS DELIBERATE.
+#
+# This module is imported BY PATH by callers outside the plugin's `programs/` dir -- the
+# FPGA pre-burn guard in `mcp-eda` loads it through the same resolver it uses to find
+# `flow_compliance_check.py`, so that a hardware action and the orchestrator apply ONE rule.
+# A module that combines `@dataclass` with the postponed-annotations future import cannot be
+# loaded that way unless the importer registers it in `sys.modules` FIRST: the dataclass
+# machinery resolves `sys.modules[cls.__module__].__dict__` while processing the class body
+# and raises `AttributeError: 'NoneType' object has no attribute '__dict__'`. Measured here
+# while wiring that guard.
+#
+# The annotations in this file are simple enough not to need the future import, so the fix is
+# to not need the importer to know anything. `test_issue2104_programs_load_by_path` is the
+# gate that cares, and a by-path arm below pins it for this module specifically.
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -97,6 +109,26 @@ TIMEOUT_WORD = "AUDIT_TIMEOUT"
 
 #: What a reader should call the state where the word is green and the exit code is not.
 DID_NOT_CERTIFY = "AUDIT_DID_NOT_CERTIFY"
+
+#: THE EXIT CODE THAT MEANS "KILLED ON A BUDGET", and it OUTRANKS every line in the stream.
+#:
+#: MEASURED, and it is why this constant exists rather than a line-ordering rule. Both
+#: callers that can time the audit out report it with rc 124 -- `subprocess.run(timeout=)`
+#: raising `TimeoutExpired`, which is the convention `step_final_audit` has always checked --
+#: and `phase23_completion_self_audit_check._run_compliance` then SYNTHESISES an
+#: `Overall: AUDIT_TIMEOUT` line and puts the audit's PARTIAL STDOUT after it.
+#:
+#: That ordering defeats a last-line rule, and the partial stdout really can carry a verdict
+#: line: `flow_compliance_check` prints its `Overall:` at line 21490 and then keeps working --
+#: the blocker list, a second full design-input rescan, the publish -- so a kill in that tail
+#: leaves the verdict line already through the pipe. The owner then read
+#: `Overall: PASS_WITH_WAIVERS` with rc 124 and reported "did not certify", naming the #2092
+#: reconciliation canary for what was a TIMEOUT; and a consumer keying on
+#: `overall == "AUDIT_TIMEOUT"` saw the green word instead and called the run MEASURED.
+#:
+#: So the rc decides this one, first, and no line can move it. A process killed on a budget
+#: examined an unknown fraction of the flow, and the fraction is what `AUDIT_TIMEOUT` names.
+TIMEOUT_RC = 124
 
 
 @dataclass(frozen=True)
@@ -153,6 +185,19 @@ def read(out: str, rc: Optional[int] = None) -> AuditVerdict:
     """
     word = verdict_word(out)
     upper = (word or "").upper()
+    # THE BUDGET KILL IS DECIDED BY THE rc, BEFORE ANY LINE IS CONSULTED. See `TIMEOUT_RC`:
+    # the caller that times the audit out prepends its own `Overall: AUDIT_TIMEOUT` line and
+    # appends the partial stdout, which can itself carry a real verdict line, so neither
+    # "first line" nor "last line" is a safe way to recognise this state.
+    if rc == TIMEOUT_RC:
+        return AuditVerdict(
+            TIMEOUT_WORD, rc, False,
+            f"the audit was stopped on its budget (exit {rc}), so it examined an unknown "
+            f"fraction of the flow and this is not a verdict on the project "
+            f"(INCONCLUSIVE, #525)"
+            + (f"; the partial output's own last verdict line said `{word}`, which is a"
+               f" fraction's word and not the run's" if word and upper != TIMEOUT_WORD
+               else ""))
     if word is None:
         return AuditVerdict(None, rc, False,
                             "the audit printed no `Overall:` line, so it stated no verdict")

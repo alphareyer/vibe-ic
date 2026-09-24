@@ -158,3 +158,89 @@ def test_an_audit_written_before_these_fields_renders_unchanged(
     assert "Reported, NOT gating" not in md
     assert "The audit does not reconcile" not in md
     assert "- PASS=" in md
+
+
+# ── the state the banner exists FOR must still render it ───────────────────
+
+def _render_with_overall(monkeypatch, tmp_path: Path, audit: dict, overall: str) -> str:
+    """`_render`, but the headline word is the caller's — so the DID-NOT-CERTIFY state can be
+    rendered. The canary is exactly the state where `reconciled: false` and a green verdict
+    word coexist, because that is what the canary IS."""
+    import yaml as _yaml
+    project = tmp_path / "project"
+    audit_path = (project / "reports" / "audit" / "phase23_completion_audit.json")
+    flow = tmp_path / "flow.yaml"
+    flow.write_text(_yaml.safe_dump({
+        "version": 2, "flow_name": "fa2_synthetic",
+        "total_steps": len(audit["steps"]), "analog_steps": 0,
+        "stages": [{"id": "stage1", "name": "synthetic stage"}],
+        "steps": [{"id": r["id"], "name": r["name"], "stage": "stage1"}
+                  for r in audit["steps"]],
+    }, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr(F, "FLOW_YAML", flow)
+
+    def _fake_run_audit(*_a, **_k):
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_text(json.dumps(audit, indent=2), encoding="utf-8")
+        return ("=== synthetic ===\nProject: /p\nFlow def: /f\n"
+                "Steps: 3 total\n  PASS=1  FAIL=1  MISSING=1\n"
+                "Overall: PASS_WITH_WAIVERS\n"), overall
+
+    monkeypatch.setattr(F, "_run_audit", _fake_run_audit)
+    return F._render(project, run_audit=True)
+
+
+_NOT_RECONCILED = {
+    "reconciled": False,
+    "equations_checked": ["E1", "E2", "E3", "E4"],
+    "broken": [{"id": "E2", "equation": "invoked == every named bucket",
+                "detail": "invoked_gate_count 246 != PASS 186 = 186"}],
+}
+
+
+def test_the_did_not_certify_headline_still_renders_the_reconciliation_banner(
+        monkeypatch, tmp_path):
+    """THE ONE DISCLOSURE THIS STATE IS ABOUT MUST NOT BE THE ONE IT HIDES.
+
+    `AUDIT_DID_NOT_CERTIFY` was first implemented by adding it to the set that SKIPS
+    `_load_fresh_audit_snapshot` — beside the two words for which there is genuinely no fresh
+    snapshot to load. But this banner and the "Reported, NOT gating" block both render only
+    `if isinstance(audit_snapshot, dict)`, so skipping the load made the headline refuse and
+    never say why, while vibe-ic#2092 requires the banner to be the FIRST thing under Verdict,
+    naming the broken equations. A refusal whose reason is hidden is worse than the PASS it
+    replaced. Withhold the COUNTS; keep the disclosure.
+    """
+    md = _render_with_overall(monkeypatch, tmp_path,
+                             _audit(reconciliation=_NOT_RECONCILED),
+                             F.AUDIT_DID_NOT_CERTIFY_VERDICT)
+    assert F.AUDIT_DID_NOT_CERTIFY_VERDICT in md, md[:400]
+    assert "The audit does not reconcile" in md, (
+        "the headline refused and hid the reconciliation banner that explains why")
+    assert "`[E2]`" in md and "invoked_gate_count 246 != PASS 186 = 186" in md
+    assert "Reported, NOT gating" in md, "the informational disclosures were hidden too"
+
+
+def test_the_did_not_certify_headline_withholds_the_counts(monkeypatch, tmp_path):
+    """The other half, and the reason the snapshot is loaded at all rather than quoted: the
+    audit said "do not quote its counts", so the per-step roll-up must NOT be rendered from
+    it. A banner above a table quoting the withdrawn numbers is the same defect one line
+    down."""
+    md = _render_with_overall(monkeypatch, tmp_path,
+                             _audit(reconciliation=_NOT_RECONCILED),
+                             F.AUDIT_DID_NOT_CERTIFY_VERDICT)
+    assert "withdrawing its own arithmetic" in md, (
+        "the summary does not say why the counts are absent")
+    # THE PROPERTY IS "THE AUDIT'S OWN NUMBERS ARE NOT QUOTED", NOT "no count line exists".
+    # My first cut asserted `"- PASS=" not in md` and it failed for the right reason: this
+    # state renders the same DEGRADED roll-up the timeout and not-run words render — every
+    # step as NO-VERDICT-IN-AUDIT, `PASS=0` — which quotes nothing the audit withdrew and says
+    # so. Asserting the absence of a substring measured the rendering, not the withdrawal.
+    assert "NO-VERDICT-IN-AUDIT=3" in md, (
+        "the degraded roll-up is absent, so the reader is given no count row at all")
+    # the audit's OWN numbers were PASS=1 / FAIL=1 / MISSING=1 — none may be quoted
+    assert "- PASS=1" not in md, "the withdrawn PASS count was quoted"
+    assert "executed PASS=1" not in md, "the withdrawn executed-PASS count was quoted"
+    # and the certified control DOES quote them, so this arm is not vacuous
+    clean = _render_with_overall(monkeypatch, tmp_path, _audit(), "PASS_WITH_WAIVERS")
+    assert "- PASS=1" in clean, (
+        "the control stopped quoting the audit's counts, so the arm above proves nothing")

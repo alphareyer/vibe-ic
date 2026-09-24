@@ -227,12 +227,21 @@ def main():
         "project": str(project),
         "summary": {
             "overall": overall,
+            # BOTH CHANNELS IN THE MACHINE-READABLE SUMMARY TOO, because this is what the
+            # MCP tool and every scripted consumer reads. `overall` is the audit's WORD; it
+            # says nothing about whether the audit stood behind it, and a consumer keying on
+            # the word alone reaches the same wrong answer the human branches used to.
+            "certified": audit.certified,
+            "certification_note": audit.why,
             "executed_pass": executed_pass,
             "executed_total": executed_total,
             "waived_deferred": waived_count,
             "canonical_step_count": _TOTAL_REQ,
             "structurally_complete": structurally_complete,
-            "production_tapeout_ready": overall == "PASS",
+            # AND THE STRONGEST CLAIM IN THIS DOCUMENT NEEDS BOTH. Keyed on the bare word,
+            # an uncertified green run published `production_tapeout_ready: true` beside
+            # `exit 1` -- the JSON contradicting the exit status of the program that wrote it.
+            "production_tapeout_ready": (overall == "PASS" and audit.certified),
         },
         "findings": [asdict(f) for f in findings],
         "underlying_output_tail": "\n".join(output.strip().splitlines()[-20:]),
