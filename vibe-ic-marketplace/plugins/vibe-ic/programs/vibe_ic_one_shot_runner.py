@@ -1295,7 +1295,8 @@ def _line_buffer_own_stream() -> None:
 #: A1..A9 as routable while the guard refused every one of them), and a reader
 #: has no way to tell which half is lying.
 ENTRY_STEP_ENTERABLE_RUNNERS = ("phase1_one_shot_runner",
-                                "design_one_shot_runner")
+                                "design_one_shot_runner",
+                                "phase3_one_shot_runner")
 
 
 def main() -> int:
@@ -1583,6 +1584,40 @@ def main() -> int:
                   f"1/2 step.", file=sys.stderr)
             return 2
         print(f"[entry] step {args.entry_step} -> {_entry_runner}")
+
+    if _entry_runner == "phase3_one_shot_runner":
+        # A Phase-3 entry is an isolated backend repair.  Do not run Phase 1,
+        # Phase 2, analog, mixed signal or the whole-flow finalize tail here.
+        # The backend owns the exact dispatch and its bounded audit.
+        if not args.exit_step:
+            print("REFUSED: a Phase-3 entry needs --exit-step", file=sys.stderr)
+            return 2
+        p3_args = [str(project), "--top-name", args.top_name,
+                   "--ic-name", args.ic_name, "--container", args.container,
+                   "--die-um", args.die_um, "--util", str(args.util),
+                   "--pdk", args.pdk, "--entry-step", str(args.entry_step),
+                   "--exit-step", str(args.exit_step)]
+        if args.allow_oss_pdk_fallback:
+            p3_args.append("--allow-oss-pdk-fallback")
+        if args.allow_pdk_target_mismatch:
+            p3_args.append("--allow-pdk-target-mismatch")
+        rc = _run_phase("PHASE 3 bounded window", _phase_runner("phase3"),
+                        p3_args, env=_phase_env)
+        p3 = _read_report(_phase_report_path(project, "phase3_one_shot.json"))
+        summary = {"program": "vibe_ic_one_shot_runner", "bounded": True,
+                   "declared_window": {"entry_step": args.entry_step,
+                                       "exit_step": args.exit_step,
+                                       "entry_runner": _entry_runner},
+                   "phases": [{"name": "phase3", "verdict": p3.get("verdict", "NOT_MEASURED"),
+                               "rc": rc}],
+                   "verdict": p3.get("verdict", "NOT_MEASURED"),
+                   "audit_verdict": "NOT_MEASURED",
+                   "audit_scope": "bounded; whole-flow audit not refreshed"}
+        out = _pl.report_path(project, "vibe_ic_one_shot.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(summary, indent=2) + "\n")
+        lock.release()
+        return rc
 
     # An entry owned by Phase 2 means Phase 1 is not this run's work: its
     # artefacts were supplied, not produced here. Force the skip through the

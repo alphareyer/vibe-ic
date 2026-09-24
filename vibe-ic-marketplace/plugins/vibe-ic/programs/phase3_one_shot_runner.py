@@ -66126,6 +66126,140 @@ _POST_RUN_AUDITS = (
 )
 
 
+def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
+    """Resolve a numeric window to independently dispatched backend sites.
+
+    An OpenROAD PnR session owns 15..22 as one unit.  Its interior is not an
+    entry point; pretending to enter at 18 would run work outside the request.
+    """
+    sites = _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites
+    heads = {name: str(span[0]) for name, span in sites}
+    if entry not in heads.values() and entry not in heads:
+        raise ValueError(f"step {entry!r} has no independent Phase-3 dispatch; "
+                         f"enterable steps: {list(heads.values())}")
+    if exit_ not in heads.values() and exit_ not in heads:
+        raise ValueError(f"step {exit_!r} has no independent Phase-3 dispatch; "
+                         f"exitable steps: {list(heads.values())}")
+    from decimal import Decimal
+    lo = Decimal(heads.get(entry, entry))
+    hi = Decimal(heads.get(exit_, exit_))
+    if lo > hi:
+        raise ValueError(f"Phase-3 window {entry!r}..{exit_!r} is reversed")
+    # The physical dispatch order places GDS before DRC/LVS even though its
+    # canonical id is 37.  Filter by flow id, then retain the runner's order.
+    return [name for name, _ in sites if lo <= Decimal(heads[name]) <= hi]
+
+
+def _phase3_file_manifest(project: Path) -> Dict[str, str]:
+    """Content hashes, including files with preserved or forged mtimes."""
+    result = {}
+    for path in project.rglob("*"):
+        if path.is_file() and not path.is_symlink():
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            result[str(path.relative_to(project))] = digest.hexdigest()
+    return result
+
+
+def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
+                       args, selected: List[str]) -> int:
+    """Dispatch only selected sites and publish a bounded audit of this run.
+
+    No canonicalisation, derived generators or whole-flow summary is called:
+    those are separate whole-flow producers and may rewrite unrelated steps.
+    """
+    before = _phase3_file_manifest(project)
+    rows: List[StepResult] = []
+    changed_sites: List[str] = []
+    site_before = before
+    window_gate = _spf.gate
+    for site in selected:
+        if site == "synth":
+            row = window_gate(project, "phase3_one_shot_runner", site,
+                            _preflight_refusal(site), step_synth,
+                            project, top, pdk, args.container)
+        elif site == "pnr":
+            row = window_gate(project, "phase3_one_shot_runner", site,
+                            _preflight_refusal(site), step_pnr,
+                            project, top, pdk, args.container,
+                            die_um=args.die_um, util=args.util,
+                            spare_density=args.spare_density,
+                            pad_ring_step=step_pad_ring_gen)
+        elif site == "gds":
+            row = window_gate(project, "phase3_one_shot_runner", site,
+                            _preflight_refusal(site), step_gds,
+                            project, top, pdk, args.container)
+        elif site == "drc":
+            row = window_gate(project, "phase3_one_shot_runner", site,
+                            _preflight_refusal(site), step_drc,
+                            project, top, pdk, args.container)
+        else:
+            row = window_gate(project, "phase3_one_shot_runner", site,
+                            _preflight_refusal(site), step_lvs,
+                            project, top, pdk, args.container,
+                            upstream_pnr=None)
+        rows.append(row)
+        site_after = _phase3_file_manifest(project)
+        if any(site_before.get(k) != site_after.get(k)
+               for k in set(site_before) | set(site_after)
+               if k.startswith(("phase3/", "reports/phase3/"))):
+            changed_sites.append(site)
+        site_before = site_after
+        if row.status not in ("PASS", "PASS_WITH_WAIVERS"):
+            break
+    after = site_before
+    changed = sorted(k for k in set(before) | set(after)
+                     if before.get(k) != after.get(k))
+    sites = [name for name, _ in
+             _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites]
+    stale = {}
+    for changed_site in changed_sites:
+        for site in sites[sites.index(changed_site) + 1:]:
+            if site not in [r.name for r in rows]:
+                stale.setdefault(site, {"status": "NOT_MEASURED",
+                                        "reason": f"upstream step {changed_site} changed output"})
+        for sid in ("37.3", "37.4", "37.5ic", "37.5ip", "38", "39", "P0"):
+            stale.setdefault(sid, {"status": "NOT_MEASURED",
+                                   "reason": f"upstream step {changed_site} changed output"})
+    report = {
+        "program": "phase3_one_shot_runner", "bounded": True,
+        "declared_window": {"entry_step": args.entry_step,
+                            "exit_step": args.exit_step,
+                            "dispatched_sites": selected},
+        "steps": [asdict(r) for r in rows], "stale_downstream": stale,
+        "changed_files": changed,
+        "verdict": _aggregate_verdict(rows) if rows else "NOT_MEASURED",
+        "audit_verdict": "NOT_MEASURED",
+        "audit_scope": "bounded; whole-flow audit not refreshed",
+    }
+    out = _pl.report_path(project, "phase3_one_shot.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2) + "\n")
+    audit = _pl.report_path(project, "phase23_completion_audit.json")
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text(json.dumps({
+        "program": "flow_compliance_check", "bounded": True,
+        "scope": {"whole_flow": False, "phase": "phase3",
+                  "step_count": len(rows), "flow_step_total": None},
+        "verdict": "NOT_MEASURED" if stale else report["verdict"],
+        "steps": [asdict(r) for r in rows] + [
+            {"id": sid, "status": item["status"], "reason": item["reason"]}
+            for sid, item in stale.items()],
+        "dispatched_sites": selected,
+        "stale_downstream": stale}, indent=2) + "\n")
+    site_spans = dict(_spf.RUNNER_PLANS["phase3_one_shot_runner"].sites)
+    window_ids = {str(sid) for site in selected for sid in site_spans[site]}
+    report["steps_view"] = _pl.emit_steps_view(
+        project, PROGRAMS_DIR, runner="phase3_one_shot_runner",
+        only_steps=window_ids)
+    out.write_text(json.dumps(report, indent=2) + "\n")
+    print(f"[phase3] bounded sites={selected}; changed={len(changed)}; "
+          f"stale={list(stale)}")
+    return 0 if all(r.status in ("PASS", "PASS_WITH_WAIVERS") for r in rows) else 1
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -66235,7 +66369,18 @@ def main() -> int:
                          "Bypasses the FRESHNESS check only — the step's "
                          "declared input contract is still enforced. "
                          "An unrecognised KIND is refused, not ignored."))
+    p.add_argument("--entry-step", help="First independently dispatched Phase-3 step")
+    p.add_argument("--exit-step", help="Last independently dispatched Phase-3 step")
     args = p.parse_args()
+    if bool(args.entry_step) != bool(args.exit_step):
+        p.error("--entry-step and --exit-step must be supplied together")
+    if args.entry_step and args.force_step:
+        p.error("--force-step cannot be combined with a bounded window")
+    try:
+        _window_sites = (_phase3_window_sites(args.entry_step, args.exit_step)
+                         if args.entry_step else None)
+    except ValueError as exc:
+        p.error(str(exc))
 
     # vibe-ic#1097 S6 — validate AT THE CLI BOUNDARY and publish through the
     # environment. The freshness predicate that consumes this sits deep in this
@@ -66452,6 +66597,14 @@ def main() -> int:
 
     print(f"=== phase3_one_shot_runner — pdk={pdk.name} top={effective_top}"
           f"{' (override of '+args.top_name+')' if effective_top != args.top_name else ''} ===")
+    if _window_sites is not None:
+        _analog_only, _analog_reason = _is_pure_analog_no_rtl_track(project)
+        if _analog_only:
+            print(f"REFUSED: digital Phase-3 window on pure-analog track: "
+                  f"{_analog_reason}", file=sys.stderr)
+            return 2
+        return _run_phase3_window(project, effective_top, pdk, args,
+                                  _window_sites)
     plan: List[StepResult] = []
 
     # v0.2.55 — pure-analog flow gate. A pure-analog IC has NO digital
