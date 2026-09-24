@@ -4966,6 +4966,7 @@ steps:
     mcp_tools: [eda_pnr]
     required_outputs:
       - "phase3/stage3/pnr/placed.def"
+      - "reports/phase3/placement_legality.json"
     gate:
       all_of:
         # The DECLARED INVERSE of `openroad_tcl_deprecation_check` (which flags
@@ -5367,6 +5368,7 @@ steps:
       - spef_extraction_check
     required_outputs:
       - "phase3/stage3/extracted/parasitic.spef OR phase3/stage3/extracted/*.spef"
+      - "reports/phase2/gates/spef_extraction.json"
     gate:
       all_of:
         - files_exist: ["phase3/stage3/extracted/*.spef"]
