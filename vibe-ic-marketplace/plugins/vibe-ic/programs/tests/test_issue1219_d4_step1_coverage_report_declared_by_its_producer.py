@@ -231,10 +231,15 @@ def test_wired_clause_still_fails_a_project_that_did_attempt_phase1(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_step1_files_exist_block_still_holds_only_rtl():
     gate = _step(_flow(), _SPEC_TO_RTL).get("gate") or {}
-    files = gate.get("files_exist")
+    assert len(gate.get("all_of", [])) == 2, gate
+    files_gate, content_gate = gate["all_of"]
+    files = files_gate.get("files_exist")
     assert isinstance(files, list) and files, (
-        "step1's gate is files_exist-only by design (see its AUDIT NOTE)")
-    assert gate.get("any_of") is True
+        "step1 must retain its RTL files_exist predicate")
+    assert files_gate.get("any_of") is True
+    assert content_gate == {
+        "program_exit_zero": "flow_step_output_content_check . --mode rtl"
+    }, content_gate
     for entry in files:
         assert "extraction_coverage_report" not in str(entry), (
             "`any_of: true` is a MODIFIER on this whole files_exist block, so "

@@ -1089,9 +1089,11 @@ MUTATIONS: Tuple[Mutation, ...] = (
         measured=Measurement(
             date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=66,
             stayed_green=(),
-            note="4 steps have no executable gate clause at all and are "
-                 "structurally out of this entry's reach: 1 and 12 (files_exist "
-                 "only), P0 (no gate key) and — since 2026-09-02 — 35. They are "
+            note="At the original measurement, 4 steps had no executable "
+                 "gate clause and were outside this entry's reach: 1 and 12 "
+                 "(files_exist only), P0 (no gate key) and 35. Steps 1, 35 "
+                 "and P0 now have content clauses; their d1 cells retain the "
+                 "separate replayed coverage named below. They are "
                  "covered by D1-UNREACHABLE-CLAUSE and D1-ORPHAN-UMBRELLA-GATE. "
                  "STEP 35 IS A WITHDRAWAL, NOT A RE-COUNT, and the change that "
                  "caused it is vibe-ic#1980 (867f807a7): it deleted step 35's "
@@ -1184,12 +1186,12 @@ MUTATIONS: Tuple[Mutation, ...] = (
         red_signal="CANNOT FAIL",
         witness="21",
         applies_to=(
-            "D1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "FS1",
+            "D1", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "FS1",
             "DT1", "12", "13", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8",
             "A9", "14", "15", "16", "17", "18", "19", "20", "21", "22", "DT2",
             "DT3", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32",
-            "33", "34", "36", "37", "38", "39", "M1", "M2", "M3", "M4", "40",
-            "41", "42", "43", "44",
+            "33", "34", "35", "36", "37", "38", "39", "M1", "M2", "M3", "M4", "40",
+            "41", "42", "43", "44", "P0",
             # the five path-specific steps, replayed 2026-08-20
             "0.5ic", "15.5ic", "26.5ic", "37.5ip", "37.5ic",
             # canonical step 37.4, replayed 2026-09-03 on this branch:
@@ -1201,14 +1203,15 @@ MUTATIONS: Tuple[Mutation, ...] = (
             #   -> REDDENED (3.5s, after the rc 2 -> 1 repair)
             "37.3"),
         measured=Measurement(
-            date="2026-08-11",
-            command=_SWEEP_THEN_ONE.replace("{added}", "12") + _THEN_FIVE, reddened=67,
-            stayed_green=("35",),
+            date="2026-09-25",
+            command="matrix_mutation_ledger.py --replay D2-BLIND-GATE-PROGRAMS --step <1|35|P0> --jobs 1",
+            reddened=70,
             note="60 red = every one of dimension 2's 60 ENFORCED cells, in one "
                  "sweep. The 2 waived cells (1, 35) and the NA cell (P0) are "
-                 "the only steps not reddened: 1 and P0 have no executable "
-                 "clause to blind, and 35's gate is files_exist + advisory, "
-                 "which is precisely why it is waived. "
+                 "the only steps not reddened at that time: 1 and P0 had no "
+                 "executable clause to blind, and 35's gate was files_exist + "
+                 "advisory. Their new content clauses were replayed on "
+                 "2026-09-25: 1, 35 and P0 each REDDENED. "
                  "STEP 12 WAS ADDED 2026-08-11 and the old note's claim that it "
                  "'has no executable clause to blind' was, by then, false. "
                  "`23d96bf5` (v1.10.0, 'close the flow_matrix dimension-2 "
@@ -1423,8 +1426,8 @@ MUTATIONS: Tuple[Mutation, ...] = (
         what="add a backticked checker name to the step's `notes` that the live "
              "structural-gate registry does not contain",
         breaks="the umbrella step's prose advertising a gate that does not "
-               "exist. P0 declares no gate and no required_outputs, so its "
-               "notes are the only surface a yaml edit can move.",
+               "exist. P0's content gate does not validate its structural "
+               "registry claims; the notes still need their own check.",
         red_signal=CANARY_PROGRAM,
         witness="P0",
         applies_to=("P0",),
@@ -2574,7 +2577,10 @@ NOT_FALSIFIABLE: Tuple[NotFalsifiable, ...] = ()
 #   d7 D7-GATE-PROBES-A-GHOST      REDDENED   (78.6s, after the two W2
 #      declarations step 37 gained in this change; ALREADY_RED before them)
 #   d8 D8-EMPTY-PROMISE            REDDENED   ( 3.4s)
-LEDGER_AS_MEASURED: Tuple[int, int, int] = (70, 8, 524)
+# 2026-09-25: (70, 8, 524) -> (70, 8, 527). Content clauses on 1, 35 and
+# P0 moved exactly those three d2 cells into ENFORCED; each was replayed with
+# D2-BLIND-GATE-PROGRAMS and REDDENED before updating this count.
+LEDGER_AS_MEASURED: Tuple[int, int, int] = (70, 8, 527)
 
 #: Every cell of the live 63x8 grid that is NOT ENFORCED, with the state its
 #: owning dimension module answers. The COMPANION to the count above, and the
@@ -2616,9 +2622,8 @@ LEDGER_AS_MEASURED: Tuple[int, int, int] = (70, 8, 524)
 #: which of 504 cells moved, or in which direction.
 LEDGER_CELLS_NOT_ENFORCED: Tuple[Tuple[str, int, str], ...] = (
     # ── dimension 2 ───────────────────────────────────────────────────
-    ("1", 2, "WAIVED"),
-    ("35", 2, "WAIVED"),
-    ("P0", 2, "NA"),
+    # 1, 35 and P0 gained executable content clauses; each d2 cell is now
+    # ENFORCED and D2-BLIND-GATE-PROGRAMS reddened it on 2026-09-25.
     # ── dimension 3 ───────────────────────────────────────────────────
     ("6", 3, "WAIVED"),
     ("39", 3, "WAIVED"),

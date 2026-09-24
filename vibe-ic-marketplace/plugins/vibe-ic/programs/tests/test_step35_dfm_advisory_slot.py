@@ -104,11 +104,14 @@ def test_step35_structure_is_otherwise_unchanged():
 
 
 def test_no_blocking_slot_still_names_dfm_screen_check():
+    content = []
     for sub in _sub_gates():
-        assert "program_exit_zero" not in sub, (
-            "the blocking slot is gone from Step 35; if it comes back it "
-            "turns every advisory into a step FAIL")
+        if "program_exit_zero" in sub:
+            content.append(sub["program_exit_zero"])
         assert "optional_program_exit_zero" not in sub
+    assert content == ["flow_step_output_content_check . --mode dfm"], (
+        "Step 35 blocks malformed output content, while dfm_screen_check "
+        "publishes its advisory result outside the blocking gate")
 
 
 # ── behaviour of the wired gate ─────────────────────────────────────────────

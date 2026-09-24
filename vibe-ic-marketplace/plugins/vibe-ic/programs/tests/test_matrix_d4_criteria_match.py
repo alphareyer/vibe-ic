@@ -67,10 +67,9 @@ What this module DOES decide, live, on every run:
      entry satisfied by one of its ``" OR "`` spellings still passes. See
      ``_assert_files_only_gate_matches_claim`` for the consumer line ranges
      that define each half of that grammar.
-  4. **P0's prose claims match the live structural-gate registry** — P0 has no
-     ``gate`` key at all, so the NA precondition is asserted and the claim its
-     ``notes`` make about ``_STRUCTURAL_RTL_GATES`` is checked against the
-     imported module.
+  4. **P0's prose claims match the live structural-gate registry** — P0's
+     ``notes`` are checked against the imported registry, and its content gate
+     is checked by the same CLI path as other gated steps.
 
 See ``matrix_d4_probe`` for how each measurement is taken and why the obvious
 cheaper versions (scan ``--help``, substring-match paths, follow imports to
@@ -420,21 +419,14 @@ _BACKTICKED = re.compile(r"`([A-Za-z_][\w]*)")
 _COUNT_CLAIM = re.compile(r"(\d+)\s+(?:[\w-]+\s+){0,3}?gates?\b", re.IGNORECASE)
 
 
-def _assert_gateless_step_prose_matches_mechanism(step_id) -> None:
-    """P0 declares no ``gate``; check the claim its prose makes instead.
+def _assert_umbrella_prose_matches_mechanism(step_id) -> None:
+    """Check P0's prose against the structural gate registry.
 
-    The NA precondition (no ``gate`` key, no ``required_outputs``) is asserted
-    first, so if someone gives P0 a real gate this cell self-invalidates. What
-    remains is a genuine criteria-match question: P0's verdict is emitted by
+    P0's structural verdict is emitted by
     ``flow_compliance_check._run_structural_rtl_gates`` over
     ``_STRUCTURAL_RTL_GATES``, and the step's own ``name``/``notes`` make
     checkable claims about that registry.
     """
-    assert not F.has_gate(step_id), (
-        f"step {step_id} / d{DIM}: this cell's NA precondition was 'the step "
-        f"declares no gate', but it now declares {F.gate(step_id)!r} — "
-        f"re-evaluate the cell against the gate predicate instead"
-    )
     assert not F.declares_required_outputs(step_id), (
         f"step {step_id} / d{DIM}: this cell's NA precondition was 'no declared "
         f"required_outputs', but the step now declares "
@@ -488,8 +480,13 @@ def test_d4_gate_measures_what_it_claims(cell):
     """One cell of dimension 4, recomputed from the current tree every run."""
     sid = cell.step_id
 
+    if F.normalize_id(sid) == "P0":
+        _assert_umbrella_prose_matches_mechanism(sid)
     if not F.has_gate(sid):
-        _assert_gateless_step_prose_matches_mechanism(sid)
+        assert F.normalize_id(sid) == "P0", (
+            f"step {sid} / d{DIM}: an un-gated non-umbrella step has no "
+            "predicate to compare with its claim"
+        )
         return
 
     if _exec_clauses(sid):

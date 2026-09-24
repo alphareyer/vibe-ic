@@ -521,6 +521,12 @@ def _step32_gate() -> dict:
     return [s for s in doc["steps"] if str(s.get("id")) == "32"][0]["gate"]
 
 
+def _step32_audit_clause() -> dict:
+    return next(c for c in _step32_gate()["all_of"]
+                if isinstance(c.get("program_exit_zero"), dict)
+                and "postroute_timing_repair_audit" in c["program_exit_zero"]["command"])
+
+
 def _repair_project(root: Path, files: dict) -> Path:
     repair = root / "phase3/stage3/postroute_timing_repair"
     repair.mkdir(parents=True, exist_ok=True)
@@ -585,16 +591,11 @@ def test_step32_reads_the_record_through_the_path_it_declares(tmp_path):
 
 
 def test_step32_discloses_but_does_not_block_on_a_silent_decision(tmp_path):
-    """NO FALSE ALARM, deliberately.
+    """The audit discloses silence; the later content clause refuses it.
 
-    A decision record that states no `repair_needed` says nothing, and that is
-    reported — but it does not block. `postroute_timing_repair_decision.decide` sets the
-    field on every path, so no run this flow produces reaches this state; the
-    trees that do are synthesized ones, and blocking cost step 32 its place in
-    `test_matrix_d8_missing_caught.REAL_GATE_PASS_TIER_STEPS` (the only
-    production-gate proof that its missing-output downgrade is reachable).
-    Measured coverage lost elsewhere is not worth a guard on an unreachable
-    state."""
+    The producer writes a boolean repair_needed on every normal path. A
+    synthesized silent record therefore exposes the distinct contracts of
+    the audit clause and the full Step-32 gate."""
     p = _repair_project(tmp_path / "silent", {
         "no_repair_needed.flag": "no repair needed\n",
         "postroute_timing_repair_decision.json": {}})
@@ -603,8 +604,11 @@ def test_step32_discloses_but_does_not_block_on_a_silent_decision(tmp_path):
         capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "TRIGGER_DECISION_SILENT" in r.stdout + r.stderr
+    audit_passed, audit_reasons = fcc._evaluate_gate(p, _step32_audit_clause())
+    assert audit_passed is True, audit_reasons
     passed, reasons = fcc._evaluate_gate(p, _step32_gate())
-    assert passed is True, reasons
+    assert passed is False, reasons
+    assert any("flow_step_output_content_check" in reason for reason in reasons), reasons
 
 
 def test_step32_clause_stays_reddenable_under_the_d2_harness(tmp_path):
@@ -616,10 +620,8 @@ def test_step32_clause_stays_reddenable_under_the_d2_harness(tmp_path):
     materialisation would hand the audit a flag-certified no-repair run and the
     clause could never reach FAIL again. This asserts the property directly, on
     the yaml, so the next widening has to face it."""
-    gate = _step32_gate()
-    clause = [c for c in gate["all_of"]
-              if "optional_program_exit_zero" in c][0]
-    conds = clause["optional_program_exit_zero"]["condition_files_exist"]
+    clause = _step32_audit_clause()
+    conds = clause["program_exit_zero"]["condition_files_exist"]
     assert "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json" in conds, conds
     assert "phase3/stage3/postroute_timing_repair/no_repair_needed.flag" not in conds, conds
     # ... and the materialised state really does still fail.
@@ -628,22 +630,24 @@ def test_step32_clause_stays_reddenable_under_the_d2_harness(tmp_path):
     repair.mkdir(parents=True)
     for pat in conds:
         (p / pat).write_text("{}\n")
-    passed, reasons = fcc._evaluate_gate(p, gate)
+    passed, reasons = fcc._evaluate_gate(p, clause)
     assert passed is False, reasons
+    assert any("postroute_timing_repair_audit" in reason for reason in reasons), reasons
 
 
 def test_step32_absent_decision_record_is_left_to_required_outputs(tmp_path):
-    """NO FALSE ALARM. A project with no decision record at all is not this
-    gate's to fail — step 32's `required_outputs` is what reports a missing
-    artefact, and double-failing it here would make the two disagree."""
+    """The audit defers missing output; the content clause also refuses it."""
     p = _repair_project(tmp_path / "norecord",
                      {"no_repair_needed.flag": "no repair needed\n"})
     r = subprocess.run(
         [sys.executable, str(PROGRAMS / "postroute_timing_repair_audit.py"), str(p)],
         capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
+    audit_passed, audit_reasons = fcc._evaluate_gate(p, _step32_audit_clause())
+    assert audit_passed is True, audit_reasons
     passed, reasons = fcc._evaluate_gate(p, _step32_gate())
-    assert passed is True, reasons
+    assert passed is False, reasons
+    assert any("flow_step_output_content_check" in reason for reason in reasons), reasons
 
 
 def test_step32_reports_a_declared_vs_catalogued_path_drift(tmp_path,
