@@ -2301,6 +2301,12 @@ def main() -> int:
         # which step of which block produced it without opening nine records.
         "structure_only_steps": [f"{s.block}/{s.name}" for s in structure_only],
     }
+    import ai_signed_judgement as _ai_judgement
+    summary["ai_judgements"] = _ai_judgement.pending(project, ("A1", "A2", "A9"))
+    _ai_judgement.demote_runner_rows(summary["steps"], summary["ai_judgements"])
+    if summary["ai_judgements"] and summary["verdict"] in ("PASS", "PASS_WITH_WAIVERS"):
+        summary["verdict"] = "NOT_MEASURED"
+        summary["reason_class"] = "awaiting_signed_judgement"
     # Per-step output view — <project>/steps/<phase>/<stage>/<id>_<slug>/.
     # The analog A1-A9 track is driven standalone for analog-only cells, which
     # therefore had no steps tree at all. Best-effort, non-gating; recorded in

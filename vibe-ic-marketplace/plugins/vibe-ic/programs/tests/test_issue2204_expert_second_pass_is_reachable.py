@@ -65,6 +65,7 @@ import vibe_ic_one_shot_runner as ORCH        # noqa: E402
 import phase1_one_shot_runner as P1           # noqa: E402
 import phase1_expert_parse_track as TRACK     # noqa: E402
 import _path_layout as _pl                    # noqa: E402
+from _ai_judgement_fixture import sign as _sign_ai_fixture  # noqa: E402
 
 #: WHERE PASS 1's RECORD LIVES, asked of the router. R-0915-151 moved
 #: `phase1_one_shot.json` onto `_path_layout`'s router, because the flat
@@ -291,6 +292,7 @@ def test_the_second_pass_runs_the_second_track_and_re_extracts_nothing(
         return 0
 
     monkeypatch.setattr(P1, "run_phase1_second_track", _fake_second_track)
+    _sign_ai_fixture(p, "D1")
     rc = P1.run_second_pass_only(p, "UNNAMED_CHIP")
 
     assert rc == 0
@@ -334,6 +336,7 @@ def test_a_delivered_answer_is_consumed_and_the_front_door_then_skips(tmp_path):
 
     # The subagent answers.
     _answer_path(p).write_text(json.dumps(_ANSWER))
+    _sign_ai_fixture(p, "D1")
     run, mode = ORCH._phase1_decision(p, force_skip=False)
     assert run is True and mode == ORCH._P1_MODE_EXPERT_SECOND_PASS, (
         "the answer the hand-off asked for is on disk and the front door "
@@ -427,6 +430,7 @@ def test_the_dispatched_argv_actually_consumes_the_answer(tmp_path):
 
     # The subagent answers, and the front door dispatches THIS argv.
     _answer_path(p).write_text(json.dumps(_ANSWER))
+    _sign_ai_fixture(p, "D1")
     run, mode = ORCH._phase1_decision(p, force_skip=False)
     assert run and mode == ORCH._P1_MODE_EXPERT_SECOND_PASS
 
@@ -514,6 +518,7 @@ def refused_then_corrected(tmp_path, request):
     for _ in range(3):
         assert ORCH._phase1_decision(p, False) == (False, "")
     _answer_path(p).write_text(json.dumps(answer, indent=2) + "\n")
+    _sign_ai_fixture(p, "D1")
     corrected_decision = ORCH._phase1_decision(p, False)
     corrected = _invoke_lifecycle(p, "03_corrected")
     assert corrected["rc"] == 0
@@ -613,13 +618,24 @@ def test_initial_expert_failure_is_separate_from_extraction(tmp_path, extract_rc
     assert first["rc"] == 1, first
     assert first["track"]["ai_subtrack"]["status"] == TRACK.AI_SCHEMA_MISMATCH
     _answer_path(p).write_text(json.dumps(_ANSWER))
+    _sign_ai_fixture(p, "D1")
     second = _invoke_lifecycle(p, "02_corrected")
     assert second["track"]["ai_subtrack"]["status"] == TRACK.AI_CONSUMED
     assert second["rc"] == extract_rc, second
     assert second["summary"]["verdict"] == ("FAIL" if extract_rc else "PASS")
-    assert second["summary"]["steps"] == first["summary"]["steps"]
+    # The first pass had an unread answer and no signed judgement. Its
+    # mechanical PASS was uncredited; the corrected signed pass restores it.
+    if extract_rc == 0:
+        assert first["summary"]["steps"][0]["status"] == "NOT_MEASURED"
+        assert first["summary"]["steps"][0]["program_status"] == "PASS"
+        assert second["summary"]["steps"][0]["status"] == "PASS"
+        assert (second["summary"]["steps"][0]["detail"]
+                == first["summary"]["steps"][0]["program_detail"])
+        assert second["summary"]["steps"][1:] == first["summary"]["steps"][1:]
+    else:
+        assert second["summary"]["steps"] == first["summary"]["steps"]
     assert second["summary"]["pass1"]["rc"] == extract_rc
-    assert first["summary"]["steps"][0]["status"] == ("FAIL" if extract_rc else "PASS")
+    assert first["summary"]["steps"][0]["status"] == ("FAIL" if extract_rc else "NOT_MEASURED")
 
 
 @pytest.mark.parametrize("prior", [None, {"mode": "expert_second_pass", "verdict": "FAIL"},

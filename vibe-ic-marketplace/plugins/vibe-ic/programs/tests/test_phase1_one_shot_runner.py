@@ -108,6 +108,20 @@ def _stage_expert_answer(project: Path) -> None:
     }))
 
 
+def _sign_d1_after_first_pass(project: Path) -> None:
+    """A reviewer signs the L-doc bytes the first pass actually produced."""
+    import ai_signed_judgement as judgement
+    digest = judgement.evidence_sha256(project, "D1")
+    assert digest
+    out = project / "reports/audit/ai_judgements/D1.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({
+        "schema": judgement.SCHEMA, "step_id": "D1",
+        "evidence_sha256": digest, "verdict": "PASS",
+        "signed_by": "ic-expert-agent", "judgement": "reviewed generated L documents",
+    }))
+
+
 def test_empty_fixture_is_blocked_not_a_pass(tmp_path):
     """WAS `test_skip_empty_fixture`, and the rename is the finding.
 
@@ -156,6 +170,12 @@ def test_reverse_one_staged_input_and_the_same_run_completes(tmp_path):
     _stage_expert_answer(project)
     cp = _run([str(project), "--ic-name", "TST_CHIP", "--mode", "prompt"],
               timeout=_RUN_TIMEOUT_S)
+    assert cp.returncode == 1
+    assert json.loads(_phase1_report(project).read_text())["reason_class"] == (
+        "awaiting_signed_judgement")
+    _sign_d1_after_first_pass(project)
+    cp = _run([str(project), "--ic-name", "TST_CHIP", "--second-track-only"],
+              timeout=_RUN_TIMEOUT_S)
     assert cp.returncode == 0, cp.stderr
     body = json.loads(
         _phase1_report(project).read_text())
@@ -183,6 +203,10 @@ def test_integration_report_shape(tmp_path):
     _stage_prompt(project)
     _stage_expert_answer(project)
     cp = _run([str(project), "--ic-name", "TST_CHIP", "--mode", "prompt"],
+              timeout=_RUN_TIMEOUT_S)
+    assert cp.returncode == 1
+    _sign_d1_after_first_pass(project)
+    cp = _run([str(project), "--ic-name", "TST_CHIP", "--second-track-only"],
               timeout=_RUN_TIMEOUT_S)
     assert cp.returncode == 0
     body = json.loads(
@@ -234,8 +258,9 @@ def test_input_docs_directory_changes_branch(tmp_path):
     if "steps" in body:  # legacy inline-steps report shape
         ingest = next(s for s in body["steps"]
                       if s["name"] == "phase1_ingest_render")
-        assert ingest["status"] in ("PASS", "FAIL", "SKIP")
+        # Unsigned D1 execution is uncredited even when extraction ran.
+        assert ingest["status"] in ("NOT_MEASURED", "FAIL", "SKIP")
     else:  # v0.1.x delegated docs-mode report — input/docs/ took the docs branch
         assert body.get("mode") == "docs"
         assert body.get("delegated_to")
-        assert body.get("verdict") in ("PASS", "FAIL", "SKIP")
+        assert body.get("verdict") in ("NOT_MEASURED", "FAIL", "SKIP")

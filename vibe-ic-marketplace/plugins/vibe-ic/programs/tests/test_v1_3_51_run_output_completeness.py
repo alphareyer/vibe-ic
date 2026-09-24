@@ -300,9 +300,15 @@ def _repo_root() -> Path:
     # .../vibe-ic-marketplace/plugins/vibe-ic/programs/tests -> up to repo root
     p = Path(__file__).resolve()
     for anc in p.parents:
-        if (anc / "benchmark-data").is_dir() and (anc / ".git").exists():
+        if (anc / ".git").exists():
             return anc
-    return p.parents[6]
+    raise RuntimeError(f"test file is outside a Git checkout: {p}")
+
+
+def test_corpus_root_is_the_checkout_containing_this_test():
+    root = _repo_root()
+    assert (root / ".git").exists()
+    assert Path(__file__).resolve().is_relative_to(root)
 
 
 def test_corpus_sweep_complete_result_md_all_pass():

@@ -2274,6 +2274,17 @@ def main() -> int:
                                         audit_axis=_audit_axis)
     else:
         overall, _rollup_why = "FAIL", ["no digital phase ran"]
+    import ai_signed_judgement as _ai_judgement
+    _ai_scope = ["D1", "1", "4", "5"]
+    if not args.skip_analog:
+        _ai_scope.extend(("A1", "A2", "A9"))
+    if not args.skip_phase3:
+        _ai_scope.append("36")
+    _ai_pending = _ai_judgement.pending(
+        project, tuple(_ai_scope))
+    if _ai_pending and overall in ("PASS", "PASS_WITH_WAIVERS"):
+        overall = "NOT_MEASURED"
+        _rollup_why.extend(_ai_pending.values())
     # A verdict that moved must say which phase moved it, in the report a reader
     # actually opens — not only on stdout.
     for _why in _rollup_why:
@@ -2294,6 +2305,7 @@ def main() -> int:
         # the same attribution, and the half nothing recorded before.
         "pdk_revision": _pdk_rec,
         "verdict": overall,
+        "ai_judgements": _ai_pending,
         # WHY the roll-up is what it is, phase by phase. Empty for a clean PASS.
         "verdict_reasons": _rollup_why,
         "completion_audit_verdicts": _ca_verdicts,
@@ -2304,7 +2316,15 @@ def main() -> int:
         "demoted_phases": _demoted,
     }
     _fd_bounded = _fd_bounded or _p3_window_ran or _p3_skip_by_exit
-
+    _phase_for_ai = {"D1": "phase1", "1": "phase2", "4": "phase2",
+                     "5": "phase2", "A1": "analog", "A2": "analog",
+                     "A9": "analog", "36": "phase3"}
+    for _sid, _detail in _ai_pending.items():
+        for _phase in summary["phases"]:
+            if (_phase["name"] == _phase_for_ai[_sid]
+                    and _phase["verdict"] in ("PASS", "PASS_WITH_WAIVERS")):
+                _phase["verdict"] = "NOT_MEASURED"
+                _phase["rc"] = 1
     # v1.6.32: emit canonical final_summary.md (best-effort). Note that
     # phase23_one_shot_runner ALSO calls this; vibe_ic delegates to
     # phase23 today, so the final summary will be regenerated here on

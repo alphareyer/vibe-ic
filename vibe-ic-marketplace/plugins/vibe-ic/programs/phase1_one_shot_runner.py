@@ -1506,6 +1506,15 @@ def run_second_pass_only(project: Path, ic_name: str) -> int:
     # both include the independently retained first-pass failure.
     rc_out = max(pass1_rc, rc)
     summary["verdict"] = "FAIL" if rc_out else pass1["verdict"]
+    import ai_signed_judgement as _ai_judgement
+    summary["ai_judgements"] = _ai_judgement.pending(project, ("D1",))
+    if not summary["ai_judgements"] and rc == 0:
+        _ai_judgement.restore_runner_rows(summary.get("steps", []))
+    _ai_judgement.demote_runner_rows(summary.get("steps", []), summary["ai_judgements"])
+    if summary["ai_judgements"] and summary["verdict"] in ("PASS", "PASS_WITH_WAIVERS"):
+        summary["verdict"] = "NOT_MEASURED"
+        summary["reason_class"] = "awaiting_signed_judgement"
+        rc_out = max(rc_out, 1)
     out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     print("\n=== phase1_one_shot_runner DONE (mode=expert_second_pass) ===")
     print(f"verdict: {summary['verdict']}")
@@ -1706,6 +1715,12 @@ def main() -> int:
                       "source": "extraction and route before expert track"},
             "second_track": second_track,
         }
+        import ai_signed_judgement as _ai_judgement
+        summary["ai_judgements"] = _ai_judgement.pending(project, ("D1",))
+        if summary["ai_judgements"] and summary["verdict"] in ("PASS", "PASS_WITH_WAIVERS"):
+            summary["verdict"] = "NOT_MEASURED"
+            summary["reason_class"] = "awaiting_signed_judgement"
+            rc = max(rc, 1)
         # THE REPORT SHAPE IS THE SAME ON BOTH DOORS (#2052). A refusal was
         # already reported here as a `steps` list; a COMPLETED run was not, so
         # `reports/phase1_one_shot.json` carried a `steps` key on one door and
@@ -1730,6 +1745,7 @@ def main() -> int:
                     "PASS" if rc_track == 0 else "FAIL", 0.0,
                     str(second_track)[:400])),
             ]
+        _ai_judgement.demote_runner_rows(summary["steps"], summary["ai_judgements"])
         # Per-step output view — see the prompt-mode call below. BOTH exits of
         # this main() get it; wiring only one would leave the docs entry (Path
         # A, the vendor-document front door) without a steps tree.
@@ -1817,6 +1833,12 @@ def main() -> int:
         "sufficiency": _suff,
         "extraction_gap": _gap,
     }
+    import ai_signed_judgement as _ai_judgement
+    summary["ai_judgements"] = _ai_judgement.pending(project, ("D1",))
+    _ai_judgement.demote_runner_rows(summary["steps"], summary["ai_judgements"])
+    if summary["ai_judgements"] and summary["verdict"] in ("PASS", "PASS_WITH_WAIVERS"):
+        summary["verdict"] = "NOT_MEASURED"
+        summary["reason_class"] = "awaiting_signed_judgement"
     if _refused:
         summary["preflight_ledger"] = _spf.LEDGER_REL
     # Per-step output view — <project>/steps/<phase>/<stage>/<id>_<slug>/.

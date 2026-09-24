@@ -23949,6 +23949,12 @@ def main() -> int:
         "steps": [asdict(s) for s in plan],
         "verdict": _aggregate_verdict(plan),
     }
+    import ai_signed_judgement as _ai_judgement
+    summary["ai_judgements"] = _ai_judgement.pending(project, ("1", "4", "5"))
+    _ai_judgement.demote_runner_rows(summary["steps"], summary["ai_judgements"])
+    if summary["ai_judgements"] and summary["verdict"] in ("PASS", "PASS_WITH_WAIVERS"):
+        summary["verdict"] = "NOT_MEASURED"
+        summary["reason_class"] = "awaiting_signed_judgement"
     if _bounded:
         # THE REPORT IS WHERE A READER LEARNS WHAT THIS RUN DID NOT DO. A
         # bounded run leaves reports/final_summary.md and the phase-2/3
@@ -24023,6 +24029,7 @@ def main() -> int:
         # The published record must describe the tree as it is being LEFT, not
         # as it was mid-run.
         summary["steps"] = [asdict(s) for s in plan]
+        _ai_judgement.demote_runner_rows(summary["steps"], summary["ai_judgements"])
         _write_phase2_report(out, summary, project)
     print(f"\n=== design_one_shot_runner DONE — {out}")
     print(f"verdict: {summary['verdict']}")

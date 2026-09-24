@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -49,6 +50,7 @@ sys.path.insert(0, str(PROGRAMS))
 
 import signoff_audit as sa  # noqa: E402
 import flow_compliance_check as fc  # noqa: E402
+from _ai_judgement_fixture import sign as _sign_ai_fixture  # noqa: E402
 
 SIGNOFF = PROGRAMS / "signoff_audit.py"
 
@@ -127,6 +129,19 @@ def _run_signoff(proj: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(SIGNOFF), str(proj), "--mode", "tapeout"],
         capture_output=True, text=True)
+
+
+def _signed_waiver_project(path: Path) -> Path:
+    project = _waiver_project(path)
+    assert _run_signoff(project).returncode == sa.WAIVER_EXIT_CODE
+    checklist = project / "reports/audit/tapeout_checklist.json"
+    checklist.parent.mkdir(parents=True, exist_ok=True)
+    checklist.write_text(json.dumps({
+        "verdict": "READY_FOR_TAPEOUT",
+        "reviewer_todo": ["Review the synthetic DRC waiver"],
+    }))
+    _sign_ai_fixture(project, "36")
+    return project
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +269,7 @@ def test_check_step_three_way_status(tmp_path):
     step = {"id": 36, "name": "Tapeout checklist", "stage": "stage4",
             "gate": {"program_exit_zero":
                      "tapeout_signoff_check . --mode tapeout"}}
-    waiver_p = _waiver_project((tmp_path / "w"))
+    waiver_p = _signed_waiver_project((tmp_path / "w"))
     clean_p = _clean_project((tmp_path / "c"))
     fail_p = _fail_project((tmp_path / "f"))
 
@@ -270,7 +285,7 @@ def test_waived_status_is_not_bare_pass(tmp_path):
     step = {"id": 36, "name": "Tapeout checklist", "stage": "stage4",
             "gate": {"program_exit_zero":
                      "tapeout_signoff_check . --mode tapeout"}}
-    r = fc.check_step(_waiver_project((tmp_path / "w")), step, waivers={})
+    r = fc.check_step(_signed_waiver_project((tmp_path / "w")), step, waivers={})
     assert r.status != "PASS"
     assert r.status == "PASS_WITH_WAIVERS"
     # the reason makes the deferral explicit + cites #651.

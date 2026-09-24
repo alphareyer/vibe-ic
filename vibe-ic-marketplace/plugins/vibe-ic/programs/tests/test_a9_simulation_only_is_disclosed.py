@@ -44,6 +44,7 @@ if str(_PROGRAMS) not in sys.path:
     sys.path.insert(0, str(_PROGRAMS))
 
 import flow_compliance_check as FCC  # noqa: E402
+from _ai_judgement_fixture import sign as _sign_ai_fixture  # noqa: E402
 
 _FLOW = _PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml"
 _CHECKER = _PROGRAMS / "analog_a9_hw_verify_check.py"
@@ -71,6 +72,7 @@ def _project(tmp_path: Path, hw: dict | None) -> Path:
     if hw is not None:
         (tmp_path / "phase3" / "analog" / "blk1"
          / "hw_measurements.json").write_text(json.dumps(hw))
+    _sign_ai_fixture(tmp_path, "A9")
     return tmp_path
 
 
