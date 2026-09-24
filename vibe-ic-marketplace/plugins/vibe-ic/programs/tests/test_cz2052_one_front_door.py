@@ -429,5 +429,5 @@ def test_the_docs_branch_reports_a_steps_list_for_a_completed_run():
         "# Prompt mode:", 1)[0]
     assert 'summary["steps"] = [' in docs_branch
     # …on the completed path too, not only on the refusal path.
-    assert docs_branch.count('summary["steps"]') == 2
+    assert docs_branch.count('summary["steps"] =') == 2
     assert "phase1_expert_parse_track" in docs_branch

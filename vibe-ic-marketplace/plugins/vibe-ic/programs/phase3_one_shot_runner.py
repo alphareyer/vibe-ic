@@ -65342,6 +65342,7 @@ _METAL_DENSITY_KLAYOUT_RECIPE = r'''
 import json, os, re, sys
 import pya
 gds_path = globals().get("gds", "")
+gds_record = globals().get("gds_record") or os.path.basename(gds_path)
 map_path = globals().get("map", "")
 out_path = globals().get("out", "")
 # The PDK this measurement was taken under, recorded IN the artifact. The gate
@@ -65471,7 +65472,7 @@ open(out_path, "w").write(json.dumps({
     "tool": "klayout",
     "measurement": "per_layer_drawn_area_over_die_bbox_area",
     "pdk": pdk_name,
-    "gds": gds_path,
+    "gds": gds_record,
     "die_area_um2": round(die_um2, 3),
     "die_area_source": die_source,
     "bbox_area_um2": round(bbox_um2, 3),
@@ -65638,6 +65639,7 @@ def _emit_metal_density_report(project: Path, top: str, pdk: PdkConfig,
     script = out_json.parent / "metal_density_klayout.py"
     script.write_text(_metal_density_recipe())
     gds_c = _to_container_path(str(gds), container)
+    gds_record = gds.relative_to(project).as_posix()
     map_c = _to_container_path(str(layermap), container)
     out_c = _to_container_path(str(out_json), container)
     script_c = _to_container_path(str(script), container)
@@ -65668,7 +65670,8 @@ def _emit_metal_density_report(project: Path, top: str, pdk: PdkConfig,
         # placed in /foss/tools/bin. See KLAYOUT_PREFER_FORK_SH.
         f"{KLAYOUT_PREFER_FORK_SH}"
         f"export PATH={TOOLS_IN_CONTAINER}/bin:$PATH && "
-        f"klayout -b -r {script_c} -rd gds={gds_c} -rd map={map_c} "
+        f"klayout -b -r {script_c} -rd gds={gds_c} "
+        f"-rd gds_record={gds_record} -rd map={map_c} "
         # THE DECLARED DIE, when there is one. Without it this measurement
         # divides by the streamed geometry's bounding box and calls the result
         # `die_area_um2`; on a slot submission that is the CORE, and the report

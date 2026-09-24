@@ -1,7 +1,9 @@
 """D9: a real declared output's red reaches the completion audit.
 
-The checked-in slice is copied byte-for-byte from run23: one invocation
-record, its declared output, and the run's RTL so the P0 umbrella executes.
+The checked-in slice is derived from run23: one invocation record, its
+declared output, and the run's RTL so the P0 umbrella executes. The report's
+GDS location was made project-relative for portability, and the fixture
+record explicitly marks that transformation and hashes the transformed bytes.
 The full 64-row/42-path corpus was first copied to scratch and checked PASS.
 Only the test flow's unrelated dependency edge is removed; the production
 provenance gate, P0 dispatch, verdict projection, and audit writer are used.

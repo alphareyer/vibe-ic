@@ -2,7 +2,7 @@
   "tool": "klayout",
   "measurement": "per_layer_drawn_area_over_die_bbox_area",
   "pdk": "gf180mcuD",
-  "gds": "/home/reyerchu/_lane_icspm5/run23/phase3/stage3/pnr/spm.gds",
+  "gds": "phase3/stage3/pnr/spm.gds",
   "die_area_um2": 9998244.0,
   "die_area_source": "the declared slot DIE_AREA",
   "bbox_area_um2": 9998244.0,

@@ -55,6 +55,7 @@ SKU, process-node or PDK literal.
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import sys
 from pathlib import Path
@@ -194,3 +195,31 @@ def test_emitter_uses_freshest_gds_and_keeps_glob_fallback():
         not in src, "the emit still prefers the stale alias unconditionally"
     # The honest 'no GDS at all' skip must survive.
     assert "no streamed GDS found" in src
+
+
+def test_density_report_records_project_relative_gds(tmp_path, monkeypatch):
+    """The EDA command reads the real GDS, while its report names a portable
+    path to the same selected file inside the project."""
+    project = tmp_path / "project"
+    gds = project / "phase3/stage3/pnr/top.gds"
+    gds.parent.mkdir(parents=True)
+    gds.write_bytes(b"GDS")
+    out = project / "reports/phase3/metal_density.json"
+    commands = []
+
+    class Pdk:
+        name = "testpdk"
+        lefdef_layermap = "layermap.txt"
+        drc_deck = ""
+
+    def eda_writes_report(_container, command, **_kw):
+        commands.append(command)
+        out.write_text(json.dumps({"layers": {"metal1": 0.3}}))
+        return 0, "", ""
+
+    monkeypatch.setattr(R, "_docker_exec", eda_writes_report)
+    notes = []
+    assert R._emit_metal_density_report(project, "top", Pdk(),
+                                        "test-container", out, notes)
+    assert "-rd gds_record=phase3/stage3/pnr/top.gds " in commands[0]
+    assert '"gds": gds_record' in R._metal_density_recipe()

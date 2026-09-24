@@ -230,8 +230,9 @@ def _drive_main(tmp_path, monkeypatch, verdicts, extra=()):
     """Drive the real `main()` over the full canonical flow with every step's
     own verdict stubbed: PASS unless `verdicts` says otherwise."""
     proj = tmp_path / "proj"
-    (proj / "rtl").mkdir(parents=True)
-    (proj / "rtl" / "top.v").write_text(
+    rtl_dir = proj / "phase2" / "stage1" / "rtl"
+    rtl_dir.mkdir(parents=True)
+    (rtl_dir / "top.v").write_text(
         "module top(input a, output b); assign b = a; endmodule\n")
     tmpl = proj / "input" / "submission_template"
     tmpl.mkdir(parents=True)
