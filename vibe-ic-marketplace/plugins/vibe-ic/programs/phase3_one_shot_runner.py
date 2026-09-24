@@ -26051,7 +26051,8 @@ def _build_postroute_timing_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: st
 
 
 def _antenna_repair_tcl(pdk: "PdkConfig",
-                        out_dir_c: str = ".") -> str:
+                        out_dir_c: str = ".",
+                        filler_spec: Optional[Dict[str, Any]] = None) -> str:
     """v0.2.14 — emit the OpenROAD Tcl that repairs process-antenna violations
     after the main detailed_route, returned as a pure string so the
     silicon-critical sequence is pinned by regression tests (v0.1.49 doctrine).
@@ -26105,6 +26106,94 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
     if not pdk.antenna_diode_cell:
         return ("puts \"ANTENNA_REPAIR_SKIPPED: no diode cell for this PDK; "
                 "antenna violations need manual diode ECO\"\n")
+    # The pre-route fillers are removed for the length of each native pass and
+    # restored before anything measures or checkpoints again, so every
+    # checkpoint this block writes (and a refusal restores from) is
+    # FILL-COMPLETE. See `_postroute_filler_bracket_tcl`.
+    _ant_rmfill, _ant_refill = _postroute_filler_bracket_from_spec(
+        "ANTENNA", filler_spec)
+    _ant_refill_if = (("    if {$_ant_fill_removed} {\n"
+                       + _ant_refill
+                       + "      set _ant_fill_removed 0\n    }\n")
+                      if _ant_refill else "")
+    # DISCLOSED, as the mixed-case message promises: a futile net (one that
+    # already carried a diode and still violated) that gained another diode.
+    _ant_futile_disclose = (
+        "    if {[array size _ant_fd_before] > 0} {\n"
+        "      set _ant_fgain {}\n"
+        "      catch {\n"
+        "        foreach {_ant_gn _ant_gb} [array get _ant_fd_before] {\n"
+        "          set _ant_gnet [$_ant_blk findNet $_ant_gn]\n"
+        "          if {$_ant_gnet eq \"NULL\"} { continue }\n"
+        "          set _ant_gc 0\n"
+        "          foreach _ant_git [$_ant_gnet getITerms] {\n"
+        "            if {[[[$_ant_git getInst] getMaster] getName] eq "
+        f"\"{pdk.antenna_diode_cell}\"}} {{ incr _ant_gc }}\n"
+        "          }\n"
+        "          if {$_ant_gc > $_ant_gb} { lappend _ant_fgain $_ant_gn }\n"
+        "        }\n"
+        "      }\n"
+        "      if {[llength $_ant_fgain] > 0} {\n"
+        "        puts \"ANTENNA_DIODE_ON_FUTILE_NET: [llength $_ant_fgain] "
+        "net(s) that already carried a diode received another one "
+        "(ANT-0019: it cannot help): [join [lrange $_ant_fgain 0 7] {, }]\"\n"
+        "      }\n"
+        "      array unset _ant_fd_before\n"
+        "    }\n")
+    _ant_refill_if = _ant_futile_disclose + _ant_refill_if
+    # RULING (mixed ANT-0019 case): the pass runs, then every diode it
+    # inserted on a FUTILE net (one that already carried a diode and still
+    # violated) is DESTROYED BY NAME before the fill is restored, and each
+    # removal is disclosed. Collected first, destroyed after, so the iterm walk
+    # never runs over an instance it just removed.
+    _ant_futile_remove = (
+        "    if {[array size _ant_fd_before] > 0} {\n"
+        "      set _ant_rmq {}\n"
+        "      catch {\n"
+        "        foreach _ant_rn [array names _ant_fd_before] {\n"
+        "          set _ant_rnet [$_ant_blk findNet $_ant_rn]\n"
+        "          if {$_ant_rnet eq \"NULL\"} { continue }\n"
+        "          foreach _ant_rit [$_ant_rnet getITerms] {\n"
+        "            set _ant_ri [$_ant_rit getInst]\n"
+        "            set _ant_rin [$_ant_ri getName]\n"
+        "            set _ant_rmn [[$_ant_ri getMaster] getName]\n"
+        f"            if {{$_ant_rmn ne \"{pdk.antenna_diode_cell}\"}} {{ continue }}\n"
+        "            if {[info exists _ant_pre_inst($_ant_rin)]} { continue }\n"
+        "            lappend _ant_rmq [list $_ant_rn $_ant_rin $_ant_rmn]\n"
+        "          }\n"
+        "        }\n"
+        "      }\n"
+        "      foreach _ant_rq $_ant_rmq {\n"
+        "        lassign $_ant_rq _ant_rn _ant_rin _ant_rmn\n"
+        "        set _ant_ri [$_ant_blk findInst $_ant_rin]\n"
+        "        if {$_ant_ri eq \"NULL\"} { continue }\n"
+        "        if {![catch {odb::dbInst_destroy $_ant_ri}]} {\n"
+        "          puts \"ANTENNA_DIODE_ON_FUTILE_NET_REMOVED: net=$_ant_rn "
+        "inst=$_ant_rin master=$_ant_rmn -- ANT-0019: a diode cannot help this "
+        "net; removed by name before the fill is restored\"\n"
+        "          lappend _ant_futile_removed $_ant_rn\n"
+        "          if {[info exists _ant_fd_before($_ant_rn)]} "
+        "{ incr _ant_fd_before($_ant_rn) 0 }\n"
+        "        }\n"
+        "      }\n"
+        "    }\n")
+    # ...and a futile net whose diode was removed is judged by the NEXT
+    # measurement: still violating -> reported as routed to the jumper /
+    # reroute path, never counted as repaired.
+    _ant_futile_still = (
+        "    if {[llength $_ant_futile_removed] > 0} {\n"
+        "      set _ant_sv {}\n"
+        "      foreach _ant_sn [lsort -unique $_ant_futile_removed] {\n"
+        "        if {[lsearch -exact $_ant_now $_ant_sn] >= 0} "
+        "{ lappend _ant_sv $_ant_sn }\n"
+        "      }\n"
+        "      if {[llength $_ant_sv] > 0} {\n"
+        "        puts \"ANTENNA_FUTILE_NET_STILL_VIOLATING: [llength $_ant_sv] "
+        "net(s) whose futile diode was removed still violate -- routed to the "
+        "jumper/reroute path, NOT counted as repaired: [join $_ant_sv {, }]\"\n"
+        "      }\n"
+        "      set _ant_futile_removed {}\n"
+        "    }\n")
     return (
         # The design-for-ECO spare tie nets are `setDoNotTouch true` so the
         # RESIZER SKIPS them instead of erroring on a dont_touch load pin
@@ -26373,7 +26462,11 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "    set _ant_ckpt_ok 1\n"
         "    puts \"ANTENNA_PRE_REPAIR_CHECKPOINT: $_ant_ckpt\"\n"
         "  }\n"
+        "  set _ant_fill_removed 0\n"
+        "  set _ant_futile_removed {}\n"
+        "  array unset _ant_fd_before\n"
         "  for {set _i 0} {$_i < $_ant_cap} {incr _i} {\n"
+        + _ant_refill_if +
         "    set _nv -1\n"
         "    set _ant_rf $_ant_dir/antenna_iter_$_i.rpt\n"
         "    if {[catch {set _nv [check_antennas -report_violating_nets "
@@ -26387,6 +26480,7 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "    set _ant_now [_vic_ant_nets $_ant_rf $_nv]\n"
         "    _vic_ant_rm_empty $_ant_rf\n"
         "    _vic_ant_sign $_ant_rf $_i\n"
+        + _ant_futile_still +
         "    if {$_nv > 0 && [llength $_ant_now] == 0} {\n"
         "      if {$_ant_membership} {\n"
         "        puts \"ANTENNA_LOOP_MEMBERSHIP_UNAVAILABLE: iter=$_i -- the "
@@ -26613,13 +26707,64 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "    array unset _ant_pre_inst\n"
         "    catch { foreach _ant_pi [$_ant_blk getInsts] "
         "{ set _ant_pre_inst([$_ant_pi getName]) 1 } }\n"
+        # NO DIODE WHERE A DIODE CANNOT HELP (ANT-0019). MEASURED on subservient
+        # (arm A): all 12 violating nets already carried a diode and still
+        # violated (a Metal2 SIDE-area ratio), and the reconverge pass added
+        # 12 MORE -- futile by the tool's own ANT-0019 ("the diodes already on
+        # them do not help and another one would not either") and illegal on a
+        # filler-tiled core. The criterion is ANT-0019's own: a violating net
+        # that ALREADY carries this diode master. When every violating net is
+        # such a net the pass runs `-jumper_only`; when only some are, the
+        # tool has no per-net selection, so the pass runs as before and those
+        # nets are reported by name (a diode landing on one is disclosed).
+        "    set _ant_futile {}\n"
+        "    set _ant_helpable 0\n"
+        "    array unset _ant_fd_before\n"
+        "    catch {\n"
+        "      foreach _ant_fn $_ant_now {\n"
+        "        set _ant_fnet [$_ant_blk findNet $_ant_fn]\n"
+        "        if {$_ant_fnet eq \"NULL\"} { incr _ant_helpable; continue }\n"
+        "        set _ant_hasd 0\n"
+        "        foreach _ant_fit [$_ant_fnet getITerms] {\n"
+        "          if {[[[$_ant_fit getInst] getMaster] getName] eq "
+        f"\"{pdk.antenna_diode_cell}\"}} {{ set _ant_hasd 1 }}\n"
+        "        }\n"
+        "        if {$_ant_hasd} { lappend _ant_futile $_ant_fn } "
+        "else { incr _ant_helpable }\n"
+        "        set _ant_nd 0\n"
+        "        foreach _ant_fit [$_ant_fnet getITerms] {\n"
+        "          if {[[[$_ant_fit getInst] getMaster] getName] eq "
+        f"\"{pdk.antenna_diode_cell}\"}} {{ incr _ant_nd }}\n"
+        "        }\n"
+        "        if {$_ant_hasd} { set _ant_fd_before($_ant_fn) $_ant_nd }\n"
+        "      }\n"
+        "    }\n"
+        "    set _ant_mode {}\n"
+        "    if {[llength $_ant_futile] > 0} {\n"
+        "      puts \"ANTENNA_DIODE_FUTILE: [llength $_ant_futile] net(s) "
+        "already carry a diode and still violate -- another diode cannot help "
+        "(ANT-0019): [join [lrange $_ant_futile 0 7] {, }]\"\n"
+        "      if {$_ant_helpable == 0} {\n"
+        "        set _ant_mode -jumper_only\n"
+        "        puts \"ANTENNA_JUMPER_ONLY_PASS: every violating net is "
+        "diode-futile; this pass inserts NO diode\"\n"
+        "      } else {\n"
+        "        puts \"ANTENNA_DIODE_FUTILE_MIXED: $_ant_helpable net(s) may "
+        "still take a diode; repair_antennas has no per-net selection, so a "
+        "diode that lands on a futile net is disclosed below\"\n"
+        "      }\n"
+        "    }\n"
+        + _ant_rmfill.replace("\n", "\n    ").rstrip(" ")
+        + "    set _ant_fill_removed 1\n"
         "    if {[catch {repair_antennas "
         f"{pdk.antenna_diode_cell}"
-        " -iterations 1 -ratio_margin $_ant_margin -reroute} _ra_native]} {\n"
+        " -iterations 1 -ratio_margin $_ant_margin {*}$_ant_mode -reroute} "
+        "_ra_native]} {\n"
         "      # FALLBACK (build without -reroute): external repair then an\n"
         "      # incremental detailed_route of the diode-dirty nets.\n"
         "      puts \"ANTENNA_NATIVE_REROUTE_NONFATAL: $_ra_native\"\n"
         "      set _ant_refused \"ANTENNA_NATIVE_REROUTE_NONFATAL: $_ra_native\"\n"
+        + _ant_futile_remove.replace("\n    ", "\n      ").replace("    if {[array", "      if {[array", 1) +
         # R-0915-116(2) — THE OBJECTIVE IS THE VIOLATION COUNT, AND THE
         # WHOLE-DESIGN FALLBACK IS DELETED.
         #
@@ -26708,6 +26853,32 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         # ORDER MATTERS: a pass that destroyed geometry is REFUSED whether or
         # not its own inserts are visible. "Unjudged" is only for a pass that
         # took nothing away AND shows nothing it added.
+        # A FAILED LEGALIZE IS NEVER SPURIOUS. MEASURED on subservient (arm A):
+        # DPL-0038 "impossible to legalize" out of the native pass was classed
+        # ANTENNA_NATIVE_ERROR_SPURIOUS because no net lost wire -- and 12
+        # unlegalized diodes shipped as 29 check_placement violations. Wire
+        # intact says nothing about placement legality. Refused like damage:
+        # the parent restores this pass's (fill-complete) checkpoint.
+        "      if {[regexp {DPL-00[0-9]+|impossible to legalize} "
+        "$_ra_native]} {\n"
+        "        set _ant_lrolled 0\n"
+        "        catch {\n"
+        "          foreach _ant_dn $_ant_new {\n"
+        "            set _ant_di [$_ant_blk findInst $_ant_dn]\n"
+        "            if {$_ant_di ne \"NULL\" && "
+        "![catch {odb::dbInst_destroy $_ant_di}]} { incr _ant_lrolled }\n"
+        "          }\n"
+        "        }\n"
+        "        puts \"ANTENNA_NATIVE_LEGALIZE_FAILED: $_ra_native -- the cells "
+        "this pass inserted could not be legalized, so the placement is not "
+        "legal whatever the wires say; the pass is REFUSED (never spurious), "
+        "$_ant_lrolled inserted instance(s) destroyed by name, and a restore is "
+        "REQUESTED of the parent from $_ant_pass_ckpt\"\n"
+        "        set _ant_refused \"ANTENNA_NATIVE_LEGALIZE_FAILED: "
+        "$_ra_native\"\n"
+        "        set _ant_damage 1\n"
+        "        break\n"
+        "      }\n"
         "      if {[llength $_ant_broken] == 0 && [llength $_ant_touched] == 0} {\n"
         "        puts \"ANTENNA_NATIVE_ERROR_UNJUDGED: $_ra_native -- this pass "
         "inserted nothing this step can see, so its connectivity cannot be "
@@ -26827,11 +26998,13 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "      }\n"
         "      break\n"
         "    }\n"
+        + _ant_futile_remove +
         f"    puts \"REPAIR_ANTENNA_DONE: diode={pdk.antenna_diode_cell} iter=$_i margin=$_ant_margin\"\n"
         "    # Escalate head-room each turn (cap 40) vs reroute re-introduction.\n"
         "    if {$_ant_margin < 40} { set _ant_margin [expr {$_ant_margin + 10}] }\n"
         "  }\n"
-        "  # THE STATE WE ARE ACTUALLY LEAVING. On the cap path the loop's last\n"
+        + _ant_refill_if.replace("\n    ", "\n  ").replace("    if {$_ant_fill", "  if {$_ant_fill", 1)
+        + "  # THE STATE WE ARE ACTUALLY LEAVING. On the cap path the loop's last\n"
         "  # recorded measurement is one repair OLD, so measure once more and\n"
         "  # record it -- the published sequence must end on the shipped state.\n"
         "  if {$_ant_stop eq \"CAP\"} {\n"
@@ -27726,7 +27899,9 @@ def _post_route_spef_repair_tcl(out_dir_c: str, tech_lef_c: str,
                                 fanout_root_buffer_cell: Optional[str] = None,
                                 reserved_instance_names:
                                     Optional[Sequence[str]] = None,
-                                pdk: Optional["PdkConfig"] = None) -> str:
+                                pdk: Optional["PdkConfig"] = None,
+                                filler_spec: Optional[Dict[str, Any]] = None
+                                ) -> str:
     """ORGANIC #557 / #581 — emit the OpenROAD Tcl for the
     post-detailed-route SPEF extraction (MEASURE-ONLY).
 
@@ -27878,7 +28053,7 @@ def _post_route_spef_repair_tcl(out_dir_c: str, tech_lef_c: str,
                 out_dir_c, fanout_root_buffer_cell,
                 stage="postroute_drv_repair",
                 reserved_instance_names=reserved_instance_names,
-                pdk=pdk)
+                pdk=pdk, filler_spec=filler_spec)
             + _pnr_stage_end("postroute_drv_repair") + "\n")
            if fork_repair_capable else
            "  puts \"SDR_SKIP_STOCK_OPENROAD: post-route SPEF DRV repair needs "
@@ -29381,11 +29556,67 @@ def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
         "  }\n"
     )
 
+def _postroute_filler_bracket_tcl(tag: str, filler_masters: Sequence[str],
+                                  *, slot_pinned_core: bool = False,
+                                  design_declared_die: bool = False,
+                                  sparse_active_row_fill: bool = False
+                                  ) -> Tuple[str, str]:
+    """``(remove_tcl, refill_tcl)`` for ONE post-route pass that may move or
+    insert cells — the SDR child sessions (both legs) and the native antenna
+    repair/reconverge.
+
+    MEASURED (subservient x gf180mcuD, run2 copies, main 240c0a353). Fillers go
+    in PRE-ROUTE (R-0915-105, `preroute_fill`), so every post-route pass that
+    calls `detailed_placement` sees them as movable instances: "Movable
+    instances area 1,363,895 um^2" in a 1,377,710 um^2 core, `[WARNING
+    DPL-0037] Use remove_fillers before detailed placement`, `[ERROR DPL-0038]
+    Utilization greater than 100%, impossible to legalize` — on a 5.5 % design.
+    Both SDR transactions were REJECTED for it (2,430 / 2,863 candidate
+    placement violations), so no post-route DRV/timing repair was ever adopted
+    and the 2x-limit slews shipped; the antenna-reconverge pass dropped 12
+    diodes onto filler-tiled sites and shipped 29 check_placement violations.
+
+    The ship-repair path already does the right thing (`SHIP_RMFILL`, then
+    `refill_block` after its reroute); this is that pattern, once, for every
+    other post-route site. The refill is the flow's OWN filler block with the
+    SAME floorplan facts `preroute_fill` used (see the ship path's measured
+    reason why the master list alone is not enough). PG connection of the
+    re-placed fillers is the residual connect `postroute_fill` already runs
+    for every late instance. No master, PDK or design literal here.
+    """
+    t = str(tag)
+    remove = (f"if {{[catch {{remove_fillers}} _pf_rm_e]}} {{ "
+              f"puts \"{t}_RMFILL_NONFATAL: $_pf_rm_e\" }} else {{ "
+              f"puts \"{t}_RMFILL: pre-route fillers removed before this pass "
+              f"moves or inserts cells (DPL-0037/DPL-0038: a filler-tiled core "
+              f"has no legal site)\" }}\n")
+    refill = (_build_sparse_die_aware_filler_tcl(
+        list(filler_masters or []), slot_pinned_core=slot_pinned_core,
+        design_declared_die=design_declared_die,
+        sparse_active_row_fill=sparse_active_row_fill)
+        + f"puts \"{t}_REFILL_DONE\"\n")
+    return remove, refill
+
+
+def _postroute_filler_bracket_from_spec(tag: str, spec: Optional[Dict[str, Any]]
+                                        ) -> Tuple[str, str]:
+    """The bracket for ``spec`` (the PnR builder's filler facts), or two empty
+    strings when no spec was given (a direct call of a sub-builder)."""
+    if not spec:
+        return "", ""
+    return _postroute_filler_bracket_tcl(
+        tag, spec.get("filler_masters") or [],
+        slot_pinned_core=bool(spec.get("slot_pinned_core")),
+        design_declared_die=bool(spec.get("design_declared_die")),
+        sparse_active_row_fill=bool(spec.get("sparse_active_row_fill")))
+
+
 def _v1_8_100_signoff_drv_repair_tcl(
         out_dir_c: str, fanout_root_buffer_cell: Optional[str] = None,
         *, stage: str = "postroute_drv_repair",
         reserved_instance_names: Optional[Sequence[str]] = None,
-        pdk: Optional["PdkConfig"] = None) -> str:
+        pdk: Optional["PdkConfig"] = None,
+        filler_spec: Optional[Dict[str, Any]] = None) -> str:
     """Bounded repair-until-clean loop on the sign-off-deck SPEF.
 
     Every step NONFATAL-guarded; any failure leaves the routing as it was and
@@ -29437,6 +29668,25 @@ def _v1_8_100_signoff_drv_repair_tcl(
     # left the shipped route described by a report of a design that was thrown
     # away.
     child_drc_c = f"{txn_c}/{_SDR_CANDIDATE_DRC_NAME}"
+    # CHILD ONLY: the disposable session removes the pre-route fillers before
+    # its first extraction (removing instances after read_spef invalidates the
+    # parasitics, EST-0104 — the ship path's measured reason) and puts them
+    # back before it writes the candidate. See `_postroute_filler_bracket_tcl`.
+    _sdr_rmfill, _sdr_refill = _postroute_filler_bracket_from_spec(
+        "SDR", filler_spec)
+    if _sdr_refill:
+        _sdr_refill = (
+            _sdr_refill
+            # The candidate the parent judges is the FILL-COMPLETE one, so its
+            # placement count is re-measured after the refill. A refill that
+            # breaks legality is reported, and it can only raise the count.
+            + "  set _sdr_pv_rf -1\n"
+            "  if {[catch {set _sdr_pv_rf [check_placement -no_abort]} "
+            "_sdr_pv_rfe]} { puts \"SDR_REFILL_CHECK_NONFATAL: $_sdr_pv_rfe\" }\n"
+            "  puts \"SDR_REFILL_PLACEMENT_VIOLATIONS: $_sdr_pv_rf\"\n"
+            "  if {[string is integer -strict $_sdr_pv_rf] && $_sdr_pv_rf > 0 "
+            "&& (![info exists _sdr_pv] || $_sdr_pv < $_sdr_pv_rf)} "
+            "{ set _sdr_pv $_sdr_pv_rf }\n")
     return (
         "  # --- v1.8.100 sign-off-domain DRV repair "
         "(#2253 checkpoint-and-child) ---\n"
@@ -29451,6 +29701,7 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "  set _sdr_tx_ready 1\n"
         "  set _sdr_ok 1\n"
         "  set _sdr_mwl 0\n"
+        + _sdr_rmfill +
         "  if {[catch {\n"
         "    set _sdr_blk [ord::get_db_block]\n"
         "    set _sdr_dbu [$_sdr_blk getDefUnits]\n"
@@ -29908,7 +30159,8 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # `NA` means the variable was never set at all, which the parent turns
         # back into "unmeasured" so the disclosure branch can refuse it. An
         # invented zero is never written here.
-        "  if {[catch {file mkdir $_sdr_tx_dir} _sdr_mk]} "
+        + _sdr_refill
+        + "  if {[catch {file mkdir $_sdr_tx_dir} _sdr_mk]} "
         "{ puts \"SDR_CHILD_MKDIR_NONFATAL: $_sdr_mk\" }\n"
         "  set _sdr_pv_out NA\n"
         "  if {[info exists _sdr_pv]} { set _sdr_pv_out $_sdr_pv }\n"
@@ -32686,7 +32938,21 @@ def _pnr_session_products(out_dir: Path, out_dir_c: str, tcl_text: str,
         if full.startswith(prefix) and "/" not in full[len(prefix):]:
             names.append(full[len(prefix):])
     names.append(log_name)
-    return [out_dir / n for n in dict.fromkeys(names)]
+    products = [out_dir / n for n in dict.fromkeys(names)]
+    # The SDR child is launched by this OpenROAD session, inside its Tcl. Its
+    # fill-complete candidate is still a product of this declared session,
+    # even though it lives in a transaction subdirectory. Likewise the native
+    # antenna pass writes checkpoints after/before its fill bracket. Declaring
+    # these paths makes the v1.24.19 session ledger hash the actual writes.
+    for stage, dirname in _SDR_TXN_DIRS.items():
+        if _pnr_stage_begin(stage) in tcl_text:
+            products.extend((out_dir / dirname / _SDR_CANDIDATE_DEF_NAME,
+                             out_dir / dirname / _SDR_CANDIDATE_ODB_NAME,
+                             out_dir / _sdr_child_log_name(stage),
+                             out_dir / _sdr_child_def_leg_log_name(stage)))
+    if "ANTENNA_PRE_REPAIR_CHECKPOINT" in tcl_text:
+        products.extend(out_dir / name for name in _ANTENNA_CHECKPOINT_NAMES)
+    return products
 
 
 def _sdr_candidate_signoff_clean(project: Path, top: Optional[str],
@@ -35125,12 +35391,23 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     print(f"[phase3] tap-cell pitch := {_tap_pitch} um "
           f"(source: {_tap_pitch_src}); coverage radius "
           f"{tapcell_coverage_radius_um(_tap_pitch)} um")
+    # ONE statement of the fill facts, shared by `preroute_fill` and by every
+    # post-route pass that must remove and restore the fill
+    # (`_postroute_filler_bracket_tcl`) — so the refill can never select a
+    # different fill policy than the base route did.
+    _postroute_filler_spec = {
+        "filler_masters": list(_filler_masters or []),
+        "slot_pinned_core": fp_rect is not None,
+        "design_declared_die": bool(_l9_die_note),
+        "sparse_active_row_fill": bool(
+            _ring_inset is not None and fp_rect is None and not _l9_die_note),
+    }
     filler_block = _build_welltie_coverage_repair_tcl(
         pdk, _tap_pitch, _tap_pitch_src) + _build_sparse_die_aware_filler_tcl(
-        _filler_masters, slot_pinned_core=fp_rect is not None,
-        design_declared_die=bool(_l9_die_note),
-        sparse_active_row_fill=bool(
-            _ring_inset is not None and fp_rect is None and not _l9_die_note))
+        _postroute_filler_spec["filler_masters"],
+        slot_pinned_core=_postroute_filler_spec["slot_pinned_core"],
+        design_declared_die=_postroute_filler_spec["design_declared_die"],
+        sparse_active_row_fill=_postroute_filler_spec["sparse_active_row_fill"])
 
     # PG global-connect RE-APPLY + audit. `global_connect` inside the PDN block
     # runs BEFORE placement, so it can only connect the instances that exist
@@ -35150,7 +35427,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # v0.2.14 — antenna repair + the DRT-0305 PG-net cleanup that must precede
     # routing. Both built by pure helpers so the silicon-critical Tcl is pinned by
     # regression tests (v0.1.49 doctrine).
-    antenna_repair_block = _antenna_repair_tcl(pdk, out_dir_c)
+    antenna_repair_block = _antenna_repair_tcl(
+        pdk, out_dir_c, filler_spec=_postroute_filler_spec)
     pg_cleanup_block = _pg_net_cleanup_tcl()
     dont_use_block = _dont_use_tcl(pdk)
     # Measure THIS library's buffer-family span so pnr.tcl can restore the
@@ -35231,7 +35509,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         # the child's own residual reroute must protect the SAME bindings the
         # parent's does -- the spares and spare pads are reserved in both.
         reserved_instance_names=_reserved_names,
-        pdk=pdk)
+        pdk=pdk, filler_spec=_postroute_filler_spec)
 
     # === R8 (v1.9.3) — DRV RE-CONVERGENCE AFTER ANTENNA REPAIR ===
     # MEASURED (R7 iter3): the sign-off DRV loop reported `SDR_CONVERGED: pass 6`
@@ -35264,7 +35542,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                                  out_dir_c, _fanout_root_buffer_cell,
                                  stage="postroute_drv_reconverge",
                                  reserved_instance_names=_reserved_names,
-                                 pdk=pdk)
+                                 pdk=pdk, filler_spec=_postroute_filler_spec)
                              + 'puts "SDR2_END"\n'
                              + _pnr_stage_end("postroute_drv_reconverge")
                              + "\n")
