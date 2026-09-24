@@ -26622,8 +26622,17 @@ def _build_postroute_timing_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: st
     _extra = sorted(lbl for lbl in _corners if lbl not in ("SS", "TT", "FF")
                     and _corners.get(lbl))
     _labels = _canon + _extra
+    # Declared process sign-off measures each process with nominal extracted RC,
+    # while OCV pairs SS/max and FF/min. Both views must exist in the repair
+    # session. A second scene using the same Liberty and nominal SPEF lets the
+    # resizer see an SS/nom hold path even when FF/min is clean.
+    _nom_aliases = ([lbl for lbl in _labels if lbl != "TT"]
+                    if post_route_start and (corner_spefs_c or {}).get("nom")
+                    and len(_labels) >= 2 else [])
+    _scenes = [lbl.lower() for lbl in _labels] + [
+        lbl.lower() + "_nom" for lbl in _nom_aliases]
     if len(_labels) >= 2:
-        _corner_names = " ".join(lbl.lower() for lbl in _labels)
+        _corner_names = " ".join(_scenes)
         liberty_block = (
             "# TAPEOUT-SIGNOFF (multi-corner post-route repair): ss/tt/ff read as timing\n"
             "# corners so repair_timing -setup optimizes the WORST (ss) process\n"
@@ -26631,6 +26640,8 @@ def _build_postroute_timing_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: st
             f"define_corners {_corner_names}\n"
             + "".join(f"read_liberty -corner {lbl.lower()} {_corners[lbl]}\n"
                       for lbl in _labels)
+            + "".join(f"read_liberty -corner {lbl.lower()}_nom {_corners[lbl]}\n"
+                      for lbl in _nom_aliases)
         )
     else:
         liberty_block = f"read_liberty {liberty_c}\n"
@@ -26693,6 +26704,13 @@ def _build_postroute_timing_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: st
                 _reads.append(
                     f"if {{[catch {{read_spef -corner {_l} "
                     f"{_pick_spef(_rc_for_process.get(_l, 'nom'))}}} _rs_{_l}]}} {{\n"
+                    f"  puts \"POSTROUTE_TIMING_REPAIR_READ_SPEF_NONFATAL {_l}: $_rs_{_l}\"\n"
+                    "}\n")
+            for _lbl in _nom_aliases:
+                _l = _lbl.lower() + "_nom"
+                _reads.append(
+                    f"if {{[catch {{read_spef -corner {_l} {_spefs['nom']}}} "
+                    f"_rs_{_l}]}} {{\n"
                     f"  puts \"POSTROUTE_TIMING_REPAIR_READ_SPEF_NONFATAL {_l}: $_rs_{_l}\"\n"
                     "}\n")
         else:
@@ -26858,6 +26876,12 @@ def _build_postroute_timing_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: st
         + "\n"
         "# === post-route repair pass 1: placement-based repair ===\n"
         + _pass1_parasitics +
+        # Hold first, while the extracted sign-off SPEF is still valid. The
+        # resizer can invalidate parasitics when it inserts a repair cell.
+        (f"if {{[catch {{repair_timing -hold"
+         f"{_resizer_bound_flag(hold_max_util_pct)}}} _rh_spef]}} {{\n"
+         "  puts \"POSTROUTE_TIMING_REPAIR_HOLD_SPEF_NONFATAL: $_rh_spef\"\n"
+         "}\n" if _annotated else "") +
         # THE AREA CEILING ON WHAT FIXING TIMING MAY COST. `repair_design` and
         # `repair_timing` both accept `-max_utilization util` (measured from the
         # tool's own CLI in the pinned image); step 32 passed it never, so the
@@ -57657,7 +57681,18 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             # Wire the fired post-route repair into a schema-complete repair_log.json so the post-route repair
             # step's audit (postroute_timing_repair_audit: changes + re_verified + affected_steps)
             # reflects the REAL post-route repair that ran — postroute_timing_repair_status_gen preserves it (#564).
-            _repair_residual = bool(_repair_after.get("violated_corners")) if _ran else True
+            # The post-repair OCV probe checks SS setup and FF hold. It does
+            # not recheck the declared SS/nom hold path that fired this repair.
+            # Keep residual open until a fresh full Step-23 sign-off on the
+            # candidate route measures that exact process/RC view.
+            _declared_hold_pending = bool(
+                _repair_decision.get("declared_hold_violations"))
+            _repair_residual = (bool(_repair_after.get("violated_corners"))
+                                or _declared_hold_pending) if _ran else True
+            if _declared_hold_pending:
+                _repair_after["declared_hold_reverified"] = False
+                notes.append("post-route repair candidate has not been re-signed "
+                             "at every declared hold corner; residual remains open")
             # ── REGRESSION GUARD ────────────────────────────────────────────
             # `repair_before` and `repair_after` were already both measured, sat
             # adjacent in the record below, and were never SUBTRACTED. So an
@@ -57761,7 +57796,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                     # re_verified is True ONLY when we genuinely re-ran the OCV
                     # sign-off on the post-route repair netlist (§4.05: honest — a failed post-route repair
                     # run that produced no netlist is NOT re-verified).
-                    "re_verified": bool(_ran and _repair_after.get("measured")),
+                    "re_verified": bool(_ran and _repair_after.get("measured")
+                                        and not _declared_hold_pending),
                     # THE BLAST RADIUS, DERIVED FROM THE FLOW DAG — NOT TYPED.
                     # This list was `[21, 23, 24, 29, 30]` from 0a9e51577 until
                     # v1.11.19 and nothing had ever checked it: `postroute_timing_repair_audit`

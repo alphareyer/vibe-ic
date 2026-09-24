@@ -49,6 +49,7 @@ v1.7.64 (Step 32 / d5) — NON-TIMING SIGN-OFF FAIL-CLOSE.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -74,6 +75,45 @@ def _load_stance(stance: Union["Path", str, dict, None]) -> Optional[dict]:
     except Exception:
         return None
     return obj if isinstance(obj, dict) else None
+
+
+def _declared_hold_violations(project: Union["Path", str, None]) -> List[Dict[str, Any]]:
+    """Read the current canonical SPEF sign-off's hold sections, including SS.
+
+    The OCV summary covers FF/min hold only. The declared process sign-off
+    also judges hold at every process corner using the nominal extracted SPEF.
+    An old or estimate-only alias cannot trigger a repair on a new route.
+    """
+    if project is None:
+        return []
+    root = Path(project)
+    report = root / "phase3/stage3/sta/post_route_timing.rpt"
+    routed = root / "phase3/stage3/pnr/routed.def"
+    try:
+        if (not report.is_file() or not routed.is_file()
+                or report.stat().st_mtime < routed.stat().st_mtime):
+            return []
+        body = report.read_text(errors="replace")
+    except OSError:
+        return []
+    if "SPEF-BASED post-route STA" not in body[:400]:
+        return []
+    sections = re.split(r"^=== HOLD corner: process=([A-Za-z0-9_]+) ===\s*$",
+                        body, flags=re.MULTILINE)
+    found: List[Dict[str, Any]] = []
+    for index in range(1, len(sections) - 1, 2):
+        corner, section = sections[index], sections[index + 1]
+        if "STA_BASIS: POST_ROUTE_SPEF" not in section:
+            continue
+        # Stop at the next setup section as well as the next hold section.
+        section = re.split(r"^=== (?:SETUP|HOLD) corner:", section,
+                           maxsplit=1, flags=re.MULTILINE)[0]
+        matches = re.findall(r"^worst slack min\s+([-+]?\d+(?:\.\d+)?)\s*$",
+                             section, flags=re.MULTILINE)
+        if len(matches) == 1 and float(matches[0]) < 0:
+            found.append({"corner": corner.upper(), "slack_ns": float(matches[0]),
+                          "report": "phase3/stage3/sta/post_route_timing.rpt"})
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +390,20 @@ def decide(stance: Union["Path", str, dict, None],
                 "setup_worst_slack_ns": s.get("setup_worst_slack_ns"),
                 "hold_worst_slack_ns": s.get("hold_worst_slack_ns"),
             })
+
+    declared_hold = _declared_hold_violations(project)
+    out["declared_hold_violations"] = declared_hold
+    if declared_hold:
+        out["timing_repair_needed"] = True
+        out["repair_needed"] = True
+        out["hold_worst_slack_ns"] = min(
+            [v["slack_ns"] for v in declared_hold]
+            + ([out["hold_worst_slack_ns"]]
+               if isinstance(out["hold_worst_slack_ns"], (int, float)) else []))
+        for violation in declared_hold:
+            name = f"hold:{violation['corner']}"
+            if name not in out["violated_corners"]:
+                out["violated_corners"].append(name)
 
     # v1.7.64 — fail-close over the non-timing sign-off domains. Purely
     # additive: it can only turn repair_needed from False to True, never the
