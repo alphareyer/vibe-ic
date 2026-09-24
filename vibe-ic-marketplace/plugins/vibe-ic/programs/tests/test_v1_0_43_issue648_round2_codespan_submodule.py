@@ -37,6 +37,7 @@ from _hostpaths import require_corpus  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+from _ai_judgement_fixture import run_phase1_with_expert_answer  # noqa: E402
 
 
 # ── helper units ─────────────────────────────────────────────────────────────
@@ -89,8 +90,10 @@ def test_end_to_end_exact_submodules_no_prose_leak(tmp_path):
     (proj / "input" / "docs" / "L2_architecture.md").write_text(_L2)
     (proj / "input" / "docs" / "L8_submodule_integration.md").write_text(_L8)
     runner = _PROGRAMS / "phase1_one_shot_runner.py"
-    r = _pr.run([sys.executable, str(runner), str(proj)],
-                       capture_output=True, text=True)
+    r = run_phase1_with_expert_answer(
+        proj, [sys.executable, str(runner), str(proj)], _pr.run,
+        expected_tokens=["user_proj_example", "counter"],
+        field_path="submodules", capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-2000:]
     l9 = list((proj / "phase1" / "generated_docs").glob("L9*.json"))[0]
     names = {s.get("name") for s in json.loads(l9.read_text()).get(

@@ -58,6 +58,7 @@ from programs.phase1_one_shot_runner import (  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+from _ai_judgement_fixture import run_phase1_with_expert_answer  # noqa: E402
 
 GATE_PROG = PROGRAMS / "l9_rtl_pin_consistency_check.py"
 RUNNER = PROGRAMS / "phase1_one_shot_runner.py"
@@ -389,8 +390,9 @@ def test_full_e2e_l3_table_to_l9_canonical_key_then_gate_pass(tmp_path):
     (docs / "L3_external_interface.md").write_text(_L3_DOC)
 
     # 1) REAL promoter via the runner (gen_l9 path).
-    r = _pr.run(
+    r = run_phase1_with_expert_answer(proj,
         [sys.executable, str(RUNNER), str(proj), "--ic-name", "blk32"],
+        _pr.run, expected_tokens=["i_clk", "i_rst_n", "sram_addr", "sram_we"],
         capture_output=True, text=True)
     assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
 

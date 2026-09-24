@@ -37,6 +37,7 @@ import phase1_one_shot_runner as p1r  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+from _ai_judgement_fixture import run_phase1_with_expert_answer  # noqa: E402
 
 # repo-root master copy (absent on an installed cache — tests then skip
 # the drift comparison, which only matters in the checkout)
@@ -189,9 +190,10 @@ def test_install_smoke_bare_cache_layout(tmp_path):
         "Reset is asynchronous active low.\n")
     env = dict(os.environ)
     env.pop("CLAUDE_PLUGIN_ROOT", None)
-    r = _pr.run(
+    r = run_phase1_with_expert_answer(proj,
         [sys.executable, str(cache / "programs" / "phase1_one_shot_runner.py"),
          str(proj), "--ic-name", "pulse_div"],
+        _pr.run, expected_tokens=["clk", "rst_n", "tick"],
         capture_output=True, text=True, cwd=str(tmp_path),
         env=env)
     assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]

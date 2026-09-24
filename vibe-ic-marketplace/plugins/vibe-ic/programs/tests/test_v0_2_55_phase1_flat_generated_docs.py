@@ -35,6 +35,7 @@ import pytest  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+from _ai_judgement_fixture import run_phase1_with_expert_answer  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
     _ENGINE is None, reason="tools/phase1_engine not present in this checkout")
@@ -93,9 +94,10 @@ def test_runner_prompt_mode_emits_flat_and_precheck_passes(tmp_path):
     proj = tmp_path / "proj"
     (proj / "input").mkdir(parents=True)
     (proj / "input" / "phase1_prompt.md").write_text(_PROMPT)
-    r = _pr.run(
+    r = run_phase1_with_expert_answer(proj,
         [sys.executable, str(PROGRAMS / "phase1_one_shot_runner.py"),
          str(proj), "--ic-name", "pulse_div"],
+        _pr.run, expected_tokens=["clk", "rst_n", "tick"],
         capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
     gd = proj / "phase1" / "generated_docs"
