@@ -772,49 +772,40 @@ def test_declared_gate_commands_names_programs_only(fcc):
     assert fcc._declared_gate_commands({"files_exist": ["x"]}) == []
 
 
-def test_a_files_exist_only_step_is_not_gateless(fcc):
-    """The distinction the ADVISORY turns on.
+def test_a_files_exist_only_step_is_not_gateless(fcc, tmp_path):
+    """Every predicate-only gate still names its operands in the disclosure.
 
-    Over the corpus the #675-strict self-skip resolves only on steps whose gate
-    is `files_exist: [...]` — no program. Keying the disclosure off the program
-    list therefore fired it 0 times on the entire population it was written
-    for. The summary names the gate that did not run; only a step with NO gate
-    at all summarises to nothing.
-
-    THE EXEMPLAR IS DERIVED, NOT NAMED. This used to read `_step(12)` — step 12
-    was, when the test was written, a step whose gate was `files_exist:
-    [phase2/stage2/synth/post_dft_netlist.v]` and nothing else. v1.10.0
-    (23d96bf5) deliberately added `dft_post_optimization_scan_survival_check` to
-    that gate, so the hard-coded precondition `_declared_gate_commands(...) ==
-    []` became false and the test went red while the PROPERTY it states — a
-    predicate-only gate summarises to something and names no program — stayed
-    exactly true. A step id is an incidental fact about the flow at one moment;
-    the property is the claim. So the exemplar is now SELECTED from the shipped
-    flow by the property itself, and the selection is asserted non-empty, which
-    is what keeps the test from passing by finding nothing to look at.
+    D268 added a program gate to the last predicate-only shipped step. Exercise
+    the consumer on a synthetic gate so this contract remains live when the
+    current flow has no predicate-only step.
     """
     assert fcc._declared_gate_summary(None) == ""
     assert fcc._declared_gate_summary({}) == ""
-
-    predicate_only = [st for st in _flow_steps()
-                      if st.get("gate")
-                      and fcc._declared_gate_commands(st["gate"]) == []]
-    assert predicate_only, (
-        "NO STEP LEFT: the shipped flow declares no gate that is predicates "
-        "only, so this test examined nothing. That is a real change in the "
-        "flow, not a licence to pass — re-derive what the #675-strict "
-        "self-skip now resolves on before editing this assertion away.")
-
-    for st in predicate_only:
-        gate = st["gate"]
+    gates = [
+        {"files_exist": ["a.log"]},
+        {"files_exist": ["a.log", "b.flag"], "any_of": True},
+        {"json_field_true": {"file": "r.json", "field": "all_ok",
+                             "expect": True}},
+    ]
+    for gate in gates:
+        assert fcc._declared_gate_commands(gate) == []
         summary = fcc._declared_gate_summary(gate)
-        assert summary, (
-            f"step {st['id']} declares a gate; the summary must describe it")
-        # The summary must NAME the predicate's own operand — an empty-ish
-        # word like "files_exist[]" would satisfy `summary` while telling the
-        # reader nothing about which gate did not run.
+        assert summary, f"predicate gate has no disclosure: {gate}"
         for operand in (gate.get("files_exist") or []):
-            assert operand in summary, (st["id"], operand, summary)
+            assert operand in summary, (gate, operand, summary)
+        if "json_field_true" in gate:
+            assert "r.json:all_ok" in summary, summary
+
+    # Drive the self-skip consumer too. The shipped step still supplies the
+    # real condition and outputs; only its gate is replaced with a predicate
+    # to exercise the gate shape removed from the current flow by D268.
+    step = dict(_step(29))
+    step["gate"] = {"files_exist": ["a.log", "b.flag"], "any_of": True}
+    result = fcc.check_step(_self_skip_project(tmp_path), step, {})
+    assert result.status == "NOT_APPLICABLE"
+    assert any("files_exist[a.log, b.flag]" in reason
+               and "NOT evaluated" in reason for reason in result.reasons), (
+        result.reasons)
 
 
 def test_declared_gate_summary_covers_the_predicate_kinds(fcc):

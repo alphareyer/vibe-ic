@@ -22625,6 +22625,9 @@ def _audit_after_declared_producers(project: Path, skip_analog: bool) -> StepRes
               f"documents the flow declares this run's steps to produce may "
               f"still be authored by the audit and refused as its own "
               f"evidence", file=sys.stderr)
+    # The producer sweep may create or replace attested files. The audit must
+    # read a summary of that resulting tree, even when the sweep exits nonzero.
+    _pl.emit_final_summary(project, PROGRAMS_DIR)
     return step_final_audit(project, phase=2, skip_analog=skip_analog)
 
 
@@ -22668,6 +22671,7 @@ def _run_refresh_only(project: Path, args) -> int:
     except Exception as _exc:                              # noqa: BLE001
         print(f"[WARN] flow_declared_producer_run did NOT run ({_exc})",
               file=sys.stderr)
+    _pl.emit_final_summary(project, PROGRAMS_DIR)
     plan.append(step_final_audit(project, phase=2,
                                  skip_analog=args.skip_analog))
     plan.append(step_stamp_gate_reports(project))
