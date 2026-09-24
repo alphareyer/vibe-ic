@@ -254,6 +254,11 @@ class ReasonClass(str, enum.Enum):
     #: state, and it is the root of both runs' NOT_MEASURED (R-0915-88).
     AWAITING_AGENT_PASS = "awaiting_agent_pass"
 
+    #: A conditional AI hand-off has run evidence but no judgement receipt
+    #: naming the exact current evidence digest. A previous run's receipt is
+    #: not a measurement of this one.
+    AWAITING_SIGNED_JUDGEMENT = "awaiting_signed_judgement"
+
     #: A required OUTPUT of this step does not exist. Carried with
     #: `Verdict.FAIL`, not NOT_MEASURED — see `Verdict.FAIL`. Named in this
     #: enum because `reason_class` is the one place a reader looks for the

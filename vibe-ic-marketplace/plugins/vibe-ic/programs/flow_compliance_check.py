@@ -15912,7 +15912,21 @@ def _with_child_gate_step(fn):
     def _judge(project, step, *args, **kwargs):
         token = _CHILD_GATE_STEP.set(str((step or {}).get("id") or ""))
         try:
-            return fn(project, step, *args, **kwargs)
+            result = fn(project, step, *args, **kwargs)
+            # Program clauses run first. A conditional expert hand-off may
+            # credit their PASS tier only after a review of THESE bytes.
+            if result.status in (_T.Verdict.PASS.value,
+                                 _T.Verdict.PASS_WITH_WAIVERS.value):
+                import ai_signed_judgement as _ai_judgement
+                credit, detail = _ai_judgement.check(project, str(step.get("id")))
+                if not credit:
+                    result.status = _T.Verdict.NOT_MEASURED.value
+                    result.reason_class = (
+                        _T.ReasonClass.AWAITING_SIGNED_JUDGEMENT.value)
+                    result.reasons.append(detail)
+                elif detail.startswith("signed judgement"):
+                    result.evidence.append(detail)
+            return result
         finally:
             _CHILD_GATE_STEP.reset(token)
     return _judge
