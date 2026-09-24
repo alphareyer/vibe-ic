@@ -115,3 +115,56 @@ def test_changed_route_cannot_sign_off_old_gds(tmp_path, monkeypatch):
     assert report["steps"][-1]["status"] == "NOT_MEASURED"
     assert "gds is outside this window" in report["steps"][-1]["detail"]
     assert (project / "phase3" / "pnr" / "top.gds").read_bytes() == b"old GDS"
+
+
+def test_real_gds_step_with_container_write_keeps_other_stage_files(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    pnr = project / "phase3" / "stage3" / "pnr"
+    pnr.mkdir(parents=True)
+    (pnr / "top.def").write_text("DESIGN top ;\nEND DESIGN\n")
+    (project / "phase3" / "synth").mkdir()
+    (project / "phase3" / "synth" / "top_synth.v").write_text("netlist")
+    (project / "reports" / "phase3").mkdir(parents=True)
+    (project / "reports" / "phase3" / "drc.rpt").write_text("prior DRC")
+    before = p3._phase3_file_manifest(project)
+
+    # The real step_gds builds its script and reports. Only the container's
+    # stream-out file write is faked; no Phase-3 dispatch function is replaced.
+    monkeypatch.setattr(p3, "_magic_def_to_gds",
+                        lambda *a, **k: (False, "unavailable"))
+
+    calls = []
+
+    def container(_name, _cmd, *args, **kwargs):
+        calls.append(_cmd)
+        for output in kwargs.get("outputs", []):
+            Path(output).parent.mkdir(parents=True, exist_ok=True)
+            Path(output).write_bytes(b"fake container GDS")
+        return 0, "streamed", ""
+
+    monkeypatch.setattr(p3, "_docker_exec", container)
+    pdk = p3.PdkConfig(name="fixture", liberty="lib", tech_lef="tech.lef",
+                       cell_lef="cell.lef", cell_gds="cell.gds", site="site",
+                       drc_deck=None)
+    args = SimpleNamespace(entry_step="37", exit_step="37", container="fake-eda")
+    p3._run_phase3_window(project, "top", pdk, args, ["gds"])
+    after = p3._phase3_file_manifest(project)
+    changed = {name for name in set(before) | set(after)
+               if before.get(name) != after.get(name)}
+    allowed_reports = {
+        "reports/audit/phase23_completion_audit.json",
+        "reports/audit/step_preflight.json",
+        "reports/audit/steps_view.json",
+        "reports/orchestrator/phase3_one_shot.json",
+        "reports/phase3/signoff_merge_probe.json",
+        "reports/phase3/tapeout_declaration_publish.json",
+        "reports/phase3/technology_units.json",
+        "reports/write_ledger.json",
+    }
+    assert all(name.startswith(("phase3/stage3/pnr/", "steps/")) or
+               name in allowed_reports for name in changed), sorted(changed)
+    assert calls, "the real GDS step never reached the container"
+    assert any(name.endswith(".gds") for name in after)
+    assert after["phase3/stage3/pnr/top.def"] == before["phase3/stage3/pnr/top.def"]
+    assert after["phase3/synth/top_synth.v"] == before["phase3/synth/top_synth.v"]
+    assert after["reports/phase3/drc.rpt"] == before["reports/phase3/drc.rpt"]
