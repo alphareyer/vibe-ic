@@ -81,6 +81,19 @@ def test_the_declared_4_is_never_loosened_by_the_pdk_default(tmp_path,
     assert "gf180mcu_*" in why, why
 
 
+def test_staged_sdc_does_not_loosen_the_design_table_to_liberty_default(
+        tmp_path, monkeypatch):
+    """Exercise the existing sign-off consumer on main as a value control."""
+    _lib(monkeypatch)
+    monkeypatch.setattr(R, "_liberty_drv_limits", lambda *a, **k: {
+        "max_fanout": 10, "fanout_source": "active.lib:default_max_fanout"})
+    project = _proj(tmp_path, SPM_L9)
+    _, info = R._ensure_staged_sdc_drv(
+        "create_clock -period 10 [get_ports clk]\n", "active.lib", "",
+        project, pdk_name="gf180mcuD")
+    assert info["added_max_fanout"] == 4, info["added_max_fanout"]
+
+
 def test_a_foreign_librarys_row_never_reaches_this_run():
     assert R._l9_library_scoped_fanout(SPM_L9, "sky130_fd_sc_hd",
                                        "sky130A") is None
