@@ -389,13 +389,21 @@ def canonical_bytes(path: Path, rule: str = "raw") -> Optional[bytes]:
         if not isinstance(doc, dict):
             return raw
         answers = doc.get("answers")
+        doc = dict(doc)
         if isinstance(answers, dict):
             prov = doc.get("answer_provenance")
             claimed = set(prov) if isinstance(prov, dict) else set()
-            doc = dict(doc)
             doc["answers"] = {
                 k: v for k, v in answers.items()
                 if k in claimed or k not in _DECLARATION_FLOW_KEYS}
+        # r3 review finding 4: `step_gds` does not only rewrite `answers`. Its
+        # merge also writes the TOP-LEVEL `from_the_technology` and
+        # `forbidden_layers` (the EXTRA_KEY path), so a phase-3-only re-run
+        # moved synth's and pnr's input hash for something the FLOW wrote.
+        # Dropped only when unclaimed, exactly as the answers are.
+        for extra in _DECLARATION_FLOW_TOP_KEYS:
+            if extra in doc and extra not in _DECLARATION_CLAIMED_TOP:
+                doc.pop(extra, None)
         return json.dumps(doc, sort_keys=True).encode("utf-8")
     return raw
 
@@ -405,11 +413,21 @@ def canonical_bytes(path: Path, rule: str = "raw") -> Optional[bytes]:
 #: default and makes `declaration_as_asked` behave as `raw`.
 _DECLARATION_FLOW_KEYS: Set[str] = set()
 
+#: TOP-LEVEL keys `step_gds`'s declaration merge also rewrites (r3 finding 4).
+_DECLARATION_FLOW_TOP_KEYS: Tuple[str, ...] = ("from_the_technology",
+                                               "forbidden_layers")
+#: …unless the operator claimed them, which `set_declaration_flow_keys`'s
+#: caller records. Empty by default: nothing is assumed claimed.
+_DECLARATION_CLAIMED_TOP: Set[str] = set()
 
-def set_declaration_flow_keys(keys: Iterable[str]) -> None:
-    """Tell this module which declaration answers the FLOW writes back."""
-    global _DECLARATION_FLOW_KEYS
+
+def set_declaration_flow_keys(keys: Iterable[str],
+                              claimed_top: Iterable[str] = ()) -> None:
+    """Tell this module which declaration answers the FLOW writes back, and
+    which TOP-LEVEL keys the operator has claimed (so they are kept)."""
+    global _DECLARATION_FLOW_KEYS, _DECLARATION_CLAIMED_TOP
     _DECLARATION_FLOW_KEYS = set(keys)
+    _DECLARATION_CLAIMED_TOP = set(claimed_top)
 
 
 def resolved_inputs_digest(project: Path,
@@ -600,87 +618,189 @@ def _referenced_names(segment: str) -> Set[str]:
     return {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
 
 
-def runner_code_closure(runner_path: Path, kind: str
-                        ) -> Tuple[Optional[str], List[str]]:
-    """Digest of the runner members reachable from this kind's entry point.
+#: (members, bindings, error) per module file, for the life of the process.
+_MODULE_INDEX: Dict[Any, Tuple[Dict[str, str], Dict[str, str],
+                                Optional[str]]] = {}
 
-    This is the move that fixes the coarse half. The old key hashed the whole
-    66k-line file, so an edit to the GDS path invalidated the cached netlist.
-    Here the closure starts at `step_synth` / `step_pnr` / `step_gds` and walks
-    module-level references, so an edit reaches only the kinds that can see
-    it — and an edit anywhere those kinds DO reach still invalidates them."""
+
+def _index_module(path: Path):
+    """Parsed members + import bindings for one module, memoised.
+
+    KEYED ON THE FILE'S IDENTITY, NOT ITS PATH, and that is a defect my own
+    tests caught: a path-only key returned the PARSED-BEFORE members after the
+    file had been edited, so `code_digest` computed twice in one process gave
+    the same answer for different bytes — the cache silently asserting that
+    nothing had changed. A stamp and a freshness check can share a process, so
+    this is not only a test artefact."""
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (str(path), 0, -1)
+    hit = _MODULE_INDEX.get(key)
+    if hit is None:
+        members, err = _module_members(path)
+        bindings = {} if err else _import_bindings(path)
+        hit = (members, bindings, err)
+        _MODULE_INDEX[key] = hit
+    return hit
+
+
+def _referenced_targets(segment: str, module: Path, bindings: Dict[str, str],
+                        members: Dict[str, str], programs_dir: Path):
+    """Every `(module_path, member_name)` a source segment can reach.
+
+    Resolves three shapes: a bare name defined in THIS module; a bare name
+    bound by `from X import f` (-> member `f` of module X); and `alias.attr`
+    where `alias` is an imported module (-> member `attr` of that module). A
+    module alias used WITHOUT an attribute cannot be narrowed, so it yields
+    `(module, None)` and the caller takes that module whole — disclosed, and
+    the conservative direction."""
+    try:
+        tree = ast.parse(segment)
+    except SyntaxError:
+        return set()
+    out = set()
+
+    def _mod_of(dotted: Optional[str]):
+        if not dotted:
+            return None
+        return _resolve_module(programs_dir, dotted)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            alias = node.value.id
+            dotted = bindings.get(alias)
+            m = _mod_of(dotted)
+            if m is not None:
+                out.add((str(m), node.attr))
+                continue
+        if isinstance(node, ast.Name):
+            nid = node.id
+            if nid in members:
+                out.add((str(module), nid))
+                continue
+            # `from X import f` -> member f of module X
+            dotted = bindings.get(_FROM_FALLBACK + nid)
+            m = _mod_of(dotted)
+            if m is not None:
+                out.add((str(m), nid))
+                continue
+            dotted = bindings.get(nid)
+            m = _mod_of(dotted)
+            if m is not None:
+                # a module alias used bare: cannot be narrowed
+                out.add((str(m), None))
+    return out
+
+
+def runner_code_closure(runner_path: Path, kind: str, programs_dir: Path = None
+                        ) -> Tuple[Optional[str], List[str]]:
+    """Digest of the FUNCTIONS this kind's step actually runs — across modules.
+
+    r3 review (w18fc56v9) finding 3, and it is the coarseness R-0924-3 exists
+    to remove. r3 walked the call graph INSIDE the runner but then hashed every
+    imported module as a WHOLE FILE — so pnr's and gds's `code` contained the
+    whole of `phase3_one_shot_runner.py` and the whole of
+    `flow_compliance_check.py`, and an edit anywhere in either re-ran PnR and
+    GDS. A per-kind key that every edit invalidates is the build key again,
+    wearing a different name.
+
+    The closure is now `(module, member)` pairs and it CROSSES module
+    boundaries: the step's entry function, every runner function it
+    transitively references, and — in each imported module — only the members
+    that are actually reached. A module alias used without an attribute cannot
+    be narrowed, so that module is taken whole and the evidence SAYS so; an
+    unparseable module is taken whole for the same reason. Both are the
+    conservative direction (more invalidation, never less).
+
+    `flow_compliance_check` therefore enters a kind's identity only if that
+    kind's own code reaches it — which is the reviewer's rule, enforced by
+    construction rather than by a list."""
     seeds = KIND_RECIPE_SEEDS.get(kind)
     if not seeds:
         return None, [f"no recipe seed declared for kind {kind!r}"]
-    members, err = _module_members(Path(runner_path))
+    runner_path = Path(runner_path)
+    programs_dir = Path(programs_dir or runner_path.resolve().parent)
+    members, bindings, err = _index_module(runner_path)
     if err:
         return None, [err]
-    missing = [s for s in seeds if s not in members]
+    missing = [x for x in seeds if x not in members]
     if missing:
         return None, [f"recipe seed(s) {', '.join(missing)} are not defined in "
-                      f"{Path(runner_path).name} — the anchor moved and the "
-                      f"closure cannot be computed, so nothing is reused"]
-    seen: Set[str] = set()
-    stack: List[str] = list(seeds)
-    while stack:
-        name = stack.pop()
-        if name in seen or name not in members:
-            continue
-        seen.add(name)
-        for ref in _referenced_names(members[name]):
-            if ref in members and ref not in seen:
-                stack.append(ref)
-    pairs = [(n, _sha256_bytes(members[n].encode("utf-8"))) for n in seen]
+                      f"{runner_path.name} — the anchor moved and the closure "
+                      f"cannot be computed, so nothing is reused"]
 
-    # THE SECOND HALF OF THE DEFECT, and measuring is what caught it.
-    # `step_pnr` reaches `_ppa/area.py` through `import _ppa.area as
-    # _ppa_area` in the runner, NOT through any step's declared `programs:`.
-    # Hashing only the runner's own member text would therefore have left an
-    # edit to `real_core_placement_density` invisible — the same blind spot
-    # `canonical_program_paths()` has. So the names a closure member REFERENCES
-    # are resolved against the runner's import bindings, and anything that
-    # lands inside `programs/` is digested with its own transitive closure.
-    bindings = _import_bindings(Path(runner_path))
-    programs_dir = Path(runner_path).resolve().parent
-    mods: List[Path] = []
-    seen_mod: Set[str] = set()
-    for name in seen:
-        for ref in _referenced_names(members[name]):
-            for dotted in (bindings.get(ref),
-                           bindings.get(_FROM_FALLBACK + ref)):
-                if not dotted or dotted in seen_mod:
-                    continue
-                m = _resolve_module(programs_dir, dotted)
-                if m is not None:
-                    seen_mod.add(dotted)
-                    mods.append(m)
-                    break
-    # ...and the programs this closure runs BY FILE PATH. r2 review finding B:
-    # a program the runner dispatches as `python3 <programs>/x.py` is never
-    # imported, so no import binding names it and it sat outside the identity
-    # of the step that runs it. The reference is a STRING, so that is what is
-    # looked for — any `"...x.py"` literal inside a closure member that
-    # resolves to a file in `programs/`.
-    for name in seen:
-        for lit in _PY_PATH_LITERAL_RE.findall(members[name]):
+    seen: Set[Tuple[str, str]] = set()
+    whole: Set[str] = set()
+    notes: List[str] = []
+    stack: List[Tuple[str, Optional[str]]] = [(str(runner_path), x)
+                                              for x in seeds]
+    while stack:
+        mod_s, name = stack.pop()
+        mod = Path(mod_s)
+        mems, binds, merr = _index_module(mod)
+        if merr:
+            whole.add(mod_s)
+            continue
+        if name is None:
+            whole.add(mod_s)
+            continue
+        if (mod_s, name) in seen or name not in mems:
+            continue
+        seen.add((mod_s, name))
+        for tgt in _referenced_targets(mems[name], mod, binds, mems,
+                                       programs_dir):
+            if tgt[1] is None:
+                whole.add(tgt[0])
+            elif tgt not in seen:
+                stack.append(tgt)
+        # A program this member runs BY FILE PATH is code it runs — and it is
+        # narrowed the same way everything else is. r3 review finding 3 asked
+        # that `flow_compliance_check` enter a kind's identity only if that
+        # kind's code reaches it; it is dispatched by path from the runner, so
+        # it DOES — but what enters is its own entry-point closure, not its
+        # 10k lines. A dispatched program with no recognisable entry point
+        # cannot be narrowed and is taken whole, disclosed.
+        for lit in _PY_PATH_LITERAL_RE.findall(mems[name]):
             m = _resolve_module(programs_dir, Path(lit).stem)
-            if m is not None and m.resolve() not in {x.resolve()
-                                                     for x in mods}:
-                mods.append(m)
-    if mods:
-        files, _notes = direct_modules(mods, programs_dir)
-        for f in files:
-            d = _sha256_file(f)
-            if d is None:
-                return None, [f"runner-imported module {f.name} unreadable"]
-            try:
-                rel = str(f.resolve().relative_to(programs_dir))
-            except ValueError:
-                rel = f.name
-            pairs.append((f"import:{rel}", d))
-    return _digest_pairs(pairs), [
-        f"{len(seen)} runner member(s) reachable from {', '.join(seeds)}, "
-        f"plus {len(pairs) - len(seen)} in-tree module(s) they directly import"]
+            if m is None:
+                continue
+            sub_mems, _sb, sub_err = _index_module(m)
+            entry = next((e for e in ("main", "cli", "run")
+                          if e in sub_mems), None) if not sub_err else None
+            if entry is None:
+                whole.add(str(m))
+            else:
+                stack.append((str(m), entry))
+
+    pairs: List[Tuple[str, str]] = []
+    for mod_s, name in sorted(seen):
+        mems, _b, _e = _index_module(Path(mod_s))
+        try:
+            rel = str(Path(mod_s).resolve().relative_to(
+                programs_dir.resolve()))
+        except ValueError:
+            rel = Path(mod_s).name
+        pairs.append((f"{rel}::{name}",
+                      _sha256_bytes(mems[name].encode("utf-8"))))
+    for mod_s in sorted(whole):
+        d = _sha256_file(Path(mod_s))
+        if d is None:
+            return None, [f"{mod_s} could not be read"]
+        try:
+            rel = str(Path(mod_s).resolve().relative_to(
+                programs_dir.resolve()))
+        except ValueError:
+            rel = Path(mod_s).name
+        pairs.append((f"whole:{rel}", d))
+    notes.append(
+        f"{len(seen)} function(s)/constant(s) across "
+        f"{len({m for m, _ in seen})} module(s) reachable from "
+        f"{', '.join(seeds)}"
+        + (f"; {len(whole)} module(s) taken whole (unnarrowable alias or "
+           f"file-path dispatch)" if whole else ""))
+    return _digest_pairs(pairs), notes
 
 
 def _import_bindings(path: Path) -> Dict[str, str]:
@@ -831,12 +951,15 @@ def program_code_digest(programs_dir: Path, steps: Sequence[Dict[str, Any]],
 def code_digest(runner_path: Path, programs_dir: Path,
                 steps: Sequence[Dict[str, Any]], kind: str
                 ) -> Tuple[Optional[str], List[str]]:
-    """The step's OWN code: runner closure + declared programs' closure."""
-    r, r_why = runner_code_closure(runner_path, kind)
-    p, p_why = program_code_digest(programs_dir, steps, kind)
-    if r is None or p is None:
-        return None, r_why + p_why
-    return _digest_pairs((("runner", r), ("programs", p))), r_why + p_why
+    """The code this step RUNS — the cross-module function-level closure.
+
+    The span's declared `programs:` are NOT added wholesale any more. r3 review
+    finding 3: doing that pulled `flow_compliance_check.py` in whole, so every
+    edit to it re-ran PnR and GDS. A declared program belongs in a kind's
+    identity only if that kind's own code REACHES it — and if the step runs it,
+    the closure finds it, including by file-path dispatch. Enforced by
+    construction rather than by a list."""
+    return runner_code_closure(Path(runner_path), kind, Path(programs_dir))
 
 
 # --------------------------------------------------------------------------
@@ -939,12 +1062,25 @@ def pdk_files_checked(pdk: Any, project: Optional[Path]
         root = Path(project).resolve()
     except OSError:
         return files, []
+    try:
+        design = (root / "input").resolve()
+    except OSError:
+        design = None
     for field, val in files:
         try:
-            if Path(val).resolve().is_relative_to(root):
-                bad.append(f"{field}={val} is inside the run directory, so it "
-                           f"is this run's own derivation and no "
-                           f"{field}_source names what it came from")
+            rp = Path(val).resolve()
+            if not rp.is_relative_to(root):
+                continue
+            # r3 review finding 5: a PDK the DESIGN STAGES under `input/` is a
+            # design input by the same rule everything else here follows —
+            # `input/` is the design's, and refusing it made every staged-PDK
+            # run (asap7 measured) permanently un-fresh. Only a path under the
+            # run's OUTPUT tree is this run's own derivation.
+            if design is not None and rp.is_relative_to(design):
+                continue
+            bad.append(f"{field}={val} is inside the run's OUTPUT tree, so it "
+                       f"is this run's own derivation and no {field}_source "
+                       f"names what it came from")
         except (OSError, ValueError):
             continue
     return files, bad

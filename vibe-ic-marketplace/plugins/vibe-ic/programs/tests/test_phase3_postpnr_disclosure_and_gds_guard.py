@@ -109,6 +109,9 @@ def _span_inputs(project, top: str = "top") -> None:
         ("phase2/stage2/constraints/%s.sdc" % top,
          "create_clock -period 10\n"),
         ("phase2/stage2/synth/netlist.v", "module %s(); endmodule\n" % top),
+        # r4: the netlist PnR ACTUALLY reads, per `pnr_input_netlist`.
+        ("phase2/stage2/synth/%s_synth.v" % top,
+         "module %s(); endmodule\n" % top),
         ("phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\nEND DESIGN\n"),
         ("phase3/stage3/pnr/spare_cells.json", "{}\n"),
         ("phase3/stage3/extracted/parasitic.spef", "*SPEF\n"),
@@ -494,6 +497,18 @@ def _with_pad_table(project: Path, pins: dict) -> None:
     # the record still describes the exact DEF and GDS on disk, and a record
     # that does not is still rejected.
     _pad_ring_evidence(project)
+    # R-0924-3 r4: `input/docs/L9*` is a DESIGN input and is now hashed, so
+    # writing the pad table legitimately invalidates PnR — and a re-run would
+    # overwrite the very DEF this helper just placed. The premise is "a
+    # previous run that ALREADY had this table", so the stamp is taken after
+    # it, exactly as a real previous run's would have been. Same fixture
+    # catch-up as the four above, and the identity is doing its job.
+    _ctx = dict(project=project, pdk=_pdk(project), container="",
+                top=TOP, args=_IdentityArgs())
+    pnr = R._pl.pnr_dir(project)
+    R._write_producer_identity(R._pl.synth_dir(project), "synth", **_ctx)
+    R._write_producer_identity(pnr, "pnr", **_ctx)
+    R._write_producer_identity(pnr, "gds", **_ctx)
 
 
 def test_pad_side_violation_is_disclosed_as_a_fail_row(tmp_path, monkeypatch):

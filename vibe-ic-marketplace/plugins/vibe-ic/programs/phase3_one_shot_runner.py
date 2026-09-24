@@ -17954,7 +17954,10 @@ def _write_producer_identity(out_dir: Path, kind: str, *,
     try:
         import _step_identity as _si  # noqa: PLC0415
         _si.set_declaration_flow_keys(_DECLARATION_PUBLISH_KEYS)
-        _si_inputs, _si_knobs = _step_inputs(Path(project), kind, top, args)
+        _si_inputs, _si_knobs, _si_bad = _step_inputs(
+            Path(project), kind, top, args)
+        if _si_bad:
+            return          # no stamp for a read-set we could not establish
         ident, why = _si.identity_now(
             project=Path(project), kind=kind,
             runner_path=Path(__file__).resolve(),
@@ -18055,7 +18058,14 @@ def _producer_cache_valid_for(out_dir: Path, kind: str, *,
             f"the per-step identity module is unavailable ({exc}), so no "
             f"cached {kind} artefact can be proven current")
     _si.set_declaration_flow_keys(_DECLARATION_PUBLISH_KEYS)
-    _si_inputs, _si_knobs = _step_inputs(Path(project), kind, top, args)
+    _si_inputs, _si_knobs, _si_bad = _step_inputs(
+        Path(project), kind, top, args)
+    if _si_bad:
+        # A resolver that could not be CALLED means the read-set is unknown,
+        # and an unknown read-set is not a freshness answer (r3 review).
+        return _deny_unless_forced(
+            f"the {kind} step's read-set cannot be established: "
+            + "; ".join(_si_bad))
     try:
         ident, _why = _si.identity_now(
             project=Path(project), kind=kind,
@@ -18141,145 +18151,145 @@ def _step_pdk_hasher(container: str):
 
 def _step_inputs(project: Path, kind: str, top: str, args: Any,
                  ) -> Tuple[List[Tuple[str, Optional[Path], str]],
-                            Dict[str, str]]:
-    """What `kind` ACTUALLY READS, resolved the way the step resolves it.
+                            Dict[str, str], List[str]]:
+    """What `kind` reads — BY CALLING THE STEP'S OWN RESOLVERS.
 
-    r2 review wt0nrjhv6 finding A, and it is why the flow-derived input list is
-    no longer authoritative. The flow declares
-    `phase2/stage2/constraints/<top>.sdc`, and `step_pnr` DOES NOT READ IT:
-    that file is a copy the runner writes once. The step resolves its SDC
-    through `_resolve_staged_silicon_sdc` — `input/constraints/*.sdc` then
-    `input/reference_flow/**/*.sdc` — or builds one from L8/L9. It takes the
-    slot and die rectangle from `reports/phase1/submission_template.json`. And
-    it is steered by `--spare-density`, `VIBEIC_TAP_PITCH_UM` and
-    `VIBEIC_FORCE_KLAYOUT_STREAMOUT`, none of which is a file. Hashing a
-    stand-in the real path never opens is not a cache key; it is a key that
-    cannot fire, which is how r1 announced `inputs unchanged` while doing
-    nothing.
+    r3 review (w18fc56v9) finding 1, and it is the last restatement: r3 still
+    NAMED each input instead of asking the step. Every miss it found is the
+    same mistake — the identity said `{top}_synth.v` while `step_pnr` routes
+    `pnr_input_netlist()` (which returns `post_dft_netlist.v` when the L20 scan
+    contract authorises it); it never looked at the reference-flow QoR knobs
+    that reshape synthesis (`SWAP_ARITH_OPERATORS`, `ADDER_MAP_FILE` — whose
+    file `_resolve_adder_map_file` may resolve to an ABSOLUTE path outside the
+    project), nor at `_reference_flow_pnr_audit`'s knobs into the PnR deck, nor
+    at `input/pdk_local` macros (which become synth blackboxes AND PnR/GDS
+    macro LEF/GDS), nor at `input/otp/*.hex` (copied into the synth working
+    directory so `$readmemh` resolves).
 
-    Returns `(inputs, knobs)`; `inputs` is `(label, path, normalisation rule)`.
-    An entry whose path is None makes the component REFUSE, because a step
-    whose own resolution produced nothing is a step nobody can prove current,
-    and an EMPTY list refuses too.
+    So this calls the resolvers instead of restating them. A resolver is asked
+    exactly as the step asks it; when one RAISES, that kind gets NO cache and
+    the reason is returned in `unresolvable` — a step whose read-set cannot be
+    established is not a step anyone can prove current.
 
-    `tapeout_declaration.json` is hashed AS THE OPERATOR ANSWERED IT
-    (`declaration_as_asked`): `step_gds` REWRITES it with the keys the flow
-    derived, AFTER the synth and PnR stamps, so hashing it raw meant those two
-    were never fresh on the next run — for a change they did not make
-    (finding D).
+    Returns `(inputs, knobs, unresolvable)`.
     """
     inputs: List[Tuple[str, Optional[Path], str]] = []
     knobs: Dict[str, str] = {}
+    unresolvable: List[str] = []
+
+    def _ask(label: str, fn, *a):
+        """Call one of the step's own resolvers, or record why we cannot."""
+        try:
+            return fn(*a)
+        except Exception as exc:  # noqa: BLE001 — a read-set we cannot get
+            unresolvable.append(
+                f"{label}: {type(exc).__name__}: {exc}")
+            return None
+
+    def _add(label: str, path, rule: str = "raw") -> None:
+        if path is None:
+            return
+        inputs.append((label, Path(path), rule))
+
     decl = (project / "input" / "submission_template"
             / "tapeout_declaration.json")
 
-    def _common() -> None:
-        inputs.append(("declaration", decl, "declaration_as_asked"))
-        # Whether the design STAGES an SDC or the flow derives one is itself
-        # an input: staging one later must invalidate, and so must removing it.
-        knobs["sdc_staged"] = "yes" if any(
-            lbl == "sdc" and "generated_docs" not in str(pth)
-            for lbl, pth, _r in inputs) else "no"
-        # THE OPERATOR'S SLOT INPUT, not the flow's restatement of it.
-        #
-        # The die rectangle the seal ring and die fill are built on comes from
-        # `_slot_geometry` / `declared_die_rect`, which read
-        # `reports/phase1/submission_template.json`. That file is written BY
-        # THIS RUN (step 0.5ic ingests the operator's template into it):
-        # MEASURED with the runner driven end to end, it goes absent ->
-        # present DURING the run, so a step stamped before it could never be
-        # fresh again. Same family as finding D, and the third member of it I
-        # have had to close.
-        # `input/submission_template/` is what the OPERATOR staged, it is
-        # under `input/`, and the ingest is a pure restatement of it — so the
-        # source is hashed and the restatement is not. A slot catalogue
-        # appearing or changing still moves this component; the run writing
-        # its own copy of it does not.
-        slots = sorted((project / "input" / "submission_template"
-                        / "slots").glob("*.yaml"))
-        for f in slots:
-            inputs.append(("slot", f, "raw"))
-        answers = (project / "input" / "submission_template"
-                   / "operator_answers.json")
-        if answers.is_file():
-            inputs.append(("operator_answers", answers, "raw"))
-        knobs["slots_staged"] = str(len(slots))
+    # ---- what EVERY kind reads -------------------------------------------
+    _add("declaration", decl, "declaration_as_asked")
+    for f in sorted((project / "input" / "submission_template"
+                     / "slots").glob("*.yaml")):
+        _add("slot", f)
+    _ans = (project / "input" / "submission_template"
+            / "operator_answers.json")
+    if _ans.is_file():
+        _add("operator_answers", _ans)
+    # The phase-1 timing/integration docs are hashed ALWAYS, not only when no
+    # SDC is staged: `_ensure_staged_sdc_drv` reads L9's SYNTH_MAX_FANOUT
+    # regardless of whether an SDC is staged (r3 review finding 1).
+    for name in ("L8_TIMING_WAVEFORM.json", "L8_RTL_CONSTANTS.json",
+                 "L9_INTEGRATION_SPEC.json"):
+        d = project / "phase1" / "generated_docs" / name
+        if d.is_file():
+            _add("phase1_doc", d)
+    for d in sorted((project / "input" / "docs").glob("L9*")):
+        _add("input_doc", d)
+    # Hard macros the design stages: synth blackboxes them and PnR/GDS read
+    # their LEF/GDS. They are a DESIGN input and are not in `_PDK_FIELDS`.
+    _pdk_local = project / "input" / "pdk_local"
+    if _pdk_local.is_dir():
+        _macros = sorted(q for q in _pdk_local.rglob("*")
+                         if q.is_file()
+                         and q.suffix.lower() in (".lef", ".gds", ".lib", ".v"))
+        for q in _macros:
+            _add("macro", q)
+        knobs["pdk_local_files"] = str(len(_macros))
+    else:
+        knobs["pdk_local_files"] = "0"
+    # The design's reference-flow QoR knobs reshape synthesis and the PnR deck.
+    _qor = _ask("_reference_flow_qor_knobs", _reference_flow_qor_knobs, project)
+    if isinstance(_qor, dict):
+        for k in sorted(_qor):
+            knobs[f"rf:{k}"] = str(_qor.get(k))
+        _adder = _qor.get("ADDER_MAP_FILE")
+        if isinstance(_adder, str) and _adder:
+            # May resolve to an ABSOLUTE path outside the project.
+            _add("adder_map",
+                 _ask("_resolve_adder_map_file", _resolve_adder_map_file,
+                      project, _adder))
+    _audit = _ask("_reference_flow_pnr_audit", _reference_flow_pnr_audit,
+                  project)
+    if isinstance(_audit, dict):
+        for k in sorted(_audit):
+            knobs[f"rfpnr:{k}"] = str(_audit.get(k))
 
     if kind == "synth":
         for f in _synth_rtl_sources(_pl.rtl_dir(project)):
-            inputs.append(("rtl", f, "raw"))
-        for f in _resolved_sdc_for_identity(project, top, synth=True):
-            inputs.append(("sdc", f, "raw"))
-        _common()
+            _add("rtl", f)
+        # `$readmemh` images the synth step copies into its working directory.
+        _otp = project / "input" / "otp"
+        if _otp.is_dir():
+            for hx in sorted(_otp.glob("*.hex")):
+                _add("otp", hx)
+        _sdc = _ask("_resolve_staged_silicon_sdc",
+                    _resolve_staged_silicon_sdc, project)
+        _add("sdc", _sdc)
+        knobs["sdc_staged"] = "yes" if _sdc else "no"
     elif kind == "pnr":
-        nl = [q for q in (_pl.synth_dir(project) / f"{top}_synth.v",
-                          _pl.synth_dir(project) / "netlist.v") if q.is_file()]
-        inputs.append(("netlist", nl[0] if nl else None, "raw"))
-        for f in _resolved_sdc_for_identity(project, top, synth=False):
-            inputs.append(("sdc", f, "raw"))
-        _common()
+        # THE NETLIST THE STEP ITSELF ROUTES TO — `post_dft_netlist.v` when the
+        # L20 scan contract authorises it, not always `{top}_synth.v`.
+        _nl = _ask("pnr_input_netlist", pnr_input_netlist, project, top)
+        if _nl is None:
+            unresolvable.append(
+                "pnr_input_netlist could not be resolved, so the netlist PnR "
+                "reads is unknown")
+        else:
+            _add("netlist", _nl[0] if isinstance(_nl, tuple) else _nl)
+            if isinstance(_nl, tuple) and len(_nl) > 1:
+                knobs["pnr_netlist_basis"] = str(_nl[1])
+        _sdc = _ask("_resolve_staged_silicon_sdc",
+                    _resolve_staged_silicon_sdc, project)
+        # WHEREVER THE RESOLVER SAYS. r3 review finding 2: the r3 rule kept
+        # only `input/` paths while this resolver still hands PnR an SDC from
+        # its retained legacy locations, so the identity and the step
+        # disagreed about which file the run is constrained by. Identity
+        # follows the resolver; where it came from is DISCLOSED instead.
+        _add("sdc", _sdc)
+        knobs["sdc_staged"] = "yes" if _sdc else "no"
+        if _sdc is not None:
+            try:
+                _in_design = Path(_sdc).resolve().is_relative_to(
+                    (project / "input").resolve())
+            except (OSError, ValueError):
+                _in_design = False
+            knobs["sdc_origin"] = ("design" if _in_design
+                                   else "flow_emitted_or_legacy")
         knobs["spare_density"] = str(getattr(args, "spare_density", ""))
         knobs[_TAP_PITCH_ENV] = os.environ.get(_TAP_PITCH_ENV, "")
     elif kind == "gds":
-        # The DEF the stream is written FROM. The SPEF is NOT here: step_gds
-        # does not read it, it is written by `step_canonicalize_artefacts`
-        # AFTER this stamp, and it carries a wall-clock `*DATE` line — the r2
-        # span hashed it and could therefore never match (findings C and E).
-        inputs.append(("streamed_def",
-                       _pl.pnr_dir(project) / f"{top}.def", "raw"))
-        _common()
+        _add("streamed_def", _pl.pnr_dir(project) / f"{top}.def")
         knobs["VIBEIC_FORCE_KLAYOUT_STREAMOUT"] = os.environ.get(
             "VIBEIC_FORCE_KLAYOUT_STREAMOUT", "")
-    return inputs, knobs
-
-
-def _resolved_sdc_for_identity(project: Path, top: str,
-                               *, synth: bool) -> List[Path]:
-    """The SDC files that are INPUT to this run, in the step's own order.
-
-    THE STAGED ONES ONLY, and that is a correction my own regression forced.
-    `sdc_constraints.collect_sdc_files` resolves the design's ground truth —
-    `input/constraints/*.sdc`, then `input/reference_flow/**/*.sdc` — and its
-    `extra_dirs` appends `phase2/stage2/constraints/`, which phase 3's synth
-    step does read. But THIS FLOW WRITES THAT DIRECTORY: when the design
-    stages no silicon SDC, `_build_auto_silicon_sdc` emits one there, AFTER
-    the synth stamp. MEASURED in `test_a_real_rerun_stamps_the_producer`:
-    synth stamped, `main()` ran, an emitted SDC appeared, the input SET grew
-    and synth could never be fresh again — the same shape as the review's
-    finding D, in a place the review did not name.
-
-    So a file the flow itself writes is not an input to the step that ran
-    before it. The design's SDC is hashed; the flow's own emission is not.
-    When nothing is staged the SDC is entirely DERIVED, and then what it is
-    derived FROM is the input: the phase-1 timing and integration docs. The
-    derivation itself is code, and `code` already covers that.
-    """
-    out: List[Path] = []
-    try:
-        staged = _resolve_staged_silicon_sdc(project)
-    except Exception:  # noqa: BLE001 — an unresolvable SDC is not a match
-        return []
-    # UNDER `input/` OR IT IS NOT STAGED. Stated explicitly rather than left to
-    # resolution order: `_resolve_staged_silicon_sdc` returns the first file in
-    # priority order, and if the flow ever emits one that sorts ahead of the
-    # design's, an order-dependent rule would silently start hashing the
-    # flow's own output again. `input/` is the design's; everything else under
-    # the project is something this flow wrote.
-    try:
-        inp_root = (Path(project) / "input").resolve()
-        if staged is not None and Path(staged).resolve().is_relative_to(
-                inp_root):
-            out.append(Path(staged))
-    except (OSError, ValueError):
-        pass
-    if out:
-        return out
-    docs = project / "phase1" / "generated_docs"
-    for name in ("L8_TIMING_WAVEFORM.json", "L9_INTEGRATION_SPEC.json"):
-        d = docs / name
-        if d.is_file():
-            out.append(d)
-    return out
+    return inputs, knobs, unresolvable
 
 
 def _step_image_digest(container: str) -> Optional[str]:

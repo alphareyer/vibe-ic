@@ -96,6 +96,9 @@ def _span_inputs(project, top: str = "top") -> None:
         ("phase2/stage2/constraints/%s.sdc" % top,
          "create_clock -period 10\n"),
         ("phase2/stage2/synth/netlist.v", "module %s(); endmodule\n" % top),
+        # r4: the netlist PnR ACTUALLY reads, per `pnr_input_netlist`.
+        ("phase2/stage2/synth/%s_synth.v" % top,
+         "module %s(); endmodule\n" % top),
         ("phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\nEND DESIGN\n"),
         ("phase3/stage3/pnr/spare_cells.json", "{}\n"),
         ("phase3/stage3/extracted/parasitic.spef", "*SPEF\n"),
