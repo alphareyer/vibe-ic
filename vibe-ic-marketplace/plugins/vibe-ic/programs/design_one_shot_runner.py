@@ -22558,13 +22558,30 @@ def declared_window_flags(entry_step, exit_step) -> Tuple[str, ...]:
         if value)
 
 
-def run_is_bounded(entry_step, exit_step) -> bool:
-    """Did this run declare a window, and therefore a bounded proof burden?
+def run_is_bounded(entry_site, exit_pruned, site_order) -> bool:
+    """Does this run's window actually PRUNE dispatch this runner would do?
 
-    EITHER flag bounds the run. `--exit-step 4` alone dispatches steps 1..4 and
-    nothing after, so the flow's whole-run documents are as much a claim about
-    steps nobody ran as they are under `--entry-step`."""
-    return bool(declared_window_flags(entry_step, exit_step))
+    A FLAG IS NOT A WINDOW (review w437hob32, MEDIUM). My first cut asked only
+    whether a flag was present, and that is wrong in a way that hides a real
+    verdict. MEASURED against step_preflight's own table for this runner, whose
+    last dispatch site heads step 11: `--exit-step 11/13/23/31/33/37` prunes
+    NOTHING -- and the front door forwards exactly those values verbatim -- while
+    `--entry-step 1` names the first site. Each of those runs dispatches the
+    whole phase exactly as a run with no flag does, so its whole-flow documents
+    are as true as that run's. Treating them as bounded skipped the phase-2
+    audit and booked it NOT_APPLICABLE, which `verdict.run_verdict` reads as
+    green: a phase-2 audit FAIL that a flagless run would raise DISAPPEARED.
+
+    So the question is asked of the signals `main()` dispatched on -- the sites
+    the exit actually pruned, and whether the entry moved off the first site --
+    not of the argv. Pure and module level, so a test can drive it. Its
+    counterpart for callers that hold only the flags is
+    `step_preflight.window_is_effective`, and a test pins the two to agree."""
+    if exit_pruned:
+        return True
+    if entry_site and site_order and entry_site != site_order[0]:
+        return True
+    return False
 
 
 def _run_refresh_only(project: Path, args) -> int:
@@ -22621,9 +22638,24 @@ def _run_refresh_only(project: Path, args) -> int:
         "verdict": _aggregate_verdict(plan),
         "seconds": round(time.time() - t0, 2),
     }
-    summary["steps_view"], _out = _pl.publish_report_then_steps_view(
-        project, PROGRAMS_DIR, "design_one_shot_runner", summary,
-        "phase2_one_shot.json")
+    # THE RUN REPORT IS NOT THIS CALL'S TO WRITE (review w437hob32, HIGH).
+    # `publish_report_then_steps_view` PUBLISHES the summary it is handed to
+    # reports/orchestrator/phase2_one_shot.json, and this call's summary has two
+    # step rows. MEASURED on the bounded run's own tree: a report carrying 36
+    # step rows, `declared_window` and 5 disclosures was replaced by a 2-row
+    # document -- the run's own verdicts erased by a refresh that measured none
+    # of them. Worse, benchmark_dispatch reads exactly that file and walks
+    # `steps[]` for the `rtl_gen` WAIVED row and its `extras.fallback_skill`
+    # (_rtl_gen_waive, :4213), so the erasure also destroys the AI-backup
+    # handover contract.
+    #
+    # A refresh REFRESHES; it does not re-author. It publishes its own record
+    # (reports/audit/refresh_only.json, below) and builds the view against the
+    # report already on disk -- which is the right input anyway, since the view
+    # takes each step's status from the runner's own verdicts and this call has
+    # none to offer.
+    summary["steps_view"] = _pl.emit_steps_view(
+        project, PROGRAMS_DIR, runner="design_one_shot_runner")
     fs_ok = _pl.emit_final_summary(project, PROGRAMS_DIR)
     summary["final_summary"] = bool(fs_ok)
     try:
@@ -22638,6 +22670,8 @@ def _run_refresh_only(project: Path, args) -> int:
     except OSError as _exc:                                # noqa: BLE001
         print(f"[WARN] could not write {_rec}: {_exc}", file=sys.stderr)
     print(f"=== --refresh-only DONE in {summary['seconds']}s — {_rec}")
+    print("    reports/orchestrator/phase2_one_shot.json was NOT rewritten: it "
+          "is the RUN's account of itself, and this call dispatched no step.")
     for s in plan:
         print(f"  {s.status:8} {s.name:20} "
               f"{_rsum.summary_detail(s.detail, s.status)}")
@@ -22743,9 +22777,7 @@ def main() -> int:
     _run_started_at = time.time()
     _window_flags = declared_window_flags(getattr(args, "entry_step", None),
                                           getattr(args, "exit_step", None))
-    _bounded = run_is_bounded(getattr(args, "entry_step", None),
-                              getattr(args, "exit_step", None))
-    if getattr(args, "refresh_only", False) and _bounded:
+    if getattr(args, "refresh_only", False) and _window_flags:
         print("REFUSED: --refresh-only rebuilds the WHOLE-FLOW documents and "
               "therefore has no window. Drop --entry-step/--exit-step to "
               "refresh, or drop --refresh-only to run the window.",
@@ -22774,6 +22806,29 @@ def main() -> int:
                                      "narrowed_to": narrowed_to,
                                      "declared_by": _declared_by, "why": _why})
         print(f"[bounded] NARROWED {refresh} -- {_why}")
+        return _why
+
+    def _disclose_runs_anyway(writer: str, writes: str, why_it_runs: str) -> str:
+        """Record one writer that RUNS on a bounded run and writes outside the
+        window anyway -- a residual, disclosed rather than argued away.
+
+        Review w437hob32 refuted my claim that step_emit_phase2_manifests was
+        bounded: it rewrites step 2/3/6 declared outputs whatever the window.
+        That is a pre-existing shape and changing it is not this change's
+        decision, but a reader of the disclosure list is entitled to know it
+        happened, so it is IN the list rather than only in a commit message."""
+        for _d in _bounded_disclosures:
+            if _d["refresh"] == writer:
+                return str(_d["why"])
+        _why = (f"run declared {' '.join(_window_flags)}; {writer} RAN ANYWAY and "
+                f"wrote {writes}, which is outside this run's window. "
+                f"{why_it_runs} This is a disclosed residual, not a claim that "
+                f"those steps were dispatched here.")
+        _bounded_disclosures.append({"refresh": writer, "kind": "runs_anyway",
+                                     "writes": writes,
+                                     "declared_by": " ".join(_window_flags),
+                                     "why": _why})
+        print(f"[bounded] RAN ANYWAY {writer} -- {_why}")
         return _why
 
     def _disclose_whole_flow_skip(refresh: str, writes: str) -> str:
@@ -22916,6 +22971,18 @@ def main() -> int:
                   "refusing to enter mid-flow without recording that it "
                   "happened", file=sys.stderr)
             return 2
+
+    # DECIDED HERE, not at parse time: `_exit_pruned` and `_entry_site` are the
+    # run's real dispatch signals and neither exists until the two blocks above
+    # have run. Everything in the finalize tail reads `_bounded`, and every one
+    # of those reads happens after the lock, below.
+    _bounded = run_is_bounded(_entry_site, _exit_pruned, _site_order())
+    if _window_flags and not _bounded:
+        print(f"[bounded] window {' '.join(_window_flags)} prunes NOTHING this "
+              f"runner would dispatch (its sites are "
+              f"{[n for n, _ in (_spf.RUNNER_PLANS.get('design_one_shot_runner').sites if _spf.RUNNER_PLANS.get('design_one_shot_runner') else ())]}); "
+              f"this run carries the FULL proof burden and every whole-flow "
+              f"document is written as it would be without the flag.")
 
     def _window_step_ids() -> set:
         """The canonical flow step ids this run's window actually dispatches.
@@ -23134,6 +23201,13 @@ def main() -> int:
     # that ran no cross-layer search leaves a NOT_APPLICABLE record rather than
     # a silence. This runs before the remaining Step-2 checks so a refuted
     # candidate is rejected at the first deterministic RTL-validation step.
+    if _bounded:
+        _disclose_runs_anyway(
+            "crosslayer_rewrite_fidelity",
+            "reports/crosslayer/rewrite_equivalence_check.json (a step-2 clause)",
+            "The judge is unconditional by its own documented contract, so that a "
+            "design which ran no cross-layer search leaves a NOT_APPLICABLE RECORD "
+            "rather than a silence; gating it is a separate decision.")
     plan.append(step_crosslayer_rewrite_fidelity(project))
 
     # Flow step 2 — pad-budget feasibility. Placed HERE, right after the RTL is
@@ -23678,6 +23752,13 @@ def main() -> int:
     # chained by phase23_one_shot_runner.py.
     # Emit plugin_output/declaration.json from the now-final RTL + the
     # oracle TB's measured framing, BEFORE the manifests/audit read it.
+    if _bounded:
+        _disclose_runs_anyway(
+            "arith_declaration_emit",
+            "plugin_output/declaration.json and its .provenance.json",
+            "It is derived from the design's own RTL and the oracle TB's measured "
+            "framing, not from any step's state, and the manifests this run does "
+            "owe read it.")
     plan.append(step_arith_declaration_emit(project))
     # MEASURE coverage before the manifests/audit read it. Nothing used to run
     # the measurement at all — see step_verilator_coverage's docstring.
@@ -23686,6 +23767,12 @@ def main() -> int:
     else:
         plan.append(step_verilator_coverage(project, args.top_name,
                                             args.container))
+    if _bounded:
+        _disclose_runs_anyway(
+            "emit_phase2_manifests",
+            "the declared outputs of steps 2, 3 and 6",
+            "The manifest emitter has always written those three steps' documents "
+            "whatever the window; the review confirmed it as a pre-existing shape.")
     plan.append(step_emit_phase2_manifests(project, plan, args.top_name,
                                            args.container))
     # v0.1.58 capture: regenerate final_summary.md BEFORE the audit so the

@@ -87,17 +87,128 @@ def _guarded_by_bounded(root: ast.AST, target: str) -> bool:
 # --------------------------------------------------------------------------- #
 # 0. the decision itself — DRIVEN, and bound to nothing else
 # --------------------------------------------------------------------------- #
-def test_either_window_flag_bounds_the_run():
-    """DRIVEN. `--exit-step 4` alone dispatches steps 1..4 and nothing after,
-    so the whole-run documents are as much a claim about steps nobody ran as
-    they are under `--entry-step`."""
+def test_declared_window_flags_reports_what_the_operator_typed():
+    """The flags are the DISCLOSURE's subject, not the decision's. Whether the
+    window prunes anything is a separate question — see
+    test_a_flag_that_prunes_nothing_is_not_a_window, which is the property review
+    w437hob32 corrected: an earlier version of this arm asserted that any flag
+    bounds the run, and that is false for `--exit-step 13` and `--entry-step 1`."""
     dsr = _load("design_one_shot_runner")
-    assert dsr.run_is_bounded("4", "4") is True
-    assert dsr.run_is_bounded("4", None) is True
-    assert dsr.run_is_bounded(None, "4") is True
-    assert dsr.run_is_bounded(None, None) is False
     assert dsr.declared_window_flags("4", None) == ("--entry-step 4",)
+    assert dsr.declared_window_flags(None, "4") == ("--exit-step 4",)
+    assert dsr.declared_window_flags("4", "4") == ("--entry-step 4", "--exit-step 4")
     assert dsr.declared_window_flags(None, None) == ()
+
+
+def test_a_flag_that_prunes_nothing_is_not_a_window():
+    """DRIVEN, review w437hob32 MEDIUM. This runner's last dispatch site heads
+    step 11, and the front door forwards --exit-step 13/23/31/33/37 verbatim.
+    Such a run dispatches the WHOLE phase exactly as a flagless run does, so its
+    whole-flow documents are exactly as true — and treating it as bounded booked
+    the phase-2 audit NOT_APPLICABLE, which run_verdict reads as green, so an
+    audit FAIL a flagless run would raise DISAPPEARED."""
+    dsr = _load("design_one_shot_runner")
+    order = ["rtl_gen", "rtl_validate", "sim", "yosys_synth", "dft_lec_chain"]
+    # nothing pruned, entry at the first site (or absent) -> NOT bounded
+    assert dsr.run_is_bounded(None, [], order) is False
+    assert dsr.run_is_bounded(None, None, order) is False
+    assert dsr.run_is_bounded("rtl_gen", [], order) is False
+    # real pruning, or an entry that moved off the first site -> bounded
+    assert dsr.run_is_bounded(None, ["dft_lec_chain"], order) is True
+    assert dsr.run_is_bounded("sim", [], order) is True
+    assert dsr.run_is_bounded("sim", ["yosys_synth"], order) is True
+
+
+def test_the_flag_level_rule_agrees_with_the_dispatch_level_one():
+    """ANTI-DRIFT. `run_is_bounded` asks the run's dispatch signals;
+    `step_preflight.window_is_effective` asks the same question of the flags,
+    for the front door, which decides before any runner has those signals. Two
+    spellings of one rule is how they come to disagree, so this pins them over
+    the windows that actually occur — benchmark_dispatch sends --exit-step 2/4/9
+    and --entry-step 2; the front door forwards 13/23/31/33/37."""
+    dsr = _load("design_one_shot_runner")
+    spf = _load("step_preflight")
+    RUNNER = "design_one_shot_runner"
+    plan = spf.RUNNER_PLANS[RUNNER]
+    order = [n for n, _ in plan.sites]
+    for exit_step in ("2", "4", "9", "11", "13", "23", "31", "33", "37"):
+        pruned = spf.exit_pruned_sites(plan.sites, exit_step) or []
+        assert dsr.run_is_bounded(None, pruned, order) == \
+            spf.window_is_effective(exit_step=exit_step, runner=RUNNER), exit_step
+    for entry_step in ("1", "2", "4", "9"):
+        site = spf.site_for_step(RUNNER, entry_step)
+        assert dsr.run_is_bounded(site, [], order) == \
+            spf.window_is_effective(entry_step=entry_step, runner=RUNNER), entry_step
+    assert spf.window_is_effective() is False
+
+
+def test_the_front_door_bounds_its_own_tail():
+    """Review w437hob32 MEDIUM: the entry the owner actually uses forwarded the
+    window and then ran its own tail unconditionally, so the leak survived and
+    the phase-2 report's `not_refreshed_here` was contradicted on disk moments
+    later by THIS runner rewriting the file it named."""
+    src = (PROGRAMS / "vibe_ic_one_shot_runner.py").read_text()
+    tree = ast.parse(src)
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    for target in ("_pl.emit_final_summary", "_pl.emit_steps_view"):
+        calls = [c for c in _calls(main) if _dotted(c) == target]
+        assert calls, f"{target} vanished from the front door"
+        guarded = []
+        for node in ast.walk(main):
+            if not isinstance(node, ast.If):
+                continue
+            if "_fd_bounded" not in {n.id for n in ast.walk(node.test)
+                                     if isinstance(n, ast.Name)}:
+                continue
+            for branch in (node.body, node.orelse):
+                for stmt in branch:
+                    guarded.extend(c for c in _calls(stmt)
+                                   if _dotted(c) == target)
+        assert all(any(g is c for g in guarded) for c in calls), (
+            f"{target} runs at the front door without consulting _fd_bounded")
+    binds = [n for n in ast.walk(main) if isinstance(n, ast.Assign)
+             and any(isinstance(tg, ast.Name) and tg.id == "_fd_bounded"
+                     for tg in n.targets)]
+    assert binds, "_fd_bounded is never computed"
+    assert not any(isinstance(b.value, ast.Constant) and b.value.value
+                   for b in binds), (
+        "_fd_bounded is bound to a truthy literal; the tail is unconditionally "
+        "skipped and every arm here still passes")
+
+
+def test_refresh_only_does_not_rewrite_the_runs_own_report():
+    """HIGH, review w437hob32. MEASURED before the fix: a bounded run's report
+    carrying 36 step rows, `declared_window` and 5 disclosures was replaced by a
+    2-row document. benchmark_dispatch reads that exact file and walks steps[]
+    for the rtl_gen WAIVED row's `extras.fallback_skill`, so the erasure also
+    destroys the AI-backup handover contract."""
+    tree = ast.parse(RUNNER.read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_run_refresh_only")
+    called = {_dotted(c) for c in _calls(fn)}
+    assert "_pl.publish_report_then_steps_view" not in called, (
+        "--refresh-only publishes its summary to the RUN's report path, erasing "
+        "the verdicts of a run it measured none of")
+    # NAMING the run report is fine and wanted -- the refresh PRINTS that it
+    # left the file alone. Passing it to anything else is the defect.
+    strings = {n.value for n in ast.walk(fn)
+               if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    for call in _calls(fn):
+        if _dotted(call) == "print":
+            continue
+        for arg in ast.walk(call):
+            if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                    and "phase2_one_shot" in arg.value):
+                raise AssertionError(
+                    f"--refresh-only passes the run report's name to "
+                    f"{_dotted(call)!r} at line {call.lineno}")
+    assert any("phase2_one_shot" in s for s in strings), (
+        "the refresh should SAY it left the run report alone")
+    assert "_pl.emit_steps_view" in called, (
+        "the refresh must still rebuild the view, against the report on disk")
+    assert any("refresh_only.json" in s for s in strings), (
+        "the refresh must publish its own record")
 
 
 def test_bounded_is_computed_by_that_function_and_never_a_constant():

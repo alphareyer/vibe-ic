@@ -1590,6 +1590,52 @@ def main() -> int:
     # stays exactly one place that decides whether Phase 1 runs.
     _force_skip_p1 = args.skip_phase1 or (
         _entry_runner == "design_one_shot_runner")
+
+    # ── THE WINDOW BOUNDS THIS ORCHESTRATOR'S TAIL TOO (R-0924-1 r2) ─────────
+    # Review w437hob32, MEDIUM: the phase-2 runner stopped refreshing whole-flow
+    # documents under a window, and THIS runner -- the entry the owner actually
+    # uses, and the one benchmark_dispatch drives -- went on running its own tail
+    # unconditionally. So the leak survived at the front door, and worse, the
+    # phase-2 report's `not_refreshed_here` was contradicted on disk moments
+    # later by this function rewriting the very file it named.
+    #
+    # Decided from the signals THIS function already has, the same way
+    # `design_one_shot_runner.run_is_bounded` is: an entry owned by phase 2
+    # means Phase 1 does not run here at all (the line above), and
+    # `window_is_effective` answers whether the exit prunes any site ANYWHERE in
+    # the flow -- an exit inside phase 2 prunes every phase-3 site. A flag that
+    # prunes nothing is not a window and this run carries the full burden.
+    _fd_window_flags = tuple(
+        f"--{n} {v}" for n, v in (("entry-step", getattr(args, "entry_step", None)),
+                                  ("exit-step", getattr(args, "exit_step", None))) if v)
+    _fd_bounded = False
+    if _fd_window_flags:
+        try:
+            import step_preflight as _spf_w            # noqa: PLC0415
+            _fd_bounded = bool(
+                (args.entry_step and _entry_runner == "design_one_shot_runner")
+                or _spf_w.window_is_effective(entry_step=args.entry_step,
+                                              exit_step=args.exit_step))
+        except ImportError:
+            # Fail CLOSED toward doing the work: an orchestrator that cannot
+            # tell whether its window prunes anything must not silently skip
+            # the documents a flagless run would publish.
+            _fd_bounded = False
+    _fd_disclosures: List[Dict[str, Any]] = []
+
+    def _fd_disclose(refresh: str, writes: str) -> str:
+        why = (f"run declared {' '.join(_fd_window_flags)}; {refresh} is a "
+               f"WHOLE-FLOW refresh ({writes}) and was not run. It restates "
+               f"every step in the flow, and this run dispatched only its "
+               f"declared window: those documents are outside this run's "
+               f"declared proof burden, not missing. Ask for them with "
+               f"design_one_shot_runner --refresh-only.")
+        _fd_disclosures.append({"refresh": refresh, "kind": "skipped",
+                                "writes": writes,
+                                "declared_by": " ".join(_fd_window_flags),
+                                "why": why})
+        print(f"[bounded] SKIPPED {refresh} -- {why}")
+        return why
     run_phase1, p1_mode = _phase1_decision(project, _force_skip_p1)
     if run_phase1:
         runner = _phase_runner("phase1")
@@ -2135,7 +2181,14 @@ def main() -> int:
     # phase23_one_shot_runner ALSO calls this; vibe_ic delegates to
     # phase23 today, so the final summary will be regenerated here on
     # the chained-end. Idempotent — generator overwrites.
-    fs_ok = _pl.emit_final_summary(project, PROGRAMS_DIR)
+    if _fd_bounded:
+        _fd_disclose("emit_final_summary",
+                     "reports/final_summary.md, and the whole-flow "
+                     "flow_compliance_check --strict that final_report_generate.py "
+                     "runs in order to write it")
+        fs_ok = False
+    else:
+        fs_ok = _pl.emit_final_summary(project, PROGRAMS_DIR)
 
     # Per-step output view: <project>/steps/<phase>/<stage>/<id>_<slug>/
     # (SYMLINK views + per-step outputs.json + steps/index.json) so EVERY
@@ -2148,8 +2201,18 @@ def main() -> int:
     # left no trace, so "this run has no steps/" could not be told apart from
     # "this orchestrator never built one". The helper records the outcome in
     # reports/audit/steps_view.json either way.
-    _sv = _pl.emit_steps_view(project, PROGRAMS_DIR,
-                              runner="vibe_ic_one_shot_runner")
+    if _fd_bounded:
+        # The phase runners that DID dispatch have already refreshed their own
+        # rows and carried the rest; rebuilding the whole tree here would undo
+        # that and restate 70 steps for a run that dispatched a window.
+        _fd_disclose("steps_view",
+                     "the whole steps/ tree, every phase and stage")
+        _sv = {"status": "OK", "bounded": True,
+               "note": "not rebuilt: this run declared a window; the phase "
+                       "runners refreshed their own rows"}
+    else:
+        _sv = _pl.emit_steps_view(project, PROGRAMS_DIR,
+                                  runner="vibe_ic_one_shot_runner")
     if _sv.get("status") != "OK":
         # Surface it in the top orchestrator's own report too — this is the
         # record a reader actually opens. Non-gating (advisories never move
@@ -2163,6 +2226,17 @@ def main() -> int:
     # (non-gating) so a run that produces NO RESULT.md can never go silent.
     dsc = _deliverable_self_check(project)
     summary["deliverable_self_check"] = dsc
+    if _fd_bounded:
+        summary["declared_window"] = {
+            "flags": list(_fd_window_flags),
+            "entry_step": args.entry_step, "exit_step": args.exit_step,
+            "entry_runner": _entry_runner,
+        }
+        summary["bounded_disclosures"] = _fd_disclosures
+        summary["not_refreshed_here"] = sorted(
+            _rel for _rel in ("reports/final_summary.md",
+                              "reports/audit/phase23_completion_audit.json")
+            if not _pl.published_here(project / _rel, t0))
 
     # FOUR-PHASE ATTRIBUTION — who routed this design, who solved it (the
     # deterministic emitter BY NAME, or the AI skill the runner waived to),
