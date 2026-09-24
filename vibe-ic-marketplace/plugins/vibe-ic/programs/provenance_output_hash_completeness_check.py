@@ -719,15 +719,23 @@ def audit_counted(project: Path, strict_timing: bool = False,
     # NORMAL pull entry's output that was legitimately removed by a later
     # prune event is not flagged PROVENANCE_OUTPUT_FILE_MISSING. The
     # prune event references the original outputs in its removed list.
-    removed_paths: set = set()
-    for e in to_check:
+    #
+    # ORDER-AWARE (lane ictier1, review wi6jgolcm). The ledger only grows, so a
+    # removal is a statement about the ledger AT ITS OWN INDEX: it retires the
+    # declarations OLDER than it, and says nothing about a later run that
+    # re-produced the path. Keyed on the NEWEST removal index per path, and
+    # read against each declaration's own index below. As an unindexed set it
+    # suppressed FILE_MISSING forever -- including for a declaration written
+    # AFTER the removal whose file is genuinely gone.
+    removed_paths: Dict[str, int] = {}
+    for _ri, e in enumerate(to_check):
         refs = _removal_list(e)
         if not refs:
             continue
         for ref in refs:
             rel = ref.get("path") if isinstance(ref, dict) else ref
             if isinstance(rel, str) and rel:
-                removed_paths.add(rel)
+                removed_paths[rel] = _ri
     for i, e in enumerate(to_check):
         tool = e.get("tool", "?")
         outputs = e.get("outputs")
@@ -766,7 +774,12 @@ def audit_counted(project: Path, strict_timing: bool = False,
                         detail=f"removed path '{rel}' resolves outside the "
                                f"project root"))
                     continue
-                if on_disk.exists():
+                # ORDER-AWARE (review wi6jgolcm): a later non-failed
+                # declaration of the path means a later run RE-PRODUCED it,
+                # so the file being there contradicts nothing this removal
+                # said. Present with NO later declaration is still the
+                # contradiction it always was.
+                if on_disk.exists() and latest_decl.get(rel, -1) <= i:
                     findings.append(ProvenanceFinding(
                         entry_index=i, tool=tool,
                         rule="PROVENANCE_REMOVAL_FILE_STILL_PRESENT",
@@ -973,7 +986,7 @@ def audit_counted(project: Path, strict_timing: bool = False,
                 # v0.2.102 — for #493 part 3. A path legitimately removed
                 # by a later prune/supersede event is expected to be
                 # absent; do not flag it as a missing-output fault.
-                if rel_path in removed_paths:
+                if removed_paths.get(rel_path, -1) > i:
                     continue
                 # #434 — an absence the ledger accounts for. Order matters:
                 # relocation is tried FIRST and, if it is present but broken,
