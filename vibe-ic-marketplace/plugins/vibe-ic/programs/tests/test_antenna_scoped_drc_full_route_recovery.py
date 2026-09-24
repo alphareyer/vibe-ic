@@ -4,6 +4,7 @@ The recovery must start from the saved ODB in a fresh EDA session.  The fake
 below supplies only EDA file writes and its native transcript; the production
 resume builder, transaction selector and emitted antenna Tcl remain real.
 """
+import json
 from pathlib import Path
 import sys
 
@@ -99,6 +100,12 @@ def test_scoped_drc_recovers_from_untouched_odb_and_verifies_full_route(
     assert "detailed_route {*}$_vic_drc_opt" in stage
     assert "ANTENNA_FULL_ROUTE_LOST_WIRES" in stage
     assert "ANTENNA_FULL_ROUTE_PLACEMENT_FAILED" in stage
+    receipt = R._disclose_antenna_rollback(
+        tmp_path, out, [rec], _REFUSAL + rec["combined_log"])
+    doc = json.loads(receipt.read_text())
+    assert doc["status"] == "RECOVERED"
+    assert doc["antenna_repair"] == "APPLIED"
+    assert doc["route_verified_at_ship"] is True
 
 
 def test_failed_full_route_restores_original_seed_and_names_failure(

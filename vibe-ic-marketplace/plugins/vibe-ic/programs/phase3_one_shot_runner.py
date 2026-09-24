@@ -26989,7 +26989,14 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
     with a violating pin), so the net-count return value is a sufficient gate. The
     skip path runs NO reroute, so it cannot disturb the main route's wires.
     Only when violations remain (or the precheck cannot measure) do we pay the
-    proven incremental repair loop above."""
+    proven incremental repair loop above.
+
+    A scoped DRT-0712 now has one exceptional path: the parent first restores
+    the pre-pass ODB in a new process and sets `_vic_antenna_full_route`. Only
+    there does this emitter run a complete detailed route after diode insertion.
+    Its router DRC, wire census, placement and antenna counts must all pass;
+    otherwise the parent restores the protected seed and reports the refusal.
+    This never retries a damaged in-memory route."""
     if not pdk.antenna_diode_cell:
         return ("puts \"ANTENNA_REPAIR_SKIPPED: no diode cell for this PDK; "
                 "antenna violations need manual diode ECO\"\n")
@@ -33853,7 +33860,7 @@ def _disclose_antenna_rollback(project: Path, out_dir: Path,
     if not records:
         return None
     rec = records[-1]
-    modified_after = ( _antenna_full_retry_modified_after_verification(log_text)
+    modified_after = (_antenna_full_retry_modified_after_verification(log_text)
                       if rec.get("status") == "RECOVERED" else
                       route_modified_after_last_verification(log_text))
     doc = {

@@ -169,12 +169,12 @@ def test_the_antenna_stage_no_longer_swallows_its_own_reroute_failure():
     printing a note."""
     # no emitted line swallows a re-route failure as a note ...
     assert 'puts \\"REPAIR_ANTENNA_REROUTE_NONFATAL' not in SRC
-    # ... and this stage runs no whole-design route at all any more. The
-    # assertions are on the EMITTED BLOCK'S COMMANDS, not on the source file
-    # and not on the deck's comments: both keep the old marker's name in the
-    # note that records why it went.
+    # The in-session fallback is still gone. A complete route exists only in
+    # the new parent-selected retry from the intact pre-pass ODB.
     assert "ANTENNA_REROUTE_FAILED" not in _antenna_cmds()
-    assert not _invokes_cmd(_antenna_cmds(), "detailed_route")
+    assert _invokes_cmd(_antenna_cmds(), "detailed_route")
+    assert "if {$_ant_full_retry}" in _antenna_cmds()
+    assert "ANTENNA_FULL_ROUTE_REFUSED" in _antenna_cmds()
     # the exit that replaced it is a recorded refusal, not a note.
     t = _antenna_block()
     i = t.index('puts "ANTENNA_DIODE_ROLLED_BACK')

@@ -119,20 +119,16 @@ def test_block_keeps_incremental_outer_loop_and_no_global_route():
     """Still the bounded incremental OUTER loop; still NO full global_route
     (the ibex full-reroute timeout).
 
-    R-0915-116(2)(iii): and now no full `detailed_route` either. This line used
-    to read `assert "detailed_route -verbose 0" in cmds` -- the external
-    fallback reroute. It is DELETED from this stage exactly as R-0915-114(a)
-    deleted it from the PG-reconnect block, and for the same measured reason:
-    a whole-design re-route of an already-routed design does not converge
-    (a NO-OP full route of int7's pre-diode database produced 57178 changed
-    net lines and DRT-0206 with 1212 checkConnectivity breaks, 0 of them on a
-    supply net). The assertion is inverted, not dropped, so the fallback
-    cannot come back unnoticed."""
+    The old in-session full-route fallback remains deleted. A complete route
+    may run only in the parent's fresh-ODB recovery after scoped DRT-0712;
+    the ordinary outer loop still uses native scoped `-reroute`."""
     cmds = _cmd_lines(R._antenna_repair_tcl(_pdk()))
     assert "set _ant_cap" in cmds
     assert "for {set _i 0} {$_i < $_ant_cap} {incr _i}" in cmds
     assert "global_route" not in cmds
-    assert not _invokes_cmd(cmds, "detailed_route")   # R-0915-116(2)(iii)
+    assert _invokes_cmd(cmds, "detailed_route")
+    assert "if {$_ant_full_retry}" in cmds
+    assert "ANTENNA_FULL_ROUTE_REFUSED" in cmds
     assert "-iterations 5" not in cmds
 
 

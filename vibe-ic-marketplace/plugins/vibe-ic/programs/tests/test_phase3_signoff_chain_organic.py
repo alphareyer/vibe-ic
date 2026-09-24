@@ -356,13 +356,9 @@ class TestAntennaRepairTcl:
         # FINAL authoritative check_antennas.
         # anchor on COMMAND forms (bare keywords also appear in comments).
         #
-        # R-0915-116(2)(iii): the `catch {detailed_route` anchor that used to
-        # sit between the repair and the final check is GONE -- the degraded
-        # branch's whole-design re-route is deleted from this stage, measured
-        # destroying a converged route on spm (run12) and costing subservient
-        # its routed.def on int7. The ORDER PROPERTY is unchanged on the steps
-        # that remain, and the deleted step is pinned absent below so it
-        # cannot slip back into the middle of the sequence.
+        # R-0915-116(2)(iii) removed the immediate fallback on the damaged
+        # in-memory route. The complete route below is guarded by a parent
+        # retry flag and starts from a fresh pre-pass ODB.
         i_loop = tcl.index("for {set _i 0}")
         i_ra = tcl.index("repair_antennas sky130")
         i_ck_last = tcl.index("catch {check_antennas}")   # final post-repair check
@@ -372,7 +368,12 @@ class TestAntennaRepairTcl:
         assert "-reroute" in tcl               # the repair carries its own reroute
         cmds = "\n".join(ln for ln in tcl.splitlines()
                          if not ln.lstrip().startswith("#"))
-        assert not _invokes_cmd(cmds, "detailed_route")  # R-0915-116(2)(iii)
+        # The ordinary path is still native/scoped. The only complete route
+        # belongs to a fresh-ODB retry selected by the parent after DRT-0712.
+        assert _invokes_cmd(cmds, "detailed_route")
+        assert cmds.index("if {$_ant_full_retry}") < cmds.index(
+            "detailed_route {*}$_vic_drc_opt")
+        assert "ANTENNA_FULL_ROUTE_REFUSED" in cmds
         assert "ANTENNA_POSTROUTE_DONE" in tcl   # sentinel for the in-session read
 
     def test_no_full_global_route_command(self):
@@ -415,18 +416,17 @@ class TestAntennaRepairTcl:
 
     def test_all_steps_nonfatal_guarded(self):
         # Antenna repair must never abort the PnR — every step is catch-guarded.
-        # (v1.3.46: global_route is dropped, so it is no longer in the set.
-        #  R-0915-116(2)(iii): `detailed_route` leaves the set the same way —
-        #  a command that is no longer emitted cannot be guarded, and the
-        #  stronger statement, that it is absent, is asserted instead.)
+        # The full detailed route is now a fresh-session recovery command,
+        # and must be catch-guarded just like the native repair.
         tcl = runner._antenna_repair_tcl(_fake_pdk_with_diode())
         for cmd in ("repair_antennas", "check_antennas"):
             assert ("catch {" + cmd) in tcl, f"{cmd} not NONFATAL-guarded"
         cmds = "\n".join(ln for ln in tcl.splitlines()
                          if not ln.lstrip().startswith("#"))
-        for gone in ("global_route", "detailed_route"):
-            assert not _invokes_cmd(cmds, gone), \
-                f"{gone} is a whole-design route here"
+        assert not _invokes_cmd(cmds, "global_route")
+        assert _invokes_cmd(cmds, "detailed_route")
+        assert "set _ant_route_rc [catch {detailed_route {*}$_vic_drc_opt}" in tcl
+        assert "ANTENNA_FULL_ROUTE_REFUSED" in tcl
 
 
 class TestDontUseTcl:
