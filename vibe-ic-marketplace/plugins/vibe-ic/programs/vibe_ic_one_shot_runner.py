@@ -1330,7 +1330,7 @@ def main() -> int:
                         "analog_one_shot_runner and are REFUSED here: run "
                         "that runner directly. Only a step that HEADS a "
                         "dispatch span is enterable; a mid-span step is "
-                        "refused rather than approximated.")
+                        "refused rather than approximated. With a window, rc reflects the DISPATCHED STEPS ONLY; whole-flow verdicts come from --refresh-only or an unbounded run.")
     p.add_argument("--exit-step", default=None,
                    help="STOP the Phase-2 dispatch after this canonical step "
                         "id: forwarded verbatim to the phase2 runner, whose "
@@ -1338,7 +1338,7 @@ def main() -> int:
                         "SKIPPED-BY-EXIT instead of run (the site holding "
                         "the exit still runs in full). Omitted: behaviour is "
                         "unchanged. Pair with --skip-phase3 when the exit "
-                        "precedes physical design.")
+                        "precedes physical design. With a window, rc reflects the DISPATCHED STEPS ONLY; whole-flow verdicts come from --refresh-only or an unbounded run.")
     p.add_argument("--skip-phase1", action="store_true")
     p.add_argument("--skip-analog", action="store_true")
     p.add_argument("--skip-phase3", action="store_true")
@@ -1612,10 +1612,31 @@ def main() -> int:
     if _fd_window_flags:
         try:
             import step_preflight as _spf_w            # noqa: PLC0415
+            # SCOPED TO PHASE 2, DELIBERATELY (review w6wr2g6di, MEDIUM 1).
+            # My r2 cut asked `window_is_effective` with runner=None, i.e. "does
+            # this window prune any site ANYWHERE in the flow". That reads
+            # phase-3 spans -- MEASURED: phase3_one_shot_runner's site heads are
+            # synth 9, pnr 15, gds 37, drc 31, lvs 31 -- so `--exit-step 23/31/33`
+            # came back "bounded". But THIS runner never forwards a window to
+            # phase 3: the phase-3 gate below is `not halted_at and not
+            # args.skip_phase3`, `p3_args` carries top-name/ic-name/container/
+            # die-um/util/pdk and no --entry-step or --exit-step, and
+            # phase3_one_shot_runner has no such flag to receive. So phase 3 ran
+            # IN FULL while this function skipped its tail and published
+            # "dispatched only its declared window" for a 70-step run, with
+            # `not_refreshed_here` empty because phase 3's own tail had just
+            # written both documents. A self-contradicting top-level report.
+            #
+            # Until phase 3 has a window, an exit inside phase 3's spans prunes
+            # nothing, so it must not count. What DOES count is this
+            # orchestrator's own decisions: an entry owned by phase 2 means
+            # Phase 1 does not run here (the line above), and a window that
+            # prunes phase-2 dispatch sites is a window this run acted on.
             _fd_bounded = bool(
                 (args.entry_step and _entry_runner == "design_one_shot_runner")
-                or _spf_w.window_is_effective(entry_step=args.entry_step,
-                                              exit_step=args.exit_step))
+                or _spf_w.window_is_effective(
+                    entry_step=args.entry_step, exit_step=args.exit_step,
+                    runner="design_one_shot_runner"))
         except ImportError:
             # Fail CLOSED toward doing the work: an orchestrator that cannot
             # tell whether its window prunes anything must not silently skip
@@ -1625,10 +1646,11 @@ def main() -> int:
 
     def _fd_disclose(refresh: str, writes: str) -> str:
         why = (f"run declared {' '.join(_fd_window_flags)}; {refresh} is a "
-               f"WHOLE-FLOW refresh ({writes}) and was not run. It restates "
-               f"every step in the flow, and this run dispatched only its "
-               f"declared window: those documents are outside this run's "
-               f"declared proof burden, not missing. Ask for them with "
+               f"WHOLE-FLOW refresh ({writes}) and was not run. That window "
+               f"bounded this run's PHASE-2 dispatch (see `phases` for what each "
+               f"phase did and `declared_window` for the flags), so a document "
+               f"restating every step in the flow is outside this run's declared "
+               f"proof burden, not missing. Ask for it with "
                f"design_one_shot_runner --refresh-only.")
         _fd_disclosures.append({"refresh": refresh, "kind": "skipped",
                                 "writes": writes,

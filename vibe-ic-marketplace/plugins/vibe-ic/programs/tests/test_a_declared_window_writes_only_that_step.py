@@ -85,6 +85,156 @@ def _guarded_by_bounded(root: ast.AST, target: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# -2. the window question is asked of what THIS runner can bound
+# --------------------------------------------------------------------------- #
+def test_an_exit_inside_phase_3_does_not_bound_the_front_door():
+    """Review w6wr2g6di MEDIUM 1. `window_is_effective` with runner=None walks
+    EVERY plan, and phase 3's site heads are synth 9, pnr 15, gds 37, drc 31,
+    lvs 31 -- so `--exit-step 23/31/33` looks like pruning. But the front door
+    never forwards a window to phase 3, so phase 3 runs IN FULL and a front door
+    that called itself bounded published "dispatched only its declared window"
+    for a 70-step run."""
+    spf = _load("step_preflight")
+    D = "design_one_shot_runner"
+    for exit_step in ("23", "31", "33"):
+        assert spf.window_is_effective(exit_step=exit_step) is True, (
+            f"the runner=None form must still answer for the whole flow "
+            f"({exit_step})")
+        assert spf.window_is_effective(exit_step=exit_step, runner=D) is False, (
+            f"--exit-step {exit_step} prunes no phase-2 site; it must not bound "
+            f"a phase-2 dispatch")
+    # and the values that DO prune phase 2 still answer yes in both forms
+    for exit_step in ("2", "4", "9"):
+        assert spf.window_is_effective(exit_step=exit_step, runner=D) is True
+
+
+def test_the_front_door_asks_the_phase2_scoped_question():
+    """It must pass runner=, because phase 3 has no window to receive one."""
+    src = (PROGRAMS / "vibe_ic_one_shot_runner.py").read_text()
+    tree = ast.parse(src)
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    calls = [c for c in _calls(main)
+             if _dotted(c).endswith("window_is_effective")]
+    assert calls, "the front door no longer asks the window question at all"
+    for c in calls:
+        kw = {k.arg for k in c.keywords}
+        assert "runner" in kw, (
+            f"line {c.lineno}: the front door asks the FLOW-WIDE form; an exit "
+            f"inside phase 3's spans would read as pruning while phase 3 runs "
+            f"in full")
+        runner_kw = next(k for k in c.keywords if k.arg == "runner")
+        assert isinstance(runner_kw.value, ast.Constant) and \
+            runner_kw.value.value == "design_one_shot_runner", (
+            "the front door must scope the question to the phase it can bound")
+    # WHY the scoping is needed, pinned so it cannot rot silently: phase 3 is
+    # dispatched without a window. If that ever changes, revisit _fd_bounded.
+    i = src.index("p3_args = [")
+    block = src[i:src.index("runner, p3_args", i)]
+    assert "--entry-step" not in block and "--exit-step" not in block, (
+        "phase 3 now receives a window -- revisit the front door's _fd_bounded "
+        "scoping, which assumes it cannot")
+
+
+def test_dispatched_step_ids_come_from_the_runs_own_record(_=None):
+    """Review w6wr2g6di MEDIUM 2, DRIVEN.
+
+    The site table says every site upstream of the entry is skipped. The
+    dispatch code only asks that for `rtl_gen` and `rtl_validate` -- the only two
+    `_before_entry` guards -- so with `--entry-step 9` the `sim` site, which
+    guards on `_after_exit` alone, DISPATCHES while the table excludes step 4.
+    Quoting the table made `declared_window.dispatched_step_ids` a false
+    statement and would have left step 4's steps-view row unrefreshed after
+    running it."""
+    dsr = _load("design_one_shot_runner")
+    spf = _load("step_preflight")
+    sites = spf.RUNNER_PLANS["design_one_shot_runner"].sites
+
+    # nothing sentinelled -> everything dispatched
+    assert dsr.dispatched_step_ids(sites, set()) == {"1", "2", "3", "4", "9",
+                                                    "11", "12", "13"}
+    # the --entry-step 9 reality: the run books sentinels for the two guarded
+    # sites only, so step 4 IS dispatched and must be reported as dispatched
+    ids = dsr.dispatched_step_ids(sites, {"rtl_gen", "rtl_validate"})
+    assert "4" in ids, (
+        "step 4 ran and was reported out-of-window -- the table's answer, not "
+        "the run's")
+    assert ids == {"4", "9", "11", "12", "13"}
+    # an exit sentinel removes its whole span
+    assert dsr.dispatched_step_ids(sites, {"yosys_synth", "dft_lec_chain"}) == \
+        {"1", "2", "3", "4"}
+    assert dsr.dispatched_step_ids((), {"anything"}) == set()
+
+
+def test_the_id_derivation_reads_the_plan_and_not_the_entry_predicate():
+    """The closure must feed it the run's sentinels, never `_before_entry`."""
+    main = _main_node()
+    fn = next((n for n in ast.walk(main) if isinstance(n, ast.FunctionDef)
+               and n.name == "_window_step_ids"), None)
+    assert fn is not None, "_window_step_ids is gone"
+    body = ast.unparse(fn)
+    assert "_before_entry" not in body, (
+        "the id derivation still asks the site TABLE which sites the entry "
+        "precedes; the dispatch code only asks that for two of five sites")
+    assert "plan" in body and "declared_by" in body, (
+        "the derivation must read the run's own sentinel rows")
+    assert "dispatched_step_ids" in body, (
+        "it must delegate to the drivable module-level function")
+
+
+# --------------------------------------------------------------------------- #
+# -1. what a bounded run's rc does NOT decide
+# --------------------------------------------------------------------------- #
+def test_the_benchmark_scorers_contract_reads_the_report_row_never_rc(tmp_path):
+    """A bounded run's rc answers for its declared window only, and the scorer
+    never asks it.
+
+    THE RULING THIS PINS (R-0924-1, after the r2 review). Every solve the harness
+    dispatches carries a window -- `_solver_argv` sends --exit-step 2/4/9 or
+    --entry-step 2, all of which prune real sites -- so on a bounded run a
+    whole-flow phase-2 audit FAIL would be a verdict over the ~69 steps that did
+    not run. It is booked NOT_APPLICABLE instead, which means rc can differ from
+    base for a solve whose ONLY failure was that audit. That is safe for scoring
+    for one reason, and this arm is that reason: the scorer's contract reads the
+    REPORT ROW, not the exit code.
+
+    MEASURED on a benchmark-shaped solve before and after the change: rc 1 both
+    ways, 32 step rows both ways, and the `rtl_gen` row byte-identical."""
+    bd = _load("benchmark_dispatch")
+    fn = bd._rtl_gen_waive
+    args = fn.__code__.co_varnames[:fn.__code__.co_argcount]
+    assert args == ("project",), (
+        f"the handover contract now takes {args}; if an exit code is ever one of "
+        f"them, a bounded run's rc starts deciding a scoring question")
+
+    rep = tmp_path / "reports" / "orchestrator" / "phase2_one_shot.json"
+    rep.parent.mkdir(parents=True)
+
+    def write(verdict, rows):
+        rep.write_text(json.dumps({"verdict": verdict, "steps": rows}) + "\n")
+
+    waived = [{"name": "rtl_gen", "status": "WAIVED", "detail": "handed over",
+               "extras": {"fallback_skill": "rtl-author"}}]
+    write("PASS", waived)
+    got = fn(tmp_path)
+    assert got == {"fallback_skill": "rtl-author", "detail": "handed over"}, got
+
+    # THE ROW DECIDES, NOT THE RUN'S VERDICT. Same row under a FAIL roll-up --
+    # which is what a bounded run whose window failed publishes -- same answer.
+    write("FAIL", waived)
+    assert fn(tmp_path) == got, "the handover moved with the roll-up verdict"
+    write("NOT_MEASURED", waived)
+    assert fn(tmp_path) == got
+
+    # and no row means no handover, whatever the verdict claims
+    write("PASS", [])
+    assert fn(tmp_path) is None
+    write("PASS", [{"name": "rtl_gen", "status": "WAIVED", "extras": {}}])
+    assert fn(tmp_path) is None, (
+        "a WAIVED row without fallback_skill is not a handover")
+
+
+# --------------------------------------------------------------------------- #
 # 0. the decision itself — DRIVEN, and bound to nothing else
 # --------------------------------------------------------------------------- #
 def test_declared_window_flags_reports_what_the_operator_typed():

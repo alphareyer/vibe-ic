@@ -22558,6 +22558,22 @@ def declared_window_flags(entry_step, exit_step) -> Tuple[str, ...]:
         if value)
 
 
+def dispatched_step_ids(sites, sentinelled_sites) -> set:
+    """The flow step ids a run dispatched, given the sites it SENTINELLED.
+
+    `sites` is step_preflight's ordered (site, span) table for the runner;
+    `sentinelled_sites` names the sites the run booked a window sentinel for.
+    Pure and module level so this can be driven: the version that asked the
+    TABLE which sites the entry precedes disagreed with the dispatch code, which
+    only asks that for two of the five sites (review w6wr2g6di)."""
+    ids: set = set()
+    for name, span in sites or ():
+        if name in (sentinelled_sites or ()):
+            continue
+        ids.update(str(s) for s in span)
+    return ids
+
+
 def run_is_bounded(entry_site, exit_pruned, site_order) -> bool:
     """Does this run's window actually PRUNE dispatch this runner would do?
 
@@ -22700,7 +22716,7 @@ def main() -> int:
                         "started in its middle. The entry's declared inputs "
                         "are checked BEFORE anything is skipped; if they are "
                         "absent the run REFUSES rather than proceeding into a "
-                        "step that has nothing to read.")
+                        "step that has nothing to read. With a window, rc reflects the DISPATCHED STEPS ONLY; whole-flow verdicts come from --refresh-only or an unbounded run.")
     p.add_argument("--exit-step", default=None,
                    help="STOP dispatching after this canonical step id (or "
                         "dispatch-site name): every dispatch site whose WHOLE "
@@ -22713,7 +22729,7 @@ def main() -> int:
                         "the task's evidence class (task_nature_route."
                         "EVIDENCE_EXIT) so a lint-evidence deliverable no "
                         "longer pays for a DFT/LEC chain nothing downstream "
-                        "reads.")
+                        "reads. With a window, rc reflects the DISPATCHED STEPS ONLY; whole-flow verdicts come from --refresh-only or an unbounded run.")
     p.add_argument("--max-rtl-repair-retries", type=int, default=3)
     p.add_argument("--lec-max-completed-rungs",
                    type=_positive_completed_rung_cap, default=None,
@@ -22993,12 +23009,28 @@ def main() -> int:
         steps are in the window" is introduced here, because two notions is how
         a view comes to disagree with the run that produced it."""
         _wplan = _spf.RUNNER_PLANS.get("design_one_shot_runner")
-        _ids: set = set()
-        for _sname, _span in (_wplan.sites if _wplan else ()):
-            if _after_exit(_sname) or _before_entry(_sname, _entry_site):
-                continue
-            _ids.update(str(_s) for _s in _span)
-        return _ids
+        # READ OFF WHAT THE RUN RECORDED, not off the site table (review
+        # w6wr2g6di, MEDIUM 2). The table says a site upstream of the entry is
+        # not dispatched; the dispatch code only asks that for `rtl_gen` and
+        # `rtl_validate` (the only two `_before_entry` guards). MEASURED: with
+        # `--entry-step 9` the entry site is `yosys_synth`, so the table excludes
+        # step 4 -- while the `sim` site guards on `_after_exit` ALONE and
+        # dispatches. The table's answer was therefore a false statement about
+        # this run, in the two places that quote it: `declared_window
+        # .dispatched_step_ids` and the steps view's `only_steps`, which would
+        # have left step 4's row unrefreshed after running it.
+        #
+        # A site was not dispatched exactly when this run booked a WINDOW
+        # SENTINEL for it: both sentinels are named for the site, status
+        # NOT_APPLICABLE, and carry `declared_by="--entry-step N"` or
+        # `"--exit-step N"`. Deriving from that cannot disagree with the run,
+        # because it IS the run's own record. (Closing the guard gap itself is a
+        # change to what DISPATCHES and is not this change's to make.)
+        _sentinelled = {
+            _s.name for _s in plan
+            if _s.status == "NOT_APPLICABLE"
+            and str(getattr(_s, "declared_by", "") or "").startswith("--")}
+        return dispatched_step_ids(_wplan.sites if _wplan else (), _sentinelled)
 
     _lock = _runner_lock.acquire_or_reenter(project, "design_one_shot_runner")
     if _lock is None:
