@@ -86,14 +86,17 @@ def test_failed_blocked_and_absent_pnr_do_not_continue():
 def test_the_chain_gate_is_wired_to_the_predicate():
     """A predicate nothing calls is not a fix."""
     src = inspect.getsource(R.main)
-    assert "_pdn_em_resize_chain_continues(\n            _pnr_row, _rz_post_status)" in src, (
+    assert "_ppa_power._pdn_em_resize_chain_continues(\n            _pnr_row, _rz_post_status, _pnr_chain_continues)" in src, (
         "main() no longer derives the stream-out chain from PnR and the "
         "post-resize EM verdict")
     waived = _row("PASS_WITH_WAIVERS", pnr_signoff_writes_complete=True,
                   route_residual_waiver={"ticket": "vibe-ic#1412"})
-    assert R._pdn_em_resize_chain_continues(waived, "PASS") is True
-    assert R._pdn_em_resize_chain_continues(waived, "FAIL") is False
-    assert R._pdn_em_resize_chain_continues(_row("FAIL"), "PASS") is False
+    assert R._ppa_power._pdn_em_resize_chain_continues(
+        waived, "PASS", R._pnr_chain_continues) is True
+    assert R._ppa_power._pdn_em_resize_chain_continues(
+        waived, "FAIL", R._pnr_chain_continues) is False
+    assert R._ppa_power._pdn_em_resize_chain_continues(
+        _row("FAIL"), "PASS", R._pnr_chain_continues) is False
     assert '_pnr_row.status == "PASS"' not in src, (
         "main() still tests the PnR row's status literally against PASS -- "
         "that is the exact test that dropped the WAIVED stream-out")

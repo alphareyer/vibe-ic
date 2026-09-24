@@ -73,7 +73,7 @@ import re
 import sys
 from pathlib import Path
 
-from typing import (Any, Dict, List, Mapping, Optional, Sequence,
+from typing import (Any, Callable, Dict, List, Mapping, Optional, Sequence,
                     Tuple)
 
 import _path_layout as _pl
@@ -1629,6 +1629,45 @@ def emit_signoff_record(project: Path, power_rpt: Path, out: Path,
 #: spelling, so the producer that RECORDS the subject and the consumer that
 #: CHECKS it cannot drift apart.
 _PDN_EM_SUBJECT_DEF = "routed.def"
+
+
+def _pdn_em_post_resize_check(project: Path, top: str, pdk: Any,
+                              container: str,
+                              emit_ir_em_reports: Callable[..., Any],
+                              emit_em_current_authority: Callable[..., Any]
+                              ) -> Tuple[str, str]:
+    """Measure the second DEF before it can advance to GDS."""
+    rpt3 = _pl.reports_phase3_dir(project)
+    def_file = _pl.pnr_dir(project) / f"{top}.def"
+    if not def_file.is_file():
+        return "NOT_MEASURED", "PDN_EM_POSTCHECK_NO_DEF"
+    notes: List[str] = []
+    try:
+        rpt3.mkdir(parents=True, exist_ok=True)
+        em_rpt = rpt3 / "em.rpt"
+        emit_ir_em_reports(project, top, pdk, container,
+                           rpt3 / "ir_drop.rpt", em_rpt, notes)
+        if not em_rpt.is_file() or em_rpt.stat().st_mtime < def_file.stat().st_mtime:
+            return "NOT_MEASURED", "PDN_EM_POSTCHECK_STALE_REPORT"
+        if not emit_em_current_authority(project, pdk, container, notes):
+            return "NOT_MEASURED", "PDN_EM_POSTCHECK_AUTHORITY_MISSING: " + "; ".join(notes)
+        doc = json.loads((rpt3 / "em_current_authority.json").read_text())
+        verdict = doc.get("verdict")
+        if verdict == "PASS":
+            return "PASS", "PDN_EM_JMAX_CLOSED: final DEF segment screen PASS"
+        if verdict == "FAIL":
+            count = (doc.get("jmax_screen") or {}).get("offender_count")
+            return "FAIL", f"PDN_EM_JMAX_UNCLOSED: {count} final DEF segment(s) exceed Jmax"
+        return "NOT_MEASURED", f"PDN_EM_POSTCHECK_UNRESOLVED: {verdict}"
+    except Exception as exc:
+        return "NOT_MEASURED", f"PDN_EM_POSTCHECK_ERROR: {exc}"
+
+
+def _pdn_em_resize_chain_continues(pnr_row: Any, post_status: str,
+                                   pnr_chain_continues: Callable[[Any], bool]
+                                   ) -> bool:
+    """A one-shot resize may proceed to GDS only after measured EM closure."""
+    return pnr_chain_continues(pnr_row) and post_status == "PASS"
 
 
 def _pdn_em_spent_on(project: Path) -> Optional[str]:
