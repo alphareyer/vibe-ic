@@ -735,9 +735,25 @@ def _is_removal_record(rec: Dict[str, Any]) -> bool:
             or bool(rec.get("removed")))
 
 
+def _removes(rec: Dict[str, Any], rel: str) -> bool:
+    """True when `rec` is a removal event that lists `rel` -- the shape
+    `_append_removal_event` writes and the hash check reads by ledger index."""
+    if not _is_removal_record(rec):
+        return False
+    for key in ("removed", "superseded", "removed_outputs", "pruned",
+                "supersedes"):
+        for ref in (rec.get(key) or []):
+            if (ref.get("path") if isinstance(ref, dict) else ref) == rel:
+                return True
+    return False
+
+
 def _newest_declared_sha(project: Path, rel: str) -> Optional[str]:
     """The sha the NEWEST production record of `rel` declares (failed
-    invocations and removal events excluded), or None when none declares it."""
+    invocations and removal events excluded), or None when none declares it.
+    A removal event of `rel` NEWER than its last declaration ends that life:
+    the answer is None, and the next write is a first declaration (the hash
+    check reads a removal by ledger index the same way)."""
     prov = Path(project) / "provenance.jsonl"
     newest: Optional[str] = None
     try:
@@ -748,7 +764,11 @@ def _newest_declared_sha(project: Path, rel: str) -> Optional[str]:
                 rec = json.loads(ln)
             except ValueError:
                 continue
-            if not isinstance(rec, dict) or _is_removal_record(rec):
+            if not isinstance(rec, dict):
+                continue
+            if _is_removal_record(rec):
+                if _removes(rec, rel):
+                    newest = None
                 continue
             try:
                 if int(rec.get("exit_code", 0)) != 0:
@@ -50133,6 +50153,13 @@ def _v1_6_620_append_pv_signoff_provenance(project: Path, top: str) -> List[str]
                 _ledger.append(_doc)
 
     def _newest(rel: str) -> Optional[dict]:
+        # A removal of `rel` newer (by ledger index) than every declaration of
+        # it ends that life: the bytes now at the path are a FIRST declaration.
+        _rm = [i for i, e in enumerate(_ledger) if _removes(e, rel)]
+        _decl = [i for i, e in enumerate(_ledger)
+                 if rel in (e.get("outputs") or {})]
+        if _rm and (not _decl or max(_rm) > max(_decl)):
+            return None
         cands = [e for e in _ledger if rel in (e.get("outputs") or {})]
         if not cands:
             return None
@@ -50324,6 +50351,10 @@ def _restamp_provenance_output(project: Path, rel: str, path: Path,
             try:
                 _rec = json.loads(_ln)
             except Exception:
+                continue
+            if isinstance(_rec, dict) and _removes(_rec, rel):
+                # a removal newer than every declaration: a first write again
+                _found, _newest_sha = False, None
                 continue
             _outs = _rec.get("outputs", {})
             if isinstance(_outs, dict) and rel in _outs:
