@@ -331,9 +331,9 @@ the moment eight rows were added up. See `substitution.py`.
 
 <!-- BEGIN GENERATED CENSUS — tools/gen_flow_matrix_census.py — DO NOT EDIT BY HAND -->
 
-**630 cells: 549 ENFORCED, 0 ENFORCED-CONTRADICTED, 7 WAIVED, 17 NA, 10 NOT_MEASURED, 45 ENFORCED-SKIPPED, 2 WAIVED-SKIPPED.**
+**630 cells: 549 ENFORCED, 3 ENFORCED-CONTRADICTED, 5 WAIVED, 16 NA, 10 NOT_MEASURED, 45 ENFORCED-SKIPPED, 2 WAIVED-SKIPPED.**
 
-The 0 CONTRADICTED cells are configured as enforcing while their own predicate is currently RED. They are NOT folded into the 549: a cell whose predicate fails is not evidence of enforcement. See vibe-ic#888.
+The 3 CONTRADICTED cells are configured as enforcing while their own predicate is currently RED. They are NOT folded into the 549: a cell whose predicate fails is not evidence of enforcement. See vibe-ic#888.
 
 Corpus at generation: NOT_OFFERED — no published cell was read. Every figure below is a function of this commit alone.
 
@@ -341,24 +341,24 @@ Corpus at generation: NOT_OFFERED — no published cell was read. Every figure b
 
 `ENFORCED` is published SPLIT, because it is not one thing. It means a live predicate ran and passed; it does not say WHAT it ran against, and that turns out to be three different answers:
 
-* **5** — measured against the step's OWN mechanism. This is the only figure that means what "enforcing" sounds like, and it is a floor: the two rows below are not evidence against it, they are the part nobody has evidence for.
-* **133** — measured against a SUBSTITUTED stand-in. The predicate runs and passes; what it exercises is not the mechanism the cell is named after. Each one carries a disclosure from the module that owns it.
+* **3** — measured against the step's OWN mechanism. This is the only figure that means what "enforcing" sounds like, and it is a floor: the two rows below are not evidence against it, they are the part nobody has evidence for.
+* **135** — measured against a SUBSTITUTED stand-in. The predicate runs and passes; what it exercises is not the mechanism the cell is named after. Each one carries a disclosure from the module that owns it.
 * **411** — in dimensions that have not answered the question at all. NOT counted as clean: UNDECLARED is a state, not a synonym for "own mechanism". See `substitution.py`, "WHY UNDECLARED IS A STATE AND NOT A DEFAULT".
 
-The 7 WAIVED and 17 NA cells are not enforcing anything and enter none of those columns. There is deliberately no single "enforcing" total to quote.
+The 5 WAIVED and 16 NA cells are not enforcing anything and enter none of those columns. There is deliberately no single "enforcing" total to quote.
 
 | dim | question | ENFORCED: own | ENFORCED: substituted | ENFORCED: undeclared | CONTRADICTED | NOT MEASURED | WAIVED | NA |
 |-----|----------|--------------:|----------------------:|---------------------:|-------------:|-------------:|-------:|---:|
 | 1 | `wiring` — Is the gate actually wired — does something real parse and execute it? | 0 | 0 | 70 | 0 | 0 | 0 | 0 |
-| 2 | `falsifiable` — Can the gate fail? Is there a reachable non-zero-exit branch? | 0 | 0 | 67 | 0 | 0 | 2 | 1 |
+| 2 | `falsifiable` — Can the gate fail? Is there a reachable non-zero-exit branch? | 0 | 0 | 67 | 3 | 0 | 0 | 0 |
 | 3 | `outputs_produced` — Are the declared required_outputs genuinely produced? | 0 | 0 | 0 | 0 | 57 | 0 | 13 |
 | 4 | `criteria_match` — Does the gate measure what its name and docstring claim it measures? | 0 | 0 | 70 | 0 | 0 | 0 | 0 |
 | 5 | `deps_correct` — Is blocks_on the true upstream set — no missing and no phantom edge? | 0 | 0 | 69 | 0 | 0 | 1 | 0 |
 | 6 | `skip_discipline` — Is every skip / vacuous-pass disclosed rather than counted as a pass? | 0 | 0 | 70 | 0 | 0 | 0 | 0 |
 | 7 | `outputs_list_complete` — Is required_outputs complete — does the step emit artefacts it never declares? | 0 | 0 | 65 | 0 | 0 | 4 | 1 |
-| 8 | `missing_caught` — When a declared output IS missing, which mechanism catches it? | 4 | 64 | 0 | 0 | 0 | 0 | 2 |
+| 8 | `missing_caught` — When a declared output IS missing, which mechanism catches it? | 2 | 66 | 0 | 0 | 0 | 0 | 2 |
 | 9 | `verdict_consumed` — When this step FAILs, does the verdict reach the exit code — or is it reported and discarded? | 1 | 69 | 0 | 0 | 0 | 0 | 0 |
-| **total** | | **5** | **133** | **411** | **0** | **57** | **7** | **17** |
+| **total** | | **3** | **135** | **411** | **3** | **57** | **5** | **16** |
 
 **NOT MEASURED is not a pass and not a defect.** Those 57 cells have a predicate that declined to run, naming a resource it could not reach — most often a published corpus this checkout does not carry. They are counted here so a dimension whose cells could not be driven cannot read as a dimension with nothing to report; read them as UNKNOWN, never as coverage.
 
