@@ -446,31 +446,76 @@ def test_the_helper_refuses_to_write_the_report_card_when_bounded():
 def test_the_whole_flow_final_audit_is_guarded_by_the_window():
     """A whole-flow verdict over a tree 69 of whose 70 steps did not run is the
     PREVIOUS run's state re-attributed to this one."""
-    assert _guarded_by_bounded(_main_node(), "step_final_audit"), (
-        "step_final_audit is reachable without consulting _bounded")
+    assert _guarded_by_bounded(_main_node(), "_audit_after_declared_producers"), (
+        "the whole-flow audit is reachable without consulting _bounded")
 
 
 def test_the_declared_producer_sweep_is_guarded_by_the_window():
-    """It executes the producers the flow declares for EVERY step."""
-    main = _main_node()
-    sweeps = [c for c in _calls(main)
-              if any(isinstance(a, ast.Call) or isinstance(a, ast.List)
-                     for a in c.args)
-              and "flow_declared_producer_run.py" in ast.dump(c)]
-    assert sweeps, "the declared-producer sweep call was not found in main()"
-    guarded = []
+    """Every path from main to the all-step producer sweep is bounded."""
+    tree = ast.parse(RUNNER.read_text())
+    helper = next((n for n in tree.body if isinstance(n, ast.FunctionDef)
+                   and n.name == "_audit_after_declared_producers"), None)
+    assert helper is not None, "the declared-producer audit helper was not found"
+    assert "flow_declared_producer_run.py" in ast.dump(helper), (
+        "the bounded guard no longer encloses the declared-producer sweep")
+
+    def own_calls(fn):
+        # ast.walk(main) also enters nested function definitions that main may
+        # never call. Count their calls only through the call graph below.
+        class Calls(ast.NodeVisitor):
+            def __init__(self):
+                self.found = []
+
+            def visit_FunctionDef(self, node):
+                pass
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Call(self, node):
+                self.found.append(node)
+                self.generic_visit(node)
+
+        visitor = Calls()
+        for stmt in fn.body:
+            visitor.visit(stmt)
+        return visitor.found
+
+    def runs_sweep(call):
+        return any(isinstance(n, ast.Constant)
+                   and n.value == "flow_declared_producer_run.py"
+                   for n in ast.walk(call))
+
+    functions = {fn.name: fn for fn in ast.walk(tree)
+                 if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    reaches_sweep = {name for name, fn in functions.items()
+                     if any(runs_sweep(c) for c in own_calls(fn))}
+    while True:
+        callers = {name for name, fn in functions.items()
+                   if any(_dotted(c) in reaches_sweep for c in own_calls(fn))}
+        expanded = reaches_sweep | callers
+        if expanded == reaches_sweep:
+            break
+        reaches_sweep = expanded
+
+    main = functions["main"]
+    sweep_calls = [c for c in own_calls(main)
+                   if runs_sweep(c) or _dotted(c) in reaches_sweep]
+    assert sweep_calls, "the declared-producer sweep call was not found in main()"
+    guarded = set()
     for node in ast.walk(main):
         if not isinstance(node, ast.If):
             continue
         if "_bounded" not in {n.id for n in ast.walk(node.test)
                               if isinstance(n, ast.Name)}:
             continue
-        for branch in (node.body, node.orelse):
-            for stmt in branch:
-                guarded.extend(c for c in _calls(stmt)
-                               if "flow_declared_producer_run.py" in ast.dump(c))
-    assert all(any(g is c for g in guarded) for c in sweeps), (
-        "the declared-producer sweep runs without consulting _bounded")
+        for stmt in (*node.body, *node.orelse):
+            # Keep the same branch rule as the original universal guard.
+            visitor = ast.Module(body=[stmt], type_ignores=[])
+            guarded.update(id(c) for c in own_calls(visitor))
+    unguarded = [c.lineno for c in sweep_calls if id(c) not in guarded]
+    assert not unguarded, (
+        f"the declared-producer sweep runs without consulting _bounded "
+        f"at main() line(s) {unguarded}")
 
 
 def test_the_narrowed_refreshes_are_disclosed_as_narrowed_not_as_skipped():
