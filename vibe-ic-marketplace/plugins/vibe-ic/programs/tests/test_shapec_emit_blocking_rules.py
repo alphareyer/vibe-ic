@@ -17,7 +17,9 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import spec_conformance_check as scc  # noqa: E402
+from _ai_judgement_fixture import run_atomic_gate_with_expert_answer  # noqa: E402
 from _specrtl_common import Port, extract_spec_contract, parse_rtl_ports, strip_comments  # noqa: E402
 
 HARNESS = Path(__file__).resolve().parent.parent.parent / "benchmark"
@@ -154,11 +156,14 @@ def _stage(tmp_path, sample_body: str):
     return ds, tmp_path / "run"
 
 
-def _run_gate(ds, run):
-    return _pr.run(
-        [sys.executable, str(GATES), "--prob", "ProbT",
-         "--workdir", str(run / "work"), "--dataset", str(ds),
-         "--prompt-suffix", "_prompt.txt", "--top-module", "TopModule"],
+def _run_gate(ds, run, *, prove_unsigned=False):
+    cmd = [sys.executable, str(GATES), "--prob", "ProbT",
+           "--workdir", str(run / "work"), "--dataset", str(ds),
+           "--prompt-suffix", "_prompt.txt", "--top-module", "TopModule"]
+    wd = run / "work" / "ProbT"
+    return run_atomic_gate_with_expert_answer(
+        cmd, _pr.run, wd / "phase1_proj", wd / "spec.yaml",
+        ds / "ProbT_prompt.txt", prove_unsigned=prove_unsigned,
         capture_output=True, text=True)
 
 
@@ -188,7 +193,7 @@ def test_gate_emits_after_fix(tmp_path):
         "  always @(posedge clk) state <= in;\n"
         "  assign out = state;\n"
         "endmodule\n")
-    r = _run_gate(ds, run)
+    r = _run_gate(ds, run, prove_unsigned=True)
     assert r.returncode == 0, r.stdout + r.stderr
     gates = json.loads((run / "work" / "ProbT" / "gates.json").read_text())
     assert gates["hard_gates_pass"] is True
@@ -246,11 +251,13 @@ def _stage_fold(tmp_path, prompt_text, sample_body):
 
 
 def _run_fold_gate(ds, run):
-    return _pr.run(
-        [sys.executable, str(GATES), "--prob", "ProbF",
-         "--workdir", str(run / "work"), "--dataset", str(ds),
-         "--prompt-suffix", "_prompt.txt", "--top-module", "TopModule"],
-        capture_output=True, text=True)
+    cmd = [sys.executable, str(GATES), "--prob", "ProbF",
+           "--workdir", str(run / "work"), "--dataset", str(ds),
+           "--prompt-suffix", "_prompt.txt", "--top-module", "TopModule"]
+    wd = run / "work" / "ProbF"
+    return run_atomic_gate_with_expert_answer(
+        cmd, _pr.run, wd / "phase1_proj", wd / "spec.yaml",
+        ds / "ProbF_prompt.txt", capture_output=True, text=True)
 
 
 @_needs_gate

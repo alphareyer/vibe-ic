@@ -173,8 +173,8 @@ def _run(tmp_path, monkeypatch, *, n_subgate_waivers=0, waived_steps=(),
     _RUN_SEQ[0] += 1
     proj = tmp_path / (f"proj_{_RUN_SEQ[0]:02d}_sub{n_subgate_waivers}"
                        f"_steps{len(waived_steps)}")
-    (proj / "rtl").mkdir(parents=True)
-    (proj / "rtl" / "top.v").write_text(
+    (proj / "phase2/stage1/rtl").mkdir(parents=True)
+    (proj / "phase2/stage1/rtl" / "top.v").write_text(
         "module top(input a, output b); assign b = a; endmodule\n")
     if waived_steps:
         (proj / "waivers.json").write_text(json.dumps({"waived_steps": [

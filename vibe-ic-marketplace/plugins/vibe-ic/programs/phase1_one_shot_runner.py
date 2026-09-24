@@ -1510,6 +1510,14 @@ def run_second_pass_only(project: Path, ic_name: str) -> int:
     summary["ai_judgements"] = _ai_judgement.pending(project, ("D1",))
     if not summary["ai_judgements"] and rc == 0:
         _ai_judgement.restore_runner_rows(summary.get("steps", []))
+        # The carried row's program_detail describes pass 1, when the expert
+        # pack was still awaiting an answer. Its status may now be restored to
+        # PASS, but that old prose must not claim HANDOFF_EMITTED after this
+        # pass consumed the signed answer.
+        for row in summary.get("steps", []):
+            if (row.get("name") == "phase1_expert_parse_track"
+                    and row.get("status") in ("PASS", "PASS_WITH_WAIVERS")):
+                row["detail"] = summary["second_track"]
     _ai_judgement.demote_runner_rows(summary.get("steps", []), summary["ai_judgements"])
     if summary["ai_judgements"] and summary["verdict"] in ("PASS", "PASS_WITH_WAIVERS"):
         summary["verdict"] = "NOT_MEASURED"
