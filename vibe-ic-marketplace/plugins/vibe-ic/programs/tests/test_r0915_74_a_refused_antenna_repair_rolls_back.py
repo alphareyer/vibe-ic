@@ -119,14 +119,19 @@ def test_every_refusal_path_records_the_refusal(marker, window):
     assert "set _ant_refused" in seg, seg
 
 
-def test_the_retired_retry_marker_is_gone_from_the_emitted_deck():
-    """The counterpart to the parametrization above: REPAIR_ANTENNA_NONFATAL
-    was dropped from it because R-0915-116(2)(iii) removed the exit, not
-    because the exit stopped recording its refusal. Pin the removal, so the
-    branch cannot come back unrecorded."""
+def test_the_retired_in_session_fallback_stays_gone():
+    """Only a fresh session restored from the pre-pass ODB may full-route.
+
+    The old immediate fallback routed an already damaged in-memory design.
+    The recovery path is gated by the parent's flag and retains the explicit
+    refusal path if its complete route or placement fails.
+    """
     t = _code()
     assert "REPAIR_ANTENNA_NONFATAL" not in t
-    assert not _invokes("detailed_route")
+    assert "set _ant_full_retry [expr {[info exists ::_vic_antenna_full_route]" in t
+    assert t.index("if {$_ant_full_retry}") < t.index("detailed_route {*}$_vic_drc_opt")
+    assert "ANTENNA_FULL_ROUTE_REFUSED" in t
+    assert "set _ant_damage 1" in t
 
 
 def _invokes(cmd: str) -> bool:

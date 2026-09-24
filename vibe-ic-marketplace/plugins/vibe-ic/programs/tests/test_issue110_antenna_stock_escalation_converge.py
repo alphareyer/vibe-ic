@@ -217,24 +217,23 @@ def test_stock_path_no_false_convergence_when_residual_persists():
     assert "ANTENNA_POSTROUTE_DONE" in res.stdout
 
 
-def test_the_loop_never_full_routes_by_either_command():
+def test_full_route_requires_the_parent_restored_retry():
     """WAS `test_block_degrades_without_reroute_and_never_full_global_routes`,
     which required BOTH the no-`-reroute` retry AND a whole-design
     `detailed_route` to be present in the emitted deck.
 
-    R-0915-116(2)(iii) deletes both. The half of the old property that still
-    holds -- and that this test now pins on both commands instead of one --
-    is that NO WHOLE-DESIGN ROUTE OF ANY KIND belongs in this loop: not the
-    full `global_route` (the ibex ~1900-net reroute timeout this file was
-    written for), and not the full `detailed_route` (the spm/subservient
-    measurements in the module docstring). The assertions are inverted, not
-    dropped, so neither can return unnoticed."""
+    R-0915-116(2)(iii) deleted the immediate in-session fallback. The scoped
+    path and the ban on full `global_route` remain. A later measured DRT-0712
+    permits one complete detailed route only after the parent restores an
+    untouched ODB in a new session; failure still refuses that transaction."""
     cmds = "\n".join(ln for ln in R._antenna_repair_tcl(_pdk()).splitlines()
                      if not ln.lstrip().startswith("#"))
     assert not _invokes_cmd(cmds, "global_route")
-    assert not _invokes_cmd(cmds, "detailed_route")
-    # the retry that needed a route to realise it is gone with it
-    assert "repair_antennas sky130_fd_sc_hd__diode_2 -iterations 1 " \
-           "-ratio_margin $_ant_margin}" not in cmds
+    # The ordinary path keeps the native scoped reroute. A complete route is
+    # allowed only under the parent's fresh-ODB retry flag after DRT-0712.
+    assert _invokes_cmd(cmds, "detailed_route")
+    assert cmds.index("if {$_ant_full_retry}") < cmds.index(
+        "detailed_route {*}$_vic_drc_opt")
+    assert "ANTENNA_FULL_ROUTE_REFUSED" in cmds
     # the native incremental path -- repair AND reroute in one call -- remains
     assert "-reroute" in cmds

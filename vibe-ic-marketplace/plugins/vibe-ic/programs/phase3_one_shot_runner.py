@@ -26989,7 +26989,14 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
     with a violating pin), so the net-count return value is a sufficient gate. The
     skip path runs NO reroute, so it cannot disturb the main route's wires.
     Only when violations remain (or the precheck cannot measure) do we pay the
-    proven incremental repair loop above."""
+    proven incremental repair loop above.
+
+    A scoped DRT-0712 now has one exceptional path: the parent first restores
+    the pre-pass ODB in a new process and sets `_vic_antenna_full_route`. Only
+    there does this emitter run a complete detailed route after diode insertion.
+    Its router DRC, wire census, placement and antenna counts must all pass;
+    otherwise the parent restores the protected seed and reports the refusal.
+    This never retries a damaged in-memory route."""
     if not pdk.antenna_diode_cell:
         return ("puts \"ANTENNA_REPAIR_SKIPPED: no diode cell for this PDK; "
                 "antenna violations need manual diode ECO\"\n")
@@ -27643,14 +27650,60 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "    }\n"
         + _ant_rmfill.replace("\n", "\n    ").rstrip(" ")
         + "    set _ant_fill_removed 1\n"
-        "    if {[catch {repair_antennas "
+        # A fresh-session retry may choose a complete route after a scoped
+        # DRT-0712. It starts from the pre-pass ODB, never the damaged DB.
+        # Keep the ordinary scoped path for designs where it succeeds.
+        "    set _ant_full_retry [expr {[info exists ::_vic_antenna_full_route] "
+        "&& $::_vic_antenna_full_route}]\n"
+        "    if {$_ant_full_retry} {\n"
+        "      puts \"ANTENNA_FULL_ROUTE_RETRY: scoped router added DRC; "
+        "retrying from the verified pre-pass ODB\"\n"
+        "      set _ant_route_rc [catch {repair_antennas "
+        f"{pdk.antenna_diode_cell}"
+        " -iterations 1 -ratio_margin $_ant_margin {*}$_ant_mode} _ra_native]\n"
+        "      if {!$_ant_route_rc} {\n"
+        "        if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
+        "        set _ant_route_rc [catch {detailed_route {*}$_vic_drc_opt} "
+        "_ra_native]\n"
+        "      }\n"
+        "      if {!$_ant_route_rc} {\n"
+        "        set _ant_missing {}\n"
+        "        foreach _ant_w1 [$_ant_blk getNets] {\n"
+        "          if {[$_ant_w1 isSpecial]} { continue }\n"
+        "          set _ant_name [$_ant_w1 getName]\n"
+        "          if {[info exists _ant_wire0($_ant_name)] "
+        "&& [$_ant_w1 getWire] eq \"NULL\"} { "
+        "lappend _ant_missing $_ant_name }\n"
+        "        }\n"
+        "        if {[llength $_ant_missing]} {\n"
+        "          set _ra_native \"ANTENNA_FULL_ROUTE_LOST_WIRES: "
+        "[llength $_ant_missing] net(s) -- [join "
+        "[lrange $_ant_missing 0 7] {, }]\"\n"
+        "          set _ant_route_rc 1\n"
+        "        } elseif {[catch {check_placement} _ant_place] "
+        "|| $_ant_place != 0} {\n"
+        "          set _ra_native \"ANTENNA_FULL_ROUTE_PLACEMENT_FAILED: "
+        "$_ant_place\"\n"
+        "          set _ant_route_rc 1\n"
+        "        } else { puts \"ANTENNA_FULL_ROUTE_VERIFIED: router DRC 0, "
+        "all previously wired nets still wired, placement 0\" }\n"
+        "      }\n"
+        "    } else {\n"
+        "      set _ant_route_rc [catch {repair_antennas "
         f"{pdk.antenna_diode_cell}"
         " -iterations 1 -ratio_margin $_ant_margin {*}$_ant_mode -reroute} "
-        "_ra_native]} {\n"
+        "_ra_native]\n"
+        "    }\n"
+        "    if {$_ant_route_rc} {\n"
         "      # FALLBACK (build without -reroute): external repair then an\n"
         "      # incremental detailed_route of the diode-dirty nets.\n"
         "      puts \"ANTENNA_NATIVE_REROUTE_NONFATAL: $_ra_native\"\n"
         "      set _ant_refused \"ANTENNA_NATIVE_REROUTE_NONFATAL: $_ra_native\"\n"
+        "      if {$_ant_full_retry} {\n"
+        "        puts \"ANTENNA_FULL_ROUTE_REFUSED: $_ra_native\"\n"
+        "        set _ant_damage 1\n"
+        "        break\n"
+        "      }\n"
         + _ant_futile_remove.replace("\n    ", "\n      ").replace("    if {[array", "      if {[array", 1) +
         # R-0915-116(2) — THE OBJECTIVE IS THE VIOLATION COUNT, AND THE
         # WHOLE-DESIGN FALLBACK IS DELETED.
@@ -33590,6 +33643,20 @@ def antenna_refused_without_checkpoint(log_text: str) -> Optional[str]:
     return None
 
 
+def _antenna_full_retry_modified_after_verification(log_text: str) -> bool:
+    """Judge the retry's actual mutation markers after its router verification.
+
+    `REPAIR_ANTENNA_DONE` is printed only after the full detailed route returns;
+    it records completion and does not change geometry. The generic historical
+    predicate treats that marker as a mutation, which would reject a measured
+    DRT=0 recovery and mark its disclosure unverified.
+    """
+    verified_log = "\n".join(
+        line for line in log_text.splitlines()
+        if "REPAIR_ANTENNA_DONE" not in line)
+    return route_modified_after_last_verification(verified_log)
+
+
 def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
                                          out_dir_c: str, pnr_tcl: Path,
                                          log_text: str,
@@ -33650,6 +33717,78 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
         rec["route_verified"] = False
         rec["rc"] = 1
         return rec
+    # A scoped DRT-0712 is a router refusal, not evidence that the diode is
+    # impossible. Retry once from a separate copy of the intact pre-pass ODB.
+    # The failed session is never reused: it may have stripped other wires.
+    # The copy also protects the rollback seed if the retry writes its normal
+    # per-pass checkpoint and then fails.
+    if ("ANTENNA_NATIVE_REROUTE_NONFATAL: DRT-0712" in log_text
+            and ckpt_name == _ANTENNA_PASS_CHECKPOINT_NAME):
+        seed = out_dir / "antenna_full_retry_seed.odb"
+        seed_c = f"{out_dir_c}/{seed.name}"
+        try:
+            shutil.copyfile(ckpt, seed)
+            deck = pnr_tcl.read_text(errors="replace")
+            retry_tail = _build_pnr_resume_tcl_text(
+                deck, checkpoint_def_c=seed_c,
+                omit_stages=["postroute_drv_repair"],
+                restore_odb_c=seed_c,
+                after_restore_tcl=_after_restore_tcl(
+                    deck, spare_plan, reroutes_immediately=False)
+                + "\nset ::_vic_antenna_full_route 1\n")
+            retry_tail = _route_drc_report_tcl(
+                f"{out_dir_c}/{ROUTER_DRC_REPORT_NAME}") + retry_tail
+            retry_name = "pnr_antenna_full_retry.tcl"
+            retry_log = "pnr_antenna_full_retry.log"
+            (out_dir / retry_name).write_text(retry_tail)
+            retry_cmd = (f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
+                         f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
+                         f"openroad -no_init -exit {out_dir_c}/{retry_name} "
+                         f"2>&1 | tee {out_dir_c}/{retry_log}")
+            retry_rc, retry_out, retry_err = _declared_session_exec(
+                container, retry_cmd,
+                _pnr_tail_products(out_dir, out_dir_c, retry_tail),
+                marker=f"{out_dir_c}/{retry_name}",
+                log_path=out_dir / retry_log, hard_ceiling_s=hard_ceiling_s)
+            retry_text = (retry_out or "") + (retry_err or "")
+            antenna_nets = re.findall(
+                r"\[INFO ANT-0002\] Found (\d+) net violations?\.",
+                retry_text)
+            antenna_pins = re.findall(
+                r"\[INFO ANT-0001\] Found (\d+) pin violations?\.",
+                retry_text)
+            retry_clean = (retry_rc == 0
+                           and "ANTENNA_FULL_ROUTE_VERIFIED:" in retry_text
+                           and "ANTENNA_LOOP_CONVERGED:" in retry_text
+                           and "[INFO DRT-0702] Post-route verification: "
+                           "0 violation(s)." in retry_text
+                           and bool(antenna_nets) and antenna_nets[-1] == "0"
+                           and bool(antenna_pins) and antenna_pins[-1] == "0"
+                           and "ANTENNA_REPAIR_REFUSED_" not in retry_text
+                           and not _antenna_full_retry_modified_after_verification(
+                               retry_text))
+            if retry_clean:
+                rec.update(status="RECOVERED", antenna_repair="APPLIED",
+                           reason="SCOPED_DRC_RECOVERED_BY_FULL_ROUTE",
+                           checkpoint=str(seed), tcl=retry_name,
+                           log=retry_log, rc=0, route_verified=True,
+                           combined_log=("\n=== PNR ANTENNA FULL ROUTE RETRY "
+                                         "===\n" + retry_text))
+                return rec
+            cause = next((line.strip() for line in reversed(
+                retry_text.splitlines())
+                if ("ANTENNA_FULL_ROUTE_REFUSED:" in line
+                    or "ANTENNA_LOOP_NOT_CONVERGED:" in line
+                    or "[ERROR DRT-" in line)), "no native cause recorded")
+            rec["recovery_reason"] = (
+                f"ANTENNA_FULL_ROUTE_NOT_VERIFIED: rc={retry_rc}; "
+                f"cause={cause[:500]}; router DRC, wire, placement, antenna "
+                "and final route verification must all succeed")
+        except (OSError, PnrResumeUnavailable) as exc:
+            rec["recovery_reason"] = f"ANTENNA_FULL_ROUTE_UNAVAILABLE: {exc}"
+        # Never restore from the checkpoint that the retry might have replaced.
+        if seed.is_file():
+            ckpt, ckpt_c = seed, seed_c
     try:
         deck = pnr_tcl.read_text(errors="replace")
         tail_text = _build_pnr_resume_tcl_text(
@@ -33689,7 +33828,9 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
     rec["rc"] = t_rc
     rec["status"] = "ROLLED_BACK" if t_rc == 0 else "FAILED"
     rec["antenna_repair"] = "NOT_APPLIED"
-    rec["reason"] = req["reason"]
+    rec["reason"] = (req["reason"] +
+                     ("; " + rec["recovery_reason"]
+                      if rec.get("recovery_reason") else ""))
     rec["checkpoint"] = str(ckpt)
     rec["tcl"] = tail_name
     rec["log"] = tail_log
@@ -33719,7 +33860,9 @@ def _disclose_antenna_rollback(project: Path, out_dir: Path,
     if not records:
         return None
     rec = records[-1]
-    modified_after = route_modified_after_last_verification(log_text)
+    modified_after = (_antenna_full_retry_modified_after_verification(log_text)
+                      if rec.get("status") == "RECOVERED" else
+                      route_modified_after_last_verification(log_text))
     doc = {
         "program": "phase3_one_shot_runner:_pnr_rollback_refused_antenna_repair",
         "ruling": "R-0915-74",
@@ -33734,6 +33877,10 @@ def _disclose_antenna_rollback(project: Path, out_dir: Path,
         "route_verified_at_ship": bool(rec.get("route_verified"))
         and not modified_after,
         "note": (
+            "A fresh session restored the pre-pass ODB, inserted the diodes "
+            "and verified a complete route before shipping. Independent "
+            "antenna sign-off still determines the final verdict."
+            if rec.get("status") == "RECOVERED" else
             "antenna_repair NOT_APPLIED means the repair was attempted, "
             "REFUSED, and rolled back to the state the router had verified. "
             "The antenna violations reported for this run are therefore the "
@@ -36948,7 +37095,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             hard_ceiling_s=_pnr_ceiling, spare_plan=spare_plan)
         if _ant_roll.get("status") != "NOT_REQUESTED":
             _ant_roll_records.append(_ant_roll)
-            if _ant_roll.get("status") == "ROLLED_BACK":
+            if _ant_roll.get("status") in ("ROLLED_BACK", "RECOVERED"):
                 rc = _ant_roll.get("rc", rc)
                 out = (out or "") + _ant_roll.get("combined_log", "")
                 _archive_antenna_iteration_reports(out_dir)
