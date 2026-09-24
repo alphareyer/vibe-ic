@@ -258,8 +258,9 @@ def test_input_docs_directory_changes_branch(tmp_path):
     if "steps" in body:  # legacy inline-steps report shape
         ingest = next(s for s in body["steps"]
                       if s["name"] == "phase1_ingest_render")
-        assert ingest["status"] in ("PASS", "FAIL", "SKIP")
+        # Unsigned D1 execution is uncredited even when extraction ran.
+        assert ingest["status"] in ("NOT_MEASURED", "FAIL", "SKIP")
     else:  # v0.1.x delegated docs-mode report — input/docs/ took the docs branch
         assert body.get("mode") == "docs"
         assert body.get("delegated_to")
-        assert body.get("verdict") in ("PASS", "FAIL", "SKIP")
+        assert body.get("verdict") in ("NOT_MEASURED", "FAIL", "SKIP")

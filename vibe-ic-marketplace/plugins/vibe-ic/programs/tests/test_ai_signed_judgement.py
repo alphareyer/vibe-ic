@@ -28,7 +28,6 @@ FILES = {
            "phase3/analog/block/topology.md": "a topology"},
     "A9": {"phase3/mixed_signal/cosim/mixed_signal_results.json": "{}"},
     "36": {"reports/audit/tapeout_checklist.json": "{}",
-           "reports/audit/tapeout_signoff.json": '{"verdict_tier":"PASS_WITH_WAIVERS"}',
            "waivers.json": '{"waived_steps":[{"id":36}]}'},
 }
 
@@ -135,12 +134,12 @@ def test_completion_audit_exits_nonzero_while_signature_is_pending(tmp_path):
 
 
 def test_step36_perc_manual_review_also_needs_judgement(tmp_path):
-    signoff = tmp_path / "reports/audit/tapeout_signoff.json"
+    checklist = tmp_path / "reports/audit/tapeout_checklist.json"
     perc = tmp_path / "reports/phase3/perc_equivalent.json"
-    for path in (signoff, perc):
+    for path in (checklist, perc):
         path.parent.mkdir(parents=True, exist_ok=True)
-    signoff.write_text('{"verdict":"PASS"}')
+    checklist.write_text('{"verdict":"READY_FOR_TAPEOUT"}')
     perc.write_text('{"categories":[{"status":"MANUAL_REVIEW"}]}')
-    row = _judge(tmp_path, "36", signoff.relative_to(tmp_path).as_posix())
+    row = _judge(tmp_path, "36", checklist.relative_to(tmp_path).as_posix())
     assert row.status == "NOT_MEASURED"
     assert row.reason_class == "awaiting_signed_judgement"

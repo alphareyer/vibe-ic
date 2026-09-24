@@ -42,6 +42,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `agentic_jsonl_to_shape_d` | any | v0.1.59 | generic agentic-JSONL → Shape-D project-dir extractor. |
 | `aging_derate_sta_check` | any | — | aging-corner STA sign-off gate for tapeout. |
 | `ahb_apb_protocol_synth` | any | v0.1.84 | AHB + APB-class protocol synth helper. |
+| `ai_signed_judgement` | any | — | Evidence-bound AI judgement for the eight conditional expert hand-offs. |
 | `aid_class_rtl_gen` | aid_class_half_duplex, aid_class_half_duplex_single_wire, mixed_signal_otp, digital_cmd_driven | Wave 56 | Vibe-IC plugin Phase 2 RTL generator for AID-class half-duplex protocol. |
 | `ams_analysis_select` | any | — | deterministic spec -> SPICE-analysis selector. |
 | `an_validator` | any | — | Application-Note (AN) validator / quality scorer, 0-80. |
@@ -1430,6 +1431,7 @@ _(no programs in this group)_
 - `agentic_jsonl_to_shape_d` — generic agentic-JSONL → Shape-D project-dir extractor.  _[v0.1.59]_
 - `aging_derate_sta_check` — aging-corner STA sign-off gate for tapeout.
 - `ahb_apb_protocol_synth` — AHB + APB-class protocol synth helper.  _[v0.1.84]_
+- `ai_signed_judgement` — Evidence-bound AI judgement for the eight conditional expert hand-offs.
 - `ams_analysis_select` — deterministic spec -> SPICE-analysis selector.
 - `an_validator` — Application-Note (AN) validator / quality scorer, 0-80.
 - `analog_a0_skip_forbidden_check` — forbidden-artefact gate (Wave 47).  _[Wave 47]_

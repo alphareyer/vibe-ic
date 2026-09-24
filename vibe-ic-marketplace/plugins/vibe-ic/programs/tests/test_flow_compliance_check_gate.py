@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib, json, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
 import pytest
+from _ai_judgement_fixture import sign as _sign_ai_fixture
 
 PROG = Path(__file__).resolve().parent.parent / "flow_compliance_check.py"
 
@@ -381,6 +382,7 @@ def _satisfy_p0_ancestry(project: Path) -> Path:
                      "literal was backfilled into a typed L doc on this tree, "
                      "so the catalogue is empty; staged by test fixture."),
     }))
+    _sign_ai_fixture(project, "D1")
     return project
 
 

@@ -76,8 +76,7 @@ def evidence(project: Path, step_id: str) -> list[Path]:
                       "phase1/generated_docs/L5*.json")
     if sid == "36":
         return _files(project, "reports/audit/tapeout_checklist.json",
-                      "reports/audit/tapeout_signoff.json", "waivers.json",
-                      "reports/phase3/perc_equivalent.json")
+                      "waivers.json", "reports/phase3/perc_equivalent.json")
     return []
 
 
@@ -108,18 +107,16 @@ def _requested(project: Path, sid: str) -> bool:
                             "phase3/mixed_signal/cosim/*_cosim_results.json",
                             "phase3/mixed_signal/cosim/mixed_signal_results.json"))
     if sid == "36":
-        signoff = _json(project / "reports/audit/tapeout_signoff.json")
         checklist = _json(project / "reports/audit/tapeout_checklist.json")
         perc = _json(project / "reports/phase3/perc_equivalent.json")
         return (bool(_json(project / "waivers.json"))
                 or bool(checklist.get("pending_foundry_items"))
+                or bool(checklist.get("reviewer_todo"))
                 or any(isinstance(row, dict) and row.get("status") == "MANUAL_REVIEW"
                        for row in (perc.get("categories") or []))
                 or any(str(x).upper() in ("PASS_WITH_WAIVERS", "PENDING",
                                            "MANUAL_REVIEW", "PASS_WITH_OPEN_ITEMS")
-                       for x in (signoff.get("verdict"),
-                                 signoff.get("verdict_tier"),
-                                 checklist.get("verdict"))))
+                       for x in (checklist.get("verdict"),)))
     return False
 
 
@@ -156,7 +153,7 @@ def check(project: Path, step_id: str) -> Tuple[bool, str]:
                "phase2/analog/*/topology.md"),
         "A9": ("phase3/mixed_signal/cosim/*_cosim_results.json",
                "phase3/mixed_signal/cosim/mixed_signal_results.json"),
-        "36": ("reports/audit/tapeout_signoff.json",),
+        "36": ("reports/audit/tapeout_checklist.json",),
     }.get(sid)
     if required_ai_output and not _files(project, *required_ai_output):
         return False, (f"awaiting_signed_judgement: Step {sid} has no AI "
