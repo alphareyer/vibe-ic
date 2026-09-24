@@ -33794,7 +33794,8 @@ def _stage_via_legalized_tech_lef(project: Path, pdk: PdkConfig,
 def step_pnr(project: Path, top: str, pdk: PdkConfig,
              container: str, die_um: str, util: float,
              spare_density=None, pad_ring_step=step_pad_ring_gen,
-             pad_ring_results: Optional[List[StepResult]] = None) -> StepResult:
+             pad_ring_results: Optional[List[StepResult]] = None,
+             em_floor_for_resize: Optional[Dict[str, Any]] = None) -> StepResult:
     t0 = time.time()
     netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
     print(f"[pnr] netlist: {_nl_note}", flush=True)
@@ -34722,16 +34723,25 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # #1215-PDN — derived (never tuned) EM strap-width floor from this
     # project's own prior measurement + the PDK's own Jmax; None on a first
     # pass (no measurement yet) keeps the PDN byte-identical. NONFATAL.
-    try:
-        _pdn_em_floor = _pdn_em_width_floor(
-            project, pdk, container, layout_will_be_replaced=True)
-    except Exception as _em_exc:  # pragma: no cover - defensive
-        print(f"[phase3] PDN EM floor derivation skipped (nonfatal): {_em_exc}")
-        _pdn_em_floor = None
+    # The one-shot corrector has JUST measured the first-pass DEF and hands
+    # its derived floor directly to this re-dispatch. Re-deriving here with
+    # layout_will_be_replaced=True would reject that same measurement as a
+    # previous layout and silently draw the original narrow straps again.
+    _pdn_em_floor = em_floor_for_resize
+    if _pdn_em_floor is None:
+        try:
+            _pdn_em_floor = _pdn_em_width_floor(
+                project, pdk, container, layout_will_be_replaced=True)
+        except Exception as _em_exc:  # pragma: no cover - defensive
+            print(f"[phase3] PDN EM floor derivation skipped (nonfatal): {_em_exc}")
+            _pdn_em_floor = None
     if _pdn_em_floor:
+        _drive_a = _pdn_em_floor.get("i_drive_A")
+        _drive_txt = (f"{_drive_a:.3e}" if isinstance(_drive_a, (int, float))
+                      else "unavailable")
         print("[phase3] PDN EM-derived strap width floor in force: "
-              f"I_total={_pdn_em_floor['i_total_A']:.3e} A "
-              f"({_pdn_em_floor['i_total_source']}), margin "
+              f"I_drive={_drive_txt} A "
+              f"({_pdn_em_floor.get('sizing_basis')}), margin "
               f"{_pdn_em_floor['margin']}; per-layer w_em recorded in "
               "reports/phase3/pdn_em_sizing.json")
     pdn_block = _build_pdn_tcl(pdk, container, em_floor=_pdn_em_floor)
@@ -66418,7 +66428,8 @@ def main() -> int:
                     args.die_um, args.util,
                     spare_density=args.spare_density,
                     pad_ring_step=step_pad_ring_gen,
-                    pad_ring_results=_pnr_rows2)
+                    pad_ring_results=_pnr_rows2,
+                    em_floor_for_resize=_rz["floor"])
                 _rz_secs = time.time() - _rz_t0
                 plan.extend(_pnr_rows2)
                 plan.append(_pnr_redispatched)
