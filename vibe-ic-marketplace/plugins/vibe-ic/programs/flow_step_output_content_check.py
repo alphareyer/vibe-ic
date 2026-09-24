@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""BLOCKING content check for flow step outputs; refusal exits nonzero.
+"""Content check for flow step outputs; refusal exits nonzero.
+
+ENFORCEMENT: advisory — step runners do not invoke this gate inline. Its
+``program_exit_zero`` clauses can fail the final flow compliance audit, but
+cannot stop the producer step while that step is running.
 
 This checks the producer's actual bytes, never a previous gate report. It is
 limited to structural evidence; design quality stays with the owning checks.
