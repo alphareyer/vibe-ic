@@ -2584,14 +2584,24 @@ def _render(project: Path, run_audit: bool = True,
     md.append(_render_step_tables(flow, verdicts))
     md.append("### Verdict roll-up")
     md.append("")
+    # THE PROSE MUST NOT PROMISE A TALLY THAT WAS WITHHELD. It said "the same bucket
+    # definitions as the `flow_compliance_check.py` tally quoted under **Verdict** above",
+    # which is false in the did-not-certify state: nothing is quoted up there, because the
+    # audit withdrew those numbers and the fence drops every line carrying them. A reader sent
+    # to compare against a tally that is not on the page would conclude the report had lost it.
+    _tally_ref = ("as `reports/audit/phase23_completion_audit.json[step_counts]`"
+                  if counts_withheld else
+                  "as the `flow_compliance_check.py` tally quoted under **Verdict** above and "
+                  "as `reports/audit/phase23_completion_audit.json[step_counts]`")
     md.append(f"_Same {total_steps}-step universe, same audit run, and the "
-              f"same bucket definitions as the `flow_compliance_check.py` "
-              f"tally quoted under **Verdict** above and as "
-              f"`reports/audit/phase23_completion_audit.json[step_counts]`. "
-              f"This table consumes that JSON object directly; the per-step "
-              f"table consumes the same artifact's `steps[]`. Any internal "
-              f"tear is reported explicitly under **Verdict** — it is never "
-              f"reconciled by adjusting a count._")
+              f"same bucket definitions {_tally_ref}. "
+              + ("The audit's own tally is NOT quoted under **Verdict**: it withdrew those "
+                 "counts, and the roll-up below is this renderer's degraded stand-in, not the "
+                 "audit's numbers. " if counts_withheld else
+                 "This table consumes that JSON object directly; the per-step "
+                 "table consumes the same artifact's `steps[]`. ")
+              + f"Any internal tear is reported explicitly under **Verdict** — it is never "
+                f"reconciled by adjusting a count._")
     md.append("")
     md.append("| Verdict | Count |")
     md.append("|---|---:|")

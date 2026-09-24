@@ -527,6 +527,24 @@ def _audit_verdict_owner():
         # the next thing it grows does not need the importer to have been careful.
         _sys.modules.setdefault("_vibeic_audit_verdict", mod)
         spec.loader.exec_module(mod)          # type: ignore[union-attr]
+        # WHAT CAME BACK MUST BE THE OWNER, AND THAT IS CHECKED. A path is not an identity:
+        # this resolver is overridable (`VIBE_IC_PROGRAMS_DIR`, `VIBE_IC_D_PROGRAMS_DIR`) and a
+        # tree that answers the name with something else -- a different `_audit_verdict.py`, or
+        # a stub that answers EVERY name, which is exactly what
+        # `test_pre_burn_audit_forwards_allow_thin_input` does -- used to be loaded, cached, and
+        # then called: `AttributeError: module '_vibeic_audit_verdict' has no attribute
+        # 'verdict_word'`, escaping from the middle of the pre-burn audit and ERRORing three
+        # shipped tests that are green on main.
+        #
+        # An unusable module is UNREACHABLE, which is a state this loader already has and whose
+        # meaning is already decided: the caller falls back to the word-and-rc rule and keeps
+        # failing closed. So the check is for the two functions the callers actually use, and
+        # nothing is cached until it passes -- a wrong module must not become the answer for the
+        # life of the process.
+        if not (callable(getattr(mod, "read", None))
+                and callable(getattr(mod, "verdict_word", None))):
+            _AUDIT_VERDICT_MOD = False
+            return None
         _AUDIT_VERDICT_MOD = mod
         return mod
     except Exception:
@@ -735,10 +753,14 @@ def _run_flow_compliance_pre_burn(
         except Exception as e:
             audit_json_error = str(e)
 
-    # Backup: stdout-regex parser (chip-AGNOSTIC, robust to whitespace
-    # and em-dash separators). Only used if the JSON artifact is
-    # absent or malformed. We still fail closed downstream when the
-    # audit JSON is missing — this branch only refines diagnostics.
+    # Backup verdict source, used only when the JSON artifact is absent or malformed.
+    #
+    # THE OLD NOTE SAID "this branch only refines diagnostics" AND THAT IS NO LONGER TRUE, so
+    # it is corrected rather than left to reassure a reader. `verdict` is what the burn decision
+    # below reads, so what this branch produces GATES A HARDWARE ACTION -- and the sentence
+    # about failing closed "when the audit JSON is missing" describes a downstream arm that
+    # keys on the VERDICT, not on the JSON's presence: what actually fails closed is a verdict
+    # of UNKNOWN, which is where this branch leaves it when nothing can be read.
     if verdict == "UNKNOWN":
         # THE SUBSTRING LADDER IS GONE. It searched the whole stream unanchored and tested
         # PASS BEFORE FAIL, so a `Overall: PASS` quoted anywhere -- the audit prints its
@@ -747,6 +769,8 @@ def _run_flow_compliance_pre_burn(
         # anchors to a verdict LINE, takes the last one, and is told the exit code.
         _own = _audit_verdict_owner()
         if _own is not None:
+            # `_audit_verdict_owner` returns None unless `read` and `verdict_word` are both
+            # callable, so this call is safe by that contract rather than by hope.
             _word = _own.verdict_word(out_text)
             if _word:
                 verdict = _word.upper()

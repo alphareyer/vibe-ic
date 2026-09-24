@@ -566,3 +566,53 @@ def test_the_mcp_tool_reads_the_published_certified_field():
     assert 'notMeasured("TOOL_DID_NOT_RUN"' in js[i_cert:i_ret], js[i_cert:i_cert + 300]
     # and nothing falsy precedes the condition on that line
     assert "false &&" not in js[i_cert:i_cert + len(guard)], js[i_cert:i_cert + 120]
+
+
+# ═══ round 4 (review wqz62nz1u) ════════════════════════════════════════════
+
+def test_the_owner_loader_refuses_a_module_that_is_not_the_owner(monkeypatch, tmp_path):
+    """A PATH IS NOT AN IDENTITY.
+
+    `_audit_verdict_owner` loaded whatever `_find_plugin_program("_audit_verdict.py")` returned
+    and CACHED it, unchecked. That resolver is overridable (`VIBE_IC_PROGRAMS_DIR`,
+    `VIBE_IC_D_PROGRAMS_DIR`), and `mcp-eda/test/test_pre_burn_audit_forwards_allow_thin_input`
+    answered EVERY name with a fake `flow_compliance_check.py` — so that file was loaded as the
+    owner and then called: `AttributeError: module '_vibeic_audit_verdict' has no attribute
+    'verdict_word'`, escaping from the middle of the pre-burn audit and ERRORing three shipped
+    tests that are green on main. Reproduced before fixing.
+
+    An unusable module is UNREACHABLE — a state this loader already had, whose meaning is
+    already decided: fall back to the word-and-rc rule and keep failing closed.
+    """
+    drv = _driver()
+    stub = tmp_path / "_audit_verdict.py"
+    stub.write_text("# a module that is not the owner\nWHAT = 1\n")
+    monkeypatch.setattr(drv, "_AUDIT_VERDICT_MOD", None, raising=False)
+    monkeypatch.setattr(drv, "_find_plugin_program", lambda name: str(stub))
+    assert drv._audit_verdict_owner() is None, (
+        "a module without the owner's API was accepted as the owner, so the next call to "
+        "`verdict_word` raises from inside the pre-burn audit")
+    # and the fallback still decides, closed
+    assert drv.pre_burn_audit_certified(1, "", "PASS") is False
+    assert drv.pre_burn_audit_certified(1, "", "FAIL") is True
+
+
+def test_a_wrong_module_is_never_cached_as_the_answer(monkeypatch, tmp_path):
+    """And it must not poison the process. The check happens BEFORE the cache is written, so a
+    tree that answers wrongly once does not make every later call wrong too."""
+    drv = _driver()
+    stub = tmp_path / "_audit_verdict.py"
+    stub.write_text("# not the owner\n")
+    monkeypatch.setattr(drv, "_AUDIT_VERDICT_MOD", None, raising=False)
+    monkeypatch.setattr(drv, "_find_plugin_program", lambda name: str(stub))
+    assert drv._audit_verdict_owner() is None
+    cached = getattr(drv, "_AUDIT_VERDICT_MOD")
+    assert cached is False or cached is None, (
+        f"a module that failed the API check was cached as the owner: {cached!r}")
+
+
+def test_the_real_owner_still_loads():
+    """NEGATIVE CONTROL: the check must not refuse the genuine module."""
+    drv = _driver()
+    own = drv._audit_verdict_owner()
+    assert own is not None and callable(own.read) and callable(own.verdict_word)

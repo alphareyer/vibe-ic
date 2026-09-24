@@ -57,10 +57,24 @@ class _FakeCompleted:
 
 
 def _force_plugin_program(monkeypatch, driver, fake_path):
-    monkeypatch.setattr(
-        driver, "_find_plugin_program",
-        lambda name: str(fake_path),
-    )
+    """Point ONLY `flow_compliance_check.py` at the fake, and leave every other name alone.
+
+    This used to answer EVERY name with the fake, which is how it began loading that file as
+    `_audit_verdict` — the driver's verdict-reading owner — and calling `verdict_word` on a
+    module that has none. The AttributeError escaped from the middle of the pre-burn audit and
+    ERRORed three tests in this file that are green on main. The loader now checks the API it
+    got (that is the fix), and this stub stops claiming to be programs it is not (this is
+    honesty about what the fixture stands in for). No assertion here is relaxed: the real
+    resolver still answers the other names, exactly as it does in production.
+    """
+    _real = driver._find_plugin_program
+
+    def _only_the_audit(name):
+        if name == "flow_compliance_check.py":
+            return str(fake_path)
+        return _real(name)
+
+    monkeypatch.setattr(driver, "_find_plugin_program", _only_the_audit)
 
 
 def _capture_argv(monkeypatch, driver):
