@@ -32290,11 +32290,64 @@ def _pnr_session_products(out_dir: Path, out_dir_c: str, tcl_text: str,
     return [out_dir / n for n in dict.fromkeys(names)]
 
 
+def _sdr_candidate_signoff_clean(project: Path, top: Optional[str],
+                                 pdk: Optional[PdkConfig],
+                                 container: str) -> Tuple[bool, str]:
+    """Demand measured zero deck DRC and a real LVS match on the candidate.
+
+    A strict clean candidate cannot be worse than any incumbent on either
+    invariant. The probe runs the same consumers the normal Phase-3 flow runs;
+    their reports are regenerated from the candidate's just-written DEF.
+    Missing context, layout, deck output or compare verdict refuses adoption.
+    """
+    if not top or pdk is None:
+        return False, "signoff_context_missing"
+    if not getattr(pdk, "drc_deck", None):
+        return False, "signoff_deck_missing"
+    try:
+        started_ns = time.time_ns()
+        gds = step_gds(project, top, pdk, container)
+        layout = _pl.pnr_dir(project) / f"{top}.gds"
+        if (gds.status != "PASS" or not layout.is_file()
+                or layout.stat().st_mtime_ns < started_ns):
+            return False, f"gds_{gds.status.lower()}"
+        drc = step_drc(project, top, pdk, container)
+        rpt = project / "phase3" / "reports" / "drc.rpt"
+        if (drc.status != "PASS" or not rpt.is_file()
+                or rpt.stat().st_mtime_ns < started_ns):
+            return False, f"drc_{drc.status.lower()}_or_report_missing"
+        # The existing count helper deliberately maps malformed XML to zero
+        # for downstream audit compatibility. Admission cannot do that: zero
+        # is meaningful only for a parseable KLayout report database.
+        import xml.etree.ElementTree as _ET
+        root = _ET.parse(rpt).getroot()
+        if root.tag != "report-database" or root.find("items") is None:
+            return False, "drc_report_unreadable"
+        count, _ = _v1_6_597_count_klayout_xml_violations(rpt)
+        if count != 0:
+            return False, f"drc_count_{count if count is not None else 'unmeasured'}"
+        lvs = step_lvs(project, top, pdk, container)
+        if lvs.status != "PASS":
+            return False, f"lvs_{lvs.status.lower()}"
+        verdict = project / "reports" / "phase3" / "lvs_verdict.json"
+        if not verdict.is_file() or verdict.stat().st_mtime_ns < started_ns:
+            return False, "lvs_verdict_missing"
+        data = json.loads(verdict.read_text())
+        if data.get("status") != "PASS":
+            return False, "lvs_verdict_not_pass"
+        return True, "deck_drc_zero_lvs_match"
+    except Exception as exc:
+        return False, f"signoff_unmeasured_{type(exc).__name__}"
+
+
 def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
                               out_dir_c: str, pnr_tcl: Path,
                               log_text: str,
                               hard_ceiling_s: int,
-                              spare_plan: Optional[Dict[str, Any]] = None
+                              spare_plan: Optional[Dict[str, Any]] = None,
+                              project: Optional[Path] = None,
+                              top: Optional[str] = None,
+                              pdk: Optional[PdkConfig] = None
                               ) -> Dict[str, Any]:
     """#2253 — finish PnR from an ACCEPTED SDR candidate the shipping session
     could not read back.
@@ -32449,7 +32502,89 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
         rec["adoptions"].append({"stage": stage, "candidate": str(cand),
                                  "tcl": tail_name, "log": tail_log,
                                  "rc": t_rc})
+        # A router-clean candidate can still introduce well/implant violations
+        # or disconnect supply nets. Probe the exact post-route tail through
+        # the flow's normal streamout, sign-off deck and LVS consumers before
+        # allowing its DEF to become the shipped one. Production callers must
+        # supply the design context; a missing or inconclusive measurement is
+        # a refusal, never an implicit clean result.
         nxt = _sdr_adopt_request(this_log)
+        if t_rc == 0 and nxt is None and project is not None:
+            admitted, reason = _sdr_candidate_signoff_clean(
+                project, top, pdk, container)
+            rec["adoptions"][-1]["signoff_admission"] = reason
+            if not admitted:
+                # If a later SDR site also proposed a candidate, restore the
+                # state from before the FIRST proposal. Otherwise an earlier
+                # unmeasured candidate would remain in the rejected tail.
+                first_stage = rec["adoptions"][0]["stage"]
+                first_txn = out_dir / _SDR_TXN_DIRS[first_stage]
+                ckpt = first_txn / _SDR_CHECKPOINT_ODB_NAME
+                if not ckpt.is_file():
+                    rec.update(status="FAILED", rc=1,
+                               reason=f"signoff_refused:{reason}; incumbent checkpoint missing")
+                    break
+                try:
+                    incumbent_tcl = _build_pnr_resume_tcl_text(
+                        deck,
+                        checkpoint_def_c=_to_container_path(
+                            str(first_txn / "pre_repair.def"), container),
+                        omit_stages=list(_SDR_CHILD_OMIT),
+                        restore_odb_c=_to_container_path(str(ckpt), container),
+                        after_restore_tcl=_after_restore_tcl(
+                            deck, spare_plan, reroutes_immediately=False))
+                    reject_name = f"pnr_sdr_reject_{len(omitted)}.tcl"
+                    reject_log = f"pnr_sdr_reject_{len(omitted)}.log"
+                    (out_dir / reject_name).write_text(incumbent_tcl)
+                    reject_cmd = (f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
+                                  f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
+                                  f"openroad -no_init -exit {out_dir_c}/{reject_name} 2>&1 | "
+                                  f"tee {out_dir_c}/{reject_log}")
+                    r_rc, r_out, r_err = _declared_session_exec(
+                        container, reject_cmd,
+                        _pnr_tail_products(out_dir, out_dir_c, incumbent_tcl),
+                        marker=f"{out_dir_c}/{reject_name}",
+                        log_path=out_dir / reject_log,
+                        hard_ceiling_s=hard_ceiling_s)
+                    combined += (f"\n=== PNR SDR REJECT (incumbent) ===\n"
+                                 + (r_out or "") + (r_err or ""))
+                    if r_rc != 0:
+                        rec.update(status="FAILED", rc=r_rc,
+                                   reason=f"signoff_refused:{reason}; incumbent tail failed")
+                    else:
+                        # The probe may have streamed the rejected candidate
+                        # already. Remove that layout from the canonical PnR
+                        # names so the normal GDS step must stream the restored
+                        # incumbent; keep the bytes under the transaction for
+                        # diagnosis. A failed move is a failed rollback.
+                        for name in (f"{top}.gds", f"{top}.prefinish.gds",
+                                     f"{top}.prefinish.gds.receipt.json"):
+                            probe_file = out_dir / name
+                            if probe_file.is_file():
+                                os.replace(probe_file,
+                                           first_txn / f"invalidated_{name}")
+                        for proposal in rec["adoptions"]:
+                            proposal_txn = out_dir / _SDR_TXN_DIRS[proposal["stage"]]
+                            receipt = proposal_txn / "receipt.tsv"
+                            lines = receipt.read_text().splitlines()
+                            if (len(lines) != 2 or lines[0].split("\t") !=
+                                    ["status", "reason", "before_router_drc",
+                                     "after_router_drc"]):
+                                raise ValueError("SDR receipt unreadable")
+                            fields = lines[1].split("\t")
+                            if len(fields) != 4:
+                                raise ValueError("SDR receipt values unreadable")
+                            receipt.write_text(
+                                lines[0] + "\n" +
+                                f"REJECTED_CANDIDATE_DISCARDED\tsignoff_{reason}"
+                                f"\t{fields[2]}\t{fields[3]}\n")
+                        rec.update(status="REJECTED", rc=0,
+                                   reason=f"signoff_refused:{reason}")
+                    rc = r_rc
+                except (OSError, ValueError, PnrResumeUnavailable) as exc:
+                    rec.update(status="FAILED", rc=1,
+                               reason=f"signoff_refused:{reason}; rollback unavailable: {exc}")
+                break
         if t_rc != 0 or nxt is None or nxt.get("stage") in omitted:
             rec["status"] = "ADOPTED" if t_rc == 0 else "FAILED"
             break
@@ -35102,7 +35237,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         _sdr_adopt = _pnr_adopt_sdr_candidates(
             container=container, out_dir=out_dir, out_dir_c=out_dir_c,
             pnr_tcl=pnr_tcl, log_text=(out or "") + (err or ""),
-            hard_ceiling_s=_pnr_ceiling, spare_plan=spare_plan)
+            hard_ceiling_s=_pnr_ceiling, spare_plan=spare_plan,
+            project=project, top=top, pdk=pdk)
         if _sdr_adopt.get("status") != "NOT_REQUESTED":
             # R-0915-69 — AND SWEEP AGAIN, BECAUSE THE ADOPT TAIL IS A SESSION
             # TOO. The sweep above runs the instant `_docker_exec` returns, which
