@@ -20416,14 +20416,57 @@ _ROUTE_LOOSEN_STALL_PATIENCE = 2
 # EXACTLY, independent of the loop's total iteration count.
 _PNR_UPSIZE_RETRIES = 3
 # Total retry-loop iterations: initial run + up-to-3 upsizes + up-to-1 downsize
-# + up-to `_ROUTE_LOOSEN_MAX_RUNGS` loosen steps. Each mutation path is
+# + one sparse GPL recovery + up-to `_ROUTE_LOOSEN_MAX_RUNGS` loosen steps.
+# Each mutation path is
 # independently bounded (upsize by the die cap + `_PNR_UPSIZE_RETRIES`;
 # downsize by a one-shot flag; loosen by the rung bound AND the die cap), so
 # the loop always terminates well within this. #914: this budget must stay
 # >= the ladder's own bound, or the SHARED loop guard would end the ladder
 # before the ladder's own criterion did — the same defect one level up.
-_PNR_RETRY_ITERS = (1 + _PNR_UPSIZE_RETRIES + 1
+_PNR_RETRY_ITERS = (1 + _PNR_UPSIZE_RETRIES + 1 + 1
                     + _ROUTE_LOOSEN_MAX_RUNGS)
+
+
+def _sparse_gpl_retry_deck(deck: str, log: str) -> Optional[Tuple[str, dict]]:
+    """One disclosed numerical-stability retry, using GPL's measured area.
+
+    The first attempt always keeps timing-driven placement. On GPL-0305 only,
+    a core whose actual movable density is below the existing floor reachability
+    bound may retry without the
+    timing-driven Nesterov reweighting. Routability placement, the declared
+    fanout constraint, later timing repair and all signoff checks stay active.
+    A second failure is final. Do not reuse a corrupted OpenROAD session.
+    """
+    if "[ERROR GPL-0305]" not in log:
+        return None
+    area = re.search(r"\[INFO GPL-0018\] Movable instances area:\s*([\d.]+)", log)
+    region = re.search(r"\[INFO GPL-0015\] Region area:\s*([\d.]+)", log)
+    if not area or not region:
+        return None
+    movable, core = float(area.group(1)), float(region.group(1))
+    sparse_limit = (_ppa_area._PLACEMENT_DENSITY_FLOOR
+                    / _ppa_area._PLACEMENT_FLOOR_MAX_RATIO)
+    if movable <= 0 or core <= 0 or movable / core >= sparse_limit:
+        return None
+    command = re.compile(r"(?m)^global_placement(?=[^\n]* -timing_driven)([^\n]*)$")
+    match = command.search(deck)
+    if not match:
+        return None
+    old = match.group(0)
+    new = old.replace(" -timing_driven", "", 1)
+    record = {
+        "trigger": "GPL-0305", "mode": "sparse_core_without_timing_driven_gpl",
+        "movable_area_um2": movable, "region_area_um2": core,
+        "natural_density": movable / core, "sparse_limit": sparse_limit,
+        "first_command": old,
+        "retry_command": new, "max_retries": 1,
+        "reason": "numerical divergence after timing-driven reweighting on a "
+                  "core below the placer floor reachability bound",
+    }
+    disclosure = ("puts \"GPL_SPARSE_RETRY: GPL-0305; timing-driven "
+                  "placement disabled for this one retry; timing repair "
+                  "and signoff remain active\"\n")
+    return deck[:match.start()] + disclosure + new + deck[match.end():], record
 
 
 def _drt_violation_trajectory(log_text: str) -> List[int]:
@@ -36853,8 +36896,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # call's archives. Derived ONCE, before the loop, from the directory as it
     # stands; a collision is still refused by name inside the preserver.
     _pnr_invocation = _next_pnr_invocation_index(out_dir)
+    _gpl_retry_done = False
     # Loop budget = initial run + over-util upsize (own counter) + a single
-    # over-sparse downsize + the ROUTING-FEEDBACK loosen ladder. Each mutation
+    # over-sparse downsize + one GPL recovery + the ROUTING-FEEDBACK loosen ladder. Each mutation
     # path is INDEPENDENTLY bounded (upsize by `_PNR_UPSIZE_RETRIES` + the die
     # cap; downsize by `_downsized_once`; loosen by `_loosen_idx`/ladder), so
     # the loop always terminates well within `_PNR_RETRY_ITERS`. v1.3.48 — the
@@ -36975,6 +37019,27 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             # a hang → fall through to the rc!=0 FAIL gate.
             _docker_timeout_isolate([out_dir / f"{top}.def"])
             break
+        # GPL-0305 is a numerical failure, not a utilization or route result.
+        # Restart the entire session once so the failed optimizer's database
+        # cannot contaminate the retry. The GPL log supplies the actual area
+        # after synthesis and any timing-driven buffering, not an area guess.
+        if rc != 0 and not _gpl_retry_done:
+            _gpl_retry = _sparse_gpl_retry_deck(
+                _generic_pnr_tcl, (out or "") + "\n" + (err or ""))
+            if _gpl_retry is not None:
+                _generic_pnr_tcl, _gpl_record = _gpl_retry
+                _gpl_record["invocation"] = _pnr_invocation
+                _gpl_record["failed_approach"] = _retry_i
+                _gpl_receipt = out_dir / f"gpl_retry.inv{_pnr_invocation}.json"
+                _gpl_receipt.write_text(json.dumps(_gpl_record, indent=2) + "\n")
+                print(f"[pnr] GPL_SPARSE_RETRY: {_gpl_record['reason']}; "
+                      f"natural_density={_gpl_record['natural_density']:.6g}; "
+                      f"retry 1/1; receipt={_gpl_receipt}", file=sys.stderr)
+                _pad_install_failure = _install_route_deck()
+                if _pad_install_failure is not None:
+                    return _pad_install_failure
+                _gpl_retry_done = True
+                continue
         # A CLOCK TREE THAT HAD TO BE DOWNSIZED IS A CORE THAT IS TOO TIGHT.
         # The in-session legalization ladder's last resort swaps over-wide
         # clock buffers down to the sink so the design legalizes. It works, and
