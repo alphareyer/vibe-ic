@@ -1049,7 +1049,10 @@ _PIPEFAIL_PREFIX = "set -o pipefail; "
 
 
 def _log_surviving_artefact(outputs, *, produced_by: str,
-                            marker: str | None = None) -> None:
+                            marker: str | None = None,
+                            tool: str | None = None,
+                            exit_code: int | None = None,
+                            survived: Dict[str, Any] | None = None) -> None:
     """Record artefacts AFTER the verdict that decides whether they survive.
 
     vibe-ic#1330. `_docker_exec(..., outputs=[...])` hashes the declared paths
@@ -1094,6 +1097,17 @@ def _log_surviving_artefact(outputs, *, produced_by: str,
     }
     if marker:
         entry["marker"] = marker
+    # A SHIPPED product of a session that exited non-zero (review we8o6v9hg):
+    # the tool that wrote the bytes, the exit code the runner APPLIED when it
+    # judged the crash survivable, and the crash itself -- raw rc, signal,
+    # stage, reason -- so `provenance_check --tool <tool>` binds the shipped
+    # bytes and nobody reads the record as an unremarkable run.
+    if tool:
+        entry["tool"] = tool
+    if exit_code is not None:
+        entry["exit_code"] = int(exit_code)
+    if survived:
+        entry["survived"] = survived
     _rmeas.attach(Path(sink), entry)
     try:
         with (Path(sink) / "provenance.jsonl").open("a") as f:
@@ -17079,6 +17093,72 @@ def _pnr_stages_after_signoff_writes(pnr_tcl_text: str) -> FrozenSet[str]:
 # declares itself to run after. A "the artifacts are complete" verdict states
 # a fact about the filesystem, so it is MEASURED against these, never inferred
 # from the stage name alone.
+def _declare_pnr_survivors(out_dir: Path, top: str, reason: str) -> List[str]:
+    """Record the sign-off artefacts a SHIPPING step_pnr keeps from a session
+    that exited NON-ZERO (review we8o6v9hg).
+
+    The session declared them (`_declared_session_exec`), but under its raw
+    exit code, and `provenance_check` skips every record with exit_code != 0 --
+    so a route the runner judged survivable (a signal in a best-effort stage
+    after the writes, a refusing session whose rollback failed) shipped with no
+    record the check accepts, where the base run's back-fill had given it one.
+
+    Only bytes a crashed session ITSELF declared are re-recorded, by sha: a
+    product no session declared, or one whose bytes changed since, is left
+    alone, so this can never launder a rewrite. Each is appended as a
+    `record: artefact` row (`_log_surviving_artefact`) naming that session, its
+    raw exit code and the reason it survived, with exit_code 0 -- the code the
+    runner applied -- and a measurement derived from the shipped file."""
+    sink = _PROV_SINK
+    if sink is None:
+        return []
+    prov = Path(sink) / "provenance.jsonl"
+    try:
+        rows = [json.loads(ln) for ln in prov.read_text().splitlines()
+                if ln.strip()]
+    except (OSError, ValueError):
+        return []
+    root = Path(sink).resolve()
+    by_session: Dict[int, List[Path]] = {}
+    for p in _pnr_signoff_artifacts(out_dir, top):
+        if not p.is_file():
+            continue
+        try:
+            rel = p.resolve().relative_to(root).as_posix()
+        except ValueError:
+            continue
+        try:
+            sha = "sha256:" + hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            continue
+        ok = crashed = None
+        for i, r in enumerate(rows):
+            if not isinstance(r, dict) or (r.get("outputs") or {}).get(rel) != sha:
+                continue
+            try:
+                rc = int(r.get("exit_code", 0))
+            except (TypeError, ValueError):
+                rc = 0
+            if rc == 0:
+                ok = i
+            else:
+                crashed = i
+        if ok is None and crashed is not None:
+            by_session.setdefault(crashed, []).append(p)
+    recorded: List[str] = []
+    for i, paths in sorted(by_session.items()):
+        r = rows[i]
+        _log_surviving_artefact(
+            [str(p) for p in paths], produced_by="step_pnr",
+            marker=r.get("marker"), tool=r.get("tool"), exit_code=0,
+            survived={"session_command": str(r.get("command") or "")[:300],
+                      "session_timestamp": r.get("timestamp"),
+                      "raw_exit_code": r.get("exit_code"),
+                      "reason": reason})
+        recorded.extend(str(p) for p in paths)
+    return recorded
+
+
 def _pnr_signoff_artifacts(out_dir: Path, top: str) -> List[Path]:
     return [out_dir / f"{top}.def", out_dir / "routed.def",
             out_dir / f"{top}_pnr.v", out_dir / "sta.rpt"]
@@ -36402,6 +36482,16 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         _nl_extras["route_residual_waiver"] = _route_residual_waiver
         _nl_extras["finding"] = _route_residual_waiver["finding"]
         _nl_extras["pnr_signoff_writes_complete"] = True
+    if _status != "FAIL":
+        # A route this step SHIPS from a session that exited non-zero is
+        # recorded as surviving it (`_declare_pnr_survivors`).
+        _declare_pnr_survivors(
+            out_dir, top,
+            (f"survivable fatal signal in best-effort stage "
+             f"{(_sig_diag or {}).get('stage')}" if _sig_survivable else
+             "the runner shipped this session's route despite its non-zero "
+             "exit (e.g. a failed antenna rollback keeps the refusing "
+             "session's route)"))
     if resize_history:
         return StepResult("pnr", _status, time.time() - t0,
                           detail,
