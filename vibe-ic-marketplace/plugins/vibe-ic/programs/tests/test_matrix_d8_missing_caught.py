@@ -1621,7 +1621,10 @@ REAL_GATE_PASS_TIER_STEPS: Tuple[str, ...] = (
     # outputs (everything except NOT_APPLICABLE), so those five cells are
     # enforced through their own real gate exactly as before. Recorded on both
     # sides, per this pin's own rule.
-    "1", "32", "35", "38",
+    # 2026-09-24: 32 and 35 leave this synthetic fixture's PASS tier because
+    # their new blocking content checks reject its placeholder documents.
+    # Their measured FAIL tiers remain pinned below.
+    "1", "38",
 )
 
 #: The steps whose real gate USED to reach a PASS tier on the seeded fixture
@@ -1750,6 +1753,10 @@ REAL_GATE_LEFT_THE_PASS_TIER: Dict[str, str] = {
     "A8": "NOT_MEASURED",
     "28": "NOT_MEASURED",
     "30": "NOT_MEASURED",
+    # The real SI and DFM content gates reject the seeded placeholder files.
+    # This is a stronger refusal on this fixture, not a claim of design PASS.
+    "32": "FAIL",
+    "35": "FAIL",
 }
 # 2026-07-28: the SET is unchanged (lost: none, gained: none). This tuple is
 # compared in flow DECLARATION order, and the dimension-5 fix moved A6's yaml

@@ -91,11 +91,9 @@ a crash, a bad invocation, an unsatisfied precondition — would certify every
 step in the flow as consuming its verdict. The PASS arm is the control that
 prices that.
 
-**P0 IS MEASURED ON ITS OWN MECHANISM, NOT A STAND-IN.** P0 declares no
-``gate:`` key at all; its verdict is emitted by
-``_run_structural_rtl_gates``. Substituting a gate onto P0 does not take —
-measured: ``check_step`` resolves it SKIPPED-CONDITION before any injected
-clause is read, in both arms. So P0's L3 drives the real umbrella against RTL in
+**P0 IS MEASURED ON ITS OWN MECHANISM, NOT A STAND-IN.** P0 now declares a
+blocking RTL content gate, and its structural verdict is still emitted by
+``_run_structural_rtl_gates``. So P0's L3 drives the real umbrella against RTL in
 a synthesized project, and the real umbrella FAILs, and the run exits 1. That
 makes P0 the one cell in this dimension whose ENFORCED verdict is measured
 against the mechanism it is named after, and :func:`matrix_cell_substitution`
@@ -172,10 +170,8 @@ _GATE_ABSENT = f"{_GATE_DIR}/absent.flag"
 PASS_GATE: Dict[str, object] = {"files_exist": [_GATE_OK]}
 FAIL_GATE: Dict[str, object] = {"files_exist": [_GATE_ABSENT]}
 
-#: P0 has no ``gate:`` key; its verdict comes from ``_run_structural_rtl_gates``.
-#: Derived, not pinned — a second gate-less step must not silently inherit the
-#: umbrella treatment, it must make :func:`test_d9_exactly_one_step_declares_no_gate`
-#: fail and force a human look.
+#: P0 has a content gate and a separate structural umbrella verdict. No step
+#: may silently become gate-less; the live set is checked below.
 def _gateless_steps() -> Tuple[str, ...]:
     return tuple(F.normalize_id(s) for s in F.step_ids() if not F.gate_clauses(s))
 
@@ -358,11 +354,10 @@ def _run_checker(step_id, gate: Optional[Dict[str, object]], root: Path,
 def _uses_own_mechanism(step_id) -> bool:
     """True when this step's L3 runs the step's OWN verdict producer.
 
-    Today that is exactly the gate-less steps: a substituted ``gate:`` never
-    reaches ``check_step`` for them, so they are driven through the real
-    structural umbrella instead.
+    P0's structural umbrella remains its own verdict producer even though
+    P0 now also declares a blocking RTL content gate.
     """
-    return F.normalize_id(step_id) in _gateless_steps()
+    return F.normalize_id(step_id) == "P0"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -402,13 +397,11 @@ def matrix_cell_state(step_id) -> str:
 def matrix_cell_substitution(step_id) -> Optional[str]:
     """Was this cell's ENFORCED verdict measured against the step's OWN producer?
 
-    ``None`` for the gate-less steps, whose L3 drives the real
+    ``None`` for P0, whose L3 drives the real
     ``_run_structural_rtl_gates`` umbrella. A disclosure for every other step,
     whose L3 verdict comes from a ``files_exist`` stand-in held at a known tier.
 
-    The split is RE-DERIVED from :func:`_gateless_steps` against the live yaml,
-    not read off a pinned tuple, so a flow edit re-points it instead of leaving
-    the census publishing a stale OWN count.
+    P0 uses its structural umbrella; all other steps use the stand-in gate.
     """
     if matrix_cell_state(step_id) != "ENFORCED":
         return None
@@ -605,18 +598,12 @@ def test_d9_the_informational_exclusion_is_reachable_at_all():
 
 
 def test_d9_exactly_one_step_declares_no_gate():
-    """The umbrella carve-out must not silently adopt a second step.
-
-    :func:`_uses_own_mechanism` routes gate-less steps down a different L3 arm.
-    A new gate-less step appearing in the yaml would inherit that arm without
-    anybody deciding it should, so it reddens here instead.
-    """
+    """Every step declares a gate; P0 also has its structural umbrella."""
     gateless = _gateless_steps()
-    assert gateless == ("P0",), (
-        f"steps declaring no `gate:` are {list(gateless)}, expected exactly "
-        f"['P0']. A gate-less step is routed through the structural-umbrella "
-        f"arm of L3; whether that is right for a NEW one is a decision, not a "
-        f"default")
+    assert gateless == (), (
+        f"steps declaring no `gate:` are {list(gateless)}, expected none")
+    assert _uses_own_mechanism("P0")
+    assert F.has_gate("P0")
 
 
 def test_d9_structural_only_scoping_is_still_the_documented_two_member_set():

@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1338
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1338)
+- **Total programs (excluding helpers / shims):** 1339
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1339)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1329 |
+| `any` | 1330 |
 
 ## Alphabetical listing
 
@@ -434,9 +434,10 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `flow_phase_attribution` | any | — | WHO did each of the four phases, and HOW. |
 | `flow_stage_check` | any | — | Flow stage check — wrapper for signoff_audit --mode flow. |
 | `flow_stage_membership_single_declaration_check` | any | — | stage membership is declared once. |
-| `flow_step_can_fail_check` | any | — | a step whose gate cannot fail must say so. |
+| `flow_step_can_fail_check` | any | — | Ratchet flow steps whose declared gate cannot fail on output content. |
 | `flow_step_execution_coverage_check` | any | — | enforce "every applicable step ran, in order". |
 | `flow_step_executor_coverage_check` | any | — | "every step has an executor that runs it". |
+| `flow_step_output_content_check` | any | — | BLOCKING content check for flow step outputs; refusal exits nonzero. |
 | `fmeda_coverage_check` | any | — | independent anti-fabrication gate over the FMEDA diagnostic-coverage report emitted by `fmeda_fault_injection_coverage.py`. |
 | `fmeda_fault_injection_coverage` | any | — | REAL ISO-26262 FMEDA diagnostic-coverage (DC) measurement by single-stuck-at FAULT INJECTION against a declared safety mechanism (ECC / p... |
 | `fork_downgrade_visibility_check` | any | — | Every abort our EDA fork downgrades to a warning must still be visible to the flow. |
@@ -1410,7 +1411,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1329 programs)
+### `any` (1330 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1816,9 +1817,10 @@ _(no programs in this group)_
 - `flow_phase_attribution` — WHO did each of the four phases, and HOW.
 - `flow_stage_check` — Flow stage check — wrapper for signoff_audit --mode flow.
 - `flow_stage_membership_single_declaration_check` — stage membership is declared once.
-- `flow_step_can_fail_check` — a step whose gate cannot fail must say so.
+- `flow_step_can_fail_check` — Ratchet flow steps whose declared gate cannot fail on output content.
 - `flow_step_execution_coverage_check` — enforce "every applicable step ran, in order".
 - `flow_step_executor_coverage_check` — "every step has an executor that runs it".
+- `flow_step_output_content_check` — BLOCKING content check for flow step outputs; refusal exits nonzero.
 - `fmeda_coverage_check` — independent anti-fabrication gate over the FMEDA diagnostic-coverage report emitted by `fmeda_fault_injection_coverage.py`.
 - `fmeda_fault_injection_coverage` — REAL ISO-26262 FMEDA diagnostic-coverage (DC) measurement by single-stuck-at FAULT INJECTION against a declared safety mechanism (ECC / p...
 - `fork_downgrade_visibility_check` — Every abort our EDA fork downgrades to a warning must still be visible to the flow.

@@ -524,74 +524,9 @@ WAIVERS: Tuple[Waiver, ...] = (
     # was relaxed to get them: the count of clauses driven to a real FAIL went
     # UP.
     #
-    # The three below could not be closed and are not going to be closed by a
-    # fixture. Their gates consist of `files_exist` clauses and nothing else,
-    # so there is no input other than absence that reaches a FAIL — this is a
-    # property of the FLOW DEFINITION, not of the test suite, and the repair
-    # is to give the step a clause that judges what the artefact says. Each
-    # premise is a statement about this commit, re-derived live on every run
-    # by test_d2_the_waived_cells_are_gated_by_existence_alone (the clause
-    # census) and test_d2_a_files_exist_clause_is_satisfied_by_a_zero_byte_file
-    # (the zero-byte measurement over every such clause in the flow).
-    Waiver(
-        step_id="1",
-        dim=2,
-        reason=(
-            "PERMANENT, by design — not a pending flow-definition decision. "
-            "Step 1's gate is ONE clause, `files_exist(any_of): "
-            "['phase2/stage1/rtl/*.sv', 'phase2/stage1/rtl/*.v']`, and a "
-            "files_exist clause has no predicate but path resolution — the "
-            "consumer computes `passed = len(found) > 0` and evaluates "
-            "nothing about the file. In isolation that clause cannot fail on "
-            "content. But the flow yaml carries an explicit AUDIT NOTE on "
-            "this step: spec->RTL is the irreducible AI-authoring step (no "
-            "deterministic spec->RTL checker exists), and RTL substance is "
-            "verified DELIBERATELY DOWNSTREAM by Steps 2-6 (lint / CDC / "
-            "simulation / formal) plus the P0 structural-RTL gates — not by "
-            "Step 1 itself. Owner-confirmed 2026-08-08: do not add a "
-            "duplicate content check to Step 1; the separation of concerns "
-            "(Step 1 authors, Step 2 judges) is intentional."
-        ),
-        evidence=(
-            "flow/phase1_phase2_phase3.yaml, the AUDIT NOTE comment directly "
-            "above step id 1 ('this gate is files_exist-only ON PURPOSE ... "
-            "Do not re-flag as a missing checker'). "
-            "programs/flow_compliance_check.py::`passed = "
-            "len(found) > 0` (the any_of branch) is the entire predicate — "
-            "re-executed live by programs/tests/test_matrix_d2_falsifiable.py"
-            "::test_d2_a_files_exist_clause_is_satisfied_by_a_zero_byte_file "
-            "and ::test_d2_the_waived_cells_are_gated_by_existence_alone."
-        ),
-    ),
-    Waiver(
-        step_id="35",
-        dim=2,
-        reason=(
-            "PERMANENT, by design — not a pending flow-definition decision. "
-            "Step 35's gate carries `files_exist: "
-            "['reports/phase3/dfm_screen.json']` plus `dfm_screen_check` "
-            "wired as `advisory_program_exit_zero`, so the only BLOCKING term "
-            "is path resolution. Promoting the DFM finding to blocking was "
-            "considered and explicitly rejected in the flow yaml's own "
-            "comment on this step: Step 31 owns the litho/min-width RULES and "
-            "Step 34 owns the density EXECUTION gate, and OpenROAD ships no "
-            "via-doubling repair pass — so failing Step 35 on a DFM "
-            "optimisation finding would fabricate a FAIL nobody is allowed to "
-            "fix. Owner-confirmed 2026-08-08: leave the DFM clause advisory."
-        ),
-        evidence=(
-            "flow/phase1_phase2_phase3.yaml, the comment on step id 35's "
-            "ADVISORY half (#306) naming Step 31/34's ownership and the "
-            "absent OpenROAD repair pass. "
-            "programs/flow_compliance_check.py::`passed = "
-            "len(missing) == 0` is the blocking term's entire predicate; "
-            "flowref.GateClause.is_advisory excludes the DFM clause from "
-            "this dimension by the module's own rule 1. Re-executed live by "
-            "programs/tests/test_matrix_d2_falsifiable.py::"
-            "test_d2_the_waived_cells_are_gated_by_existence_alone and "
-            "::test_d2_a_files_exist_clause_is_satisfied_by_a_zero_byte_file."
-        ),
-    ),
+    # Step 12 gained a blocking scan-survival check earlier. Steps 1 and 35
+    # now have blocking content checks too, so no absence-only D2 waiver
+    # remains. The live clause census checks that this stays true.
 
     # ── dimension 3 — are the declared outputs actually produced? ──────
     #

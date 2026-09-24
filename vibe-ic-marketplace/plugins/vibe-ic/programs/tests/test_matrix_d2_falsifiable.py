@@ -196,8 +196,8 @@ RUN
 ``PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`` is mandatory in this tree (a stray
 ``pytest_ethereum`` plugin otherwise breaks collection).
 
-LIVE, not remembered: 192<!--figure:blocking_clauses--> blocking clauses over
-69<!--figure:gated_steps--> gated steps. This is the denominator a reader
+LIVE, not remembered: 200<!--figure:blocking_clauses--> blocking clauses over
+70<!--figure:gated_steps--> gated steps. This is the denominator a reader
 wants, and it moves with the yaml: the digits are written by
 ``tools/gen_flow_matrix_census.py`` and the ``<!--figure:...-->`` anchors name
 the bindings that produced them (vibe-ic#961). Do not hand-edit them.
@@ -4347,29 +4347,11 @@ def test_d2_a_content_earned_program_red_is_still_a_real_red(
             f"program reds :: {out[-300:]}")
 
 
-#: The cells this repair could NOT close, and the reason, in one place.
-#:
-#: 2026-08-08: was ``("1", "12", "35")``. Step 12 closed for real — it gained
-#: ``dft_post_optimization_scan_survival_check`` as a blocking clause (a
-#: genuine content check LEC cannot subsume: scan insertion is functionally
-#: transparent, so LEC would still pass a post-DFT netlist whose scan chain
-#: silently vanished) — so it left this register and its waiver in
-#: ``flow_matrix/waivers.py`` was removed, not re-worded. Steps 1 and 35 did
-#: NOT close: both carry an explicit, owner-confirmed AUDIT NOTE in the flow
-#: yaml stating the files_exist-only gate is DELIBERATE (Step 1: content
-#: judgement belongs downstream at Steps 2-6 by design; Step 35: promoting
-#: the DFM clause to blocking would fabricate unfixable FAILs, since no
-#: OpenROAD repair pass exists for what it finds) — their waivers were
-#: reworded to say PERMANENT rather than pending, not removed.
-#:
-#: Each remaining step declares a gate whose every BLOCKING clause is a
-#: ``files_exist`` — so by the measurement in
-#: :func:`test_d2_a_files_exist_clause_is_satisfied_by_a_zero_byte_file` the
-#: whole gate is satisfied by empty files and can fail on one input only, the
-#: file not being there. They are WAIVED in ``flow_matrix/waivers.py`` with
-#: ``strict=True``: a stale entry (the step gains a content clause) reddens
-#: the suite exactly as it did for step 12.
-ABSENCE_ONLY_STEPS: Tuple[str, ...] = ("1", "35")
+#: Every flow gate now has at least one blocking clause beyond mere file
+#: existence. Step 12 gained scan-survival checking earlier; steps 1 and 35
+#: gained content checks in this change. The register remains a two-way pin:
+#: a future absence-only gate must be recorded and justified or the test fails.
+ABSENCE_ONLY_STEPS: Tuple[str, ...] = ()
 
 
 def test_d2_the_waived_cells_are_gated_by_existence_alone():
