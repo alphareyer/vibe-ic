@@ -506,6 +506,15 @@ def _drive(monkeypatch, project: Path) -> list:
     def _step(name):
         def _f(*a, **k):
             called.append(name)
+            # TOUCH REAL PLUGIN CODE. R-0924-3 r6 makes `code` what the step
+            # RAN, and a stub defined in this file runs none — so the recorder
+            # correctly records nothing and the kind is correctly poisoned.
+            # These stubs stand in for a step, so they run one real plugin
+            # function; the recording is then a true (small) record of plugin
+            # code that executed, which is what this suite's stamp/check
+            # round-trip needs. The recorder's own behaviour is covered by the
+            # r5/r6 tests that drive it for real.
+            R._pl.pnr_dir(a[0] if a else Path("."))
             return R.StepResult(name, "PASS", 0.0, f"{name} ok")
         return _f
 

@@ -50,6 +50,9 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import os
+import re
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -63,6 +66,63 @@ def _sha(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
+def _sha256_file(p: Path) -> Optional[str]:
+    try:
+        h = hashlib.sha256()
+        with open(p, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+#: Any token that names a Python script, wherever it appears — a bare argv
+#: element, inside a `bash -lc "…"` string, or after klayout's `-r` / `-rm`.
+_SCRIPT_RE = re.compile(r"[^\s\"\'=]+\.py\b")
+
+#: Environment that CHOOSES which engine runs, rather than what it runs on.
+#: `$VIBEIC_KLAYOUT_TOOLS` points `_klayout_launch` at a fork checkout, so the
+#: same recipe can execute entirely different code (r5 review finding 2).
+ENGINE_ENV = ("VIBEIC_KLAYOUT_TOOLS",)
+
+
+def _static_imports(path: Path, root: Path, seen=None) -> List[Path]:
+    """``path`` plus the in-tree modules it statically imports, transitively.
+
+    A launched script runs in ANOTHER PROCESS, so the profiler never sees a
+    single one of its calls. There is nothing to be clever with: the file is
+    taken WHOLE, and so is everything it imports from this tree. Coarse, and
+    honestly so — the alternative is not seeing it at all, which is what r5
+    measured."""
+    seen = seen if seen is not None else set()
+    out: List[Path] = []
+    try:
+        rp = path.resolve()
+    except OSError:
+        return out
+    if rp in seen or not path.is_file():
+        return out
+    seen.add(rp)
+    out.append(path)
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return out
+    for node in ast.walk(tree):
+        names: List[str] = []
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            names = [node.module]
+        for dotted in names:
+            cand = Path(root).joinpath(*dotted.split("."))
+            for q in (cand.with_suffix(".py"), cand / "__init__.py"):
+                if q.is_file():
+                    out.extend(_static_imports(q, root, seen))
+    return out
+
+
 class Recorder:
     """Collect the plugin code objects executed inside a ``with`` block."""
 
@@ -73,7 +133,30 @@ class Recorder:
         self._plugin: Dict[str, bool] = {}
         self._prev = None
         self._installed = False
+        self._prev_popen = None
+        self._launched: Set[str] = set()
+        self._engine_env: Dict[str, str] = {}
         self.why_not = ""
+
+    def _note_launch(self, argv) -> None:
+        """Record any PLUGIN SCRIPT this step launches out of process.
+
+        r5 review finding 2: `sys.setprofile` cannot see another process, so
+        `metal_fill/metal_fill.py` under klayout, `die_finishing_gen`'s seal
+        ring, `pad_assignment_gen` / `pad_ring_gen` via `_docker_exec python3`
+        and `decap_route_short_guard` all ran with nothing recorded. Rather
+        than enumerate launch sites — the mistake of rounds 1 to 5 — this
+        watches the ONE place every launch passes through."""
+        try:
+            text = argv if isinstance(argv, str) else " ".join(
+                str(x) for x in argv)
+        except Exception:  # noqa: BLE001
+            return
+        for tok in _SCRIPT_RE.findall(text):
+            self._launched.add(tok)
+        for name in ENGINE_ENV:
+            if name in text or name in os.environ:
+                self._engine_env[name] = os.environ.get(name, "")
 
     # -- the hook, kept deliberately small ---------------------------------
     def _hook(self, frame, event, arg):
@@ -86,7 +169,10 @@ class Recorder:
         self._seen.add(key)
         mine = self._plugin.get(code.co_filename)
         if mine is None:
-            mine = code.co_filename.startswith(self._root)
+            # This module is INSTRUMENTATION, not the step's code. Recording
+            # its own `_WatchedPopen` made every recording unnameable.
+            mine = (code.co_filename.startswith(self._root)
+                    and code.co_filename != __file__)
             self._plugin[code.co_filename] = mine
         if mine and code.co_name != "<module>":
             # A module's own top-level code object is covered by
@@ -106,6 +192,15 @@ class Recorder:
                 return self
             sys.setprofile(self._hook)
             threading.setprofile(self._hook)
+            self._prev_popen = subprocess.Popen
+            _rec = self
+
+            class _WatchedPopen(self._prev_popen):  # type: ignore[misc]
+                def __init__(self, args, *a, **k):
+                    _rec._note_launch(args)
+                    super().__init__(args, *a, **k)
+
+            subprocess.Popen = _WatchedPopen   # type: ignore[assignment]
             self._installed = True
         except Exception as exc:  # noqa: BLE001 — never break the step
             self.why_not = (f"the profiler could not be installed "
@@ -117,6 +212,11 @@ class Recorder:
             try:
                 sys.setprofile(self._prev)
                 threading.setprofile(None)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                if self._prev_popen is not None:
+                    subprocess.Popen = self._prev_popen  # type: ignore
             except Exception:  # noqa: BLE001
                 pass
         self._installed = False
@@ -144,6 +244,57 @@ class Recorder:
             except (OSError, ValueError):
                 rel = Path(fname).name
             out[rel] = digests
+        launched, why = self._launched_digests()
+        if why:
+            return None, why
+        out.update(launched)
+        if self._engine_env:
+            out["__engine_env__"] = {
+                k: _sha(v.encode("utf-8"))
+                for k, v in sorted(self._engine_env.items())}
+        return out, ""
+
+    def _resolve_script(self, tok: str) -> Optional[Path]:
+        """Where a launched script token lives, if it is one of ours."""
+        root = Path(self._root[:-1])
+        for cand in (Path(tok), root / tok, root / Path(tok).name):
+            try:
+                if cand.is_file() and cand.resolve().is_relative_to(root):
+                    return cand
+            except (OSError, ValueError):
+                continue
+        return None
+
+    def _launched_digests(self) -> Tuple[Dict[str, Dict[str, str]], str]:
+        """Whole-file digests for every PLUGIN script launched out of process,
+        plus its static import closure.
+
+        A token that names a plugin script we cannot READ is a refusal: an
+        unattributable plugin launch means this kind gets no cache, which is
+        the rule the review asked for."""
+        root = Path(self._root[:-1])
+        out: Dict[str, Dict[str, str]] = {}
+        for tok in sorted(self._launched):
+            path = self._resolve_script(tok)
+            if path is None:
+                # Not ours (a system script, or a name that resolves nowhere
+                # in this tree). Only a PLUGIN launch has to be attributable.
+                if (root / Path(tok).name).suffix == ".py" and \
+                        (root / Path(tok).name).exists():
+                    return {}, (f"a plugin script was launched as {tok!r} and "
+                                f"could not be read, so what this step ran "
+                                f"out of process cannot be established")
+                continue
+            for q in _static_imports(path, root):
+                d = _sha256_file(q)
+                if d is None:
+                    return {}, (f"{q} was launched (or imported by a launched "
+                                f"script) and could not be read")
+                try:
+                    rel = str(q.resolve().relative_to(root))
+                except (OSError, ValueError):
+                    rel = q.name
+                out.setdefault(f"launched:{rel}", {})["__whole__"] = d
         return out, ""
 
 
@@ -199,7 +350,20 @@ def _qualnames(tree: ast.AST, lines: List[str]
                 by_line[start] = qual
                 walk(child, f"{qual}.")
             elif isinstance(child, ast.ClassDef):
-                walk(child, f"{prefix}{child.name}.")
+                # A class body is a code object named after the class, and it
+                # RUNS at definition time — so it needs a name here or a
+                # recording that touches one cannot be resolved at all.
+                qual = f"{prefix}{child.name}"
+                seg = _segment(lines, child)
+                if seg is not None:
+                    src[qual] = seg
+                start = child.lineno
+                for dec in child.decorator_list or ():
+                    dlo = getattr(dec, "lineno", None)
+                    if dlo is not None and dlo < start:
+                        start = dlo
+                by_line[start] = qual
+                walk(child, f"{qual}.")
             else:
                 walk(child, prefix)
 
@@ -308,6 +472,17 @@ def rederive(record: Dict[str, Dict[str, str]], root: Path
     root = Path(root)
     out: Dict[str, Dict[str, str]] = {}
     for rel, entries in record.items():
+        if rel == "__engine_env__":
+            # The environment that PICKS the engine is a fact about now, and
+            # the caller re-supplies it; carried forward unchanged so a
+            # comparison is against the recorded value.
+            out[rel] = dict(entries)
+            continue
+        if rel.startswith("launched:"):
+            q = root / rel[len("launched:"):]
+            d = _sha256_file(q)
+            out[rel] = {"__whole__": d if d is not None else "ABSENT"}
+            continue
         quals = [k for k in entries if k != MODULE_BODY]
         digests, err = check_digests(root / rel, quals)
         if err:

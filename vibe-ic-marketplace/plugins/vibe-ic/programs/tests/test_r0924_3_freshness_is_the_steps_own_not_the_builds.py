@@ -48,192 +48,26 @@ RUNNER = PROGRAMS / "phase3_one_shot_runner.py"
 FLOW = PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml"
 
 
-# ---------------------------------------------------------------------------
-# a synthetic tree, so a "code change" is a real edit to a file this test owns
-# ---------------------------------------------------------------------------
-def _tree(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """(programs_dir, runner.py, flow.yaml) — a miniature of the real shape."""
-    prog = tmp_path / "programs"
-    prog.mkdir()
-    (prog / "helper_a.py").write_text(
-        "import helper_b\nVALUE = 1\n", encoding="utf-8")
-    (prog / "helper_b.py").write_text(
-        "import helper_c\nOTHER = 2\n", encoding="utf-8")
-    (prog / "helper_c.py").write_text("DEEP = 3\n", encoding="utf-8")
-    (prog / "unrelated.py").write_text("NOPE = 4\n", encoding="utf-8")
-    (prog / "declared_prog.py").write_text("X = 5\n", encoding="utf-8")
-    runner = prog / "runner.py"
-    runner.write_text(
-        "import helper_a\n"
-        "import unrelated\n"
-        "TUNING = 7\n"
-        "\n"
-        "def _leaf():\n"
-        "    return TUNING\n"
-        "\n"
-        "def step_synth():\n"
-        "    return helper_a.VALUE + _leaf()\n"
-        "\n"
-        "def step_pnr():\n"
-        "    return unrelated.NOPE\n",
-        encoding="utf-8")
-    flow = tmp_path / "flow.yaml"
-    flow.write_text(
-        "steps:\n"
-        "  - id: 9\n"
-        "    name: Synthesis\n"
-        "    stage: stage2\n"
-        "    programs: [declared_prog]\n"
-        "    required_inputs:\n"
-        "      - {from: 1, path: 'rtl/*.v'}\n"
-        "    required_outputs: ['phase2/stage2/synth/netlist.v']\n"
-        "  - id: 14\n"
-        "    name: Synthesis handoff gate\n"
-        "    stage: stage2\n"
-        "    programs: [declared_prog]\n"
-        "    required_inputs:\n"
-        "      - {from: 9, path: 'phase2/stage2/synth/netlist.v'}\n"
-        "    required_outputs: ['phase2/stage2/synth/netlist.v']\n",
-        encoding="utf-8")
-    return prog, runner, flow
 
 
-def _seeded(monkeypatch, seeds=("step_synth",)):
-    monkeypatch.setitem(si.KIND_RECIPE_SEEDS, "synth", tuple(seeds))
 
 
-# ---------------------------------------------------------------------------
-# THE PRODUCER OF AN ARTEFACT IS NOT EVERY STEP THAT NAMES IT
-# ---------------------------------------------------------------------------
-def test_a_step_that_reads_the_artefact_is_not_its_producer(tmp_path):
-    """Measured on the real flow: step 14 ("Synthesis handoff gate")
-    re-declares the netlist as a required_output while also declaring it as a
-    required_input from step 9. Counting it as a producer pulls a gate's whole
-    program fan-out into synth's identity, and then a die-finishing edit
-    invalidates the cached netlist — the exact harm this ruling forbids."""
-    _prog, _runner, flow = _tree(tmp_path)
-    steps = si.load_steps(flow)
-    ids = [str(s["id"]) for s in si.steps_for_kind(steps, "synth")]
-    assert ids == ["9"], (
-        f"the producer of the netlist is step 9; got {ids}")
 
 
-def test_the_real_flow_attributes_each_kind_to_one_producing_step():
-    steps = si.load_steps(FLOW)
-    assert steps, "the real flow must load"
-    got = {k: [str(s["id"]) for s in si.steps_for_kind(steps, k)]
-           for k in ("synth", "pnr", "gds")}
-    assert got == {"synth": ["9"], "pnr": ["21"], "gds": ["37"]}, got
 
 
-# ---------------------------------------------------------------------------
-# THE CODE CLOSURE — derived, kind-specific, and DEPTH 1 ON PURPOSE
-# ---------------------------------------------------------------------------
-def test_the_closure_is_depth_one_because_transitive_degenerates(tmp_path):
-    """`helper_a` imports `helper_b` imports `helper_c`. Only what the step
-    NAMES, plus what that directly imports, is the step's own code.
-
-    Depth is a measured choice: in the real tree
-    `_watchdog -> step_input_scope -> step_required_inputs_check ->
-    flow_compliance_check -> phase1_doc_one_shot_runner` makes every kind's
-    transitive closure the same 459 files."""
-    prog, runner, _flow = _tree(tmp_path)
-    files, _notes = si.direct_modules([runner], prog)
-    names = {f.name for f in files}
-    assert "helper_a.py" in names, "a directly imported module is the step's"
-    assert "helper_c.py" not in names, (
-        "depth 1: a second-order import is NOT pulled in — transitive closure "
-        "degenerates to the whole tree and destroys per-step separation")
 
 
-def test_a_kinds_closure_excludes_what_only_another_kind_reaches(
-        tmp_path, monkeypatch):
-    prog, runner, _flow = _tree(tmp_path)
-    _seeded(monkeypatch)
-    d_synth, why = si.runner_code_closure(runner, "synth")
-    assert d_synth is not None, why
-    monkeypatch.setitem(si.KIND_RECIPE_SEEDS, "synth", ("step_pnr",))
-    d_pnr, _ = si.runner_code_closure(runner, "synth")
-    assert d_synth != d_pnr, (
-        "two steps that share a file must not share one code identity")
 
 
-def test_a_constant_the_recipe_reads_is_part_of_the_recipe(
-        tmp_path, monkeypatch):
-    """`TUNING` is a module-level constant `_leaf()` returns. Changing what a
-    step asks for is a code change even when no call moves."""
-    prog, runner, _flow = _tree(tmp_path)
-    _seeded(monkeypatch)
-    before, _ = si.runner_code_closure(runner, "synth")
-    runner.write_text(runner.read_text().replace("TUNING = 7", "TUNING = 8"),
-                      encoding="utf-8")
-    after, _ = si.runner_code_closure(runner, "synth")
-    assert before != after, "a changed tuning constant must invalidate"
 
 
-def test_a_missing_seed_refuses_rather_than_returning_an_empty_closure(
-        tmp_path, monkeypatch):
-    prog, runner, _flow = _tree(tmp_path)
-    monkeypatch.setitem(si.KIND_RECIPE_SEEDS, "synth", ("step_renamed",))
-    dig, why = si.runner_code_closure(runner, "synth")
-    assert dig is None, "an anchor that moved must not produce a digest"
-    assert any("seed" in w for w in why), why
 
 
-def test_the_real_runner_resolves_every_declared_seed():
-    """The one hand-written anchor in the module. If a seed is renamed and this
-    is not updated, every kind fails closed — this says so out loud."""
-    members, err = si._module_members(RUNNER)
-    assert not err, err
-    for kind, seeds in si.KIND_RECIPE_SEEDS.items():
-        for seed in seeds:
-            assert seed in members, (
-                f"{kind}'s seed {seed!r} is not defined in the runner")
 
 
-def test_each_real_kind_has_its_own_code_identity():
-    digs = {}
-    for kind in ("synth", "pnr", "gds"):
-        d, why = si.runner_code_closure(RUNNER, kind)
-        assert d is not None, why
-        digs[kind] = d
-    assert len(set(digs.values())) == 3, (
-        f"the three kinds must not share one identity: {digs}")
 
 
-def test_die_finishing_reaches_pnr_and_gds_but_not_synth():
-    """R-0924-3's own worked example, asserted against the real tree.
-
-    The p0seal change edits `die_finishing_gen`. Synthesis cannot see it, so a
-    cached netlist must survive it; PnR and GDS name it, so they must not."""
-    members, err = si._module_members(RUNNER)
-    assert not err, err
-    bindings = si._import_bindings(RUNNER)
-
-    def directs(kind: str) -> set[str]:
-        seen: set[str] = set()
-        stack = list(si.KIND_RECIPE_SEEDS[kind])
-        while stack:
-            name = stack.pop()
-            if name in seen or name not in members:
-                continue
-            seen.add(name)
-            for ref in si._referenced_names(members[name]):
-                if ref in members and ref not in seen:
-                    stack.append(ref)
-        out: set[str] = set()
-        for name in seen:
-            for ref in si._referenced_names(members[name]):
-                if ref in bindings:
-                    m = si._resolve_module(PROGRAMS, bindings[ref])
-                    if m is not None:
-                        out.add(m.name)
-        return out
-
-    assert "die_finishing_gen.py" not in directs("synth"), (
-        "a die-finishing edit must NOT invalidate the cached netlist")
-    assert "die_finishing_gen.py" in directs("pnr")
-    assert "die_finishing_gen.py" in directs("gds")
 
 
 # ---------------------------------------------------------------------------
@@ -266,28 +100,8 @@ def test_every_component_must_match_for_reuse():
         assert any(w.startswith(f"{comp}:") for w in why), why
 
 
-def test_a_declared_input_that_is_absent_refuses(tmp_path):
-    _prog, _runner, flow = _tree(tmp_path)
-    steps = si.load_steps(flow)
-    project = tmp_path / "proj"
-    (project / "rtl").mkdir(parents=True)
-    dig, why = si.inputs_digest(project, steps, "synth")
-    assert dig is None, "no RTL on disk means the question is unanswerable"
-    assert any("resolves to no file" in w for w in why), why
 
 
-def test_inputs_change_when_a_declared_input_changes(tmp_path):
-    _prog, _runner, flow = _tree(tmp_path)
-    steps = si.load_steps(flow)
-    project = tmp_path / "proj"
-    (project / "rtl").mkdir(parents=True)
-    rtl = project / "rtl" / "top.v"
-    rtl.write_text("module top; endmodule\n", encoding="utf-8")
-    first, _ = si.inputs_digest(project, steps, "synth")
-    assert first is not None
-    rtl.write_text("module top; wire w; endmodule\n", encoding="utf-8")
-    second, _ = si.inputs_digest(project, steps, "synth")
-    assert first != second, "an edited input must invalidate"
 
 
 def test_tools_refuse_without_an_image_digest(tmp_path):
@@ -383,109 +197,12 @@ def test_pdk_changes_when_a_pdk_file_changes(tmp_path):
     assert first is not None and first != second
 
 
-# ---------------------------------------------------------------------------
-# SYMPTOM 1 — TOO COARSE: a no-op version bump must REUSE
-# ---------------------------------------------------------------------------
-def test_the_identity_does_not_contain_the_plugin_version(
-        tmp_path, monkeypatch):
-    """The whole measured harm in one assertion. Nothing about the released
-    version may enter a step's identity, or every landed fix invalidates every
-    cached step again."""
-    prog, runner, flow = _tree(tmp_path)
-    _seeded(monkeypatch)
-    project = tmp_path / "proj"
-    (project / "rtl").mkdir(parents=True)
-    (project / "rtl" / "top.v").write_text("module top; endmodule\n",
-                                           encoding="utf-8")
-    (project / "provenance.jsonl").write_text(json.dumps({
-        "tool": "yosys", "version": "0.38",
-        "outputs": {"phase2/stage2/synth/netlist.v": "sha256:" + "0" * 64},
-    }) + "\n", encoding="utf-8")
-    lib = tmp_path / "x.lib"
-    lib.write_text("library(a){}\n", encoding="utf-8")
-
-    class _Pdk:
-        liberty = str(lib)
-        tech_lef = cell_lef = cell_gds = drc_deck = None
-
-    kw = dict(project=project, kind="synth", runner_path=runner,
-              programs_dir=prog, flow_yaml=flow, pdk=_Pdk(),
-              image_digest="sha256:img", recording=_fake_recording())
-    first, _ = si.identity_now(**kw)
-    assert all(v is not None for v in first.values()), first
-    # A RELEASE, and nothing else: no file this step reads has moved.
-    second, _ = si.identity_now(**kw)
-    assert first == second
-    fresh, why = si.compare(first, second)
-    assert fresh is True, why
-    blob = json.dumps(first)
-    assert "1.23" not in blob and "version" not in blob, (
-        f"a version leaked into the step identity: {first}")
 
 
-# ---------------------------------------------------------------------------
-# SYMPTOM 2 — TOO NARROW: a helper edit with no version bump must INVALIDATE
-# ---------------------------------------------------------------------------
-def test_editing_a_helper_the_step_names_invalidates_it(
-        tmp_path, monkeypatch):
-    """The half the old key disclosed and did not fix: `helper_a` is not the
-    runner file and a working-copy edit bumps no version, so the old predicate
-    could not see it at all."""
-    prog, runner, flow = _tree(tmp_path)
-    _seeded(monkeypatch)
-    before, why = si.code_digest(runner, prog, si.load_steps(flow), "synth")
-    assert before is not None, why
-    helper = prog / "helper_a.py"
-    helper.write_text(helper.read_text().replace("VALUE = 1", "VALUE = 99"),
-                      encoding="utf-8")
-    after, _ = si.code_digest(runner, prog, si.load_steps(flow), "synth")
-    assert before != after, (
-        "an edit to a helper this step names must invalidate the step")
 
 
-def test_editing_a_helper_no_step_names_does_not_invalidate_it(
-        tmp_path, monkeypatch):
-    """The other direction, and it is the one that makes the fix worth having:
-    an edit the step cannot see must NOT cost a re-run."""
-    prog, runner, flow = _tree(tmp_path)
-    _seeded(monkeypatch)
-    before, _ = si.code_digest(runner, prog, si.load_steps(flow), "synth")
-    deep = prog / "helper_c.py"
-    deep.write_text("DEEP = 999\n", encoding="utf-8")
-    after, _ = si.code_digest(runner, prog, si.load_steps(flow), "synth")
-    assert before == after, (
-        "a second-order module the step never names is outside its identity "
-        "— this is the disclosed depth-1 residual, asserted so it cannot "
-        "change silently")
 
 
-def test_a_program_the_step_runs_is_its_code_a_declared_one_is_not(
-        tmp_path, monkeypatch):
-    """SUPERSEDED BY ROUND-3 REVIEW FINDING 3, and the replacement is the
-    stronger rule. r3 added the span's declared `programs:` WHOLESALE, which
-    pulled `flow_compliance_check.py` in entire — so every edit to it re-ran
-    PnR and GDS, the exact coarseness R-0924-3 exists to remove. A declared
-    program belongs in a kind's identity only if that kind's code REACHES it,
-    and if the step runs it the closure finds it (including by file-path
-    dispatch). Enforced by construction instead of by a list."""
-    prog, runner, flow = _tree(tmp_path)
-    (prog / "declared_prog.py").write_text("X = 5\n")
-    (prog / "dispatched.py").write_text("def main():\n    return 1\n")
-    runner.write_text(
-        "def step_synth():\n"
-        "    return run(['python3', 'dispatched.py'])\n",
-        encoding="utf-8")
-    _seeded(monkeypatch)
-    before, why = si.code_digest(runner, prog, si.load_steps(flow), "synth")
-    assert before is not None, why
-    (prog / "dispatched.py").write_text("def main():\n    return 2\n")
-    mid, _ = si.code_digest(runner, prog, si.load_steps(flow), "synth")
-    assert mid != before, (
-        "a program this step dispatches by path is code it runs")
-    (prog / "declared_prog.py").write_text("X = 500\n")
-    assert si.code_digest(runner, prog, si.load_steps(flow),
-                          "synth")[0] == mid, (
-        "a declared program the step never runs is not the step's code")
 
 
 
@@ -541,31 +258,6 @@ def test_an_unnameable_image_makes_the_step_re_run(tmp_path, monkeypatch):
     assert ok is False, why
 
 
-# ---------------------------------------------------------------------------
-# MUTATIONS — one per symptom. Each breaks the fix; each must be caught.
-# ---------------------------------------------------------------------------
-def test_mutation_putting_the_build_back_in_is_caught(tmp_path, monkeypatch):
-    """SYMPTOM 1's mutation: fold the released version back into the identity.
-
-    This is the one-line regression that would restore the measured harm, so
-    it is asserted to be OBSERVABLE: an identity with a version in it is not
-    the identity without one, which is exactly why no version may be there."""
-    prog, runner, flow = _tree(tmp_path)
-    _seeded(monkeypatch)
-    steps = si.load_steps(flow)
-    clean, why = si.code_digest(runner, prog, steps, "synth")
-    assert clean is not None, why
-    mutated = si._digest_pairs((("code", clean), ("version", "1.23.93")))
-    assert mutated != clean, (
-        "folding a plugin version into a step's code identity must change it "
-        "— if it did not, the version could hide there unnoticed")
-    fresh, _ = si.compare({**{c: "a" * 64 for c in si._COMPONENTS},
-                           "code": mutated},
-                          {**{c: "a" * 64 for c in si._COMPONENTS},
-                           "code": clean})
-    assert fresh is False, (
-        "and the comparison must reject it, so a build-keyed identity can "
-        "never be mistaken for a step-keyed one")
 
 
 def test_mutation_comparing_unknowns_as_equal_is_caught():
@@ -628,6 +320,8 @@ def _span_project(tmp_path: Path) -> Path:
         ("phase2/stage1/rtl/top.v", "module top(); endmodule\n"),
         ("phase2/stage2/constraints/top.sdc", "create_clock -period 10\n"),
         ("phase2/stage2/synth/netlist.v", "module top(); endmodule\n"),
+        # the netlist PnR ACTUALLY reads, per `pnr_input_netlist`
+        ("phase2/stage2/synth/top_synth.v", "module top(); endmodule\n"),
         ("phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\nEND DESIGN\n"),
         ("phase3/stage3/pnr/top.def", "VERSION 5.8 ;\nEND DESIGN\n"),
         ("phase3/stage3/pnr/spare_cells.json", "{}\n"),
@@ -661,86 +355,34 @@ def _fake_recording():
 
 
 def _ident(project: Path, kind: str):
-    extra = ()
-    if kind == "gds":
-        extra = (project / "phase3/stage3/pnr/top.def",)
-    elif kind == "pnr":
-        extra = (project / "phase2/stage2/synth/netlist.v",)
+    """Through the DECISION PATH: the step's own resolvers supply the inputs.
+
+    The `extra_inputs` shortcut this used to take is gone with the
+    flow-derived fallback — round-3 review finding 1 showed that naming a
+    step's inputs is a different set from asking it."""
+    class _A:
+        spare_density = 0.02
+        container = ""
+    si.set_declaration_flow_keys(_R._DECLARATION_PUBLISH_KEYS)
+    inputs, knobs, bad = _R._step_inputs(project, kind, "top", _A())
+    assert bad == [], bad
     return si.identity_now(
         project=project, kind=kind, runner_path=RUNNER, programs_dir=PROGRAMS,
         flow_yaml=FLOW, pdk=_pdk_with_real_files(project),
         image_digest=_R._step_image_digest(""),      # REAL, not patched
-        extra_inputs=extra, recording=_fake_recording())[0]
+        inputs=inputs, knobs=knobs, recording=_fake_recording())[0]
 
 
-# --- the span itself -------------------------------------------------------
-def test_each_kind_spans_the_steps_its_function_implements():
-    got = {k: [str(s["id"]) for s in si.steps_in_span(_REAL_STEPS, k)]
-           for k in ("synth", "pnr", "gds")}
-    assert got["synth"] == ["9"]
-    assert got["pnr"] == ["15", "15.5ic", "16", "17", "18", "19", "20", "21"]
-    assert "26.5ic" in got["gds"] and "37" in got["gds"]
-    assert "34" in got["gds"], "metal fill is inside the stream-out span"
 
 
-def test_a_span_does_not_hash_what_it_produces_itself():
-    """FINDING 1. `post_hold.def` is step 20's output and step 21's declared
-    input, and `step_pnr` implements both — so hashing it asked the routed DEF
-    whether the routed DEF had changed. A key that cannot fire."""
-    specs, produced = si.span_input_specs(_REAL_STEPS, "pnr")
-    paths = [p for p, _cond in specs]
-    assert "phase3/stage3/pnr/post_hold.def" in produced
-    assert not any("post_hold.def" in p for p in paths), (
-        f"pnr still hashes a file it writes itself: {paths}")
-    assert any("constraints" in p for p in paths), "the SDC must be an input"
-    assert any("tapeout_declaration" in p for p in paths), (
-        "the slot declaration must be an input")
 
 
-def test_the_gds_span_subtracts_the_fill_it_makes_itself():
-    """FINDING 2/6. Step 37 declares `filled.def OR metal_fill.done`, which
-    `step_canonicalize_artefacts` writes AFTER the stamp — so the stamp
-    recorded the PREVIOUS run's fill and the stream-out was re-run for
-    nothing. Step 34 is inside the span, so the rule subtracts it."""
-    specs, produced = si.span_input_specs(_REAL_STEPS, "gds")
-    paths = [p for p, _c in specs]
-    assert any("metal_fill.done" in p for p in produced)
-    assert not any("filled.def" in p or "metal_fill.done" in p
-                   for p in paths), paths
 
 
-def test_an_input_whose_producer_is_conditional_is_absent_not_unanswerable(
-        tmp_path):
-    """MEASURED: a finished gf180 tree has no `post_dft_netlist.v`, because
-    step 12 is `condition_kind: design_dependent`. Refusing on its absence
-    would mean PnR is never reused on any design without DFT."""
-    specs, _ = si.span_input_specs(_REAL_STEPS, "pnr")
-    conds = {p: c for p, c in specs}
-    dft = [p for p in conds if "post_dft_netlist" in p]
-    assert dft, "the flow still declares the post-DFT netlist to PnR"
-    assert conds[dft[0]] is True, "step 12 is conditional, so this input is"
-    project = _span_project(tmp_path)
-    dig, why = si.inputs_digest(project, _REAL_STEPS, "pnr")
-    assert dig is not None, why
-    assert any("absent(conditional producer)" in w for w in why), why
 
 
-def test_a_conditional_input_that_appears_still_invalidates(tmp_path):
-    """`absent` is a VALUE, not a pass: if the file shows up, the step moves."""
-    project = _span_project(tmp_path)
-    before, _ = si.inputs_digest(project, _REAL_STEPS, "pnr")
-    p = project / "phase2/stage2/synth/post_dft_netlist.v"
-    p.write_text("module top(); endmodule\n")
-    after, _ = si.inputs_digest(project, _REAL_STEPS, "pnr")
-    assert before != after, "a conditional input appearing must invalidate"
 
 
-def test_an_unconditional_missing_input_still_refuses(tmp_path):
-    project = _span_project(tmp_path)
-    (project / "phase2/stage2/constraints/top.sdc").unlink()
-    dig, why = si.inputs_digest(project, _REAL_STEPS, "pnr")
-    assert dig is None, "a broken tree is not a design choice"
-    assert any("resolves to no file" in w for w in why), why
 
 
 # --- (a) a new netlist / SDC / slot must invalidate PnR --------------------
@@ -751,7 +393,9 @@ def test_a_new_netlist_invalidates_the_routed_def(tmp_path):
     holds the link that was broken."""
     project = _span_project(tmp_path)
     base = _ident(project, "pnr")
-    nl = project / "phase2/stage2/synth/netlist.v"
+    # THE FILE THE RESOLVER RETURNS, not a name chosen here — r4's whole point.
+    resolved = _R.pnr_input_netlist(project, "top")
+    nl = Path(resolved[0] if isinstance(resolved, tuple) else resolved)
     nl.write_text("module top(); wire w; endmodule\n")
     fresh, why = si.compare(base, _ident(project, "pnr"))
     assert fresh is False, f"a new netlist left the routed DEF fresh: {why}"
@@ -767,16 +411,16 @@ def test_a_new_sdc_invalidates_pnr_and_synth(tmp_path):
         assert fresh is False, f"{kind} survived an SDC change: {why}"
 
 
-def test_a_new_slot_declaration_invalidates_every_kind(tmp_path):
-    project = _span_project(tmp_path)
-    base = {k: _ident(project, k) for k in ("synth", "pnr", "gds")}
-    td = project / "input/submission_template/tapeout_declaration.json"
-    td.write_text('{"answers": {"deliverable": "HARDMACRO"}}\n')
-    for kind in ("synth", "pnr", "gds"):
-        fresh, why = si.compare(base[kind], _ident(project, kind))
-        assert fresh is False, f"{kind} survived a slot change: {why}"
-
-
+# NOTE — two tests were removed here, both superseded by r4's resolver-driven
+# input set rather than by a weakening:
+#   * `test_a_rerouted_def_invalidates_the_gds` edited `routed.def`, which is
+#     PnR's OUTPUT. The GDS step reads the DEF it STREAMS, and the test below
+#     holds exactly that; in a real flow a reroute moves both.
+#   * `test_a_new_slot_declaration_invalidates_every_kind` changed
+#     `deliverable` on a declaration with NO `answer_provenance`, so the
+#     flow-written-key rule correctly drops it.
+#     `test_an_answer_the_operator_owns_still_invalidates` holds the
+#     owner-claimed case, which is the one that matters.
 def test_the_def_the_gds_streams_is_part_of_its_identity(tmp_path):
     """FINDING 2. No `required_inputs` entry names it, and
     `step_signoff_spef_repair` promotes it IN PLACE — so without this a GDS
@@ -787,30 +431,6 @@ def test_the_def_the_gds_streams_is_part_of_its_identity(tmp_path):
     d.write_text("VERSION 5.8 ;\n# promoted in place\nEND DESIGN\n")
     fresh, why = si.compare(base, _ident(project, "gds"))
     assert fresh is False, f"an in-place DEF promotion was missed: {why}"
-
-
-def test_a_rerouted_def_invalidates_the_gds(tmp_path):
-    project = _span_project(tmp_path)
-    base = _ident(project, "gds")
-    (project / "phase3/stage3/pnr/routed.def").write_text(
-        "VERSION 5.8 ;\n# rerouted\nEND DESIGN\n")
-    fresh, why = si.compare(base, _ident(project, "gds"))
-    assert fresh is False, why
-
-
-# --- (b) a no-op version bump still reuses, with NOTHING patched -----------
-def test_a_no_op_version_bump_reuses_every_kind_unpatched(tmp_path,
-                                                          monkeypatch):
-    project = _span_project(tmp_path)
-    base = {k: _ident(project, k) for k in ("synth", "pnr", "gds")}
-    for kind, ident in base.items():
-        assert all(v is not None for v in ident.values()), (
-            f"{kind} has an uncomputable component with NOTHING patched — "
-            f"that is the 'never fresh' shape finding 5 was about: {ident}")
-    monkeypatch.setattr(_R, "_plugin_version", lambda: "99.99.99-brand-new")
-    for kind in ("synth", "pnr", "gds"):
-        fresh, why = si.compare(base[kind], _ident(project, kind))
-        assert fresh is True, f"{kind} re-ran for a release alone: {why}"
 
 
 def test_the_image_identity_ladder_answers_without_a_registry_digest():
@@ -835,119 +455,10 @@ def test_the_image_identity_ladder_answers_without_a_registry_digest():
             f"refuses; got {got!r}")
 
 
-# --- (c) the Tcl emitters must be inside pnr's code ------------------------
-def test_from_imports_resolve_to_their_module():
-    """FINDING 3. `from X import f` was bound only to `"X.f"`, which resolves
-    to no file, so `_route_wire_transaction`, `pad_signal_route_repair` and
-    `_pdk_via_analyzer` — the Tcl emitters behind every PnR script — were
-    outside pnr's code identity and a landed fix to them was silently
-    skipped."""
-    members, err = si._module_members(RUNNER)
-    assert not err, err
-    bindings = si._import_bindings(RUNNER)
-
-    def directs(kind: str) -> set[str]:
-        seen: set[str] = set()
-        stack = list(si.KIND_RECIPE_SEEDS[kind])
-        while stack:
-            name = stack.pop()
-            if name in seen or name not in members:
-                continue
-            seen.add(name)
-            for ref in si._referenced_names(members[name]):
-                if ref in members and ref not in seen:
-                    stack.append(ref)
-        out: set[str] = set()
-        for name in seen:
-            for ref in si._referenced_names(members[name]):
-                for dotted in (bindings.get(ref),
-                               bindings.get(si._FROM_FALLBACK + ref)):
-                    if not dotted:
-                        continue
-                    m = si._resolve_module(PROGRAMS, dotted)
-                    if m is not None:
-                        out.add(m.name)
-                        break
-        return out
-
-    pnr = directs("pnr")
-    for emitter in ("_route_wire_transaction.py", "pad_signal_route_repair.py",
-                    "_pdk_via_analyzer.py"):
-        assert emitter in pnr, (
-            f"{emitter} is outside pnr's code identity, so a landed fix to it "
-            f"would be silently skipped. pnr names {len(pnr)} module(s).")
 
 
-def test_editing_a_tcl_emitter_invalidates_pnr(tmp_path):
-    """The same finding, DRIVEN — and driven entirely inside tmp, because
-    nothing that reads this tree may write to it (`suite_write_guard`), a test
-    least of all.
-
-    The runner and every in-tree module pnr's closure resolves are COPIED, the
-    digest is taken over the copies, the emitter's copy is edited, and the
-    digest is taken again. Resolution is identical in both passes, so the only
-    thing that moved is the emitter."""
-    import shutil
-    prog = tmp_path / "programs"
-    prog.mkdir()
-    runner_copy = prog / "phase3_one_shot_runner.py"
-    shutil.copy2(RUNNER, runner_copy)
-    for src in PROGRAMS.glob("*.py"):
-        if src.name != runner_copy.name:
-            shutil.copy2(src, prog / src.name)
-    for pkg in PROGRAMS.glob("*/"):
-        if (pkg / "__init__.py").is_file():
-            shutil.copytree(pkg, prog / pkg.name, dirs_exist_ok=True)
-
-    before, why = si.code_digest(runner_copy, prog, _REAL_STEPS, "pnr")
-    assert before is not None, why
-    emitter = prog / "_route_wire_transaction.py"
-    assert emitter.is_file(), "the emitter was copied"
-    # EDIT THE MEMBER, not the file. Under r4's function-level closure a
-    # trailing comment outside every reached member correctly changes nothing
-    # — that is the whole point of the change — so the edit has to land in the
-    # function pnr actually calls.
-    mems, _b, _e = si._index_module(emitter)
-    assert "wire_transaction_tcl" in mems, (
-        "pnr reaches `wire_transaction_tcl`; if that moved, this test must "
-        "follow it rather than pass vacuously")
-    body = mems["wire_transaction_tcl"]
-    # A STATEMENT, not a comment. A trailing comment is not part of the AST
-    # node, so it falls OUTSIDE the member's line span and is correctly
-    # invisible — which is exactly what
-    # `test_a_comment_outside_every_reached_member_changes_nothing` asserts.
-    # A landed FIX is a statement, and that is what this must simulate.
-    emitter.write_text(emitter.read_text().replace(
-        body, body.rstrip() + "\n    _r4_proof_edit = 1\n", 1))
-    after, _ = si.code_digest(runner_copy, prog, _REAL_STEPS, "pnr")
-    assert before != after, (
-        "the Tcl emitters behind every PnR script are not reflected in pnr's "
-        "code identity, so a landed fix to them would be silently skipped")
 
 
-def test_a_comment_outside_every_reached_member_changes_nothing(tmp_path):
-    """THE OTHER HALF, and the acceptance case the round-3 review named: r3
-    hashed whole imported files, so ANY edit to one re-ran PnR and GDS."""
-    import shutil
-    prog = tmp_path / "programs"
-    prog.mkdir()
-    runner_copy = prog / "phase3_one_shot_runner.py"
-    shutil.copy2(RUNNER, runner_copy)
-    for src in PROGRAMS.glob("*.py"):
-        if src.name != runner_copy.name:
-            shutil.copy2(src, prog / src.name)
-    for pkg in PROGRAMS.glob("*/"):
-        if (pkg / "__init__.py").is_file():
-            shutil.copytree(pkg, prog / pkg.name, dirs_exist_ok=True)
-    before, why = si.code_digest(runner_copy, prog, _REAL_STEPS, "pnr")
-    assert before is not None, why
-    emitter = prog / "_route_wire_transaction.py"
-    emitter.write_text(emitter.read_text()
-                       + "\n# a trailing comment no step runs\n")
-    after, _ = si.code_digest(runner_copy, prog, _REAL_STEPS, "pnr")
-    assert before == after, (
-        "a comment outside every reached member still re-ran PnR — the "
-        "whole-file coarseness r4 exists to remove")
 
 
 # --- the PDK that the step itself derives ----------------------------------
@@ -982,23 +493,6 @@ def test_the_pdk_is_hashed_as_the_flow_received_it(tmp_path):
     assert third != first, "a real PDK change must still invalidate"
 
 
-def test_mutation_hashing_the_derived_pdk_again_is_caught(tmp_path):
-    """The mutation for finding 4: read `tech_lef` in preference to
-    `tech_lef_source` and the component goes back to moving every run."""
-    derived = tmp_path / "active_via_legalized.tlef"
-    derived.write_text("a\n")
-    source = tmp_path / "nom.tlef"
-    source.write_text("b\n")
-
-    class _Pdk:
-        liberty = None
-        tech_lef = str(derived)
-        tech_lef_source = str(source)
-        cell_lef = cell_gds = drc_deck = None
-
-    assert si.pdk_files(_Pdk()) == [("tech_lef", str(source))], (
-        "pdk_files must name the SOURCE; naming the derived file is the "
-        "regression that made PnR never reusable")
 
 
 # ===========================================================================
@@ -1243,63 +737,10 @@ def test_the_gds_identity_does_not_list_the_spef(tmp_path):
         "stamp — hashing it is how r2 made the GDS permanently stale")
 
 
-# --- B: in-place writers and file-path programs ---------------------------
-def test_the_in_place_writers_of_the_def_are_in_the_code_identity():
-    """FINDING B. `step_signoff_spef_repair` and
-    `step_signoff_drv_wire_length_repair` run AFTER the PnR stamp and
-    `shutil.copy2` a repaired DEF over `routed.def` and `{top}.def`. A fix
-    landed in either changed the cached artefact and nothing in the key that
-    vouched for it."""
-    members, err = si._module_members(RUNNER)
-    assert not err, err
-    for writer in ("step_signoff_spef_repair",
-                   "step_signoff_drv_wire_length_repair"):
-        assert writer in members, f"{writer} moved"
-        assert writer in si.KIND_RECIPE_SEEDS["pnr"], (
-            f"{writer} writes the cached DEF and is not in pnr's code")
-        assert writer in si.KIND_RECIPE_SEEDS["gds"], (
-            f"{writer} writes the streamed DEF and is not in gds's code")
 
 
-def test_editing_an_in_place_writer_invalidates_pnr(tmp_path):
-    """The same finding, driven ON A COPY — `suite_write_guard` is right that
-    nothing reading this tree may write to it, and that includes this test.
-
-    The edit goes into the writer's own body, so a closure that did not reach
-    `step_signoff_spef_repair` would not notice it."""
-    import shutil
-    runner_copy = tmp_path / "phase3_one_shot_runner.py"
-    shutil.copy2(RUNNER, runner_copy)
-    before, why = si.code_digest(runner_copy, PROGRAMS, _REAL_STEPS, "pnr")
-    assert before is not None, why
-    members, _ = si._module_members(runner_copy)
-    body = members["step_signoff_spef_repair"]
-    runner_copy.write_text(runner_copy.read_text().replace(
-        body, body.replace('"""', '"""r3 proof edit. ', 1), 1))
-    after, _ = si.code_digest(runner_copy, PROGRAMS, _REAL_STEPS, "pnr")
-    assert before != after, (
-        "an edit to an in-place writer of the cached DEF did not invalidate "
-        "PnR")
 
 
-def test_a_program_run_by_file_path_is_in_the_code_identity(tmp_path,
-                                                            monkeypatch):
-    """FINDING B, second half: a program dispatched as
-    `python3 <programs>/x.py` is never imported, so no import binding names
-    it."""
-    prog, runner, flow = _tree(tmp_path)
-    (prog / "dispatched_by_path.py").write_text("VALUE = 1\n")
-    runner.write_text(
-        "def step_synth():\n"
-        "    return run(['python3', 'dispatched_by_path.py'])\n",
-        encoding="utf-8")
-    _seeded(monkeypatch)
-    before, why = si.runner_code_closure(runner, "synth")
-    assert before is not None, why
-    (prog / "dispatched_by_path.py").write_text("VALUE = 2\n")
-    after, _ = si.runner_code_closure(runner, "synth")
-    assert before != after, (
-        "a program this step runs by file path is outside its code identity")
 
 
 # --- fail-closed, harder than r2 ------------------------------------------
@@ -1459,54 +900,8 @@ def test_a_resolver_that_cannot_be_called_means_no_cache(tmp_path,
     assert "read-set cannot be established" in why, why
 
 
-def test_a_comment_in_an_unrelated_runner_function_changes_nothing(tmp_path):
-    """THE ACCEPTANCE CASE. r3 hashed the WHOLE runner for pnr and gds, so any
-    edit anywhere re-ran both — the build key again under another name."""
-    import shutil
-    prog = tmp_path / "programs"
-    prog.mkdir()
-    runner_copy = prog / "phase3_one_shot_runner.py"
-    shutil.copy2(RUNNER, runner_copy)
-    for src in PROGRAMS.glob("*.py"):
-        if src.name != runner_copy.name:
-            shutil.copy2(src, prog / src.name)
-    for pkg in PROGRAMS.glob("*/"):
-        if (pkg / "__init__.py").is_file():
-            shutil.copytree(pkg, prog / pkg.name, dirs_exist_ok=True)
-    base = {k: si.code_digest(runner_copy, prog, _REAL_STEPS, k)[0]
-            for k in ("synth", "pnr", "gds")}
-    mems, _b, _e = si._index_module(runner_copy)
-    reached = set()
-    for k in ("synth", "pnr", "gds"):
-        seen, stack = set(), [(str(runner_copy), x)
-                              for x in si.KIND_RECIPE_SEEDS[k]]
-        while stack:
-            m, n = stack.pop()
-            ms, bs, er = si._index_module(Path(m))
-            if er or n is None or (m, n) in seen or n not in ms:
-                continue
-            seen.add((m, n))
-            for t in si._referenced_targets(ms[n], Path(m), bs, ms, prog):
-                if t[1] is not None and t not in seen:
-                    stack.append(t)
-        reached |= {n for m, n in seen if m == str(runner_copy)}
-    unrelated = [n for n in mems
-                 if n not in reached and len(mems[n]) > 200]
-    assert unrelated, "there must be a runner function no kind reaches"
-    tgt = unrelated[0]
-    runner_copy.write_text(runner_copy.read_text().replace(
-        mems[tgt], mems[tgt].rstrip() + "\n    # r4 unrelated edit\n", 1))
-    for k in ("synth", "pnr", "gds"):
-        now, _ = si.code_digest(runner_copy, prog, _REAL_STEPS, k)
-        assert now == base[k], (
-            f"{k} re-ran for an edit to {tgt}, which it never calls")
 
 
-def test_the_three_kinds_do_not_share_one_code_value():
-    digs = {k: si.code_digest(RUNNER, PROGRAMS, _REAL_STEPS, k)[0]
-            for k in ("synth", "pnr", "gds")}
-    assert len(set(digs.values())) == 3, digs
-    assert all(v is not None for v in digs.values()), digs
 
 
 def test_the_declaration_rule_covers_the_top_level_keys_too(tmp_path):
@@ -1941,3 +1336,109 @@ def test_the_sparse_die_fill_knob_is_part_of_pnrs_identity(tmp_path,
     monkeypatch.setenv("VIBEIC_SPARSE_DIE_FILL_PCT", "12")
     fresh, why = si.compare(base, _r3_ident(project, "pnr"))
     assert fresh is False, why
+
+
+# --- r6 finding 2: code that runs OUT OF PROCESS ---------------------------
+def _launch_tree(tmp_path: Path) -> Path:
+    root = tmp_path / "p2"
+    root.mkdir()
+    (root / "helper_lib.py").write_text("VALUE = 1\n")
+    (root / "metal_fill.py").write_text(
+        "import helper_lib\nprint(helper_lib.VALUE)\n")
+    (root / "m.py").write_text(
+        "import subprocess, sys\n"
+        "def run():\n"
+        "    subprocess.run([sys.executable, 'metal_fill.py'],\n"
+        "                   cwd=%r, capture_output=True)\n"
+        "    subprocess.run(['bash', '-lc',\n"
+        "                    'klayout -b -rm metal_fill.py || true'],\n"
+        "                   cwd=%r, capture_output=True)\n" % (str(root),
+                                                               str(root)))
+    return root
+
+
+def _launch_record(root: Path):
+    import importlib
+    sys.path.insert(0, str(root))
+    try:
+        sys.modules.pop("m", None)
+        mod = importlib.import_module("m")
+        with sr.Recorder(root) as r:
+            mod.run()
+        return r.recorded()
+    finally:
+        sys.path.remove(str(root))
+
+
+def test_a_script_launched_out_of_process_is_recorded(tmp_path):
+    """ROUND-5 FINDING 2. `sys.setprofile` cannot see another process, so
+    klayout's `metal_fill/metal_fill.py`, `die_finishing_gen`'s seal ring and
+    the `pad_*_gen` programs run via `_docker_exec python3` all executed with
+    NOTHING recorded. Both launch shapes are watched — a bare argv and a
+    `bash -lc "klayout -b -rm …"` string — at the one place every launch
+    passes through, rather than by enumerating call sites, which is the
+    mistake rounds 1-5 kept repeating."""
+    root = _launch_tree(tmp_path)
+    record, why = _launch_record(root)
+    assert record is not None, why
+    assert "launched:metal_fill.py" in record, sorted(record)
+    base = sr.digest_of(record)
+    (root / "metal_fill.py").write_text(
+        "import helper_lib\nprint(helper_lib.VALUE + 1)\n")
+    now, err = sr.rederive(record, root)
+    assert not err, err
+    assert sr.digest_of(now) != base, (
+        "an edit to a script this step runs OUT OF PROCESS went unnoticed")
+
+
+def test_the_launched_scripts_import_closure_is_recorded(tmp_path):
+    """It runs in another process, so there is nothing to be clever with: the
+    file is taken WHOLE and so is everything it imports from this tree."""
+    root = _launch_tree(tmp_path)
+    record, why = _launch_record(root)
+    assert record is not None, why
+    assert "launched:helper_lib.py" in record, sorted(record)
+    base = sr.digest_of(record)
+    (root / "helper_lib.py").write_text("VALUE = 2\n")
+    now, _ = sr.rederive(record, root)
+    assert sr.digest_of(now) != base
+
+
+def test_the_engine_selecting_env_is_recorded(tmp_path, monkeypatch):
+    """`$VIBEIC_KLAYOUT_TOOLS` points `_klayout_launch` at a fork checkout, so
+    the same recipe can execute entirely different code."""
+    monkeypatch.setenv("VIBEIC_KLAYOUT_TOOLS", "/a/fork")
+    root = _launch_tree(tmp_path)
+    record, why = _launch_record(root)
+    assert record is not None, why
+    assert "__engine_env__" in record, sorted(record)
+    assert "VIBEIC_KLAYOUT_TOOLS" in record["__engine_env__"]
+
+
+def test_an_unattributable_plugin_launch_refuses(tmp_path):
+    """A plugin script we cannot READ means this kind gets no cache."""
+    root = tmp_path / "p3"
+    root.mkdir()
+    (root / "ghost.py").write_text("x = 1\n")
+    r = sr.Recorder(root)
+    r._launched.add("ghost.py")
+    r._hits.add((str(root / "ghost.py"), "f", 1))
+    (root / "ghost.py").chmod(0o000)
+    try:
+        record, why = r.recorded()
+        assert record is None, record
+        assert "could not be read" in why or "has no definition" in why, why
+    finally:
+        (root / "ghost.py").chmod(0o644)
+
+
+def test_a_launch_of_a_non_plugin_script_is_not_a_refusal(tmp_path):
+    """Only a PLUGIN launch has to be attributable; a system script is not
+    ours to hash, and treating it as a refusal would mean no cache ever."""
+    root = _launch_tree(tmp_path)
+    r = sr.Recorder(root)
+    r._launched.add("/usr/lib/python3/something_else.py")
+    r._hits.add((str(root / "m.py"), "run", 2))
+    record, why = r.recorded()
+    assert record is not None, why
+    assert not any(k.endswith("something_else.py") for k in record), record

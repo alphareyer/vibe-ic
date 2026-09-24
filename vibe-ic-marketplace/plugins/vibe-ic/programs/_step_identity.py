@@ -77,57 +77,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-# The ONE anchor in this module: which function in the runner IS the step.
-# Everything else about `code` is derived from these by walking the module.
-# A rename that is not reflected here makes the closure empty, and an empty
-# closure is refused (`code` becomes None -> re-run), never silently accepted:
-# `test_r0924_3_*` asserts each seed resolves in the real runner.
-KIND_RECIPE_SEEDS: Dict[str, Tuple[str, ...]] = {
-    "synth": ("step_synth",),
-    # r2 review finding B: `step_pnr` is not the only writer of the artefact
-    # this key protects. `step_signoff_spef_repair` and
-    # `step_signoff_drv_wire_length_repair` run AFTER the PnR stamp and
-    # `shutil.copy2` a repaired DEF straight over `routed.def` and
-    # `{top}.def`. A fix landed in either of them changed the cached DEF and
-    # changed nothing in the key that vouched for it. A step's code is every
-    # function that writes its artefact, not the one that is named after it.
-    "pnr": ("step_pnr", "step_signoff_spef_repair",
-            "step_signoff_drv_wire_length_repair"),
-    "gds": ("step_gds", "step_signoff_spef_repair",
-            "step_signoff_drv_wire_length_repair",
-            "step_canonicalize_artefacts"),
-}
 
-# Which DECLARED flow output identifies the step(s) that produce this kind.
-# Matched against `required_outputs` so the step ids themselves are derived
-# from the flow rather than written down here (they move; the artefact does
-# not). Suffix match, so a declared "phase3/stage4/gds/*.gds" is found.
-KIND_OUTPUT_MARK: Dict[str, str] = {
-    "synth": "synth/netlist.v",
-    "pnr": "pnr/routed.def",
-    "gds": ".gds",
-}
 
-# THE SPAN each runner function implements, as the flow's own endpoints.
-#
-# REVIEW FINDING (R-0924-3 r1, wcxu446tu — 6 CONFIRMED, root cause here): the
-# first cut tied each kind to the ONE step that declares its artefact, and that
-# is not what the code does. `step_pnr` is floorplan THROUGH routing; `step_gds`
-# plus the in-place finishing around it spans die finishing through stream-out.
-# Keying pnr on step 21 alone made its inputs `sha(post_hold.def)` — a file
-# `step_pnr` WRITES ITSELF — so a new netlist, a new SDC or a new slot left the
-# routed DEF "fresh" and the disclosure said `inputs unchanged`. A self-
-# referential cache key is worse than no key: it is a key that cannot fire.
-#
-# Endpoints only; MEMBERSHIP is derived from the flow's own ordering, so a step
-# inserted into a span joins it without anything here being edited. A test
-# asserts each endpoint resolves and that the interior members it must contain
-# are present.
-KIND_SPAN: Dict[str, Tuple[str, str]] = {
-    "synth": ("9", "9"),
-    "pnr": ("15", "21"),
-    "gds": ("26.5ic", "37"),
-}
 
 # Where each kind's artefacts live, for selecting its provenance entries.
 KIND_DIR_PREFIX: Dict[str, Tuple[str, ...]] = {
@@ -136,8 +87,6 @@ KIND_DIR_PREFIX: Dict[str, Tuple[str, ...]] = {
     "gds": ("phase3/stage4/gds/", "phase3/stage3/gds/"),
 }
 
-#: Marks the "resolve `from X import f` as module X" fallback binding.
-_FROM_FALLBACK = "\0from:"
 
 SIDECAR = "step_identity.json"
 _COMPONENTS = ("inputs", "code", "tools", "pdk")
@@ -190,149 +139,14 @@ def load_steps(flow_yaml: Path) -> List[Dict[str, Any]]:
     return steps if isinstance(steps, list) else []
 
 
-def steps_for_kind(steps: Sequence[Dict[str, Any]], kind: str
-                   ) -> List[Dict[str, Any]]:
-    """The declared producer step(s) of `kind`, found by their OUTPUT.
-
-    Derived from the flow rather than hard-coded by id, because ids move and
-    the artefact a step owes does not. Analog and mixed-signal GDS outputs are
-    excluded: they are a different deliverable with their own steps."""
-    mark = KIND_OUTPUT_MARK.get(kind)
-    if not mark:
-        return []
-
-    def _consumes(step: Dict[str, Any]) -> bool:
-        """True when the step declares this artefact as an INPUT.
-
-        MEASURED: step 14 ("Synthesis handoff gate") re-declares
-        `phase2/stage2/synth/netlist.v` in its `required_outputs` while also
-        declaring it as a `required_input` from step 9. It is a GATE over the
-        netlist, not its producer, and treating it as one dragged
-        `flow_compliance_check`'s ~460-file import closure into synth's
-        identity — which would have made a die-finishing edit invalidate the
-        cached netlist, the very thing R-0924-3 exists to stop. A step that
-        reads the artefact did not write it."""
-        for e in (step.get("required_inputs") or []):
-            if not isinstance(e, dict):
-                continue
-            spec = e.get("path")
-            if not isinstance(spec, str):
-                continue
-            for alt in (x.strip() for x in spec.split(" OR ")):
-                if alt.endswith(mark) or mark in alt:
-                    return True
-        return False
-
-    out: List[Dict[str, Any]] = []
-    for s in steps:
-        if _consumes(s):
-            continue
-        for o in (s.get("required_outputs") or []):
-            if not isinstance(o, str):
-                continue
-            for alt in (x.strip() for x in o.split(" OR ")):
-                if not alt.endswith(mark) and mark not in alt:
-                    continue
-                if any(t in alt for t in ("analog", "hardmacro",
-                                          "mixed_signal", "foundry_handoff")):
-                    continue
-                out.append(s)
-                break
-            else:
-                continue
-            break
-    return out
 
 
-def _glob_first(project: Path, spec: str) -> List[Path]:
-    """First non-empty match for one declared path spec, sorted.
-
-    `spec` may be a literal or a glob; the caller splits " OR " before this."""
-    try:
-        if any(ch in spec for ch in "*?["):
-            return sorted(p for p in project.glob(spec) if p.is_file())
-        p = project / spec
-        return [p] if p.is_file() else []
-    except (OSError, ValueError):
-        return []
 
 
-# --------------------------------------------------------------------------
-# component: inputs
-# --------------------------------------------------------------------------
-def steps_in_span(steps: Sequence[Dict[str, Any]], kind: str
-                  ) -> List[Dict[str, Any]]:
-    """Every flow step the runner function for `kind` implements.
-
-    Derived from the flow's ORDER between the declared endpoints, so this does
-    not have to be re-listed when a step is inserted."""
-    span = KIND_SPAN.get(kind)
-    if not span:
-        return []
-    ids = [str(s.get("id")) for s in steps]
-    try:
-        lo, hi = ids.index(span[0]), ids.index(span[1])
-    except ValueError:
-        return []
-    if lo > hi:
-        return []
-    return list(steps[lo:hi + 1])
 
 
-def _declared_paths(entries: Any) -> List[str]:
-    out: List[str] = []
-    for e in entries or ():
-        spec = e.get("path") if isinstance(e, dict) else e
-        if isinstance(spec, str) and spec:
-            out.append(spec)
-    return out
 
 
-def span_input_specs(steps: Sequence[Dict[str, Any]], kind: str
-                     ) -> Tuple[List[Tuple[str, bool]], List[str]]:
-    """`([(spec, producer_is_conditional)], produced_inside)` for the span.
-
-    THE UNION of every `required_inputs` path declared by any step in the span,
-    MINUS everything the span PRODUCES itself. The subtraction is the point: a
-    step's own output is not evidence about whether that step should re-run,
-    and hashing it is what made the first cut unable to fire.
-
-    THE CONDITIONAL FLAG, which measurement forced. `step_pnr`'s span declares
-    `phase2/stage2/synth/post_dft_netlist.v`, owed by step 12 — and step 12 is
-    `condition_kind: design_dependent`, owed only where the design declares
-    DFT. A real finished gf180 tree (probeSPM_A3) does not have that file, so
-    treating its absence as an unanswerable question would refuse for ever and
-    PnR would NEVER be reused on any design without DFT, which is most of them.
-    An input whose producer is conditional is therefore recorded as ABSENT
-    rather than refused — and `absent` is a VALUE, so if the file ever appears
-    the identity moves and the step re-runs. Nothing is lost; a change is still
-    always detected. An UNCONDITIONAL declared input that is missing still
-    refuses, because that is a broken tree, not a design choice."""
-    members = steps_in_span(steps, kind)
-    by_id = {str(s.get("id")): s for s in steps}
-    produced: Set[str] = set()
-    for s in members:
-        for spec in _declared_paths(s.get("required_outputs")):
-            for alt in (x.strip() for x in spec.split(" OR ")):
-                produced.add(alt)
-    specs: List[Tuple[str, bool]] = []
-    seen: Set[str] = set()
-    for s in members:
-        for e in (s.get("required_inputs") or ()):
-            spec = e.get("path") if isinstance(e, dict) else e
-            if not isinstance(spec, str) or not spec:
-                continue
-            alts = [x.strip() for x in spec.split(" OR ")]
-            if all(a in produced for a in alts):
-                continue          # made inside the span: not an input to it
-            if spec in seen:
-                continue
-            seen.add(spec)
-            producer = by_id.get(str(e.get("from"))) if isinstance(e, dict) \
-                else None
-            conditional = bool(producer and producer.get("condition"))
-            specs.append((spec, conditional))
-    return specs, sorted(produced)
 
 
 #: How a file's bytes are canonicalised before hashing, by a STATED rule.
@@ -350,9 +164,6 @@ def span_input_specs(steps: Sequence[Dict[str, Any]], kind: str
 #: evidence, so nothing is quietly dropped.
 NORMALISERS: Tuple[str, ...] = ("raw", "spef_no_date", "declaration_as_asked")
 
-#: A `"something.py"` string literal — how a program run by file path
-#: names itself in the source that dispatches it.
-_PY_PATH_LITERAL_RE = re.compile(r"[\"']([A-Za-z0-9_./-]+\.py)[\"']")
 
 _SPEF_DATE_RE = re.compile(rb"^\*DATE\b.*$", re.MULTILINE)
 
@@ -484,123 +295,8 @@ def resolved_inputs_digest(project: Path,
     return _digest_pairs(pairs), evidence
 
 
-def inputs_digest(project: Path, steps: Sequence[Dict[str, Any]], kind: str,
-                  extra: Sequence[Path] = ()
-                  ) -> Tuple[Optional[str], List[str]]:
-    """sha256 over everything the SPAN reads, as it exists in this run.
-
-    Returns `(digest, evidence)`. `digest` is None — meaning re-run — when the
-    kind has no span, when a declared input resolves to nothing, or when a
-    resolved file cannot be read. A declared input that is not there is not
-    "no input": it is an unanswerable question.
-
-    `extra` carries inputs the flow does not declare but the step demonstrably
-    reads — the DEF a stream-out consumes, which other steps promote IN PLACE
-    (`step_signoff_spef_repair`) and which no `required_inputs` entry names."""
-    specs, _produced = span_input_specs(steps, kind)
-    if not specs and not extra:
-        return None, [f"no flow step in {kind}'s span declares an input that "
-                      f"the span does not also produce, so there is nothing "
-                      f"to hash"]
-    pairs: List[Tuple[str, str]] = []
-    evidence: List[str] = []
-    seen: Set[str] = set()
-
-    def _take(path: Path) -> Optional[str]:
-        d = _sha256_file(path)
-        if d is None:
-            return None
-        try:
-            rel = os.path.relpath(path, Path(project))
-        except ValueError:
-            rel = str(path)
-        if rel not in seen:
-            seen.add(rel)
-            pairs.append((rel, d))
-            evidence.append(f"{rel}={d[:12]}")
-        return d
-
-    for spec, conditional in specs:
-        hits: List[Path] = []
-        for alt in (x.strip() for x in spec.split(" OR ")):
-            hits = _glob_first(Path(project), alt)
-            if hits:
-                break
-        if not hits:
-            if conditional:
-                # A VALUE, not a refusal — see `span_input_specs`. If the file
-                # ever appears, this pair changes and the step re-runs.
-                pairs.append((spec, "absent"))
-                evidence.append(f"{spec}=absent(conditional producer)")
-                continue
-            return None, [f"declared input {spec!r} resolves to no file in "
-                          f"this run, so this step's inputs cannot be hashed"]
-        for h in hits:
-            if _take(h) is None:
-                return None, [f"declared input {h} could not be read"]
-    for path in extra:
-        p = Path(path)
-        if not p.is_file():
-            return None, [f"{p} is read by this step but is not on disk, so "
-                          f"its inputs cannot be hashed"]
-        if _take(p) is None:
-            return None, [f"{p} could not be read"]
-    if not pairs:
-        return None, [f"{kind}'s span names no hashable input"]
-    return _digest_pairs(pairs), evidence
 
 
-# --------------------------------------------------------------------------
-# component: code — DERIVED, never a hand-kept list
-# --------------------------------------------------------------------------
-def _module_members(path: Path) -> Tuple[Dict[str, str], Optional[str]]:
-    """Module-level functions AND assignments, name -> exact source segment.
-
-    Constants are members because a recipe's tuning constant is part of that
-    recipe: changing `_PLACEMENT_DENSITY_FLOOR` changes what the placer is
-    asked for just as surely as editing the call that reads it."""
-    try:
-        src = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return {}, f"{path.name} unreadable: {exc}"
-    try:
-        tree = ast.parse(src)
-    except SyntaxError as exc:
-        return {}, f"{path.name} unparseable: {exc}"
-    # Slice by line span against a ONE-TIME split. `ast.get_source_segment`
-    # re-splits the whole file per node, which is quadratic and measurably so:
-    # the runner is ~66k lines and the naive form did not finish in 120 s.
-    lines = src.splitlines(keepends=True)
-
-    def _seg(node: ast.AST) -> Optional[str]:
-        lo = getattr(node, "lineno", None)
-        hi = getattr(node, "end_lineno", None)
-        if lo is None or hi is None:
-            return None
-        # Include the decorators: a changed decorator changes the function.
-        for dec in getattr(node, "decorator_list", ()) or ():
-            dlo = getattr(dec, "lineno", None)
-            if dlo is not None and dlo < lo:
-                lo = dlo
-        return "".join(lines[lo - 1:hi])
-
-    out: Dict[str, str] = {}
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                             ast.ClassDef)):
-            seg = _seg(node)
-            if seg is not None:
-                out[node.name] = seg
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            seg = _seg(node)
-            if seg is None:
-                continue
-            targets = (node.targets if isinstance(node, ast.Assign)
-                       else [node.target])
-            for t in targets:
-                if isinstance(t, ast.Name):
-                    out[t.id] = seg
-    return out, None
 
 
 def _referenced_names(segment: str) -> Set[str]:
@@ -618,334 +314,20 @@ def _referenced_names(segment: str) -> Set[str]:
     return {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
 
 
-#: (members, bindings, error) per module file, for the life of the process.
-_MODULE_INDEX: Dict[Any, Tuple[Dict[str, str], Dict[str, str],
-                                Optional[str]]] = {}
 
 
-def _index_module(path: Path):
-    """Parsed members + import bindings for one module, memoised.
-
-    KEYED ON THE FILE'S IDENTITY, NOT ITS PATH, and that is a defect my own
-    tests caught: a path-only key returned the PARSED-BEFORE members after the
-    file had been edited, so `code_digest` computed twice in one process gave
-    the same answer for different bytes — the cache silently asserting that
-    nothing had changed. A stamp and a freshness check can share a process, so
-    this is not only a test artefact."""
-    try:
-        st = path.stat()
-        key = (str(path), st.st_mtime_ns, st.st_size)
-    except OSError:
-        key = (str(path), 0, -1)
-    hit = _MODULE_INDEX.get(key)
-    if hit is None:
-        members, err = _module_members(path)
-        bindings = {} if err else _import_bindings(path)
-        hit = (members, bindings, err)
-        _MODULE_INDEX[key] = hit
-    return hit
 
 
-def _referenced_targets(segment: str, module: Path, bindings: Dict[str, str],
-                        members: Dict[str, str], programs_dir: Path):
-    """Every `(module_path, member_name)` a source segment can reach.
-
-    Resolves three shapes: a bare name defined in THIS module; a bare name
-    bound by `from X import f` (-> member `f` of module X); and `alias.attr`
-    where `alias` is an imported module (-> member `attr` of that module). A
-    module alias used WITHOUT an attribute cannot be narrowed, so it yields
-    `(module, None)` and the caller takes that module whole — disclosed, and
-    the conservative direction."""
-    try:
-        tree = ast.parse(segment)
-    except SyntaxError:
-        return set()
-    out = set()
-
-    def _mod_of(dotted: Optional[str]):
-        if not dotted:
-            return None
-        return _resolve_module(programs_dir, dotted)
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            alias = node.value.id
-            dotted = bindings.get(alias)
-            m = _mod_of(dotted)
-            if m is not None:
-                out.add((str(m), node.attr))
-                continue
-        if isinstance(node, ast.Name):
-            nid = node.id
-            if nid in members:
-                out.add((str(module), nid))
-                continue
-            # `from X import f` -> member f of module X
-            dotted = bindings.get(_FROM_FALLBACK + nid)
-            m = _mod_of(dotted)
-            if m is not None:
-                out.add((str(m), nid))
-                continue
-            dotted = bindings.get(nid)
-            m = _mod_of(dotted)
-            if m is not None:
-                # a module alias used bare: cannot be narrowed
-                out.add((str(m), None))
-    return out
 
 
-def runner_code_closure(runner_path: Path, kind: str, programs_dir: Path = None
-                        ) -> Tuple[Optional[str], List[str]]:
-    """Digest of the FUNCTIONS this kind's step actually runs — across modules.
-
-    r3 review (w18fc56v9) finding 3, and it is the coarseness R-0924-3 exists
-    to remove. r3 walked the call graph INSIDE the runner but then hashed every
-    imported module as a WHOLE FILE — so pnr's and gds's `code` contained the
-    whole of `phase3_one_shot_runner.py` and the whole of
-    `flow_compliance_check.py`, and an edit anywhere in either re-ran PnR and
-    GDS. A per-kind key that every edit invalidates is the build key again,
-    wearing a different name.
-
-    The closure is now `(module, member)` pairs and it CROSSES module
-    boundaries: the step's entry function, every runner function it
-    transitively references, and — in each imported module — only the members
-    that are actually reached. A module alias used without an attribute cannot
-    be narrowed, so that module is taken whole and the evidence SAYS so; an
-    unparseable module is taken whole for the same reason. Both are the
-    conservative direction (more invalidation, never less).
-
-    `flow_compliance_check` therefore enters a kind's identity only if that
-    kind's own code reaches it — which is the reviewer's rule, enforced by
-    construction rather than by a list."""
-    seeds = KIND_RECIPE_SEEDS.get(kind)
-    if not seeds:
-        return None, [f"no recipe seed declared for kind {kind!r}"]
-    runner_path = Path(runner_path)
-    programs_dir = Path(programs_dir or runner_path.resolve().parent)
-    members, bindings, err = _index_module(runner_path)
-    if err:
-        return None, [err]
-    missing = [x for x in seeds if x not in members]
-    if missing:
-        return None, [f"recipe seed(s) {', '.join(missing)} are not defined in "
-                      f"{runner_path.name} — the anchor moved and the closure "
-                      f"cannot be computed, so nothing is reused"]
-
-    seen: Set[Tuple[str, str]] = set()
-    whole: Set[str] = set()
-    notes: List[str] = []
-    stack: List[Tuple[str, Optional[str]]] = [(str(runner_path), x)
-                                              for x in seeds]
-    while stack:
-        mod_s, name = stack.pop()
-        mod = Path(mod_s)
-        mems, binds, merr = _index_module(mod)
-        if merr:
-            whole.add(mod_s)
-            continue
-        if name is None:
-            whole.add(mod_s)
-            continue
-        if (mod_s, name) in seen or name not in mems:
-            continue
-        seen.add((mod_s, name))
-        for tgt in _referenced_targets(mems[name], mod, binds, mems,
-                                       programs_dir):
-            if tgt[1] is None:
-                whole.add(tgt[0])
-            elif tgt not in seen:
-                stack.append(tgt)
-        # A program this member runs BY FILE PATH is code it runs — and it is
-        # narrowed the same way everything else is. r3 review finding 3 asked
-        # that `flow_compliance_check` enter a kind's identity only if that
-        # kind's code reaches it; it is dispatched by path from the runner, so
-        # it DOES — but what enters is its own entry-point closure, not its
-        # 10k lines. A dispatched program with no recognisable entry point
-        # cannot be narrowed and is taken whole, disclosed.
-        for lit in _PY_PATH_LITERAL_RE.findall(mems[name]):
-            m = _resolve_module(programs_dir, Path(lit).stem)
-            if m is None:
-                continue
-            sub_mems, _sb, sub_err = _index_module(m)
-            entry = next((e for e in ("main", "cli", "run")
-                          if e in sub_mems), None) if not sub_err else None
-            if entry is None:
-                whole.add(str(m))
-            else:
-                stack.append((str(m), entry))
-
-    pairs: List[Tuple[str, str]] = []
-    for mod_s, name in sorted(seen):
-        mems, _b, _e = _index_module(Path(mod_s))
-        try:
-            rel = str(Path(mod_s).resolve().relative_to(
-                programs_dir.resolve()))
-        except ValueError:
-            rel = Path(mod_s).name
-        pairs.append((f"{rel}::{name}",
-                      _sha256_bytes(mems[name].encode("utf-8"))))
-    for mod_s in sorted(whole):
-        d = _sha256_file(Path(mod_s))
-        if d is None:
-            return None, [f"{mod_s} could not be read"]
-        try:
-            rel = str(Path(mod_s).resolve().relative_to(
-                programs_dir.resolve()))
-        except ValueError:
-            rel = Path(mod_s).name
-        pairs.append((f"whole:{rel}", d))
-    notes.append(
-        f"{len(seen)} function(s)/constant(s) across "
-        f"{len({m for m, _ in seen})} module(s) reachable from "
-        f"{', '.join(seeds)}"
-        + (f"; {len(whole)} module(s) taken whole (unnarrowable alias or "
-           f"file-path dispatch)" if whole else ""))
-    return _digest_pairs(pairs), notes
 
 
-def _import_bindings(path: Path) -> Dict[str, str]:
-    """`bound name -> dotted module`, for every import ANYWHERE in a module.
-
-    Function-local imports count: the runner imports `step_force`, `_ppa.area`
-    and others inside the functions that use them, which is precisely where a
-    step's real dependencies live."""
-    try:
-        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
-    except (OSError, SyntaxError):
-        return {}
-    out: Dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for a in node.names:
-                out[a.asname or a.name.split(".")[0]] = a.name
-        elif isinstance(node, ast.ImportFrom) and node.module and \
-                not node.level:
-            for a in node.names:
-                # REVIEW FINDING 3 (r1): binding the name to `"<module>.<name>"`
-                # and nothing else meant `from _route_wire_transaction import f`
-                # resolved to a module path that does not exist, so
-                # `_route_wire_transaction.py`, `pad_signal_route_repair.py`
-                # (the Tcl emitters behind every PnR script) and
-                # `_pdk_via_analyzer.py` were OUTSIDE pnr's code identity — a
-                # landed fix to any of them would have been silently skipped.
-                # `X.f` is tried first because `from _ppa import area` really
-                # does name a submodule; `X` is the fallback and is the case
-                # that was missing.
-                out[a.asname or a.name] = f"{node.module}.{a.name}"
-                out.setdefault(_FROM_FALLBACK + (a.asname or a.name),
-                               node.module)
-                out.setdefault(node.module.split(".")[0], node.module)
-    return out
 
 
-def _resolve_module(programs_dir: Path, dotted: str) -> Optional[Path]:
-    """`_ppa.area` -> programs/_ppa/area.py, when it is ours. None if not."""
-    parts = dotted.split(".")
-    base = Path(programs_dir).joinpath(*parts)
-    for cand in (base.with_suffix(".py"), base / "__init__.py"):
-        try:
-            if cand.is_file() and cand.resolve().is_relative_to(
-                    Path(programs_dir).resolve()):
-                return cand
-        except (OSError, ValueError):
-            continue
-    return None
 
 
-def direct_modules(entries: Iterable[Path], programs_dir: Path
-                   ) -> Tuple[List[Path], List[str]]:
-    """The entry files plus the in-tree modules they DIRECTLY import.
-
-    THE HALF THE OLD KEY MISSED, and the depth is a MEASURED choice, not a
-    guess. `canonical_run_admission.canonical_program_paths()` names three
-    files by hand and so cannot see a change in a helper; walking imports is
-    the only version that does not rot. But walking them TRANSITIVELY
-    degenerates in this tree — measured on main b23f6d190:
-
-        _watchdog.py -> step_input_scope.py -> step_required_inputs_check.py
-        -> flow_compliance_check.py -> phase1_doc_one_shot_runner.py
-
-    and that last module imports 123 more. Every kind's transitive closure is
-    the same 459 files, so under it a die-finishing edit would invalidate the
-    cached NETLIST — precisely the harm R-0924-3 exists to stop. At depth 1 the
-    sets separate and are right: `die_finishing_gen.py` is in pnr's and gds's
-    and NOT in synth's.
-
-    DISCLOSED RESIDUAL, in the same spirit as the predicate this replaces
-    disclosed its own: a change to a SECOND-ORDER helper — imported by a direct
-    module but never named by the step itself — is not detected here. It is a
-    smaller hole than the one being closed, it is stated rather than hidden,
-    and branch (2) is where the per-step graph can close it properly."""
-    programs_dir = Path(programs_dir)
-    out: List[Path] = []
-    notes: List[str] = []
-    seen: Set[Path] = set()
-
-    def _add(p: Path) -> bool:
-        try:
-            rp = p.resolve()
-        except OSError:
-            return False
-        if rp in seen or not p.is_file():
-            return False
-        seen.add(rp)
-        out.append(p)
-        return True
-
-    for entry in entries:
-        cur = Path(entry)
-        if not _add(cur):
-            continue
-        try:
-            tree = ast.parse(cur.read_text(encoding="utf-8"))
-        except (OSError, SyntaxError) as exc:
-            notes.append(f"{cur.name}: {type(exc).__name__}")
-            continue
-        for node in ast.walk(tree):
-            names: List[str] = []
-            if isinstance(node, ast.Import):
-                names = [a.name for a in node.names]
-            elif isinstance(node, ast.ImportFrom) and node.module and \
-                    not node.level:
-                names = [node.module] + [f"{node.module}.{a.name}"
-                                         for a in node.names]
-            for dotted in names:
-                m = _resolve_module(programs_dir, dotted)
-                if m is not None:
-                    _add(m)
-    return out, notes
 
 
-def program_code_digest(programs_dir: Path, steps: Sequence[Dict[str, Any]],
-                        kind: str) -> Tuple[Optional[str], List[str]]:
-    """Digest of the SPAN's declared `programs:` plus their direct imports."""
-    producers = steps_in_span(steps, kind)
-    if not producers:
-        return None, ["no declared producer step, so no declared programs"]
-    entries: List[Path] = []
-    for s in producers:
-        for name in (s.get("programs") or []):
-            p = Path(programs_dir) / f"{name}.py"
-            if p.is_file():
-                entries.append(p)
-    if not entries:
-        # A step that declares no program of its own is not an error; the
-        # runner members carry its recipe. An EMPTY set is reported as such,
-        # never as a match.
-        return _digest_pairs(()), ["step declares no program file of its own"]
-    files, notes = direct_modules(entries, programs_dir)
-    pairs: List[Tuple[str, str]] = []
-    for f in files:
-        d = _sha256_file(f)
-        if d is None:
-            return None, [f"program {f.name} could not be read"]
-        try:
-            rel = str(f.resolve().relative_to(Path(programs_dir).resolve()))
-        except ValueError:
-            rel = f.name
-        pairs.append((rel, d))
-    return _digest_pairs(pairs), [f"{len(pairs)} program file(s): the step's own "
-                                  f"and their direct in-tree imports"] + notes
 
 
 def code_from_recording(recording) -> Tuple[Optional[str], List[str]]:
@@ -990,18 +372,6 @@ def code_from_stored(stored, programs_dir: Path
     return _sr.digest_of(now), [note]
 
 
-def code_digest(runner_path: Path, programs_dir: Path,
-                steps: Sequence[Dict[str, Any]], kind: str
-                ) -> Tuple[Optional[str], List[str]]:
-    """The code this step RUNS — the cross-module function-level closure.
-
-    The span's declared `programs:` are NOT added wholesale any more. r3 review
-    finding 3: doing that pulled `flow_compliance_check.py` in whole, so every
-    edit to it re-ran PnR and GDS. A declared program belongs in a kind's
-    identity only if that kind's own code REACHES it — and if the step runs it,
-    the closure finds it, including by file-path dispatch. Enforced by
-    construction rather than by a list."""
-    return runner_code_closure(Path(runner_path), kind, Path(programs_dir))
 
 
 # --------------------------------------------------------------------------
@@ -1063,69 +433,8 @@ def tools_digest(project: Path, kind: str, image_digest: Optional[str]
 _PDK_FIELDS = ("liberty", "tech_lef", "cell_lef", "cell_gds", "drc_deck")
 
 
-def pdk_files(pdk: Any) -> List[Tuple[str, str]]:
-    """`(field, path)` for every PDK file this flow declares, in order.
-
-    THE SOURCE, NOT THE DERIVATION. REVIEW FINDING 4 (r1): `step_pnr` stages a
-    VIA-legalised tech LEF into the RUN directory and MUTATES the shared
-    `PdkConfig` to point at it (`phase3_one_shot_runner:33391`, which also sets
-    `tech_lef_source` to the original). The stamp is written after the step, so
-    the recorded PDK was the derived file — which differs every run, so the PDK
-    component never matched and PnR was NEVER reused. `<field>_source` is the
-    plugin's own record of what the field was before the flow touched it, so it
-    is preferred wherever it is set: a file this run produced is an OUTPUT, and
-    an output is not evidence about whether the step that made it should run."""
-    out: List[Tuple[str, str]] = []
-    for field in _PDK_FIELDS:
-        src = getattr(pdk, f"{field}_source", None)
-        val = src or getattr(pdk, field, None)
-        if val:
-            out.append((field, str(val)))
-    return out
 
 
-def pdk_files_checked(pdk: Any, project: Optional[Path]
-                      ) -> Tuple[List[Tuple[str, str]], List[str]]:
-    """`pdk_files`, plus a refusal for any path that is this RUN's own output.
-
-    BELT AND BRACES for finding 4, and it does not depend on the PDK's layout.
-    `<field>_source` is set by the one derivation we know about (the VIA-patch
-    legalizer), and the consumers that read it key off `/libs.ref/` — a
-    convention, not a guarantee. So the structural fact is checked directly
-    instead: a PDK path INSIDE THE PROJECT is a file this run produced, and a
-    file this run produced is not evidence about whether the run should
-    happen. With no `<field>_source` to fall back on, that is unanswerable and
-    refuses rather than hashing the derivation."""
-    files = pdk_files(pdk)
-    if project is None:
-        return files, []
-    bad: List[str] = []
-    try:
-        root = Path(project).resolve()
-    except OSError:
-        return files, []
-    try:
-        design = (root / "input").resolve()
-    except OSError:
-        design = None
-    for field, val in files:
-        try:
-            rp = Path(val).resolve()
-            if not rp.is_relative_to(root):
-                continue
-            # r3 review finding 5: a PDK the DESIGN STAGES under `input/` is a
-            # design input by the same rule everything else here follows —
-            # `input/` is the design's, and refusing it made every staged-PDK
-            # run (asap7 measured) permanently un-fresh. Only a path under the
-            # run's OUTPUT tree is this run's own derivation.
-            if design is not None and rp.is_relative_to(design):
-                continue
-            bad.append(f"{field}={val} is inside the run's OUTPUT tree, so it "
-                       f"is this run's own derivation and no {field}_source "
-                       f"names what it came from")
-        except (OSError, ValueError):
-            continue
-    return files, bad
 
 
 def pdk_field_values(pdk: Any) -> List[Tuple[str, str]]:
@@ -1272,8 +581,13 @@ def identity_now(*, project: Path, kind: str, runner_path: Path,
         ident["inputs"], why["inputs"] = resolved_inputs_digest(
             Path(project), inputs, dict(knobs or {}))
     else:
-        ident["inputs"], why["inputs"] = inputs_digest(
-            Path(project), steps, kind, extra_inputs)
+        # There is no flow-derived fallback any more. Round-3 review finding 1
+        # showed that deriving a step's inputs from what the FLOW DECLARES is
+        # a different set from what the STEP READS, and the caller now resolves
+        # them by calling the step's own resolvers. A caller that supplies none
+        # has not established the read-set, and that is a refusal.
+        ident["inputs"], why["inputs"] = (
+            None, ["no caller resolved this step's read-set"])
     # CODE — what the step RAN, never a static approximation of it. The
     # closure stays available as a disclosed cross-check but is not the
     # authority (R-0924-3 r5).
