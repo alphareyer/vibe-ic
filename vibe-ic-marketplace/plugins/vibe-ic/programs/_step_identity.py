@@ -361,6 +361,10 @@ def code_from_stored(stored, programs_dir: Path
         import _step_recorder as _sr  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001
         return None, [f"the recorder is unavailable ({type(exc).__name__})"]
+    if not all(name in stored.get("__engine_env__", {})
+               for name in _sr.ENGINE_ENV):
+        return None, ["the cached artefact does not record every engine "
+                      "environment name, so its code cannot be compared"]
     now, err = _sr.rederive(stored, Path(programs_dir))
     if err:
         return None, [err]

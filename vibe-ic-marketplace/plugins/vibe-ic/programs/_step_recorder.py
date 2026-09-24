@@ -88,7 +88,7 @@ _SCRIPT_RE = re.compile(r"[^\s\"\'=]+\.py\b")
 #: metal_fill/metal_fill.py`), and both rewrite the GDS in place inside
 #: `step_gds`.
 _ASSET_RE = re.compile(
-    r"[\"\']([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:py|rb|lym|drc|lydrc|tcl))[\"\']")
+    r"^[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:py|rb|lym|drc|lydrc|tcl)$")
 
 #: Environment that CHOOSES which engine runs, rather than what it runs on.
 #: `$VIBEIC_KLAYOUT_TOOLS` points `_klayout_launch` at a fork checkout, so the
@@ -102,21 +102,21 @@ def _engine_marker(name: str) -> str:
     r6 review finding 3: hashing the path string alone meant two different
     fork checkouts at the same path read identical, and the variable was never
     compared at all."""
-    val = os.environ.get(name, "")
-    marker = val
+    val = os.environ.get(name)
+    marker = "UNSET" if val is None else "SET\n" + val
     if val:
         q = Path(val)
         if q.is_dir():
             try:
                 names = sorted(f"{x.relative_to(q)}:{_sha256_file(x)}"
                                for x in q.rglob("*") if x.is_file())[:4096]
-                marker = val + "\n" + "\n".join(names)
+                marker += "\n" + "\n".join(names)
             except OSError:
-                marker = val + "\nUNREADABLE"
+                marker += "\nUNREADABLE"
         elif q.exists():
-            marker = val + "\n" + str(_sha256_file(q))
+            marker += "\n" + str(_sha256_file(q))
         else:
-            marker = val + "\nABSENT"
+            marker += "\nABSENT"
     return _sha(marker.encode("utf-8"))
 
 
@@ -132,14 +132,28 @@ def _engine_assets(path: Path, root: Path) -> List[Path]:
     uses underscores."""
     out: List[Path] = []
     try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeError):
         return out
+    # Only executable string literals name engines. A docstring may mention
+    # a test fixture or historical file without ever handing it to a tool.
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value,
+                                                         ast.Constant) and \
+                    isinstance(first.value.value, str):
+                docstrings.add(id(first.value))
+    names = {node.value for node in ast.walk(tree)
+             if isinstance(node, ast.Constant) and isinstance(node.value, str)
+             and id(node) not in docstrings and _ASSET_RE.fullmatch(node.value)}
     roots: List[Path] = [Path(path).parent, Path(root)]
     env = os.environ.get("VIBEIC_KLAYOUT_TOOLS")
     if env:
         roots.append(Path(env))
-    for name in sorted(set(_ASSET_RE.findall(text))):
+    for name in sorted(names):
         for base in roots:
             cand = base / name
             if cand.is_file():
@@ -318,9 +332,8 @@ class Recorder:
         if why:
             return None, why
         out.update(launched)
-        if self._engine_env:
-            out["__engine_env__"] = {
-                k: _engine_marker(k) for k in sorted(self._engine_env)}
+        out["__engine_env__"] = {
+            name: _engine_marker(name) for name in ENGINE_ENV}
         return out, ""
 
     def _resolve_script(self, tok: str) -> Optional[Path]:
@@ -555,27 +568,7 @@ def rederive(record: Dict[str, Dict[str, str]], root: Path
             # engine never made the GDS stale. The value is read from the
             # environment as it is NOW, and what is hashed is the ENGINE ROOT
             # IT POINTS AT — a path string is not an engine.
-            now: Dict[str, str] = {}
-            for name in entries:
-                val = os.environ.get(name, "")
-                marker = val
-                if val:
-                    q = Path(val)
-                    if q.is_dir():
-                        try:
-                            names = sorted(
-                                f"{x.relative_to(q)}:{_sha256_file(x)}"
-                                for x in q.rglob("*")
-                                if x.is_file())[:4096]
-                            marker = val + "\n" + "\n".join(names)
-                        except OSError:
-                            marker = val + "\nUNREADABLE"
-                    elif q.exists():
-                        marker = val + "\n" + str(_sha256_file(q))
-                    else:
-                        marker = val + "\nABSENT"
-                now[name] = _sha(marker.encode("utf-8"))
-            out[rel] = now
+            out[rel] = {name: _engine_marker(name) for name in entries}
             continue
         if rel.startswith("launched:"):
             q = root / rel[len("launched:"):]

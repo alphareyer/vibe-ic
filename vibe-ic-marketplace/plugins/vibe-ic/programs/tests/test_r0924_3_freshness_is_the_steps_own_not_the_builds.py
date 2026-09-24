@@ -351,7 +351,9 @@ def _fake_recording():
     import _step_recorder as _sr
     d, err = _sr.check_digests(PROGRAMS / "_step_identity.py", [])
     assert not err, err
-    return {"_step_identity.py": d}
+    return {"_step_identity.py": d,
+            "__engine_env__": {name: _sr._engine_marker(name)
+                               for name in _sr.ENGINE_ENV}}
 
 
 def _ident(project: Path, kind: str):
@@ -1462,9 +1464,12 @@ def test_the_re_stamp_never_shrinks_the_recording(tmp_path, monkeypatch):
     out.mkdir(parents=True, exist_ok=True)
 
     # a stamp from a run in which step_pnr DID run
-    full = {"phase3_one_shot_runner.py": {sr.MODULE_BODY: "m",
-                                          "step_pnr": "a",
-                                          "_build_pdn_tcl": "b"}}
+    full_keys, err = sr.check_digests(
+        RUNNER, ["step_pnr", "_build_pdn_tcl"])
+    assert not err, err
+    full = {"phase3_one_shot_runner.py": full_keys,
+            "__engine_env__": {name: sr._engine_marker(name)
+                               for name in sr.ENGINE_ENV}}
     monkeypatch.setattr(_R, "_STEP_RECORDING", {"pnr": (full, "")})
     _R._write_producer_identity(out, "pnr", project=project,
                                 pdk=_pdk_with_real_files(project),
@@ -1473,12 +1478,15 @@ def test_the_re_stamp_never_shrinks_the_recording(tmp_path, monkeypatch):
     assert "step_pnr" in first["recording"]["phase3_one_shot_runner.py"]
 
     # now a CACHE HIT: only the repair steps ran
-    repair_only = {"phase3_one_shot_runner.py": {
-        sr.MODULE_BODY: "m", "step_signoff_spef_repair": "c"}}
+    repair_keys, err = sr.check_digests(RUNNER, ["step_signoff_spef_repair"])
+    assert not err, err
+    repair_only = {"phase3_one_shot_runner.py": repair_keys,
+                   "__engine_env__": full["__engine_env__"]}
     monkeypatch.setattr(_R, "_STEP_RECORDING", {"pnr": (repair_only, "")})
     _R._write_producer_identity(out, "pnr", project=project,
                                 pdk=_pdk_with_real_files(project),
-                                container="", top="top", args=_Args())
+                                container="", top="top", args=_Args(),
+                                cache_hit=True)
     second = si.read_sidecar(out, "pnr") or {}
     keys = second["recording"]["phase3_one_shot_runner.py"]
     assert "step_pnr" in keys and "_build_pdn_tcl" in keys, (
@@ -1486,6 +1494,87 @@ def test_the_re_stamp_never_shrinks_the_recording(tmp_path, monkeypatch):
         f"{sorted(keys)}")
     assert "step_signoff_spef_repair" in keys, (
         "and the repair that rewrote the DEF must be named too")
+
+
+def test_cache_miss_drops_old_keys_and_cache_hit_rederives_them(
+        tmp_path, monkeypatch):
+    project = _staged_project(tmp_path)
+    out = _R._pl.pnr_dir(project)
+    out.mkdir(parents=True, exist_ok=True)
+    helper = tmp_path / "helper.py"
+    helper.write_text("print('old')\n")
+    key = "launched:" + str(helper)
+    previous = {key: {"__whole__": sr._sha256_file(helper)}}
+    current = {"phase3_one_shot_runner.py": sr.check_digests(
+        RUNNER, ["step_signoff_spef_repair"])[0]}
+    monkeypatch.setattr(_R, "_STEP_RECORDING", {"pnr": (previous, "")})
+    _R._write_producer_identity(out, "pnr", project=project,
+                                pdk=_pdk_with_real_files(project),
+                                container="", top="top", args=_Args())
+    helper.write_text("print('new')\n")
+    monkeypatch.setattr(_R, "_STEP_RECORDING", {"pnr": (current, "")})
+    # Full producer ran: its current recording replaces the prior recipe.
+    _R._write_producer_identity(out, "pnr", project=project,
+                                pdk=_pdk_with_real_files(project),
+                                container="", top="top", args=_Args())
+    assert key not in si.read_sidecar(out, "pnr")["recording"]
+    # A true hit carries the old producer, and must read its bytes again.
+    previous[key]["__whole__"] = sr._sha256_file(helper)
+    monkeypatch.setattr(_R, "_STEP_RECORDING", {"pnr": (previous, "")})
+    _R._write_producer_identity(out, "pnr", project=project,
+                                pdk=_pdk_with_real_files(project),
+                                container="", top="top", args=_Args())
+    monkeypatch.setattr(_R, "_STEP_RECORDING", {"pnr": (current, "")})
+    _R._write_producer_identity(out, "pnr", project=project,
+                                pdk=_pdk_with_real_files(project),
+                                container="", top="top", args=_Args(),
+                                cache_hit=True)
+    assert si.read_sidecar(out, "pnr")["recording"][key]["__whole__"] == \
+        sr._sha256_file(helper)
+    # A helper edited after the hit decision must not acquire a fresh stamp
+    # merely because its current hash can be calculated.
+    old_sidecar = si.read_sidecar(out, "pnr")
+    helper.write_text("print('changed after hit')\n")
+    _R._write_producer_identity(out, "pnr", project=project,
+                                pdk=_pdk_with_real_files(project),
+                                container="", top="top", args=_Args(),
+                                cache_hit=True)
+    assert si.read_sidecar(out, "pnr") == old_sidecar
+    assert si.code_from_stored(old_sidecar["recording"], PROGRAMS)[0] != \
+        old_sidecar["code"]
+
+
+def test_unset_engine_name_is_recorded_and_later_set_invalidates(
+        tmp_path, monkeypatch):
+    monkeypatch.delenv("VIBEIC_KLAYOUT_TOOLS", raising=False)
+    root = _rec_tree(tmp_path)
+    record, why = _rec_of(root)
+    assert record is not None, why
+    name = "VIBEIC_KLAYOUT_TOOLS"
+    assert record["__engine_env__"][name] == sr._engine_marker(name)
+    assert si.code_from_stored({"m.py": record["m.py"]}, root)[0] is None
+    fork = tmp_path / "fork"
+    fork.mkdir()
+    (fork / "engine.rb").write_text("engine\n")
+    monkeypatch.setenv(name, str(fork))
+    now, err = sr.rederive(record, root)
+    assert not err, err
+    assert sr.digest_of(now) != sr.digest_of(record)
+
+
+def test_docstring_asset_name_does_not_bind_an_unexecuted_test(tmp_path):
+    root = tmp_path / "plugin"
+    root.mkdir()
+    (root / "tests").mkdir()
+    irrelevant = root / "tests" / "test_mirror.py"
+    irrelevant.write_text("unrelated test\n")
+    emitter = root / "emit.py"
+    emitter.write_text('"""tests/test_mirror.py"""\n'
+                       'ENGINE = "metal_fill.py"\n')
+    (root / "metal_fill.py").write_text("engine\n")
+    assets = sr._engine_assets(emitter, root)
+    assert root / "metal_fill.py" in assets
+    assert irrelevant not in assets
 
 
 def test_a_grandchild_engine_is_reached_from_the_real_program(tmp_path):

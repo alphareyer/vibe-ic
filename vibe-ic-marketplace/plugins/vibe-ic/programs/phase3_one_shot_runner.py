@@ -17934,7 +17934,8 @@ def _write_producer_identity(out_dir: Path, kind: str, *,
                              pdk: Any = None,
                              container: str = "",
                              top: str = "",
-                             args: Any = None) -> None:
+                             args: Any = None,
+                             cache_hit: bool = False) -> None:
     """Stamp the build that just produced ``kind``'s artefact in ``out_dir``.
 
     Best-effort, exactly like the sibling sidecars: a stamp failure must never
@@ -17980,25 +17981,24 @@ def _write_producer_identity(out_dir: Path, kind: str, *,
                                                      "run through the "
                                                      "recorder"))
         _probed = _probed_tool_versions(Path(project), kind)
-        # THE RE-STAMP MUST NEVER SHRINK THE RECORDING. r6 review finding 1:
-        # on a pnr CACHE HIT `step_pnr` never runs, but the two repair steps
-        # still do under `_recorded(("pnr", "gds"))` — so this session's "pnr"
-        # recording names ONLY the repair functions. Overwriting the sidecar
-        # with it dropped every `step_pnr` key, and the next run then compared
-        # a set that no longer mentioned the router: an edit to a step_pnr-only
-        # helper (`_build_pdn_tcl`, `_pad_connected_ring_tcl`) read "pnr
-        # unchanged" and the DEF was reused. That is the exact
-        # `--force-step gds` on a finished tree that R-0924-3 was measured on.
-        # The UNION is what the artefact deserves: the base DEF was made by the
-        # code in the stored recording, and then rewritten by the code in this
-        # one. Extra keys can only cause MORE invalidation, never less.
-        _prior = (_si.read_sidecar(out_dir, kind) or {}).get("recording")
-        if _rec is not None and isinstance(_prior, dict):
-            _u: Dict[str, Dict[str, str]] = {k: dict(v)
-                                             for k, v in _prior.items()}
+        # A cache hit retains the code that made the reused base artefact;
+        # repair spans alone cannot describe it. A cache miss ran the base
+        # producer again, so its old keys must be discarded. Re-derive every
+        # carried key from current bytes: copying an old digest would keep an
+        # edited or deleted, unexecuted helper stale forever after re-stamp.
+        if cache_hit and _rec is not None:
+            _prior = (_si.read_sidecar(out_dir, kind) or {}).get("recording")
+            if not isinstance(_prior, dict):
+                return
+            import _step_recorder as _sr  # noqa: PLC0415
+            _current, _error = _sr.rederive(_prior, PROGRAMS_DIR)
+            if _error or _current is None or _current != _prior or any(
+                    value == "ABSENT" for entries in _current.values()
+                    for value in entries.values()):
+                return  # unprovable old code is never a new cache stamp
             for _rel, _entries in _rec.items():
-                _u.setdefault(_rel, {}).update(_entries)
-            _rec = _u
+                _current.setdefault(_rel, {}).update(_entries)
+            _rec = _current
         ident, why = _si.identity_now(
             project=Path(project), kind=kind,
             runner_path=Path(__file__).resolve(),
@@ -68647,7 +68647,8 @@ def main() -> int:
         if _STEP_RECORDING.get("pnr", (None, ""))[0] is not None:
             _write_producer_identity(
                 _pl.pnr_dir(project), "pnr", project=project, pdk=pdk,
-                container=args.container, top=effective_top, args=args)
+                container=args.container, top=effective_top, args=args,
+                cache_hit=not _pnr_reran)
         if _chain_ok:
             # #593 — the GDS is derived from the DEF, so it shares the
             # PnR geometry cache verdict: a geometry change that forced a

@@ -396,7 +396,10 @@ def _seed_recording(kind: str) -> None:
     # source), so the stand-in is computed the same way a real recording is.
     _d, _err = _sr.check_digests(R.PROGRAMS_DIR / "_step_identity.py", [])
     assert not _err, _err
-    R._STEP_RECORDING[kind] = ({"_step_identity.py": _d}, "")
+    R._STEP_RECORDING[kind] = ({
+        "_step_identity.py": _d,
+        "__engine_env__": {name: _sr._engine_marker(name)
+                           for name in _sr.ENGINE_ENV}}, "")
 
 
 def _stamp(project: Path, out_dir: Path, kind: str) -> None:
