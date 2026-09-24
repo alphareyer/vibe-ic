@@ -15923,7 +15923,10 @@ def _with_child_gate_step(fn):
                     # A validated ENV_UNAVAILABLE waiver is a disclosed
                     # deferral, not credit for an AI-produced PASS. Preserve
                     # its waiver tier while recording that no review occurred.
+                    _waivers = args[0] if args else kwargs.get("waivers", {})
+                    _entry = (_waivers or {}).get(step.get("id"), {})
                     if (result.status == _T.Verdict.PASS_WITH_WAIVERS.value
+                            and _entry.get("_env_unavailable")
                             and any(str(reason).startswith(
                                 "ENV_UNAVAILABLE waiver applied")
                                 for reason in result.reasons)):
