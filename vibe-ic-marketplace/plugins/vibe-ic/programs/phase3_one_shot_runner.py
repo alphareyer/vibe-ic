@@ -50456,6 +50456,11 @@ def _record_reemitted_outputs(project: Path) -> Optional[str]:
                 rec = json.loads(line)
             except Exception:  # noqa: BLE001 — a line we cannot read, we skip
                 continue
+            if _is_removal_record(rec):
+                for rel in tuple(newest):
+                    if _removes(rec, rel):
+                        del newest[rel]
+                continue
             if "exit_code" in rec:
                 try:
                     if int(rec["exit_code"]) != 0:

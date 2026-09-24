@@ -313,3 +313,30 @@ def test_a_removed_input_credits_no_transform_chain(tmp_path):
     assert R._redeclaration_evidence(
         proj, proj / GDS, _sha(b"GDS as streamed\n"),
         ("gds:dummy_fill", 0.0, proj / GDS, _sha(b"GDS as streamed\n"))) is None
+
+
+def test_reemit_detector_does_not_resurrect_a_removed_declaration(tmp_path):
+    proj = _project(tmp_path)
+    _prune(proj, REL, ORIGINAL)
+    (proj / REL).write_bytes(b"LVS: first report after prune\n")
+    assert R._record_reemitted_outputs(proj) is None
+    assert len(_rows(proj)) == 2, "the detector must not first-declare it"
+    assert _declined(proj) == []
+    R._restamp_provenance_output(proj, REL, proj / REL, "netgen", "lvs")
+    assert _rules(proj)[0] == "PASS"
+
+
+def test_failed_invocation_cannot_become_the_transform_input(tmp_path):
+    proj = _project(tmp_path, GDS, b"GDS as streamed\n")
+    (proj / GDS).write_bytes(b"GDS edited outside session\n")
+    with (proj / "provenance.jsonl").open("a") as f:
+        f.write(json.dumps({"record": "invocation", "tool": "klayout",
+                            "exit_code": 1,
+                            "outputs": {GDS: _sha(b"GDS edited outside session\n")}})
+                + "\n")
+    R._declared_transform_exec(
+        proj, proj / GDS, "gds:fill", "klayout", "fill",
+        lambda: (proj / GDS).write_bytes(b"GDS filled\n"))
+    assert len(_rows(proj)) == 2
+    assert GDS in _declined(proj)
+    assert "PROVENANCE_HASH_MISMATCH" in _rules(proj)[1]

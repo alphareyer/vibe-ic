@@ -1,0 +1,144 @@
+{
+  "tool": "klayout",
+  "measurement": "per_layer_drawn_area_over_die_bbox_area",
+  "pdk": "gf180mcuD",
+  "gds": "/home/reyerchu/_lane_icspm5/run23/phase3/stage3/pnr/spm.gds",
+  "die_area_um2": 9998244.0,
+  "die_area_source": "the declared slot DIE_AREA",
+  "bbox_area_um2": 9998244.0,
+  "bbox_area_over_die_area": 1.0,
+  "layers": {
+    "metal1": 0.353334,
+    "metal2": 0.381402,
+    "metal3": 0.360674,
+    "metal4": 0.358619,
+    "metal5": 0.358074
+  },
+  "layers_routing_only": {
+    "metal1": 0.330224,
+    "metal2": 0.204086,
+    "metal3": 0.304593,
+    "metal4": 0.318349,
+    "metal5": 0.319482
+  },
+  "layers_datatype_delta": {
+    "metal1": 0.02311,
+    "metal2": 0.177316,
+    "metal3": 0.056081,
+    "metal4": 0.04027,
+    "metal5": 0.038592
+  },
+  "layers_absent_in_gds": [],
+  "layer_gds_map": {
+    "metal1": [
+      34,
+      0
+    ],
+    "metal2": [
+      36,
+      0
+    ],
+    "metal3": [
+      42,
+      0
+    ],
+    "metal4": [
+      46,
+      0
+    ],
+    "metal5": [
+      81,
+      0
+    ]
+  },
+  "layer_gds_specs": {
+    "metal1": [
+      [
+        34,
+        0
+      ],
+      [
+        34,
+        4
+      ],
+      [
+        34,
+        10
+      ]
+    ],
+    "metal2": [
+      [
+        36,
+        0
+      ],
+      [
+        36,
+        4
+      ],
+      [
+        36,
+        10
+      ]
+    ],
+    "metal3": [
+      [
+        42,
+        0
+      ],
+      [
+        42,
+        4
+      ],
+      [
+        42,
+        10
+      ]
+    ],
+    "metal4": [
+      [
+        46,
+        0
+      ],
+      [
+        46,
+        4
+      ],
+      [
+        46,
+        10
+      ]
+    ],
+    "metal5": [
+      [
+        81,
+        0
+      ],
+      [
+        81,
+        4
+      ],
+      [
+        81,
+        10
+      ]
+    ]
+  },
+  "datatype_discovery": {
+    "specs_from_layermap": 10,
+    "specs_from_deck": 5,
+    "deck_files_read": 40,
+    "purpose_exclusions": [
+      "VIA",
+      "CUT",
+      "TEXT",
+      "LABEL",
+      "SLOT",
+      "BLK",
+      "RES"
+    ],
+    "note": "the datatype SET is discovered from the PDK's own layermap and its own density deck; no datatype number is written into this program (vibe-ic#990). `layers` counts that set; `layers_routing_only` is what the pre-#990 producer counted (the routing/NET row alone) and is published beside it so the delta is visible rather than a number that moved.",
+    "deck_files_offered": 40,
+    "deck_files_unreadable": []
+  },
+  "disclosure": "REAL KLayout measurement of the AS-BUILT (post-OpenROAD-filler) GDS. Per-layer density = merged drawn metal area / DIE area, where the die is the declared slot DIE_AREA; the layout bounding box is published beside it as `bbox_area_um2`, because on a shuttle-slot submission the two rectangles differ and only the die answers the foundry rule. The DATATYPE SET counted per metal layer is DISCOVERED from the PDK's own LEF/DEF layermap (every purpose row for that layer, not only routing/NET) and from the PDK's own density deck (every binding on that layer's GDS layer number); no datatype number is written into the producer. `layers_routing_only` is what the pre-#990 producer counted and `layers_datatype_delta` is the difference \u2014 on a layout with no dummy fill the delta is 0.0 on every layer. The signoff gate applies the foundry CMP window (or a DISCLOSED generic [0.30,0.70] default) to `layers`. Layers absent in the GDS are listed, not fabricated."
+}
