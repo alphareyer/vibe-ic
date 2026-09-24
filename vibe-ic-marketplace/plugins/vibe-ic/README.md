@@ -1,4 +1,4 @@
-# vibe-ic — AI-Native IC Design plugin (**v1.24.56**)
+# vibe-ic — AI-Native IC Design plugin (**v1.24.57**)
 
 **A deterministic program layer with AI-backup skills, driving spec → RTL → GDS.**
 
