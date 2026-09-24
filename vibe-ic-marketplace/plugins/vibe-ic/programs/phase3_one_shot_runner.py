@@ -66134,20 +66134,22 @@ def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
     """
     sites = _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites
     heads = {name: str(span[0]) for name, span in sites}
+    tails = {name: str(span[-1]) for name, span in sites}
     if entry not in heads.values() and entry not in heads:
         raise ValueError(f"step {entry!r} has no independent Phase-3 dispatch; "
                          f"enterable steps: {list(heads.values())}")
-    if exit_ not in heads.values() and exit_ not in heads:
+    if exit_ not in tails.values() and exit_ not in heads:
         raise ValueError(f"step {exit_!r} has no independent Phase-3 dispatch; "
-                         f"exitable steps: {list(heads.values())}")
+                         f"exitable steps: {list(tails.values())}")
     from decimal import Decimal
     lo = Decimal(heads.get(entry, entry))
-    hi = Decimal(heads.get(exit_, exit_))
+    hi = Decimal(tails.get(exit_, exit_))
     if lo > hi:
         raise ValueError(f"Phase-3 window {entry!r}..{exit_!r} is reversed")
     # The physical dispatch order places GDS before DRC/LVS even though its
     # canonical id is 37.  Filter by flow id, then retain the runner's order.
-    return [name for name, _ in sites if lo <= Decimal(heads[name]) <= hi]
+    return [name for name, _ in sites
+            if lo <= Decimal(heads[name]) and Decimal(tails[name]) <= hi]
 
 
 def _phase3_file_manifest(project: Path) -> Dict[str, str]:

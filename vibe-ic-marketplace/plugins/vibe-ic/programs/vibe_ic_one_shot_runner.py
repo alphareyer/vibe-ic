@@ -1601,16 +1601,20 @@ def main() -> int:
             p3_args.append("--allow-oss-pdk-fallback")
         if args.allow_pdk_target_mismatch:
             p3_args.append("--allow-pdk-target-mismatch")
+        phase3_started = time.time()
         rc = _run_phase("PHASE 3 bounded window", _phase_runner("phase3"),
                         p3_args, env=_phase_env)
-        p3 = _read_report(_phase_report_path(project, "phase3_one_shot.json"))
+        phase3_report = _phase_report_path(project, "phase3_one_shot.json")
+        p3 = (_read_report(phase3_report)
+              if _pl.published_here(phase3_report, phase3_started) else {})
+        phase3_verdict = p3.get("verdict", "NOT_MEASURED")
         summary = {"program": "vibe_ic_one_shot_runner", "bounded": True,
                    "declared_window": {"entry_step": args.entry_step,
                                        "exit_step": args.exit_step,
                                        "entry_runner": _entry_runner},
-                   "phases": [{"name": "phase3", "verdict": p3.get("verdict", "NOT_MEASURED"),
+                   "phases": [{"name": "phase3", "verdict": phase3_verdict,
                                "rc": rc}],
-                   "verdict": p3.get("verdict", "NOT_MEASURED"),
+                   "verdict": phase3_verdict,
                    "audit_verdict": "NOT_MEASURED",
                    "audit_scope": "bounded; whole-flow audit not refreshed"}
         out = _pl.report_path(project, "vibe_ic_one_shot.json")

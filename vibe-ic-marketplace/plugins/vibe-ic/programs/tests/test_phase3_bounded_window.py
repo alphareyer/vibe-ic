@@ -50,6 +50,7 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
     report = json.loads((project / "reports" / "orchestrator" /
                          "phase3_one_shot.json").read_text())
     assert report["bounded"] is True
+    assert report["steps_view"]["status"] == "OK"
     assert report["audit_verdict"] == "NOT_MEASURED"
     assert report["stale_downstream"]["drc"]["status"] == "NOT_MEASURED"
     assert "gds" in report["stale_downstream"]["drc"]["reason"]
@@ -58,6 +59,7 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
 
 def test_window_rejects_interior_and_excludes_gds_from_15_to_31():
     assert p3._phase3_window_sites("15", "31") == ["pnr", "drc", "lvs"]
+    assert p3._phase3_window_sites("15", "22") == ["pnr"]
     try:
         p3._phase3_window_sites("18", "22")
     except ValueError as exc:
