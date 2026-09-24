@@ -243,6 +243,24 @@ import subprocess as _sp  # noqa: E402
 
 import pytest  # noqa: E402
 
+from not_verified_tier import skip_not_verified  # noqa: E402
+
+# WHICH SKIPS HERE ARE NOT-VERIFIED, AND WHICH ONE IS NOT (vibe-ic#1128)
+# ======================================================================
+# `_image_ref_or_skip` fires when the thing these arms verify WITH is out of
+# reach — no docker CLI, no resolvable pin, the pinned image not pulled. Each
+# of those is an UNANSWERED question about the image-read path, so each
+# declares through the tier and carries the command that would answer it.
+#
+# `_skip_unless_image_content` is deliberately NOT in the tier. It fires where
+# the liberty opens directly, and there the arms do not merely go unverified —
+# they do not APPLY: there is no mount to translate and no image to read from,
+# so the host case they exist for is absent. Annexing an ordinary N/A into this
+# tier is the over-reach `not_verified_tier`'s own docstring rules out, and it
+# would make an in-image run report an unanswered question it does not have.
+# Every caller runs that check FIRST, so an in-image run never reaches the
+# declarations below.
+
 #: The liberty spm run23 actually timed against, as the deck stamped it.
 _IMAGE_LIBERTY = (
     "/foss/pdks/ciel/gf180mcu/versions/"
@@ -253,18 +271,32 @@ _IMAGE_LIBERTY = (
 def _image_ref_or_skip() -> str:
     """The pinned image, or skip — this arm needs the real one."""
     if not _shutil.which("docker"):
-        pytest.skip("docker is not available here")
+        skip_not_verified(
+            "docker is not available here, so the image-read path this arm "
+            "exists to prove was never exercised",
+            "install the docker CLI on this host and re-run this file")
     try:
         import _eda_pin as _pin
         ref = _pin.image_reference()
-    except Exception:                                        # noqa: BLE001
-        pytest.skip("the pinned image reference could not be resolved")
+    except Exception as exc:                                 # noqa: BLE001
+        skip_not_verified(
+            f"the pinned image reference could not be resolved ({exc}), so "
+            f"there was no image to read the liberty from",
+            "repair programs/_eda_pin.py so image_reference() resolves, then "
+            "re-run this file")
     if not ref:
-        pytest.skip("no pinned image reference")
+        skip_not_verified(
+            "_eda_pin.image_reference() names no image, so there was no "
+            "image to read the liberty from",
+            "pin an EDA image reference in programs/_eda_pin.py, then re-run "
+            "this file")
     r = _sp.run(["docker", "image", "inspect", ref],
                 capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
-        pytest.skip(f"the pinned image is not present locally: {ref}")
+        skip_not_verified(
+            f"the pinned image is not present locally ({ref}), so the "
+            f"liberty could not be read from the image the run recorded",
+            f"docker pull {ref}")
     return ref
 
 
@@ -350,7 +382,10 @@ def test_an_unreachable_image_stays_not_measured_by_name(tmp_path):
     """A recorded image that is not here is not a unit."""
     _skip_unless_image_content()
     if not _shutil.which("docker"):
-        pytest.skip("docker is not available here")
+        skip_not_verified(
+            "docker is not available here, so 'a recorded image that is not "
+            "present stays NOT_MEASURED' was never put to the test",
+            "install the docker CLI on this host and re-run this file")
     project = tmp_path / "run"
     (project / "reports").mkdir(parents=True)
     (project / "reports" / "container_image.json").write_text(
