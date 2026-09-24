@@ -33,6 +33,7 @@ import phase1_doc_one_shot_runner as R  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+from _ai_judgement_fixture import run_phase1_with_expert_answer  # noqa: E402
 
 
 # ── (1) the helper unit ──────────────────────────────────────────────────────
@@ -92,8 +93,9 @@ def test_end_to_end_single_io_in_row_no_phantoms(tmp_path):
         "| `clk_i` | input | 1 | clock |\n"
         "| `io_in` | in | 38 | User GPIO inputs (`io_in[37:0]`) |\n")
     runner = _PROGRAMS / "phase1_one_shot_runner.py"
-    r = _pr.run([sys.executable, str(runner), str(proj)],
-                       capture_output=True, text=True)
+    r = run_phase1_with_expert_answer(
+        proj, [sys.executable, str(runner), str(proj)], _pr.run,
+        expected_tokens=["io_in"], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-2000:]
     names = _final_l9_names(proj)
     import re

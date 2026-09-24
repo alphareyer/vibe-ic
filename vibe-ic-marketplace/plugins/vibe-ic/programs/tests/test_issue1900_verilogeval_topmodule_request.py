@@ -14,6 +14,7 @@ if str(_PROGRAMS) not in sys.path:
 
 import phase1_doc_one_shot_runner as P  # noqa: E402
 import _progress_run as _pr  # noqa: E402
+from _ai_judgement_fixture import run_phase1_with_expert_answer  # noqa: E402
 
 
 _INTAKE_FIXTURE = (
@@ -138,8 +139,9 @@ def test_issue1900_phase1_emits_topmodule_into_l9(tmp_path):
         encoding="utf-8",
     )
 
-    result = _pr.run(
+    result = run_phase1_with_expert_answer(project,
         [sys.executable, str(_PROGRAMS / "phase1_one_shot_runner.py"), str(project)],
+        _pr.run, expected_tokens=["TopModule"], field_path="top_module",
         capture_output=True,
         text=True,
     )

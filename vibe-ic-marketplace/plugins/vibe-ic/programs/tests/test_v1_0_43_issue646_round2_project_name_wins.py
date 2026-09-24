@@ -29,6 +29,7 @@ from _hostpaths import require_corpus  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+from _ai_judgement_fixture import run_phase1_with_expert_answer  # noqa: E402
 
 
 def test_project_name_declaration_is_used():
@@ -81,8 +82,9 @@ def test_end_to_end_phase1_uses_declaration(tmp_path):
         "## External Interface\n\n| Signal | Direction | Width |\n"
         "|---|---|---|\n| clk_i | input | 1 |\n")
     runner = _PROGRAMS / "phase1_one_shot_runner.py"
-    r = _pr.run([sys.executable, str(runner), str(proj)],
-                       capture_output=True, text=True)
+    r = run_phase1_with_expert_answer(
+        proj, [sys.executable, str(runner), str(proj)], _pr.run,
+        expected_tokens=["clk_i"], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-2000:]
     # NOTE: the canonical L1 doc is L1_DATASHEET.json — a `L1*.json` glob would
     # spuriously match L10..L23 (e.g. L17_CHANNEL_SIGNAL_CATALOG.json), so we

@@ -30,6 +30,7 @@ import phase1_doc_one_shot_runner as D  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+from _ai_judgement_fixture import run_phase1_with_expert_answer  # noqa: E402
 
 _L3_DOC = """# External Interface Specification
 
@@ -110,9 +111,10 @@ def test_path_b_project_five_ports_zero_phantom_submodules(tmp_path):
     docs.mkdir(parents=True)
     (docs / "L3_external_interface.md").write_text(_L3_DOC)
     (docs / "L7_verification_plan.md").write_text(_L7_DOC)
-    r = _pr.run(
+    r = run_phase1_with_expert_answer(proj,
         [sys.executable, str(PROGRAMS / "phase1_one_shot_runner.py"),
          str(proj), "--ic-name", "mul32"],
+        _pr.run, expected_tokens=["clk", "rst_n", "op_a", "op_b", "result"],
         capture_output=True, text=True)
     assert r.returncode == 0, r.stdout[-1200:] + r.stderr[-1200:]
     l9 = json.loads(
