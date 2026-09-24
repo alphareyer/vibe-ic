@@ -33,8 +33,8 @@ anchor beside it names the binding that produced it. Do not hand-edit them:
 run ``--fix-figures``, and ``--check`` fails on drift (vibe-ic#961).
 
     gate
-        present on 69<!--figure:gate_declared--> steps,
-        non-empty on 69<!--figure:gated_steps--> (absent on P0 only)
+        present on 70<!--figure:gate_declared--> steps,
+        non-empty on 70<!--figure:gated_steps--> (every step now declares one)
     required_outputs
         present on 68<!--figure:required_output_declared--> steps,
         non-empty on 68<!--figure:required_output_steps--> (absent on FS1 and P0)
@@ -106,29 +106,29 @@ either call the real helper or document that it is using the strict form.
 --------------------------------------------------------------------
 3. ``gate`` grammar
 --------------------------------------------------------------------
-Top-level shapes over 69<!--figure:gated_steps--> gates — how many gates carry
+Top-level shapes over 70<!--figure:gated_steps--> gates — how many gates carry
 each key (a gate may carry more than one, so these do not partition):
 
-    {'all_of': [...]}                 55<!--figure:gate_shape_all_of-->
-    {'program_exit_zero': <str|dict>} 13<!--figure:gate_shape_program_exit_zero-->
+    {'all_of': [...]}                 56<!--figure:gate_shape_all_of-->
+    {'program_exit_zero': <str|dict>} 14<!--figure:gate_shape_program_exit_zero-->
                                       (dict form once, on step 16:
                                        {'command': '...'} )
-    {'files_exist': [...]}             1<!--figure:gate_shape_files_exist-->
-                                      (step 1, with 'any_of': True)
+    {'files_exist': [...]}             0<!--figure:gate_shape_files_exist-->
+                                      (step 1 now has an all_of content gate)
 
 Clause census, NORMALISED by :func:`gate_clauses` over every gated step. This
 replaces a hand-counted table of raw ``all_of`` members: the raw table counted
 a different population from the accessor this module tells you to use, so the
 two could not be reconciled by a reader and only one of them was derived.
 
-    program_exit_zero          128<!--figure:gate_clauses_program_exit_zero-->  MANDATORY
+    program_exit_zero          138<!--figure:gate_clauses_program_exit_zero-->  MANDATORY
     advisory_program_exit_zero 77<!--figure:gate_clauses_advisory_program_exit_zero-->  NON-BLOCKING
     files_exist                33<!--figure:gate_clauses_files_exist-->
-    optional_program_exit_zero 30<!--figure:gate_clauses_optional_program_exit_zero-->  conditional
+    optional_program_exit_zero 27<!--figure:gate_clauses_optional_program_exit_zero-->  conditional
     json_field_true             1<!--figure:gate_clauses_json_field_true-->
     ------------------------------
-    total                     269<!--figure:gate_clauses_total-->, of which
-                              192<!--figure:blocking_clauses--> block
+    total                     276<!--figure:gate_clauses_total-->, of which
+                              199<!--figure:blocking_clauses--> block
 
 Three different exit-zero kinds with three different force levels:
   * ``program_exit_zero``          — blocking.
@@ -143,8 +143,8 @@ Use :func:`gate_clauses` (typed) rather than re-walking the dict.
 4. Program resolution
 --------------------------------------------------------------------
 A gate command's FIRST whitespace token is the program basename. Of the
-219<!--figure:gate_program_tokens_distinct--> distinct tokens across the
-235<!--figure:gate_commands_total--> gate commands, all but
+220<!--figure:gate_program_tokens_distinct--> distinct tokens across the
+242<!--figure:gate_commands_total--> gate commands, all but
 0<!--figure:gate_programs_unresolved--> resolve to ``programs/<token>.py``, and
 zero commands shell out via ``python3 <file>``. This figure is the live count
 of gates naming a program that does not exist. It went 0 -> 3 when the
@@ -158,11 +158,10 @@ about the source tree, not about the yaml's spelling. Use
 :func:`gate_program_tokens` when you need the declared-but-possibly-missing
 form (that difference IS the dimension-1 wiring question).
 
-67<!--figure:steps_naming_a_program--> of the
-69<!--figure:gated_steps--> gated steps name at least one program THAT RESOLVES.
-The single exception is step 1, which has a file-existence-only gate and
-legitimately names none. It was four until 15.5ic, 26.5ic and 37.5ip got their
-programs — see section 4.
+70<!--figure:steps_naming_a_program--> of the
+70<!--figure:gated_steps--> gated steps name at least one program THAT RESOLVES.
+There is no exception now: step 1 and P0 name content gates, and all
+other gated steps already resolved at least one program.
 
 --------------------------------------------------------------------
 5. ``blocks_on``

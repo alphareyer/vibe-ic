@@ -1497,12 +1497,8 @@ steps:
     required_inputs:
       - from: D1
         outputs: all
-    # AUDIT NOTE (by-design, not a gap): this gate is files_exist-only ON PURPOSE.
-    # spec->RTL is the irreducible AI authoring step (open-benchmark-methodology
-    # §1: NL->RTL needs an LLM; there is no deterministic spec->RTL checker). The
-    # emitted RTL's substance is verified DOWNSTREAM by Steps 2-6 (lint / CDC /
-    # simulation / formal) and the P0 structural-RTL gates. Do not re-flag as a
-    # missing checker.
+    # The content gate below rejects empty or incomplete module sources.
+    # Design fidelity remains with the downstream spec/RTL checks and P0.
     skills: [spec-to-rtl]
     # THE TWO ARTEFACTS THIS STEP MAY PRODUCE AND CANNOT PROMISE.
     #
@@ -1578,8 +1574,11 @@ steps:
       # than requiring the RTL. Any future addition to that list weakens it the
       # same way; add a nested `all_of` sub-gate instead.
     gate:
-      files_exist: ["phase2/stage1/rtl/*.sv", "phase2/stage1/rtl/*.v"]
-      any_of: true
+      all_of:
+        - files_exist: ["phase2/stage1/rtl/*.sv", "phase2/stage1/rtl/*.v"]
+          any_of: true
+        # BLOCKING: parse the authored RTL bytes, including comment-only files.
+        - program_exit_zero: "flow_step_output_content_check . --mode rtl"
     # The dependency was always REAL and never DECLARED. D1 is the sole member
     # of stage_phase1 and its L1-L27 output is, in this file's own words, "the
     # universal handoff to Phase 2" — spec-to-RTL literally reads
@@ -3570,6 +3569,7 @@ steps:
     required_inputs:
       - from: 1
         path: "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
+    condition_kind: setup_required
     condition:
       files_exist: ["phase2/stage1/rtl"]
     programs:
@@ -3656,6 +3656,7 @@ steps:
     stage: stage2
     # R-0915-158: DECLARED phase-agnostic — judged in BOTH --phase scopes.
     phase_scope: agnostic
+    condition_kind: design_dependent
     condition:
       # SAME DECLARATION, SAME CLASS AS STEP 11 (lane icspm3, 2026-09-15).
       # At-speed ATPG IS DFT: a design whose own L20 declares no scan chain,
@@ -3851,6 +3852,7 @@ steps:
       - from: D1
         path: "phase1/generated_docs/L5_ADI_SPEC.json"
     skills: [analog-spec-extract]
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
     # PATH: the canonical location comes FIRST because it is the only one any
@@ -3883,6 +3885,7 @@ steps:
       - from: A1
         path: "phase3/analog/*/spec.json OR phase1/analog/*/spec.json"
     skills: [analog-topology-select]
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
     # PATH: canonical first — see the A1 note. The producer and
@@ -3912,6 +3915,7 @@ steps:
           tree)
     skills: [analog-netlist-gen]
     mcp_tools: [eda_xschem_netlist]
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
     # PATH: canonical first — see the A1 note.
@@ -3946,6 +3950,7 @@ steps:
         path: "phase3/analog/*/spec.json OR phase1/analog/*/spec.json"
     skills: [analog-sizing-loop]
     mcp_tools: [eda_spice_corner]
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
     # PATH: canonical first — see the A1 note.
@@ -4041,6 +4046,7 @@ steps:
         path: "phase3/analog/*/*.sp OR phase2/analog/*/*.sp"
     skills: [analog-layout]
     mcp_tools: [eda_analog_layout]
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
     required_outputs:
@@ -4116,6 +4122,7 @@ steps:
     required_inputs:
       - from: A5
         path: "phase3/analog/*/layout.mag OR phase3/analog/*/*.gds"
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
     skills: [drc-fix, lvs-triage]
@@ -4162,6 +4169,7 @@ steps:
       trigger: "Performance degradation > 10% post-extraction"
     skills: [analog-extraction-resim]
     mcp_tools: [eda_spice_corner]
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
     required_outputs:
@@ -4180,6 +4188,7 @@ steps:
 
     phase_scope: agnostic
     skills: [analog-hardmacro-gen]
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
     programs:
@@ -4340,6 +4349,7 @@ steps:
       trigger: "HW mismatch; netlist or analog/hardmacro fix"
     skills: [mixed-signal-cosim, analog-hw-tuning-loop]
     mcp_tools: [eda_spice, eda_simulate]
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
     # EVIDENCE: `mixed_signal_cosim_check` — the gate this step runs — reads
@@ -4517,6 +4527,8 @@ steps:
       - "reports/analog/stage_analog_compliance.json"
     gate:
       all_of:
+        - program_exit_zero: "flow_step_output_content_check . --mode netlist"
+        - program_exit_zero: "flow_step_output_content_check . --mode stage_analog"
         # ── ON-PASS REVIEW of stage_analog ─────────────────────────────────
         # Declared on the stage (`stages[].on_pass_review`), DISPATCHED here:
         # the synthesis-handoff step, after A1..A9 have finished.
@@ -5069,7 +5081,7 @@ steps:
         - files_exist: ["phase3/stage3/pnr/spare_cells.json"]
         # Readiness: actual_density >= target, spares distributed across
         # core regions (not clustered), and all tied off.
-        - optional_program_exit_zero:
+        - program_exit_zero:
             command: "spare_cell_coverage_check . --json reports/phase2/gates/spare_cell_coverage.json"
             condition_files_exist: ["phase3/stage3/pnr/spare_cells.json"]
             absent_condition_reason: >-
@@ -6656,17 +6668,13 @@ steps:
       - "reports/phase3/si_mcf_sta.rpt"
     gate:
       all_of:
+        # One unconditional SI check covers both the old .rpt condition and
+        # .json-only evidence; a second conditional invocation would duplicate
+        # the same blocking clause without testing a different mechanism.
+        - program_exit_zero: "si_crosstalk_check . --json reports/phase2/gates/si_crosstalk.json"
+        - program_exit_zero: "flow_step_output_content_check . --mode si"
         - files_exist: ["reports/phase3/si_crosstalk.rpt", "reports/phase3/si_crosstalk.json"]
           any_of: true
-        - optional_program_exit_zero:
-            command: "si_crosstalk_check . --json reports/phase2/gates/si_crosstalk.json"
-            condition_files_exist: ["reports/phase3/si_crosstalk.rpt"]
-            absent_condition_reason: >-
-              The same gate OPENS with a hard any-of `files_exist` over
-              reports/phase3/si_crosstalk.rpt and .json, so a run carrying NO
-              crosstalk evidence at all FAILs step 27 at that predicate. This
-              clause is scoped to the .rpt form of the evidence that predicate
-              already requires one of.
         # MCF crosstalk-DELAY axis (complements the noise/glitch axis above):
         # the runner re-runs OpenSTA on an MCF-bounded SPEF (Cc*MCF folded per
         # the aggressor/victim timing-window overlap; setup MCF=2 / hold MCF=0)
@@ -7498,6 +7506,7 @@ steps:
       - "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json"
     gate:
       all_of:
+        - program_exit_zero: "flow_step_output_content_check . --mode repair"
         - files_exist: ["phase3/stage3/postroute_timing_repair/repair_log.json", "phase3/stage3/postroute_timing_repair/no_repair_needed.flag"]
           any_of: true
         # `condition_files_exist` is ANY-of: the program runs when at least one
@@ -7526,7 +7535,7 @@ steps:
         # flag-certified no-repair run and the clause stops being reddenable at
         # all. Listing only the record keeps the clause falsifiable and loses
         # no reachable state.
-        - optional_program_exit_zero:
+        - program_exit_zero:
             command: "postroute_timing_repair_audit . --json reports/phase2/gates/postroute_timing_repair_audit.json"
             condition_files_exist:
               - "phase3/stage3/postroute_timing_repair/repair_log.json"
@@ -7773,14 +7782,12 @@ steps:
       - "reports/phase3/dfm_screen.json"
     gate:
       all_of:
-        # AUDIT NOTE (by-design, not a gap): this step's only blocking
-        # predicate is producer artefact presence. dfm_screen_check is declared
-        # in program_outputs above because it classifies PASS/advisory/skip but
-        # owns no refusal predicate; Issue #1980 deliberately keeps that
-        # producer record out of the gate denominator.
+        # The producer remains advisory; the content gate validates its
+        # emitted document's shape without promoting yield advice to FAIL.
         # BLOCKING half: the screen must have produced its artefact. A step
         # that never ran cannot be certified done.
         - files_exist: ["reports/phase3/dfm_screen.json"]
+        - program_exit_zero: "flow_step_output_content_check . --mode dfm"
         # dfm_screen_check is a producer/classifier with PASS,
         # PASS_WITH_ADVISORIES and SKIP outputs but no refusal predicate.
         # Issue #1980 keeps its structured output above and excludes it from
@@ -9405,6 +9412,7 @@ steps:
         path: "phase3/stage4/gds/*.gds"
       - from: A8
         outputs: all
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
     # flow-orchestrate REMOVED: skills/_classification.json records it under
@@ -9486,6 +9494,7 @@ steps:
     required_inputs:
       - from: M1
         path: "phase3/mixed_signal/top_merged.gds"
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
     skills: [ir-drop-triage]
@@ -9551,6 +9560,7 @@ steps:
     required_inputs:
       - from: M1
         path: "phase3/mixed_signal/top_merged.gds"
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
     skills: [mixed-signal-cosim, ams-sim]
@@ -9578,6 +9588,7 @@ steps:
     required_inputs:
       - from: M1
         path: "phase3/mixed_signal/top_merged.gds"
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase1/analog/analog_block_list.json"]
     skills: [tapeout-checklist]
@@ -9596,6 +9607,7 @@ steps:
     required_inputs:
       - from: 38
         outputs: all
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase3/stage5_manufacturing/silicon_received.json"]
     programs:
@@ -9657,6 +9669,7 @@ steps:
     required_inputs:
       - from: 40
         path: "phase3/stage5_manufacturing/wafer_lot_received.json"
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase3/stage5_manufacturing/silicon_received.json"]
     programs:
@@ -9674,6 +9687,7 @@ steps:
     required_inputs:
       - from: 41
         outputs: all
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase3/stage5_manufacturing/silicon_received.json"]
     programs:
@@ -9690,6 +9704,7 @@ steps:
     required_inputs:
       - from: 42
         path: "phase3/stage5_manufacturing/packaging_log.json"
+    condition_kind: design_dependent
     condition:
       files_exist: ["phase3/stage5_manufacturing/silicon_received.json"]
     programs:
@@ -9721,6 +9736,7 @@ steps:
     required_inputs:
       - from: 43
         outputs: all
+    condition_kind: design_dependent
     condition:
       # vibe-ic#220 — scope on the SILICON INTAKE declaration, not on this
       # step's own output.
@@ -9808,6 +9824,9 @@ steps:
     # instead of silently re-grading the cell. This comment is that ruling
     # written down at the point of decision, which is the only place a future
     # reader looks.
+    gate:
+      # BLOCKING: the synthetic umbrella evaluates this clause in-process.
+      program_exit_zero: "flow_step_output_content_check . --mode rtl"
     notes: |
       Synthetic preflight stage; the verdict is emitted directly by
       flow_compliance_check.py's `_run_structural_rtl_gates(...)` and

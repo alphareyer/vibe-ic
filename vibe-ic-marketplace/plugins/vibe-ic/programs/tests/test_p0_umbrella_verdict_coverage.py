@@ -129,6 +129,11 @@ def _run_main(tmp_path, monkeypatch, records, extra_args=("--phase", "2",
     (proj / "rtl").mkdir(parents=True)
     (proj / "rtl" / "top.v").write_text(
         "module top(input a, output b); assign b = a; endmodule\n")
+    # The P0 content gate reads the canonical RTL directory. Keep this
+    # population fixture's authored RTL available at that consumer path too.
+    (proj / "phase2" / "stage1" / "rtl").mkdir(parents=True)
+    (proj / "phase2" / "stage1" / "rtl" / "top.v").write_text(
+        "module top(input a, output b); assign b = a; endmodule\n")
     _probe.write_seed(proj)
     flow_def = tmp_path / "p0_probe_flow.yaml"
     _probe.write_flow(flow_def)

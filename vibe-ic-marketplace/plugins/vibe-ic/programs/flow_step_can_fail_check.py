@@ -1,61 +1,8 @@
-#!/usr/bin/env python3
-"""flow_step_can_fail_check — a step whose gate cannot fail must say so.
+"""Ratchet flow steps whose declared gate cannot fail on output content.
 
-WHY
-===
-The flow-gate dashboard publishes eight per-step dimensions, one of which asks
-"can this step actually fail". It reads 62 of 63 clean. Nothing recomputes it —
-the page's own generator says so in its docstring and carries the distribution
-forward untouched, so the figure is a judgement someone made once.
-
-Recomputed from the flow yaml, SEVEN of the 63 steps have no criterion capable
-of failing on content (it was EIGHT until step 12 was given
-`program_exit_zero: dft_post_optimization_scan_survival_check` in 23d96bf55,
-which is why the entry below is gone rather than merely quiet):
-
-    no blocking criterion at all
-      P0   Structural-RTL pre-flight            (no `gate:` key)
-      14   Synthesis handoff gate               (only optional_program_exit_zero)
-
-    judged only by "the declared file exists and is non-empty"
-      1    Spec-to-RTL
-      18   Spare-cell + repair-prep insertion
-      27   Signal Integrity (crosstalk / noise / glitch)
-      32   Post-route timing repair pass
-      35   DFM screen
-
-Step 32 is not hypothetical. A run recorded `repair_needed=true, changes_count=0,
-re_verified=false` — a repair that changed nothing and was never re-verified — and
-the step passed, because a file existed and its program criterion is optional.
-A repair raised and not applied is indistinguishable from no repair at all, and the
-step said PASS.
-
-WHAT THIS CHECKS
-================
-For every step in the canonical flow, whether its `gate:` declares at least one
-criterion that can FAIL the step:
-
-    blocking       program_exit_zero · files_exist · json_field_true
-    non-blocking   advisory_program_exit_zero · optional_program_exit_zero
-
-`all_of` / `any_of` are walked. A step with no blocking criterion cannot fail on
-anything its gate examines; a step whose only blocking criterion is
-`files_exist` can fail only on absence, never on content — a file written by a
-tool that got the wrong answer passes it.
-
-Both are reported, and both are held to a baseline that MAY ONLY SHRINK. The
-baseline is not an excuse: it exists because failing eight pre-existing entries
-on day one produces a gate people route around, and a gate that is blocking for
-anything NEW from its first run is the property worth having.
-
-Removing an entry means giving that step a criterion that can fail. Deleting the
-entry without doing so is the one repair this file exists to prevent.
-
-EXIT
-    0  no step outside the baseline lacks a failing criterion
-    1  a step does — or a baseline entry now has one and the baseline should shrink
-    2  the flow yaml could not be read or contains no steps. A gate that scanned
-       nothing has not passed; see the rc=2 convention used across this repo.
+All formerly recorded weak steps now have blocking content checks. The empty
+baseline is intentional: new or regressed weak gates fail this source audit.
+Runtime behavior still requires mutation tests through the actual evaluator.
 """
 from __future__ import annotations
 
@@ -74,18 +21,8 @@ BLOCKING = {"program_exit_zero", "files_exist", "json_field_true"}
 NON_BLOCKING = {"advisory_program_exit_zero", "optional_program_exit_zero"}
 COMBINATORS = {"all_of", "any_of"}
 
-# Steps that already lack a failing criterion. MAY ONLY SHRINK.
-# `reason` records WHICH of the two shapes it is, so a reader can tell
-# "nothing can fail here" from "only absence can fail here" without re-deriving.
-BASELINE: Dict[str, str] = {
-    "P0": "no gate key at all",
-    "14": "only optional_program_exit_zero",
-    "1": "files_exist only — fails on absence, never on content",
-    "18": "files_exist only — fails on absence, never on content",
-    "27": "files_exist only — fails on absence, never on content",
-    "32": "files_exist only — fails on absence, never on content",
-    "35": "files_exist only — fails on absence, never on content",
-}
+# Recorded weak-step baseline. It may only shrink and is now empty.
+BASELINE: Dict[str, str] = {}
 
 
 def criteria(gate) -> Set[str]:

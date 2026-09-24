@@ -28,11 +28,23 @@ def _flow(tmp: Path, steps) -> Path:
     return f
 
 
-def _run(flow: Path, programs: Path):
-    p = _pr.run([sys.executable, str(GRID), "--flow", str(flow),
+def _run(flow: Path, programs: Path, grid: Path = GRID):
+    p = _pr.run([sys.executable, str(grid), "--flow", str(flow),
                         "--programs", str(programs)],
                        capture_output=True, text=True)
     return p.returncode, p.stdout + p.stderr
+
+
+def _historical_grid(tmp: Path) -> Path:
+    """A synthetic old baseline keeps the shrink/deletion branches testable."""
+    grid = tmp / "historical_flow_gate_grid.py"
+    source = GRID.read_text(encoding="utf-8")
+    source = source.replace("D6_BASELINE: Set[str] = set()",
+                            "D6_BASELINE: Set[str] = {'A1'}")
+    source = source.replace("D8_BASELINE: Set[str] = set()",
+                            "D8_BASELINE: Set[str] = {'14'}")
+    grid.write_text(source, encoding="utf-8")
+    return grid
 
 
 # ------------------------------------------------------- D1, and its trap
@@ -94,7 +106,7 @@ def test_a_baseline_entry_that_gained_a_kind_forces_the_baseline_to_shrink(tmp_p
     steps = [{"id": "A1", "name": "x", "condition": "c",
               "condition_kind": "design_dependent",
               "gate": {"program_exit_zero": "p"}}]
-    rc, out = _run(_flow(tmp_path, steps), tmp_path)
+    rc, out = _run(_flow(tmp_path, steps), tmp_path, _historical_grid(tmp_path))
     assert "must shrink" in out, out
 
 
@@ -254,7 +266,7 @@ def test_a_deleted_baselined_step_is_not_reported_as_fixed(tmp_path):
     # step "14" is in D8_BASELINE; a flow that does not contain it at all
     flow = _flow(tmp_path, [{"id": "D1", "name": "x",
                              "gate": {"program_exit_zero": "p"}}])
-    rc, out = _run(flow, tmp_path)
+    rc, out = _run(flow, tmp_path, _historical_grid(tmp_path))
     assert "NO LONGER EXISTS in the flow" in out, out
     assert "14" in out, out
     # and it must NOT be dressed up as good news
@@ -280,7 +292,7 @@ def test_a_genuinely_repaired_baselined_step_is_still_reported_as_fixed(tmp_path
         {"id": "14", "name": "y", "required_outputs": ["out.txt"],
          "gate": {"files_exist": ["out.txt"]}},
     ])
-    rc, out = _run(flow, tmp_path)
+    rc, out = _run(flow, tmp_path, _historical_grid(tmp_path))
     # Scoped to D8. A tiny fixture necessarily omits D6's 22 baselined steps,
     # so D6 correctly reports them as gone; asserting on the whole output would
     # be asserting on the fixture's size rather than on the behaviour.

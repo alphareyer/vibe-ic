@@ -118,56 +118,26 @@ def test_combinators_are_walked(tmp_path):
     assert rc == 0, out
 
 
-def test_the_baseline_is_not_empty():
-    """Vacuity guard for the parametrised test below.
-
-    If the baseline ever empties — the goal — the shrink test has no subject and
-    would collect zero cases and report green. That must be a deliberate
-    decision, announced here, not a silently empty parametrisation.
-    """
-    assert _baseline(), (
-        "the baseline is empty, so the must-shrink branch can no longer be "
-        "exercised; delete the gate's shrink logic deliberately or keep a case")
+def test_the_baseline_is_empty_after_repairs():
+    """Every formerly weak step now has a content gate."""
+    assert _baseline() == {}
 
 
-@pytest.mark.parametrize("promoted", sorted(_baseline()))
-def test_a_baseline_entry_that_gained_a_real_gate_forces_the_baseline_to_shrink(
-        promoted, tmp_path):
-    """The half people forget: a fixed entry must leave the record.
-
-    A baseline that never shrinks stops describing anything and becomes a list of
-    permissions.
-
-    DERIVED, and now checked for EVERY entry rather than for `P0` alone. The
-    fixture is built from the checker's own baseline: every entry is present and
-    still weak except `promoted`, which gains a criterion that can fail. So the
-    `new` bucket is empty by construction — which is what lets the `fixed`
-    branch be reached at all — and the only finding is the one under test.
-
-    Widened on purpose: the hand-typed version asserted the shrink for `P0` and
-    nothing else, so an entry that stopped being reported would have gone
-    unnoticed. Every entry now has to earn its place.
-    """
-    baseline = _baseline()
-    steps = []
-    for sid in baseline:
-        if sid == promoted:
-            steps.append({"id": sid, "name": "now gated",
-                          "gate": {"program_exit_zero": "x"}})
-        else:
-            # `files_exist` alone is weak for every entry regardless of which
-            # shape its recorded reason names, so this keeps the rest of the
-            # baseline in `weak` — and therefore out of BOTH findings — without
-            # the fixture needing to know why each one was recorded.
-            steps.append({"id": sid, "name": "still weak",
-                          "gate": {"files_exist": ["a"]}})
-    f = _flow(tmp_path, steps)
-    rc, out = _run(f)
-    assert rc == 1, out
-    assert "must shrink" in out, (
-        f"promoting {promoted!r} must reach the shrink branch, not the "
-        f"new-weak-step branch:\n{out}")
-    assert promoted in out, out
+def test_a_baseline_entry_that_gained_a_real_gate_forces_the_baseline_to_shrink(tmp_path):
+    """Exercise the ratchet with a synthetic historical entry after closure."""
+    checker = tmp_path / "flow_step_can_fail_check.py"
+    source = GATE.read_text(encoding="utf-8")
+    checker.write_text(source.replace(
+        "BASELINE: Dict[str, str] = {}",
+        "BASELINE: Dict[str, str] = {'historical': 'files_exist only'}"),
+        encoding="utf-8")
+    f = _flow(tmp_path, [{"id": "historical", "name": "now gated",
+                          "gate": {"program_exit_zero": "x"}}])
+    p = _pr.run([sys.executable, str(checker), "--flow", str(f)],
+                capture_output=True, text=True)
+    assert p.returncode == 1
+    assert "must shrink" in p.stdout
+    assert "historical" in p.stdout
 
 
 def test_stage_containers_are_not_steps(tmp_path):

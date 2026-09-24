@@ -176,7 +176,9 @@ EXPECTED_DIMS = 9
 # 2026-09-23: step 37.3 (GDS stream-out / finishing fidelity) ARRIVED.
 # MEASURED on the live yaml, not incremented: arrived ['37.3'], departed [].
 # 37.3 declares a gate, so this census moves 68 -> 69.
-CENSUS_GATE_PRESENT = 69
+# 2026-09-24: compare the live step-id sets with origin/main. P0 adds its
+# blocking structural gate; no gate-bearing step leaves the set (69 -> 70).
+CENSUS_GATE_PRESENT = 70
 # UNCHANGED at 61. A 2026-07-28 change gave FS1 a `required_outputs` key and
 # was WITHDRAWN the same day: the only thing that made the declaration
 # satisfiable was `check_step` standing its early MISSING down so FS1's own
@@ -327,7 +329,9 @@ CENSUS_BLOCKS_ON_NON_EMPTY = 68
 # 2026-09-23: step 37.3 (GDS stream-out / finishing fidelity) ARRIVED.
 # MEASURED on the live yaml, not incremented: arrived ['37.3'], departed [].
 # 37.3 names gds_xor_check under `programs:`, so 66 -> 67.
-CENSUS_GATE_PROGRAMS_NON_EMPTY = 67
+# 2026-09-24: the live exec-gate set adds 1 (RTL content), 35 (DFM document
+# content), and P0 (structural RTL); no member leaves (67 -> 70).
+CENSUS_GATE_PROGRAMS_NON_EMPTY = 70
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -643,21 +647,9 @@ def test_gate_programs_non_empty_exactly_where_the_gate_names_one(raw_steps):
         assert F.gate_programs(key) == (), f"{key}: unexpected gate programs"
 
     assert len(with_exec) == CENSUS_GATE_PROGRAMS_NON_EMPTY
-    # "12" left this set 2026-08-08: it gained a program_exit_zero exec
-    # clause (dft_post_optimization_scan_survival_check).
-    #
-    # "35" JOINED it 2026-09-02, in `867f807a7` ("fix: preserve advisory
-    # evidence tiers (#1980)") -- the same one revision the count above is
-    # derived to, and this membership pin is what makes that derivation
-    # checkable: a count that moved without naming its member would pass the
-    # assert above and fail here. Step 35's
-    # `advisory_program_exit_zero: dfm_screen_check …` was retired and the same
-    # producer re-declared as a `program_outputs:` entry, so the step keeps its
-    # evidence tier by declaration and legitimately has no exec clause.
-    # `gate_programs("35") == ()` is asserted in the loop above, which is what
-    # distinguishes this from a step that lost its clause and kept a dangling
-    # program.
-    assert without_exec == {"1", "35", "P0"}
+    # Steps 1, 35, and P0 now have blocking content or structural checks in
+    # their own gates. The live no-exec set has no members.
+    assert without_exec == set()
 
 
 def test_every_gate_named_program_resolves_to_a_real_file():

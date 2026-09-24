@@ -2162,10 +2162,8 @@ def test_probe_umbrella_step_id_is_a_declared_flow_step():
         f"{compliance_module().__name__} emits its structural verdict under "
         f"step id {sid!r}, which the flow yaml does not declare"
     )
-    assert not F.has_gate(sid), (
-        f"step {sid!r} now declares a gate of its own; the umbrella branch in "
-        f"test_d1_gate_is_wired_in no longer applies and must be re-derived"
-    )
+    assert F.has_gate(sid), f"step {sid!r} lost its blocking RTL content gate"
+    assert "flow_step_output_content_check" in F.gate_programs(sid)
 
 
 def test_probe_channel_d_measured_this_worktree_and_the_whole_flow():

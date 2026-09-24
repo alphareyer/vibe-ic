@@ -180,13 +180,10 @@ THE PREDICATE, PER STEP
 
 NA
 --
-``P0`` is the only step with no ``gate`` key at all — it is a synthetic
-pre-flight whose verdict is emitted directly by
-``flow_compliance_check._run_structural_rtl_gates``. There is no gate to
-falsify, so its cell is NA — and the NA is *live*: the test asserts the
-precondition (no ``gate`` key, no clauses) still holds. The day someone gives
-P0 a gate, this test fails and forces the cell to be re-decided. An NA that
-merely ``pytest.skip()``s is silent absence wearing a hat and is not used here.
+``P0`` now declares a blocking RTL content gate. No D2 cell is NA;
+``NA_STEPS`` remains an explicit pin so a future ungated step cannot silently
+inherit an accepted NA. The cell test proves the P0 gate can reject RTL
+content after a source file has been produced.
 
 RUN
 ---
@@ -196,8 +193,8 @@ RUN
 ``PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`` is mandatory in this tree (a stray
 ``pytest_ethereum`` plugin otherwise breaks collection).
 
-LIVE, not remembered: 192<!--figure:blocking_clauses--> blocking clauses over
-69<!--figure:gated_steps--> gated steps. This is the denominator a reader
+LIVE, not remembered: 199<!--figure:blocking_clauses--> blocking clauses over
+70<!--figure:gated_steps--> gated steps. This is the denominator a reader
 wants, and it moves with the yaml: the digits are written by
 ``tools/gen_flow_matrix_census.py`` and the ``<!--figure:...-->`` anchors name
 the bindings that produced them (vibe-ic#961). Do not hand-edit them.
@@ -293,18 +290,14 @@ ABSENCE_RED = "FAIL_ON_ABSENCE_ONLY"
 #: editing a comparison in one branch and forgetting the other three.
 DEMONSTRATIONS: Tuple[str, ...] = (RED,)
 
-#: The steps whose dimension-2 cell is NA because they declare no ``gate`` at
-#: all. Exactly one at time of writing: ``P0`` is a synthetic pre-flight whose
-#: verdict is emitted directly by
-#: ``flow_compliance_check._run_structural_rtl_gates`` and surfaced in
-#: ``reports/audit/phase23_completion_audit.json`` — see the step's own
-#: ``notes:`` in the flow yaml. There is no gate expression to falsify.
+#: The steps whose dimension-2 cell is NA because they declare no ``gate``.
+#: P0 now has a blocking RTL content gate, so this set is empty.
 #:
 #: Declared rather than derived on purpose. Deriving it (``every step with no
 #: gate is NA``) would make a step that LOSES its gate silently reclassify
 #: itself as an accepted NA — the disease, one level up. Declared, both
 #: directions redden.
-NA_STEPS: Tuple[str, ...] = ("P0",)
+NA_STEPS: Tuple[str, ...] = ()
 
 #: Per-gate subprocess cap for this suite. The production default is 900s
 #: (``_path_layout.gate_timeout_s``), sized for a real 7.5MB post-PnR netlist.
@@ -495,6 +488,12 @@ def _f_empty(p: Path) -> None:
 
 def _f_rtl_bad(p: Path) -> None:
     _w(p, "phase2/stage1/rtl/top.v", _BAD_RTL)
+
+
+def _f_analog_stage_bad_verdict(p: Path) -> None:
+    """A declared analog stage whose delivered verdict has the wrong type."""
+    _w(p, "phase1/analog/analog_block_list.json", {"blocks": []})
+    _w(p, "reports/analog/stage_analog_compliance.json", {"overall": 42})
 
 
 def _analog_partial(p: Path, root: str) -> None:
@@ -2375,6 +2374,7 @@ def _f_xor_design_layer_differs(p: Path) -> None:
 FIXTURES: Dict[str, Callable[[Path], None]] = {
     "EMPTY": _f_empty,
     "RTL_BAD": _f_rtl_bad,
+    "ANALOG_STAGE_BAD_VERDICT": _f_analog_stage_bad_verdict,
     "ANALOG_P3": _f_analog_p3,
     "ANALOG_P3_MACRO_RTL": _f_analog_p3_macro_rtl,
     "ANALOG_P3_TOPOLOGY_BEHAVIOUR": _f_analog_p3_topology_behaviour,
@@ -2432,6 +2432,10 @@ FIXTURES: Dict[str, Callable[[Path], None]] = {
 #: not redden it) fails loudly rather than silently keeping a stale recipe.
 #: Clauses absent from this table use ``EMPTY``.
 CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
+    # The analog gate self-skips on a digital-only project. Declare analog
+    # work, then deliver a structurally invalid verdict to reach its refusal.
+    ("14", "flow_step_output_content_check . --mode stage_analog"):
+        "ANALOG_STAGE_BAD_VERDICT",
     # Step 37.3's clause is a JUDGE of the producer's receipt, not a second
     # measurement -- R-0915-126, and the SLT53D S arm is the record of what a
     # re-measuring clause costs: the producer measured 0 differences across 46
@@ -4347,29 +4351,11 @@ def test_d2_a_content_earned_program_red_is_still_a_real_red(
             f"program reds :: {out[-300:]}")
 
 
-#: The cells this repair could NOT close, and the reason, in one place.
-#:
-#: 2026-08-08: was ``("1", "12", "35")``. Step 12 closed for real — it gained
-#: ``dft_post_optimization_scan_survival_check`` as a blocking clause (a
-#: genuine content check LEC cannot subsume: scan insertion is functionally
-#: transparent, so LEC would still pass a post-DFT netlist whose scan chain
-#: silently vanished) — so it left this register and its waiver in
-#: ``flow_matrix/waivers.py`` was removed, not re-worded. Steps 1 and 35 did
-#: NOT close: both carry an explicit, owner-confirmed AUDIT NOTE in the flow
-#: yaml stating the files_exist-only gate is DELIBERATE (Step 1: content
-#: judgement belongs downstream at Steps 2-6 by design; Step 35: promoting
-#: the DFM clause to blocking would fabricate unfixable FAILs, since no
-#: OpenROAD repair pass exists for what it finds) — their waivers were
-#: reworded to say PERMANENT rather than pending, not removed.
-#:
-#: Each remaining step declares a gate whose every BLOCKING clause is a
-#: ``files_exist`` — so by the measurement in
-#: :func:`test_d2_a_files_exist_clause_is_satisfied_by_a_zero_byte_file` the
-#: whole gate is satisfied by empty files and can fail on one input only, the
-#: file not being there. They are WAIVED in ``flow_matrix/waivers.py`` with
-#: ``strict=True``: a stale entry (the step gains a content clause) reddens
-#: the suite exactly as it did for step 12.
-ABSENCE_ONLY_STEPS: Tuple[str, ...] = ("1", "35")
+#: Every flow gate now has at least one blocking clause beyond mere file
+#: existence. Step 12 gained scan-survival checking earlier; steps 1 and 35
+#: gained content checks in this change. The register remains a two-way pin:
+#: a future absence-only gate must be recorded and justified or the test fails.
+ABSENCE_ONLY_STEPS: Tuple[str, ...] = ()
 
 
 def test_d2_the_waived_cells_are_gated_by_existence_alone():
