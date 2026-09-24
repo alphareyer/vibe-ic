@@ -23066,7 +23066,7 @@ def main() -> int:
 
     # Under the lock -- it writes -- and BEFORE canonical span admission, which
     # admits a phase-2 span this call does not dispatch.
-    if getattr(args, "refresh_only", False):
+    if not _bounded and getattr(args, "refresh_only", False):
         return _run_refresh_only(project, args)
 
     _canonical = _canonical_admission.admit_span(
