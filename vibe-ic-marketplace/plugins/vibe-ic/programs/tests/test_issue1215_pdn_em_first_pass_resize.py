@@ -142,8 +142,10 @@ def test_a_rail_short_on_its_own_must_not_order_a_wasted_repnr(
     # run, forever.
     _arm(monkeypatch, floor=_FLOOR,
          drawn={"metal4": 18.71, "metal5": 8.36, "metal1": 0.6})
+    reasons = []
     assert R._pdn_em_first_pass_resize(
-        _tree(tmp_path), "spm", object(), "c") is None
+        _tree(tmp_path), "spm", object(), "c", reasons) is None
+    assert reasons == ["all measured strap widths meet their EM floors"]
 
 
 def test_without_the_pdn_script_the_decision_refuses_rather_than_guesses(
@@ -151,8 +153,10 @@ def test_without_the_pdn_script_the_decision_refuses_rather_than_guesses(
     # No pnr.tcl means the strap/rail split cannot be established. Guessing it
     # is how the false trigger comes back, so the answer is None.
     _arm(monkeypatch, floor=_FLOOR, drawn={"metal4": 1.6, "metal1": 0.6})
+    reasons = []
     assert R._pdn_em_first_pass_resize(
-        _tree(tmp_path, pnr_tcl=None), "spm", object(), "c") is None
+        _tree(tmp_path, pnr_tcl=None), "spm", object(), "c", reasons) is None
+    assert len(reasons) == 1 and "PDN script unavailable" in reasons[0]
 
 
 # --------------------------------------------------------------------------
@@ -181,8 +185,10 @@ def test_no_routed_def_means_no_resize(tmp_path, monkeypatch):
     _arm(monkeypatch, floor=_FLOOR, drawn={"metal4": 1.6})
     R._pl.pnr_dir(tmp_path).mkdir(parents=True, exist_ok=True)   # no DEF
     R._pl.reports_phase3_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    reasons = []
     assert R._pdn_em_first_pass_resize(
-        tmp_path, "spm", object(), "c") is None
+        tmp_path, "spm", object(), "c", reasons) is None
+    assert len(reasons) == 1 and "routed DEF missing" in reasons[0]
 
 
 def test_a_def_stating_no_pg_widths_means_no_resize(tmp_path, monkeypatch):
