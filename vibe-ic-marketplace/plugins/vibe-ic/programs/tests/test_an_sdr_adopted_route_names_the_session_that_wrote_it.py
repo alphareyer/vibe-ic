@@ -195,16 +195,20 @@ def test_the_product_list_is_read_off_the_real_template(tmp_path):
 
 def test_the_rollback_and_resume_tails_declare_their_products_too():
     """The antenna rollback and the fatal-signal resume are PnR tails exactly
-    like the adopt tail: same product list, same set-aside, same outputs=."""
+    like the adopt tail: same product list, run through the ONE declared-
+    session helper (set aside, outputs=, put back -- asserted on the helper
+    itself below)."""
     import inspect
     for fn in (R._pnr_adopt_sdr_candidates,
                R._pnr_rollback_refused_antenna_repair,
                R._pnr_resume_after_fatal_signal):
         src = inspect.getsource(fn)
+        assert "_declared_session_exec(" in src, fn.__name__
         assert "_pnr_tail_products(" in src, fn.__name__
-        assert "_set_aside_session_products(" in src, fn.__name__
-        assert "_restore_unwritten_products(" in src, fn.__name__
-        assert "outputs=[str(_p) for _p in _tail_products]" in src, fn.__name__
+    helper = inspect.getsource(R._declared_session_exec)
+    assert "_set_aside_session_products(" in helper
+    assert "_restore_unwritten_products(" in helper
+    assert "outputs=[str(p) for p in products]" in helper
 
 
 def _si_mcf_promote(proj: Path, monkeypatch):
