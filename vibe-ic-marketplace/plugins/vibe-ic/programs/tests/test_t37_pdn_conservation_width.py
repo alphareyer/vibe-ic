@@ -56,6 +56,23 @@ def test_technology_maxwidth_refuses_infeasible_current_by_name(tmp_path):
         R._build_pdn_tcl(_pdk(tmp_path, max_width="5.0"), em_floor=_floor())
 
 
+def test_lef_comments_and_denied_statements_cannot_set_spacing_or_maxwidth(tmp_path):
+    """Only LEF grammar statements may constrain the measured PDN resize."""
+    pdk = _pdk(tmp_path, max_width="20.0")
+    baseline = R._build_pdn_tcl(pdk, em_floor=_floor())
+    tech = Path(pdk.tech_lef)
+    original = tech.read_text()
+    for denial in ("not", "no", "without", "非", "不"):
+        tech.write_text(original.replace(
+            " SPACING 0.3 ;\n",
+            " SPACING 0.3 ;\n"
+            f" # {denial} SPACING 90 ;\n"
+            f" # {denial} MAXWIDTH 1 ;\n"
+            f" {denial} MAXWIDTH 1 ;\n"
+            " MAXWIDTH 1 ; denied\n"))
+        assert R._build_pdn_tcl(pdk, em_floor=_floor()) == baseline
+
+
 def test_second_pass_is_blocked_by_its_own_segment_result(tmp_path, monkeypatch):
     pnr = R._pl.pnr_dir(tmp_path)
     pnr.mkdir(parents=True)

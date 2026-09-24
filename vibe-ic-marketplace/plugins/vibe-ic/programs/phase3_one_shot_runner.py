@@ -8769,11 +8769,15 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                                 + r"\s*$(.*?)^\s*END\s+"
                                 + re.escape(str(st["layer"])) + r"\s*$",
                                 _tlef_txt or "", re.M | re.S | re.I)
-                            _body = _layer_body.group(1) if _layer_body else ""
+                            # LEF comments are not grammar productions. Strip
+                            # them before reading complete numeric statements.
+                            _body = re.sub(r"#[^\n]*", "",
+                                           _layer_body.group(1) if _layer_body else "")
                             _spaces = [float(x) for x in re.findall(
-                                r"\bSPACING\s+([0-9.]+)\b", _body, re.I)]
+                                r"^\s*SPACING\s+([0-9.]+)\s*;\s*$",
+                                _body, re.M | re.I)]
                             _maxw = re.search(
-                                r"^\s*MAXWIDTH\s+([0-9.]+)\s*;",
+                                r"^\s*MAXWIDTH\s+([0-9.]+)\s*;\s*$",
                                 _body, re.M | re.I)
                             _plan_em = _pdn_em_stripe_plan(
                                 i_seg_A=float(_iseg),
@@ -69075,6 +69079,10 @@ def main() -> int:
         _pnr_row = next((s for s in reversed(plan) if s.name == "pnr"), None)
         _pnr_step_passed = _pdn_em_resize_chain_continues(
             _pnr_row, _rz_post_status)
+        if not _pnr_step_passed:
+            print(f"[pnr] PDN_EM_CHAIN_STOPPED (continues={_pnr_step_passed}): "
+                  + (_rz_post_detail or (_pnr_row.detail if _pnr_row else
+                                         "PnR result missing")), file=sys.stderr)
         _pnr_reran = (_pnr_row is not None
                       and "skipped" not in _pnr_row.detail)
         _chain_ok = _pnr_step_passed

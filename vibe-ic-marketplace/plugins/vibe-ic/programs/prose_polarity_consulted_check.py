@@ -1192,6 +1192,15 @@ _NOT_PROSE: Dict[str, str] = {
         "The matches read machine-produced EM report fields plus the LEF "
         "MANUFACTURINGGRID production. These formal measurement grammars cannot "
         "deny their numeric tokens in surrounding prose.",
+    "phase3_one_shot_runner::_build_pdn_tcl":
+        "The new MAXWIDTH and SPACING reads take only complete, semicolon-"
+        "terminated numeric statements from a named ROUTING LAYER block in "
+        "technology LEF. Hash comments are removed before matching, and the "
+        "patterns anchor both ends of the statement. LEF has no production "
+        "for 'not MAXWIDTH 5 ;' or 'SPACING 9 ; denied'; neither can match. "
+        "A missing MAXWIDTH remains unknown rather than an invented cap. "
+        "The companion PDN test injects denial text and checks it cannot "
+        "change the emitted width or feasibility decision.",
     "release_docs_check::_parameter_values":
         "SystemVerilog parameter declarations are formal HDL grammar. A parameter "
         "is declared with an expression or is absent; HDL has no prose denial "
