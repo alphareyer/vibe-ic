@@ -66,6 +66,8 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
                         "phase23_completion_audit.json").read_text())
     assert audit["scope"]["whole_flow"] is False
     assert audit["audit_kind"].startswith("bounded_invalidation")
+    assert audit["declared_output_checks"]["37"]["gate_verdict"] == "NOT_MEASURED"
+    assert audit["declared_output_checks"]["37"]["missing_outputs"]
     assert report["stale_downstream"]["drc"]["status"] == "NOT_MEASURED"
     assert "gds" in report["stale_downstream"]["drc"]["reason"]
     assert report["stale_downstream"]["lvs"]["status"] == "NOT_MEASURED"

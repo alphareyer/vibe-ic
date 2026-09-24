@@ -66172,6 +66172,40 @@ def _phase3_file_manifest(project: Path) -> Dict[str, str]:
     return result
 
 
+def _phase3_window_output_audit(project: Path, step_ids: Set[str]
+                                ) -> Dict[str, Dict[str, Any]]:
+    """Check this window's declared outputs without invoking out-of-window gates.
+
+    Presence is an independent observation, not a gate PASS.  In particular,
+    Step 37's stage-3 compliance gate is deliberately not run by a GDS-only
+    window; its missing receipt remains visible here as NOT_MEASURED.
+    """
+    import yaml
+    import flow_compliance_check as _fcc
+    flow = yaml.safe_load(_fcc.DEFAULT_FLOW_DEF.read_text()) or {}
+    selected = {str(step.get("id")): step for step in flow.get("steps", [])
+                if isinstance(step, dict) and str(step.get("id")) in step_ids}
+    checks = {}
+    for sid in sorted(step_ids):
+        step = selected.get(sid)
+        if step is None:
+            checks[sid] = {"status": "NOT_MEASURED",
+                           "reason": "step absent from canonical flow"}
+            continue
+        missing = []
+        for spec in step.get("required_outputs") or []:
+            alternatives = [part.strip() for part in str(spec).split(" OR ")]
+            if not any(_fcc._glob_first(project, part)
+                       for part in alternatives):
+                missing.append(str(spec))
+        checks[sid] = {"status": "NOT_MEASURED" if missing else "PRESENT",
+                       "missing_outputs": missing,
+                       "gate_verdict": "NOT_MEASURED",
+                       "reason": "only output presence was checked; the whole-flow "
+                                 "gate audit was not run"}
+    return checks
+
+
 def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                        args, selected: List[str]) -> int:
     """Dispatch only selected sites and publish a bounded audit of this run.
@@ -66304,6 +66338,10 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
         "stale_downstream": stale}, indent=2) + "\n")
     site_spans = dict(_spf.RUNNER_PLANS["phase3_one_shot_runner"].sites)
     window_ids = {str(sid) for site in selected for sid in site_spans[site]}
+    audit_doc = json.loads(audit.read_text())
+    audit_doc["declared_output_checks"] = _phase3_window_output_audit(
+        project, window_ids)
+    audit.write_text(json.dumps(audit_doc, indent=2) + "\n")
     report["steps_view"] = _pl.emit_steps_view(
         project, PROGRAMS_DIR, runner="phase3_one_shot_runner",
         only_steps=window_ids)
