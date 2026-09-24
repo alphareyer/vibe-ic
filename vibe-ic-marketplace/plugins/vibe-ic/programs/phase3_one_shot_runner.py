@@ -66126,37 +66126,292 @@ _POST_RUN_AUDITS = (
 )
 
 
-def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
-    """Resolve a numeric window to independently dispatched backend sites.
-
-    An OpenROAD PnR session owns 15..22 as one unit.  Its interior is not an
-    entry point; pretending to enter at 18 would run work outside the request.
-    """
-    sites = _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites
-    heads = {name: str(span[0]) for name, span in sites}
-    tails = {name: str(span[-1]) for name, span in sites}
-    if entry not in heads.values() and entry not in heads:
-        raise ValueError(f"step {entry!r} has no independent Phase-3 dispatch; "
-                         f"enterable steps: {list(heads.values())}")
-    from decimal import Decimal
-    try:
-        lo = Decimal(heads.get(entry, entry))
-        hi = Decimal(tails.get(exit_, exit_))
-    except Exception as exc:
-        raise ValueError(f"invalid Phase-3 exit step {exit_!r}") from exc
+def _phase3_window_steps(entry: str, exit_: str) -> List[str]:
+    """Canonical stage3/stage4 order comes from the flow, not runner spans."""
+    import yaml
+    import flow_compliance_check as _fcc
+    flow = yaml.safe_load(_fcc.DEFAULT_FLOW_DEF.read_text()) or {}
+    ids = [str(step["id"]) for step in flow.get("steps", [])
+           if step.get("stage") in ("stage3", "stage4")]
+    # Step 9 is the backend synthesis dispatch inherited from Phase 2.
+    ids.insert(0, "9")
+    if entry not in ids or exit_ not in ids:
+        raise ValueError(f"unknown canonical Phase-3 step: {entry!r}..{exit_!r}")
+    lo, hi = ids.index(entry), ids.index(exit_)
     if lo > hi:
         raise ValueError(f"Phase-3 window {entry!r}..{exit_!r} is reversed")
-    if hi > Decimal("37"):
-        raise ValueError(f"Phase-3 exit {exit_!r} is beyond this runner's "
-                         "independent dispatch sites")
-    # The physical dispatch order places GDS before DRC/LVS even though its
-    # canonical id is 37.  Filter by flow id, then retain the runner's order.
-    selected = [name for name, _ in sites
-                if lo <= Decimal(heads[name]) and Decimal(tails[name]) <= hi]
-    if not selected:
-        raise ValueError(f"Phase-3 window {entry!r}..{exit_!r} contains no "
-                         "independently dispatched site")
+    return ids[lo:hi + 1]
+
+
+def _phase3_window_sites(entry: str, exit_: str) -> List[str]:
+    """Select a real dispatch unit for every canonical backend step.
+
+    PnR's eight steps share an OpenROAD session. Other unsplit steps use the
+    full Phase-3 runner as their enclosing unit, isolated from the source tree.
+    """
+    ids = _phase3_window_steps(entry, exit_)
+    sites = _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites
+    direct = {str(sid): name for name, span in sites for sid in span}
+    direct.update({"15.5ic": "pnr",
+                   "36": "tapeout_checklist",
+                   "37.3": "gds_xor",
+                   "37.4": "signoff_metrics_aggregate",
+                   "38": "foundry_handoff"})
+    spans = dict(sites)
+    pnr_ids = set(spans["pnr"]) | {"15.5ic"}
+    canonicalizer_ids = {"23", "24", "25", "26", "26.5ic", "27",
+                         "28", "29", "30", "32", "33", "34", "35"}
+    if set(ids).issubset(pnr_ids) and not set(spans["pnr"]).issubset(ids):
+        return ["enclosing_pnr"]
+    if set(ids).issubset(canonicalizer_ids):
+        return ["enclosing_canonicalize"]
+    if (any(sid not in direct for sid in ids) or
+            any(not set(map(str, spans[direct[sid]])).issubset(ids)
+                for sid in ids if direct.get(sid) in spans)):
+        return ["enclosing_phase3"]
+    if ids == ["31"]:
+        return ["drc", "lvs"]
+    selected = []
+    for sid in ids:
+        site = direct[sid]
+        if site not in selected:
+            selected.append(site)
     return selected
+
+
+def _phase3_window_clone(project: Path, target: Path) -> None:
+    """A private reflink/copy: gate and enclosing-unit writes never hit inputs."""
+    cp = subprocess.run(["cp", "-a", "--reflink=auto", str(project),
+                         str(target)], capture_output=True, text=True)
+    if cp.returncode:
+        raise RuntimeError(f"window isolation copy failed: {cp.stderr}")
+
+
+def _phase3_window_full_gate_audit(project: Path, step_ids: Set[str]
+                                   ) -> Dict[str, Dict[str, Any]]:
+    """Run exactly each selected step's canonical full gate on a private copy."""
+    import tempfile
+    import yaml
+    import flow_compliance_check as _fcc
+    flow = yaml.safe_load(_fcc.DEFAULT_FLOW_DEF.read_text()) or {}
+    steps = {str(step.get("id")): step for step in flow.get("steps", [])
+             if str(step.get("id")) in step_ids}
+    with tempfile.TemporaryDirectory(prefix="phase3-gates-",
+                                     dir=project.parent) as temp:
+        isolated = Path(temp) / project.name
+        _phase3_window_clone(project, isolated)
+        waivers = _fcc._load_waivers(isolated)
+        results = {}
+        for sid in step_ids:
+            if sid not in steps:
+                results[sid] = {"status": "NOT_MEASURED",
+                                "reason": "step absent from canonical flow"}
+                continue
+            result = _fcc.check_step(isolated, steps[sid], waivers)
+            results[sid] = asdict(result)
+        return results
+
+
+def _phase3_window_direct_site(project: Path, top: str, pdk: PdkConfig,
+                               args, site: str, window_gate) -> StepResult:
+    """Dispatch an existing site privately; publish only its declared outputs."""
+    import tempfile
+    import yaml
+    import flow_compliance_check as _fcc
+    spans = dict(_spf.RUNNER_PLANS["phase3_one_shot_runner"].sites)
+    flow = yaml.safe_load(_fcc.DEFAULT_FLOW_DEF.read_text()) or {}
+    owned = {str(sid) for sid in spans[site]}
+    if site == "pnr":
+        owned.add("15.5ic")
+    steps = [step for step in flow.get("steps", [])
+             if str(step.get("id")) in owned]
+    with tempfile.TemporaryDirectory(prefix="phase3-direct-",
+                                     dir=project.parent) as temp:
+        isolated = Path(temp) / project.name
+        _phase3_window_clone(project, isolated)
+        if site == "synth":
+            row = window_gate(isolated, "phase3_one_shot_runner", site,
+                              _preflight_refusal(site), step_synth,
+                              isolated, top, pdk, args.container)
+        elif site == "pnr":
+            row = window_gate(isolated, "phase3_one_shot_runner", site,
+                              _preflight_refusal(site), step_pnr,
+                              isolated, top, pdk, args.container,
+                              die_um=args.die_um, util=args.util,
+                              spare_density=args.spare_density,
+                              pad_ring_step=step_pad_ring_gen)
+        elif site == "gds":
+            row = window_gate(isolated, "phase3_one_shot_runner", site,
+                              _preflight_refusal(site), step_gds,
+                              isolated, top, pdk, args.container)
+            if row.status == "PASS":
+                source = _pl.pnr_dir(isolated) / f"{top}.gds"
+                target = _pl.gds_dir(isolated) / f"{top}.gds"
+                if source.is_file():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+                else:
+                    row = StepResult("gds", "NOT_MEASURED", row.duration_s,
+                                     f"stream-out reported PASS without {source}",
+                                     reason_class=_V.ReasonClass.INPUT_ABSENT)
+        elif site == "drc":
+            row = window_gate(isolated, "phase3_one_shot_runner", site,
+                              _preflight_refusal(site), step_drc,
+                              isolated, top, pdk, args.container)
+        else:
+            row = window_gate(isolated, "phase3_one_shot_runner", site,
+                              _preflight_refusal(site), step_lvs,
+                              isolated, top, pdk, args.container,
+                              upstream_pnr=None)
+        outputs = []
+        for step in steps:
+            for spec in step.get("required_outputs") or []:
+                for pattern in str(spec).split(" OR "):
+                    for source in isolated.glob(pattern.strip()):
+                        if source.is_file():
+                            target = project / source.relative_to(isolated)
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(source, target)
+                            outputs.append(str(target))
+        if site == "gds":
+            # Retain the failed stream-out as this step's diagnostic output;
+            # the canonical sign-off alias is created only on a valid PASS.
+            source = _pl.pnr_dir(isolated) / f"{top}.gds"
+            if source.is_file():
+                target = _pl.pnr_dir(project) / f"{top}.gds"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                outputs.append(str(target))
+        row.output_files = outputs
+        return row
+
+
+def _phase3_window_metrics(project: Path) -> StepResult:
+    """Step 37.4 producer on a private tree; publish its two declared outputs."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="phase3-metrics-",
+                                     dir=project.parent) as temp:
+        isolated = Path(temp) / project.name
+        _phase3_window_clone(project, isolated)
+        result = step_signoff_metrics_aggregate(isolated)
+        outputs = []
+        for rel in ("phase3/final/metrics.json",
+                    "reports/phase3/signoff_metrics_aggregate.json"):
+            source = isolated / rel
+            if source.is_file():
+                target = project / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                outputs.append(str(target))
+        result.output_files = outputs
+        return result
+
+
+def _phase3_window_pre_audit_producer(project: Path, site: str,
+                                      container: str) -> StepResult:
+    """Run one declared producer without refreshing any sibling output."""
+    import tempfile
+    table = {name: (program, out_rel, extra)
+             for name, program, out_rel, extra in _PRE_AUDIT_PRODUCERS}
+    program, out_rel, extra = table[site]
+    step_id = {"tapeout_checklist": "36", "gds_xor": "37.3",
+               "foundry_handoff": "38"}[site]
+    with tempfile.TemporaryDirectory(prefix="phase3-producer-",
+                                     dir=project.parent) as temp:
+        isolated = Path(temp) / project.name
+        _phase3_window_clone(project, isolated)
+        argv = tuple(extra)
+        if site in _KLAYOUT_CONTAINER_SIGNOFF_GATES and container:
+            argv += ("--container", container)
+        row = _run_declared_signoff_gate(isolated, site, program,
+                                         out_rel, argv)
+        import yaml
+        import flow_compliance_check as _fcc
+        flow = yaml.safe_load(_fcc.DEFAULT_FLOW_DEF.read_text()) or {}
+        step = next(s for s in flow["steps"] if str(s.get("id")) == step_id)
+        outputs = []
+        for spec in step.get("required_outputs") or []:
+            for pattern in str(spec).split(" OR "):
+                for source in isolated.glob(pattern.strip()):
+                    if source.is_file():
+                        target = project / source.relative_to(isolated)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source, target)
+                        outputs.append(str(target))
+        row.output_files = outputs
+        return row
+
+
+def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
+                             args, step_ids: Set[str],
+                             unit: str = "phase3") -> StepResult:
+    """Run the unsplit Phase-3 unit privately and publish only selected outputs."""
+    import tempfile
+    import yaml
+    import flow_compliance_check as _fcc
+    t0 = time.time()
+    flow = yaml.safe_load(_fcc.DEFAULT_FLOW_DEF.read_text()) or {}
+    steps = [s for s in flow.get("steps", []) if str(s.get("id")) in step_ids]
+    with tempfile.TemporaryDirectory(prefix="phase3-enclosing-",
+                                     dir=project.parent) as temp:
+        isolated = Path(temp) / project.name
+        _phase3_window_clone(project, isolated)
+        if unit == "canonicalize":
+            canonical_row = step_canonicalize_artefacts(
+                isolated, top, pdk, args.container)
+            unit_rc = 0 if canonical_row.status in (
+                "PASS", "PASS_WITH_WAIVERS") else 1
+            unit_verdict = canonical_row.status
+        elif unit == "pnr":
+            pnr_row = step_pnr(isolated, top, pdk, args.container,
+                               die_um=args.die_um, util=args.util,
+                               spare_density=args.spare_density,
+                               pad_ring_step=step_pad_ring_gen)
+            unit_rc = 0 if pnr_row.status in ("PASS", "PASS_WITH_WAIVERS") else 1
+            unit_verdict = pnr_row.status
+        else:
+            cmd = [sys.executable, str(Path(__file__)), str(isolated),
+                   "--top-name", top, "--pdk", pdk.name,
+                   "--container", args.container]
+            cp = subprocess.run(cmd, capture_output=True, text=True)
+            unit_rc = cp.returncode
+            unit_report = _pl.report_path(isolated, "phase3_one_shot.json")
+            try:
+                unit_verdict = json.loads(unit_report.read_text()).get("verdict")
+            except (OSError, ValueError):
+                unit_verdict = None
+        copied = []
+        produced = []
+        for step in steps:
+            for spec in step.get("required_outputs") or []:
+                for pattern in str(spec).split(" OR "):
+                    for source in isolated.glob(pattern.strip()):
+                        if source.is_file():
+                            target = project / source.relative_to(isolated)
+                            if (not target.is_file() or
+                                    source.stat().st_mtime_ns != target.stat().st_mtime_ns or
+                                    source.stat().st_size != target.stat().st_size):
+                                produced.append(str(source.relative_to(isolated)))
+                                target.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.copy2(source, target)
+                                copied.append(str(target))
+        unit_ok = unit_rc == 0 and bool(produced) and unit_verdict in (
+            "PASS", "PASS_WITH_WAIVERS")
+        name = "enclosing_" + unit
+        enclosing = {"pnr": "step_pnr",
+                     "canonicalize": "step_canonicalize_artefacts",
+                     "phase3": "phase3_one_shot_runner"}[unit]
+        execution_note = ("ran as part of" if produced else
+                          "requested through; no selected output was produced by")
+        return StepResult(name, "PASS" if unit_ok
+                          else "NOT_MEASURED", time.time() - t0,
+                          f"steps {', '.join(sorted(step_ids))} {execution_note} "
+                          f"{enclosing}; enclosing rc={unit_rc}; "
+                          f"verdict={unit_verdict}; selected outputs newly "
+                          f"produced={len(produced)}; only selected declared "
+                          "outputs published",
+                          copied, reason_class=("" if unit_ok else
+                                                _V.ReasonClass.INPUT_ABSENT))
 
 
 def _phase3_file_manifest(project: Path) -> Dict[str, str]:
@@ -66174,12 +66429,7 @@ def _phase3_file_manifest(project: Path) -> Dict[str, str]:
 
 def _phase3_window_output_audit(project: Path, step_ids: Set[str]
                                 ) -> Dict[str, Dict[str, Any]]:
-    """Check this window's declared outputs without invoking out-of-window gates.
-
-    Presence is an independent observation, not a gate PASS.  In particular,
-    Step 37's stage-3 compliance gate is deliberately not run by a GDS-only
-    window; its missing receipt remains visible here as NOT_MEASURED.
-    """
+    """Check selected output presence; gate results are recorded separately."""
     import yaml
     import flow_compliance_check as _fcc
     flow = yaml.safe_load(_fcc.DEFAULT_FLOW_DEF.read_text()) or {}
@@ -66200,9 +66450,8 @@ def _phase3_window_output_audit(project: Path, step_ids: Set[str]
                 missing.append(str(spec))
         checks[sid] = {"status": "NOT_MEASURED" if missing else "PRESENT",
                        "missing_outputs": missing,
-                       "gate_verdict": "NOT_MEASURED",
-                       "reason": "only output presence was checked; the whole-flow "
-                                 "gate audit was not run"}
+                       "reason": "output presence only; full declared gates "
+                                 "are in declared_gate_checks"}
     return checks
 
 
@@ -66218,6 +66467,7 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     changed_sites: List[str] = []
     site_before = before
     window_gate = _spf.gate
+    window_ids = set(_phase3_window_steps(args.entry_step, args.exit_step))
     for site in selected:
         # A narrower numeric window can omit a producer between two selected
         # sites (for example PnR 15..22 and PV 31, with GDS 37 omitted).
@@ -66238,44 +66488,19 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                 f"{missing_link} is outside this window, so this gate cannot "
                 "measure the new artefact", reason_class=_V.ReasonClass.UPSTREAM_FAILED))
             break
-        if site == "synth":
-            row = window_gate(project, "phase3_one_shot_runner", site,
-                            _preflight_refusal(site), step_synth,
-                            project, top, pdk, args.container)
-        elif site == "pnr":
-            row = window_gate(project, "phase3_one_shot_runner", site,
-                            _preflight_refusal(site), step_pnr,
-                            project, top, pdk, args.container,
-                            die_um=args.die_um, util=args.util,
-                            spare_density=args.spare_density,
-                            pad_ring_step=step_pad_ring_gen)
-        elif site == "gds":
-            row = window_gate(project, "phase3_one_shot_runner", site,
-                            _preflight_refusal(site), step_gds,
-                            project, top, pdk, args.container)
-        elif site == "drc":
-            row = window_gate(project, "phase3_one_shot_runner", site,
-                            _preflight_refusal(site), step_drc,
-                            project, top, pdk, args.container)
+        if site in ("enclosing_phase3", "enclosing_pnr",
+                    "enclosing_canonicalize"):
+            row = _phase3_window_enclosing(
+                project, top, pdk, args, window_ids,
+                unit=site.removeprefix("enclosing_"))
+        elif site == "signoff_metrics_aggregate":
+            row = _phase3_window_metrics(project)
+        elif site in ("tapeout_checklist", "gds_xor", "foundry_handoff"):
+            row = _phase3_window_pre_audit_producer(
+                project, site, args.container)
         else:
-            row = window_gate(project, "phase3_one_shot_runner", site,
-                            _preflight_refusal(site), step_lvs,
-                            project, top, pdk, args.container,
-                            upstream_pnr=None)
-        if site == "gds" and row.status == "PASS":
-            # The full runner normally reaches this alias through the broad
-            # canonicalizer.  A window may publish only Step 37's own GDS,
-            # never call that canonicalizer (which rewrites other steps).
-            source = _pl.pnr_dir(project) / f"{top}.gds"
-            target = _pl.gds_dir(project) / f"{top}.gds"
-            if source.is_file():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-                row.output_files.append(str(target))
-            else:
-                row = StepResult("gds", "NOT_MEASURED", row.duration_s,
-                                 f"stream-out reported PASS without {source}",
-                                 reason_class=_V.ReasonClass.INPUT_ABSENT)
+            row = _phase3_window_direct_site(
+                project, top, pdk, args, site, window_gate)
         rows.append(row)
         site_after = _phase3_file_manifest(project)
         if any(site_before.get(k) != site_after.get(k)
@@ -66291,20 +66516,40 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     sites = [name for name, _ in
              _spf.RUNNER_PLANS["phase3_one_shot_runner"].sites]
     stale = {}
+    changed_labels = {"signoff_metrics_aggregate": "37.4 (signoff_metrics_aggregate)",
+                      "tapeout_checklist": "36 (tapeout_checklist)",
+                      "gds_xor": "37.3 (gds_xor)",
+                      "foundry_handoff": "38 (foundry_handoff)",
+                      "gds": "37 (gds)", "drc": "31 (drc)",
+                      "lvs": "31 (lvs)", "synth": "9 (synth)"}
     for changed_site in changed_sites:
-        for site in sites[sites.index(changed_site) + 1:]:
+        changed_step = changed_labels.get(
+            changed_site, ",".join(sorted(window_ids)))
+        following = (sites[sites.index(changed_site) + 1:]
+                     if changed_site in sites else [])
+        for site in following:
             if site not in [r.name for r in rows]:
                 stale.setdefault(site, {"status": "NOT_MEASURED",
-                                        "reason": f"upstream step {changed_site} changed output"})
-        for sid in ("37.3", "37.4", "37.5ic", "37.5ip", "38", "39", "P0"):
+                                        "reason": f"upstream step {changed_step} changed output"})
+        canonical = _phase3_window_steps("15", "39")
+        last = max((canonical.index(sid) for sid in window_ids
+                    if sid in canonical), default=-1)
+        for sid in canonical[last + 1:]:
             stale.setdefault(sid, {"status": "NOT_MEASURED",
-                                   "reason": f"upstream step {changed_site} changed output"})
+                                   "reason": f"upstream step {changed_step} changed output"})
     report = {
         "program": "phase3_one_shot_runner", "bounded": True,
         "window_run_id": os.environ.get("VIBEIC_PHASE3_WINDOW_RUN_ID"),
         "declared_window": {"entry_step": args.entry_step,
                             "exit_step": args.exit_step,
-                            "dispatched_sites": selected},
+                            "canonical_step_ids": sorted(window_ids),
+                            "dispatched_sites": selected,
+                            "enclosing_unit": (
+                                "phase3_one_shot_runner" if "enclosing_phase3" in selected
+                                else "step_pnr" if "enclosing_pnr" in selected
+                                else "step_canonicalize_artefacts"
+                                if "enclosing_canonicalize" in selected
+                                else None)},
         "steps": [asdict(r) for r in rows], "stale_downstream": stale,
         "changed_files": changed,
         "verdict": _aggregate_verdict(rows) if rows else "NOT_MEASURED",
@@ -66336,19 +66581,51 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
             for sid, item in stale.items()],
         "dispatched_sites": selected,
         "stale_downstream": stale}, indent=2) + "\n")
-    site_spans = dict(_spf.RUNNER_PLANS["phase3_one_shot_runner"].sites)
-    window_ids = {str(sid) for site in selected for sid in site_spans[site]}
     audit_doc = json.loads(audit.read_text())
+    gate_results = _phase3_window_full_gate_audit(project, window_ids)
+    audit_doc["audit_kind"] = "bounded_full_declared_gates"
+    audit_doc["declared_gate_checks"] = gate_results
     audit_doc["declared_output_checks"] = _phase3_window_output_audit(
         project, window_ids)
+    audit_doc["verdict"] = (_aggregate_verdict(rows) if rows else "NOT_MEASURED")
+    gate_statuses = {item.get("status") for item in gate_results.values()}
+    if "FAIL" in gate_statuses:
+        audit_doc["verdict"] = "FAIL"
+    elif any(status not in ("PASS", "PASS_WITH_WAIVERS",
+                            "NOT_APPLICABLE") for status in gate_statuses):
+        audit_doc["verdict"] = "NOT_MEASURED"
+    report["audit_verdict"] = audit_doc["verdict"]
+    if audit_doc["verdict"] in ("FAIL", "NOT_MEASURED"):
+        report["verdict"] = audit_doc["verdict"]
+    report["audit_scope"] = "bounded; full declared gates for selected steps"
+    report["bounded_disclosures"][0] = {
+        "refresh": "flow_compliance_check.check_step", "kind": "executed",
+        "why": "all gate clauses of selected canonical steps ran on an isolated copy"}
     audit.write_text(json.dumps(audit_doc, indent=2) + "\n")
-    report["steps_view"] = _pl.emit_steps_view(
-        project, PROGRAMS_DIR, runner="phase3_one_shot_runner",
-        only_steps=window_ids)
+    # The steps-view emitter refreshes every steps/* write record. Isolate it
+    # and publish only its bounded report, preserving every unselected record.
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="phase3-steps-view-",
+                                     dir=project.parent) as temp:
+        isolated = Path(temp) / project.name
+        _phase3_window_clone(project, isolated)
+        report["steps_view"] = _pl.emit_steps_view(
+            isolated, PROGRAMS_DIR, runner="phase3_one_shot_runner",
+            only_steps=window_ids)
+        source_view = _pl.report_path(isolated, "steps_view.json")
+        if source_view.is_file():
+            target_view = _pl.report_path(project, "steps_view.json")
+            target_view.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_view, target_view)
+            report["steps_view"]["steps_root"] = str(project / "steps")
+            report["steps_view"]["record_path"] = str(target_view)
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(f"[phase3] bounded sites={selected}; changed={len(changed)}; "
           f"stale={list(stale)}")
-    return 0 if all(r.status in ("PASS", "PASS_WITH_WAIVERS") for r in rows) else 1
+    return 0 if (all(r.status in ("PASS", "PASS_WITH_WAIVERS") for r in rows)
+                 and all(item.get("status") in ("PASS", "PASS_WITH_WAIVERS",
+                                                "NOT_APPLICABLE")
+                         for item in gate_results.values())) else 1
 
 
 # ---------------------------------------------------------------------------
@@ -66460,8 +66737,8 @@ def main() -> int:
                          "Bypasses the FRESHNESS check only — the step's "
                          "declared input contract is still enforced. "
                          "An unrecognised KIND is refused, not ignored."))
-    p.add_argument("--entry-step", help="First independently dispatched Phase-3 step")
-    p.add_argument("--exit-step", help="Last independently dispatched Phase-3 step")
+    p.add_argument("--entry-step", help="First canonical Phase-3 step")
+    p.add_argument("--exit-step", help="Last canonical Phase-3 step")
     args = p.parse_args()
     if bool(args.entry_step) != bool(args.exit_step):
         p.error("--entry-step and --exit-step must be supplied together")
@@ -66518,7 +66795,27 @@ def main() -> int:
     # is exactly where two standalone re-runs could co-write pnr/ +
     # reports/. Re-enters the orchestrator's lock via the env token, or
     # refuses a second concurrent standalone phase3 on a live project.
-    _lock = _runner_lock.acquire_or_reenter(project, "phase3_one_shot_runner")
+    if _window_sites is not None:
+        # Window control state lives beside the project. Preserve any stale
+        # lock byte-for-byte, but refuse if a whole-flow driver is live.
+        source_lock = project / _runner_lock.LOCK_FILENAME
+        holder = _runner_lock._read_lock(source_lock) if source_lock.exists() else None
+        if holder is not None:
+            try:
+                live = _runner_lock._pid_alive(int(holder.get("pid", -1)))
+            except (TypeError, ValueError):
+                live = False
+            if live:
+                print("CONCURRENT_RUN_REFUSED: live project runner lock",
+                      file=sys.stderr)
+                return 3
+        lock_root = project.parent / ".phase3_window_locks" / project.name
+        lock_root.mkdir(parents=True, exist_ok=True)
+        _lock = _runner_lock.acquire_or_reenter(
+            lock_root, "phase3_bounded_window")
+    else:
+        _lock = _runner_lock.acquire_or_reenter(
+            project, "phase3_one_shot_runner")
     if _lock is None:
         return 3
 
@@ -66532,18 +66829,30 @@ def main() -> int:
         }
         print(f"REFUSED: {_delivery_record['reason']}: {_delivery_refusal}",
               file=sys.stderr)
-        _delivery_report = _pl.reports_phase3_dir(project) / "delivery_admission.json"
-        _delivery_report.parent.mkdir(parents=True, exist_ok=True)
-        _delivery_report.write_text(json.dumps(_delivery_record, indent=2) + "\n")
+        if _window_sites is None:
+            _delivery_report = _pl.reports_phase3_dir(project) / "delivery_admission.json"
+            _delivery_report.parent.mkdir(parents=True, exist_ok=True)
+            _delivery_report.write_text(json.dumps(_delivery_record, indent=2) + "\n")
         return 2
 
-    _canonical = _canonical_admission.admit_span(
-        project, "phase3", PROGRAMS_DIR, args.container,
-        {"top_name": args.top_name, "ic_name": args.ic_name,
+    _admission_args = {"top_name": args.top_name, "ic_name": args.ic_name,
          "die_um": args.die_um, "util": args.util, "pdk": args.pdk,
          "allow_oss_pdk_fallback": bool(args.allow_oss_pdk_fallback),
          "allow_pdk_target_mismatch": bool(args.allow_pdk_target_mismatch),
-         "spare_density": args.spare_density})
+         "spare_density": args.spare_density}
+    if _window_sites is not None:
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix="phase3-admission-",
+                                         dir=project.parent) as temp:
+            isolated = Path(temp) / project.name
+            _phase3_window_clone(project, isolated)
+            _canonical = _canonical_admission.admit_span(
+                isolated, "phase3", PROGRAMS_DIR, args.container,
+                _admission_args)
+    else:
+        _canonical = _canonical_admission.admit_span(
+            project, "phase3", PROGRAMS_DIR, args.container,
+            _admission_args)
     if not _canonical.admitted:
         print(f"REFUSED: canonical Phase-3 admission: {_canonical.reason} "
               f"({_canonical.detail})", file=sys.stderr)
@@ -66577,6 +66886,8 @@ def main() -> int:
         allow_oss_fallback=bool(getattr(args, "allow_oss_pdk_fallback", False)))
     if _cp_refusal:
         print(_cp_refusal, file=sys.stderr)
+        if _window_sites is not None:
+            return 4
         try:
             _rp = _pl.reports_phase3_dir(project)
             _rp.mkdir(parents=True, exist_ok=True)
@@ -66605,6 +66916,8 @@ def main() -> int:
         allow_mismatch=bool(getattr(args, "allow_pdk_target_mismatch", False)))
     if _dt_refusal:
         print(_dt_refusal, file=sys.stderr)
+        if _window_sites is not None:
+            return 4
         try:
             _rp = _pl.reports_phase3_dir(project)
             _rp.mkdir(parents=True, exist_ok=True)
@@ -66637,6 +66950,8 @@ def main() -> int:
                    or os.environ.get("EDA_CONTAINER")))
     if _ml_refusal:
         print(_ml_refusal, file=sys.stderr)
+        if _window_sites is not None:
+            return 4
         try:
             _rp = _pl.reports_phase3_dir(project)
             _rp.mkdir(parents=True, exist_ok=True)

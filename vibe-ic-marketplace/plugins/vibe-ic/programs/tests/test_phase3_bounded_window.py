@@ -15,6 +15,20 @@ def test_real_runner_cli_exposes_window():
     assert "--entry-step" in proc.stdout and "--exit-step" in proc.stdout
 
 
+def test_front_door_refusal_does_not_write_into_window_project(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "input.txt").write_text("unadmitted project")
+    before = p3._phase3_file_manifest(project)
+    cp = subprocess.run(
+        [sys.executable, str(Path(p3.__file__)), str(project),
+         "--entry-step", "37.4", "--exit-step", "37.4"],
+        capture_output=True, text=True, check=False)
+    assert cp.returncode != 0
+    assert "REFUSED" in cp.stderr
+    assert p3._phase3_file_manifest(project) == before
+
+
 def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monkeypatch):
     project = tmp_path / "project"
     pnr = p3._pl.pnr_dir(project)
@@ -37,21 +51,18 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
     args = SimpleNamespace(entry_step="37", exit_step="37", container="fake-eda")
     selected = p3._phase3_window_sites("37", "37")
     assert selected == ["gds"]
-    assert p3._run_phase3_window(project, "top", object(), args, selected) == 0
+    assert p3._run_phase3_window(project, "top", object(), args, selected) == 1
 
     after = p3._phase3_file_manifest(project)
     changed = {name for name in set(before) | set(after)
                if before.get(name) != after.get(name)}
     allowed_reports = {
-        "reports/audit/step_preflight.json",
         "reports/audit/phase23_completion_audit.json",
         "reports/audit/steps_view.json",
         "reports/orchestrator/phase3_one_shot.json",
-        "reports/write_ledger.json",
     }
-    assert all(name in ("phase3/stage3/pnr/top.gds", "phase3/stage4/gds/top.gds") or
-               name in allowed_reports or name.startswith("steps/")
-               for name in changed), changed
+    assert set(changed) <= allowed_reports | {
+        "phase3/stage3/pnr/top.gds", "phase3/stage4/gds/top.gds"}, changed
     assert after["phase3/stage3/pnr/top.def"] == before["phase3/stage3/pnr/top.def"]
     assert after["phase3/synth/top_synth.v"] == before["phase3/synth/top_synth.v"]
     assert after["reports/phase3/drc.rpt"] == before["reports/phase3/drc.rpt"]
@@ -61,28 +72,41 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
                          "phase3_one_shot.json").read_text())
     assert report["bounded"] is True
     assert report["steps_view"]["status"] == "OK"
-    assert report["audit_verdict"] == "NOT_MEASURED"
+    assert report["audit_verdict"] == "FAIL"
+    assert report["verdict"] == "FAIL"
     audit = json.loads((project / "reports" / "audit" /
                         "phase23_completion_audit.json").read_text())
     assert audit["scope"]["whole_flow"] is False
-    assert audit["audit_kind"].startswith("bounded_invalidation")
-    assert audit["declared_output_checks"]["37"]["gate_verdict"] == "NOT_MEASURED"
+    assert audit["audit_kind"] == "bounded_full_declared_gates"
+    assert audit["declared_gate_checks"]["37"]["status"] == "FAIL"
+    assert any("GATE EVIDENCE" in reason
+               for reason in audit["declared_gate_checks"]["37"]["reasons"])
+    assert "gate_verdict" not in audit["declared_output_checks"]["37"]
     assert audit["declared_output_checks"]["37"]["missing_outputs"]
     assert report["stale_downstream"]["drc"]["status"] == "NOT_MEASURED"
     assert "gds" in report["stale_downstream"]["drc"]["reason"]
     assert report["stale_downstream"]["lvs"]["status"] == "NOT_MEASURED"
 
 
-def test_window_rejects_interior_and_excludes_gds_from_15_to_31():
-    assert p3._phase3_window_sites("15", "31") == ["pnr", "drc", "lvs"]
-    assert p3._phase3_window_sites("15", "22") == ["pnr"]
-    assert p3._phase3_window_sites("9", "23") == ["synth", "pnr"]
-    try:
-        p3._phase3_window_sites("18", "22")
-    except ValueError as exc:
-        assert "no independent Phase-3 dispatch" in str(exc)
-    else:
-        raise AssertionError("interior PnR step accepted as an entry")
+def test_every_canonical_phase3_step_is_accepted_from_yaml():
+    import yaml
+    import flow_compliance_check as fcc
+    flow = yaml.safe_load(fcc.DEFAULT_FLOW_DEF.read_text())
+    ids = [str(step["id"]) for step in flow["steps"]
+           if step.get("stage") in ("stage3", "stage4")]
+    assert ids
+    for sid in ids:
+        assert p3._phase3_window_sites(sid, sid), sid
+    assert p3._phase3_window_sites("18", "18") == ["enclosing_pnr"]
+    assert p3._phase3_window_sites("15.5ic", "15.5ic") == ["enclosing_pnr"]
+    assert p3._phase3_window_sites("24", "24") == ["enclosing_canonicalize"]
+    assert p3._phase3_window_sites("37.4", "37.4") == [
+        "signoff_metrics_aggregate"]
+    assert p3._phase3_window_sites("37", "37") == ["gds"]
+    assert p3._phase3_window_sites("31", "31") == ["drc", "lvs"]
+    assert p3._phase3_window_sites("36", "36") == ["tapeout_checklist"]
+    assert p3._phase3_window_sites("37.3", "37.3") == ["gds_xor"]
+    assert p3._phase3_window_sites("38", "38") == ["foundry_handoff"]
 
 
 def test_changed_route_cannot_sign_off_old_gds(tmp_path, monkeypatch):
@@ -111,7 +135,9 @@ def test_changed_route_cannot_sign_off_old_gds(tmp_path, monkeypatch):
     monkeypatch.setattr(p3, "step_lvs", should_not_run)
     args = SimpleNamespace(entry_step="15", exit_step="31", container="fake-eda",
                            die_um="auto", util=0.3, spare_density=0.02)
-    selected = p3._phase3_window_sites("15", "31")
+    # Explicitly exercise dependency blocking inside the dispatch loop: the
+    # public selector now chooses the enclosing unit for this mixed span.
+    selected = ["pnr", "drc", "lvs"]
     assert p3._run_phase3_window(project, "top", object(), args, selected) == 1
     report = json.loads((project / "reports" / "orchestrator" /
                          "phase3_one_shot.json").read_text())
@@ -157,17 +183,12 @@ def test_real_gds_step_with_container_write_keeps_other_stage_files(tmp_path, mo
                if before.get(name) != after.get(name)}
     allowed_reports = {
         "reports/audit/phase23_completion_audit.json",
-        "reports/audit/step_preflight.json",
         "reports/audit/steps_view.json",
         "reports/orchestrator/phase3_one_shot.json",
-        "reports/phase3/signoff_merge_probe.json",
-        "reports/phase3/tapeout_declaration_publish.json",
-        "reports/phase3/technology_units.json",
-        "reports/write_ledger.json",
     }
-    assert all(name.startswith(("phase3/stage3/pnr/", "phase3/stage4/gds/",
-                                "steps/")) or
-               name in allowed_reports for name in changed), sorted(changed)
+    assert set(changed) <= allowed_reports | {
+        "phase3/stage3/pnr/top.gds", "phase3/stage3/pnr/stream_out.log",
+        "phase3/stage4/gds/top.gds"}, sorted(changed)
     assert calls, "the real GDS step never reached the container"
     assert any(name.endswith(".gds") for name in after)
     assert after["phase3/stage3/pnr/top.def"] == before["phase3/stage3/pnr/top.def"]
