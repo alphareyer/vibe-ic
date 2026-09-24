@@ -143,3 +143,37 @@ def test_step36_perc_manual_review_also_needs_judgement(tmp_path):
     row = _judge(tmp_path, "36", checklist.relative_to(tmp_path).as_posix())
     assert row.status == "NOT_MEASURED"
     assert row.reason_class == "awaiting_signed_judgement"
+
+
+@pytest.mark.parametrize("sid,request_path", [
+    (5, "phase2/stage1/formal/formal_authoring_request.json"),
+    ("A9", "phase1/analog/analog_block_list.json"),
+])
+def test_env_unavailable_waiver_stays_disclosed_without_ai_credit(
+        tmp_path, sid, request_path):
+    path = tmp_path / request_path
+    path.parent.mkdir(parents=True)
+    path.write_text("{}")
+    step = {"id": sid, "name": str(sid), "stage": "test",
+            "required_outputs": ["missing.txt"],
+            "gate": {"files_exist": ["missing.txt"]}}
+    row = audit.check_step(tmp_path, step, {
+        sid: {"_env_unavailable": True, "reason": "tool unavailable",
+              "approver": "reviewer"}})
+    assert row.status == "PASS_WITH_WAIVERS"
+    assert any("ENV_UNAVAILABLE waiver applied" in reason
+               for reason in row.reasons)
+    assert any("grants no AI PASS credit" in reason for reason in row.reasons)
+
+
+def test_other_waiver_does_not_sign_expert_review(tmp_path):
+    checklist = tmp_path / "reports/audit/tapeout_checklist.json"
+    checklist.parent.mkdir(parents=True)
+    checklist.write_text('{"verdict":"PENDING"}')
+    step = {"id": "36", "name": "36", "stage": "test",
+            "required_outputs": ["reports/audit/tapeout_checklist.json"],
+            "gate": {"files_exist": ["reports/audit/tapeout_checklist.json"]}}
+    row = audit.check_step(tmp_path, step, {
+        "36": {"reason": "manual waiver", "approver": "reviewer"}})
+    assert row.status == "NOT_MEASURED"
+    assert row.reason_class == "awaiting_signed_judgement"

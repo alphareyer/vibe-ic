@@ -15920,10 +15920,21 @@ def _with_child_gate_step(fn):
                 import ai_signed_judgement as _ai_judgement
                 credit, detail = _ai_judgement.check(project, str(step.get("id")))
                 if not credit:
-                    result.status = _T.Verdict.NOT_MEASURED.value
-                    result.reason_class = (
-                        _T.ReasonClass.AWAITING_SIGNED_JUDGEMENT.value)
-                    result.reasons.append(detail)
+                    # A validated ENV_UNAVAILABLE waiver is a disclosed
+                    # deferral, not credit for an AI-produced PASS. Preserve
+                    # its waiver tier while recording that no review occurred.
+                    if (result.status == _T.Verdict.PASS_WITH_WAIVERS.value
+                            and any(str(reason).startswith(
+                                "ENV_UNAVAILABLE waiver applied")
+                                for reason in result.reasons)):
+                        result.reasons.append(
+                            "AI review remains unsigned; the ENV_UNAVAILABLE "
+                            "waiver grants no AI PASS credit")
+                    else:
+                        result.status = _T.Verdict.NOT_MEASURED.value
+                        result.reason_class = (
+                            _T.ReasonClass.AWAITING_SIGNED_JUDGEMENT.value)
+                        result.reasons.append(detail)
                 elif detail.startswith("signed judgement"):
                     result.evidence.append(detail)
             return result
