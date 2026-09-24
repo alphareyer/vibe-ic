@@ -86,8 +86,9 @@ def _project_with_rtl(tmp_path: Path) -> Path:
     and no die of its own honestly is.
     """
     proj = tmp_path / "proj"
-    (proj / "rtl").mkdir(parents=True)
-    (proj / "rtl" / "top.v").write_text(
+    rtl = proj / "phase2" / "stage1" / "rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "top.v").write_text(
         "module top(input a, output b); assign b = a; endmodule\n")
     tmpl = proj / "input" / "submission_template"
     tmpl.mkdir(parents=True)
