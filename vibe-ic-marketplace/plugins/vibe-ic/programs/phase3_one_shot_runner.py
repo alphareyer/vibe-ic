@@ -32089,6 +32089,38 @@ def _disclose_antenna_rollback(project: Path, out_dir: Path,
         return None
 
 
+#: The route products an SDR adopt tail ships: the post-route writes of the PnR
+#: template (`write_def .../routed.def`, `write_def .../<top>.def`,
+#: `write_verilog .../<top>_pnr.v`). Intermediate stage DEFs are not declared:
+#: the parent may have written them legitimately before it stopped.
+_SDR_TAIL_PRODUCT_RE = re.compile(
+    r"^\s*write_(?:def|verilog)\s+(\S+/(?:routed\.def|[^/\s}]+_pnr\.v|"
+    r"[^/\s}]+\.def))\s*$", re.M)
+
+
+def _sdr_adopt_tail_products(out_dir: Path, out_dir_c: str,
+                             tail_text: str) -> List[Path]:
+    """The shipped route files the adopt tail writes, read off its own Tcl.
+
+    `routed.def` and `<top>_pnr.v`, plus `<top>.def` -- the one `.def` written
+    beside `<top>_pnr.v` under the same top name. Only writes into `out_dir`
+    count; the candidate's transaction directory is not a product."""
+    names: List[str] = []
+    for m in _SDR_TAIL_PRODUCT_RE.finditer(tail_text or ""):
+        full = m.group(1)
+        if not full.startswith(out_dir_c.rstrip("/") + "/"):
+            continue
+        name = full[len(out_dir_c.rstrip("/")) + 1:]
+        if "/" in name:
+            continue
+        names.append(name)
+    tops = {n[:-len("_pnr.v")] for n in names if n.endswith("_pnr.v")}
+    keep = [n for n in names
+            if n == "routed.def" or n.endswith("_pnr.v")
+            or (n.endswith(".def") and n[:-len(".def")] in tops)]
+    return [out_dir / n for n in dict.fromkeys(keep)]
+
+
 def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
                               out_dir_c: str, pnr_tcl: Path,
                               log_text: str,
@@ -32226,9 +32258,27 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
                f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
                f"openroad -no_init -exit {out_dir_c}/{tail_name} 2>&1 | "
                f"tee {out_dir_c}/{tail_log}")
+        # THE TAIL IS THE SESSION THAT WRITES THE SHIPPED ROUTE, AND IT SAYS SO
+        # (spm run23, step 21). The parent stops at the accept "having written
+        # nothing", so routed.def / <top>.def / <top>_pnr.v come from THIS
+        # openroad session -- which declared no outputs, so the ledger's only
+        # openroad record of routed.def was the original route's (d7b41629) and
+        # a nameless runner re-emit described the adopted bytes (6f8e3d27):
+        # `provenance_check --tool openroad` read "hash mismatch". Same shape as
+        # `_run_route_producer` (#2569): declare the products this session
+        # writes, after removing any copy an earlier session left there, so a
+        # declared path is never hashed over bytes this session did not write.
+        _tail_products = _sdr_adopt_tail_products(out_dir, out_dir_c,
+                                                  tail_text)
+        for _p in _tail_products:
+            try:
+                _p.unlink()
+            except FileNotFoundError:
+                pass
         t_rc, t_out, t_err = _docker_exec(
             container, cmd, marker=f"{out_dir_c}/{tail_name}",
-            log_path=out_dir / tail_log, hard_ceiling_s=hard_ceiling_s)
+            log_path=out_dir / tail_log, hard_ceiling_s=hard_ceiling_s,
+            outputs=[str(_p) for _p in _tail_products])
         this_log = (t_out or "") + (t_err or "")
         combined += (f"\n=== PNR SDR ADOPT (from {cand}, "
                      f"{', '.join(omitted)} omitted) ===\n" + this_log)
