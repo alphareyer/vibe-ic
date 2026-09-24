@@ -84,8 +84,12 @@ def test_step14_blocks_corrupt_declared_analog_report(tmp_path):
 
 @pytest.mark.parametrize("step_id", CASES)
 def test_content_refusal_denies_the_owning_step_pass_tier(tmp_path, step_id):
-    """Exercise the actual step judge with its canonical content clause."""
-    rel, good, damaged = CASES[step_id]
+    """Exercise the actual step judge with its canonical content clause.
+
+    Keep corrupt files nonempty: a files_exist precondition must not be able
+    to rescue this test when the content clause is removed.
+    """
+    rel, good, _ = CASES[step_id]
     path = _write(tmp_path, rel, good)
     step = _steps()[step_id]
     gate = step["gate"]
@@ -109,7 +113,8 @@ def test_content_refusal_denies_the_owning_step_pass_tier(tmp_path, step_id):
                "gate": gate}
     healthy = compliance.check_step(tmp_path, subject, {})
     assert healthy.status == "PASS", (step_id, healthy.reasons)
-    path.write_text(damaged)
+    path.write_text("module top(\n" if step_id in {"1", "14", "P0"}
+                    else "{}")
     broken = compliance.check_step(tmp_path, subject, {})
     assert broken.status == "FAIL", (step_id, broken.reasons)
     path.unlink()
@@ -126,6 +131,25 @@ def test_content_gate_declares_its_actual_step_tier():
                 "flow_step_output_content_check" and
                 c["slot"] == "program_exit_zero" and c["dispatchable"]]
     assert len(required) == 7  # 1, 14 twice, 27, 32, 35, P0
+
+
+@pytest.mark.parametrize("step_id,commands", [
+    ("1", ("flow_step_output_content_check . --mode rtl",)),
+    ("14", ("flow_step_output_content_check . --mode netlist",
+            "flow_step_output_content_check . --mode stage_analog")),
+    ("18", ("spare_cell_coverage_check . --json reports/phase2/gates/spare_cell_coverage.json",)),
+    ("27", ("flow_step_output_content_check . --mode si",)),
+    ("32", ("flow_step_output_content_check . --mode repair",)),
+    ("35", ("flow_step_output_content_check . --mode dfm",)),
+    ("P0", ("flow_step_output_content_check . --mode rtl",)),
+])
+def test_each_content_clause_is_required_by_its_own_step(step_id, commands):
+    gate = _steps()[step_id]["gate"]
+    clauses = gate.get("all_of", [gate])
+    required = {spec.get("command") if isinstance(spec, dict) else spec
+                for clause in clauses
+                if (spec := clause.get("program_exit_zero")) is not None}
+    assert set(commands) <= required, (step_id, required)
 
 
 @pytest.mark.parametrize("step_id", ("1", "14", "18", "27", "32", "35", "P0"))
