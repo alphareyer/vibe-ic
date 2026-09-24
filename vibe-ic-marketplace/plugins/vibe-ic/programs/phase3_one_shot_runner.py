@@ -605,6 +605,8 @@ class StepResult:
 
     def __post_init__(self) -> None:
         _V.validate_step_row(self)
+        _register_pass_outputs(self.name, self.status, self.duration_s,
+                               self.output_files)
 
 
 # v1.6.54 — verdict-tier vocabulary. ENV_UNAVAILABLE distinguishes
@@ -686,6 +688,60 @@ def _preflight_refusal(name: str):
 # what #365 asks for. chip/tool-AGNOSTIC: the tool name is the command's first
 # token, never a known-tools list.
 _PROV_SINK: Optional[Path] = None
+
+# ── WHAT THIS PASS DEMONSTRABLY PRODUCED ─────────────────────────────────────
+#
+# `_record_reemitted_outputs` used to append a fresh declaration for ANY declared
+# output whose bytes had drifted from its newest record. MEASURED on main
+# 240c0a353: a declared `reports/phase3/lvs.rpt`, rewritten with no invocation,
+# read PROVENANCE_HASH_MISMATCH before that pass and PASS after it -- the ledger
+# laundered an unexplained rewrite into a declaration, and the `reconstructed`
+# flag it carries is read by nobody.
+#
+# A back-fill may only re-declare what THIS pass produced, with the producing
+# step named. The evidence is the step's own row: every StepResult of a step
+# that RAN (PASS / FAIL) lists the files it wrote, and a file counts only if it
+# was modified inside that step's own run window. Its sha is taken when the
+# step returns. A later drift is re-declared only when the disk still holds
+# exactly those bytes; anything else is an unexplained change.
+#: resolved absolute path -> (producing step, sha256 when the step returned)
+_PASS_PRODUCED: Dict[str, Tuple[str, str]] = {}
+_PASS_PRODUCING_STATUSES = ("PASS", "PASS_WITH_WAIVERS", "FAIL")
+
+
+def _file_sha256(path: Path) -> Optional[str]:
+    try:
+        h = hashlib.sha256()
+        with Path(path).open("rb") as f:
+            for ch in iter(lambda: f.read(1 << 20), b""):
+                h.update(ch)
+        return "sha256:" + h.hexdigest()
+    except OSError:
+        return None
+
+
+def _register_pass_outputs(step: str, status: str, duration_s: float,
+                           files: Iterable[str],
+                           since: Optional[float] = None) -> None:
+    """Record the files `step` wrote in this pass. Never raises."""
+    try:
+        if str(status) not in _PASS_PRODUCING_STATUSES:
+            return
+        now = time.time()
+        t_start = (since if since is not None
+                   else now - max(float(duration_s or 0.0), 0.0)) - 2.0
+        for f in files or ():
+            fp = Path(f)
+            try:
+                if not fp.is_file() or fp.stat().st_mtime < t_start:
+                    continue          # not written inside this step's window
+            except OSError:
+                continue
+            sha = _file_sha256(fp)
+            if sha:
+                _PASS_PRODUCED[str(fp.resolve())] = (str(step), sha)
+    except Exception:  # noqa: BLE001 — bookkeeping never breaks the run
+        return
 
 
 def set_invocation_provenance_sink(project: Optional[Path]) -> None:
@@ -50163,12 +50219,41 @@ def _record_reemitted_outputs(project: Path) -> Optional[str]:
                     if isinstance(rel, str) and isinstance(declared_sha, str):
                         newest[rel] = declared_sha
         drifted = {}
+        producing: Dict[str, str] = {}
+        unexplained: List[Dict[str, str]] = []
         for rel, declared_sha in newest.items():
             fp = project / rel
             if fp.is_file():
                 cur = _sha(fp)
                 if cur != declared_sha:
-                    drifted[rel] = cur
+                    # Re-declared ONLY when a step of this pass wrote exactly
+                    # these bytes -- see `_PASS_PRODUCED`. Anything else is an
+                    # unexplained change: recorded as a finding, never as a
+                    # fresh declaration, so the hash check still sees it.
+                    _who = _PASS_PRODUCED.get(str(fp.resolve()))
+                    if _who is not None and _who[1] == cur:
+                        drifted[rel] = cur
+                        producing[rel] = _who[0]
+                    else:
+                        unexplained.append({
+                            "path": rel, "declared_sha256": declared_sha,
+                            "disk_sha256": cur,
+                            "why": ("no step of this pass wrote these bytes"
+                                    if _who is None else
+                                    f"step {_who[0]!r} wrote this path, but "
+                                    f"it changed after that step returned")})
+        _unexplained_path = project / "reports" / "phase3" / \
+            "provenance_unexplained_rewrites.json"
+        if unexplained:
+            _unexplained_path.parent.mkdir(parents=True, exist_ok=True)
+            _unexplained_path.write_text(json.dumps({
+                "program": "phase3_one_shot_runner",
+                "verdict": "FINDING",
+                "note": ("declared outputs whose bytes changed with no "
+                         "invocation this pass can account for; they are NOT "
+                         "re-declared, so provenance_output_hash_completeness_"
+                         "check reports each as a hash mismatch"),
+                "rewrites": unexplained}, indent=2) + "\n")
         if drifted:
             _bulk = {
                 "tool": "phase3_one_shot_runner",
@@ -50182,10 +50267,19 @@ def _record_reemitted_outputs(project: Path) -> Optional[str]:
                         "runner; the earlier record of each path "
                         "is superseded, not amended",
                 "outputs": drifted,
+                # which step of THIS pass wrote each path's current bytes
+                "producing_step": producing,
             }
             _rmeas.attach(project, _bulk)
             with prov_path.open("a") as f:
                 f.write(json.dumps(_bulk) + "\n")
+        if unexplained:
+            return (f"provenance: {len(unexplained)} declared output(s) changed "
+                    f"with no invocation this pass accounts for and were NOT "
+                    f"re-declared: "
+                    f"{', '.join(u['path'] for u in unexplained[:5])}"
+                    f"{' ...' if len(unexplained) > 5 else ''} — see "
+                    f"{_unexplained_path.relative_to(project)}")
     except Exception as exc:  # noqa: BLE001 — bookkeeping never breaks the run
         return f"provenance re-emit record failed: {exc}"
     return None
@@ -55172,6 +55266,10 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # 1. Record any declared output that still exists on disk but whose
     #    bytes no longer match its newest record — by APPENDING a fresh
     #    record of what is there now, never by editing an older one.
+    # This step's own writes so far are this pass's too; it has no StepResult
+    # yet, so they are registered here, inside its own window.
+    _register_pass_outputs("canonicalize_artefacts", "PASS", 0.0, written,
+                           since=t0)
     _reemit_note = _record_reemitted_outputs(project)
     if _reemit_note:
         notes.append(_reemit_note)
