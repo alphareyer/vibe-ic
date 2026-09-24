@@ -56,6 +56,13 @@ def test_a_deck_this_generator_wrote_is_not_re_emitted(tmp_path):
     assert m._repair_deck_is_stale(p) is False
 
 
+def test_a_valid_stamp_after_a_long_preamble_is_still_current(tmp_path):
+    p = tmp_path / "postroute_timing_repair.tcl"
+    p.write_text("# explanatory preamble\n" * 300 + _deck())
+    assert p.read_text().index(m._POSTROUTE_TIMING_REPAIR_DECK_STAMP) > 4096
+    assert m._repair_deck_is_stale(p) is False
+
+
 def test_copied_run_deck_must_use_this_runs_paths(tmp_path):
     import inspect
     p = tmp_path / "postroute_timing_repair.tcl"

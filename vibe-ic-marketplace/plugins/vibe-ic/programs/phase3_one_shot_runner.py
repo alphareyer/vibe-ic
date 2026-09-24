@@ -18279,9 +18279,11 @@ def _step_pdk_hasher(container: str):
             try:
                 import _container_exec as _cx  # noqa: PLC0415
                 quoted = " ".join(shlex.quote(r) for r in remote)
-                cp = _cx.run_in_container(
+                cp = _cx.run_in_container_supervised(
                     container, f"sha256sum {quoted} 2>/dev/null || true",
-                    deadline_s=120)
+                    ceiling_s=120)
+                if cp.returncode != 0:
+                    return out  # a stalled or refused probe proves no digest
                 for line in (cp.stdout or "").splitlines():
                     parts = line.split(None, 1)
                     if len(parts) == 2 and len(parts[0]) == 64:
@@ -20421,6 +20423,8 @@ def _sparse_gpl_retry_deck(
     fanout constraint, later timing repair and all signoff checks stay active.
     A second failure is final. Do not reuse a corrupted OpenROAD session.
     """
+    _instrument_calibration.assert_calibrated(
+        "phase3_one_shot_runner::_sparse_gpl_retry_deck")
     def decline(reason: str) -> None:
         if decline_reasons is not None:
             decline_reasons.append(reason)
@@ -26605,7 +26609,7 @@ def _repair_deck_is_stale(deck: Path, *, start_def: Optional[str] = None,
         body = deck.read_text(errors="replace")
     except OSError:
         return True
-    if f"{_POSTROUTE_TIMING_REPAIR_DECK_STAMP}{fp}" not in body[:4096]:
+    if f"{_POSTROUTE_TIMING_REPAIR_DECK_STAMP}{fp}" not in body:
         return True
     # A copied/resumed run may carry a deck stamped by this same code but
     # hard-wired to another run's DEF and output directory. Re-emitting is
@@ -33850,6 +33854,8 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
     is never papered over: `routed.def` is whatever the refusing session left,
     and the record says the route ships unverified.
     """
+    _instrument_calibration.assert_calibrated(
+        "phase3_one_shot_runner::_pnr_rollback_refused_antenna_repair")
     rec: Dict[str, Any] = {"status": "NOT_REQUESTED", "antenna_repair": None,
                            "combined_log": "", "rc": 0}
     unrolled = antenna_refused_without_checkpoint(log_text)

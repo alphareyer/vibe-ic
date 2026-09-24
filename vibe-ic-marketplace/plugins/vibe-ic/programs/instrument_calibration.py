@@ -550,6 +550,67 @@ def _polarity_tree(src: str) -> Callable[[], Path]:
     return _build
 
 
+def _judge_sparse_gpl_retry(log: str) -> Optional[str]:
+    import phase3_one_shot_runner as R
+    # The placement command is the producer's Tcl grammar. Only the log is the
+    # measured input to this instrument; use the same deck in both arms.
+    deck = "global_placement -routability_driven -density 0.3 -timing_driven\n"
+    result = R._sparse_gpl_retry_deck(deck, log)
+    return "GPL_SPARSE_RETRY" if result is not None else None
+
+
+def _antenna_retry_log(verified: bool) -> Tuple[int, str]:
+    if verified:
+        return (0, "ANTENNA_FULL_ROUTE_VERIFIED: router DRC 0\n"
+                "ANTENNA_LOOP_CONVERGED: iter=1\n"
+                + _read("route_verified_negative.log")()
+                + "\nREPAIR_ANTENNA_DONE: diode=D iter=0 margin=0\n"
+                "[INFO ANT-0002] Found 0 net violations.\n"
+                "[INFO ANT-0001] Found 0 pin violations.\n")
+    return (1, _read("route_aborted_negative.log")())
+
+
+def _judge_antenna_rollback(sample: Tuple[int, str]) -> Optional[str]:
+    """Exercise the real rollback selector; fake only the EDA process writes."""
+    import phase3_one_shot_runner as R
+    with tempfile.TemporaryDirectory(prefix="cal_antenna_rollback_") as td:
+        out = Path(td) / "pnr"
+        out.mkdir()
+        (out / R._ANTENNA_PASS_CHECKPOINT_NAME).write_bytes(b"calibration odb")
+        deck = Path(td) / "pnr.tcl"
+        deck.write_text("\n".join((
+            "read_verilog /cal/design.v", "link_design top",
+            R._PNR_RESUME_ELIDE_BEGIN, "puts BASE_ROUTE",
+            R._PNR_RESUME_ELIDE_END,
+            R._pnr_stage_begin("postroute_drv_repair"), "puts DRV",
+            R._pnr_stage_end("postroute_drv_repair"),
+            R._pnr_stage_begin("postroute_antenna_repair"), "puts ANTENNA",
+            R._pnr_stage_end("postroute_antenna_repair"),
+            R._pnr_stage_begin("postroute_antenna_reconverge"),
+            "puts RECONVERGE", R._pnr_stage_end("postroute_antenna_reconverge"),
+            f"write_def {out}/routed.def", f"write_def {out}/top.def",
+            f"write_verilog {out}/top_pnr.v", "")))
+        request = ("ANTENNA_NATIVE_REROUTE_NONFATAL: DRT-0712\n"
+                   "ANTENNA_REPAIR_REFUSED_ROLLBACK_REQUEST: "
+                   f"checkpoint={out / R._ANTENNA_PASS_CHECKPOINT_NAME} "
+                   "reason=DRT-0712\n")
+        original = R._declared_session_exec
+        def eda_writes(_container, cmd, products, **_kwargs):
+            for product in products:
+                Path(product).write_text("calibration EDA output\n")
+            if "pnr_antenna_full_retry" in cmd:
+                return sample[0], sample[1], ""
+            return 0, _read("route_verified_negative.log")(), ""
+        try:
+            R._declared_session_exec = eda_writes
+            result = R._pnr_rollback_refused_antenna_repair(
+                container="calibration", out_dir=out, out_dir_c=str(out),
+                pnr_tcl=deck, log_text=request, hard_ceiling_s=60)
+        finally:
+            R._declared_session_exec = original
+    return "RECOVERED" if result["status"] == "RECOVERED" else None
+
+
 # ── the registry itself ───────────────────────────────────────────────────
 
 INSTRUMENTS: Dict[str, Instrument] = {}
@@ -1029,6 +1090,53 @@ _register(Instrument(
                     "OpenSTA writes a **0-byte** report. "
                     "`calibration/mpw_clean_negative.rpt`."),
         artefact=_read("mpw_clean_negative.rpt")),
+))
+
+_register(Instrument(
+    name="phase3_one_shot_runner::_sparse_gpl_retry_deck",
+    reads="OpenROAD GPL area and divergence diagnostics",
+    ruling="GPL-2597",
+    owner="phase3",
+    why=("A retry is justified only when the tool reports GPL-0305 and its "
+         "measured movable-to-region ratio is below the existing sparse "
+         "limit. A clean placement transcript must not trigger a retry."),
+    judge=_judge_sparse_gpl_retry,
+    positive=Sample(
+        provenance=("Real OpenROAD GPL-0015, GPL-0018 and GPL-0305 lines "
+                    "captured from the 2026-09-25 pinned-image placement "
+                    "failure; selected verbatim into "
+                    "calibration/gpl_sparse_diverged_positive.log."),
+        artefact=_read("gpl_sparse_diverged_positive.log")),
+    expect="GPL_SPARSE_RETRY",
+    negative=Sample(
+        provenance=("Real successful OpenROAD placement and routing of the "
+                    "calibration chain, in route_verified_negative.log; no "
+                    "GPL-0305 was emitted."),
+        artefact=_read("route_verified_negative.log")),
+))
+
+_register(Instrument(
+    name="phase3_one_shot_runner::_pnr_rollback_refused_antenna_repair",
+    reads="OpenROAD DRT verification and antenna violation transcript",
+    ruling="R-0915-74 / scoped route recovery",
+    owner="phase3",
+    why=("The full-route retry may be promoted only after the router verified "
+         "zero DRC and the antenna census found zero violations. The "
+         "negative is a real router abort and must fall back to rollback."),
+    judge=_judge_antenna_rollback,
+    positive=Sample(
+        provenance=("Real OpenROAD two-inverter-chain transcript in "
+                    "route_verified_negative.log, with the runner's own "
+                    "completion markers and zero ANT-0001/0002 lines "
+                    "observed in a successful OpenROAD antenna run. The EDA "
+                    "session writes are supplied at the tool boundary."),
+        artefact=lambda: _antenna_retry_log(True)),
+    expect="RECOVERED",
+    negative=Sample(
+        provenance=("Real OpenROAD two-inverter-chain abort transcript in "
+                    "route_aborted_negative.log; it has no final DRT-0702 "
+                    "verification, so it cannot authorize the retry."),
+        artefact=lambda: _antenna_retry_log(False)),
 ))
 
 

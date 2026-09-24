@@ -848,3 +848,30 @@ def test_the_kind_guard_still_refuses_a_new_unguarded_producer():
     assert bad, (
         "a call site whose kind is a variable was read as if it named none; "
         "that is how a new producer arrives unseen")
+
+
+def test_container_pdk_digest_uses_progress_supervision_and_refuses_stall(
+        tmp_path, monkeypatch):
+    import subprocess
+    import _container_exec as CE
+
+    path = str(tmp_path / "remote.lib")  # absent on host, resolved in container
+    digest = "a" * 64
+    results = [CE.STALLED_RC, 0]
+    calls = []
+
+    def supervised(container, cmd, **kwargs):
+        calls.append((container, cmd, kwargs))
+        return subprocess.CompletedProcess([], results.pop(0),
+                                           f"{digest}  {path}\n", "")
+
+    monkeypatch.setattr(CE, "run_in_container_supervised", supervised)
+    monkeypatch.setattr(CE, "run_in_container", lambda *a, **k:
+                        pytest.fail("a clock deadline was used"))
+    R._STEP_PDK_HASH_CACHE.clear()
+    hash_paths = R._step_pdk_hasher("calibration-container")
+    assert hash_paths([path]) == {}, "a stalled run cannot prove a digest"
+    assert hash_paths([path]) == {path: digest}, (
+        "a completed supervised probe must still supply its digest")
+    assert len(calls) == 2
+    assert all(c[2] == {"ceiling_s": 120} for c in calls)

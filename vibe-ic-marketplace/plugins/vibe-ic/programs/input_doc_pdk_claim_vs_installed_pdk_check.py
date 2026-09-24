@@ -274,14 +274,9 @@ _ROOT_STATE_REASON = {
     ROOT_READ: "installed_pdk_root_holds_no_pdk",
 }
 
-# Container-side deadline for one backend round trip, in seconds. The landing
-# harness bounds a whole pytest SESSION at 180s with `--timeout-method=thread`,
-# and `ci_harness_timeout_ceiling_check` derives the per-call ceiling as
-# `180 // 3 = 60`; `_container_exec` adds `CLIENT_GRACE_S` on top of this
-# number for its client-side backstop, so the total stays under that ceiling.
-# Measured 2026-08-14 on a live image: the whole gate answers in 3.0s over six
-# installed PDKs, so this bound is a safety net rather than a budget.
-_CONTAINER_DEADLINE_S = 40
+# An observed budget, never a kill deadline. The supervisor only reaps a
+# container process after consecutive looks find no CPU, I/O or output progress.
+_CONTAINER_BUDGET_S = 40
 
 # ── the image this repo ANCHORS, READ rather than restated (vibe-ic#1076) ───
 #
@@ -750,23 +745,19 @@ def _docker_exec(container: str, cmd: str) -> Tuple[bool, str, str]:
     that was down, misnamed, or absent produced `None`, `None` became `[]` one
     layer up, and `[]` was reported as an empty PDK root (vibe-ic#1491).
 
-    Routed through `_container_exec.run_in_container`, the repo's sanctioned
-    site for this call, so the deadline runs as the tool's PARENT INSIDE the
-    container and can signal it. A client-side `timeout=` bounds only the local
-    docker client and leaves the containerised tool running as an orphan, which
-    is what `container_exec_deadline_check` exists to find; this call site used
-    to be one of its findings.
+    The supervised route records process identity inside the container. It
+    reaps only a stalled process by identity, including on a slow host.
     """
     try:
-        cp = _container_exec.run_in_container(
-            container, cmd, deadline_s=_CONTAINER_DEADLINE_S)
-    except Exception as exc:  # docker absent, container wedged past the grace
+        cp = _container_exec.run_in_container_supervised(
+            container, cmd, ceiling_s=_CONTAINER_BUDGET_S)
+    except Exception as exc:  # docker absent or supervision unavailable
         return False, "", f"{type(exc).__name__}: {exc}"
-    # A killed run has no verdict. `describe_result` names the deadline and the
-    # missing-`timeout` cases in the module that owns those exit codes.
-    why = _container_exec.describe_result(cp, _CONTAINER_DEADLINE_S)
-    if why:
-        return False, "", why
+    if cp.returncode == _container_exec.STALLED_RC:
+        return False, "", "container process stalled and was reaped by identity"
+    refusal = _container_exec.image_refusal(cp)
+    if refusal:
+        return False, "", refusal
     if cp.returncode != 0:
         detail = (cp.stderr or "").strip().splitlines()
         return False, "", (f"`docker exec {container}` exited "

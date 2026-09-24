@@ -482,29 +482,21 @@ def test_every_uncheckable_environment_gets_its_own_reason_token(tmp_path,
     assert len(tokens) == 4, tokens
 
 
-def test_the_container_round_trip_carries_a_container_side_deadline():
-    """A client-side `timeout=` bounds the local docker client only; the tool
-    inside keeps running as an orphan. #1491 routed this gate's round trip
-    through `_container_exec`, so the deadline runs as the tool's parent INSIDE
-    the container and can signal it — and the total client bound stays under
-    the 60s per-call ceiling `ci_harness_timeout_ceiling_check` derives from
-    the 180s session bound, so one wedged container cannot take the session
-    down with it."""
-    argv = _container_exec.container_deadline_argv(
-        "c", "true", gate._CONTAINER_DEADLINE_S)
-
-    assert argv[:3] == ["docker", "exec", "c"], argv
-    assert "timeout" in argv, argv
-    assert str(gate._CONTAINER_DEADLINE_S) in argv, argv
-    assert (gate._CONTAINER_DEADLINE_S
-            + _container_exec.CLIENT_GRACE_S) <= 60, gate._CONTAINER_DEADLINE_S
+def test_the_container_round_trip_uses_progress_supervision(monkeypatch):
+    calls = []
+    def supervised(container, cmd, **kw):
+        calls.append((container, cmd, kw))
+        return subprocess.CompletedProcess([], 0, "ready\n", "")
+    monkeypatch.setattr(_container_exec, "run_in_container_supervised", supervised)
+    monkeypatch.setattr(_container_exec, "run_in_container", lambda *a, **k:
+                        pytest.fail("clock deadline used"))
+    assert gate._docker_exec("c", "true") == (True, "ready\n", "")
+    assert len(calls) == 1
+    assert calls[0][2] == {"ceiling_s": gate._CONTAINER_BUDGET_S}
 
 
-def test_a_container_deadline_expiry_is_not_an_empty_pdk_root(tmp_path,
-                                                              monkeypatch):
-    """The same conflation one exit code over: coreutils `timeout` reports 124
-    when it killed the tool. A killed run has no verdict, so it must not be
-    recorded as a root that was read and found empty."""
+def test_a_tool_rc_124_is_not_reported_as_a_deadline(tmp_path, monkeypatch):
+    """A supervised tool can itself exit 124; that does not mean a clock killed it."""
     _unreachable_container_backends(
         monkeypatch, rc=_container_exec.TIMEOUT_EXPIRED_RC, stderr="")
 
@@ -513,7 +505,16 @@ def test_a_container_deadline_expiry_is_not_an_empty_pdk_root(tmp_path,
 
     assert rep["installed_pdk_root_state"] == gate.ROOT_BACKEND_UNAVAILABLE, rep
     assert rep["verdict"] == "FAIL", rep
-    assert "deadline" in rep["reason"], rep
+    assert "exited 124" in rep["reason"], rep
+    assert "deadline" not in rep["reason"], rep
+
+
+def test_a_stalled_container_is_not_an_empty_pdk_root(tmp_path, monkeypatch):
+    _unreachable_container_backends(monkeypatch, rc=_container_exec.STALLED_RC)
+    rep = gate.run(project_with(tmp_path / "proj", ABSENCE_DOC),
+                   "/foss/pdks", container="c")
+    assert rep["installed_pdk_root_state"] == gate.ROOT_BACKEND_UNAVAILABLE, rep
+    assert "stalled" in rep["reason"], rep
 
 
 def test_the_environment_is_printed_on_a_run_that_decides_something(tmp_path):

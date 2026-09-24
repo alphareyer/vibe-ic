@@ -96,7 +96,7 @@ def _declared_hold_violations(project: Union["Path", str, None]) -> List[Dict[st
         body = report.read_text(errors="replace")
     except OSError:
         return []
-    if "SPEF-BASED post-route STA" not in body[:400]:
+    if "SPEF-BASED post-route STA" not in body:
         return []
     sections = re.split(r"^=== HOLD corner: process=([A-Za-z0-9_]+) ===\s*$",
                         body, flags=re.MULTILINE)

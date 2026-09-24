@@ -42,6 +42,16 @@ def test_ss_nominal_hold_fires_repair_when_ff_min_is_clean(tmp_path):
         "post_route_timing.rpt")
 
 
+def test_spef_basis_after_a_long_report_header_still_fires(tmp_path):
+    project = _project(tmp_path)
+    report = project / "phase3/stage3/sta/post_route_timing.rpt"
+    report.write_text("# generated report header\n" * 25 + report.read_text())
+    assert report.read_text().index("SPEF-BASED post-route STA") > 400
+    result = decision.decide(_stance(), True, project=project)
+    assert result["timing_repair_needed"] is True
+    assert "hold:SS" in result["violated_corners"]
+
+
 def test_met_and_old_reports_do_not_create_false_trigger(tmp_path):
     project = _project(tmp_path, "0.12")
     assert decision.decide(_stance(), True, project=project)["repair_needed"] is False

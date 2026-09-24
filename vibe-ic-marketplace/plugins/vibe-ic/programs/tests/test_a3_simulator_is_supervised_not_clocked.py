@@ -208,9 +208,11 @@ def test_the_a3_site_is_no_longer_on_the_container_deadline_record():
     rec = json.loads(REGISTER.read_text(encoding="utf-8"))["recorded"]
     assert not [k for k in rec if k.startswith("analog_a3_netlist_emit.py::")], (
         sorted(rec))
-    # ... and the three that remain are other lanes' and are still named, so a
+    # ... and the two that remain are other lanes' and are still named, so a
     # "shrink" that emptied the file would not pass either.
-    assert len(rec) == 3, sorted(rec)
+    assert len(rec) == 2, sorted(rec)
+    assert not [k for k in rec if k.startswith(
+        "input_doc_pdk_claim_vs_installed_pdk_check.py::")], sorted(rec)
 
 
 def test_the_ceiling_gate_still_passes_on_this_tree():
@@ -220,7 +222,7 @@ def test_the_ceiling_gate_still_passes_on_this_tree():
         [sys.executable, str(PROGRAMS / "watchdog_ceiling_semantics_check.py")],
         capture_output=True, text=True, cwd=str(PROGRAMS))
     assert cp.returncode == 0, cp.stdout[-3000:] + cp.stderr[-2000:]
-    assert "CONTAINER_DEADLINE 3" in cp.stdout, cp.stdout[-2000:]
+    assert "CONTAINER_DEADLINE 2" in cp.stdout, cp.stdout[-2000:]
 
 
 # ═══ the reap the conversion depends on ═══════════════════════════════════
