@@ -98,3 +98,61 @@ def test_synth_rerun_declares_final_runner_log(tmp_path, monkeypatch):
     assert _rows(project)[-1]["outputs"][rel] == _sha(log.read_bytes())
     verdict, findings = hashes.audit(project)
     assert verdict == "PASS", findings
+
+
+def test_synth_log_two_process_writes_and_undeclared_mutation(tmp_path, monkeypatch):
+    project = tmp_path
+    rtl = project / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "core.v").write_text(
+        "module core(input a, output y); assign y=a; endmodule\n")
+    synth = project / "phase2/stage2/synth"
+    synth.mkdir(parents=True)
+    log = synth / "synth.log"
+    log.write_bytes(b"original transcript")
+    rel = log.relative_to(project).as_posix()
+    (project / "provenance.jsonl").write_text(json.dumps({
+        "tool": "yosys", "exit_code": 0,
+        "outputs": {rel: _sha(log.read_bytes())}
+    }) + "\n")
+    lib = project / "test.lib"
+    lib.write_text("library(test) { cell(INV) { area : 1.0; } }\n")
+    pdk = runner.PdkConfig(name="test", liberty=str(lib), tech_lef="test.lef",
+                           cell_lef="test.lef", cell_gds=None, site="unit",
+                           drc_deck=None)
+    calls = 0
+
+    def fake_eda(container, cmd, **kwargs):
+        nonlocal calls
+        marker = kwargs.get("marker")
+        if marker and str(marker).endswith("_synth.v"):
+            calls += 1
+            Path(marker).write_text(
+                "module core(input a, output y); assign y=a; endmodule\n")
+            return 0, f"Number of cells: {calls}\n", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(runner, "_docker_exec", fake_eda)
+    monkeypatch.setattr(runner, "_to_container_path", lambda path, container: path)
+    for expected in (1, 2):
+        # A new runner process starts with no sink. This is the state the
+        # older test, which manually enabled the sink, could not reproduce.
+        runner.set_invocation_provenance_sink(None)
+        result = runner.step_synth(project, "core", pdk, "fake")
+        assert result.status == "PASS", result.detail
+        declarations = [r for r in _rows(project) if rel in r.get("outputs", {})]
+        assert len(declarations) == expected + 1
+        assert declarations[-1]["outputs"][rel] == _sha(log.read_bytes())
+        assert hashes.audit(project)[0] == "PASS"
+
+    # A mutation between sessions breaks the declared-input chain. The next
+    # legitimate write must not launder that unexplained change.
+    log.write_bytes(log.read_bytes() + b"\nundeclared mutation")
+    runner.set_invocation_provenance_sink(None)
+    result = runner.step_synth(project, "core", pdk, "fake")
+    assert result.status == "PASS", result.detail
+    declarations = [r for r in _rows(project) if rel in r.get("outputs", {})]
+    assert len(declarations) == 3
+    assert declarations[-1]["outputs"][rel] != _sha(log.read_bytes())
+    assert hashes.audit(project)[0] == "FAIL"
+    runner.set_invocation_provenance_sink(None)

@@ -16431,6 +16431,25 @@ def _signoff_regen(artifact: Path, *layouts: Path) -> bool:
         return True
 
 
+def _write_synth_log(project: Path, log: Path, content: str) -> None:
+    """Declare each runner-formatted synth transcript at its actual write site.
+
+    A later phase-3 invocation may reuse this path after canonicalization has
+    already declared it. Only a verified transform of those declared bytes may
+    supersede that record; a first write gets its own artefact declaration.
+    """
+    if log.is_file():
+        _declared_transform_exec(
+            project, log, "synth:format_log", "phase3_one_shot_runner",
+            "format Yosys synthesis transcript (phase3 step_synth)",
+            lambda: log.write_text(content))
+    else:
+        log.write_text(content)
+        _log_surviving_artefact(
+            [str(log)], produced_by="phase3_one_shot_runner.step_synth",
+            tool="phase3_one_shot_runner")
+
+
 def step_synth(project: Path, top: str, pdk: PdkConfig,
                container: str,
                period_relax: float = 1.0) -> StepResult:
@@ -16441,6 +16460,10 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     never overflows its die cannot tell this parameter exists.
     """
     t0 = time.time()
+    # Synthesis precedes step_pnr, which used to be the first site enabling
+    # the ledger. A new process reusing a declared synth.log therefore wrote
+    # it with no active sink and left the old hash as the newest declaration.
+    set_invocation_provenance_sink(project)
     all_rtl = sorted((_pl.rtl_dir(project)).glob("*.sv")) + \
               sorted((_pl.rtl_dir(project)).glob("*.v"))
     # Phase 3 synth = silicon top only. Skip FPGA wrappers + test fixtures
@@ -16866,7 +16889,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         f"staged cells : {_macro_def['staged_cells'] or '(none)'}\n"
         f"macro cells  : {_macro_def['macro_cells'] or '(none)'}\n"
         f"reason       : {_macro_def['reason']}\n\n")
-    log.write_text(_md_header + _rf_header + out + "\n" + err)
+    _write_synth_log(project, log, _md_header + _rf_header + out + "\n" + err)
     if _macro_def["severity"] == "ERROR":
         print(f"[phase3][synth][ERROR] {_macro_def['verdict']}: "
               f"{_macro_def['reason']}", file=sys.stderr)
@@ -16913,7 +16936,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
             f"write_verilog -noattr {netlist_c}'"
         )
         rc, out, err = _docker_exec(container, slang_cmd, marker=netlist_c)
-        log.write_text(log.read_text() +
+        _write_synth_log(project, log, log.read_text() +
                        f"\n\n=== SLANG FALLBACK FRONTEND ({fe_reason}) ===\n" +
                        out + "\n" + err)
         if rc == 0 and _netlist_is_from_this_build():
@@ -16945,7 +16968,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 f"write_verilog -noattr {netlist_c}'"
             )
             rc2, out2, err2 = _docker_exec(container, sv2v_cmd, marker=netlist_c)
-            log.write_text(
+            _write_synth_log(project, log,
                 log.read_text() +
                 "\n\n=== SV2V PRE-PASS FALLBACK FRONTEND ===\n" +
                 out2 + "\n" + err2)
@@ -17002,7 +17025,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
             # output netlist path in the yosys argv.
             _rcs, _outs, _errs = _docker_exec(container, _syn_cmd,
                                               marker=netlist_c)
-            log.write_text(
+            _write_synth_log(project, log,
                 log.read_text() +
                 f"\n\n=== -DSYNTHESIS RETRY (phase2 #668 port — {_retry_reason}) ===\n" +
                 _outs + "\n" + _errs)
@@ -17018,9 +17041,6 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         if sig:
             detail += f" error={sig}"
         detail += f" log_tail={(out+err)[-1200:]}"
-        _log_surviving_artefact([str(log)],
-                                produced_by="phase3_one_shot_runner.step_synth",
-                                tool="phase3_one_shot_runner")
         return StepResult("synth", "FAIL", time.time() - t0, detail,
                           [str(log)],
                           extras={"synth_frontend": "none",
@@ -17087,9 +17107,6 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # ≤1-register top-level wrappers) is deferred — see future
     # enhancement BACKLOG-v12.
     if cell_count_int == 0:
-        _log_surviving_artefact([str(log)],
-                                produced_by="phase3_one_shot_runner.step_synth",
-                                tool="phase3_one_shot_runner")
         return StepResult("synth", "FAIL", time.time() - t0,
                           (f"empty netlist (Number of cells=0); "
                            "Yosys mapping eliminated all logic. "
@@ -17318,10 +17335,6 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                               f"budget of {_budget} at "
                               f"period_relax={AREA_RETRY_PERIOD_RELAX}; the "
                               f"relaxed-timing netlist is NOT adopted as a fix")
-                _log_surviving_artefact(
-                    [str(log)],
-                    produced_by="phase3_one_shot_runner.step_synth",
-                    tool="phase3_one_shot_runner")
                 return StepResult(
                     "synth", "FAIL", time.time() - t0,
                     f"netlist={netlist.name} cells={cell_count} "
@@ -17335,12 +17348,6 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                             "area_loop_adopted": False})
             _area_verdict = (" area_budget=ok" if _acp.returncode == 0
                              else f" area_budget=INCOMPLETE(rc={_acp.returncode})")
-    # The runner formats this log AFTER Yosys returns. Its final bytes are a
-    # runner product, so declare them after every successful synthesis, even
-    # when a previous phase-3 pass already declared the same path.
-    _log_surviving_artefact([str(log)],
-                            produced_by="phase3_one_shot_runner.step_synth",
-                            tool="phase3_one_shot_runner")
     return StepResult("synth", "PASS", time.time() - t0,
                       f"netlist={netlist.name} cells={cell_count} "
                       f"frontend={synth_frontend}"
