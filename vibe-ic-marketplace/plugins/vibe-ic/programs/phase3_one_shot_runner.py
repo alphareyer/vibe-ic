@@ -5449,12 +5449,10 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig",
     island: a tie only counts when it is in the SAME row as the active it
     biases.  Hence the repair is per-row, not by euclidean distance.
 
-    WHEN IT RUNS.  At the start of `postroute_fill` — after the last
-    instance-creating stage (antenna reconverge) and BEFORE the row fill takes
-    the free sites, so there is somewhere to put a tie.  It only ADDS
-    instances, so the DEF-stage monotonicity gate is unaffected, and
-    `_build_pg_reconnect_tcl` (emitted directly after the fill) gives the new
-    ties their PG connection like every other late instance.
+    WHEN IT RUNS. At `preroute_fill` and again in each post-route
+    remove/refill bracket after repair-created devices exist, while the row
+    sites are free. It only ADDS instances; `_build_pg_reconnect_tcl` gives
+    the new ties their PG connection like every other late instance.
 
     WHAT IT GUARANTEES.  Every CORE instance with at least one non-PG signal
     MTerm (the same "functional anchor" selector the sparse-die row fill uses,
@@ -30488,7 +30486,8 @@ def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
 def _postroute_filler_bracket_tcl(tag: str, filler_masters: Sequence[str],
                                   *, slot_pinned_core: bool = False,
                                   design_declared_die: bool = False,
-                                  sparse_active_row_fill: bool = False
+                                  sparse_active_row_fill: bool = False,
+                                  welltie_repair_tcl: str = ""
                                   ) -> Tuple[str, str]:
     """``(remove_tcl, refill_tcl)`` for ONE post-route pass that may move or
     insert cells — the SDR child sessions (both legs) and the native antenna
@@ -30519,7 +30518,9 @@ def _postroute_filler_bracket_tcl(tag: str, filler_masters: Sequence[str],
               f"puts \"{t}_RMFILL: pre-route fillers removed before this pass "
               f"moves or inserts cells (DPL-0037/DPL-0038: a filler-tiled core "
               f"has no legal site)\" }}\n")
-    refill = (_build_sparse_die_aware_filler_tcl(
+    # Repair-created devices can occupy rows the pre-route tie census never
+    # saw. Restore same-row well ties while the sites are still free.
+    refill = (welltie_repair_tcl + _build_sparse_die_aware_filler_tcl(
         list(filler_masters or []), slot_pinned_core=slot_pinned_core,
         design_declared_die=design_declared_die,
         sparse_active_row_fill=sparse_active_row_fill)
@@ -30537,7 +30538,8 @@ def _postroute_filler_bracket_from_spec(tag: str, spec: Optional[Dict[str, Any]]
         tag, spec.get("filler_masters") or [],
         slot_pinned_core=bool(spec.get("slot_pinned_core")),
         design_declared_die=bool(spec.get("design_declared_die")),
-        sparse_active_row_fill=bool(spec.get("sparse_active_row_fill")))
+        sparse_active_row_fill=bool(spec.get("sparse_active_row_fill")),
+        welltie_repair_tcl=spec.get("welltie_repair_tcl") or "")
 
 
 def _v1_8_100_signoff_drv_repair_tcl(
@@ -33892,7 +33894,9 @@ def _pnr_session_products(out_dir: Path, out_dir_c: str, tcl_text: str,
 
 def _sdr_candidate_signoff_clean(project: Path, top: Optional[str],
                                  pdk: Optional[PdkConfig],
-                                 container: str) -> Tuple[bool, str]:
+                                 container: str,
+                                 evidence_dir: Optional[Path] = None
+                                 ) -> Tuple[bool, str]:
     """Demand measured zero deck DRC and a real LVS match on the candidate.
 
     A strict clean candidate cannot be worse than any incumbent on either
@@ -33913,28 +33917,39 @@ def _sdr_candidate_signoff_clean(project: Path, top: Optional[str],
             return False, f"gds_{gds.status.lower()}"
         drc = step_drc(project, top, pdk, container)
         rpt = project / "phase3" / "reports" / "drc.rpt"
-        if (drc.status != "PASS" or not rpt.is_file()
-                or rpt.stat().st_mtime_ns < started_ns):
-            return False, f"drc_{drc.status.lower()}_or_report_missing"
+        if not rpt.is_file() or rpt.stat().st_mtime_ns < started_ns:
+            return False, f"drc_report_missing:{rpt}"
+        if evidence_dir is not None:
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(rpt, evidence_dir / "candidate_drc_signoff.rpt")
         # The existing count helper deliberately maps malformed XML to zero
         # for downstream audit compatibility. Admission cannot do that: zero
         # is meaningful only for a parseable KLayout report database.
         import xml.etree.ElementTree as _ET
-        root = _ET.parse(rpt).getroot()
+        try:
+            root = _ET.parse(rpt).getroot()
+        except _ET.ParseError:
+            return False, f"drc_report_unreadable:{rpt}"
         if root.tag != "report-database" or root.find("items") is None:
-            return False, "drc_report_unreadable"
-        count, _ = _v1_6_597_count_klayout_xml_violations(rpt)
-        if count != 0:
-            return False, f"drc_count_{count if count is not None else 'unmeasured'}"
+            return False, f"drc_report_unreadable:{rpt}"
+        items = root.findall("./items/item")
+        rules = sorted({(item.findtext("category") or "").strip("'\" ")
+                        for item in items})
+        if items and not all(rules):
+            return False, f"drc_report_unreadable:{rpt}"
+        if rules:
+            return False, f"drc_fail:{','.join(rules)}"
+        if drc.status != "PASS":
+            return False, f"drc_measurement_failed:{drc.status.lower()}"
         lvs = step_lvs(project, top, pdk, container)
         if lvs.status != "PASS":
-            return False, f"lvs_{lvs.status.lower()}"
+            return False, f"lvs_fail:{lvs.status.lower()}"
         verdict = project / "reports" / "phase3" / "lvs_verdict.json"
         if not verdict.is_file() or verdict.stat().st_mtime_ns < started_ns:
-            return False, "lvs_verdict_missing"
+            return False, f"lvs_report_missing:{verdict}"
         data = json.loads(verdict.read_text())
         if data.get("status") != "PASS":
-            return False, "lvs_verdict_not_pass"
+            return False, f"lvs_fail:verdict_{data.get('status', 'missing')}"
         return True, "deck_drc_zero_lvs_match"
     except Exception as exc:
         return False, f"signoff_unmeasured_{type(exc).__name__}"
@@ -34113,8 +34128,13 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
         nxt = _sdr_adopt_request(this_log)
         if t_rc == 0 and nxt is None and project is not None:
             admitted, reason = _sdr_candidate_signoff_clean(
-                project, top, pdk, container)
+                project, top, pdk, container,
+                evidence_dir=out_dir / _SDR_TXN_DIRS[stage])
             rec["adoptions"][-1]["signoff_admission"] = reason
+            candidate_drc = (out_dir / _SDR_TXN_DIRS[stage] /
+                             "candidate_drc_signoff.rpt")
+            if candidate_drc.is_file():
+                rec["adoptions"][-1]["signoff_drc_report"] = str(candidate_drc)
             if not admitted:
                 # If a later SDR site also proposed a candidate, restore the
                 # state from before the FIRST proposal. Otherwise an earlier
@@ -36349,9 +36369,11 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         "design_declared_die": bool(_l9_die_note),
         "sparse_active_row_fill": bool(
             _ring_inset is not None and fp_rect is None and not _l9_die_note),
+        "welltie_repair_tcl": _build_welltie_coverage_repair_tcl(
+            pdk, _tap_pitch, _tap_pitch_src),
     }
-    filler_block = _build_welltie_coverage_repair_tcl(
-        pdk, _tap_pitch, _tap_pitch_src) + _build_sparse_die_aware_filler_tcl(
+    filler_block = _postroute_filler_spec["welltie_repair_tcl"] + \
+        _build_sparse_die_aware_filler_tcl(
         _postroute_filler_spec["filler_masters"],
         slot_pinned_core=_postroute_filler_spec["slot_pinned_core"],
         design_declared_die=_postroute_filler_spec["design_declared_die"],
