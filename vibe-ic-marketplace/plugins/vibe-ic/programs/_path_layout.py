@@ -1077,6 +1077,50 @@ def gate_timeout_s() -> int:
 # subprocess. Best-effort: failure is logged but does NOT change the
 # runner's verdict (the runner's own step audit is the source of truth;
 # the summary is a derived view).
+# --------------------------------------------------------------------------- #
+# "DID THIS INVOCATION PUBLISH THIS FILE?" — ONE implementation, for every
+# reader that needs the answer.
+#
+# WHERE THIS CAME FROM, AND WHY IT MOVED. The question was first asked, and
+# answered, inside `vibe_ic_one_shot_runner._published_here` (#2572/#2575): a
+# phase report that exists is not this run's account of itself unless this run
+# wrote it, and a stale record must never authorise a demotion. That reader
+# resolves a phase REPORT NAME through the router, so the predicate lived
+# behind that resolution and nothing else could ask it.
+#
+# A SECOND READER NOW NEEDS THE SAME QUESTION ABOUT AN ARBITRARY PATH. A run
+# that declares a window (`--entry-step` / `--exit-step`) deliberately does NOT
+# refresh the whole-flow documents — `reports/final_summary.md`,
+# `reports/audit/phase23_completion_audit.json` — so a reader of that tree must
+# be able to tell "this run wrote it" from "this run left the previous run's
+# copy in place". That is the same question, and answering it a second time in
+# a second place is how two staleness rules come to disagree about one file.
+# So the predicate lives here, the phase-report reader delegates to it, and
+# `FRESHNESS_TOLERANCE_S` has one value.
+# --------------------------------------------------------------------------- #
+FRESHNESS_TOLERANCE_S = 1.0
+
+
+def published_here(path, started_at, tolerance_s=None) -> bool:
+    """Was `path` written at or after `started_at`? `exists AND fresh`.
+
+    `started_at` is the asking invocation's own start (`time.time()` at entry).
+    The tolerance absorbs coarse filesystem mtime granularity: a file written
+    microseconds after the run started must not read as older than the run.
+
+    Fails CLOSED. An unreadable or absent path returns False — "this
+    invocation did not publish it" — because the consequence of a wrong True
+    is a stale document quoted as fresh evidence, and the consequence of a
+    wrong False is a disclosure nobody needed."""
+    from pathlib import Path as _Path
+    tol = FRESHNESS_TOLERANCE_S if tolerance_s is None else tolerance_s
+    try:
+        p = _Path(path)
+        return p.is_file() and (p.stat().st_mtime + tol >= started_at)
+    except OSError:
+        return False
+
+
 def emit_final_summary(project, programs_dir=None) -> bool:
     """Run `final_report_generate.py` against `project` and return True
     on success, False on any failure (exception, missing tool, non-zero
@@ -1154,7 +1198,7 @@ def steps_view_report_path(project) -> Path:
 
 
 def emit_steps_view(project, programs_dir=None, runner=None,
-                    timeout=None) -> dict:
+                    timeout=None, only_steps=None) -> dict:
     """Build `<project>/steps/` and record the outcome. NEVER raises.
 
     Returns the status record (also written to
@@ -1195,9 +1239,17 @@ def emit_steps_view(project, programs_dir=None, runner=None,
                 timeout = STEPS_VIEW_TIMEOUT_S
             proc = None
             try:
+                _cmd = [sys.executable, str(collector), str(project)]
+                if only_steps:
+                    # A run that declared a window refreshes only its own
+                    # steps' folders; the collector CARRIES the rest of the
+                    # index rather than dropping it. See
+                    # step_output_collector.materialize's docstring.
+                    _cmd += ["--only-steps",
+                             ",".join(sorted(str(s) for s in only_steps))]
+                    rec["bounded_to"] = sorted(str(s) for s in only_steps)
                 proc = subprocess.run(
-                    [sys.executable, str(collector), str(project)],
-                    timeout=timeout, check=False,
+                    _cmd, timeout=timeout, check=False,
                     capture_output=True, text=True,
                 )
             except subprocess.TimeoutExpired:
@@ -1259,7 +1311,7 @@ def emit_steps_view(project, programs_dir=None, runner=None,
 
 
 def publish_report_then_steps_view(project, programs_dir, runner, summary,
-                                   report_name):
+                                   report_name, only_steps=None):
     """Write `summary` to its report path, THEN build the steps view.
 
     Returns (steps_view_record, report_path). The caller attaches the record to
@@ -1287,4 +1339,5 @@ def publish_report_then_steps_view(project, programs_dir, runner, summary,
         out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     except Exception:                                     # noqa: BLE001
         pass
-    return emit_steps_view(project, programs_dir, runner=runner), out
+    return emit_steps_view(project, programs_dir, runner=runner,
+                           only_steps=only_steps), out

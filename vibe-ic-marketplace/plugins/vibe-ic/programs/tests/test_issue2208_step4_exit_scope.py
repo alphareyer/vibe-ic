@@ -35,9 +35,16 @@ def test_main_scopes_step4_producers_and_real_consumer(tmp_path, monkeypatch, ex
     monkeypatch.setattr(runner._spf, 'gate', lambda project, owner, site, refuse, fn, *a, **kw:
                         fn(*a, **{k: v for k, v in kw.items() if not k.startswith('_preflight')}))
     monkeypatch.setattr(runner._pl, 'emit_final_summary', lambda *a, **kw: False)
-    def publish(project, programs, owner, summary, name):
+    published = {}
+
+    def publish(project, programs, owner, summary, name, only_steps=None):
+        # `only_steps` is R-0924-1's bounded steps view: a run that declared a
+        # window refreshes its own step rows and carries the rest. Recorded
+        # here so this test -- which already drives main() with and without a
+        # window -- also witnesses that the window reaches the view.
         out = tmp_path / name
         out.write_text(json.dumps(summary))
+        published['only_steps'] = only_steps
         return {}, out
     monkeypatch.setattr(runner._pl, 'publish_report_then_steps_view', publish)
     argv = ['runner', str(tmp_path), '--skip-hardware', '--skip-phase3', '--skip-analog',
@@ -48,6 +55,25 @@ def test_main_scopes_step4_producers_and_real_consumer(tmp_path, monkeypatch, ex
     rc = runner.main()
     report = json.loads((tmp_path / 'phase2_one_shot.json').read_text())
     rows = {row['name']: row for row in report['steps']}
+    # R-0924-1: the declared window bounds the finalize tail, and says so.
+    if exit_step:
+        assert published['only_steps'], (
+            'a run declaring --exit-step must bound the steps view to its own '
+            'rows; the view was rebuilt for the whole flow')
+        assert isinstance(published['only_steps'], set)
+        assert report['declared_window']['exit_step'] == exit_step
+        assert report['declared_window']['flags'] == [f'--exit-step {exit_step}']
+        disclosed = {d['refresh']: d['kind']
+                     for d in report['bounded_disclosures']}
+        assert disclosed.get('final_audit') == 'skipped', disclosed
+        assert disclosed.get('emit_final_summary') == 'skipped', disclosed
+        assert disclosed.get('steps_view') == 'narrowed', disclosed
+        assert rows['final_audit']['status'] == 'NOT_APPLICABLE', rows['final_audit']
+    else:
+        assert published['only_steps'] is None, (
+            'an unbounded run must rebuild the whole steps view')
+        assert 'declared_window' not in report
+        assert 'bounded_disclosures' not in report
     if exit_step == '2':
         for name in ['sim', 'reference_tb', 'step4_functional_evidence', 'verilator_coverage']:
             assert rows[name]['status'] == 'NOT_APPLICABLE', rows[name]

@@ -867,7 +867,10 @@ def _audit_axis_from_verdicts(verdicts: Optional[List[str]]) -> Dict[str, Any]:
 #: phase's own fresh report stale. One second is two orders of magnitude below the
 #: staleness this is for -- an earlier RUN, minutes or hours back -- so it cannot
 #: mask the case being detected.
-_FRESHNESS_TOLERANCE_S = 1.0
+# ONE value, owned by `_path_layout.FRESHNESS_TOLERANCE_S` — see
+# `_path_layout.published_here` for why the predicate moved there. Kept as a
+# module name because this file reads it in three places.
+_FRESHNESS_TOLERANCE_S = _pl.FRESHNESS_TOLERANCE_S
 
 
 def _phase_report_path(project: Path, report_name: str) -> Path:
@@ -919,10 +922,13 @@ def _published_here(project: Path, report_name: str, started_at: float) -> bool:
     """
     try:
         path = _phase_report_path(project, report_name)
-        return path.is_file() and (path.stat().st_mtime + _FRESHNESS_TOLERANCE_S
-                                   >= started_at)
     except OSError:                                        # pragma: no cover
         return False
+    # THE PREDICATE IS NOT SPELLED HERE ANY MORE. `_path_layout.published_here`
+    # owns it, because the bounded-window reader asks the same question about
+    # paths that are not phase reports. This function is now only the ROUTER
+    # step: report name -> path. R-0924-1.
+    return _pl.published_here(path, started_at)
 
 
 def _row_verdict(project: Path, report_name: str, rc: int, started_at: float,

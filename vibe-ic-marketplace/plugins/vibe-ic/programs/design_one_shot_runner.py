@@ -12110,9 +12110,16 @@ def _stamp_design_identity_in_file(fp: Path, ident: dict) -> bool:
     return True
 
 
-def _stamp_gate_report_dirs(project: Path) -> List[str]:
+def _stamp_gate_report_dirs(project: Path,
+                            written_after: Optional[float] = None) -> List[str]:
     """Sweep reports/phase2/gates/ + reports/phase2/lint/ and stamp every
-    *.json with this project's #484 identity. Returns the project-relative
+    *.json with this project's #484 identity.
+
+    `written_after` (a run's own start time) narrows the sweep to the jsons
+    THIS INVOCATION wrote, asking `_path_layout.published_here` -- the one
+    owner of that question. A run with a declared window re-emits only its own
+    steps' gate reports, and stamping the rest would touch, and re-date, a file
+    this run has no business rewriting. Omitted: the whole sweep, unchanged. Returns the project-relative
     paths that were freshly stamped (for the StepResult detail / transcript).
     Generic by design: catches ALL gate/lint jsons however they were produced
     (YAML workflow, direct checker invocation, manual), not a hand-maintained
@@ -12124,6 +12131,20 @@ def _stamp_gate_report_dirs(project: Path) -> List[str]:
         if not d.is_dir():
             continue
         for fp in sorted(d.glob("*.json")):
+            if written_after is not None and not _pl.published_here(
+                    fp, written_after):
+                # THE TOLERANCE IS LOAD-BEARING HERE, and I measured both
+                # directions before settling. Dropping it (tolerance_s=0.0)
+                # looks tighter and is wrong: on this filesystem a file's mtime
+                # lands ~1 ms BEFORE the `time.time()` the run recorded as its
+                # start, so a gate json the run had just written read as older
+                # than the run and went UNSTAMPED -- and an unstamped gate json
+                # is what the cross-design identity audit flags. Keeping the
+                # owner's one value admits, at worst, a file written inside the
+                # same second as the run's start; that costs one redundant
+                # stamp, which is idempotent and cosmetic. The asymmetry decides
+                # it: a missed stamp is a finding, a redundant one is not.
+                continue
             if _stamp_design_identity_in_file(fp, ident):
                 stamped.append(str(fp.relative_to(project)))
     return stamped
@@ -12261,7 +12282,8 @@ def step_slot_pad_budget(project: Path, top_name: str) -> StepResult:
                                    if status == "NOT_APPLICABLE" else ""))
 
 
-def step_stamp_gate_reports(project: Path) -> StepResult:
+def step_stamp_gate_reports(project: Path,
+                            written_after: Optional[float] = None) -> StepResult:
     """ORGANIC-20260606 #497 ROUND-2: caller-side identity stamp of every
     gate/lint JSON the gate-audit step produced. Runs AFTER step_final_audit
     (which is what drives flow_compliance_check.py → the YAML gate checkers
@@ -12269,7 +12291,7 @@ def step_stamp_gate_reports(project: Path) -> StepResult:
     post-processing — never changes a verdict, never fails the run."""
     t0 = time.time()
     try:
-        stamped = _stamp_gate_report_dirs(project)
+        stamped = _stamp_gate_report_dirs(project, written_after=written_after)
     except Exception as e:  # noqa: BLE001 — stamping must never fail the run
         return StepResult("stamp_gate_reports", "PASS",
                           time.time() - t0,
@@ -22523,6 +22545,108 @@ def _exit_pruned_sites(sites, exit_step):
     return _spf.exit_pruned_sites(sites, exit_step)
 
 
+def declared_window_flags(entry_step, exit_step) -> Tuple[str, ...]:
+    """The window flags this run declared, in the spelling the operator used.
+
+    Empty means no window, and therefore the whole flow's proof burden. Module
+    level and pure, so the decision can be DRIVEN by a test instead of inferred
+    from the shape of the code that calls it: an arm that reads
+    `if _bounded: ...` cannot tell you `_bounded` was computed correctly."""
+    return tuple(
+        f"--{name} {value}" for name, value in (("entry-step", entry_step),
+                                                ("exit-step", exit_step))
+        if value)
+
+
+def run_is_bounded(entry_step, exit_step) -> bool:
+    """Did this run declare a window, and therefore a bounded proof burden?
+
+    EITHER flag bounds the run. `--exit-step 4` alone dispatches steps 1..4 and
+    nothing after, so the flow's whole-run documents are as much a claim about
+    steps nobody ran as they are under `--entry-step`."""
+    return bool(declared_window_flags(entry_step, exit_step))
+
+
+def _run_refresh_only(project: Path, args) -> int:
+    """`--refresh-only`: run EXACTLY the whole-flow refreshes a bounded run
+    discloses as skipped, dispatch no step, and record what was rebuilt.
+
+    THE OTHER HALF OF THE RULE. Bounding a run is only honest if the roll-ups
+    remain OBTAINABLE: an operator who ran three bounded step re-runs and now
+    wants the flow's own documents rebuilt must be able to ask for that, and
+    must not have to re-run the flow to get it. This is that ask, and it is the
+    same refreshes, in the same order the finalize tail runs them --
+    declared producers, the final audit, the gate-identity sweep, the run
+    report + whole steps view, the canonical summary, the late re-stamp -- so a
+    refreshed tree is byte-comparable with the tree an unbounded run leaves. The
+    summary is written TWICE, as the tail writes it: once before the audit,
+    because the audit reads its attestation table, and once after, because the
+    audit's own result belongs in it.
+
+    It dispatches NO step, so it can neither produce nor destroy design
+    evidence; everything it writes is a restatement of what is already on disk.
+    The verdict is `_aggregate_verdict` over the refresh's own steps -- the
+    runner's existing rule, not a new one -- so a refresh whose audit FAILS
+    exits non-zero and says why."""
+    t0 = time.time()
+    plan: List[StepResult] = []
+    print("=== design_one_shot_runner --refresh-only: rebuilding the "
+          "whole-flow documents; NO step is dispatched")
+    # BEFORE THE AUDIT, because the audit READS this document's attestation
+    # table and a stale table is a phantom gap -- the same ordering, and the
+    # same reason, as the finalize tail's pre-audit emission.
+    _pl.emit_final_summary(project, PROGRAMS_DIR)
+    try:
+        _dp = subprocess.run(
+            [sys.executable,
+             str(PROGRAMS_DIR / "flow_declared_producer_run.py"), str(project)],
+            timeout=_pl.audit_timeout_s(project) + 120,
+            check=False, capture_output=True, text=True)
+        for _ln in (_dp.stdout or "").strip().splitlines():
+            print(f"[refresh] {_ln}")
+    except Exception as _exc:                              # noqa: BLE001
+        print(f"[WARN] flow_declared_producer_run did NOT run ({_exc})",
+              file=sys.stderr)
+    plan.append(step_final_audit(project, phase=2,
+                                 skip_analog=args.skip_analog))
+    plan.append(step_stamp_gate_reports(project))
+    summary: Dict[str, Any] = {
+        "project": str(project),
+        "program": "design_one_shot_runner --refresh-only",
+        "refreshed": ["flow_declared_producer_run", "final_audit",
+                      "stamp_gate_reports", "steps_view",
+                      "emit_final_summary"],
+        "dispatched_steps": [],
+        "steps": [asdict(s) for s in plan],
+        "verdict": _aggregate_verdict(plan),
+        "seconds": round(time.time() - t0, 2),
+    }
+    summary["steps_view"], _out = _pl.publish_report_then_steps_view(
+        project, PROGRAMS_DIR, "design_one_shot_runner", summary,
+        "phase2_one_shot.json")
+    fs_ok = _pl.emit_final_summary(project, PROGRAMS_DIR)
+    summary["final_summary"] = bool(fs_ok)
+    try:
+        _late = _stamp_gate_report_dirs(project)
+    except Exception:                                      # noqa: BLE001
+        _late = []
+    summary["late_restamped"] = _late
+    _rec = project / "reports" / "audit" / "refresh_only.json"
+    try:
+        _rec.parent.mkdir(parents=True, exist_ok=True)
+        _rec.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+    except OSError as _exc:                                # noqa: BLE001
+        print(f"[WARN] could not write {_rec}: {_exc}", file=sys.stderr)
+    print(f"=== --refresh-only DONE in {summary['seconds']}s — {_rec}")
+    for s in plan:
+        print(f"  {s.status:8} {s.name:20} "
+              f"{_rsum.summary_detail(s.detail, s.status)}")
+    print(f"final summary: "
+          f"{'reports/final_summary.md' if fs_ok else 'NOT generated'}")
+    print(f"verdict: {summary['verdict']}")
+    return 0 if summary["verdict"] in ("PASS", "PASS_WITH_WAIVERS") else 1
+
+
 def main() -> int:
     _line_buffer_own_stream()
     p = argparse.ArgumentParser()
@@ -22578,6 +22702,15 @@ def main() -> int:
                         "WAIVES rtl_gen. The displaced tree is copied to a "
                         "timestamped phase2/stage1/rtl.authored_backup.*/ "
                         "that no later run reclaims.")
+    p.add_argument("--refresh-only", action="store_true",
+                   help="Run ONLY the whole-flow refreshes that a run with a "
+                        "declared window (--entry-step/--exit-step) discloses "
+                        "as skipped -- the declared-producer sweep, the final "
+                        "audit, reports/final_summary.md, the whole steps view "
+                        "and the gate-identity sweeps -- and dispatch NO step. "
+                        "For the operator who wants the roll-ups rebuilt after "
+                        "one or more bounded runs. REFUSES together with a "
+                        "window: a refresh of the whole flow has no window.")
     args = p.parse_args()
 
     global _FORCE_RTL_REGEN
@@ -22587,6 +22720,97 @@ def main() -> int:
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
+
+    # ── A DECLARED WINDOW IS A DECLARED PROOF BURDEN (R-0924-1) ─────────────
+    # The owner's ask: when a gate is wrong, re-run THAT step -- only it.
+    # The window was already honoured for DISPATCH: every out-of-window site is
+    # recorded NOT_APPLICABLE and names the flag that pruned it. The finalize
+    # tail was not, and no flag reached it. MEASURED on a copy of
+    # benchmark-data/ic/subservient at main 69abc2734,
+    # `--entry-step 4 --exit-step 4`: 766 files touched, of which 432 lay
+    # OUTSIDE step 4's own workspace, and the run drove flow_compliance_check
+    # 23 times -- 3 of them over the WHOLE flow -- to write documents about 69
+    # steps it had not dispatched. The one-step run then published a
+    # final_summary.md whose fence reads "Steps: 70 total".
+    #
+    # THE RULE. A run that declares a window writes the named steps' declared
+    # outputs, their gate receipts, its ledger rows, its own run report and the
+    # run state. Every WHOLE-FLOW refresh is skipped WITH A DISCLOSURE, in the
+    # same wording the out-of-window sentinels already use, and is available on
+    # demand as `--refresh-only`. A refresh that happens by accident is not a
+    # refresh anybody asked for, and its cost is charged to a run that did not
+    # want it.
+    _run_started_at = time.time()
+    _window_flags = declared_window_flags(getattr(args, "entry_step", None),
+                                          getattr(args, "exit_step", None))
+    _bounded = run_is_bounded(getattr(args, "entry_step", None),
+                              getattr(args, "exit_step", None))
+    if getattr(args, "refresh_only", False) and _bounded:
+        print("REFUSED: --refresh-only rebuilds the WHOLE-FLOW documents and "
+              "therefore has no window. Drop --entry-step/--exit-step to "
+              "refresh, or drop --refresh-only to run the window.",
+              file=sys.stderr)
+        return 2
+    # ONE list, and the operator reads it in ONE place: what was not run at
+    # all, and what ran NARROWED to this run's own work. A narrowing is not a
+    # skip and must not be reported as one -- the gate-identity sweep still
+    # runs, over the jsons this run wrote -- but a reader who is told only
+    # about the skips would not know the sweep and the steps view had changed
+    # scope, and would read their smaller output as a loss.
+    _bounded_disclosures: List[Dict[str, Any]] = []
+
+    def _disclose_narrowed_refresh(refresh: str, narrowed_to: str) -> str:
+        """Record + announce one refresh that RAN, bounded to this run's work."""
+        for _d in _bounded_disclosures:
+            if _d["refresh"] == refresh:
+                return str(_d["why"])
+        _declared_by = " ".join(_window_flags)
+        _why = (f"run declared {_declared_by}; {refresh} ran NARROWED to "
+                f"{narrowed_to}. It is not a whole-flow refresh on this run, so "
+                f"the documents it would otherwise have rewritten for steps "
+                f"outside the window keep the content the run that produced "
+                f"them left.")
+        _bounded_disclosures.append({"refresh": refresh, "kind": "narrowed",
+                                     "narrowed_to": narrowed_to,
+                                     "declared_by": _declared_by, "why": _why})
+        print(f"[bounded] NARROWED {refresh} -- {_why}")
+        return _why
+
+    def _disclose_whole_flow_skip(refresh: str, writes: str) -> str:
+        """Record + announce one skipped whole-flow refresh; return its reason.
+
+        Idempotent per refresh name: `emit_final_summary` has five call sites
+        and a bounded run may reach several of them, but the operator is owed
+        one disclosure per refresh, not one per call."""
+        for _d in _bounded_disclosures:
+            if _d["refresh"] == refresh:
+                return str(_d["why"])
+        _declared_by = " ".join(_window_flags)
+        _why = (f"run declared {_declared_by}; {refresh} is a WHOLE-FLOW "
+                f"refresh ({writes}) and was not run. It restates every step in "
+                f"the flow, and this run dispatched only its declared window: "
+                f"those documents are outside this run's declared proof burden, "
+                f"not missing. Ask for them with --refresh-only.")
+        _bounded_disclosures.append({"refresh": refresh, "kind": "skipped",
+                                     "writes": writes,
+                                     "declared_by": _declared_by, "why": _why})
+        print(f"[bounded] SKIPPED {refresh} -- {_why}")
+        return _why
+
+    def _emit_final_summary_or_disclose() -> bool:
+        """reports/final_summary.md, unless a window makes it a whole-flow refresh.
+
+        final_report_generate.py defaults to run_audit=True, so this document
+        costs a whole-flow `flow_compliance_check --strict` every time it is
+        written -- the single most expensive thing in the finalize tail."""
+        if _bounded:
+            _disclose_whole_flow_skip(
+                "emit_final_summary",
+                "reports/final_summary.md, and the whole-flow "
+                "flow_compliance_check --strict that final_report_generate.py "
+                "runs in order to write it")
+            return False
+        return _pl.emit_final_summary(project, PROGRAMS_DIR)
 
     # ORGANIC #588 — single-driver lock honored by the standalone phase2
     # runner; re-enters the orchestrator's lock via the env token, or
@@ -22693,9 +22917,30 @@ def main() -> int:
                   "happened", file=sys.stderr)
             return 2
 
+    def _window_step_ids() -> set:
+        """The canonical flow step ids this run's window actually dispatches.
+
+        Read off the SAME declaration the dispatcher reads -- step_preflight's
+        ordered (site, span) table, filtered by the same two predicates that
+        decide whether a site is dispatched at all. No second notion of "which
+        steps are in the window" is introduced here, because two notions is how
+        a view comes to disagree with the run that produced it."""
+        _wplan = _spf.RUNNER_PLANS.get("design_one_shot_runner")
+        _ids: set = set()
+        for _sname, _span in (_wplan.sites if _wplan else ()):
+            if _after_exit(_sname) or _before_entry(_sname, _entry_site):
+                continue
+            _ids.update(str(_s) for _s in _span)
+        return _ids
+
     _lock = _runner_lock.acquire_or_reenter(project, "design_one_shot_runner")
     if _lock is None:
         return 3
+
+    # Under the lock -- it writes -- and BEFORE canonical span admission, which
+    # admits a phase-2 span this call does not dispatch.
+    if getattr(args, "refresh_only", False):
+        return _run_refresh_only(project, args)
 
     _canonical = _canonical_admission.admit_span(
         project, "phase2", PROGRAMS_DIR, args.container,
@@ -23288,7 +23533,7 @@ def main() -> int:
             # `agent_report_sha256_attestation_check` gate compares the
             # fresh on-disk SOF hash against the previous run's attestation
             # (Quartus is not bit-deterministic) and FAILs.
-            _pl.emit_final_summary(project, PROGRAMS_DIR)
+            _emit_final_summary_or_disclose()
             plan.append(step_fpga_burn(project, args.top_name))
 
         rtl_repair_retry = 0
@@ -23367,7 +23612,7 @@ def main() -> int:
                                 args.container))
                             plan.append(step_fpga_compile(
                                 project, args.top_name, args.container))
-                            _pl.emit_final_summary(project, PROGRAMS_DIR)
+                            _emit_final_summary_or_disclose()
                             plan.append(step_fpga_burn(
                                 project, args.top_name))
                             continue
@@ -23394,7 +23639,7 @@ def main() -> int:
                                           args.container))
             plan.append(step_fpga_compile(project, args.top_name, args.container))
             # Same reason as above — regenerate attestation before burn.
-            _pl.emit_final_summary(project, PROGRAMS_DIR)
+            _emit_final_summary_or_disclose()
             plan.append(step_fpga_burn(project, args.top_name))
 
     # Steps 11-13 — DFT (Fault ATPG) → post-DFT opt → LEC (yosys equiv).
@@ -23451,7 +23696,7 @@ def main() -> int:
     # The FPGA path (line 3545 above) already follows this pattern; the
     # --skip-hardware / --skip-phase3 path was missing it, producing a
     # spurious FAIL on CVDP-class atomic runs (captured from v0.1.57).
-    _pl.emit_final_summary(project, PROGRAMS_DIR)
+    _emit_final_summary_or_disclose()
     # ── THE RUN WRITES THE DOCUMENTS THE FLOW SAYS THE RUN WRITES ───────────
     # R-0915-101 follow-up (lane icslot2). `flow_declared_producer_run` has
     # existed since f119083ec and was wired into `phase3_one_shot_runner` ONLY.
@@ -23491,26 +23736,53 @@ def main() -> int:
     # work or manufactures work for a step this delivery does not have (see
     # `flow_declared_producer_run.owed` / `already_produced_by_the_run`).
     # Same shape and same guarantees as the phase-3 site, which is untouched.
-    try:
-        _dp = subprocess.run(
-            [sys.executable,
-             str(PROGRAMS_DIR / "flow_declared_producer_run.py"),
-             str(project)],
-            timeout=_pl.audit_timeout_s(project) + 120,
-            check=False, capture_output=True, text=True)
-        for _ln in (_dp.stdout or "").strip().splitlines():
-            print(f"[phase2] {_ln}")
-        if _dp.returncode != 0:
-            print(f"[INFO] flow_declared_producer_run rc={_dp.returncode}: a "
-                  f"declared producer could not be EXECUTED (not a verdict "
-                  f"about the design); {(_dp.stderr or '').strip()[-300:]}",
-                  file=sys.stderr)
-    except Exception as _dp_exc:  # nosec — must not abort the audit
-        print(f"[WARN] flow_declared_producer_run did NOT run ({_dp_exc}); the "
-              f"documents the flow declares this run's steps to produce may "
-              f"still be authored by the audit and refused as its own "
-              f"evidence", file=sys.stderr)
-    plan.append(step_final_audit(project, phase=2, skip_analog=args.skip_analog))
+    # A WINDOW BOUNDS THIS SWEEP TOO. It executes the producers the flow
+    # declares for EVERY step, which is exactly the whole-flow work a declared
+    # window says this run does not owe.
+    if _bounded:
+        _disclose_whole_flow_skip(
+            "flow_declared_producer_run",
+            "the documents the flow declares every step to produce, for the "
+            "steps this run did not dispatch")
+    else:
+        try:
+            _dp = subprocess.run(
+                [sys.executable,
+                 str(PROGRAMS_DIR / "flow_declared_producer_run.py"),
+                 str(project)],
+                timeout=_pl.audit_timeout_s(project) + 120,
+                check=False, capture_output=True, text=True)
+            for _ln in (_dp.stdout or "").strip().splitlines():
+                print(f"[phase2] {_ln}")
+            if _dp.returncode != 0:
+                print(f"[INFO] flow_declared_producer_run rc={_dp.returncode}: a "
+                      f"declared producer could not be EXECUTED (not a verdict "
+                      f"about the design); {(_dp.stderr or '').strip()[-300:]}",
+                      file=sys.stderr)
+        except Exception as _dp_exc:  # nosec — must not abort the audit
+            print(f"[WARN] flow_declared_producer_run did NOT run ({_dp_exc}); the "
+                  f"documents the flow declares this run's steps to produce may "
+                  f"still be authored by the audit and refused as its own "
+                  f"evidence", file=sys.stderr)
+
+    if _bounded:
+        # A WHOLE-FLOW VERDICT OVER A TREE 69 OF WHOSE 70 STEPS DID NOT RUN is
+        # not a verdict about this run; it is the previous run's state
+        # re-attributed to this one. The window's own step gates above have
+        # already produced this run's verdicts, and they are what the report
+        # carries. NOT_APPLICABLE is the same word, and the same disclosure
+        # shape, the out-of-window dispatch sentinels use.
+        plan.append(StepResult(
+            "final_audit", "NOT_APPLICABLE", 0.0,
+            _disclose_whole_flow_skip(
+                "final_audit",
+                "reports/audit/step_outputs/** (one output record per flow "
+                "step), reports/audit/audit_created/**, reports/metrics/** and "
+                "the gate reports every step's YAML checker re-emits"),
+            declared_by=" ".join(_window_flags)))
+    else:
+        plan.append(step_final_audit(project, phase=2,
+                                     skip_analog=args.skip_analog))
 
     # vibe-ic#2080 — the run's report card, asked by a gate that nothing ran.
     # Dispatched right after the final audit, where the report card is the
@@ -23536,7 +23808,13 @@ def main() -> int:
     # time the runner exited. The second sweep after `emit_final_summary` is
     # what makes the claim true; this one is kept so the ordinary case is
     # stamped before anything reads it.
-    plan.append(step_stamp_gate_reports(project))
+    if _bounded:
+        _disclose_narrowed_refresh(
+            "stamp_gate_reports",
+            "the gate/lint jsons THIS run wrote; a json an earlier run left is "
+            "not re-dated by a run that did not rewrite it")
+    plan.append(step_stamp_gate_reports(
+        project, written_after=_run_started_at if _bounded else None))
 
     summary = {
         "project": str(project),
@@ -23545,6 +23823,25 @@ def main() -> int:
         "steps": [asdict(s) for s in plan],
         "verdict": _aggregate_verdict(plan),
     }
+    if _bounded:
+        # THE REPORT IS WHERE A READER LEARNS WHAT THIS RUN DID NOT DO. A
+        # bounded run leaves reports/final_summary.md and the phase-2/3
+        # completion audit describing an EARLIER run, which is strictly better
+        # than today's state -- today they describe a 70-step flow that did not
+        # run -- but only if the staleness is visible. `published_here` is the
+        # same predicate the front door uses to decide whether a phase report
+        # is this invocation's account of itself; there is no second rule.
+        summary["declared_window"] = {
+            "flags": list(_window_flags),
+            "entry_step": args.entry_step,
+            "exit_step": args.exit_step,
+            "dispatched_step_ids": sorted(_window_step_ids()),
+        }
+        summary["bounded_disclosures"] = _bounded_disclosures
+        summary["not_refreshed_here"] = sorted(
+            _rel for _rel in ("reports/final_summary.md",
+                              "reports/audit/phase23_completion_audit.json")
+            if not _pl.published_here(project / _rel, _run_started_at))
     # Per-step output view — <project>/steps/<phase>/<stage>/<id>_<slug>/.
     # phase2 is the most common standalone entry (`/vibe-ic-phase2`, and the
     # `--skip-phase3` benchmark shape), and it used to leave no steps tree.
@@ -23555,16 +23852,22 @@ def main() -> int:
     # Published BEFORE the view is built -- see publish_report_then_steps_view:
     # the collector is a subprocess and can only join this run's per-step
     # verdicts onto the step records if they are already on disk.
+    if _bounded:
+        _disclose_narrowed_refresh(
+            "steps_view",
+            "the window's own step rows; every other row is CARRIED from the "
+            "prior index marked refreshed_here=false, and no folder is pruned")
     summary["steps_view"], out = _pl.publish_report_then_steps_view(
         project, PROGRAMS_DIR, "design_one_shot_runner", summary,
-        "phase2_one_shot.json")
+        "phase2_one_shot.json",
+        only_steps=(_window_step_ids() if _bounded else None))
     _write_phase2_report(out, summary, project)
     # Record rtl/ as the runner is leaving it, so the NEXT front-door run
     # can tell this tree (generator-produced, safe to regenerate) from one
     # an author has since edited (must be preserved).
     _finalize_rtl_provenance()
     # v1.6.32: emit canonical final_summary.md (best-effort).
-    fs_ok = _pl.emit_final_summary(project, PROGRAMS_DIR)
+    fs_ok = _emit_final_summary_or_disclose()
     # THE LAST WRITE TO THE GATE DIRS, and therefore the one that decides what
     # a reader finds there. `emit_final_summary` just re-ran the YAML gate
     # checkers (final_report_generate.py -> flow_compliance_check.py) and
@@ -23575,7 +23878,8 @@ def main() -> int:
     # which is exactly why the count below is the count of files the report
     # generator clobbered.
     try:
-        _late_stamped = _stamp_gate_report_dirs(project)
+        _late_stamped = _stamp_gate_report_dirs(
+            project, written_after=_run_started_at if _bounded else None)
     except Exception as _e:  # noqa: BLE001 — stamping must never fail the run
         _late_stamped = []
         print(f"design_one_shot_runner: late identity re-stamp skipped "
