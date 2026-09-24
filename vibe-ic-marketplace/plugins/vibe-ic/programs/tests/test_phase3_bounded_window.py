@@ -41,8 +41,16 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
     after = p3._phase3_file_manifest(project)
     changed = {name for name in set(before) | set(after)
                if before.get(name) != after.get(name)}
+    allowed_reports = {
+        "reports/audit/step_preflight.json",
+        "reports/audit/phase23_completion_audit.json",
+        "reports/audit/steps_view.json",
+        "reports/orchestrator/phase3_one_shot.json",
+        "reports/write_ledger.json",
+    }
     assert all(name == "phase3/pnr/top.gds" or
-               name.startswith(("reports/", "steps/")) for name in changed), changed
+               name in allowed_reports or name.startswith("steps/")
+               for name in changed), changed
     assert after["phase3/pnr/top.def"] == before["phase3/pnr/top.def"]
     assert after["phase3/synth/top_synth.v"] == before["phase3/synth/top_synth.v"]
     assert after["reports/phase3/drc.rpt"] == before["reports/phase3/drc.rpt"]
@@ -52,6 +60,10 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
     assert report["bounded"] is True
     assert report["steps_view"]["status"] == "OK"
     assert report["audit_verdict"] == "NOT_MEASURED"
+    audit = json.loads((project / "reports" / "audit" /
+                        "phase23_completion_audit.json").read_text())
+    assert audit["scope"]["whole_flow"] is False
+    assert audit["audit_kind"].startswith("bounded_invalidation")
     assert report["stale_downstream"]["drc"]["status"] == "NOT_MEASURED"
     assert "gds" in report["stale_downstream"]["drc"]["reason"]
     assert report["stale_downstream"]["lvs"]["status"] == "NOT_MEASURED"

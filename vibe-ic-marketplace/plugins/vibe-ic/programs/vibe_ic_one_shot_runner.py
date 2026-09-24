@@ -1616,7 +1616,9 @@ def main() -> int:
                                "rc": rc}],
                    "verdict": phase3_verdict,
                    "audit_verdict": "NOT_MEASURED",
-                   "audit_scope": "bounded; whole-flow audit not refreshed"}
+                   "audit_scope": "bounded; whole-flow audit not refreshed",
+                   "bounded_disclosures": p3.get("bounded_disclosures", []),
+                   "stale_downstream": p3.get("stale_downstream", {})}
         out = _pl.report_path(project, "vibe_ic_one_shot.json")
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(summary, indent=2) + "\n")

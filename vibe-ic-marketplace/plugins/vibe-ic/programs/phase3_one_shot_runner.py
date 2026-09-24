@@ -66261,6 +66261,14 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
         "verdict": _aggregate_verdict(rows) if rows else "NOT_MEASURED",
         "audit_verdict": "NOT_MEASURED",
         "audit_scope": "bounded; whole-flow audit not refreshed",
+        "bounded_disclosures": [
+            {"refresh": "flow_compliance_check --strict", "kind": "skipped",
+             "why": "whole-flow gate evaluation is outside the declared window; "
+                    "the bounded invalidation record is NOT_MEASURED"},
+            {"refresh": "emit_final_summary", "kind": "skipped",
+             "why": "reports/final_summary.md describes the whole flow and was "
+                    "not rewritten by this window"},
+        ],
     }
     out = _pl.report_path(project, "phase3_one_shot.json")
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -66268,7 +66276,9 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
     audit = _pl.report_path(project, "phase23_completion_audit.json")
     audit.parent.mkdir(parents=True, exist_ok=True)
     audit.write_text(json.dumps({
-        "program": "flow_compliance_check", "bounded": True,
+        "program": "phase3_one_shot_runner",
+        "audit_kind": "bounded_invalidation; flow_compliance_check not run",
+        "bounded": True,
         "scope": {"whole_flow": False, "phase": "phase3",
                   "step_count": len(rows), "flow_step_total": None},
         "verdict": "NOT_MEASURED" if stale else report["verdict"],
