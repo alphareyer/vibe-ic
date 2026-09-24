@@ -1037,8 +1037,6 @@ def _scan_runner(path: Path) -> RunnerScan:
                     scan.glob_patterns.append(arg.value)
                     for hit in PROGRAMS_DIR.glob(arg.value):
                         add(hit.stem)
-        if isinstance(node, ast.JoinedStr):
-            resolve_fstring(node, "fstring")
         if (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
@@ -1552,24 +1550,28 @@ def test_probe_channel_c_does_not_match_the_world():
     )
 
 
+def test_probe_channel_c_ignores_non_dispatch_fstrings(tmp_path):
+    """A status reason that resembles a program name does not invoke it."""
+    runner = tmp_path / "sample_one_shot_runner.py"
+    runner.write_text(
+        'def reason(lvs):\n'
+        '    return f"lvs_{lvs.status.lower()}"\n',
+        encoding="utf-8",
+    )
+    scan = _scan_runner(runner)
+    assert "lvs_triage_classify" not in scan.invoked
+    assert not scan.fstring_patterns
+
+
 def test_probe_no_cell_rests_on_channel_c_alone():
     """Channel (c) must not be the ONLY thing holding a cell up.
 
-    2026-07-27, adversarial finding (LOW), confirmed by re-measurement:
-    `resolve_fstring()` is applied to EVERY `ast.JoinedStr` in a runner, not
-    only to the argument of `__import__` / `import_module` / `glob`, so the
-    1925 harvested "f-string patterns" include a great deal of prose
-    (`'^verdict: [^/\\s]*$'`, an entire multi-line SPICE stub template). The
-    60% ceiling above is the only thing between that resolver and "invoked
-    means nothing", and it is measuring prose, not dispatch.
-
-    That over-match cannot manufacture a green TODAY because channel (a) — the
-    real executor, driven — holds on all 62 gated steps and P0 takes the
-    umbrella branch, so the three-channel OR is decided by (a) everywhere and
-    (c) never breaks a tie. This test makes that a MEASURED, ENFORCED fact
-    instead of a footnote: the day a step's cell would be carried by (c) alone,
-    the suite says so, because a branch-blind static scan is not evidence that
-    the reaching branch ever executes.
+    The 2026-07-27 adversarial review found that scanning every f-string
+    harvested prose as dispatch. The 2026-09-24 #2579 landing exposed that
+    defect: an LVS status reason matched ``lvs_triage_classify``. The scanner
+    now resolves dynamic names only at import call sites. Channel (c) still
+    cannot prove its reaching branch runs for any particular design. This
+    assertion prevents a step from relying on channel (c) alone.
     """
     sole = []
     for sid in F.step_ids():
@@ -1722,6 +1724,11 @@ def test_probe_no_cell_rests_on_channel_c_alone():
 #: is exactly the substitution this file's docstring refuses -- changing a
 #: predicate so a finding stops landing -- so the entry stays and the fact is
 #: recorded instead.
+#: 2026-09-24 — #2579 added ``f"lvs_{lvs.status.lower()}"`` as an SDR
+#: admission failure reason. That expression runs no program. The runner
+#: scanner once treated every f-string as a dispatch pattern, which falsely
+#: removed ``lvs_triage_classify`` from this set. The Step 31 declaration,
+#: gate, and runner dispatch remain unchanged; keep its pin.
 
 ORPHAN_DECLARED_PROGRAMS: Tuple[Tuple[str, str], ...] = (
     ("2", "crosslayer_rewrite_equivalence"),
