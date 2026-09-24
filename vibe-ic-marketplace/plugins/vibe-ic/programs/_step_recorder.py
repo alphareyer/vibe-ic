@@ -134,7 +134,7 @@ class Recorder:
             by_file.setdefault(fname, []).append((name, lineno))
         out: Dict[str, Dict[str, str]] = {}
         for fname, entries in by_file.items():
-            digests, err = source_digests(Path(fname), entries)
+            digests, err = stamp_digests(Path(fname), entries)
             if err:
                 # A file we ran but cannot re-read is not a file we can prove
                 # unchanged.
@@ -159,91 +159,157 @@ def _segment(lines: List[str], node: ast.AST) -> Optional[str]:
     return "".join(lines[lo - 1:hi])
 
 
-def _function_index(tree: ast.AST, lines: List[str]
-                    ) -> Dict[Tuple[str, int], str]:
-    """``{(name, firstlineno): source}`` for every function at any depth.
+#: Code objects Python names for a comprehension or a lambda. They are not
+#: functions anyone edits on their own, and on 3.10 a `<listcomp>` carries the
+#: line it appears on — so keying them separately made an edit anywhere above
+#: turn them ABSENT. They FOLD into the function that encloses them.
+_ANON = ("<lambda>", "<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>")
 
-    Keyed the way a code object names itself, so a recording can be looked up
-    without re-deriving scope."""
-    out: Dict[Tuple[str, int], str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            seg = _segment(lines, node)
-            if seg is not None:
-                # `co_firstlineno` points at the `def`, decorators excluded.
-                out[(node.name, node.lineno)] = seg
-        elif isinstance(node, ast.Lambda):
-            seg = _segment(lines, node)
-            if seg is not None:
-                out.setdefault(("<lambda>", node.lineno), seg)
-    return out
+
+def _qualnames(tree: ast.AST, lines: List[str]
+               ) -> Tuple[Dict[int, str], Dict[str, str]]:
+    """``({code-object start line: qualname}, {qualname: source})``.
+
+    KEYED BY QUALNAME, NEVER BY LINE NUMBER — r5 review finding 4. A key
+    carrying a line number turns every function below an inserted line into
+    ABSENT, which degrades the whole file to one bit of granularity: exactly
+    run23's symptom. Line numbers appear here only to map a CODE OBJECT back
+    to its definition at record time, and never leave this module.
+
+    The line recorded is the code object's OWN first line, which for a
+    DECORATED function is its first DECORATOR (r5 review finding 3: keying on
+    the `def` line made those ABSENT at stamp AND at check, so ABSENT ==
+    ABSENT and a body edit was never detected). The hashed source INCLUDES the
+    decorators, because a changed decorator changes the function."""
+    by_line: Dict[int, str] = {}
+    src: Dict[str, str] = {}
+
+    def walk(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qual = f"{prefix}{child.name}"
+                seg = _segment(lines, child)
+                if seg is not None:
+                    src[qual] = seg
+                start = child.lineno
+                for dec in child.decorator_list or ():
+                    dlo = getattr(dec, "lineno", None)
+                    if dlo is not None and dlo < start:
+                        start = dlo
+                by_line[start] = qual
+                walk(child, f"{qual}.")
+            elif isinstance(child, ast.ClassDef):
+                walk(child, f"{prefix}{child.name}.")
+            else:
+                walk(child, prefix)
+
+    walk(tree, "")
+    return by_line, src
+
+
+def _enclosing(by_line: Dict[int, str], lineno: int) -> Optional[str]:
+    """The qualname whose code object starts at or above ``lineno``.
+
+    Used only to FOLD an anonymous code object (a comprehension, a lambda)
+    into the function it lives in."""
+    best = None
+    for start, qual in by_line.items():
+        if start <= lineno and (best is None or start > best[0]):
+            best = (start, qual)
+    return best[1] if best else None
 
 
 def module_body_digest(tree: ast.AST, lines: List[str]) -> str:
-    """sha256 of a module's TOP-LEVEL NON-def statements.
+    """sha256 of a module's NON-def statements, INCLUDING class bodies.
 
     Constants, compiled regex tables, dict dispatch tables and imports are not
     functions and never appear as a call, yet changing one changes what every
-    function in that file does. A recorder that watched only calls would be
-    blind to exactly the tuning constants earlier rounds had to special-case."""
+    function in that file does. r5 review finding 3 added the other half:
+    statements in a CLASS body are in no function either, and were in no
+    digest at all.
+
+    The TEXT is hashed, not the positions (r5 review finding 4): each
+    statement is stripped and joined, so inserting a blank line above a
+    constant does not read as a change to it."""
     parts: List[str] = []
-    for node in getattr(tree, "body", []):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                             ast.ClassDef)):
-            continue
-        seg = _segment(lines, node)
-        if seg is not None:
-            parts.append(seg)
-    return _sha("".join(parts).encode("utf-8"))
+
+    def collect(body) -> None:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if isinstance(node, ast.ClassDef):
+                collect(node.body)
+                continue
+            seg = _segment(lines, node)
+            if seg is not None:
+                parts.append("\n".join(x.strip() for x in seg.splitlines()
+                                        if x.strip()))
+    collect(getattr(tree, "body", []))
+    return _sha("\n".join(parts).encode("utf-8"))
 
 
-def source_digests(path: Path, entries) -> Tuple[Dict[str, str],
-                                                 Optional[str]]:
-    """``({"<name>@<lineno>": sha}, error)`` for the named functions in
-    ``path``, plus the module-body digest."""
+def _parse(path: Path):
     try:
         text = Path(path).read_text(encoding="utf-8")
     except OSError as exc:
-        return {}, f"{path} ran but could not be re-read ({exc})"
+        return None, None, f"{path} could not be read ({exc})"
     try:
         tree = ast.parse(text)
     except SyntaxError as exc:
-        return {}, f"{path} ran but could not be parsed ({exc})"
-    lines = text.splitlines(keepends=True)
-    index = _function_index(tree, lines)
+        return None, None, f"{path} could not be parsed ({exc})"
+    return tree, text.splitlines(keepends=True), None
+
+
+def stamp_digests(path: Path, entries) -> Tuple[Dict[str, str],
+                                                Optional[str]]:
+    """``({qualname: sha}, error)`` for code objects observed RUNNING.
+
+    An entry that cannot be resolved to a definition in the file it came from
+    is a REFUSAL, not a stored value (r5 review finding 3): storing ABSENT at
+    stamp time made it compare equal to the ABSENT the check re-derives, so
+    the function's body could change for ever without being noticed."""
+    tree, lines, err = _parse(path)
+    if err:
+        return {}, f"{path} ran but {err}"
+    by_line, src = _qualnames(tree, lines)
     out: Dict[str, str] = {MODULE_BODY: module_body_digest(tree, lines)}
     for name, lineno in sorted(entries):
-        src = index.get((name, lineno))
-        if src is None:
-            # Recorded as executed, absent from the current source: the code
-            # that ran is not the code on disk. That is the strongest possible
-            # reason to re-run, so it is reported as a value, not skipped.
-            out[f"{name}@{lineno}"] = "ABSENT"
-            continue
-        out[f"{name}@{lineno}"] = _sha(src.encode("utf-8"))
+        qual = by_line.get(lineno)
+        if qual is None and name in _ANON:
+            qual = _enclosing(by_line, lineno)
+        if qual is None or qual not in src:
+            return {}, (f"{path}: a code object that RAN ({name} at line "
+                        f"{lineno}) has no definition in this file, so what "
+                        f"ran cannot be named")
+        out[qual] = _sha(src[qual].encode("utf-8"))
+    return out, None
+
+
+def check_digests(path: Path, qualnames) -> Tuple[Dict[str, str],
+                                                  Optional[str]]:
+    """``({qualname: sha}, error)`` for the SAME names, from CURRENT source.
+
+    A name that has GONE gets the value ``ABSENT``; here that is an honest
+    answer and it differs from any hash, so the step re-runs."""
+    tree, lines, err = _parse(path)
+    if err:
+        return {}, err
+    _by_line, src = _qualnames(tree, lines)
+    out: Dict[str, str] = {MODULE_BODY: module_body_digest(tree, lines)}
+    for qual in sorted(qualnames):
+        seg = src.get(qual)
+        out[qual] = "ABSENT" if seg is None else _sha(seg.encode("utf-8"))
     return out, None
 
 
 def rederive(record: Dict[str, Dict[str, str]], root: Path
              ) -> Tuple[Optional[Dict[str, Dict[str, str]]], str]:
-    """Recompute a recording's keys against the CURRENT source.
-
-    Same shape in, same shape out, so the caller compares two dicts rather
-    than trusting this to decide anything."""
+    """Recompute a recording's keys against the CURRENT source."""
     root = Path(root)
     out: Dict[str, Dict[str, str]] = {}
     for rel, entries in record.items():
-        path = root / rel
-        want = []
-        for key in entries:
-            if key == MODULE_BODY:
-                continue
-            name, _, lineno = key.rpartition("@")
-            try:
-                want.append((name, int(lineno)))
-            except ValueError:
-                return None, f"unreadable recording key {key!r} for {rel}"
-        digests, err = source_digests(path, want)
+        quals = [k for k in entries if k != MODULE_BODY]
+        digests, err = check_digests(root / rel, quals)
         if err:
             return None, err
         out[rel] = digests

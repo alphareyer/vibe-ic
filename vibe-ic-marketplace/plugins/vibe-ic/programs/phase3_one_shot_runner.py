@@ -18225,7 +18225,34 @@ def _probed_tool_versions(project: Path, kind: str) -> str:
         return ""
 
 
-def _recorded(kind: str, fn):
+def _merge_recording(kind: str, rec, why: str) -> None:
+    """Fold one more recorded span into ``kind``'s recording.
+
+    A kind's identity must cover EVERY step that writes that kind's artefacts
+    (r5 review finding 1). `step_signoff_spef_repair` and
+    `step_signoff_drv_wire_length_repair` run AFTER `step_pnr` and copy a
+    repaired DEF over `routed.def` and `{top}.def` — so a fix landed in either
+    changed the shipped DEF while the key that vouched for it read
+    "pnr unchanged", and the next run shipped the old repaired DEF. Recording
+    them INTO pnr (and into gds, which streams that same DEF) is what makes
+    the span match the artefact."""
+    have, have_why = _STEP_RECORDING.get(kind, (None, ""))
+    if rec is None:
+        # One span we could not record poisons the kind: a partial recording
+        # would look like a complete one.
+        _STEP_RECORDING[kind] = (None, why or have_why or "a span of this "
+                                 "kind could not be recorded")
+        return
+    if have is None and (have_why or kind in _STEP_RECORDING):
+        return                      # already poisoned; keep the reason
+    merged: Dict[str, Dict[str, str]] = {k: dict(v) for k, v in
+                                         (have or {}).items()}
+    for rel, entries in rec.items():
+        merged.setdefault(rel, {}).update(entries)
+    _STEP_RECORDING[kind] = (merged, "")
+
+
+def _recorded(kinds, fn):
     """Wrap a step so the code it RUNS is recorded (R-0924-3 r5).
 
     Four review rounds found the same hole class in a static AST closure, and
@@ -18243,8 +18270,10 @@ def _recorded(kind: str, fn):
         try:
             import _step_recorder as _sr  # noqa: PLC0415
         except Exception as exc:  # noqa: BLE001
-            _STEP_RECORDING[kind] = (
-                None, f"the recorder is unavailable ({type(exc).__name__})")
+            for _k in ((kinds,) if isinstance(kinds, str) else kinds):
+                _merge_recording(
+                    _k, None,
+                    f"the recorder is unavailable ({type(exc).__name__})")
             return fn(*a, **k)
         rec = _sr.Recorder(PROGRAMS_DIR)
         try:
@@ -18252,11 +18281,12 @@ def _recorded(kind: str, fn):
                 return fn(*a, **k)
         finally:
             try:
-                _STEP_RECORDING[kind] = rec.recorded()
+                _got, _why = rec.recorded()
             except Exception as exc:  # noqa: BLE001 — never fail the step
-                _STEP_RECORDING[kind] = (
-                    None, f"the recording could not be read "
-                          f"({type(exc).__name__}: {exc})")
+                _got, _why = None, (f"the recording could not be read "
+                                    f"({type(exc).__name__}: {exc})")
+            for _k in ((kinds,) if isinstance(kinds, str) else kinds):
+                _merge_recording(_k, _got, _why)
     return _wrapped
 
 
@@ -18396,6 +18426,10 @@ def _step_inputs(project: Path, kind: str, top: str, args: Any,
                                    else "flow_emitted_or_legacy")
         knobs["spare_density"] = str(getattr(args, "spare_density", ""))
         knobs[_TAP_PITCH_ENV] = os.environ.get(_TAP_PITCH_ENV, "")
+        # r5 review finding 5: this one changes `step_pnr`'s filler Tcl and
+        # therefore the DEF, and was in no component at all.
+        knobs["VIBEIC_SPARSE_DIE_FILL_PCT"] = os.environ.get(
+            "VIBEIC_SPARSE_DIE_FILL_PCT", "")
     elif kind == "gds":
         _add("streamed_def", _pl.pnr_dir(project) / f"{top}.def")
         knobs["VIBEIC_FORCE_KLAYOUT_STREAMOUT"] = os.environ.get(
@@ -68555,7 +68589,8 @@ def main() -> int:
             # the slow sign-off corner, BEFORE gds/drc/lvs so the shipped design is
             # the repaired one. No-op (base route kept) unless it reaches setup>=0
             # AND the reroute is DRC-clean. Fail-safe: never a DRC regression.
-            _sr = step_signoff_spef_repair(project, effective_top, pdk,
+            _sr = _recorded(("pnr", "gds"), step_signoff_spef_repair)(
+                project, effective_top, pdk,
                                            args.container)
             if _sr is not None:
                 plan.append(_sr)
@@ -68576,11 +68611,24 @@ def main() -> int:
             # Runs BEFORE gds/drc/lvs, so the shipped GDS and the LVS/DRC
             # sign-off see whatever this promotes; if nothing improves on the
             # downstream number the incumbent route is restored byte-for-byte.
-            _esc = step_signoff_drv_wire_length_repair(
+            _esc = _recorded(("pnr", "gds"),
+                             step_signoff_drv_wire_length_repair)(
                 project, effective_top, pdk, args.container)
             if _esc is not None:
                 plan.append(_esc)
                 _chain_ok = (_esc.status == "PASS")
+        # RE-STAMP PnR AFTER ITS LAST WRITER. r5 review finding 1: the stamp
+        # was taken when `step_pnr` returned, and the two repair/escalation
+        # steps above then copied a repaired DEF over `routed.def` and
+        # `{top}.def`. The artefact on disk was therefore NOT the artefact the
+        # stamp vouched for, and an edit to the repair path read "pnr
+        # unchanged" and shipped the old repaired DEF. A kind's stamp belongs
+        # after the last step that writes that kind's artefacts; the recording
+        # merged above now covers those steps too.
+        if _STEP_RECORDING.get("pnr", (None, ""))[0] is not None:
+            _write_producer_identity(
+                _pl.pnr_dir(project), "pnr", project=project, pdk=pdk,
+                container=args.container, top=effective_top, args=args)
         if _chain_ok:
             # #593 — the GDS is derived from the DEF, so it shares the
             # PnR geometry cache verdict: a geometry change that forced a

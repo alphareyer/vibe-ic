@@ -119,7 +119,7 @@ def _seed_recording(kind: str) -> None:
     # DERIVED, not invented: a hand-written digest would not survive
     # re-derivation (the check side recomputes these keys from CURRENT
     # source), so the stand-in is computed the same way a real recording is.
-    _d, _err = _sr.source_digests(R.PROGRAMS_DIR / "_step_identity.py", [])
+    _d, _err = _sr.check_digests(R.PROGRAMS_DIR / "_step_identity.py", [])
     assert not _err, _err
     R._STEP_RECORDING[kind] = ({"_step_identity.py": _d}, "")
 

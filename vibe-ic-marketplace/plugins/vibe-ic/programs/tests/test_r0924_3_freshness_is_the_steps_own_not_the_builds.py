@@ -655,7 +655,7 @@ def _fake_recording():
     components supply a stable stand-in here; the recorder's own behaviour is
     covered by the r5 tests that drive it for real."""
     import _step_recorder as _sr
-    d, err = _sr.source_digests(PROGRAMS / "_step_identity.py", [])
+    d, err = _sr.check_digests(PROGRAMS / "_step_identity.py", [])
     assert not err, err
     return {"_step_identity.py": d}
 
@@ -1576,7 +1576,10 @@ def test_an_aliased_import_is_recorded_because_it_ran(tmp_path):
     record, why = _record_run(root)
     assert record is not None, why
     assert "m_alias.py" in record, record
-    assert any(k.startswith("helper@") for k in record["m_alias.py"]), record
+    # QUALNAMES, not name@lineno — r5 review finding 4: a key carrying a line
+    # number turns every function below an inserted line into ABSENT, which
+    # degrades the file to one bit of granularity.
+    assert "helper" in record["m_alias.py"], record
     base = sr.digest_of(record)
     (root / "m_alias.py").write_text(
         "TUNING = 7\ndef helper():\n    return TUNING + 1\n")
@@ -1774,3 +1777,167 @@ def test_mutation_recording_only_calls_would_miss_the_module_body(tmp_path):
         "sanity: without the module body, the constant edit is invisible")
     assert sr.digest_of(now) != sr.digest_of(record), (
         "and WITH it, the same edit is caught — which is why it is there")
+
+
+# ===========================================================================
+# r6 — ROUND-5 REVIEW (wk2vtxpjt)
+#
+# "record what ran" is the right AUTHORITY, but it recorded the wrong SPAN and
+# keyed on line numbers. These exercise the DECISION PATH (`identity_now` /
+# the recorder that feeds it), not the static closure — which the review
+# showed has no caller at all, so the tests that exercised it proved nothing.
+# ===========================================================================
+def _rec_tree(tmp_path: Path) -> Path:
+    root = tmp_path / "p"
+    root.mkdir()
+    (root / "m.py").write_text(
+        "import functools\n"
+        "TUNING = 7\n"
+        "def deco(f):\n"
+        "    return f\n"
+        "class C:\n"
+        "    TABLE = {'a': 1}\n"
+        "    def meth(self):\n"
+        "        return TUNING\n"
+        "@deco\n"
+        "def decorated():\n"
+        "    return [x for x in range(3)]\n"
+        "def run():\n"
+        "    return C().meth() + len(decorated())\n")
+    return root
+
+
+def _rec_of(root: Path):
+    import importlib
+    sys.path.insert(0, str(root))
+    try:
+        sys.modules.pop("m", None)
+        mod = importlib.import_module("m")
+        with sr.Recorder(root) as r:
+            mod.run()
+        return r.recorded()
+    finally:
+        sys.path.remove(str(root))
+
+
+def test_keys_are_qualnames_and_carry_no_line_numbers(tmp_path):
+    """ROUND-5 FINDING 4. A key carrying a line number turns every function
+    below an inserted line into ABSENT, so the runner degrades to whole-file
+    granularity — which is exactly what run23 showed."""
+    root = _rec_tree(tmp_path)
+    record, why = _rec_of(root)
+    assert record is not None, why
+    keys = set(record["m.py"])
+    assert {"run", "decorated", "C.meth", sr.MODULE_BODY} <= keys, keys
+    assert not any("@" in k for k in keys), keys
+
+
+def test_inserting_a_line_at_the_top_of_a_file_changes_nothing(tmp_path):
+    root = _rec_tree(tmp_path)
+    record, why = _rec_of(root)
+    assert record is not None, why
+    base = sr.digest_of(record)
+    src = (root / "m.py").read_text()
+    (root / "m.py").write_text("# a new first line\n" + src)
+    now, err = sr.rederive(record, root)
+    assert not err, err
+    assert sr.digest_of(now) == base, (
+        "an edit ABOVE the recorded functions re-ran the step")
+
+
+def test_a_decorated_functions_body_edit_is_detected(tmp_path):
+    """ROUND-5 FINDING 3. `co_firstlineno` for a decorated function is the
+    DECORATOR line; keying on the `def` line made it ABSENT at stamp AND at
+    check, so ABSENT == ABSENT and a body edit was never noticed."""
+    root = _rec_tree(tmp_path)
+    record, why = _rec_of(root)
+    assert record is not None, why
+    assert "decorated" in record["m.py"], record
+    base = sr.digest_of(record)
+    (root / "m.py").write_text((root / "m.py").read_text().replace(
+        "range(3)", "range(4)"))
+    now, _ = sr.rederive(record, root)
+    assert sr.digest_of(now) != base
+
+
+def test_a_class_body_statement_is_in_the_digest(tmp_path):
+    """The other half of finding 3: a statement in a CLASS body is in no
+    function, and was in no digest at all."""
+    root = _rec_tree(tmp_path)
+    record, why = _rec_of(root)
+    assert record is not None, why
+    base = sr.digest_of(record)
+    (root / "m.py").write_text((root / "m.py").read_text().replace(
+        "TABLE = {'a': 1}", "TABLE = {'a': 2}"))
+    now, _ = sr.rederive(record, root)
+    assert sr.digest_of(now) != base
+
+
+def test_an_unnameable_code_object_refuses_at_stamp_time(tmp_path):
+    """An ABSENT at STAMP time is a refusal, not a stored value — storing it
+    made it compare equal to the ABSENT the check re-derives."""
+    root = _rec_tree(tmp_path)
+    digests, err = sr.stamp_digests(root / "m.py", [("nope", 9999)])
+    assert digests == {} and err, (digests, err)
+    assert "has no definition" in err, err
+
+
+def test_a_comprehension_folds_into_its_enclosing_function(tmp_path):
+    """On 3.10 a `<listcomp>` carries the line it appears on, so keying it
+    separately made an edit anywhere above turn it ABSENT."""
+    root = _rec_tree(tmp_path)
+    record, why = _rec_of(root)
+    assert record is not None, why
+    assert not any(k.startswith("<") for k in record["m.py"]), record
+
+
+# --- the SPAN: every step that writes the kind's artefacts -----------------
+def test_the_post_stamp_writers_are_recorded_into_pnr_and_gds():
+    """ROUND-5 FINDING 1, on the decision path. `step_signoff_spef_repair` and
+    `step_signoff_drv_wire_length_repair` run AFTER `step_pnr` and copy a
+    repaired DEF over `routed.def` and `{top}.def`, so an edit to the repair
+    path read "pnr unchanged" and shipped the old repaired DEF."""
+    src = RUNNER.read_text()
+    for writer in ("step_signoff_spef_repair",
+                   "step_signoff_drv_wire_length_repair"):
+        assert f'_recorded(("pnr", "gds"), {writer})' in src \
+            or f'_recorded(("pnr", "gds"),\n                             {writer})' in src, (
+            f"{writer} writes the cached DEF and is not recorded into the "
+            f"kinds it rewrites")
+    assert "RE-STAMP PnR AFTER ITS LAST WRITER" in src, (
+        "the pnr stamp must be taken after the last step that writes its "
+        "artefacts, or the stamp vouches for bytes that were then replaced")
+
+
+def test_the_recorder_accumulates_rather_than_replacing(tmp_path,
+                                                        monkeypatch):
+    """Two recorded spans of the same kind must MERGE, or the last one wins
+    and the earlier step's code leaves the identity."""
+    monkeypatch.setattr(_R, "_STEP_RECORDING", {})
+    _R._merge_recording("pnr", {"a.py": {"f": "1"}}, "")
+    _R._merge_recording("pnr", {"b.py": {"g": "2"}}, "")
+    got, why = _R._STEP_RECORDING["pnr"]
+    assert got is not None and set(got) == {"a.py", "b.py"}, (got, why)
+
+
+def test_a_span_that_could_not_be_recorded_poisons_the_kind(tmp_path,
+                                                            monkeypatch):
+    """A partial recording would look like a complete one."""
+    monkeypatch.setattr(_R, "_STEP_RECORDING", {})
+    _R._merge_recording("pnr", {"a.py": {"f": "1"}}, "")
+    _R._merge_recording("pnr", None, "the profiler was unavailable")
+    got, why = _R._STEP_RECORDING["pnr"]
+    assert got is None and "profiler" in why, (got, why)
+
+
+def test_the_sparse_die_fill_knob_is_part_of_pnrs_identity(tmp_path,
+                                                           monkeypatch):
+    """ROUND-5 FINDING 5: it changes `step_pnr`'s filler Tcl and the DEF, and
+    was in no component."""
+    project = _staged_project(tmp_path)
+    _inputs, knobs, _bad = _R._step_inputs(project, "pnr", "top", _Args())
+    assert "VIBEIC_SPARSE_DIE_FILL_PCT" in knobs, sorted(knobs)
+    base = _r3_ident(project, "pnr")
+    monkeypatch.setenv("VIBEIC_SPARSE_DIE_FILL_PCT", "12")
+    fresh, why = si.compare(base, _r3_ident(project, "pnr"))
+    assert fresh is False, why
