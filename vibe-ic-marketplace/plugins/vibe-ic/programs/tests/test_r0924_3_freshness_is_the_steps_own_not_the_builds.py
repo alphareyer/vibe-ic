@@ -1442,3 +1442,115 @@ def test_a_launch_of_a_non_plugin_script_is_not_a_refusal(tmp_path):
     record, why = r.recorded()
     assert record is not None, why
     assert not any(k.endswith("something_else.py") for k in record), record
+
+
+# ===========================================================================
+# r7 — ROUND-6 REVIEW (wcr8rvg8d): 2 HIGH + 1 MED, all narrow
+# ===========================================================================
+def test_the_re_stamp_never_shrinks_the_recording(tmp_path, monkeypatch):
+    """ROUND-6 FINDING 1, and it is the dangerous one.
+
+    On a pnr CACHE HIT `step_pnr` never runs, but the two repair steps still
+    do under `_recorded(("pnr", "gds"))` — so this session's "pnr" recording
+    names ONLY the repair functions. Overwriting the sidecar with it dropped
+    every `step_pnr` key, and the next run compared a set that no longer
+    mentioned the router: an edit to a step_pnr-only helper read "pnr
+    unchanged" and the DEF was reused. That is exactly `--force-step gds` on a
+    finished tree, which is the scenario R-0924-3 was measured on."""
+    project = _staged_project(tmp_path)
+    out = _R._pl.pnr_dir(project)
+    out.mkdir(parents=True, exist_ok=True)
+
+    # a stamp from a run in which step_pnr DID run
+    full = {"phase3_one_shot_runner.py": {sr.MODULE_BODY: "m",
+                                          "step_pnr": "a",
+                                          "_build_pdn_tcl": "b"}}
+    monkeypatch.setattr(_R, "_STEP_RECORDING", {"pnr": (full, "")})
+    _R._write_producer_identity(out, "pnr", project=project,
+                                pdk=_pdk_with_real_files(project),
+                                container="", top="top", args=_Args())
+    first = si.read_sidecar(out, "pnr") or {}
+    assert "step_pnr" in first["recording"]["phase3_one_shot_runner.py"]
+
+    # now a CACHE HIT: only the repair steps ran
+    repair_only = {"phase3_one_shot_runner.py": {
+        sr.MODULE_BODY: "m", "step_signoff_spef_repair": "c"}}
+    monkeypatch.setattr(_R, "_STEP_RECORDING", {"pnr": (repair_only, "")})
+    _R._write_producer_identity(out, "pnr", project=project,
+                                pdk=_pdk_with_real_files(project),
+                                container="", top="top", args=_Args())
+    second = si.read_sidecar(out, "pnr") or {}
+    keys = second["recording"]["phase3_one_shot_runner.py"]
+    assert "step_pnr" in keys and "_build_pdn_tcl" in keys, (
+        f"the re-stamp SHRANK the recording and the router is no longer named: "
+        f"{sorted(keys)}")
+    assert "step_signoff_spef_repair" in keys, (
+        "and the repair that rewrote the DEF must be named too")
+
+
+def test_a_grandchild_engine_is_reached_from_the_real_program(tmp_path):
+    """ROUND-6 FINDING 2. The `Popen` wrapper sees HOP 1 (runner ->
+    `metal_fill_emit.py`) but not HOP 2 (`metal_fill_emit.py` -> `klayout -b
+    -r metal_fill/metal_fill.py`), and both rewrite the GDS in place inside
+    `step_gds`. `_SCRIPT_RE` was `.py`-only and `_static_imports` follows
+    Python imports only, so the engine was outside the key entirely.
+
+    Driven against the REAL program, not a shape the flow does not use."""
+    emit = PROGRAMS / "metal_fill_emit.py"
+    assert emit.is_file(), "the real program must exist for this to mean it"
+    assets = sr._engine_assets(emit, PROGRAMS)
+    names = {str(q.relative_to(PROGRAMS)) for q in assets
+             if str(q).startswith(str(PROGRAMS))}
+    assert "metal_fill/metal_fill.py" in names, (
+        f"the KLayout engine this program hands off to is not reachable: "
+        f"{sorted(names)}")
+
+
+def test_an_engine_asset_edit_invalidates_the_launched_closure(tmp_path):
+    root = tmp_path / "eng"
+    (root / "metal_fill").mkdir(parents=True)
+    (root / "metal_fill" / "metal_fill.py").write_text("print('v1')\n")
+    (root / "emit.py").write_text("ENGINE = 'metal_fill.py'\nprint(ENGINE)\n")
+    (root / "m.py").write_text(
+        "import subprocess, sys\n"
+        "def run():\n"
+        "    subprocess.run([sys.executable, 'emit.py'], cwd=%r,\n"
+        "                   capture_output=True)\n" % str(root))
+    import importlib
+    sys.path.insert(0, str(root))
+    try:
+        sys.modules.pop("m", None)
+        mod = importlib.import_module("m")
+        with sr.Recorder(root) as r:
+            mod.run()
+        record, why = r.recorded()
+    finally:
+        sys.path.remove(str(root))
+    assert record is not None, why
+    assert "launched:metal_fill/metal_fill.py" in record, sorted(record)
+    base = sr.digest_of(record)
+    (root / "metal_fill" / "metal_fill.py").write_text("print('v2')\n")
+    now, err = sr.rederive(record, root)
+    assert not err, err
+    assert sr.digest_of(now) != base, (
+        "an edit to the engine a launched program hands to KLayout went "
+        "unnoticed")
+
+
+def test_the_engine_env_is_compared_by_its_bytes(tmp_path, monkeypatch):
+    """ROUND-6 FINDING 3. `__engine_env__` was recorded and then copied back
+    verbatim by `rederive`, so it was never COMPARED — swapping the fork
+    engine never made the GDS stale. And a PATH STRING is not an engine: two
+    different checkouts at the same path read identical."""
+    fork = tmp_path / "fork"
+    fork.mkdir()
+    (fork / "engine.rb").write_text("v1\n")
+    monkeypatch.setenv("VIBEIC_KLAYOUT_TOOLS", str(fork))
+    record = {"__engine_env__": {"VIBEIC_KLAYOUT_TOOLS":
+                                 sr._engine_marker("VIBEIC_KLAYOUT_TOOLS")}}
+    base = sr.digest_of(record)
+    assert sr.digest_of(sr.rederive(record, tmp_path)[0]) == base, "stable"
+    # same PATH, different BYTES
+    (fork / "engine.rb").write_text("v2\n")
+    assert sr.digest_of(sr.rederive(record, tmp_path)[0]) != base, (
+        "the fork engine's contents changed and nothing noticed")

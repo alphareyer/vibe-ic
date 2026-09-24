@@ -81,10 +81,80 @@ def _sha256_file(p: Path) -> Optional[str]:
 #: element, inside a `bash -lc "…"` string, or after klayout's `-r` / `-rm`.
 _SCRIPT_RE = re.compile(r"[^\s\"\'=]+\.py\b")
 
+#: An ENGINE ASSET a launched program hands to another tool: a KLayout script
+#: (`.py`, `.rb`, `.lym`), a rule deck (`.drc`, `.lydrc`) or a Tcl recipe.
+#: r6 review finding 2: the `Popen` wrapper sees HOP 1 (runner ->
+#: `metal_fill_emit.py`) but not HOP 2 (`metal_fill_emit.py` -> `klayout -b -r
+#: metal_fill/metal_fill.py`), and both rewrite the GDS in place inside
+#: `step_gds`.
+_ASSET_RE = re.compile(
+    r"[\"\']([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:py|rb|lym|drc|lydrc|tcl))[\"\']")
+
 #: Environment that CHOOSES which engine runs, rather than what it runs on.
 #: `$VIBEIC_KLAYOUT_TOOLS` points `_klayout_launch` at a fork checkout, so the
 #: same recipe can execute entirely different code (r5 review finding 2).
 ENGINE_ENV = ("VIBEIC_KLAYOUT_TOOLS",)
+
+
+def _engine_marker(name: str) -> str:
+    """A digest of the ENGINE an env var selects — its bytes, not its path.
+
+    r6 review finding 3: hashing the path string alone meant two different
+    fork checkouts at the same path read identical, and the variable was never
+    compared at all."""
+    val = os.environ.get(name, "")
+    marker = val
+    if val:
+        q = Path(val)
+        if q.is_dir():
+            try:
+                names = sorted(f"{x.relative_to(q)}:{_sha256_file(x)}"
+                               for x in q.rglob("*") if x.is_file())[:4096]
+                marker = val + "\n" + "\n".join(names)
+            except OSError:
+                marker = val + "\nUNREADABLE"
+        elif q.exists():
+            marker = val + "\n" + str(_sha256_file(q))
+        else:
+            marker = val + "\nABSENT"
+    return _sha(marker.encode("utf-8"))
+
+
+def _engine_assets(path: Path, root: Path) -> List[Path]:
+    """Files a launched program NAMES for another tool to execute.
+
+    `_klayout_launch.find_engine(subdir, name)` resolves
+    `$VIBEIC_KLAYOUT_TOOLS/<subdir>/<name>` first and the vendored
+    `<programs>/<subdir>/<name>` second — so a program that names
+    `"metal_fill.py"` or `"pdk_fill_driver.rb"` in a string is handing a whole
+    script to KLayout, and no Python import walk can see it. Both spellings of
+    the subdir are searched because the fork uses hyphens where the plugin
+    uses underscores."""
+    out: List[Path] = []
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    roots: List[Path] = [Path(path).parent, Path(root)]
+    env = os.environ.get("VIBEIC_KLAYOUT_TOOLS")
+    if env:
+        roots.append(Path(env))
+    for name in sorted(set(_ASSET_RE.findall(text))):
+        for base in roots:
+            cand = base / name
+            if cand.is_file():
+                out.append(cand)
+                break
+        else:
+            # `<root>/<subdir>/<name>` — the vendored engine layout, whose
+            # subdir the caller passes separately and we do not have here.
+            hits = sorted(Path(root).glob(f"*/{Path(name).name}"))
+            if env:
+                hits += sorted(Path(env).glob(f"*/{Path(name).name}"))
+            for q in hits[:4]:
+                if q.is_file():
+                    out.append(q)
+    return out
 
 
 def _static_imports(path: Path, root: Path, seen=None) -> List[Path]:
@@ -250,8 +320,7 @@ class Recorder:
         out.update(launched)
         if self._engine_env:
             out["__engine_env__"] = {
-                k: _sha(v.encode("utf-8"))
-                for k, v in sorted(self._engine_env.items())}
+                k: _engine_marker(k) for k in sorted(self._engine_env)}
         return out, ""
 
     def _resolve_script(self, tok: str) -> Optional[Path]:
@@ -285,7 +354,11 @@ class Recorder:
                                 f"could not be read, so what this step ran "
                                 f"out of process cannot be established")
                 continue
-            for q in _static_imports(path, root):
+            reach = _static_imports(path, root)
+            for q in list(reach):
+                reach.extend(a for a in _engine_assets(q, root)
+                             if a not in reach)
+            for q in reach:
                 d = _sha256_file(q)
                 if d is None:
                     return {}, (f"{q} was launched (or imported by a launched "
@@ -293,7 +366,11 @@ class Recorder:
                 try:
                     rel = str(q.resolve().relative_to(root))
                 except (OSError, ValueError):
-                    rel = q.name
+                    # An engine under `$VIBEIC_KLAYOUT_TOOLS` lives OUTSIDE the
+                    # plugin, so its absolute path is what identifies it — a
+                    # bare basename would re-hash the vendored copy instead and
+                    # a fork swap would look like no change at all.
+                    rel = str(q.resolve())
                 out.setdefault(f"launched:{rel}", {})["__whole__"] = d
         return out, ""
 
@@ -473,10 +550,32 @@ def rederive(record: Dict[str, Dict[str, str]], root: Path
     out: Dict[str, Dict[str, str]] = {}
     for rel, entries in record.items():
         if rel == "__engine_env__":
-            # The environment that PICKS the engine is a fact about now, and
-            # the caller re-supplies it; carried forward unchanged so a
-            # comparison is against the recorded value.
-            out[rel] = dict(entries)
+            # RE-READ, NOT COPIED. r6 review finding 3: carrying the recorded
+            # value forward meant it was never COMPARED, so swapping the fork
+            # engine never made the GDS stale. The value is read from the
+            # environment as it is NOW, and what is hashed is the ENGINE ROOT
+            # IT POINTS AT — a path string is not an engine.
+            now: Dict[str, str] = {}
+            for name in entries:
+                val = os.environ.get(name, "")
+                marker = val
+                if val:
+                    q = Path(val)
+                    if q.is_dir():
+                        try:
+                            names = sorted(
+                                f"{x.relative_to(q)}:{_sha256_file(x)}"
+                                for x in q.rglob("*")
+                                if x.is_file())[:4096]
+                            marker = val + "\n" + "\n".join(names)
+                        except OSError:
+                            marker = val + "\nUNREADABLE"
+                    elif q.exists():
+                        marker = val + "\n" + str(_sha256_file(q))
+                    else:
+                        marker = val + "\nABSENT"
+                now[name] = _sha(marker.encode("utf-8"))
+            out[rel] = now
             continue
         if rel.startswith("launched:"):
             q = root / rel[len("launched:"):]
