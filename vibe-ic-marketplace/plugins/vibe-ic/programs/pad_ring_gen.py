@@ -572,7 +572,7 @@ def _place(die: PR.Def, cfg: Dict[str, Any], lib: PR.IoLibrary,
         # floor(floor(a)/w) == floor(a/w) for integer w. Step 7 is the only
         # divergence and this comment is it.
         # 8. refuse a corner spacing that is not a multiple of the site width
-        if odd or to_corner % site_w:
+        if PR.side_spacing(total, n, avail, site_w) is None:
             widths = sorted(set(along))
             guidance_fields: Dict[str, Any] = {
                 "current_pad_count": n,
@@ -1532,6 +1532,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         fillers_declared=cfg["fillers"],
         fillers_placed=len(fillers),
         unperformed=unperformed, bterms=bterms, findings=notes)
+    skip_marker = project / PR.PADRING_SKIPPED_REL
+    try:
+        skip_marker.unlink(missing_ok=True)
+    except OSError as exc:
+        return _fail("PADRING_SKIP_MARKER_UNREMOVABLE",
+                     f"{PR.PADRING_SKIPPED_REL}: {exc}; a stale SKIP marker "
+                     "must not coexist with a verified new ring",
+                     die=die_rec, config=cfg_rec)
     _write(project, args.json, rep)
     print(f"=== {PROGRAM} ({project.name}) ===")
     print("  verdict: PASS")

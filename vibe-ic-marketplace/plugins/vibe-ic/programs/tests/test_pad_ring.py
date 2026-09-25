@@ -397,6 +397,30 @@ def test_a_corner_spacing_off_the_site_grid_is_refused(tmp_path):
     assert "PAD_CORNER_SPACING_NOT_SITE_MULTIPLE" in _rules(root)
 
 
+def test_runner_log_keeps_real_ring_producer_refusal(tmp_path, capsys):
+    import phase3_one_shot_runner as runner
+
+    root = _project(tmp_path, site_w=6.0)
+    assert _gen(root) == 1
+    output = capsys.readouterr().out
+    note = runner._pad_ring_process_note(1, output, "")
+    assert note.startswith("PAD_CORNER_SPACING_NOT_SITE_MULTIPLE:")
+    assert "minimum site width" in note
+    assert runner._pad_ring_process_note(0, output, "") == output.splitlines()[0]
+
+
+def test_second_generation_retires_a_previous_skip_sidecar(tmp_path):
+    root = _project(tmp_path, config=None)
+    assert _gen(root) == 2
+    marker = root / PR.PADRING_SKIPPED_REL
+    assert marker.is_file()
+    (root / PR.ASSIGNMENT_REL).write_text(json.dumps(_config()))
+    assert _gen(root) == 0
+    assert _report(root)["verdict"] == "PASS"
+    assert _ring_def(root).is_file()
+    assert not marker.exists()
+
+
 def test_the_corner_grid_refusal_names_every_feasible_uniform_pad_count(
         tmp_path, capsys):
     """The refusal must answer the arithmetic question it already solved.
