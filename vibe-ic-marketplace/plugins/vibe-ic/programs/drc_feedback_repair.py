@@ -344,6 +344,9 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
         if not source_def.is_file():
             raise ValueError('FEEDBACK_ROUTED_DEF_MISSING')
         digest = _sha(source_def)
+        routed = pnr / 'routed.def'
+        if publish and (not routed.is_file() or _sha(routed) != digest):
+            raise ValueError('FEEDBACK_CANONICAL_DEF_DIVERGED')
         record['initial_source_sha256'] = digest
         record['source_sha256'] = digest
         if not re.fullmatch(r'(?:sha256:)?[0-9a-f]{64}', image):
@@ -438,11 +441,7 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
                     raise ValueError('FEEDBACK_BOUND_EXHAUSTED')
                 record['after_count'] = 0
             if current != source_def and publish:
-                outputs = [source_def]
-                routed = pnr / 'routed.def'
-                if routed != source_def and routed.is_file() and _sha(routed) == digest:
-                    outputs.append(routed)
-                _replace_selected(current, outputs)
+                _replace_selected(current, [source_def, routed])
             record['source_sha256'] = _sha(source_def)
             record['status'] = 'PASS'
             record['reason'] = 'RULE_ZERO_WITH_ROUTE_GUARDS'
@@ -464,12 +463,16 @@ def verify_streamed(project: Path, top: str, pdk: Any, image: str,
     Finishing may add geometry after the scratch DEF stream. Measure the
     reviewed rule again on the actual GDS and refuse any changed input.
     """
+    _instrument_calibration.assert_calibrated('drc_feedback_repair::run')
     receipt = project / 'reports/phase3/drc_feedback.json'
     source = project / 'phase3/stage3/pnr' / f'{top}.def'
     try:
         record = json.loads(receipt.read_text())
         if record.get('status') != 'PASS' or record.get('source_sha256') != _sha(source):
             raise ValueError('FEEDBACK_ROUTE_DIGEST_MISMATCH')
+        routed = project / 'phase3/stage3/pnr/routed.def'
+        if not routed.is_file() or _sha(routed) != _sha(source):
+            raise ValueError('FEEDBACK_CANONICAL_DEF_DIVERGED')
         if not gds.is_file():
             raise ValueError('FEEDBACK_FINISHED_GDS_MISSING')
         design = _def_design(source)
@@ -501,9 +504,11 @@ def check_binding(project: Path, top: str, gds: Path) -> tuple[bool, str]:
     try:
         record = json.loads((project / 'reports/phase3/drc_feedback.json').read_text())
         source = project / 'phase3/stage3/pnr' / f'{top}.def'
+        routed = project / 'phase3/stage3/pnr/routed.def'
         if (record.get('status') == 'PASS'
                 and record.get('finished_status') == 'PASS'
                 and record.get('source_sha256') == _sha(source)
+                and _sha(routed) == _sha(source)
                 and record.get('finished_gds_sha256') == _sha(gds)
                 and record.get('finished_counts')
                 and all(v == 0 for v in record['finished_counts'].values())):

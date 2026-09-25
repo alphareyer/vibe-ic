@@ -275,7 +275,8 @@ def unresolved_pin_layers(pins):
     return sorted({layer for _n, layer, _x, _y in pins if not metal_index(layer)})
 
 
-def restore(gds_in, def_file, gds_out, top=None, pdk_tech=None):
+def restore(gds_in, def_file, gds_out, top=None, pdk_tech=None,
+            mask_out=None):
     try:
         def_text = open(def_file).read()
     except OSError as exc:
@@ -314,6 +315,12 @@ def restore(gds_in, def_file, gds_out, top=None, pdk_tech=None):
 
     ly = pya.Layout(); ly.read(gds_in)
     tc = ly.cell(top) if top else ly.top_cell()
+    # A separate mask view receives only PDK-declared port label layers.
+    # Synthetic 100/n text and 901/902 rail markers are LVS working layers.
+    mask_ly = pya.Layout() if mask_out else None
+    if mask_ly is not None:
+        mask_ly.read(gds_in)
+        mask_tc = mask_ly.cell(top) if top else mask_ly.top_cell()
     # DEF database unit -> GDS dbu, using the DEF's OWN declared resolution.
     _units = def_units_per_micron(def_text)
     if _units is None:
@@ -349,6 +356,11 @@ def restore(gds_in, def_file, gds_out, top=None, pdk_tech=None):
         _pdk_ld = _pdk_map.get(_idx)
         if _pdk_ld:
             tc.shapes(ly.layer(*_pdk_ld)).insert(pya.Text(name, _tr))
+            if mask_ly is not None:
+                mask_tc.shapes(mask_ly.layer(*_pdk_ld)).insert(
+                    pya.Text(name, pya.Trans(
+                        pya.Trans.R0, int(round(x * ((1.0 / _units) / mask_ly.dbu))),
+                        int(round(y * ((1.0 / _units) / mask_ly.dbu))))))
             _n_pdk += 1
 
     # v1.3.93 — paint the uniting rail-marker on the FOLLOW-PIN layer ONLY.
@@ -382,6 +394,8 @@ def restore(gds_in, def_file, gds_out, top=None, pdk_tech=None):
             n_rail += 1
 
     ly.write(gds_out)
+    if mask_ly is not None:
+        mask_ly.write(mask_out)
     _strap_note = (f" (+{n_strap_skipped} upper-metal strap seg(s) NOT marked — "
                    f"united via real via connectivity)" if n_strap_skipped else "")
     # #613 — a PARTIAL resolution is the dangerous middle: the run looks clean
@@ -412,6 +426,7 @@ def main(argv=None):
     ap.add_argument("--gds-in", required=True)
     ap.add_argument("--def-file", required=True)
     ap.add_argument("--gds-out", required=True)
+    ap.add_argument("--mask-out", help="mask GDS with PDK port labels only; flow markers stay in --gds-out")
     ap.add_argument("--top")
     ap.add_argument("--pdk-tech",
                     help="Magic `*-GDS.tech` for the design's PDK. Its "
@@ -420,7 +435,8 @@ def main(argv=None):
                          "labels are written there IN ADDITION to layer "
                          f"{TEXT_LAYER[0]}. Absent -> disclosed, never guessed.")
     a = ap.parse_args(argv)
-    return restore(a.gds_in, a.def_file, a.gds_out, a.top, a.pdk_tech)
+    return restore(a.gds_in, a.def_file, a.gds_out, a.top, a.pdk_tech,
+                   a.mask_out)
 
 
 if __name__ == "__main__":
