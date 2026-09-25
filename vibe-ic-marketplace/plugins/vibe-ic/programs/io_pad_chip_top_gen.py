@@ -972,6 +972,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         tie_low_cell: Optional[str] = None,
         tie_low_pin: Optional[str] = None,
         tie_liberty: Optional[str] = None,
+        supply_plan: Optional[Dict[str, object]] = None,
         ) -> Tuple[int, Dict[str, object]]:
     rec: Dict[str, object] = {"program": PROGRAM, "verdict": "REFUSE",
                               "findings": [], "project": str(project)}
@@ -1167,33 +1168,83 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         pair, plan = _derive_supply_pad_pair(
             classes, sizes, pin_roles, prefix, power_net, ground_net,
             macro_sources)
-        # Put the adjacent pair on the currently shortest edge.  This is a
-        # stable geometric minimisation; it neither rewrites the design's
-        # signal partition nor lengthens the longest side unless every side
-        # was already equally full.
+        # Without a measured current, one pair is the exploration baseline.
+        # A same-run PSM plan may request more; it is never an input-side pad
+        # assignment and it never changes the signal instances or their order.
         side_widths = {
             side: sum(sizes.get(str(chosen[i]["master"]), (0.0, 0.0))[0]
                       for i in ordered[side])
             for side in SIDES}
-        supply_side = min(SIDES, key=lambda side: (side_widths[side],
-                                                   SIDES.index(side)))
+        pair_count = 1
+        if supply_plan is not None:
+            if (supply_plan.get("verdict") != "PLANNED"
+                    or not isinstance(supply_plan.get("pair_count"), int)
+                    or supply_plan["pair_count"] < 1
+                    or not supply_plan.get("subject_def_sha256")):
+                raise Refusal("SUPPLY_ENTRY_PLAN_INVALID",
+                              "the measured-current supply plan lacks a positive count or subject")
+            pair_count = int(supply_plan["pair_count"])
+        pair_width = sum(sizes[str(entry["master"])][0] for entry in pair)
+        supply_placement: Dict[str, List[List[str]]] = {s: [] for s in SIDES}
+        if supply_plan is None:
+            side = min(SIDES, key=lambda s: (side_widths[s], SIDES.index(s)))
+            allocation = [side]
+        else:
+            die = float(supply_plan.get("die_side_um") or 0)
+            corner = float(sizes.get(str(decls.values.get("PAD_CORNER")), (0, 0))[0])
+            edge = float(decls.values.get("PAD_EDGE_SPACING") or 0)
+            if not (die > 2 * (corner + edge) and pair_width > 0):
+                raise Refusal("SUPPLY_ENTRY_NO_LEGAL_SITE",
+                              "die, corner, edge, or supply-master geometry is absent")
+            usable = die - 2 * (corner + edge)
+            capacity = {s: max(0, int((usable - side_widths[s] + 1e-9)
+                                       // pair_width)) for s in SIDES}
+            if sum(capacity.values()) < pair_count:
+                raise Refusal("SUPPLY_ENTRY_NO_LEGAL_SITE",
+                              f"{pair_count} VDD/VSS pairs need {pair_width:g}um each; "
+                              f"available pairs by side are {capacity}")
+            allocation = []
+            used = {s: 0 for s in SIDES}
+            for _ in range(pair_count):
+                choices = [s for s in SIDES if used[s] < capacity[s]]
+                side = min(choices, key=lambda s: (used[s], side_widths[s],
+                                                    SIDES.index(s)))
+                used[side] += 1
+                allocation.append(side)
         supply_instances: List[str] = []
-        for entry in pair:
-            inst = f"u_pad_supply_{entry['kind']}"
-            if inst in chosen:
-                raise Refusal("INSTANCE_NAME_COLLISION",
-                              f"supply pad maps to existing {inst!r}")
-            chosen[inst] = dict(entry)
-            supply_instances.append(inst)
-        ordered[supply_side] = supply_instances + ordered[supply_side]
+        for index, side in enumerate(allocation):
+            group = []
+            for entry in pair:
+                suffix = "" if pair_count == 1 else f"_{index}"
+                inst = f"u_pad_supply_{entry['kind']}{suffix}"
+                if inst in chosen:
+                    raise Refusal("INSTANCE_NAME_COLLISION",
+                                  f"supply pad maps to existing {inst!r}")
+                chosen[inst] = dict(entry)
+                supply_instances.append(inst)
+                group.append(inst)
+            supply_placement[side].append(group)
+        for side in SIDES:
+            signals = ordered[side]
+            groups = supply_placement[side]
+            if not groups:
+                continue
+            # Preserve the relative signal order while distributing entries.
+            buckets = [[] for _ in range(len(signals) + 1)]
+            for n, group in enumerate(groups):
+                buckets[(n * len(buckets)) // len(groups)].extend(group)
+            ordered[side] = [item for n, signal in enumerate(signals)
+                             for item in [*buckets[n], signal]] + buckets[-1]
         supply_ports = [power_net, ground_net]
         source_file = (Path(pdk_root) / str(pdk) / "SOURCES"
                        if pdk_root and pdk else None)
         plan.update({
-            "placement_side": supply_side,
-            "placement_basis": (
-                "adjacent minimum pair prepended to the edge with the least "
-                "existing signal-pad width; ties use S/E/N/W order"),
+            "placement_side": allocation[0] if pair_count == 1 else None,
+            "placement_basis": ("minimum pair on shortest signal edge" if pair_count == 1
+                                else "measured-current pairs balanced across legal sides; signal order retained"),
+            "pair_count": pair_count,
+            "pairs_by_side": {s: len(supply_placement[s]) for s in SIDES},
+            "measured_supply_entry_plan": supply_plan,
             "signal_width_before_um": side_widths,
             "instances": supply_instances,
             "pdk_sources": ({"path": str(source_file),
@@ -1466,6 +1517,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--pdk", default=None)
     ap.add_argument("--power-net", default=None)
     ap.add_argument("--ground-net", default=None)
+    ap.add_argument("--supply-plan", default=None)
     ap.add_argument("--tie-high-cell", default=None)
     ap.add_argument("--tie-high-pin", default=None)
     ap.add_argument("--tie-low-cell", default=None)
@@ -1479,10 +1531,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     pdk = args.pdk or os.environ.get("PDK")
 
     try:
+        plan = json.loads(Path(args.supply_plan).read_text()) if args.supply_plan else None
         rc, rec = run(
             project, pdk_root, pdk, args.power_net, args.ground_net,
             args.tie_high_cell, args.tie_high_pin,
-            args.tie_low_cell, args.tie_low_pin, args.tie_liberty)
+            args.tie_low_cell, args.tie_low_pin, args.tie_liberty, plan)
     except Unavailable as exc:
         rc, rec = 2, {"program": PROGRAM, "verdict": "NOT_AVAILABLE",
                       "rule": exc.rule, "findings": [exc.message]}

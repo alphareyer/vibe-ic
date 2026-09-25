@@ -301,6 +301,63 @@ def pdn_pad_entry_plan(segments: Sequence[Mapping[str, Any]], *,
     return out
 
 
+def pdn_supply_entry_count_plan(*, current_A: float,
+                                ring_plan: Mapping[str, Any],
+                                pad_entries: Sequence[Mapping[str, Any]],
+                                jmax_A_per_um: Mapping[str, float],
+                                margin: float) -> Dict[str, Any]:
+    """Plan paired supply entries from this layout's PSM current and LEF Jmax.
+
+    The existing ring recipe, rather than an unbuildable proposed width, is
+    the capacity of each new entry.  This is a conservative count proposal;
+    only a new PSM run can establish the actual current distribution.
+    """
+    if not (math.isfinite(current_A) and current_A > 0
+            and 0 <= margin < 1):
+        raise ValueError("SUPPLY_ENTRY_CURRENT_UNMEASURED")
+    capacities = []
+    for layer, width in zip(ring_plan.get("layers", ()),
+                            ring_plan.get("recipe_widths_um", ())):
+        jmax = float(jmax_A_per_um.get(str(layer).lower(), 0))
+        if jmax > 0 and float(width) > 0:
+            capacities.append({"structure": "ring", "layer": str(layer),
+                               "width_um": float(width),
+                               "capacity_A": float(width) * jmax * (1 - margin)})
+    for entry in pad_entries:
+        width = float(entry.get("drawn_width_um") or 0)
+        jmax = float(entry.get("jmax_A_per_um") or 0)
+        if width > 0 and jmax > 0:
+            capacities.append({"structure": "pad_entry",
+                               "layer": str(entry["layer"]),
+                               "width_um": width,
+                               "capacity_A": width * jmax * (1 - margin)})
+    if not capacities or not any(c["structure"] == "pad_entry" for c in capacities):
+        raise ValueError("SUPPLY_ENTRY_CAPACITY_UNPROVEN")
+    pad_capacity = min(c["capacity_A"] for c in capacities
+                       if c["structure"] == "pad_entry")
+    ring_caps = [c for c in capacities if c["structure"] == "ring"]
+    ring_peaks = ring_plan.get("measured_ring_peak_A") or {}
+    ring_demands = []
+    for c in ring_caps:
+        peak = float(ring_peaks.get(c["layer"].lower(), 0))
+        if peak > 0:
+            ring_demands.append({**c, "measured_peak_A": peak,
+                                 "required_pairs": math.floor(peak / c["capacity_A"]) + 1})
+    if ring_caps and not ring_demands:
+        raise ValueError("RING_SEGMENT_CURRENT_UNMEASURED")
+    # J == Jmax after guardband is an offender, so equality needs one more.
+    pad_pairs = math.floor(current_A / pad_capacity) + 1
+    ring_pairs = max((x["required_pairs"] for x in ring_demands), default=1)
+    pairs = max(1, pad_pairs, ring_pairs)
+    limiting = min(capacities, key=lambda c: c["capacity_A"])
+    return {"verdict": "PLANNED", "rule": "PSM_CURRENT_OVER_ENTRY_CAPACITY",
+            "current_A": current_A, "margin": margin,
+            "capacities": capacities, "limiting": limiting,
+            "pad_pair_floor": pad_pairs, "ring_pair_floor": ring_pairs,
+            "ring_demands": ring_demands, "pair_count": pairs,
+            "validation": "NEW_PSM_REQUIRED: count extrapolates measured peak sharing; final EM must remeasure every segment"}
+
+
 SCHEMA_METRIC = "vibeic.ppa.metric.v1"
 PARSER = "_ppa/power.py"
 
@@ -1810,8 +1867,10 @@ def _pdn_em_post_resize_check(project: Path, top: str, pdk: Any,
     try:
         rpt3.mkdir(parents=True, exist_ok=True)
         em_rpt = rpt3 / "em.rpt"
-        emit_ir_em_reports(project, top, pdk, container,
-                           rpt3 / "ir_drop.rpt", em_rpt, notes)
+        _ir_ok, em_ok = emit_ir_em_reports(project, top, pdk, container,
+                                          rpt3 / "ir_drop.rpt", em_rpt, notes)
+        if not em_ok:
+            return "NOT_MEASURED", "PDN_EM_POSTCHECK_NATIVE_UNMEASURED: " + "; ".join(notes)
         if not em_rpt.is_file() or em_rpt.stat().st_mtime < def_file.stat().st_mtime:
             return "NOT_MEASURED", "PDN_EM_POSTCHECK_STALE_REPORT"
         if not emit_em_current_authority(project, pdk, container, notes):

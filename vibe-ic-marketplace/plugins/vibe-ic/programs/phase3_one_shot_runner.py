@@ -7635,6 +7635,7 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
         floor["rail_pitch_plan"] = rail_pitch
 
     ring_plan = None
+    supply_plan = None
     ring_cfg = getattr(pdk, "pdn_ring", None) or {}
     if ring_cfg:
         log_path = pnr_out / "openroad.log"
@@ -7679,9 +7680,62 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
                     margin=float(floor["margin"]),
                     grid_um=float(floor["manufacturing_grid_um"]))
                 floor["ring_capacity_plan"] = ring_plan
+                # T55: a ring too narrow for the one-pair exploratory layout
+                # may be relieved by MORE legal entry sites. Derive the count
+                # from this pass's PSM total current and the drawn entry/ring
+                # widths against the active tech LEF's Jmax. This is a plan,
+                # never an EM pass; the re-routed layout must be remeasured.
+                if ring_plan.get("code") or any(
+                        p["status"] == "CAPACITY_NOT_PROVEN"
+                        for p in ring_plan["pad_entry"]):
+                    import hashlib as _supply_hashlib
+                    def_text = def_file.read_text(errors="replace")
+                    units_m = re.search(r"UNITS DISTANCE MICRONS\s+(\d+)", def_text)
+                    die_m = re.search(
+                        r"DIEAREA\s*\(\s*(\d+)\s+(\d+)\s*\)\s*"
+                        r"\(\s*(\d+)\s+(\d+)\s*\)", def_text)
+                    if not units_m or not die_m:
+                        return decline("PDN_EM_RING_CAPACITY_UNREACHABLE: "
+                                       "SUPPLY_ENTRY_DIE_GEOMETRY_UNPROVEN; "
+                                       "routed DEF lacks units or die rectangle; "
+                                       f"required_footprint={ring_plan['required_footprint_um']}um")
+                    dbu = int(units_m.group(1))
+                    dims = [(int(die_m.group(3)) - int(die_m.group(1))) / dbu,
+                            (int(die_m.group(4)) - int(die_m.group(2))) / dbu]
+                    if abs(dims[0] - dims[1]) > 1 / dbu:
+                        return decline("PDN_EM_RING_CAPACITY_UNREACHABLE: "
+                                       "SUPPLY_ENTRY_DIE_GEOMETRY_UNPROVEN; "
+                                       "the pad generator needs a square measured die; "
+                                       f"required_footprint={ring_plan['required_footprint_um']}um")
+                    try:
+                        supply_plan = _ppa_power.pdn_supply_entry_count_plan(
+                            current_A=float(floor["i_total_A"]),
+                            ring_plan=ring_plan,
+                            pad_entries=ring_plan["pad_entry"],
+                            jmax_A_per_um={k: float(v["jmax_A_per_um"])
+                                               for k, v in floor["per_layer"].items()
+                                               if v.get("jmax_A_per_um")},
+                            margin=float(floor["margin"]))
+                    except (ValueError, TypeError) as exc:
+                        return decline(f"SUPPLY_ENTRY_CAPACITY_UNPROVEN: {exc}")
+                    tech_text = _read_pdk_text(pdk.tech_lef, container)
+                    if not tech_text:
+                        return decline("SUPPLY_ENTRY_CAPACITY_UNPROVEN: "
+                                       "active tech LEF cannot be read")
+                    supply_plan.update({
+                        "subject_def_sha256": _supply_hashlib.sha256(
+                            def_file.read_bytes()).hexdigest(),
+                        "die_side_um": dims[0],
+                        "current_source": floor.get("i_total_source"),
+                        "tech_lef": str(pdk.tech_lef),
+                        "tech_lef_sha256": _supply_hashlib.sha256(
+                            tech_text.encode()).hexdigest(),
+                    })
+                    floor["supply_entry_plan"] = supply_plan
+                    _aa.write_json(rpt3 / "supply_entry_plan.json", supply_plan)
         except (OSError, ValueError, KeyError) as exc:
             return decline(f"PDN_EM_RING_CAPACITY_NOT_MEASURED: {exc}")
-        if ring_plan and ring_plan.get("code"):
+        if ring_plan and ring_plan.get("code") and not supply_plan:
             try:
                 sizing_path = rpt3 / "pdn_em_sizing.json"
                 sizing = json.loads(sizing_path.read_text())
@@ -7697,8 +7751,9 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
                            f"required_footprint="
                            f"{ring_plan['required_footprint_um']}um, "
                            f"available={ring_plan['available_footprint_um']}um")
-        if ring_plan and any(p["status"] == "CAPACITY_NOT_PROVEN"
-                             for p in ring_plan["pad_entry"]):
+        if ring_plan and not supply_plan and any(
+                p["status"] == "CAPACITY_NOT_PROVEN"
+                for p in ring_plan["pad_entry"]):
             try:
                 sizing_path = rpt3 / "pdn_em_sizing.json"
                 sizing = json.loads(sizing_path.read_text())
@@ -7723,10 +7778,11 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
                           "drawn_um": float(w_drawn),
                           "w_em_um": float(w_em),
                           "shortfall_x": round(float(w_em) / float(w_drawn), 4)})
-    if not short and not rail_pitch and not (
+    if not short and not rail_pitch and not supply_plan and not (
             ring_plan and ring_plan.get("applied") == "WIDER_RING"):
         return decline("all measured strap widths meet their EM floors")
     return {"floor": floor, "short": short, "rail_pitch": rail_pitch,
+            "supply_entry_plan": supply_plan,
             "repair_class": _PDN_ARCH_REPAIR_CLASS,
             "sentinel": sentinel}
 
@@ -35272,7 +35328,8 @@ def _chip_path_requests_pad_ring(project: Path) -> bool:
 
 def _padring_producer_dispatch(project: Path,
                                container: Optional[str] = None,
-                               pdk: Optional["PdkConfig"] = None
+                               pdk: Optional["PdkConfig"] = None,
+                               supply_plan: Optional[Dict[str, Any]] = None
                                ) -> StepResult:
     """Step 15.5ic's pad-ring producer, dispatched ONLY when a ring is built.
 
@@ -35315,6 +35372,9 @@ def _padring_producer_dispatch(project: Path,
     chip-AGNOSTIC: the delivery route only, no chip / vendor / SKU literal.
     """
     if _chip_path_requests_pad_ring(project):
+        if supply_plan is not None:
+            return step_io_pad_chip_top_gen(project, container, pdk,
+                                            supply_plan=supply_plan)
         return step_io_pad_chip_top_gen(project, container, pdk)
     declared, why = _declaration_deliverable_answer(project)
     return StepResult(
@@ -35544,7 +35604,8 @@ def _padring_chip_top_record(project: Path) -> Optional[Dict[str, Any]]:
 
 
 def step_io_pad_chip_top_gen(project: Path, container: Optional[str] = None,
-                             pdk: Optional[PdkConfig] = None) -> StepResult:
+                             pdk: Optional[PdkConfig] = None,
+                             supply_plan: Optional[Dict[str, Any]] = None) -> StepResult:
     """Step 15.5ic's FIRST producer — the one that instantiates the IO pads.
 
     It runs BEFORE the floorplan, not with the rest of step 15.5ic, and the
@@ -35562,6 +35623,11 @@ def step_io_pad_chip_top_gen(project: Path, container: Optional[str] = None,
                           str(exc))
     extra = (["--pdk-root", str(pdk_root), "--pdk", str(pdk_tree)]
              if pdk_root and pdk_tree else [])
+    if supply_plan is not None:
+        plan_path = project / "reports" / "phase3" / "supply_entry_plan.json"
+        _aa.write_json(plan_path, supply_plan)
+        extra.extend(["--supply-plan", (_to_container_path(str(plan_path), container)
+                                           if container else str(plan_path))])
     # The pad producer may exercise physical-design freedom only with the
     # SAME rail identity the PDN uses.  A unique pair is authority; zero or
     # multiple candidates is not guessed and leaves the producer's explicit
@@ -36106,7 +36172,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # ports from signal-only DRV limits, while its die_required_um is an input
     # to the floorplan.  The producer is idempotent and writes only its own
     # wrapper/record; a design with no declared pad placement SKIPs.
-    _padring_producer = _padring_producer_dispatch(project, container, pdk)
+    _padring_producer = _padring_producer_dispatch(
+        project, container, pdk,
+        supply_plan=(em_floor_for_resize or {}).get("supply_entry_plan"))
     if _padring_producer.status not in (_V.Verdict.PASS.value,
                                           _V.Verdict.NOT_MEASURED.value):
         print(f"[phase3] io_pad_chip_top_gen: {_padring_producer.status} — "
@@ -63843,7 +63911,8 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     em_csv_c = f"{out_dir_c}/em_segments.csv"
     em_geometry = out_dir / "em_pg_geometry.tsv"
     em_geometry_c = f"{out_dir_c}/em_pg_geometry.tsv"
-    for old in (em_geometry, out_dir / "em_pg_geometry_subject.json"):
+    for old in (em_geometry, out_dir / "em_pg_geometry_subject.json",
+                out_dir / "em_segments.csv"):
         try:
             old.unlink()
         except FileNotFoundError:

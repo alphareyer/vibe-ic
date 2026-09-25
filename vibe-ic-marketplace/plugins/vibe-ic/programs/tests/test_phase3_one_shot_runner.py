@@ -251,12 +251,13 @@ def test_chip_top_producer_precedes_sdc_and_die_resolution():
     # ring, so its producer is not run). The ORDER property is unchanged: the
     # dispatch -- and therefore the producer, for a delivery that requests a
     # ring -- precedes both SDC construction and die resolution.
-    dispatch_line = "_padring_producer = _padring_producer_dispatch(project, container, pdk)"
+    dispatch_line = "_padring_producer = _padring_producer_dispatch("
     producer = step.index(dispatch_line)
     sdc = step.index("# SDC: silicon top != FPGA wrapper")
     die = step.index("die_um, _l9_die_note = _effective_die_um")
     assert producer < sdc < die
     assert step.count(dispatch_line) == 1
+    assert 'supply_plan=(em_floor_for_resize or {}).get("supply_entry_plan")' in step
     # and the dispatch is the ONLY road to the producer from step_pnr: the
     # producer itself is called exactly once, inside the dispatch, never
     # directly from step_pnr (a second, ungated call would re-pin a hardmacro

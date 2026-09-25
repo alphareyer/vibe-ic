@@ -930,6 +930,18 @@ def _pin_entry(header: str, move: Dict[str, Any]) -> str:
             f"        + FIXED ( {ox} {oy} ) N ;")
 
 
+def _multi_pin_entry(header: str, moves: List[Dict[str, Any]]) -> str:
+    """One logical supply BTerm with one physical PORT per bonded pad.
+
+    PSM uses placed BPins as voltage sources. Keeping only the last pad's
+    PORT makes every extra supply pad electrically inert in the measurement.
+    DEF permits several PORT clauses under the same PIN/net, preserving the
+    chip top's single logical VDD or VSS port and exposing every bond site.
+    """
+    return header + "\n" + "\n".join(
+        _pin_entry("", move).strip().rstrip(";") for move in moves) + " ;"
+
+
 def _rewrite_pins(source_text: str,
                   moves: List[Dict[str, Any]]) -> Tuple[str, List[str]]:
     """Re-place the BTerm of every signal a pad drives; leave the rest alone.
@@ -944,7 +956,9 @@ def _rewrite_pins(source_text: str,
         r"^(?P<endindent>\s*)END\s+PINS\b", source_text)
     if section is None:
         raise PR.DefError("floorplan DEF has no PINS section")
-    by_signal = {m["signal"]: m for m in moves}
+    by_signal: Dict[str, List[Dict[str, Any]]] = {}
+    for move in moves:
+        by_signal.setdefault(move["signal"], []).append(move)
     entries: List[str] = []
     rewritten: List[str] = []
     for raw in section.group("body").split(";"):
@@ -952,12 +966,14 @@ def _rewrite_pins(source_text: str,
         if not body:
             continue
         m = re.match(r"^-\s+(\S+)", body)
-        move = by_signal.get(m.group(1)) if m else None
-        if move is None:
+        signal_moves = by_signal.get(m.group(1)) if m else None
+        if signal_moves is None:
             entries.append("    " + body + " ;")
             continue
         header = body.split("+ PORT", 1)[0].rstrip()
-        entries.append(_pin_entry("    " + header, move))
+        entries.append(_pin_entry("    " + header, signal_moves[0])
+                       if len(signal_moves) == 1 else
+                       _multi_pin_entry("    " + header, signal_moves))
         rewritten.append(m.group(1))
     replacement = (f"PINS {len(entries)} ;\n" + "\n".join(entries)
                    + "\nEND PINS")
