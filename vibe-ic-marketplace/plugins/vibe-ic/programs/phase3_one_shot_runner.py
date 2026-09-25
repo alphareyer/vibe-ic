@@ -16666,6 +16666,162 @@ def _write_synth_log(project: Path, log: Path, content: str) -> None:
             tool="phase3_one_shot_runner")
 
 
+def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
+                         container: str) -> StepResult:
+    """Run the mapped synthesis tool and retain its native evidence for step 9."""
+    import librelane_contract as _ll
+    import synth_area_stats_emit as _sas
+
+    t0 = time.time()
+    set_invocation_provenance_sink(project)
+    switch = json.loads((project / "phase3/librelane_switch.json").read_text())
+    image = switch.get("image")
+    if not image:
+        return StepResult("synth", "FAIL", time.time() - t0,
+                          "LL_IMAGE_UNDECLARED: phase3/librelane_switch.json needs image")
+    rtl = sorted(_pl.rtl_dir(project).glob("*.sv")) + sorted(_pl.rtl_dir(project).glob("*.v"))
+    skipped = ("assertions", "de10lite_top", "host_emulator", "_tb", "testbench", "stimulus")
+    rtl = _drop_include_hubs([path for path in rtl
+                              if not any(token in path.name.lower() for token in skipped)])
+    rtl = [path for path in rtl if "pkg" in path.name.lower()] + [
+        path for path in rtl if "pkg" not in path.name.lower()]
+    if not rtl:
+        return StepResult("synth", "FAIL", time.time() - t0, "LL_SYNTH_INPUT_MISSING")
+    macro = _sf.decide_macro_aware_sim_define(
+        _sf.read_text_blob(rtl),
+        list(pdk.macro_libs) + list(pdk.macro_lefs) + list(pdk.macro_v))
+    defines = ["SIMULATION"] if macro["define_sim"] else []
+    # A SystemVerilog source is a declared input to the slang decision.  The
+    # direct arm can still use its sequential fallback in direct mode.
+    use_slang = any(path.suffix == ".sv" for path in rtl)
+    config_dir = project / "phase3/librelane"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "synth_config.json"
+    try:
+        liberty_stem = Path(str(getattr(pdk, "liberty", ""))).stem
+        std_cell_library = liberty_stem.split("__", 1)[0]
+        if not liberty_stem or "__" not in liberty_stem:
+            raise _ll.Refusal("LL_SCL_UNRESOLVED", str(getattr(pdk, "liberty", "")))
+        liberty_path = Path(str(pdk.liberty))
+        pdk_root_host = switch.get("pdk_root_host")
+        if pdk_root_host and liberty_path.is_relative_to(Path(pdk_root_host)):
+            liberty_guest = "/pdk/" + str(liberty_path.relative_to(Path(pdk_root_host)))
+        else:
+            liberty_guest = str(liberty_path)
+        config = _ll.emit_synthesis_config(
+            project, str(pdk.name), config_path, rtl, defines, use_slang,
+            std_cell_library=std_cell_library, synth_liberty=liberty_guest)
+        config["DESIGN_NAME"] = top
+        _ll.write_json(config_path, config)
+        provenance = json.loads(config_path.with_suffix('.provenance.json').read_text())
+        provenance["DESIGN_NAME"] = "phase3_one_shot_runner resolved ASIC top"
+        _ll.write_json(config_path.with_suffix('.provenance.json'), provenance)
+        for step_id, name in (("Yosys.JsonHeader", "json_header_config.json"),
+                              ("Yosys.Synthesis", "synthesis_config.json")):
+            _ll.write_json(config_dir / name,
+                           {**config, "meta": {"step": step_id}})
+        state_in = config_dir / "synthesis_state_in.json"
+        _ll.write_json(state_in, {})
+        source_mount = switch.get("development_librelane_source")
+        mounts = []
+        if source_mount:
+            source_path = Path(source_mount)
+            if not source_path.is_dir():
+                raise _ll.Refusal("LL_FORK_SOURCE_MISSING", str(source_path))
+            mounts.append((source_path,
+                           "/usr/local/lib/python3.12/dist-packages/librelane"))
+        pdk_root_guest = None
+        if pdk_root_host:
+            pdk_root_path = Path(pdk_root_host)
+            if not pdk_root_path.is_dir():
+                raise _ll.Refusal("LL_PDK_ROOT_MISSING", str(pdk_root_path))
+            pdk_root_guest = "/pdk"
+            mounts.append((pdk_root_path, pdk_root_guest))
+        header_config = _ll.resolve_step_config(
+            project, image, config_dir / "json_header_config.json",
+            config_dir / "json_header_resolved.json", mounts=mounts,
+            pdk_root=pdk_root_guest)
+        synthesis_config = _ll.resolve_step_config(
+            project, image, config_dir / "synthesis_config.json",
+            config_dir / "synthesis_resolved.json", mounts=mounts,
+            pdk_root=pdk_root_guest)
+        folders = _ll.run_chain(project, image, [
+            ("Yosys.JsonHeader", header_config, state_in),
+            ("Yosys.Synthesis", synthesis_config, state_in)],
+            mounts=mounts, pdk_root=pdk_root_guest)
+        folder = folders[-1]
+        state = json.loads((folder / "state_out.json").read_text())
+        source = Path(state.get("nl") or "")
+        stat = folder / "reports/stat.json"
+        if not source.is_file() or not stat.is_file():
+            raise _ll.Refusal("LL_SYNTH_OUTPUT_MISSING", f"{source} or {stat}")
+        metrics = state.get("metrics", {})
+        if metrics.get("design__instance_unmapped__count") != 0 or \
+                metrics.get("synthesis__check_error__count") != 0:
+            raise _ll.Refusal("LL_SYNTH_CHECK_FAILED", str(metrics))
+        netlist = _pl.synth_dir(project) / f"{top}_synth.v"
+        netlist.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, netlist)
+        encfile = folder / "fsm_encoding.enc"
+        if encfile.is_file():
+            shutil.copy2(encfile, netlist.parent / "fsm_encoding.enc")
+        elif config["SYNTH_FSM_ENCFILE"]:
+            raise _ll.Refusal("LL_FSM_ENCFILE_MISSING", str(encfile))
+        _write_synth_inputs_sidecar(netlist, _pl.rtl_dir(project))
+        _log_surviving_artefact([str(netlist)],
+                                produced_by="LibreLane.Yosys.Synthesis",
+                                tool="yosys", exit_code=0)
+        stats = _sas.emit_for_run(project, folder / "reports/stat.rpt", netlist,
+                                  liberty=getattr(pdk, "liberty", None),
+                                  container=None)
+        if stats is None:
+            raise _ll.Refusal("LL_SYNTH_AREA_UNMEASURED", str(stat))
+        _ll.verify_synthesis_stat(stat, state, Path(stats), top,
+                                  folder / "stat_binding_gate.json")
+        gate = subprocess.run([sys.executable,
+                               str(PROGRAMS_DIR / "area_total_vs_budget_check.py"),
+                               str(project)], capture_output=True, text=True)
+        if gate.returncode != 0:
+            return StepResult("synth", "FAIL", time.time() - t0,
+                              f"area_total_vs_budget_check rc={gate.returncode}: "
+                              + gate.stdout[-500:],
+                              [str(netlist), str(stat), str(stats)])
+        netlist_gate = subprocess.run(
+            [sys.executable, str(PROGRAMS_DIR / "synth_netlist_check.py"),
+             "--netlist", str(netlist), "--tool-netlist", str(source),
+             "--rtl", *[str(path) for path in rtl],
+             "--json", str(folder / "synth_netlist_gate.json")],
+            capture_output=True, text=True)
+        if netlist_gate.returncode:
+            raise _ll.Refusal("LL_SYNTH_NETLIST_GATE_FAILED", netlist_gate.stdout[-500:])
+        if not Path(str(pdk.liberty)).is_file():
+            raise _ll.Refusal("LL_PDK_LIB_MISSING", str(pdk.liberty))
+        pdk_gate = subprocess.run(
+            [sys.executable, str(PROGRAMS_DIR / "pdk_consistency_check.py"),
+             "--netlist", str(netlist), "--pdk-lib", str(pdk.liberty),
+             "--json", str(folder / "pdk_consistency_gate.json")],
+            capture_output=True, text=True)
+        if pdk_gate.returncode != 0:
+            raise _ll.Refusal("LL_PDK_CONSISTENCY_FAILED",
+                              f"rc={pdk_gate.returncode}: " + pdk_gate.stdout[-500:])
+        provenance_gate = subprocess.run(
+            [sys.executable, str(PROGRAMS_DIR / "provenance_check.py"),
+             str(project), "--output", str(netlist.relative_to(project)),
+             "--tool", "yosys", "--require-measured",
+             "--json", str(folder / "provenance_gate.json")],
+            capture_output=True, text=True)
+        if provenance_gate.returncode:
+            raise _ll.Refusal("LL_PROVENANCE_FAILED", provenance_gate.stdout[-500:])
+        return StepResult("synth", "PASS", time.time() - t0,
+                          f"LibreLane Yosys.Synthesis: {netlist.name}; "
+                          f"area gate rc={gate.returncode}; "
+                          f"pdk gate rc={pdk_gate.returncode}; "
+                          "netlist/provenance gates rc=0",
+                          [str(netlist), str(stat), str(stats), str(folder / "state_out.json")])
+    except (_ll.Refusal, OSError, ValueError) as exc:
+        return StepResult("synth", "FAIL", time.time() - t0, str(exc))
+
+
 def step_synth(project: Path, top: str, pdk: PdkConfig,
                container: str,
                period_relax: float = 1.0) -> StepResult:
@@ -16675,6 +16831,14 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     every yosys command below is byte-identical to what it was, so a run that
     never overflows its die cannot tell this parameter exists.
     """
+    import librelane_contract as _ll
+    _mode = _ll.selected_mode(project, "9")
+    if _mode == "librelane":
+        return _step_synth_librelane(project, top, pdk, container)
+    if _mode == "dual":
+        return StepResult("synth", "FAIL", 0.0,
+                          "LL_DUAL_POSTROUTE_NOT_READY: no same-scope routed "
+                          "measurements and LEC proof for both isolated arms")
     t0 = time.time()
     # Synthesis precedes step_pnr, which used to be the first site enabling
     # the ledger. A new process reusing a declared synth.log therefore wrote

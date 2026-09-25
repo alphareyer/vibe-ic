@@ -73,6 +73,104 @@ def test_invalid_declared_pad_spacing_is_refused(tmp_path):
     with pytest.raises(contract.Refusal, match='LL_PAD_SPACING_INVALID'):
         contract.emit_config(p, 'processA', p / 'phase3/librelane/config.json')
 
+def test_synthesis_config_uses_selected_sources_and_lec_hooks(tmp_path):
+    p = design(tmp_path)
+    rtl = p / 'phase2/stage1/rtl'
+    rtl.mkdir(parents=True)
+    package = rtl / 'pkg.sv'
+    block = rtl / 'block.sv'
+    package.write_text('package pkg; endpackage')
+    block.write_text('module block(input clk, output reg q); always @(posedge clk) q <= 1; endmodule')
+    result = contract.emit_synthesis_config(
+        p, 'processA', p / 'phase3/librelane/synth.json',
+        [package, block], ['SIMULATION'], True)
+    assert result['VERILOG_FILES'] == [str(package), str(block)]
+    assert result['VERILOG_DEFINES'] == ['SIMULATION']
+    assert result['USE_SLANG'] is True
+    assert result['SYNTH_FSM_ENCFILE'] is True
+    assert result['SYNTH_PRESERVE_FSM_REGISTERS'] == []
+    assert 'VERILOG_FILES' in json.loads(
+        (p / 'phase3/librelane/synth.provenance.json').read_text())
+
+
+def test_synthesis_config_refuses_external_or_missing_rtl(tmp_path):
+    p = design(tmp_path)
+    with pytest.raises(contract.Refusal, match='LL_SYNTH_INPUT_MISSING'):
+        contract.emit_synthesis_config(p, 'processA', p / 'synth.json',
+                                       [tmp_path / 'other.sv'], [], False)
+
+
+def test_native_stat_binds_area_gate_and_netlist_to_tool_output(tmp_path):
+    netlist = tmp_path / 'block.nl.v'
+    netlist.write_text('module block; endmodule\n')
+    stat = put(tmp_path / 'stat.json', {'modules': {
+        '\\block': {'num_cells': 4, 'area': 12.5}}})
+    stats = put(tmp_path / 'stats.json', {'cell_count': 4, 'chip_area': 12.5,
+        'netlist_sha256': 'sha256:' + contract.digest(netlist)})
+    state = {'nl': str(netlist), 'metrics': {
+        'design__instance__count': 4, 'design__instance__area': 12.5}}
+    output = tmp_path / 'binding.json'
+    assert contract.verify_synthesis_stat(stat, state, stats, 'block', output)['status'] == 'PASS'
+    assert json.loads(output.read_text())['native_netlist_sha256'] == contract.digest(netlist)
+
+    put(stats, {'cell_count': 3, 'chip_area': 12.5,
+                'netlist_sha256': 'sha256:' + contract.digest(netlist)})
+    with pytest.raises(contract.Refusal, match='LL_STAT_MISMATCH'):
+        contract.verify_synthesis_stat(stat, state, stats, 'block', output)
+    assert not output.exists()
+
+    put(stats, {'cell_count': 4, 'chip_area': 12.5,
+                'netlist_sha256': 'sha256:' + contract.digest(netlist)})
+    netlist.write_text('module block; wire changed; endmodule\n')
+    with pytest.raises(contract.Refusal, match='LL_STAT_NETLIST_MISMATCH'):
+        contract.verify_synthesis_stat(stat, state, stats, 'block', output)
+
+
+def test_synthesis_chain_accepts_pre_netlist_state_and_keeps_tool_output(tmp_path, monkeypatch):
+    p = design(tmp_path)
+    initial = put(p / 'initial.json', {'json_h': str(put(p / 'header.json', {}))})
+    config = put(p / 'config.json', {'meta': {'step': 'Yosys.Synthesis'}})
+
+    def tool_run(cmd, **_):
+        folder = Path(cmd[cmd.index('-o') + 1])
+        netlist = folder / 'block.nl.v'
+        netlist.write_text('module block; endmodule')
+        put(folder / 'state_out.json', {'nl': str(netlist)})
+        return SimpleNamespace(returncode=0, stdout='ok', stderr='')
+
+    monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
+    monkeypatch.setattr(contract.subprocess, 'run', tool_run)
+    folder = contract.run_chain(p, 'candidate', [('Yosys.Synthesis', config, initial)])[0]
+    assert (folder / 'block.nl.v').is_file()
+    assert json.loads((folder / 'state_out.json').read_text())['nl'].endswith('block.nl.v')
+
+
+def test_stream_lane_and_synthesis_namespace_keep_separate_receipts(tmp_path, monkeypatch):
+    p = design(tmp_path)
+    netlist = p / 'block.nl.v'
+    netlist.write_text('module block; endmodule')
+    initial = put(p / 'initial.json', {'nl': str(netlist)})
+    config = put(p / 'config.json', {'meta': {'step': 'OpenROAD.Floorplan'}})
+
+    def tool_run(cmd, **_):
+        folder = Path(cmd[cmd.index('-o') + 1])
+        put(folder / 'state_out.json', {'nl': str(netlist)})
+        return SimpleNamespace(returncode=0, stdout='ok', stderr='')
+
+    monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
+    monkeypatch.setattr(contract.subprocess, 'run', tool_run)
+    steps = [('OpenROAD.Floorplan', config, initial)]
+    stream = contract.run_chain(p, 'candidate', steps, lane='stream37')[0]
+    synth = contract.run_chain(p, 'candidate', steps,
+                               namespace='ppa_synthesis/arm0')[0]
+    assert stream == p / 'phase3/librelane/stream37/01-openroad-floorplan'
+    assert synth == p / 'phase3/librelane/ppa_synthesis/arm0/01-openroad-floorplan'
+    assert stream.joinpath('vibeic_receipt.json').is_file()
+    assert synth.joinpath('vibeic_receipt.json').is_file()
+    with pytest.raises(contract.Refusal, match='LL_LANE_NAMESPACE_CONFLICT'):
+        contract.run_chain(p, 'candidate', steps, lane='stream37',
+                           namespace='ppa_synthesis/arm0')
+
 
 def test_switch_defaults_to_direct_and_rejects_bad_value(tmp_path):
     p = design(tmp_path)
@@ -82,6 +180,15 @@ def test_switch_defaults_to_direct_and_rejects_bad_value(tmp_path):
     put(p / 'phase3/librelane_switch.json', {'steps': {'15.5ic': 'fallback'}})
     with pytest.raises(contract.Refusal, match='LL_INVALID_SWITCH'):
         contract.selected_mode(p, '15.5ic')
+
+
+def test_step9_dual_does_not_silently_run_direct_without_routed_evidence(tmp_path):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    p = design(tmp_path)
+    put(p / 'phase3/librelane_switch.json', {'steps': {'9': 'dual'}})
+    result = runner.step_synth(p, 'block', None, '')
+    assert result.status == 'FAIL'
+    assert 'LL_DUAL_POSTROUTE_NOT_READY' in result.detail
 
 
 def test_image_incapable_is_named_and_not_fallback(monkeypatch):
