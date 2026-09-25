@@ -714,12 +714,213 @@ def test_clause_force_levels():
 # ──────────────────────────────────────────────────────────────────────
 # required_outputs grammar
 # ──────────────────────────────────────────────────────────────────────
+# Pinned members, re-derived per YAML revision since ec5c9c4da through
+# VIBE_IC_MATRIX_FLOW_YAML. A same-count output substitution must redden too.
+PINNED_OUTPUT_MEMBERS = frozenset({
+    ('0.5ic', 'input/submission_template/slots/*.yaml OR input/submission_template/NO_TEMPLATE.txt OR input/submission_template/SELF_TAPEOUT.txt'),
+    ('0.5ic', 'input/submission_template/tapeout_declaration.json'),
+    ('0.5ic', 'reports/phase1/submission_template.json'),
+    ('0.5ic', 'reports/phase1/tapeout_declaration.json'),
+    ('1', 'phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v'),
+    ('10', 'phase3/stage3/sta/pre_pnr_timing.rpt'),
+    ('10', 'reports/phase3/sta/pre_pnr_summary.json'),
+    ('11', 'phase2/stage2/dft/atpg_coverage.rpt'),
+    ('11', 'phase2/stage2/dft/coverage.yml'),
+    ('11', 'phase2/stage2/dft/scan_netlist.v'),
+    ('11', 'phase2/stage2/dft/transition_atpg_plan.md'),
+    ('11', 'reports/phase2/dft/bsdl_plan.json'),
+    ('11', 'reports/phase2/dft/coverage.json'),
+    ('12', 'phase2/stage2/synth/post_dft_netlist.v'),
+    ('13', 'reports/lec.json'),
+    ('13', 'reports/lec.rpt'),
+    ('14', 'phase2/stage2/synth/netlist.v'),
+    ('14', 'reports/analog/stage_analog_compliance.json'),
+    ('15', 'phase3/stage3/pnr/floorplan.def'),
+    ('15', 'phase3/stage3/pnr/pdn.tcl OR phase3/stage3/pnr/pdn.done'),
+    ('15', 'reports/phase2/gates/stage2_compliance.json'),
+    ('15.5ic', 'phase3/stage3/pnr/padring.def'),
+    ('15.5ic', 'reports/phase3/pad_assignment.json'),
+    ('15.5ic', 'reports/phase3/padring.json'),
+    ('16', 'phase3/stage3/cts/clock_plan.json'),
+    ('17', 'phase3/stage3/pnr/placed.def'),
+    ('17', 'reports/phase3/placement_legality.json'),
+    ('18', 'phase3/stage3/pnr/spare_cells.json'),
+    ('18', 'reports/spare_cell_coverage.json'),
+    ('19', 'phase3/stage3/cts/clock_tree.rpt'),
+    ('19', 'phase3/stage3/pnr/post_cts.def'),
+    ('2', 'reports/crosslayer/rewrite_equivalence_check.json'),
+    ('2', 'reports/phase2/lint/rom_init_lint.json'),
+    ('2', 'reports/phase2/lint/rtl_hygiene.json'),
+    ('20', 'phase3/stage3/pnr/post_hold.def'),
+    ('21', 'phase3/stage3/pnr/openroad.log'),
+    ('21', 'phase3/stage3/pnr/routed.def'),
+    ('21', 'phase3/stage3/pnr/routed.drc.rpt'),
+    ('21', 'reports/phase3/drc_router.json'),
+    ('21', 'reports/phase3/drc_router.rpt'),
+    ('22', 'phase3/stage3/extracted/parasitic.spef OR phase3/stage3/extracted/*.spef'),
+    ('22', 'reports/phase2/gates/spef_extraction.json'),
+    ('23', 'phase3/stage3/sta/post_route_timing.rpt'),
+    ('23', 'reports/phase3/sta/architectural_residual.json'),
+    ('23', 'reports/phase3/sta/post_route_signoff_corner.json'),
+    ('23', 'reports/phase3/sta/post_route_summary.json'),
+    ('23', 'reports/phase3/sta/sta_corner_record_completeness.json'),
+    ('23', 'reports/phase3/sta_spef_based.rpt'),
+    ('24', 'reports/phase3/dynamic_ir.json'),
+    ('24', 'reports/phase3/ir_drop.json'),
+    ('24', 'reports/phase3/ir_drop.rpt'),
+    ('24', 'reports/phase3/ir_drop_signoff.json'),
+    ('25', 'reports/phase3/em.json'),
+    ('25', 'reports/phase3/em.rpt'),
+    ('25', 'reports/phase3/em_current_authority.json'),
+    ('25', 'reports/phase3/em_signoff.json'),
+    ('26', 'reports/phase3/antenna.json'),
+    ('26', 'reports/phase3/antenna.rpt'),
+    ('26', 'reports/phase3/antenna_signoff.json'),
+    ('26.5ic', 'phase3/stage3/pnr/die_finished.def OR phase3/stage3/pnr/die_finishing.SKIPPED.txt'),
+    ('26.5ic', 'reports/phase3/die_finishing.json'),
+    ('27', 'reports/phase3/si_crosstalk.rpt OR reports/phase3/si_crosstalk.json'),
+    ('27', 'reports/phase3/si_mcf_sta.json'),
+    ('27', 'reports/phase3/si_mcf_sta.rpt'),
+    ('28', 'reports/phase2/gates/perc_signoff.json'),
+    ('28', 'reports/phase3/PERC_SIGNOFF_MEMO.md'),
+    ('28', 'reports/phase3/perc_equivalent.json'),
+    ('28', 'reports/phase3/perc_equivalent.rpt'),
+    ('29', 'phase3/stage3/sim_postlayout/results.log OR phase3/stage3/sim_postlayout/pass.flag'),
+    ('29', 'reports/phase2/gates/post_layout_sim.json'),
+    ('3', 'reports/phase2/cdc/async_input.json'),
+    ('3', 'reports/phase2/cdc/crossing.json'),
+    ('3', 'reports/phase2/cdc/reset_dep.json'),
+    ('30', 'phase3/stage3/spice/*.sp OR phase3/stage3/spice/*.spice OR sim_spice/*.sp'),
+    ('30', 'phase3/stage3/spice/correlation.json OR reports/phase3/spice_correlation.json'),
+    ('31', 'reports/phase2/gates/erc_density.json'),
+    ('31', 'reports/phase3/drc_signoff.json'),
+    ('31', 'reports/phase3/drc_signoff.rpt'),
+    ('31', 'reports/phase3/erc.rpt'),
+    ('31', 'reports/phase3/lvs.json'),
+    ('31', 'reports/phase3/lvs.rpt'),
+    ('31', 'reports/phase3/lvs_verdict.json'),
+    ('31', 'reports/phase3/magic_illegal_overlap.json'),
+    ('31', 'reports/phase3/perc_sweep.json'),
+    ('32', 'phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json'),
+    ('32', 'phase3/stage3/postroute_timing_repair/repair_log.json OR phase3/stage3/postroute_timing_repair/no_repair_needed.flag'),
+    ('33', 'reports/phase3/power.json'),
+    ('33', 'reports/phase3/power.rpt'),
+    ('34', 'phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done'),
+    ('34', 'reports/density.json OR reports/phase3/density.json'),
+    ('34', 'reports/density.rpt OR reports/phase3/density.rpt'),
+    ('35', 'reports/phase3/dfm_screen.json'),
+    ('36', 'reports/audit/tapeout_checklist.json'),
+    ('37', 'phase3/stage3/pnr/*stream_out.log'),
+    ('37', 'phase3/stage4/gds/*.gds'),
+    ('37', 'reports/phase3/gates/stage3_compliance.json'),
+    ('37', 'reports/phase3/layout_receipts.json'),
+    ('37', 'reports/phase3/pad_ring_route_evidence.json'),
+    ('37.3', 'reports/phase3/gds_xor.json'),
+    ('37.4', 'phase3/final/metrics.json'),
+    ('37.4', 'reports/phase3/signoff_metrics_aggregate.json'),
+    ('37.5ic', 'phase3/stage4/documentation/ic/*/ERRATA.md'),
+    ('37.5ic', 'phase3/stage4/documentation/ic/*/PRELIMINARY_DATASHEET.md'),
+    ('37.5ic', 'phase3/stage4/documentation/ic/*/RELEASE_NOTES.md'),
+    ('37.5ic', 'phase3/stage4/documentation/ic/*/documentation_manifest.yaml'),
+    ('37.5ic', 'reports/phase3/docs/BRIEF_*.html'),
+    ('37.5ic', 'reports/phase3/docs/SIGNOFF_*.html'),
+    ('37.5ic', 'reports/phase3/general_precheck.json'),
+    ('37.5ic', 'reports/phase3/shuttle_precheck.json'),
+    ('37.5ic', 'reports/phase3/tapeout_precheck.json'),
+    ('37.5ip', 'phase3/stage4/documentation/ip/*/DELIVERABLES_MANIFEST.md'),
+    ('37.5ip', 'phase3/stage4/documentation/ip/*/ERRATA.md'),
+    ('37.5ip', 'phase3/stage4/documentation/ip/*/IP_DATASHEET.md'),
+    ('37.5ip', 'phase3/stage4/documentation/ip/*/IP_INTEGRATION_GUIDE.md'),
+    ('37.5ip', 'phase3/stage4/documentation/ip/*/RELEASE_NOTES.md'),
+    ('37.5ip', 'phase3/stage4/documentation/ip/*/documentation_manifest.yaml'),
+    ('37.5ip', 'phase3/stage4/hardmacro/*.gds'),
+    ('37.5ip', 'phase3/stage4/hardmacro/*.lef'),
+    ('37.5ip', 'phase3/stage4/hardmacro/*.lib'),
+    ('37.5ip', 'phase3/stage4/hardmacro/*.v'),
+    ('37.5ip', 'reports/phase3/digital_hardmacro.json'),
+    ('38', 'phase3/stage4/foundry_handoff/corner_test_vectors.json'),
+    ('38', 'phase3/stage4/foundry_handoff/mask_spec.json'),
+    ('38', 'phase3/stage4/foundry_handoff/scribe_line_layout.gds OR phase3/stage4/foundry_handoff/scribe_line_layout.PENDING_FOUNDRY.txt'),
+    ('38', 'phase3/stage4/foundry_handoff/wat_plan.json'),
+    ('39', 'phase2/stage1/fpga/final/*.sof'),
+    ('39', 'reports/phase2/fpga/on_board_pass.json'),
+    ('4', 'phase2/stage1/sim/*.log OR phase2/stage1/sim/results.xml OR phase2/stage1/sim/pass.flag OR phase2/stage1/sim_professional/**/results.xml'),
+    ('4', 'reports/phase2/coverage/coverage_actual.json'),
+    ('4', 'reports/phase2/coverage/coverage_verilator.json'),
+    ('40', 'phase3/stage5_manufacturing/mask_set_received.json'),
+    ('40', 'phase3/stage5_manufacturing/wafer_lot_received.json'),
+    ('41', 'phase3/stage5_manufacturing/wafer_map.csv'),
+    ('41', 'phase3/stage5_manufacturing/wafer_sort_yield.json'),
+    ('42', 'phase3/stage5_manufacturing/packaging_log.json'),
+    ('43', 'phase3/stage5_manufacturing/burn_in_results.json'),
+    ('43', 'phase3/stage5_manufacturing/final_test_yield.json'),
+    ('44', 'phase3/stage5_manufacturing/htol_results.json'),
+    ('5', 'phase2/stage1/formal/*.sby OR phase2/stage1/formal/formal_authoring_request.json OR phase2/stage1/formal/formal_not_applicable.json'),
+    ('5', 'phase2/stage1/formal/results.json OR phase2/stage1/formal/formal_authoring_request.json OR phase2/stage1/formal/formal_not_applicable.json'),
+    ('5', 'phase2/stage1/sim_full_stack/results.json'),
+    ('6', 'phase2/stage1/fpga/output_files/*.map.rpt'),
+    ('6', 'phase2/stage1/fpga/output_files/*.sof'),
+    ('6', 'reports/phase2/fpga/quartus_map_audit.json'),
+    ('7', 'phase2/stage2/constraints/*.sdc'),
+    ('7', 'phase2/stage2/constraints/pvt_matrix.json'),
+    ('8', 'reports/phase2/sdc_check.json'),
+    ('9', 'phase2/stage2/synth/area.rpt OR phase2/stage2/synth/stats.json'),
+    ('9', 'phase2/stage2/synth/netlist.v'),
+    ('A1', 'phase3/analog/*/spec.json OR phase1/analog/*/spec.json'),
+    ('A2', 'phase3/analog/*/topology.md OR phase2/analog/*/topology.md'),
+    ('A3', 'phase3/analog/*/*.sp OR phase2/analog/*/*.sp'),
+    ('A4', 'phase3/analog/*/corner_results.json OR phase2/analog/*/corner_results.json'),
+    ('A5', 'phase3/analog/*/layout.mag OR phase3/analog/*/*.gds'),
+    ('A6', 'phase3/analog/*/drc_clean.flag OR phase3/analog/*/drc.report OR phase3/analog/*/*.lyrdb OR phase3/analog/*/drc.rpt'),
+    ('A6', 'phase3/analog/*/lvs_match.flag OR phase3/analog/*/lvs.report OR phase3/analog/*/comp.json OR phase3/analog/*/lvs.rpt'),
+    ('A7', 'phase3/analog/*/pre_vs_post.json'),
+    ('A8', 'phase3/analog/hardmacro/*/*.gds'),
+    ('A8', 'phase3/analog/hardmacro/*/*.lef'),
+    ('A8', 'phase3/analog/hardmacro/*/*.lib'),
+    ('A8', 'phase3/analog/hardmacro/*/*.v'),
+    ('A9', 'phase3/mixed_signal/cosim/*_cosim_results.json OR phase3/mixed_signal/cosim/mixed_signal_results.json OR phase3/analog/*/hw_measurements.json'),
+    ('D1', 'phase1/extraction_patterns.json'),
+    ('D1', 'phase1/generated_docs/L10_TEST_CASES.json'),
+    ('D1', 'phase1/generated_docs/L11_OTP_CONTENT.json'),
+    ('D1', 'phase1/generated_docs/L12_BEHAVIORAL_SEQUENCES.json'),
+    ('D1', 'phase1/generated_docs/L13_*.json'),
+    ('D1', 'phase1/generated_docs/L19_CONSTRAINTS_PDK.json'),
+    ('D1', 'phase1/generated_docs/L1_DATASHEET.json'),
+    ('D1', 'phase1/generated_docs/L21_POWER_INTENT.json'),
+    ('D1', 'phase1/generated_docs/L2_FRS.json'),
+    ('D1', 'phase1/generated_docs/L3_CMD_PROTOCOL.json'),
+    ('D1', 'phase1/generated_docs/L4_REGMAP.json'),
+    ('D1', 'phase1/generated_docs/L5_ADI_SPEC.json'),
+    ('D1', 'phase1/generated_docs/L6_CONTROL_LOGIC.json'),
+    ('D1', 'phase1/generated_docs/L7_TEST_DEBUG.json'),
+    ('D1', 'phase1/generated_docs/L8_RTL_CONSTANTS.json'),
+    ('D1', 'phase1/generated_docs/L8_TIMING_WAVEFORM.json'),
+    ('D1', 'phase1/generated_docs/L9_INTEGRATION_SPEC.json'),
+    ('D1', 'reports/audit/phase1/expert_parse_track.json'),
+    ('D1', 'reports/phase1/extraction_coverage_report.json'),
+    ('D1', 'reports/phase1/extraction_coverage_report.md'),
+    ('DT1', 'reports/phase2/dft/transition_coverage.json'),
+    ('DT2', 'reports/phase2/dft/path_delay_coverage.json'),
+    ('DT3', 'reports/phase2/dft/sdd_coverage.json'),
+    ('M1', 'phase3/mixed_signal/top_merged.gds'),
+    ('M1', 'reports/analog/mixed_signal/merge.json'),
+    ('M2', 'reports/analog/mixed_signal/isolation.json'),
+    ('M2', 'reports/analog/mixed_signal/level_shifter.json'),
+    ('M2', 'reports/analog/mixed_signal/power_domain.json'),
+    ('M3', 'phase3/mixed_signal/cosim/mixed_signal_results.json'),
+    ('M3', 'reports/analog/mixed_signal/interface_si.json'),
+    ('M4', 'reports/analog/mixed_signal/signoff.json'),
+})
+
+
 def test_output_entries_classify_into_the_four_kinds():
     seen = Counter()
+    members = set()
     for sid in F.step_ids():
         for entry in F.required_outputs(sid):
             kind = F.classify_output(entry)
             assert kind in F.OUTPUT_KINDS
+            members.add((str(sid), entry))
             seen[kind] += 1
     # 2026-07-28, RE-REVIEWED: 126 -> 133, all SEVEN new entries are plain FILE
     # (92 -> 99); the GLOB and ANY_OF populations are untouched. Each one is a
@@ -1168,7 +1369,17 @@ def test_output_entries_classify_into_the_four_kinds():
     # 136, GLOB and ANY_OF untouched; flowref's anchored
     # `required_output_entries` moved 191 -> 190 by
     # `gen_flow_matrix_census.py --fix-figures` in the same change.
-    assert sum(seen.values()) == 190, (seen, REDERIVE)
+    # 190 -> 193, re-derived by driving flowref at every YAML revision since
+    # ec5c9c4da via VIBE_IC_MATRIX_FLOW_YAML and diffing (step, entry) sets:
+    #   ac2104931 + ('37', 'reports/phase3/layout_receipts.json') FILE
+    #   4e36f3703 + ('17', 'reports/phase3/placement_legality.json') FILE
+    #   4e36f3703 + ('22', 'reports/phase2/gates/spef_extraction.json') FILE
+    # No removals or kind changes. The full member pin above catches a swap
+    # even when the four kind counts happen to remain the same.
+    assert members == PINNED_OUTPUT_MEMBERS, (
+        'added', sorted(members - PINNED_OUTPUT_MEMBERS),
+        'removed', sorted(PINNED_OUTPUT_MEMBERS - members), REDERIVE)
+    assert sum(seen.values()) == len(PINNED_OUTPUT_MEMBERS), (seen, REDERIVE)
     # 136 -> 138 FILE and 27 -> 28 GLOB, from the SAME set diff.
     #
     # AN EARLIER REVISION OF THIS PIN SAID FILE 139 / GLOB 27, and the arithmetic
@@ -1181,7 +1392,7 @@ def test_output_entries_classify_into_the_four_kinds():
     # transcript of what went into the sign-off GDS -- and it classifies as GLOB.
     # One entry moved between two kinds; the total did not move, which is exactly
     # why this test asserts the three kinds separately and not just their sum.
-    assert seen[F.FILE] == 136, (seen, REDERIVE)
+    assert seen[F.FILE] == 139, (seen, REDERIVE)
     assert seen[F.GLOB] == 28, (seen, REDERIVE)
     assert seen[F.ANY_OF] == 26, (seen, REDERIVE)
     # Reported to the orchestrator: the PROGRAM_EXIT form described in the brief

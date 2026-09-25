@@ -147,6 +147,11 @@ def test_the_klayout_engine_loads_the_cell_the_def_contains(tmp_path, monkeypatc
     seen = _capture(monkeypatch)
     monkeypatch.setattr(p3, "_vacuous_on_unrouted", lambda *a, **k: None)
     monkeypatch.setattr(p3, "_magic_def_to_gds", lambda *a, **k: (False, "forced"))
+    # The pre-stream admission added by 57b1579a3 otherwise returns before
+    # either engine is called. Admit this synthetic DEF at that boundary and
+    # keep the actual KLayout command construction under test.
+    monkeypatch.setattr(p3, "_layout_basis", lambda *a, **k: ("test-digest", None))
+    monkeypatch.setattr(p3._ga, "gate_passed", lambda *a, **k: True)
     p3.step_gds(project, "spm", _Pdk(), "cnt")
     assert "TOP=chip_top " in seen["cmd"], seen["cmd"][:300]
 
