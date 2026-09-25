@@ -329,4 +329,17 @@ def _project(tmp_path, with_chip_gds=False):
     (p / "phase1/generated_docs").mkdir(parents=True)
     (p / "phase1/generated_docs/L1_DATASHEET.json").write_text(
         json.dumps({"ic_name": "alpha"}))
+    import _gds_admission as admission
+    gate = p / "reports/phase3/prestream_gate.json"
+    gate.parent.mkdir(parents=True, exist_ok=True)
+    gate.write_text(json.dumps({"verdict": "PASS", "layout_digest": "a" * 64}))
+    pnr = p / "phase3/stage3/pnr"
+    stream = pnr / name
+    stream.write_bytes((p / "phase3/stage4/gds" / name).read_bytes())
+    basis = []
+    for filename in ("routed.def", "constraint.sdc"):
+        path = pnr / filename
+        path.write_text("synthetic layout input\n")
+        basis.append(path)
+    admission.admit_gds(p, stream, "a" * 64, basis)
     return p

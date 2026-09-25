@@ -2,6 +2,7 @@
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import foundry_handoff_pack_gen as H
 import phase3_one_shot_runner as R
@@ -108,5 +109,133 @@ def test_prior_shipped_gds_is_quarantined_with_record(tmp_path, monkeypatch):
     records = list((project / "phase3/scratch/gds_quarantine").glob("*/record.json"))
     assert len(records) == 1
     doc = json.loads(records[0].read_text())
-    assert "new phase-3 run" in doc["reason"]
+    assert "cached GDS" in doc["reason"]
     assert len(doc["files"]) == len(locations)
+
+
+def test_stale_digest_quarantines_gds_without_rerunning_pnr(tmp_path, monkeypatch):
+    project = _project(tmp_path / "run", cached_die=NEW_DIE, cached_util=NEW_UTIL)
+    admission = R._ga.admission_path(project)
+    record = json.loads(admission.read_text())
+    record["layout_digest"] = "0" * 64
+    admission.write_text(json.dumps(record) + "\n")
+    drive = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    R.main()
+    assert "pnr" not in drive.called
+    assert "gds" in drive.called
+    assert "skipped re-run" not in _plan(project)["gds"]["detail"]
+    assert list((project / "phase3/scratch/gds_quarantine").glob("*/record.json"))
+
+
+def test_matching_digest_and_pass_gate_reuses_both_caches(tmp_path, monkeypatch):
+    project = _project(tmp_path / "run", cached_die=NEW_DIE, cached_util=NEW_UTIL)
+    gds = R._pl.pnr_dir(project) / f"{TOP}.gds"
+    gate = json.loads((project / "reports/phase3/prestream_gate.json").read_text())
+    assert R._ga.admitted_gds(project, gds, gate["layout_digest"])
+    drive = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    R.main()
+    assert "pnr" not in drive.called
+    assert "gds" not in drive.called
+    assert "skipped re-run" in _plan(project)["gds"]["detail"]
+
+
+def test_matching_digest_without_pass_gate_cannot_ship(tmp_path, monkeypatch):
+    project = _project(tmp_path / "run", cached_die=NEW_DIE, cached_util=NEW_UTIL)
+    gate = project / "reports/phase3/prestream_gate.json"
+    record = json.loads(gate.read_text())
+    record["verdict"] = "FAIL"
+    gate.write_text(json.dumps(record) + "\n")
+    drive = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    monkeypatch.setattr(R, "step_prestream_gate", lambda *a, **k:
+                        R.StepResult("prestream_gate", "FAIL", 0.0,
+                                     "same digest, no PASS", extras={
+                                         "layout_digest": record["layout_digest"],
+                                         "failed_gates": ["antenna"]}))
+    R.main()
+    assert "pnr" not in drive.called
+    assert "gds" not in drive.called
+    assert not (R._pl.pnr_dir(project) / f"{TOP}.gds").exists()
+    assert _plan(project)["foundry_handoff"]["status"] == "NOT_MEASURED"
+
+
+def test_handoff_refuses_stale_stage4_copy_with_pass_gate(tmp_path):
+    project = tmp_path / "run"
+    pnr = R._pl.pnr_dir(project)
+    pnr.mkdir(parents=True)
+    source = pnr / "unit.gds"
+    source.write_bytes(require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+        "tests", "fixtures", "density_fill", "filled.gds").read_bytes())
+    alias = R._pl.gds_dir(project) / "unit.gds"
+    alias.parent.mkdir(parents=True)
+    alias.write_bytes(source.read_bytes() + b"stale copy")
+    gate = project / "reports/phase3/prestream_gate.json"
+    gate.parent.mkdir(parents=True)
+    gate.write_text(json.dumps({"verdict": "PASS", "layout_digest": "a" * 64}))
+    basis = []
+    for name in ("routed.def", "constraint.sdc", "netlist.v"):
+        path = pnr / name
+        path.write_text("fixture input\n")
+        basis.append(path)
+    R._ga.admit_gds(project, source, "a" * 64, basis)
+    assert H.main([str(project)]) == 2
+    assert not alias.exists()
+    assert not list(R._pl.foundry_handoff_dir(project).glob("*.gds"))
+
+
+def test_handoff_refuses_an_unrecorded_extra_mask(tmp_path):
+    project = tmp_path / "run"
+    pnr = R._pl.pnr_dir(project)
+    pnr.mkdir(parents=True)
+    source = pnr / "unit.gds"
+    source.write_bytes(require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+        "tests", "fixtures", "density_fill", "filled.gds").read_bytes())
+    alias = R._pl.gds_dir(project) / "unit.gds"
+    alias.parent.mkdir(parents=True)
+    alias.write_bytes(source.read_bytes())
+    gate = project / "reports/phase3/prestream_gate.json"
+    gate.parent.mkdir(parents=True)
+    gate.write_text(json.dumps({"verdict": "PASS", "layout_digest": "a" * 64}))
+    basis = []
+    for name in ("routed.def", "constraint.sdc", "netlist.v"):
+        path = pnr / name
+        path.write_text("fixture input\n")
+        basis.append(path)
+    R._ga.admit_gds(project, source, "a" * 64, basis)
+    extra = alias.parent / "unit_extra.gds"
+    extra.write_bytes(source.read_bytes())
+    assert H.main([str(project)]) == 2
+    assert not extra.exists()
+    assert not list(R._pl.foundry_handoff_dir(project).glob("*.gds"))
+
+
+def test_window_after_pnr_keeps_existing_routed_layout(tmp_path, monkeypatch):
+    project = _project(tmp_path / "run", cached_die=NEW_DIE, cached_util=NEW_UTIL)
+    pnr = R._pl.pnr_dir(project)
+    before = (pnr / "routed.def").read_bytes()
+    calls = []
+
+    def fake_drc(proj, *args):
+        calls.append("drc")
+        out = proj / "phase3/reports/drc.rpt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("<report-database><items/></report-database>\n")
+        return R.StepResult("drc", "PASS", 0.0, "deck clean", [str(out)])
+
+    def fake_lvs(proj, *args, **kwargs):
+        calls.append("lvs")
+        out = proj / "phase3/reports/lvs.rpt"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("LVS MATCH\n")
+        return R.StepResult("lvs", "PASS", 0.0, "match", [str(out)])
+
+    monkeypatch.setattr(R, "step_drc", fake_drc)
+    monkeypatch.setattr(R, "step_lvs", fake_lvs)
+    args = SimpleNamespace(entry_step="31", exit_step="31", container="",
+                           die_um=NEW_DIE, util=NEW_UTIL, spare_density=0.02)
+    assert R._phase3_window_sites("31", "31") == ["drc", "lvs"]
+    R._run_phase3_window(project, TOP, _pdk(project), args, ["drc", "lvs"])
+    assert calls == ["drc", "lvs"]
+    assert (pnr / "routed.def").read_bytes() == before
+    assert (pnr / f"{TOP}.gds").is_file()

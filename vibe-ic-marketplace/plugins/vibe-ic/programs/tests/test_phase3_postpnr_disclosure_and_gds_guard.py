@@ -113,6 +113,7 @@ def _span_inputs(project, top: str = "top") -> None:
         ("phase2/stage2/synth/%s_synth.v" % top,
          "module %s(); endmodule\n" % top),
         ("phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\nEND DESIGN\n"),
+        ("phase3/stage3/pnr/constraint.sdc", "create_clock -period 10\n"),
         ("phase3/stage3/pnr/spare_cells.json", "{}\n"),
         ("phase3/stage3/extracted/parasitic.spef", "*SPEF\n"),
     ):
@@ -248,6 +249,15 @@ def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
     # describes, and the clause remains able to fire -- a stale record still
     # invalidates the cache, which is that clause's own suite's subject.
     _pad_ring_evidence(tmp_path)
+    # This previous run's mask has both a byte receipt and a PASS gate for
+    # the exact routed basis. The cache assertion below is unchanged from #593.
+    basis, error = R._layout_basis(tmp_path, TOP, _pdk(tmp_path), "")
+    assert not error, error
+    gate = R._pl.reports_phase3_dir(tmp_path) / "prestream_gate.json"
+    gate.parent.mkdir(parents=True, exist_ok=True)
+    gate.write_text(json.dumps({"verdict": "PASS", "layout_digest": basis}) + "\n")
+    R._ga.admit_gds(tmp_path, pnr / f"{TOP}.gds", basis,
+                    R._layout_basis_paths(tmp_path, TOP))
     return tmp_path
 
 
@@ -318,9 +328,16 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
     # extracted STA, IR/EM or antenna evidence, so the independent pre-stream
     # admission is supplied as an already-measured PASS for this fixture.
     # T47's runner tests exercise that gate's blocking/diagnostic branches.
-    monkeypatch.setattr(R, "step_prestream_gate", lambda *a, **k:
-                        R.StepResult("prestream_gate", "PASS", 0.0,
-                                     "fixture's routed basis admitted"))
+    def _fake_gate(proj, top, pdk, container):
+        basis, error = R._layout_basis(proj, top, pdk, container)
+        assert not error, error
+        gate = R._pl.reports_phase3_dir(proj) / "prestream_gate.json"
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text(json.dumps({"verdict": "PASS", "layout_digest": basis}) + "\n")
+        return R.StepResult("prestream_gate", "PASS", 0.0,
+                            "fixture's routed basis admitted",
+                            extras={"layout_digest": basis})
+    monkeypatch.setattr(R, "step_prestream_gate", _fake_gate)
 
     monkeypatch.setattr(R, "_detect_pdk",
                         lambda *a, **k: _pdk(project))
@@ -407,23 +424,17 @@ def test_the_disclosure_row_is_present_and_did_not_block_anything(
 # The other direction — so the test above cannot pass by always re-running.
 # ---------------------------------------------------------------------------
 
-def test_unchanged_geometry_quarantines_the_previous_gds(tmp_path, monkeypatch):
-    """Same die and util still cannot reuse a previous run's unadmitted mask."""
+def test_unchanged_geometry_still_reuses_the_gds(tmp_path, monkeypatch):
+    """Same die + same util as the cached run: PnR is skipped and the GDS is
+    reused. This is the provenance-preserving behaviour #593 kept."""
     project = _project(tmp_path, cached_die=NEW_DIE, cached_util=NEW_UTIL)
-    gds = R._pl.pnr_dir(project) / f"{TOP}.gds"
-    stale = gds.read_text()
     d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
     R.main()
 
     plan = _plan(project)
-    assert "pnr" in d.called, "old pad-ring evidence no longer has its old GDS"
-    assert "gds" in d.called, "a previous mask cannot be shipped from cache"
-    assert gds.read_text() != stale
-    assert "skipped re-run" not in plan["gds"]["detail"]
-    records = list((project / "phase3/scratch/gds_quarantine").glob("*/record.json"))
-    assert records
-    assert any(row["source"] == f"phase3/stage3/pnr/{TOP}.gds"
-               for row in json.loads(records[0].read_text())["files"])
+    assert "pnr" not in d.called, "unchanged geometry must hit the PnR cache"
+    assert "gds" not in d.called, "unchanged geometry must hit the GDS cache"
+    assert "skipped re-run" in plan["gds"]["detail"]
 
 
 # ---------------------------------------------------------------------------

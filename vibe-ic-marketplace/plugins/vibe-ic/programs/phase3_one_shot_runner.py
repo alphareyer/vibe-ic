@@ -45060,17 +45060,21 @@ def step_pad_ring_final_evidence(project: Path, top: str,
 
 
 def _pad_ring_route_cache_valid(project: Path, top: str) -> bool:
-    """A chip route is reusable only while its evidence hashes still bind."""
+    """Keep the landed GDS-hash check when a GDS exists.
+
+    Quarantining a mask leaves a valid routed DEF usable; a visible mask with
+    mismatched pad evidence still invalidates this cache as before.
+    """
     path = project / "reports" / "phase3" / "pad_ring_route_evidence.json"
     try:
         doc = json.loads(path.read_text())
         final_def = _pl.pnr_dir(project) / f"{top}.def"
         gds = _pl.pnr_dir(project) / f"{top}.gds"
         return (doc.get("verdict") == "PASS" and final_def.is_file()
-                and gds.is_file()
                 and doc.get("gds_source_def_sha256") == _sha256_file(final_def)
-                and (doc.get("gds_evidence") or {}).get("sha256")
-                == _sha256_file(gds))
+                and (not gds.is_file() or
+                     (doc.get("gds_evidence") or {}).get("sha256")
+                     == _sha256_file(gds)))
     except (OSError, ValueError, TypeError):
         return False
 
@@ -46099,7 +46103,8 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
         digest, refusal = _layout_basis(project, top, pdk, container)
         if refusal or not _ga.gate_passed(project, digest):
             return StepResult("gds", "NOT_MEASURED", 0.0,
-                              f"pre-stream gate refused this layout: {refusal or digest}")
+                              f"pre-stream gate refused this layout: {refusal or digest}",
+                              reason_class=_V.ReasonClass.UPSTREAM_FAILED)
     _vac = _vacuous_on_unrouted(project, "gds", t0)
     if _vac is not None:
         return _vac
@@ -53440,6 +53445,12 @@ def _layout_basis(project: Path, top: str, pdk: PdkConfig,
     return digest, ""
 
 
+def _layout_basis_paths(project: Path, top: str) -> list[Path]:
+    pnr = _pl.pnr_dir(project)
+    return [pnr / "routed.def", pnr_input_netlist(project, top)[0],
+            pnr / "constraint.sdc"]
+
+
 def _shipped_layout_digest(project: Path, top: str) -> Tuple[str, str]:
     """SHA-256 over the shipped GDS bytes followed by the routed DEF bytes."""
     pnr = _pl.pnr_dir(project)
@@ -57157,7 +57168,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         for extra in sorted(gds_out.glob("*.gds")):
             if extra not in candidate_chip_gds:
                 candidate_chip_gds.append(extra)
-    if handoff_out.is_dir() and not (prestream or prepv) and _ga.gate_passed(project):
+    if handoff_out.is_dir() and not (prestream or prepv) and _ga.admitted_package_source(project):
         # THE LAYOUT MEMBERS COME FROM ONE PLACE: `foundry_handoff_pack_gen.
         # package_layout_members`, which re-derives every member from the
         # SIGNED-OFF GDS on every run, by copy. This block used to package
@@ -69015,8 +69026,26 @@ def _direct_flow_window(project: Path, top: str, pdk: PdkConfig,
                 source = _pl.pnr_dir(isolated) / f"{top}.gds"
                 target = _pl.gds_dir(isolated) / f"{top}.gds"
                 if source.is_file():
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source, target)
+                    digest, error = _layout_basis(
+                        isolated, top, pdk, args.container)
+                    if error or not _ga.gate_passed(isolated, digest):
+                        row = StepResult(
+                            "gds", "NOT_MEASURED", row.duration_s,
+                            f"window stream lacks a PASS gate for its routed basis: "
+                            f"{error or digest}",
+                            reason_class=_V.ReasonClass.UPSTREAM_FAILED)
+                    else:
+                        try:
+                            _ga.admit_gds(isolated, source, digest,
+                                          _layout_basis_paths(isolated, top))
+                        except (OSError, ValueError) as exc:
+                            row = StepResult(
+                                "gds", "NOT_MEASURED", row.duration_s,
+                                f"window stream admission failed: {exc}",
+                                reason_class=_V.ReasonClass.MISSING_ARTEFACT)
+                        else:
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(source, target)
                 else:
                     row = StepResult("gds", "NOT_MEASURED", row.duration_s,
                                      f"stream-out reported PASS without {source}",
@@ -69036,19 +69065,24 @@ def _direct_flow_window(project: Path, top: str, pdk: PdkConfig,
                 for pattern in str(spec).split(" OR "):
                     for source in isolated.glob(pattern.strip()):
                         if source.is_file():
+                            if site == "gds" and row.status != "PASS" and source.suffix.lower() == ".gds":
+                                continue
                             target = project / source.relative_to(isolated)
                             target.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(source, target)
                             outputs.append(str(target))
         if site == "gds":
-            # Retain the failed stream-out as this step's diagnostic output;
-            # the canonical sign-off alias is created only on a valid PASS.
+            # A failed window keeps candidate bytes only in private scratch.
             source = _pl.pnr_dir(isolated) / f"{top}.gds"
-            if source.is_file():
+            if row.status == "PASS" and source.is_file():
                 target = _pl.pnr_dir(project) / f"{top}.gds"
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
                 outputs.append(str(target))
+                receipt = _ga.admission_path(project)
+                receipt.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(_ga.admission_path(isolated), receipt)
+                outputs.append(str(receipt))
         row.output_files = outputs
         return row
 
@@ -69255,6 +69289,15 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                 f"{missing_link} is outside this window, so this gate cannot "
                 "measure the new artefact", reason_class=_V.ReasonClass.UPSTREAM_FAILED))
             break
+        if site in ("drc", "lvs"):
+            basis, error = _layout_basis(project, top, pdk, args.container)
+            if error or not _ga.admitted_gds(
+                    project, _pl.pnr_dir(project) / f"{top}.gds", basis):
+                rows.append(StepResult(
+                    site, "NOT_MEASURED", 0.0,
+                    f"window refused unadmitted routed GDS: {error or basis}",
+                    reason_class=_V.ReasonClass.UPSTREAM_FAILED))
+                break
         if site in ("enclosing_phase3", "enclosing_pnr",
                     "enclosing_canonicalize"):
             row = _phase3_window_enclosing(
@@ -69855,9 +69898,15 @@ def main() -> int:
         # The canonicalize step runs unconditionally to stage canonical paths.
         netlist_existing = _pl.synth_dir(project) / f"{effective_top}_synth.v"
         def_existing = _pl.pnr_dir(project) / f"{effective_top}.def"
-        _ga.quarantine_visible_gds(project, "new phase-3 run; prior GDS has no admission for this run")
-        _ga.quarantine_handoff_package(project, "new phase-3 run; prior handoff is not this run's package")
         gds_existing = _pl.pnr_dir(project) / f"{effective_top}.gds"
+        _cached_basis, _cached_basis_error = _layout_basis(
+            project, effective_top, pdk, args.container)
+        if not _ga.admitted_gds(project, gds_existing, _cached_basis):
+            _ga.quarantine_visible_gds(
+                project, "cached GDS lacks a matching layout digest, byte receipt or PASS gate"
+                + (f"; {_cached_basis_error}" if _cached_basis_error else ""))
+            _ga.quarantine_handoff_package(
+                project, "cached GDS is not admitted for the current routed layout")
         # PR-A3 — the preserve-provenance skip is PDK-keyed: a cached
         # netlist whose instantiated masters are NOT in the ACTIVE
         # liberty was mapped to a DIFFERENT PDK (e.g. a sky130 netlist
@@ -70342,12 +70391,23 @@ def main() -> int:
                     _pl.pnr_dir(project), "pnr", project=project, pdk=pdk,
                     container=args.container, top=effective_top, args=args)
             if _prestream.status != "PASS":
+                _ga.quarantine_visible_gds(
+                    project, "current routed layout failed the pre-stream gate")
+                _ga.quarantine_handoff_package(
+                    project, "current routed layout failed the pre-stream gate")
                 _prestream_refusal = (
                     f"pre-stream gate failed ({', '.join(_prestream.extras.get('failed_gates', [])) or _prestream.detail}); "
                     f"layout_digest={_prestream.extras.get('layout_digest', 'UNAVAILABLE')}")
                 _chain_ok = False
                 plan.append(_upstream_signoff_not_measured(
                     "gds", _prestream_refusal))
+            elif not _ga.admitted_gds(
+                    project, gds_existing,
+                    _prestream.extras.get("layout_digest", "")):
+                _ga.quarantine_visible_gds(
+                    project, "cached GDS does not bind the admitted routed layout")
+                _ga.quarantine_handoff_package(
+                    project, "cached handoff does not bind the admitted routed layout")
         if _chain_ok:
             # #593 — the GDS is derived from the DEF, so it shares the
             # PnR geometry cache verdict: a geometry change that forced a
@@ -70368,7 +70428,11 @@ def main() -> int:
                 top=effective_top, die_um=args.die_um, util=args.util,
                 pdk=pdk, container=args.container, args=args,
                 blocked_by=("PnR re-ran in this session, so a cached GDS is "
-                            "from the previous DEF" if _pnr_reran else ""))
+                            "from the previous DEF" if _pnr_reran else
+                            "cached GDS has no matching admission" if not
+                            _ga.admitted_gds(project, gds_existing,
+                                             _prestream.extras.get("layout_digest", ""))
+                            else ""))
             _gds_prod_msg = _gds_cache.producer_reason
             if _gds_cache.accept:
                 _gds_dispatched = StepResult(
@@ -70391,6 +70455,10 @@ def main() -> int:
                     effective_top, pdk, args.container)
                 plan.append(_gds_dispatched)
                 if _gds_dispatched.status == "PASS":
+                    _ga.admit_gds(
+                        project, gds_existing,
+                        _prestream.extras.get("layout_digest", ""),
+                        _layout_basis_paths(project, effective_top))
                     _write_producer_identity(
                         _pnr_out, "gds", project=project, pdk=pdk,
                         container=args.container, top=effective_top,

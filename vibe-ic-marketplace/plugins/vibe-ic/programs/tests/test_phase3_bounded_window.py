@@ -30,14 +30,25 @@ def test_front_door_refusal_does_not_write_into_window_project(tmp_path):
 
 
 def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monkeypatch):
+    from test_phase3_postpnr_disclosure_and_gds_guard import _pdk
     project = tmp_path / "project"
     pnr = p3._pl.pnr_dir(project)
     pnr.mkdir(parents=True)
     (project / "phase3" / "synth").mkdir(parents=True)
     (pnr / "top.def").write_text("supplied route\n")
+    (pnr / "routed.def").write_text("supplied route\n")
+    (pnr / "constraint.sdc").write_text("create_clock -period 10\n")
+    netlist = project / "phase2/stage2/synth/top_synth.v"
+    netlist.parent.mkdir(parents=True)
+    netlist.write_text("module top(); endmodule\n")
     (project / "phase3" / "synth" / "top_synth.v").write_text("supplied netlist\n")
     (project / "reports" / "phase3").mkdir(parents=True)
     (project / "reports" / "phase3" / "drc.rpt").write_text("old DRC\n")
+    pdk = _pdk(project)
+    basis, error = p3._layout_basis(project, "top", pdk, "")
+    assert not error, error
+    (project / "reports/phase3/prestream_gate.json").write_text(
+        json.dumps({"verdict": "PASS", "layout_digest": basis}))
     before = p3._phase3_file_manifest(project)
 
     # This is the EDA container's stream-out write.  Dispatch, preflight,
@@ -48,10 +59,10 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
         return p3.StepResult("gds", "PASS", 0.0, "streamed", [str(out)])
 
     monkeypatch.setattr(p3, "step_gds", streamout)
-    args = SimpleNamespace(entry_step="37", exit_step="37", container="fake-eda")
+    args = SimpleNamespace(entry_step="37", exit_step="37", container="")
     selected = p3._phase3_window_sites("37", "37")
     assert selected == ["gds"]
-    assert p3._run_phase3_window(project, "top", object(), args, selected) == 1
+    assert p3._run_phase3_window(project, "top", pdk, args, selected) == 1
 
     after = p3._phase3_file_manifest(project)
     changed = {name for name in set(before) | set(after)
@@ -60,6 +71,7 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
         "reports/audit/phase23_completion_audit.json",
         "reports/audit/steps_view.json",
         "reports/orchestrator/phase3_one_shot.json",
+        "reports/phase3/gds_admission.json",
     }
     assert set(changed) <= allowed_reports | {
         "phase3/stage3/pnr/top.gds", "phase3/stage4/gds/top.gds"}, changed
@@ -68,6 +80,7 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
     assert after["reports/phase3/drc.rpt"] == before["reports/phase3/drc.rpt"]
     assert "phase3/stage3/pnr/top.gds" in after
     assert after["phase3/stage4/gds/top.gds"] == after["phase3/stage3/pnr/top.gds"]
+    assert p3._ga.admitted_gds(project, pnr / "top.gds", basis)
     report = json.loads((project / "reports" / "orchestrator" /
                          "phase3_one_shot.json").read_text())
     assert report["bounded"] is True
@@ -148,16 +161,20 @@ def test_changed_route_cannot_sign_off_old_gds(tmp_path, monkeypatch):
 
 
 def test_real_gds_step_with_container_write_keeps_other_stage_files(tmp_path, monkeypatch):
+    from test_phase3_postpnr_disclosure_and_gds_guard import _pdk
     project = tmp_path / "project"
     pnr = project / "phase3" / "stage3" / "pnr"
     pnr.mkdir(parents=True)
     (pnr / "top.def").write_text("DESIGN top ;\nEND DESIGN\n")
+    (pnr / "routed.def").write_text("DESIGN top ;\nEND DESIGN\n")
+    (pnr / "constraint.sdc").write_text("create_clock -period 10\n")
+    netlist = project / "phase2/stage2/synth/top_synth.v"
+    netlist.parent.mkdir(parents=True)
+    netlist.write_text("module top(); endmodule\n")
     (project / "phase3" / "synth").mkdir()
     (project / "phase3" / "synth" / "top_synth.v").write_text("netlist")
     (project / "reports" / "phase3").mkdir(parents=True)
     (project / "reports" / "phase3" / "drc.rpt").write_text("prior DRC")
-    before = p3._phase3_file_manifest(project)
-
     # The real step_gds builds its script and reports. Only the container's
     # stream-out file write is faked; no Phase-3 dispatch function is replaced.
     monkeypatch.setattr(p3, "_magic_def_to_gds",
@@ -166,17 +183,21 @@ def test_real_gds_step_with_container_write_keeps_other_stage_files(tmp_path, mo
     calls = []
 
     def container(_name, _cmd, *args, **kwargs):
+        from test_gds_substance_check import _real_gds
         calls.append(_cmd)
         for output in kwargs.get("outputs", []):
             Path(output).parent.mkdir(parents=True, exist_ok=True)
-            Path(output).write_bytes(b"fake container GDS")
+            Path(output).write_bytes(_real_gds(n_cells=20, n_boundaries=200))
         return 0, "streamed", ""
 
     monkeypatch.setattr(p3, "_docker_exec", container)
-    pdk = p3.PdkConfig(name="fixture", liberty="lib", tech_lef="tech.lef",
-                       cell_lef="cell.lef", cell_gds="cell.gds", site="site",
-                       drc_deck=None)
-    args = SimpleNamespace(entry_step="37", exit_step="37", container="fake-eda")
+    pdk = _pdk(project)
+    basis, error = p3._layout_basis(project, "top", pdk, "")
+    assert not error, error
+    gate = project / "reports/phase3/prestream_gate.json"
+    gate.write_text(json.dumps({"verdict": "PASS", "layout_digest": basis}))
+    before = p3._phase3_file_manifest(project)
+    args = SimpleNamespace(entry_step="37", exit_step="37", container="")
     p3._run_phase3_window(project, "top", pdk, args, ["gds"])
     after = p3._phase3_file_manifest(project)
     changed = {name for name in set(before) | set(after)
@@ -185,12 +206,57 @@ def test_real_gds_step_with_container_write_keeps_other_stage_files(tmp_path, mo
         "reports/audit/phase23_completion_audit.json",
         "reports/audit/steps_view.json",
         "reports/orchestrator/phase3_one_shot.json",
+        "reports/phase3/gds_admission.json",
     }
     assert set(changed) <= allowed_reports | {
         "phase3/stage3/pnr/top.gds", "phase3/stage3/pnr/stream_out.log",
         "phase3/stage4/gds/top.gds"}, sorted(changed)
     assert calls, "the real GDS step never reached the container"
+    assert p3._ga.admitted_gds(project, pnr / "top.gds", basis)
     assert any(name.endswith(".gds") for name in after)
     assert after["phase3/stage3/pnr/top.def"] == before["phase3/stage3/pnr/top.def"]
     assert after["phase3/synth/top_synth.v"] == before["phase3/synth/top_synth.v"]
     assert after["reports/phase3/drc.rpt"] == before["reports/phase3/drc.rpt"]
+
+
+def test_gds_window_without_pass_gate_returns_named_refusal(tmp_path):
+    from test_phase3_postpnr_disclosure_and_gds_guard import _pdk
+    project = tmp_path / "project"
+    pnr = p3._pl.pnr_dir(project)
+    pnr.mkdir(parents=True)
+    for name, data in (("top.def", "DESIGN top ;\nEND DESIGN\n"),
+                       ("routed.def", "DESIGN top ;\nEND DESIGN\n"),
+                       ("constraint.sdc", "create_clock -period 10\n")):
+        (pnr / name).write_text(data)
+    netlist = project / "phase2/stage2/synth/top_synth.v"
+    netlist.parent.mkdir(parents=True)
+    netlist.write_text("module top(); endmodule\n")
+    row = p3.step_gds(project, "top", _pdk(project), "")
+    assert row.status == "NOT_MEASURED"
+    assert row.reason_class == p3._V.ReasonClass.UPSTREAM_FAILED.value
+    assert "pre-stream gate refused" in row.detail
+    assert not (pnr / "top.gds").exists()
+
+
+def test_post_pnr_window_refuses_a_stale_gds_before_drc(tmp_path, monkeypatch):
+    from test_phase3_postpnr_disclosure_and_gds_guard import (
+        _project, _pdk, TOP, NEW_DIE, NEW_UTIL,
+    )
+    project = _project(tmp_path / "project", cached_die=NEW_DIE,
+                       cached_util=NEW_UTIL)
+    receipt = p3._ga.admission_path(project)
+    record = json.loads(receipt.read_text())
+    record["layout_digest"] = "0" * 64
+    receipt.write_text(json.dumps(record))
+
+    def wrong_consumer(*args, **kwargs):
+        raise AssertionError("DRC consumed an unadmitted GDS")
+
+    monkeypatch.setattr(p3, "step_drc", wrong_consumer)
+    args = SimpleNamespace(entry_step="31", exit_step="31", container="",
+                           die_um=NEW_DIE, util=NEW_UTIL, spare_density=0.02)
+    p3._run_phase3_window(project, TOP, _pdk(project), args, ["drc", "lvs"])
+    report = json.loads((project / "reports/orchestrator/phase3_one_shot.json").read_text())
+    assert report["steps"][0]["name"] == "drc"
+    assert report["steps"][0]["status"] == "NOT_MEASURED"
+    assert "unadmitted routed GDS" in report["steps"][0]["detail"]

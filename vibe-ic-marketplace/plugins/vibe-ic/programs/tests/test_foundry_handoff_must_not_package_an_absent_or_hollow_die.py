@@ -211,9 +211,22 @@ def _pack(project):
 
 
 def _admit_layout(project):
+    import _gds_admission as admission
     gate = project / "reports/phase3/prestream_gate.json"
     gate.parent.mkdir(parents=True, exist_ok=True)
     gate.write_text(json.dumps({"verdict": "PASS", "layout_digest": "a" * 64}))
+    source = project / "phase3/stage4/gds" / f"{_TOP}.gds"
+    if source.is_file():
+        pnr = project / "phase3/stage3/pnr"
+        pnr.mkdir(parents=True, exist_ok=True)
+        stream = pnr / source.name
+        stream.write_bytes(source.read_bytes())
+        basis = []
+        for name in ("routed.def", "constraint.sdc"):
+            path = pnr / name
+            path.write_text("synthetic layout input\n")
+            basis.append(path)
+        admission.admit_gds(project, stream, "a" * 64, basis)
 
 
 def test_the_packager_refuses_a_streamed_non_die_and_leaves_no_half_kit(

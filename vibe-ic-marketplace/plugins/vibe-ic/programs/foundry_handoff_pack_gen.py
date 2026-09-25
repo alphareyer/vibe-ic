@@ -882,8 +882,8 @@ def package_layout_members(project: Path) -> dict:
     import shutil
     project = Path(project)
     sources = _fhpc.layout_member_sources(project)
-    if sources and not _ga.gate_passed(project):
-        raise ValueError("NOT_MEASURED: pre-stream gate did not PASS; no GDS may be packaged")
+    if sources and not _ga.admitted_package_sources(project, sources):
+        raise ValueError("NOT_MEASURED: GDS lacks current digest-bound admission")
     hd = _pl.foundry_handoff_dir(project)
     hd.mkdir(parents=True, exist_ok=True)
     members, written, kept, zero = {}, [], [], []
@@ -931,17 +931,6 @@ def main(argv=None) -> int:
     if not project.is_dir():
         print(f"VACUOUS_PASS: project dir missing: {project}",
               file=sys.stderr)
-        return 2
-
-    # A skeleton-only fixture has no physical layout to package. Once a gate
-    # has run, a failure must refuse even that skeleton; a stale GDS cannot
-    # stand in for the current run's admission.
-    gate = _ga.gate_record(project)
-    if (gate or _ga.visible_gds(project)) and not _ga.gate_passed(project):
-        _ga.quarantine_visible_gds(project, "foundry handoff refused: pre-stream gate did not PASS")
-        _ga.quarantine_handoff_package(project, "foundry handoff refused: pre-stream gate did not PASS")
-        print("NOT_MEASURED: pre-stream gate refused foundry handoff; "
-              "no GDS packaged", file=sys.stderr)
         return 2
 
     # ORGANIC #654 — a handoff pack for a layout the router never finished is
@@ -998,9 +987,24 @@ def main(argv=None) -> int:
     _gds, _rule, _detail = _fhpc.packageable_chip_gds(project)
     if _rule is not None and (_rule != _fhpc.RULE_NO_CHIP_GDS
                               or _fhpc.gds_files_on_disk(project)):
+        _ga.quarantine_visible_gds(project, f"foundry handoff refused: {_rule}")
+        _ga.quarantine_handoff_package(project, f"foundry handoff refused: {_rule}")
         print(f"VACUOUS_PASS: {_rule}: {_detail} Refusing to write a foundry "
               f"handoff pack. Produce the sign-off GDS first (canonical step "
               f"37 stream-out), then re-run.", file=sys.stderr)
+        return 2
+
+    # A valid-looking mask still needs a byte and routed-basis receipt. Keep
+    # the hollow-die diagnostic above visible; it cannot become a package.
+    gate = _ga.gate_record(project)
+    visible = _ga.visible_gds(project)
+    if ((visible or (gate and gate.get("verdict") != "PASS"))
+            and not _ga.admitted_package_sources(
+                project, _fhpc.layout_member_sources(project))):
+        _ga.quarantine_visible_gds(project, "foundry handoff refused: GDS lacks current admission")
+        _ga.quarantine_handoff_package(project, "foundry handoff refused: GDS lacks current admission")
+        print("NOT_MEASURED: GDS admission refused foundry handoff; "
+              "no GDS packaged", file=sys.stderr)
         return 2
 
     handoff_dir = _pl.foundry_handoff_dir(project)

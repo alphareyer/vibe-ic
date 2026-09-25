@@ -82,6 +82,7 @@ def _span_inputs(project, top: str = "top") -> None:
         ("phase2/stage2/synth/%s_synth.v" % top,
          "module %s(); endmodule\n" % top),
         ("phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\nEND DESIGN\n"),
+        ("phase3/stage3/pnr/constraint.sdc", "create_clock -period 10\n"),
         ("phase3/stage3/pnr/spare_cells.json", "{}\n"),
         ("phase3/stage3/extracted/parasitic.spef", "*SPEF\n"),
     ):
@@ -484,6 +485,13 @@ def _project(tmp_path: Path, *, stamp: bool) -> Path:
     # what makes the clause still able to fire (see
     # `test_a_stale_pad_ring_record_still_invalidates_the_pnr_cache`).
     _pad_ring_evidence(tmp_path)
+    basis, error = R._layout_basis(tmp_path, TOP, _pdk(tmp_path), "")
+    assert not error, error
+    gate = R._pl.reports_phase3_dir(tmp_path) / "prestream_gate.json"
+    gate.parent.mkdir(parents=True, exist_ok=True)
+    gate.write_text(json.dumps({"verdict": "PASS", "layout_digest": basis}) + "\n")
+    R._ga.admit_gds(tmp_path, pnr / f"{TOP}.gds", basis,
+                    R._layout_basis_paths(tmp_path, TOP))
     return tmp_path
 
 
@@ -530,9 +538,16 @@ def _drive(monkeypatch, project: Path) -> list:
     # This fixture tests cache identity with synthetic route and timing data.
     # Its independent pre-stream admission is supplied as a measured premise;
     # the cache and GDS dispatch assertions below remain unchanged.
-    monkeypatch.setattr(R, "step_prestream_gate", lambda *a, **k:
-                        R.StepResult("prestream_gate", "PASS", 0.0,
-                                     "fixture routed basis admitted"))
+    def _fake_gate(proj, top, pdk, container):
+        basis, error = R._layout_basis(proj, top, pdk, container)
+        assert not error, error
+        gate = R._pl.reports_phase3_dir(proj) / "prestream_gate.json"
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text(json.dumps({"verdict": "PASS", "layout_digest": basis}) + "\n")
+        return R.StepResult("prestream_gate", "PASS", 0.0,
+                            "fixture routed basis admitted",
+                            extras={"layout_digest": basis})
+    monkeypatch.setattr(R, "step_prestream_gate", _fake_gate)
     monkeypatch.setattr(R, "_detect_pdk",
                         lambda *a, **k: _pdk(project))
     # R-0924-3: an image nobody can name is not a proven image, so the

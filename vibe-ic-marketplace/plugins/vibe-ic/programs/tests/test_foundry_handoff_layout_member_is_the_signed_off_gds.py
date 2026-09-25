@@ -39,9 +39,21 @@ def _project(tmp: Path, member: bytes, signed: bytes) -> Path:
 
 
 def _admit(project: Path) -> None:
+    import _gds_admission as admission
     gate = project / "reports/phase3/prestream_gate.json"
     gate.parent.mkdir(parents=True, exist_ok=True)
     gate.write_text(json.dumps({"verdict": "PASS", "layout_digest": "a" * 64}))
+    pnr = project / "phase3/stage3/pnr"
+    pnr.mkdir(parents=True, exist_ok=True)
+    if not (pnr / "spm.gds").is_file():
+        (pnr / "spm.gds").write_bytes(
+            (project / "phase3/stage4/gds/spm.gds").read_bytes())
+    basis = []
+    for name in ("routed.def", "constraint.sdc"):
+        path = pnr / name
+        path.write_text("synthetic layout input\n")
+        basis.append(path)
+    admission.admit_gds(project, pnr / "spm.gds", "a" * 64, basis)
 
 
 def _gate(proj: Path):

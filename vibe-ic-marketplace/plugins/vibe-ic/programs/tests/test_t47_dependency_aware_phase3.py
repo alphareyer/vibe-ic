@@ -51,12 +51,21 @@ def _run(tmp_path, monkeypatch, *, gate_pass: bool, diagnostic: bool = False,
     monkeypatch.setattr(R, "step_pnr", fake_pnr)
     if gate_pass or diagnostic:
         monkeypatch.setattr(R, "step_canonicalize_artefacts", fake_canonicalize)
-    monkeypatch.setattr(R, "step_prestream_gate", lambda *a, **k: R.StepResult(
-        "prestream_gate", "PASS" if gate_pass else "FAIL", 0.0,
-        "synthetic routed gate verdict", extras={
-            "layout_digest": "routed-basis",
-            "failed_gates": [] if gate_pass else ["sta_corner"]}),
-            raising=False)
+    def fake_gate(proj, top, pdk, container):
+        basis, error = R._layout_basis(proj, top, pdk, container)
+        assert not error, error
+        gate = R._pl.reports_phase3_dir(proj) / "prestream_gate.json"
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text(json.dumps({
+            "verdict": "PASS" if gate_pass else "FAIL",
+            "layout_digest": basis,
+            "failed_gates": [] if gate_pass else ["sta_corner"],
+        }) + "\n")
+        return R.StepResult("prestream_gate", "PASS" if gate_pass else "FAIL", 0.0,
+                            "synthetic routed gate verdict", extras={
+                                "layout_digest": basis,
+                                "failed_gates": [] if gate_pass else ["sta_corner"]})
+    monkeypatch.setattr(R, "step_prestream_gate", fake_gate, raising=False)
     if verify_xor_parallel:
         rendezvous = threading.Barrier(2, timeout=15)
         real_signoff = R.step_declared_signoff_gates
@@ -100,6 +109,9 @@ def test_real_prestream_gate_refuses_unidentified_routed_basis(tmp_path, monkeyp
     real_gate = R.step_prestream_gate
     project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
     drive = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
+    # The shared cache fixture now carries a complete routed basis. Remove
+    # this input to exercise this test's original unidentified-basis premise.
+    (R._pl.pnr_dir(project) / "constraint.sdc").unlink()
     monkeypatch.setattr(R, "step_prestream_gate", real_gate)
     R.main()
     plan = _plan(project)
