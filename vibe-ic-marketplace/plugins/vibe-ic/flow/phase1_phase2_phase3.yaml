@@ -6344,7 +6344,7 @@ steps:
         # `_discover` was taught to skip its own verdict documents — measured
         # before that guard, a second run of this gate re-ingested its own
         # output and files_found went 1 -> 2.
-        - program_exit_zero: "antenna_report_check . --mode antenna --json reports/phase3/antenna_signoff.json"
+        - program_exit_zero: "antenna_report_check . --mode antenna --under reports/phase3/antenna.rpt --json reports/phase3/antenna_signoff.json"
         # INDEPENDENT GDS-geometry antenna sign-off (the authoritative second
         # opinion the flow never had). Reconstructs the as-fabricated
         # connectivity from the streamed GDS and computes per-net
