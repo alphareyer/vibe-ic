@@ -63911,7 +63911,8 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     em_csv_c = f"{out_dir_c}/em_segments.csv"
     em_geometry = out_dir / "em_pg_geometry.tsv"
     em_geometry_c = f"{out_dir_c}/em_pg_geometry.tsv"
-    for old in (em_geometry, out_dir / "em_pg_geometry_subject.json"):
+    for old in (em_geometry, out_dir / "em_pg_geometry_subject.json",
+                out_dir / "em_segments.csv"):
         try:
             old.unlink()
         except FileNotFoundError:

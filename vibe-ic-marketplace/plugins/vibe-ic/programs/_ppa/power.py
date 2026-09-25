@@ -1867,8 +1867,10 @@ def _pdn_em_post_resize_check(project: Path, top: str, pdk: Any,
     try:
         rpt3.mkdir(parents=True, exist_ok=True)
         em_rpt = rpt3 / "em.rpt"
-        emit_ir_em_reports(project, top, pdk, container,
-                           rpt3 / "ir_drop.rpt", em_rpt, notes)
+        _ir_ok, em_ok = emit_ir_em_reports(project, top, pdk, container,
+                                          rpt3 / "ir_drop.rpt", em_rpt, notes)
+        if not em_ok:
+            return "NOT_MEASURED", "PDN_EM_POSTCHECK_NATIVE_UNMEASURED: " + "; ".join(notes)
         if not em_rpt.is_file() or em_rpt.stat().st_mtime < def_file.stat().st_mtime:
             return "NOT_MEASURED", "PDN_EM_POSTCHECK_STALE_REPORT"
         if not emit_em_current_authority(project, pdk, container, notes):
