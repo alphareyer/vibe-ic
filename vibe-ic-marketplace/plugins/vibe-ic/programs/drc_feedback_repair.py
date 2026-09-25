@@ -344,6 +344,10 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
         if not source_def.is_file():
             raise ValueError('FEEDBACK_ROUTED_DEF_MISSING')
         digest = _sha(source_def)
+        routed = pnr / 'routed.def'
+        if publish and (not routed.is_file() or _sha(routed) != digest):
+            raise ValueError('FEEDBACK_CANONICAL_DEF_DIVERGED')
+        record['initial_source_sha256'] = digest
         record['source_sha256'] = digest
         if not re.fullmatch(r'(?:sha256:)?[0-9a-f]{64}', image):
             raise ValueError('FEEDBACK_IMAGE_DIGEST_REQUIRED')
@@ -437,11 +441,8 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
                     raise ValueError('FEEDBACK_BOUND_EXHAUSTED')
                 record['after_count'] = 0
             if current != source_def and publish:
-                outputs = [source_def]
-                routed = pnr / 'routed.def'
-                if routed != source_def and routed.is_file() and _sha(routed) == digest:
-                    outputs.append(routed)
-                _replace_selected(current, outputs)
+                _replace_selected(current, [source_def, routed])
+            record['source_sha256'] = _sha(source_def)
             record['status'] = 'PASS'
             record['reason'] = 'RULE_ZERO_WITH_ROUTE_GUARDS'
         record['scratch_cleaned'] = not Path(temp).exists()
@@ -453,6 +454,74 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
     receipt.parent.mkdir(parents=True, exist_ok=True)
     write_text(receipt, json.dumps(record, indent=2, sort_keys=True) + '\n')
     return record
+
+
+def verify_streamed(project: Path, top: str, pdk: Any, image: str,
+                    gds: Path) -> dict:
+    """BLOCKING: bind the route feedback to the finished mask stream.
+
+    Finishing may add geometry after the scratch DEF stream. Measure the
+    reviewed rule again on the actual GDS and refuse any changed input.
+    """
+    _instrument_calibration.assert_calibrated('drc_feedback_repair::run')
+    receipt = project / 'reports/phase3/drc_feedback.json'
+    source = project / 'phase3/stage3/pnr' / f'{top}.def'
+    try:
+        record = json.loads(receipt.read_text())
+        if record.get('status') != 'PASS' or record.get('source_sha256') != _sha(source):
+            raise ValueError('FEEDBACK_ROUTE_DIGEST_MISMATCH')
+        routed = project / 'phase3/stage3/pnr/routed.def'
+        if not routed.is_file() or _sha(routed) != _sha(source):
+            raise ValueError('FEEDBACK_CANONICAL_DEF_DIVERGED')
+        if not gds.is_file():
+            raise ValueError('FEEDBACK_FINISHED_GDS_MISSING')
+        measured_source_sha = _sha(source)
+        measured_gds_sha = _sha(gds)
+        design = _def_design(source)
+        scratch_root = project / 'phase3/scratch/drc_feedback'
+        scratch_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='finished-feedback-',
+                                         dir=scratch_root) as temp:
+            counts = {}
+            for rule in _rules(pdk.drc_deck or ''):
+                one = Path(temp) / rule['id']
+                one.mkdir()
+                counts[rule['id']] = len(_measure(image, project, pdk.drc_deck,
+                                                  rule, gds, design, one))
+        if (_sha(source) != measured_source_sha or
+                _sha(routed) != measured_source_sha or
+                _sha(gds) != measured_gds_sha):
+            raise ValueError('FEEDBACK_FINISHED_LAYOUT_CHANGED_DURING_MEASUREMENT')
+        record['finished_gds_sha256'] = measured_gds_sha
+        record['finished_counts'] = counts
+        if any(counts.values()):
+            raise ValueError('FEEDBACK_FINISHED_GDS_RULE_NONZERO')
+        record['finished_status'] = 'PASS'
+    except (OSError, ValueError, ET.ParseError) as exc:
+        record = locals().get('record', {})
+        record['finished_status'] = 'REFUSED'
+        record['finished_reason'] = str(exc)
+    write_text(receipt, json.dumps(record, indent=2, sort_keys=True) + '\n')
+    return record
+
+
+def check_binding(project: Path, top: str, gds: Path) -> tuple[bool, str]:
+    """BLOCKING final admission; old or incomplete receipts never certify GDS."""
+    try:
+        record = json.loads((project / 'reports/phase3/drc_feedback.json').read_text())
+        source = project / 'phase3/stage3/pnr' / f'{top}.def'
+        routed = project / 'phase3/stage3/pnr/routed.def'
+        if (record.get('status') == 'PASS'
+                and record.get('finished_status') == 'PASS'
+                and record.get('source_sha256') == _sha(source)
+                and _sha(routed) == _sha(source)
+                and record.get('finished_gds_sha256') == _sha(gds)
+                and record.get('finished_counts')
+                and all(v == 0 for v in record['finished_counts'].values())):
+            return True, 'FEEDBACK_BOUND_TO_FINISHED_LAYOUT'
+    except (OSError, ValueError, TypeError):
+        pass
+    return False, 'FEEDBACK_LAYOUT_DIGEST_MISMATCH_OR_UNMEASURED'
 
 
 def main(argv: list[str] | None = None) -> int:

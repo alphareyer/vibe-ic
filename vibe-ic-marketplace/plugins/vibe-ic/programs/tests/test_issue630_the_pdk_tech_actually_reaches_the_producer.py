@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import importlib
 import types
+from pathlib import Path
 
 P = importlib.import_module("phase3_one_shot_runner")
 
@@ -105,6 +106,8 @@ def _restore(monkeypatch, tech):
 
     def fake_exec(container, cmd, **kw):
         calls["cmd"] = cmd
+        mask = cmd.split("--mask-out ", 1)[1].split()[0]
+        Path(mask).write_bytes(b"\x00\x06\x00\x02\x00\x07")
         return 0, "restored: 3 I/O labels + 0 power-rail markers ()", ""
 
     monkeypatch.setattr(P, "_docker_exec", fake_exec)

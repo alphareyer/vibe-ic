@@ -34785,7 +34785,7 @@ def _sdr_candidate_signoff_clean_in_shadow(project: Path, top: Optional[str],
         if (gds.status != "PASS" or not layout.is_file()
                 or layout.stat().st_mtime_ns < started_ns):
             return False, f"gds_{gds.status.lower()}"
-        drc = step_drc(project, top, pdk, container)
+        drc = step_drc(project, top, pdk, container, True)
         rpt = project / "phase3" / "reports" / "drc.rpt"
         if not rpt.is_file() or rpt.stat().st_mtime_ns < started_ns:
             return False, f"drc_report_missing:{rpt}"
@@ -39261,26 +39261,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                 "input_identity": _identity_after,
                 "def_sha256": _def_sha,
             }, sort_keys=True) + "\n")
-    # The router cannot see cell-internal shapes omitted from LEF.  A reviewed
-    # deck mapping admits a private, digest-bound post-route feedback trial;
-    # only a fully guarded zero-rule candidate may replace the routed DEF.
-    if _status == "PASS":
-        import drc_feedback_repair as _drc_feedback
-        if _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None)):
-            _feedback = _drc_feedback.run(
-                project, top, pdk,
-                _drc_feedback.image_for_container(container),
-                stream_script_text=_GDS_STREAMOUT_PY)
-            _nl_extras = dict(_nl_extras)
-            _nl_extras["drc_feedback"] = _feedback
-            if _feedback["status"] != "PASS":
-                _status = "FAIL"
-                detail += (" | SIGNOFF_DECK_FEEDBACK_REFUSED: "
-                           + _feedback.get("reason", "unknown"))
-            else:
-                detail += (" | SIGNOFF_DECK_FEEDBACK_PASS: "
-                           f"{_feedback.get('before_count', 0)}->"
-                           f"{_feedback.get('after_count', 0)}")
+    # Feedback runs in pre-stream admission after every route writer.
     if resize_history:
         return StepResult("pnr", _status, time.time() - t0,
                           detail,
@@ -41286,7 +41267,8 @@ def _restore_port_labels_if_missing(project: Path, top: str, pdk: PdkConfig,
                                             gds_path, def_file, force=True)
     if not ok:
         return False, f"{note} (trigger: {why})"
-    after = _port_label_census(gds_path, def_file, pdk_tech=_mtech)
+    after = _port_label_census(gds_path.with_suffix(".lvs.gds"), def_file,
+                               pdk_tech=_mtech)
     if after is not None and after.get("verdict") not in ("OK", "NOT_MEASURED"):
         # Ran, and the artefact still does not name its ports. Saying "restored"
         # here would be the defect wearing the fix's report.
@@ -41359,6 +41341,8 @@ def _klayout_restore_port_labels(project: Path, top: str, pdk: PdkConfig,
     pnr_dir = _pl.pnr_dir(project)
     prog = _ship_program("def_gds_port_power_restore.py", pnr_dir)
     labeled = pnr_dir / f"{top}.labeled.gds"
+    lvs_gds = gds_path.with_suffix(".lvs.gds")
+    mask_labeled = gds_path.with_suffix(".mask-labeled.gds")
     # #630 — tell the producer which layers this PDK declares for PORT labels.
     # Without it the labels go only on layer 100, which a Magic-based extractor
     # does not read, and the restore succeeds while the ports stay unnamed.
@@ -41368,15 +41352,23 @@ def _klayout_restore_port_labels(project: Path, top: str, pdk: PdkConfig,
         f"python3 {_to_container_path(str(prog), container)} "
         f"--gds-in {_to_container_path(str(gds_path), container)} "
         f"--def-file {_to_container_path(str(def_file), container)} "
-        f"--gds-out {_to_container_path(str(labeled), container)}"
+        f"--gds-out {_to_container_path(str(labeled), container)} "
+        f"--mask-out {_to_container_path(str(mask_labeled), container)}"
         + (f" --pdk-tech {_mtech}" if _mtech else "")
     )
     rc, out, err = _docker_exec(container, cmd,
                                 marker=_to_container_path(str(prog), container))
     if (rc == 0 and labeled.is_file() and labeled.stat().st_size > 0
+            and mask_labeled.is_file() and mask_labeled.stat().st_size > 0
             and "restored:" in (out or "")):
         try:
-            labeled.replace(gds_path)
+            labeled.replace(lvs_gds)
+            mask_labeled.replace(gds_path)
+            _aa.write_text(lvs_gds.with_suffix(".gds.receipt.json"),
+                json.dumps({"mask_gds_sha256": _sha256_file(gds_path),
+                            "def_sha256": _sha256_file(def_file),
+                            "lvs_gds_sha256": _sha256_file(lvs_gds)},
+                           sort_keys=True) + "\n")
         except Exception as exc:
             return False, f"restore wrote {labeled.name} but swap failed: {exc}"
         tail = "; ".join(l for l in (out or "").splitlines()
@@ -41385,7 +41377,7 @@ def _klayout_restore_port_labels(project: Path, top: str, pdk: PdkConfig,
                "; NO PDK magic *-GDS.tech resolved — labels are on the "
                "KLayout contract layer ONLY, which a Magic-based extractor "
                "does not read (vibe-ic#630)")
-        return True, f"port labels + rail markers restored ({tail}){_tn}"
+        return True, f"PDK port labels in mask, flow markers in LVS copy ({tail}){_tn}"
     return False, f"port-label restore NONFATAL: rc={rc} {(out + err)[-300:]}"
 
 
@@ -46118,6 +46110,23 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     pnr_dir = _pl.pnr_dir(project)
     def_file = pnr_dir / f"{top}.def"
     gds_out = pnr_dir / f"{top}.gds"
+    for _old_lvs in (gds_out.with_suffix(".lvs.gds"),
+                     gds_out.with_suffix(".lvs.gds.receipt.json")):
+        _old_lvs.unlink(missing_ok=True)
+    import drc_feedback_repair as _drc_feedback
+    if not candidate and _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None)):
+        try:
+            _fb_receipt = json.loads(
+                (project / "reports/phase3/drc_feedback.json").read_text())
+            _fb_current = _sha256_file(def_file)
+            _fb_route = _sha256_file(pnr_dir / "routed.def")
+        except (OSError, ValueError):
+            _fb_receipt, _fb_current, _fb_route = {}, None, None
+        if (_fb_receipt.get("status") != "PASS" or
+                _fb_receipt.get("source_sha256") != _fb_current or
+                _fb_route != _fb_current):
+            return StepResult("gds", "FAIL", time.time() - t0,
+                              "FEEDBACK_ROUTE_DIGEST_MISMATCH: pre-stream admission refused")
     if not def_file.is_file():
         return StepResult("gds", "NOT_MEASURED", time.time() - t0,
                           f"DEF missing: {def_file}", reason_class=_V.ReasonClass.INPUT_ABSENT)
@@ -48375,8 +48384,18 @@ def _try_svrf_native_drc(project: Path, top: str, pdk: PdkConfig,
 
 
 def step_drc(project: Path, top: str, pdk: PdkConfig,
-             container: str) -> StepResult:
+             container: str, candidate: bool = False) -> StepResult:
     t0 = time.time()
+    if candidate and "sdr_candidates" not in Path(project).parts:
+        return StepResult("drc", "FAIL", time.time() - t0,
+                          "candidate DRC requires private SDR scratch")
+    import drc_feedback_repair as _drc_feedback
+    if (not candidate and
+            _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None))):
+        _bound, _why = _drc_feedback.check_binding(
+            project, top, _pl.pnr_dir(project) / f"{top}.gds")
+        if not _bound:
+            return StepResult("drc", "FAIL", time.time() - t0, _why)
     _vac = _vacuous_on_unrouted(project, "drc", t0)
     if _vac is not None:
         return _vac
@@ -50706,6 +50725,22 @@ def _run_klayout_lvs(project: Path, top: str, pdk: PdkConfig,
                           f"KLayout LVS: sign-off GDS {gds_path.name} missing",
                           extras={"finding": "LVS_NO_SIGNOFF_GDS",
                                   "lvs_verdict": verdict})
+    _lvs_copy = gds_path.with_suffix(".lvs.gds")
+    if _lvs_copy.is_file():
+        try:
+            _lvs_receipt = json.loads(
+                _lvs_copy.with_suffix(".gds.receipt.json").read_text())
+            _lvs_bound = (
+                _lvs_receipt.get("mask_gds_sha256") == _sha256_file(gds_path)
+                and _lvs_receipt.get("def_sha256") == _sha256_file(
+                    _pl.pnr_dir(project) / f"{top}.def")
+                and _lvs_receipt.get("lvs_gds_sha256") == _sha256_file(_lvs_copy))
+        except (OSError, ValueError):
+            _lvs_bound = False
+        if not _lvs_bound:
+            return StepResult("lvs", "FAIL", time.time() - t0,
+                              "LVS_PRIVATE_GDS_DIGEST_MISMATCH")
+        gds_path = _lvs_copy
     if not (pdk.cell_gds and Path(pdk.cell_gds).is_file()):
         verdict = _write_lvs_verdict(
             project, "ENV_UNAVAILABLE", "LVS_NO_CELL_GDS",
@@ -53530,7 +53565,8 @@ _FINAL_LAYOUT_GATES = (
 
 
 def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
-                        container: str, *, _si_retry: bool = False) -> StepResult:
+                        container: str, *, _si_retry: bool = False,
+                        _feedback_retry: bool = False) -> StepResult:
     """Measure the current routed revision before allowing any GDS stream."""
     t0 = time.time()
     digest, refusal = _layout_basis(project, top, pdk, container)
@@ -53573,12 +53609,36 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
             _si_mcf_repair_promote(project, top, pdk, container,
                                    rec.get("after") or {}, [])
             rerun = step_prestream_gate(project, top, pdk, container,
-                                        _si_retry=True)
+                                        _si_retry=True,
+                                        _feedback_retry=_feedback_retry)
             rerun.extras["layout_writer_applied"] = "si_mcf_repair"
             return rerun
     except Exception as exc:
         mcf_producer_error = f"SI MCF producer/remedy could not run: {exc}"
         evidence.detail += f"; {mcf_producer_error}"
+    # SI MCF promotion above is the last routed writer.  Feedback belongs
+    # here, before the pre-stream gate certifies a fixed layout identity.
+    import drc_feedback_repair as _drc_feedback
+    if _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None)):
+        _feedback = _drc_feedback.run(
+            project, top, pdk,
+            _drc_feedback.image_for_container(container),
+            stream_script_text=_GDS_STREAMOUT_PY)
+        if _feedback.get("status") != "PASS":
+            return StepResult("prestream_gate", "FAIL", time.time() - t0,
+                              "SIGNOFF_DECK_FEEDBACK_REFUSED: " +
+                              _feedback.get("reason", "unknown"),
+                              [str(project / "reports/phase3/drc_feedback.json")])
+        if (_feedback.get("initial_source_sha256") !=
+                _feedback.get("source_sha256")):
+            if _feedback_retry:
+                return StepResult("prestream_gate", "FAIL", time.time() - t0,
+                                  "feedback changed the route twice; bounded pre-stream identity not stable")
+            rerun = step_prestream_gate(project, top, pdk, container,
+                                        _si_retry=_si_retry,
+                                        _feedback_retry=True)
+            rerun.extras["layout_writer_applied"] = "drc_feedback"
+            return rerun
     rows = [_run_declared_signoff_gate(project, *spec)
             for spec in _PRESTREAM_GATES]
     if evidence.status != "PASS":
@@ -70513,6 +70573,21 @@ def main() -> int:
                     project, effective_top, _gds_dispatched, args.container)
                 plan.append(_pad_final)
                 _chain_ok = (_pad_final.status == "PASS")
+            if _gds_dispatched.status == "PASS":
+                import drc_feedback_repair as _drc_feedback
+                if _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None)):
+                    _fb_finished = _drc_feedback.verify_streamed(
+                        project, effective_top, pdk,
+                        _drc_feedback.image_for_container(args.container),
+                        _pl.pnr_dir(project) / f"{effective_top}.gds")
+                    _chain_ok = _chain_ok and _fb_finished.get("finished_status") == "PASS"
+                    plan.append(StepResult(
+                        "drc_feedback_finished",
+                        "PASS" if _fb_finished.get("finished_status") == "PASS" else "FAIL", 0.0,
+                        _fb_finished.get("finished_reason", "reviewed rule zero on finished GDS"),
+                        [str(project / "reports/phase3/drc_feedback.json")],
+                        extras={"finished_gds_sha256": _fb_finished.get("finished_gds_sha256"),
+                                "finished_counts": _fb_finished.get("finished_counts")}))
         # PRE-FLIGHT (canonical step 31 — DRC/LVS/ERC/Density, split across the
         # two dispatches below). Its declared input is step 21's routed.def:
         # a sign-off that runs with no routed design produces a verdict about
