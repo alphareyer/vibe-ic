@@ -34198,6 +34198,8 @@ def _antenna_isolated_recovery_modified(log_text: str) -> bool:
     """The accepted isolated router verification must postdate every mutation."""
     _instrument_calibration.assert_calibrated(
         "phase3_one_shot_runner::_antenna_isolated_recovery_modified")
+    _instrument_calibration.assert_calibrated(
+        "phase3_one_shot_runner::_antenna_isolated_recovery_modified/post_verify_mutation")
     marker = "=== PNR ANTENNA ISOLATED ECO ==="
     if marker not in log_text:
         return True

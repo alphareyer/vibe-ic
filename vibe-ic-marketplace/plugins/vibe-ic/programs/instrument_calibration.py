@@ -1071,14 +1071,17 @@ _register(Instrument(
 ))
 
 _register(Instrument(
-    name="phase3_one_shot_runner::_antenna_isolated_recovery_modified",
+    name="phase3_one_shot_runner::_antenna_isolated_recovery_modified/post_verify_mutation",
     reads="the isolated OpenROAD scoped-route log after DRT-0711",
     ruling="R-0915-86 (T47f)",
     owner="T47f",
     why=("A DRT-0711 zero-violation line gives no release credit if a later "
          "mutation invalidated that verification. Both calibration sessions "
          "route the same two-inverter cal_chain; only the positive session "
-         "removes its routed n1 net after verification."),
+         "removes its routed n1 net after verification. This second pair "
+         "checks post-verification mutation at the same reader as the "
+         "landed T57 pair for absent final verification."),
+    calls_at="phase3_one_shot_runner::_antenna_isolated_recovery_modified",
     judge=_judge_antenna_isolated_recovery_modified,
     positive=Sample(
         provenance=("Real OpenROAD 26Q3-2627-g9e33179906 on 8HD-4, image "
