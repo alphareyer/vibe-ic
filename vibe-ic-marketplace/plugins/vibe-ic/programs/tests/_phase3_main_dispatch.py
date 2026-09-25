@@ -83,11 +83,9 @@ def gds_chain_dispatch_line():
     assert [ast.unparse(a) for a in gate.args[-4:]] == [
         "project", "effective_top", "pdk", "args.container"]
     chain_calls = [n for n in ast.walk(main) if isinstance(n, ast.Call)
-                   and isinstance(n.func, ast.Attribute)
-                   and isinstance(n.func.value, ast.Name)
-                   and n.func.value.id == "_ppa_power"
-                   and n.func.attr == "_pdn_em_resize_chain_continues"]
+                   and isinstance(n.func, ast.Name)
+                   and n.func.id == "_pnr_chain_continues"]
     assert len(chain_calls) == 1
     assert [ast.unparse(arg) for arg in chain_calls[0].args] == [
-        "_pnr_row", "_rz_post_status", "_pnr_chain_continues"]
+        "_pnr_row"]
     return name.lineno

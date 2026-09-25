@@ -258,11 +258,10 @@ class TestIrEmReports:
 
         def fake_exec(container, cmd, timeout=0, **_):
             # Emit an EM segment CSV where the emitter expects it.
-            for tok in cmd.split():
-                if tok.endswith("em_segments.csv"):
-                    Path(tok).write_text(
-                        "Node0 Layer,...,Current\n"
-                        "met1,...,6.030e-13\nmet1,...,6.850e-05\n")
+            for net in ("VPWR", "VGND"):
+                (rpt3 / f"em_segments_{net}.csv").write_text(
+                    "Node0 Layer,...,Current\n"
+                    "met1,...,6.030e-13\nmet1,...,6.850e-05\n")
             return (0, stdout, "")
 
         monkeypatch.setattr(runner, "_docker_exec", fake_exec)
