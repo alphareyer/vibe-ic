@@ -7695,14 +7695,18 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
                         r"DIEAREA\s*\(\s*(\d+)\s+(\d+)\s*\)\s*"
                         r"\(\s*(\d+)\s+(\d+)\s*\)", def_text)
                     if not units_m or not die_m:
-                        return decline("SUPPLY_ENTRY_DIE_GEOMETRY_UNPROVEN: "
-                                       "routed DEF lacks units or die rectangle")
+                        return decline("PDN_EM_RING_CAPACITY_UNREACHABLE: "
+                                       "SUPPLY_ENTRY_DIE_GEOMETRY_UNPROVEN; "
+                                       "routed DEF lacks units or die rectangle; "
+                                       f"required_footprint={ring_plan['required_footprint_um']}um")
                     dbu = int(units_m.group(1))
                     dims = [(int(die_m.group(3)) - int(die_m.group(1))) / dbu,
                             (int(die_m.group(4)) - int(die_m.group(2))) / dbu]
                     if abs(dims[0] - dims[1]) > 1 / dbu:
-                        return decline("SUPPLY_ENTRY_DIE_GEOMETRY_UNPROVEN: "
-                                       "the pad generator needs a square measured die")
+                        return decline("PDN_EM_RING_CAPACITY_UNREACHABLE: "
+                                       "SUPPLY_ENTRY_DIE_GEOMETRY_UNPROVEN; "
+                                       "the pad generator needs a square measured die; "
+                                       f"required_footprint={ring_plan['required_footprint_um']}um")
                     try:
                         supply_plan = _ppa_power.pdn_supply_entry_count_plan(
                             current_A=float(floor["i_total_A"]),
