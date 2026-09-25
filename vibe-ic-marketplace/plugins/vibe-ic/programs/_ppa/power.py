@@ -333,14 +333,29 @@ def pdn_supply_entry_count_plan(*, current_A: float,
                                "capacity_A": width * jmax * (1 - margin)})
     if not capacities or not any(c["structure"] == "pad_entry" for c in capacities):
         raise ValueError("SUPPLY_ENTRY_CAPACITY_UNPROVEN")
-    limiting = min(capacities, key=lambda c: c["capacity_A"])
+    pad_capacity = min(c["capacity_A"] for c in capacities
+                       if c["structure"] == "pad_entry")
+    ring_caps = [c for c in capacities if c["structure"] == "ring"]
+    ring_peaks = ring_plan.get("measured_ring_peak_A") or {}
+    ring_demands = []
+    for c in ring_caps:
+        peak = float(ring_peaks.get(c["layer"].lower(), 0))
+        if peak > 0:
+            ring_demands.append({**c, "measured_peak_A": peak,
+                                 "required_pairs": math.floor(peak / c["capacity_A"]) + 1})
+    if ring_caps and not ring_demands:
+        raise ValueError("RING_SEGMENT_CURRENT_UNMEASURED")
     # J == Jmax after guardband is an offender, so equality needs one more.
-    pairs = max(1, math.floor(current_A / limiting["capacity_A"]) + 1)
+    pad_pairs = math.floor(current_A / pad_capacity) + 1
+    ring_pairs = max((x["required_pairs"] for x in ring_demands), default=1)
+    pairs = max(1, pad_pairs, ring_pairs)
+    limiting = min(capacities, key=lambda c: c["capacity_A"])
     return {"verdict": "PLANNED", "rule": "PSM_CURRENT_OVER_ENTRY_CAPACITY",
             "current_A": current_A, "margin": margin,
             "capacities": capacities, "limiting": limiting,
-            "pair_count": pairs,
-            "validation": "NEW_PSM_REQUIRED: count assumes current sharing; final EM must remeasure every segment"}
+            "pad_pair_floor": pad_pairs, "ring_pair_floor": ring_pairs,
+            "ring_demands": ring_demands, "pair_count": pairs,
+            "validation": "NEW_PSM_REQUIRED: count extrapolates measured peak sharing; final EM must remeasure every segment"}
 
 
 SCHEMA_METRIC = "vibeic.ppa.metric.v1"
