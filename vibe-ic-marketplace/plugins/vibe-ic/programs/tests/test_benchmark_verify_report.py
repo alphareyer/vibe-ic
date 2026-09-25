@@ -124,7 +124,8 @@ def _make_markdown_only_project(tmp: Path) -> Path:
 
 def _run(project: Path):
     r = subprocess.run([sys.executable, str(GEN), str(project),
-                        "--ref", str(_reference_for(project))],
+                        "--ref", str(_reference_for(project)),
+                        "--changed-files"],
                        capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 
@@ -219,12 +220,29 @@ def test_markdown_match_cannot_satisfy_pillar_two(tmp_path):
 
 def test_receipt_must_bind_supplied_reference_and_producer_log(tmp_path):
     p = _make_project(tmp_path)
-    one = next((p / "cross_check").rglob("*.json"))
+    one = p / "cross_check" / "p" / "step_40.json"
     receipt = json.loads(one.read_text())
     receipt["reference"]["sha256"] = "0" * 64
     one.write_text(json.dumps(receipt))
     rc, out = _run(p)
     assert rc == 1 and "OVERALL=NOT-COMPLETE" in out
+    assert "**Invalid or ambiguous supplied receipts:** 40." in (
+        p / "BENCHMARK_VERIFICATION_REPORT.md").read_text()
+
+
+def test_a_second_corrupt_receipt_cannot_be_ignored(tmp_path):
+    p = _make_project(tmp_path / "project")
+    original = p / "cross_check" / "p" / "step_1.json"
+    duplicate = p / "cross_check" / "another_run" / "step_1.json"
+    duplicate.parent.mkdir()
+    receipt = json.loads(original.read_text())
+    receipt["reference"]["sha256"] = "0" * 64
+    duplicate.write_text(json.dumps(receipt))
+    rc, out = _run(p)
+    report = (p / "BENCHMARK_VERIFICATION_REPORT.md").read_text()
+    assert rc == 1 and "(unresolved 1)" in out, out
+    step_row = next(line for line in report.splitlines() if line.startswith("| 1 |"))
+    assert "| applicable | PENDING |" in step_row, step_row
 
 
 def test_self_reference_cannot_satisfy_pillar_two(tmp_path):

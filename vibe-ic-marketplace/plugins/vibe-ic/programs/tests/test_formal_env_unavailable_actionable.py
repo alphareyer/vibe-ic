@@ -25,6 +25,7 @@ participates.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -46,7 +47,7 @@ _FLOW_YAML = _PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml"
 #: A container name that cannot exist → the environment is GENUINELY absent.
 _ABSENT_CONTAINER = "vibeic_no_such_container_211"
 #: The container the image ships; present on a provisioned run host.
-_REAL_CONTAINER = "vibeic-eda"
+_REAL_CONTAINER = os.environ.get("VIBEIC_EDA_CONTAINER", "vibeic-eda")
 
 _RTL = """\
 module ctr (input clk, input rst, output reg [3:0] q);
@@ -65,7 +66,8 @@ module formal_ctr (input clk, input rst);
   reg init = 1;
   always @(posedge clk) init <= 0;
   always @(posedge clk) if (!init) assert (q <= 4'd9);
-  initial assume (rst);
+  // Reset is sampled on the first clock edge, not merely at time zero.
+  always @(posedge clk) if (init) assume (rst);
 endmodule
 """
 
