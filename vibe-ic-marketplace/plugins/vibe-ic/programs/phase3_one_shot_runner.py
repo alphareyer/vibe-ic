@@ -34165,7 +34165,7 @@ def _antenna_isolated_scoped_retry_tcl(seed_c: str, candidate_c: str,
         "  set _place0([$_i getName]) [list [$_i getOrigin] "
         "[$_i getPlacementStatus]]\n"
         "}\n"
-        f"set _report {candidate_c}.targets.rpt\n"
+        f"set _report {candidate_c}.targets.txt\n"
         "set _pre [check_antennas -report_violating_nets "
         "-report_file $_report]\n"
         "set _targets {}\n"
@@ -34381,7 +34381,7 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
         candidate = out_dir / "antenna_isolated_candidate.odb"
         candidate_def = out_dir / "antenna_isolated_candidate.odb.def"
         marker_report = out_dir / "antenna_isolated_candidate.odb.drc.rpt"
-        target_report = out_dir / "antenna_isolated_candidate.odb.targets.rpt"
+        target_report = out_dir / "antenna_isolated_candidate.odb.targets.txt"
         seed_c = f"{out_dir_c}/{seed.name}"
         candidate_c = f"{out_dir_c}/{candidate.name}"
         marker_history: List[str] = []
@@ -53657,6 +53657,10 @@ def _shipped_layout_digest(project: Path, top: str) -> Tuple[str, str]:
     return digest.hexdigest(), ""
 
 
+_CANONICAL_ANTENNA_SCOPE = ("--mode", "antenna", "--under",
+                            "reports/phase3/antenna.rpt")
+
+
 _PRESTREAM_GATES = (
     ("placement_legality", "placement_legality_check.py",
      "reports/phase3/placement_legality.json", ()),
@@ -53678,7 +53682,7 @@ _PRESTREAM_GATES = (
     ("em_authority", "em_peak_current_authority_check.py",
      "reports/phase3/em_current_authority.json", ()),
     ("antenna", "antenna_report_check.py",
-     "reports/phase3/antenna_signoff.json", ("--mode", "antenna")),
+     "reports/phase3/antenna_signoff.json", _CANONICAL_ANTENNA_SCOPE),
     ("si", "si_crosstalk_check.py",
      "reports/phase2/gates/si_crosstalk.json", ()),
     ("si_mcf", "si_mcf_sta_check.py",
@@ -53695,7 +53699,7 @@ _FINAL_LAYOUT_GATES = (
     ("em_authority_final", "em_peak_current_authority_check.py",
      "reports/phase3/em_current_authority.json", ()),
     ("antenna_final", "antenna_report_check.py",
-     "reports/phase3/antenna_signoff.json", ("--mode", "antenna")),
+     "reports/phase3/antenna_signoff.json", _CANONICAL_ANTENNA_SCOPE),
     # A router report cannot attest to antenna geometry introduced by
     # finishing or fill. The GDS deck reads the delivered stream directly;
     # a missing deck is NOT_MEASURED, never release PASS. Keep this output
@@ -53708,6 +53712,58 @@ _FINAL_LAYOUT_GATES = (
     ("si_mcf_final", "si_mcf_sta_check.py",
      "reports/phase3/si_mcf_sta_check.json", ()),
 )
+
+
+def _prestream_route_census(project: Path, top: str, pdk: PdkConfig,
+                            container: str, digest: str) -> Tuple[Optional[dict], str]:
+    """Measure the current routed DEF in a fresh OpenROAD ODB session.
+
+    BLOCKING evidence: an absent, incomplete or stale census is NOT_MEASURED.
+    The existing geometry-aware probe excludes genuinely abutted pad terminals.
+    """
+    pnr = _pl.pnr_dir(project)
+    report = _pl.reports_phase3_dir(project) / "prestream_route_census.json"
+    report.unlink(missing_ok=True)
+    routed = pnr / "routed.def"
+    if not routed.is_file():
+        return None, "routed.def absent"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    tcl = report.parent / "prestream_route_census.tcl"
+    lefs = [pdk.tech_lef, pdk.cell_lef]
+    extra_lefs = _def_reopen_extra_lefs_c(routed, pdk, container)
+    body = "".join(f"read_lef {_to_container_path(str(f), container)}\n"
+                   for f in lefs)
+    body += "".join(f"read_lef {f}\n" for f in extra_lefs)
+    body += (f"read_def {_to_container_path(str(routed), container)}\n"
+             + _routing_integrity_check_tcl("PRESTREAM")
+             + 'puts "PRESTREAM_CENSUS_COMPLETE: $::_vic_routing_integrity_complete"\n')
+    _aa.write_text(tcl, body)
+    tcl_c = _to_container_path(str(tcl), container)
+    cmd = (f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
+           f"{TOOLS_IN_CONTAINER}/bin:$PATH && openroad -no_init -exit {tcl_c}")
+    try:
+        rc, out, err = _docker_exec(container, cmd, marker=tcl_c,
+                                    inputs=[routed, *map(Path, lefs)],
+                                    transcript_path=report.parent / "prestream_route_census.log")
+    except Exception as exc:
+        return None, f"OpenROAD census could not run: {exc}"
+    log = (out or "") + "\n" + (err or "")
+    counts = re.findall(r"^PRESTREAM_UNROUTED_NETS:\s*(\d+)", log, re.M)
+    abutted = re.findall(r"^PRESTREAM_ABUTTED_NETS:\s*(\d+)", log, re.M)
+    blind = re.findall(r"^PRESTREAM_UNROUTED_SHAPE_BLIND:\s*(\d+)", log, re.M)
+    complete = re.findall(r"^PRESTREAM_CENSUS_COMPLETE:\s*1\s*$", log, re.M)
+    after, changed = _layout_basis(project, top, pdk, container)
+    if rc or len(counts) != 1 or len(abutted) != 1 or len(blind) != 1 or len(complete) != 1:
+        return None, f"OpenROAD census incomplete (rc={rc}; markers={len(counts)}/{len(abutted)}/{len(blind)}/{len(complete)})"
+    if changed or after != digest:
+        return None, "layout changed during OpenROAD census"
+    record = {"layout_digest": digest, "source_def": str(routed),
+              "source_def_sha256": _sha256_file(routed),
+              "unrouted_nets": int(counts[0]), "abutted_nets": int(abutted[0]),
+              "shape_blind_nets": int(blind[0]), "tool": "OpenROAD ODB",
+              "status": "MEASURED"}
+    _aa.write_text(report, json.dumps(record, indent=2) + "\n")
+    return record, ""
 
 
 def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
@@ -53868,21 +53924,26 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
         rows.append(StepResult("router_drc", "PASS", 0.0,
                                "router completed; final DRC violations=0"))
     signal_routed, signal_nets = _def_signal_routing_stats(pnr / "routed.def")
-    if signal_nets and not signal_routed:
+    census, census_error = _prestream_route_census(
+        project, top, pdk, container, digest)
+    if census_error:
+        rows.append(_upstream_signoff_not_measured(
+            "route_connectivity", "final ODB unrouted-net census absent: "
+            + census_error))
+    elif signal_nets and not signal_routed:
         rows.append(StepResult("route_connectivity", "FAIL", 0.0,
                                f"{signal_nets} signal nets but no signal wiring"))
+    elif census["unrouted_nets"]:
+        rows.append(StepResult("route_connectivity", "FAIL", 0.0,
+                               f"{census['unrouted_nets']} unrouted nets",
+                               [str(_pl.reports_phase3_dir(project) /
+                                    "prestream_route_census.json")]))
     else:
-        unrouted = re.findall(r"PRESTREAM_UNROUTED_NETS:\s*(\d+)", log)
-        if not unrouted:
-            rows.append(_upstream_signoff_not_measured(
-                "route_connectivity", "final ODB unrouted-net census absent"))
-        elif int(unrouted[-1]) != 0:
-            rows.append(StepResult("route_connectivity", "FAIL", 0.0,
-                                   f"{unrouted[-1]} unrouted nets"))
-        else:
-            rows.append(StepResult("route_connectivity", "PASS", 0.0,
-                                   "signal DEF wiring present; final ODB "
-                                   "unrouted-net census=0"))
+        rows.append(StepResult("route_connectivity", "PASS", 0.0,
+                               "signal DEF wiring present; final ODB "
+                               "unrouted-net census=0",
+                               [str(_pl.reports_phase3_dir(project) /
+                                    "prestream_route_census.json")]))
     after, changed = _layout_basis(project, top, pdk, container)
     if changed or after != digest:
         rows.append(_upstream_signoff_not_measured(
