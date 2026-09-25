@@ -136,6 +136,171 @@ def pdn_ring_dimensions(cfg: Dict[str, Any]
     return offset, clearance, widths_f, spacings_f, footprint
 
 
+def pdn_rail_pitch_plan(segments: Sequence[Mapping[str, Any]], *,
+                        rail_layer: str, rail_width_um: float,
+                        jmax_A_per_um: float, margin: float,
+                        old_pitch_um: float, grid_um: float
+                        ) -> Optional[Dict[str, Any]]:
+    """Conservative linear-span plan for a fixed-width follow-pin rail.
+
+    The largest measured current on the rail is the starting point.  With
+    unchanged distributed load per unit length, current is proportional to
+    the distance to the next perpendicular strap.  Thus I_new/I_old =
+    pitch_new/pitch_old.  This is a prediction, never an EM verdict; the
+    rebuilt grid still requires a fresh PSM and final DEF check.
+    """
+    if not (rail_width_um > 0 and jmax_A_per_um > 0 and old_pitch_um > 0
+            and grid_um > 0 and 0 < margin < 1):
+        return None
+    currents = [float(s.get("current_A", 0)) for s in segments
+                if str(s.get("layer0", "")).lower() == rail_layer.lower()
+                and str(s.get("layer1", "")).lower() == rail_layer.lower()
+                and float(s.get("current_A", 0)) > 0]
+    if not currents:
+        return None
+    peak = max(currents)
+    limit = rail_width_um * jmax_A_per_um * (1 - margin)
+    if peak < limit:
+        return None
+    bound = old_pitch_um * limit / peak
+    # Stay strictly below the gate's >= threshold; two-grid pitch also keeps
+    # the centred stripe and its offset representable by pdngen.
+    quantum = 2 * grid_um
+    pitch = math.floor(bound / quantum + 1e-9) * quantum
+    if pitch >= bound - 1e-12:
+        pitch -= quantum
+    if pitch <= 0:
+        return {"code": "PDN_EM_RAIL_PITCH_UNREACHABLE",
+                "old_pitch_um": old_pitch_um, "bound_pitch_um": bound,
+                "rail_current_A": peak, "rail_limit_A": limit}
+    return {"applied": "DENSER_STRAPS", "rail_layer": rail_layer,
+            "old_pitch_um": old_pitch_um, "new_pitch_um": round(pitch, 6),
+            "rail_current_A": peak, "rail_limit_A": limit,
+            "rail_j_before_A_per_um": peak / rail_width_um,
+            "rail_j_predicted_after_A_per_um": (
+                peak * pitch / old_pitch_um / rail_width_um),
+            "jmax_A_per_um": jmax_A_per_um, "margin": margin,
+            "model": "I_new = I_measured * new_pitch / old_pitch; "
+                     "fresh PSM must verify changed load distribution"}
+
+
+def pdn_ring_segment_peaks(def_text: str,
+                           segments: Sequence[Mapping[str, Any]]
+                           ) -> Dict[str, float]:
+    """Peak PSM current on a width-bearing DEF RING rectangle, per layer."""
+    dbm = re.search(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)", def_text)
+    snet = re.search(r"SPECIALNETS\b(.*?)END\s+SPECIALNETS",
+                     def_text, re.S)
+    if not dbm or not snet or int(dbm.group(1)) <= 0:
+        return {}
+    dbu = int(dbm.group(1))
+    boxes: Dict[str, List[Tuple[float, float, float, float]]] = {}
+    pat = re.compile(
+        r"(?:ROUTED|NEW)\s+(\S+)\s+(\d+)\s+\+\s+SHAPE\s+RING\s+"
+        r"\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+"
+        r"\(\s*(-?\d+)\s+(-?\d+)\s*\)")
+    for m in pat.finditer(snet.group(1)):
+        layer, raw_width, *xy = m.groups()
+        width = int(raw_width) / dbu
+        if width <= 0:
+            continue
+        x0, y0, x1, y1 = [int(v) / dbu for v in xy]
+        half = width / 2
+        boxes.setdefault(layer.lower(), []).append((
+            min(x0, x1) - half, min(y0, y1) - half,
+            max(x0, x1) + half, max(y0, y1) + half))
+    peaks: Dict[str, float] = {}
+    for s in segments:
+        layer = str(s.get("layer0", "")).lower()
+        if layer != str(s.get("layer1", "")).lower():
+            continue
+        pts = s.get("points_um")
+        if not pts or any(v is None for pt in pts for v in pt):
+            continue
+        for lx, ly, hx, hy in boxes.get(layer, []):
+            if all(lx - 1e-6 <= x <= hx + 1e-6 and
+                   ly - 1e-6 <= y <= hy + 1e-6 for x, y in pts):
+                peaks[layer] = max(peaks.get(layer, 0.0),
+                                   float(s.get("current_A", 0)))
+                break
+    return peaks
+
+
+def pdn_ring_capacity_plan(cfg: Mapping[str, Any], *, gap_um: float,
+                           peaks_A: Mapping[str, float],
+                           jmax_A_per_um: Mapping[str, float],
+                           margin: float, grid_um: float
+                           ) -> Dict[str, Any]:
+    """Size configured ring rails; refuse a measured gap that cannot fit.
+
+    No undeclared stacked ring, extra rail or pad bypass is presumed legal.
+    Such topology needs a proven layer, via and pad-pin plan before use.
+    """
+    _, clearance, widths, spacings, _ = pdn_ring_dimensions(dict(cfg))
+    layers = [str(x) for x in cfg["layers"]]
+    required = []
+    for layer, recipe in zip(layers, widths):
+        peak = float(peaks_A.get(layer.lower(), 0))
+        jmax = float(jmax_A_per_um.get(layer.lower(), 0))
+        if peak > 0 and jmax > 0:
+            bound = peak / (jmax * (1 - margin))
+            quantum = 2 * grid_um
+            width = math.ceil(bound / quantum - 1e-9) * quantum
+            if width <= bound + 1e-12:
+                width += quantum
+            required.append(max(recipe, round(width, 6)))
+        else:
+            required.append(recipe)
+    footprint = max(2 * w + s for w, s in zip(required, spacings))
+    record = {"gap_um": gap_um, "clearance_um": clearance,
+              "layers": layers, "recipe_widths_um": widths,
+              "required_widths_um": required, "spacings_um": spacings,
+              "required_footprint_um": footprint,
+              "available_footprint_um": gap_um - clearance,
+              "measured_ring_peak_A": dict(peaks_A),
+              "margin": margin}
+    if footprint >= gap_um - clearance:
+        return {**record, "code": "PDN_EM_RING_CAPACITY_UNREACHABLE",
+                "reason": "measured ring EM widths and two supply rails do not fit "
+                          "the measured pad-to-core gap; no additional "
+                          "ring layer, rail or direct pad bypass is declared "
+                          "and geometry-proven"}
+    return {**record, "applied": (
+        "WIDER_RING" if any(w > old for w, old in zip(required, widths))
+        else "NO_CHANGE")}
+
+
+def pdn_pad_entry_plan(segments: Sequence[Mapping[str, Any]], *,
+                       pad_layers: Sequence[str], drawn_widths_um: Mapping[str, float],
+                       jmax_A_per_um: Mapping[str, float], margin: float,
+                       grid_um: float) -> List[Dict[str, Any]]:
+    """Measured pad-layer current and EM width; geometry approval is separate."""
+    out = []
+    for name in pad_layers:
+        layer = str(name).lower()
+        currents = [float(s.get("current_A", 0)) for s in segments
+                    if str(s.get("layer0", "")).lower() == layer
+                    and str(s.get("layer1", "")).lower() == layer]
+        peak = max(currents, default=0.0)
+        width = float(drawn_widths_um.get(layer, 0))
+        jmax = float(jmax_A_per_um.get(layer, 0))
+        if not (peak > 0 and width > 0 and jmax > 0 and grid_um > 0):
+            continue
+        bound = peak / (jmax * (1 - margin))
+        quantum = 2 * grid_um
+        required = math.ceil(bound / quantum - 1e-9) * quantum
+        if required <= bound + 1e-12:
+            required += quantum
+        out.append({"layer": name, "measured_peak_A": peak,
+                    "drawn_width_um": width,
+                    "required_width_um": round(required, 6),
+                    "j_before_A_per_um": peak / width,
+                    "jmax_A_per_um": jmax, "margin": margin,
+                    "status": ("CAPACITY_NOT_PROVEN" if width < required
+                               else "WIDTH_SUFFICIENT")})
+    return out
+
+
 SCHEMA_METRIC = "vibeic.ppa.metric.v1"
 PARSER = "_ppa/power.py"
 
@@ -1679,7 +1844,9 @@ def _pdn_em_spent_on(project: Path) -> Optional[str]:
     return _pdn_em_subject_digest(project)
 
 def _pdn_em_sentinel_binds(sentinel: Path, project: Path,
-                           run_id: Optional[str] = None) -> Tuple[bool, str]:
+                           run_id: Optional[str] = None,
+                           repair_class: Optional[str] = None
+                           ) -> Tuple[bool, str]:
     """Bind a spent resize only if its floor reached this DEF, or this run spent it.
 
     The run id is the anti-loop bound while pass 2 is in flight or still narrow.
@@ -1732,6 +1899,10 @@ def _pdn_em_sentinel_binds(sentinel: Path, project: Path,
         return False, ("the previous resize did not take effect: the routed "
                        "DEF is below its recorded floor on "
                        + ", ".join(sorted(missing)))
+    if (repair_class and isinstance(doc, Mapping)
+            and doc.get("repair_class") != repair_class):
+        return False, ("a previous run spent a different PDN remedy; "
+                       "this architecture remedy has not been tried")
     return True, ("the previous resize took effect: every recorded strap "
                   "floor is present in the routed DEF")
 
@@ -1982,6 +2153,7 @@ def _record_pdn_em_resize_spend(project: Path, decision: Mapping[str, Any]
             "reason": "pdn_em_first_pass_resize",
             "spent_on_def": _pdn_em_spent_on(project),
             "run_id": _PDN_EM_RUN_ID,
+            "repair_class": decision.get("repair_class"),
             "short": decision["short"],
             **proof,
         }, indent=2) + "\n")

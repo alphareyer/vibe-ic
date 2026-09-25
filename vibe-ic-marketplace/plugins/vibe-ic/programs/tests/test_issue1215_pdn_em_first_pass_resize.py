@@ -29,6 +29,7 @@ from __future__ import annotations
 import sys
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
 if str(_PROGRAMS) not in sys.path:
@@ -146,6 +147,83 @@ def test_a_rail_short_on_its_own_must_not_order_a_wasted_repnr(
     assert R._pdn_em_first_pass_resize(
         _tree(tmp_path), "spm", object(), "c", reasons) is None
     assert reasons == ["all measured strap widths meet their EM floors"]
+
+
+def test_measured_hot_fixed_rail_orders_shorter_connected_strap_span(
+        tmp_path, monkeypatch):
+    floor = {"per_layer": {
+        "metal1": {"orig_name": "Metal1", "jmax_A_per_um": 0.00067,
+                   "w_em_um": 50.12},
+        "metal4": {"orig_name": "Metal4", "jmax_A_per_um": 0.00067,
+                   "w_em_um": 50.12}},
+        "margin": 0.1, "manufacturing_grid_um": 0.005,
+        "width_quantum_um": 0.01, "i_drive_A": 0.03022}
+    _arm(monkeypatch, floor=floor,
+         drawn={"metal1": 0.6, "metal4": 50.12})
+    project = _tree(tmp_path, pnr_tcl=(
+        _PNR_TCL + "  add_pdn_connect -grid grid -layers {Metal1 Metal4}\n"))
+    report = R._pl.reports_phase3_dir(project) / "em_segments.csv"
+    report.write_text(
+        "Net,Node0 Layer,Node1 Layer,Current,Node0 X Location,"
+        "Node0 Y Location,Node1 X Location,Node1 Y Location\n"
+        "VDD,Metal1,Metal1,0.001102,1,2,3,2\n"
+        "VDD,Metal4,Metal4,0.007,4,5,4,8\n")
+    out = R._pdn_em_first_pass_resize(project, "spm", object(), "c")
+    plan = out["rail_pitch"]
+    assert out["short"] == []
+    assert plan["applied"] == "DENSER_STRAPS"
+    assert plan["strap_layer"] == "metal4"
+    assert plan["new_pitch_um"] < 153.6 * (0.6 * 0.00067 * 0.9) / 0.001102
+    assert plan["rail_j_predicted_after_A_per_um"] < 0.00067 * 0.9
+
+
+def test_ring_recipe_is_refused_when_measured_em_width_cannot_fit(
+        tmp_path, monkeypatch):
+    floor = {"per_layer": {
+        "metal4": {"orig_name": "Metal4", "jmax_A_per_um": 0.00067,
+                   "w_em_um": 50.12},
+        "metal5": {"orig_name": "Metal5", "jmax_A_per_um": 0.0015,
+                   "w_em_um": 22.39}},
+        "margin": 0.1, "manufacturing_grid_um": 0.005}
+    _arm(monkeypatch, floor=floor,
+         drawn={"metal4": 50.12, "metal5": 22.39})
+    project = _tree(tmp_path)
+    (R._pl.pnr_dir(project) / "spm.def").write_text(
+        "UNITS DISTANCE MICRONS 1000 ;\nSPECIALNETS 1 ;\n"
+        "- SUP + ROUTED Metal4 1600 + SHAPE RING "
+        "( 10000 0 ) ( 10000 20000 ) ;\nEND SPECIALNETS\n")
+    (R._pl.pnr_dir(project) / "openroad.log").write_text(
+        "PDN_PAD_RING_PLAN: gap=17.44um footprint=4.9um\n")
+    (R._pl.reports_phase3_dir(project) / "em_segments.csv").write_text(
+        "Node0 Layer,Node0 X location,Node0 Y location,Node1 Layer,"
+        "Node1 X location,Node1 Y location,Current\n"
+        "Metal4,10,5,Metal4,10,8,0.01136\n")
+    cfg = {"layers": ["Metal4", "Metal5"], "widths": [1.6, 1.6],
+           "spacings": [1.7, 1.7], "connect_to_pad_layers": ["Metal2"],
+           "connects": [["Metal2", "Metal4"]], "core_offset_um": 6,
+           "min_clearance_um": 0.46}
+    reasons = []
+    assert R._pdn_em_first_pass_resize(
+        project, "spm", SimpleNamespace(pdn_ring=cfg), "c", reasons) is None
+    assert "PDN_EM_RING_CAPACITY_UNREACHABLE" in reasons[0]
+    assert "39.38" in reasons[0]
+
+
+def test_configured_ring_with_no_placed_pads_keeps_core_resize(
+        tmp_path, monkeypatch):
+    _arm(monkeypatch, floor=_FLOOR,
+         drawn={"metal1": 0.6, "metal4": 1.6, "metal5": 1.6})
+    project = _tree(tmp_path)
+    (R._pl.pnr_dir(project) / "openroad.log").write_text(
+        "PDN_PAD_RING_INERT: no placed PAD-class masters\n")
+    cfg = {"layers": ["Metal4", "Metal5"], "widths": [1.6, 1.6],
+           "spacings": [1.7, 1.7], "connect_to_pad_layers": ["Metal2"],
+           "connects": [["Metal2", "Metal4"]], "core_offset_um": 6,
+           "min_clearance_um": 0.46}
+    out = R._pdn_em_first_pass_resize(
+        project, "spm", SimpleNamespace(pdn_ring=cfg), "c")
+    assert out is not None
+    assert {d["layer"] for d in out["short"]} == {"Metal4", "Metal5"}
 
 
 def test_without_the_pdn_script_the_decision_refuses_rather_than_guesses(

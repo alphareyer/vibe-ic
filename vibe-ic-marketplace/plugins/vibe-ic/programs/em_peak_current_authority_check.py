@@ -332,10 +332,27 @@ def jmax_tier(project: Path, jmax: Optional[Path], tech_lef: Optional[Path],
         pass
     defw = (emc._def_pg_widths_of(local_def) if local_def else
             emc.discover_def_pg_min_widths(project))
+    geometry_path = None
+    if local_def:
+        try:
+            geometry_doc = json.loads((project / "reports/phase3" /
+                                       "em_pg_geometry_subject.json").read_text())
+            name = geometry_doc.get("geometry_file")
+            if (geometry_doc.get("def_sha256") == digest
+                    and isinstance(name, str)
+                    and Path(name).name == name):
+                candidate_geometry = project / "reports/phase3" / name
+                if (candidate_geometry.is_file()
+                        and hashlib.sha256(candidate_geometry.read_bytes()).hexdigest()
+                        == geometry_doc.get("geometry_sha256")):
+                    geometry_path = candidate_geometry
+        except (OSError, ValueError, TypeError):
+            pass
     verdict, rep = emc.evaluate(em_path, jpath, tlef, margin,
                                 emc._DEFAULT_BLACKS_N, net_hint, 20,
                                 def_widths=defw or None,
-                                def_path=local_def)
+                                def_path=local_def,
+                                pg_geometry_path=geometry_path)
     return {"verdict": verdict, "skip_reason": rep.get("skip_reason"),
             "def_pg_min_widths_um": defw or None,
             "jmax_source": rep.get("jmax_source"),
