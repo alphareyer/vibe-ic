@@ -15,6 +15,14 @@ def _plan(die_side_um=500):
 
 
 def _produce(project, root, plan):
+    if plan is not None:
+        floorplan = project / "phase3/stage3/pnr/floorplan.def"
+        floorplan.parent.mkdir(parents=True, exist_ok=True)
+        side = int(plan["die_side_um"] * 1000)
+        floorplan.write_text(
+            "VERSION 5.8 ;\nDESIGN chip_top ;\n"
+            "UNITS DISTANCE MICRONS 1000 ;\n"
+            f"DIEAREA ( 0 0 ) ( {side} {side} ) ;\nEND DESIGN\n")
     path = project / "supply_plan.json"
     path.write_text(json.dumps(plan))
     return subprocess.run(
@@ -61,6 +69,74 @@ def test_no_legal_site_is_named_refusal(tmp_path):
     rec = json.loads((project / "reports/phase3/io_pad_chip_top.json").read_text())
     assert rec["rule"] == "SUPPLY_ENTRY_NO_LEGAL_SITE"
     assert not (project / "phase3/stage3/pnr/chip_top_io.v").exists()
+
+
+def _wide_ring_project(tmp_path):
+    """Four uneven signal edges and a site grid like a real second pass."""
+    project, root = _tree(tmp_path)
+    doc = (project / "input/docs/L3.md")
+    doc.write_text(doc.read_text().replace("`rst`", "`south_bus[15:0]`")
+                   .replace("`clk`", "`east_bus[7:0]`")
+                   .replace("`d[1:0]`", "`north_bus[15:0]`")
+                   .replace("`q`", "`west_bus[1:0]`"))
+    ports = [{"name": f"{side}_bus", "direction": "input", "width": width,
+              "msb": width - 1, "lsb": 0}
+             for side, width in (("south", 16), ("east", 8),
+                                 ("north", 16), ("west", 2))]
+    (project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").write_text(
+        json.dumps({"top_module": "core", "top_ports": ports}))
+    lef = root / "testpdk/libs.ref/test_io/lef/test_io.lef"
+    text = lef.read_text().replace("SIZE 10.000 BY 100.000", "SIZE 75.000 BY 100.000")
+    text = text.replace("SIZE 40.000 BY 100.000", "SIZE 355.000 BY 355.000")
+    text = text.replace("SIZE 1 BY 100", "SIZE 0.1 BY 100")
+    text = text.replace("SIZE 1.000 BY 100.000", "SIZE 0.100 BY 100.000")
+    lef.write_text(text)
+    cfg = root / "testpdk/libs.tech/someflow/test_io/config.tcl"
+    cfg.write_text(cfg.read_text().replace('PAD_EDGE_SPACING) "5"',
+                                           'PAD_EDGE_SPACING) "26"'))
+    return project, root
+
+
+def test_measured_second_pass_uses_ring_site_grid_and_rewrites_population(tmp_path):
+    project, root = _wide_ring_project(tmp_path)
+    first = _produce(project, root, None)
+    assert first.returncode == 0, first.stdout + first.stderr
+    first_rec = json.loads((project / "reports/phase3/io_pad_chip_top.json").read_text())
+    assert first_rec["power_pad_plan"]["pair_count"] == 1
+    second = _produce(project, root, {"verdict": "PLANNED", "pair_count": 7,
+                                      "subject_def_sha256": "a" * 64,
+                                      "die_side_um": 1962})
+    assert second.returncode == 0, second.stdout + second.stderr
+    rec = json.loads((project / "reports/phase3/io_pad_chip_top.json").read_text())
+    assert rec["power_pad_plan"]["pair_count"] == 7
+    assert rec["power_pad_plan"]["pairs_by_side"] == {
+        "S": 0, "E": 2, "N": 0, "W": 5}
+    assert sum(name.startswith("u_pad_supply_power_") for name in
+               rec["derived_answers"]["pad_order_by_side"]["west"]) == 5
+
+
+def test_second_pass_infeasible_grid_names_request_and_legal_counts(tmp_path):
+    project, root = _wide_ring_project(tmp_path)
+    result = _produce(project, root, {"verdict": "PLANNED", "pair_count": 30,
+                                      "subject_def_sha256": "a" * 64,
+                                      "die_side_um": 1962})
+    assert result.returncode == 1
+    rec = json.loads((project / "reports/phase3/io_pad_chip_top.json").read_text())
+    assert rec["rule"] == "SUPPLY_ENTRY_RING_GEOMETRY_INFEASIBLE"
+    assert "requested_pairs=30" in rec["findings"][0]
+    assert "die_side_um=1962" in rec["findings"][0]
+    assert "legal_pair_counts_by_side" in rec["findings"][0]
+
+
+def test_site_grid_filters_a_width_only_balanced_population(tmp_path):
+    project, root = _wide_ring_project(tmp_path)
+    result = _produce(project, root, {"verdict": "PLANNED", "pair_count": 4,
+                                      "subject_def_sha256": "a" * 64,
+                                      "die_side_um": 1962})
+    assert result.returncode == 0, result.stdout + result.stderr
+    rec = json.loads((project / "reports/phase3/io_pad_chip_top.json").read_text())
+    assert rec["power_pad_plan"]["pairs_by_side"] == {
+        "S": 0, "E": 3, "N": 0, "W": 1}
 
 
 def test_checked_in_psm_sizing_artifact_drives_entry_floor():

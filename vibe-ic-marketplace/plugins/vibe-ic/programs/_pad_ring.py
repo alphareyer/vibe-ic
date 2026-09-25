@@ -1543,6 +1543,25 @@ class IoLibrary:
 
 
 # ── abutment ────────────────────────────────────────────────────────────────
+def side_spacing(total_width: int, pad_count: int, available: int,
+                 site_width: int) -> Optional[Tuple[int, int]]:
+    """Return (between, to_corner) under the ring placer's exact DBU rule.
+
+    A missing result is a width or site-grid refusal.  The chip-top supply
+    allocator and pad_ring_gen must use the same rule on every PnR pass.
+    """
+    if (pad_count <= 0 or site_width <= 0 or total_width > available
+            or total_width < 0):
+        return None
+    free = available - total_width
+    between = (free // (pad_count + 1) // site_width) * site_width
+    rest = free - between * (pad_count - 1)
+    corner, odd = divmod(rest, 2)
+    if odd or corner % site_width:
+        return None
+    return between, corner
+
+
 def gap_is_fillable(gap: int, filler_widths: Sequence[int]) -> bool:
     """Can `gap` DEF units be tiled exactly by the declared filler cells?
 

@@ -35934,6 +35934,14 @@ def step_io_pad_chip_top_gen(project: Path, container: Optional[str] = None,
                       f"rc={rc} {note}".strip(), reason_class=reason)
 
 
+def _pad_ring_process_note(rc: int, out: str, err: str) -> str:
+    """Keep a producer's named refusal, even when a banner precedes it."""
+    lines = ((out or "") + "\n" + (err or "")).strip().splitlines()
+    error = next((line.strip() for line in lines
+                  if re.match(r"\s*[A-Z][A-Z0-9_]+:", line)), None)
+    return error if rc != 0 and error else (lines[0] if lines else "")
+
+
 def step_pad_ring_gen(project: Path, container: Optional[str] = None,
                       pdk: Optional[PdkConfig] = None) -> StepResult:
     """Canonical step 15.5ic producer + independent gate, before routing.
@@ -35995,8 +36003,8 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
                 [sys.executable, str(prog), str(project), *extra],
                 capture_output=True, text=True, errors="replace")
             rc, out, err = cp.returncode, cp.stdout, cp.stderr
-        detail = (out or err or "").strip().splitlines()
-        notes.append(f"{name}: rc={rc} {detail[0] if detail else ''}".strip())
+        notes.append(f"{name}: rc={rc} "
+                     f"{_pad_ring_process_note(rc, out, err)}".strip())
         if rc == 0:
             status, reason = _V.Verdict.PASS.value, ""
             continue

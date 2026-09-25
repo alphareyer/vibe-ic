@@ -54,7 +54,9 @@ def _tree(tmp_path: Path, *, with_ground=True) -> tuple[Path, Path]:
     lefdir = root / "testpdk/libs.ref/test_io/lef"
     lefdir.mkdir(parents=True)
     text = (
-        _macro("test_io__in", "PAD INPUT", [("PAD", "SIGNAL")])
+        "SITE test_io_site\n  CLASS PAD ;\n  SIZE 1 BY 100 ;\nEND test_io_site\n"
+        "SITE test_io_corner_site\n  CLASS PAD ;\n  SIZE 40 BY 40 ;\nEND test_io_corner_site\n"
+        + _macro("test_io__in", "PAD INPUT", [("PAD", "SIGNAL")])
         + _macro("test_io__bi", "PAD INOUT", [("PAD", "SIGNAL")])
         + _macro("test_io__fill", "PAD SPACER", width=1)
         + _macro("test_io__cor", "ENDCAP BOTTOMLEFT", width=40)
@@ -71,6 +73,8 @@ def _tree(tmp_path: Path, *, with_ground=True) -> tuple[Path, Path]:
     cfgdir = root / "testpdk/libs.tech/someflow/test_io"
     cfgdir.mkdir(parents=True)
     (cfgdir / "config.tcl").write_text(
+        'set ::env(PAD_SITE_NAME) "test_io_site"\n'
+        'set ::env(PAD_CORNER_SITE_NAME) "test_io_corner_site"\n'
         'set ::env(PAD_CORNER) "$::env(PAD_CELL_LIBRARY)__cor"\n'
         'set ::env(PAD_FILLERS) "$::env(PAD_CELL_LIBRARY)__fill"\n'
         'set ::env(PAD_EDGE_SPACING) "5"\n'

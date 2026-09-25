@@ -1191,26 +1191,98 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
             allocation = [side]
         else:
             die = float(supply_plan.get("die_side_um") or 0)
-            corner = float(sizes.get(str(decls.values.get("PAD_CORNER")), (0, 0))[0])
+            corner_size = sizes.get(str(decls.values.get("PAD_CORNER")), (0, 0))
             edge = float(decls.values.get("PAD_EDGE_SPACING") or 0)
-            if not (die > 2 * (corner + edge) and pair_width > 0):
+            if not (die > 2 * (max(corner_size) + edge) and pair_width > 0):
                 raise Refusal("SUPPLY_ENTRY_NO_LEGAL_SITE",
                               "die, corner, edge, or supply-master geometry is absent")
-            usable = die - 2 * (corner + edge)
-            capacity = {s: max(0, int((usable - side_widths[s] + 1e-9)
-                                       // pair_width)) for s in SIDES}
-            if sum(capacity.values()) < pair_count:
-                raise Refusal("SUPPLY_ENTRY_NO_LEGAL_SITE",
-                              f"{pair_count} VDD/VSS pairs need {pair_width:g}um each; "
-                              f"available pairs by side are {capacity}")
-            allocation = []
-            used = {s: 0 for s in SIDES}
-            for _ in range(pair_count):
-                choices = [s for s in SIDES if used[s] < capacity[s]]
-                side = min(choices, key=lambda s: (used[s], side_widths[s],
-                                                    SIDES.index(s)))
-                used[side] += 1
-                allocation.append(side)
+            # The first pass has already written the floorplan DEF. Reuse its
+            # DBU scale, and the ring producer's site-grid/filler rules, when
+            # the measured-current plan changes the supply population.
+            floorplan = project / PR.FLOORPLAN_DEF_REL
+            if not floorplan.is_file():
+                raise Refusal("SUPPLY_ENTRY_FLOORPLAN_MISSING",
+                              f"requested_pairs={pair_count}, die_side_um={die:g}; "
+                              "the preceding PnR pass wrote no floorplan DEF")
+            try:
+                prior_die = PR.read_def(floorplan)
+            except (PR.DefError, OSError) as exc:
+                raise Refusal("SUPPLY_ENTRY_FLOORPLAN_UNREADABLE",
+                              f"{PR.FLOORPLAN_DEF_REL}: {exc}") from exc
+            units = prior_die.units
+            prior_box = prior_die.box
+            if any(abs(span - round(die * units)) > 1 for span in
+                   (prior_box[2] - prior_box[0],
+                    prior_box[3] - prior_box[1])):
+                raise Refusal("SUPPLY_ENTRY_DIE_MISMATCH",
+                              f"requested_pairs={pair_count}, plan_die_um={die:g}, "
+                              f"prior_floorplan_die_um={[(prior_box[2] - prior_box[0]) / units, (prior_box[3] - prior_box[1]) / units]}")
+            library = PR.IoLibrary(
+                lefs, PR.discover_io_site_declarations(pdk_root, pdk))
+            site = library.resolve_site(str(decls.values.get("PAD_SITE_NAME") or ""))
+            if not site or not site.get("size") or site.get("class") != "PAD":
+                raise Refusal("SUPPLY_ENTRY_SITE_UNRESOLVED",
+                              f"PAD_SITE_NAME={decls.values.get('PAD_SITE_NAME')!r} "
+                              "has no PAD-class site width in the selected IO library")
+            site_w = int(round(float(site["size"][0]) * units))
+            filler_names = decls.values.get("PAD_FILLERS") or []
+            filler_widths = [int(round(sizes[name][0] * units))
+                             for name in filler_names if name in sizes]
+            legal: Dict[str, List[int]] = {}
+            final_widths: Dict[str, Dict[int, int]] = {}
+            for side in SIDES:
+                corner = corner_size[0] if side in ("S", "N") else corner_size[1]
+                available = int(round((die - 2 * (corner + edge)) * units))
+                base_widths = [int(round(sizes[str(chosen[i]["master"])][0] * units))
+                               for i in ordered[side]]
+                supply_widths = [int(round(sizes[str(entry["master"])][0] * units))
+                                 for entry in pair]
+                legal[side] = []
+                final_widths[side] = {}
+                for count in range(pair_count + 1):
+                    widths = base_widths + supply_widths * count
+                    total = sum(widths)
+                    if not widths:
+                        good = PR.gap_is_fillable(available, filler_widths)
+                    else:
+                        spacing = PR.side_spacing(total, len(widths),
+                                                  available, site_w)
+                        good = (spacing is not None and all(
+                            PR.gap_is_fillable(gap, filler_widths)
+                            for gap in spacing))
+                    if good:
+                        legal[side].append(count)
+                        final_widths[side][count] = total
+            # Search complete legal side counts; a greedy pair-at-a-time move
+            # can get stuck when count+1 is illegal but count+2 is legal.
+            states = {0: ()}
+            for side in SIDES:
+                next_states = {}
+                for used, counts in states.items():
+                    for count in legal[side]:
+                        total = used + count
+                        if total > pair_count:
+                            continue
+                        candidate = counts + (count,)
+                        old = next_states.get(total)
+                        def rank(values):
+                            widths = [final_widths[s][n]
+                                      for s, n in zip(SIDES[:len(values)], values)]
+                            return (max(widths), sum(w * w for w in widths), values)
+                        if old is None or rank(candidate) < rank(old):
+                            next_states[total] = candidate
+                states = next_states
+            selected = states.get(pair_count)
+            if selected is None:
+                raise Refusal(
+                    "SUPPLY_ENTRY_RING_GEOMETRY_INFEASIBLE",
+                    f"requested_pairs={pair_count}, die_side_um={die:g}, "
+                    f"pair_width_um={pair_width:g}, site_width_um="
+                    f"{site_w / units:g}, legal_pair_counts_by_side={legal}; "
+                    "no assignment passes pad-ring width, corner-site and "
+                    "declared-filler rules")
+            allocation = [side for side, count in zip(SIDES, selected)
+                          for _ in range(count)]
         supply_instances: List[str] = []
         for index, side in enumerate(allocation):
             group = []
