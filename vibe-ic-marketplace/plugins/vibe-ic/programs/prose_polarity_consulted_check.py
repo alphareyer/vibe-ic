@@ -119,6 +119,19 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "drc_feedback_repair::_def_nets":
+        "DEF is a closed machine grammar: UNITS DISTANCE MICRONS, NETS, "
+        "ROUTED and END NETS are parser tokens, not sentences. A denial such "
+        "as 'not ROUTED' is invalid DEF and cannot be emitted by OpenROAD. "
+        "The function refuses absent sections and does not infer sign-off "
+        "success from these tokens; it only compares route identities.",
+    "drc_feedback_repair::run":
+        "The values read here are exact KLayout RDB XML categories, OpenROAD "
+        "fixed-format INFO records anchored at both line ends, and a DEF "
+        "formal grammar. The route's success is never inferred from free "
+        "prose: an absent metric is a named refusal, nonzero is a refusal, "
+        "and the original deck must emit a parseable zero-item RDB. A text "
+        "line saying 'not [INFO ...]' cannot match the anchored grammar.",
     "sta_signoff_rigor_check::check":
         "TWO STAMP LINES THIS FLOW WRITES ITSELF, in a closed field grammar "
         "(R-0915-154). `# STA_ALIAS_BASIS: <file>` is written by "

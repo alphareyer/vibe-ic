@@ -1,0 +1,16 @@
+# Select one registered rule without editing the sign-off deck or its rule text.
+# The PDK registry accepts tags, not exact rule IDs. Add an exact, private tag
+# during registration, then evaluate the original deck in this DRC context.
+deck = $deck_file
+rule = $rule_id
+raise 'FEEDBACK_DECK_OR_RULE_MISSING' if !deck || !rule
+require File.join(File.dirname(deck), 'rule_framework')
+class RuleFramework::Registry
+  alias_method :feedback_original_register, :register
+  def register(id:, path:, priority:, tags: [], &code)
+    feedback_original_register(id: id, path: path, priority: priority,
+                               tags: tags + ["feedback_exact_#{id}"], &code)
+  end
+end
+$decks = "feedback_exact_#{rule}"
+eval(File.read(deck), binding, deck)
