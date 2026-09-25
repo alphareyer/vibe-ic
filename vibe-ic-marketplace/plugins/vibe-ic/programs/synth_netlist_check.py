@@ -829,7 +829,8 @@ def audit_area_stats(netlist_path: Path) -> Tuple[List[Finding], dict]:
 TOOL_EMITTED_NETLIST_NAME = "netlist_yosys.v"
 
 
-def tool_emitted_netlist(netlist_path: Path) -> Optional[Path]:
+def tool_emitted_netlist(netlist_path: Path,
+                         declared_source: Optional[Path] = None) -> Optional[Path]:
     """The synthesiser's own output file beside ``netlist_path``, or ``None``.
 
     ``None`` when it is absent, unreadable, or IS the file under audit — a gate
@@ -837,7 +838,7 @@ def tool_emitted_netlist(netlist_path: Path) -> Optional[Path]:
     corroborate against, and pretending otherwise would compare a file with
     itself and call the agreement evidence.
     """
-    candidate = netlist_path.parent / TOOL_EMITTED_NETLIST_NAME
+    candidate = declared_source or (netlist_path.parent / TOOL_EMITTED_NETLIST_NAME)
     if not candidate.is_file():
         return None
     try:
@@ -849,7 +850,8 @@ def tool_emitted_netlist(netlist_path: Path) -> Optional[Path]:
 
 
 def audit_cell_census(netlist_path: Path, cell_counts: Dict[str, int],
-                      total_cells: int) -> Tuple[List[Finding], dict]:
+                      total_cells: int,
+                      declared_source: Optional[Path] = None) -> Tuple[List[Finding], dict]:
     """``(findings, info)`` for the census cross-check against the tool's output.
 
     The comparison is over the CELL CENSUS, not over bytes. Two files that
@@ -867,7 +869,7 @@ def audit_cell_census(netlist_path: Path, cell_counts: Dict[str, int],
         "status": "",
     }
 
-    source = tool_emitted_netlist(netlist_path)
+    source = tool_emitted_netlist(netlist_path, declared_source)
     if source is None:
         info["status"] = "NO_TOOL_EMITTED_NETLIST"
         findings.append(Finding(
@@ -970,6 +972,9 @@ def main(argv: list = None) -> int:
                         help="RTL source files the netlist is judged against "
                              "(enables the staleness guard #426 and the "
                              "register-bit structure-aware floor #427)")
+    parser.add_argument('--tool-netlist', default=None,
+                        help="Tool's native netlist for this mapped synthesis arm; "
+                             "keeps the phase-2 generic netlist separate")
     parser.add_argument('--json', default=None,
                         help="Output JSON report path")
     args = parser.parse_args(argv)
@@ -992,9 +997,15 @@ def main(argv: list = None) -> int:
     # comparing an empty census against a real one would relabel an existing
     # EMPTY_NETLIST error as a contradiction.
     if stats.get("has_module"):
+        declared_tool = Path(args.tool_netlist) if args.tool_netlist else None
+        if declared_tool is not None and tool_emitted_netlist(netlist_path, declared_tool) is None:
+            findings.append(Finding(
+                severity="ERROR", category="TOOL_NETLIST_MISSING",
+                message=f"declared synthesis tool netlist is absent or self-referential: {declared_tool}"))
         census_findings, census_info = audit_cell_census(
             netlist_path, stats.get("cell_type_counts", {}),
-            stats.get("total_cells", 0))
+            stats.get("total_cells", 0),
+            declared_tool)
         findings.extend(census_findings)
         stats["cell_census"] = census_info
 

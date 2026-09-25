@@ -68,6 +68,24 @@ assign a = b;
 """
 
 
+def test_explicit_mapped_tool_netlist_preserves_generic_phase2_sibling(tmp_path):
+    mapped = tmp_path / "mapped.v"
+    native = tmp_path / "librelane.nl.v"
+    generic = tmp_path / "netlist_yosys.v"
+    mapped.write_text(VALID_15_CELLS)
+    native.write_text(VALID_15_CELLS)
+    generic.write_text(make_netlist_with_n_cells(16))
+    report = tmp_path / "gate.json"
+    argv = [sys.executable, str(SCRIPT), '--netlist', str(mapped),
+            '--tool-netlist', str(native), '--json', str(report)]
+    assert subprocess.run(argv, capture_output=True).returncode == 0
+    assert json.loads(report.read_text())['stats']['cell_census']['source'] == str(native)
+    native.write_text(make_netlist_with_n_cells(14))
+    assert subprocess.run(argv, capture_output=True).returncode == 1
+    native.unlink()
+    assert subprocess.run(argv, capture_output=True).returncode == 1
+
+
 # ===========================================================================
 # Test 1: Valid netlist with 500 cells — PASS
 # ===========================================================================

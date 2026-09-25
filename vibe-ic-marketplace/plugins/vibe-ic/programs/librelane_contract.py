@@ -144,6 +144,86 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
     return result
 
 
+def emit_synthesis_config(project: Path, pdk: str, output: Path,
+                          rtl_files: list[Path], defines: list[str],
+                          use_slang: bool,
+                          std_cell_library: str | None = None,
+                          synth_liberty: str | None = None) -> dict:
+    """Bind Yosys.Synthesis to the caller's selected design inputs."""
+    import sparse_fsm_detect
+
+    if not rtl_files or any(not path.is_file() or not path.resolve().is_relative_to(project.resolve())
+                            for path in rtl_files):
+        raise Refusal('LL_SYNTH_INPUT_MISSING', 'selected RTL must exist inside the project')
+    result = emit_config(project, pdk, output)
+    sources = _load(output.with_suffix('.provenance.json'))
+    _set(result, sources, 'PDK', pdk, 'resolved PDK supplied by phase3_one_shot_runner')
+    if std_cell_library:
+        _set(result, sources, 'STD_CELL_LIBRARY', std_cell_library,
+             'resolved synthesis liberty library supplied by phase3_one_shot_runner')
+    if synth_liberty:
+        _set(result, sources, 'LIB', {'*': [synth_liberty]},
+             'resolved synthesis liberty supplied by phase3_one_shot_runner')
+    _set(result, sources, 'VERILOG_FILES',
+         [str(path.resolve()) for path in rtl_files],
+         'phase3_one_shot_runner.step_synth selected RTL (package-first, include-hub filtered)')
+    for key in ('PNR_SDC_FILE', 'SIGNOFF_SDC_FILE'):
+        if key in result and str(result[key]).startswith('dir::'):
+            result[key] = str((project / str(result[key])[5:]).resolve())
+    _set(result, sources, 'VERILOG_DEFINES', defines,
+         'phase3_one_shot_runner.step_synth macro-aware frontend decision')
+    _set(result, sources, 'USE_SLANG', use_slang,
+         'phase3_one_shot_runner.step_synth frontend decision')
+    sparse = sparse_fsm_detect.detect_paths(rtl_files)
+    _set(result, sources, 'SYNTH_PRESERVE_FSM_REGISTERS', sparse['register_names'],
+         'sparse_fsm_detect over selected design RTL')
+    _set(result, sources, 'SYNTH_PRESERVE_FSM_INSTANCES', sparse['flop_instances'],
+         'sparse_fsm_detect over selected design RTL')
+    _set(result, sources, 'SYNTH_FSM_ENCFILE', True,
+         'step 13 LEC requires the synthesis FSM recoding table')
+    write_json(output, result)
+    write_json(output.with_suffix('.provenance.json'), sources)
+    return result
+
+
+def verify_synthesis_stat(stat_path: Path, state: dict, stats_path: Path,
+                          top: str, output: Path) -> dict:
+    """Bind the area-gate input and copied netlist to Yosys's native stat."""
+    output.unlink(missing_ok=True)
+    stat = _load(stat_path)
+    stats = _load(stats_path)
+    module = stat.get('modules', {}).get('\\' + top)
+    if module is None:
+        module = stat.get('modules', {}).get(top)
+    if not isinstance(module, dict):
+        raise Refusal('LL_STAT_TOP_MISSING', top)
+    metrics = state.get('metrics', {})
+    native_netlist = Path(state.get('nl') or '')
+    if not native_netlist.is_file():
+        raise Refusal('LL_SYNTH_OUTPUT_MISSING', str(native_netlist))
+    count = module.get('num_cells')
+    area = module.get('area')
+    if not isinstance(count, int) or isinstance(count, bool) or \
+            not isinstance(area, (int, float)) or isinstance(area, bool):
+        raise Refusal('LL_STAT_UNMEASURED', str(stat_path))
+    other_counts = (stats.get('cell_count'), metrics.get('design__instance__count'))
+    other_areas = (stats.get('chip_area'), metrics.get('design__instance__area'))
+    if any(value != count for value in other_counts) or any(
+            not isinstance(value, (int, float)) or isinstance(value, bool) or
+            abs(value - area) > max(1e-6, abs(area) * 1e-9)
+            for value in other_areas):
+        raise Refusal('LL_STAT_MISMATCH', f'{stat_path} vs {stats_path}/state metrics')
+    native_hash = digest(native_netlist)
+    if stats.get('netlist_sha256') != 'sha256:' + native_hash:
+        raise Refusal('LL_STAT_NETLIST_MISMATCH', str(native_netlist))
+    report = {'status': 'PASS', 'top': top, 'cell_count': count,
+              'area_um2': area, 'stat_sha256': digest(stat_path),
+              'native_netlist_sha256': native_hash,
+              'area_gate_input_sha256': digest(stats_path)}
+    write_json(output, report)
+    return report
+
+
 def _walk_paths(value: Any):
     if isinstance(value, dict):
         for item in value.values():
@@ -156,10 +236,13 @@ def _walk_paths(value: Any):
 
 
 def _check_state(state: dict, *, outputs: bool = False,
-                 step: str | None = None) -> None:
-    # Floorplan is the producer of the first ODB/DEF/SDC. Requiring those
-    # views on its input made the T83 adapter unable to execute step 15.
-    required = ('nl',) if step == 'OpenROAD.Floorplan' else ('odb', 'def', 'nl', 'sdc')
+                 step_id: str = '') -> None:
+    # Early steps consume only the views produced so far. Floorplan creates
+    # the first ODB/DEF/SDC from the mapped netlist.
+    early = {'Yosys.JsonHeader': (), 'Yosys.Synthesis': ('json_h',),
+             'OpenROAD.CheckSDCFiles': ('nl',), 'OpenROAD.STAPrePNR': ('nl',),
+             'OpenROAD.Floorplan': ('nl',)}
+    required = early.get(step_id, ('odb', 'def', 'nl', 'sdc'))
     if not outputs:
         for key in required:
             if not state.get(key):
@@ -236,22 +319,57 @@ for step_id in json.loads(Path(requested).read_text()):
     return configs
 
 
+def resolve_step_config(project: Path, image: str, source: Path, output: Path,
+                        *, mounts: list[tuple[Path, str]] | None = None,
+                        pdk_root: str | None = None, docker: str = 'docker') -> Path:
+    """Ask LibreLane to apply its PDK config before the step-only CLI runs."""
+    script = (
+        'import json,os,tempfile;'
+        'from librelane.config import Config;'
+        'from librelane.steps import Step;'
+        f'p={str(source)!r}; out={str(output)!r}; root={pdk_root!r};'
+        '_,cls=Step.factory.from_step_config(p);'
+        f'cfg,_=Config.load(p,cls.get_all_config_variables(),design_dir={str(project)!r},pdk_root=root);'
+        'fd,tmp=tempfile.mkstemp(dir=os.path.dirname(out));'
+        'os.write(fd,cfg.dumps().encode());os.close(fd);os.replace(tmp,out)'
+    )
+    volumes = ['-v', f'{project.resolve()}:{project.resolve()}']
+    for host, guest in mounts or []:
+        volumes += ['-v', f'{host.resolve()}:{guest}:ro']
+    result = subprocess.run([docker, 'run', '--rm', *volumes,
+                             '--entrypoint', 'python3', image, '-c', script],
+                            capture_output=True, text=True)
+    if result.returncode or not output.is_file():
+        raise Refusal('LL_CONFIG_RESOLVE_FAILED',
+                      (result.stderr or result.stdout)[-1000:])
+    return output
+
 def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
               *, docker: str = 'docker', mounts: list[tuple[Path, str]] | None = None,
-              lane: str | None = None) -> list[Path]:
+              lane: str | None = None, pdk_root: str | None = None,
+              namespace: str | None = None) -> list[Path]:
     """Run pinned per-step snapshots. Step directories retain both inputs and outputs."""
     image_capability(image, docker)
     outputs = []
     previous: Path | None = None
     if lane is not None and (not lane or '/' in lane or lane in ('.', '..')):
         raise Refusal('LL_INVALID_LANE', str(lane))
-    base = project / 'phase3/librelane' / lane if lane else project / 'phase3/librelane'
+    if namespace and (Path(namespace).is_absolute() or
+                      any(part in ('..', '.') for part in Path(namespace).parts)):
+        raise Refusal('LL_INVALID_NAMESPACE', namespace)
+    if lane and namespace:
+        raise Refusal('LL_LANE_NAMESPACE_CONFLICT', f'{lane}: {namespace}')
+    base = project / 'phase3/librelane'
+    if lane:
+        base /= lane
+    if namespace:
+        base /= namespace
     for index, (step_id, config, initial_state) in enumerate(steps, 1):
         name = f'{index:02d}-{step_id.lower().replace(".", "-")}'
         folder = base / name
         state_path = previous or initial_state
         state = _load(state_path)
-        _check_state(state, step=step_id)
+        _check_state(state, step_id=step_id)
         if _load(config).get('meta', {}).get('step') != step_id:
             raise Refusal('LL_STEP_CONFIG_MISMATCH', step_id)
         fingerprint = {'image': image, 'config': digest(config), 'state': digest(state_path),
@@ -278,6 +396,8 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         cmd = [docker, 'run', '--rm', *volume_args, '--entrypoint', 'python3', image,
                '-m', 'librelane.steps', 'run', '--id', step_id, '-c', str(config),
                '-i', str(state_path), '-o', str(folder)]
+        if pdk_root:
+            cmd.extend(['--pdk-root', pdk_root])
         completed = subprocess.run(cmd, capture_output=True, text=True)
         (folder / 'invocation.log').write_text(completed.stdout + '\n' + completed.stderr)
         if completed.returncode or not (folder / 'state_out.json').exists():

@@ -48,3 +48,10 @@ edge spacing, and rotation settings as well as side order. It records each
 source field and refuses invalid edge spacing. It still leaves PDK-only site
 geometry, library views, PDN sizing, and excluded masters to their actual
 declaration or tool config; a t78 metric is not an input source.
+## Step 9 synthesis candidate
+
+Step 9 opts in with `{"steps":{"9":"librelane"},"image":"<LibreLane-capable image>"}`. The runner selects the same staged RTL files as its direct synthesis path, including package ordering and include-hub filtering. It emits `VERILOG_FILES`, `VERILOG_DEFINES`, `USE_SLANG`, resolved PDK/Liberty inputs, sparse FSM preservation attributes and the FSM encoding-table request with input provenance. It resolves the PDK config, then runs `Yosys.JsonHeader` and `Yosys.Synthesis`. The mapped netlist and native `stat.json` remain linked by the LibreLane receipt. A binding gate compares native stat count/area to the emitted area-gate input and state metrics, and verifies the native netlist hash. The area budget, mapped-netlist, PDK consistency and provenance gates run on the selected output; any nonzero gate status fails this candidate.
+
+This candidate requires the `vibeic/librelane` FSM hooks before LEC can use its encoding table. A local test can set `development_librelane_source` and `pdk_root_host` in the switch to mount a read-only fork source and PDK. Those are development inputs, not release evidence. Production remains `direct` when step 9 is not explicitly selected. `dual` fails closed until both isolated arms have comparable routed results and LEC proof.
+
+`programs/_ppa/synthesis.py` runs the nine LibreLane `SYNTH_STRATEGY` arms through pre-PnR STA. Its reports are exploratory proxies. `select_postroute` admits only same-scope routed reports with proved LEC, a passing area gate and required measured power; a proxy alone never chooses an arm.
