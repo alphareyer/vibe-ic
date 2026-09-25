@@ -1344,6 +1344,38 @@ _register(Instrument(
 ))
 
 
+# The P0 front end reads Verilator's fixed diagnostic grammar. Calibrate its
+# code reader on transcripts emitted by the released image before it judges.
+def _judge_p0_verilator_codes(log: str) -> Optional[str]:
+    import p0_tool_frontend_check as p0
+    return ("SELRANGE" if any(row["code"] == "SELRANGE"
+                           for row in p0._diagnostic_codes(log)) else None)
+
+
+_register(Instrument(
+    name="p0_tool_frontend_check::_diagnostic_codes",
+    reads="Verilator --lint-only --Wall diagnostic transcript",
+    ruling="T86", owner="mig-p0",
+    why=("P0 substitutes Verilator diagnostic codes for hand-written RTL "
+         "regex scans. The code prefix must identify a real out-of-range "
+         "selection and stay silent on unrelated tool warnings."),
+    judge=_judge_p0_verilator_codes,
+    positive=Sample(
+        provenance=("Real Verilator 5.053 (released vibeic-eda:0.3.67) "
+                    "--lint-only --Wall -Wno-fatal transcript on synthetic "
+                    "RTL selecting bit 5 of logic [3:0]; generated on "
+                    "192.168.1.114. calibration/p0_verilator_positive.log."),
+        artefact=_read("p0_verilator_positive.log")),
+    expect="SELRANGE",
+    negative=Sample(
+        provenance=("Same released Verilator on a valid one-module RTL. "
+                    "DECLFILENAME and UNUSEDSIGNAL warnings are present "
+                    "but no SELRANGE; generated on 192.168.1.114. "
+                    "calibration/p0_verilator_negative.log."),
+        artefact=_read("p0_verilator_negative.log")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════

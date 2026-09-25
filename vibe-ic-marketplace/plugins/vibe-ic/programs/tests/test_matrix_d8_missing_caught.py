@@ -263,6 +263,7 @@ _VERILOG_BODY = (
     "  assign q = clk;\n"
     "endmodule\n"
 )
+_VERILOG_SV_BODY = _VERILOG_BODY.replace("d8_fixture_top", "d8_fixture_top_sv")
 
 # ──────────────────────────────────────────────────────────────────────
 # PATH-CORRECT FIXTURE BODIES
@@ -322,7 +323,10 @@ _PATH_BODIES: Tuple[Tuple[str, str], ...] = (
 _KIND_BODIES: Tuple[Tuple[str, str], ...] = (
     (".jsonl", _JSONL_BODY),
     (".json", _JSON_BODY),
-    (".sv", _VERILOG_BODY),
+    # Step 1 materializes both .v and .sv alternatives. Distinct module
+    # names keep the seeded tree elaboratable by its real Yosys/Verilator
+    # gate, so this test still measures the missing-output downgrade.
+    (".sv", _VERILOG_SV_BODY),
     (".v", _VERILOG_BODY),
 )
 
@@ -2086,7 +2090,10 @@ def _content_arm_sweep() -> Dict[str, Dict[str, Any]]:
 #: `test_d8_downgrade_is_reachable_through_each_steps_own_real_gate` already
 #: owns, and duplicating it would report one defect as two.
 CONTENT_ARM_AS_MEASURED: Dict[str, str] = {
-    "D1": _CONTENT_UNMOVED, "1": _CONTENT_UNMOVED, "2": _CONTENT_UNMOVED,
+    # T86: step 1's real RTL gate now elaborates with Yosys and lints with
+    # Verilator. Corrupting its seeded RTL changes PASS to FAIL with a named
+    # Yosys reason; the former module-token count missed that corruption.
+    "D1": _CONTENT_UNMOVED, "1": _CONTENT_MOVED, "2": _CONTENT_UNMOVED,
     # 4 REJOINS the population with `_COVERAGE_BODY`. Measured, not assumed:
     # UNMOVED — corrupting the coverage artefact's content does not move step 4's
     # verdict, because the gate that reads it (`verilator_coverage_measure`) is

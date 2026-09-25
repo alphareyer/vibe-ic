@@ -1,0 +1,20 @@
+%Warning-DECLFILENAME: /src/width.sv:1:8: Filename 'width' does not match MODULE name: 'child'
+    1 | module child(input logic [3:0] a, output logic b); assign b=a[5]; endmodule
+      |        ^~~~~
+                       ... For warning description see https://verilator.org/warn/DECLFILENAME?v=5.053
+                       ... Use "/* verilator lint_off DECLFILENAME */" and lint_on around source to disable this message.
+%Warning-SELRANGE: /src/width.sv:1:62: Selection index out of range: 5:5 outside 3:0
+                                     : ... note: In instance 'top.c'
+    1 | module child(input logic [3:0] a, output logic b); assign b=a[5]; endmodule
+      |                                                              ^
+                   ... For warning description see https://verilator.org/warn/SELRANGE?v=5.053
+                   ... Use "/* verilator lint_off SELRANGE */" and lint_on around source to disable this message.
+%Warning-WIDTHEXPAND: /src/width.sv:2:59: Input port connection 'a' expects 4 bits on the pin connection, but pin connection's VARREF 'a' generates 2 bits.
+                                        : ... note: In instance 'top'
+    2 | module top(input logic [1:0] a, output logic b); child c(.a(a), .b(b)); endmodule
+      |                                                           ^
+                      ... For warning description see https://verilator.org/warn/WIDTHEXPAND?v=5.053
+                      ... Use "/* verilator lint_off WIDTHEXPAND */" and lint_on around source to disable this message.
+- V e r i l a t i o n   R e p o r t: Verilator 5.053 devel rev v5.050-544-gd9cb52e9a
+- Verilator: Built from 0.031 MB sources in 4 modules, into 0.012 MB in 3 C++ files needing 0.000 MB
+- Verilator: Walltime 0.005 s (elab=0.000, cvt=0.002, bld=0.000); cpu 0.005 s on 1 threads; allocated 18.305 MB

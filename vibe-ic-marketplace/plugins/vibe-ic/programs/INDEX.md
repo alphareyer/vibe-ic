@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1343
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1343)
+- **Total programs (excluding helpers / shims):** 1344
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1344)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1334 |
+| `any` | 1335 |
 
 ## Alphabetical listing
 
@@ -838,6 +838,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `output_latency_advisor` | any | — | output sampling/latency advisor. |
 | `p0_disposition_backing_check` | any | — | A P0 disposition that names a home the tree does not have. |
 | `p0_gate_invocability_drift_check` | any | — | Fail-closed guard against a P0 gate the umbrella cannot invoke. |
+| `p0_tool_frontend_check` | any | — | P0 structural front ends: Yosys elaboration and Verilator diagnostic codes. |
 | `package_invariants_check` | any | — | the rule lives NEXT TO the code it binds. |
 | `packaging_intake_check` | any | Wave 88 | gate (v1.6.13 Wave 88, renumbered in v1.6.14 Wave 90: Step 37 -> 38; v1.6.15 Wave 91: Step 38 -> 39; Step 42 in the phase1_phase2_phase3.... |
 | `packet_length_check_present` | any | — | Static audit for packet-length sanity checks in any module that dispatches on a received command. |
@@ -1415,7 +1416,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1334 programs)
+### `any` (1335 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2224,6 +2225,7 @@ _(no programs in this group)_
 - `output_latency_advisor` — output sampling/latency advisor.
 - `p0_disposition_backing_check` — A P0 disposition that names a home the tree does not have.
 - `p0_gate_invocability_drift_check` — Fail-closed guard against a P0 gate the umbrella cannot invoke.
+- `p0_tool_frontend_check` — P0 structural front ends: Yosys elaboration and Verilator diagnostic codes.
 - `package_invariants_check` — the rule lives NEXT TO the code it binds.
 - `packaging_intake_check` — gate (v1.6.13 Wave 88, renumbered in v1.6.14 Wave 90: Step 37 -> 38; v1.6.15 Wave 91: Step 38 -> 39; Step 42 in the phase1_phase2_phase3....  _[Wave 88]_
 - `packet_length_check_present` — Static audit for packet-length sanity checks in any module that dispatches on a received command.
