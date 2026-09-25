@@ -66,42 +66,41 @@ def test_the_record_is_persisted_beside_the_arithmetic():
     assert 'pdn_em_sizing.json' in SRC
 
 
-def test_the_row_reads_the_artefact_not_a_scope_it_cannot_see():
-    """The step row is written by the orchestrator, which never sees the
-    dispatch's floor dict; it must read the persisted record."""
-    i = SRC.index('"pdn_em_resize", _pnr_redispatched.status')
-    seg = SRC[max(0, i - 1200):i]
-    assert 'pdn_em_sizing.json' in seg and '.get("applied")' in seg
+def test_post_route_signoff_does_not_redispatch_pnr():
+    """Step 25 must audit the routed geometry without changing its subject."""
+    main = inspect.getsource(R.main)
+    assert '_pdn_em_first_pass_resize(' not in main
+    assert '_pnr_redispatched' not in main
+    assert '_pnr_step_passed = _pnr_chain_continues(_pnr_row)' in main
 
 
 # --------------------------------------------------------- both directions
 
-def test_a_stripe_answer_is_reported_as_stripes_with_the_width_kept():
-    i = SRC.index("_applied_txt = ")
-    seg = SRC[i:i + 900]
-    assert "stripes at" in seg and "KEPT" in seg
-    assert 'a.get("verdict") == "MORE_STRIPES"' in seg
+def test_a_stripe_answer_records_stripes_with_width_kept():
+    plan = R._pdn_em_stripe_plan(
+        i_seg_A=0.001189, drawn_width_um=1.6, pitch_um=153.58,
+        jmax_A_per_um=0.00067, margin=0.1, safety=2,
+        min_spacing_um=0.3, max_width_um=None, grid_um=0.005)
+    assert plan['verdict'] == 'MORE_STRIPES'
+    assert plan['stripe_multiplier'] == 3
+    assert plan['new_width_um'] == 1.6
+    assert plan['new_pitch_um'] < 153.58
 
 
-def test_a_width_answer_is_still_reported_as_a_width():
-    i = SRC.index("_applied_txt = ")
-    seg = SRC[i:i + 900]
-    assert "width -> " in seg, (
-        "when the planner really does widen, the row must say so")
+def test_the_record_distinguishes_width_from_stripe_count():
+    body = inspect.getsource(R._build_pdn_tcl)
+    assert '"stripe_multiplier": _plan_em.get("stripe_multiplier")' in body
+    assert '"width_um": _plan_em.get("new_width_um")' in body
+    assert '"width_kept": (_plan_em.get("new_width_um")' in body
 
 
-def test_the_shortfall_is_kept_and_labelled_as_a_shortfall():
-    """Not deleted — a reviewer needs to know what triggered the pass. It is
-    labelled, so it can no longer be read as the remedy."""
-    i = SRC.index('"one-shot EM resize: SHORT BY ')
-    assert i > 0
-    assert "{_short_txt}" in SRC[i:i + 120]
+def test_the_shortfall_is_not_misreported_as_an_applied_remedy():
+    main = inspect.getsource(R.main)
+    assert 'one-shot EM resize: SHORT BY' not in main
+    assert '"pdn_em_resize", _pnr_redispatched.status' not in main
 
 
-def test_nothing_applied_leaves_the_row_as_it_was():
-    """A run whose deck applied nothing (no stripe plan, no widening) must not
-    grow an empty APPLIED clause."""
-    i = SRC.index("_applied_txt = ")
-    seg = SRC[i:i + 400]
-    assert '_applied_txt = ""' in seg
-    assert "if _applied:" in seg
+def test_signoff_keeps_the_original_pnr_row():
+    main = inspect.getsource(R.main)
+    assert '_pnr_row = next((s for s in reversed(plan) if s.name == "pnr"), None)' in main
+    assert '_chain_ok = _pnr_step_passed' in main

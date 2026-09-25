@@ -58010,8 +58010,24 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # downstream gate can date, so the mixture is silent — see `_signoff_regen`.
     ir_rpt = rpt_phase3 / "ir_drop.rpt"
     em_rpt = rpt_phase3 / "em.rpt"
+    from librelane_contract import Refusal as _LLRefusal, selected_mode as _ll_selected_mode
+    _em_dual_due = False
+    _em_switch_mode = _ll_selected_mode(project, "25")
+    if _em_switch_mode == "librelane":
+        raise _LLRefusal("LL_EM_STEP_UNAVAILABLE",
+                         "LibreLane has no EM step; use dual for the OpenROAD audit")
+    if primary_def.is_file() and _em_switch_mode == "dual":
+        try:
+            _em_tool_doc = json.loads((rpt_phase3 / "em_openroad_density.json").read_text())
+            _em_dual_due = (_em_tool_doc.get("mode") != "dual" or
+                            _em_tool_doc.get("verdict") != "MEASURED" or
+                            _em_tool_doc.get("def_sha256") !=
+                            hashlib.sha256(primary_def.read_bytes()).hexdigest())
+        except (OSError, ValueError):
+            _em_dual_due = True
     if primary_def.is_file() and (_signoff_regen(ir_rpt, primary_def)
-                                  or _signoff_regen(em_rpt, primary_def)):
+                                  or _signoff_regen(em_rpt, primary_def)
+                                  or _em_dual_due):
         ir_ok, em_ok = _emit_ir_em_reports(
             project, top, pdk, container, ir_rpt, em_rpt, notes)
         if ir_ok:
@@ -64704,8 +64720,8 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
                         notes: List[str]) -> Tuple[bool, bool]:
     """OpenROAD PSM IR-drop + EM on the routed DEF (no SPEF required).
 
-    Runs `analyze_power_grid -net <VPWR> -enable_em` for each discovered
-    power net, captures the IR + EM stdout, and writes:
+    Runs `analyze_power_grid -enable_em` for each discovered supply and ground
+    net, captures the IR + EM stdout, and writes:
       * reports/phase3/ir_drop.{rpt,json}  (mV / IR drop / voltage keywords)
       * reports/phase3/em.{rpt,json}       (current / A / current density)
     Best-effort: returns (ir_ok, em_ok). chip-AGNOSTIC — power net names
@@ -64715,7 +64731,7 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     if not def_file.is_file():
         notes.append("IR/EM skipped: routed DEF missing")
         return False, False
-    power_nets, _ground = _discover_power_nets(def_file)
+    power_nets, ground_nets = _discover_power_nets(def_file)
     if not power_nets:
         notes.append(
             "IR/EM skipped: DEF has no SPECIALNETS power grid "
@@ -64733,15 +64749,40 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     out_dir = ir_rpt.parent
     out_dir.mkdir(parents=True, exist_ok=True)
     out_dir_c = _to_container_path(str(out_dir), container)
-    em_csv_c = f"{out_dir_c}/em_segments.csv"
+    psm_nets = list(dict.fromkeys([*power_nets, *ground_nets]))
+    from librelane_contract import Refusal as _LLRefusal, selected_mode
+    _em_mode = selected_mode(project, "25")
+    if _em_mode == "librelane":
+        raise _LLRefusal("LL_EM_STEP_UNAVAILABLE",
+                         "LibreLane has no EM step; use dual for the OpenROAD audit")
+    _audit_tool = _em_mode == "dual"
+    # The OpenROAD fork's check_current_density consumes areal A/um^2 limits.
+    # LEF routing DCCURRENTDENSITY is mA/um: divide by declared THICKNESS.
+    # Apply the same margin as the retained vibe-ic gate for a meaningful A/B.
+    import em_current_density_check as _emcd
+    _tlef = _read_pdk_text(str(pdk.tech_lef), container) or ""
+    _jmax = _emcd.parse_lef_jmax(_tlef)
+    _em_limits = out_dir / "em_openroad_limits.txt"
+    _limit_rows = [
+        f"{row['orig_name']} {row['jmax_areal_A_per_um2'] * (1 - _emcd._DEFAULT_MARGIN):.12g}"
+        for row in _jmax.values()
+        if row.get("kind") == "routing" and row.get("jmax_areal_A_per_um2")
+    ]
+    if _audit_tool and not _limit_rows:
+        notes.append("OpenROAD EM density NOT_MEASURED: tech LEF has no routing Jmax plus THICKNESS")
     em_geometry = out_dir / "em_pg_geometry.tsv"
     em_geometry_c = f"{out_dir_c}/em_pg_geometry.tsv"
     for old in (em_geometry, out_dir / "em_pg_geometry_subject.json",
-                out_dir / "em_segments.csv"):
+                out_dir / "em_segments.csv", out_dir / "em_openroad_density.json",
+                out_dir / "em_openroad_ab.json", _em_limits,
+                *(out_dir / f"em_segments_{net}.csv" for net in psm_nets),
+                *(out_dir / f"em_openroad_density_{net}.csv" for net in psm_nets)):
         try:
             old.unlink()
         except FileNotFoundError:
             pass
+    if _audit_tool and _limit_rows:
+        _aa.write_text(_em_limits, "\n".join(_limit_rows) + "\n")
     # DEF SPECIALNETS omit the layer metal inside generated via arrays. PSM
     # nonetheless reports current between nodes on those via enclosures. Dump
     # the loaded ODB's actual routing-layer boxes so those edges have a real
@@ -64796,13 +64837,21 @@ close $_eg_f
         notes.append("IR/EM: set_layer_rc via-resistance from tech LEF for "
                      + ", ".join(f"{k}={v}" for k, v in sorted(via_res.items())))
     psm_blocks = []
-    for net in power_nets:
+    for net in psm_nets:
+        _net_csv = f"{out_dir_c}/em_segments_{net}.csv"
+        _density_csv = f"{out_dir_c}/em_openroad_density_{net}.csv"
+        _density_tcl = (
+            f'if {{[catch {{check_current_density -net {net} '
+            f'-em_limits_file {out_dir_c}/{_em_limits.name} '
+            f'-em_report {_density_csv} -allow_reuse}} _em_err]}} {{\n'
+            f'  puts "EM_TOOL_NONFATAL {net}: $_em_err"\n'
+            f'}}\n' if _audit_tool and _limit_rows else '')
         psm_blocks.append(
             f'puts "=== PSM_NET {net} ==="\n'
             f'if {{[catch {{analyze_power_grid -net {net} -enable_em '
-            f'-em_outfile {em_csv_c}}} _psm_err]}} {{\n'
+            f'-em_outfile {_net_csv}}} _psm_err]}} {{\n'
             f'  puts "PSM_NONFATAL {net}: $_psm_err"\n'
-            f'}}\n')
+            f'}} else {{\n{_density_tcl}}}\n')
     # #362 — select the liberty's own operating condition when it declares
     # one but names no default. Without this PSM cannot determine the supply
     # voltage and aborts PSM-0079, taking static IR and EM with it. Emitted
@@ -64856,13 +64905,78 @@ catch {{set_wire_rc -clock -layer {mp}5}}
                            json.dumps(failure, indent=2) + "\n")
         notes.append(f"IR/EM refused: native execution rc={rc}; no fresh measurement")
         return False, False
+    # PSM replaces -em_outfile on every solve. Preserve each rail and merge
+    # with an explicit Net column so the retained Jmax gate sees both rails.
+    _merged = out_dir / "em_segments.csv"
+    with tempfile.NamedTemporaryFile(mode="w", dir=out_dir, prefix=".em_segments.",
+                                     delete=False) as _tmp:
+        _temp_name = _tmp.name
+        _header_written = False
+        _psm_segment_counts = {}
+        for _net in psm_nets:
+            _part = out_dir / f"em_segments_{_net}.csv"
+            if not _part.is_file():
+                _psm_segment_counts[_net] = 0
+                continue
+            with _part.open(errors="replace") as _source:
+                _header = _source.readline().rstrip("\r\n")
+                if not _header:
+                    _psm_segment_counts[_net] = 0
+                    continue
+                if not _header_written:
+                    _tmp.write("Net," + _header + "\n")
+                    _header_written = True
+                _n = 0
+                for _line in _source:
+                    _tmp.write(_net + "," + _line)
+                    _n += 1
+                _psm_segment_counts[_net] = _n
+    os.replace(_temp_name, _merged)
+    _density_rows = {}
+    for _net in psm_nets:
+        _path = out_dir / f"em_openroad_density_{_net}.csv"
+        _counts = {"checked": 0, "no_limit": 0, "violated": 0,
+                   "worst_ratio": None}
+        if _path.is_file():
+            import csv as _csv
+            with _path.open(newline="", errors="replace") as _fh:
+                for _row in _csv.DictReader(_fh):
+                    if _row.get("Status") == "NO_LIMIT":
+                        _counts["no_limit"] += 1
+                    elif _row.get("Status") in ("OK", "VIOLATED"):
+                        _counts["checked"] += 1
+                        _counts["violated"] += _row["Status"] == "VIOLATED"
+                        try:
+                            _ratio = float(_row["Ratio"])
+                        except (KeyError, ValueError):
+                            continue
+                        _counts["worst_ratio"] = max(
+                            _counts["worst_ratio"] or 0.0, _ratio)
+        _counts["psm_segments"] = _psm_segment_counts.get(_net, 0)
+        _density_rows[_net] = _counts
+    _aa.write_text(out_dir / "em_openroad_density.json", json.dumps({
+        "tool": "OpenROAD.check_current_density", "source_model": "PSM default",
+        "sdc_spef_loaded": False, "nets": _density_rows,
+        "verdict": ("MEASURED" if _audit_tool and _density_rows and all(
+            r["checked"] > 0 and r["no_limit"] == 0 for r in _density_rows.values())
+            else "NOT_MEASURED"),
+        "mode": _em_mode,
+        "scope": "routing wires only",
+        "via_cut_status": "NOT_MEASURED: OpenROAD density CSV omits via-cut records",
+        "def_sha256": hashlib.sha256(def_file.read_bytes()).hexdigest(),
+        "signal_em": "NOT_MEASURED: no activity and signal J-limit authority",
+    }, indent=2) + "\n")
     # Parse IR + EM numbers from PSM stdout (deterministic regex).
     ir_lines = [ln for ln in log.splitlines()
                 if re.search(r"voltage|IR drop|PSM-|Supply", ln, re.I)]
     em_lines = [ln for ln in log.splitlines()
                 if re.search(r"current|EM analysis|EM lifetime", ln, re.I)]
     has_ir = any(re.search(r"IR drop", ln, re.I) for ln in ir_lines)
-    has_em = any(re.search(r"current\s*:", ln, re.I) for ln in em_lines)
+    _missing_em_nets = [net for net in psm_nets
+                        if _psm_segment_counts.get(net, 0) == 0 or
+                        f"PSM_NONFATAL {net}:" in log]
+    has_em = (not _missing_em_nets and
+              any(re.search(r"current\s*:", ln, re.I) for ln in em_lines))
 
     ir_ok = False
     if has_ir:
@@ -64870,7 +64984,7 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "# OpenROAD PSM (Power Supply Metal) IR-drop report — emitted by\n"
             "# phase3_one_shot_runner (ORGANIC-20260531 sign-off-chain step).\n"
             "# Tool: openroad / PSM analyze_power_grid (static IR drop).\n"
-            f"# Power nets analysed: {', '.join(power_nets)}\n"
+            f"# Supply nets analysed: {', '.join(psm_nets)}\n"
             "#\n"
             "# Substance: static IR drop computed on the routed DEF power grid\n"
             "# via OpenROAD PSM — no SPEF required (PSM walks the SPECIALNETS\n"
@@ -64926,7 +65040,7 @@ catch {{set_wire_rc -clock -layer {mp}5}}
         # runner and its tests cannot drift into two answers about one log.
         from psm_analysis_coverage import (analysis_coverage, ir_verdict,
                                            verdict_basis)
-        _cov = analysis_coverage(log, power_nets)
+        _cov = analysis_coverage(log, psm_nets)
         _psm_analysed = _cov["analysed"]
         _psm_failed = _cov["analysis_failed"]
         _psm_conn = _cov["connectivity"]
@@ -64940,6 +65054,7 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "tool": "openroad-psm",
             "mode": "static_ir_drop",
             "power_nets": power_nets,
+            "ground_nets": ground_nets,
             "source": str(ir_rpt.relative_to(project)),
             "worst_ir_uv": _worst_ir_uv,
             "supply_voltage_v": _vdd_v,
@@ -65012,7 +65127,7 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "# OpenROAD PSM Electromigration (EM) report — emitted by\n"
             "# phase3_one_shot_runner (ORGANIC-20260531 sign-off-chain step).\n"
             "# Tool: openroad / PSM analyze_power_grid -enable_em.\n"
-            f"# Power nets analysed: {', '.join(power_nets)}\n"
+            f"# Supply nets analysed: {', '.join(psm_nets)}\n"
             "#\n"
             "# Substance: per-segment current (Amperes) on the power grid,\n"
             "# from which current density (A/cm^2) is derived for EM lifetime\n"
@@ -65053,6 +65168,9 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "tool": "openroad-psm",
             "mode": "electromigration",
             "power_nets": power_nets,
+            "ground_nets": ground_nets,
+            "nets_analysed": psm_nets,
+            "source_model": "PSM default; no SDC/SPEF or pad VSRC",
             "segments_analysed": seg_count,
             "max_segment_current_A": max_cur,
             "source": str(em_rpt.relative_to(project)),
@@ -65085,12 +65203,14 @@ catch {{set_wire_rc -clock -layer {mp}5}}
         # because that branch may not have run at all (no IR line, no
         # coverage), and this one must still be able to say why.
         from psm_analysis_coverage import analysis_coverage as _em_coverage
-        _cov_em = _em_coverage(log, power_nets)
+        _cov_em = _em_coverage(log, psm_nets)
         _psm_analysed = _cov_em["analysed"]
         _psm_failed = _cov_em["analysis_failed"]
         _psm_conn = _cov_em["connectivity"]
         _psm_unconn = _cov_em["unconnected_instances"]
-        _em_why = (f"PSM analysis FAILED on {', '.join(_psm_failed)}"
+        _em_why = (f"PSM EM absent or failed on {', '.join(_missing_em_nets)}"
+                   if _missing_em_nets else
+                   f"PSM analysis FAILED on {', '.join(_psm_failed)}"
                    if _psm_failed else
                    f"PSM produced no per-segment current line (rc={rc})")
         _em_conn = (f"; {len(_psm_unconn)} unconnected supply pin(s) reported, "
@@ -65103,7 +65223,7 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             f"reason: {_em_why}{_em_conn}\n"
             "current density (Javg/Jpeak): NOT_MEASURED — no segment current "
             "was produced, so no density is derivable from this run\n"
-            f"power nets asked: {', '.join(power_nets)}\n"
+            f"supply nets asked: {', '.join(psm_nets)}\n"
             f"nets analysed: {', '.join(_psm_analysed) or 'none'}\n"
             f"nets whose analysis failed: {', '.join(_psm_failed) or 'none'}\n"
             "\n# === Full PSM/EM stdout (provenance) ===\n" + log[-3000:] +
@@ -68452,6 +68572,8 @@ def _emit_em_current_authority(project: Path, pdk: PdkConfig,
             f"EM authority emit did not refresh {out_json.name} "
             f"(rc={proc.returncode}): {(proc.stderr or '')[-200:]}")
         return False
+    import em_current_density_check as _emcd
+    _emcd.emit_openroad_ab(project, notes)
     return True
 
 
@@ -70416,169 +70538,11 @@ def main() -> int:
         # `plan[-1]`. `_chain_ok` reproduces the pre-existing gating exactly
         # (PnR must pass; each optional repair row that IS appended must pass)
         # while being structurally immune to disclosure-only rows.
-        # ── #1215-PDN-FIRSTPASS — ONE bounded EM resize pass ──────────────
-        # A single end-to-end run from `input/` alone could never size its own
-        # PDN: the floor's only input (I_total = P/V) is produced by canonical
-        # step 25, AFTER the PnR that draws the straps. So the first run drew
-        # 1.6 um straps and step 25 honestly failed them. This closes that loop
-        # exactly once, here, at the first instant BOTH the routed DEF and a
-        # measurement of it can exist.
-        #
-        # Bounded STRUCTURALLY, not by a counter: the sentinel is written
-        # BEFORE the re-dispatch, so a crash mid-re-PnR, or a second pass that
-        # is still short, cannot buy a third. The trigger is a comparison of
-        # two WIDTHS (derived floor vs the width the DEF carries) — never a
-        # gate's verdict — so this is derivation, not fitting.
-        # Placed BEFORE the `_pnr_row` snapshot below on purpose: that lookup
-        # is by NAME over `reversed(plan)`, so it picks up the re-run's row.
-        _rz_post_status = "PASS"
-        _rz_post_detail = ""
-        _pnr_pre = next((s for s in reversed(plan) if s.name == "pnr"), None)
-        if _pnr_pre is not None and _pnr_pre.status == "PASS":
-            _rz_decline_reason: List[str] = []
-            _rz_spend_failed = False
-            try:
-                _rz = _pdn_em_first_pass_resize(
-                    project, effective_top, pdk, args.container,
-                    _rz_decline_reason)
-            except Exception as _rz_exc:  # pragma: no cover - defensive
-                _rz = None
-                _rz_decline_reason.append(f"decision raised: {_rz_exc}")
-            if _rz:
-                # Derive the one width/pitch pair before writing the sentinel
-                # or paying for another PnR. This is the exact Tcl builder the
-                # dispatch below uses, with the real resolved PDK.
-                try:
-                    _build_pdn_tcl(pdk, args.container, em_floor=_rz["floor"])
-                except ValueError as _plan_exc:
-                    _rz_decline_reason.append(str(_plan_exc))
-                    _rz = None
-            if _rz:
-                _short_txt = ", ".join(
-                    f"{d['layer']} {d['drawn_um']}->{d['w_em_um']}um "
-                    f"({d['shortfall_x']}x short)" for d in _rz["short"])
-                if _rz.get("rail_pitch"):
-                    _rp = _rz["rail_pitch"]
-                    _short_txt += (", " if _short_txt else "") + (
-                        f"{_rp['rail_layer']} fixed rail current "
-                        f"{_rp['rail_current_A']:.6g}A requires connected "
-                        f"strap pitch {_rp['old_pitch_um']}->"
-                        f"{_rp['new_pitch_um']}um")
-                # Sentinel FIRST. Without a written bound, refuse re-PnR.
-                if not _record_pdn_em_resize_spend(project, _rz):
-                    _rz_spend_failed = True
-                    _rz = None
-            else:
-                print("[pnr] PDN_EM_RESIZE_DECLINED: "
-                      + (_rz_decline_reason[0] if _rz_decline_reason
-                         else "decision returned no reason"), file=sys.stderr)
-                if (_rz_decline_reason and _rz_decline_reason[0].startswith(
-                        ("PDN_EM_RING_CAPACITY_UNREACHABLE",
-                         "PDN_EM_PAD_ENTRY_CAPACITY_UNPROVEN",
-                         "PDN_EM_RING_GEOMETRY_UNPROVEN",
-                         "PDN_EM_RING_CAPACITY_NOT_MEASURED",
-                         "PDN_EM_COMBINED_PLAN_INFEASIBLE",
-                         "PDN_EM_COMBINED_PLAN_NOT_MEASURED",
-                         "PDN_EM_ROUTING_BUDGET_INVALID"))):
-                    _rz_post_status = "FAIL"
-                    _rz_post_detail = _rz_decline_reason[0]
-                    plan.append(StepResult("pdn_em_architecture", "FAIL", 0.0,
-                                           _rz_post_detail))
-            if _rz:
-                print(f"[pnr] PDN EM resize: this run's own measured current "
-                      f"requires a changed PDN plan ({_short_txt}) — "
-                      f"re-running PnR ONCE with the derived floor",
-                      flush=True)
-                _rz_started_ns = time.time_ns()
-                _rz_t0 = time.time()
-                _pnr_rows2: List[StepResult] = []
-                _pnr_redispatched = _spf.gate(
-                    project, "phase3_one_shot_runner", "pnr",
-                    _preflight_refusal("pnr"),
-                    _recorded("pnr", step_pnr), project,
-                    effective_top, pdk, args.container,
-                    args.die_um, args.util,
-                    spare_density=args.spare_density,
-                    pad_ring_step=step_pad_ring_gen,
-                    pad_ring_results=_pnr_rows2,
-                    em_floor_for_resize=_rz["floor"])
-                _rz_secs = time.time() - _rz_t0
-                plan.extend(_pnr_rows2)
-                plan.append(_pnr_redispatched)
-                if _pnr_redispatched.status == "PASS":
-                    _write_producer_identity(
-                        _pl.pnr_dir(project), "pnr", project=project,
-                        pdk=pdk, container=args.container, top=effective_top,
-                        args=args)
-                    _rz_post_row = _postcheck_step(
-                        project, effective_top, pdk, args.container,
-                        _rz_started_ns)
-                    _rz_post_status = _rz_post_row.status
-                    _rz_post_detail = _rz_post_row.detail
-                # Publish the COST beside the arithmetic, measured not
-                # estimated: the second PnR's wall-clock is the price of this
-                # fix and belongs in the artefact a reviewer reads.
-                try:
-                    _szp = _pl.reports_phase3_dir(project) / "pdn_em_sizing.json"
-                    _szd = json.loads(_szp.read_text())
-                    _szd["first_pass_resize"] = {
-                        "applied": True,
-                        "layers_short_on_pass_1": _rz["short"],
-                        "second_pnr_status": _pnr_redispatched.status,
-                        "second_pnr_wall_clock_s": round(_rz_secs, 1),
-                        "bound": ("exactly one extra PnR per run; "
-                                  f"enforced by {_PDN_EM_RESIZE_SENTINEL} "
-                                  "written before re-dispatch. A prior run's "
-                                  "spend binds only if its recorded strap "
-                                  "floor is present in the routed DEF"),
-                        "trigger": ("drawn DEF strap width < derived w_em; a "
-                                    "comparison of two widths, never a gate "
-                                    "verdict"),
-                    }
-                    _aa.write_text(_szp, json.dumps(_szd, indent=2) + "\n")
-                except (OSError, ValueError):
-                    pass
-                # R-0915-111 — SAY WHAT WAS DONE, not only what was short.
-                _applied = []
-                try:
-                    _applied = (json.loads(
-                        (_pl.reports_phase3_dir(project)
-                         / "pdn_em_sizing.json").read_text()).get("applied")
-                        or [])
-                except (OSError, ValueError):
-                    _applied = []
-                _applied_txt = ""
-                if _applied:
-                    _applied_txt = " APPLIED: " + ", ".join(
-                        (f"{a['layer']} {a['stripe_multiplier']}x stripes at "
-                         f"{a['pitch_um']}um, width {a['width_um']}um KEPT"
-                         if a.get("verdict") == "MORE_STRIPES"
-                         else (f"{a['layer']} pitch "
-                               f"{a['old_pitch_um']}->{a['new_pitch_um']}um, "
-                               f"width {a['width_um']}um"
-                               if a.get("verdict") == "DENSER_STRAPS"
-                               else f"{a['layer']} width -> {a['width_um']}um"))
-                        for a in _applied) + "."
-                plan.append(StepResult(
-                    "pdn_em_resize", _pnr_redispatched.status, _rz_secs,
-                    f"one-shot EM resize: SHORT BY {_short_txt}.{_applied_txt}"
-                    f" PnR re-run once "
-                    f"({_rz_secs:.0f}s). Bound: one extra pass, sentinel-"
-                    f"enforced. Arithmetic in reports/phase3/pdn_em_sizing.json"))
-                if _pnr_redispatched.status == "PASS":
-                    plan.append(_rz_post_row)
-            else:
-                if _rz_spend_failed:
-                    print("[pnr] PDN_EM_RESIZE_NOT_DISPATCHED: sentinel "
-                          "write failed; no safe one-pass bound", file=sys.stderr)
-
+        # Step 25 audits EM on the routed layout.  PDN sizing is a pre-route
+        # PPA decision; a post-route EM result must not start a second PnR.
+        # Keep the original PnR row as the stream-out subject.
         _pnr_row = next((s for s in reversed(plan) if s.name == "pnr"), None)
-        _pnr_step_passed = _ppa_power._pdn_em_resize_chain_continues(
-            _pnr_row, _rz_post_status, _pnr_chain_continues)
-        if not _pnr_step_passed:
-            print(f"[pnr] PDN_EM_CHAIN_STOPPED (continues={_pnr_step_passed}): "
-                  + (_rz_post_detail or (_pnr_row.detail if _pnr_row else
-                                         "PnR result missing")), file=sys.stderr)
+        _pnr_step_passed = _pnr_chain_continues(_pnr_row)
         _pnr_reran = (_pnr_row is not None
                       and "skipped" not in _pnr_row.detail)
         _chain_ok = _pnr_step_passed

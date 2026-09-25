@@ -821,6 +821,55 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
     return "PASS", rep
 
 
+def emit_openroad_ab(project: Path, notes: List[str]) -> None:
+    """Compare two measurements of one DEF without promoting an empty tool PASS."""
+    from _atomic_artefact import write_text as _atomic_write_text
+    rpt = project / "reports/phase3"
+    output = rpt / "em_openroad_ab.json"
+    try:
+        tool = json.loads((rpt / "em_openroad_density.json").read_text())
+        gate = json.loads((rpt / "em_current_authority.json").read_text())
+        subject = json.loads((rpt / "em.json").read_text())
+    except (OSError, ValueError) as exc:
+        _atomic_write_text(output, json.dumps({"verdict": "NOT_MEASURED",
+            "reason": f"A/B input absent or invalid: {exc}"}, indent=2) + "\n")
+        return
+    same_def = (tool.get("def_sha256") and
+                tool.get("def_sha256") == subject.get("subject_def_sha256"))
+    nets = tool.get("nets") or {}
+    measured = (same_def and tool.get("verdict") == "MEASURED" and
+                isinstance(nets, dict) and nets and
+                all(row.get("checked", 0) > 0 and row.get("no_limit") == 0
+                    for row in nets.values()))
+    jmax = gate.get("jmax_screen") or {}
+    summary = jmax.get("summary") or {}
+    if not measured or jmax.get("verdict") not in ("PASS", "FAIL"):
+        result = {"verdict": "NOT_MEASURED", "same_def": bool(same_def),
+                  "reason": "tool coverage or retained Jmax gate unavailable"}
+    else:
+        tool_violations = sum(int(row.get("violated", 0)) for row in nets.values())
+        gate_offenders = int(jmax.get("offender_count", 0))
+        tool_util = max(float(row.get("worst_ratio") or 0) for row in nets.values())
+        gate_util = summary.get("worst_utilization")
+        result = {
+            "verdict": "MEASURED", "same_def": True,
+            "tool_violations": tool_violations,
+            "vibeic_offender_count": gate_offenders,
+            "offender_count_agrees": tool_violations == gate_offenders,
+            "offender_sets": "NOT_MEASURED: retained gate records only top offenders",
+            "tool_worst_utilization": tool_util,
+            "vibeic_worst_utilization": gate_util,
+            "utilization_agrees": gate_util is not None and abs(tool_util - gate_util) < 0.001,
+            "source_model": tool.get("source_model"),
+            "sdc_spef_loaded": tool.get("sdc_spef_loaded"),
+            "signal_em": tool.get("signal_em"),
+            "via_cut_status": tool.get("via_cut_status"),
+        }
+        if not result["offender_count_agrees"] or not result["utilization_agrees"]:
+            notes.append("EM OpenROAD/vibe-ic A/B differs; see em_openroad_ab.json")
+    _atomic_write_text(output, json.dumps(result, indent=2) + "\n")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("em_report",

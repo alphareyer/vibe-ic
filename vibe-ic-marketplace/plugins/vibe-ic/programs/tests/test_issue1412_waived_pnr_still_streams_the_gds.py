@@ -86,9 +86,8 @@ def test_failed_blocked_and_absent_pnr_do_not_continue():
 def test_the_chain_gate_is_wired_to_the_predicate():
     """A predicate nothing calls is not a fix."""
     src = inspect.getsource(R.main)
-    assert "_ppa_power._pdn_em_resize_chain_continues(\n            _pnr_row, _rz_post_status, _pnr_chain_continues)" in src, (
-        "main() no longer derives the stream-out chain from PnR and the "
-        "post-resize EM verdict")
+    assert "_pnr_step_passed = _pnr_chain_continues(_pnr_row)" in src, (
+        "main() no longer derives stream-out from the measured PnR row")
     waived = _row("PASS_WITH_WAIVERS", pnr_signoff_writes_complete=True,
                   route_residual_waiver={"ticket": "vibe-ic#1412"})
     assert R._ppa_power._pdn_em_resize_chain_continues(
