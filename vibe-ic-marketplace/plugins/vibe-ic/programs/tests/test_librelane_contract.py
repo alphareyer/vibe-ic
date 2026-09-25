@@ -33,7 +33,11 @@ def design(tmp_path):
     put(p / 'input/submission_template/tapeout_declaration.json', {'answers': {
         'top_cell': 'chip_top', 'die_area_um': [0, 0, 100, 100],
         'core_area_um': [10, 10, 90, 90]}})
-    put(p / 'phase3/stage3/pnr/pad_assignment.json', {'PAD_NORTH': ['u_a']})
+    put(p / 'phase3/stage3/pnr/pad_assignment.json', {
+        'PAD_NORTH': ['u_a'], 'PAD_SITE_NAME': 'siteA',
+        'PAD_CORNER_SITE_NAME': 'cornerSiteA', 'PAD_CORNER': 'cornerA',
+        'PAD_FILLERS': ['fillA'], 'PAD_EDGE_SPACING': '12.5',
+        'PAD_ROTATION_HORIZONTAL': 'R0'})
     return p
 
 
@@ -48,12 +52,26 @@ def test_emit_declared_values_and_sources(tmp_path):
     assert result['MAX_FANOUT_CONSTRAINT'] == 4
     assert result['DIE_AREA'] == [0, 0, 100, 100]
     assert result['PAD_NORTH'] == ['u_a']
+    assert result['PAD_CORNER'] == ['cornerA']
+    assert result['PAD_FILLERS'] == ['fillA']
+    assert result['PAD_EDGE_SPACING'] == 12.5
+    assert result['PAD_ROTATION_HORIZONTAL'] == 'R0'
     assert result['PDN_SKIPTRIM'] is True
     assert result['VERILOG_FILES'][0].endswith('/block.v')
     assert result['PNR_SDC_FILE'].endswith('/constraint.sdc')
     assert 'MAX_TRANSITION_CONSTRAINT' not in result
     provenance = json.loads((p / 'phase3/librelane/config.provenance.json').read_text())
     assert all(k in provenance for k in result)
+
+
+def test_invalid_declared_pad_spacing_is_refused(tmp_path):
+    p = design(tmp_path)
+    pads = p / 'phase3/stage3/pnr/pad_assignment.json'
+    doc = json.loads(pads.read_text())
+    doc['PAD_EDGE_SPACING'] = '-1'
+    put(pads, doc)
+    with pytest.raises(contract.Refusal, match='LL_PAD_SPACING_INVALID'):
+        contract.emit_config(p, 'processA', p / 'phase3/librelane/config.json')
 
 
 def test_switch_defaults_to_direct_and_rejects_bad_value(tmp_path):
@@ -101,6 +119,39 @@ def test_chain_resumes_success_and_reruns_failed_step(tmp_path, monkeypatch):
     (folder / 'state_out.json').unlink()
     contract.run_chain(p, 'candidate', steps)
     assert len(calls) == 2
+
+
+def test_floorplan_accepts_netlist_only_before_it_creates_geometry(tmp_path, monkeypatch):
+    p = design(tmp_path)
+    netlist = p / 'source.nl.v'
+    netlist.write_text('module block; endmodule\n')
+    state = put(p / 'initial.json', {'nl': str(netlist)})
+    cfg = put(p / 'config.json', {'meta': {'step': 'OpenROAD.Floorplan'}})
+
+    def fake_floorplan(cmd, **_):
+        folder = Path(cmd[cmd.index('-o') + 1])
+        views = {}
+        for key in ('odb', 'def', 'nl', 'sdc'):
+            view = folder / ('block.' + key)
+            view.write_text(key)
+            views[key] = str(view)
+        put(folder / 'state_out.json', views)
+        return SimpleNamespace(returncode=0, stdout='floorplan', stderr='')
+
+    monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
+    monkeypatch.setattr(contract.subprocess, 'run', fake_floorplan)
+    assert contract.run_chain(p, 'candidate', [('OpenROAD.Floorplan', cfg, state)])[0].joinpath('state_out.json').is_file()
+
+
+def test_tap_step_refuses_missing_geometry_input(tmp_path, monkeypatch):
+    p = design(tmp_path)
+    netlist = p / 'source.nl.v'
+    netlist.write_text('module block; endmodule\n')
+    state = put(p / 'initial.json', {'nl': str(netlist)})
+    cfg = put(p / 'config.json', {'meta': {'step': 'OpenROAD.TapEndcapInsertion'}})
+    monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
+    with pytest.raises(contract.Refusal, match='LL_STATE_MISSING'):
+        contract.run_chain(p, 'candidate', [('OpenROAD.TapEndcapInsertion', cfg, state)])
 
 
 def test_missing_metric_stays_unmeasured_and_cannot_win(tmp_path):

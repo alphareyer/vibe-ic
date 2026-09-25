@@ -120,6 +120,25 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
         _set(result, sources, key, value, source)
     for key in ('PAD_SOUTH', 'PAD_EAST', 'PAD_NORTH', 'PAD_WEST'):
         _set(result, sources, key, pads.get(key), 'phase3/stage3/pnr/pad_assignment.json.' + key)
+    for key in ('PAD_SITE_NAME', 'PAD_CORNER_SITE_NAME', 'PAD_FILLERS',
+                'PAD_ROTATION_HORIZONTAL', 'PAD_ROTATION_VERTICAL',
+                'PAD_ROTATION_CORNER'):
+        _set(result, sources, key, pads.get(key),
+             'phase3/stage3/pnr/pad_assignment.json.' + key)
+    if pads.get('PAD_CORNER'):
+        corner = pads['PAD_CORNER']
+        _set(result, sources, 'PAD_CORNER',
+             corner if isinstance(corner, list) else [corner],
+             'phase3/stage3/pnr/pad_assignment.json.PAD_CORNER')
+    if pads.get('PAD_EDGE_SPACING') is not None:
+        try:
+            spacing = float(pads['PAD_EDGE_SPACING'])
+        except (TypeError, ValueError) as exc:
+            raise Refusal('LL_PAD_SPACING_INVALID', str(pads['PAD_EDGE_SPACING'])) from exc
+        if not 0 <= spacing < float('inf'):
+            raise Refusal('LL_PAD_SPACING_INVALID', str(spacing))
+        _set(result, sources, 'PAD_EDGE_SPACING', spacing,
+             'phase3/stage3/pnr/pad_assignment.json.PAD_EDGE_SPACING')
     write_json(output, result)
     write_json(output.with_suffix('.provenance.json'), sources)
     return result
@@ -136,8 +155,11 @@ def _walk_paths(value: Any):
         yield Path(value)
 
 
-def _check_state(state: dict, *, outputs: bool = False) -> None:
-    required = ('odb', 'def', 'nl', 'sdc')
+def _check_state(state: dict, *, outputs: bool = False,
+                 step: str | None = None) -> None:
+    # Floorplan is the producer of the first ODB/DEF/SDC. Requiring those
+    # views on its input made the T83 adapter unable to execute step 15.
+    required = ('nl',) if step == 'OpenROAD.Floorplan' else ('odb', 'def', 'nl', 'sdc')
     if not outputs:
         for key in required:
             if not state.get(key):
@@ -178,7 +200,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         folder = base / name
         state_path = previous or initial_state
         state = _load(state_path)
-        _check_state(state)
+        _check_state(state, step=step_id)
         if _load(config).get('meta', {}).get('step') != step_id:
             raise Refusal('LL_STEP_CONFIG_MISMATCH', step_id)
         fingerprint = {'image': image, 'config': digest(config), 'state': digest(state_path),

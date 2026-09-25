@@ -112,6 +112,65 @@ def _unwrap(doc: Any) -> Tuple[Any, bool]:
     return doc, False
 
 
+def _librelane_report(project: Path, state_path: Path,
+                      assignment: Dict[str, Any], lib: PR.IoLibrary) -> Dict[str, Any]:
+    """Describe tool geometry for the existing independent ring audit.
+
+    The ordered pads and signal map come from the input assignment. Corner and
+    filler populations come from the PadRing DEF; every footprint comes from
+    the IO LEF. No Python placement is performed here.
+    """
+    state = json.loads(state_path.read_text())
+    def_path = Path(state["def"])
+    if not def_path.is_relative_to(project) or not def_path.is_file():
+        raise ValueError("PADRING_TOOL_DEF_MISSING: state DEF must be inside the project")
+    ring = PR.read_def(def_path)
+    ordered = {name: side for side in PR.SIDES
+               for name in assignment.get("PAD_" + {"S": "SOUTH", "E": "EAST",
+                                                      "N": "NORTH", "W": "WEST"}[side], [])}
+    if not ordered:
+        raise ValueError("PADRING_ASSIGNMENT_EMPTY: no declared pad instances")
+    fillers = set(assignment.get("PAD_FILLERS") or [])
+    corner_master = assignment.get("PAD_CORNER")
+    report: Dict[str, Any] = {
+        "schema": PR.SCHEMA, "program": "OpenROAD.PadRing", "verdict": "PASS",
+        "padring_def": str(def_path.relative_to(project)),
+        "config": assignment, "pads": [], "corners": [], "fillers": [],
+    }
+    for comp in ring.components.values():
+        kind = ("pad" if comp.instance in ordered else
+                "corner" if comp.master == corner_master else
+                "filler" if comp.master in fillers else None)
+        if kind is None:
+            continue
+        size = lib.masters.get(comp.master)
+        if size is None or not comp.placed:
+            raise ValueError(f"PADRING_TOOL_MASTER_OR_PLACEMENT_UNRESOLVED: {comp.instance}")
+        width, height = PR.footprint(size, comp.orient or "N", ring.units)
+        cell: Dict[str, Any] = {"instance": comp.instance, "master": comp.master,
+                                "orient": comp.orient, "width_dbu": width,
+                                "height_dbu": height}
+        cx, cy = comp.x + width / 2, comp.y + height / 2
+        if kind == "pad":
+            cell["side"] = ordered[comp.instance]
+            cell["signal"] = (assignment.get("SIGNAL_MAP") or {}).get(comp.instance, "")
+            report["pads"].append(cell)
+        elif kind == "corner":
+            llx, lly, urx, ury = ring.box
+            cell["position"] = ("S" if cy < (lly + ury) / 2 else "N") + \
+                               ("W" if cx < (llx + urx) / 2 else "E")
+            report["corners"].append(cell)
+        else:
+            cell["side"] = PR.nearest_side(cx, cy, ring.box)
+            report["fillers"].append(cell)
+    placed_pads = {cell["instance"] for cell in report["pads"]}
+    if placed_pads != set(ordered):
+        raise ValueError("PADRING_TOOL_PAD_MISSING: " +
+                         ", ".join(sorted(set(ordered) - placed_pads)))
+    report["fillers_placed"] = len(report["fillers"])
+    return report
+
+
 # ── the SKIP branch ─────────────────────────────────────────────────────────
 def _audit_skip(project: Path, rep: Dict[str, Any]) -> List[Dict[str, str]]:
     """A skip is accepted only when it says what it skipped over."""
@@ -787,6 +846,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--io-lef", action="append", default=None)
     ap.add_argument("--pdk-root", default=None)
     ap.add_argument("--pdk", default=None)
+    ap.add_argument("--librelane-state", default=None,
+                    help="Audit OpenROAD.PadRing state_out.json directly")
     args = ap.parse_args(argv)
 
     project = Path(args.project_dir).resolve()
@@ -797,6 +858,32 @@ def main(argv: Optional[List[str]] = None) -> int:
     rep_path = Path(args.json) if args.json else (project / PR.REPORT_REL)
     if not rep_path.is_absolute():
         rep_path = (Path.cwd() / rep_path).resolve()
+
+    if args.librelane_state:
+        try:
+            assignment = json.loads((project / "phase3/stage3/pnr/pad_assignment.json").read_text())
+            lefs, decls, source, declined = resolve_io_library_views(
+                project, {}, args.io_lef, args.pdk_root, args.pdk)
+            lib = PR.IoLibrary(lefs, decls)
+            report = _librelane_report(project, Path(args.librelane_state),
+                                       assignment, lib)
+            findings = _audit_ring(project, report, lib, declined)
+            verdict = "FAIL" if findings else "PASS"
+            reason = findings[0]["message"] if findings else (
+                "OpenROAD.PadRing DEF, declared pads, PDK IO LEF, and ring abutment agree")
+        except (OSError, ValueError, KeyError, TypeError, PR.DefError) as exc:
+            report, findings, verdict, reason = None, [
+                _finding("PADRING_TOOL_OUTPUT_UNREADABLE", str(exc))], "FAIL", str(exc)
+            source = "tool output or PDK unreadable"
+        audit = {"schema": PR.SCHEMA, "gate": GATE, "verdict": verdict,
+                 "rc": 0 if verdict == "PASS" else 1, "reason": reason,
+                 "report_path": str(rep_path), "pdk_read_where": source,
+                 "findings": findings, "producer": report,
+                 "tool_state": str(args.librelane_state)}
+        rep_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(rep_path, audit)
+        print(f"=== {GATE} ({project.name}) ===\n  verdict: {verdict}\n  {reason}")
+        return audit["rc"]
 
     findings: List[Dict[str, str]] = []
     producer: Any = None

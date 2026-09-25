@@ -25,3 +25,26 @@ For `dual`, `execute_dual` calls the LibreLane and direct OpenROAD producers wit
 ## Refusal IDs
 
 `LL_IMAGE_INCAPABLE`, `LL_CLOCK_AMBIGUOUS`, `LL_CONSTRAINT_CONFLICT`, `LL_INVALID_JSON_OBJECT`, `LL_INVALID_SWITCH`, `LL_STATE_MISSING`, `LL_STATE_FILE_MISSING`, `LL_STEP_CONFIG_MISMATCH`, `LL_STEP_FAILED`, and `LL_ARM_REPORT_MISSING` are explicit failures. `LL_ARM_NOT_MEASURED`, `LL_ARM_SCOPE_MISMATCH`, and `LL_PARETO_TIE` are selector reasons. No refusal silently falls back to the old backend.
+
+## T84 physical-step replay
+
+`OpenROAD.Floorplan` accepts a synthesized `nl` input State and creates the
+initial ODB, DEF, and SDC. Later physical steps still require those views.
+The verified spm replay used Floorplan, DumpRCValues,
+CheckMacroAntennaProperties, SetPowerConnections, PadRing,
+ManualMacroPlacement, CutRows, TapEndcapInsertion, AddPDNObstructions, and
+GeneratePDN. The intermediate steps are actual dependencies in the clean t78
+flow. All five target steps' metrics and ODB/DEF bytes matched t78.
+
+`pad_ring_check.py --librelane-state <PadRing/state_out.json>` runs the
+existing ring geometry audit on LibreLane's DEF, the design's pad assignment,
+and the PDK IO LEF. It does not invoke `pad_ring_gen.py`. A missing declared
+pad, wrong side, unresolved footprint, open filler gap, or uncovered BTerm
+fails the gate. The normal direct-path gate remains available for designs
+without the step switch.
+
+The emitter now carries the pad producer's declared site, corner, filler,
+edge spacing, and rotation settings as well as side order. It records each
+source field and refuses invalid edge spacing. It still leaves PDK-only site
+geometry, library views, PDN sizing, and excluded masters to their actual
+declaration or tool config; a t78 metric is not an input source.
