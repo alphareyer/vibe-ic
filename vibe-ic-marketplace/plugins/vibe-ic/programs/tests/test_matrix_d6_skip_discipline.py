@@ -766,6 +766,9 @@ class Scenario:
     #: same ``steps[]`` row as ``status``. Without it this module cannot tell
     #: a skip from a partial measurement; see ``is_skip_tier``.
     reason_class: str = ""
+    #: Source-bound explanation for NOT_APPLICABLE; the one-step probe omits
+    #: producers, so an ask before producer must remain distinguishable.
+    declared_by: str = ""
 
     @property
     def vacuous(self) -> bool:
@@ -901,6 +904,7 @@ def _run_scenario(step_id, name: str, *, seeded: bool, rtl: bool = False,
             capture_output=True, text=True)
         status: Optional[str] = None
         reason_class: str = ""
+        declared_by: str = ""
         reasons: Tuple[str, ...] = ()
         advisories: Tuple[str, ...] = ()
         counts: Optional[Dict[str, int]] = None
@@ -914,6 +918,7 @@ def _run_scenario(step_id, name: str, *, seeded: bool, rtl: bool = False,
                 if str(entry.get("id")) == F.normalize_id(step_id):
                     status = entry.get("status")
                     reason_class = str(entry.get("reason_class") or "")
+                    declared_by = str(entry.get("declared_by") or "")
                     reasons = tuple(str(r) for r in (entry.get("reasons") or []))
         # The headline X/Y is printed, not reported: L3c compares the number a
         # reviewer READS against the discrete per-tier counters, so it has to
@@ -948,6 +953,7 @@ def _run_scenario(step_id, name: str, *, seeded: bool, rtl: bool = False,
             numerator=numerator,
             counts=counts,
             reason_class=reason_class,
+            declared_by=declared_by,
         )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -2094,6 +2100,22 @@ def _leg5_waiver_channel(probe: Probe) -> List[str]:
 
 
 
+def _leg6_asked_before_omitted_producer(probe: Probe) -> bool:
+    """The one-step probe omitted a declared producer that has not completed.
+
+    This is the shared skip taxonomy's `ASKED_BEFORE_PRODUCER` case, not an
+    exemption for a named step. On a complete flow the producer is evaluated;
+    a completed producer with a missing output must make its consumer fail.
+    """
+    seeded = probe.scenarios.get("SEEDED")
+    if (seeded is None or seeded.status != "NOT_APPLICABLE" or
+            not seeded.declared_by.startswith("ASKED_BEFORE_PRODUCER:")):
+        return False
+    return any(str(spec.get("from")) != F.normalize_id(probe.step_id)
+               for spec in F.step_by_id(probe.step_id).get("required_inputs", [])
+               if isinstance(spec, dict) and spec.get("from") is not None)
+
+
 def _leg6_skip_is_keyed_on_something_the_flow_never_promises(
         probe: Probe) -> List[str]:
     """L6 — WAS THE SKIP ALLOWED?  (not: was it disclosed)
@@ -2131,6 +2153,8 @@ def _leg6_skip_is_keyed_on_something_the_flow_never_promises(
         return problems
     if full.skipped:
         return problems                       # legitimate: keyed on a non-promise
+    if _leg6_asked_before_omitted_producer(probe):
+        return problems                       # one-step probe has no producer
     sid = F.normalize_id(probe.step_id)
     if sid in _DEFERRED_L6_SKIPS:
         return problems                       # named in the shrink-only register
@@ -3054,11 +3078,12 @@ def test_d6_l6_flow_declared_output_denominator_is_disclosed():
 
 
 def test_d6_l6_separates_legitimate_skips_from_illegitimate_ones():
-    """Only still-live skip tiers enter L6 after #1978 classification.
+    """Only still-live unjustified skip tiers enter L6 after classification.
 
         Steps 12 and 30 previously entered this leg as ambiguous VACUOUS_PASS rows.
-        The shared reason taxonomy classifies them as INCOMPLETE. P0 now FAILs
-        when promised RTL is absent, leaving no illegitimate deferred skips.
+        The shared reason taxonomy classifies them as INCOMPLETE. A consumer
+        asked before an omitted producer is a legitimate one-step skip; once
+        the producer completes, a missing promised output must FAIL.
     """
     legit, illegit = [], []
     for sid in F.step_ids():
@@ -3067,9 +3092,12 @@ def test_d6_l6_separates_legitimate_skips_from_illegitimate_ones():
         full = probe.scenarios.get("FLOW_COMPLETE")
         if not seeded or not full or not seeded.skipped:
             continue
-        (legit if full.skipped else illegit).append(
+        (legit if full.skipped or _leg6_asked_before_omitted_producer(probe)
+         else illegit).append(
             F.normalize_id(sid))
-    assert legit == [], legit
+    assert legit == ["P0"], legit
+    assert probe_for("P0").scenarios["SEEDED"].declared_by.startswith(
+        "ASKED_BEFORE_PRODUCER:")
     assert illegit == [], illegit
     # R-0915-85 — `INCOMPLETE` was the word that kept 12 and 30 out of this
     # leg, and it is `NOT_MEASURED(partial_population)` now: the step RAN and
@@ -3127,7 +3155,7 @@ def test_d6_l6_the_register_is_the_only_thing_holding_those_cells_green():
         full = probe.scenarios.get("FLOW_COMPLETE")
         if not seeded or not full or not seeded.skipped:
             continue
-        if not full.skipped:
+        if not full.skipped and not _leg6_asked_before_omitted_producer(probe):
             charged.add(F.normalize_id(sid))
     assert charged == set(_DEFERRED_L6_SKIPS), (
         f"the register and the live measurement disagree: measured "
