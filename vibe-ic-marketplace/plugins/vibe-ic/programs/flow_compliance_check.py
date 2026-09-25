@@ -367,7 +367,8 @@ _STRUCTURAL_RTL_GATES: tuple[str, ...] = (
     "warn_acceptance_policy_check",
     "tristate_bus_check",
     "fsm_error_invariant",
-    "bitwidth_consistency_check",
+    # Generic elaboration, select range and port shape are checked by P0's
+    # flow_step_output_content_check clause through the tool front ends.
     "periodic_signal_required_check",
     "fpga_async_input_synchronizer_check",
     # P0's own `notes` in flow/phase1_phase2_phase3.yaml name
@@ -1525,7 +1526,6 @@ _STRUCTURAL_RTL_GATES: tuple[str, ...] = (
     "l9_completeness_check",
     "layer_extension_presence_check",   # patched v1.6.4: silent-skip on generic classes
     "manifest_leak_check",
-    "module_port_audit",
     "no_protocol_consistency_check",
     "openroad_tcl_deprecation_check",
     "output_artifact_check",
@@ -7704,6 +7704,57 @@ _CLASS_SKIPPABLE_PROTOCOL_GATES: frozenset[str] = frozenset({
     "l12_behavioral_sequences_steps_typed_check",  # protocol behavioral step
     "protocol_ip_simulation_required_check",     # protocol sim required
 })
+
+# P0 protocol lessons are design-intent checks. A registered IC class that
+# explicitly declares no half-duplex bus cannot be judged against the bus's
+# wake, response-window or turnaround rules. Keep this as an explicit roster:
+# a similar-looking name alone is never evidence of applicability.
+_CLASS_SKIPPABLE_HALF_DUPLEX_GATES: frozenset[str] = frozenset({
+    "self_rx_mask_check",
+    "tristate_self_rx_mask_check",
+    "pre_awake_silence_check",
+    "periodic_timer_vs_rx_activity_check",
+    "bus_turnaround_consumes_spec_constant_check",
+    "break_framing_vs_l3_check",
+    "break_handler_safety_check",
+    "tristate_pullup_assertion_check",
+    "frame_end_gap_in_l8_check",
+    "l8_frame_end_gap_derivation_check",
+    "half_duplex_response_window_check",
+    "half_duplex_frame_end_idle_reset_check",
+    "half_duplex_wrapper_open_drain_check",
+    "wake_pulse_implementation_check",
+    "wake_gen_bus_active_reset_check",
+    "wake_pulse_width_matches_measurement_check",
+    "wake_pulse_emit_gated_by_first_rx_command_check",
+    "wake_gen_silence_gate",
+    "slave_tx_no_device_break_check",
+    "device_response_no_br_check",
+    "self_rx_mask_required_check",
+    "tristate_active_drive_check",
+    "tx_abort_during_transmission_check",
+    "send_test_active_drive_check",
+    "connect_vs_send_test_parity_check",
+    "protocol_reference_tb_pass_check",
+})
+
+# Command-specific lessons need two independent declarations before N/A:
+# the class excludes a command protocol AND L3/L4 positively describe a
+# no-opcode/no-regmap input. Missing L docs never license a skip.
+_CLASS_SKIPPABLE_COMMAND_INTENT_GATES: frozenset[str] = frozenset({
+    "cmd_arg_range_validation_check",
+    "cmd_protocol_byte_exact_check",
+    "cmd_response_otp_provenance_check",
+    "cmd_argument_validation_present_check",
+    "dispatch_handler_completeness",
+    "dispatch_fetch_loop_population_check",
+    "dispatcher_tx_arm_order_check",
+    "dispatcher_response_size_table_audit",
+    "opcode_dispatch_completeness_check",
+    "l3_opcode_response_template_check",
+    "per_opcode_response_latency_table_check",
+    "response_payload_template_check",
+})
 # ORGANIC-20260605-fullstack-byte-oracle-inapplicable-to-datapath-primitive
 # (#419): full-stack byte-protocol ARTEFACT gates. For a registry-matched
 # class with command_protocol_applicable=false (datapath / combinational
@@ -7966,6 +8017,12 @@ def _class_skipped_gates(project: Path) -> Dict[str, str]:
     if not flags.get("registry_matched"):
         return {}
     skipped: Dict[str, str] = {}
+    if flags.get("half_duplex_bus") is False:
+        for g in _CLASS_SKIPPABLE_HALF_DUPLEX_GATES:
+            skipped[g] = (
+                f"N/A for class {ic_class!r}: half_duplex_bus=false "
+                f"(verification_track={flags.get('verification_track')!r}). "
+                "This bus-specific design-intent rule has no declared subject.")
     if flags.get("command_protocol_applicable") is False:
         for g in _CLASS_SKIPPABLE_PROTOCOL_GATES:
             skipped[g] = (
@@ -7991,6 +8048,11 @@ def _class_skipped_gates(project: Path) -> Dict[str, str]:
     # the L docs positively record a no-opcode/no-regmap input.
     if (flags.get("command_protocol_applicable") is False
             and _ldocs_record_no_opcodes(project)):
+        for g in _CLASS_SKIPPABLE_COMMAND_INTENT_GATES:
+            skipped[g] = (
+                f"N/A for class {ic_class!r}: command_protocol_applicable"
+                "=false and L3/L4 declare no opcodes or register map. "
+                "A present protocol declaration keeps this gate live.")
         for g in _CLASS_SKIPPABLE_FULLSTACK_ARTEFACT_GATES:
             skipped.setdefault(g, (
                 f"N/A for class {ic_class!r}: command_protocol_applicable"

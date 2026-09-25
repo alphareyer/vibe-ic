@@ -15,7 +15,24 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import p0_tool_frontend_check as _rtl_frontend
+
+
+def _rtl_errors(project: Path) -> tuple[list[str], dict | None]:
+    files = sorted((project / "phase2/stage1/rtl").glob("*.v")) + sorted((project / "phase2/stage1/rtl").glob("*.sv"))
+    if not files:
+        return ["no RTL source"], None
+    errors = [f"{path}: empty RTL source" for path in files
+              if not path.read_text(errors="replace").strip()]
+    if errors:
+        return errors, None
+    verdict = _rtl_frontend.check(project, _rtl_frontend.os.environ.get(
+        "VIBEIC_EDA_IMAGE", _rtl_frontend.DEFAULT_IMAGE))
+    return list(verdict["findings"]), verdict
 
 
 def check(project: Path, mode: str) -> list[str]:
@@ -33,22 +50,7 @@ def check(project: Path, mode: str) -> list[str]:
                for row in data):
             return [f"{path}: invalid rom_init_lint finding"]
     elif mode == "rtl":
-        files = sorted((project / "phase2/stage1/rtl").glob("*.v")) + sorted((project / "phase2/stage1/rtl").glob("*.sv"))
-        if not files:
-            return ["no RTL source"]
-        found_module = False
-        for path in files:
-            src = re.sub(r"/\*.*?\*/|//[^\n]*", "", path.read_text(errors="replace"), flags=re.S)
-            if not src.strip():
-                errors.append(f"{path}: empty RTL source")
-                continue
-            starts = len(re.findall(r"\bmodule\s+\w+\b", src))
-            ends = len(re.findall(r"\bendmodule\b", src))
-            if starts != ends:
-                errors.append(f"{path}: incomplete module declaration")
-            found_module |= starts > 0
-        if not found_module:
-            errors.append("RTL tree has no module")
+        errors, _ = _rtl_errors(project)
     elif mode == "netlist":
         path = project / "phase2/stage2/synth/netlist.v"
         if not path.is_file():
@@ -96,12 +98,24 @@ def main() -> int:
     if not args.project.is_dir():
         print(f"FAIL: project directory absent: {args.project}")
         return 2
-    errors = check(args.project, args.mode)
+    if args.mode == "rtl":
+        errors, frontend = _rtl_errors(args.project)
+    else:
+        errors = check(args.project, args.mode)
+        frontend = None
     for error in errors:
         print("FAIL:", error)
     if errors:
         return 1
     print(f"PASS: {args.mode} output content")
+    if frontend is not None:
+        print("TOOL_EVIDENCE:", json.dumps({
+            "sources": frontend["sources"],
+            "tools": {name: {"exit_code": row["exit_code"],
+                             "execution": row["execution"],
+                             "diagnostics": row.get("diagnostics", [])}
+                      for name, row in frontend["tools"].items()},
+        }, sort_keys=True))
     return 0
 
 

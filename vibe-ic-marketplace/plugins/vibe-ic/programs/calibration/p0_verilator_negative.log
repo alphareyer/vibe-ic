@@ -1,0 +1,14 @@
+%Warning-DECLFILENAME: /src/clean.sv:1:8: Filename 'clean' does not match MODULE name: 'top'
+    1 | module top(input logic a); endmodule
+      |        ^~~
+                       ... For warning description see https://verilator.org/warn/DECLFILENAME?v=5.053
+                       ... Use "/* verilator lint_off DECLFILENAME */" and lint_on around source to disable this message.
+%Warning-UNUSEDSIGNAL: /src/clean.sv:1:24: Signal is not used: 'a'
+                                         : ... note: In instance 'top'
+    1 | module top(input logic a); endmodule
+      |                        ^
+                       ... For warning description see https://verilator.org/warn/UNUSEDSIGNAL?v=5.053
+                       ... Use "/* verilator lint_off UNUSEDSIGNAL */" and lint_on around source to disable this message.
+- V e r i l a t i o n   R e p o r t: Verilator 5.053 devel rev v5.050-544-gd9cb52e9a
+- Verilator: Built from 0.031 MB sources in 3 modules, into 0.010 MB in 3 C++ files needing 0.000 MB
+- Verilator: Walltime 0.004 s (elab=0.000, cvt=0.002, bld=0.000); cpu 0.004 s on 1 threads; allocated 17.652 MB
