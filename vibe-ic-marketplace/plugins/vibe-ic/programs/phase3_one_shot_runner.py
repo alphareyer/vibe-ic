@@ -7426,39 +7426,6 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
 _PDN_EM_RESIZE_SENTINEL = _ppa_power._PDN_EM_RESIZE_SENTINEL
 
 
-def _pdn_em_post_resize_check(project: Path, top: str, pdk: "PdkConfig",
-                              container: str) -> Tuple[str, str]:
-    """Measure the second DEF before it can advance to GDS."""
-    rpt3 = _pl.reports_phase3_dir(project)
-    def_file = _pl.pnr_dir(project) / f"{top}.def"
-    if not def_file.is_file():
-        return "NOT_MEASURED", "PDN_EM_POSTCHECK_NO_DEF"
-    notes: List[str] = []
-    try:
-        rpt3.mkdir(parents=True, exist_ok=True)
-        em_rpt = rpt3 / "em.rpt"
-        _emit_ir_em_reports(project, top, pdk, container,
-                            rpt3 / "ir_drop.rpt", em_rpt, notes)
-        if not em_rpt.is_file() or em_rpt.stat().st_mtime < def_file.stat().st_mtime:
-            return "NOT_MEASURED", "PDN_EM_POSTCHECK_STALE_REPORT"
-        if not _emit_em_current_authority(project, pdk, container, notes):
-            return "NOT_MEASURED", "PDN_EM_POSTCHECK_AUTHORITY_MISSING: " + "; ".join(notes)
-        doc = json.loads((rpt3 / "em_current_authority.json").read_text())
-        verdict = doc.get("verdict")
-        if verdict == "PASS":
-            return "PASS", "PDN_EM_JMAX_CLOSED: final DEF segment screen PASS"
-        if verdict == "FAIL":
-            count = (doc.get("jmax_screen") or {}).get("offender_count")
-            return "FAIL", f"PDN_EM_JMAX_UNCLOSED: {count} final DEF segment(s) exceed Jmax"
-        return "NOT_MEASURED", f"PDN_EM_POSTCHECK_UNRESOLVED: {verdict}"
-    except Exception as exc:
-        return "NOT_MEASURED", f"PDN_EM_POSTCHECK_ERROR: {exc}"
-
-
-def _pdn_em_resize_chain_continues(pnr_row: Optional["StepResult"],
-                                   post_status: str) -> bool:
-    """A one-shot resize may proceed to GDS only after measured EM closure."""
-    return _pnr_chain_continues(pnr_row) and post_status == "PASS"
 _PDN_EM_RUN_ID = _ppa_power._PDN_EM_RUN_ID
 _PDN_EM_LAYOUT_IDENTITY = _ppa_power._PDN_EM_LAYOUT_IDENTITY
 _pdn_em_input_identity = _ppa_power._pdn_em_input_identity
@@ -69088,8 +69055,9 @@ def main() -> int:
                         _pl.pnr_dir(project), "pnr", project=project,
                         pdk=pdk, container=args.container, top=effective_top,
                         args=args)
-                    _rz_post_status, _rz_post_detail = _pdn_em_post_resize_check(
-                        project, effective_top, pdk, args.container)
+                    _rz_post_status, _rz_post_detail = _ppa_power._pdn_em_post_resize_check(
+                        project, effective_top, pdk, args.container,
+                        _emit_ir_em_reports, _emit_em_current_authority)
                 # Publish the COST beside the arithmetic, measured not
                 # estimated: the second PnR's wall-clock is the price of this
                 # fix and belongs in the artefact a reviewer reads.
@@ -69146,8 +69114,8 @@ def main() -> int:
                           "write failed; no safe one-pass bound", file=sys.stderr)
 
         _pnr_row = next((s for s in reversed(plan) if s.name == "pnr"), None)
-        _pnr_step_passed = _pdn_em_resize_chain_continues(
-            _pnr_row, _rz_post_status)
+        _pnr_step_passed = _ppa_power._pdn_em_resize_chain_continues(
+            _pnr_row, _rz_post_status, _pnr_chain_continues)
         if not _pnr_step_passed:
             print(f"[pnr] PDN_EM_CHAIN_STOPPED (continues={_pnr_step_passed}): "
                   + (_rz_post_detail or (_pnr_row.detail if _pnr_row else

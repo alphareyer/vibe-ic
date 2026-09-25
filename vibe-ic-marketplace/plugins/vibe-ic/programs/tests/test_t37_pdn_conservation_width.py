@@ -92,20 +92,25 @@ def test_second_pass_is_blocked_by_its_own_segment_result(tmp_path, monkeypatch)
             "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
             "M4,0,0,M4,1,0,%s\nM4,1,0,M4,2,0,1.0e-6\n" % p)
     monkeypatch.setattr(R, "_emit_ir_em_reports", fake_psm)
-    status, detail = R._pdn_em_post_resize_check(
-        tmp_path, "unit", _pdk(tmp_path), "unused")
+    status, detail = R._ppa_power._pdn_em_post_resize_check(
+        tmp_path, "unit", _pdk(tmp_path), "unused",
+        R._emit_ir_em_reports, R._emit_em_current_authority)
     assert status == "FAIL" and "PDN_EM_JMAX_UNCLOSED" in detail
     peak["current"] = 1.0e-6
-    status, detail = R._pdn_em_post_resize_check(
-        tmp_path, "unit", _pdk(tmp_path), "unused")
+    status, detail = R._ppa_power._pdn_em_post_resize_check(
+        tmp_path, "unit", _pdk(tmp_path), "unused",
+        R._emit_ir_em_reports, R._emit_em_current_authority)
     assert status == "PASS" and "PDN_EM_JMAX_CLOSED" in detail
 
 
 def test_the_postcheck_is_a_flow_stop_not_just_a_report():
     pnr = R.StepResult("pnr", "PASS", 0.0, "routed DEF written")
-    assert R._pdn_em_resize_chain_continues(pnr, "PASS")
-    assert not R._pdn_em_resize_chain_continues(pnr, "FAIL")
-    assert not R._pdn_em_resize_chain_continues(pnr, "NOT_MEASURED")
+    assert R._ppa_power._pdn_em_resize_chain_continues(
+        pnr, "PASS", R._pnr_chain_continues)
+    assert not R._ppa_power._pdn_em_resize_chain_continues(
+        pnr, "FAIL", R._pnr_chain_continues)
+    assert not R._ppa_power._pdn_em_resize_chain_continues(
+        pnr, "NOT_MEASURED", R._pnr_chain_continues)
     source = (Path(R.__file__)).read_text()
     assert '"pdn_em_postcheck", _rz_post_status' in source
-    assert '_pdn_em_resize_chain_continues(' in source
+    assert '_ppa_power._pdn_em_resize_chain_continues(' in source
