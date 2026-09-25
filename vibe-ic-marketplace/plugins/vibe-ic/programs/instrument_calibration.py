@@ -989,6 +989,12 @@ def _judge_route_modified(log_txt: str) -> Optional[str]:
             if R.route_modified_after_last_verification(log_txt) else None)
 
 
+def _judge_antenna_isolated_recovery_modified(log_txt: str) -> Optional[str]:
+    import phase3_one_shot_runner as R
+    return ("MODIFIED_AFTER_VERIFICATION"
+            if R._antenna_isolated_recovery_modified(log_txt) else None)
+
+
 def _judge_refusal_after_verification(log_txt: str) -> Optional[str]:
     import phase3_one_shot_runner as R
     return ("REFUSAL_AFTER_VERIFICATION"
@@ -1062,6 +1068,30 @@ _register(Instrument(
                     "If it fires here it is reporting the verification, not "
                     "the order."),
         artefact=_read("route_completed_positive.log")),
+))
+
+_register(Instrument(
+    name="phase3_one_shot_runner::_antenna_isolated_recovery_modified",
+    reads="the isolated OpenROAD scoped-route log after DRT-0711",
+    ruling="R-0915-86 (T47f)",
+    owner="T47f",
+    why=("A DRT-0711 zero-violation line gives no release credit if a later "
+         "mutation invalidated that verification. Both calibration sessions "
+         "route the same two-inverter cal_chain; only the positive session "
+         "removes its routed n1 net after verification."),
+    judge=_judge_antenna_isolated_recovery_modified,
+    positive=Sample(
+        provenance=("Real OpenROAD 26Q3-2627-g9e33179906 on 8HD-4, image "
+                    "sha256:7c343bfae1ff672176bbc76f2355faa3cc5d84d163aabee9992736454d063610; "
+                    "calibration/isolated_route_modified.tcl routes cal_chain "
+                    "then destroys n1 after DRT-0711. Full unedited stdout."),
+        artefact=_read("isolated_route_modified_positive.log")),
+    expect="MODIFIED_AFTER_VERIFICATION",
+    negative=Sample(
+        provenance=("Same real OpenROAD image and cal_chain input; "
+                    "calibration/isolated_route_clean.tcl exits immediately "
+                    "after scoped DRT-0711. Full unedited stdout."),
+        artefact=_read("isolated_route_clean_negative.log")),
 ))
 
 _register(Instrument(
