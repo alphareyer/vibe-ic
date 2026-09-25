@@ -17301,6 +17301,14 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # First hit: 3.1M-cell INT4 accelerator whose dequant-loop `integer`
     # survived flatten and killed link_design. Non-fatal on IO error.
     _ensure_structural_reader_readable(netlist, project)
+    # Yosys writes this canonical path again on a phase-3 synthesis.  The
+    # invocation logger has the observed command/rc, but its marker is not an
+    # output declaration, and the final bytes can change in the structural
+    # cleanup above.  Declare the surviving product here, at its last writer,
+    # so an older phase-2 hash is superseded without editing history.
+    _log_surviving_artefact(
+        [str(netlist)], produced_by="phase3_one_shot_runner.step_synth",
+        tool="yosys", exit_code=0)
     # Cell count from yosys stat
     cell_count = "?"
     cell_count_int = -1
@@ -54302,6 +54310,24 @@ def step11_needs_rerun(project: Path) -> Tuple[bool, str]:
 
     PURE: reads the tree, writes nothing. Returns (needs_rerun, reason).
     """
+    # The audit's Step 11 condition is the authority for whether the design
+    # owes scan/ATPG at all.  A skeleton L20 alone cannot stand it down: the
+    # shared predicate also corroborates absence against every input document.
+    try:
+        import yaml as _yaml
+        import flow_compliance_check as _flow
+        flow = _yaml.safe_load(_flow.DEFAULT_FLOW_DEF.read_text()) or {}
+        step = next((s for s in (flow.get("steps") or [])
+                     if isinstance(s, dict) and str(s.get("id")) == "11"), None)
+        if step is not None:
+            declared = _flow._l_doc_declares_absence(
+                project, (step.get("condition") or {}).get("l_doc_declares"))
+            if declared is not None:
+                return False, ("Step 11 NOT_APPLICABLE by the flow's input-"
+                               f"corroborated declaration: {declared[0]} "
+                               f"({declared[1]}); {declared[2]}")
+    except (OSError, ValueError, TypeError, ImportError):
+        pass  # Unreadable flow/declaration cannot excuse a required step.
     missing = [r for r in _STEP11_REQUIRED_REL if not (project / r).is_file()]
     if missing:
         return True, ("canonical Step-11 required output(s) absent: "
@@ -54516,6 +54542,11 @@ def run_step11_dft_after_synth(project: Path, top: str,
     t0 = time.time()
     needs, why_needs = step11_needs_rerun(project)
     if not needs:
+        if why_needs.startswith("Step 11 NOT_APPLICABLE"):
+            return [StepResult(
+                "dft_atpg_order_selfheal", "NOT_APPLICABLE",
+                time.time() - t0, why_needs,
+                declared_by=why_needs)]
         return []
     have_map, why_map = mapped_netlist_available_for_atpg(project)
     if not have_map:
