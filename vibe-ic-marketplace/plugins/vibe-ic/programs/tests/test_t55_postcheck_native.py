@@ -1,5 +1,6 @@
 """A failed native PSM run cannot inherit an earlier segment screen."""
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -64,3 +65,19 @@ def test_native_failure_removes_previous_segment_csv(tmp_path, monkeypatch):
     assert (ir_ok, em_ok) == (False, False)
     assert not stale.exists()
     assert json.loads((reports / "em.json").read_text())["verdict"] == "FAIL"
+
+
+def test_second_pnr_stale_def_em_row_is_valid_and_does_not_run_psm(
+        tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    called = []
+    monkeypatch.setattr(R, "_emit_ir_em_reports",
+                        lambda *_args: called.append(True))
+    # This is the sub4 path: PnR said PASS while canonical DEF still predates
+    # the second dispatch. Its old EM report cannot measure the new layout.
+    row = R._pdn_em_postcheck_step(
+        project, "subservient", object(), "test", time.time_ns())
+    assert row.status == "NOT_MEASURED"
+    assert row.reason_class == "upstream_failed"
+    assert row.detail == "PDN_EM_POSTCHECK_STALE_DEF"
+    assert called == []

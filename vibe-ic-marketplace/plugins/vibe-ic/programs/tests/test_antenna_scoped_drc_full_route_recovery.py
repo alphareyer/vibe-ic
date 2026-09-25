@@ -201,6 +201,23 @@ def test_scoped_damage_retries_same_target_nets_in_fresh_session(
     assert json.loads(receipt.read_text())["route_verified_at_ship"] is True
 
 
+def test_scoped_router_still_damaged_marker_uses_isolated_retry(
+        tmp_path, monkeypatch):
+    refusal = (
+        "ANTENNA_ROUTER: version=fork scoped_reroute=1\n"
+        "ANTENNA_NATIVE_REROUTE_NONFATAL: DRT-0712\n"
+        "ANTENNA_SCOPED_ROUTER_STILL_DAMAGED: scoped router lost 7 wires\n"
+        "ANTENNA_REPAIR_REFUSED_ROLLBACK_REQUEST: "
+        "checkpoint=/w/pnr/antenna_pass_pre.odb "
+        "reason=ANTENNA_DIODE_ROLLED_BACK: 7 net(s); native_error=DRT-0712\n"
+    )
+    rec, calls, out = _run(tmp_path, monkeypatch, refusal=refusal)
+    assert rec["status"] == "RECOVERED"
+    assert rec["route_verified"] is True
+    assert "pnr_antenna_isolated_retry" in calls[0]
+    assert (out / "pnr_antenna_isolated_retry.tcl").is_file()
+
+
 def test_scoped_damage_retry_cannot_ship_unverified_route(
         tmp_path, monkeypatch):
     rec, calls, out = _run(

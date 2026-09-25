@@ -34278,7 +34278,8 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
     # The failed session is never reused: it may have stripped other wires.
     # The copy also protects the rollback seed if the retry writes its normal
     # per-pass checkpoint and then fails.
-    scoped_damage = ("ANTENNA_SCOPED_HELD_WIRE_DAMAGE:" in req["reason"]
+    scoped_damage = (("ANTENNA_SCOPED_HELD_WIRE_DAMAGE:" in req["reason"]
+                      or "ANTENNA_SCOPED_ROUTER_STILL_DAMAGED:" in log_text)
                      and "ANTENNA_ROUTER:" in log_text
                      and "scoped_reroute=1" in log_text)
     if (scoped_damage and antenna_diode_cell
@@ -69094,6 +69095,28 @@ def _restores_the_container_env(fn):
     return _scoped
 
 
+def _pdn_em_postcheck_step(project: Path, top: str, pdk: Any,
+                           container: str, rerun_started_ns: int) -> StepResult:
+    """Record the second-PnR EM measurement, including why it is unavailable."""
+    status, detail = _ppa_power._pdn_em_post_resize_check(
+        project, top, pdk, container, _emit_ir_em_reports,
+        _emit_em_current_authority, rerun_started_ns=rerun_started_ns)
+    reason = ""
+    if status == "NOT_MEASURED":
+        if detail.startswith("PDN_EM_POSTCHECK_NO_DEF"):
+            reason = _V.ReasonClass.INPUT_ABSENT.value
+        elif detail.startswith("PDN_EM_POSTCHECK_STALE_DEF"):
+            reason = _V.ReasonClass.UPSTREAM_FAILED.value
+        elif detail.startswith("PDN_EM_POSTCHECK_UNRESOLVED"):
+            reason = _V.ReasonClass.INCONCLUSIVE.value
+        else:
+            # Native PSM, report freshness, authority emission and exceptions
+            # are execution failures; an earlier EM report cannot close them.
+            reason = _V.ReasonClass.EXECUTION_ERROR.value
+    return StepResult("pdn_em_postcheck", status, 0.0, detail,
+                      reason_class=reason)
+
+
 @_restores_the_container_env
 def main() -> int:
     p = argparse.ArgumentParser()
@@ -69790,10 +69813,11 @@ def main() -> int:
                         _pl.pnr_dir(project), "pnr", project=project,
                         pdk=pdk, container=args.container, top=effective_top,
                         args=args)
-                    _rz_post_status, _rz_post_detail = _ppa_power._pdn_em_post_resize_check(
+                    _rz_post_row = _pdn_em_postcheck_step(
                         project, effective_top, pdk, args.container,
-                        _emit_ir_em_reports, _emit_em_current_authority,
-                        rerun_started_ns=_rz_started_ns)
+                        _rz_started_ns)
+                    _rz_post_status = _rz_post_row.status
+                    _rz_post_detail = _rz_post_row.detail
                 # Publish the COST beside the arithmetic, measured not
                 # estimated: the second PnR's wall-clock is the price of this
                 # fix and belongs in the artefact a reviewer reads.
@@ -69845,9 +69869,7 @@ def main() -> int:
                     f"({_rz_secs:.0f}s). Bound: one extra pass, sentinel-"
                     f"enforced. Arithmetic in reports/phase3/pdn_em_sizing.json"))
                 if _pnr_redispatched.status == "PASS":
-                    plan.append(StepResult(
-                        "pdn_em_postcheck", _rz_post_status, 0.0,
-                        _rz_post_detail))
+                    plan.append(_rz_post_row)
             else:
                 if _rz_spend_failed:
                     print("[pnr] PDN_EM_RESIZE_NOT_DISPATCHED: sentinel "
