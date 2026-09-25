@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1342
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1342)
+- **Total programs (excluding helpers / shims):** 1343
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1343)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1333 |
+| `any` | 1334 |
 
 ## Alphabetical listing
 
@@ -718,6 +718,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `level_hysteresis_flag_oracle_check` | any | — | prompt-derived oracle for the thermometer-level-controller class with a history-dependent (hysteresis) flag. |
 | `level_shifter_required_check` | any | — | M2 gate (substance-verifying). |
 | `lfsr_synth` | any | — | deterministic SOLVER for the LINEAR-FEEDBACK-SHIFT-REGISTER family (Galois form), turning a fully-specified LFSR spec into correct RTL bl... |
+| `librelane_contract` | any | — | Project-local LibreLane step handoff. No Phase-3 step opts in implicitly. |
 | `lin_protocol_synth` | any | v0.1.84 | LIN-class protocol synth helper. |
 | `literal_verdict_keyword_check` | any | — | anti-fabrication gate (v1.6.38). |
 | `llm_semantic_confirm` | any | — | LLM double-confirm for program-extracted SEMANTIC fields. |
@@ -1414,7 +1415,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1333 programs)
+### `any` (1334 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2103,6 +2104,7 @@ _(no programs in this group)_
 - `level_hysteresis_flag_oracle_check` — prompt-derived oracle for the thermometer-level-controller class with a history-dependent (hysteresis) flag.
 - `level_shifter_required_check` — M2 gate (substance-verifying).
 - `lfsr_synth` — deterministic SOLVER for the LINEAR-FEEDBACK-SHIFT-REGISTER family (Galois form), turning a fully-specified LFSR spec into correct RTL bl...
+- `librelane_contract` — Project-local LibreLane step handoff. No Phase-3 step opts in implicitly.
 - `lin_protocol_synth` — LIN-class protocol synth helper.  _[v0.1.84]_
 - `literal_verdict_keyword_check` — anti-fabrication gate (v1.6.38).
 - `llm_semantic_confirm` — LLM double-confirm for program-extracted SEMANTIC fields.
