@@ -46825,7 +46825,7 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
                                 pnr_dir / "constraint.sdc", gds_out)
     except (Refusal, OSError, ValueError, KeyError) as exc:
         return StepResult("gds", "FAIL", time.time() - t0, f"LibreLane step 37: {exc}")
-    substance = _gds_substance_gate(gds_out, def_file)
+    substance = _gds_substance_gate(result["gds"], def_file)
     if substance:
         return StepResult("gds", "FAIL", time.time() - t0,
                           f"LibreLane GDS substance: {substance}",
