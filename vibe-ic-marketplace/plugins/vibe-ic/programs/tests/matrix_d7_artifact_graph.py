@@ -591,6 +591,25 @@ def _collect_writes(tree: ast.AST) -> Set[Tuple[str, ...]]:
     _module_names = _module_aliases(tree)
     out: Set[Tuple[str, ...]] = set()
 
+    # Phase-1's chokepoint takes a document name rather than a Path. Resolve
+    # literal calls and the runner's constant name tables so its loop writes
+    # participate in W2 just like direct Path writes.
+    l_doc_names: Set[str] = set()
+    for assignment in ast.walk(tree):
+        if not isinstance(assignment, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
+        if not any(isinstance(t, ast.Name) and t.id in {
+                "_L14_L18_EXTRACTORS", "_L19_L23_CODES_AND_NAMES",
+                "_L24_L27_CODES_AND_NAMES"} for t in targets):
+            continue
+        value = assignment.value
+        if value is not None:
+            l_doc_names.update(n.value for n in ast.walk(value)
+                               if isinstance(n, ast.Constant) and
+                               isinstance(n.value, str) and
+                               re.fullmatch(r"L\d+_[A-Z0-9_]+", n.value))
+
     def add(node: ast.AST) -> None:
         tail = resolver.tail(node)
         if tail and Path(tail[-1]).suffix.lower() in ARTIFACT_SUFFIXES:
@@ -600,6 +619,11 @@ def _collect_writes(tree: ast.AST) -> Set[Tuple[str, ...]]:
         if not isinstance(n, ast.Call):
             continue
         fn = n.func
+        if isinstance(fn, ast.Name) and fn.id == "_write_l_doc" and len(n.args) > 1:
+            name = _const_str(n.args[1])
+            names = (name,) if name else l_doc_names
+            out.update(("phase1", "generated_docs", f"{doc}.json") for doc in names)
+            continue
         if isinstance(fn, ast.Name) and fn.id in _ATOMIC_WRITERS and n.args:
             add(n.args[0])
             continue

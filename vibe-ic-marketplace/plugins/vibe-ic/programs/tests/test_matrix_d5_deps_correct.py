@@ -1687,7 +1687,7 @@ _NARROWED_LIVE_SUBJECTS: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
     (
         "flow_compliance_check",
         "coverage_actual.json",
-        ("2", "14"),
+        ("2",),
         "flow_compliance_check.py `Path(artifact_rel).name != "
         "_COVERAGE_SELFSKIP_ARTIFACT`, over `result.evidence` — the declared "
         "outputs of the step BEING CHECKED. The constant classifies a path the "

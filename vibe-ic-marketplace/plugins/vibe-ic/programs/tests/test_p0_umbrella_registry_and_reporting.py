@@ -326,9 +326,9 @@ def test_single_fail_reason_shape_unchanged(tmp_path, monkeypatch):
     assert p0["reasons"] == ["FAIL: gate_a — boom"]
 
 
-def test_no_rtl_umbrella_still_reports_SKIPPED_CONDITION(
+def test_no_rtl_umbrella_fails_on_missing_promised_input(
         tmp_path, monkeypatch):
-    """#447: 0/N checkers executed is not a PASS — must stay a skip.
+    """The flow promises RTL to P0; 0/N dispatched is a failure.
 
     #497 step 3 — this line is the umbrella's note about ITSELF: it names no
     gate, and it is now emitted from the umbrella's tri-state rather than out
@@ -337,7 +337,7 @@ def test_no_rtl_umbrella_still_reports_SKIPPED_CONDITION(
     rc, report = _run_main(tmp_path, monkeypatch, [], ("--lenient",),
                            dispatched=False)
     p0 = _p0(report)
-    assert p0 is not None and p0["status"] == "NOT_APPLICABLE"
+    assert p0 is not None and p0["status"] == "FAIL"
     assert p0["reasons"] == [f"SKIP: {_flow._P0_NO_RTL_NOTE}"]
     assert p0["gate_records"] == [], (
         "no gate was considered, so there is no gate record — and the line "

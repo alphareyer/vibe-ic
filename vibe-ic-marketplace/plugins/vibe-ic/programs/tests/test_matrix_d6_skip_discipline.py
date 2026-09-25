@@ -1285,10 +1285,7 @@ def flow_declared_outputs() -> Tuple[str, ...]:
 #: repairing it, and three more red cells subtract from the only delta they
 #: have to read. A NEW member fails immediately; these three are named with
 #: their evidence and may only be DELETED, never added to.
-_DEFERRED_L6_SKIPS: Dict[str, str] = {
-    "P0": "SKIPPED-CONDITION -> FAIL — the structural-RTL umbrella skips for "
-          "want of an artefact the flow guarantees",
-}
+_DEFERRED_L6_SKIPS: Dict[str, str] = {}
 
 
 @dataclass
@@ -3059,10 +3056,9 @@ def test_d6_l6_flow_declared_output_denominator_is_disclosed():
 def test_d6_l6_separates_legitimate_skips_from_illegitimate_ones():
     """Only still-live skip tiers enter L6 after #1978 classification.
 
-    Steps 12 and 30 previously entered this leg as ambiguous VACUOUS_PASS rows.
-    The shared reason taxonomy now classifies both unsafe non-verdicts as
-    INCOMPLETE before L6. P0 remains the one live illegitimate skip. This pins
-    that split so an unsafe outcome cannot quietly re-enter the skip register.
+        Steps 12 and 30 previously entered this leg as ambiguous VACUOUS_PASS rows.
+        The shared reason taxonomy classifies them as INCOMPLETE. P0 now FAILs
+        when promised RTL is absent, leaving no illegitimate deferred skips.
     """
     legit, illegit = [], []
     for sid in F.step_ids():
@@ -3074,7 +3070,7 @@ def test_d6_l6_separates_legitimate_skips_from_illegitimate_ones():
         (legit if full.skipped else illegit).append(
             F.normalize_id(sid))
     assert legit == [], legit
-    assert illegit == ["P0"], illegit
+    assert illegit == [], illegit
     # R-0915-85 — `INCOMPLETE` was the word that kept 12 and 30 out of this
     # leg, and it is `NOT_MEASURED(partial_population)` now: the step RAN and
     # examined PART of its population. Pinned as the PAIR, because the verdict

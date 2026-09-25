@@ -21191,11 +21191,8 @@ def step_emit_phase2_manifests(project: Path,
                 "rule_set": "yosys-elaborate-noncrit-warn",
             }
         w("reports/phase2/lint/rtl_hygiene.json", _hyg)
-        w("reports/phase2/lint/rom_init_lint.json", {
-            "verdict": "PASS",
-            "evidence": "otp_image_check step",
-            "init_file_search_path_in_qsf": True,
-        })
+        # rom_init_lint owns this path.  Its JSON is a list of findings, and
+        # only its actual invocation may create or refresh that evidence.
 
     # Step 3: CDC / RDC.
     # ORGANIC-20260606-cross-ic-recycled-canned-pass-reports (#436): the

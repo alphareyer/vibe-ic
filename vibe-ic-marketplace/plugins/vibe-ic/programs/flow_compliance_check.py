@@ -10261,8 +10261,8 @@ _P0_NONDECISIVE_VERDICTS = frozenset({
 #: operator-facing listing is a contract this migration does not get to alter
 #: on the way past — and once the parsers are gone (step 4) the prefix
 #: collision is inert: it exists only in text nothing reads.
-_P0_NO_RTL_NOTE = ("no RTL directory found — structural gates skipped "
-                   "(analog track / pre-RTL)")
+_P0_NO_RTL_NOTE = ("no RTL directory found — promised structural input absent; "
+                   "no structural gates ran")
 
 
 #: Severity tokens a JSON-emitting gate uses for the finding that DECIDED an
@@ -10882,8 +10882,8 @@ def _p0_umbrella_status(executed: Optional[bool],
 
     The four outcomes, and why the third one is not a PASS:
 
-      * ``executed is None``  -> ``SKIPPED-CONDITION``. #447: the umbrella
-        dispatched nothing (no RTL), and 0-of-N executed checkers is not a PASS.
+      * ``executed is None``  -> ``FAIL``. The flow promises RTL to P0, so
+        an empty dispatch is a broken input rather than an applicable skip.
       * a gate FAILed          -> ``FAIL``. Unchanged; ``executed`` IS the
         umbrella's own ``len(fails) == 0`` flag, so this branch re-derives
         nothing and cannot disagree with the bucket it came from.
@@ -10961,9 +10961,9 @@ def _p0_umbrella_status(executed: Optional[bool],
     # NOT_MEASURED, and the thing a reader needed all along is in the second
     # element.
     if executed is None:
-        # The INPUT declares the structural track inapplicable. The caller
-        # carries the declaration into `declared_by`.
-        return _T.Verdict.NOT_APPLICABLE.value, ""
+        # Step 1 promises RTL to P0. Missing RTL is a broken promised input,
+        # not a reason to excuse the structural umbrella.
+        return _T.Verdict.FAIL.value, ""
     if not executed:
         return _T.Verdict.FAIL.value, ""
     # RB2-03 (#2063) — ZERO ANSWERED IS NOT "PARTIALLY ANSWERED". `INCOMPLETE`
@@ -20043,7 +20043,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     # all) publishes "no records" rather than an empty list that would read as
     # "every gate was considered and none of them anything".
     structural_gate_records: Optional[List[Dict[str, Any]]] = None
-    if args.stage not in (3, 4) and target_stage not in _NO_RTL_UMBRELLA_SCOPES:
+    # A scoped test flow may declare only one step. Do not inject P0 into a
+    # flow that does not declare it; the canonical flow does declare P0.
+    if (any(str(step.get("id")) == "P0" for step in steps)
+            and args.stage not in (3, 4)
+            and target_stage not in _NO_RTL_UMBRELLA_SCOPES):
         structural_gate_records = []
         # #497 step 3 — `main()` no longer consumes the umbrella's PROSE
         # buckets at all. `s_passed` is the umbrella's own tri-state and

@@ -257,10 +257,8 @@ def test_a_real_FAIL_still_outranks_the_disclosure(
     assert audit["not_invocable_gate_count"] == 1
 
 
-def test_no_RTL_is_still_SKIPPED_CONDITION(tmp_path, monkeypatch, capsys):
-    """#447's tri-state survives. The umbrella that dispatched NOTHING is not
-    INCOMPLETE — it has no population at all, and saying `INCOMPLETE` there
-    would claim it tried."""
+def test_no_RTL_fails_the_promised_structural_input(tmp_path, monkeypatch, capsys):
+    """An empty P0 dispatch is a failure when the flow promises RTL."""
     def _stub(_project, **kw):
         out = kw.get("records_out")
         if out is not None:
@@ -276,7 +274,7 @@ def test_no_RTL_is_still_SKIPPED_CONDITION(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     step = next(s for s in json.loads(report.read_text())["steps"]
                 if s["id"] == "P0")
-    assert step["status"] == "NOT_APPLICABLE"
+    assert step["status"] == "FAIL"
 
 
 # ===========================================================================
@@ -423,8 +421,8 @@ def test_real_gates_a_fully_invoked_clean_registry_is_PASS(
 # the decision function, as a truth table
 # ===========================================================================
 @pytest.mark.parametrize("executed,records,expected", [
-    (None, [], "NOT_APPLICABLE"),
-    (None, [_not_invocable("g")], "NOT_APPLICABLE"),
+    (None, [], "FAIL"),
+    (None, [_not_invocable("g")], "FAIL"),
     (False, [_fail("g")], "FAIL"),
     (False, [_fail("g"), _not_invocable("h")], "FAIL"),
     # `len(fails) == 0` over a population of ZERO. Not reachable from the one
