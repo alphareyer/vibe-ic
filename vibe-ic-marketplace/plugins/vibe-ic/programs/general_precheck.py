@@ -1124,7 +1124,8 @@ def _step_flow_marker_layers(ev: StepEvidence,
 # --------------------------------------------------------------------------- #
 # DELEGATED steps — call the in-tree checker, report its rc. Never its rules.
 # --------------------------------------------------------------------------- #
-def _bound_drc_scope(project: Path, layout: Optional[Path]):
+def _bound_drc_scope(project: Path, layout: Optional[Path],
+                     engine: str = "klayout"):
     """Use a canonical pair only when its measured run checked this layout.
 
     Legacy ledgers without input bindings retain discovery. Once a producer
@@ -1142,9 +1143,15 @@ def _bound_drc_scope(project: Path, layout: Optional[Path]):
             continue
         if isinstance(entry, dict):
             records.append(entry)
-    report_rel = "reports/phase3/drc_signoff.rpt"
+    if engine == "magic":
+        report_rel = "reports/phase3/drc_signoff_magic.rpt"
+        expected_tool = "magic"
+    else:
+        report_rel = "reports/phase3/drc_signoff.rpt"
+        expected_tool = "klayout"
     log_rel = "reports/phase3/drc_signoff.log"
-    sources = (report_rel, "phase3/reports/drc.rpt")
+    sources = ((report_rel,) if engine == "magic" else
+               (report_rel, "phase3/reports/drc.rpt"))
     def ledger_key(rel):
         # The producer hashes resolved paths, including ordinary Step-31
         # publication aliases. Reports and transcripts may resolve to
@@ -1165,7 +1172,7 @@ def _bound_drc_scope(project: Path, layout: Optional[Path]):
         if (entry.get("record") != "invocation" or
                 entry.get("measured") is not True or
                 type(entry.get("exit_code")) is not int or
-                entry["exit_code"] != 0 or entry.get("tool") != "klayout"):
+                entry["exit_code"] != 0 or entry.get("tool") != expected_tool):
             return [], failure
         def digest(path):
             sha = _sha256(path) if path.is_file() else None
@@ -1189,12 +1196,15 @@ def _bound_drc_scope(project: Path, layout: Optional[Path]):
         source_log = str(Path(source).with_suffix(".log"))
         if not matched_input:
             return [], failure
-        for origin, alias in ((source, report_rel), (source_log, log_rel)):
+        aliases = ((source, report_rel),) if engine == "magic" else (
+            (source, report_rel), (source_log, log_rel))
+        for origin, alias in aliases:
             expected = outputs.get(ledger_key(origin))
             if (not expected or digest(project / origin) != expected or
                     digest(project / alias) != expected):
                 return [], failure
-        return [report_rel, log_rel], ""
+        return ([report_rel] if engine == "magic" else
+                [report_rel, log_rel]), ""
     return [], ""
 
 
@@ -1303,7 +1313,9 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
     if d.program in _PDK_AWARE_DELEGATES and pdk:
         extra = ["--pdk", pdk]
     if d.program == "drc_report_check":
-        scope, refusal = _bound_drc_scope(project, layout)
+        engine = ("magic" if step.step_id == "Checker.MagicDRC"
+                  else "klayout")
+        scope, refusal = _bound_drc_scope(project, layout, engine)
         if refusal:
             ev.evidence = refusal
             return

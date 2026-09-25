@@ -78,6 +78,27 @@ def test_canonical_real_violation_is_not_rescued_by_historical_zero(tmp_path):
     assert _actual_delegate(tmp_path, gds).verdict == GP.FAIL
 
 
+def test_magic_rung_scopes_its_own_bound_report_not_klayout(tmp_path):
+    gds = _fixture(tmp_path, violations=1)
+    magic = tmp_path / "reports/phase3/drc_signoff_magic.rpt"
+    magic.write_text("# Tool: magic\nmagic DRC: 0 violations\n")
+    row = {"record": "invocation", "measured": True, "tool": "magic",
+           "exit_code": 0,
+           "inputs": {gds.relative_to(tmp_path).as_posix(): _sha(gds)},
+           "outputs": {magic.relative_to(tmp_path).as_posix(): _sha(magic)}}
+    with (tmp_path / "provenance.jsonl").open("a") as f:
+        f.write(json.dumps(row) + "\n")
+    step = next(s for s in GP.LADDER if s.step_id == "Checker.MagicDRC")
+    ev = GP._blank(step)
+    GP._step_delegate(ev, step, tmp_path, GP.default_runner, GP._HERE, 60,
+                      layout=gds)
+    command = ev.measured["command"]
+    assert command[command.index("--under") + 1] == \
+        "reports/phase3/drc_signoff_magic.rpt"
+    magic.write_text(magic.read_text() + "changed after measurement\n")
+    assert GP._bound_drc_scope(tmp_path, gds, "magic")[1]
+
+
 @pytest.mark.parametrize("change", ["gds", "report", "missing_report", "missing_log",
                                     "raw_log", "native_failure"])
 def test_stale_or_incomplete_binding_cannot_pass(tmp_path, change):
