@@ -57,8 +57,6 @@ def _run(tmp_path, monkeypatch, *, gate_pass: bool, diagnostic: bool = False,
             "layout_digest": "routed-basis",
             "failed_gates": [] if gate_pass else ["sta_corner"]}),
             raising=False)
-    if gate_pass or diagnostic:
-        monkeypatch.setattr(R, "step_declared_signoff_gates", lambda *a, **k: [])
     if verify_xor_parallel:
         rendezvous = threading.Barrier(2, timeout=15)
 
