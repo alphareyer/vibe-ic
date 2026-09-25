@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from test_io_pad_power_domain_plan import _tree, GEN
+from _hostpaths import require_repo
 
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
@@ -60,3 +61,31 @@ def test_no_legal_site_is_named_refusal(tmp_path):
     rec = json.loads((project / "reports/phase3/io_pad_chip_top.json").read_text())
     assert rec["rule"] == "SUPPLY_ENTRY_NO_LEGAL_SITE"
     assert not (project / "phase3/stage3/pnr/chip_top_io.v").exists()
+
+
+def test_checked_in_psm_sizing_artifact_drives_entry_floor():
+    """A measured in-repo current artefact must affect the actual planner."""
+    from _ppa.power import pdn_supply_entry_count_plan
+
+    artifact = require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
+        "fixtures", "pdn_em_sizing", "arm_C.json")
+    sizing = json.loads(artifact.read_text())
+    layer = next(iter(sizing["per_layer"]))
+    jmax = sizing["per_layer"][layer]["jmax_A_per_um"]
+    current = sizing["i_total_A"]
+    peak = sizing["max_segment_current_A"]
+    recipe_width = 1.6
+    entry_width = 9.45
+    capacity = recipe_width * jmax * (1 - sizing["margin"])
+    result = pdn_supply_entry_count_plan(
+        current_A=current,
+        ring_plan={"layers": [layer], "recipe_widths_um": [recipe_width],
+                   "measured_ring_peak_A": {layer: peak}},
+        pad_entries=[{"layer": layer, "drawn_width_um": entry_width,
+                      "jmax_A_per_um": jmax}],
+        jmax_A_per_um={layer: jmax}, margin=sizing["margin"])
+    assert result["current_A"] == current
+    assert result["pair_count"] == 7
+    assert result["ring_pair_floor"] * capacity > peak
+    assert (result["ring_pair_floor"] - 1) * capacity < peak
