@@ -41847,6 +41847,7 @@ _SHIP_POSTROUTE_CVG_TCL = r"""
 # MEASURED after this change, same design, same corner: DRV 3 -> 0 in one extra
 # pass, SS setup +3.63 -> +3.88 ns, reroute complete (SHIP_WNS_POSTROUTE).
 set _ship_prev_wns -1.0e30
+set _ship_prev_hold -1.0e30
 set _ship_prev_drv 1000000
 for {set _cvg 0} {$_cvg < __BOUND__} {incr _cvg} {
   catch {define_process_corner -ext_model_index 0 X}
@@ -41880,14 +41881,16 @@ for {set _cvg 0} {$_cvg < __BOUND__} {incr _cvg} {
     puts "SHIP_CVG_CKPT: pass=$_cvg def=__PNR__/ship_cvg_pass${_cvg}.def wns=$_cvg_wns drv=$_cvg_drv hold=$_cvg_hold"
   }
   if {![string is double -strict $_cvg_wns]} { puts "SHIP_CVG_NONNUMERIC"; break }
-  if {$_cvg_wns >= -0.001 && $_cvg_drv == 0} { puts "SHIP_CVG_CLOSED"; break }
-  if {$_cvg_wns >= -0.001 && $_cvg_drv < 0} { puts "SHIP_CVG_CLOSED_DRV_UNMEASURED"; break }
-  if {$_cvg > 0 && [string is double -strict $_ship_prev_wns] && $_cvg_wns <= [expr {$_ship_prev_wns + 0.10}] && $_cvg_drv >= $_ship_prev_drv} { puts "SHIP_CVG_PLATEAU"; break }
+  if {$_cvg_wns >= -0.001 && $_cvg_drv == 0 && [string is double -strict $_cvg_hold] && $_cvg_hold >= 0} { puts "SHIP_CVG_CLOSED"; break }
+  if {$_cvg_wns >= -0.001 && $_cvg_drv < 0 && [string is double -strict $_cvg_hold] && $_cvg_hold >= 0} { puts "SHIP_CVG_CLOSED_DRV_UNMEASURED"; break }
+  if {$_cvg > 0 && [string is double -strict $_ship_prev_wns] && $_cvg_wns <= [expr {$_ship_prev_wns + 0.10}] && $_cvg_drv >= $_ship_prev_drv && [string is double -strict $_cvg_hold] && $_cvg_hold <= $_ship_prev_hold} { puts "SHIP_CVG_PLATEAU"; break }
   set _ship_prev_wns $_cvg_wns
   set _ship_prev_drv $_cvg_drv
+  if {[string is double -strict $_cvg_hold]} { set _ship_prev_hold $_cvg_hold }
   for {set _ci 0} {$_ci < 5} {incr _ci} {
     if {[catch {repair_design} e]} { puts "SHIP_CVG_RD_NONFATAL: $e"; break }
     if {[catch {repair_timing -setup} e]} { puts "SHIP_CVG_RT_NONFATAL: $e"; incr _ship_rt_failed }
+    if {[catch {repair_timing -hold} e]} { puts "SHIP_CVG_HOLD_REPAIR_NONFATAL: $e" }
     if {[catch {detailed_placement} e]} { puts "SHIP_CVG_DP_NONFATAL: $e"; break }
   }
   if {[catch {check_placement} e]} { puts "SHIP_CVG_CP_WARN: $e" }
@@ -42227,7 +42230,7 @@ def _ship_signoff_spef_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
                                   sparse_active_row_fill: bool = False,
                                   antenna_diode_cell: Optional[str] = None
                                   ) -> str:
-    """Fresh-session post-route SETUP repair against the REAL max-RC SPEF at the
+    """Fresh-session post-route SETUP and HOLD repair against real max-RC SPEF at the
     SLOW (SS) sign-off corner, writing routed_repaired.def / <top>_pnr_repaired.v.
 
     Root cause it closes (#527 estimate-vs-SPEF): the in-flow and post-route
@@ -42241,9 +42244,10 @@ def _ship_signoff_spef_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
 
     detailed_route runs UNBOUNDED (like the base sign-off route) so the inserted
     repair buffers are realized to DRC convergence. The Python step promotes the
-    result ONLY if the repair reaches non-negative setup AND the reroute converges
-    to 0 DRC violations; otherwise the base route is kept (fail-safe, never a
-    DRC regression). chip/PDK-AGNOSTIC: standard OpenROAD APIs; corner libs +
+    result ONLY if setup and measured hold are non-negative AND the reroute
+    converges to 0 router DRC violations; otherwise the base route is kept.
+    The PDK sign-off DRC is a later gate and can still find pin-access errors
+    the router does not model. chip/PDK-AGNOSTIC: standard OpenROAD APIs; corner libs +
     captable come from the active PDK."""
     mp = metal_prefix
     # DPL-0038 re-fill: after the repair reroute, restore the decap/fill tiling that
@@ -42336,6 +42340,8 @@ def _ship_signoff_spef_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         + "if {[catch {estimate_parasitics -detailed_routing} e]} { "
         "puts \"SHIP_EST_DR_NONFATAL: $e\" }\n"
         "catch {puts \"SHIP_WNS_BEFORE: [sta::worst_slack -max]\"}\n"
+        "catch {puts \"SHIP_HOLD_BEFORE: [sta::worst_slack -min]\"}\n"
+        "puts \"SHIP_HOLD_GATE_EXPECTED: 1\"\n"
         # DRV-CLOSURE-LOOP — `repair_design` is a GREEDY SINGLE-PASS resizer:
         # its own log line ("Found N slew violations." / "Found N
         # capacitance violations.") reports what it found AT ENTRY, not what
@@ -42379,6 +42385,8 @@ def _ship_signoff_spef_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         "puts \"SHIP_RD_NONFATAL: $_drv_rd\"; break }\n"
         "  if {[catch {repair_timing -setup} _drv_rt]} { "
         "puts \"SHIP_RT_NONFATAL: $_drv_rt\"; incr _ship_rt_failed }\n"
+        "  if {[catch {repair_timing -hold} _drv_rh]} { "
+        "puts \"SHIP_HOLD_REPAIR_NONFATAL: $_drv_rh\" }\n"
         "  if {[catch {detailed_placement} _drv_dp]} { "
         "puts \"SHIP_DP_NONFATAL: $_drv_dp\"; break }\n"
         "}\n"
@@ -43008,6 +43016,7 @@ def _parse_ship_repair_log(log: str) -> dict:
                              log or "")]
     return {
         "wns_before": _f("SHIP_WNS_BEFORE"),
+        "hold_before": _f("SHIP_HOLD_BEFORE"),
         "wns_after_repair": _f("SHIP_WNS_AFTER_REPAIR"),
         # #552 — how many `repair_timing -setup` calls were refused before the
         # number above was taken, so a consumer reading `wns_after_repair` sees
@@ -43021,6 +43030,11 @@ def _parse_ship_repair_log(log: str) -> dict:
         # #603 — the HONEST post-reroute real-SPEF worst slack (the number
         # the sign-off independently re-derives); None on older/stubbed logs.
         "wns_postroute": _f("SHIP_WNS_POSTROUTE"),
+        # The shipped repair already measures this after its final reroute.
+        # Treat silence as unmeasured, never as a clean hold view.
+        **({"hold_postroute": _f("SHIP_CVG_FINAL_HOLD")}
+           if ("SHIP_HOLD_GATE_EXPECTED: 1" in (log or "")
+               or "SHIP_CVG_FINAL_HOLD:" in (log or "")) else {}),
         # #543 -- how many `detailed_route` aborts the step swallowed. When this
         # is non-zero `wns_postroute` is absent BY CONSTRUCTION (the Tcl emits
         # the slack as SHIP_WNS_UNROUTED instead), so no consumer can read an
@@ -43101,7 +43115,13 @@ def _ship_repair_refusals(parsed: dict) -> list:
     if _unr is not None and _unr > 0:
         out.append(f"{_unr} net(s) were left unrouted")
     wp, wb = parsed.get("wns_postroute"), parsed.get("wns_before")
-    if wp is not None and wb is not None and wp <= wb + 0.001:
+    _hold_closed = (isinstance(parsed.get("hold_before"), (int, float))
+                    and parsed["hold_before"] < 0
+                    and isinstance(parsed.get("hold_postroute"), (int, float))
+                    and parsed["hold_postroute"] >= 0
+                    and isinstance(wb, (int, float)) and wb >= 0
+                    and isinstance(wp, (int, float)) and wp >= 0)
+    if wp is not None and wb is not None and wp <= wb + 0.001 and not _hold_closed:
         out.append(f"setup did not measurably improve on the sign-off basis "
                    f"({wb} -> {wp} ns)")
     wa = parsed.get("wns_after_repair")
@@ -43111,6 +43131,10 @@ def _ship_repair_refusals(parsed: dict) -> list:
     if parsed.get("route_violations") != 0:
         out.append(f"the reroute was not DRC-clean "
                    f"({parsed.get('route_violations')} violation(s))")
+    if "hold_postroute" in parsed and (parsed["hold_postroute"] is None
+                                       or parsed["hold_postroute"] < 0):
+        out.append(f"the repaired route did not close measured hold "
+                   f"({parsed['hold_postroute']} ns)")
     sb, sa = parsed.get("drv_slew_before"), parsed.get("drv_slew_after")
     if sb is not None and sa is not None and sa > sb:
         out.append(f"repair_design's own slew-violation transcript rose "
@@ -43268,12 +43292,24 @@ def _ship_repair_should_promote(parsed: dict, repaired_def_ok: bool,
     # encodes that policy and is unchanged) -- closure is not the bar here,
     # being genuinely better is. Same tolerance as before, and still skipped
     # when either marker is absent, so this only ADDS a refusal.
-    if wp is not None and wb is not None and wp <= wb + 0.001:
+    # A previously red hold can be closed while spending some *positive*
+    # setup slack. Both endpoints must remain measured and non-negative; this
+    # does not permit a new setup red or any DRC/DRV regression.
+    _hold_closed = (isinstance(parsed.get("hold_before"), (int, float))
+                    and parsed["hold_before"] < 0
+                    and isinstance(parsed.get("hold_postroute"), (int, float))
+                    and parsed["hold_postroute"] >= 0
+                    and isinstance(wb, (int, float)) and wb >= 0
+                    and isinstance(wp, (int, float)) and wp >= 0)
+    if wp is not None and wb is not None and wp <= wb + 0.001 and not _hold_closed:
         return False
     wa = parsed.get("wns_after_repair")
     if wa is None or wa < -0.001:
         return False
     if parsed.get("route_violations") != 0:
+        return False
+    if "hold_postroute" in parsed and (parsed["hold_postroute"] is None
+                                       or parsed["hold_postroute"] < 0):
         return False
     # DRV no-regression, judged PER CATEGORY (unchanged from main, deliberately).
     #
@@ -58151,14 +58187,17 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     _repair_start_def, _repair_start_basis = _repair_start_point(pnr_out, top)
     _repair_post_route = _repair_start_basis.startswith("post_route")
     _repair_spefs_c: Dict[str, str] = {}
+    _repair_source_spefs: List[Path] = []
     if _repair_post_route:
         for _sp in sorted(mc_spef_dir.glob(f"{top}.*.spef")
                           if mc_spef_dir.is_dir() else []):
             _c = _sp.name[len(top) + 1:].split(".")[0]
             if _c in _SPEF_CORNERS and _sp.stat().st_size > 0:
                 _repair_spefs_c[_c] = _to_container_path(str(_sp), container)
+                _repair_source_spefs.append(_sp)
         if not _repair_spefs_c and spef_out.is_file() and spef_out.stat().st_size > 0:
             _repair_spefs_c["nom"] = _to_container_path(str(spef_out), container)
+            _repair_source_spefs.append(spef_out)
     try:
         _repair_captables_c = (_discover_openrcx_captables(pdk, container)
                             if _repair_post_route else {})
@@ -58284,7 +58323,11 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 f"(setup_wns={_repair_decision['setup_worst_slack_ns']} "
                 f"hold_wns={_repair_decision['hold_worst_slack_ns']}) — running the "
                 "multi-corner post-route repair (NOT writing no_repair_needed.flag).")
-            _ran = _run_postroute_timing_repair(project, top, container, repair_tcl_path, notes)
+            _ran = _run_postroute_timing_repair(
+                project, top, container, repair_tcl_path, notes,
+                source_paths=[p for p in (
+                    _repair_start_def, pnr_out / "constraint.sdc",
+                    *_repair_source_spefs) if p is not None])
             _repair_decision["action"] = ("timing_repair_ran" if _ran
                                        else "timing_repair_no_netlist")
             _repair_after = {}
@@ -59981,7 +60024,8 @@ def repair_result_is_a_regression(delta_ns, delta_is_comparable: bool) -> bool:
 
 def _run_postroute_timing_repair(project: Path, top: str, container: str,
                     repair_tcl_path: Path, notes: List[str],
-                    timeout: int = 7200) -> bool:
+                    timeout: int = 7200,
+                    source_paths: Sequence[Path] = ()) -> bool:
     """AUTO-TRIGGER — actually RUN the emitted multi-corner-aware post-route repair
     timing-repair TCL (``_build_postroute_timing_repair_tcl``) via OpenROAD, producing
     ``postroute_timing_repair/{top}_timing_repaired.v`` plus
@@ -59992,19 +60036,42 @@ def _run_postroute_timing_repair(project: Path, top: str, container: str,
     case the multi-corner post-route repair exists for) got ``no_repair_needed.flag`` and the post-route repair
     stayed dead. When the trigger fires, this runs it.
 
-    IDEMPOTENT: if the post-route repair netlist already exists (a prior run / resume) it is
-    NOT re-run (the post-route repair reroute is a full, expensive route pass). Best-effort: a
+    IDEMPOTENT only when a receipt binds the candidate to the current deck,
+    routed DEF, SDC and SPEFs. A stale candidate must be recomputed. Best-effort: a
     tool failure logs a note and returns False — §4.05, no fabricated closure."""
     postroute_timing_repair_out = _pl.postroute_timing_repair_dir(project)
     repaired_v = postroute_timing_repair_out / f"{top}_timing_repaired.v"
-    if repaired_v.is_file() and repaired_v.stat().st_size > 0:
-        notes.append(f"post-route repair auto-trigger: {repaired_v.name} already present — "
-                     "reusing (no re-run).")
-        return True
-    if not repair_tcl_path.is_file():
-        notes.append("post-route repair auto-trigger: postroute_timing_repair.tcl missing — "
-                     "cannot fire.")
+    repaired_def = postroute_timing_repair_out / "timing_repaired.def"
+    run_log = postroute_timing_repair_out / "postroute_timing_repair.log"
+    receipt = postroute_timing_repair_out / "repair_inputs.json"
+    inputs = [repair_tcl_path, *(Path(p) for p in source_paths)]
+    if not all(p.is_file() and p.stat().st_size > 0 for p in inputs):
+        notes.append("post-route repair auto-trigger cannot fire: an input "
+                     "deck/DEF/SDC/SPEF is absent or empty; refusing a cached result")
         return False
+    input_digest = hashlib.sha256()
+    for path in inputs:
+        input_digest.update(str(path).encode())
+        input_digest.update(hashlib.sha256(path.read_bytes()).digest())
+    digest = input_digest.hexdigest()
+    prior = None
+    if receipt.is_file():
+        try:
+            prior = json.loads(receipt.read_text()).get("input_sha256")
+        except (OSError, ValueError, TypeError):
+            pass
+    if (prior == digest and all(p.is_file() and p.stat().st_size > 0
+                                for p in (repaired_v, repaired_def, run_log))):
+        notes.append(f"post-route repair auto-trigger: {repaired_v.name} already present — "
+                     "input digest matches; reusing (no re-run).")
+        return True
+    # Quarantine every previous candidate output before invoking the tool. A
+    # failed tool must not leave a stale netlist or SPEF that looks newly valid.
+    for path in (repaired_v, repaired_def, run_log,
+                 *postroute_timing_repair_out.glob(f"spef_corners/{top}.*.spef")):
+        if path.exists():
+            path.replace(path.with_name(path.name + ".superseded"))
+    receipt.unlink(missing_ok=True)
     postroute_timing_repair_dir_c = _to_container_path(str(postroute_timing_repair_out), container)
     tcl_c = _to_container_path(str(repair_tcl_path), container)
     cmd = (f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
@@ -60018,6 +60085,7 @@ def _run_postroute_timing_repair(project: Path, top: str, container: str,
         return False
     ok = repaired_v.is_file() and repaired_v.stat().st_size > 0
     if ok:
+        _aa.write_text(receipt, json.dumps({"input_sha256": digest}, indent=2) + "\n")
         notes.append(f"post-route repair auto-trigger FIRED: multi-corner post-route repair ran → "
                      f"{repaired_v.name} produced (see postroute_timing_repair/"
                      "postroute_timing_repair.log).")
