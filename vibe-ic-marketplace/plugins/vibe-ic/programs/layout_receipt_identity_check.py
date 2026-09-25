@@ -7,6 +7,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import _atomic_artefact as _aa
+
 
 def _sha(path: Path) -> str:
     digest = hashlib.sha256()
@@ -84,7 +86,7 @@ def main() -> int:
     result = check(args.project)
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
-        args.json.write_text(json.dumps(result, indent=2) + "\n")
+        _aa.write_text(args.json, json.dumps(result, indent=2) + "\n")
     print(f"layout_receipt_identity_check: {result['verdict']}: "
           + "; ".join(result["reasons"]))
     return 0 if result["verdict"] == "PASS" else 1

@@ -5,6 +5,7 @@ import json
 import sys
 import threading
 from pathlib import Path
+import pytest
 import yaml
 
 import phase3_one_shot_runner as R
@@ -48,14 +49,16 @@ def _run(tmp_path, monkeypatch, *, gate_pass: bool, diagnostic: bool = False,
                             "current outputs staged")
 
     monkeypatch.setattr(R, "step_pnr", fake_pnr)
-    monkeypatch.setattr(R, "step_canonicalize_artefacts", fake_canonicalize)
+    if gate_pass or diagnostic:
+        monkeypatch.setattr(R, "step_canonicalize_artefacts", fake_canonicalize)
     monkeypatch.setattr(R, "step_prestream_gate", lambda *a, **k: R.StepResult(
         "prestream_gate", "PASS" if gate_pass else "FAIL", 0.0,
         "synthetic routed gate verdict", extras={
             "layout_digest": "routed-basis",
             "failed_gates": [] if gate_pass else ["sta_corner"]}),
             raising=False)
-    monkeypatch.setattr(R, "step_declared_signoff_gates", lambda *a, **k: [])
+    if gate_pass or diagnostic:
+        monkeypatch.setattr(R, "step_declared_signoff_gates", lambda *a, **k: [])
     if verify_xor_parallel:
         rendezvous = threading.Barrier(2, timeout=15)
 
@@ -206,3 +209,16 @@ def test_flow_dependency_declares_the_delivered_layout():
     assert {"34", "37"} <= {str(v) for v in steps["31"]["blocks_on"]}
     assert "37" in {str(v) for v in steps["37.3"]["blocks_on"]}
     assert order["34"] < order["37"] < order["31"] < order["36"]
+
+
+@pytest.mark.parametrize("top", ["chip_top", "subservient"])
+def test_prestream_required_reports_have_real_writers(tmp_path, top):
+    """Run both declared gate programs, including their failure output paths."""
+    project = tmp_path / top
+    project.mkdir()
+    for name, program, out_rel, argv in R._PRESTREAM_GATES[:2]:
+        row = R._run_declared_signoff_gate(project, name, program, out_rel, argv)
+        report = project / out_rel
+        assert report.is_file(), (top, name, row.status, row.detail)
+        assert row.output_files == [str(report)]
+        assert row.status != "PASS"  # This fixture has no EDA evidence.
