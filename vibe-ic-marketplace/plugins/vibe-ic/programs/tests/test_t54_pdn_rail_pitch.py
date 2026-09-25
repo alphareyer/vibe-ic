@@ -20,6 +20,7 @@ def test_rail_pitch_is_drawn_with_a_coupled_strap_width(tmp_path):
                             "strap_layer": "m4", "rail_layer": "m1",
                             "old_pitch_um": 153.58,
                             "new_pitch_um": 50.4,
+                            "strap_peak_A": 0.001,
                             "rail_j_before_A_per_um": 0.001102 / 0.6,
                             "rail_j_predicted_after_A_per_um":
                                 0.001102 * 50.4 / 153.58 / 0.6},

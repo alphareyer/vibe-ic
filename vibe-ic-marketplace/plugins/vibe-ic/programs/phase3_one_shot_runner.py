@@ -7617,17 +7617,30 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
                 continue
             try:
                 segments = list(_emcd._iter_csv_segments(csv_path, None))
+                _measured_def_text = def_file.read_text(errors="replace")
+                _def_pitch = _ppa_power.pdn_def_stripe_pitch(
+                    _measured_def_text, strap_layer)
+                _tcl_pitch = float(sm.group(1))
                 rail_pitch = _ppa_power.pdn_rail_pitch_plan(
                     segments, rail_layer=rail_layer,
                     rail_width_um=float(rail_width),
                     jmax_A_per_um=float(rail["jmax_A_per_um"]),
                     margin=float(floor["margin"]),
-                    old_pitch_um=float(sm.group(1)),
+                    old_pitch_um=(_def_pitch if _def_pitch else _tcl_pitch),
                     grid_um=float(floor["manufacturing_grid_um"]))
             except (OSError, ValueError, KeyError):
                 rail_pitch = None
             if rail_pitch:
                 rail_pitch["strap_layer"] = strap_layer
+                rail_pitch["measured_def_pitch_um"] = _def_pitch
+                rail_pitch["script_pitch_um"] = _tcl_pitch
+                rail_pitch["script_def_pitch_mismatch"] = (
+                    _def_pitch is not None
+                    and abs(_def_pitch - _tcl_pitch) > 2 * float(
+                        floor["manufacturing_grid_um"]))
+                rail_pitch["strap_peak_A"] = _ppa_power.pdn_strap_segment_peak(
+                    _measured_def_text, segments,
+                    strap_layer)
                 break
         if rail_pitch:
             break
@@ -8765,6 +8778,8 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
     # and when the pitch no longer satisfies the documented spacing ratio it
     # is re-derived with the same _PDN_STRAP_* ratios the auto plan uses.
     _emfl = (em_floor or {}).get("per_layer") or {}
+    if isinstance(em_floor, dict):
+        em_floor["applied"] = []
 
     def _em_floor_w(layer: str, w: float) -> Tuple[float, bool]:
         fl = _emfl.get(str(layer).lower())
@@ -8900,6 +8915,10 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                 if not (st.get("layer") and _sw0):
                     continue
                 _swf, _hit = _em_floor_w(st["layer"], float(_sw0))
+                _rail_plan = (em_floor or {}).get("rail_pitch_plan") or {}
+                _joint_rail = (str(st["layer"]).lower()
+                               == str(_rail_plan.get("strap_layer", "")).lower()
+                               and _rail_plan.get("applied") == "DENSER_STRAPS")
                 # R-0915-111 — STRIPES FIRST. A tighter pitch divides the
                 # per-stripe current and steals no track; a wider strap steals
                 # tracks and, past `pitch/2 - width < min spacing`, makes
@@ -8907,7 +8926,7 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                 # stripe planner whether more stripes reach the same Jmax at
                 # the width already drawn, and take that answer when it does.
                 _plan_em = None
-                if _hit:
+                if _hit and not _joint_rail:
                     _lay_em = (em_floor or {}).get("per_layer", {}).get(
                         str(st["layer"]).lower(), {})
                     _iseg = (em_floor or {}).get("max_segment_current_A")
@@ -8979,7 +8998,7 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                     _em_widened.append(
                         f"{st['layer']} {_plan_em['stripe_multiplier']}x "
                         f"stripes (pitch {st['pitch']}um, width {_sw0} kept)")
-                elif _hit:
+                elif _hit and not _joint_rail:
                     st["width"] = round(float(_plan_em["new_width_um"])
                                         if _plan_em else _swf, 6)
                     _np = max(float(st.get("pitch") or 0.0),
@@ -8990,32 +9009,47 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                         st["offset"] = round(_np / _PDN_STRAP_OFFSET_DIV, 6)
                     _em_widened.append(
                         f"{st['layer']} {_sw0}->{st['width']}")
-                _rail_plan = (em_floor or {}).get("rail_pitch_plan") or {}
-                if (str(st["layer"]).lower()
-                        == str(_rail_plan.get("strap_layer", "")).lower()
-                        and _rail_plan.get("applied") == "DENSER_STRAPS"):
+                if _joint_rail:
                     _old_pitch = float(_rail_plan["old_pitch_um"])
                     _new_pitch = float(_rail_plan["new_pitch_um"])
                     _lay = _emfl[str(st["layer"]).lower()]
                     _jpw = float(_lay["jmax_A_per_um"])
                     _margin = float(em_floor["margin"])
                     _q = float(em_floor["width_quantum_um"])
-                    # The measured strap-current authority has the same
-                    # linear-span scaling as the rail. Keep its safety factor
-                    # while exchanging width for extra parallel straps.
-                    _need = (float(em_floor["i_drive_A"]) * _new_pitch
-                             / _old_pitch / (_jpw * (1 - _margin)))
+                    # The all-layer maximum can be a ring or pad entry. A
+                    # strap width must be driven by a measured STRIPE edge.
+                    _strap_peak = _rail_plan.get("strap_peak_A")
+                    if not isinstance(_strap_peak, (int, float)) or _strap_peak <= 0:
+                        raise ValueError("PDN_EM_COMBINED_PLAN_NOT_MEASURED: "
+                                         "no measured strap edge on the rail's "
+                                         "connected layer")
+                    _strap_drive = (float(_strap_peak)
+                                    * float(em_floor.get("safety_factor") or 1.0)
+                                    * _new_pitch / _old_pitch)
+                    _need = _strap_drive / (_jpw * (1 - _margin))
                     _width = math.ceil(_need / _q - 1e-9) * _q
                     if _width <= _need + 1e-12:
                         _width += _q
+                    _width = max(_width, float(_sw0))
                     _sp = _techlef_layer_spacing(_tlef_txt or "", str(st["layer"]))
                     _sp = float(_sp if _sp is not None else _sw0)
-                    if 2 * _width + _sp >= _new_pitch:
+                    _resource_fraction = 2.0 * _width / _new_pitch
+                    # Leave at least half the layer's tracks to signal
+                    # routing. A project may declare a tighter budget.
+                    _resource_budget = float((straps or {}).get(
+                        "max_routing_fraction", 0.5))
+                    if not 0 < _resource_budget <= 1:
+                        raise ValueError("PDN_EM_ROUTING_BUDGET_INVALID: "
+                                         f"{_resource_budget}")
+                    if (2 * _width + _sp >= _new_pitch
+                            or _resource_fraction > _resource_budget + 1e-9):
                         raise ValueError(
-                            "PDN_EM_RAIL_PITCH_UNREACHABLE: "
+                            "PDN_EM_COMBINED_PLAN_INFEASIBLE: "
                             f"pitch={_new_pitch}um requires strap width="
-                            f"{_width:.4f}um, two-rail spacing={_sp}um; "
-                            f"need > {2 * _width + _sp:.4f}um")
+                            f"{_width:.4f}um; two-rail spacing={_sp}um "
+                            f"requires pitch>{2 * _width + _sp:.4f}um; "
+                            f"routing_fraction={_resource_fraction:.4f} "
+                            f"budget={_resource_budget:.4f}")
                     st["pitch"] = _new_pitch
                     st["width"] = round(_width, 6)
                     _grid = float(em_floor["manufacturing_grid_um"])
@@ -9026,10 +9060,16 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                         em_floor["applied"] = [a for a in em_floor.get("applied", [])
                                                if str(a.get("layer", "")).lower()
                                                != str(st["layer"]).lower()]
-                        em_floor["applied"].append({
+                        _joint_decision = {
                             **_rail_plan, "layer": str(st["layer"]),
                             "verdict": "DENSER_STRAPS", "pitch_um": _new_pitch,
-                            "width_um": st["width"]})
+                            "width_um": st["width"],
+                            "strap_drive_A": _strap_drive,
+                            "routing_fraction": _resource_fraction,
+                            "routing_budget": _resource_budget,
+                            "spacing_um": _sp}
+                        em_floor["applied"].append(_joint_decision)
+                        em_floor["combined_decision"] = _joint_decision
                     _em_widened.append(
                         f"{st['layer']} rail span pitch {_old_pitch}->{_new_pitch}um")
         if _stripes:
@@ -69633,6 +69673,15 @@ def main() -> int:
                 _rz = None
                 _rz_decline_reason.append(f"decision raised: {_rz_exc}")
             if _rz:
+                # Derive the one width/pitch pair before writing the sentinel
+                # or paying for another PnR. This is the exact Tcl builder the
+                # dispatch below uses, with the real resolved PDK.
+                try:
+                    _build_pdn_tcl(pdk, args.container, em_floor=_rz["floor"])
+                except ValueError as _plan_exc:
+                    _rz_decline_reason.append(str(_plan_exc))
+                    _rz = None
+            if _rz:
                 _short_txt = ", ".join(
                     f"{d['layer']} {d['drawn_um']}->{d['w_em_um']}um "
                     f"({d['shortfall_x']}x short)" for d in _rz["short"])
@@ -69655,7 +69704,10 @@ def main() -> int:
                         ("PDN_EM_RING_CAPACITY_UNREACHABLE",
                          "PDN_EM_PAD_ENTRY_CAPACITY_UNPROVEN",
                          "PDN_EM_RING_GEOMETRY_UNPROVEN",
-                         "PDN_EM_RING_CAPACITY_NOT_MEASURED"))):
+                         "PDN_EM_RING_CAPACITY_NOT_MEASURED",
+                         "PDN_EM_COMBINED_PLAN_INFEASIBLE",
+                         "PDN_EM_COMBINED_PLAN_NOT_MEASURED",
+                         "PDN_EM_ROUTING_BUDGET_INVALID"))):
                     _rz_post_status = "FAIL"
                     _rz_post_detail = _rz_decline_reason[0]
                     plan.append(StepResult("pdn_em_architecture", "FAIL", 0.0,
@@ -69665,6 +69717,7 @@ def main() -> int:
                       f"requires a changed PDN plan ({_short_txt}) — "
                       f"re-running PnR ONCE with the derived floor",
                       flush=True)
+                _rz_started_ns = time.time_ns()
                 _rz_t0 = time.time()
                 _pnr_rows2: List[StepResult] = []
                 _pnr_redispatched = _spf.gate(
@@ -69687,7 +69740,8 @@ def main() -> int:
                         args=args)
                     _rz_post_status, _rz_post_detail = _ppa_power._pdn_em_post_resize_check(
                         project, effective_top, pdk, args.container,
-                        _emit_ir_em_reports, _emit_em_current_authority)
+                        _emit_ir_em_reports, _emit_em_current_authority,
+                        rerun_started_ns=_rz_started_ns)
                 # Publish the COST beside the arithmetic, measured not
                 # estimated: the second PnR's wall-clock is the price of this
                 # fix and belongs in the artefact a reviewer reads.

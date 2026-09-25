@@ -184,6 +184,85 @@ def pdn_rail_pitch_plan(segments: Sequence[Mapping[str, Any]], *,
                      "fresh PSM must verify changed load distribution"}
 
 
+def pdn_strap_segment_peak(def_text: str,
+                           segments: Sequence[Mapping[str, Any]],
+                           layer: str) -> Optional[float]:
+    """Largest measured edge covered by a same-layer DEF STRIPE.
+
+    Ring and pad-entry peaks must not be used as a per-strap current. The CSV
+    has no structure field, so the layout's own SPECIALNETS supply that fact.
+    """
+    dbm = re.search(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)", def_text)
+    snet = re.search(r"SPECIALNETS\b(.*?)END\s+SPECIALNETS", def_text, re.S)
+    if not dbm or not snet or int(dbm.group(1)) <= 0:
+        return None
+    dbu = int(dbm.group(1))
+    boxes = []
+    pat = re.compile(
+        r"(?:ROUTED|NEW)\s+(\S+)\s+(\d+)\s+\+\s+SHAPE\s+STRIPE\s+"
+        r"\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+"
+        r"\(\s*(-?\d+)\s+(-?\d+)\s*\)")
+    for match in pat.finditer(snet.group(1)):
+        lay, raw_w, *raw_xy = match.groups()
+        if lay.lower() != layer.lower() or int(raw_w) <= 0:
+            continue
+        x0, y0, x1, y1 = (int(v) / dbu for v in raw_xy)
+        half = int(raw_w) / dbu / 2
+        boxes.append((min(x0, x1) - half, min(y0, y1) - half,
+                      max(x0, x1) + half, max(y0, y1) + half))
+    peaks = []
+    for seg in segments:
+        if (str(seg.get("layer0", "")).lower() != layer.lower()
+                or str(seg.get("layer1", "")).lower() != layer.lower()):
+            continue
+        pts = seg.get("points_um")
+        if not pts or any(v is None for pt in pts for v in pt):
+            continue
+        if any(all(lx - 1e-6 <= x <= hx + 1e-6 and
+                   ly - 1e-6 <= y <= hy + 1e-6 for x, y in pts)
+               for lx, ly, hx, hy in boxes):
+            peaks.append(float(seg["current_A"]))
+    return max(peaks) if peaks else None
+
+
+def pdn_def_stripe_pitch(def_text: str, layer: str) -> Optional[float]:
+    """Per-net stripe pitch in the measured DEF, excluding the other rail.
+
+    A newer Tcl can coexist with an older final DEF after a failed PnR tail.
+    The current distribution belongs to the DEF, so its pitch is the only
+    valid denominator for predicting the next distribution.
+    """
+    dbm = re.search(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)", def_text)
+    snet = re.search(r"SPECIALNETS\b(.*?)END\s+SPECIALNETS", def_text, re.S)
+    if not dbm or not snet or int(dbm.group(1)) <= 0:
+        return None
+    dbu = int(dbm.group(1))
+    pitches = []
+    pat = re.compile(
+        r"(?:ROUTED|NEW)\s+(\S+)\s+\d+\s+\+\s+SHAPE\s+STRIPE\s+"
+        r"\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+"
+        r"\(\s*(-?\d+)\s+(-?\d+)\s*\)")
+    for statement in snet.group(1).split(";"):
+        axes = {"x": set(), "y": set()}
+        for match in pat.finditer(statement):
+            lay, x0, y0, x1, y1 = match.groups()
+            if lay.lower() != layer.lower():
+                continue
+            x0, y0, x1, y1 = map(int, (x0, y0, x1, y1))
+            if x0 == x1 and y0 != y1:
+                axes["x"].add(x0)
+            elif y0 == y1 and x0 != x1:
+                axes["y"].add(y0)
+        for coords in axes.values():
+            vals = sorted(coords)
+            if len(vals) >= 2:
+                diffs = [(b - a) / dbu for a, b in zip(vals, vals[1:])
+                         if b > a]
+                if diffs:
+                    pitches.append(sorted(diffs)[len(diffs) // 2])
+    return max(pitches) if pitches else None
+
+
 def pdn_ring_segment_peaks(def_text: str,
                            segments: Sequence[Mapping[str, Any]]
                            ) -> Dict[str, float]:
@@ -1856,13 +1935,20 @@ _PDN_EM_SUBJECT_DEF = "routed.def"
 def _pdn_em_post_resize_check(project: Path, top: str, pdk: Any,
                               container: str,
                               emit_ir_em_reports: Callable[..., Any],
-                              emit_em_current_authority: Callable[..., Any]
+                              emit_em_current_authority: Callable[..., Any],
+                              rerun_started_ns: Optional[int] = None
                               ) -> Tuple[str, str]:
     """Measure the second DEF before it can advance to GDS."""
     rpt3 = _pl.reports_phase3_dir(project)
     def_file = _pl.pnr_dir(project) / f"{top}.def"
     if not def_file.is_file():
         return "NOT_MEASURED", "PDN_EM_POSTCHECK_NO_DEF"
+    # The second PnR may return success after writing intermediate DEFs while
+    # leaving the old shipped DEF untouched. EM on that old file is not a
+    # measurement of the requested width/pitch repair.
+    if (rerun_started_ns is not None
+            and def_file.stat().st_mtime_ns <= rerun_started_ns):
+        return "NOT_MEASURED", "PDN_EM_POSTCHECK_STALE_DEF"
     notes: List[str] = []
     try:
         rpt3.mkdir(parents=True, exist_ok=True)
@@ -1931,7 +2017,8 @@ def _pdn_em_sentinel_binds(sentinel: Path, project: Path,
     if now is None:
         return False, ("the routed DEF could not be read, so the sentinel "
                        "cannot be matched to a layout")
-    short = doc.get("short")
+    applied = doc.get("applied")
+    short = applied if isinstance(applied, list) and applied else doc.get("short")
     if not isinstance(short, list) or not short:
         return False, "the sentinel records no strap-width floor to verify"
     try:
@@ -1945,7 +2032,7 @@ def _pdn_em_sentinel_binds(sentinel: Path, project: Path,
         if not isinstance(row, Mapping) or not isinstance(row.get("layer"), str):
             return False, "the sentinel has an invalid strap-width floor"
         try:
-            width = float(row["w_em_um"])
+            width = float(row["width_um"] if short is applied else row["w_em_um"])
         except (KeyError, TypeError, ValueError):
             return False, "the sentinel has an invalid strap-width floor"
         if not math.isfinite(width) or width <= 0:
@@ -2178,9 +2265,13 @@ def _pdn_em_reusable_floor(project: Path, identity: Optional[Dict[str, Any]]
             if "-followpins" not in m.group(0)}
         if not straps:
             return None
+        selected = {str(r["layer"]).lower(): float(r["width_um"])
+                    for r in doc.get("applied", [])
+                    if isinstance(r, Mapping) and r.get("layer") and r.get("width_um")}
         for layer in straps:
             row = floor["per_layer"].get(layer)
-            if row and drawn.get(layer, 0.0) + 1e-9 < float(row["w_em_um"]):
+            width = selected.get(layer, float(row["w_em_um"]) if row else 0.0)
+            if width and drawn.get(layer, 0.0) + 1e-9 < width:
                 return None
         return floor
     except Exception:  # nosec — uncertain proof must keep the old floorless path
@@ -2214,6 +2305,7 @@ def _record_pdn_em_resize_spend(project: Path, decision: Mapping[str, Any]
             "run_id": _PDN_EM_RUN_ID,
             "repair_class": decision.get("repair_class"),
             "short": decision["short"],
+            "applied": decision.get("floor", {}).get("applied", []),
             **proof,
         }, indent=2) + "\n")
         return True
