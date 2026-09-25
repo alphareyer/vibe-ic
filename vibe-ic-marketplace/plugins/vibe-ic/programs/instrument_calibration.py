@@ -1080,7 +1080,11 @@ _register(Instrument(
          "route the same two-inverter cal_chain; only the positive session "
          "removes its routed n1 net after verification. This second pair "
          "checks post-verification mutation at the same reader as the "
-         "landed T57 pair for absent final verification."),
+         "landed T57 pair for absent final verification. MEASURED on the "
+         "real OpenROAD pair: the post-verification n1 deletion fires while "
+         "the clean final route stays silent; the landed T57 pair separately "
+         "measures an absent final verification. Both are verdicts from "
+         "the one reader and must assert at that reader's source."),
     calls_at="phase3_one_shot_runner::_antenna_isolated_recovery_modified",
     judge=_judge_antenna_isolated_recovery_modified,
     positive=Sample(
