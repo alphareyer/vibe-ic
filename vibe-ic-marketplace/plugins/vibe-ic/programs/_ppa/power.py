@@ -301,6 +301,48 @@ def pdn_pad_entry_plan(segments: Sequence[Mapping[str, Any]], *,
     return out
 
 
+def pdn_supply_entry_count_plan(*, current_A: float,
+                                ring_plan: Mapping[str, Any],
+                                pad_entries: Sequence[Mapping[str, Any]],
+                                jmax_A_per_um: Mapping[str, float],
+                                margin: float) -> Dict[str, Any]:
+    """Plan paired supply entries from this layout's PSM current and LEF Jmax.
+
+    The existing ring recipe, rather than an unbuildable proposed width, is
+    the capacity of each new entry.  This is a conservative count proposal;
+    only a new PSM run can establish the actual current distribution.
+    """
+    if not (math.isfinite(current_A) and current_A > 0
+            and 0 <= margin < 1):
+        raise ValueError("SUPPLY_ENTRY_CURRENT_UNMEASURED")
+    capacities = []
+    for layer, width in zip(ring_plan.get("layers", ()),
+                            ring_plan.get("recipe_widths_um", ())):
+        jmax = float(jmax_A_per_um.get(str(layer).lower(), 0))
+        if jmax > 0 and float(width) > 0:
+            capacities.append({"structure": "ring", "layer": str(layer),
+                               "width_um": float(width),
+                               "capacity_A": float(width) * jmax * (1 - margin)})
+    for entry in pad_entries:
+        width = float(entry.get("drawn_width_um") or 0)
+        jmax = float(entry.get("jmax_A_per_um") or 0)
+        if width > 0 and jmax > 0:
+            capacities.append({"structure": "pad_entry",
+                               "layer": str(entry["layer"]),
+                               "width_um": width,
+                               "capacity_A": width * jmax * (1 - margin)})
+    if not capacities or not any(c["structure"] == "pad_entry" for c in capacities):
+        raise ValueError("SUPPLY_ENTRY_CAPACITY_UNPROVEN")
+    limiting = min(capacities, key=lambda c: c["capacity_A"])
+    # J == Jmax after guardband is an offender, so equality needs one more.
+    pairs = max(1, math.floor(current_A / limiting["capacity_A"]) + 1)
+    return {"verdict": "PLANNED", "rule": "PSM_CURRENT_OVER_ENTRY_CAPACITY",
+            "current_A": current_A, "margin": margin,
+            "capacities": capacities, "limiting": limiting,
+            "pair_count": pairs,
+            "validation": "NEW_PSM_REQUIRED: count assumes current sharing; final EM must remeasure every segment"}
+
+
 SCHEMA_METRIC = "vibeic.ppa.metric.v1"
 PARSER = "_ppa/power.py"
 

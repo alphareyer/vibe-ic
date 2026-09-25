@@ -1,0 +1,59 @@
+"""PSM current changes the real chip-top producer's supply pad population."""
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+from test_io_pad_power_domain_plan import _tree, GEN
+
+PROGRAMS = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROGRAMS))
+def _plan(die_side_um=500):
+    return {"verdict": "PLANNED", "pair_count": 30,
+            "subject_def_sha256": "a" * 64, "die_side_um": die_side_um}
+
+
+def _produce(project, root, plan):
+    path = project / "supply_plan.json"
+    path.write_text(json.dumps(plan))
+    return subprocess.run(
+        [sys.executable, str(GEN), str(project), "--pdk-root", str(root),
+         "--pdk", "testpdk", "--power-net", "VDD", "--ground-net", "VSS",
+         "--supply-plan", str(path)], capture_output=True, text=True)
+
+
+def test_psm_count_and_real_chip_top_keep_signal_order(tmp_path):
+    project, root = _tree(tmp_path)
+    plan = _plan()
+    result = _produce(project, root, plan)
+    assert result.returncode == 0, result.stdout + result.stderr
+    from _ppa.power import pdn_supply_entry_count_plan
+    count = pdn_supply_entry_count_plan(
+        current_A=0.0284,
+        ring_plan={"layers": ["metal4"], "recipe_widths_um": [1.6]},
+        pad_entries=[{"layer": "metal2", "drawn_width_um": 9.45,
+                      "jmax_A_per_um": 0.00067}],
+        jmax_A_per_um={"metal4": 0.00067}, margin=0.1)
+    assert count["pair_count"] == 30
+    assert count["limiting"]["structure"] == "ring"
+    rec = json.loads((project / "reports/phase3/io_pad_chip_top.json").read_text())
+    pads = rec["derived_answers"]["pad_order_by_side"]
+    assert rec["power_pad_plan"]["pair_count"] == 30
+    assert sorted(rec["power_pad_plan"]["pairs_by_side"].values()) == [7, 7, 8, 8]
+    assert {side: [p for p in names if not p.startswith("u_pad_supply_")]
+            for side, names in pads.items()} == {
+                "south": ["u_pad_rst"], "east": ["u_pad_clk"],
+                "north": ["u_pad_d_1", "u_pad_d_0"], "west": ["u_pad_q"]}
+    wrapper = (project / rec["chip_top_verilog"]).read_text()
+    assert wrapper.count("test_io__pbridge u_pad_supply_power_") == 30
+    assert wrapper.count("test_io__gbridge u_pad_supply_ground_") == 30
+    assert wrapper.count("inout VDD") == 1
+
+
+def test_no_legal_site_is_named_refusal(tmp_path):
+    project, root = _tree(tmp_path)
+    result = _produce(project, root, _plan(die_side_um=150))
+    assert result.returncode == 1
+    rec = json.loads((project / "reports/phase3/io_pad_chip_top.json").read_text())
+    assert rec["rule"] == "SUPPLY_ENTRY_NO_LEGAL_SITE"
+    assert not (project / "phase3/stage3/pnr/chip_top_io.v").exists()
