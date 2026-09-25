@@ -4139,7 +4139,7 @@ def _check_antenna(project_dir: Path) -> AuditResult:
     #   "Found N net violations." / "Found M pin violations."
     #   "antenna check: N net violations, M pin violations"
     #   "antenna clean: YES|NO"
-    found_re = re.compile(r"Found\s+(\d+)\s+(?:net|pin|antenna)\s+violation", re.I)
+    found_re = re.compile(r"Found\s+(\d+)\s+(net|pin|antenna)\s+violation", re.I)
     pair_re = re.compile(r"(\d+)\s+net\s+violations?,?\s+(\d+)\s+pin\s+violations?", re.I)
     clean_re = re.compile(r"antenna\s+clean\s*:\s*(YES|NO|TRUE|FALSE)", re.I)
     total_viol = None
@@ -4162,8 +4162,14 @@ def _check_antenna(project_dir: Path) -> AuditResult:
         cnt = 0
         seen = False
         if found_hits:
+            # A report can contain the tool summary and a tail of the same
+            # transcript. They describe one check, not separate violations.
+            # Keep the last count for each kind, as check_antennas does.
+            by_kind = {}
             for mm in found_hits:
-                cnt += int(mm.group(1)); seen = True
+                by_kind[mm.group(2).lower()] = int(mm.group(1))
+            cnt = sum(by_kind.values())
+            seen = True
         else:
             for mm in pair_re.finditer(text):
                 cnt += int(mm.group(1)) + int(mm.group(2)); seen = True

@@ -26767,6 +26767,7 @@ def _build_postroute_timing_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: st
                           captables_c: Optional[Dict[str, str]] = None,
                           filler_masters: Optional[List[str]] = None,
                           extra_lefs_c: Optional[Sequence[str]] = None,
+                          corner_extra_libs_c: Optional[Dict[str, Sequence[str]]] = None,
                           setup_max_util_pct: Optional[float] = None,
                           hold_max_util_pct: Optional[float] = None,
                           recover_power_pct: Optional[int] = None) -> str:
@@ -26898,6 +26899,12 @@ def _build_postroute_timing_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: st
                     and len(_labels) >= 2 else [])
     _scenes = [lbl.lower() for lbl in _labels] + [
         lbl.lower() + "_nom" for lbl in _nom_aliases]
+    _extra_libs = corner_extra_libs_c or {}
+    def _scene_extra_libs(label: str, scene: str) -> str:
+        return "".join(
+            f"read_liberty -corner {scene} {path}\n"
+            for path in dict.fromkeys(_extra_libs.get(label, ()))
+            if path != _corners.get(label))
     if len(_labels) >= 2:
         _corner_names = " ".join(_scenes)
         liberty_block = (
@@ -26907,11 +26914,19 @@ def _build_postroute_timing_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: st
             f"define_corners {_corner_names}\n"
             + "".join(f"read_liberty -corner {lbl.lower()} {_corners[lbl]}\n"
                       for lbl in _labels)
+            + "".join(_scene_extra_libs(lbl, lbl.lower()) for lbl in _labels)
             + "".join(f"read_liberty -corner {lbl.lower()}_nom {_corners[lbl]}\n"
+                      for lbl in _nom_aliases)
+            + "".join(_scene_extra_libs(lbl, lbl.lower() + "_nom")
                       for lbl in _nom_aliases)
         )
     else:
         liberty_block = f"read_liberty {liberty_c}\n"
+        if _labels:
+            liberty_block += "".join(
+                f"read_liberty {path}\n"
+                for path in dict.fromkeys(_extra_libs.get(_labels[0], ()))
+                if path != liberty_c)
     # write_sdf needs an explicit -corner under multi-scene (multi-corner)
     # analysis (else STA-0103 '-scene keyword required'); emit the SDF at the
     # nominal (tt) corner — the conventional back-annotation corner — else the
@@ -57871,6 +57886,10 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 _pnr_dir_c, _postroute_timing_repair_dir_c,
                 pdk.metal_prefix,
                 corner_libs=_repair_corner_libs,
+                corner_extra_libs_c={
+                    label: [_to_container_path(path, container)
+                            for path in _sta_extra_liberties(project, pdk, liberty)]
+                    for label, liberty in _repair_corner_libs.items()},
                 start_def_c=(_to_container_path(str(_repair_start_def), container)
                              if _repair_start_def is not None else None),
                 post_route_start=_repair_post_route,
