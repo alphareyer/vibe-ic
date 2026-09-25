@@ -34100,7 +34100,10 @@ def _antenna_full_retry_modified_after_verification(log_text: str) -> bool:
 
 
 def _antenna_isolated_scoped_retry_tcl(seed_c: str, candidate_c: str,
-                                       diode_cell: str) -> str:
+                                       diode_cell: str, *,
+                                       move_net: str = "",
+                                       move_steps: int = 0,
+                                       marker_box: Optional[Tuple[float, float, float, float]] = None) -> str:
     """Repair the saved ODB without replaying the PnR tail's route setup.
 
     The diode insertion is scoped by OpenROAD to violating nets. The saved
@@ -34108,6 +34111,46 @@ def _antenna_isolated_scoped_retry_tcl(seed_c: str, candidate_c: str,
     A fresh process also prevents the live session's transient route state from
     deleting unrelated wires while the scoped router reports them held fixed.
     """
+    move = ""
+    if move_net:
+        if move_steps not in (-4, -1, 1, 4) or marker_box is None:
+            raise ValueError("ANTENNA_ISOLATED_MOVE_UNBOUNDED")
+        x0, y0, x1, y1 = marker_box
+        move = (
+            f"set _move_net {{{move_net}}}\n"
+            f"set _marker_box {{{x0} {y0} {x1} {y1}}}\n"
+            "set _dbu [$_ab getDbUnitsPerMicron]\n"
+            "lassign $_marker_box _mx0 _my0 _mx1 _my1\n"
+            "foreach _v {_mx0 _my0 _mx1 _my1} { set $_v [expr {round([set $_v] * $_dbu)}] }\n"
+            "set _move_diodes {}\n"
+            "foreach _i [$_ab getInsts] {\n"
+            "  if {[info exists _place0([$_i getName])]} { continue }\n"
+            "  foreach _t [$_i getITerms] {\n"
+            "    set _n [$_t getNet]\n"
+            "    if {$_n eq \"NULL\" || [$_n getName] ne $_move_net} { continue }\n"
+            "    set _b [$_t getBBox]\n"
+            "    if {[$_b xMin] < $_mx1 && [$_b xMax] > $_mx0 && "
+            "[$_b yMin] < $_my1 && [$_b yMax] > $_my0} {\n"
+            "      lappend _move_diodes $_i\n"
+            "    }\n"
+            "  }\n"
+            "}\n"
+            "if {[llength $_move_diodes] != 1} {\n"
+            "  error \"ANTENNA_ISOLATED_MARKER_NOT_ON_NEW_DIODE: "
+            "net=$_move_net matches=[llength $_move_diodes]\"\n"
+            "}\n"
+            "set _d [lindex $_move_diodes 0]\n"
+            "set _b [$_d getBBox]\n"
+            "set _width [expr {[$_b xMax] - [$_b xMin]}]\n"
+            "lassign [$_d getOrigin] _x _y\n"
+            f"$_d setOrigin [expr {{$_x + ({move_steps}) * $_width}}] $_y\n"
+            "if {[check_placement -no_abort] != 0} {\n"
+            "  error \"ANTENNA_ISOLATED_DIODE_SITE_REFUSED: "
+            "net=$_move_net steps=" + str(move_steps) + "\"\n"
+            "}\n"
+            "puts \"ANTENNA_ISOLATED_DIODE_MOVED: "
+            "net=$_move_net steps=" + str(move_steps) + " placement=0\"\n"
+        )
     return (
         f"read_db {seed_c}\n"
         "set _ab [ord::get_db_block]\n"
@@ -34144,8 +34187,10 @@ def _antenna_isolated_scoped_retry_tcl(seed_c: str, candidate_c: str,
         "}\n"
         "puts \"ANTENNA_ISOLATED_RMFILL: cleared filler sites\"\n"
         f"set _rc [catch {{repair_antennas {diode_cell} -iterations 1 "
-        "-ratio_margin 0 -reroute} _err]\n"
+        "-ratio_margin 0} _err]\n"
         "if {$_rc} { error \"ANTENNA_ISOLATED_REPAIR_REFUSED: $_err\" }\n"
+        + move +
+        f"detailed_route -nets $_targets -output_drc {candidate_c}.drc.rpt\n"
         "set _lost {}\n"
         "set _held_damage {}\n"
         "foreach _name [array names _wire0] {\n"
@@ -34196,6 +34241,45 @@ def _antenna_def_nets_section(path: Path) -> Optional[str]:
         return None
     match = re.search(r"(?ms)^NETS\s+\d+\s*;\n.*?^END NETS\s*$", text)
     return match.group(0) if match else None
+
+
+def _antenna_isolated_drc_markers(path: Path) -> List[Dict[str, Any]]:
+    """Read OpenROAD's fixed-format -output_drc records; empty means no marker.
+
+    A malformed report is not a clean report. Its raw bytes remain in the
+    refusal receipt and cannot authorize another physical edit.
+    """
+    _instrument_calibration.assert_calibrated(
+        "phase3_one_shot_runner::_antenna_isolated_drc_markers")
+    raw = path.read_text(errors="replace")
+    if not raw.strip():
+        return []
+    number = r"[-+]?\d+(?:\.\d+)?"
+    pattern = re.compile(
+        rf"violation type: ([^\n]+)\n\s*srcs: ([^\n]+)\n\s*"
+        rf"bbox = \(({number}), ({number})\) - "
+        rf"\(({number}), ({number})\) on Layer (\S+)\s*"
+    )
+    records = []
+    end = 0
+    for match in pattern.finditer(raw):
+        if raw[end:match.start()].strip():
+            raise ValueError(
+                f"ANTENNA_ISOLATED_MARKER_UNREADABLE: "
+                f"{raw[end:match.start()][:300]}")
+        block = match.group(0).strip()
+        rule, sources, *rest = match.groups()
+        x0, y0, x1, y1 = (float(v) for v in rest[:4])
+        if x0 >= x1 or y0 >= y1:
+            raise ValueError(f"ANTENNA_ISOLATED_MARKER_INVALID_BOX: {block[:300]}")
+        records.append({"rule": rule, "sources": sources.split(),
+                        "box": (x0, y0, x1, y1), "layer": rest[4],
+                        "raw": block})
+        end = match.end()
+    if not records or raw[end:].strip():
+        raise ValueError(
+            f"ANTENNA_ISOLATED_MARKER_UNREADABLE: {raw[end:][:300]}")
+    return records
 
 
 def _antenna_isolated_recovery_modified(log_text: str) -> bool:
@@ -34296,36 +34380,93 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
         seed = out_dir / "antenna_isolated_seed.odb"
         candidate = out_dir / "antenna_isolated_candidate.odb"
         candidate_def = out_dir / "antenna_isolated_candidate.odb.def"
+        marker_report = out_dir / "antenna_isolated_candidate.odb.drc.rpt"
+        target_report = out_dir / "antenna_isolated_candidate.odb.targets.rpt"
         seed_c = f"{out_dir_c}/{seed.name}"
         candidate_c = f"{out_dir_c}/{candidate.name}"
+        marker_history: List[str] = []
         try:
             shutil.copyfile(ckpt, seed)
-            isolated_name = "pnr_antenna_isolated_retry.tcl"
-            isolated_log = "pnr_antenna_isolated_retry.log"
-            isolated = _antenna_isolated_scoped_retry_tcl(
-                seed_c, candidate_c, antenna_diode_cell)
-            (out_dir / isolated_name).write_text(isolated)
-            isolated_cmd = (
-                f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
-                f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
-                f"openroad -no_init -exit {out_dir_c}/{isolated_name} "
-                f"2>&1 | tee {out_dir_c}/{isolated_log}")
-            i_rc, i_out, i_err = _declared_session_exec(
-                container, isolated_cmd, [candidate, candidate_def],
-                marker=f"{out_dir_c}/{isolated_name}",
-                log_path=out_dir / isolated_log,
-                hard_ceiling_s=hard_ceiling_s)
-            i_text = (i_out or "") + (i_err or "")
-            isolated_ok = (
-                i_rc == 0 and candidate.is_file()
-                and _antenna_def_nets_section(candidate_def) is not None
-                and "[WARNING ANT-0018]" not in i_text
-                and "ANTENNA_ISOLATED_VERIFIED: lost=0 held_shrunk=0 "
-                    "moved=0 placement=0 antenna=0" in i_text
-                and "[INFO DRT-0634] Scoped detailed routing touched "
-                    in i_text
-                and "[INFO DRT-0711] Scoped detailed routing: "
-                    "whole-design violations 0 on entry, 0 on exit" in i_text)
+            isolated_ok = False
+            move_net = ""
+            marker_box = None
+            for trial, steps in enumerate((0, -1, 1, -4, 4)):
+                for product in (candidate, candidate_def, marker_report,
+                                target_report):
+                    product.unlink(missing_ok=True)
+                isolated_name = ("pnr_antenna_isolated_retry.tcl" if trial == 0
+                                 else f"pnr_antenna_isolated_retry_{trial}.tcl")
+                isolated_log = ("pnr_antenna_isolated_retry.log" if trial == 0
+                                else f"pnr_antenna_isolated_retry_{trial}.log")
+                isolated = _antenna_isolated_scoped_retry_tcl(
+                    seed_c, candidate_c, antenna_diode_cell,
+                    move_net=move_net if trial else "",
+                    move_steps=steps,
+                    marker_box=marker_box if trial else None)
+                (out_dir / isolated_name).write_text(isolated)
+                isolated_cmd = (
+                    f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
+                    f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
+                    f"openroad -no_init -exit {out_dir_c}/{isolated_name} "
+                    f"2>&1 | tee {out_dir_c}/{isolated_log}")
+                i_rc, i_out, i_err = _declared_session_exec(
+                    container, isolated_cmd,
+                    [candidate, candidate_def, marker_report, target_report],
+                    marker=f"{out_dir_c}/{isolated_name}",
+                    log_path=out_dir / isolated_log,
+                    hard_ceiling_s=hard_ceiling_s)
+                i_text = (i_out or "") + (i_err or "")
+                isolated_ok = (
+                    i_rc == 0 and candidate.is_file()
+                    and _antenna_def_nets_section(candidate_def) is not None
+                    and "[WARNING ANT-0018]" not in i_text
+                    and "No access point" not in i_text
+                    and "Valid access pattern combination not found" not in i_text
+                    and "[ERROR DRT-0073]" not in i_text
+                    and "[ERROR DRT-0085]" not in i_text
+                    and "ANTENNA_ISOLATED_VERIFIED: lost=0 held_shrunk=0 "
+                        "moved=0 placement=0 antenna=0" in i_text
+                    and "[INFO DRT-0634] Scoped detailed routing touched "
+                        in i_text
+                    and "[INFO DRT-0711] Scoped detailed routing: "
+                        "whole-design violations 0 on entry, 0 on exit" in i_text)
+                if isolated_ok:
+                    break
+                if (trial > 0 and "ANTENNA_ISOLATED_DIODE_SITE_REFUSED:"
+                        in i_text):
+                    marker_history.append(f"trial={trial} site refused")
+                    continue
+                if "DRT-0712" not in i_text or not marker_report.is_file():
+                    break
+                try:
+                    markers = _antenna_isolated_drc_markers(marker_report)
+                except ValueError as exc:
+                    marker_history.append(str(exc))
+                    break
+                if not markers:
+                    marker_history.append("DRT-0712 marker report empty")
+                    break
+                marker_history.extend(m["raw"] for m in markers)
+                if trial:
+                    if (len(markers) != 1
+                            or f"net:{move_net}" not in markers[0]["sources"]):
+                        marker_history.append(
+                            "new marker no longer maps to the target diode")
+                        break
+                    continue
+                target_line = re.search(
+                    r"^ANTENNA_ISOLATED_TARGETS:\s+(.+)$", i_text, re.M)
+                targets = set(target_line.group(1).split()) if target_line else set()
+                local = [(m, [s[4:] for s in m["sources"]
+                              if s.startswith("net:") and s[4:] in targets])
+                         for m in markers]
+                local = [(m, names[0]) for m, names in local
+                         if len(names) == 1 and len(m["sources"]) == 2]
+                if len(markers) != 1 or len(local) != 1:
+                    marker_history.append("marker has no unique target diode")
+                    break
+                marker_box, move_net = local[0][0]["box"], local[0][1]
+            rec["isolated_drc_markers"] = marker_history
             if isolated_ok:
                 deck = pnr_tcl.read_text(errors="replace")
                 tail = _build_pnr_resume_tcl_text(
@@ -34390,7 +34531,8 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
                     f"tail={t_text[-500:]}")
             else:
                 rec["recovery_reason"] = (
-                    f"ANTENNA_ISOLATED_ECO_NOT_VERIFIED: rc={i_rc}; "
+                    f"ANTENNA_ISOLATED_MARKERS_REFUSED: "
+                    f"markers={marker_history}; rc={i_rc}; "
                     f"cause={i_text[-500:]}")
         except (OSError, PnrResumeUnavailable) as exc:
             rec["recovery_reason"] = f"ANTENNA_ISOLATED_ECO_UNAVAILABLE: {exc}"
@@ -34507,6 +34649,9 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
     rec["reason"] = (req["reason"] +
                      ("; " + rec["recovery_reason"]
                       if rec.get("recovery_reason") else ""))
+    if rec.get("isolated_drc_markers"):
+        rec["reason"] += ("; ANTENNA_ISOLATED_MARKERS_REFUSED: "
+                          + " | ".join(rec["isolated_drc_markers"]))
     rec["checkpoint"] = str(ckpt)
     rec["tcl"] = tail_name
     rec["log"] = tail_log
@@ -34552,6 +34697,7 @@ def _disclose_antenna_rollback(project: Path, out_dir: Path,
         "checkpoint": rec.get("checkpoint"),
         "tcl": rec.get("tcl"),
         "log": rec.get("log"),
+        "isolated_drc_markers": rec.get("isolated_drc_markers", []),
         # (b) — the invariant, as a fact and not as a hope.
         "route_modified_after_last_verification": bool(modified_after),
         "route_verified_at_ship": bool(rec.get("route_verified"))
