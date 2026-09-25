@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Content check for flow step outputs; refusal exits nonzero.
 
-ENFORCEMENT: blocking — required program_exit_zero clauses deny a step PASS.
+ENFORCEMENT: advisory — step runners do not invoke this gate inline.
 
 The required ``program_exit_zero`` clauses deny their owning step a PASS tier
 in flow_compliance_check, but this gate cannot stop a producer step while

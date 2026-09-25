@@ -338,7 +338,8 @@ def test_no_rtl_umbrella_fails_on_missing_promised_input(
                            dispatched=False)
     p0 = _p0(report)
     assert p0 is not None and p0["status"] == "FAIL"
-    assert p0["reasons"] == [f"SKIP: {_flow._P0_NO_RTL_NOTE}"]
+    assert p0["reasons"] == [f"SKIP: {_flow._P0_NO_RTL_NOTE}",
+                             "FAIL: Step 1 completed but its promised RTL is absent"]
     assert p0["gate_records"] == [], (
         "no gate was considered, so there is no gate record — and the line "
         "above is not one")

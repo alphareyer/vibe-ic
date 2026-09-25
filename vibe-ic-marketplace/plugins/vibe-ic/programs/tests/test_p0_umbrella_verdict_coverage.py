@@ -268,9 +268,13 @@ def test_no_RTL_fails_the_promised_structural_input(tmp_path, monkeypatch, capsy
     proj = tmp_path / "proj"
     (proj / "rtl").mkdir(parents=True)
     (proj / "rtl" / "top.v").write_text("module top; endmodule\n")
+    _probe.write_seed(proj)
+    flow_def = tmp_path / "p0_probe_flow.yaml"
+    _probe.write_flow(flow_def)
     monkeypatch.setattr(F, "_run_structural_rtl_gates", _stub)
     report = tmp_path / "report.json"
-    F.main([str(proj), "--json", str(report), "--lenient"])
+    F.main([str(proj), "--json", str(report), "--lenient",
+            "--flow-def", str(flow_def)])
     capsys.readouterr()
     step = next(s for s in json.loads(report.read_text())["steps"]
                 if s["id"] == "P0")

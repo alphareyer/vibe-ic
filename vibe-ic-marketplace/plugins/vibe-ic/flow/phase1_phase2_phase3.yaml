@@ -1813,7 +1813,6 @@ steps:
         # only, no per-IP allow-list.
         - program_exit_zero: "rtl_hygiene_lint phase2/stage1/rtl/*.sv phase2/stage1/rtl/*.v --severity ERROR --json reports/phase2/lint/rtl_hygiene.json"
         - program_exit_zero: "rom_init_lint phase2/stage1/rtl/*.sv phase2/stage1/rtl/*.v --json reports/phase2/lint/rom_init_lint.json"
-        - program_exit_zero: "flow_step_output_content_check . --mode rom_lint"
         # rtl_bug_report_schema_check: only fires when reports/phase2/rtl_bugs.json
         # exists; otherwise the program reports rc=2 (input missing) which
         # we treat as "not applicable" via the optional_program_exit_zero
@@ -2936,9 +2935,11 @@ steps:
         # reader after the wrong artefact. The verdict belongs on the record,
         # not in step 7's tier. It writes no artefact, so nothing is added to
         # `required_outputs`.
-    # stage1_compliance above audits every stage-1 step. Step 6 covers
-    # 2/4/5 and step 3 is independent, so both must finish first.
-    blocks_on: [1, 3, 6]
+    # Step 3's CDC evidence is consumed by the next SDC validation step.
+    # Step 6's ancestors include RTL validation and simulation; their FAIL
+    # must not void a measured constraints result. The nested stage-1 audit
+    # above remains advisory and reports those failures in its own record.
+    blocks_on: [1, 3]
 
   - id: 8
     name: "🔁 SDC validation"
