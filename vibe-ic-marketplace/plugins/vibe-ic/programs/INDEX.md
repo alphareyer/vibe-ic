@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1340
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1340)
+- **Total programs (excluding helpers / shims):** 1341
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1341)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1331 |
+| `any` | 1332 |
 
 ## Alphabetical listing
 
@@ -355,6 +355,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `doc_consistency_no_unresolved_conflicts_check` | any | Wave 37 | Cross-doc range conflict detector. When >=2 extracted docs disagree |
 | `doc_extract` | any | — | Convert vendor docs (.doc/.docx/.pdf/.pptx/.xlsx/.txt) to plain-text or structured JSON for downstream Phase 1 (doc-extraction) / spec-de... |
 | `doc_table_row_placement_check` | any | — | a table row in the middle of a paragraph is a swallowed sentence, and a version gate that checks AGREEMENT cannot see it. |
+| `drc_feedback_repair` | any | — | Bounded post-route feedback from a router-invisible sign-off rule. |
 | `drc_fix_planner` | any | v0.1.50 | DRC fix-planner (Pattern-B → program). |
 | `drc_report_check` | any | — | DRC report check — wrapper for eda_report_audit --mode drc. |
 | `drc_rule_layer_classify` | any | v0.3.16 | ORGANIC #513. Classify DRC violations by RULE-LAYER into stdcell-library-internal vs design-level. |
@@ -1412,7 +1413,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1331 programs)
+### `any` (1332 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1739,6 +1740,7 @@ _(no programs in this group)_
 - `doc_consistency_no_unresolved_conflicts_check` — Cross-doc range conflict detector. When >=2 extracted docs disagree  _[Wave 37]_
 - `doc_extract` — Convert vendor docs (.doc/.docx/.pdf/.pptx/.xlsx/.txt) to plain-text or structured JSON for downstream Phase 1 (doc-extraction) / spec-de...
 - `doc_table_row_placement_check` — a table row in the middle of a paragraph is a swallowed sentence, and a version gate that checks AGREEMENT cannot see it.
+- `drc_feedback_repair` — Bounded post-route feedback from a router-invisible sign-off rule.
 - `drc_fix_planner` — DRC fix-planner (Pattern-B → program).  _[v0.1.50]_
 - `drc_report_check` — DRC report check — wrapper for eda_report_audit --mode drc.
 - `drc_rule_layer_classify` — ORGANIC #513. Classify DRC violations by RULE-LAYER into stdcell-library-internal vs design-level.  _[v0.3.16]_
