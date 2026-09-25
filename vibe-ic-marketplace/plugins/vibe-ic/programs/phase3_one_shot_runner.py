@@ -33992,10 +33992,122 @@ def _antenna_full_retry_modified_after_verification(log_text: str) -> bool:
     return route_modified_after_last_verification(verified_log)
 
 
+def _antenna_isolated_scoped_retry_tcl(seed_c: str, candidate_c: str,
+                                       diode_cell: str) -> str:
+    """Repair the saved ODB without replaying the PnR tail's route setup.
+
+    The diode insertion is scoped by OpenROAD to violating nets. The saved
+    wires of every other net are checked before the candidate can be written.
+    A fresh process also prevents the live session's transient route state from
+    deleting unrelated wires while the scoped router reports them held fixed.
+    """
+    return (
+        f"read_db {seed_c}\n"
+        "set _ab [ord::get_db_block]\n"
+        "array set _wire0 {}\n"
+        "foreach _n [$_ab getNets] {\n"
+        "  if {[$_n isSpecial]} { continue }\n"
+        "  set _w [$_n getWire]\n"
+        "  if {$_w ne \"NULL\"} { set _wire0([$_n getName]) [$_w length] }\n"
+        "}\n"
+        "array set _place0 {}\n"
+        "foreach _i [$_ab getInsts] {\n"
+        "  set _place0([$_i getName]) [list [$_i getOrigin] "
+        "[$_i getPlacementStatus]]\n"
+        "}\n"
+        f"set _report {candidate_c}.targets.rpt\n"
+        "set _pre [check_antennas -report_violating_nets "
+        "-report_file $_report]\n"
+        "set _targets {}\n"
+        "set _fh [open $_report r]\n"
+        "while {[gets $_fh _line] >= 0} {\n"
+        "  if {[regexp {^Net:\\s+(\\S.*)$} $_line -> _name]} {\n"
+        "    lappend _targets [string trim $_name]\n"
+        "  }\n"
+        "}\n"
+        "close $_fh\n"
+        "set _targets [lsort -unique $_targets]\n"
+        "if {$_pre <= 0 || [llength $_targets] != $_pre} {\n"
+        "  error \"ANTENNA_ISOLATED_TARGETS_UNMEASURED: count=$_pre "
+        "named=[llength $_targets]\"\n"
+        "}\n"
+        "puts \"ANTENNA_ISOLATED_TARGETS: $_targets\"\n"
+        f"set _rc [catch {{repair_antennas {diode_cell} -iterations 1 "
+        "-ratio_margin 0 -reroute} _err]\n"
+        "if {$_rc} { error \"ANTENNA_ISOLATED_REPAIR_REFUSED: $_err\" }\n"
+        "set _lost {}\n"
+        "set _held_damage {}\n"
+        "foreach _name [array names _wire0] {\n"
+        "  set _n [$_ab findNet $_name]\n"
+        "  if {$_n eq \"NULL\" || [$_n getWire] eq \"NULL\"} {\n"
+        "    lappend _lost $_name\n"
+        "    continue\n"
+        "  }\n"
+        "  if {[lsearch -exact $_targets $_name] >= 0} { continue }\n"
+        "  if {[[$_n getWire] length] < $_wire0($_name)} {\n"
+        "    lappend _held_damage $_name\n"
+        "  }\n"
+        "}\n"
+        "if {[llength $_lost] || [llength $_held_damage]} {\n"
+        "  error \"ANTENNA_ISOLATED_WIRE_DAMAGE: lost=$_lost "
+        "held_shrunk=$_held_damage\"\n"
+        "}\n"
+        "set _moved {}\n"
+        "foreach _i [$_ab getInsts] {\n"
+        "  set _name [$_i getName]\n"
+        "  if {![info exists _place0($_name)]} { continue }\n"
+        "  set _now [list [$_i getOrigin] [$_i getPlacementStatus]]\n"
+        "  if {$_now ne $_place0($_name)} { lappend _moved $_name }\n"
+        "}\n"
+        "if {[llength $_moved]} {\n"
+        "  error \"ANTENNA_ISOLATED_EXISTING_CELL_MOVED: $_moved\"\n"
+        "}\n"
+        "set _place [check_placement]\n"
+        "if {$_place != 0} {\n"
+        "  error \"ANTENNA_ISOLATED_PLACEMENT_FAILED: $_place\"\n"
+        "}\n"
+        "set _ant [check_antennas]\n"
+        "if {$_ant != 0} {\n"
+        "  error \"ANTENNA_ISOLATED_NOT_CONVERGED: $_ant\"\n"
+        "}\n"
+        "puts \"ANTENNA_ISOLATED_VERIFIED: lost=0 held_shrunk=0 "
+        "moved=0 placement=0 antenna=0\"\n"
+        f"write_db {candidate_c}\n"
+        f"write_def {candidate_c}.def\n"
+    )
+
+
+def _antenna_def_nets_section(path: Path) -> Optional[str]:
+    """Exact routed-net DEF section, or None when the route is unreadable."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+    match = re.search(r"(?ms)^NETS\s+\d+\s*;\n.*?^END NETS\s*$", text)
+    return match.group(0) if match else None
+
+
+def _antenna_isolated_recovery_modified(log_text: str) -> bool:
+    """The accepted isolated router verification must postdate every mutation."""
+    marker = "=== PNR ANTENNA ISOLATED ECO ==="
+    if marker not in log_text:
+        return True
+    lines = log_text.rsplit(marker, 1)[1].splitlines()
+    verified = max((i for i, line in enumerate(lines)
+                    if "[INFO DRT-0711] Scoped detailed routing: "
+                       "whole-design violations 0 on entry, 0 on exit" in line),
+                   default=-1)
+    if verified < 0:
+        return True
+    return any(i > verified and any(token in line for token in
+               _ROUTE_MUTATION_MARKERS) for i, line in enumerate(lines))
+
+
 def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
                                          out_dir_c: str, pnr_tcl: Path,
                                          log_text: str,
                                          hard_ceiling_s: int,
+                                         antenna_diode_cell: Optional[str] = None,
                                          spare_plan: Optional[Dict[str, Any]]
                                          = None) -> Dict[str, Any]:
     """Re-enter the post-route tail from the pre-repair checkpoint.
@@ -34054,13 +34166,124 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
         rec["route_verified"] = False
         rec["rc"] = 1
         return rec
-    # A scoped DRT-0712 is a router refusal, not evidence that the diode is
+    # A scoped DRT-0712, or a scoped pass which damaged held wires, is a
+    # refusal of this session's route, not evidence that the diode is
     # impossible. Retry once from a separate copy of the intact pre-pass ODB.
     # The failed session is never reused: it may have stripped other wires.
     # The copy also protects the rollback seed if the retry writes its normal
     # per-pass checkpoint and then fails.
-    if ("ANTENNA_NATIVE_REROUTE_NONFATAL: DRT-0712" in log_text
+    scoped_damage = ("ANTENNA_SCOPED_HELD_WIRE_DAMAGE:" in req["reason"]
+                     and "ANTENNA_ROUTER:" in log_text
+                     and "scoped_reroute=1" in log_text)
+    if (scoped_damage and antenna_diode_cell
             and ckpt_name == _ANTENNA_PASS_CHECKPOINT_NAME):
+        seed = out_dir / "antenna_isolated_seed.odb"
+        candidate = out_dir / "antenna_isolated_candidate.odb"
+        candidate_def = out_dir / "antenna_isolated_candidate.odb.def"
+        seed_c = f"{out_dir_c}/{seed.name}"
+        candidate_c = f"{out_dir_c}/{candidate.name}"
+        try:
+            shutil.copyfile(ckpt, seed)
+            isolated_name = "pnr_antenna_isolated_retry.tcl"
+            isolated_log = "pnr_antenna_isolated_retry.log"
+            isolated = _antenna_isolated_scoped_retry_tcl(
+                seed_c, candidate_c, antenna_diode_cell)
+            (out_dir / isolated_name).write_text(isolated)
+            isolated_cmd = (
+                f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
+                f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
+                f"openroad -no_init -exit {out_dir_c}/{isolated_name} "
+                f"2>&1 | tee {out_dir_c}/{isolated_log}")
+            i_rc, i_out, i_err = _declared_session_exec(
+                container, isolated_cmd, [candidate, candidate_def],
+                marker=f"{out_dir_c}/{isolated_name}",
+                log_path=out_dir / isolated_log,
+                hard_ceiling_s=hard_ceiling_s)
+            i_text = (i_out or "") + (i_err or "")
+            isolated_ok = (
+                i_rc == 0 and candidate.is_file()
+                and _antenna_def_nets_section(candidate_def) is not None
+                and "[WARNING ANT-0018]" not in i_text
+                and "ANTENNA_ISOLATED_VERIFIED: lost=0 held_shrunk=0 "
+                    "moved=0 placement=0 antenna=0" in i_text
+                and "[INFO DRT-0634] Scoped detailed routing touched "
+                    in i_text
+                and "[INFO DRT-0711] Scoped detailed routing: "
+                    "whole-design violations 0 on entry, 0 on exit" in i_text)
+            if isolated_ok:
+                deck = pnr_tcl.read_text(errors="replace")
+                tail = _build_pnr_resume_tcl_text(
+                    deck, checkpoint_def_c=candidate_c,
+                    omit_stages=[*_ANTENNA_STAGES,
+                                 "postroute_setup_repair_estimate"],
+                    restore_odb_c=candidate_c,
+                    after_restore_tcl=_after_restore_tcl(
+                        deck, spare_plan, reroutes_immediately=False))
+                tail_verify = (
+                    "\nset _ant_end [check_antennas]\n"
+                    "set _ant_place [check_placement]\n"
+                    "if {$_ant_end != 0 || $_ant_place != 0} {\n"
+                    "  error \"ANTENNA_ISOLATED_TAIL_REFUSED: "
+                    "antenna=$_ant_end placement=$_ant_place\"\n"
+                    "}\n"
+                    "puts \"ANTENNA_ISOLATED_TAIL_VERIFIED: "
+                    "antenna=0 placement=0\"\n")
+                prefix, exit_line, suffix = tail.rpartition("\nexit\n")
+                if not exit_line:
+                    raise PnrResumeUnavailable(
+                        "isolated antenna adopt has no final exit")
+                tail = (_route_drc_report_tcl(
+                    f"{out_dir_c}/{ROUTER_DRC_REPORT_NAME}") + prefix +
+                    tail_verify + exit_line + suffix)
+                tail_name = "pnr_antenna_isolated_adopt.tcl"
+                tail_log = "pnr_antenna_isolated_adopt.log"
+                (out_dir / tail_name).write_text(tail)
+                tail_cmd = (
+                    f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
+                    f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
+                    f"openroad -no_init -exit {out_dir_c}/{tail_name} "
+                    f"2>&1 | tee {out_dir_c}/{tail_log}")
+                t_rc, t_out, t_err = _declared_session_exec(
+                    container, tail_cmd,
+                    _pnr_tail_products(out_dir, out_dir_c, tail),
+                    marker=f"{out_dir_c}/{tail_name}",
+                    log_path=out_dir / tail_log,
+                    hard_ceiling_s=hard_ceiling_s)
+                t_text = (t_out or "") + (t_err or "")
+                shipped_nets = _antenna_def_nets_section(
+                    out_dir / "routed.def")
+                candidate_nets = _antenna_def_nets_section(candidate_def)
+                if (t_rc == 0
+                        and "ANTENNA_ISOLATED_TAIL_VERIFIED: antenna=0 "
+                            "placement=0" in t_text
+                        and "[WARNING ANT-0018]" not in t_text
+                        and shipped_nets is not None
+                        and shipped_nets == candidate_nets
+                        and not route_modified_after_last_verification(t_text)):
+                    rec.update(
+                        status="RECOVERED", antenna_repair="APPLIED",
+                        reason="SCOPED_HELD_WIRE_DAMAGE_RECOVERED_BY_ISOLATED_ECO",
+                        checkpoint=str(seed), tcl=tail_name, log=tail_log,
+                        rc=0, route_verified=True,
+                        combined_log=("\n=== PNR ANTENNA ISOLATED ECO ===\n"
+                                      + i_text + "\n=== PNR ANTENNA ADOPT ===\n"
+                                      + t_text))
+                    return rec
+                rec["recovery_reason"] = (
+                    f"ANTENNA_ISOLATED_ADOPT_NOT_VERIFIED: rc={t_rc}; "
+                    f"tail={t_text[-500:]}")
+            else:
+                rec["recovery_reason"] = (
+                    f"ANTENNA_ISOLATED_ECO_NOT_VERIFIED: rc={i_rc}; "
+                    f"cause={i_text[-500:]}")
+        except (OSError, PnrResumeUnavailable) as exc:
+            rec["recovery_reason"] = f"ANTENNA_ISOLATED_ECO_UNAVAILABLE: {exc}"
+        # The isolated candidate may have been written by a failed run. A
+        # refusal always restores the untouched seed, never that candidate.
+        if seed.is_file():
+            ckpt, ckpt_c = seed, seed_c
+    drc_refusal = "ANTENNA_NATIVE_REROUTE_NONFATAL: DRT-0712" in log_text
+    if (ckpt_name == _ANTENNA_PASS_CHECKPOINT_NAME and drc_refusal):
         seed = out_dir / "antenna_full_retry_seed.odb"
         seed_c = f"{out_dir_c}/{seed.name}"
         try:
@@ -34197,9 +34420,13 @@ def _disclose_antenna_rollback(project: Path, out_dir: Path,
     if not records:
         return None
     rec = records[-1]
-    modified_after = (_antenna_full_retry_modified_after_verification(log_text)
-                      if rec.get("status") == "RECOVERED" else
-                      route_modified_after_last_verification(log_text))
+    modified_after = (
+        _antenna_isolated_recovery_modified(log_text)
+        if rec.get("reason") ==
+        "SCOPED_HELD_WIRE_DAMAGE_RECOVERED_BY_ISOLATED_ECO" else
+        _antenna_full_retry_modified_after_verification(log_text)
+        if rec.get("status") == "RECOVERED" else
+        route_modified_after_last_verification(log_text))
     doc = {
         "program": "phase3_one_shot_runner:_pnr_rollback_refused_antenna_repair",
         "ruling": "R-0915-74",
@@ -37434,7 +37661,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         _ant_roll = _pnr_rollback_refused_antenna_repair(
             container=container, out_dir=out_dir, out_dir_c=out_dir_c,
             pnr_tcl=pnr_tcl, log_text=(out or "") + (err or ""),
-            hard_ceiling_s=_pnr_ceiling, spare_plan=spare_plan)
+            hard_ceiling_s=_pnr_ceiling, spare_plan=spare_plan,
+            antenna_diode_cell=pdk.antenna_diode_cell)
         if _ant_roll.get("status") != "NOT_REQUESTED":
             _ant_roll_records.append(_ant_roll)
             if _ant_roll.get("status") in ("ROLLED_BACK", "RECOVERED"):
