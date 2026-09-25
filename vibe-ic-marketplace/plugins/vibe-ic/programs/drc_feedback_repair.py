@@ -475,6 +475,8 @@ def verify_streamed(project: Path, top: str, pdk: Any, image: str,
             raise ValueError('FEEDBACK_CANONICAL_DEF_DIVERGED')
         if not gds.is_file():
             raise ValueError('FEEDBACK_FINISHED_GDS_MISSING')
+        measured_source_sha = _sha(source)
+        measured_gds_sha = _sha(gds)
         design = _def_design(source)
         scratch_root = project / 'phase3/scratch/drc_feedback'
         scratch_root.mkdir(parents=True, exist_ok=True)
@@ -486,7 +488,11 @@ def verify_streamed(project: Path, top: str, pdk: Any, image: str,
                 one.mkdir()
                 counts[rule['id']] = len(_measure(image, project, pdk.drc_deck,
                                                   rule, gds, design, one))
-        record['finished_gds_sha256'] = _sha(gds)
+        if (_sha(source) != measured_source_sha or
+                _sha(routed) != measured_source_sha or
+                _sha(gds) != measured_gds_sha):
+            raise ValueError('FEEDBACK_FINISHED_LAYOUT_CHANGED_DURING_MEASUREMENT')
+        record['finished_gds_sha256'] = measured_gds_sha
         record['finished_counts'] = counts
         if any(counts.values()):
             raise ValueError('FEEDBACK_FINISHED_GDS_RULE_NONZERO')

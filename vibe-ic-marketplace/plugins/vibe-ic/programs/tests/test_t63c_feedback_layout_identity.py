@@ -98,6 +98,22 @@ def test_finished_zero_rule_is_bound_to_the_exact_mask(tmp_path, monkeypatch):
     assert feedback.check_binding(project, 'unit', gds)[0]
 
 
+def test_finished_layout_change_during_rule_measurement_is_refused(tmp_path, monkeypatch):
+    project, _, gds, _ = _layout(tmp_path)
+    feedback._instrument_calibration.assert_calibrated('drc_feedback_repair::run')
+    def measured(*_args):
+        gds.write_bytes(b'mask-changed-while-deck-was-running')
+        return []
+    monkeypatch.setattr(feedback, '_measure', measured)
+    result = feedback.verify_streamed(
+        project, 'unit', SimpleNamespace(drc_deck='/pdk/gf180mcu.drc'),
+        'sha256:' + '0' * 64, gds)
+    assert result['finished_status'] == 'REFUSED'
+    assert result['finished_reason'] == (
+        'FEEDBACK_FINISHED_LAYOUT_CHANGED_DURING_MEASUREMENT')
+    assert not feedback.check_binding(project, 'unit', gds)[0]
+
+
 def test_prestream_admission_refuses_old_feedback(tmp_path, monkeypatch):
     project, source, _, _ = _layout(tmp_path)
     source.write_text('DESIGN unit ;\n# changed by signoff repair\n')
