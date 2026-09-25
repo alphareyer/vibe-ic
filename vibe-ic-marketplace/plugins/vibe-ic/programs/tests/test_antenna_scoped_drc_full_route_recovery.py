@@ -44,7 +44,8 @@ def _deck() -> str:
 
 
 def _run(tmp_path, monkeypatch, *, clean=True, refusal=_REFUSAL,
-         route_change=False, unrouted_gate=False, filler_tiled=False):
+         route_change=False, unrouted_gate=False, filler_tiled=False,
+         marker_retry=None):
     out = tmp_path / "pnr"
     out.mkdir()
     (out / R._ANTENNA_PASS_CHECKPOINT_NAME).write_bytes(b"verified odb")
@@ -63,6 +64,20 @@ def _run(tmp_path, monkeypatch, *, clean=True, refusal=_REFUSAL,
                 f"{route_end} ;\nEND NETS\n"
                 if str(product).endswith(".def") else "EDA output\n")
         if "pnr_antenna_isolated_retry" in _cmd:
+            if marker_retry and ("pnr_antenna_isolated_retry.tcl" in _cmd
+                                 or marker_retry == "all_fail"):
+                (out / "antenna_isolated_candidate.odb.drc.rpt").write_text(
+                    "violation type: Short\n"
+                    "\tsrcs: net:target net:held\n"
+                    "\tbbox = (10.0000, 20.0000) - "
+                    "(10.2800, 20.3800) on Layer M2\n"
+                    + ("violation type: Spacing\n"
+                       "\tsrcs: net:target net:other\n"
+                       "\tbbox = (30.0000, 40.0000) - "
+                       "(30.2800, 40.3800) on Layer M3\n"
+                       if marker_retry == "multiple" else ""))
+                return (1, "ANTENNA_ISOLATED_TARGETS: target other\n"
+                        "[ERROR DRT-0712] scoped route added one DRC\n", "")
             if filler_tiled:
                 tcl = (out / "pnr_antenna_isolated_retry.tcl").read_text()
                 if "remove_fillers" not in tcl.split("repair_antennas", 1)[0]:
@@ -191,7 +206,8 @@ def test_scoped_damage_retries_same_target_nets_in_fresh_session(
     assert len(calls) == 2
     tcl = (out / "pnr_antenna_isolated_retry.tcl").read_text()
     assert "read_db /w/pnr/antenna_isolated_seed.odb" in tcl
-    assert "repair_antennas D -iterations 1 -ratio_margin 0 -reroute" in tcl
+    assert "repair_antennas D -iterations 1 -ratio_margin 0" in tcl
+    assert "detailed_route -nets $_targets -output_drc " in tcl
     assert "ANTENNA_ISOLATED_WIRE_DAMAGE" in tcl
     assert "ANTENNA_ISOLATED_EXISTING_CELL_MOVED" in tcl
     tail = (out / "pnr_antenna_isolated_adopt.tcl").read_text()
@@ -257,3 +273,51 @@ def test_scoped_retry_rejects_zero_antenna_with_unrouted_gate(
     assert rec["status"] == "ROLLED_BACK"
     assert rec["antenna_repair"] == "NOT_APPLIED"
     assert len(calls) == 3
+
+
+def test_marker_mapped_to_new_diode_retries_from_seed_and_recovers(
+        tmp_path, monkeypatch):
+    rec, calls, out = _run(tmp_path, monkeypatch, refusal=_SCOPED_DAMAGE,
+                           marker_retry="recover")
+    assert rec["status"] == "RECOVERED"
+    assert rec["antenna_repair"] == "APPLIED"
+    assert len(calls) == 3  # first scoped route, fresh scoped retry, adopt
+    assert "Short" in rec["isolated_drc_markers"][0]
+    first = (out / "pnr_antenna_isolated_retry.tcl").read_text()
+    moved = (out / "pnr_antenna_isolated_retry_1.tcl").read_text()
+    assert "-output_drc /w/pnr/antenna_isolated_candidate.odb.drc.rpt" in first
+    assert "read_db /w/pnr/antenna_isolated_seed.odb" in moved
+    assert "set _move_net {target}" in moved
+    assert "set _marker_box {10.0 20.0 10.28 20.38}" in moved
+    assert "ANTENNA_ISOLATED_MARKER_NOT_ON_NEW_DIODE" in moved
+    assert "check_placement -no_abort" in moved
+    assert "detailed_route -nets $_targets -output_drc" in moved
+
+
+def test_unclosed_marker_lists_rule_layer_nets_and_box_in_refusal(
+        tmp_path, monkeypatch):
+    rec, calls, out = _run(tmp_path, monkeypatch, refusal=_SCOPED_DAMAGE,
+                           marker_retry="all_fail")
+    assert rec["status"] == "ROLLED_BACK"
+    assert rec["antenna_repair"] == "NOT_APPLIED"
+    assert len(calls) == 6  # initial and four bounded site trials, rollback
+    assert "ANTENNA_ISOLATED_MARKERS_REFUSED" in rec["reason"]
+    assert "Short" in rec["reason"]
+    assert "net:target net:held" in rec["reason"]
+    assert "10.0000, 20.0000" in rec["reason"]
+    assert "Layer M2" in rec["reason"]
+    assert "ANTENNA_STAGE" not in (out / "pnr_antenna_rollback.tcl").read_text()
+
+
+def test_multiple_native_markers_are_all_listed_and_not_silently_retried(
+        tmp_path, monkeypatch):
+    rec, calls, _ = _run(tmp_path, monkeypatch, refusal=_SCOPED_DAMAGE,
+                         marker_retry="multiple")
+    assert rec["status"] == "ROLLED_BACK"
+    assert len(calls) == 2  # multiple constraints need a fresh local plan
+    assert "ANTENNA_ISOLATED_MARKERS_REFUSED" in rec["reason"]
+    assert sum("violation type:" in m
+               for m in rec["isolated_drc_markers"]) == 2
+    assert "net:target net:held" in rec["reason"]
+    assert "net:target net:other" in rec["reason"]
+    assert "Layer M3" in rec["reason"]

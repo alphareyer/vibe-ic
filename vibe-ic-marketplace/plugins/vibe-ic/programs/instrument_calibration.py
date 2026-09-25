@@ -621,6 +621,15 @@ def _judge_isolated_recovery(log: str) -> Optional[str]:
             R._antenna_isolated_recovery_modified(combined) else None)
 
 
+def _judge_antenna_isolated_drc_markers(report: str) -> Optional[str]:
+    import phase3_one_shot_runner as R
+    with tempfile.TemporaryDirectory(prefix="cal_antenna_drc_") as td:
+        path = Path(td) / "router.drc.rpt"
+        path.write_text(report)
+        count = len(R._antenna_isolated_drc_markers(path))
+    return f"DRC_MARKERS:{count}" if count else None
+
+
 def _judge_feedback_antenna(log: str) -> Optional[str]:
     import drc_feedback_repair as D
     net, pin = D._antenna(log)
@@ -1247,6 +1256,26 @@ _register(Instrument(
                     "entry and exit after DRT-0633/0634, followed by the "
                     "ANT-0001/0002 zero census."),
         artefact=_read("antenna_isolated_verified_negative.log")),
+))
+
+_register(Instrument(
+    name="phase3_one_shot_runner::_antenna_isolated_drc_markers",
+    reads="OpenROAD detailed_route -output_drc marker report",
+    ruling="T67 / scoped DRT-0712", owner="icdrcfb",
+    why=("A native Short with layer, nets and bbox may drive a local diode "
+         "site trial; an empty clean report must not invent a marker."),
+    judge=_judge_antenna_isolated_drc_markers,
+    positive=Sample(
+        provenance=("Real 0.3.76 OpenROAD scoped reroute on the copied T66 "
+                    "antenna seed: DRT-0712 wrote one Metal2 Short to "
+                    "-output_drc; original report bytes retained."),
+        artefact=_read("antenna_scoped_drc_short_positive.rpt")),
+    expect="DRC_MARKERS:1",
+    negative=Sample(
+        provenance=("Real 0.3.76 OpenROAD scoped reroute from the same "
+                    "copied seed after legal diode relocation: router DRC "
+                    "0 to 0 and an empty -output_drc file."),
+        artefact=_read("antenna_scoped_drc_clean_negative.rpt")),
 ))
 
 _register(Instrument(
