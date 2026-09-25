@@ -188,13 +188,64 @@ def selected_mode(project: Path, step: str) -> str:
     return mode
 
 
+def resolve_step_configs(project: Path, image: str, pdk: str,
+                         step_ids: list[str], *, pdk_root: Path,
+                         docker: str = 'docker') -> dict[str, Path]:
+    """Resolve step configs from declared design inputs and the image's PDK.
+
+    The installed LibreLane resolver supplies PDK values.  A prior run's
+    resolved.json (including its design-specific numbers) is never an input.
+    """
+    image_capability(image, docker)
+    if not (pdk_root / pdk).is_dir():
+        raise Refusal('LL_PDK_MISSING', str(pdk_root / pdk))
+    root = project / 'phase3/librelane/37-config'
+    root.mkdir(parents=True, exist_ok=True)
+    design = root / 'design.json'
+    emit_config(project, pdk, design)
+    requested = root / 'steps.json'
+    write_json(requested, step_ids)
+    script = '''import json,sys
+from pathlib import Path
+from librelane.flows.chip import Chip
+from librelane.steps import Step
+design, requested, output, pdk, project = sys.argv[1:]
+flow = Chip(config=design, pdk=pdk, pdk_root="/pdk", design_dir=project)
+raw = flow.config.to_raw_dict()
+for step_id in json.loads(Path(requested).read_text()):
+    target = Step.factory.get(step_id)
+    if target is None:
+        raise ValueError("unknown LibreLane step: " + step_id)
+    names = {var.name for var in target.get_all_config_variables()}
+    selected = {key: value for key, value in raw.items() if key in names}
+    selected["meta"] = {"librelane_version": __import__("librelane.__version__", fromlist=["__version__"]).__version__, "step": step_id}
+    Path(output, step_id + ".json").write_text(json.dumps(selected, indent=2, default=str) + "\\n")
+'''
+    cmd = [docker, 'run', '--rm', '-v', f'{project.resolve()}:{project.resolve()}',
+           '-v', f'{pdk_root.resolve()}:/pdk:ro',
+           '--entrypoint', 'python3', image, '-c', script, str(design),
+           str(requested), str(root), pdk, str(project.resolve())]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    (root / 'resolution.log').write_text(result.stdout + '\n' + result.stderr)
+    if result.returncode:
+        raise Refusal('LL_CONFIG_RESOLUTION_FAILED', str(root / 'resolution.log'))
+    configs = {step: root / f'{step}.json' for step in step_ids}
+    for step, path in configs.items():
+        if not path.is_file() or _load(path).get('meta', {}).get('step') != step:
+            raise Refusal('LL_STEP_CONFIG_MISSING', step)
+    return configs
+
+
 def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
-              *, docker: str = 'docker', mounts: list[tuple[Path, str]] | None = None) -> list[Path]:
+              *, docker: str = 'docker', mounts: list[tuple[Path, str]] | None = None,
+              lane: str | None = None) -> list[Path]:
     """Run pinned per-step snapshots. Step directories retain both inputs and outputs."""
     image_capability(image, docker)
     outputs = []
     previous: Path | None = None
-    base = project / 'phase3/librelane'
+    if lane is not None and (not lane or '/' in lane or lane in ('.', '..')):
+        raise Refusal('LL_INVALID_LANE', str(lane))
+    base = project / 'phase3/librelane' / lane if lane else project / 'phase3/librelane'
     for index, (step_id, config, initial_state) in enumerate(steps, 1):
         name = f'{index:02d}-{step_id.lower().replace(".", "-")}'
         folder = base / name

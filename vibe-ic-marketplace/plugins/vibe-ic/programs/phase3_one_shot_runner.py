@@ -46245,8 +46245,8 @@ def publish_tapeout_declarations(project: Path, pdk: "PdkConfig",
     return rec
 
 
-def step_gds(project: Path, top: str, pdk: PdkConfig,
-             container: str, *, candidate: bool = False) -> StepResult:
+def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
+                     container: str, *, candidate: bool = False) -> StepResult:
     t0 = time.time()
     if candidate:
         if "sdr_candidates" not in Path(project).parts:
@@ -46759,6 +46759,140 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
                               "stdcell_marker_layer": marker_arg or None,
                               "stream_log": str(stream_log),
                               "stream_tail": (out or "")[-600:]})
+
+
+def step_gds(project: Path, top: str, pdk: PdkConfig,
+             container: str, *, candidate: bool = False) -> StepResult:
+    """Opt-in tool stream-out; direct remains the production default."""
+    if candidate:
+        return _step_gds_direct(project, top, pdk, container, candidate=True)
+    from librelane_contract import Refusal, selected_mode
+    mode = selected_mode(project, "37")
+    if mode == "direct":
+        return _step_gds_direct(project, top, pdk, container)
+
+    t0 = time.time()
+    digest, refusal = _layout_basis(project, top, pdk, container)
+    if refusal or not _ga.gate_passed(project, digest):
+        return StepResult("gds", "NOT_MEASURED", time.time() - t0,
+                          f"pre-stream gate refused this layout: {refusal or digest}",
+                          reason_class=_V.ReasonClass.UPSTREAM_FAILED)
+    vacuous = _vacuous_on_unrouted(project, "gds", t0)
+    if vacuous is not None:
+        return vacuous
+    pnr_dir = _pl.pnr_dir(project)
+    def_file = pnr_dir / f"{top}.def"
+    gds_out = pnr_dir / f"{top}.gds"
+    if not def_file.is_file() or not (pnr_dir / "routed.def").is_file():
+        return StepResult("gds", "NOT_MEASURED", time.time() - t0,
+                          "admitted routed DEF missing",
+                          reason_class=_V.ReasonClass.INPUT_ABSENT)
+    if _sha256_file(def_file) != _sha256_file(pnr_dir / "routed.def"):
+        return StepResult("gds", "FAIL", time.time() - t0,
+                          "LL_ROUTE_DIGEST_MISMATCH: final DEF differs from routed DEF")
+    import drc_feedback_repair as _drc_feedback
+    if _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None)):
+        try:
+            fb = json.loads((project / "reports/phase3/drc_feedback.json").read_text())
+        except (OSError, ValueError):
+            fb = {}
+        if fb.get("status") != "PASS" or fb.get("source_sha256") != _sha256_file(def_file):
+            return StepResult("gds", "FAIL", time.time() - t0,
+                              "FEEDBACK_ROUTE_DIGEST_MISMATCH: pre-stream admission refused")
+    image = os.environ.get("VIBEIC_LIBRELANE_IMAGE")
+    root = os.environ.get("VIBEIC_LIBRELANE_PDK_ROOT")
+    if not image or not root:
+        return StepResult("gds", "NOT_MEASURED", time.time() - t0,
+                          "LL_IMAGE_OR_PDK_ROOT_NOT_DECLARED",
+                          reason_class=_V.ReasonClass.TOOL_ABSENT)
+    physical_top, top_note = _streamout_top(def_file, top)
+    publish_database_unit_declaration(project, pdk, container, def_file)
+    publish_tapeout_declarations(project, pdk, container, def_file, physical_top)
+    from librelane_step37 import run as _run_librelane
+    direct_gds = None
+    direct_result = None
+    if mode == "dual":
+        direct_result = _step_gds_direct(project, top, pdk, container)
+        if direct_result.status != "PASS" or not gds_out.is_file():
+            return StepResult("gds", "FAIL", time.time() - t0,
+                              f"direct arm failed: {direct_result.detail}")
+        direct_gds = project / "phase3/tool_arms/37/direct/direct.gds"
+        direct_gds.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(gds_out, direct_gds)
+    try:
+        result = _run_librelane(project, image, Path(root), pdk.name,
+                                pnr_dir / "routed.def", pnr_dir / f"{top}_pnr.v",
+                                pnr_dir / "constraint.sdc", gds_out)
+    except (Refusal, OSError, ValueError, KeyError) as exc:
+        return StepResult("gds", "FAIL", time.time() - t0, f"LibreLane step 37: {exc}")
+    substance = _gds_substance_gate(gds_out, def_file)
+    if substance:
+        return StepResult("gds", "FAIL", time.time() - t0,
+                          f"LibreLane GDS substance: {substance}",
+                          extras={"streamout_engine": result["engine"]})
+    # The flow's step-37 gds_port_label_check is the authoritative tool-output
+    # gate.  This host may not have pya, so a local census here is not proof.
+    if direct_gds is not None:
+        from librelane_contract import digest as _ll_digest
+        from librelane_contract import execute_dual, resolve_step_configs
+        from librelane_step37 import _gds_state, _measured_drc
+        root_dir = project / "phase3/librelane"
+        configs = resolve_step_configs(project, image, pdk.name,
+                                       ["Magic.DRC", "KLayout.DRC"],
+                                       pdk_root=Path(root))
+        input_state = result["state"]
+        scope = {"def_sha256": _ll_digest(def_file), "step": "37-final-gds"}
+
+        def _arm(gds_path: Path, arm_name: str):
+            def produce(folder: Path) -> Path:
+                arm_state = _gds_state(input_state, gds_path, folder / "state.json")
+                counts = _measured_drc(project, image, Path(root), pdk.name,
+                                       arm_state, f"37-dual-{arm_name}", configs)
+                report = folder / "selection.json"
+                from _atomic_artefact import write_json as _write_json
+                _write_json(report, {"verdict": "PASS", "scope": scope,
+                                    "metrics": {"drc_total": {
+                                        "status": "MEASURED", "value": counts["total"]}},
+                                    "drc": counts, "gds_sha256": _ll_digest(gds_path)})
+                return report
+            return produce
+
+        try:
+            dual = execute_dual(project, "37", _arm(gds_out, "librelane"),
+                                _arm(direct_gds, "direct"), {"drc_total": "min"})
+        except (Refusal, OSError, ValueError, KeyError) as exc:
+            return StepResult("gds", "FAIL", time.time() - t0,
+                              f"dual GDS measurement failed: {exc}")
+        if dual.get("selection") == "UNDETERMINED":
+            return StepResult("gds", "NOT_MEASURED", time.time() - t0,
+                              f"dual GDS selection undecided: {dual.get('reason')}",
+                              [str(direct_gds), str(gds_out)],
+                              reason_class=_V.ReasonClass.INCONCLUSIVE)
+        if dual["selection"] == "openroad":
+            shutil.copy2(direct_gds, gds_out)
+            result["engine"] = direct_result.extras.get("streamout_engine", "direct")
+        else:
+            _log_invocation(
+                "klayout LibreLane step37 selected-stream finishing",
+                0, int((time.time() - t0) * 1000),
+                marker=str(result["promotion"]), outputs=[gds_out],
+                input_hashes={str(def_file): _sha256_file(def_file)})
+        return StepResult("gds", "PASS", time.time() - t0,
+                          f"dual GDS selected {dual['selection']} by measured DRC",
+                          [str(gds_out), str(direct_gds)],
+                          extras={"streamout_engine": result["engine"],
+                                  "dual_selection": dual["selection"]})
+    _log_invocation(
+        "klayout LibreLane step37 selected-stream finishing",
+        0, int((time.time() - t0) * 1000),
+        marker=str(result["promotion"]), outputs=[gds_out],
+        input_hashes={str(def_file): _sha256_file(def_file)})
+    return StepResult("gds", "PASS", time.time() - t0,
+                      f"LibreLane stream-out={result['engine']} XOR=0 density=0"
+                      + (f" [{top_note}]" if top_note else ""), [str(gds_out)],
+                      extras={"streamout_engine": result["engine"],
+                              "librelane_promotion": str(result["promotion"]),
+                              "die_finishing": True, "density_fill": True})
 
 
 # ---------------------------------------------------------------------------
@@ -53026,9 +53160,22 @@ def _step37_declare_streamout_gds_provenance(project: Path, top: str) -> None:
     canon_rel = f"phase3/stage4/gds/{top}.gds"
     pnr_gds = project / pnr_rel
     canon_gds = project / canon_rel
+    promotion = project / "phase3/librelane/37-promotion.json"
+    ll_selected = False
+    if promotion.is_file():
+        try:
+            ll_record = json.loads(promotion.read_text())
+            ll_selected = (pnr_gds.is_file() and
+                           ll_record.get("canonical") == str(pnr_gds) and
+                           ll_record.get("canonical_sha256") ==
+                           (_file_sha256(pnr_gds) or "").removeprefix("sha256:"))
+        except (OSError, ValueError, TypeError):
+            ll_selected = False
     _restamp_provenance_output(
-        project, pnr_rel, pnr_gds, "magic",
-        "magic gds write (streamout) (phase3_one_shot_runner step37)")
+        project, pnr_rel, pnr_gds, "klayout" if ll_selected else "magic",
+        ("LibreLane KLayout finishing of selected measured stream (step37)"
+         if ll_selected else
+         "magic gds write (streamout) (phase3_one_shot_runner step37)"))
     if not (pnr_gds.is_file() and canon_gds.is_file()):
         return
     try:
