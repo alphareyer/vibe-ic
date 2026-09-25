@@ -76,6 +76,21 @@ def test_failed_gate_refuses_handoff_even_with_old_sources(tmp_path):
     assert list(old_kit.parent.iterdir()) == []
 
 
+def test_pre_audit_handoff_refuses_unadmitted_explicit_source(tmp_path):
+    project = tmp_path / "run"
+    source = R._pl.gds_dir(project) / "unit.gds"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+        "tests", "fixtures", "density_fill", "filled.gds").read_bytes())
+    rows = R.run_pre_audit_producers(project)
+    handoff = [row for row in rows if row.name == "foundry_handoff"]
+    assert len(handoff) == 1 and handoff[0].status == "NOT_MEASURED", rows
+    assert not source.exists()
+    assert not list(R._pl.foundry_handoff_dir(project).glob("*.gds"))
+    assert "admission absent" in handoff[0].detail
+
+
 def test_prior_shipped_gds_is_quarantined_with_record(tmp_path, monkeypatch):
     project = _project(tmp_path / "run", cached_die=OLD_DIE, cached_util=OLD_UTIL)
     _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)

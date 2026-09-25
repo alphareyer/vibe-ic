@@ -53785,6 +53785,18 @@ def run_pre_audit_producers(project: Path, container: str = "", *,
         if (only_names is not None and name not in only_names
                 or name in skip_names):
             continue
+        if name == "foundry_handoff":
+            import foundry_handoff_package_check as _handoff_check
+            sources = _handoff_check.layout_member_sources(project)
+            if ((_ga.visible_gds(project) or _ga.gate_record(project))
+                    and not _ga.admitted_package_sources(project, sources)):
+                _ga.quarantine_visible_gds(
+                    project, "foundry handoff: current layout admission absent")
+                _ga.quarantine_handoff_package(
+                    project, "foundry handoff: current layout admission absent")
+                rows.append(_upstream_signoff_not_measured(
+                    name, "current digest-bound GDS admission absent"))
+                continue
         argv = tuple(extra_argv)
         if container and name in _PDK_AWARE_SIGNOFF_GATES:
             argv += ("--pdk-container", container)
