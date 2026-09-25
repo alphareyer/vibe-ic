@@ -69095,24 +69095,13 @@ def _restores_the_container_env(fn):
     return _scoped
 
 
-def _pdn_em_postcheck_step(project: Path, top: str, pdk: Any,
-                           container: str, rerun_started_ns: int) -> StepResult:
+def _postcheck_step(project: Path, top: str, pdk: Any,
+                    container: str, rerun_started_ns: int) -> StepResult:
     """Record the second-PnR EM measurement, including why it is unavailable."""
     status, detail = _ppa_power._pdn_em_post_resize_check(
         project, top, pdk, container, _emit_ir_em_reports,
         _emit_em_current_authority, rerun_started_ns=rerun_started_ns)
-    reason = ""
-    if status == "NOT_MEASURED":
-        if detail.startswith("PDN_EM_POSTCHECK_NO_DEF"):
-            reason = _V.ReasonClass.INPUT_ABSENT.value
-        elif detail.startswith("PDN_EM_POSTCHECK_STALE_DEF"):
-            reason = _V.ReasonClass.UPSTREAM_FAILED.value
-        elif detail.startswith("PDN_EM_POSTCHECK_UNRESOLVED"):
-            reason = _V.ReasonClass.INCONCLUSIVE.value
-        else:
-            # Native PSM, report freshness, authority emission and exceptions
-            # are execution failures; an earlier EM report cannot close them.
-            reason = _V.ReasonClass.EXECUTION_ERROR.value
+    reason = _ppa_power._pdn_em_postcheck_reason_class(status, detail)
     return StepResult("pdn_em_postcheck", status, 0.0, detail,
                       reason_class=reason)
 
@@ -69813,7 +69802,7 @@ def main() -> int:
                         _pl.pnr_dir(project), "pnr", project=project,
                         pdk=pdk, container=args.container, top=effective_top,
                         args=args)
-                    _rz_post_row = _pdn_em_postcheck_step(
+                    _rz_post_row = _postcheck_step(
                         project, effective_top, pdk, args.container,
                         _rz_started_ns)
                     _rz_post_status = _rz_post_row.status

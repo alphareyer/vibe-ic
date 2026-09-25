@@ -75,7 +75,7 @@ def test_second_pnr_stale_def_em_row_is_valid_and_does_not_run_psm(
                         lambda *_args: called.append(True))
     # This is the sub4 path: PnR said PASS while canonical DEF still predates
     # the second dispatch. Its old EM report cannot measure the new layout.
-    row = R._pdn_em_postcheck_step(
+    row = R._postcheck_step(
         project, "subservient", object(), "test", time.time_ns())
     assert row.status == "NOT_MEASURED"
     assert row.reason_class == "upstream_failed"
