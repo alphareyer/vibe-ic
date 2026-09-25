@@ -1,0 +1,20 @@
+{
+  "decks": [
+    {
+      "deck_basename": "gf180mcu.drc",
+      "rules": [
+        {
+          "id": "CO.6a",
+          "registry_id": "CO.6a_metal1_eol_overlap",
+          "source": "rule_decks/contact.rb",
+          "reason": "Cell-internal Contact geometry is absent from the standard-cell LEF seen by the router",
+          "via_pattern": "^Via1",
+          "pin_layer": "Metal1",
+          "obstruction_layer": "Metal2",
+          "obstruction_half_widths_um": [0.11, 0.22, 0.33],
+          "search_radius_um": 0.5
+        }
+      ]
+    }
+  ]
+}

@@ -34193,6 +34193,8 @@ def _antenna_def_nets_section(path: Path) -> Optional[str]:
 
 def _antenna_isolated_recovery_modified(log_text: str) -> bool:
     """The accepted isolated router verification must postdate every mutation."""
+    _instrument_calibration.assert_calibrated(
+        "phase3_one_shot_runner::_antenna_isolated_recovery_modified")
     marker = "=== PNR ANTENNA ISOLATED ECO ==="
     if marker not in log_text:
         return True
@@ -39202,6 +39204,25 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                 "input_identity": _identity_after,
                 "def_sha256": _def_sha,
             }, sort_keys=True) + "\n")
+    # The router cannot see cell-internal shapes omitted from LEF.  A reviewed
+    # deck mapping admits a private, digest-bound post-route feedback trial;
+    # only a fully guarded zero-rule candidate may replace the routed DEF.
+    if _status == "PASS":
+        import drc_feedback_repair as _drc_feedback
+        if _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None)):
+            _feedback = _drc_feedback.run(
+                project, top, pdk,
+                _drc_feedback.image_for_container(container))
+            _nl_extras = dict(_nl_extras)
+            _nl_extras["drc_feedback"] = _feedback
+            if _feedback["status"] != "PASS":
+                _status = "FAIL"
+                detail += (" | SIGNOFF_DECK_FEEDBACK_REFUSED: "
+                           + _feedback.get("reason", "unknown"))
+            else:
+                detail += (" | SIGNOFF_DECK_FEEDBACK_PASS: "
+                           f"{_feedback.get('before_count', 0)}->"
+                           f"{_feedback.get('after_count', 0)}")
     if resize_history:
         return StepResult("pnr", _status, time.time() - t0,
                           detail,

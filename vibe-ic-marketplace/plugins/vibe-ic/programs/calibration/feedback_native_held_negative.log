@@ -1,0 +1,3 @@
+[INFO DRT-0633] Scoped detailed routing: 1 net(s) named, 1175 of 1175 other net(s) held fixed (their existing wire is an obstruction and is not rewritten).
+[INFO DRT-0634] Scoped detailed routing touched 1 net(s) in the database and left 1175 net(s) byte-identical. Named: u_core/_193_.
+[INFO DRT-0711] Scoped detailed routing: whole-design violations 0 on entry, 0 on exit (delta +0).

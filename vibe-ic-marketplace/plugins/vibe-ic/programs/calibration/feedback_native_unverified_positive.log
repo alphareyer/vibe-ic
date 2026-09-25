@@ -1,0 +1,29 @@
+[INFO ANT-0002] Found 4 net violations.
+[INFO ANT-0001] Found 4 pin violations.
+T57_BEFORE: 1181 wired 27625 instances 4 antenna
+[WARNING GRT-0300] Timing is not available, setting critical nets percentage to 0.
+[INFO GRT-0012] Found 4 antenna violations.
+[WARNING DPL-0037] Use remove_fillers before detailed placement.
+[INFO DPL-0006] Core area: 5633783.23 um^2
+[INFO DPL-0007] Movable instances area: 8.78 um^2
+[INFO DPL-0008] Fixed instances area within core: 422448.68 um^2
+[INFO DPL-0009] Utilization: 7.5%
+[INFO DPL-0005] Diamond search max displacement: +/- 500 sites horizontally, +/- 100 rows vertically.
+[INFO DPL-1102] Legalizing using negotiation legalizer.
+[INFO DPL-1103] Negotiation base search window: +/-20 sites horizontally, +/-5 rows vertically 
+	Automatic search window extension enabled.
+	Search window extendable up to the max displacement cap of +/-500 sites, +/-100 rows near walls.
+[INFO DPL-1104] NegotiationLegalizer DRC penalty: 5.
+[INFO DPL-0392] Negotiation cell height distribution (1 unique row-count(s)):
+[INFO DPL-0393]   height 1 row(s): 26858 cells
+[INFO DPL-0500] Runtime: 0.12s
+[INFO GRT-0015] Inserted 4 diodes.
+T57_REPAIR_RC: 0 4
+T57_LOST: u_core/net11 clknet_5_25_0_clk__core u_core/net707 u_core/net711
+T57_SHRUNK: 
+T57_MOVED_COUNT: 0
+T57_MOVED_FIRST: 
+[WARNING ANT-0018] 4 net(s) with a gate and no routing were NOT checked and are absent from the counts below, which is not the same as clean: u_core/net11 clknet_5_25_0_clk__core u_core/net707 u_core/net711
+[INFO ANT-0002] Found 0 net violations.
+[INFO ANT-0001] Found 0 pin violations.
+T57_AFTER: 0 antenna
