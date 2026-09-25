@@ -44,7 +44,7 @@ def _deck() -> str:
 
 
 def _run(tmp_path, monkeypatch, *, clean=True, refusal=_REFUSAL,
-         route_change=False, unrouted_gate=False):
+         route_change=False, unrouted_gate=False, filler_tiled=False):
     out = tmp_path / "pnr"
     out.mkdir()
     (out / R._ANTENNA_PASS_CHECKPOINT_NAME).write_bytes(b"verified odb")
@@ -63,6 +63,10 @@ def _run(tmp_path, monkeypatch, *, clean=True, refusal=_REFUSAL,
                 f"{route_end} ;\nEND NETS\n"
                 if str(product).endswith(".def") else "EDA output\n")
         if "pnr_antenna_isolated_retry" in _cmd:
+            if filler_tiled:
+                tcl = (out / "pnr_antenna_isolated_retry.tcl").read_text()
+                if "remove_fillers" not in tcl.split("repair_antennas", 1)[0]:
+                    return (1, "[ERROR DPL-0038] Utilization greater than 100%, impossible to legalize\n", "")
             if clean:
                 return (0,
                         "[INFO DRT-0634] Scoped detailed routing touched "
@@ -216,6 +220,16 @@ def test_scoped_router_still_damaged_marker_uses_isolated_retry(
     assert rec["route_verified"] is True
     assert "pnr_antenna_isolated_retry" in calls[0]
     assert (out / "pnr_antenna_isolated_retry.tcl").is_file()
+
+
+def test_isolated_retry_clears_fillers_before_diode_legalization(
+        tmp_path, monkeypatch):
+    """The saved post-route ODB has fillers; native legalization rejects it."""
+    rec, calls, out = _run(tmp_path, monkeypatch, refusal=_SCOPED_DAMAGE,
+                           filler_tiled=True)
+    assert rec["status"] == "RECOVERED"
+    tcl = (out / "pnr_antenna_isolated_retry.tcl").read_text()
+    assert tcl.index("remove_fillers") < tcl.index("repair_antennas")
 
 
 def test_scoped_damage_retry_cannot_ship_unverified_route(

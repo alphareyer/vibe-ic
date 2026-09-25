@@ -34139,6 +34139,10 @@ def _antenna_isolated_scoped_retry_tcl(seed_c: str, candidate_c: str,
         "named=[llength $_targets]\"\n"
         "}\n"
         "puts \"ANTENNA_ISOLATED_TARGETS: $_targets\"\n"
+        "if {[catch {remove_fillers} _rf_err]} {\n"
+        "  error \"ANTENNA_ISOLATED_RMFILL_REFUSED: $_rf_err\"\n"
+        "}\n"
+        "puts \"ANTENNA_ISOLATED_RMFILL: cleared filler sites\"\n"
         f"set _rc [catch {{repair_antennas {diode_cell} -iterations 1 "
         "-ratio_margin 0 -reroute} _err]\n"
         "if {$_rc} { error \"ANTENNA_ISOLATED_REPAIR_REFUSED: $_err\" }\n"
@@ -39265,7 +39269,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         if _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None)):
             _feedback = _drc_feedback.run(
                 project, top, pdk,
-                _drc_feedback.image_for_container(container))
+                _drc_feedback.image_for_container(container),
+                stream_script_text=_GDS_STREAMOUT_PY)
             _nl_extras = dict(_nl_extras)
             _nl_extras["drc_feedback"] = _feedback
             if _feedback["status"] != "PASS":
