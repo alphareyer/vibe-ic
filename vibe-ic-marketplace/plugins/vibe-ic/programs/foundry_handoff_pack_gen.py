@@ -77,6 +77,7 @@ import plugin_manifest_discovery as _pmd  # noqa: E402  (#800 ONE version reader
 import foundry_handoff_package_check as _fhpc  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _atomic_artefact as _aa  # noqa: E402  (vibe-ic#1082)
+import _gds_admission as _ga  # noqa: E402
 
 
 def _read_text(p: Path) -> str:
@@ -880,10 +881,13 @@ def package_layout_members(project: Path) -> dict:
     import os
     import shutil
     project = Path(project)
+    sources = _fhpc.layout_member_sources(project)
+    if sources and not _ga.gate_passed(project):
+        raise ValueError("NOT_MEASURED: pre-stream gate did not PASS; no GDS may be packaged")
     hd = _pl.foundry_handoff_dir(project)
     hd.mkdir(parents=True, exist_ok=True)
     members, written, kept, zero = {}, [], [], []
-    for name, src in _fhpc.layout_member_sources(project).items():
+    for name, src in sources.items():
         if src.stat().st_size == 0:
             zero.append(name)
             continue
@@ -927,6 +931,17 @@ def main(argv=None) -> int:
     if not project.is_dir():
         print(f"VACUOUS_PASS: project dir missing: {project}",
               file=sys.stderr)
+        return 2
+
+    # A skeleton-only fixture has no physical layout to package. Once a gate
+    # has run, a failure must refuse even that skeleton; a stale GDS cannot
+    # stand in for the current run's admission.
+    gate = _ga.gate_record(project)
+    if (gate or _ga.visible_gds(project)) and not _ga.gate_passed(project):
+        _ga.quarantine_visible_gds(project, "foundry handoff refused: pre-stream gate did not PASS")
+        _ga.quarantine_handoff_package(project, "foundry handoff refused: pre-stream gate did not PASS")
+        print("NOT_MEASURED: pre-stream gate refused foundry handoff; "
+              "no GDS packaged", file=sys.stderr)
         return 2
 
     # ORGANIC #654 — a handoff pack for a layout the router never finished is

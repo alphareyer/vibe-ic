@@ -34,7 +34,14 @@ def _project(tmp: Path, member: bytes, signed: bytes) -> Path:
                       ("phase3/stage4/foundry_handoff/spm.gds", member)):
         (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp / rel).write_bytes(data)
+    _admit(tmp)
     return tmp
+
+
+def _admit(project: Path) -> None:
+    gate = project / "reports/phase3/prestream_gate.json"
+    gate.parent.mkdir(parents=True, exist_ok=True)
+    gate.write_text(json.dumps({"verdict": "PASS", "layout_digest": "a" * 64}))
 
 
 def _gate(proj: Path):
@@ -77,6 +84,7 @@ def test_the_producer_refreshes_a_hardlinked_member_after_a_re_run(tmp_path):
     os.replace(tmp, src)                            # the re-run's stream-out
     assert (hd / "spm.gds").read_bytes() == OLD     # the defect, reproduced
     assert C.stale_layout_members(proj), "the gate must see it"
+    _admit(proj)
     rec = G.package_layout_members(proj)
     assert rec["written"] == ["spm.gds"], rec
     assert (hd / "spm.gds").read_bytes() == NEW

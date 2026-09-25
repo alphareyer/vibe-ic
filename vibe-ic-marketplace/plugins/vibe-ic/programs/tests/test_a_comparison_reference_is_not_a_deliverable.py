@@ -236,6 +236,9 @@ def test_the_runner_excludes_the_reference_from_the_link_set(tmp_path):
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_bytes(b"GDS" * 64)
     assert sorted(PKG.layout_member_sources(tmp_path)) == ["spm.gds"]
+    admission = tmp_path / "reports/phase3/prestream_gate.json"
+    admission.parent.mkdir(parents=True, exist_ok=True)
+    admission.write_text(json.dumps({"verdict": "PASS", "layout_digest": "a" * 64}))
     rec = G.package_layout_members(tmp_path)
     assert sorted(rec["members"]) == ["spm.gds"], rec
     hd = tmp_path / "phase3/stage4/foundry_handoff"

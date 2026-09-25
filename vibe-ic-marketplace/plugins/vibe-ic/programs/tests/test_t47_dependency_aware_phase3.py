@@ -135,7 +135,9 @@ def test_xor_and_tapeout_precheck_overlap_on_frozen_identity(tmp_path, monkeypat
 def test_diagnostic_continue_never_supplies_release_pass(tmp_path, monkeypatch):
     project, drive, plan = _run(tmp_path, monkeypatch, gate_pass=False,
                                 diagnostic=True)
-    assert "gds" in drive.called
+    assert "gds" not in drive.called
+    assert plan["gds"]["status"] == "NOT_MEASURED"
+    assert not list((project / "phase3/stage4/foundry_handoff").glob("*.gds"))
     receipt = json.loads((project / "reports/phase3/layout_receipts.json").read_text())
     assert receipt["release_scope"] == "DIAGNOSTIC_ONLY"
     assert receipt["release_verdict"] == "NOT_MEASURED_FOR_RELEASE"

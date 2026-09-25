@@ -276,9 +276,14 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
         out.mkdir(parents=True, exist_ok=True)
         # A real re-run rewrites the DEF and the geometry sidecar.
         w, _, h = die_um.partition("x")
-        (out / f"{top}.def").write_text(
-            f"DIEAREA ( 0 0 ) ( {int(float(w)) * 1000} "
-            f"{int(float(h)) * 1000} ) ;\nPINS 0 ;\nEND PINS\n")
+        dest = out / f"{top}.def"
+        lines = dest.read_text().splitlines(keepends=True) if dest.is_file() else []
+        area = (f"DIEAREA ( 0 0 ) ( {int(float(w)) * 1000} "
+                f"{int(float(h)) * 1000} ) ;\n")
+        # A repeated PnR run changes the requested die; it does not silently
+        # erase already placed pins from this pad-side fixture.
+        lines = [area if line.startswith("DIEAREA ") else line for line in lines]
+        dest.write_text("".join(lines) if lines else area + "PINS 0 ;\nEND PINS\n")
         R._write_pnr_args_sidecar(out, die_um, u)
         return R.StepResult("pnr", "PASS", 0.0,
                             f"PnR OK: routed {die_um} (re-ran: geometry changed)")
@@ -402,17 +407,23 @@ def test_the_disclosure_row_is_present_and_did_not_block_anything(
 # The other direction — so the test above cannot pass by always re-running.
 # ---------------------------------------------------------------------------
 
-def test_unchanged_geometry_still_reuses_the_gds(tmp_path, monkeypatch):
-    """Same die + same util as the cached run: PnR is skipped and the GDS is
-    reused. This is the provenance-preserving behaviour #593 kept."""
+def test_unchanged_geometry_quarantines_the_previous_gds(tmp_path, monkeypatch):
+    """Same die and util still cannot reuse a previous run's unadmitted mask."""
     project = _project(tmp_path, cached_die=NEW_DIE, cached_util=NEW_UTIL)
+    gds = R._pl.pnr_dir(project) / f"{TOP}.gds"
+    stale = gds.read_text()
     d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
     R.main()
 
     plan = _plan(project)
-    assert "pnr" not in d.called, "unchanged geometry must hit the PnR cache"
-    assert "gds" not in d.called, "unchanged geometry must hit the GDS cache"
-    assert "skipped re-run" in plan["gds"]["detail"]
+    assert "pnr" in d.called, "old pad-ring evidence no longer has its old GDS"
+    assert "gds" in d.called, "a previous mask cannot be shipped from cache"
+    assert gds.read_text() != stale
+    assert "skipped re-run" not in plan["gds"]["detail"]
+    records = list((project / "phase3/scratch/gds_quarantine").glob("*/record.json"))
+    assert records
+    assert any(row["source"] == f"phase3/stage3/pnr/{TOP}.gds"
+               for row in json.loads(records[0].read_text())["files"])
 
 
 # ---------------------------------------------------------------------------

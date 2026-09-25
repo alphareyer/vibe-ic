@@ -83,6 +83,7 @@ from typing import (Any, Callable, Dict, FrozenSet, Iterable, List, Mapping,
                     NamedTuple, Optional, Sequence, Set, Tuple)
 import _audit_scope
 import _path_layout as _pl
+import _gds_admission as _ga
 import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _prose_polarity as _pp
@@ -34709,6 +34710,53 @@ def _pnr_session_products(out_dir: Path, out_dir_c: str, tcl_text: str,
 
 
 def _sdr_candidate_signoff_clean(project: Path, top: Optional[str],
+                                 pdk: Optional[PdkConfig], container: str,
+                                 evidence_dir: Optional[Path] = None
+                                 ) -> Tuple[bool, str]:
+    """Evaluate a candidate in private scratch, bound to its routed basis."""
+    if not top or pdk is None:
+        return False, "signoff_context_missing"
+    digest, refusal = _layout_basis(project, top, pdk, container)
+    if refusal:
+        return False, f"candidate_layout_basis:{refusal}"
+    scratch = project / "phase3" / "scratch" / "sdr_candidates"
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f"{digest[:16]}-", dir=scratch) as tmp:
+        shadow = Path(tmp) / "project"
+        shadow.mkdir()
+        # Copy every project tree so any helper side effects stay private.
+        # Reflinks avoid physical duplication on filesystems that support them.
+        for item in project.iterdir():
+            target = shadow / item.name
+            if item.name == "phase3":
+                (target / "scratch").mkdir(parents=True)
+                for stage in item.iterdir():
+                    if stage.name != "scratch":
+                        subprocess.run(["cp", "-a", "--reflink=auto", "--",
+                                        str(stage), str(target / stage.name)],
+                                       check=True)
+            elif item.is_dir():
+                subprocess.run(["cp", "-a", "--reflink=auto", "--",
+                                str(item), str(target)], check=True)
+            else:
+                shutil.copy2(item, target)
+        admitted, reason = _sdr_candidate_signoff_clean_in_shadow(
+            shadow, top, pdk, container, evidence_dir)
+        after, changed = _layout_basis(project, top, pdk, container)
+        if changed or after != digest:
+            admitted, reason = False, "candidate_layout_changed_during_signoff"
+        if evidence_dir is not None:
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            _aa.write_text(evidence_dir / "candidate_gds_admission.json",
+                           json.dumps({"kind": "PRIVATE_SDR_CANDIDATE",
+                                       "layout_digest": digest,
+                                       "admitted": admitted,
+                                       "reason": reason,
+                                       "scratch_removed": True}, indent=2) + "\n")
+        return admitted, reason
+
+
+def _sdr_candidate_signoff_clean_in_shadow(project: Path, top: Optional[str],
                                  pdk: Optional[PdkConfig],
                                  container: str,
                                  evidence_dir: Optional[Path] = None
@@ -34726,7 +34774,7 @@ def _sdr_candidate_signoff_clean(project: Path, top: Optional[str],
         return False, "signoff_deck_missing"
     try:
         started_ns = time.time_ns()
-        gds = step_gds(project, top, pdk, container)
+        gds = step_gds(project, top, pdk, container, candidate=True)
         layout = _pl.pnr_dir(project) / f"{top}.gds"
         if (gds.status != "PASS" or not layout.is_file()
                 or layout.stat().st_mtime_ns < started_ns):
@@ -46041,8 +46089,17 @@ def publish_tapeout_declarations(project: Path, pdk: "PdkConfig",
 
 
 def step_gds(project: Path, top: str, pdk: PdkConfig,
-             container: str) -> StepResult:
+             container: str, *, candidate: bool = False) -> StepResult:
     t0 = time.time()
+    if candidate:
+        if "sdr_candidates" not in Path(project).parts:
+            return StepResult("gds", "NOT_MEASURED", 0.0,
+                              "candidate stream requires private SDR scratch")
+    else:
+        digest, refusal = _layout_basis(project, top, pdk, container)
+        if refusal or not _ga.gate_passed(project, digest):
+            return StepResult("gds", "NOT_MEASURED", 0.0,
+                              f"pre-stream gate refused this layout: {refusal or digest}")
     _vac = _vacuous_on_unrouted(project, "gds", t0)
     if _vac is not None:
         return _vac
@@ -57100,7 +57157,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         for extra in sorted(gds_out.glob("*.gds")):
             if extra not in candidate_chip_gds:
                 candidate_chip_gds.append(extra)
-    if handoff_out.is_dir() and not (prestream or prepv):
+    if handoff_out.is_dir() and not (prestream or prepv) and _ga.gate_passed(project):
         # THE LAYOUT MEMBERS COME FROM ONE PLACE: `foundry_handoff_pack_gen.
         # package_layout_members`, which re-derives every member from the
         # SIGNED-OFF GDS on every run, by copy. This block used to package
@@ -69461,7 +69518,7 @@ def main() -> int:
     p.add_argument("--entry-step", help="First canonical Phase-3 step")
     p.add_argument("--exit-step", help="Last canonical Phase-3 step")
     p.add_argument("--diagnostic-continue", action="store_true",
-                   help="Collect downstream diagnostics after a failed pre-stream gate; never credit them for release")
+                   help="Retain diagnostic-only reports; a failed pre-stream gate never authorizes GDS or release")
     args = p.parse_args()
     if bool(args.entry_step) != bool(args.exit_step):
         p.error("--entry-step and --exit-step must be supplied together")
@@ -69798,6 +69855,8 @@ def main() -> int:
         # The canonicalize step runs unconditionally to stage canonical paths.
         netlist_existing = _pl.synth_dir(project) / f"{effective_top}_synth.v"
         def_existing = _pl.pnr_dir(project) / f"{effective_top}.def"
+        _ga.quarantine_visible_gds(project, "new phase-3 run; prior GDS has no admission for this run")
+        _ga.quarantine_handoff_package(project, "new phase-3 run; prior handoff is not this run's package")
         gds_existing = _pl.pnr_dir(project) / f"{effective_top}.gds"
         # PR-A3 — the preserve-provenance skip is PDK-keyed: a cached
         # netlist whose instantiated masters are NOT in the ACTIVE
@@ -70286,10 +70345,9 @@ def main() -> int:
                 _prestream_refusal = (
                     f"pre-stream gate failed ({', '.join(_prestream.extras.get('failed_gates', [])) or _prestream.detail}); "
                     f"layout_digest={_prestream.extras.get('layout_digest', 'UNAVAILABLE')}")
-                if not args.diagnostic_continue:
-                    _chain_ok = False
-                    plan.append(_upstream_signoff_not_measured(
-                        "gds", _prestream_refusal))
+                _chain_ok = False
+                plan.append(_upstream_signoff_not_measured(
+                    "gds", _prestream_refusal))
         if _chain_ok:
             # #593 — the GDS is derived from the DEF, so it shares the
             # PnR geometry cache verdict: a geometry change that forced a
@@ -70375,8 +70433,7 @@ def main() -> int:
         # exists to stop.
         _pnr_result = next((s for s in reversed(plan) if s.name == "pnr"), None)
         _gds_result = next((s for s in reversed(plan) if s.name == "gds"), None)
-        _layout_refusal = ("" if args.diagnostic_continue and _prestream_refusal
-                           else _prestream_refusal) or _layout_signoff_refusal(
+        _layout_refusal = _prestream_refusal or _layout_signoff_refusal(
             project, effective_top, _pnr_result, _gds_result,
             _RUN_STARTED_AT)
         if _layout_refusal:
@@ -70518,7 +70575,10 @@ def main() -> int:
     # not signing off on it. A refusal here is printed and does not withhold the
     # release, because each step's own yaml clause still decides it in the audit.
     _pre_audit_rows: List[StepResult] = []
-    if not _layout_refusal:
+    if _layout_refusal:
+        plan.append(_upstream_signoff_not_measured(
+            "foundry_handoff", _layout_refusal))
+    else:
         _pre_audit_rows = run_pre_audit_producers(
             project, args.container, skip_names=("gds_xor",))
         _pre_audit_rows.extend(_xor_rows)
