@@ -904,6 +904,9 @@ SINGLE_ENTRY_STEPS_AS_MEASURED: Tuple[str, ...] = (
     # recomputed on this tree: 25 members. The recomputation's by-product is
     # recorded too, and the gate itself measured it: 'pinned but NO LONGER
     # single-entry: []' — no other member had gone stale in the meantime.
+    # 2026-09-25: re-derived from the live required_outputs accessor after
+    # Steps 17 and 22 declared the gate JSON files their runner consumes.
+    # Both now have two entries and leave the single-entry population.
     "1",
     "8",
     "FS1",
@@ -917,9 +920,7 @@ SINGLE_ENTRY_STEPS_AS_MEASURED: Tuple[str, ...] = (
     "A7",
     "A9",
     "16",
-    "17",
     "20",
-    "22",
     "DT2",
     "DT3",
     "35",
