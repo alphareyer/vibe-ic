@@ -4139,9 +4139,16 @@ def _check_antenna(project_dir: Path) -> AuditResult:
     #   "Found N net violations." / "Found M pin violations."
     #   "antenna check: N net violations, M pin violations"
     #   "antenna clean: YES|NO"
-    found_re = re.compile(r"Found\s+(\d+)\s+(net|pin|antenna)\s+violation", re.I)
-    pair_re = re.compile(r"(\d+)\s+net\s+violations?,?\s+(\d+)\s+pin\s+violations?", re.I)
-    clean_re = re.compile(r"antenna\s+clean\s*:\s*(YES|NO|TRUE|FALSE)", re.I)
+    # These are whole machine-written lines, not phrases inside a comment or
+    # diagnostic sentence. In particular, "Not Found 0 ..." is no count.
+    found_re = re.compile(
+        r"^(?:\[INFO ANT-[0-9]{4}\][ \t]+)?Found[ \t]+(\d+)"
+        r"[ \t]+(net|pin|antenna)[ \t]+violations?\.?[ \t]*$", re.I | re.M)
+    pair_re = re.compile(
+        r"^antenna check:[ \t]+(\d+)[ \t]+net[ \t]+violations?,?"
+        r"[ \t]+(\d+)[ \t]+pin[ \t]+violations?[ \t]*$", re.I | re.M)
+    clean_re = re.compile(
+        r"^antenna clean:[ \t]*(YES|NO|TRUE|FALSE)[ \t]*$", re.I | re.M)
     total_viol = None
     clean_flag = None
     best_file = ""

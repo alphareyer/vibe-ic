@@ -1202,6 +1202,18 @@ _NOT_PROSE: Dict[str, str] = {
         "checks that such an annotated line yields NOT_MEASURED. The ring "
         "refusal and inert records are separate productions, not alternative "
         "polarity for the gap field.",
+    "eda_report_audit::_check_antenna":
+        "The counts are machine-written whole-line records from OpenROAD "
+        "check_antennas or the runner's report writer. Accepted grammar is "
+        "`[INFO ANT-0002] Found 2 net violations.` (also a bare `Found` "
+        "line), `antenna check: 2 net violations, 1 pin violations`, or "
+        "`antenna clean: NO`; each numeric/status field is anchored at both "
+        "line ends with no free-text field. Negative example: `Not Found 0 "
+        "net violations.` and `antenna not clean: YES` do not match any "
+        "production and cannot declare zero or clean. The companion antenna "
+        "test executes the audit on these denial lines and expects no count. "
+        "A report with no recognized production is refused for lack of a count; a "
+        "negation cannot be interpreted as a clean result.",
     "phase3_one_shot_runner::_pdn_em_width_floor":
         "The matches read machine-produced EM report fields plus the LEF "
         "MANUFACTURINGGRID production. These formal measurement grammars cannot "

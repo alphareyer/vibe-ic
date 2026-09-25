@@ -10,6 +10,7 @@ sys.path.insert(0, str(PROGRAMS))
 import phase3_one_shot_runner as runner  # noqa: E402
 import general_precheck as precheck  # noqa: E402
 from antenna_report_check import main as antenna_main, build_argv  # noqa: E402
+from eda_report_audit import _check_antenna  # noqa: E402
 
 
 def test_repair_reads_exact_io_liberty_in_each_signoff_scene(tmp_path):
@@ -83,3 +84,19 @@ def test_antenna_report_log_tail_does_not_double_count(tmp_path):
                                     "reports/phase3/antenna.rpt",
                                     "--json", str(out)])) != 0
     assert json.loads(out.read_text())["summary"]["violations"] == 2
+
+
+def test_antenna_denial_sentences_cannot_declare_zero_or_clean(tmp_path):
+    reports = tmp_path / "reports/phase3"
+    reports.mkdir(parents=True)
+    (reports / "antenna.rpt").write_text(
+        "# OpenROAD check_antennas diagnostic transcript\n"
+        "Not Found 0 net violations.\n"
+        "Not Found 0 pin violations.\n"
+        "antenna not clean: YES\n"
+        "Antenna check: not 0 net violations, 0 pin violations\n"
+        + "# tool output\n" * 20)
+    result = _check_antenna(tmp_path)
+    assert result.passed is False
+    assert result.summary["violations"] is None
+    assert any(f.rule == "ANTENNA_VIOLATION_COUNT" for f in result.findings)
