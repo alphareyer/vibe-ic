@@ -70713,6 +70713,18 @@ def main() -> int:
     for gen, kind in _DERIVED_ARTEFACT_GENERATORS:
         gen_path = PROGRAMS_DIR / gen
         if gen_path.is_file():
+            if gen == "foundry_handoff_pack_gen.py":
+                import foundry_handoff_package_check as _handoff_check
+                sources = _handoff_check.layout_member_sources(project)
+                if ((_ga.visible_gds(project) or _ga.gate_record(project))
+                        and not _ga.admitted_package_sources(project, sources)):
+                    _ga.quarantine_visible_gds(
+                        project, "foundry handoff: current layout admission absent")
+                    _ga.quarantine_handoff_package(
+                        project, "foundry handoff: current layout admission absent")
+                    print("[WARN] foundry handoff skipped: current digest-bound "
+                          "GDS admission absent", file=sys.stderr)
+                    continue
             cmd = [sys.executable, str(gen_path), str(project)]
             # #467: hand the resolved top to the handoff generator as the
             # design_top fallback (used only when L1 ic_name is empty).

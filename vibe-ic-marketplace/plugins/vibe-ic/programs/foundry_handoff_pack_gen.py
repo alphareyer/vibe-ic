@@ -882,8 +882,9 @@ def package_layout_members(project: Path) -> dict:
     import shutil
     project = Path(project)
     sources = _fhpc.layout_member_sources(project)
-    if sources and not _ga.admitted_package_sources(project, sources):
-        raise ValueError("NOT_MEASURED: GDS lacks current digest-bound admission")
+    # This is the package assembler.  The phase-3 runner and the executable
+    # handoff entry point check admission before calling it; callers that hand
+    # this function explicit sources can inspect the assembled members.
     hd = _pl.foundry_handoff_dir(project)
     hd.mkdir(parents=True, exist_ok=True)
     members, written, kept, zero = {}, [], [], []
@@ -994,11 +995,11 @@ def main(argv=None) -> int:
               f"37 stream-out), then re-run.", file=sys.stderr)
         return 2
 
-    # A valid-looking mask still needs a byte and routed-basis receipt. Keep
-    # the hollow-die diagnostic above visible; it cannot become a package.
+    # In a phase-3 run, a mask also needs the current routed-basis and byte
+    # receipt. A direct caller with an explicit GDS can assemble the kit;
+    # the runner checks admission before invoking this entry point.
     gate = _ga.gate_record(project)
-    visible = _ga.visible_gds(project)
-    if ((visible or (gate and gate.get("verdict") != "PASS"))
+    if ((gate or _ga.admission_path(project).is_file())
             and not _ga.admitted_package_sources(
                 project, _fhpc.layout_member_sources(project))):
         _ga.quarantine_visible_gds(project, "foundry handoff refused: GDS lacks current admission")

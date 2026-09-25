@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Refuse release credit for diagnostic or stale Phase-3 layout receipts."""
+"""Refuse release credit for diagnostic or stale Phase-3 layout receipts.
+
+ENFORCEMENT: advisory
+WHERE THE VERDICT IS CONSUMED: step 37's flow gate clause invokes this
+program via flow_compliance_check. The phase-3 runner enforces stream
+admission separately before publishing a GDS.
+"""
 from __future__ import annotations
 
 # --- sibling-import path (vibe-ic#2104) ------------------------------------

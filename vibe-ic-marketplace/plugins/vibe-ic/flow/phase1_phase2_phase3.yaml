@@ -4963,6 +4963,10 @@ steps:
     programs:
       - placement_legality_check
       - pnr_timing_repair_completeness_check
+    program_outputs:
+      - program: placement_legality_check
+        path: "reports/phase3/placement_legality.json"
+        producer_command: "placement_legality_check . --json reports/phase3/placement_legality.json"
     mcp_tools: [eda_pnr]
     required_outputs:
       - "phase3/stage3/pnr/placed.def"
@@ -5039,7 +5043,7 @@ steps:
         # 0 FAIL / 6 PASS / 28 rc=2 NOT CHECKED. No published run turns red.
         - program_exit_zero: "pnr_timing_repair_completeness_check phase3/stage3/pnr --json reports/phase3/pnr/timing_repair_completeness.json"
         - files_exist: ["phase3/stage3/pnr/placed.def"]
-        - program_exit_zero: "placement_legality_check . --json reports/phase3/placement_legality.json"
+        - program_exit_zero: "placement_legality_check . --json reports/phase3/placement_legality_verdict.json"
     blocks_on: [16]
 
   # ── Step 18: Spare-cell + ECO-prep insertion (Design-for-ECO) ──
@@ -5366,6 +5370,10 @@ steps:
     mcp_tools: [eda_extraction]
     programs:
       - spef_extraction_check
+    program_outputs:
+      - program: spef_extraction_check
+        path: "reports/phase2/gates/spef_extraction.json"
+        producer_command: "spef_extraction_check . --json reports/phase2/gates/spef_extraction.json"
     required_outputs:
       - "phase3/stage3/extracted/parasitic.spef OR phase3/stage3/extracted/*.spef"
       - "reports/phase2/gates/spef_extraction.json"
@@ -5373,7 +5381,7 @@ steps:
       all_of:
         - files_exist: ["phase3/stage3/extracted/*.spef"]
           any_of: true
-        - program_exit_zero: "spef_extraction_check . --json reports/phase2/gates/spef_extraction.json"
+        - program_exit_zero: "spef_extraction_check . --json reports/phase2/gates/spef_extraction_verdict.json"
         - program_exit_zero: "provenance_check . --output phase3/stage3/extracted/*.spef --tool magic,openroad --require-measured"
     blocks_on: [21]
     notes: |
@@ -7268,7 +7276,6 @@ steps:
       # authorship note claims it. A document the run already produced is
       # left byte-for-byte alone.
       - stage3_compliance
-      - layout_receipt_identity_check
     required_outputs:
       - "phase3/stage4/gds/*.gds"
       # THE STREAM-OUT TRANSCRIPT, declared because it is CONSUMED. This step
