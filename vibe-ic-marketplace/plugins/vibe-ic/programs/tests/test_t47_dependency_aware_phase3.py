@@ -59,18 +59,17 @@ def _run(tmp_path, monkeypatch, *, gate_pass: bool, diagnostic: bool = False,
             raising=False)
     if verify_xor_parallel:
         rendezvous = threading.Barrier(2, timeout=15)
+        real_signoff = R.step_declared_signoff_gates
+        real_producers = R.run_pre_audit_producers
 
         def signoff(*a, **k):
             rendezvous.wait()
-            return [R.StepResult("tapeout_precheck", "PASS", 0.0,
-                                 "frozen GDS read")]
+            return real_signoff(*a, **k)
 
         def producers(*a, **k):
             if k.get("only_names") == ("gds_xor",):
                 rendezvous.wait()
-                return [R.StepResult("gds_xor", "PASS", 0.0,
-                                     "frozen GDS read")]
-            return []
+            return real_producers(*a, **k)
 
         monkeypatch.setattr(R, "step_declared_signoff_gates", signoff)
         monkeypatch.setattr(R, "run_pre_audit_producers", producers)
