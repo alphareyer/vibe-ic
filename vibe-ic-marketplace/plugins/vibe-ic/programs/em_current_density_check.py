@@ -281,6 +281,8 @@ def _iter_csv_segments(em_path: Path, net_hint: Optional[str]
         i_cur = find("current")
         i_w = find("width")
         i_net = find("net")
+        i_x0, i_y0 = find("node0", "x location"), find("node0", "y location")
+        i_x1, i_y1 = find("node1", "x location"), find("node1", "y location")
         if i_l0 is None or i_cur is None:
             return  # not a per-segment EM CSV
         for row in reader:
@@ -295,7 +297,12 @@ def _iter_csv_segments(em_path: Path, net_hint: Optional[str]
             net = (row[i_net].strip() if (i_net is not None and len(row) > i_net)
                    else (net_hint or "unknown"))
             yield {"net": net, "layer0": layer0, "layer1": layer1,
-                   "current_A": abs(cur), "width_um": width}
+                   "current_A": abs(cur), "width_um": width,
+                   "points_um": (
+                       ((_num(row[i_x0]), _num(row[i_y0])),
+                        (_num(row[i_x1]), _num(row[i_y1])))
+                       if all(i is not None and len(row) > i
+                              for i in (i_x0, i_y0, i_x1, i_y1)) else None)}
 
 
 def _iter_json_segments(data: Any, net_hint: Optional[str]
@@ -364,13 +371,96 @@ def iter_segments(em_path: Path, net_hint: Optional[str]
 # Dividing by a lower bound OVERSTATES J, so this bound can only ADD
 # offenders relative to the truth, never hide one: a PASS through it is
 # trustworthy, and it is strictly less pessimistic than the LEF default
-# (every legal wire is >= the LEF minimum). Width preference order is
-# csv > def_specialnets > lef_default, each segment recording its source.
+# (every legal wire is >= the LEF minimum). A prospective offender can use
+# a narrower-of-route-and-chord local width only when the measured DEF's
+# same-net wire covers the entire edge. Otherwise the layer bound stands.
+# Width preference order is csv > proven local DEF > layer DEF min > LEF.
 # chip-AGNOSTIC: DEF grammar only.
 _DEF_DBU_RE = re.compile(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)")
 _DEF_SNET_SECTION_RE = re.compile(r"SPECIALNETS\b(.*?)END\s+SPECIALNETS",
                                   re.DOTALL)
 _DEF_SNET_WIRE_RE = re.compile(r"(?:^|[+\s])(?:ROUTED|NEW)\s+(\S+)\s+(\d+)\b")
+_DEF_LOCAL_WIRE_RE = re.compile(
+    r"(?:ROUTED|NEW)\s+(\S+)\s+(\d+)\s+\+\s+SHAPE\s+"
+    r"(?:STRIPE|RING|FOLLOWPIN)\s+"
+    r"\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)")
+
+
+def _def_pg_local_rects(def_path: Path) -> Dict[Tuple[str, str], List[Tuple[float, ...]]]:
+    """Same-net DEF wire rectangles. Unparsed geometry stays on the old bound."""
+    try:
+        txt = def_path.read_text(errors="replace")
+    except OSError:
+        return {}
+    dbm = _DEF_DBU_RE.search(txt)
+    sm = _DEF_SNET_SECTION_RE.search(txt)
+    if not dbm or not sm or int(dbm.group(1)) <= 0:
+        return {}
+    dbu = int(dbm.group(1))
+    out: Dict[Tuple[str, str], List[Tuple[float, ...]]] = {}
+    for statement in sm.group(1).split(";"):
+        nm = re.match(r"\s*-\s+(\S+)", statement)
+        if not nm:
+            continue
+        net = nm.group(1).lower()
+        for m in _DEF_LOCAL_WIRE_RE.finditer(statement):
+            layer, raw_w, *raw_xy = m.groups()
+            width = int(raw_w) / dbu
+            if width <= 0:
+                continue
+            x0, y0, x1, y1 = (int(v) / dbu for v in raw_xy)
+            # DEF routes are Manhattan. A diagonal or unsupported path cannot
+            # establish a cross section, so leave its conservative bound.
+            if x0 != x1 and y0 != y1:
+                continue
+            half = width / 2
+            out.setdefault((net, layer.lower()), []).append(
+                (min(x0, x1) - half, min(y0, y1) - half,
+                 max(x0, x1) + half, max(y0, y1) + half, width))
+    return out
+
+
+def _def_segment_supported_width(
+        seg: Dict[str, Any], rects: Dict[Tuple[str, str], List[Tuple[float, ...]]]
+        ) -> Optional[float]:
+    """A width is proven only if one same-net metal rectangle covers both ends."""
+    pts = seg.get("points_um")
+    if not pts or any(v is None for point in pts for v in point):
+        return None
+    (x0, y0), (x1, y1) = pts
+    length = math.hypot(x1 - x0, y1 - y0)
+    if length <= 0:
+        return None
+    nx, ny = -(y1 - y0) / length, (x1 - x0) / length
+
+    def chord(x, y, box):
+        lx, ly, hx, hy, _ = box
+        limits = []
+        for pos, direction, lo, hi in ((x, nx, lx, hx), (y, ny, ly, hy)):
+            if abs(direction) < 1e-12:
+                if not lo <= pos <= hi:
+                    return 0.0
+            else:
+                a, b = (lo - pos) / direction, (hi - pos) / direction
+                limits.append((min(a, b), max(a, b)))
+        return (min(v[1] for v in limits) - max(v[0] for v in limits)
+                if limits else 0.0)
+
+    matches = []
+    for box in rects.get(
+            (str(seg["net"]).lower(), str(seg["layer0"]).lower()), []):
+        lx, ly, hx, hy, width = box
+        if all(lx - 1e-6 <= x <= hx + 1e-6 and
+               ly - 1e-6 <= y <= hy + 1e-6 for x, y in pts):
+            # Near a wire end or corner, the metal chord perpendicular to
+            # current can be narrower than the declared route width. A
+            # rectangle's chord varies linearly along this edge, so its
+            # smaller endpoint chord bounds the whole edge from below.
+            matches.append(min(width, chord(x0, y0, box),
+                               chord(x1, y1, box)))
+    # Multiple overlapping wires can carry an edge. The narrowest proven
+    # covering wire is conservative; a missing match retains the layer bound.
+    return min(matches) if matches and min(matches) > 0 else None
 
 
 def _def_pg_widths_of(def_path: Path) -> Dict[str, float]:
@@ -533,7 +623,8 @@ def _lifetime_ratio(util: float, n: float) -> Optional[float]:
 def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
              tech_lef: Optional[Path], margin: float, blacks_n: float,
              net_hint: Optional[str], top_offenders: int,
-             def_widths: Optional[Dict[str, float]] = None
+             def_widths: Optional[Dict[str, float]] = None,
+             def_path: Optional[Path] = None
              ) -> Tuple[str, Dict[str, Any]]:
     """Return (verdict, report). verdict in {PASS, FAIL, SKIPPED}."""
     rep: Dict[str, Any] = {
@@ -583,9 +674,23 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
     per_layer: Dict[str, Dict[str, Any]] = {}
     unscreened_reasons: Dict[str, int] = {}
 
+    local_rects = _def_pg_local_rects(def_path) if def_path else {}
+    local_width_uses = 0
     for seg in segs:
         n_total += 1
         r = _screen_segment(seg, table, margin, blacks_n, def_widths)
+        # The per-layer minimum is a sound PASS bound but can falsely FAIL a
+        # wide stripe because an unrelated narrow ring also uses this layer.
+        # Resolve only prospective offenders, only against a same-net DEF
+        # rectangle covering the WHOLE CSV edge. Otherwise keep the bound.
+        if (r["status"] == "offender" and not seg.get("width_um") and
+                seg["layer0"].lower() == seg["layer1"].lower()):
+            local_w = _def_segment_supported_width(seg, local_rects)
+            if local_w and local_w > (r.get("width_um") or 0):
+                local_seg = dict(seg, width_um=local_w)
+                r = _screen_segment(local_seg, table, margin, blacks_n, def_widths)
+                r["width_source"] = "def_same_net_covering_wire"
+                local_width_uses += 1
         if r["status"] == "unscreened":
             n_unscreened += 1
             unscreened_reasons[r["reason"]] = unscreened_reasons.get(r["reason"], 0) + 1
@@ -614,6 +719,7 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
                           "max_utilization": round(v["max_utilization"], 6)}
                       for k, v in sorted(per_layer.items())},
         "jmax_layers": sorted(e["orig_name"] for e in table.values()),
+        "local_def_width_uses": local_width_uses,
     }
 
     # (3b) report present + Jmax present but nothing mapped → SKIPPED, never PASS
