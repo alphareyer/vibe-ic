@@ -7640,8 +7640,18 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
         log_path = pnr_out / "openroad.log"
         try:
             log_text = log_path.read_text(errors="replace")
-            gap_matches = re.findall(r"PDN_PAD_RING_PLAN:[^\n]*?gap=([0-9.]+)um",
-                                     log_text)
+            # Read only the complete record emitted by
+            # `_pad_connected_ring_tcl`.  A loose search for `gap=` could
+            # borrow a number from an unrelated or annotated log sentence.
+            gap_matches = re.findall(
+                r"^PDN_PAD_RING_PLAN: placed_pads=[0-9]+ "
+                r"power_pads=[0-9]+ side_power_pads=[0-9]+ "
+                r"gap=([0-9]+(?:\.[0-9]+)?)um "
+                r"configured_offset=[0-9.]+um fitted_offset=[0-9.]+um "
+                r"footprint=[0-9.]+um clearance=[0-9.]+um "
+                r"layers=[A-Za-z_][A-Za-z_0-9]*(?: [A-Za-z_][A-Za-z_0-9]*)* "
+                r"pad_layers=[A-Za-z_][A-Za-z_0-9]*(?: [A-Za-z_][A-Za-z_0-9]*)*$",
+                log_text, re.M)
             if not gap_matches and "PDN_PAD_RING_INERT" not in log_text:
                 return decline("PDN_EM_RING_CAPACITY_NOT_MEASURED: "
                                "no pad-to-core gap in PnR log")

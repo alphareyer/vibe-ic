@@ -192,8 +192,13 @@ def test_ring_recipe_is_refused_when_measured_em_width_cannot_fit(
         "UNITS DISTANCE MICRONS 1000 ;\nSPECIALNETS 1 ;\n"
         "- SUP + ROUTED Metal4 1600 + SHAPE RING "
         "( 10000 0 ) ( 10000 20000 ) ;\nEND SPECIALNETS\n")
-    (R._pl.pnr_dir(project) / "openroad.log").write_text(
-        "PDN_PAD_RING_PLAN: gap=17.44um footprint=4.9um\n")
+    log_path = R._pl.pnr_dir(project) / "openroad.log"
+    plan_record = (
+        "PDN_PAD_RING_PLAN: placed_pads=4 power_pads=2 side_power_pads=2 "
+        "gap=17.44um configured_offset=6um fitted_offset=6um "
+        "footprint=4.9um clearance=0.46um "
+        "layers=Metal4 Metal5 pad_layers=Metal2")
+    log_path.write_text(plan_record + "\n")
     (R._pl.reports_phase3_dir(project) / "em_segments.csv").write_text(
         "Node0 Layer,Node0 X location,Node0 Y location,Node1 Layer,"
         "Node1 X location,Node1 Y location,Current\n"
@@ -207,6 +212,14 @@ def test_ring_recipe_is_refused_when_measured_em_width_cannot_fit(
         project, "spm", SimpleNamespace(pdn_ring=cfg), "c", reasons) is None
     assert "PDN_EM_RING_CAPACITY_UNREACHABLE" in reasons[0]
     assert "39.38" in reasons[0]
+
+    # The gap is a field of this complete tool record. A denial spliced into
+    # the line makes it invalid; the same 17.44 must not size the ring.
+    log_path.write_text(plan_record.replace("gap=", "not gap=") + "\n")
+    reasons.clear()
+    assert R._pdn_em_first_pass_resize(
+        project, "spm", SimpleNamespace(pdn_ring=cfg), "c", reasons) is None
+    assert "PDN_EM_RING_CAPACITY_NOT_MEASURED" in reasons[0]
 
 
 def test_configured_ring_with_no_placed_pads_keeps_core_resize(
