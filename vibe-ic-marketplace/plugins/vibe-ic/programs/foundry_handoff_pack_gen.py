@@ -77,6 +77,7 @@ import plugin_manifest_discovery as _pmd  # noqa: E402  (#800 ONE version reader
 import foundry_handoff_package_check as _fhpc  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _atomic_artefact as _aa  # noqa: E402  (vibe-ic#1082)
+import _gds_admission as _ga  # noqa: E402
 
 
 def _read_text(p: Path) -> str:
@@ -880,10 +881,14 @@ def package_layout_members(project: Path) -> dict:
     import os
     import shutil
     project = Path(project)
+    sources = _fhpc.layout_member_sources(project)
+    # This is the package assembler.  The phase-3 runner and the executable
+    # handoff entry point check admission before calling it; callers that hand
+    # this function explicit sources can inspect the assembled members.
     hd = _pl.foundry_handoff_dir(project)
     hd.mkdir(parents=True, exist_ok=True)
     members, written, kept, zero = {}, [], [], []
-    for name, src in _fhpc.layout_member_sources(project).items():
+    for name, src in sources.items():
         if src.stat().st_size == 0:
             zero.append(name)
             continue
@@ -983,9 +988,24 @@ def main(argv=None) -> int:
     _gds, _rule, _detail = _fhpc.packageable_chip_gds(project)
     if _rule is not None and (_rule != _fhpc.RULE_NO_CHIP_GDS
                               or _fhpc.gds_files_on_disk(project)):
+        _ga.quarantine_visible_gds(project, f"foundry handoff refused: {_rule}")
+        _ga.quarantine_handoff_package(project, f"foundry handoff refused: {_rule}")
         print(f"VACUOUS_PASS: {_rule}: {_detail} Refusing to write a foundry "
               f"handoff pack. Produce the sign-off GDS first (canonical step "
               f"37 stream-out), then re-run.", file=sys.stderr)
+        return 2
+
+    # In a phase-3 run, a mask also needs the current routed-basis and byte
+    # receipt. A direct caller with an explicit GDS can assemble the kit;
+    # the runner checks admission before invoking this entry point.
+    gate = _ga.gate_record(project)
+    if ((gate or _ga.admission_path(project).is_file())
+            and not _ga.admitted_package_sources(
+                project, _fhpc.layout_member_sources(project))):
+        _ga.quarantine_visible_gds(project, "foundry handoff refused: GDS lacks current admission")
+        _ga.quarantine_handoff_package(project, "foundry handoff refused: GDS lacks current admission")
+        print("NOT_MEASURED: GDS admission refused foundry handoff; "
+              "no GDS packaged", file=sys.stderr)
         return 2
 
     handoff_dir = _pl.foundry_handoff_dir(project)

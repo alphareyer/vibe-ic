@@ -69,11 +69,11 @@ OR a sim ``*.log`` OR a ``pass.flag``; a ``drc_clean.flag`` OR a ``.lyrdb``).
 The consumer splits on the literal ``" OR "`` (spaces included) and strips each
 alternative — :func:`split_any_of` reproduces exactly that.
 
-Live entry census — 190<!--figure:required_output_entries--> entries over
+Live entry census — 193<!--figure:required_output_entries--> entries over
 68<!--figure:required_output_steps--> steps, classified by
 :func:`classify_output` (digits derived; see the anchor note in §1):
 
-    FILE          136<!--figure:required_outputs_file-->
+    FILE          139<!--figure:required_outputs_file-->
         plain relative path, no wildcard, no " OR "
     GLOB          28<!--figure:required_outputs_glob-->
         wildcard, no " OR " (e.g. ``phase1/generated_docs/L13_*.json``)
@@ -85,7 +85,7 @@ Live entry census — 190<!--figure:required_output_entries--> entries over
 
 **Contradiction with the brief, reported deliberately**: there is NO
 ``program_exit_zero: "<cmd>"`` form anywhere in ``required_outputs``. All
-190<!--figure:required_output_entries--> entries are plain strings; not one contains the token ``program_exit_zero``.
+193<!--figure:required_output_entries--> entries are plain strings; not one contains the token ``program_exit_zero``.
 That form exists only inside ``gate`` clauses (§3). :data:`PROGRAM_EXIT` is
 still returned by :func:`classify_output` for forward compatibility, but on the
 current yaml it never fires — a sibling that branches on it is writing dead
@@ -121,14 +121,14 @@ replaces a hand-counted table of raw ``all_of`` members: the raw table counted
 a different population from the accessor this module tells you to use, so the
 two could not be reconciled by a reader and only one of them was derived.
 
-    program_exit_zero          138<!--figure:gate_clauses_program_exit_zero-->  MANDATORY
+    program_exit_zero          139<!--figure:gate_clauses_program_exit_zero-->  MANDATORY
     advisory_program_exit_zero 77<!--figure:gate_clauses_advisory_program_exit_zero-->  NON-BLOCKING
     files_exist                33<!--figure:gate_clauses_files_exist-->
     optional_program_exit_zero 27<!--figure:gate_clauses_optional_program_exit_zero-->  conditional
     json_field_true             1<!--figure:gate_clauses_json_field_true-->
     ------------------------------
-    total                     276<!--figure:gate_clauses_total-->, of which
-                              199<!--figure:blocking_clauses--> block
+    total                     277<!--figure:gate_clauses_total-->, of which
+                              200<!--figure:blocking_clauses--> block
 
 Three different exit-zero kinds with three different force levels:
   * ``program_exit_zero``          — blocking.
@@ -143,8 +143,8 @@ Use :func:`gate_clauses` (typed) rather than re-walking the dict.
 4. Program resolution
 --------------------------------------------------------------------
 A gate command's FIRST whitespace token is the program basename. Of the
-220<!--figure:gate_program_tokens_distinct--> distinct tokens across the
-242<!--figure:gate_commands_total--> gate commands, all but
+221<!--figure:gate_program_tokens_distinct--> distinct tokens across the
+243<!--figure:gate_commands_total--> gate commands, all but
 0<!--figure:gate_programs_unresolved--> resolve to ``programs/<token>.py``, and
 zero commands shell out via ``python3 <file>``. This figure is the live count
 of gates naming a program that does not exist. It went 0 -> 3 when the
@@ -166,8 +166,8 @@ other gated steps already resolved at least one program.
 --------------------------------------------------------------------
 5. ``blocks_on``
 --------------------------------------------------------------------
-111<!--figure:blocks_on_edges--> edges, mixed types
-(87<!--figure:blocks_on_edges_int--> int, 24<!--figure:blocks_on_edges_str--> str),
+112<!--figure:blocks_on_edges--> edges, mixed types
+(88<!--figure:blocks_on_edges_int--> int, 24<!--figure:blocks_on_edges_str--> str),
 every target resolving to a declared step id — no dangling references at time of writing. Compare with
 :func:`normalize_id` on both sides; the real consumers stringify
 (``{str(id): [str(e) for e in blocks_on]}``).

@@ -113,6 +113,7 @@ def _span_inputs(project, top: str = "top") -> None:
         ("phase2/stage2/synth/%s_synth.v" % top,
          "module %s(); endmodule\n" % top),
         ("phase3/stage3/pnr/routed.def", "VERSION 5.8 ;\nEND DESIGN\n"),
+        ("phase3/stage3/pnr/constraint.sdc", "create_clock -period 10\n"),
         ("phase3/stage3/pnr/spare_cells.json", "{}\n"),
         ("phase3/stage3/extracted/parasitic.spef", "*SPEF\n"),
     ):
@@ -248,6 +249,15 @@ def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
     # describes, and the clause remains able to fire -- a stale record still
     # invalidates the cache, which is that clause's own suite's subject.
     _pad_ring_evidence(tmp_path)
+    # This previous run's mask has both a byte receipt and a PASS gate for
+    # the exact routed basis. The cache assertion below is unchanged from #593.
+    basis, error = R._layout_basis(tmp_path, TOP, _pdk(tmp_path), "")
+    assert not error, error
+    gate = R._pl.reports_phase3_dir(tmp_path) / "prestream_gate.json"
+    gate.parent.mkdir(parents=True, exist_ok=True)
+    gate.write_text(json.dumps({"verdict": "PASS", "layout_digest": basis}) + "\n")
+    R._ga.admit_gds(tmp_path, pnr / f"{TOP}.gds", basis,
+                    R._layout_basis_paths(tmp_path, TOP))
     return tmp_path
 
 
@@ -276,9 +286,14 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
         out.mkdir(parents=True, exist_ok=True)
         # A real re-run rewrites the DEF and the geometry sidecar.
         w, _, h = die_um.partition("x")
-        (out / f"{top}.def").write_text(
-            f"DIEAREA ( 0 0 ) ( {int(float(w)) * 1000} "
-            f"{int(float(h)) * 1000} ) ;\nPINS 0 ;\nEND PINS\n")
+        dest = out / f"{top}.def"
+        lines = dest.read_text().splitlines(keepends=True) if dest.is_file() else []
+        area = (f"DIEAREA ( 0 0 ) ( {int(float(w)) * 1000} "
+                f"{int(float(h)) * 1000} ) ;\n")
+        # A repeated PnR run changes the requested die; it does not silently
+        # erase already placed pins from this pad-side fixture.
+        lines = [area if line.startswith("DIEAREA ") else line for line in lines]
+        dest.write_text("".join(lines) if lines else area + "PINS 0 ;\nEND PINS\n")
         R._write_pnr_args_sidecar(out, die_um, u)
         return R.StepResult("pnr", "PASS", 0.0,
                             f"PnR OK: routed {die_um} (re-ran: geometry changed)")
@@ -309,6 +324,20 @@ def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
     monkeypatch.setattr(R, "step_signoff_spef_repair", lambda *a, **k: None)
     monkeypatch.setattr(R, "step_signoff_drv_wire_length_repair",
                         lambda *a, **k: None)
+    # This suite owns the geometry-cache decision. Its synthetic DEF has no
+    # extracted STA, IR/EM or antenna evidence, so the independent pre-stream
+    # admission is supplied as an already-measured PASS for this fixture.
+    # T47's runner tests exercise that gate's blocking/diagnostic branches.
+    def _fake_gate(proj, top, pdk, container):
+        basis, error = R._layout_basis(proj, top, pdk, container)
+        assert not error, error
+        gate = R._pl.reports_phase3_dir(proj) / "prestream_gate.json"
+        gate.parent.mkdir(parents=True, exist_ok=True)
+        gate.write_text(json.dumps({"verdict": "PASS", "layout_digest": basis}) + "\n")
+        return R.StepResult("prestream_gate", "PASS", 0.0,
+                            "fixture's routed basis admitted",
+                            extras={"layout_digest": basis})
+    monkeypatch.setattr(R, "step_prestream_gate", _fake_gate)
 
     monkeypatch.setattr(R, "_detect_pdk",
                         lambda *a, **k: _pdk(project))

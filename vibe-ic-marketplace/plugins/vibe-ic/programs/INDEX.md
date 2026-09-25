@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1341
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1341)
+- **Total programs (excluding helpers / shims):** 1342
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1342)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1332 |
+| `any` | 1333 |
 
 ## Alphabetical listing
 
@@ -706,6 +706,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `latency_conformance_check` | any | — | v1.0 plugin gate (ORGANIC #705). |
 | `layer_extension_presence_check` | any | v0.50 | v0.50 plugin gate |
 | `layer_membership_is_declared_not_inferred_from_a_filename_prefix` | any | — | A layer population selected by a filename prefix instead of by the relation. |
+| `layout_receipt_identity_check` | any | — | Refuse release credit for diagnostic or stale Phase-3 layout receipts. |
 | `leaf_typo_alias_emit` | any | v0.3.18 | v0.3.18 (ORGANIC #517). |
 | `lec_equivalence_check` | any | — | Step 13 deterministic LEC substance gate. |
 | `lec_gate_netlist_select` | any | — | Truthful diagnosis of a structural LEC abort. |
@@ -1413,7 +1414,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1332 programs)
+### `any` (1333 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2090,6 +2091,7 @@ _(no programs in this group)_
 - `latency_conformance_check` — v1.0 plugin gate (ORGANIC #705).
 - `layer_extension_presence_check` — v0.50 plugin gate  _[v0.50]_
 - `layer_membership_is_declared_not_inferred_from_a_filename_prefix` — A layer population selected by a filename prefix instead of by the relation.
+- `layout_receipt_identity_check` — Refuse release credit for diagnostic or stale Phase-3 layout receipts.
 - `leaf_typo_alias_emit` — v0.3.18 (ORGANIC #517).  _[v0.3.18]_
 - `lec_equivalence_check` — Step 13 deterministic LEC substance gate.
 - `lec_gate_netlist_select` — Truthful diagnosis of a structural LEC abort.

@@ -62,6 +62,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import functools
 import inspect
@@ -82,6 +83,7 @@ from typing import (Any, Callable, Dict, FrozenSet, Iterable, List, Mapping,
                     NamedTuple, Optional, Sequence, Set, Tuple)
 import _audit_scope
 import _path_layout as _pl
+import _gds_admission as _ga
 import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _prose_polarity as _pp
@@ -32767,6 +32769,7 @@ if {{[catch {{set _plv [check_placement -no_abort]}} _plv_e]}} {{
 }} else {{
   puts "PNR_PLACEMENT_VIOLATIONS: $_plv"
 }}
+{_routing_integrity_check_tcl("PRESTREAM")}
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 {min_area_patch_block}write_def {out_dir_c}/routed.def
 }} else {{
@@ -34195,6 +34198,8 @@ def _antenna_isolated_recovery_modified(log_text: str) -> bool:
     """The accepted isolated router verification must postdate every mutation."""
     _instrument_calibration.assert_calibrated(
         "phase3_one_shot_runner::_antenna_isolated_recovery_modified")
+    _instrument_calibration.assert_calibrated(
+        "phase3_one_shot_runner::_antenna_isolated_recovery_modified/post_verify_mutation")
     marker = "=== PNR ANTENNA ISOLATED ECO ==="
     if marker not in log_text:
         return True
@@ -34707,6 +34712,53 @@ def _pnr_session_products(out_dir: Path, out_dir_c: str, tcl_text: str,
 
 
 def _sdr_candidate_signoff_clean(project: Path, top: Optional[str],
+                                 pdk: Optional[PdkConfig], container: str,
+                                 evidence_dir: Optional[Path] = None
+                                 ) -> Tuple[bool, str]:
+    """Evaluate a candidate in private scratch, bound to its routed basis."""
+    if not top or pdk is None:
+        return False, "signoff_context_missing"
+    digest, refusal = _layout_basis(project, top, pdk, container)
+    if refusal:
+        return False, f"candidate_layout_basis:{refusal}"
+    scratch = project / "phase3" / "scratch" / "sdr_candidates"
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f"{digest[:16]}-", dir=scratch) as tmp:
+        shadow = Path(tmp) / "project"
+        shadow.mkdir()
+        # Copy every project tree so any helper side effects stay private.
+        # Reflinks avoid physical duplication on filesystems that support them.
+        for item in project.iterdir():
+            target = shadow / item.name
+            if item.name == "phase3":
+                (target / "scratch").mkdir(parents=True)
+                for stage in item.iterdir():
+                    if stage.name != "scratch":
+                        subprocess.run(["cp", "-a", "--reflink=auto", "--",
+                                        str(stage), str(target / stage.name)],
+                                       check=True)
+            elif item.is_dir():
+                subprocess.run(["cp", "-a", "--reflink=auto", "--",
+                                str(item), str(target)], check=True)
+            else:
+                shutil.copy2(item, target)
+        admitted, reason = _sdr_candidate_signoff_clean_in_shadow(
+            shadow, top, pdk, container, evidence_dir)
+        after, changed = _layout_basis(project, top, pdk, container)
+        if changed or after != digest:
+            admitted, reason = False, "candidate_layout_changed_during_signoff"
+        if evidence_dir is not None:
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            _aa.write_text(evidence_dir / "candidate_gds_admission.json",
+                           json.dumps({"kind": "PRIVATE_SDR_CANDIDATE",
+                                       "layout_digest": digest,
+                                       "admitted": admitted,
+                                       "reason": reason,
+                                       "scratch_removed": True}, indent=2) + "\n")
+        return admitted, reason
+
+
+def _sdr_candidate_signoff_clean_in_shadow(project: Path, top: Optional[str],
                                  pdk: Optional[PdkConfig],
                                  container: str,
                                  evidence_dir: Optional[Path] = None
@@ -34724,7 +34776,7 @@ def _sdr_candidate_signoff_clean(project: Path, top: Optional[str],
         return False, "signoff_deck_missing"
     try:
         started_ns = time.time_ns()
-        gds = step_gds(project, top, pdk, container)
+        gds = step_gds(project, top, pdk, container, candidate=True)
         layout = _pl.pnr_dir(project) / f"{top}.gds"
         if (gds.status != "PASS" or not layout.is_file()
                 or layout.stat().st_mtime_ns < started_ns):
@@ -45010,17 +45062,21 @@ def step_pad_ring_final_evidence(project: Path, top: str,
 
 
 def _pad_ring_route_cache_valid(project: Path, top: str) -> bool:
-    """A chip route is reusable only while its evidence hashes still bind."""
+    """Keep the landed GDS-hash check when a GDS exists.
+
+    Quarantining a mask leaves a valid routed DEF usable; a visible mask with
+    mismatched pad evidence still invalidates this cache as before.
+    """
     path = project / "reports" / "phase3" / "pad_ring_route_evidence.json"
     try:
         doc = json.loads(path.read_text())
         final_def = _pl.pnr_dir(project) / f"{top}.def"
         gds = _pl.pnr_dir(project) / f"{top}.gds"
         return (doc.get("verdict") == "PASS" and final_def.is_file()
-                and gds.is_file()
                 and doc.get("gds_source_def_sha256") == _sha256_file(final_def)
-                and (doc.get("gds_evidence") or {}).get("sha256")
-                == _sha256_file(gds))
+                and (not gds.is_file() or
+                     (doc.get("gds_evidence") or {}).get("sha256")
+                     == _sha256_file(gds)))
     except (OSError, ValueError, TypeError):
         return False
 
@@ -46039,8 +46095,18 @@ def publish_tapeout_declarations(project: Path, pdk: "PdkConfig",
 
 
 def step_gds(project: Path, top: str, pdk: PdkConfig,
-             container: str) -> StepResult:
+             container: str, *, candidate: bool = False) -> StepResult:
     t0 = time.time()
+    if candidate:
+        if "sdr_candidates" not in Path(project).parts:
+            return StepResult("gds", "NOT_MEASURED", 0.0,
+                              "candidate stream requires private SDR scratch")
+    else:
+        digest, refusal = _layout_basis(project, top, pdk, container)
+        if refusal or not _ga.gate_passed(project, digest):
+            return StepResult("gds", "NOT_MEASURED", 0.0,
+                              f"pre-stream gate refused this layout: {refusal or digest}",
+                              reason_class=_V.ReasonClass.UPSTREAM_FAILED)
     _vac = _vacuous_on_unrouted(project, "gds", t0)
     if _vac is not None:
         return _vac
@@ -53359,6 +53425,276 @@ def _upstream_signoff_not_measured(name: str, why: str) -> StepResult:
                       reason_class=_V.ReasonClass.UPSTREAM_FAILED)
 
 
+def _layout_basis(project: Path, top: str, pdk: PdkConfig,
+                  container: str) -> Tuple[str, str]:
+    """Content identity of the routed basis, with the shipped GDS when frozen."""
+    import _step_identity as _si
+    pnr = _pl.pnr_dir(project)
+    netlist = pnr_input_netlist(project, top)[0]
+    paths = {"def": pnr / "routed.def", "netlist": netlist,
+             "sdc": pnr / "constraint.sdc"}
+    missing = [f"{name}: {path}" for name, path in paths.items()
+               if not path.is_file()]
+    if missing:
+        return "", "missing layout input " + ", ".join(missing)
+    pdk_sha, why = _si.pdk_digest(
+        pdk, _step_pdk_hasher(container), project=project)
+    if not pdk_sha:
+        return "", "PDK identity unavailable: " + "; ".join(why)
+    parts = {name: _sha256_file(path) for name, path in paths.items()}
+    parts["pdk"] = pdk_sha
+    digest = hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
+    return digest, ""
+
+
+def _layout_basis_paths(project: Path, top: str) -> list[Path]:
+    pnr = _pl.pnr_dir(project)
+    return [pnr / "routed.def", pnr_input_netlist(project, top)[0],
+            pnr / "constraint.sdc"]
+
+
+def _shipped_layout_digest(project: Path, top: str) -> Tuple[str, str]:
+    """SHA-256 over the shipped GDS bytes followed by the routed DEF bytes."""
+    pnr = _pl.pnr_dir(project)
+    paths = (pnr / f"{top}.gds", pnr / "routed.def")
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        return "", "missing shipped layout: " + ", ".join(missing)
+    digest = hashlib.sha256()
+    try:
+        for path in paths:
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+    except OSError as exc:
+        return "", f"shipped layout unreadable: {exc}"
+    return digest.hexdigest(), ""
+
+
+_PRESTREAM_GATES = (
+    ("placement_legality", "placement_legality_check.py",
+     "reports/phase3/placement_legality.json", ()),
+    ("spef", "spef_extraction_check.py",
+     "reports/phase2/gates/spef_extraction.json", ()),
+    ("hold_corner", "hold_corner_coverage_check.py",
+     "reports/phase3/sta/hold_corner_coverage.json", ()),
+    ("sta_signoff", "sta_report_check.py",
+     "reports/phase3/sta/post_route_summary.json",
+     ("--mode", "sta") + _STEP23_STA_SCOPE),
+    ("sta_corner", "post_route_signoff_corner_check.py",
+     "reports/phase3/sta/post_route_signoff_corner.json", ()),
+    ("sta_record", "sta_corner_record_completeness_check.py",
+     "reports/phase3/sta/sta_corner_record_completeness.json", ()),
+    ("ir_drop", "ir_drop_report_check.py",
+     "reports/phase3/ir_drop_signoff.json", ("--mode", "ir_drop")),
+    ("em_signoff", "em_report_check.py",
+     "reports/phase3/em_signoff.json", ("--mode", "em")),
+    ("em_authority", "em_peak_current_authority_check.py",
+     "reports/phase3/em_current_authority.json", ()),
+    ("antenna", "antenna_report_check.py",
+     "reports/phase3/antenna_signoff.json", ("--mode", "antenna")),
+    ("si", "si_crosstalk_check.py",
+     "reports/phase2/gates/si_crosstalk.json", ()),
+    ("si_mcf", "si_mcf_sta_check.py",
+     "reports/phase3/si_mcf_sta_check.json", ()),
+)
+
+_FINAL_LAYOUT_GATES = (
+    ("erc_density", "erc_density_check.py",
+     "reports/phase3/erc_density_check.json", ()),
+    ("dfm_screen", "dfm_screen_check.py",
+     "reports/phase3/dfm_screen.json", ()),
+    ("ir_drop_final", "ir_drop_report_check.py",
+     "reports/phase3/ir_drop_signoff.json", ("--mode", "ir_drop")),
+    ("em_authority_final", "em_peak_current_authority_check.py",
+     "reports/phase3/em_current_authority.json", ()),
+    ("antenna_final", "antenna_report_check.py",
+     "reports/phase3/antenna_signoff.json", ("--mode", "antenna")),
+    # A router report cannot attest to antenna geometry introduced by
+    # finishing or fill. The GDS deck reads the delivered stream directly;
+    # a missing deck is NOT_MEASURED, never release PASS. Keep this output
+    # free of the word "antenna": the router-report discoverer globs that
+    # token and must not mistake this independent verdict for its input.
+    ("gds_antenna_final", "gds_antenna_deck_check.py",
+     "reports/phase3/gate_oxide_geom_final.json", ()),
+    ("si_final", "si_crosstalk_check.py",
+     "reports/phase2/gates/si_crosstalk.json", ()),
+    ("si_mcf_final", "si_mcf_sta_check.py",
+     "reports/phase3/si_mcf_sta_check.json", ()),
+)
+
+
+def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
+                        container: str, *, _si_retry: bool = False) -> StepResult:
+    """Measure the current routed revision before allowing any GDS stream."""
+    t0 = time.time()
+    digest, refusal = _layout_basis(project, top, pdk, container)
+    if refusal:
+        return StepResult("prestream_gate", "NOT_MEASURED", 0.0,
+                          refusal, reason_class=_V.ReasonClass.INPUT_ABSENT)
+    evidence = step_canonicalize_artefacts(
+        project, top, pdk, container, prestream=True)
+    mcf_producer_error = ""
+    # The MCF producer normally sits later in canonicalisation. Its input is
+    # the routed SPEF, so run it now and spend the existing one-pass SI repair
+    # budget before the route is frozen. A promotion changes the DEF and forces
+    # the entire pre-stream measurement to be repeated on the new identity.
+    try:
+        mcf = project / "reports/phase3/si_mcf_sta.json"
+        spefs = sorted(_pl.extracted_dir(project).glob("*.spef"))
+        newest = max(spefs, key=lambda path: path.stat().st_mtime) if spefs else None
+        if newest is not None and _signoff_regen(mcf, newest):
+            cp = _pr.run([sys.executable, str(PROGRAMS_DIR / "si_mcf_sta.py"),
+                          "run", str(project), "--container", container],
+                         capture_output=True, text=True)
+            if cp.returncode:
+                mcf_producer_error = f"si_mcf_sta rc={cp.returncode}"
+                evidence.detail += f"; {mcf_producer_error}"
+        import si_mcf_verdict_basis as _si_vb
+        _si_vb.apply(project)
+        import si_mcf_repair as _si_rep
+        seam = None
+        reason = ""
+        try:
+            seam = _si_mcf_repair_seam(project, top, pdk, container)
+        except SiMcfRepairSeamUnavailable as exc:
+            reason = str(exc)
+        rec = _si_rep.run_once(project, container=container, runner=seam,
+                               no_seam_reason=reason)
+        if rec.get("decision") == "ADOPTED":
+            if _si_retry:
+                return StepResult("prestream_gate", "FAIL", time.time() - t0,
+                                  "SI remedy exceeded one layout promotion")
+            _si_mcf_repair_promote(project, top, pdk, container,
+                                   rec.get("after") or {}, [])
+            rerun = step_prestream_gate(project, top, pdk, container,
+                                        _si_retry=True)
+            rerun.extras["layout_writer_applied"] = "si_mcf_repair"
+            return rerun
+    except Exception as exc:
+        mcf_producer_error = f"SI MCF producer/remedy could not run: {exc}"
+        evidence.detail += f"; {mcf_producer_error}"
+    rows = [_run_declared_signoff_gate(project, *spec)
+            for spec in _PRESTREAM_GATES]
+    if evidence.status != "PASS":
+        rows.append(_upstream_signoff_not_measured(
+            "prestream_evidence", evidence.detail))
+    if mcf_producer_error:
+        rows.append(_upstream_signoff_not_measured(
+            "si_mcf_producer", mcf_producer_error))
+    for row in rows:
+        if row.status != "PASS":
+            continue
+        for output in row.output_files:
+            try:
+                gate_doc = json.loads(Path(output).read_text())
+            except (OSError, ValueError):
+                continue
+            tier = gate_doc.get("verdict") if isinstance(gate_doc, dict) else None
+            if tier in ("WAIVED", "SKIP", "VACUOUS_PASS", "NOT_MEASURED",
+                        "NOT_APPLICABLE", "PASS_WITH_WAIVERS"):
+                row.status = "NOT_MEASURED"
+                row.reason_class = _V.ReasonClass.NO_POPULATION.value
+                row.detail += f"; gate reported {tier}, not measured PASS"
+    dyn_ir = _pl.reports_phase3_dir(project) / "dynamic_ir.json"
+    dyn_ir_producer_error = ""
+    if _signoff_regen(dyn_ir, _pl.pnr_dir(project) / "routed.def"):
+        lef_args = []
+        for flag, value in (("--tech-lef", pdk.tech_lef),
+                            ("--cell-lef", pdk.cell_lef),
+                            ("--liberty", pdk.liberty)):
+            if value:
+                lef_args.extend((flag, str(value)))
+        for macro_lef in getattr(pdk, "macro_lefs", None) or ():
+            lef_args.extend(("--macro-lef", str(macro_lef)))
+        try:
+            cp = _pr.run([sys.executable,
+                     str(PROGRAMS_DIR / "dynamic_ir_vectored_emit.py"),
+                     "--project", str(project), "--out", str(dyn_ir),
+                     "--static-json", str(_pl.reports_phase3_dir(project)
+                                           / "ir_drop.json"),
+                     "--container", container] + lef_args,
+                    check=False, capture_output=True, text=True)
+            if cp.returncode:
+                dyn_ir_producer_error = f"dynamic IR producer rc={cp.returncode}"
+        except Exception as exc:
+            dyn_ir_producer_error = f"dynamic IR producer could not run: {exc}"
+    if dyn_ir_producer_error:
+        rows.append(_upstream_signoff_not_measured(
+            "dynamic_ir_producer", dyn_ir_producer_error))
+    if dyn_ir.is_file():
+        try:
+            cp = _pr.run([sys.executable,
+                          str(PROGRAMS_DIR / "dynamic_ir_drop_check.py"),
+                          str(dyn_ir), "--budget-pct", "10"],
+                         check=False, capture_output=True, text=True)
+            rows.append(StepResult("dynamic_ir", "PASS" if cp.returncode == 0
+                                   else "FAIL", 0.0,
+                                   (cp.stdout or cp.stderr or "").strip()))
+        except Exception as exc:
+            rows.append(_upstream_signoff_not_measured(
+                "dynamic_ir", f"dynamic IR gate could not run: {exc}"))
+    else:
+        rows.append(_upstream_signoff_not_measured(
+            "dynamic_ir", "transient IR report absent"))
+    # The PnR step owns route/connectivity convergence; the routed DEF and
+    # router DRC are its final evidence. The reader refuses missing evidence.
+    pnr = _pl.pnr_dir(project)
+    for name in ("placed.def", "routed.def"):
+        if not (pnr / name).is_file():
+            rows.append(_upstream_signoff_not_measured(
+                "route_evidence", f"{name} absent from current route"))
+    route_log = pnr / "openroad.log"
+    log = route_log.read_text(errors="replace") if route_log.is_file() else ""
+    drc_count = _drt_final_violations(log)
+    if not _detail_route_completed(log) or drc_count is None:
+        rows.append(_upstream_signoff_not_measured(
+            "route_completion", "router completion or final DRC count absent"))
+    elif drc_count:
+        rows.append(StepResult("router_drc", "FAIL", 0.0,
+                               f"final router DRC violations={drc_count}"))
+    else:
+        rows.append(StepResult("router_drc", "PASS", 0.0,
+                               "router completed; final DRC violations=0"))
+    signal_routed, signal_nets = _def_signal_routing_stats(pnr / "routed.def")
+    if signal_nets and not signal_routed:
+        rows.append(StepResult("route_connectivity", "FAIL", 0.0,
+                               f"{signal_nets} signal nets but no signal wiring"))
+    else:
+        unrouted = re.findall(r"PRESTREAM_UNROUTED_NETS:\s*(\d+)", log)
+        if not unrouted:
+            rows.append(_upstream_signoff_not_measured(
+                "route_connectivity", "final ODB unrouted-net census absent"))
+        elif int(unrouted[-1]) != 0:
+            rows.append(StepResult("route_connectivity", "FAIL", 0.0,
+                                   f"{unrouted[-1]} unrouted nets"))
+        else:
+            rows.append(StepResult("route_connectivity", "PASS", 0.0,
+                                   "signal DEF wiring present; final ODB "
+                                   "unrouted-net census=0"))
+    after, changed = _layout_basis(project, top, pdk, container)
+    if changed or after != digest:
+        rows.append(_upstream_signoff_not_measured(
+            "layout_basis", "layout changed during pre-stream verification"))
+    for row in rows:
+        row.extras["layout_digest"] = digest
+    failed = [r for r in rows if r.status != "PASS"]
+    receipt = {"layout_digest": digest, "basis": "DEF/netlist/SDC/PDK",
+               "verdict": "FAIL" if failed else "PASS",
+               "failed_gates": [r.name for r in failed],
+               "gates": [asdict(r) for r in rows],
+               "evidence": asdict(evidence)}
+    out = _pl.reports_phase3_dir(project) / "prestream_gate.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _aa.write_text(out, json.dumps(receipt, indent=2) + "\n")
+    return StepResult("prestream_gate", "FAIL" if failed else "PASS",
+                      time.time() - t0,
+                      f"layout_digest={digest}; failed gates: "
+                      + (", ".join(r.name for r in failed) if failed else "none"),
+                      [str(out)], extras={"layout_digest": digest,
+                                          "failed_gates": receipt["failed_gates"]})
+
+
 #: PRE-AUDIT PRODUCERS: run so the document EXISTS, never folded into the
 #: release roll-up. Same (name, program, output, argv) shape as
 #: `_DECLARED_SIGNOFF_GATES`, deliberately a SEPARATE tuple.
@@ -53436,7 +53772,9 @@ _PRE_AUDIT_PRODUCERS = (
 )
 
 
-def run_pre_audit_producers(project: Path, container: str = "") -> List[StepResult]:
+def run_pre_audit_producers(project: Path, container: str = "", *,
+                            only_names: Optional[Sequence[str]] = None,
+                            skip_names: Sequence[str] = ()) -> List[StepResult]:
     """Write the documents steps 36 and 38 declare, and report them separately.
 
     The rows come back for the console and the log; the caller does NOT fold them
@@ -53446,6 +53784,21 @@ def run_pre_audit_producers(project: Path, container: str = "") -> List[StepResu
     """
     rows: List[StepResult] = []
     for name, program, out_rel, extra_argv in _PRE_AUDIT_PRODUCERS:
+        if (only_names is not None and name not in only_names
+                or name in skip_names):
+            continue
+        if name == "foundry_handoff":
+            import foundry_handoff_package_check as _handoff_check
+            sources = _handoff_check.layout_member_sources(project)
+            if ((_ga.visible_gds(project) or _ga.gate_record(project))
+                    and not _ga.admitted_package_sources(project, sources)):
+                _ga.quarantine_visible_gds(
+                    project, "foundry handoff: current layout admission absent")
+                _ga.quarantine_handoff_package(
+                    project, "foundry handoff: current layout admission absent")
+                rows.append(_upstream_signoff_not_measured(
+                    name, "current digest-bound GDS admission absent"))
+                continue
         argv = tuple(extra_argv)
         if container and name in _PDK_AWARE_SIGNOFF_GATES:
             argv += ("--pdk-container", container)
@@ -53637,7 +53990,24 @@ def step_declared_signoff_gates(project: Path,
     except Exception as _exc:
         print(f"[phase3] clock-target provenance emit non-fatal: {_exc}")
     out: List[StepResult] = []
+    # These readers have disjoint outputs AND per-step metric writers.
+    # sta_signoff and sta_corner both write Step-23 metrics, so corner follows
+    # the first wave. sta_record then reads corner's report. Clock disclosure
+    # remains last because it reads the stamp below.
+    parallel_names = {"sta_signoff", "sta_architectural_residual",
+                      "em_signoff"}
+    parallel_rows = {}
+    with ThreadPoolExecutor(max_workers=len(parallel_names)) as pool:
+        jobs = {}
+        for spec in _DECLARED_SIGNOFF_GATES:
+            if spec[0] in parallel_names:
+                jobs[spec[0]] = pool.submit(
+                    _run_declared_signoff_gate, project, *spec)
+        parallel_rows = {name: job.result() for name, job in jobs.items()}
     for name, program, out_rel, extra_argv in _DECLARED_SIGNOFF_GATES:
+        if name in parallel_rows:
+            out.append(parallel_rows[name])
+            continue
         if name == _ASSUMED_CLOCK_DISCLOSURE_STEP:
             # vibe-ic#2126 — STAMP, THEN ASK. The stamp used to run after the
             # whole loop, which was correct while nothing read it back. Now that
@@ -56551,7 +56921,8 @@ def _append_removal_event(project: Path, event: str,
 
 
 def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
-                                container: str) -> StepResult:
+                                container: str, *, prestream: bool = False,
+                                prepv: bool = False) -> StepResult:
     """v1.6.36 — stage runner outputs at the canonical paths the flow YAML expects.
 
     Closes Steps 7, 10, 14, 15-20, 21, 22, 27, 30, 31, 33, 34, 35, 36 drift waivers
@@ -56811,7 +57182,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         for extra in sorted(gds_out.glob("*.gds")):
             if extra not in candidate_chip_gds:
                 candidate_chip_gds.append(extra)
-    if handoff_out.is_dir():
+    if handoff_out.is_dir() and not (prestream or prepv) and _ga.admitted_package_source(project):
         # THE LAYOUT MEMBERS COME FROM ONE PLACE: `foundry_handoff_pack_gen.
         # package_layout_members`, which re-derives every member from the
         # SIGNED-OFF GDS on every run, by copy. This block used to package
@@ -57420,6 +57791,13 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             written.append(str(si_rpt))
             written.append(str(rpt_phase3 / "si_crosstalk.json"))
 
+    if prestream:
+        # The routed-design measurements above have no GDS input. Run them
+        # before stream-out; leave fill, final PV and handoff to the frozen
+        # post-stream phase. The caller checks every required verdict.
+        return StepResult("prestream_evidence", "PASS", time.time() - t0,
+                          "; ".join(notes), written)
+
     # --- ORGANIC-20260531: Step 34 metal fill (filler_placement) --------
     # `filled.def` — and its siblings `metal_fill.{log,done}` and
     # `reports/density.{rpt,json}` — are computed FROM the routed DEF, so this
@@ -57451,6 +57829,12 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         if _emit_erc_report(project, top, pdk, container, erc_rpt, notes):
             written.append(str(erc_rpt))
             written.append(str(rpt_phase3 / "erc.json"))
+
+    if prepv:
+        # Fill and ERC have been produced; now freeze and run independent PV
+        # readers. The full canonicalisation after PV can consume their reports.
+        return StepResult("prefill_evidence", "PASS", time.time() - t0,
+                          "; ".join(notes), written)
 
     # --- TAPEOUT-SIGNOFF P1: POST-LAYOUT LEC (routed/post-route-repaired == synth/RTL) ---
     # Step 13 only proved RTL==synth. This re-proves the FINAL routed/post-route repair
@@ -68656,8 +69040,26 @@ def _direct_flow_window(project: Path, top: str, pdk: PdkConfig,
                 source = _pl.pnr_dir(isolated) / f"{top}.gds"
                 target = _pl.gds_dir(isolated) / f"{top}.gds"
                 if source.is_file():
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source, target)
+                    digest, error = _layout_basis(
+                        isolated, top, pdk, args.container)
+                    if error or not _ga.gate_passed(isolated, digest):
+                        row = StepResult(
+                            "gds", "NOT_MEASURED", row.duration_s,
+                            f"window stream lacks a PASS gate for its routed basis: "
+                            f"{error or digest}",
+                            reason_class=_V.ReasonClass.UPSTREAM_FAILED)
+                    else:
+                        try:
+                            _ga.admit_gds(isolated, source, digest,
+                                          _layout_basis_paths(isolated, top))
+                        except (OSError, ValueError) as exc:
+                            row = StepResult(
+                                "gds", "NOT_MEASURED", row.duration_s,
+                                f"window stream admission failed: {exc}",
+                                reason_class=_V.ReasonClass.MISSING_ARTEFACT)
+                        else:
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(source, target)
                 else:
                     row = StepResult("gds", "NOT_MEASURED", row.duration_s,
                                      f"stream-out reported PASS without {source}",
@@ -68677,19 +69079,24 @@ def _direct_flow_window(project: Path, top: str, pdk: PdkConfig,
                 for pattern in str(spec).split(" OR "):
                     for source in isolated.glob(pattern.strip()):
                         if source.is_file():
+                            if site == "gds" and row.status != "PASS" and source.suffix.lower() == ".gds":
+                                continue
                             target = project / source.relative_to(isolated)
                             target.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(source, target)
                             outputs.append(str(target))
         if site == "gds":
-            # Retain the failed stream-out as this step's diagnostic output;
-            # the canonical sign-off alias is created only on a valid PASS.
+            # A failed window keeps candidate bytes only in private scratch.
             source = _pl.pnr_dir(isolated) / f"{top}.gds"
-            if source.is_file():
+            if row.status == "PASS" and source.is_file():
                 target = _pl.pnr_dir(project) / f"{top}.gds"
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
                 outputs.append(str(target))
+                receipt = _ga.admission_path(project)
+                receipt.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(_ga.admission_path(isolated), receipt)
+                outputs.append(str(receipt))
         row.output_files = outputs
         return row
 
@@ -68896,6 +69303,15 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
                 f"{missing_link} is outside this window, so this gate cannot "
                 "measure the new artefact", reason_class=_V.ReasonClass.UPSTREAM_FAILED))
             break
+        if site in ("drc", "lvs"):
+            basis, error = _layout_basis(project, top, pdk, args.container)
+            if error or not _ga.admitted_gds(
+                    project, _pl.pnr_dir(project) / f"{top}.gds", basis):
+                rows.append(StepResult(
+                    site, "NOT_MEASURED", 0.0,
+                    f"window refused unadmitted routed GDS: {error or basis}",
+                    reason_class=_V.ReasonClass.UPSTREAM_FAILED))
+                break
         if site in ("enclosing_phase3", "enclosing_pnr",
                     "enclosing_canonicalize"):
             row = _phase3_window_enclosing(
@@ -69158,6 +69574,8 @@ def main() -> int:
                          "An unrecognised KIND is refused, not ignored."))
     p.add_argument("--entry-step", help="First canonical Phase-3 step")
     p.add_argument("--exit-step", help="Last canonical Phase-3 step")
+    p.add_argument("--diagnostic-continue", action="store_true",
+                   help="Retain diagnostic-only reports; a failed pre-stream gate never authorizes GDS or release")
     args = p.parse_args()
     if bool(args.entry_step) != bool(args.exit_step):
         p.error("--entry-step and --exit-step must be supplied together")
@@ -69457,6 +69875,8 @@ def main() -> int:
 
     is_pure_analog, pa_reason = _is_pure_analog_no_rtl_track(project)
     _layout_refusal = ""
+    _prestream_refusal = ""
+    _frozen_digest = ""
     if _mount_preflight_failed:
         msg = (f"container mount-coverage preflight FAILED: project path "
                f"{project} is not covered by any bind mount of container "
@@ -69493,6 +69913,14 @@ def main() -> int:
         netlist_existing = _pl.synth_dir(project) / f"{effective_top}_synth.v"
         def_existing = _pl.pnr_dir(project) / f"{effective_top}.def"
         gds_existing = _pl.pnr_dir(project) / f"{effective_top}.gds"
+        _cached_basis, _cached_basis_error = _layout_basis(
+            project, effective_top, pdk, args.container)
+        if not _ga.admitted_gds(project, gds_existing, _cached_basis):
+            _ga.quarantine_visible_gds(
+                project, "cached GDS lacks a matching layout digest, byte receipt or PASS gate"
+                + (f"; {_cached_basis_error}" if _cached_basis_error else ""))
+            _ga.quarantine_handoff_package(
+                project, "cached GDS is not admitted for the current routed layout")
         # PR-A3 — the preserve-provenance skip is PDK-keyed: a cached
         # netlist whose instantiated masters are NOT in the ACTIVE
         # liberty was mapped to a DIFFERENT PDK (e.g. a sky130 netlist
@@ -69966,6 +70394,34 @@ def main() -> int:
                 _pl.pnr_dir(project), "pnr", project=project, pdk=pdk,
                 container=args.container, top=effective_top, args=args,
                 cache_hit=not _pnr_reran)
+        _prestream_refusal = ""
+        if _chain_ok:
+            _prestream = step_prestream_gate(
+                project, effective_top, pdk, args.container)
+            plan.append(_prestream)
+            if _prestream.extras.get("layout_writer_applied"):
+                _pnr_reran = True
+                _write_producer_identity(
+                    _pl.pnr_dir(project), "pnr", project=project, pdk=pdk,
+                    container=args.container, top=effective_top, args=args)
+            if _prestream.status != "PASS":
+                _ga.quarantine_visible_gds(
+                    project, "current routed layout failed the pre-stream gate")
+                _ga.quarantine_handoff_package(
+                    project, "current routed layout failed the pre-stream gate")
+                _prestream_refusal = (
+                    f"pre-stream gate failed ({', '.join(_prestream.extras.get('failed_gates', [])) or _prestream.detail}); "
+                    f"layout_digest={_prestream.extras.get('layout_digest', 'UNAVAILABLE')}")
+                _chain_ok = False
+                plan.append(_upstream_signoff_not_measured(
+                    "gds", _prestream_refusal))
+            elif not _ga.admitted_gds(
+                    project, gds_existing,
+                    _prestream.extras.get("layout_digest", "")):
+                _ga.quarantine_visible_gds(
+                    project, "cached GDS does not bind the admitted routed layout")
+                _ga.quarantine_handoff_package(
+                    project, "cached handoff does not bind the admitted routed layout")
         if _chain_ok:
             # #593 — the GDS is derived from the DEF, so it shares the
             # PnR geometry cache verdict: a geometry change that forced a
@@ -69986,7 +70442,11 @@ def main() -> int:
                 top=effective_top, die_um=args.die_um, util=args.util,
                 pdk=pdk, container=args.container, args=args,
                 blocked_by=("PnR re-ran in this session, so a cached GDS is "
-                            "from the previous DEF" if _pnr_reran else ""))
+                            "from the previous DEF" if _pnr_reran else
+                            "cached GDS has no matching admission" if not
+                            _ga.admitted_gds(project, gds_existing,
+                                             _prestream.extras.get("layout_digest", ""))
+                            else ""))
             _gds_prod_msg = _gds_cache.producer_reason
             if _gds_cache.accept:
                 _gds_dispatched = StepResult(
@@ -70009,10 +70469,40 @@ def main() -> int:
                     effective_top, pdk, args.container)
                 plan.append(_gds_dispatched)
                 if _gds_dispatched.status == "PASS":
+                    _ga.admit_gds(
+                        project, gds_existing,
+                        _prestream.extras.get("layout_digest", ""),
+                        _layout_basis_paths(project, effective_top))
                     _write_producer_identity(
                         _pnr_out, "gds", project=project, pdk=pdk,
                         container=args.container, top=effective_top,
                         args=args)
+            if _gds_dispatched.status == "PASS":
+                _prefill = step_canonicalize_artefacts(
+                    project, effective_top, pdk, args.container, prepv=True)
+                plan.append(_prefill)
+                _fill = _pl.pnr_dir(project) / "filled.def"
+                _fill_done = _pl.pnr_dir(project) / "metal_fill.done"
+                _frozen_digest, _freeze_error = _shipped_layout_digest(
+                    project, effective_top)
+                _route_def = _pl.pnr_dir(project) / "routed.def"
+                if _prefill.status != "PASS":
+                    _freeze_error = "post-fill Step 34 producer did not complete"
+                elif not (_fill.is_file() or _fill_done.is_file()):
+                    _freeze_error = "post-fill Step 34 produced no filled DEF or completion record"
+                elif all(_signoff_regen(path, _route_def)
+                         for path in (_fill, _fill_done) if path.is_file()):
+                    _freeze_error = "post-fill Step 34 output predates the current routed DEF"
+                if _freeze_error:
+                    _chain_ok = False
+                    _prestream_refusal = f"post-stream freeze failed: {_freeze_error}"
+                    plan.append(_upstream_signoff_not_measured(
+                        "layout_freeze", _prestream_refusal))
+                else:
+                    plan.append(StepResult(
+                        "layout_freeze", "PASS", 0.0,
+                        f"shipped GDS + DEF layout_digest={_frozen_digest}",
+                        extras={"layout_digest": _frozen_digest}))
             if _chip_path_requests_pad_ring(project):
                 _pad_final = step_pad_ring_final_evidence(
                     project, effective_top, _gds_dispatched, args.container)
@@ -70025,27 +70515,36 @@ def main() -> int:
         # exists to stop.
         _pnr_result = next((s for s in reversed(plan) if s.name == "pnr"), None)
         _gds_result = next((s for s in reversed(plan) if s.name == "gds"), None)
-        _layout_refusal = _layout_signoff_refusal(
+        _layout_refusal = _prestream_refusal or _layout_signoff_refusal(
             project, effective_top, _pnr_result, _gds_result,
             _RUN_STARTED_AT)
         if _layout_refusal:
             plan.append(_upstream_signoff_not_measured("drc", _layout_refusal))
+            # Preserve the existing PnR-failure classification in step_lvs.
+            if _pnr_result is not None and _pnr_result.status == "PASS":
+                plan.append(_upstream_signoff_not_measured("lvs", _layout_refusal))
+            else:
+                plan.append(_spf.gate(
+                    project, "phase3_one_shot_runner", "lvs",
+                    _preflight_refusal("lvs"), step_lvs, project,
+                    effective_top, pdk, args.container,
+                    upstream_pnr=_pnr_result))
         else:
-            plan.append(_spf.gate(
-                project, "phase3_one_shot_runner", "drc",
-                _preflight_refusal("drc"),
-                step_drc, project, effective_top, pdk, args.container))
-        # ORGANIC #590 — hand step_lvs the pnr outcome so an upstream
-        # mid-tcl death SKIPs the compare instead of mislabelling the
-        # inevitable mismatch a design/extraction defect.
-        if _layout_refusal and _pnr_result is not None and _pnr_result.status == "PASS":
-            plan.append(_upstream_signoff_not_measured("lvs", _layout_refusal))
-        else:
-            plan.append(_spf.gate(
-                project, "phase3_one_shot_runner", "lvs",
-                _preflight_refusal("lvs"),
-                step_lvs, project, effective_top, pdk, args.container,
-                upstream_pnr=_pnr_result))
+            # Both readers consume the same immutable stream. Their engines
+            # write disjoint report paths; collect in canonical row order.
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                drc_job = pool.submit(
+                    _spf.gate, project, "phase3_one_shot_runner", "drc",
+                    _preflight_refusal("drc"), step_drc, project,
+                    effective_top, pdk, args.container)
+                lvs_job = pool.submit(
+                    _spf.gate, project, "phase3_one_shot_runner", "lvs",
+                    _preflight_refusal("lvs"), step_lvs, project,
+                    effective_top, pdk, args.container,
+                    upstream_pnr=_pnr_result)
+                plan.extend((drc_job.result(), lvs_job.result()))
+            for row in plan[-2:]:
+                row.extras["layout_digest"] = _frozen_digest
 
     if not _layout_refusal:
         _layout_refusal = _layout_signoff_refusal(
@@ -70060,6 +70559,50 @@ def main() -> int:
                  _layout_refusal) if _layout_refusal else
                 step_canonicalize_artefacts(
                     project, effective_top, pdk, args.container))
+    if _frozen_digest and not _layout_refusal:
+        _after_canon, _after_error = _shipped_layout_digest(
+            project, effective_top)
+        _canonical_gds = _pl.gds_dir(project) / f"{effective_top}.gds"
+        _stream_gds = _pl.pnr_dir(project) / f"{effective_top}.gds"
+        if (_after_error or _after_canon != _frozen_digest
+                or not _canonical_gds.is_file()
+                or _sha256_file(_canonical_gds) != _sha256_file(_stream_gds)):
+            _layout_refusal = ("frozen shipped layout changed or its canonical "
+                               f"copy differs; layout_digest={_frozen_digest}; "
+                               f"{_after_error}")
+            plan.append(_upstream_signoff_not_measured(
+                "layout_identity", _layout_refusal))
+            for _row in plan:
+                if _row.name in ("drc", "lvs") and _row.status == "PASS":
+                    _row.status = "NOT_MEASURED"
+                    _row.reason_class = _V.ReasonClass.UPSTREAM_FAILED.value
+                    _row.detail += "; receipt invalidated: " + _layout_refusal
+
+    if _layout_refusal:
+        plan.extend(_upstream_signoff_not_measured(spec[0], _layout_refusal)
+                    for spec in _FINAL_LAYOUT_GATES)
+    else:
+        # Step 25 follows Step 24. Both SI readers may emit Step-27 metrics,
+        # so the MCF check follows the first SI wave instead of sharing a
+        # metrics writer with si_final.
+        independent = [spec for spec in _FINAL_LAYOUT_GATES
+                       if spec[0] not in ("em_authority_final", "si_mcf_final")]
+        with ThreadPoolExecutor(max_workers=len(independent)) as pool:
+            jobs = {spec[0]: pool.submit(
+                _run_declared_signoff_gate, project, *spec)
+                for spec in independent}
+            finished = {name: job.result() for name, job in jobs.items()}
+        em_spec = next(spec for spec in _FINAL_LAYOUT_GATES
+                       if spec[0] == "em_authority_final")
+        finished[em_spec[0]] = _run_declared_signoff_gate(project, *em_spec)
+        si_mcf_spec = next(spec for spec in _FINAL_LAYOUT_GATES
+                           if spec[0] == "si_mcf_final")
+        finished[si_mcf_spec[0]] = _run_declared_signoff_gate(
+            project, *si_mcf_spec)
+        final_rows = [finished[spec[0]] for spec in _FINAL_LAYOUT_GATES]
+        for row in final_rows:
+            row.extras["layout_digest"] = _frozen_digest
+        plan.extend(final_rows)
 
     # Canonical step 37.5ic — dispatch the release-document producer on the
     # chip path before the compliance auditor evaluates the step's gate. The
@@ -70091,9 +70634,21 @@ def main() -> int:
     # what emits `phase3/stage3/sta/*.rpt` and `reports/phase3/em.rpt`, and
     # BEFORE the derived-artefact generators build the hand-off pack and
     # tape-out checklist on top of a sign-off nobody checked.
-    plan.extend(step_declared_signoff_gates(
-        project, pdk.name, args.container,
-        upstream_refusal=_layout_refusal))
+    if _layout_refusal:
+        plan.extend(step_declared_signoff_gates(
+            project, pdk.name, args.container,
+            upstream_refusal=_layout_refusal))
+    else:
+        # XOR reads the shipped GDS and its retained pre-finishing boundary.
+        # It writes only its own receipt, so it may run alongside final STA,
+        # EM and tapeout precheck without racing a layout writer.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            xor_job = pool.submit(run_pre_audit_producers, project,
+                                  args.container, only_names=("gds_xor",))
+            plan.extend(step_declared_signoff_gates(
+                project, pdk.name, args.container,
+                upstream_refusal=_layout_refusal))
+            _xor_rows = xor_job.result()
     # PRE-AUDIT PRODUCERS, run and REPORTED, never planned. Steps 36 and 38 each
     # declare their own gate as their only producer, so without this the only
     # writer of their documents is the audit's own clause and the audit refuses
@@ -70101,8 +70656,16 @@ def main() -> int:
     # `_PRE_AUDIT_PRODUCERS` -- these are producers, and producing a document is
     # not signing off on it. A refusal here is printed and does not withhold the
     # release, because each step's own yaml clause still decides it in the audit.
-    if not _layout_refusal:
-        for _row in run_pre_audit_producers(project, args.container):
+    _pre_audit_rows: List[StepResult] = []
+    if _layout_refusal:
+        plan.append(_upstream_signoff_not_measured(
+            "foundry_handoff", _layout_refusal))
+    else:
+        _pre_audit_rows = run_pre_audit_producers(
+            project, args.container, skip_names=("gds_xor",))
+        _pre_audit_rows.extend(_xor_rows)
+        for _row in _pre_audit_rows:
+            _row.extras["layout_digest"] = _frozen_digest
             print(f"[phase3] pre-audit producer {_row.name}: {_row.status}")
 
     # ORDERING (measured on `spm`, image 0.3.46, plugin v1.17.42): the
@@ -70164,6 +70727,18 @@ def main() -> int:
     for gen, kind in _DERIVED_ARTEFACT_GENERATORS:
         gen_path = PROGRAMS_DIR / gen
         if gen_path.is_file():
+            if gen == "foundry_handoff_pack_gen.py":
+                import foundry_handoff_package_check as _handoff_check
+                sources = _handoff_check.layout_member_sources(project)
+                if ((_ga.visible_gds(project) or _ga.gate_record(project))
+                        and not _ga.admitted_package_sources(project, sources)):
+                    _ga.quarantine_visible_gds(
+                        project, "foundry handoff: current layout admission absent")
+                    _ga.quarantine_handoff_package(
+                        project, "foundry handoff: current layout admission absent")
+                    print("[WARN] foundry handoff skipped: current digest-bound "
+                          "GDS admission absent", file=sys.stderr)
+                    continue
             cmd = [sys.executable, str(gen_path), str(project)]
             # #467: hand the resolved top to the handoff generator as the
             # design_top fallback (used only when L1 ic_name is empty).
@@ -70336,6 +70911,81 @@ def main() -> int:
               f"documents the flow declares this run's steps to produce may "
               f"still be authored by the audit and refused as its own "
               f"evidence", file=sys.stderr)
+
+    # Release receipts bind every final reader to the GDS/DEF revision frozen
+    # at stream-out. A later writer voids them before the completion audit.
+    _final_digest, _final_error = _shipped_layout_digest(
+        project, effective_top)
+    _current_basis, _basis_error = _layout_basis(
+        project, effective_top, pdk, args.container)
+    _prestream_row = next((r for r in reversed(plan)
+                           if r.name == "prestream_gate"), None)
+    _prestream_basis = ((_prestream_row.extras or {}).get("layout_digest")
+                        if _prestream_row is not None else "")
+    _basis_stale = bool(_prestream_basis and
+                        (_basis_error or _current_basis != _prestream_basis))
+    _layout_stale = bool(_frozen_digest and
+                         (_final_error or _final_digest != _frozen_digest))
+    _diagnostic_only = bool(_prestream_refusal and args.diagnostic_continue)
+    _release_refusal = (_prestream_refusal or
+                        (f"routed DEF/netlist/SDC/PDK basis changed: "
+                         f"{_prestream_basis} -> {_current_basis or _basis_error}"
+                         if _basis_stale else "") or
+                        (f"frozen layout changed: {_frozen_digest} -> "
+                         f"{_final_digest or _final_error}" if _layout_stale else "") or
+                        ("no frozen layout identity" if not _frozen_digest else ""))
+    _layout_rows = {"gds", "prefill_evidence", "layout_freeze",
+                    "pad_ring_route_evidence", "drc", "lvs",
+                    "canonicalize_artefacts",
+                    "drv_promotion_corroboration", "gds_xor",
+                    "tapeout_precheck", "signoff_metrics_aggregate",
+                    "tapeout_docs_gen", "ic_release_docs_gen",
+                    "digital_hardmacro_gen", "ip_release_docs_gen"}
+    _layout_rows.update(name for name, *_ in _FINAL_LAYOUT_GATES)
+    _layout_rows.update(name for name, *_ in _DECLARED_SIGNOFF_GATES)
+    for _row in plan:
+        if _row.name not in _layout_rows:
+            continue
+        _row.extras["layout_digest"] = _frozen_digest or "UNAVAILABLE"
+        if _release_refusal and _row.status == "PASS":
+            _row.status = "NOT_MEASURED"
+            _row.reason_class = _V.ReasonClass.UPSTREAM_FAILED.value
+            _row.detail += "; receipt invalidated: " + _release_refusal
+        if _diagnostic_only:
+            _row.extras["release_scope"] = "DIAGNOSTIC_ONLY"
+            _row.extras["release_verdict"] = "NOT_MEASURED_FOR_RELEASE"
+            _row.extras["upstream_failed_gate"] = _prestream_refusal
+    for _row in _pre_audit_rows:
+        if _diagnostic_only:
+            _row.extras["release_scope"] = "DIAGNOSTIC_ONLY"
+            _row.extras["release_verdict"] = "NOT_MEASURED_FOR_RELEASE"
+            _row.extras["upstream_failed_gate"] = _prestream_refusal
+            if _row.status == "PASS":
+                _row.status = "NOT_MEASURED"
+                _row.reason_class = _V.ReasonClass.UPSTREAM_FAILED.value
+    _receipt_path = _pl.reports_phase3_dir(project) / "layout_receipts.json"
+    _receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    _receipt_doc = {
+        "frozen_layout_digest": _frozen_digest or None,
+        "current_layout_digest": _final_digest or None,
+        "prestream_basis_digest": _prestream_basis or None,
+        "current_basis_digest": _current_basis or None,
+        "gds_relpath": f"phase3/stage3/pnr/{effective_top}.gds",
+        "gds_sha256": (_sha256_file(_pl.pnr_dir(project) / f"{effective_top}.gds")
+                       if (_pl.pnr_dir(project) / f"{effective_top}.gds").is_file()
+                       else None),
+        "def_sha256": (_sha256_file(_pl.pnr_dir(project) / "routed.def")
+                       if (_pl.pnr_dir(project) / "routed.def").is_file()
+                       else None),
+        "upstream_failed_gate": _prestream_refusal or None,
+        "release_scope": ("DIAGNOSTIC_ONLY" if _diagnostic_only
+                          else "RELEASE_CANDIDATE"),
+        "release_verdict": ("NOT_MEASURED_FOR_RELEASE" if _release_refusal
+                            else "ELIGIBLE_FOR_AUDIT"),
+        "receipts": ([asdict(r) for r in plan if r.name in _layout_rows]
+                     + [asdict(r) for r in _pre_audit_rows]),
+    }
+    _aa.write_text(_receipt_path, json.dumps(_receipt_doc, indent=2) + "\n")
 
     fs_ok = _pl.emit_final_summary(project, PROGRAMS_DIR)
 
