@@ -154,14 +154,30 @@ def test_parse_mcorner_ocv_slacks():
     assert hold == 0.42
 
 
-def test_run_postroute_timing_repair_reuses_existing_netlist(tmp_path):
-    # IDEMPOTENT: an existing repair netlist is reused, NOT re-run (no docker call).
+def test_run_postroute_timing_repair_reuses_existing_netlist(tmp_path, monkeypatch):
+    # IDEMPOTENT only when the candidate has a receipt for the current inputs.
     repair = tmp_path / "phase3/stage3/postroute_timing_repair"
     repair.mkdir(parents=True)
-    (repair / "chip_top_timing_repaired.v").write_text("module chip_top; endmodule\n")
+    deck = repair / "postroute_timing_repair.tcl"
+    deck.write_text("read_def current.def\n")
+    source = tmp_path / "routed.def"
+    source.write_text("current route\n")
+    calls = []
+
+    def fake_tool(*args, **kwargs):
+        calls.append(1)
+        (repair / "chip_top_timing_repaired.v").write_text("module chip_top; endmodule\n")
+        (repair / "timing_repaired.def").write_text("current candidate\n")
+        (repair / "postroute_timing_repair.log").write_text("repair ran\n")
+
+    monkeypatch.setattr(R, "_docker_exec", fake_tool)
+    monkeypatch.setattr(R, "_to_container_path", lambda path, container: path)
     notes = []
     assert R._run_postroute_timing_repair(tmp_path, "chip_top", "no-such-container",
-                             repair / "postroute_timing_repair.tcl", notes) is True
+                             deck, notes, source_paths=[source]) is True
+    assert R._run_postroute_timing_repair(tmp_path, "chip_top", "no-such-container",
+                             deck, notes, source_paths=[source]) is True
+    assert len(calls) == 1
     assert any("already present" in n for n in notes)
 
 
