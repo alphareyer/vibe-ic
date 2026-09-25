@@ -145,6 +145,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # vibe-ic#1082 — a declared report destination is written atomically, so a
 # reader never sees a half-written verdict file.
 from _atomic_artefact import write_json as _atomic_write_json  # noqa: E402
+from _atomic_artefact import write_bytes as _atomic_write_bytes  # noqa: E402
 
 GATE = "instrument_calibration"
 
@@ -609,6 +610,55 @@ def _judge_antenna_rollback(sample: Tuple[int, str]) -> Optional[str]:
         finally:
             R._declared_session_exec = original
     return "RECOVERED" if result["status"] == "RECOVERED" else None
+
+
+def _judge_isolated_recovery(log: str) -> Optional[str]:
+    import phase3_one_shot_runner as R
+    # The marker is emitted by the runner; the remainder is the captured
+    # OpenROAD transcript. Keep the tool lines byte-for-byte.
+    combined = "=== PNR ANTENNA ISOLATED ECO ===\n" + log
+    return ("ROUTE_UNVERIFIED" if
+            R._antenna_isolated_recovery_modified(combined) else None)
+
+
+def _judge_feedback_antenna(log: str) -> Optional[str]:
+    import drc_feedback_repair as D
+    net, pin = D._antenna(log)
+    return f"ANTENNA_VIOLATIONS:{net}/{pin}" if net or pin else None
+
+
+def _judge_feedback_scoped(sample: Tuple[str, Tuple[str, ...]]) -> Optional[str]:
+    import drc_feedback_repair as D
+    log, targets = sample
+    return None if D._native_scoped_guard(log, set(targets)) else "WIRE_GUARD_REFUSED"
+
+
+def _judge_feedback_measure(sample: Tuple[str, str]) -> Optional[str]:
+    """Exercise the production KLayout log and RDB readers with real outputs."""
+    import drc_feedback_repair as D
+    from types import SimpleNamespace
+    registry = json.loads((FIXTURES.parent / "router_invisible_rules.json").read_text())
+    deck = registry["decks"][0]
+    rule = deck["rules"][0]
+    log_name, rdb_name = sample
+    log = _read(log_name)()
+    report_bytes = (FIXTURES / rdb_name).read_bytes()
+    original = D._docker
+    with tempfile.TemporaryDirectory(prefix="cal_feedback_") as td:
+        scratch = Path(td)
+        def eda_writes(_image, _project, args, **_kwargs):
+            report = next(Path(a.partition("=")[2]) for a in args
+                          if a.startswith("report="))
+            _atomic_write_bytes(report, report_bytes)
+            return SimpleNamespace(returncode=0, stdout=log, stderr="")
+        try:
+            D._docker = eda_writes
+            markers = D._measure("calibration", scratch, deck["deck_basename"],
+                                 rule, scratch / "calibration.gds", "calibration_top",
+                                 scratch)
+        finally:
+            D._docker = original
+    return "SIGNOFF_RULE_PRESENT" if markers else None
 
 
 # ── the registry itself ───────────────────────────────────────────────────
@@ -1137,6 +1187,94 @@ _register(Instrument(
                     "route_aborted_negative.log; it has no final DRT-0702 "
                     "verification, so it cannot authorize the retry."),
         artefact=lambda: _antenna_retry_log(False)),
+))
+
+_register(Instrument(
+    name="phase3_one_shot_runner::_antenna_isolated_recovery_modified",
+    reads="the isolated OpenROAD retry transcript after the runner's ECO marker",
+    ruling="T57 / R-0915-74(b)", owner="icdrcfb",
+    why=("A route without the scoped router's final zero-DRC verification "
+         "cannot be disclosed as verified at ship. The isolated retry must "
+         "leave the verification as its last route-changing event."),
+    judge=_judge_isolated_recovery,
+    positive=Sample(
+        provenance=("Real T57 OpenROAD isolate.log from the copied run23: "
+                    "antenna repair inserts four diodes but no DRT-0711 "
+                    "verification follows. Only the runner's own ECO marker "
+                    "is prepended when exercising the reader."),
+        artefact=_read("antenna_isolated_unverified_positive.log")),
+    expect="ROUTE_UNVERIFIED",
+    negative=Sample(
+        provenance=("Real T57 OpenROAD isolated_retry_final.log from the same "
+                    "copied run23: DRT-0711 reports whole-design zero on "
+                    "entry and exit after DRT-0633/0634, followed by the "
+                    "ANT-0001/0002 zero census."),
+        artefact=_read("antenna_isolated_verified_negative.log")),
+))
+
+_register(Instrument(
+    name="drc_feedback_repair::_antenna",
+    reads="OpenROAD check_antennas ANT-0001/0002 lines",
+    ruling="T63", owner="icdrcfb",
+    why="A violating antenna census must fire; the zero census stays silent.",
+    judge=_judge_feedback_antenna,
+    positive=Sample(
+        provenance=("Real T57 OpenROAD jumper.log, copied run23: last "
+                    "ANT-0002 and ANT-0001 report four net and pin violations."),
+        artefact=_read("feedback_antenna_violating_positive.log")),
+    expect="ANTENNA_VIOLATIONS:4/4",
+    negative=Sample(
+        provenance=("Real T63 OpenROAD baseline.antenna.log, copied run23: "
+                    "ANT-0002 and ANT-0001 both report zero."),
+        artefact=_read("feedback_antenna_clean_negative.log")),
+))
+
+_register(Instrument(
+    name="drc_feedback_repair::_native_scoped_guard",
+    reads="OpenROAD DRT-0633/0634/0711 scoped route proof lines",
+    ruling="T63", owner="icdrcfb",
+    why=("A retry without native evidence that the named nets were touched "
+         "and all other wires held fixed must refuse the trial."),
+    judge=_judge_feedback_scoped,
+    positive=Sample(
+        provenance=("Real T57 OpenROAD isolate.log, copied run23: the "
+                    "antenna repair leaves four nets unwired and emits no "
+                    "DRT-0633/0634/0711 scoped proof. A one-net request must "
+                    "therefore be refused."),
+        artefact=lambda: (_read("feedback_native_unverified_positive.log")(),
+                          ("calibration_target",))),
+    expect="WIRE_GUARD_REFUSED",
+    negative=Sample(
+        provenance=("Real T63 OpenROAD trial1.log: DRT-0633 names one net, "
+                    "holds 1175 others, DRT-0634 confirms one touched and "
+                    "1175 unchanged, and DRT-0711 confirms zero DRC. The "
+                    "one-element target set matches the tool's named count."),
+        artefact=lambda: (_read("feedback_native_held_negative.log")(),
+                          ("calibration_target",))),
+))
+
+_register(Instrument(
+    name="drc_feedback_repair::run",
+    reads="the KLayout deck transcript and its selected-rule RDB",
+    ruling="T63", owner="icdrcfb",
+    why=("The run's strict-decrease decision reads a selected-rule report. "
+         "The same original deck must show a real marker before reroute and "
+         "no marker on the candidate; the production _measure reader checks "
+         "both the deck execution transcript and the RDB."),
+    judge=_judge_feedback_measure,
+    positive=Sample(
+        provenance=("Real T63 KLayout baseline.drc.log and baseline.rpt from "
+                    "the copied run23; the selected original deck reports "
+                    "one CO.6a edge-pair marker."),
+        artefact=lambda: ("feedback_rule_present_positive.log",
+                          "feedback_rule_present_positive.rdb")),
+    expect="SIGNOFF_RULE_PRESENT",
+    negative=Sample(
+        provenance=("Real T63 KLayout candidate1.drc.log and candidate1.rpt "
+                    "from the same copied run23, same original deck: the RDB "
+                    "items are empty."),
+        artefact=lambda: ("feedback_rule_zero_negative.log",
+                          "feedback_rule_zero_negative.rdb")),
 ))
 
 

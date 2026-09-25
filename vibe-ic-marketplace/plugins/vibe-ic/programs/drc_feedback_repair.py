@@ -23,6 +23,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 from _atomic_artefact import write_text
 from _docker_memory import docker_memory_flags
+import instrument_calibration as _instrument_calibration
 
 _MARKER = re.compile(r"-?\d+(?:\.\d+)?")
 _ROUTE_VIA = re.compile(r"(?:ROUTED|NEW)\s+\S+\s+\(\s*(\d+)\s+(\d+)\s*\)\s+(\S*Via\S*)", re.I)
@@ -144,6 +145,7 @@ def _wire_guard(before: Path, after: Path, targets: set[str]) -> tuple[bool, lis
 
 
 def _native_scoped_guard(log: str, targets: set[str]) -> bool:
+    _instrument_calibration.assert_calibrated('drc_feedback_repair::_native_scoped_guard')
     held = _SCOPED_HELD.findall(log)
     identical = _SCOPED_IDENTICAL.findall(log)
     if not held or not identical or not _SCOPED_DRC.search(log):
@@ -154,6 +156,7 @@ def _native_scoped_guard(log: str, targets: set[str]) -> bool:
 
 
 def _antenna(log: str) -> tuple[int, int]:
+    _instrument_calibration.assert_calibrated('drc_feedback_repair::_antenna')
     a, b = _ANT_NET.findall(log), _ANT_PIN.findall(log)
     if not a or not b:
         raise ValueError('FEEDBACK_ANTENNA_NOT_MEASURED')
@@ -317,6 +320,7 @@ def _replace_selected(source: Path, outputs: list[Path]) -> None:
 def run(project: Path, top: str, pdk: Any, image: str, *,
         source_def: Path | None = None, publish: bool = True) -> dict:
     """Run one declared rule on the actual routed DEF; fail closed on every gap."""
+    _instrument_calibration.assert_calibrated('drc_feedback_repair::run')
     project = project.resolve()
     pnr = project / 'phase3/stage3/pnr'
     source_def = source_def or pnr / f'{top}.def'

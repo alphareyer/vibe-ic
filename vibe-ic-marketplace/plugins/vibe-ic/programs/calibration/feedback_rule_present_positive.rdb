@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<report-database>
+ <description/>
+ <original-file/>
+ <generator>drc: script='/task/scratch/select_rule.drc'</generator>
+ <top-cell>chip_top</top-cell>
+ <tags>
+ </tags>
+ <categories>
+  <category>
+   <name>CO.6a</name>
+   <description>CO.6a : Metal1 EOL overlap (&lt;0.34µm lines) : 0.06µm</description>
+   <categories>
+   </categories>
+  </category>
+ </categories>
+ <cells>
+  <cell>
+   <name>chip_top</name>
+   <variant/>
+   <layout-name/>
+   <references>
+   </references>
+  </cell>
+ </cells>
+ <items>
+  <item>
+   <tags/>
+   <category>'CO.6a'</category>
+   <cell>chip_top</cell>
+   <visited>false</visited>
+   <multiplicity>1</multiplicity>
+   <comment/>
+   <image/>
+   <values>
+    <value>edge-pair: (2548.385,2750.6;2548.385,2750.608)/(2548.37,2750.6;2548.37,2750.608)</value>
+   </values>
+  </item>
+ </items>
+</report-database>

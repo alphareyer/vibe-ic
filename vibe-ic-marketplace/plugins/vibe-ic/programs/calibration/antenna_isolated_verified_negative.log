@@ -1,0 +1,74 @@
+[WARNING ANT-0011] -report_violating_nets is deprecated.
+[INFO ANT-0002] Found 4 net violations.
+[INFO ANT-0001] Found 4 pin violations.
+ANTENNA_ISOLATED_TARGETS: clknet_5_25_0_clk__core u_core/net11 u_core/net707 u_core/net711
+[INFO ANT-0002] Found 4 net violations.
+[INFO ANT-0001] Found 4 pin violations.
+[WARNING GRT-0300] Timing is not available, setting critical nets percentage to 0.
+[INFO GRT-0012] Found 4 antenna violations.
+[WARNING DPL-0037] Use remove_fillers before detailed placement.
+[INFO DPL-0006] Core area: 5633783.23 um^2
+[INFO DPL-0007] Movable instances area: 8.78 um^2
+[INFO DPL-0008] Fixed instances area within core: 422448.68 um^2
+[INFO DPL-0009] Utilization: 7.5%
+[INFO DPL-0005] Diamond search max displacement: +/- 500 sites horizontally, +/- 100 rows vertically.
+[INFO DPL-1102] Legalizing using negotiation legalizer.
+[INFO DPL-1103] Negotiation base search window: +/-20 sites horizontally, +/-5 rows vertically 
+	Automatic search window extension enabled.
+	Search window extendable up to the max displacement cap of +/-500 sites, +/-100 rows near walls.
+[INFO DPL-1104] NegotiationLegalizer DRC penalty: 5.
+[INFO DPL-0392] Negotiation cell height distribution (1 unique row-count(s)):
+[INFO DPL-0393]   height 1 row(s): 26858 cells
+[INFO DPL-0500] Runtime: 0.12s
+[INFO GRT-0015] Inserted 4 diodes.
+[INFO GRT-0325] repair_antennas -reroute: re-routing 4 net(s) the repair pass left unwired; every other net is held fixed.
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via1
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via1
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via2
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via2
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via3
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via3
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via4
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via4
+[INFO DRT-0167] List of default vias:
+  Layer Via2
+    default via: Via2_HH
+  Layer Via3
+    default via: Via3_HH
+  Layer Via4
+    default via: Via4_HH
+[INFO DRT-0168] Init region query.
+[INFO DRT-0033] Poly2 shape region query size = 0.
+[INFO DRT-0033] CON shape region query size = 0.
+[INFO DRT-0033] Metal1 shape region query size = 109056.
+[INFO DRT-0033] Via1 shape region query size = 219675.
+[INFO DRT-0033] Metal2 shape region query size = 22379.
+[INFO DRT-0033] Via2 shape region query size = 220432.
+[INFO DRT-0033] Metal3 shape region query size = 78694.
+[INFO DRT-0033] Via3 shape region query size = 220432.
+[INFO DRT-0033] Metal4 shape region query size = 76233.
+[INFO DRT-0033] Via4 shape region query size = 88962.
+[INFO DRT-0033] Metal5 shape region query size = 47650.
+[INFO DRT-0633] Scoped detailed routing: 4 net(s) named, 1177 of 1177 other net(s) held fixed (their existing wire is an obstruction and is not rewritten).
+[INFO DRT-0178] Init guide query.
+[INFO DRT-0036] Poly2 guide region query size = 0.
+[INFO DRT-0036] CON guide region query size = 0.
+[INFO DRT-0036] Metal1 guide region query size = 2375.
+[INFO DRT-0036] Via1 guide region query size = 0.
+[INFO DRT-0036] Metal2 guide region query size = 2051.
+[INFO DRT-0036] Via2 guide region query size = 0.
+[INFO DRT-0036] Metal3 guide region query size = 1003.
+[INFO DRT-0036] Via3 guide region query size = 0.
+[INFO DRT-0036] Metal4 guide region query size = 43.
+[INFO DRT-0036] Via4 guide region query size = 0.
+[INFO DRT-0036] Metal5 guide region query size = 0.
+[INFO DRT-0179] Init gr pin query.
+[INFO DRT-0634] Scoped detailed routing touched 4 net(s) in the database and left 1177 net(s) byte-identical. Named: u_core/net11, clknet_5_25_0_clk__core, u_core/net707, u_core/net711.
+[INFO DRT-0711] Scoped detailed routing: whole-design violations 0 on entry, 0 on exit (delta +0).
+[INFO DRT-0501] Runtime: 42.59s
+[INFO ANT-0002] Found 0 net violations.
+[INFO ANT-0001] Found 0 pin violations.
+[INFO GRT-0313] repair_antennas -reroute: antenna-clean after 1 reroute pass(es).
+[INFO ANT-0002] Found 0 net violations.
+[INFO ANT-0001] Found 0 pin violations.
+ANTENNA_ISOLATED_VERIFIED: lost=0 held_shrunk=0 moved=0 placement=0 antenna=0
