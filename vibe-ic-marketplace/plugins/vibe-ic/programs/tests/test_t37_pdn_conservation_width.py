@@ -91,6 +91,7 @@ def test_second_pass_is_blocked_by_its_own_segment_result(tmp_path, monkeypatch)
             "Node0 Layer,Node0 X location,Node0 Y location,"
             "Node1 Layer,Node1 X location,Node1 Y location,Current\n"
             "M4,0,0,M4,1,0,%s\nM4,1,0,M4,2,0,1.0e-6\n" % p)
+        return False, True  # IR is not emitted; this segment EM run succeeded.
     monkeypatch.setattr(R, "_emit_ir_em_reports", fake_psm)
     status, detail = R._ppa_power._pdn_em_post_resize_check(
         tmp_path, "unit", _pdk(tmp_path), "unused",
