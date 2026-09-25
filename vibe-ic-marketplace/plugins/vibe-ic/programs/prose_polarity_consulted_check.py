@@ -1188,6 +1188,20 @@ _NOT_PROSE: Dict[str, str] = {
         "The scan reads ngspice's machine/tool version banner, not a design "
         "document. A version token has no surrounding natural-language denial "
         "whose polarity could change the provenance value.",
+    "phase3_one_shot_runner::_pdn_em_first_pass_resize":
+        "The gap is read from the flow's own OpenROAD Tcl `puts` record, "
+        "not from a design document or a diagnostic sentence. "
+        "`_pad_connected_ring_tcl` emits `PDN_PAD_RING_PLAN: placed_pads=4 "
+        "power_pads=2 side_power_pads=2 gap=17.44um configured_offset=6um "
+        "fitted_offset=6um footprint=4.9um clearance=0.46um "
+        "layers=Metal4 Metal5 pad_layers=Metal2`. The reader accepts that "
+        "whole fixed-field production, anchored at both line ends, with "
+        "numeric fields and layer identifiers. This grammar has no denial "
+        "production: inserting `not` before or after `gap=17.44um` makes "
+        "the record invalid, so no gap is declared. The companion PDN test "
+        "checks that such an annotated line yields NOT_MEASURED. The ring "
+        "refusal and inert records are separate productions, not alternative "
+        "polarity for the gap field.",
     "phase3_one_shot_runner::_pdn_em_width_floor":
         "The matches read machine-produced EM report fields plus the LEF "
         "MANUFACTURINGGRID production. These formal measurement grammars cannot "

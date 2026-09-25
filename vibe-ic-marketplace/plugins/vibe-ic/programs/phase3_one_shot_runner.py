@@ -7424,6 +7424,7 @@ def _pdn_em_width_floor(project: Path, pdk: "PdkConfig",
 #: this process invocation binds immediately; an earlier run's spend binds
 #: only when its recorded floor is present in the current routed DEF.
 _PDN_EM_RESIZE_SENTINEL = _ppa_power._PDN_EM_RESIZE_SENTINEL
+_PDN_ARCH_REPAIR_CLASS = "rail_ring_pad_v1"
 
 
 _PDN_EM_RUN_ID = _ppa_power._PDN_EM_RUN_ID
@@ -7502,7 +7503,8 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
     # This run's sentinel is an immediate anti-loop bound. A prior sentinel
     # binds only after the drawn DEF proves that its floor took effect.
     _binds, _why = _ppa_power._pdn_em_sentinel_binds(
-        sentinel, project, run_id=_PDN_EM_RUN_ID)
+        sentinel, project, run_id=_PDN_EM_RUN_ID,
+        repair_class=_PDN_ARCH_REPAIR_CLASS)
     if _binds:
         return decline(f"resize already spent: {_why}")
     print(f"[phase3] PDN EM first-pass resize is AVAILABLE: {_why}",
@@ -7592,6 +7594,122 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
             r"add_pdn_stripe\b[^\n]*?-layer\s+(\S+)[^\n]*?-followpins",
             tcl_txt)}
 
+    # A fixed cell rail can be repaired by shortening the distance to its
+    # directly connected perpendicular strap.  Use the measured rail current,
+    # never the all-layer peak or a gate verdict, for that span calculation.
+    rail_pitch = None
+    for rail_layer in sorted(followpin_layers):
+        rail = floor["per_layer"].get(rail_layer) or {}
+        rail_width = drawn.get(rail_layer)
+        if not (rail_width and rail.get("jmax_A_per_um")):
+            continue
+        for cm in re.finditer(r"add_pdn_connect\b[^\n]*?-layers\s+\{(\S+)\s+(\S+)\}", tcl_txt):
+            pair = (cm.group(1).lower(), cm.group(2).lower())
+            if rail_layer not in pair:
+                continue
+            strap_layer = pair[1] if pair[0] == rail_layer else pair[0]
+            sm = re.search(r"add_pdn_stripe\b[^\n]*?-layer\s+" + re.escape(strap_layer)
+                           + r"\b[^\n]*?-pitch\s+([0-9.]+)", tcl_txt, re.I)
+            if not sm:
+                continue
+            csv_path = rpt3 / "em_segments.csv"
+            if not csv_path.is_file():
+                continue
+            try:
+                segments = list(_emcd._iter_csv_segments(csv_path, None))
+                rail_pitch = _ppa_power.pdn_rail_pitch_plan(
+                    segments, rail_layer=rail_layer,
+                    rail_width_um=float(rail_width),
+                    jmax_A_per_um=float(rail["jmax_A_per_um"]),
+                    margin=float(floor["margin"]),
+                    old_pitch_um=float(sm.group(1)),
+                    grid_um=float(floor["manufacturing_grid_um"]))
+            except (OSError, ValueError, KeyError):
+                rail_pitch = None
+            if rail_pitch:
+                rail_pitch["strap_layer"] = strap_layer
+                break
+        if rail_pitch:
+            break
+    if rail_pitch:
+        floor["rail_pitch_plan"] = rail_pitch
+
+    ring_plan = None
+    ring_cfg = getattr(pdk, "pdn_ring", None) or {}
+    if ring_cfg:
+        log_path = pnr_out / "openroad.log"
+        try:
+            log_text = log_path.read_text(errors="replace")
+            # Read only the complete record emitted by
+            # `_pad_connected_ring_tcl`.  A loose search for `gap=` could
+            # borrow a number from an unrelated or annotated log sentence.
+            gap_matches = re.findall(
+                r"^PDN_PAD_RING_PLAN: placed_pads=[0-9]+ "
+                r"power_pads=[0-9]+ side_power_pads=[0-9]+ "
+                r"gap=([0-9]+(?:\.[0-9]+)?)um "
+                r"configured_offset=[0-9.]+um fitted_offset=[0-9.]+um "
+                r"footprint=[0-9.]+um clearance=[0-9.]+um "
+                r"layers=[A-Za-z_][A-Za-z_0-9]*(?: [A-Za-z_][A-Za-z_0-9]*)* "
+                r"pad_layers=[A-Za-z_][A-Za-z_0-9]*(?: [A-Za-z_][A-Za-z_0-9]*)*$",
+                log_text, re.M)
+            if not gap_matches and "PDN_PAD_RING_INERT" not in log_text:
+                return decline("PDN_EM_RING_CAPACITY_NOT_MEASURED: "
+                               "no pad-to-core gap in PnR log")
+            if gap_matches:
+                segments = list(_emcd._iter_csv_segments(
+                    rpt3 / "em_segments.csv", None))
+                peaks = _ppa_power.pdn_ring_segment_peaks(
+                    def_file.read_text(errors="replace"), segments)
+                if not peaks:
+                    return decline("PDN_EM_RING_GEOMETRY_UNPROVEN: "
+                                   "no measured PSM edge matched a final DEF ring")
+                ring_plan = _ppa_power.pdn_ring_capacity_plan(
+                    ring_cfg, gap_um=float(gap_matches[-1]), peaks_A=peaks,
+                    jmax_A_per_um={k: float(v["jmax_A_per_um"])
+                                       for k, v in floor["per_layer"].items()
+                                       if v.get("jmax_A_per_um")},
+                    margin=float(floor["margin"]),
+                    grid_um=float(floor["manufacturing_grid_um"]))
+                ring_plan["pad_entry"] = _ppa_power.pdn_pad_entry_plan(
+                    segments, pad_layers=ring_cfg["connect_to_pad_layers"],
+                    drawn_widths_um=drawn,
+                    jmax_A_per_um={k: float(v["jmax_A_per_um"])
+                                       for k, v in floor["per_layer"].items()
+                                       if v.get("jmax_A_per_um")},
+                    margin=float(floor["margin"]),
+                    grid_um=float(floor["manufacturing_grid_um"]))
+                floor["ring_capacity_plan"] = ring_plan
+        except (OSError, ValueError, KeyError) as exc:
+            return decline(f"PDN_EM_RING_CAPACITY_NOT_MEASURED: {exc}")
+        if ring_plan and ring_plan.get("code"):
+            try:
+                sizing_path = rpt3 / "pdn_em_sizing.json"
+                sizing = json.loads(sizing_path.read_text())
+                sizing["ring_capacity_plan"] = ring_plan
+                if rail_pitch:
+                    sizing["rail_pitch_plan"] = {
+                        **rail_pitch, "status": "NOT_APPLIED_RING_REFUSAL"}
+                _aa.write_text(sizing_path, json.dumps(sizing, indent=2) + "\n")
+            except (OSError, ValueError):
+                pass
+            return decline("PDN_EM_RING_CAPACITY_UNREACHABLE: "
+                           f"gap={ring_plan['gap_um']}um, "
+                           f"required_footprint="
+                           f"{ring_plan['required_footprint_um']}um, "
+                           f"available={ring_plan['available_footprint_um']}um")
+        if ring_plan and any(p["status"] == "CAPACITY_NOT_PROVEN"
+                             for p in ring_plan["pad_entry"]):
+            try:
+                sizing_path = rpt3 / "pdn_em_sizing.json"
+                sizing = json.loads(sizing_path.read_text())
+                sizing["ring_capacity_plan"] = ring_plan
+                _aa.write_text(sizing_path, json.dumps(sizing, indent=2) + "\n")
+            except (OSError, ValueError):
+                pass
+            return decline("PDN_EM_PAD_ENTRY_CAPACITY_UNPROVEN: "
+                           "measured pad current needs a wider connection "
+                           "than the routed DEF proves")
+
     short: List[Dict[str, Any]] = []
     for lname, ent in floor["per_layer"].items():
         if str(lname).lower() in followpin_layers:
@@ -7605,9 +7723,12 @@ def _pdn_em_first_pass_resize(project: Path, top: str, pdk: "PdkConfig",
                           "drawn_um": float(w_drawn),
                           "w_em_um": float(w_em),
                           "shortfall_x": round(float(w_em) / float(w_drawn), 4)})
-    if not short:
+    if not short and not rail_pitch and not (
+            ring_plan and ring_plan.get("applied") == "WIDER_RING"):
         return decline("all measured strap widths meet their EM floors")
-    return {"floor": floor, "short": short, "sentinel": sentinel}
+    return {"floor": floor, "short": short, "rail_pitch": rail_pitch,
+            "repair_class": _PDN_ARCH_REPAIR_CLASS,
+            "sentinel": sentinel}
 
 
 def macro_pg_pin_names(macro_lefs) -> Tuple[List[str], List[str]]:
@@ -8378,7 +8499,9 @@ def _io_pg_global_connect_tcl(pdk: "PdkConfig", container: Optional[str],
     return out
 
 
-def _pad_connected_ring_tcl(pdk: "PdkConfig") -> Dict[str, str]:
+def _pad_connected_ring_tcl(pdk: "PdkConfig",
+                            ring_plan: Optional[Dict[str, Any]] = None
+                            ) -> Dict[str, str]:
     """Build a config-driven, runtime-fitted pad-connected core ring.
 
     A configured ring is fitted to the *placed* side-pad/core gap in ODB.  The
@@ -8404,6 +8527,9 @@ def _pad_connected_ring_tcl(pdk: "PdkConfig") -> Dict[str, str]:
         }
 
     offset, clearance, widths_f, spacings_f, footprint = _pdn_ring_dimensions(cfg)
+    if ring_plan and ring_plan.get("applied") == "WIDER_RING":
+        widths_f = [float(x) for x in ring_plan["required_widths_um"]]
+        footprint = max(2 * w + s for w, s in zip(widths_f, spacings_f))
     layers = cfg["layers"]
     pad_layers = cfg["connect_to_pad_layers"]
     connects = cfg.get("connects") or []
@@ -8669,7 +8795,8 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
         # met1-follow-pins-only PDN below is emitted UNCHANGED.
         strap_tcl = ""
         strap_note = ""
-        ring = _pad_connected_ring_tcl(pdk)
+        ring = _pad_connected_ring_tcl(
+            pdk, (em_floor or {}).get("ring_capacity_plan"))
         straps = (pdk.pdn_straps or {})
         # The registry config WINS when present (a PDK that ships tuned
         # IR-drop geometry keeps it, byte-identical). When it is ABSENT the
@@ -8807,6 +8934,48 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                         st["offset"] = round(_np / _PDN_STRAP_OFFSET_DIV, 6)
                     _em_widened.append(
                         f"{st['layer']} {_sw0}->{st['width']}")
+                _rail_plan = (em_floor or {}).get("rail_pitch_plan") or {}
+                if (str(st["layer"]).lower()
+                        == str(_rail_plan.get("strap_layer", "")).lower()
+                        and _rail_plan.get("applied") == "DENSER_STRAPS"):
+                    _old_pitch = float(_rail_plan["old_pitch_um"])
+                    _new_pitch = float(_rail_plan["new_pitch_um"])
+                    _lay = _emfl[str(st["layer"]).lower()]
+                    _jpw = float(_lay["jmax_A_per_um"])
+                    _margin = float(em_floor["margin"])
+                    _q = float(em_floor["width_quantum_um"])
+                    # The measured strap-current authority has the same
+                    # linear-span scaling as the rail. Keep its safety factor
+                    # while exchanging width for extra parallel straps.
+                    _need = (float(em_floor["i_drive_A"]) * _new_pitch
+                             / _old_pitch / (_jpw * (1 - _margin)))
+                    _width = math.ceil(_need / _q - 1e-9) * _q
+                    if _width <= _need + 1e-12:
+                        _width += _q
+                    _sp = _techlef_layer_spacing(_tlef_txt or "", str(st["layer"]))
+                    _sp = float(_sp if _sp is not None else _sw0)
+                    if 2 * _width + _sp >= _new_pitch:
+                        raise ValueError(
+                            "PDN_EM_RAIL_PITCH_UNREACHABLE: "
+                            f"pitch={_new_pitch}um requires strap width="
+                            f"{_width:.4f}um, two-rail spacing={_sp}um; "
+                            f"need > {2 * _width + _sp:.4f}um")
+                    st["pitch"] = _new_pitch
+                    st["width"] = round(_width, 6)
+                    _grid = float(em_floor["manufacturing_grid_um"])
+                    st["offset"] = round(
+                        math.floor((_new_pitch / _PDN_STRAP_OFFSET_DIV)
+                                   / _grid + 1e-9) * _grid, 6)
+                    if isinstance(em_floor, dict):
+                        em_floor["applied"] = [a for a in em_floor.get("applied", [])
+                                               if str(a.get("layer", "")).lower()
+                                               != str(st["layer"]).lower()]
+                        em_floor["applied"].append({
+                            **_rail_plan, "layer": str(st["layer"]),
+                            "verdict": "DENSER_STRAPS", "pitch_um": _new_pitch,
+                            "width_um": st["width"]})
+                    _em_widened.append(
+                        f"{st['layer']} rail span pitch {_old_pitch}->{_new_pitch}um")
         if _stripes:
             _sl = []
             if _em_widened:
@@ -36564,11 +36733,16 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # R-0915-111 — the deck records what it APPLIED into the floor dict; persist
     # it beside the arithmetic so the step that reports the resize reads the
     # remedy instead of restating the shortfall.
-    if isinstance(_pdn_em_floor, dict) and _pdn_em_floor.get("applied"):
+    if (isinstance(_pdn_em_floor, dict)
+            and (_pdn_em_floor.get("applied")
+                 or _pdn_em_floor.get("ring_capacity_plan"))):
         try:
             _szp = _pl.reports_phase3_dir(project) / "pdn_em_sizing.json"
             _szd = json.loads(_szp.read_text())
-            _szd["applied"] = _pdn_em_floor["applied"]
+            if _pdn_em_floor.get("applied"):
+                _szd["applied"] = _pdn_em_floor["applied"]
+            if _pdn_em_floor.get("ring_capacity_plan"):
+                _szd["ring_capacity_plan"] = _pdn_em_floor["ring_capacity_plan"]
             _aa.write_text(_szp, json.dumps(_szd, indent=2) + "\n")
         except (OSError, ValueError):
             pass
@@ -63420,6 +63594,53 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     out_dir.mkdir(parents=True, exist_ok=True)
     out_dir_c = _to_container_path(str(out_dir), container)
     em_csv_c = f"{out_dir_c}/em_segments.csv"
+    em_geometry = out_dir / "em_pg_geometry.tsv"
+    em_geometry_c = f"{out_dir_c}/em_pg_geometry.tsv"
+    for old in (em_geometry, out_dir / "em_pg_geometry_subject.json"):
+        try:
+            old.unlink()
+        except FileNotFoundError:
+            pass
+    # DEF SPECIALNETS omit the layer metal inside generated via arrays. PSM
+    # nonetheless reports current between nodes on those via enclosures. Dump
+    # the loaded ODB's actual routing-layer boxes so those edges have a real
+    # cross section instead of silently inheriting a LEF default width.
+    geometry_tcl = r'''
+set _eg_f [open __GEOMETRY_PATH__ w]
+puts $_eg_f "net\tlayer\tx0_um\ty0_um\tx1_um\ty1_um\tsource"
+set _eg_dbu [[ord::get_db_tech] getDbUnitsPerMicron]
+foreach _eg_n [[ord::get_db_block] getNets] {
+  if {[$_eg_n getSigType] ni {POWER GROUND}} {continue}
+  foreach _eg_sw [$_eg_n getSWires] {
+    foreach _eg_s [$_eg_sw getWires] {
+      if {[$_eg_s isVia]} {
+        lassign [$_eg_s getViaXY] _eg_vx _eg_vy
+        set _eg_v [$_eg_s getTechVia]
+        if {$_eg_v eq "NULL"} {set _eg_v [$_eg_s getBlockVia]}
+        if {$_eg_v eq "NULL"} {continue}
+        foreach _eg_b [$_eg_v getBoxes] {
+          set _eg_l [$_eg_b getTechLayer]
+          if {$_eg_l eq "NULL" || [$_eg_l getRoutingLevel] <= 0} {continue}
+          puts $_eg_f [join [list [$_eg_n getName] [$_eg_l getName] \
+            [expr {double($_eg_vx+[$_eg_b xMin])/$_eg_dbu}] \
+            [expr {double($_eg_vy+[$_eg_b yMin])/$_eg_dbu}] \
+            [expr {double($_eg_vx+[$_eg_b xMax])/$_eg_dbu}] \
+            [expr {double($_eg_vy+[$_eg_b yMax])/$_eg_dbu}] via_metal] "\t"]
+        }
+      } else {
+        set _eg_l [$_eg_s getTechLayer]
+        if {$_eg_l eq "NULL" || [$_eg_l getRoutingLevel] <= 0} {continue}
+        puts $_eg_f [join [list [$_eg_n getName] [$_eg_l getName] \
+          [expr {double([$_eg_s xMin])/$_eg_dbu}] \
+          [expr {double([$_eg_s yMin])/$_eg_dbu}] \
+          [expr {double([$_eg_s xMax])/$_eg_dbu}] \
+          [expr {double([$_eg_s yMax])/$_eg_dbu}] special_wire] "\t"]
+      }
+    }
+  }
+}
+close $_eg_f
+'''.replace("__GEOMETRY_PATH__", em_geometry_c)
     # v1.3.93 — supply per-CUT-LAYER via resistance to PSM. A fixed-VIA-master
     # LEF ships RESISTANCE on the VIA12/VIA23/… masters but leaves the cut LAYERS
     # (VIA1, VIA2, …) at 0 ohm, so PSM aborts "[PSM-0021] Resistance map contains
@@ -63461,6 +63682,7 @@ read_lef {cell_lef_c}
 {macro_lefs_tcl}
 read_liberty {liberty_c}
 {_oc_tcl}read_def {def_c}
+{geometry_tcl}
 if {{[catch {{set_wire_rc -signal -layer {mp}1}} _e1]}} {{
   catch {{set_wire_rc -layer {mp}1}}
 }}
@@ -63474,6 +63696,14 @@ catch {{set_wire_rc -clock -layer {mp}5}}
         f"openroad -no_init -exit {tcl_c} 2>&1 | tee {out_dir_c}/ir_em.log"
     )
     rc, out, err = _docker_exec(container, cmd, marker=tcl_c, outputs=[out_dir / "ir_em.log"])
+    if rc == 0 and em_geometry.is_file():
+        _aa.write_text(out_dir / "em_pg_geometry_subject.json", json.dumps({
+            "schema": "em_pg_geometry/1",
+            "def_sha256": hashlib.sha256(def_file.read_bytes()).hexdigest(),
+            "geometry_file": em_geometry.name,
+            "geometry_sha256": hashlib.sha256(em_geometry.read_bytes()).hexdigest(),
+            "producer": "OpenROAD ODB routing-layer SBoxes and via metal boxes",
+        }, indent=2) + "\n")
     log = (out or "") + "\n" + (err or "")
     if rc != 0:
         # A failed native invocation cannot attest values from stdout or stale reports.
@@ -69022,6 +69252,13 @@ def main() -> int:
                 _short_txt = ", ".join(
                     f"{d['layer']} {d['drawn_um']}->{d['w_em_um']}um "
                     f"({d['shortfall_x']}x short)" for d in _rz["short"])
+                if _rz.get("rail_pitch"):
+                    _rp = _rz["rail_pitch"]
+                    _short_txt += (", " if _short_txt else "") + (
+                        f"{_rp['rail_layer']} fixed rail current "
+                        f"{_rp['rail_current_A']:.6g}A requires connected "
+                        f"strap pitch {_rp['old_pitch_um']}->"
+                        f"{_rp['new_pitch_um']}um")
                 # Sentinel FIRST. Without a written bound, refuse re-PnR.
                 if not _record_pdn_em_resize_spend(project, _rz):
                     _rz_spend_failed = True
@@ -69030,9 +69267,18 @@ def main() -> int:
                 print("[pnr] PDN_EM_RESIZE_DECLINED: "
                       + (_rz_decline_reason[0] if _rz_decline_reason
                          else "decision returned no reason"), file=sys.stderr)
+                if (_rz_decline_reason and _rz_decline_reason[0].startswith(
+                        ("PDN_EM_RING_CAPACITY_UNREACHABLE",
+                         "PDN_EM_PAD_ENTRY_CAPACITY_UNPROVEN",
+                         "PDN_EM_RING_GEOMETRY_UNPROVEN",
+                         "PDN_EM_RING_CAPACITY_NOT_MEASURED"))):
+                    _rz_post_status = "FAIL"
+                    _rz_post_detail = _rz_decline_reason[0]
+                    plan.append(StepResult("pdn_em_architecture", "FAIL", 0.0,
+                                           _rz_post_detail))
             if _rz:
                 print(f"[pnr] PDN EM resize: this run's own measured current "
-                      f"needs wider straps than it drew ({_short_txt}) — "
+                      f"requires a changed PDN plan ({_short_txt}) — "
                       f"re-running PnR ONCE with the derived floor",
                       flush=True)
                 _rz_t0 = time.time()
@@ -69096,7 +69342,11 @@ def main() -> int:
                         (f"{a['layer']} {a['stripe_multiplier']}x stripes at "
                          f"{a['pitch_um']}um, width {a['width_um']}um KEPT"
                          if a.get("verdict") == "MORE_STRIPES"
-                         else f"{a['layer']} width -> {a['width_um']}um")
+                         else (f"{a['layer']} pitch "
+                               f"{a['old_pitch_um']}->{a['new_pitch_um']}um, "
+                               f"width {a['width_um']}um"
+                               if a.get("verdict") == "DENSER_STRAPS"
+                               else f"{a['layer']} width -> {a['width_um']}um"))
                         for a in _applied) + "."
                 plan.append(StepResult(
                     "pdn_em_resize", _pnr_redispatched.status, _rz_secs,

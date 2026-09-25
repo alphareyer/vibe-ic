@@ -420,6 +420,35 @@ def _def_pg_local_rects(def_path: Path) -> Dict[Tuple[str, str], List[Tuple[floa
     return out
 
 
+def _odb_pg_geometry_rects(path: Path
+                           ) -> Dict[Tuple[str, str], List[Tuple[float, ...]]]:
+    """Width-bearing special wires and via-metal boxes emitted from OpenROAD ODB.
+
+    The caller authenticates the file against the exact DEF PSM measured.
+    A malformed row proves no width; it never creates a PASS default.
+    """
+    out: Dict[Tuple[str, str], List[Tuple[float, ...]]] = {}
+    try:
+        with path.open(newline="", errors="replace") as fh:
+            for row in csv.DictReader(fh, delimiter="\t"):
+                try:
+                    net = str(row["net"]).lower()
+                    layer = str(row["layer"]).lower()
+                    x0, y0, x1, y1 = (float(row[k]) for k in
+                                      ("x0_um", "y0_um", "x1_um", "y1_um"))
+                    if not (math.isfinite(x0) and math.isfinite(y0) and
+                            math.isfinite(x1) and math.isfinite(y1) and
+                            x1 > x0 and y1 > y0):
+                        continue
+                    out.setdefault((net, layer), []).append(
+                        (x0, y0, x1, y1, max(x1 - x0, y1 - y0)))
+                except (KeyError, ValueError, TypeError):
+                    continue
+    except OSError:
+        return {}
+    return out
+
+
 def _def_segment_supported_width(
         seg: Dict[str, Any], rects: Dict[Tuple[str, str], List[Tuple[float, ...]]]
         ) -> Optional[float]:
@@ -624,7 +653,8 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
              tech_lef: Optional[Path], margin: float, blacks_n: float,
              net_hint: Optional[str], top_offenders: int,
              def_widths: Optional[Dict[str, float]] = None,
-             def_path: Optional[Path] = None
+             def_path: Optional[Path] = None,
+             pg_geometry_path: Optional[Path] = None
              ) -> Tuple[str, Dict[str, Any]]:
     """Return (verdict, report). verdict in {PASS, FAIL, SKIPPED}."""
     rep: Dict[str, Any] = {
@@ -675,7 +705,10 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
     unscreened_reasons: Dict[str, int] = {}
 
     local_rects = _def_pg_local_rects(def_path) if def_path else {}
+    odb_rects = (_odb_pg_geometry_rects(pg_geometry_path)
+                 if pg_geometry_path else {})
     local_width_uses = 0
+    odb_width_uses = 0
     for seg in segs:
         n_total += 1
         r = _screen_segment(seg, table, margin, blacks_n, def_widths)
@@ -686,11 +719,23 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
         if (r["status"] == "offender" and not seg.get("width_um") and
                 seg["layer0"].lower() == seg["layer1"].lower()):
             local_w = _def_segment_supported_width(seg, local_rects)
+            odb_w = _def_segment_supported_width(seg, odb_rects)
+            # DEF's explicit same-net route remains the conductor authority.
+            # A via enclosure that overlaps a broad strap is not evidence
+            # that the entire strap current is squeezed through that one via.
+            # ODB fills only edges DEF could not width-prove (notably M3).
+            if odb_w and local_w is None:
+                local_w = odb_w
+                local_source = "odb_pg_metal_geometry"
+            else:
+                local_source = "def_same_net_covering_wire"
             if local_w and local_w > (r.get("width_um") or 0):
                 local_seg = dict(seg, width_um=local_w)
                 r = _screen_segment(local_seg, table, margin, blacks_n, def_widths)
-                r["width_source"] = "def_same_net_covering_wire"
+                r["width_source"] = local_source
                 local_width_uses += 1
+                if local_source == "odb_pg_metal_geometry":
+                    odb_width_uses += 1
         if r["status"] == "unscreened":
             n_unscreened += 1
             unscreened_reasons[r["reason"]] = unscreened_reasons.get(r["reason"], 0) + 1
@@ -720,6 +765,7 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
                       for k, v in sorted(per_layer.items())},
         "jmax_layers": sorted(e["orig_name"] for e in table.values()),
         "local_def_width_uses": local_width_uses,
+        "odb_pg_geometry_width_uses": odb_width_uses,
     }
 
     # (3b) report present + Jmax present but nothing mapped → SKIPPED, never PASS
