@@ -222,9 +222,12 @@ def _pin_map(image: str, project: Path, lefs: list[str], source_def: Path,
 
 
 def _stream(image: str, project: Path, pdk: Any, top: str,
-            source_def: Path, scratch: Path) -> Path:
+            source_def: Path, scratch: Path,
+            stream_script_text: str | None = None) -> Path:
     script = project / 'phase3/stage3/pnr/stream_out.py'
-    if not script.is_file():
+    if stream_script_text is not None:
+        write_text(script, stream_script_text)
+    elif not script.is_file():
         raise ValueError('FEEDBACK_STREAM_SCRIPT_MISSING')
     gds = scratch / 'candidate.gds'
     lefs = [pdk.tech_lef, pdk.cell_lef, *pdk.macro_lefs]
@@ -318,7 +321,8 @@ def _replace_selected(source: Path, outputs: list[Path]) -> None:
 
 
 def run(project: Path, top: str, pdk: Any, image: str, *,
-        source_def: Path | None = None, publish: bool = True) -> dict:
+        source_def: Path | None = None, publish: bool = True,
+        stream_script_text: str | None = None) -> dict:
     """Run one declared rule on the actual routed DEF; fail closed on every gap."""
     _instrument_calibration.assert_calibrated('drc_feedback_repair::run')
     project = project.resolve()
@@ -346,10 +350,16 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
         design_cell = _def_design(source_def)
         record['design_cell'] = design_cell
         lefs = [pdk.tech_lef, pdk.cell_lef, *pdk.macro_lefs]
+        stream_script = pnr / 'stream_out.py'
+        if stream_script_text is None and not stream_script.is_file():
+            raise ValueError('FEEDBACK_STREAM_SCRIPT_MISSING')
+        stream_digest = (hashlib.sha256(stream_script_text.encode()).hexdigest()
+                         if stream_script_text is not None else _sha(stream_script))
         basis = {'def_sha256': digest, 'image': image, 'deck': pdk.drc_deck,
                  'lefs': lefs, 'cell_gds': pdk.cell_gds,
                  'macro_gds': pdk.macro_gds,
-                 'lefdef_map': pdk.lefdef_layermap}
+                 'lefdef_map': pdk.lefdef_layermap,
+                 'stream_script_sha256': stream_digest}
         basis_digest = hashlib.sha256(json.dumps(basis, sort_keys=True).encode()).hexdigest()
         record['layout_basis_sha256'] = basis_digest
         with tempfile.TemporaryDirectory(prefix=basis_digest[:16] + '-', dir=scratch_root) as temp:
@@ -362,7 +372,8 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
                 one.mkdir()
                 before = _measure(image, project, pdk.drc_deck, rule,
                                   _stream(image, project, pdk, design_cell,
-                                          current, one), design_cell, one)
+                                          current, one, stream_script_text),
+                                  design_cell, one)
                 record['before_count'] = len(before)
                 record['markers'] = before
                 if not before:
@@ -403,7 +414,8 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
                             else:
                                 trial['candidate_def_sha256'] = _sha(candidate)
                                 gds = _stream(image, project, pdk, design_cell,
-                                              candidate, trial_dir)
+                                              candidate, trial_dir,
+                                              stream_script_text)
                                 trial['scratch_gds_sha256'] = _sha(gds)
                                 after = _measure(image, project, pdk.drc_deck,
                                                  rule, gds, design_cell, trial_dir)

@@ -60,6 +60,7 @@ def _fixture(tmp_path):
 
 @pytest.mark.parametrize('fault, expected', [
     ('none', 'PASS'),
+    ('missing_stream', 'PASS'),
     ('non_target_wire', 'REFUSED'),
     ('router_drc', 'REFUSED'),
     ('antenna', 'REFUSED'),
@@ -70,6 +71,8 @@ def test_feedback_accepts_only_guarded_strict_decrease(tmp_path, monkeypatch,
                                                        fault, expected):
     module = _module()
     project, pdk = _fixture(tmp_path)
+    if fault == 'missing_stream':
+        (project / 'phase3/stage3/pnr/stream_out.py').unlink()
     original = (project / 'phase3/stage3/pnr/chip_top.def').read_bytes()
     if MODULE.is_file():
         def fake_eda(_image, _project, argv, *, env=None):
@@ -114,11 +117,12 @@ def test_feedback_accepts_only_guarded_strict_decrease(tmp_path, monkeypatch,
                        f'[INFO ANT-0002] Found {antenna} net violations.\n'
                        '[INFO ANT-0001] Found 0 pin violations.\n', stderr='')
         monkeypatch.setattr(module, '_docker', fake_eda)
+    kwargs = {'stream_script_text': 'print("EDA stream")\n'} if fault == 'missing_stream' else {}
     result = module.run(project, 'chip_top', pdk, 'sha256:' + '0' * 64,
-                        publish=False)
+                        publish=False, **kwargs)
     assert result['status'] == expected
     assert (project / 'phase3/stage3/pnr/chip_top.def').read_bytes() == original
-    if fault == 'none':
+    if fault in ('none', 'missing_stream'):
         assert (result['before_count'], result['after_count']) == (1, 0)
         assert result['trials'][0]['router_drc'] == 0
         assert result['trials'][0]['antenna'] == (0, 0)
