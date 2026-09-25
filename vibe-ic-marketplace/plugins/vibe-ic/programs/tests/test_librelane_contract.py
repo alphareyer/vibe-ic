@@ -145,6 +145,33 @@ def test_synthesis_chain_accepts_pre_netlist_state_and_keeps_tool_output(tmp_pat
     assert json.loads((folder / 'state_out.json').read_text())['nl'].endswith('block.nl.v')
 
 
+def test_stream_lane_and_synthesis_namespace_keep_separate_receipts(tmp_path, monkeypatch):
+    p = design(tmp_path)
+    netlist = p / 'block.nl.v'
+    netlist.write_text('module block; endmodule')
+    initial = put(p / 'initial.json', {'nl': str(netlist)})
+    config = put(p / 'config.json', {'meta': {'step': 'OpenROAD.Floorplan'}})
+
+    def tool_run(cmd, **_):
+        folder = Path(cmd[cmd.index('-o') + 1])
+        put(folder / 'state_out.json', {'nl': str(netlist)})
+        return SimpleNamespace(returncode=0, stdout='ok', stderr='')
+
+    monkeypatch.setattr(contract, 'image_capability', lambda *a: None)
+    monkeypatch.setattr(contract.subprocess, 'run', tool_run)
+    steps = [('OpenROAD.Floorplan', config, initial)]
+    stream = contract.run_chain(p, 'candidate', steps, lane='stream37')[0]
+    synth = contract.run_chain(p, 'candidate', steps,
+                               namespace='ppa_synthesis/arm0')[0]
+    assert stream == p / 'phase3/librelane/stream37/01-openroad-floorplan'
+    assert synth == p / 'phase3/librelane/ppa_synthesis/arm0/01-openroad-floorplan'
+    assert stream.joinpath('vibeic_receipt.json').is_file()
+    assert synth.joinpath('vibeic_receipt.json').is_file()
+    with pytest.raises(contract.Refusal, match='LL_LANE_NAMESPACE_CONFLICT'):
+        contract.run_chain(p, 'candidate', steps, lane='stream37',
+                           namespace='ppa_synthesis/arm0')
+
+
 def test_switch_defaults_to_direct_and_rejects_bad_value(tmp_path):
     p = design(tmp_path)
     assert contract.selected_mode(p, '15.5ic') == 'direct'
