@@ -113,5 +113,6 @@ def test_the_postcheck_is_a_flow_stop_not_just_a_report():
     assert not R._ppa_power._pdn_em_resize_chain_continues(
         pnr, "NOT_MEASURED", R._pnr_chain_continues)
     source = (Path(R.__file__)).read_text()
-    assert '"pdn_em_postcheck", _rz_post_status' in source
+    assert '_rz_post_row = _postcheck_step(' in source
+    assert 'plan.append(_rz_post_row)' in source
     assert '_ppa_power._pdn_em_resize_chain_continues(' in source

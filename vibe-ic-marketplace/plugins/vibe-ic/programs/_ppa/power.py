@@ -1973,6 +1973,21 @@ def _pdn_em_post_resize_check(project: Path, top: str, pdk: Any,
         return "NOT_MEASURED", f"PDN_EM_POSTCHECK_ERROR: {exc}"
 
 
+def _pdn_em_postcheck_reason_class(status: str, detail: str) -> str:
+    """Classify an unavailable second-pass EM result by its producer cause."""
+    if status != "NOT_MEASURED":
+        return ""
+    if detail.startswith("PDN_EM_POSTCHECK_NO_DEF"):
+        return "input_absent"
+    if detail.startswith("PDN_EM_POSTCHECK_STALE_DEF"):
+        return "upstream_failed"
+    if detail.startswith("PDN_EM_POSTCHECK_UNRESOLVED"):
+        return "inconclusive"
+    # Native PSM, report freshness, authority emission and exceptions failed
+    # during execution. An earlier EM report cannot close this measurement.
+    return "execution_error"
+
+
 def _pdn_em_resize_chain_continues(pnr_row: Any, post_status: str,
                                    pnr_chain_continues: Callable[[Any], bool]
                                    ) -> bool:
