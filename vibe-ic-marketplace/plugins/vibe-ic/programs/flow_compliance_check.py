@@ -10261,8 +10261,8 @@ _P0_NONDECISIVE_VERDICTS = frozenset({
 #: operator-facing listing is a contract this migration does not get to alter
 #: on the way past — and once the parsers are gone (step 4) the prefix
 #: collision is inert: it exists only in text nothing reads.
-_P0_NO_RTL_NOTE = ("no RTL directory found — structural gates skipped "
-                   "(analog track / pre-RTL)")
+_P0_NO_RTL_NOTE = ("no RTL directory found — structural input absent; "
+                   "no structural gates ran")
 
 
 #: Severity tokens a JSON-emitting gate uses for the finding that DECIDED an
@@ -10877,13 +10877,15 @@ def structural_measurement_line(registered: Optional[int],
 
 
 def _p0_umbrella_status(executed: Optional[bool],
-                        records: List[Dict[str, Any]]) -> str:
+                        records: List[Dict[str, Any]],
+                        rtl_promised: bool = True) -> str:
     """THE ONE OWNER of the P0 umbrella's step verdict.
 
     The four outcomes, and why the third one is not a PASS:
 
-      * ``executed is None``  -> ``SKIPPED-CONDITION``. #447: the umbrella
-        dispatched nothing (no RTL), and 0-of-N executed checkers is not a PASS.
+      * ``executed is None``  -> ``FAIL`` only if Step 1 has completed and
+        promised RTL. Before that producer succeeds, the caller records
+        ``NOT_APPLICABLE / ASKED_BEFORE_PRODUCER`` for the empty dispatch.
       * a gate FAILed          -> ``FAIL``. Unchanged; ``executed`` IS the
         umbrella's own ``len(fails) == 0`` flag, so this branch re-derives
         nothing and cannot disagree with the bucket it came from.
@@ -10961,9 +10963,12 @@ def _p0_umbrella_status(executed: Optional[bool],
     # NOT_MEASURED, and the thing a reader needed all along is in the second
     # element.
     if executed is None:
-        # The INPUT declares the structural track inapplicable. The caller
-        # carries the declaration into `declared_by`.
-        return _T.Verdict.NOT_APPLICABLE.value, ""
+        # A completed Step 1 promises RTL. Before that producer completes,
+        # P0 has no structural subject; the caller supplies that distinction.
+        if not rtl_promised:
+            return (_T.Verdict.NOT_APPLICABLE.value,
+                    _reason_taxonomy.ASKED_BEFORE_PRODUCER)
+        return _T.Verdict.FAIL.value, ""
     if not executed:
         return _T.Verdict.FAIL.value, ""
     # RB2-03 (#2063) — ZERO ANSWERED IS NOT "PARTIALLY ANSWERED". `INCOMPLETE`
@@ -20043,7 +20048,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     # all) publishes "no records" rather than an empty list that would read as
     # "every gate was considered and none of them anything".
     structural_gate_records: Optional[List[Dict[str, Any]]] = None
-    if args.stage not in (3, 4) and target_stage not in _NO_RTL_UMBRELLA_SCOPES:
+    # A scoped test flow may declare only one step. Do not inject P0 into a
+    # flow that does not declare it; the canonical flow does declare P0.
+    if (any(str(step.get("id")) == "P0" for step in steps)
+            and args.stage not in (3, 4)
+            and target_stage not in _NO_RTL_UMBRELLA_SCOPES):
         structural_gate_records = []
         # #497 step 3 — `main()` no longer consumes the umbrella's PROSE
         # buckets at all. `s_passed` is the umbrella's own tri-state and
@@ -20098,10 +20107,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         # recovered the count as `registry - fails - skips - waivers`, which is
         # the closest a bucket-only world could get to asking the gates.
         structural_passed_count = _p0_passed_count(structural_gate_records)
-        # #447 — s_passed is None when NO checker executed (no RTL):
-        # the umbrella reports SKIPPED-CONDITION, never PASS; a
-        # pure-analog project's strict verdict is decided by the
-        # A-track gates, not by 0/226 skipped digital checkers.
+        # #447 — s_passed is None when NO checker executed (no RTL).
+        # The Step-1 result below distinguishes an unmet producer promise
+        # from a structural subject that was not yet due.
         # vibe-ic#559 — the headline said `N checkers` where N is the number
         # REGISTERED, which is not the number that produced a verdict. 33 of the
         # 243 reject the argv the umbrella builds (argparse exits 2 before the
@@ -20134,7 +20142,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         structural_not_invocable_count = _p0_not_invocable_count(
             structural_gate_records)
         _p0_status, _p0_reason = _p0_umbrella_status(
-            s_passed, structural_gate_records)
+            s_passed, structural_gate_records,
+            rtl_promised=s_passed is not None)
         structural_result = StepResult(
             id="P0",
             name=(f"Structural-RTL gates (P0 umbrella, {_n_verdict} of "
@@ -20150,7 +20159,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             # INCOMPLETE, not PASS.
             status=_p0_status,
             reason_class=_p0_reason,
-            declared_by=("the input declares no structural-RTL track"
+            declared_by=("ASKED_BEFORE_PRODUCER: Step 1 has not successfully "
+                         "produced RTL"
                          if _p0_status == _T.Verdict.NOT_APPLICABLE.value
                          else ""),
             reasons=reasons_combined,
@@ -20253,6 +20263,23 @@ def main(argv: Optional[List[str]] = None) -> int:
                     _by_id[str(_step.get("id"))] = _r
         for _step in _eval_steps:
             results.append(_by_id[str(_step.get("id"))])
+
+    # P0 is dispatched before the ordinary step loop, but Step 1 owns its RTL.
+    # Resolve the promise only after Step 1 has been judged. A failed or
+    # unexecuted producer does not make an empty P0 dispatch a design failure;
+    # a completed producer with no RTL does.
+    if (structural_result is not None
+            and structural_result.status == _T.Verdict.NOT_APPLICABLE.value
+            and structural_result.reason_class ==
+                _reason_taxonomy.ASKED_BEFORE_PRODUCER):
+        _rtl_owner = next((r for r in results if str(r.id) == "1"), None)
+        if (_rtl_owner is not None and _rtl_owner.status in
+                (_T.Verdict.PASS.value, _T.Verdict.PASS_WITH_WAIVERS.value)):
+            structural_result.status = _T.Verdict.FAIL.value
+            structural_result.reason_class = ""
+            structural_result.declared_by = ""
+            structural_result.reasons.append(
+                "FAIL: Step 1 completed but its promised RTL is absent")
 
     # v0.3.5 — ORGANIC #502/#503: cascade attribution AFTER all step
     # verdicts are final (waiver conversions included): waiver chains

@@ -20,7 +20,19 @@ from pathlib import Path
 
 def check(project: Path, mode: str) -> list[str]:
     errors: list[str] = []
-    if mode == "rtl":
+    if mode == "rom_lint":
+        path = project / "reports/phase2/lint/rom_init_lint.json"
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, UnicodeError, ValueError) as exc:
+            return [f"{path}: unreadable JSON: {exc}"]
+        if not isinstance(data, list):
+            return [f"{path}: expected findings list from rom_init_lint"]
+        if any(not isinstance(row, dict) or
+               not {"file", "line", "rule", "severity"} <= row.keys()
+               for row in data):
+            return [f"{path}: invalid rom_init_lint finding"]
+    elif mode == "rtl":
         files = sorted((project / "phase2/stage1/rtl").glob("*.v")) + sorted((project / "phase2/stage1/rtl").glob("*.sv"))
         if not files:
             return ["no RTL source"]
@@ -79,7 +91,7 @@ def check(project: Path, mode: str) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("project", type=Path)
-    ap.add_argument("--mode", required=True, choices=("rtl", "netlist", "si", "repair", "dfm", "stage_analog"))
+    ap.add_argument("--mode", required=True, choices=("rtl", "rom_lint", "netlist", "si", "repair", "dfm", "stage_analog"))
     args = ap.parse_args()
     if not args.project.is_dir():
         print(f"FAIL: project directory absent: {args.project}")

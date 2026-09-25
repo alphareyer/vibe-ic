@@ -667,6 +667,30 @@ steps:
       - program: l22_analog_verification_plan_emit
         path: "phase1/generated_docs/L22_VERIFICATION_PLAN.json"
         verdict_field: extraction_status
+      # The Phase-1 runner emits these through _write_l_doc. They are
+      # conditional producer claims, not unconditional required outputs.
+      - program: phase1_doc_one_shot_runner
+        path: "phase1/generated_docs/L14_PROTOCOL_VERSIONING.json"
+      - program: phase1_doc_one_shot_runner
+        path: "phase1/generated_docs/L15_ENCODING_TABLES.json"
+      - program: phase1_doc_one_shot_runner
+        path: "phase1/generated_docs/L16_COMPLIANCE_PROPERTIES.json"
+      - program: phase1_doc_one_shot_runner
+        path: "phase1/generated_docs/L17_CHANNEL_SIGNAL_CATALOG.json"
+      - program: phase1_doc_one_shot_runner
+        path: "phase1/generated_docs/L18_INTERCONNECT_TOPOLOGY.json"
+      - program: phase1_doc_one_shot_runner
+        path: "phase1/generated_docs/L20_DFT_SCAN_TOPOLOGY.json"
+      - program: phase1_doc_one_shot_runner
+        path: "phase1/generated_docs/L23_SECURITY_REQUIREMENTS.json"
+      - program: phase1_doc_one_shot_runner
+        path: "phase1/generated_docs/L24_SIGNOFF.json"
+      - program: phase1_doc_one_shot_runner
+        path: "phase1/generated_docs/L25_RELIABILITY_MISSION_PROFILE.json"
+      - program: phase1_doc_one_shot_runner
+        path: "phase1/generated_docs/L26_MECHANICAL_TRANSDUCTION.json"
+      - program: phase1_doc_one_shot_runner
+        path: "phase1/generated_docs/L27_MEMORY_MODULE_SPD.json"
     required_outputs:
       - "phase1/generated_docs/L1_DATASHEET.json"
       - "phase1/generated_docs/L2_FRS.json"
@@ -1538,6 +1562,8 @@ steps:
       - program: staged_rtl_reused_ip_manifest_emit
         path: "phase2/stage1/rtl/SOURCE_MANIFEST.json"
       - program: ip_catalog_pull
+        path: "plugin_output/declaration.json"
+      - program: spec_declaration_emit
         path: "plugin_output/declaration.json"
       - program: arith_declaration_emit
         path: "plugin_output/declaration.json"
@@ -2909,7 +2935,11 @@ steps:
         # reader after the wrong artefact. The verdict belongs on the record,
         # not in step 7's tier. It writes no artefact, so nothing is added to
         # `required_outputs`.
-    blocks_on: [1]
+    # Step 3's CDC evidence is consumed by the next SDC validation step.
+    # Step 6's ancestors include RTL validation and simulation; their FAIL
+    # must not void a measured constraints result. The nested stage-1 audit
+    # above remains advisory and reports those failures in its own record.
+    blocks_on: [1, 3]
 
   - id: 8
     name: "🔁 SDC validation"
@@ -3065,8 +3095,8 @@ steps:
         path: "input/submission_template/tapeout_declaration.json"
       - from: 1
         path: "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
-      - from: 7
-        path: "phase2/stage2/constraints/*.sdc"
+      # design_one_shot_runner synthesizes before step_sdc_gen. Synthesis
+      # obtains its period from Phase-1 timing intent, so SDC is not an input.
     skills: [synth-doctor]
     mcp_tools: [eda_synth]
     programs:

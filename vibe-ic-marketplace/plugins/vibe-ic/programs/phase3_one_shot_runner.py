@@ -71314,13 +71314,16 @@ def main() -> int:
             timeout=_pl.audit_timeout_s(project) + 120,
             check=False, capture_output=True, text=True)
         if _fc.returncode != 0:
-            # NOT a finding about the design: flow_compliance exits non-zero
-            # for a non-clean flow, which is the ordinary case this refresh is
-            # run to capture. What is worth saying is that the refresh RAN and
-            # what it returned, so a stale audit can be told from a fresh one.
-            print(f"[INFO] flow_compliance refresh returned rc={_fc.returncode}; "
-                  "phase23_completion_audit.json is fresh and the headline is "
-                  "derived from it", file=sys.stderr)
+            _audit_path = _pl.report_path(project, "phase23_completion_audit.json")
+            try:
+                _audit_doc = json.loads(_audit_path.read_text())
+                _audit_tier = str(_audit_doc.get("verdict", "NOT_MEASURED"))
+            except (OSError, ValueError, AttributeError):
+                _audit_tier = "NOT_MEASURED"
+            _level = "ERROR" if _audit_tier == "FAIL" else "WARN"
+            print(f"[{_level}] flow_compliance --strict refresh returned "
+                  f"rc={_fc.returncode}, audit verdict={_audit_tier}; "
+                  "the headline must reflect this audit", file=sys.stderr)
     except Exception as _fc_exc:  # nosec — must not abort finalize
         print("[WARN] flow_compliance refresh did NOT run "
               f"({_fc_exc}); _derive will read a STALE "
