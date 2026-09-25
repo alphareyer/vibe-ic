@@ -53622,7 +53622,8 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
     if _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None)):
         _feedback = _drc_feedback.run(
             project, top, pdk,
-            _drc_feedback.image_for_container(container))
+            _drc_feedback.image_for_container(container),
+            stream_script_text=_GDS_STREAMOUT_PY)
         if _feedback.get("status") != "PASS":
             return StepResult("prestream_gate", "FAIL", time.time() - t0,
                               "SIGNOFF_DECK_FEEDBACK_REFUSED: " +
