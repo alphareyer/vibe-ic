@@ -70929,20 +70929,18 @@ def main() -> int:
     # what emits `phase3/stage3/sta/*.rpt` and `reports/phase3/em.rpt`, and
     # BEFORE the derived-artefact generators build the hand-off pack and
     # tape-out checklist on top of a sign-off nobody checked.
-    if _layout_refusal:
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        # XOR reads the shipped GDS and its retained pre-finishing boundary.
+        # It writes only its own receipt, so it may run alongside final STA,
+        # EM and tapeout precheck without racing a layout writer. A refused
+        # layout must not start XOR, but shares the same sign-off call site.
+        xor_job = (pool.submit(run_pre_audit_producers, project,
+                               args.container, only_names=("gds_xor",))
+                   if not _layout_refusal else None)
         plan.extend(step_declared_signoff_gates(
             project, pdk.name, args.container,
             upstream_refusal=_layout_refusal))
-    else:
-        # XOR reads the shipped GDS and its retained pre-finishing boundary.
-        # It writes only its own receipt, so it may run alongside final STA,
-        # EM and tapeout precheck without racing a layout writer.
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            xor_job = pool.submit(run_pre_audit_producers, project,
-                                  args.container, only_names=("gds_xor",))
-            plan.extend(step_declared_signoff_gates(
-                project, pdk.name, args.container,
-                upstream_refusal=_layout_refusal))
+        if xor_job is not None:
             _xor_rows = xor_job.result()
     # PRE-AUDIT PRODUCERS, run and REPORTED, never planned. Steps 36 and 38 each
     # declare their own gate as their only producer, so without this the only
