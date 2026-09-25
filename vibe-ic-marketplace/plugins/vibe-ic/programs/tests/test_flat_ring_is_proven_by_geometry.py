@@ -32,13 +32,23 @@ if str(_PROGRAMS) not in sys.path:
 
 import phase3_one_shot_runner as p3  # noqa: E402
 
-pya = pytest.importorskip("pya")
+try:
+    import pya
+except ImportError:
+    pya = None
+
+
+@pytest.fixture
+def geometry_backend():
+    # Keep the host-independent contract test below runnable. Geometry tests
+    # run with the pinned EDA image, where pya is installed.
+    return pytest.importorskip("pya")
 
 TOP = "chip_top"
 PAD = "IO_PAD_A"
 CORE = "STD_CELL_A"
-L1 = pya.LayerInfo(34, 0)
-L2 = pya.LayerInfo(46, 0)
+L1 = pya.LayerInfo(34, 0) if pya is not None else None
+L2 = pya.LayerInfo(46, 0) if pya is not None else None
 
 
 def _hier_layout() -> "pya.Layout":
@@ -100,7 +110,7 @@ def _edit_final(final: Path, fn) -> Path:
 
 # -- the merge keeps the placement it is about to destroy -------------------
 
-def test_merge_writes_the_ring_reference_before_flattening(tmp_path):
+def test_merge_writes_the_ring_reference_before_flattening(tmp_path, geometry_backend):
     merged, ref, stdout = _merge(tmp_path)
     assert "RING_REFERENCE_WRITTEN instances=2" in stdout
     final = pya.Layout()
@@ -109,7 +119,7 @@ def test_merge_writes_the_ring_reference_before_flattening(tmp_path):
     assert p3._gds_reference_counts(ref, TOP) == {PAD: 2}  # core not copied
 
 
-def test_merge_without_ring_masters_writes_no_reference(tmp_path):
+def test_merge_without_ring_masters_writes_no_reference(tmp_path, geometry_backend):
     merged, ref, stdout = _merge(tmp_path, masters="")
     assert merged.is_file() and not ref.exists()
     assert "RING_REFERENCE" not in stdout
@@ -117,14 +127,14 @@ def test_merge_without_ring_masters_writes_no_reference(tmp_path):
 
 # -- the geometry proof, both directions ------------------------------------
 
-def test_an_intact_ring_in_the_flat_gds_is_covered(tmp_path):
+def test_an_intact_ring_in_the_flat_gds_is_covered(tmp_path, geometry_backend):
     merged, ref, _ = _merge(tmp_path)
     rep = _proof(tmp_path, ref, merged)
     assert rep["verdict"] == "PASS", rep
     assert rep["masters"] == {PAD: {"instances": 2, "covered": 2}}
 
 
-def test_a_polygon_cut_from_one_pad_is_not_covered(tmp_path):
+def test_a_polygon_cut_from_one_pad_is_not_covered(tmp_path, geometry_backend):
     merged, ref, _ = _merge(tmp_path)
 
     def cut(ly, top):
@@ -139,7 +149,7 @@ def test_a_polygon_cut_from_one_pad_is_not_covered(tmp_path):
     assert rep["uncovered"][0]["origin_dbu"] == [50000, 0]
 
 
-def test_a_layer_missing_from_the_final_is_not_covered(tmp_path):
+def test_a_layer_missing_from_the_final_is_not_covered(tmp_path, geometry_backend):
     merged, ref, _ = _merge(tmp_path)
 
     def drop(ly, top):
@@ -149,7 +159,7 @@ def test_a_layer_missing_from_the_final_is_not_covered(tmp_path):
     assert rep["masters"][PAD]["covered"] == 0
 
 
-def test_a_moved_pad_is_not_covered(tmp_path):
+def test_a_moved_pad_is_not_covered(tmp_path, geometry_backend):
     merged, ref, _ = _merge(tmp_path)
 
     def move(ly, top):
@@ -161,7 +171,7 @@ def test_a_moved_pad_is_not_covered(tmp_path):
     assert rep["verdict"] == "FAIL", rep
 
 
-def test_a_final_without_the_top_is_not_measured(tmp_path):
+def test_a_final_without_the_top_is_not_measured(tmp_path, geometry_backend):
     merged, ref, _ = _merge(tmp_path)
 
     def rename(ly, top):
@@ -234,7 +244,7 @@ def _gate(project: Path, container):
     return res, doc
 
 
-def test_the_gate_passes_a_flat_gds_whose_ring_is_covered(tmp_path, monkeypatch):
+def test_the_gate_passes_a_flat_gds_whose_ring_is_covered(tmp_path, monkeypatch, geometry_backend):
     _fake_docker(monkeypatch, tmp_path)
     res, doc = _gate(_project(tmp_path), "c")
     assert res.status == "PASS", doc["findings"]
@@ -243,7 +253,7 @@ def test_the_gate_passes_a_flat_gds_whose_ring_is_covered(tmp_path, monkeypatch)
     assert doc["flat_ring_geometry_proof"]["covered_by_master"] == {PAD: 2}
 
 
-def test_the_gate_fails_a_flat_gds_whose_ring_lost_geometry(tmp_path, monkeypatch):
+def test_the_gate_fails_a_flat_gds_whose_ring_lost_geometry(tmp_path, monkeypatch, geometry_backend):
     _fake_docker(monkeypatch, tmp_path)
     res, doc = _gate(_project(tmp_path, cut=True), "c")
     assert res.status == "FAIL"
@@ -251,7 +261,7 @@ def test_the_gate_fails_a_flat_gds_whose_ring_lost_geometry(tmp_path, monkeypatc
     assert doc["flat_ring_geometry_proof"]["verdict"] == "FAIL"
 
 
-def test_no_reference_or_no_container_leaves_the_ring_not_proven(tmp_path, monkeypatch):
+def test_no_reference_or_no_container_leaves_the_ring_not_proven(tmp_path, monkeypatch, geometry_backend):
     _fake_docker(monkeypatch, tmp_path)
     res, doc = _gate(_project(tmp_path, with_reference=False), "c")
     assert res.status == "FAIL"
@@ -261,7 +271,7 @@ def test_no_reference_or_no_container_leaves_the_ring_not_proven(tmp_path, monke
     assert doc["flat_ring_geometry_proof"]["verdict"] == "NOT_MEASURED"
 
 
-def test_a_reference_short_of_the_expected_ring_fails_before_klayout(tmp_path, monkeypatch):
+def test_a_reference_short_of_the_expected_ring_fails_before_klayout(tmp_path, monkeypatch, geometry_backend):
     def boom(*a, **k):
         raise AssertionError("klayout must not run")
     monkeypatch.setattr(p3, "_docker_exec", boom)

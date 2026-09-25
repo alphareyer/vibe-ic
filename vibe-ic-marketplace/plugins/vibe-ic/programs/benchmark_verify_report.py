@@ -202,6 +202,13 @@ def _valid_receipt(receipt: object, project: Path, reference: Path, sid: str,
     return verdict
 
 
+def _receipt_candidates(project: Path, sid: str) -> list[str]:
+    return sorted(set(
+        glob.glob(str(project / "cross_check" / "**" / f"step_{sid}.json"), recursive=True)
+        + glob.glob(str(project / "cross_check" / "**" / f"step_{sid.zfill(2)}.json"), recursive=True)
+    ))
+
+
 def _read_step_verdict(project: Path, reference: Path | None, sid: str,
                        program_root: Path):
     """Read exactly one bound JSON receipt; prose is not executable evidence."""
@@ -219,24 +226,20 @@ def _read_step_verdict(project: Path, reference: Path | None, sid: str,
         return None, None
     except ValueError:
         pass
-    files = sorted(set(
-        glob.glob(str(project / "cross_check" / "**" / f"step_{sid}.json"), recursive=True)
-        + glob.glob(str(project / "cross_check" / "**" / f"step_{sid.zfill(2)}.json"), recursive=True)
-    ))
-    verdicts = []
-    for name in files:
-        try:
-            verdict = _valid_receipt(json.loads(Path(name).read_text()), project, reference,
-                                     sid, program_root)
-        except (OSError, ValueError, json.JSONDecodeError):
-            verdict = None
-        if verdict is not None:
-            verdicts.append((verdict, name))
-    # One step has one comparison. Multiple apparently-good, disagreeing
-    # receipts are ambiguity, not a reason to select the first green one.
-    if len(verdicts) == 1:
-        return verdicts[0]
-    return None, None
+    files = _receipt_candidates(project, sid)
+    # The schema binds content to subject, reference and producer, but carries
+    # no run identity or supersession order. A timestamp or directory name
+    # cannot authorize choosing one of two receipts. Require exactly one
+    # candidate, then validate it; even a corrupt second candidate is ambiguity.
+    if len(files) != 1:
+        return None, None
+    name = files[0]
+    try:
+        verdict = _valid_receipt(json.loads(Path(name).read_text()), project, reference,
+                                 sid, program_root)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None, None
+    return (verdict, name) if verdict is not None else (None, None)
 
 
 def _is_analog_ic(project: Path) -> bool:
@@ -560,9 +563,16 @@ def main():
     steps = _load_steps(flow)
     # ── Pillar 2: 56-step output comparison ──
     step_rows, n_pass, n_applicable, n_unresolved = [], 0, 0, 0
+    invalid_receipts = []
     for sid, name, stage in steps:
         kind, method = STEP_METHOD.get(sid, ("metric", "(uncategorized)"))
         applicable = True
+        # A supplied corrupt receipt is a refusal even for an N/A step. N/A
+        # excuses the measurement, not a contradictory artefact the caller
+        # actually supplied (notably physical-silicon step 40).
+        v, _ = _read_step_verdict(project, reference, sid, here)
+        if _receipt_candidates(project, sid) and v is None:
+            invalid_receipts.append(sid)
         if kind == "analog" and not analog_ic:
             applicable = False; verdict = "N/A"
         elif kind == "mfg":
@@ -573,7 +583,6 @@ def main():
             applicable = False
             verdict = "N/A (analog-only — no digital RTL)"
         else:
-            v, _ = _read_step_verdict(project, reference, sid, here)
             verdict = v or "PENDING"
         if applicable:
             n_applicable += 1
@@ -823,7 +832,7 @@ def main():
     # ── Gates ──
     def gate(ok): return "✅ PASS" if ok else "❌ FAIL/PENDING"
     g_func = (func_pct == 100.0)
-    g_steps = (n_unresolved == 0 and n_applicable > 0)
+    g_steps = (n_unresolved == 0 and n_applicable > 0 and not invalid_receipts)
     # Pillars 3 (code coverage) + 4 (FPGA) N/A-pass for an analog-only IC
     # (no digital RTL), mirroring Pillar 6's N/A-without-place-and-route.
     g_code = cc_na or (line_pct is not None and float(line_pct) >= a.code_cov_floor)
@@ -927,6 +936,10 @@ def main():
     # Pillar 2 detail table
     L.append("## Pillar 2 — 56-step Output Comparison (OURS vs open-source reference)")
     L.append("")
+    if invalid_receipts:
+        L.append("**Invalid or ambiguous supplied receipts:** "
+                 + ", ".join(invalid_receipts) + ".")
+        L.append("")
     L.append("> Comparison is step-appropriate, NOT byte-identical: equivalence steps use LEC/co-sim; "
              "metric steps compare magnitude/trend in-range; layout endpoints use "
              "'both independently DRC/LVS/STA-clean + functionally equivalent' (different micro-arch "

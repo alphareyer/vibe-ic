@@ -126,11 +126,28 @@ def test_content_gate_declares_runner_advisory_and_required_step_clauses():
     programs = Path(__file__).resolve().parents[1]
     assert enforcement.declared_intent(
         programs, "flow_step_output_content_check") == "advisory"
-    clauses = enforcement.clauses_in_flow(FLOW)
-    required = [c for c in clauses if c["gate"] ==
-                "flow_step_output_content_check" and
-                c["slot"] == "program_exit_zero" and c["dispatchable"]]
-    assert len(required) == 7  # 1, 14 twice, 27, 32, 35, P0
+    expected = {
+        ("1", "rtl"), ("14", "netlist"), ("14", "stage_analog"),
+        ("27", "si"), ("32", "repair"), ("35", "dfm"), ("P0", "rtl"),
+    }
+
+    def content_modes(gate):
+        if not isinstance(gate, dict):
+            return
+        command = gate.get("program_exit_zero")
+        prefix = "flow_step_output_content_check . --mode "
+        if isinstance(command, str) and command.startswith(prefix):
+            yield command[len(prefix):]
+        for key in ("all_of", "any_of"):
+            children = gate.get(key)
+            if isinstance(children, list):
+                for child in children:
+                    yield from content_modes(child)
+
+    actual = {(step_id, mode)
+              for step_id, step in _steps().items()
+              for mode in content_modes(step.get("gate"))}
+    assert actual == expected, (sorted(actual - expected), sorted(expected - actual))
 
 
 @pytest.mark.parametrize("step_id,commands", [
