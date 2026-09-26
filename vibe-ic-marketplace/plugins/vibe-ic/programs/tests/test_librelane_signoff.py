@@ -18,6 +18,8 @@ import pytest
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 contract = importlib.import_module('librelane_contract')
+from _stated_eda_image import stated_image, state_the_image  # noqa: E402
+import _eda_pin  # noqa: E402
 signoff = importlib.import_module('librelane_signoff')
 
 CORNERS = ('nom_tt_025C_5v00', 'max_ss_125C_4v50', 'min_ff_n40C_5v50')
@@ -41,6 +43,7 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(contract, '_CAPABILITY', {}, raising=False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_IMAGE', raising=False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_PDK_ROOT', raising=False)
+    state_the_image(monkeypatch)   # the identity is stated, never asked of this host
 
 
 # ------------------------------------------------------- the extra Tcl ---
@@ -613,10 +616,8 @@ def test_a_kernel_disagreement_withdraws_the_delta_delay_reading(tmp_path, monke
     assert basis['verdict'] == 'FAIL' and basis['verdict_basis']['verdict_from'] == 'mcf_envelope'
 
 
-def test_step_27_reads_the_step_23_tool_corner(tmp_path):
-    runner = importlib.import_module('phase3_one_shot_runner')
+def _step23_tool_record(tmp_path):
     project = tmp_path / 'p'
-    assert runner._librelane_si_corner_inputs(project) is None      # 23 direct
     folder = project / 'phase3/librelane/23/01-openroad-stapostpnr'
     corner = 'max_ss_125C_4v50'
     spef = write(project / 'x/max.spef', 's')
@@ -630,11 +631,32 @@ def test_step_27_reads_the_step_23_tool_corner(tmp_path):
         'judgment': {'worst_setup': {'corner': corner, 'ws': 1.0}}})
     put(project / 'phase3/librelane_switch.json', {'steps': {'23': 'librelane'},
                                                    'pdk_root_host': str(tmp_path / 'root')})
+    return project, corner, spef, nl
+
+
+def test_step_27_reads_the_step_23_tool_corner(tmp_path):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    assert runner._librelane_si_corner_inputs(tmp_path / 'p') is None      # 23 direct
+    project, corner, spef, nl = _step23_tool_record(tmp_path)
     tool = runner._librelane_si_corner_inputs(project)
+    # the image is the one resolve_image resolved, stated by the fixture
+    assert tool['image'] == stated_image()
     assert tool['design'] == 'chip_top' and tool['corner'] == corner
     assert tool['spef'] == spef.resolve() and tool['netlist'] == nl.resolve()
     assert tool['liberties'][0].endswith('sc__ss_125C_4v50.lib')
     assert tool['mounts'] == [(tmp_path / 'root' / 'gfx', '/pdk/gfx')]
+
+
+def test_step_27_with_no_resolvable_image_keeps_the_direct_inputs(tmp_path, monkeypatch):
+    """An unresolvable image is one more reason step 27 has no tool corner
+    (None, the function's stated answer), never an uncaught refusal."""
+    runner = importlib.import_module('phase3_one_shot_runner')
+    project, _corner, _spef, _nl = _step23_tool_record(tmp_path)
+
+    def unresolvable(env=None, *, allow_pull=False):
+        raise _eda_pin.ImageNotResolvable(['this host: none'])
+    monkeypatch.setattr(_eda_pin, 'resolved_image_digest', unresolvable)
+    assert runner._librelane_si_corner_inputs(project) is None
 
 
 def test_the_direct_si_windows_are_re_derived_after_a_re_extraction(tmp_path, monkeypatch):

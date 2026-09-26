@@ -15,11 +15,7 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 contract = importlib.import_module('librelane_contract')
 import _eda_pin  # noqa: E402
-
-#: The identity the host resolver answers in these tests, STATED rather than
-#: asked of this host's docker (the rfi `_runtime_pair_fixture` pattern). Not a
-#: real image, on purpose: a path that tried to run it fails loudly.
-STATED_DIGEST = 'sha256:' + '7c' * 32
+from _stated_eda_image import STATED_DIGEST, stated_image, state_the_image  # noqa: E402
 
 #: Verbatim probe output from the released 0.3.77 image
 #: (ghcr.io/vibeic/vibeic-eda@sha256:b966901e...), openroad and openroad-python.
@@ -44,13 +40,7 @@ def _fresh_capability_cache(monkeypatch):
     monkeypatch.setattr(contract, '_CAPABILITY', {}, raising=False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_IMAGE', raising=False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_PDK_ROOT', raising=False)
-    monkeypatch.delenv(_eda_pin.IMAGE_REPO_ENV, raising=False)
-    monkeypatch.setattr(_eda_pin, 'resolved_image_digest',
-                        lambda env=None, *, allow_pull=False: STATED_DIGEST)
-
-
-def stated_image():
-    return f'{_eda_pin.IMAGE_REPO_DEFAULT}@{STATED_DIGEST}'
+    state_the_image(monkeypatch)
 
 
 # ---------------------------------------------------------------- image ---

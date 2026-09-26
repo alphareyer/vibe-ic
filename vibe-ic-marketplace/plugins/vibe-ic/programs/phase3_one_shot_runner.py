@@ -67264,6 +67264,7 @@ def _librelane_si_corner_inputs(project: Path) -> Optional[dict]:
         corner = record["judgment"]["worst_setup"]["corner"]
         inputs = _ll.post_pnr_timing_inputs(project, state, corner)
         design = json.loads((state.parent / "config.json").read_text())["DESIGN_NAME"]
+        image = _ll.resolve_image(project)
     except (OSError, ValueError, KeyError, TypeError, _ll.Refusal):
         return None
     root = _ll.resolve_pdk_root(project)
@@ -67276,7 +67277,7 @@ def _librelane_si_corner_inputs(project: Path) -> Optional[dict]:
     return {"state": state, "corner": corner, "design": design,
             "liberties": inputs["liberties"],
             "netlist": project / inputs["sta_netlist"], "sdc": project / inputs["sdc"],
-            "spef": project / inputs["spef"], "image": _ll.resolve_image(project),
+            "spef": project / inputs["spef"], "image": image,
             "mounts": [(Path(root) / pdk_name, f"/pdk/{pdk_name}")]}
 
 
