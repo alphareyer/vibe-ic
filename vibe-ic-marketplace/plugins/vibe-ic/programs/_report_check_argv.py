@@ -70,7 +70,10 @@ VALUE_FLAGS: Tuple[str, ...] = ("--mode", "--json", "--under",
                                 # CONTENT rather than mounted. It takes a
                                 # value, so it belongs here for the same
                                 # reason as the rest.
-                                "--image")
+                                "--image",
+                                # F15: the caller's named subject files (the
+                                # step-23 wrapper on the tool arm).
+                                "--subject")
 
 
 def split_argv(

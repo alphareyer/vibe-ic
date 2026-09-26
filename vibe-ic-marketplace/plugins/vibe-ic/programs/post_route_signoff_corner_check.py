@@ -81,7 +81,20 @@ up without an edit here. A row whose slack resolved from a PRE-LAYOUT basis is
 DISCLOSED but never escalated to FAIL — a pre-layout estimate is not a sign-off
 measurement, and the sibling already records which basis won per field.
 
-Exit: 0 PASS/NOT_APPLICABLE/SINGLE_AXIS_ONLY · 1 FAIL · 2 arg error.
+STEP 23 ON THE TOOL (F15)
+=========================
+When step 23 runs `librelane` or `dual` (`phase3/librelane_switch.json`) the
+subject is the TOOL's sign-off: every corner `OpenROAD.STAPostPNR` declared
+(RC corner x process corner, the full matrix), each judged from its own
+`<corner>/vibeic_signoff.rpt` (`worst slack max` = setup, `worst slack min` =
+hold) read through `librelane_signoff.step23_tool_arm` -- bound to the sha256
+the tool wrote, timed on the views still on disk, with the corner's scope
+(rc_corner, process, voltage, temperature) carried onto its row. Both axes
+are swept, so there is no single-axis limitation to reconcile, and the direct
+multicorner report is not read. A corner report that is missing, unbound,
+stale, or carries no setup or hold slack REFUSES (rc 1, verdict REFUSED).
+
+Exit: 0 PASS/NOT_APPLICABLE/SINGLE_AXIS_ONLY · 1 FAIL/REFUSED · 2 arg error.
 """
 from __future__ import annotations
 
@@ -107,6 +120,8 @@ try:
     import sta_corner_record_completeness_check as _rec  # noqa: E402  sibling gate
 except Exception:  # pragma: no cover - defensive
     _rec = None
+import librelane_signoff as _ls  # noqa: E402 — step 23 on the tool (F15)
+from librelane_contract import Refusal  # noqa: E402
 
 _PROGRAM = "post_route_signoff_corner_check"
 
@@ -412,8 +427,61 @@ def reconcile_scope(project: Path, res: Dict[str, object],
     return res
 
 
+def evaluate_tool(arm: dict, slack_tol: float) -> Dict[str, object]:
+    """Every corner the tool declared, from its own report; FAIL on any
+    corner's setup or hold worst slack below -slack_tol."""
+    rows: List[Dict[str, object]] = []
+    for corner, row in arm["corners"].items():
+        report = row["files"][_ls.CORNER_REPORT]
+        worst: Dict[str, float] = {}
+        for line in report["text"].splitlines():
+            m = _WORST_SLACK_RE.search(line.strip())
+            if m and m.group(1).lower() not in worst:
+                worst[m.group(1).lower()] = float(m.group(2))
+        if "max" not in worst or "min" not in worst:
+            raise Refusal("LL_STA_CORNER_SLACK_MISSING",
+                          f"{report['path']}: no worst setup and hold slack")
+        rows.append({"corner": corner,
+                     **{k: row[k] for k in ("rc_corner", "process", "voltage_v",
+                                            "temperature_c", "scope_gaps")},
+                     "setup_worst_slack_ns": worst["max"],
+                     "hold_worst_slack_ns": worst["min"],
+                     "report": report["path"], "report_sha256": report["sha256"]})
+    setup = min(rows, key=lambda r: r["setup_worst_slack_ns"])
+    hold = min(rows, key=lambda r: r["hold_worst_slack_ns"])
+    violated = [f"{r['corner']} {role} worst-slack {r[key]:+.3f} ns is VIOLATED"
+                for r in rows for role, key in (("setup", "setup_worst_slack_ns"),
+                                                ("hold", "hold_worst_slack_ns"))
+                if r[key] < -slack_tol]
+    governing = min(setup["setup_worst_slack_ns"], hold["hold_worst_slack_ns"])
+    verdict = "FAIL" if violated else "PASS"
+    return {
+        "verdict": verdict, "status": verdict,
+        "reasons": violated or [
+            f"every corner STAPostPNR declared MET ({len(rows)} corners, RC x "
+            f"process; governing worst-slack {governing:+.3f} ns; worst setup "
+            f"at {setup['corner']}, worst hold at {hold['corner']})"],
+        "setup_worst_slack_ns": setup["setup_worst_slack_ns"],
+        "setup_worst_corner": setup["corner"],
+        "hold_worst_slack_ns": hold["hold_worst_slack_ns"],
+        "hold_worst_corner": hold["corner"],
+        "governing_worst_slack_ns": governing, "slack_tol_ns": slack_tol,
+        "scope_axis_swept": [SWEPT_AXIS, getattr(_rec, "AXIS_PROCESS", "process")],
+        "tool_corners": rows, "report": arm["record"],
+        "basis": _ls.tool_arm_basis(arm),
+    }
+
+
 def check(project: Path, report_override: Optional[str],
           slack_tol: float) -> Dict[str, object]:
+    try:
+        arm = _ls.step23_tool_arm(project)
+        if arm is not None:
+            return evaluate_tool(arm, slack_tol)
+    except Refusal as exc:
+        return {"verdict": "REFUSED", "status": "REFUSED", "refusal": exc.code,
+                "reasons": [f"step 23 runs on the tool and its sign-off cannot "
+                            f"be read: {exc}"], "report": None}
     rpt = _resolve_report(project, report_override)
     if rpt is None:
         return {

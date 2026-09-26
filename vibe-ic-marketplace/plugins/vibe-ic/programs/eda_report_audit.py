@@ -255,6 +255,8 @@ def _is_own_verdict_document(p: Path) -> bool:
 # omitted, discovery is project-wide exactly as before, so no existing caller
 # changes behaviour.
 _SCOPE_ROOTS: Optional[List[Path]] = None
+#: `--subject` (repeatable): the caller's own subject files; see `_discover`.
+_SUBJECTS: Optional[List[Path]] = None
 
 
 def _scope_root(r) -> Path:
@@ -291,6 +293,25 @@ class scoped_discovery:  # noqa: N801 — a context manager, used as a verb
     def __exit__(self, *exc):
         global _SCOPE_ROOTS
         _SCOPE_ROOTS = self._prev
+        return False
+
+
+class named_subjects:  # noqa: N801 — a context manager, used as a verb
+    """Name the subject files (`--subject`) for the duration of the block."""
+
+    def __init__(self, subjects: Optional[List[Path]]):
+        self._subjects = list(subjects) if subjects is not None else None
+        self._prev = None
+
+    def __enter__(self):
+        global _SUBJECTS
+        self._prev = _SUBJECTS
+        _SUBJECTS = self._subjects
+        return self
+
+    def __exit__(self, *exc):
+        global _SUBJECTS
+        _SUBJECTS = self._prev
         return False
 
 
@@ -475,7 +496,14 @@ def _discover(project_dir: Path, patterns: List[str],
     skipping hidden / backup-flavored directories (#525), this program's own
     verdict documents, names carrying any of `exclude_name_tokens`, and
     anything outside an active `--under` scope. Aliases of one physical file
-    collapse to a single entry (see `_identity`)."""
+    collapse to a single entry (see `_identity`).
+
+    `--subject` (F15): when the caller NAMES its subject files, those are the
+    subject -- no glob is walked.  The step-23 wrapper names the per-corner
+    reports STAPostPNR wrote (sha-verified against the tool's receipt before
+    the audit starts), whose names no report glob matches."""
+    if _SUBJECTS is not None:
+        return [p for p in _SUBJECTS if p.is_file() and _in_scope(p)]
     found: List[Path] = []
     for pat in patterns:
         found.extend(project_dir.rglob(pat))
@@ -3730,11 +3758,13 @@ def _check_sta(project_dir: Path) -> AuditResult:
     # CONTRADICTION either, so it warns rather than fails (the fail-safe
     # exit for the "don't know" bucket).
     basis_distinct = {"PRE_LAYOUT": 0, "POST_ROUTE": 0, "UNDECLARED": 0}
+    # A caller that NAMED its subject (`--subject`, the step-23 tool arm) is
+    # judged on those files alone: the per_corner/ sweep is our own deck's.
     corner_dirs = sorted({Path(p) for pat in
                           ("phase*/stage*/sta/per_corner",
                            "reports/phase*/sta/per_corner")
                           for p in glob.glob(str(project_dir / pat))
-                          if Path(p).is_dir()})
+                          if Path(p).is_dir()}) if _SUBJECTS is None else []
     for cd in corner_dirs:
         rpts = sorted(p for p in cd.glob("*.rpt")
                       if p.is_file() and p.stat().st_size > 0)
@@ -4337,6 +4367,11 @@ def main(argv: list = None) -> int:
              "(repeatable). Omitted, discovery is project-wide. Use it to scope "
              "a step's gate to the artefacts that step declares, so another "
              "step's report cannot carry — or fail — this one.")
+    parser.add_argument(
+        "--subject", action="append", default=None, metavar="REL",
+        help="audit exactly these project-relative files (repeatable) "
+             "instead of globbing for them; each must also sit under "
+             "--under when a scope is given")
     args = parser.parse_args(argv)
 
     set_image_override(getattr(args, "image", None))
@@ -4351,7 +4386,9 @@ def main(argv: list = None) -> int:
         checker = MODE_MAP[args.mode]
         roots = ([project_dir / rel for rel in args.under]
                  if args.under else None)
-        with scoped_discovery(roots):
+        with scoped_discovery(roots), named_subjects(
+                [project_dir / rel for rel in args.subject]
+                if args.subject else None):
             result = checker(project_dir)
         if roots:
             # The scope is part of the verdict: a reader must be able to see

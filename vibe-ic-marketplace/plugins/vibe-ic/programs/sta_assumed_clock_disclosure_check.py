@@ -45,6 +45,15 @@ EXIT CODES
                   Absence of an input is NOT a pass (vibe-ic#1140): a gate that
                   reports 0 on an empty project certifies nothing.
 
+STEP 23 ON THE TOOL (F15)
+=========================
+When step 23 runs `librelane` or `dual`, the sign-off is STAPostPNR's, and its
+record (`librelane_signoff.SIGNOFF_RECORD`, bound to the tool state it names)
+is one of the records that must disclose an assumed period; the records the
+step's other gates write still must too. A tool sign-off that cannot be read
+(`librelane_signoff.step23_tool_arm`) REFUSES (rc 1): the disclosure is about
+a sign-off, and an unreadable sign-off is not one that needed no disclosure.
+
 Chip / PDK-AGNOSTIC: no chip, vendor, PDK or library literal appears here.
 """
 
@@ -65,6 +74,8 @@ from _atomic_artefact import write_text as atomic_write_text  # noqa: E402
 from clock_target_provenance import (  # noqa: E402
     ASSUMED_DISCLOSURE, PROVENANCE_REL as _PROVENANCE_REL,
     SIGNOFF_RELS as _SIGNOFF_RELS)
+import librelane_signoff as _ls  # noqa: E402 — step 23 on the tool (F15)
+from librelane_contract import Refusal  # noqa: E402
 
 
 def _load(path: Path) -> Optional[dict]:
@@ -86,6 +97,17 @@ def check(project: Path) -> Dict[str, object]:
         "missing": [],
         "reason": "",
     }
+    try:
+        arm = _ls.step23_tool_arm(project)
+    except Refusal as exc:
+        rep["verdict"] = "REFUSED"
+        rep["refusal"] = exc.code
+        rep["reason"] = (f"step 23 runs on the tool and its sign-off cannot be "
+                         f"read: {exc}")
+        return rep
+    rels = _SIGNOFF_RELS + ((_ls.SIGNOFF_RECORD,) if arm is not None else ())
+    if arm is not None:
+        rep["basis"] = _ls.tool_arm_basis(arm)
     prov_path = project / _PROVENANCE_REL
     prov = _load(prov_path)
     if prov is None:
@@ -102,7 +124,7 @@ def check(project: Path) -> Dict[str, object]:
             + "); nothing to disclose")
         return rep
 
-    present: List[Path] = [project / r for r in _SIGNOFF_RELS
+    present: List[Path] = [project / r for r in rels
                            if (project / r).is_file()]
     rep["signoff_records"] = [str(p) for p in present]
     if not present:
@@ -148,7 +170,7 @@ def main(argv=None) -> int:
     print(f"[{rep['verdict']}] sta_assumed_clock_disclosure_check — "
           f"{rep['reason']}")
     print(json.dumps(rep, indent=2))
-    return {"PASS": 0, "FAIL": 1}.get(str(rep["verdict"]), 2)
+    return {"PASS": 0, "FAIL": 1, "REFUSED": 1}.get(str(rep["verdict"]), 2)
 
 
 if __name__ == "__main__":

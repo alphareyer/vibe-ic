@@ -119,6 +119,26 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "achieved_period_recorded_check::tool_setup_slack":
+        "ONE OPENSTA RECORD. `worst slack max <v>` is report_worst_slack's fixed "
+        "output inside a STAPostPNR corner report (the step-23 extra corner Tcl "
+        "calls it), matched anchored at line start and end around one number. "
+        "The field is a number, so no denial can be spelled in it, and a corner "
+        "with no such line is not read as no-slack: it REFUSES "
+        "(LL_STA_CORNER_SLACK_MISSING).",
+    "post_route_signoff_corner_check::evaluate_tool":
+        "ONE OPENSTA RECORD. `worst slack max|min <v>` is report_worst_slack's "
+        "fixed output in each STAPostPNR corner report, one line per analysis, "
+        "whose only fields are the analysis keyword and a number. There is no "
+        "negated form to emit, and a corner lacking either line REFUSES "
+        "(LL_STA_CORNER_SLACK_MISSING) rather than being judged on one side.",
+    "clock_target_record_agreement_check::tool_clock_periods":
+        "TWO MACHINE RECORDS. `Clock: <name>` / `Period: <p>` is OpenSTA "
+        "report_clock_properties' fixed block in LibreLane's corner clock.rpt, "
+        "and `STA_TIME_UNIT: <unit>` is stamped by the step-23 corner Tcl with "
+        "`puts` from sta::unit_scale_abbreviation/unit_suffix. Every field is a "
+        "name, a number or a unit token anchored at line start; an absent unit "
+        "or an empty clock report REFUSES instead of guessing.",
     "librelane_signoff::agreement":
         "TWO MACHINE GRAMMARS, NO SENTENCE. `Reading cell library for the "
         "'<corner>' corner at '<path>'` is LibreLane 3.1 sta/corner.tcl's own "
