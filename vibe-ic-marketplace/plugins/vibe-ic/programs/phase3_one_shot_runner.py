@@ -42648,6 +42648,130 @@ def _max_captable_c(pdk: "PdkConfig", container: str) -> str:
     return _discover_openrcx_captables(pdk, container).get("max", "")
 
 
+# ── TF24: a post-route session that CREATES cells must connect their supply ──
+#
+# `step_signoff_spef_repair`, its best-pass restore and the DRV wire-length
+# escalation each re-open a WRITTEN DEF in a fresh OpenROAD session, remove the
+# fillers, let the resizer insert buffers (`repair_design`, `repair_timing
+# -setup`, and since 6d989b5a5 / v1.24.67 `repair_timing -hold`), re-route,
+# re-fill, and write a DEF the step then PROMOTES over `routed.def`. The PDN's
+# `add_global_connection` rules are session state that no DEF carries, and none
+# of these sessions ever ran `global_connect` -- so every instance they created
+# kept its POWER/GROUND terminals on no net, and `write_def` could no longer
+# say `( * VDD )`.
+#
+# MEASURED (spm x gf180mcuD, vibeic-eda 0.3.79, pure direct flow, lane mig98
+# arm D; read back by `pg_supply_pin_ownership_check`):
+#     routed_base_prerepair.def   PASS  88,160 supply pins, all owned
+#     routed_repaired.def         FAIL  57,320 of 86,016 on no net
+#                                       = 16 `hold*` buffers + every refilled
+#                                         filler, 4 supply pins each
+# and the Netgen LVS on that DEF failed with 4 unmatched nets per buffer.
+#
+# THE RULES ARE THE DECK'S (`_pg_global_connect_reassert_tcl`, R-0915-12),
+# registered right after `read_def`; THIS block applies them immediately before
+# every `write_def` of a candidate, after the last instance-creating command
+# (repair, refill), and audits what it left. Do-not-touch instances are skipped
+# by `global_connect` (ODB-0383), so the flag is lifted across the one call and
+# restored exactly as found. The audit is disclosure; the verdict is the
+# DEF-level gate the step runs on the written artefact.
+def _postroute_pg_apply_tcl(marker: str) -> str:
+    """Apply the registered global-connect rules to every instance that exists
+    NOW, then print ``<marker>_PG_NO_NET: total=<n> no_net=<m>``.
+
+    chip/PDK-AGNOSTIC: odb only; the nets and patterns are whatever rules the
+    session registered from the run's own deck."""
+    m = "".join(c if (c.isalnum() or c == "_") else "_" for c in marker)
+    return (
+        f"# === {m}: supply global-connect before write (TF24) ===\n"
+        "set _pgw_dnt {}\n"
+        "if {[catch {\n"
+        "  foreach _pgw_i [[ord::get_db_block] getInsts] {\n"
+        "    if {[$_pgw_i isDoNotTouch]} {\n"
+        "      lappend _pgw_dnt $_pgw_i\n"
+        "      $_pgw_i setDoNotTouch false\n"
+        "    }\n"
+        "  }\n"
+        f"}} _pgw_e]}} {{ puts \"{m}_PG_DONTTOUCH_LIFT_NONFATAL: $_pgw_e\" }}\n"
+        f"if {{[catch {{global_connect}} _pgw_e]}} {{ "
+        f"puts \"{m}_PG_CONNECT_NONFATAL: $_pgw_e\" }}\n"
+        "if {[catch {\n"
+        "  foreach _pgw_i $_pgw_dnt { $_pgw_i setDoNotTouch true }\n"
+        f"}} _pgw_e]}} {{ puts \"{m}_PG_DONTTOUCH_RESTORE_NONFATAL: $_pgw_e\" }}\n"
+        "if {[catch {\n"
+        "  set _pgw_tot 0\n"
+        "  set _pgw_bad 0\n"
+        "  foreach _pgw_i [[ord::get_db_block] getInsts] {\n"
+        "    foreach _pgw_t [$_pgw_i getITerms] {\n"
+        "      set _pgw_s [[$_pgw_t getMTerm] getSigType]\n"
+        "      if {$_pgw_s ne \"POWER\" && $_pgw_s ne \"GROUND\"} { continue }\n"
+        "      incr _pgw_tot\n"
+        "      if {[$_pgw_t getNet] eq \"NULL\"} { incr _pgw_bad }\n"
+        "    }\n"
+        "  }\n"
+        f"  puts \"{m}_PG_NO_NET: total=$_pgw_tot no_net=$_pgw_bad\"\n"
+        f"}} _pgw_e]}} {{ puts \"{m}_PG_AUDIT_NONFATAL: $_pgw_e\" }}\n"
+    )
+
+
+def _pnr_deck_pg_rules_text(pnr_out: Path) -> str:
+    """The PnR deck whose `add_global_connection` lines a post-route session
+    re-registers (`_pg_global_connect_reassert_tcl`). Empty when there is no
+    readable deck: the session then registers nothing, its own audit prints the
+    unowned count, and the DEF gate refuses the candidate by name."""
+    try:
+        return (pnr_out / "pnr.tcl").read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def _postroute_pg_ownership_verdict(project: Path, def_path: Path,
+                                    pdk: "PdkConfig", container: str,
+                                    site: str) -> Dict[str, Any]:
+    """TF24 -- judge a post-route CANDIDATE DEF with
+    `pg_supply_pin_ownership_check` before it may be promoted, and write the
+    record to ``reports/phase3/postroute_pg_ownership_<site>.json``.
+
+    The LEFs are the ones that define the DEF's masters: the standard-cell LEF
+    plus exactly the extra LEFs a re-opened DEF needs (macros, IO), resolved by
+    the same `_def_reopen_extra_lefs_c` the repair decks read. A LEF that cannot
+    be read leaves its masters UNKNOWN, which the gate reports NOT_MEASURED --
+    never clean. Never raises: an exception is a NOT_MEASURED record."""
+    import pg_supply_pin_ownership_check as _pgo  # noqa: PLC0415
+    try:
+        lef_texts: List[str] = []
+        for lef in [str(pdk.cell_lef)] + list(
+                _def_reopen_extra_lefs_c(def_path, pdk, container)):
+            text = _read_pdk_text(lef, container)
+            if text:
+                lef_texts.append(text)
+        rec = _pgo.judge(Path(def_path).read_text(errors="replace"),
+                         lef_texts)
+    except Exception as exc:  # noqa: BLE001
+        rec = {"gate": _pgo.GATE, "verdict": "NOT_MEASURED",
+               "code": _pgo.UNMEASURED_CODE,
+               "reason": f"{_pgo.UNMEASURED_CODE}: the check could not run "
+                         f"({type(exc).__name__}: {exc})"}
+    rec["def"] = str(def_path)
+    rec["site"] = site
+    try:
+        _aa.write_json(_pl.reports_phase3_dir(project)
+                       / f"postroute_pg_ownership_{site}.json", rec)
+    except OSError:
+        pass
+    return rec
+
+
+def _pg_ownership_promotion_note(rec: Optional[Dict[str, Any]]) -> str:
+    """One sentence for a PROMOTED route: its supply ownership WAS re-read on
+    the promoted DEF, by the TF24 gate, whatever the older disclosure says
+    about the PnR step's own audit."""
+    if not rec:
+        return ""
+    return (f" POSTROUTE_PG_OWNERSHIP: {rec.get('verdict')} on the promoted "
+            f"DEF itself ({rec.get('reason')}).")
+
+
 _SHIP_POSTROUTE_CVG_TCL = r"""
 # === POST-REROUTE real-SPEF convergence (#603 — SS setup closure) ===
 # SHIP_WNS_AFTER_REPAIR above is measured with the set_wire_rc wire-load model on
@@ -42716,6 +42840,14 @@ for {set _cvg 0} {$_cvg < __BOUND__} {incr _cvg} {
   # defect this issue is about, not a fix for it.
   # The marker is emitted ONLY when write_def actually succeeded, so a pass can
   # never advertise a checkpoint that is not on disk.
+  # TF24 -- NO supply connect here. This is mid-loop, after the parasitics
+  # are annotated, and the repair below runs on them: MEASURED on arm D's
+  # pre-repair DEF, a `global_connect` at this point made the next pass's
+  # `repair_design` die `[ERROR EST-0104] inconsistent parasitics state`
+  # (SHIP_CVG_RD_NONFATAL) and the loop plateaued at setup -0.186 instead of
+  # closing at +1.486. A checkpoint never ships as written: the restore
+  # session re-reads it, registers the rules and connects before its own
+  # write (`_ship_cvg_restore_tcl`).
   if {[catch {write_def __PNR__/ship_cvg_pass${_cvg}.def} e]} {
     puts "SHIP_CVG_CKPT_NONFATAL: pass=$_cvg $e"
   } else {
@@ -43069,7 +43201,8 @@ def _ship_signoff_spef_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
                                   slot_pinned_core: bool = False,
                                   design_declared_die: bool = False,
                                   sparse_active_row_fill: bool = False,
-                                  antenna_diode_cell: Optional[str] = None
+                                  antenna_diode_cell: Optional[str] = None,
+                                  pg_rules_deck: str = ""
                                   ) -> str:
     """Fresh-session post-route SETUP and HOLD repair against real max-RC SPEF at the
     SLOW (SS) sign-off corner, writing routed_repaired.def / <top>_pnr_repaired.v.
@@ -43116,6 +43249,11 @@ def _ship_signoff_spef_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         + _extra_liberty_read_block(extra_liberties_c, ss_liberty_c) +
         f"read_def {pnr_dir_c}/routed.def\n"
         f"read_sdc {pnr_dir_c}/constraint.sdc\n"
+        # TF24 -- this session CREATES cells (repair buffers, hold buffers,
+        # the refill), and the PDN's connection rules did not come back with
+        # the DEF. Register the deck's own rules here; they are applied
+        # before the candidate is written (`_postroute_pg_apply_tcl`).
+        + _pg_global_connect_reassert_tcl(pg_rules_deck)
         # #543 -- THIS STEP RESIZES, so it needs the same cell-pool exclusion the
         # PnR session has. It did not have it: `pnr.tcl` carries the v1.2.86
         # do-not-use block and this Tcl carried none, so `repair_design` /
@@ -43300,6 +43438,9 @@ def _ship_signoff_spef_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         # landings the base route did not have (measured 13 / 11 / 9 across
         # three runs) and trades a timing FAIL for a DRC FAIL.
         + _min_area_patch_tcl("SHIP_MIN_AREA")
+        # TF24 -- after the LAST instance-creating command (repair + refill),
+        # before the candidate is written.
+        + _postroute_pg_apply_tcl("SHIP")
         # R-0915-125 -- the repaired candidate is not written when an unnamed
         # step moved the route it was built on; the route already on disk is
         # what ships, and the refusal says so by name.
@@ -43322,7 +43463,8 @@ def _ship_cvg_restore_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
                           extra_liberties_c: Optional[Sequence[str]] = None,
                           slot_pinned_core: bool = False,
                           design_declared_die: bool = False,
-                          sparse_active_row_fill: bool = False
+                          sparse_active_row_fill: bool = False,
+                          pg_rules_deck: str = ""
                           ) -> str:
     """vibe-ic#2171 — RESTORE the convergence loop's winning pass, in a FRESH
     session, and re-measure it.
@@ -43383,6 +43525,9 @@ def _ship_cvg_restore_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         + _extra_liberty_read_block(extra_liberties_c, ss_liberty_c) +
         f"read_def {checkpoint_def_c}\n"
         f"read_sdc {pnr_dir_c}/constraint.sdc\n"
+        # TF24 -- the refill below creates instances; see
+        # `_postroute_pg_apply_tcl`.
+        + _pg_global_connect_reassert_tcl(pg_rules_deck) +
         # The SAME wire-load model the repair session set. It is superseded for
         # every net the SPEF covers, and it is the fallback for any net the SPEF
         # does not — so omitting it is a DIFFERENT timing basis on exactly the
@@ -43438,6 +43583,7 @@ def _ship_cvg_restore_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         + _routing_integrity_check_tcl("SHIP")
         + f"{refill_block}"
         + _min_area_patch_tcl("SHIP_RESTORE_MIN_AREA")
+        + _postroute_pg_apply_tcl("SHIP_RESTORE")
         # R-0915-125 -- a RESTORE that ships a database an unnamed step
         # changed has restored nothing. It refuses, and the checkpoint it was
         # restoring from is still on disk.
@@ -44362,7 +44508,8 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
             and not _repair_declared_die),
         # G-SHIP-ANTENNA — the PDK's own diode master, the same one the base
         # PnR antenna repair uses. None => the window discloses and does not run.
-        antenna_diode_cell=pdk.antenna_diode_cell)
+        antenna_diode_cell=pdk.antenna_diode_cell,
+        pg_rules_deck=_pnr_deck_pg_rules_text(pnr_out))
     tcl_path = pnr_out / "signoff_spef_repair.tcl"
     tcl_path.write_text(tcl)
     tcl_c = _to_container_path(str(tcl_path), container)
@@ -44423,7 +44570,8 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
             design_declared_die=_repair_declared_die,
             sparse_active_row_fill=bool(
                 _repair_ring_inset is not None and _repair_slot is None
-                and not _repair_declared_die))
+                and not _repair_declared_die),
+            pg_rules_deck=_pnr_deck_pg_rules_text(pnr_out))
         _rtcl_path = pnr_out / "ship_cvg_restore.tcl"
         _rtcl_path.write_text(_rtcl)
         _rtcl_c = _to_container_path(str(_rtcl_path), container)
@@ -44453,6 +44601,22 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
     repaired_v = pnr_out / f"{top}_pnr_repaired.v"
     def_ok = repaired_def.is_file() and repaired_def.stat().st_size > 0
     v_ok = repaired_v.is_file() and repaired_v.stat().st_size > 0
+    # TF24 -- the candidate is judged on its OWN written DEF before anything
+    # can promote it: every supply pin of every instance on a declared supply
+    # net of its kind. A refusal keeps the base route, which the PnR step's
+    # own PG audit already covers, and says so by code.
+    _pgo = (_postroute_pg_ownership_verdict(
+        project, repaired_def, pdk, container, "signoff_spef_repair")
+        if def_ok else None)
+    if _pgo is not None and _pgo.get("verdict") != "PASS":
+        _pg_note = (f"{_pgo.get('code')}: the repaired candidate was NOT "
+                    f"promoted; base route kept. {_pgo.get('reason')}")
+        _drv_promotion_disclose(pnr_out, "pg_supply_ownership_refused",
+                                _pg_note)
+        return StepResult("signoff_spef_repair", "PASS", time.time() - t0,
+                          _pg_note,
+                          extras={"refusal_code": _pgo.get("code"),
+                                  "pg_supply_ownership": _pgo.get("verdict")})
     if _ship_repair_should_promote(parsed, def_ok, v_ok):
         # A promotion DID happen: drop any non-promotion record a previous
         # invocation left, so the marker and the record can never both be
@@ -44490,11 +44654,13 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
                f"worse under the declared best-pass rule; the restored design "
                f"was re-measured and reproduced that pass's own number). "
                if parsed.get("cvg_restored_from_pass") is not None else "")
-            + _PG_STALE_AFTER_PROMOTION,
+            + _PG_STALE_AFTER_PROMOTION
+            + _pg_ownership_promotion_note(_pgo),
             [str(routed), str(_pnr_v)],
             extras={"pg_net_ownership_stale": True,
                     "pg_net_ownership_stale_reason":
-                        _PG_STALE_AFTER_PROMOTION})
+                        _PG_STALE_AFTER_PROMOTION,
+                    "pg_supply_ownership": (_pgo or {}).get("verdict")})
     _note = _ship_repair_nonpromotion_note(parsed)
     _drv_promotion_disclose(
         pnr_out, "repair_declined",
@@ -44657,7 +44823,8 @@ def _ship_wire_length_escalation_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
                                      max_captable_c: str, metal_prefix: str,
                                      thread_count: int,
                                      filler_masters: Optional[List[str]] = None,
-                                     extra_lefs_c: Optional[Sequence[str]] = None
+                                     extra_lefs_c: Optional[Sequence[str]] = None,
+                                     pg_rules_deck: str = ""
                                      ) -> str:
     """Emit the bounded (`_DRV_ESCALATION_ROUNDS`) repeater-insertion escalation:
     read the CURRENT routed.def (whatever step_signoff_spef_repair already
@@ -44734,6 +44901,9 @@ def _ship_wire_length_escalation_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         f"read_liberty {ss_liberty_c}\n"
         f"read_def {pnr_dir_c}/routed.def\n"
         f"read_sdc {pnr_dir_c}/constraint.sdc\n"
+        # TF24 -- the escalation inserts repeaters and refills; see
+        # `_postroute_pg_apply_tcl`.
+        + _pg_global_connect_reassert_tcl(pg_rules_deck)
         # #543 -- same reason as the sign-off repair Tcl above: this path resizes,
         # so the unroutable characterization masters (__probe / __lpflow / __dly)
         # must leave its pool before `repair_design` can pick one. Emitting the
@@ -44771,6 +44941,9 @@ def _ship_wire_length_escalation_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         + refill_block
         + measure_tcl("after")
         + "catch {puts \"SHIP_ESC_WNS_AFTER: [sta::worst_slack -max]\"}\n"
+        # TF24 -- after the last measurement that reads parasitics, before
+        # the write (a DB change after annotation is EST-0104 to a resizer).
+        + _postroute_pg_apply_tcl("SHIP_ESC")
         + _route_mutation_guard_tcl(
             f"if {{[catch {{write_def {pnr_dir_c}/routed_escalated.def}} e]}} {{ "
             f"puts \"SHIP_ESC_WD_NONFATAL: $e\" }}\n"
@@ -44998,7 +45171,8 @@ def step_signoff_drv_wire_length_repair(
         ss_lib, _to_container_path(str(pnr_out), container),
         cap, pdk.metal_prefix, _openroad_thread_count(),
         filler_masters=_filler_masters_for_pdk(pdk),
-        extra_lefs_c=_def_reopen_extra_lefs_c(routed, pdk, container))
+        extra_lefs_c=_def_reopen_extra_lefs_c(routed, pdk, container),
+        pg_rules_deck=_pnr_deck_pg_rules_text(pnr_out))
     tcl_path = pnr_out / "signoff_drv_escalation.tcl"
     tcl_path.write_text(tcl)
     tcl_c = _to_container_path(str(tcl_path), container)
@@ -45023,6 +45197,17 @@ def step_signoff_drv_wire_length_repair(
     escalated_v = pnr_out / f"{top}_pnr_escalated.v"
     def_ok = escalated_def.is_file() and escalated_def.stat().st_size > 0
     v_ok = escalated_v.is_file() and escalated_v.stat().st_size > 0
+    # TF24 -- judged on its own written DEF before it is even staged.
+    _pgo = (_postroute_pg_ownership_verdict(
+        project, escalated_def, pdk, container,
+        "signoff_drv_wire_length_repair") if def_ok else None)
+    if _pgo is not None and _pgo.get("verdict") != "PASS":
+        return StepResult(
+            "signoff_drv_wire_length_repair", "PASS", time.time() - t0,
+            f"{_pgo.get('code')}: the escalated candidate was NOT promoted; "
+            f"current route kept. {_pgo.get('reason')}",
+            extras={"refusal_code": _pgo.get("code"),
+                    "pg_supply_ownership": _pgo.get("verdict")})
     _pnr_v = pnr_out / f"{top}_pnr.v"
     _topdef = pnr_out / f"{top}.def"
     notes: List[str] = []
@@ -45079,11 +45264,13 @@ def step_signoff_drv_wire_length_repair(
             f"{parsed.get('after_count')}, traceability only), setup WNS "
             f"{parsed.get('wns_after')} ns, reroute DRC-clean (0 violations); "
             f"promoted over the pre-escalation route. "
-            + _PG_STALE_AFTER_PROMOTION,
+            + _PG_STALE_AFTER_PROMOTION
+            + _pg_ownership_promotion_note(_pgo),
             [str(routed), str(_pnr_v)],
             extras={"pg_net_ownership_stale": True,
                     "pg_net_ownership_stale_reason":
-                        _PG_STALE_AFTER_PROMOTION})
+                        _PG_STALE_AFTER_PROMOTION,
+                    "pg_supply_ownership": (_pgo or {}).get("verdict")})
 
     # NOT promoted — restore the incumbent byte-for-byte.
     if _incumbent_def.is_file():
@@ -57761,7 +57948,8 @@ def _si_mcf_repair_child_tcl(top: str, *, tech_lef_c: str, cell_lef_c: str,
                              slot_pinned_core: bool = False,
                              design_declared_die: bool = False,
                              sparse_active_row_fill: bool = False,
-                             reroute_iters: int = _SHIP_REROUTE_MAX_DROUTE_ITERS
+                             reroute_iters: int = _SHIP_REROUTE_MAX_DROUTE_ITERS,
+                             pg_rules_deck: str = ""
                              ) -> str:
     """The CHILD deck for ONE SI-aware repair pass, written to a candidate.
 
@@ -57800,6 +57988,9 @@ def _si_mcf_repair_child_tcl(top: str, *, tech_lef_c: str, cell_lef_c: str,
         + _extra_liberty_read_block(extra_liberties_c, liberty_c) +
         f"read_def {pnr_dir_c}/routed.def\n"
         f"read_sdc {sdc_c}\n"
+        # TF24 -- this session may insert buffers and it refills; see
+        # `_postroute_pg_apply_tcl`.
+        + _pg_global_connect_reassert_tcl(pg_rules_deck)
         # This session RESIZES, so it needs the same cell-pool exclusion the
         # PnR session has (#543): without it the repair is free to insert the
         # exact master the do-not-use block exists to keep out, and the reroute
@@ -57898,7 +58089,8 @@ def _si_mcf_repair_child_tcl(top: str, *, tech_lef_c: str, cell_lef_c: str,
         # Written on BOTH arms: a no-op candidate is still a candidate and must
         # be judgeable by the same rules, so that "the pass ran and changed
         # nothing" is a measured outcome rather than an absent one.
-        f"if {{[catch {{write_def {txn_dir_c}/{_SI_MCF_CANDIDATE_DEF}}} e]}} {{ "
+        + _postroute_pg_apply_tcl("SI_MCF")
+        + f"if {{[catch {{write_def {txn_dir_c}/{_SI_MCF_CANDIDATE_DEF}}} e]}} {{ "
         f"puts \"SI_MCF_WD_NONFATAL: $e\" }}\n"
         # The DATABASE is the restore point, not the DEF (R-0915-18): a DEF
         # carries neither the global router's guides nor `dont_touch`.
@@ -58007,7 +58199,8 @@ def _si_mcf_repair_seam(project: Path, top: str, pdk: "PdkConfig",
             slot_pinned_core=_slot is not None,
             design_declared_die=_declared_die,
             sparse_active_row_fill=bool(_ring_inset is not None
-                                        and _slot is None and not _declared_die))
+                                        and _slot is None and not _declared_die),
+            pg_rules_deck=_pnr_deck_pg_rules_text(pnr_out))
         tcl_path = txn / "si_mcf_repair_child.tcl"
         tcl_path.write_text(tcl)
         tcl_c = _to_container_path(str(tcl_path), container)
@@ -58124,6 +58317,20 @@ def _si_mcf_repair_promote(project: Path, top: str, pdk: "PdkConfig",
         (after.get("candidate_odb"), pnr_out / "routed_si_mcf.odb"),
     ]
     missing = [str(dst) for src, dst in moves if not src]
+    # TF24 -- a candidate whose inserted cells own no supply is not shipped.
+    _pgo = (_postroute_pg_ownership_verdict(
+        project, Path(after["candidate_def"]), pdk, container, "si_mcf_repair")
+        if not missing else {"verdict": "PASS"})
+    if _pgo.get("verdict") != "PASS":
+        _si_rep.record_promotion(
+            project, promoted=[], rederived=[],
+            refused=(f"{_pgo.get('code')}: the candidate DEF's supply pins "
+                     f"are not all on declared supply nets ("
+                     f"{_pgo.get('reason')}), so NOTHING was promoted and the "
+                     f"shipping session keeps its route"))
+        notes.append(f"si_mcf_repair: ADOPTED but NOT promoted "
+                     f"({_pgo.get('code')}); shipping route kept")
+        return
     if missing:
         _si_rep.record_promotion(
             project, promoted=[], rederived=[],

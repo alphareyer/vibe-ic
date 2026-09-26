@@ -1994,6 +1994,49 @@ _register(Instrument(
 ))
 
 
+def _judge_pg_supply_ownership(pair: Tuple[str, str]) -> Optional[str]:
+    import pg_supply_pin_ownership_check as C
+    def_text, lef_text = pair
+    rec = C.judge(def_text, [lef_text])
+    return rec["code"] if rec["verdict"] == "FAIL" else None
+
+
+_PG_SUPPLY_CAL_PROV = (
+    "Real OpenROAD 26Q3-2963-gc73a322d30 (the pinned vibeic-eda 0.3.79, 8HD-4, "
+    "2026-09-27), unedited `write_def` output: gf180mcu_fd_sc_mcu7t5v0 nom tech "
+    "LEF + cell LEF, calibration/cal_pg_buf_gf180.v linked, a 40x40 um "
+    "floorplan, the four `add_global_connection` rules a gf180 PnR deck "
+    "registers (VDD/VNW -power, VSS/VPW -ground), `global_connect`, u0 placed. "
+    "The LEF half is calibration/pg_supply_buf_1.lef, the buf_1 MACRO block "
+    "copied verbatim from that cell LEF. ")
+
+_register(Instrument(
+    name="pg_supply_pin_ownership_check::judge",
+    reads="a post-route candidate DEF + the LEFs of its masters",
+    ruling="TF24 (lane migf24; T98 r2.3 finding for lane 32)", owner="migf24",
+    why=("A fresh post-route session inserts cells after the PDN's one-shot "
+         "global_connect with no rule registered; write_def then drops the "
+         "`( * VDD )` wildcard and lists only the owned terminals, so an "
+         "unpowered cell is visible only as an ABSENCE. The pair is the same "
+         "database written before and after one such insertion."),
+    judge=_judge_pg_supply_ownership,
+    positive=Sample(
+        provenance=(_PG_SUPPLY_CAL_PROV + "Then `odb::dbInst_create` of a "
+                    "second buf_1 `hold1` (what the resizer does), placed, "
+                    "`write_def`: VDD lists ( u0 VNW ) ( u0 VDD ) and no hold1. "
+                    "calibration/pg_supply_unowned_positive.def"),
+        artefact=lambda: (_read("pg_supply_unowned_positive.def")(),
+                          _read("pg_supply_buf_1.lef")())),
+    expect="PG_SUPPLY_PIN_OFF_SUPPLY_NET",
+    negative=Sample(
+        provenance=(_PG_SUPPLY_CAL_PROV + "`write_def` before the insertion: "
+                    "VDD ( * VNW ) ( * VDD ). "
+                    "calibration/pg_supply_owned_negative.def"),
+        artefact=lambda: (_read("pg_supply_owned_negative.def")(),
+                          _read("pg_supply_buf_1.lef")())),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════

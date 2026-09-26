@@ -1,0 +1,69 @@
+MACRO gf180mcu_fd_sc_mcu7t5v0__buf_1
+  CLASS core ;
+  FOREIGN gf180mcu_fd_sc_mcu7t5v0__buf_1 ;
+  ORIGIN 0.000 0.000 ;
+  SIZE 3.360 BY 3.920 ;
+  SYMMETRY X Y ;
+  SITE GF018hv5v_mcu_sc7 ;
+  PIN I
+    DIRECTION INPUT ;
+    ANTENNAGATEAREA 0.498500 ;
+    PORT
+      LAYER Metal1 ;
+        RECT 0.705 1.630 1.590 2.190 ;
+        RECT 0.705 0.650 1.220 1.630 ;
+    END
+  END I
+  PIN Z
+    DIRECTION OUTPUT ;
+    ANTENNADIFFAREA 0.897600 ;
+    PORT
+      LAYER Metal1 ;
+        RECT 2.485 1.600 2.955 3.380 ;
+        RECT 2.330 0.575 2.955 1.600 ;
+    END
+  END Z
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    SHAPE ABUTMENT ;
+    PORT
+      LAYER Metal1 ;
+        RECT 0.000 3.620 3.360 4.220 ;
+        RECT 1.530 3.130 1.870 3.620 ;
+    END
+  END VDD
+  PIN VNW
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER Nwell ;
+        RECT -0.430 1.760 3.790 4.350 ;
+    END
+  END VNW
+  PIN VPW
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER Pwell ;
+        RECT -0.430 -0.430 3.790 1.760 ;
+    END
+  END VPW
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    SHAPE ABUTMENT ;
+    PORT
+      LAYER Metal1 ;
+        RECT 1.585 0.300 1.815 0.865 ;
+        RECT 0.000 -0.300 3.360 0.300 ;
+    END
+  END VSS
+  OBS
+      LAYER Metal1 ;
+        RECT 0.245 2.815 0.630 3.390 ;
+        RECT 0.245 2.580 2.255 2.815 ;
+        RECT 0.245 0.800 0.475 2.580 ;
+        RECT 1.970 1.830 2.255 2.580 ;
+  END
+END gf180mcu_fd_sc_mcu7t5v0__buf_1

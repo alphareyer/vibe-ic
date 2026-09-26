@@ -91,6 +91,10 @@ yarn-error.log*
 # EDA tool outputs (large, regeneratable)
 *.gds
 *.def
+# TF24 -- the same rescue as calibration/*.log above: these DEFs are OpenROAD's
+# own `write_def` of a calibration structure, the pair an instrument is
+# calibrated on, not a design artefact.
+!vibe-ic-marketplace/plugins/vibe-ic/programs/calibration/*.def
 *.lef.tmp
 *.sof
 *.pof
