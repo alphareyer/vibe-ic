@@ -547,6 +547,13 @@ class Domain:
     #: rc values from the measurement program that mean "I could not look".
     undetermined_rcs: Tuple[int, ...] = (2, 3)
     programs_dir: Path = PROGRAMS_DIR
+    #: How far this domain may move the wrong way, in its own unit, before a
+    #: change counts as a COLLATERAL regression. 0 (the default, and every
+    #: domain that declares none) is the strict rule. Declared per domain in
+    #: the registry, never passed at run time: a tolerance a caller could
+    #: widen is a guard a caller could remove. It never touches `improves`:
+    #: an objective still has to get strictly better to be promoted.
+    regression_tolerance: float = 0.0
 
     def program_path(self) -> Path:
         if self.program is None:  # pragma: no cover - guarded by callers
@@ -584,7 +591,9 @@ class Domain:
         return new > old if self.direction is Direction.MAXIMIZE else new < old
 
     def regresses(self, new: float, old: float) -> bool:
-        return new < old if self.direction is Direction.MAXIMIZE else new > old
+        tol = self.regression_tolerance
+        return (new < old - tol if self.direction is Direction.MAXIMIZE
+                else new > old + tol)
 
 
 @dataclass(frozen=True)
@@ -905,6 +914,11 @@ def _load_domain(name: str, spec: Any, programs_dir: Path) -> Domain:
         raise RegistryError(f"domain {name!r}: a metric without a unit is a number alone")
     if not spec.get("metric"):
         raise RegistryError(f"domain {name!r}: no metric name declared")
+    tol = spec.get("regression_tolerance", 0)
+    if isinstance(tol, bool) or not isinstance(tol, (int, float)) or tol < 0:
+        raise RegistryError(
+            f"domain {name!r}: regression_tolerance must be a number >= 0 in "
+            f"the domain's own unit, got {tol!r}")
     return Domain(
         name=name, metric=str(spec["metric"]), unit=str(spec["unit"]),
         direction=_enum(Direction, spec.get("direction"), f"domain {name!r}.direction"),
@@ -916,6 +930,7 @@ def _load_domain(name: str, spec: Any, programs_dir: Path) -> Domain:
         binding=binding,
         undetermined_rcs=tuple(int(r) for r in (measure.get("undetermined_rcs") or (2, 3))),
         programs_dir=programs_dir,
+        regression_tolerance=float(tol),
     )
 
 

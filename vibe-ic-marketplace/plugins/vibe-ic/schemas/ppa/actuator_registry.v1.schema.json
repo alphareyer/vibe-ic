@@ -141,6 +141,7 @@
         "direction": {"enum": ["maximize", "minimize"]},
         "binding": {"$ref": "#/definitions/binding"},
         "summary": {"type": "string"},
+        "regression_tolerance": {"type": "number", "minimum": 0, "default": 0, "description": "How far this domain may move the wrong way, in its own unit, before a change counts as a COLLATERAL regression (0: the strict rule). Declared here, never at run time; it never relaxes the objective's own improvement test."},
         "flow_steps": {
           "type": "array",
           "items": {"type": ["string", "integer"]},

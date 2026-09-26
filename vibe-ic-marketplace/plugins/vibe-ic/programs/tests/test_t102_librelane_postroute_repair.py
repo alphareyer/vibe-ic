@@ -311,6 +311,39 @@ def test_a_candidate_with_a_supply_pin_off_its_net_is_never_adopted(tmp_path, mo
     assert row['supply_ownership']['verdict'] == 'FAIL'
 
 
+def test_a_hold_repair_is_adopted_through_extraction_noise_on_setup(tmp_path, monkeypatch):
+    """MEASURED on spm (arm L): 17 hold buffers took worst hold -0.335 ->
+    +0.326 ns and moved worst setup 4.026052 -> 4.025948 ns on paths they never
+    touched. That is not a regression the step may roll a hold closure back
+    for; the declared 1 ps tolerance is what tells the two apart."""
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(4.026052, -0.335),
+        candidates=[_cand(4.025948, 0.326)])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_hold')
+    assert [it.decision for it in run.iterations] == ['PROMOTED'], run.to_record()
+    assert run.outcome is closure.Outcome.CONVERGED
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] == '32-cand01'
+
+
+def test_a_regression_tolerance_is_declared_and_never_negative(tmp_path):
+    import yaml
+    doc = yaml.safe_load(REGISTRY.read_text())
+    assert doc['domains']['timing.setup']['regression_tolerance'] == 0.001
+    assert 'regression_tolerance' not in doc['domains']['timing.drv']
+    doc['domains']['timing.setup']['regression_tolerance'] = -0.1
+    bad = write(tmp_path / 'r.yaml', yaml.safe_dump(doc))
+    with pytest.raises(closure.RegistryError, match='regression_tolerance'):
+        closure.load_registry(bad)
+    reg = closure.load_registry(REGISTRY)
+    setup = reg.domains['timing.setup']
+    assert not setup.regresses(4.025948, 4.026052)
+    assert setup.regresses(0.14, 3.33)
+    # the objective's own test is untouched: a smaller loss is still no gain
+    assert not setup.improves(4.0259, 4.0260)
+    assert reg.domains['pnr.repair_deck.required_completeness'].regression_tolerance == 0
+
+
 def test_a_hold_repair_that_leaves_an_antenna_is_rolled_back(tmp_path, monkeypatch):
     project, arm, impl, shim = _scenario_impl(
         tmp_path, baseline=(1.0, -0.2),

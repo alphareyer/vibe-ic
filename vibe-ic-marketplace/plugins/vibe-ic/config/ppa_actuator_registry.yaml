@@ -115,6 +115,15 @@ domains:
   # (the worst of them), in the sign-off scene. rc 3 = the adopted State
   # cannot answer (a corner unreported, a State that is not the one adopted),
   # which is NOT_MEASURED, never a number.
+  #
+  # regression_tolerance on the two slack domains, MEASURED (spm x gf180mcuD,
+  # vibeic-eda 0.3.79, lane mig102 arm L): a hold repair that inserted 17
+  # buffers on input paths took worst hold -0.335 -> +0.326 ns and moved
+  # worst SETUP 4.026052 -> 4.025948 ns (-0.1 ps) on paths it never touched --
+  # re-extraction after the ECO route. With the strict rule that candidate was
+  # rolled back and the violation shipped. 1 ps is ten times that noise and
+  # 1/3000 of the setup loss T98 measured (+3.33 -> +0.14 ns), which is still
+  # a regression here.
 
   timing.setup:
     summary: >-
@@ -130,6 +139,7 @@ domains:
       argv_template: ["measure", "--domain", "setup", "--json", "{json_out}"]
       extract: {kind: json_pointer, pointer: "/value"}
       undetermined_rcs: [2, 3]
+    regression_tolerance: 0.001
     satisfied_when: {op: ">=", value: 0.0}
 
   timing.hold:
@@ -146,6 +156,7 @@ domains:
       argv_template: ["measure", "--domain", "hold", "--json", "{json_out}"]
       extract: {kind: json_pointer, pointer: "/value"}
       undetermined_rcs: [2, 3]
+    regression_tolerance: 0.001
     satisfied_when: {op: ">=", value: 0.0}
 
   timing.drv:
