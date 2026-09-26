@@ -21,7 +21,6 @@ Chip-AGNOSTIC: step ids (A5/A6/5/7) are flow-definition structure, not
 chip names; the attribution logic itself walks edges generically.
 """
 import sys
-import pytest
 from pathlib import Path
 
 import yaml
@@ -391,7 +390,6 @@ def test_declared_dependency_relation_is_small():
     }, sorted(pairs)
 
 
-@pytest.mark.consistency
 def test_ordering_ancestry_is_two_orders_of_magnitude_wider():
     """The measurement that makes the list above meaningful: how many pairs
     the ORDERING graph alone would have licensed."""
@@ -525,7 +523,6 @@ def _ancestry(parents):
     return out
 
 
-@pytest.mark.consistency
 def test_the_latest_delta_is_derived_and_not_asserted_in_prose():
     """THE DERIVATION ABOVE, MADE CHECKABLE.
 
