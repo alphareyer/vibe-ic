@@ -284,6 +284,70 @@ def annotate_pg_pins(lef_text: str, rails: Dict[str, str]) -> Tuple[str, int]:
     return "\n".join(out) + ("\n" if lef_text.endswith("\n") else ""), n
 
 
+def annotate_signal_pins(lef_text: str, signals: List[str]) -> Tuple[str, int]:
+    """Declare every non-rail port PIN `DIRECTION INOUT` / `USE SIGNAL`.
+
+    The same loss as `annotate_pg_pins`, on the other pins: a port's class and
+    use do not survive the GDS the abstract is written from (Magic's GDS
+    reader restores a port from its pin boundary and text, nothing more), so
+    `lef write` emits the signal PINs bare. MEASURED on u_hawaii_adc/ldo
+    (OpenROAD 26Q3): a bare PIN is read as `io=INPUT`, a direction this
+    program is not entitled to claim for an analog port. An analog port is
+    INOUT, as `interface_verilog` already declares it.
+
+    A PIN that already states a DIRECTION or a USE is left alone. Returns
+    (text, n_pins_annotated)."""
+    want = {str(s) for s in (signals or [])}
+    lines = lef_text.splitlines()
+    out: List[str] = []
+    n = 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        m = re.match(r"^(\s*)PIN\s+(\S+)\s*$", line)
+        if m and m.group(2) in want:
+            j = i + 1
+            stated = False
+            while j < len(lines) and not re.match(
+                    r"^\s*(PORT|END)\b", lines[j]):
+                if re.match(r"^\s*(DIRECTION|USE)\b", lines[j]):
+                    stated = True
+                j += 1
+            if not stated:
+                pad = m.group(1) + "  "
+                out.append(f"{pad}DIRECTION INOUT ;")
+                out.append(f"{pad}USE SIGNAL ;")
+                n += 1
+        i += 1
+    return "\n".join(out) + ("\n" if lef_text.endswith("\n") else ""), n
+
+
+def lef_pin_census(lef_text: str) -> List[Dict]:
+    """`[{pin, layers, use}]` — what the LEF on disk actually declares, so the
+    report says what was WRITTEN, not what the topology asked for."""
+    out: List[Dict] = []
+    cur = None
+    for raw in lef_text.splitlines():
+        tok = raw.split()
+        if not tok:
+            continue
+        if tok[0] == "PIN" and len(tok) > 1:
+            cur = {"pin": tok[1], "layers": [], "use": None}
+            out.append(cur)
+        elif cur is not None and tok[0] == "USE" and len(tok) > 1:
+            cur["use"] = tok[1].rstrip(";")
+        elif cur is not None and tok[0] == "LAYER" and len(tok) > 1:
+            if tok[1] not in cur["layers"]:
+                cur["layers"].append(tok[1])
+        elif cur is not None and tok[0] == "END" and len(tok) > 1 \
+                and tok[1] == cur["pin"]:
+            cur = None
+        elif tok[0] == "OBS":
+            cur = None
+    return out
+
+
 def _rect_minus(a, b):
     """`a` minus `b`, as up to four axis-aligned rectangles."""
     ax1, ay1, ax2, ay2 = a
@@ -438,6 +502,10 @@ def emit_block(project: Path, block: str, container: str, pdk_root: str,
                                       _rails_map)
     if n_pg:
         lef.write_text(_pg_text)
+    _sig_text, n_sig = annotate_signal_pins(lef.read_text(errors="replace"),
+                                            signals)
+    if n_sig:
+        lef.write_text(_sig_text)
     halo = float(os.environ.get("A8_PIN_ACCESS_CLEARANCE_UM", "0.6"))
     carved, n_carved = ((lef.read_text(errors="replace"), 0) if halo <= 0
                         else carve_pin_access(
@@ -447,12 +515,19 @@ def emit_block(project: Path, block: str, container: str, pdk_root: str,
     (hdir / f"{block}.gds").write_bytes(gds.read_bytes())
     (hdir / f"{block}.v").write_text(interface_verilog(block, rails, signals))
     (hdir / f"{block}.lib").write_text(interface_liberty(block, rails, signals))
+    census = lef_pin_census(lef.read_text(errors="replace"))
     return {"block": block, "emitted": True, "rc": 0,
             "lef_bytes": lef.stat().st_size,
             "obs_rects_carved_for_pin_access": n_carved,
             "pg_pins_declared": n_pg,
+            "signal_pins_declared": n_sig,
             "pin_access_clearance_um": halo,
-            "pins": len(rails) + len(signals),
+            # MEASURED on the LEF just written — never the topology's count.
+            # The count this used to print ("4 pin(s)" from the topology) was
+            # printed beside a LEF with ZERO pins (T94).
+            "pins": len(census),
+            "lef_pins": census,
+            "declared_ports": len(rails) + len(signals),
             "rails": rails, "signals": signals,
             "magicrc": rcfile}
 
@@ -487,7 +562,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     for r in results:
         print("A8_EMIT %s: %s" % (
             r["block"],
-            ("lef %d B, %d pin(s)" % (r["lef_bytes"], r["pins"]))
+            ("lef %d B, %d pin(s) in the LEF of %s declared [%s]" % (
+                r["lef_bytes"], r["pins"], r.get("declared_ports", "?"),
+                ", ".join("%s:%s" % (p["pin"], "/".join(p["layers"]))
+                          for p in r.get("lef_pins", []))))
             if r["emitted"] else "REFUSED — " + r["reason"]))
     if a.json:
         # Atomic (vibe-ic#1082): the declared report appears under its final

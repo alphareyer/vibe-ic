@@ -24,6 +24,14 @@ Failure rules:
   A8_HARDMACRO_LEF_NO_PINS    — the LEF has no PIN for any declared port
   A8_HARDMACRO_LEF_PIN_MISSING — a declared port is not a LEF PIN
   A8_HARDMACRO_RAIL_NOT_PG    — a declared rail PIN is not USE POWER/GROUND
+  A8_HARDMACRO_PIN_LAYER_MISMATCH — a PIN is not on the layer A5 drew it on
+  A8_HARDMACRO_PIN_NOT_ROUTING_LAYER — a PIN is on a cut layer, or a signal
+                                  PIN on the lowest routing layer
+  A8_HARDMACRO_SIGNAL_PIN_NOT_ON_EDGE — a signal PIN touches no macro edge
+  A8_HARDMACRO_PG_PIN_UNREACHABLE — the PnR PDN planner cannot reach a
+                                  supply PIN (or it cannot be asked)
+                                  (the last four only for a block whose A5
+                                  layout declares its pins)
   A8_HARDMACRO_STUB_MARKER    — file matches stub-marker panel
                                   (`ai_authored_methodology_stub`,
                                   `behavioral stub`, `placeholder
@@ -203,6 +211,178 @@ def _lef_pin_findings(project: Path, block: str, lef_path: Path) -> List[dict]:
     return out
 
 
+# ── WHERE THE PINS ARE, AND WHETHER A ROUTER AND A GRID CAN REACH THEM ──────
+# (analog decision q2-pin-layer). A PIN is not enough: a pin on a cut layer is
+# refused by every router, a signal pin inside the abstract's obstruction has
+# no path to it (Magic's `lef write -hide` says so in its own source), and a
+# supply pin the PDN planner cannot cross is a macro with no power. These are
+# asked of the LEF against what A5 DECLARED each pin to be
+# (`layout_provenance.json` `pins`). A block whose layout declares no pins is
+# judged by the rules above alone, exactly as before.
+
+#: LEF geometry is on a 0.005 um manufacturing grid at the coarsest; a pin
+#: edge within it of the boundary is ON the boundary.
+_EDGE_TOL_UM = 0.005
+
+
+def _lef_geometry(text: str) -> tuple:
+    """`((W, H) or None, {pin: {layer: [rects]}})` from a LEF MACRO."""
+    size = None
+    pins: dict = {}
+    cur = None
+    layer = None
+    for raw in text.splitlines():
+        tok = raw.replace(";", " ").split()
+        if not tok:
+            continue
+        if tok[0] == "SIZE" and len(tok) >= 4 and size is None:
+            try:
+                size = (float(tok[1]), float(tok[3]))
+            except ValueError:
+                size = None
+        elif tok[0] == "PIN" and len(tok) > 1:
+            cur, layer = tok[1].lower(), None
+            pins.setdefault(cur, {})
+        elif tok[0] == "OBS":
+            cur = None
+        elif cur is not None and tok[0] == "LAYER" and len(tok) > 1:
+            layer = tok[1]
+            pins[cur].setdefault(layer, [])
+        elif cur is not None and layer and tok[0] == "RECT" and len(tok) >= 5:
+            try:
+                pins[cur][layer].append(tuple(float(v) for v in tok[1:5]))
+            except ValueError:
+                pass
+        elif cur is not None and tok[0] == "END" and len(tok) > 1 \
+                and tok[1].lower() == cur:
+            cur = None
+    return size, pins
+
+
+def _declared_pins(project: Path, block: str) -> tuple:
+    """`(pins, tech_layers)` A5 recorded for this block, or `([], None)`."""
+    import json as _json
+    prov = project / "phase3" / "analog" / block / "layout_provenance.json"
+    try:
+        doc = _json.loads(prov.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], None
+    pins = [p for p in (doc.get("pins") or []) if isinstance(p, dict)]
+    layers = (doc.get("pins_basis") or {}).get("tech_lef_layers")
+    return pins, (layers if isinstance(layers, list) and layers else None)
+
+
+def _tech_lef_text(rows: list) -> str:
+    """The PDK layer table A5 read, re-serialised as the LEF it came from, so
+    the PDN planner reads it through its own parser."""
+    out = []
+    for r in rows:
+        out.append(f"LAYER {r.get('name')}")
+        out.append(f"  TYPE {r.get('type')} ;")
+        if r.get("direction"):
+            out.append(f"  DIRECTION {r['direction']} ;")
+        if r.get("pitch"):
+            out.append(f"  PITCH {r['pitch']} ;")
+        if r.get("width"):
+            out.append(f"  WIDTH {r['width']} ;")
+        out.append(f"END {r.get('name')}")
+    return "\n".join(out) + "\n"
+
+
+def _pin_access_findings(project: Path, block: str, lef_text: str,
+                         rel: str) -> List[dict]:
+    declared, tech = _declared_pins(project, block)
+    if not declared:
+        return []
+    size, geo = _lef_geometry(lef_text)
+    out: List[dict] = []
+
+    def find(rule: str, detail: str) -> None:
+        out.append({"block": block, "rule": rule, "rel_path": rel,
+                    "detail": detail})
+
+    ttype = {str(r.get("name")).lower(): str(r.get("type") or "").upper()
+             for r in (tech or [])}
+    routing = [str(r.get("name")) for r in (tech or [])
+               if str(r.get("type") or "").upper() == "ROUTING"]
+    for p in declared:
+        net = str(p.get("net", "")).lower()
+        want = str(p.get("lef_layer") or "")
+        got = geo.get(net, {})
+        if not got:
+            continue            # a missing PIN is LEF_PIN_MISSING's finding
+        if want and set(got) != {want}:
+            find("A8_HARDMACRO_PIN_LAYER_MISMATCH",
+                 f"port {net} was drawn as a {want} pin by A5, and the LEF "
+                 f"declares it on {sorted(got)}")
+        for layer in got:
+            kind = ttype.get(layer.lower())
+            if kind is None and tech is None:
+                kind = str(p.get("lef_type") or "").upper() or None
+            if kind != "ROUTING" or (not p.get("rail") and routing
+                                     and layer == routing[0]):
+                find("A8_HARDMACRO_PIN_NOT_ROUTING_LAYER",
+                     f"port {net} is a PIN on {layer} "
+                     f"({kind or 'a layer the PDK table does not declare'}"
+                     f"{', the lowest routing layer' if kind == 'ROUTING' else ''}"
+                     f"); a macro pin must be on a routing layer a signal "
+                     f"router may use")
+        if not p.get("rail"):
+            if size is None:
+                find("A8_HARDMACRO_SIGNAL_PIN_NOT_ON_EDGE",
+                     f"the LEF states no SIZE, so whether port {net} touches "
+                     f"the macro boundary is NOT MEASURED")
+                continue
+            w, h = size
+            t = _EDGE_TOL_UM
+            if not any(r[0] <= t or r[1] <= t or r[2] >= w - t
+                       or r[3] >= h - t
+                       for rs in got.values() for r in rs):
+                find("A8_HARDMACRO_SIGNAL_PIN_NOT_ON_EDGE",
+                     f"no rectangle of signal pin {net} touches the macro "
+                     f"boundary (0 0 {w} {h}); an abstract written with "
+                     f"`-hide` obstructs everything inside it, so a router "
+                     f"has no path to an interior pin")
+    rails = [p for p in declared if p.get("rail")]
+    if not rails:
+        return out
+    if tech is None:
+        find("A8_HARDMACRO_PG_PIN_UNREACHABLE",
+             "A5 recorded no PDK layer table, so whether the PDN planner can "
+             "reach the supply pins is NOT MEASURED")
+        return out
+    try:
+        import phase3_one_shot_runner as _p3
+    except Exception as exc:  # noqa: BLE001 — named, never a pass
+        find("A8_HARDMACRO_PG_PIN_UNREACHABLE",
+             f"the PDN planner could not be loaded ({type(exc).__name__}); "
+             f"supply-pin reach is NOT MEASURED")
+        return out
+    tech_text = _tech_lef_text(tech)
+    followpin = routing[0] if routing else ""
+    straps = _p3._auto_pdn_straps_from_techlef(tech_text, followpin) or {}
+    outcome = _p3._macro_pdn_grid_outcome([lef_text], tech_text,
+                                          straps.get("stripes") or [],
+                                          followpin)
+    for ref in outcome.get("refusals") or []:
+        find("A8_HARDMACRO_PG_PIN_UNREACHABLE",
+             f"the PnR PDN planner refuses this macro's supply pins: "
+             f"{ref.get('reason')} — {ref.get('detail')}")
+    plan = outcome.get("plan") or {}
+    unreachable = sorted({str(u[1]) for u in plan.get("unreachable") or []})
+    if unreachable:
+        find("A8_HARDMACRO_PG_PIN_UNREACHABLE",
+             f"supply pin(s) {unreachable} are narrower across the "
+             f"{plan.get('strap_layer')} macro strap than its smallest legal "
+             f"pitch {plan.get('pitch_floor')} um, so no strap is guaranteed "
+             f"to cross them")
+    if outcome.get("plan") is None and not outcome.get("refusals"):
+        find("A8_HARDMACRO_PG_PIN_UNREACHABLE",
+             "the LEF carries no POWER/GROUND pin for the PDN planner to "
+             "reach, although A5 drew supply pins")
+    return out
+
+
 def _check_block(project: Path, block: str
                  ) -> tuple[Optional[str], List[dict]]:
     hdir = project / "phase3" / "analog" / "hardmacro" / block
@@ -254,6 +434,10 @@ def _check_block(project: Path, block: str
     lef_path = hdir / f"{block}.lef"
     if lef_path.is_file():
         findings.extend(_lef_pin_findings(project, block, lef_path))
+        findings.extend(_pin_access_findings(
+            project, block,
+            lef_path.read_text(encoding="utf-8", errors="replace"),
+            str(lef_path.relative_to(project))))
     if findings:
         return "FAIL", findings
 
