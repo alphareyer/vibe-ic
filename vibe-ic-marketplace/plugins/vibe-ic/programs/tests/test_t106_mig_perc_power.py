@@ -653,6 +653,8 @@ def _wps_edge(calls):
             spef_slow = 'mutated' in str(run)
             wrdata = run.read_text().split('wrdata ')[1].split('\n')[0].split()
             calls.append(('wrdata', wrdata))
+            control = run.read_text().split('.control')[1].split('.endc')[0]
+            assert control.split()[-1] == 'quit', control
             assert wrdata[1:] == ['v(u_core\\\\/_417_/clk)', 'v(u_core\\\\/_417_/q)',
                                   'v(u_core\\\\/_416_/d)'], wrdata
             delay = 1.10e-9 if spef_slow else 0.72e-9

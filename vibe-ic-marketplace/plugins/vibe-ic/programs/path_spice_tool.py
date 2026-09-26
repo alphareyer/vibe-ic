@@ -452,7 +452,10 @@ def _simulate(deck: Path, simulator: str, image: str, project: Path,
         vectors = ' '.join('v(' + n.lower().replace('\\', '\\\\') + ')' for n in names)
         run = f'tran {step_s:.6g} {stop}' if step_s else 'run'
         control = (f'.control\nset wr_vecnames\nset wr_singlescale\n{run}\n'
-                   f'wrdata {deck.with_suffix(".wave")} {vectors}\n.endc\n')
+                   f'wrdata {deck.with_suffix(".wave")} {vectors}\nquit\n.endc\n')
+        # `quit`: in batch mode ngspice otherwise runs the deck's own `.tran`
+        # card after the control block (MEASURED on spm: the 1e-13 card took
+        # 30-57 min after the control-block transient had finished in ~1 min).
         # A function, not a string: a replacement string would read the
         # doubled backslashes above as escapes and undo them.
         runnable.write_text(re.sub(r'^\.end\s*$', lambda _m: control + '.end', text,
