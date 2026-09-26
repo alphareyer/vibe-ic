@@ -1679,6 +1679,53 @@ for _rule, _fn, _pos_src, _neg_src, _expect, _why in (
     ))
 
 
+
+def _judge_kind_prove_arm(log: str) -> Optional[str]:
+    """Fires when the transcript's `smtbmc` prove ARM reads as an unbounded
+    proof after `formal_property_run.fold_prove_arms`."""
+    import formal_property_run as F
+    cfg = F.parse_sby_config((FIXTURES / "sby_prove_arms.sby").read_text())
+    lp = F.parse_sby_log(log, sby_stem="formal_ctr", seed=cfg)
+    _, records = F.fold_prove_arms(lp)
+    for rec in records:
+        for arm in rec["arms"]:
+            if arm["engine"].startswith("smtbmc") and arm["bound"] == "unbounded":
+                return "UNBOUNDED_BY_KIND"
+    return None
+
+
+_register(Instrument(
+    name="formal_property_run::fold_prove_arms",
+    reads="the SymbiYosys transcript of a `mode prove` task driven by "
+          "`smtbmc yices` (k-induction) beside the `abc pdr` task",
+    ruling="T91 (review70 step 5 correction: smtbmc prove is real)",
+    owner="mig-rtlver",
+    why=("k-induction reports its two halves separately — `returned pass for "
+         "basecase` then `returned FAIL for induction` — and only `DONE (...)` "
+         "is the task verdict. A reader that takes the basecase line as the "
+         "task status turns a bounded result into an unbounded proof. The pair "
+         "is two real transcripts of the SAME .sby that differ only in whether "
+         "the induction step closed."),
+    judge=_judge_kind_prove_arm,
+    positive=Sample(
+        provenance=(
+            "REAL SBY v0.67-31-g2c2f04e / yices-smt2 transcript, released "
+            "vibeic-eda 0.3.77 image (by digest), 8hd-3 (.121), 2026-09-26. "
+            "`calibration/sby_prove_arms.sby` is `emit_sby(..., "
+            "kind_engine=KIND_PROVE_ENGINE)` over an 8-bit counter wrapping at "
+            "9 with `assert(q <= 9)` (sources: tests/fixtures/sby_prove_arms/"
+            "pass/). `successful proof by k-induction`, `DONE (PASS, rc=0)`."),
+        artefact=_read("sby_prove_arms_pass.sby.log")),
+    expect="UNBOUNDED_BY_KIND",
+    negative=Sample(
+        provenance=(
+            "The SAME .sby, same image and host, counter wrapping at 50 with "
+            "`assert(q != 200)` (tests/fixtures/sby_prove_arms/unknown/): true, "
+            "but not 20-inductive. `returned pass for basecase`, `returned FAIL "
+            "for induction`, `DONE (UNKNOWN, rc=4)` — abc pdr proves it."),
+        artefact=_read("sby_prove_arms_unknown.sby.log")),
+))
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════

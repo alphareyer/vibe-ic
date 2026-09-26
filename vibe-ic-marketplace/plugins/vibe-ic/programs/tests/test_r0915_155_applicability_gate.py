@@ -208,9 +208,14 @@ SPM_L8 = _l8([{"name": "rst", "polarity": "active_high", "sync": "synchronous",
 def test_the_spm_shaped_design_is_inside_the_class_and_passes(tmp_path):
     _, res, rep = _step5(_project(tmp_path, {"m.v": SERIAL}, SPM_L8))
     assert res["expert_fallback_invocation_status"] == "INVOKED_BY_PROGRAM"
-    assert res["unresolved_obligations"] == []
-    assert res["property_denominator"] == res["authored_property_count"] == 6
+    # R-0924-2 (landed on main before this port): the reset NAME is
+    # discharged by BINDING at the gate, not by the structural check, so
+    # it is the one row the proof record leaves open and the gate closes.
+    assert list(_open(res)) == [L8P + "resets.0.name"]
+    assert res["property_denominator"] == 6
+    assert res["authored_property_count"] == 5
     assert rep["verdict"] == "PASS", rep["findings"]
+    assert rep["discharged_by_binding"] == [L8P + "resets.0.name"]
     ev = json.loads((tmp_path / "phase2/stage1/formal/formal_structural_evidence.json").read_text())
     assert ev["applicability"] == {"class": "R-0915-155", "inside": True,
                                    "failed_preconditions": []}
@@ -226,8 +231,12 @@ SIMPLE_L8 = _l8([{"name": "rst", "polarity": "active_high", "sync": "synchronous
 
 def test_a_simple_correct_design_passes(tmp_path):
     _, res, rep = _step5(_project(tmp_path, {"m.v": SIMPLE}, SIMPLE_L8))
-    assert _open(res) == {}
+    # R-0924-2 (landed on main before this port): the reset NAME is
+    # discharged by BINDING at the gate, not by the structural check, so
+    # it is the one row the proof record leaves open and the gate closes.
+    assert list(_open(res)) == [L8P + "resets.0.name"]
     assert rep["verdict"] == "PASS", rep["findings"]
+    assert rep["discharged_by_binding"] == [L8P + "resets.0.name"]
 
 
 def test_a_simple_wrong_polarity_design_is_refuted(tmp_path):

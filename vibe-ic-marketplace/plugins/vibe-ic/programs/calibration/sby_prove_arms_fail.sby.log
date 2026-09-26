@@ -1,0 +1,183 @@
+SBY  3:57:22 [formal_ctr_safety] Removing directory '/w/fail/formal_ctr_safety'.
+SBY  3:57:22 [formal_ctr_safety] Copy '/w/fail/ctr.v' to '/w/fail/formal_ctr_safety/src/ctr.v'.
+SBY  3:57:22 [formal_ctr_safety] Copy '/w/fail/formal_ctr.sv' to '/w/fail/formal_ctr_safety/src/formal_ctr.sv'.
+SBY  3:57:22 [formal_ctr_safety] engine_0: abc pdr
+SBY  3:57:22 [formal_ctr_safety_kind] Removing directory '/w/fail/formal_ctr_safety_kind'.
+SBY  3:57:22 [formal_ctr_safety_kind] Copy '/w/fail/ctr.v' to '/w/fail/formal_ctr_safety_kind/src/ctr.v'.
+SBY  3:57:22 [formal_ctr_safety_kind] Copy '/w/fail/formal_ctr.sv' to '/w/fail/formal_ctr_safety_kind/src/formal_ctr.sv'.
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0: smtbmc yices
+SBY  3:57:22 [formal_ctr_bmc] Removing directory '/w/fail/formal_ctr_bmc'.
+SBY  3:57:22 [formal_ctr_bmc] Copy '/w/fail/ctr.v' to '/w/fail/formal_ctr_bmc/src/ctr.v'.
+SBY  3:57:22 [formal_ctr_bmc] Copy '/w/fail/formal_ctr.sv' to '/w/fail/formal_ctr_bmc/src/formal_ctr.sv'.
+SBY  3:57:22 [formal_ctr_bmc] engine_0: abc bmc3
+SBY  3:57:22 [formal_ctr_safety] base: starting process "cd formal_ctr_safety/src; yosys -ql ../model/design.log ../model/design.ys"
+SBY  3:57:22 [formal_ctr_safety_kind] base: starting process "cd formal_ctr_safety_kind/src; yosys -ql ../model/design.log ../model/design.ys"
+SBY  3:57:22 [formal_ctr_bmc] base: starting process "cd formal_ctr_bmc/src; yosys -ql ../model/design.log ../model/design.ys"
+SBY  3:57:22 [formal_ctr_safety] base: finished (returncode=0)
+SBY  3:57:22 [formal_ctr_safety_kind] base: finished (returncode=0)
+SBY  3:57:22 [formal_ctr_safety] prep: starting process "cd formal_ctr_safety/model; yosys -ql design_prep.log design_prep.ys"
+SBY  3:57:22 [formal_ctr_bmc] base: finished (returncode=0)
+SBY  3:57:22 [formal_ctr_safety_kind] prep: starting process "cd formal_ctr_safety_kind/model; yosys -ql design_prep.log design_prep.ys"
+SBY  3:57:22 [formal_ctr_bmc] prep: starting process "cd formal_ctr_bmc/model; yosys -ql design_prep.log design_prep.ys"
+SBY  3:57:22 [formal_ctr_safety] prep: finished (returncode=0)
+SBY  3:57:22 [formal_ctr_safety_kind] prep: finished (returncode=0)
+SBY  3:57:22 [formal_ctr_safety] aig: starting process "cd formal_ctr_safety/model; yosys -ql design_aiger.log design_aiger.ys"
+SBY  3:57:22 [formal_ctr_bmc] prep: finished (returncode=0)
+SBY  3:57:22 [formal_ctr_safety_kind] smt2: starting process "cd formal_ctr_safety_kind/model; yosys -ql design_smt2.log design_smt2.ys"
+SBY  3:57:22 [formal_ctr_bmc] aig: starting process "cd formal_ctr_bmc/model; yosys -ql design_aiger.log design_aiger.ys"
+SBY  3:57:22 [formal_ctr_safety_kind] smt2: finished (returncode=0)
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: starting process "cd formal_ctr_safety_kind; yosys-smtbmc -s yices --presat --unroll --noprogress -t 20  --append 0 --dump-vcd engine_0/trace.vcd --dump-yw engine_0/trace.yw --dump-vlogtb engine_0/trace_tb.v --dump-smtc engine_0/trace.smtc model/design_smt2.smt2"
+SBY  3:57:22 [formal_ctr_safety] aig: Warning: Treating undriven bit formal_ctr.\clk like $anyseq.
+SBY  3:57:22 [formal_ctr_safety] aig: Warning: Treating undriven bit formal_ctr.\rst like $anyseq.
+SBY  3:57:22 [formal_ctr_safety] aig: Warning: Treating a total of 2 undriven bits in formal_ctr like $anyseq.
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: starting process "cd formal_ctr_safety_kind; yosys-smtbmc -s yices --presat --unroll -i --noprogress -t 20  --append 0 --dump-vcd engine_0/trace_induct.vcd --dump-yw engine_0/trace_induct.yw --dump-vlogtb engine_0/trace_induct_tb.v --dump-smtc engine_0/trace_induct.smtc model/design_smt2.smt2"
+SBY  3:57:22 [formal_ctr_bmc] aig: Warning: Treating undriven bit formal_ctr.\clk like $anyseq.
+SBY  3:57:22 [formal_ctr_bmc] aig: Warning: Treating undriven bit formal_ctr.\rst like $anyseq.
+SBY  3:57:22 [formal_ctr_bmc] aig: Warning: Treating a total of 2 undriven bits in formal_ctr like $anyseq.
+SBY  3:57:22 [formal_ctr_safety] aig: finished (returncode=0)
+SBY  3:57:22 [formal_ctr_safety] engine_0: starting process "cd formal_ctr_safety; yosys-abc -c 'read_aiger model/design_aiger.aig; fold; strash; pdr -v -l; write_cex -a engine_0/trace.aiw'"
+SBY  3:57:22 [formal_ctr_bmc] aig: finished (returncode=0)
+SBY  3:57:22 [formal_ctr_bmc] engine_0: starting process "cd formal_ctr_bmc; yosys-abc -c 'read_aiger model/design_aiger.aig; fold; strash; bmc3 -F 12 -v; write_cex -a engine_0/trace.aiw'"
+SBY  3:57:22 [formal_ctr_safety] engine_0: ======== ABC command line "read_aiger model/design_aiger.aig; fold; strash; pdr -v -l; write_cex -a engine_0/trace.aiw"
+SBY  3:57:22 [formal_ctr_safety] engine_0: Warning: The last output is interpreted as a constraint.
+SBY  3:57:22 [formal_ctr_safety] engine_0: VarMax = 300. FrameMax = 10000. QueMax = 0. TimeMax = 119. MonoCNF = no. SkipGen = no. SolveAll = no.
+SBY  3:57:22 [formal_ctr_bmc] engine_0: ======== ABC command line "read_aiger model/design_aiger.aig; fold; strash; bmc3 -F 12 -v; write_cex -a engine_0/trace.aiw"
+SBY  3:57:22 [formal_ctr_bmc] engine_0: Warning: The last output is interpreted as a constraint.
+SBY  3:57:22 [formal_ctr_safety] engine_0: Frame Clauses                                                     Max Queue Flops Time
+SBY  3:57:22 [formal_ctr_safety] engine_0: 1 : 0 7                                                                 1     8      0.00 sec  T/O =  0  PRV =  0
+SBY  3:57:22 [formal_ctr_safety] engine_0: 2 : 0 2 13                                                              1    16      0.01 sec  T/O =  0  PRV =  0
+SBY  3:57:22 [formal_ctr_bmc] engine_0: Running "bmc3". PI/PO/Reg = 10/1/20. And =    109. Lev =    13. ObjNums =    96.
+SBY  3:57:22 [formal_ctr_bmc] engine_0: Params: FramesMax = 12. Start = 0. ConfLimit = 0. TimeOut = 0. SolveAll = 0.
+SBY  3:57:22 [formal_ctr_bmc] engine_0: 0 + : Var =       1. Cla =        0. Conf =      0. Learn =      0.    0 MB   4 MB     0.01 sec
+SBY  3:57:22 [formal_ctr_bmc] engine_0: 1 + : Var =      57. Cla =      146. Conf =      0. Learn =      0.    0 MB   4 MB     0.01 sec
+SBY  3:57:22 [formal_ctr_bmc] engine_0: 2 + : Var =     103. Cla =      289. Conf =      5. Learn =      4.    0 MB   4 MB     0.01 sec
+SBY  3:57:22 [formal_ctr_bmc] engine_0: 3 + : Var =     149. Cla =      432. Conf =     10. Learn =      8.    0 MB   4 MB     0.01 sec
+SBY  3:57:22 [formal_ctr_bmc] engine_0: 4 + : Var =     195. Cla =      575. Conf =     25. Learn =     22.    0 MB   4 MB     0.01 sec
+SBY  3:57:22 [formal_ctr_bmc] engine_0: 5 + : Var =     241. Cla =      718. Conf =     39. Learn =     35.    0 MB   4 MB     0.01 sec
+SBY  3:57:22 [formal_ctr_bmc] engine_0: 6 + : Var =     287. Cla =      861. Conf =     67. Learn =     62.    0 MB   4 MB     0.01 sec
+SBY  3:57:22 [formal_ctr_bmc] engine_0: 7 + : Var =     333. Cla =     1004. Conf =     90. Learn =     84.    0 MB   4 MB     0.01 sec
+SBY  3:57:22 [formal_ctr_bmc] engine_0: 8 + : Var =     379. Cla =     1147. Conf =    115. Learn =    108.    0 MB   4 MB     0.01 sec
+SBY  3:57:22 [formal_ctr_bmc] engine_0: 9 + : Var =     425. Cla =     1290. Conf =    138. Learn =    130.    0 MB   4 MB     0.01 sec
+SBY  3:57:22 [formal_ctr_bmc] engine_0: 10 + : Var =     471. Cla =     1433. Conf =    175. Learn =    166.    0 MB   4 MB     0.01 sec
+SBY  3:57:22 [formal_ctr_bmc] engine_0: 11 + : Var =     517. Cla =     1576. Conf =    188. Learn =    178.    0 MB   4 MB     0.01 sec
+SBY  3:57:22 [formal_ctr_bmc] engine_0: Runtime:  CNF = 0.0 sec (1.6 %)  UNSAT = 0.0 sec (7.7 %)  SAT = 0.0 sec (0.0 %)  UNDEC = 0.0 sec (0.0 %)
+SBY  3:57:22 [formal_ctr_bmc] engine_0: LStart(P) = 10000  LDelta(Q) = 2000  LRatio(R) = 80  ReduceDB = 0  Vars = 1000  Used = 989 (98.90 %)
+SBY  3:57:22 [formal_ctr_bmc] engine_0: Buffs = 106. Dups = 0.   Hash hits = 0.  Hash misses = 397.  UniProps = 0.
+SBY  3:57:22 [formal_ctr_bmc] engine_0: No output asserted in 12 frames. Resource limit reached (conf limit 0). Time =     0.01 sec
+SBY  3:57:22 [formal_ctr_bmc] engine_0: Counter-example is not available.
+SBY  3:57:22 [formal_ctr_safety] engine_0: 3 : 0 3 3 14 ~1                                                          4    20      0.01 sec  T/O =  0  PRV =  0
+SBY  3:57:22 [formal_ctr_bmc] engine_0: finished (returncode=0)
+SBY  3:57:22 [formal_ctr_bmc] engine_0: Status returned by engine: PASS
+SBY  3:57:22 [formal_ctr_bmc] summary: Elapsed clock time [H:MM:SS (secs)]: 0:00:00 (0)
+SBY  3:57:22 [formal_ctr_bmc] summary: Elapsed process time [H:MM:SS (secs)]: 0:00:00 (0)
+SBY  3:57:22 [formal_ctr_bmc] summary: engine_0 (abc bmc3) returned PASS
+SBY  3:57:22 [formal_ctr_bmc] summary: engine_0 did not produce any traces
+SBY  3:57:22 [formal_ctr_bmc] DONE (PASS, rc=0)
+SBY  3:57:22 [formal_ctr_safety] engine_0: 4 : 0 2 1 2 13 ~1                                                        0    20      0.01 sec  T/O =  0  PRV =  0
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Solver: yices
+SBY  3:57:22 [formal_ctr_safety] engine_0: 5 : 0 2 1 2 2 11 ~1                                                      0    20      0.01 sec  T/O =  0  PRV =  0
+SBY  3:57:22 [formal_ctr_safety] engine_0: 6 : 0 2 1 2 2 2 10 ~1                                                    1    20      0.01 sec  T/O =  0  PRV =  0
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 0..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 0..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 1..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 1..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 2..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 2..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 3..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 3..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 4..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 4..
+SBY  3:57:22 [formal_ctr_safety] engine_0: 7 : 0 2 1 2 2 2 1 11 ~1                                                  1    20      0.02 sec  T/O =  0  PRV =  0
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 5..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 5..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 6..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 6..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 7..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 7..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 8..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 8..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 9..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 9..
+SBY  3:57:22 [formal_ctr_safety] engine_0: 8 : 0 2 1 2 2 2 1 2 12 ~1                                                1    20      0.02 sec  T/O =  0  PRV =  0
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 10..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 10..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 11..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 11..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 12..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 12..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Solver: yices
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 13..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 13..
+SBY  3:57:22 [formal_ctr_safety] engine_0: 9 : 0 2 1 2 3 4 6 8 4 4 ~11                                             17    20      0.03 sec  T/O =  0  PRV =  0
+SBY  3:57:22 [formal_ctr_safety] engine_0: Block =   23  Oblig =    93  Clause =    47  Call =   426 (sat=60.6%)  Cex =   0  Start =   0
+SBY  3:57:22 [formal_ctr_safety] engine_0: SAT solving =     0.00 sec ( 13.07 %)
+SBY  3:57:22 [formal_ctr_safety] engine_0: unsat     =     0.00 sec (  1.11 %)
+SBY  3:57:22 [formal_ctr_safety] engine_0: sat       =     0.00 sec ( 11.96 %)
+SBY  3:57:22 [formal_ctr_safety] engine_0: Generalize  =     0.00 sec (  8.50 %)
+SBY  3:57:22 [formal_ctr_safety] engine_0: Push clause =     0.00 sec (  3.26 %)
+SBY  3:57:22 [formal_ctr_safety] engine_0: Ternary sim =     0.00 sec (  0.99 %)
+SBY  3:57:22 [formal_ctr_safety] engine_0: Containment =     0.00 sec (  0.03 %)
+SBY  3:57:22 [formal_ctr_safety] engine_0: CNF compute =     0.00 sec (  0.85 %)
+SBY  3:57:22 [formal_ctr_safety] engine_0: Refinement  =     0.00 sec (  0.05 %)
+SBY  3:57:22 [formal_ctr_safety] engine_0: TOTAL       =     0.03 sec (100.00 %)
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 14..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 14..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 20..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 19..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 15..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 15..
+SBY  3:57:22 [formal_ctr_safety] engine_0: Output 0 of miter "model/design_aiger" was asserted in frame 21.  Time =     0.03 sec
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 18..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 17..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 16..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 16..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 16..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 15..
+SBY  3:57:22 [formal_ctr_safety] engine_0: finished (returncode=0)
+SBY  3:57:22 [formal_ctr_safety] engine_0: Status returned by engine: FAIL
+SBY  3:57:22 [formal_ctr_safety] summary: Elapsed clock time [H:MM:SS (secs)]: 0:00:00 (0)
+SBY  3:57:22 [formal_ctr_safety] summary: Elapsed process time [H:MM:SS (secs)]: 0:00:00 (0)
+SBY  3:57:22 [formal_ctr_safety] summary: engine_0 (abc pdr) returned FAIL
+SBY  3:57:22 [formal_ctr_safety] summary: engine_0 did not produce any traces
+SBY  3:57:22 [formal_ctr_safety] DONE (FAIL, rc=2)
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 17..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 17..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 14..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 13..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 12..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 11..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 10..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 18..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 18..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 9..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 8..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 7..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 6..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assumptions in step 19..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Checking assertions in step 19..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 5..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 4..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 3..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: ##   0:00:00  Status: passed
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 2..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 1..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Trying induction in step 0..
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Temporal induction failed!
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Assert failed in formal_ctr: formal_ctr.sv:7.26-7.43 (_witness_.check_assert_formal_ctr_sv_7_6)
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Writing trace to VCD file: engine_0/trace_induct.vcd
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Writing trace to Verilog testbench: engine_0/trace_induct_tb.v
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Writing trace to constraints file: engine_0/trace_induct.smtc
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Writing trace to Yosys witness file: engine_0/trace_induct.yw
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: finished (returncode=0)
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.basecase: Status returned by engine for basecase: pass
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: ##   0:00:00  Status: failed
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: finished (returncode=1)
+SBY  3:57:22 [formal_ctr_safety_kind] engine_0.induction: Status returned by engine for induction: FAIL
+SBY  3:57:22 [formal_ctr_safety_kind] summary: Elapsed clock time [H:MM:SS (secs)]: 0:00:00 (0)
+SBY  3:57:22 [formal_ctr_safety_kind] summary: Elapsed process time [H:MM:SS (secs)]: 0:00:00 (0)
+SBY  3:57:22 [formal_ctr_safety_kind] summary: engine_0 (smtbmc yices) returned pass for basecase
+SBY  3:57:22 [formal_ctr_safety_kind] summary: engine_0 (smtbmc yices) returned FAIL for induction
+SBY  3:57:22 [formal_ctr_safety_kind] summary: counterexample trace [induction]: formal_ctr_safety_kind/engine_0/trace_induct.vcd
+SBY  3:57:22 [formal_ctr_safety_kind] summary:   failed assertion formal_ctr._witness_.check_assert_formal_ctr_sv_7_6 at formal_ctr.sv:7.26-7.43
+SBY  3:57:22 [formal_ctr_safety_kind] DONE (UNKNOWN, rc=4)
+SBY  3:57:22 The following tasks failed: ['safety', 'safety_kind']

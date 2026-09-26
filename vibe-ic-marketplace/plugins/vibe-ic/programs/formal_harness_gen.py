@@ -671,19 +671,19 @@ def declaration_obligations(project: Optional[Path]) -> dict:
                     row = _obligation(
                         "L8", key, f"declared temporal behavior {key}={text}", path)
                     binding = _binding_of(row["id"], text)
-                    rule = None if binding else l8_program_rule(data, key, text)
-                    if binding:
-                        row["kind"] = "binding"       # R-0924-2: a name
-                        row["binding"] = binding
-                    elif rule is not None:
+                    rule = l8_program_rule(data, key, text)
+                    if rule is not None:
                         # R-0915-144: a declaration a PROGRAM rule covers
                         # carries that rule, so the program answers it and the
-                        # expert is asked only for what no rule covers. A NAME
-                        # obligation stays with R-0924-2's binding discharge
-                        # (the landed contract), so one declaration never has
-                        # two dischargers.
+                        # expert is asked only for what no rule covers.
                         row["program_rule"] = rule
                         row["kind"] = rule["kind"]
+                    if binding:
+                        # R-0924-2: a NAME obligation stays kind `binding`
+                        # (the landed contract); its structural rule above
+                        # still routes it to the program.
+                        row["kind"] = "binding"
+                        row["binding"] = binding
                     obligations.append(row)
 
     # Stable IDs are part of the handoff contract. Multiple L8 files can carry

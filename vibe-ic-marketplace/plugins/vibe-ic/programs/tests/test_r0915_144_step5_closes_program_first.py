@@ -195,16 +195,21 @@ def test_a_dut_hierarchical_reference_is_detected():
 def test_green_reference_design_closes_step5_program_only(tmp_path):
     project = _project(tmp_path)
     _, res, rep = _step5(project)
-    assert res["verdict"] == "PASS" and res["all_proved"] is True, res
-    assert res["unresolved_obligations"] == []
+    # R-0924-2 (landed on main before this port): the reset NAME is
+    # discharged by BINDING at the gate, not by the structural check, so
+    # it is the one row the proof record leaves open and the gate closes.
+    assert res["all_proved"] is True, res
+    assert [o["id"] for o in res["unresolved_obligations"]] == [IDS["name"]]
     assert res["expert_fallback_invocation_status"] == "INVOKED_BY_PROGRAM"
     receipt = project / res["expert_fallback_receipt"]
     assert receipt.name == fpr.PROGRAM_RECEIPT and receipt.is_file()
     disp = {d["id"]: d["status"] for d in
             json.loads(receipt.read_text())["dispositions"]}
-    assert disp == {IDS[k]: fpr.DISCHARGED_BY_PROGRAM
-                    for k in ("edge", "name", "sync", "polarity", "prose")}
+    assert disp == {**{IDS[k]: fpr.DISCHARGED_BY_PROGRAM
+                       for k in ("edge", "sync", "polarity", "prose")},
+                    IDS["name"]: "NOT_DISCHARGED"}
     assert rep["verdict"] == "PASS", rep["findings"]
+    assert rep["discharged_by_binding"] == [IDS["name"]]
     assert not any("EXPERT_FALLBACK_OUTSTANDING" in f for f in rep["findings"])
 
 

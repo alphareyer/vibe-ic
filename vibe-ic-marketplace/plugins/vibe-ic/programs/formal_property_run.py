@@ -98,7 +98,20 @@ _DONE_RE = re.compile(r"DONE \((?P<status>PASS|FAIL|ERROR|UNKNOWN|TIMEOUT)",
                       re.IGNORECASE)
 _SUMMARY_RET_RE = re.compile(
     r"summary:\s*(?:engine_\d+\s*\([^)]*\)\s*returned|Status:)\s*"
-    r"(?P<status>PASS|FAIL|ERROR|UNKNOWN|TIMEOUT)", re.IGNORECASE)
+    r"(?P<status>PASS|FAIL|ERROR|UNKNOWN|TIMEOUT)\b"
+    # A k-induction engine (`smtbmc` in `mode prove`) reports its two HALVES
+    # separately — `returned pass for basecase`, then `returned FAIL for
+    # induction` — and only the task's `DONE (...)` line is the verdict. A
+    # basecase pass is a BOUNDED result; read as the task status it would turn
+    # a transcript cut before `DONE` into an unbounded proof. MEASURED in the
+    # released image (SBY v0.67-31-g2c2f04e): an 8-bit counter wrapping at 50
+    # with `assert(q != 200)` gives `pass for basecase`, `FAIL for induction`,
+    # `DONE (UNKNOWN, rc=4)`.
+    r"(?!\s+for\s+(?:basecase|induction))", re.IGNORECASE)
+#: `summary: Elapsed clock time [H:MM:SS (secs)]: 0:00:03 (3)` — per task.
+_ELAPSED_RE = re.compile(
+    r"summary:\s*Elapsed clock time \[H:MM:SS \(secs\)\]:\s*\S+\s*\((?P<secs>\d+)\)",
+    re.IGNORECASE)
 _ENGINE_RE = re.compile(r"engine_\d+:\s*(?P<engine>abc\s+\w+|smtbmc.*|btor.*|"
                         r"aiger.*)$", re.IGNORECASE)
 _CEX_FRAME_RE = re.compile(r"asserted in frame (?P<frame>\d+)", re.IGNORECASE)
@@ -334,6 +347,7 @@ class TaskResult:
     mode: str = ""                   # prove / bmc / cover
     depth: Optional[int] = None
     cex_frame: Optional[int] = None
+    elapsed_s: Optional[int] = None  # sby's own per-task wall clock
 
     @property
     def bound_kind(self) -> str:
@@ -546,6 +560,9 @@ def parse_sby_log(text: str, sby_stem: str = "",
         mf = _CEX_FRAME_RE.search(rest)
         if mf and tr.cex_frame is None:
             tr.cex_frame = int(mf.group("frame"))
+        mt = _ELAPSED_RE.search(rest)
+        if mt:
+            tr.elapsed_s = int(mt.group("secs"))
         md = _DONE_RE.search(rest)
         if md:
             tr.status = md.group("status").upper()
@@ -563,11 +580,102 @@ def parse_sby_log(text: str, sby_stem: str = "",
     return lp
 
 
+#: The second PROVE engine. `mode prove` with `[engines] smtbmc yices` is a
+#: k-induction proof in SymbiYosys; it is NOT bmc-only. MEASURED in the released
+#: image (SBY v0.67-31-g2c2f04e, yices-smt2 2.7.0; bitwuzla/z3/boolector
+#: absent, so yices is the only smtbmc solver there): a 4-bit mod-10 counter
+#: gives `successful proof by k-induction` / `DONE (PASS, rc=0)`.
+KIND_PROVE_ENGINE = "smtbmc yices"
+#: A task named `<prove task><KIND_ARM_SUFFIX>` is the SAME claim as its base
+#: task, proved by the second engine. It is folded into the base row.
+KIND_ARM_SUFFIX = "_kind"
+
+
+def fold_prove_arms(lp: LogParse) -> Tuple[LogParse, List[dict]]:
+    """Fold every `<task>_kind` prove arm into its base prove task.
+
+    Two engines asked the SAME question (`mode prove`, same script), so the
+    claim has ONE row whose status is the better honest answer:
+
+      * any arm FAIL (a counterexample; k-induction's basecase FAIL and pdr's
+        FAIL are both real traces) -> FAIL. If the other arm PASSed the two
+        engines disagree; that is recorded and the row is NEVER PASS.
+      * else any arm PASS (`DONE (PASS)`, an unbounded proof) -> PASS, and the
+        faster arm (sby's own elapsed clock; ties keep the first engine) is
+        the `selected` one.
+      * else the base task's own status (UNKNOWN / ERROR / TIMEOUT) — an
+        induction step that failed is UNKNOWN, never a proof and never a cex.
+
+    Each arm keeps its own status from its own `DONE` line, so the
+    anti-fabrication rule holds per engine: an arm with no `DONE` stays
+    UNKNOWN and cannot contribute a PASS. Returns the folded parse and one
+    record per folded claim."""
+    folded = LogParse()
+    records: List[dict] = []
+    arms_of: Dict[str, TaskResult] = {}
+    for name, tr in lp.tasks.items():
+        base = name[:-len(KIND_ARM_SUFFIX)] if name.endswith(KIND_ARM_SUFFIX) else None
+        if base and base in lp.tasks and (tr.mode or "").lower() == "prove" \
+                and (lp.tasks[base].mode or "").lower() == "prove":
+            arms_of[base] = tr
+            continue
+        folded.tasks[name] = tr
+    uncalibrated = None
+    if arms_of:
+        import instrument_calibration as _instrument_calibration
+        try:
+            _instrument_calibration.assert_calibrated(
+                "formal_property_run::fold_prove_arms")
+        except _instrument_calibration.Uncalibrated as exc:
+            uncalibrated = str(exc)
+    for base, kind in arms_of.items():
+        primary = lp.tasks[base]
+        if uncalibrated:
+            # The second arm may not judge (NOT_MEASURED / uncalibrated); the
+            # claim is the first engine's alone, and the record says why.
+            folded.tasks[base] = primary
+            records.append({
+                "task": base, "status": primary.status,
+                "selected_engine": primary.engine, "engines_disagree": False,
+                "arms": [{"task": kind.name, "engine": kind.engine,
+                          "status": "NOT_MEASURED",
+                          "reason_class": "uncalibrated",
+                          "detail": uncalibrated}]})
+            continue
+        arms = [primary, kind]
+        statuses = [a.status for a in arms]
+        disagreement = "FAIL" in statuses and "PASS" in statuses
+        if "FAIL" in statuses:
+            chosen = next(a for a in arms if a.status == "FAIL")
+        elif "PASS" in statuses:
+            passing = [a for a in arms if a.status == "PASS"]
+            chosen = min(passing, key=lambda a: (a.elapsed_s is None,
+                                                 a.elapsed_s or 0))
+        else:
+            chosen = primary
+        folded.tasks[base] = TaskResult(
+            name=base, status=chosen.status, engine=chosen.engine,
+            mode=primary.mode, depth=primary.depth,
+            cex_frame=chosen.cex_frame, elapsed_s=chosen.elapsed_s)
+        records.append({
+            "task": base,
+            "status": chosen.status,
+            "selected_engine": chosen.engine,
+            "engines_disagree": disagreement,
+            "arms": [{"task": a.name, "engine": a.engine, "status": a.status,
+                      "bound": a.bound_kind, "elapsed_s": a.elapsed_s}
+                     for a in arms],
+        })
+    return folded, records
+
+
 def build_results(top: str, cfg: Dict[str, TaskResult], lp: LogParse,
                   evidence_relpath: str, sby_relpath: str) -> dict:
     """Merge config (mode/depth) with the log (status/engine/cex) into the
     canonical results.json dict the Step-5 gate consumes. all_proved is true
-    ONLY when at least one task ran and every task returned PASS."""
+    ONLY when at least one task ran and every task returned PASS. A second
+    prove engine's arm is folded into its claim first (`fold_prove_arms`)."""
+    lp, prove_arms = fold_prove_arms(lp)
     props = []
     for name, tr in sorted(lp.tasks.items()):
         c = cfg.get(name)
@@ -621,7 +729,15 @@ def build_results(top: str, cfg: Dict[str, TaskResult], lp: LogParse,
             "bound; a full unbounded proof of a wide datapath may be "
             "solver-hard — this is a disclosed bounded result, not a full "
             "proof)")
+    if any(r["engines_disagree"] for r in prove_arms):
+        verdict = "FAIL"
+        disclosure.append(
+            "PROVE ENGINES DISAGREE: one engine proved and the other found a "
+            "counterexample for the same claim — recorded as FAIL, never PASS: "
+            + ", ".join(r["task"] for r in prove_arms if r["engines_disagree"]))
+    extra = {"prove_arms": prove_arms} if prove_arms else {}
     return {
+        **extra,
         "program": "formal_property_run",
         "version": "1.1.0",
         "top": top,
@@ -755,10 +871,16 @@ def emit_sby(rtl_files: List[str], harness_file: str, top: str,
              include_files: Optional[List[str]] = None,
              frontend: str = "read_verilog",
              observers: Optional[List[Tuple[str, str]]] = None,
-             dut_simdef: Optional[str] = None) -> str:
+             dut_simdef: Optional[str] = None,
+             kind_engine: Optional[str] = None) -> str:
     """Emit a two-task .sby: a `safety` task (unbounded prove) and a `bmc`
     task (bounded model check). Files are listed under [files] so the Step-5
     evidence gate can resolve every referenced source.
+
+    `kind_engine` (e.g. `KIND_PROVE_ENGINE`) adds a THIRD task,
+    `safety<KIND_ARM_SUFFIX>`: the same `mode prove` claim over the same read,
+    driven by a second unbounded engine. `build_results` folds it into the
+    `safety` row (`fold_prove_arms`). Without it the text is byte-identical.
 
     `-sv` is not optional. Without it yosys uses the Verilog-2005 frontend,
     which rejects SystemVerilog a synthesisable design legitimately uses.
@@ -879,6 +1001,37 @@ def emit_sby(rtl_files: List[str], harness_file: str, top: str,
             _b.append(f"select -assert-any {top}/w:{rhs}")
             _b.append(f"connect -set {lhs} {rhs}")
         bind_lines = "\n".join(_b) + "\n"
+    if kind_engine:
+        kt = "safety" + KIND_ARM_SUFFIX
+        return f"""[tasks]
+safety   prove
+{kt} prove
+bmc      bmc
+
+[options]
+safety: mode prove
+safety: depth {safety_depth}
+{kt}: mode prove
+{kt}: depth {safety_depth}
+bmc:    mode bmc
+bmc:    depth {bmc_depth}
+aigsmt none
+multiclock on
+
+[engines]
+safety: {engine_prove}
+{kt}: {kind_engine}
+bmc:    {engine_bmc}
+
+[script]
+{dut_lines}safety: {_safety_read}
+{kt}: {_safety_read}
+bmc: {_bmc_read}
+{bind_lines}prep -top {top}
+
+[files]
+{files_block}
+"""
     return f"""[tasks]
 safety   prove
 bmc      bmc
@@ -1738,6 +1891,16 @@ def _program_discharge(formal_dir: Path, container: Optional[str],
                                           "the program did not author, which "
                                           "can make its properties vacuous: "
                                           + " | ".join(assumes))})
+        if o.get("binding") and status == DISCHARGED_BY_PROGRAM:
+            # R-0924-2 (landed): a NAME obligation is discharged by BINDING at
+            # the Step-5 gate. The structural check measured it — a refutation
+            # above stands — but a structural PASS is recorded as a finding on
+            # the open row, never as this program's closure.
+            status = _fsc.NOT_DISCHARGED
+            per_claim.append({"claim": "binding", "verdict": _fsc.NOT_DISCHARGED,
+                              "finding": ("structurally confirmed; a NAME "
+                                          "obligation is discharged by BINDING "
+                                          "at the Step-5 gate (R-0924-2)")})
         dispositions.append({
             "id": o["id"], "status": status, "kind": o["program_rule"]["kind"],
             "claims": per_claim, "properties": list(o.get("properties") or []),
@@ -1799,6 +1962,11 @@ def _verified_program_closures(formal_dir: Path) -> Tuple[
             or not rtl or any(_sha256(Path(f)) != h for f, h in rtl.items())):
         return {}, {}, {}
     routed = {str(o["id"]) for o in _program_routed(contract)}
+    # R-0924-2 (landed): a NAME obligation is discharged by BINDING at the
+    # gate, never here. The structural check still measures it — a refutation
+    # stands and a finding is written onto the open row — but a structural
+    # PASS does not close it, so one declaration has one discharger.
+    by_binding = {str(o["id"]) for o in _program_routed(contract) if o.get("binding")}
     verdicts = {(r.get("rule"), r.get("signal", ""), r.get("value", "")): r.get("verdict")
                 for r in evidence.get("claims") or []}
     closed, refuted, undischarged = {}, {}, {}
@@ -1815,6 +1983,7 @@ def _verified_program_closures(formal_dir: Path) -> Tuple[
             if any(verdicts.get(k) == "REFUTED" for k in keys):
                 refuted[str(d["id"])] = d
         elif (d.get("status") == DISCHARGED_BY_PROGRAM
+              and str(d["id"]) not in by_binding
               and all(verdicts.get(k) == "PASS" for k in keys)
               and not any(c.get("claim") in ("temporal", "vacuity")
                           for c in d.get("claims") or [])):
@@ -2186,6 +2355,18 @@ def proof_inputs(sby_path: Path, formal_dir: Path) -> dict:
     return {"source": source, "files": files}
 
 
+def _prove_engine_mode(project: Path, requested: str) -> str:
+    """`direct` or `dual` for the standard prove task (see `run`)."""
+    if requested in ("direct", "dual"):
+        return requested
+    if requested != "auto":
+        raise ValueError(f"prove_engines must be auto|direct|dual, not {requested!r}")
+    import librelane_contract as _ll
+    mode = _ll.selected_mode(project, "5")
+    # step 5 has no LibreLane arm; `librelane` there names nothing to run.
+    return "dual" if mode == "dual" else "direct"
+
+
 def run(project: Path, harness: Optional[Path] = None,
         rtl: Optional[List[Path]] = None, top: Optional[str] = None,
         sby: Optional[Path] = None, container: Optional[str] = _pin.default_container_name(),
@@ -2194,8 +2375,15 @@ def run(project: Path, harness: Optional[Path] = None,
         invariant_harness: Optional[Path] = None,
         engine_backend: str = "auto",
         mem_limit_kb: Optional[int] = None,
-        emit_only: bool = False) -> dict:
+        emit_only: bool = False,
+        prove_engines: str = "auto") -> dict:
     """Author the .sby, run the proof, and record an HONEST verdict.
+
+    `prove_engines`: `direct` = `abc pdr` alone; `dual` = `abc pdr` AND
+    `smtbmc yices` k-induction on the same claim, folded to the better honest
+    verdict (`fold_prove_arms`); `auto` = the project's step-5 switch
+    (`phase3/librelane_switch.json` `{"steps":{"5":"dual"}}`, read by
+    `librelane_contract.selected_mode`), `direct` when absent.
 
     `timeout` and `mem_limit_kb` are the RESOURCE CEILING the caller grants this
     proof. `mem_limit_kb=None` derives an address-space ceiling from the host;
@@ -2242,8 +2430,11 @@ def run(project: Path, harness: Optional[Path] = None,
             return {"verdict": "ERROR", "rc": 1,
                     "reason": "invariant harness needs --rtl/--top"}
         prags = parse_harness_pragmas(inv_h.read_text())
-        # `abc pdr` is the ONLY unbounded engine SymbiYosys can drive in `mode
-        # prove`. A stronger OSS datapath engine (btormc/pono over BTOR2 via
+        # CORRECTED (T91): `abc pdr` is NOT the only unbounded engine sby
+        # drives in `mode prove` — `smtbmc yices` completes a k-induction
+        # proof there (MEASURED, see `KIND_PROVE_ENGINE`; the standard harness
+        # path runs it as a second arm under `prove_engines="dual"`). What IS
+        # true: a stronger OSS datapath engine (btormc/pono over BTOR2 via
         # `--kind`, or AMulet2 on a combinational multiplier netlist) is NOT
         # sby-prove-drivable — it needs a direct `write_btor -> btormc --kind`
         # (or AMulet) invocation. We therefore NEVER substitute it as an sby
@@ -2366,10 +2557,19 @@ def run(project: Path, harness: Optional[Path] = None,
             _crtop = None
         if _crtop:
             chip_read = _csr.chip_read_record(rtl, _dut_macros, _crtop)
+        _mode = _prove_engine_mode(project, prove_engines)
+        _kind = None
+        if _mode == "dual":
+            if emit_only or engine_availability.get("yices-smt2"):
+                _kind = KIND_PROVE_ENGINE
+            else:
+                engine_note = ("prove_engines=dual requested; yices-smt2 is "
+                               "ABSENT, so only abc pdr ran — no second arm "
+                               "was fabricated")
         sby_text = emit_sby(staged_rtl, harness.name, top,
                             safety_depth=safety_depth, bmc_depth=bmc_depth,
                             include_files=staged_hdrs, observers=_observers,
-                            dut_simdef=_dut_simdef)
+                            dut_simdef=_dut_simdef, kind_engine=_kind)
         sby_path = formal_dir / f"{top}_formal.sby"
         sby_path.write_text(sby_text)
     else:
@@ -2870,6 +3070,11 @@ def main(argv=None) -> int:
     ap.add_argument("--emit-only", action="store_true", dest="emit_only",
                     help="author the .sby and stage its sources, then STOP — "
                          "no proof is run, nothing is proved or refuted")
+    ap.add_argument("--prove-engines", default="auto", dest="prove_engines",
+                    choices=("auto", "direct", "dual"),
+                    help="direct = abc pdr; dual = abc pdr + smtbmc yices "
+                         "k-induction, better verdict kept; auto = the "
+                         "project's step-5 switch (default direct)")
     ap.add_argument("--json", default=None)
     args = ap.parse_args(argv)
     if not args.project_dir.is_dir():
@@ -2883,7 +3088,8 @@ def main(argv=None) -> int:
               invariant_harness=args.invariant_harness,
               engine_backend=args.engine_backend,
               mem_limit_kb=args.mem_limit_kb,
-              emit_only=args.emit_only)
+              emit_only=args.emit_only,
+              prove_engines=args.prove_engines)
     rc = res.pop("rc", 0)
     out = json.dumps(res, indent=2, ensure_ascii=False)
     if args.json:

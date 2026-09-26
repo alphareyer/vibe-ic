@@ -390,7 +390,12 @@ def test_l9_authored_never_exceeds_the_denominator_and_spm_still_passes(tmp_path
                              "assertion 後一個 cycle 內所有內部狀態歸零"}])))
     assert rep["verdict"] == "PASS", rep["findings"]
     assert res["expert_fallback_invocation_status"] == "INVOKED_BY_PROGRAM"
+    # R-0924-2 (landed on main before this port): the reset NAME is
+    # discharged by BINDING at the gate, not by the structural check, so
+    # it is the one row the proof record leaves open and the gate closes.
     assert res["property_denominator"] == 6
-    assert res["authored_property_count"] == 6
+    assert res["authored_property_count"] == 5
+    assert list(_open(res)) == [L8P + "resets.0.name"]
+    assert rep["discharged_by_binding"] == [L8P + "resets.0.name"]
     # 1 reset-safety floor + 4 state-zero properties; polarity is structural
     assert res["assert_statement_count"] == 5
