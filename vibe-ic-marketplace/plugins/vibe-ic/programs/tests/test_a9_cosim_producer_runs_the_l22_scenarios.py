@@ -35,7 +35,7 @@ import l22_analog_verification_plan_emit as L22  # noqa: E402
 import mixed_signal_cosim_check as GATE  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "a9_cosim_scenarios"
-OBSERVER_LOG = FIXTURE / "a9_observer_ngspice_dcosim.log"
+OBSERVER_LOG = FIXTURE / "a9_observer_ngspice_dcosim.txt"
 
 # Minimal A3-shaped artefacts: the netlist's .subckt line and a testbench in
 # the shape `analog_a3_netlist_emit` writes. No device content is needed —
