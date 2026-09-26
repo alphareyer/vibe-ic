@@ -1621,6 +1621,64 @@ _register(Instrument(
 ))
 
 
+# Step 3 (T91 mig-rtlver) judges CDC/RDC from a Yosys JSON netlist written with
+# LibreLane Yosys.JsonHeader's passes. Each rule gets its own pair: the netlist
+# grammar (`$dff`/`$adff` pins, `$mux` arms, port directions) is read three
+# different ways, and a calibrated crossing rule says nothing about the reset
+# rule. Samples: yosys 0.69+ 4d572059c in the released vibeic-eda 0.3.77
+# image, `read_verilog -sv; hierarchy -check -top T -nokeep_prints
+# -nokeep_asserts; rename -top T; proc; flatten; opt_clean -purge; json`, on
+# the calibration structures `calibration/cdc_netlist_*.v`, produced on
+# 192.168.1.121 on 2026-09-26.
+def _cdc_netlist_rule(rule: str) -> Callable[[str], Optional[str]]:
+    def _judge(path: str) -> Optional[str]:
+        import _cdc_netlist
+        import cdc_async_input_check
+        nl = _cdc_netlist.load(FIXTURES / path)
+        fn = {"reg_crossing": _cdc_netlist.reg_crossing_findings,
+              "reset_dependency": _cdc_netlist.reset_dependency_findings}.get(rule)
+        rows = fn(nl) if fn else _cdc_netlist.async_input_findings(
+            nl, cdc_async_input_check.is_probable_async_port)
+        blocking = sorted({r["rule"] for r in rows if r["severity"] == "ERROR"})
+        return ",".join(blocking) or None
+    return _judge
+
+
+_CDC_NETLIST_PROV = ("Real Yosys JSON (released vibeic-eda 0.3.77, yosys 0.69+ "
+                     "4d572059c, Yosys.JsonHeader passes) of calibration/"
+                     "cdc_netlist_{src}; generated on 192.168.1.121. "
+                     "calibration/{out}.")
+
+for _rule, _fn, _pos_src, _neg_src, _expect, _why in (
+        ("reg_crossing", "reg_crossing_findings", "cdc_unsync.v", "cdc_sync.v",
+         "CDC_REG_NO_SYNC",
+         "a clk_a flop sampled once by clk_b must fire; the same flop "
+         "re-registered twice in clk_b must stay silent"),
+        ("async_input", "async_input_findings", "async_raw_unsync.v",
+         "async_raw_sync.v", "ASYNC_INPUT_NO_SYNC",
+         "an async-named PORT used as an enable must fire; the same port "
+         "behind a two-flop chain must stay silent"),
+        ("reset_dependency", "reset_dependency_findings", "reset_circular.v",
+         "reset_sync_ok.v", "CIRCULAR_RESET_DEPENDENCY",
+         "a reset OR-ed with a flop it resets must fire; a two-flop reset "
+         "synchroniser releasing a second reset domain must stay silent")):
+    _pos = f"cdc_netlist_{_rule.split('_')[0]}_positive.json"
+    _neg = f"cdc_netlist_{_rule.split('_')[0]}_negative.json"
+    _register(Instrument(
+        name=f"_cdc_netlist::{_fn}",
+        reads="Yosys JSON netlist (LibreLane Yosys.JsonHeader passes)",
+        ruling="T91", owner="mig-rtlver",
+        why=("Step 3 moves its CDC/RDC rules from RTL regex onto the netlist; "
+             + _why + "."),
+        judge=_cdc_netlist_rule(_rule),
+        positive=Sample(provenance=_CDC_NETLIST_PROV.format(src=_pos_src, out=_pos),
+                        artefact=lambda _p=_pos: _p),
+        expect=_expect,
+        negative=Sample(provenance=_CDC_NETLIST_PROV.format(src=_neg_src, out=_neg),
+                        artefact=lambda _n=_neg: _n),
+    ))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════

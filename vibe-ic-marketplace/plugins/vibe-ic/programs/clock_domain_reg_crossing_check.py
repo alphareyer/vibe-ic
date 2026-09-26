@@ -598,7 +598,9 @@ def collect_files(project_dir: Optional[str], rtl_dir: Optional[str],
 
 
 def audit(project_dir: Optional[str] = None, rtl_dir: Optional[str] = None,
-          paths: Optional[List[str]] = None, strict: bool = False) -> AuditResult:
+          paths: Optional[List[str]] = None, strict: bool = False,
+          netlist: Optional[str] = None,
+          front_end: Optional[str] = None) -> AuditResult:
     result = AuditResult(program='clock_domain_reg_crossing_check', passed=True)
     files = collect_files(project_dir, rtl_dir, paths or [])
     examined = 0
@@ -618,6 +620,26 @@ def audit(project_dir: Optional[str] = None, rtl_dir: Optional[str] = None,
         result.findings.extend(fnd)
         examined += ex
 
+    # Step-3 front end (T91): the switch or `--netlist` moves the judgement
+    # onto the Yosys JSON netlist, where a flop's clock is its CLK pin.
+    import _cdc_netlist
+    if project_dir is not None or netlist or (front_end not in (None, 'auto')):
+        mode = _cdc_netlist.resolve_mode(Path(project_dir or '.').resolve(),
+                                         front_end, netlist)
+    else:
+        mode = 'direct'
+    extra: Dict[str, object] = {}
+    if mode != 'direct':
+        rows, extra = _cdc_netlist.apply_front_end(
+            Path(project_dir or '.').resolve(), mode, netlist, 'reg_crossing',
+            [asdict(f) for f in result.findings], len(files))
+        result.findings = [Finding(**r) for r in rows]
+        if extra.get('netlist_read'):
+            domains = extra.get('netlist_clock_domains') or []
+            examined = (examined if mode == 'dual' else 0) + (1 if len(domains) >= 2 else 0)
+        if mode == 'librelane':
+            files = [Path(str(extra.get('netlist')))] if extra.get('netlist_read') else []
+
     errors = [f for f in result.findings if f.severity == 'ERROR']
     warns = [f for f in result.findings if f.severity == 'WARN']
     result.passed = not errors and not (strict and warns)
@@ -630,8 +652,9 @@ def audit(project_dir: Optional[str] = None, rtl_dir: Optional[str] = None,
         # No RTL at all is NOT a pass. The structural-gate dispatcher reads
         # exit 2 as input-missing/skip; reporting PASS on an empty scan would
         # let a project with no RTL collect a green CDC verdict it never earned.
-        'no_input': len(files) == 0,
+        'no_input': len(files) == 0 and not errors,
     }
+    result.summary.update(extra)
     return result
 
 
@@ -644,6 +667,10 @@ def main() -> None:
                    help='treat WARN findings as failures')
     p.add_argument('--json', nargs='?', const='-', default=None,
                    help='Emit JSON. With no value → stdout. With a path → write file.')
+    p.add_argument('--netlist', default=None,
+                   help='Yosys JSON netlist (Yosys.JsonHeader passes); opts in to the netlist front end')
+    p.add_argument('--front-end', choices=('auto', 'regex', 'netlist', 'dual'),
+                   default='auto', help='auto = phase3/librelane_switch.json step 3')
     args = p.parse_args()
 
     project_dir = args.project_dir
@@ -655,7 +682,8 @@ def main() -> None:
         project_dir = '.'
 
     result = audit(project_dir=project_dir, rtl_dir=args.rtl_dir,
-                   paths=paths, strict=args.strict)
+                   paths=paths, strict=args.strict, netlist=args.netlist,
+                   front_end=args.front_end)
 
     if args.json is not None:
         payload = json.dumps(asdict(result), indent=2)

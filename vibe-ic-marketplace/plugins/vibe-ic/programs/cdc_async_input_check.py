@@ -30,6 +30,7 @@ from typing import List, Set, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rtl_scan_scope as _scan_scope  # noqa: E402
 import _vacuous_exit as _vx  # noqa: E402
+import _cdc_netlist  # noqa: E402
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
 
 
@@ -274,6 +275,41 @@ def is_used_in_always_posedge(src: str, signal: str) -> Tuple[bool, int]:
     return False, 0
 
 
+def is_probable_async_port(name: str) -> bool:
+    """Is a PORT of this name an asynchronous input (the name classifier)?
+
+    Shared by the regex front end and the netlist front end
+    (`_cdc_netlist.async_input_findings`), so the two differ only in how
+    they find ports and synchronisers, never in which names count.
+    """
+    # Skip reset/clock pins (typical synchronizer exception)
+    if re.match(r'^(clk|clock|rst|rstn|reset|resetn)(_.*)?$', name, re.I):
+        return False
+    # Skip OpenTitan-style internal hierarchy ports: `<name>_i` is a
+    # convention for same-clock inputs (the parent drives from the same
+    # clock). Only flag names that match KNOWN async patterns: physical
+    # pad / GPIO / external pin / explicit async suffix. This removes the
+    # false-positive flood on same-clock module hierarchies.
+    # Updated 2026-04-22 per LL feedback_plugin_usage_discipline.md —
+    # prior version flagged ALL inputs, producing 20+ bogus findings per
+    # OpenTitan-style design.
+    # Skip common OpenTitan software-driven signal prefixes — these are
+    # APB/TL-UL register-file outputs, NOT async inputs. Lowercase `sw_*`
+    # in OpenTitan means "software-controlled", not "switch".
+    if re.match(r'^(sw_|hw_|reg_|wdog_|wkup_|intr_)', name):
+        return False
+
+    is_probable_async = (
+        # Explicit async markers in the name (lowercase suffix)
+        re.search(r'_(pad|async|raw|ext)$', name) is not None
+        # Physical FPGA pin names — require uppercase start to avoid
+        # matching lowercase `sw_*` software signals
+        or re.match(r'^(KEY|BUTTON|SW|GPIO|MISO|MOSI|SDA|SCL|SCK|CS_N|BUS_RX|UART_RX)(_.*)?$',
+                    name) is not None
+    )
+    return is_probable_async
+
+
 def audit_file(path: Path, project_root: Path) -> List[Finding]:
     findings: List[Finding] = []
     try:
@@ -315,32 +351,7 @@ def audit_file(path: Path, project_root: Path) -> List[Finding]:
         seen.add(name)
         if name not in port_names:
             continue
-        # Skip reset/clock pins (typical synchronizer exception)
-        if re.match(r'^(clk|clock|rst|rstn|reset|resetn)(_.*)?$', name, re.I):
-            continue
-        # Skip OpenTitan-style internal hierarchy ports: `<name>_i` is a
-        # convention for same-clock inputs (the parent drives from the same
-        # clock). Only flag names that match KNOWN async patterns: physical
-        # pad / GPIO / external pin / explicit async suffix. This removes the
-        # false-positive flood on same-clock module hierarchies.
-        # Updated 2026-04-22 per LL feedback_plugin_usage_discipline.md —
-        # prior version flagged ALL inputs, producing 20+ bogus findings per
-        # OpenTitan-style design.
-        # Skip common OpenTitan software-driven signal prefixes — these are
-        # APB/TL-UL register-file outputs, NOT async inputs. Lowercase `sw_*`
-        # in OpenTitan means "software-controlled", not "switch".
-        if re.match(r'^(sw_|hw_|reg_|wdog_|wkup_|intr_)', name):
-            continue
-
-        is_probable_async = (
-            # Explicit async markers in the name (lowercase suffix)
-            re.search(r'_(pad|async|raw|ext)$', name) is not None
-            # Physical FPGA pin names — require uppercase start to avoid
-            # matching lowercase `sw_*` software signals
-            or re.match(r'^(KEY|BUTTON|SW|GPIO|MISO|MOSI|SDA|SCL|SCK|CS_N|BUS_RX|UART_RX)(_.*)?$',
-                        name) is not None
-        )
-        if not is_probable_async:
+        if not is_probable_async_port(name):
             continue
         candidates.append((name, lineno))
 
@@ -363,7 +374,8 @@ def audit_file(path: Path, project_root: Path) -> List[Finding]:
     return findings
 
 
-def audit(project_dir: str) -> AuditResult:
+def audit(project_dir: str, netlist: "str | None" = None,
+          front_end: "str | None" = None) -> AuditResult:
     root = Path(project_dir).resolve()
     result = AuditResult(program='cdc_async_input_check', passed=True)
     if not root.exists():
@@ -379,11 +391,23 @@ def audit(project_dir: str) -> AuditResult:
     for f in files:
         result.findings.extend(audit_file(f, root))
 
+    # Step-3 front end (T91): the switch or `--netlist` moves the judgement
+    # onto the Yosys JSON netlist, where port-ness is a structural fact.
+    mode = _cdc_netlist.resolve_mode(root, front_end, netlist)
+    rows, extra = _cdc_netlist.apply_front_end(
+        root, mode, netlist, "async_input", [asdict(f) for f in result.findings],
+        len(files), is_probable_async_port)
+    result.findings = [Finding(**{k: r[k] for k in ('rule', 'severity', 'message', 'file', 'line')})
+                       for r in rows]
+    examined = len(files) if mode == "direct" else (
+        (len(files) if mode == "dual" else 0) + (1 if extra.get("netlist_read") else 0))
     result.passed = len(result.findings) == 0
     result.summary = {
-        'files_scanned': len(files),
+        'files_scanned': examined,
         'violations': len(result.findings),
     }
+    if mode != "direct":
+        result.summary.update(extra)
     result.verdict = _verdict_for(result)
     return result
 
@@ -396,8 +420,12 @@ def main():
     # feedback_plugin_usage_discipline.md (14 gate-signature bugs).
     p.add_argument("--json", nargs="?", const="-", default=None,
                    help="Emit JSON. With no value → stdout. With a path → write file.")
+    p.add_argument("--netlist", default=None,
+                   help="Yosys JSON netlist (Yosys.JsonHeader passes); opts in to the netlist front end")
+    p.add_argument("--front-end", choices=("auto", "regex", "netlist", "dual"),
+                   default="auto", help="auto = phase3/librelane_switch.json step 3")
     args = p.parse_args()
-    result = audit(args.project_dir)
+    result = audit(args.project_dir, netlist=args.netlist, front_end=args.front_end)
     # ORGANIC #887 — say it BEFORE the report is emitted, on the stream whose
     # width is fixed. See `_emit_vacuous_disclosure`.
     if result.verdict == _VACUOUS_VERDICT:

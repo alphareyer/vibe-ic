@@ -1,0 +1,106 @@
+{
+  "creator": "Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]",
+  "modules": {
+    "reset_circular": {
+      "attributes": {
+        "top": "00000000000000000000000000000001",
+        "src": "cdc_netlist_reset_circular.v:6.1-12.10"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "ext_rst": {
+          "direction": "input",
+          "bits": [ 3 ]
+        },
+        "ok": {
+          "direction": "output",
+          "bits": [ 4 ]
+        }
+      },
+      "cells": {
+        "$flatten\\u_gen.$procdff$5": {
+          "hide_name": 1,
+          "type": "$adff",
+          "parameters": {
+            "ARST_POLARITY": "1",
+            "ARST_VALUE": "0",
+            "CLK_POLARITY": "1",
+            "WIDTH": "00000000000000000000000000000001"
+          },
+          "attributes": {
+            "src": "cdc_netlist_reset_circular.v:2.3-4.6"
+          },
+          "port_directions": {
+            "ARST": "input",
+            "CLK": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "ARST": [ 5 ],
+            "CLK": [ 2 ],
+            "D": [ "1" ],
+            "Q": [ 4 ]
+          }
+        },
+        "$or$cdc_netlist_reset_circular.v:9$2": {
+          "hide_name": 1,
+          "type": "$or",
+          "parameters": {
+            "A_SIGNED": "00000000000000000000000000000000",
+            "A_WIDTH": "00000000000000000000000000000001",
+            "B_SIGNED": "00000000000000000000000000000000",
+            "B_WIDTH": "00000000000000000000000000000001",
+            "Y_WIDTH": "00000000000000000000000000000001"
+          },
+          "attributes": {
+            "src": "cdc_netlist_reset_circular.v:9.16-9.32"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 3 ],
+            "B": [ 4 ],
+            "Y": [ 5 ]
+          }
+        }
+      },
+      "netnames": {
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {
+            "src": "cdc_netlist_reset_circular.v:6.35-6.38"
+          }
+        },
+        "ext_rst": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {
+            "src": "cdc_netlist_reset_circular.v:6.51-6.58"
+          }
+        },
+        "ok": {
+          "hide_name": 0,
+          "bits": [ 4 ],
+          "attributes": {
+            "src": "cdc_netlist_reset_circular.v:6.72-6.74"
+          }
+        },
+        "rst": {
+          "hide_name": 0,
+          "bits": [ 5 ],
+          "attributes": {
+            "src": "cdc_netlist_reset_circular.v:7.8-7.11"
+          }
+        }
+      }
+    }
+  }
+}

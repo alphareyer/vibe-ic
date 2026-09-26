@@ -21580,6 +21580,61 @@ def step_emit_phase2_manifests(project: Path,
         w("reports/phase2/cdc/crossing.json", _cdc_payload)
         w("reports/phase2/cdc/async_input.json", _cdc_payload)
         w("reports/phase2/cdc/reset_dep.json", _cdc_payload)
+    # T91 (mig-rtlver) — step-3 front end. `direct` (the default) is the
+    # regex scan above, unchanged. `librelane` / `dual` also write the Yosys
+    # JSON netlist the step-3 gates read (the passes LibreLane's
+    # Yosys.JsonHeader runs), and the domain count comes from the flops' CLK
+    # pins. A multi-clock design stays SKIPPED-CONDITION on the crossing
+    # report: the netlist gives the domains, not a CDC engine (#436, #673).
+    import librelane_contract as _ll
+    _cdc_mode = _ll.selected_mode(project, "3")
+    if _cdc_mode != "direct" and _rtl_files:
+        import _cdc_netlist
+        _skip = ("assertions", "de10lite_top", "host_emulator", "_tb",
+                 "testbench", "stimulus")
+        _cdc_src = [f for f in _rtl_files
+                    if not any(t in f.name.lower() for t in _skip)]
+        _m_top = re.search(r"top module '([^']+)'", _cdc_scope)
+        _switch = json.loads((project / "phase3/librelane_switch.json").read_text())
+        _nl_rec: Dict[str, Any] = {"mode": _cdc_mode, "netlist": _cdc_netlist.NETLIST_REL,
+                                   "rtl_files": [f.name for f in _cdc_src]}
+        try:
+            _nl_path = _cdc_netlist.build(project, _cdc_src,
+                                          _m_top.group(1) if _m_top else None,
+                                          image=_switch.get("image"))
+            _nl = _cdc_netlist.load(_nl_path)
+            _nl_domains = _cdc_netlist.clock_domains(_nl)
+            _nl_rec.update({"verdict": "PASS", "top": _nl.top,
+                            "flops": len(_nl.flops),
+                            "clock_domains": _nl_domains,
+                            "regex_clock_domains": sorted(_domain_clocks),
+                            "multi_clock_agrees": (len(_nl_domains) >= 2)
+                            == (len(_domain_clocks) >= 2)})
+        except _cdc_netlist.Refusal as _exc:
+            _nl_rec.update({"verdict": "FAIL", "reason": str(_exc)})
+            _nl_domains = None
+        w("reports/phase2/cdc/netlist_front_end.json", _nl_rec)
+        if _cdc_mode == "librelane" and _nl_domains is not None:
+            _ev = (f"Yosys JSON netlist ({_cdc_netlist.NETLIST_REL}, top "
+                   f"'{_nl_rec['top']}', {_nl_rec['flops']} flop cells): clock "
+                   f"domain(s) by CLK pin {_nl_domains or ['(none)']}")
+            if len(_nl_domains) <= 1:
+                _nl_payload = {"verdict": "PASS", "evidence": _ev
+                               + " — no clock-domain crossings exist",
+                               "crossings": [], "clocks_found": _nl_domains,
+                               "front_end": "netlist"}
+            else:
+                _nl_payload = {"verdict": "SKIPPED-CONDITION",
+                               "reason": _ev + ": multi-clock design; the "
+                               "crossing rules run in clock_domain_reg_crossing_check "
+                               "on this netlist, and no CDC engine is installed (#436)",
+                               "clocks_found": _nl_domains, "front_end": "netlist"}
+            w("reports/phase2/cdc/crossing.json", _nl_payload)
+        elif _cdc_mode == "librelane":
+            w("reports/phase2/cdc/crossing.json", {
+                "verdict": "FAIL", "front_end": "netlist",
+                "reason": "step 3 selects the netlist front end and the netlist "
+                          "was not produced: " + str(_nl_rec.get("reason"))})
 
     # Step 4: simulation.
     # ORGANIC-20260606-verdict-only-pass-artifacts-no-evidence (#433a):
