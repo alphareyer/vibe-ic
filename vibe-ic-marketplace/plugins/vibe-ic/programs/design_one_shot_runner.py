@@ -12234,19 +12234,43 @@ def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
         resolved = _ll.resolve_step_config(
             project, image, config_dir / "lint_config.json",
             config_dir / "lint_resolved.json", mounts=mounts, pdk_root=pdk_root)
+        header = json.loads((config_dir / "lint_config.json").read_text())
+        header["meta"] = {"step": "Yosys.JsonHeader"}
+        _ll.write_json(config_dir / "header_config.json", header)
+        header_resolved = _ll.resolve_step_config(
+            project, image, config_dir / "header_config.json",
+            config_dir / "header_resolved.json", mounts=mounts, pdk_root=pdk_root)
         state_in = config_dir / "lint_state_in.json"
         _ll.write_json(state_in, {})
-        folder = _ll.run_chain(project, image, [("Verilator.Lint", resolved, state_in)],
-                               mounts=mounts, pdk_root=pdk_root, lane="step2")[-1]
+        folder, header_dir = _ll.run_chain(
+            project, image, [("Verilator.Lint", resolved, state_in),
+                             ("Yosys.JsonHeader", header_resolved, state_in)],
+            mounts=mounts, pdk_root=pdk_root, lane="step2")
     except (_ll.Refusal, OSError, ValueError) as exc:
         return StepResult("rtl_lint_tool", "FAIL", time.time() - t0, str(exc))
+    # The step-2 port conformance, against the tool's elaborated interface.
+    # Advisory like its flow clause: recorded, never the lint verdict.
+    conformance = project / "reports/phase2/gates/spec_conformance_tool_ports.json"
+    json_h = json.loads((header_dir / "state_out.json").read_text()).get("json_h")
+    l9_path = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    conformance_rc = None
+    if json_h and l9_path.is_file():
+        conformance.parent.mkdir(parents=True, exist_ok=True)
+        conformance_rc = _pr.run(
+            [sys.executable, str(PROGRAMS_DIR / "spec_conformance_check.py"),
+             "--rtl-dir", str(_pl.rtl_dir(project)), "--spec", str(l9_path),
+             "--tool-ports", str(json_h), "--json", str(conformance)],
+            capture_output=True, text=True).returncode
     report = _vlg.judge(folder, rtl)
     report["mode"] = mode
     out_dir.mkdir(parents=True, exist_ok=True)
     _ll.write_json(gate_json, report)
     outputs = [str(gate_json), str(folder / "verilator-lint.log")]
     verdict = report["verdict"]
-    detail = f"Verilator.Lint gate {verdict}: {report.get('reason', '')}"
+    detail = (f"Verilator.Lint gate {verdict}: {report.get('reason', '')}; "
+              f"spec_conformance --tool-ports rc={conformance_rc} (advisory)")
+    if conformance.is_file():
+        outputs.append(str(conformance))
     if mode == "dual":
         direct_json = out_dir / "rtl_hygiene_direct_arm.json"
         direct_json.unlink(missing_ok=True)
@@ -12267,7 +12291,8 @@ def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
     reason = "" if status != "NOT_MEASURED" else (
         "input_absent" if report.get("reason_class") == "INPUT_ABSENT" else "inconclusive")
     return StepResult("rtl_lint_tool", status, time.time() - t0, detail, outputs,
-                      extras={"mode": mode}, reason_class=reason)
+                      extras={"mode": mode, "spec_conformance_tool_ports_rc": conformance_rc},
+                      reason_class=reason)
 
 
 def _usage_rc() -> int:

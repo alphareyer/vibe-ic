@@ -162,6 +162,15 @@ def _design(tmp_path, mode, log, errors, warnings):
             source = script.split("p='", 1)[1].split("'", 1)[0]
             output = script.split("out='", 1)[1].split("'", 1)[0]
             Path(output).write_text(Path(source).read_text())
+        elif 'librelane.steps' in cmd and cmd[cmd.index('--id') + 1] == 'Yosys.JsonHeader':
+            folder = Path(cmd[cmd.index('-o') + 1])
+            folder.mkdir(parents=True, exist_ok=True)
+            header = folder / 'cal_pos.h.json'
+            header.write_text(json.dumps({'modules': {'cal_pos': {'ports': {
+                'clk': {'direction': 'input', 'bits': [2]},
+                'a': {'direction': 'input', 'bits': [3]},
+                'q': {'direction': 'output', 'bits': [4]}}}}}))
+            put(folder / 'state_out.json', {'json_h': str(header), 'metrics': {}})
         elif 'librelane.steps' in cmd and 'run' in cmd:
             folder = Path(cmd[cmd.index('-o') + 1])
             config = json.loads(Path(cmd[cmd.index('-c') + 1]).read_text())
@@ -187,6 +196,8 @@ def test_librelane_mode_lints_the_synthesis_file_set_and_blocks(tmp_path, monkey
     assert report.get('file_set', {}).get('linted') == [str(src.resolve())]
     assert (row.status if row else None, report.get('verdict')) == ('FAIL', 'FAIL')
     assert any('librelane.steps' in c for c in calls)
+    assert row.extras['spec_conformance_tool_ports_rc'] is not None
+    assert (project / 'reports/phase2/gates/spec_conformance_tool_ports.json').is_file()
 
 
 def test_direct_mode_is_unchanged_and_adds_no_row(tmp_path, monkeypatch):
@@ -205,3 +216,37 @@ def test_dual_mode_blocks_on_the_union_and_names_the_arm(tmp_path, monkeypatch):
     assert dual['arms']['librelane']['verdict'] == 'FAIL'
     assert dual['only_librelane'] == [[src.name, 5]]
     assert (project / 'reports/phase2/lint/rtl_hygiene_direct_arm.json').is_file()
+
+
+# ---- spec conformance against the tool's elaborated ports ------------------
+
+FIXTURE = PROGRAMS / 'tests/fixtures/t91_yosys_jsonheader_define_width.h.json'
+DEFINE_RTL = ('`define WA 4\nmodule blk (\n    input  wire           clk,\n'
+              '    input  wire [`WA-1:0] a,\n    output reg  [1:0]     q\n);\n'
+              '    always @(posedge clk) q <= a[1:0] ^ a[3:2];\nendmodule\n')
+
+
+def _conformance(tmp_path, *extra):
+    import subprocess
+    src = rtl(tmp_path, 'blk.v', DEFINE_RTL)
+    spec = put(tmp_path / 'L9.json', {'top_module': 'blk', 'ports': [
+        {'name': 'clk', 'direction': 'input', 'width': 1},
+        {'name': 'a', 'direction': 'input', 'width': 8},
+        {'name': 'q', 'direction': 'output', 'width': 2}]})
+    return subprocess.run([sys.executable, str(PROGRAMS / 'spec_conformance_check.py'),
+                           '--spec', str(spec), '--rtl-dir', str(src.parent), *extra],
+                          capture_output=True, text=True)
+
+
+def test_a_width_behind_a_define_is_compared_from_the_tool_ports(tmp_path):
+    """Regex reads `[`WA-1:0]` as width 0 (unknown) and passes an 8-vs-4 port;
+    the Yosys.JsonHeader interface (real tool output) measures 4."""
+    assert _conformance(tmp_path).returncode == 0          # the text reader's blind spot
+    tool = _conformance(tmp_path, '--tool-ports', str(FIXTURE))
+    assert tool.returncode == 1
+    assert "port 'a' width RTL=4 vs spec=8" in tool.stdout
+
+
+def test_a_top_missing_from_the_tool_ports_is_not_measured(tmp_path):
+    other = put(tmp_path / 'other.json', {'modules': {'else': {'ports': {}}}})
+    assert _conformance(tmp_path, '--tool-ports', str(other)).returncode == 2

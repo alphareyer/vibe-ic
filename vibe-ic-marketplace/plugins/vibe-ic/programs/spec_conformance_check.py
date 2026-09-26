@@ -2724,6 +2724,19 @@ def check(spec: SpecContract, rtl_name: str, rtl_ports: List[Port],
     return f
 
 
+def _tool_ports(path: Path, top: str) -> Optional[List[Port]]:
+    """Ports of `top` from a Yosys JSON netlist, in declaration order."""
+    try:
+        modules = json.loads(path.read_text()).get('modules', {})
+    except (OSError, ValueError, AttributeError):
+        return None
+    module = modules.get(top) or modules.get('\\' + top) if top else None
+    if not isinstance(module, dict):
+        return None
+    return [Port(name, str(port.get('direction')), len(port.get('bits') or []))
+            for name, port in (module.get('ports') or {}).items()]
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description='Spec↔RTL contract-conformance gate.')
     ap.add_argument('paths', nargs='*', help='RTL files or directories')
@@ -2731,6 +2744,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument('--spec', required=True,
                     help='Spec file (.json contract, .md/.txt NL/markdown, or .v)')
     ap.add_argument('--top', help='Top module name (default: first/spec module)')
+    ap.add_argument('--tool-ports',
+                    help='Yosys write_json of the elaborated design (LibreLane '
+                         'Yosys.JsonHeader json_h): take the top module\'s ports '
+                         'from the tool instead of the RTL text')
     ap.add_argument('--strict', action='store_true',
                     help='Exit 1 on WARN findings too')
     ap.add_argument('--json', help='Write findings as JSON')
@@ -2816,6 +2833,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             rtl_name, rtl_ports, rtl_body, chosen = nm, ports, src, str(f)
             if top and nm == top:
                 break
+
+    if args.tool_ports:
+        # The elaborated interface: a width behind a `define or an expression
+        # the text parser cannot evaluate reads 0 there and compares as unknown.
+        tool_ports = _tool_ports(Path(args.tool_ports), top or rtl_name)
+        if tool_ports is None:
+            print(f'spec_conformance_check: NOT_MEASURED — top '
+                  f'{top or rtl_name!r} not in {args.tool_ports}', file=sys.stderr)
+            return 2
+        rtl_name, rtl_ports = (top or rtl_name), tool_ports
 
     rtl_resets = classify_rtl_resets(rtl_body)
     rtl_registered = _rtl_output_is_registered(rtl_body, rtl_ports)
