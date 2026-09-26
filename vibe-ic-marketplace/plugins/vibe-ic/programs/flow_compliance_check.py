@@ -135,6 +135,7 @@ import fpga_board_capability as _fpga_cap
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
+import _flow_yaml  # noqa: E402  F18: the one libyaml-backed, once-per-process flow parse
 
 try:
     import yaml
@@ -6747,7 +6748,7 @@ def _derive_os_constraints_prereq_steps(
     """
     try:
         path = Path(flow_path) if flow_path is not None else _find_flow_def()
-        doc = yaml.safe_load(Path(path).read_text(errors="replace"))
+        doc = _flow_yaml.load(path, errors="replace")
     except Exception:                                        # noqa: BLE001
         return (), tuple(_OS_CONSTRAINTS_PREREQ_ROLES)
     steps = (doc or {}).get("steps") or []
@@ -11825,7 +11826,7 @@ def step4_sim_evidence_alternatives(
     flow carries no such entry — degrade loudly, never silently."""
     path = Path(flow_def) if flow_def else DEFAULT_FLOW_DEF
     try:
-        doc = yaml.safe_load(Path(path).read_text(errors="replace"))
+        doc = _flow_yaml.load(path, errors="replace")
     except (OSError, yaml.YAMLError) as exc:
         raise Step4EvidenceUndeclared(
             f"flow definition unreadable at {path}: {exc}") from exc
@@ -13179,7 +13180,7 @@ _ENV_UNAVAILABLE_STEP_NAME_TO_ID: Dict[str, Any] = _we.STEP_NAME_TO_ID
 def _derive_fpga_board_step_ids(flow_path: Optional[Path] = None) -> frozenset:
     try:
         path = Path(flow_path) if flow_path is not None else _find_flow_def()
-        doc = yaml.safe_load(Path(path).read_text(errors="replace"))
+        doc = _flow_yaml.load(path, errors="replace")
     except Exception:                                        # noqa: BLE001
         return frozenset()
     return _fpga_cap.board_bound_step_ids((doc or {}).get("steps") or [])
@@ -15672,8 +15673,8 @@ def _outputs_read_by_in_scope_steps(sid, my_outputs, manifest):
     everything.
     """
     try:
-        import yaml as _y                          # noqa: PLC0415
-        flow = _y.safe_load(DEFAULT_FLOW_DEF.read_text(errors="replace"))
+        import yaml as _y  # noqa: F401,PLC0415 - availability probe
+        flow = _flow_yaml.load(DEFAULT_FLOW_DEF, errors="replace")
         steps = (flow or {}).get("steps") or []
         if not steps:
             return list(my_outputs)
@@ -19929,7 +19930,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     try:
-        flow = yaml.safe_load(flow_path.read_text())
+        flow = _flow_yaml.load(flow_path)
     except yaml.YAMLError as exc:
         print(f"flow_compliance_check: YAML parse error: {exc}", file=sys.stderr)
         return 2
