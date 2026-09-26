@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json
+import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
 from librelane_contract import (Refusal, digest, judge_step, resolve_step_configs,
                                 run_chain, select_arms, state_from_direct)
 
@@ -84,7 +85,7 @@ def _vibeic_gds_gates(project: Path, image: str, pdk_root: Path, pdk: str,
     for name, script in (("substance", "gds_substance_check.py"),
                          ("port_labels", "gds_port_label_check.py")):
         report = base / f"37-{arm}-{name}.json"
-        cmd = ["docker", "run", "--rm", "-v", f"{project.resolve()}:{project.resolve()}",
+        cmd = ["docker", "run", "--rm", *_dmem.docker_memory_flags(), "-v", f"{project.resolve()}:{project.resolve()}",
                "-v", f"{programs.resolve()}:{programs.resolve()}:ro",
                "-v", f"{(pdk_root / pdk).resolve()}:/pdk/{pdk}:ro",
                image, "--skip", "python3", str(programs / script), str(project),

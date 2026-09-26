@@ -166,7 +166,10 @@ def test_the_cli_refuses_rather_than_printing_nothing_when_it_cannot_tell():
 
 # ── the guard that has to survive future edits ──────────────────────────────
 
-_RUN_ARGV = re.compile(r'\[\s*(?:"docker"|docker_bin)\s*,\s*"run"')
+# The binary is spelled three ways in programs/: the literal, `docker_bin`, and
+# a bare `docker` parameter (analog_a6_librelane_drc._image_run). The last one
+# escaped this guard with no ceiling until it was named here.
+_RUN_ARGV = re.compile(r'\[\s*(?:"docker"|docker_bin|docker)\s*,\s*"run"')
 
 
 def test_no_docker_run_escapes_the_ceiling():
