@@ -70,8 +70,20 @@ def _runner():
     spec = importlib.util.spec_from_file_location(
         "phase3_one_shot_runner", PLUGIN / "programs" / "phase3_one_shot_runner.py")
     mod = importlib.util.module_from_spec(spec)
+    # Registered only while it executes, then the previous entry is restored.
+    # Left in place, this copy replaced the runner for every later test on the
+    # worker: a call-time `import phase3_one_shot_runner` got THIS module while
+    # their monkeypatches sat on the original (d3 live-measurement, pdn_em
+    # identity, r34 pad drop all went red behind this file, green alone).
+    previous = sys.modules.get("phase3_one_shot_runner")
     sys.modules["phase3_one_shot_runner"] = mod
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        if previous is None:
+            sys.modules.pop("phase3_one_shot_runner", None)
+        else:
+            sys.modules["phase3_one_shot_runner"] = previous
     return mod
 
 
