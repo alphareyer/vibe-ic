@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1360
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1360)
+- **Total programs (excluding helpers / shims):** 1359
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1359)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1351 |
+| `any` | 1350 |
 
 ## Alphabetical listing
 
@@ -178,7 +178,6 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `bit_level_full_stack_tb_oracle_check` | any | Wave 12 | v0.119.44 (Wave 12) plugin gate. |
 | `bit_mapping_synth` | any | — | the deterministic consumer of a bit-mapping contract. |
 | `bitmanip_synth` | any | — | deterministic SOLVER for the CVDP BIT-MANIPULATION family: combinational pure-functions of a stated-width vector that the registry's plai... |
-| `bitwidth_consistency_check` | any | — | flag Verilog bit-selects that exceed the register's declared width. |
 | `ble_protocol_synth` | any | v0.1.84 | Bluetooth Low Energy 5.2-class protocol synth helper. |
 | `blindness_audit` | any | — | deterministic prompt-only blindness audit. |
 | `blocker_classification_check` | any | — | Guard the classified blocker list's contract on a compliance report. |
@@ -1432,7 +1431,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1351 programs)
+### `any` (1350 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1586,7 +1585,6 @@ _(no programs in this group)_
 - `bit_level_full_stack_tb_oracle_check` — v0.119.44 (Wave 12) plugin gate.  _[Wave 12]_
 - `bit_mapping_synth` — the deterministic consumer of a bit-mapping contract.
 - `bitmanip_synth` — deterministic SOLVER for the CVDP BIT-MANIPULATION family: combinational pure-functions of a stated-width vector that the registry's plai...
-- `bitwidth_consistency_check` — flag Verilog bit-selects that exceed the register's declared width.
 - `ble_protocol_synth` — Bluetooth Low Energy 5.2-class protocol synth helper.  _[v0.1.84]_
 - `blindness_audit` — deterministic prompt-only blindness audit.
 - `blocker_classification_check` — Guard the classified blocker list's contract on a compliance report.
