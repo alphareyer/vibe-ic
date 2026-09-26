@@ -77,10 +77,18 @@ def test_every_admitted_lever_cites_the_flag_that_applies_it(out):
     _, doc = _emit(out)
     runner = _PROGRAMS / P.RUNNER_REL
     lines = runner.read_text(encoding="utf-8").splitlines()
+    # A step-17 LibreLane lever is applied through the switch file's
+    # `placement_levers`, whose keys the contract declares: its citation is
+    # that declaration, and it must be there on that line just the same.
+    contract = (_PROGRAMS / P.CONTRACT_REL).read_text(encoding="utf-8").splitlines()
     for l in doc["levers"]:
         if not l["admitted"]:
             continue
         c = l["citation"]
+        if l["applies_via"].startswith(P.SWITCH_PREFIX):
+            assert c["path"] == P.CONTRACT_REL
+            assert repr(c["literal"]) in contract[c["line"] - 1], (l["lever"], c)
+            continue
         assert c["path"] == P.RUNNER_REL
         assert c["literal"] in lines[c["line"] - 1], (l["lever"], c)
 

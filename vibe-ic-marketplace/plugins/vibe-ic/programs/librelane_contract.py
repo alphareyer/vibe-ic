@@ -779,6 +779,131 @@ def elide_tap_pdn_region(full_pnr_tcl: str, marker: str) -> str:
             + full_pnr_tcl[m.end(1):])
 
 
+def placement_consumer_tcl(full_pnr_tcl: str, placed_def_c: str, marker: str,
+                           after_load_tcl: str = '') -> str:
+    """The direct deck from CTS onward, on LibreLane's placed design (step 17).
+
+    With steps 15..18 produced by LibreLane (Floorplan..DetailedPlacement and
+    `Vibeic.InsertSpareCells`), the direct deck consumes the tool's final
+    placed DEF instead of rebuilding the design:
+
+    1. the netlist load (the `read_verilog`..`link_design` block) becomes one
+       full `read_def` of the handed-over DEF, which creates the block with
+       every instance, net, pin, row, track and special net. The deck's
+       `read_lef` lines stay, so CTS and routing use the SAME tech LEF as the
+       direct flow (including its via-landing remediation), and so a resume
+       or SDR child deck derived from this one still restores a checkpoint
+       DEF on top of them. (MEASURED: `read_db` after `read_lef` replaces the
+       whole database, tech included.)
+    2. everything the deck does between the resume-elide sentinel and
+       `puts "<marker> cts"` (floorplan/pad-ring ingest, taps, PDN, global
+       placement, the legalization ladder, the #684 tap prune, spare
+       insertion, pre-CTS repair) is removed: it is already in that DEF.
+       ``after_load_tcl`` goes in its place: the session state a DEF does not
+       carry (global-connect rules, dont_touch).
+
+    The sentinel itself stays, so resume and SDR child decks still find the
+    region they elide. Anything else refuses `LL_PLACEMENT_SEAM_AMBIGUOUS`.
+    """
+    lines = full_pnr_tcl.splitlines()
+    starts = [i for i, ln in enumerate(lines) if ln.startswith('read_verilog ')]
+    if not starts:
+        raise ValueError('LL_PLACEMENT_SEAM_AMBIGUOUS: no read_verilog design load')
+    i_rv = starts[0]
+    i_ld = i_rv + 1
+    while i_ld < len(lines) and (lines[i_ld].startswith('read_verilog ')
+                                 or not lines[i_ld].strip()
+                                 or lines[i_ld].lstrip().startswith('#')):
+        i_ld += 1
+    if i_ld >= len(lines) or not lines[i_ld].startswith('link_design '):
+        raise ValueError('LL_PLACEMENT_SEAM_AMBIGUOUS: read_verilog is not '
+                         'followed by link_design')
+    lines[i_rv:i_ld + 1] = [
+        '# steps 15..18: the design is LibreLane\'s placed DEF '
+        '(librelane_contract.placement_consumer_tcl)',
+        f'read_def {placed_def_c}']
+    text = '\n'.join(lines) + '\n'
+    begin = re.findall(r'(?m)^# <<<PNR_RESUME_ELIDE_BEGIN>>>\s*$', text)
+    cts = re.findall(rf'(?m)^puts "{re.escape(marker)} cts"\s*$', text)
+    if len(begin) != 1 or len(cts) != 1:
+        raise ValueError('LL_PLACEMENT_SEAM_AMBIGUOUS: expected one resume '
+                         f'sentinel and one CTS stage, found {len(begin)}/{len(cts)}')
+    m = re.search(r'(?ms)^# <<<PNR_RESUME_ELIDE_BEGIN>>>\s*$\n(?:#[^\n]*\n)*'
+                  rf'(.*?)^(?=puts "{re.escape(marker)} cts"\s*$)', text)
+    if m is None:
+        raise ValueError('LL_PLACEMENT_SEAM_AMBIGUOUS: CTS precedes the sentinel')
+    ingest = (f'puts "{marker} librelane_placement_ingest"\n'
+              f'puts "LIBRELANE_PLACEMENT_CONSUMED: {placed_def_c}"\n'
+              + (after_load_tcl.rstrip('\n') + '\n' if after_load_tcl.strip() else ''))
+    return text[:m.start(1)] + ingest + text[m.end(1):]
+
+
+#: Step 17's PPA levers on the LibreLane arm: LibreLane config variables the
+#: GlobalPlacement / RepairDesignPostGPL / DetailedPlacement steps read. A
+#: value enters the config only as a declared project input --
+#: `phase3/librelane_switch.json` `placement_levers` {KEY: value}, the file a
+#: PPA candidate writes -- with that source in the provenance file.
+PLACEMENT_LEVERS: dict[str, tuple[str, float | None, float | None]] = {
+    'PL_TARGET_DENSITY_PCT': ('number', 0.0, 100.0),
+    'PL_TIMING_DRIVEN': ('bool', None, None),
+    'PL_ROUTABILITY_DRIVEN': ('bool', None, None),
+    'GPL_CELL_PADDING': ('int', 0, None),
+    'DPL_CELL_PADDING': ('int', 0, None),
+    'PL_WIRE_LENGTH_COEF': ('number', 0.0, None),
+    'PL_MAX_DISPLACEMENT_X': ('int', 0, None),
+    'PL_MAX_DISPLACEMENT_Y': ('int', 0, None),
+}
+PLACEMENT_LEVERS_KEY = 'placement_levers'
+
+#: A lever that replaces a deprecated design key LibreLane would otherwise
+#: translate (`PL_TARGET_DENSITY` fraction -> `_PCT`); both set is a conflict.
+_LEVER_SUPERSEDES = {'PL_TARGET_DENSITY_PCT': ('PL_TARGET_DENSITY',)}
+
+
+def _lever_value(key: str, raw: Any) -> Any:
+    kind, low, high = PLACEMENT_LEVERS[key]
+    if kind == 'bool':
+        if isinstance(raw, bool):
+            return raw
+        if str(raw).strip().lower() in ('true', 'false'):
+            return str(raw).strip().lower() == 'true'
+        raise ValueError(f'{raw!r} is not a boolean')
+    if isinstance(raw, bool):
+        raise ValueError(f'{raw!r} is not a number')
+    value: Any = int(str(raw).strip()) if kind == 'int' else float(str(raw).strip())
+    if value != value or value in (float('inf'), float('-inf')):
+        raise ValueError(f'{raw!r} is not finite')
+    if (low is not None and (value < low or (kind == 'number' and value == low))) \
+            or (high is not None and value > high):
+        raise ValueError(f'{raw!r} is outside the lever range')
+    return value
+
+
+def placement_levers(project: Path) -> dict[str, tuple[Any, str]]:
+    """The project's declared placement levers -> a `resolve_step_configs`
+    overlay. An unknown key refuses `LL_PLACEMENT_LEVER_UNKNOWN`; a value of
+    the wrong type or outside the lever's range `LL_PLACEMENT_LEVER_INVALID`.
+    Nothing is defaulted: an absent lever leaves the design declaration or
+    LibreLane's own default in force."""
+    path = project / 'phase3/librelane_switch.json'
+    declared = _load(path).get(PLACEMENT_LEVERS_KEY) if path.is_file() else None
+    if declared is None:
+        return {}
+    if not isinstance(declared, dict):
+        raise Refusal('LL_PLACEMENT_LEVER_INVALID', f'{PLACEMENT_LEVERS_KEY} is not an object')
+    overlay: dict[str, tuple[Any, str]] = {}
+    for key, raw in declared.items():
+        if key not in PLACEMENT_LEVERS:
+            raise Refusal('LL_PLACEMENT_LEVER_UNKNOWN',
+                          f'{key}: not one of {sorted(PLACEMENT_LEVERS)}')
+        try:
+            value = _lever_value(key, raw)
+        except ValueError as exc:
+            raise Refusal('LL_PLACEMENT_LEVER_INVALID', f'{key}: {exc}') from exc
+        overlay[key] = (value, f'phase3/librelane_switch.json {PLACEMENT_LEVERS_KEY}.{key}')
+    return overlay
+
+
 #: The released LibreLane-capable vibeic-eda image, pinned BY DIGEST (owner
 #: 2026-09-26: 0.3.77, librelane 3.1.0.dev1, OpenROAD 26Q3-2943).  A tag can
 #: move; a digest cannot.  An explicit switch/env declaration overrides it.
@@ -911,6 +1036,33 @@ def selected_mode(project: Path, step: str) -> str:
     return mode
 
 
+#: vibe-ic's own LibreLane steps (`Vibeic.*`), shipped with this plugin in
+#: `programs/librelane_plugins/librelane_plugin_vibeic`. LibreLane discovers a
+#: `librelane_plugin_*` module on `sys.path`; the contract mounts `programs/`
+#: read-only at its own path and adds the plugin root to `PYTHONPATH` only
+#: for a run that names such a step, so every other step's invocation and
+#: fingerprint are unchanged.
+PLUGIN_ROOT = Path(__file__).resolve().parent / 'librelane_plugins'
+PLUGIN_STEP_PREFIX = 'Vibeic.'
+
+
+def _plugin_args(step_ids: list[str]) -> list[str]:
+    if not any(str(s).startswith(PLUGIN_STEP_PREFIX) for s in step_ids):
+        return []
+    programs = PLUGIN_ROOT.parent.resolve()
+    return ['-v', f'{programs}:{programs}:ro', '-e', f'PYTHONPATH={PLUGIN_ROOT.resolve()}']
+
+
+def _plugin_digests(step_id: str) -> dict[str, str]:
+    """The custom step's code is an input of that step: its files, and the
+    plan builder it imports, by sha256."""
+    if not step_id.startswith(PLUGIN_STEP_PREFIX):
+        return {}
+    files = sorted(PLUGIN_ROOT.rglob('*.py')) + [PLUGIN_ROOT.parent / '_spare_plan.py']
+    return {str(path.relative_to(PLUGIN_ROOT.parent)): digest(path)
+            for path in files if path.is_file()}
+
+
 def resolve_step_configs(project: Path, image: str, pdk: str,
                          step_ids: list[str], *, pdk_root: Path,
                          docker: str = 'docker',
@@ -931,6 +1083,10 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     if overlay:
         sources = _load(design.with_suffix('.provenance.json'))
         for key, (value, source) in overlay.items():
+            for older in _LEVER_SUPERSEDES.get(key, ()):
+                if older in emitted:
+                    emitted.pop(older)
+                    sources[older] = f'superseded by {key} ({source})'
             _set(emitted, sources, key, value, source)
         write_json(design, emitted)
         write_json(design.with_suffix('.provenance.json'), sources)
@@ -949,6 +1105,13 @@ for step_id in json.loads(Path(requested).read_text()):
         raise ValueError("unknown LibreLane step: " + step_id)
     names = {var.name for var in target.get_all_config_variables()}
     selected = {key: value for key, value in raw.items() if key in names}
+    # A step outside the Chip flow (vibe-ic's own `Vibeic.*`) declares
+    # variables the flow's resolver does not know, so the resolved dict drops
+    # them; take exactly those, and only those, from the declared design file.
+    if step_id.startswith("Vibeic."):
+        declared = json.loads(Path(design).read_text())
+        selected.update({key: value for key, value in declared.items()
+                         if key in names and key not in selected})
     selected["meta"] = {"librelane_version": __import__("librelane.__version__", fromlist=["__version__"]).__version__, "step": step_id}
     Path(output, step_id + ".json").write_text(json.dumps(selected, indent=2, default=str) + "\\n")
     # LibreLane's Meta refuses unknown keys, so the step's declared views live beside it.
@@ -958,7 +1121,7 @@ for step_id in json.loads(Path(requested).read_text()):
         "outputs": [getattr(f, "id", None) or f.value.id for f in target.outputs]}) + "\\n")
 '''
     cmd = [docker, 'run', '--rm', '-v', f'{project.resolve()}:{project.resolve()}',
-           '-v', f'{pdk_root.resolve()}:/pdk:ro',
+           '-v', f'{pdk_root.resolve()}:/pdk:ro', *_plugin_args(step_ids),
            '--entrypoint', 'python3', image, '-c', script, str(design),
            str(requested), str(root), pdk, str(project.resolve())]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -1099,6 +1262,8 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
                        'step': step_id}
         if home:
             fingerprint['openroad_aliases'] = capability['openroad_aliases']
+        if step_id.startswith(PLUGIN_STEP_PREFIX):
+            fingerprint['plugin'] = _plugin_digests(step_id)
         receipt = folder / 'vibeic_receipt.json'
         if receipt.exists() and _load(receipt).get('input') == fingerprint and (folder / 'state_out.json').exists():
             _check_state(_load(folder / 'state_out.json'), outputs=True)
@@ -1119,6 +1284,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             volume_args += ['-v', f'{host.resolve()}:{guest}:ro']
         if home:
             volume_args += ['-e', f'HOME={home.resolve()}']
+        volume_args += _plugin_args([step_id])
         cmd = [docker, 'run', '--rm', *volume_args, '--entrypoint', 'python3', image,
                '-m', 'librelane.steps', 'run', '--id', step_id, '-c', str(config),
                '-i', str(state_path), '-o', str(folder)]

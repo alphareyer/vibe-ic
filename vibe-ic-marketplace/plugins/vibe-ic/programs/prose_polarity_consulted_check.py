@@ -1230,6 +1230,26 @@ _NOT_PROSE: Dict[str, str] = {
         "Generated Verilog named-port connection syntax is parsed from the "
         "runner-owned testbench skeleton. The matched `.name(` token is an HDL "
         "grammar production and Verilog has no prose form that denies it.",
+    "clock_plan_check::_sdc_primary_clock_sources":
+        "SDC `create_clock ... -name <n> [get_ports <p>]` commands, parsed after "
+        "`#` comments are stripped (the same comment rule as `_sdc_clock_names`). "
+        "SDC is a Tcl command grammar: a clock is created by the command or it "
+        "is not, and no neighbouring text can deny it -- a disabled clock is a "
+        "deleted or commented command, which the strip removes before matching.",
+    "phase3_one_shot_runner::_prepare_librelane_floorplan_for_route":
+        "Liberty `cell ( <name> )` group headers (`_V1_6_596_RE_CELL_DECL`), "
+        "read to list the library's cell NAMES for the step-17 "
+        "EXTRA_EXCLUDED_CELLS derivation. Liberty is a formal group grammar: a "
+        "cell group is declared or it is not; there is no prose form that denies "
+        "a declared cell, and the name filter that follows is the same family "
+        "regex set the direct deck applies with `get_lib_cells`.",
+    "phase3_one_shot_runner::_select_placement_arm":
+        "The runner's OWN marker line `DIRECT_ARM_CHECK_PLACEMENT_VIOLATIONS <n>`, "
+        "printed by `_build_check_placement_verdict_tcl` in the arm deck this "
+        "function writes, carrying `check_placement -no_abort`'s integer. It is "
+        "a fixed-format record, not a sentence: the count is the only field, a "
+        "raise prints a different marker (`_RAISED`), and an absent marker is "
+        "read as NOT_MEASURED, never as zero.",
     "librelane_contract::def_supply_tcl":
         "A tool-written DEF's SPECIALNETS `- <net> ... + USE POWER|GROUND ;` "
         "and PINS `- <pin> + NET <net> ... + DIRECTION <dir> ;` productions "

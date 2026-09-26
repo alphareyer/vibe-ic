@@ -22516,129 +22516,18 @@ def _v1_0_38_pin_placement_block(project: Path,
 #                   overlap or delete the dont_touch spares.
 # Chip-AGNOSTIC: the spare-cell mix and tie cells are discovered from
 # the PDK liberty — no chip-class literal anywhere.
-_DEFAULT_SPARE_DENSITY = 0.02      # 2% of placed cells
-_SPARE_DENSITY_MAX = 0.2           # clamp ceiling (20%)
-_SPARE_DENSITY_MIN = 0.0
-# Canonical spare-cell function-class mix. Each entry is (class, weight):
-# a balanced ECO budget needs combinational gates (inverter/nand/nor/
-# aoi/oai), a 2:1 mux, and at least one sequential element so a state
-# bug can be patched too. Weights sum to 1.0.
-_SPARE_CELL_MIX = (
-    ("inverter", 0.25),
-    ("nand2",    0.20),
-    ("nor2",     0.15),
-    ("mux2",     0.15),
-    ("aoi",      0.10),
-    ("oai",      0.05),
-    ("dff",      0.10),
-)
-
-
-def _compute_spare_density(raw) -> Tuple[float, Optional[str]]:
-    """Normalize / clamp a --spare-density value to [0.0, 0.2].
-
-    Returns (density_fraction, warning_or_None). Non-numeric / None
-    falls back to the 2% default. Values are clamped — a request for
-    50% spares is honoured as the 20% ceiling with a warning. Pure
-    numeric guard, chip-AGNOSTIC."""
-    warn: Optional[str] = None
-    if raw is None:
-        return _DEFAULT_SPARE_DENSITY, None
-    try:
-        d = float(raw)
-    except (TypeError, ValueError):
-        return (_DEFAULT_SPARE_DENSITY,
-                f"--spare-density {raw!r} is not numeric; using default "
-                f"{_DEFAULT_SPARE_DENSITY}")
-    if d != d:  # NaN
-        return _DEFAULT_SPARE_DENSITY, "--spare-density is NaN; using default"
-    if d < _SPARE_DENSITY_MIN:
-        warn = (f"--spare-density {d:g} < 0 is invalid; clamping to "
-                f"{_SPARE_DENSITY_MIN}")
-        d = _SPARE_DENSITY_MIN
-    if d > _SPARE_DENSITY_MAX:
-        warn = (f"--spare-density {d:g} exceeds ceiling "
-                f"{_SPARE_DENSITY_MAX}; clamping to {_SPARE_DENSITY_MAX}")
-        d = _SPARE_DENSITY_MAX
-    return d, warn
-
-
-def _spare_count_from_density(placed_cells: int, density: float) -> int:
-    """Number of spare cells to insert for a given placed-cell count and
-    density. At least 1 spare when density>0 and there is any placed
-    logic (so even a tiny block gets an ECO budget). Uses CEIL (not
-    round) so the achieved density (count/placed) always MEETS OR
-    EXCEEDS the requested target — `round` could land just under the
-    target (e.g. 302*0.02=6.04 -> round 6 -> 6/302=0.0199 < 0.02, which
-    would fail the coverage gate). Pure math."""
-    if placed_cells <= 0 or density <= 0.0:
-        return 0
-    # Integer ceil of (placed_cells * density) without importing math:
-    # add a tiny epsilon-free ceil via the -(-a // b) idiom on a scaled
-    # integer. density is a float fraction; scale to avoid fp drift.
-    scaled = placed_cells * density
-    n = int(scaled)
-    if scaled > n:
-        n += 1
-    return max(1, n)
-
-
-def _spare_type_distribution(count: int,
-                             mix=_SPARE_CELL_MIX) -> Dict[str, int]:
-    """Allocate `count` spares across the canonical function-class mix
-    by weight. Guarantees the integer allocation sums to `count`
-    (largest-remainder rounding) so the emitted JSON `types{}` total
-    equals `count`. Pure, chip-AGNOSTIC."""
-    if count <= 0:
-        return {}
-    # Floor allocation + fractional remainders.
-    alloc: Dict[str, float] = {cls: count * w for cls, w in mix}
-    floored: Dict[str, int] = {cls: int(v) for cls, v in alloc.items()}
-    used = sum(floored.values())
-    remaining = count - used
-    # Distribute the remaining units to the largest fractional parts.
-    rema = sorted(
-        ((cls, alloc[cls] - floored[cls]) for cls, _ in mix),
-        key=lambda kv: kv[1], reverse=True,
-    )
-    i = 0
-    while remaining > 0 and rema:
-        cls = rema[i % len(rema)][0]
-        floored[cls] += 1
-        remaining -= 1
-        i += 1
-    # Drop zero-allocations for a clean JSON.
-    return {cls: n for cls, n in floored.items() if n > 0}
-
-
-def _spare_grid_positions(count: int, core_llx: int, core_lly: int,
-                          core_urx: int, core_ury: int
-                          ) -> List[Tuple[int, int]]:
-    """Spread `count` spare instances across a near-square grid over the
-    core area so they are DISTRIBUTED (not clustered in one corner).
-    Returns a list of (llx, lly) integer micron coordinates. The grid
-    is sized ceil(sqrt(count)) per axis; positions are evenly spaced
-    inside the core with a small inset. Pure geometry, chip-AGNOSTIC."""
-    if count <= 0:
-        return []
-    w = max(1, core_urx - core_llx)
-    h = max(1, core_ury - core_lly)
-    import math
-    cols = max(1, int(math.ceil(math.sqrt(count))))
-    rows = max(1, int(math.ceil(count / cols)))
-    out: List[Tuple[int, int]] = []
-    # Inset by ~5% so spares sit inside the core, not on the edge.
-    inset_x = max(1, w // 20)
-    inset_y = max(1, h // 20)
-    usable_w = max(1, w - 2 * inset_x)
-    usable_h = max(1, h - 2 * inset_y)
-    for idx in range(count):
-        r = idx // cols
-        c = idx % cols
-        x = core_llx + inset_x + (usable_w * c) // max(1, cols)
-        y = core_lly + inset_y + (usable_h * r) // max(1, rows)
-        out.append((int(x), int(y)))
-    return out
+# The plan arithmetic lives in `_spare_plan` (one builder for the direct
+# deck below and the LibreLane step `Vibeic.InsertSpareCells`); the names this
+# runner has always published are kept as bindings to it.
+import _spare_plan as _sp  # noqa: E402
+_DEFAULT_SPARE_DENSITY = _sp.DEFAULT_SPARE_DENSITY
+_SPARE_DENSITY_MAX = _sp.SPARE_DENSITY_MAX
+_SPARE_DENSITY_MIN = _sp.SPARE_DENSITY_MIN
+_SPARE_CELL_MIX = _sp.SPARE_CELL_MIX
+_compute_spare_density = _sp.compute_spare_density
+_spare_count_from_density = _sp.spare_count_from_density
+_spare_type_distribution = _sp.spare_type_distribution
+_spare_grid_positions = _sp.spare_grid_positions
 
 
 def _netlist_cell_masters(netlist_text: str) -> set:
@@ -22678,71 +22567,7 @@ def _discover_spare_cells_from_liberty(
     cells = _V1_6_596_RE_CELL_DECL.findall(text)
     if not cells:
         return out
-    # Per-class name-token patterns. Ordered so the smallest/simplest
-    # drive variant is preferred (we pick the first match after sorting
-    # by name length, which tends to favour the base 1x cell).
-    patterns = {
-        "inverter": re.compile(r"(?:^|_)(?:inv|clkinv)_?\w*$", re.I),
-        "nand2":    re.compile(r"(?:^|_)nand2\w*$", re.I),
-        "nor2":     re.compile(r"(?:^|_)nor2\w*$", re.I),
-        # A 2:1 mux is named `mux2*` (sky130/Nangate), `mx2*` / `mxi2*`
-        # (inverting) in Artisan-style commercial libraries (e.g. a commercial
-        # 180nm PDK's `MX2D1`, `MXI2D1`), or `muxi2*`. Match all so the spare mix
-        # resolves a concrete mux on any library — a `mux2`-only pattern drops
-        # the class on commercial PDKs, sinking the spare-cell density target.
-        "mux2":     re.compile(r"(?:^|_)m(?:ux|x)i?2\w*$", re.I),
-        # AOI / OAI cells carry an AND-OR / OR-AND topology prefix in
-        # every real library (sky130 `a21oi`/`a221oi`, Nangate `AOI21`),
-        # not a literal `aoi`/`oai`. Match the topology-digit form
-        # (`a<digits>oi` / `o<digits>ai`) plus the literal as a fallback.
-        "aoi":      re.compile(r"(?:^|_)(?:a\d+oi|aoi)\w*$", re.I),
-        "oai":      re.compile(r"(?:^|_)(?:o\d+ai|oai)\w*$", re.I),
-        "dff":      re.compile(r"(?:^|_)(?:dff|dfxtp|dfrtp|sdff)\w*$", re.I),
-    }
-    # SECOND-TIER patterns, consulted ONLY when the primary pattern for a
-    # class matches nothing in this library. They are deliberately broader,
-    # so they must not run first — a broad match would change which cell a
-    # library that the primary already handles resolves to (measured: a
-    # generic `d(ff|f<letters>)` form flips sky130 from dfrtp_2 to dfbbn_1).
-    # Tier 2 therefore only ever ADDS coverage for libraries that would
-    # otherwise resolve the class to None.
-    #
-    # `dff`: the primary token list (dff/dfxtp/dfrtp/sdff) is a sky130 +
-    # Nangate spelling list, so it matched NO flip-flop in IHP SG13G2,
-    # whose FFs are sg13g2_dfrbp_* / sg13g2_dfrbpq_* / sg13g2_sdfrbp_*.
-    # The class was dropped from the spare mix, the plan requested 8 spares
-    # but placed 7, and the Design-for-ECO coverage gate failed with
-    # "actual_density 0.019886 < target_density 0.02" (spm x ihp-sg13g2,
-    # 2026-07-21). The tier-2 form matches a `d`+`f`+suffix flip-flop name
-    # while still rejecting latches (dlhq/dlhr/dllr) and delay cells
-    # (dlygate*), which begin `dl`, not `df`.
-    patterns_tier2 = {
-        "dff": re.compile(r"(?:^|_)s?d(?:ff|f[a-z]{1,6})\w*$", re.I),
-    }
-    used = used_cells or set()
-    cells_sorted = sorted(set(cells), key=lambda n: (len(n), n))
-    for cls, pat in patterns.items():
-        for _pat in (pat, patterns_tier2.get(cls)):
-            if _pat is None:
-                continue
-            first_match: Optional[str] = None
-            for nm in cells_sorted:
-                if not _pat.search(nm):
-                    continue
-                if first_match is None:
-                    first_match = nm
-                if nm not in used:
-                    out[cls] = nm
-                    break
-            if out[cls] is None and first_match is not None:
-                # Every variant of this class is in functional use — keep
-                # the base pick; the plan records the conflict so downstream
-                # LVS knows the class-level spare-only ignore will not
-                # engage.
-                out[cls] = first_match
-            if out[cls] is not None:
-                break  # primary tier resolved it; never consult tier 2
-    return out
+    return _sp.discover_spare_cells(cells, used_cells)
 
 
 def _spare_insertion_provenance(spare_plan: Dict[str, Any],
@@ -22837,110 +22662,12 @@ def _build_spare_cells_plan(placed_cells: int, density: float,
     a class whose every variant is in use is recorded under
     ``class_conflicts`` so LVS knows the class-level ignore cannot
     apply there."""
-    count = _spare_count_from_density(placed_cells, density)
-    dist = _spare_type_distribution(count)
     cell_map = (_discover_spare_cells_from_liberty(liberty_path, container,
                                                    used_cells=used_cells)
                 if liberty_path else {})
-    llx, lly, urx, ury = core_box
-    positions = _spare_grid_positions(count, llx, lly, urx, ury)
-    instances: List[Dict[str, Any]] = []
-    pos_i = 0
-    per_class_idx: Dict[str, int] = {}
-    # Emit instances class-by-class so names group logically, but assign
-    # positions from the distributed grid (round-robin) so each class is
-    # itself spread across the core.
-    flat_classes: List[str] = []
-    for cls, n in dist.items():
-        flat_classes.extend([cls] * n)
-    # Drop classes that resolved to no concrete PDK cell — an instance
-    # with cell=None is never physically inserted (place_inst is
-    # skipped), so it must NOT appear in the plan as a "preserved"
-    # spare (the preservation check would otherwise flag it as removed).
-    # This honours the discovery contract ("the caller drops them from
-    # the mix"). dropped_classes is recorded for transparency.
-    dropped_classes: Dict[str, int] = {}
-    for k, cls in enumerate(flat_classes):
-        concrete = cell_map.get(cls) if cell_map else None
-        if cell_map and concrete is None:
-            dropped_classes[cls] = dropped_classes.get(cls, 0) + 1
-            continue
-        idx = per_class_idx.get(cls, 0)
-        per_class_idx[cls] = idx + 1
-        x, y = positions[pos_i] if pos_i < len(positions) else (llx, lly)
-        pos_i += 1
-        instances.append({
-            "name": f"spare_{cls}_{idx}",
-            "type": cls,
-            "cell": concrete,
-            "llx": x,
-            "lly": y,
-            "keep": True,
-        })
-    # Reserve spare/ECO IO pads when a pad ring exists (2 spare pads —
-    # one input-class, one output-class — a minimal ECO IO budget).
-    spare_pads: List[Dict[str, Any]] = []
-    if has_pad_ring:
-        spare_pads = [
-            {"name": "spare_pad_in_0", "kind": "input", "keep": True},
-            {"name": "spare_pad_out_0", "kind": "output", "keep": True},
-        ]
-    # Recompute count / types from the instances that actually carry a
-    # concrete cell (post-drop), so the plan's headline numbers match the
-    # spares that are physically inserted + later preservation-checked.
-    eff_types: Dict[str, int] = {}
-    for inst in instances:
-        eff_types[inst["type"]] = eff_types.get(inst["type"], 0) + 1
-    eff_count = len(instances)
-    # ORGANIC-20260531 Step 18: the sign-off audit reads a `rows[]` field
-    # (the standard-cell placement rows the spares occupy). Derive it
-    # DETERMINISTICALLY from the existing instance placement — group spare
-    # instances by their lly (row y-origin) and record per-row occupancy.
-    # This does NOT change placement; it only surfaces the rows the spares
-    # already sit on so the audit can read them. chip-AGNOSTIC.
-    rows: List[Dict[str, Any]] = []
-    by_lly: Dict[Any, List[Dict[str, Any]]] = {}
-    for inst in instances:
-        by_lly.setdefault(inst.get("lly"), []).append(inst)
-    for row_idx, lly in enumerate(sorted(
-            by_lly.keys(), key=lambda v: (v is None, v))):
-        members = by_lly[lly]
-        xs = [m.get("llx") for m in members if m.get("llx") is not None]
-        rows.append({
-            "row": row_idx,
-            "lly": lly,
-            "spare_count": len(members),
-            "min_llx": min(xs) if xs else None,
-            "max_llx": max(xs) if xs else None,
-            "instances": [m["name"] for m in members],
-        })
-    # #563 r2 — record classes whose chosen cell is still in functional
-    # use (no unused variant existed): the class-level spare-only LVS
-    # ignore cannot engage for these; tie-off (postfix TCL) is then the
-    # mechanism that makes them LVS-clean.
-    used = used_cells or set()
-    class_conflicts = sorted({inst["cell"] for inst in instances
-                              if inst.get("cell") and inst["cell"] in used})
-    plan = {
-        "count": eff_count,
-        "density": round(density, 6),
-        "types": eff_types,
-        # tied_off is a CLAIM about the physical netlist; step_pnr sets it
-        # honestly once it knows whether the PDK has a tie-lo cell for the
-        # postfix tie-off block (#563 r2 — the pre-fix constant True was
-        # never backed by actual tie-off TCL).
-        "tied_off": False,
-        "instances": instances,
-        "rows": rows,
-        "spare_pads": spare_pads,
-        "cell_map": cell_map,
-    }
-    if class_conflicts:
-        plan["class_conflicts"] = class_conflicts
-    if dropped_classes:
-        plan["dropped_classes_no_pdk_cell"] = dropped_classes
-        plan["requested_count"] = count
-    return plan
+    return _sp.build_spare_cells_plan(placed_cells, density, core_box,
+                                      cell_map, has_pad_ring=has_pad_ring,
+                                      used_cells=used_cells)
 
 
 def _spare_actual_density(plan: Dict[str, Any], placed_cells: int) -> float:
@@ -23663,6 +23390,22 @@ def _emit_step18_spare_record(project: Path, out_dir: Path, log_path: Path,
     if spare_warn:
         spare_note += f" | {spare_warn}"
     return spare_note, written
+
+
+#: The cell FAMILIES the direct deck's resizer/CTS pool excludes (the regexes
+#: `_dont_use_family_fallback_tcl` emits, OpenSTA-anchored, case-insensitive).
+#: Step 17 on LibreLane hands the same exclusion to the tool as
+#: `EXTRA_EXCLUDED_CELLS`: MEASURED on the spm copy without it,
+#: RepairDesignPostGPL built a six-deep `dlyb_1` fanout chain and SS setup
+#: closed at -1.25 ns.
+_DONT_USE_FAMILY_PATTERNS = (".*probe_.*", ".*probec_.*", ".*lpflow.*",
+                             ".*clkdly.*", ".*dly.*", ".*delay.*")
+
+
+def _dont_use_family_cells(cell_names: Sequence[str]) -> List[str]:
+    """The library cells `_DONT_USE_FAMILY_PATTERNS` exclude, by whole name."""
+    rx = [re.compile(p, re.I) for p in _DONT_USE_FAMILY_PATTERNS]
+    return sorted({c for c in cell_names if any(r.fullmatch(c) for r in rx)})
 
 
 def _dont_use_family_fallback_tcl() -> str:
@@ -33345,6 +33088,17 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
         # are not in the ODB, and probe F measured the whole repair recipe
         # working once they are read back.
         lines = [ln for ln in lines if not ln.startswith("read_lef ")]
+    # A deck that loads LibreLane's placed DEF (steps 15..18,
+    # `librelane_contract.placement_consumer_tcl`) has no netlist block: its
+    # `read_def` line is the design-load site the checkpoint replaces.
+    if not any(ln.startswith("read_verilog ") for ln in lines):
+        _ll_load = [i for i, ln in enumerate(lines)
+                    if ln.startswith("read_def ") and i and "placement_consumer_tcl"
+                    in lines[i - 1]]
+        if _ll_load:
+            lines[_ll_load[0]:_ll_load[0] + 1] = [
+                "read_verilog <librelane placed DEF>",
+                "link_design <librelane placed DEF>"]
     i_rv = _index_of(lambda ln: ln.startswith("read_verilog "), "read_verilog")
     # THE LOAD SITE IS A BLOCK, NOT A PAIR. A chip-path deck reads the core
     # netlist AND the pad-carrying chip top before linking (MEASURED on
@@ -36399,10 +36153,169 @@ def _librelane_floorplan_modes(project: Path) -> Dict[str, str]:
     return {step: _ll.selected_mode(project, step) for step in ("15", "15.5ic")}
 
 
+def _librelane_placement_modes(project: Path) -> Dict[str, str]:
+    """The contract switch for placement (17) and its spare pool (18).
+
+    Step 18's spares are inserted inside the placement the deck builds, so
+    they have one producer with step 17: when 18 is not named it follows 17,
+    and naming it differently is refused by the caller
+    (`LL_SPARE_PLACEMENT_SPLIT_UNSUPPORTED`)."""
+    import librelane_contract as _ll
+    switch = project / "phase3/librelane_switch.json"
+    named = {}
+    if switch.is_file():
+        try:
+            named = json.loads(switch.read_text()).get("steps") or {}
+        except (OSError, ValueError):
+            named = {}
+    m17 = _ll.selected_mode(project, "17")
+    return {"17": m17,
+            "18": _ll.selected_mode(project, "18") if "18" in named else m17}
+
+
+def _merge_librelane_spare_record(plan: Dict[str, Any], record: Path) -> None:
+    """Carry what `Vibeic.InsertSpareCells` MEASURED into the step-18 plan.
+
+    The plan's coordinates are the grid it asked for; the step records where
+    each spare actually legalized (`llx/lly`, with `planned_llx/lly`) and its
+    tie-off/supply/check_placement counts under `measured`. Only instances the
+    step names are updated; a missing record changes nothing, and step 18's
+    own log reader still decides whether anything was observed."""
+    try:
+        doc = json.loads(record.read_text())
+    except (OSError, ValueError):
+        return
+    placed = {i.get("name"): i for i in doc.get("instances") or []
+              if isinstance(i, dict)}
+    for inst in plan.get("instances") or []:
+        got = placed.get(inst.get("name"))
+        if got is not None:
+            for key in ("llx", "lly", "planned_llx", "planned_lly"):
+                if key in got:
+                    inst[key] = got[key]
+    if isinstance(doc.get("measured"), dict):
+        plan["librelane_measured"] = doc["measured"]
+    plan["producer"] = "Vibeic.InsertSpareCells"
+
+
+#: Step 17 `dual`: both arms start from the SAME step-15 LibreLane State and
+#: are measured by the SAME instrument (LibreLane `OpenROAD.STAMidPNR` on each
+#: arm's placed view). review70 row 17's order: check_placement 0 is a hard
+#: requirement (an arm with violations is not eligible), then setup WS/TNS.
+_PLACEMENT_DUAL_OBJECTIVES = {"timing__setup__ws": "max",
+                              "timing__setup__tns": "max"}
+
+
+def _placement_arm_to_route(selection: Dict[str, Any]) -> str:
+    """The step-17 arm the routing session consumes. A dominating arm wins;
+    a measured, same-scope TIE (`LL_PARETO_TIE`) goes to the tool (owner
+    principle: use the tool when there is one); any unmeasured or mis-scoped
+    comparison keeps the incumbent direct placement."""
+    if selection.get("selection") in ("librelane", "openroad"):
+        return selection["selection"]
+    return "librelane" if selection.get("reason") == "LL_PARETO_TIE" else "openroad"
+
+
+def _placement_direct_arm_tcl(direct_deck: str, out_dir_c: str, arm_c: str) -> str:
+    """The direct deck's own placement, stopped before CTS, writing only into
+    the arm directory: every `write_def`/`write_db`/report redirect aimed at
+    the PnR directory is re-aimed at `arm_c`; reads are left alone."""
+    marker = f'puts "{_PNR_STAGE_MARKER} cts"'
+    lines = direct_deck.splitlines()
+    cut = [i for i, ln in enumerate(lines) if ln.strip() == marker]
+    if len(cut) != 1:
+        raise ValueError("LL_PLACEMENT_SEAM_AMBIGUOUS: no single CTS stage in the direct deck")
+    head = "\n".join(lines[:cut[0]])
+    for verb in ("write_def ", "write_db ", "write_verilog ", "> "):
+        head = head.replace(verb + out_dir_c + "/", verb + arm_c + "/")
+    return (head + "\n"
+            + f"write_def {arm_c}/placed.def\n"
+            + f"write_verilog {arm_c}/placed.v\n"
+            + _build_check_placement_verdict_tcl("DIRECT_ARM", "_da")
+            + "exit 0\n")
+
+
+def _select_placement_arm(project: Path, image: str, container: str,
+                          out_dir: Path, configs: Dict[str, Path],
+                          ll_state: Path, direct_deck: str,
+                          mounts: List[Tuple[Path, str]]) -> Dict[str, Any]:
+    """Run step 17's direct arm beside the LibreLane arm and select by
+    measurement (`librelane_contract.execute_dual` / `select_arms`).
+
+    Returns the selection document. `UNDETERMINED` (a tie, a trade-off, an
+    unmeasured arm) keeps the incumbent direct placement -- the production
+    default -- and says so; a missing measurement never selects an arm.
+    """
+    import librelane_contract as _ll
+    sta_cfg = configs["OpenROAD.STAMidPNR"]
+    out_dir_c = _to_container_path(str(out_dir), container)
+
+    def _judge(folder: Path, arm_dir: Path, violations: Optional[int],
+               sdc: Path) -> Path:
+        report = arm_dir / "gate.json"
+        doc = _ll.judge_step(folder, list(_PLACEMENT_DUAL_OBJECTIVES), report,
+                             scope={"step": "17", "instrument": "OpenROAD.STAMidPNR",
+                                    "image": image, "sdc_sha256": _ll.digest(sdc)})
+        doc["metrics"]["check_placement_violations"] = (
+            {"status": "MEASURED", "value": violations}
+            if isinstance(violations, int) else {"status": "NOT_MEASURED"})
+        if violations != 0 and doc["verdict"] == "PASS":
+            doc["verdict"] = "FAIL" if isinstance(violations, int) else "NOT_MEASURED"
+        _aa.write_text(report, json.dumps(doc, indent=2) + "\n")
+        return report
+
+    # ONE constraint set for both arms. The tool State carries the SDC its
+    # own steps re-wrote (`write_sdc`); MEASURED on the spm copy its bytes
+    # differ from the deck's, and select_arms refused LL_ARM_SCOPE_MISMATCH.
+    sdc = out_dir / "constraint.sdc"
+
+    def librelane_arm(arm_dir: Path) -> Path:
+        state = json.loads(ll_state.read_text())
+        state["sdc"] = str(sdc.resolve())
+        sta_state = arm_dir / "sta_state_in.json"
+        _aa.write_text(sta_state, json.dumps(state, indent=2) + "\n")
+        folder = _ll.run_chain(project, image, [("OpenROAD.STAMidPNR", sta_cfg, sta_state)],
+                               mounts=mounts, lane="17-dual-librelane")[-1]
+        record = out_dir / "librelane_spare_cells.json"
+        measured = (json.loads(record.read_text()).get("measured") or {}
+                    if record.is_file() else {})
+        return _judge(folder, arm_dir, measured.get("check_placement_violations"), sdc)
+
+    def openroad_arm(arm_dir: Path) -> Path:
+        arm_c = _to_container_path(str(arm_dir), container)
+        tcl = arm_dir / "placement.tcl"
+        _aa.write_text(tcl, _placement_direct_arm_tcl(direct_deck, out_dir_c, arm_c))
+        log = arm_dir / "openroad.log"
+        cmd = (f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:{TOOLS_IN_CONTAINER}/bin:$PATH"
+               f" && openroad -no_init -exit {_to_container_path(str(tcl), container)}"
+               f" > {_to_container_path(str(log), container)} 2>&1")
+        _docker_exec(container, cmd, marker=str(tcl))
+        text = log.read_text(errors="replace") if log.is_file() else ""
+        m = re.search(r"DIRECT_ARM_CHECK_PLACEMENT_VIOLATIONS\s+(\d+)", text)
+        violations = int(m.group(1)) if m else None
+        try:
+            state = _ll.state_from_direct(
+                project, image, sta_cfg,
+                {"def": arm_dir / "placed.def", "nl": arm_dir / "placed.v", "sdc": sdc},
+                arm_dir / "bridge", mounts=mounts)
+            folder = _ll.run_chain(project, image, [("OpenROAD.STAMidPNR", sta_cfg, state)],
+                                   mounts=mounts, lane="17-dual-openroad")[-1]
+        except _ll.Refusal as exc:
+            doc = {"verdict": "NOT_MEASURED", "reason": str(exc), "metrics": {},
+                   "scope": {}}
+            _aa.write_text(arm_dir / "gate.json", json.dumps(doc, indent=2) + "\n")
+            return arm_dir / "gate.json"
+        return _judge(folder, arm_dir, violations, sdc)
+
+    return _ll.execute_dual(project, "17", librelane_arm, openroad_arm,
+                            _PLACEMENT_DUAL_OBJECTIVES)
+
+
 def _prepare_librelane_floorplan_for_route(
         project: Path, pdk: PdkConfig, container: str, out_dir: Path,
         generic_pnr_tcl: str, modes: Dict[str, str],
         io_view_discover=_discover_padring_io_views,
+        placement: Optional[Dict[str, Any]] = None,
         ) -> Tuple[StepResult, Optional[str]]:
     """Steps 15/15.5ic through LibreLane, handed to the direct routing deck.
 
@@ -36413,6 +36326,14 @@ def _prepare_librelane_floorplan_for_route(
     sha256; the tool DEF is then gated by `pad_ring_check --librelane-state`
     and consumed by the same `read_def -floorplan_initialize` seam as the
     direct ring.  No producer failure falls back to the direct path.
+
+    With ``placement`` (steps 17/18 on LibreLane) the chain continues through
+    the same flow's `OpenROAD.GlobalPlacement` .. `OpenROAD.DetailedPlacement`
+    and then `Vibeic.InsertSpareCells`, fed from the step-15 State with no
+    bridge between them. ``placement`` carries the runner's step-18 plan and
+    tie-low cell. The final ODB/DEF are handed to `librelane_placed.odb` /
+    `placed.def`, and the deck is `librelane_contract.placement_consumer_tcl`:
+    `read_db` of that ODB, then the direct deck from CTS on.
     """
     import librelane_contract as _ll
     t0 = time.time()
@@ -36463,7 +36384,8 @@ def _prepare_librelane_floorplan_for_route(
         notes.append(f"{name}: rc={rc}")
         if rc != 0:
             return _fail("LL_PAD_ASSIGNMENT_FAILED", f"{name} rc={rc}: {(out + err)[-800:]}")
-    last = ("Odb.RemovePDNObstructions" if modes["15"] == "librelane"
+    last = ("OpenROAD.DetailedPlacement" if placement is not None
+            else "Odb.RemovePDNObstructions" if modes["15"] == "librelane"
             else "OpenROAD.PadRing")
     mounts = [(Path(pdk_root) / str(pdk.name), f"/pdk/{pdk.name}")]
     try:
@@ -36477,6 +36399,27 @@ def _prepare_librelane_floorplan_for_route(
                                 "image librelane/scripts/openroad/common/pdn_cfg.tcl + "
                                 f"pdk_registry.json pdks[name={pdk.name}].pdn_ring.connects")}
                    if pdn_cfg and modes["15"] == "librelane" else None)
+        if placement is not None:
+            steps.append("Vibeic.InsertSpareCells")
+            overlay = dict(overlay or {})
+            overlay.update(_ll.placement_levers(project))
+            plan_path = project / "phase3/librelane/15-config/spare_plan.json"
+            plan_path.parent.mkdir(parents=True, exist_ok=True)
+            _aa.write_text(plan_path, json.dumps(placement["spare_plan"], indent=2) + "\n")
+            overlay["VIBEIC_SPARE_PLAN"] = (
+                str(plan_path.resolve()),
+                "phase3_one_shot_runner step-18 plan (_spare_plan, --spare-density)")
+            _lib_text = _v1_6_604_read_text_or_container_cat(pdk.liberty, container) or ""
+            _excluded = _dont_use_family_cells(_V1_6_596_RE_CELL_DECL.findall(_lib_text))
+            if _excluded:
+                overlay["EXTRA_EXCLUDED_CELLS"] = (
+                    _excluded,
+                    "phase3_one_shot_runner._DONT_USE_FAMILY_PATTERNS (the direct "
+                    "deck's resizer dont_use families) over the PDK liberty")
+            if placement.get("tie_lo"):
+                overlay["VIBEIC_SPARE_TIELO_CELL"] = (
+                    placement["tie_lo"],
+                    "phase3_one_shot_runner tie-low discovery over the PDK liberty")
         configs = _ll.resolve_step_configs(project, image, str(pdk.name), steps,
                                            pdk_root=Path(pdk_root), folder="15-config",
                                            overlay=overlay)
@@ -36491,17 +36434,38 @@ def _prepare_librelane_floorplan_for_route(
         return _fail(exc.code, str(exc))
     by_step = dict(zip(steps, folders))
     ring_state = by_step["OpenROAD.PadRing"] / "state_out.json"
-    final_state = folders[-1] / "state_out.json"
+    final_state = (by_step["Odb.RemovePDNObstructions"] / "state_out.json"
+                   if placement is not None else folders[-1] / "state_out.json")
     padring = out_dir / "padring.def"
     handoff = project / "reports/phase3/librelane_floorplan_handoff.json"
+    placed_handoff = project / "reports/phase3/librelane_placement_handoff.json"
     try:
         _ll.handoff_to_direct(ring_state, {"def": padring}, handoff.with_name(
             "librelane_padring_handoff.json"))
         _ll.handoff_to_direct(final_state, {"def": out_dir / "floorplan.def",
                                             "odb": out_dir / "librelane_floorplan.odb"},
                               handoff)
+        if placement is not None:
+            _ll.handoff_to_direct(folders[-1] / "state_out.json",
+                                  {"def": out_dir / "placed.def",
+                                   "odb": out_dir / "librelane_placed.odb"},
+                                  placed_handoff)
     except _ll.Refusal as exc:
         return _fail(exc.code, str(exc))
+    if placement is not None:
+        # The tool logs that carry step 17/18's verdicts, where the existing
+        # readers look (`placement_legality_check` scans pnr/*.log; step 18's
+        # record reads its markers): DetailedPlacement's own check_placement
+        # (a violation fails that step) and the spare step's count.
+        for step_id, name in (("OpenROAD.DetailedPlacement", "librelane_placement.log"),
+                              ("Vibeic.InsertSpareCells", "librelane_spare_cells.log")):
+            logs = sorted(by_step[step_id].glob("*.log"))
+            _aa.write_text(out_dir / name, "".join(
+                f"# {log.relative_to(project)}\n" + log.read_text(errors="replace")
+                for log in logs if log.name != "invocation.log"))
+        _spare_record = by_step["Vibeic.InsertSpareCells"] / "spare_cells.json"
+        if _spare_record.is_file():
+            shutil.copyfile(_spare_record, out_dir / "librelane_spare_cells.json")
     # The existing 15.5ic gate, on the tool's own PadRing DEF.  Its PDK reads go
     # through `_pad_ring`'s environment seam -- the run's container once phase
     # 3 has published one -- so it takes the SAME container-side PDK tree as the
@@ -36544,8 +36508,50 @@ def _prepare_librelane_floorplan_for_route(
             _padring_physical_only_instance_tcl(text) + "\n"
             + _ll.def_supply_tcl(text, _PNR_STAGE_MARKER),
             exclusion_tcl)
+        direct_consumer = consumer
+        if placement is not None:
+            consumed = out_dir / "placed.def"
+            _tie_nets = [f"spare_tielo_{i.get('name')}"
+                         for i in placement["spare_plan"].get("instances") or []
+                         if i.get("cell") and i.get("name")]
+            consumer = _ll.placement_consumer_tcl(
+                consumer, _to_container_path(str(consumed), container),
+                _PNR_STAGE_MARKER,
+                _ll.def_supply_tcl(consumed.read_text(
+                    encoding="utf-8", errors="replace"), _PNR_STAGE_MARKER)
+                + "\n" + _spare_reassert_dont_touch_tcl(placement["spare_plan"])
+                + "".join(
+                    f'if {{[set _stn [[ord::get_db_block] findNet {{{n}}}]] ne "NULL"}} '
+                    f'{{ $_stn setDoNotTouch true; puts "SPARE_TIE_NET_DONT_TOUCH: {n}" }}\n'
+                    for n in _tie_nets))
     except (OSError, ValueError) as exc:
         return _fail("LL_FLOORPLAN_NO_CONSUMER", str(exc))
+    if placement is not None and placement.get("mode") == "dual":
+        try:
+            selection = _select_placement_arm(
+                project, image, container, out_dir, configs,
+                folders[-1] / "state_out.json", direct_consumer, mounts)
+        except (_ll.Refusal, OSError, ValueError, KeyError) as exc:
+            return _fail("LL_DUAL_PLACEMENT_FAILED", str(exc))
+        notes.append(f"step 17 dual: selection={selection.get('selection')} "
+                     f"({selection.get('reason') or 'dominates'}; "
+                     "phase3/tool_arms/17/selection.json)")
+        if _placement_arm_to_route(selection) != "librelane":
+            # the direct arm won, or the comparison was not measured on one
+            # scope: the incumbent direct placement runs in the routing
+            # session exactly as the arm did
+            consumer, consumed = direct_consumer, out_dir / "floorplan.def"
+            placed_handoff = handoff
+            # The LibreLane arm's records leave the paths the step-17/18
+            # readers bind to: the routing session writes its own placed.def.
+            _arm = project / "phase3/tool_arms/17/librelane"
+            for _rec in (project / "reports/phase3/librelane_placement_handoff.json",
+                         out_dir / "librelane_placement.log",
+                         out_dir / "librelane_spare_cells.log",
+                         out_dir / "librelane_spare_cells.json"):
+                if _rec.is_file():
+                    _arm.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(_rec), str(_arm / _rec.name))
     for view in io_lefs:
         if view not in pdk.macro_lefs:
             pdk.macro_lefs.append(view)
@@ -36555,7 +36561,8 @@ def _prepare_librelane_floorplan_for_route(
     _record_physical_view_inventory(project, consumer)
     notes.append(f"LibreLane {steps[0]}..{steps[-1]} ({len(steps)} steps, {image}); "
                  f"routing consumer reads {consumed.relative_to(project)} "
-                 f"(handoff receipt {handoff.relative_to(project)}); "
+                 f"(handoff receipt "
+                 f"{(placed_handoff if placement is not None else handoff).relative_to(project)}); "
                  f"{len(excluded)} port net(s) excluded")
     return StepResult("pad_ring_gen", "PASS", time.time() - t0, "; ".join(notes),
                       [str(padring), str(consumed), str(handoff)],
@@ -37645,6 +37652,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # post-route well-tie repair (the source of the y~666 um NW/DV/PP seam on
     # spm final14) must not edit them.  Absent switch: byte-identical deck.
     _ll_fp_modes = _librelane_floorplan_modes(project)
+    # Steps 17/18 producer switch: LibreLane GlobalPlacement..DetailedPlacement
+    # + `Vibeic.InsertSpareCells`, continuing the step-15 LibreLane chain.
+    _ll_pl_modes = _librelane_placement_modes(project)
     tapcell_prune_block = ("" if _ll_fp_modes["15"] == "librelane"
                            else _build_tapcell_prune_tcl(pdk, _spare_pts_um))
     # #1215-PDN — derived (never tuned) EM strap-width floor from this
@@ -38187,6 +38197,20 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
 
     def _install_route_deck() -> Optional[StepResult]:
         """Write the current geometry's route deck, refreshing its ring first."""
+        _pl_refusal = None
+        if _ll_pl_modes["17"] != _ll_pl_modes["18"]:
+            _pl_refusal = ("LL_SPARE_PLACEMENT_SPLIT_UNSUPPORTED",
+                           "the spare pool (18) is inserted inside the "
+                           f"placement (17) producer: {_ll_pl_modes}")
+        elif (_ll_pl_modes["17"] != "direct"
+              and set(_ll_fp_modes.values()) != {"librelane"}):
+            _pl_refusal = ("LL_PLACEMENT_NEEDS_LIBRELANE_FLOORPLAN",
+                           "step 17 on LibreLane continues the step-15 "
+                           f"LibreLane State; select 15/15.5ic too ({_ll_fp_modes})")
+        if _pl_refusal is not None:
+            return StepResult("pnr", "FAIL", time.time() - t0,
+                              f"{_pl_refusal[0]}: {_pl_refusal[1]}",
+                              extras={"finding": _pl_refusal[0]})
         if not _chip_padring and set(_ll_fp_modes.values()) != {"direct"}:
             # The proven LibreLane segment is the Chip flow's; a core-only
             # design has no pad declarations for it.  Never a silent direct run.
@@ -38222,7 +38246,15 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             _ll_fp_geometry[:] = [_fp_now]
             pad_result, consumer_tcl = _prepare_librelane_floorplan_for_route(
                 project, pdk, container, out_dir, _generic_pnr_tcl,
-                _ll_fp_modes)
+                _ll_fp_modes,
+                placement=({"spare_plan": spare_plan, "mode": _ll_pl_modes["17"],
+                            "tie_lo": (f"{_tie_lo_cell}/{_tie_lo_pin}"
+                                       if _tie_lo_cell else None)}
+                           if _ll_pl_modes["17"] != "direct" else None))
+            if (pad_result.status == "PASS" and _ll_pl_modes["17"] != "direct"
+                    and "LIBRELANE_PLACEMENT_CONSUMED" in (consumer_tcl or "")):
+                _merge_librelane_spare_record(
+                    spare_plan, out_dir / "librelane_spare_cells.json")
         else:
             pad_result, consumer_tcl = _prepare_padring_for_route(
                 project, pdk, container, out_dir, out_dir_c,
@@ -38887,8 +38919,13 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _spare_record_written = False
     try:
         spare_note, _spare_record_written = _emit_step18_spare_record(
-            project, out_dir, _pnr_logp, spare_plan,
-            placed_cells_est, spare_dens, spare_warn)
+            project, out_dir,
+            # Step 18 on LibreLane: the markers are the custom step's own log.
+            (out_dir / "librelane_spare_cells.log"
+             if _ll_pl_modes["18"] != "direct"
+             and "LIBRELANE_PLACEMENT_CONSUMED" in pnr_tcl.read_text(errors="replace")
+             else _pnr_logp),
+            spare_plan, placed_cells_est, spare_dens, spare_warn)
     except Exception as _s18_exc:  # nosec — never fatal to PnR
         spare_note = f" | spare_record_emit_failed: {_s18_exc}"
     if "SPARE_INSERTION_NOT_OBSERVED" in spare_note:
@@ -55230,10 +55267,18 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
         return None
 
     if not clocks:
-        # No SDC parsed — fall back to a single nominal core clock so the plan
-        # still carries a positive period + source object. Reachable only on
-        # the CONTENT trigger, where there is no real plan to destroy.
-        clocks["clk"] = {"name": "clk", "period_ns": 10.0, "source": "clk"}
+        # NO CLOCK IS INVENTED (step-16 migration, review70 row 16). This used
+        # to write a nominal 10 ns "clk" here, which satisfied every substance
+        # check downstream with a clock no input declared. LibreLane does the
+        # honest thing in the same situation -- CTS warns and is skipped -- and
+        # so does this producer now: no plan is written, and `clock_plan_check`
+        # reports the absence (CLOCK_PLAN_MISSING / the thin plan's own
+        # CLOCK_NO_PERIOD) instead of grading a fabricated one.
+        notes.append(
+            "clock_plan.json NOT written: no create_clock/create_generated_clock "
+            f"in any SDC ({len(sdc_paths)} file(s) read) -- a design with no "
+            "declared clock says so; no nominal clock is invented")
+        return None
 
     clock_plan.parent.mkdir(parents=True, exist_ok=True)
     clock_plan.write_text(json.dumps({
@@ -55246,8 +55291,6 @@ def emit_clock_plan(project: Path, clock_plan: Path, primary_def: Path,
         # cannot disagree about the inputs, and the record survives clone /
         # copy / rsync / archive extraction the way an mtime does not.
         "derived_from": _pl.clock_plan_sdc_digests(project, sdc_paths),
-        "buf_strategy": "clkbuf chain (heuristic; ASIC-grade CTS skill "
-                        "should refine via cts-plan)",
     }, indent=2) + "\n")
     return str(clock_plan)
 
