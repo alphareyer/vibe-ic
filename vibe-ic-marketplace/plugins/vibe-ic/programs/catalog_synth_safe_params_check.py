@@ -123,7 +123,7 @@ def judge(netlist: dict, ips: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     ``netlist`` is Yosys's ``write_json`` after ``hierarchy -check -top``.
     """
-    _calibration.assert_calibrated(f"{PROGRAM}::judge")
+    _calibration.assert_calibrated("catalog_synth_safe_params_check::judge")
     rows = []
     for name, module in sorted((netlist.get("modules") or {}).items()):
         attrs = module.get("attributes") or {}
