@@ -18018,6 +18018,13 @@ _PNR_RESUME_ELIDE_END = "# <<<PNR_RESUME_ELIDE_END>>>"
 #: deck resumes from the handed-over ODB after END (`librelane_cts_hold`).
 _PNR_CTS_HOLD_BEGIN = "# <<<PNR_CTS_HOLD_BEGIN>>>"
 _PNR_CTS_HOLD_END = "# <<<PNR_CTS_HOLD_END>>>"
+#: Step 21 (global + detailed route) inside the resume-elided region: from this
+#: line to `_PNR_RESUME_ELIDE_END` (the route checkpoint). The DRT-0305 PG-net
+#: cleanup opens the region and the main `global_route` follows it; a
+#: LibreLane selection of step 21 runs the cleanup, stops the deck at that
+#: `global_route`, routes on LibreLane, and resumes the deck after the
+#: checkpoint (`librelane_route`), exactly as the fatal-signal resume does.
+_PNR_ROUTE_BEGIN = "# <<<PNR_ROUTE_BEGIN>>>"
 
 
 def _pnr_stage_begin(label: str) -> str:
@@ -32628,6 +32635,7 @@ if {{[catch {{
 # design actually routes instead of silently shipping unrouted. See
 # _pg_net_cleanup_tcl for the full rationale.
 puts "{_PNR_STAGE_MARKER} global_route"
+# <<<PNR_ROUTE_BEGIN>>>
 {pg_cleanup_block}global_route
 # === v0.1.26 post-global-route SETUP / DRV repair ===
 # Re-estimate RC from global routing and repair again so the final routed
@@ -37732,6 +37740,19 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         return StepResult("pnr", "FAIL", time.time() - t0, _ll_cts_refusal,
                           extras={"finding": _ll_cts_refusal.split(":")[0],
                                   "librelane_modes": _ll_cts_modes})
+    # Step 21 (global + detailed route) producer switch (mig99). Absent switch:
+    # the deck and its single session are unchanged.
+    import librelane_route as _llroute
+    _ll_route_mode = _llroute.modes(project)[_llroute.STEP]
+    if _ll_route_mode != "direct":
+        try:
+            _llroute.switch_knobs(project)
+            _llroute.seed_arms(project)
+        except ValueError as exc:
+            return StepResult("pnr", "FAIL", time.time() - t0,
+                              f"LL_ROUTE_CONFIG_REFUSED: {exc}",
+                              extras={"finding": "LL_ROUTE_CONFIG_REFUSED",
+                                      "librelane_modes": {_llroute.STEP: _ll_route_mode}})
     tapcell_prune_block = ("" if _ll_fp_modes["15"] == "librelane"
                            else _build_tapcell_prune_tcl(pdk, _spare_pts_um))
     # #1215-PDN — derived (never tuned) EM strap-width floor from this
@@ -38499,7 +38520,28 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         # loop-invariant (computed once, above the loop).
         _pnr_aside = _set_aside_session_products(_pnr_products)
         try:
-            if set(_ll_cts_modes.values()) != {"direct"}:
+            if _ll_route_mode != "direct":
+                # Step 21 on LibreLane: the same approach, split at the route
+                # region (`librelane_route.execute`); with 19/20 on LibreLane
+                # too, their split runs first and hands over to the route.
+                rc, out, err = _llroute.execute(
+                    sys.modules[__name__], project=project, pdk=pdk, container=container,
+                    out_dir=out_dir, out_dir_c=out_dir_c, pnr_tcl=pnr_tcl,
+                    mode=_ll_route_mode, cmd=cmd, spare_plan=spare_plan,
+                    exec_kwargs={"log_path": _pnr_logp,
+                                 "progress_globs": ["sdr_child_*.log"],
+                                 "hard_ceiling_s": _pnr_ceiling},
+                    cts_hold=(None if set(_ll_cts_modes.values()) == {"direct"} else
+                              functools.partial(
+                                  _llcts.execute, sys.modules[__name__], project=project,
+                                  pdk=pdk, container=container, out_dir=out_dir,
+                                  out_dir_c=out_dir_c, pnr_tcl=pnr_tcl,
+                                  modes=_ll_cts_modes, cmd=cmd, spare_plan=spare_plan,
+                                  overlay=_ll_cts_overlay,
+                                  exec_kwargs={"log_path": _pnr_logp,
+                                               "progress_globs": ["sdr_child_*.log"],
+                                               "hard_ceiling_s": _pnr_ceiling})))
+            elif set(_ll_cts_modes.values()) != {"direct"}:
                 # Steps 19/20 on LibreLane: the same approach, split at the
                 # CTS/hold region (`librelane_cts_hold.execute`).
                 rc, out, err = _llcts.execute(

@@ -31,7 +31,7 @@ import os as _os
 import re
 import sys as _sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
@@ -294,7 +294,9 @@ def execute(
         R, *, project: Path, pdk: Any, container: str, out_dir: Path,
         out_dir_c: str, pnr_tcl: Path, modes: Dict[str, str], cmd: str,
         spare_plan: Optional[Dict[str, Any]], overlay: Dict[str, Tuple[Any, str]],
-        exec_kwargs: Dict[str, Any]) -> Tuple[int, str, str]:
+        exec_kwargs: Dict[str, Any],
+        after_handoff: Optional[Callable[..., Tuple[int, str, str]]] = None
+) -> Tuple[int, str, str]:
     """Steps 19/20 on LibreLane inside one PnR approach (T98).
 
     1. the direct deck runs up to `R._PNR_CTS_HOLD_BEGIN` and checkpoints;
@@ -307,7 +309,10 @@ def execute(
     4. the selected views go to `post_cts.def` / `post_hold.def` /
        `post_hold.odb` and the tool's `cts.rpt` to `cts/clock_tree.rpt`,
        all sha256-bound (`reports/phase3/librelane_cts_hold_handoff.json`);
-    5. the deck resumes from `post_hold.odb` after `R._PNR_CTS_HOLD_END`.
+    5. the deck resumes from `post_hold.odb` after `R._PNR_CTS_HOLD_END`;
+       or, when step 21 is on LibreLane too (`librelane_route.execute`),
+       ``after_handoff(post_hold_odb_c, post_hold_def_c, after_restore_tcl,
+       out, err)`` continues from the handoff instead.
 
     Returns `(rc, stdout, stderr)` like `R._docker_exec`. A refusal returns a
     nonzero rc with the refusal code in stdout and in the log; it never runs
@@ -580,6 +585,9 @@ def execute(
             _log(f"# <<< LIBRELANE {label}")
     _log(f"PNR_CTS_HOLD_HANDOFF: selected={selected} receipt="
          f"{handoff.relative_to(project)}")
+    if after_handoff is not None:
+        return after_handoff(f"{out_dir_c}/post_hold.odb", f"{out_dir_c}/post_hold.def",
+                             after, out, err)
     tail_cmd = cmd.replace(pnr_tcl_c, R._to_container_path(str(tail_tcl), container)
                            ).replace(f"tee {out_dir_c}/openroad.log",
                                      f"tee -a {out_dir_c}/openroad.log")

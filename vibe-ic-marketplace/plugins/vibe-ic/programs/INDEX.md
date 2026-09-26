@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1365
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1365)
+- **Total programs (excluding helpers / shims):** 1366
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1366)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1356 |
+| `any` | 1357 |
 
 ## Alphabetical listing
 
@@ -731,6 +731,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `librelane_ir_antenna` | any | — | Opt-in steps 24, 26 and 26.5ic through LibreLane tool steps. |
 | `librelane_postroute` | any | — | Steps 28, 29 and 33 read the post-route state the tool already produced. |
 | `librelane_prelayout` | any | — | Opt-in steps 7, 8 and 10 through LibreLane OpenROAD.CheckSDCFiles + STAPrePNR. |
+| `librelane_route` | any | — | step 21 (global + detailed routing) on LibreLane (lane mig99). |
 | `librelane_signoff` | any | — | Opt-in steps 22 and 23 through LibreLane OpenROAD.RCX + OpenROAD.STAPostPNR. |
 | `librelane_step37` | any | — | Opt-in step-37 LibreLane stream-out from vibe-ic's admitted routed DEF. |
 | `lin_protocol_synth` | any | v0.1.84 | LIN-class protocol synth helper. |
@@ -1437,7 +1438,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1356 programs)
+### `any` (1357 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2139,6 +2140,7 @@ _(no programs in this group)_
 - `librelane_ir_antenna` — Opt-in steps 24, 26 and 26.5ic through LibreLane tool steps.
 - `librelane_postroute` — Steps 28, 29 and 33 read the post-route state the tool already produced.
 - `librelane_prelayout` — Opt-in steps 7, 8 and 10 through LibreLane OpenROAD.CheckSDCFiles + STAPrePNR.
+- `librelane_route` — step 21 (global + detailed routing) on LibreLane (lane mig99).
 - `librelane_signoff` — Opt-in steps 22 and 23 through LibreLane OpenROAD.RCX + OpenROAD.STAPostPNR.
 - `librelane_step37` — Opt-in step-37 LibreLane stream-out from vibe-ic's admitted routed DEF.
 - `lin_protocol_synth` — LIN-class protocol synth helper.  _[v0.1.84]_
