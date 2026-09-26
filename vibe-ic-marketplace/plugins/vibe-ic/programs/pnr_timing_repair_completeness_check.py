@@ -77,6 +77,16 @@ the gate be wired UNCONDITIONALLY: a `condition_files_exist` on the very script
 whose absence would be interesting is the self-disabling shape
 `flow_condition_reachability_check` exists to refuse.
 
+In directory mode a deck that restores a checkpoint (`read_db` / `read_def`)
+and runs no build, placement or resizer command is NOT a timing session: it is
+recorded under `not_timing_sessions` with its sha256 and skipped, never
+passed. Measured on spm run23 and the LibreLane chain: the scoped antenna ECO
+(`pnr_antenna_isolated_retry.tcl`, v1.24.64) and the pre-CTS head of a split
+session (`pnr_cts_head.tcl`, T98) matched `pnr*.tcl` and turned step 17 red
+while every deck that placed or optimised carried the chain. The rule reads
+what the deck does, not its name; see `_checkpoint_session_without_timing_work`.
+Every audited deck also carries its sha256, so the verdict names the bytes.
+
 KNOWN HARDENING GAP (disclosed, not fixed here)
 -----------------------------------------------
 This is a token audit, not a Tcl interpreter. Two shapes still read as present:
@@ -102,6 +112,7 @@ Exit codes::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -167,6 +178,53 @@ def _looks_like_tcl_pnr(text: str) -> bool:
         r"\bplace_pins\b", r"\binitialize_floorplan\b",
     )
     return any(re.search(a, text) for a in anchors)
+
+
+#: Commands through which a deck BUILDS, PLACES or OPTIMISES the design. Only a
+#: deck that runs at least one of them carries the timing-repair obligation this
+#: gate audits: the silicon-DOA shape is an optimising session that never ran
+#: the setup chain. `set_wire_rc` / `estimate_parasitics` are deliberately not
+#: here: they set up parasitics and change no cell, wire or placement.
+_TIMING_BEARING = re.compile(
+    r"\b(?:read_verilog|link_design|initialize_floorplan|global_placement"
+    r"|detailed_placement|place_design|clock_tree_synthesis|repair_design"
+    r"|repair_timing|repair_clock_nets|repair_tie_fanout|buffer_ports"
+    r"|remove_buffers)\b")
+
+#: A deck that resumes from a checkpoint the run already wrote.
+_CHECKPOINT_RESTORE = re.compile(r"^\s*(?:read_db|read_def)\b", re.M)
+
+
+def _checkpoint_session_without_timing_work(text: str) -> bool:
+    """True for a deck that restores an existing checkpoint and neither
+    builds, places nor optimises anything in it.
+
+    Two such decks share the step-17 directory with the P&R flow and match
+    `pnr*.tcl`, so directory mode used to FAIL them for a chain they have no
+    business running:
+
+      * the scoped antenna ECO (`pnr_antenna_isolated_retry*.tcl`,
+        v1.24.64): `read_db` of the routed pre-repair checkpoint, then
+        `repair_antennas` + `detailed_route -nets <targets>`, and it REFUSES
+        itself if any existing cell moved. A setup chain there would break
+        the very contract the session proves;
+      * the pre-CTS head of a split session (`pnr_cts_head.tcl`, T98) when
+        placement was ingested: `read_def placed.def`, parasitics set,
+        checkpoint written. The chain runs in the tail it hands off to, and
+        that tail is audited.
+
+    The decision reads what the deck DOES, never its name. A checkpoint deck
+    that runs any placement or resizer command (a hold-only
+    `read_db` + `repair_timing -hold`, a `read_def` + `detailed_placement`) is
+    still audited and still FAILs without the chain.
+    """
+    active = _strip_commented(text)
+    return (bool(_CHECKPOINT_RESTORE.search(active))
+            and not _TIMING_BEARING.search(active))
+
+
+def _sha256(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 @dataclass
@@ -273,6 +331,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     single = len(args.script) == 1 and Path(args.script[0]).is_file()
 
     audited: List[Dict[str, Any]] = []
+    not_timing: List[Dict[str, Any]] = []
     for path in scripts:
         try:
             raw = path.read_text(errors="replace")
@@ -286,8 +345,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             skips.append(f"{path}: no OpenROAD P&R Tcl flow detected "
                          f"(no read_verilog/global_placement/repair_* anchors)")
             continue
+        if not single and _checkpoint_session_without_timing_work(raw):
+            # Directory mode only: a script named on the command line is the
+            # caller's explicit subject and is always audited.
+            not_timing.append({"script": str(path), "sha256": _sha256(path),
+                               "reason": "NOT_A_TIMING_SESSION: restores a "
+                                         "checkpoint and runs no build, "
+                                         "placement or resizer command"})
+            skips.append(f"{path}: NOT_A_TIMING_SESSION ({not_timing[-1]['sha256']})")
+            continue
         verdict, findings, summary = audit(path)
-        audited.append({"script": str(path), "verdict": verdict,
+        audited.append({"script": str(path), "sha256": _sha256(path),
+                        "verdict": verdict,
                         "summary": summary,
                         "findings": [asdict(f) for f in findings]})
 
@@ -313,6 +382,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "summary": summary,
         "findings": worst["findings"],
         "audited": audited,
+        "not_timing_sessions": not_timing,
         "skipped": skips,
     }
     if args.json:
