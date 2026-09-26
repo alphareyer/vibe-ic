@@ -1475,6 +1475,77 @@ _register(Instrument(
 ))
 
 
+def _judge_eqy_partitions(scratch: Path) -> Optional[str]:
+    import librelane_eqy as E
+    parts = E.partition_status(scratch)
+    if parts is None:
+        return "NOT_MEASURED"
+    if any("FAIL" in s.values() and "PASS" not in s.values() for s in parts.values()):
+        return "NOT_EQUIVALENT"
+    return None
+
+
+_register(Instrument(
+    name="librelane_eqy::partition_status",
+    reads="EQY per-partition strategy status files (scratch/strategies/*/*/status)",
+    ruling="T92 step 13", owner="mig-sdcsta",
+    why=("EQY's top-level status folds 'undecided' into FAIL, so the step-13 "
+         "arm-B reader works per partition. The pair differs only in one gate "
+         "cell: inv (equivalent) vs buf (not) on a defined combinational cone."),
+    judge=_judge_eqy_partitions,
+    positive=Sample(
+        provenance=("Real LibreLane 3.1.0.dev1 Yosys.EQY in the released "
+                    "vibeic-eda 0.3.77 image on 8hd-3 (.121), 2026-09-26, with "
+                    "EQY v0.69 plugins built from YosysHQ/eqy against the "
+                    "image's Yosys 0.69 (the image ships none). Gold "
+                    "calibration/cal_chain_rtl.v, gate calibration/"
+                    "cal_eqy_gate_noneq.v (buf_1 where inv_1 belongs). Copied "
+                    "unedited: logfile.txt and every strategy status file. "
+                    "calibration/eqy_not_equivalent_positive/"),
+        artefact=lambda: FIXTURES / "eqy_not_equivalent_positive"),
+    expect="NOT_EQUIVALENT",
+    negative=Sample(
+        provenance=("Same run, gate calibration/cal_eqy_gate.v (inv_1). Every "
+                    "partition PASS. calibration/eqy_equivalent_negative/"),
+        artefact=lambda: FIXTURES / "eqy_equivalent_negative"),
+))
+
+
+def _judge_eqy_xbits(scratch: Path) -> Optional[str]:
+    import librelane_eqy as E
+    found = E.xbit_partitions(scratch)
+    if found is None:
+        return "NOT_MEASURED"
+    return "XBITS_VACUOUS" if found else None
+
+
+_register(Instrument(
+    name="librelane_eqy::xbit_partitions",
+    reads="EQY partition.list (`xbits` partition tags)",
+    ruling="T92 step 13", owner="mig-sdcsta",
+    why=("EQY's miter passes any point that is x on the gold side. With a "
+         "resetless flop and no init, a non-equivalent gate cell still ends "
+         "`DONE (PASS, rc=0)`; the only trace is the `xbits` tag."),
+    judge=_judge_eqy_xbits,
+    positive=Sample(
+        provenance=("Real LibreLane Yosys.EQY run (0.3.77 image, EQY v0.69 "
+                    "plugins, 8hd-3, 2026-09-26): gold calibration/"
+                    "cal_xbits_rtl.v (resetless registered output), gate "
+                    "calibration/cal_chain_noninv.v (buf_1 where inv_1 "
+                    "belongs), script without an init. Unedited partition.list "
+                    "and logfile.txt (`DONE (PASS, rc=0)` over a non-equivalent "
+                    "gate). calibration/eqy_xbits_vacuous_positive/"),
+        artefact=lambda: FIXTURES / "eqy_xbits_vacuous_positive"),
+    expect="XBITS_VACUOUS",
+    negative=Sample(
+        provenance=("Same tool, gold calibration/cal_chain_rtl.v, gate "
+                    "calibration/cal_eqy_gate.v, script with `setundef -init "
+                    "-zero` (librelane_eqy.eqy_script). No partition tagged "
+                    "xbits. calibration/eqy_defined_init_negative/"),
+        artefact=lambda: FIXTURES / "eqy_defined_init_negative"),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════
