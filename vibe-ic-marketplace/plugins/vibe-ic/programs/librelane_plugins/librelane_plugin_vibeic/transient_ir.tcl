@@ -21,14 +21,21 @@ foreach {nets voltage} [list $::env(VDD_NETS) $::env(LIB_VOLTAGE) $::env(GND_NET
         if { [info exists ::env(VIBEIC_TRANSIENT_STEPS)] } {
             lappend arg_list -steps $::env(VIBEIC_TRANSIENT_STEPS)
         }
-        if { [info exists ::env(VIBEIC_DECAP_CAP)] } {
-            lappend arg_list -decap_cap $::env(VIBEIC_DECAP_CAP)
-        }
         if { [dict exists $vsrc_files $net] } {
             lappend arg_list -vsrc [dict get $vsrc_files $net]
         }
-        puts "=== VIBEIC_TRANSIENT_NET $net"
         set_pdnsim_net_voltage -net $net -voltage $voltage
+        if { [info exists ::env(VIBEIC_DECAP_CAP)] } {
+            # The quasi-static reference the decap's effect is measured against.
+            puts "=== VIBEIC_TRANSIENT_REF $net"
+            log_cmd analyze_power_grid {*}$arg_list
+            # VIBEIC_DECAP_CAP is in farads; the fork reads -decap_cap in the
+            # session's capacitance unit (the first liberty's), so it is
+            # divided by what one of those units is, as the session says.
+            lappend arg_list -decap_cap \
+                [expr {$::env(VIBEIC_DECAP_CAP) / [sta::capacitance_ui_sta 1.0]}]
+        }
+        puts "=== VIBEIC_TRANSIENT_NET $net"
         log_cmd analyze_power_grid {*}$arg_list
     }
 }

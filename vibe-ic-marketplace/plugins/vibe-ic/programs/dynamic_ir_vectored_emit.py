@@ -57,7 +57,8 @@ authoritative for the static tier.
 
 CLI
   python3 dynamic_ir_vectored_emit.py --project <run_dir> [--out F] [--net N]
-        [--period-ns P] [--steps N] [--decap-cap C] [--budget-pct P]
+        [--period-ns P] [--steps N] [--decap-cap F] [--budget-pct P]
+        [--spef S] [--extra-liberty L ...]
   python3 dynamic_ir_vectored_emit.py --def D --tech-lef T --cell-lef C \
         --liberty L [--macro-lef M ...] [--sdc S] --out F [--net N]
   main(argv) -> 0 emitted/skipped-honestly / 1 tool-error / 2 IO-or-arg error.
@@ -69,6 +70,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import subprocess
 import sys as _sys
@@ -271,6 +273,203 @@ def parse_total_power_w(psm_log: str) -> Optional[float]:
     return _to_float(m.group(1)) if m else None
 
 
+# ── the on-die decap: its unit, and whether it measurably did anything ─────────
+#
+# F20, measured on spm (gf180mcuD, vibeic-eda 0.3.79, one power basis):
+#
+#   the fork reads `-decap_cap` through `sta::capacitance_ui_sta`, i.e. in the
+#   SESSION's capacitance unit, which the first liberty set (here pF:
+#   `sta::capacitance_ui_sta 1.0` = 1e-12). `-decap_cap 1e-9` meant as 1 nF was
+#   modelled, and printed, as `On-die capacitance : 1.00e-21 F`.
+#
+#   and a printed on-die capacitance is not a transient result. With the unit
+#   right, VDD, period 24 ns, quasi-static bound 1.48e-02 V:
+#       1 pF  -> 1.48e-02 V  ratio 2.00      10 pF -> 1.48e-02 V  ratio 2.00
+#       100 pF -> 1.47e-02 V ratio 1.98      1 nF  -> 1.37e-02 V  ratio 1.85
+#       10 nF -> 9.61e-03 V  ratio 1.30
+#   The old rule ("on-die cap printed => genuine") called the first two, and
+#   the 1e-21 F run, genuine di/dt results. They are the scaled static bound.
+#
+# So the value is passed in the unit the session uses (derived in the deck from
+# the session itself, never a guessed constant), the printed value is read back
+# against the request, and "genuine" is earned only by a MEASURED property of
+# the dynamic solve: its droop is below a quasi-static reference solve of the
+# same net, in the same session, by more than the tool printed them to.
+
+#: Farads per unit of the session's capacitance (the first liberty's
+#: `capacitive_load_unit`, or `set_cmd_units`), asked of the session itself.
+SESSION_CAP_UNIT_TCL = "[sta::capacitance_ui_sta 1.0]"
+_PRINTED_RE = re.compile(r"^([+\-]?)(\d+)(?:\.(\d*))?(?:[eE]([+\-]?\d+))?$")
+_DYN_TEXT_RE = re.compile(r"Worst\s+dynamic\s+IR\s+drop\s*:\s*(\S+)\s*V", re.I)
+_ONDIE_TEXT_RE = re.compile(r"On-die\s+capacitance\s*:\s*(\S+)\s*F", re.I)
+
+
+def decap_arg_tcl(decap_f: float) -> str:
+    """`-decap_cap` in the session's unit: the farads divided by what one unit
+    of the session's capacitance is, as the session itself says."""
+    return f"[expr {{{float(decap_f)!r} / {SESSION_CAP_UNIT_TCL}}}]"
+
+
+def _printed(regex, text: str) -> Optional[Tuple[float, float]]:
+    """(value, one unit in its last printed digit) of a number as the tool
+    PRINTED it, or None. `1.48e-02` -> (0.0148, 1e-4); `2.00` -> (2.0, 0.01)."""
+    m = regex.search(text or "")
+    if not m:
+        return None
+    p = _PRINTED_RE.match(m.group(1))
+    if not p:
+        return None
+    decimals = len(p.group(3) or "")
+    exponent = int(p.group(4) or 0)
+    return float(m.group(1)), 10.0 ** (exponent - decimals)
+
+
+#: One block per solve in the emitter's transcript. The reference (quasi-static)
+#: solve of a net is `DYN_IR_REF`, the reported solve `DYN_IR PSM`.
+_BLOCK_RE = re.compile(r"^=== (DYN_IR_REF|DYN_IR PSM) (\S+)[^\n]*===\s*$", re.M)
+
+
+def transient_blocks(log: str) -> Dict[Tuple[str, str], str]:
+    """{("ref"|"psm", net): text} from the emitter's transcript."""
+    out: Dict[Tuple[str, str], str] = {}
+    marks = list(_BLOCK_RE.finditer(log or ""))
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(log)
+        kind = "ref" if m.group(1) == "DYN_IR_REF" else "psm"
+        out[(kind, m.group(2))] = log[m.end():end]
+    return out
+
+
+def decap_effect(reference: str, solve: str, requested_f: float) -> Dict[str, object]:
+    """Did the modelled on-die decap MEASURABLY change the transient droop?
+
+    `reference` is the net's quasi-static solve (no decap), `solve` the same
+    net's decap solve, same session; `requested_f` the decap asked for, in F.
+
+    * `DECAP_READBACK_MISMATCH` — the solve printed no on-die capacitance, or
+      one that is not the requested value to its printed precision (the unit
+      defect this exists for: 1e-9 printed as 1.00e-21 F). The solve modelled
+      something else; it is not a result about the declared decap.
+    * `NO_QUASI_STATIC_REFERENCE` / `NO_DYNAMIC_LINE` — nothing to compare.
+    * `DECAP_BELOW_RESOLUTION` — the droop equals the quasi-static bound to the
+      precision both were printed at: the number IS the scaled static bound.
+    * `DECAP_MEASURED` — the droop is below the bound by more than one unit of
+      the printed precision (half a unit of rounding on each side), so the
+      difference is certain. Only this state is `genuine`.
+    """
+    out: Dict[str, object] = {"requested_decap_f": requested_f, "genuine": False}
+    import instrument_calibration as _ic
+    try:
+        _ic.assert_calibrated("dynamic_ir_vectored_emit::decap_effect")
+    except _ic.Uncalibrated as exc:
+        out.update(state="UNCALIBRATED", reason=str(exc))
+        return out
+    cap = _printed(_ONDIE_TEXT_RE, solve)
+    if cap is None or not math.isclose(cap[0], requested_f, rel_tol=0.0,
+                                       abs_tol=cap[1] / 2.0 + 1e-9 * requested_f):
+        out.update(state="DECAP_READBACK_MISMATCH",
+                   printed_decap_f=cap[0] if cap else None,
+                   reason=(f"requested {requested_f:g} F, the solve modelled "
+                           + (f"{cap[0]:g} F" if cap else "no on-die capacitance")))
+        return out
+    out["printed_decap_f"] = cap[0]
+    if parse_cap_model(reference) != "quasi-static":
+        out.update(state="NO_QUASI_STATIC_REFERENCE",
+                   reason="no quasi-static reference solve of this net")
+        return out
+    bound, dyn = _printed(_DYN_TEXT_RE, reference), _printed(_DYN_TEXT_RE, solve)
+    if bound is None or dyn is None:
+        out.update(state="NO_DYNAMIC_LINE", reason="a solve printed no dynamic drop")
+        return out
+    resolution = (bound[1] + dyn[1]) / 2.0
+    reduction = abs(bound[0]) - abs(dyn[0])
+    out.update(quasi_static_bound_v=abs(bound[0]), dynamic_v=abs(dyn[0]),
+               reduction_v=reduction, resolution_v=resolution)
+    # In units of the printed precision, so that 0.0148 - 0.0147 (one unit,
+    # 1.0000000000000009e-4 in binary) is one unit and not a hair more.
+    if round(reduction / resolution, 6) > 1.0:
+        out.update(state="DECAP_MEASURED", genuine=True)
+    else:
+        out.update(state="DECAP_BELOW_RESOLUTION",
+                   reason=("the decap solve's droop equals the quasi-static bound "
+                           "to the printed precision"))
+    return out
+
+
+# ── the power basis: ONE for the static and the dynamic tier ───────────────────
+#
+# F20, measured on spm (gf180mcuD, 0.3.79, same DEF, same deck otherwise):
+#   static tier  (DEF, one cell liberty, no SDC/SPEF)   36.2 mW  VDD 15.0 mV
+#   dynamic tier (DEF, one cell liberty, SDC)            1.51 mW  VDD 1.25 mV
+#   both on DEF + SDC + propagated clocks + SPEF + cell and same-PVT IO/macro
+#   liberties                                           21.9 mW  VDD 7.41 /
+#                                            VSS 8.39 mV static, 14.8 / 16.8 dyn
+# The clock of a padded chip enters through an IO pad: without the pad liberty
+# it never reaches its tree. Two tiers on two bases published a "dynamic" drop
+# twelve times BELOW the static one.
+
+def _tcl_word(path) -> str:
+    """A bare Tcl word when the path needs no quoting (how the flow's other
+    decks spell paths), else the quoted form."""
+    text = str(path)
+    return text if re.fullmatch(r"[A-Za-z0-9_./+:@=,-]+", text) else _lef_tcl_word(Path(text))
+
+
+def power_basis_tcl(extra_liberties: List[str], sdc: Optional[str],
+                    spef: Optional[str]) -> str:
+    """The basis block, placed after `read_def` (T103's order, which its
+    landed producer test pins): the IO/macro liberties, the SDC with
+    propagated clocks, the SPEF. A read that fails prints a marker
+    `power_basis` records instead of being swallowed."""
+    out = "".join(f"read_liberty {_tcl_word(x)}\n" for x in dict.fromkeys(extra_liberties))
+    if sdc:
+        out += (f"if {{[catch {{read_sdc {_tcl_word(sdc)}}} _b_e]}} "
+                "{ puts \"IR_BASIS_SDC_UNREAD: $_b_e\" } else {\n"
+                "  if {[catch {set_propagated_clock [all_clocks]} _b_e]} "
+                "{ puts \"IR_BASIS_CLOCKS_UNPROPAGATED: $_b_e\" }\n}\n")
+    if spef:
+        out += (f"if {{[catch {{read_spef {_tcl_word(spef)}}} _b_e]}} "
+                "{ puts \"IR_BASIS_SPEF_UNREAD: $_b_e\" }\n")
+    return out
+
+
+def _sha256(path) -> Optional[str]:
+    import hashlib
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except (OSError, TypeError):
+        return None
+
+
+def power_basis(def_file, sdc, spef, liberties: List[str],
+                spef_reason: Optional[str] = None,
+                log: Optional[str] = None) -> Dict[str, object]:
+    """The declared basis of a PSM session, and whether the session read it.
+
+    `id` hashes the inputs (the layout, SDC and SPEF by content, the liberties
+    in read order by path), so two sessions on one basis carry one id."""
+    import hashlib
+    rec: Dict[str, object] = {
+        "layout": str(def_file), "layout_sha256": _sha256(def_file),
+        "sdc": str(sdc) if sdc else None, "sdc_sha256": _sha256(sdc) if sdc else None,
+        "spef": str(spef) if spef else None,
+        "spef_sha256": _sha256(spef) if spef else None,
+        "spef_excluded_reason": spef_reason,
+        "liberties": [str(x) for x in dict.fromkeys(liberties)],
+        "propagated_clocks": bool(sdc),
+    }
+    rec["id"] = hashlib.sha256(json.dumps(
+        [rec["layout_sha256"], rec["sdc_sha256"], rec["spef_sha256"],
+         rec["liberties"]]).encode()).hexdigest()[:16]
+    if log is not None:
+        unread = [m for m in ("IR_BASIS_SDC_UNREAD", "IR_BASIS_CLOCKS_UNPROPAGATED",
+                              "IR_BASIS_SPEF_UNREAD") if m in log]
+        rec["unread"] = unread
+        rec["complete"] = bool(sdc and spef and not unread)
+        rec["total_power_w"] = parse_total_power_w(log)
+    return rec
+
+
 def parse_sdc_period_ns(sdc_text: str) -> Optional[float]:
     """Smallest `create_clock … -period <num>` value (ns) in an SDC, or None.
     The TIGHTEST clock is the worst-case for di/dt, so we take the minimum."""
@@ -325,13 +524,47 @@ def discover_power_nets(def_file: Path) -> List[str]:
     return power
 
 
+def discover_supply_nets(def_file: Path) -> List[str]:
+    """USE POWER then USE GROUND nets of the DEF SPECIALNETS: every net the
+    static tier analyses, so the dynamic tier answers about the same nets."""
+    out: List[str] = list(discover_power_nets(def_file))
+    try:
+        text = def_file.read_text(errors="ignore")
+    except OSError:
+        return out
+    m = re.search(r"^SPECIALNETS\b.*?^END SPECIALNETS", text, re.MULTILINE | re.DOTALL)
+    if not m:
+        return out
+    for net_m in re.finditer(r"^\s*-\s+([A-Za-z_][\w$]*)(.*?)(?=^\s*-\s+|\Z)",
+                             m.group(0), re.MULTILINE | re.DOTALL):
+        if re.search(r"\bUSE\s+GROUND\b", net_m.group(2)) and net_m.group(1) not in out:
+            out.append(net_m.group(1))
+    return out
+
+
+def read_static_tier(ir_drop_json: Path) -> Dict[str, object]:
+    """The Step-24 static record: worst drop (mV), its power basis id and the
+    total power its session printed. Empty when unreadable."""
+    try:
+        d = json.loads(Path(ir_drop_json).read_text(errors="ignore"))
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    basis = d.get("power_basis") if isinstance(d.get("power_basis"), dict) else {}
+    return {"static_mv": read_static_ir_mv(Path(ir_drop_json)),
+            "basis_id": basis.get("id"), "complete": basis.get("complete"),
+            "total_power_w": basis.get("total_power_w")}
+
+
 def build_result(worst_dyn_mv: float, vdd_v: Optional[float],
                  static_tr_mv: Optional[float], ratio: Optional[float],
                  package_droop_mv: Optional[float], power_net: str,
                  period_ns: float, period_source: str, steps: Optional[int],
                  timestep_s: Optional[float], current_model: Optional[str],
                  cap_model: Optional[str],
-                 static_mv: Optional[float] = None) -> Dict[str, object]:
+                 static_mv: Optional[float] = None,
+                 decap: Optional[Dict[str, object]] = None) -> Dict[str, object]:
     """Assemble the dynamic_ir.json payload (real transient numbers + honest
     disclosure). Keeps the gate-consumed keys max_dynamic_drop_mv / vdd_v.
 
@@ -344,12 +577,16 @@ def build_result(worst_dyn_mv: float, vdd_v: Optional[float],
     figures across two different designs, PDKs, supplies and periods). Such a
     number answers the STATIC question scaled by a constant; it carries no
     independent di/dt information and is a conservative UPPER BOUND, not a
-    genuine transient result. Only a decap-aware solve (on-die capacitance
-    supplied) is a genuine dynamic droop. The payload therefore DISCLOSES which
-    of the two it is (`scaled_static_bound`) and never labels a quasi-static
-    bound as "not a static echo". chip-AGNOSTIC: keyed on the tool's own
-    capacitance-model string, no design/PDK/vendor literal."""
-    _is_genuine = isinstance(cap_model, str) and cap_model.startswith("on-die-cap")
+    genuine transient result. The payload therefore DISCLOSES which of the two
+    it is (`scaled_static_bound`) and never labels a quasi-static bound as "not
+    a static echo".
+
+    F20: a PRINTED on-die capacitance does not make it genuine either (1 pF
+    and a unit-mangled 1e-21 F both left the ratio at 2.00 on spm). Genuine is
+    the `decap` evidence of `decap_effect` — the decap solve measurably below a
+    quasi-static reference of the same net — and nothing else. chip-AGNOSTIC:
+    keyed on the tool's own printed report, no design/PDK/vendor literal."""
+    _is_genuine = isinstance(decap, dict) and decap.get("genuine") is True
     scaled_static_bound = not _is_genuine
     _solver_desc = (
         "OpenROAD PSM `analyze_power_grid -transient` performs the static DC "
@@ -361,8 +598,19 @@ def build_result(worst_dyn_mv: float, vdd_v: Optional[float],
     if _is_genuine:
         disclosure = (
             "REAL decap-aware transient (di/dt) IR-drop: " + _solver_desc +
-            " On-die capacitance was supplied, so this is a genuine dynamic "
-            "droop, not a fixed scaling of the static drop.")
+            f" The modelled on-die capacitance ({decap.get('printed_decap_f')} F, "
+            "read back as requested) lowered the droop below a quasi-static "
+            "reference solve of the same net by more than the printed "
+            "precision, so this is a genuine dynamic droop, not a fixed "
+            "scaling of the static drop.")
+    elif isinstance(cap_model, str) and cap_model.startswith("on-die-cap"):
+        disclosure = (
+            "SCALED-STATIC BOUND WITH A MODELLED DECAP: " + _solver_desc +
+            " An on-die capacitance was modelled, but its effect was not "
+            "measured above the printed precision against a quasi-static "
+            f"reference ({(decap or {}).get('state', 'no reference solve')}), "
+            "so this number is the static solve scaled by the quasi-static "
+            "ratio — a conservative UPPER BOUND, not a genuine di/dt result.")
     elif isinstance(cap_model, str) and cap_model.startswith("quasi-static"):
         disclosure = (
             "QUASI-STATIC SCALED-STATIC BOUND (no on-die decap supplied): " +
@@ -398,6 +646,8 @@ def build_result(worst_dyn_mv: float, vdd_v: Optional[float],
         "scaled_static_bound": scaled_static_bound,
         "disclosure": disclosure,
     }
+    if decap is not None:
+        res["decap_evidence"] = decap
     if static_tr_mv is not None:
         res["static_from_transient_mv"] = round(static_tr_mv, 4)
     if ratio is not None:
@@ -618,23 +868,43 @@ def _lef_tcl_word(path: Path) -> str:
 
 def _build_transient_tcl(def_file: Path, tech_lef: Path, cell_lef: Path,
                          liberty: Path, macro_lefs: List[Path],
-                         sdc: Optional[Path], power_net: str,
-                         period_ns: float, steps: int,
-                         decap_cap: Optional[str], via_res: Dict[str, float],
-                         metal_prefix: str,
-                         container: Optional[str] = None) -> str:
+                         sdc: Optional[Path], power_net, period_ns: float,
+                         steps: int, decap_cap: Optional[float],
+                         via_res: Dict[str, float], metal_prefix: str,
+                         container: Optional[str] = None,
+                         spef: Optional[Path] = None,
+                         extra_liberties: Optional[List[str]] = None) -> str:
     """The exact OpenROAD PSM TRANSIENT TCL (host paths; container mounts them).
 
     Mirrors the static grid setup that already produces a real IR number on the
-    routed PDN, then appends `-transient -period <ns> -steps <N>` (no VCD needed —
-    the solver derives di/dt from the clock period)."""
+    routed PDN, on the declared power basis (`power_basis_tcl`), then appends
+    `-transient -period <ns> -steps <N>` per supply net (no VCD needed — the
+    solver derives di/dt from the clock period). With a decap (farads) each net
+    is solved twice: a quasi-static reference, then the decap solve with the
+    value in the session's own capacitance unit (`decap_arg_tcl`)."""
+    nets = [power_net] if isinstance(power_net, str) else list(power_net)
     lef_tcl = "".join(f"read_lef {_lef_tcl_word(f)}\n"
                       for f in _physical_lefs(tech_lef, cell_lef, macro_lefs))
-    sdc_tcl = f"catch {{read_sdc {sdc}}}\n" if sdc else ""
     via_tcl = "".join(f"catch {{set_layer_rc -via {c} -resistance {r}}}\n"
                       for c, r in sorted(via_res.items()))
-    decap_arg = f" -decap_cap {decap_cap}" if decap_cap else ""
+    extra = [x for x in (extra_liberties or []) if str(x) != str(liberty)]
+    basis_design = power_basis_tcl(extra, str(sdc) if sdc else None,
+                                   str(spef) if spef else None)
     _oc = liberty_operating_condition(liberty, container)
+    solves = ""
+    for net in nets:
+        base = f"analyze_power_grid -net {net} -transient -period {period_ns} -steps {steps}"
+        if decap_cap:
+            solves += (
+                f'puts "=== DYN_IR_REF {net} quasi-static ==="\n'
+                f"if {{[catch {{{base}}} _psm_err]}} {{\n"
+                f'  puts "PSM_TRANSIENT_NONFATAL {net}: $_psm_err"\n}}\n')
+        decap_arg = f" -decap_cap {decap_arg_tcl(decap_cap)}" if decap_cap else ""
+        decap_note = f" decap_f={float(decap_cap)!r}" if decap_cap else ""
+        solves += (
+            f'puts "=== DYN_IR PSM {net} transient period={period_ns}ns{decap_note} ==="\n'
+            f"if {{[catch {{{base}{decap_arg}}} _psm_err]}} {{\n"
+            f'  puts "PSM_TRANSIENT_NONFATAL {net}: $_psm_err"\n}}\n')
     return (
         lef_tcl + f"read_liberty {liberty}\n"
         # vibe-ic#362 — select the library's own operating condition when it
@@ -643,15 +913,12 @@ def _build_transient_tcl(def_file: Path, tech_lef: Path, cell_lef: Path,
         # exists and catch-guarded: a PDK with a default is unchanged.
         + (f"catch {{set_operating_conditions {_oc}}}\n" if _oc else "")
         + f"read_def {def_file}\n"
-        f"{sdc_tcl}"
+        f"{basis_design}"
         f"if {{[catch {{set_wire_rc -signal -layer {metal_prefix}1}}]}} "
         f"{{ catch {{set_wire_rc -layer {metal_prefix}1}} }}\n"
         f"catch {{set_wire_rc -clock -layer {metal_prefix}5}}\n"
         f"{via_tcl}"
-        f'puts "=== DYN_IR PSM {power_net} transient period={period_ns}ns ==="\n'
-        f"if {{[catch {{analyze_power_grid -net {power_net} -transient "
-        f"-period {period_ns} -steps {steps}{decap_arg}}} _psm_err]}} {{\n"
-        f'  puts "PSM_TRANSIENT_NONFATAL {power_net}: $_psm_err"\n}}\n'
+        f"{solves}"
         f"exit\n"
     )
 
@@ -728,17 +995,24 @@ def emit(def_file: Path, tech_lef: Path, cell_lef: Path, liberty: Path,
          power_net: Optional[str], container: str, metal_prefix: str,
          static_json: Optional[Path], budget_pct: float,
          period_ns: Optional[float], steps: int,
-         decap_cap: Optional[str]) -> Tuple[int, Dict[str, object]]:
-    """Run the TRANSIENT PSM and write dynamic_ir.json. Returns (rc, payload)."""
+         decap_cap: Optional[float], spef: Optional[Path] = None,
+         extra_liberties: Optional[List[str]] = None,
+         spef_reason: Optional[str] = None) -> Tuple[int, Dict[str, object]]:
+    """Run the TRANSIENT PSM and write dynamic_ir.json. Returns (rc, payload).
+
+    Every supply net of the DEF (power and ground, as the static tier) unless
+    `power_net` names one; the worst net is the reported number. `sdc`, `spef`
+    and `extra_liberties` are the declared power basis (`power_basis`), which
+    the static tier's record must share for its number to be reported beside
+    this one. `decap_cap` is in farads."""
     out_json.parent.mkdir(parents=True, exist_ok=True)
-    nets = [power_net] if power_net else discover_power_nets(def_file)
+    nets = [power_net] if power_net else discover_supply_nets(def_file)
     if not nets:
         payload = skip_result(
             "DEF has no SPECIALNETS power grid (no power net to analyze)",
             status="SKIPPED_NO_PDN")
         out_json.write_text(json.dumps(payload, indent=2) + "\n")
         return 0, payload
-    net = nets[0]
     try:
         _validate_physical_views(
             def_file, _physical_lefs(tech_lef, cell_lef, macro_lefs), container)
@@ -755,9 +1029,12 @@ def emit(def_file: Path, tech_lef: Path, cell_lef: Path, liberty: Path,
     else:
         period_source = "cli"
     via_res = _discover_via_res(tech_lef)
+    libs = [str(liberty), *[str(x) for x in (extra_liberties or [])
+                            if str(x) != str(liberty)]]
     tcl = _build_transient_tcl(def_file, tech_lef, cell_lef, liberty, macro_lefs,
-                               sdc, net, period_ns, steps, decap_cap, via_res,
-                               metal_prefix, container)
+                               sdc, nets, period_ns, steps, decap_cap, via_res,
+                               metal_prefix, container, spef=spef,
+                               extra_liberties=libs[1:])
     tcl_path = out_json.parent / "dynamic_ir_transient.tcl"
     tcl_path.write_text(tcl)
     cmd = (f"export PATH={_TOOLS}/openroad/bin:{_TOOLS}/bin:$PATH && "
@@ -811,10 +1088,30 @@ def emit(def_file: Path, tech_lef: Path, cell_lef: Path, liberty: Path,
         out_json.write_text(json.dumps(payload, indent=2) + "\n")
         return 1, payload
 
-    worst_v = parse_worst_dynamic_ir_v(log)
-    if worst_v is None:
-        reason = ("PSM produced no 'Worst dynamic IR drop' line "
-                  "(grid disconnected / no valid resistance map / solver error)")
+    blocks = transient_blocks(log)
+    if not blocks and len(nets) == 1 and not decap_cap:
+        blocks = {("psm", nets[0]): log}     # one solve: the transcript is its block
+    basis = power_basis(def_file, sdc, spef, libs, spef_reason=spef_reason, log=log)
+    per_net: Dict[str, Dict[str, object]] = {}
+    missing: List[str] = []
+    for net in nets:
+        body = blocks.get(("psm", net), "")
+        drop = parse_worst_dynamic_ir_v(body)
+        if drop is None:
+            missing.append(net)
+            continue
+        row: Dict[str, object] = {
+            "dynamic_drop_v": drop, "static_drop_v": parse_worst_static_tr_v(body),
+            "ratio": parse_dynamic_static_ratio(body),
+            "capacitance_model": parse_cap_model(body)}
+        if decap_cap:
+            row["decap"] = decap_effect(blocks.get(("ref", net), ""), body,
+                                        float(decap_cap))
+        per_net[net] = row
+    if missing:
+        reason = (f"PSM produced no 'Worst dynamic IR drop' line for net(s) "
+                  f"{missing} (grid disconnected / no valid resistance map / "
+                  "solver error)")
         if _PSM_NO_PERIOD_RE.search(log):
             reason = ("transient solve rejected the clock period (PSM-0107) — "
                       "check SDC create_clock / --period-ns")
@@ -824,12 +1121,62 @@ def emit(def_file: Path, tech_lef: Path, cell_lef: Path, liberty: Path,
                    "dynamic_ir_report_emitted": False,
                    "reason": reason,
                    "period_ns": period_ns, "period_source": period_source,
+                   "power_basis": basis,
                    "log_tail": log[-1500:]}
         out_json.write_text(json.dumps(payload, indent=2) + "\n")
         return 1, payload
-
-    vdd = parse_supply_v(log)
-    static_mv = read_static_ir_mv(static_json) if static_json else None
+    mismatched = {n: r["decap"] for n, r in per_net.items()
+                  if isinstance(r.get("decap"), dict)
+                  and r["decap"].get("state") == "DECAP_READBACK_MISMATCH"}
+    if mismatched:
+        # The solve modelled a different capacitance than the one declared:
+        # its number is about nothing anybody asked for.
+        payload = {"signoff_dimension": "dynamic_transient_ir_drop",
+                   "analysis_mode": "transient_psm",
+                   "status": "ERROR_DECAP_READBACK",
+                   "dynamic_ir_report_emitted": False,
+                   "reason": "; ".join(f"{n}: {d.get('reason')}"
+                                       for n, d in mismatched.items()),
+                   "per_net": per_net, "power_basis": basis}
+        out_json.write_text(json.dumps(payload, indent=2) + "\n")
+        return 1, payload
+    worst = max(per_net, key=lambda n: per_net[n]["dynamic_drop_v"])
+    body = blocks[("psm", worst)]
+    worst_v = per_net[worst]["dynamic_drop_v"]
+    # The supply is the power net's; a ground net's block prints 0 V.
+    vdd = max((v for v in (parse_supply_v(blocks.get(("psm", n), "")) for n in nets)
+               if v), default=None)
+    own_static_mv = max((r["static_drop_v"] for r in per_net.values()
+                         if r["static_drop_v"] is not None), default=None)
+    own_static_mv = own_static_mv * 1000.0 if own_static_mv is not None else None
+    # BOTH NUMBERS ON ONE BASIS. The Step-24 static record is reported beside
+    # this one only when its session declared the same basis and printed the
+    # same power; otherwise this session's own static solve stands in, and the
+    # payload says why.
+    static_tier: Dict[str, object] = {"basis_id": basis["id"]}
+    static_mv = None
+    ext = read_static_tier(static_json) if static_json else {}
+    if ext.get("static_mv") is None:
+        static_tier["source"] = "this session's static solve (no Step-24 record)"
+    elif ext.get("basis_id") != basis["id"]:
+        static_tier.update(source="this session's static solve",
+                           step24_static_mv=ext["static_mv"],
+                           step24_basis_id=ext.get("basis_id"),
+                           reason="the Step-24 static record is on another power basis")
+    elif not (ext.get("total_power_w") and basis.get("total_power_w")
+              and math.isclose(ext["total_power_w"], basis["total_power_w"],
+                               rel_tol=0.01)):
+        static_tier.update(source="this session's static solve",
+                           step24_static_mv=ext["static_mv"],
+                           step24_total_power_w=ext.get("total_power_w"),
+                           reason="same declared basis, different printed power")
+    else:
+        static_mv = ext["static_mv"]
+        static_tier.update(source="step24 ir_drop.json, same basis and power",
+                           step24_static_mv=ext["static_mv"])
+    decaps = [r.get("decap") for r in per_net.values()]
+    genuine_all = bool(decap_cap) and all(isinstance(d, dict) and d.get("genuine")
+                                          for d in decaps)
     payload = build_result(
         worst_dyn_mv=worst_v * 1000.0, vdd_v=vdd,
         # V -> mV, like every other magnitude on this call. parse_worst_static_tr_v
@@ -837,14 +1184,20 @@ def emit(def_file: Path, tech_lef: Path, cell_lef: Path, liberty: Path,
         # no external Step-24 static number was available, static_ir_mv /
         # dynamic_vs_static_ratio / exceeds_static) wrong by 1000x.
         static_tr_mv=(lambda s: s * 1000.0 if s is not None else None)(
-            parse_worst_static_tr_v(log)),
-        ratio=parse_dynamic_static_ratio(log),
+            parse_worst_static_tr_v(body)),
+        ratio=parse_dynamic_static_ratio(body),
         package_droop_mv=(lambda p: p * 1000.0 if p is not None else None)(
-            parse_package_droop_v(log)),
-        power_net=net, period_ns=period_ns, period_source=period_source,
-        steps=parse_steps(log), timestep_s=parse_timestep_s(log),
-        current_model=parse_current_model(log), cap_model=parse_cap_model(log),
-        static_mv=static_mv)
+            parse_package_droop_v(body)),
+        power_net=worst, period_ns=period_ns, period_source=period_source,
+        steps=parse_steps(body), timestep_s=parse_timestep_s(body),
+        current_model=parse_current_model(body), cap_model=parse_cap_model(body),
+        static_mv=static_mv if static_mv is not None else own_static_mv,
+        decap=(dict(per_net[worst]["decap"], genuine=genuine_all)
+               if decap_cap else None))
+    payload["nets_analysed"] = sorted(per_net)
+    payload["per_net"] = per_net
+    payload["power_basis"] = basis
+    payload["static_tier"] = static_tier
     # local budget verdict (the authoritative gate re-derives it from budget_pct)
     payload["budget_pct"] = budget_pct
     if vdd is not None:
@@ -911,8 +1264,17 @@ def main(argv: List[str]) -> int:
                     help="clock period (ns) for -transient (default: SDC-derived)")
     ap.add_argument("--steps", type=int, default=_DEFAULT_STEPS,
                     help="transient time-steps per period (default 100)")
-    ap.add_argument("--decap-cap", default=None,
-                    help="optional on-die decap (e.g. 1pF); default quasi-static")
+    ap.add_argument("--decap-cap", type=float, default=None,
+                    help="optional on-die decap in FARADS (e.g. 1e-9); passed "
+                         "to the tool in the session's own capacitance unit "
+                         "and read back. Default: quasi-static")
+    ap.add_argument("--spef", type=Path, default=None,
+                    help="power basis: the routed design's SPEF")
+    ap.add_argument("--spef-excluded-reason", default=None,
+                    help="power basis: why no SPEF is part of it (recorded)")
+    ap.add_argument("--extra-liberty", action="append", default=[],
+                    help="power basis: IO/macro liberty read after --liberty "
+                         "(repeatable, in order)")
     ns = ap.parse_args(argv)
 
     if ns.project:
@@ -948,7 +1310,9 @@ def main(argv: List[str]) -> int:
         out_json=ns.out, power_net=ns.net, container=ns.container,
         metal_prefix=ns.metal_prefix, static_json=ns.static_json,
         budget_pct=ns.budget_pct, period_ns=ns.period_ns, steps=ns.steps,
-        decap_cap=ns.decap_cap)
+        decap_cap=ns.decap_cap, spef=ns.spef,
+        extra_liberties=list(ns.extra_liberty),
+        spef_reason=ns.spef_excluded_reason)
     print(json.dumps(payload, indent=2))
     return rc
 

@@ -55043,22 +55043,10 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
     dyn_ir = _pl.reports_phase3_dir(project) / "dynamic_ir.json"
     dyn_ir_producer_error = ""
     if _signoff_regen(dyn_ir, _pl.pnr_dir(project) / "routed.def"):
-        lef_args = []
-        for flag, value in (("--tech-lef", pdk.tech_lef),
-                            ("--cell-lef", pdk.cell_lef),
-                            ("--liberty", pdk.liberty)):
-            if value:
-                lef_args.extend((flag, str(value)))
-        for macro_lef in getattr(pdk, "macro_lefs", None) or ():
-            lef_args.extend(("--macro-lef", str(macro_lef)))
         try:
-            cp = _pr.run([sys.executable,
-                     str(PROGRAMS_DIR / "dynamic_ir_vectored_emit.py"),
-                     "--project", str(project), "--out", str(dyn_ir),
-                     "--static-json", str(_pl.reports_phase3_dir(project)
-                                           / "ir_drop.json"),
-                     "--container", container] + lef_args,
-                    check=False, capture_output=True, text=True)
+            cp = _pr.run(_step24_transient_argv(
+                project, _pl.pnr_dir(project) / f"{top}.def", pdk, container, dyn_ir),
+                         check=False, capture_output=True, text=True)
             if cp.returncode:
                 dyn_ir_producer_error = f"dynamic IR producer rc={cp.returncode}"
         except Exception as exc:
@@ -59807,27 +59795,17 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             # solve actually run. The genuine no-liberty / no-PDN SKIP is
             # preserved (the emitter still SKIPs honestly when liberty is truly
             # absent or the DEF has no power grid).
-            _dyn_lef_args = []
-            if getattr(pdk, "tech_lef", None):
-                _dyn_lef_args += ["--tech-lef", str(pdk.tech_lef)]
-            if getattr(pdk, "cell_lef", None):
-                _dyn_lef_args += ["--cell-lef", str(pdk.cell_lef)]
-            # The routed DEF also instantiates hardmacro/IO masters. The pad
-            # producer adds its resolved physical views to this same inventory.
-            for _dyn_macro_lef in (getattr(pdk, "macro_lefs", None) or []):
-                _dyn_lef_args += ["--macro-lef", str(_dyn_macro_lef)]
-            if getattr(pdk, "liberty", None):
-                _dyn_lef_args += ["--liberty", str(pdk.liberty)]
+            # F20 — and the DEF, SDC, SPEF and IO/macro liberties of the static
+            # tier's power basis (`_step24_transient_argv`): the auto-discovery
+            # took the first sorted *.def in pnr/, which on spm was an antenna
+            # trial layout, not the shipped route the static tier measured.
             # CZT-11 — a transient PSM solve is exactly the shape a wall
             # clock ruins: it is long, legitimately, and it is CPU-bound with
             # long quiet phases. Supervised on the child's output/CPU/IO
             # instead; the note below now names a STALL as a stall.
-            _pr.run(
-                [sys.executable, str(PROGRAMS_DIR / "dynamic_ir_vectored_emit.py"),
-                 "--project", str(project), "--out", str(dyn_ir_json),
-                 "--static-json", str(rpt_phase3 / "ir_drop.json"),
-                 "--container", container] + _dyn_lef_args,
-                check=False, capture_output=True, text=True)
+            _pr.run(_step24_transient_argv(project, primary_def, pdk, container,
+                                          dyn_ir_json),
+                    check=False, capture_output=True, text=True)
             if dyn_ir_json.is_file():
                 written.append(str(dyn_ir_json))
         except Exception as exc:
@@ -67197,6 +67175,82 @@ def _ir_supply_from_psm_log(log: str,
     return v, v > 0.0
 
 
+def _step24_basis_inputs(project: Path, def_file: Path, pdk: PdkConfig) -> Dict[str, Any]:
+    """F20 — THE ONE POWER BASIS step 24's two tiers solve on.
+
+    The static session (`_emit_ir_em_reports`) and the transient emitter
+    (`_step24_transient_argv`) both take their layout, SDC, SPEF and libraries
+    from here, and both record `dynamic_ir_vectored_emit.power_basis` of it, so
+    the dynamic record can say whether its static neighbour is on the same one.
+
+    The basis is LibreLane's (`OpenROAD.IRDropReport`: ODB + SDC + SPEF, cell +
+    pad libraries): the routed DEF, `pnr/constraint.sdc` with propagated
+    clocks, the step-22 SPEF, and the standard-cell liberty followed by the
+    same-PVT IO/macro liberties the PnR and sign-off STA sessions load
+    (`_sta_extra_liberties`). MEASURED on spm: the static tier used to read the
+    DEF and one liberty (36.2 mW, 15.0 mV) and the dynamic tier the DEF, SDC
+    and one liberty (1.51 mW — the clock enters through a pad whose liberty was
+    not loaded), so a "dynamic" 1.25 mV was published under a static 15 mV. On
+    this basis: 21.9 mW, 7.41/8.39 mV static and 14.8/16.8 mV quasi-static.
+
+    A SPEF older than the routed DEF describes another layout and is left out,
+    with the reason recorded; so is an absent one. Both tiers then share the
+    reduced basis, and the record says it is incomplete. `def_file` is the
+    routed `pnr/<top>.def`; the SPEF is the step-22 one of the same top."""
+    def_file = Path(def_file)
+    sdc = _pl.pnr_dir(project) / "constraint.sdc"
+    spef = _pl.extracted_dir(project) / f"{def_file.stem}.spef"
+    spef_reason = None
+    if not spef.is_file():
+        spef_reason = "no step-22 SPEF"
+    elif def_file.is_file() and spef.stat().st_mtime < def_file.stat().st_mtime:
+        spef_reason = "the step-22 SPEF is older than the routed DEF"
+    liberty = str(pdk.liberty) if getattr(pdk, "liberty", None) else None
+    try:
+        extra = _sta_extra_liberties(project, pdk, pdk.liberty) if liberty else []
+    except AttributeError:  # a duck-typed PDK stub with no library lists
+        extra = []
+    return {"def": def_file, "sdc": sdc if sdc.is_file() else None,
+            "spef": None if spef_reason else spef, "spef_reason": spef_reason,
+            "liberty": liberty,
+            "extra_liberties": [str(x) for x in extra if str(x) != liberty]}
+
+
+def _step24_transient_argv(project: Path, def_file: Path, pdk: PdkConfig,
+                          container: str, out_json: Path) -> List[str]:
+    """The transient emitter's argv on the static tier's basis
+    (`_step24_basis_inputs`): the same routed DEF, SDC, SPEF, libraries and
+    metal prefix, and the Step-24 record to report beside it. Every input is
+    explicit — no `--project` auto-discovery, which would add an SDC the
+    static session did not read, or pick another DEF."""
+    basis = _step24_basis_inputs(project, def_file, pdk)
+    argv = [sys.executable, str(PROGRAMS_DIR / "dynamic_ir_vectored_emit.py"),
+            "--out", str(out_json),
+            "--def", str(basis["def"]),
+            "--static-json", str(_pl.reports_phase3_dir(project) / "ir_drop.json"),
+            "--container", container]
+    if getattr(pdk, "metal_prefix", None):
+        argv += ["--metal-prefix", str(pdk.metal_prefix)]
+    for flag, value in (("--tech-lef", getattr(pdk, "tech_lef", None)),
+                        ("--cell-lef", getattr(pdk, "cell_lef", None)),
+                        ("--liberty", basis["liberty"])):
+        if value:
+            argv += [flag, str(value)]
+    # The routed DEF also instantiates hardmacro/IO masters. The pad producer
+    # adds its resolved physical views to this same inventory.
+    for macro_lef in getattr(pdk, "macro_lefs", None) or ():
+        argv += ["--macro-lef", str(macro_lef)]
+    for liberty in basis["extra_liberties"]:
+        argv += ["--extra-liberty", liberty]
+    if basis["sdc"]:
+        argv += ["--sdc", str(basis["sdc"])]
+    if basis["spef"]:
+        argv += ["--spef", str(basis["spef"])]
+    else:
+        argv += ["--spef-excluded-reason", str(basis["spef_reason"])]
+    return argv
+
+
 def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
                         container: str, ir_rpt: Path, em_rpt: Path,
                         notes: List[str]) -> Tuple[bool, bool]:
@@ -67321,36 +67375,30 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
             f"'{_oc}' (it defines the block but names no default — PSM "
             f"otherwise aborts PSM-0079); the tool reads its voltage from "
             f"the library, none is asserted here")
-    # T103 — THE POWER BASIS. PSM turns each instance's power into its grid
-    # current, so the EM verdict is only as true as that power. MEASURED on spm
-    # (gf180mcuD, routed DEF): this session used to read the DEF and the one
-    # standard-cell liberty and nothing else -- no SDC, so OpenSTA's default
-    # activity with no clock: 23.1 mW. With the flow's own SDC alone it read
-    # 1.19 mW, a false PASS: the clock enters through an IO pad whose liberty
-    # was not loaded, so the clock never reached its tree (Clock group 0 W).
-    # With the SDC, the step-22 SPEF and the same-PVT IO/macro liberties that
-    # the PnR and sign-off sessions load: 21.0 mW, of which the clock network
-    # is 14.3 mW. The verdict records which of these it had.
-    try:
-        _pb_libs = [_to_container_path(str(x), container)
-                    for x in _sta_extra_liberties(project, pdk, pdk.liberty)]
-    except AttributeError:  # a duck-typed PDK stub with no library lists
-        _pb_libs = []
-    _pb_sdc = pnr_out / "constraint.sdc"
-    _pb_spef = _pl.extracted_dir(project) / f"{top}.spef"
-    _pb_spef_why = None
-    if not _pb_spef.is_file():
-        _pb_spef_why = "no step-22 SPEF"
-    elif _pb_spef.stat().st_mtime < def_file.stat().st_mtime:
-        _pb_spef_why = "the step-22 SPEF is older than the routed DEF"
-    _pb_tcl = "".join(f"read_liberty {x}\n" for x in dict.fromkeys(_pb_libs))
-    if _pb_sdc.is_file():
-        _pb_tcl += (f"if {{[catch {{read_sdc {_to_container_path(str(_pb_sdc), container)}}} _e]}} "
-                    f"{{ puts \"EM_BASIS_SDC_UNREAD: $_e\" }}\n"
-                    "catch {set_propagated_clock [all_clocks]}\n")
-    if _pb_spef_why is None:
-        _pb_tcl += (f"if {{[catch {{read_spef {_to_container_path(str(_pb_spef), container)}}} _e]}} "
-                    f"{{ puts \"EM_BASIS_SPEF_UNREAD: $_e\" }}\n")
+    # THE POWER BASIS, DECLARED ONCE (`_step24_basis_inputs`) and used by the
+    # static IR, the step-25 EM this same session computes, and the transient
+    # tier (`_step24_transient_argv`).
+    # T103 — PSM turns each instance's power into its grid current, so the EM
+    # verdict is only as true as that power. MEASURED on spm (gf180mcuD, routed
+    # DEF): this session used to read the DEF and the one standard-cell liberty
+    # and nothing else -- no SDC, so OpenSTA's default activity with no clock:
+    # 23.1 mW. With the flow's own SDC alone it read 1.19 mW, a false PASS: the
+    # clock enters through an IO pad whose liberty was not loaded, so the clock
+    # never reached its tree (Clock group 0 W). With the SDC, the step-22 SPEF
+    # and the same-PVT IO/macro liberties that the PnR and sign-off sessions
+    # load: 21.0 mW, of which the clock network is 14.3 mW.
+    # F20 — the transient tier used a third basis (another DEF, SDC, one
+    # liberty: 1.51 mW), so its "dynamic" 1.25 mV was published under a static
+    # 15.0 mV. On this one basis: 21.9 mW, 7.41/8.39 mV static, 14.8/16.8 mV
+    # quasi-static, and every record carries the same basis id.
+    import dynamic_ir_vectored_emit as _dyn_basis
+    _basis = _step24_basis_inputs(project, def_file, pdk)
+    _pb_libs = [_to_container_path(x, container) for x in _basis["extra_liberties"]]
+    _pb_tcl = _dyn_basis.power_basis_tcl(
+        _pb_libs, (_to_container_path(str(_basis["sdc"]), container)
+             if _basis["sdc"] else None),
+        (_to_container_path(str(_basis["spef"]), container)
+         if _basis["spef"] else None))
     try:
         _instrument_calibration.assert_calibrated("_ppa.power::em_power_basis")
         _pb_uncal = None
@@ -67389,6 +67437,13 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "producer": "OpenROAD ODB routing-layer SBoxes and via metal boxes",
         }, indent=2) + "\n")
     log = (out or "") + "\n" + (err or "")
+    # The ONE record of the basis this session solved on: ir_drop.json carries
+    # it, em.json's power_basis carries its id, and the transient tier's
+    # dynamic_ir.json reports the static number only under the same id.
+    _basis_record = _dyn_basis.power_basis(
+        def_file, _basis["sdc"], _basis["spef"],
+        [str(pdk.liberty), *_basis["extra_liberties"]],
+        spef_reason=_basis["spef_reason"], log=log)
     if rc != 0:
         # A failed native invocation cannot attest values from stdout or stale reports.
         failure = {"tool": "openroad-psm", "verdict": "FAIL",
@@ -67566,6 +67621,9 @@ catch {{set_wire_rc -clock -layer {mp}5}}
                              "power delivery is lower" if _bump_m else
                              "PSM analyze_power_grid"),
             "unconnected_supply_pins": _psm_unconn[:20],
+            # F20 — what this number was solved on; the transient tier
+            # reports it beside its own only on the same basis and power.
+            "power_basis": _basis_record,
             "unmeasured_reason": (None if _supply_measured else (
                 "PSM reported a supply voltage of 0 V: it found no source to "
                 "analyse on the power net(s). No IR percentage or budget "
@@ -67666,10 +67724,10 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "nets_analysed": psm_nets,
             "source_model": "PSM default sources (the supply BTerms); no pad VSRC file",
             "power_basis": _ppa_power.em_power_basis(
-                log, sdc=(str(_pb_sdc.relative_to(project)) if _pb_sdc.is_file() else None),
-                spef=(None if _pb_spef_why else str(_pb_spef.relative_to(project))),
-                spef_reason=_pb_spef_why, liberties=[liberty_c, *_pb_libs],
-                uncalibrated=_pb_uncal),
+                log, sdc=(str(_basis["sdc"].relative_to(project)) if _basis["sdc"] else None),
+                spef=(str(_basis["spef"].relative_to(project)) if _basis["spef"] else None),
+                spef_reason=_basis["spef_reason"], liberties=[liberty_c, *_pb_libs],
+                uncalibrated=_pb_uncal, basis_id=_basis_record["id"]),
             "segments_analysed": seg_count,
             "max_segment_current_A": max_cur,
             "source": str(em_rpt.relative_to(project)),

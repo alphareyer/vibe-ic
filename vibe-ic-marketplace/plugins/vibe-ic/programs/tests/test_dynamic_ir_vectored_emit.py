@@ -515,10 +515,14 @@ def _run_dynamic_ir_call_block(project, pdk, primary_def):
     calls = []
     def run(argv, **kwargs):
         calls.append((argv, E.main(argv[2:])))
+    # F20: the block builds its argv with the runner's own helper (the static
+    # tier's power basis); it is bound here from the shipped module.
+    import phase3_one_shot_runner as R
     env = dict(project=project, pdk=pdk, primary_def=primary_def,
                rpt_phase3=project / 'reports/phase3', container='fixture',
                _signoff_regen=lambda *_: True, _pr=SimpleNamespace(run=run),
-               sys=sys, PROGRAMS_DIR=_PROGRAMS, written=[], notes=[])
+               sys=sys, PROGRAMS_DIR=_PROGRAMS, written=[], notes=[],
+               _step24_transient_argv=R._step24_transient_argv)
     exec(compile(block, str(_PROGRAMS / 'phase3_one_shot_runner.py'), 'exec'), env)
     assert env['notes'] == [], env['notes']
     assert len(calls) == 1
