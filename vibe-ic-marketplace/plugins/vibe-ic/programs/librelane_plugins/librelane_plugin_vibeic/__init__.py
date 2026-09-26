@@ -133,6 +133,8 @@ class InsertSpareCells(OdbpyStep):
 from .ir_drop import IRDropChecker, TransientIR  # noqa: E402,F401
 
 __all__ += ["IRDropChecker", "TransientIR"]
+
+
 @Step.factory.register()
 class GateLevelSim(Step):
     """SDF-annotated gate-level simulation of the design's L10 suite, one run
