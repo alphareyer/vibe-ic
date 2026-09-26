@@ -441,9 +441,14 @@ def chain_folder(project: Path, lane: str, steps, step: str) -> Path:
 
 def run_ir(project: Path, image: str, pdk_root: Path, pdk: str, *, routed_def: Path,
            netlist: Path, sdc: Path, spef: Path, budget_pct: Optional[float],
-           budget_source: str, lane: str = '24') -> Dict[str, Any]:
+           budget_source: str, lane: str = '24', decap_f: Optional[float] = None,
+           decap_source: Optional[str] = None) -> Dict[str, Any]:
     """Bridge the shipped route, run IRDropReport + Vibeic.IRDropChecker, then
-    the cross-check.  Returns the record `judge_ir` reads."""
+    the cross-check.  Returns the record `judge_ir` reads.
+
+    `decap_f` (farads, with its declared `decap_source`) is the on-die decap
+    `Vibeic.TransientIR` models; the step converts it to the session's unit,
+    reads it back and measures its effect.  None: quasi-static."""
     configs = resolve_step_configs(project, image, pdk, list(IR_STEPS), pdk_root=pdk_root,
                                    folder='24-config')
     # The budget is the checker's own variable, which the Chip flow's resolver
@@ -464,6 +469,18 @@ def run_ir(project: Path, image: str, pdk_root: Path, pdk: str, *, routed_def: P
         write_json(configs[step], step_cfg)
         write_json(configs[step].with_name(configs[step].stem + '.overrides.json'),
                    {'cleared': cleared, 'source': RC_SOURCE})
+    if decap_f is not None:
+        if not decap_source:
+            raise Refusal('LL_DECAP_SOURCE_UNDECLARED',
+                          f'a decap of {decap_f!r} F needs a declared source')
+        transient_cfg = configs['Vibeic.TransientIR']
+        step_cfg = _config(transient_cfg)
+        step_cfg['VIBEIC_DECAP_CAP'] = decap_f
+        write_json(transient_cfg, step_cfg)
+        overrides = transient_cfg.with_name(transient_cfg.stem + '.overrides.json')
+        record = _load(overrides) if overrides.is_file() else {}
+        record['VIBEIC_DECAP_CAP'] = {'value': decap_f, 'unit': 'F', 'source': decap_source}
+        write_json(overrides, record)
     cfg = _config(ir_cfg)
     mounts = [(pdk_root / pdk, f'/pdk/{pdk}')]
     for source in (routed_def, netlist, sdc, spef):

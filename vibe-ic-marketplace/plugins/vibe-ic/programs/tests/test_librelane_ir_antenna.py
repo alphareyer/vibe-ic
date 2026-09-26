@@ -411,14 +411,23 @@ def test_the_transient_record_takes_the_worst_net_and_says_it_is_a_bound():
 
 
 def test_a_solve_with_on_die_capacitance_is_labelled_by_the_emitters_rule():
-    # The same reader and label rule as dynamic_ir_vectored_emit: a printed
-    # on-die capacitance makes it "genuine" (measured: the fork reads
-    # -decap_cap 1e-9 in pF -> 1e-21 F, and the ratio stays 2.00).
+    # The same reader and label rule as dynamic_ir_vectored_emit. T101 pinned
+    # the rule as it then was — a printed on-die capacitance made it "genuine"
+    # — on this real sample, where the fork read -decap_cap 1e-9 in pF (1e-21 F)
+    # and the ratio stayed 2.00, and named it as the defect. F20 changed the
+    # rule (the label is earned by a measured reduction against a quasi-static
+    # reference) and this sample is now what that rule refuses: read without a
+    # declared decap it is the scaled static bound, and read against the 1e-9 F
+    # it was asked for it is not a solve of that decap at all.
     transient_findings = la.transient_findings
     doc = transient_findings((_FIX / "transient_decap_1e-9.rpt").read_text(),
                              ["VDD", "VSS"], 5.0, 24.0, "sdc_create_clock")
-    assert doc["scaled_static_bound"] is False
+    assert doc["scaled_static_bound"] is True
     assert doc["capacitance_model"].startswith("on-die-cap")
+    asked = transient_findings((_FIX / "transient_decap_1e-9.rpt").read_text(),
+                               ["VDD", "VSS"], 5.0, 24.0, "sdc_create_clock",
+                               decap_f=1e-9)
+    assert asked["verdict"] == "NOT_MEASURED" and "1e-21" in asked["reason"]
 
 
 def test_a_net_the_solve_did_not_answer_is_not_measured():

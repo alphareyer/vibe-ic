@@ -2157,6 +2157,58 @@ _register(Instrument(
 ))
 
 
+def _judge_decap_effect(log: str) -> Optional[str]:
+    """The emitter's own transcript: every decap solve measurably below its
+    net's quasi-static reference -> DECAP_MEASURED, else silent."""
+    import dynamic_ir_vectored_emit as D
+    blocks = D.transient_blocks(log)
+    states = []
+    for m in re.finditer(r"^=== DYN_IR PSM (\S+) \S+ period=\S+ decap_f=(\S+) ===$",
+                         log, re.M):
+        states.append(D.decap_effect(blocks.get(("ref", m.group(1)), ""),
+                                     blocks.get(("psm", m.group(1)), ""),
+                                     float(m.group(2)))["state"])
+    return "DECAP_MEASURED" if states and set(states) == {"DECAP_MEASURED"} else None
+
+
+_DECAP_CAL_PROV = (
+    "Real `dynamic_ir_vectored_emit` transcript, vibeic-eda 0.3.79 (OpenROAD "
+    "26Q3-2963-gc73a322d30), lane migf20 on 8hd-3, on the copied run23 "
+    "(gf180mcuD): its routed DEF + constraint.sdc + extracted SPEF + the "
+    "tt_025C_5v00 cell and IO liberties. A transient PSM solve needs a real "
+    "routed power grid, which no calibration structure here has (see the "
+    "`dynamic_ir_vectored_emit::emit` register entry). Per net (VDD, VSS) a quasi-static "
+    "reference solve, then the decap solve with `-decap_cap` in the session's "
+    "unit (`sta::capacitance_ui_sta 1.0` = 1e-12 there). Project path "
+    "replaced by <project> and the DEF basename by <top>; otherwise unedited. ")
+
+_register(Instrument(
+    name="dynamic_ir_vectored_emit::decap_effect",
+    reads="the transient emitter's PSM transcript (reference + decap solve per net)",
+    ruling="F20 (lane migf20; T101 finding 4)", owner="migf20",
+    why=("The shared rule 'on-die capacitance printed => genuine di/dt' called "
+         "a ratio-2.00 result genuine: the fork read 1e-9 in pF (1.00e-21 F), "
+         "and with the unit right 1 pF still leaves the droop equal to the "
+         "quasi-static bound. The pair is the same session asked for two "
+         "decaps: one that measurably lowers the droop, one that prints a "
+         "capacitance and changes nothing."),
+    judge=_judge_decap_effect,
+    positive=Sample(
+        provenance=(_DECAP_CAL_PROV + "decap 1e-9 F, printed 1.00e-09 F: VDD "
+                    "1.48e-02 -> 1.37e-02 V (ratio 1.85), VSS 1.68e-02 -> "
+                    "1.53e-02 V (1.82). calibration/"
+                    "dynamic_ir_decap_measured_positive.log"),
+        artefact=_read("dynamic_ir_decap_measured_positive.log")),
+    expect="DECAP_MEASURED",
+    negative=Sample(
+        provenance=(_DECAP_CAL_PROV + "decap 1e-12 F, printed 1.00e-12 F: VDD "
+                    "1.48e-02 and VSS 1.68e-02 V in both solves, ratio 2.00 — "
+                    "the printed-capacitance case the old rule called genuine. "
+                    "calibration/dynamic_ir_decap_unresolved_negative.log"),
+        artefact=_read("dynamic_ir_decap_unresolved_negative.log")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════

@@ -111,12 +111,34 @@ def _asserts_genuine(payload) -> bool:
     return any(m in blob for m in _GENUINE_CLAIM_MARKERS)
 
 
-def _mk(cap_model, worst_dyn_mv=106.0, static_tr_mv=53.0, vdd_v=1.8, ratio=2.0):
+def _mk(cap_model, worst_dyn_mv=106.0, static_tr_mv=53.0, vdd_v=1.8, ratio=2.0,
+        decap=None):
     return E.build_result(
         worst_dyn_mv=worst_dyn_mv, vdd_v=vdd_v, static_tr_mv=static_tr_mv,
         ratio=ratio, package_droop_mv=None, power_net="VDD", period_ns=8.0,
         period_source="sdc_create_clock", steps=100, timestep_s=1e-11,
-        current_model="vectorless", cap_model=cap_model)
+        current_model="vectorless", cap_model=cap_model, decap=decap)
+
+
+# F20 (lane migf20) — "SHOULD A DECAP-AWARE SOLVE EVER LAND" (the docstring's
+# open question) was answered by measurement on spm, vibeic-eda 0.3.79: a
+# printed on-die capacitance is NOT evidence of a genuine solve. 1 pF (unit
+# right) and a unit-mangled 1.00e-21 F both left the droop at the quasi-static
+# bound, ratio 2.00. So the decap-aware arm of these tests is no longer the
+# bare string "on-die-cap 1e-12F" — that exact shape is now a bound — but a
+# REAL decap-aware solve with the measured evidence `decap_effect` derives
+# from it (calibration/dynamic_ir_decap_measured_positive.log: VDD 1.48e-02
+# -> 1.37e-02 V under 1e-9 F). Every assertion below is unchanged; only the
+# fixture of the genuine arm moved from a claim to a measurement.
+def _measured_decap():
+    blocks = E.transient_blocks(
+        (_PROGRAMS / "calibration" / "dynamic_ir_decap_measured_positive.log").read_text())
+    return E.decap_effect(blocks[("ref", "VDD")], blocks[("psm", "VDD")], 1e-9)
+
+
+def _genuine():
+    return _mk("on-die-cap 1.00e-09F", worst_dyn_mv=13.7, static_tr_mv=7.41,
+               vdd_v=5.0, ratio=1.85, decap=_measured_decap())
 
 
 # --------------------------------------------------------------------------
@@ -175,7 +197,7 @@ def test_reverse_decap_aware_solve_stays_genuine():
     under the over-correction mutation the bare form passed and only the flag
     assertion fired.
     """
-    r = _mk("on-die-cap 1e-12F")
+    r = _genuine()
     assert _asserts_genuine(r), (
         "the decap-aware payload dropped its genuine-di/dt presentation: "
         f"{_string_values(r)!r}"
@@ -200,7 +222,7 @@ def test_undetermined_cap_model_is_conservatively_a_bound():
 # --------------------------------------------------------------------------
 def test_two_tiers_are_machine_distinguishable():
     quasi = _mk("quasi-static")
-    decap = _mk("on-die-cap 1e-12F")
+    decap = _genuine()
     # Behavioural first, and it is the whole defect in one line: pre-fix the
     # disclosure was a CONSTANT, so these two payloads were indistinguishable
     # in every string they carried. That assertion fails pre-fix on a real

@@ -1896,6 +1896,15 @@ _NOT_PROSE: Dict[str, str] = {
         'English DESIGN DOCUMENTS, where denial is spellable and was spelled; '
         'consulting `_prose_polarity` here would add a branch that can never '
         'fire.',
+    "dynamic_ir_vectored_emit::transient_blocks":
+        "THE EMITTER'S OWN MARKERS, NO SENTENCE. `=== DYN_IR_REF <net> ... ===` "
+        "and `=== DYN_IR PSM <net> ... ===` are `puts` lines this module writes "
+        "into its own OpenROAD deck (`_build_transient_tcl`) before each solve; "
+        "the reader only cuts the transcript at them and keys each block by "
+        "(kind, net). No field is interpreted, so no denial can be spelled, and "
+        "a net whose block is missing is ERROR_NO_PSM_IR, never a pass. "
+        "Falsifier: tests/test_f20_dynamic_ir_decap_unit_label_and_basis.py"
+        "::test_each_net_is_first_solved_quasi_static_as_the_reference.",
 }
 
 def _aliases(tree: ast.Module) -> Set[str]:

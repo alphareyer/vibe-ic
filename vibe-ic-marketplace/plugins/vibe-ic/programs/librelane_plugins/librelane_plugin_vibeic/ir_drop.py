@@ -81,9 +81,11 @@ class TransientIR(OpenROADStep):
     VDD and GND net, on IRDropReport's basis (ODB, SDC, SPEF, resistance,
     sources).  The period is the design's own SDC clock.  With no on-die
     capacitance the solve is quasi-static -- a fixed scaling of the static
-    drop -- and the record says so (`scaled_static_bound`); it is never
-    labelled a genuine di/dt result.  A net whose solve printed no dynamic
-    drop fails the step, never a skip.
+    drop -- and the record says so (`scaled_static_bound`).  With a decap it
+    is genuine only when every net's droop is measurably below its
+    quasi-static reference (`decap_effect`); a decap the solve did not model
+    as declared fails the step.  A net whose solve printed no dynamic drop
+    fails the step, never a skip.
     """
 
     id = "Vibeic.TransientIR"
@@ -98,7 +100,10 @@ class TransientIR(OpenROADStep):
         Variable("VIBEIC_TRANSIENT_STEPS", Optional[int],
                  "Time steps per period for the transient solve."),
         Variable("VIBEIC_DECAP_CAP", Optional[Decimal],
-                 "On-die decoupling capacitance (F); none -> quasi-static."),
+                 "On-die decoupling capacitance in farads, passed to the tool "
+                 "in the session's capacitance unit and read back; each net "
+                 "is also solved quasi-static as the reference its effect is "
+                 "measured against.  None -> quasi-static only."),
     ]
 
     def get_script_path(self):
@@ -122,7 +127,9 @@ class TransientIR(OpenROADStep):
         views, metrics = super().run(state_in, env=env, **kwargs)
         report = open(os.path.join(self.step_dir, "transient_ir.rpt")).read()
         nets = [*(self.config.get("VDD_NETS") or []), *(self.config.get("GND_NETS") or [])]
-        doc = transient_findings(report, nets, float(voltage), period, period_source)
+        decap = self.config.get("VIBEIC_DECAP_CAP")
+        doc = transient_findings(report, nets, float(voltage), period, period_source,
+                                 decap_f=float(decap) if decap is not None else None)
         with open(os.path.join(self.step_dir, "transient_ir.json"), "w") as stream:
             json.dump(doc, stream, indent=2)
         if doc["verdict"] != "MEASURED":
