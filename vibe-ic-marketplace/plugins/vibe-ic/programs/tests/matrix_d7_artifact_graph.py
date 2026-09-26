@@ -734,13 +734,16 @@ def _publish_ast_index_progress(scope: str, completed: int, total: int) -> None:
     domain_progress(scope, completed, total)
 
 
-def _stride_publisher(scope: str, n_units: int):
+def _stride_publisher(scope: str, n_units: int,
+                      stride: int = _AST_INDEX_PROGRESS_STRIDE):
     """Credit completed work, including the last partial stride, never a clock.
 
     Each caller enumerates a frozen input population. Repeated observations do
     not renew progress; a parse or walk stuck within one unit remains silent.
+    ``stride`` is how many units one checkpoint credits: 25 cheap AST parses,
+    or 1 for a population whose every unit is itself seconds of real work.
     """
-    stride = _AST_INDEX_PROGRESS_STRIDE
+    assert stride >= 1, f"stride must be >= 1, got {stride}"
     total = (n_units + stride - 1) // stride
     emitted = 0
     last_seen = 0
