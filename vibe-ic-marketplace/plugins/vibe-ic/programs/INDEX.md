@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1354
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1354)
+- **Total programs (excluding helpers / shims):** 1358
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1358)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1345 |
+| `any` | 1349 |
 
 ## Alphabetical listing
 
@@ -453,6 +453,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `formal_harness_gen` | any | — | Step 5 DETERMINISTIC formal-property authoring. |
 | `formal_proof_evidence_check` | any | — | Step 5 formal proof EVIDENCE-CHAIN gate (ORGANIC-20260606 #448). |
 | `formal_property_run` | any | — | Step 5 formal-property RUNNER. |
+| `formal_structural_check` | any | — | Step 5: discharge STRUCTURAL clock/reset declarations with a deterministic structural check (R-0915-144). |
 | `foundry_handoff_pack_gen` | any | — | emit Step 35 foundry handoff package skeleton. |
 | `foundry_handoff_package_check` | any | Wave 88 | gate (v1.6.13 Wave 88, integerised in v1.6.14 Wave 90, renumbered Step 34 → 35 in v1.6.15 Wave 91, and Step 35 → 38 by the later renumber... |
 | `foundry_signoff_plan_check` | any | v0.113 | v0.113 (BACKLOG-v10 P1.2). |
@@ -1158,6 +1159,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `signoff_waiver_emit` | any | v0.1.49 | Chipignite/foundry signoff-waiver scaffold emitter. |
 | `signoff_waiver_md_emit` | any | v0.1.49 | Submitter-facing waiver Markdown emitter. |
 | `silent_decline_audit` | any | — | find remedy decisions whose REFUSAL is silent (#313 §6). |
+| `sim_activity_dump` | any | — | a DUT-scoped VCD for vector power, with its scope. |
+| `sim_dual_compare` | any | — | one cocotb testbench, two simulators, one answer. |
 | `sim_hang_detect` | any | — | emit-side hang-predict heuristics (v1.2.45→v1.2.46). |
 | `single_bus_driver_check` | any | Wave 10 | structural-RTL gate that catches the "two parallel bus drivers" anti-pattern in half-duplex protocol ICs. |
 | `single_testpath_guard` | any | v0.2.24 | pytest.ini must declare ONE test tree. |
@@ -1342,6 +1345,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `verdict_token_propagation_check` | any | — | META-audit: producer -> consumer verdict-token propagation guard (ORGANIC #722, captured Bucket C). |
 | `verify_fail_triage` | any | — | mechanical CVDP fail-mode classifier (ORGANIC #534). |
 | `verilator_coverage_measure` | any | v0.53 | v0.53 plugin gate |
+| `verilator_lint_gate` | any | — | the step-2 judge of LibreLane Verilator.Lint. |
 | `verilator_timing_fallback_check` | any | — | golden-self-test-guarded Verilator fallback for testbenches iverilog cannot compile. |
 | `verilog_selfcheck_lint` | any | — | PROGRAM-FIRST verilator -Wall self-lint gate. |
 | `verilog_width_resolve` | any | — | SHARED parameterized-width reader (Verilog/SystemVerilog spec prose). chip-AGNOSTIC: any benchmark (CVDP/VerilogEval/RTLLM) or Phase-1 de... |
@@ -1426,7 +1430,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1345 programs)
+### `any` (1349 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1851,6 +1855,7 @@ _(no programs in this group)_
 - `formal_harness_gen` — Step 5 DETERMINISTIC formal-property authoring.
 - `formal_proof_evidence_check` — Step 5 formal proof EVIDENCE-CHAIN gate (ORGANIC-20260606 #448).
 - `formal_property_run` — Step 5 formal-property RUNNER.
+- `formal_structural_check` — Step 5: discharge STRUCTURAL clock/reset declarations with a deterministic structural check (R-0915-144).
 - `foundry_handoff_pack_gen` — emit Step 35 foundry handoff package skeleton.
 - `foundry_handoff_package_check` — gate (v1.6.13 Wave 88, integerised in v1.6.14 Wave 90, renumbered Step 34 → 35 in v1.6.15 Wave 91, and Step 35 → 38 by the later renumber...  _[Wave 88]_
 - `foundry_signoff_plan_check` — v0.113 (BACKLOG-v10 P1.2).  _[v0.113]_
@@ -2553,6 +2558,8 @@ _(no programs in this group)_
 - `signoff_waiver_emit` — Chipignite/foundry signoff-waiver scaffold emitter.  _[v0.1.49]_
 - `signoff_waiver_md_emit` — Submitter-facing waiver Markdown emitter.  _[v0.1.49]_
 - `silent_decline_audit` — find remedy decisions whose REFUSAL is silent (#313 §6).
+- `sim_activity_dump` — a DUT-scoped VCD for vector power, with its scope.
+- `sim_dual_compare` — one cocotb testbench, two simulators, one answer.
 - `sim_hang_detect` — emit-side hang-predict heuristics (v1.2.45→v1.2.46).
 - `single_bus_driver_check` — structural-RTL gate that catches the "two parallel bus drivers" anti-pattern in half-duplex protocol ICs.  _[Wave 10]_
 - `single_testpath_guard` — pytest.ini must declare ONE test tree.  _[v0.2.24]_
@@ -2737,6 +2744,7 @@ _(no programs in this group)_
 - `verdict_token_propagation_check` — META-audit: producer -> consumer verdict-token propagation guard (ORGANIC #722, captured Bucket C).
 - `verify_fail_triage` — mechanical CVDP fail-mode classifier (ORGANIC #534).
 - `verilator_coverage_measure` — v0.53 plugin gate  _[v0.53]_
+- `verilator_lint_gate` — the step-2 judge of LibreLane Verilator.Lint.
 - `verilator_timing_fallback_check` — golden-self-test-guarded Verilator fallback for testbenches iverilog cannot compile.
 - `verilog_selfcheck_lint` — PROGRAM-FIRST verilator -Wall self-lint gate.
 - `verilog_width_resolve` — SHARED parameterized-width reader (Verilog/SystemVerilog spec prose). chip-AGNOSTIC: any benchmark (CVDP/VerilogEval/RTLLM) or Phase-1 de...
