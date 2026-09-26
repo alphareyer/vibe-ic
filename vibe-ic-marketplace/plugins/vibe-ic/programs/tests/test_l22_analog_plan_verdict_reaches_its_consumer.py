@@ -183,11 +183,20 @@ def test_the_flow_definition_declares_the_producer_and_output():
     step = next(s for s in yaml.safe_load(FLOW.read_text())["steps"]
                 if s["id"] == "D1")
     assert "l22_analog_verification_plan_emit" in step["programs"]
-    assert step["program_outputs"] == [{
+    # v1.24.80 (#2642, T73) declared D1's other Phase-1 documents on the same
+    # `program_outputs` list (`test_t73_flow_declarations` owns those rows), so
+    # the list is no longer this entry alone. What this test owns is the L22
+    # entry: exactly one, exactly this, and no other row claiming its path.
+    rows = step["program_outputs"]
+    assert [r for r in rows
+            if r.get("program") == "l22_analog_verification_plan_emit"] == [{
         "program": "l22_analog_verification_plan_emit",
         "path": "phase1/generated_docs/L22_VERIFICATION_PLAN.json",
         "verdict_field": "extraction_status",
     }]
+    assert [r["program"] for r in rows
+            if r.get("path") == "phase1/generated_docs/L22_VERIFICATION_PLAN.json"
+            ] == ["l22_analog_verification_plan_emit"]
     assert COMMAND not in str(step["gate"])
 
 
