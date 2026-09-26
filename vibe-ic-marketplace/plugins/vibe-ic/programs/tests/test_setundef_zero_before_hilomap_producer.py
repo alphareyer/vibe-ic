@@ -49,11 +49,22 @@ def _load(name: str):
     spec = importlib.util.spec_from_file_location(
         name, _PROGRAMS / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
+    # Registered only while it executes. This runs at COLLECTION, so a copy
+    # left in sys.modules replaced the runner on every xdist worker before any
+    # test ran: tests that bound the original at import then monkeypatched a
+    # module their code under test no longer imported (d3 live measurement,
+    # pdn_em identity, r34 pad drop: red in the sweep, green alone).
+    previous = sys.modules.get(name)
     sys.modules[name] = mod
     try:
         spec.loader.exec_module(mod)
     except SystemExit:
         pass
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
     return mod
 
 
