@@ -445,6 +445,49 @@ def _try_native_a6_pv(project: Path, block: str, container: str):
         return None
 
 
+def _a6_librelane_arm(project: Path, block: str, container: str,
+                      mode: str) -> Dict[str, Any]:
+    """Run `analog_a6_librelane_drc` beside native A6 PV (T94, opt-in).
+
+    Returns `{"rc", "record", "blocking", "detail"}`. `blocking` is True when
+    the arm's own record names a blocking rule, when the switch is invalid, or
+    when the arm could not be measured: a selected tool arm that produced no
+    evidence cannot leave the stricter half of the verdict unset.
+    """
+    if mode not in ("librelane", "dual"):
+        return {"rc": None, "blocking": True,
+                "detail": f"phase3/librelane_switch.json: invalid A6 mode"}
+    prog = PROGRAMS_DIR / "analog_a6_librelane_drc.py"
+    image, why = _pin.container_image_digest(container)
+    if not image:
+        return {"rc": _pc.EX_ENV_REFUSED, "blocking": True,
+                "detail": f"{_pc.ENV_REFUSED_TOKEN} {why}"}
+    if "@" not in image:
+        image = f"{_pin.image_repo()}@{image}"
+    bdir = _pl.analog_dir(project) / block
+    att = bdir / "a6_librelane" / "attribution.json"
+    att.parent.mkdir(parents=True, exist_ok=True)
+    _pr.run([sys.executable, str(PROGRAMS_DIR / "analog_a6_drc_attribute.py"),
+             str(project), "--block", block, "--container", container,
+             "--json", str(att)], capture_output=True, text=True)
+    cmd = [sys.executable, str(prog), str(project), "--block", block,
+           "--image", image]
+    if att.is_file():
+        cmd += ["--attribution", str(att)]
+    cp = _pr.run(cmd, capture_output=True, text=True)
+    rec_path = bdir / "a6_librelane_drc.json"
+    try:
+        record = json.loads(rec_path.read_text())
+    except (OSError, ValueError):
+        record = None
+    tail = ((cp.stdout or "").strip().splitlines()
+            or (cp.stderr or "").strip().splitlines() or ["no output"])[-1]
+    return {"rc": cp.returncode, "mode": mode,
+            "record": str(rec_path) if record is not None else None,
+            "blocking": cp.returncode != 0,
+            "union": (record or {}).get("union"), "detail": tail}
+
+
 def _loop_liveness(project: Path, block: str, container: str):
     """Was the block's loop LIVE over the window A4 just measured?
 
@@ -1172,6 +1215,30 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
     # never clear a violation, because a deviation A5 recorded is
     # reported as a DISCLOSURE beside the class and changes neither the
     # class nor any exit code.
+    # THE A6 TOOL ARM, OPT-IN (T94): LibreLane KLayout.DRC + Magic.DRC on the
+    # block GDS, the graded-rule union and A6's own attribution on top.
+    # Selected by phase3/librelane_switch.json {"steps": {"A6": ...}}. It is
+    # the STRICTER half: a blocking arm is the step's FAIL; a clean arm leaves
+    # the native path below to decide.
+    if step_name == "A6_block_pv" and (_pl.analog_dir(project) / bname
+                                       / f"{bname}.gds").is_file():
+        import librelane_contract as _llc
+        try:
+            _a6_mode = _llc.selected_mode(project, "A6")
+        except _llc.Refusal:
+            _a6_mode = "invalid"
+        if _a6_mode != "direct":
+            _a6_arm = _a6_librelane_arm(
+                project, bname,
+                (getattr(args, "container", None)
+                 or os.environ.get("VIBEIC_ANALOG_CONTAINER")
+                 or _pin.default_container_name()), _a6_mode)
+            if _a6_arm.get("blocking"):
+                return StepResult(
+                    step_name, bname, _V.Verdict.FAIL.value, time.time() - t0,
+                    f"LibreLane DRC arm ({_a6_mode}): {_a6_arm.get('detail')}",
+                    output_files=_step_outputs(project, bname, step_name),
+                    extras={"librelane_arm": _a6_arm})
     if step_name == "A6_block_pv":
         _attr = PROGRAMS_DIR / "analog_a6_drc_attribute.py"
         if _attr.is_file():

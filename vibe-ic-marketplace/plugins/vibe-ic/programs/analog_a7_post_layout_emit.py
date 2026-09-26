@@ -253,6 +253,21 @@ def compare(pre: Dict[str, Optional[float]], post: Dict[str, Optional[float]],
     return rows
 
 
+def layout_tech(bdir: Path) -> Path:
+    """The Magic technology A5 drew the block with, from its own record
+    (`layout_provenance.json` -> `pdk_sources.magic_tech`). The PDK and its
+    root follow from the path: `<pdk_root>/<pdk>/libs.tech/magic/<tech>`."""
+    lay = bdir / "layout_provenance.json"
+    try:
+        tech = Path(json.loads(lay.read_text())["pdk_sources"]["magic_tech"])
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise ValueError(f"{lay.name} names no pdk_sources.magic_tech "
+                         f"({exc})") from exc
+    if len(tech.parents) < 4 or tech.parents[1].name != "libs.tech":
+        raise ValueError(f"{tech} is not <pdk_root>/<pdk>/libs.tech/magic/…")
+    return tech
+
+
 def _style_slug(style: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", style).strip("_") or "default"
 
@@ -289,11 +304,10 @@ def run(project: Path, block: str, container: str, image: str,
             return _refuse(record, record_path, "A7_INPUT_ABSENT",
                            f"{need.relative_to(project)} (owed by {owner})", 2)
     try:
-        tech = Path(json.loads(lay.read_text())["pdk_sources"]["magic_tech"])
-    except (KeyError, TypeError, ValueError, OSError) as exc:
+        tech = layout_tech(bdir)
+    except ValueError as exc:
         return _refuse(record, record_path, "A7_LAYOUT_TECH_UNDECLARED",
-                       f"{lay.relative_to(project)} names no pdk_sources."
-                       f"magic_tech ({exc})", 2)
+                       f"{lay.relative_to(project)}: {exc}", 2)
     # <pdk_root>/<pdk>/libs.tech/magic/<tech>: the layout's own PDK.
     pdk, pdk_root = tech.parents[2].name, str(tech.parents[3])
     record.update({"pdk": pdk, "pdk_root": pdk_root, "magic_tech": str(tech)})
