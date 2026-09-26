@@ -125,3 +125,18 @@ def test_b3_a_degradation_past_the_declared_threshold_only_in_the_tool_arm_fails
     assert rec["b3"]["threshold_pct"] == 10.0     # read from the flow YAML
     assert rec["b3"]["tool_only"] == {"blk": ["vout@ngspice()"]}
     assert rec["result"] == "FAIL"
+
+
+def test_b1_an_a8_product_absent_in_both_arms_is_no_difference_and_is_said(
+        tmp_path):
+    d = _arm(tmp_path, "D")
+    t = _arm(tmp_path, "T")
+    for arm in (d, t):
+        (arm / "phase3/analog/hardmacro/blk/blk.lef").unlink()
+    base = B.manifest(d)
+    rec = B.compare(base, d, t, "A7", _drive(_D), _drive(_T), None, FLOW)
+    lef = rec["b1"]["a8_products"]["phase3/analog/hardmacro/blk/blk.lef"]
+    assert lef["absent_in_both"] is True and rec["b1"]["pass"] is True
+    (t / "phase3/analog/hardmacro/blk/blk.lef").write_text("L")
+    rec = B.compare(base, d, t, "A7", _drive(_D), _drive(_T), None, FLOW)
+    assert rec["b1"]["pass"] is False

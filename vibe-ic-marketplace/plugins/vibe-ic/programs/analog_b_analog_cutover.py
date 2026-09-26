@@ -203,9 +203,12 @@ def compare(base: Dict[str, str], d_proj: Path, t_proj: Path, step: str,
     for b in blocks:
         for ext in (".gds", ".lef", ".lib", ".v"):
             rel = f"phase3/analog/hardmacro/{b}/{b}{ext}"
+            # ABSENT IN BOTH ARMS is no difference, and is said as such
+            # rather than called "identical": A8 did not produce it here.
             a8[rel] = {"direct": md.get(rel), "tool": mt.get(rel),
-                       "identical": md.get(rel) == mt.get(rel)
-                       and md.get(rel) is not None}
+                       "identical": md.get(rel) == mt.get(rel),
+                       "absent_in_both": md.get(rel) is None
+                       and mt.get(rel) is None}
     pop_d = {r for r in md if not _own(step, r)}
     pop_t = {r for r in mt if not _own(step, r)}
     b1 = {"pre_existing_changed_across_arms": changed,
