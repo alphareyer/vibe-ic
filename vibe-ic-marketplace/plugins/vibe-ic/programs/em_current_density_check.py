@@ -95,6 +95,50 @@ _DEFAULT_MARGIN = 0.10
 # current-density exponent in Black's equation (n≈2 for the J^-n term).
 _DEFAULT_BLACKS_N = 2.0
 
+#: OpenROAD Tcl that dumps the loaded ODB's supply-net routing-layer boxes
+#: (special wires, and the metal of every via) as the TSV
+#: `_odb_pg_geometry_rects` reads. DEF SPECIALNETS omit the layer metal inside
+#: generated via arrays, yet PSM reports current between nodes on those via
+#: enclosures; this gives those edges a real cross section. One instrument for
+#: every session that feeds this gate: the Step-25 producer and the pre-route
+#: PDN sweep (`_ppa/pdn_em_presweep`). `__GEOMETRY_PATH__` is the output path.
+PG_GEOMETRY_TCL = r'''
+set _eg_f [open __GEOMETRY_PATH__ w]
+puts $_eg_f "net\tlayer\tx0_um\ty0_um\tx1_um\ty1_um\tsource"
+set _eg_dbu [[ord::get_db_tech] getDbUnitsPerMicron]
+foreach _eg_n [[ord::get_db_block] getNets] {
+  if {[$_eg_n getSigType] ni {POWER GROUND}} {continue}
+  foreach _eg_sw [$_eg_n getSWires] {
+    foreach _eg_s [$_eg_sw getWires] {
+      if {[$_eg_s isVia]} {
+        lassign [$_eg_s getViaXY] _eg_vx _eg_vy
+        set _eg_v [$_eg_s getTechVia]
+        if {$_eg_v eq "NULL"} {set _eg_v [$_eg_s getBlockVia]}
+        if {$_eg_v eq "NULL"} {continue}
+        foreach _eg_b [$_eg_v getBoxes] {
+          set _eg_l [$_eg_b getTechLayer]
+          if {$_eg_l eq "NULL" || [$_eg_l getRoutingLevel] <= 0} {continue}
+          puts $_eg_f [join [list [$_eg_n getName] [$_eg_l getName] \
+            [expr {double($_eg_vx+[$_eg_b xMin])/$_eg_dbu}] \
+            [expr {double($_eg_vy+[$_eg_b yMin])/$_eg_dbu}] \
+            [expr {double($_eg_vx+[$_eg_b xMax])/$_eg_dbu}] \
+            [expr {double($_eg_vy+[$_eg_b yMax])/$_eg_dbu}] via_metal] "\t"]
+        }
+      } else {
+        set _eg_l [$_eg_s getTechLayer]
+        if {$_eg_l eq "NULL" || [$_eg_l getRoutingLevel] <= 0} {continue}
+        puts $_eg_f [join [list [$_eg_n getName] [$_eg_l getName] \
+          [expr {double([$_eg_s xMin])/$_eg_dbu}] \
+          [expr {double([$_eg_s yMin])/$_eg_dbu}] \
+          [expr {double([$_eg_s xMax])/$_eg_dbu}] \
+          [expr {double([$_eg_s yMax])/$_eg_dbu}] special_wire] "\t"]
+      }
+    }
+  }
+}
+close $_eg_f
+'''
+
 
 def _num(v: Any) -> Optional[float]:
     try:
