@@ -41,6 +41,17 @@ import flow_compliance_check as FCC  # noqa: E402
 import librelane_contract as contract  # noqa: E402
 import pad_ring_check as CHK  # noqa: E402
 import pad_ring_gen as GEN  # noqa: E402
+from _stated_eda_image import state_the_image  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _stated_image(monkeypatch):
+    """The image identity is STATED, never asked of this host: the runner branch
+    below reaches `librelane_contract.resolve_image`, which inside the image (no
+    docker) would refuse LL_IMAGE_NOT_RESOLVABLE and on a docker host would
+    borrow whatever it holds (tests/_stated_eda_image.py)."""
+    monkeypatch.delenv("VIBEIC_LIBRELANE_IMAGE", raising=False)
+    state_the_image(monkeypatch)
 
 _spec = importlib.util.spec_from_file_location(
     "f30_pad_ring_fixtures", Path(__file__).resolve().parent / "test_pad_ring.py")
