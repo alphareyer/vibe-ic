@@ -8,8 +8,10 @@ Two owner rulings on the gate F9 wired:
    says ``ENFORCEMENT: blocking``. The two change together:
    ``flow_gate_enforcement_audit`` reads a blocking declaration without an
    inline spawn as ``contradiction::``, and an inline spawn under an advisory
-   declaration as ``declared_weaker_than_wired``. The mutation arm below strips
-   the spawn from a copy of the runner and requires the contradiction back.
+   declaration as ``declared_weaker_than_wired``. One mutation arm drops the
+   spawn from a copy of the runner and requires the contradiction back. The
+   audit cannot see whether ``main`` calls the step at all, so a second arm
+   reads ``main``'s plan appends and requires the uncalled step to be seen.
 2. The input declares serv as its reuse; the glue never instantiates it. Yosys's
    ``hierarchy -top`` drops every serv module, so the gate judged zero rows and
    answered PASS. It now FAILs with ``CATALOG_REUSE_DECLARED_NOT_INSTANTIATED``.
@@ -42,7 +44,7 @@ REPORT = 'reports/phase2/gates/catalog_synth_safe_params.json'
 RUNNER = 'design_one_shot_runner.py'
 L2_DECLARES_SERV = {'cpu_isa': 'rv32i', 'cpu_arch': 'bit-serial',
                     'description': 'The design reuses the serv core from the IP catalog.'}
-#: The inline spawn this change adds; the mutation arm deletes exactly it.
+#: The inline call this change adds to ``main``; a mutation arm deletes exactly it.
 INLINE_CALL = '        plan.append(step_catalog_synth_safe_params(project))\n'
 
 
@@ -165,6 +167,25 @@ def _programs_copy(tmp_path, runner_text):
     return d
 
 
+def _main_plan_appends(src):
+    """``plan.append(<call>)`` targets inside ``main``, in source order.
+
+    The audit credits the spawn INSIDE ``step_catalog_synth_safe_params``; it
+    cannot see whether ``main`` ever calls that function (measured: replacing
+    the call with ``pass`` left the audit at INLINE_BLOCKING). This reads it.
+    """
+    import ast
+    main = next(f for f in ast.parse(src).body
+                if isinstance(f, ast.FunctionDef) and f.name == 'main')
+    calls = [n for n in ast.walk(main)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == 'append' and isinstance(n.func.value, ast.Name)
+             and n.func.value.id == 'plan' and n.args
+             and isinstance(n.args[0], ast.Call)]
+    return [ast.unparse(c.args[0].func)
+            for c in sorted(calls, key=lambda c: (c.lineno, c.col_offset))]
+
+
 def test_the_audit_reads_the_gate_as_declared_blocking_and_enforced():
     rep, row = _gate_row(PROGRAMS)
     assert (row['declared'], row['enforcement'], row['wiring']) == (
@@ -174,12 +195,33 @@ def test_the_audit_reads_the_gate_as_declared_blocking_and_enforced():
     assert GATE not in {g['gate'] for g in rep['declared_weaker_than_wired']}
 
 
-def test_mutation_removing_the_inline_spawn_is_a_contradiction(tmp_path):
+def test_main_appends_the_step_after_the_rtl_is_staged_and_before_step2():
+    order = _main_plan_appends((PROGRAMS / RUNNER).read_text())
+    assert order.count('step_catalog_synth_safe_params') == 1, order
+    at = order.index('step_catalog_synth_safe_params')
+    # After the last step-1 stager (reused-IP consume and both alias emitters)
+    # and before the step-2/3 determinism gates and synthesis.
+    for before in ('step_reused_ip_consume', 'step_leaf_typo_aliases',
+                   'step_reset_clock_variant_aliases'):
+        assert order.index(before) < at, (before, order[:at + 1])
+    assert at < order.index('step_lesson_consumption'), order
+
+
+def test_mutation_an_uncalled_step_is_seen(tmp_path):
     text = (PROGRAMS / RUNNER).read_text()
     assert text.count(INLINE_CALL) == 1, 'the inline call moved; update INLINE_CALL'
+    cut = text.replace(INLINE_CALL, '        pass\n')
+    assert 'step_catalog_synth_safe_params' not in _main_plan_appends(cut)
+
+
+def test_mutation_dropping_the_spawn_is_a_contradiction(tmp_path):
+    text = (PROGRAMS / RUNNER).read_text()
+    spawn = f'str(PROGRAMS_DIR / "{GATE}.py")'
+    assert text.count(spawn) == 1, 'the spawn moved; update spawn'
     live = _gate_row(_programs_copy(tmp_path / 'live', text))[1]
     assert live['wiring'] == 'INLINE_BLOCKING', live
-    rep, row = _gate_row(_programs_copy(tmp_path / 'cut', text.replace(INLINE_CALL, '')))
+    rep, row = _gate_row(_programs_copy(
+        tmp_path / 'cut', text.replace(spawn, 'str(PROGRAMS_DIR / "other_check.py")')))
     assert row['wiring'] == 'NOT_INVOKED', row
     assert GATE in {c['gate'] for c in rep['contradictions']}
 
