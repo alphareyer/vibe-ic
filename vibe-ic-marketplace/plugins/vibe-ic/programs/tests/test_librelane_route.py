@@ -604,11 +604,11 @@ def test_a_pareto_tie_is_broken_in_the_reviews_order(tmp_path):
 def test_drt_runs_are_read_per_run_not_from_the_mixed_state(tmp_path):
     drt = tmp_path / 'drt'
     write(drt / 'drt-run-0/chip_top.drc', 'violation type: Short\n' * 2)
-    write(drt / 'drt-run-1/chip_top.drc', '')
+    write(drt / 'drt-run-2/chip_top.drc', '')
     write(drt / 'drt-run-10/chip_top.drc', 'violation type: Cut Spacing\n')
     runs = route.drt_runs(drt)
     assert [(r['run'], r['markers']) for r in runs] == [
-        ('drt-run-0', 2), ('drt-run-1', 0), ('drt-run-10', 1)]
+        ('drt-run-0', 2), ('drt-run-2', 0), ('drt-run-10', 1)]
 
 
 # ------------------------------------------------------- the plugin steps ---
