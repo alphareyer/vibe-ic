@@ -5502,7 +5502,10 @@ steps:
       # missing SILENTLY: `cut_netlist.v` and `*_pnr.v`. Both are artefacts a
       # producer really writes that NO step in this file declares, so neither
       # absence is loud anywhere. `*.spef` was never part of the hole: it is
-      # step 22's SOLE required_output and already carried a T3 backstop.
+      # a declared required_output of step 22 and carries a T3 backstop (it
+      # was step 22's only entry until v1.24.73 declared the pre-stream receipt
+      # `spef_extraction.json` beside it; required_outputs is ALL-of, so the
+      # SPEF stays one step 22 is held to).
       #
       # THE ROOT CAUSE WAS DECLARATION-vs-PRODUCER, AND IT IS FIXED BY NAMING
       # DECLARED ARTEFACTS, NOT BY DECLARING THE UNDECLARED ONES. Both
@@ -5526,7 +5529,7 @@ steps:
       #     other's declared outputs instead of each other's intermediates is
       #     the same repair DT1's own required_outputs note describes, and DT3
       #     one step later already uses exactly this spelling.
-      #   * `*.spef` is step 22's SOLE required_output and step 22
+      #   * `*.spef` is a declared required_output of step 22 and step 22
       #     `blocks_on: [21]`, so a SPEF cannot exist unless routing PASSED.
       #     `*_pnr.v` therefore added no scoping — only a third way for DT2 to
       #     vanish. The missing-netlist case is guarded BY THE PRODUCER and

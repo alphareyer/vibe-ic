@@ -107,7 +107,7 @@ def test_every_dt2_trigger_is_some_steps_declared_output():
     for path, why in reasons.items():
         assert why.startswith("T3"), (
             f"{path} is reachable via {why!r}, not because a step declares it "
-            f"as its sole required_output")
+            f"as a required_output")
 
 
 def test_the_condition_is_this_steps_own_blocks_on_written_as_artefacts():
@@ -117,21 +117,31 @@ def test_the_condition_is_this_steps_own_blocks_on_written_as_artefacts():
     upstream never ran."""
     dt2 = _step("DT2")
     assert sorted(str(b) for b in dt2["blocks_on"]) == ["22", "DT1"], dt2["blocks_on"]
-    dt1_out = _step("DT1")["required_outputs"]
-    s22_out = _step("22")["required_outputs"]
-    assert len(dt1_out) == 1 and len(s22_out) == 1, (dt1_out, s22_out)
-    # Step 22 declares ONE pattern with two OR branches
-    # (`parasitic.spef OR *.spef`); `_build_backstop_index` indexes every branch
-    # of a single pattern, and the glob branch is a SUPERSET of the named one,
-    # so the branch DT2 cites cannot go unmatched while step 22 stays green.
-    declared = set(_g._or_branches(dt1_out[0])) | set(_g._or_branches(s22_out[0]))
+    def _declared(sid: str) -> set:
+        # Every entry, every OR branch: `check_step` reads required_outputs as
+        # ALL-of-N (each entry must be produced), and `_build_backstop_index`
+        # indexes every branch of every entry. Step 22 declares its SPEF as
+        # `parasitic.spef OR *.spef` -- the glob branch is a SUPERSET of the
+        # named one, so the branch DT2 cites cannot go unmatched while step 22
+        # stays green -- and, since v1.24.73 (#2635), its pre-stream receipt
+        # `spef_extraction.json` beside it. A premise of "exactly one entry"
+        # is a count, not the property: what matters is that each trigger is
+        # an entry the upstream step is held to.
+        return {b for pat in _step(sid)["required_outputs"]
+                for b in _g._or_branches(pat)}
+
+    dt1_decl, s22_decl = _declared("DT1"), _declared("22")
+    assert dt1_decl and s22_decl, (dt1_decl, s22_decl)
     cond = set(dt2["condition"]["files_exist"])
     assert len(cond) == 2, cond
-    assert cond <= declared, (cond - declared, declared)
-    assert cond & set(_g._or_branches(dt1_out[0])), (
-        "DT2 no longer waits for DT1's declared grade")
-    assert cond & set(_g._or_branches(s22_out[0])), (
+    assert cond <= dt1_decl | s22_decl, (cond - (dt1_decl | s22_decl),
+                                         dt1_decl | s22_decl)
+    assert cond & dt1_decl, "DT2 no longer waits for DT1's declared grade"
+    assert cond & s22_decl, (
         "DT2 no longer waits for step 22's declared parasitics")
+    assert "phase3/stage3/extracted/*.spef" in cond, (
+        "DT2 must wait for step 22's parasitics, not merely its receipt: the "
+        "receipt can be written by a pre-stream check that found no SPEF")
     assert not dt2["condition"].get("any_of"), (
         "DT2's condition became any-of; a single present trigger would then arm "
         "the step before its other upstream had run")
