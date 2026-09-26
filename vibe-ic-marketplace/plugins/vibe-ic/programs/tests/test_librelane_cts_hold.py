@@ -21,6 +21,7 @@ contract = importlib.import_module('librelane_contract')
 runner = importlib.import_module('phase3_one_shot_runner')
 llev = importlib.import_module('_librelane_cts_hold_evidence')
 cts = importlib.import_module('librelane_cts_hold')
+from _stated_eda_image import state_the_image  # noqa: E402
 
 CORNERS = ['nom_tt_025C_5v00', 'nom_ss_125C_4v50', 'nom_ff_n40C_5v50']
 
@@ -40,6 +41,7 @@ def write(path, text):
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch):
     monkeypatch.setattr(contract, '_CAPABILITY', {}, raising=False)
+    state_the_image(monkeypatch)   # the identity is stated, never asked of this host
     for name in ('VIBEIC_LIBRELANE_IMAGE', 'VIBEIC_LIBRELANE_PDK_ROOT'):
         monkeypatch.delenv(name, raising=False)
 
