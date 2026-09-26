@@ -1981,6 +1981,11 @@ def _is_registered(inst: Instrument) -> bool:
 _IMPORT_FILE = "<frozen importlib._bootstrap>"
 
 
+class _Reached(list):
+    """The module namespaces a run reached, plus the code objects it ENTERED."""
+    entered: frozenset = frozenset()
+
+
 def _reaching(run: Callable[[], Any]) -> Tuple[Any, List[Dict[str, Any]]]:
     """Run `run` and return its result with every module namespace it reached.
 
@@ -1995,6 +2000,9 @@ def _reaching(run: Callable[[], Any]) -> Tuple[Any, List[Dict[str, Any]]]:
     module for the first time runs the import system and every finder a host
     installed (pytest's assertion-rewriting hook, whose module binds a
     per-test closure); that is how the module arrived, not what the judge read.
+
+    The list also carries `.entered`: every code object the run entered, so a
+    replaced function can be told apart from one the run actually called.
     """
     spaces: Dict[int, Dict[str, Any]] = {}
     codes: Dict[int, Any] = {}
@@ -2026,7 +2034,9 @@ def _reaching(run: Callable[[], Any]) -> Tuple[Any, List[Dict[str, Any]]]:
         for v in list(g.values()):
             if isinstance(v, types.ModuleType):
                 reached.setdefault(id(v.__dict__), v.__dict__)
-    return result, list(reached.values())
+    out = _Reached(reached.values())
+    out.entered = frozenset(codes.values())
+    return result, out
 
 
 def _is_foreign(value: Any, home: Optional[str], name: str) -> bool:
@@ -2169,14 +2179,29 @@ def _interpreters_own(filename: str) -> bool:
             and "site-packages" not in parts and "dist-packages" not in parts)
 
 
+def _took_part(value: Any, entered: Optional[frozenset]) -> bool:
+    """Could `value` have shaped what the run measured? A mock always could (it
+    answers attribute reads, not only calls); a function only if the run
+    entered its code. A function bound where the run looked but never called
+    measured nothing: the interpreter's start-up binds such things by
+    environment (the EDA image's `sitecustomize` installs apport's closure as
+    `sys.excepthook`; the host has none), and reading one as a caller's fake
+    left every calibration uncached in the image and only there (F8b)."""
+    if entered is None or not isinstance(value, types.FunctionType):
+        return True
+    return value.__code__ in entered
+
+
 def _foreign_bindings(reached: List[Dict[str, Any]]) -> List[str]:
-    """Every binding in `reached` a caller replaced, as `module.name`."""
+    """Every binding in `reached` a caller replaced and the run used, as
+    `module.name`."""
+    entered = getattr(reached, "entered", None)
     found = [f"{__name__}.{k}" for k, v in _IMPORTED_STATE.items()
              if globals().get(k) is not v]
     for g in reached:
         home = g.get("__name__")
         found.extend(f"{home}.{k}" for k, v in list(g.items())
-                     if _is_foreign(v, home, k))
+                     if _is_foreign(v, home, k) and _took_part(v, entered))
     return found
 
 
