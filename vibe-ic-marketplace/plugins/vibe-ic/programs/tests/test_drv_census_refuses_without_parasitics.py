@@ -43,6 +43,7 @@ import phase3_one_shot_runner as R  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _tcl_walk                    # noqa: E402
 from _pnr_tcl_stub import STUB as _STUB          # noqa: E402
+from _pnr_tcl_stub import ANNOTATED_SESSION  # noqa: E402
 from test_sdr_checkpoint_and_child import _full_pnr_tcl  # noqa: E402
 
 # The four occurrences as they appear in the shipping log, with the census line
@@ -164,6 +165,54 @@ def test_the_repair_model_is_disclosed_next_to_the_number(tmp_path):
 
 # ────────────────── with-parasitics control: it GRADES ────────────────────
 
+# A session whose `read_spef` returns and whose violator report counts 7 -- the
+# SAME stand-in both tests below drive; only the annotation census differs.
+_WORKING_SESSION = (
+    "namespace eval ord { proc get_db_block {} { return ::_vic_blk } }\n"
+    "proc ::_vic_blk {op args} {\n"
+    "  switch -- $op { getDefUnits { return 1000 } "
+    "getDieArea { return ::_vic_die } default { return \"\" } }\n"
+    "}\n"
+    "proc ::_vic_die {op args} {\n"
+    "  switch -- $op { dx - dy { return 1150000 } default { return \"\" } }\n"
+    "}\n"
+    "proc read_spef {path} { return }\n"
+    "proc write_spef {path} {\n"
+    "  file mkdir [file dirname $path]\n"
+    "  set f [open $path w]; puts $f SPEF; close $f\n"
+    "}\n"
+    "proc extract_parasitics {args} { return }\n"
+    "proc report_check_types {args} {\n"
+    "  set path \"\"; set take 0\n"
+    "  foreach a $args {\n"
+    "    if {$take} { set path $a; set take 0; continue }\n"
+    "    if {$a eq \">\"} { set take 1 } elseif {[string index $a 0] eq \">\"} "
+    "{ set path [string range $a 1 end] }\n"
+    "  }\n"
+    "  if {$path eq \"\"} { return }\n"
+    "  file mkdir [file dirname $path]\n"
+    "  set f [open $path w]\n"
+    "  puts $f \"max capacitance\"\n"
+    "  for {set i 0} {$i < 7} {incr i} "
+    "{ puts $f \"  net_$i 0.1 0.2 -0.1 (VIOLATED)\" }\n"
+    "  close $f\n"
+    "}\n"
+    "proc detailed_route {args} {\n"
+    "  # -output_drc\n"
+    "  return\n"
+    "}\n"
+    "proc global_route {args} { return }\n"
+    "proc write_db {path} {\n"
+    "  file mkdir [file dirname $path]\n"
+    "  set f [open $path w]; puts -nonewline $f ODB; close $f\n"
+    "}\n"
+    "proc write_def {path} {\n"
+    "  file mkdir [file dirname $path]\n"
+    "  set f [open $path w]; puts -nonewline $f DEF; close $f\n"
+    "}\n"
+    "proc write_verilog {path} {}\n")
+
+
 def test_with_parasitics_the_census_still_reports_its_number(tmp_path):
     """THE CONTROL THAT MAKES THE REFUSAL MEAN SOMETHING. A gate that refuses
     everything passes this file for free. Drive the real deck with a working
@@ -173,52 +222,9 @@ def test_with_parasitics_the_census_still_reports_its_number(tmp_path):
     ckpt.write_text("CHECKPOINT\n")
     child = R._build_pnr_sdr_child_tcl_text(
         deck, checkpoint_def_c=str(ckpt), stage="postroute_drv_repair")
-    harness = (
-        "namespace eval ord { proc get_db_block {} { return ::_vic_blk } }\n"
-        "proc ::_vic_blk {op args} {\n"
-        "  switch -- $op { getDefUnits { return 1000 } "
-        "getDieArea { return ::_vic_die } default { return \"\" } }\n"
-        "}\n"
-        "proc ::_vic_die {op args} {\n"
-        "  switch -- $op { dx - dy { return 1150000 } default { return \"\" } }\n"
-        "}\n"
-        "proc read_spef {path} { return }\n"
-        "proc write_spef {path} {\n"
-        "  file mkdir [file dirname $path]\n"
-        "  set f [open $path w]; puts $f SPEF; close $f\n"
-        "}\n"
-        "proc extract_parasitics {args} { return }\n"
-        "proc report_check_types {args} {\n"
-        "  set path \"\"; set take 0\n"
-        "  foreach a $args {\n"
-        "    if {$take} { set path $a; set take 0; continue }\n"
-        "    if {$a eq \">\"} { set take 1 } elseif {[string index $a 0] eq \">\"} "
-        "{ set path [string range $a 1 end] }\n"
-        "  }\n"
-        "  if {$path eq \"\"} { return }\n"
-        "  file mkdir [file dirname $path]\n"
-        "  set f [open $path w]\n"
-        "  puts $f \"max capacitance\"\n"
-        "  for {set i 0} {$i < 7} {incr i} "
-        "{ puts $f \"  net_$i 0.1 0.2 -0.1 (VIOLATED)\" }\n"
-        "  close $f\n"
-        "}\n"
-        "proc detailed_route {args} {\n"
-        "  # -output_drc\n"
-        "  return\n"
-        "}\n"
-        "proc global_route {args} { return }\n"
-        "proc write_db {path} {\n"
-        "  file mkdir [file dirname $path]\n"
-        "  set f [open $path w]; puts -nonewline $f ODB; close $f\n"
-        "}\n"
-        "proc write_def {path} {\n"
-        "  file mkdir [file dirname $path]\n"
-        "  set f [open $path w]; puts -nonewline $f DEF; close $f\n"
-        "}\n"
-        "proc write_verilog {path} {}\n")
+    harness = _WORKING_SESSION
     out, err, route = _tcl_walk.walk(
-        "source [lindex $argv 0]\n", _STUB + harness + child, tmp_path)
+        "source [lindex $argv 0]\n", _STUB + ANNOTATED_SESSION + harness + child, tmp_path)
     assert "SDR_DRV_CENSUS_NOT_MEASURED" not in out, (
         f"[{route}] the census refused a run that HAD parasitics and a report:"
         f"\n{out[-1500:]}")
@@ -232,3 +238,32 @@ def test_the_child_deck_is_still_valid_tcl(tmp_path):
         "source [lindex $argv 0]\n", _STUB + _child(tmp_path), tmp_path)
     assert "missing close-bracket" not in err, err
     assert "SDR_CHILD_DONE" in out, f"[{route}] {out[-1200:]}"
+
+
+def test_a_read_spef_that_annotated_nothing_is_refused(tmp_path):
+    """R-0915-83's other half: `read_spef` RETURNING is not parasitics in STA.
+
+    MEASURED (vibeic-eda 0.3.79, OpenROAD 26Q3-2963): a SPEF whose names do not
+    match the design prints STA-1648/1650 warnings, RETURNS, and annotates
+    nothing -- OpenSTA's census then lists every driver. The deck used to set
+    the flag the moment `read_spef` returned, so this session graded. Same
+    working-session stand-in as the control above; the census lists the one
+    driver as unannotated, in the tool's own grammar.
+    """
+    deck = _full_pnr_tcl(tmp_path)
+    ckpt = tmp_path / "ckpt.def"
+    ckpt.write_text("CHECKPOINT\n")
+    child = R._build_pnr_sdr_child_tcl_text(
+        deck, checkpoint_def_c=str(ckpt), stage="postroute_drv_repair")
+    unannotated = ANNOTATED_SESSION.replace(
+        'puts $f "Found 0 unannotated drivers."',
+        'puts $f "Found 1 unannotated drivers."; puts $f " _stub_drv/Y"')
+    assert unannotated != ANNOTATED_SESSION
+    out, err, route = _tcl_walk.walk(
+        "source [lindex $argv 0]\n",
+        _STUB + unannotated + _WORKING_SESSION + child, tmp_path)
+    assert "SDR_DRV_CENSUS_NOT_MEASURED: parasitics_in_sta=0" in out, (
+        f"[{route}] a session whose read_spef annotated nothing still "
+        f"graded:\n{out[-1500:]}")
+    assert "SDR_DRV_BY_KIND" not in out, (
+        f"[{route}] the refused census still reported a number")

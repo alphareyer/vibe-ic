@@ -47,6 +47,8 @@ import phase3_one_shot_runner as p3  # noqa: E402
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _pnr_tcl_stub import ANNOTATED_SESSION  # noqa: E402
 
 
 def _emit(spef="/OUT/sdr_pass.spef", tag="SDR"):
@@ -288,7 +290,7 @@ def _drive_loop(tmpdir, rd_script, spef_exists=True,
     # `lindex` handed the second call the word "parasitics" and the arm under
     # test never ran. Braced per element, the list is what it says it is.
     script = " ".join("{%s}" % a for a in rd_script)
-    head = _LOOP_STUBS + "\nset RPT %s/sdr_drv.rpt\nset RPT_N 0\nset RD_N 0\nset RD_SCRIPT {%s}\n" % (
+    head = _LOOP_STUBS + ANNOTATED_SESSION + "\nset RPT %s/sdr_drv.rpt\nset RPT_N 0\nset RD_N 0\nset RD_SCRIPT {%s}\n" % (
         out, script)
     # The transaction refuses to mutate without a real router baseline.  This
     # unit fixture supplies one native-format finding, and detailed_route above

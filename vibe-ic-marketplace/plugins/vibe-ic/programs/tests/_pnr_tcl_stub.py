@@ -145,3 +145,40 @@ STUB = _UNKNOWN + _UTL + _REPORT_DONT_USE + _ORD_DB_PRESENT
 
 #: The same interpreter, with no master present in the physical database.
 STUB_MASTERS_ABSENT = _UNKNOWN + _UTL + _REPORT_DONT_USE + _ORD_DB_ABSENT
+
+
+# OPT-IN, never part of STUB: an OpenSTA session in which `read_spef` DID
+# annotate the design. R-0915-83's census sets `parasitics_in_sta` only from
+# `report_parasitic_annotation -report_unannotated`, read back, plus one leaf
+# driver pin of the linked design that is not listed in it. Under the plain
+# STUB nothing is annotated -- the report is created empty and `get_pins`
+# answers nothing -- so the census refuses, which is the honest answer for a
+# stand-in that models no parasitics. A harness that models a WORKING
+# `read_spef` must model this too, beside it.
+#
+# The report is the tool's own bytes for an annotated session (MEASURED,
+# vibeic-eda 0.3.79, `calibration/drv_with_parasitics_negative.ann`). The pin
+# queries answer ONLY for the census's own `get_pins -hierarchical *` and the
+# one stand-in pin, so every other `get_pins`/`get_property` in the deck gets
+# the same "" the fallthrough gave it before.
+ANNOTATED_SESSION = r"""
+proc report_parasitic_annotation {args} {
+  set n [llength $args]
+  if {$n >= 2 && [lindex $args end-1] in {> >>}} {
+    set f [open [lindex $args end] [expr {[lindex $args end-1] eq ">" ? "w" : "a"}]]
+    puts $f "Found 0 unannotated drivers."
+    puts $f "Found 0 partially unannotated drivers."
+    close $f
+  }
+}
+proc get_pins {args} {
+  if {$args eq {-hierarchical *}} { return {_stub_drv/Y} }
+  return ""
+}
+proc get_full_name {obj} { return $obj }
+proc get_property {obj prop} {
+  if {$obj ne "_stub_drv/Y"} { return "" }
+  switch -- $prop { direction { return output } is_hierarchical { return 0 } }
+  return ""
+}
+"""

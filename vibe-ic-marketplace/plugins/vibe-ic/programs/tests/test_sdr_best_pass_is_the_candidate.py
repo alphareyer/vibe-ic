@@ -35,6 +35,7 @@ import phase3_one_shot_runner as R  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _tcl_walk                                 # noqa: E402
 from _pnr_tcl_stub import STUB as _STUB          # noqa: E402
+from _pnr_tcl_stub import ANNOTATED_SESSION  # noqa: E402
 from test_sdr_checkpoint_and_child import _full_pnr_tcl  # noqa: E402
 
 # NO `skipif(tclsh is None)` HERE, DELIBERATELY. A tool-absent skip turns a
@@ -156,7 +157,7 @@ def _run_child(tmp_path: Path, drc_counts, *, drv_counts=None):
         "{ puts $f \"  net_$i   0.1   0.2   -0.1 (VIOLATED)\" }\n"
         "  close $f\n"
         "}\n")
-    out, err, route = _tcl_walk.walk(_WALKER, _STUB + harness + child, tmp_path)
+    out, err, route = _tcl_walk.walk(_WALKER, _STUB + ANNOTATED_SESSION + harness + child, tmp_path)
     return _Ran(out, err, route)
 
 

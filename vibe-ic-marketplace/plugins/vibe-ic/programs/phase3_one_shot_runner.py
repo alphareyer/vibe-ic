@@ -30957,6 +30957,8 @@ def _v1_8_100_signoff_drv_repair_tcl(
     repair recipe in the tree and the two would drift — the failure this repo
     has already paid for once with the routing-clear filter.
     """
+    _instrument_calibration.assert_calibrated(
+        "phase3_one_shot_runner::_v1_8_100_signoff_drv_repair_tcl")  # R-0915-83
     # The tie-recovery deck for the legalize ladder's tap rung. It is the
     # SAME occupancy-aware well-tie repair the parent runs after its own
     # tap prune — never the fixed-pitch `tapcell`, which re-inserts on
@@ -31112,12 +31114,49 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # a SPEF is read back. So a census taken after extraction alone reports
         # ZERO and is byte-indistinguishable from a clean design -- a
         # NOT_MEASURED that reads as green, and the loop would call it
-        # CONVERGED on pass 1. `_sdr_par_ok` is set ONLY on the line below,
-        # after `read_spef` returns without error, and nothing else sets it.
+        # CONVERGED on pass 1.
+        #
+        # `read_spef` RETURNING is not evidence that parasitics reached STA:
+        # MEASURED (vibeic-eda 0.3.79, OpenROAD 26Q3-2963, the calibration
+        # chain), a SPEF whose names do not match the design prints seven
+        # STA-1648/1650 warnings, returns, annotates NOTHING, and the violator
+        # report it leaves is the same 0 bytes a clean design leaves. So the
+        # flag is set ONLY from OpenSTA's own annotation census, read back
+        # after the read: its grammar parses (`Found N unannotated drivers.`
+        # followed by exactly N names) AND at least one leaf driver pin of the
+        # linked design is NOT in that list. With no parasitics every driver
+        # is listed, and a design with one annotated net still grades.
         "    set _sdr_par_ok 0\n"
         f"    if {{[catch {{read_spef {out_dir_c}/sdr_pass.spef}} _sdr_sr]}} "
         "{ puts \"SDR_SPEFR_NONFATAL: $_sdr_sr\"; set _sdr_tx_error 1; break }\n"
-        "    set _sdr_par_ok 1\n"
+        "    set _sdr_un [dict create]\n"
+        "    set _sdr_un_n -1\n"
+        "    set _sdr_un_seen 0\n"
+        "    set _sdr_par_driver 0\n"
+        "    if {[catch {\n"
+        f"      report_parasitic_annotation -report_unannotated > {out_dir_c}/sdr_ann.rpt\n"
+        f"      set _sdr_fh [open {out_dir_c}/sdr_ann.rpt r]\n"
+        "      set _sdr_sect 0\n"
+        "      while {[gets $_sdr_fh _sdr_ln] >= 0} {\n"
+        "        if {[regexp {^Found ([0-9]+) unannotated drivers\\.$} $_sdr_ln -> _sdr_un_n]} "
+        "{ set _sdr_sect 1; continue }\n"
+        "        if {[regexp {^Found [0-9]+ partially unannotated drivers\\.$} $_sdr_ln]} "
+        "{ set _sdr_sect 2; continue }\n"
+        "        if {$_sdr_sect == 1 && [string index $_sdr_ln 0] eq \" \"} "
+        "{ dict set _sdr_un [string trim $_sdr_ln] 1; incr _sdr_un_seen }\n"
+        "      }\n"
+        "      close $_sdr_fh\n"
+        "      if {$_sdr_un_n >= 0 && $_sdr_un_seen == $_sdr_un_n} {\n"
+        "        foreach _sdr_pin [get_pins -hierarchical *] {\n"
+        "          if {[get_property $_sdr_pin is_hierarchical]} { continue }\n"
+        "          if {[lsearch -exact {output tristate bidirect} "
+        "[get_property $_sdr_pin direction]] < 0} { continue }\n"
+        "          if {![dict exists $_sdr_un [get_full_name $_sdr_pin]]} "
+        "{ set _sdr_par_driver 1; break }\n"
+        "        }\n"
+        "      }\n"
+        "    } _sdr_ae]} { puts \"SDR_ANNOTATION_NONFATAL: $_sdr_ae\" }\n"
+        "    if {$_sdr_par_driver} { set _sdr_par_ok 1 }\n"
         # Count the sign-off DRV the same way the Step-23 gate does: the
         # tool's own violator report, not a proxy.
         # R-0915-83 — and REFUSE BY NAME rather than report a number when the
@@ -31137,8 +31176,9 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "$_sdr_par_ok violator_report=$_sdr_rpt_ok -- a DRV census without "
         "parasitics in STA reports 0 and cannot be told apart from a clean "
         "design (MEASURED: 0 after extract_parasitics alone, 45237 after "
-        "read_spef of the SAME extraction). NO NUMBER IS REPORTED and the "
-        "repair loop does not run on it.\"\n"
+        "read_spef of the SAME extraction; parasitics_in_sta is OpenSTA's own "
+        "report_parasitic_annotation, unannotated=$_sdr_un_n). NO NUMBER IS "
+        "REPORTED and the repair loop does not run on it.\"\n"
         "      set _sdr_tx_error 1\n"
         "      break\n"
         "    }\n"

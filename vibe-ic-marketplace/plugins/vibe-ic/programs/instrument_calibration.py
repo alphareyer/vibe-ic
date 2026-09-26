@@ -343,10 +343,12 @@ def _judge_progress(job: Dict[str, str]) -> Optional[str]:
 #
 # The census is EMITTED TCL, so the calibration EXECUTES it: the block is taken
 # out of the deck the runner actually emits, by its own markers, and run in
-# `tclsh` with the five tool commands stubbed. The ONE difference between the
-# two arms is whether `read_spef` returns or raises; the violator report handed
-# to the counting arm is the REAL `report_check_types -violators` file OpenSTA
-# wrote for the calibration chain.
+# `tclsh` with the tool commands stubbed. The two arms differ in what OpenSTA
+# WROTE: the `report_check_types -violators` file and the
+# `report_parasitic_annotation -report_unannotated` census of the same session,
+# one `read_spef` apart. `get_pins`/`get_property`/`get_full_name` answer from
+# the pin inventory OpenROAD printed for the same linked design
+# (`calibration/cal_chain_pins.txt`), identical in both arms.
 
 _TCL_OUT_DIR = "/tmp/cal_pnr"
 _TCL_CENSUS_BEGIN = "set _sdr_par_ok 0"
@@ -363,32 +365,53 @@ def _drv_census_block() -> str:
     return deck[i:j + 1]
 
 
-def run_drv_census(report_text: Optional[str]) -> str:
-    """Run the EMITTED census in tclsh over `report_text` and return its line.
+def _tcl_word(text: str) -> str:
+    return "{" + text + "}"
 
-    `report_text` is the `report_check_types -violators` file the session left
-    behind: `None` means the command never wrote one, `""` means it wrote an
-    EMPTY one — and OpenSTA writes exactly that for a session with no
-    parasitics, which is the whole point.
 
-    The five tool commands the block calls are stubbed and nothing else is; the
-    Tcl is the deck's own text, cut out by its own markers. This EXECUTES the
-    census instead of grepping it, which is how the two findings below were
-    found.
+def run_drv_census(report_text: Optional[str],
+                   annotation_text: Optional[str] = None) -> str:
+    """Run the EMITTED census in tclsh over one session's two reports.
+
+    `report_text` is the `report_check_types -violators` file and
+    `annotation_text` the `report_parasitic_annotation -report_unannotated`
+    file the session left behind. `None` means the command never wrote one,
+    `""` means it wrote an EMPTY one -- and OpenSTA writes exactly that
+    violator report for a session with no parasitics AND for a clean design
+    with them, which is why the annotation census is what decides.
+
+    Only tool commands are stubbed; the Tcl is the deck's own text, cut out by
+    its own markers. This EXECUTES the census instead of grepping it.
     """
     block = _drv_census_block()
+    pins = [ln.split() for ln in
+            (FIXTURES / "cal_chain_pins.txt").read_text().splitlines()
+            if ln.strip()]
+    inventory = " ".join(
+        f"{_tcl_word(name)} {{direction {d} is_hierarchical {h}}}"
+        for name, d, h in pins)
     with tempfile.TemporaryDirectory() as td:
         rpt = Path(td) / "sdr_drv.rpt"
+        ann = Path(td) / "sdr_ann.rpt"
         if report_text is not None:
             rpt.write_text(report_text)
+        if annotation_text is not None:
+            ann.write_text(annotation_text)
         prelude = (
             "proc define_process_corner {args} {}\n"
             "proc extract_parasitics {args} {}\n"
             "proc write_spef {args} {}\n"
             "proc read_spef {args} {}\n"
             "proc report_check_types {args} {}\n"
+            "proc report_parasitic_annotation {args} {}\n"
+            f"set ::_cal_pins [dict create {inventory}]\n"
+            "proc get_pins {args} { return [dict keys $::_cal_pins] }\n"
+            "proc get_full_name {obj} { return $obj }\n"
+            "proc get_property {obj prop} "
+            "{ return [dict get $::_cal_pins $obj $prop] }\n"
             "set _sdr_tx_error 0\n")
-        body = block.replace(f"{_TCL_OUT_DIR}/sdr_drv.rpt", str(rpt))
+        body = (block.replace(f"{_TCL_OUT_DIR}/sdr_drv.rpt", str(rpt))
+                     .replace(f"{_TCL_OUT_DIR}/sdr_ann.rpt", str(ann)))
         script = prelude + "while {1} {\n" + body + "\nbreak\n}\n"
         path = Path(td) / "census.tcl"
         path.write_text(script)
@@ -397,9 +420,10 @@ def run_drv_census(report_text: Optional[str]) -> str:
     return ((cp.stdout or "") + (cp.stderr or "")).strip()
 
 
-def _judge_drv_census(report_text: Optional[str]) -> Optional[str]:
+def _judge_drv_census(
+        session: Tuple[Optional[str], Optional[str]]) -> Optional[str]:
     """Fires with the refusal line; silent when it reports a number."""
-    out = run_drv_census(report_text)
+    out = run_drv_census(*session)
     if "SDR_DRV_CENSUS_NOT_MEASURED" in out:
         if "SDR_DRV_BY_KIND" in out:
             return "REFUSED_AND_ALSO_REPORTED_A_NUMBER"
@@ -408,13 +432,16 @@ def _judge_drv_census(report_text: Optional[str]) -> Optional[str]:
     return None
 
 
-def _drv_arm_no_parasitics() -> str:
-    """The REAL report OpenSTA wrote with no parasitics in the session: EMPTY."""
-    return (FIXTURES / "drv_no_parasitics_positive.rpt").read_text()
+def _drv_arm_no_parasitics() -> Tuple[str, str]:
+    """The REAL session with no parasitics in STA: an EMPTY violator report
+    and an annotation census that lists every driver."""
+    return ((FIXTURES / "drv_no_parasitics_positive.rpt").read_text(),
+            (FIXTURES / "drv_no_parasitics_positive.ann").read_text())
 
 
-def _drv_arm_with_parasitics() -> str:
-    return (FIXTURES / "drv_with_parasitics_negative.rpt").read_text()
+def _drv_arm_with_parasitics() -> Tuple[str, str]:
+    return ((FIXTURES / "drv_with_parasitics_negative.rpt").read_text(),
+            (FIXTURES / "drv_with_parasitics_negative.ann").read_text())
 
 
 # ---- 5. the LEC disposition, R-0915-82 -----------------------------------
@@ -800,71 +827,59 @@ _register(Instrument(
 
 _register(Instrument(
     name="phase3_one_shot_runner::_v1_8_100_signoff_drv_repair_tcl",
-    reads="the OpenSTA session's `report_check_types -violators` file",
+    reads=("the OpenSTA session's `report_check_types -violators` file and "
+           "its `report_parasitic_annotation -report_unannotated` census"),
     ruling="R-0915-83",
     owner="icaes",
     why=("`extract_parasitics` fills the ODB; OpenSTA sees nothing until a "
          "SPEF is read back, so a census taken without one reports 0 and is "
-         "byte-identical to a clean design — and the loop reads 0 as "
+         "byte-identical to a clean design -- and the loop reads 0 as "
          "convergence, which makes the UNMEASURED case look best (R-0915-83). "
-         "The pair EXECUTES the emitted census in tclsh over the two REAL "
-         "`report_check_types -violators` files OpenSTA wrote for the same "
-         "design one `read_spef` apart.\n\n"
-         "MEASURED ON THIS TREE, AND IT IS MISCALIBRATED. Two findings, both "
-         "from RUNNING the deck rather than grepping it:\n"
-         "  (a) the empty report is still counted. OpenSTA's real output for "
-         "the no-parasitics session is a 0-BYTE file; `file exists` is true "
-         "for it, so `_sdr_rpt_ok` stays 1 and the census prints "
-         "`SDR_DRV_BY_KIND: total=0` — the phantom R-0915-83 was written to "
-         "stop, arriving through the half the fix did not close.\n"
-         "  (b) `parasitics_in_sta=0` is UNREACHABLE. `_sdr_par_ok` is cleared, "
-         "then a failing `read_spef` prints `SDR_SPEFR_NONFATAL` and BREAKS, "
-         "then it is set to 1 — so at the `if {!$_sdr_par_ok ...}` test it is "
-         "always 1 and only the `violator_report` half can ever fire. The "
-         "landed control asserts the refusal STRING is in the deck, which is "
-         "true, and never that it is reachable.\n"
-         "Owner icaes, in its own batch: this registry does not change what an "
-         "instrument measures."),
+         "The pair EXECUTES the emitted census in tclsh over the REAL reports "
+         "OpenSTA wrote for the same design one `read_spef` apart.\n\n"
+         "This entry was registered MISCALIBRATED (a2f33ad76) and the judge "
+         "was the defect: `_sdr_par_ok` was set by `read_spef` RETURNING, so "
+         "the parasitics half of the refusal was unreachable, and the empty "
+         "violator report was counted as 0. The empty report cannot be the "
+         "discriminator -- MEASURED in vibeic-eda 0.3.79, OpenSTA writes the "
+         "same 0 bytes for the clean design WITH parasitics. What does "
+         "discriminate is OpenSTA's own annotation census: every driver is "
+         "listed with no parasitics (and after a `read_spef` of a SPEF whose "
+         "names do not match, which returns without error), none with them. "
+         "The deck now sets the flag from that census only."),
     judge=_judge_drv_census,
     positive=Sample(
         provenance=(
-            "The REAL `report_check_types -max_slew -max_capacitance "
-            "-max_fanout -violators` file OpenSTA 2.7.0 wrote on 8HD-6 for a "
-            "two-inverter `sky130_fd_sc_hd__inv_2` chain at "
-            "`set_max_capacitance 0.004` with NO `read_spef`: **0 bytes**, over "
-            "a design that has 2 violators. "
-            "`calibration/drv_no_parasitics_positive.rpt`."),
+            "The REAL session with NO `read_spef`, two-inverter "
+            "`sky130_fd_sc_hd__inv_2` chain `calibration/cal_chain.v` at "
+            "`set_max_capacitance 0.004`: `report_check_types -max_slew "
+            "-max_capacitance -max_fanout -violators` wrote **0 bytes** over a "
+            "design that has 2 violators "
+            "(`calibration/drv_no_parasitics_positive.rpt`; first captured "
+            "with OpenSTA 2.7.0, re-captured byte-identical with OpenROAD "
+            "26Q3-2963-gc73a322d30 in vibeic-eda 0.3.79), and "
+            "`report_parasitic_annotation -report_unannotated` wrote `Found 3 "
+            "unannotated drivers.` listing A, u1/Y, u2/Y "
+            "(`calibration/drv_no_parasitics_positive.ann`, 83 bytes, "
+            "OpenROAD 26Q3-2963 in 0.3.79). A `read_spef` of a SPEF whose "
+            "names do not match returns without error and writes the SAME "
+            "83 bytes."),
         artefact=_drv_arm_no_parasitics),
     expect="SDR_DRV_CENSUS_NOT_MEASURED",
     negative=Sample(
         provenance=(
-            "The SAME design, SAME limit, SAME command — one `read_spef "
+            "The SAME design, SAME limit, SAME commands -- one `read_spef "
             "cal_chain.spef` apart, where the SPEF is a genuine OpenRCX "
             "extraction with the PDK's own "
             "`rules.openrcx.sky130A.max.magic` (`[INFO RCX-0045] Extract 1 "
-            "nets, 6 rsegs, 6 caps, 3 ccs`). 285 bytes, 2 `(VIOLATED)` lines "
-            "under a `max capacitance` heading; the deck counts them "
-            "(`SDR_DRV_BY_KIND: total=2 max_capacitance=2`). "
-            "`calibration/drv_with_parasitics_negative.rpt`."),
+            "nets, 6 rsegs, 6 caps, 3 ccs`). The violator report is 285 "
+            "bytes, 2 `(VIOLATED)` lines under a `max capacitance` heading "
+            "(`calibration/drv_with_parasitics_negative.rpt`, re-captured "
+            "byte-identical in 0.3.79); the annotation census is `Found 0 "
+            "unannotated drivers.` (`calibration/drv_with_parasitics_"
+            "negative.ann`, 68 bytes, OpenROAD 26Q3-2963 in 0.3.79). The "
+            "deck counts them: `SDR_DRV_BY_KIND: total=2 max_capacitance=2`."),
         artefact=_drv_arm_with_parasitics),
-    miscalibrated_evidence=Miscalibration(
-        failed_sides=("positive",),
-        # MEASURED by running the emitted census in tclsh over the REAL 0-byte
-        # report, on cf37f6c92: it does not refuse. `judge` returns None.
-        fires_with=None,
-        instead_of=("the deck prints `SDR_DRV_BY_KIND: total=0 "
-                    "max_capacitance=0` over a design that has 2 violators — "
-                    "the same bytes a clean design produces, which is the "
-                    "phantom R-0915-83 exists to stop"),
-        closed_by=("icaes, R-0915-83 follow-up: (a) an EMPTY violator report "
-                   "is not a measured 0 — `file exists` is true for a 0-byte "
-                   "file, so `_sdr_rpt_ok` stays 1; (b) `parasitics_in_sta=0` "
-                   "is unreachable — a failing `read_spef` prints "
-                   "SDR_SPEFR_NONFATAL and BREAKS before the test that reads "
-                   "the flag. When either is fixed this census starts "
-                   "refusing, `fires_with` stops matching, and this object is "
-                   "deleted in that commit."),
-    ),
 ))
 
 _register(Instrument(
