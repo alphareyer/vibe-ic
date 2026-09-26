@@ -13,24 +13,24 @@ to a real PASS.
 
 What is genuinely back-annotated
 --------------------------------
-Icarus Verilog's ``$sdf_annotate`` on this SDF applies the **INTERCONNECT**
-(net RC / routing-parasitic) delays derived from the extracted SPEF — the run
-log records the count via ``-sdf-info`` ("Created a vpiInterModPath").  This is
-real post-layout delay back-annotation of the routed netlist.
+Every case compiles with ``_IVERILOG_FLAGS`` (R-0915-75, one constant for
+every call site): ``-ginterconnect`` applies the SDF **INTERCONNECT**
+(net RC) delays and ``-gspecify`` builds the module paths the SDF **IOPATH**
+cell-arc delays attach to (isolated probe: 0 ps without it, 98 ps with it;
+run15's netlist: ModPath failures 31061 -> 0). ``sdf_annotation_census``
+counts what the simulator actually applied (``Putting delay``) and
+``sdf_error_count`` every record it refused (``SDF ERROR``).
 
 Honest residual (documented, not hidden)
 ----------------------------------------
-* This Icarus build applies **INTERCONNECT** delays but not the SDF **IOPATH**
-  cell arc delays (its ``$sdf_annotate`` emits 0 "Putting delay" for IOPATH and
-  0 match-errors — a known Icarus limitation).  At-speed *cell* timing sign-off
-  therefore remains STA's job (Step 23/28), which this program does not
-  duplicate.
-* ``-gspecify`` is intentionally *not* used: this PDK's sequential models drive
-  their outputs through NOTIFIER-based ``$setuphold``/``$width`` timing checks
-  that Icarus does not support ("Timing checks are not supported"), which injects
-  X and breaks functional simulation.  Cells therefore simulate with their
-  logical (zero-arc) behaviour while the SDF interconnect delays stay active —
-  a functionally-correct gate-level sim of the routed netlist.
+* Icarus does not support timing checks ("Timing checks are not supported"):
+  NOTIFIER-based ``$setuphold``/``$width`` in a PDK's sequential models do not
+  fire, so setup/hold is STA's job (Step 23/28), not this simulation's.
+* An SDF IOPATH the model's specify block does not declare (for example an
+  unconditional ``(IOPATH S Z ...)`` against a mux whose model has only
+  conditional S->Z paths) is refused as ``SDF ERROR``; T106 measured 63 such
+  records per case on spm x gf180mcuD (xor2 / mux2). The tool arm
+  (``judge_tool_arm``) fails a corner on any of them.
 
 NEVER fabricates a results.log: the file is written only from the *captured*
 simulator output, and a functional mismatch is surfaced as an ERROR line so the
@@ -756,6 +756,11 @@ def parse_l10_case_stdout(text: str) -> Dict[str, object]:
 _SDF_APPLIED_RE = re.compile(r"^SDF INFO:.*Putting delay", re.M)
 _SDF_MODPATH_FAIL_RE = re.compile(
     r"^SDF ERROR:.*Unable to match ModPath", re.M)
+#: Every record the simulator refused, of any kind (an unmatched ModPath, an
+#: INTERCONNECT with no inter-module path, ...). Step 29's tool arm gates on
+#: this being ZERO (T106): one refused record is one delay the "annotated"
+#: simulation did not carry.
+_SDF_ERROR_RE = re.compile(r"^SDF ERROR:", re.M)
 
 
 def sdf_annotation_census(text: str) -> Dict[str, object]:
@@ -771,6 +776,12 @@ def sdf_annotation_census(text: str) -> Dict[str, object]:
     return {"delays_applied": applied,
             "modpath_unmatched": unmatched,
             "annotated": applied > 0}
+
+
+def sdf_error_count(text: str) -> int:
+    """Every SDF record the simulator refused, of any kind. PURE (T106)."""
+    _instrument_calibration.assert_calibrated("sdf_gate_sim::sdf_error_count")
+    return len(_SDF_ERROR_RE.findall(text or ""))
 
 
 def name_unannotated_run(census: Dict[str, object]) -> Optional[str]:
@@ -1511,22 +1522,10 @@ def run(project, top: str = "spm", container: str = DEFAULT_CONTAINER,
     # compile + run inside the container.  -ginterconnect enables SDF net-delay
     # back-annotation.
     #
-    # CELL-ARC (IOPATH) status — v1.3.97, HONEST (corrects the earlier
-    # "iverilog can't do cell-arc" claim): iverilog CAN back-annotate SDF IOPATH
-    # cell-arc delays with `-gspecify` — PROVEN on real PDK cells (a DFFHQD1
-    # posedge-CK->Q SDF arc of 2ns lands exactly: posedge@5ns -> Q@7ns; an INVD1
-    # A->Y arc of 5ns lands exactly). The OpenSTA-written spm.sdf already carries
-    # 979 IOPATH cell-arc entries. BUT enabling `-gspecify` on the WHOLE-DESIGN
-    # gate-sim breaks the CALIBRATED streaming-scoreboard TB: the added per-stage
-    # cell-arc delays shift transitions past the TB's fixed sample edges ->
-    # CALIBRATION_FAIL. Making the functional TB cell-delay-aware (sample on the
-    # SDF-annotated valid window instead of a fixed latency) is a tracked
-    # residual (NOT a commercial gap, NOT an iverilog limit). Until then the
-    # gate-sim validates FUNCTION under real net-RC delays (the 50/50 result) and
-    # at-speed CELL timing is signed off by STA (Step 23/28), which uses the same
-    # Liberty arcs the SDF is derived from. So `-gspecify` is intentionally NOT
-    # enabled here to keep the functional sim sound. See docs/ADVANCED_NODE_
-    # EXTENSION.md "cell-arc gate-sim".
+    # CELL-ARC (IOPATH) status: `_IVERILOG_FLAGS` carries `-gspecify`
+    # (R-0915-75, see its definition), so the SDF's IOPATH cell-arc delays are
+    # applied as well as the net RC; the census of the transcript says how
+    # many were.
     vvp = sim_dir / f"{top}_gatesim.vvp"
     compile_flags = _IVERILOG_FLAGS
     runtime_flags = "-sdf-info"
@@ -1650,6 +1649,329 @@ def run(project, top: str = "spm", container: str = DEFAULT_CONTAINER,
                  f"{parsed['annotated_interconnect_delays']} SDF net delays)")
     return {"verdict": parsed["verdict"], "meta": meta,
             "results_log": str(sim_dir / "results.log")}
+
+
+# ---------------------------------------------------------------------------
+# T106 — step 29's TOOL arm: the L10 suite against every STAPostPNR corner SDF.
+#
+# The SDFs are LibreLane `OpenROAD.STAPostPNR`'s own (`write_sdf -include_typ
+# -divider . -corner <c>`, one per STA corner); the simulation runs inside the
+# image as the LibreLane custom step `Vibeic.GateLevelSim`
+# (`librelane_plugins/librelane_plugin_vibeic`), with the flags below. This
+# module prepares what that step runs and judges what it wrote; the step
+# itself decides nothing.
+# ---------------------------------------------------------------------------
+
+#: The placeholder the prepared testbenches carry where the SDF path goes; the
+#: custom step substitutes each corner's SDF for it.
+SDF_PLACEHOLDER = "@@VIBEIC_SDF_FILE@@"
+
+_ESCAPED_INST_RE = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_$]*)\s+(?:\\\S+|[A-Za-z_][\w$]*)\s*\(",
+    re.MULTILINE)
+_MODULE_PORTS_RE = re.compile(
+    r"^\s*module\s+([A-Za-z_][\w$]*)\s*\(([^;]*)\)\s*;", re.MULTILINE)
+_UDP_RE = re.compile(r"^\s*primitive\s+([A-Za-z_][\w$]*)\b", re.MULTILINE)
+_MODULE_BODY_RE = re.compile(
+    r"^\s*(module|primitive)\s+([A-Za-z_][\w$]*)\b(.*?)\bend(?:module|primitive)\b",
+    re.MULTILINE | re.DOTALL)
+#: What makes a module body a MODEL rather than a black box: some behaviour.
+_BEHAVIOUR_RE = re.compile(
+    r"\b(assign|always|initial|table|specify)\b|"
+    r"^\s*(and|or|not|buf|nand|nor|xor|xnor|bufif[01]|notif[01])\b\s*[#(\w]",
+    re.MULTILINE)
+_NAMED_CONN_RE = re.compile(r"\.\s*([A-Za-z_][\w$]*)\s*\(")
+#: A body line that instantiates something (a cell, a UDP) is structure, and
+#: structure is a model; a declaration is not.
+_BODY_INSTANCE_RE = re.compile(
+    r"^\s*([A-Za-z_][\w$]*)\s*(?:#\s*\([^;]*?\)\s*)?(?:[A-Za-z_][\w$]*\s*)?\(",
+    re.MULTILINE)
+_DECLARATION_WORDS = frozenset({
+    "input", "output", "inout", "wire", "reg", "tri", "supply0", "supply1",
+    "parameter", "localparam", "specparam", "integer", "real", "time", "wand",
+    "wor", "module", "primitive", "function", "task", "if", "else", "for"})
+
+
+def netlist_used_cells(text: str) -> set:
+    """Cell types a netlist instantiates, escaped instance names included
+    (a flattened routed netlist names its instances `\\u_core/_239_`)."""
+    defined = set(_MODULE_RE.findall(text or ""))
+    return (set(_ESCAPED_INST_RE.findall(text or "")) - defined
+            - _VERILOG_NON_CELL_WORDS)
+
+
+def _netlist_top(text: str) -> Optional[Tuple[str, List[str]]]:
+    """(module, ports) of the module no other module instantiates."""
+    modules = {m.group(1): [p.strip() for p in m.group(2).split(",") if p.strip()]
+               for m in _MODULE_PORTS_RE.finditer(text or "")}
+    used = set(_ESCAPED_INST_RE.findall(text or ""))
+    tops = [m for m in modules if m not in used]
+    return (tops[0], modules[tops[0]]) if len(tops) == 1 else None
+
+
+def bind_dut_module(tb_text: str, dut_module: str, dut_instance: str,
+                    netlist_text: str) -> Tuple[str, Dict[str, object]]:
+    """Bind a case's DUT to the module the routed netlist actually defines.
+
+    MEASURED (spm x gf180mcuD run23): every L10 case instantiates the RTL top
+    `spm`, while the routed netlist defines only its padded `chip_top`, so all
+    five cases died `Unknown module type: spm` and step 29 was NOT_EXECUTED.
+    The binding moves to the netlist's own top ONLY when that module is absent
+    and the netlist top has exactly the port NAMES the testbench connects; any
+    other shape raises, so a renamed or re-shaped interface is never bound by
+    guesswork."""
+    if re.search(r"(?m)^\s*module\s+" + re.escape(dut_module) + r"\b", netlist_text):
+        return tb_text, {"dut_module": dut_module, "rebound": False}
+    top = _netlist_top(netlist_text)
+    if top is None:
+        raise ValueError(f"netlist defines no {dut_module} and no single top")
+    inst = re.search(r"(?m)^(\s*)" + re.escape(dut_module) + r"(\s+"
+                     + re.escape(dut_instance) + r"\s*\()", tb_text)
+    if inst is None:
+        raise ValueError(f"no `{dut_module} {dut_instance} (` in the testbench")
+    end = tb_text.find(";", inst.end())
+    connected = set(_NAMED_CONN_RE.findall(tb_text[inst.end():end]))
+    if not connected or connected != set(top[1]):
+        raise ValueError(f"netlist top {top[0]} ports {sorted(top[1])} are not "
+                         f"the ports the testbench connects {sorted(connected)}")
+    text = tb_text[:inst.start()] + inst.group(1) + top[0] + inst.group(2) \
+        + tb_text[inst.end():]
+    return text, {"dut_module": top[0], "rebound": True, "from": dut_module,
+                  "ports": sorted(connected)}
+
+
+def _module_defs(path: Path) -> Dict[str, bool]:
+    """{module/primitive name: has behaviour} for one Verilog model file."""
+    try:
+        text = strip_comments(path.read_text(errors="replace"))
+    except OSError:
+        return {}
+    return {m.group(2): (m.group(1) == "primitive"
+                         or bool(_BEHAVIOUR_RE.search(m.group(3)))
+                         or any(word not in _DECLARATION_WORDS for word in
+                                _BODY_INSTANCE_RE.findall(m.group(3))))
+            for m in _MODULE_BODY_RE.finditer(text)}
+
+
+def verilog_model_closure(declared: List[Path], used_cells: set
+                          ) -> Dict[str, object]:
+    """The model files a gate netlist needs, from the PDK's DECLARED models.
+
+    LibreLane's PDK config names `CELL_VERILOG_MODELS` and `PAD_VERILOG_MODELS`.
+    MEASURED on gf180mcuD: the cell model instantiates UDPs defined only in its
+    sibling `primitives.v`, and the declared pad models are `*_blackbox_pp.v`
+    (ports only), so an input pad drives X. So every name is resolved to the
+    first file -- declared files first, then their same-directory siblings --
+    that MODELS it (a body with behaviour); a black box is used only when
+    nothing models the name, and is listed as such. A file that would define a
+    name another chosen file already defines is not taken (a duplicate
+    definition is a compile error); the clash is listed. Names nothing defines
+    are `unresolved`, never stubbed here."""
+    candidates: List[Path] = []
+    for path in [Path(p) for p in declared]:
+        for cand in [path] + sorted(path.parent.glob("*.v")):
+            if cand not in candidates and cand.is_file():
+                candidates.append(cand)
+    defs = {path: _module_defs(path) for path in candidates}
+
+    def provider(name: str) -> Optional[Path]:
+        for want in (True, False):
+            for path in candidates:
+                if defs[path].get(name) is want:
+                    return path
+        return None
+
+    chosen: List[Path] = []
+    owner: Dict[str, Path] = {}
+    clashes: List[Dict[str, object]] = []
+    resolved: Dict[str, Path] = {}
+    queue = sorted(used_cells)
+    while queue:
+        name = queue.pop()
+        if name in resolved:
+            continue
+        if name in owner:
+            resolved[name] = owner[name]
+            continue
+        path = provider(name)
+        if path is None:
+            continue
+        if path not in chosen:
+            clash = sorted(m for m in defs[path] if m in owner)
+            if clash:
+                if not any(c["file"] == str(path) for c in clashes):
+                    clashes.append({"file": str(path), "names": clash[:8]})
+                continue
+            chosen.append(path)
+            owner.update({m: path for m in defs[path]})
+            text = strip_comments(path.read_text(errors="replace"))
+            queue += [m for m in re.findall(
+                r"^\s*([A-Za-z_][\w$]*)\s*(?:#\s*\([^;]*?\)\s*)?"
+                r"(?:[A-Za-z_][\w$]*\s*)?\(", text, re.MULTILINE)
+                if m not in resolved and m not in _VERILOG_NON_CELL_WORDS]
+        resolved[name] = path
+    return {"files": [str(p) for p in candidates if p in chosen],
+            "unresolved": sorted(c for c in used_cells if c not in resolved),
+            "blackboxed": sorted(c for c in used_cells if c in resolved
+                                 and defs[resolved[c]].get(c) is False),
+            "clashes": clashes}
+
+
+def tool_arm_manifest(project: Path, top: str, netlist: Path,
+                      declared_models: List[Path], out: Path,
+                      *, path_map: Optional[Dict[str, str]] = None) -> Dict[str, object]:
+    """What `Vibeic.GateLevelSim` runs: the run's executed L10 cases bound to
+    the netlist the tool timed, with the SDF path left as a placeholder, and
+    the model closure. `path_map` rewrites host model paths to the paths the
+    image sees (`{host_prefix: container_prefix}`)."""
+    suite = find_l10_executed_cases(project, top)
+    if not suite or not suite.get("cases"):
+        raise ValueError("no executed L10 case to re-run at gate level")
+    ntext = netlist.read_text(errors="replace")
+    used = netlist_used_cells(ntext)
+    closure = verilog_model_closure(declared_models, used)
+    models_text = "".join(Path(f).read_text(errors="replace") for f in closure["files"])
+    stubs = missing_empty_cell_stubs(ntext, used, models_text)
+    out.mkdir(parents=True, exist_ok=True)
+    stub_path = out / "phys_cell_stubs.v"
+    _aa.write_text(stub_path, "// Physical-only cells no declared model defines.\n"
+                   "`timescale 1ns/1ps\n"
+                   + "".join(f"module {cell} (); endmodule\n" for cell in stubs))
+    cases, refused = [], list(suite.get("skipped") or [])
+    for case in suite["cases"]:
+        cid = str(case["id"])
+        try:
+            text, binding = bind_dut_module(str(case["text"]), top,
+                                            str(case["dut_instance"]), ntext)
+            text = inject_sdf_annotation(text, str(case["module"]),
+                                         str(case["dut_instance"]), SDF_PLACEHOLDER)
+        except ValueError as exc:
+            refused.append({"id": cid, "disposition": "NO_GATE_BINDING",
+                            "detail": str(exc)})
+            continue
+        tb = out / f"{cid}_tb.v"
+        _aa.write_text(tb, text)
+        cases.append({"id": cid, "module": str(case["module"]),
+                      "testbench": str(tb), "binding": binding})
+
+    def _mapped(p: str) -> str:
+        for host, guest in (path_map or {}).items():
+            if p.startswith(host):
+                return guest + p[len(host):]
+        return p
+    manifest = {"compile_flags": _IVERILOG_FLAGS, "top": top,
+                "netlist": str(netlist), "cases": cases, "not_a_subject": refused,
+                "models": [_mapped(f) for f in closure["files"]],
+                "stubs": str(stub_path), "sdf_placeholder": SDF_PLACEHOLDER,
+                "model_closure": closure, "declared": suite.get("declared")}
+    _aa.write_text(out / "gls_manifest.json", json.dumps(manifest, indent=2) + "\n")
+    return manifest
+
+
+def judge_tool_arm(step_dir: Path, manifest: Dict[str, object]) -> Dict[str, object]:
+    """Per corner: the cases' verdicts and the SDF census, from the transcripts
+    `Vibeic.GateLevelSim` wrote. A corner PASSes only when every case passed,
+    at least one delay was applied, and the simulator refused NO SDF record."""
+    runs = json.loads((step_dir / "gls_runs.json").read_text())
+    corners: Dict[str, Dict[str, object]] = {}
+    for row in runs.get("runs") or []:
+        corner = corners.setdefault(str(row["corner"]), {
+            "sdf": row.get("sdf"), "cases": [], "delays_applied": 0,
+            "sdf_errors": 0, "modpath_unmatched": 0})
+        stdout = Path(str(row.get("stdout") or ""))
+        text = stdout.read_text(errors="replace") if stdout.is_file() else ""
+        parsed = (parse_l10_case_stdout(text) if row.get("compile_rc") == 0
+                  else {"verdict": None, "passed": 0, "total": 0, "marker": None})
+        census = sdf_annotation_census(text)
+        errors = sdf_error_count(text)
+        corner["delays_applied"] += census["delays_applied"]
+        corner["sdf_errors"] += errors
+        corner["modpath_unmatched"] += census["modpath_unmatched"]
+        case = {"id": row["case"], "verdict": parsed.get("verdict"),
+                "passed": parsed.get("passed"), "total": parsed.get("total"),
+                "compile_rc": row.get("compile_rc"), "sim_rc": row.get("sim_rc"),
+                "sdf_delays_applied": census["delays_applied"],
+                "sdf_errors": errors}
+        if row.get("compile_rc") != 0:
+            case["detail"] = "did not compile against the gate netlist"
+        elif parsed.get("verdict") is None:
+            case["detail"] = name_unverdicted_case(
+                row.get("sim_rc"), len(text.encode()), bool(text) and not text.endswith("\n"))
+        corner["cases"].append(case)
+    for name, corner in corners.items():
+        cases = corner["cases"]
+        reasons = []
+        if not cases or any(c["verdict"] is None for c in cases):
+            reasons.append("NOT_EXECUTED")
+        if any(c["verdict"] == "FAIL" for c in cases):
+            reasons.append("CASE_FAIL")
+        if not corner["delays_applied"]:
+            reasons.append("SDF_NOT_ANNOTATED")
+        if corner["sdf_errors"]:
+            reasons.append("SDF_ERRORS")
+        corner["verdict"] = ("PASS" if not reasons else
+                             "NOT_EXECUTED" if reasons == ["NOT_EXECUTED"] else "FAIL")
+        corner["reasons"] = reasons
+    verdict = ("NOT_EXECUTED" if not corners else
+               "PASS" if all(c["verdict"] == "PASS" for c in corners.values()) else
+               "FAIL" if any(c["verdict"] == "FAIL" for c in corners.values()) else
+               "NOT_EXECUTED")
+    return {"verdict": verdict, "corners": corners,
+            "corners_covered": sorted(corners),
+            "cases": [c["id"] for c in manifest.get("cases") or []],
+            "not_a_subject": manifest.get("not_a_subject") or [],
+            "compile_flags": manifest.get("compile_flags")}
+
+
+def write_tool_arm_results(sim_dir: Path, judged: Dict[str, object], top: str
+                           ) -> List[str]:
+    """Step 29's declared evidence when the tool arm is the step: the corner
+    SDFs beside the log (the gate looks for them there), a per-corner
+    per-case `results.log`, `results.json`, and `pass.flag` only on PASS.
+    A failing corner is written as an `ERROR:` line naming its reasons, the
+    line the step-29 gate reads as a failed simulation."""
+    import shutil
+    sim_dir.mkdir(parents=True, exist_ok=True)
+    written: List[str] = []
+    lines = ["SDF-annotated post-layout gate-level simulation (Step 29)",
+             f"design           : {top}",
+             "sdf source       : LibreLane OpenROAD.STAPostPNR, one SDF per STA corner",
+             f"compile flags    : {judged.get('compile_flags')}",
+             f"corners          : {len(judged.get('corners') or {})}", ""]
+    for name, corner in sorted((judged.get("corners") or {}).items()):
+        sdf = Path(str(corner.get("sdf") or ""))
+        if sdf.is_file():
+            copy = sim_dir / f"{top}__{name}.sdf"
+            shutil.copyfile(sdf, copy)
+            written.append(str(copy))
+        lines.append(f"-- corner {name}: $sdf_annotate(\"{sdf}\") --")
+        lines.append(f"sdf annotation: {corner.get('delays_applied')} delay(s) applied, "
+                     f"{corner.get('sdf_errors')} SDF ERROR record(s) "
+                     f"({corner.get('modpath_unmatched')} unmatched ModPath)")
+        for case in corner.get("cases") or []:
+            lines.append(f"  {case['id']:<40} {case.get('verdict') or 'NOT_EXECUTED':<12} "
+                         f"{case.get('detail') or ''}".rstrip())
+        if corner.get("verdict") != "PASS":
+            lines.append(f"ERROR: corner {name} {corner.get('verdict')}: "
+                         + ", ".join(corner.get("reasons") or []))
+        lines.append("")
+    for row in judged.get("not_a_subject") or []:
+        lines.append(f"not a subject: {row.get('id')} {row.get('disposition')} "
+                     f"{row.get('detail') or ''}".rstrip())
+    lines.append(f"VERDICT: {judged.get('verdict')}")
+    _aa.write_text(sim_dir / "results.log", "\n".join(lines) + "\n")
+    _aa.write_text(sim_dir / "results.json", json.dumps({
+        "program": "sdf_gate_sim", "version": "1.3.0", "suite": "l10_executed_cases",
+        "arm": "librelane_stapostpnr_corner_sdfs", **judged}, indent=2, default=str) + "\n")
+    written += [str(sim_dir / "results.log"), str(sim_dir / "results.json")]
+    flag = sim_dir / "pass.flag"
+    if judged.get("verdict") == "PASS":
+        _aa.write_text(flag, f"PASS {len(judged.get('cases') or [])} L10 case(s) x "
+                             f"{len(judged.get('corners') or {})} STA corner SDF(s)\n")
+        written.append(str(flag))
+    elif flag.is_file():
+        flag.unlink()
+    return written
 
 
 def main(argv: Optional[list] = None) -> int:

@@ -2373,3 +2373,158 @@ def _record_pdn_em_resize_spend(project: Path, decision: Mapping[str, Any]
         print(f"[pnr] PDN_EM_RESIZE_SENTINEL_WRITE_FAILED: {exc}; "
               "no re-PnR dispatched", file=sys.stderr)
         return False
+
+
+# ── T106 — STEP 33 FROM THE TOOL: STAPostPNR's per-corner report_power ──────
+#
+# LibreLane `OpenROAD.STAPostPNR` runs `report_power -corner <c>` for every STA
+# corner on the post-PnR state with that corner's SPEF (`sta/corner.tcl`), and
+# writes it to `<corner>/power.rpt`. Its `power__total` METRIC is written
+# WITHOUT a `__corner:` modifier by every corner process, and
+# `OpenROAD.STAPostPNR.run` merges the corners' metric dicts in `STA_CORNERS`
+# order, so the value that survives is the LAST listed corner's; the metric's
+# declared `sum_aggregator` never sees a per-corner key. MEASURED on spm
+# (0.3.79): `power__total` 26.46 mW = max_ff (last in STA_CORNERS) while
+# nom_tt reads 20.76 mW; t89_ref_077 likewise 11.37 mW = max_ff vs nom_tt
+# 8.78 mW. The metric is therefore never read here; the per-corner reports are.
+#
+# The tool reads no activity file (`backends/librelane.py`, measured: zero
+# `read_vcd`/`read_saif` in the installed tool), so its basis is VECTORLESS by
+# construction. A corner whose transcript shows an activity read contradicts
+# that and is refused rather than relabelled.
+
+_ACTIVITY_READ_RE = re.compile(
+    r"^\s*(read_vcd|read_saif|read_power_activities|set_power_activity)\b", re.M)
+_CORNER_LIB_RE = re.compile(
+    r"^Reading cell library for the '([^']+)' corner at '([^']+)'", re.M)
+
+
+def stapostpnr_corner_power(sta_folder: Path) -> Dict[str, Any]:
+    """{corner: power record} from every analysed corner's `power.rpt`."""
+    corners: Dict[str, Any] = {}
+    for folder in sorted(p for p in Path(sta_folder).iterdir()
+                         if (p / "sta.log").is_file()):
+        report = read_power_report(folder / "power.rpt")
+        log = (folder / "sta.log").read_text(errors="replace")
+        libs = [path for name, path in _CORNER_LIB_RE.findall(log)
+                if name == folder.name]
+        row: Dict[str, Any] = {"report": str(folder / "power.rpt"),
+                               "liberties": libs}
+        total = (report or {}).get("total_row")
+        if total is None:
+            row.update(status=STATUS_NOT_MEASURED,
+                       reason="no report_power Total row in the corner report")
+        elif _ACTIVITY_READ_RE.search(log):
+            row.update(status=STATUS_INVALID, basis=BASIS_CONTRADICTED,
+                       reason="the corner transcript reads activity; the tool "
+                              "is measured to be vectorless by construction")
+        else:
+            row.update(status=STATUS_MEASURED, basis=BASIS_VECTORLESS,
+                       sha256=report.get("sha256"),
+                       **{f"{c}_w": total[f"{c}_w"] for c in CATEGORIES},
+                       total_raw=total["total_raw"])
+        corners[folder.name] = row
+    return corners
+
+
+def _printed_half_unit(raw: Optional[str]) -> Optional[float]:
+    """Half a unit in the last digit a report printed: what a number read back
+    from it can be trusted to. `2.15e-02` -> 5e-05; `8.777829e-03` -> 5e-10."""
+    m = re.fullmatch(r"[+-]?(\d*)\.?(\d*)(?:[eE]([+-]?\d+))?", (raw or "").strip())
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    return 0.5 * 10.0 ** (int(m.group(3) or 0) - len(m.group(2)))
+
+
+def signoff_power_arms(direct: Optional[Dict[str, Any]],
+                       direct_report: Optional[Dict[str, Any]],
+                       corners: Dict[str, Any], *,
+                       direct_liberty: Optional[str],
+                       direct_spef_sha256: Optional[str],
+                       tool_spef_sha256: Dict[str, str]) -> Dict[str, Any]:
+    """Which arm carries step 33's sign-off power, and whether the two agree.
+
+    The engine is the same (OpenSTA `report_power`), so the choice is FIDELITY,
+    never the smaller number:
+
+    * the direct arm is canonical only when its activity basis is a VECTOR read
+      the transcript CORROBORATES (`Annotated N pin activities`, N > 0);
+    * otherwise the tool's per-corner vectorless reports are canonical, and the
+      reported total is the largest analysed corner's (a budget is a ceiling).
+
+    AGREEMENT: a vectorless direct session and the tool corner that read the
+    SAME liberty file and the SAME SPEF bytes must agree to within what the two
+    reports' printed digits resolve. Different parasitics or a different
+    liberty is NOT_COMPARABLE -- declared, never a disagreement.
+    """
+    measured = {c: r for c, r in corners.items() if r.get("status") == STATUS_MEASURED}
+    activity = (direct or {}).get("activity") or {}
+    vector = (activity.get("basis") in _VECTOR_BASES
+              and activity.get("corroboration") == CORROBORATED)
+    out: Dict[str, Any] = {"direct_basis": activity.get("basis"),
+                           "direct_corroboration": activity.get("corroboration"),
+                           "tool_corners": corners}
+    if vector:
+        out.update(canonical="direct", reason=(
+            "the direct arm's activity basis is a corroborated vector read; the "
+            "tool is vectorless by construction"))
+    elif measured and len(measured) == len(corners):
+        worst = max(measured, key=lambda c: measured[c]["total_w"])
+        out.update(canonical="librelane", worst_corner=worst,
+                   total_power_w=measured[worst]["total_w"], reason=(
+                       "no corroborated vector basis: sign-off power is the tool's "
+                       "vectorless report at every analysed corner"))
+    else:
+        out.update(canonical=None, reason="LL_POWER_CORNER_NOT_MEASURED: " + ", ".join(
+            sorted(set(corners) - set(measured))) if corners else "no analysed corner")
+    # The agreement check, on the corner(s) that read the direct deck's inputs.
+    same = [c for c, r in measured.items()
+            if direct_liberty and any(Path(p).name == Path(direct_liberty).name
+                                      for p in r.get("liberties") or [])
+            and direct_spef_sha256 and tool_spef_sha256.get(c) == direct_spef_sha256]
+    total = _row_number((direct_report or {}).get("total_row"), "total_w")
+    if vector or total is None:
+        out["agreement"] = {"verdict": "NOT_COMPARABLE", "reason": (
+            "the direct arm is vector-driven" if vector else
+            "the direct arm has no measured total")}
+    elif len(same) != 1:
+        out["agreement"] = {"verdict": "NOT_COMPARABLE", "matched_corners": same,
+                            "reason": "no single tool corner read the direct "
+                                      "deck's liberty AND SPEF bytes"}
+    else:
+        tool = measured[same[0]]
+        bound = ((_printed_half_unit(direct_report["total_row"].get("total_raw")) or 0.0)
+                 + (_printed_half_unit(tool.get("total_raw")) or 0.0))
+        delta = abs(total - tool["total_w"])
+        out["agreement"] = {"verdict": "AGREE" if delta <= bound else "DISAGREE",
+                            "corner": same[0], "direct_w": total,
+                            "tool_w": tool["total_w"], "delta_w": delta,
+                            "resolution_w": bound}
+    return out
+
+
+def tool_power_report_text(corner: str, row: Dict[str, Any], report_text: str,
+                           state_sha256: str) -> str:
+    """The step-33 `power.rpt` when the tool arm is canonical: the tool's own
+    corner report, byte for byte, under an envelope naming where it came from
+    and the stamps the step-33 readers take (`POWER_ANALYSIS_MODE`,
+    `POWER_BASIS`, `STA_BASIS`). Nothing in the report body is edited."""
+    return (
+        "# OpenSTA report_power -- LibreLane OpenROAD.STAPostPNR corner report,\n"
+        "# handed to step 33 unedited (T106).\n"
+        "# tool: opensta\n"
+        f"# source: {row['report']}\n"
+        f"# source_sha256: {row.get('sha256')}\n"
+        f"# stapostpnr_state_sha256: {state_sha256}\n"
+        f"# corner: {corner} (the largest total of the analysed corners)\n"
+        f"# liberty: {Path((row.get('liberties') or ['unstated'])[0]).name}\n"
+        f"# liberties_read: {' '.join(Path(p).name for p in row.get('liberties') or [])}\n"
+        "# STA_BASIS: POST_ROUTE_SPEF\n"
+        "# Every analysed corner is recorded in reports/phase3/power_arms.json.\n"
+        "# Group rows: Sequential / Combinational / Clock / Macro / Pad; each\n"
+        "# carries Internal, Switching and Leakage (static) Power, then the total.\n"
+        "POWER_ANALYSIS_MODE: vectorless_sdc\n"
+        "POWER_BASIS: POST_ROUTE_SPEF\n"
+        f"POWER_BASIS_CORNER: {corner}\n"
+        "# === Begin OpenSTA Power Report ===\n"
+        + report_text)

@@ -1,0 +1,19 @@
+SDF INFO: Loading cal_inv.sdf from tb_inv.v:4
+SDF INFO: cal_inv.sdf:2: Version: 3.0
+SDF INFO: cal_inv.sdf:3: Design: cal_inv
+SDF INFO: cal_inv.sdf:4: Date: Sat Sep 26 16:06:55 2026
+SDF INFO: cal_inv.sdf:5: Vendor: Parallax
+SDF INFO: cal_inv.sdf:6: Program: STA
+SDF INFO: cal_inv.sdf:7: Program Version: 3.1.0
+SDF INFO: cal_inv.sdf:8: Divider: "."
+SDF INFO: cal_inv.sdf:9: Timescale: 1ns
+SDF INFO: cal_inv.sdf:15: INTERCONNECT with port1 = a index = 0, port2 = u0.I index = 0
+SDF INFO: cal_inv.sdf:15: Created a vpiInterModPath
+SDF INFO: cal_inv.sdf:15: Putting delay: 0.000000 for index 0
+SDF INFO: cal_inv.sdf:16: INTERCONNECT with port1 = u0.ZN index = 0, port2 = u1.I index = 0
+SDF INFO: cal_inv.sdf:16: Created a vpiInterModPath
+SDF INFO: cal_inv.sdf:16: Putting delay: 0.000000 for index 0
+SDF INFO: cal_inv.sdf:17: INTERCONNECT with port1 = u1.ZN index = 0, port2 = z index = 0
+SDF INFO: cal_inv.sdf:17: Created a vpiInterModPath
+SDF INFO: cal_inv.sdf:17: Putting delay: 0.000000 for index 0
+tb_inv.v:5: $finish called at 10000 (1ps)

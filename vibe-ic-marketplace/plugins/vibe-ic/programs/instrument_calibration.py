@@ -771,6 +771,42 @@ _register(Instrument(
         artefact=_read("sdf_annotated_negative.log")),
 ))
 
+def _judge_sdf_errors(transcript: str) -> Optional[str]:
+    import sdf_gate_sim as SG
+    count = SG.sdf_error_count(transcript)
+    return f"SDF ERROR RECORDS: {count}" if count else None
+
+
+_register(Instrument(
+    name="sdf_gate_sim::sdf_error_count",
+    reads="the `vvp -sdf-info` transcript of the gate-level simulation",
+    ruling="T106 (step 29 tool arm gates on SDF ERROR = 0)",
+    owner="mig106",
+    why=("Step 29's tool arm refuses a corner whose simulation dropped any SDF "
+         "record. MEASURED on spm x gf180mcuD: every STAPostPNR corner SDF left "
+         "63 refused records per case (xor2 / mux2 unconditional IOPATH against "
+         "the models' conditional specify paths). The pair differs only in the "
+         "cell: a gf180 mux2 (conditional S->Z paths) and an inverter chain."),
+    judge=_judge_sdf_errors,
+    positive=Sample(
+        provenance=(
+            "REAL `vvp -sdf-info` transcript, 8HD-4, vibeic-eda 0.3.79 (by "
+            "digest). Netlist: `calibration/cal_sdf_error_mux.v`, one "
+            "`gf180mcu_fd_sc_mcu7t5v0__mux2_2`; models: the PDK's own "
+            "`primitives.v` + `gf180mcu_fd_sc_mcu7t5v0.v`; compiled `iverilog "
+            "-g2012 -ginterconnect -gspecify`. SDF: OpenSTA 3.1.0 `write_sdf "
+            "-include_typ -divider .` at the tt liberty. MEASURED: 2 `SDF "
+            "ERROR` (Unable to match ModPath S -> Z)."),
+        artefact=_read("sdf_error_positive.log")),
+    expect="SDF ERROR RECORDS",
+    negative=Sample(
+        provenance=(
+            "The SAME PDK, models, compile and SDF writer; the netlist is "
+            "`calibration/cal_sdf_error_inv.v`, two `inv_1` in a chain. "
+            "MEASURED: 0 `SDF ERROR`, 3 `Putting delay`."),
+        artefact=_read("sdf_error_negative.log")),
+))
+
 _register(Instrument(
     name="_container_exec::container_tree_probe",
     reads="the live process tree of the work (not the client that launched it)",

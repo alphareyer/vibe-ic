@@ -1,0 +1,24 @@
+SDF INFO: Loading cal_mux.sdf from tb_mux.v:4
+SDF INFO: cal_mux.sdf:2: Version: 3.0
+SDF INFO: cal_mux.sdf:3: Design: cal_mux
+SDF INFO: cal_mux.sdf:4: Date: Sat Sep 26 16:06:55 2026
+SDF INFO: cal_mux.sdf:5: Vendor: Parallax
+SDF INFO: cal_mux.sdf:6: Program: STA
+SDF INFO: cal_mux.sdf:7: Program Version: 3.1.0
+SDF INFO: cal_mux.sdf:8: Divider: "."
+SDF INFO: cal_mux.sdf:9: Timescale: 1ns
+SDF INFO: cal_mux.sdf:15: INTERCONNECT with port1 = a index = 0, port2 = u0.I0 index = 0
+SDF INFO: cal_mux.sdf:15: Created a vpiInterModPath
+SDF INFO: cal_mux.sdf:15: Putting delay: 0.000000 for index 0
+SDF INFO: cal_mux.sdf:16: INTERCONNECT with port1 = b index = 0, port2 = u0.I1 index = 0
+SDF INFO: cal_mux.sdf:16: Created a vpiInterModPath
+SDF INFO: cal_mux.sdf:16: Putting delay: 0.000000 for index 0
+SDF INFO: cal_mux.sdf:17: INTERCONNECT with port1 = s index = 0, port2 = u0.S index = 0
+SDF INFO: cal_mux.sdf:17: Created a vpiInterModPath
+SDF INFO: cal_mux.sdf:17: Putting delay: 0.000000 for index 0
+SDF INFO: cal_mux.sdf:18: INTERCONNECT with port1 = u0.Z index = 0, port2 = z index = 0
+SDF INFO: cal_mux.sdf:18: Created a vpiInterModPath
+SDF INFO: cal_mux.sdf:18: Putting delay: 0.000000 for index 0
+SDF ERROR: cal_mux.sdf:37: Unable to match ModPath S -> Z in tb.dut.u0
+SDF ERROR: cal_mux.sdf:38: Unable to match ModPath S -> Z in tb.dut.u0
+tb_mux.v:5: $finish called at 10000 (1ps)

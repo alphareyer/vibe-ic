@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1360
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1360)
+- **Total programs (excluding helpers / shims):** 1362
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1362)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1351 |
+| `any` | 1353 |
 
 ## Alphabetical listing
 
@@ -728,6 +728,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `librelane_contract` | any | — | Project-local LibreLane step handoff. No Phase-3 step opts in implicitly. |
 | `librelane_eqy` | any | — | Step 13 arm B: LibreLane Yosys.EQY beside lec_run (arm A). |
 | `librelane_ir_antenna` | any | — | Opt-in steps 24, 26 and 26.5ic through LibreLane tool steps. |
+| `librelane_postroute` | any | — | Steps 28, 29 and 33 read the post-route state the tool already produced. |
 | `librelane_prelayout` | any | — | Opt-in steps 7, 8 and 10 through LibreLane OpenROAD.CheckSDCFiles + STAPrePNR. |
 | `librelane_signoff` | any | — | Opt-in steps 22 and 23 through LibreLane OpenROAD.RCX + OpenROAD.STAPostPNR. |
 | `librelane_step37` | any | — | Opt-in step-37 LibreLane stream-out from vibe-ic's admitted routed DEF. |
@@ -865,6 +866,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `parametric_spec_extractor` | any | — | deterministic baseline extractors for the PROSE PARAMETRIC element types (the design parameters a spec states in words but in a regular w... |
 | `path_delay_coverage_check` | any | — | REAL at-speed PATH-DELAY-FAULT (PDF) coverage gate for the timing-graded ATPG step (DT2). |
 | `path_delay_fault_atpg_run` | any | — | REAL at-speed TIMING-graded PATH-DELAY-FAULT (PDF) ATPG. Composes OpenSTA K-longest-path enumeration (real Liberty + SPEF timing) with th... |
+| `path_spice_tool` | any | — | Step 30's tool arm: OpenSTA `write_path_spice` on the STAPostPNR corner. |
 | `payload_bit_position_check` | any | — | Cross-reference spec doc bit-layout statements with RTL bit-indexing to catch payload-bit misreads. |
 | `pcie_gen5_protocol_synth` | any | v0.1.89 | PCI Express 5.0 (Gen5) protocol synth helper. |
 | `pcie_protocol_synth` | any | v0.1.84 | PCI Express-class protocol synth helper. |
@@ -1432,7 +1434,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1351 programs)
+### `any` (1353 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2131,6 +2133,7 @@ _(no programs in this group)_
 - `librelane_contract` — Project-local LibreLane step handoff. No Phase-3 step opts in implicitly.
 - `librelane_eqy` — Step 13 arm B: LibreLane Yosys.EQY beside lec_run (arm A).
 - `librelane_ir_antenna` — Opt-in steps 24, 26 and 26.5ic through LibreLane tool steps.
+- `librelane_postroute` — Steps 28, 29 and 33 read the post-route state the tool already produced.
 - `librelane_prelayout` — Opt-in steps 7, 8 and 10 through LibreLane OpenROAD.CheckSDCFiles + STAPrePNR.
 - `librelane_signoff` — Opt-in steps 22 and 23 through LibreLane OpenROAD.RCX + OpenROAD.STAPostPNR.
 - `librelane_step37` — Opt-in step-37 LibreLane stream-out from vibe-ic's admitted routed DEF.
@@ -2268,6 +2271,7 @@ _(no programs in this group)_
 - `parametric_spec_extractor` — deterministic baseline extractors for the PROSE PARAMETRIC element types (the design parameters a spec states in words but in a regular w...
 - `path_delay_coverage_check` — REAL at-speed PATH-DELAY-FAULT (PDF) coverage gate for the timing-graded ATPG step (DT2).
 - `path_delay_fault_atpg_run` — REAL at-speed TIMING-graded PATH-DELAY-FAULT (PDF) ATPG. Composes OpenSTA K-longest-path enumeration (real Liberty + SPEF timing) with th...
+- `path_spice_tool` — Step 30's tool arm: OpenSTA `write_path_spice` on the STAPostPNR corner.
 - `payload_bit_position_check` — Cross-reference spec doc bit-layout statements with RTL bit-indexing to catch payload-bit misreads.
 - `pcie_gen5_protocol_synth` — PCI Express 5.0 (Gen5) protocol synth helper.  _[v0.1.89]_
 - `pcie_protocol_synth` — PCI Express-class protocol synth helper.  _[v0.1.84]_
