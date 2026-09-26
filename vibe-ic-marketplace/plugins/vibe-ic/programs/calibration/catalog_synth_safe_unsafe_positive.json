@@ -1,0 +1,334 @@
+{
+  "creator": "Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]",
+  "modules": {
+    "$paramod\\ipcore\\sim=s32'00000000000000000000000000000001": {
+      "attributes": {
+        "dynports": "00000000000000000000000000000001",
+        "hdlname": "ipcore",
+        "src": "ip.v:1.1-3.10"
+      },
+      "parameter_default_values": {
+        "W": "00000000000000000000000000000100",
+        "sim": "1"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 3, 4, 5, 6 ]
+        }
+      },
+      "cells": {
+        "$add$ip.v:2$6": {
+          "hide_name": 1,
+          "type": "$add",
+          "parameters": {
+            "A_SIGNED": "00000000000000000000000000000000",
+            "A_WIDTH": "00000000000000000000000000000100",
+            "B_SIGNED": "00000000000000000000000000000000",
+            "B_WIDTH": "00000000000000000000000000000001",
+            "Y_WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "ip.v:2.30-2.38"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 3, 4, 5, 6 ],
+            "B": [ "1" ],
+            "Y": [ 7, 8, 9, 10 ]
+          }
+        },
+        "$procdff$7": {
+          "hide_name": 1,
+          "type": "$dff",
+          "parameters": {
+            "CLK_POLARITY": "1",
+            "WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "ip.v:2.3-2.39"
+          },
+          "port_directions": {
+            "CLK": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "CLK": [ 2 ],
+            "D": [ 7, 8, 9, 10 ],
+            "Q": [ 3, 4, 5, 6 ]
+          }
+        }
+      },
+      "netnames": {
+        "$0\\q[3:0]": {
+          "hide_name": 1,
+          "bits": [ 7, 8, 9, 10 ],
+          "attributes": {
+            "src": "ip.v:2.3-2.39"
+          }
+        },
+        "$add$ip.v:2$6_Y": {
+          "hide_name": 1,
+          "bits": [ 7, 8, 9, 10 ],
+          "attributes": {
+            "src": "ip.v:2.30-2.38"
+          }
+        },
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {
+            "src": "ip.v:1.69-1.72"
+          }
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 3, 4, 5, 6 ],
+          "attributes": {
+            "src": "ip.v:1.93-1.94"
+          }
+        }
+      }
+    },
+    "$paramod\\ipwrap\\sim=s32'00000000000000000000000000000001": {
+      "attributes": {
+        "hdlname": "ipwrap",
+        "src": "ip.v:4.1-6.10"
+      },
+      "parameter_default_values": {
+        "sim": "00000000000000000000000000000001"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 3, 4, 5, 6 ]
+        }
+      },
+      "cells": {
+        "u": {
+          "hide_name": 0,
+          "type": "$paramod\\ipcore\\sim=s32'00000000000000000000000000000001",
+          "parameters": {
+          },
+          "attributes": {
+            "src": "ip.v:5.23-5.43"
+          },
+          "port_directions": {
+            "clk": "input",
+            "q": "output"
+          },
+          "connections": {
+            "clk": [ 2 ],
+            "q": [ 3, 4, 5, 6 ]
+          }
+        }
+      },
+      "netnames": {
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {
+            "src": "ip.v:4.43-4.46"
+          }
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 3, 4, 5, 6 ],
+          "attributes": {
+            "src": "ip.v:4.61-4.62"
+          }
+        }
+      }
+    },
+    "ipcore": {
+      "attributes": {
+        "dynports": "00000000000000000000000000000001",
+        "src": "ip.v:1.1-3.10"
+      },
+      "parameter_default_values": {
+        "W": "00000000000000000000000000000100",
+        "sim": "0"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "q": {
+          "direction": "output",
+          "bits": [ 3, 4, 5, 6 ]
+        }
+      },
+      "cells": {
+        "$add$ip.v:2$2": {
+          "hide_name": 1,
+          "type": "$add",
+          "parameters": {
+            "A_SIGNED": "00000000000000000000000000000000",
+            "A_WIDTH": "00000000000000000000000000000100",
+            "B_SIGNED": "00000000000000000000000000000000",
+            "B_WIDTH": "00000000000000000000000000000001",
+            "Y_WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "ip.v:2.30-2.38"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 3, 4, 5, 6 ],
+            "B": [ "1" ],
+            "Y": [ 7, 8, 9, 10 ]
+          }
+        },
+        "$procdff$8": {
+          "hide_name": 1,
+          "type": "$dff",
+          "parameters": {
+            "CLK_POLARITY": "1",
+            "WIDTH": "00000000000000000000000000000100"
+          },
+          "attributes": {
+            "src": "ip.v:2.3-2.39"
+          },
+          "port_directions": {
+            "CLK": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "CLK": [ 2 ],
+            "D": [ 7, 8, 9, 10 ],
+            "Q": [ 3, 4, 5, 6 ]
+          }
+        }
+      },
+      "netnames": {
+        "$0\\q[3:0]": {
+          "hide_name": 1,
+          "bits": [ 7, 8, 9, 10 ],
+          "attributes": {
+            "src": "ip.v:2.3-2.39"
+          }
+        },
+        "$add$ip.v:2$2_Y": {
+          "hide_name": 1,
+          "bits": [ 7, 8, 9, 10 ],
+          "attributes": {
+            "src": "ip.v:2.30-2.38"
+          }
+        },
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {
+            "src": "ip.v:1.69-1.72"
+          }
+        },
+        "q": {
+          "hide_name": 0,
+          "bits": [ 3, 4, 5, 6 ],
+          "attributes": {
+            "src": "ip.v:1.93-1.94"
+          }
+        }
+      }
+    },
+    "top": {
+      "attributes": {
+        "top": "00000000000000000000000000000001",
+        "src": "glue_bad.v:1.1-4.10"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "a": {
+          "direction": "output",
+          "bits": [ 3, 4, 5, 6 ]
+        },
+        "b": {
+          "direction": "output",
+          "bits": [ 7, 8, 9, 10 ]
+        }
+      },
+      "cells": {
+        "u2": {
+          "hide_name": 0,
+          "type": "ipcore",
+          "parameters": {
+          },
+          "attributes": {
+            "module_not_derived": "00000000000000000000000000000001",
+            "src": "glue_bad.v:3.10-3.31"
+          },
+          "port_directions": {
+            "clk": "input",
+            "q": "output"
+          },
+          "connections": {
+            "clk": [ 2 ],
+            "q": [ 7, 8, 9, 10 ]
+          }
+        },
+        "w": {
+          "hide_name": 0,
+          "type": "$paramod\\ipwrap\\sim=s32'00000000000000000000000000000001",
+          "parameters": {
+          },
+          "attributes": {
+            "src": "glue_bad.v:2.21-2.41"
+          },
+          "port_directions": {
+            "clk": "input",
+            "q": "output"
+          },
+          "connections": {
+            "clk": [ 2 ],
+            "q": [ 3, 4, 5, 6 ]
+          }
+        }
+      },
+      "netnames": {
+        "a": {
+          "hide_name": 0,
+          "bits": [ 3, 4, 5, 6 ],
+          "attributes": {
+            "src": "glue_bad.v:1.37-1.38"
+          }
+        },
+        "b": {
+          "hide_name": 0,
+          "bits": [ 7, 8, 9, 10 ],
+          "attributes": {
+            "src": "glue_bad.v:1.53-1.54"
+          }
+        },
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {
+            "src": "glue_bad.v:1.19-1.22"
+          }
+        }
+      }
+    }
+  }
+}
