@@ -153,7 +153,7 @@ Things that will bite you if you skip the docstring:
   `advisory_program_exit_zero` does **not**, `optional_program_exit_zero`
   blocks only when its `condition_files_exist` are present. Treating an
   advisory clause as enforcement is measuring something adjacent.
-* **No `program_exit_zero` form exists in `required_outputs`** — all 190<!--figure:required_output_entries-->
+* **No `program_exit_zero` form exists in `required_outputs`** — all 193<!--figure:required_output_entries-->
   entries are plain path strings. That form lives only in `gate`.
 
 ### `cells.py` — the 630<!--figure:ledger_cells-->-cell ledger
@@ -244,7 +244,7 @@ from flow_matrix import cells as C, flowref as F, waivers as W
 
 The ledger's unit is a step, but dimensions 2 (falsifiability), 4
 (criteria-match) and 6 (skip discipline) each ask their question of a gate
-CLAUSE — 199<!--figure:blocking_clauses--> blocking clauses over 70<!--figure:gated_steps--> gated steps. A cell-level
+CLAUSE — 202<!--figure:blocking_clauses--> blocking clauses over 70<!--figure:gated_steps--> gated steps. A cell-level
 `xfail(strict=True)` cannot express "5 of this step's 6 clauses are proven and
 the 6th is not", so those modules carry an in-module per-clause register with
 the same both-directions anti-rot semantics (a stale entry reddens; an entry

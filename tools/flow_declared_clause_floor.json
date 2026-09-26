@@ -135,7 +135,7 @@
     {
       "step": "17",
       "kind": "program_exit_zero",
-      "cmd": "placement_legality_check . --json reports/phase3/placement_legality.json"
+      "cmd": "placement_legality_check . --json reports/phase3/placement_legality_verdict.json"
     },
     {
       "step": "17",
@@ -275,7 +275,7 @@
     {
       "step": "22",
       "kind": "program_exit_zero",
-      "cmd": "spef_extraction_check . --json reports/phase2/gates/spef_extraction.json"
+      "cmd": "spef_extraction_check . --json reports/phase2/gates/spef_extraction_verdict.json"
     },
     {
       "step": "23",

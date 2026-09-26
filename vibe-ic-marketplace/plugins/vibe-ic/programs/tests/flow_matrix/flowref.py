@@ -123,12 +123,12 @@ two could not be reconciled by a reader and only one of them was derived.
 
     program_exit_zero          139<!--figure:gate_clauses_program_exit_zero-->  MANDATORY
     advisory_program_exit_zero 77<!--figure:gate_clauses_advisory_program_exit_zero-->  NON-BLOCKING
-    files_exist                33<!--figure:gate_clauses_files_exist-->
+    files_exist                35<!--figure:gate_clauses_files_exist-->
     optional_program_exit_zero 27<!--figure:gate_clauses_optional_program_exit_zero-->  conditional
     json_field_true             1<!--figure:gate_clauses_json_field_true-->
     ------------------------------
-    total                     277<!--figure:gate_clauses_total-->, of which
-                              200<!--figure:blocking_clauses--> block
+    total                     279<!--figure:gate_clauses_total-->, of which
+                              202<!--figure:blocking_clauses--> block
 
 Three different exit-zero kinds with three different force levels:
   * ``program_exit_zero``          — blocking.
@@ -166,8 +166,8 @@ other gated steps already resolved at least one program.
 --------------------------------------------------------------------
 5. ``blocks_on``
 --------------------------------------------------------------------
-112<!--figure:blocks_on_edges--> edges, mixed types
-(88<!--figure:blocks_on_edges_int--> int, 24<!--figure:blocks_on_edges_str--> str),
+113<!--figure:blocks_on_edges--> edges, mixed types
+(89<!--figure:blocks_on_edges_int--> int, 24<!--figure:blocks_on_edges_str--> str),
 every target resolving to a declared step id — no dangling references at time of writing. Compare with
 :func:`normalize_id` on both sides; the real consumers stringify
 (``{str(id): [str(e) for e in blocks_on]}``).
