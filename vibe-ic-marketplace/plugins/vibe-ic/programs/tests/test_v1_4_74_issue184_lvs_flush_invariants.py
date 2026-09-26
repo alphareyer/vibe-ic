@@ -24,7 +24,9 @@ NOT assert:
 
 chip-AGNOSTIC: pure file-I/O timing, no design/PDK literal.
 """
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -47,19 +49,14 @@ TRUNCATED_REPORT = "Contents of circuit 1:  Circuit: 'x'\nFlattening ...\n"
 
 class ReadFlushedRealFsTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(__file__).resolve().parent / "_tmp_v1_4_74"
-        self.tmp.mkdir(exist_ok=True)
+        # One private directory per test. The shared `tests/_tmp_v1_4_74/`
+        # this used to be let two xdist workers unlink each other's report
+        # mid-poll ("'Final result:' not found in ''").
+        self.tmp = Path(tempfile.mkdtemp(prefix="v1_4_74_"))
         self.rpt = self.tmp / "lvs.rpt"
-        if self.rpt.exists():
-            self.rpt.unlink()
 
     def tearDown(self):
-        if self.rpt.exists():
-            self.rpt.unlink()
-        try:
-            self.tmp.rmdir()
-        except OSError:
-            pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     # ── the fix: a real late flush is caught on a clean exit ──────────────
     def test_real_late_flush_caught_on_clean_exit(self):
