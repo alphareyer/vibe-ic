@@ -8918,37 +8918,12 @@ _UNDRIVABLE_BY_STRUCTURAL_UMBRELLA: Dict[str, Dict[str, str]] = {
             "non-empty (encoding inference improved beyond UNKNOWN) before it "
             "is a gate rather than a report."),
     },
-    "module_port_audit": {
-        "category": "zero-decidable-denom",
-        "requires": "--rtl-dir --top-module --out-dir (all umbrella-suppliable)",
-        "measured": (
-            "SUPERSEDED by measurement. This entry recorded rc=1 on 7/107 as a "
-            "blackbox/external-stub false-positive class. That diagnosis was "
-            "wrong, and `Available ports: []` was the tell: not a stub the scan "
-            "cannot see, but a header the parser truncated to ZERO ports. Five "
-            "parse shapes, fixed in v1.9.10 — width bound to the net type, an "
-            "`ifdef` inside the port list, an import on the module line (the "
-            "`Available ports: []` case, 81 corpus files), multi-dimensional "
-            "packed ranges, and a single-index select called 1 bit "
-            "unconditionally. Re-measured over the SAME 101 directories, the "
-            "pre-fix arm from `git show origin/main:` rather than by editing "
-            "the tree: rc=1 8 -> 0, ERROR findings 715 -> 0, and 0/101 with "
-            "the umbrella's own argv too. Proven not to be an accept-everything "
-            "parser: renaming the declaration of the now-visible "
-            "`aes_sub_bytes.data_i` in a COPY of the corpus takes it back to "
-            "rc=1 on exactly that port. #492 bar 1 (no new FAIL) is CLEARED, "
-            "and so is bar 3 (it can still fail for the reason it exists).\n"
-            "What is NOT cleared is an honest denominator. `Parsed N modules` "
-            "is 1 on many CVDP directories, where there is no instantiation to "
-            "compare against a declaration — the gate's actual subject — so a "
-            "PASS there certifies nothing. Same shape as "
-            "`interface_encoding_audit` above."),
-        "disposition": (
-            "KEEP registered, unwired — but for the denominator, NOT for the "
-            "corpus. Wiring needs the report to publish the number of "
-            "instantiation-port comparisons it actually made, and to refuse "
-            "when that is zero. See vibe-ic#559."),
-    },
+    # `module_port_audit` LEFT THIS REGISTER with the umbrella (1a27f263d):
+    # its one ERROR finding, a named connection to a port the module does not
+    # declare, is Verilator PINNOTFOUND in P0's `flow_step_output_content_check
+    # --mode rtl` clause. A record of why the umbrella cannot drive a gate it
+    # no longer carries describes nothing. The retirement is recorded in
+    # tests/test_p0_tool_frontend_migration.py::RETIRED_REGEX_GATES.
     "oe_pattern_check": {
         "category": "reddens-corpus",
         "requires": "--rtl-files --out-dir (both umbrella-suppliable)",

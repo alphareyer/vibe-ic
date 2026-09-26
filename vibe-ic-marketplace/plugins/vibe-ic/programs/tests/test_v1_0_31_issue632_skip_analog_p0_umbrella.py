@@ -124,7 +124,7 @@ def test_skip_set_derived_from_registered_gates_and_chip_agnostic():
     assert "analog_content_detected_must_emit_l5_check" not in skip
     # NO purely-digital structural gate may ever be in the analog skip set.
     for g in ("rig_topology_disclosure_check", "handshake_check",
-              "bitwidth_consistency_check", "project_outputs_in_tree_check",
+              "function_void_with_output_check", "project_outputs_in_tree_check",
               "phase1_all_l_docs_present_check"):
         assert g not in skip
 

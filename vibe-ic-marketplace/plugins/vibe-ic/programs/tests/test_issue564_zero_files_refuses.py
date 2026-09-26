@@ -36,8 +36,10 @@ import _progress_run as _pr  # noqa: E402
 
 _PROGRAMS = pathlib.Path(__file__).resolve().parents[1]
 
+#: `bitwidth_consistency_check` was the fourth. It was retired with the P0
+#: regex gates (1a27f263d; Verilator SELRANGE blocks its finding now) and
+#: its file deleted, so there is no program left to refuse.
 GATES = (
-    "bitwidth_consistency_check",
     "crc_residual_check",
     "device_response_no_br_check",
     "gap_reset_granularity_check",
