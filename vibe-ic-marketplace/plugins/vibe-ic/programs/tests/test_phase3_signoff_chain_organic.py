@@ -22,6 +22,7 @@ Covers the 7 backlog items:
 """
 import importlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -1864,6 +1865,12 @@ class TestSiTimingAwareAdvisory:
         rpt3.mkdir(parents=True, exist_ok=True)
         spef = tmp_path / "chip_top.spef"
         spef.write_text(spef_text)
+        # A pre-staged JSON is one derived FROM this SPEF, so it must not be
+        # older than it: the runner re-derives windows dated before the SPEF
+        # they are read with (a re-extraction must not reuse old windows).
+        _json = extracted / "chip_top_si_timing.json"
+        _st = spef.stat()
+        os.utime(_json, (_st.st_atime + 1, _st.st_mtime + 1))
         return project, rpt3, spef
 
     def test_advisory_fields_merged_and_gate_passes(self, tmp_path, monkeypatch):

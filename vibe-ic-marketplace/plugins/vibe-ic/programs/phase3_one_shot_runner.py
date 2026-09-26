@@ -67137,7 +67137,7 @@ def _emit_si_timing_json(project: Path, top: str, pdk: PdkConfig, container: str
     return True
 
 
-def _librelane_si_timing_inputs(project: Path) -> Optional[dict]:
+def _librelane_si_corner_inputs(project: Path) -> Optional[dict]:
     """Step 23's tool state and its setup sign-off corner, for step 27.
 
     None when step 23 is direct, or when its record names no measured worst
@@ -67168,7 +67168,7 @@ def _librelane_si_timing_inputs(project: Path) -> Optional[dict]:
             "mounts": [(Path(root) / pdk_name, f"/pdk/{pdk_name}")]}
 
 
-def _librelane_si_timing_json(project: Path, top: str, tool: dict, out_json: Path,
+def _librelane_si_windows_json(project: Path, top: str, tool: dict, out_json: Path,
                               notes: List[str], vdd_v: float = 1.8) -> bool:
     """The SI timing JSON on the tool corner's inputs, in the tool's image."""
     mod = _si_timing_aware_module()
@@ -67249,11 +67249,11 @@ def _merge_si_timing_aware(project: Path, top: str, pdk: PdkConfig,
     out_json = extracted / f"{top}_si_timing.json"
     # Step 23 on LibreLane: the windows come from the tool's own sign-off
     # corner (its routed netlist, SDC, SPEF and liberties), timed in its image.
-    tool = _librelane_si_timing_inputs(project)
+    tool = _librelane_si_corner_inputs(project)
     if tool is not None:
         spef = tool["spef"]
         if _signoff_regen(out_json, spef, tool["state"]):
-            if not _librelane_si_timing_json(project, top, tool, out_json, notes,
+            if not _librelane_si_windows_json(project, top, tool, out_json, notes,
                                              vdd_v=vdd_v):
                 return
     else:

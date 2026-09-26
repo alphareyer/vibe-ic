@@ -581,7 +581,7 @@ def test_a_kernel_disagreement_withdraws_the_delta_delay_reading(tmp_path, monke
 def test_step_27_reads_the_step_23_tool_corner(tmp_path):
     runner = importlib.import_module('phase3_one_shot_runner')
     project = tmp_path / 'p'
-    assert runner._librelane_si_timing_inputs(project) is None      # 23 direct
+    assert runner._librelane_si_corner_inputs(project) is None      # 23 direct
     folder = project / 'phase3/librelane/23/01-openroad-stapostpnr'
     corner = 'max_ss_125C_4v50'
     spef = write(project / 'x/max.spef', 's')
@@ -595,7 +595,7 @@ def test_step_27_reads_the_step_23_tool_corner(tmp_path):
         'judgment': {'worst_setup': {'corner': corner, 'ws': 1.0}}})
     put(project / 'phase3/librelane_switch.json', {'steps': {'23': 'librelane'},
                                                    'pdk_root_host': str(tmp_path / 'root')})
-    tool = runner._librelane_si_timing_inputs(project)
+    tool = runner._librelane_si_corner_inputs(project)
     assert tool['design'] == 'chip_top' and tool['corner'] == corner
     assert tool['spef'] == spef.resolve() and tool['netlist'] == nl.resolve()
     assert tool['liberties'][0].endswith('sc__ss_125C_4v50.lib')
@@ -618,3 +618,15 @@ def test_the_direct_si_windows_are_re_derived_after_a_re_extraction(tmp_path, mo
                         lambda *a, **k: calls.append(a) or False)
     runner._merge_si_timing_aware(project, 'spm', SimpleNamespace(), 'c', spef, {}, [])
     assert len(calls) == 1
+
+
+def test_a_deck_with_a_different_derate_is_not_comparable(tmp_path):
+    """The direct deck's derate is its own constant; the tool's is the PDK's
+    declared percent.  Where they differ the slacks answer different questions,
+    so a gap is NOT_COMPARABLE, never a disagreement."""
+    folder, spef_dir = _deck_fixture(tmp_path)
+    text = OCV.format(setup='0.36', hold='0.40').replace(
+        'OCV_DERATE_APPLIED early=0.95 late=1.05', 'OCV_DERATE_APPLIED early=0.92 late=1.08', 1)
+    doc = signoff.deck_agreement(text, folder, tmp_path / 'deck.json', spef_dir=spef_dir)
+    rows = {r['stanza']: r['verdict'] for r in doc['stanzas']}
+    assert rows == {'SETUP': 'NOT_COMPARABLE', 'HOLD': 'AGREE'} and doc['verdict'] == 'AGREE'

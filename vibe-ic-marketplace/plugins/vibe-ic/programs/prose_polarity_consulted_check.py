@@ -119,6 +119,26 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "librelane_signoff::agreement":
+        "TWO MACHINE GRAMMARS, NO SENTENCE. `Reading cell library for the "
+        "'<corner>' corner at '<path>'` is LibreLane 3.1 sta/corner.tcl's own "
+        "fixed record, anchored at line start with both fields quoted, and is "
+        "used only to list the files the tool read; `VIBEIC_ARM <key> <value>` "
+        "is printed by this module's own arm Tcl with `puts` from a number the "
+        "interpreter computed, anchored at both line ends around two \\S+ "
+        "fields. Neither has a negated form ('not VIBEIC_ARM ...' fails the "
+        "anchor), and the direction is safe: an unparsed value is None, and "
+        "None never AGREEs, so a reading that cannot be made is a refusal.",
+    "librelane_signoff::deck_agreement":
+        "STAMP LINES THIS FLOW WRITES ITSELF plus one OpenSTA record. "
+        "`=== SETUP|HOLD corner: ... ===`, `STA_BASIS_LIBERTY: <path>`, "
+        "`STA_BASIS_CORNER: <rc>`, `STA_BASIS_SPEF: <file>` and "
+        "`OCV_DERATE_APPLIED early=<x> late=<y>` are emitted by "
+        "_emit_mcorner_ocv_sta with `puts $_f` from values it resolved; "
+        "`worst slack max|min <v>` is OpenSTA report_worst_slack's fixed "
+        "output, matched anchored at both ends. No field is free text, so a "
+        "denial cannot be spelled inside one; and every unreadable field "
+        "makes the stanza NOT_COMPARABLE, which can never produce AGREE.",
     "librelane_prelayout::check_setup_counts":
         "OpenSTA check_setup prints one fixed-format summary per finding kind, "
         "'Warning: There are|is <N> <kind>.', and prints nothing for a kind "
