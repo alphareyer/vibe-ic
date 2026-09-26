@@ -1990,7 +1990,10 @@ def declared_sdc_clocks(sdc: Path, sdf_texts: List[str]) -> Dict[str, object]:
     SDC is the design's. The unit is the SDC's `set_units -time` when it states
     one, else the unit the STA session read it in -- the SDF TIMESCALE that
     session wrote. Anything this cannot read refuses (ValueError): an unreadable
-    SDC, a port clock with no literal period, two periods on one port, no unit."""
+    SDC, a port clock with no literal period, two periods on one port, no unit.
+    An SDC that creates no PORT clock (a combinational design, a virtual clock)
+    declares that no DUT port is clocked: the result carries no clock, and a
+    bench that free-runs a DUT port is then refused by `bind_bench_clock`."""
     import sdc_constraints as _sdcc
     try:
         text = Path(sdc).read_text(errors="replace")
@@ -2008,7 +2011,8 @@ def declared_sdc_clocks(sdc: Path, sdf_texts: List[str]) -> Dict[str, object]:
                              f"port {clock['port_name']}")
         clocks[clock["port_name"]] = clock["period_ns"]
     if not clocks:
-        raise ValueError(f"SDC_DECLARES_NO_PORT_CLOCK: {sdc}")
+        return {"sdc": str(sdc), "unit_s": None, "clocks_s": {},
+                "unit_source": "no port clock is declared"}
     units = _SDC_SET_UNITS_TIME_RE.findall(text)
     if units:
         scale, unit = units[-1]

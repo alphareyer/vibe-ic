@@ -169,7 +169,6 @@ def test_the_sdc_units_statement_outranks_the_sdf_timescale(tmp_path):
 
 @pytest.mark.parametrize('sdc,sdfs,code', [
     (None, [SDF_HEAD], 'SDC_UNREADABLE'),
-    ('create_clock -name v -period 10\n', [SDF_HEAD], 'SDC_DECLARES_NO_PORT_CLOCK'),
     ('create_clock -period [expr 2*$p] [get_ports clk]\n', [SDF_HEAD], 'SDC_CLOCK_UNREADABLE'),
     ('create_clock -period 10 [get_ports clk]\ncreate_clock -period 12 [get_ports clk]\n',
      [SDF_HEAD], 'SDC_CLOCK_AMBIGUOUS'),
@@ -183,6 +182,18 @@ def test_an_sdc_clock_this_cannot_read_refuses_and_is_never_guessed(tmp_path, sd
         write(path, sdc)
     with pytest.raises(ValueError, match=code):
         sgs.declared_sdc_clocks(path, sdfs)
+
+
+def test_an_sdc_with_no_port_clock_clocks_no_port_and_refuses_a_free_running_bench(tmp_path):
+    """A combinational design (only a virtual clock) is not refused for having
+    no clock; a bench that free-runs a DUT port against it is."""
+    sdc = write(tmp_path / 'c.sdc', 'create_clock -name v -period 10\n')
+    declared = sgs.declared_sdc_clocks(sdc, ['(DELAYFILE)\n'])
+    assert declared['clocks_s'] == {}
+    comb = TB.replace('  always #5 clk = ~clk;\n', '')
+    assert sgs.bind_bench_clock(comb, 'dut', declared)[0] == comb
+    with pytest.raises(ValueError, match='BENCH_CLOCK_UNDECLARED'):
+        sgs.bind_bench_clock(TB, 'dut', declared)
 
 
 @pytest.mark.parametrize('tb,clocks,code', [
