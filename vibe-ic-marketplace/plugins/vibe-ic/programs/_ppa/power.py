@@ -728,6 +728,51 @@ def activity_provenance(text: str) -> Dict[str, Any]:
     return prov
 
 
+#: Where step 4's DUT-scoped activity dump writes its manifest, under a sim
+#: directory (`sim_activity_dump.MANIFEST` in `activity/`).
+ACTIVITY_MANIFEST_REL = "activity/activity.json"
+
+
+def select_activity(sim_dirs: Sequence[Path]) -> Optional[Dict[str, Any]]:
+    """The activity input for a vector power session, and the scope to read it at.
+
+    A step-4 manifest whose VCD header was verified to carry the DUT scope wins:
+    MEASURED in OpenSTA 3.1.0, `read_vcd` without `-scope` on a testbench VCD
+    annotates 0 pins, so a VCD without its scope is an intention, not an input.
+    With no manifest, the first non-empty `.vcd` is returned with `scope`
+    None, exactly the file the deck used to pick; the report's own
+    `Annotated N pin activities.` then decides whether it counted
+    (`activity_provenance`)."""
+    for root in sim_dirs:
+        manifest = Path(root) / ACTIVITY_MANIFEST_REL
+        try:
+            doc = json.loads(manifest.read_text())
+        except (OSError, ValueError):
+            continue
+        vcd = Path(str(doc.get("vcd") or ""))
+        if doc.get("scope_verified") is True and doc.get("scope") \
+                and vcd.is_file() and vcd.stat().st_size > 0:
+            return {"vcd": vcd, "scope": str(doc["scope"]),
+                    "source": str(manifest)}
+    for root in sim_dirs:
+        for vcd in sorted(Path(root).rglob("*.vcd")):
+            if vcd.stat().st_size > 0:
+                return {"vcd": vcd, "scope": None, "source": "legacy-glob"}
+    return None
+
+
+def activity_read_tcl(vcd_c: str, scope: Optional[str]) -> str:
+    """The deck line that reads the activity, caught and printed on failure.
+
+    `read_vcd` and not `read_power_activities -vcd`: MEASURED in OpenSTA 3.1.0
+    (vibeic-eda 0.3.77) the latter is deprecated and raises `default is not a
+    mode object`, which is why every shipped `vector_vcd` report carried
+    READ_VCD_FAIL."""
+    scope_arg = f"-scope {scope} " if scope else ""
+    return (f"if {{[catch {{read_vcd {scope_arg}{vcd_c}}} _vcd_err]}} {{\n"
+            f"  puts \"READ_VCD_FAIL: $_vcd_err\"\n}}\n")
+
+
 def parse_power_report(text: str, *, path: Optional[str] = None,
                        sha256: Optional[str] = None) -> Dict[str, Any]:
     """Parse one `report_power` artefact into rows plus activity provenance.

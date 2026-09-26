@@ -713,6 +713,168 @@ def union_coverage_dats(
     }
 
 
+# ----- the tool's own line union (lcov) ---------------------------------
+
+#: THE TOOL ALREADY MERGES LINES ACROSS INSTANCE PATHS; ONLY `--write` DOES
+#: NOT. MEASURED in the released image (verilator_coverage 5.053, two TBs that
+#: instantiate the same module as `tbA.u_dut` and `tbB.dut_i`):
+#: `--write merged.dat` keeps 58 `C` records, twice the 29 of one run, while
+#: `--write-info merged.info` writes ONE `DA:<line>,<hits>` per source line of
+#: the shared module, keyed by file and line only. So the line-level suite
+#: union has a second, independent producer: the tool. Toggle and branch
+#: points stay per instance in lcov (`BRDA` rows repeat), so those keep the
+#: `h`-stripping union above. The lcov `DA` row is per SOURCE LINE and carries
+#: every point type on that line (a port's toggle points sit on the module
+#: header line), so the two are compared as the same question: which lines of
+#: which file carry a point, and which of them any run hit.
+LCOV_INFO_NAME = "coverage_union.info"
+
+
+def parse_lcov_info(text: str) -> Dict[str, Dict[int, int]]:
+    """`{file: {line: hits}}` from `verilator_coverage --write-info` output.
+
+    Only `SF:` / `DA:` / `end_of_record` are read. A `DA` row outside an `SF`
+    record is malformed input and raises ValueError, so an unreadable file can
+    never be read as an empty (and therefore agreeing) union."""
+    out: Dict[str, Dict[int, int]] = {}
+    current: Optional[str] = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("SF:"):
+            current = line[3:]
+            out.setdefault(current, {})
+        elif line.startswith("DA:"):
+            if current is None:
+                raise ValueError(f"lcov DA row outside an SF record: {line!r}")
+            fields = line[3:].split(",")
+            if len(fields) < 2:
+                raise ValueError(f"malformed lcov DA row: {line!r}")
+            n, hits = int(fields[0]), int(fields[1])
+            out[current][n] = max(out[current].get(n, 0), hits)
+        elif line == "end_of_record":
+            current = None
+    return out
+
+
+def union_line_map(paths: Sequence[str]) -> Optional[Dict[str, Dict[int, int]]]:
+    """`{file: {line: hits}}` over every point of the `h`-stripped union.
+
+    The same question lcov answers, asked of this program's own union: every
+    point type, keyed by file and line, hit when any run hit any point on it.
+    None when a record cannot be keyed (same refusal as `union_coverage_dats`)."""
+    hits: Dict[str, Dict[int, int]] = {}
+    for path in paths:
+        with open(path, "r", errors="replace") as fh:
+            for raw in fh:
+                m = COVERAGE_LINE_RE.match(raw)
+                if not m:
+                    continue
+                blob, n = m.group(1), int(m.group(2))
+                if coverage_point_key(blob) is None:
+                    return None
+                fields = dict(seg.split("\x02", 1) for seg in blob.split("\x01")
+                              if "\x02" in seg)
+                src, lineno = fields.get("f"), fields.get("l")
+                if not src or not (lineno or "").isdigit():
+                    continue
+                per = hits.setdefault(src, {})
+                for one in {int(lineno)} | _span_lines(fields.get("S", "")):
+                    per[one] = per.get(one, 0) + n
+    return hits
+
+
+def _span_lines(spec: str) -> set:
+    """The lines a point's `S` field names (`5`, `2-4`, `2-4,7`).
+
+    MEASURED: an `else` point recorded at `l=4` carries `S=5`, and lcov writes
+    a `DA:5` row for it. Reading only `l` loses that line."""
+    lines: set = set()
+    for part in (spec or "").split(","):
+        lo, _, hi = part.strip().partition("-")
+        if lo.isdigit() and (not hi or hi.isdigit()):
+            lines.update(range(int(lo), int(hi or lo) + 1))
+    return lines
+
+
+def cross_check_line_union(ours: Optional[Dict[str, Dict[int, int]]],
+                           tool: Optional[Dict[str, Dict[int, int]]],
+                           scope: Sequence[str]) -> Dict[str, Any]:
+    """Compare the two line unions over the DUT files named in `scope`.
+
+    `agree` is True only when both sides name the same scoped files, the same
+    lines in each, and the same subset of them hit. A side that is absent is
+    NOT_MEASURED, never agreement."""
+    import instrument_calibration as _calibration
+    try:
+        _calibration.assert_calibrated(
+            "verilator_coverage_measure::cross_check_line_union")
+    except _calibration.Uncalibrated as exc:
+        return {"status": "NOT_MEASURED", "reason_class": exc.reason_class,
+                "reason": str(exc)}
+    if ours is None or tool is None:
+        return {"status": "NOT_MEASURED",
+                "reason": ("the h-stripped union could not be keyed"
+                           if ours is None else
+                           "verilator_coverage --write-info produced no "
+                           "readable lcov union")}
+    wanted = {Path(n).name for n in scope}
+
+    def scoped(side: Dict[str, Dict[int, int]]) -> Dict[str, Dict[int, int]]:
+        return {Path(f).name: lines for f, lines in side.items()
+                if Path(f).name in wanted}
+
+    a, b = scoped(ours), scoped(tool)
+    mismatches: List[Dict[str, Any]] = []
+    for name in sorted(set(a) | set(b)):
+        la, lb = a.get(name, {}), b.get(name, {})
+        if set(la) != set(lb):
+            mismatches.append({"file": name, "kind": "line_set",
+                               "only_h_stripped_union": sorted(set(la) - set(lb)),
+                               "only_lcov": sorted(set(lb) - set(la))})
+        hit_a = {n for n, h in la.items() if h > 0}
+        hit_b = {n for n, h in lb.items() if h > 0}
+        if hit_a != hit_b:
+            mismatches.append({"file": name, "kind": "hit_set",
+                               "only_h_stripped_union": sorted(hit_a - hit_b),
+                               "only_lcov": sorted(hit_b - hit_a)})
+    total = sum(len(lines) for lines in b.values())
+    covered = sum(1 for lines in b.values() for h in lines.values() if h > 0)
+    if not b:
+        return {"status": "NOT_MEASURED",
+                "reason": "the lcov union names none of the scoped DUT files",
+                "lcov_files": sorted(tool)}
+    return {"status": "MEASURED", "agree": not mismatches,
+            "lcov_line_totals": {
+                "covered": covered, "total": total,
+                "pct": round(100.0 * covered / total, 2) if total else 0.0},
+            "mismatches": mismatches}
+
+
+def lcov_line_union(dats: Sequence[str], out_dir: str,
+                    exec_fn=None) -> Tuple[Optional[Dict[str, Dict[int, int]]], str]:
+    """Run `verilator_coverage --write-info` over `dats`; return (map, info path)."""
+    if exec_fn is None:
+        def exec_fn(argv, cwd):  # noqa: ANN001 — local default
+            r = run(argv, cwd=cwd, check=False)
+            return r.returncode, r.stdout, r.stderr
+    info = str(Path(out_dir) / LCOV_INFO_NAME)
+    try:
+        Path(info).unlink()
+    except OSError:
+        pass
+    try:
+        rc, _out, _err = exec_fn(["verilator_coverage", "--write-info", info,
+                                  *[str(d) for d in dats]], out_dir)
+    except OSError:
+        return None, info
+    if rc != 0 or not Path(info).is_file():
+        return None, info
+    try:
+        return parse_lcov_info(Path(info).read_text(errors="replace")), info
+    except ValueError:
+        return None, info
+
+
 # ----- artefact provenance -----------------------------------------
 
 TOOL_SIGNATURES = [
@@ -1111,8 +1273,18 @@ def measure_suite(rtl: Sequence[str], tbs: Sequence[str], build_dir: str, *,
             dats = dats[:1]
     elif dats:
         cov = parse_coverage_dat(dats[0], mounts=mounts)
+    # THE TOOL'S LINE UNION, BESIDE OURS. Recorded, and a disagreement is a
+    # named finding that `check` refuses; neither side replaces the other.
+    line_check: Dict[str, Any] = {"status": "NOT_MEASURED",
+                                  "reason": "no coverage.dat to union"}
+    if dats:
+        tool_map, info = lcov_line_union(dats, build_dir, exec_fn=exec_fn)
+        line_check = cross_check_line_union(union_line_map(dats), tool_map,
+                                            list(scope or rtl))
+        line_check["lcov_info"] = info
     return {"dats": dats, "cov": cov, "per_testbench": per_tb,
             "union_refused": union_refused,
+            "line_union_cross_check": line_check,
             "measured": [str(t) for t in tbs
                          if per_tb.get(str(t), {}).get("measured")],
             "scope_used": list(scope or rtl)}
@@ -1132,6 +1304,8 @@ def suite_payload_fields(result: Dict[str, Any]) -> Dict[str, Any]:
                               else "single-testbench"),
         "per_testbench": result.get("per_testbench") or {},
         "union_refused": result.get("union_refused") or "",
+        "line_union_cross_check": result.get("line_union_cross_check") or {
+            "status": "NOT_MEASURED", "reason": "not recorded by the producer"},
     }
 
 
@@ -1614,6 +1788,18 @@ def cmd_check(args: argparse.Namespace) -> int:
                   f"branch {data['totals']['branch']['pct']}%) describe that "
                   f"testbench, NOT the RTL, and are NOT graded here.")
             return 1
+
+    # TWO PRODUCERS OF ONE LINE UNION MUST AGREE. The tool's lcov union and
+    # the h-stripped union answer the same question; a measured disagreement
+    # means one of the two published line numbers is wrong, and which one is
+    # not decidable here. An unmeasured cross-check is disclosed, not failed.
+    _xc = data.get("line_union_cross_check")
+    if isinstance(_xc, dict) and _xc.get("status") == "MEASURED" \
+            and _xc.get("agree") is False:
+        print("[check] LINE_UNION_DISAGREES: verilator_coverage --write-info "
+              "and the h-stripped suite union name different lines or hits: "
+              + json.dumps(_xc.get("mismatches"))[:600])
+        return 1
 
     totals = data["totals"]
     line_pct = totals["line"]["pct"]

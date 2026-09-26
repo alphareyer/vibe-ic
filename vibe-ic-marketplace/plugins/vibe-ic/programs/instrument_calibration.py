@@ -1726,6 +1726,78 @@ _register(Instrument(
         artefact=_read("sby_prove_arms_unknown.sby.log")),
 ))
 
+# Step 4 (T91): the tool's own lcov line union beside the h-stripped union.
+def _judge_line_union(sample: Tuple[Tuple[str, ...], str]) -> Optional[str]:
+    import verilator_coverage_measure as vcm
+    dats, info = sample
+    got = vcm.cross_check_line_union(
+        vcm.union_line_map([str(FIXTURES / d) for d in dats]),
+        vcm.parse_lcov_info((FIXTURES / info).read_text()), ["cov_cal.v"])
+    if got.get("status") != "MEASURED":
+        return "NOT_MEASURED:" + str(got.get("reason"))
+    return None if got["agree"] else "LINE_UNION_DISAGREES"
+
+
+_register(Instrument(
+    name="verilator_coverage_measure::cross_check_line_union",
+    reads="verilator_coverage --write-info lcov union vs coverage.dat records",
+    ruling="T91", owner="mig-rtlver",
+    why=("Two producers of one line union must name the same lines and the "
+         "same hits. Reading only a point's `l` field and not its `S` span "
+         "dropped an `else` line lcov reports; the pair keeps that visible."),
+    judge=_judge_line_union,
+    positive=Sample(
+        provenance=("Real verilator 5.053 coverage.dat of two calibration "
+                    "testbenches (tb_cal_idle, tb_cal_toggle) over the "
+                    "six-line calibration module cov_cal, and the real "
+                    "`verilator_coverage --write-info` union of both, "
+                    "released vibeic-eda:0.3.77 on 192.168.1.121. The "
+                    "h-stripped side is built from the idle member only, "
+                    "so line 6 (hit only by the toggle member) differs."),
+        artefact=lambda: (("cov_union_tb_idle.dat",),
+                          "cov_union_suite_lcov.info")),
+    expect="LINE_UNION_DISAGREES",
+    negative=Sample(
+        provenance=("Same real files: both members on both sides agree "
+                    "line for line and hit for hit."),
+        artefact=lambda: (("cov_union_tb_idle.dat", "cov_union_tb_toggle.dat"),
+                          "cov_union_suite_lcov.info")),
+))
+
+
+# Step 4 (T91): one cocotb TB under Icarus and Verilator, compared per case.
+def _judge_sim_differential(sample: Tuple[str, str]) -> Optional[str]:
+    import sim_dual_compare as sdc
+    got = sdc.compare_junit(FIXTURES / sample[0], FIXTURES / sample[1])
+    if got["verdict"] == "NOT_MEASURED":
+        return "NOT_MEASURED:" + str(got.get("reason"))
+    return got.get("finding")
+
+
+_register(Instrument(
+    name="sim_dual_compare::compare_junit",
+    reads="cocotb JUnit results.xml from SIM=icarus and SIM=verilator",
+    ruling="T91", owner="mig-rtlver",
+    why=("A case whose outcome depends on the simulator is an X-semantics or "
+         "race hazard. The reader must fire on a real per-case split and stay "
+         "silent when both simulators pass the same cases."),
+    judge=_judge_sim_differential,
+    positive=Sample(
+        provenance=("Real cocotb 2.2.0.dev JUnit, released vibeic-eda:0.3.77 "
+                    "on 192.168.1.121: a calibration flop with no reset read "
+                    "by int(dut.q.value); Icarus fails q_starts_low with "
+                    "`Cannot convert Logic('X') to int`, Verilator passes."),
+        artefact=lambda: ("sim_dual_icarus_x_positive.xml",
+                          "sim_dual_verilator_x_positive.xml")),
+    expect="SIM_DIFFERENTIAL_DISAGREES",
+    negative=Sample(
+        provenance=("Same calibration flop with a synchronous reset: both "
+                    "simulators pass both cases."),
+        artefact=lambda: ("sim_dual_icarus_negative.xml",
+                          "sim_dual_verilator_negative.xml")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════

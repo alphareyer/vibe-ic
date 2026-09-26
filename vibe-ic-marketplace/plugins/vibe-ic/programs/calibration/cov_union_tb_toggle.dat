@@ -1,0 +1,30 @@
+# SystemC::Coverage-3
+C 'fcov_cal.vl1n27ttogglepagev_toggle/cov_caloclk:0->1htb_cal_toggle.dut_i' 6
+C 'fcov_cal.vl1n27ttogglepagev_toggle/cov_caloclk:1->0htb_cal_toggle.dut_i' 6
+C 'fcov_cal.vl1n43ttogglepagev_toggle/cov_calorst:0->1htb_cal_toggle.dut_i' 1
+C 'fcov_cal.vl1n43ttogglepagev_toggle/cov_calorst:1->0htb_cal_toggle.dut_i' 1
+C 'fcov_cal.vl1n59ttogglepagev_toggle/cov_caloa:0->1htb_cal_toggle.dut_i' 1
+C 'fcov_cal.vl1n59ttogglepagev_toggle/cov_caloa:1->0htb_cal_toggle.dut_i' 0
+C 'fcov_cal.vl1n73ttogglepagev_toggle/cov_caloq:0->1htb_cal_toggle.dut_i' 3
+C 'fcov_cal.vl1n73ttogglepagev_toggle/cov_caloq:1->0htb_cal_toggle.dut_i' 2
+C 'fcov_cal.vl2n3tlinepagev_line/cov_caloblockS2htb_cal_toggle.dut_i' 6
+C 'fcov_cal.vl3n5tlinepagev_line/cov_caloelsifS3-4htb_cal_toggle.dut_i' 1
+C 'fcov_cal.vl5n10tbranchpagev_branch/cov_caloifS5-6htb_cal_toggle.dut_i' 5
+C 'fcov_cal.vl5n11tbranchpagev_branch/cov_caloelsehtb_cal_toggle.dut_i' 0
+C 'fcov_cal.vl6n12texprpagev_expr/cov_calo(q==0) => 1htb_cal_toggle.dut_i' 3
+C 'fcov_cal.vl6n12texprpagev_expr/cov_calo(q==1) => 0htb_cal_toggle.dut_i' 2
+C 'ftb_cal_toggle.vl2n27ttogglepagev_toggle/tb_cal_toggleoclk:0->1htb_cal_toggle' 6
+C 'ftb_cal_toggle.vl2n27ttogglepagev_toggle/tb_cal_toggleoclk:1->0htb_cal_toggle' 6
+C 'ftb_cal_toggle.vl2n31tlinepagev_line/tb_cal_toggleoblockS2htb_cal_toggle' 1
+C 'ftb_cal_toggle.vl2n34ttogglepagev_toggle/tb_cal_toggleorst:0->1htb_cal_toggle' 1
+C 'ftb_cal_toggle.vl2n34ttogglepagev_toggle/tb_cal_toggleorst:1->0htb_cal_toggle' 1
+C 'ftb_cal_toggle.vl2n38tlinepagev_line/tb_cal_toggleoblockS2htb_cal_toggle' 1
+C 'ftb_cal_toggle.vl2n41ttogglepagev_toggle/tb_cal_toggleoa:0->1htb_cal_toggle' 1
+C 'ftb_cal_toggle.vl2n41ttogglepagev_toggle/tb_cal_toggleoa:1->0htb_cal_toggle' 0
+C 'ftb_cal_toggle.vl2n43tlinepagev_line/tb_cal_toggleoblockS2htb_cal_toggle' 1
+C 'ftb_cal_toggle.vl2n51ttogglepagev_toggle/tb_cal_toggleoq:0->1htb_cal_toggle' 3
+C 'ftb_cal_toggle.vl2n51ttogglepagev_toggle/tb_cal_toggleoq:1->0htb_cal_toggle' 2
+C 'ftb_cal_toggle.vl3n1tlinepagev_line/tb_cal_toggleoblockS3htb_cal_toggle' 12
+C 'ftb_cal_toggle.vl3n15texprpagev_expr/tb_cal_toggleo(clk==0) => 1htb_cal_toggle' 6
+C 'ftb_cal_toggle.vl3n15texprpagev_expr/tb_cal_toggleo(clk==1) => 0htb_cal_toggle' 6
+C 'ftb_cal_toggle.vl3n21tlinepagev_line/tb_cal_toggleoblockS3htb_cal_toggle' 1

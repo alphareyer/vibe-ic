@@ -64944,16 +64944,16 @@ def _emit_power_report(project: Path, top: str, pdk: PdkConfig,
     # so switching power comes from REAL activity instead of the
     # vectorless SDC default. The chosen mode is disclosed in power.rpt
     # and power.json (`analysis_mode`); no VCD → vectorless (honest).
-    vcd_cands = (sorted(_pl.sim_dir(project).rglob("*.vcd"))
-                 + sorted(_pl.sim_full_stack_dir(project).rglob("*.vcd")))
-    vcd = next((v for v in vcd_cands if v.stat().st_size > 0), None)
+    # Step 4's DUT-scoped dump (manifest + verified scope) first; see
+    # `_ppa.power.select_activity` for why a VCD without its scope is not one.
+    _activity = _ppa_power.select_activity(
+        [_pl.sim_dir(project), _pl.sim_full_stack_dir(project)])
+    vcd = _activity["vcd"] if _activity else None
     analysis_mode = "vector_vcd" if vcd else "vectorless_sdc"
     vcd_tcl = ""
     if vcd:
         vcd_c = _run_root_tcl_path(vcd, project, container, tcl_path)
-        vcd_tcl = (f"if {{[catch {{read_power_activities -vcd {vcd_c}}} "
-                   f"_vcd_err]}} {{\n"
-                   f"  puts \"READ_VCD_FAIL: $_vcd_err\"\n}}\n")
+        vcd_tcl = _ppa_power.activity_read_tcl(vcd_c, _activity["scope"])
     # Parasitics: read AFTER link_design and alongside the SDC, exactly as the
     # sibling post-route STA emitters do. Only ever emitted when a non-empty
     # SPEF for THIS run exists — a `read_spef` of a file that is not there is

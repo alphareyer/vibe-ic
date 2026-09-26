@@ -8843,6 +8843,49 @@ def _professional_tb_clear_refusal(out_dir: Path) -> None:
         pass
 
 
+def _professional_tb_sim_differential(project: Path, out_dir: Path,
+                                      container: str,
+                                      exec_site: str) -> Optional[Dict[str, Any]]:
+    """Step 4 `dual`: rerun the SAME cocotb bundle under Verilator and compare.
+
+    None unless `phase3/librelane_switch.json` selects `"4": "dual"`, so the
+    default path is byte-identical. The Icarus JUnit the step just read is kept
+    as `results.xml` (every existing reader) and copied to `results_icarus.xml`;
+    the Verilator arm builds in its own `sim_build_verilator` and writes
+    `results_verilator.xml`, which `_cocotb_xml_summary` does not glob, so the
+    functional denominator stays the Icarus one."""
+    import shutil as _shutil
+    import librelane_contract as _ll
+    import sim_dual_compare as _sdc
+    if _ll.selected_mode(project, "4") != "dual":
+        return None
+    icarus = out_dir / "results_icarus.xml"
+    verilator = out_dir / "results_verilator.xml"
+    try:
+        _shutil.copy2(out_dir / "results.xml", icarus)
+        verilator.unlink(missing_ok=True)
+    except OSError as exc:
+        return {"verdict": "NOT_MEASURED",
+                "reason": f"could not stage the Icarus JUnit: {exc}"}
+    cmd = (f"cd '{out_dir}' && make SIM=verilator SIM_BUILD=sim_build_verilator "
+           f"COCOTB_RESULTS_FILE=results_verilator.xml")
+    log_path = out_dir / "cocotb_run_verilator.log"
+    if exec_site == "container":
+        rc, so, se = _docker_exec(container, cmd, timeout=1200,
+                                  marker=str(out_dir), log_path=str(log_path))
+    else:
+        rc, so, se = _run(["bash", "-lc", cmd], cwd=out_dir, timeout=1200)
+        try:
+            log_path.write_text((so or "") + "\n" + (se or ""))
+        except OSError:
+            pass
+    result = _sdc.compare_junit(icarus, verilator)
+    result["verilator_rc"] = rc
+    _aa.write_text(out_dir / "sim_differential.json",
+                   json.dumps(result, indent=2) + "\n")
+    return result
+
+
 def professional_tb_bundle_accounted(out_dir: Path) -> Tuple[bool, str]:
     """(accounted, how) — did this bundle end the step with a TRANSCRIPT or a
     NAMED REFUSAL?
@@ -9062,6 +9105,27 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
         # Measured. A refusal a previous pass recorded for this bundle is now
         # stale and must not outlive the transcript that answers it.
         _professional_tb_clear_refusal(out_dir)
+
+        _diff = _professional_tb_sim_differential(project, out_dir, container,
+                                                  _exec_site)
+        if _diff is not None:
+            rec["sim_differential"] = _diff
+            if _diff["verdict"] == "FAIL":
+                _write({**rec, "status": "FAIL", "reason": _diff["finding"]})
+                return StepResult(
+                    "professional_tb_gen", "FAIL", time.time() - t0,
+                    detail=(f"{_diff['finding']}: "
+                            f"{len(_diff['disagreements'])} case(s) differ "
+                            f"between Icarus and Verilator — "
+                            f"{_diff['disagreements'][:3]}"))
+            if _diff["verdict"] != "PASS":
+                _write({**rec, "status": "INCOMPLETE",
+                        "reason": _diff.get("reason")})
+                return StepResult(
+                    "professional_tb_gen", "NOT_MEASURED", time.time() - t0,
+                    detail=("step 4 dual: the Verilator arm was not "
+                            f"measured — {_diff.get('reason')}"),
+                    reason_class=_V.ReasonClass.EXECUTION_ERROR)
 
         if xml_fail > 0:
             rec["functional_mismatch"] = True
@@ -21259,13 +21323,37 @@ def step_verilator_coverage(project: Path, top_name: str = "",
         "format_detected": cov["format_detected"],
         "path_namespace": cov["path_namespace"],
     }
+    # Step 4 `dual`: the DUT-scoped activity dump Step 33's vector power reads.
+    # Opt-in, because it changes which activity basis a downstream power
+    # number is taken on.
+    import librelane_contract as _ll
+    if _ll.selected_mode(project, "4") == "dual":
+        import sim_activity_dump as _sad
+        _names = [top_name] if top_name else []
+        for _src in rtl:
+            _names += [m for m in _sad._MODULE.findall(
+                _sad._COMMENTS.sub("", Path(_src).read_text(errors="replace")))
+                if m not in _names]
+        _act: Dict[str, Any] = {"status": "NOT_APPLICABLE",
+                                "reason": "no design module to scope"}
+        for _name in _names:
+            _act = _sad.dump([str(x) for x in rtl], [str(x) for x in tbs],
+                             _name, _pl.sim_dir(project) / "activity",
+                             exec_fn=_verilator_stage_exec(container))
+            if _act["status"] != "NOT_APPLICABLE":
+                break
+        payload["activity_dump"] = _act
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _aa.write_text(out_path, json.dumps(payload, indent=2) + "\n")
     t = scoped["totals"]
+    _xc = payload.get("line_union_cross_check") or {}
     return StepResult(
         "verilator_coverage", "PASS", time.time() - t0,
         f"measured line={t['line']['pct']}% toggle={t['toggle']['pct']}% "
-        f"branch={t['branch']['pct']}% from {dat}",
+        f"branch={t['branch']['pct']}% from {dat}; lcov line union "
+        f"{_xc.get('status')}"
+        + (f" agree={_xc.get('agree')}" if _xc.get("status") == "MEASURED"
+           else ""),
         [str(out_path.relative_to(project))])
 
 
