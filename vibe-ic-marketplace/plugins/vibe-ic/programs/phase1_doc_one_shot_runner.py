@@ -23075,6 +23075,12 @@ def gen_l1_datasheet(project: Path,
             # The record SAYS it carries a port table — the #2060 contract, so
             # this never depends on its strategy name being on a list.
             _pin["from_port_table"] = True
+            # The grammar publishes the declared direction as `dir`; the pin
+            # table and the L9 promoter read `mode`/`direction`, and without
+            # them every declared port was published as `inout`.
+            if _entry.get("dir"):
+                _pin.setdefault("mode", _entry["dir"])
+                _pin.setdefault("direction", _entry["dir"])
             pins.append(_pin)
 
     # ORGANIC #2090 — collect the register-name exclusions the merge pass makes
