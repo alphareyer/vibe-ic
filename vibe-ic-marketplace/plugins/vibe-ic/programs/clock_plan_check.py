@@ -441,6 +441,69 @@ def cts_clock_roots(text: str):
             set(_CTS_ROOT_RE.findall(text)))
 
 
+# WHERE LIBRELANE CTS RECORDS ITS ROOTS (F30). With steps 19/20 on LibreLane
+# the runner hands `OpenROAD.CTS`'s `cts.rpt` to `_CTS_REPORT_REL`, sha256-bound
+# by this receipt. That file is the tool's `report_cts` SUMMARY ("Total number
+# of Clock Roots: 1.") and names no root, so the CTS-0007/0095 reader above saw
+# none and every LibreLane CTS run read CTS_CLOCK_MISSING. The roots are in the
+# SAME step's transcript, `openroad-cts.log`, beside the report the receipt
+# bound -- the tool's own `clock_tree_synthesis` lines, the same grammar.
+_LL_CTS_HANDOFF_REL = "reports/phase3/librelane_cts_hold_handoff.json"
+_LL_CTS_STEP = "OpenROAD.CTS"
+_LL_CTS_LOG = "openroad-cts.log"
+
+
+def _sha256(path: Path) -> str:
+    import hashlib  # noqa: PLC0415
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def cts_transcript(project: Path):
+    """(text, source, note): the CTS transcript this run's clock roots are in.
+
+    `_CTS_REPORT_REL` itself, unless the LibreLane CTS handoff receipt binds
+    THOSE bytes (its `views.cts_rpt.dest_sha256`) to the `OpenROAD.CTS` chain
+    folder whose own `cts.rpt` it copied (`source_sha256`). Then the text is
+    that folder's `openroad-cts.log`. Every binding failure keeps the report
+    alone, which names no root and so fails closed, and says why in `note`.
+    A report the receipt does not bind (a later direct CTS rewrote it) is read
+    as itself: the receipt speaks only for the bytes it hashed.
+    """
+    import instrument_calibration as _ic  # noqa: PLC0415
+    _ic.assert_calibrated("clock_plan_check::cts_transcript")
+    report = project / _CTS_REPORT_REL
+    text = report.read_text(errors="replace")
+    receipt_path = project / _LL_CTS_HANDOFF_REL
+    if not receipt_path.is_file():
+        return text, _CTS_REPORT_REL, ""
+    try:
+        receipt = json.loads(receipt_path.read_text())
+        view = receipt["views"]["cts_rpt"]
+        folder = project / receipt["chain"][_LL_CTS_STEP]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return text, _CTS_REPORT_REL, (
+            f"{_LL_CTS_HANDOFF_REL} unreadable ({exc}); read "
+            f"{_CTS_REPORT_REL} alone")
+    if view.get("dest_sha256") != _sha256(report):
+        return text, _CTS_REPORT_REL, (
+            f"{_CTS_REPORT_REL} is not the bytes {_LL_CTS_HANDOFF_REL} "
+            f"handed over; read as itself")
+    log = folder / _LL_CTS_LOG
+    tool_rpt = folder / "cts.rpt"
+    if not tool_rpt.is_file() or _sha256(tool_rpt) != view.get("source_sha256"):
+        return text, _CTS_REPORT_REL, (
+            f"{_LL_CTS_HANDOFF_REL} binds {_CTS_REPORT_REL} to a {_LL_CTS_STEP} "
+            f"report that {folder.relative_to(project)}/cts.rpt no longer is; "
+            f"its transcript is not this report's")
+    if not log.is_file():
+        return text, _CTS_REPORT_REL, (
+            f"{_LL_CTS_STEP} transcript {log.relative_to(project)} is absent")
+    return (log.read_text(errors="replace"), str(log.relative_to(project)),
+            f"LibreLane {_LL_CTS_STEP}: {_CTS_REPORT_REL} is its report_cts "
+            f"summary (sha256-bound by {_LL_CTS_HANDOFF_REL}); roots read from "
+            f"the step's own transcript")
+
+
 def cts_missing_clocks(text: str, sources):
     """SDC clocks (`{name: source}`) whose root CTS never names."""
     clocks, roots = cts_clock_roots(text)
@@ -495,7 +558,8 @@ def _tool_clock_findings(project: Path, sdc_files):
             })
     report = project / _CTS_REPORT_REL
     if report.is_file():
-        text = report.read_text(errors="replace")
+        text, source, note = cts_transcript(project)
+        note = f"; {note}" if note else ""
         dropped = cts_missing_clocks(text, sources)
         clocks, roots = cts_clock_roots(text)
         if dropped:
@@ -503,16 +567,16 @@ def _tool_clock_findings(project: Path, sdc_files):
                 "severity": "FAIL", "rule": "CTS_CLOCK_MISSING",
                 "message": f"SDC create_clock {dropped} (sources "
                            f"{[sources[d] for d in dropped]}): TritonCTS never "
-                           f"names its root in {_CTS_REPORT_REL} (it named "
+                           f"names its root in {source} (it named "
                            f"clocks {sorted(clocks)}, roots {sorted(roots)}), "
-                           f"so no clock tree was considered for it.",
+                           f"so no clock tree was considered for it{note}.",
             })
         else:
             findings.append({
                 "severity": "INFO", "rule": "CTS_CLOCKS_SEEN",
                 "message": f"TritonCTS took up every SDC clock root: "
                            f"{sorted(clocks.items())} {sorted(roots)} "
-                           f"({_CTS_REPORT_REL})",
+                           f"({source}{note})",
             })
     return findings
 

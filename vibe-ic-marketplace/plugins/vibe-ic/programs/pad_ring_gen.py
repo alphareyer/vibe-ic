@@ -1032,6 +1032,89 @@ def _emit_def(die: PR.Def, pads: List[Dict[str, Any]],
     return out
 
 
+# ── the LibreLane-placed ring (F30) ────────────────────────────────────────
+#: The receipt `librelane_contract.handoff_to_direct` writes when the runner
+#: hands `OpenROAD.PadRing`'s State to the direct paths (`padring.def`).
+LL_PADRING_HANDOFF_REL = "reports/phase3/librelane_padring_handoff.json"
+
+
+def _sha256(path: Path) -> str:
+    import hashlib  # noqa: PLC0415
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def librelane_placed_ring_report(project: Path, state_path: Path,
+                                 lib: "PR.IoLibrary") -> Dict[str, Any]:
+    """Step 15.5ic's report for the ring LibreLane's `OpenROAD.PadRing` PLACED.
+
+    On the LibreLane path the tool places the ring and this program places
+    nothing. What it still owes is the step's producer record,
+    `reports/phase3/padring.json`: the population the ring gate audits and
+    `step_pad_ring_final_evidence` carries to the routed DEF and the GDS.
+
+    Every fact comes from the tool's own output, bound by sha256 to the receipt
+    the handoff wrote: the State file is the one the receipt names, its DEF is
+    the receipt's source, and `padring.def` is still exactly those bytes. The
+    ring is then described from that DEF, the declared assignment and the PDK
+    IO LEF (`pad_ring_check._librelane_report`, the describer the tool gate
+    already uses). An unbound or unreadable input raises ValueError with a
+    named code; nothing is copied from another arm and nothing is declared.
+    """
+    from pad_ring_check import _librelane_report  # noqa: PLC0415
+    receipt_path = project / LL_PADRING_HANDOFF_REL
+    try:
+        receipt = json.loads(receipt_path.read_text())
+        view = receipt["views"]["def"]
+        state = json.loads(state_path.read_text())
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"PADRING_LL_RECEIPT_UNREADABLE: {LL_PADRING_HANDOFF_REL} "
+                         f"or {state_path}: {exc}") from exc
+    padring = project / PR.PADRING_DEF_REL
+    tool_def = Path(str(state.get("def") or ""))
+    if not padring.is_file() or not tool_def.is_file():
+        raise ValueError(f"PADRING_LL_DEF_MISSING: {PR.PADRING_DEF_REL} present="
+                         f"{padring.is_file()}, State DEF {tool_def} present="
+                         f"{tool_def.is_file()}")
+    got = {"state": _sha256(state_path), "tool_def": _sha256(tool_def),
+           "padring_def": _sha256(padring)}
+    want = {"state": receipt.get("state_sha256"),
+            "tool_def": view.get("source_sha256"),
+            "padring_def": view.get("dest_sha256")}
+    unbound = sorted(k for k in got if got[k] != want[k])
+    if unbound or want["tool_def"] != want["padring_def"]:
+        raise ValueError(
+            f"PADRING_LL_UNBOUND: {unbound or ['receipt source != dest']} do not "
+            f"match {LL_PADRING_HANDOFF_REL} (measured {got}, receipt {want})")
+    assignment = json.loads((project / PR.ASSIGNMENT_REL).read_text())
+    report = _librelane_report(project, state_path, assignment, lib)
+    report.update({
+        "program": PROGRAM,
+        "placed_by": "OpenROAD.PadRing",
+        "reason": (f"described the ring OpenROAD.PadRing placed "
+                   f"({len(report['pads'])} pad(s), {len(report['corners'])} "
+                   f"corner(s), {report['fillers_placed']} filler(s)) from "
+                   f"{PR.PADRING_DEF_REL}, bound by sha256 to "
+                   f"{LL_PADRING_HANDOFF_REL}; this program placed nothing"),
+        "padring_def": PR.PADRING_DEF_REL,
+        "inputs": {"floorplan_def": None, "pad_assignment": PR.ASSIGNMENT_REL},
+        "tool_evidence": {
+            "receipt": LL_PADRING_HANDOFF_REL,
+            "receipt_sha256": _sha256(receipt_path),
+            "state": (str(state_path.relative_to(project))
+                      if state_path.is_relative_to(project) else str(state_path)),
+            "state_sha256": got["state"],
+            "padring_def_sha256": got["padring_def"],
+        },
+        "io_cell_library": lib.as_dict(),
+        "findings": [],
+    })
+    return report
+
+
 # ── main ────────────────────────────────────────────────────────────────────
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -1043,6 +1126,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "PDK distribution.")
     ap.add_argument("--pdk-root", default=None)
     ap.add_argument("--pdk", default=None)
+    ap.add_argument("--librelane-state", default=None,
+                    help="describe the ring OpenROAD.PadRing placed (its "
+                         "state_out.json, bound to "
+                         f"{LL_PADRING_HANDOFF_REL}); places nothing")
     args = ap.parse_args(argv)
 
     project = Path(args.project_dir).resolve()
@@ -1070,6 +1157,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         PR.discover_io_library_configs(args.pdk_root, args.pdk),
         masters=lib.masters)
     pdk_supplied = sorted(decls.values)
+
+    if args.librelane_state:
+        try:
+            rep = librelane_placed_ring_report(
+                project, Path(args.librelane_state).resolve(), lib)
+        except (OSError, ValueError, KeyError, TypeError, PR.DefError) as exc:
+            code = str(exc).split(":", 1)[0]
+            rule = code if code.startswith("PADRING_") else "PADRING_LL_UNREADABLE"
+            rep = _report("FAIL", str(exc), io_cell_library=lib.as_dict(),
+                          findings=[_finding("ERROR", rule, str(exc))])
+        _write(project, args.json, rep)
+        print(f"=== {PROGRAM} ({project.name}) ===\n  verdict: {rep['verdict']}"
+              f"\n  {rep['reason']}")
+        return 0 if rep["verdict"] == "PASS" else 1
 
     # ── the SKIP branch: name the absent variables one by one ──────────────
     missing: List[Dict[str, Any]] = []

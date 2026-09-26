@@ -36554,6 +36554,24 @@ def _prepare_librelane_floorplan_for_route(
     notes.append(f"pad_ring_check --librelane-state: rc={gate.returncode}")
     if gate.returncode != 0:
         return _fail("PADRING_TOOL_GATE_FAILED", (gate.stdout + gate.stderr)[-800:])
+    # F30: the step's PRODUCER record. The gate above writes only its own
+    # verdict document to `reports/phase3/padring.json`, and the audit rightly
+    # refuses a declared output only the step's gate authored (audit_created):
+    # on this path nothing else wrote it. `pad_ring_gen --librelane-state`
+    # describes the ring PadRing placed, bound by sha256 to the handoff receipt
+    # above, and `pad_ring_check` then audits that record exactly as the flow's
+    # own 15.5ic clause does -- the same producer -> gate order as the direct
+    # path.
+    for name, extra, code in (
+            ("pad_ring_gen.py", ["--librelane-state", str(ring_state)],
+             "PADRING_LL_PRODUCER_FAILED"),
+            ("pad_ring_check.py", [], "PADRING_TOOL_GATE_FAILED")):
+        cp = _pr.run([sys.executable, str(PROGRAMS_DIR / name), str(project),
+                      *extra, *pdk_args],
+                     capture_output=True, text=True, errors="replace")
+        notes.append(f"{name} {' '.join(extra[:1])}: rc={cp.returncode}".replace(" :", ":"))
+        if cp.returncode != 0:
+            return _fail(code, (cp.stdout + cp.stderr)[-800:])
     if getattr(pdk, "tech_lef", None):
         prog_c = _to_container_path(str(PROGRAMS_DIR / "pad_bterm_coincidence_check.py"),
                                     container)
