@@ -51,6 +51,14 @@ _PPA_OUTSIDE_MEMBERS = frozenset({
     "area.py", "gate_proof_vocabulary_has_a_producer.py", "openroad.py",
     "phase3_one_shot_runner.py", "power_total_vs_budget_check.py",
     "readme_ppa_extractor.py", "records_migrate.py", "timing.py",
+    # ENTERED with b1b69720f (T83, "opt-in LibreLane phase3 step contract"):
+    # `select_arms` imports `_ppa.pareto` (dominates, Objective) to pick a
+    # dual-arm winner, and the module carries a `__main__` guard, so by this
+    # gate's own relation (`_imports` + `_is_executable`) it is a ppa-layer
+    # executable that no `ppa_*.py` glob reaches. Re-derived by running the
+    # program on 8cdef7a95 and on 40315b3aa: identical outside set, this one
+    # member added, none left. Recorded by T109c; the pin was red since T83.
+    "librelane_contract.py",
 })
 
 

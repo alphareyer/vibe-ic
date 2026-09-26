@@ -91,6 +91,16 @@ CLASS_ACTION = {
                     "— Magic re-checks a subcell's interior in the parent's "
                     "context. Neither the cell alone nor the wire alone "
                     "reproduces it."),
+    # q1 (T109). Never assigned by the `.mag` classification below: it needs
+    # the authoritative KLayout decks, so the A6 arms assign it
+    # (`_a6_drc_authority.authority`) from `gds_roundtrip`'s evidence.
+    "ENGINE_ARTEFACT": ("Magic-only on the GDS, reproduced rectangle for "
+                        "rectangle by the bare device's own GDS round trip, "
+                        "graded 0 by the PDK's authoritative KLayout decks on "
+                        "that device GDS and on the block GDS, and those decks "
+                        "fire the rule on the PDK's unit FAIL testcase. "
+                        "Excused, always reported; the defect is the engine's "
+                        "GDS read-back, not the layout."),
 }
 
 _SECTION_RE = re.compile(r"^<< (\S+) >>\n(.*?)(?=^<<)", re.S | re.M)
@@ -305,6 +315,136 @@ def recorded_deviation_boxes(bdir: Path, lam: int
     return out
 
 
+def _gds_check_tcl(gds: str, top: str) -> str:
+    """The deck on a GDS read back into Magic, the way LibreLane `Magic.DRC`
+    reads the deliverable (`gds readonly`, `gds maskhints`), drc(full)."""
+    return (f"crashbackups disable\ndrc off\ngds readonly true\n"
+            f"gds maskhints true\ngds read {gds}\nload {top}\n"
+            f"select top cell\ndrc on\ndrc euclidean on\n"
+            f"drc style drc(full)\ndrc check\ndrc catchup\n"
+            f'puts "A6TOTAL [drc list count total]"\n'
+            f"{_DUMP_TCL}\nquit -noprompt\n")
+
+
+def _klayout_rule_counts(stage: Stage, deck: str, gds: str, top: str,
+                         tag: str) -> Optional[Dict[str, int]]:
+    """One authoritative KLayout deck on one GDS inside the stage: the
+    per-rule violation counts, or None when the deck graded nothing (an
+    unread deck is not a clean one). One retry: the image's KLayout has been
+    measured to crash in teardown after writing a complete report."""
+    import _a6_drc_authority as _auth
+    for _attempt in range(2):
+        rc, _o, _e = stage.sh(
+            f"cd {shlex.quote(stage.path or '.')} && klayout -b -r "
+            f"{shlex.quote(deck)} -rd input={shlex.quote(gds)} "
+            f"-rd topcell={shlex.quote(top)} -rd report={tag}.lyrdb "
+            f"-rd run_mode=deep -rd threads=4", timeout=3600)
+        host = Path(stage.host_tmp) / f"{tag}.lyrdb"
+        got, _ = stage.get(f"{tag}.lyrdb", host)
+        if rc == 0 and got and host.is_file():
+            rules = _auth.lyrdb_text_rules(host.read_text(errors="replace"))
+            if rules["graded"]:
+                return {r: int(n) for r, n in rules["violations"].items()}
+    return None
+
+
+def gds_roundtrip(project: Path, block: str, stage: Stage, magicrc: str,
+                  rules: Sequence[str], klayout_decks: Sequence[str]
+                  ) -> dict:
+    """ENGINE_ARTEFACT evidence (q1 conditions ii and iii), per rule id.
+
+    The block GDS is read back into Magic and checked; every distinct PDK
+    device cell the layout instantiates is written to GDS ALONE by Magic,
+    read back and checked; its violations, translated by each instance's
+    transform, are the rectangles the bare device reproduces. A rule is
+    `reproduced` only when EVERY one of its block rectangles is. For each
+    reproducing cell the authoritative KLayout decks are run on that device
+    GDS, and their summed count of the rule is recorded (None = not
+    measured). Nothing here decides a class: the arm does, with the block's
+    own KLayout result and the capability control beside this."""
+    from analog_a6_native_pv import rule_id
+    bdir = _pl.analog_dir(project) / block
+    mag = bdir / "layout.mag"
+    gds = bdir / f"{block}.gds"
+    for need in (mag, gds):
+        if not need.is_file():
+            return {"result": "NOT_MEASURED", "reason": f"no {need.name}"}
+    text = mag.read_text(errors="replace")
+    inst = instances(text)
+    cells = sorted({c for c, _, _ in inst})
+    for name in [gds.name, mag.name] + [f"{c}.mag" for c in cells]:
+        src = bdir / name
+        ok, err = stage.put(src, name) if src.is_file() else (False, "absent")
+        if not ok:
+            return {"result": "NOT_MEASURED",
+                    "reason": f"cannot stage {name}: {err}"}
+    deck = Deck(stage, magicrc)
+    want = set(rules)
+    blob = deck.run(_gds_check_tcl(gds.name, block), "a6gdsblock")
+    if parse_total(blob) is None:
+        return {"result": "NOT_MEASURED",
+                "reason": "Magic reported no count on the block GDS read-back"}
+    block_rects: Dict[str, Set[Tuple[int, ...]]] = {}
+    by_rule: Dict[str, int] = {}
+    for msg, r in parse_violations(blob):
+        rid = rule_id(msg)
+        if rid:
+            by_rule[rid] = by_rule.get(rid, 0) + 1
+            if rid in want:
+                block_rects.setdefault(rid, set()).add(tuple(r))
+    cell_rects: Dict[str, Dict[str, Set[Tuple[int, ...]]]] = {}
+    for cell in cells:
+        tag = f"a6rt_{re.sub(r'[^A-Za-z0-9_]', '_', cell)}"
+        deck.run(f"crashbackups disable\ndrc off\nload {cell}\n"
+                 f"gds write {tag}.gds\nquit -noprompt\n", f"{tag}_w")
+        rblob = deck.run(_gds_check_tcl(f"{tag}.gds", cell), f"{tag}_r")
+        rel: Dict[str, Set[Tuple[int, ...]]] = {}
+        for msg, r in parse_violations(rblob):
+            rid = rule_id(msg)
+            if rid in want:
+                rel.setdefault(rid, set()).add(tuple(r))
+        cell_rects[cell] = rel
+    out_rules: Dict[str, dict] = {}
+    for rid in sorted(want):
+        placed: Set[Tuple[int, ...]] = set()
+        per_cell: Dict[str, int] = {}
+        for cell in cells:
+            rel = cell_rects.get(cell, {}).get(rid, set())
+            per_cell[cell] = len(rel)
+            for c, tx, ty in inst:
+                if c == cell:
+                    placed |= {(r[0] + 2 * tx, r[1] + 2 * ty,
+                                r[2] + 2 * tx, r[3] + 2 * ty) for r in rel}
+        mine = block_rects.get(rid, set())
+        kl: Dict[str, Optional[int]] = {}
+        for cell, n in per_cell.items():
+            if not n:
+                continue
+            tag = f"a6rt_{re.sub(r'[^A-Za-z0-9_]', '_', cell)}"
+            total: Optional[int] = 0
+            for i, d in enumerate(klayout_decks):
+                got = _klayout_rule_counts(stage, d, f"{tag}.gds", cell,
+                                           f"{tag}_kl{i}")
+                if got is None:
+                    total = None
+                    break
+                total += got.get(rid, 0)
+            kl[cell] = total
+        out_rules[rid] = {
+            "block_rects": len(mine),
+            "reproduced_rects": len(mine & placed),
+            "reproduced": bool(mine) and mine <= placed,
+            "cells": {c: n for c, n in per_cell.items() if n},
+            "klayout_on_device_gds": kl,
+        }
+    return {"result": "MEASURED", "block_gds_by_rule": dict(sorted(
+                by_rule.items())),
+            "klayout_decks": list(klayout_decks), "rules": out_rules,
+            "unit_note": ("rectangles are Magic internal units; a bare "
+                          "cell's rectangle is placed by each identity-"
+                          "transform instance of it in layout.mag")}
+
+
 def attribute(project: Path, block: str, stage: Stage, magicrc: str,
               default_window: int = 25) -> Tuple[int, dict]:
     bdir = _pl.analog_dir(project) / block
@@ -473,6 +613,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     default="/foss/pdks/ihp-sg13g2/libs.tech/magic/"
                             "ihp-sg13g2.magicrc")
     ap.add_argument("--json")
+    ap.add_argument("--gds-roundtrip", action="store_true",
+                    help="measure the ENGINE_ARTEFACT evidence (q1 ii/iii) "
+                         "for --rule on the block GDS instead of attributing")
+    ap.add_argument("--rule", action="append", default=[])
+    ap.add_argument("--klayout-deck", action="append", default=[],
+                    help="an authoritative KLayout deck (container path), "
+                         "run on each reproducing device GDS")
     args = ap.parse_args(argv)
 
     project = args.project_dir.resolve()
@@ -496,7 +643,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                               f"a count of 0 would be a fabrication")}
             return _finish(out, args, RC_NOT_ATTRIBUTED)
         try:
-            rc, report = attribute(project, args.block, stage, args.magicrc)
+            if args.gds_roundtrip:
+                rt = gds_roundtrip(project, args.block, stage, args.magicrc,
+                                   args.rule, args.klayout_deck)
+                rc = 0 if rt.get("result") == "MEASURED" else RC_NOT_ATTRIBUTED
+                report = {"gate": GATE, "schema": SCHEMA,
+                          "block": args.block, "gds_roundtrip": rt}
+            else:
+                rc, report = attribute(project, args.block, stage,
+                                       args.magicrc)
         except RuntimeError as exc:
             rc, report = RC_NOT_ATTRIBUTED, {
                 "gate": GATE, "block": args.block,

@@ -287,17 +287,41 @@ def test_484_without_fix_shape_would_collide(tmp_path):
         (proj / "reports").mkdir(parents=True)
         p2.step_emit_phase2_manifests(proj, [])
 
-    # Normalise BOTH designs' lint json by removing the identity stamp →
-    # they become byte-identical → the gate must flag them.
+    # Normalise BOTH designs' stamped artefacts by removing the identity stamp
+    # → they become byte-identical → the gate must flag them.
+    #
+    # RE-DERIVED (T109c). This control named `reports/phase2/lint/
+    # rom_init_lint.json`; since 3c501d609 the manifest emitter no longer
+    # writes it ("only its actual invocation may create that evidence"), so
+    # the control opened a file that is not there. The stamped population is
+    # now read off what the emitter actually wrote, identically in both
+    # designs, and must be non-empty.
+    def _stamped(proj):
+        out = set()
+        for fp in proj.rglob("*.json"):
+            try:
+                d = json.loads(fp.read_text())
+            except ValueError:
+                continue
+            if isinstance(d, dict) and "design_identity" in d:
+                out.add(str(fp.relative_to(proj)))
+        return out
+
+    stamped = _stamped(a)
+    assert stamped and stamped == _stamped(b), (sorted(stamped),
+                                                sorted(_stamped(b)))
     for proj in (a, b):
-        fp = proj / "reports/phase2/lint/rom_init_lint.json"
-        d = json.loads(fp.read_text())
-        d.pop("design_identity", None)
-        fp.write_text(json.dumps(d, indent=2) + "\n")
+        for rel in stamped:
+            fp = proj / rel
+            d = json.loads(fp.read_text())
+            d.pop("design_identity", None)
+            fp.write_text(json.dumps(d, indent=2) + "\n")
 
     rep, rc = _run_cdi([a, b])
     assert rep["verdict"] == "FAIL"
-    assert any("rom_init_lint.json" in f["message"] for f in rep["findings"])
+    flagged = {rel for rel in stamped
+               if any(Path(rel).name in f["message"] for f in rep["findings"])}
+    assert flagged, rep["findings"]
 
 
 # ════════════════════════════════════════════════════════════════════════

@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
+import _a6_drc_authority as _auth  # noqa: E402 — q1: whose word stands
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
 _SVRFDRC_BIN = "svrfdrc"
@@ -262,34 +263,59 @@ def _count_lyrdb_categories(text: str) -> int:
     return len(re.findall(r"<category>", text or ""))
 
 
-def _klayout_drc_runner(deck: str, gds: str, block: str, container: str,
-                        report_host: Path) -> Tuple[Optional[int], Dict[str, Any]]:
-    """Run an open-PDK KLayout DRC runset on the block GDS.
+def _klayout_run(binc: str, deck: str, gds: str, block: str, container: str,
+                 report_host: Path, extra_rd: str = "") -> Tuple[int, str]:
+    """One `klayout -b -r` of one runset, with ONE retry on a non-zero exit.
 
-    `klayout -b -r <deck> -rd input=<gds> -rd report=<rdb> -rd topcell=<block>`
-    is the runset convention those decks declare (`$input` / `$report` /
-    `$topcell`). Returns (violations, meta); None when the engine or the report
-    is missing, so the caller keeps its existing waiver path rather than
-    inventing a verdict.
-    """
-    binc = _tool_on_path(container, "klayout")
-    if binc is None:
-        return None, {"reason": "klayout engine not on container PATH"}
+    The retry is recorded by the caller, never hidden: the image's KLayout
+    has been MEASURED to segfault in its deep-shape-store destructor after
+    writing a complete report (1 in 5 runs of one extra-rules deck on one
+    block). A second failure stands and the run is no evidence."""
     deck_c = _to_container_path(container, deck)
     gds_c = _to_container_path(container, gds)
     rpt_c = _to_container_path(container, str(report_host))
     cmd = (f"{shlex.quote(binc)} -b -r {shlex.quote(deck_c)} "
            f"-rd input={shlex.quote(gds_c)} "
            f"-rd report={shlex.quote(rpt_c)} "
-           f"-rd topcell={shlex.quote(block)}")
-    # SUPERVISED BY PROGRESS. The marker is the deck path, which is already in
-    # the argv, so the watchdog can find this job's process tree in the
-    # container and read its CPU. No ceiling: a DRC that is still working is
-    # never cut off, and one that has stopped moving is.
-    rc, out, err = _docker_exec(container, cmd, marker=deck_c)
+           f"-rd topcell={shlex.quote(block)}{extra_rd}")
+    tail = ""
+    rcs = []
+    for _attempt in range(2):
+        # SUPERVISED BY PROGRESS. The marker is the deck path, which is
+        # already in the argv, so the watchdog can find this job's process
+        # tree in the container and read its CPU. No ceiling: a DRC that is
+        # still working is never cut off, and one that has stopped moving is.
+        rc, out, err = _docker_exec(container, cmd, marker=deck_c)
+        rcs.append(rc)
+        tail = (out + err)[-300:]
+        if rc == 0:
+            break
+    return rcs[-1], tail if len(rcs) == 1 else f"{tail} (exit codes {rcs})"
+
+
+def _klayout_drc_runner(deck: str, gds: str, block: str, container: str,
+                        report_host: Path) -> Tuple[Optional[int], Dict[str, Any]]:
+    """Run an open-PDK KLayout DRC runset on the block GDS — the main runset
+    AND every extra-rules runset the PDK ships beside it (q1).
+
+    `klayout -b -r <deck> -rd input=<gds> -rd report=<rdb> -rd topcell=<block>`
+    is the runset convention those decks declare (`$input` / `$report` /
+    `$topcell`). Returns (violations, meta); None when the engine or the report
+    is missing, so the caller keeps its existing waiver path rather than
+    inventing a verdict.
+
+    THE EXTRA RUNSET (`_a6_drc_authority.EXTRA_RUNSET_GLOB`, beside the main
+    deck). The PDK's own DRC driver runs it by default; this runner did not,
+    so a rule only it grades (MEASURED on ihp-sg13g2: `MIM.e`, `M2.d`) was
+    graded by no deck in A6 at all. Present but silent is no evidence.
+    """
+    binc = _tool_on_path(container, "klayout")
+    if binc is None:
+        return None, {"reason": "klayout engine not on container PATH"}
+    rc, tail = _klayout_run(binc, deck, gds, block, container, report_host)
     if not report_host.is_file():
         return None, {"reason": f"klayout produced no report (rc={rc})",
-                      "tail": (out + err)[-300:]}
+                      "tail": tail}
     text = report_host.read_text(errors="replace")
     graded = _count_lyrdb_categories(text)
     if graded == 0 or rc != 0:
@@ -310,9 +336,55 @@ def _klayout_drc_runner(deck: str, gds: str, block: str, container: str,
                                  f"rc={rc} — an unread deck, not a clean "
                                  f"block"),
                       "method": "klayout_runset", "rc": rc,
-                      "tail": (out + err)[-300:]}
-    return _count_lyrdb_items(text), {"method": "klayout_runset", "rc": rc,
-                                      "rules_pass": graded}
+                      "tail": tail}
+    violations = _count_lyrdb_items(text)
+    passes = {str(deck): _auth.lyrdb_text_rules(text)}
+    extra_meta: List[Dict[str, Any]] = []
+    threads = max(1, min(8, os.cpu_count() or 1))
+    for ex in _auth.extra_runsets(Path(deck).parent):
+        rpt = report_host.parent / f"drc.{ex.stem}.lyrdb"
+        erc, etail = _klayout_run(
+            binc, str(ex), gds, block, container, rpt,
+            f" -rd run_mode=deep -rd threads={threads}")
+        etext = rpt.read_text(errors="replace") if rpt.is_file() else ""
+        erules = _auth.lyrdb_text_rules(etext)
+        if erc != 0 or not erules["graded"]:
+            return None, {"reason": (
+                f"{_auth.EXTRA_RUNSET_GRADED_NOTHING}: the extra runset "
+                f"{ex.name} graded {len(erules['graded'])} rule(s) at "
+                f"rc={erc} — present but silent is NOT_MEASURED, never "
+                f"clean"), "method": "klayout_runset", "rc": erc,
+                "tail": etail}
+        rec: Dict[str, Any] = {"runset": ex.name,
+                               "report": rpt.name,
+                               "rules_graded": len(erules["graded"]),
+                               "violations": erules["violations"]}
+        if erules["violations"]:
+            # WHAT A DEEP COUNT COUNTS: one marker per unique cell. The flat
+            # count (every instance) is disclosed beside it; the verdict is
+            # the same either way.
+            frpt = report_host.parent / f"drc.{ex.stem}.flat.lyrdb"
+            frc, _ = _klayout_run(binc, str(ex), gds, block, container, frpt,
+                                  f" -rd run_mode=flat -rd threads={threads}")
+            rec["flat_counts"] = (
+                _auth.lyrdb_text_rules(frpt.read_text(errors="replace"))
+                ["violations"] if frc == 0 and frpt.is_file()
+                else f"NOT_MEASURED (rc={frc})")
+        extra_meta.append(rec)
+        passes[str(ex)] = erules
+        violations += sum(erules["violations"].values())
+    authoritative = _auth.merge_passes(passes)
+    # RULES GRADED = DISTINCT RULES ACROSS EVERY RUNSET. `_count_lyrdb_
+    # categories` counts every `<category>` tag, and each violation `<item>`
+    # carries one too, so on a report with hits it over-counts (MEASURED:
+    # 846 for 560 + 272 graded rules and 14 items).
+    meta: Dict[str, Any] = {"method": "klayout_runset", "rc": rc,
+                            "rules_pass": len(authoritative["graded"])
+                            or graded}
+    if extra_meta:
+        meta["extra_runsets"] = extra_meta
+    meta["authoritative"] = authoritative
+    return violations, meta
 
 
 # ── default (real, in-container) engine runners ─────────────────────────────
@@ -655,6 +727,33 @@ def _write_drc_report(bdir: Path, block: str, violations: int,
             f"# {se.get('coverage', 'coverage not stated')}",
             "",
         ]
+        dis = se.get("engine_disagreements") or {}
+        if dis:
+            lines[-1:] = [
+                "# engine disagreements (q1): the deck graded the rule and "
+                "fired 0; deferred only behind a capability control",
+                f"second_engine_uncontrolled_disagreements: "
+                f"{','.join(sorted(dis.get('uncontrolled_disagreements') or {})) or '-'}",
+                f"second_engine_engine_artefact: "
+                f"{','.join(sorted(dis.get('engine_artefact') or {})) or '-'}",
+                f"second_engine_deferred_by_capability_control: "
+                f"{','.join(sorted(dis.get('deferred_by_capability_control') or {})) or '-'}",
+                "",
+            ]
+    # THE EXTRA-RULES RUNSET(S), by name, with what they fired (rule ids and
+    # counts only): the authoritative deck is the main runset PLUS these.
+    for ex in meta.get("extra_runsets") or []:
+        lines[-1:] = [
+            f"extra_runset: {ex.get('runset')} graded "
+            f"{ex.get('rules_graded')} violations "
+            f"{sum((ex.get('violations') or {}).values())} "
+            f"({','.join(f'{r}={n}' for r, n in sorted((ex.get('violations') or {}).items())) or '-'}; "
+            f"deep-mode markers per unique cell)",
+            *([f"extra_runset_flat_counts: "
+               f"{','.join(f'{r}={n}' for r, n in sorted(ex['flat_counts'].items())) or '-'}"]
+              if isinstance(ex.get("flat_counts"), dict) else []),
+            "",
+        ]
     rpt.write_text("\n".join(lines))
     return rpt
 
@@ -848,7 +947,10 @@ def second_engine_not_measured(reason: str = "", *, container: str = "",
 
 
 def second_engine_drc(project: Path, block: str, container: str,
-                      lyrdb_text: str, *, runner: Optional[Callable] = None
+                      lyrdb_text: str, *, runner: Optional[Callable] = None,
+                      klayout: Optional[Dict[str, Any]] = None,
+                      capability_runner: Optional[Callable] = None,
+                      roundtrip_runner: Optional[Callable] = None
                       ) -> Dict[str, Any]:
     """Grade, with the second engine, the rules the sign-off deck does not.
 
@@ -893,15 +995,26 @@ def second_engine_drc(project: Path, block: str, container: str,
             refusal=why if _pin.CONTAINER_IMAGE_MISMATCH in why else "")
     if isinstance(attribution.get("blocks"), dict):
         attribution = attribution["blocks"].get(block, attribution)
-    graded = graded_rule_ids(lyrdb_text)
+    # THE AUTHORITATIVE GRADED SET is every KLayout runset's (main + extra,
+    # q1) when the caller measured them; else the one report it was handed.
+    kl = klayout or _auth.lyrdb_text_rules(lyrdb_text)
+    graded = (set(kl.get("graded") or []) if klayout
+              else graded_rule_ids(lyrdb_text))
     adjudicated = unadjudicated_rules(attribution, graded)
     disp = rules_by_disposition(attribution, graded)
+    disagreement = engine_disagreements(
+        project, block, container, kl, disp["deferred"],
+        capability_runner=capability_runner,
+        roundtrip_runner=roundtrip_runner)
+    uncontrolled = disagreement.get("uncontrolled_disagreements") or {}
     return {
         "engine": "magic drc(full)",
         "signoff_rules_graded": len(graded),
         "own_paint_rules_the_signoff_deck_does_not_grade":
             dict(sorted(adjudicated.items())),
-        "violations": sum(adjudicated.values()),
+        "violations": sum(adjudicated.values()) + sum(
+            int(v["count"]) for v in uncontrolled.values()),
+        **({"engine_disagreements": disagreement} if disagreement else {}),
         "deferred_to_signoff_deck": disp["deferred"],
         "reported_not_verdicted": disp["reported"],
         "unreadable_rule_messages": unreadable_rule_messages(attribution),
@@ -924,6 +1037,145 @@ def second_engine_drc(project: Path, block: str, container: str,
                      "rules it graded and passed, so an absent rule is NOT "
                      "evidence that it was graded and clean"),
     }
+
+
+def engine_disagreements(project: Path, block: str, container: str,
+                         klayout: Dict[str, Any], deferred: Dict[str, int], *,
+                         capability_runner: Optional[Callable] = None,
+                         roundtrip_runner: Optional[Callable] = None
+                         ) -> Dict[str, Any]:
+    """The rules this engine fired that an authoritative deck GRADED and fired
+    0 on — and whether that deferral is earned (q1).
+
+    A deck's 0 on a rule is only evidence if the deck can fire that rule, so
+    each disagreement needs the capability control: the same deck fires it on
+    the PDK's own unit FAIL testcase. One that does not is `uncontrolled` and
+    COUNTS; one that does is deferred, and is an ENGINE_ARTEFACT when the
+    bare-device GDS round trip also holds. Empty when the engines agree."""
+    dis = _auth.disagreements(klayout, deferred)
+    if not dis:
+        return {}
+    decks = list((klayout.get("passes") or {}).keys())
+    cap = (capability_runner or _native_capability)(
+        project, block, container, sorted(dis), decks)
+    rt = (roundtrip_runner or _native_roundtrip)(
+        project, block, container, sorted(dis), decks)
+    auth = _auth.authority(klayout, dis, (), cap, rt)
+    return {k: auth[k] for k in ("deferred_by_capability_control",
+                                 "engine_artefact",
+                                 "deferred_not_engine_artefact",
+                                 "uncontrolled_disagreements",
+                                 "blocking_codes")}
+
+
+def _unit_testcase_dir(project: Path, block: str, container: str,
+                       main_deck: str) -> Optional[str]:
+    """Where the PDK's DRC unit testcases are, as a container path: beside
+    the staged deck when they were staged, else beside the SAME deck in the
+    PDK the block's layout was drawn with (A5's `layout_provenance.json`)."""
+    host = Path(main_deck).parent / _auth.UNIT_TESTCASE_DIR
+    if host.is_dir():
+        return _to_container_path(container, str(host))
+    try:
+        import analog_a7_post_layout_emit as _a7
+        tech = _a7.layout_tech(block_dir(project, block) or Path("."))
+    except (ValueError, OSError):
+        return None
+    libs = tech.parents[1]
+    # SUPERVISED BY PROGRESS, like every non-probe call here: a walk of the
+    # PDK tree is not a `test -e`. The marker is the tree, already in argv.
+    rc, out, _ = _docker_exec(
+        container, f"find {shlex.quote(str(libs))} -name "
+                   f"{shlex.quote(Path(main_deck).name)} -path '*drc*' "
+                   f"2>/dev/null | sort | head -1", marker=str(libs))
+    found = (out or "").strip().splitlines()
+    if rc != 0 or not found:
+        return None
+    return str(Path(found[-1]).parent / _auth.UNIT_TESTCASE_DIR)
+
+
+def _native_capability(project: Path, block: str, container: str,
+                       rules: List[str], decks: List[str]
+                       ) -> Dict[str, Dict[str, Any]]:
+    """Run every authoritative deck on the PDK's unit testcases that name a
+    disagreeing rule, in the EDA container. Reports land in this producer's
+    own work area (`phase3/extracted/analog/_capability`)."""
+    none = {r: _auth.capability_record(r, [], {}) for r in rules}
+    binc = _tool_on_path(container, "klayout") if decks else None
+    unit = (_unit_testcase_dir(project, block, container, decks[0])
+            if binc else None)
+    if not unit:
+        return {r: dict(v, result=_auth.CAP_NOT_MEASURED,
+                        reason="no klayout or no PDK unit testcase dir")
+                for r, v in none.items()}
+    rc, out, _ = _docker_exec(
+        container, f"python3 -c {shlex.quote(_auth.UNIT_LABEL_SCRIPT)} "
+                   f"{shlex.quote(unit)}", marker=unit)
+    labels = _auth.parse_unit_labels(out) or {}
+    work = project / "phase3" / "extracted" / "analog" / "_capability"
+    work.mkdir(parents=True, exist_ok=True)
+    results: Dict[str, Optional[Dict[str, Any]]] = {}
+    out_rec: Dict[str, Dict[str, Any]] = {}
+    for rule in rules:
+        tcs = _auth.testcases_for_rule(labels, rule)
+        for tc in tcs:
+            if tc in results:
+                continue
+            top = (labels.get(tc) or {}).get("top") or []
+            if len(top) != 1:
+                results[tc] = None
+                continue
+            passes: Dict[str, Any] = {}
+            for i, d in enumerate(decks):
+                rpt = work / f"{Path(tc).stem}.{Path(d).stem}.lyrdb"
+                src = f"{unit}/{tc}"
+                deck_c = _to_container_path(container, d)
+                rpt_c = _to_container_path(container, str(rpt))
+                ok = False
+                for _attempt in range(2):
+                    rc2, _o, _e = _docker_exec(
+                        container,
+                        f"{shlex.quote(binc)} -b -r {shlex.quote(deck_c)} "
+                        f"-rd input={shlex.quote(src)} "
+                        f"-rd report={shlex.quote(rpt_c)} "
+                        f"-rd topcell={shlex.quote(top[0])} "
+                        f"-rd run_mode=deep -rd threads=4", marker=deck_c)
+                    if rc2 == 0 and rpt.is_file():
+                        ok = True
+                        break
+                rules_i = (_auth.lyrdb_text_rules(rpt.read_text(
+                    errors="replace")) if ok else None)
+                if not rules_i or not rules_i["graded"]:
+                    passes = {}
+                    break
+                passes[d] = rules_i
+            results[tc] = _auth.merge_passes(passes) if passes else None
+        out_rec[rule] = _auth.capability_record(rule, tcs, results)
+    return out_rec
+
+
+def _native_roundtrip(project: Path, block: str, container: str,
+                      rules: List[str], decks: List[str]
+                      ) -> Optional[Dict[str, Any]]:
+    """ENGINE_ARTEFACT conditions ii/iii, measured by A6's own attribution
+    program (`--gds-roundtrip`) with the same authoritative decks."""
+    import analog_a6_drc_attribute as _attr
+    dst = (project / "phase3" / "extracted" / "analog" / block
+           / "a6_gds_roundtrip.json")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    argv = [str(project), "--block", block, "--container", container,
+            "--json", str(dst), "--gds-roundtrip"]
+    for r in rules:
+        argv += ["--rule", r]
+    for d in decks:
+        argv += ["--klayout-deck", _to_container_path(container, d)]
+    try:
+        _attr.main(argv)
+        doc = json.loads(dst.read_text())
+    except (OSError, ValueError, SystemExit, RuntimeError) as exc:
+        return {"result": "NOT_MEASURED", "reason": str(exc)}
+    return doc.get("gds_roundtrip") or {"result": "NOT_MEASURED",
+                                        "reason": doc.get("reason", "")}
 
 
 def run_block_pv(project: Path, block: str, res: Dict[str, Any],
@@ -997,7 +1249,8 @@ def run_block_pv(project: Path, block: str, res: Dict[str, Any],
             # set, and NOT_MEASURED when the second engine cannot run.
             lyrdb_text = raw.read_text(errors="replace") if raw.is_file() else ""
             second = second_engine_drc(project, block, container, lyrdb_text,
-                                       runner=second_engine_runner)
+                                       runner=second_engine_runner,
+                                       klayout=meta.get("authoritative"))
             total = int(violations)
             # `second_engine_drc` always answers with a record now, and the
             # record says which tier it is. `or` covers an injected runner that

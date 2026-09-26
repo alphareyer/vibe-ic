@@ -23,6 +23,29 @@ the tool does it here:
      measurement per extraction style — naming the extracted netlist as its
      post-layout evidence. The A7 gate owns the verdict.
 
+WHAT THE PRODUCER GUARANTEES BEYOND "IT RAN" (q7, T109):
+  * NON-INTERFERENCE. Its working decks live in its own area,
+    `phase3/librelane/analog/<block>/a7_resim/`, never under
+    `phase3/analog/<block>/`: A3's gates rglob `phase3/analog` for `*.sp`,
+    and 11 resimulation decks there grew one gate's population 13 -> 24 and
+    flipped another to FAIL. Only `pre_vs_post.json` and
+    `a7_post_layout.json` are written beside the block.
+  * NO SILENT DROP. The extracted body sits one level down (`xrcx`) in the
+    wrapper, so a testbench probe `v(<dut>.<n>)` of an internal net is
+    rewritten to `v(<dut>.xrcx.<n>)` when `<n>` is a net of that style's
+    extracted netlist (to the wrapper's node when `<n>` is one of the
+    extracted subcircuit's ports). A probe whose net is ABSENT after
+    extraction is taken out of the post deck and its measurement listed in
+    `not_compared` with the reason. Any other measurement the pre run had and
+    the post run lacks refuses `A7_POST_MEASUREMENT_MISSING`.
+  * DEVICE INVENTORY. Each style's extracted PDK devices must equal the A3
+    netlist's: for a model the layout's Magic technology declares a
+    `mosfet`/`msubcircuit` device, the sum of w*m per (model, l) (Magic may
+    split fingers); for every other model the (model, w, l) multiset with m
+    expanded. A difference refuses `A7_RCX_DEVICE_INVENTORY_MISMATCH` — a
+    resimulation of a circuit that lost or gained a device is not a
+    post-layout measurement of this one.
+
 Nothing here grades, and nothing here invents a value: the PDK and the Magic
 technology come from A5's `layout_provenance.json` (the technology the layout
 was drawn with), the ports and model binding from the A3 netlist, the stimulus
@@ -239,11 +262,28 @@ def post_layout_testbench(tb_text: str, block: str, post_name: Optional[str],
 
 
 def compare(pre: Dict[str, Optional[float]], post: Dict[str, Optional[float]],
-            style: str) -> List[dict]:
+            style: str, not_compared: Optional[Dict[str, str]] = None,
+            missing: Optional[List[str]] = None) -> List[dict]:
+    """One row per measurement both runs produced. NOTHING IS DROPPED
+    SILENTLY: a measurement with no pre-layout value, or taken out of the post
+    deck because its net is absent after extraction (`not_compared` on the
+    way in), is written to `not_compared` with its reason; one the post run
+    lacks for any other reason is appended to `missing` — the caller refuses
+    on it."""
     rows = []
-    for name in sorted(set(pre) & set(post)):
-        a, b = pre[name], post[name]
-        if a is None or b is None:
+    skipped = not_compared if not_compared is not None else {}
+    lost = missing if missing is not None else []
+    for name in sorted(pre):
+        a = pre[name]
+        b = post.get(name)
+        if a is None:
+            skipped[name] = "no pre-layout value (the A3 testbench's own " \
+                            "run did not produce it)"
+            continue
+        if name in skipped:
+            continue
+        if b is None:
+            lost.append(name)
             continue
         row = {"name": f"{name}@{style}", "metric": name, "extraction_style": style,
                "pre_value": a, "post_value": b}
@@ -251,6 +291,245 @@ def compare(pre: Dict[str, Optional[float]], post: Dict[str, Optional[float]],
             row["delta_pct"] = 100.0 * (b - a) / abs(a)
         rows.append(row)
     return rows
+
+
+#: SPICE magnitude suffixes, longest first (`meg` before `m`).
+_SPICE_SCALE = (("meg", 1e6), ("mil", 25.4e-6), ("t", 1e12), ("g", 1e9),
+                ("k", 1e3), ("m", 1e-3), ("u", 1e-6), ("n", 1e-9),
+                ("p", 1e-12), ("f", 1e-15), ("a", 1e-18))
+_NUM_RE = re.compile(r"^([-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)([a-z]*)$",
+                     re.I)
+
+
+def spice_number(text: str) -> Optional[float]:
+    """A SPICE value (`115.384u`, `0.11538m`, `2e-6`) as a float, or None."""
+    m = _NUM_RE.match((text or "").strip().strip("'\""))
+    if not m:
+        return None
+    val, suf = float(m.group(1)), m.group(2).lower()
+    for s, k in _SPICE_SCALE:
+        if suf.startswith(s):
+            return val * k
+    return val
+
+
+def _subckt_body(text: str, name: str) -> Optional[List[str]]:
+    body: Optional[List[str]] = None
+    for line in _joined_lines(text):
+        m = _SUBCKT_RE.match(line)
+        if m and body is None and m.group(1) == name:
+            body = []
+            continue
+        if body is not None:
+            if re.match(r"^\s*\.ends\b", line, re.I):
+                return body
+            body.append(line)
+    return body
+
+
+def device_instances(text: str, name: str) -> List[dict]:
+    """Every PDK-device instance (an `X` card whose model is not a subcircuit
+    of the same file) in `.subckt name`: `{model, w, l, m}` in SI units."""
+    defined = {m.group(1).lower() for m in
+               (_SUBCKT_RE.match(ln) for ln in _joined_lines(text)) if m}
+    out: List[dict] = []
+    for line in _subckt_body(text, name) or []:
+        toks = line.split()
+        if not toks or toks[0][0] not in "xX":
+            continue
+        pos = [t for t in toks[1:] if "=" not in t]
+        if not pos or pos[-1].lower() in defined:
+            continue
+        params = {k.lower(): v for k, v in
+                  (t.split("=", 1) for t in toks[1:] if "=" in t)}
+        out.append({"model": pos[-1].lower(),
+                    "w": spice_number(params.get("w", "")),
+                    "l": spice_number(params.get("l", "")),
+                    "m": spice_number(params.get("m", "1")) or 1.0})
+    return out
+
+
+def summed_device_models(tech_text: str) -> set:
+    """Models the Magic technology extracts as MOS devices (`device mosfet`
+    or `device msubcircuit`): their fingers may be split, so their width is
+    compared as a sum. Read from the technology's own `extract` section."""
+    out = set()
+    for line in (tech_text or "").splitlines():
+        t = line.split()
+        if len(t) >= 3 and t[0] == "device" and t[1] in ("mosfet",
+                                                          "msubcircuit"):
+            out.add(t[2].lower())
+    return out
+
+
+def _close(a: Optional[float], b: Optional[float], rel: float = 1e-3) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    return abs(a - b) <= rel * max(abs(a), abs(b), 1e-30)
+
+
+def device_inventory(a3: List[dict], rcx: List[dict], summed: set) -> dict:
+    """Compare two device inventories (see the module docstring). Values are
+    matched with a 1e-3 relative tolerance: Magic writes 5 significant
+    digits (`115.384u` comes back `0.11538m`)."""
+    diffs: List[str] = []
+    models = sorted({d["model"] for d in a3} | {d["model"] for d in rcx})
+    for model in models:
+        mine = [d for d in a3 if d["model"] == model]
+        theirs = [d for d in rcx if d["model"] == model]
+        if model in summed:
+            def by_l(devs):
+                acc: List[List[float]] = []
+                for d in devs:
+                    wm = (d["w"] or 0.0) * d["m"]
+                    for row in acc:
+                        if _close(row[0], d["l"]):
+                            row[1] += wm
+                            break
+                    else:
+                        acc.append([d["l"], wm])
+                return sorted(acc, key=lambda r: (r[0] is None, r[0] or 0))
+            x, y = by_l(mine), by_l(theirs)
+            if len(x) != len(y) or not all(
+                    _close(p[0], q[0]) and _close(p[1], q[1])
+                    for p, q in zip(x, y)):
+                diffs.append(f"{model}: sum(w*m) per l A3={x} extracted={y}")
+        else:
+            def expand(devs):
+                return sorted(((d["w"] or 0.0), (d["l"] or 0.0))
+                              for d in devs for _ in range(int(round(d["m"]))))
+            x, y = expand(mine), expand(theirs)
+            if len(x) != len(y) or not all(
+                    _close(p[0], q[0]) and _close(p[1], q[1])
+                    for p, q in zip(x, y)):
+                diffs.append(f"{model}: (w, l) multiset A3={len(x)} "
+                             f"extracted={len(y)} device(s) differ")
+    return {"result": "MISMATCH" if diffs else "MATCH",
+            "a3_devices": len(a3), "extracted_devices": len(rcx),
+            "summed_models": sorted(summed & set(models)),
+            "differences": diffs}
+
+
+def rcx_nets(rcx_text: str, block: str) -> Tuple[set, set]:
+    """(ports, internal nets) of the extracted `.subckt block`, lower-cased."""
+    ports: set = set()
+    nets: set = set()
+    for line in _joined_lines(rcx_text):
+        m = _SUBCKT_RE.match(line)
+        if m and m.group(1) == block:
+            ports = {t.lower() for t in m.group(2).split() if "=" not in t}
+            break
+    for line in _subckt_body(rcx_text, block) or []:
+        toks = line.split()
+        if not toks or toks[0][0] in "*.+":
+            continue
+        kind = toks[0][0].lower()
+        pos = [t for t in toks[1:] if "=" not in t]
+        if kind == "x":
+            nets.update(t.lower() for t in pos[:-1])
+        elif kind in "rcl":
+            nets.update(t.lower() for t in pos[:2])
+        elif kind in "mdq":
+            nets.update(t.lower() for t in pos[:-1])
+    return ports, nets - ports
+
+
+def dut_instances(tb_text: str, block: str) -> List[str]:
+    """Instance names of `block` in a testbench, lower-cased."""
+    out = []
+    for line in _joined_lines(tb_text):
+        toks = line.split()
+        if toks and toks[0][0] in "xX":
+            pos = [t for t in toks[1:] if "=" not in t]
+            if pos and pos[-1] == block:
+                out.append(toks[0].lower())
+    return out
+
+
+_PROBE_RE = re.compile(r"\bv\(\s*([A-Za-z_][\w]*)\.([^\s,()]+)\s*\)", re.I)
+_MEAS_NAME_RE = re.compile(r"^\s*\.?meas(?:ure)?\s+\w+\s+(\w+)", re.I)
+_LET_RE = re.compile(r"^\s*let\s+(\w+)\s*=(.*)$", re.I)
+_ECHO_VAR_RE = re.compile(r"\$&(\w+)")
+
+
+def remap_probes(tb_text: str, block: str, ports: set, internal: set,
+                 mapping: Dict[str, str]) -> Tuple[str, Dict[str, str]]:
+    """The post-layout testbench's internal-node probes, pointed into the
+    extracted body. Returns (text, {measurement: reason}) where the second
+    maps every measurement taken out because its net is absent."""
+    duts = set(dut_instances(tb_text, block))
+    low_map = {k.lower(): v for k, v in mapping.items()}
+    absent: set = set()
+
+    def sub(m: "re.Match") -> str:
+        inst, node = m.group(1), m.group(2)
+        if inst.lower() not in duts:
+            return m.group(0)
+        n = node.lower()
+        if n in low_map and n in ports:
+            return f"v({inst}.{low_map[n]})"
+        if n in internal:
+            return f"v({inst}.xrcx.{node})"
+        absent.add(f"{inst.lower()}.{n}")
+        return m.group(0)
+
+    dropped: Dict[str, str] = {}
+    out: List[str] = []
+    for line in tb_text.splitlines():
+        new = _PROBE_RE.sub(sub, line)
+        gone = [f"{mm.group(1).lower()}.{mm.group(2).lower()}"
+                for mm in _PROBE_RE.finditer(line)
+                if f"{mm.group(1).lower()}.{mm.group(2).lower()}" in absent]
+        low = line.strip().lower()
+        if gone and low.startswith(".save"):
+            keep = [t for t in new.split()[1:]
+                    if not any(g in t.lower() for g in gone)]
+            new = ".save " + " ".join(keep) if keep else "* " + line
+        elif gone:
+            mm = _MEAS_NAME_RE.match(line)
+            lm = _LET_RE.match(line)
+            name = (mm.group(1) if mm else lm.group(1) if lm else None)
+            if name:
+                dropped[name.lower()] = (
+                    f"probes {', '.join(sorted(set(gone)))}: the net is absent "
+                    f"from the extracted netlist")
+            new = "* A7: net absent after extraction: " + line
+        else:
+            lm = _LET_RE.match(line)
+            if lm and any(re.search(rf"\b{re.escape(d)}\b", lm.group(2), re.I)
+                          for d in dropped):
+                dropped[lm.group(1).lower()] = "depends on a measurement " \
+                    "whose net is absent after extraction"
+                new = "* A7: depends on an absent net: " + line
+            elif low.startswith("echo") and any(
+                    v.lower() in dropped for v in _ECHO_VAR_RE.findall(line)):
+                out_keys: dict = {}
+                new = _echo_without(line, dropped, out_keys)
+                for k in out_keys:
+                    dropped.setdefault(k, "echoes a measurement whose net is "
+                                          "absent after extraction")
+        out.append(new)
+    return "\n".join(out) + ("\n" if tb_text.endswith("\n") else ""), dropped
+
+
+def _echo_without(line: str, dropped: Dict[str, str], keys: dict) -> str:
+    """An `echo "MEAS k1=" $&v1 " k2=" $&v2` card without the pairs whose
+    variable was taken out; the removed keys are recorded in `keys`."""
+    parts = re.split(r"(\$&\w+)", line)
+    out = [parts[0]]
+    i = 1
+    while i < len(parts):
+        var, text = parts[i][2:], parts[i + 1] if i + 1 < len(parts) else ""
+        if var.lower() in dropped:
+            km = re.search(r"(\w+)=\s*\"?\s*$", out[-1])
+            if km:
+                keys[km.group(1).lower()] = True
+                out[-1] = out[-1][:km.start()] + out[-1][km.end():]
+            out.append(text)
+        else:
+            out.extend([parts[i], text])
+        i += 2
+    return "".join(out)
 
 
 def layout_tech(bdir: Path) -> Path:
@@ -291,7 +570,9 @@ def run(project: Path, block: str, container: str, image: str,
     import _designs_root as dr
 
     bdir = project / "phase3" / "analog" / block
-    work = bdir / "post_layout"
+    # NON-INTERFERENCE: the working decks never land under phase3/analog,
+    # which A3's gates rglob. Only the two records below are the block's.
+    work = project / "phase3" / "librelane" / "analog" / block / "a7_resim"
     record_path = bdir / "a7_post_layout.json"
     record: dict = {"producer": PRODUCER, "schema": 1, "block": block,
                     "step": STEP, "image": image, "extraction_tool": RCX_STEP}
@@ -332,6 +613,11 @@ def run(project: Path, block: str, container: str, image: str,
         return _refuse(record, record_path, "A7_NO_EXTRACTION_STYLE",
                        f"{tech} declares no ngspice extraction style", 1)
     record["extraction_styles"] = styles
+    flat_tech = work / "magic_tech.flat"
+    summed = summed_device_models(
+        flat_tech.read_text(errors="replace") if flat_tech.is_file()
+        else _tech_text(tech))
+    a3_devices = device_instances(netlist.read_text(errors="replace"), block)
 
     host_root = dr.resolve_host_root(project, container)
     tb_text = tb.read_text(errors="replace")
@@ -362,6 +648,7 @@ def run(project: Path, block: str, container: str, image: str,
 
     specs: List[dict] = []
     corners: List[dict] = []
+    not_compared: Dict[str, str] = {}
     state_in = work / "state_in.json"
     write_json(state_in, {"gds": str(gds.resolve()), "metrics": {}})
     for style in styles:
@@ -410,6 +697,15 @@ def run(project: Path, block: str, container: str, image: str,
             return _refuse(record, record_path, "A7_RCX_PARASITIC_FREE",
                            f"{rcx.name}: depth {audit.depth} — a re-simulation "
                            f"of it is the pre-layout circuit again", 1)
+        inventory = device_inventory(a3_devices,
+                                     device_instances(rcx_text, block), summed)
+        corner["device_inventory"] = inventory
+        if inventory["result"] != "MATCH":
+            record["corners"] = corners
+            return _refuse(record, record_path,
+                           "A7_RCX_DEVICE_INVENTORY_MISMATCH",
+                           f"{rcx.name}: {'; '.join(inventory['differences'])}",
+                           1)
         try:
             post_text, mapping = post_layout_netlist(
                 block, ports, rcx_text,
@@ -417,8 +713,12 @@ def run(project: Path, block: str, container: str, image: str,
             post_net = work / f"{block}_post_{slug}.sp"
             write_text(post_net, post_text)
             post_tb = work / f"tb_{block}_post_{slug}.sp"
-            write_text(post_tb, post_layout_testbench(
-                tb_text, block, post_net.name, bdir, work))
+            rports, rinternal = rcx_nets(rcx_text, block)
+            post_tb_text, dropped = remap_probes(
+                post_layout_testbench(tb_text, block, post_net.name, bdir,
+                                      work),
+                block, rports, rinternal, mapping)
+            write_text(post_tb, post_tb_text)
         except ValueError as exc:
             record["corners"] = corners
             rule = str(exc).split(":", 1)[0]
@@ -432,7 +732,18 @@ def run(project: Path, block: str, container: str, image: str,
             record["corners"] = corners
             return _refuse(record, record_path, "A7_POST_SIM_FAILED",
                            f"{post_tb.name} did not simulate ({post['log']})", 1)
-        specs.extend(compare(pre["meas"], post["meas"], style))
+        skipped: Dict[str, str] = dict(dropped)
+        lost: List[str] = []
+        specs.extend(compare(pre["meas"], post["meas"], style, skipped, lost))
+        if skipped:
+            corner["not_comparable_post_layout"] = skipped
+            not_compared.update({f"{k}@{style}": v for k, v in skipped.items()})
+        if lost:
+            record["corners"] = corners
+            return _refuse(record, record_path, "A7_POST_MEASUREMENT_MISSING",
+                           f"{post_tb.name}: the pre-layout run measured "
+                           f"{lost} and the post-layout run did not, on nets "
+                           f"the extraction kept ({post['log']})", 1)
     record["corners"] = corners
     if not specs:
         return _refuse(record, record_path, "A7_NOTHING_COMPARED",
@@ -446,10 +757,13 @@ def run(project: Path, block: str, container: str, image: str,
             "post_layout_netlist": typical["post_layout_netlist"],
             "extraction_tool": f"LibreLane {RCX_STEP}", "image": image,
             "record": str(record_path.relative_to(project)),
+            **({"not_compared": not_compared} if not_compared else {}),
         },
         "extraction_depth": sorted({c["depth"] for c in corners}),
         "specs": specs,
     })
+    if not_compared:
+        record["not_comparable_post_layout"] = not_compared
     record["result"] = "PRODUCED"
     write_json(record_path, record)
     print(f"[{PRODUCER}] block={block} {len(corners)} extraction style(s), "

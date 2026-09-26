@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1351
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1351)
+- **Total programs (excluding helpers / shims):** 1352
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1352)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1342 |
+| `any` | 1343 |
 
 ## Alphabetical listing
 
@@ -72,6 +72,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `analog_adc_enob_corner_check` | any | — | R12 system-ENOB per-corner gate (A4). |
 | `analog_adc_enob_fit` | any | — | A4 producer: converter waveform -> SNDR -> ENOB. |
 | `analog_artefact_substance_check` | any | — | catch substance-less analog deliverables that pass `analog_per_block_pv_completeness_check` and `analog_hardmacro_check` on file-presence... |
+| `analog_b_analog_cutover` | any | — | criterion b-analog for an analog step's cut-over from `direct` to the tool path (owner decision q7, T109). |
 | `analog_block_coverage_check` | any | — | deterministic gate for analog block design coverage |
 | `analog_block_list_emit_check` | any | — | master block-list schema gate. |
 | `analog_block_type_classify` | any | — | deterministic name→type taxonomy lookup. |
@@ -1423,7 +1424,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1342 programs)
+### `any` (1343 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1471,6 +1472,7 @@ _(no programs in this group)_
 - `analog_adc_enob_corner_check` — R12 system-ENOB per-corner gate (A4).
 - `analog_adc_enob_fit` — A4 producer: converter waveform -> SNDR -> ENOB.
 - `analog_artefact_substance_check` — catch substance-less analog deliverables that pass `analog_per_block_pv_completeness_check` and `analog_hardmacro_check` on file-presence...
+- `analog_b_analog_cutover` — criterion b-analog for an analog step's cut-over from `direct` to the tool path (owner decision q7, T109).
 - `analog_block_coverage_check` — deterministic gate for analog block design coverage
 - `analog_block_list_emit_check` — master block-list schema gate.
 - `analog_block_type_classify` — deterministic name→type taxonomy lookup.

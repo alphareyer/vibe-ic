@@ -53,6 +53,17 @@ def test_report_emitted_when_cts_complete_even_without_routing(tmp_path):
     pnr = _pnr(tmp_path)
     (pnr / "openroad.log").write_text(_CTS_LOG)
     (pnr / "post_cts.def").write_text("VERSION 5.8 ;\nDESIGN top ;\nEND DESIGN\n")
+    # THE ORDER THE TOOL PRODUCES, STATED, NOT LEFT TO THE CLOCK (T109c). The
+    # emitter reads the log only when it is at least as new as post_cts.def
+    # (a log older than the DEF belongs to an earlier pass). OpenROAD writes
+    # the DEF during the run and keeps appending to the log, so the log is the
+    # newer file. Written in the other order, this test passed only when both
+    # writes fell in one kernel timestamp tick and failed on a loaded host
+    # (measured: 1 red in a sharded run, 3/3 green in isolation).
+    import os
+    t = (pnr / "post_cts.def").stat().st_mtime
+    os.utime(pnr / "post_cts.def", (t, t))
+    os.utime(pnr / "openroad.log", (t + 1, t + 1))
     # explicitly NO routed.def — routing never finished.
     out = R._emit_cts_report_if_complete(tmp_path, "top")
     rpt = R._pl.cts_dir(tmp_path) / "clock_tree.rpt"

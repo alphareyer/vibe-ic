@@ -503,7 +503,12 @@ class Engine:
         if not self.container:
             return subprocess.run(["bash", "-lc", cmd], capture_output=True,
                                   text=True)
-        return _ce.run_in_container(self.container, cmd, deadline_s=deadline_s)
+        # SUPERVISED BY PROGRESS, NO CLOCK (vibe-ic#2051/#2083): a GNU
+        # `timeout` deadline stops a job because time passed, not because it
+        # stopped working. `deadline_s` is kept in the signature for callers
+        # and no longer arms a clock (T109c, phase3 supervision gate).
+        del deadline_s
+        return _ce.run_in_container_supervised(self.container, cmd)
 
     def ngspice(self, deck: Path) -> Tuple[bool, Dict[str, float], str]:
         """The A4 sweep's own ngspice path: login shell, fork binary, meas."""
