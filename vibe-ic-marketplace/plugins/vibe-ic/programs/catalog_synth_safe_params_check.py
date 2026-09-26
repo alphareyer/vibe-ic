@@ -143,13 +143,20 @@ def judge(netlist: dict, ips: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
-def _yosys(project: Path, image: str, script: str, out_dir: Path):
-    """Host yosys, else the EDA image with only ``out_dir`` writable."""
+def _yosys(project: Path, image: str | None, script: str, out_dir: Path):
+    """Host yosys, else the EDA image with only ``out_dir`` writable.
+
+    ``image`` is the declared one (``--image`` / ``VIBEIC_EDA_IMAGE``); when
+    nothing is declared the pinned image is resolved here, at use, never
+    stored.
+    """
     import shutil
     import subprocess
     if shutil.which("yosys"):
         command = ["yosys", "-q", "-p", script]
     elif shutil.which("docker"):
+        import p0_tool_frontend_check as frontend
+        image = image or frontend.default_image()
         root, out = str(project.resolve()), str(out_dir.resolve())
         command = ["docker", "run", "--rm", "--network", "none", "-u",
                    f"{os.getuid()}:{os.getgid()}", "-v", f"{root}:{root}:ro",
@@ -161,7 +168,7 @@ def _yosys(project: Path, image: str, script: str, out_dir: Path):
                           check=False)
 
 
-def run(project: Path, image: str) -> tuple[int, dict[str, Any]]:
+def run(project: Path, image: str | None) -> tuple[int, dict[str, Any]]:
     import p0_tool_frontend_check as frontend
     from _specrtl_common import rtl_source_files
     report: dict[str, Any] = {"program": PROGRAM, "project": str(project)}
@@ -214,14 +221,13 @@ def run(project: Path, image: str) -> tuple[int, dict[str, Any]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    import p0_tool_frontend_check as frontend
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("project", type=Path)
     parser.add_argument("--image", default=None)
     parser.add_argument("--json", type=Path, default=None)
     args = parser.parse_args(argv)
     project = args.project.resolve()
-    image = args.image or os.environ.get("VIBEIC_EDA_IMAGE", frontend.DEFAULT_IMAGE)
+    image = args.image or os.environ.get("VIBEIC_EDA_IMAGE") or None
     rc, report = run(project, image)
     write_json(args.json or project / REPORT_REL, report)
     print(f"[{report['verdict']}] {PROGRAM}: {report['reason']}",
