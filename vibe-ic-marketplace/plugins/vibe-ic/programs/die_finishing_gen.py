@@ -138,6 +138,7 @@ import json
 import os
 import re
 import sys
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -986,7 +987,18 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
         pdk: Optional[str], python: str, marker: Optional[str],
         width: Optional[float], height: Optional[float],
         out: Optional[str], in_place: bool,
-        report: Optional[str]) -> Dict[str, Any]:
+        report: Optional[str], sealed_by: Optional[str] = None,
+        sealed_by_record: Optional[str] = None,
+        sealed_by_error: Optional[str] = None) -> Dict[str, Any]:
+    """``sealed_by``: a GDS some other caller of the SAME PDK generator already
+    produced from ``gds`` (step 26.5ic on LibreLane `KLayout.SealRing`).  It
+    takes the place of this program's own invocation and nothing else: the
+    declaration (HARDMACRO skip, required ring), the verification of the
+    output layout, the band, the die id and the report are unchanged, so the
+    tool's output is judged exactly as ours is.  ``sealed_by_record`` names the
+    producer's own record (bound by sha256 in the report).
+    ``sealed_by_error``: that producer REFUSED; the report says so through the
+    same no-output path, and this program never falls back to its own run."""
     rep = Path(report) if report else (project / _REPORT_REL)
     if not rep.is_absolute():
         rep = project / rep
@@ -1281,10 +1293,30 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
               else str(Path(script).parent.parent.parent))
         env["KLAYOUT_PATH"] = kp
         seal["klayout_path"] = kp
-    argv = _emit_argv(form, runner, script, python, tech,
-                      runner.cpath(gds_path), runner.cpath(staged), w, h)
-    seal["argv"] = list(argv)
-    rc, sout, serr = runner.run_argv(argv, env, timeout=3600)
+    if sealed_by_error and not sealed_by:
+        seal["producer"] = "librelane:KLayout.SealRing"
+        rc, sout, serr = 1, "", f"the LibreLane producer refused: {sealed_by_error}"
+    elif sealed_by:
+        # The generator already ran elsewhere; its output is staged exactly
+        # where ours would have been written, then measured like ours.
+        produced = Path(sealed_by)
+        seal["producer"] = "librelane:KLayout.SealRing"
+        seal["sealed_by"] = {"path": str(produced),
+                             "sha256": _sha256_file(produced)}
+        if sealed_by_record:
+            seal["sealed_by"]["record"] = str(sealed_by_record)
+            seal["sealed_by"]["record_sha256"] = _sha256_file(Path(sealed_by_record))
+        rc, sout, serr = 0, "", ""
+        if produced.is_file():
+            shutil.copyfile(produced, staged)
+        else:
+            rc = 1
+            serr = f"sealed-by GDS not found: {produced}"
+    else:
+        argv = _emit_argv(form, runner, script, python, tech,
+                          runner.cpath(gds_path), runner.cpath(staged), w, h)
+        seal["argv"] = list(argv)
+        rc, sout, serr = runner.run_argv(argv, env, timeout=3600)
     seal["generator_rc"] = rc
     tail = ((sout or "") + (serr or "")).strip()
     if tail:
@@ -1498,6 +1530,13 @@ def main(argv=None) -> int:
     ap.add_argument("--in-place", action="store_true",
                     help="replace the streamed GDS with the sealed layout")
     ap.add_argument("--report", default=None)
+    ap.add_argument("--sealed-by", default=None,
+                    help="a GDS the same PDK generator already produced from "
+                         "--gds (LibreLane KLayout.SealRing); verified, not re-run")
+    ap.add_argument("--sealed-by-record", default=None,
+                    help="the producer's own record, bound by sha256")
+    ap.add_argument("--sealed-by-error", default=None,
+                    help="the producer refused; report it, never run our own")
     ap.add_argument("--json", dest="json_out", default=None)
     ap.add_argument("--strict", action="store_true",
                     help="treat a disclosed skip as a FAIL (tapeout sign-off)")
@@ -1507,7 +1546,9 @@ def main(argv=None) -> int:
     try:
         res = run(project, ns.gds, ns.script, ns.form, ns.tech, ns.pdk_root,
                   ns.pdk, ns.python, ns.marker, ns.die_width, ns.die_height,
-                  ns.out, ns.in_place, ns.report)
+                  ns.out, ns.in_place, ns.report, sealed_by=ns.sealed_by,
+                  sealed_by_record=ns.sealed_by_record,
+                  sealed_by_error=ns.sealed_by_error)
     except Exception as exc:                                 # noqa: BLE001
         res = {"producer": _PRODUCER, "check": _CHECK,
                "seal_ring": {"state": "FAIL", "reason": f"gate error: {exc}"},

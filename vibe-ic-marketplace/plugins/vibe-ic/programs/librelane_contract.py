@@ -468,7 +468,10 @@ _EARLY_STEP_INPUTS: dict[str, tuple[str, ...]] = {
     'Checker.YosysUnmappedCells': ('nl',), 'Checker.YosysSynthChecks': ('nl',),
     'Checker.NetlistAssignStatements': ('nl',),
     'Magic.RCX': ('gds',), 'Magic.DRC': ('gds',),
-    'KLayout.DRC': ('gds',)}
+    'KLayout.DRC': ('gds',),
+    # Stream-level checks and finishing read the stream alone (steps 26, 26.5ic).
+    'KLayout.Antenna': ('gds',), 'Checker.KLayoutAntenna': (),
+    'KLayout.SealRing': ('gds',), 'KLayout.XOR': ('mag_gds', 'klayout_gds')}
 
 
 def _check_state(state: dict, *, outputs: bool = False,
@@ -1008,16 +1011,21 @@ def image_capability(image: str, docker: str = 'docker') -> dict:
     return _CAPABILITY[key]
 
 
-def openroad_home(folder: Path, capability: dict | None) -> Path | None:
-    """Write the init file that defines the probe's aliases, or nothing."""
+def openroad_home(folder: Path, capability: dict | None,
+                  extra: list[str] | None = None) -> Path | None:
+    """Write the init file that defines the probe's aliases (and a caller's
+    `extra` Tcl lines, e.g. a tool debug print the caller reads back), or
+    nothing when there is neither."""
     aliases = (capability or {}).get('openroad_aliases') or {}
-    if not aliases:
+    if not aliases and not extra:
         return None
     folder.mkdir(parents=True, exist_ok=True)
     lines = ['# vibe-ic librelane_contract: abbreviation aliases derived from the image']
     for short, full in sorted(aliases.items()):
         lines.append(f'if {{[llength [info commands ::{short}]] == 0}} '
                      f'{{ proc ::{short} {{args}} {{ return [::{full} {{*}}$args] }} }}')
+    if extra:
+        lines += ['# vibe-ic librelane_contract: caller-declared init lines', *extra]
     (folder / '.openroad').write_text('\n'.join(lines) + '\n')
     (folder / '.bashrc').write_text('')
     return folder
@@ -1050,6 +1058,8 @@ def selected_mode(project: Path, step: str) -> str:
 #: fingerprint are unchanged.
 PLUGIN_ROOT = Path(__file__).resolve().parent / 'librelane_plugins'
 PLUGIN_STEP_PREFIX = 'Vibeic.'
+#: The `programs/` modules the plugin's steps import (inputs of those steps).
+PLUGIN_HOST_MODULES = ('_spare_plan.py', 'dynamic_ir_vectored_emit.py')
 
 
 def _plugin_args(step_ids: list[str]) -> list[str]:
@@ -1064,7 +1074,8 @@ def _plugin_digests(step_id: str) -> dict[str, str]:
     plan builder it imports, by sha256."""
     if not step_id.startswith(PLUGIN_STEP_PREFIX):
         return {}
-    files = sorted(PLUGIN_ROOT.rglob('*.py')) + [PLUGIN_ROOT.parent / '_spare_plan.py']
+    files = sorted(PLUGIN_ROOT.rglob('*.py')) + sorted(PLUGIN_ROOT.rglob('*.tcl')) + [
+        PLUGIN_ROOT.parent / name for name in PLUGIN_HOST_MODULES]
     return {str(path.relative_to(PLUGIN_ROOT.parent)): digest(path)
             for path in files if path.is_file()}
 
@@ -1224,8 +1235,13 @@ def resolve_step_config(project: Path, image: str, source: Path, output: Path,
 def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
               *, docker: str = 'docker', mounts: list[tuple[Path, str]] | None = None,
               lane: str | None = None, pdk_root: str | None = None,
-              namespace: str | None = None) -> list[Path]:
-    """Run pinned per-step snapshots. Step directories retain both inputs and outputs."""
+              namespace: str | None = None,
+              openroad_init: list[str] | None = None) -> list[Path]:
+    """Run pinned per-step snapshots. Step directories retain both inputs and outputs.
+
+    ``openroad_init``: extra Tcl lines for the OpenROAD init file every
+    OpenROAD step reads (joins each step's fingerprint).
+    """
     capability = image_capability(image, docker)
     outputs = []
     previous: Path | None = None
@@ -1241,7 +1257,7 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         base /= lane
     if namespace:
         base /= namespace
-    home = openroad_home(base / '.openroad_home', capability)
+    home = openroad_home(base / '.openroad_home', capability, openroad_init)
     for index, (step_id, config, initial_state) in enumerate(steps, 1):
         name = f'{index:02d}-{step_id.lower().replace(".", "-")}'
         folder = base / name
@@ -1270,6 +1286,8 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             fingerprint['openroad_aliases'] = capability['openroad_aliases']
         if step_id.startswith(PLUGIN_STEP_PREFIX):
             fingerprint['plugin'] = _plugin_digests(step_id)
+        if openroad_init:
+            fingerprint['openroad_init'] = list(openroad_init)
         receipt = folder / 'vibeic_receipt.json'
         if receipt.exists() and _load(receipt).get('input') == fingerprint and (folder / 'state_out.json').exists():
             _check_state(_load(folder / 'state_out.json'), outputs=True)
