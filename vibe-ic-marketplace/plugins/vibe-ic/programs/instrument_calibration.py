@@ -2083,6 +2083,57 @@ _register(Instrument(
 ))
 
 
+def _judge_tap_row_coverage(pair: Tuple[str, str]) -> Optional[str]:
+    """Step 15's tap-coverage reader on one real placed DEF, at the deck's
+    15 um (gf180mcu DF.13_MV / DF.14_MV), counting the endcap only on its
+    LEF's evidence -- exactly as the runner calls it."""
+    import tap_row_coverage_check as C
+    def_text, lef_text = pair
+    rec = C.audit(def_text, [lef_text], "gf180mcu_fd_sc_mcu7t5v0__filltie", 15.0,
+                  "gf180mcu_fd_sc_mcu7t5v0__endcap", "cells")
+    return "TAP_ROW_COVERAGE_GAP" if rec["uncovered"] else None
+
+
+_TAP_COVERAGE_CAL_PROV = (
+    "Real OpenROAD 26Q3-2963-gc73a322d30 (the pinned vibeic-eda 0.3.79, 8HD-8, "
+    "2026-09-27), unedited `write_def` output: gf180mcu_fd_sc_mcu7t5v0 nom tech "
+    "LEF + cell LEF, calibration/cal_chain_gf180.v linked (two dffq_1 around one "
+    "inv_1, no design under test), a 140x40 um die with a 120x19.6 um core (4 "
+    "rows, N/FS), `tapcell -tapcell_master ..__filltie -endcap_master ..__endcap "
+    "-distance D`, f0/i0/f1 seeded at (50,10) (60,13.92) (90,17.84) um and "
+    "`detailed_placement`. The LEF half is calibration/tap_coverage_cells.lef, "
+    "the filltie/endcap/dffq_1/inv_1 MACRO blocks copied verbatim from that "
+    "cell LEF. ")
+
+_register(Instrument(
+    name="tap_row_coverage_check::audit",
+    reads="a placed DEF's ROWS + COMPONENTS and the LEFs of its masters",
+    ruling="T96 (review70 step 15, harvest 2: deck distance, well-island coverage)",
+    owner="mig96",
+    why=("Step 15 on LibreLane drops the direct prune and well-tie repair, so "
+         "the only thing standing between the tool's tap lattice and a DF.13/"
+         "DF.14 violation is this reader. A same-row ruler read 181 of 413 "
+         "cells uncovered on a layout the KLayout deck passes; the pair is one "
+         "structure tapped at two distances, so only the island geometry "
+         "decides."),
+    judge=_judge_tap_row_coverage,
+    positive=Sample(
+        provenance=(_TAP_COVERAGE_CAL_PROV + "D = 40: ties 78.4 um apart in a "
+                    "row, 2 of 3 cells further than 15 um from every tie in "
+                    "their well island (worst 17.36 um). "
+                    "calibration/tap_coverage_gap_positive.def"),
+        artefact=lambda: (_read("tap_coverage_gap_positive.def")(),
+                          _read("tap_coverage_cells.lef")())),
+    expect="TAP_ROW_COVERAGE_GAP",
+    negative=Sample(
+        provenance=(_TAP_COVERAGE_CAL_PROV + "D = 20 (the PDK's own "
+                    "FP_TAPCELL_DIST): every cell within 15 um of a tie in its "
+                    "island. calibration/tap_coverage_covered_negative.def"),
+        artefact=lambda: (_read("tap_coverage_covered_negative.def")(),
+                          _read("tap_coverage_cells.lef")())),
+))
+
+
 def _ll_cts_sample(stem: str) -> Callable[[], Dict[str, str]]:
     def _load() -> Dict[str, str]:
         return {"cts.rpt": (FIXTURES / f"{stem}.rpt").read_text(errors="replace"),

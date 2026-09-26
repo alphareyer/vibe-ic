@@ -35583,14 +35583,18 @@ def _chip_path_requests_pad_ring(project: Path) -> bool:
 
     A slot that is genuinely TAKEN still requests a ring, and so does a
     self-tape-out: the declaration is consulted, never overridden.
+
+    The condition itself lives in `_tapeout_declaration.requests_pad_ring`
+    (T96), because `librelane_contract.selected_mode` asks the same question
+    to pick the chip path's production default for steps 15..20, and a gate
+    reading its step's producer through the contract must get the runner's
+    answer.
     """
-    slot_dir = project / "input" / "submission_template" / "slots"
-    if not ((project / "input" / "submission_template"
-             / "SELF_TAPEOUT.txt").is_file()
-            or (slot_dir.is_dir() and any(slot_dir.glob("*.yaml")))):
-        return False
-    declared, _why = _declaration_deliverable_answer(project)
-    return declared != "HARDMACRO"
+    _here = str(Path(__file__).resolve().parent)
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+    import _tapeout_declaration as _td                          # noqa: PLC0415
+    return _td.requests_pad_ring(project)
 
 
 def _padring_producer_dispatch(project: Path,
@@ -36206,19 +36210,30 @@ def _librelane_admission_facts(project: Path) -> Dict[str, Any]:
     logic lives in `librelane_contract.py`, which the runner-only program
     digest does not cover.  MEASURED on the spm copy: a contract-only fix was
     refused DUPLICATE_NO_NEW_EVIDENCE, and so would a direct run followed by
-    the same run with the switch added.  Absent switch: nothing is added, so
-    every existing identity is unchanged.
+    the same run with the switch added.  A design class whose steps run on
+    the contract's class default (T96: the chip path, 15..20) selects those
+    producers with no switch at all, so its defaults count the same way.
+    Absent switch and no class default: nothing is added, so every such
+    identity is unchanged.
     """
-    switch = project / "phase3/librelane_switch.json"
-    if not switch.is_file():
-        return {}
     import librelane_contract as _ll
+    switch = project / "phase3/librelane_switch.json"
+    facts: Dict[str, Any] = {}
+    if switch.is_file():
+        try:
+            facts["librelane_switch"] = json.loads(switch.read_text())
+        except (OSError, ValueError) as exc:
+            facts["librelane_switch"] = f"UNREADABLE:{exc}"
     try:
-        declared: Any = json.loads(switch.read_text())
-    except (OSError, ValueError) as exc:
-        declared = f"UNREADABLE:{exc}"
-    return {"librelane_switch": declared,
-            "librelane_contract_sha256": _ll.digest(PROGRAMS_DIR / "librelane_contract.py")}
+        defaults = _ll.class_defaults_in_force(project)
+    except (_ll.Refusal, OSError, ValueError) as exc:
+        defaults = {"UNREADABLE": str(exc)}
+    if defaults:
+        facts["librelane_class_defaults"] = defaults
+    if facts:
+        facts["librelane_contract_sha256"] = _ll.digest(
+            PROGRAMS_DIR / "librelane_contract.py")
+    return facts
 
 
 def _librelane_floorplan_modes(project: Path) -> Dict[str, str]:
@@ -36385,6 +36400,122 @@ def _select_placement_arm(project: Path, image: str, container: str,
                             _PLACEMENT_DUAL_OBJECTIVES)
 
 
+def _librelane_tap_coverage(project: Path, pdk: PdkConfig, container: str,
+                            def_path: Path, scope: str) -> Tuple[int, str]:
+    """Step 15's tap gate on the TOOL's output (T96, review70 step 15 harvest 2).
+
+    `tap_row_coverage_check` judges the DEF against the distance the PDK's DRC
+    deck states (`deck_tap_max_distance_um`, the runner's one reader; a deck
+    that states none is NOT_MEASURED, never a guess), with the tap and endcap
+    masters and the knob `OpenROAD.TapEndcapInsertion` was resolved with.
+    `lattice` is the pre-placement half on TapEndcapInsertion's own DEF;
+    `cells` is the final layout. It replaces, on the LibreLane path, what the
+    direct deck's #684 prune and well-tie repair were built to guarantee.
+    Returns (rc, one-line summary); rc 1 is a measured FAIL.
+    """
+    cfg_path = project / "phase3/librelane/15-config/OpenROAD.TapEndcapInsertion.json"
+    try:
+        cfg = json.loads(cfg_path.read_text())
+    except (OSError, ValueError) as exc:
+        return 2, f"tap_row_coverage_check: {cfg_path.name} unreadable: {exc}"
+    deck, why = deck_tap_max_distance_um(pdk, container)
+    prog_c = _to_container_path(str(PROGRAMS_DIR / "tap_row_coverage_check.py"), container)
+    report = f"reports/phase3/pnr/tap_row_coverage.{scope}.json"
+    args = ["python3", prog_c, _to_container_path(str(project), container),
+            "--def", _to_container_path(str(def_path), container),
+            "--lef", str(pdk.cell_lef),
+            "--tap-master", str(cfg.get("WELLTAP_CELL") or pdk.tapcell_master or ""),
+            "--scope", scope,
+            "--distance-um", str(deck if deck is not None else 0),
+            "--distance-source", f"PDK DRC deck ({why})",
+            "--json", report]
+    if cfg.get("ENDCAP_CELL"):
+        args += ["--endcap-master", str(cfg["ENDCAP_CELL"])]
+    if cfg.get("FP_TAPCELL_DIST") is not None:
+        args += ["--tool-distance-um", str(cfg["FP_TAPCELL_DIST"]),
+                 "--tool-distance-source",
+                 f"{cfg_path.relative_to(project)} FP_TAPCELL_DIST"]
+    rc, out, err = _docker_exec(container, " ".join(shlex.quote(a) for a in args),
+                                marker=prog_c)
+    line = next((ln.strip() for ln in (out + err).splitlines()
+                 if ln.strip() and not ln.startswith(("===", "  verdict"))), "")
+    return rc, f"tap_row_coverage_check --scope {scope}: rc={rc} ({report}; {line[:300]})"
+
+
+def _unplaceable_dont_use_tcl(masters: List[str]) -> str:
+    """`set_dont_use` of the masters no row of the tool's lattice can hold, for
+    the direct deck's session on the LibreLane floorplan (its own #951 cap sat
+    in the tap region `elide_tap_pdn_region` removes). Empty for none."""
+    if not masters:
+        return ""
+    return "".join(f"if {{[catch {{set_dont_use [get_lib_cells {{{m}}}]}}]}} "
+                   f"{{ puts \"UNPLACEABLE_MASTER_DONT_USE_FAILED: {m}\" }}\n"
+                   for m in masters) + (
+        f'puts "UNPLACEABLE_MASTERS_EXCLUDED: {len(masters)} (LibreLane lattice)"\n')
+
+
+def _librelane_exclude_unplaceable(project: Path, configs: Dict[str, Path],
+                                   later: List[str], lattice: Path,
+                                   mounts: List[Tuple[Path, str]],
+                                   notes: List[str]
+                                   ) -> Tuple[Dict[str, Path], List[str]]:
+    """The later steps' configs with every master no row can hold excluded,
+    and those masters (the direct tail's session gets `set_dont_use` of them).
+
+    `tap_row_coverage_check.unplaceable_masters` reads TapEndcapInsertion's
+    own DEF and the cell LEFs its config names (container paths mapped back
+    through the chain's mounts). Each later step that declares
+    EXTRA_EXCLUDED_CELLS gets the union through `derive_step_config`, with the
+    measurement as its source; nothing changes when no master is too wide.
+    """
+    import librelane_contract as _ll
+    import tap_row_coverage_check as _trc
+    cfg = json.loads((lattice / "config.json").read_text())
+
+    def _host(path: str) -> Path:
+        for src, dst in mounts:
+            if path == dst or path.startswith(dst.rstrip("/") + "/"):
+                return Path(src) / path[len(dst.rstrip("/")):].lstrip("/")
+        return Path(path)
+
+    lefs = [_host(str(p)).read_text(errors="replace") for p in cfg.get("CELL_LEFS") or []]
+    tap_def = Path(json.loads((lattice / "state_out.json").read_text())["def"])
+    got = _trc.unplaceable_masters(tap_def.read_text(errors="replace"), lefs)
+    notes.append(f"unplaceable-master cap: longest free row run "
+                 f"{got['longest_free_run_um']} um after TapEndcapInsertion; "
+                 f"excluded {got['unplaceable'] or 'none'}")
+    if not got["unplaceable"]:
+        return configs, []
+    source = (f"tap_row_coverage_check.unplaceable_masters on "
+              f"{tap_def.relative_to(project) if tap_def.is_relative_to(project) else tap_def}"
+              f" (longest free row run {got['longest_free_run_um']} um)")
+    out = dict(configs)
+    for step in later:
+        doc = json.loads(configs[step].read_text())
+        if "EXTRA_EXCLUDED_CELLS" not in doc:
+            continue
+        have = list(doc.get("EXTRA_EXCLUDED_CELLS") or [])
+        union = have + [m for m in got["unplaceable"] if m not in have]
+        out[step] = _ll.derive_step_config(
+            configs[step], configs[step].with_name(f"{step}.unplaceable.json"),
+            {"EXTRA_EXCLUDED_CELLS": (union, source)})
+    return out, list(got["unplaceable"])
+
+
+def _librelane_final_tap_gate(project: Path, pdk: PdkConfig, container: str,
+                              out_dir: Path, top: str, modes: Dict[str, str]
+                              ) -> Tuple[bool, str]:
+    """(failed, detail suffix) for the routed `<top>.def` when step 15 ran on
+    LibreLane (T96): the direct prune and well-tie repair never touch the
+    tool's taps, so the final layout's coverage is measured instead. Direct
+    step 15: nothing is judged here and nothing is added."""
+    if modes.get("15") != "librelane":
+        return False, ""
+    rc, note = _librelane_tap_coverage(project, pdk, container,
+                                       out_dir / f"{top}.def", "cells")
+    return rc == 1, f" | {note}"
+
+
 def _prepare_librelane_floorplan_for_route(
         project: Path, pdk: PdkConfig, container: str, out_dir: Path,
         generic_pnr_tcl: str, modes: Dict[str, str],
@@ -36460,6 +36591,7 @@ def _prepare_librelane_floorplan_for_route(
         notes.append(f"{name}: rc={rc}")
         if rc != 0:
             return _fail("LL_PAD_ASSIGNMENT_FAILED", f"{name} rc={rc}: {(out + err)[-800:]}")
+    unplaceable: List[str] = []
     last = ("OpenROAD.DetailedPlacement" if placement is not None
             else "Odb.RemovePDNObstructions" if modes["15"] == "librelane"
             else "OpenROAD.PadRing")
@@ -36504,10 +36636,22 @@ def _prepare_librelane_floorplan_for_route(
             {"nl": [netlist, wrapper]},
             project / "phase3/librelane/15-config/bridge", mounts=mounts,
             chain=[configs[s] for s in steps[1:]])
+        if modes["15"] == "librelane" and "OpenROAD.TapEndcapInsertion" in steps:
+            # review70 step 15 harvest 4 (#951): a master wider than the
+            # longest free row run the tool's tap lattice leaves can never be
+            # legally placed, so the steps after TapEndcapInsertion are not
+            # offered it. The lattice is run first (its receipt is reused by
+            # the full chain below) and measured, never estimated.
+            k = steps.index("OpenROAD.TapEndcapInsertion") + 1
+            lattice = _ll.run_chain(project, image,
+                                    [(s, configs[s], state0) for s in steps[:k]],
+                                    mounts=mounts, lane="15-floorplan")[-1]
+            configs, unplaceable = _librelane_exclude_unplaceable(
+                project, configs, steps[k:], lattice, mounts, notes)
         folders = _ll.run_chain(project, image, [(s, configs[s], state0) for s in steps],
                                 mounts=mounts, lane="15-floorplan")
-    except _ll.Refusal as exc:
-        return _fail(exc.code, str(exc))
+    except (_ll.Refusal, OSError, ValueError, KeyError) as exc:
+        return _fail(getattr(exc, "code", "LL_FLOORPLAN_CHAIN_FAILED"), str(exc))
     by_step = dict(zip(steps, folders))
     ring_state = by_step["OpenROAD.PadRing"] / "state_out.json"
     final_state = (by_step["Odb.RemovePDNObstructions"] / "state_out.json"
@@ -36528,6 +36672,22 @@ def _prepare_librelane_floorplan_for_route(
                                   placed_handoff)
     except _ll.Refusal as exc:
         return _fail(exc.code, str(exc))
+    if modes["15"] == "librelane" and "OpenROAD.TapEndcapInsertion" not in by_step:
+        notes.append("TAP_LATTICE_NOT_MEASURED: the segment ran no "
+                     "OpenROAD.TapEndcapInsertion")
+    elif modes["15"] == "librelane":
+        # review70 step 15 harvest 2: the tool's tap lattice, measured against
+        # the deck's distance before anything is placed on it.
+        try:
+            tap_def = Path(json.loads((by_step["OpenROAD.TapEndcapInsertion"]
+                                       / "state_out.json").read_text())["def"])
+        except (OSError, ValueError, KeyError) as exc:
+            return _fail("TAP_LATTICE_UNREADABLE", str(exc))
+        rc_tap, tap_note = _librelane_tap_coverage(project, pdk, container,
+                                                   tap_def, "lattice")
+        notes.append(tap_note)
+        if rc_tap == 1:
+            return _fail("TAP_LATTICE_GATE_FAILED", tap_note)
     if placement is not None:
         # The tool logs that carry step 17/18's verdicts, where the existing
         # readers look (`placement_legality_check` scans pnr/*.log; step 18's
@@ -36600,7 +36760,8 @@ def _prepare_librelane_floorplan_for_route(
         consumer = _padring_routing_consumer_tcl(
             deck, _to_container_path(str(consumed), container),
             _padring_physical_only_instance_tcl(text) + "\n"
-            + _ll.def_supply_tcl(text, _PNR_STAGE_MARKER),
+            + _ll.def_supply_tcl(text, _PNR_STAGE_MARKER)
+            + _unplaceable_dont_use_tcl(unplaceable),
             exclusion_tcl)
         direct_consumer = consumer
         if placement is not None:
@@ -36614,6 +36775,7 @@ def _prepare_librelane_floorplan_for_route(
                 _ll.def_supply_tcl(consumed.read_text(
                     encoding="utf-8", errors="replace"), _PNR_STAGE_MARKER)
                 + "\n" + _spare_reassert_dont_touch_tcl(placement["spare_plan"])
+                + _unplaceable_dont_use_tcl(unplaceable)
                 + "".join(
                     f'if {{[set _stn [[ord::get_db_block] findNet {{{n}}}]] ne "NULL"}} '
                     f'{{ $_stn setDoNotTouch true; puts "SPARE_TIE_NET_DONT_TOUCH: {n}" }}\n'
@@ -39989,6 +40151,15 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             pnr_outputs,
             extras={"pdn_status": _pdn_mk, **spare_extras}, reason_class=_V.ReasonClass.INPUT_ABSENT)
     detail += f" | pdn: {_pdn_mk}"
+    _tap_fail, _tap_note = _librelane_final_tap_gate(
+        project, pdk, container, out_dir, top, _ll_fp_modes)
+    detail += _tap_note
+    if _tap_fail:
+        return StepResult("pnr", "FAIL", time.time() - t0,
+                          f"TAP_ROW_COVERAGE_GATE_FAILED:{_tap_note}. {detail}",
+                          pnr_outputs,
+                          extras={"finding": "TAP_ROW_COVERAGE_GATE_FAILED",
+                                  "pdn_status": _pdn_mk, **spare_extras})
     # Which netlist was actually built, in the step record itself. A run that
     # routed a chainless netlist must say so rather than look like any other
     # PASS — that ambiguity is what let a scan-free tape-out sit behind a 97 %

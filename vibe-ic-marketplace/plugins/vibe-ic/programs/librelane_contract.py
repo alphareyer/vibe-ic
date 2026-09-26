@@ -1345,17 +1345,90 @@ def derive_step_config(config: Path, output: Path, updates: dict[str, tuple[Any,
 #: naming the step `direct` in `phase3/librelane_switch.json`.
 PRODUCTION_DEFAULTS: dict[str, str] = {}
 
+#: The chip path: a die that carries its own pad ring
+#: (`_tapeout_declaration.requests_pad_ring`, the condition of step 15.5ic).
+DESIGN_CLASS_CHIP_PAD_RING = 'chip_pad_ring'
+
+#: Production defaults of a DESIGN CLASS, for steps whose tool path is proven
+#: only there. T96 (2026-09-27) cut steps 15..20 over on the chip path: the
+#: LibreLane Chip segment Floorplan..PadRing..GeneratePDN (15, 15.5ic),
+#: GlobalPlacement..DetailedPlacement + Vibeic.InsertSpareCells (17, 18) and
+#: CTS..ResizerTimingPostCTS (19, 20), measured on spm x gf180mcuD against the
+#: direct chain (docs/librelane_contract.md, "Cut-over of 15..20"). A core-only
+#: or HARDMACRO design has no Chip-flow segment (LL_FLOORPLAN_CORE_ONLY_UNSUPPORTED),
+#: so it keeps `direct`. A step-wide `PRODUCTION_DEFAULTS` entry outranks these.
+CLASS_PRODUCTION_DEFAULTS: dict[str, dict[str, str]] = {
+    DESIGN_CLASS_CHIP_PAD_RING: {'15': 'librelane', '15.5ic': 'librelane',
+                                 '17': 'librelane', '18': 'librelane',
+                                 '19': 'librelane', '20': 'librelane'},
+}
+
+#: A class default runs only inside the chain it continues. The producers are
+#: one LibreLane chain (15.5ic -> 15 -> 17/18) or one deck region (19 with 20),
+#: so a project that names one of these steps anything but `librelane` takes
+#: the steps that depend on it back to `direct` with it, instead of meeting
+#: the runner's split refusals (LL_FLOORPLAN_PADRING_SPLIT_UNSUPPORTED,
+#: LL_PLACEMENT_NEEDS_LIBRELANE_FLOORPLAN, LL_SPARE_PLACEMENT_SPLIT_UNSUPPORTED,
+#: LL_CTS_HOLD_SPLIT_UNSUPPORTED) on a combination it never asked for.
+CLASS_DEFAULT_REQUIRES: dict[str, tuple[str, ...]] = {
+    '15': ('15.5ic',), '17': ('15', '15.5ic', '18'), '18': ('15', '15.5ic', '17'),
+    '19': ('20',), '20': ('19',)}
+
+
+def design_class(project: Path) -> str | None:
+    """The design class whose production defaults apply, or None."""
+    import _tapeout_declaration as TD
+    return DESIGN_CLASS_CHIP_PAD_RING if TD.requests_pad_ring(project) else None
+
+
+def _class_default(project: Path, step: str, named: dict[str, Any],
+                   _seen: frozenset[str] = frozenset()) -> str | None:
+    """`step`'s class default, when every step it continues also resolves to
+    `librelane`; None otherwise (the caller then uses `direct`)."""
+    defaults = CLASS_PRODUCTION_DEFAULTS.get(design_class(project) or '', {})
+    mode = defaults.get(step)
+    if mode is None:
+        return None
+    seen = _seen | {step}
+    for need in CLASS_DEFAULT_REQUIRES.get(step, ()):
+        if need in named:
+            if named[need] != 'librelane':
+                return None
+        elif need not in seen and _class_default(project, need, named, seen) != 'librelane':
+            return None
+    return mode
+
 
 def selected_mode(project: Path, step: str) -> str:
     """The project's switch when it names the step, else the production
-    default for the step, else `direct`. An invalid mode is refused, from
-    either source."""
+    default for the step, else the design class's default (when the steps
+    it continues resolve to LibreLane too), else `direct`. An invalid mode is
+    refused, from either source."""
     path = project / 'phase3/librelane_switch.json'
     steps = _load(path).get('steps', {}) if path.is_file() else {}
-    mode = steps[step] if step in steps else PRODUCTION_DEFAULTS.get(step, 'direct')
+    if step in steps:
+        mode = steps[step]
+    elif step in PRODUCTION_DEFAULTS:
+        mode = PRODUCTION_DEFAULTS[step]
+    else:
+        mode = _class_default(project, step, steps) or 'direct'
     if mode not in ('direct', 'librelane', 'dual'):
         raise Refusal('LL_INVALID_SWITCH', f'{step}: {mode}')
     return mode
+
+
+def class_defaults_in_force(project: Path) -> dict[str, str]:
+    """The steps this project runs on a class default rather than its switch:
+    `{step: mode}` for every class-default step the switch does not name and
+    whose default survives `CLASS_DEFAULT_REQUIRES`. Empty for a project
+    outside every class."""
+    path = project / 'phase3/librelane_switch.json'
+    steps = _load(path).get('steps', {}) if path.is_file() else {}
+    cls = design_class(project)
+    return {step: selected_mode(project, step)
+            for step in CLASS_PRODUCTION_DEFAULTS.get(cls or '', {})
+            if step not in steps and step not in PRODUCTION_DEFAULTS
+            and _class_default(project, step, steps) is not None}
 
 
 #: vibe-ic's own LibreLane steps (`Vibeic.*`), shipped with this plugin in

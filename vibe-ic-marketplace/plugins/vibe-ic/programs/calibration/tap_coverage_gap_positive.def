@@ -1,0 +1,44 @@
+VERSION 5.8 ;
+DIVIDERCHAR "/" ;
+BUSBITCHARS "[]" ;
+DESIGN cal_chain ;
+UNITS DISTANCE MICRONS 2000 ;
+DIEAREA ( 0 0 ) ( 280000 80000 ) ;
+ROW ROW_0 GF018hv5v_mcu_sc7 20160 23520 N DO 214 BY 1 STEP 1120 0 ;
+ROW ROW_1 GF018hv5v_mcu_sc7 20160 31360 FS DO 214 BY 1 STEP 1120 0 ;
+ROW ROW_2 GF018hv5v_mcu_sc7 20160 39200 N DO 214 BY 1 STEP 1120 0 ;
+ROW ROW_3 GF018hv5v_mcu_sc7 20160 47040 FS DO 214 BY 1 STEP 1120 0 ;
+COMPONENTS 19 ;
+    - PHY_EDGE_ROW_0_Left_4 gf180mcu_fd_sc_mcu7t5v0__endcap + SOURCE DIST + FIXED ( 20160 23520 ) N ;
+    - PHY_EDGE_ROW_0_Right_0 gf180mcu_fd_sc_mcu7t5v0__endcap + SOURCE DIST + FIXED ( 257600 23520 ) FN ;
+    - PHY_EDGE_ROW_1_Left_5 gf180mcu_fd_sc_mcu7t5v0__endcap + SOURCE DIST + FIXED ( 20160 31360 ) FS ;
+    - PHY_EDGE_ROW_1_Right_1 gf180mcu_fd_sc_mcu7t5v0__endcap + SOURCE DIST + FIXED ( 257600 31360 ) S ;
+    - PHY_EDGE_ROW_2_Left_6 gf180mcu_fd_sc_mcu7t5v0__endcap + SOURCE DIST + FIXED ( 20160 39200 ) N ;
+    - PHY_EDGE_ROW_2_Right_2 gf180mcu_fd_sc_mcu7t5v0__endcap + SOURCE DIST + FIXED ( 257600 39200 ) FN ;
+    - PHY_EDGE_ROW_3_Left_7 gf180mcu_fd_sc_mcu7t5v0__endcap + SOURCE DIST + FIXED ( 20160 47040 ) FS ;
+    - PHY_EDGE_ROW_3_Right_3 gf180mcu_fd_sc_mcu7t5v0__endcap + SOURCE DIST + FIXED ( 257600 47040 ) S ;
+    - TAP_TAPCELL_ROW_0_10 gf180mcu_fd_sc_mcu7t5v0__filltie + SOURCE DIST + FIXED ( 255360 23520 ) N ;
+    - TAP_TAPCELL_ROW_0_8 gf180mcu_fd_sc_mcu7t5v0__filltie + SOURCE DIST + FIXED ( 98560 23520 ) N ;
+    - TAP_TAPCELL_ROW_0_9 gf180mcu_fd_sc_mcu7t5v0__filltie + SOURCE DIST + FIXED ( 176960 23520 ) N ;
+    - TAP_TAPCELL_ROW_1_11 gf180mcu_fd_sc_mcu7t5v0__filltie + SOURCE DIST + FIXED ( 179200 31360 ) FS ;
+    - TAP_TAPCELL_ROW_2_12 gf180mcu_fd_sc_mcu7t5v0__filltie + SOURCE DIST + FIXED ( 99680 39200 ) N ;
+    - TAP_TAPCELL_ROW_3_13 gf180mcu_fd_sc_mcu7t5v0__filltie + SOURCE DIST + FIXED ( 98560 47040 ) FS ;
+    - TAP_TAPCELL_ROW_3_14 gf180mcu_fd_sc_mcu7t5v0__filltie + SOURCE DIST + FIXED ( 176960 47040 ) FS ;
+    - TAP_TAPCELL_ROW_3_15 gf180mcu_fd_sc_mcu7t5v0__filltie + SOURCE DIST + FIXED ( 255360 47040 ) FS ;
+    - f0 gf180mcu_fd_sc_mcu7t5v0__dffq_1 + PLACED ( 100800 23520 ) N ;
+    - f1 gf180mcu_fd_sc_mcu7t5v0__dffq_1 + PLACED ( 180320 39200 ) N ;
+    - i0 gf180mcu_fd_sc_mcu7t5v0__inv_1 + PLACED ( 119840 31360 ) FS ;
+END COMPONENTS
+PINS 3 ;
+    - a + NET a + DIRECTION INPUT + USE SIGNAL ;
+    - clk + NET clk + DIRECTION INPUT + USE SIGNAL ;
+    - y + NET y + DIRECTION OUTPUT + USE SIGNAL ;
+END PINS
+NETS 5 ;
+    - a ( PIN a ) ( f0 D ) + USE SIGNAL ;
+    - clk ( PIN clk ) ( f1 CLK ) ( f0 CLK ) + USE SIGNAL ;
+    - n0 ( i0 ZN ) ( f1 D ) + USE SIGNAL ;
+    - q0 ( i0 I ) ( f0 Q ) + USE SIGNAL ;
+    - y ( PIN y ) ( f1 Q ) + USE SIGNAL ;
+END NETS
+END DESIGN
