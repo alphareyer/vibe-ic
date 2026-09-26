@@ -2083,6 +2083,80 @@ _register(Instrument(
 ))
 
 
+def _ll_cts_sample(stem: str) -> Callable[[], Dict[str, str]]:
+    def _load() -> Dict[str, str]:
+        return {"cts.rpt": (FIXTURES / f"{stem}.rpt").read_text(errors="replace"),
+                "openroad-cts.log": (FIXTURES / f"{stem}.log").read_text(
+                    errors="replace")}
+    return _load
+
+
+def _judge_ll_cts_transcript(sample: Dict[str, str]) -> Optional[str]:
+    """The step-19 LibreLane handoff, rebuilt around one real CTS step folder:
+    its `cts.rpt` copied to the runner's report path and bound by the receipt,
+    exactly as `librelane_cts_hold` writes them. Then step 16's reader."""
+    import hashlib
+    import clock_plan_check as C
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp)
+        folder = project / "phase3/librelane/19-cts-hold/01-openroad-cts"
+        folder.mkdir(parents=True)
+        for name, text in sample.items():
+            _atomic_write_bytes(folder / name, text.encode())
+        report = project / C._CTS_REPORT_REL
+        report.parent.mkdir(parents=True)
+        _atomic_write_bytes(report, sample["cts.rpt"].encode())
+        digest = hashlib.sha256(report.read_bytes()).hexdigest()
+        receipt = project / C._LL_CTS_HANDOFF_REL
+        receipt.parent.mkdir(parents=True)
+        _atomic_write_json(receipt, {
+            "chain": {"OpenROAD.CTS": str(folder.relative_to(project))},
+            "views": {"cts_rpt": {"source_sha256": digest,
+                                  "dest_sha256": digest}}})
+        text, _source, _note = C.cts_transcript(project)
+    return ("CTS_CLOCK_MISSING"
+            if C.cts_missing_clocks(text, _CTS_CAL_SOURCES) else None)
+
+
+_LL_CTS_CAL_PROV = (
+    "Real LibreLane 3.1.0.dev1 `OpenROAD.CTS` (its cts.tcl on OpenROAD "
+    "26Q3-2963-gc73a322d30, the pinned vibeic-eda 0.3.79, 8HD-4, 2026-09-27): "
+    "`librelane --pdk gf180mcuD --skip OpenROAD.STAMidPNR --to OpenROAD.CTS` "
+    "(the image's STAMidPNR dies on est::check_corner_wire_cap) on "
+    "calibration/cal_two_clock_gf180.v, run under the container's /tmp; the "
+    "step folder's own `cts.rpt` (the report_cts summary, which names no root) "
+    "and `openroad-cts.log`, unedited. Judged against "
+    "calibration/cal_two_clocks.sdc. ")
+
+_register(Instrument(
+    name="clock_plan_check::cts_transcript",
+    reads=("the LibreLane `OpenROAD.CTS` transcript the step-19 handoff binds "
+           "(`reports/phase3/librelane_cts_hold_handoff.json`)"),
+    ruling="F30 (review70 step 16 x T98 step 19)", owner="migf30",
+    why=("With steps 19/20 on LibreLane the CTS report is the tool's "
+         "report_cts summary, which names no root, so step 16 read "
+         "CTS_CLOCK_MISSING on every LibreLane CTS. The roots are in the same "
+         "step's transcript. The pair is two real LibreLane CTS step folders "
+         "whose report_cts summaries are byte-identical: only the transcript "
+         "can tell a root taken up from a root never named."),
+    judge=_judge_ll_cts_transcript,
+    positive=Sample(
+        provenance=(_LL_CTS_CAL_PROV + "CLOCK_PORT=clk, PNR_SDC_FILE "
+                    "calibration/cal_one_clock.sdc (clk only): `[INFO "
+                    "CTS-0007] Net \"clk\" found for clock \"clk\".` and "
+                    "nothing for clk2. calibration/"
+                    "ll_cts_clock_root_dropped_positive.{rpt,log}"),
+        artefact=_ll_cts_sample("ll_cts_clock_root_dropped_positive")),
+    expect="CTS_CLOCK_MISSING",
+    negative=Sample(
+        provenance=(_LL_CTS_CAL_PROV + "CLOCK_PORT=[clk, clk2], PNR_SDC_FILE "
+                    "calibration/cal_two_clocks.sdc: CTS-0007 names both "
+                    "clocks (CTS-0041 then skips each, 1 sink). calibration/"
+                    "ll_cts_clock_roots_seen_negative.{rpt,log}"),
+        artefact=_ll_cts_sample("ll_cts_clock_roots_seen_negative")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════
