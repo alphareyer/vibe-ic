@@ -672,9 +672,14 @@ def run_step30(project: Path, image: str, pdk_root: Path, pdk: str, *,
                                paths=paths)
             mutated_spef = mutate_spef(Path(base['spef']), MUTATION_FACTOR,
                                        root / simulator / 'mutated.spef')
-            # The mutation re-times the SAME start and end pins.
-            pins = [f"-path_delay max -from {item['parsed']['start_row']['pin']} "
-                    f"-to {item['parsed']['rows'][-1]['pin']}"
+            # The mutation re-times the SAME arc: start and end pin AND their
+            # transitions. MEASURED on spm: `-from Q -to D` alone picked the
+            # opposite edge after the mutation, and the tool's deck (no initial
+            # state) cannot launch a falling Q from a flop that powers up at 0.
+            edge = lambda row: 'rise' if row['tr'] == '^' else 'fall'  # noqa: E731
+            pins = [f"-path_delay max -{edge(item['parsed']['start_row'])}_from "
+                    f"{item['parsed']['start_row']['pin']} -{edge(item['parsed']['rows'][-1])}_to "
+                    f"{item['parsed']['rows'][-1]['pin']}"
                     for item in base['prepared'] if item['parsed'] and item['deck']]
             mutated = (prepare_arm(project, image, state_path, corner, pdk_root=pdk_root,
                                    pdk=pdk, out_dir=root / simulator / 'mutated',

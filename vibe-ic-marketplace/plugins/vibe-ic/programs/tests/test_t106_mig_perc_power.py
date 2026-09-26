@@ -706,5 +706,5 @@ def test_step_30_runs_the_tool_deck_and_the_spef_mutation_and_records_every_arm(
     assert base['start_pin'] == 'u_core/_417_/Q' and base['end_pin'] == 'u_core/_416_/D'
     assert base['spice_ns'] == pytest.approx(0.52, abs=0.011)
     sta_runs = [c for c in calls if c[0] == 'sta']
-    assert '-from u_core/_417_/Q -to u_core/_416_/D' in Path(sta_runs[1][-1]).read_text()
+    assert '-fall_from u_core/_417_/Q -fall_to u_core/_416_/D' in Path(sta_runs[1][-1]).read_text()
     assert json.loads((project / 'reports/phase3/spice_path_tool.json').read_text())['step'] == '30'
