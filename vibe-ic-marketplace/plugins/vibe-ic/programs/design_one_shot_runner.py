@@ -20800,29 +20800,58 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                        "no scan netlist → post-DFT disclosed-skip", reason_class=_V.ReasonClass.INPUT_ABSENT))
 
     # ================= Step 13 — LEC (RTL ≡ handoff netlist) =================
+    # The handoff netlist is the one step 15 routes (see step_lec_equivalence).
+    return step_lec_equivalence(project, top_name, container, results,
+                                lec_max_completed_rungs=lec_max_completed_rungs)
+
+
+def step_lec_equivalence(project: Path, top_name: str, container: str,
+                         results: Optional[List[StepResult]] = None, *,
+                         lec_max_completed_rungs: Optional[int] = None
+                         ) -> List[StepResult]:
+    """Flow step 13: prove RTL == the netlist step 15 routes.
+
+    Split out of `step_dft_lec_chain` so phase 3 can re-prove after its
+    synthesis half writes the mapped netlist, without re-running steps 11/12.
+    `results` are earlier rows of the chain; they are returned in front of
+    this step's row.
+    """
+    results = list(results or [])
+    reports_dir = project / "reports"
     # lec_run's retries share ONE total deadline, and the runner reads that
     # budget from the producer rather than restating it. It is now RECORDED,
     # not ENFORCED: see the dispatch below.
     _LEC_PRODUCER_TIMEOUT_S = lec_producer_outer_timeout_s()
     t0 = time.time()
-    # --- Gate-netlist selection ---------------------------------------------
-    # The SELECTION IS UNCHANGED: post_dft_netlist.v when it exists on disk,
-    # else netlist.v. gate_netlist_for_lec() is byte-identical to that rule for
-    # every input and is exercised against it directly in
-    # programs/tests/test_lec_gate_netlist_select.py.
+    # --- The subject: the netlist step 15 routes (owner decision F1) --------
+    # Arm A used to prove RTL == `netlist.v`, the technology-GENERIC phase-2
+    # netlist. Step 15 never routes that file: it routes the MAPPED netlist,
+    # or the post-DFT one once a scan chain is published. Measured on spm
+    # (run23): lec.json PASS 66/66 on netlist.v (sha256 41e72ef1...) while PnR
+    # built spm_synth.v (sha256 15cd5ac7...). The subject is now asked of step
+    # 15's own resolver, so the proof and the router name one file, and the
+    # gate refuses a proof whose recorded sha256 is not that file's.
     #
-    # What it adds is DIAGNOSIS, not substitution. When the OSS Fault ATPG path
-    # ran, post_dft_netlist.v is an opt_clean of the CUT netlist — 0 flip-flops,
-    # every flop replaced by a `<inst>.d` pseudo-port pair — and yosys
-    # equiv_make aborts on the port match, comparing nothing. That must stay a
-    # visible hard FAIL on the real artifact. Quietly comparing <top>_synth.v
-    # instead would make the step canonically named
-    # `13_equivalence_check_rtl_post_dft_netlist` report PASS while the post-DFT
-    # netlist was never read, and would leave the upstream byte-copy in
-    # fault_atpg_run.py unflagged. So the note goes into the step record and the
-    # netlist handed to lec_run does not change.
-    gate_netlist, _lec_netlist_note, _lec_gate_is_cut = (
+    # `gate_netlist_for_lec` still names step 12's handoff; it is kept for its
+    # diagnosis only (a CUT post_dft_netlist.v is an upstream defect worth
+    # reporting even though step 15 refuses to route it).
+    _step12_rel, _lec_netlist_note, _lec_gate_is_cut = (
         _lec_gns.gate_netlist_for_lec(project, top_name))
+    gate_netlist, _lec_subject_note, _lec_subject_is_scan = (
+        _lec_gns.lec_subject_for_step13(project, top_name))
+    if not gate_netlist or not (project / gate_netlist).is_file():
+        # Never a substitute. Before phase 3's synthesis half has written the
+        # mapped netlist there is nothing step 15 would route, so there is
+        # nothing to prove yet; phase 3 runs this step again once it exists.
+        _why = (f"the netlist step 15 routes is not on disk yet "
+                f"({gate_netlist or 'unresolved'}: {_lec_subject_note}); "
+                f"step 13 proves only that netlist and proves nothing "
+                f"in its place")
+        _dft_disclose_skip(reports_dir / "lec_not_run.json", _why)
+        results.append(StepResult("lec_equivalence", "NOT_MEASURED",
+                       time.time() - t0, _why,
+                       reason_class=_V.ReasonClass.INPUT_ABSENT))
+        return results
     lec_run = PROGRAMS_DIR / "lec_run.py"
     if lec_run.is_file():
         cmd = _lec_run_argv(
@@ -20837,12 +20866,13 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
         # drops the scan output, and mirrors the gate's internal-wire prefix
         # onto the gold so points still match by name.
         #
-        # THE SELECTED NETLIST IS UNCHANGED. This adds constraints to the
-        # comparison of `gate_netlist`; it never swaps in a different file.
-        # lec_run re-checks that the gate really carries the declared DFT
-        # ports and refuses to wrap otherwise, so passing the flag on a
-        # non-scan netlist cannot alter that run's verdict.
-        if scan_netlist_is_real_chain(project):
+        # DECLARED BY STEP 11'S OWN RECORD. The flag is passed exactly when step
+        # 15's resolver says the subject is the scan-inserted netlist, which it
+        # says only when `scan_chain.json` is published, covers every flop, is
+        # L20-authorised and its DFT ports are in the netlist. lec_run reads
+        # the tie-offs from that record (`functional_mode_tieoff`), never from
+        # port names, and refuses to wrap a gate lacking the declared ports.
+        if _lec_subject_is_scan:
             cmd += ["--scan-meta", SCAN_CHAIN_JSON_REL]
         # NO OUTER DEADLINE, AND THE HISTORY IS THE ARGUMENT. This wall has
         # been raised twice already — 1200 s was below even ONE inner attempt,
@@ -20923,9 +20953,10 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                                f"not enforced: a progressing proof is never cut off)"
                                + (f"; {_lec_reuse}" if _lec_reuse else "")
                                + (f"; {_lec_reason}" if _lec_reason else "")
-                               # Only annotate when the artifact is unusable —
-                               # a healthy run keeps its original message.
-                               + (f"; gate-netlist WARNING: {_lec_netlist_note}"
+                               + f"; subject: {_lec_subject_note}"
+                               # Only annotate when step 12's artifact is
+                               # unusable.
+                               + (f"; step-12 WARNING: {_lec_netlist_note}"
                                   if _lec_gate_is_cut else ""),
                                output_files=["reports/lec.json", "reports/lec.rpt"],
                                reason_class=_lec_rc,

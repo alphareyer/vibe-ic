@@ -55980,6 +55980,68 @@ def run_step11_dft_after_synth(project: Path, top: str,
     return out
 
 
+def run_step13_lec_on_pnr_input(project: Path, top: str,
+                                container: str) -> List[StepResult]:
+    """Prove canonical Step 13 on the netlist step 15 is about to route.
+
+    Owner decision F1. Step 13 proves RTL == the netlist `pnr_input_netlist`
+    returns. On a design without DFT that is the MAPPED netlist, which only
+    exists once `step_synth` has run, so phase 2 cannot prove it and step 11's
+    self-heal (N/A without DFT) never re-invokes step 13. This runs step 13
+    alone, after synthesis and before PnR, when the recorded proof is not
+    about that file.
+
+    Keyed on content, not on a count: it re-proves only when the sha256 in
+    `reports/lec.json:proof_identity.gate_netlist` differs from step 15's
+    input (or no proof exists), so a current proof — including one the
+    step-11 self-heal just made — is left alone and costs nothing.
+    """
+    t0 = time.time()
+    import sys as _sys
+    if str(PROGRAMS_DIR) not in _sys.path:
+        _sys.path.insert(0, str(PROGRAMS_DIR))
+    import lec_gate_netlist_select as _gns
+    try:
+        doc = json.loads((project / "reports" / "lec.json").read_text())
+    except (OSError, ValueError):
+        doc = {}
+    binding = _gns.proof_subject_binding(project, doc, top)
+    state = binding.get("state")
+    if state == _gns.BINDING_MATCH:
+        return []
+    if state == _gns.BINDING_NO_CONSUMER:
+        return [StepResult(
+            "lec_pnr_input", "NOT_MEASURED", time.time() - t0,
+            f"step 15's input netlist is not on disk "
+            f"({binding.get('consumer_path')}: "
+            f"{binding.get('consumer_note')}), so step 13 has no subject",
+            extras={"subject_binding": binding},
+            reason_class=_V.ReasonClass.INPUT_ABSENT)]
+    try:
+        import design_one_shot_runner as _d2
+        rows = _d2.step_lec_equivalence(project, top, container)
+    except Exception as exc:  # noqa: BLE001 — reported, never swallowed
+        return [StepResult(
+            "lec_pnr_input", "FAIL", time.time() - t0,
+            f"step 13 on step 15's input raised {type(exc).__name__}: {exc}",
+            extras={"subject_binding": binding})]
+    out: List[StepResult] = []
+    for r in rows:
+        out.append(StepResult(
+            f"step13_{r.name}", r.status, r.duration_s,
+            f"re-proved on step 15's input (was {state}: proof "
+            f"{binding.get('proved_path')} {binding.get('proved_sha256')}, "
+            f"step 15 routes {binding.get('consumer_path')} "
+            f"{binding.get('consumer_sha256')}) | {r.detail}",
+            list(r.output_files), {**dict(r.extras), "subject_binding": binding},
+            reason_class=getattr(r, "reason_class", "") or "",
+            declared_by=getattr(r, "declared_by", "") or "",
+            waiver_rows=list(getattr(r, "waiver_rows", None) or []),
+            attribution=getattr(r, "attribution", "") or "",
+            disclosures=list(getattr(r, "disclosures", None) or [])))
+    return out
+
+
 def run_at_speed_atpg_producers(project: Path, written: List[str],
                                 notes: List[str]) -> None:
     """Produce DT1/DT2/DT3 at-speed coverage, disclosing every non-production.
@@ -71542,6 +71604,15 @@ def main() -> int:
                     project, effective_top, args.container):
                 plan.append(_s11)
                 print(f"[dft] {_s11.status:5s} {_s11.name}: {_s11.detail}",
+                      flush=True)
+            # ── canonical Step 13 on step 15's input (owner decision F1) ───
+            # After the step-11 self-heal (which may itself have re-proved) and
+            # before PnR: the proof must be about the netlist PnR routes.
+            # Emits nothing when the recorded proof already is.
+            for _s13 in run_step13_lec_on_pnr_input(
+                    project, effective_top, args.container):
+                plan.append(_s13)
+                print(f"[lec] {_s13.status:5s} {_s13.name}: {_s13.detail}",
                       flush=True)
             # ── canonical Steps 7 + 10 (pre-layout stage-2 sign-off) ───────
             # Emitted HERE, right after synth and BEFORE step_pnr, for the same
