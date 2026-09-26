@@ -56,6 +56,7 @@ MEASURED, both directions, same test file:
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -236,13 +237,34 @@ def test_real_output_still_reads_as_produced(tmp_path):
 #: the departure and the arrival by name) and as an ORDERED tuple, because
 #: `phase/stage/step` is a nesting order and a set cannot say so.
 #:
-#: These are the flow's own words for step 37. If the flow renames its phase,
-#: its stage, or this step, this pin goes red and NAMES the rename — that is
-#: what a pin is for, and it is the same reconciliation the count never made.
-_STEP_DIR_PARTS = ("phase3", "stage4",
-                   "37_gdsii_output_only_if_step_31_pv_fully_clean")
-_STEP_DIR_MEMBERS = {"phase3", "stage4",
-                     "37_gdsii_output_only_if_step_31_pv_fully_clean"}
+#: These are the flow's own words for step 37, READ from the flow: the phase
+#: and stage that prefix the GDS path it declares, its `stage:` field, and its
+#: id and `name:` word by word. This was a hand copy of those words and went
+#: red when v1.24.73 renamed step 37 ("GDSII output (after routed-layout
+#: pre-stream admission)"): the collector was right and the copy was stale. A
+#: copy cannot name a rename any better than the flow does; what the pin
+#: guards is that the collector nests under the flow's words and no others.
+def _flow_step(step_id: str) -> dict:
+    spec = yaml.safe_load(_FLOW.read_text(encoding="utf-8"))
+    hits = [s for s in spec["steps"] if str(s.get("id")) == step_id]
+    assert len(hits) == 1, f"the flow declares step {step_id} {len(hits)} times"
+    return hits[0]
+
+
+def _flow_dir_parts(step_id: str) -> tuple:
+    step = _flow_step(step_id)
+    gds = [o for o in _declared_outputs(step_id) if o.endswith(".gds")]
+    assert len(gds) == 1, f"step {step_id} declares one GDS output: {gds}"
+    phase, stage = gds[0].split("/")[:2]
+    assert stage == step["stage"], (
+        f"premise: step {step_id}'s `stage:` ({step['stage']}) is the stage "
+        f"its declared GDS lives under ({gds[0]})")
+    words = "_".join(re.findall(r"[a-z0-9]+", str(step["name"]).lower()))
+    return (phase, stage, f"{step_id}_{words[:48]}")
+
+
+_STEP_DIR_PARTS = _flow_dir_parts(GDS_STEP)
+_STEP_DIR_MEMBERS = set(_STEP_DIR_PARTS)
 
 
 def test_collector_still_builds_the_nested_symlink_tree(tmp_path):
