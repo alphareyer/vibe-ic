@@ -42,7 +42,23 @@ def test_p0_renders_skipped_condition():
     The `main()` half is kept as a wiring assertion: the owner is only the owner
     if the site that publishes the step actually calls it."""
     import inspect
-    assert F.p0_umbrella_verdict(None, []) == "NOT_APPLICABLE"
+    # RE-DERIVED (T118). v1.24.80 (3c501d609 / a4caf1550, #2642) split #447's
+    # "nothing executed" into the two states it always conflated: nothing
+    # executed because Step 1 has not produced RTL yet (NOT_APPLICABLE /
+    # ASKED_BEFORE_PRODUCER), and nothing executed although Step 1 completed
+    # and promised RTL (FAIL). The owner cannot tell the two apart from
+    # `(executed, records)` alone; the caller supplies `rtl_promised`, and the
+    # context-free call is pinned as FAIL by the owner's own truth table
+    # (test_p0_umbrella_verdict_coverage, test_t73_flow_declarations). What
+    # #447 pinned -- the not-yet-due empty dispatch renders NOT_APPLICABLE and
+    # never PASS -- is asserted in the context that makes it so.
+    status, reason = F._p0_umbrella_status(None, [], rtl_promised=False)
+    assert status == "NOT_APPLICABLE", (status, reason)
+    assert reason == F._reason_taxonomy.ASKED_BEFORE_PRODUCER, reason
+    # #447's core, in EITHER context: nothing executed is never a PASS.
+    for promised in (False, True):
+        assert F._p0_umbrella_status(None, [], rtl_promised=promised)[0] \
+            != "PASS", promised
     owner = inspect.getsource(F._p0_umbrella_status)
     # R-0915-85 — the word the owner writes is `NOT_APPLICABLE`, and it must
     # DECLARE what makes it so; #447's sentence is unchanged and the reference
@@ -57,9 +73,14 @@ def test_p0_renders_skipped_condition():
     # (the word and the reason beside it), so the wiring is asserted on the
     # call, not on one line's worth of it.
     _flat = " ".join(fn.split())
-    assert "_p0_umbrella_status( s_passed, structural_gate_records)" in _flat \
-        or "_p0_umbrella_status(s_passed, structural_gate_records)" in _flat, \
+    assert "_p0_umbrella_status( s_passed, structural_gate_records" in _flat \
+        or "_p0_umbrella_status(s_passed, structural_gate_records" in _flat, \
         _flat[:400]
+    # ...and it supplies the context: an empty dispatch in `main()` is judged
+    # not-yet-due, and only the post-Step-1 resolution may turn it into FAIL.
+    # Without this the #447 state above would be unreachable from the one
+    # publishing site.
+    assert "rtl_promised=s_passed is not None" in _flat, _flat[:400]
 
 
 def test_rtl_present_still_executes(tmp_path):
