@@ -291,6 +291,11 @@ def ngspice_deck(project: Path, row: dict, arts: Dict[str, dict],
             name = f"a9_{i}_{stat}"
             control.append(f"meas tran {name} {stat} v({node}) "
                            f"from={settle:g} to={stop:g}")
+        # The A4 reader takes a `meas` result from its `echo "MEAS k=" $&k`
+        # summary: ngspice prints the native line as `k = v at= t`, which its
+        # native-line pattern (a value that ENDS the line) does not match.
+        control.append(f'echo "MEAS a9_{i}_min=" $&a9_{i}_min '
+                       f'" a9_{i}_max=" $&a9_{i}_max')
         probes.append({"criterion": i, "node": node})
     control += [".endc", ".end"]
     head = [f"* {TOOL} — scenario {row['id']}: {row.get('description')}",
@@ -381,11 +386,15 @@ def dcosim_deck(project: Path, row: dict, arts: Dict[str, dict], *,
     stop = clock["delay"] + windows * window * period
     return "\n".join([
         f"* {TOOL} — scenario {row['id']}: {row.get('description')}",
-        "* bridge thresholds: 1/3 and 2/3 of the testbench's own logic rail "
-        "(an instrument definition; between them a sample is X)",
+        "* bridge thresholds: the data bit resolves below 1/3 and above 2/3 of "
+        "the testbench's own logic rail and is X between them; the clock "
+        "switches at half the rail with NO X band, because 0->X and X->1 are "
+        "each a Verilog posedge and an X band would count every clock twice "
+        "(measured). Instrument definitions, not bounds.",
         *body,
         f".model a9_adc adc_bridge in_low={rail / 3:g} in_high={2 * rail / 3:g}",
-        f"a9_clk [{clk_node}] [a9_dclk] a9_adc",
+        f".model a9_clk_adc adc_bridge in_low={rail / 2:g} in_high={rail / 2:g}",
+        f"a9_clk [{clk_node}] [a9_dclk] a9_clk_adc",
         f"a9_bit [{where[(block, pin)]}] [a9_dbit] a9_adc",
         f"a9_obs [a9_dclk a9_dbit] [a9_mark] a9_observer",
         f".model a9_observer d_cosim simulation=\"ivlng\" "

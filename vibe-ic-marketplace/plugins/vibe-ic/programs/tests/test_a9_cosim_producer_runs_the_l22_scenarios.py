@@ -153,6 +153,9 @@ def test_the_connection_replaces_the_consumers_supply(tmp_path):
     assert "v_vdd__delta_sigma" not in deck
     assert "r_load__ldo" not in deck
     assert "v_vdd__ldo ldo_vin 0 1.8" in deck
+    # Every measure reaches the A4 reader through its MEAS echo summary.
+    for i in (0, 1):
+        assert f'echo "MEAS a9_{i}_min=" $&a9_{i}_min' in deck
 
 
 def test_without_libvvp_every_dcosim_row_is_not_measured(tmp_path):
@@ -170,6 +173,24 @@ def test_without_libvvp_every_dcosim_row_is_not_measured(tmp_path):
     deck = (project / "phase3/mixed_signal/cosim/S5/deck_held.sp").read_text()
     assert f'lib_args=["{A9.LIBVVP_DEFAULT}"]' in deck
     assert "d_cosim simulation=\"ivlng\"" in deck
+
+
+def test_the_clock_bridge_has_no_unknown_band(tmp_path):
+    """MEASURED: with an X band on the clock, 0->X and X->1 are each a Verilog
+    posedge, and a real d_cosim run printed six 8-clock windows for 24 clocks.
+    """
+    import re
+    project = _project(tmp_path)
+    _run(project, FakeEngine(meas=_IN_BOUNDS))
+    deck = (project / "phase3/mixed_signal/cosim/S5/deck_held.sp").read_text()
+    clk_model = re.search(r"^a9_clk \[\S+\] \[a9_dclk\] (\S+)$", deck,
+                          re.MULTILINE).group(1)
+    m = re.search(rf"^\.model {clk_model} adc_bridge in_low=(\S+) "
+                  rf"in_high=(\S+)$", deck, re.MULTILINE)
+    assert m.group(1) == m.group(2)
+    bit = re.search(r"^\.model a9_adc adc_bridge in_low=(\S+) in_high=(\S+)$",
+                    deck, re.MULTILINE)
+    assert float(bit.group(1)) < float(bit.group(2))
 
 
 def test_the_sweep_is_run_against_the_reference(tmp_path):
