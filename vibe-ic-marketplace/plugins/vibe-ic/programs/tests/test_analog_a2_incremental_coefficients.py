@@ -232,6 +232,10 @@ def _env(order=2, osr=256, vref=1.0, vdd=1.2, enob=14, fclk=1.0):
     e.update(_entry()["constants"])
     e.update({"kt_j_300k": 4.141947e-21, "cap_area_ff_per_um2": 1.5,
               "rsheet_ohm_per_sq": 260.0, "vth_n_extracted_v": 0.5})
+    # q6-a2-cap-osr: the kT/C budget divides by the decode's N_eff, a constant
+    # A2 DERIVES from the bound `osr` and `order` and publishes; an env that
+    # stands in for A2's must carry it the same way (never a typed number).
+    e.update(m.declared_averaging_env(_entry(), e))
     return e
 
 

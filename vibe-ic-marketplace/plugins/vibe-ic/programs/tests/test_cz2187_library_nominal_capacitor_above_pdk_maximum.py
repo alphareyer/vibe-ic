@@ -187,12 +187,21 @@ def test_the_library_nominal_split_is_DECLARED_like_every_other_one():
 
 
 # ── the other direction ───────────────────────────────────────────────────
-@pytest.mark.parametrize("l_um", [0.5, 10.0, None])
+@pytest.mark.parametrize("l_um", ["min", 10.0, None])
 def test_a_library_nominal_capacitor_the_pdk_CAN_draw_is_untouched(l_um):
     """T4. THE CONTROL. `None` is the ceiling itself, read from the registry —
     at the maximum is legal, and a split that fires there would be splitting
-    devices the PDK draws perfectly well."""
+    devices the PDK draws perfectly well. `"min"` is the other end, also read
+    from the registry: it used to be a literal 0.5u, which was "drawable" only
+    while the family stated no capacitor minimum. It now states the Magic
+    gencell's (q6-a2-cap-osr), and a 0.5u device is one the gencell clamps UP
+    — re-solved or refused, see test_q6_a2_cap_split_and_swing_model.py —
+    so the control is taken AT the minimum, where it is legal."""
     lmax = _lmax()
+    if l_um == "min":
+        _e, _mx, minima = _family_records()
+        l_um = M.min_length_um(minima, A2.CAP_ROLE)
+        assert l_um is not None
     cap = _nominal_cap(l_um=(lmax if l_um is None else l_um))
     devs, exprs, recs, refusals = _split([dict(cap)], [])
     assert [d["name"] for d in devs] == ["c_nom"]

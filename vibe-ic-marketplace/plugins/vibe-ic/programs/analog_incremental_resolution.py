@@ -511,9 +511,10 @@ def swing_design(window: int, reference_window: int, feedback_delay: int,
         "within_x_lim": all(p <= x_lim + 1e-12
                             for p in after["peak_per_stage"]),
         "n_invariant_note": (
-            "the swing is evaluated inside the region where the loop's peaks "
-            "do not depend on N, so this record holds at every candidate "
-            "window; OSR is chosen on resolution alone"),
+            "evaluated inside the input range where the loop's swing does not "
+            "grow with N (`u_stable`), so one record serves every candidate "
+            "window (the emitter records the scaled peaks per candidate); "
+            "OSR is chosen on resolution alone"),
     })
     return rec
 

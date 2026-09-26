@@ -392,13 +392,17 @@ def _sha(p: Path) -> Optional[str]:
         return None
 
 
-def _run_decks(decks: Dict[str, Path], container: str, deadline_s: int
+def _run_decks(decks: Dict[str, Path], container: str, budget_s: float
                ) -> Dict[str, int]:
+    """Every deck in parallel, each SUPERVISED (no clock: reaped only on a
+    progress stall, vibe-ic#2051/#2083). `budget_s` is a recorded budget whose
+    crossing is announced, never a kill."""
     def one(item):
         tag, deck = item
         cmd = (f"cd {shlex.quote(str(deck.parent))} && ngspice -b "
                f"{shlex.quote(deck.name)} > {shlex.quote(deck.stem)}.log 2>&1")
-        cp = _ce.run_in_container(container, cmd, deadline_s=deadline_s)
+        cp = _ce.run_in_container_supervised(container, cmd,
+                                             ceiling_s=float(budget_s))
         return tag, cp.returncode
 
     with _cf.ThreadPoolExecutor(max_workers=max(1, len(decks))) as ex:
@@ -406,7 +410,7 @@ def _run_decks(decks: Dict[str, Path], container: str, deadline_s: int
 
 
 def probe(project: Path, block: str, container: str, validate: bool = False,
-          clocks: Optional[int] = None, deadline_s: int = 7200
+          clocks: Optional[int] = None, budget_s: float = 14400.0
           ) -> Tuple[int, Dict[str, Any]]:
     bdir = project / "phase3" / "analog" / block
     ir_p, sp_p = bdir / "topology.json", bdir / f"{block}.sp"
@@ -473,7 +477,7 @@ def probe(project: Path, block: str, container: str, validate: bool = False,
         p.write_text(deck)
         decks[tag] = p
     started = time.time()
-    rcs = _run_decks(decks, container, deadline_s)
+    rcs = _run_decks(decks, container, budget_s)
     runs: Dict[str, Any] = {}
     for tag in decks:
         w = read_wrdata(wdir / f"w_{tag}.txt", inst, vnets)
@@ -583,11 +587,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "VIBEIC_EDA_CONTAINER", "vibeic-eda"))
     ap.add_argument("--validate", action="store_true")
     ap.add_argument("--clocks", type=int, default=None)
-    ap.add_argument("--deadline-s", type=int, default=7200)
+    ap.add_argument("--budget-s", type=float, default=14400.0,
+                    help="recorded budget; its crossing is announced, it "
+                         "stops nothing")
     a = ap.parse_args(argv)
     project = a.project.resolve()
     rc, rec = probe(project, a.block, a.container, a.validate, a.clocks,
-                    a.deadline_s)
+                    a.budget_s)
     if rc != RC_NA:
         name = VALIDATION_ARTEFACT if a.validate else FIT_ARTEFACT
         _atomic.write_json(project / "phase3" / "analog" / a.block / name,

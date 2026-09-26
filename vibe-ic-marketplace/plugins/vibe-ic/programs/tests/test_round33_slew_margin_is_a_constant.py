@@ -54,6 +54,9 @@ def _env(**kw):
     e.update({"kt_j_300k": 4.141947e-21, "cap_area_ff_per_um2": 2.00009,
               "rsheet_ohm_per_sq": 260.0, "vth_n_extracted_v": 0.5})
     e.update(kw)
+    # q6-a2-cap-osr: the kT/C budget divides by the decode's N_eff, which A2
+    # DERIVES from the bound `osr` and `order`; carried the same way here.
+    e.update(m.declared_averaging_env(_entry(), e))
     return e
 
 

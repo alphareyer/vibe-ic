@@ -134,10 +134,21 @@ def test_a3_renders_what_a2_split(emitted):
         for u in units:
             assert rendered[u][1] == pytest.approx(rec["unit_l_um"],
                                                    rel=1e-9), (u, rec)
-    stripped = copy.deepcopy(ir)
-    stripped.pop(a2.EFFECTIVE_SPEC_KEY)
-    moved = _rendered(stripped, spec)
-    assert any(abs(moved[n][1] - rendered[n][1]) > 1e-6 for n in rendered)
+    # The key is load-bearing: an expression naming the free spec renders at
+    # the EFFECTIVE value, and at the declared one only when the key is gone.
+    probe_ir = copy.deepcopy(ir)
+    probe_ir["device_param_exprs"].append(
+        {"device": "cs1", "param": "m", "expr": "osr"})
+    ov = a3._resolve_params(probe_ir, a3.spec_values(spec))[0]
+    assert ov["cs1"]["m"] == 512.0
+    probe_ir.pop(a2.EFFECTIVE_SPEC_KEY)
+    ov = a3._resolve_params(probe_ir, a3.spec_values(spec))[0]
+    assert ov["cs1"]["m"] == 256.0
+    # and no capacitor length depends on the free spec by name any more: the
+    # window reaches the sizing only through the published `n_eff`
+    for e in ir["device_param_exprs"]:
+        if e.get("param") == "l":
+            assert "osr" not in e["expr"], e
 
 
 def test_an_ir_that_applied_nothing_renders_as_it_always_did():
@@ -418,3 +429,27 @@ def test_the_probe_deck_holds_the_input_and_reroots_relative_paths():
     assert ".lib /abs/y.lib ss" in deck
     assert "tran 1n 1u" not in deck and ".save v(a)" not in deck
     assert "wrdata w.txt v(xdut.vo1) v(xdut.vcm)" in deck
+
+
+def test_a_declaration_whose_caps_are_below_the_minimum_is_refused_by_name(
+        tmp_path):
+    """The other half of the split in `test_analog_a2_delta_sigma_spec_bound
+    ::test_the_sampling_capacitor_follows_the_declared_resolution`: at enob 12
+    the kT/C sampling capacitor (4.35 fF) is below the smallest drawable
+    device even as a square. Main emitted it at 0.24u for a gencell that
+    clamps it to 2.0u; it is now refused by name, with the bound's label."""
+    specs = [r for r in _specs() if r["name"] not in ("ENOB", "OSR",
+                                                       "Vin (diff)")]
+    specs += [{"name": "ENOB", "min": 12.0, "unit": "bit"},
+              {"name": "OSR", "target": 256.0, "unit": "—"}]
+    root = tmp_path / "e12"
+    root.mkdir()
+    make_project(root, [block(BLK, "delta_sigma", specs)])
+    assert run_prog(A1, root).returncode == 0
+    res = run_prog(A2, root, "--pdk", PDK)
+    assert res.returncode != 0
+    gap = json.loads((bdir(root, BLK) / "topology_gap.json").read_text())
+    txt = json.dumps(gap)
+    assert "cs1:" in txt and a2.BELOW_MINIMUM in txt
+    assert "Magic gencell" in txt
+    assert not (bdir(root, BLK) / "topology.json").exists()

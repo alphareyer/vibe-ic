@@ -870,10 +870,22 @@ SAMPLING_CAP_L_EXPR = cap_l_expr(SAMPLING_CAP_FF_EXPR)
 #: `factorial(order)` is written `order` because `requires_domain` admits only
 #: orders 1 and 2, where they are equal -- an entry admitting order >= 3 must
 #: state the factorial explicitly.
+#:
+#: WRITTEN IN `n_eff`, NOT `osr` (q6-a2-cap-osr), and deliberately: this ratio
+#: multiplies the sampling capacitor, whose kT/C budget now divides by `n_eff`,
+#: and the product is what sizes the OTA bias and `c_cmc`. With both halves in
+#: the same variable the product is EXACTLY the quantity it was when both were
+#: in `osr` — so the kT/C correction does not move the bias, `c_cmc`, or the
+#: landed invariant that the bias is independent of the window
+#: (`test_the_bias_is_INDEPENDENT_of_osr_and_that_is_physics`). Whether this
+#: open-loop load is the right load at all is a separate question and is NOT
+#: answered here: with the loop scaled from the measured coefficients the
+#: largest integrating capacitor is ~12 x Cs, while this ratio reads ~470 x Cs
+#: at N = 512 — recorded as an open gap, not changed in this lane.
 _LOAD_OVER_CS_DERIVED_EXPR = (
     "(1 + miller_fraction_of_load) / "
     "((vdd * integrator_swing_fraction_of_vdd * order "
-    "/ (vref * osr ** order)) ** (1.0 / order))")
+    "/ (vref * n_eff ** order)) ** (1.0 / order))")
 #: The OTA's load, in farads.
 _LOAD_F_EXPR = ("(" + SAMPLING_CAP_FF_EXPR + ") * ("
                 + _LOAD_OVER_CS_DERIVED_EXPR + ") / farad_to_ff")
@@ -4054,6 +4066,52 @@ def loop_swing_and_sizing(lib: Dict[str, Any],
     return rec
 
 
+def loop_ratio_groups(decl: Optional[Dict[str, Any]],
+                      stage_rec: Optional[Dict[str, Any]],
+                      devices: List[Dict[str, Any]]
+                      ) -> Optional[List[Dict[str, Any]]]:
+    """One matching group per integrator: the sampling, integrating and
+    feedback capacitors whose RATIOS are that stage's loop coefficients.
+
+    q6-a2-cap-osr split rule. A VALUE-ONLY capacitor (auto-zero, decoupling,
+    compensation) is realised as N identical parallel units and needs no
+    matching group — `layout_matching` style `none` is legitimate for it.
+    A RATIO-DEFINING capacitor is only as good as its ratio, so the group
+    states that it is to be drawn from ONE shared unit cell (identical units
+    for the integer part, a remainder cell keeping the unit's area-to-
+    perimeter ratio — McCreary, JSSC 16(6), 1981) and placed common-centroid
+    with at least two dummies per side.
+
+    STATED, NOT YET DRAWN: A5 has no common-centroid placer and no dummy/LVS
+    reconciliation path, so `layout_status` says the placement is not
+    implemented rather than letting a reader assume it was."""
+    if not isinstance(decl, dict) or not stage_rec:
+        return None
+    casc = [g for g in [stage_rec] + list(stage_rec.get("groups") or [])
+            if isinstance(g, dict) and g.get("role") == "cascade"]
+    if not casc:
+        return None
+    dev = decl.get("coefficient_devices") or {}
+    names = {str(d.get("name")) for d in devices}
+    out = []
+    for i in range(1, int(casc[0]["stages"]) + 1):
+        members = []
+        for role in ("sampling", "integrating", "feedback"):
+            base = str(dev.get(role, "")).format(i=i)
+            got = sorted(n for n in names
+                         if n == base or re.fullmatch(
+                             re.escape(base) + r"_u\d+", n))
+            members.append({"role": role, "device": base, "instances": got})
+        out.append({
+            "name": f"loop_coefficients_stage{i}", "kind": "ratio",
+            "members": members, "style": "common_centroid",
+            "unit_cell": "shared", "dummies_per_side": 2,
+            "remainder_rule": "area_to_perimeter_preserved",
+            "layout_status": "declared_not_implemented_in_a5",
+        })
+    return out
+
+
 def apply_loop_sizing(param_exprs: List[Dict[str, Any]],
                       decl: Dict[str, Any], swing: Dict[str, Any]
                       ) -> List[Dict[str, Any]]:
@@ -6077,6 +6135,11 @@ def build_ir(block: str, btype: str, entry: Dict[str, Any],
         "loop_swing": loop_swing,
         "loop_probe": (dict(_loop_decl) if isinstance(_loop_decl, dict)
                        else None),
+        # The capacitors whose RATIOS are the loop's coefficients, one group
+        # per integrator — see `loop_ratio_groups`. None for an entry with no
+        # `loop_probe`.
+        "ratio_matching_groups": loop_ratio_groups(_loop_decl, stage_rec,
+                                                   devices),
         "devices": devices,
         "spec_knobs": [dict(k) for k in lib.get("spec_knobs", [])],
         "knobs": knobs,

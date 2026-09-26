@@ -277,20 +277,41 @@ def _cap_lengths(root, d):
 
 def test_the_sampling_capacitor_follows_the_declared_resolution(tmp_path):
     """Sampled kT/C noise against the quantisation floor: one bit of ENOB is
-    4x the capacitance. Two bits is 16x, and a library default is 1x."""
-    d14, _, r14 = a2(tmp_path, "e14", enob=14.0)
-    d12, _, r12 = a2(tmp_path, "e12", enob=12.0)
-    c14, c12 = _cap_lengths(r14, d14), _cap_lengths(r12, d12)
-    assert c14["cs1"] == pytest.approx(c12["cs1"] * 16.0, rel=A2_TOL)
+    4x the capacitance. Two bits is 16x, and a library default is 1x.
+
+    SWEPT AT 15/13, not 14/12 as it was (q6-a2-cap-osr). The target family now
+    states its capacitor MINIMUM (the Magic gencell's 2.0u), and at enob 12 the
+    kT/C sampling capacitor is 4.35 fF — below the smallest drawable device
+    even re-solved as a square (1.65u) — so that declaration is REFUSED by
+    name instead of drawn clamped up to a larger capacitor than it asked for.
+    The assertion is unchanged in kind and the ratio is still exact (two bits,
+    16x); the refused point is asserted as a refusal in
+    `test_q6_a2_cap_split_and_swing_model.py::
+    test_a_declaration_whose_caps_are_below_the_minimum_is_refused_by_name`,
+    so the population is split rather than narrowed."""
+    d15, _, r15 = a2(tmp_path, "e15", enob=15.0)
+    d13, _, r13 = a2(tmp_path, "e13", enob=13.0)
+    c15, c13 = _cap_lengths(r15, d15), _cap_lengths(r13, d13)
+    assert c15["cs1"] == pytest.approx(c13["cs1"] * 16.0, rel=A2_TOL)
 
 
 def test_the_sampling_capacitor_follows_the_declared_oversampling(tmp_path):
     """Oversampling spreads the sampled noise, so it buys the capacitance
-    back one for one."""
+    back one for one — one for one in EFFECTIVE samples (q6-a2-cap-osr).
+
+    The incremental decode weights its samples with the loop's own triangular
+    input response, so the noise averages over N_eff = (sum w)^2 / sum w^2,
+    not over N: 0.744 N at 64 and 0.749 N at 256. The capacitance ratio is
+    therefore the N_eff ratio (4.025 here), read from the constant each IR
+    publishes; asserting a bare 4.0 would assert the equal-weight averaging
+    the decode does not do."""
     d_hi, _, r_hi = a2(tmp_path, "o256", osr=256.0)
     d_lo, _, r_lo = a2(tmp_path, "o64", osr=64.0)
     c_hi, c_lo = _cap_lengths(r_hi, d_hi), _cap_lengths(r_lo, d_lo)
-    assert c_lo["cs1"] == pytest.approx(c_hi["cs1"] * 4.0, rel=1e-3)
+    n_hi = read_json(d_hi / "topology.json")["constants"]["n_eff"]
+    n_lo = read_json(d_lo / "topology.json")["constants"]["n_eff"]
+    assert n_hi / n_lo == pytest.approx(4.0, rel=0.01)
+    assert c_lo["cs1"] == pytest.approx(c_hi["cs1"] * n_hi / n_lo, rel=1e-3)
 
 
 def test_the_sampling_capacitor_follows_the_declared_reference(tmp_path):
