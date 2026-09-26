@@ -220,3 +220,98 @@ def test_an_af_of_one_or_less_is_not_applied_and_the_basis_says_unaccelerated(tm
         assert rep["acceleration_factor"] is None, (af, rep)
         assert "UNACCELERATED" in rep["fit_basis"], (af, rep)
         assert abs(rep["fit_point_estimate"] - (0.5 / 100000.0) * 1e9) < 1e-6, (af, rep)
+
+
+# ------------- E: migration 44 — chi-square bound at a DECLARED confidence level
+# review70 step 44: "replace the 0.5-failure FIT floor with a chi-square upper
+# bound at a declared confidence level and enforce the declared sample plan".
+# chi2(CL, 2)/2 = -ln(1 - CL) for zero failures; values below are computed from
+# that identity, not copied from any standard.
+def test_zero_failure_bound_is_minus_ln_one_minus_cl(tmp_path):
+    import math
+    for cl in (0.6, 0.9):
+        rep = HTOL.audit(_mk(tmp_path, {"units_tested": 100, "stress_hours": 1000,
+                                        "failures": 0, "confidence_level": cl}))
+        assert rep["verdict"] == "PASS", rep
+        want = -math.log(1 - cl) / 100000.0 * 1e9
+        assert abs(rep["fit_upper_bound"] - want) < 1e-2, (cl, rep)
+        assert rep["fit_upper_bound"] > rep["fit_point_estimate"], rep
+        assert rep["fit_upper_bound_status"] == "MEASURED"
+
+
+def test_nonzero_failure_bound_matches_the_poisson_identity(tmp_path):
+    """f = 1 at 60 % CL: lam with P(Poisson(lam) <= 1) = 0.4, i.e.
+    e^-lam (1 + lam) = 0.4 -> lam = 2.0223 (chi2(0.6, 4)/2)."""
+    import math
+    lam = HTOL.chi2_upper_half(0.6, 1)
+    assert abs(math.exp(-lam) * (1 + lam) - 0.4) < 1e-9, lam
+    assert abs(lam - 2.0223) < 1e-3, lam
+
+
+def test_the_bound_applies_the_acceleration_factor(tmp_path):
+    import math
+    rep = HTOL.audit(_mk(tmp_path, {"units_tested": 100, "stress_hours": 1000,
+                                    "failures": 0, "confidence_level": 0.6,
+                                    "acceleration_factor": 50}))
+    want = -math.log(0.4) / 5000000.0 * 1e9
+    assert abs(rep["fit_upper_bound"] - want) < 1e-3, rep
+
+
+def test_no_confidence_level_means_no_bound_and_says_why(tmp_path):
+    rep = HTOL.audit(_mk(tmp_path, {"units_tested": 77, "stress_hours": 1000,
+                                    "failures": 0}))
+    assert rep["verdict"] == "PASS", rep
+    assert rep["fit_upper_bound"] is None, rep
+    assert rep["fit_upper_bound_status"].startswith("NOT_MEASURED"), rep
+
+
+def test_an_invalid_confidence_level_is_refused(tmp_path):
+    for cl in (0, 1, 60, -0.1, "0.6", True):
+        rep = HTOL.audit(_mk(tmp_path, {"units_tested": 77, "stress_hours": 1000,
+                                        "failures": 0, "confidence_level": cl}))
+        assert rep["verdict"] == "FAIL", (cl, rep)
+        assert "CONFIDENCE_LEVEL_INVALID" in rep["reason"], (cl, rep)
+
+
+def test_a_fit_claim_below_the_chi_square_bound_fails(tmp_path):
+    """The 0.5-floor number (5000 FIT here) claimed as the 60 % bound is 1.8x
+    too optimistic: the bound is 9163 FIT."""
+    rep = HTOL.audit(_mk(tmp_path, {"units_tested": 100, "stress_hours": 1000,
+                                    "failures": 0, "confidence_level": 0.6,
+                                    "fit": 5000}))
+    assert rep["verdict"] == "FAIL", rep
+    assert "FIT_CLAIM_UNDERSTATED" in rep["reason"], rep
+
+
+def test_a_fit_claim_at_the_bound_passes(tmp_path):
+    rep = HTOL.audit(_mk(tmp_path, {"units_tested": 100, "stress_hours": 1000,
+                                    "failures": 0, "confidence_level": 0.6,
+                                    "fit": 9200}))
+    assert rep["verdict"] == "PASS", rep
+
+
+def test_a_fit_claim_without_a_confidence_level_fails(tmp_path):
+    rep = HTOL.audit(_mk(tmp_path, {"units_tested": 100, "stress_hours": 1000,
+                                    "failures": 0, "fit": 10}))
+    assert rep["verdict"] == "FAIL", rep
+    assert "FIT_CLAIM_WITHOUT_CONFIDENCE" in rep["reason"], rep
+
+
+def test_a_declared_sample_plan_must_reconcile_with_units_tested(tmp_path):
+    rep = HTOL.audit(_mk(tmp_path, {"units_tested": 77, "stress_hours": 1000,
+                                    "failures": 0,
+                                    "sample_plan": {"lots": 3, "units_per_lot": 77}}))
+    assert rep["verdict"] == "FAIL", rep
+    assert "SAMPLE_PLAN_INCONSISTENT" in rep["reason"], rep
+    rep = HTOL.audit(_mk(tmp_path, {"units_tested": 231, "stress_hours": 1000,
+                                    "failures": 0,
+                                    "sample_plan": {"lots": 3, "units_per_lot": 77}}))
+    assert rep["verdict"] == "PASS", rep
+    assert rep["sample_plan"] == {"lots": 3, "units_per_lot": 77}, rep
+
+
+def test_a_claimed_standard_without_a_declared_plan_fails(tmp_path):
+    rep = HTOL.audit(_mk(tmp_path, {"units_tested": 77, "stress_hours": 1000,
+                                    "failures": 0, "qual_standard": "X-STD"}))
+    assert rep["verdict"] == "FAIL", rep
+    assert "SAMPLE_PLAN_UNDECLARED" in rep["reason"], rep

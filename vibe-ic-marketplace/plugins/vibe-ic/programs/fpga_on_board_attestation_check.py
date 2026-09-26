@@ -312,6 +312,50 @@ def inspect(project: Path, min_scenarios: int = 1) -> List[Finding]:
     return findings
 
 
+# ── NOT_MEASURED when no hardware was ever brought to the bench ──────────────
+# OWNER RULING (fleet ledger, 2026-09-25 15:2x): steps 6 and 39 (FPGA on-board)
+# are EXCLUDED from the IC "truly PASS" goal and are reported separately as
+# NOT_MEASURED -- not counted, never called PASS. review70 step 39 (migration
+# 39): no LibreLane/OpenROAD step compiles or programs an FPGA and the image has
+# no Quartus, so this gate stays; what changes is the WORD for "nothing was
+# measured". A project with none of the three PHYSICAL evidence classes (final
+# .sof, programmer log file, bench evidence file) did not fail a board test --
+# it never had one. It reports NOT_MEASURED with the same non-zero rc, so no
+# consumer reading rc can mistake it for a pass. A manifest that CLAIMS a pass
+# with no physical class behind it stays a FAIL: that is the forged-JSON case
+# this gate exists for, not an absence.
+RULING_FPGA_EXCLUDED = ("owner 2026-09-25: steps 6 and 39 (FPGA on-board) are "
+                        "excluded from the IC PASS goal; reported NOT_MEASURED, "
+                        "never PASS")
+
+
+def physical_evidence_files(project: Path) -> List[str]:
+    """Project-relative paths of every PHYSICAL evidence file (classes 2-4).
+    Presence only -- the content judgement stays in `inspect`."""
+    out: List[Path] = []
+    final_dir, _drift = declared_final_bitstream_dir(project)
+    if final_dir.is_dir():
+        out.extend(sorted(final_dir.glob("*.sof")))
+    fpga_reports = _pl.reports_phase2_dir(project) / "fpga"
+    if fpga_reports.is_dir():
+        out.extend(sorted(fpga_reports.glob("*.log")))
+    for g in EVIDENCE_GLOBS:
+        out.extend(sorted(project.glob(g)))
+    return sorted({str(p.relative_to(project)) if p.is_relative_to(project)
+                   else str(p) for p in out if p.is_file()})
+
+
+def _manifest_claims_pass(project: Path) -> bool:
+    try:
+        data = json.loads(_pl.report_path(
+            project, "fpga/on_board_pass.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and (
+        data.get("all_scenarios_passed") is True
+        or data.get("verdict") == "PASS")
+
+
 # ── waiver plumbing (same contract as final_test_attestation_check.py) ──
 # Deliberately identical to the sibling gate: a waiver is an entry in the
 # project's `waivers.json`, written by `waivers_materialize.py` from the
@@ -434,10 +478,20 @@ def main(argv: List[str] | None = None) -> int:
     for f in findings:
         icon = "✗" if f.severity == "error" else "⚠"
         print(f"  {icon} [{f.severity}] {f.rule}: {f.message}")
-    print(f"\nOverall: {'PASS' if not errors else 'FAIL'}")
+    overall = "PASS" if not errors else "FAIL"
+    extra = {}
+    if errors and not physical_evidence_files(project) \
+            and not _manifest_claims_pass(project):
+        overall = "NOT_MEASURED"
+        extra = {"reason_class": "hardware_required",
+                 "reason": ("no final .sof, programmer log or bench evidence "
+                            "exists: no FPGA board test was performed"),
+                 "ruling": RULING_FPGA_EXCLUDED}
+    print(f"\nOverall: {overall}")
 
     _write_report(args.json, {
-        "overall": "PASS" if not errors else "FAIL",
+        "overall": overall,
+        **extra,
         "findings": [asdict(f) for f in findings],
     })
 

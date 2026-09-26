@@ -622,6 +622,76 @@ def stale_layout_members(project):
     return stale
 
 
+# ---------------------------------------------------------------------------
+# THE LAYOUT MEMBER IS THE TOOL'S FINAL GDS WHEN STEP 37 RAN THROUGH LIBRELANE.
+#
+# Migration 38 (review70 step 38): LibreLane/OpenROAD have no hand-off step, so
+# step 38 stays a vibe-ic packaging gate, but once step 37 is switched to the
+# tool (`phase3/librelane_switch.json` steps."37" = librelane | dual) the layout
+# the foundry receives must be the bytes LibreLane's finishing chain produced.
+# `librelane_step37.run` records them in `phase3/librelane/37-promotion.json`
+# (`source_sha256` = the selected arm's finished GDS; `canonical` = the flow
+# path it was copied to). The stale-member rule above compares the member with
+# the signed-off copy; this one compares it with the TOOL's output, so a copy
+# re-finished in place after promotion (the old prefinish path) or a member
+# left from a direct run cannot ship under a LibreLane sign-off. Direct mode is
+# unchanged: there is no tool record to compare with.
+# ---------------------------------------------------------------------------
+RULE_LAYOUT_NOT_TOOL_OUTPUT = "FOUNDRY_HANDOFF_LAYOUT_NOT_THE_TOOL_OUTPUT"
+_LL_PROMOTION = "phase3/librelane/37-promotion.json"
+
+
+def tool_layout_binding(project):
+    """Findings (list of dicts) binding the package layout member to the
+    LibreLane step-37 promotion receipt. [] when step 37 ran direct or the
+    kit has not been written yet."""
+    project = Path(project)
+    hd = project / "phase3/stage4/foundry_handoff"
+    if not hd.is_dir():
+        return []
+    try:
+        from librelane_contract import Refusal, selected_mode
+    except ImportError as exc:
+        return [{"why": f"librelane_contract unavailable ({exc}); the step-37 "
+                        f"mode cannot be read"}]
+    try:
+        mode = selected_mode(project, "37")
+    except Refusal as exc:
+        return [{"why": f"phase3/librelane_switch.json is invalid: {exc}"}]
+    except (OSError, ValueError) as exc:
+        return [{"why": f"phase3/librelane_switch.json unreadable: {exc}"}]
+    if mode == "direct":
+        return []
+    receipt = project / _LL_PROMOTION
+    try:
+        rec = json.loads(receipt.read_text(errors="replace"))
+    except (OSError, ValueError):
+        rec = None
+    if not isinstance(rec, dict):
+        return [{"mode": mode, "why": (
+            f"step 37 is switched to {mode!r} but {_LL_PROMOTION} is absent or "
+            f"unreadable, so no member can be shown to be the tool's GDS")}]
+    src_sha = rec.get("source_sha256")
+    canonical = rec.get("canonical")
+    if not (isinstance(src_sha, str) and len(src_sha) == 64
+            and isinstance(canonical, str) and canonical):
+        return [{"mode": mode, "why": (
+            f"{_LL_PROMOTION} names no source_sha256/canonical path")}]
+    name = Path(canonical).name
+    member = hd / name
+    if not member.is_file():
+        return [{"mode": mode, "member": str(member.relative_to(project)),
+                 "why": f"the package carries no {name}, the member step 37 "
+                        f"promoted"}]
+    m_sha = sha256_file(member)
+    if m_sha != src_sha:
+        return [{"mode": mode, "member": str(member.relative_to(project)),
+                 "member_sha256": m_sha, "tool_source": rec.get("source"),
+                 "tool_source_sha256": src_sha,
+                 "why": "member bytes are not LibreLane's final GDS"}]
+    return []
+
+
 def gds_files_on_disk(project):
     """EVERY `*.gds` under the three roots — any size, any name, frame or die.
 
@@ -867,6 +937,27 @@ def main(argv=None):
         }]
         report = {"program": _GATE_NAME, "verdict": verdict,
                   "findings": findings, "stale_layout_members": stale}
+        _ga.stamp(report)
+        out = json.dumps(report, indent=2, ensure_ascii=False)
+        if args.json:
+            Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(Path(args.json), out)
+        print(out)
+        return rc
+
+    unbound = tool_layout_binding(project)
+    if unbound:
+        verdict, rc = "FAIL", 1
+        findings = [{
+            "severity": "ERROR",
+            "rule": RULE_LAYOUT_NOT_TOOL_OUTPUT,
+            "message": (
+                f"step 37 ran through LibreLane but the hand-off layout member "
+                f"is not its final GDS: {unbound[0]['why']}. The package must "
+                f"carry the bytes {_LL_PROMOTION} records (source_sha256)."),
+        }]
+        report = {"program": _GATE_NAME, "verdict": verdict,
+                  "findings": findings, "tool_layout_binding": unbound}
         _ga.stamp(report)
         out = json.dumps(report, indent=2, ensure_ascii=False)
         if args.json:

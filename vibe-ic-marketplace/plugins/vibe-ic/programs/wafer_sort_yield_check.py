@@ -376,6 +376,16 @@ def _emit(args, project, verdict, step_label, yield_rel, map_rel, waiver,
                                else None),
         "target_yield_pct": (round(target, 4) if target is not None
                              else None),
+        # migration 41 (review70): the bar should come from the intent, so a
+        # producer cannot pick its own. No phase-1 L-doc field carries a sort
+        # yield target yet (and l_doc_field_producer_check refuses a reader
+        # with no producer), so the target is still the artefact's own --
+        # SAID, not silent.
+        "target_source": ("artefact" if target is not None else None),
+        "target_source_note": (
+            "stated by the sort report this gate audits; no intent document "
+            "declares a sort-yield target, so the producer set its own bar"
+            if target is not None else None),
         "total_die": (int(total) if total is not None else None),
         "wafer_map_rows": map_rows,
         "waiver": waiver,
