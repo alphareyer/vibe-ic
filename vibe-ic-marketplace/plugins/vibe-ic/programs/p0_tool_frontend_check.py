@@ -27,6 +27,15 @@ import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the 
 # visible in diagnostics without becoming a stricter new P0 policy.
 BLOCKING_CODES = frozenset({"SELRANGE", "PINNOTFOUND", "MULTIDRIVEN"})
 
+# RETIRED BY THIS FRONT END, and what blocks each one's finding now:
+#   bitwidth_consistency_check  bitselect-out-of-range -> SELRANGE     (program deleted)
+#   module_port_audit           port-name MISMATCH     -> PINNOTFOUND  (kept as a port
+#                               parser for _staged_top_module and phase3_one_shot_runner)
+# The record is `RETIRED_REGEX_GATES` in tests/test_p0_tool_frontend_migration.py,
+# and it is kept out of this file on purpose: `gate_is_wired_check` credits a
+# gate name written as a table literal in a program that can spawn as a
+# dispatch, so a retirement record here would read as the retired gate's caller.
+
 
 def default_image() -> str:
     """The image this check runs, resolved and never remembered.

@@ -46,6 +46,8 @@ def _load(name, filename):
 F = _load("flow_compliance_check", "flow_compliance_check.py")
 D = _load("p0_gate_invocability_drift_check", "p0_gate_invocability_drift_check.py")
 REGISTER = F._UNDRIVABLE_BY_STRUCTURAL_UMBRELLA
+_RETIRED = _load("test_p0_tool_frontend_migration_rec",
+                 "tests/test_p0_tool_frontend_migration.py").RETIRED_REGEX_GATES
 
 _VALID_CATEGORIES = {
     "reddens-corpus", "zero-decidable-denom", "cross-layer-contract",
@@ -147,7 +149,12 @@ def test_table_covers_exactly_the_undecided_gates_found_so_far():
     visible rather than merged into one flat set: the twelve were found by a
     check that worked, the four were found by fixing the check.
     """
-    assert set(REGISTER) == _ROUND6_TWELVE | _ROUND7_RULE_B_FOUR
+    # A gate that later LEFT the umbrella leaves this register with it. It does
+    # not leave the frontier: it must be accounted for by the retirement record
+    # instead, and by exactly one of the two.
+    retired = set(_RETIRED) & (_ROUND6_TWELVE | _ROUND7_RULE_B_FOUR)
+    assert not set(REGISTER) & retired, sorted(set(REGISTER) & retired)
+    assert set(REGISTER) | retired == _ROUND6_TWELVE | _ROUND7_RULE_B_FOUR
 
 
 def test_the_round7_four_are_now_explicit_derived_na_on_an_empty_design():

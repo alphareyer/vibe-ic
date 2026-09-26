@@ -136,22 +136,6 @@
       },
       "why_permitted": "Handed an EMPTY corpus this sweep REFUSES (rc 2 on three readable empty directories, rc 2 on no targets at all) instead of returning the rc 0 it returns over the populated corpus. Its clean exit is therefore not reachable without reading input, so it is not confusable with a no-input run -- which is the confusion this survey exists to catch. What it still lacks is the machine-readable half: it says so in prose rather than through the VACUOUS_PASS sentinel. That is a reporting-format gap, not an unreached check."
     },
-    "bitwidth_consistency_check.py": {
-      "deciding_invocation": "positional/files",
-      "empty_dirs_corpus": {
-        "rc": 2,
-        "says": "Files: 0  Errors: 0  Warnings: 0  Result: PASS"
-      },
-      "empty_none_corpus": {
-        "rc": 2,
-        "says": "usage: bitwidth_consistency_check.py [-h] [--json] paths [paths ...]"
-      },
-      "populated_corpus": {
-        "rc": 0,
-        "says": "Files: 3  Errors: 0  Warnings: 0  Result: PASS"
-      },
-      "why_permitted": "Handed an EMPTY corpus this sweep REFUSES (rc 2 on three readable empty directories, rc 2 on no targets at all) instead of returning the rc 0 it returns over the populated corpus. Its clean exit is therefore not reachable without reading input, so it is not confusable with a no-input run -- which is the confusion this survey exists to catch. What it still lacks is the machine-readable half: it says so in prose rather than through the VACUOUS_PASS sentinel. That is a reporting-format gap, not an unreached check."
-    },
     "crc_residual_check.py": {
       "deciding_invocation": "positional/files",
       "empty_dirs_corpus": {

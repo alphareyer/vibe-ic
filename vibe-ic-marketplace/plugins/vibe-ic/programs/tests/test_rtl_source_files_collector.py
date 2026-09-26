@@ -143,9 +143,21 @@ def test_gate_ignores_generated_netlist_end_to_end(tmp_path):
     _mk(tmp_path / "phase2/stage2/synth/netlist_yosys.v",
         "module top(input clk);\n  reg [4:0] idx;\n"
         "  wire [7:0] a = {1'b0, idx[6:0]};\nendmodule\n")
-    r = subprocess.run(
-        [sys.executable, str(PROGRAMS / "bitwidth_consistency_check.py"),
-         ".", "--json"],
-        cwd=tmp_path, capture_output=True, text=True)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert '"files_scanned": 1' in r.stdout
+    # The gate this drove, `bitwidth_consistency_check`, was retired to the P0
+    # tool front end, which collects its sources the same way and hands them
+    # to Yosys and Verilator. Only the tool's execution is faked here.
+    import p0_tool_frontend_check as fe
+    handed = []
+
+    def fake(tool, args, root, image):
+        handed.append(args)
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    real, fe._invoke = fe._invoke, fake
+    try:
+        result = fe.check(tmp_path.resolve(), "test-image")
+    finally:
+        fe._invoke = real
+    assert result["sources"] == ["phase2/stage1/rtl/top.v"], result
+    assert handed and not any("netlist_yosys" in a for argv in handed
+                                for a in argv), handed

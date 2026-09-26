@@ -161,7 +161,7 @@ def test_no_digital_gate_is_ever_owned_by_the_analog_deferral():
     floor — the failure mode a fix tuned until a count reached zero produces."""
     skip = F._skip_analog_p0_gates()
     for g in ("rig_topology_disclosure_check", "handshake_check",
-              "bitwidth_consistency_check", "cdc_async_input_check",
+              "function_void_with_output_check", "cdc_async_input_check",
               "crc_completeness_check"):
         assert g not in skip, f"{g} is a digital gate and must always run"
     for g in F._ANALOG_TRACK_OWNS:

@@ -290,7 +290,7 @@ def test_class_skipped_gates_for_arithmetic_primitive(tmp_path):
         assert "N/A for class" in skipped[g]
     # Core functional/structural gates are NOT skipped.
     for g in ("crc_completeness_check", "fsm_error_invariant",
-              "bitwidth_consistency_check"):
+              "function_void_with_output_check"):
         assert g not in skipped, g
     # #1978 took four PROTOCOL-INDEPENDENT questions out of this table on the
     # rule that a caller may not suppress them wholesale by name. That is a
