@@ -8,12 +8,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import shutil
+
 import pytest
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 import canonical_primitive_synth as synth
 from _hostpaths import require_repo
+from not_verified_tier import skip_not_verified
 
 
 def description(valid="valid", ready="ready"):
@@ -55,6 +58,13 @@ def test_aliases_emit_through_existing_cli(valid, ready, tmp_path):
     # backpressure and needless-stall invariants on actual composed RTL.
     tb = tmp_path / "tb.v"
     tb.write_text(synth.emit_scoreboard_tb(contract))
+    # Everything above is verified on any host; the scoreboard needs a
+    # simulator, and without one that half is NOT_VERIFIED, never passed.
+    missing = [t for t in ("iverilog", "vvp") if not shutil.which(t)]
+    if missing:
+        skip_not_verified(
+            f"{missing} not on PATH, so the composed RTL's scoreboard cannot run",
+            "tools/ci/run_suite_in_eda_image.sh -- programs/tests/test_handshake_direction_suffix.py")
     executable = tmp_path / "sim.vvp"
     compiled = subprocess.run(
         ["iverilog", "-g2012", "-s", "tb_transport_stage", "-o",

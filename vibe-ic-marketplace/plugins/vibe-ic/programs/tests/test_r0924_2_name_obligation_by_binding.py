@@ -16,8 +16,12 @@ Through the real programs (`formal_harness_gen.generate` ->
   declared port not the reset  -> BINDING_OUTSTANDING, gate not PASS
   covering property refuted    -> BINDING_OUTSTANDING, gate not PASS
 
-Needs yosys + sby on PATH (the vibeic-eda image, as CI and falsref run them);
-without them the engine arms FAIL with the reason, never skip. chip-AGNOSTIC.
+Needs yosys + sby on PATH (the vibeic-eda image, as CI and falsref run them).
+Without them the engine arms are NOT_VERIFIED — declared through
+`not_verified_tier`, named in the session's own summary, and a session with
+VIBEIC_REQUIRE_EDA_VERIFICATION=1 (a landing host) fails on them. A bare
+assertion made a host without the image read as a defect in this rule, and
+a bare `pytest.skip` would read as a pass; neither is true. chip-AGNOSTIC.
 """
 from __future__ import annotations
 
@@ -32,6 +36,7 @@ sys.path.insert(0, str(PROGRAMS))
 import formal_harness_gen as fhg  # noqa: E402
 import formal_property_run as fpr  # noqa: E402
 import formal_proof_evidence_check as gate  # noqa: E402
+from not_verified_tier import skip_not_verified  # noqa: E402
 
 NAME_ID = "L8.clock_and_reset_waveform.resets.0.name"
 RTL = """module ctr(input clk, input rst, input en, output reg [3:0] q);
@@ -55,7 +60,10 @@ def _project(tmp: Path, reset_name: str = "rst") -> Path:
 
 def _step5(project: Path, harness_edit=None):
     missing = [t for t in ("yosys", "sby") if shutil.which(t) is None]
-    assert not missing, f"{missing} not on PATH — run inside the vibeic-eda image"
+    if missing:
+        skip_not_verified(
+            f"{missing} not on PATH, so no harness can be proved here",
+            "tools/ci/run_suite_in_eda_image.sh -- programs/tests/test_r0924_2_name_obligation_by_binding.py")
     gen = fhg.generate(project=project, top="ctr")
     assert gen["verdict"] == "EMITTED", gen
     h = Path(gen["harness_path"])
