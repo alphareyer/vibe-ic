@@ -25,6 +25,7 @@ and nothing would ever regenerate the document carrying it.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -42,10 +43,37 @@ import _gate_authorship as GA                # noqa: E402
 
 # ── (a) flow order, derived from the flow ────────────────────────────────────
 
+def _flow_steps() -> list:
+    doc = yaml.safe_load((PLUGIN / "flow" / "phase1_phase2_phase3.yaml").read_text())
+    return list(FDP._iter_steps(doc))
+
+
 def _flow_step_order() -> dict:
     """Step id -> position, read from the flow definition itself."""
-    doc = yaml.safe_load((PLUGIN / "flow" / "phase1_phase2_phase3.yaml").read_text())
-    return {str(s.get("id")): i for i, s in enumerate(FDP._iter_steps(doc))}
+    return {str(s.get("id")): i for i, s in enumerate(_flow_steps())}
+
+
+def _flow_step_stage() -> dict:
+    """Step id -> the stage the flow files it under (`stage3`, `stage4`, ...)."""
+    return {str(s.get("id")): s.get("stage") for s in _flow_steps()}
+
+
+_STAGE_REPORT = re.compile(r"\b(stage\d+)_compliance\b")
+
+
+def _stage_report_steps() -> dict:
+    """Stage -> the ids of the steps whose clauses run that stage's compliance report.
+
+    Read from the flow, never named: v1.24.73 (#2635) moved step 31 from stage 3 into stage
+    4 and behind step 37, so WHICH report judges step 31 is a fact of the flow, not of this
+    file.
+    """
+    out: dict = {}
+    for s in _flow_steps():
+        text = json.dumps(s.get("gate")) + json.dumps(s.get("programs"))
+        for stage in set(_STAGE_REPORT.findall(text)):
+            out.setdefault(stage, []).append(str(s.get("id")))
+    return out
 
 
 def test_the_clauses_run_in_the_order_the_flow_states_them():
@@ -87,22 +115,60 @@ def test_the_one_program_outputs_clause_sits_with_its_own_step():
 
     Not a restatement of the sort -- it pins the case the ruling is about, so if the two
     channels are concatenated again this says which clause moved and where to.
+
+    WHICH REPORT JUDGES STEP 31 IS READ FROM THE FLOW. When R-0915-160 was measured step 31
+    was in stage 3, before step 37, and step 37's `stage3_compliance` clause was the report
+    that judged it too early. v1.24.73 (#2635, "GDS only after gates") filed step 31 under
+    stage 4 and placed it AFTER step 37, so `stage3_compliance` no longer judges it at all and
+    `perc_sweep` now legitimately runs after that clause. The property is unchanged: the
+    report of step 31's OWN stage must run after step 31's producer, and no stage report in
+    the producer pass may run before a clause of a step in its own stage.
     """
     clauses = FDP.declared_producer_clauses()
+    order = _flow_step_order()
+    stage_of = _flow_step_stage()
     idx = {c["target"]: i for i, c in enumerate(clauses)}
     sweep = idx.get("reports/phase3/perc_sweep.json")
-    compl = idx.get("reports/phase3/gates/stage3_compliance.json")
-    assert sweep is not None and compl is not None, sorted(idx)
-    assert sweep < compl, (
-        f"step 31's perc_sweep producer runs at [{sweep}], after step 37's stage-3 "
-        f"compliance clause at [{compl}] -- so that report judges step 31 before its "
-        f"artefact exists and records sweep_reach_check as DESIGN_DECLARED_NA")
+    assert sweep is not None, sorted(idx)
 
     # and it really is the step-31 clause, beside step 31's others
     assert str(clauses[sweep]["step"]) == "31"
     neighbours = {str(clauses[i]["step"])
                   for i in range(max(0, sweep - 3), sweep + 1)}
     assert neighbours == {"31"}, neighbours
+
+    # the report that judges step 31 is its own stage's, and it runs after step 31
+    stage = stage_of.get("31")
+    judges = _stage_report_steps().get(stage or "")
+    assert judges, (
+        f"no step runs {stage}_compliance, so nothing judges step 31's stage and the arm "
+        f"below cannot fail; re-measure this test's premise")
+    for sid in judges:
+        assert order[sid] > order["31"], (
+            f"step {sid} runs {stage}_compliance at flow position {order[sid]}, before step "
+            f"31 at {order['31']} -- that report judges step 31 before its artefact exists "
+            f"and records sweep_reach_check as DESIGN_DECLARED_NA")
+    compl = idx.get(f"reports/phase3/gates/{stage}_compliance.json")
+    if compl is not None:
+        assert sweep < compl, (
+            f"step 31's perc_sweep producer runs at [{sweep}], after the {stage} compliance "
+            f"clause at [{compl}]")
+
+    # every stage report in the pass runs after every clause of its own stage's steps
+    reports = [(k, m.group(1)) for k, c in enumerate(clauses)
+               if (m := re.search(r"(stage\d+)_compliance\.json$", c["target"]))]
+    assert reports, "no stage-compliance clause in the pass; the arm below cannot fail"
+    for k, st in reports:
+        before = [i for i, c in enumerate(clauses[:k])
+                  if stage_of.get(str(c["step"])) == st]
+        late = [f"[{i}] step {c['step']} ({c['target']})"
+                for i, c in enumerate(clauses)
+                if i > k and stage_of.get(str(c["step"])) == st]
+        assert before, (
+            f"no {st} clause precedes {st}_compliance at [{k}]; the ordering arm is vacuous")
+        assert not late, (
+            f"{st}_compliance at [{k}] judges {st} before these of its producers ran: "
+            + ", ".join(late))
 
 
 # ── (b) owed() asks the document ─────────────────────────────────────────────
@@ -201,8 +267,22 @@ _STEP_31_SIBLINGS = (
 )
 
 
+def _step31_stage_program() -> Path:
+    """The compliance program of the stage the FLOW files step 31 under.
+
+    It was `stage3_compliance` until v1.24.73 (#2635) moved step 31 into stage 4; after that
+    `stage3_compliance` prints no `sweep_reach_check` line at all, and a differential over it
+    measures nothing.
+    """
+    stage = _flow_step_stage().get("31")
+    assert stage, "the flow no longer has a step 31; re-measure this arm's premise"
+    prog = PROGRAMS / f"{stage}_compliance.py"
+    assert prog.is_file(), prog
+    return prog
+
+
 def _stage3_report(tmp_path: Path, *, with_sweep: bool) -> str:
-    """Run the REAL stage-3 compliance over a project with/without perc_sweep.json."""
+    """Run the REAL compliance of step 31's stage over a project with/without perc_sweep.json."""
     import subprocess
 
     proj = tmp_path / ("with" if with_sweep else "without")
@@ -219,7 +299,7 @@ def _stage3_report(tmp_path: Path, *, with_sweep: bool) -> str:
         sweep.write_text(json.dumps({"verdict": "PASS", "reach": []}) + "\n")
 
     r = subprocess.run(
-        [sys.executable, str(PROGRAMS / "stage3_compliance.py"), str(proj)],
+        [sys.executable, str(_step31_stage_program()), str(proj)],
         capture_output=True, text=True, cwd=str(proj), timeout=1800)
     return r.stdout + r.stderr
 
@@ -227,10 +307,11 @@ def _stage3_report(tmp_path: Path, *, with_sweep: bool) -> str:
 def test_the_stage_three_report_judges_the_gate_once_its_artefact_exists(tmp_path):
     """THE COST OF THE ORDER, as a differential on one staged project.
 
-    Step 37's clause publishes a verdict about stage 3, which contains step 31. Run the real
-    `stage3_compliance` with step 31's `perc_sweep.json` absent -- the state the pass was in
-    when that clause ran BEFORE this change -- and with it present, which is what flow order
-    now guarantees. The gate `sweep_reach_check` must be JUDGED in the second, not written off
+    A stage report publishes a verdict about its stage, which contains step 31 -- stage 3
+    when this was measured, stage 4 since v1.24.73 (#2635); the stage is read from the flow.
+    Run that stage's real compliance with step 31's `perc_sweep.json` absent -- the state the
+    pass was in when the report ran BEFORE step 31 -- and with it present, which is what flow
+    order guarantees. The gate `sweep_reach_check` must be JUDGED in the second, not written off
     as not applicable to this design.
     """
     without = _stage3_report(tmp_path, with_sweep=False)

@@ -251,6 +251,14 @@ def test_a_refusal_with_no_checkpoint_is_its_own_fact():
 # the parent: what it does, and what it refuses to do
 # --------------------------------------------------------------------------
 def _call(tmp_path, log, *, make_ckpt=True, exec_rc=0, monkeypatch=None):
+    # The rollback is a calibrated instrument (54520ca58, v1.24.58): its first
+    # call in a process RUNS ITSELF on a DRT-0712 probe before it judges. Done
+    # under the fakes below, that probe's own full-route retry
+    # (omit=postroute_drv_repair) lands in `calls` ahead of the call under
+    # test, and the calibration is cached from fakes. Calibrate first, against
+    # the real collaborators, so `calls` holds only what THIS call did.
+    R._instrument_calibration.assert_calibrated(
+        "phase3_one_shot_runner::_pnr_rollback_refused_antenna_repair")
     out_dir = tmp_path / "pnr"
     out_dir.mkdir(parents=True, exist_ok=True)
     if make_ckpt:
