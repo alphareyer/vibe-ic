@@ -13,7 +13,8 @@ resolvers would answer:
 - step 13 EQY (`_lec_eqy_arm`): image and root;
 and these asked the resolver without the design's PDK, so an undeclared
 project refused `LL_PDK_UNDECLARED` and the message dropped the cause:
-- steps 24/26/26.5ic (`_librelane_step_ctx`), 29 and 30 (`_step29/30_tool_arm`).
+- steps 19/20 (`librelane_cts_hold.execute`, T98), 24/26/26.5ic
+  (`_librelane_step_ctx`), 29 and 30 (`_step29/30_tool_arm`).
 
 For each step: an undeclared project resolves; a declared value wins (and the
 host is never asked); a refusal names the resolver's cause.
@@ -116,8 +117,8 @@ def _switch(project, **values):
 
     No `pdk` either: the phase-3 steps must hand the resolver the DESIGN's PDK.
     Steps 2 and 13 read their PDK from the switch by contract (`_switch_pdk`)."""
-    doc = {'steps': {s: 'librelane' for s in ('2', '3', '7', '8', '10', '13', '24',
-                                             '26', '29', '30')}, **values}
+    doc = {'steps': {s: 'librelane' for s in ('2', '3', '7', '8', '10', '13', '19', '20',
+                                             '24', '26', '29', '30')}, **values}
     (project / 'phase3/librelane_switch.json').write_text(json.dumps(doc))
 
 
@@ -292,8 +293,47 @@ def step30(env, monkeypatch):
     return seen, ' '.join(notes)
 
 
+def step19_20(env, monkeypatch):
+    """Steps 19/20 (T98 `librelane_cts_hold.execute`): the direct deck's head
+    session is stated (it writes the pre-CTS checkpoint); the tool is stopped
+    at `resolve_step_configs`, which receives the image and the host root."""
+    runner = importlib.import_module('phase3_one_shot_runner')
+    cts = importlib.import_module('librelane_cts_hold')
+    out_dir = env.project / 'phase3/stage3/pnr'
+    out_dir.mkdir(parents=True)
+    (out_dir / 'constraint.sdc').write_text('create_clock -period 24 clk\n')
+    pnr_tcl = out_dir / 'pnr.tcl'
+    pnr_tcl.write_text(
+        'read_lef /t.lef\nread_liberty /l.lib\nread_verilog /n.v\nlink_design chip_top\n'
+        f'read_sdc {out_dir}/constraint.sdc\n{runner._PNR_RESUME_ELIDE_BEGIN}\n'
+        f'global_placement\n{runner._PNR_CTS_HOLD_BEGIN}\nclock_tree_synthesis\n'
+        f'repair_timing -hold\n{runner._PNR_CTS_HOLD_END}\ndetailed_route\n'
+        f'{runner._PNR_RESUME_ELIDE_END}\nwrite_def {out_dir}/routed.def\n')
+
+    def docker_exec(container, cmd, *a, **k):
+        for ext in ('odb', 'def', 'nl.v', 'insts'):
+            (out_dir / f'cts_hold_split/pre_cts.{ext}').write_text('x\n')
+        return 0, '', ''
+    monkeypatch.setattr(runner, '_docker_exec', docker_exec)
+    monkeypatch.setattr(runner, '_after_restore_tcl', lambda *a, **k: '')
+    monkeypatch.setattr(runner, '_container_mounts', lambda c: [])
+    seen = {}
+
+    def resolve_step_configs(project, image, pdk, ids, *, pdk_root=None, **_k):
+        seen.update(image=image, root=Path(pdk_root))
+        _stop()
+    monkeypatch.setattr(contract, 'resolve_step_configs', resolve_step_configs)
+    _rc, out, _ = cts.execute(
+        runner, project=env.project, pdk=SimpleNamespace(name=PDK), container='c',
+        out_dir=out_dir, out_dir_c=str(out_dir), pnr_tcl=pnr_tcl,
+        modes={'19': 'librelane', '20': 'librelane'},
+        cmd=f'openroad {pnr_tcl} | tee {out_dir}/openroad.log', spare_plan=None,
+        overlay={}, exec_kwargs={})
+    return seen, out
+
+
 STEPS = {'2 lint': step2, '8 synth': step8, '7/8/10 pre-layout signoff': prelayout,
-         '13 eqy': step13, '24/26/26.5ic ctx': step_ctx, '29 gls': step29,
+         '13 eqy': step13, '19/20 cts+hold': step19_20, '24/26/26.5ic ctx': step_ctx, '29 gls': step29,
          '30 path spice': step30}
 ROOT_STEPS = pytest.mark.parametrize('drive', STEPS.values(), ids=list(STEPS))
 

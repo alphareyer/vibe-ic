@@ -357,11 +357,10 @@ def execute(
         # divergence): the caller's retry ladder reads this session's log.
         return (rc or 1), out, err
     image = _ll.resolve_image(project)
-    pdk_root = _ll.resolve_pdk_root(project)
-    if not pdk_root:
-        return _refuse("LL_PDK_ROOT_NOT_DECLARED",
-                       "phase3/librelane_switch.json pdk_root_host or "
-                       "VIBEIC_LIBRELANE_PDK_ROOT", out)
+    try:        # the contract's resolver, for the design's PDK (F25)
+        pdk_root = _ll.pdk_root_resolution(project, str(pdk.name), image=image)["path"]
+    except _ll.Refusal as exc:
+        return _refuse("LL_PDK_ROOT_NOT_DECLARED", str(exc), out)
     mounts = [(Path(pdk_root) / str(pdk.name), f"/pdk/{pdk.name}")]
     sizing_tcl = work / "clock_path_drive_sizing.body.tcl"
     R._aa.write_text(sizing_tcl, R._clock_path_drive_sizing_tcl())
