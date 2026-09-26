@@ -9172,6 +9172,53 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
                 "program_first": "professional_tb_gen"}, reason_class=_V.ReasonClass.PARTIAL_POPULATION)
 
 
+def step_catalog_synth_safe_params(project: Path) -> StepResult:
+    """Run step 1's catalog synth-safe gate inline, on the staged RTL (F28).
+
+    ENFORCEMENT: blocking. ``catalog_synth_safe_params_check`` judges, on
+    Yosys's elaboration, that every declared catalog IP is reached from the top
+    and that each reached module carries its synth-safe values. A non-zero exit
+    is this step's FAIL, or NOT_MEASURED when the gate says it could not look;
+    neither rolls up to a PASS. The final audit re-runs the same step-1 clause.
+    """
+    t0 = time.time()
+    report = _pl.report_path(project, "gates/catalog_synth_safe_params.json")
+    rc, out, err = _run([
+        sys.executable,
+        str(PROGRAMS_DIR / "catalog_synth_safe_params_check.py"),
+        str(project), "--json", str(report),
+    ], cwd=project, timeout=600)
+    detail = (out or err).strip()
+    try:
+        payload = json.loads(report.read_text(errors="replace"))
+    except (OSError, ValueError):
+        payload = {}
+    verdict = str(payload.get("verdict") or "")
+    reason = str(payload.get("reason") or detail)[:600]
+    files = [str(report.relative_to(project))] if report.is_file() else []
+    if rc != 0:
+        if verdict == "NOT_MEASURED":
+            cls = (_V.ReasonClass.TOOL_ABSENT if "unavailable" in reason
+                   else _V.ReasonClass.EXECUTION_ERROR if reason.startswith("Yosys")
+                   else _V.ReasonClass.INPUT_ABSENT)
+            return StepResult(
+                "catalog_synth_safe_params", "NOT_MEASURED", time.time() - t0,
+                f"catalog_synth_safe_params_check rc={rc} (NOT_MEASURED): {reason}",
+                files, reason_class=cls.value)
+        return StepResult(
+            "catalog_synth_safe_params", "FAIL", time.time() - t0,
+            (f"catalog_synth_safe_params_check rc={rc}"
+             + (f" ({verdict})" if verdict else "") + f": {reason}"),
+            files, extras={"failure_codes": payload.get("failure_codes") or []})
+    if verdict == "NOT_APPLICABLE":
+        return StepResult(
+            "catalog_synth_safe_params", "NOT_APPLICABLE", time.time() - t0,
+            reason, files,
+            declared_by=str(payload.get("reason_class") or "DESIGN_DECLARED_NA"))
+    return StepResult("catalog_synth_safe_params", "PASS", time.time() - t0,
+                      reason, files)
+
+
 def step_step4_functional_evidence(project: Path,
                                    ic_class: str = "") -> StepResult:
     """Run Step 4's TB-substance and functional-evidence gates inline.
@@ -23682,6 +23729,21 @@ def main() -> int:
     # wrapper TAKES OVER the top name (port-rename, not module-rename). Best-
     # effort + polarity-safe; never gates.
     plan.append(step_reset_clock_variant_aliases(project, args.top_name))
+
+    # F28 — step 1's catalog synth-safe gate, INLINE and blocking, on the RTL as
+    # staged above (generator, reused-IP consume and aliases included): a
+    # declared catalog IP the top never reaches, or one elaborated with an
+    # unsafe value, FAILs here instead of only in final_audit.
+    if _before_entry("rtl_gen", _entry_site):
+        plan.append(StepResult(
+            "catalog_synth_safe_params", "NOT_APPLICABLE", 0.0,
+            f"run declared --entry-step {args.entry_step}; step 1 is upstream "
+            f"of it. final_audit still runs the step-1 clause.",
+            declared_by=f"--entry-step {args.entry_step}"))
+    elif _after_exit("rtl_gen"):
+        plan.append(_exit_sentinel("catalog_synth_safe_params"))
+    else:
+        plan.append(step_catalog_synth_safe_params(project))
 
     # Structural DETERMINISM gates — the SAME gates the benchmark emit path
     # applies (shape_b_sample_export.guard_export checks C/D: clock-divider

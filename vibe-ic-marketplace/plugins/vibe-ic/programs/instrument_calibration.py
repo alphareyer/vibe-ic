@@ -1949,6 +1949,42 @@ _register(Instrument(
 ))
 
 
+def _judge_catalog_reuse_reached(text: str) -> Optional[str]:
+    import catalog_synth_safe_params_check as C
+    reached = C.reached_ips(json.loads(text), [
+        {"ip_name": "cal", "files": ["ip.v"], "params": {"sim": 0}}])
+    return "DECLARED_IP_NOT_REACHED" if "cal" not in reached else None
+
+
+_register(Instrument(
+    name="catalog_synth_safe_params_check::reached_ips",
+    reads="Yosys write_json after `hierarchy -check -top` (step 1)",
+    ruling="F28 (a declared catalog IP the top never reaches FAILs)",
+    owner="migf28",
+    why=("`hierarchy -top` drops every module the top does not reach, so an "
+         "IP is reached when one of its source files still names a module. "
+         "The pair reads the same IP file against a glue that instantiates it "
+         "and a glue that does not; a reader that saw the IP from the files "
+         "read, not from the elaborated netlist, would call both reached."),
+    judge=_judge_catalog_reuse_reached,
+    positive=Sample(
+        provenance=("Real Yosys 0.69+ 4d572059c (vibeic-eda 0.3.79 by digest, "
+                    "8hd-3, 2026-09-27): `read_verilog -sv ip.v "
+                    "glue_unreached.v; hierarchy -top top; proc; write_json` of "
+                    "calibration/cal_catalog_ip.v (staged as ip.v) and "
+                    "cal_catalog_glue_unreached.v, whose top instantiates "
+                    "nothing. Unedited. "
+                    "calibration/catalog_reuse_unreached_positive.json"),
+        artefact=_read("catalog_reuse_unreached_positive.json")),
+    expect="DECLARED_IP_NOT_REACHED",
+    negative=Sample(
+        provenance=("The same IP with cal_catalog_glue_pinned.v, which "
+                    "instantiates it (the ::judge negative). Unedited. "
+                    "calibration/catalog_synth_safe_pinned_negative.json"),
+        artefact=_read("catalog_synth_safe_pinned_negative.json")),
+))
+
+
 #: calibration/cal_two_clocks.sdc, the clocks both CTS samples were timed with.
 _CTS_CAL_SOURCES = {"clk": "clk", "clk2": "clk2"}
 

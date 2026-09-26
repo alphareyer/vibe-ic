@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Step 1: every elaborated catalog-IP instance carries its synth-safe values.
 
-ENFORCEMENT: advisory — step runners do not invoke this gate inline.
-
-Its required step-1 ``program_exit_zero`` clause denies step 1 a PASS tier in
-flow_compliance_check, but this gate cannot stop the RTL author while it runs.
+ENFORCEMENT: blocking — ``design_one_shot_runner.step_catalog_synth_safe_params``
+runs it at step 1, right after the RTL is staged, and a non-zero exit is that
+step's FAIL (F28). The step-1 ``program_exit_zero`` clause re-runs it in
+flow_compliance_check.
 
 A catalog manifest may declare ``synth_safe_params`` (serv: ``sim=0``, #492).
 With the unsafe value Yosys aborts synthesis, or elaborates a simulation-only
@@ -37,6 +37,13 @@ record (``plugin_output/declaration.json``, which the flow itself writes) may
 only ADD an IP to the judged set; it never makes the gate NOT_APPLICABLE. A
 declaration that is missing or unreadable is refused: unread is not empty.
 
+A DECLARED IP MUST BE REACHED (F28). A catalog IP the input declares as its
+reuse, of which no module survives ``hierarchy -top``, is a spec/RTL
+inconsistency: FAIL with ``CATALOG_REUSE_DECLARED_NOT_INSTANTIATED``. It used to
+PASS with zero judged rows -- a verdict from an empty denominator. An IP that
+only the pull record names is not held to this: the flow copied it, the design
+never said it would use it.
+
 Verdicts: PASS (rc 0), FAIL (rc 1), NOT_APPLICABLE (rc 0, ``reason_class``
 DESIGN_DECLARED_NA: no declared or pulled catalog IP declares a synth-safe
 parameter), NOT_MEASURED (rc 1: the declaration was not read, no top, or Yosys
@@ -68,6 +75,10 @@ REPORT_REL = "reports/phase2/gates/catalog_synth_safe_params.json"
 DECLARATION_DOCS = (("phase1/generated_docs", "L*.json"), ("input/docs", "L*.md"))
 YOSYS_JSON_REL = "reports/phase2/gates/catalog_synth_safe_params.yosys.json"
 _PULLED = ("PASS", "PARTIAL")
+#: FAIL code: the input declares the IP as reuse; the elaborated top never reaches it.
+DECLARED_NOT_INSTANTIATED = "CATALOG_REUSE_DECLARED_NOT_INSTANTIATED"
+#: FAIL code: a reached module of the IP elaborates a non-synth-safe value.
+UNSAFE_PARAM = "CATALOG_SYNTH_SAFE_VALUE_NOT_PINNED"
 
 
 def _safe_params(manifest: dict) -> dict[str, Any]:
@@ -221,6 +232,20 @@ def judge(netlist: dict, ips: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def reached_ips(netlist: dict, ips: list[dict[str, Any]]) -> list[str]:
+    """Names of the IPs with at least one module in the elaborated netlist.
+
+    ``netlist`` is Yosys's ``write_json`` after ``hierarchy -check -top``,
+    which drops every module the top does not reach. A module belongs to an
+    IP by its ``src`` file, as in ``judge``; reaching needs no parameter.
+    """
+    _calibration.assert_calibrated("catalog_synth_safe_params_check::reached_ips")
+    srcs = {Path(str((module.get("attributes") or {}).get("src", ""))
+                 .split("|")[0].rsplit(":", 1)[0]).name
+            for module in (netlist.get("modules") or {}).values()}
+    return sorted(ip["ip_name"] for ip in ips if srcs & set(ip["files"]))
+
+
 def _yosys(project: Path, image: str | None, script: str, out_dir: Path):
     """Host yosys, else the EDA image with only ``out_dir`` writable.
 
@@ -302,15 +327,30 @@ def run(project: Path, image: str | None) -> tuple[int, dict[str, Any]]:
         return 1, report
     rows = judge(netlist, ips)
     report["instances"] = rows
+    reached = reached_ips(netlist, ips)
+    report["reached_ips"] = reached
+    unreached = sorted(ip["ip_name"] for ip in ips
+                       if ip.get("declared") and ip["ip_name"] not in reached)
     unsafe = [r for r in rows if not r["safe"]]
+    codes, reasons = [], []
+    if unreached:
+        codes.append(DECLARED_NOT_INSTANTIATED)
+        reasons.append(
+            f"{DECLARED_NOT_INSTANTIATED}: the input declares catalog IP "
+            f"{unreached} as reuse, but no module of it is reached from top {top}")
     if unsafe:
-        report.update(verdict="FAIL", reason="; ".join(
+        codes.append(UNSAFE_PARAM)
+        reasons.extend(
             f"{r['hdlname']} ({r['ip_name']}) elaborates {r['param']}={r['value']!r}, "
-            f"synth-safe value is {r['synth_safe_value']!r}" for r in unsafe))
+            f"synth-safe value is {r['synth_safe_value']!r}" for r in unsafe)
+    if codes:
+        report.update(verdict="FAIL", failure_codes=codes, reason="; ".join(reasons))
         return 1, report
     report.update(verdict="PASS", reason=(
         f"{len(rows)} elaborated IP module(s) carry their synth-safe values"
-        if rows else "no module declaring a synth-safe parameter is reached from the top"))
+        if rows else (f"reached IP(s) {reached}: no reached module declares a "
+                      "synth-safe parameter" if reached else
+                      "no pulled, undeclared IP is reached from the top")))
     return 0, report
 
 
