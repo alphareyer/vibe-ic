@@ -1,0 +1,4 @@
+u1/A input 0
+u1/Y output 0
+u2/A input 0
+u2/Y output 0

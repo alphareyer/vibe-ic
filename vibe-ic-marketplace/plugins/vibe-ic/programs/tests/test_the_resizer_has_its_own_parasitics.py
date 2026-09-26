@@ -38,6 +38,7 @@ import phase3_one_shot_runner as R  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _tcl_walk                    # noqa: E402
 from _pnr_tcl_stub import STUB as _STUB          # noqa: E402
+from _pnr_tcl_stub import ANNOTATED_SESSION  # noqa: E402
 from test_sdr_checkpoint_and_child import _full_pnr_tcl  # noqa: E402
 
 RED_LOG = """\
@@ -197,7 +198,7 @@ def test_with_parasitics_the_census_still_reports_a_real_number(tmp_path):
         "}\n"
         "proc write_verilog {path} {}\n")
     out, err, route = _tcl_walk.walk(
-        "source [lindex $argv 0]\n", _STUB + harness + child, tmp_path)
+        "source [lindex $argv 0]\n", _STUB + ANNOTATED_SESSION + harness + child, tmp_path)
     assert "SDR_DRV_BY_KIND: total=7" in out, (
         f"[{route}] the census stopped grading: {out[-1500:]}")
     assert "_RSZ_PARASITICS" not in out, (

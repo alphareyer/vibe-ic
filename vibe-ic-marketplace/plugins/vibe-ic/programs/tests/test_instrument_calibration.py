@@ -213,42 +213,69 @@ def test_no_test_in_this_file_skips_or_xfails():
             raise AssertionError(f"pytest.mark.{n.attr} at line {n.lineno}")
 
 
-def test_the_drv_census_still_counts_the_empty_report():
-    """Finding (a), pinned as a measurement rather than a sentence.
+def test_the_drv_census_grades_by_the_annotation_census_not_the_empty_report():
+    """Finding (a), CLOSED, and pinned as a measurement.
 
-    The REAL 0-byte report OpenSTA wrote for the no-parasitics session, and the
-    REAL 285-byte one it wrote for the same design one `read_spef` later, both
-    run through the deck's OWN census text.
+    The empty violator report is not the discriminator: OpenSTA writes the
+    SAME 0 bytes for the no-parasitics session and for the clean design WITH
+    parasitics (MEASURED, vibeic-eda 0.3.79). The session's own
+    `report_parasitic_annotation` is. All four sessions below are the tool's
+    REAL bytes, run through the deck's OWN census text.
     """
     empty = (C.FIXTURES / "drv_no_parasitics_positive.rpt").read_text()
     full = (C.FIXTURES / "drv_with_parasitics_negative.rpt").read_text()
+    none_ann = (C.FIXTURES / "drv_no_parasitics_positive.ann").read_text()
+    all_ann = (C.FIXTURES / "drv_with_parasitics_negative.ann").read_text()
     assert empty == "", "the no-parasitics fixture is no longer the 0-byte file"
     assert full.count("(VIOLATED)") == 2, full
 
-    out_empty = C.run_drv_census(empty)
-    out_full = C.run_drv_census(full)
-    assert "SDR_DRV_BY_KIND: total=0" in out_empty, out_empty
-    assert "SDR_DRV_CENSUS_NOT_MEASURED" not in out_empty, (
-        "the census now refuses the empty report — finding (a) is CLOSED and "
-        "this test is rewritten to pin the new behaviour, never deleted")
-    assert "SDR_DRV_BY_KIND: total=2 max_capacitance=2" in out_full, out_full
+    # no parasitics in STA: empty report, every driver unannotated -> refused
+    out = C.run_drv_census(empty, none_ann)
+    assert "SDR_DRV_CENSUS_NOT_MEASURED: parasitics_in_sta=0" in out, out
+    assert "SDR_DRV_BY_KIND" not in out, out
+    # parasitics in STA, clean design: the SAME empty report is a measured 0
+    out = C.run_drv_census(empty, all_ann)
+    assert "SDR_DRV_BY_KIND: total=0 max_capacitance=0" in out, out
+    assert "SDR_DRV_CENSUS_NOT_MEASURED" not in out, out
+    # parasitics in STA, violating design: counted
+    out = C.run_drv_census(full, all_ann)
+    assert "SDR_DRV_BY_KIND: total=2 max_capacitance=2" in out, out
 
 
-def test_the_parasitics_half_of_the_refusal_is_unreachable():
-    """Finding (b). `_sdr_par_ok` cannot be 0 at the test that reads it.
+def test_the_parasitics_half_of_the_refusal_is_reachable():
+    """Finding (b), CLOSED. `read_spef` returning no longer sets the flag.
 
-    Structural, on the deck's own text: between the clear and the test there is
-    a `break` on every path that would leave the flag at 0.
+    Executed, not grepped: a session whose `read_spef` returned but whose
+    annotation census lists every driver (the bytes a name-mismatched SPEF
+    leaves, MEASURED in 0.3.79), and one whose census was never written, both
+    refuse on the parasitics half.
     """
+    full = (C.FIXTURES / "drv_with_parasitics_negative.rpt").read_text()
+    none_ann = (C.FIXTURES / "drv_no_parasitics_positive.ann").read_text()
+    for ann in (none_ann, None):
+        out = C.run_drv_census(full, ann)
+        assert "parasitics_in_sta=0 violator_report=1" in out, out
+        assert "SDR_DRV_BY_KIND" not in out, out
     block = C._drv_census_block()
     clear = block.index("set _sdr_par_ok 0")
     setok = block.index("set _sdr_par_ok 1")
-    test = block.index("if {!$_sdr_par_ok")
-    assert clear < setok < test, (clear, setok, test)
-    between = block[clear:setok]
-    assert "break" in between, (
-        "there is now a path from the clear to the set that does not break — "
-        "the refusal's parasitics half may be reachable; re-measure it")
+    assert block[setok - len("{ "):setok] == "{ " and \
+        "if {$_sdr_par_driver}" in block[clear:setok], (
+        "`_sdr_par_ok` is set by something other than the annotation census")
+
+
+def test_the_annotation_census_grammar_is_the_tools_own():
+    """A census whose report does not parse is not an annotated session."""
+    none_ann = (C.FIXTURES / "drv_no_parasitics_positive.ann").read_text()
+    all_ann = (C.FIXTURES / "drv_with_parasitics_negative.ann").read_text()
+    # a count that disagrees with the names listed under it
+    torn = none_ann.replace(" u2/Y\n", "")
+    assert torn != none_ann
+    for ann in (torn, "", "Found 0 partially unannotated drivers.\n"):
+        out = C.run_drv_census("", ann)
+        assert "SDR_DRV_CENSUS_NOT_MEASURED: parasitics_in_sta=0" in out, (
+            ann, out)
+    assert "SDR_DRV_BY_KIND: total=0" in C.run_drv_census("", all_ann)
 
 
 # ── the rule ──────────────────────────────────────────────────────────────
@@ -430,6 +457,9 @@ def test_every_on_disk_sample_exists():
                    "sdf_unannotated_positive.log", "sdf_annotated_negative.log",
                    "drv_no_parasitics_positive.rpt",
                    "drv_with_parasitics_negative.rpt",
+                   "drv_no_parasitics_positive.ann",
+                   "drv_with_parasitics_negative.ann",
+                   "cal_chain_pins.txt",
                    "lec_proven_negative.json",
                    "magic_overlap_positive.feedback",
                    "magic_overlap_negative.feedback",
@@ -522,6 +552,15 @@ def test_the_drv_reports_are_one_read_spef_apart():
     spef = (C.FIXTURES / "cal_chain.spef").read_text()
     assert "*D_NET" in spef and "*CAP" in spef, (
         "the SPEF behind the with-parasitics arm is no longer a SPEF")
+    none_ann = (C.FIXTURES / "drv_no_parasitics_positive.ann").read_text()
+    all_ann = (C.FIXTURES / "drv_with_parasitics_negative.ann").read_text()
+    assert none_ann == ("Found 3 unannotated drivers.\n A\n u1/Y\n u2/Y\n"
+                        "Found 0 partially unannotated drivers.\n"), none_ann
+    assert all_ann == ("Found 0 unannotated drivers.\n"
+                       "Found 0 partially unannotated drivers.\n"), all_ann
+    pins = (C.FIXTURES / "cal_chain_pins.txt").read_text().split("\n")
+    assert pins == ["u1/A input 0", "u1/Y output 0", "u2/A input 0",
+                    "u2/Y output 0", ""], pins
 
 
 def test_the_mpw_pair_is_the_tools_own_table():
