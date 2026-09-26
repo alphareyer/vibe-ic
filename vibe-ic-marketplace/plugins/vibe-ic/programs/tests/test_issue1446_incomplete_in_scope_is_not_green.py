@@ -41,6 +41,8 @@ import re
 import sys
 from pathlib import Path
 
+from _declared_design_inputs import declare_no_reuse_input
+
 PROG = Path(__file__).resolve().parent.parent / "flow_compliance_check.py"
 
 _L_DOCS = (
@@ -62,11 +64,19 @@ def _import_fcc():
 
 
 def _bare_project(tmp_path: Path) -> Path:
-    """RTL and nothing else — P0's declared ancestry never ran."""
+    """RTL and the user's input doc — P0's declared ancestry never ran.
+
+    F27: step 1's catalog gate (F9) reads the design's declaration and refuses
+    a tree with none, so without it step 1 is never marked done and #1429's
+    worked example (`[1] = PASS marked done while [D1] = MISSING`) cannot
+    arise. The declaration is the user's no-reuse INPUT doc, not a D1 output:
+    D1 still produced nothing, so the chain under P0 stays broken.
+    """
     project = tmp_path / "proj"
     rtl = project / "phase2" / "stage1" / "rtl"
     rtl.mkdir(parents=True)
     (rtl / "core.sv").write_text("module core; endmodule\n")
+    declare_no_reuse_input(project)
     return project
 
 
