@@ -262,14 +262,50 @@ def test_missing_before_first_fail_stays_bare():
     # R-0915-140 (lane ictier1 rework) — there is no "cut point": 7 comes after
     # 5 in YAML order but blocks_on [1] only, so it was OWED and stays bare,
     # exactly like 3. Step 6 (blocks_on [2, 4, 5]) is the one 5 blocks.
+    #
+    # RE-DERIVED FROM THE LIVE YAML (T109b, as T90 did for not_owed). Since
+    # v1.24.80 step 7 blocks_on [1, 3], so 7 now reaches 3 -- one of this
+    # fixture's own missing-artefact rows -- and is attributed to 3. The claim
+    # under test was never "7 is bare"; it is "a step AFTER 5 in YAML order
+    # that 5 does not reach is not attributed to 5". The owed step is therefore
+    # taken from the graph, and its expected note is derived from its own
+    # closure instead of typed.
+    ids = _main_track_ids(steps)
+    parents = {str(s["id"]): [str(x) for x in (s.get("blocks_on") or [])]
+               for s in steps if s.get("id") is not None}
+
+    def _closure(sid):
+        seen, queue = set(), list(parents.get(str(sid), []))
+        while queue:
+            pid = queue.pop(0)
+            if pid not in seen:
+                seen.add(pid)
+                queue.extend(parents.get(pid, []))
+        return seen
+
+    # the premises, asserted: 3 is not downstream of 5; 6 is; and some step
+    # after 5 in YAML order is not
+    assert "5" not in _closure(3)
+    assert "5" in _closure(6), parents.get("6")
+    owed = [i for i in ids if ids.index(i) > ids.index(5)
+            and i != 6 and "5" not in _closure(i)]
+    assert owed, "no step after 5 in YAML order is outside 5's closure"
+    later = owed[0]
     results = [_res(3, "FAIL", reason_class="missing_artefact"),
                _res(5, "FAIL", reason_class=""),
-               _res(7, "FAIL", reason_class="missing_artefact"),
+               _res(later, "FAIL", reason_class="missing_artefact"),
                _res(6, "FAIL", reason_class="missing_artefact")]
     FCC._attribute_cascade_verdicts(results, steps, waivers={})
     assert results[0].cascade_note == ""      # not blocked by 5
-    assert results[2].cascade_note == ""      # after 5 in YAML, not blocked
-    assert results[2].status == "FAIL"
+    # after 5 in YAML, NOT attributed to 5; attributed to 3 exactly when 3 is
+    # on its own blocks_on closure, and otherwise bare and still FAIL
+    assert results[2].cascade_note != "blocked-by-upstream(5)"
+    if "3" in _closure(later):
+        assert results[2].cascade_note == "blocked-by-upstream(3)"
+        assert results[2].status == "NOT_MEASURED"
+    else:
+        assert results[2].cascade_note == ""
+        assert results[2].status == "FAIL"
     assert results[3].cascade_note == "blocked-by-upstream(5)"
 
 
@@ -294,20 +330,9 @@ def test_no_fail_no_annotation():
 
 # ── #776: the softening surface, pinned ──────────────────────────────────────
 
-def test_declared_dependency_relation_is_small():
-    """ANTI-DRIFT. Every entry here is a licence to discount a MISSING step
-    behind someone else's waiver, so the whole list must be reviewable in one
-    screen and must not grow without a reviewer seeing it.
-
-    MEASURED on the canonical flow at the time of #776:
-      * 1221 (step, transitive-blocks_on-ancestor) pairs
-      *    6 of them carry a declared dependency
-
-    A new pair appearing here is not automatically wrong — it means a flow edit
-    declared a real read — but it must be looked at, because it also means one
-    more step can now go quiet behind an upstream waiver.
-    """
-    steps = _steps()
+def _declared_pairs(steps):
+    """Every (step, waived ancestor) pair the waiver-deferral relation licenses
+    on this flow -- measured by waiving each step in turn."""
     ids = [s["id"] for s in steps if str(s.get("id")) != "P0"]
 
     pairs = set()
@@ -325,6 +350,23 @@ def test_declared_dependency_relation_is_small():
             results, steps, {waived: {"ticket": "T"}})
         for sid, parent, _ticket in info["deferred_by_upstream"]:
             pairs.add((str(sid), str(parent)))
+    return pairs
+
+
+def test_declared_dependency_relation_is_small():
+    """ANTI-DRIFT. Every entry here is a licence to discount a MISSING step
+    behind someone else's waiver, so the whole list must be reviewable in one
+    screen and must not grow without a reviewer seeing it.
+
+    MEASURED on the canonical flow at the time of #776:
+      * 1221 (step, transitive-blocks_on-ancestor) pairs
+      *    6 of them carry a declared dependency
+
+    A new pair appearing here is not automatically wrong — it means a flow edit
+    declared a real read — but it must be looked at, because it also means one
+    more step can now go quiet behind an upstream waiver.
+    """
+    pairs = _declared_pairs(_steps())
 
     assert pairs == {
         ("2", "D1"),    # lint gate reads L3/L8/L11 docs D1 writes
@@ -440,7 +482,17 @@ def test_ordering_ancestry_is_two_orders_of_magnitude_wider():
     # `phase3/stage3/pnr/routed.def`, step 21's declared output, which is already
     # one of the listed declared pairs -- so this step licensed no NEW declared
     # read. 7 pairs against 1595 is still two orders of magnitude.
-    assert total == 1595, total
+    #
+    # 1595 -> 1563 (2026-09-26, T90 / v1.24.80): ordering edges moved again
+    # (step 7 now blocks_on [1, 3]; steps 17/22 re-ordered). THE PIN BECOMES THE
+    # CLAIM IT WAS FOR. Under the owner's 2026-09-26 ruling an exact count that
+    # only tracks the flow is bookkeeping (lane mig116 marks such tests
+    # `consistency`); what this test exists to show is the RATIO: the ordering
+    # graph licenses at least two orders of magnitude more pairs than the
+    # declared-dependency relation does. Both sides are measured here.
+    declared = _declared_pairs(steps)
+    assert declared, "the declared relation measured nothing"
+    assert total >= 100 * len(declared), (total, len(declared))
 
 
 def _ordering_parents(steps, drop_step=None):
@@ -479,11 +531,13 @@ def test_the_latest_delta_is_derived_and_not_asserted_in_prose():
     to trust that somebody had rebuilt the pre-edit graph. This arm rebuilds it,
     so the NEXT step addition cannot be waved through with a plausible sentence.
 
-    For 1567 -> 1595, the shape is ONE new step (37.3, `blocks_on: [21]`) that
-    nothing depends on:
-        exactly one step's ancestry size changes -- 37.3's own, 0 -> 28
+    The latest entry is ONE new step (37.3) that nothing depends on. Its shape,
+    re-measured on the live flow every run (no typed totals -- those are
+    bookkeeping and went stale when T90 moved 37.3's upstream):
+        exactly one step's ancestry size changes -- 37.3's own
+        the total moves by exactly 37.3's ancestry
         37.3 is an ancestor of nothing, so the change cannot cascade
-        the whole-flow edge count moves by exactly one
+        the only edges that move are 37.3's own `blocks_on`
     """
     steps = _steps()
     cur = _ordering_parents(steps)
@@ -495,17 +549,24 @@ def test_the_latest_delta_is_derived_and_not_asserted_in_prose():
     a_cur, a_pre = _ancestry(cur), _ancestry(pre)
     total_cur = sum(len(v) for v in a_cur.values())
     total_pre = sum(len(v) for v in a_pre.values())
-    assert total_cur == 1595 and total_pre == 1567, (total_cur, total_pre)
-    assert total_cur - total_pre == 28
+    # THE SHAPE, NOT THE NUMBERS (T109b). The typed totals (1595/1567, +28)
+    # went stale the moment another edit moved 37.3's upstream (T90: 37.3 now
+    # has 39 ancestors); they were bookkeeping. What the derivation claims is
+    # the shape: adding a step nothing depends on moves the total by exactly
+    # its own ancestry, and moves no other step.
+    assert total_cur - total_pre == len(a_cur["37.3"]), (total_cur, total_pre)
 
     moved = {k for k, v in a_cur.items() if len(a_pre.get(k, set())) != len(v)}
     assert moved == {"37.3"}, (
         f"more than one step's ancestry moved with 37.3: {sorted(moved)} — the "
         f"delta is then not the shape the comment describes and must be "
         f"re-derived, not re-typed")
-    assert len(a_cur["37.3"]) == 28
+    assert a_cur["37.3"] >= {str(x) for x in cur["37.3"]}
     assert not [k for k, v in a_cur.items() if "37.3" in v], (
-        "something now depends on 37.3, so its ancestry DOES cascade and the +28 "
-        "arithmetic above no longer holds")
+        "something now depends on 37.3, so its ancestry DOES cascade and the "
+        "delta arithmetic above no longer holds")
+    # the only edges the step brought are its own blocks_on (nothing points
+    # at it); the count of those is read from the step, not typed
     assert (sum(len(v) for v in cur.values())
-            - sum(len(v) for v in pre.values())) == 1, "more than one new edge"
+            - sum(len(v) for v in pre.values())) == len(cur["37.3"]), (
+        "an edge other than 37.3's own blocks_on moved with it")
