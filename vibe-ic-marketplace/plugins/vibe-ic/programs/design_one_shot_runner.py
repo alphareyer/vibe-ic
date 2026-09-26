@@ -12259,7 +12259,7 @@ def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
     """Flow Step 2 lint through the tool: LibreLane Verilator.Lint + its gate.
 
     Opt-in per `phase3/librelane_switch.json` `{"steps": {"2": ...}}`, with
-    the image and PDK declared there. `direct` (the default) returns None and
+    the PDK declared there; the image is `librelane_contract.resolve_image`. `direct` (the default) returns None and
     the step is unchanged. `librelane` judges Verilator.Lint with
     `verilator_lint_gate`; `dual` also runs `rtl_hygiene_lint --severity ERROR`
     and blocks on the union, recording which arm found what. The linted files
@@ -12279,10 +12279,10 @@ def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
     gate_json = out_dir / "verilator_lint_gate.json"
     try:
         switch = json.loads((project / "phase3/librelane_switch.json").read_text())
-        image, pdk = switch.get("image"), switch.get("pdk")
-        if not image or not pdk:
+        image, pdk = _ll.resolve_image(project), switch.get("pdk")
+        if not pdk:
             raise _ll.Refusal("LL_SWITCH_INCOMPLETE",
-                              "step 2 needs image and pdk in phase3/librelane_switch.json")
+                              "step 2 needs pdk in phase3/librelane_switch.json")
         l9 = _rcvar_l9_top_ports(project)
         top = l9[0] if l9 else None
         rtl = silicon_rtl_selection(_pl.rtl_dir(project))
