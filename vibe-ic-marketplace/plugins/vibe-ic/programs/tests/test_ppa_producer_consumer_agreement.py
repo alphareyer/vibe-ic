@@ -153,6 +153,10 @@ NON_CARRIERS = {
     "vibeic.ppa.search_manifest.v1":        "the candidate lifecycle",
     "vibeic.ppa.closure_run.v1":            "a controller run",
     "vibeic.ppa.actuator_registry.v1":      "what a controller may move",
+    # T103: the pre-route PDN EM search (`_ppa/pdn_em_presweep.py`). Its
+    # frontier is built from records it constructs in memory; the document
+    # itself holds the gate's per-candidate verdicts, not metric records.
+    "vibeic.ppa.pdn_em_presweep.v1":        "a pre-route PDN search record",
     # The agent control plane (`_ppa/agent_policy.py`, `_ppa/agent_router.py`,
     # `_ppa/agent_context.py`). None of these five carry a reading: the context
     # is deliberately evidence REFERENCES and hashes with no file content at

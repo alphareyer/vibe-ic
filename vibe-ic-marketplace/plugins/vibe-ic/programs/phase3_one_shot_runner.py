@@ -93,6 +93,7 @@ import _reference_flow_boundary as _rfb
 import _source_record_merge as _srm  # per-source merge: silence cannot erase
 from _ppa import power as _ppa_power                              # noqa: E402
 from _ppa import area as _ppa_area                                # noqa: E402
+from _ppa import pdn_em_presweep as _ppa_presweep                # noqa: E402
 from _ppa.power import pdn_ring_dimensions as _pdn_ring_dimensions
 import floorplan_contract as _fpc  # design-declared fixed floorplan + DRV limits
 from _rtl_include_hub import drop_include_hubs as _drop_include_hubs  # shared aggregator filter
@@ -8780,13 +8781,21 @@ def _pdn_pad_footprint_clip_tcl(pad_layers: Sequence[str]) -> str:
 
 
 def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
-                   em_floor: Optional[Dict[str, Any]] = None) -> str:
+                   em_floor: Optional[Dict[str, Any]] = None,
+                   strap_override: Optional[Mapping[str, Mapping[str, Any]]] = None,
+                   plan_out: Optional[Dict[str, Any]] = None) -> str:
     """v0.1.47 — emit OpenROAD PDN (`add_global_connection`/`define_pdn_grid`/
     `pdngen`) Tcl, NONFATAL-guarded.
 
     Returns the inserted block when the PDK is sky130-style (probed by
     `tapcell_master` non-None), or a SKIPPED line otherwise. Without this
     block routed.def has 0 SPECIALNETS → silicon DOA.
+
+    T103 — `plan_out` receives the straps the block draws (layer, width, pitch,
+    offset) and the supply nets; `strap_override` ({layer: {width, pitch,
+    offset}}) replaces those three numbers on the named strap layers and
+    nothing else, so the pre-route EM sweep (`_ppa/pdn_em_presweep`) measures
+    the SAME deck block with only the strap geometry changed.
     """
     # #1215-PDN — apply the DERIVED EM width floor to STRAP layers (never
     # follow-pins). max() only: a floor can widen a strap, never narrow it,
@@ -9087,6 +9096,19 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                         em_floor["combined_decision"] = _joint_decision
                     _em_widened.append(
                         f"{st['layer']} rail span pitch {_old_pitch}->{_new_pitch}um")
+        if strap_override and _stripes:
+            _stripes = [dict(st) for st in _stripes]
+            for st in _stripes:
+                _ov = strap_override.get(str(st.get("layer")))
+                if _ov:
+                    st.update({k: _ov[k] for k in ("width", "pitch", "offset")})
+        if isinstance(plan_out, dict):
+            plan_out.update({
+                "power_net": pwr, "ground_net": gnd,
+                "straps": [{k: st.get(k) for k in ("layer", "width", "pitch", "offset")}
+                           for st in _stripes],
+                "routing_budget": float((straps or {}).get("max_routing_fraction", 0.5)),
+                "offset_div": _PDN_STRAP_OFFSET_DIV})
         if _stripes:
             _sl = []
             if _em_widened:
@@ -32226,6 +32248,7 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
                         sizing_limits_block: str = "",
                         sizing_drv_report_block: str = "",
                         fanout_root_repair_block: str = "",
+                        preroute_pdn_em_block: str = "",
                         reserved_instance_names: Optional[Sequence[str]] = None
                         ) -> str:
     """ORGANIC #581 — the COMPLETE pnr.tcl template as a PURE builder
@@ -32599,7 +32622,7 @@ if {{[catch {{
   puts "HOLD_WHS_NONFATAL: $_whs_err"
 }}
 # <<<PNR_CTS_HOLD_END>>>
-{routing_constraint_tcl}# === v0.2.14 — DRT-0305 PG-net cleanup (MUST precede global_route) ===
+{preroute_pdn_em_block}{routing_constraint_tcl}# === v0.2.14 — DRT-0305 PG-net cleanup (MUST precede global_route) ===
 # A non-special POWER/GROUND net in regular NETS (dangling zero_/one_ tie stub)
 # makes TritonRoute abort ALL detailed routing; remove/reclassify it first so the
 # design actually routes instead of silently shipping unrouted. See
@@ -37748,7 +37771,11 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
               f"({_pdn_em_floor.get('sizing_basis')}), margin "
               f"{_pdn_em_floor['margin']}; per-layer w_em recorded in "
               "reports/phase3/pdn_em_sizing.json")
-    pdn_block = _build_pdn_tcl(pdk, container, em_floor=_pdn_em_floor)
+    import copy as _copy
+    _pdn_em_floor_in = _copy.deepcopy(_pdn_em_floor)
+    _pdn_plan: Dict[str, Any] = {}
+    pdn_block = _build_pdn_tcl(pdk, container, em_floor=_pdn_em_floor,
+                               plan_out=_pdn_plan)
     # R-0915-111 — the deck records what it APPLIED into the floor dict; persist
     # it beside the arithmetic so the step that reports the resize reads the
     # remedy instead of restating the shortfall.
@@ -38204,6 +38231,39 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _pnr_fanout_root_repair = _ship_max_fanout_root_repair_tcl(
         _fanout_root_buffer_cell,
         f"{out_dir_c}/pnr_fanout_root_candidates.rpt")
+    # T103 (steps 25/25b) — size the PDN for EM before routing, on the deck's
+    # own block. Only when this deck draws the grid (step 15 direct).
+    _pdn_em_presweep_block = ""
+    if pdn_block and _ll_fp_modes["15"] != "librelane":
+        try:
+            from librelane_ir_antenna import declared_supply_pads as _pes_pads
+            _pes_decl = _pes_pads(project)
+            _pes_v = _pdk_nominal_voltage(pdk, container)
+            _pes_corner = None
+            if corner_liberty_block:
+                _pes_names = (corner_liberty_block.splitlines()[0].split()[1:]
+                              if corner_liberty_block.startswith("define_corners") else [])
+                _pes_corner = "tt" if "tt" in _pes_names else (_pes_names or [None])[0]
+            _pes_nets = ({_pdn_plan["power_net"]: _pes_v, _pdn_plan["ground_net"]: 0.0}
+                         if _pdn_plan.get("power_net") and _pes_v is not None else {})
+            _pdn_em_presweep_block, _pes_note = _ppa_presweep.prepare(
+                pnr_dir=out_dir,
+                sweep_dir_c=_to_container_path(
+                    str(out_dir / _ppa_presweep.SWEEP_DIR), container),
+                plan=_pdn_plan,
+                build=lambda _st: _build_pdn_tcl(
+                    pdk, container, em_floor=_copy.deepcopy(_pdn_em_floor_in),
+                    strap_override=_st),
+                tech_lef=Path(str(pdk.tech_lef)),
+                tech_lef_c=_to_container_path(str(pdk.tech_lef), container),
+                tech_lef_text=_read_pdk_text(str(pdk.tech_lef), container) or "",
+                nets=_pes_nets, corner=_pes_corner,
+                declared_pads=_pes_decl.get("instances") or [],
+                stage_marker=_PNR_STAGE_MARKER)
+            print(f"[phase3] {_pes_note}", file=sys.stderr)
+        except Exception as _pes_exc:  # the flow keeps its own grid
+            _pdn_em_presweep_block = ""
+            print(f"[phase3] PDN_EM_PRESWEEP_NOT_STAGED: {_pes_exc}", file=sys.stderr)
     _generic_pnr_tcl = _build_pnr_tcl_text(
         tech_lef_c=tech_lef_c, cell_lef_c=cell_lef_c,
         macro_lefs_tcl=macro_lefs_tcl, liberty_c=liberty_c,
@@ -38252,6 +38312,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         sizing_limits_block=sizing_limits_block,
         sizing_drv_report_block=sizing_drv_report_block,
         fanout_root_repair_block=_pnr_fanout_root_repair,
+        preroute_pdn_em_block=_pdn_em_presweep_block,
         reserved_instance_names=_reserved_names)
 
     _chip_padring = _chip_path_requests_pad_ring(project)
@@ -67092,6 +67153,15 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     if not def_file.is_file():
         notes.append("IR/EM skipped: routed DEF missing")
         return False, False
+    # T103 — publish the pre-route PDN EM sizing record (the PnR session's
+    # own search) beside the post-route measurement that judges its outcome.
+    try:
+        _pes_rec = _ppa_presweep.finalize(project, pnr_out)
+        if _pes_rec:
+            notes.append(f"PDN EM pre-route sizing: {_pes_rec.get('verdict')} "
+                         f"(candidate {_pes_rec.get('chosen')}; {_ppa_presweep.REPORT_REL})")
+    except (OSError, ValueError, KeyError) as _pes_exc:
+        notes.append(f"PDN EM pre-route sizing record unreadable: {_pes_exc}")
     power_nets, ground_nets = _discover_power_nets(def_file)
     if not power_nets:
         notes.append(
@@ -67148,42 +67218,7 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     # nonetheless reports current between nodes on those via enclosures. Dump
     # the loaded ODB's actual routing-layer boxes so those edges have a real
     # cross section instead of silently inheriting a LEF default width.
-    geometry_tcl = r'''
-set _eg_f [open __GEOMETRY_PATH__ w]
-puts $_eg_f "net\tlayer\tx0_um\ty0_um\tx1_um\ty1_um\tsource"
-set _eg_dbu [[ord::get_db_tech] getDbUnitsPerMicron]
-foreach _eg_n [[ord::get_db_block] getNets] {
-  if {[$_eg_n getSigType] ni {POWER GROUND}} {continue}
-  foreach _eg_sw [$_eg_n getSWires] {
-    foreach _eg_s [$_eg_sw getWires] {
-      if {[$_eg_s isVia]} {
-        lassign [$_eg_s getViaXY] _eg_vx _eg_vy
-        set _eg_v [$_eg_s getTechVia]
-        if {$_eg_v eq "NULL"} {set _eg_v [$_eg_s getBlockVia]}
-        if {$_eg_v eq "NULL"} {continue}
-        foreach _eg_b [$_eg_v getBoxes] {
-          set _eg_l [$_eg_b getTechLayer]
-          if {$_eg_l eq "NULL" || [$_eg_l getRoutingLevel] <= 0} {continue}
-          puts $_eg_f [join [list [$_eg_n getName] [$_eg_l getName] \
-            [expr {double($_eg_vx+[$_eg_b xMin])/$_eg_dbu}] \
-            [expr {double($_eg_vy+[$_eg_b yMin])/$_eg_dbu}] \
-            [expr {double($_eg_vx+[$_eg_b xMax])/$_eg_dbu}] \
-            [expr {double($_eg_vy+[$_eg_b yMax])/$_eg_dbu}] via_metal] "\t"]
-        }
-      } else {
-        set _eg_l [$_eg_s getTechLayer]
-        if {$_eg_l eq "NULL" || [$_eg_l getRoutingLevel] <= 0} {continue}
-        puts $_eg_f [join [list [$_eg_n getName] [$_eg_l getName] \
-          [expr {double([$_eg_s xMin])/$_eg_dbu}] \
-          [expr {double([$_eg_s yMin])/$_eg_dbu}] \
-          [expr {double([$_eg_s xMax])/$_eg_dbu}] \
-          [expr {double([$_eg_s yMax])/$_eg_dbu}] special_wire] "\t"]
-      }
-    }
-  }
-}
-close $_eg_f
-'''.replace("__GEOMETRY_PATH__", em_geometry_c)
+    geometry_tcl = _emcd.PG_GEOMETRY_TCL.replace("__GEOMETRY_PATH__", em_geometry_c)
     # v1.3.93 — supply per-CUT-LAYER via resistance to PSM. A fixed-VIA-master
     # LEF ships RESISTANCE on the VIA12/VIA23/… masters but leaves the cut LAYERS
     # (VIA1, VIA2, …) at 0 ohm, so PSM aborts "[PSM-0021] Resistance map contains
@@ -67226,6 +67261,44 @@ close $_eg_f
             f"'{_oc}' (it defines the block but names no default — PSM "
             f"otherwise aborts PSM-0079); the tool reads its voltage from "
             f"the library, none is asserted here")
+    # T103 — THE POWER BASIS. PSM turns each instance's power into its grid
+    # current, so the EM verdict is only as true as that power. MEASURED on spm
+    # (gf180mcuD, routed DEF): this session used to read the DEF and the one
+    # standard-cell liberty and nothing else -- no SDC, so OpenSTA's default
+    # activity with no clock: 23.1 mW. With the flow's own SDC alone it read
+    # 1.19 mW, a false PASS: the clock enters through an IO pad whose liberty
+    # was not loaded, so the clock never reached its tree (Clock group 0 W).
+    # With the SDC, the step-22 SPEF and the same-PVT IO/macro liberties that
+    # the PnR and sign-off sessions load: 21.0 mW, of which the clock network
+    # is 14.3 mW. The verdict records which of these it had.
+    try:
+        _pb_libs = [_to_container_path(str(x), container)
+                    for x in _sta_extra_liberties(project, pdk, pdk.liberty)]
+    except AttributeError:  # a duck-typed PDK stub with no library lists
+        _pb_libs = []
+    _pb_sdc = pnr_out / "constraint.sdc"
+    _pb_spef = _pl.extracted_dir(project) / f"{top}.spef"
+    _pb_spef_why = None
+    if not _pb_spef.is_file():
+        _pb_spef_why = "no step-22 SPEF"
+    elif _pb_spef.stat().st_mtime < def_file.stat().st_mtime:
+        _pb_spef_why = "the step-22 SPEF is older than the routed DEF"
+    _pb_tcl = "".join(f"read_liberty {x}\n" for x in dict.fromkeys(_pb_libs))
+    if _pb_sdc.is_file():
+        _pb_tcl += (f"if {{[catch {{read_sdc {_to_container_path(str(_pb_sdc), container)}}} _e]}} "
+                    f"{{ puts \"EM_BASIS_SDC_UNREAD: $_e\" }}\n"
+                    "catch {set_propagated_clock [all_clocks]}\n")
+    if _pb_spef_why is None:
+        _pb_tcl += (f"if {{[catch {{read_spef {_to_container_path(str(_pb_spef), container)}}} _e]}} "
+                    f"{{ puts \"EM_BASIS_SPEF_UNREAD: $_e\" }}\n")
+    try:
+        _instrument_calibration.assert_calibrated("_ppa.power::em_power_basis")
+        _pb_uncal = None
+    except _instrument_calibration.Uncalibrated as _pb_exc:
+        _pb_uncal = str(_pb_exc)
+    _pb_tcl += ('puts "=== EM_POWER_BASIS ==="\n'
+                'if {[catch {report_power} _e]} { puts "EM_BASIS_POWER_UNREPORTED: $_e" }\n'
+                'puts "=== EM_POWER_BASIS_END ==="\n')
     tcl_path = out_dir / f"ir_em_{top}.tcl"
     tcl_path.write_text(f"""
 read_lef {tech_lef_c}
@@ -67233,7 +67306,7 @@ read_lef {cell_lef_c}
 {macro_lefs_tcl}
 read_liberty {liberty_c}
 {_oc_tcl}read_def {def_c}
-{geometry_tcl}
+{_pb_tcl}{geometry_tcl}
 if {{[catch {{set_wire_rc -signal -layer {mp}1}} _e1]}} {{
   catch {{set_wire_rc -layer {mp}1}}
 }}
@@ -67531,7 +67604,12 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "power_nets": power_nets,
             "ground_nets": ground_nets,
             "nets_analysed": psm_nets,
-            "source_model": "PSM default; no SDC/SPEF or pad VSRC",
+            "source_model": "PSM default sources (the supply BTerms); no pad VSRC file",
+            "power_basis": _ppa_power.em_power_basis(
+                log, sdc=(str(_pb_sdc.relative_to(project)) if _pb_sdc.is_file() else None),
+                spef=(None if _pb_spef_why else str(_pb_spef.relative_to(project))),
+                spef_reason=_pb_spef_why, liberties=[liberty_c, *_pb_libs],
+                uncalibrated=_pb_uncal),
             "segments_analysed": seg_count,
             "max_segment_current_A": max_cur,
             "source": str(em_rpt.relative_to(project)),

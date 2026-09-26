@@ -2528,3 +2528,35 @@ def tool_power_report_text(corner: str, row: Dict[str, Any], report_text: str,
         f"POWER_BASIS_CORNER: {corner}\n"
         "# === Begin OpenSTA Power Report ===\n"
         + report_text)
+
+
+def em_power_basis(log: str, *, sdc: Optional[str], spef: Optional[str],
+                    spef_reason: Optional[str], liberties: Sequence[str],
+                    uncalibrated: Optional[str] = None) -> Dict[str, Any]:
+    """What the EM currents were computed from: the inputs read and OpenSTA's
+    own power split (the `report_power` the session printed between its
+    EM_POWER_BASIS markers). `clock_reaches_network` is False when clocks are
+    defined yet the clock group draws nothing -- the clock stopped at a cell
+    with no timing view, and every current is then understated.
+    `uncalibrated` (the caller's `instrument_calibration` refusal) withholds
+    that judgement."""
+    body = log.split("=== EM_POWER_BASIS ===", 1)[-1].split("=== EM_POWER_BASIS_END ===", 1)[0] \
+        if "=== EM_POWER_BASIS ===" in log else ""
+    groups: Dict[str, float] = {}
+    for m in re.finditer(r"^(Sequential|Combinational|Clock|Macro|Pad|Total)\s+"
+                         r"(?:\S+\s+){3}(\S+)", body, re.M):
+        try:
+            groups[m.group(1).lower()] = float(m.group(2))
+        except ValueError:
+            continue
+    uncal = ("NOT_MEASURED", uncalibrated) if uncalibrated else None
+    return {"sdc": sdc, "spef": spef, "spef_not_read": spef_reason,
+            "liberties": list(dict.fromkeys(liberties)),
+            "power_W": groups or None,
+            "clock_reaches_network": (None if uncal or not sdc or "clock" not in groups
+                                      else groups["clock"] > 0),
+            "calibration": f"uncalibrated: {uncal[1]}" if uncal else "CALIBRATED",
+            "basis": ("declared SDC (propagated clocks) + step-22 SPEF + session liberties"
+                      if sdc and spef else
+                      "declared SDC (propagated clocks), no SPEF" if sdc else
+                      "no SDC: OpenSTA default activity, not the design's clock")}
