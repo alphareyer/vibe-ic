@@ -53,7 +53,10 @@ def sandbox():
         "import pytest\n\n"
         "@pytest.mark.consistency\n"
         "def test_bookkeeping():\n    pass\n\n"
-        "def test_behaviour():\n    pass\n")
+        "def test_behaviour():\n    pass\n\n"
+        "@pytest.mark.consistency\n"
+        "@pytest.mark.parametrize('v', ['a b', 'a c'])\n"
+        "def test_spaced(v):\n    pass\n")
     yield d
     subprocess.run(["rm", "-rf", "--", str(d)], check=False)
 
@@ -61,21 +64,21 @@ def sandbox():
 def test_routine_session_deselects_and_discloses(sandbox):
     r = _pytest(["-q", "-W", "error::pytest.PytestUnknownMarkWarning"], sandbox)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "1 passed, 1 deselected" in r.stdout, r.stdout
-    assert "consistency tier: 1 bookkeeping test(s) DESELECTED" in r.stdout
+    assert "1 passed, 3 deselected" in r.stdout, r.stdout
+    assert "consistency tier: 3 bookkeeping test(s) DESELECTED" in r.stdout
 
 
 def test_the_variable_includes_them(sandbox):
     r = _pytest(["-q", "-rA"], sandbox, **{ct.ENV: "1"})
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "2 passed" in r.stdout and "deselected" not in r.stdout, r.stdout
+    assert "4 passed" in r.stdout and "deselected" not in r.stdout, r.stdout
     assert "PASSED test_pair.py::test_bookkeeping" in r.stdout
 
 
 @pytest.mark.parametrize("value", ["", "0", "true", "yes", " 1"])
 def test_only_the_exact_value_one_includes_them(sandbox, value):
     r = _pytest(["-q"], sandbox, **{ct.ENV: value})
-    assert "1 passed, 1 deselected" in r.stdout, (value, r.stdout)
+    assert "1 passed, 3 deselected" in r.stdout, (value, r.stdout)
 
 
 def test_the_marker_is_registered_so_strict_markers_accepts_it(sandbox):
@@ -157,7 +160,7 @@ def test_resync_sorts_reds_into_regenerate_and_hand_edit(monkeypatch, capsys):
     rc = ct.resync(apply=False, site=None)
     out = capsys.readouterr().out
     assert rc == 1
-    assert "3 test(s), 1 passed, 2 red" in out
+    assert "3 test(s), 1 passed, 2 red, 0 skipped" in out
     reg, hand = out.split("EDIT BY HAND", 1)
     assert f"RED {regen}" in reg and "not applied" in reg
     assert "programs/tests/test_hand.py::test_b" in hand
@@ -176,7 +179,10 @@ def test_resync_refuses_an_empty_run(monkeypatch, capsys):
 def test_resync_runs_the_real_session_with_the_variable_set(sandbox):
     rc, results, out = ct._run_consistency(sandbox, ["test_pair.py"])
     assert rc == 0, out
-    assert results == {"test_pair.py::test_bookkeeping": "PASSED"}, out
+    # every node is its own key — a parametrized id with a space included
+    assert results == {"test_pair.py::test_bookkeeping": "PASSED",
+                       "test_pair.py::test_spaced[a b]": "PASSED",
+                       "test_pair.py::test_spaced[a c]": "PASSED"}, out
 
 
 def test_every_website_fact_names_a_live_source_and_the_readable_ones_resolve():

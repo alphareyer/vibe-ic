@@ -272,20 +272,44 @@ def _tiers() -> List[str]:
     return tiers
 
 
-_RESULT_RE = re.compile(r"^(PASSED|FAILED|ERROR) (\S+)", re.M)
+def _junit_results(xml_path: Path) -> Dict[str, str]:
+    """nodeid -> PASSED/FAILED/ERROR/SKIPPED, read from pytest's own JUnit.
+
+    NOT from the `-rA` summary text: a parametrized id may contain spaces, and
+    a `\\S+` scrape of that text silently merges such ids into one key —
+    measured, 111 results for 124 collected nodes. `junit_family=xunit1`
+    carries the `file` attribute, so the nodeid is rebuilt from pytest's record.
+    """
+    import xml.etree.ElementTree as ET
+    out: Dict[str, str] = {}
+    root = ET.parse(str(xml_path)).getroot()
+    for case in root.iter("testcase"):
+        f = case.get("file") or ""
+        cls = (case.get("classname") or "").split(".")[-1]
+        stem = Path(f).stem
+        parts = [f] + ([cls] if cls and cls != stem else []) + [case.get("name", "")]
+        tags = {child.tag for child in case}
+        state = ("FAILED" if "failure" in tags else "ERROR" if "error" in tags
+                 else "SKIPPED" if "skipped" in tags else "PASSED")
+        out["::".join(parts)] = state
+    return out
 
 
 def _run_consistency(cwd: Path, targets: Sequence[str],
                      extra: Sequence[str] = ()) -> Tuple[int, Dict[str, str], str]:
+    import tempfile
     env = dict(os.environ)
     env[ENV] = "1"
     env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
-    cmd = [sys.executable, "-m", "pytest", "-q", "-rA", "-p", "no:cacheprovider",
-           "-m", MARKER, *extra, *targets]
-    proc = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, text=True)
-    out = proc.stdout + proc.stderr
-    results = {m.group(2): m.group(1) for m in _RESULT_RE.finditer(proc.stdout)}
-    return proc.returncode, results, out
+    with tempfile.TemporaryDirectory(prefix="consistency_tier_") as tmp:
+        junit = Path(tmp) / "junit.xml"
+        cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+               "-o", "junit_family=xunit1", f"--junitxml={junit}",
+               "-m", MARKER, *extra, *targets]
+        proc = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True,
+                              text=True)
+        results = _junit_results(junit) if junit.is_file() else {}
+    return proc.returncode, results, proc.stdout + proc.stderr
 
 
 def _tools_test_files() -> List[str]:
@@ -351,11 +375,15 @@ def resync(apply: bool, site: Path | None) -> int:
         print("NOT_MEASURED: no consistency test was collected in any tier — "
               "an empty run is not a green one.")
         return 2
-    red = sorted(n for n, s in results.items() if s != "PASSED")
-    print(f"CONSISTENCY RUN: {len(results)} test(s), {len(results) - len(red)} "
-          f"passed, {len(red)} red")
+    red = sorted(n for n, s in results.items() if s in ("FAILED", "ERROR"))
+    skipped = sorted(n for n, s in results.items() if s == "SKIPPED")
+    passed = len(results) - len(red) - len(skipped)
+    print(f"CONSISTENCY RUN: {len(results)} test(s), {passed} passed, "
+          f"{len(red)} red, {len(skipped)} skipped")
     for n in red:
         print(f"  RED {n}")
+    for n in skipped:
+        print(f"  NOT MEASURED (skipped) {n}")
     regen_files = sorted({_file_of(n) for n in red if _file_of(n) in REGENERATORS})
     hand = sorted(n for n in red if _file_of(n) not in REGENERATORS)
     print("\nREGENERATE (a program re-derives these):")
