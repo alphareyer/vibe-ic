@@ -271,11 +271,20 @@ def image_capability(image: str, docker: str = 'docker') -> None:
         raise Refusal('LL_IMAGE_INCAPABLE', f'{image}: LibreLane CLI or yosys CLI -y unavailable (rc={result.returncode})')
 
 
+#: A step's production default once its lane has CUT OVER (MIGRATION_COMMON
+#: criteria (a) and (b), or b-analog for an analog observer step). A step not
+#: named here defaults to `direct`. A project opts out of a cut-over default by
+#: naming the step `direct` in `phase3/librelane_switch.json`.
+PRODUCTION_DEFAULTS: dict[str, str] = {}
+
+
 def selected_mode(project: Path, step: str) -> str:
+    """The project's switch when it names the step, else the production
+    default for the step, else `direct`. An invalid mode is refused, from
+    either source."""
     path = project / 'phase3/librelane_switch.json'
-    if not path.is_file():
-        return 'direct'
-    mode = _load(path).get('steps', {}).get(step, 'direct')
+    steps = _load(path).get('steps', {}) if path.is_file() else {}
+    mode = steps[step] if step in steps else PRODUCTION_DEFAULTS.get(step, 'direct')
     if mode not in ('direct', 'librelane', 'dual'):
         raise Refusal('LL_INVALID_SWITCH', f'{step}: {mode}')
     return mode

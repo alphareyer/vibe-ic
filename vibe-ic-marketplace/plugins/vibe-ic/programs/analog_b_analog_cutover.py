@@ -78,6 +78,9 @@ STEP_OWN_RECORDS = {
 #: The runner's step names, in the order the runner dispatches them.
 RUNNER_STEP = {"A6": "A6_block_pv", "A7": "A7_post_layout_resim",
                "A8": "A8_hardmacro_gen", "A9": "A9_hw_verify"}
+#: The waived verdict, in both spellings the flow has used: R-0915-85
+#: collapsed WAIVED into PASS_WITH_WAIVERS.
+WAIVED_WORDS = ("WAIVED", "PASS_WITH_WAIVERS")
 COMPLIANCE_STEPS = tuple([f"A{i}" for i in range(1, 10)] +
                          [f"M{i}" for i in range(1, 5)])
 
@@ -224,7 +227,7 @@ def compare(base: Dict[str, str], d_proj: Path, t_proj: Path, step: str,
         if a == b:
             continue
         allowed = None
-        if key.endswith(f"/{step}") and a == "WAIVED" and b == "PASS":
+        if key.endswith(f"/{step}") and a in WAIVED_WORDS and b == "PASS":
             allowed = "WAIVED->PASS at the step under test"
         elif b == "FAIL" and a != "FAIL" and control and \
                 key in (control.get("confirmed") or {}):
@@ -238,7 +241,8 @@ def compare(base: Dict[str, str], d_proj: Path, t_proj: Path, step: str,
         if a == b:
             continue
         allowed = ("WAIVED->PASS at the step under test"
-                   if sid == step and a == "WAIVED" and b == "PASS" else None)
+                   if sid == step and a in WAIVED_WORDS and b == "PASS"
+                   else None)
         diffs.append({"where": f"compliance {sid}", "direct": a, "tool": b,
                       "allowed": allowed})
     b2 = {"differences": diffs,
