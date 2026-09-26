@@ -31,6 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 PROGRAMS = Path(__file__).resolve().parents[1]
@@ -194,14 +195,23 @@ def test_an_undisclosed_missing_bitstream_still_fails(tmp_path):
     assert doc["overall"] == "FAIL", doc["overall"]
 
 
-def test_a_step_that_owes_no_bitstream_is_never_excluded(tmp_path):
+@pytest.mark.parametrize("output_present", [False, True],
+                         ids=["declared-output-absent", "gate-fails"])
+def test_a_step_that_owes_no_bitstream_is_never_excluded(tmp_path,
+                                                         output_present):
     # The audit's own board-skip row, forged onto a step the flow does NOT
     # declare as owing a bitstream: it is not a board step, so it is not
     # excluded (it keeps the ENV_UNAVAILABLE tier an ENV row always had).
+    # BOTH conversion sites are reached: the early one (no declared output on
+    # disk) and the one after the gate ran and failed.
     ids = {s["id"] for s in _shipped_steps()}
     sid = next(n for n in range(1000, 2000) if n not in ids)
+    if output_present:
+        (tmp_path / "out").mkdir()
+        (tmp_path / "out/present.txt").write_text("x\n")
     step = {"id": sid, "name": "not a board step", "stage": "stage1",
-            "required_outputs": ["out/never.txt"],
+            "required_outputs": ["out/present.txt" if output_present
+                                 else "out/never.txt"],
             "gate": {"files_exist": ["out/never.txt"]}}
     w = {sid: {"id": sid, "reason": "forged", "approver": "x",
                "ticket": "T", "review_required": True,
