@@ -30,16 +30,25 @@ BLOCKING_CODES = frozenset({"SELRANGE", "PINNOTFOUND", "MULTIDRIVEN"})
 def default_image() -> str:
     """The image this check runs, resolved and never remembered.
 
-    `_eda_image.local_image()` — the `VIBEIC_EDA_IMAGE` override when set,
-    otherwise the PINNED bytes under whatever local reference names them,
-    without touching the network — and the composed pinned reference
-    (`_eda_pin.image_reference`) only when nothing is local. It used to be a
-    module constant pinned to a tag (0.3.76), which went stale the moment the
-    image moved; `test_the_eda_image_is_resolved_not_remembered` refuses that
-    shape."""
-    import _eda_image
+    The pinned DIGEST (`_eda_pin.resolved_image_digest`, which honours an
+    explicit override), run under whatever LOCAL reference holds those bytes
+    (`_eda_pin.local_references_for_digest`, no network), and the composed
+    pinned reference only when nothing local holds them. Local first is
+    load-bearing: `resolved_image_digest` exports `<repo>@<digest>` into the
+    environment, and on a host whose `VIBEIC_EDA_IMAGE_REPO` names a registry
+    mirror that reference is not local, so handing it to `docker run` would
+    fetch the image instead of running it.
+
+    It used to be a module constant pinned to a tag (0.3.76), which went stale
+    the moment the image moved; `test_the_eda_image_is_resolved_not_remembered`
+    refuses that shape."""
     import _eda_pin
-    return _eda_image.local_image() or _eda_pin.image_reference()
+    try:
+        digest = _eda_pin.resolved_image_digest()
+    except _eda_pin.ImageNotResolvable:
+        return _eda_pin.image_reference()
+    refs, _why = _eda_pin.local_references_for_digest(digest)
+    return refs[0] if refs else _eda_pin.image_reference()
 
 
 _DIAGNOSTIC = re.compile(r"^%(Warning|Error)-([A-Z][A-Z0-9_]*):", re.M)
