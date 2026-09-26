@@ -342,10 +342,17 @@ def _resolve_report(project: Path, override, name: str):
 def _acquire_dt2(project: Path, args, pdk_dir) -> tuple[dict | None, str]:
     """Consume an existing DT2 path_delay_coverage.json, else RUN DT2's real
     producer (`_pdf.run_pdf_atpg`) to create one. Returns (dt2_blob, note)."""
+    want = getattr(args, "timing_source", None)
     path = _resolve_report(project, args.dt2_json, "path_delay_coverage.json")
     if path is not None:
         blob = _load_json(path)
-        if blob is not None:
+        # With a LibreLane timing source, a DT2 report is reused only when it
+        # graded exactly those views (same corner, same file hashes).
+        if blob is not None and (want is None or (
+                (blob.get("timing_source") or {}).get("corner")
+                == want["corner"] and
+                (blob.get("timing_source") or {}).get("sha256")
+                == want["sha256"])):
             return blob, f"reused existing DT2 report: {path.name}"
     # Produce it (real engine — same inputs DT2 would take).
     _ec, blob = _pdf.run_pdf_atpg(
@@ -354,7 +361,7 @@ def _acquire_dt2(project: Path, args, pdk_dir) -> tuple[dict | None, str]:
         spef=args.spef, liberty=args.liberty, top=args.top, clock=args.clock,
         dff_cells=args.dff_cells, k=args.k, floor=0.0,
         timing_fraction=_pdf.TIMING_FRACTION_DEFAULT, pdk_dir=pdk_dir,
-        timeout=args.timeout)
+        timeout=args.timeout, timing_source=want)
     return blob, "produced DT2 report via path_delay_fault_atpg_run.run_pdf_atpg"
 
 
@@ -405,6 +412,7 @@ def run_sdd_atpg(project: Path, args, pdk_dir) -> tuple[int, dict]:
 
     dt2, dt2_note = _acquire_dt2(project, args, pdk_dir)
     base["dt2_source"] = dt2_note
+    base["slack_source"] = dt2.get("timing_source") if dt2 else None
     if dt2 is None:
         base.update({"verdict": "ERROR", "status": "ERROR",
                      "reasons": ["could not obtain DT2 path-delay coverage "
@@ -562,6 +570,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--pdk-dir", default=None,
                    help="PDK dir mounted at /pdk (default ../shared_pdk)")
     p.add_argument("--timeout", type=int, default=1800)
+    p.add_argument("--librelane-state", default=None,
+                   help="state_out.json of a LibreLane OpenROAD.STAPostPNR "
+                        "step; slack comes from --librelane-corner of it")
+    p.add_argument("--librelane-corner", default=None,
+                   help="STA corner whose slack grades SDD")
     p.add_argument("--json", default=None,
                    help="Report path (default reports/phase2/dft/"
                         "sdd_coverage.json)")
@@ -571,6 +584,24 @@ def main(argv: list[str] | None = None) -> int:
     if not project.is_dir():
         print(f"{_PROGRAM}: not a directory: {project}", file=sys.stderr)
         return 2
+
+    args.timing_source = None
+    if args.librelane_state or args.librelane_corner:
+        import librelane_contract as _llc
+        try:
+            if not (args.librelane_state and args.librelane_corner):
+                raise _llc.Refusal("LL_STATE_MISSING",
+                                   "--librelane-state and --librelane-corner "
+                                   "are required together")
+            args.timing_source = _llc.post_pnr_timing_inputs(
+                project, (project / args.librelane_state).resolve(),
+                args.librelane_corner)
+        except _llc.Refusal as exc:
+            print(f"{_PROGRAM}: {exc}", file=sys.stderr)
+            return 2
+        args.sta_netlist = args.timing_source["sta_netlist"]
+        args.sdc = args.timing_source["sdc"]
+        args.spef = args.timing_source["spef"]
 
     _augment_defaults(project, args)
 

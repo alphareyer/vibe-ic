@@ -767,8 +767,8 @@ def _ensure_cut(project: Path, netlist_rel: str, cut_rel: str, clock: str,
     return True, f"ran fault cut (--dff {cells})"
 
 
-def _tdf_pre_flatten_script(liberty_ctr: str, cut_rel: str, top: str,
-                            flat_rel: str) -> str:
+def _tdf_pre_flatten_script(liberty_ctr: "str | list[str]", cut_rel: str,
+                            top: str, flat_rel: str) -> str:
     """Build the yosys pre-flatten script for the TDF miter core (pure/testable).
 
     v1.4.39 (ic2-sha256 sha256 DT1 floor): `proc; memory_collect; memory_map` run
@@ -779,10 +779,14 @@ def _tdf_pre_flatten_script(liberty_ctr: str, cut_rel: str, top: str,
     to logic, so the miter core flattens to generic `$_*_` gates. Same recipe as
     the #155 LEC memory_map fix; a no-op on memory-less designs (the passes just
     find nothing to legalize). `flatten -separator _` keeps inlined pin nets as
-    CLEAN ids so `sat -set`/`connect` can reference every fault site."""
+    CLEAN ids so `sat -set`/`connect` can reference every fault site.
+
+    `liberty_ctr` may be a list: a padded top needs its IO library as well as
+    the standard cells, and every library is read the same way."""
+    libraries = [liberty_ctr] if isinstance(liberty_ctr, str) else liberty_ctr
     return (
-        f"read_liberty -ignore_miss_func {liberty_ctr}\n"
-        f"read_verilog /work/{cut_rel}\n"
+        "".join(f"read_liberty -ignore_miss_func {lib}\n" for lib in libraries)
+        + f"read_verilog /work/{cut_rel}\n"
         f"hierarchy -top {top}\n"
         "proc\n"
         "memory_collect\n"
@@ -920,7 +924,7 @@ def levelisation_failure_reason(flat_verilog_text: str, liberty: str) -> str:
         f"and none is reported.")
 
 
-def _gate_levelise(project: Path, cut_rel: str, liberty_ctr: str,
+def _gate_levelise(project: Path, cut_rel: str, liberty_ctr: "str | list[str]",
                    top: str, flat_rel: str, pdk_dir: Path | None,
                    timeout: int,
                    extra_mounts: list[tuple[str, str]] | None = None
@@ -947,7 +951,8 @@ def _gate_levelise(project: Path, cut_rel: str, liberty_ctr: str,
     # A Liberty holding none of this netlist's cells produces exit 0 and a file
     # of untouched blackboxes. Ask the only question that matters.
     why = levelisation_failure_reason(
-        (project / flat_rel).read_text(errors="replace"), liberty_ctr)
+        (project / flat_rel).read_text(errors="replace"),
+        liberty_ctr if isinstance(liberty_ctr, str) else ", ".join(liberty_ctr))
     if why:
         return False, why
     return True, "gate-levelised via read_liberty -ignore_miss_func + flatten"

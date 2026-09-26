@@ -419,18 +419,29 @@ def pdf_coverage_math(records: list[dict], period_ns: float | None,
 
 def _run_opensta_paths(project: Path, sta_netlist: str, sdc: str, spef: str,
                        liberty: str, top: str, n_paths: int,
-                       pdk_dir: Path | None, timeout: int
+                       pdk_dir: Path | None, timeout: int,
+                       sta_liberties: list[str] | None = None
                        ) -> tuple[bool, str, str]:
     """Run OpenSTA on the ROUTED netlist + SPEF (real timing) and return the
     raw `report_checks` text of the N worst-slack (longest) LOC-launchable
-    paths. Returns (ok, report_text, message)."""
-    liberty_ctr, lib_mount = _tdf._resolve_liberty_mount(project, liberty)
-    extra = [lib_mount] if lib_mount else None
+    paths. Returns (ok, report_text, message).
+
+    `sta_liberties`, when given, are the cell libraries LibreLane's
+    STAPostPNR read for the graded corner; they replace `liberty` for timing
+    only."""
+    read_libs = []
+    extra = []
+    for lib in (sta_liberties or [liberty]):
+        liberty_ctr, lib_mount = _tdf._resolve_liberty_mount(project, lib)
+        read_libs.append(f"read_liberty {liberty_ctr}\n")
+        if lib_mount and lib_mount not in extra:
+            extra.append(lib_mount)
+    extra = extra or None
     rpt_rel = "phase2/stage2/dft/pdf/sta_paths.rpt"
     (project / rpt_rel).parent.mkdir(parents=True, exist_ok=True)
     tcl_rel = "phase2/stage2/dft/pdf/_pdf_sta.tcl"
     tcl = (
-        f"read_liberty {liberty_ctr}\n"
+        "".join(read_libs) +
         f"read_verilog /work/{sta_netlist}\n"
         f"link_design {top}\n"
         f"read_sdc /work/{sdc}\n"
@@ -533,8 +544,13 @@ def run_pdf_atpg(project: Path, netlist_rel: str, cut_rel: str, flat_rel: str,
                  sta_netlist: str, sdc: str, spef: str, liberty: str,
                  top: str, clock: str, dff_cells: str | None, k: int,
                  floor: float, timing_fraction: float, pdk_dir: Path | None,
-                 timeout: int = 1800) -> tuple[int, dict]:
-    """Full PDF ATPG producer. Returns (exit_code, report_dict)."""
+                 timeout: int = 1800,
+                 timing_source: dict | None = None) -> tuple[int, dict]:
+    """Full PDF ATPG producer. Returns (exit_code, report_dict).
+
+    `timing_source` is `librelane_contract.post_pnr_timing_inputs`'s answer
+    when the timing views come from LibreLane STAPostPNR; it is recorded in
+    the report and its corner libraries are used for STA."""
     pdf_dir = (project / "phase2/stage2/dft/pdf")
     pdf_dir.mkdir(parents=True, exist_ok=True)
     miters_rel = "phase2/stage2/dft/pdf/pdf_miters.v"
@@ -547,6 +563,7 @@ def run_pdf_atpg(project: Path, netlist_rel: str, cut_rel: str, flat_rel: str,
         "sta_netlist": sta_netlist, "spef": spef, "sdc": sdc,
         "floor_pct": floor, "k_requested": k,
         "timing_fraction": timing_fraction, "disclosure": _DISCLOSURE,
+        "timing_source": timing_source or {"step": "direct"},
     }
 
     # 0. TIMING-MODEL GUARD — self-skip if the real timing inputs are absent.
@@ -583,6 +600,11 @@ def run_pdf_atpg(project: Path, netlist_rel: str, cut_rel: str, flat_rel: str,
     else:
         flat_rel = "phase2/stage2/dft/pdf/flat_core.v"
         liberty_ctr, lib_mount = _tdf._resolve_liberty_mount(project, liberty)
+        # The corner libraries STAPostPNR read also model the netlist's pad
+        # cells; without them a padded top cannot be levelised.
+        if (timing_source or {}).get("liberties"):
+            liberty_ctr = list(timing_source["liberties"])
+            lib_mount = None
         ok, msg = _tdf._gate_levelise(
             project, cut_rel, liberty_ctr, top, flat_rel, pdk_dir,
             timeout=min(timeout, 300),
@@ -642,7 +664,8 @@ def run_pdf_atpg(project: Path, netlist_rel: str, cut_rel: str, flat_rel: str,
     n_paths = max(k * 2, 32)
     ok, rpt_text, msg = _run_opensta_paths(
         project, sta_netlist, sdc, spef, liberty, top, n_paths, pdk_dir,
-        timeout=min(timeout, 600))
+        timeout=min(timeout, 600),
+        sta_liberties=(timing_source or {}).get("liberties"))
     base["opensta"] = msg
     if not ok:
         base.update({"verdict": "ERROR", "status": "ERROR", "reasons": [msg]})
@@ -813,6 +836,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--pdk-dir", default=None,
                    help="PDK dir mounted at /pdk (default ../shared_pdk)")
     p.add_argument("--timeout", type=int, default=1800)
+    p.add_argument("--librelane-state", default=None,
+                   help="state_out.json of a LibreLane OpenROAD.STAPostPNR "
+                        "step; its routed netlist, SDC, the corner's SPEF and "
+                        "cell libraries replace --sta-netlist/--sdc/--spef")
+    p.add_argument("--librelane-corner", default=None,
+                   help="STA corner to grade from --librelane-state")
     p.add_argument("--json", default=None,
                    help="Report path (default reports/phase2/dft/"
                         "path_delay_coverage.json)")
@@ -822,6 +851,26 @@ def main(argv: list[str] | None = None) -> int:
     if not project.is_dir():
         print(f"{_PROGRAM}: not a directory: {project}", file=sys.stderr)
         return 2
+
+    timing_source = None
+    if args.librelane_state or args.librelane_corner:
+        # No fallback to the direct views: a requested LibreLane source that
+        # cannot be read is an error, not a reason to grade other files.
+        import librelane_contract as _llc
+        try:
+            if not (args.librelane_state and args.librelane_corner):
+                raise _llc.Refusal("LL_STATE_MISSING",
+                                   "--librelane-state and --librelane-corner "
+                                   "are required together")
+            timing_source = _llc.post_pnr_timing_inputs(
+                project, (project / args.librelane_state).resolve(),
+                args.librelane_corner)
+        except _llc.Refusal as exc:
+            print(f"{_PROGRAM}: {exc}", file=sys.stderr)
+            return 2
+        args.sta_netlist = timing_source["sta_netlist"]
+        args.sdc = timing_source["sdc"]
+        args.spef = timing_source["spef"]
 
     # Chip-AGNOSTIC auto-discovery for omitted inputs (never a chip-named
     # default): first glob hit under the flow's canonical emit locations.
@@ -874,7 +923,7 @@ def main(argv: list[str] | None = None) -> int:
         spef=args.spef, liberty=args.liberty, top=args.top, clock=args.clock,
         dff_cells=args.dff_cells, k=args.k, floor=args.floor,
         timing_fraction=args.timing_fraction, pdk_dir=pdk_dir,
-        timeout=args.timeout)
+        timeout=args.timeout, timing_source=timing_source)
 
     if args.json:
         json_path = Path(args.json)

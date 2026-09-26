@@ -6,6 +6,7 @@ import argparse
 import fnmatch
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -419,6 +420,72 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         previous = folder / 'state_out.json'
         outputs.append(folder)
     return outputs
+
+
+#: STAPostPNR writes one `sta.log` per analysed corner. This line names each
+#: cell library it read for that corner (LibreLane 3.1 `scripts/openroad/sta`).
+_STA_CELL_LIBRARY_RE = re.compile(
+    r"^Reading cell library for the '([^']+)' corner at '([^']+)'", re.M)
+
+
+def _state_step_id(folder: Path) -> str | None:
+    """The LibreLane step that wrote `folder`, from its own records."""
+    receipt = folder / 'vibeic_receipt.json'
+    if receipt.is_file():
+        return _load(receipt).get('input', {}).get('step')
+    config = folder / 'config.json'
+    if config.is_file():
+        return _load(config).get('meta', {}).get('step')
+    return None
+
+
+def post_pnr_timing_inputs(project: Path, state_path: Path, corner: str) -> dict:
+    """The routed netlist, SDC, SPEF and cell libraries `OpenROAD.STAPostPNR`
+    timed `corner` with, as project-relative paths.
+
+    Netlist, SDC and SPEF come from the step's `state_out.json`; the SPEF is
+    the one whose corner pattern matches `corner` (the same `fnmatch` rule
+    LibreLane applies). The cell libraries are the ones the step's own
+    `<corner>/sta.log` says it read. A corner the step did not analyse, an
+    ambiguous or absent SPEF, or a view outside the project is refused.
+    """
+    folder = state_path.parent
+    step = _state_step_id(folder)
+    if step != 'OpenROAD.STAPostPNR':
+        raise Refusal('LL_NOT_STAPOSTPNR', f'{folder}: written by {step}')
+    state = _load(state_path)
+    log = folder / corner / 'sta.log'
+    if not log.is_file():
+        analysed = sorted(d.name for d in folder.iterdir()
+                          if (d / 'sta.log').is_file())
+        raise Refusal('LL_CORNER_NOT_ANALYSED', f'{corner}: {analysed}')
+    spefs = state.get('spef') or {}
+    if isinstance(spefs, str):
+        spefs = {'*': spefs}
+    matched = [path for pattern, path in spefs.items()
+               if fnmatch.fnmatch(corner, pattern)]
+    if len(matched) != 1:
+        raise Refusal('LL_SPEF_UNRESOLVED', f'{corner}: {len(matched)} matching SPEF')
+    libraries = [path for name, path in
+                 _STA_CELL_LIBRARY_RE.findall(log.read_text(errors='replace'))
+                 if name == corner]
+    if not libraries:
+        raise Refusal('LL_CORNER_LIBRARY_UNREAD', str(log))
+    root = project.resolve()
+    result: dict[str, Any] = {'step': step, 'corner': corner,
+                              'liberties': libraries}
+    for key, value in (('sta_netlist', state.get('nl')),
+                       ('sdc', state.get('sdc')), ('spef', matched[0]),
+                       ('state', str(state_path))):
+        path = Path(value or '')
+        if not value or not path.is_file():
+            raise Refusal('LL_STATE_FILE_MISSING', f'{key}: {value}')
+        if not path.resolve().is_relative_to(root):
+            raise Refusal('LL_STATE_OUTSIDE_PROJECT', f'{key}: {value}')
+        result[key] = str(path.resolve().relative_to(root))
+    result['sha256'] = {key: digest(root / result[key])
+                        for key in ('sta_netlist', 'sdc', 'spef', 'state')}
+    return result
 
 
 def judge_step(folder: Path, required_metrics: list[str], output: Path,

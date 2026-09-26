@@ -55112,6 +55112,77 @@ def routed_sdc_clock(project: Path) -> Optional[str]:
     return (m.group(1) or m.group(2)) if m else None
 
 
+#: LibreLane names an STA corner `<rc>_<process>_<temp>_<volt>`. DT2/DT3 take
+#: their paths and slack from the max-RC slow-process corner (review70, DT3).
+_ATPG_LIBRELANE_CORNER = "max_ss_*"
+
+
+def atpg_librelane_views(project: Path, step: str
+                          ) -> Tuple[Optional[List[str]], Optional[str]]:
+    """The producer arguments that grade `step` on LibreLane STAPostPNR views.
+
+    `([], None)` when `phase3/librelane_switch.json` leaves the step direct;
+    `(argv, None)` when it selects `librelane` and exactly one STAPostPNR
+    state under `phase3/librelane/` analysed exactly one max_ss corner;
+    `(None, reason)` when it selects LibreLane and that cannot be met. There
+    is no fallback to the direct views, and no second PDF/SDD engine, so
+    `dual` is refused.
+    """
+    if step not in ("DT2", "DT3"):
+        return [], None
+    import fnmatch as _fn
+    import librelane_contract as _ll
+    try:
+        mode = _ll.selected_mode(project, step)
+    except _ll.Refusal as exc:
+        return None, str(exc)
+    if mode == "direct":
+        return [], None
+    if mode == "dual":
+        return None, (f"{step} selects dual, but there is one path-delay "
+                      f"engine and one slack source per corner; select "
+                      f"librelane or direct")
+    root = project / "phase3" / "librelane"
+    states = sorted(
+        p for p in (root.rglob("state_out.json") if root.is_dir() else [])
+        if "attempts" not in p.relative_to(root).parts
+        and _ll._state_step_id(p.parent) == "OpenROAD.STAPostPNR")
+    if len(states) != 1:
+        return None, (f"{step} selects librelane and {len(states)} "
+                      f"OpenROAD.STAPostPNR states exist under "
+                      f"phase3/librelane/ (need exactly one)")
+    corners = sorted(d.name for d in states[0].parent.iterdir()
+                     if (d / "sta.log").is_file()
+                     and _fn.fnmatch(d.name, _ATPG_LIBRELANE_CORNER))
+    if len(corners) != 1:
+        return None, (f"{step} selects librelane and {states[0].parent.name} "
+                      f"analysed {len(corners)} corners matching "
+                      f"{_ATPG_LIBRELANE_CORNER} (need exactly one)")
+    try:
+        _ll.post_pnr_timing_inputs(project, states[0], corners[0])
+    except _ll.Refusal as exc:
+        return None, str(exc)
+    return ["--librelane-state", str(states[0].relative_to(project)),
+            "--librelane-corner", corners[0]], None
+
+
+def atpg_graded_from(path: Path, librelane_args: List[str]) -> bool:
+    """Did the report at `path` grade the views `librelane_args` name?
+
+    Always True for the direct path (no arguments), so the direct behaviour
+    is unchanged. With LibreLane arguments, a grade of other views is stale.
+    """
+    if not librelane_args:
+        return True
+    try:
+        source = json.loads(path.read_text(errors="replace")).get(
+            "timing_source") or {}
+    except Exception:
+        return False
+    return (source.get("state") == librelane_args[1]
+            and source.get("corner") == librelane_args[3])
+
+
 def atpg_missing_inputs(project: Path, step: str) -> List[str]:
     """Human-readable names of the inputs `step`'s producer needs and lacks.
 
@@ -55697,9 +55768,20 @@ def run_at_speed_atpg_producers(project: Path, written: List[str],
     )
     for step, prog, extra_argv in order:
         out_json = project / _ATPG_COVERAGE_REL[step]
-        if not atpg_needs_regrade(out_json):
+        ll_argv, ll_refusal = atpg_librelane_views(project, step)
+        if not atpg_needs_regrade(out_json) and (
+                ll_argv is None or atpg_graded_from(out_json, ll_argv)):
             # A real grade already exists; retire any record that contradicts it.
             atpg_clear_not_run(project, step)
+            continue
+        if ll_refusal:
+            atpg_disclose_not_run(
+                project, step,
+                f"{step} at-speed ATPG NOT RUN — LibreLane timing views "
+                f"selected and unavailable: {ll_refusal}",
+                "precondition_unmet", {"librelane_timing": ll_refusal})
+            notes.append(f"{step} LibreLane timing views unavailable "
+                         f"→ {_ATPG_NOT_RUN_REL[step]}")
             continue
 
         missing = atpg_missing_inputs(project, step)
@@ -55715,7 +55797,7 @@ def run_at_speed_atpg_producers(project: Path, written: List[str],
 
         cmd = [sys.executable, str(PROGRAMS_DIR / prog), str(project),
                "--clock", str(routed_sdc_clock(project)), *extra_argv,
-               "--json", str(out_json)]
+               *ll_argv, "--json", str(out_json)]
         pdk_in = project / "input" / "pdk"
         if pdk_in.is_dir():
             cmd += ["--pdk-dir", str(pdk_in.resolve())]
