@@ -180,6 +180,7 @@ def test_no_publisher_discards_the_verdict_of_the_checker_it_ran():
         repr(bad))
 
 
+@pytest.mark.consistency
 def test_the_ledger_has_no_stale_entries():
     """An entry that now propagates must be REMOVED, not left standing.
 

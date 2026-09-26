@@ -361,6 +361,7 @@ def test_every_named_limitation_carries_a_reason():
         assert limits.reason_for(skill).startswith("synthetic good-output")
 
 
+@pytest.mark.consistency
 def test_the_limitation_list_size_is_pinned_so_it_can_be_watched_shrinking():
     """53 named entries stand in for a blanket skip over the same 53.
 

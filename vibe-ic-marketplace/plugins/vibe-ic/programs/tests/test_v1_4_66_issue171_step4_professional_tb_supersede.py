@@ -28,6 +28,7 @@ chip-AGNOSTIC: structural paths + JUnit structure only, no chip / vendor / SKU
 literal.
 """
 import sys
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -171,6 +172,7 @@ def _step4():
     }
 
 
+@pytest.mark.consistency
 def test_fixture_matches_the_flow_yaml():
     """This file's Step-4 fixture must BE the flow's Step 4, not a lookalike —
     otherwise it can keep asserting a shape the real flow no longer has."""

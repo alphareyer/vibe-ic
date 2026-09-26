@@ -637,6 +637,7 @@ _WIRING_COUNT = re.compile(
     re.I)
 
 
+@pytest.mark.consistency
 def test_the_declaration_states_no_wiring_COUNT_the_flow_falsifies():
     """The half its neighbour returns early on.
 

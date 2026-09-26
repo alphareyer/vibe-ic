@@ -183,6 +183,7 @@ def test_a_recorded_maximum_is_a_CEILING_and_not_a_fixed_width():
                 f"device with no freedom to divide")
 
 
+@pytest.mark.consistency
 def test_the_absence_notes_are_measured_over_every_gencell_not_sampled():
     """Each family's record explains its ABSENT roles. That prose is a claim
     about the whole file, and a claim about a whole file has to have read the
@@ -241,6 +242,7 @@ def test_the_recorded_device_is_one_that_can_actually_BE_sized():
         assert found.get("wmin") is not None, (family, rec["device"])
 
 
+@pytest.mark.consistency
 def test_the_citation_counts_every_capacitor_gencell_not_just_the_bounded_ones():
     """A citation that says "the only one" or "of six" is a claim about the
     WHOLE file, and a claim about a whole file has to have counted the whole

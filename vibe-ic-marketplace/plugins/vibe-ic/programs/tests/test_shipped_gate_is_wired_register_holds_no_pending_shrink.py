@@ -156,6 +156,7 @@ def _synthetic_root(tmp_path, gates, recorded):
 # 1. the register owes no unrecorded paydown
 # --------------------------------------------------------------------------
 
+@pytest.mark.consistency
 def test_the_shipped_check_reports_no_pending_tightening(shipped):
     """RED before the shrink was recorded: the check printed
     `[TIGHTENED] unwired: 27 entries left the recorded set (53 -> 26)` and
@@ -170,6 +171,7 @@ def test_the_shipped_check_reports_no_pending_tightening(shipped):
     assert "--record-shrink" not in r.stdout, r.stdout
 
 
+@pytest.mark.consistency
 def test_the_shipped_register_is_exactly_what_the_shipped_tree_measures(shipped):
     """Not `<=` and not `does not contain X` — the SAME SET, both directions,
     for BOTH registers.

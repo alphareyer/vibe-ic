@@ -507,6 +507,7 @@ class TestNoEmitSiteRestatesTheVersion:
             "an attribution string states a version literal instead of "
             "reading it from the manifest (#800):\n  " + "\n  ".join(offenders))
 
+    @pytest.mark.consistency
     def test_the_set_of_version_reading_programs_is_pinned(self):
         found = set()
         for py in sorted(_PROGRAMS.glob("*.py")):

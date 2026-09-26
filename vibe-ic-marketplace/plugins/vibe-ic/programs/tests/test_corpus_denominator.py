@@ -175,6 +175,7 @@ def test_the_published_corpus_has_not_become_less_answerable():
     assert ok, why
 
 
+@pytest.mark.consistency
 @needs_corpus
 def test_the_measured_state_is_what_the_docstring_claims():
     """#1200's number, re-derived rather than quoted.

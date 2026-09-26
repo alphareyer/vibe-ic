@@ -83,6 +83,7 @@ def _baseline() -> dict:
     return json.loads(BASELINE.read_text(encoding="utf-8"))
 
 
+@pytest.mark.consistency
 @needs_corpus
 def test_every_baseline_entry_names_a_published_run():
     """A `per_run` key that names nothing is debt recorded against a ghost.
@@ -107,6 +108,7 @@ def test_every_baseline_entry_names_a_published_run():
     )
 
 
+@pytest.mark.consistency
 @needs_corpus
 def test_declared_population_matches_the_tree():
     """`runs_swept` / `runs_with_reports` must describe THIS tree.
@@ -124,6 +126,7 @@ def test_declared_population_matches_the_tree():
         f"but the tree holds {rep['runs_with_reports']}")
 
 
+@pytest.mark.consistency
 def test_the_recorded_total_is_the_sum_of_its_own_entries():
     """`findings_total` must not drift from `per_run`.
 

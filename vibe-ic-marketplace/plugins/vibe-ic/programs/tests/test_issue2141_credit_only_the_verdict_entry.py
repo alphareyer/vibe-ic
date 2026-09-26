@@ -291,6 +291,7 @@ def _register():
     return json.loads(REGISTER.read_text(encoding="utf-8"))
 
 
+@pytest.mark.consistency
 def test_the_shipped_register_is_stamped_with_the_new_rule():
     """The migration was RUN, not deferred to a human at landing time."""
     assert _register().get("measured_under") == G._RULE_ID

@@ -6,6 +6,7 @@ regenerating the inventory fails this test, forcing
 `python3 programs/gen_skill_inventory.py` to be re-run.
 """
 from __future__ import annotations
+import pytest
 import importlib.util
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ def _load_gen():
     return mod
 
 
+@pytest.mark.consistency
 def test_committed_skill_inventory_matches_folders() -> None:
     code = _load_gen().discover()
     committed = json.loads(INV.read_text())
@@ -38,6 +40,7 @@ def test_total_equals_enumeration() -> None:
     assert inv["total"] == sum(inv["by_tier"].values())
 
 
+@pytest.mark.consistency
 def test_new_skills_counted() -> None:
     inv = json.loads(INV.read_text())
     # the two skills added this cycle must be in the count

@@ -219,6 +219,7 @@ def test_zh_integer_step_ids_match_flow_exactly():
     )
 
 
+@pytest.mark.consistency
 def test_headline_step_count_matches_flow():
     data, int_steps, _other = _load_flow()
     en, zh = _docs()

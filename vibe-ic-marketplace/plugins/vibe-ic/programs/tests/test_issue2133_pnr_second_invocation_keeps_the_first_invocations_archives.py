@@ -632,6 +632,7 @@ class TestIssue2108InvariantsHoldAcrossInvocations:
 # ---------------------------------------------------------------------------
 # 7. THE CONSUMER SET NAMED IN THIS MODULE'S DOCSTRING IS STILL COMPLETE
 # ---------------------------------------------------------------------------
+@pytest.mark.consistency
 def test_the_manifest_consumer_set_is_still_what_this_module_names():
     """The docstring above names every file in the repository that reads the
     manifest or the archives. That claim is the reason this change could be

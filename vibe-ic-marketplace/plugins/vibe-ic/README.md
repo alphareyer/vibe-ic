@@ -1,12 +1,12 @@
-# vibe-ic — AI-Native IC Design plugin (**v1.24.98**)
+# vibe-ic — AI-Native IC Design plugin (**v1.24.99**)
 
 **A deterministic program layer with AI-backup skills, driving spec → RTL → GDS.**
 
-The plugin is no longer "compliance regexes over agent prose". It is **1479 top-level Python
-programs** (1353 of them catalogued in [`programs/INDEX.md`](programs/INDEX.md); the other
+The plugin is no longer "compliance regexes over agent prose". It is **1480 top-level Python
+programs** (1354 of them catalogued in [`programs/INDEX.md`](programs/INDEX.md); the other
 126 are helper modules and shims) that run the flow, **60 skills** that back the programs up
 where judgment is genuinely required, **6 slash commands**, **9 agents**, and
-**4019 test files**. Programs decide; skills only fill the holes the programs
+**4020 test files**. Programs decide; skills only fill the holes the programs
 deliberately leave.
 
 ## ► The one front door
@@ -203,12 +203,12 @@ separate **`VIBEIC_OPENROAD_THREADS`** (`mcp-eda/src/lib/pnr_threads.mjs`,
    metadata fields, tool invocations, hand-off lines) as a regex list.
 2. A shared driver `_shared/skill_compliance_check.py` audits any
    agent-produced output against the YAML.
-3. **1479 top-level deterministic programs** verify actual artifacts on disk — not
+3. **1480 top-level deterministic programs** verify actual artifacts on disk — not
    just what the agent wrote in its report.
 
 ## Layout
 
-At 1479 top-level programs, a hand-maintained per-bucket listing is not meaningful — the catalog is
+At 1480 top-level programs, a hand-maintained per-bucket listing is not meaningful — the catalog is
 generated instead. `programs/INDEX.md` is produced by `tools/gen_programs_index.py`, and a
 CI freshness test diffs the regenerated index against the committed one and FAILs on drift.
 
@@ -225,7 +225,7 @@ plugins/vibe-ic/
 │   ├── bootstrap_compliance.py    — regenerates all compliance.yaml
 │   ├── gen_compliance_tests.py    — regenerates all test_compliance.py
 │   └── add_compliance_gate.py     — adds gate section to SKILL.md files
-├── programs/                      — 1479 top-level *.py (1353 catalogued)
+├── programs/                      — 1480 top-level *.py (1354 catalogued)
 │   ├── INDEX.md                   — AUTO-GENERATED catalog; CI-checked for drift
 │   ├── vibe_ic_one_shot_runner.py — THE front door
 │   ├── phase1_one_shot_runner.py  — and phase1_doc_, phase2_, phase23_,
@@ -235,7 +235,7 @@ plugins/vibe-ic/
 │   ├── l_doc_taxonomy.py          — L1..L27 layer definitions
 │   ├── _commercial_pdk.py         — config-driven commercial-PDK resolution
 │   ├── gds_antenna/, metal_fill/  — sub-packages
-│   └── tests/                     — 4019 test files
+│   └── tests/                     — 4020 test files
 ├── skills/                        — 60 skills, each with SKILL.md + compliance.yaml
 │   └── <skill>/tests/             — 82 per-skill compliance regression files
 ├── commands/                      — 6 slash commands + _anti_fabrication_rules.md
@@ -249,7 +249,7 @@ plugins/vibe-ic/
 
 ## Test suite
 
-**4019 test files** under `programs/tests/`, plus **82** per-skill compliance regressions
+**4020 test files** under `programs/tests/`, plus **82** per-skill compliance regressions
 under `skills/*/tests/`.
 
 Run it the CI way — a bare `pytest` from the plugin root, exactly as
@@ -267,6 +267,28 @@ Never `pytest programs/tests/` alone — a path filter skips the integration gat
 The gatekeeper workflow layers on `plugin_full_audit.py` (D1: every program has a test;
 D2: every flow step has a compliance checker) and, at `x.y.0` milestones only, the
 both-tree full suite.
+
+### The consistency tier (bookkeeping tests)
+
+Tests marked `@pytest.mark.consistency` check that INFORMATION matches the code —
+stated counts, inventories and indexes, registers that must equal a measured set,
+file or step order, figures in READMEs and docs. They are **deselected** (not run,
+not counted) on every routine run, and every session that deselects some says how
+many. They run only at the `x.y.0` FULL cadence (`tools/gatekeeper-land.sh` exports
+`VIBEIC_RUN_CONSISTENCY=1` when `landing_cadence.py` answers FULL) or on the owner's
+request:
+
+```bash
+cd vibe-ic-marketplace/plugins/vibe-ic
+VIBEIC_RUN_CONSISTENCY=1 bash run_tests.sh               # the full suite, consistency included
+python3 programs/consistency_tier.py --resync \
+    --website-repo <vibeic.ai checkout>                   # consistency only, then the resync report
+python3 programs/consistency_tier.py --resync --apply     # ... and run the regenerators
+```
+
+`--resync` runs every consistency test, names what a generator re-derives
+(inventory, index), lists what must be edited by hand, and lists the
+vibeic/vibeic.ai statements of codebase facts with the live value of each source.
 
 ## Usage
 
@@ -318,7 +340,7 @@ architecture (v0.40).
 Everything since has come from the same loop, run continuously: drive real ICs and open
 benchmarks through the flow, find where an AI judgment call rescued a run, and absorb
 that judgment back into a deterministic program with a regression test. That is why the
-program count moved from 41 at v0.40 to 1479 top-level programs today — and why
+program count moved from 41 at v0.40 to 1480 top-level programs today — and why
 the honesty gates exist at all. Each one was written after a real run reported a
 pass it could not back.
 

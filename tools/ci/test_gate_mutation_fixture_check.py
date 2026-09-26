@@ -311,6 +311,7 @@ def test_no_debt_entry_pins_a_line_number():
         "the next edit above them makes wrong: %r" % (len(offenders), offenders[:5]))
 
 
+@pytest.mark.consistency
 def test_every_debt_entry_names_a_gate_the_dispatcher_declares_exactly_once():
     """What makes dropping `declared_at` safe, asserted rather than assumed.
 

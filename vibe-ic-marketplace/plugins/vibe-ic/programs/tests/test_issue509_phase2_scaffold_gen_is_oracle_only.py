@@ -620,6 +620,7 @@ def test_the_module_declares_itself_oracle_only():
     )
 
 
+@pytest.mark.consistency
 def test_index_md_does_not_describe_the_oracle_as_a_live_path():
     index = PROGRAMS / "INDEX.md"
     if not index.is_file():

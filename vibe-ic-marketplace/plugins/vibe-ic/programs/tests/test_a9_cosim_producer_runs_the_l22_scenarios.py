@@ -245,7 +245,8 @@ def test_the_observer_lines_are_read_from_a_real_dcosim_log():
             for w in windows] == [(0, 3, 13, 0, 8), (1, 5, 21, 0, 8),
                                   (2, 4, 14, 0, 8)]
     # 24 clocks, 8-clock windows: three, not six (the X-band double count).
-    assert len(windows) == 3
+    # Pinned by MEMBERS, not by size: a double count would add windows 3..5.
+    assert {w["window"] for w in windows} == {0, 1, 2}
 
 
 def test_a_log_without_observer_lines_yields_no_window():

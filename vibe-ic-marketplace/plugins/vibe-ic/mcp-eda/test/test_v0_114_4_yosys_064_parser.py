@@ -29,6 +29,7 @@ can be parsed; never -1.
 chip-AGNOSTIC.
 """
 from __future__ import annotations
+import pytest
 
 import re
 import subprocess
@@ -179,6 +180,7 @@ def test_v0_114_4_source_has_three_canonical_regexes():
         "\\\\", "\\")
 
 
+@pytest.mark.consistency
 def test_v0_114_4_server_version_canonicalised():
     """SERVER_VERSION is canonicalised to the unified package.json version.
 

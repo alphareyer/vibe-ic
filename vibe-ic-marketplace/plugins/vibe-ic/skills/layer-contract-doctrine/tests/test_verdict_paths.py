@@ -111,6 +111,7 @@ def declared_verdicts() -> list:
 
 
 # ───────────────────────────────────────────────────────────── tests
+@pytest.mark.consistency
 def test_skill_md_and_this_file_agree_on_the_verdict_set():
     """A verdict added to SKILL.md needs a fixture here before it can ship."""
     assert set(declared_verdicts()) == set(RECORDS), (

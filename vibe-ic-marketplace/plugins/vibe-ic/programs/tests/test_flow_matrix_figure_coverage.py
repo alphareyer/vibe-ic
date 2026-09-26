@@ -211,6 +211,7 @@ def test_an_empty_corpus_is_not_a_pass(tmp_path):
 
 
 # ------------------------------------------------------ 5. THE REAL CORPUS --
+@pytest.mark.consistency
 def test_every_anchored_figure_in_the_committed_corpus_is_fresh():
     """#961, asserted against the tree instead of a fixture."""
     gen = _load_generator()

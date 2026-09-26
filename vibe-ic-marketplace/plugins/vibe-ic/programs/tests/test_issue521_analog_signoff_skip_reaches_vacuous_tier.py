@@ -490,6 +490,7 @@ _P0_EXPECTED = {
 }
 
 
+@pytest.mark.consistency
 def test_the_umbrella_registers_the_expected_subset():
     """Ten of the seventeen are registered structural gates; the other seven
     reach a report only through direct invocation or a step slot. Pinned so

@@ -200,6 +200,7 @@ def test_a_normal_exit_still_reads_the_log(monkeypatch):
 
 # ═══ the register shrank with the fix ═════════════════════════════════════
 
+@pytest.mark.consistency
 def test_the_a3_site_is_no_longer_on_the_container_deadline_record():
     """A converted site that stays on the record is a row the gate prints
     forever with a remedy nobody owes; `watchdog_ceiling_semantics_check`

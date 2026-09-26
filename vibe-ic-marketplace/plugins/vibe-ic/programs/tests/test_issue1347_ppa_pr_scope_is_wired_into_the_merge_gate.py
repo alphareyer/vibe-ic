@@ -39,6 +39,7 @@ applies five, and a green control has to ANSWER rather than avoid a surface
 (measured in `test_no_answers_document_is_reported_with_the_count_...`).
 """
 import ast
+import pytest
 import hashlib
 import json
 import subprocess
@@ -452,6 +453,7 @@ def test_the_answers_path_is_documented_where_a_pr_author_will_see_it():
         "in its own output, but no PR author is told it exists")
 
 
+@pytest.mark.consistency
 def test_the_documented_path_and_the_gates_constant_have_not_drifted():
     """One path, asserted from both ends. If someone moves the constant, this
     fails; if someone edits the template, this fails."""

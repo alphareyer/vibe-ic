@@ -98,6 +98,19 @@ LANDING_CADENCE="$(python3 "$PROGRAMS/landing_cadence.py" \
     --repo "$ROOT" --base "$BASE" --head HEAD 2>/dev/null \
     | sed -n 's/^LANDING_CADENCE=//p' || true)"
 [ -n "$LANDING_CADENCE" ] || LANDING_CADENCE=FULL
+# THE CONSISTENCY TIER RIDES THE SAME VERDICT (owner, 2026-09-26). Tests marked
+# `consistency` — pure bookkeeping: stated counts, inventories, registers, file
+# order, README/website figures — are DESELECTED unless this variable is 1
+# (`programs/consistency_tier.py`). They run at the x.y.0 milestone and on the
+# owner's request, never on a patch. Exported here, once, so every lane below
+# (targeted/full pytest, repo tools tests, unselectable) inherits one answer;
+# cleared otherwise, so a caller's environment cannot turn a patch landing into
+# a bookkeeping one. The same no-flag rule as the cadence itself.
+if [ "$LANDING_CADENCE" = "FULL" ]; then
+  export VIBEIC_RUN_CONSISTENCY=1
+else
+  unset VIBEIC_RUN_CONSISTENCY
+fi
 CHEAP_ONLY=0
 PREPARE=0
 # THE FULL TIER'S INDEPENDENT STAGES RUN AT THE SAME TIME, BY DEFAULT.

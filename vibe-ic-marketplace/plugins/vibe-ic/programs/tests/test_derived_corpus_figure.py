@@ -116,6 +116,7 @@ def _flow_declared_gate_programs_independently() -> set:
     return {n for n in names if (PROGRAMS / n).is_file()}
 
 
+@pytest.mark.consistency
 def test_wiring_audit_docstring_states_this_checkouts_populations():
     """The populations the docstring argues from must be THIS tree's.
 

@@ -373,6 +373,7 @@ def test_the_satisfied_marking_names_the_commit_that_satisfied_it(doc: Path):
         f"per-section rule above asserted nothing")
 
 
+@pytest.mark.consistency
 def test_the_generator_and_its_committed_output_do_not_drift():
     """`RESULT.md` is `gen_result_md.py`'s output and NOTHING re-derives it.
 

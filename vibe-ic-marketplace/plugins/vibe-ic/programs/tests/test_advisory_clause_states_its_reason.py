@@ -141,6 +141,7 @@ def test_the_population_is_the_clause_keys_not_the_grep_count():
         "for — re-derive it rather than deleting it")
 
 
+@pytest.mark.consistency
 def test_the_census_the_gate_publishes_is_the_one_it_measures():
     """The gate's docstring prints a three-line census. It must be THIS tree's.
 
@@ -528,6 +529,7 @@ def test_the_gate_is_wired_where_its_verdict_can_refuse():
         "declared with something other than blocking `run`: " + line[0])
 
 
+@pytest.mark.consistency
 def test_the_shipped_register_records_what_the_tree_measures():
     """The register on this tree must be exactly the offenders on this tree —
     no stale entry (a gate that has since stated a reason and would read as

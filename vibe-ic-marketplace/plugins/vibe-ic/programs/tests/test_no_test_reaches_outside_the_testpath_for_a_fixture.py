@@ -25,6 +25,7 @@ reaches the phantom tree. A test may still climb to reach the PROGRAMS directory
 may read anything under its own `fixtures/`.
 """
 import ast
+import pytest
 import re
 import sys
 from pathlib import Path
@@ -71,6 +72,7 @@ def test_no_test_climbs_out_of_the_testpath_to_read_a_fixture():
         + "; ".join(f"{n}:{ln} -> {v!r}" for n, ln, v in offenders))
 
 
+@pytest.mark.consistency
 def test_the_re_homed_corpus_is_where_the_consumers_now_look():
     """The other half: the destination really holds the 14 files, so a green
     result above cannot mean the corpus vanished instead."""

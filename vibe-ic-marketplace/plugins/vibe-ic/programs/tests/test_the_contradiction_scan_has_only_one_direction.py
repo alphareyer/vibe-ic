@@ -73,6 +73,7 @@ def test_the_audit_reports_the_direction_its_contradiction_scan_cannot_see():
         assert row["wiring"] == "INLINE_BLOCKING"
 
 
+@pytest.mark.consistency
 def test_the_live_instance_is_named_rather_than_counted():
     """A count tells nobody which gate to go and read."""
     rep = _mod().audit(_FLOW, _PROGRAMS)

@@ -512,6 +512,7 @@ def test_the_inventory_cannot_keep_claiming_a_defect_that_is_FIXED(
         f"unverifiable and the loose files must not be credited: {post_hoc}")
 
 
+@pytest.mark.consistency
 def test_the_inventory_names_records_that_actually_exist(citing, inventory):
     """Every explicit residual must still be a live citation."""
     _assert_inventory_live(citing, inventory)

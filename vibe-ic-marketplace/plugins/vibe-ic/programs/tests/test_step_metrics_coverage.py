@@ -60,6 +60,7 @@ def _tmp(prefix):
 # --------------------------------------------------------------------------
 # The census — the remainder is COUNTED IN THE CODE, not described in a brief
 # --------------------------------------------------------------------------
+@pytest.mark.consistency
 def test_declared_coverage_matches_the_tree():
     """The census follows the flow, and every step has a real gate clause."""
     from flow_compliance_check import _find_flow_def

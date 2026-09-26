@@ -426,6 +426,7 @@ def test_a_clock_domains_field_that_is_not_a_list_keeps_the_gate_live(
     assert F._p0_contract_na_reason(gate, proj, rtl) is None
 
 
+@pytest.mark.consistency
 def test_the_roster_is_exactly_what_this_file_accounts_for():
     """No gate may join `_P0_GATE_ZERO_POPULATION` without a both-direction
     case here. If this fails, add the gate to DECLARING + STATED_BY rather

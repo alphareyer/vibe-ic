@@ -48,6 +48,7 @@ def test_the_bracket_fast_reject_is_sound_for_every_bracket_family():
     assert PP.blank_bracketed("no brackets here") == "no brackets here"
 
 
+@pytest.mark.consistency
 def test_the_no_caller_claim_in_the_docstring_matches_the_tree():
     """The module states that `sentence_scope` has no caller, and rests its
     whole containment argument on that. A claim a reader has to take on faith is

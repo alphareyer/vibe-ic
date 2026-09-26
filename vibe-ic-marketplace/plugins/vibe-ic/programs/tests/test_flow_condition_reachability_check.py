@@ -50,6 +50,7 @@ def test_canonical_flow_has_no_unbaselined_holes():
     assert unlisted == [], f"new self-disabling condition(s): {unlisted}"
 
 
+@pytest.mark.consistency
 def test_baseline_has_no_stale_entries():
     """A fix must delete its baseline entry, or the file rots into a permanent
     excuse that outlives the defect it described."""

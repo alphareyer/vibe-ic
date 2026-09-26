@@ -31,6 +31,7 @@ reads is a decision somebody makes on purpose rather than a thing that happens.
 Chip-, PDK- and vendor-AGNOSTIC: no foundry, node or SKU appears here.
 """
 from __future__ import annotations
+import pytest
 
 import re
 import sys
@@ -228,6 +229,7 @@ def test_the_spef_stamp_is_now_actually_read():
         "report had already stated.")
 
 
+@pytest.mark.consistency
 def test_the_ledger_may_not_hold_a_stamp_that_is_actually_parsed():
     """The ledger must not rot into a list of things that are fine.
 

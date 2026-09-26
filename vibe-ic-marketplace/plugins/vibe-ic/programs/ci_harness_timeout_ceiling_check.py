@@ -332,7 +332,7 @@ _LANDING_WINDOW_ANCHOR = "lane_emit_window"
 # top-level `lane_emit_window` call, so the entry-to-anchor prefix moves with
 # the whole file and the three lane bodies do not.
 _LANDING_EXECUTION_PREFIX_SHA256 = (
-    '86f771da467b9bb4d0e4aae33656db18fa4e540afd08504f55e6f58e35edfc3a'
+    'cae2bc03cb6ecd87ed806c5d4718bab91de215c4295cf47e2e23c84b47e2c1ba'
 )
 # RE-PINNED when the landing gained its runtime PREFLIGHT. Both digests below
 # moved for one reason and it is stated here rather than left to `git log`: the
@@ -872,7 +872,7 @@ _LANDING_EXECUTION_PREFIX_SHA256 = (
 # can force a byte change must be satisfied BEFORE the PREPARE is rendered, not
 # between the two landings. See vibe-ic#2202.
 _LANDING_SCRIPT_SHA256 = (
-    '8125c8a7b50f8c9c20cab3e5a693ba66da981549d50ea5a86bc5a7e3861034b2'
+    '48d8710c86d1dde82563061ebf8d40c7660685a729b61fed0a2c7ef3ff3cea19'
 )
 # The helper AST is not enough: a counterfeit CLI can define the expected
 # helper and never call it.  Bind the policy to the complete reviewed driver

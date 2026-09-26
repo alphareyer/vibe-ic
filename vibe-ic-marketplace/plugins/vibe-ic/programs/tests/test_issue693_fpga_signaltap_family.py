@@ -186,6 +186,7 @@ def test_registration_carries_a_written_reason(gate):
         f"in the preceding comment block")
 
 
+@pytest.mark.consistency
 @pytest.mark.parametrize("gate", _SIGNALTAP)
 def test_signaltap_gates_are_pinned_as_declared_orphans(gate):
     """The repo DOES have a register for exactly this state — use it.

@@ -63,7 +63,14 @@ if str(_HERE) not in sys.path:
 # root on every run and REFUSES a run it would falsify. Riding the rootdir
 # conftest is what makes that execute rather than be remembered, and it costs
 # one `git rev-parse` per session.
-pytest_plugins = ("suite_write_guard", "not_verified_tier", "scratch_root_guard")
+# 2026-09-26 (owner) — the fourth plugin is not a guard but a tier: tests marked
+# `consistency` (pure bookkeeping: stated counts, inventories, registers, order,
+# README/website figures) are DESELECTED unless VIBEIC_RUN_CONSISTENCY=1, which
+# `tools/gatekeeper-land.sh` exports at the x.y.0 FULL cadence. Loaded here for
+# the same reason as the three above: it must ride every invocation. See
+# `programs/consistency_tier.py`.
+pytest_plugins = ("suite_write_guard", "not_verified_tier", "scratch_root_guard",
+                  "consistency_tier")
 
 
 # ORGANIC #574 — robust waveform-artifact hygiene. Many tests run `vvp` on an

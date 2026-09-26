@@ -426,6 +426,7 @@ def test_the_shipped_register_could_have_come_from_its_own_writer():
     assert SIFBU._shrink_provenance_defects(doc) == []
 
 
+@pytest.mark.consistency
 def test_the_shipped_register_separates_what_it_saw_from_what_it_did_not():
     """The two ledgers carry different claims, so an entry may sit in one only.
 

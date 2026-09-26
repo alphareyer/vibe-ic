@@ -133,6 +133,7 @@ def test_the_condition_glob_matches_a_staged_lef(tmp_path):
         "never run")
 
 
+@pytest.mark.consistency
 def test_the_geometry_gate_header_no_longer_claims_to_be_unwired():
     """The header stated the defect as a fact about the repo. Landing the
     wiring without correcting it leaves a false statement in the file that a

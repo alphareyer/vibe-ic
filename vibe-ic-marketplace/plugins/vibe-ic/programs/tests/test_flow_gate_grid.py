@@ -418,6 +418,7 @@ def test_the_declared_denominator_is_derived_from_both_axes(tmp_path):
     assert total != 504, "the frozen-both-axes arithmetic is back"
 
 
+@pytest.mark.consistency
 def test_the_grids_dimension_list_agrees_with_the_live_cell_ledger():
     """ADDING ONE MUST NOT BE POSSIBLE ON ONE SIDE ONLY.
 

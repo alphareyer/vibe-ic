@@ -467,6 +467,7 @@ def test_a_design_of_another_class_is_byte_identical(tmp_path):
     assert not (got & set(_profile()["db_classes"]))
 
 
+@pytest.mark.consistency
 def test_the_six_remaining_null_classes_are_still_null():
     """This landing takes ONE class. The other six stay null — each a recorded
     DECISION in `test_issue2110_unprofiled_classes_are_decisions` — and pinning

@@ -458,6 +458,7 @@ def test_the_ledger_is_generated_not_hand_written():
         "the ledger claims to be generated and its generator is not in the tree")
 
 
+@pytest.mark.consistency
 def test_the_unwired_state_is_disclosed_or_gone():
     """Wiring is MEASURED, and the disclosure dies with it.
 

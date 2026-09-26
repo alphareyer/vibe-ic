@@ -34,6 +34,7 @@ and becomes a record of history. This test is the enforcement the header
 already claimed.
 """
 from __future__ import annotations
+import pytest
 
 import importlib.util
 import json
@@ -60,6 +61,7 @@ def _register(mod) -> list:
     return json.loads(path.read_text(encoding="utf-8")).get("known", [])
 
 
+@pytest.mark.consistency
 def test_no_register_row_matches_nothing():
     """THE ARM. Every recorded row must still name a site the scanner finds.
 

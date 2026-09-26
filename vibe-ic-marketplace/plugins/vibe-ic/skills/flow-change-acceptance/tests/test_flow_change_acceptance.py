@@ -165,6 +165,7 @@ def _program_mapping_errors(body: str, programs: Path) -> list[str]:
     return errors
 
 
+@pytest.mark.consistency
 def test_skill_documents_its_own_promotion_path():
     """Program-first reuse must identify real programs, without mandatory slogans.
 

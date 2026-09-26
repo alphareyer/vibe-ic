@@ -38,6 +38,7 @@ same figures when it does. A guard that goes quiet instead of red is the defect,
 not the guard.
 """
 from __future__ import annotations
+import pytest
 
 import re
 import sys
@@ -146,6 +147,7 @@ def test_the_stated_peak_is_the_bound_times_one_checkpoint():
         f"computed from the wrong count")
 
 
+@pytest.mark.consistency
 def test_every_count_of_held_checkpoints_is_the_bound_the_code_holds():
     bound = R._SHIP_POSTROUTE_CVG_MAX_PASSES
     counts = _counts(_note())
