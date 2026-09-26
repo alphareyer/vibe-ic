@@ -44,6 +44,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
+import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
 import instrument_calibration as _calibration  # noqa: E402
 
 PROGRAM = "catalog_synth_safe_params_check"
@@ -158,7 +159,8 @@ def _yosys(project: Path, image: str | None, script: str, out_dir: Path):
         import p0_tool_frontend_check as frontend
         image = image or frontend.default_image()
         root, out = str(project.resolve()), str(out_dir.resolve())
-        command = ["docker", "run", "--rm", "--network", "none", "-u",
+        command = ["docker", "run", *_dmem.docker_memory_flags(), "--rm",
+                   "--network", "none", "-u",
                    f"{os.getuid()}:{os.getgid()}", "-v", f"{root}:{root}:ro",
                    "-v", f"{out}:{out}", "--entrypoint", "yosys", image,
                    "-q", "-p", script]
