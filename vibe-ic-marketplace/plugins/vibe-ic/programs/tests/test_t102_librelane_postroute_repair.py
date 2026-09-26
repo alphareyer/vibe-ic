@@ -112,8 +112,9 @@ def test_a_corner_the_tool_did_not_report_leaves_the_summary_unmeasured():
 def _impl_with(tmp_path, measurement, antenna=0):
     impl = tmp_path / 'impl'
     sta = put(tmp_path / 'sta/state_out.json', {'metrics': {}})
-    put(impl / prr.CURRENT, {'candidate': None, 'antenna': antenna, 'measurement': dict(
-        measurement, sta_state=str(sta), sta_state_sha256=contract.digest(sta))})
+    put(impl / prr.CURRENT, {'candidate': None, 'measurement': dict(
+        measurement, antenna_nets=antenna, sta_state=str(sta),
+        sta_state_sha256=contract.digest(sta))})
     return impl, sta
 
 
@@ -209,6 +210,8 @@ SHIM = textwrap.dedent('''\
                 d.write_text(spec["def"])
                 metrics = spec["repair_metrics"]
                 doc = {"def": str(d), "metrics": metrics}
+            elif step.endswith("CheckAntennas"):
+                doc = {"metrics": spec.get("antenna_metrics", {})}
             else:
                 doc = {"metrics": spec["sta_metrics"] if step.endswith("STAPostPNR") else {}}
             (folder / "state_out.json").write_text(json.dumps(doc))
@@ -228,8 +231,8 @@ def _scenario_impl(tmp_path, baseline, candidates):
     cfg = put(project / 'phase3/librelane/32-config/Vibeic.PostRouteRepair.json',
               {'meta': {'step': prr.REPAIR_STEP}, 'CELL_LEFS': [str(lef)]})
     ctx = {'project': str(project), 'image': 'img', 'pdk': 'pdk', 'mounts': [],
-           'configs': {prr.REPAIR_STEP: str(cfg), 'OpenROAD.RCX': str(cfg),
-                       'OpenROAD.STAPostPNR': str(cfg)}, 'corners': CORNERS}
+           'configs': {step: str(cfg) for step in (prr.REPAIR_STEP, *prr.MEASURE_STEPS)},
+           'corners': CORNERS}
     arm = project / prr.ARM_REL
     impl = arm / prr.IMPL_DIR
     put(impl / prr.CONTEXT, ctx)
@@ -237,9 +240,9 @@ def _scenario_impl(tmp_path, baseline, candidates):
               {'metrics': _sta_metrics(*baseline)})
     input_state = put(project / 'phase3/librelane/32-config/bridge/state_in.json', {'def': 'x'})
     put(impl / prr.CURRENT, {'candidate': None, 'repair_input': str(input_state),
-                            'repair_state': str(input_state), 'antenna': 0,
+                            'repair_state': str(input_state),
                             'measurement': dict(prr.summarize(_sta_metrics(*baseline), CORNERS),
-                                                sta_state=str(sta),
+                                                antenna_nets=0, sta_state=str(sta),
                                                 sta_state_sha256=contract.digest(sta))})
     scenario = {f'32-cand{i:02d}': c for i, c in enumerate(candidates, 1)}
     put(tmp_path / 'scenario.json', scenario)
@@ -255,11 +258,15 @@ def _controller(impl, arm, shim, monkeypatch, tmp_path):
     return closure.ClosureController(reg, impl, arm / 'closure')
 
 
+def _ant(nets):
+    return {} if nets is None else {'antenna__violating__nets': nets,
+                                    'antenna__violating__pins': nets}
+
+
 def _cand(setup, hold, drv=(0, 0, 0), *, changed=1, owned=True, antenna=0):
     return {'def': _def(owned), 'sta_metrics': _sta_metrics(setup, hold, drv),
-            'repair_metrics': {'vibeic__prr__changed': changed,
-                               'vibeic__prr__before__antenna__violating_nets': 0,
-                               'vibeic__prr__after__antenna__violating_nets': antenna}}
+            'antenna_metrics': _ant(antenna),
+            'repair_metrics': {'vibeic__prr__changed': changed}}
 
 
 def test_a_drv_fix_that_gives_up_setup_is_rolled_back(tmp_path, monkeypatch):
@@ -344,14 +351,29 @@ def test_a_regression_tolerance_is_declared_and_never_negative(tmp_path):
     assert reg.domains['pnr.repair_deck.required_completeness'].regression_tolerance == 0
 
 
-def test_a_hold_repair_that_leaves_an_antenna_is_rolled_back(tmp_path, monkeypatch):
+@pytest.mark.parametrize('antenna', [4, None])
+def test_a_repair_that_creates_an_antenna_violation_is_never_adopted(tmp_path, monkeypatch, antenna):
+    """Lane mig99 measured it on spm: the direct SDR DRV repair candidate
+    ADDED 4 antenna violations to an antenna-clean route. Every candidate is
+    counted by the step-26 instrument (OpenROAD.CheckAntennas) and one that
+    creates a violation -- or cannot be counted -- is refused, however much it
+    closed timing."""
     project, arm, impl, shim = _scenario_impl(
         tmp_path, baseline=(1.0, -0.2),
-        candidates=[_cand(1.0, 0.05, antenna=2)])
+        candidates=[_cand(1.0, 0.05, antenna=antenna)])
     ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
     run = ctl.run_controller('postroute.repair_hold')
     assert run.iterations[0].decision == 'ROLLED_BACK'
-    assert 'antenna.violation_count: 0.0 -> 2.0' in run.iterations[0].decision_reason
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+    row = json.loads((arm / prr.LEDGER).read_text())['candidates'][0]
+    assert row['decision'] == 'REFUSED' and row['reason'].startswith('antenna (OpenROAD.CheckAntennas)')
+    assert row['antenna'] == {'before': 0, 'after': antenna}
+
+
+def test_antenna_is_measured_by_the_step_26_instrument_on_every_candidate():
+    assert prr.MEASURE_STEPS[0] == 'OpenROAD.CheckAntennas'
+    import librelane_ir_antenna as step26
+    assert set(prr.ANTENNA_METRICS) == set(step26.ROUTER_METRICS)
 
 
 def test_run_bridges_measures_closes_and_records_every_candidates_fate(tmp_path, monkeypatch):
@@ -362,8 +384,8 @@ def test_run_bridges_measures_closes_and_records_every_candidates_fate(tmp_path,
     lef = write(tmp_path / 'cells.lef', LEF)
     base, cand = (4.026052, -0.335), _cand(4.025948, 0.326)
     scenario = {'32-base': {'def': _def(True), 'sta_metrics': _sta_metrics(*base),
-                            'repair_metrics': {'vibeic__prr__changed': 0,
-                                               'vibeic__prr__before__antenna__violating_nets': 0}},
+                            'antenna_metrics': _ant(0),
+                            'repair_metrics': {'vibeic__prr__changed': 0}},
                 '32-cand01': cand}
     put(tmp_path / 'scenario.json', scenario)
     shim = tmp_path / 'shim'

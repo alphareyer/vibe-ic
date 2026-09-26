@@ -68,6 +68,14 @@ _PPA_OUTSIDE_MEMBERS = frozenset({
     # program on f33242415 (this outside set) and on the T103 branch: this one
     # member added, none left.
     "pdn_em_presweep.py",
+    # ENTERED with T102 (lane mig102, step 32 on LibreLane): the actuator and
+    # measurement wrapper of the `timing.repair_setup` closure runs the closure
+    # itself (`from _ppa import closure`: load_registry + ClosureController)
+    # and is a `__main__` program (the registry's `actuate`/`measure` argv), so
+    # by this gate's own relation it is a ppa-layer executable no `ppa_*.py`
+    # glob reaches. Re-derived by running the program on 9bb487edd (v1.25.47) and on the
+    # branch: this one member added, none left.
+    "librelane_postroute_repair.py",
 })
 
 

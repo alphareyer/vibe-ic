@@ -49,6 +49,10 @@ HARD REFUSALS, BEFORE A CANDIDATE CAN BE ADOPTED
 ================================================
 * supply ownership (F24): `pg_supply_pin_ownership_check` on the candidate's
   own DEF. A proven off-supply pin keeps the pointer where it was;
+* antenna, by the step-26 instrument (`OpenROAD.CheckAntennas`
+  `antenna__violating__nets`): a candidate with more violating nets than the
+  state it was built from, or an uncounted one, keeps the pointer where it
+  was (lane mig99 measured the direct SDR candidate adding 4 on spm);
 * the repair step's own `check_placement` (it fails the step);
 * router DRC: the fork's scoped `detailed_route -nets` refuses a route with
   more whole-design violations than it was given (DRT-0712), which fails the
@@ -74,7 +78,12 @@ import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the 
 
 STEP = "32"
 REPAIR_STEP = "Vibeic.PostRouteRepair"
-MEASURE_STEPS = ("OpenROAD.RCX", "OpenROAD.STAPostPNR")
+#: Every candidate, and the input, is measured by the same three steps: the
+#: step-26 router-model antenna instrument (`OpenROAD.CheckAntennas`, whose
+#: `antenna__violating__nets` `librelane_ir_antenna` judges), then RCX, then
+#: STAPostPNR at every corner.
+MEASURE_STEPS = ("OpenROAD.CheckAntennas", "OpenROAD.RCX", "OpenROAD.STAPostPNR")
+ANTENNA_METRICS = ("antenna__violating__nets", "antenna__violating__pins")
 ARM_REL = "phase3/tool_arms/32"
 IMPL_DIR = "impl"
 CONTEXT = "context.json"
@@ -209,26 +218,28 @@ def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
         mounts=[(Path(h), g) for h, g in ctx["mounts"]], lane=lane)
     sta_state = folders[-1] / "state_out.json"
     summary = summarize(_load(sta_state).get("metrics") or {}, ctx["corners"])
+    antenna = antenna_census(folders[1])
     return folders[0], {"sta_state": str(sta_state),
-                        "sta_state_sha256": _ll.digest(sta_state), **summary}
+                        "sta_state_sha256": _ll.digest(sta_state), **summary,
+                        "antenna_nets": antenna["antenna__violating__nets"],
+                        "antenna_pins": antenna["antenna__violating__pins"],
+                        "antenna_state": str(folders[1] / "state_out.json")}
 
 
-def _antenna(repair_folder: Path) -> Optional[int]:
-    """Antenna-violating nets of the route a repair step handed on: its
-    after-count, or (census, or a no-op candidate) the input's count."""
-    metrics = _load(repair_folder / "state_out.json").get("metrics") or {}
-    key = ("vibeic__prr__before__antenna__violating_nets"
-           if metrics.get("vibeic__prr__changed") == 0 else
-           "vibeic__prr__after__antenna__violating_nets")
-    value = metrics.get(key)
-    return value if isinstance(value, int) else None
+def antenna_census(folder: Path) -> Dict[str, Optional[int]]:
+    """`OpenROAD.CheckAntennas`' own counts from its step folder (the step-26
+    router-model instrument); a count the step did not write is None."""
+    metrics = _load(folder / "state_out.json").get("metrics") or {}
+    return {k: (metrics.get(k) if isinstance(metrics.get(k), int)
+                and not isinstance(metrics.get(k), bool) else None)
+            for k in ANTENNA_METRICS}
 
 
 DOMAIN_VALUE = {
     "setup": lambda cur: cur["measurement"].get("setup_ws_min"),
     "hold": lambda cur: cur["measurement"].get("hold_ws_min"),
     "drv": lambda cur: cur["measurement"].get("drv_count"),
-    "antenna": lambda cur: cur.get("antenna"),
+    "antenna": lambda cur: cur["measurement"].get("antenna_nets"),
 }
 
 
@@ -333,10 +344,23 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
         _ledger_append(impl, row)
         print(f"candidate {lane} refused: {row['reason']}")
         return 0
+    # Antenna, by the step-26 instrument, on the candidate and on what it was
+    # built from: a candidate that creates an antenna violation (or cannot be
+    # counted) never moves the pointer, whatever it did for timing or DRV.
+    before = (cur.get("measurement") or {}).get("antenna_nets")
+    after = measurement.get("antenna_nets")
+    row["antenna"] = {"before": before, "after": after}
+    if after is None or (before is not None and after > before):
+        row.update(decision="REFUSED",
+                   reason=(f"antenna (OpenROAD.CheckAntennas): violating nets "
+                           f"{before} -> {after}"))
+        _ledger_append(impl, row)
+        print(f"candidate {lane} refused: {row['reason']}")
+        return 0
     write_json(impl / CURRENT, {
         "candidate": lane, "repair_input": str(repaired),
         "repair_state": str(repaired), "repair_folder": str(folder),
-        "measurement": measurement, "antenna": _antenna(folder),
+        "measurement": measurement,
         "supply_ownership": row["supply_ownership"]})
     row.update(decision="PROPOSED")
     _ledger_append(impl, row)
@@ -423,8 +447,9 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
     folder0, baseline = _candidate(ctx, census, state0, "32-base")
     write_json(impl / CURRENT, {"candidate": None, "repair_input": str(state0),
                                 "repair_state": str(state0), "repair_folder": str(folder0),
-                                "measurement": baseline, "antenna": _antenna(folder0)})
-    report.update(corners=corners, baseline=baseline, baseline_antenna=_antenna(folder0))
+                                "measurement": baseline})
+    report.update(corners=corners, baseline=baseline,
+                  baseline_antenna=baseline.get("antenna_nets"))
     reg = _cl.load_registry(registry, programs_dir=programs_dir)
     controller = _cl.ClosureController(reg, impl, arm / "closure")
     runs = []
@@ -444,7 +469,7 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
     final = _load(impl / CURRENT)
     report["adopted"] = final.get("candidate")
     report["final"] = final.get("measurement")
-    report["final_antenna"] = final.get("antenna")
+    report["final_antenna"] = (final.get("measurement") or {}).get("antenna_nets")
     report["final_supply_ownership"] = final.get("supply_ownership")
     report["adopted_state"] = final.get("repair_state")
     report["verdict"] = "PASS"

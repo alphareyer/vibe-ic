@@ -205,10 +205,11 @@ domains:
 
   antenna.violations:
     summary: >-
-      Antenna-violating nets of the route step 32 adopted: OpenROAD
-      check_antennas in the Vibeic.PostRouteRepair session, on the input
-      route (census) and on every candidate after its ECO route -- one
-      instrument for both.
+      Antenna-violating nets of the route step 32 adopted, by the step-26
+      router-model instrument (OpenROAD.CheckAntennas antenna__violating__nets)
+      run on the input route and on every candidate -- one instrument for
+      both. The wrapper also REFUSES a candidate that adds one (lane mig99
+      measured the direct SDR candidate adding 4 on spm).
     metric: antenna.violation_count
     unit: count
     direction: minimize
