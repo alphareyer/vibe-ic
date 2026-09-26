@@ -37,8 +37,11 @@ CAP_CLASS = "capacitor"
 # the reader that parses it. Measured on 9cf22c191c, this was the one file
 # `test_no_new_undeclared_infrastructure_skip_appears` named, and it has been
 # named since v1.17.98 (18cb660e3b) — the text is unchanged, only its author is.
+# "Out of reach" includes an EMPTY mount point: 8HD-4 and 8HD-8 carry a bare
+# `/foss/pdks` directory with nothing in it, and `is_dir()` alone let all five
+# PDK-reading tests run there and fail as if the registry were wrong.
 pytestmark = pytest.mark.skipif(
-    not PDK_ROOT.is_dir(),
+    not PDK_ROOT.is_dir() or not any(PDK_ROOT.iterdir()),
     reason=not_verified_reason(
         "the shipped PDKs are not on this host, so what each family's gencell "
         "states cannot be read",
