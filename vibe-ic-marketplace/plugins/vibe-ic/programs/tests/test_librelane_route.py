@@ -88,9 +88,11 @@ def test_the_route_region_is_delimited_once_at_the_decks_top_level(real_deck):
     region = '\n'.join(lines[begin[0]:end[0]])
     assert _has(region, 'global_route') and 'detailed_route {*}$_vic_drc_opt' in region
     assert 'clock_tree_synthesis' not in region
-    # after the CTS/hold region and after the DRT-0305 PG-net cleanup
+    # after the CTS/hold region; the DRT-0305 PG-net cleanup opens it, before
+    # the main global_route
     assert lines.index(runner._PNR_CTS_HOLD_END) < begin[0]
-    assert 'PG_CLEANUP_DONE' in '\n'.join(lines[:begin[0]])
+    first_route = next(i for i in range(begin[0], end[0]) if lines[i].startswith('global_route'))
+    assert 'PG_CLEANUP_DONE' in '\n'.join(lines[begin[0]:first_route])
     assert cts.tcl_brace_depth(lines[:begin[0]]) == 0
     assert cts.tcl_brace_depth(lines[begin[0]:end[0] + 1]) == 0
 
@@ -344,7 +346,7 @@ def _route_project(tmp_path, switch):
             f'{runner._PNR_CTS_HOLD_BEGIN}\nclock_tree_synthesis -buf_list b\n'
             f'write_def {out_dir}/post_cts.def\nrepair_timing -hold\n'
             f'write_def {out_dir}/post_hold.def\n{runner._PNR_CTS_HOLD_END}\n'
-            f'puts "PNR_STAGE: global_route"\npg_cleanup\n{runner._PNR_ROUTE_BEGIN}\n'
+            f'puts "PNR_STAGE: global_route"\n{runner._PNR_ROUTE_BEGIN}\npg_cleanup\n'
             f'global_route\ndetailed_route -output_drc {out_dir}/{runner.ROUTER_DRC_REPORT_NAME}\n'
             f'write_def {out_dir}/routed_preantenna.def\n'
             f'{runner._PNR_RESUME_ELIDE_END}\nrepair_antennas\n'

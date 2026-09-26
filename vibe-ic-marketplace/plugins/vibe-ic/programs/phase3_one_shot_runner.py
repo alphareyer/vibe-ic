@@ -18019,10 +18019,11 @@ _PNR_RESUME_ELIDE_END = "# <<<PNR_RESUME_ELIDE_END>>>"
 _PNR_CTS_HOLD_BEGIN = "# <<<PNR_CTS_HOLD_BEGIN>>>"
 _PNR_CTS_HOLD_END = "# <<<PNR_CTS_HOLD_END>>>"
 #: Step 21 (global + detailed route) inside the resume-elided region: from this
-#: line, after the DRT-0305 PG-net cleanup, to `_PNR_RESUME_ELIDE_END` (the
-#: route checkpoint). A LibreLane selection of step 21 stops the deck here,
-#: routes on LibreLane, and resumes the deck after the checkpoint
-#: (`librelane_route`), exactly as the fatal-signal resume does.
+#: line to `_PNR_RESUME_ELIDE_END` (the route checkpoint). The DRT-0305 PG-net
+#: cleanup opens the region and the main `global_route` follows it; a
+#: LibreLane selection of step 21 runs the cleanup, stops the deck at that
+#: `global_route`, routes on LibreLane, and resumes the deck after the
+#: checkpoint (`librelane_route`), exactly as the fatal-signal resume does.
 _PNR_ROUTE_BEGIN = "# <<<PNR_ROUTE_BEGIN>>>"
 
 
@@ -32634,8 +32635,8 @@ if {{[catch {{
 # design actually routes instead of silently shipping unrouted. See
 # _pg_net_cleanup_tcl for the full rationale.
 puts "{_PNR_STAGE_MARKER} global_route"
-{pg_cleanup_block}# <<<PNR_ROUTE_BEGIN>>>
-global_route
+# <<<PNR_ROUTE_BEGIN>>>
+{pg_cleanup_block}global_route
 # === v0.1.26 post-global-route SETUP / DRV repair ===
 # Re-estimate RC from global routing and repair again so the final routed
 # netlist reflects setup-closed, fanout-buffered nets (best-effort).

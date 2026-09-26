@@ -153,12 +153,20 @@ def chain_ids(image: str, *, seeded: bool = False,
 
 
 def _cut(R, lines: List[str], marker: str) -> List[str]:
+    """The deck up to the region's main `global_route`: the first command
+    line after `marker` that starts with it. What precedes it inside the
+    region (the DRT-0305 PG-net cleanup) is work the route needs, so it stays
+    on the checkpoint side."""
     idx = [i for i, ln in enumerate(lines) if ln.strip() == marker]
     if len(idx) != 1:
         raise R.PnrResumeUnavailable(
             f"pnr.tcl carries {len(idx)} {marker!r} markers; the step-21 region "
             "cannot be located")
-    head = lines[:idx[0]]
+    route = next((i for i in range(idx[0] + 1, len(lines))
+                  if re.match(r"global_route(\s|$)", lines[i])), None)
+    if route is None:
+        raise R.PnrResumeUnavailable("the step-21 region carries no global_route")
+    head = lines[:idx[0]] + lines[idx[0] + 1:route]
     if _brace_depth(head) != 0:
         raise R.PnrResumeUnavailable("the step-21 region is not at the deck's top level")
     return head
