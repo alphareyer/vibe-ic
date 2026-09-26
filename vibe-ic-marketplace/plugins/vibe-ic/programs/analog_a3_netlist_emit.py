@@ -936,13 +936,15 @@ def _resolve_params(ir: Dict[str, Any], sv: Dict[str, float]
     name still wins, because a process constant is what the design is built
     ON, never what it is built FROM. A family nobody has characterized seeds
     nothing and every expression resolves exactly as it did before."""
-    env: Dict[str, Any] = {}
-    env.update({k: v for k, v in (ir.get("pdk_measured_params") or {}).items()
-                if isinstance(v, (int, float)) and not isinstance(v, bool)})
-    env.update(ir.get("constants") or {})
-    env.update({k: v for k, v in (ir.get("knobs") or {}).items()
-                if isinstance(v, (int, float))})
-    env.update(sv)
+    # THE SAME environment A2 split the capacitors in — one function, so the
+    # length A2 checked against the PDK's bounds is the length rendered here
+    # (q6-a2-cap-osr: A2 split at the graded-range OSR while this pass
+    # rendered at the declared one, and four capacitors came out above the
+    # gencell maximum). `effective_spec_values` is absent on an IR that
+    # applied nothing, and then this is exactly the environment it always was.
+    env: Dict[str, Any] = _a2.rendering_env(
+        ir.get("pdk_measured_params"), ir.get("constants"), ir.get("knobs"),
+        sv, ir.get(_a2.EFFECTIVE_SPEC_KEY))
     overrides: Dict[str, Dict[str, float]] = {}
     spec_bound: List[str] = []
     knob_src = ir.get("knob_sources") or {}

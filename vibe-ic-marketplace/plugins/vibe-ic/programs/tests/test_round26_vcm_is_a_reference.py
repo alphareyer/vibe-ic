@@ -60,8 +60,14 @@ def test_the_decoupling_is_SIZED_from_the_declaration_not_a_constant():
     assert "c_vcm" in exprs, "c_vcm carries no derived size"
     assert exprs["c_vcm"]["param"] == "l"
     assert "40.0" in exprs["c_vcm"]["expr"]
-    # and it must be expressed against the sampling capacitor, not typed out
-    assert "enob" in exprs["c_vcm"]["expr"] and "osr" in exprs["c_vcm"]["expr"]
+    # and it must be expressed against the sampling capacitor, not typed out.
+    # The oversampling reaches it through `n_eff` (q6-a2-cap-osr: the kT/C
+    # budget averages over the decode's EFFECTIVE samples), which A2 derives
+    # from the bound `osr` — so it still moves with the declaration.
+    assert "enob" in exprs["c_vcm"]["expr"] and "n_eff" in exprs["c_vcm"]["expr"]
+    lo = m.declared_averaging_env(_entry(), {"osr": 64.0, "order": 2.0})
+    hi = m.declared_averaging_env(_entry(), {"osr": 256.0, "order": 2.0})
+    assert hi["n_eff"] > 3.9 * lo["n_eff"]
 
 
 def test_the_decoupling_dominates_the_charge_that_disturbs_it():

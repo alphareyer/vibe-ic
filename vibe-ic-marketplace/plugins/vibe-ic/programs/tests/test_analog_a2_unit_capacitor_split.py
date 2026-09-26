@@ -251,6 +251,9 @@ _SIZING_ENV = {
     "farad_to_ff": 1.0e15, "enob": 12.0, "osr": 64.0, "vref": 1.2,
     "cap_area_ff_per_um2": CAREA, "cap_perim_ff_per_um": CPERI,
     "w_cap": 10.0,
+    # q6-a2-cap-osr: the kT/C budget divides by the decode's N_eff, which A2
+    # derives from the window and the loop order; derived here the same way.
+    "n_eff": A2.averaging_n_eff(64, 2),
 }
 
 

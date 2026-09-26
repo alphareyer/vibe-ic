@@ -253,3 +253,299 @@ def choose(candidates: Sequence[int], order: int, coeff_of,
             "met": chosen is not None,
             "chosen": picked,
             "rule": "smallest_window_measured_to_reach_the_graded_target"}
+
+
+# ══ THE SWING MODEL, PER STAGE (q6-a2-cap-osr) ═════════════════════════════
+#
+# WHY THE SCALAR RECURRENCE ABOVE CANNOT JUDGE SWING. `_run` ties the input,
+# inter-stage and DAC coefficients of every stage to ONE number, while the
+# emitted circuit has separate `cs_i`, `cf_i` and `ci_i` devices. So it cannot
+# express the one transformation that fixes swing — diagonal state scaling
+# (Schreier's `scaleABCD`: x' = S x, which takes no OSR argument) — and its
+# verdict "over the swing budget at every OSR" was a MODEL defect, not an OSR
+# property: MEASURED on this recurrence, the peaks at DC inputs up to 0.92 are
+# identical at N = 64 and N = 512, and scaling stage i by k leaves the
+# bitstream bit-identical while multiplying that stage's peak by exactly k.
+#
+# The generalised loop, in units of the HALF reference span:
+#
+#     x_1[n] = x_1[n-1] + b_1 * u[n]      - a_1 * d[n] + o_1
+#     x_s[n] = x_s[n-1] + c_s * x_{s-1}   - a_s * d[n] + o_s
+#     v[n]   = +1 if x_last > 0 else -1 ;  d[n] = v[n - feedback_delay]
+#
+# with `b_1`, `a_s`, `c_s` and the per-clock offsets `o_s` MEASURED on the
+# emitted netlist (`analog_sc_loop_probe`), never taken from the capacitor
+# ratios alone: on u_hawaii_adc the DAC branch measured 0.2494 against a cap
+# ratio of 0.2499, and the input branch 0.2686 against the SAME ratio — a
+# branch without bottom-plate sampling takes signal-dependent charge
+# injection, which no ratio shows.
+
+#: The margin below the first N-dependent input level that the loop's
+#: effective full-scale input must keep (q6 verifier, B4'): it covers cap
+#: mismatch, reference/supply tolerance and injection drift across corners.
+INPUT_STABILITY_MARGIN = 0.07
+#: The fraction of the swing limit each scaled stage is allowed to reach
+#: (B3'): scaled to x_lim * (1 - m), never to x_lim itself.
+SWING_SCALE_MARGIN = 0.10
+#: The extra input level the peaks are evaluated at, above the effective
+#: full-scale input (B3').
+PEAK_EVAL_HEADROOM = 0.03
+#: Relative growth of the peak ENVELOPE between two windows that counts as
+#: "the loop's swing has become N-dependent" (see `stable_input_limit`).
+N_DEPENDENCE_TOLERANCE = 0.25
+#: A measured coefficient further than this from its capacitor ratio says the
+#: branch does not realise its ratio (q6 verifier, B1').
+COEFFICIENT_RATIO_TOLERANCE = 0.02
+
+
+def run_loop(window: int, b1: float, a: Sequence[float], c: Sequence[float],
+             feedback_delay: int, stimulus, offsets: Sequence[float] = (),
+             windows: int = 1) -> Dict[str, Any]:
+    """Run the per-stage loop for `windows` conversion windows, each from a
+    reset state. `stimulus(n)` is the input at clock n. Returns the per-stage
+    peak and the bitstream (so two coefficient sets can be compared for
+    bit-identity). `c[0]` is unused (stage 1 takes `b1`)."""
+    order = len(a)
+    off = list(offsets) + [0.0] * (order - len(offsets))
+    peak = [0.0] * order
+    bits: List[int] = []
+    for win in range(windows):
+        st = [0.0] * order
+        pipe = [0.0] * max(feedback_delay, 0)
+        for k in range(window):
+            n = win * window + k
+            u = stimulus(n)
+            v = 1.0 if st[order - 1] > 0.0 else -1.0
+            d = v if feedback_delay == 0 else pipe[0]
+            for s in range(order - 1, 0, -1):
+                st[s] += c[s] * st[s - 1] - a[s] * d + off[s]
+            st[0] += b1 * u - a[0] * d + off[0]
+            for s in range(order):
+                if abs(st[s]) > peak[s]:
+                    peak[s] = abs(st[s])
+            if feedback_delay:
+                pipe = pipe[1:] + [v]
+            bits.append(1 if v > 0 else 0)
+    return {"peak_per_stage": peak, "bits": bits}
+
+
+def _dc(u: float):
+    return lambda n: u
+
+
+def _tone(amplitude: float, window: int, phase: float, cycles: int,
+          graded: int):
+    f = cycles / float(graded * window)
+    return lambda n: amplitude * math.sin(2.0 * math.pi * f * n + phase)
+
+
+def loop_peaks(window: int, b1: float, a: Sequence[float],
+               c: Sequence[float], feedback_delay: int, u: float,
+               phases: int = DEFAULT_PHASES) -> Dict[str, Any]:
+    """The per-stage peak over DC inputs at +u and -u AND a coherent tone of
+    amplitude u (the same coprime tone rule `achievable` uses), with every
+    arm's peaks kept so a reader can see which one bound."""
+    arms: Dict[str, List[float]] = {}
+    for sgn in (1.0, -1.0):
+        arms[f"dc_{sgn * u:+.4f}"] = run_loop(
+            window, b1, a, c, feedback_delay, _dc(sgn * u))["peak_per_stage"]
+    tone = _stim.incremental_tone(_stim.incremental_record_windows())
+    if tone is not None:
+        g, cyc = tone["graded_windows"], tone["cycles"]
+        tp = [0.0] * len(a)
+        for i in range(max(int(phases), 1)):
+            r = run_loop(window, b1, a, c, feedback_delay,
+                         _tone(u, window, 2.0 * math.pi * i / phases, cyc, g),
+                         windows=g + 1)["peak_per_stage"]
+            tp = [max(x, y) for x, y in zip(tp, r)]
+        arms[f"tone_{u:.4f}"] = tp
+    peak = [max(v[s] for v in arms.values()) for s in range(len(a))]
+    return {"peak_per_stage": peak, "arms": arms, "u": u}
+
+
+def stable_input_limit(b1: float, a: Sequence[float], c: Sequence[float],
+                       feedback_delay: int, window: int, reference_window: int,
+                       step: float = 0.01, top: float = 1.0,
+                       tolerance: float = N_DEPENDENCE_TOLERANCE) -> float:
+    """The largest DC input level (on a `step` grid, in units of the loop's
+    own full scale b1 = a1) below which the loop's swing does not grow with
+    the window length.
+
+    ON THE ENVELOPE, NOT THE POINT. A single DC level is a bad witness: a
+    rational input puts the loop on a long limit cycle whose extreme a short
+    window may not reach. MEASURED on this recurrence (a = 0.2499, delay 1):
+    at u = 0.50 the stage peak doubles between N = 512 and N = 1024 while the
+    loop is perfectly bounded, and at u = 0.92 the two windows happen to
+    agree although the envelope has already grown by 23 %. So the quantity
+    compared is the ENVELOPE E_N(u) = max over |u'| <= u of the per-stage
+    peak, at `window` against `reference_window`, and the limit is the last
+    grid level before any stage's envelope grows by more than `tolerance`.
+    Overload is unmistakable on it: at u = 1.00 the stage-2 envelope is 11.8
+    at N = 64 and 95.7 at N = 512."""
+    env_w = [0.0] * len(a)
+    env_r = [0.0] * len(a)
+    last = 0.0
+    n = int(round(top / step))
+    for i in range(0, n + 1):
+        u = i * step
+        for sgn in ((1.0,) if i == 0 else (1.0, -1.0)):
+            p1 = run_loop(window, b1, a, c, feedback_delay,
+                          _dc(sgn * u))["peak_per_stage"]
+            p0 = run_loop(reference_window, b1, a, c, feedback_delay,
+                          _dc(sgn * u))["peak_per_stage"]
+            env_w = [max(x, y) for x, y in zip(env_w, p1)]
+            env_r = [max(x, y) for x, y in zip(env_r, p0)]
+        if any(x > (1.0 + tolerance) * max(y, 1e-12)
+               for x, y in zip(env_w, env_r)):
+            return last
+        last = u
+    return last
+
+
+def scale_states(b1: float, a: Sequence[float], c: Sequence[float],
+                 k: Sequence[float], offsets: Sequence[float] = ()
+                 ) -> Dict[str, Any]:
+    """Diagonal state scaling x'_i = k_i x_i: b1, a_1 x k_1; c_i x
+    k_i / k_{i-1}; a_i x k_i; o_i x k_i. The quantiser reads only the SIGN of
+    the last state, so any k_i > 0 leaves the bitstream unchanged."""
+    order = len(a)
+    a2 = [a[i] * k[i] for i in range(order)]
+    c2 = [0.0] + [c[i] * k[i] / k[i - 1] for i in range(1, order)]
+    off = list(offsets) + [0.0] * (order - len(offsets))
+    return {"b1": b1 * k[0], "a": a2, "c": c2,
+            "offsets": [off[i] * k[i] for i in range(order)]}
+
+
+def swing_design(window: int, reference_window: int, feedback_delay: int,
+                 a: Sequence[float], c: Sequence[float],
+                 b1_over_a1_per_cap_ratio: float, offset_u: float,
+                 u_decl: float, x_lim: float,
+                 margin_u: float = INPUT_STABILITY_MARGIN,
+                 margin_scale: float = SWING_SCALE_MARGIN,
+                 headroom: float = PEAK_EVAL_HEADROOM,
+                 phases: int = DEFAULT_PHASES) -> Dict[str, Any]:
+    """Input attenuation and dynamic-range scaling FROM THE DESIGN'S OWN
+    DECLARED SPAN, with margin (q6 verifier's B3'/B4').
+
+    `a`, `c` are the loop's DAC and inter-stage coefficients as MEASURED (or,
+    disclosed, as the capacitor ratios when no measurement exists).
+    `b1_over_a1_per_cap_ratio` is the MEASURED input-branch gain relative to
+    its capacitor ratio, (b1/a1)_meas / (cs1/cf1): 1.0 for a branch that
+    realises its ratio, 1.077 measured on a branch without bottom-plate
+    sampling. `offset_u` is the per-clock offset referred to the input, in
+    units of the loop's full scale.
+
+    1. u_stable: the largest input at which the loop's peaks do not grow with
+       N (`stable_input_limit`).
+    2. The effective full-scale input must keep `margin_u` below it:
+       u_eff_max = (b1/a1) * u_decl + |offset_u| <= u_stable - margin_u.
+       That fixes b1/a1, and the DRAWN ratio cs1/cf1 = (b1/a1) / gain.
+    3. Peaks at u_eff_max + headroom over DC and a full-span tone.
+    4. k_i = x_lim * (1 - margin_scale) / peak_i, the scaled loop, and the
+       assertion that its bitstream is bit-identical to the unscaled one.
+    """
+    order = len(a)
+    u_stable = stable_input_limit(a[0], a, c, feedback_delay, window,
+                                  reference_window)
+    ratio = (u_stable - margin_u - abs(offset_u)) / float(u_decl)
+    rec: Dict[str, Any] = {
+        "producer": PRODUCER, "window_clocks": window,
+        "reference_window_clocks": reference_window,
+        "feedback_delay_clocks": feedback_delay,
+        "u_decl": float(u_decl), "x_lim": float(x_lim),
+        "u_stable": u_stable, "input_stability_margin": margin_u,
+        "offset_u": float(offset_u), "swing_scale_margin": margin_scale,
+        "peak_eval_headroom": headroom,
+        "coefficients_unscaled": {"a": list(a), "c": list(c)},
+        "input_branch_gain_over_cap_ratio": float(b1_over_a1_per_cap_ratio),
+        "rule": "diagonal_state_scaling_at_the_declared_span_with_margin",
+    }
+    if ratio <= 0:
+        rec.update({"feasible": False,
+                    "reason": ("no positive input attenuation keeps the "
+                               "declared span inside the stable region with "
+                               "the stated margin")})
+        return rec
+    u_eff_max = ratio * u_decl + abs(offset_u)
+    b1 = ratio * a[0]
+    u_eval = u_eff_max + headroom
+    # Evaluated with b1 = a1 at u_eval: u_eval IS the effective input.
+    pk = loop_peaks(window, a[0], a, c, feedback_delay, u_eval, phases)
+    k = [x_lim * (1.0 - margin_scale) / p if p > 0 else 1.0
+         for p in pk["peak_per_stage"]]
+    sc = scale_states(a[0], a, c, k)
+    after = loop_peaks(window, sc["b1"], sc["a"], sc["c"], feedback_delay,
+                       u_eval, phases)
+    # BIT-IDENTITY, on every arm the peaks were taken over.
+    ident = True
+    for u in (u_eval, -u_eval):
+        r0 = run_loop(window, a[0], a, c, feedback_delay, _dc(u))["bits"]
+        r1 = run_loop(window, sc["b1"], sc["a"], sc["c"], feedback_delay,
+                      _dc(u))["bits"]
+        ident = ident and (r0 == r1)
+    tone = _stim.incremental_tone(_stim.incremental_record_windows())
+    if tone is not None:
+        g, cyc = tone["graded_windows"], tone["cycles"]
+        st = _tone(u_eval, window, 0.0, cyc, g)
+        r0 = run_loop(window, a[0], a, c, feedback_delay, st,
+                      windows=g + 1)["bits"]
+        r1 = run_loop(window, sc["b1"], sc["a"], sc["c"], feedback_delay,
+                      st, windows=g + 1)["bits"]
+        ident = ident and (r0 == r1)
+    drawn_ratio = ratio / float(b1_over_a1_per_cap_ratio)
+    rec.update({
+        "feasible": True,
+        "b1_over_a1": ratio,
+        "cs1_over_cf1_drawn": drawn_ratio,
+        "u_eff_max": u_eff_max, "u_eval": u_eval,
+        "attenuation_db": 20.0 * math.log10(ratio),
+        "peaks_before": pk["peak_per_stage"], "peak_arms_before": pk["arms"],
+        "scale": k,
+        # the SCALED loop, in the loop's own coefficient terms, with the
+        # input path carrying the attenuation: b1' = k1 * ratio * a1.
+        "coefficients_scaled": {"b1": k[0] * b1, "a": sc["a"],
+                                "c": sc["c"]},
+        "peaks_after": after["peak_per_stage"],
+        "peak_arms_after": after["arms"],
+        "bitstream_identical": ident,
+        "within_x_lim": all(p <= x_lim + 1e-12
+                            for p in after["peak_per_stage"]),
+        "n_invariant_note": (
+            "sized at the CHOSEN window, inside the input range where the "
+            "loop's swing does not GROW with N (`u_stable`). At the other "
+            "candidate windows the scaled peaks move by a few percent (a "
+            "limit cycle a shorter window samples differently) and the "
+            "emitter records them; the scale margin is what keeps them under "
+            "x_lim. OSR is chosen on resolution alone"),
+    })
+    return rec
+
+
+def declared_swing_limit(constants: Dict[str, Any],
+                         spec_values: Dict[str, float]) -> Optional[float]:
+    """x_lim at the DECLARED WORST CORNER: the entry's swing fraction of the
+    LOWEST declared supply, over the HIGHEST declared reference, in half-span
+    units — 0.833 * 1.1 / 1.2 = 0.764 on u_hawaii_adc, where the target-corner
+    `swing_budget` reads 0.9996. None when the rows are not bound."""
+    frac = (constants or {}).get("integrator_swing_fraction_of_vdd")
+    sv = spec_values or {}
+    vdd = sv.get("vdd_min", sv.get("vdd"))
+    vref = sv.get("vref_max", sv.get("vref"))
+    if not all(isinstance(x, (int, float)) and not isinstance(x, bool)
+               and x > 0 for x in (frac, vdd, vref)):
+        return None
+    return float(frac) * float(vdd) / float(vref)
+
+
+def declared_input_span(spec_values: Dict[str, float],
+                        input_spec: str = "vindiff") -> Optional[float]:
+    """u_decl = the declared differential input over the declared reference
+    (1.0 on u_hawaii_adc: full VHI-VLO span), in the loop's own units — not
+    the plugin's 0.72 + 0.20 test tone. None when not bound."""
+    sv = spec_values or {}
+    vin = sv.get(input_spec)
+    vref = sv.get("vref")
+    if not all(isinstance(x, (int, float)) and not isinstance(x, bool)
+               and x > 0 for x in (vin, vref)):
+        return None
+    return float(vin) / float(vref)
