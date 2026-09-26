@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1362
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1362)
+- **Total programs (excluding helpers / shims):** 1363
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1363)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1353 |
+| `any` | 1354 |
 
 ## Alphabetical listing
 
@@ -1035,6 +1035,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `qspi_ospi_protocol_synth` | any | v0.1.91 | Quad/Octal SPI (QSPI/OSPI) — JEDEC Expanded SPI (xSPI, JESD251) protocol synth helper. |
 | `quartus_map_audit` | any | — | Scan Quartus .map.rpt for silent-failure indicators. |
 | `ramp_waveform_oracle_check` | any | — | deterministic gate that MEASURES a multi-bit monotonic-ramp / triangle / sawtooth output and compares it to the bounds and step the SPEC ... |
+| `rcx_field_solver_reference` | any | — | Step 22 accuracy arm: a field-solver reference C for sampled critical nets. |
 | `readme_class_detector` | any | — | README-token IC class detector (v1.6.522). |
 | `readme_deep_parser` | any | — | Capability 1 of GitHub issue #27. |
 | `readme_ppa_extractor` | any | — | for #36 Bug 10: PPA implementation-results table picker. |
@@ -1434,7 +1435,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1353 programs)
+### `any` (1354 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2440,6 +2441,7 @@ _(no programs in this group)_
 - `qspi_ospi_protocol_synth` — Quad/Octal SPI (QSPI/OSPI) — JEDEC Expanded SPI (xSPI, JESD251) protocol synth helper.  _[v0.1.91]_
 - `quartus_map_audit` — Scan Quartus .map.rpt for silent-failure indicators.
 - `ramp_waveform_oracle_check` — deterministic gate that MEASURES a multi-bit monotonic-ramp / triangle / sawtooth output and compares it to the bounds and step the SPEC ...
+- `rcx_field_solver_reference` — Step 22 accuracy arm: a field-solver reference C for sampled critical nets.
 - `readme_class_detector` — README-token IC class detector (v1.6.522).
 - `readme_deep_parser` — Capability 1 of GitHub issue #27.
 - `readme_ppa_extractor` — for #36 Bug 10: PPA implementation-results table picker.
