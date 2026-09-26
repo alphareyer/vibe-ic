@@ -6,7 +6,8 @@ stubbing _docker_exec. The heart of the fix they guard: the iic-osic-tools
 `bash -lc` login BANNER (`[INFO] Final PATH variable: ...`) must NOT leak into a
 discovered captable / AOCV / blackbox path (a naive `head -1` captured the
 banner). Also verifies:
-  * multi-corner captable discovery returns the .magic model per corner;
+  * multi-corner captable discovery returns the DECLARED model per corner
+    (F13: it used to prefer an undeclared .magic sibling);
   * AOCV discovery is None on a PDK that ships none (honest);
   * corner-STA recipe splits SETUP(max-RC) / HOLD(min-RC);
   * the disclosure JSON logic (single- vs multi-corner) is honest.
@@ -56,22 +57,24 @@ def test_container_ls_paths_filters_login_banner(monkeypatch):
     assert P._container_ls_paths("c", "expr", "no-such-token") == []
 
 
-def test_discover_captables_picks_magic_per_corner(monkeypatch):
+def test_discover_captables_picks_the_declared_model_per_corner(monkeypatch):
+    """F13 (§4.05): the model per corner is the one the PDK's config DECLARES,
+    not a `.magic` sibling the glob used to prefer; the login banner still
+    never leaks into a discovered path."""
+    root = "/foss/pdks/sky130A/libs.tech/librelane"
+
     def fake_exec(container, cmd, timeout=20, **_):
-        # emulate `ls` for whichever corner is embedded in the expr
-        for corner in ("min", "nom", "max"):
-            if f".{corner}.magic" in cmd or f".{corner} " in cmd or cmd.endswith(f".{corner}"):
-                return (0, _BANNER +
-                        f"/foss/pdks/sky130A/libs.tech/openlane/rules.openrcx.sky130A.{corner}.magic\n"
-                        f"/foss/pdks/sky130A/libs.tech/openlane/rules.openrcx.sky130A.{corner}.spef_extractor\n",
-                        "")
-        return (0, _BANNER, "")
+        # the container answers the runner's declaration probe (fixed grammar)
+        return (0, _BANNER + f"RCX_DECL_CONFIG {root}/config.tcl\n" + "".join(
+            f"RCX_DECL_RULESET RCX_RULESETS {c}_* 1 {root}/config.tcl "
+            f"{root}/rules.openrcx.sky130A.{c}.spef_extractor\n"
+            for c in ("min", "nom", "max")) + "RCX_DECL_END\n", "")
     monkeypatch.setattr(P, "_docker_exec", fake_exec)
     caps = P._discover_openrcx_captables(_mk_pdk(Path("/tmp")), "c")
     assert set(caps) == {"min", "nom", "max"}
     for corner, path in caps.items():
-        assert path.endswith(f".{corner}.magic")  # prefers the .magic model
-        assert "[INFO]" not in path                # banner never leaks
+        assert path.endswith(f".{corner}.spef_extractor")  # the declared model
+        assert "[INFO]" not in path                          # banner never leaks
 
 
 def test_discover_captables_empty_when_none(monkeypatch):
