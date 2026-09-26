@@ -166,13 +166,13 @@ def _switch(project: Path, **steps) -> None:
 
 def test_direct_is_the_default(tmp_path):
     _stapostpnr(tmp_path)
-    assert R.atpg_librelane_timing(tmp_path, "DT2") == ([], None)
+    assert R.atpg_librelane_views(tmp_path, "DT2") == ([], None)
 
 
 def test_librelane_passes_the_state_and_the_max_ss_corner(tmp_path):
     state = _stapostpnr(tmp_path)
     _switch(tmp_path, DT2="librelane")
-    argv, refusal = R.atpg_librelane_timing(tmp_path, "DT2")
+    argv, refusal = R.atpg_librelane_views(tmp_path, "DT2")
     assert refusal is None
     assert argv == ["--librelane-state", str(state.relative_to(tmp_path)),
                     "--librelane-corner", CORNER]
@@ -180,8 +180,8 @@ def test_librelane_passes_the_state_and_the_max_ss_corner(tmp_path):
 
 def test_dual_and_a_missing_state_are_refused(tmp_path):
     _switch(tmp_path, DT2="dual", DT3="librelane")
-    assert R.atpg_librelane_timing(tmp_path, "DT2")[0] is None
-    argv, refusal = R.atpg_librelane_timing(tmp_path, "DT3")
+    assert R.atpg_librelane_views(tmp_path, "DT2")[0] is None
+    argv, refusal = R.atpg_librelane_views(tmp_path, "DT3")
     assert argv is None and "0 OpenROAD.STAPostPNR" in refusal
 
 

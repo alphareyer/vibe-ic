@@ -55117,7 +55117,7 @@ def routed_sdc_clock(project: Path) -> Optional[str]:
 _ATPG_LIBRELANE_CORNER = "max_ss_*"
 
 
-def atpg_librelane_timing(project: Path, step: str
+def atpg_librelane_views(project: Path, step: str
                           ) -> Tuple[Optional[List[str]], Optional[str]]:
     """The producer arguments that grade `step` on LibreLane STAPostPNR views.
 
@@ -55768,7 +55768,7 @@ def run_at_speed_atpg_producers(project: Path, written: List[str],
     )
     for step, prog, extra_argv in order:
         out_json = project / _ATPG_COVERAGE_REL[step]
-        ll_argv, ll_refusal = atpg_librelane_timing(project, step)
+        ll_argv, ll_refusal = atpg_librelane_views(project, step)
         if not atpg_needs_regrade(out_json) and (
                 ll_argv is None or atpg_graded_from(out_json, ll_argv)):
             # A real grade already exists; retire any record that contradicts it.
