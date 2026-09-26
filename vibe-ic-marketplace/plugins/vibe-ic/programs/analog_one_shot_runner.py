@@ -470,8 +470,11 @@ def _a6_librelane_arm(project: Path, block: str, container: str,
     _pr.run([sys.executable, str(PROGRAMS_DIR / "analog_a6_drc_attribute.py"),
              str(project), "--block", block, "--container", container,
              "--json", str(att)], capture_output=True, text=True)
+    # The container is where the bare-device GDS round trip (q1's
+    # ENGINE_ARTEFACT evidence) runs Magic; without it that evidence is
+    # NOT_MEASURED and no rule is called an engine artefact.
     cmd = [sys.executable, str(prog), str(project), "--block", block,
-           "--image", image]
+           "--image", image, "--container", container]
     if att.is_file():
         cmd += ["--attribution", str(att)]
     arm_run = _pr.run(cmd, capture_output=True, text=True)
