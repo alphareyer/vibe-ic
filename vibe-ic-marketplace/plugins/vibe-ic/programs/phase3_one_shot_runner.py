@@ -67137,6 +67137,92 @@ def _emit_si_timing_json(project: Path, top: str, pdk: PdkConfig, container: str
     return True
 
 
+def _librelane_si_timing_inputs(project: Path) -> Optional[dict]:
+    """Step 23's tool state and its setup sign-off corner, for step 27.
+
+    None when step 23 is direct, or when its record names no measured worst
+    setup corner (step 27 then keeps the direct inputs)."""
+    if _librelane_signoff_modes(project)[1] == "direct":
+        return None
+    import librelane_contract as _ll
+    try:
+        record = json.loads((_pl.reports_phase3_dir(project)
+                             / "sta_postpnr_signoff.json").read_text())
+        state = Path(record["sta_state"])
+        corner = record["judgment"]["worst_setup"]["corner"]
+        inputs = _ll.post_pnr_timing_inputs(project, state, corner)
+        design = json.loads((state.parent / "config.json").read_text())["DESIGN_NAME"]
+    except (OSError, ValueError, KeyError, TypeError, _ll.Refusal):
+        return None
+    root = _ll.resolve_pdk_root(project)
+    if not root:
+        return None
+    pdk_name = next((p.split("/")[2] for p in inputs["liberties"]
+                     if p.startswith("/pdk/")), None)
+    if pdk_name is None:
+        return None
+    return {"state": state, "corner": corner, "design": design,
+            "liberties": inputs["liberties"],
+            "netlist": project / inputs["sta_netlist"], "sdc": project / inputs["sdc"],
+            "spef": project / inputs["spef"], "image": _ll.resolve_image(project),
+            "mounts": [(Path(root) / pdk_name, f"/pdk/{pdk_name}")]}
+
+
+def _librelane_si_timing_json(project: Path, top: str, tool: dict, out_json: Path,
+                              notes: List[str], vdd_v: float = 1.8) -> bool:
+    """The SI timing JSON on the tool corner's inputs, in the tool's image."""
+    mod = _si_timing_aware_module()
+    import librelane_signoff as _ls
+    tcl = mod.build_opensta_si_tcl(
+        tool["liberties"][0], str(tool["netlist"]), tool["design"], str(tool["sdc"]),
+        str(tool["spef"]), str(out_json), vdd_v=vdd_v,
+        extra_liberties=tool["liberties"][1:], propagated_clock=True)
+    tcl_path = out_json.parent / f"si_timing_{top}.librelane.tcl"
+    tcl_path.write_text(tcl)
+    done = _ls.run_sta_script(project, tool["image"], tool["mounts"], tcl_path,
+                              out_json.parent / "si_timing.log")
+    try:
+        json.loads(out_json.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
+        notes.append(f"SI timing-aware: the tool-corner timing JSON did not "
+                     f"parse (rc={done.returncode}; {exc}) — keeping the "
+                     f"floating-victim screen.")
+        return False
+    notes.append(f"SI timing-aware: windows from LibreLane STAPostPNR corner "
+                 f"{tool['corner']} (routed netlist, its SDC/SPEF/liberties).")
+    return True
+
+
+def _librelane_si_kernel_check(project: Path, top: str, tool: dict, spef: Path,
+                               timing_json: Path, sbody: dict,
+                               notes: List[str]) -> None:
+    """The per-pair window arithmetic, re-done by the fork's OpenSTA kernel
+    (`timing_window_overlap`).  The two must agree; a disagreement withdraws
+    the delta-delay reading (NOT_MEASURED), so step 27's verdict basis falls
+    back to the conservative envelope instead of trusting either arm."""
+    mod = _si_timing_aware_module()
+    import librelane_signoff as _ls
+    rows, unknown = mod.kernel_overlap_rows(spef.read_text(errors="replace"),
+                                            str(timing_json))
+    script = timing_json.parent / f"si_kernel_overlap_{top}.tcl"
+    script.write_text(mod.kernel_overlap_tcl(rows))
+    done = _ls.run_sta_script(project, tool["image"], tool["mounts"], script,
+                              timing_json.parent / "si_kernel_overlap.log")
+    result = mod.compare_kernel_overlap(rows, done.stdout)
+    result.update(rc=done.returncode, unknown_window_directions=unknown,
+                  kernel="timing_window_overlap (vibeic OpenSTA fork)")
+    sbody["kernel_cross_check"] = result
+    if result["verdict"] != "AGREE" and isinstance(sbody.get("delta_delay"), dict):
+        sbody["delta_delay"]["verdict"] = "NOT_MEASURED"
+        sbody["delta_delay"]["withdrawn_because"] = (
+            f"the window arithmetic and the OpenSTA kernel {result['verdict']} "
+            f"({result.get('disagreement_count')} pair(s))")
+        sbody["delta_delay_verdict"] = "NOT_MEASURED"
+    notes.append(f"SI kernel cross-check: {result['verdict']} over "
+                 f"{result['pairs']} pair direction(s) with known windows "
+                 f"({unknown} unknown, {result['touching_only']} touching only).")
+
+
 def _merge_si_timing_aware(project: Path, top: str, pdk: PdkConfig,
                            container: str, spef: Path, sbody: dict,
                            notes: List[str], vdd_v: float = 1.8) -> None:
@@ -67158,21 +67244,33 @@ def _merge_si_timing_aware(project: Path, top: str, pdk: PdkConfig,
     mod = _si_timing_aware_module()
     if mod is None:
         return
-    primary_sta = _pl.pnr_dir(project) / "sta.rpt"
-    if not primary_sta.is_file():
-        notes.append("SI timing-aware: no post-route STA report — the "
-                     "switching-window advisory needs arrival windows; "
-                     "keeping the floating-victim screen (no over-claim).")
-        return
-    sdc = _pl.pnr_dir(project) / "constraint.sdc"
-    netlist = _pl.synth_dir(project) / f"{top}_synth.v"
     extracted = _pl.extracted_dir(project)
     extracted.mkdir(parents=True, exist_ok=True)
     out_json = extracted / f"{top}_si_timing.json"
-    if not out_json.is_file():
-        if not _emit_si_timing_json(project, top, pdk, container, spef, sdc,
-                                    netlist, out_json, notes, vdd_v=vdd_v):
+    # Step 23 on LibreLane: the windows come from the tool's own sign-off
+    # corner (its routed netlist, SDC, SPEF and liberties), timed in its image.
+    tool = _librelane_si_timing_inputs(project)
+    if tool is not None:
+        spef = tool["spef"]
+        if _signoff_regen(out_json, spef, tool["state"]):
+            if not _librelane_si_timing_json(project, top, tool, out_json, notes,
+                                             vdd_v=vdd_v):
+                return
+    else:
+        primary_sta = _pl.pnr_dir(project) / "sta.rpt"
+        if not primary_sta.is_file():
+            notes.append("SI timing-aware: no post-route STA report — the "
+                         "switching-window advisory needs arrival windows; "
+                         "keeping the floating-victim screen (no over-claim).")
             return
+        sdc = _pl.pnr_dir(project) / "constraint.sdc"
+        netlist = _pl.synth_dir(project) / f"{top}_synth.v"
+        # Dated against the SPEF it is read with: a re-extraction must not be
+        # scored against the previous extraction's windows.
+        if _signoff_regen(out_json, spef):
+            if not _emit_si_timing_json(project, top, pdk, container, spef, sdc,
+                                        netlist, out_json, notes, vdd_v=vdd_v):
+                return
     try:
         adv = mod.run_si_signoff_timing_aware(
             spef, out_json,
@@ -67227,6 +67325,8 @@ def _merge_si_timing_aware(project: Path, top: str, pdk: PdkConfig,
             "scope": dd.get("scope"),
         }
         sbody["delta_delay_verdict"] = dd.get("delta_delay_verdict")
+    if tool is not None:
+        _librelane_si_kernel_check(project, top, tool, spef, out_json, sbody, notes)
     notes.append(
         "SI timing-aware (ADVISORY): "
         f"{adv.get('pairs_decoupled_by_window', 0)} pairs decoupled by window, "

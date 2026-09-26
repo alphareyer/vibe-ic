@@ -534,3 +534,21 @@ def deck_agreement(report_text: str, sta_folder: Path, output: Path, *,
                 'tool_step': str(sta_folder)}
     write_json(output, document)
     return document
+
+
+# --- step 27: OpenSTA scripts on the tool's own inputs, in the tool image --
+
+def run_sta_script(project: Path, image: str, mounts: list[tuple[Path, str]],
+                   script: Path, log: Path, *, docker: str = 'docker') -> subprocess.CompletedProcess:
+    """Standalone `sta` in the image, with the project and the PDK mounted at
+    the paths the tool's state names (the `/pdk/<pdk>` liberties)."""
+    volumes = ['-v', f'{project.resolve()}:{project.resolve()}']
+    for host, guest in mounts:
+        volumes += ['-v', f'{host.resolve()}:{guest}:ro']
+    completed = subprocess.run([docker, 'run', '--rm', '--network', 'none',
+                                *_dmem.docker_memory_flags(), *volumes,
+                                '--entrypoint', 'sta', image, '-no_init', '-no_splash',
+                                '-exit', str(script)], capture_output=True, text=True)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(completed.stdout + '\n' + completed.stderr)
+    return completed

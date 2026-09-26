@@ -486,3 +486,135 @@ def test_step_23_times_the_handed_tool_spefs_not_a_second_extraction(tmp_path, m
     assert seen['extract'] is False and seen['time'] is True
     assert seen['direct_spefs'] == handed
     assert not failures, failures
+
+
+# ------------------------------------------------ step 27 on the tool state ---
+
+si = importlib.import_module('si_signoff_timing_aware')
+
+SI_SPEF = '''*SPEF "IEEE 1481-1998"
+*C_UNIT 1 FF
+*NAME_MAP
+*1 a
+*2 b
+*3 c
+*D_NET *1 3.0
+*CONN
+*I u1:Z O
+*CAP
+1 *1:1 1.0
+2 *1:1 *2:1 1.0
+3 *1:1 *3:1 1.0
+*END
+*D_NET *2 2.0
+*CONN
+*I u2:Z O
+*CAP
+1 *2:1 1.0
+*END
+*D_NET *3 2.0
+*CONN
+*I u3:Z O
+*CAP
+1 *3:1 1.0
+*END
+'''
+
+
+def _timing(windows):
+    return {'pins': {pin: {'arr_rise_min': lo, 'arr_rise_max': hi,
+                                                      'arr_fall_min': lo, 'arr_fall_max': hi,
+                                                      'slew_rise_max': 0.0, 'slew_fall_max': 0.0}
+                     for pin, (lo, hi) in windows.items()}}
+
+
+def test_windows_are_timed_on_the_propagated_clock_when_asked():
+    tcl = si.build_opensta_si_tcl('l', 'n', 't', 's', 'sp', 'o', propagated_clock=True)
+    head = tcl.split('proc _si_capture')[0]
+    assert head.index('read_spef sp') < head.index('set_propagated_clock [all_clocks]')
+    assert 'set_propagated_clock' not in si.build_opensta_si_tcl('l', 'n', 't', 's', 'sp', 'o')
+
+
+def test_the_kernel_agreeing_with_the_window_arithmetic_is_agree():
+    rows, unknown = si.kernel_overlap_rows(SI_SPEF, _timing({'u1:Z': (1.0, 2.0), 'u2:Z': (1.5, 3.0),
+                                                              'u3:Z': (5.0, 6.0)}))
+    assert unknown == 0 and len(rows) == 4
+    tcl = si.kernel_overlap_tcl(rows)
+    assert tcl.count('timing_window_overlap -victim_window') == 4
+    fractions = {i: (0.5 if r['python_overlap'] else 0.0) for i, r in enumerate(rows)}
+    out = ''.join(f'VIBEIC_KOV {i} {f}\n' for i, f in fractions.items())
+    assert si.compare_kernel_overlap(rows, out)['verdict'] == 'AGREE'
+
+
+def test_the_kernel_contradicting_the_arithmetic_is_disagree_and_touching_is_named():
+    rows, _ = si.kernel_overlap_rows(SI_SPEF, _timing({'u1:Z': (1.0, 2.0), 'u2:Z': (2.0, 3.0),
+                                                       'u3:Z': (5.0, 6.0)}))
+    # a/b only touch at t=2.0: the closed-interval test says overlap, the kernel 0
+    touching = ''.join(f'VIBEIC_KOV {i} 0.0\n' for i in range(len(rows)))
+    doc = si.compare_kernel_overlap(rows, touching)
+    assert doc['verdict'] == 'AGREE' and doc['touching_only'] == 2
+    # the kernel claiming an overlap for disjoint windows (a/c) is a disagreement
+    wrong = ''.join(f'VIBEIC_KOV {i} {0.3 if {rows[i]["victim"], rows[i]["aggressor"]} == {"*1", "*3"} else 0.0}\n'
+                    for i in range(len(rows)))
+    doc = si.compare_kernel_overlap(rows, wrong)
+    assert doc['verdict'] == 'DISAGREE' and doc['disagreement_count'] == 2
+    assert si.compare_kernel_overlap(rows, '')['verdict'] == 'NOT_MEASURED'
+
+
+def test_a_kernel_disagreement_withdraws_the_delta_delay_reading(tmp_path, monkeypatch):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    spef = write(tmp_path / 'c.spef', SI_SPEF)
+    timing = put(tmp_path / 't.json', _timing({'u1:Z': (1.0, 2.0), 'u2:Z': (1.5, 3.0), 'u3:Z': (5.0, 6.0)}))
+    # the kernel says "no overlap" for every pair, contradicting a/b
+    monkeypatch.setattr(signoff, 'run_sta_script', lambda *a, **k: SimpleNamespace(
+        returncode=0, stderr='', stdout=''.join(f'VIBEIC_KOV {i} 0.0\n' for i in range(4))))
+    sbody = {'delta_delay': {'verdict': 'PASS', 'pairs_slack_checked': 3}, 'delta_delay_verdict': 'PASS'}
+    notes = []
+    runner._librelane_si_kernel_check(tmp_path, 'spm', {'image': 'img', 'mounts': []}, spef, timing,
+                                      sbody, notes)
+    assert sbody['kernel_cross_check']['verdict'] == 'DISAGREE'
+    assert sbody['delta_delay']['verdict'] == 'NOT_MEASURED' and sbody['delta_delay_verdict'] == 'NOT_MEASURED'
+    basis = importlib.import_module('si_mcf_verdict_basis').reconcile({'verdict': 'FAIL'}, sbody)
+    assert basis['verdict'] == 'FAIL' and basis['verdict_basis']['verdict_from'] == 'mcf_envelope'
+
+
+def test_step_27_reads_the_step_23_tool_corner(tmp_path):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    project = tmp_path / 'p'
+    assert runner._librelane_si_timing_inputs(project) is None      # 23 direct
+    folder = project / 'phase3/librelane/23/01-openroad-stapostpnr'
+    corner = 'max_ss_125C_4v50'
+    spef = write(project / 'x/max.spef', 's')
+    nl = write(project / 'x/spm_pnr.v', 'n')
+    sdc = write(project / 'x/c.sdc', 'c')
+    put(folder / 'state_out.json', {'nl': str(nl), 'sdc': str(sdc), 'spef': {'max_*': str(spef)}})
+    put(folder / 'config.json', {'meta': {'step': 'OpenROAD.STAPostPNR'}, 'DESIGN_NAME': 'chip_top'})
+    write(folder / corner / 'sta.log', STA_LOG.format(c=corner, p='ss_125C_4v50').replace('/pdk/x/', '/pdk/gfx/'))
+    put(project / 'reports/phase3/sta_postpnr_signoff.json', {
+        'sta_state': str(folder / 'state_out.json'),
+        'judgment': {'worst_setup': {'corner': corner, 'ws': 1.0}}})
+    put(project / 'phase3/librelane_switch.json', {'steps': {'23': 'librelane'},
+                                                   'pdk_root_host': str(tmp_path / 'root')})
+    tool = runner._librelane_si_timing_inputs(project)
+    assert tool['design'] == 'chip_top' and tool['corner'] == corner
+    assert tool['spef'] == spef.resolve() and tool['netlist'] == nl.resolve()
+    assert tool['liberties'][0].endswith('sc__ss_125C_4v50.lib')
+    assert tool['mounts'] == [(tmp_path / 'root' / 'gfx', '/pdk/gfx')]
+
+
+def test_the_direct_si_windows_are_re_derived_after_a_re_extraction(tmp_path, monkeypatch):
+    """The timing JSON was produced only when absent: a re-extracted SPEF was
+    then scored against the previous extraction's windows."""
+    import os
+    runner = importlib.import_module('phase3_one_shot_runner')
+    project = tmp_path / 'p'
+    extracted = project / 'phase3/stage3/extracted'
+    old = put(extracted / 'spm_si_timing.json', {'pins': {}})
+    os.utime(old, (1_000_000, 1_000_000))
+    spef = write(extracted / 'spm.spef', SI_SPEF)
+    write(project / 'phase3/stage3/pnr/sta.rpt', 'x')
+    calls = []
+    monkeypatch.setattr(runner, '_emit_si_timing_json',
+                        lambda *a, **k: calls.append(a) or False)
+    runner._merge_si_timing_aware(project, 'spm', SimpleNamespace(), 'c', spef, {}, [])
+    assert len(calls) == 1
