@@ -90,13 +90,23 @@ def test_disclosed_skip_synthesises_waiver_for_both_board_steps(tmp_path):
 def test_disclosed_skip_defers_final_signoff_step(tmp_path):
     # The #663 core symptom: final-signoff was a hard FAIL; now WAIVED-DEFERRED.
     _proj(tmp_path, {"verdict": "SKIP", "sof_present": False})
-    assert _status(tmp_path, FINAL_STEP) == "PASS_WITH_WAIVERS"
+    # F10 (owner rule): the disclosed board skip is NOT_MEASURED and leaves
+    # the run verdict by name; it is no longer spelled as a waiver. The
+    # property this pinned is unchanged: not FAIL, not PASS, deferred.
+    r = F.check_step(tmp_path, FINAL_STEP, F._load_waivers(tmp_path))
+    assert r.status == "NOT_MEASURED", (r.status, r.reasons)
+    assert r.excluded_from_verdict, r.reasons
 
 
 def test_keep_607_early_prototype_still_deferred(tmp_path):
     # #607 positive case must still pass (no regression).
     _proj(tmp_path, {"verdict": "SKIP", "sof_present": False})
-    assert _status(tmp_path, EARLY_STEP) == "PASS_WITH_WAIVERS"
+    # F10 (owner rule): the disclosed board skip is NOT_MEASURED and leaves
+    # the run verdict by name; it is no longer spelled as a waiver. The
+    # property this pinned is unchanged: not FAIL, not PASS, deferred.
+    r = F.check_step(tmp_path, EARLY_STEP, F._load_waivers(tmp_path))
+    assert r.status == "NOT_MEASURED", (r.status, r.reasons)
+    assert r.excluded_from_verdict, r.reasons
 
 
 # ── NEGATIVE no-leak: undisclosed missing bitstream still FAILs ───────────

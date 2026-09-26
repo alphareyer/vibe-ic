@@ -91,3 +91,33 @@ def fpga_absent_from_run(project: Path) -> bool:
     if d is None or not _skip_shape(d):
         return False
     return d.get("skip_reason") == "not_attempted"
+
+
+# ── Which flow steps the disclosure speaks for ───────────────────────────────
+#
+# The record above states ONE fact about ONE artefact: `sof_present` — whether
+# a bitstream of this suffix was built. The steps that fact decides are the
+# steps whose own declared `required_outputs` owe such a bitstream; nothing
+# else can be read off the record. So the set is DERIVED from the flow's
+# declarations, not kept as a list of step ids or role names beside it: a
+# renumbered, renamed or added board step moves the set with the yaml.
+BITSTREAM_SUFFIX = ".sof"
+
+
+def step_owes_bitstream(step: dict) -> bool:
+    """Does this flow step DECLARE a bitstream among its required outputs?
+
+    Every " OR " alternative of every entry is read; a step owes a bitstream
+    when any declared spelling names one."""
+    outs = step.get("required_outputs") if isinstance(step, dict) else None
+    for entry in outs or ():
+        for alt in str(entry).split(" OR "):
+            if alt.strip().lower().endswith(BITSTREAM_SUFFIX):
+                return True
+    return False
+
+
+def board_bound_step_ids(steps) -> frozenset:
+    """The ids of the flow steps that owe a bitstream (see above)."""
+    return frozenset(s.get("id") for s in (steps or ())
+                     if isinstance(s, dict) and step_owes_bitstream(s))

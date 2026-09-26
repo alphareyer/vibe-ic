@@ -76,7 +76,12 @@ def test_disclosed_skip_synthesises_waiver(tmp_path):
 def test_disclosed_skip_waives_step(tmp_path):
     _proj(tmp_path, {"verdict": "SKIP", "sof_present": False,
                      "evidence": "fpga_compile not run"})
-    assert _status(tmp_path) == "PASS_WITH_WAIVERS"
+    # F10 (owner rule): the disclosed board skip is NOT_MEASURED and leaves
+    # the run verdict by name; it is no longer spelled as a waiver. The
+    # property this pinned is unchanged: not FAIL, not PASS, deferred.
+    r = F.check_step(tmp_path, STEP6, F._load_waivers(tmp_path))
+    assert r.status == "NOT_MEASURED", (r.status, r.reasons)
+    assert r.excluded_from_verdict, r.reasons
 
 
 def test_undisclosed_no_audit_still_fails(tmp_path):

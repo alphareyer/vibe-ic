@@ -930,8 +930,11 @@ def test_exactly_one_step_after_the_IP_terminal_has_no_way_to_not_apply(
     assert 39 in FCC._FPGA_BOARD_STEP_IDS, (
         "39 is waivable via --skip-hardware; if that changed it becomes a "
         "second instance of the same gap")
-    assert FCC.check_step(proj, _step_by_id("39"), {},
-                          skip_hardware=True).status == "PASS_WITH_WAIVERS"
+    # F10 (owner rule): the hatch is now NOT_MEASURED, excluded from the
+    # verdict by name, rather than a waiver; it is still a way out for 39.
+    _r39 = FCC.check_step(proj, _step_by_id("39"), {}, skip_hardware=True)
+    assert _r39.status == "NOT_MEASURED" and _r39.excluded_from_verdict, (
+        _r39.status, _r39.reasons)
 
 
 def _step_by_id(sid: str) -> dict:
