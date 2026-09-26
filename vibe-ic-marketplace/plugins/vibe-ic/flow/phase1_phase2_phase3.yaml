@@ -1605,6 +1605,15 @@ steps:
           any_of: true
         # BLOCKING: parse the authored RTL bytes, including comment-only files.
         - program_exit_zero: "flow_step_output_content_check . --mode rtl"
+        # BLOCKING (F9). LibreLane's SYNTH_PARAMETERS reaches only the top, so a
+        # reused catalog IP's synth-safe parameter (serv sim=0) is pinned by the
+        # glue; Yosys's own elaboration judges that every reachable module of
+        # the IP carries it. Applicability is the DESIGN's declaration -- the
+        # catalog IP its input docs name as its own reuse, the reading that
+        # routes step_rtl_gen to catalog-glue-author -- never an artefact this
+        # flow writes. No declared IP: DESIGN_DECLARED_NA. No readable
+        # declaration: refused (rc 1), never N/A.
+        - program_exit_zero: "catalog_synth_safe_params_check . --json reports/phase2/gates/catalog_synth_safe_params.json"
     # The dependency was always REAL and never DECLARED. D1 is the sole member
     # of stage_phase1 and its L1-L27 output is, in this file's own words, "the
     # universal handoff to Phase 2" — spec-to-RTL literally reads

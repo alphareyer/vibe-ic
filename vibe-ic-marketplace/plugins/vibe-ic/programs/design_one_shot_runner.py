@@ -7799,11 +7799,8 @@ def _step_rtl_gen_bound(
         _declared_reuse: List[str] = []
         if catalog_matches_summary:
             try:
-                from ip_catalog_query import declared_reuse_idents as _dri
-                _named = _dri(project)
-                _declared_reuse = [
-                    m["ip_name"] for m in catalog_matches_summary
-                    if str(m.get("ip_name", "")).strip().lower() in _named]
+                from ip_catalog_query import declared_catalog_reuse as _dcr
+                _declared_reuse = _dcr(project, catalog_matches_summary)
             except Exception as _e:      # no docs / no reader ⇒ no override
                 _declared_reuse = []
         if _declared_reuse:
