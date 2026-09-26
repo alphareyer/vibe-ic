@@ -4074,6 +4074,10 @@ def loop_swing_and_sizing(lib: Dict[str, Any],
                              scl["c"], delay, sw["u_eval"])
         per[str(n)] = pk["peak_per_stage"]
     rec["peaks_after_per_candidate_window"] = per
+    worst = max((max(v) for v in per.values()), default=None)
+    rec["peaks_after_worst_candidate"] = worst
+    rec["within_x_lim_every_candidate"] = (worst is not None
+                                           and worst <= sw["x_lim"])
     return rec
 
 

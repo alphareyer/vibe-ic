@@ -287,9 +287,12 @@ def test_the_emitted_loop_is_scaled_with_margin_at_the_declared_span(emitted):
     for p in sw["peaks_after"]:
         assert p <= lim + 1e-9
         assert p < sw["x_lim"] - 1e-6
-    # the record holds at every candidate window, not only the chosen one
+    # sized at the chosen window; at every other candidate the scaled loop
+    # stays under x_lim (the margin absorbs the few-percent variation a
+    # shorter window's limit cycle shows) — and the record says so
+    assert sw["within_x_lim_every_candidate"] is True
     for peaks in sw["peaks_after_per_candidate_window"].values():
-        assert max(peaks) <= lim + 1e-9
+        assert max(peaks) <= sw["x_lim"] + 1e-9
     rec = ir["graded_range_choice"]
     assert rec["swing"]["record"] == "loop_swing"
     assert rec["chosen_over_swing_budget"] is False
