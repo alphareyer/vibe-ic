@@ -282,3 +282,58 @@ def test_errors_are_the_ones_read_text_and_safe_load_raised(tmp_path):
     assert _flow_yaml.PARSES == {}                          # nothing cached
     bad.write_text("steps: []\n", encoding="utf-8")
     assert _flow_yaml.load(bad) == {"steps": []}
+
+
+# --------------------------------------------------------------------------- #
+# The other in-flow callers a full spm audit launches (measured: 33 of the
+# 137 flow parses of one flow_compliance_check run went through these four).
+# --------------------------------------------------------------------------- #
+
+def _call_waivers_schema_check():
+    import waivers_schema_check as M
+    M._FLOW_ID_CACHE.clear()
+    return M.flow_step_ids(_FLOW)
+
+
+def _call_l24_signoff_requirements_extract():
+    import l24_signoff_requirements_extract as M
+    M._RECORD_CACHE.clear()
+    return M._declared_records(_FLOW)
+
+
+def _call_closed_loop_metric_reaches_its_producer():
+    import closed_loop_metric_reaches_its_producer as M
+    return M.audit(_PLUGIN.parents[2])["denominator"]
+
+
+def _call_phase1_planned_consumer_starved_check(tmp_path):
+    import phase1_planned_consumer_starved_check as M
+    return M.main([str(tmp_path), "--flow", str(_FLOW),
+                   "--json", str(tmp_path / "out.json")])
+
+
+@pytest.mark.parametrize("call", [
+    "_call_waivers_schema_check",
+    "_call_l24_signoff_requirements_extract",
+    "_call_closed_loop_metric_reaches_its_producer",
+    "_call_phase1_planned_consumer_starved_check",
+])
+def test_the_other_in_flow_callers_parse_through_the_shared_loader(call, monkeypatch, tmp_path):
+    fn = globals()[call]
+    args = (tmp_path,) if call.endswith("starved_check") else ()
+    fn(*args)                            # import-time effects happen here
+    fy = sys.modules.get("_flow_yaml")
+    if fy is not None:
+        fy.clear_cache()
+    spy = _ParseSpy(monkeypatch)
+    first = fn(*args)
+    second = fn(*args)
+    assert first == second
+    if call.endswith("starved_check"):
+        assert first != 2, "OPERATIONAL refusal: the flow was not read"
+    else:
+        assert first not in (None, {}, frozenset(), 0), f"{call}: empty answer"
+    flow_docs = len(spy.docs)
+    assert flow_docs >= 1, "the call never read the flow; nothing measured"
+    if _libyaml():
+        assert spy.pure_python == 0, f"{call}: flow yaml went through the pure-Python scanner"

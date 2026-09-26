@@ -53,8 +53,11 @@ the tapeout precheck named in the ruling.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # so the sibling import below resolves however this is invoked
+import _flow_yaml  # noqa: E402  F18: the one libyaml-backed, once-per-process flow parse
 
 __all__ = ["SIGNOFF_CHECKS", "extract_signoff_requirements",
            "report_tokens_for", "signoff_record_paths_for", "find_flow_def"]
@@ -203,8 +206,7 @@ def _declared_records(flow_def: Path) -> Dict[str, Tuple[str, ...]]:
     if cached is not None:
         return cached
     try:
-        data = yaml.safe_load(flow_def.read_text(encoding="utf-8",
-                                                 errors="replace"))
+        data = _flow_yaml.load(flow_def, encoding="utf-8", errors="replace")
     except (OSError, ValueError, yaml.YAMLError):
         return {}
     steps = data.get("steps") if isinstance(data, dict) else None
