@@ -90,19 +90,47 @@ def sdc_diagnostics(sta_log: str, sdc: Path) -> list[dict[str, Any]]:
     return found
 
 
-def check_setup_counts(checks_rpt: str) -> Optional[dict[str, int]]:
-    """check_setup findings by kind; None when the section was never written."""
+def check_setup_counts(checks_rpt: str,
+                       exclude: frozenset = frozenset()) -> Optional[dict[str, int]]:
+    """check_setup findings by kind; None when the section was never written.
+
+    `exclude` names objects that are never timed (the design's supply ports,
+    from the resolved VDD/GND declarations). They are subtracted only when the
+    `-verbose` listing under the summary line names them; an unlisted count
+    stands as reported.
+    """
     instrument_calibration.assert_calibrated("librelane_prelayout::check_setup_counts")
     header = _CHECK_SETUP_HEADER_RE.search(checks_rpt)
     if header is None:
         return None
     counts: dict[str, int] = {}
-    for m in _CHECK_SETUP_RE.finditer(checks_rpt, header.end()):
+    lines = checks_rpt[header.end():].splitlines()
+    for index, line in enumerate(lines):
+        m = _CHECK_SETUP_RE.match(line)
+        if m is None:
+            continue
         text = m.group(2)
         kind = next((name for token, name in _CHECK_SETUP_KINDS if token in text),
                     "other:" + text)
-        counts[kind] = counts.get(kind, 0) + int(m.group(1))
+        listed = []
+        for follow in lines[index + 1:]:
+            if not follow.startswith("  ") or not follow.strip():
+                break
+            listed.append(follow.strip())
+        dropped = sum(1 for name in listed if name in exclude)
+        counts[kind] = counts.get(kind, 0) + max(0, int(m.group(1)) - dropped)
     return counts
+
+
+def supply_names(resolved: dict) -> frozenset:
+    """The design's supply ports as the resolved tool config declares them."""
+    names = set()
+    for key in ("VDD_NETS", "GND_NETS", "VDD_PIN", "GND_PIN"):
+        value = resolved.get(key)
+        for item in (value if isinstance(value, list) else [value]):
+            if isinstance(item, str) and item:
+                names.add(item)
+    return frozenset(names)
 
 
 # ── configuration ──────────────────────────────────────────────────────────
@@ -237,7 +265,8 @@ def judge_sdc(folder: Path, resolved: dict, declared_sdc: Optional[Path],
         log = (corner / "sta.log").read_text(errors="replace")
         diags = sdc_diagnostics(log, deck)
         checks_path = corner / "checks.rpt"
-        counts = (check_setup_counts(checks_path.read_text(errors="replace"))
+        counts = (check_setup_counts(checks_path.read_text(errors="replace"),
+                                     supply_names(resolved))
                   if checks_path.is_file() else None)
         per_corner[corner.name] = {"sdc_diagnostics": diags, "check_setup": counts}
         if counts is None:
@@ -257,6 +286,7 @@ def judge_sdc(folder: Path, resolved: dict, declared_sdc: Optional[Path],
             findings.append(f"{corner.name}: check_setup {untimed}")
     report = {"step": "8", "program": "librelane_prelayout.judge_sdc",
               "verdict": verdict, "sdc": str(deck),
+              "excluded_supply_endpoints": sorted(supply_names(resolved)),
               "sdc_sha256": digest(deck) if deck.is_file() else None,
               "fallback_sdc": fallback, "corners": per_corner,
               "findings": findings, "source": str(folder / "state_out.json"),

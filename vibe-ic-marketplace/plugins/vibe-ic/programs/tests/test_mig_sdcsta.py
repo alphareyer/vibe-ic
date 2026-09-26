@@ -156,6 +156,17 @@ def test_untimed_io_alone_fails_step8(tmp_path):
     assert report["verdict"] == "FAIL"
 
 
+def test_a_declared_supply_port_is_not_an_untimed_endpoint(tmp_path):
+    """check_setup lists a port named like the declared supply; it is not timing."""
+    folder, deck = sta_folder(tmp_path, checks="sta_prepnr_check_setup_supply_named.rpt")
+    config = json.loads((folder / "config.json").read_text())
+    assert prelayout.judge_sdc(folder, config, deck, tmp_path / "a.json")["verdict"] == "FAIL"
+    config.update({"VDD_NETS": ["VDD"], "GND_NETS": ["VSS"]})
+    report = prelayout.judge_sdc(folder, config, deck, tmp_path / "b.json")
+    assert report["verdict"] == "PASS"
+    assert report["corners"]["nom_tt_025C_5v00"]["check_setup"] == {"unconstrained_endpoints": 0}
+
+
 def test_step8_refuses_the_fallback_deck_and_an_absent_check_section(tmp_path):
     folder, deck = sta_folder(tmp_path, checks=None)
     config = json.loads((folder / "config.json").read_text())
