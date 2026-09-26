@@ -627,7 +627,7 @@ def _run_in_docker(project: Path, shell_cmd: str, timeout: int,
         docker_cmd += ["-v", f"{host}:{ctr}"]
     if pdk_dir is not None and pdk_dir.exists():
         docker_cmd += ["-v", f"{pdk_dir}:/pdk"]
-    docker_cmd += [_far.DOCKER_IMAGE, "-c", preamble + shell_cmd]
+    docker_cmd += [_far.docker_image(), "-c", preamble + shell_cmd]
 
     # THE PROBE AND THE REAP AN EPHEMERAL `docker run` NEEDS, both taken from
     # `_docker_watchdog` rather than written here (vibe-ic#2082). They were
@@ -1239,7 +1239,10 @@ def _detect_sat_solver(project: Path, pdk_dir: Path | None,
         candidates = list(_ATPG_SAT_SOLVER_PREFERENCE)
     else:
         candidates = [pref]
-    key = (_far.DOCKER_IMAGE, tuple(candidates))
+    # The cache is keyed by WHAT RUNS the probe: on the local route no image is
+    # started, so none is resolved (with no docker client none can be).
+    engine = None if _CE.no_container_route() else _far.docker_image()
+    key = (engine, tuple(candidates))
     if key in _SAT_SOLVER_PROBE_CACHE:
         return _SAT_SOLVER_PROBE_CACHE[key]
     chosen = ""

@@ -84,13 +84,27 @@ def _top(project: Path) -> str | None:
     return None
 
 
+def _route_image(tool: str, image: str | None) -> str | None:
+    """The image `tool` will run in, or None when no image runs.
+
+    RESOLVED ONLY ON THE DOCKER PATH, at the moment it is needed. A tool on
+    PATH (natively, or inside the image itself) runs with nothing resolved; so
+    does the no-docker case, which `_invoke` refuses as unavailable. Otherwise
+    the declared `image` is used as is, else `default_image()` resolves it now
+    and raises `_eda_pin.ImageNotResolvable` rather than guess."""
+    if shutil.which(tool) or not shutil.which("docker"):
+        return None
+    return image or default_image()
+
+
 def _invoke(tool: str, args: list[str], project: Path,
-            image: str) -> subprocess.CompletedProcess[str]:
+            image: str | None) -> subprocess.CompletedProcess[str]:
     if shutil.which(tool):
         command = [tool, *args]
     elif shutil.which("docker"):
         # Phase 2 needs only the released EDA image's tool binaries. LibreLane
         # CLI capability is neither requested nor assumed here.
+        image = image or default_image()
         root = str(project.resolve())
         command = ["docker", "run", "--rm", *_dmem.docker_memory_flags(),
                    "--network", "none",
@@ -102,7 +116,9 @@ def _invoke(tool: str, args: list[str], project: Path,
                           text=True, check=False)
 
 
-def check(project: Path, image: str) -> dict:
+def check(project: Path, image: str | None = None) -> dict:
+    """`image` is the declared one (`--image`); None resolves it only if a
+    tool actually has to run in docker."""
     files = rtl_source_files(project)
     result = {"program": "p0_tool_frontend_check", "passed": False,
               "sources": [str(p.relative_to(project)) for p in files],
@@ -124,19 +140,25 @@ def check(project: Path, image: str) -> dict:
               " ".join("-I " + directory for directory in include_dirs) +
               " " + " ".join(names) +
               "; hierarchy -check " + hierarchy + "; proc; write_json /dev/null")
+    import _eda_pin
     try:
-        yosys = _invoke("yosys", ["-Q", "-T", "-p", script], project, image)
+        yosys_image = _route_image("yosys", image)
+        yosys = _invoke("yosys", ["-Q", "-T", "-p", script], project, yosys_image)
         verilator_args = ["--lint-only", "--Wall", "-Wno-fatal"]
         if top:
             verilator_args += ["--top-module", top]
+        verilator_image = _route_image("verilator", image)
         verilator = _invoke("verilator", [*verilator_args,
                                           *("-I" + directory for directory in include_dirs),
-                                          *names], project, image)
+                                          *names], project, verilator_image)
+    except _eda_pin.ImageNotResolvable as exc:
+        result["findings"].append(f"tool invocation refused: {exc}")
+        return result
     except (FileNotFoundError, OSError) as exc:
         result["findings"].append(f"tool invocation unavailable: {exc}")
         return result
     result["tools"]["Yosys.JsonHeader"] = {"exit_code": yosys.returncode,
-                                               "execution": "host" if shutil.which("yosys") else image,
+                                               "execution": "host" if shutil.which("yosys") else yosys_image,
                                                "output": (yosys.stdout + yosys.stderr)[-8000:]}
     lint_log = verilator.stdout + verilator.stderr
     try:
@@ -145,7 +167,7 @@ def check(project: Path, image: str) -> dict:
         result["findings"].append(f"tool diagnostic reader uncalibrated: {exc}")
         return result
     result["tools"]["Verilator.Lint"] = {"exit_code": verilator.returncode,
-                                            "execution": "host" if shutil.which("verilator") else image,
+                                            "execution": "host" if shutil.which("verilator") else verilator_image,
                                             "diagnostics": diagnostics,
                                             "output": lint_log[-8000:]}
     if yosys.returncode:
@@ -165,8 +187,6 @@ def main() -> int:
     parser.add_argument("project", type=Path)
     parser.add_argument("--image", default=None)
     args = parser.parse_args()
-    if args.image is None:
-        args.image = default_image()
     if not args.project.is_dir():
         print("FAIL: project directory absent")
         return 2

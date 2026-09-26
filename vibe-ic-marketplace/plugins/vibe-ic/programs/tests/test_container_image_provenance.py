@@ -276,8 +276,16 @@ def test_repo_at_digest_reference_form_matches_the_same_way(monkeypatch):
 def test_the_plugins_own_pin_constant_is_accepted_by_its_own_require_image(monkeypatch):
     """Reads `_eda_pin.IMAGE_DIGEST` itself, so the two cannot drift apart
     again: whatever the pin becomes, --require-image must accept it for a
-    container running an image that carries it."""
+    container running an image that carries it.
+
+    The pin is STATED at `_eda_pin` (the `_stated_eda_image` pattern), not
+    inherited from this host's docker: `IMAGE_DIGEST` is still read through
+    `_eda_pin`'s own attribute, but the verdict no longer depends on whether
+    the host running the test has docker (inside the image it has none)."""
     import _eda_pin
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _stated_eda_image import state_the_image
+    state_the_image(monkeypatch)
     monkeypatch.setattr(cip, "inspect_container",
                         lambda n: _ok("vibeic-eda:pinned", PINNED_ID))
     monkeypatch.setattr(cip, "_resolve_image_id", lambda r: None)
