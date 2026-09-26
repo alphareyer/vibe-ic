@@ -559,8 +559,13 @@ def test_the_gate_level_sim_step_ships_in_the_plugin_the_contract_mounts():
     source = (contract.PLUGIN_ROOT / 'librelane_plugin_vibeic/__init__.py').read_text()
     assert 'id = "Vibeic.GateLevelSim"' in source
     assert contract._plugin_args(['Vibeic.GateLevelSim'])
-    # The step records; it does not read the transcript grammar it produces.
-    assert 'SDF ERROR' not in source and 'Putting delay' not in source
+    # The step records; it parses nothing it produces (the judgement is the
+    # calibrated `sdf_gate_sim.judge_tool_arm` on the host).
+    import ast
+    tree = ast.parse(source)
+    imported = ({a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+                | {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)})
+    assert not imported & {'re', 'sdf_gate_sim'}
 
 
 def test_the_post_route_power_deck_propagates_the_clock_the_routed_netlist_has(tmp_path, monkeypatch):
