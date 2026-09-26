@@ -233,3 +233,29 @@ def test_pass_exactly_at_target(tmp_path):
     _write_map(d, 1000)
     rc, rep = _run(tmp_path)
     assert rc == 0 and rep["verdict"] == "PASS"
+
+
+# ----------------------------------------------------------------------
+# migration 41 — WHOSE bar is it? The report must say.
+# ----------------------------------------------------------------------
+def test_the_report_says_the_target_is_the_producers_own(tmp_path):
+    """review70 step 41: the target should come from the intent so a producer
+    cannot choose its own bar. No L-doc field declares one yet, so the gate
+    cannot read one -- but it must not present a self-chosen bar as a spec."""
+    d = _mfg_dir(tmp_path)
+    _write_yield(d, {"good_die": 920, "total_die": 1000,
+                     "target_yield_pct": 85.0})
+    _write_map(d, 1000)
+    rc, rep = _run(tmp_path)
+    assert rc == 0 and rep["verdict"] == "PASS", rep
+    assert rep["target_source"] == "artefact", rep
+    assert "own bar" in rep["target_source_note"], rep
+
+
+def test_no_target_means_no_target_source(tmp_path):
+    d = _mfg_dir(tmp_path)
+    _write_yield(d, {"good_die": 920, "total_die": 1000})
+    _write_map(d, 1000)
+    rc, rep = _run(tmp_path)
+    assert rc == 1 and rep["verdict"] == "FAIL", rep
+    assert rep["target_source"] is None, rep
