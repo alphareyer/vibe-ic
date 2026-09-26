@@ -89,6 +89,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # so the sibling import below resolves however this is invoked
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
+import _flow_yaml  # F18: one libyaml-backed, once-per-process parse of the flow yaml
 
 METRICS_REL = "reports/metrics"
 RC_OK = 0
@@ -268,13 +269,13 @@ def step_for_invocation(program: str, argv: List[str],
     """
     import shlex                                          # noqa: PLC0415
     try:
-        import yaml                                       # noqa: PLC0415
+        import yaml  # noqa: F401,PLC0415 - availability probe; _flow_yaml parses
     except ImportError:
         return None, "PyYAML is not importable here"
     flow = flow_yaml or (Path(__file__).resolve().parent.parent / "flow"
                          / "phase1_phase2_phase3.yaml")
     try:
-        doc = yaml.safe_load(flow.read_text(encoding="utf-8")) or {}
+        doc = _flow_yaml.load(flow, encoding="utf-8") or {}
     except (OSError, ValueError) as exc:
         return None, f"cannot read {flow.name}: {exc}"
     want = _opt_value(list(argv), _OUTPUT_OPTS)
@@ -336,13 +337,13 @@ def _step_runs_program(step_id: str, program: str,
     `drc_report_check`) is not an attribution, and is refused."""
     import shlex                                          # noqa: PLC0415
     try:
-        import yaml                                       # noqa: PLC0415
+        import yaml  # noqa: F401,PLC0415 - availability probe; _flow_yaml parses
     except ImportError:
         return False
     flow = flow_yaml or (Path(__file__).resolve().parent.parent / "flow"
                          / "phase1_phase2_phase3.yaml")
     try:
-        doc = yaml.safe_load(flow.read_text(encoding="utf-8")) or {}
+        doc = _flow_yaml.load(flow, encoding="utf-8") or {}
     except (OSError, ValueError):
         return False
     for step in doc.get("steps") or []:

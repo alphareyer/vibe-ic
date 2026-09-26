@@ -147,6 +147,8 @@ import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # so the sibling import below resolves however this is invoked
+import _flow_yaml  # noqa: E402  F18: the one libyaml-backed, once-per-process flow parse
 
 PROGRAM = "phase1_planned_consumer_starved_check"
 VERSION = "1.0.0"
@@ -628,8 +630,8 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"{flow_path}")
         return 2
     try:
-        import yaml
-        flow = yaml.safe_load(flow_path.read_text(encoding="utf-8"))
+        import yaml  # noqa: F401 - availability probe
+        flow = _flow_yaml.load(flow_path, encoding="utf-8")
     except Exception as exc:                                # noqa: BLE001
         print(f"=== {PROGRAM} === OPERATIONAL: flow YAML unreadable "
               f"({exc.__class__.__name__}: {exc})")

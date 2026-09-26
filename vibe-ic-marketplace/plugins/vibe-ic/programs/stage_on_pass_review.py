@@ -449,6 +449,7 @@ from gds_topcell_name_check import parse_structures  # noqa: E402
 # it from there rather than restating it. See `is_input_quotation`.
 import phase1_evidence_grounding_check as _peg  # noqa: E402
 from _atomic_artefact import write_json as atomic_write_json  # vibe-ic#1082 (helper from PR #1094)  # noqa: E402
+import _flow_yaml  # noqa: E402  F18: the one libyaml-backed, once-per-process flow parse
 
 try:
     import yaml  # type: ignore
@@ -614,7 +615,7 @@ def load_declaration(flow_def: Path, stage_id: str) -> Dict[str, Any]:
     if yaml is None:
         raise ValueError("pyyaml is not importable; the flow cannot be parsed")
     try:
-        doc = yaml.safe_load(flow_def.read_text(encoding="utf-8"))
+        doc = _flow_yaml.load(flow_def, encoding="utf-8")
     except OSError as e:
         raise ValueError(f"{flow_def}: {e}") from e
     except Exception as e:  # yaml error
@@ -664,7 +665,7 @@ def stages_declaring_review(flow_def: Path) -> List[Dict[str, Any]]:
     if yaml is None:
         raise ValueError("pyyaml is not importable; the flow cannot be parsed")
     try:
-        doc = yaml.safe_load(flow_def.read_text(encoding="utf-8"))
+        doc = _flow_yaml.load(flow_def, encoding="utf-8")
     except OSError as e:
         raise ValueError(f"{flow_def}: {e}") from e
     except Exception as e:  # yaml error

@@ -136,6 +136,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _waiver_entries as _we  # noqa: E402  (after sys.path bootstrap)
 import _evidence_independence as _ei  # noqa: E402  (#524)
+import _flow_yaml  # noqa: E402  F18: the one libyaml-backed, once-per-process flow parse
 
 
 PLACEHOLDER_REASONS = {
@@ -259,8 +260,8 @@ def flow_step_ids(flow_def: Path | None = None) -> frozenset:
     if key in _FLOW_ID_CACHE:
         return _FLOW_ID_CACHE[key]
     try:
-        import yaml  # imported lazily: standalone use must not require it
-        data = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace"))
+        import yaml  # noqa: F401 - imported lazily: standalone use must not require it
+        data = _flow_yaml.load(path, encoding="utf-8", errors="replace")
     except Exception:  # ImportError, YAMLError, OSError — all "not derivable"
         return frozenset()
     steps = (data or {}).get("steps") if isinstance(data, dict) else None

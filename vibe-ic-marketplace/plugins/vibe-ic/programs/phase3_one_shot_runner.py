@@ -55735,7 +55735,8 @@ def step11_needs_rerun(project: Path) -> Tuple[bool, str]:
     try:
         import yaml as _yaml
         import flow_compliance_check as _flow
-        flow = _yaml.safe_load(_flow.DEFAULT_FLOW_DEF.read_text()) or {}
+        import _flow_yaml                                    # noqa: PLC0415
+        flow = _flow_yaml.load(_flow.DEFAULT_FLOW_DEF) or {}
         step = next((s for s in (flow.get("steps") or [])
                      if isinstance(s, dict) and str(s.get("id")) == "11"), None)
         if step is not None:
@@ -57185,7 +57186,8 @@ def _canonical_step_condition(project: Path, step_id: str
     try:
         import yaml
         import flow_compliance_check as _fcc
-        doc = yaml.safe_load(flow_def.read_text(encoding="utf-8"))
+        import _flow_yaml                                    # noqa: PLC0415
+        doc = _flow_yaml.load(flow_def, encoding="utf-8")
     except Exception as exc:  # noqa: BLE001 — an unreadable contract is named
         return None, f"cannot read canonical flow condition: {exc}"
 
@@ -57280,8 +57282,9 @@ def _spare_coverage_job() -> Optional[Tuple[str, str, str, Tuple[str, ...]]]:
     """
     flow_def = PROGRAMS_DIR.parent / "flow" / "phase1_phase2_phase3.yaml"
     try:
-        import yaml                                          # noqa: PLC0415
-        doc = yaml.safe_load(flow_def.read_text(encoding="utf-8"))
+        import yaml  # noqa: F401,PLC0415 - availability probe
+        import _flow_yaml                                    # noqa: PLC0415
+        doc = _flow_yaml.load(flow_def, encoding="utf-8")
     except Exception:                                        # noqa: BLE001
         return None
 
@@ -71032,7 +71035,8 @@ def _phase3_window_steps(entry: str, exit_: str) -> List[str]:
     """Canonical stage3/stage4 order comes from the flow, not runner spans."""
     import yaml
     import flow_compliance_check as _fcc
-    flow = yaml.safe_load(_fcc.DEFAULT_FLOW_DEF.read_text()) or {}
+    import _flow_yaml                                        # noqa: PLC0415
+    flow = _flow_yaml.load(_fcc.DEFAULT_FLOW_DEF) or {}
     ids = [str(step["id"]) for step in flow.get("steps", [])
            if step.get("stage") in ("stage3", "stage4")]
     # Step 9 is the backend synthesis dispatch inherited from Phase 2.

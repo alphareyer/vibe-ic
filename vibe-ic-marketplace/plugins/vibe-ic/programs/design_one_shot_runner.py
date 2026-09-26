@@ -21149,7 +21149,8 @@ def fmeda_producer_command(flow_yaml: Optional[Path] = None) -> Optional[str]:
     import yaml
     path = flow_yaml or _fdp.FLOW_YAML
     try:
-        doc = yaml.safe_load(path.read_text(errors="replace"))
+        import _flow_yaml                                    # noqa: PLC0415
+        doc = _flow_yaml.load(path, errors="replace")
     except (OSError, ValueError):
         return None
     for step in _fdp._iter_steps(doc):

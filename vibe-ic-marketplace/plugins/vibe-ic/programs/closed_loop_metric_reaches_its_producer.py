@@ -91,6 +91,7 @@ from typing import Dict, List, Optional, Set
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _atomic_artefact as _aa  # noqa: E402
+import _flow_yaml  # noqa: E402  F18: the one libyaml-backed, once-per-process flow parse
 
 #: A metric identifier, as the flow's own triggers write them. Two shapes:
 #: the OpenROAD/ORFS double-underscore form (`design__instance__area`,
@@ -213,8 +214,8 @@ def audit(root: Path) -> Dict:
     progs = _programs_dir(root)
     if flow is None or progs is None:
         return {"edges": [], "denominator": 0, "reason": "no flow or programs"}
-    import yaml                                            # noqa: PLC0415
-    doc = yaml.safe_load(flow.read_text(errors="replace")) or {}
+    import yaml  # noqa: F401,PLC0415 - availability probe
+    doc = _flow_yaml.load(flow, errors="replace") or {}
     steps = {str(s.get("id")): s for s in (doc.get("steps") or [])}
 
     edges: List[Dict] = []
