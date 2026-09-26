@@ -97,6 +97,12 @@ _STA_RPTS = (
     "phase3/reports/sta.rpt",
 )
 
+#: The post-route SIGN-OFF reports (F17). Each may time the design at several
+#: corners, one `worst slack max` per corner section, and the achieved period
+#: is bounded by the WORST of them all. The PnR session's own `sta.rpt` is not
+#: a sign-off: it is read only when none of these carries a setup slack.
+_SIGNOFF_RPTS = _STA_RPTS[:3]
+
 #: `worst slack max <float>` — OpenSTA's own spelling, and the ONLY one of the
 #: two that can express headroom.
 #:
@@ -119,10 +125,56 @@ _WORST_SLACK_RE = re.compile(
 _WNS_RE = re.compile(
     r"^\s*wns\s+max\s+([-+]?\d+(?:\.\d+)?)\s*$",
     re.MULTILINE | re.IGNORECASE)
+#: A corner section header, as the direct decks write it (`=== SETUP corner:
+#: process=SS ... ===`, `=== SETUP (max-RC corner, ...) ===`).
+_SECTION_RE = re.compile(r"^===[^\n]*===[ \t]*$", re.MULTILINE)
+
+
+def setup_slack_candidates(project: Path, rels=_SIGNOFF_RPTS):
+    """Every ``(slack_ns, source_rel, section)`` the named reports carry: one
+    per `worst slack max` line, labelled by the `===` corner section it sits
+    in -- never only the first line of a file.
+
+    MEASURED (F17, spm run23): `sta_spef_based.rpt` times three process
+    corners in one file, FF first. The first `worst slack max` in it is the
+    FF corner's 12.13 ns; the same file's SS corner says 0.55 ns and the OCV
+    deck's SS/max-RC corner says 0.36 ns. A first-match reader published the
+    FASTEST corner's slack as the design's setup headroom.
+    """
+    found = []
+    for rel in rels:
+        p = project / rel
+        if not p.is_file():
+            continue
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:                                    # pragma: no cover
+            continue
+        heads = [(m.start(), m.group(0).strip())
+                 for m in _SECTION_RE.finditer(text)]
+        for m in _WORST_SLACK_RE.finditer(text):
+            section = None
+            for pos, head in heads:
+                if pos > m.start():
+                    break
+                section = head
+            try:
+                found.append((float(m.group(1)), rel, section))
+            except ValueError:                             # pragma: no cover
+                continue
+    return found
 
 
 def measured_setup_slack(project: Path):
-    """``(slack_ns, source_rel)`` from the run's own STA, or ``(None, None)``."""
+    """``(slack_ns, source_rel)`` from the run's own STA, or ``(None, None)``.
+
+    The WORST `worst slack max` over every corner section of every post-route
+    sign-off report (F17); the per-file fallbacks below apply only when no
+    sign-off report carries one."""
+    signoff = setup_slack_candidates(project)
+    if signoff:
+        worst = min(signoff, key=lambda c: c[0])
+        return worst[0], worst[1]
     for rel in _STA_RPTS:
         p = project / rel
         if not p.is_file():
@@ -168,6 +220,11 @@ def tool_setup_slack(arm: dict):
             per_corner)
 
 
+def _candidates_doc(project: Path) -> list:
+    return [{"slack_ns": v, "report": rel, "section": sec}
+            for v, rel, sec in setup_slack_candidates(project)]
+
+
 def evaluate(project: Path) -> dict:
     """The whole verdict, as data, so the test can assert on it directly."""
     try:
@@ -195,6 +252,28 @@ def evaluate(project: Path) -> dict:
             payload = None
 
     findings = []
+    recorded = (payload or {}).get("worst_setup_slack_ns")
+    if (tool is None and slack is not None
+            and isinstance(recorded, (int, float))
+            and not isinstance(recorded, bool)
+            and abs(float(recorded) - slack) > TOOL_SLACK_TOLERANCE_NS):
+        # F17: the gate's two inputs describe different timing. Neither is
+        # chosen: a reached period that the run's worst sign-off corner does
+        # not reproduce is refused, never passed on presence alone.
+        return {
+            "program": "achieved_period_recorded_check",
+            "verdict": "REFUSED", "rc": RC_FAIL,
+            "refusal": "ACHIEVED_PERIOD_SLACK_DISAGREES",
+            "setup_slack_ns": slack, "slack_source": source,
+            "recorded_setup_slack_ns": recorded,
+            "slack_candidates": _candidates_doc(project),
+            "achieved_recorded": present, "findings": [],
+            "note": (f"{ACHIEVED_REL} records a worst setup slack of "
+                     f"{recorded} ns, but the worst post-route sign-off "
+                     f"corner on disk measured {slack} ns ({source}): the two "
+                     f"inputs of this gate disagree, so the reached period "
+                     f"cannot be credited"),
+        }
     if slack is None:
         return {
             "program": "achieved_period_recorded_check",
@@ -249,7 +328,6 @@ def evaluate(project: Path) -> dict:
                     "artefact must never become a clock relaxation (#1083 "
                     "records ORFS's `update_ok`/`--failing` as NOT adopted)"),
             })
-        recorded = payload.get("worst_setup_slack_ns")
         if (tool is not None and isinstance(recorded, (int, float))
                 and abs(float(recorded) - slack) > TOOL_SLACK_TOLERANCE_NS):
             findings.append({
@@ -273,7 +351,8 @@ def evaluate(project: Path) -> dict:
         "reached_period_ns": (payload or {}).get("achievable_period_ns"),
         "findings": findings,
         **({"basis": _ls.tool_arm_basis(arm), "tool_setup_slack_ns": per_corner}
-           if tool is not None else {}),
+           if tool is not None else
+           {"slack_candidates": _candidates_doc(project)}),
     }
 
 

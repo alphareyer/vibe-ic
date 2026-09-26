@@ -58806,9 +58806,12 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 _spec_period_ns, _ = _resolve_clock_spec(project, top=top)
                 _fmax_rep = achievable_from_slack(
                     float(_spec_period_ns), float(setup_wns))
-                (rpt_phase3 / "achievable_fmax.json").write_text(
-                    json.dumps(_fmax_rep, indent=2) + "\n")
-                written.append(str(rpt_phase3 / "achievable_fmax.json"))
+                # F17: when step 23 runs on the tool, the reached period is
+                # the TOOL's worst setup, recorded after STAPostPNR below.
+                if _ll_m23 == "direct":
+                    (rpt_phase3 / "achievable_fmax.json").write_text(
+                        json.dumps(_fmax_rep, indent=2) + "\n")
+                    written.append(str(rpt_phase3 / "achievable_fmax.json"))
                 # The sentence has to be true on BOTH branches now. "setup FAIL
                 # -> achievable X" read as a repair on a run that had already
                 # MET its spec; on a PASS the same two numbers are asked-vs-
@@ -58840,6 +58843,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         _librelane_signoff_record(project, top, pdk, _ll_m22, _ll_m23,
                                   mc_spef_dir, mc_ocv_rpt, notes,
                                   signoff_failures, written)
+    if primary_def.is_file() and _ll_m23 != "direct":
+        _achievable_fmax_from_tool_arm(project, top, notes, written)
 
     # --- Step 23: post-route STA report (canonical) ---------------------
     # #527 — SPEF-based is CANONICAL when available (closer to sign-off
@@ -62986,6 +62991,48 @@ def _librelane_handed_spefs(receipt: Path) -> Dict[str, Path]:
         if dest.is_file() and _sha256_file(dest) == row.get("dest_sha256"):
             out[_ls.rc_corner(view.partition(":")[2])] = dest
     return out
+
+
+def _achievable_fmax_from_tool_arm(project: Path, top: str, notes: List[str],
+                                   written: List[str]) -> None:
+    """F17: step 23 on the tool (`librelane|dual`) records the reached period
+    from the TOOL's worst setup slack -- the worst `worst slack max` over every
+    STAPostPNR corner, read through `librelane_signoff.step23_tool_arm` by the
+    same reader gate 1 judges with.  The direct OCV deck's slack is kept
+    beside it for comparison, never in its place: an unreadable tool arm
+    leaves no record (gate 1 then refuses), not a direct-deck one."""
+    import achieved_period_recorded_check as _apr
+    import librelane_signoff as _ls
+    from sta_achievable_fmax_report import achievable_from_slack
+    record = _pl.reports_phase3_dir(project) / "achievable_fmax.json"
+    try:
+        direct_setup_ns = json.loads((_pl.reports_phase3_dir(project) /
+                                      "mcorner_ocv_stance.json").read_text()
+                                     ).get("setup_worst_slack_ns")
+    except (OSError, ValueError, AttributeError):
+        direct_setup_ns = None
+    try:
+        arm = _ls.step23_tool_arm(project)
+        if arm is None:
+            raise RuntimeError("step 23 is not on the tool")
+        slack, source, per_corner = _apr.tool_setup_slack(arm)
+        spec_ns, _ = _resolve_clock_spec(project, top=top)
+        doc = achievable_from_slack(float(spec_ns), float(slack))
+        doc.update({"slack_source": source,
+                    "tool_setup_slack_ns": per_corner,
+                    "direct_ocv_setup_slack_ns": direct_setup_ns,
+                    "basis": _ls.tool_arm_basis(arm)})
+        _aa.write_json(record, doc)
+        written.append(str(record))
+        notes.append(
+            f"achievable-Fmax from the step-23 tool arm: worst setup {slack} ns "
+            f"at {source} (direct OCV deck: {direct_setup_ns} ns) -> reached "
+            f"{doc['achievable_period_ns']} ns")
+    except Exception as exc:  # a refusal names itself; nothing falls back
+        if record.is_file():
+            record.unlink()
+        notes.append(f"achievable-Fmax NOT recorded: the step-23 tool arm "
+                     f"cannot be read ({exc}); the direct deck is not substituted")
 
 
 def _librelane_signoff_record(project: Path, top: str, pdk: PdkConfig,
