@@ -561,3 +561,24 @@ def test_the_gate_level_sim_step_ships_in_the_plugin_the_contract_mounts():
     assert contract._plugin_args(['Vibeic.GateLevelSim'])
     # The step records; it does not read the transcript grammar it produces.
     assert 'SDF ERROR' not in source and 'Putting delay' not in source
+
+
+def test_the_post_route_power_deck_propagates_the_clock_the_routed_netlist_has(tmp_path, monkeypatch):
+    """MEASURED on spm: the direct deck on STAPostPNR's own SPEF read 0.46% low
+    with ideal clocks and matched the tool's report to the last digit once the
+    clock was propagated. A pre-PnR estimate has no clock tree to propagate."""
+    runner, pdk = _pdk(str(tmp_path / 'cells__tt_025C_5v00.lib'))
+    pnr = runner._pl.pnr_dir(tmp_path)
+    write(pnr / 'spm_pnr.v', CHIP_TOP)
+    write(pnr / 'constraint.sdc', 'create_clock -period 24 [get_ports clk]\n')
+    write(runner._pl.extracted_dir(tmp_path) / 'spm.spef', '*SPEF\n')
+    write(runner._pl.synth_dir(tmp_path) / 'spm_synth.v', CHIP_TOP)
+    monkeypatch.setattr(runner, '_docker_exec', lambda *a, **k: (1, '', ''))
+    rpt = runner._pl.reports_phase3_dir(tmp_path) / 'power.rpt'
+    rpt.parent.mkdir(parents=True, exist_ok=True)
+    for basis, propagated in (('post_pnr', True), ('pre_pnr', False)):
+        runner._emit_power_report(tmp_path, 'spm', pdk, 'c', rpt, [], basis=basis)
+        deck = (rpt.parent / 'power_spm.tcl').read_text()
+        assert ('set_propagated_clock [all_clocks]' in deck) is propagated, basis
+        if propagated:
+            assert deck.index('read_spef') < deck.index('set_propagated_clock')

@@ -68,6 +68,11 @@ import spice_correlation_check as _scc  # noqa: E402 — the gate's pure helpers
 SIMULATORS = ('ngspice', 'xyce')
 #: The lesson's own mutation: every capacitance scaled by 10 (RULINGS CT-08).
 MUTATION_FACTOR = 10.0
+#: The default subject: register-to-register setup paths, whose data path is
+#: standard cells only. A path through an IO pad simulates the pad's full
+#: transistor netlist and its external load (MEASURED on spm: > 29 min for one
+#: output-pad path in ngspice) and its timing is set by the declared IO delays.
+REG_TO_REG = '-path_delay max -from [all_registers -clock_pins] -to [all_registers -data_pins]'
 
 _VOLTAGE_MAP_RE = re.compile(r'voltage_map\s*\(\s*"?(\w+)"?\s*,\s*([-\d.eE+]+)\s*\)')
 _POWER_RAIL_RE = re.compile(r'power_rail\s*\(\s*"?(\w+)"?\s*,\s*([-\d.eE+]+)\s*\)')
@@ -356,7 +361,8 @@ def measure(deck: Path, simulator: str, sta: dict, header: dict) -> Dict[str, An
     text = deck.read_text(errors='replace')
     supplies = [float(v) for v in re.findall(r'^v\d+\s+\S+\s+0\s+([-\d.eE+]+)\s*$', text, re.M)]
     vdd = max(supplies) if supplies else None
-    wave_path = deck.with_suffix('.prn' if simulator == 'xyce' else '.wave')
+    wave_path = (deck.with_suffix('.run.sp.prn') if simulator == 'xyce'
+                 else deck.with_suffix('.wave'))
     if vdd is None or not wave_path.is_file():
         return {'status': 'NOT_MEASURED', 'reason': 'no waveform or no supply in the deck'}
     wave = read_waveform(wave_path, simulator)
@@ -383,19 +389,41 @@ def measure(deck: Path, simulator: str, sta: dict, header: dict) -> Dict[str, An
                                                  'after the start pin did'}
 
 
+def transient_step_s(deck: Path, rows: List[dict]) -> Tuple[float, float]:
+    """(step the run uses, step the tool's deck asked for), in seconds.
+
+    The tool asks for its print step as the TMAX of a many-cycle window
+    (MEASURED on spm: `.tran 1e-13 7.44e-08`, 744k forced points, > 11 min per
+    register-to-register path on a loaded host). The run uses a twentieth of
+    the fastest slew the STA path reports -- the resolution a threshold
+    crossing needs -- and never less than the tool's own step. The adaptive
+    integrator still refines every edge; both steps are recorded."""
+    m = re.search(r'^\.tran\s+(\S+)\s+(\S+)', deck.read_text(errors='replace'), re.M | re.I)
+    asked = float(m.group(1)) if m else 0.0
+    slews = [r['slew_ns'] for r in rows if (r.get('slew_ns') or 0) > 0]
+    derived = min(slews) * 1e-9 / 20.0 if slews else asked
+    return max(asked, derived), asked
+
+
 def _simulate(deck: Path, simulator: str, image: str, project: Path,
-              mounts: List[Tuple[Path, str]]) -> subprocess.CompletedProcess:
+              mounts: List[Tuple[Path, str]], step_s: Optional[float] = None
+              ) -> subprocess.CompletedProcess:
+    text = deck.read_text()
+    stop = re.search(r'^\.tran\s+\S+\s+(\S+)', text, re.M | re.I).group(1)
+    runnable = deck.with_suffix('.run.sp')
     if simulator == 'ngspice':
-        text = deck.read_text()
         nodes = re.search(r'^\.print tran (.*)$', text, re.M).group(1).split()
         names = [n[2:-1] for n in nodes if n.lower().startswith('v(')]
         deck.with_suffix('.nodes.json').write_text(json.dumps(names))
-        control = ('.control\nrun\nwrdata ' + str(deck.with_suffix('.wave')) + ' '
+        run = f'tran {step_s:.6g} {stop}' if step_s else 'run'
+        control = (f'.control\n{run}\nwrdata ' + str(deck.with_suffix('.wave')) + ' '
                    + ' '.join(f'v({n})' for n in names) + '\n.endc\n')
-        runnable = deck.with_suffix('.run.sp')
         runnable.write_text(re.sub(r'^\.end\s*$', control + '.end', text, flags=re.M))
         return _docker(image, project, mounts, ['ngspice', '-b', str(runnable)], deck.parent)
-    return _docker(image, project, mounts, ['Xyce', str(deck)], deck.parent)
+    if step_s:
+        text = re.sub(r'^\.tran\s+\S+', f'.tran {step_s:.6g}', text, count=1, flags=re.M | re.I)
+    runnable.write_text(text)
+    return _docker(image, project, mounts, ['Xyce', str(runnable)], deck.parent)
 
 
 def mutate_spef(source: Path, factor: float, out: Path) -> Dict[str, Any]:
@@ -452,7 +480,7 @@ def run_arm(project: Path, image: str, state_path: Path, corner: str, *,
                         header.get('nom_temperature'), out_dir / f'models_{simulator}.sp')
     # `-group_path_count N` writes N decks (`path_1.sp_<n>.sp`); the STA side
     # is one `report_checks` with the same arguments, split per path.
-    args = path_args or [f'-path_delay max -group_path_count {paths}']
+    args = path_args or [f'{REG_TO_REG} -group_path_count {paths}']
     spef_path = spef or (project / inputs['spef'])
     tcl = out_dir / 'arm.tcl'
     tcl.write_text(arm_tcl(inputs, project, top, str(spef_path), (libname.group(1), opc.group(1)),
@@ -477,9 +505,11 @@ def run_arm(project: Path, image: str, state_path: Path, corner: str, *,
                        wps_fail=[f for i, f in failed if int(i) == index + 1])
             rows.append(row)
             continue
-        sim = _simulate(deck, simulator, image, project, mounts)
+        step, asked = transient_step_s(deck, parsed['rows'])
+        sim = _simulate(deck, simulator, image, project, mounts, step_s=step)
         deck.with_suffix('.log').write_text(sim.stdout + '\n' + sim.stderr)
         got = measure(deck, simulator, parsed, header)
+        row.update(tran_step_ns=step * 1e9, deck_tran_step_ns=asked * 1e9)
         sta_ns = parsed['path_delay_ns']
         stages = path_stages(parsed['rows'])
         tol = _scc.derive_liberty_path_tolerance(liberty_text, stages, sta_ns) if stages else None
@@ -512,7 +542,7 @@ def judge(arm: Dict[str, Any], mutated: Optional[Dict[str, Any]]) -> Dict[str, A
         if other is None:
             response.append({'path': row['path'], 'responds': None})
             continue
-        step = _tran_step_ns(row['deck'])
+        step = row.get('tran_step_ns') or _tran_step_ns(row['deck'])
         delta = other['spice_ns'] - row['spice_ns']
         response.append({'path': row['path'], 'spice_delta_ns': delta,
                          'sta_delta_ns': other['sta_ns'] - row['sta_ns'],

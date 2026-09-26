@@ -65907,6 +65907,12 @@ def _emit_power_report(project: Path, top: str, pdk: PdkConfig,
     # SPEF for THIS run exists — a `read_spef` of a file that is not there is
     # how a session ends up quietly measuring something else.
     spef_tcl = f"read_spef {spef_c}\n" if spef_c else ""
+    # T106 — a ROUTED netlist has a clock tree: its slews and internal power
+    # are the propagated clock's. MEASURED on spm: this deck on the tool's own
+    # SPEF read 20.669 mW with ideal clocks and 20.765 mW propagated, which is
+    # STAPostPNR's report_power for the same corner to the last printed digit.
+    if netlist == routed_netlist:
+        spef_tcl += "set_propagated_clock [all_clocks]\n"
     tcl_path.write_text(f"""{_emitted_script_root_tcl(tcl_path, project)}
 read_liberty {lib_c}
 {macro_libs_tcl}
