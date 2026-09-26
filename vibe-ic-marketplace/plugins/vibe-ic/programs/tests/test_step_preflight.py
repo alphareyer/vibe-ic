@@ -298,11 +298,36 @@ def test_due_set_grows_monotonically_along_the_dispatch_order():
 def test_every_declared_site_is_wired_at_a_real_call_site(runner):
     src = (PROGRAMS / f"{runner}.py").read_text(encoding="utf-8")
     assert "import step_preflight as _spf" in src
+    # READ AS CODE, not as text (T109c). Two call shapes are real dispatches:
+    #   _spf.gate(project, "<runner>", "<site>", ...)             direct
+    #   pool.submit(_spf.gate, project, "<runner>", "<site>", ...) handed on
+    # ac2104931 moved phase3's `drc` into the second shape to run DRC and LVS
+    # concurrently; the old regex saw only the first and called a wired site
+    # unwired. An AST match also refuses a site named only in a comment or a
+    # string, which the regex accepted.
+    import ast
+    wired = set()
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call):
+            continue
+
+        def _is_gate(n):
+            return (isinstance(n, ast.Attribute) and n.attr == "gate"
+                    and isinstance(n.value, ast.Name) and n.value.id == "_spf")
+
+        args = list(node.args)
+        if _is_gate(node.func):
+            rest = args
+        else:
+            hit = [i for i, a in enumerate(args) if _is_gate(a)]
+            if not hit:
+                continue
+            rest = args[hit[0] + 1:]
+        if len(rest) >= 3 and all(isinstance(a, ast.Constant)
+                                  for a in rest[1:3]):
+            wired.add((rest[1].value, rest[2].value))
     for site, _span in SP.RUNNER_PLANS[runner].sites:
-        pat = re.compile(r"_spf\.gate\(\s*project,\s*[\"']"
-                         + re.escape(runner) + r"[\"'],\s*[\"']"
-                         + re.escape(site) + r"[\"']")
-        assert pat.search(src), (
+        assert (runner, site) in wired, (
             f"{runner} declares site {site!r} but no `_spf.gate(project, "
             f"'{runner}', '{site}', …)` call site exists — the pre-flight "
             f"would be available but never enforced, which is the exact state "
