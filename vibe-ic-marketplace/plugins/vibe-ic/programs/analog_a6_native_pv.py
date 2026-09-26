@@ -1082,10 +1082,12 @@ def _unit_testcase_dir(project: Path, block: str, container: str,
     except (ValueError, OSError):
         return None
     libs = tech.parents[1]
+    # SUPERVISED BY PROGRESS, like every non-probe call here: a walk of the
+    # PDK tree is not a `test -e`. The marker is the tree, already in argv.
     rc, out, _ = _docker_exec(
         container, f"find {shlex.quote(str(libs))} -name "
                    f"{shlex.quote(Path(main_deck).name)} -path '*drc*' "
-                   f"2>/dev/null | sort | head -1", timeout=120)
+                   f"2>/dev/null | sort | head -1", marker=str(libs))
     found = (out or "").strip().splitlines()
     if rc != 0 or not found:
         return None
@@ -1108,7 +1110,7 @@ def _native_capability(project: Path, block: str, container: str,
                 for r, v in none.items()}
     rc, out, _ = _docker_exec(
         container, f"python3 -c {shlex.quote(_auth.UNIT_LABEL_SCRIPT)} "
-                   f"{shlex.quote(unit)}", timeout=900)
+                   f"{shlex.quote(unit)}", marker=unit)
     labels = _auth.parse_unit_labels(out) or {}
     work = project / "phase3" / "extracted" / "analog" / "_capability"
     work.mkdir(parents=True, exist_ok=True)
