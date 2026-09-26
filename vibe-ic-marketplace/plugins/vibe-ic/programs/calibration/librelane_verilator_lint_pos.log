@@ -1,0 +1,15 @@
+%Error-LATCH: /tmp/vlcal/phase2/stage1/rtl/cal_pos.v:10:5: Latch inferred for signal 'l' (not all control paths of combinational always assign a value)
+                                                         : ... Suggest use of always_latch for intentional latches
+   10 |     always @(*) if (en) l = a;
+      |     ^~~~~~
+              ... For error description see https://verilator.org/warn/LATCH?v=5.053
+%Warning-MULTIDRIVEN: /tmp/vlcal/phase2/stage1/rtl/cal_pos.v:5:17: Signal has multiple driving blocks with different clocking: 'q'
+                      /tmp/vlcal/phase2/stage1/rtl/cal_pos.v:8:27: ... Location of first driving block
+    8 |     always @(posedge clk) q <= a;
+      |                           ^
+                      /tmp/vlcal/phase2/stage1/rtl/cal_pos.v:9:27: ... Location of other driving block
+    9 |     always @(negedge clk) q <= ~a;
+      |                           ^
+                      ... For warning description see https://verilator.org/warn/MULTIDRIVEN?v=5.053
+                      ... Use "/* verilator lint_off MULTIDRIVEN */" and lint_on around source to disable this message.
+%Error: Exiting due to 1 error(s)

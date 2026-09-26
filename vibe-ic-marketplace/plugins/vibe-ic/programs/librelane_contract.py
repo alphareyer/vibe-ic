@@ -220,6 +220,28 @@ def emit_synthesis_config(project: Path, pdk: str, output: Path,
     return result
 
 
+def emit_lint_config(project: Path, pdk: str, output: Path, top: str,
+                     rtl_files: list[Path], top_source: str) -> dict:
+    """Bind Verilator.Lint to the design's own RTL and declared top.
+
+    Step 2 runs before any Phase-3 artefact exists, so this reads nothing
+    from phase3/stage3; unlike `emit_config` it needs no pad or die input."""
+    if not rtl_files or any(not path.is_file() or not path.resolve().is_relative_to(project.resolve())
+                            for path in rtl_files):
+        raise Refusal('LL_LINT_INPUT_MISSING', 'selected RTL must exist inside the project')
+    if not top:
+        raise Refusal('LL_TOP_UNDECLARED', 'no declared RTL top module')
+    result: dict[str, Any] = {'meta': {'step': 'Verilator.Lint'}}
+    sources: dict[str, str] = {}
+    _set(result, sources, 'DESIGN_NAME', top, top_source)
+    _set(result, sources, 'PDK', pdk, 'phase3/librelane_switch.json.pdk')
+    _set(result, sources, 'VERILOG_FILES', [str(path.resolve()) for path in rtl_files],
+         '_rtl_include_hub.silicon_rtl_selection (the step-9 synthesis input)')
+    write_json(output, result)
+    write_json(output.with_suffix('.provenance.json'), sources)
+    return result
+
+
 def verify_synthesis_stat(stat_path: Path, state: dict, stats_path: Path,
                           top: str, output: Path) -> dict:
     """Bind the area-gate input and copied netlist to Yosys's native stat."""
@@ -275,7 +297,7 @@ def _walk_paths(value: Any):
 # sole required input (magic.py RCX/DRC, klayout.py DRC).
 # One table for the run_chain floor and the bridge's chain requirements.
 _EARLY_STEP_INPUTS: dict[str, tuple[str, ...]] = {
-    'Yosys.JsonHeader': (), 'Yosys.Synthesis': ('json_h',),
+    'Verilator.Lint': (), 'Yosys.JsonHeader': (), 'Yosys.Synthesis': ('json_h',),
     'OpenROAD.CheckSDCFiles': ('nl',), 'OpenROAD.STAPrePNR': ('nl',),
     'OpenROAD.Floorplan': ('nl',), 'Yosys.EQY': ('nl',),
     'Checker.YosysUnmappedCells': ('nl',), 'Checker.YosysSynthChecks': ('nl',),

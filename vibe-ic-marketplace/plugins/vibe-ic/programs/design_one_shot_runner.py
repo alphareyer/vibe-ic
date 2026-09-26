@@ -12191,6 +12191,85 @@ def step_crosslayer_rewrite_fidelity(project: Path) -> StepResult:
                       extras={"exit_code": rc})
 
 
+def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
+    """Flow Step 2 lint through the tool: LibreLane Verilator.Lint + its gate.
+
+    Opt-in per `phase3/librelane_switch.json` `{"steps": {"2": ...}}`, with
+    the image and PDK declared there. `direct` (the default) returns None and
+    the step is unchanged. `librelane` judges Verilator.Lint with
+    `verilator_lint_gate`; `dual` also runs `rtl_hygiene_lint --severity ERROR`
+    and blocks on the union, recording which arm found what. The linted files
+    are the step-9 synthesis input (`silicon_rtl_selection`), so a lint of a
+    different or empty file set cannot pass."""
+    import librelane_contract as _ll
+    try:
+        mode = _ll.selected_mode(project, "2")
+    except _ll.Refusal as exc:
+        return StepResult("rtl_lint_tool", "FAIL", 0.0, str(exc))
+    if mode == "direct":
+        return None
+    from _rtl_include_hub import silicon_rtl_selection
+    import verilator_lint_gate as _vlg
+    t0 = time.time()
+    out_dir = project / "reports/phase2/lint"
+    gate_json = out_dir / "verilator_lint_gate.json"
+    try:
+        switch = json.loads((project / "phase3/librelane_switch.json").read_text())
+        image, pdk = switch.get("image"), switch.get("pdk")
+        if not image or not pdk:
+            raise _ll.Refusal("LL_SWITCH_INCOMPLETE",
+                              "step 2 needs image and pdk in phase3/librelane_switch.json")
+        l9 = _rcvar_l9_top_ports(project)
+        top = l9[0] if l9 else None
+        rtl = silicon_rtl_selection(_pl.rtl_dir(project))
+        config_dir = project / "phase3/librelane/step2"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        _ll.emit_lint_config(project, str(pdk), config_dir / "lint_config.json",
+                             str(top or ""), rtl,
+                             "L9_INTEGRATION_SPEC.top_module")
+        mounts, pdk_root = [], None
+        if switch.get("pdk_root_host"):
+            mounts.append((Path(switch["pdk_root_host"]), "/pdk"))
+            pdk_root = "/pdk"
+        resolved = _ll.resolve_step_config(
+            project, image, config_dir / "lint_config.json",
+            config_dir / "lint_resolved.json", mounts=mounts, pdk_root=pdk_root)
+        state_in = config_dir / "lint_state_in.json"
+        _ll.write_json(state_in, {})
+        folder = _ll.run_chain(project, image, [("Verilator.Lint", resolved, state_in)],
+                               mounts=mounts, pdk_root=pdk_root, lane="step2")[-1]
+    except (_ll.Refusal, OSError, ValueError) as exc:
+        return StepResult("rtl_lint_tool", "FAIL", time.time() - t0, str(exc))
+    report = _vlg.judge(folder, rtl)
+    report["mode"] = mode
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _ll.write_json(gate_json, report)
+    outputs = [str(gate_json), str(folder / "verilator-lint.log")]
+    verdict = report["verdict"]
+    detail = f"Verilator.Lint gate {verdict}: {report.get('reason', '')}"
+    if mode == "dual":
+        direct_json = out_dir / "rtl_hygiene_direct_arm.json"
+        direct_json.unlink(missing_ok=True)
+        cmd = [sys.executable, str(PROGRAMS_DIR / "rtl_hygiene_lint.py"),
+               *[str(p) for p in rtl], "--severity", "ERROR", "--json", str(direct_json)]
+        try:
+            rc = _pr.run(cmd, capture_output=True, text=True).returncode
+            direct = json.loads(direct_json.read_text()) if direct_json.is_file() else None
+        except (subprocess.SubprocessError, OSError, ValueError):
+            rc, direct = 2, None
+        dual = _vlg.combine_arms(report, direct, rc)
+        _ll.write_json(out_dir / "lint_dual.json", dual)
+        outputs += [str(direct_json), str(out_dir / "lint_dual.json")]
+        verdict = dual["verdict"]
+        detail = (f"dual lint {verdict}: only LibreLane {len(dual['only_librelane'])}, "
+                  f"only direct {len(dual['only_direct'])}; " + detail)
+    status = {"PASS": "PASS", "FAIL": "FAIL"}.get(verdict, "NOT_MEASURED")
+    reason = "" if status != "NOT_MEASURED" else (
+        "input_absent" if report.get("reason_class") == "INPUT_ABSENT" else "inconclusive")
+    return StepResult("rtl_lint_tool", status, time.time() - t0, detail, outputs,
+                      extras={"mode": mode}, reason_class=reason)
+
+
 def _usage_rc() -> int:
     """The rc-3 USAGE tier, read from the module that owns it (#712).
 
@@ -23463,6 +23542,12 @@ def main() -> int:
             "design which ran no cross-layer search leaves a NOT_APPLICABLE RECORD "
             "rather than a silence; gating it is a separate decision.")
     plan.append(step_crosslayer_rewrite_fidelity(project))
+
+    # Flow Step 2 lint through LibreLane Verilator.Lint, when the design's
+    # switch selects it for step 2. The default (direct) adds no row.
+    _tool_lint = step_rtl_lint_tool(project)
+    if _tool_lint is not None:
+        plan.append(_tool_lint)
 
     # Flow step 2 — pad-budget feasibility. Placed HERE, right after the RTL is
     # stable and long before synthesis/DFT/PnR, because the whole point of the

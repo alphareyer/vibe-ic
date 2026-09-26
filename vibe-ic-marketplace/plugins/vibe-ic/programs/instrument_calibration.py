@@ -1588,6 +1588,39 @@ _register(Instrument(
 ))
 
 
+# Step 2 judges LibreLane Verilator.Lint's transcript. The reader must fire on
+# an error and a curated warning in the design, and stay silent on a warning
+# outside the curated set.
+def _judge_verilator_lint_gate(log: str) -> Optional[str]:
+    import verilator_lint_gate as gate
+    return gate._judge_calibration(log)
+
+
+_register(Instrument(
+    name="verilator_lint_gate::parse_transcript",
+    reads="LibreLane Verilator.Lint verilator-lint.log",
+    ruling="T91", owner="mig-rtlver",
+    why=("Step 2 promotes %Error and curated Verilator warning codes to "
+         "blocking. The head-line grammar must find LATCH and MULTIDRIVEN "
+         "and leave UNUSEDSIGNAL non-blocking."),
+    judge=_judge_verilator_lint_gate,
+    positive=Sample(
+        provenance=("Real LibreLane 3.1.0.dev1 Verilator.Lint (Verilator "
+                    "5.053, released vibeic-eda 0.3.77 by digest) on a "
+                    "synthetic three-always module: a combinational if "
+                    "without else and one reg written from posedge and "
+                    "negedge blocks; generated on 192.168.1.121 under "
+                    "/tmp/vlcal. calibration/librelane_verilator_lint_pos.log."),
+        artefact=_read("librelane_verilator_lint_pos.log")),
+    expect="BLOCKING",
+    negative=Sample(
+        provenance=("Same step and image on a one-flop module reading one "
+                    "bit of a two-bit input: only UNUSEDSIGNAL is reported. "
+                    "calibration/librelane_verilator_lint_neg.log."),
+        artefact=_read("librelane_verilator_lint_neg.log")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════

@@ -16676,12 +16676,8 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
     set_invocation_provenance_sink(project)
     switch = json.loads((project / "phase3/librelane_switch.json").read_text())
     image = _ll.resolve_image(project)
-    rtl = sorted(_pl.rtl_dir(project).glob("*.sv")) + sorted(_pl.rtl_dir(project).glob("*.v"))
-    skipped = ("assertions", "de10lite_top", "host_emulator", "_tb", "testbench", "stimulus")
-    rtl = _drop_include_hubs([path for path in rtl
-                              if not any(token in path.name.lower() for token in skipped)])
-    rtl = [path for path in rtl if "pkg" in path.name.lower()] + [
-        path for path in rtl if "pkg" not in path.name.lower()]
+    from _rtl_include_hub import silicon_rtl_selection
+    rtl = silicon_rtl_selection(_pl.rtl_dir(project))
     if not rtl:
         return StepResult("synth", "FAIL", time.time() - t0, "LL_SYNTH_INPUT_MISSING")
     macro = _sf.decide_macro_aware_sim_define(
