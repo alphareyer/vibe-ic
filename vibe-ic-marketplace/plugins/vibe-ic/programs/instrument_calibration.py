@@ -1475,6 +1475,18 @@ _register(Instrument(
 ))
 
 
+def _eqy_scratch(name: str) -> Callable[[], Path]:
+    """Unpack an EQY sample (its unedited status files and partition.list,
+    stored as one tar so every fixture stays a flat file) into a temp dir."""
+    def _load() -> Path:
+        import tarfile
+        out = Path(tempfile.mkdtemp(prefix="cal_eqy_"))
+        with tarfile.open(FIXTURES / f"{name}.tar") as tar:
+            tar.extractall(out)  # our own fixture: relative paths only
+        return out
+    return _load
+
+
 def _judge_eqy_partitions(scratch: Path) -> Optional[str]:
     import librelane_eqy as E
     parts = E.partition_status(scratch)
@@ -1499,15 +1511,15 @@ _register(Instrument(
                     "EQY v0.69 plugins built from YosysHQ/eqy against the "
                     "image's Yosys 0.69 (the image ships none). Gold "
                     "calibration/cal_chain_rtl.v, gate calibration/"
-                    "cal_eqy_gate_noneq.v (buf_1 where inv_1 belongs). Copied "
-                    "unedited: logfile.txt and every strategy status file. "
-                    "calibration/eqy_not_equivalent_positive/"),
-        artefact=lambda: FIXTURES / "eqy_not_equivalent_positive"),
+                    "cal_eqy_gate_noneq.v (buf_1 where inv_1 belongs). Every "
+                    "strategy status file and partition.list, unedited, in "
+                    "calibration/eqy_not_equivalent_positive.tar"),
+        artefact=_eqy_scratch("eqy_not_equivalent_positive")),
     expect="NOT_EQUIVALENT",
     negative=Sample(
         provenance=("Same run, gate calibration/cal_eqy_gate.v (inv_1). Every "
-                    "partition PASS. calibration/eqy_equivalent_negative/"),
-        artefact=lambda: FIXTURES / "eqy_equivalent_negative"),
+                    "partition PASS. calibration/eqy_equivalent_negative.tar"),
+        artefact=_eqy_scratch("eqy_equivalent_negative")),
 ))
 
 
@@ -1533,16 +1545,16 @@ _register(Instrument(
                     "cal_xbits_rtl.v (resetless registered output), gate "
                     "calibration/cal_chain_noninv.v (buf_1 where inv_1 "
                     "belongs), script without an init. Unedited partition.list "
-                    "and logfile.txt (`DONE (PASS, rc=0)` over a non-equivalent "
-                    "gate). calibration/eqy_xbits_vacuous_positive/"),
-        artefact=lambda: FIXTURES / "eqy_xbits_vacuous_positive"),
+                    "and status files (EQY logged `DONE (PASS, rc=0)` over the "
+                    "non-equivalent gate). calibration/eqy_xbits_vacuous_positive.tar"),
+        artefact=_eqy_scratch("eqy_xbits_vacuous_positive")),
     expect="XBITS_VACUOUS",
     negative=Sample(
         provenance=("Same tool, gold calibration/cal_chain_rtl.v, gate "
                     "calibration/cal_eqy_gate.v, script with `setundef -init "
                     "-zero` (librelane_eqy.eqy_script). No partition tagged "
-                    "xbits. calibration/eqy_defined_init_negative/"),
-        artefact=lambda: FIXTURES / "eqy_defined_init_negative"),
+                    "xbits. calibration/eqy_defined_init_negative.tar"),
+        artefact=_eqy_scratch("eqy_defined_init_negative")),
 ))
 
 

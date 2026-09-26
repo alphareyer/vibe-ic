@@ -240,21 +240,26 @@ eqy = _optional("librelane_eqy")
 
 
 def eqy_folder(root, sample):
+    """A Yosys.EQY step directory holding a real EQY run's status files."""
+    import tarfile
     folder = root / "01-yosys-eqy"
-    shutil.copytree(CAL / sample, folder / "scratch")
+    (folder / "scratch").mkdir(parents=True)
+    with tarfile.open(CAL / f"{sample}.tar") as tar:
+        tar.extractall(folder / "scratch")
     return folder
 
 
 def test_eqy_counterexample_and_proof_are_read_per_partition(tmp_path):
     bad = eqy.judge_eqy(eqy_folder(tmp_path / "a", "eqy_not_equivalent_positive"), tmp_path / "a.json")
-    good = eqy.judge_eqy(eqy_folder(tmp_path / "b", "eqy_equivalent_negative"), tmp_path / "b.json")
+    good = eqy.judge_eqy(eqy_folder(tmp_path / "b", "eqy_defined_init_negative"), tmp_path / "b.json")
     assert (bad["verdict"], bad["non_equivalent_points"]) == ("FAIL", ["cal_chain.y"])
     assert (good["verdict"], good["proven_points"]) == ("PASS", 2)
 
 
 def test_eqy_pass_over_xbits_is_inconclusive(tmp_path):
-    folder = eqy_folder(tmp_path, "eqy_equivalent_negative")
-    shutil.copy(CAL / "eqy_xbits_vacuous_positive/partition.list", folder / "scratch/partition.list")
+    folder = eqy_folder(tmp_path, "eqy_xbits_vacuous_positive")
+    statuses = eqy.partition_status(folder / "scratch")
+    assert all(set(s.values()) == {"PASS"} for s in statuses.values())
     report = eqy.judge_eqy(folder, tmp_path / "x.json")
     assert report["verdict"] == "INCONCLUSIVE"
     assert report["xbits_partitions"] == ["cal_chain.y", "cal_chain.q0"]
