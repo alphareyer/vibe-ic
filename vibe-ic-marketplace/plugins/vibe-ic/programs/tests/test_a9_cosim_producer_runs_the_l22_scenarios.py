@@ -242,8 +242,10 @@ def test_no_declared_scenario_is_an_honest_gap(tmp_path):
 def test_the_observer_lines_are_read_from_a_real_dcosim_log():
     windows = A9.observer_windows(OBSERVER_LOG.read_text())
     assert [(w["window"], w["ones"], w["code"], w["x"], w["n"])
-            for w in windows] == [(0, 2, 15, 0, 8), (1, 4, 18, 0, 8),
-                                  (2, 4, 22, 0, 8)]
+            for w in windows] == [(0, 3, 13, 0, 8), (1, 5, 21, 0, 8),
+                                  (2, 4, 14, 0, 8)]
+    # 24 clocks, 8-clock windows: three, not six (the X-band double count).
+    assert len(windows) == 3
 
 
 def test_a_log_without_observer_lines_yields_no_window():
