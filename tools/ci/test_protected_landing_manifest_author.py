@@ -193,7 +193,20 @@ def test_the_derivation_reproduces_the_register_in_the_tree(author, transition):
     """
     live = json.loads((_ROOT / _MANIFEST).read_bytes())
     assert transition.derived_paths() == live["paths"]
-    assert transition.derived_runner() == live["runner"]
+    # LIKE WITH LIKE. The runner row is two things: a PROFILE this verifier
+    # derives, and an IMAGE the base records and a PREPARE may not replace
+    # (`test_prepare_cannot_replace_the_base_owned_runner_digest`). This used to
+    # compare the recorded image with the one THIS HOST resolves, so the same
+    # tree was green or red by host -- MEASURED 2026-09-26 on 8hd-3 at 6886af48b:
+    # register `@sha256:4215132e…` (0.3.63), host `@sha256:93d88e9e…` (0.3.79).
+    # Every derived field is still compared, and the image is held to the one
+    # rule the verifier has for it; that the author REPRODUCES it is asserted by
+    # `test_the_author_carries_the_registers_image_not_the_hosts`.
+    recorded = dict(live["runner"])
+    recorded_image = recorded.pop("image")
+    assert transition.derived_runner_profile() == recorded
+    assert transition.image_digest_of(recorded_image) is not None, recorded_image
+    assert transition._runner_profile(live["runner"]) == live["runner"]
 
 
 def test_the_derived_runner_is_one_the_verifier_accepts(transition):
@@ -290,3 +303,61 @@ def test_without_the_flag_a_manifest_that_moves_nothing_is_still_refused(
     assert "--no-move" in str(caught.value), (
         "the refusal must name the way out, or the obligation lives in "
         "somebody's head again")
+
+
+# --- the runner image is the BASE's record, never the authoring host's ------
+#
+# `render` wrote `derived_runner()`, whose image is resolved on whatever host
+# runs the author, while `build_receipt` refuses a PREPARE whose runner differs
+# from the base's. So a PREPARE authored on a host holding a newer image than
+# the register records could not land, and the register's parity test was red
+# or green by host. These pin the rule the author follows now: the profile is
+# derived, the image is carried from the register, and a register carrying no
+# image the verifier accepts is refused rather than silently re-resolved.
+
+_FOREIGN_DIGEST = "sha256:" + "b" * 64
+
+
+def test_the_author_carries_the_registers_image_not_the_hosts(
+        author, transition, head, monkeypatch):
+    """Host-independent: the authoring host is made to resolve a FOREIGN digest,
+    and the rendered runner must still be the register's, byte for byte."""
+    monkeypatch.setattr(transition, "runner_image_digest",
+                        lambda: _FOREIGN_DIGEST)
+    monkeypatch.setattr(author, "_load_transition", lambda: transition)
+    assert transition.derived_runner()["image"].endswith("@" + _FOREIGN_DIGEST), (
+        "the probe did not reach the host resolution it is meant to vary")
+    live = json.loads((_ROOT / _MANIFEST).read_bytes())
+    manifest = author.render(repo=_ROOT, commit=head,
+                             transition_id="runner-carry-probe-v1",
+                             current_id="probe-observed-at-head",
+                             next_id="runner-carry-probe-v1-next",
+                             moves={}, no_move=True)
+    assert manifest["runner"] == live["runner"]
+    assert _FOREIGN_DIGEST not in manifest["runner"]["image"]
+
+
+@pytest.mark.parametrize("runner_image", [
+    None,                                            # the key is absent
+    "ghcr.io/vibeic/vibeic-eda:latest",              # a tag, not a reference
+])
+def test_a_register_with_no_acceptable_image_is_refused_not_re_resolved(
+        author, transition, monkeypatch, runner_image):
+    monkeypatch.setattr(transition, "runner_image_digest",
+                        lambda: _FOREIGN_DIGEST)
+    live = json.loads((_ROOT / _MANIFEST).read_bytes())
+    runner = dict(live["runner"])
+    runner.pop("image")
+    if runner_image is not None:
+        runner["image"] = runner_image
+    with pytest.raises(author.Refusal) as caught:
+        author.base_owned_runner(transition, {"runner": runner})
+    assert "never resolved on the authoring host" in str(caught.value)
+
+
+def test_the_base_owned_runner_is_the_derived_profile_plus_the_recorded_image(
+        author, transition):
+    live = json.loads((_ROOT / _MANIFEST).read_bytes())
+    assert author.base_owned_runner(transition, live) == {
+        **transition.derived_runner_profile(),
+        "image": live["runner"]["image"]}

@@ -324,7 +324,11 @@ HERMETIC_TEST_PROGRESS = {
         # `step37.4` flow cell adds one parametrised
         # `test_every_enforced_cell_carries_a_named_mutation` item before the
         # witness family.  The replay population itself remains 25.
-        "items": 127,
+        # 127 -> 128 and ordinal 93 -> 94, re-derived at 6886af48b (v1.25.11,
+        # the 1.25.x FULL resync): `9ef6a544e` registered the `step37.3` flow
+        # cell, one more `[step37.3]` item before the witness family.  The
+        # replay population itself remains 25.
+        "items": 128,
         # EVERY PRODUCER ITEM MUST APPEAR IN EXACTLY ONE OF TWO LISTS, and
         # this is the second. It is NOT a claim that these items are short:
         # it is the MEASURED set of producer items carrying no schedule at
@@ -341,7 +345,7 @@ HERMETIC_TEST_PROGRESS = {
         ),
         "producer_profiles": (("replay_many",),),
         "domains": (
-            (93, HERMETIC_MUTATION_FILE
+            (94, HERMETIC_MUTATION_FILE
              + "::test_lock2_the_mutation_really_reddens_its_witness[D1-BLIND-GATE-PROGRAMS]",
              "matrix-mutation-replays", 25),
         ),
