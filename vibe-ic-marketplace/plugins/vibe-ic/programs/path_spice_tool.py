@@ -453,7 +453,10 @@ def _simulate(deck: Path, simulator: str, image: str, project: Path,
         run = f'tran {step_s:.6g} {stop}' if step_s else 'run'
         control = (f'.control\nset wr_vecnames\nset wr_singlescale\n{run}\n'
                    f'wrdata {deck.with_suffix(".wave")} {vectors}\n.endc\n')
-        runnable.write_text(re.sub(r'^\.end\s*$', control + '.end', text, flags=re.M))
+        # A function, not a string: a replacement string would read the
+        # doubled backslashes above as escapes and undo them.
+        runnable.write_text(re.sub(r'^\.end\s*$', lambda _m: control + '.end', text,
+                                   flags=re.M))
         return _docker(image, project, mounts, ['ngspice', '-b', str(runnable)], deck.parent)
     if step_s:
         text = re.sub(r'^\.tran\s+\S+', f'.tran {step_s:.6g}', text, count=1, flags=re.M | re.I)

@@ -645,13 +645,14 @@ def _wps_edge(calls):
                                                  t2=f'{3.762931 + d1:.6f}'))
             for deck in __import__('re').findall(r'-spice_file (\S+)', tcl):
                 write(Path(deck + '_1.sp'), '* Path\n.tran 1e-13 2e-08\n'
-                      '.print tran v(u_core\\\\/_417_/CLK) v(u_core\\\\/_417_/Q) v(u_core\\\\/_416_/D)\n'
-                      'v2 u_core\\\\/_417_/VDD 0 4.500\n.end\n')
+                      '.print tran v(u_core\\/_417_/CLK) v(u_core\\/_417_/Q) v(u_core\\/_416_/D)\n'
+                      'v2 u_core\\/_417_/VDD 0 4.500\n.end\n')
             return SimpleNamespace(returncode=0, stdout='VIBEIC_WPS_OK 1\n', stderr='')
         if argv[0] == 'ngspice':
             run = Path(argv[-1])
             spef_slow = 'mutated' in str(run)
             wrdata = run.read_text().split('wrdata ')[1].split('\n')[0].split()
+            calls.append(('wrdata', wrdata))
             assert wrdata[1:] == ['v(u_core\\\\/_417_/clk)', 'v(u_core\\\\/_417_/q)',
                                   'v(u_core\\\\/_416_/d)'], wrdata
             delay = 1.10e-9 if spef_slow else 0.72e-9
