@@ -327,6 +327,7 @@ def test_direct_mode_never_reads_the_tool_arm(tmp_path):
     ('stale_view', 'LL_STA_INPUT_STALE'),
     ('stale_mode', 'LL_STA_RECORD_STALE'),
     ('no_record', 'LL_STA_TOOL_ARM_UNREADABLE'),
+    ('other_state', 'LL_STA_RECORD_STALE'),
 ])
 def test_the_reader_refuses_what_it_cannot_bind(tmp_path, damage, code):
     project = tool_project(tmp_path)
@@ -337,6 +338,11 @@ def test_the_reader_refuses_what_it_cannot_bind(tmp_path, damage, code):
         report.write_text(report.read_text().replace('worst slack max 1.0', 'worst slack max 9.0'))
     elif damage == 'stale_view':
         (project / 'phase3/stage3/pnr/top_pnr.v').write_text('module top(a); endmodule\n')
+    elif damage == 'other_state':
+        # the record names a STAPostPNR state other than the one on disk
+        record = project / signoff.SIGNOFF_RECORD
+        record.write_text(json.dumps({**json.loads(record.read_text()),
+                                      'sta_state_sha256': '0' * 64}))
     elif damage == 'stale_mode':
         (project / 'phase3/librelane_switch.json').write_text(json.dumps({'steps': {'23': 'dual'}}))
     else:
@@ -424,6 +430,9 @@ def test_the_same_numbers_in_our_deck_do_not_flip_a_gate_on_the_tool(tmp_path, n
                 'phase3/stage3/sta/sta_spef_multicorner.rpt', 'reports/phase3/sta_spef_based.rpt',
                 'phase3/stage3/sta/post_route_timing.rpt'):
         _write(project / rel, '=== SETUP corner: process=SS liberty=x.lib ===\n' + deck)
+    # the step-10 per-corner sweep is our deck too: one lone corner report is
+    # a broken multi-corner claim there, and must not be read on the tool arm
+    _write(project / 'phase3/stage3/sta/per_corner/sta_SS.rpt', deck)
     rc, doc = run_gate(name, project, tmp_path)
     assert rc == 0 and verdict(doc) == 'PASS', (name, doc)
     assert STA in json.dumps(doc), (name, doc)
@@ -504,3 +513,10 @@ def test_a_required_pvt_corner_is_measured_only_by_a_tool_corner_on_its_liberty(
     rc, doc = run_gate('sta_corner_record_completeness_check', project, tmp_path)
     assert (rc, doc['verdict']) == expect, doc
     assert doc['declaration_sources']['required_pvt_corners'] == ['FF', 'SS', 'TT']
+
+
+def test_a_hold_only_violation_at_one_tool_corner_fails_the_corner_gate(tmp_path):
+    project = gate_inputs(tool_project(tmp_path, hold={'nom_tt_025C_5v00': -0.05}))
+    rc, doc = run_gate('post_route_signoff_corner_check', project, tmp_path)
+    assert (rc, doc['verdict'], doc['hold_worst_corner']) == (1, 'FAIL', 'nom_tt_025C_5v00')
+    assert any('nom_tt_025C_5v00 hold' in r for r in doc['reasons'])

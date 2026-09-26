@@ -964,7 +964,7 @@ def judge_project(project: Path) -> Tuple[str, int, dict]:
     except Refusal as exc:
         return "REFUSED", 1, {
             "tool": _TOOL, "mode": "librelane_stapostpnr", "verdict": "REFUSED",
-            "reason": exc.code, "artefact": str(project), "project": str(project),
+            "reason": exc.code, "refusal": exc.code, "artefact": str(project), "project": str(project),
             "message": f"step 23 runs on the tool and its sign-off cannot be "
                        f"read: {exc}"}
     sources = _discover(project)
