@@ -59815,13 +59815,14 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                     # re-run any of them, which is why the post-route repair netlist is not the
                     # shipped implementation (see _POSTROUTE_TIMING_REPAIR_MAX_DROUTE_ITERS).
                     # Written in the flow's own declaration order.
-                    # 37.3 (#2514) joins for 33's reason: it `blocks_on: [21]`
-                    # (the routed database is its reference), not on 32, so
-                    # nothing in the graph guarantees its XOR receipt describes
-                    # the post-repair layout.
+                    # 31 and 37.3 LEFT the radius when the flow moved them
+                    # (ac2104931): 31 now `blocks_on [.., 34, 37]` and 37.3
+                    # `blocks_on [21, 37]`, so both run on the post-repair GDS
+                    # (32 -> 34 -> 37) and consume the repair by construction.
+                    # Physical verification is therefore no longer stale after
+                    # a repair; it is downstream of it (T109c).
                     "affected_steps": [21, 22, "DT2", "DT3", 23, 24, 25, 26,
-                                       "26.5ic", 27, 28, 29, 30, 31, 33,
-                                       "37.3"],
+                                       "26.5ic", 27, 28, 29, 30, 33],
                     "repair_before": _repair_decision["repair_before"],
                     "repair_after": _repair_after,
                     "residual_violation": _repair_residual,

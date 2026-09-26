@@ -265,10 +265,22 @@ def test_the_recorded_set_matches_what_the_umbrella_classifies():
     # across 2b45d26cf is exactly that one name, and no gate arrived. Coverage
     # stays total (0 silent of 245): the direction is a smaller registry, not a
     # silence.
-    assert len(measured) == 0 and res["registered"] == 245, (
+    #
+    # 245 -> 243 (1a27f263d, "Rebase P0 RTL structural checks on Yosys and
+    # Verilator"): `bitwidth_consistency_check` and `module_port_audit` left
+    # the tuple; no gate arrived; still 0 silent. THE TYPED COUNT IS RETIRED
+    # (T109c): under the owner's 2026-09-26 ruling a number that only tracks
+    # the registry is bookkeeping. What this test asserts is that coverage is
+    # TOTAL over the umbrella's OWN registry -- read from the umbrella, never
+    # typed, and never vacuous.
+    umbrella = tuple(getattr(F, "_STRUCTURAL_RTL_GATES", ()))
+    assert umbrella, "the umbrella registers no P0 gate; a zero would be vacuous"
+    assert res["registered"] == len(umbrella), (
+        "the drift check measured a registry other than the umbrella's own: "
+        f"{res['registered']} vs {len(umbrella)}")
+    assert len(measured) == 0, (
         f"P0 coverage moved: {res['registered'] - len(measured)} of "
-        f"{res['registered']} gates return a verdict. Update this anchor "
-        f"deliberately and say which direction it moved.")
+        f"{res['registered']} gates return a verdict; silent: {sorted(measured)}")
 
 
 def test_every_measured_silence_carries_a_machine_readable_decision():

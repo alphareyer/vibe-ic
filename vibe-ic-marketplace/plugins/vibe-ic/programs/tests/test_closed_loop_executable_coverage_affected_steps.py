@@ -155,8 +155,21 @@ def test_extraction_and_physical_verification_are_in_the_radius():
     derived = derive_blast_radius(_load())
     by = {_norm(s["id"]): str(s.get("name") or "") for s in _load()["steps"]}
     assert "22" in derived and "Extraction" in by["22"]
-    assert "31" in derived and "Physical Verification" in by["31"]
-    assert {"22", "31"} <= runner_affected_steps()
+    assert "22" in runner_affected_steps()
+    # PHYSICAL VERIFICATION MUST SEE THE POST-REPAIR LAYOUT. Either it is in
+    # the radius (stale, must re-run) or it is downstream of the repair (runs
+    # on the repaired GDS by construction) -- never neither. Since ac2104931
+    # step 31 blocks_on [.., 34, 37], i.e. it is downstream of 32 (T109c,
+    # re-derived rather than pinned to one side).
+    bo = _blocks_on(_load())
+    routed = _descendants(ROUTING_STEP, bo)     # PV of the ROUTED design only
+    pv = [sid for sid, name in by.items()
+          if "Physical Verification" in name and sid in routed]
+    assert pv, "no Physical Verification step downstream of routing"
+    after = _descendants(REPAIR_STEP, bo)
+    for sid in pv:
+        assert (sid in derived) != (sid in after), (sid, "radius", sid in derived)
+        assert (sid in runner_affected_steps()) == (sid in derived)
 
 
 def test_the_radius_excludes_what_runs_after_the_repair():
@@ -180,9 +193,12 @@ def test_the_pre_fix_literal_would_fail_this_test():
     derived = derive_blast_radius(_load())
     assert set(PRE_FIX_LITERAL) != derived
     missed = derived - set(PRE_FIX_LITERAL)
-    assert "31" in missed, (
-        "the pre-fix literal is supposed to have omitted physical verification; "
-        f"it did not, so the premise of this file is wrong — missed={sorted(missed)}")
+    # the omission the file was written for that still exists on this flow:
+    # extraction (22), which the repair itself re-runs. (Physical verification
+    # was the other; since ac2104931 it runs after the repair -- T109c.)
+    assert "22" in missed, (
+        "the pre-fix literal is supposed to have omitted extraction; it did "
+        f"not, so the premise of this file is wrong — missed={sorted(missed)}")
 
 
 def test_the_flow_prose_for_step_32_also_disagrees_with_the_derivation():
@@ -198,7 +214,10 @@ def test_the_flow_prose_for_step_32_also_disagrees_with_the_derivation():
     derived = derive_blast_radius(doc)
     if "21-#28" in trigger or "21-28" in trigger:
         assert prose_says != derived
-        assert {"29", "30", "31"} <= (derived - prose_says)
+        # the post-layout verification steps past #28 that the radius holds,
+        # derived (31 left the radius in ac2104931 -- T109c)
+        past = {x for x in derived if x in {"29", "30", "31"}}
+        assert past and past <= (derived - prose_says), sorted(past)
     else:
         pytest.skip("step 32's trigger prose no longer names #21-#28")
 
@@ -246,7 +265,10 @@ def test_the_radius_is_anchored_by_who_NAMES_the_repair_step():
                               if _norm(p) != REPAIR_STEP]
     grown = derive_blast_radius(orphaned)
     assert grown > base, "cutting every reference to 32 must widen the radius"
-    # GDSII output is unambiguously DOWNSTREAM of the repair; its appearance is
-    # the recognisable signature of the anchor having been cut. (34, metal fill,
-    # does NOT appear: its only parent was 32, so it leaves the graph entirely.)
-    assert "37" in (grown - base), sorted(grown - base)
+    # THE SIGNATURE of the anchor having been cut: steps that were DOWNSTREAM
+    # of the repair now appear in the radius. Derived from the graph rather
+    # than naming one (it was GDS 37; since ac2104931 37 hangs only off 34,
+    # whose only parent was 32, so 37 leaves the graph and PV 31 / 37.3 / 36
+    # are what appear -- T109c).
+    was_after = _descendants(REPAIR_STEP, _blocks_on(_load()))
+    assert (grown - base) and (grown - base) <= was_after, sorted(grown - base)
