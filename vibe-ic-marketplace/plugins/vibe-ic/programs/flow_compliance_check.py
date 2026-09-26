@@ -1737,6 +1737,13 @@ class StepResult:
     # channel cannot DELETE a `PASS voided: dependency ...` line that origin/main
     # would have printed. Never read as a tier.
     json_vacuity_promoted: bool = False
+    # F10 — non-empty ONLY on a NOT_MEASURED step that is EXCLUDED from the run
+    # verdict, and it is the sentence that says why: the producer's own record
+    # (or the run's declared mode) states that what this step judges was never
+    # built here. Such a step is listed by name beside the verdict and never
+    # enters it — it cannot make the run PASS, PASS_WITH_WAIVERS, NOT_MEASURED
+    # or FAIL. Empty on every other step, so `asdict` publishes `""` uniformly.
+    excluded_from_verdict: str = ""
     # W4 - one entry per `optional_program_exit_zero` clause on this step whose
     # `condition_files_exist` matched NO path, so the program never ran and the
     # clause concluded nothing. Each entry carries the command and the reason
@@ -6827,6 +6834,13 @@ def _os_constraints_prereq_satisfied(result: Any,
     """
     status = getattr(result, "status", None)
     if status == _T.Verdict.PASS.value:
+        return True
+    # F10 — the SAME board-absent state this guard accepted as a synthesised
+    # cap-gap waiver now wears its honest word: NOT_MEASURED and excluded from
+    # the verdict. It did not fail, and a step outside the verdict cannot
+    # decide the promotion either way. Any OTHER NOT_MEASURED still blocks.
+    if (status == _T.Verdict.NOT_MEASURED.value
+            and getattr(result, "excluded_from_verdict", "")):
         return True
     if status != _T.Verdict.PASS_WITH_WAIVERS.value:
         return False
@@ -13180,13 +13194,23 @@ _ENV_UNAVAILABLE_STEP_NAME_TO_ID: Dict[str, Any] = _we.STEP_NAME_TO_ID
 # both failed to waive the real FPGA-final step (39) AND wrongly waived a
 # non-FPGA backend step (37=GDSII). Deriving the set here makes it renumber-
 # proof: any future YAML renumber updates the table once, and this set follows.
-_FPGA_BOARD_STEP_NAMES = (
-    "fpga_compile", "fpga_early_prototype",
-    "fpga_onboard_test", "fpga_final_signoff", "fpga_signoff",
-)
-_FPGA_BOARD_STEP_IDS = frozenset(
-    _ENV_UNAVAILABLE_STEP_NAME_TO_ID[_n] for _n in _FPGA_BOARD_STEP_NAMES
-)  # = {6, 39}
+#
+# F10 — the name table above is itself a hand list of step numbers, so the set
+# is now read off the flow yaml: the board steps are the steps whose declared
+# `required_outputs` owe the bitstream the FPGA producer's record reports on
+# (`fpga_board_capability.board_bound_step_ids`). FAILS CLOSED: an unreadable
+# flow yields the empty set, so no step is deferred or excluded on its account
+# and its natural FAIL stands.
+def _derive_fpga_board_step_ids(flow_path: Optional[Path] = None) -> frozenset:
+    try:
+        path = Path(flow_path) if flow_path is not None else _find_flow_def()
+        doc = yaml.safe_load(Path(path).read_text(errors="replace"))
+    except Exception:                                        # noqa: BLE001
+        return frozenset()
+    return _fpga_cap.board_bound_step_ids((doc or {}).get("steps") or [])
+
+
+_FPGA_BOARD_STEP_IDS = _derive_fpga_board_step_ids()  # = {6, 39} today
 
 # The ANALOG counterpart of _FPGA_BOARD_STEP_IDS: steps whose evidence can only
 # come off a lab bench. Kept as STRING ids because the analog track is lettered
@@ -13400,6 +13424,40 @@ def _synthesise_fpga_skip_waivers(
             "_env_unavailable": True,
             "_fpga_skip": True,
         }
+
+
+# F10 — THE OWNER RULE: a step that was not measured is NOT_MEASURED and is
+# excluded from the verdict; it is never a waiver. A waiver is an authored
+# undertaking (evidence, a ticket, review_required) about a step that RAN. The
+# row `_synthesise_fpga_skip_waivers` builds is none of that: the audit writes
+# it itself from the producer's skip record, about a board step that could not
+# run. So where that row (or --skip-hardware) would have promoted the step to
+# PASS_WITH_WAIVERS, the step is NOT_MEASURED, its reason class is read off the
+# cause the record names, and `excluded_from_verdict` carries the sentence that
+# takes it out of the run verdict. An authored waivers.json entry is untouched.
+_BOARD_ABSENT_REASON_CLASS = {
+    "quartus_absent": _T.ReasonClass.TOOL_ABSENT.value,
+    "board_pin_contract_absent": _T.ReasonClass.INPUT_ABSENT.value,
+    "cause_not_recorded": _T.ReasonClass.NOT_EXECUTED.value,
+}
+
+
+def _is_synthesised_board_skip(entry: Any) -> bool:
+    """The audit's OWN cap-gap row for a board step (never an authored one)."""
+    return isinstance(entry, dict) and bool(entry.get("_fpga_skip"))
+
+
+def _board_step_not_measured(result: "StepResult", sid: Any, *,
+                             reason_class: str, basis: str,
+                             natural: Sequence[str] = ()) -> "StepResult":
+    """Mark a board step NOT_MEASURED and excluded from the run verdict."""
+    result.status = _T.Verdict.NOT_MEASURED.value
+    result.reason_class = reason_class
+    result.excluded_from_verdict = (
+        f"NOT_MEASURED, excluded from the run verdict: {basis}")
+    result.reasons = [result.excluded_from_verdict] + [
+        f"  ↳ natural: {r}" for r in list(natural)[:3]]
+    return result
 
 
 _PHASE2_REPORT = "reports/orchestrator/phase2_one_shot.json"
@@ -16103,13 +16161,14 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # ORGANIC #608 — the waived set is now DERIVED from the canonical name→id
     # table (_FPGA_BOARD_STEP_IDS = {6, 39}), not the stale literal (6, 37) that
     # a Wave 90 renumber broke (37 became GDSII; FPGA-final moved to 39).
+    # F10 — NOT a waiver: the flag declares that no board is part of this run,
+    # so the step was not measured, and it leaves the verdict by name.
     if skip_hardware and isinstance(sid, int) and sid in _FPGA_BOARD_STEP_IDS:
-        result.status = _T.Verdict.PASS_WITH_WAIVERS.value
-        result.reasons.append(
-            "FPGA-board step waived via --skip-hardware: no physical FPGA "
-            "attached for a headless doc→GDS run (review_required at "
-            "board-bringup; GDS/STA/DRC/LVS sign-off unaffected)")
-        return result
+        return _board_step_not_measured(
+            result, sid, reason_class=_T.ReasonClass.INPUT_ABSENT.value,
+            basis=("--skip-hardware declares no physical FPGA board for this "
+                   "headless doc→GDS run, so no board test was performed "
+                   "(GDS/STA/DRC/LVS sign-off unaffected)"))
 
     # A9 is the ANALOG bench-hardware step, and the allowlist entry that exempts
     # its hw-correlation sub-gate calls it "the analog analogue of
@@ -16388,7 +16447,16 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 f"to manufacture completion evidence; wire a pre-audit "
                 f"producer into the owning runner.")
         # v1.6.269 (#126) — ENV_UNAVAILABLE fallback at early MISSING.
-        if sid in waivers and bool(waivers[sid].get("_env_unavailable")):
+        if (sid in waivers and _is_synthesised_board_skip(waivers[sid])
+                and sid in _FPGA_BOARD_STEP_IDS):
+            _board_step_not_measured(
+                result, sid,
+                reason_class=_BOARD_ABSENT_REASON_CLASS.get(
+                    waivers[sid].get("cause"),
+                    _T.ReasonClass.NOT_EXECUTED.value),
+                basis=waivers[sid].get("reason", "(no reason)"),
+                natural=result.reasons)
+        elif sid in waivers and bool(waivers[sid].get("_env_unavailable")):
             natural_reason = result.reasons[-1] if result.reasons else "MISSING"
             result.status = _T.Verdict.PASS_WITH_WAIVERS.value
             result.reasons = [
@@ -17632,6 +17700,16 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # tapeout review must still close it before production. The PASS
     # path is NOT touched — a real evidence + gate-PASS keeps PASS.
     if (result.status == _T.Verdict.FAIL.value
+            and sid in waivers
+            and _is_synthesised_board_skip(waivers[sid])
+            and sid in _FPGA_BOARD_STEP_IDS):
+        _board_step_not_measured(
+            result, sid,
+            reason_class=_BOARD_ABSENT_REASON_CLASS.get(
+                waivers[sid].get("cause"), _T.ReasonClass.NOT_EXECUTED.value),
+            basis=waivers[sid].get("reason", "(no reason)"),
+            natural=result.reasons)
+    elif (result.status == _T.Verdict.FAIL.value
             and sid in waivers
             and bool(waivers[sid].get("_env_unavailable"))):
         original_reasons = list(result.reasons)
@@ -20792,6 +20870,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                   or (_T.in_analog_track(r) and _T.scoped_into_verdict(r))]
     else:
         scoped = results
+    # F10 — A STEP THAT WAS NOT MEASURED LEAVES THE VERDICT, BY NAME. Every
+    # bucket below (`failing`, `missing`, `setup_required_skipped`, the
+    # NOT_MEASURED rung, the waiver rung) reads `scoped`, so removing the rows
+    # here is the one place that keeps them out of all of them; they are
+    # published as `not_measured_excluded` beside the verdict instead.
+    not_measured_excluded = [
+        r for r in results
+        if getattr(r, "excluded_from_verdict", "")
+        and r.status == _T.Verdict.NOT_MEASURED.value]
+    if not_measured_excluded:
+        _excl = {id(r) for r in not_measured_excluded}
+        scoped = [r for r in scoped if id(r) not in _excl]
     # R-0915-85 — `MISSING` and `SKIPPED-SETUP-REQUIRED` are gone as words.
     # The two buckets survive as what they always measured, read off the
     # reason: a declared output that does not exist is a FAIL that says
@@ -20958,7 +21048,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                       - sum(_n for _k, _n in counts.items()
                             if _T.is_excused(_k)
                             or _k == _T.Verdict.PASS_WITH_WAIVERS.value)
-                      + len(oss_blocked_skipped))
+                      + len(oss_blocked_skipped)
+                      # F10 — out of the denominator exactly as the synthesised
+                      # waiver took them out: no published X/Y moves.
+                      - len(not_measured_excluded))
     # ADJUDICATED AT MERGE, v1.7.96 (supersedes Wave 93) — this is NOT an
     # owner ruling and must not be read as one; the repo's real ones carry a
     # date (`Owner ruling (2026-07-22)` in
@@ -21656,6 +21749,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             overall = _T.Verdict.PASS_WITH_WAIVERS.value
 
     print(f"\nOverall: {overall}  (strict={not args.lenient})")
+    if not_measured_excluded:
+        # F10 — named on the line under the verdict, never folded into it.
+        print(f"  NOT_MEASURED, excluded from the verdict "
+              f"({len(not_measured_excluded)} step(s)): "
+              + "; ".join(f"[{r.id}] {r.name} ({r.reason_class})"
+                          for r in not_measured_excluded))
     if overall == _T.Verdict.PASS_WITH_WAIVERS.value:
         # vibe-ic#924 — this sentence says "step(s)", so it gets the STEP
         # count. The sub-gate waivers are a second sentence in their own unit
@@ -21934,6 +22033,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             },
             "counts": counts,
             "overall": overall,
+            # F10 — the steps nobody measured, by name, OUTSIDE `overall`.
+            "not_measured_excluded": [
+                {"step_id": r.id, "step_name": r.name,
+                 "reason_class": r.reason_class,
+                 "reason": r.excluded_from_verdict}
+                for r in not_measured_excluded],
             "advisories": advisories,
             "structural_fail_lines": structural_fail_lines if (
                 args.phase == "2"

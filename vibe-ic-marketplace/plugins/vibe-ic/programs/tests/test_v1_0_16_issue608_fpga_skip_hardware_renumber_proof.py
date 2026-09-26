@@ -65,7 +65,10 @@ def test_skip_hardware_waives_fpga_final_by_name(tmp_path):
     proj = _proj(tmp_path, {"verdict": "SKIP"})
     r = F.check_step(proj, _step(FPGA_FINAL_ID, "FPGA final sign-off"),
                      {}, skip_hardware=True)
-    assert r.status == "PASS_WITH_WAIVERS"
+    # F10 (owner rule): --skip-hardware declares the board absent, so the step
+    # is NOT_MEASURED and excluded from the verdict by name, not a waiver.
+    assert r.status == "NOT_MEASURED", (r.status, r.reasons)
+    assert r.excluded_from_verdict, r.reasons
 
 
 def test_skip_hardware_does_not_waive_gdsii_step(tmp_path):
