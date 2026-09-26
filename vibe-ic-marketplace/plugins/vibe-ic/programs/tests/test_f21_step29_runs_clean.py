@@ -438,3 +438,31 @@ def test_a_model_read_from_the_container_is_the_file_not_the_entrypoint_banner(m
         stdout='[INFO] Final PATH variable: /x\n[INFO] Final PATH variable: /y\n' + body,
         returncode=0))
     assert sgs._read_container_files('c', ['/m.v']) == body
+
+
+# ------------------------------------------ issue #1410: no fixed window ---
+
+#: SDF allows `//` comments; a writer's banner can push the header statements
+#: past any fixed prefix. They are still the file's statements.
+_LONG_BANNER = ''.join(f'// banner line {i:04d} ' + 'x' * 40 + '\n' for i in range(120))
+
+
+def test_a_timescale_past_the_first_4096_bytes_is_still_the_sdfs_unit(tmp_path):
+    sdc = write(tmp_path / 'c.sdc', 'create_clock -period 24 [get_ports clk]\n')
+    sdf = '(DELAYFILE\n' + _LONG_BANNER + ' (TIMESCALE 1ps)\n)\n'
+    assert sdf.index('TIMESCALE') > 4096
+    clocks = sgs.declared_sdc_clocks(sdc, [sdf])
+    assert clocks['clocks_s'] == {'clk': pytest.approx(24e-12)}
+
+
+def test_a_divider_past_the_first_4096_bytes_is_still_the_sdfs_divider():
+    bundle = _cal('negative')
+    sdf = bundle['sdf_text']
+    head, rest = sdf.split('\n', 1)
+    # the same SDF, `/` divider stated after a long banner; line numbers kept
+    # by folding the banner into the first line's trailing comment block
+    moved = (head + ' ' + _LONG_BANNER.replace('\n', ' ') + '\n'
+             + rest.replace('(DIVIDER .)', '(DIVIDER /)').replace('u_pad.PAD', 'u_pad/PAD'))
+    assert moved.index('DIVIDER') > 4096
+    got = _classify(bundle, sdf_text=moved)
+    assert got['by_class'].get('INOUT_PORT_INTERCONNECT') == 1, got

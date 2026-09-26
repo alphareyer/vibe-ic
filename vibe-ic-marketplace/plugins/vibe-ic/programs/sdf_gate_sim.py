@@ -2019,10 +2019,12 @@ def declared_sdc_clocks(sdc: Path, sdf_texts: List[str]) -> Dict[str, object]:
         unit_s = float(scale or 1) * _UNIT_S[unit]
         unit_source = f"{sdc}: set_units -time"
     else:
+        # The WHOLE text: a header statement past any fixed prefix is still
+        # the file's statement, never "unstated" (issue #1410 window rule).
         stated = {(m.group(1), m.group(2)) for t in sdf_texts
-                  for m in [_SDF_TIMESCALE_RE.search(t[:4096])] if m}
+                  for m in [_SDF_TIMESCALE_RE.search(t)] if m}
         if len(stated) != 1 or len(sdf_texts) == 0 or any(
-                not _SDF_TIMESCALE_RE.search(t[:4096]) for t in sdf_texts):
+                not _SDF_TIMESCALE_RE.search(t) for t in sdf_texts):
             raise ValueError(f"SDC_TIME_UNIT_UNSTATED: {sdc} has no set_units "
                              f"-time and the SDFs state {sorted(stated)}")
         scale, unit = stated.pop()
@@ -2194,7 +2196,9 @@ def classify_sdf_errors(transcript: str, *, compile_log: str, sdf_text: str,
     sorry = {(Path(m.group(1)).name, int(m.group(2)))
              for m in _IFNONE_SORRY_RE.finditer(compile_log or "")}
     lines = (sdf_text or "").splitlines()
-    divider = (_SDF_DIVIDER_RE.search(sdf_text[:4096] if sdf_text else "")
+    # The whole text (issue #1410): a DIVIDER past a fixed prefix is still the
+    # file's divider; only a file that states none takes SDF's default `.`.
+    divider = (_SDF_DIVIDER_RE.search(sdf_text or "")
                or re.match(r"(.)", "."))
     cells: List[Tuple[int, str]] = []
     for idx, line in enumerate(lines, 1):
