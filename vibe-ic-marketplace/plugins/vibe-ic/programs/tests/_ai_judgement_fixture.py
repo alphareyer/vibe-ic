@@ -35,14 +35,21 @@ def run_atomic_gate_with_expert_answer(cmd: list[str], run,
     """
     source = prompt.read_text()
     doc = yaml.safe_load(spec.read_text()) or {}
-    assert doc["design"]["name"] == "TopModule"
-    doc["design"]["description"] = source
+    # A `design:` spec carries the prompt as its description; a Shape-C spec
+    # (`ic_name` / `L1` / `L9`) carries it as L1's description.
+    if "design" in doc:
+        assert doc["design"]["name"] == "TopModule"
+        key = "design"
+    else:
+        assert doc["ic_name"] == "TopModule"
+        key = "L1"
+    doc.setdefault(key, {})["description"] = source
     spec.write_text(yaml.safe_dump(doc, sort_keys=False))
     first = run(cmd, **kwargs)
     l9 = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
     assert l9.is_file(), (first.stdout or "") + (first.stderr or "")
     notes = json.loads(l9.read_text()).get("notes") or ""
-    assert yaml.safe_load(notes)["design"]["description"].strip() == source.strip(), (
+    assert yaml.safe_load(notes)[key]["description"].strip() == source.strip(), (
         "Phase-1 input lost the fixture's design prompt")
     report = project / "reports/audit/phase1/expert_parse_track.json"
     assert report.is_file(), "Phase-1 did not emit an expert handoff"

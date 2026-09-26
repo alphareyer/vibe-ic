@@ -262,10 +262,19 @@ def test_gates_atomic_blocks_wrong_kmap_and_emits_correct(tmp_path):
     # oracle BLOCK gate remains the guard for the cases the synth SKIPs (don't-care
     # / mux-decomposition K-maps), covered by test_wrong_kmap_read_blocks above.
     _stage(work, "Prob122_kmap4", _ports_abcd(), K4_WRONG)
-    r = subprocess.run([sys.executable, str(GATES), "--prob", "Prob122_kmap4",
-                        "--workdir", str(work), "--dataset", str(dataset),
-                        "--bench", "verilogeval-v2"],
-                       capture_output=True, text=True)
+    # v1.24.57: an emit consumes a signed Phase-1 D1 on every call, so the
+    # real expert handoff is finished (and an unsigned one proven refused)
+    # before the emit is asserted.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _ai_judgement_fixture import run_atomic_gate_with_expert_answer
+    wd = work / "Prob122_kmap4"
+    r = run_atomic_gate_with_expert_answer(
+        [sys.executable, str(GATES), "--prob", "Prob122_kmap4",
+         "--workdir", str(work), "--dataset", str(dataset),
+         "--bench", "verilogeval-v2"],
+        subprocess.run, wd / "phase1_proj", wd / "spec.yaml",
+        dataset / "Prob122_kmap4_prompt.txt", prove_unsigned=True,
+        capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr   # synth auto-corrected the wrong read
     gj = json.loads((work / "Prob122_kmap4" / "gates.json").read_text())
     assert gj["hard_gates_pass"] is True
@@ -287,7 +296,7 @@ def test_gates_atomic_blocks_wrong_kmap_and_emits_correct(tmp_path):
                         "--workdir", str(work), "--dataset", str(dataset),
                         "--bench", "verilogeval-v2"],
                        capture_output=True, text=True)
-    assert r.returncode == 0
+    assert r.returncode == 0, r.stdout + r.stderr
     gj = json.loads((work / "Prob122_kmap4" / "gates.json").read_text())
     assert gj["hard_gates_pass"] is True
     assert gj["steps"]["kmap_truth_table_oracle"]["verdict"] == "PASS"

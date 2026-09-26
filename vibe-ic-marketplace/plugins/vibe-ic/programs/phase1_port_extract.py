@@ -147,6 +147,87 @@ def _verilog_regions(text: str) -> str:
 #: the label the way they drifted on the top-module status vocabulary (#2052).
 CODE_REGION_PORT_STRATEGY = "verilog_code_region_port_decl_issue2060"
 SIGNAL_TABLE_PORT_STRATEGY = "markdown_signal_table_port_row_issue2060"
+STRUCTURED_SPEC_PORT_STRATEGY = "structured_spec_ports_mapping"
+
+#: The direction values a structured spec may write. Verilog's own keywords
+#: only: a mapping whose `dir` says anything else is not a port declaration.
+_SPEC_DIRECTIONS = {"input": "input", "output": "output", "inout": "inout"}
+
+
+def _structured_spec_port_entries(value) -> List[tuple]:
+    """`(name, fields)` pairs from one `ports:` value, in document order.
+
+    Two shapes, both a direct transcription of a port list: a mapping
+    `name: {dir, width}` and a list of `{name, dir, width}` records.
+    """
+    if isinstance(value, dict):
+        return [(k, v) for k, v in value.items() if isinstance(v, dict)]
+    if isinstance(value, list):
+        return [(v.get("name"), v) for v in value if isinstance(v, dict)]
+    return []
+
+
+def extract_structured_spec_ports(text: str) -> List[Dict[str, Any]]:
+    """Every port a STRUCTURED spec (a YAML/JSON document) declares under a
+    `ports:` key, each carrying the source line it was read from.
+
+    A Shape-C `spec.yaml` states its interface as data (`L9: {ports: {a: {dir:
+    input, width: 1}}}`), which neither the code-region nor the table grammar
+    reads, so the Phase-1 front doors published ZERO ports for a spec that
+    declares five, and the sufficiency gate — which does see them in the
+    input — halted on an extraction gap. GRAMMAR, as for the other shapes: the
+    document must parse to a mapping, the entry must sit under a key named
+    `ports`, and its `dir`/`direction` must be a Verilog direction keyword.
+    Prose parses to a string and yields nothing. A `width` that is not an
+    integer is `WIDTH_UNKNOWN`, never a made-up 1.
+    """
+    try:
+        import yaml
+        doc = yaml.safe_load(text)
+    except Exception:
+        return []
+    if not isinstance(doc, dict):
+        return []
+    lines = text.splitlines()
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    stack = [doc]
+    while stack:
+        node = stack.pop(0)
+        if isinstance(node, list):
+            stack.extend(node)
+            continue
+        if not isinstance(node, dict):
+            continue
+        for key, value in node.items():
+            if str(key).strip().lower() != "ports":
+                stack.append(value)
+                continue
+            for name, fields in _structured_spec_port_entries(value):
+                name = str(name or "").strip()
+                raw_dir = fields.get("dir", fields.get("direction"))
+                direction = _SPEC_DIRECTIONS.get(str(raw_dir or "").strip().lower())
+                if not re.fullmatch(r"[A-Za-z_]\w*", name) or not direction:
+                    continue
+                if name in seen:
+                    continue
+                seen.add(name)
+                width = fields.get("width")
+                if isinstance(width, bool) or not isinstance(width, (int, str)) \
+                        or not str(width).strip().isdigit():
+                    width = WIDTH_UNKNOWN
+                else:
+                    width = int(width)
+                name_rx = re.compile(r"^\s*(?:-\s*)?(?:name\s*:\s*)?['\"]?%s['\"]?\s*(?::|,|}|$)"
+                                     % re.escape(name))
+                line = next((ln.strip() for ln in lines if name_rx.match(ln)), "")
+                out.append({"name": name, "dir": direction, "width": width,
+                            "width_cell": "",
+                            "source": "structured_spec_ports",
+                            "source_line": line,
+                            "description": line or None,
+                            "extraction_strategy": STRUCTURED_SPEC_PORT_STRATEGY})
+    return out
 
 
 def _source_line(text: str, offset: int) -> str:
@@ -309,7 +390,9 @@ def _stated_width(cell: str) -> int:
 
 def extract_code_block_ports(text: str) -> List[Dict[str, Any]]:
     """Every port a document DECLARES in a Verilog/SystemVerilog code region or
-    in a markdown signal table, each carrying the source line it was read from.
+    in a markdown signal table (or, see `extract_structured_spec_ports`, under
+    a structured spec's `ports:` key), each carrying the source line it was
+    read from.
 
     vibe-ic#2060. GRAMMAR, never a token match: an entry needs a DIRECTION
     keyword (`input`/`output`/`inout`), an optional packed width, and an
@@ -373,6 +456,12 @@ def extract_code_block_ports(text: str) -> List[Dict[str, Any]]:
                     # the document that stated it.
                     "description": line,
                     "extraction_strategy": CODE_REGION_PORT_STRATEGY})
+    # A structured spec states its ports as data. Last, so on a name a table or
+    # a code region also declares, the existing entry and its provenance stand.
+    for entry in extract_structured_spec_ports(text):
+        if entry["name"] not in seen:
+            seen.add(entry["name"])
+            out.append(entry)
     return out
 
 

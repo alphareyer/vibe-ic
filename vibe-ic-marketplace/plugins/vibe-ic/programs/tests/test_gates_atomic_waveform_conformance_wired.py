@@ -36,6 +36,9 @@ import pytest
 PLUGIN = Path(__file__).resolve().parents[2]
 GATES = PLUGIN / "benchmark" / "gates_atomic.py"
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _ai_judgement_fixture import run_atomic_gate_with_expert_answer  # noqa: E402
+
 # The REAL VerilogEval Prob098_circuit7 prompt (dataset_spec-to-rtl), verbatim.
 # NBA-lead: q lags the displayed a by one posedge; q is X at the first posedge.
 _PROMPT = """\
@@ -93,11 +96,20 @@ def _stage(tmp, body):
     return ds, wd
 
 
-def _run(tmp, ds):
-    return subprocess.run(
-        [sys.executable, str(GATES), "--prob", "ProbXX_circuit7",
-         "--workdir", str(tmp / "work"), "--dataset", str(ds),
-         "--bench", "verilogeval-human"], capture_output=True, text=True)
+def _cmd(tmp, ds):
+    return [sys.executable, str(GATES), "--prob", "ProbXX_circuit7",
+            "--workdir", str(tmp / "work"), "--dataset", str(ds),
+            "--bench", "verilogeval-human"]
+
+
+def _run(tmp, ds, *, prove_unsigned=False):
+    # v1.24.57: an emit consumes a signed Phase-1 D1 on every call, so the
+    # real expert handoff is finished before the emit is asserted.
+    wd = tmp / "work" / "ProbXX_circuit7"
+    return run_atomic_gate_with_expert_answer(
+        _cmd(tmp, ds), subprocess.run, wd / "phase1_proj", wd / "spec.yaml",
+        ds / "ProbXX_circuit7_prompt.txt", prove_unsigned=prove_unsigned,
+        capture_output=True, text=True)
 
 
 @pytest.mark.skipif(shutil.which("iverilog") is None, reason="iverilog absent")
@@ -108,7 +120,8 @@ def test_correct_sequential_waveform_read_is_NOT_blocked(tmp_path):
     # assertion is what let an inverted-convention misread go unnoticed; pinning it
     # against the verbatim dataset prompt makes the no-leak claim concrete.
     ds, wd = _stage(tmp_path, _CORRECT)
-    r = _run(tmp_path, ds)
+    r = _run(tmp_path, ds, prove_unsigned=True)
+    assert r.returncode == 0, r.stdout + r.stderr
     gj = json.loads((wd / "gates.json").read_text())
     assert gj["steps"]["waveform_table_conformance"]["verdict"] == "PASS_OR_SKIP", \
         gj["steps"].get("waveform_table_conformance")
@@ -131,6 +144,7 @@ def test_wrong_sequential_waveform_read_is_auto_corrected(tmp_path):
     # is host-verified 0-mismatch on the real Prob098_circuit7.)
     ds, wd = _stage(tmp_path, _WRONG)
     r = _run(tmp_path, ds)
+    assert r.returncode == 0, r.stdout + r.stderr
     gj = json.loads((wd / "gates.json").read_text())
     # the deterministic solver fired and produced the CORRECT RTL...
     assert gj["steps"]["deterministic_synth"]["applied"] is True
@@ -175,7 +189,7 @@ def test_combinational_is_skipped_not_blocked(tmp_path):
     (wd / "spec.yaml").write_text(
         "ic_name: TopModule\nclass_path: combinational-logic\n"
         "L1: {ic_name: TopModule, description: x}\nL9: {module_name: TopModule}\n")
-    _run(tmp_path, ds)
+    subprocess.run(_cmd(tmp_path, ds), capture_output=True, text=True)
     gj = json.loads((wd / "gates.json").read_text())
     # the sequential-replay check must NOT block a combinational prompt
     rules = [f["rule"] for f in gj["steps"].get("structural_emit_block", {}).get("findings", [])]
