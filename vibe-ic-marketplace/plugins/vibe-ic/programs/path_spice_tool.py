@@ -65,7 +65,9 @@ with no declared layout or rcfile simulates the schematic view and says so
 Dual: ngspice and Xyce. The device models are chosen from the PDK's
 `libs.tech/<simulator>` tree by what the cells instantiate; a simulator tree
 that defines none of those devices refuses by name
-(`LL_SPICE_DEVICE_UNMODELLED`).
+(`LL_SPICE_DEVICE_UNMODELLED`). Two CORRELATED arms are an AGREEMENT check,
+never a pick (``step_verdict``): within 1% of each other they PASS with the
+ngspice number reported, beyond it the step refuses `LL_SPICE_ARMS_DISAGREE`.
 
 chip-AGNOSTIC: no design, PDK, cell or corner literal selects a branch.
 """
@@ -854,6 +856,83 @@ def _tran_step_ns(deck: Any) -> float:
     return float(m.group(1)) * 1e9 if m else 0.0
 
 
+#: Two simulators on the same deck are one instrument measured twice: their
+#: SPICE delays must agree to within this fraction of the reported arm's
+#: (orchestrator ruling, consistent with step 23's engine agreement).
+AGREEMENT_FRACTION = 0.01
+#: The arm whose number is reported when the arms agree.
+REPORTED_ARM = 'ngspice'
+
+
+def step_verdict(judgments: Dict[str, Dict[str, Any]],
+                 paths: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Step 30's verdict from its simulator arms (pure).
+
+    * Two or more CORRELATED arms are an AGREEMENT check, not a pick: every
+      path measured by every one of them must give SPICE delays within
+      ``AGREEMENT_FRACTION`` of the reported arm's, then PASS with
+      `verdict_basis` AGREE and every arm recorded; otherwise REFUSED
+      `LL_SPICE_ARMS_DISAGREE`. A pair with no path measured in common has
+      not been compared, and refuses the same way.
+    * One CORRELATED arm with every other arm NOT_MEASURED (refused, or its
+      simulator unavailable): PASS on that arm, the others named.
+    * One CORRELATED arm beside a MEASURED arm that is not CORRELATED is a
+      disagreement between instruments: REFUSED, never a pick.
+    * No CORRELATED arm: the measured arms' verdict (FAIL), or NOT_MEASURED.
+    """
+    verdicts = {s: (j or {}).get('verdict') for s, j in judgments.items()}
+    correlated = sorted(s for s, v in verdicts.items() if v == 'CORRELATED')
+    unmeasured = sorted(s for s, v in verdicts.items() if v in ('NOT_MEASURED', None))
+    others = sorted(s for s in verdicts if s not in correlated and s not in unmeasured)
+    if not correlated:
+        if not others:
+            return {'verdict': 'NOT_MEASURED', 'verdict_basis': 'NO_ARM_MEASURED',
+                    'not_measured': unmeasured}
+        return {'verdict': 'FAIL', 'verdict_basis': 'NO_ARM_CORRELATED',
+                'arm_verdicts': {s: verdicts[s] for s in others}, 'not_measured': unmeasured}
+    if others:
+        return {'verdict': 'REFUSED', 'refusal': 'LL_SPICE_ARMS_DISAGREE',
+                'verdict_basis': 'DISAGREE',
+                'reason': (f'{correlated} CORRELATED, {others} '
+                           f'{[verdicts[s] for s in others]}: the instruments disagree'),
+                'arm_verdicts': {s: verdicts[s] for s in correlated + others},
+                'not_measured': unmeasured}
+    if len(correlated) == 1:
+        return {'verdict': 'PASS', 'verdict_basis': 'SINGLE_ARM', 'reported_arm': correlated[0],
+                'not_measured': unmeasured}
+    reported = REPORTED_ARM if REPORTED_ARM in correlated else correlated[0]
+    measured = {s: {(r.get('startpoint'), r.get('endpoint')): r['spice_ns']
+                    for r in paths.get(s) or []
+                    if r.get('status') == 'MEASURED' and r.get('spice_ns')}
+                for s in correlated}
+    common = set.intersection(*(set(m) for m in measured.values()))
+    rows = []
+    for key in sorted(common, key=str):
+        ref = measured[reported][key]
+        for s in correlated:
+            if s != reported:
+                delta = abs(measured[s][key] - ref) / abs(ref)
+                rows.append({'startpoint': key[0], 'endpoint': key[1], 'arm': s,
+                             'reported_ns': ref, 'arm_ns': measured[s][key],
+                             'relative_delta': delta, 'agree': delta <= AGREEMENT_FRACTION})
+    base = {'arms_compared': correlated, 'reported_arm': reported,
+            'agreement_fraction': AGREEMENT_FRACTION, 'agreement': rows,
+            'not_measured': unmeasured}
+    if not rows:
+        return dict(base, verdict='REFUSED', refusal='LL_SPICE_ARMS_DISAGREE',
+                    verdict_basis='DISAGREE',
+                    reason='the CORRELATED arms measured no path in common: not compared')
+    if all(r['agree'] for r in rows):
+        return dict(base, verdict='PASS', verdict_basis='AGREE')
+    worst = max(rows, key=lambda r: r['relative_delta'])
+    return dict(base, verdict='REFUSED', refusal='LL_SPICE_ARMS_DISAGREE',
+                verdict_basis='DISAGREE',
+                reason=(f"{worst['arm']} {worst['arm_ns']:.4g} ns vs {reported} "
+                        f"{worst['reported_ns']:.4g} ns on {worst['startpoint']} -> "
+                        f"{worst['endpoint']}: {worst['relative_delta'] * 100:.3g}% > "
+                        f"{AGREEMENT_FRACTION * 100:g}%"))
+
+
 def run_step30(project: Path, image: str, pdk_root: Path, pdk: str, *,
                corner: Optional[str] = None, paths: int = 3,
                simulators: Sequence[str] = SIMULATORS) -> Dict[str, Any]:
@@ -909,16 +988,15 @@ def run_step30(project: Path, image: str, pdk_root: Path, pdk: str, *,
                                'mutated': done_mut, 'mutation': mutated_spef}
         except Refusal as exc:
             arms[simulator] = {'judgment': {'verdict': 'NOT_MEASURED', 'reason': str(exc)}}
-    measured = {s: a for s, a in arms.items() if a['judgment']['verdict'] != 'NOT_MEASURED'}
-    better = [s for s, a in measured.items() if a['judgment']['verdict'] == 'CORRELATED']
     document = {'step': '30', 'corner': corner, 'sta_state': str(state_path),
                 'sta_state_sha256': digest(state_path),
                 'deck': 'OpenSTA write_path_spice (SPEF-annotated)',
                 'arms': {s: a['judgment'] for s, a in arms.items()},
-                'selection': (better[0] if len(better) == 1 else
-                              'UNDETERMINED' if len(better) > 1 else None),
-                'rule': ('an arm is better when |SPICE-STA| is within the Liberty-grid '
-                         'tolerance AND the result responds to the SPEF mutation'),
+                **step_verdict({s: a['judgment'] for s, a in arms.items()},
+                               {s: (a.get('base') or {}).get('paths') or [] for s, a in arms.items()}),
+                'rule': ('an arm is CORRELATED when |SPICE-STA| is within the Liberty-grid '
+                         'tolerance AND the result responds to the SPEF mutation; two '
+                         'CORRELATED arms are an agreement check, never a pick'),
                 'detail': {s: {k: v for k, v in a.items() if k != 'judgment'}
                            for s, a in arms.items()}}
     write_json(project / 'reports/phase3/spice_path_tool.json', document)

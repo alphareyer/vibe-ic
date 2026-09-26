@@ -271,3 +271,102 @@ def test_the_pdk_magicrc_is_the_one_its_own_flow_config_declares(tmp_path):
     assert pst.pdk_magicrc(tmp_path / 'x', '/pdk', 'x') == (
         '/pdk/x/libs.tech/magic/x.magicrc', 'libs.tech/librelane/config.tcl:MAGICRC')
     assert pst.pdk_magicrc(tmp_path / 'y', '/pdk', 'y') is None
+
+
+# ------------------------------------ r2: two arms are an agreement check ---
+
+def _row(start, spice):
+    return {'startpoint': start, 'endpoint': 'e', 'status': 'MEASURED', 'spice_ns': spice}
+
+
+#: MEASURED on spm (layout-extracted cells, max_ss): the two paths both arms timed.
+SPM_NGSPICE = [_row('u_core/_417_', 10.025510), _row('u_core/_417_b', 10.034072),
+               {'startpoint': 'u_core/_417_c', 'endpoint': 'e', 'status': 'NOT_MEASURED'}]
+SPM_XYCE = [_row('u_core/_417_', 10.023148), _row('u_core/_417_b', 10.035614),
+            {'startpoint': 'u_core/_417_c', 'endpoint': 'e', 'status': 'NOT_MEASURED'}]
+C = {'verdict': 'CORRELATED'}
+
+
+def test_two_correlated_arms_within_one_percent_pass_on_agreement_and_report_ngspice():
+    got = pst.step_verdict({'ngspice': C, 'xyce': C}, {'ngspice': SPM_NGSPICE, 'xyce': SPM_XYCE})
+    assert (got['verdict'], got['verdict_basis'], got['reported_arm']) == ('PASS', 'AGREE', 'ngspice')
+    assert got['arms_compared'] == ['ngspice', 'xyce']
+    assert len(got['agreement']) == 2 and all(r['agree'] for r in got['agreement'])
+    assert max(r['relative_delta'] for r in got['agreement']) == pytest.approx(0.000235, abs=1e-5)
+
+
+def test_two_correlated_arms_beyond_one_percent_refuse_and_never_pick():
+    # 1.2% apart: both are inside the STA tolerance, and still not one number.
+    xyce = [_row('u_core/_417_', 10.025510 * 1.012), SPM_XYCE[1]]
+    got = pst.step_verdict({'ngspice': C, 'xyce': C}, {'ngspice': SPM_NGSPICE, 'xyce': xyce})
+    assert (got['verdict'], got['refusal'], got['verdict_basis']) == (
+        'REFUSED', 'LL_SPICE_ARMS_DISAGREE', 'DISAGREE')
+    assert 'reported_arm' not in got or got['verdict'] != 'PASS'
+    # The boundary itself: exactly 1% agrees, a hair more does not.
+    at = [_row('u_core/_417_', 10.0 * 1.01)]
+    assert pst.step_verdict({'ngspice': C, 'xyce': C},
+                            {'ngspice': [_row('u_core/_417_', 10.0)], 'xyce': at})['verdict'] == 'PASS'
+    over = [_row('u_core/_417_', 10.0 * 1.0101)]
+    assert pst.step_verdict({'ngspice': C, 'xyce': C},
+                            {'ngspice': [_row('u_core/_417_', 10.0)], 'xyce': over})['verdict'] == 'REFUSED'
+
+
+def test_two_correlated_arms_with_no_path_in_common_have_not_been_compared():
+    got = pst.step_verdict({'ngspice': C, 'xyce': C},
+                           {'ngspice': [_row('a', 10.0)], 'xyce': [_row('b', 10.0)]})
+    assert (got['verdict'], got['refusal']) == ('REFUSED', 'LL_SPICE_ARMS_DISAGREE')
+
+
+def test_one_correlated_arm_with_the_other_unavailable_passes_on_that_arm():
+    refused = {'verdict': 'NOT_MEASURED', 'reason': 'LL_SPICE_DEVICE_UNMODELLED: xyce: ...'}
+    got = pst.step_verdict({'ngspice': C, 'xyce': refused}, {'ngspice': SPM_NGSPICE, 'xyce': []})
+    assert (got['verdict'], got['verdict_basis'], got['reported_arm']) == ('PASS', 'SINGLE_ARM', 'ngspice')
+    assert got['not_measured'] == ['xyce']
+
+
+def test_one_correlated_arm_beside_a_measured_mismatch_is_a_disagreement_not_a_pick():
+    got = pst.step_verdict({'ngspice': C, 'xyce': {'verdict': 'MISMATCH'}},
+                           {'ngspice': SPM_NGSPICE, 'xyce': SPM_XYCE})
+    assert (got['verdict'], got['refusal']) == ('REFUSED', 'LL_SPICE_ARMS_DISAGREE')
+
+
+def test_no_correlated_arm_fails_or_is_not_measured():
+    assert pst.step_verdict({'ngspice': {'verdict': 'MISMATCH'}, 'xyce': {'verdict': 'MISMATCH'}},
+                            {})['verdict'] == 'FAIL'
+    assert pst.step_verdict({'ngspice': {'verdict': 'NOT_MEASURED'}}, {})['verdict'] == 'NOT_MEASURED'
+
+
+def test_step_30_writes_the_step_verdict_not_a_selection(tmp_path, monkeypatch):
+    """The landed T106 fixture: one ngspice arm, Xyce refused by its model tree."""
+    project = tmp_path / 'design'
+    folder, _ = t106._stapostpnr(project)
+    record = json.loads((project / postroute.STEP23_RECORD).read_text())
+    record['judgment'] = {'worst_setup': {'corner': 'max_ss_125C_4v50'}}
+    put(project / postroute.STEP23_RECORD, record)
+    root = tmp_path / 'pdkroot'
+    write(root / 'x/libs.ref/cells/lib/cells__ss_125C_4v50.lib', t106.LIBERTY)
+    write(root / 'x/libs.ref/cells/spice/cells.spice',
+          '.SUBCKT cells__dffq_1 D CLK Q VDD VNW VPW VSS\n'
+          'X_i_0 Q D VSS VPW nfet_05v0 W=8.2e-07 L=6e-07\n.ENDS\n')
+    write(root / 'x/libs.tech/ngspice/m.ngspice', t106.MODELS)
+    (root / 'x/libs.tech/xyce').mkdir(parents=True)
+    config = json.loads((folder / 'config.json').read_text())
+    config['CELL_SPICE_MODELS'] = ['/pdk/x/libs.ref/cells/spice/cells.spice']
+    put(folder / 'config.json', config)
+    monkeypatch.setattr(pst, '_docker', t106._wps_edge([]))
+    doc = pst.run_step30(project, 'img', root, 'x', paths=1)
+    written = json.loads((project / 'reports/phase3/spice_path_tool.json').read_text())
+    assert 'selection' not in written
+    assert 'selection' not in written
+    # The fixture's liberty gives no stage tables: the arm cannot derive its
+    # tolerance, so the step does not pass on it.
+    assert (written['verdict'], written['verdict_basis']) == ('FAIL', 'NO_ARM_CORRELATED')
+    assert written['arm_verdicts'] == {'ngspice': 'TOLERANCE_UNDERIVABLE'}
+    assert written['not_measured'] == ['xyce'] and doc['verdict'] == 'FAIL'
+    judge = pst.judge
+    monkeypatch.setattr(pst, 'judge', lambda *a: dict(judge(*a), verdict='CORRELATED'))
+    doc = pst.run_step30(project, 'img', root, 'x', paths=1)
+    written = json.loads((project / 'reports/phase3/spice_path_tool.json').read_text())
+    assert (written['verdict'], written['verdict_basis'], written['reported_arm']) == (
+        'PASS', 'SINGLE_ARM', 'ngspice')
+    assert written['not_measured'] == ['xyce']
