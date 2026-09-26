@@ -314,6 +314,7 @@ def test_an_unpowered_candidate_is_refused_by_name_and_not_promoted(
     assert rec["verdict"] == "FAIL" and rec["site"] == "signoff_spef_repair"
     disclosed = json.loads((pnr / R._DRV_PROMOTION_NOT_RUN).read_text())
     assert disclosed["not_run_stage"] == "pg_supply_ownership_refused"
+    assert G.REFUSE_CODE in disclosed["reason"]
     # the step also handed the producer the deck's rules
     assert "add_global_connection -net PWRNET" in (
         pnr / "signoff_spef_repair.tcl").read_text()
@@ -328,3 +329,68 @@ def test_a_powered_candidate_is_promoted_and_says_it_was_read(
     assert "POSTROUTE_PG_OWNERSHIP: PASS" in res.detail
     assert res.extras.get("pg_supply_ownership") == "PASS"
     assert (pnr / "routed.def").read_text() == CAL_NEG.read_text()
+
+
+def test_an_unmeasurable_candidate_is_published_not_refused_and_not_clean(
+        tmp_path, monkeypatch):
+    """A master no readable LEF defines is NOT_MEASURED: the promotion stands
+    (refusing would lose a timing repair to an unreadable LEF) and the
+    note and record say NOT_MEASURED -- never PASS."""
+    mystery = tmp_path / "mystery.def"
+    mystery.write_text(CAL_NEG.read_text().replace(
+        "gf180mcu_fd_sc_mcu7t5v0__buf_1", "UNREAD_MASTER"))
+    project, pnr, pdk = _stage(tmp_path, monkeypatch, mystery)
+    res = R.step_signoff_spef_repair(project, "top", pdk, "")
+    assert "SHIPPED" in res.detail
+    assert "POSTROUTE_PG_OWNERSHIP: NOT_MEASURED" in res.detail
+    assert res.extras.get("pg_supply_ownership") == "NOT_MEASURED"
+
+
+def test_an_unpowered_escalation_candidate_is_never_staged(
+        tmp_path, monkeypatch):
+    project, pnr, pdk = _stage(tmp_path, monkeypatch, CAL_POS)
+    # Promotion is OFF in production (its own flag, its own tests); the
+    # producer fix and the refusal are for the day it is switched on.
+    monkeypatch.setattr(R, "_DRV_ESCALATION_PROMOTION_ENABLED", True)
+    before = (pnr / "routed.def").read_bytes()
+    measured = []
+    monkeypatch.setattr(R, "_measure_signoff_drv_population",
+                        lambda *a, **k: measured.append(a) or 5)
+
+    def _producer(container, tcl_c, outs):
+        outs[0].write_text(CAL_POS.read_text())
+        outs[1].write_text("module top; endmodule // escalated\n")
+        return 0, "SHIP_ESC_BEFORE_COUNT: 5\nSHIP_ESC_AFTER_COUNT: 1\n", ""
+    monkeypatch.setattr(R, "_run_route_producer", _producer)
+    res = R.step_signoff_drv_wire_length_repair(project, "top", pdk, "")
+    assert res.detail.startswith(G.REFUSE_CODE), res.detail
+    assert res.extras.get("refusal_code") == G.REFUSE_CODE
+    assert (pnr / "routed.def").read_bytes() == before
+    assert measured == [], "the candidate was staged for measurement"
+    assert "add_global_connection -net PWRNET" in (
+        pnr / "signoff_drv_escalation.tcl").read_text()
+
+
+def test_an_unpowered_si_mcf_candidate_is_not_promoted(tmp_path, monkeypatch):
+    project, pnr, pdk = _stage(tmp_path, monkeypatch, CAL_POS)
+    rep = project / "reports" / "phase3"
+    rep.mkdir(parents=True, exist_ok=True)
+    (rep / "si_mcf_repair.json").write_text(json.dumps(
+        {"decision": "ADOPTED"}))
+    txn = pnr / "si_txn"
+    txn.mkdir()
+    cand = {"candidate_def": txn / "candidate.def",
+            "candidate_netlist": txn / "top_pnr.v",
+            "candidate_spef": txn / "candidate.spef",
+            "candidate_odb": txn / "candidate.odb"}
+    cand["candidate_def"].write_text(CAL_POS.read_text())
+    for k in ("candidate_netlist", "candidate_spef", "candidate_odb"):
+        cand[k].write_text("x\n")
+    before = (pnr / "routed.def").read_bytes()
+    notes: list = []
+    R._si_mcf_repair_promote(project, "top", pdk, "",
+                             {k: str(v) for k, v in cand.items()}, notes)
+    assert (pnr / "routed.def").read_bytes() == before
+    assert any(G.REFUSE_CODE in n for n in notes), notes
+    rec = json.loads((rep / "si_mcf_repair.json").read_text())
+    assert G.REFUSE_CODE in rec["promotion"]["refused"]

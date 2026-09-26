@@ -42732,6 +42732,12 @@ def _postroute_pg_ownership_verdict(project: Path, def_path: Path,
     `pg_supply_pin_ownership_check` before it may be promoted, and write the
     record to ``reports/phase3/postroute_pg_ownership_<site>.json``.
 
+    The callers refuse on FAIL only -- a supply pin PROVEN off its net. A
+    NOT_MEASURED record (a master no readable LEF defines, a DEF with no
+    COMPONENTS) is published beside the promotion and never called clean;
+    refusing on it would turn every unreadable IO/macro LEF on some PDK into a
+    lost timing repair, a regression this lane could not measure.
+
     The LEFs are the ones that define the DEF's masters: the standard-cell LEF
     plus exactly the extra LEFs a re-opened DEF needs (macros, IO), resolved by
     the same `_def_reopen_extra_lefs_c` the repair decks read. A LEF that cannot
@@ -44603,21 +44609,18 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
     v_ok = repaired_v.is_file() and repaired_v.stat().st_size > 0
     # TF24 -- the candidate is judged on its OWN written DEF before anything
     # can promote it: every supply pin of every instance on a declared supply
-    # net of its kind. A refusal keeps the base route, which the PnR step's
-    # own PG audit already covers, and says so by code.
+    # net of its kind. A PROVEN violation refuses the promotion by code and
+    # the base route (which the PnR step's own PG audit covers) is kept, via
+    # the one non-promotion branch below. NOT_MEASURED does not refuse: it is
+    # recorded and published beside the promotion, never read as a pass.
     _pgo = (_postroute_pg_ownership_verdict(
         project, repaired_def, pdk, container, "signoff_spef_repair")
         if def_ok else None)
-    if _pgo is not None and _pgo.get("verdict") != "PASS":
-        _pg_note = (f"{_pgo.get('code')}: the repaired candidate was NOT "
+    _pg_refusal = ((f"{_pgo.get('code')}: the repaired candidate was NOT "
                     f"promoted; base route kept. {_pgo.get('reason')}")
-        _drv_promotion_disclose(pnr_out, "pg_supply_ownership_refused",
-                                _pg_note)
-        return StepResult("signoff_spef_repair", "PASS", time.time() - t0,
-                          _pg_note,
-                          extras={"refusal_code": _pgo.get("code"),
-                                  "pg_supply_ownership": _pgo.get("verdict")})
-    if _ship_repair_should_promote(parsed, def_ok, v_ok):
+                   if _pgo is not None and _pgo.get("verdict") == "FAIL"
+                   else "")
+    if not _pg_refusal and _ship_repair_should_promote(parsed, def_ok, v_ok):
         # A promotion DID happen: drop any non-promotion record a previous
         # invocation left, so the marker and the record can never both be
         # readable and the gate can never corroborate against a stale claim.
@@ -44661,13 +44664,17 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
                     "pg_net_ownership_stale_reason":
                         _PG_STALE_AFTER_PROMOTION,
                     "pg_supply_ownership": (_pgo or {}).get("verdict")})
-    _note = _ship_repair_nonpromotion_note(parsed)
+    _note = _pg_refusal or _ship_repair_nonpromotion_note(parsed)
     _drv_promotion_disclose(
-        pnr_out, "repair_declined",
+        pnr_out, "pg_supply_ownership_refused" if _pg_refusal
+        else "repair_declined",
         "the repair ran and its result did not clear the promotion gate, so "
         "the base route was kept: " + _note)
     return StepResult(
-        "signoff_spef_repair", "PASS", time.time() - t0, _note)
+        "signoff_spef_repair", "PASS", time.time() - t0, _note,
+        extras=({"refusal_code": _pgo.get("code"),
+                 "pg_supply_ownership": _pgo.get("verdict")}
+                if _pg_refusal else {}))
 
 
 # --- DRV wire-length escalation (a SEPARATE, independently-gated attempt) --
@@ -45201,7 +45208,7 @@ def step_signoff_drv_wire_length_repair(
     _pgo = (_postroute_pg_ownership_verdict(
         project, escalated_def, pdk, container,
         "signoff_drv_wire_length_repair") if def_ok else None)
-    if _pgo is not None and _pgo.get("verdict") != "PASS":
+    if _pgo is not None and _pgo.get("verdict") == "FAIL":
         return StepResult(
             "signoff_drv_wire_length_repair", "PASS", time.time() - t0,
             f"{_pgo.get('code')}: the escalated candidate was NOT promoted; "
@@ -58317,11 +58324,12 @@ def _si_mcf_repair_promote(project: Path, top: str, pdk: "PdkConfig",
         (after.get("candidate_odb"), pnr_out / "routed_si_mcf.odb"),
     ]
     missing = [str(dst) for src, dst in moves if not src]
-    # TF24 -- a candidate whose inserted cells own no supply is not shipped.
+    # TF24 -- a candidate PROVEN to leave a supply pin off its supply net is
+    # not shipped (NOT_MEASURED is recorded, not refused; see the ship step).
     _pgo = (_postroute_pg_ownership_verdict(
         project, Path(after["candidate_def"]), pdk, container, "si_mcf_repair")
         if not missing else {"verdict": "PASS"})
-    if _pgo.get("verdict") != "PASS":
+    if _pgo.get("verdict") == "FAIL":
         _si_rep.record_promotion(
             project, promoted=[], rederived=[],
             refused=(f"{_pgo.get('code')}: the candidate DEF's supply pins "
