@@ -51,14 +51,20 @@ paths survives its own subject's absence. Three ways a trigger survives:
      record saying why there is none, and either one reaches the gate, so an
      unrunnable step reports BLOCKED instead of disappearing.
 
-  T3 BACKSTOP — the trigger is the SOLE `required_outputs` pattern of some
-     step. Then its absence already forces that step to MISSING, which is loud.
-     The `len(required_outputs) == 1` test is load-bearing and NOT pedantry:
-     `check_step` marks a step MISSING only when NO required_output matched
-     (`if outputs and not result.evidence`), so required_outputs is ANY-of.
-     A path listed alongside others can vanish while the step still passes on a
-     sibling — which is exactly how a spare-cell manifest disappears without
-     anybody noticing.
+  T3 BACKSTOP — the trigger is a declared `required_outputs` entry of some
+     step. Then its absence already FAILs that step, which is loud.
+     `check_step` has read required_outputs as ALL-of-N since v1.7.36 (PR #455):
+     every entry is resolved on its own, the early MISSING return fires when
+     none matched, and when only SOME matched, any verdict other than FAIL or
+     NOT_APPLICABLE is rewritten to FAIL ("required_outputs missing: ... every
+     declared output must be produced, not just one"). So an entry listed
+     beside siblings is exactly as loud as a sole one. This used to say the
+     opposite -- that a sibling could carry the step while the path vanished --
+     which was the ANY-of reading #455 retired, and it made the guard refuse the
+     backstop to every step that declares a receipt next to its artefact (step
+     22's SPEF after its `spef_extraction.json` receipt was declared). Only the
+     " OR " INSIDE one entry is still any-of; the self-gate check in `classify`
+     handles that branch level.
 
   T4 HARD-GATE — the same step's gate already carries a NON-optional
      `files_exist` predicate naming that path. Then the path's absence FAILs
@@ -305,17 +311,16 @@ def _is_disclosure(path: str) -> bool:
 
 
 def _build_backstop_index(steps: list) -> dict[str, str]:
-    """Map path -> step id, for steps whose required_outputs is a SINGLE
-    pattern. Only those make an absent path loud (see T3 in the docstring)."""
+    """Map path -> step id, for every declared required_outputs entry. Each
+    entry is ALL-of in `check_step`, so each makes an absent path loud (see T3
+    in the docstring)."""
     idx: dict[str, str] = {}
     for st in steps:
         if not isinstance(st, dict):
             continue
-        ro = st.get("required_outputs") or []
-        if len(ro) != 1:
-            continue
-        for branch in _or_branches(ro[0]):
-            idx.setdefault(branch, str(st.get("id")))
+        for pat in (st.get("required_outputs") or []):
+            for branch in _or_branches(pat):
+                idx.setdefault(branch, str(st.get("id")))
     return idx
 
 
@@ -517,10 +522,10 @@ def classify(flow_yaml: Path) -> list[dict]:
                 reasons[p] = ("T4 hard files_exist in the same step's gate "
                               "(absence FAILs the step outright)")
             elif p in backstop and backstop[p] != c["step"]:
-                reasons[p] = f"T3 sole required_output of step {backstop[p]}"
+                reasons[p] = f"T3 declared required_output of step {backstop[p]}"
             elif (p in backstop and backstop[p] == c["step"]
                     and c["surface"] == "predicate"):
-                # Its own sole required_output. This rescues a PREDICATE only.
+                # Its own declared required_output. This rescues a PREDICATE only.
                 # `check_step` evaluates the step-level `condition` at
                 # flow_compliance_check.py:5598 and RETURNS SKIPPED-CONDITION
                 # at :5617 — before the required_outputs check at :5651. So a
@@ -530,7 +535,7 @@ def classify(flow_yaml: Path) -> list[dict]:
                 # was supposed to report it (Step 44 / HTOL). A predicate
                 # condition lives inside the gate, which runs after :5651, so
                 # there the required_outputs check really does fire first.
-                reasons[p] = ("T3 own sole required_output, predicate "
+                reasons[p] = ("T3 own declared required_output, predicate "
                               "surface (required_outputs checked first)")
             elif p in hard_index:
                 reasons[p] = (f"T7 hard files_exist in step {hard_index[p]} "
