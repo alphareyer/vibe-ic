@@ -2168,6 +2168,36 @@ def step_block_list_schema(project: Path) -> StepResult:
                       extras={"block_list_schema": row}, disclosures=[_V.Disclosure.ADVISORY])
 
 
+def _a9_cosim(project: Path, args=None) -> Dict[str, Any]:
+    """Run `analog_a9_cosim_emit` on the L22-declared scenarios.
+
+    The producer's exit code IS the tier: 0 results written, 2 an honest gap
+    (L22 declares no scenario), 69 the environment refused (an engine the
+    image lacks) — the last is NOT_MEASURED and never a waiver.
+    """
+    prog = PROGRAMS_DIR / "analog_a9_cosim_emit.py"
+    container = (getattr(args, "container", None)
+                 or os.environ.get("VIBEIC_ANALOG_CONTAINER")
+                 or _pin.default_container_name())
+    try:
+        cp = _pr.run([sys.executable, str(prog), str(project),
+                      "--container", container],
+                     capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError, _pr.Stalled) as exc:
+        return {"producer": prog.name, "rc": None,
+                "tier": "NOT_MEASURED", "detail": f"{type(exc).__name__}: {exc}"}
+    tier = {0: "RESULTS_WRITTEN", _pc.RC_HONEST_GAP: "NOT_DECLARED",
+            _pc.EX_ENV_REFUSED: "ENV_UNAVAILABLE"}.get(cp.returncode,
+                                                        "PRODUCER_ERROR")
+    lines = ((cp.stderr or "").strip().splitlines()
+             or (cp.stdout or "").strip().splitlines() or [""])
+    print(f"  A9 cosim  {tier:16} rc={cp.returncode} {lines[-1][:100]}")
+    return {"producer": prog.name, "rc": cp.returncode, "tier": tier,
+            "detail": lines[-1],
+            "results": str(_pl.mixed_signal_cosim_dir(project)
+                           / "mixed_signal_results.json")}
+
+
 def _aggregate_verdict(plan: List[StepResult]) -> str:
     """The run's verdict, from `verdict.run_verdict`. ONE rule for the flow.
 
@@ -2428,6 +2458,13 @@ def main() -> int:
             step_for_block, project, blk, "A9_hw_verify", args=args,
             _preflight_note=_note))
 
+    # q5 — A9's co-simulation is CHIP-level: its scenarios cross blocks, so it
+    # runs once, after every block's A1-A9, against the ids Phase 1 declared in
+    # L22. Recorded beside the rows, not as one: the flow's A9 gate
+    # (`mixed_signal_cosim_check`) owns that verdict, and a second row here
+    # would roll the same fact up twice.
+    a9_cosim = _a9_cosim(project, args)
+
     # vibe-ic#2080 — the master block list every A-gate above read, judged at
     # last by the gate written for it. AFTER the loop: A1 is what emits each
     # block's spec.json, so asking before it would answer about a tree this run
@@ -2451,6 +2488,7 @@ def main() -> int:
         # which step of which block produced it without opening nine records.
         "structure_only_steps": [f"{s.block}/{s.name}" for s in structure_only],
     }
+    summary["a9_cosim"] = a9_cosim
     import ai_signed_judgement as _ai_judgement
     summary["ai_judgements"] = _ai_judgement.pending(project, ("A1", "A2", "A9"))
     _ai_judgement.demote_runner_rows(summary["steps"], summary["ai_judgements"])
