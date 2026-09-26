@@ -25,8 +25,10 @@ LibreLane's ``SYNTH_PARAMETERS`` reaches only the top module (``chparam
 still judges the RTL as the direct synthesis path elaborates it.
 
 Verdicts: PASS (rc 0), FAIL (rc 1), NOT_APPLICABLE (rc 0: no pulled IP
-declares a synth-safe parameter), NOT_MEASURED (rc 2: no top, or Yosys did
-not elaborate). NOT_MEASURED is never read as PASS.
+declares a synth-safe parameter), NOT_MEASURED (rc 1: no top, or Yosys did
+not elaborate). NOT_MEASURED exits 1 so no rc-reading consumer credits it:
+flow_compliance_check reads rc 2 as a non-verdict it may promote to
+VACUOUS_PASS.
 
 chip-AGNOSTIC: parameter names and values come only from the manifests.
 """
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -140,6 +143,24 @@ def judge(netlist: dict, ips: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def _yosys(project: Path, image: str, script: str, out_dir: Path):
+    """Host yosys, else the EDA image with only ``out_dir`` writable."""
+    import shutil
+    import subprocess
+    if shutil.which("yosys"):
+        command = ["yosys", "-q", "-p", script]
+    elif shutil.which("docker"):
+        root, out = str(project.resolve()), str(out_dir.resolve())
+        command = ["docker", "run", "--rm", "--network", "none", "-u",
+                   f"{os.getuid()}:{os.getgid()}", "-v", f"{root}:{root}:ro",
+                   "-v", f"{out}:{out}", "--entrypoint", "yosys", image,
+                   "-q", "-p", script]
+    else:
+        raise FileNotFoundError("yosys and docker unavailable")
+    return subprocess.run(command, cwd=project, capture_output=True, text=True,
+                          check=False)
+
+
 def run(project: Path, image: str) -> tuple[int, dict[str, Any]]:
     import p0_tool_frontend_check as frontend
     from _specrtl_common import rtl_source_files
@@ -155,17 +176,17 @@ def run(project: Path, image: str) -> tuple[int, dict[str, Any]]:
     if not top or not files:
         report.update(verdict="NOT_MEASURED",
                       reason="no L9 top_module or no RTL to elaborate")
-        return 2, report
+        return 1, report
     out = project / YOSYS_JSON_REL
     out.parent.mkdir(parents=True, exist_ok=True)
     out.unlink(missing_ok=True)
     script = ("read_verilog -sv " + " ".join(files) + f"; hierarchy -check -top {top}"
               f"; proc; write_json {out.resolve()}")
     try:
-        result = frontend._invoke("yosys", ["-q", "-p", script], project, image)
+        result = _yosys(project, image, script, out.parent)
     except FileNotFoundError as exc:
         report.update(verdict="NOT_MEASURED", reason=str(exc))
-        return 2, report
+        return 1, report
     report["yosys"] = {"exit_code": result.returncode,
                        "log_tail": (result.stdout + result.stderr)[-2000:]}
     try:
@@ -173,9 +194,11 @@ def run(project: Path, image: str) -> tuple[int, dict[str, Any]]:
     except (OSError, ValueError):
         netlist = None
     if result.returncode or not isinstance(netlist, dict):
+        last = [line for line in (result.stdout + result.stderr).splitlines()
+                if line.strip()][-1:] or ["no output"]
         report.update(verdict="NOT_MEASURED",
-                      reason="Yosys did not elaborate the RTL (see yosys.log_tail)")
-        return 2, report
+                      reason=f"Yosys did not elaborate the RTL: {last[0][-300:]}")
+        return 1, report
     rows = judge(netlist, ips)
     report["instances"] = rows
     unsafe = [r for r in rows if not r["safe"]]
@@ -198,7 +221,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", type=Path, default=None)
     args = parser.parse_args(argv)
     project = args.project.resolve()
-    import os
     image = args.image or os.environ.get("VIBEIC_EDA_IMAGE", frontend.DEFAULT_IMAGE)
     rc, report = run(project, image)
     write_json(args.json or project / REPORT_REL, report)

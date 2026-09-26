@@ -228,27 +228,28 @@ def _catalog_project(tmp_path, recorded):
         {'ip_name': 'serv', 'status': 'PASS', 'files_copied': [{'dest': str(rtl / 'ip.v')}]}]})
     calls = []
 
-    def yosys_writes(tool, args, project, image):
-        calls.append((tool, args))
-        out = Path(args[-1].rsplit('write_json ', 1)[1])
+    def yosys_writes(project, image, script, out_dir):
+        calls.append(script)
+        out = Path(script.rsplit('write_json ', 1)[1])
+        assert out.parent == out_dir
         if recorded is not None:
             shutil.copy(CAL / recorded, out)
-        return subprocess.CompletedProcess(args, 0 if recorded else 1, '', '')
+        return subprocess.CompletedProcess(['yosys'], 0 if recorded else 1, '', '')
     return p, calls, yosys_writes
 
 
 @pytest.mark.parametrize('recorded,rc,verdict', [
     ('catalog_synth_safe_unsafe_positive.json', 1, 'FAIL'),
     ('catalog_synth_safe_pinned_negative.json', 0, 'PASS'),
-    (None, 2, 'NOT_MEASURED')])
+    (None, 1, 'NOT_MEASURED')])
 def test_the_gate_judges_the_elaborated_parameter(tmp_path, monkeypatch, recorded, rc, verdict):
     p, calls, fake = _catalog_project(tmp_path, recorded)
-    monkeypatch.setattr(frontend, '_invoke', fake)
     gate = importlib.import_module('catalog_synth_safe_params_check')
+    monkeypatch.setattr(gate, '_yosys', fake)
     assert gate.main([str(p)]) == rc
     report = json.loads((p / gate.REPORT_REL).read_text())
     assert report['verdict'] == verdict
-    script = calls[0][1][-1]
+    script = calls[0]
     assert 'hierarchy -check -top top' in script and 'read_verilog -sv' in script
     if verdict == 'FAIL':
         # both the wrapper and the core it passes sim=1 to are named
@@ -258,8 +259,8 @@ def test_the_gate_judges_the_elaborated_parameter(tmp_path, monkeypatch, recorde
 def test_the_gate_is_not_applicable_without_a_pinned_catalog_ip(tmp_path, monkeypatch):
     p, calls, fake = _catalog_project(tmp_path, 'catalog_synth_safe_unsafe_positive.json')
     put(p / 'plugin_output/declaration.json', {'ip_catalog_used': []})
-    monkeypatch.setattr(frontend, '_invoke', fake)
     gate = importlib.import_module('catalog_synth_safe_params_check')
+    monkeypatch.setattr(gate, '_yosys', fake)
     assert gate.main([str(p)]) == 0
     assert json.loads((p / gate.REPORT_REL).read_text())['verdict'] == 'NOT_APPLICABLE'
     assert calls == []
