@@ -1311,6 +1311,18 @@ _NOT_PROSE: Dict[str, str] = {
         "`digital_hardmacro_gen::_specialnet_entries`. It creates only nets the "
         "DEF itself marks POWER/GROUND and only pins bound to them; a missing "
         "DIRECTION falls back to INOUT, the DEF default for a supply pin.",
+    "phase3_one_shot_runner::_librelane_placed_ring_evidence":
+        "Two machine grammars, no sentence. (1) The runner-emitted pnr.tcl: its "
+        "own `puts \"LIBRELANE_PLACEMENT_CONSUMED: <path>\"` line, written by "
+        "`librelane_contract.placement_consumer_tcl`, and the `read_def <path>` "
+        "command before it, both anchored at line start, where a Tcl comment "
+        "(`#`) cannot match; Tcl has no form that denies a command. (2) Tool-"
+        "written DEF COMPONENTS / NETS / SPECIALNETS productions, read through "
+        "`_pad_ring.parse_def` and `_def_net_members`: a component or terminal "
+        "is listed or it is not, the same grammar and reason as "
+        "`_def_specialnet_iterm_map` above. Nothing is declared from either: "
+        "an absent line, component or terminal is a FAIL finding, never a "
+        "default.",
     "phase3_one_shot_runner::_def_specialnet_iterm_map":
         "Routed DEF SPECIALNETS terminal tuples, `- <net> ... ( <inst> <pin> ) "
         "... ;` productions written by the router. DEF has no form that DENIES a "
