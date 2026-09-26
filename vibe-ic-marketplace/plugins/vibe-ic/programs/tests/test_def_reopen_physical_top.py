@@ -10,6 +10,8 @@ from pathlib import Path
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 import phase3_one_shot_runner as p3  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _prestream_admission_fixture import admit_fixture_layout  # noqa: E402
 
 
 class _Pdk:
@@ -103,7 +105,12 @@ def test_klayout_receives_the_same_physical_top(tmp_path, monkeypatch):
     monkeypatch.setattr(p3, "_vacuous_on_unrouted", lambda *a, **k: None)
     monkeypatch.setattr(
         p3, "_magic_def_to_gds", lambda *a, **k: (False, "forced fallback"))
-    result = p3.step_gds(project, "logical_core", _Pdk(), "container")
+    # v1.24.73 (#2635): admit the fixture's routed basis so the KLayout
+    # fallback is reached behind the pre-stream boundary.
+    pdk = _Pdk()
+    admit_fixture_layout(monkeypatch, p3, project, "logical_core", pdk,
+                         "container")
+    result = p3.step_gds(project, "logical_core", pdk, "container")
     assert result.status == "FAIL"
     assert "TOP=package_top " in seen["cmd"], seen["cmd"]
 

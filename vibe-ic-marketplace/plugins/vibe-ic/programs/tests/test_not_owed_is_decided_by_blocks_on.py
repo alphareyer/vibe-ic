@@ -88,23 +88,63 @@ def test_the_decision_is_fed_the_failed_blockers_and_an_owed_step_keeps_fail():
 
 # ── finding 1: blocks_on decides, YAML order decides nothing ───────────────
 
+def _ancestors(steps, sid):
+    graph = {str(s["id"]): [str(e) for e in (s.get("blocks_on") or [])]
+             for s in steps if s.get("id") is not None}
+    seen, todo = set(), [str(sid)]
+    while todo:
+        for e in graph.get(todo.pop(), []):
+            if e not in seen:
+                seen.add(e)
+                todo.append(e)
+    return seen
+
+
 def test_steps_owed_their_outputs_keep_fail_behind_an_unrelated_root():
-    """Review scenario: root 2 FAILs its own gate, 1 PASS; 3 and 7 (blocks_on
-    [1]) cannot reach 2, so both were owed and stay FAIL(missing_artefact) with
-    no blocked-by-upstream note and no 'never owed' reason. Step 4 (blocks_on
-    [2]) really is blocked and reads the cascade."""
-    rows = [_row(1, _PASS), _gate_fail(2), _missing(3), _missing(4),
-            _missing(7)]
-    info = FCC._attribute_cascade_verdicts(rows, _steps(), waivers={})
-    got = _by_id(rows)
+    """Review scenario: root 2 FAILs its own gate, 1 PASS; 3 and 7 cannot reach
+    2, so both were owed and stay FAIL(missing_artefact) with no
+    blocked-by-upstream note and no 'never owed' reason. Step 4 (blocks_on
+    [2]) really is blocked and reads the cascade.
+
+    RE-DERIVED FROM THE LIVE YAML (v1.24.80, #2642). When this was written, 3
+    and 7 both had `blocks_on: [1]`. T73 then gave step 7 `blocks_on: [1, 3]`,
+    and `test_t73_flow_declarations` pins that edge. Neither step can reach
+    root 2 (checked below, not assumed), so root 2 still decides nothing for
+    either. But with the edge in place, an owed and missing 3 is itself a root
+    (`test_a_root_that_is_itself_missing_artefact_is_still_a_root`). So the
+    scenario runs in two arms: 7 owed (3 PASSED) keeps FAIL, and 7 behind a
+    missing 3 is attributed to 3, never to the unrelated root 2."""
+    steps = _steps()
     for sid in (3, 7):
-        r = got[sid]
+        assert "2" not in _ancestors(steps, sid), (sid, "premise: reaches 2")
+    assert "3" in _ancestors(steps, 7), "premise: 7 waits on 3 (T73 edge)"
+
+    def _owed(r, sid):
         assert (r.status, r.reason_class) == (_FAIL, _MISSING), (sid, r.status)
         assert r.cascade_note == "", (sid, r.cascade_note)
         assert not any("never owed" in x for x in r.reasons), (sid, r.reasons)
+
+    # arm 1: 3 and 7 both owed behind the unrelated root 2
+    rows = [_row(1, _PASS), _gate_fail(2), _row(3, _PASS), _missing(4),
+            _missing(7)]
+    info = FCC._attribute_cascade_verdicts(rows, steps, waivers={})
+    got = _by_id(rows)
+    _owed(got[7], 7)
     assert (got[4].status, got[4].reason_class) == (_NM, _UPSTREAM)
     assert got[4].cascade_note == "blocked-by-upstream(2)"
     assert info["blocked_by_upstream"] == {2: 1}
+
+    # arm 2: the review's rows. 3 is owed and missing; 7 waits on 3, not on 2
+    rows = [_row(1, _PASS), _gate_fail(2), _missing(3), _missing(4),
+            _missing(7)]
+    info = FCC._attribute_cascade_verdicts(rows, steps, waivers={})
+    got = _by_id(rows)
+    _owed(got[3], 3)
+    assert (got[7].status, got[7].reason_class) == (_NM, _UPSTREAM)
+    assert got[7].cascade_note == "blocked-by-upstream(3)", got[7].cascade_note
+    assert (got[4].status, got[4].reason_class) == (_NM, _UPSTREAM)
+    assert got[4].cascade_note == "blocked-by-upstream(2)"
+    assert info["blocked_by_upstream"] == {2: 1, 3: 1}
 
 
 def test_a_leaf_root_demotes_nothing_it_does_not_block():
@@ -151,15 +191,28 @@ def test_a_root_that_is_itself_missing_artefact_is_still_a_root():
 
 
 def test_an_off_track_id_behind_a_failed_blocker_reads_the_cascade():
-    """Review scenario (2): root 31 FAILs, 37 and 37.4 (blocks_on [37]) are
+    """Review scenario (2): the root FAILs, 37 and 37.4 (blocks_on [37]) are
     missing. 37.4 is a string id that `_track_of` put on no track, so it kept
-    FAIL(missing_artefact) — harsher than the step it waits on."""
-    rows = [_gate_fail(31), _missing(37), _missing("37.4"), _missing(38)]
-    FCC._attribute_cascade_verdicts(rows, _steps(), waivers={})
+    FAIL(missing_artefact) — harsher than the step it waits on.
+
+    RE-DERIVED FROM THE LIVE YAML (v1.24.73, #2635). The review's root was 31,
+    which then preceded 37. The pre-stream admission moved physical
+    verification after the stream-out (31 now `blocks_on` 37), so 31 can no
+    longer block 37. The root is now 37's own declared blocker, read from the
+    YAML, and asserted to be an ancestor of all three rows."""
+    steps = _steps()
+    blockers = next(s for s in steps if s.get("id") == 37)["blocks_on"]
+    assert len(blockers) == 1, blockers
+    root = blockers[0]
+    for sid in (37, "37.4", 38):
+        assert str(root) in _ancestors(steps, sid), (sid, root)
+    rows = [_gate_fail(root), _missing(37), _missing("37.4"), _missing(38)]
+    FCC._attribute_cascade_verdicts(rows, steps, waivers={})
     for sid in (37, "37.4", 38):
         r = _by_id(rows)[sid]
         assert (r.status, r.reason_class) == (_NM, _UPSTREAM), (sid, r.status)
-        assert r.cascade_note == "blocked-by-upstream(31)", (sid, r.cascade_note)
+        assert r.cascade_note == f"blocked-by-upstream({root})", (
+            sid, r.cascade_note)
 
 
 def test_the_dependency_condition_writer_applies_the_same_rule(tmp_path):

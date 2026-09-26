@@ -22,6 +22,8 @@ from pathlib import Path
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 import phase3_one_shot_runner as R  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _prestream_admission_fixture import admit_fixture_layout  # noqa: E402
 
 
 def _write_map(p: Path) -> Path:
@@ -75,10 +77,12 @@ def test_signoff_streamout_without_map_fails(tmp_path: Path, monkeypatch):
     pnr.mkdir(parents=True)
     (pnr / "top.def").write_text("DESIGN top ;\nEND DESIGN\n")
     monkeypatch.setattr(R._pl, "pnr_dir", lambda _p: pnr)
+    pdk = _pdk(calibre_drc="/pdk/deck.rule", lefdef_layermap=None)
+    # v1.24.73 (#2635): admit the fixture's routed basis, or the step stops
+    # at the pre-stream boundary and the map gate is never reached.
+    admit_fixture_layout(monkeypatch, R, tmp_path, "top", pdk, "container")
 
-    res = R.step_gds(
-        tmp_path, "top",
-        _pdk(calibre_drc="/pdk/deck.rule", lefdef_layermap=None), "container")
+    res = R.step_gds(tmp_path, "top", pdk, "container")
     assert res.status == "FAIL"
     assert "layer map" in res.detail.lower()
 
@@ -93,10 +97,12 @@ def test_no_foundry_deck_keeps_legacy_path_open(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(R, "_magic_def_to_gds",
                         lambda *a, **k: (False, "no magic"))
     monkeypatch.setattr(R, "_docker_exec", lambda *a, **k: (1, "", "no tool"))
+    pdk = _pdk(calibre_drc=None, lefdef_layermap=None)
+    # Admitted too, so this negative arm is measured behind the pre-stream
+    # boundary rather than passing on the admission refusal's text.
+    admit_fixture_layout(monkeypatch, R, tmp_path, "top", pdk, "container")
 
-    res = R.step_gds(
-        tmp_path, "top",
-        _pdk(calibre_drc=None, lefdef_layermap=None), "container")
+    res = R.step_gds(tmp_path, "top", pdk, "container")
     # It may still fail for want of a tool, but never for the map reason.
     assert "layer map" not in res.detail.lower()
 

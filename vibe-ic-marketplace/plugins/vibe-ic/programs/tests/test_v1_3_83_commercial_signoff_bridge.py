@@ -28,6 +28,8 @@ sys.path.insert(0, str(PROGRAMS))
 
 import phase3_one_shot_runner as p3
 import _watchdog
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _prestream_admission_fixture import admit_fixture_layout  # noqa: E402
 
 #: A LOOK INTERVAL and two LOOK COUNTS — never a runtime bound. Nothing here
 #: decides "too slow"; the only thing that ends a wait is the subject making no
@@ -328,6 +330,9 @@ def test_same_net_heal_forces_klayout_streamout_not_magic(tmp_path, monkeypatch)
         called["heal"] += 1
         return True, "healed"
     monkeypatch.setattr(p3, "_klayout_same_net_heal", _fake_heal)
+    # v1.24.73 (#2635): admit the fixture's routed basis, or the step stops at
+    # the pre-stream boundary before either engine is chosen.
+    admit_fixture_layout(monkeypatch, p3, tmp_path, "top", pdk, "vibeic-eda")
 
     res = p3.step_gds(tmp_path, "top", pdk, "vibeic-eda")
     assert not called["magic"], (

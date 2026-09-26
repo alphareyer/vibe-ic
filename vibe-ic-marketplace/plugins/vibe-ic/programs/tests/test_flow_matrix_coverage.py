@@ -324,12 +324,25 @@ STEP_IDS_AS_MEASURED: Tuple[str, ...] = (
     '10', '11', 'FS1', 'DT1', '12', '13', 'A1', 'A2', 'A3', 'A4', 'A5',
     'A6', 'A7', 'A8', 'A9', '14', '15', '15.5ic', '16', '17', '18',
     '19', '20', '21', '22', 'DT2', 'DT3', '23', '24', '25', '26',
-    '26.5ic', '27', '28', '29', '30', '31', '32', '33', '34', '35',
+    '26.5ic', '27', '28', '29', '30', '32', '33', '34', '35',
     # 2026-09-23: '37.3' JOINS, in declaration order, between 37 and 37.4 --
     # canonical GDS stream-out / finishing fidelity (R-0915-129 metric 2). The
     # list is what distinguishes "a step arrived" from "a step was renamed", so
     # it moves in the same change as GRID_AS_MEASURED above and names the member.
-    '36', '37', '37.3', '37.4', '37.5ip', '37.5ic', '38', '39',
+    #
+    # RE-MEASURED 2026-09-26 (T90) after v1.24.73 (#2635, pre-stream admission).
+    # The POPULATION is unchanged -- same 70 ids, arrived [], departed [] -- so
+    # GRID_AS_MEASURED stays (70, 9, 630). Only the DECLARATION ORDER of two ids
+    # moved, and the move is #2635's own fix: no GDS streams before the routed
+    # layout passes its gates, and the final checks run on the frozen stream.
+    #   * 31 (physical verification) now `blocks_on` 34 and 37: DRC/LVS read the
+    #     GDS that 37 streams. It moved from after 30 to directly after 37.3.
+    #   * 36 (tape-out checklist, `blocks_on` [31, 32, 33, 34]) follows its
+    #     blocker 31 and now sits directly after it.
+    # Measured live:
+    #   `python3 -c "from flow_matrix import flowref as F; print(F.step_ids())"`
+    # D5 FORWARD-EDGE holds: no id is declared before one it `blocks_on`.
+    '37', '37.3', '31', '36', '37.4', '37.5ip', '37.5ic', '38', '39',
     'M1', 'M2', 'M3', 'M4',
     '40', '41', '42', '43', '44', 'P0',
 )
