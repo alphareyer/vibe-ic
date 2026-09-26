@@ -296,6 +296,25 @@ class scoped_discovery:  # noqa: N801 — a context manager, used as a verb
         return False
 
 
+class named_subjects:  # noqa: N801 — a context manager, used as a verb
+    """Name the subject files (`--subject`) for the duration of the block."""
+
+    def __init__(self, subjects: Optional[List[Path]]):
+        self._subjects = list(subjects) if subjects is not None else None
+        self._prev = None
+
+    def __enter__(self):
+        global _SUBJECTS
+        self._prev = _SUBJECTS
+        _SUBJECTS = self._subjects
+        return self
+
+    def __exit__(self, *exc):
+        global _SUBJECTS
+        _SUBJECTS = self._prev
+        return False
+
+
 def _in_scope(p: Path) -> bool:
     """Is this path inside an active `--under` scope?
 
@@ -4354,9 +4373,6 @@ def main(argv: list = None) -> int:
              "instead of globbing for them; each must also sit under "
              "--under when a scope is given")
     args = parser.parse_args(argv)
-    global _SUBJECTS
-    _SUBJECTS = ([Path(args.project_dir) / rel for rel in args.subject]
-                 if args.subject else None)
 
     set_image_override(getattr(args, "image", None))
     project_dir = Path(args.project_dir)
@@ -4370,7 +4386,9 @@ def main(argv: list = None) -> int:
         checker = MODE_MAP[args.mode]
         roots = ([project_dir / rel for rel in args.under]
                  if args.under else None)
-        with scoped_discovery(roots):
+        with scoped_discovery(roots), named_subjects(
+                [project_dir / rel for rel in args.subject]
+                if args.subject else None):
             result = checker(project_dir)
         if roots:
             # The scope is part of the verdict: a reader must be able to see

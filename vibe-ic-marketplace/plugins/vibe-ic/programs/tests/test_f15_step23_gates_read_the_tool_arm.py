@@ -520,3 +520,16 @@ def test_a_hold_only_violation_at_one_tool_corner_fails_the_corner_gate(tmp_path
     rc, doc = run_gate('post_route_signoff_corner_check', project, tmp_path)
     assert (rc, doc['verdict'], doc['hold_worst_corner']) == (1, 'FAIL', 'nom_tt_025C_5v00')
     assert any('nom_tt_025C_5v00 hold' in r for r in doc['reasons'])
+
+
+def test_named_subjects_do_not_outlive_the_audit_that_named_them(tmp_path):
+    """`--subject` scopes ONE audit: a later audit in the same process (a
+    pytest worker, the runner's gate loop) globs as it always did."""
+    import eda_report_audit
+    project = tool_project(tmp_path)
+    rel = f'{STA}/max_ss_125C_4v50/{signoff.CORNER_REPORT}'
+    eda_report_audit.main([str(project), '--mode', 'sta', '--under', STA,
+                           '--subject', rel, '--json', str(tmp_path / 'a.json')])
+    assert eda_report_audit._SUBJECTS is None
+    _write(project / 'reports/phase3/drc_signoff.rpt', 'x')
+    assert [p.name for p in eda_report_audit._discover(project, ['*drc*.rpt'])] == ['drc_signoff.rpt']
