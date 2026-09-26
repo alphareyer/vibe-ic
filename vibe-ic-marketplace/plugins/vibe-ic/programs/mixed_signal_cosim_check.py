@@ -25,6 +25,22 @@ When analog blocks exist but NO co-sim substance is present at all (no
 aggregate file AND no per-block files AND not stubs) the gate FAILs
 (rc=1) — it never vacuous-PASSes on absence.
 
+THE DENOMINATOR IS L22's, NOT THE PRODUCER'S (q5)
+------------------------------------------------
+Walking "every declared scenario" of the producer's own report let the
+producer decide how many scenarios there were. When Phase 1 has written
+``L22.verification_plan.cosim_scenarios`` (the key is present), that list is
+the denominator:
+
+  * a declared id with no result                → FAIL COSIM_SCENARIO_MISSING
+  * a result whose verdict is FAIL / unreadable → FAIL
+  * a result NOT_MEASURED or UNBOUNDED          → rc 2 (not verified; never PASS)
+  * a result id L22 does not declare            → INFO undeclared_extra, uncounted
+  * results stamped with another L22 sha256     → FAIL STALE_PLAN
+  * L22 declares ZERO rows for analog blocks    → rc 2, citing cosim_scenario_gaps
+
+A plan written before the key existed keeps the behaviour above unchanged.
+
 Exit codes:
     0 = PASS  (real co-sim substance verified)
     1 = FAIL  (missing-when-required / failed / vacuous scenario set)
@@ -81,6 +97,10 @@ class AuditResult:
     # blocks). The CLI maps it to rc=2 (VACUOUS_PASS at the orchestrator)
     # — distinct from passed==False which is an honest FAIL (rc=1).
     skip: bool = False
+    # vacuous == True: the step applies and nothing FAILed, but what L22
+    # declares was not all verified (NOT_MEASURED / UNBOUNDED / no rows).
+    # rc 2 — the not-verified tier, never PASS.
+    vacuous: bool = False
     findings: List[Finding] = field(default_factory=list)
     summary: dict = field(default_factory=dict)
 
@@ -310,6 +330,119 @@ def _block_is_stub(project: Path, block: str) -> bool:
     return is_stub_json(data)
 
 
+_NOT_VERIFIED_TOKENS = frozenset({"not_measured", "unbounded"})
+
+
+def _l22_cosim_plan(project: Path):
+    """(declared rows, gaps, L22 sha256) when L22 declares the key, else None."""
+    import hashlib
+    from l_doc_consumer_contract import l_doc_fields, load_l_doc
+    path, doc = load_l_doc(project, "L22")
+    if path is None or doc is None:
+        return None
+    plan = l_doc_fields(doc).get("verification_plan")
+    if not isinstance(plan, dict) or "cosim_scenarios" not in plan:
+        return None
+    rows = plan.get("cosim_scenarios")
+    return ([r for r in rows if isinstance(r, dict)]
+            if isinstance(rows, list) else [],
+            plan.get("cosim_scenario_gaps") or [],
+            hashlib.sha256(path.read_bytes()).hexdigest())
+
+
+def _audit_against_l22(project: Path, result: AuditResult,
+                       declared: list, gaps: list, sha: str) -> dict:
+    """Judge the aggregate report against the ids L22 declares."""
+    ids = [str(r.get("id")) for r in declared]
+    if not ids:
+        result.vacuous = True
+        result.findings.append(Finding(
+            rule="COSIM_NO_DECLARED_SCENARIOS", severity="WARNING",
+            message=("L22 declares no co-simulation scenario for a design "
+                     "with analog blocks; A9 is not verified. Gaps: "
+                     + (", ".join(str(g.get("category")) for g in gaps
+                                  if isinstance(g, dict)) or "none recorded")),
+        ))
+        return {"source": "L22", "declared": [], "gaps": gaps}
+    agg = _pl.mixed_signal_cosim_dir(project) / "mixed_signal_results.json"
+    rel = str(agg)
+    try:
+        data = json.loads(agg.read_text(errors="replace"))
+    except FileNotFoundError:
+        data = None
+    except (json.JSONDecodeError, OSError):
+        result.passed = False
+        result.findings.append(Finding(
+            rule="AGG_PARSE_ERROR", severity="ERROR",
+            message="Cannot parse aggregate mixed_signal_results.json",
+            file=rel))
+        return {"source": "L22", "declared": ids, "pass": False}
+    if data is not None and is_stub_json(data):
+        result.findings.append(Finding(
+            rule="AGG_STUB_ACCEPTED", severity="INFO",
+            message=("Aggregate mixed_signal_results.json carries a "
+                     "deterministic_stub marker (PASS_WITH_STUB tier)."),
+            file=rel))
+        return {"source": "L22", "declared": ids, "stub": True}
+    scenarios = (_extract_scenarios(data) if isinstance(data, dict) else None)
+    if scenarios is None:
+        scenarios = []
+    stamped = {str(s.get("l22_sha256")) for s in scenarios
+               if isinstance(s, dict) and s.get("l22_sha256")}
+    if isinstance(data, dict) and data.get("l22_sha256"):
+        stamped.add(str(data["l22_sha256"]))
+    if stamped and stamped != {sha}:
+        result.passed = False
+        result.findings.append(Finding(
+            rule="STALE_PLAN", severity="ERROR",
+            message=(f"results were produced against L22 sha256 "
+                     f"{sorted(stamped)}; the current L22 is {sha}"),
+            file=rel))
+    by_id = {}
+    for idx, scn in enumerate(scenarios):
+        if isinstance(scn, dict):
+            by_id.setdefault(_scenario_name(scn, idx), scn)
+    verdicts = {}
+    for sid in ids:
+        scn = by_id.get(sid)
+        if scn is None:
+            result.passed = False
+            verdicts[sid] = "MISSING"
+            result.findings.append(Finding(
+                rule="COSIM_SCENARIO_MISSING", severity="ERROR",
+                message=f"L22 declares scenario '{sid}' and no result has it",
+                file=rel))
+            continue
+        word = str(scn.get("verdict") or scn.get("status") or "").strip()
+        verdicts[sid] = word or "NONE"
+        if word.lower() in _NOT_VERIFIED_TOKENS:
+            result.vacuous = True
+            result.findings.append(Finding(
+                rule="SCENARIO_NOT_VERIFIED", severity="WARNING",
+                message=(f"Scenario '{sid}': {word} — "
+                         f"{scn.get('reason') or 'no reason given'}"),
+                file=rel))
+            continue
+        verdict = _scenario_is_pass(scn)
+        if verdict is True:
+            continue
+        result.passed = False
+        result.findings.append(Finding(
+            rule="SCENARIO_FAILED" if verdict is False else "SCENARIO_NO_VERDICT",
+            severity="ERROR",
+            message=f"Scenario '{sid}': co-sim verdict is {word or 'absent'}",
+            file=rel))
+    extra = sorted(set(by_id) - set(ids))
+    if extra:
+        result.findings.append(Finding(
+            rule="UNDECLARED_EXTRA", severity="INFO",
+            message=(f"results carry scenarios L22 does not declare "
+                     f"(not counted): {extra}"),
+            file=rel))
+    return {"source": "L22", "declared": ids, "verdicts": verdicts,
+            "undeclared_extra": extra, "l22_sha256": sha}
+
+
 def run_audit(project: Path) -> AuditResult:
     result = AuditResult()
 
@@ -323,6 +456,19 @@ def run_audit(project: Path) -> AuditResult:
             message="No analog blocks detected; skipping mixed-signal cosim check",
         ))
         result.summary = {"skipped": True, "reason": "no_analog_blocks"}
+        return result
+
+    declared = _l22_cosim_plan(project)
+    if declared is not None:
+        detail = _audit_against_l22(project, result, *declared)
+        result.summary = {
+            "skipped": False, "total_blocks": len(blocks),
+            "denominator": detail, "pass": result.passed,
+            "verdict_tier": ("FAIL" if not result.passed
+                             else "NOT_VERIFIED" if result.vacuous
+                             else "PASS_WITH_STUB" if detail.get("stub")
+                             else "PASS"),
+        }
         return result
 
     # --- substance pass 1: aggregate report (the file the gate cites) ---
@@ -530,12 +676,15 @@ def main(argv: list = None) -> int:
         Path(args.json).write_text(out)
 
     if not args.json:
-        status = waiver_status if result.passed else "FAIL"
+        status = ("FAIL" if not result.passed
+                  else "NOT_VERIFIED" if result.vacuous else waiver_status)
         print(f"[{status}] mixed_signal_cosim_check")
         for f in result.findings:
             if f.severity in ("ERROR", "WARNING"):
                 print(f"  [{f.severity}] {f.rule}: {f.message}")
 
+    if result.passed and result.vacuous:
+        return 2
     return 0 if result.passed else 1
 
 

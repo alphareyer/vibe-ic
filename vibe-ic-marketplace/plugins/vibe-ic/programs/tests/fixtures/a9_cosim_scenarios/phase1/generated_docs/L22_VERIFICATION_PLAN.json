@@ -1,0 +1,260 @@
+{
+  "doc_id": "L22",
+  "doc_name": "L22_VERIFICATION_PLAN",
+  "applicability": "APPLICABLE",
+  "ic_class": "data_converter",
+  "fields": {
+    "coverage_goals": [],
+    "formal_properties": [],
+    "regression_matrix": {},
+    "verification_plan_present": "implicit",
+    "notes": "Spec does not include a formal verification plan; categories above are derived from the spec's functional and waveform descriptions.",
+    "verification_categories_derived_from_spec": [
+      "Register access (read/write to all register fields; reserved-bit behavior)",
+      "Nominal transfer / transaction across the protocol's operating modes",
+      "Error and fault condition detection and handling",
+      "Reset behavior verification",
+      "Back-to-back / sustained operation"
+    ],
+    "verification_plan": {
+      "schema_version": 1,
+      "track": "analog_mixed_signal",
+      "ic_class": "data_converter",
+      "analog": [
+        {
+          "block": "delta_sigma",
+          "block_type": "delta_sigma",
+          "specifications": [
+            {
+              "name": "converter_type",
+              "target_raw": "incremental delta-sigma",
+              "range_raw": "—",
+              "unit": "—",
+              "note": "resets/accumulates per conversion window"
+            },
+            {
+              "name": "Order",
+              "target_raw": "2",
+              "range_raw": "1–3",
+              "unit": "—",
+              "note": "loop-filter order (est)",
+              "target": 2.0,
+              "min": 1.0,
+              "max": 3.0
+            },
+            {
+              "name": "OSR",
+              "target_raw": "256",
+              "range_raw": "64–512",
+              "unit": "—",
+              "note": "oversampling ratio (est)",
+              "target": 256.0,
+              "min": 64.0,
+              "max": 512.0
+            },
+            {
+              "name": "ENOB",
+              "target_raw": "≥ 14",
+              "range_raw": "≥ 10",
+              "unit": "bit",
+              "note": "target effective resolution (est)",
+              "min": 14.0
+            },
+            {
+              "name": "Vin (diff)",
+              "target_raw": "1.0",
+              "range_raw": "0–1.2",
+              "unit": "V",
+              "note": "input range vs VHI/VLO",
+              "target": 1.0,
+              "min": 0.0,
+              "max": 1.2
+            },
+            {
+              "name": "Vref",
+              "target_raw": "1.0",
+              "range_raw": "0.8–1.2",
+              "unit": "V",
+              "note": "reference (VHI−VLO)",
+              "target": 1.0,
+              "min": 0.8,
+              "max": 1.2
+            },
+            {
+              "name": "Vdd (core)",
+              "target_raw": "1.2",
+              "range_raw": "1.1–1.3",
+              "unit": "V",
+              "note": "core supply (one copy from the LDO)",
+              "target": 1.2,
+              "min": 1.1,
+              "max": 1.3
+            },
+            {
+              "name": "fclk",
+              "target_raw": "1.0",
+              "range_raw": "0.1–1.2823",
+              "unit": "MHz",
+              "note": "modulator clock (CK4/5/6); fclk_max declared 1.2823 MHz (owner, 2026-09-07 — the settling bound at fclk_max, vibe-ic#2045; corrected from 1.2824 the same day: the break-even is 1.28237… and rounding UP left the bound short by 3.6e-5 counts, lane czadcfd)",
+              "target": 1.0,
+              "min": 0.1,
+              "max": 1.2823
+            },
+            {
+              "name": "output",
+              "target_raw": "1-bit serial (OUTn / dout)",
+              "range_raw": "—",
+              "unit": "—",
+              "note": "digital bitstream per channel"
+            }
+          ],
+          "verification_intent": [],
+          "source_evidence": [
+            {
+              "layer": "L5",
+              "path": "phase1/generated_docs/L5_ADI_SPEC.json",
+              "field": "analog_blocks[0]"
+            }
+          ]
+        },
+        {
+          "block": "ldo",
+          "block_type": "ldo",
+          "specifications": [
+            {
+              "name": "Vout",
+              "target_raw": "1.2",
+              "range_raw": "1.1–1.3",
+              "unit": "V",
+              "note": "regulated CORE for the LDO-fed modulator copy",
+              "target": 1.2,
+              "min": 1.1,
+              "max": 1.3
+            },
+            {
+              "name": "Iout",
+              "target_raw": "0.5",
+              "range_raw": "0.1–1.0",
+              "unit": "mA",
+              "note": "modulator quiescent + dynamic budget (est)",
+              "target": 0.5,
+              "min": 0.1,
+              "max": 1.0
+            },
+            {
+              "name": "Vin",
+              "target_raw": "1.8",
+              "range_raw": "1.6–2.0",
+              "unit": "V",
+              "note": "IOVDD (confirmed top pin)",
+              "target": 1.8,
+              "min": 1.6,
+              "max": 2.0
+            },
+            {
+              "name": "Dropout",
+              "target_raw": "≤ 0.5",
+              "range_raw": "—",
+              "unit": "V",
+              "note": "headroom (1.8 IOVDD − 1.2 CORE = 0.6 V available)",
+              "max": 0.5
+            },
+            {
+              "name": "PSRR",
+              "target_raw": "≥ 40",
+              "range_raw": "≥ 40",
+              "unit": "dB",
+              "note": "supply rejection target (est, not silicon-measured)",
+              "min": 40.0
+            },
+            {
+              "name": "Iq",
+              "target_raw": "≤ 50",
+              "range_raw": "—",
+              "unit": "µA",
+              "note": "quiescent current target (est)",
+              "max": 50.0
+            },
+            {
+              "name": "Load/line reg",
+              "target_raw": "best-effort",
+              "range_raw": "—",
+              "unit": "—",
+              "note": "report achieved"
+            }
+          ],
+          "verification_intent": [
+            {
+              "phase": "dc_operating_point_line_load_regulation_ldo_sndr",
+              "method": "DC operating point + line/load regulation (LDO); SNDR/ENOB transient + input sweep (modulator).",
+              "evidence": "input/docs/L5_ANALOG_SPEC.md (Verification intent section)",
+              "extraction_strategy": "verification_intent_bullet_v634"
+            }
+          ],
+          "source_evidence": [
+            {
+              "layer": "L5",
+              "path": "phase1/generated_docs/L5_ADI_SPEC.json",
+              "field": "analog_blocks[1]"
+            },
+            {
+              "layer": "L7",
+              "path": "input/docs/L5_ANALOG_SPEC.md (Verification intent section)",
+              "derived_from": "L5 Verification intent section"
+            }
+          ]
+        }
+      ],
+      "unscoped_intent": [
+        {
+          "phase": "multi_corner_tt_ss_ff_40_27_125_c",
+          "method": "Multi-corner: TT/SS/FF × −40/27/125 °C.",
+          "evidence": "input/docs/L5_ANALOG_SPEC.md (Verification intent section)",
+          "extraction_strategy": "verification_intent_bullet_v634"
+        },
+        {
+          "phase": "tool_disclosure_ihp_sg13g2_ships_sectioned_ngspi",
+          "method": "Tool disclosure: IHP SG13G2 ships sectioned ngspice corner libraries for every device",
+          "evidence": "input/docs/L5_ANALOG_SPEC.md (Verification intent section)",
+          "extraction_strategy": "verification_intent_bullet_v634"
+        },
+        {
+          "phase": "golden_cross_check_verify_stage_only_the_fabrica",
+          "method": "Golden cross-check (verify stage only): the fabricated UHEE628_S2024 GDS + KLayout-extracted",
+          "evidence": "input/docs/L5_ANALOG_SPEC.md (Verification intent section)",
+          "extraction_strategy": "verification_intent_bullet_v634"
+        }
+      ],
+      "corner_matrix": {
+        "process": [
+          "TT",
+          "SS",
+          "FF"
+        ],
+        "temperature_c": [
+          -40,
+          27,
+          125
+        ],
+        "source_evidence": [
+          "input/docs/L5_ANALOG_SPEC.md (Verification intent section)"
+        ]
+      }
+    }
+  },
+  "extraction_hints": [
+    "Look for coverage targets, vplan, regression policy.",
+    "Capture per-feature coverage goals."
+  ],
+  "extraction_status": "NOT_YET_EXTRACTED",
+  "emitted_by": "phase1_post_process.emit_l_doc_skeleton v1.21.6",
+  "extraction_evidence": {},
+  "source_documents": [],
+  "_generator": {
+    "plugin": "vibe-ic",
+    "plugin_version": "1.21.6",
+    "l_doc_taxonomy_digest": "e3eeeadc5528",
+    "l_doc_taxonomy_docs": 28,
+    "emitter": "l22_analog_verification_plan_emit.run"
+  }
+}
