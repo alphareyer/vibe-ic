@@ -2978,6 +2978,22 @@ _REHOMED = {
     # go away, its command string changed.
     "phase1_expert_parse_track .":
     "phase1_expert_parse_track . --check-report",
+    # v1.24.73 (#2635) made the pre-stream runner the PRODUCER of the step-17
+    # and step-22 receipts (`program_outputs`, declared in `required_outputs`)
+    # and moved each step gate's own re-measurement to a `*_verdict.json`
+    # path. v1.24.82 (#2644) pointed the gates back at the receipts, which
+    # made the steps self-certify by construction (R-0915-141) and put two
+    # writers on one file (R-0915-152); T90 restores the #2635 spelling, and
+    # the gate now also names the receipt with a `files_exist` clause. A
+    # RE-PATH: same step, same kind (`program_exit_zero`), same program, and
+    # the clause still runs and still blocks -- only the destination it writes
+    # changed.
+    "placement_legality_check . --json reports/phase3/placement_legality.json":
+    "placement_legality_check . --json "
+    "reports/phase3/placement_legality_verdict.json",
+    "spef_extraction_check . --json reports/phase2/gates/spef_extraction.json":
+    "spef_extraction_check . --json "
+    "reports/phase2/gates/spef_extraction_verdict.json",
 }
 
 #: Clauses deliberately removed from the GATE denominator by Issue #1980 and

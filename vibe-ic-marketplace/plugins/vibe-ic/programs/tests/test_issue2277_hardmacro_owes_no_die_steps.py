@@ -207,13 +207,35 @@ def test_the_reader_still_owns_the_refusal():
 
 def test_the_new_channel_adopted_exactly_one_entry():
     """The blast radius, asserted rather than assumed: `producer_command` is read
-    from `program_outputs` only, and exactly one entry in the whole flow has one."""
+    from `program_outputs` only, and these are the entries in the whole flow
+    that have one.
+
+    RE-MEASURED 2026-09-26 (T90). v1.24.73 (#2635, fd809a4c9 "declare report
+    producers") put the step-17 and step-22 pre-stream receipts on THIS channel
+    -- the producer declared off the gate, the gate re-measuring to its own
+    `*_verdict.json` -- which is the #1980 shape this channel exists for. It
+    did not move this pin, so the test was red on main from v1.24.73. Measured
+    on the live yaml: arrived [('17', 'placement_legality_check'),
+    ('22', 'spef_extraction_check')], departed []. Each carries a
+    `producer_command` whose program is the entry's own program and whose path
+    is a `required_output` of its step (asserted below, not assumed)."""
     doc = yaml.safe_load(_FLOW.read_text(encoding="utf-8"))
     carrying = [(str(st["id"]), e["program"])
                 for st in doc["steps"]
                 for e in (st.get("program_outputs") or [])
                 if isinstance(e, dict) and e.get("producer_command")]
-    assert carrying == [("31", "perc_corpus_sweep")]
+    assert carrying == [("17", "placement_legality_check"),
+                        ("22", "spef_extraction_check"),
+                        ("31", "perc_corpus_sweep")]
+    for st in doc["steps"]:
+        for e in (st.get("program_outputs") or []):
+            if isinstance(e, dict) and e.get("producer_command"):
+                assert e["producer_command"].split()[0] == e["program"], e
+                assert e["path"] in (st.get("required_outputs") or []), e
+                assert e["program"] not in str(st.get("gate")) or (
+                    f"--json {e['path']}" not in str(st.get("gate"))), (
+                    f"step {st['id']}: the gate writes the producer's own "
+                    f"document {e['path']} (R-0915-141)")
 
 
 def test_an_entry_without_a_producer_command_is_NOT_adopted():

@@ -54,6 +54,8 @@ from pathlib import Path
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 import phase3_one_shot_runner as R  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _prestream_admission_fixture import admit_fixture_layout  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +81,10 @@ def _run_step_gds(tmp_path, monkeypatch, pdk):
     monkeypatch.setattr(R, "_magic_def_to_gds",
                         lambda *a, **k: (False, "no magic"))
     monkeypatch.setattr(R, "_docker_exec", lambda *a, **k: (1, "", "no tool"))
+    # v1.24.73 (#2635): nothing streams before the routed layout is admitted.
+    # This suite owns the layer-map guard behind that boundary, so it admits
+    # its fixture's own basis and keeps every arm reaching the guard.
+    admit_fixture_layout(monkeypatch, R, tmp_path, "top", pdk, "container")
     return R.step_gds(tmp_path, "top", pdk, "container")
 
 

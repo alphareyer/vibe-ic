@@ -31,6 +31,7 @@ sys.path.insert(0, str(PROGRAMS / "tests"))
 
 import phase3_one_shot_runner as R                              # noqa: E402
 import provenance_output_hash_completeness_check as C           # noqa: E402
+from _prestream_admission_fixture import admit_fixture_layout      # noqa: E402
 
 REL = "reports/phase3/lvs.rpt"
 ORIGINAL = b"LVS: circuits match uniquely\n"
@@ -239,7 +240,11 @@ def _run_step_gds(tmp_path: Path, monkeypatch, *, tamper_after_stream: bool):
                 fh.write(f"{_n}\n".encode())
             return True, f"{_n} ok"
         monkeypatch.setattr(R, name, _rewrite)
-    R.step_gds(proj, TOP, _Pdk(), "cnt")
+    # v1.24.73 (#2635): admit this fixture's routed basis, or step_gds stops
+    # at the pre-stream boundary and nothing streams for the chain to explain.
+    pdk = _Pdk()
+    admit_fixture_layout(monkeypatch, R, proj, TOP, pdk, "cnt")
+    R.step_gds(proj, TOP, pdk, "cnt")
     R._record_reemitted_outputs(proj)
     return proj, gds
 
