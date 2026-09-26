@@ -146,6 +146,16 @@ def test_opensta_rejecting_a_constraint_fails_step8(tmp_path):
     assert corner["check_setup"] == {"no_input_delay": 1, "unconstrained_endpoints": 2}
 
 
+def test_untimed_io_alone_fails_step8(tmp_path):
+    """create_clock only: OpenSTA reads it cleanly and still leaves I/O untimed."""
+    folder, deck = sta_folder(tmp_path, checks="sta_prepnr_check_setup_clock_only_positive.rpt",
+                              sdc="cal_clock_only.sdc")
+    config = json.loads((folder / "config.json").read_text())
+    report = prelayout.judge_sdc(folder, config, deck, tmp_path / "g.json")
+    assert report["corners"]["nom_tt_025C_5v00"]["sdc_diagnostics"] == []
+    assert report["verdict"] == "FAIL"
+
+
 def test_step8_refuses_the_fallback_deck_and_an_absent_check_section(tmp_path):
     folder, deck = sta_folder(tmp_path, checks=None)
     config = json.loads((folder / "config.json").read_text())
