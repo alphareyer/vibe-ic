@@ -225,9 +225,27 @@ TB = '''`timescale 1ns/1ps
 module tb_case;
   reg clk; reg x; wire p;
   spm dut (.clk(clk), .x(x), .p(p));
+  always #5 clk = ~clk;
   initial begin clk = 0; x = 0; #100 $display("ORACLE_TB_DONE pass=1/1"); $finish; end
 endmodule
 '''
+
+#: What the chip-top producer (step 15.5ic) writes: `chip_top` wraps `spm`,
+#: x through a pad, clk and p wired to the chip ports (F21).
+CHIP_TOP_IO = '''module chip_top (input clk, input x, output p);
+  wire x__core;
+  cells__in_c u_pad_x (.PAD(x), .Y(x__core));
+  spm u_core (.clk(clk), .x(x__core), .p(p));
+endmodule
+'''
+
+
+def _declare_chip_top(project):
+    write(project / 'phase3/stage3/pnr/chip_top_io.v', CHIP_TOP_IO)
+    put(project / sgs.CHIP_TOP_RECORD_REL, {
+        'verdict': 'WROTE', 'chip_top_module': 'chip_top', 'core_module': 'spm',
+        'chip_top_verilog': 'phase3/stage3/pnr/chip_top_io.v',
+        'pad_instances': {'u_pad_x': {'port': 'x', 'terminal': 'PAD', 'core_pin': 'Y'}}})
 
 VVP_PASS = ('SDF INFO: <run>/chip_top__{c}.sdf:15: Putting delay: 0.000000 for index 0\n'
             'SDF INFO: <run>/chip_top__{c}.sdf:16: Putting delay: 0.001000 for index 0\n'
@@ -263,10 +281,15 @@ def test_the_model_closure_takes_the_udp_sibling_and_the_modelled_pad_not_the_bl
 
 
 def test_a_case_binds_to_the_netlist_top_only_when_its_ports_are_the_same(tmp_path):
-    text, binding = sgs.bind_dut_module(TB, 'spm', 'dut', CHIP_TOP)
+    # F21: the rebinding is the DECLARED chip top's, never a port-name match.
+    _declare_chip_top(tmp_path)
+    declared = sgs.declared_dut_binding(tmp_path, 'spm', CHIP_TOP)
+    text, binding = sgs.bind_dut_module(TB, 'spm', 'dut', CHIP_TOP, declared)
     assert 'chip_top dut (.clk(clk)' in text and binding['rebound']
     with pytest.raises(ValueError):
-        sgs.bind_dut_module(TB.replace('.p(p)', '.q(p)'), 'spm', 'dut', CHIP_TOP)
+        sgs.bind_dut_module(TB.replace('.p(p)', '.q(p)'), 'spm', 'dut', CHIP_TOP, declared)
+    with pytest.raises(ValueError):
+        sgs.bind_dut_module(TB, 'spm', 'dut', CHIP_TOP)
     same = CHIP_TOP.replace('module chip_top', 'module spm')
     assert sgs.bind_dut_module(TB, 'spm', 'dut', same)[0] == TB
 
@@ -280,6 +303,11 @@ def _gls_project(tmp_path):
     put(project / 'input/submission_template/tapeout_declaration.json',
         {'answers': {'top_cell': 'chip_top'}})
     _stapostpnr(project)
+    _declare_chip_top(project)
+    write(project / 'phase3/stage3/pnr/chip_top.sdc',
+          'create_clock -name clk -period 24.0 [get_ports clk]\n')
+    for sdf in (project / 'phase3/librelane/22-23/02-openroad-stapostpnr').glob('*/*.sdf'):
+        sdf.write_text('(DELAYFILE\n (TIMESCALE 1ns)\n)\n')
     tb = write(project / 'phase2/stage1/sim/tb_case.v', TB)
     put(project / 'reports/phase2/sim/l10_execution.json',
         {'cases': [{'id': 'case_1', 'sim_executed': True, 'tb_file': str(tb)}]})

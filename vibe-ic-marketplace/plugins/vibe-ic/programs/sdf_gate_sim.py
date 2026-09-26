@@ -453,14 +453,18 @@ class CellModels:
     model source, needed by `missing_empty_cell_stubs`.
     """
 
-    __slots__ = ("paths", "text", "source", "pdk_id")
+    __slots__ = ("paths", "text", "source", "pdk_id", "files")
 
     def __init__(self, paths: List[str], text: str, source: str,
-                 pdk_id: Optional[str] = None):
+                 pdk_id: Optional[str] = None,
+                 files: Optional[Dict[str, str]] = None):
         self.paths = list(paths)
         self.text = text
         self.source = source
         self.pdk_id = pdk_id
+        #: {path: its own text}, for a reader that needs a model's line numbers
+        #: (the SDF-error classifier); `{}` when only the joined text is known.
+        self.files = dict(files or {})
 
     @property
     def arg(self) -> str:
@@ -489,7 +493,14 @@ def _read_container_files(container: str, paths: List[str]) -> str:
             return ""
         if r.returncode != 0 or not r.stdout:
             return ""
-        chunks.append(r.stdout)
+        # F21, MEASURED (vibeic-eda 0.3.79): the image's entrypoint prints
+        # `[INFO] Final PATH variable: ...` lines on stdout BEFORE `cat` runs,
+        # so every line number of the model read this way was off by two and
+        # no compiler diagnostic could be traced back into it.
+        out = r.stdout
+        while out.startswith("[INFO]"):
+            out = out.split("\n", 1)[1] if "\n" in out else ""
+        chunks.append(out)
     return "\n".join(chunks)
 
 
@@ -514,8 +525,9 @@ def resolve_cell_models(project: Path, used_cells: set,
     """
     host = find_pdk_verilog(project, used_cells)
     if host is not None:
-        return CellModels([str(host)], host.read_text(errors="replace"),
-                          "host_staged")
+        host_text = host.read_text(errors="replace")
+        return CellModels([str(host)], host_text, "host_staged",
+                          files={str(host): host_text})
 
     pdk_id = _pcm.detect_pdk_id(used_cells)
     paths = _pcm.container_model_paths(pdk_id)
@@ -544,15 +556,54 @@ def resolve_cell_models(project: Path, used_cells: set,
         if probe.returncode == 0 and not clean_probe.strip():
             companions.append(companion)
     paths = companions + [p for p in paths if p not in companions]
-    text = _read_container_files(container, paths)
-    if not text:
+    files = {p: _read_container_files(container, [p]) for p in paths}
+    if not all(files.values()):
         return None
+    text = "\n".join(files[p] for p in paths)
     # Same substantive bar the host path applies: the model must actually
     # define at least one cell the netlist instantiates. Prevents a stale
     # table entry from handing iverilog a model for a different library.
     if not (set(_MODULE_RE.findall(text)) & set(used_cells)):
         return None
-    return CellModels(paths, text, "container_pdk", pdk_id)
+    return CellModels(paths, text, "container_pdk", pdk_id, files=files)
+
+
+def declared_io_models(project: Path, container: str, used_cells: set,
+                       models: "CellModels") -> "CellModels":
+    """F21: the pad models a routed CHIP TOP needs, beside the cell models.
+
+    The netlist step 15 routed is the chip top, so it instantiates the pads
+    the chip-top producer placed; a cell model alone leaves every pad an
+    unknown module and the case never compiles. The pads' library is the one
+    that producer DECLARED (`io_library_liberty` in its record); its models
+    are that library's `verilog/` directory, and the closure takes, per pad,
+    the file that MODELS it over a black box (`verilog_model_closure_of_texts`).
+    With no record, or nothing missing, the models are returned unchanged."""
+    missing = set(used_cells) - set(_MODULE_RE.findall(models.text))
+    try:
+        rec = json.loads((project / CHIP_TOP_RECORD_REL).read_text(errors="replace"))
+    except (OSError, ValueError):
+        return models
+    libs = rec.get("io_library_liberty") or []
+    if not missing or rec.get("verdict") != "WROTE" or not isinstance(libs, list):
+        return models
+    dirs = sorted({str(Path(str(lib)).parent.parent / "verilog") for lib in libs})
+    candidates: List[str] = []
+    for d in dirs:
+        listed = _docker(container, f"ls -1 {shlex.quote(d)}", budget_s=60)
+        candidates += [f"{d}/{name.strip()}" for name in (listed.stdout or "").splitlines()
+                       if name.strip().endswith(".v")]
+    texts = {c: _read_container_files(container, [c]) for c in candidates}
+    owned = {m: p for p in models.paths
+             for m in _MODULE_RE.findall(models.files.get(p, ""))}
+    closure = verilog_model_closure_of_texts(candidates, texts, missing, owned)
+    extra = [f for f in closure["files"] if f not in models.paths]
+    if not extra:
+        return models
+    files = dict(models.files, **{f: texts[f] for f in extra})
+    return CellModels(models.paths + extra,
+                      models.text + "\n" + "\n".join(texts[f] for f in extra),
+                      models.source + "+declared_io", models.pdk_id, files=files)
 
 
 def find_sdf(project: Path, top: str) -> Optional[Path]:
@@ -994,13 +1045,37 @@ def _run_l10_suite(project: Path, top: str, container: str, sim_dir: Path,
 
     rows: List[Dict[str, object]] = []
     skipped = list(suite.get("skipped") or [])
+    # F21 — the DUT is the module the routed netlist defines (the declared chip
+    # top when it wraps the core), and the bench clocks at the DECLARED SDC's
+    # period. Either unreadable is a named refusal of every case, not a guess.
+    sdf_text = _read_or_empty(sdf)
+    try:
+        declared = declared_dut_binding(project, top, ntext)
+        clocks = declared_sdc_clocks(_pl.pnr_dir(project) / "constraint.sdc",
+                                     [sdf_text])
+        refusal = None
+    except ValueError as exc:
+        declared, clocks, refusal = None, None, str(exc)
+    explainer = SdfErrorExplainer(ntext, models.files)
     for case in (suite.get("cases") or []):
         cid, tb_module = str(case["id"]), str(case["module"])
         row: Dict[str, object] = {"id": cid, "module": tb_module,
                                   "testbench": str(case["path"])}
         try:
+            if refusal:
+                raise ValueError(refusal)
+            bound, row["dut_binding"] = bind_dut_module(
+                str(case["text"]), top, str(case["dut_instance"]), ntext, declared)
+            bound, row["clock"] = bind_bench_clock(
+                bound, str(case["dut_instance"]), clocks)
+        except ValueError as exc:
+            row.update(verdict=None, marker=None, passed=0, total=0,
+                       detail=f"NO_GATE_BINDING: {exc}")
+            rows.append(row)
+            continue
+        try:
             injected = inject_sdf_annotation(
-                str(case["text"]), tb_module, str(case["dut_instance"]),
+                bound, tb_module, str(case["dut_instance"]),
                 str(sdf))
         except ValueError as exc:
             row.update(verdict=None, marker=None, passed=0, total=0,
@@ -1072,6 +1147,13 @@ def _run_l10_suite(project: Path, top: str, container: str, sim_dir: Path,
         _census = sdf_annotation_census(text)
         row["sdf_delays_applied"] = _census["delays_applied"]
         row["sdf_modpath_unmatched"] = _census["modpath_unmatched"]
+        _classes = classify_sdf_errors(
+            text, compile_log=_read_or_empty(sim_dir / f"{cid}.compile.log"),
+            sdf_text=sdf_text, explainer=explainer)
+        row["sdf_errors"] = _classes["total"]
+        row["sdf_errors_by_class"] = _classes["by_class"]
+        row["sdf_errors_unexplained"] = _classes["unexplained"]
+        row["unexplained_samples"] = _classes["unexplained_samples"]
         if parsed.get("verdict") is None:
             row["detail"] = name_unverdicted_case(_rc, _size, _truncated)
         rows.append(row)
@@ -1085,12 +1167,27 @@ def _run_l10_suite(project: Path, top: str, container: str, sim_dir: Path,
             "sdf": str(sdf), "declared": suite.get("declared"),
             "compile_flags": _IVERILOG_FLAGS,
             "delays_applied": _delays, "modpath_unmatched": _unmatched}
+    # F21 — every refused SDF record by class; an unexplained one fails the
+    # step (the `ERROR:` line is what the step-29 gate reads as a failure).
+    _by_class: Dict[str, int] = {}
+    for r in rows:
+        for cls, n in (r.get("sdf_errors_by_class") or {}).items():
+            _by_class[cls] = _by_class.get(cls, 0) + n
+    _unexplained = sum(int(r.get("sdf_errors_unexplained") or 0) for r in rows)
+    _extra = ["", f"dut binding   : {_binding_line(declared)}",
+              f"bench clock   : {_clock_line(clocks)}",
+              _sdf_error_class_line({"sdf_errors_by_class": _by_class,
+                                     "sdf_errors_unexplained": _unexplained})]
+    if _unexplained:
+        _extra.append(f"ERROR: {_unexplained} SDF ERROR record(s) no class "
+                      f"explains; the annotated simulation dropped delays for a "
+                      f"reason this run cannot name")
     _aa.write_text(sim_dir / "results.log",
-                   build_l10_results_log(rows, skipped, meta))
+                   build_l10_results_log(rows, skipped, meta) + "\n".join(_extra) + "\n")
     failed = [r for r in rows if r.get("verdict") == "FAIL"]
     unrun = [r for r in rows if r.get("verdict") is None]
-    verdict = ("PASS" if rows and not failed and not unrun else
-               "FAIL" if failed else "NOT_EXECUTED")
+    verdict = ("PASS" if rows and not failed and not unrun and not _unexplained else
+               "FAIL" if failed or (_unexplained and not unrun) else "NOT_EXECUTED")
     _aa.write_text(sim_dir / "results.json", json.dumps({
         "program": "sdf_gate_sim", "version": "1.2.0",
         "suite": "l10_executed_cases", "verdict": verdict,
@@ -1105,6 +1202,10 @@ def _run_l10_suite(project: Path, top: str, container: str, sim_dir: Path,
                            "modpath_unmatched": _unmatched,
                            "annotated": _delays > 0,
                            "compile_flags": _IVERILOG_FLAGS},
+        "sdf_errors_by_class": _by_class,
+        "sdf_errors_unexplained": _unexplained,
+        "sdf_error_classes": SDF_ERROR_CLASSES,
+        "dut_binding": declared, "clock": clocks,
         "artifacts": {"netlist": str(netlist), "sdf": str(sdf)},
     }, indent=2, ensure_ascii=False) + "\n")
     if verdict == "PASS":
@@ -1429,6 +1530,7 @@ def run(project, top: str = "spm", container: str = DEFAULT_CONTAINER,
                      f"{len(used)} distinct cells instantiated)")
         return {"verdict": "NOT_APPLICABLE", "reason": "no pdk lib"}
 
+    models = declared_io_models(project, container, used, models)
     sim_dir.mkdir(parents=True, exist_ok=True)
 
     # R-0915-54 — THE RUN'S OWN EXECUTED L10 SUITE IS THE FIRST SUBJECT.
@@ -1709,43 +1811,431 @@ def _netlist_top(text: str) -> Optional[Tuple[str, List[str]]]:
     return (tops[0], modules[tops[0]]) if len(tops) == 1 else None
 
 
+#: The chip-top producer's record (step 15.5ic, `io_pad_chip_top_gen`): which
+#: module the routed netlist's top IS, which core it wraps, and the Verilog it
+#: wrote, pad by pad. The only source a gate-level DUT binding is taken from.
+CHIP_TOP_RECORD_REL = "reports/phase3/io_pad_chip_top.json"
+
+_INSTANCE_STMT_RE = re.compile(
+    r"^\s*([A-Za-z_][\w$]*)\s+(\\\S+|[A-Za-z_][\w$]*)\s*\((.*?)\)\s*;",
+    re.MULTILINE | re.DOTALL)
+_CONN_RE = re.compile(r"\.\s*([A-Za-z_][\w$]*)\s*\(\s*([^()]*?)\s*\)")
+_NET_BIT_RE = re.compile(r"^\\?([A-Za-z_][\w$]*)\s*(?:\[\s*(\d+)\s*\])?$")
+
+
+def _instances(text: str) -> Dict[str, Tuple[str, Dict[str, str]]]:
+    """{instance: (master, {pin: net expression})} of a structural text."""
+    out: Dict[str, Tuple[str, Dict[str, str]]] = {}
+    for m in _INSTANCE_STMT_RE.finditer(text or ""):
+        if m.group(1) in _VERILOG_NON_CELL_WORDS:
+            continue
+        out[m.group(2).lstrip("\\")] = (m.group(1), dict(_CONN_RE.findall(m.group(3))))
+    return out
+
+
+def _net_bit(expr: str) -> Optional[Tuple[str, Optional[int]]]:
+    m = _NET_BIT_RE.match((expr or "").strip())
+    if not m:
+        return None
+    return m.group(1), (int(m.group(2)) if m.group(2) is not None else None)
+
+
+def declared_dut_binding(project: Path, top: str, netlist_text: str
+                         ) -> Dict[str, object]:
+    """The module a case's DUT `top` is, in the netlist step 15 routed.
+
+    F21, MEASURED on spm x gf180mcuD (run23): every L10 case instantiates the
+    core `spm`; the routed netlist defines only the padded `chip_top`, so the
+    direct arm died `Unknown module type: spm` on all five cases and recorded
+    NOT_EXECUTED with 0 delays. A chip top is not found by guessing: the
+    chip-top producer RECORDS it (`CHIP_TOP_RECORD_REL`) -- the chip-top
+    module, the core it wraps, the Verilog it wrote and, per pad, the pad's
+    chip-side terminal and core-side pin. The binding is read from there:
+    each core port is traced through the net it is wired to in that Verilog,
+    the pad on that net, to the chip-top port on the pad's terminal. Any link
+    that does not trace refuses (ValueError, named); a same-named port is not
+    evidence of anything."""
+    if re.search(r"(?m)^\s*module\s+" + re.escape(top) + r"\b", netlist_text or ""):
+        return {"dut_module": top, "rebound": False, "port_map": None,
+                "source": "the routed netlist defines the DUT's own module"}
+    rec_path = project / CHIP_TOP_RECORD_REL
+    try:
+        rec = json.loads(rec_path.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"NO_DECLARED_CHIP_TOP: the routed netlist defines no "
+                         f"`{top}` and the chip-top record {rec_path} cannot be "
+                         f"read ({exc})")
+    chip, core = rec.get("chip_top_module"), rec.get("core_module")
+    if rec.get("verdict") != "WROTE" or not chip or not rec.get("chip_top_verilog"):
+        raise ValueError(f"NO_DECLARED_CHIP_TOP: {rec_path} records no chip top "
+                         f"(verdict {rec.get('verdict')!r})")
+    if core != top:
+        raise ValueError(f"CHIP_TOP_WRAPS_ANOTHER_CORE: {rec_path} says `{chip}` "
+                         f"wraps `{core}`; the case's DUT is `{top}`")
+    routed = _netlist_top(netlist_text)
+    if routed is None or routed[0] != chip:
+        raise ValueError(f"ROUTED_TOP_IS_NOT_THE_DECLARED_CHIP_TOP: the routed "
+                         f"netlist's top is {routed[0] if routed else None!r}, "
+                         f"the record declares `{chip}`")
+    vpath = project / str(rec["chip_top_verilog"])
+    try:
+        vtext = strip_comments(vpath.read_text(errors="replace"))
+    except OSError as exc:
+        raise ValueError(f"NO_DECLARED_CHIP_TOP: {vpath} ({exc})")
+    body = re.search(r"(?ms)^\s*module\s+" + re.escape(chip) + r"\b(.*?)\bendmodule\b",
+                     vtext)
+    if body is None:
+        raise ValueError(f"NO_DECLARED_CHIP_TOP: {vpath} defines no `{chip}`")
+    insts = _instances(body.group(1))
+    cores = [name for name, (master, _) in insts.items() if master == top]
+    if len(cores) != 1:
+        raise ValueError(f"CORE_INSTANCE_NOT_UNIQUE: `{chip}` in {vpath} "
+                         f"instantiates `{top}` {len(cores)} time(s)")
+    through: Dict[Tuple[str, Optional[int]], Tuple[str, Optional[int]]] = {}
+    for name, pad in (rec.get("pad_instances") or {}).items():
+        if not isinstance(pad, dict) or not pad.get("core_pin"):
+            continue                      # a supply pad carries no core signal
+        conns = insts.get(name, ("", {}))[1]
+        inner = _net_bit(conns.get(str(pad["core_pin"]), ""))
+        outer = _net_bit(conns.get(str(pad.get("terminal")), ""))
+        if inner is None or outer is None:
+            raise ValueError(f"PAD_NOT_TRACEABLE: `{name}` in {vpath} does not "
+                             f"wire {pad.get('core_pin')} and {pad.get('terminal')}")
+        through[inner] = outer
+    port_map: Dict[str, str] = {}
+    for port, expr in insts[cores[0]][1].items():
+        net = _net_bit(expr)
+        if net is None:
+            raise ValueError(f"CORE_PORT_NOT_TRACEABLE: .{port}({expr})")
+        hits = {k: v for k, v in through.items()
+                if k[0] == net[0] and (net[1] is None or k[1] == net[1])}
+        if not hits:
+            if net[1] is None and net[0] in routed[1]:
+                port_map[port] = net[0]   # wired to the chip port itself
+                continue
+            raise ValueError(f"CORE_PORT_NOT_TRACEABLE: core port {port} is on "
+                             f"net {expr}, which no declared pad and no chip "
+                             f"port carries")
+        outers = {v[0] for v in hits.values()}
+        if len(outers) != 1 or any(k[1] != v[1] for k, v in hits.items()):
+            raise ValueError(f"CORE_PORT_SPLIT: core port {port} reaches "
+                             f"{sorted(outers)} bit-inconsistently")
+        port_map[port] = outers.pop()
+    absent = sorted(set(port_map.values()) - set(routed[1]))
+    if absent:
+        raise ValueError(f"CHIP_PORT_NOT_ROUTED: {absent} are not ports of the "
+                         f"routed `{chip}`")
+    return {"dut_module": chip, "rebound": True, "from": top,
+            "port_map": port_map, "source": str(rec_path)}
+
+
 def bind_dut_module(tb_text: str, dut_module: str, dut_instance: str,
-                    netlist_text: str) -> Tuple[str, Dict[str, object]]:
+                    netlist_text: str, declared: Optional[Dict[str, object]] = None
+                    ) -> Tuple[str, Dict[str, object]]:
     """Bind a case's DUT to the module the routed netlist actually defines.
 
-    MEASURED (spm x gf180mcuD run23): every L10 case instantiates the RTL top
-    `spm`, while the routed netlist defines only its padded `chip_top`, so all
-    five cases died `Unknown module type: spm` and step 29 was NOT_EXECUTED.
-    The binding moves to the netlist's own top ONLY when that module is absent
-    and the netlist top has exactly the port NAMES the testbench connects; any
-    other shape raises, so a renamed or re-shaped interface is never bound by
-    guesswork."""
+    A netlist that defines `dut_module` binds as is. Otherwise the binding is
+    `declared` (`declared_dut_binding`): the instance is re-typed to the
+    declared chip top and each connection renamed to the chip port its core
+    port traces to. Without a declaration it REFUSES (F21: never by name)."""
     if re.search(r"(?m)^\s*module\s+" + re.escape(dut_module) + r"\b", netlist_text):
         return tb_text, {"dut_module": dut_module, "rebound": False}
-    top = _netlist_top(netlist_text)
-    if top is None:
-        raise ValueError(f"netlist defines no {dut_module} and no single top")
+    if not declared or not declared.get("port_map"):
+        raise ValueError(f"netlist defines no {dut_module} and no chip top is "
+                         f"declared for it")
     inst = re.search(r"(?m)^(\s*)" + re.escape(dut_module) + r"(\s+"
                      + re.escape(dut_instance) + r"\s*\()", tb_text)
     if inst is None:
         raise ValueError(f"no `{dut_module} {dut_instance} (` in the testbench")
     end = tb_text.find(";", inst.end())
-    connected = set(_NAMED_CONN_RE.findall(tb_text[inst.end():end]))
-    if not connected or connected != set(top[1]):
-        raise ValueError(f"netlist top {top[0]} ports {sorted(top[1])} are not "
-                         f"the ports the testbench connects {sorted(connected)}")
-    text = tb_text[:inst.start()] + inst.group(1) + top[0] + inst.group(2) \
-        + tb_text[inst.end():]
-    return text, {"dut_module": top[0], "rebound": True, "from": dut_module,
-                  "ports": sorted(connected)}
+    port_map = dict(declared["port_map"])
+    conns = tb_text[inst.end():end]
+    connected = set(_NAMED_CONN_RE.findall(conns))
+    if not connected or not connected <= set(port_map):
+        raise ValueError(f"the testbench connects {sorted(connected)}; the "
+                         f"declared chip top carries {sorted(port_map)}")
+    conns = _NAMED_CONN_RE.sub(lambda m: "." + port_map[m.group(1)] + "(", conns)
+    text = (tb_text[:inst.start()] + inst.group(1) + str(declared["dut_module"])
+            + inst.group(2) + conns + tb_text[end:])
+    return text, {"dut_module": declared["dut_module"], "rebound": True,
+                  "from": dut_module, "source": declared.get("source"),
+                  "ports": {p: port_map[p] for p in sorted(connected)}}
+
+
+# ---------------------------------------------------------------------------
+# F21 — the bench clock is the one the DECLARED SDC states.
+# ---------------------------------------------------------------------------
+
+_UNIT_S = {"s": 1.0, "ms": 1e-3, "us": 1e-6, "ns": 1e-9, "ps": 1e-12, "fs": 1e-15}
+_TB_TIMESCALE_RE = re.compile(
+    r"`timescale\s+(1|10|100)\s*(s|ms|us|ns|ps|fs)\s*/\s*(1|10|100)\s*(s|ms|us|ns|ps|fs)")
+#: OpenSTA's `write_sdf` states the time unit of the session's default
+#: liberty (SdfWriter: `timescale_ = default_lib->units()->timeUnit()`), which
+#: is also the unit that session read the SDC's numbers in.
+_SDF_TIMESCALE_RE = re.compile(
+    r"\(\s*TIMESCALE\s+(1|10|100)(?:\.0*)?\s*(s|ms|us|ns|ps|fs)\s*\)")
+_SDC_SET_UNITS_TIME_RE = re.compile(
+    r"^\s*set_units\b[^\n]*?-time\s+\{?\s*(\d*\.?\d+)?\s*(s|ms|us|ns|ps|fs)\b", re.M)
+_CLOCK_GEN_RE = re.compile(
+    r"(?m)^(\s*always\s*#\s*)(\(\s*[0-9.]+\s*\)|[0-9.]+)(\s*)([A-Za-z_][\w$]*)"
+    r"(\s*<?=\s*[~!]\s*)([A-Za-z_][\w$]*)(\s*;)")
+
+
+def declared_sdc_clocks(sdc: Path, sdf_texts: List[str]) -> Dict[str, object]:
+    """Every port clock the declared SDC creates, in seconds.
+
+    F21, MEASURED on spm x gf180mcuD: the L10 bench toggled its clock every
+    5 ns (a 10 ns period) against a declared `create_clock -period 24.0`, and
+    every ss corner failed all five cases. The bench's number is a default; the
+    SDC is the design's. The unit is the SDC's `set_units -time` when it states
+    one, else the unit the STA session read it in -- the SDF TIMESCALE that
+    session wrote. Anything this cannot read refuses (ValueError): an unreadable
+    SDC, a port clock with no literal period, two periods on one port, no unit.
+    An SDC that creates no PORT clock (a combinational design, a virtual clock)
+    declares that no DUT port is clocked: the result carries no clock, and a
+    bench that free-runs a DUT port is then refused by `bind_bench_clock`."""
+    import sdc_constraints as _sdcc
+    try:
+        text = Path(sdc).read_text(errors="replace")
+    except OSError as exc:
+        raise ValueError(f"SDC_UNREADABLE: {sdc} ({exc})")
+    clocks: Dict[str, float] = {}
+    for clock in _sdcc.create_clocks_in_text(text):
+        if not clock["port_name"]:
+            continue                      # a virtual clock toggles no port
+        if clock["period_ns"] is None:
+            raise ValueError(f"SDC_CLOCK_UNREADABLE: {sdc}:{clock['line']} states "
+                             f"no literal -period for port {clock['port_name']}")
+        if clocks.get(clock["port_name"], clock["period_ns"]) != clock["period_ns"]:
+            raise ValueError(f"SDC_CLOCK_AMBIGUOUS: {sdc} creates two periods on "
+                             f"port {clock['port_name']}")
+        clocks[clock["port_name"]] = clock["period_ns"]
+    if not clocks:
+        return {"sdc": str(sdc), "unit_s": None, "clocks_s": {},
+                "unit_source": "no port clock is declared"}
+    units = _SDC_SET_UNITS_TIME_RE.findall(text)
+    if units:
+        scale, unit = units[-1]
+        unit_s = float(scale or 1) * _UNIT_S[unit]
+        unit_source = f"{sdc}: set_units -time"
+    else:
+        stated = {(m.group(1), m.group(2)) for t in sdf_texts
+                  for m in [_SDF_TIMESCALE_RE.search(t[:4096])] if m}
+        if len(stated) != 1 or len(sdf_texts) == 0 or any(
+                not _SDF_TIMESCALE_RE.search(t[:4096]) for t in sdf_texts):
+            raise ValueError(f"SDC_TIME_UNIT_UNSTATED: {sdc} has no set_units "
+                             f"-time and the SDFs state {sorted(stated)}")
+        scale, unit = stated.pop()
+        unit_s = float(scale) * _UNIT_S[unit]
+        unit_source = "the STA session's SDF TIMESCALE"
+    return {"sdc": str(sdc), "unit_s": unit_s, "unit_source": unit_source,
+            "clocks_s": {port: period * unit_s for port, period in clocks.items()}}
+
+
+def bind_bench_clock(tb_text: str, dut_instance: str, declared: Dict[str, object]
+                     ) -> Tuple[str, Dict[str, object]]:
+    """Re-time the bench's free-running clock to the declared SDC period.
+
+    The generator is `always #<half> <sig> = ~<sig>;` on the bench signal wired
+    to the DUT port the SDC clocks. Refuses (ValueError) a bench with no
+    timescale, an SDC clock port the bench does not drive from such a
+    generator, a generator on a DUT port the SDC declares no clock on, and a
+    half period the bench's precision cannot state."""
+    ts = _TB_TIMESCALE_RE.search(tb_text)
+    if ts is None:
+        raise ValueError("BENCH_TIMESCALE_UNSTATED: the bench states no `timescale")
+    unit_s = int(ts.group(1)) * _UNIT_S[ts.group(2)]
+    prec_s = int(ts.group(3)) * _UNIT_S[ts.group(4)]
+    inst = re.search(r"(?m)^\s*[A-Za-z_][\w$]*\s+" + re.escape(dut_instance)
+                     + r"\s*\(", tb_text)
+    if inst is None:
+        raise ValueError(f"no DUT instance `{dut_instance}` in the bench")
+    conns = {p: e.strip() for p, e in _CONN_RE.findall(
+        tb_text[inst.end():tb_text.find(";", inst.end())])}
+    gens = {m.group(4): m for m in _CLOCK_GEN_RE.finditer(tb_text)
+            if m.group(4) == m.group(6)}
+    driven = {sig: port for port, sig in conns.items() if sig in gens}
+    stray = sorted(port for sig, port in driven.items()
+                   if port not in declared["clocks_s"])
+    if stray:
+        raise ValueError(f"BENCH_CLOCK_UNDECLARED: the bench free-runs DUT port(s) "
+                         f"{stray}, on which {declared['sdc']} creates no clock")
+    edits, info = [], []
+    for port, period_s in sorted(declared["clocks_s"].items()):
+        sig = conns.get(port)
+        if sig not in gens:
+            raise ValueError(f"BENCH_CLOCK_NOT_BOUND: {declared['sdc']} clocks port "
+                             f"{port}; the bench drives it from {sig!r}, which no "
+                             f"`always #<half> {sig} = ~{sig};` toggles")
+        half = period_s / 2.0
+        steps = half / prec_s
+        if abs(steps - round(steps)) > 1e-6 * max(1.0, steps):
+            raise ValueError(f"BENCH_PRECISION: half of the declared {period_s:g} s "
+                             f"period is not a multiple of the bench precision "
+                             f"{prec_s:g} s")
+        value = f"{half / unit_s:.9f}".rstrip("0").rstrip(".")
+        m = gens[sig]
+        edits.append((m.start(2), m.end(2), value))
+        info.append({"port": port, "signal": sig, "period_s": period_s,
+                     "bench_half_period": value, "bench_default": m.group(2).strip("() ")})
+    for a, b, value in sorted(edits, reverse=True):
+        tb_text = tb_text[:a] + value + tb_text[b:]
+    return tb_text, {"sdc": declared["sdc"], "unit_source": declared["unit_source"],
+                     "clocks": info}
+
+
+# ---------------------------------------------------------------------------
+# F21 — every SDF record the simulator refused, by class.
+#
+# MEASURED on spm x gf180mcuD, vibeic-eda 0.3.79 (Icarus 14.0 devel
+# 07454266b): 63 `SDF ERROR` per case, 315 per corner, two classes, both the
+# TOOL's (isolated probes reproduce each on a two-cell design):
+#
+#  IFNONE_EDGE_PATH_DROPPED (62): the cell models write `ifnone (posedge A1
+#    => (Z:A1))`. Icarus's parser answers `sorry: ifnone with an
+#    edge-sensitive path is not supported.` and DROPS the path, so the cell has
+#    no A1->Z module path and every SDF IOPATH for it is `Unable to match
+#    ModPath`. Fixed in the fork: vibeic/iverilog PR (IFNONE_FORK below).
+#  INOUT_PORT_INTERCONNECT (1): `(INTERCONNECT u_pad_p.PAD p ...)`: Icarus's
+#    -ginterconnect isolates only input/output ports, never an inout one, so a
+#    bidirectional pad terminal has no net to put the delay on (`Could not
+#    find intermodpath!`). A delay on a bidirectional net is a feature Icarus
+#    does not have: vibeic/iverilog draft PR with the reproducer (INOUT_FORK below).
+#
+# A record is EXPLAINED only when this run's own artefacts prove the cause: the
+# compile log's `sorry` names the model line of that cell's `ifnone` path; the
+# SDF line names an endpoint the model/netlist declares `inout`. Anything else
+# is unexplained, and an unexplained record fails the corner.
+# ---------------------------------------------------------------------------
+
+IFNONE_FORK = "https://github.com/vibeic/iverilog/pull/4"
+INOUT_FORK = "https://github.com/vibeic/iverilog/pull/5"
+SDF_ERROR_CLASSES = {
+    "IFNONE_EDGE_PATH_DROPPED": {
+        "owner": "tool:iverilog", "fork": IFNONE_FORK,
+        "why": "the model's `ifnone` edge-sensitive path was dropped by the "
+               "parser (`sorry` in the compile log), so the SDF arc has no "
+               "module path to land on"},
+    "INOUT_PORT_INTERCONNECT": {
+        "owner": "tool:iverilog", "fork": INOUT_FORK,
+        "why": "-ginterconnect cannot put a delay on an inout port's net"},
+}
+_SDF_ERROR_LINE_RE = re.compile(r"^SDF ERROR: (.+?):(\d+): (.*)$", re.M)
+_MODPATH_MSG_RE = re.compile(
+    r"^Unable to match ModPath (?:(posedge|negedge) )?(\S+) -> (\S+) in ")
+_IFNONE_SORRY_RE = re.compile(
+    r"^(.+?):(\d+): sorry: ifnone with an edge-sensitive path is not supported\.",
+    re.M)
+_IFNONE_EDGE_PATH_RE = re.compile(
+    r"\bifnone\s*(?://[^\n]*\n\s*)*\(\s*(?:(?:posedge|negedge)\s+)?([A-Za-z_][\w$]*)"
+    r"\s*[+-]?\s*[=*]>\s*\(\s*([A-Za-z_][\w$]*)\s*[+-]?\s*:")
+_SDF_CELLTYPE_RE = re.compile(r"\(\s*CELLTYPE\s+\"([^\"]+)\"\s*\)")
+_SDF_DIVIDER_RE = re.compile(r"\(\s*DIVIDER\s+(\S)\s*\)")
+_SDF_INTERCONNECT_RE = re.compile(r"\(\s*INTERCONNECT\s+(\S+)\s+(\S+)")
+_PORT_DECL_RE = re.compile(
+    r"\b(input|output|inout)\b\s*(?:wire\b|reg\b|tri\b)?\s*(?:\[[^\]]*\]\s*)?"
+    r"([A-Za-z_][\w$]*(?:\s*,\s*[A-Za-z_][\w$]*)*)")
+
+
+class SdfErrorExplainer:
+    """The netlist and the models, parsed once for every transcript of a run."""
+
+    def __init__(self, netlist_text: str, models: Dict[str, str]):
+        self.masters = {name: master for name, (master, _)
+                        in _instances(netlist_text).items()}
+        top = _netlist_top(netlist_text)
+        self.top_dirs = (self._dirs(re.search(
+            r"(?ms)^\s*module\s+" + re.escape(top[0]) + r"\b(.*?)\bendmodule\b",
+            netlist_text).group(0)) if top else {})
+        self.modules: Dict[str, Tuple[str, str, int]] = {}
+        for path, text in models.items():
+            for m in re.finditer(r"(?m)^\s*module\s+([A-Za-z_][\w$]*)\b", text):
+                if m.group(1) in self.modules:
+                    continue
+                stop = text.find("endmodule", m.end())
+                self.modules[m.group(1)] = (
+                    Path(path).name, text[m.start():stop if stop > 0 else None],
+                    text.count("\n", 0, m.start()) + 1)
+
+    @staticmethod
+    def _dirs(text: str) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        for m in _PORT_DECL_RE.finditer(strip_comments(text)):
+            for name in m.group(2).split(","):
+                out.setdefault(name.strip(), m.group(1))
+        return out
+
+    def ifnone_paths(self, cell: str) -> Dict[Tuple[str, str], List[Tuple[str, int]]]:
+        """{(src, dst): [(model file name, line of its `ifnone`)]} of a cell."""
+        if cell not in self.modules:
+            return {}
+        fname, text, first = self.modules[cell]
+        out: Dict[Tuple[str, str], List[Tuple[str, int]]] = {}
+        for m in _IFNONE_EDGE_PATH_RE.finditer(text):
+            out.setdefault((m.group(1), m.group(2)), []).append(
+                (fname, first + text.count("\n", 0, m.start())))
+        return out
+
+    def endpoint_dir(self, name: str, divider: str) -> Optional[str]:
+        parts = re.split(r"(?<!\\)" + re.escape(divider), name)
+        if len(parts) == 1:
+            return self.top_dirs.get(name.replace("\\", ""))
+        inst = divider.join(parts[:-1]).replace("\\", "")
+        master = self.masters.get(inst)
+        if master not in self.modules:
+            return None
+        return self._dirs(self.modules[master][1]).get(parts[-1])
+
+
+def classify_sdf_errors(transcript: str, *, compile_log: str, sdf_text: str,
+                        explainer: SdfErrorExplainer) -> Dict[str, object]:
+    """Every `SDF ERROR` of one simulation, by class; the rest unexplained."""
+    _instrument_calibration.assert_calibrated("sdf_gate_sim::classify_sdf_errors")
+    sorry = {(Path(m.group(1)).name, int(m.group(2)))
+             for m in _IFNONE_SORRY_RE.finditer(compile_log or "")}
+    lines = (sdf_text or "").splitlines()
+    divider = (_SDF_DIVIDER_RE.search(sdf_text[:4096] if sdf_text else "")
+               or re.match(r"(.)", "."))
+    cells: List[Tuple[int, str]] = []
+    for idx, line in enumerate(lines, 1):
+        m = _SDF_CELLTYPE_RE.search(line)
+        if m:
+            cells.append((idx, m.group(1)))
+    by_class: Dict[str, int] = {}
+    unexplained: List[str] = []
+    for m in _SDF_ERROR_LINE_RE.finditer(transcript or ""):
+        lineno, msg = int(m.group(2)), m.group(3)
+        cls = None
+        mp = _MODPATH_MSG_RE.match(msg)
+        if mp:
+            cell = next((c for start, c in reversed(cells) if start <= lineno), None)
+            dropped = explainer.ifnone_paths(cell or "").get((mp.group(2), mp.group(3)), [])
+            if any(site in sorry for site in dropped):
+                cls = "IFNONE_EDGE_PATH_DROPPED"
+        elif msg.startswith("Could not find intermodpath") and 0 < lineno <= len(lines):
+            ic = _SDF_INTERCONNECT_RE.search(lines[lineno - 1])
+            if ic and "inout" in (explainer.endpoint_dir(ic.group(1), divider.group(1)),
+                                  explainer.endpoint_dir(ic.group(2), divider.group(1))):
+                cls = "INOUT_PORT_INTERCONNECT"
+        if cls:
+            by_class[cls] = by_class.get(cls, 0) + 1
+        else:
+            unexplained.append(m.group(0))
+    return {"total": sum(by_class.values()) + len(unexplained),
+            "by_class": by_class, "unexplained": len(unexplained),
+            "unexplained_samples": unexplained[:5]}
 
 
 def _module_defs(path: Path) -> Dict[str, bool]:
     """{module/primitive name: has behaviour} for one Verilog model file."""
     try:
-        text = strip_comments(path.read_text(errors="replace"))
+        return _module_defs_text(path.read_text(errors="replace"))
     except OSError:
         return {}
+
+
+def _module_defs_text(raw: str) -> Dict[str, bool]:
+    text = strip_comments(raw)
     return {m.group(2): (m.group(1) == "primitive"
                          or bool(_BEHAVIOUR_RE.search(m.group(3)))
                          or any(word not in _DECLARATION_WORDS for word in
@@ -1772,19 +2262,36 @@ def verilog_model_closure(declared: List[Path], used_cells: set
         for cand in [path] + sorted(path.parent.glob("*.v")):
             if cand not in candidates and cand.is_file():
                 candidates.append(cand)
-    defs = {path: _module_defs(path) for path in candidates}
+    texts: Dict[str, str] = {}
+    for cand in candidates:
+        try:
+            texts[str(cand)] = cand.read_text(errors="replace")
+        except OSError:
+            texts[str(cand)] = ""
+    return verilog_model_closure_of_texts([str(c) for c in candidates], texts,
+                                          used_cells)
 
-    def provider(name: str) -> Optional[Path]:
+
+def verilog_model_closure_of_texts(candidates: List[str], texts: Dict[str, str],
+                                   used_cells: set,
+                                   owned: Optional[Dict[str, str]] = None
+                                   ) -> Dict[str, object]:
+    """`verilog_model_closure` over files already read (`texts`), in the
+    candidate order given. `owned` names modules a model the caller already
+    compiles defines ({name: file}); a candidate redefining one is a clash."""
+    defs = {path: _module_defs_text(texts.get(path, "")) for path in candidates}
+
+    def provider(name: str) -> Optional[str]:
         for want in (True, False):
             for path in candidates:
                 if defs[path].get(name) is want:
                     return path
         return None
 
-    chosen: List[Path] = []
-    owner: Dict[str, Path] = {}
+    chosen: List[str] = []
+    owner: Dict[str, str] = dict(owned or {})
     clashes: List[Dict[str, object]] = []
-    resolved: Dict[str, Path] = {}
+    resolved: Dict[str, str] = {}
     queue = sorted(used_cells)
     while queue:
         name = queue.pop()
@@ -1804,30 +2311,37 @@ def verilog_model_closure(declared: List[Path], used_cells: set
                 continue
             chosen.append(path)
             owner.update({m: path for m in defs[path]})
-            text = strip_comments(path.read_text(errors="replace"))
+            text = strip_comments(texts.get(path, ""))
             queue += [m for m in re.findall(
                 r"^\s*([A-Za-z_][\w$]*)\s*(?:#\s*\([^;]*?\)\s*)?"
                 r"(?:[A-Za-z_][\w$]*\s*)?\(", text, re.MULTILINE)
                 if m not in resolved and m not in _VERILOG_NON_CELL_WORDS]
         resolved[name] = path
-    return {"files": [str(p) for p in candidates if p in chosen],
+    return {"files": [p for p in candidates if p in chosen],
             "unresolved": sorted(c for c in used_cells if c not in resolved),
             "blackboxed": sorted(c for c in used_cells if c in resolved
+                                 and c in defs.get(resolved[c], {})
                                  and defs[resolved[c]].get(c) is False),
             "clashes": clashes}
 
 
 def tool_arm_manifest(project: Path, top: str, netlist: Path,
                       declared_models: List[Path], out: Path,
-                      *, path_map: Optional[Dict[str, str]] = None) -> Dict[str, object]:
+                      *, sdc: Path, sdfs: List[Path],
+                      path_map: Optional[Dict[str, str]] = None) -> Dict[str, object]:
     """What `Vibeic.GateLevelSim` runs: the run's executed L10 cases bound to
-    the netlist the tool timed, with the SDF path left as a placeholder, and
-    the model closure. `path_map` rewrites host model paths to the paths the
-    image sees (`{host_prefix: container_prefix}`)."""
+    the netlist the tool timed (`declared_dut_binding`) and clocked at the
+    period of the SDC it timed against (`bind_bench_clock`), with the SDF path
+    left as a placeholder, and the model closure. `path_map` rewrites host
+    model paths to the paths the image sees (`{host_prefix: container_prefix}`).
+    A binding or a clock this run does not declare refuses the whole arm."""
     suite = find_l10_executed_cases(project, top)
     if not suite or not suite.get("cases"):
         raise ValueError("no executed L10 case to re-run at gate level")
     ntext = netlist.read_text(errors="replace")
+    declared = declared_dut_binding(project, top, ntext)
+    clocks = declared_sdc_clocks(sdc, [Path(f).read_text(errors="replace")
+                                       for f in sdfs])
     used = netlist_used_cells(ntext)
     closure = verilog_model_closure(declared_models, used)
     models_text = "".join(Path(f).read_text(errors="replace") for f in closure["files"])
@@ -1842,7 +2356,9 @@ def tool_arm_manifest(project: Path, top: str, netlist: Path,
         cid = str(case["id"])
         try:
             text, binding = bind_dut_module(str(case["text"]), top,
-                                            str(case["dut_instance"]), ntext)
+                                            str(case["dut_instance"]), ntext,
+                                            declared)
+            text, clock = bind_bench_clock(text, str(case["dut_instance"]), clocks)
             text = inject_sdf_annotation(text, str(case["module"]),
                                          str(case["dut_instance"]), SDF_PLACEHOLDER)
         except ValueError as exc:
@@ -1852,7 +2368,7 @@ def tool_arm_manifest(project: Path, top: str, netlist: Path,
         tb = out / f"{cid}_tb.v"
         _aa.write_text(tb, text)
         cases.append({"id": cid, "module": str(case["module"]),
-                      "testbench": str(tb), "binding": binding})
+                      "testbench": str(tb), "binding": binding, "clock": clock})
 
     def _mapped(p: str) -> str:
         for host, guest in (path_map or {}).items():
@@ -1863,7 +2379,9 @@ def tool_arm_manifest(project: Path, top: str, netlist: Path,
                 "netlist": str(netlist), "cases": cases, "not_a_subject": refused,
                 "models": [_mapped(f) for f in closure["files"]],
                 "stubs": str(stub_path), "sdf_placeholder": SDF_PLACEHOLDER,
-                "model_closure": closure, "declared": suite.get("declared")}
+                "model_closure": closure, "declared": suite.get("declared"),
+                "dut_binding": declared,
+                "clock": {k: v for k, v in clocks.items()}}
     _aa.write_text(out / "gls_manifest.json", json.dumps(manifest, indent=2) + "\n")
     return manifest
 
@@ -1873,25 +2391,39 @@ def judge_tool_arm(step_dir: Path, manifest: Dict[str, object]) -> Dict[str, obj
     `Vibeic.GateLevelSim` wrote. A corner PASSes only when every case passed,
     at least one delay was applied, and the simulator refused NO SDF record."""
     runs = json.loads((step_dir / "gls_runs.json").read_text())
+    explainer = _explainer_for(Path(str(manifest.get("netlist") or "")),
+                               (manifest.get("model_closure") or {}).get("files") or [])
+    sdf_texts: Dict[str, str] = {}
     corners: Dict[str, Dict[str, object]] = {}
     for row in runs.get("runs") or []:
         corner = corners.setdefault(str(row["corner"]), {
             "sdf": row.get("sdf"), "cases": [], "delays_applied": 0,
-            "sdf_errors": 0, "modpath_unmatched": 0})
+            "sdf_errors": 0, "sdf_errors_by_class": {},
+            "sdf_errors_unexplained": 0, "modpath_unmatched": 0})
         stdout = Path(str(row.get("stdout") or ""))
         text = stdout.read_text(errors="replace") if stdout.is_file() else ""
         parsed = (parse_l10_case_stdout(text) if row.get("compile_rc") == 0
                   else {"verdict": None, "passed": 0, "total": 0, "marker": None})
         census = sdf_annotation_census(text)
         errors = sdf_error_count(text)
+        if str(row.get("sdf")) not in sdf_texts:
+            sdf_texts[str(row.get("sdf"))] = _read_or_empty(Path(str(row.get("sdf"))))
+        classes = classify_sdf_errors(
+            text, compile_log=_read_or_empty(Path(str(row.get("compile_log") or ""))),
+            sdf_text=sdf_texts[str(row.get("sdf"))], explainer=explainer)
         corner["delays_applied"] += census["delays_applied"]
         corner["sdf_errors"] += errors
+        for cls, n in classes["by_class"].items():
+            corner["sdf_errors_by_class"][cls] = corner["sdf_errors_by_class"].get(cls, 0) + n
+        corner["sdf_errors_unexplained"] += classes["unexplained"]
         corner["modpath_unmatched"] += census["modpath_unmatched"]
         case = {"id": row["case"], "verdict": parsed.get("verdict"),
                 "passed": parsed.get("passed"), "total": parsed.get("total"),
                 "compile_rc": row.get("compile_rc"), "sim_rc": row.get("sim_rc"),
                 "sdf_delays_applied": census["delays_applied"],
-                "sdf_errors": errors}
+                "sdf_errors": errors, "sdf_errors_by_class": classes["by_class"],
+                "sdf_errors_unexplained": classes["unexplained"],
+                "unexplained_samples": classes["unexplained_samples"]}
         if row.get("compile_rc") != 0:
             case["detail"] = "did not compile against the gate netlist"
         elif parsed.get("verdict") is None:
@@ -1907,7 +2439,9 @@ def judge_tool_arm(step_dir: Path, manifest: Dict[str, object]) -> Dict[str, obj
             reasons.append("CASE_FAIL")
         if not corner["delays_applied"]:
             reasons.append("SDF_NOT_ANNOTATED")
-        if corner["sdf_errors"]:
+        if corner["sdf_errors_unexplained"]:
+            # F21: an EXPLAINED record (SDF_ERROR_CLASSES) is the named tool
+            # limit its class links; only an unexplained one fails the corner.
             reasons.append("SDF_ERRORS")
         corner["verdict"] = ("PASS" if not reasons else
                              "NOT_EXECUTED" if reasons == ["NOT_EXECUTED"] else "FAIL")
@@ -1920,7 +2454,47 @@ def judge_tool_arm(step_dir: Path, manifest: Dict[str, object]) -> Dict[str, obj
             "corners_covered": sorted(corners),
             "cases": [c["id"] for c in manifest.get("cases") or []],
             "not_a_subject": manifest.get("not_a_subject") or [],
-            "compile_flags": manifest.get("compile_flags")}
+            "compile_flags": manifest.get("compile_flags"),
+            "sdf_error_classes": SDF_ERROR_CLASSES,
+            "dut_binding": manifest.get("dut_binding"),
+            "clock": manifest.get("clock")}
+
+
+def _read_or_empty(path: Path) -> str:
+    try:
+        return path.read_text(errors="replace") if path.is_file() else ""
+    except OSError:
+        return ""
+
+
+def _explainer_for(netlist: Path, model_files: List[str]) -> "SdfErrorExplainer":
+    return SdfErrorExplainer(_read_or_empty(netlist),
+                             {str(f): _read_or_empty(Path(str(f))) for f in model_files})
+
+
+def _sdf_error_class_line(row: Dict[str, object]) -> str:
+    parts = [f"{cls} {n} (owner {SDF_ERROR_CLASSES[cls]['owner']}, "
+             f"{SDF_ERROR_CLASSES[cls]['fork']})"
+             for cls, n in sorted((row.get("sdf_errors_by_class") or {}).items())]
+    return (f"sdf errors by class: {', '.join(parts) or 'none'}; "
+            f"unexplained {row.get('sdf_errors_unexplained') or 0}")
+
+
+def _binding_line(binding: Optional[Dict[str, object]]) -> str:
+    if not binding:
+        return "-"
+    if not binding.get("rebound"):
+        return f"{binding.get('dut_module')} (the routed netlist defines it)"
+    return (f"{binding.get('from')} -> {binding.get('dut_module')}, declared by "
+            f"{binding.get('source')}")
+
+
+def _clock_line(clock: Optional[Dict[str, object]]) -> str:
+    if not clock:
+        return "-"
+    return ", ".join(f"{port} {period * 1e9:g} ns" for port, period
+                     in sorted((clock.get("clocks_s") or {}).items())) + \
+        f" (from {clock.get('sdc')}; unit: {clock.get('unit_source')})"
 
 
 def write_tool_arm_results(sim_dir: Path, judged: Dict[str, object], top: str
@@ -1937,6 +2511,8 @@ def write_tool_arm_results(sim_dir: Path, judged: Dict[str, object], top: str
              f"design           : {top}",
              "sdf source       : LibreLane OpenROAD.STAPostPNR, one SDF per STA corner",
              f"compile flags    : {judged.get('compile_flags')}",
+             f"dut binding      : {_binding_line(judged.get('dut_binding'))}",
+             f"bench clock      : {_clock_line(judged.get('clock'))}",
              f"corners          : {len(judged.get('corners') or {})}", ""]
     for name, corner in sorted((judged.get("corners") or {}).items()):
         sdf = Path(str(corner.get("sdf") or ""))
@@ -1948,6 +2524,7 @@ def write_tool_arm_results(sim_dir: Path, judged: Dict[str, object], top: str
         lines.append(f"sdf annotation: {corner.get('delays_applied')} delay(s) applied, "
                      f"{corner.get('sdf_errors')} SDF ERROR record(s) "
                      f"({corner.get('modpath_unmatched')} unmatched ModPath)")
+        lines.append(_sdf_error_class_line(corner))
         for case in corner.get("cases") or []:
             lines.append(f"  {case['id']:<40} {case.get('verdict') or 'NOT_EXECUTED':<12} "
                          f"{case.get('detail') or ''}".rstrip())

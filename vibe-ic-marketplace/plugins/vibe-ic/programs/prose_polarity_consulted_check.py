@@ -149,6 +149,15 @@ _NOT_PROSE: Dict[str, str] = {
         "(inert, or kept on its schematic subckt and named), never promoted to "
         "the layout view. Falsifier: tests/test_f22_spice_corr.py"
         "::test_the_not_prose_claim_for_the_subckt_reader_is_falsifiable.",
+    "sdf_gate_sim::declared_dut_binding":
+        "TWO MACHINE GRAMMARS, NO SENTENCE. The chip-top Verilog is the "
+        "structural netlist `io_pad_chip_top_gen` wrote (comments stripped "
+        "first): `module <name>`, `<master> <instance> (.pin(net), ...);` and "
+        "`net[bit]` references, read only to TRACE a core port through a pad "
+        "to a chip port; the record is that producer's JSON. Verilog has no "
+        "negated connection to spell, and every link that does not trace "
+        "REFUSES (NO_DECLARED_CHIP_TOP, CORE_PORT_NOT_TRACEABLE, "
+        "CHIP_PORT_NOT_ROUTED) instead of binding by name.",
     "librelane_signoff::agreement":
         "TWO MACHINE GRAMMARS, NO SENTENCE. `Reading cell library for the "
         "'<corner>' corner at '<path>'` is LibreLane 3.1 sta/corner.tcl's own "

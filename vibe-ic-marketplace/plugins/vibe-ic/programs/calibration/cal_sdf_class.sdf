@@ -1,0 +1,77 @@
+(DELAYFILE
+ (SDFVERSION "3.0")
+ (DESIGN "cal_sdf_class")
+ (DATE "Sat Sep 26 18:48:15 2026")
+ (VENDOR "Parallax")
+ (PROGRAM "STA")
+ (VERSION "3.1.0")
+ (DIVIDER .)
+ (TIMESCALE 1ns)
+ (CELL
+  (CELLTYPE "cal_sdf_class")
+  (INSTANCE)
+  (DELAY
+   (ABSOLUTE
+    (INTERCONNECT a u0.I0 (0.000:0.000:0.000))
+    (INTERCONNECT b u0.I1 (0.000:0.000:0.000))
+    (INTERCONNECT s u0.S (0.000:0.000:0.000))
+    (INTERCONNECT oe u_pad.OE (0.000:0.000:0.000))
+    (INTERCONNECT ie u_pad.CS (0.000:0.000:0.000))
+    (INTERCONNECT ie u_pad.SL (0.000:0.000:0.000))
+    (INTERCONNECT ie u_pad.IE (0.000:0.000:0.000))
+    (INTERCONNECT ie u_pad.PU (0.000:0.000:0.000))
+    (INTERCONNECT ie u_pad.PD (0.000:0.000:0.000))
+    (INTERCONNECT u0.Z u_pad.A (0.000:0.000:0.000))
+    (INTERCONNECT u_pad.PAD p (0.000:0.000:0.000))
+   )
+  )
+ )
+ (CELL
+  (CELLTYPE "gf180mcu_fd_sc_mcu7t5v0__mux2_2")
+  (INSTANCE u0)
+  (DELAY
+   (ABSOLUTE
+    (IOPATH I0 Z (0.413:0.420:0.428) (0.482:0.485:0.488))
+    (COND I1===1'b1
+     (IOPATH I0 Z (0.413:0.420:0.428) (0.482:0.485:0.488)))
+    (COND I1===1'b0
+     (IOPATH I0 Z (0.413:0.420:0.428) (0.482:0.485:0.488)))
+    (IOPATH I1 Z (0.413:0.420:0.428) (0.486:0.489:0.492))
+    (COND I0===1'b1
+     (IOPATH I1 Z (0.413:0.420:0.428) (0.486:0.489:0.492)))
+    (COND I0===1'b0
+     (IOPATH I1 Z (0.413:0.420:0.428) (0.486:0.489:0.492)))
+    (IOPATH S Z (0.374:0.382:0.390) (0.425:0.428:0.432))
+    (IOPATH S Z (0.483:0.491:0.499) (0.510:0.513:0.517))
+   )
+  )
+ )
+ (CELL
+  (CELLTYPE "gf180mcu_fd_io__bi_24t")
+  (INSTANCE u_pad)
+  (DELAY
+   (ABSOLUTE
+    (COND CS==1'b1&&OE==1'b0&&PAD==1'b1
+     (IOPATH IE Y (1.374:1.374:1.374) (1.126:1.126:1.126)))
+    (COND CS==1'b0&&OE==1'b0&&PAD==1'b1
+     (IOPATH IE Y (1.319:1.319:1.319) (1.072:1.072:1.072)))
+    (COND A==1'b0&&IE==1'b0&&SL==1'b1
+     (IOPATH OE PAD () (1.094:1.094:1.094)))
+    (COND A==1'b0&&IE==1'b0&&SL==1'b0
+     (IOPATH OE PAD () (1.102:1.102:1.102)))
+    (COND A==1'b1&&IE==1'b0&&SL==1'b1
+     (IOPATH OE PAD (1.522:1.522:1.522)))
+    (COND A==1'b1&&IE==1'b0&&SL==1'b0
+     (IOPATH OE PAD (1.578:1.578:1.578)))
+    (COND IE==1'b0&&OE==1'b1&&SL==1'b1
+     (IOPATH A PAD (1.805:1.807:1.809) (1.939:1.941:1.942)))
+    (COND IE==1'b0&&OE==1'b1&&SL==1'b0
+     (IOPATH A PAD (1.867:1.869:1.870) (1.954:1.956:1.957)))
+    (COND CS==1'b1&&IE==1'b1&&OE==1'b0
+     (IOPATH PAD Y (1.018:1.018:1.018) (1.278:1.278:1.278)))
+    (COND CS==1'b0&&IE==1'b1&&OE==1'b0
+     (IOPATH PAD Y (0.951:0.951:0.951) (0.813:0.813:0.813)))
+   )
+  )
+ )
+)

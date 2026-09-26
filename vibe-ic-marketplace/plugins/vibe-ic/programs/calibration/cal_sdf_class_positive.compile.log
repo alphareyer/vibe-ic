@@ -1,0 +1,2 @@
+cal_sdf_class_cells.v:105: sorry: ifnone with an edge-sensitive path is not supported.
+cal_sdf_class_cells.v:109: sorry: ifnone with an edge-sensitive path is not supported.
