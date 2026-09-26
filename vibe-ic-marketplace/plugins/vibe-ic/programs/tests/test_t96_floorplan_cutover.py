@@ -336,3 +336,38 @@ def test_the_sdr_tap_rung_never_rips_up_the_tools_taps(tmp_path):
         str(tmp_path), 'BUF_X1', stage='postroute_drv_repair', pdk=pdk,
         filler_spec={**spec, 'welltie_repair_tcl': 'puts DIRECT_WELLTIE_REPAIR\n'})
     assert 'tapcell_ripup' in direct
+
+
+def test_the_isolated_antenna_eco_puts_the_fillers_back(tmp_path, monkeypatch):
+    """The deck clears every filler site before `repair_antennas`; the tail that
+    adopts its candidate resumes after the antenna stage (the only other
+    refill), so the candidate must carry the PnR's own refill -- measured on
+    spm: 0 fillers shipped, 321 sign-off markers at the one-site gaps."""
+    import test_antenna_scoped_drc_full_route_recovery as scoped
+    spec = {'filler_masters': ['fx__fill_2', 'fx__fill_1'], 'slot_pinned_core': False,
+            'design_declared_die': True, 'sparse_active_row_fill': True,
+            'welltie_repair_tcl': ''}
+    real = runner._pnr_rollback_refused_antenna_repair
+    import functools
+    monkeypatch.setattr(runner, '_pnr_rollback_refused_antenna_repair',
+                        functools.partial(real, filler_spec=spec))
+    rec, _calls, out = scoped._run(tmp_path, monkeypatch, refusal=scoped._SCOPED_DAMAGE)
+    assert rec['status'] == 'RECOVERED'
+    tcl = (out / 'pnr_antenna_isolated_retry.tcl').read_text()
+    refill = runner._postroute_filler_bracket_from_spec('ANTENNA_ISOLATED', spec)[1]
+    assert refill and 'filler_placement' in refill and 'ANTENNA_ISOLATED_REFILL_DONE' in refill
+    # after every move / wire / placement check, before the candidate is written
+    assert (tcl.index('ANTENNA_ISOLATED_VERIFIED') < tcl.index(refill)
+            < tcl.index('write_db /w/pnr/antenna_isolated_candidate.odb'))
+    assert tcl.index('remove_fillers') < tcl.index('repair_antennas')
+    # no spec (a direct call of the builder): the deck is what it was
+    bare = runner._antenna_isolated_scoped_retry_tcl('/s.odb', '/c.odb', 'D')
+    assert 'filler_placement' not in bare
+
+
+def test_step_pnr_hands_its_filler_facts_to_the_antenna_rollback():
+    import inspect
+    src = inspect.getsource(runner.step_pnr)
+    call = src[src.index('_pnr_rollback_refused_antenna_repair('):]
+    call = call[:call.index('if _ant_roll.get(')]
+    assert 'filler_spec=_postroute_filler_spec' in call

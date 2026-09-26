@@ -34124,13 +34124,29 @@ def _antenna_isolated_scoped_retry_tcl(seed_c: str, candidate_c: str,
                                        diode_cell: str, *,
                                        move_net: str = "",
                                        move_steps: int = 0,
-                                       marker_box: Optional[Tuple[float, float, float, float]] = None) -> str:
+                                       marker_box: Optional[Tuple[float, float, float, float]] = None,
+                                       refill_tcl: str = "") -> str:
     """Repair the saved ODB without replaying the PnR tail's route setup.
 
     The diode insertion is scoped by OpenROAD to violating nets. The saved
     wires of every other net are checked before the candidate can be written.
     A fresh process also prevents the live session's transient route state from
     deleting unrelated wires while the scoped router reports them held fixed.
+
+    T96 — THE FILLERS GO BACK. The deck clears every filler site before the
+    repair (`remove_fillers`), and the tail that adopts the candidate resumes
+    AFTER the antenna stage, whose own bracket is the only refill, while
+    `postroute_fill` assumes the pre-route fillers are still in (R-0915-105).
+    MEASURED on spm (LibreLane 15..20 chain, 0.3.79): the adopted candidate
+    and the shipped `spm.def` carried 0 fillers (7,318 before the pass), and
+    the sign-off deck read 321 KLayout markers (DF.13_MV 86, NW.2b_LV 62,
+    PP.2 54, NP.2 51, DV.5 33) at the one-site gaps left beside fillties and
+    cells; the direct arm lost them the same way and was masked only when the
+    sign-off SPEF repair's own refill was promoted. ``refill_tcl`` is the
+    PnR's own post-route filler refill (`_postroute_filler_bracket_from_spec`,
+    the same facts `preroute_fill` used), run after every move/wire/placement
+    check, so it adds instances and moves none, before the candidate is
+    written.
     """
     move = ""
     if move_net:
@@ -34249,6 +34265,7 @@ def _antenna_isolated_scoped_retry_tcl(seed_c: str, candidate_c: str,
         "}\n"
         "puts \"ANTENNA_ISOLATED_VERIFIED: lost=0 held_shrunk=0 "
         "moved=0 placement=0 antenna=0\"\n"
+        + refill_tcl +
         f"write_db {candidate_c}\n"
         f"write_def {candidate_c}.def\n"
     )
@@ -34329,6 +34346,8 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
                                          hard_ceiling_s: int,
                                          antenna_diode_cell: Optional[str] = None,
                                          spare_plan: Optional[Dict[str, Any]]
+                                         = None,
+                                         filler_spec: Optional[Dict[str, Any]]
                                          = None) -> Dict[str, Any]:
     """Re-enter the post-route tail from the pre-repair checkpoint.
 
@@ -34423,7 +34442,9 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
                     seed_c, candidate_c, antenna_diode_cell,
                     move_net=move_net if trial else "",
                     move_steps=steps,
-                    marker_box=marker_box if trial else None)
+                    marker_box=marker_box if trial else None,
+                    refill_tcl=_postroute_filler_bracket_from_spec(
+                        "ANTENNA_ISOLATED", filler_spec)[1])
                 (out_dir / isolated_name).write_text(isolated)
                 isolated_cmd = (
                     f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
@@ -38814,7 +38835,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             container=container, out_dir=out_dir, out_dir_c=out_dir_c,
             pnr_tcl=pnr_tcl, log_text=(out or "") + (err or ""),
             hard_ceiling_s=_pnr_ceiling, spare_plan=spare_plan,
-            antenna_diode_cell=pdk.antenna_diode_cell)
+            antenna_diode_cell=pdk.antenna_diode_cell,
+            filler_spec=_postroute_filler_spec)
         if _ant_roll.get("status") != "NOT_REQUESTED":
             _ant_roll_records.append(_ant_roll)
             if _ant_roll.get("status") in ("ROLLED_BACK", "RECOVERED"):
