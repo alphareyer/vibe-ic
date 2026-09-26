@@ -20,6 +20,13 @@ Two owner rulings on the gate F9 wired:
 
 Real Yosys (host, else the EDA image), as in test_f9. ``tempfile.mkdtemp``
 rather than ``tmp_path``: in the EDA image ``tmp_path`` carries a newline.
+
+THE IMAGE IS STATED (``_stated_eda_image``), not asked of this host: every
+in-process resolution in this module answers the stated identity. The gate's
+own Yosys runs in a child process: inside the image (no docker) it uses the
+image's Yosys and resolves no image at all; on a docker host without Yosys the
+child resolves the image it runs, as production does. The stated digest is
+not a real image, so handing it to that child would make it run nothing.
 """
 import json
 import shutil
@@ -33,6 +40,7 @@ import yaml
 PLUGIN = Path(__file__).resolve().parents[2]
 PROGRAMS = PLUGIN / 'programs'
 sys.path.insert(0, str(PROGRAMS))
+sys.path.insert(0, str(PROGRAMS / 'tests'))
 import flow_compliance_check as fcc  # noqa: E402
 import flow_gate_enforcement_audit as AUDIT  # noqa: E402
 
@@ -46,6 +54,12 @@ L2_DECLARES_SERV = {'cpu_isa': 'rv32i', 'cpu_arch': 'bit-serial',
                     'description': 'The design reuses the serv core from the IP catalog.'}
 #: The inline call this change adds to ``main``; a mutation arm deletes exactly it.
 INLINE_CALL = '        plan.append(step_catalog_synth_safe_params(project))\n'
+
+
+@pytest.fixture(autouse=True)
+def _stated_image(monkeypatch):
+    from _stated_eda_image import state_the_image
+    return state_the_image(monkeypatch)
 
 
 @pytest.fixture
