@@ -109,11 +109,13 @@ to be silenced.
 NO SECOND DEFINITION
 ====================
 Path/role policy and the runner profile are DERIVED FROM THE VERIFIER --
-`derived_paths()` and `derived_runner()` -- because a path is protected BECAUSE
-THE VERIFIER READS IT, and re-stating either here would be a second opinion
-about what is protected.  (They were copied out of whatever manifest was
+`derived_paths()` and `derived_runner_profile()` -- because a path is protected
+BECAUSE THE VERIFIER READS IT, and re-stating either here would be a second
+opinion about what is protected.  (They were copied out of whatever manifest was
 already in the tree until `7581f9555`, and a copy of a rule is a rule that can
-drift from itself: at v1.13.3 the copy was v1.12.39's.)  The tuples are observed
+drift from itself: at v1.13.3 the copy was v1.12.39's.)  The runner IMAGE is the
+one field that IS carried from the register, because it is not a rule: it is a
+record the base owns and a PREPARE may not replace (see `base_owned_runner`).  The tuples are observed
 through `protected_landing_transition._observe_files`, the same function the
 verifier uses, and the finished object is handed back to `parse_manifest` before
 it is written.  A manifest this program emits and the verifier refuses is a bug
@@ -250,6 +252,44 @@ def refuse_a_shrink(previous_rows: Any, derived_rows: Any,
             "protected is the failure this check exists for.")
 
 
+def base_owned_runner(transition: Any, live_manifest: Mapping[str, Any]
+                      ) -> dict[str, Any]:
+    """The runner row to write: the PROFILE derived from the verifier, the
+    IMAGE carried from the register the base already holds.
+
+    THE IMAGE WAS ASKED OF THE AUTHORING HOST, AND THE BASE REFUSES THAT ANSWER.
+    `derived_runner()` resolves the image on whatever machine runs this, while
+    `build_receipt` refuses a PREPARE whose runner differs from the base's
+    (`test_prepare_cannot_replace_the_base_owned_runner_digest`) -- so every
+    PREPARE authored on a host holding a newer image than the register records
+    was refused, and the parity test went red on the same tree on some hosts and
+    not others. MEASURED 2026-09-26 on 8hd-3 at 6886af48b: register
+    `@sha256:4215132e…` (0.3.63), host `@sha256:93d88e9e…` (0.3.79). The image is
+    a RECORD the base owns (the EDA image identity is resolved at run time, never
+    carried as policy), so it is read from the register and checked to be one
+    the verifier accepts; it is never re-derived here.
+    """
+    profile = getattr(transition, "derived_runner_profile", None)
+    if profile is None:
+        # A verifier older than the split: its derived row minus the image is
+        # the same profile. Resolving the image there is that verifier's cost.
+        derived = {k: v for k, v in transition.derived_runner().items()
+                   if k != "image"}
+    else:
+        derived = profile()
+    recorded = live_manifest.get("runner")
+    image = recorded.get("image") if isinstance(recorded, Mapping) else None
+    runner = {**derived, "image": image}
+    try:
+        transition._runner_profile(runner, "the base-owned runner image")
+    except Exception as exc:                       # noqa: BLE001 - re-raised
+        raise Refusal(
+            "the register already in the tree records no runner image this "
+            f"verifier accepts ({exc}), and the image is carried from the base, "
+            "never resolved on the authoring host") from exc
+    return runner
+
+
 def render(*, repo: Path, commit: str, transition_id: str, current_id: str,
            next_id: str, moves: dict[str, Path],
            renames: Mapping[str, str] | None = None,
@@ -282,7 +322,7 @@ def render(*, repo: Path, commit: str, transition_id: str, current_id: str,
     # `RUNTIME_PATHS` / `REQUIRED_AUTHORITY_PATHS`; the runner is likewise the
     # profile `_runner_profile` validates against.  See `derived_paths`.
     paths = transition.derived_paths()
-    runner = transition.derived_runner()
+    runner = base_owned_runner(transition, live_manifest)
 
     # A DERIVED SET THAT SILENTLY SHRINKS IS WORSE THAN A STALE ONE.
     #
