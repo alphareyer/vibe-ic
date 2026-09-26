@@ -1055,6 +1055,84 @@ def _materialise_image_pdk(image: str, found: dict[str, str], pdk: str,
     return root, 'copied'
 
 
+#: Pruning keeps the current image's copy and this many previous ones; a copy
+#: is removed only when its image is gone from this host and nothing uses it.
+PDK_ROOT_KEEP_PREVIOUS = 1
+PDK_ROOT_PRUNE_LOG = 'pdk_root_prune.log.jsonl'
+
+
+def _docker_lines(docker: str, *argv: str) -> list[str] | None:
+    """stdout lines of a docker query, or None when docker could not answer."""
+    try:
+        done = subprocess.run([docker, *argv], capture_output=True, text=True)
+    except OSError:
+        return None
+    return None if done.returncode else [l.strip() for l in done.stdout.splitlines() if l.strip()]
+
+
+def prune_pdk_root_cache(current_image_id: str, docker: str = 'docker') -> dict[str, Any]:
+    """Remove cached PDK-root copies whose image is no longer on this host.
+
+    Kept: the current image's copy, the `PDK_ROOT_KEEP_PREVIOUS` most recently
+    made other copies, any copy whose image this host still holds, any copy a
+    running container binds, and any copy still being made. When docker cannot
+    list the host's images or containers nothing is removed (a copy that could
+    not be looked at is never presumed unused). Every decision is appended to
+    `<cache>/pdk_root_prune.log.jsonl` and returned.
+    """
+    cache = _pdk_root_cache()
+    current = current_image_id.split(':', 1)[-1]
+    record: dict[str, Any] = {'cache': str(cache), 'current': current_image_id,
+                              'kept': [], 'removed': [], 'refused': None}
+    try:
+        others = [d for d in cache.iterdir() if d.is_dir() and d.name != current
+                  and re.fullmatch(r'[0-9a-f]{64}', d.name)]
+    except OSError:
+        return record
+    if not others:
+        return record
+
+    def made(d: Path) -> float:
+        return max((m.stat().st_mtime for m in d.glob(f'*{PDK_ROOT_MARKER}')),
+                   default=d.stat().st_mtime)
+    others.sort(key=made, reverse=True)
+    record['kept'] = [{'image_id': f'sha256:{d.name}', 'why': 'previous'}
+                      for d in others[:PDK_ROOT_KEEP_PREVIOUS]]
+    candidates = others[PDK_ROOT_KEEP_PREVIOUS:]
+    held = sources = None
+    if candidates:
+        held = _docker_lines(docker, 'image', 'ls', '--no-trunc', '--format', '{{.ID}}')
+        running = _docker_lines(docker, 'ps', '-q', '--no-trunc')
+        sources = [] if running == [] else (_docker_lines(
+            docker, 'inspect', '--format', '{{range .Mounts}}{{.Source}}\n{{end}}', *running)
+            if running is not None else None)
+    if candidates and (held is None or sources is None):
+        record['refused'] = ('docker could not list the host images or the running '
+                             "containers' mounts; nothing removed")
+    elif candidates:
+        used = {Path(src).relative_to(base).parts[0] for src in sources
+                for base in {cache, cache.resolve()}
+                if Path(src).is_relative_to(base) and Path(src) != base}
+        for d in candidates:
+            why = ('image still on this host' if f'sha256:{d.name}' in held else
+                   'bound by a running container' if d.name in used else
+                   'copy in progress' if any(d.glob('.*.partial-*')) else None)
+            if why:
+                record['kept'].append({'image_id': f'sha256:{d.name}', 'why': why})
+                continue
+            try:
+                shutil.rmtree(d)
+                record['removed'].append({'image_id': f'sha256:{d.name}', 'path': str(d)})
+            except OSError as exc:
+                record['kept'].append({'image_id': f'sha256:{d.name}', 'why': f'remove failed: {exc}'})
+    try:
+        with (cache / PDK_ROOT_PRUNE_LOG).open('a') as log:
+            log.write(json.dumps(record, sort_keys=True) + '\n')
+    except OSError:
+        pass
+    return record
+
+
 def pdk_root_resolution(project: Path | None = None, pdk: str | None = None, *,
                         image: str | None = None, docker: str = 'docker') -> dict[str, Any]:
     """Declared > resolved at run time > refused by name, like `resolve_image`.
@@ -1087,6 +1165,8 @@ def pdk_root_resolution(project: Path | None = None, pdk: str | None = None, *,
             image = image or resolve_image(project)
             found = image_pdk_root(image, docker)
             root, how = _materialise_image_pdk(image, found, str(pdk), docker)
+            # A new copy is when an older image's copy may have become stale.
+            pruned = prune_pdk_root_cache(found['image_id'], docker) if how == 'copied' else None
         except Refusal as exc:
             raise Refusal('LL_PDK_ROOT_NOT_RESOLVABLE',
                           'not declared (switch pdk_root_host / VIBEIC_LIBRELANE_PDK_ROOT) '
@@ -1098,7 +1178,7 @@ def pdk_root_resolution(project: Path | None = None, pdk: str | None = None, *,
                                  'pdk': str(pdk), 'pdk_from': pdk_source,
                                  'guest_path': f"{found['pdk_root']}/{pdk}",
                                  'host_path': str(root / str(pdk)),
-                                 'cache': how}}
+                                 'cache': how, 'cache_prune': pruned}}
     if project is not None and (project / 'phase3').is_dir():
         write_json(project / PDK_ROOT_PROVENANCE_REL, answer)
     return answer

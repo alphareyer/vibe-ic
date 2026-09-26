@@ -12256,7 +12256,8 @@ def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
     """Flow Step 2 lint through the tool: LibreLane Verilator.Lint + its gate.
 
     Opt-in per `phase3/librelane_switch.json` `{"steps": {"2": ...}}`, with
-    the PDK declared there; the image is `librelane_contract.resolve_image`. `direct` (the default) returns None and
+    the PDK declared there; the image is `librelane_contract.resolve_image` and
+    the PDK root `pdk_root_resolution`. `direct` (the default) returns None and
     the step is unchanged. `librelane` judges Verilator.Lint with
     `verilator_lint_gate`; `dual` also runs `rtl_hygiene_lint --severity ERROR`
     and blocks on the union, recording which arm found what. The linted files
@@ -12288,10 +12289,10 @@ def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
         _ll.emit_lint_config(project, str(pdk), config_dir / "lint_config.json",
                              str(top or ""), rtl,
                              "L9_INTEGRATION_SPEC.top_module")
-        mounts, pdk_root = [], None
-        if switch.get("pdk_root_host"):
-            mounts.append((Path(switch["pdk_root_host"]), "/pdk"))
-            pdk_root = "/pdk"
+        # The PDK root through the one resolver (declared > resolved from the
+        # image > refused, naming its cause); never read from the switch here.
+        root = _ll.pdk_root_resolution(project, str(pdk), image=image)["path"]
+        mounts, pdk_root = [(Path(root), "/pdk")], "/pdk"
         resolved = _ll.resolve_step_config(
             project, image, config_dir / "lint_config.json",
             config_dir / "lint_resolved.json", mounts=mounts, pdk_root=pdk_root)
@@ -21003,15 +21004,16 @@ def _lec_eqy_arm(project: Path, top_name: str, gate_netlist: str,
     reports = project / "reports"
     try:
         switch = json.loads((project / "phase3/librelane_switch.json").read_text())
-        image, pdk = switch.get("image"), switch.get("pdk")
-        if not image or not pdk:
+        pdk = switch.get("pdk")
+        if not pdk:
             raise _llc.Refusal("LL_SWITCH_INCOMPLETE",
-                               "step 13 needs image and pdk in phase3/librelane_switch.json")
-        mounts: List[Tuple[Path, str]] = []
-        pdk_root = None
-        if switch.get("pdk_root_host"):
-            mounts.append((Path(switch["pdk_root_host"]), "/pdk"))
-            pdk_root = "/pdk"
+                               "step 13 needs pdk in phase3/librelane_switch.json")
+        # Image and PDK root through the contract's resolvers (declared >
+        # resolved at run time > refused, naming the cause).
+        image = _llc.resolve_image(project)
+        root = _llc.pdk_root_resolution(project, str(pdk), image=image)["path"]
+        mounts: List[Tuple[Path, str]] = [(Path(root), "/pdk")]
+        pdk_root = "/pdk"
         overlay = switch.get("development_eqy_overlay")
         if overlay:
             # Development input only: the released image ships no EQY plugins.
@@ -21712,13 +21714,11 @@ def step_emit_phase2_manifests(project: Path,
         _cdc_src = [f for f in _rtl_files
                     if not any(t in f.name.lower() for t in _skip)]
         _m_top = re.search(r"top module '([^']+)'", _cdc_scope)
-        _switch = json.loads((project / "phase3/librelane_switch.json").read_text())
         _nl_rec: Dict[str, Any] = {"mode": _cdc_mode, "netlist": _cdc_netlist.NETLIST_REL,
                                    "rtl_files": [f.name for f in _cdc_src]}
         try:
             _nl_path = _cdc_netlist.build(project, _cdc_src,
-                                          _m_top.group(1) if _m_top else None,
-                                          image=_switch.get("image"))
+                                          _m_top.group(1) if _m_top else None)
             _nl = _cdc_netlist.load(_nl_path)
             _nl_domains = _cdc_netlist.clock_domains(_nl)
             _nl_rec.update({"verdict": "PASS", "top": _nl.top,

@@ -16711,7 +16711,10 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
         if not liberty_stem or "__" not in liberty_stem:
             raise _ll.Refusal("LL_SCL_UNRESOLVED", str(getattr(pdk, "liberty", "")))
         liberty_path = Path(str(pdk.liberty))
-        pdk_root_host = switch.get("pdk_root_host")
+        # The host PDK root through the contract's resolver (declared >
+        # resolved from the image > refused, naming its cause).
+        pdk_root_host = _ll.pdk_root_resolution(project, str(pdk.name),
+                                                image=image)["path"]
         if pdk_root_host and liberty_path.is_relative_to(Path(pdk_root_host)):
             liberty_guest = "/pdk/" + str(liberty_path.relative_to(Path(pdk_root_host)))
         else:
@@ -56708,19 +56711,14 @@ def _prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
     """
     import librelane_contract as _llc
     import librelane_prelayout as _llp
-    switch = json.loads((project / "phase3/librelane_switch.json").read_text())
-    image = switch.get("image")
-    if not image:
-        raise _llc.Refusal("LL_IMAGE_UNDECLARED",
-                           "phase3/librelane_switch.json needs image")
-    mounts: List[Tuple[Path, str]] = []
-    pdk_root_guest = None
-    if switch.get("pdk_root_host"):
-        root = Path(switch["pdk_root_host"])
-        if not root.is_dir():
-            raise _llc.Refusal("LL_PDK_ROOT_MISSING", str(root))
-        mounts.append((root, "/pdk"))
-        pdk_root_guest = "/pdk"
+    # Image and PDK root through the contract's resolvers (declared >
+    # resolved at run time > refused, naming the cause).
+    image = _llc.resolve_image(project)
+    root = Path(_llc.pdk_root_resolution(project, str(pdk.name), image=image)["path"])
+    if not root.is_dir():
+        raise _llc.Refusal("LL_PDK_ROOT_MISSING", str(root))
+    mounts: List[Tuple[Path, str]] = [(root, "/pdk")]
+    pdk_root_guest = "/pdk"
     netlist = _pl.synth_dir(project) / f"{top}_synth.v"
     rtl = sorted(_pl.rtl_dir(project).glob("*.sv")) + \
         sorted(_pl.rtl_dir(project).glob("*.v"))
@@ -63810,15 +63808,17 @@ _LL_ANTENNA_RECORD = "antenna_librelane.json"
 _LL_SEAL_RECORD = "die_finishing_librelane.json"
 
 
-def _librelane_step_ctx(project: Path, steps: str) -> Tuple[str, Path]:
-    """(image, host PDK root) for a LibreLane step; the root is never guessed."""
+def _librelane_step_ctx(project: Path, steps: str, pdk: str) -> Tuple[str, Path]:
+    """(image, host PDK root) for a LibreLane step, through the contract's
+    resolvers for the design's PDK; the root is never guessed."""
     import librelane_contract as _ll
-    root = _ll.resolve_pdk_root(project)
-    if not root:
+    image = _ll.resolve_image(project)
+    try:
+        root = _ll.pdk_root_resolution(project, pdk, image=image)["path"]
+    except _ll.Refusal as exc:
         raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
-                          f"step(s) {steps} on LibreLane need pdk_root_host in "
-                          "the switch or VIBEIC_LIBRELANE_PDK_ROOT")
-    return _ll.resolve_image(project), Path(root)
+                          f"step(s) {steps} on LibreLane: {exc}") from None
+    return image, Path(root)
 
 
 def _librelane_step24_record(project: Path, top: str, pdk: PdkConfig, mode: str,
@@ -63836,7 +63836,7 @@ def _librelane_step24_record(project: Path, top: str, pdk: PdkConfig, mode: str,
                            "producer": "librelane:OpenROAD.IRDropReport",
                            "def_sha256": _sha256_file(routed)}
     try:
-        image, root = _librelane_step_ctx(project, "24")
+        image, root = _librelane_step_ctx(project, "24", pdk.name)
         declared = getattr(pdk, "ir_budget_pct", None)
         budget = float(declared if declared is not None else _ibc._DEFAULT_BUDGET_PCT)
         source = ("pdk.ir_budget_pct" if declared is not None else
@@ -63934,7 +63934,7 @@ def _librelane_antenna_router(project: Path, top: str, pdk: PdkConfig, mode: str
     routed = pnr / f"{top}.def"
     doc: Dict[str, Any] = {"step": "26", "mode": mode, "def_sha256": _sha256_file(routed)}
     try:
-        image, root = _librelane_step_ctx(project, "26")
+        image, root = _librelane_step_ctx(project, "26", pdk.name)
         router = _la.run_antenna_router(project, image, root, pdk.name, routed_def=routed,
                                         netlist=pnr / f"{top}_pnr.v",
                                         sdc=pnr / "constraint.sdc")
@@ -64014,7 +64014,7 @@ def _librelane_antenna_gds(project: Path, top: str, pdk: PdkConfig, mode: str,
     gds = _pl.pnr_dir(project) / f"{top}.gds"
     routed = _pl.pnr_dir(project) / f"{top}.def"
     try:
-        image, root = _librelane_step_ctx(project, "26")
+        image, root = _librelane_step_ctx(project, "26", pdk.name)
         doc["gds"] = _la.run_antenna_gds(project, image, root, pdk.name, gds=gds)
     except Exception as exc:  # a refusal names itself; nothing falls back
         doc["gds"] = None
@@ -64047,7 +64047,7 @@ def _librelane_sealring(project: Path, pdk: PdkConfig, gds_path: Path,
     arm.mkdir(parents=True, exist_ok=True)
     doc: Dict[str, Any] = {"step": "26.5ic", "mode": mode}
     try:
-        image, root = _librelane_step_ctx(project, "26.5ic")
+        image, root = _librelane_step_ctx(project, "26.5ic", pdk.name)
         rect, basis = declared_die_rect(project)
         if not rect:
             raise RuntimeError(f"LL_SEALRING_DIE_UNDECLARED: {basis}")
@@ -64069,7 +64069,7 @@ def _librelane_sealring_xor(project: Path, pdk: PdkConfig, gds_path: Path) -> No
     doc: Dict[str, Any] = {"step": "26.5ic", "mode": "dual"}
     try:
         doc = json.loads(path.read_text())
-        image, root = _librelane_step_ctx(project, "26.5ic")
+        image, root = _librelane_step_ctx(project, "26.5ic", pdk.name)
         doc["xor"] = _la.xor_sealed(project, image, root, pdk.name, direct_gds=gds_path,
                                     tool_gds=Path(doc["tool"]["sealed_gds"]))
     except Exception as exc:  # recorded; the refusal below reads it
@@ -66213,12 +66213,13 @@ def _step30_tool_arm(project: Path, pdk: PdkConfig, written: List[str],
     import librelane_contract as _ll
     import path_spice_tool as _pst
     try:
-        root = _ll.resolve_pdk_root(project)
-        if not root:
+        image = _ll.resolve_image(project)
+        try:
+            root = _ll.pdk_root_resolution(project, pdk.name, image=image)["path"]
+        except _ll.Refusal as exc:
             raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
-                              "step 30 on LibreLane needs pdk_root_host in the "
-                              "switch or VIBEIC_LIBRELANE_PDK_ROOT")
-        doc = _pst.run_step30(project, _ll.resolve_image(project), Path(root), pdk.name)
+                              f"step 30 on LibreLane: {exc}") from None
+        doc = _pst.run_step30(project, image, Path(root), pdk.name)
         written.append(str(project / "reports/phase3/spice_path_tool.json"))
         notes.append("step 30 write_path_spice arm: " + ", ".join(
             f"{s}={j['verdict']}" for s, j in doc["arms"].items()))
@@ -66238,13 +66239,14 @@ def _step29_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
     import librelane_postroute as _lp
     import sdf_gate_sim as _sgs
     try:
-        root = _ll.resolve_pdk_root(project)
-        if not root:
+        image = _ll.resolve_image(project)
+        try:
+            root = _ll.pdk_root_resolution(project, pdk.name, image=image)["path"]
+        except _ll.Refusal as exc:
             raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
-                              "step 29 on LibreLane needs pdk_root_host in the "
-                              "switch or VIBEIC_LIBRELANE_PDK_ROOT")
+                              f"step 29 on LibreLane: {exc}") from None
         # The direct arm writes ONE SDF (`_emit_sdf`, the PDK's default liberty).
-        judged = _lp.gate_level_sim(project, top, _ll.resolve_image(project),
+        judged = _lp.gate_level_sim(project, top, image,
                                     Path(root), pdk.name, direct_sdfs=[direct_sdf])
         written.append(str(project / "reports/phase3/gls_corners.json"))
         if mode == "librelane":

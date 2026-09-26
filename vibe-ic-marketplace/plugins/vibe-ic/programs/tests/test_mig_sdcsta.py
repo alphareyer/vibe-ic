@@ -216,8 +216,12 @@ def test_step10_tool_path_publishes_and_blocks_on_a_black_box(tmp_path, monkeypa
     for name in ("x_ss_125C.lib", "x_tt_025C.lib"):
         (libs / name).write_text("library(x) {}\n")
     put(p / "phase3/stage3/pnr/constraint.sdc", (CAL / "cal_full.sdc").read_text())
+    # The stated environment: image AND PDK root declared, so the contract's
+    # resolvers answer without asking this host's docker.
+    (tmp_path / "pdkroot").mkdir()
     put(p / "phase3/librelane_switch.json", {"steps": {"7": "librelane", "8": "librelane",
-                                                        "10": "librelane"}, "image": "img"})
+                                                        "10": "librelane"}, "image": "img",
+                                              "pdk_root_host": str(tmp_path / "pdkroot")})
     logs = {"clean": "sta_prepnr_linked_clean_negative.log",
             "bad": "sta_prepnr_black_box_positive.log"}
     chosen = {}
@@ -300,7 +304,9 @@ def test_combine_keeps_the_conclusive_arm_and_never_outvotes_a_counterexample(a,
 def test_step13_row_takes_the_eqy_counterexample(tmp_path, monkeypatch):
     runner = importlib.import_module("design_one_shot_runner")
     p = tmp_path / "proj"
-    put(p / "phase3/librelane_switch.json", {"steps": {"13": "dual"}, "image": "img", "pdk": "pdkA"})
+    (tmp_path / "pdkroot").mkdir()          # stated: image and PDK root declared
+    put(p / "phase3/librelane_switch.json", {"steps": {"13": "dual"}, "image": "img", "pdk": "pdkA",
+                                              "pdk_root_host": str(tmp_path / "pdkroot")})
     put(p / "phase2/stage1/rtl/cal_chain.v", (CAL / "cal_chain_rtl.v").read_text())
     put(p / "phase2/stage2/synth/netlist.v", (CAL / "cal_eqy_gate_noneq.v").read_text())
     put(p / "reports/lec.json", {"verdict": "INCONCLUSIVE"})

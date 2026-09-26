@@ -151,8 +151,12 @@ def _design(tmp_path, mode, log, errors, warnings):
     rtl(tmp_path, 'cal_pos_tb.v', 'module cal_pos_tb; endmodule\n')
     put(project / 'phase1/generated_docs/L9_INTEGRATION_SPEC.json', {'top_module': 'cal_pos'})
     if mode:
+        # The stated environment: image AND PDK root declared, so the
+        # contract's resolvers answer without asking this host's docker.
+        (tmp_path / 'pdkroot').mkdir(exist_ok=True)
         put(project / 'phase3/librelane_switch.json',
-            {'steps': {'2': mode}, 'image': 'img', 'pdk': 'pdkA'})
+            {'steps': {'2': mode}, 'image': 'img', 'pdk': 'pdkA',
+             'pdk_root_host': str(tmp_path / 'pdkroot')})
     calls = []
 
     def tool(cmd, **_):
