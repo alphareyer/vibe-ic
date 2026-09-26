@@ -8843,6 +8843,49 @@ def _professional_tb_clear_refusal(out_dir: Path) -> None:
         pass
 
 
+def _professional_tb_sim_differential(project: Path, out_dir: Path,
+                                      container: str,
+                                      exec_site: str) -> Optional[Dict[str, Any]]:
+    """Step 4 `dual`: rerun the SAME cocotb bundle under Verilator and compare.
+
+    None unless `phase3/librelane_switch.json` selects `"4": "dual"`, so the
+    default path is byte-identical. The Icarus JUnit the step just read is kept
+    as `results.xml` (every existing reader) and copied to `results_icarus.xml`;
+    the Verilator arm builds in its own `sim_build_verilator` and writes
+    `results_verilator.xml`, which `_cocotb_xml_summary` does not glob, so the
+    functional denominator stays the Icarus one."""
+    import shutil as _shutil
+    import librelane_contract as _ll
+    import sim_dual_compare as _sdc
+    if _ll.selected_mode(project, "4") != "dual":
+        return None
+    icarus = out_dir / "results_icarus.xml"
+    verilator = out_dir / "results_verilator.xml"
+    try:
+        _shutil.copy2(out_dir / "results.xml", icarus)
+        verilator.unlink(missing_ok=True)
+    except OSError as exc:
+        return {"verdict": "NOT_MEASURED",
+                "reason": f"could not stage the Icarus JUnit: {exc}"}
+    cmd = (f"cd '{out_dir}' && make SIM=verilator SIM_BUILD=sim_build_verilator "
+           f"COCOTB_RESULTS_FILE=results_verilator.xml")
+    log_path = out_dir / "cocotb_run_verilator.log"
+    if exec_site == "container":
+        rc, so, se = _docker_exec(container, cmd, timeout=1200,
+                                  marker=str(out_dir), log_path=str(log_path))
+    else:
+        rc, so, se = _run(["bash", "-lc", cmd], cwd=out_dir, timeout=1200)
+        try:
+            log_path.write_text((so or "") + "\n" + (se or ""))
+        except OSError:
+            pass
+    result = _sdc.compare_junit(icarus, verilator)
+    result["verilator_rc"] = rc
+    _aa.write_text(out_dir / "sim_differential.json",
+                   json.dumps(result, indent=2) + "\n")
+    return result
+
+
 def professional_tb_bundle_accounted(out_dir: Path) -> Tuple[bool, str]:
     """(accounted, how) — did this bundle end the step with a TRANSCRIPT or a
     NAMED REFUSAL?
@@ -9062,6 +9105,27 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
         # Measured. A refusal a previous pass recorded for this bundle is now
         # stale and must not outlive the transcript that answers it.
         _professional_tb_clear_refusal(out_dir)
+
+        _diff = _professional_tb_sim_differential(project, out_dir, container,
+                                                  _exec_site)
+        if _diff is not None:
+            rec["sim_differential"] = _diff
+            if _diff["verdict"] == "FAIL":
+                _write({**rec, "status": "FAIL", "reason": _diff["finding"]})
+                return StepResult(
+                    "professional_tb_gen", "FAIL", time.time() - t0,
+                    detail=(f"{_diff['finding']}: "
+                            f"{len(_diff['disagreements'])} case(s) differ "
+                            f"between Icarus and Verilator — "
+                            f"{_diff['disagreements'][:3]}"))
+            if _diff["verdict"] != "PASS":
+                _write({**rec, "status": "INCOMPLETE",
+                        "reason": _diff.get("reason")})
+                return StepResult(
+                    "professional_tb_gen", "NOT_MEASURED", time.time() - t0,
+                    detail=("step 4 dual: the Verilator arm was not "
+                            f"measured — {_diff.get('reason')}"),
+                    reason_class=_V.ReasonClass.EXECUTION_ERROR)
 
         if xml_fail > 0:
             rec["functional_mismatch"] = True
@@ -12189,6 +12253,110 @@ def step_crosslayer_rewrite_fidelity(project: Path) -> StepResult:
     return StepResult("crosslayer_rewrite_fidelity", status,
                       time.time() - t0, detail, [out_rel],
                       extras={"exit_code": rc})
+
+
+def step_rtl_lint_tool(project: Path) -> Optional[StepResult]:
+    """Flow Step 2 lint through the tool: LibreLane Verilator.Lint + its gate.
+
+    Opt-in per `phase3/librelane_switch.json` `{"steps": {"2": ...}}`, with
+    the PDK declared there; the image is `librelane_contract.resolve_image`. `direct` (the default) returns None and
+    the step is unchanged. `librelane` judges Verilator.Lint with
+    `verilator_lint_gate`; `dual` also runs `rtl_hygiene_lint --severity ERROR`
+    and blocks on the union, recording which arm found what. The linted files
+    are the step-9 synthesis input (`silicon_rtl_selection`), so a lint of a
+    different or empty file set cannot pass."""
+    import librelane_contract as _ll
+    try:
+        mode = _ll.selected_mode(project, "2")
+    except _ll.Refusal as exc:
+        return StepResult("rtl_lint_tool", "FAIL", 0.0, str(exc))
+    if mode == "direct":
+        return None
+    from _rtl_include_hub import silicon_rtl_selection
+    import verilator_lint_gate as _vlg
+    t0 = time.time()
+    out_dir = project / "reports/phase2/lint"
+    gate_json = out_dir / "verilator_lint_gate.json"
+    try:
+        switch = json.loads((project / "phase3/librelane_switch.json").read_text())
+        image, pdk = _ll.resolve_image(project), switch.get("pdk")
+        if not pdk:
+            raise _ll.Refusal("LL_SWITCH_INCOMPLETE",
+                              "step 2 needs pdk in phase3/librelane_switch.json")
+        l9 = _rcvar_l9_top_ports(project)
+        top = l9[0] if l9 else None
+        rtl = silicon_rtl_selection(_pl.rtl_dir(project))
+        config_dir = project / "phase3/librelane/step2"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        _ll.emit_lint_config(project, str(pdk), config_dir / "lint_config.json",
+                             str(top or ""), rtl,
+                             "L9_INTEGRATION_SPEC.top_module")
+        mounts, pdk_root = [], None
+        if switch.get("pdk_root_host"):
+            mounts.append((Path(switch["pdk_root_host"]), "/pdk"))
+            pdk_root = "/pdk"
+        resolved = _ll.resolve_step_config(
+            project, image, config_dir / "lint_config.json",
+            config_dir / "lint_resolved.json", mounts=mounts, pdk_root=pdk_root)
+        header = json.loads((config_dir / "lint_config.json").read_text())
+        header["meta"] = {"step": "Yosys.JsonHeader"}
+        _ll.write_json(config_dir / "header_config.json", header)
+        header_resolved = _ll.resolve_step_config(
+            project, image, config_dir / "header_config.json",
+            config_dir / "header_resolved.json", mounts=mounts, pdk_root=pdk_root)
+        state_in = config_dir / "lint_state_in.json"
+        _ll.write_json(state_in, {})
+        folder, header_dir = _ll.run_chain(
+            project, image, [("Verilator.Lint", resolved, state_in),
+                             ("Yosys.JsonHeader", header_resolved, state_in)],
+            mounts=mounts, pdk_root=pdk_root, lane="step2")
+    except (_ll.Refusal, OSError, ValueError) as exc:
+        return StepResult("rtl_lint_tool", "FAIL", time.time() - t0, str(exc))
+    # The step-2 port conformance, against the tool's elaborated interface.
+    # Advisory like its flow clause: recorded, never the lint verdict.
+    conformance = project / "reports/phase2/gates/spec_conformance_tool_ports.json"
+    json_h = json.loads((header_dir / "state_out.json").read_text()).get("json_h")
+    l9_path = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    conformance_rc = None
+    if json_h and l9_path.is_file():
+        conformance.parent.mkdir(parents=True, exist_ok=True)
+        conformance_rc = _pr.run(
+            [sys.executable, str(PROGRAMS_DIR / "spec_conformance_check.py"),
+             "--rtl-dir", str(_pl.rtl_dir(project)), "--spec", str(l9_path),
+             "--tool-ports", str(json_h), "--json", str(conformance)],
+            capture_output=True, text=True).returncode
+    report = _vlg.judge(folder, rtl)
+    report["mode"] = mode
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _ll.write_json(gate_json, report)
+    outputs = [str(gate_json), str(folder / "verilator-lint.log")]
+    verdict = report["verdict"]
+    detail = (f"Verilator.Lint gate {verdict}: {report.get('reason', '')}; "
+              f"spec_conformance --tool-ports rc={conformance_rc} (advisory)")
+    if conformance.is_file():
+        outputs.append(str(conformance))
+    if mode == "dual":
+        direct_json = out_dir / "rtl_hygiene_direct_arm.json"
+        direct_json.unlink(missing_ok=True)
+        cmd = [sys.executable, str(PROGRAMS_DIR / "rtl_hygiene_lint.py"),
+               *[str(p) for p in rtl], "--severity", "ERROR", "--json", str(direct_json)]
+        try:
+            rc = _pr.run(cmd, capture_output=True, text=True).returncode
+            direct = json.loads(direct_json.read_text()) if direct_json.is_file() else None
+        except (subprocess.SubprocessError, OSError, ValueError):
+            rc, direct = 2, None
+        dual = _vlg.combine_arms(report, direct, rc)
+        _ll.write_json(out_dir / "lint_dual.json", dual)
+        outputs += [str(direct_json), str(out_dir / "lint_dual.json")]
+        verdict = dual["verdict"]
+        detail = (f"dual lint {verdict}: only LibreLane {len(dual['only_librelane'])}, "
+                  f"only direct {len(dual['only_direct'])}; " + detail)
+    status = {"PASS": "PASS", "FAIL": "FAIL"}.get(verdict, "NOT_MEASURED")
+    reason = "" if status != "NOT_MEASURED" else (
+        "input_absent" if report.get("reason_class") == "INPUT_ABSENT" else "inconclusive")
+    return StepResult("rtl_lint_tool", status, time.time() - t0, detail, outputs,
+                      extras={"mode": mode, "spec_conformance_tool_ports_rc": conformance_rc},
+                      reason_class=reason)
 
 
 def _usage_rc() -> int:
@@ -21155,13 +21323,37 @@ def step_verilator_coverage(project: Path, top_name: str = "",
         "format_detected": cov["format_detected"],
         "path_namespace": cov["path_namespace"],
     }
+    # Step 4 `dual`: the DUT-scoped activity dump Step 33's vector power reads.
+    # Opt-in, because it changes which activity basis a downstream power
+    # number is taken on.
+    import librelane_contract as _ll
+    if _ll.selected_mode(project, "4") == "dual":
+        import sim_activity_dump as _sad
+        _names = [top_name] if top_name else []
+        for _src in rtl:
+            _names += [m for m in _sad._MODULE.findall(
+                _sad._COMMENTS.sub("", Path(_src).read_text(errors="replace")))
+                if m not in _names]
+        _act: Dict[str, Any] = {"status": "NOT_APPLICABLE",
+                                "reason": "no design module to scope"}
+        for _name in _names:
+            _act = _sad.dump([str(x) for x in rtl], [str(x) for x in tbs],
+                             _name, _pl.sim_dir(project) / "activity",
+                             exec_fn=_verilator_stage_exec(container))
+            if _act["status"] != "NOT_APPLICABLE":
+                break
+        payload["activity_dump"] = _act
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _aa.write_text(out_path, json.dumps(payload, indent=2) + "\n")
     t = scoped["totals"]
+    _xc = payload.get("line_union_cross_check") or {}
     return StepResult(
         "verilator_coverage", "PASS", time.time() - t0,
         f"measured line={t['line']['pct']}% toggle={t['toggle']['pct']}% "
-        f"branch={t['branch']['pct']}% from {dat}",
+        f"branch={t['branch']['pct']}% from {dat}; lcov line union "
+        f"{_xc.get('status')}"
+        + (f" agree={_xc.get('agree')}" if _xc.get("status") == "MEASURED"
+           else ""),
         [str(out_path.relative_to(project))])
 
 
@@ -21476,6 +21668,61 @@ def step_emit_phase2_manifests(project: Path,
         w("reports/phase2/cdc/crossing.json", _cdc_payload)
         w("reports/phase2/cdc/async_input.json", _cdc_payload)
         w("reports/phase2/cdc/reset_dep.json", _cdc_payload)
+    # T91 (mig-rtlver) — step-3 front end. `direct` (the default) is the
+    # regex scan above, unchanged. `librelane` / `dual` also write the Yosys
+    # JSON netlist the step-3 gates read (the passes LibreLane's
+    # Yosys.JsonHeader runs), and the domain count comes from the flops' CLK
+    # pins. A multi-clock design stays SKIPPED-CONDITION on the crossing
+    # report: the netlist gives the domains, not a CDC engine (#436, #673).
+    import librelane_contract as _ll
+    _cdc_mode = _ll.selected_mode(project, "3")
+    if _cdc_mode != "direct" and _rtl_files:
+        import _cdc_netlist
+        _skip = ("assertions", "de10lite_top", "host_emulator", "_tb",
+                 "testbench", "stimulus")
+        _cdc_src = [f for f in _rtl_files
+                    if not any(t in f.name.lower() for t in _skip)]
+        _m_top = re.search(r"top module '([^']+)'", _cdc_scope)
+        _switch = json.loads((project / "phase3/librelane_switch.json").read_text())
+        _nl_rec: Dict[str, Any] = {"mode": _cdc_mode, "netlist": _cdc_netlist.NETLIST_REL,
+                                   "rtl_files": [f.name for f in _cdc_src]}
+        try:
+            _nl_path = _cdc_netlist.build(project, _cdc_src,
+                                          _m_top.group(1) if _m_top else None,
+                                          image=_switch.get("image"))
+            _nl = _cdc_netlist.load(_nl_path)
+            _nl_domains = _cdc_netlist.clock_domains(_nl)
+            _nl_rec.update({"verdict": "PASS", "top": _nl.top,
+                            "flops": len(_nl.flops),
+                            "clock_domains": _nl_domains,
+                            "regex_clock_domains": sorted(_domain_clocks),
+                            "multi_clock_agrees": (len(_nl_domains) >= 2)
+                            == (len(_domain_clocks) >= 2)})
+        except _cdc_netlist.Refusal as _exc:
+            _nl_rec.update({"verdict": "FAIL", "reason": str(_exc)})
+            _nl_domains = None
+        w("reports/phase2/cdc/netlist_front_end.json", _nl_rec)
+        if _cdc_mode == "librelane" and _nl_domains is not None:
+            _ev = (f"Yosys JSON netlist ({_cdc_netlist.NETLIST_REL}, top "
+                   f"'{_nl_rec['top']}', {_nl_rec['flops']} flop cells): clock "
+                   f"domain(s) by CLK pin {_nl_domains or ['(none)']}")
+            if len(_nl_domains) <= 1:
+                _nl_payload = {"verdict": "PASS", "evidence": _ev
+                               + " — no clock-domain crossings exist",
+                               "crossings": [], "clocks_found": _nl_domains,
+                               "front_end": "netlist"}
+            else:
+                _nl_payload = {"verdict": "SKIPPED-CONDITION",
+                               "reason": _ev + ": multi-clock design; the "
+                               "crossing rules run in clock_domain_reg_crossing_check "
+                               "on this netlist, and no CDC engine is installed (#436)",
+                               "clocks_found": _nl_domains, "front_end": "netlist"}
+            w("reports/phase2/cdc/crossing.json", _nl_payload)
+        elif _cdc_mode == "librelane":
+            w("reports/phase2/cdc/crossing.json", {
+                "verdict": "FAIL", "front_end": "netlist",
+                "reason": "step 3 selects the netlist front end and the netlist "
+                          "was not produced: " + str(_nl_rec.get("reason"))})
 
     # Step 4: simulation.
     # ORGANIC-20260606-verdict-only-pass-artifacts-no-evidence (#433a):
@@ -21619,7 +21866,8 @@ def step_emit_phase2_manifests(project: Path,
                 _sys.path.insert(0, str(PROGRAMS_DIR))
             import formal_harness_gen as _fhg
             import formal_property_run as _fpr
-            _gen = _fhg.generate(project=project, top=top_name)
+            _gen = _fhg.generate(project=project, top=top_name,
+                                 container=(container or None))
             if _gen.get("verdict") == "EMITTED":
                 _res = _fpr.run(
                     project,
@@ -23463,6 +23711,12 @@ def main() -> int:
             "design which ran no cross-layer search leaves a NOT_APPLICABLE RECORD "
             "rather than a silence; gating it is a separate decision.")
     plan.append(step_crosslayer_rewrite_fidelity(project))
+
+    # Flow Step 2 lint through LibreLane Verilator.Lint, when the design's
+    # switch selects it for step 2. The default (direct) adds no row.
+    _tool_lint = step_rtl_lint_tool(project)
+    if _tool_lint is not None:
+        plan.append(_tool_lint)
 
     # Flow step 2 — pad-budget feasibility. Placed HERE, right after the RTL is
     # stable and long before synthesis/DFT/PnR, because the whole point of the

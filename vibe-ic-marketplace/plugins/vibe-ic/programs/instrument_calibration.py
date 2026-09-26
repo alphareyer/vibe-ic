@@ -1588,6 +1588,216 @@ _register(Instrument(
 ))
 
 
+# Step 2 judges LibreLane Verilator.Lint's transcript. The reader must fire on
+# an error and a curated warning in the design, and stay silent on a warning
+# outside the curated set.
+def _judge_verilator_lint_gate(log: str) -> Optional[str]:
+    import verilator_lint_gate as gate
+    return gate._judge_calibration(log)
+
+
+_register(Instrument(
+    name="verilator_lint_gate::parse_transcript",
+    reads="LibreLane Verilator.Lint verilator-lint.log",
+    ruling="T91", owner="mig-rtlver",
+    why=("Step 2 promotes %Error and curated Verilator warning codes to "
+         "blocking. The head-line grammar must find LATCH and MULTIDRIVEN "
+         "and leave UNUSEDSIGNAL non-blocking."),
+    judge=_judge_verilator_lint_gate,
+    positive=Sample(
+        provenance=("Real LibreLane 3.1.0.dev1 Verilator.Lint (Verilator "
+                    "5.053, released vibeic-eda 0.3.77 by digest) on a "
+                    "synthetic three-always module: a combinational if "
+                    "without else and one reg written from posedge and "
+                    "negedge blocks; generated on 192.168.1.121 under "
+                    "/tmp/vlcal. calibration/librelane_verilator_lint_pos.log."),
+        artefact=_read("librelane_verilator_lint_pos.log")),
+    expect="BLOCKING",
+    negative=Sample(
+        provenance=("Same step and image on a one-flop module reading one "
+                    "bit of a two-bit input: only UNUSEDSIGNAL is reported. "
+                    "calibration/librelane_verilator_lint_neg.log."),
+        artefact=_read("librelane_verilator_lint_neg.log")),
+))
+
+
+# Step 3 (T91 mig-rtlver) judges CDC/RDC from a Yosys JSON netlist written with
+# LibreLane Yosys.JsonHeader's passes. Each rule gets its own pair: the netlist
+# grammar (`$dff`/`$adff` pins, `$mux` arms, port directions) is read three
+# different ways, and a calibrated crossing rule says nothing about the reset
+# rule. Samples: yosys 0.69+ 4d572059c in the released vibeic-eda 0.3.77
+# image, `read_verilog -sv; hierarchy -check -top T -nokeep_prints
+# -nokeep_asserts; rename -top T; proc; flatten; opt_clean -purge; json`, on
+# the calibration structures `calibration/cdc_netlist_*.v`, produced on
+# 192.168.1.121 on 2026-09-26.
+def _cdc_netlist_rule(rule: str) -> Callable[[str], Optional[str]]:
+    def _judge(path: str) -> Optional[str]:
+        import _cdc_netlist
+        import cdc_async_input_check
+        nl = _cdc_netlist.load(FIXTURES / path)
+        fn = {"reg_crossing": _cdc_netlist.reg_crossing_findings,
+              "reset_dependency": _cdc_netlist.reset_dependency_findings}.get(rule)
+        rows = fn(nl) if fn else _cdc_netlist.async_input_findings(
+            nl, cdc_async_input_check.is_probable_async_port)
+        blocking = sorted({r["rule"] for r in rows if r["severity"] == "ERROR"})
+        return ",".join(blocking) or None
+    return _judge
+
+
+_CDC_NETLIST_PROV = ("Real Yosys JSON (released vibeic-eda 0.3.77, yosys 0.69+ "
+                     "4d572059c, Yosys.JsonHeader passes) of calibration/"
+                     "cdc_netlist_{src}; generated on 192.168.1.121. "
+                     "calibration/{out}.")
+
+for _rule, _fn, _pos_src, _neg_src, _expect, _why in (
+        ("reg_crossing", "reg_crossing_findings", "cdc_unsync.v", "cdc_sync.v",
+         "CDC_REG_NO_SYNC",
+         "a clk_a flop sampled once by clk_b must fire; the same flop "
+         "re-registered twice in clk_b must stay silent"),
+        ("async_input", "async_input_findings", "async_raw_unsync.v",
+         "async_raw_sync.v", "ASYNC_INPUT_NO_SYNC",
+         "an async-named PORT used as an enable must fire; the same port "
+         "behind a two-flop chain must stay silent"),
+        ("reset_dependency", "reset_dependency_findings", "reset_circular.v",
+         "reset_sync_ok.v", "CIRCULAR_RESET_DEPENDENCY",
+         "a reset OR-ed with a flop it resets must fire; a two-flop reset "
+         "synchroniser releasing a second reset domain must stay silent")):
+    _pos = f"cdc_netlist_{_rule.split('_')[0]}_positive.json"
+    _neg = f"cdc_netlist_{_rule.split('_')[0]}_negative.json"
+    _register(Instrument(
+        name=f"_cdc_netlist::{_fn}",
+        reads="Yosys JSON netlist (LibreLane Yosys.JsonHeader passes)",
+        ruling="T91", owner="mig-rtlver",
+        why=("Step 3 moves its CDC/RDC rules from RTL regex onto the netlist; "
+             + _why + "."),
+        judge=_cdc_netlist_rule(_rule),
+        positive=Sample(provenance=_CDC_NETLIST_PROV.format(src=_pos_src, out=_pos),
+                        artefact=lambda _p=_pos: _p),
+        expect=_expect,
+        negative=Sample(provenance=_CDC_NETLIST_PROV.format(src=_neg_src, out=_neg),
+                        artefact=lambda _n=_neg: _n),
+    ))
+
+
+
+def _judge_kind_prove_arm(log: str) -> Optional[str]:
+    """Fires when the transcript's `smtbmc` prove ARM reads as an unbounded
+    proof after `formal_property_run.fold_prove_arms`."""
+    import formal_property_run as F
+    cfg = F.parse_sby_config((FIXTURES / "sby_prove_arms.sby").read_text())
+    lp = F.parse_sby_log(log, sby_stem="formal_ctr", seed=cfg)
+    _, records = F.fold_prove_arms(lp)
+    for rec in records:
+        for arm in rec["arms"]:
+            if arm["engine"].startswith("smtbmc") and arm["bound"] == "unbounded":
+                return "UNBOUNDED_BY_KIND"
+    return None
+
+
+_register(Instrument(
+    name="formal_property_run::fold_prove_arms",
+    reads="the SymbiYosys transcript of a `mode prove` task driven by "
+          "`smtbmc yices` (k-induction) beside the `abc pdr` task",
+    ruling="T91 (review70 step 5 correction: smtbmc prove is real)",
+    owner="mig-rtlver",
+    why=("k-induction reports its two halves separately — `returned pass for "
+         "basecase` then `returned FAIL for induction` — and only `DONE (...)` "
+         "is the task verdict. A reader that takes the basecase line as the "
+         "task status turns a bounded result into an unbounded proof. The pair "
+         "is two real transcripts of the SAME .sby that differ only in whether "
+         "the induction step closed."),
+    judge=_judge_kind_prove_arm,
+    positive=Sample(
+        provenance=(
+            "REAL SBY v0.67-31-g2c2f04e / yices-smt2 transcript, released "
+            "vibeic-eda 0.3.77 image (by digest), 8hd-3 (.121), 2026-09-26. "
+            "`calibration/sby_prove_arms.sby` is `emit_sby(..., "
+            "kind_engine=KIND_PROVE_ENGINE)` over an 8-bit counter wrapping at "
+            "9 with `assert(q <= 9)` (sources: tests/fixtures/sby_prove_arms/"
+            "pass/). `successful proof by k-induction`, `DONE (PASS, rc=0)`."),
+        artefact=_read("sby_prove_arms_pass.sby.log")),
+    expect="UNBOUNDED_BY_KIND",
+    negative=Sample(
+        provenance=(
+            "The SAME .sby, same image and host, counter wrapping at 50 with "
+            "`assert(q != 200)` (tests/fixtures/sby_prove_arms/unknown/): true, "
+            "but not 20-inductive. `returned pass for basecase`, `returned FAIL "
+            "for induction`, `DONE (UNKNOWN, rc=4)` — abc pdr proves it."),
+        artefact=_read("sby_prove_arms_unknown.sby.log")),
+))
+
+# Step 4 (T91): the tool's own lcov line union beside the h-stripped union.
+def _judge_line_union(sample: Tuple[Tuple[str, ...], str]) -> Optional[str]:
+    import verilator_coverage_measure as vcm
+    dats, info = sample
+    got = vcm.cross_check_line_union(
+        vcm.union_line_map([str(FIXTURES / d) for d in dats]),
+        vcm.parse_lcov_info((FIXTURES / info).read_text()), ["cov_cal.v"])
+    if got.get("status") != "MEASURED":
+        return "NOT_MEASURED:" + str(got.get("reason"))
+    return None if got["agree"] else "LINE_UNION_DISAGREES"
+
+
+_register(Instrument(
+    name="verilator_coverage_measure::cross_check_line_union",
+    reads="verilator_coverage --write-info lcov union vs coverage.dat records",
+    ruling="T91", owner="mig-rtlver",
+    why=("Two producers of one line union must name the same lines and the "
+         "same hits. Reading only a point's `l` field and not its `S` span "
+         "dropped an `else` line lcov reports; the pair keeps that visible."),
+    judge=_judge_line_union,
+    positive=Sample(
+        provenance=("Real verilator 5.053 coverage.dat of two calibration "
+                    "testbenches (tb_cal_idle, tb_cal_toggle) over the "
+                    "six-line calibration module cov_cal, and the real "
+                    "`verilator_coverage --write-info` union of both, "
+                    "released vibeic-eda:0.3.77 on 192.168.1.121. The "
+                    "h-stripped side is built from the idle member only, "
+                    "so line 6 (hit only by the toggle member) differs."),
+        artefact=lambda: (("cov_union_tb_idle.dat",),
+                          "cov_union_suite_lcov.info")),
+    expect="LINE_UNION_DISAGREES",
+    negative=Sample(
+        provenance=("Same real files: both members on both sides agree "
+                    "line for line and hit for hit."),
+        artefact=lambda: (("cov_union_tb_idle.dat", "cov_union_tb_toggle.dat"),
+                          "cov_union_suite_lcov.info")),
+))
+
+
+# Step 4 (T91): one cocotb TB under Icarus and Verilator, compared per case.
+def _judge_sim_differential(sample: Tuple[str, str]) -> Optional[str]:
+    import sim_dual_compare as sdc
+    got = sdc.compare_junit(FIXTURES / sample[0], FIXTURES / sample[1])
+    if got["verdict"] == "NOT_MEASURED":
+        return "NOT_MEASURED:" + str(got.get("reason"))
+    return got.get("finding")
+
+
+_register(Instrument(
+    name="sim_dual_compare::compare_junit",
+    reads="cocotb JUnit results.xml from SIM=icarus and SIM=verilator",
+    ruling="T91", owner="mig-rtlver",
+    why=("A case whose outcome depends on the simulator is an X-semantics or "
+         "race hazard. The reader must fire on a real per-case split and stay "
+         "silent when both simulators pass the same cases."),
+    judge=_judge_sim_differential,
+    positive=Sample(
+        provenance=("Real cocotb 2.2.0.dev JUnit, released vibeic-eda:0.3.77 "
+                    "on 192.168.1.121: a calibration flop with no reset read "
+                    "by int(dut.q.value); Icarus fails q_starts_low with "
+                    "`Cannot convert Logic('X') to int`, Verilator passes."),
+        artefact=lambda: ("sim_dual_icarus_x_positive.xml",
+                          "sim_dual_verilator_x_positive.xml")),
+    expect="SIM_DIFFERENTIAL_DISAGREES",
+    negative=Sample(
+        provenance=("Same calibration flop with a synchronous reset: both "
+                    "simulators pass both cases."),
+        artefact=lambda: ("sim_dual_icarus_negative.xml",
+                          "sim_dual_verilator_negative.xml")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════

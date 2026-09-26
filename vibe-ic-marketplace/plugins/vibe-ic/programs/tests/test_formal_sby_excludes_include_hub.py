@@ -136,10 +136,16 @@ def _stage(tmp_path: Path, files: dict) -> tuple[Path, Path, list[Path]]:
 
 
 def _read_line(sby_text: str) -> str:
-    for line in sby_text.splitlines():
-        if "read_verilog" in line:
-            return line
-    raise AssertionError("no read_verilog line in the emitted .sby:\n" + sby_text)
+    """EVERY `read_verilog` line of the emitted .sby, joined — the read list.
+
+    R-0915-157 reads the DUT exactly as the chip's synthesis does, one
+    `read_verilog -sv [-DSIMULATION ]<file>` per file, and the harness on its
+    own line; the read list is their union. Each assertion below holds over
+    ALL of them: an aggregator on ANY read line is still caught."""
+    lines = [l for l in sby_text.splitlines() if "read_verilog" in l]
+    if not lines:
+        raise AssertionError("no read_verilog line in the emitted .sby:\n" + sby_text)
+    return " ".join(lines)
 
 
 def _emit(tmp_path: Path, files: dict) -> str:

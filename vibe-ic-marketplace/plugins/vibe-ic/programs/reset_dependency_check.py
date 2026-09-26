@@ -397,7 +397,8 @@ def audit_file(path: Path, project_root: Path) -> List[Finding]:
     return findings
 
 
-def audit(project_dir: str) -> AuditResult:
+def audit(project_dir: str, netlist: Optional[str] = None,
+          front_end: Optional[str] = None) -> AuditResult:
     root = Path(project_dir).resolve()
     result = AuditResult(program='reset_dependency_check', passed=True)
     if not root.exists():
@@ -421,9 +422,25 @@ def audit(project_dir: str) -> AuditResult:
             seen.add(key)
             result.findings.append(fd)
 
+    # Step-3 front end (T91): the switch or `--netlist` moves the judgement
+    # onto the Yosys JSON netlist, where a flop's reset is its ARST pin or
+    # the select of its outermost constant-arm mux. The 2 MB skip above stays
+    # for the regex arm only; the netlist arm reads the tool's JSON whole.
+    import _cdc_netlist
+    mode = _cdc_netlist.resolve_mode(root, front_end, netlist)
+    extra: Dict[str, object] = {}
+    examined = len(files)
+    if mode != 'direct':
+        rows, extra = _cdc_netlist.apply_front_end(
+            root, mode, netlist, 'reset_dependency',
+            [asdict(f) for f in result.findings], len(files))
+        result.findings = [Finding(**{k: r[k] for k in ('rule', 'severity', 'message', 'file', 'line')})
+                           for r in rows]
+        examined = (len(files) if mode == 'dual' else 0) + (1 if extra.get('netlist_read') else 0)
+
     result.passed = len(result.findings) == 0
     result.summary = {
-        'files_scanned': len(files),
+        'files_scanned': examined,
         'violations': len(result.findings),
         # ORGANIC #615 — transparency: report (not silently drop) the
         # synth/PnR-output + multi-MB files excluded from the structural scan.
@@ -431,6 +448,7 @@ def audit(project_dir: str) -> AuditResult:
         'skipped': [{'file': fp, 'reason': rsn}
                     for fp, rsn in skipped[:50]],
     }
+    result.summary.update(extra)
     result.verdict = _verdict_for(result)
     return result
 
@@ -440,8 +458,12 @@ def main():
     p.add_argument("project_dir", nargs="?", default=".")
     p.add_argument("--json", nargs="?", const="-", default=None,
                    help="Emit JSON. With no value → stdout. With a path → write file.")
+    p.add_argument("--netlist", default=None,
+                   help="Yosys JSON netlist (Yosys.JsonHeader passes); opts in to the netlist front end")
+    p.add_argument("--front-end", choices=("auto", "regex", "netlist", "dual"),
+                   default="auto", help="auto = phase3/librelane_switch.json step 3")
     args = p.parse_args()
-    result = audit(args.project_dir)
+    result = audit(args.project_dir, netlist=args.netlist, front_end=args.front_end)
     # ORGANIC #887 — say it BEFORE the report is emitted, on the stream whose
     # width is fixed. See `_emit_vacuous_disclosure`.
     if result.verdict == _VACUOUS_VERDICT:

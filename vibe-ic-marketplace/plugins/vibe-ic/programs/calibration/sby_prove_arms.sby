@@ -1,0 +1,29 @@
+[tasks]
+safety   prove
+safety_kind prove
+bmc      bmc
+
+[options]
+safety: mode prove
+safety: depth 20
+safety_kind: mode prove
+safety_kind: depth 20
+bmc:    mode bmc
+bmc:    depth 12
+aigsmt none
+multiclock on
+
+[engines]
+safety: abc pdr
+safety_kind: smtbmc yices
+bmc:    abc bmc3
+
+[script]
+safety: read_verilog -formal -sv -DSPM_SAFETY_ONLY formal_ctr.sv ctr.v
+safety_kind: read_verilog -formal -sv -DSPM_SAFETY_ONLY formal_ctr.sv ctr.v
+bmc: read_verilog -formal -sv -DSPM_RESET_AT_T0 formal_ctr.sv ctr.v
+prep -top formal_ctr
+
+[files]
+ctr.v
+formal_ctr.sv

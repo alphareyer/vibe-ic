@@ -1,0 +1,142 @@
+{
+  "creator": "Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]",
+  "modules": {
+    "async_raw_unsync": {
+      "attributes": {
+        "top": "00000000000000000000000000000001",
+        "src": "cdc_netlist_async_raw_unsync.v:1.1-6.10"
+      },
+      "ports": {
+        "clk": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "rst_n": {
+          "direction": "input",
+          "bits": [ 3 ]
+        },
+        "btn_raw": {
+          "direction": "input",
+          "bits": [ 4 ]
+        },
+        "led": {
+          "direction": "output",
+          "bits": [ 5 ]
+        }
+      },
+      "cells": {
+        "$not$cdc_netlist_async_raw_unsync.v:4$3": {
+          "hide_name": 1,
+          "type": "$not",
+          "parameters": {
+            "A_SIGNED": "00000000000000000000000000000000",
+            "A_WIDTH": "00000000000000000000000000000001",
+            "Y_WIDTH": "00000000000000000000000000000001"
+          },
+          "attributes": {
+            "src": "cdc_netlist_async_raw_unsync.v:4.55-4.59"
+          },
+          "port_directions": {
+            "A": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 5 ],
+            "Y": [ 6 ]
+          }
+        },
+        "$procdff$10": {
+          "hide_name": 1,
+          "type": "$adff",
+          "parameters": {
+            "ARST_POLARITY": "00000000000000000000000000000000",
+            "ARST_VALUE": "0",
+            "CLK_POLARITY": "1",
+            "WIDTH": "00000000000000000000000000000001"
+          },
+          "attributes": {
+            "src": "cdc_netlist_async_raw_unsync.v:3.3-5.6"
+          },
+          "port_directions": {
+            "ARST": "input",
+            "CLK": "input",
+            "D": "input",
+            "Q": "output"
+          },
+          "connections": {
+            "ARST": [ 3 ],
+            "CLK": [ 2 ],
+            "D": [ 7 ],
+            "Q": [ 5 ]
+          }
+        },
+        "$procmux$4": {
+          "hide_name": 1,
+          "type": "$mux",
+          "parameters": {
+            "WIDTH": "00000000000000000000000000000001"
+          },
+          "attributes": {
+            "src": "cdc_netlist_async_raw_unsync.v:4.39-4.46|cdc_netlist_async_raw_unsync.v:4.35-4.60"
+          },
+          "port_directions": {
+            "A": "input",
+            "B": "input",
+            "S": "input",
+            "Y": "output"
+          },
+          "connections": {
+            "A": [ 5 ],
+            "B": [ 6 ],
+            "S": [ 4 ],
+            "Y": [ 7 ]
+          }
+        }
+      },
+      "netnames": {
+        "$0\\led[0:0]": {
+          "hide_name": 1,
+          "bits": [ 7 ],
+          "attributes": {
+            "src": "cdc_netlist_async_raw_unsync.v:3.3-5.6"
+          }
+        },
+        "$not$cdc_netlist_async_raw_unsync.v:4$3_Y": {
+          "hide_name": 1,
+          "bits": [ 6 ],
+          "attributes": {
+            "src": "cdc_netlist_async_raw_unsync.v:4.55-4.59"
+          }
+        },
+        "btn_raw": {
+          "hide_name": 0,
+          "bits": [ 4 ],
+          "attributes": {
+            "src": "cdc_netlist_async_raw_unsync.v:1.71-1.78"
+          }
+        },
+        "clk": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {
+            "src": "cdc_netlist_async_raw_unsync.v:1.37-1.40"
+          }
+        },
+        "led": {
+          "hide_name": 0,
+          "bits": [ 5 ],
+          "attributes": {
+            "src": "cdc_netlist_async_raw_unsync.v:2.37-2.40"
+          }
+        },
+        "rst_n": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {
+            "src": "cdc_netlist_async_raw_unsync.v:1.53-1.58"
+          }
+        }
+      }
+    }
+  }
+}

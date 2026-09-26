@@ -102,7 +102,14 @@ def test_yaml_step8_wires_the_screen():
 # ── vector power disclosure (source pins) ──────────────────────────────────
 
 def test_power_emitter_uses_vcd_when_present():
-    i = _P3_SRC.index("read_power_activities -vcd")
+    """RE-POINTED, NOT WEAKENED (T91 step 4, 2026-09-26). This anchored on the
+    literal `read_power_activities -vcd`. MEASURED in the released image
+    (OpenSTA 3.1.0, vibeic-eda 0.3.77) that command is deprecated and raises
+    `default is not a mode object`, so every deck carrying it annotated no
+    activity. The deck line is now `_ppa.power.activity_read_tcl` (`read_vcd`,
+    with `-scope` when step 4 verified one). The property asserted is
+    unchanged: the emitter declares vector_vcd exactly when a VCD is used."""
+    i = _P3_SRC.index("_ppa_power.activity_read_tcl(")
     window = _P3_SRC[i - 1400:i + 600]
     assert 'analysis_mode = "vector_vcd" if vcd else "vectorless_sdc"' \
         in window

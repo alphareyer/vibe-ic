@@ -375,6 +375,220 @@ def _timing_semantics(value: Any, prefix: str = "") -> List[Tuple[str, str]]:
     return out
 
 
+# ── R-0915-144 — PROGRAM RULES FOR L8 CLOCK/RESET DECLARATIONS ──────────────
+#
+# Program first, AI backup. An L8 clock/reset declaration is one of two kinds:
+#
+#   STRUCTURAL  a fact about the RTL's structure: the clock EDGE, the reset
+#               port NAME, synchronous vs asynchronous. No temporal property can
+#               falsify these in the cycle-based model Step 5 proves in (there
+#               is no "between edges"), so they are answered by
+#               `formal_structural_check` from the flow's own yosys netlist.
+#   TEMPORAL    reset BEHAVIOUR: the POLARITY, and "all internal state is zero
+#               one cycle after assertion". These become generated properties,
+#               proved or refuted by the flow's own engine.
+#
+# A claim with no rule here goes to the `formal-verify` expert exactly as
+# before. Prose is parsed CONSERVATIVELY: every clause must be fully consumed
+# by a recognised claim, or the whole declaration stays with the expert. A
+# clause the program half-understood is a clause it must not answer.
+KIND_STRUCTURAL = "STRUCTURAL"
+KIND_TEMPORAL = "TEMPORAL"
+KIND_MIXED = "MIXED"
+# R-0915-144 round 5: polarity is a STRUCTURAL netlist fact (the SRST/ARST
+# polarity of every flop the reset forces), not a property over a textual
+# subset of registers (review round 4, H2).
+_STRUCTURAL_CLAIMS = {"clock_edge", "reset_port", "reset_sync", "reset_polarity",
+                      "state_covered"}
+_TEMPORAL_CLAIMS = {"reset_state_zero"}
+
+_CR_PATH_RE = re.compile(
+    r"(?:^|\.)(?P<group>clocks|resets)\.(?P<idx>\d+)\.(?P<field>[A-Za-z_]\w*)$")
+
+
+def _norm_edge(text: str) -> Optional[str]:
+    t = text.strip().lower().replace("-", "").replace("_", "")
+    if t in {"posedge", "rising", "risingedge", "positive", "pos", "rise"}:
+        return "posedge"
+    if t in {"negedge", "falling", "fallingedge", "negative", "neg", "fall"}:
+        return "negedge"
+    return None
+
+
+def _norm_sync(text: str) -> Optional[str]:
+    t = text.strip().lower()
+    if t in {"asynchronous", "async", "非同步", "異步"}:
+        return "asynchronous"
+    if t in {"synchronous", "sync", "同步"}:
+        return "synchronous"
+    return None
+
+
+def _norm_polarity(text: str) -> Optional[str]:
+    t = text.strip().lower().replace("-", "_").replace(" ", "_")
+    if t in {"active_high", "high", "activehigh"}:
+        return "active_high"
+    if t in {"active_low", "low", "activelow"}:
+        return "active_low"
+    return None
+
+
+_P_ASYNC = re.compile(r"非同步|異步|\basynchronous\b|\basync\b", re.I)
+_P_SYNC = re.compile(r"同步|\bsynchronous\b|\bsync\b", re.I)
+_P_HIGH = re.compile(r"active[\s_-]?high|高電位有效|高態有效", re.I)
+_P_LOW = re.compile(r"active[\s_-]?low|低電位有效|低態有效", re.I)
+# "all internal state is zero one cycle after assertion", in the two word
+# orders a declaration is written in, Chinese and English.
+_P_ZERO = [
+    re.compile(
+        r"(?:(?:reset\s*)?(?:assertion|asserted|assert)\s*)?(?:後|之後)?\s*"
+        r"(?:一個|一|1)\s*(?:clock\s*)?(?:cycle|個?週期|個?周期|時脈)\s*(?:內|之內)?\s*"
+        r"(?:所有|全部)\s*(?:的)?\s*(?:內部)?\s*(?:的)?\s*"
+        r"(?:狀態|暫存器|registers?|state)\s*(?:都|皆|均)?\s*"
+        r"(?:歸零|清零|清為\s*0|為\s*0|設為\s*0)", re.I),
+    re.compile(
+        r"all\s+(?:internal\s+)?(?:state|registers?|flip[\s-]?flops?|flops?)\s+"
+        r"(?:is\s+|are\s+)?(?:zeroed|cleared|zero|reset\s+to\s+(?:0|zero)|"
+        r"set\s+to\s+(?:0|zero)|cleared\s+to\s+(?:0|zero))\s+"
+        r"(?:within\s+)?(?:one|1|a\s+single)\s+(?:clock\s+)?cycle\s+"
+        r"after\s+(?:reset\s+)?(?:assertion|(?:it\s+|reset\s+)?is\s+asserted)", re.I),
+    re.compile(
+        r"(?:within\s+)?(?:one|1|a\s+single)\s+(?:clock\s+)?cycle\s+"
+        r"after\s+(?:reset\s+)?(?:assertion|(?:it\s+|reset\s+)?is\s+asserted)"
+        r"\s*,?\s*all\s+(?:internal\s+)?(?:state|registers?|flip[\s-]?flops?|flops?)\s+"
+        r"(?:is\s+|are\s+)?(?:zeroed|cleared|zero|reset\s+to\s+(?:0|zero)|"
+        r"set\s+to\s+(?:0|zero))", re.I),
+]
+# Words that carry no claim. Anything ELSE left in a clause after the
+# recognised claims are removed makes the clause unrecognised. A WORD SET, not
+# a regex: this is English/Chinese prose from L8, and a keyword regex over it
+# reads like an HDL declaration scan to the hygiene gate.
+_FILLER_WORDS = frozenset({"reset", "rst", "signal", "the", "is", "a", "an",
+                           "input", "port"})
+_FILLER_CJK_RE = re.compile(r"reset\s*信號|信號|的", re.I)
+_FILLER_SEP_RE = re.compile(r"[()（）\[\]*`'\"\s:：]+")
+
+
+def _only_filler(rest: str) -> bool:
+    """True when nothing but claim-free filler is left in a clause."""
+    words = _FILLER_SEP_RE.split(_FILLER_CJK_RE.sub(" ", rest))
+    return all(w.lower() in _FILLER_WORDS for w in words if w)
+_CLAUSE_SPLIT_RE = re.compile(r"[;；。,，\n]+")
+
+
+def parse_reset_prose(text: str, reset: str, declared_polarity: Optional[str]
+                      ) -> Optional[List[dict]]:
+    """Every claim a reset prose declaration makes, or None when ANY clause is
+    not fully understood. Pure. A None keeps the declaration with the expert."""
+    claims: List[dict] = []
+    polarity = declared_polarity
+    zero = False
+    clauses = [c for c in _CLAUSE_SPLIT_RE.split(text) if c.strip()]
+    if not clauses:
+        return None
+    for clause in clauses:
+        rest = clause
+        found = False
+        if _P_ASYNC.search(rest):
+            claims.append({"rule": "reset_sync", "signal": reset,
+                           "value": "asynchronous"})
+            rest = _P_ASYNC.sub(" ", rest)
+            found = True
+        elif _P_SYNC.search(rest):
+            claims.append({"rule": "reset_sync", "signal": reset,
+                           "value": "synchronous"})
+            rest = _P_SYNC.sub(" ", rest)
+            found = True
+        if _P_HIGH.search(rest) and not _P_LOW.search(rest):
+            polarity = "active_high"
+            claims.append({"rule": "reset_polarity", "signal": reset,
+                           "value": "active_high"})
+            rest = _P_HIGH.sub(" ", rest)
+            found = True
+        elif _P_LOW.search(rest) and not _P_HIGH.search(rest):
+            polarity = "active_low"
+            claims.append({"rule": "reset_polarity", "signal": reset,
+                           "value": "active_low"})
+            rest = _P_LOW.sub(" ", rest)
+            found = True
+        for pat in _P_ZERO:
+            if pat.search(rest):
+                zero = True
+                rest = pat.sub(" ", rest)
+                found = True
+                break
+        if not found or not _only_filler(rest):
+            return None
+    if zero:
+        if polarity is None:
+            # "zero after assertion" with no stated polarity names no guard.
+            return None
+        claims.append({"rule": "reset_state_zero", "signal": reset,
+                       "value": polarity})
+    # the same claim stated twice is one claim
+    uniq: List[dict] = []
+    for c in claims:
+        if c not in uniq:
+            uniq.append(c)
+    return uniq
+
+
+def _record_at(data: Any, key: str) -> Optional[dict]:
+    """The dict holding the leaf at dotted `key` (its parent record)."""
+    parts = key.split(".")[:-1]
+    cur = data
+    for p in parts:
+        if isinstance(cur, dict):
+            cur = cur.get(p)
+        elif isinstance(cur, list) and p.isdigit() and int(p) < len(cur):
+            cur = cur[int(p)]
+        else:
+            return None
+    return cur if isinstance(cur, dict) else None
+
+
+def _rule(claims: List[dict]) -> dict:
+    kinds = {KIND_STRUCTURAL if c["rule"] in _STRUCTURAL_CLAIMS
+             else KIND_TEMPORAL for c in claims}
+    kind = kinds.pop() if len(kinds) == 1 else KIND_MIXED
+    return {"kind": kind, "claims": claims, "ruling": "R-0915-144"}
+
+
+def l8_program_rule(data: dict, key: str, text: str) -> Optional[dict]:
+    """The program rule that answers L8 declaration `key`=`text`, or None."""
+    m = _CR_PATH_RE.search(key)
+    if not m:
+        return None
+    rec = _record_at(data, key)
+    if rec is None:
+        return None
+    group, field_ = m.group("group"), m.group("field")
+    name = str(rec.get("name") or "").strip()
+    if not re.fullmatch(r"[A-Za-z_]\w*", name):
+        return None
+    if group == "clocks":
+        if field_ == "edge":
+            edge = _norm_edge(text)
+            if edge:
+                return _rule([{"rule": "clock_edge", "signal": name,
+                               "value": edge}])
+        return None
+    # resets
+    if field_ == "name":
+        return _rule([{"rule": "reset_port", "signal": name, "value": ""}])
+    if field_ == "sync":
+        sync = _norm_sync(text)
+        return _rule([{"rule": "reset_sync", "signal": name,
+                       "value": sync}]) if sync else None
+    if field_ == "polarity":
+        pol = _norm_polarity(text)
+        return _rule([{"rule": "reset_polarity", "signal": name,
+                       "value": pol}]) if pol else None
+    declared_pol = _norm_polarity(str(rec.get("polarity") or ""))
+    claims = parse_reset_prose(text, name, declared_pol)
+    return _rule(claims) if claims else None
+
+
 def declaration_obligations(project: Optional[Path]) -> dict:
     """Build the exact L3/L6/L8 formal-authoring denominator.
 
@@ -457,8 +671,18 @@ def declaration_obligations(project: Optional[Path]) -> dict:
                     row = _obligation(
                         "L8", key, f"declared temporal behavior {key}={text}", path)
                     binding = _binding_of(row["id"], text)
+                    rule = l8_program_rule(data, key, text)
+                    if rule is not None:
+                        # R-0915-144: a declaration a PROGRAM rule covers
+                        # carries that rule, so the program answers it and the
+                        # expert is asked only for what no rule covers.
+                        row["program_rule"] = rule
+                        row["kind"] = rule["kind"]
                     if binding:
-                        row["kind"] = "binding"       # R-0924-2: a name
+                        # R-0924-2: a NAME obligation stays kind `binding`
+                        # (the landed contract); its structural rule above
+                        # still routes it to the program.
+                        row["kind"] = "binding"
                         row["binding"] = binding
                     obligations.append(row)
 
@@ -926,6 +1150,189 @@ def derive_reset_props(iface: ModuleIface, reset_name: str, active_low: bool
     return props
 
 
+# ── R-0915-144 — observable DUT state and the generated L8 reset properties ─
+#
+# WHY OBSERVERS, AND WHY NEVER `dut.<reg>`. MEASURED 2026-09-23 (lane icspm5
+# §48, mechanism confirmed by lane icformal1): a property written over a
+# hierarchical reference into the DUT does NOT read the DUT's register in this
+# flow's formal path. yosys `read_verilog` has no hierarchical references; it
+# makes `dut.pr` an IMPLICITLY DECLARED LOCAL WIRE of the harness
+#     Warning: Identifier `\dut.pr' is implicitly declared.
+#     Warning: Wire formal_spm.\dut.pr is used but has no driver.
+# which the engine then treats as a FREE variable. The same claim over the
+# harness port `p` (`assign p = pr`) proved while the one over `dut.pr` failed
+# at frame 3. (Under the harness's own `default_nettype none` it is a hard
+# parse error instead.) Either way the property is not about the design.
+#
+# The mechanism the engine DOES bind is the flow's own `@connect` one (see
+# `formal_property_run.emit_invariant_sby`): the harness declares an explicit,
+# undriven `(* keep *)` observer wire, and the .sby script flattens the design
+# and `connect -set`s the observer to the flattened DUT net, after asserting
+# that net exists. Measured on spm: s/c/yr/pr all prove zero one cycle after
+# reset, and a mutant whose reset branch leaves `yr` alone fails. The pragma is
+# `@observe`, not `@connect`, so a generated harness stays on the STANDARD proof
+# path and keeps writing the canonical results.json.
+OBSERVE_PRAGMA = "@observe"
+OBSERVER_PREFIX = "vibeic_obs_"
+
+
+@dataclass
+class Observer:
+    wire: str        # the harness wire
+    net: str         # the DUT net it is bound to (flattened name, may be dotted)
+    width: str       # "[N-1:0]" from the NETLIST's bit count, "" for 1 bit
+
+
+@dataclass
+class L8Prop:
+    name: str        # property name
+    guard: str       # harness expression that is true one cycle after reset
+    expr: str        # consequent
+    obligation: str  # the obligation id it answers
+    reset: str = ""  # the declared reset the guard follows
+    active_low: bool = False  # its DECLARED polarity
+
+
+def _obs_wire(net: str) -> str:
+    """The observer wire for DUT net `net`. INJECTIVE by construction: only a
+    plain identifier is accepted (R-0915-155 C6 keeps everything else outside
+    the class), so the wire is the prefix plus the name, unchanged. The old
+    `$`->`__` mapping made `a$b` and `a__b` one wire (round-6 review)."""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", net):
+        raise ValueError(f"observer net {net!r} is not a plain identifier")
+    return OBSERVER_PREFIX + net
+
+
+def netlist_state(rtl_files: List[Path], top: str, work_dir: Path,
+                  container: Optional[str], resets: List[str] = (),
+                  clock: str = "", simdef: str = "") -> Tuple[Optional[dict], str]:
+    """The design's state, from the NETLIST of the DUT read exactly as the
+    chip's synthesis reads it (R-0915-157) — never from RTL text (review round
+    4, M4), never from a FORMAL variant. If the DUT does not elaborate under
+    that read, the design is outside the class (`outside_class`, named)."""
+    try:
+        import formal_structural_check as _fsc
+    except Exception as exc:  # noqa: BLE001
+        return None, f"netlist reader unavailable: {exc}"
+    elabs = _fsc.elaborations(rtl_files, top, work_dir, container, simdef)
+    facts = []
+    klass: List[str] = []
+    temporal: List[str] = []
+    for e in elabs:
+        if e["netlist"] is None:
+            why = (f"R-0915-157: the DUT does not elaborate under the chip's own "
+                   f"read ({e['defines']}, yosys rc={e['rc']}) — the program "
+                   f"proves the chip's design or nothing")
+            return {"ok": False, "outside_class": [why]}, (
+                "outside the class the program proves soundly (R-0915-155): " + why)
+        for f in _fsc.applicability(e["netlist"], top, clock, list(resets), e["raw"]):
+            if f not in klass:
+                klass.append(f)
+        for f in _fsc.temporal_applicability(e["netlist"], top):
+            if f not in temporal:
+                temporal.append(f)
+        facts.append(_fsc.netlist_facts(e["netlist"], top))
+    if klass:
+        # R-0915-155: outside the class the program proves soundly. Nothing
+        # is claimed — the caller refuses EVERY ruled obligation with this.
+        return {"ok": False, "outside_class": klass}, (
+            "outside the class the program proves soundly (R-0915-155): "
+            + "; ".join(klass))
+    if any(not f["ok"] for f in facts):
+        return None, next(f["why"] for f in facts if not f["ok"])
+    if any(f["registers"] != facts[0]["registers"] for f in facts):
+        return None, "the proof's elaborations disagree about the design's state"
+    # which declared resets force state ASYNCHRONOUSLY (netlist, not text)
+    out = dict(facts[0])
+    out["temporal_outside"] = temporal
+    out["async_resets"] = {}
+    for rst in resets:
+        hit = False
+        for e in elabs:
+            tm = _fsc._top_module(e["netlist"], top)
+            if tm is None:
+                continue
+            bit, _w = _fsc._port_bit(tm[1], rst)
+            if bit is None:
+                continue
+            rm = _fsc._reset_map(tm[1], bit)
+            hit = hit or bool(rm["async"] or rm["async_x"])
+        out["async_resets"][rst] = hit
+    return out, ""
+
+
+def derive_l8_props(facts: Optional[dict], facts_why: str,
+                    obligations: List[dict], inputs: set
+                    ) -> Tuple[List[L8Prop], List[Observer], Dict[str, dict],
+                               Dict[str, str]]:
+    """Generated properties for the TEMPORAL claims ("all state zero one
+    cycle after assertion"), over EVERY register the netlist says is design
+    state. Returns (props, observers, answered, refused).
+
+    The guard uses the DECLARED polarity, and its identity is (reset,
+    polarity). Polarity itself is no longer a property: it is a STRUCTURAL
+    netlist fact checked on every flop the reset forces (review round 4, H2)."""
+    props: List[L8Prop] = []
+    observers: Dict[str, Observer] = {}
+    answered: Dict[str, dict] = {}
+    refused: Dict[str, str] = {}
+    for ob in obligations:
+        rule = ob.get("program_rule") or {}
+        temporal = [c for c in rule.get("claims") or []
+                    if c.get("rule") in _TEMPORAL_CLAIMS]
+        if not temporal:
+            continue
+        oid = str(ob["id"])
+        if facts is None or facts.get("outside_class"):
+            refused[oid] = (facts_why if facts is not None else
+                            f"the design's state could not be read from the netlist: {facts_why}")
+            continue
+        if facts.get("temporal_outside"):
+            refused[oid] = ("the temporal claim is outside the class (R-0915-155): "
+                            + "; ".join(facts["temporal_outside"]))
+            continue
+        names: List[str] = []
+        why = ""
+        for c in temporal:
+            reset = c["signal"]
+            if reset not in inputs:
+                why = f"declared reset {reset!r} is not a 1-bit input of the declared top"
+                break
+            decl_low = c.get("value") == "active_low"
+            if (facts.get("async_resets") or {}).get(reset):
+                why = (f"{reset!r} resets state asynchronously; the one-cycle-"
+                       f"after guard does not state that behaviour")
+                break
+            tag = f"{reset}_{'al' if decl_low else 'ah'}"
+            guard = f"f_past_valid && l8_{tag}_active_q"
+            try:
+                wires = {reg["name"]: _obs_wire(reg["name"]) for reg in facts["registers"]}
+            except ValueError as exc:
+                why = f"cannot observe the design's state faithfully: {exc}"
+                break
+            if len(set(wires.values())) != len(wires):
+                why = "two registers would share one observer wire"
+                break
+            for reg in facts["registers"]:
+                wire = wires[reg["name"]]
+                width = f"[{reg['width'] - 1}:0]" if reg["width"] > 1 else ""
+                observers.setdefault(wire, Observer(wire, reg["name"], width))
+                name = f"p_l8_reset_state_zero_{tag}_{wire[len(OBSERVER_PREFIX):]}"
+                if not any(p.name == name for p in props):
+                    props.append(L8Prop(name, guard, f"({wire} == '0)", oid,
+                                        reset, decl_low))
+                names.append(name)
+        if why:
+            refused[oid] = why
+            continue
+        answered[oid] = {"properties": names, "claims": temporal,
+                         "state_registers": [r["name"] for r in facts["registers"]]}
+    keep = {n for a in answered.values() for n in a["properties"]}
+    props = [p for p in props if p.name in keep]
+    used = {w for p in props for w in re.findall(rf"\b{OBSERVER_PREFIX}\w+", p.expr)}
+    return props, [o for w, o in observers.items() if w in used], answered, refused
+
+
 # ── harness emission ────────────────────────────────────────────────────────
 #: The ONE file in `formal/` this generator never writes. See the comment in
 #: `emit_harness` for why it has to exist and why it has to be a fragment.
@@ -997,7 +1404,9 @@ def _expert_closed_obligations(formal_dir: Path, unresolved: List[dict],
 def emit_harness(iface: ModuleIface, clock: str, reset_name: str,
                  active_low: bool, props: List[ResetProp],
                  assertion_form: str = "concurrent",
-                 expert_properties: str = "") -> str:
+                 expert_properties: str = "",
+                 l8_props: Optional[List[L8Prop]] = None,
+                 observers: Optional[List["Observer"]] = None) -> str:
     """Emit `formal_<top>.sv`: instantiate the DUT with all ports, drive every
     non-clock input as free `(* anyseq *)`, and assert each output's reset-safety
     invariant under the guard appropriate to its FF's reset style. Pure."""
@@ -1119,6 +1528,42 @@ def emit_harness(iface: ModuleIface, clock: str, reset_name: str,
     if prop_lines:
         body_parts.append("")
     body_parts += assert_lines
+    # R-0915-144 — THE GENERATED L8 RESET PROPERTIES, over observers the
+    # engine binds (see OBSERVE_PRAGMA). Absent → byte-identical harness.
+    if l8_props:
+        body_parts.append("")
+        body_parts.append("    // R-0915-144: L8 reset declarations, authored by this program.")
+        for ob in observers or []:
+            w = f"{ob.width} " if ob.width else ""
+            body_parts.append(
+                f"    // {OBSERVE_PRAGMA} {ob.wire} = dut.{ob.net}")
+            body_parts.append(f"    (* keep *) wire {w}{ob.wire};")
+        seen_rst: List[str] = []
+        for p in l8_props:
+            tag = f"{p.reset}_{'al' if p.active_low else 'ah'}"
+            if tag in seen_rst:
+                continue
+            seen_rst.append(tag)
+            act = f"!{p.reset}" if p.active_low else p.reset
+            body_parts += [
+                f"    wire l8_{tag}_active = {act};",
+                f"    reg l8_{tag}_active_q = 1'b0;",
+                f"    always @(posedge {clock}) "
+                f"l8_{tag}_active_q <= l8_{tag}_active;",
+            ]
+        for p in l8_props:
+            if assertion_form == "immediate":
+                body_parts.append(
+                    f"    always @(posedge {clock}) if ({p.guard})\n"
+                    f"        a_{p.name[2:]}: assert ({p.expr});")
+            else:
+                body_parts += [
+                    f"    property {p.name};",
+                    f"        @(posedge {clock})",
+                    f"            ({p.guard}) |-> ({p.expr});",
+                    f"    endproperty",
+                    f"    a_{p.name[2:]}: assert property ({p.name});",
+                ]
     # THE EXPERT ROLE'S PROPERTIES, IF THIS RUN HAS ANY.
     #
     # WHY: measured 2026-09-15 on `subservient` x gf180mcuD. This program
@@ -1430,7 +1875,8 @@ def _unresolved_declaration_rows(decl: dict) -> List[dict]:
 def generate(project: Optional[Path] = None, top: Optional[str] = None,
              rtl: Optional[List[Path]] = None,
              out: Optional[Path] = None,
-             assertion_form: str = "concurrent") -> dict:
+             assertion_form: str = "concurrent",
+             container: Optional[str] = None) -> dict:
     """Author the deterministic floor and its declaration denominator.
 
     NOT_APPLICABLE is reserved for an explicit design declaration. An
@@ -1454,8 +1900,15 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
                 "property_denominator": 0}
 
     declared = list(decl["obligations"]) + _unresolved_declaration_rows(decl)
-    rtl_files = list(rtl) if rtl else (
-        _discover_rtl(_pl.rtl_dir(project)) if (project and _pl) else [])
+    # R-0915-157: the DUT is the CHIP's source set — the ONE selection phase-3
+    # synthesis reads (`_chip_synth_read.chip_rtl_files`).
+    if rtl:
+        rtl_files = list(rtl)
+    elif project and _pl:
+        import _chip_synth_read as _csr
+        rtl_files = _csr.chip_rtl_files(_pl.rtl_dir(project))
+    else:
+        rtl_files = []
     if not rtl_files:
         if project is None:
             return {"verdict": "NOT_APPLICABLE", "rc": 2,
@@ -1532,10 +1985,123 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
     # byte-identical harness to the one it got before this existed, and a
     # harness can never `` `include `` a file sby would fail to stage.
     _expert = out_path.parent / EXPERT_PROPERTIES_SVH
+    # R-0915-144 — the program answers the TEMPORAL claims it has a rule for.
+    _mtexts = _module_texts(rtl_files)
+    _known = list(_mtexts.keys())
+    # R-0915-144 / review H5 — a rule is about a 1-bit INPUT of the design. A
+    # declared reset or clock that is an OUTPUT (the flow's own L8 emitter
+    # lists `o_rst_n` among the resets), or not a port at all, is not this
+    # rule's subject: the rule is refused with the reason and the obligation
+    # goes to the expert. It is never "the RTL contradicts its declaration".
+    _decl_top = _resolve_top(rtl_files, top, project)
+    _subj_name = _decl_top if _decl_top in _known else dut_top
+    _subj = parse_module(_mtexts[_subj_name][0], _subj_name) if _subj_name in _mtexts else None
+    _inputs = {p.name for p in (_subj.ports if _subj else iface.ports)
+               if p.direction == "input" and _is_scalar(p.width)}
+    _pre_refused: Dict[str, str] = {}
+    for o in declared:
+        for c in (o.get("program_rule") or {}).get("claims") or []:
+            if c.get("signal") and c["signal"] not in _inputs:
+                _pre_refused[str(o["id"])] = (
+                    f"declared {c['signal']!r} is not a 1-bit input of "
+                    f"{_subj_name}; not the subject of rule {c['rule']}")
+                break
+    # Review round 2, M2 — one reset, two DECLARED polarities (the flow's L8
+    # emitter takes `polarity` and `port_description` from independent
+    # sources). Both cannot be true; the program answers neither and names
+    # the contradiction for the expert.
+    _pols: Dict[str, Dict[str, List[str]]] = {}
+    for o in declared:
+        for c in (o.get("program_rule") or {}).get("claims") or []:
+            if c.get("rule") in ("reset_polarity", "reset_state_zero"):
+                _pols.setdefault(c["signal"], {}).setdefault(
+                    c.get("value", ""), []).append(str(o["id"]))
+    for rst, by_pol in _pols.items():
+        if len(by_pol) > 1:
+            for pol, ids in by_pol.items():
+                for oid in ids:
+                    _pre_refused.setdefault(oid, (
+                        f"L8 declares reset {rst!r} with contradictory "
+                        f"polarities {sorted(by_pol)} "
+                        f"({'; '.join(f'{k}: {v}' for k, v in sorted(by_pol.items()))}); "
+                        f"the program answers neither"))
+    # PROGRAM-FIRST OWNS THE DECLARED TOP, AND ONLY THE DECLARED TOP.
+    #
+    # When the harness proves a module BELOW the declared top, whether the
+    # wrappers are transparent to the reset, the clock and the state is a
+    # judgement, not a regex. Round 2 closed the top's declarations on the
+    # core's proof (a wrapper's `~rst_n` / `rst_n | scan_mode` was invisible);
+    # the round-3 allowance for "a plain wire through every wrapper" was
+    # itself bypassed three ways (a second instance of the same module, a
+    # `#(...)` override of the reset value, the wrapper's own flops) and made
+    # `state_covered` compare the core's register names with the top's
+    # netlist. So the allowance is REMOVED: off the declared top the program
+    # closes NOTHING — temporal or structural — and every ruled obligation
+    # goes to the `formal-verify` expert with this reason (review round 3).
+    #
+    # AND "THE DECLARED TOP" MEANS RESOLVED AND FOUND BY NAME. `_pick_provable`
+    # labels its FIRST-MODULE FALLBACK `declared_top` too (no --top and no L9
+    # top_module with several modules, a case mismatch, a `macromodule`, the
+    # runner's default `chip_top` with no chip_top.v) — so the label alone
+    # proves nothing. The program closes only when the resolved declared top
+    # exists by that exact name AND is the module the harness proves
+    # (review round 4, H1).
+    _top_found = (_decl_top is not None and _decl_top in _known
+                  and dut_top == _decl_top and selection == "declared_top")
+    if not _top_found:
+        for o in declared:
+            if o.get("program_rule"):
+                _pre_refused.setdefault(str(o["id"]), (
+                    f"the harness proves {dut_top!r} ({selection}), and the "
+                    f"declared top {_decl_top!r} is "
+                    + ("not a module in the RTL" if _decl_top not in _known
+                       else "a different module")
+                    + "; whether that module stands for the design is a "
+                      "judgement the program does not make, so it closes "
+                      "nothing here"))
+    _facts, _facts_why = (None, "not computed")
+    _simdef = ""
+    if _top_found and project is not None and _pl is not None and any(
+            str(o["id"]) not in _pre_refused and o.get("program_rule")
+            for o in declared):
+        _resets = sorted({c["signal"] for o in declared
+                          for c in (o.get("program_rule") or {}).get("claims") or []
+                          if c.get("rule", "").startswith("reset_")
+                          and c.get("signal") in _inputs})
+        import _chip_synth_read as _csr
+        _simdef, _simdec = _csr.chip_sim_define(
+            rtl_files, _csr.staged_macro_files(project))
+        # R-0915-157 round 9: the define decision reads the macro views A8
+        # stages in phase 3. While a declared analog block has none staged,
+        # the chip's decision cannot be known here: outside the class, named.
+        _unstaged = _csr.unstaged_analog_blocks(project)
+        if _unstaged:
+            for o in declared:
+                if o.get("program_rule"):
+                    _pre_refused.setdefault(str(o["id"]), (
+                        f"outside the class: the design declares analog "
+                        f"block(s) {_unstaged} whose hard macros A8 has not "
+                        f"staged yet, so the chip's -DSIMULATION decision "
+                        f"cannot be known at Step 5; the program closes "
+                        f"nothing on a read that may not be the chip's"))
+        _facts, _facts_why = netlist_state(
+            rtl_files, _decl_top, _pl.formal_dir(project) / "l8_netlist",
+            container, _resets, clock, _simdef)
+        if _facts is not None and _facts.get("outside_class"):
+            # R-0915-155: EVERY ruled obligation — structural and temporal —
+            # goes to the expert with the failing preconditions named.
+            for o in declared:
+                if o.get("program_rule"):
+                    _pre_refused.setdefault(str(o["id"]), _facts_why)
+    l8_props, l8_obs, l8_answered, l8_refused = derive_l8_props(
+        _facts, _facts_why, [o for o in declared if o.get("program_rule")
+                             and str(o["id"]) not in _pre_refused], _inputs)
+    l8_refused.update(_pre_refused)
     harness = emit_harness(iface, clock, reset_name, active_low, props,
                            assertion_form=assertion_form,
                            expert_properties=(EXPERT_PROPERTIES_SVH
-                                              if _expert.is_file() else ""))
+                                              if _expert.is_file() else ""),
+                           l8_props=l8_props, observers=l8_obs)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(harness)
     generated = [{
@@ -1546,7 +2112,49 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
         "property": f"p_reset_safety_{idx}", "status": "AUTHORED",
         "author": "formal_harness_gen",
     } for idx, p in enumerate(props, 1)]
-    unresolved = declared
+    # R-0915-144 — sort each program-ruled obligation by what is left of it:
+    #   * every claim TEMPORAL and every one now has a property → covered here,
+    #     exactly like the reset-safety floor above (proved or refuted by the
+    #     engine);
+    #   * any STRUCTURAL claim → stays in the request, annotated, and
+    #     `formal_property_run` answers it with `formal_structural_check`
+    #     (receipt INVOKED_BY_PROGRAM), citing the properties its temporal
+    #     claims rely on;
+    #   * a rule the program could not apply → the rule is marked refused, the
+    #     reason is written on the row, and the expert gets it as before.
+    unresolved = []
+    for ob in declared:
+        rule = ob.get("program_rule")
+        if not rule:
+            unresolved.append(ob)
+            continue
+        oid = str(ob["id"])
+        row = dict(ob)
+        if oid in l8_refused:
+            row["program_refused"] = l8_refused[oid]
+            unresolved.append(row)
+            continue
+        ans = l8_answered.get(oid)
+        if ans:
+            row["properties"] = ans["properties"]
+            if ans.get("state_registers"):
+                # "ALL internal state" is only as true as the register list:
+                # the netlist check confirms no flop lies outside it. That is
+                # a structural claim, so the obligation becomes MIXED.
+                claims = list(rule["claims"]) + [{
+                    "rule": "state_covered",
+                    "signal": next(c["signal"] for c in rule["claims"]
+                                   if c["rule"] == "reset_state_zero"),
+                    "value": ",".join(ans["state_registers"])}]
+                rule = _rule(claims)
+                row["program_rule"] = rule
+                row["kind"] = rule["kind"]
+        if rule.get("kind") == KIND_TEMPORAL and ans:
+            row.update({"property": ans["properties"][0], "status": "AUTHORED",
+                        "author": "formal_harness_gen", "source": row.get("source")})
+            generated.append(row)
+            continue
+        unresolved.append(row)
     # THE EXPERT'S ANSWER, READ BACK AND RE-VERIFIED.
     #
     # This program writes `formal_authoring_request.json` telling the
@@ -1584,6 +2192,30 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
         "fallback_skill": "formal-verify" if unresolved else None,
         **_declaration_read_state(decl),
     }
+    if any((o.get("program_rule") or {}).get("kind") in (KIND_STRUCTURAL, KIND_MIXED)
+           and not o.get("program_refused") for o in unresolved):
+        # WHAT the structural check reads: the declared top (the declaration
+        # is about the chip), falling back to the module the harness proves.
+        contract["structural_subject"] = {
+            "top": _subj_name,
+            # the R-0915-155 gate is re-applied by the check that answers
+            "clock": clock,
+            # R-0915-157: the chip's define decision, the same read the proof uses
+            "simdef": _simdef if _top_found else "",
+            "resets": sorted({c["signal"] for o in declared
+                              for c in (o.get("program_rule") or {}).get("claims") or []
+                              if c.get("rule", "").startswith("reset_")
+                              and c.get("signal") in _inputs}),
+            "rtl_files": [str(f) for f in rtl_files],
+        }
+    if _top_found and project is not None and _pl is not None:
+        # R-0915-157 round 9: the module the program-closed proof is ABOUT;
+        # `formal_property_run` records the exact chip read under it.
+        contract["chip_read_top"] = _decl_top
+    if l8_obs:
+        contract["observers"] = [
+            {"wire": o.wire, "net": f"dut.{o.net}", "width": o.width}
+            for o in l8_obs]
     _write_property_contract(project, contract)
     return {
         "verdict": "EMITTED", "rc": 0,
@@ -1619,9 +2251,13 @@ def main(argv=None) -> int:
     ap.add_argument("--rtl", type=Path, nargs="*", default=None)
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--json", default=None)
+    ap.add_argument("--container", default=None,
+                    help="EDA container for the netlist read (default: this "
+                         "filesystem, the in-image route)")
     args = ap.parse_args(argv)
     project = args.project_dir.resolve() if args.project_dir else None
-    res = generate(project=project, top=args.top, rtl=args.rtl, out=args.out)
+    res = generate(project=project, top=args.top, rtl=args.rtl, out=args.out,
+                   container=args.container)
     rc = res.pop("rc", 0)
     out = json.dumps(res, indent=2, ensure_ascii=False)
     if args.json:

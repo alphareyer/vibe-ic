@@ -155,3 +155,25 @@ def macro_headers_first(files: Sequence[Path]) -> List[Path]:
         return paths
     rest = [p for p in paths if not is_macro_header(p)]
     return headers + rest
+
+
+#: Non-silicon sources that the LibreLane synthesis input excludes by name.
+SILICON_SKIP_TOKENS = ("assertions", "de10lite_top", "host_emulator", "_tb",
+                       "testbench", "stimulus")
+
+
+def silicon_rtl_selection(rtl_dir: Path) -> List[Path]:
+    """The RTL LibreLane synthesises: step 9's input, and step 2's lint input.
+
+    One selector, so the file set the linter judged is the file set synthesis
+    reads by construction (the step-2 lint once globbed only ``*.sv`` and
+    linted zero files of a ``.v`` design). Package files first."""
+    rtl_dir = Path(rtl_dir)
+    if not rtl_dir.is_dir():
+        return []
+    rtl = sorted(rtl_dir.glob("*.sv")) + sorted(rtl_dir.glob("*.v"))
+    rtl = drop_include_hubs([path for path in rtl
+                             if not any(token in path.name.lower()
+                                        for token in SILICON_SKIP_TOKENS)])
+    return [path for path in rtl if "pkg" in path.name.lower()] + [
+        path for path in rtl if "pkg" not in path.name.lower()]

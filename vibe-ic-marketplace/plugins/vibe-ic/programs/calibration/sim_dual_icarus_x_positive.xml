@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuites name="cocotb tests"><testsuite name="tb_xd" errors="0" failures="1" skipped="0" tests="2" time="0.000" timestamp="2026-09-26T01:50:57.508822+00:00" hostname="ff5174b1e79e"><testcase classname="tb_xd" name="q_starts_low" time="0.000"><failure message="Cannot convert Logic('X') to int" type="ValueError">Traceback (most recent call last):
+  File "/tmp/s4x/tb_xd.py", line 10, in q_starts_low
+    assert int(dut.q.value) == 0
+           ^^^^^^^^^^^^^^^^
+  File "/opt/vibeic-forks/cocotb/src/cocotb/types/_logic.py", line 255, in __int__
+    raise ValueError(f"Cannot convert {self!r} to int")
+ValueError: Cannot convert Logic('X') to int
+</failure><properties><property name="cocotb" value="True" /><property name="random_seed" value="1790387457" /><property name="file" value="/tmp/s4x/tb_xd.py" /><property name="line" value="5" /><property name="sim_time_unit" value="ns" /><property name="sim_time_start" value="0.0" /><property name="sim_time_stop" value="0.0" /><property name="sim_time_duration" value="0.0" /><property name="sim_time_ratio" value="0.0" /></properties><system-err>Test failed with COCOTB_RANDOM_SEED=1790387457
+</system-err></testcase><testcase classname="tb_xd" name="clock_runs" time="0.000"><properties><property name="cocotb" value="True" /><property name="random_seed" value="1790387457" /><property name="file" value="/tmp/s4x/tb_xd.py" /><property name="line" value="12" /><property name="sim_time_unit" value="ns" /><property name="sim_time_start" value="0.001" /><property name="sim_time_stop" value="20.001" /><property name="sim_time_duration" value="20.0" /><property name="sim_time_ratio" value="139567.2989541309" /></properties></testcase></testsuite></testsuites>

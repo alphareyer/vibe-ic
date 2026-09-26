@@ -16676,12 +16676,8 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
     set_invocation_provenance_sink(project)
     switch = json.loads((project / "phase3/librelane_switch.json").read_text())
     image = _ll.resolve_image(project)
-    rtl = sorted(_pl.rtl_dir(project).glob("*.sv")) + sorted(_pl.rtl_dir(project).glob("*.v"))
-    skipped = ("assertions", "de10lite_top", "host_emulator", "_tb", "testbench", "stimulus")
-    rtl = _drop_include_hubs([path for path in rtl
-                              if not any(token in path.name.lower() for token in skipped)])
-    rtl = [path for path in rtl if "pkg" in path.name.lower()] + [
-        path for path in rtl if "pkg" not in path.name.lower()]
+    from _rtl_include_hub import silicon_rtl_selection
+    rtl = silicon_rtl_selection(_pl.rtl_dir(project))
     if not rtl:
         return StepResult("synth", "FAIL", time.time() - t0, "LL_SYNTH_INPUT_MISSING")
     macro = _sf.decide_macro_aware_sim_define(
@@ -16859,14 +16855,11 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # the ledger. A new process reusing a declared synth.log therefore wrote
     # it with no active sink and left the old hash as the newest declaration.
     set_invocation_provenance_sink(project)
-    all_rtl = sorted((_pl.rtl_dir(project)).glob("*.sv")) + \
-              sorted((_pl.rtl_dir(project)).glob("*.v"))
     # Phase 3 synth = silicon top only. Skip FPGA wrappers + test fixtures
-    # + non-synthesisable assertion files.
-    skip_substrs = ("assertions", "de10lite_top", "host_emulator", "_tb",
-                    "testbench", "stimulus")
-    silicon = [f for f in all_rtl
-               if not any(s in f.name.lower() for s in skip_substrs)]
+    # + non-synthesisable assertion files. R-0915-157: this selection lives in
+    # `_chip_synth_read.chip_rtl_files`, the ONE definition the Step-5 formal
+    # proof also reads the DUT with, so the proof and the chip cannot drift.
+    #
     # Drop include-hub aggregators — a file that `include`s a sibling which is
     # ALSO staged standalone. Reading both defines every included module twice
     # and the read ABORTS ("duplicate definition" / "already declared"), so
@@ -16874,11 +16867,9 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # want of a GDS. The name filter above cannot catch this: an aggregator is
     # identified by its `include grammar, not by its filename. Parity with
     # phase-2 synth's selector, which has excluded these since #614.
-    silicon = _drop_include_hubs(silicon)
     # Package files MUST come first so `import pkg::*` resolves.
-    pkg_files = [f for f in silicon if "pkg" in f.name.lower()]
-    other = [f for f in silicon if "pkg" not in f.name.lower()]
-    rtl_files = pkg_files + other
+    import _chip_synth_read as _csr
+    rtl_files = _csr.chip_rtl_files(_pl.rtl_dir(project))
 
     # ASIC top resolution moved to main() so all steps share the same
     # `top`. step_synth now receives the already-resolved name.
@@ -16928,14 +16919,26 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # "-DSIMULATION " and every command emitted here is BYTE-IDENTICAL to the
     # historical flow, so the behavioural path the define was added for is
     # untouched. See synth_frontend.decide_macro_aware_sim_define.
-    _macro_def = _sf.decide_macro_aware_sim_define(
-        _sf.read_text_blob(rtl_files),
+    _simdef, _macro_def = _csr.chip_sim_define(
+        rtl_files,
         list(pdk.macro_libs) + list(pdk.macro_lefs) + list(pdk.macro_v))
-    _simdef = "-DSIMULATION " if _macro_def["define_sim"] else ""
-    reads = "; ".join(
-        f"read_verilog -sv {_simdef}{_to_container_path(str(f), container)}"
-        for f in rtl_files
-    )
+    reads = "; ".join(_csr.chip_read_lines(
+        rtl_files, _simdef, lambda f: _to_container_path(str(f), container)))
+    # R-0915-157 round 9: record the read this synthesis BUILDS and compare it
+    # with the read Step 5's program-closed proof recorded. A difference (the
+    # define decision flipped by A8's staged macros, the file set or contents,
+    # the top) makes those closures STALE — `formal_proof_evidence_check`
+    # refuses them; it is never a PASS about a different chip.
+    try:
+        _stale = _csr.write_built_record(
+            project, rtl_files,
+            list(pdk.macro_libs) + list(pdk.macro_lefs) + list(pdk.macro_v), top)
+    except Exception as _e:  # noqa: BLE001 — the record never blocks synth
+        _stale = []
+        print(f"[phase3] chip-read record not written: {_e}", file=sys.stderr)
+    for _d in _stale:
+        print(f"[phase3] STEP-5 PROOF STALE — the proof read a different chip: {_d}",
+              file=sys.stderr)
     # Read OTP image into the synth working directory so $readmemh resolves.
     otp_hex_dir = project / "input" / "otp"
     setup = ""
@@ -64941,16 +64944,16 @@ def _emit_power_report(project: Path, top: str, pdk: PdkConfig,
     # so switching power comes from REAL activity instead of the
     # vectorless SDC default. The chosen mode is disclosed in power.rpt
     # and power.json (`analysis_mode`); no VCD → vectorless (honest).
-    vcd_cands = (sorted(_pl.sim_dir(project).rglob("*.vcd"))
-                 + sorted(_pl.sim_full_stack_dir(project).rglob("*.vcd")))
-    vcd = next((v for v in vcd_cands if v.stat().st_size > 0), None)
+    # Step 4's DUT-scoped dump (manifest + verified scope) first; see
+    # `_ppa.power.select_activity` for why a VCD without its scope is not one.
+    _activity = _ppa_power.select_activity(
+        [_pl.sim_dir(project), _pl.sim_full_stack_dir(project)])
+    vcd = _activity["vcd"] if _activity else None
     analysis_mode = "vector_vcd" if vcd else "vectorless_sdc"
     vcd_tcl = ""
     if vcd:
         vcd_c = _run_root_tcl_path(vcd, project, container, tcl_path)
-        vcd_tcl = (f"if {{[catch {{read_power_activities -vcd {vcd_c}}} "
-                   f"_vcd_err]}} {{\n"
-                   f"  puts \"READ_VCD_FAIL: $_vcd_err\"\n}}\n")
+        vcd_tcl = _ppa_power.activity_read_tcl(vcd_c, _activity["scope"])
     # Parasitics: read AFTER link_design and alongside the SDC, exactly as the
     # sibling post-route STA emitters do. Only ever emitted when a non-empty
     # SPEF for THIS run exists — a `read_spef` of a file that is not there is
@@ -70987,32 +70990,24 @@ def main() -> int:
     # steps. step_synth's local override of `top` was not propagating
     # to step_pnr, so PnR looked for `<requested_top>_synth.v` while
     # synth had emitted `<asic_top>_synth.v`.
-    effective_top = args.top_name
-    for cand in (f"{args.top_name}_asic", f"{args.top_name}_pad_wrapper"):
-        if (_pl.rtl_dir(project) / f"{cand}.sv").is_file():
-            effective_top = cand
-            break
-    # ORGANIC — when the `_asic` / `_pad_wrapper` probe above did NOT fire (so
-    # effective_top is still the raw --top-name), fall back to the SAME
-    # structural resolver phase-2 uses. The orchestrator's --top-name is
-    # frequently the PROJECT / SKU name (e.g. `caravel_user_project`), whose
-    # synthesizable top module is actually a differently-named wrapper
-    # (`user_project_wrapper`). Without this, yosys `synth -top <project>` fails
-    # its HIERARCHY pass with "Module `<project>' not found!" and the whole
-    # phase-3 backend collapses (no netlist → no PnR → no pnr/constraint.sdc →
-    # the step-7 constraints/*.sdc gate FAILs → every downstream stage cascades),
-    # while phase-2 synth PASSES on the same rtl/ — a same-project divergence.
-    # The resolver returns --top-name unchanged when it IS a real module, so
-    # already-correct designs are untouched; it only overrides a phantom top.
-    if effective_top == args.top_name:
-        _structural_top = _resolve_asic_top_structural(
-            project, args.top_name, _l9_top_module_hint(project))
-        if _structural_top and _structural_top != effective_top:
-            print(f"[phase3] ASIC top {args.top_name!r} is not a module in "
-                  f"rtl/ — resolved synthesizable top to {_structural_top!r} "
-                  f"(instantiation-graph root; parity with phase-2 synth)",
-                  file=sys.stderr)
-            effective_top = _structural_top
+    # R-0915-157 round 9: the resolution lives in `_chip_synth_read.
+    # effective_top`, the ONE definition the Step-5 proof's record is compared
+    # against. `<top>_asic` / `<top>_pad_wrapper` when rtl/ carries one; else
+    # the SAME structural resolver phase-2 uses — the orchestrator's --top-name
+    # is frequently the PROJECT / SKU name (e.g. `caravel_user_project`), whose
+    # synthesizable top module is a differently-named wrapper
+    # (`user_project_wrapper`); without it `synth -top <project>` fails its
+    # HIERARCHY pass while phase-2 synth PASSES on the same rtl/. A --top-name
+    # that IS a real module is returned unchanged.
+    import _chip_synth_read as _csr_top
+    effective_top = _csr_top.effective_top(project, args.top_name)
+    if (effective_top != args.top_name
+            and effective_top not in (f"{args.top_name}_asic",
+                                      f"{args.top_name}_pad_wrapper")):
+        print(f"[phase3] ASIC top {args.top_name!r} is not a module in "
+              f"rtl/ — resolved synthesizable top to {effective_top!r} "
+              f"(instantiation-graph root; parity with phase-2 synth)",
+              file=sys.stderr)
 
     print(f"=== phase3_one_shot_runner — pdk={pdk.name} top={effective_top}"
           f"{' (override of '+args.top_name+')' if effective_top != args.top_name else ''} ===")
