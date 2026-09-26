@@ -115,6 +115,7 @@ chip-AGNOSTIC.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -232,6 +233,9 @@ class PdkFacts:
         # See `analog_a5_pdk_device_limits.layer_identity` for the defect
         # this closes; `read_pdk` refuses rather than leave it None.
         self.layers: Optional["_lim.LayerIdentity"] = None
+        # the tech LEF's ROUTING/CUT table (`tech_lef_layers`), or None
+        self.tech_lef: Optional[List[dict]] = None
+        self.tech_lef_sha256: Optional[str] = None
 
     def limits_for(self, model: str) -> Tuple[Optional[float], Optional[float],
                                               Optional[str]]:
@@ -306,7 +310,8 @@ def over_maxima(devs: Sequence[dict], facts: PdkFacts) -> List[dict]:
 
 def read_pdk(stage: Stage, pdk_root: str, family: str,
              gencell_tcl: Optional[str], drc_tech: Optional[str],
-             magic_tech: Optional[str] = None
+             magic_tech: Optional[str] = None,
+             tech_lef: Optional[str] = None
              ) -> Tuple[Optional[PdkFacts], str]:
     """Read every PDK fact this emitter needs, or say which file was
     unreadable. Never a default: a limit that cannot be read is ABSENT."""
@@ -375,6 +380,25 @@ def read_pdk(stage: Stage, pdk_root: str, family: str,
             if rc2 == 0 and txt.strip():
                 for model, rec in _lim.gencell_defaults(txt, path).items():
                     facts.gencells.setdefault(model, rec)
+
+    # THE TECH LEF: which routing layers exist, their preferred directions and
+    # their DC current density — what the macro's pins are placed and sized
+    # by. NOT fatal: without it the pins cannot be derived, and the record
+    # says so (`pins_basis`) instead of this emitter guessing a layer.
+    lp = tech_lef
+    if not lp:
+        rc, out, _ = stage.sh(
+            f"ls -1 {shlex.quote(pdk_root)}/{shlex.quote(family)}"
+            f"/libs.ref/*/lef/*tech*.lef", timeout=120)
+        found = sorted(t for t in (out or "").split() if t.endswith(".lef")) \
+            if rc == 0 else []
+        lp = found[0] if found else None
+    if lp:
+        rc, out, _ = stage.sh(f"cat {shlex.quote(lp)}", timeout=120)
+        if rc == 0 and tech_lef_layers(out):
+            facts.tech_lef = tech_lef_layers(out)
+            facts.sources["tech_lef"] = lp
+            facts.tech_lef_sha256 = hashlib.sha256(out.encode()).hexdigest()
     return facts, ""
 
 
@@ -1141,6 +1165,12 @@ class Plan:
         self.deviations: List[dict] = []
         self.ports: List[Tuple[str, int, int]] = []
         self.port_nets: List[str] = []
+        # the declared ports as PINS: one record per port, with the
+        # rectangle its label covers (see `_draw_pins`)
+        self.pins: List[dict] = []
+        # `floating_metal_patches` census, and each patch's own device
+        self.island_patches: dict = {}
+        self.patch_of: Dict[Tuple[str, tuple], str] = {}
         self.row_base = 0
         # the gencells' OWN geometry, placed. The emitter does not draw it
         # and cannot change it, but its routing runs beside it, and a
@@ -1340,6 +1370,303 @@ def cell_components(cell: dict) -> Dict[Tuple[str, int], int]:
 
     return {(la, ja): (find(i), lfind(i))
             for i, (la, ja, _r) in enumerate(items)}
+
+
+def floating_device_metal(cell: dict, geo: "Geo") -> List[dict]:
+    """Every metal polygon of a gencell child that NO terminal label reaches
+    and that is smaller than the deck's minimum area on its own layer.
+
+    A gencell polygon this emitter routes to merges with the routing and is
+    graded as part of it. One no label reaches is left exactly as the gencell
+    drew it, and the minimum-area rule grades it alone. The two are told apart
+    by CONDUCTOR (`cell_components`), and a conductor is reached when a label
+    point lies on any of its rectangles — the same containment the router
+    uses to find a terminal. Areas are summed over the polygon's rectangles,
+    which Magic writes as non-overlapping tiles.
+
+    Each record also names the label LAYER(S) of the sections its conductor
+    is drawn over (`sections`): a gate contact the gencell did not label is
+    drawn on the same contact type as the one it did, and that is how
+    `floating_metal_patches` finds which terminal, and so which net, it is.
+
+    MEASURED, and it is why this exists: the PDK's MOS gencell draws a gate
+    contact at BOTH ends of the gate, carries each to metal2 through its own
+    via1, and labels only the top one (the bottom is labelled only when there
+    is no top contact). Unrouted, the bottom contact's metal2 is the gate
+    length times one via pad: 20 (ldo) and 302 (delta_sigma) islands of
+    0.0812 and 0.058 um2 under the 0.144 um2 Mn.d rule on u_hawaii_adc, and
+    nothing in this emitter looked at geometry it did not route. Returns
+    records, never raises."""
+    comps = cell_components(cell)
+    rects = [(layer, j, r) for layer, rs in sorted(device_planes(cell).items())
+             for j, r in enumerate(rs)]
+    reached = set()
+    for lab in cell.get("labels", []):
+        for layer, j, r in rects:
+            if r[0] <= lab["x"] <= r[2] and r[1] <= lab["y"] <= r[3]:
+                reached.add(comps.get((layer, j), (None, None))[0])
+    area: Dict[Tuple[str, int], int] = {}
+    boxes: Dict[Tuple[str, int], List[Tuple[int, int, int, int]]] = {}
+    conductor: Dict[Tuple[str, int], int] = {}
+    for layer, j, r in rects:
+        mm = _METAL_RE.match(layer)
+        if not mm or _VIA_RE.match(layer):
+            continue
+        c, lc = comps.get((layer, j), (None, None))
+        key = (layer, lc)
+        area[key] = area.get(key, 0) + (r[2] - r[0]) * (r[3] - r[1])
+        boxes.setdefault(key, []).append(tuple(r))
+        conductor[key] = c
+    label_layers = {lab.get("layer") for lab in cell.get("labels", [])}
+    out = []
+    for (layer, lc), a in sorted(area.items(), key=str):
+        need = geo.area_lam2.get(int(_METAL_RE.match(layer).group(1)), 0)
+        c = conductor[(layer, lc)]
+        if c in reached or not need or a >= need:
+            continue
+        mine = [r for (ly, j, r) in rects
+                if comps.get((ly, j), (None, None))[0] == c]
+        over = sorted(
+            sec for sec, srs in cell["sections"].items()
+            if sec in label_layers and any(
+                s[0] < m[2] and m[0] < s[2] and s[1] < m[3] and m[1] < s[3]
+                for s in srs for m in mine))
+        out.append({"layer": layer, "area_lambda2": a,
+                    "min_area_lambda2": need, "comp": c,
+                    "bbox": _extent(boxes[(layer, lc)]), "sections": over})
+    return out
+
+
+def _clear_but(sites: "Sites", box: Sequence[int], layer: str,
+               allowed: set, net: str,
+               origin: Sequence[Sequence[int]] = (),
+               joins: Sequence[Sequence[int]] = ()) -> bool:
+    """`Sites.clear` for a box that is ALLOWED to join several conductors:
+    every device conductor in `allowed` may touch it, every other conductor
+    must keep the deck's space and must not touch, and this emitter's own
+    paint of another net is an obstacle like any device's.
+
+    EUCLIDEAN, where `Sites.clear` is per-axis. A patch sits INSIDE a
+    gencell, next to the gencell's own metal at the gencell's own corner
+    distances, and the per-axis reading refuses geometry the gencell already
+    drew legally: MEASURED on the ldo pass device, every gate-contact island
+    is 0.20 um across and 0.14 um up from its own finger's source/drain metal
+    — 0.244 um apart against a 0.21 um rule, legal, and refused per-axis, so
+    no patch that kept the island's own edge could ever pass. The distance
+    here is the one the deck measures; the rectangles it is taken between are
+    `parse_cell`'s, already rounded outward.
+
+    `origin`: the polygons the box EXTENDS. A neighbour those already sit
+    closer to than the rule (by `parse_cell`'s outward rounding, or because
+    the gencell drew them so) is not made worse by a box that comes no
+    closer to it than they do, so only a box that comes CLOSER is refused.
+
+    `joins`: this net's own rectangles the caller is joining in the same
+    stroke (a patch drawn as two rectangles is checked one at a time)."""
+    s = sites.geo.metal_space(layer)
+
+    def d2(a, b) -> int:
+        dx = max(b[0] - a[2], a[0] - b[2], 0)
+        dy = max(b[1] - a[3], a[1] - b[3], 0)
+        return dx * dx + dy * dy
+
+    for r in sites.near(layer, box, s):
+        if "lcomp" in r and r.get("comp") in allowed:
+            continue
+        got = d2(box, r["box"])
+        if "lcomp" not in r and r["net"] == net and \
+                tuple(r["box"]) in {tuple(j) for j in joins}:
+            continue
+        if "lcomp" not in r and r["net"] == net:
+            # this emitter's own paint of the SAME net: joining it is fine,
+            # standing short of it is not — two polygons of one net are
+            # still two polygons to the spacing rule (MEASURED: a same-net
+            # escape 0.11 um from a patch, M2.b on delta_sigma)
+            if got and got < s * s:
+                return False
+            continue
+        if got >= s * s:
+            continue
+        if got == 0 or not origin or got < min(d2(o, r["box"])
+                                                for o in origin):
+            return False
+    return True
+
+
+def floating_metal_patches(plan: "Plan", per_dev: Sequence[dict],
+                           geo: "Geo", sites: "Sites") -> List[dict]:
+    """PLAN a legal area for every unrouted, sub-minimum-area gencell polygon,
+    and RESERVE it, before any routing is drawn. `commit_metal_patches`
+    paints them after the routing.
+
+    WHOSE IT IS. A polygon no label reaches still belongs to a terminal: it is
+    drawn over a section of the same type as one of the device's labels (a
+    gate contact on the gate-contact type). When exactly one netlist net's
+    labels sit on that type, the polygon is that net's; otherwise it is the
+    device's own and every other net keeps clear of the patch.
+
+    HOW IT IS MADE LEGAL — every option that fits, in this order:
+      1. GROWN along one axis until it holds the deck's minimum area, into
+         space that keeps the deck's spacing from every other conductor;
+      2. BRIDGED to the nearest polygon of the SAME net on the same layer —
+         the case of a multiplied device, whose stacked gate contacts sit one
+         minimum space apart with no room to grow between them.
+
+    WHY TWO PASSES, MEASURED on u_hawaii_adc. Painted before the routing, 302
+    of 302 delta_sigma islands grew — and one escape strap, which the plan's
+    structure places without asking the index, landed 0.11 um from a patch
+    (M2.b). Painted after the routing, 301 of 302 found no room: the escapes
+    had taken it. So the first option is RESERVED in the index here — the
+    island placer then steers every via island around it — and the options
+    are re-checked against the finished routing when they are painted."""
+    pending: List[dict] = []
+    cache: Dict[int, List[dict]] = {}
+    for d in per_dev:
+        cell, dev = d["cell"], d["dev"]
+        if id(cell) not in cache:
+            cache[id(cell)] = floating_device_metal(cell, geo)
+        if not cache[id(cell)]:
+            continue
+        tmap, _ring, _un = terminal_map(dev, cell)
+        nets_on: Dict[str, set] = {}
+        for net, labs in tmap.items():
+            for lab in labs:
+                nets_on.setdefault(lab.get("layer"), set()).add(net)
+        ox, oy = d["origin"]
+        name = dev["name"]
+        # which placed device conductor each net's labels reach — a bridge
+        # may only join the polygon to one of its OWN net's
+        net_comps: Dict[str, set] = {}
+        for net, labs in tmap.items():
+            for lab in labs:
+                lx, ly = ox + lab["x"], oy + lab["y"]
+                for r in d["rows"]:
+                    b = r["box"]
+                    if b[0] <= lx <= b[2] and b[1] <= ly <= b[3]:
+                        net_comps.setdefault(net, set()).add(r["comp"])
+        for isl in cache[id(cell)]:
+            owners = set()
+            for sec in isl["sections"]:
+                owners |= nets_on.get(sec, set())
+            net = next(iter(owners)) if len(owners) == 1 else f"<device {name}>"
+            layer = isl["layer"]
+            need = isl["min_area_lambda2"]
+            x1, y1, x2, y2 = isl["bbox"]
+            x1, y1, x2, y2 = x1 + ox, y1 + oy, x2 + ox, y2 + oy
+            w, h = x2 - x1, y2 - y1
+            me = (name, isl["comp"])
+            here = (x1, y1, x2, y2)
+            options: List[tuple] = []
+            hh = int(math.ceil(need / max(w, 1))) + 1
+            ww = int(math.ceil(need / max(h, 1))) + 1
+            for box in ((x1, y2 - hh, x2, y2), (x1, y1, x2, y1 + hh),
+                        (x2 - ww, y1, x2, y2), (x1, y1, x1 + ww, y2)):
+                if _clear_but(sites, box, layer, {me}, net, [here]):
+                    options.append(("grown", box, {me}, [here]))
+            if not net.startswith("<device "):
+                reach = 2 * geo.metal_space(layer)
+                best = None
+                for r in sites.near(layer, here, reach):
+                    if "lcomp" not in r or r.get("comp") == me \
+                            or not r["net"].startswith(f"<device {name}>"):
+                        continue
+                    b = r["box"]
+                    ox1, ox2 = max(x1, b[0]), min(x2, b[2])
+                    oy1, oy2 = max(y1, b[1]), min(y2, b[3])
+                    if ox2 - ox1 >= min(w, b[2] - b[0]):
+                        box = (ox1, min(y1, b[1]), ox2, max(y2, b[3]))
+                    elif oy2 - oy1 >= min(h, b[3] - b[1]):
+                        box = (min(x1, b[0]), oy1, max(x2, b[2]), oy2)
+                    else:
+                        continue
+                    gap = box_separation(here, b)
+                    if gap > reach or (best and gap >= best[0]):
+                        continue
+                    best = (gap, box, r.get("comp"), tuple(b))
+                if best and best[2] in net_comps.get(net, ()) \
+                        and _clear_but(sites, best[1], layer, {me, best[2]},
+                                       net, [here, best[3]]):
+                    options.append(("bridged", best[1], {me, best[2]},
+                                    [here, best[3]]))
+            if options:
+                sites.add({"net": net, "layer": layer, "box": options[0][1]})
+            pending.append({"dev": dev, "name": name, "net": net,
+                            "layer": layer, "here": here, "need": need,
+                            "area": isl["area_lambda2"], "options": options})
+    return pending
+
+
+def commit_metal_patches(plan: "Plan", pending: Sequence[dict],
+                         sites: "Sites", examined: int) -> dict:
+    """Paint the first option of each planned patch that is still clear of
+    everything the routing has drawn since; record the ones none is.
+
+    The patches are drawn through `Plan.paint` under the owning net, so the
+    short audit sees them. Returns the census for the provenance."""
+    census = {"examined": examined, "below_min_area": len(pending),
+              "grown": 0, "bridged": 0, "joined": 0, "left": 0,
+              "patches": []}
+    for p in pending:
+        done = next(((kind, box) for kind, box, allowed, origin in p["options"]
+                     if _clear_but(sites, box, p["layer"], allowed, p["net"],
+                                   origin)), None)
+        if done is None and not p["net"].startswith("<device "):
+            # THE ROUTING OF THE SAME NET CAME CLOSE: join it instead. An
+            # option refused only because this net's own wire now stands
+            # short of it is extended over that wire, which makes the two
+            # one polygon (MEASURED: one delta_sigma gate contact whose own
+            # escape landed 0.11 um below the planned growth).
+            s = sites.geo.metal_space(p["layer"])
+            for kind, box, allowed, origin in p["options"]:
+                near = [r for r in sites.near(p["layer"], box, s)
+                        if "lcomp" not in r and r["net"] == p["net"]
+                        and 0 < box_separation(box, r["box"]) < s]
+                for r in sorted(near, key=lambda r: box_separation(
+                        box, r["box"])):
+                    b = r["box"]
+                    # the patch is stretched along the wire's side to cover
+                    # the wire's whole span, and the gap between them is
+                    # filled across that span: two full-width rectangles, no
+                    # neck thinner than either of them
+                    if b[2] < box[0] or b[0] > box[2]:
+                        ext = (box[0], min(box[1], b[1]), box[2],
+                               max(box[3], b[3]))
+                        gx = (b[2], box[0]) if b[2] < box[0] \
+                            else (box[2], b[0])
+                        fill = (gx[0], b[1], gx[1], b[3])
+                    else:
+                        ext = (min(box[0], b[0]), box[1], max(box[2], b[2]),
+                               box[3])
+                        gy = (b[3], box[1]) if b[3] < box[1] \
+                            else (box[3], b[1])
+                        fill = (b[0], gy[0], b[2], gy[1])
+                    if all(_clear_but(sites, q, p["layer"], allowed,
+                                      p["net"], list(origin) + [b, box],
+                                      joins=[b])
+                           for q in (ext, fill)):
+                        done = ("joined", ext, fill)
+                        break
+                if done:
+                    break
+        if done is None:
+            census["left"] += 1
+            plan.deviate(p["dev"], "device_metal_island_area_lambda2",
+                         p["need"], p["area"],
+                         f"an unrouted {p['layer']} polygon of {p['name']} at "
+                         f"{list(p['here'])} is below the deck's minimum area "
+                         f"and no legal growth or same-net bridge exists; "
+                         f"DRAWN as the gencell made it")
+            continue
+        kind, boxes = done[0], done[1:]
+        census[kind] += 1
+        for box in boxes:
+            plan.paint(p["net"], p["layer"], *box)
+            plan.patch_of[(p["layer"], tuple(box))] = p["name"]
+        census["patches"].append({"device": p["name"], "net": p["net"],
+                                  "layer": p["layer"], "how": kind,
+                                  "box": [list(b) for b in boxes]
+                                  if len(boxes) > 1 else list(boxes[0])})
+    return census
 
 
 def friendly_conductor(rows: Sequence[dict], layer: str, x: int, y: int,
@@ -1642,7 +1969,7 @@ def _via_stack(plan: Plan, net: str, x: int, y: int, level: int, geo: Geo,
 
 def build_plan(devs: Sequence[dict], ports: Sequence[str],
                cells: Dict[tuple, dict], facts: PdkFacts, geo: Geo,
-               tap_clear: int) -> Plan:
+               tap_clear: int, pin_spec: Optional[dict] = None) -> Plan:
     plan = Plan()
     pitch = geo.pitch()
     pad_half = geo.via_pad[1]
@@ -1873,6 +2200,9 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
     # placer that cannot see them places into them.
     sites = Sites(plan.device_shapes, geo)
     plan.sites = sites
+    # What the gencells leave unrouted and too small: planned and reserved
+    # now, painted after the routing (see `floating_metal_patches`).
+    patches = floating_metal_patches(plan, per_dev, geo, sites)
 
     # Lanes are handed out in order of the height they come from: the lane
     # nearest the device serves the LOWEST escape. An escape therefore never
@@ -1994,7 +2324,11 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
             _via_stack(plan, net, lane, rail_y[net], 2, geo, top=3,
                        sites=sites)
 
+    plan.island_patches = commit_metal_patches(plan, patches, sites,
+                                               len(per_dev))
+
     # ── one metal2 rail per net, and a label on each declared port ──────
+    rail_box: Dict[str, Tuple[int, int, int, int]] = {}
     for net in nets:
         xs = [g["lane_x"] for d in per_dev for g in d["groups"]
               if g["net"] == net]
@@ -2003,11 +2337,351 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
         ty = rail_y[net]
         plan.paint(net, "metal2", min(xs) - pitch, ty - hw2,
                    max(xs) + pitch, ty + hw2)
-        plan.ports.append((net, min(xs), ty))
+        rail_box[net] = (min(xs) - pitch, ty - hw2, max(xs) + pitch, ty + hw2)
+        if net not in ports or not pin_spec:
+            plan.ports.append((net, min(xs), ty))
 
     plan.row_base = row_base
     plan.port_nets = [n for n in nets if n in ports]
+    if pin_spec:
+        top_y = max([r["box"][3] for r in plan.shapes]
+                    + [r["box"][3] for r in plan.device_shapes]
+                    + [d["origin"][1] + d["cell"]["bbox"][3]
+                       for d in per_dev] + [0])
+        _draw_pins(plan, [n for n in ports if n in rail_box], rail_box,
+                   pin_spec, geo, sites, top_y, pitch)
     return plan
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 6b. the macro's pins — what the abstract is placed and powered by
+# ──────────────────────────────────────────────────────────────────────
+# THE DEFECT THIS CLOSES, MEASURED (u_hawaii_adc, ihp-sg13g2, vibeic-eda
+# 0.3.79). Each declared port used to be labelled at a ZERO-AREA point on its
+# metal2 rail, the point where the rail's via landing sits. Magic moved the
+# label onto the via it sat on (DBPickLabelLayer), the GDS writer emits a pin
+# boundary only for a label with area (CalmaWrite.c), and a GDS read turns
+# text into a port only from a pin boundary (CalmaRdpt.c) — so the A8
+# abstract, written by `gds read` + `lef write`, had SIZE and OBS and ZERO
+# pins, on both blocks. A macro with no pins cannot be connected at all.
+#
+# The rule the pins follow now (analog decision q2-pin-layer):
+#   * every declared port is a RECTANGULAR label on PURE routing metal —
+#     never a point, never a cut layer, never the lowest metal;
+#   * a signal port is a vertical stub on the lowest vertical routing layer
+#     above this generator's own routing that is not a PDN strap layer,
+#     running down to the macro's rail-side (bottom) boundary, so a router
+#     reaches it from outside without crossing the obstruction;
+#   * a supply port is a full-height stripe on the vertical layer of the
+#     PDK's top strap pair, which is where the power grid's straps cross it.
+# Which layers those are is read from the PDK's tech LEF (`pin_layers`); no
+# layer is named here.
+def tech_lef_layers(text: str) -> List[dict]:
+    """`{name, type, direction, pitch, width, dc_density}` for every ROUTING and
+    CUT layer of a tech LEF, in declaration order (bottom to top). Pure LEF
+    grammar; an unparseable text gives `[]`, which callers read as ABSENT."""
+    out: List[dict] = []
+    cur: Optional[dict] = None
+    for raw in (text or "").splitlines():
+        s = raw.split("#", 1)[0].strip()
+        m = re.match(r"^LAYER\s+(\S+)\s*$", s)
+        if m:
+            cur = {"name": m.group(1), "type": "", "direction": "",
+                   "pitch": None, "width": None, "dc_density": None}
+            out.append(cur)
+            continue
+        if cur is None:
+            continue
+        if re.match(r"^END\s+" + re.escape(cur["name"]) + r"\s*$", s):
+            cur = None
+            continue
+        tok = s.rstrip(";").split()
+        if not tok:
+            continue
+        key = tok[0].upper()
+        try:
+            if key == "TYPE" and len(tok) > 1 and not cur["type"]:
+                cur["type"] = tok[1].upper()
+            elif key == "DIRECTION" and len(tok) > 1 and not cur["direction"]:
+                cur["direction"] = tok[1].upper()
+            elif key == "PITCH" and len(tok) > 1 and cur["pitch"] is None:
+                cur["pitch"] = float(tok[1])
+            elif key == "WIDTH" and len(tok) == 2 and cur["width"] is None:
+                cur["width"] = float(tok[1])
+            elif key == "DCCURRENTDENSITY" and len(tok) > 2 \
+                    and tok[1].upper() == "AVERAGE" \
+                    and cur["dc_density"] is None:
+                cur["dc_density"] = float(tok[2])
+        except ValueError:
+            continue
+    return [r for r in out if r["type"] in ("ROUTING", "CUT")]
+
+
+def pin_layers(lef_layers: Sequence[dict], wired: Sequence[int]
+               ) -> Tuple[Optional[int], Optional[int], dict]:
+    """(signal level, supply level, basis) from the tech LEF's layer table.
+
+    Level k is the k-th ROUTING layer, which is Magic's `metal{k}` — the
+    numbering this emitter already routes by. `wired` is the set of levels
+    this generator can size (its deck read).
+
+    SUPPLY: the vertical layer of the top two routing layers — the pair a
+    power grid straps with, so a full-height stripe there is crossed by the
+    other strap layer of the pair.
+    SIGNAL: the lowest VERTICAL routing layer above ROUTE_LEVEL (so none of
+    this generator's own lanes and rails are on it) that is not one of those
+    two strap layers. Vertical, because the pin sits on the bottom edge and is
+    approached along the layer's preferred direction.
+    None for either means the LEF does not offer one; the caller records it."""
+    routing = [r for r in lef_layers if r["type"] == "ROUTING"]
+    lvl = {i + 1: r for i, r in enumerate(routing)}
+    top2 = sorted(lvl)[-2:]
+    supply = next((k for k in sorted(top2, reverse=True)
+                   if lvl[k]["direction"] == "VERTICAL" and k in wired), None)
+    signal = next((k for k in sorted(lvl)
+                   if k > ROUTE_LEVEL and k not in top2 and k in wired
+                   and lvl[k]["direction"] == "VERTICAL"), None)
+    basis = {"routing_layers": [r["name"] for r in routing],
+             "strap_pair": [lvl[k]["name"] for k in top2],
+             "signal_layer": lvl[signal]["name"] if signal else None,
+             "supply_layer": lvl[supply]["name"] if supply else None}
+    return signal, supply, basis
+
+
+#: the block's declared rail ROLE -> the pin USE it is labelled with. The
+#: same vocabulary A8's `annotate_pg_pins` reads, so both ends agree.
+RAIL_ROLE_USE = {"vdd": "power", "vcc": "power", "vpwr": "power",
+                 "vss": "ground", "gnd": "ground", "vgnd": "ground"}
+
+_CURRENT_UNIT_MA = {"a": 1e3, "ma": 1.0, "ua": 1e-3, "µa": 1e-3,
+                    "μa": 1e-3, "na": 1e-6}
+
+
+def declared_current_ma(spec: Optional[dict]) -> Tuple[Optional[float], str]:
+    """The largest current the block's A1 spec declares, in mA, and the row
+    it came from — or (None, reason).
+
+    A spec row states a current for the BLOCK, not for a port: nothing in the
+    spec says which port carries `iout`. So the largest declared current is the
+    bound every port is sized for — a port cannot be sized for a smaller
+    current than one the block declares without knowing it does not carry it.
+    The row's `max` is used where it has one, else its `target`."""
+    best: Tuple[Optional[float], str] = (None, "")
+    for row in (spec or {}).get("specs") or []:
+        unit = str(row.get("unit") or "").strip().lower().replace(" ", "")
+        mult = _CURRENT_UNIT_MA.get(unit)
+        if mult is None:
+            continue
+        for field in ("max", "target"):
+            v = row.get(field)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                ma = float(v) * mult
+                if best[0] is None or ma > best[0]:
+                    best = (ma, f"spec.json `{row.get('name')}`.{field} = "
+                                f"{v} {row.get('unit')}")
+                break
+    if best[0] is None:
+        return None, "the block spec declares no current"
+    return best
+
+
+def pin_spec_for(ports: Sequence[str], rails: Optional[dict],
+                 spec: Optional[dict], facts: "PdkFacts", geo: "Geo"
+                 ) -> Tuple[Optional[dict], dict]:
+    """What every declared port becomes as a pin: its layer, USE, width and
+    cuts per via, each with the source it came from. (None, basis) when the
+    tech LEF offers no layer to put it on — recorded, never guessed."""
+    basis: dict = {"tech_lef": facts.sources.get("tech_lef"),
+                   "tech_lef_sha256": facts.tech_lef_sha256}
+    if not facts.tech_lef:
+        basis["result"] = "NOT_DETERMINED"
+        basis["reason"] = ("no tech LEF was readable, so the routing layers, "
+                           "their directions and the PDK's strap layers are "
+                           "unknown; the ports keep their rail labels")
+        return None, basis
+    signal, supply, lb = pin_layers(facts.tech_lef, sorted(geo.wire))
+    basis.update(lb)
+    # the PDK's own layer table, as read, so a reader of the abstract (the A8
+    # gate) can ask the same PDN planner PnR uses without the PDK on its host
+    basis["tech_lef_layers"] = [dict(r) for r in facts.tech_lef]
+    routing = [r for r in facts.tech_lef if r["type"] == "ROUTING"]
+    # The cut BETWEEN routing layers k and k+1 is Magic's `via{k}`: the CUT
+    # the LEF declares after its k-th ROUTING layer. A cut before the first
+    # routing layer (the device contact) is no via of this stack.
+    cut_of: Dict[int, dict] = {}
+    seen = 0
+    for r in facts.tech_lef:
+        if r["type"] == "ROUTING":
+            seen += 1
+        elif seen and seen not in cut_of:
+            cut_of[seen] = r
+    if rails is None:
+        basis["pin_roles_source"] = "absent"
+        role_of: Dict[str, str] = {}
+    else:
+        basis["pin_roles_source"] = "topology.json rails"
+        role_of = {str(v): str(k).strip().lower()
+                   for k, v in (rails or {}).items()}
+    i_ma, i_src = declared_current_ma(spec)
+    basis["current_bound_mA"] = i_ma
+    basis["current_source"] = i_src
+    out: dict = {}
+    for i, net in enumerate(ports):
+        is_rail = net in role_of
+        level = supply if is_rail else signal
+        if level is None:
+            basis["result"] = "NOT_DETERMINED"
+            basis["reason"] = (f"the tech LEF offers no "
+                               f"{'supply' if is_rail else 'signal'} pin "
+                               f"layer by the rule in `pin_layers`")
+            return None, basis
+        lef = routing[level - 1]
+        rec = {"index": i + 1, "rail": is_rail, "level": level,
+               "lef_layer": lef["name"], "lef_type": lef["type"],
+               "use": (RAIL_ROLE_USE.get(role_of[net]) if is_rail
+                       else "signal"),
+               "width_lam": geo.wire.get(level, 1), "cuts": 1,
+               "em": {"result": "NOT_MEASURED", "reason": i_src}}
+        if i_ma is not None:
+            # THE EM RULE: the tech LEF's own `DCCURRENTDENSITY AVERAGE` —
+            # mA per um of width for a routing layer, mA per cut for a cut
+            # layer — the table `em_current_density_check` grades. The pin
+            # strip is at least I/J wide, and every via level of its stack
+            # carries at least I/J_cut cuts. The deck minimum is the floor.
+            j = lef.get("dc_density")
+            em = {"current_mA": i_ma, "current_source": i_src,
+                  "rule": (f"{basis['tech_lef']} LAYER {lef['name']} "
+                           f"DCCURRENTDENSITY AVERAGE {j} (mA/um)")
+                  if j else None}
+            if j:
+                w_um = i_ma / j
+                rec["width_lam"] = max(rec["width_lam"],
+                                       int(math.ceil(w_um * geo.lam - 1e-9)))
+                em["width_um_required"] = round(w_um, 4)
+            stack = [cut_of.get(k) for k in range(2, level)]
+            if stack and all(c and c.get("dc_density") for c in stack):
+                rec["cuts"] = max(int(math.ceil(i_ma / c["dc_density"] - 1e-9))
+                                  for c in stack)
+                em["cut_rule"] = [f"LAYER {c['name']} DCCURRENTDENSITY "
+                                  f"AVERAGE {c['dc_density']} (mA/cut)"
+                                  for c in stack]
+            em["result"] = "SIZED" if j else "NOT_MEASURED"
+            rec["em"] = em
+        out[net] = rec
+    basis["result"] = "DETERMINED"
+    return {"ports": out}, basis
+
+
+def _pin_stack_boxes(x: int, y: int, lo: int, hi: int, geo: "Geo",
+                     cuts: int) -> Tuple[List[Tuple[str, Tuple[int, ...]]],
+                                         Dict[int, Tuple[int, int, int, int]]]:
+    """The rectangles of a via stack from metal `lo` to metal `hi` at (x, y)
+    carrying `cuts` cuts per level in a row along x: every via square, and one
+    metal bar per level enclosing its cuts at the deck's surround and area
+    (`Geo.long_half`, which is sized for both)."""
+    vias = list(range(lo, hi))
+    p = max(2 * geo.via_pad[k] + geo.rules_via_space(k) for k in vias)
+    offs = [i * p - ((cuts - 1) * p) // 2 for i in range(cuts)]
+    paint: List[Tuple[str, Tuple[int, ...]]] = []
+    bars: Dict[int, Tuple[int, int, int, int]] = {}
+    for m in range(lo, hi + 1):
+        # the bar is at least the layer's own minimum width across, or the
+        # bar sticking out of a wide strip is a width violation (TM1.a,
+        # measured: 4 on ldo before this floor)
+        h = max([geo.long_half[k] for k in vias if k in (m - 1, m)]
+                + [(geo.wire.get(m, 1) + 1) // 2])
+        bars[m] = (x + offs[0] - h, y - h, x + offs[-1] + h, y + h)
+        paint.append((f"metal{m}", bars[m]))
+    for k in vias:
+        ph = geo.via_pad[k]
+        for o in offs:
+            paint.append((f"via{k}", (x + o - ph, y - ph, x + o + ph, y + ph)))
+    return paint, bars
+
+
+def _draw_pins(plan: "Plan", ports: Sequence[str],
+               rail_box: Dict[str, Tuple[int, int, int, int]], pin_spec: dict,
+               geo: "Geo", sites: "Sites", top_y: int, pitch: int) -> None:
+    """Bring each declared port from its metal2 rail to its pin layer, at the
+    first position along the rail where the stack AND the stub or stripe keep
+    the deck's space from every other conductor, and record the pin.
+
+    Supplies first: a stripe spans the whole block and is the harder one to
+    seat, and every signal stub is then placed clear of it. A port no
+    position clears is DRAWN at the rail's left end and recorded as a
+    deviation — this emitter records shortfalls, the deck adjudicates."""
+    order = sorted(ports, key=lambda n: (not pin_spec["ports"][n]["rail"],
+                                         ports.index(n)))
+    for net in order:
+        spec = pin_spec["ports"][net]
+        level = spec["level"]
+        rx1, ry1, rx2, ry2 = rail_box[net]
+        y = (ry1 + ry2) // 2
+        half = max(spec["width_lam"] // 2, geo.wire.get(level, 1) // 2, 1)
+        cuts = max(1, spec["cuts"])
+        layers = ([f"metal{k}" for k in range(2, level + 1)]
+                  + [f"via{k}" for k in range(2, level)])
+        stepv = max(1, pitch // 4)
+        cands = list(range(rx1, rx2 + 1, stepv))
+        chosen = None
+        for x in cands:
+            paint, bars = _pin_stack_boxes(x, y, 2, level, geo, cuts)
+            ext = (min(b[0] for b in bars.values()),
+                   min(b[1] for b in bars.values()),
+                   max(b[2] for b in bars.values()),
+                   max(b[3] for b in bars.values()))
+            if ext[0] < rx1 or ext[2] > rx2:
+                continue
+            if not sites.clear(ext, layers, None, net):
+                continue
+            top = bars[level]
+            if spec["rail"]:
+                strip = (x - half, 0, x + half, top_y)
+                near = [f"metal{k}" for k in (level - 1, level, level + 1)
+                        if k in geo.wire]
+            else:
+                strip = (x - half, 0, x + half, top[3])
+                near = [f"metal{level}"]
+            if not sites.clear(strip, near, None, net):
+                continue
+            chosen = (x, paint, bars, strip)
+            break
+        if chosen is None:
+            x = rx1 + (rx2 - rx1) // 4
+            paint, bars = _pin_stack_boxes(x, y, 2, level, geo, cuts)
+            top = bars[level]
+            strip = ((x - half, 0, x + half, top_y) if spec["rail"]
+                     else (x - half, 0, x + half, top[3]))
+            chosen = (x, paint, bars, strip)
+            plan.deviate({"name": f"port {net}"}, "pin_site_clearance", 1, 0,
+                         f"no position along the {net} rail seats its "
+                         f"metal{level} pin and via stack clear of every "
+                         f"other conductor; DRAWN at x={x} and recorded")
+        x, paint, bars, strip = chosen
+        for layer, b in paint:
+            plan.paint(net, layer, *b)
+        plan.paint(net, f"metal{level}", *strip)
+        sp = geo.space.get(level, geo.default_space)
+        bar = bars[level]
+        if spec["rail"]:
+            label = (strip[0], bar[3] + sp, strip[2], strip[3])
+        else:
+            label = (strip[0], strip[1], strip[2], bar[1] - sp)
+        if label[2] <= label[0] or label[3] <= label[1]:
+            plan.deviate({"name": f"port {net}"}, "pin_label_length_lambda",
+                         1, label[3] - label[1],
+                         f"the pure metal{level} length left for {net}'s pin "
+                         f"label is not positive; the label covers the whole "
+                         f"strip instead")
+            label = strip
+        plan.pins.append({
+            "net": net, "index": spec["index"],
+            "layer": f"metal{level}", "lef_layer": spec.get("lef_layer"),
+            "lef_type": spec.get("lef_type"),
+            "use": spec["use"], "rail": spec["rail"],
+            "label_box": tuple(label), "strip_box": tuple(strip),
+            "cuts_per_via": cuts, "width_lam": strip[2] - strip[0],
+        })
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -2108,6 +2782,12 @@ def clearance_deviations(plan: Plan, geo: Geo,
                 continue
             seen.add(key)
             who = (na if dev_a else nb)[len("<device "):-1]
+            if plan.patch_of.get((layer, tuple(bb if dev_a else ba))) == who:
+                # a patch on one of the device's OWN polygons, which by
+                # construction comes no closer to the rest of that device than
+                # the polygon it extends (`_clear_but`): the gencell's own
+                # spacing, and what a gencell draws is the PDK's business
+                continue
             plan.deviate(owner.get(who, anon),
                          f"{layer}_space_to_device_lambda",
                          min_space[layer], round(gap, 3),
@@ -2273,6 +2953,21 @@ def layout_tcl(block: str, plan: Plan, out_dir: str) -> str:
         L.append(f"label {net} FreeSans 40 0 0 0 c metal2")
         if net in plan.port_nets:
             L.append("port make")
+    # A DECLARED PORT IS A RECTANGLE ON PURE ROUTING METAL (see `_draw_pins`).
+    # A point label does not survive the GDS the abstract is written from, and
+    # a label on a via is moved by Magic onto the cut layer; both give an
+    # abstract with no pin. Refused here rather than written.
+    for pin in sorted(plan.pins, key=lambda p: p["index"]):
+        x1, y1, x2, y2 = pin["label_box"]
+        if x2 <= x1 or y2 <= y1 or not _METAL_RE.match(pin["layer"]):
+            raise ValueError(f"port {pin['net']}: a pin label must be a "
+                             f"rectangle on a metal layer, got {pin}")
+        L += [f"box {x1} {y1} {x2} {y2}",
+              f"label {pin['net']} FreeSans 40 0 0 0 c {pin['layer']}",
+              f"port make {pin['index']}",
+              "port class inout"]
+        if pin["use"]:
+            L.append(f"port use {pin['use']}")
     # Each gencell child is SAVED BY NAME rather than left to `writeall`: a
     # cell Magic generated has no filename of its own, so `writeall force`
     # silently writes none of them and `layout.mag` comes out naming children
@@ -2291,6 +2986,15 @@ def layout_tcl(block: str, plan: Plan, out_dir: str) -> str:
 # ──────────────────────────────────────────────────────────────────────
 # 8. the producer
 # ──────────────────────────────────────────────────────────────────────
+def _read_json(path: Path) -> Optional[dict]:
+    """A JSON document, or None when it is absent or unreadable."""
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
 def emit_block(project: Path, block: str, stage: Stage, magicrc: str,
                facts: PdkFacts, args) -> Tuple[int, dict]:
     bdir = _pl.analog_dir(project) / block
@@ -2394,7 +3098,17 @@ def emit_block(project: Path, block: str, stage: Stage, magicrc: str,
                    "emitter does not"),
     }
 
-    plan = build_plan(devs, ports, cells, facts, geo, tap_clear)
+    # THE PINS: layer, USE, width and cuts per port, from the block's own
+    # rail declaration (A2 IR), its spec's declared current (A1) and the
+    # PDK's tech LEF. Never a rail inferred from a net NAME.
+    topo = _read_json(bdir / "topology.json")
+    rails = topo.get("rails") if isinstance(topo, dict) and \
+        isinstance(topo.get("rails"), dict) else None
+    pin_spec, pins_basis = pin_spec_for(ports, rails,
+                                        _read_json(bdir / "spec.json"),
+                                        facts, geo)
+    report["pins_basis"] = pins_basis
+    plan = build_plan(devs, ports, cells, facts, geo, tap_clear, pin_spec)
     clearance_deviations(plan, geo, devs)
     # A GEOMETRY THE PDK'S GENCELL CLAMPED. Recorded like every other
     # measurement this emitter makes, and blocking like the short: see
@@ -2448,6 +3162,21 @@ def emit_block(project: Path, block: str, stage: Stage, magicrc: str,
 
     report["result"] = "OK"
     report["shapes_painted"] = len(plan.shapes)
+    # WHAT THE GENCELLS LEFT UNROUTED AND TOO SMALL, and what became of it.
+    # See `floating_metal_patches`.
+    fl = dict(plan.island_patches)
+    fl["patches"] = fl.get("patches", [])[:50]
+    report["floating_device_metal"] = fl
+    report["pins"] = [{
+        "net": p["net"], "index": p["index"], "layer": p["layer"],
+        "lef_layer": p["lef_layer"], "lef_type": p["lef_type"],
+        "use": p["use"], "rail": p["rail"],
+        "box_um": [round(v / lam, 4) for v in p["label_box"]],
+        "strip_um": [round(v / lam, 4) for v in p["strip_box"]],
+        "width_um": round(p["width_lam"] / lam, 4),
+        "cuts_per_via": p["cuts_per_via"],
+        "em": (pin_spec or {}).get("ports", {}).get(p["net"], {}).get("em"),
+    } for p in sorted(plan.pins, key=lambda q: q["index"])]
     report["deviations"] = plan.deviations
     report["deviation_summary"] = _summarise(plan.deviations)
     # Beside the shortfall list, never inside it: what the bulk-tap search
@@ -2690,6 +3419,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--gencell-tcl")
     ap.add_argument("--drc-tech")
     ap.add_argument("--magic-tech")
+    ap.add_argument("--tech-lef",
+                    help="the PDK tech LEF the pins are placed and sized by "
+                         "(default: <pdk-root>/<family>/libs.ref/*/lef/"
+                         "*tech*.lef)")
     ap.add_argument("--wire-width-um", type=float,
                     default=DEFAULT_WIRE_W_UM)
     ap.add_argument("--via-pad-half-um", type=float,
@@ -2735,7 +3468,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         facts, why = read_pdk(stage, args.pdk_root, args.family,
                               args.gencell_tcl, args.drc_tech,
-                              args.magic_tech)
+                              args.magic_tech, args.tech_lef)
         if facts is None:
             out["result"] = "ENV_UNAVAILABLE"
             out["tool"] = "pdk"
