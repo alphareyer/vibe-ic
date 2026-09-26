@@ -21,9 +21,11 @@ returns -- same keys, values and Python types -- by:
     from what the imported `yaml` module offers, so a PyYAML without libyaml
     falls back silently and correctly;
   * parsing at most ONCE per process per (resolved path, mtime_ns, size,
-    sha256 of the bytes, encoding, errors). The bytes are re-read and
-    re-hashed on every call (~2 ms), so an edited file is re-parsed even when
-    the edit kept its mtime and size;
+    sha256 of the decoded text). The file is re-read, decoded as the caller
+    asked and re-hashed on every call (~2 ms), so an edited file is re-parsed
+    even when the edit kept its mtime and size, and callers that decode the
+    same bytes to the same text (utf-8 vs locale vs errors="replace" on a
+    valid UTF-8 flow) share one parse;
   * handing every caller a DEEP COPY of the cached document (~2 ms), so a
     caller that mutates what it got cannot change what the next caller
     reads -- exactly as with a fresh `safe_load`.
@@ -73,11 +75,13 @@ def load(path: Optional[os.PathLike] = None, *, encoding: Optional[str] = None,
     import yaml                                           # noqa: PLC0415
     p = Path(path) if path is not None else DEFAULT_FLOW_YAML
     st = os.stat(p)
-    data = p.read_bytes()
+    text = _decode(p.read_bytes(), encoding, errors)
+    # Keyed on the DECODED text: callers that read the same file with
+    # different encoding/errors share one parse whenever the text is the same
+    # (it is, for a valid UTF-8 flow), and never when it is not.
     key = (str(p.resolve()), st.st_mtime_ns, st.st_size,
-           hashlib.sha256(data).hexdigest(), encoding, errors)
+           hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest())
     if key not in _CACHE:
-        text = _decode(data, encoding, errors)
         loader = loader_class()
         doc = yaml.load(text, Loader=loader)              # noqa: S506 - safe loaders only
         PARSES[loader.__name__] = PARSES.get(loader.__name__, 0) + 1

@@ -337,3 +337,27 @@ def test_the_other_in_flow_callers_parse_through_the_shared_loader(call, monkeyp
     assert flow_docs >= 1, "the call never read the flow; nothing measured"
     if _libyaml():
         assert spy.pure_python == 0, f"{call}: flow yaml went through the pure-Python scanner"
+
+
+def test_decode_variants_of_the_same_text_share_one_parse():
+    """A full spm audit measured 137 parses in 95 processes when the key held
+    (encoding, errors): FCC reads with errors="replace" and with the locale
+    default, step_metrics with utf-8. The same decoded text is one parse."""
+    import _flow_yaml
+    a = _flow_yaml.load(_FLOW, encoding="utf-8")
+    b = _flow_yaml.load(_FLOW, errors="replace")
+    c = _flow_yaml.load(_FLOW)
+    d = _flow_yaml.load(_FLOW, encoding="utf-8", errors="replace")
+    assert a == b == c == d
+    assert sum(_flow_yaml.PARSES.values()) == 1
+
+
+def test_different_decoded_texts_of_one_file_are_different_parses(tmp_path):
+    import _flow_yaml
+    p = tmp_path / "f.yaml"
+    p.write_bytes(b"k: a\xffb\n")
+    replaced = _flow_yaml.load(p, errors="replace")
+    ignored = _flow_yaml.load(p, errors="ignore")
+    assert replaced == yaml.safe_load(p.read_text(errors="replace")) == {"k": "a�b"}
+    assert ignored == yaml.safe_load(p.read_text(errors="ignore")) == {"k": "ab"}
+    assert sum(_flow_yaml.PARSES.values()) == 2
