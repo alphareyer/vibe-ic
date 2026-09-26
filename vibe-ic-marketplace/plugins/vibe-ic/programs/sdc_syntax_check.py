@@ -146,7 +146,65 @@ def check_brackets(text: str) -> List[Tuple[int, str]]:
 # ---------------------------------------------------------------------------
 # Core audit logic
 # ---------------------------------------------------------------------------
+#: Where the step-8 tool path writes OpenSTA's own verdict on the SDC.
+OPENSTA_GATE = Path("phase3/librelane/prelayout/gates/step8_sdc_opensta.json")
+
+
+def opensta_gate(base: Path) -> Tuple[str, List[Finding], bool]:
+    """Step 8 on the tool path: OpenSTA's read_sdc/check_setup verdict.
+
+    Selected by `phase3/librelane_switch.json` step "8". In `librelane` mode it
+    replaces the regex parse below; in `dual` both must pass. The record must
+    be bound to the SDC the flow hands the tool, else it is someone else's run.
+    """
+    import librelane_contract as _llc
+    try:
+        mode = _llc.selected_mode(base, "8")
+    except (_llc.Refusal, ValueError, OSError) as exc:
+        return "invalid", [Finding("SWITCH_INVALID", "ERROR", str(exc))], False
+    if mode == "direct":
+        return mode, [], True
+    record = base / OPENSTA_GATE
+    if not record.is_file():
+        return mode, [Finding("OPENSTA_GATE_ABSENT", "ERROR",
+                              f"{OPENSTA_GATE} not written: STAPrePNR did not run "
+                              "for this project", str(OPENSTA_GATE))], False
+    try:
+        doc = json.loads(record.read_text())
+    except (OSError, ValueError) as exc:
+        return mode, [Finding("OPENSTA_GATE_UNREADABLE", "ERROR", str(exc),
+                              str(OPENSTA_GATE))], False
+    deck = Path(str(doc.get("sdc") or ""))
+    if not deck.is_file() or doc.get("sdc_sha256") != _llc.digest(deck):
+        return mode, [Finding("OPENSTA_GATE_STALE", "ERROR",
+                              f"record is not bound to the current bytes of {deck}",
+                              str(OPENSTA_GATE))], False
+    status = doc.get("verdict")
+    findings = [Finding("OPENSTA_" + str(status), "ERROR" if status != "PASS" else "INFO",
+                        text, str(OPENSTA_GATE)) for text in doc.get("findings") or []]
+    findings.append(Finding("OPENSTA_VERDICT", "INFO" if status == "PASS" else "ERROR",
+                            f"OpenSTA read_sdc/check_setup verdict {status} on {deck}",
+                            str(OPENSTA_GATE)))
+    return mode, findings, status == "PASS"
+
+
 def audit(project_dir: str) -> AuditResult:
+    base = Path(project_dir)
+    mode, tool_findings, tool_passed = (opensta_gate(base) if base.is_dir()
+                                        else ("direct", [], True))
+    if mode == "librelane":
+        return AuditResult(program="sdc_syntax_check", passed=tool_passed,
+                           findings=tool_findings,
+                           summary={"mode": mode, "judge": str(OPENSTA_GATE)})
+    result = _regex_audit(project_dir)
+    if mode != "direct":
+        result.findings = tool_findings + result.findings
+        result.passed = result.passed and tool_passed
+        result.summary["mode"] = mode
+    return result
+
+
+def _regex_audit(project_dir: str) -> AuditResult:
     findings: List[Finding] = []
     base = Path(project_dir)
 

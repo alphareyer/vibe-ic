@@ -119,6 +119,14 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "librelane_prelayout::check_setup_counts":
+        "OpenSTA check_setup prints one fixed-format summary per finding kind, "
+        "'Warning: There are|is <N> <kind>.', and prints nothing for a kind "
+        "with zero findings; there is no negated form to emit. The reader "
+        "only counts those lines after the check_setup header and returns "
+        "None when the header is absent, so an unwritten section is "
+        "NOT_MEASURED, never zero. Calibrated on real STAPrePNR checks.rpt "
+        "pairs (instrument_calibration).",
     "drc_feedback_repair::_def_nets":
         "DEF is a closed machine grammar: UNITS DISTANCE MICRONS, NETS, "
         "ROUTED and END NETS are parser tokens, not sentences. A denial such "

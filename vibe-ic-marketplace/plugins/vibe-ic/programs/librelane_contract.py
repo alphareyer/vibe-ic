@@ -52,7 +52,10 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
     l9 = _load(root / 'L9_INTEGRATION_SPEC.json')
     l19 = _load(root / 'L19_CONSTRAINTS_PDK.json')
     declaration = _load(project / 'input/submission_template/tapeout_declaration.json')
-    pads = _load(project / 'phase3/stage3/pnr/pad_assignment.json')
+    # The pad producer (step 15.5ic) runs after synthesis and pre-layout STA;
+    # before it has run the PAD_* keys are undeclared, so they stay absent.
+    pad_path = project / 'phase3/stage3/pnr/pad_assignment.json'
+    pads = _load(pad_path) if pad_path.is_file() else {}
     result: dict[str, Any] = {}
     sources: dict[str, str] = {}
     clocks = [c for c in l8.get('clock_domains', []) if c.get('role') == 'primary'
@@ -244,7 +247,9 @@ def _check_state(state: dict, *, outputs: bool = False,
     # sole required input (magic.py RCX/DRC, klayout.py DRC).
     early = {'Yosys.JsonHeader': (), 'Yosys.Synthesis': ('json_h',),
              'OpenROAD.CheckSDCFiles': ('nl',), 'OpenROAD.STAPrePNR': ('nl',),
-             'OpenROAD.Floorplan': ('nl',),
+             'OpenROAD.Floorplan': ('nl',), 'Yosys.EQY': ('nl',),
+             'Checker.YosysUnmappedCells': ('nl',), 'Checker.YosysSynthChecks': ('nl',),
+             'Checker.NetlistAssignStatements': ('nl',),
              'Magic.RCX': ('gds',), 'Magic.DRC': ('gds',),
              'KLayout.DRC': ('gds',)}
     required = early.get(step_id, ('odb', 'def', 'nl', 'sdc'))
@@ -379,7 +384,12 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
             raise Refusal('LL_STEP_CONFIG_MISMATCH', step_id)
         fingerprint = {'image': image, 'config': digest(config), 'state': digest(state_path),
                        'state_files': {str(path): digest(path) for path in _walk_paths(
-                           {k: v for k, v in state.items() if k != 'metrics'})}, 'step': step_id}
+                           {k: v for k, v in state.items() if k != 'metrics'})},
+                       # Files the step config names (SDC, EQY script, PDN Tcl…)
+                       # are inputs too: an edited deck must re-run the step.
+                       'config_files': {str(path): digest(path) for path in _walk_paths(
+                           _load(config)) if path.is_file()},
+                       'step': step_id}
         receipt = folder / 'vibeic_receipt.json'
         if receipt.exists() and _load(receipt).get('input') == fingerprint and (folder / 'state_out.json').exists():
             _check_state(_load(folder / 'state_out.json'), outputs=True)

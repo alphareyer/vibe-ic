@@ -1376,6 +1376,218 @@ _register(Instrument(
 ))
 
 
+# ---- LibreLane OpenROAD.STAPrePNR readers (steps 8 and 10, T92) -----------
+
+_STA_PREPNR_RUN = (
+    "Real LibreLane 3.1.0.dev1 OpenROAD.STAPrePNR (OpenSTA via `sta`) in the "
+    "released vibeic-eda 0.3.77 image, run by digest on 8hd-3 (.121) on "
+    "2026-09-26 through librelane_contract.run_chain, nom_tt_025C_5v00 "
+    "corner of gf180mcuD. Calibration structure: calibration/"
+    "cal_chain_gf180.v (two dffq_1 around one inv_1, no design under test)")
+
+
+def _judge_sta_black_box(log: str) -> Optional[str]:
+    import librelane_prelayout as L
+    return "BLACK_BOX" if L.black_boxes(log) else None
+
+
+def _judge_sta_sdc_diag(sample: Tuple[str, str]) -> Optional[str]:
+    import librelane_prelayout as L
+    log, sdc = sample
+    return "SDC_DIAGNOSTIC" if L.sdc_diagnostics(log, Path(sdc)) else None
+
+
+def _judge_sta_check_setup(rpt: str) -> Optional[str]:
+    import librelane_prelayout as L
+    counts = L.check_setup_counts(rpt)
+    if counts is None:
+        return "NOT_MEASURED"
+    return "UNTIMED" if any(counts.values()) else None
+
+
+_register(Instrument(
+    name="librelane_prelayout::black_boxes",
+    reads="OpenSTA sta.log written by LibreLane STAPrePNR (link_design)",
+    ruling="T92 step 10", owner="mig-sdcsta",
+    why=("OpenSTA links a master missing from every liberty as an empty black "
+         "box and exits 0; the slack it then reports omits that logic "
+         "(harvest: 'No paths found' / wns 0.00 where the linked run had "
+         "-33.88 ns). The pair differs only in one cell master."),
+    judge=_judge_sta_black_box,
+    positive=Sample(
+        provenance=(_STA_PREPNR_RUN + ", with i0's master renamed to "
+                    "cal_absent_master (calibration/cal_chain_absent.v). "
+                    "Unedited sta.log; carries Warning 198 'Creating black "
+                    "box for i0'. calibration/sta_prepnr_black_box_positive.log"),
+        artefact=_read("sta_prepnr_black_box_positive.log")),
+    expect="BLACK_BOX",
+    negative=Sample(
+        provenance=(_STA_PREPNR_RUN + ", unmodified netlist and "
+                    "calibration/cal_full.sdc. Unedited sta.log. "
+                    "calibration/sta_prepnr_linked_clean_negative.log"),
+        artefact=_read("sta_prepnr_linked_clean_negative.log")),
+))
+
+_register(Instrument(
+    name="librelane_prelayout::sdc_diagnostics",
+    reads="OpenSTA sta.log diagnostics raised while reading the SDC",
+    ruling="T92 step 8", owner="mig-sdcsta",
+    why=("A constraint aimed at a port OpenSTA cannot find is a warning, the "
+         "run exits 0 and the constraint applies to nothing. A regex over the "
+         "SDC text cannot see it; OpenSTA's own read_sdc diagnostic can."),
+    judge=_judge_sta_sdc_diag,
+    positive=Sample(
+        provenance=(_STA_PREPNR_RUN + ", SDC calibration/cal_bad_port.sdc "
+                    "(set_input_delay on a port that does not exist). "
+                    "Unedited sta.log; Warning 366 at cal_bad_port.sdc line 2. "
+                    "calibration/sta_prepnr_sdc_bad_port_positive.log"),
+        artefact=lambda: (_read("sta_prepnr_sdc_bad_port_positive.log")(),
+                          "cal_bad_port.sdc")),
+    expect="SDC_DIAGNOSTIC",
+    negative=Sample(
+        provenance=(_STA_PREPNR_RUN + ", SDC calibration/cal_full.sdc. "
+                    "calibration/sta_prepnr_linked_clean_negative.log"),
+        artefact=lambda: (_read("sta_prepnr_linked_clean_negative.log")(),
+                          "cal_full.sdc")),
+))
+
+_register(Instrument(
+    name="librelane_prelayout::check_setup_counts",
+    reads="OpenSTA check_setup section of STAPrePNR checks.rpt",
+    ruling="T92 step 8", owner="mig-sdcsta",
+    why=("A staged SDC declaring only create_clock leaves every primary I/O "
+         "untimed, which turns a red sign-off green by subtraction. OpenSTA's "
+         "check_setup counts the missing input delays and unconstrained "
+         "endpoints; the pair differs only in the SDC."),
+    judge=_judge_sta_check_setup,
+    positive=Sample(
+        provenance=(_STA_PREPNR_RUN + ", SDC calibration/cal_clock_only.sdc. "
+                    "Unedited checks.rpt: 1 input port missing "
+                    "set_input_delay, 2 unconstrained endpoints. "
+                    "calibration/sta_prepnr_check_setup_clock_only_positive.rpt"),
+        artefact=_read("sta_prepnr_check_setup_clock_only_positive.rpt")),
+    expect="UNTIMED",
+    negative=Sample(
+        provenance=(_STA_PREPNR_RUN + ", SDC calibration/cal_full.sdc. "
+                    "Unedited checks.rpt with an empty check_setup section. "
+                    "calibration/sta_prepnr_check_setup_clean_negative.rpt"),
+        artefact=_read("sta_prepnr_check_setup_clean_negative.rpt")),
+))
+
+
+def _eqy_scratch(name: str) -> Callable[[], Path]:
+    """Unpack an EQY sample (its unedited status files and partition.list,
+    stored as one tar so every fixture stays a flat file) into a temp dir."""
+    def _load() -> Path:
+        import tarfile
+        out = Path(tempfile.mkdtemp(prefix="cal_eqy_"))
+        with tarfile.open(FIXTURES / f"{name}.tar") as tar:
+            tar.extractall(out)  # our own fixture: relative paths only
+        return out
+    return _load
+
+
+def _judge_eqy_partitions(scratch: Path) -> Optional[str]:
+    import librelane_eqy as E
+    parts = E.partition_status(scratch)
+    if parts is None:
+        return "NOT_MEASURED"
+    if any("FAIL" in s.values() and "PASS" not in s.values() for s in parts.values()):
+        return "NOT_EQUIVALENT"
+    return None
+
+
+_register(Instrument(
+    name="librelane_eqy::partition_status",
+    reads="EQY per-partition strategy status files (scratch/strategies/*/*/status)",
+    ruling="T92 step 13", owner="mig-sdcsta",
+    why=("EQY's top-level status folds 'undecided' into FAIL, so the step-13 "
+         "arm-B reader works per partition. The pair differs only in one gate "
+         "cell: inv (equivalent) vs buf (not) on a defined combinational cone."),
+    judge=_judge_eqy_partitions,
+    positive=Sample(
+        provenance=("Real LibreLane 3.1.0.dev1 Yosys.EQY in the released "
+                    "vibeic-eda 0.3.77 image on 8hd-3 (.121), 2026-09-26, with "
+                    "EQY v0.69 plugins built from YosysHQ/eqy against the "
+                    "image's Yosys 0.69 (the image ships none). Gold "
+                    "calibration/cal_chain_rtl.v, gate calibration/"
+                    "cal_eqy_gate_noneq.v (buf_1 where inv_1 belongs). Every "
+                    "strategy status file and partition.list, unedited, in "
+                    "calibration/eqy_not_equivalent_positive.tar"),
+        artefact=_eqy_scratch("eqy_not_equivalent_positive")),
+    expect="NOT_EQUIVALENT",
+    negative=Sample(
+        provenance=("Same run, gate calibration/cal_eqy_gate.v (inv_1). Every "
+                    "partition PASS. calibration/eqy_equivalent_negative.tar"),
+        artefact=_eqy_scratch("eqy_equivalent_negative")),
+))
+
+
+def _judge_eqy_xbits(scratch: Path) -> Optional[str]:
+    import librelane_eqy as E
+    found = E.xbit_partitions(scratch)
+    if found is None:
+        return "NOT_MEASURED"
+    return "XBITS_VACUOUS" if found else None
+
+
+_register(Instrument(
+    name="librelane_eqy::xbit_partitions",
+    reads="EQY partition.list (`xbits` partition tags)",
+    ruling="T92 step 13", owner="mig-sdcsta",
+    why=("EQY's miter passes any point that is x on the gold side. With a "
+         "resetless flop and no init, a non-equivalent gate cell still ends "
+         "`DONE (PASS, rc=0)`; the only trace is the `xbits` tag."),
+    judge=_judge_eqy_xbits,
+    positive=Sample(
+        provenance=("Real LibreLane Yosys.EQY run (0.3.77 image, EQY v0.69 "
+                    "plugins, 8hd-3, 2026-09-26): gold calibration/"
+                    "cal_xbits_rtl.v (resetless registered output), gate "
+                    "calibration/cal_chain_noninv.v (buf_1 where inv_1 "
+                    "belongs), script without an init. Unedited partition.list "
+                    "and status files (EQY logged `DONE (PASS, rc=0)` over the "
+                    "non-equivalent gate). calibration/eqy_xbits_vacuous_positive.tar"),
+        artefact=_eqy_scratch("eqy_xbits_vacuous_positive")),
+    expect="XBITS_VACUOUS",
+    negative=Sample(
+        provenance=("Same tool, gold calibration/cal_chain_rtl.v, gate "
+                    "calibration/cal_eqy_gate.v, script with `setundef -init "
+                    "-zero` (librelane_eqy.eqy_script). No partition tagged "
+                    "xbits. calibration/eqy_defined_init_negative.tar"),
+        artefact=_eqy_scratch("eqy_defined_init_negative")),
+))
+
+
+def _judge_handoff_constants(netlist: str) -> Optional[str]:
+    import synth_handoff_netlist_check as H
+    return "CONSTANT_NOT_TIED" if H.constant_connections(netlist) else None
+
+
+_register(Instrument(
+    name="synth_handoff_netlist_check::constant_connections",
+    reads="the Yosys write_verilog handoff netlist (step 14)",
+    ruling="T92 step 14", owner="mig-sdcsta",
+    why=("A constant left as a literal instead of a tie cell becomes an "
+         "OpenROAD zero_/one_ net and fails detailed route (DRT-0305). The "
+         "pair is one RTL synthesised with and without hilomap."),
+    judge=_judge_handoff_constants,
+    positive=Sample(
+        provenance=("Real Yosys 0.69+ 4d572059c (vibeic-eda 0.3.77, 8hd-3, "
+                    "2026-09-26): `synth -flatten; dfflibmap; abc -liberty "
+                    "<gf180mcu tt lib>; opt_clean -purge; write_verilog "
+                    "-noattr` of calibration/cal_const_rtl.v, NO hilomap. "
+                    "Unedited: `assign lo = 1'h0; assign hi = 1'h1;`. "
+                    "calibration/synth_const_no_hilomap_positive.v"),
+        artefact=_read("synth_const_no_hilomap_positive.v")),
+    expect="CONSTANT_NOT_TIED",
+    negative=Sample(
+        provenance=("Same RTL through LibreLane 3.1.0.dev1 Yosys.Synthesis in "
+                    "the same image (tieh/tiel placed). Unedited netlist. "
+                    "calibration/synth_const_tied_negative.v"),
+        artefact=_read("synth_const_tied_negative.v")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════

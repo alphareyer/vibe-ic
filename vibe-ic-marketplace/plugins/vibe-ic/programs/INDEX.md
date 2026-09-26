@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1348
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1348)
+- **Total programs (excluding helpers / shims):** 1351
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1351)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1339 |
+| `any` | 1342 |
 
 ## Alphabetical listing
 
@@ -722,6 +722,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `level_shifter_required_check` | any | — | M2 gate (substance-verifying). |
 | `lfsr_synth` | any | — | deterministic SOLVER for the LINEAR-FEEDBACK-SHIFT-REGISTER family (Galois form), turning a fully-specified LFSR spec into correct RTL bl... |
 | `librelane_contract` | any | — | Project-local LibreLane step handoff. No Phase-3 step opts in implicitly. |
+| `librelane_eqy` | any | — | Step 13 arm B: LibreLane Yosys.EQY beside lec_run (arm A). |
+| `librelane_prelayout` | any | — | Opt-in steps 7, 8 and 10 through LibreLane OpenROAD.CheckSDCFiles + STAPrePNR. |
 | `librelane_step37` | any | — | Opt-in step-37 LibreLane stream-out from vibe-ic's admitted routed DEF. |
 | `lin_protocol_synth` | any | v0.1.84 | LIN-class protocol synth helper. |
 | `literal_verdict_keyword_check` | any | — | anti-fabrication gate (v1.6.38). |
@@ -1255,6 +1257,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `synth_area_stats_emit` | any | — | publish the synthesis area figure as an artefact. |
 | `synth_doctor` | any | v0.1.96 | Yosys synthesis-log error classifier (synth-doctor Pattern-B → program). |
 | `synth_frontend` | any | — | Shared SystemVerilog-frontend selection logic. |
+| `synth_handoff_netlist_check` | any | — | Step 14 on the tool path: judge the synthesis HANDOFF NETLIST, not its recipe. |
 | `synth_netlist_check` | any | — | Deterministic synthesis netlist validation checker. |
 | `synth_wrapper_check` | any | — | Deterministic compliance check for synth-wrapper-gen. |
 | `synth_wrapper_gen` | any | — | auto-generate synthesis wrapper for inout-port designs. |
@@ -1420,7 +1423,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1339 programs)
+### `any` (1342 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2113,6 +2116,8 @@ _(no programs in this group)_
 - `level_shifter_required_check` — M2 gate (substance-verifying).
 - `lfsr_synth` — deterministic SOLVER for the LINEAR-FEEDBACK-SHIFT-REGISTER family (Galois form), turning a fully-specified LFSR spec into correct RTL bl...
 - `librelane_contract` — Project-local LibreLane step handoff. No Phase-3 step opts in implicitly.
+- `librelane_eqy` — Step 13 arm B: LibreLane Yosys.EQY beside lec_run (arm A).
+- `librelane_prelayout` — Opt-in steps 7, 8 and 10 through LibreLane OpenROAD.CheckSDCFiles + STAPrePNR.
 - `librelane_step37` — Opt-in step-37 LibreLane stream-out from vibe-ic's admitted routed DEF.
 - `lin_protocol_synth` — LIN-class protocol synth helper.  _[v0.1.84]_
 - `literal_verdict_keyword_check` — anti-fabrication gate (v1.6.38).
@@ -2644,6 +2649,7 @@ _(no programs in this group)_
 - `synth_area_stats_emit` — publish the synthesis area figure as an artefact.
 - `synth_doctor` — Yosys synthesis-log error classifier (synth-doctor Pattern-B → program).  _[v0.1.96]_
 - `synth_frontend` — Shared SystemVerilog-frontend selection logic.
+- `synth_handoff_netlist_check` — Step 14 on the tool path: judge the synthesis HANDOFF NETLIST, not its recipe.
 - `synth_netlist_check` — Deterministic synthesis netlist validation checker.
 - `synth_wrapper_check` — Deterministic compliance check for synth-wrapper-gen.
 - `synth_wrapper_gen` — auto-generate synthesis wrapper for inout-port designs.

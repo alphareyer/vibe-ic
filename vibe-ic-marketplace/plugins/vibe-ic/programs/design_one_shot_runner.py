@@ -20783,7 +20783,106 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                            "unavailable")
         results.append(StepResult("lec_equivalence", "NOT_MEASURED", time.time() - t0,
                        "lec_run.py missing → disclosed-skip", reason_class=_V.ReasonClass.TOOL_ABSENT))
-    return results
+    return _lec_eqy_arm(project, top_name, gate_netlist, results)
+
+
+def _lec_eqy_arm(project: Path, top_name: str, gate_netlist: str,
+                 results: List[StepResult]) -> List[StepResult]:
+    """Step 13 arm B (opt-in via phase3/librelane_switch.json step "13").
+
+    lec_run (arm A) has already run. `librelane` and `dual` both add LibreLane
+    Yosys.EQY as arm B and keep the conclusive arm; EQY is never the sole
+    evidence (see `librelane_eqy`). The step row is replaced by the combined
+    verdict; both arm records stay on disk.
+    """
+    import librelane_contract as _llc
+    try:
+        mode = _llc.selected_mode(project, "13")
+    except _llc.Refusal as exc:
+        return results + [StepResult("lec_equivalence_eqy", "FAIL", 0.0, str(exc))]
+    if mode == "direct":
+        return results
+    import librelane_eqy as _eqy
+    t0 = time.time()
+    reports = project / "reports"
+    try:
+        switch = json.loads((project / "phase3/librelane_switch.json").read_text())
+        image, pdk = switch.get("image"), switch.get("pdk")
+        if not image or not pdk:
+            raise _llc.Refusal("LL_SWITCH_INCOMPLETE",
+                               "step 13 needs image and pdk in phase3/librelane_switch.json")
+        mounts: List[Tuple[Path, str]] = []
+        pdk_root = None
+        if switch.get("pdk_root_host"):
+            mounts.append((Path(switch["pdk_root_host"]), "/pdk"))
+            pdk_root = "/pdk"
+        overlay = switch.get("development_eqy_overlay")
+        if overlay:
+            # Development input only: the released image ships no EQY plugins.
+            base = Path(overlay)
+            mounts.append((base / "eqy", "/foss/tools/yosys/bin/eqy"))
+            mounts += [(base / name, "/foss/tools/bin/" + name) for name in
+                       ("eqy_combine.so", "eqy_partition.so", "eqy_recode.so")]
+        rtl_dir = project / "phase2/stage1/rtl"
+        rtl = sorted(rtl_dir.glob("*.sv")) + sorted(rtl_dir.glob("*.v"))
+        netlist = Path(gate_netlist)
+        if not netlist.is_absolute():
+            netlist = project / netlist
+        folder = _eqy.run_eqy(project, image, str(pdk), top_name, rtl, netlist,
+                              mounts=mounts, pdk_root=pdk_root,
+                              std_cell_library=switch.get("std_cell_library"))
+        eqy_doc = _eqy.judge_eqy(folder, reports / "lec_eqy.json")
+        eqy_doc["subject"] = str(netlist)
+        # The netlist PnR consumes. When arm A's subject is a different file
+        # (the generic phase-2 netlist), prove the mapped handoff netlist too:
+        # a counterexample there is decisive for the step.
+        handoff = _pl.synth_dir(project) / f"{top_name}_synth.v"
+        handoff_doc = None
+        if handoff.is_file() and handoff.resolve() != netlist.resolve():
+            hfolder = _eqy.run_eqy(project, image, str(pdk), top_name, rtl, handoff,
+                                   mounts=mounts, pdk_root=pdk_root,
+                                   std_cell_library=switch.get("std_cell_library"),
+                                   namespace="lec_eqy_handoff")
+            handoff_doc = _eqy.judge_eqy(hfolder, reports / "lec_eqy_handoff.json")
+            handoff_doc["subject"] = str(handoff)
+            _llc.write_json(reports / "lec_eqy_handoff.json", handoff_doc)
+    except (_llc.Refusal, OSError, ValueError) as exc:
+        eqy_doc = {"verdict": "NOT_MEASURED", "explanation": str(exc)}
+        handoff_doc = None
+        _llc.write_json(reports / "lec_eqy.json", eqy_doc)
+    try:
+        lec_doc = json.loads((reports / "lec.json").read_text())
+    except (OSError, ValueError):
+        lec_doc = {"verdict": "NOT_MEASURED"}
+    combined = _eqy.combine(lec_doc, eqy_doc)
+    combined["mode"] = mode
+    if handoff_doc is not None:
+        combined["handoff"] = {"subject": handoff_doc.get("subject"),
+                               "verdict": handoff_doc.get("verdict"),
+                               "explanation": handoff_doc.get("explanation")}
+        if handoff_doc.get("verdict") == "FAIL":
+            combined["verdict"] = "FAIL"
+            combined["reason"] = "HANDOFF_NETLIST_NOT_EQUIVALENT"
+    _llc.write_json(reports / "lec_arms.json", combined)
+    arm_a = next((r for r in results if r.name == "lec_equivalence"), None)
+    kept = [r for r in results if r.name != "lec_equivalence"]
+    status = {"PASS": "PASS", "FAIL": "FAIL"}.get(combined["verdict"], "NOT_MEASURED")
+    detail = (f"step 13 arms ({mode}): {combined['verdict']} "
+              f"[lec_run={combined['arms']['lec_run']}, eqy={combined['arms']['eqy']}"
+              f"{', selected ' + combined['selected'] if combined.get('selected') else ''}"
+              f"{', ' + combined['reason'] if combined.get('reason') else ''}]; "
+              f"eqy: {eqy_doc.get('explanation', '')}"
+              + (f"; handoff {Path(str(combined['handoff']['subject'])).name}: "
+                 f"eqy {combined['handoff']['verdict']} ({combined['handoff']['explanation']})"
+                 if combined.get("handoff") else "")
+              + (f" | arm A: {arm_a.detail}" if arm_a else ""))
+    kept.append(StepResult(
+        "lec_equivalence", status, time.time() - t0 + (arm_a.duration_s if arm_a else 0.0),
+        detail, output_files=["reports/lec.json", "reports/lec_eqy.json",
+                              "reports/lec_arms.json"]
+        + (["reports/lec_eqy_handoff.json"] if handoff_doc is not None else []),
+        reason_class=("" if status != "NOT_MEASURED" else _V.ReasonClass.INCONCLUSIVE)))
+    return kept
 
 
 def _sha256_file(path: Path) -> Optional[str]:
