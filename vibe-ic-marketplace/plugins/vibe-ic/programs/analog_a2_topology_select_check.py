@@ -35,6 +35,11 @@ with substance:
 
 Failure rules:
   A2_TOPOLOGY_MISSING       — topology.md absent
+  A2_TOPOLOGY_IR_*          — the block's topology.json IR is structurally
+                              wrong: a device with the wrong terminal count,
+                              a net no port/rail/internal-net declaration
+                              names, a declared net no device touches, or no
+                              device at all (checked whenever the IR exists)
   A2_TOPOLOGY_EMPTY         — present but < 200 bytes (placeholder)
   A2_TOPOLOGY_NO_PRIMITIVE  — present but names no circuit vocabulary
                               at all (neither panel hit)
@@ -122,6 +127,55 @@ _PRIMITIVE_KEYWORDS_LC: tuple[str, ...] = (
 )
 
 
+def _ir_findings(project: Path, block: str, ir_path: Path) -> List[dict]:
+    """Structural findings over the A2 topology IR; [] when there is none.
+
+    Each device's net count equals its role's terminal count; every net a
+    device touches is declared (a port, a rail or an internal net); every
+    port and every declared internal net is touched by some device.
+    """
+    import json
+    if not ir_path.is_file():
+        return []
+    rel = str(ir_path.relative_to(project))
+    try:
+        ir = json.loads(ir_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [{"block": block, "rule": "A2_TOPOLOGY_IR_INVALID",
+                 "rel_path": rel, "detail": f"unparsable: {exc}"}]
+    devices = [d for d in (ir.get("devices") or []) if isinstance(d, dict)]
+    if not devices:
+        return [{"block": block, "rule": "A2_TOPOLOGY_IR_NO_DEVICES",
+                 "rel_path": rel, "detail": "the IR declares no device"}]
+    ports = [str(p) for p in (ir.get("ports") or [])]
+    rails = {str(v) for v in (ir.get("rails") or {}).values()}
+    internal = [str(n) for n in (ir.get("internal_nets") or [])]
+    declared = set(ports) | rails | set(internal)
+    terms = ir.get("role_terminals") or {}
+    out: List[dict] = []
+    bad = [f"{d.get('name')}({d.get('role')}: {len(d.get('nets') or [])} "
+           f"nets, role takes {terms.get(d.get('role'))})"
+           for d in devices if terms.get(d.get("role")) is not None
+           and len(d.get("nets") or []) != terms.get(d.get("role"))]
+    if bad:
+        out.append({"block": block, "rule": "A2_TOPOLOGY_IR_TERMINALS",
+                    "rel_path": rel, "detail": "; ".join(bad[:8])})
+    used = {str(n) for d in devices for n in (d.get("nets") or [])}
+    undeclared = sorted(used - declared)
+    if undeclared:
+        out.append({"block": block, "rule": "A2_TOPOLOGY_IR_NET_UNDECLARED",
+                    "rel_path": rel,
+                    "detail": (f"{len(undeclared)} net(s) a device touches are "
+                               f"not declared as a port, rail or internal net: "
+                               f"{undeclared[:12]}")})
+    dangling = [n for n in ports + internal if n not in used]
+    if dangling:
+        out.append({"block": block, "rule": "A2_TOPOLOGY_IR_NET_UNUSED",
+                    "rel_path": rel,
+                    "detail": f"declared net(s) no device touches: {dangling}"})
+    return out
+
+
 def _check_block(project: Path, block: str
                  ) -> tuple[Optional[str], List[dict]]:
     path, found = resolve_block_artefact(
@@ -147,6 +201,15 @@ def _check_block(project: Path, block: str
             "rel_path": str(path.relative_to(project)),
             "detail": f"{size}B < min {MIN_BYTES}B (placeholder?)",
         }]
+    # THE IR IS THE TOPOLOGY (T94, A2 harvest #3). When the block carries the
+    # `topology.json` IR that A3 renders from, its STRUCTURE is checked, not
+    # its vocabulary: a memo headed "# Topology - ldo" passed the keyword
+    # floor. MEASURED on vibeic-eda 0.3.77 / u_hawaii_adc/delta_sigma: 351
+    # devices touch 8 nets the IR never declares, so A3's per-internal-net
+    # rail measurement (which reads `internal_nets`) never measured them.
+    ir_findings = _ir_findings(project, block, path.parent / "topology.json")
+    if ir_findings:
+        return "FAIL", ir_findings
     # The verdict asserts the GOOD thing is PRESENT: at least one term that
     # ordinary prose cannot supply. Generic hits are reported for diagnosis
     # but never promote the verdict on their own.

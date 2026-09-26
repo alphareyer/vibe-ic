@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1345
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1345)
+- **Total programs (excluding helpers / shims):** 1347
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1347)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1336 |
+| `any` | 1338 |
 
 ## Alphabetical listing
 
@@ -59,7 +59,9 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `analog_a5_pdk_device_limits` | any | — | what the PDK ITSELF permits a drawn device to be, and what clearance its metal-1 rule demands of a bulk tap. |
 | `analog_a6_block_pv_check` | any | — | A6 deterministic gate (Per-Block Physical Verification: DRC + LVS). |
 | `analog_a6_drc_attribute` | any | — | what each A6 DRC violation actually IS. |
+| `analog_a6_librelane_drc` | any | — | A6 per-block DRC through LibreLane (T94). |
 | `analog_a6_native_pv` | any | — | A6 per-block PHYSICAL-VERIFICATION producer (consume the resolver's staged sign-off decks; run native DRC + LVS). |
+| `analog_a7_post_layout_emit` | any | — | the deterministic A7 producer. |
 | `analog_a7_post_layout_resim_check` | any | — | Verifies that the upstream `analog-extraction-resim` skill has emitted |
 | `analog_a8_before_floorplan_check` | any | — | analog/digital ordering gate. |
 | `analog_a8_hardmacro_emit` | any | — | A8 PRODUCER for an ANALOG block: emit the real hardmacro abstract kit from the block's own signed-off layout. |
@@ -1417,7 +1419,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1336 programs)
+### `any` (1338 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1452,7 +1454,9 @@ _(no programs in this group)_
 - `analog_a5_pdk_device_limits` — what the PDK ITSELF permits a drawn device to be, and what clearance its metal-1 rule demands of a bulk tap.
 - `analog_a6_block_pv_check` — A6 deterministic gate (Per-Block Physical Verification: DRC + LVS).
 - `analog_a6_drc_attribute` — what each A6 DRC violation actually IS.
+- `analog_a6_librelane_drc` — A6 per-block DRC through LibreLane (T94).
 - `analog_a6_native_pv` — A6 per-block PHYSICAL-VERIFICATION producer (consume the resolver's staged sign-off decks; run native DRC + LVS).
+- `analog_a7_post_layout_emit` — the deterministic A7 producer.
 - `analog_a7_post_layout_resim_check` — Verifies that the upstream `analog-extraction-resim` skill has emitted
 - `analog_a8_before_floorplan_check` — analog/digital ordering gate.
 - `analog_a8_hardmacro_emit` — A8 PRODUCER for an ANALOG block: emit the real hardmacro abstract kit from the block's own signed-off layout.

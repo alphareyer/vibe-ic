@@ -239,9 +239,13 @@ def _check_state(state: dict, *, outputs: bool = False,
                  step_id: str = '') -> None:
     # Early steps consume only the views produced so far. Floorplan creates
     # the first ODB/DEF/SDC from the mapped netlist.
+    # A lone analog block has only a GDS: these steps declare GDS as their
+    # sole required input (magic.py RCX/DRC, klayout.py DRC).
     early = {'Yosys.JsonHeader': (), 'Yosys.Synthesis': ('json_h',),
              'OpenROAD.CheckSDCFiles': ('nl',), 'OpenROAD.STAPrePNR': ('nl',),
-             'OpenROAD.Floorplan': ('nl',)}
+             'OpenROAD.Floorplan': ('nl',),
+             'Magic.RCX': ('gds',), 'Magic.DRC': ('gds',),
+             'KLayout.DRC': ('gds',)}
     required = early.get(step_id, ('odb', 'def', 'nl', 'sdc'))
     if not outputs:
         for key in required:

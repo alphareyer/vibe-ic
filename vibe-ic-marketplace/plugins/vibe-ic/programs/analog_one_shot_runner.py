@@ -445,6 +445,49 @@ def _try_native_a6_pv(project: Path, block: str, container: str):
         return None
 
 
+def _a6_librelane_arm(project: Path, block: str, container: str,
+                      mode: str) -> Dict[str, Any]:
+    """Run `analog_a6_librelane_drc` beside native A6 PV (T94, opt-in).
+
+    Returns `{"rc", "record", "blocking", "detail"}`. `blocking` is True when
+    the arm's own record names a blocking rule, when the switch is invalid, or
+    when the arm could not be measured: a selected tool arm that produced no
+    evidence cannot leave the stricter half of the verdict unset.
+    """
+    if mode not in ("librelane", "dual"):
+        return {"rc": None, "blocking": True,
+                "detail": f"phase3/librelane_switch.json: invalid A6 mode"}
+    prog = PROGRAMS_DIR / "analog_a6_librelane_drc.py"
+    image, why = _pin.container_image_digest(container)
+    if not image:
+        return {"rc": _pc.EX_ENV_REFUSED, "blocking": True,
+                "detail": f"{_pc.ENV_REFUSED_TOKEN} {why}"}
+    if "@" not in image:
+        image = f"{_pin.image_repo()}@{image}"
+    bdir = _pl.analog_dir(project) / block
+    att = bdir / "a6_librelane" / "attribution.json"
+    att.parent.mkdir(parents=True, exist_ok=True)
+    _pr.run([sys.executable, str(PROGRAMS_DIR / "analog_a6_drc_attribute.py"),
+             str(project), "--block", block, "--container", container,
+             "--json", str(att)], capture_output=True, text=True)
+    cmd = [sys.executable, str(prog), str(project), "--block", block,
+           "--image", image]
+    if att.is_file():
+        cmd += ["--attribution", str(att)]
+    arm_run = _pr.run(cmd, capture_output=True, text=True)
+    rec_path = bdir / "a6_librelane_drc.json"
+    try:
+        record = json.loads(rec_path.read_text())
+    except (OSError, ValueError):
+        record = None
+    tail = ((arm_run.stdout or "").strip().splitlines()
+            or (arm_run.stderr or "").strip().splitlines() or ["no output"])[-1]
+    return {"rc": arm_run.returncode, "mode": mode,
+            "record": str(rec_path) if record is not None else None,
+            "blocking": arm_run.returncode != 0,
+            "union": (record or {}).get("union"), "detail": tail}
+
+
 def _loop_liveness(project: Path, block: str, container: str):
     """Was the block's loop LIVE over the window A4 just measured?
 
@@ -1172,6 +1215,30 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
     # never clear a violation, because a deviation A5 recorded is
     # reported as a DISCLOSURE beside the class and changes neither the
     # class nor any exit code.
+    # THE A6 TOOL ARM, OPT-IN (T94): LibreLane KLayout.DRC + Magic.DRC on the
+    # block GDS, the graded-rule union and A6's own attribution on top.
+    # Selected by phase3/librelane_switch.json {"steps": {"A6": ...}}. It is
+    # the STRICTER half: a blocking arm is the step's FAIL; a clean arm leaves
+    # the native path below to decide.
+    if step_name == "A6_block_pv" and (_pl.analog_dir(project) / bname
+                                       / f"{bname}.gds").is_file():
+        import librelane_contract as _llc
+        try:
+            _a6_mode = _llc.selected_mode(project, "A6")
+        except _llc.Refusal:
+            _a6_mode = "invalid"
+        if _a6_mode != "direct":
+            _a6_arm = _a6_librelane_arm(
+                project, bname,
+                (getattr(args, "container", None)
+                 or os.environ.get("VIBEIC_ANALOG_CONTAINER")
+                 or _pin.default_container_name()), _a6_mode)
+            if _a6_arm.get("blocking"):
+                return StepResult(
+                    step_name, bname, _V.Verdict.FAIL.value, time.time() - t0,
+                    f"LibreLane DRC arm ({_a6_mode}): {_a6_arm.get('detail')}",
+                    output_files=_step_outputs(project, bname, step_name),
+                    extras={"librelane_arm": _a6_arm})
     if step_name == "A6_block_pv":
         _attr = PROGRAMS_DIR / "analog_a6_drc_attribute.py"
         if _attr.is_file():
@@ -1606,6 +1673,80 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
             # deck does that. Same shape as A4's real-sweep fall-through: the
             # gate below still owns the verdict, on the artefact that is
             # actually on disk.
+            # A7 HAS A TOOL PRODUCER, OPT-IN (T94). LibreLane Magic.RCX
+            # extracts the A5 GDS and A4's ngspice machinery re-simulates the
+            # A3 testbench on it (`analog_a7_post_layout_emit`). Selected per
+            # project by `phase3/librelane_switch.json` {"steps": {"A7": ...}};
+            # the default stays the skill hand-off until the owner cuts over.
+            if step_name == "A7_post_layout_resim":
+                import librelane_contract as _llc
+                try:
+                    _a7_mode = _llc.selected_mode(project, "A7")
+                except _llc.Refusal as _exc:
+                    return StepResult(
+                        step_name, bname, "FAIL", time.time() - t0,
+                        f"phase3/librelane_switch.json: {_exc}",
+                        reason_class=_V.ReasonClass.EXECUTION_ERROR)
+                a7_prog = PROGRAMS_DIR / "analog_a7_post_layout_emit.py"
+                if _a7_mode != "direct" and a7_prog.is_file():
+                    _a7_container = (getattr(args, "container", None)
+                                     or os.environ.get("VIBEIC_ANALOG_CONTAINER")
+                                     or _pin.default_container_name())
+                    _a7_image, _a7_why = _pin.container_image_digest(
+                        _a7_container)
+                    if _a7_image and "@" not in _a7_image:
+                        # A bare digest is not a reference `docker run`
+                        # accepts; name it in the pinned repository.
+                        _a7_image = f"{_pin.image_repo()}@{_a7_image}"
+                    if not _a7_image:
+                        return StepResult(
+                            step_name, bname, _spf.REFUSAL_STATUS,
+                            time.time() - t0,
+                            f"{_pc.ENV_REFUSED_TOKEN} {_a7_why}",
+                            extras={"producer": a7_prog.name,
+                                    "verdict_tier": "ENV_UNAVAILABLE"},
+                            reason_class=_spf.REFUSAL_REASON_CLASS)
+                    a7_cp = _pr.run(
+                        [sys.executable, str(a7_prog), str(project),
+                         "--block", bname, "--container", _a7_container,
+                         "--image", _a7_image],
+                        capture_output=True, text=True)
+                    a7_gap = _producer_env_gap(a7_cp) or (
+                        a7_cp.returncode == _pc.EX_ENV_REFUSED
+                        and f"{a7_prog.name} exited {_pc.EX_ENV_REFUSED}")
+                    if a7_gap:
+                        return StepResult(
+                            step_name, bname, _spf.REFUSAL_STATUS,
+                            time.time() - t0, str(a7_gap),
+                            extras={"producer": a7_prog.name,
+                                    "producer_rc": a7_cp.returncode,
+                                    "verdict_tier": "ENV_UNAVAILABLE"},
+                            reason_class=_spf.REFUSAL_REASON_CLASS)
+                    _a7_tail = ((a7_cp.stderr or "").strip().splitlines()
+                                or (a7_cp.stdout or "").strip().splitlines()
+                                or ["no output"])[-1]
+                    if a7_cp.returncode == 1:
+                        return StepResult(
+                            step_name, bname, "FAIL", time.time() - t0,
+                            f"{a7_prog.name}: {_a7_tail}",
+                            extras={"producer": a7_prog.name,
+                                    "producer_rc": 1,
+                                    "mode": _a7_mode})
+                    if a7_cp.returncode == 0:
+                        cp_real = _pr.run(cmd, capture_output=True, text=True)
+                        _gate_tail = (cp_real.stdout.strip().splitlines()[-1]
+                                      if cp_real.stdout else "")
+                        return StepResult(
+                            step_name, bname,
+                            "PASS" if cp_real.returncode == 0 else "FAIL",
+                            time.time() - t0,
+                            f"{a7_prog.name} extracted + re-simulated; A7 "
+                            f"gate: {_gate_tail}",
+                            output_files=_step_outputs(project, bname,
+                                                       step_name),
+                            extras={"producer": a7_prog.name,
+                                    "producer_rc": 0, "mode": _a7_mode,
+                                    "image": _a7_image})
             if step_name == "A5_layout":
                 emit_prog = PROGRAMS_DIR / "analog_a5_layout_emit.py"
                 if emit_prog.is_file():
@@ -1710,6 +1851,15 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     # cannot round up to a green verdict) and carries the
                     # ENV_UNAVAILABLE tier and the container name in `extras`.
                     _env_gap = _producer_env_gap(rs_cp)
+                    if not _env_gap and rs_cp is not None and \
+                            rs_cp.returncode == _pc.EX_ENV_REFUSED:
+                        # The exit code is the producer's contract for this
+                        # tier (A3's branch reads it the same way); a refusal
+                        # whose sentence lacks the line-start token is still
+                        # a refusal.
+                        _env_gap = (f"{_pc.ENV_REFUSED_TOKEN} "
+                                    f"{real_prog.name} exited "
+                                    f"{_pc.EX_ENV_REFUSED}")
                     if _env_gap and not _corner_results_exists(project, bname):
                         return StepResult(
                             step_name, bname, _spf.REFUSAL_STATUS,

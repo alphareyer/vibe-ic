@@ -3230,14 +3230,32 @@ def run_block(project, block, container, pdk, topology_override):
     it, writes NO artefact, and exits `EX_ENV_REFUSED` so a caller can route on
     a refusal instead of reading one as a result.
     """
+    # THE REFUSAL LINE STARTS WITH THE TOKEN. The analog runner recognises a
+    # producer's environment refusal by a line that BEGINS with
+    # `ENV_REFUSED:` (or by the exit code); a sentence that only contains it
+    # was read as "artefact not yet emitted" and the step was WAIVED to the
+    # `ams-sim` skill, which cannot supply a container or a memory ceiling.
     try:
         return _run_block(project, block, container, pdk, topology_override)
     except _container_exec.ContainerImageMismatch as exc:
         print(f"{_container_exec.IMAGE_REFUSAL_MARK}{exc}", file=sys.stderr)
-        print(f"[real_sim] block={block} ENV_REFUSED: nothing was simulated "
-              f"and NO artefact was written: this is NOT a statement about the "
-              f"design, and NOT a missing simulator — the container holds the "
-              f"wrong bytes.", file=sys.stderr)
+        print(f"ENV_REFUSED: analog_real_corner_sweep block={block}: nothing "
+              f"was simulated and NO artefact was written: this is NOT a "
+              f"statement about the design, and NOT a missing simulator — the "
+              f"container holds the wrong bytes.", file=sys.stderr)
+        return _container_exec.EX_ENV_REFUSED
+    except _aca.AdmissionRefused as exc:
+        # MEASURED (lane mig94, 0.3.77, u_hawaii_adc/ldo): a container started
+        # without a memory ceiling made the first single-deck launch raise
+        # here, uncaught — a traceback, exit 1, no corner_results.json — and
+        # the runner then reported A4 as WAIVED to a skill. The admission
+        # refused BEFORE any simulator launch; nothing about the design was
+        # learned, so this is the environment tier, not a gap and not a FAIL.
+        print(f"ENV_REFUSED: analog_real_corner_sweep block={block}: corner "
+              f"admission refused before any simulator launch ({exc}); "
+              f"nothing was simulated and NO artefact was written. Declare a "
+              f"per-corner reservation (VIBEIC_ANALOG_CORNER_MEMORY) or start "
+              f"the container with a memory ceiling.", file=sys.stderr)
         return _container_exec.EX_ENV_REFUSED
     except _dr.MountRootUnresolved as exc:
         print(f"[real_sim] block={block} BLOCKED on host mount root: "
