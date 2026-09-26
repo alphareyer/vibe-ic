@@ -148,10 +148,26 @@ def test_the_stamp_is_performed_inside_the_dispatch_loop():
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef)
               and n.name == "step_declared_signoff_gates")
-    loops = [n for n in ast.walk(fn) if isinstance(n, ast.For)]
-    assert len(loops) == 1, "the dispatch loop is no longer a single for-loop"
+    # RE-DERIVED (T109c). ac2104931 added a second loop over the same table:
+    # a parallel FIRST WAVE that submits independent readers to a pool before
+    # the dispatch loop. The claim is about the DISPATCH loop -- the one that
+    # walks `_DECLARED_SIGNOFF_GATES` row by row -- so it is found by what it
+    # iterates, and the first wave is held to never include the audited row.
+    loops = [n for n in ast.walk(fn) if isinstance(n, ast.For)
+             and ast.unparse(n.iter) == "_DECLARED_SIGNOFF_GATES"]
+    dispatch = [n for n in loops if isinstance(n.target, ast.Tuple)]
+    assert len(dispatch) == 1, "the row-by-row dispatch loop is no longer one loop"
+    import phase3_one_shot_runner as R
+    for n in ast.walk(fn):
+        if (isinstance(n, ast.Assign) and isinstance(n.value, ast.Set)
+                and any(isinstance(t, ast.Name) and t.id == "parallel_names"
+                        for t in n.targets)):
+            wave = {e.value for e in n.value.elts if isinstance(e, ast.Constant)}
+            assert R._ASSUMED_CLOCK_DISCLOSURE_STEP not in wave, (
+                "the disclosure row would run in the parallel first wave, "
+                "before the stamp")
     stamped_in_loop = [
-        n for n in ast.walk(loops[0])
+        n for n in ast.walk(dispatch[0])
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
         and n.func.attr == "stamp_signoff_records"]
     assert len(stamped_in_loop) == 1, (

@@ -92,11 +92,43 @@ def test_the_fidelity_step_has_no_verdict_dependency_on_stream_out():
     closure must be non-empty, because a step that reads another step's output and
     declares no edge is D5-MISSING-EDGE.
     """
-    parents = _step("37.3").get("blocks_on")
-    assert parents == [21], parents
-    assert 37 not in parents and "37" not in [str(p) for p in parents], (
-        "a verdict dependency on step 37 is what cascaded this step away on the "
-        "one run where the fidelity answer mattered most")
+    # RE-DERIVED (T109c). ac2104931 made 37.3 read step 37's SHIPPED GDS
+    # ("Step 37 supplies the shipped GDS. Both inputs must be named in the
+    # dependency closure") and, in the same change, moved physical
+    # verification (31) AFTER stream-out (31 blocks_on [.., 34, 37]). So an
+    # edge to 37 no longer carries a PV verdict: a DRC/LVS FAIL no longer stops
+    # 37 and cannot cascade 37.3 away. The ruling's property is asserted over
+    # the closure: no physical-verification verdict upstream of 37.3, and its
+    # trigger's producer (21) is a declared edge.
+    parents = [str(p) for p in (_step("37.3").get("blocks_on") or [])]
+    assert "21" in parents, parents
+    steps = _flow()["steps"]
+    edges = {str(s["id"]): [str(p) for p in (s.get("blocks_on") or [])]
+             for s in steps if isinstance(s, dict) and "id" in s}
+    closure, stack = set(), list(parents)
+    while stack:
+        cur = stack.pop()
+        if cur not in closure:
+            closure.add(cur)
+            stack.extend(edges.get(cur, []))
+    pv = {str(s["id"]) for s in steps if isinstance(s, dict)
+          and "Physical Verification" in str(s.get("name", ""))
+          and "21" in _ancestry(edges, str(s["id"]))}
+    assert pv, "no physical-verification step downstream of routing"
+    assert not (pv & closure), (
+        f"a PV verdict ({sorted(pv & closure)}) is upstream of the fidelity "
+        f"step -- that is what cascaded it away on the one run where the "
+        f"fidelity answer mattered most")
+
+
+def _ancestry(edges, sid):
+    seen, stack = set(), list(edges.get(sid, []))
+    while stack:
+        cur = stack.pop()
+        if cur not in seen:
+            seen.add(cur)
+            stack.extend(edges.get(cur, []))
+    return seen
 
 
 def test_the_step_is_not_listed_as_a_dependency_graph_root():
@@ -183,8 +215,8 @@ def test_the_trigger_has_a_loud_absence_and_a_declared_producer():
     assert "reports/phase3/pad_ring_route_evidence.json" not in hard, (
         "if the attestation ever gains a hard clause this test should be "
         "revisited, not deleted -- the trigger choice was made on this fact")
-    assert _step("37.3").get("blocks_on") == [21], (
-        "the trigger's producer must be the declared edge, or the two halves of "
+    assert 21 in (_step("37.3").get("blocks_on") or []), (
+        "the trigger's producer must be a declared edge, or the two halves of "
         "this argument are about different steps")
 
 
@@ -233,7 +265,10 @@ def test_the_layout_producer_gets_the_container_by_its_own_flag_name():
         "the two flags are different questions and must not be conflated")
     src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
     i = src.index("for name, program, out_rel, extra_argv in _PRE_AUDIT_PRODUCERS:")
-    body = src[i:i + 1800]
+    # the LOOP, to its own `return rows` -- not a fixed character window,
+    # which a new branch in the loop (the foundry_handoff admission) pushed
+    # the flag out of (T109c)
+    body = src[i:src.index("return rows", i)]
     assert '("--container", container)' in body
     assert body.index("_PDK_AWARE_SIGNOFF_GATES") < body.index(
         "_KLAYOUT_CONTAINER_SIGNOFF_GATES"), "both branches must remain present"
