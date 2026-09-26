@@ -42275,6 +42275,28 @@ def _die_finishing(project: Path, top: str, pdk: PdkConfig,
     run_env = dict(os.environ)
     if container:
         run_env["VIBEIC_EDA_CONTAINER"] = container
+    # Step 26.5ic on LibreLane (`phase3/librelane_switch.json`): the same PDK
+    # generator through `KLayout.SealRing`.  `librelane`: the tool's output
+    # (or its refusal) is what `die_finishing_gen` verifies and reports -- it
+    # never runs its own.  `dual`: ours seals in place, then XOR against the
+    # tool's.  A design whose declaration owes no ring runs no tool.
+    from librelane_contract import selected_mode as _ll_selected_mode
+    import die_finishing_gen as _dfg
+    _ll_m265 = _ll_selected_mode(project, "26.5ic")
+    _ll_seal: Dict[str, Any] = {}
+    if _ll_m265 != "direct":
+        _ll_decl, _ll_decl_why = _dfg._declaration(project)
+        _ll_owed = not (_dfg._hardmacro_skip(_ll_decl)
+                        or _ll_decl.get(_dfg._DECL_REQUIRED) is False)
+        if _ll_owed and not _ll_decl_why:
+            _ll_seal = _librelane_sealring(project, pdk, gds_path, _ll_m265)
+            if _ll_m265 == "librelane":
+                if _ll_seal.get("tool"):
+                    argv += ["--sealed-by", _ll_seal["tool"]["sealed_gds"],
+                             "--sealed-by-record",
+                             str(_pl.reports_phase3_dir(project) / _LL_SEAL_RECORD)]
+                else:
+                    argv += ["--sealed-by-error", str(_ll_seal.get("refusal"))]
     try:
         cp = _pr.run_best_effort(argv, capture_output=True, text=True,
                             env=run_env,
@@ -42293,6 +42315,11 @@ def _die_finishing(project: Path, top: str, pdk: PdkConfig,
                     if ln.startswith(("VACUOUS_PASS:", "die_finishing_gen:"))),
                    (tail[-1] if tail else f"rc={cp.returncode}"))
         return False, f"die finishing did NOT complete: {why[:300]}"
+    if _ll_m265 == "dual" and _ll_seal.get("tool"):
+        _librelane_sealring_xor(project, pdk, gds_path)
+    if _ll_m265 == "librelane" and _ll_seal.get("tool"):
+        return True, ("PDK seal ring inserted by LibreLane KLayout.SealRing and "
+                      "verified around the die")
     return True, "PDK seal ring inserted and verified around the die"
 
 
@@ -58963,6 +58990,21 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         if em_ok:
             written.append(str(em_rpt))
             written.append(str(rpt_phase3 / "em.json"))
+    # Step 24 on LibreLane (`phase3/librelane_switch.json`): OpenROAD.
+    # IRDropReport on the canonical SPEF step 22 left, with the same-basis
+    # cross-check.  The direct session above still runs: step 25's EM reads it.
+    _ll_m24 = _ll_selected_mode(project, "24")
+    if primary_def.is_file() and _ll_m24 != "direct":
+        if _signoff_regen(rpt_phase3 / _LL_IR_RECORD, primary_def, spef_out):
+            _librelane_step24_record(project, top, pdk, _ll_m24, spef_out, written)
+        if _ll_m24 == "librelane":
+            try:
+                _ll_ir_doc = json.loads((rpt_phase3 / _LL_IR_RECORD).read_text())
+                if _ll_ir_doc.get("record") and _ll_ir_doc.get("def_sha256") == \
+                        _sha256_file(primary_def):
+                    _librelane_step24_publish(project, _ll_ir_doc)
+            except (OSError, ValueError, KeyError) as exc:
+                notes.append(f"step 24 LibreLane publish: {exc}")
 
     # --- #1215: Step 25 EM AUTHORITY comparison -------------------------
     # em.json above is a MEASUREMENT-ONLY artefact; the budget comparison
@@ -58993,11 +59035,29 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
 
     # --- ORGANIC-20260531: Step 26 antenna (re-emit to audit path) ------
     antenna_rpt = rpt_phase3 / "antenna.rpt"
+    # Step 26 on LibreLane: the router model is OpenROAD.CheckAntennas on the
+    # shipped route's ODB (`librelane` replaces the direct re-read; `dual`
+    # keeps it and compares); the GDS model runs on the shipped stream in
+    # the final canonicalisation below.
+    _ll_m26 = _ll_selected_mode(project, "26")
     if primary_def.is_file() and _signoff_regen(antenna_rpt, primary_def):
-        if _emit_antenna_report(project, top, pdk, container,
-                                antenna_rpt, notes):
+        if _ll_m26 != "librelane" and _emit_antenna_report(project, top, pdk, container,
+                                                           antenna_rpt, notes):
             written.append(str(antenna_rpt))
             written.append(str(rpt_phase3 / "antenna.json"))
+    if primary_def.is_file() and _ll_m26 != "direct" and \
+            _signoff_regen(rpt_phase3 / _LL_ANTENNA_RECORD, primary_def):
+        _librelane_antenna_router(project, top, pdk, _ll_m26, written)
+        if _ll_m26 == "librelane":
+            written.append(str(antenna_rpt))
+    _ll_ship_gds = _pl.pnr_dir(project) / f"{top}.gds"
+    _ll_final = not prestream and not prepv
+    if (_ll_final and _ll_m26 != "direct" and _ll_ship_gds.is_file()
+            and _librelane_antenna_gds_due(project, _ll_ship_gds)):
+        _librelane_antenna_gds(project, top, pdk, _ll_m26, written)
+    for _ll_refusal in _librelane_step_refusals(project, top, final=_ll_final):
+        signoff_failures.append(_ll_refusal)
+        notes.append(_ll_refusal)
 
     # --- ORGANIC-20260531: Step 27 SI / crosstalk (real SPEF coupling caps) --
     si_rpt = rpt_phase3 / "si_crosstalk.rpt"
@@ -59157,7 +59217,10 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     #     missing-inputs (never a fabricated number). The per-instance VECTORED
     #     DVD (SAIF/VCD + package L·di/dt) is the accuracy tier tracked separately.
     dyn_ir_json = rpt_phase3 / "dynamic_ir.json"
-    if primary_def.is_file() and _signoff_regen(dyn_ir_json, primary_def):
+    # Step 24 on LibreLane publishes this file from Vibeic.TransientIR
+    # (the same fork solve, on the tool's SDC+SPEF basis); never both.
+    if (primary_def.is_file() and _ll_selected_mode(project, "24") != "librelane"
+            and _signoff_regen(dyn_ir_json, primary_def)):
         try:
             # Pass the design's ACTUAL tech/cell LEF + LIBERTY (the runner knows
             # them from the resolved PDK context) so the emitter never SKIPs on a
@@ -63017,6 +63080,349 @@ def _librelane_signoff_record(project: Path, top: str, pdk: PdkConfig,
             written.append(str(rpt / "rc_extraction_arms.json"))
     except Exception as exc:  # a refusal names itself; nothing falls back
         signoff_failures.append(f"steps 22/23 LibreLane: {exc}")
+
+
+# --- Steps 24, 26, 26.5ic on LibreLane (librelane_ir_antenna) ---------------
+#: Each step's LibreLane record, beside the direct report it corroborates or
+#: (mode `librelane`) replaces.
+_LL_IR_RECORD = "ir_drop_librelane.json"
+_LL_ANTENNA_RECORD = "antenna_librelane.json"
+_LL_SEAL_RECORD = "die_finishing_librelane.json"
+
+
+def _librelane_step_ctx(project: Path, steps: str) -> Tuple[str, Path]:
+    """(image, host PDK root) for a LibreLane step; the root is never guessed."""
+    import librelane_contract as _ll
+    root = _ll.resolve_pdk_root(project)
+    if not root:
+        raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
+                          f"step(s) {steps} on LibreLane need pdk_root_host in "
+                          "the switch or VIBEIC_LIBRELANE_PDK_ROOT")
+    return _ll.resolve_image(project), Path(root)
+
+
+def _librelane_step24_record(project: Path, top: str, pdk: PdkConfig, mode: str,
+                         spef: Path, written: List[str]) -> None:
+    """Step 24 on `OpenROAD.IRDropReport` + `Vibeic.IRDropChecker`, with the
+    same-basis cross-check; records `reports/phase3/ir_drop_librelane.json`.
+    The SPEF is the canonical one step 22 left (its producer's, never a
+    re-extraction)."""
+    import librelane_ir_antenna as _la
+    import ir_drop_budget_check as _ibc
+    rpt = _pl.reports_phase3_dir(project)
+    pnr = _pl.pnr_dir(project)
+    routed = pnr / f"{top}.def"
+    doc: Dict[str, Any] = {"step": "24", "mode": mode,
+                           "producer": "librelane:OpenROAD.IRDropReport",
+                           "def_sha256": _sha256_file(routed)}
+    try:
+        image, root = _librelane_step_ctx(project, "24")
+        declared = getattr(pdk, "ir_budget_pct", None)
+        budget = float(declared if declared is not None else _ibc._DEFAULT_BUDGET_PCT)
+        source = ("pdk.ir_budget_pct" if declared is not None else
+                  "ir_drop_budget_check._DEFAULT_BUDGET_PCT (the direct verdict's budget)")
+        record = _la.run_ir(project, image, root, pdk.name, routed_def=routed,
+                            netlist=pnr / f"{top}_pnr.v", sdc=pnr / "constraint.sdc",
+                            spef=spef, budget_pct=budget, budget_source=source)
+        doc["record"] = record
+        doc["judgment"] = _la.judge_ir(record)
+    except Exception as exc:  # a refusal names itself; nothing falls back
+        doc["judgment"] = {"verdict": "NOT_MEASURED", "reasons": [f"refused: {exc}"]}
+    _aa.write_json(rpt / _LL_IR_RECORD, doc)
+    written.append(str(rpt / _LL_IR_RECORD))
+
+
+def _librelane_step24_publish(project: Path, doc: Dict[str, Any]) -> None:
+    """Mode `librelane`: `ir_drop.{json,rpt}` from the tool's measurement, in
+    the direct producer's schema so the step-24 gates read it unchanged."""
+    rpt = _pl.reports_phase3_dir(project)
+    record, judged = doc["record"], doc["judgment"]
+    rule = judged["rule"]
+    tool = Path(record["tool_state"]).parent
+    supply = rule.get("supply_v")
+    worst_v = rule.get("worst_drop_v")
+    per_net = rule.get("per_net_worst_drop_v") or {}
+    body = ("# OpenROAD PSM IR-drop report — LibreLane OpenROAD.IRDropReport\n"
+            "# (step 24 on the tool; phase3_one_shot_runner librelane mode).\n"
+            f"# Supply nets analysed: {', '.join(rule.get('analysed_nets') or [])}\n"
+            f"# Resistance: {record.get('rc_source')}\n"
+            f"# Sources: {record.get('source_model')}\n"
+            "openroad / PSM: analyze_power_grid invoked\n"
+            "IR drop analysis (static): worst voltage drop\n")
+    for net, drop in sorted(per_net.items()):
+        body += f"IR drop on {net}: {drop:.6g} V  -> {drop * 1000.0:.6g} mV\n"
+    tool_rpt = tool / "irdrop.rpt"
+    tool_log = next(iter(sorted(tool.glob("openroad-*.log"))), None)
+    body += ("\n# === LibreLane irdrop.rpt (provenance) ===\n"
+             + (tool_rpt.read_text(errors="replace") if tool_rpt.is_file() else "(absent)\n")
+             + "\n# === OpenROAD log tail (provenance) ===\n"
+             + (tool_log.read_text(errors="replace")[-3000:] if tool_log else "(absent)") + "\n"
+             + "# end of ir_drop.rpt\n")
+    _aa.write_text(rpt / "ir_drop.rpt", body)
+    verdict = {"PASS": "PASS", "FAIL": "FAIL"}.get(judged["verdict"], "UNMEASURED")
+    _aa.write_json(rpt / "ir_drop.json", {
+        "tool": "openroad-psm", "producer": doc["producer"], "mode": "static_ir_drop",
+        "power_nets": record.get("vdd_nets"), "ground_nets": record.get("gnd_nets"),
+        "source": "reports/phase3/ir_drop.rpt",
+        "worst_ir_uv": worst_v * 1e6 if worst_v is not None else None,
+        "per_net_worst_drop_v": per_net,
+        "supply_voltage_v": supply, "supply_measured": bool(supply),
+        "worst_ir_pct_vdd": (round(rule["worst_drop_pct"], 3)
+                             if rule.get("worst_drop_pct") is not None else None),
+        "budget_uv": rule["budget_v"] * 1e6 if rule.get("budget_v") is not None else None,
+        "budget_pct_vdd": rule.get("budget_pct"), "budget_basis": record.get("budget_source"),
+        "supply_model": record.get("source_model"),
+        "nets_analysed": rule.get("analysed_nets"),
+        "nets_analysis_failed": judged["psm_coverage"]["analysis_failed"],
+        "unconnected_supply_pins": judged["psm_coverage"]["unconnected_instances"][:20],
+        "verdict_basis": "; ".join(judged["reasons"]) or (
+            "worst static IR drop over every declared VDD/GND net against the budget; "
+            "arms agree on the same basis; PSM resistance equals the tech LEF"),
+        "verdict": verdict, "def_sha256": doc.get("def_sha256"),
+        "tool_state": record["tool_state"], "tool_state_sha256": record["tool_state_sha256"],
+        "evidence": "LibreLane OpenROAD.IRDropReport state metrics + irdrop.rpt",
+    })
+    # The dynamic tier, from Vibeic.TransientIR, in the direct
+    # emitter's payload (its own `build_result`), or its error by name.
+    import dynamic_ir_vectored_emit as _dyn
+    transient = record.get("transient") or {}
+    if transient.get("verdict") == "MEASURED":
+        payload = {k: v for k, v in transient.items() if k not in ("verdict",)}
+        payload["producer"] = "librelane:Vibeic.TransientIR"
+        payload["static_ir_mv"] = (round(worst_v * 1000.0, 4) if worst_v is not None
+                                   else payload.get("static_ir_mv"))
+        payload["budget_pct"] = _dyn._DEFAULT_DYN_BUDGET_PCT
+        if supply:
+            payload["budget_mv"] = round(_dyn._DEFAULT_DYN_BUDGET_PCT / 100.0 * supply * 1000.0, 4)
+            payload["verdict"] = ("PASS" if payload["max_dynamic_drop_mv"] < payload["budget_mv"]
+                                  else "FAIL")
+    else:
+        payload = {"status": "ERROR_NO_PSM_IR", "dynamic_ir_report_emitted": False,
+                   "producer": "librelane:Vibeic.TransientIR",
+                   "reason": transient.get("reason") or "no transient record"}
+    _aa.write_json(rpt / "dynamic_ir.json", payload)
+
+
+def _librelane_antenna_router(project: Path, top: str, pdk: PdkConfig, mode: str,
+                              written: List[str]) -> None:
+    """Step 26's router model on `OpenROAD.CheckAntennas` (the shipped route's
+    ODB).  Mode `librelane` publishes `antenna.{json,rpt}` from it; `dual`
+    keeps the direct report and records both."""
+    import librelane_ir_antenna as _la
+    rpt = _pl.reports_phase3_dir(project)
+    pnr = _pl.pnr_dir(project)
+    routed = pnr / f"{top}.def"
+    doc: Dict[str, Any] = {"step": "26", "mode": mode, "def_sha256": _sha256_file(routed)}
+    try:
+        image, root = _librelane_step_ctx(project, "26")
+        router = _la.run_antenna_router(project, image, root, pdk.name, routed_def=routed,
+                                        netlist=pnr / f"{top}_pnr.v",
+                                        sdc=pnr / "constraint.sdc")
+        doc["router"] = router
+    except Exception as exc:  # a refusal names itself; nothing falls back
+        doc["refusal"] = f"router model: {exc}"
+        router = None
+    # A clean count on a route that never finished is vacuous (R-0915-69):
+    # the same two calibrated readers the direct report uses, over the log of
+    # the session whose route ships (the promotion's, when one happened).
+    _logs = [pnr / "openroad.log"]
+    if (pnr / "routed_base_prerepair.def").is_file():
+        _logs.append(pnr / "signoff_spef_repair.log")
+    _text = "\n".join(p.read_text(errors="ignore") for p in _logs if p.is_file())
+    doc["routing_incomplete"] = antenna_routing_incomplete(_text) if _text else None
+    doc["route_modified_after_last_verification"] = (
+        antenna_reroute_refusal_after_last_verification(_text) if _text else None)
+    if mode == "dual" and router is not None:
+        try:
+            direct = json.loads((rpt / "antenna.json").read_text())
+            total = (direct.get("net_violations") or 0) + (direct.get("pin_violations") or 0)
+            tool_total = _la._total(router["counts"])
+            doc["direct_router"] = {"net_violations": direct.get("net_violations"),
+                                    "pin_violations": direct.get("pin_violations"),
+                                    "mode": direct.get("mode")}
+            if tool_total is not None and (total == 0) != (tool_total == 0):
+                doc["router_arms"] = f"DISAGREE: direct {total} vs tool {tool_total}"
+            else:
+                doc["router_arms"] = "AGREE" if tool_total is not None else "NOT_COMPARABLE"
+        except (OSError, ValueError) as exc:
+            doc["router_arms"] = f"NOT_COMPARABLE: {exc}"
+    if mode == "librelane" and router is not None:
+        counts = router["counts"]
+        nets = counts.get("antenna__violating__nets")
+        pins = counts.get("antenna__violating__pins")
+        log = next(iter(sorted(Path(router["state"]).parent.glob("openroad-*.log"))), None)
+        lines = [ln for ln in (log.read_text(errors="replace").splitlines() if log else [])
+                 if "ANT-" in ln]
+        subject = _measured_subject(project, top, [routed], tool_log=log)
+        clean = nets == 0 and pins == 0
+        _aa.write_text(rpt / "antenna.rpt", _measured_subject_lines(subject) + (
+            "# OpenROAD antenna check (gate-oxide protection) — LibreLane\n"
+            "# OpenROAD.CheckAntennas on the ODB of the shipped route (step 26\n"
+            "# on the tool; phase3_one_shot_runner librelane mode).\n#\n"
+            f"antenna check: {nets} net violations, {pins} pin violations\n"
+            f"antenna clean: {'YES' if clean else 'NO'}\n"
+            "\n# === check_antennas output (provenance) ===\n"
+            + ("\n".join(lines) or "(no ANT lines captured)") + "\n# end of antenna.rpt\n"))
+        _aa.write_json(rpt / "antenna.json", {
+            "tool": "openroad", "producer": "librelane:OpenROAD.CheckAntennas",
+            "mode": "antenna_check_shipped_odb", "net_violations": nets,
+            "pin_violations": pins, "clean": clean,
+            "source": "reports/phase3/antenna.rpt", "measured_subject": subject,
+            "tool_state": router["state"], "tool_state_sha256": router["state_sha256"],
+            "routing_incomplete": doc["routing_incomplete"],
+            "route_modified_after_last_verification":
+                doc["route_modified_after_last_verification"],
+            "verdict": ("FAIL" if doc["routing_incomplete"]
+                        or doc["route_modified_after_last_verification"] else
+                        "PASS" if clean else "FAIL" if isinstance(nets, int) else "NOT_MEASURED"),
+        })
+    _aa.write_json(rpt / _LL_ANTENNA_RECORD, doc)
+    written.append(str(rpt / _LL_ANTENNA_RECORD))
+
+
+def _librelane_antenna_gds(project: Path, top: str, pdk: PdkConfig, mode: str,
+                           written: List[str]) -> None:
+    """Step 26's GDS model on the SHIPPED stream (`KLayout.Antenna` with the
+    PDK deck), then the two rules over both models."""
+    import librelane_ir_antenna as _la
+    rpt = _pl.reports_phase3_dir(project)
+    path = rpt / _LL_ANTENNA_RECORD
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, ValueError):
+        doc = {"step": "26", "mode": mode}
+    gds = _pl.pnr_dir(project) / f"{top}.gds"
+    routed = _pl.pnr_dir(project) / f"{top}.def"
+    try:
+        image, root = _librelane_step_ctx(project, "26")
+        doc["gds"] = _la.run_antenna_gds(project, image, root, pdk.name, gds=gds)
+    except Exception as exc:  # a refusal names itself; nothing falls back
+        doc["gds"] = None
+        doc["gds_refusal"] = str(exc)
+    doc["judgment"] = _la.judge_antenna(
+        doc.get("router"), doc.get("gds"),
+        {"def": _sha256_file(routed) if routed.is_file() else None,
+         "gds": _sha256_file(gds) if gds.is_file() else None})
+    _aa.write_json(path, doc)
+    written.append(str(path))
+
+
+def _librelane_antenna_gds_due(project: Path, gds: Path) -> bool:
+    """The GDS model is due when the record has none, or it measured a
+    different stream than the one that ships now (content, not dates)."""
+    try:
+        doc = json.loads((_pl.reports_phase3_dir(project) / _LL_ANTENNA_RECORD).read_text())
+    except (OSError, ValueError):
+        return True
+    model = doc.get("gds") or {}
+    return model.get("subject_sha256") != _sha256_file(gds) or "judgment" not in doc
+
+
+def _librelane_sealring(project: Path, pdk: PdkConfig, gds_path: Path,
+                        mode: str) -> Dict[str, Any]:
+    """Step 26.5ic on `KLayout.SealRing`, from a snapshot of the unsealed
+    stream (the direct arm, in dual, seals the original in place after)."""
+    import librelane_ir_antenna as _la
+    arm = project / "phase3/tool_arms/26.5ic"
+    arm.mkdir(parents=True, exist_ok=True)
+    doc: Dict[str, Any] = {"step": "26.5ic", "mode": mode}
+    try:
+        image, root = _librelane_step_ctx(project, "26.5ic")
+        rect, basis = declared_die_rect(project)
+        if not rect:
+            raise RuntimeError(f"LL_SEALRING_DIE_UNDECLARED: {basis}")
+        unsealed = arm / "unsealed.gds"
+        shutil.copyfile(gds_path, unsealed)
+        doc["tool"] = _la.run_sealring(project, image, root, pdk.name, gds_in=unsealed,
+                                       die_rect=list(rect), die_source=basis)
+        doc["image"] = image
+    except Exception as exc:  # a refusal names itself; nothing falls back
+        doc["refusal"] = str(exc)
+    _aa.write_json(_pl.reports_phase3_dir(project) / _LL_SEAL_RECORD, doc)
+    return doc
+
+
+def _librelane_sealring_xor(project: Path, pdk: PdkConfig, gds_path: Path) -> None:
+    """Dual 26.5ic: the direct arm's sealed stream XOR the tool's must be 0."""
+    import librelane_ir_antenna as _la
+    path = _pl.reports_phase3_dir(project) / _LL_SEAL_RECORD
+    doc: Dict[str, Any] = {"step": "26.5ic", "mode": "dual"}
+    try:
+        doc = json.loads(path.read_text())
+        image, root = _librelane_step_ctx(project, "26.5ic")
+        doc["xor"] = _la.xor_sealed(project, image, root, pdk.name, direct_gds=gds_path,
+                                    tool_gds=Path(doc["tool"]["sealed_gds"]))
+    except Exception as exc:  # recorded; the refusal below reads it
+        doc["xor"] = {"verdict": "NOT_MEASURED", "reason": str(exc)}
+    _aa.write_json(path, doc)
+
+
+def _librelane_step_refusals(project: Path, top: str, *, final: bool) -> List[str]:
+    """What steps 24/26/26.5ic on LibreLane forbid, re-read on EVERY call from
+    their records (a prestream return drops `signoff_failures`; the final
+    canonicalisation must still see them).  `librelane`: the tool's verdict is
+    the step's.  `dual`: the direct report stays canonical and a tool FAIL is
+    a note, but arms that disagree, or evidence about a layout that does not
+    ship, fail the step.  ``final``: the shipped stream exists, so step 26's
+    GDS model must have judged it."""
+    from librelane_contract import selected_mode
+    rpt = _pl.reports_phase3_dir(project)
+    routed = _pl.pnr_dir(project) / f"{top}.def"
+    now = _sha256_file(routed) if routed.is_file() else None
+    out: List[str] = []
+
+    def _doc(name: str) -> Optional[Dict[str, Any]]:
+        try:
+            return json.loads((rpt / name).read_text())
+        except (OSError, ValueError):
+            return None
+
+    m24 = selected_mode(project, "24")
+    if m24 != "direct" and now:
+        doc = _doc(_LL_IR_RECORD)
+        judged = (doc or {}).get("judgment") or {}
+        if doc is None:
+            out.append("step 24 LibreLane: no record")
+        elif doc.get("def_sha256") != now:
+            out.append("step 24 LibreLane: record is about another routed DEF")
+        elif m24 == "librelane" and judged.get("verdict") != "PASS":
+            out.append(f"step 24 LibreLane IR {judged.get('verdict')}: {judged.get('reasons')}")
+        elif m24 == "dual" and any(r.startswith(("LL_IR_ARMS_DISAGREE", "LL_IR_RC_MODEL"))
+                                   for r in judged.get("reasons") or []):
+            out.append(f"step 24 dual: {judged.get('reasons')}")
+    m26 = selected_mode(project, "26")
+    if m26 != "direct" and now:
+        doc = _doc(_LL_ANTENNA_RECORD)
+        if doc is None:
+            out.append("step 26 LibreLane: no record")
+        elif doc.get("def_sha256") != now:
+            out.append("step 26 LibreLane: router record is about another routed DEF")
+        else:
+            if doc.get("routing_incomplete") or doc.get("route_modified_after_last_verification"):
+                out.append("step 26 LibreLane: the antenna count is about a route that did "
+                           "not finish, or was edited after its last verification")
+            if str(doc.get("router_arms", "")).startswith("DISAGREE"):
+                out.append(f"step 26 dual router arms {doc['router_arms']}")
+            if m26 == "librelane" and doc.get("refusal"):
+                out.append(f"step 26 LibreLane: {doc['refusal']}")
+            judged = doc.get("judgment")
+            if final and not judged:
+                out.append("step 26 LibreLane: the GDS model never judged the shipped stream")
+            if judged:
+                reasons = judged.get("reasons") or []
+                if m26 == "librelane" and judged.get("verdict") != "PASS":
+                    out.append(f"step 26 LibreLane antenna {judged.get('verdict')}: {reasons}")
+                elif m26 == "dual" and any(r.startswith(("LL_ANTENNA_MODELS_DISAGREE",
+                                                         "LL_ANTENNA_EVIDENCE_STALE"))
+                                           for r in reasons):
+                    out.append(f"step 26 dual: {reasons}")
+    m265 = selected_mode(project, "26.5ic")
+    if m265 == "dual":
+        doc = _doc(_LL_SEAL_RECORD) or {}
+        verdict = (doc.get("xor") or {}).get("verdict")
+        if verdict == "DISAGREE":
+            out.append(f"step 26.5ic dual: sealed streams differ ({doc['xor']})")
+    return out
 
 
 def _emit_corner_spef_sta(project: Path, top: str, pdk: PdkConfig,

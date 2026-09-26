@@ -113,3 +113,9 @@ class InsertSpareCells(OdbpyStep):
                 f"{self.id}: check_placement reported {violations!r} "
                 f"violation(s) after spare insertion; see {self._report_path()}")
         return views, metrics
+
+
+# Step 24 (lane mig101): the IR gate and the fork's transient solve.
+from .ir_drop import IRDropChecker, TransientIR  # noqa: E402,F401
+
+__all__ += ["IRDropChecker", "TransientIR"]
