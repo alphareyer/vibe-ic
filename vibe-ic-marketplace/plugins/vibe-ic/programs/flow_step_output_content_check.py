@@ -30,8 +30,7 @@ def _rtl_errors(project: Path) -> tuple[list[str], dict | None]:
               if not path.read_text(errors="replace").strip()]
     if errors:
         return errors, None
-    verdict = _rtl_frontend.check(project, _rtl_frontend.os.environ.get(
-        "VIBEIC_EDA_IMAGE", _rtl_frontend.DEFAULT_IMAGE))
+    verdict = _rtl_frontend.check(project, _rtl_frontend.default_image())
     return list(verdict["findings"]), verdict
 
 

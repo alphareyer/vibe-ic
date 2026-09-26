@@ -25,7 +25,23 @@ import instrument_calibration as _calibration  # noqa: E402
 # unknown port names. Their warning-only width/unconnected reports remain
 # visible in diagnostics without becoming a stricter new P0 policy.
 BLOCKING_CODES = frozenset({"SELRANGE", "PINNOTFOUND", "MULTIDRIVEN"})
-DEFAULT_IMAGE = "ghcr.io/vibeic/vibeic-eda:0.3.76"
+
+
+def default_image() -> str:
+    """The image this check runs, resolved and never remembered.
+
+    `_eda_image.local_image()` — the `VIBEIC_EDA_IMAGE` override when set,
+    otherwise the PINNED bytes under whatever local reference names them,
+    without touching the network — and the composed pinned reference
+    (`_eda_pin.image_reference`) only when nothing is local. It used to be a
+    module constant pinned to a tag (0.3.76), which went stale the moment the
+    image moved; `test_the_eda_image_is_resolved_not_remembered` refuses that
+    shape."""
+    import _eda_image
+    import _eda_pin
+    return _eda_image.local_image() or _eda_pin.image_reference()
+
+
 _DIAGNOSTIC = re.compile(r"^%(Warning|Error)-([A-Z][A-Z0-9_]*):", re.M)
 
 
@@ -127,9 +143,10 @@ def check(project: Path, image: str) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("project", type=Path)
-    parser.add_argument("--image", default=os.environ.get(
-        "VIBEIC_EDA_IMAGE", DEFAULT_IMAGE))
+    parser.add_argument("--image", default=None)
     args = parser.parse_args()
+    if args.image is None:
+        args.image = default_image()
     if not args.project.is_dir():
         print("FAIL: project directory absent")
         return 2
