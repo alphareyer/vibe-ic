@@ -185,3 +185,19 @@ def test_scan_chain_reports_the_image_the_atpg_module_resolved():
     cost no live coverage."""
     assert fsci._fatpg is far
     assert fsci._fatpg.DOCKER_IMAGE == far.DOCKER_IMAGE
+
+
+# ── the EDA image identity is STATED for this module ─────────────────────────
+# These tests drive the ATPG container route with a docker client STUBBED
+# present, and read the image the route starts. That image is resolved at call
+# time now (never at import), so unstated it would be asked of THIS host's real
+# docker: a host fact, and inside the image (no docker) an ImageNotResolvable
+# before any assertion. Stated at `_eda_pin` (the `_stated_eda_image` pattern),
+# every read still goes through the real resolver path.
+import pytest  # noqa: E402
+from _stated_eda_image import state_the_image as _state_the_image  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _stated_eda_identity(monkeypatch):
+    _state_the_image(monkeypatch)

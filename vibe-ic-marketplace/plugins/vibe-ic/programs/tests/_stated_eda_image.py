@@ -41,4 +41,11 @@ def state_the_image(monkeypatch, digest: str = STATED_DIGEST) -> str:
     monkeypatch.delenv(_pin.IMAGE_REPO_ENV, raising=False)
     monkeypatch.setattr(_pin, "resolved_image_digest",
                         lambda env=None, *, allow_pull=False: digest)
+    # `image_reference` names only a reference this host HOLDS for the digest,
+    # so the stated identity is stated as held under the published repository.
+    # Any other digest is still asked of the real host.
+    real_held = _pin.local_references_for_digest
+    monkeypatch.setattr(
+        _pin, "local_references_for_digest",
+        lambda d: ((stated_image(digest),), "") if d == digest else real_held(d))
     return stated_image(digest)

@@ -801,6 +801,7 @@ def build_ecc_injection_tb(spec: MechanismSpec,
 #: the plugin was verified against", and nothing ever verified that.
 #: vibeic-eda's own release gate does — see `_eda_image`.
 import _eda_image as _img
+import _eda_pin as _pin
 
 
 def _resolve_docker_image() -> str:
@@ -858,7 +859,15 @@ def resolve_injection_backend(image: Optional[str] = None
     measurement requirement: the rendered TB is plain Verilog-2012 and the DC it
     prints does not depend on which of the two compiled it.
     """
-    img = image or _local_docker_image()
+    # AN UNRESOLVABLE IMAGE IS AN ABSENT CONTAINER, not a crash. With no
+    # docker (e.g. inside the image) the identity cannot be resolved at all;
+    # the host leg needs none, and when there is no host leg either the NONE
+    # reason carries the named refusal instead of a guessed reference.
+    unresolved = ""
+    try:
+        img = image or _local_docker_image()
+    except _pin.ImageNotResolvable as exc:
+        img, unresolved = None, f" ({exc})"
     if img:
         return BACKEND_DOCKER, img, f"container {img} usable without a pull"
     if _host_iverilog():
@@ -866,7 +875,7 @@ def resolve_injection_backend(image: Optional[str] = None
     return (BACKEND_NONE, None,
             "no injection backend: no vibeic-eda image is present locally "
             "(set VIBEIC_EDA_IMAGE, or `docker pull`, to use a container) and "
-            "the host has no iverilog/vvp on PATH")
+            "the host has no iverilog/vvp on PATH" + unresolved)
 
 
 def _run_injection_host(project: Path,

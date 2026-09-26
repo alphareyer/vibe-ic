@@ -436,6 +436,8 @@ def test_the_runner_image_is_resolved_when_read(monkeypatch):
     monkeypatch.delenv(_eda_pin.IMAGE_REPO_ENV, raising=False)
     monkeypatch.setattr(_eda_pin, "resolved_image_digest",
                         lambda env=None, *, allow_pull=False: next(answers))
+    monkeypatch.setattr(_eda_pin, "local_references_for_digest",
+                        lambda d: ((f"{_eda_pin.IMAGE_REPO_DEFAULT}@{d}",), ""))
     assert L.RUNNER_IMAGE.endswith("4" * 64)
     assert L.RUNNER_IMAGE.endswith("5" * 64), "the runner image was remembered"
     assert "RUNNER_IMAGE" not in vars(L)
@@ -449,3 +451,87 @@ def test_the_remedy_names_an_unresolvable_runner_image_instead_of_crashing(monke
     monkeypatch.setattr(_eda_pin, "resolved_image_digest", _none)
     text = L._runner_image_or_refusal()
     assert "not resolvable" in text and "IMAGE_NOT_RESOLVABLE" in text
+
+
+# ── fmeda: the injection backend asks for an image only as its first choice ──
+
+def test_an_unresolvable_image_leaves_the_host_injection_leg_open(monkeypatch):
+    """`resolve_injection_backend` is container-first. With no docker (inside
+    the image) the image cannot even be resolved; that used to escape as
+    ImageNotResolvable and crash the program although host iverilog/vvp was
+    there to run the injection."""
+    import fmeda_fault_injection_coverage as fi
+
+    def _none():
+        raise _eda_pin.ImageNotResolvable(["this host: docker unusable"])
+    monkeypatch.setattr(fi, "_local_docker_image", _none)
+    monkeypatch.setattr(fi, "_host_iverilog", lambda: True)
+    assert fi.resolve_injection_backend()[:2] == (fi.BACKEND_HOST, None)
+    monkeypatch.setattr(fi, "_host_iverilog", lambda: False)
+    backend, img, reason = fi.resolve_injection_backend()
+    assert (backend, img) == (fi.BACKEND_NONE, None)
+    assert "IMAGE_NOT_RESOLVABLE" in reason, reason
+    # a declared image is used as is, and nothing is resolved for it
+    assert fi.resolve_injection_backend("declared/image:1")[:2] == (
+        fi.BACKEND_DOCKER, "declared/image:1")
+
+
+# ── image_reference names a reference THIS HOST HOLDS (lane migf14) ──────────
+# Every fleet host configures VIBEIC_EDA_IMAGE_REPO as the fleet mirror while
+# holding the bytes under another name; composing `<configured repo>@<digest>`
+# named an image no host holds, and `docker run` of it would pull from the
+# mirror. The model below is the daemon; it refuses any pull or registry ask.
+
+_D = "sha256:" + "6d" * 32
+_MIRROR = "mirror.invalid:5000/vibeic-eda"
+
+
+def _host_holding(monkeypatch, *names):
+    asked = []
+
+    def _docker(*argv, timeout=None):
+        asked.append(argv)
+        if argv[:1] in (("pull",), ("manifest",)) or "pull" in argv:
+            pytest.fail(f"image_reference reached the registry: {argv}")
+        if argv[:2] == ("image", "ls"):
+            return 0, "".join(f"{n}@{_D}\n" for n in names), ""
+        pytest.fail(f"a daemon question this model does not describe: {argv}")
+    monkeypatch.delenv("VIBEIC_EDA_IMAGE", raising=False)
+    monkeypatch.delenv("IIC_EDA_IMAGE", raising=False)
+    monkeypatch.setenv(_eda_pin.IMAGE_REPO_ENV, _MIRROR)
+    monkeypatch.setattr(_eda_pin, "_docker", _docker)
+    monkeypatch.setattr(_eda_pin, "resolved_image_digest",
+                        lambda env=None, *, allow_pull=False: _D)
+    return asked
+
+
+def test_a_configured_mirror_the_host_does_not_hold_is_never_named(monkeypatch):
+    asked = _host_holding(monkeypatch, _eda_pin.IMAGE_REPO_DEFAULT)
+    got = _eda_pin.image_reference()
+    assert got == f"{_eda_pin.IMAGE_REPO_DEFAULT}@{_D}", got
+    assert not got.startswith(_MIRROR), "the configured repo was composed, not held"
+    assert asked and all(a[:2] == ("image", "ls") for a in asked)
+
+
+def test_the_configured_name_is_preferred_when_it_is_held(monkeypatch):
+    _host_holding(monkeypatch, _eda_pin.IMAGE_REPO_DEFAULT, _MIRROR)
+    assert _eda_pin.image_reference() == f"{_MIRROR}@{_D}"
+
+
+def test_a_digest_no_local_name_carries_is_refused_by_name(monkeypatch):
+    _host_holding(monkeypatch)                     # holds nothing
+    with pytest.raises(_eda_pin.ImageNotHeld) as exc:
+        _eda_pin.image_reference()
+    assert isinstance(exc.value, _eda_pin.ImageNotResolvable)
+    assert _eda_pin.IMAGE_NOT_PRESENT in str(exc.value)
+
+
+def test_librelane_runs_the_held_reference_or_refuses(monkeypatch):
+    import librelane_contract as LL
+    monkeypatch.delenv("VIBEIC_LIBRELANE_IMAGE", raising=False)
+    _host_holding(monkeypatch, _eda_pin.IMAGE_REPO_DEFAULT)
+    assert LL.resolve_image(None) == f"{_eda_pin.IMAGE_REPO_DEFAULT}@{_D}"
+    _host_holding(monkeypatch)
+    with pytest.raises(LL.Refusal) as exc:
+        LL.resolve_image(None)
+    assert _eda_pin.IMAGE_NOT_PRESENT in str(exc.value)

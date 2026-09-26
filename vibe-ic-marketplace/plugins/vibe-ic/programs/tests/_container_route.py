@@ -61,8 +61,16 @@ def _pin(monkeypatch, *, has_docker: bool) -> None:
 
 
 def pin_container_route(monkeypatch) -> None:
-    """Declare: this test measures the CONTAINER route. There is a client."""
+    """Declare: this test measures the CONTAINER route. There is a client.
+
+    The client is a stand-in, so it cannot answer which image the route would
+    start; that image is resolved at call time, on this route only. It is
+    therefore STATED too (`_stated_eda_image`), or the test would ask THIS
+    host's real docker -- the same host-dependence this module removes, and an
+    ImageNotResolvable inside the image. A declared image still wins."""
     _pin(monkeypatch, has_docker=True)
+    from _stated_eda_image import state_the_image
+    state_the_image(monkeypatch)
 
 
 def pin_local_route(monkeypatch) -> None:

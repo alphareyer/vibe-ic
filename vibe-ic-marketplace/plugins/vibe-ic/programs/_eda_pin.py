@@ -455,14 +455,54 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def image_reference(env=None) -> str:
-    """`<configured repo>@<pinned digest>` — the only reference this plugin runs.
+class ImageNotHeld(ImageNotResolvable):
+    """The identity resolved, but no reference ON THIS HOST carries it.
 
-    Composed, never stored: a second composed constant would be a second
-    definition of the runtime, which is precisely how the harness and the
-    landing preflight came to name images forty patch releases apart.
-    """
+    A subclass so every caller that already refuses on `ImageNotResolvable`
+    refuses on this too; its own code is `IMAGE_NOT_PRESENT`."""
+
+    def __init__(self, digest: str, why: str):
+        self.digest = digest
+        RuntimeError.__init__(
+            self, f"{IMAGE_NOT_PRESENT}: {digest} is not held on this host "
+                  f"under any repository name ({why}); refusing rather than "
+                  f"naming a reference `docker run` would have to pull")
+        self.tried = (str(self),)
+
+
+def configured_reference(env=None) -> str:
+    """`<configured repo>@<pinned digest>` -- WHERE the pinned bytes would be
+    fetched from. Not a reference to run: the configured repository is
+    deployment configuration, and on a fleet whose `VIBEIC_EDA_IMAGE_REPO`
+    names a mirror, no host holds the bytes under that name. For messages and
+    for an explicit, opt-in pull only."""
     return f"{image_repo(env)}@{resolved_image_digest(env)}"
+
+
+def image_reference(env=None) -> str:
+    """The reference this plugin RUNS: one THIS HOST HOLDS for the pinned digest.
+
+    THE DIGEST IS THE IDENTITY; THE REPOSITORY IS CONFIGURATION (#2170). This
+    used to compose `<configured repo>@<digest>`. MEASURED by lane migf14: every
+    fleet host sets `VIBEIC_EDA_IMAGE_REPO` to the fleet mirror, and the bytes
+    are held under another name, so the composed reference named an image no
+    host holds and a `docker run` of it (LibreLane's `resolve_image`) would
+    PULL from the mirror. `_hold`'s export already names the held reference;
+    this applies the same rule here.
+
+    Order: the configured name if this host holds the digest under it, else
+    any local name carrying that RepoDigest. None -> `ImageNotHeld`
+    (`IMAGE_NOT_PRESENT`), never a composed guess and never a pull. Local
+    metadata only. Resolved on each call, never stored.
+    """
+    digest = resolved_image_digest(env)
+    held, why = local_references_for_digest(digest)
+    configured = f"{image_repo(env)}@{digest}"
+    if configured in held:
+        return configured
+    if held:
+        return held[0]
+    raise ImageNotHeld(digest, why or "no local repository name carries it")
 
 
 def is_bare_image_id(value) -> bool:
@@ -609,7 +649,7 @@ def pinned_image_present(env=None) -> Tuple[Optional[str], str]:
     question ("what does this machine happen to have?") and returning it would
     reproduce the defect this module was written for.
     """
-    ref = image_reference(env)
+    ref = configured_reference(env)
     digests, why = local_repo_digests(ref)
     pinned = resolved_image_digest(env)
     if not why and any(reference_digest(d) == pinned for d in digests):
