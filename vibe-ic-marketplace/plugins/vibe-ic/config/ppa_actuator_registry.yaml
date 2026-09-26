@@ -109,23 +109,61 @@ domains:
   # Each names no program, because a DECLARED_ONLY entry that named one would
   # let the label and the tree disagree. `_ppa/closure.py` refuses that at load.
 
+  # ---- Step 32 (T102): the post-route repair's measurements. -------------
+  # Each is `librelane_postroute_repair measure` over the ADOPTED candidate:
+  # the number OpenROAD.STAPostPNR wrote for it, at EVERY declared STA corner
+  # (the worst of them), in the sign-off scene. rc 3 = the adopted State
+  # cannot answer (a corner unreported, a State that is not the one adopted),
+  # which is NOT_MEASURED, never a number.
+
   timing.setup:
-    summary: Worst negative setup slack at the signed-off corner.
+    summary: >-
+      Worst setup slack over every declared STA corner (OpenROAD.STAPostPNR,
+      after OpenROAD.RCX) of the post-route candidate step 32 adopted.
     metric: timing.setup.wns_ns
     unit: ns
     direction: maximize
-    binding: DECLARED_ONLY
-    flow_steps: ["19", "20", "21", "23"]
+    binding: EXECUTABLE
+    flow_steps: ["19", "20", "21", "23", "32"]
+    measure:
+      program: librelane_postroute_repair
+      argv_template: ["measure", "--domain", "setup", "--json", "{json_out}"]
+      extract: {kind: json_pointer, pointer: "/value"}
+      undetermined_rcs: [2, 3]
     satisfied_when: {op: ">=", value: 0.0}
 
   timing.hold:
-    summary: Worst negative hold slack at the signed-off corner.
+    summary: >-
+      Worst hold slack over every declared STA corner of the post-route
+      candidate step 32 adopted.
     metric: timing.hold.wns_ns
     unit: ns
     direction: maximize
-    binding: DECLARED_ONLY
-    flow_steps: ["19", "20", "23"]
+    binding: EXECUTABLE
+    flow_steps: ["19", "20", "23", "32"]
+    measure:
+      program: librelane_postroute_repair
+      argv_template: ["measure", "--domain", "hold", "--json", "{json_out}"]
+      extract: {kind: json_pointer, pointer: "/value"}
+      undetermined_rcs: [2, 3]
     satisfied_when: {op: ">=", value: 0.0}
+
+  timing.drv:
+    summary: >-
+      max_slew + max_capacitance + max_fanout violations, summed over every
+      declared STA corner, of the post-route candidate step 32 adopted.
+    metric: timing.drv.violation_count
+    unit: count
+    direction: minimize
+    binding: EXECUTABLE
+    flow_steps: ["23", "32"]
+    measure:
+      program: librelane_postroute_repair
+      argv_template: ["measure", "--domain", "drv", "--json", "{json_out}"]
+      extract: {kind: json_pointer, pointer: "/value"}
+      undetermined_rcs: [2, 3]
+    satisfied_when: {op: "<=", value: 0}
+
 
   power.total:
     summary: Total power against the design's DECLARED budget (L19.power_budget_uw).
@@ -155,12 +193,21 @@ domains:
     satisfied_when: {op: "<=", value: 5.0}
 
   antenna.violations:
-    summary: Antenna-rule violation count after routing.
+    summary: >-
+      Antenna-violating nets of the route step 32 adopted: OpenROAD
+      check_antennas in the Vibeic.PostRouteRepair session, on the input
+      route (census) and on every candidate after its ECO route -- one
+      instrument for both.
     metric: antenna.violation_count
     unit: count
     direction: minimize
-    binding: DECLARED_ONLY
-    flow_steps: ["21", "26"]
+    binding: EXECUTABLE
+    flow_steps: ["21", "26", "32"]
+    measure:
+      program: librelane_postroute_repair
+      argv_template: ["measure", "--domain", "antenna", "--json", "{json_out}"]
+      extract: {kind: json_pointer, pointer: "/value"}
+      undetermined_rcs: [2, 3]
     satisfied_when: {op: "<=", value: 0}
 
   em.current_density:
@@ -256,18 +303,56 @@ actuators:
 
   timing.repair_setup:
     summary: >-
-      Resize, buffer and legalise to close setup paths (OpenROAD
-      set_wire_rc + repair_design + repair_timing -setup). Not bound: no
-      shipped program emits or applies this chain as a parameterised action.
-    binding: DECLARED_ONLY
-    wrapper: {}
+      One post-detailed-route repair candidate (flow step 32, T102): the
+      LibreLane plugin step Vibeic.PostRouteRepair on the ADOPTED routed
+      State (fork estimate_parasitics -detailed_routing, repair_design,
+      repair_timing -setup then -hold, legalize, supply connection, ECO
+      detailed_route -nets), then OpenROAD.RCX + OpenROAD.STAPostPNR. The
+      wrapper moves the implementation root's pointer to the candidate only
+      when its DEF passes pg_supply_pin_ownership_check; the controller keeps
+      or rolls back that pointer on the re-measured domains.
+    binding: EXECUTABLE
+    wrapper:
+      program: librelane_postroute_repair
+      argv_template:
+        - "actuate"
+        - "--setup-margin-ns"
+        - "{setup_margin_ns}"
+        - "--hold-margin-ns"
+        - "{hold_margin_ns}"
+        - "--setup-max-buffer-pct"
+        - "{setup_max_buffer_pct}"
+        - "--hold-max-buffer-pct"
+        - "{hold_max_buffer_pct}"
+        - "--repair-tns-pct"
+        - "{repair_tns_pct}"
     parameters:
-      setup_margin_ns: {type: number, unit: ns, minimum: 0, maximum: 1.0}
-      max_utilization_pct: {type: number, unit: percent, minimum: 1, maximum: 95}
+      setup_margin_ns: {type: number, unit: ns, minimum: 0, maximum: 1.0, default: 0}
+      hold_margin_ns: {type: number, unit: ns, minimum: 0, maximum: 0.5, default: 0}
+      setup_max_buffer_pct:
+        type: number
+        unit: percent
+        exclusiveMinimum: 0
+        maximum: 20
+        default: 5
+      hold_max_buffer_pct:
+        type: number
+        unit: percent
+        exclusiveMinimum: 0
+        maximum: 5
+        default: 5
+        description: >-
+          The hold-fix skill's 5 % guardrail is the ceiling; above it is
+          REFUSED, not clamped.
+      repair_tns_pct: {type: number, unit: percent, minimum: 0, maximum: 100, default: 100}
+    preconditions:
+      - {kind: file_nonempty, path: "current.json"}
+      - {kind: file_nonempty, path: "context.json"}
     blast_radius: BLOCK
-    resource_ceilings: {wall_seconds: 3600, max_invocations_per_run: 4}
+    resource_ceilings: {wall_seconds: 14400, max_invocations_per_run: 8}
     rollback: SNAPSHOT_RESTORE
-    remeasure_domains: [timing.setup, timing.hold, area.physical, power.total]
+    remeasure_domains: [timing.setup, timing.hold, timing.drv, antenna.violations,
+                        area.physical, power.total]
 
   timing.repair_hold:
     summary: >-
@@ -324,6 +409,49 @@ actuators:
 # ladder of proposals, one declared stop condition.
 # --------------------------------------------------------------------------
 controllers:
+
+  # ---- Step 32 (T102). One actuator, three objectives, in the order the
+  # step runs them: setup, then hold (hold after setup), then design rules.
+  # Bound to NO flow edge: edge 23's fallback is step 32, and binding it is
+  # the landing that makes step 32's LibreLane arm the production default.
+  # Each ladder is the smallest authorised action first, then a small
+  # over-fix margin; re-running takes the same actions in the same order.
+  postroute.repair_setup:
+    summary: Close post-route setup on the router's own parasitics.
+    objective_domain: timing.setup
+    actuator: timing.repair_setup
+    plan:
+      - {setup_margin_ns: 0}
+      - {setup_margin_ns: 0.05}
+      - {setup_margin_ns: 0.1, setup_max_buffer_pct: 10}
+    stop:
+      max_iterations: 3
+      plateau_patience: 2
+      wall_seconds: 28800
+
+  postroute.repair_hold:
+    summary: Close post-route hold without giving up setup.
+    objective_domain: timing.hold
+    actuator: timing.repair_setup
+    plan:
+      - {hold_margin_ns: 0}
+      - {hold_margin_ns: 0.05}
+      - {hold_margin_ns: 0.1}
+    stop:
+      max_iterations: 3
+      plateau_patience: 2
+      wall_seconds: 28800
+
+  postroute.repair_drv:
+    summary: Close post-route max slew / capacitance / fanout.
+    objective_domain: timing.drv
+    actuator: timing.repair_setup
+    plan:
+      - {}
+    stop:
+      max_iterations: 1
+      plateau_patience: 1
+      wall_seconds: 14400
 
   pnr.deck.hold_block_emission:
     summary: >-

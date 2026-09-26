@@ -41,6 +41,11 @@ reroute of the nets the router's own report names. See ``routing.py``.
 ``Vibeic.FinishingXOR`` (flow step 37.3, mig105) and ``Vibeic.DatabaseUnit``
 (flow step 37.5ic, mig105): finishing never removes or covers design geometry,
 and the stream's UNITS is the declared grid. See ``signoff.py``.
+
+``Vibeic.PostRouteRepair`` (flow step 32, T102) runs after
+``OpenROAD.DetailedRouting``: one candidate of the post-route repair, on the
+routed ODB; ``programs/librelane_postroute_repair.py`` measures and adopts or
+rolls it back. See ``postroute_repair.py``.
 """
 from __future__ import annotations
 
@@ -158,6 +163,11 @@ __all__ += ["FinishingXOR", "DatabaseUnit"]
 from .routing import DetailedRoutingSeeded, NamedViolationReroute  # noqa: E402,F401
 
 __all__ += ["DetailedRoutingSeeded", "NamedViolationReroute"]
+
+# Step 32 (lane mig102): the post-detailed-route repair.
+from .postroute_repair import PostRouteRepair  # noqa: E402,F401
+
+__all__ += ["PostRouteRepair"]
 
 
 @Step.factory.register()
