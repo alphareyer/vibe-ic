@@ -30982,7 +30982,14 @@ def _v1_8_100_signoff_drv_repair_tcl(
     # top of the cells the ladder just legalized (MEASURED: 10 violations
     # back). Absent a PDK the rung is not emitted at all and this deck is
     # byte-for-byte what it was.
-    if pdk is not None:
+    # T96: a filler spec that carries NO well-tie repair is the step-15
+    # LibreLane floorplan's (`step_pnr` leaves it empty there): the taps are
+    # TapEndcapInsertion's, and this rung's `tapcell_ripup` + direct repair
+    # would replace them all, so it is not emitted -- the same rule as the
+    # #684 prune and the post-route repair on that path.
+    _tool_taps = (filler_spec is not None
+                  and not (filler_spec.get("welltie_repair_tcl") or ""))
+    if pdk is not None and not _tool_taps:
         _sdr_pitch, _sdr_pitch_src = tap_max_distance_um(pdk)
         _sdr_tie_recover = _build_welltie_coverage_repair_tcl(
             pdk, _sdr_pitch, _sdr_pitch_src)
