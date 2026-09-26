@@ -13,7 +13,8 @@ import benchmark_dispatch as dispatch
 import shape_b_sample_export as guarded_export
 import flow_phase_attribution as fpa
 from _hostpaths import require_repo
-from test_issue1903_shape_c_accepted_export_control import _fixture
+from test_issue1903_shape_c_accepted_export_control import (
+    _fixture, _require_standalone_compiler)
 
 
 def _task(run):
@@ -75,6 +76,7 @@ def test_wrong_scorer_top_blocks_without_sample(tmp_path):
 
 
 def test_compile_failure_blocks_the_claimed_blocking_emit(tmp_path):
+    _require_standalone_compiler()
     run, dataset, _ = _fixture(tmp_path)
     task = _task(run)
     _replace_candidate(
@@ -120,6 +122,7 @@ def test_runner_evidence_mismatch_blocks_without_sample(tmp_path):
 
 def test_nonzero_broader_runner_rc_is_disclosed_but_does_not_block_rtl_sample(
         tmp_path):
+    _require_standalone_compiler()
     run, dataset, _ = _fixture(tmp_path)
     task = _task(run)
     task["program_verification"]["runner_rc"] = 1
@@ -148,6 +151,7 @@ def test_supplied_rtl_gate_is_read_from_not_attempted_on_export(tmp_path):
     ``not_attempted``. The export guard must compare that exact status with
     the review task instead of inventing a missing/failed RTL owner.
     """
+    _require_standalone_compiler()
     run, dataset, _ = _fixture(tmp_path)
     task = _task(run)
     task["program_verification"]["rtl_gen"] = "NOT_APPLICABLE"
@@ -171,6 +175,7 @@ def test_supplied_rtl_gate_is_read_from_not_attempted_on_export(tmp_path):
 
 def test_shape_c_applicable_guard_skip_is_recorded_in_solve_report(
         tmp_path, monkeypatch):
+    _require_standalone_compiler()
     run, dataset, _ = _fixture(tmp_path)
     note = "NOTE: worked-example oracle SKIP (applicable, non-blocking)"
 
@@ -344,6 +349,7 @@ def test_empty_shape_c_worklist_blocks(tmp_path):
 
 def test_attestation_write_failure_blocks_and_removes_sample(tmp_path,
                                                              monkeypatch):
+    _require_standalone_compiler()
     run, dataset, _ = _fixture(tmp_path)
 
     def fail_record(*args, **kwargs):
@@ -361,6 +367,7 @@ def test_attestation_write_failure_blocks_and_removes_sample(tmp_path,
 
 def test_attestation_readback_failure_blocks_and_removes_sample(tmp_path,
                                                                 monkeypatch):
+    _require_standalone_compiler()
     run, dataset, _ = _fixture(tmp_path)
 
     def fail_load(path):
@@ -425,3 +432,21 @@ def test_checked_in_shape_c_sample_remains_guard_compatible(tmp_path):
     ok, problems = guarded_export.guard_export(sample)
     assert ok, problems
     assert "TopModule" in guarded_export._module_names(sample.read_text())
+
+
+def test_a_host_without_the_compiler_refuses_rather_than_exporting(
+        tmp_path, monkeypatch):
+    """The arms above are NOT_VERIFIED on a host with no `iverilog`; this one is
+    answerable EVERYWHERE, because it is about that host. The export's compile
+    guard cannot run, so the export must refuse and name why — never publish
+    reviewed bytes it could not compile, and never leave a sample behind."""
+    run, dataset, _ = _fixture(tmp_path)
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil, "which",
+        lambda name, *a, **k: None if name == "iverilog" else real_which(
+            name, *a, **k))
+    with pytest.raises(SystemExit) as exc:
+        dispatch._export_accepted_shape_c_samples("verilogeval-v2", run)
+    assert "standalone compile capability is unavailable" in str(exc.value)
+    assert not (run / "samples" / "Prob900_neutral_sample01.sv").exists()

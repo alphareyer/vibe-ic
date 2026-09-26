@@ -1225,3 +1225,53 @@ def test_resolver_attach_preserves_three_states_and_frozen_identity(monkeypatch,
         monkeypatch.setattr(_pin, "_RESOLVED", {})
         monkeypatch.delenv("VIBEIC_EDA_IMAGE")
         assert _pin.resolved_image_digest() == new
+
+
+@pytest.mark.parametrize("held_under", ["other_name_only", "configured_name"])
+def test_the_published_identity_names_a_reference_this_host_holds(monkeypatch, held_under):
+    """The export `_hold` publishes is an OVERRIDE, and `local_image()` honours an
+    override verbatim — so it must name bytes this host can run.
+
+    MEASURED 2026-09-26 on 8HD-6 (`VIBEIC_EDA_IMAGE_REPO` naming a fleet mirror,
+    the pinned bytes held only under ghcr): the first `local_image()` answered the
+    ghcr reference; the resolve it triggered exported `<mirror>@<digest>`, and
+    every later call answered THAT — a name no local image carries. The fmeda
+    injection's `docker run` then went to the mirror and failed rc 125 "manifest
+    unknown", so a measured-DC gate reported UNMEASURED on a host holding the
+    image. Same process, same digest, two answers.
+
+    Arm `configured_name` is the control: when the configured repository does
+    carry the digest, the export keeps the name the operator set.
+    """
+    digest = "sha256:" + "7" * 64
+    configured = "mirror.example/vibeic-eda"
+    other = "registry.example/vibeic-eda"
+    holder = other if held_under == "other_name_only" else configured
+    for key in ("VIBEIC_EDA_IMAGE", "IIC_EDA_IMAGE", "VIBEIC_EDA_IMAGE_REPO"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("VIBEIC_EDA_IMAGE_REPO", configured)
+    monkeypatch.setattr(_pin, "_RESOLVED", {})
+
+    def docker(*args, **kwargs):
+        if args == ("image", "ls", "--digests", "--format",
+                    "{{.Repository}}\t{{.Digest}}\t{{.ID}}"):
+            return 0, f"{holder}\t{digest}\timg-id\n", ""
+        if args[:3] == ("image", "inspect", "--format") and "Labels" in args[3]:
+            return 0, "0.3.79\n", ""
+        if args[:4] == ("image", "inspect", "--format", "{{json .RepoDigests}}"):
+            if args[4] == f"{holder}@{digest}":
+                return 0, json.dumps([f"{holder}@{digest}"]) + "\n", ""
+            return 1, "", f"Error: No such image: {args[4]}"
+        if args[:2] == ("image", "ls") and "-a" in args:
+            return 0, f"{holder}@{digest}\n", ""
+        raise AssertionError(f"unmodelled Docker operation: {args}")
+
+    monkeypatch.setattr(_pin, "_docker", docker)
+    want = f"{holder}@{digest}"
+    answers = [M.local_image() for _ in range(3)]
+    assert answers == [want] * 3, answers
+    assert os.environ["VIBEIC_EDA_IMAGE"] == want
+    # A child process inherits the export and has no module cache.
+    monkeypatch.setattr(_pin, "_RESOLVED", {})
+    assert M.local_image() == want
+    assert _pin.resolved_image_digest() == digest

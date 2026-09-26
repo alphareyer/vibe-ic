@@ -9,11 +9,31 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import benchmark_dispatch as dispatch
 import emit_attestation
 import flow_phase_attribution as fpa
+from not_verified_tier import skip_not_verified
+
+
+def _require_standalone_compiler() -> None:
+    """NOT_VERIFIED when the export's own compile guard cannot run here.
+
+    `_export_accepted_shape_c_task` refuses with "standalone compile capability
+    is unavailable" when `shutil.which("iverilog")` is None — the SAME question
+    asked here. That refusal is the program being right on a host with no
+    compiler, so a test of what the export does AFTER the compile guard has not
+    been answered on such a host: it is disclosed, and blocking under
+    VIBEIC_REQUIRE_EDA_VERIFICATION=1, rather than red or passed.
+    """
+    if shutil.which("iverilog") is None:
+        skip_not_verified(
+            "iverilog not on PATH, so the Shape-C export's standalone compile "
+            "guard cannot run here",
+            "tools/ci/run_suite_in_eda_image.sh -- "
+            "programs/tests/test_issue1903_shape_c_accepted_export*.py")
 
 
 def _sha(text: str) -> str:
@@ -143,6 +163,7 @@ def _fixture(root: Path) -> tuple[Path, Path, str]:
 
 
 def test_existing_export_front_door_emits_shape_c_reviewed_value(tmp_path):
+    _require_standalone_compiler()
     run, dataset, rtl_text = _fixture(tmp_path)
     dispatch._export_accepted_shape_c_samples("verilogeval-v2", run)
     sample = run / "samples" / "Prob900_neutral_sample01.sv"

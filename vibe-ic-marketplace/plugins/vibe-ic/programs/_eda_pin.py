@@ -260,8 +260,14 @@ def reset_resolved_image_digest() -> None:
 _FORK_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
-def _host_image_digest(repo: str) -> Tuple[Optional[str], str]:
-    """The newest EDA image ON THIS HOST, by its own version label, as a digest.
+def _host_image_digest(repo: str) -> Tuple[Optional[str], str, str]:
+    """The newest EDA image ON THIS HOST, by its own version label, as a digest,
+    and the repository name this host HOLDS it under: `(digest, why, held_as)`.
+
+    `held_as` is `repo` when the configured name carries the digest, else the
+    first listed name that does. It is what `_hold` publishes: the configured
+    name composed with a digest it does not carry is a reference this host
+    cannot run (see `_hold`).
 
     THREE THINGS THIS HAS TO GET RIGHT, all of them measured on the fleet
     2026-09-17 and all of them wrong in the obvious implementation:
@@ -287,12 +293,13 @@ def _host_image_digest(repo: str) -> Tuple[Optional[str], str]:
     rc, out, _err = _docker("image", "ls", "--digests", "--format",
                             "{{.Repository}}\t{{.Digest}}\t{{.ID}}")
     if rc == -1:
-        return None, _err
+        return None, _err, ""
     if rc != 0:
-        return None, f"docker image ls failed: {rc}"
+        return None, f"docker image ls failed: {rc}", ""
 
     short = repo.rsplit("/", 1)[-1]
     seen, candidates = set(), []
+    names: dict = {}
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) < 3:
@@ -301,6 +308,8 @@ def _host_image_digest(repo: str) -> Tuple[Optional[str], str]:
         if short not in name:
             continue
         got = reference_digest(f"{name}@{digest}") if digest and digest != "<none>" else None
+        if got:
+            names.setdefault(got, []).append(name)
         if not got or got in seen:
             continue
         seen.add(got)
@@ -317,9 +326,9 @@ def _host_image_digest(repo: str) -> Tuple[Optional[str], str]:
         digests, why_direct = local_repo_digests(repo)
         got = next((d for d in (reference_digest(x) for x in digests) if d), None)
         if got:
-            return got, ""
+            return got, "", repo
         return None, (f"no {short} image on this host carries a registry digest "
-                      f"(listing found none; {repo}: {why_direct or 'no digest'})")
+                      f"(listing found none; {repo}: {why_direct or 'no digest'})"), ""
 
     def _version_key(image_id: str):
         rc2, o2, _ = _docker("image", "inspect", "--format",
@@ -341,8 +350,9 @@ def _host_image_digest(repo: str) -> Tuple[Optional[str], str]:
     if not _version_key(ranked[0][1]):
         return None, (f"{len(candidates)} {short} image(s) carry a digest but none "
                       "states org.opencontainers.image.version; which release this "
-                      "is cannot be read, and a guess is not an identity")
-    return top, ""
+                      "is cannot be read, and a guess is not an identity"), ""
+    held = names.get(top, [])
+    return top, "", (repo if repo in held else held[0])
 
 
 def _registry_image_digest(repo: str) -> Tuple[Optional[str], str]:
@@ -367,7 +377,7 @@ def resolved_image_digest(env=None, *, allow_pull: bool = False) -> str:
     if "digest" in _RESOLVED:
         return _RESOLVED["digest"]
 
-    def _hold(digest: str) -> str:
+    def _hold(digest: str, held_as: str = "") -> str:
         """Fix this identity for the whole PROCESS TREE, not just this process.
 
         A run is many processes: the runner spawns a step, the step spawns a
@@ -378,11 +388,22 @@ def resolved_image_digest(env=None, *, allow_pull: bool = False) -> str:
         environment makes every child take step 1 (the explicit override) and
         agree by construction, which is what "resolve once per run" means when
         the run is not one process.
+
+        PUBLISHED UNDER THE NAME THIS HOST HOLDS IT BY (`held_as`), not the
+        configured repository. The export is an override, and `_eda_image`
+        honours an override verbatim; composing the configured name with a
+        digest found under ANOTHER name made every resolve after the first
+        name an image this host does not hold. MEASURED 2026-09-26 on 8HD-6
+        with `VIBEIC_EDA_IMAGE_REPO` naming the fleet mirror and the pinned
+        bytes held only under ghcr: the first `local_image()` answered the ghcr
+        reference, the second the mirror one, and `docker run` refused it with
+        rc 125 "manifest unknown". The identity is the digest either way (#2170).
         """
         _RESOLVED["digest"] = digest
         if not (env.get("VIBEIC_EDA_IMAGE") or "").strip():
             try:
-                os.environ["VIBEIC_EDA_IMAGE"] = f"{image_repo(env)}@{digest}"
+                os.environ["VIBEIC_EDA_IMAGE"] = (
+                    f"{held_as or image_repo(env)}@{digest}")
                 _RESOLVED[_EXPORTED] = True
             except Exception:
                 pass
@@ -407,9 +428,9 @@ def resolved_image_digest(env=None, *, allow_pull: bool = False) -> str:
             return _hold(got)
         tried.append(f"{key}={named} carries no digest ({why or 'not present'})")
 
-    got, why = _host_image_digest(repo)
+    got, why, held_as = _host_image_digest(repo)
     if got:
-        return _hold(got)
+        return _hold(got, held_as)
     tried.append(f"this host: {why}")
 
     if allow_pull:
