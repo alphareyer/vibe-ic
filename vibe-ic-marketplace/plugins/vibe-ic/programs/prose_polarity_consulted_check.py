@@ -1323,6 +1323,14 @@ _NOT_PROSE: Dict[str, str] = {
         "`_def_specialnet_iterm_map` above. Nothing is declared from either: "
         "an absent line, component or terminal is a FAIL finding, never a "
         "default.",
+    "librelane_contract::prune_pdk_root_cache":
+        "Directory NAMES under the PDK-root cache, which `_materialise_image_pdk` "
+        "itself creates as the 64-hex image ID (`<cache>/<hex>/<pdk>`), matched "
+        "with one anchored `fullmatch` to select this resolver's own copies, plus "
+        "docker's `{{.ID}}` / `{{.Source}}` template output, one field per line. "
+        "No sentence is read: a name has no form that DENIES it, and a name that "
+        "does not match is simply not a copy and is never touched. (F25, lane "
+        "migf25.)",
     "phase3_one_shot_runner::_def_specialnet_iterm_map":
         "Routed DEF SPECIALNETS terminal tuples, `- <net> ... ( <inst> <pin> ) "
         "... ;` productions written by the router. DEF has no form that DENIES a "
