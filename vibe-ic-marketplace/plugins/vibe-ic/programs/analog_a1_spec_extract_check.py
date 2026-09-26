@@ -18,6 +18,9 @@ with substance:
           `iq_ua`, `iout_ma`, ...).
 
 Failure rules:
+  A1_SPEC_FIELDS_DEFAULTED — `_provenance.fields_defaulted` is non-empty (or
+                          `defaults_used` is true): a value no document
+                          stated
   A1_SPEC_MISSING        — spec.json absent for the block
   A1_SPEC_INVALID_JSON   — spec.json present but unparsable
   A1_SPEC_EMPTY          — parsed but empty / no fields
@@ -133,11 +136,14 @@ def _check_block(project: Path, block: str) -> tuple[Optional[str], List[dict]]:
     spec_path, found = resolve_block_artefact(
         project, block, "spec.json", DECLARED_PHASE)
     if not found:
+        gap = spec_path.parent / "spec_gap.json"
         return "MISSING", [{
             "block": block,
             "rule": "A1_SPEC_MISSING",
             "rel_path": str(spec_path.relative_to(project)),
-            "detail": "spec.json not found",
+            "detail": ("spec.json not found; the producer recorded an honest "
+                       f"gap in {gap.relative_to(project)}"
+                       if gap.is_file() else "spec.json not found"),
         }]
     try:
         data = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -155,6 +161,21 @@ def _check_block(project: Path, block: str) -> tuple[Optional[str], List[dict]]:
             "rel_path": str(spec_path.relative_to(project)),
             "detail": "spec.json is empty / not a JSON object",
         }]
+    # NO SPEC VALUE WITHOUT A DOCUMENT (T94, A1 harvest #2). A spec value
+    # whose provenance is not a document field is a default, and a default
+    # graded a bandgap against a 1.205 V no document stated. The producer
+    # records what it defaulted; a non-empty record is refused here.
+    prov = data.get("_provenance")
+    if isinstance(prov, dict):
+        defaulted = prov.get("fields_defaulted") or []
+        if defaulted or prov.get("defaults_used") is True:
+            return "FAIL", [{
+                "block": block,
+                "rule": "A1_SPEC_FIELDS_DEFAULTED",
+                "rel_path": str(spec_path.relative_to(project)),
+                "detail": (f"spec value(s) {list(defaulted) or '(unnamed)'} "
+                           f"were defaulted, not bound from a document field"),
+            }]
     # Layout (a): specs: [...]
     specs = data.get("specs")
     if isinstance(specs, list):

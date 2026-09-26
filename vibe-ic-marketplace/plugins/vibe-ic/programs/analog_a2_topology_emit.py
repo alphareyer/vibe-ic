@@ -1454,7 +1454,14 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
                           # branch, and its complement (F164/F165)
                           "nndac", "nndacs", "nckdac", "nckdacb",
                           # the auto-zeroed quantiser input
-                          "nqz"],
+                          "nqz",
+                          # nets the devices below touch that this list
+                          # never named, so A3's per-internal-net rail
+                          # measurement skipped them (T94; refused by
+                          # A2_TOPOLOGY_IR_NET_UNDECLARED): the common-mode
+                          # buffer, and the quantiser's strobe and input
+                          "nd1_cm", "nd2_cm", "ntail_cm", "nvcmr",
+                          "nqd1", "nqstb", "ndi_n", "ndi_p"],
         # The gate this entry builds carries the clock's own phase once the
         # conversion-window reset is released — see `CLOCK_PHASE_ALIASES_KEY`
         # and the devices that build it further down.

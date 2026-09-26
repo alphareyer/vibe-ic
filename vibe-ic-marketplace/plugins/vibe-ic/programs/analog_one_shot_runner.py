@@ -474,17 +474,17 @@ def _a6_librelane_arm(project: Path, block: str, container: str,
            "--image", image]
     if att.is_file():
         cmd += ["--attribution", str(att)]
-    cp = _pr.run(cmd, capture_output=True, text=True)
+    arm_run = _pr.run(cmd, capture_output=True, text=True)
     rec_path = bdir / "a6_librelane_drc.json"
     try:
         record = json.loads(rec_path.read_text())
     except (OSError, ValueError):
         record = None
-    tail = ((cp.stdout or "").strip().splitlines()
-            or (cp.stderr or "").strip().splitlines() or ["no output"])[-1]
-    return {"rc": cp.returncode, "mode": mode,
+    tail = ((arm_run.stdout or "").strip().splitlines()
+            or (arm_run.stderr or "").strip().splitlines() or ["no output"])[-1]
+    return {"rc": arm_run.returncode, "mode": mode,
             "record": str(rec_path) if record is not None else None,
-            "blocking": cp.returncode != 0,
+            "blocking": arm_run.returncode != 0,
             "union": (record or {}).get("union"), "detail": tail}
 
 
