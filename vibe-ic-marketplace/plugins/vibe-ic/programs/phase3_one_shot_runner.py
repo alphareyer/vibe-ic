@@ -58819,7 +58819,10 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 # same measurement.
                 _spec_verdict = "MET" if _fmax_rep["spec_met"] else "FAIL"
                 notes.append(
-                    "achievable-Fmax reported (honest measurement, sign-off "
+                    ("achievable-Fmax reported" if _ll_m23 == "direct" else
+                     "achievable-Fmax of the direct OCV deck (comparison only, "
+                     "NOT recorded: step 23 runs on the tool)")
+                    + " (honest measurement, sign-off "
                     f"verdict UNCHANGED): asked {_fmax_rep['spec_period_ns']} ns "
                     f"({_fmax_rep['spec_fmax_mhz']} MHz) setup {_spec_verdict} "
                     f"-> reached {_fmax_rep['achievable_period_ns']} ns "
