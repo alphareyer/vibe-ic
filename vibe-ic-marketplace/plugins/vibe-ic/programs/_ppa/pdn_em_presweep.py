@@ -259,10 +259,33 @@ proc _vibeic_pes_build {{k}} {{
   pdngen -reset
   uplevel #0 [list source $_pes_dir/cand_$k.tcl]
 }}
+# Instances created after the PDN step (CTS and repair buffers) have their
+# supply pins on no net until the deck's own post-route re-connect; PSM draws
+# no current for them (MEASURED on spm: 0.153 of Jmax connected vs 1.25 with
+# the clock tree on the grid). Connect them as that block does -- do-not-touch
+# lifted across the connect and restored -- and count what is still floating.
+proc _vibeic_pes_connect {{}} {{
+  set _dnt {{}}
+  foreach _i [[ord::get_db_block] getInsts] {{
+    if {{[$_i isDoNotTouch]}} {{ lappend _dnt $_i; $_i setDoNotTouch false }}
+  }}
+  set _rc [catch {{global_connect}} _e]
+  foreach _i $_dnt {{ $_i setDoNotTouch true }}
+  if {{$_rc}} {{ error "PDN_EM_PRESWEEP_CONNECT_FAILED: $_e" }}
+  set _n 0
+  foreach _i [[ord::get_db_block] getInsts] {{
+    foreach _t [$_i getITerms] {{
+      if {{[[$_t getMTerm] getSigType] ni {{POWER GROUND}}}} {{ continue }}
+      if {{[$_t getNet] eq "NULL"}} {{ incr _n }}
+    }}
+  }}
+  return $_n
+}}
 proc _vibeic_pes_measure {{k vsrc_opt}} {{
   global _pes_dir
   set _pes_cd $_pes_dir/c$k
   file mkdir $_pes_cd
+  set _f [open $_pes_cd/pg_on_no_net.txt w]; puts $_f [_vibeic_pes_connect]; close $_f
 {geom}
   write_def $_pes_cd/cand.def
   set _pf [open $_pes_cd/power.rpt w]
@@ -399,6 +422,17 @@ def judge(cand_dir: Path, tech_lef: Path, nets: Mapping[str, float], margin: flo
                 "reason": (cand_dir / "BUILD_FAILED").read_text(errors="replace").strip()}
     if not (cand_dir / "MEASURED").is_file():
         return {"verdict": "NOT_MEASURED", "reason": "the session wrote no MEASURED marker"}
+    try:
+        floating = int((cand_dir / "pg_on_no_net.txt").read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        floating = None
+    if floating != 0:
+        # PSM draws no current for an instance whose supply pin is on no net;
+        # a grid judged without them is judged on part of the design.
+        return {"verdict": "NOT_MEASURED",
+                "reason": (f"{floating} supply terminal(s) on no net when PSM solved"
+                           if floating is not None else
+                           "the session recorded no supply-connection count")}
     d = cand_dir / "cand.def"
     widths = _emcd._def_pg_widths_of(d)
     out: Dict[str, Any] = {"nets": {}, "tool_ab": {}, "ir_worst_v": {}}

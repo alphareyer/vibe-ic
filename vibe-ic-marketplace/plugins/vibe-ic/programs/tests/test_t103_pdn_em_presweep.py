@@ -112,6 +112,7 @@ def _measure(sweep, cid, *, currents, strap_w=None, ring_w=1.0, ring_current=Non
             f"M4,50,10,M4,50,20,{currents.get(net, 1e-5)}\n"
             + (f"M5,10,0,M5,20,0,{ring_current}\n" if ring_current else ""))
         (d / f"voltage_{net}.txt").write_text(f"M4,50,10,{NETS[net] - 0.01 if NETS[net] else 0.01}\n")
+    (d / "pg_on_no_net.txt").write_text("0\n")
     (d / "MEASURED").write_text(cid)
     return d
 
@@ -253,6 +254,22 @@ def test_a_spent_budget_keeps_the_passing_candidate_with_most_headroom(tmp_path,
     assert "supply pad count" in rec["next_axis"]
 
 
+def test_a_grid_solved_with_floating_supply_pins_is_not_judged(tmp_path):
+    """spm, in the PnR session after CTS: the clock tree's supply pins were on
+    no net, PSM drew 6 mW of 19.5, and the flow grid read 0.153 of Jmax --
+    a PASS about a third of the design."""
+    sweep, _c, _d = _sweep(tmp_path)
+    d = _measure(sweep, "0", currents={"VDD": 1e-4, "VSS": 1e-4})
+    (d / "pg_on_no_net.txt").write_text("21888\n")
+    assert S.next_action(sweep) == ("DONE", "0")
+    rec = json.loads((sweep / S.RECORD_FILE).read_text())
+    assert rec["verdict"] == "NOT_MEASURED"
+    assert "21888 supply terminal(s) on no net" in rec["evaluated"]["0"]["reason"]
+    (d / "pg_on_no_net.txt").unlink()
+    S.next_action(sweep)
+    assert json.loads((sweep / S.RECORD_FILE).read_text())["verdict"] == "NOT_MEASURED"
+
+
 def test_an_unmeasured_flow_grid_changes_nothing(tmp_path):
     sweep, _c, _d = _sweep(tmp_path)
     (sweep / "c0").mkdir()
@@ -306,6 +323,13 @@ def test_the_session_keeps_the_supply_pins_and_restores_the_flow_grid_on_error()
     assert "_vibeic_pes_build 0" in tcl and "PDN_EM_PRESWEEP_RESTORE_FAILED" in tcl
     assert "PDN_EM_PRESWEEP_NET_UNSOURCED" in tcl
     assert "u_pwr u_gnd" in tcl
+    # every measurement first connects the post-PDN instances, lifting and
+    # restoring do-not-touch, and records what is still floating
+    i_conn = tcl.index("proc _vibeic_pes_connect")
+    assert "setDoNotTouch false" in tcl[i_conn:] and "setDoNotTouch true" in tcl[i_conn:]
+    i_meas = tcl.index("proc _vibeic_pes_measure")
+    body = tcl[i_meas:tcl.index("analyze_power_grid", i_meas)]
+    assert "pg_on_no_net.txt" in body and "_vibeic_pes_connect" in body
 
 
 def test_prepare_stages_the_decks_own_block_per_candidate(tmp_path):
