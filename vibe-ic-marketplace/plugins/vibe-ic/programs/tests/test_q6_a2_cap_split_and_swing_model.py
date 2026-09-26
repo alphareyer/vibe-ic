@@ -453,3 +453,41 @@ def test_a_declaration_whose_caps_are_below_the_minimum_is_refused_by_name(
     assert "cs1:" in txt and a2.BELOW_MINIMUM in txt
     assert "Magic gencell" in txt
     assert not (bdir(root, BLK) / "topology.json").exists()
+
+
+def test_a_stage_the_recurrence_does_not_describe_is_not_used():
+    """MEASURED on the emitted delta_sigma: stage 2's per-clock recurrence
+    explains 94.5 % of its step (rms 9.1 mV against stage 1's 0.18 mV),
+    because the integrator outputs do not hold during the sampling phase.
+    Such a stage is POOR_FIT and its coefficients are not used."""
+    import random
+    rnd = random.Random(7)
+    runs = []
+    for vin in (0.55, 0.60, 0.65, 0.70):
+        vcm, y1, y2 = 0.59, 0.59, 0.59
+        smp = []
+        for k in range(40):
+            fb = 0.1 if (k * 7 + int(vin * 100)) % 3 else 1.1
+            smp.append({"k": k, "vcm": vcm, "fb": fb, "reset": False,
+                        "y0": y1, "y1": y2})
+            y2 = y2 + 0.19 * (y1 - vcm) + 0.08 * (fb - vcm) \
+                + rnd.gauss(0.0, 0.02)
+            y1 = y1 + 0.27 * (vin - vcm) + 0.25 * (fb - vcm) + 0.007
+        runs.append((vin, smp))
+    fit = probe.fit_stages(runs, 2)
+    assert fit[0]["status"] == "MEASURED" and fit[0]["r2"] > 0.999
+    assert fit[1]["status"] == "POOR_FIT" and fit[1]["r2"] < probe.MIN_FIT_R2
+
+
+def test_a2_uses_the_measured_stage_and_discloses_the_other(emitted):
+    _root, _d, ir, spec = emitted
+    meas = _measurement(ir)
+    meas["status"] = "PARTIALLY_MEASURED"
+    meas["stages"][1]["status"] = "POOR_FIT"
+    meas["stages"][1]["gain_input_over_ratio"] = 0.60
+    sw = _rebuild(ir, spec, meas)["loop_swing"]
+    assert sw["coefficient_source"] == "partially_measured"
+    assert sw["coefficient_source_per_stage"] == ["measured",
+                                                  "cap_ratio_unmeasured"]
+    assert sw["gain_input_over_ratio"][1] == 1.0
+    assert sw["gain_input_over_ratio"][0] == pytest.approx(1.077)

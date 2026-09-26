@@ -3991,24 +3991,32 @@ def loop_swing_and_sizing(lib: Dict[str, Any],
     if isinstance(measured_loop, dict):
         rows = [r for r in measured_loop.get("stages") or []
                 if isinstance(r, dict)]
+        def _usable(r):
+            return (r.get("status") == "MEASURED"
+                    and isinstance(r.get("gain_input_over_ratio"),
+                                   (int, float))
+                    and isinstance(r.get("gain_dac_over_ratio"),
+                                   (int, float)))
         if measured_loop.get("structure_sha256") != structure_sha:
             stale = ("the measurement was taken on a different switch "
                      "network (structure_sha256 differs), so it describes "
                      "another circuit and is not used")
-        elif measured_loop.get("status") != "MEASURED" or len(rows) != order \
-                or any(r.get("status") != "MEASURED"
-                       or not isinstance(r.get("gain_input_over_ratio"),
-                                         (int, float))
-                       or not isinstance(r.get("gain_dac_over_ratio"),
-                                         (int, float)) for r in rows):
-            stale = "the measurement is incomplete (a stage NOT_MEASURED)"
+        elif measured_loop.get("status") not in ("MEASURED",
+                                                 "PARTIALLY_MEASURED") \
+                or len(rows) != order or not any(_usable(r) for r in rows):
+            stale = "the measurement is incomplete (no stage MEASURED)"
         else:
+            # PER STAGE: a stage the probe measured is sized from its
+            # measurement; one it could not (POOR_FIT / NOT_MEASURED) keeps
+            # its capacitor ratio, and the record says which is which.
             rows = sorted(rows, key=lambda r: int(r["stage"]))
-            g_in = [float(r["gain_input_over_ratio"]) for r in rows]
-            g_dac = [float(r["gain_dac_over_ratio"]) for r in rows]
-            off = [float(r.get("offset_state_per_clock") or 0.0)
-                   for r in rows]
-            source = "measured"
+            for i, r in enumerate(rows):
+                if _usable(r):
+                    g_in[i] = float(r["gain_input_over_ratio"])
+                    g_dac[i] = float(r["gain_dac_over_ratio"])
+                    off[i] = float(r.get("offset_state_per_clock") or 0.0)
+            source = ("measured" if all(_usable(r) for r in rows)
+                      else "partially_measured")
             meas_rows = rows
     a = [g_dac[i] * coeffs[i] for i in range(order)]
     c = [0.0] + [g_in[i] * coeffs[i] for i in range(1, order)]
@@ -4033,9 +4041,12 @@ def loop_swing_and_sizing(lib: Dict[str, Any],
     }
     if meas_rows:
         rec["measured"] = [{k: r.get(k) for k in (
-            "stage", "input_coefficient", "dac_coefficient",
+            "stage", "status", "input_coefficient", "dac_coefficient",
             "offset_v_per_clock", "cap_ratio_input", "cap_ratio_dac",
-            "rms_residual_v", "n")} for r in meas_rows]
+            "rms_residual_v", "r2", "n", "reason")} for r in meas_rows]
+        rec["coefficient_source_per_stage"] = [
+            "measured" if r.get("status") == "MEASURED"
+            else "cap_ratio_unmeasured" for r in meas_rows]
     if u_decl is None or x_lim is None:
         rec.update({"feasible": False,
                     "reason": ("the declared input span or the worst-corner "

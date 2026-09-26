@@ -103,6 +103,14 @@ SAMPLE_BEFORE_EDGE = 0.005
 FEEDBACK_SAMPLE_AT = 0.25
 #: The DAC coefficient may compress this much at the declared span (B3').
 MAX_DAC_COMPRESSION = 0.01
+#: The fraction of a stage's per-clock step variance the linear per-clock
+#: recurrence must explain before its coefficients are used. MEASURED on
+#: u_hawaii_adc delta_sigma: stage 1 fits with rms 0.18 mV; stage 2 with
+#: 9.1 mV, because the integrator outputs do NOT hold during the sampling
+#: phase (vint swings 0.35-0.86 V inside it) and the next stage samples that
+#: moving node — the blind spot `analog_incremental_resolution` names. A fit
+#: that poor is reported, never used.
+MIN_FIT_R2 = 0.995
 
 RC_OK, RC_FAIL, RC_NA, RC_NO_RECORD = 0, 1, 2, 3
 
@@ -139,8 +147,12 @@ def least_squares(rows: Sequence[Sequence[float]], y: Sequence[float]
     if beta is None:
         return None
     res = [v - sum(b * x for b, x in zip(beta, r)) for r, v in zip(rows, y)]
+    mean = sum(y) / len(y)
+    sst = sum((v - mean) ** 2 for v in y)
+    sse = sum(e * e for e in res)
     return {"beta": beta, "n": len(rows),
-            "rms_residual": math.sqrt(sum(e * e for e in res) / len(res))}
+            "rms_residual": math.sqrt(sse / len(res)),
+            "r2": (1.0 - sse / sst) if sst > 0 else None}
 
 
 def clock_samples(run: Dict[str, Any], nets: Dict[str, str],
@@ -207,10 +219,18 @@ def fit_stages(runs: Sequence[Tuple[float, List[Dict[str, float]]]],
                         "reason": "too few clocks outside the reset"})
             continue
         g, a_dac, off = fit["beta"]
-        out.append({"stage": s + 1, "status": "MEASURED",
+        good = fit["r2"] is not None and fit["r2"] >= MIN_FIT_R2
+        out.append({"stage": s + 1,
+                    "status": "MEASURED" if good else "POOR_FIT",
                     "input_coefficient": g, "dac_coefficient": a_dac,
                     "offset_v_per_clock": off, "n": fit["n"],
-                    "rms_residual_v": fit["rms_residual"]})
+                    "rms_residual_v": fit["rms_residual"], "r2": fit["r2"],
+                    "min_r2": MIN_FIT_R2})
+        if not good:
+            out[-1]["reason"] = (
+                "the per-clock linear recurrence explains too little of this "
+                "stage's step: its output does not hold a value between "
+                "clocks, so no coefficient read off it is the loop's")
     return out
 
 
@@ -410,8 +430,8 @@ def _run_decks(decks: Dict[str, Path], container: str, budget_s: float
 
 
 def probe(project: Path, block: str, container: str, validate: bool = False,
-          clocks: Optional[int] = None, budget_s: float = 14400.0
-          ) -> Tuple[int, Dict[str, Any]]:
+          clocks: Optional[int] = None, budget_s: float = 14400.0,
+          reuse_records: bool = False) -> Tuple[int, Dict[str, Any]]:
     bdir = project / "phase3" / "analog" / block
     ir_p, sp_p = bdir / "topology.json", bdir / f"{block}.sp"
     tb_p, spec_p = bdir / f"tb_{block}.sp", bdir / "spec.json"
@@ -477,7 +497,13 @@ def probe(project: Path, block: str, container: str, validate: bool = False,
         p.write_text(deck)
         decks[tag] = p
     started = time.time()
-    rcs = _run_decks(decks, container, budget_s)
+    if reuse_records and all((wdir / f"w_{t}.txt").is_file() for t in decks):
+        # Re-analysis of records this probe already wrote for THESE decks —
+        # the decks were just re-rendered byte-for-byte from the same inputs,
+        # so the records are theirs. Nothing is simulated.
+        rcs = {t: None for t in decks}
+    else:
+        rcs = _run_decks(decks, container, budget_s)
     runs: Dict[str, Any] = {}
     for tag in decks:
         w = read_wrdata(wdir / f"w_{tag}.txt", inst, vnets)
@@ -516,7 +542,7 @@ def probe(project: Path, block: str, container: str, validate: bool = False,
     for f, r in zip(fit, ratios):
         f["cap_ratio_input"] = r["input"]
         f["cap_ratio_dac"] = r["dac"]
-        if f.get("status") == "MEASURED":
+        if f.get("status") in ("MEASURED", "POOR_FIT"):
             f["gain_input_over_ratio"] = (f["input_coefficient"] / r["input"]
                                           if r["input"] else None)
             f["gain_dac_over_ratio"] = (f["dac_coefficient"] / r["dac"]
@@ -528,7 +554,9 @@ def probe(project: Path, block: str, container: str, validate: bool = False,
             f["within_ratio_tolerance"] = bool(dev) and max(dev) <= \
                 _a2._res.COEFFICIENT_RATIO_TOLERANCE
     rec["stages"] = fit
-    rec["status"] = "MEASURED"
+    rec["status"] = ("MEASURED" if all(f.get("status") == "MEASURED"
+                                       for f in fit)
+                     else "PARTIALLY_MEASURED")
     rc = RC_OK
     if validate:
         frac = (ir.get("constants") or {}).get(
@@ -587,13 +615,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "VIBEIC_EDA_CONTAINER", "vibeic-eda"))
     ap.add_argument("--validate", action="store_true")
     ap.add_argument("--clocks", type=int, default=None)
+    ap.add_argument("--reuse-records", action="store_true",
+                    help="re-analyse the records a previous run of this "
+                         "probe wrote, without simulating")
     ap.add_argument("--budget-s", type=float, default=14400.0,
                     help="recorded budget; its crossing is announced, it "
                          "stops nothing")
     a = ap.parse_args(argv)
     project = a.project.resolve()
     rc, rec = probe(project, a.block, a.container, a.validate, a.clocks,
-                    a.budget_s)
+                    a.budget_s, a.reuse_records)
     if rc != RC_NA:
         name = VALIDATION_ARTEFACT if a.validate else FIT_ARTEFACT
         _atomic.write_json(project / "phase3" / "analog" / a.block / name,
