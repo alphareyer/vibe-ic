@@ -66,8 +66,11 @@ from librelane_contract import Refusal, _load, digest, post_pnr_timing_inputs  #
 import spice_correlation_check as _scc  # noqa: E402 — the gate's pure helpers
 
 SIMULATORS = ('ngspice', 'xyce')
-#: The lesson's own mutation: every capacitance scaled by 10 (RULINGS CT-08).
-MUTATION_FACTOR = 10.0
+#: Every capacitance doubled. The CT-08 lesson scaled by 10; MEASURED on spm
+#: max_ss that pushed the register-to-register path from 12.8 ns to 49.5 ns in
+#: STA, past the deck's own simulation window, so no SPICE edge was left to
+#: compare. A control whose perturbed run cannot be measured controls nothing.
+MUTATION_FACTOR = 2.0
 #: The default subject: register-to-register setup paths, whose data path is
 #: standard cells only. A path through an IO pad simulates the pad's full
 #: transistor netlist and its external load (MEASURED on spm: > 29 min for one
@@ -369,6 +372,13 @@ def parse_path_report(text: str) -> Optional[Dict[str, Any]]:
     if not (start and end and rows):
         return None
     first = next((r for r in rows if r['inst'] == start.group(1) or r['cell'] == 'in'), rows[0])
+    if _scc.is_sequential_cell(first['cell']):
+        # A launching register: the comparison is its combinational cone,
+        # from its output pin, as the direct gate's is -- the flop's own
+        # clock-to-output arc has no cell_rise/fall table on the related pin
+        # `derive_liberty_path_tolerance` reads first.
+        first = next((r for r in rows[rows.index(first) + 1:]
+                      if r['inst'] == first['inst']), first)
     return {'startpoint': start.group(1), 'endpoint': end.group(1),
             'start_row': first, 'rows': rows[rows.index(first):],
             'start_time_ns': first['time'], 'end_time_ns': rows[-1]['time'],
@@ -381,7 +391,7 @@ def path_stages(rows: List[dict]) -> List[dict]:
     stages = []
     for prev, row in zip(rows, rows[1:]):
         if prev['inst'] == row['inst'] and '/' in prev['pin'] and '/' in row['pin'] \
-                and row['cell'] not in ('in', 'out'):
+                and row['cell'] not in ('in', 'out') and not _scc.is_sequential_cell(row['cell']):
             stages.append({'inst': row['inst'], 'cell': row['cell'],
                            'toggle_pin': prev['pin'].rsplit('/', 1)[1],
                            'transition': 'fall' if row['tr'] == 'v' else 'rise',
@@ -620,10 +630,12 @@ def judge(arm: Dict[str, Any], mutated: Optional[Dict[str, Any]]) -> Dict[str, A
                          'sta_delta_ns': other['sta_ns'] - row['sta_ns'],
                          'resolution_ns': 2 * step,
                          'responds': abs(delta) > 2 * step and delta > 0})
-    unresponsive = [r for r in response if r['responds'] is not True]
+    unmeasured = [r for r in response if r['responds'] is None]
+    unresponsive = [r for r in response if r['responds'] is False]
     worst = max(rows, key=lambda r: abs(r.get('error_pct') or 0.0))
     verdicts = {r.get('verdict') for r in rows}
     verdict = ('SPEF_UNRESPONSIVE' if unresponsive else
+               'MUTATION_NOT_MEASURED' if unmeasured else
                'CORRELATED' if verdicts == {'CORRELATED'} else
                'CRITICAL_MISMATCH' if 'CRITICAL_MISMATCH' in verdicts else
                'MISMATCH' if 'MISMATCH' in verdicts else 'TOLERANCE_UNDERIVABLE')

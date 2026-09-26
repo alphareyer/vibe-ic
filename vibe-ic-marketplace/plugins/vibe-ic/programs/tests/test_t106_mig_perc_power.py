@@ -537,6 +537,9 @@ def test_a_correlation_that_does_not_move_with_the_spef_is_refused(tmp_path, mon
     assert pst.judge(base, _arm([1.30], sta=1.25))['verdict'] == 'CORRELATED'
     assert pst.judge(base, _arm([1.02], sta=1.25))['verdict'] == 'SPEF_UNRESPONSIVE'
     assert pst.judge(_arm([1.5]), _arm([1.8], sta=1.25))['verdict'] == 'CRITICAL_MISMATCH'
+    unmeasured = _arm([1.30], sta=1.25)
+    unmeasured['paths'][0]['status'] = 'NOT_MEASURED'
+    assert pst.judge(base, unmeasured)['verdict'] == 'MUTATION_NOT_MEASURED'
 
 
 def test_the_spice_delay_is_measured_between_the_sta_pins_at_the_sta_edges(tmp_path):
@@ -601,7 +604,7 @@ Path Type: max
                            3.762521    3.762521   clock network delay (propagated)
                0.101318    0.000000    3.762521 ^ u_core/_417_/CLK (cells__dffq_1)
    0.013435    0.186434    {d1}    {t1} v u_core/_417_/Q (cells__dffq_1)
-               0.186434    0.000410    {t2} v u_core/_416_/D (cells__dffq_1)
+               0.186434    {d2}    {t2} v u_core/_416_/D (cells__dffq_1)
                                        {t2}   data arrival time
 '''
 
@@ -639,10 +642,10 @@ def _wps_edge(calls):
             tcl = Path(argv[-1]).read_text()
             spef = tcl.split('read_spef ')[1].split('\n')[0]
             slow = 'mutated' in spef
-            d1 = 0.95 if slow else 0.710804
+            d1, d2 = 0.710804, (0.9 if slow else 0.5)
             for rpt in __import__('re').findall(r'> (\S+\.rpt)', tcl):
                 write(Path(rpt), STA_PATH.format(d1=f'{d1:.6f}', t1=f'{3.762521 + d1:.6f}',
-                                                 t2=f'{3.762931 + d1:.6f}'))
+                                                 d2=f'{d2:.6f}', t2=f'{3.762521 + d1 + d2:.6f}'))
             for deck in __import__('re').findall(r'-spice_file (\S+)', tcl):
                 write(Path(deck + '_1.sp'), '* Path\n.tran 1e-13 2e-08\n'
                       '.print tran v(u_core\\/_417_/CLK) v(u_core\\/_417_/Q) v(u_core\\/_416_/D)\n'
@@ -657,13 +660,14 @@ def _wps_edge(calls):
             assert control.split()[-1] == 'quit', control
             assert wrdata[1:] == ['v(u_core\\\\/_417_/clk)', 'v(u_core\\\\/_417_/q)',
                                   'v(u_core\\\\/_416_/d)'], wrdata
-            delay = 1.10e-9 if spef_slow else 0.72e-9
+            cone = 0.95e-9 if spef_slow else 0.52e-9
             rows = [' time v(u_core\\/_417_/clk) v(u_core\\/_417_/q) v(u_core\\/_416_/d)\n']
-            for i in range(200):
+            for i in range(400):
                 t = i * 1e-11
                 clk = 4.5 if t >= 0.5e-9 else 0.0
-                d = 0.0 if t >= 0.5e-9 + delay else 4.5
-                rows.append(f' {t} {clk} {d} {d}\n')
+                q = 0.0 if t >= 0.5e-9 + 0.71e-9 else 4.5
+                d = 0.0 if t >= 0.5e-9 + 0.71e-9 + cone else 4.5
+                rows.append(f' {t} {clk} {q} {d}\n')
             write(Path(wrdata[0]), ''.join(rows))
             return SimpleNamespace(returncode=0, stdout='', stderr='')
         raise AssertionError(argv)
@@ -696,10 +700,11 @@ def test_step_30_runs_the_tool_deck_and_the_spef_mutation_and_records_every_arm(
     assert ngspice['mutation'][0]['responds'] is True
     base = json.loads((project / 'reports/phase3/spice_path_tool.json').read_text())[
         'detail']['ngspice']['base']['paths'][0]
-    # STA: the launching clock pin to the endpoint pin; SPICE: the same pins.
-    assert base['sta_ns'] == pytest.approx(0.711214)
-    assert base['start_pin'] == 'u_core/_417_/CLK' and base['end_pin'] == 'u_core/_416_/D'
-    assert base['spice_ns'] == pytest.approx(0.72, abs=0.011)
+    # The launching register's combinational cone: its Q pin to the endpoint
+    # pin, in STA and in SPICE.
+    assert base['sta_ns'] == pytest.approx(0.5)
+    assert base['start_pin'] == 'u_core/_417_/Q' and base['end_pin'] == 'u_core/_416_/D'
+    assert base['spice_ns'] == pytest.approx(0.52, abs=0.011)
     sta_runs = [c for c in calls if c[0] == 'sta']
-    assert '-from u_core/_417_/CLK -to u_core/_416_/D' in Path(sta_runs[1][-1]).read_text()
+    assert '-from u_core/_417_/Q -to u_core/_416_/D' in Path(sta_runs[1][-1]).read_text()
     assert json.loads((project / 'reports/phase3/spice_path_tool.json').read_text())['step'] == '30'
