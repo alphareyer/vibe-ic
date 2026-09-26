@@ -541,9 +541,10 @@ def test_a_correlation_that_does_not_move_with_the_spef_is_refused(tmp_path, mon
 
 def test_the_spice_delay_is_measured_between_the_sta_pins_at_the_sta_edges(tmp_path):
     deck = write(tmp_path / 'path_1.sp_1.sp', 'v1 x/VDD 0 5.000\n.tran 1e-13 2e-9\n')
-    put(tmp_path / 'path_1.sp_1.nodes.json', ['u\\/a/CLK', 'u\\/b/D'])
     rows = [(t * 1e-10, 0.0 if t < 3 else 5.0, 5.0 if t < 8 else 0.0) for t in range(12)]
-    write(tmp_path / 'path_1.sp_1.wave', ''.join(f'{t} {a} {t} {b}\n' for t, a, b in rows))
+    # ngspice `wrdata` with wr_vecnames + wr_singlescale, names as it keeps them.
+    write(tmp_path / 'path_1.sp_1.wave', ' time v(u\\/a/clk) v(u\\/b/d)\n'
+          + ''.join(f' {t} {a} {b}\n' for t, a, b in rows))
     sta = {'startpoint': 'u/a', 'endpoint': 'u/b', 'endpoint_transition': 'fall',
            'rows': [{'inst': 'u/a', 'pin': 'u/a/CLK', 'tr': '^', 'cell': 'dff'},
                     {'inst': 'u/b', 'pin': 'u/b/D', 'tr': 'v', 'cell': 'dff'}]}
@@ -650,16 +651,17 @@ def _wps_edge(calls):
         if argv[0] == 'ngspice':
             run = Path(argv[-1])
             spef_slow = 'mutated' in str(run)
-            nodes = json.loads(run.with_suffix('').with_suffix('.nodes.json').read_text())
+            wrdata = run.read_text().split('wrdata ')[1].split('\n')[0].split()
+            assert wrdata[1:] == ['v(u_core\\\\/_417_/clk)', 'v(u_core\\\\/_417_/q)',
+                                  'v(u_core\\\\/_416_/d)'], wrdata
             delay = 1.10e-9 if spef_slow else 0.72e-9
-            rows = []
+            rows = [' time v(u_core\\/_417_/clk) v(u_core\\/_417_/q) v(u_core\\/_416_/d)\n']
             for i in range(200):
                 t = i * 1e-11
                 clk = 4.5 if t >= 0.5e-9 else 0.0
                 d = 0.0 if t >= 0.5e-9 + delay else 4.5
-                rows.append(f'{t} {clk} {t} {d} {t} {d}\n')
-            write(run.with_suffix('').with_suffix('.wave'), ''.join(rows))
-            assert len(nodes) == 3
+                rows.append(f' {t} {clk} {d} {d}\n')
+            write(Path(wrdata[0]), ''.join(rows))
             return SimpleNamespace(returncode=0, stdout='', stderr='')
         raise AssertionError(argv)
     return fake
@@ -696,5 +698,5 @@ def test_step_30_runs_the_tool_deck_and_the_spef_mutation_and_records_every_arm(
     assert base['start_pin'] == 'u_core/_417_/CLK' and base['end_pin'] == 'u_core/_416_/D'
     assert base['spice_ns'] == pytest.approx(0.72, abs=0.011)
     sta_runs = [c for c in calls if c[0] == 'sta']
-    assert '-from u_core/_417_ -to u_core/_416_' in Path(sta_runs[1][-1]).read_text()
+    assert '-from u_core/_417_/CLK -to u_core/_416_/D' in Path(sta_runs[1][-1]).read_text()
     assert json.loads((project / 'reports/phase3/spice_path_tool.json').read_text())['step'] == '30'

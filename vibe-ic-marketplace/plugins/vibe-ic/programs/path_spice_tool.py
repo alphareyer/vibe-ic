@@ -318,19 +318,18 @@ def _docker(image: str, project: Path, mounts: List[Tuple[Path, str]], argv: Lis
 # --- waveform and measurement --------------------------------------------
 
 def read_waveform(path: Path, simulator: str) -> Dict[str, List[Tuple[float, float]]]:
-    """{node: [(t, v)]}. ngspice: `wrdata` pairs (time, value) per vector, in
-    the order ``nodes.json`` beside it names them; Xyce: the `.prn` table."""
-    text = path.read_text(errors='replace').splitlines()
-    if simulator == 'xyce':
-        head = text[0].split()
-        rows = [line.split() for line in text[1:] if line.split() and line.split()[0].isdigit()]
-        t = head.index('TIME')
-        return {name.lower(): [(float(r[t]), float(r[i])) for r in rows]
-                for i, name in enumerate(head) if i not in (0, t)}
-    nodes = json.loads(path.with_suffix('.nodes.json').read_text())
-    rows = [[float(x) for x in line.split()] for line in text if line.strip()]
-    return {node.lower(): [(r[2 * i], r[2 * i + 1]) for r in rows]
-            for i, node in enumerate(nodes)}
+    """{node: [(t, v)]} from the simulator's table: ngspice `wrdata` with
+    `wr_vecnames`/`wr_singlescale`, or Xyce's `.prn`. Node names are keyed
+    lowercase with `v(...)` and escapes removed."""
+    lines = [line.split() for line in path.read_text(errors='replace').splitlines()
+             if line.split()]
+    head = lines[0]
+    rows = [r for r in lines[1:] if len(r) == len(head)]
+    key = lambda n: re.sub(r'^v\((.*)\)$', r'\1', n.lower()).replace('\\', '')  # noqa: E731
+    t = next(i for i, n in enumerate(head) if n.lower() == 'time')
+    skip = {t} | ({head.index('Index')} if simulator == 'xyce' and 'Index' in head else set())
+    return {key(name): [(float(r[t]), float(r[i])) for r in rows]
+            for i, name in enumerate(head) if i not in skip}
 
 
 def crossings(wave: List[Tuple[float, float]], level: float, edge: str) -> List[float]:
@@ -403,7 +402,6 @@ def measure(deck: Path, simulator: str, sta: dict, header: dict) -> Dict[str, An
     wave = read_waveform(wave_path, simulator)
     start = sta.get('start_row') or sta['rows'][0]
     end = sta['rows'][-1]
-    wave = {k.replace('\\', ''): v for k, v in wave.items()}
     a = wave.get(start['pin'].lower().replace('\\', ''))
     b = wave.get(end['pin'].lower().replace('\\', ''))
     if not a or not b:
@@ -448,10 +446,13 @@ def _simulate(deck: Path, simulator: str, image: str, project: Path,
     if simulator == 'ngspice':
         nodes = re.search(r'^\.print tran (.*)$', text, re.M).group(1).split()
         names = [n[2:-1] for n in nodes if n.lower().startswith('v(')]
-        deck.with_suffix('.nodes.json').write_text(json.dumps(names))
+        # ngspice keeps node names lowercase and its control language reads a
+        # backslash as an escape; the header names each column (MEASURED:
+        # `v(u_core\/a/CLK)` in a control line is "no such vector").
+        vectors = ' '.join('v(' + n.lower().replace('\\', '\\\\') + ')' for n in names)
         run = f'tran {step_s:.6g} {stop}' if step_s else 'run'
-        control = (f'.control\n{run}\nwrdata ' + str(deck.with_suffix('.wave')) + ' '
-                   + ' '.join(f'v({n})' for n in names) + '\n.endc\n')
+        control = (f'.control\nset wr_vecnames\nset wr_singlescale\n{run}\n'
+                   f'wrdata {deck.with_suffix(".wave")} {vectors}\n.endc\n')
         runnable.write_text(re.sub(r'^\.end\s*$', control + '.end', text, flags=re.M))
         return _docker(image, project, mounts, ['ngspice', '-b', str(runnable)], deck.parent)
     if step_s:
@@ -491,6 +492,16 @@ def run_arm(project: Path, image: str, state_path: Path, corner: str, *,
             paths: int = 3, path_args: Optional[List[str]] = None,
             spef: Optional[Path] = None) -> Dict[str, Any]:
     """Top-N setup paths of `corner` through the tool's deck and `simulator`."""
+    return simulate_arm(prepare_arm(project, image, state_path, corner, pdk_root=pdk_root,
+                                    pdk=pdk, out_dir=out_dir, simulator=simulator,
+                                    paths=paths, path_args=path_args, spef=spef))
+
+
+def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
+                pdk_root: Path, pdk: str, out_dir: Path, simulator: str = 'ngspice',
+                paths: int = 3, path_args: Optional[List[str]] = None,
+                spef: Optional[Path] = None) -> Dict[str, Any]:
+    """The STA session: each path's report and the tool's deck for it."""
     inputs = post_pnr_timing_inputs(project, state_path, corner)
     config = _load(state_path.parent / 'config.json')
     top, power, ground = config.get('DESIGN_NAME'), config.get('VDD_PIN'), config.get('GND_PIN')
@@ -523,31 +534,48 @@ def run_arm(project: Path, image: str, state_path: Path, corner: str, *,
     sta = _docker(image, project, mounts, ['sta', '-no_init', '-no_splash', '-exit', str(tcl)], out_dir)
     (out_dir / 'sta.log').write_text(sta.stdout + '\n' + sta.stderr)
     failed = re.findall(r'^VIBEIC_WPS_FAIL (\d+) (.*)$', sta.stdout, re.M)
-    rows: List[Dict[str, Any]] = []
-    decks = sorted(out_dir.glob('path_*.sp_*.sp'),
-                   key=lambda d: [int(n) for n in re.findall(r'\d+', d.name)])
-    reports = []
-    for rpt in sorted(out_dir.glob('path_*.rpt')):
-        reports += ['Startpoint: ' + b for b in
-                    rpt.read_text(errors='replace').split('Startpoint: ')[1:]]
-    liberty_text = '\n'.join(lib_texts)
-    for index, block in enumerate(reports):
-        parsed = parse_path_report(block)
-        deck = decks[index] if index < len(decks) else None
-        row: Dict[str, Any] = {'path': index + 1, 'deck': str(deck) if deck else None}
+    # Report `path_<i>.rpt` block <n> is the path `write_path_spice` wrote to
+    # `path_<i>.sp_<n>.sp` (the same `-path_args`, the same order).
+    prepared = []
+    for i in range(1, len(args) + 1):
+        rpt = out_dir / f'path_{i}.rpt'
+        blocks = (['Startpoint: ' + b for b in rpt.read_text(errors='replace')
+                   .split('Startpoint: ')[1:]] if rpt.is_file() else [])
+        for n, block in enumerate(blocks, 1):
+            deck = out_dir / f'path_{i}.sp_{n}.sp'
+            prepared.append({'path': len(prepared) + 1, 'parsed': parse_path_report(block),
+                             'deck': deck if deck.is_file() else None,
+                             'wps_fail': [f for k, f in failed if int(k) == i]})
+    return {'corner': corner, 'simulator': simulator, 'inputs': inputs,
+            'spef': str(spef_path), 'spef_sha256': digest(spef_path), 'cells': cells,
+            'models': models, 'sta_rc': sta.returncode, 'prepared': prepared,
+            'image': image, 'project': project, 'mounts': mounts, 'header': header,
+            'liberty_text': '\n'.join(lib_texts)}
+
+
+def simulate_arm(arm: Dict[str, Any], *, workers: int = 8) -> Dict[str, Any]:
+    """Every prepared deck through the simulator (concurrently), measured
+    and compared with its STA path."""
+    from concurrent.futures import ThreadPoolExecutor
+    simulator, header = arm['simulator'], arm['header']
+
+    def one(item: Dict[str, Any]) -> Dict[str, Any]:
+        parsed, deck = item['parsed'], item['deck']
+        row: Dict[str, Any] = {'path': item['path'], 'deck': str(deck) if deck else None}
         if parsed is None or deck is None or deck.stat().st_size == 0:
             row.update(status='NOT_MEASURED', reason='no STA path or no deck',
-                       wps_fail=[f for i, f in failed if int(i) == index + 1])
-            rows.append(row)
-            continue
+                       wps_fail=item['wps_fail'])
+            return row
         step, asked = transient_step_s(deck, parsed['rows'])
-        sim = _simulate(deck, simulator, image, project, mounts, step_s=step)
+        sim = _simulate(deck, simulator, arm['image'], arm['project'], arm['mounts'],
+                        step_s=step)
         deck.with_suffix('.log').write_text(sim.stdout + '\n' + sim.stderr)
         got = measure(deck, simulator, parsed, header)
         row.update(tran_step_ns=step * 1e9, deck_tran_step_ns=asked * 1e9)
         sta_ns = parsed['path_delay_ns']
         stages = path_stages(parsed['rows'])
-        tol = _scc.derive_liberty_path_tolerance(liberty_text, stages, sta_ns) if stages else None
+        tol = (_scc.derive_liberty_path_tolerance(arm['liberty_text'], stages, sta_ns)
+               if stages else None)
         row.update(startpoint=parsed['startpoint'], endpoint=parsed['endpoint'],
                    sta_ns=sta_ns, stages=len(stages), sim_rc=sim.returncode, **got)
         if got.get('status') == 'MEASURED':
@@ -556,10 +584,13 @@ def run_arm(project: Path, image: str, state_path: Path, corner: str, *,
                        tolerance_pct=tol['tolerance_pct'] if tol else None,
                        verdict=(_scc.path_correlation_verdict(err, tol['tolerance_pct'])
                                 if tol and err is not None else 'TOLERANCE_UNDERIVABLE'))
-        rows.append(row)
-    return {'corner': corner, 'simulator': simulator, 'inputs': inputs,
-            'spef': str(spef_path), 'spef_sha256': digest(spef_path), 'cells': cells,
-            'models': models, 'sta_rc': sta.returncode, 'paths': rows}
+        return row
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        rows = list(pool.map(one, arm['prepared']))
+    return {k: v for k, v in arm.items()
+            if k not in ('prepared', 'image', 'project', 'mounts', 'header', 'liberty_text')
+            } | {'paths': rows}
 
 
 def judge(arm: Dict[str, Any], mutated: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -618,18 +649,31 @@ def run_step30(project: Path, image: str, pdk_root: Path, pdk: str, *,
     arms: Dict[str, Any] = {}
     for simulator in simulators:
         try:
-            base = run_arm(project, image, state_path, corner, pdk_root=pdk_root, pdk=pdk,
-                           out_dir=root / simulator / 'base', simulator=simulator, paths=paths)
+            base = prepare_arm(project, image, state_path, corner, pdk_root=pdk_root, pdk=pdk,
+                               out_dir=root / simulator / 'base', simulator=simulator,
+                               paths=paths)
             mutated_spef = mutate_spef(Path(base['spef']), MUTATION_FACTOR,
                                        root / simulator / 'mutated.spef')
-            pins = [f"-path_delay max -from {r['startpoint']} -to {r['endpoint']}"
-                    for r in base['paths'] if r.get('status') == 'MEASURED']
-            mutated = (run_arm(project, image, state_path, corner, pdk_root=pdk_root, pdk=pdk,
-                               out_dir=root / simulator / 'mutated', simulator=simulator,
-                               path_args=pins, spef=Path(mutated_spef['path']))
-                       if pins else None)
-            arms[simulator] = {'judgment': judge(base, mutated), 'base': base,
-                               'mutated': mutated, 'mutation': mutated_spef}
+            # The mutation re-times the SAME start and end pins.
+            pins = [f"-path_delay max -from {item['parsed']['start_row']['pin']} "
+                    f"-to {item['parsed']['rows'][-1]['pin']}"
+                    for item in base['prepared'] if item['parsed'] and item['deck']]
+            mutated = (prepare_arm(project, image, state_path, corner, pdk_root=pdk_root,
+                                   pdk=pdk, out_dir=root / simulator / 'mutated',
+                                   simulator=simulator, path_args=pins,
+                                   spef=Path(mutated_spef['path'])) if pins else None)
+            # Every deck of both arms simulates at once; they are independent.
+            base['prepared'] = [dict(i, arm='base') for i in base['prepared']]
+            both = dict(base, prepared=base['prepared']
+                        + [dict(i, arm='mutated') for i in (mutated or {}).get('prepared', [])])
+            rows = simulate_arm(both)['paths']
+            done_base = {k: v for k, v in simulate_arm(dict(base, prepared=[]))
+                         .items()} | {'paths': rows[:len(base['prepared'])]}
+            done_mut = (None if mutated is None else
+                        {k: v for k, v in simulate_arm(dict(mutated, prepared=[])).items()}
+                        | {'paths': rows[len(base['prepared']):]})
+            arms[simulator] = {'judgment': judge(done_base, done_mut), 'base': done_base,
+                               'mutated': done_mut, 'mutation': mutated_spef}
         except Refusal as exc:
             arms[simulator] = {'judgment': {'verdict': 'NOT_MEASURED', 'reason': str(exc)}}
     measured = {s: a for s, a in arms.items() if a['judgment']['verdict'] != 'NOT_MEASURED'}
