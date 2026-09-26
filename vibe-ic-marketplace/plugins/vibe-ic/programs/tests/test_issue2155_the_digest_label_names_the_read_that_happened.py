@@ -90,6 +90,21 @@ def _no_docker_at_all(monkeypatch, calls):
     return calls
 
 
+def _state_the_pin(monkeypatch, digest):
+    """THE PIN IS A STATED PRECONDITION of section 2, not a read.
+
+    `judged_image` composes `_pin.image_reference(env)`, and that presumes an
+    identity. Left to `resolved_image_digest` it is resolved FROM THIS HOST
+    (b4b098acc) by `docker image ls --digests`: under `_no_docker_at_all` a
+    route the model refuses by design, so the test went red whenever no
+    earlier test in the process had warmed the resolve cache and green whenever
+    one had; without that model, it answered out of whatever this host holds
+    and escaped as `ImageNotResolvable` on a host with no docker at all.
+    """
+    monkeypatch.setattr(_pin, "resolved_image_digest",
+                        lambda env=None, *, allow_pull=False: digest)
+
+
 # ── 1. one test per label: the kind names the read that produced the digest ──
 
 def test_a_reference_that_carries_its_digest_is_labelled_reference_digest(
@@ -154,8 +169,10 @@ def test_allow_pull_over_a_digest_pinned_reference_says_reference_digest(
     """
     calls: list = []
     _no_docker_at_all(monkeypatch, calls)
+    _state_the_pin(monkeypatch, _B)
     j = M.judged_image(env={}, allow_pull=True)
     assert j.ref == _pin.image_reference({})
+    assert j.digest == _B
     assert j.digest == _pin.IMAGE_DIGEST
     assert j.digest_kind == "reference-digest", (
         f"the report labels its digest {j.digest_kind!r}; the reads actually "
@@ -179,6 +196,7 @@ def test_judged_image_reports_the_kind_it_was_handed(monkeypatch, kind):
     # kind that produced.
     monkeypatch.setattr(_pin, "local_references_for_digest",
                         lambda digest: ((), ""))
+    _state_the_pin(monkeypatch, _A)
     monkeypatch.setattr(M, "image_digest",
                         lambda ref, **kw: (_pin.IMAGE_DIGEST, kind, ""))
     monkeypatch.setattr(M, "image_version",
