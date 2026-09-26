@@ -126,19 +126,59 @@ def test_the_guard_fires_when_a_roster_reappears_under_any_name(tmp_path):
         assert key in {d["key"] for d in rec["second_declarations"]}, rec
 
 
+def _declared_sequence(flow: Path):
+    """The flow's own step sequence, as `steps:` declares it. The step NUMBER
+    is an identifier; the position in this list is where the flow runs it
+    (step 31 keeps its number and sits after 37.3 since v1.24.73)."""
+    doc = yaml.safe_load(flow.read_text(encoding="utf-8"))
+    return [str(s["id"]) for s in doc["steps"]]
+
+
+def _stage_of(membership):
+    return {str(x): sid for sid, xs in membership.items() for x in xs}
+
+
+#: The four cut points #923 reconciled: where origin/main's roster and the
+#: per-step fields disagreed about a stage BOUNDARY on the day it landed.
+_RECONCILED_AT_923 = ["14", "32", "38", "39"]
+
+
 def test_the_reintroduced_roster_would_carry_the_same_four_contradictions(tmp_path):
     """Not a rule — the RECORD of what was reconciled. The roster this test
     puts back is origin/main's, and against the surviving per-step fields it
-    still disagrees about exactly steps 14, 32, 38 and 39."""
+    disagreed about exactly steps 14, 32, 38 and 39.
+
+    A later landing may RELOCATE a step into another stage (v1.24.73 moved
+    step 31 to stage4, after step 37). The frozen roster then disagrees about
+    that step too, and that is not one of the four. Which extra clashes are
+    relocations is read off the flow, not re-typed: a relocated step sits, in
+    the flow's declared sequence, AFTER a step the roster itself places in a
+    later stage. A step re-labelled in place has no such witness, so it is
+    still reported here as a fifth contradiction."""
     p = _mutate(tmp_path, _restore_roster, name="asmain.yaml")
     r, rec = _run(p, tmp_path / "asmain.json")
     assert r.returncode == 2
     doc = yaml.safe_load(p.read_text(encoding="utf-8"))
-    field = {str(s["id"]): str(s.get("stage")) for s in doc["steps"]}
-    clash = sorted(
-        str(sid) for st in doc["stages"] for sid in st.get("steps", [])
-        if str(sid) in field and field[str(sid)] != st["id"])
-    assert clash == ["14", "32", "38", "39"], clash
+    field = _stage_of(rec["membership"])  # the PROGRAM's reading of the fields
+    order = [st["id"] for st in doc["stages"]]
+    roster = {str(sid): st["id"] for st in doc["stages"]
+              for sid in st.get("steps", [])}
+    clash = sorted((sid for sid in roster
+                    if sid in field and field[sid] != roster[sid]),
+                   key=lambda x: (len(x), x))
+    seq = _declared_sequence(p)
+
+    def relocated(sid):
+        before = seq[:seq.index(sid)]
+        return any(order.index(roster[b]) > order.index(roster[sid])
+                   for b in before if b in roster)
+
+    moved = [sid for sid in clash if relocated(sid)]
+    assert [sid for sid in clash if sid not in moved] == _RECONCILED_AT_923, (
+        f"clash={clash}, relocated-by-the-flow={moved}")
+    for sid in moved:
+        # a relocation lands the step in the stage it now runs among
+        assert order.index(field[sid]) > order.index(roster[sid]), (sid, field[sid])
 
 
 # ── PAIRED GUARDS — true on BOTH arms ───────────────────────────────────────
@@ -160,27 +200,42 @@ def _numeric_runs(declared_ids, membership):
 @pytest.mark.parametrize("arm", ["roster_free", "roster_carrying"])
 def test_numeric_backbone_is_contiguous_and_follows_declared_stage_order(
         arm, tmp_path, shipped):
-    """GUARD. The numeric steps must form gapless, non-overlapping runs in the
-    order the stages are declared. It held before the roster was deleted and it
-    holds after, so it cannot be traded away to satisfy the discriminator: a
-    'fix' that scattered steps to make one declaration true would break it.
+    """GUARD. Walking the flow's DECLARED step sequence, the numeric steps
+    visit the stages in declared stage order and never return to a stage they
+    left; together they are the gapless 1..N, each in exactly one stage. It
+    held before the roster was deleted and it holds after, so it cannot be
+    traded away to satisfy the discriminator: a 'fix' that re-labelled a step
+    into another stage without moving it to where that stage runs would
+    break it.
+
+    The guard used to say each stage's NUMBERS are contiguous. That is not a
+    property of the flow: v1.24.73 moved step 31 (physical verification) into
+    stage4 and placed it after step 37, where it runs, keeping its number.
+    Stage3 is then 15..30, 32 and the flow is right. What the guard protects
+    is that membership follows the flow's order — read from the flow here.
     """
     if arm == "roster_free":
         _, rec = shipped
+        flow = _FLOW
     else:
-        p = _mutate(tmp_path, _restore_roster, name="guard.yaml")
-        _, rec = _run(p, tmp_path / "guard.json")
+        flow = _mutate(tmp_path, _restore_roster, name="guard.yaml")
+        _, rec = _run(flow, tmp_path / "guard.json")
     declared_ids, membership = _membership_from_program(rec)
     runs = _numeric_runs(declared_ids, membership)
     assert len(runs) >= 4, f"too few numeric stages to be the backbone: {runs}"
-    prev_end = 0
-    for sid, nums in runs:
-        assert nums == list(range(nums[0], nums[-1] + 1)), (
-            f"stage {sid} numeric members are not contiguous: {nums}")
-        assert nums[0] == prev_end + 1, (
-            f"stage {sid} starts at {nums[0]}, expected {prev_end + 1} — the "
-            f"numeric backbone has a gap or an overlap")
-        prev_end = nums[-1]
+
+    nums = sorted(n for _, ns in runs for n in ns)
+    assert nums == list(range(1, nums[-1] + 1)), (
+        f"the numeric backbone has a gap or a step in two stages: {nums}")
+
+    stage_of = _stage_of({sid: [str(n) for n in ns] for sid, ns in runs})
+    visited = [stage_of[x] for x in _declared_sequence(flow) if x in stage_of]
+    assert len(visited) == len(nums), "a numeric step is missing from steps:"
+    walk = [st for i, st in enumerate(visited) if i == 0 or visited[i - 1] != st]
+    assert walk == [sid for sid, _ in runs], (
+        f"in the flow's declared sequence the numeric steps visit the stages "
+        f"as {walk}; expected each stage once, in declared order "
+        f"{[sid for sid, _ in runs]}")
 
 
 def test_every_step_resolves_to_a_declared_stage(shipped):

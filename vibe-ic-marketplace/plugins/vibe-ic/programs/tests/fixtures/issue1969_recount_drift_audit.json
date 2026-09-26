@@ -493,16 +493,6 @@
       "disclosures": []
     },
     {
-      "id": "31",
-      "name": "synthetic step 48",
-      "stage": "stage1",
-      "status": "NOT_MEASURED",
-      "reason_class": "upstream_failed",
-      "declared_by": "",
-      "attribution": "",
-      "disclosures": []
-    },
-    {
       "id": "32",
       "name": "synthetic step 49",
       "stage": "stage1",
@@ -543,16 +533,6 @@
       "disclosures": []
     },
     {
-      "id": "36",
-      "name": "synthetic step 53",
-      "stage": "stage1",
-      "status": "NOT_MEASURED",
-      "reason_class": "upstream_failed",
-      "declared_by": "",
-      "attribution": "",
-      "disclosures": []
-    },
-    {
       "id": "37",
       "name": "synthetic step 54",
       "stage": "stage1",
@@ -565,6 +545,26 @@
     {
       "id": "37.3",
       "name": "synthetic step 55",
+      "stage": "stage1",
+      "status": "NOT_MEASURED",
+      "reason_class": "upstream_failed",
+      "declared_by": "",
+      "attribution": "",
+      "disclosures": []
+    },
+    {
+      "id": "31",
+      "name": "synthetic step 48",
+      "stage": "stage1",
+      "status": "NOT_MEASURED",
+      "reason_class": "upstream_failed",
+      "declared_by": "",
+      "attribution": "",
+      "disclosures": []
+    },
+    {
+      "id": "36",
+      "name": "synthetic step 53",
       "stage": "stage1",
       "status": "NOT_MEASURED",
       "reason_class": "upstream_failed",
