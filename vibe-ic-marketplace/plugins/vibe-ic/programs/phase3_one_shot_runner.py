@@ -42571,30 +42571,12 @@ def _density_metal_fill(project: Path, top: str, pdk: PdkConfig,
 
 
 def _max_captable_c(pdk: "PdkConfig", container: str) -> str:
-    """Container path of the PDK's MAX-corner OpenRCX captable (for real max-RC
-    parasitic extraction). Derived from the tech-LEF path (prefix before
-    ``/libs.ref/``); globs ``rules.openrcx.*.max.magic`` under librelane/openlane.
-    Returns "" if none found. chip/PDK-AGNOSTIC (no chip/vendor literal)."""
-    root = _pdk_root_c(pdk)
-    if not root:
-        return ""
-    for sub in ("librelane", "openlane"):
-        try:
-            # SPM-SI-1 — both captable naming conventions (chip/PDK-AGNOSTIC):
-            #   open_pdks / asap7 : rules.openrcx.<pdk>.max.magic
-            #   IHP-Open-PDK      : openrcx/<pdk>.max.magic.rules
-            rc, out, _ = _docker_exec(
-                container,
-                f"ls {root}/libs.tech/{sub}/rules.openrcx.*.max.magic "
-                f"{root}/libs.tech/{sub}/openrcx/*.max.magic.rules "
-                f"{root}/libs.tech/{sub}/openrcx/*.max.rules 2>/dev/null")
-        except Exception:
-            continue
-        for ln in (out or "").splitlines():
-            ln = ln.strip()
-            if ln.endswith((".max.magic", ".max.magic.rules", ".max.rules")):
-                return ln
-    return ""
+    """Container path of the MAX-corner OpenRCX ruleset this PDK DECLARES (step
+    22's declared input, `_openrcx_ruleset_declaration`), for the real max-RC
+    repair extractions. "" when the PDK declares no max ruleset. Never globbed:
+    the glob preferred an undeclared `*.max.magic`, so a repair sized against a
+    model the sign-off extraction does not use. chip/PDK-AGNOSTIC."""
+    return _discover_openrcx_captables(pdk, container).get("max", "")
 
 
 _SHIP_POSTROUTE_CVG_TCL = r"""
@@ -58663,6 +58645,11 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                          else "direct:_emit_spef_corners"),
             "handoff_receipt": (str(_ll_rcx_receipt.relative_to(project))
                                 if _ll_m22 == "librelane" else None),
+            # The declared ruleset the direct corners were extracted with.
+            "ruleset_declaration": (
+                str((spef_out.parent / _RCX_DECLARATION_RECORD).relative_to(project))
+                if _ll_m22 != "librelane"
+                and (spef_out.parent / _RCX_DECLARATION_RECORD).is_file() else None),
             "corners_extracted": _corners,
             "corner_count": len(_corners),
             "multi_corner": _multi,
@@ -59596,6 +59583,12 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                                 .strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "outputs": {spef_rel: _sha(spef_out)},
             }
+            # §4.05 — the extraction ruleset is a declared INPUT: carry the
+            # declaration (file per corner, and where the PDK declared it)
+            # that `_emit_spef` recorded beside this SPEF.
+            _rcx_inputs = _rcx_provenance_inputs(spef_out)
+            if _rcx_inputs:
+                spef_entry["inputs"] = _rcx_inputs
             _rmeas.attach(project, spef_entry)
             with prov_path.open("a") as f:
                 f.write(json.dumps(spef_entry) + "\n")
@@ -62651,6 +62644,30 @@ def _emit_spef(project: Path, top: str, pdk: PdkConfig, container: str,
     macro_lefs_tcl = _extra_lef_read_block(
         _def_reopen_extra_lefs_c(def_file, pdk, container))
     mp = pdk.metal_prefix
+    # §4.05 — the ruleset is a declared input, recorded beside the SPEF.
+    decl = _openrcx_ruleset_declaration(pdk, container)
+    _write_rcx_declaration_record(spef_out.parent, decl)
+    if decl["status"] == "UNREADABLE":
+        notes.append(
+            f"RCX_RULESET_DECLARATION_UNREADABLE: {decl['detail']} — step 22 "
+            "refuses to extract: the rule-less LEF-RC tier would silently "
+            "replace the ruleset this PDK declares.")
+        return False
+    rules_nom = ""
+    if decl["status"] == "DECLARED":
+        _nom = decl["corners"].get("nom")  # type: ignore[union-attr]
+        if not _nom:
+            notes.append(
+                "RCX_NOM_RULESET_UNDECLARED: the PDK declares OpenRCX rulesets "
+                f"only for {sorted(decl['corners'])} — step 22 refuses to "  # type: ignore[arg-type]
+                "extract the nominal SPEF on a neighbouring corner's model.")
+            return False
+        rules_nom = _nom["path"]
+    else:
+        notes.append(
+            f"RCX_RULESET_{decl['status']}: {decl['detail']} — the nominal "
+            "SPEF is the disclosed rule-less LEF-RC v2 tier; no ruleset is "
+            "guessed from the PDK tree.")
     # ORGANIC-20260531 Step 22 fix (v0.2.5 — CORRECTED): `write_spef` is the OpenRCX
     # sign-off command; it needs `extract_parasitics -ext_model_file <captable>` to have
     # run — NOT `estimate_parasitics` (that only populates lumped RC for STA and leaves
@@ -62664,10 +62681,10 @@ def _emit_spef(project: Path, top: str, pdk: PdkConfig, container: str,
     # finding was a false negative — it was tested on a routing-less DEF (0 rc segments).
     # Verified working: spm routed DEF → 1370 rc segments, 330 nets, 1700 caps extracted.
     #
-    # Sequence (chip- AND pdk-AGNOSTIC — the captable is globbed from the PDK root derived
-    # from the tech-LEF path; layer names from pdk.metal_prefix):
+    # Sequence (chip- AND pdk-AGNOSTIC — the ruleset is the one the PDK DECLARES,
+    # see `_openrcx_ruleset_declaration`; layer names from pdk.metal_prefix):
     #   1. set_wire_rc (per-layer R/C — harmless; needed by the estimate fallback)
-    #   2. discover the OpenRCX captable for this PDK
+    #   2. the PDK's declared OpenRCX ruleset (nom)
     #   3a. captable found → define_process_corner + extract_parasitics -ext_model_file
     #       (real OpenRCX extraction); 3b. else → estimate_parasitics fallback
     #   4. write_spef
@@ -62684,57 +62701,11 @@ if {{[catch {{set_wire_rc -signal -layer {mp}1}} _swr_sig]}} {{
   catch {{set_wire_rc -layer {mp}1}}
 }}
 catch {{set_wire_rc -clock -layer {mp}5}}
-# --- Step 22.2: discover the OpenRCX captable for THIS PDK (chip/PDK-AGNOSTIC) ---
-# Derive the PDK root from the tech-LEF path (.../<PDK>/libs.ref/...), then glob the
-# OpenRCX extraction-model file (rules.openrcx.<pdk>.nom.magic | .nom). v1.3.46: the
-# fork's newer image ships it under libs.tech/librelane, the older image under
-# libs.tech/openlane — glob BOTH (brace expansion); lsort orders librelane first so
-# [lindex $_c 0] prefers librelane, falling back to openlane (backward-compat).
-set _tlef {tech_lef_c}
-set _i [string first "/libs.ref/" $_tlef]
-set _rules ""
-if {{$_i > 0}} {{
-  set _root [string range $_tlef 0 [expr {{$_i - 1}}]]
-  set _c [lsort [glob -nocomplain $_root/libs.tech/{{librelane,openlane}}/rules.openrcx.*.nom.magic]]
-  if {{[llength $_c] == 0}} {{
-    set _c [lsort [glob -nocomplain $_root/libs.tech/{{librelane,openlane}}/rules.openrcx.*.nom]]
-  }}
-  # SPM-SI-1 — SECOND captable naming convention (chip/PDK-AGNOSTIC). IHP-Open-PDK
-  # ships it one level deeper with the tokens reversed:
-  #   libs.tech/librelane/openrcx/<pdk>.<corner>.magic.rules
-  # Missing it silently downgrades to the -lef_rc grounded-cap path -> a SPEF with
-  # ZERO coupling caps -> a VACUOUS crosstalk screen (N nets, 0 coupling pairs)
-  # on a PDK that does ship a full coupling model. Ordered LAST so nothing that
-  # resolves today changes.
-  if {{[llength $_c] == 0}} {{
-    set _c [lsort [glob -nocomplain $_root/libs.tech/{{librelane,openlane}}/openrcx/*.nom.magic.rules $_root/libs.tech/{{librelane,openlane}}/openrcx/*.nom.rules]]
-  }}
-  if {{[llength $_c] > 0}} {{ set _rules [lindex $_c 0] }}
-}}
-# PR-B2b — staged tech-LEF fallback: a named PDK whose tech LEF was staged
-# into the project (e.g. asap7, normalized for negative OFFSETs) carries no
-# "/libs.ref/" in its path, so the derivation above silently finds nothing
-# and the run degrades to the LEF-RC fallback — which itself dies on ASAP7
-# because the academic tech LEF declares no RESISTANCE (RCX-0138). The CELL
-# LEF of a named PDK always lives in-container under <PDK>/libs.ref/, so
-# derive the PDK root from it when the tech-LEF path yields no captable.
-# chip-AGNOSTIC: same glob convention, second path source.
-if {{$_rules eq ""}} {{
-  set _clef {cell_lef_c}
-  set _j [string first "/libs.ref/" $_clef]
-  if {{$_j > 0}} {{
-    set _root2 [string range $_clef 0 [expr {{$_j - 1}}]]
-    set _c2 [lsort [glob -nocomplain $_root2/libs.tech/{{librelane,openlane}}/rules.openrcx.*.nom.magic]]
-    if {{[llength $_c2] == 0}} {{
-      set _c2 [lsort [glob -nocomplain $_root2/libs.tech/{{librelane,openlane}}/rules.openrcx.*.nom]]
-    }}
-    # SPM-SI-1 — second convention on the cell-LEF-derived root too.
-    if {{[llength $_c2] == 0}} {{
-      set _c2 [lsort [glob -nocomplain $_root2/libs.tech/{{librelane,openlane}}/openrcx/*.nom.magic.rules $_root2/libs.tech/{{librelane,openlane}}/openrcx/*.nom.rules]]
-    }}
-    if {{[llength $_c2] > 0}} {{ set _rules [lindex $_c2 0] }}
-  }}
-}}
+# --- Step 22.2: the OpenRCX ruleset THIS PDK DECLARES (nom corner) ---
+# Resolved in Python by `_openrcx_ruleset_declaration` from the PDK's own
+# LibreLane config (or the registry); never globbed. Recorded, with where it
+# was declared, in {_RCX_DECLARATION_RECORD} beside this SPEF.
+set _rules {{{rules_nom}}}
 if {{$_rules ne ""}} {{
   # --- Step 22.3a: full OpenRCX extraction with the captable (sign-off SPEF) ---
   puts "SPEF_OPENRCX_CAPTABLE: $_rules"
@@ -62775,6 +62746,10 @@ exit
         f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
         f"openroad -no_init -exit {tcl_c} 2>&1 | tee {out_dir_c}/extract.log"
     )
+    # A SPEF left by an earlier extraction (another ruleset, another route)
+    # must not survive a failed re-extraction as if this one produced it: the
+    # declaration recorded beside it would then vouch for bytes it never made.
+    spef_out.unlink(missing_ok=True)
     rc, out, err = _docker_exec(container, cmd, marker=tcl_c, outputs=[spef_out])
     if not spef_out.is_file() or spef_out.stat().st_size == 0:
         notes.append(
@@ -62865,44 +62840,230 @@ def _emit_spef_coupling_augment(def_file: Path, tech_lef: Path, spef_out: Path,
 _SPEF_CORNERS = ("min", "nom", "max")
 
 
-def _discover_openrcx_captables(pdk: PdkConfig, container: str
-                                ) -> Dict[str, str]:
-    """Return {corner: container_captable_path} for the min/nom/max OpenRCX
-    extraction models this PDK ships (chip/PDK/image-AGNOSTIC — globbed from the
-    PDK root derived from the tech-LEF path). Corners with no captable are omitted;
-    an empty/one-entry result means the PDK is single-corner (honest fallback).
+# ── Step 22: the OpenRCX ruleset is a DECLARED input (§4.05) ────────────────
+# The direct path used to GLOB the PDK tree for `rules.openrcx.*.<corner>[.magic]`
+# (and IHP's `openrcx/*.<corner>.magic.rules`) and PREFER the `.magic` file.
+# Nothing declares that file.  MEASURED on the 0.3.79 image: the glob picks a
+# ruleset the PDK does not declare on all three open PDKs --
+#   gf180mcuD  declares rules.openrcx.gf180mcuD.<c>       (glob took .<c>.magic)
+#   sky130A    declares rules.openrcx.sky130A.<c>.calibre (glob took .<c>.magic)
+#   ihp-sg13g2 declares openrcx/IHP_rcx_patterns.rules    (glob took the
+#              ihp-sg13g2.nom.magic.rules its config comments out)
+# and on spm x gf180mcuD that one choice is the whole 35 % total-C gap between
+# this path (9.367 pF) and LibreLane OpenROAD.RCX (6.084 pF) on the same DEF.
+#
+# The declaration is read where LibreLane reads it: the PDK's own
+# `libs.tech/librelane/config.tcl` (an older image's `libs.tech/openlane/`
+# when that is the only one; then the standard-cell library's
+# `<scl>/config.tcl`), SOURCED by Tcl exactly as LibreLane sources it, with
+# `RCX_RULESETS` first and the legacy `RCX_RULES[_MIN|_MAX]` translated the
+# way LibreLane's `config/pdk_compat.py` does (nom_*/min_*/max_*).  A PDK with
+# no LibreLane config may declare it in `pdk_registry.json` instead
+# (`rcx_rules[_min|_max]`, relative to the PDK root).  Nothing is globbed:
+#   DECLARED       -> OpenRCX with exactly the declared file(s)
+#   DECLARES_NONE  -> the PDK's config was read and names no ruleset: the
+#                     disclosed rule-less tier (LEF-RC v2, grounded caps)
+#   UNDECLARED     -> no declaration source exists: the same disclosed tier,
+#                     never a guessed ruleset
+#   UNREADABLE     -> a declaration exists but could not be evaluated, or names
+#                     a file that is not there: REFUSE (no SPEF), because the
+#                     rule-less tier would silently replace a declared model.
+_RCX_LEGACY_VARS = (("RCX_RULES", "nom_*"), ("RCX_RULES_MIN", "min_*"),
+                    ("RCX_RULES_MAX", "max_*"))
+_RCX_DECLARATION_RECORD = "rcx_ruleset_declaration.json"
+_RCX_DECL_TCL = r"""
+lassign $argv pdkdir scl
+set root [file dirname $pdkdir]
+set pdk [file tail $pdkdir]
+set ::env(PDK_ROOT) $root
+set ::env(PDK) $pdk
+if {$scl ne ""} { set ::env(STD_CELL_LIBRARY) $scl }
+set flow ""
+foreach f {librelane openlane} {
+  if {[file isfile $root/$pdk/libs.tech/$f/config.tcl]} { set flow $f; break }
+}
+if {$flow eq ""} { puts "RCX_DECL_NO_CONFIG $root/$pdk/libs.tech/{librelane,openlane}/config.tcl"; exit }
+set cfg $root/$pdk/libs.tech/$flow/config.tcl
+puts "RCX_DECL_CONFIG $cfg"
+if {[catch {source $cfg} e]} { puts "RCX_DECL_ERROR [string map {"\n" " "} $e]"; exit }
+set from [dict create]
+foreach var {RCX_RULESETS %LEGACYVARS%} {
+  if {[info exists ::env($var)]} { dict set from $var $cfg }
+}
+if {[info exists ::env(STD_CELL_LIBRARY)]} {
+  set scfg $root/$pdk/libs.tech/$flow/$::env(STD_CELL_LIBRARY)/config.tcl
+  if {[file isfile $scfg]} {
+    set before [array get ::env RCX_*]
+    if {[catch {source $scfg} e]} { puts "RCX_DECL_ERROR [string map {"\n" " "} $e]"; exit }
+    puts "RCX_DECL_CONFIG $scfg"
+    foreach var {RCX_RULESETS %LEGACYVARS%} {
+      if {[info exists ::env($var)] && (![dict exists $before $var] || [dict get $before $var] ne $::env($var))} {
+        dict set from $var $scfg
+      }
+    }
+  }
+}
+if {[info exists ::env(RCX_RULESETS)]} {
+  dict for {k v} $::env(RCX_RULESETS) { puts "RCX_DECL_RULESET RCX_RULESETS $k [file isfile $v] [dict get $from RCX_RULESETS] $v" }
+} else {
+  foreach {var pat} {%LEGACY%} {
+    if {[info exists ::env($var)]} { puts "RCX_DECL_RULESET $var $pat [file isfile $::env($var)] [dict get $from $var] $::env($var)" }
+  }
+}
+puts "RCX_DECL_END"
+""".replace("%LEGACY%", " ".join(f"{v} {p}" for v, p in _RCX_LEGACY_VARS)).replace(
+    "%LEGACYVARS%", " ".join(v for v, _p in _RCX_LEGACY_VARS))
 
-    v1.3.46 — the fork's newer image ships the captable under libs.tech/librelane;
-    the older image used libs.tech/openlane. We PREFER librelane and fall back to
-    openlane (backward-compat) — the first dir that yields a hit for a corner wins."""
-    out: Dict[str, str] = {}
+
+def _rcx_ruleset_corner(pattern: str) -> str:
+    """`nom_*` -> `nom`: the corner a LibreLane RCX_RULESETS pattern names
+    (the same reading `librelane_signoff.rc_corner` gives it)."""
+    return pattern.strip("*_")
+
+
+def _pdk_std_cell_library(pdk: PdkConfig) -> str:
+    """The standard-cell library this flow reads: the `libs.ref/<scl>/`
+    segment of the PDK's own cell LEF / Liberty (the value LibreLane's
+    STD_CELL_LIBRARY carries).  "" when neither path has one."""
+    for attr in ("cell_lef", "liberty", "cell_gds"):
+        v = str(getattr(pdk, attr, "") or "")
+        i = v.find("/libs.ref/")
+        if i > 0:
+            return v[i + len("/libs.ref/"):].split("/", 1)[0]
+    return ""
+
+
+def _parse_rcx_declaration(out: str) -> Dict[str, object]:
+    """The fixed-format lines `_RCX_DECL_TCL` prints -> the declaration.
+
+    Grammar (one record per line, emitted by our own Tcl, no prose):
+    `RCX_DECL_CONFIG <file>`, `RCX_DECL_NO_CONFIG <file>`,
+    `RCX_DECL_ERROR <msg>`,
+    `RCX_DECL_RULESET <var> <pattern> <0|1 exists> <declaring file> <path>`,
+    `RCX_DECL_END`.  Any other line (the image's login banner) is ignored."""
+    configs: List[str] = []
+    corners: Dict[str, Dict[str, str]] = {}
+    other: Dict[str, str] = {}
+    missing: List[str] = []
+    no_config = error = None
+    ended = False
+    for ln in (out or "").splitlines():
+        words = ln.strip().split(" ", 5)
+        tag = words[0] if words else ""
+        if tag == "RCX_DECL_CONFIG" and len(words) >= 2:
+            configs.append(ln.strip().split(" ", 1)[1])
+        elif tag == "RCX_DECL_NO_CONFIG" and len(words) >= 2:
+            no_config = ln.strip().split(" ", 1)[1]
+        elif tag == "RCX_DECL_ERROR":
+            error = ln.strip()[len(tag):].strip() or "error"
+        elif tag == "RCX_DECL_RULESET" and len(words) == 6:
+            var, pattern, exists, source, path = words[1:6]
+            by = f"{source}:{var}" + (
+                f"[{pattern}]" if var == "RCX_RULESETS" else "")
+            if exists != "1":
+                missing.append(f"{by} -> {path}")
+            corner = _rcx_ruleset_corner(pattern)
+            if corner in _SPEF_CORNERS:
+                corners[corner] = {"path": path, "pattern": pattern,
+                                   "declared_by": by}
+            else:
+                other[pattern] = path
+        elif tag == "RCX_DECL_END":
+            ended = True
+    if no_config:
+        return {"status": "UNDECLARED", "declaration": None, "corners": {},
+                "detail": f"no LibreLane PDK config at {no_config}"}
+    if error or not ended:
+        return {"status": "UNREADABLE", "declaration": configs or None,
+                "corners": {}, "detail": error or "the declaration did not "
+                "finish evaluating (no RCX_DECL_END)"}
+    if missing:
+        return {"status": "UNREADABLE", "declaration": configs, "corners": {},
+                "detail": "declared ruleset file(s) absent: " + "; ".join(missing)}
+    if not corners:
+        return {"status": "DECLARES_NONE", "declaration": configs, "corners": {},
+                "other_patterns": other,
+                "detail": "the PDK's LibreLane config declares no OpenRCX "
+                          "ruleset for min/nom/max"}
+    return {"status": "DECLARED", "declaration": configs, "corners": corners,
+            "other_patterns": other, "detail": ""}
+
+
+def _openrcx_ruleset_declaration(pdk: PdkConfig, container: str
+                                 ) -> Dict[str, object]:
+    """The OpenRCX ruleset(s) this PDK DECLARES, per corner, with where each
+    was declared.  Never globbed; see the block comment above."""
     root_c = _pdk_root_c(pdk)
     if not root_c:
-        return out
-    # librelane FIRST (newer image), openlane fallback (older image).
-    cap_dirs = (f"{root_c}/libs.tech/librelane",
-                f"{root_c}/libs.tech/openlane")
-    for corner in _SPEF_CORNERS:
-        chosen: Optional[str] = None
-        for d in cap_dirs:
-            # SPM-SI-1 — two captable naming conventions, chip/PDK-AGNOSTIC:
-            #   open_pdks / asap7 : <d>/rules.openrcx.<pdk>.<corner>.magic
-            #   IHP-Open-PDK      : <d>/openrcx/<pdk>.<corner>.magic.rules
-            # Glob BOTH so a PDK using the second layout gets its real coupling
-            # captable instead of silently degrading to grounded-cap LEF-RC.
-            expr = (f"{shlex.quote(d)}/rules.openrcx.*.{corner}.magic "
-                    f"{shlex.quote(d)}/rules.openrcx.*.{corner} "
-                    f"{shlex.quote(d)}/openrcx/*.{corner}.magic.rules "
-                    f"{shlex.quote(d)}/openrcx/*.{corner}.rules")
-            # Prefer the .magic model; require the corner token in the name.
-            hits = _container_ls_paths(container, expr, f".{corner}")
-            magic = [h for h in hits if h.endswith(".magic")]
-            chosen = magic[0] if magic else (hits[0] if hits else None)
-            if chosen:
-                break
-        if chosen:
-            out[corner] = chosen
-    return out
+        return {"status": "UNDECLARED", "declaration": None, "corners": {},
+                "detail": "no PDK root: none of the PDK's files lives under "
+                          "<PDK_ROOT>/<PDK>/libs.ref/"}
+    import base64 as _b64
+    script = _b64.b64encode(_RCX_DECL_TCL.encode()).decode()
+    cmd = (f"echo {script} | base64 -d | tclsh /dev/stdin "
+           f"{shlex.quote(root_c)} {shlex.quote(_pdk_std_cell_library(pdk))}")
+    try:
+        _rc, out, err = _docker_exec(container, cmd, timeout=60)
+    except Exception as exc:  # the container itself did not answer
+        return {"status": "UNREADABLE", "declaration": None, "corners": {},
+                "detail": f"declaration probe failed: {exc}"}
+    decl = _parse_rcx_declaration(out)
+    if decl["status"] != "UNDECLARED":
+        return decl
+    # No LibreLane config: the registry is the other declaration a PDK has.
+    entry = _pdk_registry_entry(pdk.name) or {}
+    reg: Dict[str, Dict[str, str]] = {}
+    for key, corner in (("rcx_rules", "nom"), ("rcx_rules_min", "min"),
+                        ("rcx_rules_max", "max")):
+        rel = entry.get(key)
+        if isinstance(rel, str) and rel.strip():
+            reg[corner] = {"path": f"{root_c}/{rel.strip().lstrip('/')}",
+                           "pattern": f"{corner}_*",
+                           "declared_by": f"pdk_registry.json:{pdk.name}.{key}"}
+    if not reg:
+        return decl
+    found = _container_ls_paths(
+        container, " ".join(shlex.quote(v["path"]) for v in reg.values()), "/")
+    absent = [f"{v['declared_by']} -> {v['path']}" for v in reg.values()
+              if v["path"] not in found]
+    if absent:
+        return {"status": "UNREADABLE", "declaration": ["pdk_registry.json"],
+                "corners": {}, "detail": "declared ruleset file(s) absent: "
+                + "; ".join(absent)}
+    return {"status": "DECLARED", "declaration": ["pdk_registry.json"],
+            "corners": reg, "detail": ""}
+
+
+def _write_rcx_declaration_record(out_dir: Path, decl: Dict[str, object]
+                                  ) -> Path:
+    """The declaration a step-22 extraction used, beside its SPEF(s)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rec = out_dir / _RCX_DECLARATION_RECORD
+    _aa.write_json(rec, {"step": "22", "input": "openrcx_ruleset", **decl})
+    return rec
+
+
+def _rcx_provenance_inputs(spef: Path) -> Dict[str, object]:
+    """The provenance `inputs` of a direct step-22 SPEF: the ruleset
+    declaration `_emit_spef` recorded beside it ({} when there is none, e.g.
+    a tool-produced SPEF, whose ruleset LibreLane's own state records)."""
+    rec = Path(spef).parent / _RCX_DECLARATION_RECORD
+    if not rec.is_file():
+        return {}
+    try:
+        return {"openrcx_ruleset": json.loads(rec.read_text())}
+    except (OSError, ValueError):
+        return {"openrcx_ruleset": "UNREADABLE_RECORD"}
+
+
+def _discover_openrcx_captables(pdk: PdkConfig, container: str
+                                ) -> Dict[str, str]:
+    """{corner: container ruleset path} for the corners this PDK DECLARES
+    (`_openrcx_ruleset_declaration`); empty unless the status is DECLARED."""
+    decl = _openrcx_ruleset_declaration(pdk, container)
+    if decl["status"] != "DECLARED":
+        return {}
+    return {c: v["path"] for c, v in decl["corners"].items()}  # type: ignore[union-attr]
 
 
 def _emit_spef_corners(project: Path, top: str, pdk: PdkConfig, container: str,
@@ -62968,6 +63129,8 @@ def _emit_spef_corners(project: Path, top: str, pdk: PdkConfig, container: str,
         f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
         f"openroad -no_init -exit {tcl_c} 2>&1 | tee {out_dir_c}/extract_corners.log"
     )
+    for p in corner_spefs.values():   # never report an earlier run's corner
+        p.unlink(missing_ok=True)
     _docker_exec(container, cmd, marker=tcl_c)
     produced: Dict[str, Path] = {}
     for corner, p in corner_spefs.items():
@@ -63188,8 +63351,9 @@ def _librelane_signoff_record(project: Path, top: str, pdk: PdkConfig,
                                     if n not in sampled]
             arms_doc = {
                 "step": "22", "mode": "dual", "canonical": "direct",
-                # No field-solver reference exists for this comparison yet, so
-                # neither arm can be called more accurate: the frontier is kept.
+                # Without a field-solver reference neither arm can be called
+                # more accurate: the frontier is kept (replaced below when one
+                # is declared).
                 "selection": "UNDETERMINED",
                 "reason": ("LL_RC_ACCURACY_NOT_MEASURED: arms are compared "
                            "with each other; no field-solver reference"),
@@ -63197,6 +63361,26 @@ def _librelane_signoff_record(project: Path, top: str, pdk: PdkConfig,
                 "tool_rcx_state": str(result22["rcx"] / "state_out.json"),
                 "corners": _ls.compare_extraction(direct, tool, sampled),
             }
+            # The selection criterion is accuracy against a field-solver
+            # reference (`rcx_field_solver_reference.py`, a declared input at
+            # tool_arms/22/reference.json): with one, `select_arms` picks on
+            # per-net total C error at the reference's RC corner; without one
+            # the frontier is kept, as above.
+            reference = arms / "22/reference.json"
+            if reference.is_file():
+                corner = str(_ls.load_reference(reference).get("rc_corner") or "")
+                if corner in direct and corner in tool:
+                    sel = _ls.accuracy_selection(
+                        {"direct": direct[corner], "librelane": tool[corner]},
+                        reference, arms / "22/accuracy")
+                    arms_doc.update({"selection": sel["selection"],
+                                     "reason": sel.get("reason"),
+                                     "criterion": sel["criterion"],
+                                     "accuracy": sel})
+                else:
+                    arms_doc["reason"] = (
+                        f"LL_RC_REFERENCE_CORNER_UNMATCHED: the reference is at "
+                        f"{corner!r}; arms have {sorted(set(direct) & set(tool))}")
             _aa.write_json(rpt / "rc_extraction_arms.json", arms_doc)
             written.append(str(rpt / "rc_extraction_arms.json"))
     except Exception as exc:  # a refusal names itself; nothing falls back

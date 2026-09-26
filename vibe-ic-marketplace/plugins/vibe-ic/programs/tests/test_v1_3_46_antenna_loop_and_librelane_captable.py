@@ -191,9 +191,34 @@ def _fake_ls(_container, ls_expr, must_contain, timeout=20):
     return hits
 
 
+def _declare(root: Path, subdir: str) -> None:
+    """F13: the PDK's own `libs.tech/<subdir>/config.tcl` DECLARES the per-corner
+    rulesets (the legacy RCX_RULES[_MIN|_MAX] form) -- the files `_stage` wrote."""
+    cfg = root / "pdk" / "libs.tech" / subdir / "config.tcl"
+    cfg.write_text("".join(
+        f'set ::env({v}) "$::env(PDK_ROOT)/$::env(PDK)/libs.tech/{subdir}/'
+        f'rules.openrcx.sky130A.{c}.magic"\n'
+        for v, c in (("RCX_RULES", "nom"), ("RCX_RULES_MIN", "min"),
+                     ("RCX_RULES_MAX", "max"))))
+
+
+def _host_exec(container, cmd, timeout=20, **_kw):
+    """The container boundary, faked: the runner's command runs on the host
+    (test container path == host path)."""
+    import subprocess
+    p = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                       timeout=60)
+    return p.returncode, p.stdout, p.stderr
+
+
+# F13 (§4.05): discovery reads the ruleset the PDK DECLARES (librelane config,
+# then an older image's openlane config) instead of globbing both dirs. The
+# three properties below are unchanged: the new image's declaration is found,
+# an older image's still is, and the new image's wins when both exist.
 def test_discover_captables_hits_librelane(tmp_path, monkeypatch):
-    monkeypatch.setattr(R, "_container_ls_paths", _fake_ls)
+    monkeypatch.setattr(R, "_docker_exec", _host_exec)
     tlef = _stage(tmp_path, "librelane")
+    _declare(tmp_path, "librelane")
     pdk = _pdk()
     pdk.tech_lef = tlef
     out = R._discover_openrcx_captables(pdk, container="fake")
@@ -204,9 +229,10 @@ def test_discover_captables_hits_librelane(tmp_path, monkeypatch):
 
 
 def test_discover_captables_backward_compat_openlane(tmp_path, monkeypatch):
-    """Old image (captable under libs.tech/openlane) must still be found."""
-    monkeypatch.setattr(R, "_container_ls_paths", _fake_ls)
+    """Old image (captable declared under libs.tech/openlane) must still be found."""
+    monkeypatch.setattr(R, "_docker_exec", _host_exec)
     tlef = _stage(tmp_path, "openlane")
+    _declare(tmp_path, "openlane")
     pdk = _pdk()
     pdk.tech_lef = tlef
     out = R._discover_openrcx_captables(pdk, container="fake")
@@ -217,9 +243,11 @@ def test_discover_captables_backward_compat_openlane(tmp_path, monkeypatch):
 
 def test_discover_captables_prefers_librelane_when_both_present(
         tmp_path, monkeypatch):
-    monkeypatch.setattr(R, "_container_ls_paths", _fake_ls)
+    monkeypatch.setattr(R, "_docker_exec", _host_exec)
     tlef = _stage(tmp_path, "librelane")
     _stage(tmp_path, "openlane")
+    _declare(tmp_path, "librelane")
+    _declare(tmp_path, "openlane")
     pdk = _pdk()
     pdk.tech_lef = tlef
     out = R._discover_openrcx_captables(pdk, container="fake")

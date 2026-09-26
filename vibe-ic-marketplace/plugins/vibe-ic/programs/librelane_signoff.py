@@ -280,6 +280,71 @@ def compare_extraction(direct: dict[str, Path], tool: dict[str, Path],
     return rows
 
 
+# --- step 22 dual: accuracy against a field-solver reference ---------------
+
+#: The step-22 dual selection criterion: per-net total C against the
+#: field-solver reference (`rcx_field_solver_reference.py`), smaller is better.
+ACCURACY_OBJECTIVES = {'c_mean_abs_err_pct': 'min'}
+
+
+def load_reference(path: Path) -> dict:
+    """A field-solver reference record, refused unless it states nets."""
+    ref = _load(Path(path))
+    nets = ref.get('nets')
+    if ref.get('kind') != 'field_solver_reference' or not isinstance(nets, dict) or not nets:
+        raise Refusal('LL_RC_REFERENCE_EMPTY', f'{path}: no field-solver nets')
+    if any(not isinstance(v, (int, float)) or not v > 0 for v in nets.values()):
+        raise Refusal('LL_RC_REFERENCE_NONPOSITIVE', str(path))
+    return ref
+
+
+def arm_accuracy(spef: Path, reference: dict, reference_sha: str) -> dict:
+    """One arm's report in `select_arms`' shape: per-net total C error against
+    the reference, MEASURED only when every reference net is in the SPEF."""
+    census = spef_census(spef)
+    rows, missing = [], []
+    for net, ref_pf in sorted(reference['nets'].items()):
+        got = census['nets'].get(net)
+        if got is None:
+            missing.append(net)
+            continue
+        rows.append({'net': net, 'reference_pf': ref_pf, 'arm_pf': got,
+                     'err_pct': 100.0 * (got - ref_pf) / ref_pf})
+    errs = sorted(r['err_pct'] for r in rows)
+    measured = bool(rows) and not missing
+    value = (sum(abs(e) for e in errs) / len(errs)) if measured else None
+    return {'verdict': 'PASS' if measured else 'NOT_MEASURED',
+            'scope': {'reference_sha256': reference_sha,
+                      'rc_corner': reference.get('rc_corner'),
+                      'nets': len(reference['nets'])},
+            'metrics': {'c_mean_abs_err_pct': {
+                'status': 'MEASURED' if measured else 'NOT_MEASURED', 'value': value}},
+            'c_median_err_pct': errs[len(errs) // 2] if errs else None,
+            'c_sum_err_pct': (100.0 * (sum(r['arm_pf'] for r in rows)
+                                       - sum(r['reference_pf'] for r in rows))
+                              / sum(r['reference_pf'] for r in rows)) if rows else None,
+            'missing_nets': missing, 'spef': str(spef), 'spef_sha256': census['sha256'],
+            'rows': rows}
+
+
+def accuracy_selection(arms: dict[str, Path], reference_path: Path, out_dir: Path) -> dict:
+    """The step-22 dual selection: each arm's SPEF (at the reference's RC
+    corner) against the field-solver reference, picked by `select_arms` on
+    ACCURACY_OBJECTIVES.  Equal accuracy is a tie: both arms are kept."""
+    from librelane_contract import select_arms
+    reference = load_reference(reference_path)
+    sha = digest(Path(reference_path))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    reports = {}
+    for name, spef in sorted(arms.items()):
+        reports[name] = out_dir / f'{name}.json'
+        write_json(reports[name], arm_accuracy(Path(spef), reference, sha))
+    verdict = select_arms(reports, ACCURACY_OBJECTIVES, out_dir / 'selection.json')
+    return {**verdict, 'criterion': 'accuracy against the field-solver reference',
+            'objectives': ACCURACY_OBJECTIVES, 'reference': str(reference_path),
+            'reference_sha256': sha, 'reports': {k: str(v) for k, v in reports.items()}}
+
+
 # --- per-corner timing from the tool's own records -------------------------
 
 #: LibreLane STAPostPNR metric names, per corner (`<metric>__corner:<name>`).

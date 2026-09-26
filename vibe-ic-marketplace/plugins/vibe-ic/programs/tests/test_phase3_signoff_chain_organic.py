@@ -200,9 +200,17 @@ class TestSpefTclCaptable:
         return tcl_files[0].read_text()
 
     def test_tcl_runs_real_openrcx_extraction(self, tmp_path, monkeypatch):
+        # F13 (§4.05): the captable is the one the PDK DECLARES, resolved by
+        # `_openrcx_ruleset_declaration` -- no longer globbed in the deck.
+        declared = "/foss/pdks/sky130A/libs.tech/librelane/rules.openrcx.sky130A.nom"
+        monkeypatch.setattr(runner, "_openrcx_ruleset_declaration", lambda p, c: {
+            "status": "DECLARED", "declaration": ["config.tcl"], "detail": "",
+            "corners": {"nom": {"path": declared, "pattern": "nom_*",
+                                "declared_by": "config.tcl:RCX_RULES"}}})
         tcl = self._emit(tmp_path, monkeypatch)
-        # the real OpenRCX path: discover captable → define corner → extract_parasitics
-        assert "rules.openrcx" in tcl, "must glob the OpenRCX captable"
+        # the real OpenRCX path: declared captable → define corner → extract_parasitics
+        assert "rules.openrcx" in tcl, "must read the OpenRCX captable"
+        assert f"set _rules {{{declared}}}" in tcl, "must read the DECLARED captable"
         assert "define_process_corner -ext_model_index" in tcl
         assert "extract_parasitics -ext_model_file" in tcl, (
             "write_spef needs extract_parasitics (OpenRCX), not estimate_parasitics")
