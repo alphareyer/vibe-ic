@@ -20799,7 +20799,8 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
         results.append(StepResult("post_dft_opt", "NOT_MEASURED", time.time() - t0,
                        "no scan netlist → post-DFT disclosed-skip", reason_class=_V.ReasonClass.INPUT_ABSENT))
 
-    # ================= Step 13 — LEC (RTL ≡ the netlist step 15 routes) ======
+    # ================= Step 13 — LEC (RTL ≡ handoff netlist) =================
+    # The handoff netlist is the one step 15 routes (see step_lec_equivalence).
     return step_lec_equivalence(project, top_name, container, results,
                                 lec_max_completed_rungs=lec_max_completed_rungs)
 
