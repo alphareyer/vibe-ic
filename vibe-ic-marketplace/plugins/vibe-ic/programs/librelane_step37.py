@@ -50,7 +50,7 @@ def _routed_state(project: Path, image: str, pdk_root: Path, pdk: str,
 def _gds_state(state_path: Path, gds: Path, out: Path) -> Path:
     state = json.loads(state_path.read_text())
     if not gds.is_file():
-        raise Refusal("LL_STREAM_MISSING", str(gds))
+        raise Refusal("LL_STREAM_MISSING", f"no streamed GDS file at {gds}")
     state["gds"] = str(gds)
     write_json(out, state)
     return out

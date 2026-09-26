@@ -252,7 +252,8 @@ def verify_synthesis_stat(stat_path: Path, state: dict, stats_path: Path,
     if module is None:
         module = stat.get('modules', {}).get(top)
     if not isinstance(module, dict):
-        raise Refusal('LL_STAT_TOP_MISSING', top)
+        raise Refusal('LL_STAT_TOP_MISSING',
+                      f'{top}: no modules entry for it in {stat_path}')
     metrics = state.get('metrics', {})
     native_netlist = Path(state.get('nl') or '')
     if not native_netlist.is_file():
@@ -312,7 +313,7 @@ def _check_state(state: dict, *, outputs: bool = False,
     if not outputs:
         for key in required:
             if not state.get(key):
-                raise Refusal('LL_STATE_MISSING', key)
+                raise Refusal('LL_STATE_MISSING', f'state[{key!r}] is empty')
     for path in _walk_paths({k: v for k, v in state.items() if k != 'metrics'}):
         if not path.is_file():
             raise Refusal('LL_STATE_FILE_MISSING', str(path))
@@ -803,7 +804,8 @@ for step_id in json.loads(Path(requested).read_text()):
     configs = {step: root / f'{step}.json' for step in step_ids}
     for step, path in configs.items():
         if not path.is_file() or _load(path).get('meta', {}).get('step') != step:
-            raise Refusal('LL_STEP_CONFIG_MISSING', step)
+            raise Refusal('LL_STEP_CONFIG_MISSING',
+                          f'{step}: no config at {path} naming meta.step {step!r}')
     return configs
 
 
@@ -1034,7 +1036,8 @@ def post_pnr_timing_inputs(project: Path, state_path: Path, corner: str) -> dict
                        ('state', str(state_path))):
         path = Path(value or '')
         if not value or not path.is_file():
-            raise Refusal('LL_STATE_FILE_MISSING', f'{key}: {value}')
+            raise Refusal('LL_STATE_FILE_MISSING',
+                          f'{key}: no file at path {value!r}')
         if not path.resolve().is_relative_to(root):
             raise Refusal('LL_STATE_OUTSIDE_PROJECT', f'{key}: {value}')
         result[key] = str(path.resolve().relative_to(root))

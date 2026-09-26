@@ -1203,7 +1203,8 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
             if not floorplan.is_file():
                 raise Refusal("SUPPLY_ENTRY_FLOORPLAN_MISSING",
                               f"requested_pairs={pair_count}, die_side_um={die:g}; "
-                              "the preceding PnR pass wrote no floorplan DEF")
+                              "the preceding PnR pass wrote no floorplan DEF at "
+                              f"{PR.FLOORPLAN_DEF_REL} under {project}")
             try:
                 prior_die = PR.read_def(floorplan)
             except (PR.DefError, OSError) as exc:

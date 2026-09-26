@@ -16679,7 +16679,9 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
     from _rtl_include_hub import silicon_rtl_selection
     rtl = silicon_rtl_selection(_pl.rtl_dir(project))
     if not rtl:
-        return StepResult("synth", "FAIL", time.time() - t0, "LL_SYNTH_INPUT_MISSING")
+        return StepResult("synth", "FAIL", time.time() - t0,
+                          "LL_SYNTH_INPUT_MISSING: no synthesizable *.sv/*.v under "
+                          f"{_pl.rtl_dir(project)}")
     macro = _sf.decide_macro_aware_sim_define(
         _sf.read_text_blob(rtl),
         list(pdk.macro_libs) + list(pdk.macro_lefs) + list(pdk.macro_v))
@@ -16798,7 +16800,8 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
         if netlist_gate.returncode:
             raise _ll.Refusal("LL_SYNTH_NETLIST_GATE_FAILED", netlist_gate.stdout[-500:])
         if not Path(str(pdk.liberty)).is_file():
-            raise _ll.Refusal("LL_PDK_LIB_MISSING", str(pdk.liberty))
+            raise _ll.Refusal("LL_PDK_LIB_MISSING",
+                              f"no liberty file at {pdk.liberty}")
         pdk_gate = subprocess.run(
             [sys.executable, str(PROGRAMS_DIR / "pdk_consistency_check.py"),
              "--netlist", str(netlist), "--pdk-lib", str(pdk.liberty),

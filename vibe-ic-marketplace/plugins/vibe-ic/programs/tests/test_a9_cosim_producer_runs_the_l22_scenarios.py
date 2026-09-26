@@ -245,7 +245,9 @@ def test_the_observer_lines_are_read_from_a_real_dcosim_log():
             for w in windows] == [(0, 3, 13, 0, 8), (1, 5, 21, 0, 8),
                                   (2, 4, 14, 0, 8)]
     # 24 clocks, 8-clock windows: three, not six (the X-band double count).
-    # Pinned by MEMBERS, not by size: a double count would add windows 3..5.
+    # The count and the member set together: three entries AND three distinct
+    # window ids, so a double-counted window cannot hide behind either one.
+    assert len(windows) == 3
     assert {w["window"] for w in windows} == {0, 1, 2}
 
 

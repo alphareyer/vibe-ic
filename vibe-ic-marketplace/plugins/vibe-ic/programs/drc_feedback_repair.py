@@ -41,6 +41,16 @@ _SCOPED_DRC = re.compile(
     r'0 on entry, 0 on exit \(delta \+0\)\.$', re.M)
 
 
+class _Absent(ValueError):
+    """An absence refusal. ``str()`` stays the bare code the receipt records as
+    its ``reason``; ``where`` names the search space the code alone cannot, so
+    "not there" and "never looked" do not read the same."""
+
+    def __init__(self, code: str, where: str):
+        super().__init__(code)
+        self.where = where
+
+
 def _sha(path: Path) -> str:
     h = hashlib.sha256()
     with path.open('rb') as f:
@@ -105,7 +115,8 @@ def _def_nets(path: Path) -> tuple[int, dict[str, str]]:
 def _def_design(path: Path) -> str:
     match = re.search(r'^DESIGN\s+(\S+)\s*;', path.read_text(errors='replace'), re.M)
     if not match:
-        raise ValueError('FEEDBACK_DEF_DESIGN_MISSING')
+        raise _Absent('FEEDBACK_DEF_DESIGN_MISSING',
+                      f'no DESIGN statement in {path}')
     return match.group(1)
 
 
@@ -181,13 +192,16 @@ def _openroad_prefix(lefs: list[str], source_def: Path) -> str:
 
 
 def _route_layer_policy(project: Path) -> str:
-    deck = project / 'phase3/stage3/pnr/pnr.tcl'
-    if not deck.is_file():
-        raise ValueError('FEEDBACK_ROUTE_LAYER_POLICY_MISSING')
+    deck_path = project / 'phase3/stage3/pnr/pnr.tcl'
+    if not deck_path.is_file():
+        raise _Absent('FEEDBACK_ROUTE_LAYER_POLICY_MISSING',
+                      f'no PnR deck file at {deck_path}')
     lines = set(re.findall(r'\bset_routing_layers(?:\s+[-\w]+)+',
-                           deck.read_text()))
+                           deck_path.read_text()))
     if len(lines) != 1:
-        raise ValueError('FEEDBACK_ROUTE_LAYER_POLICY_MISSING')
+        raise _Absent('FEEDBACK_ROUTE_LAYER_POLICY_MISSING',
+                      f'{len(lines)} distinct set_routing_layers lines in '
+                      f'{deck_path}, not exactly one')
     return next(iter(lines)).strip() + '\n'
 
 
@@ -228,7 +242,8 @@ def _stream(image: str, project: Path, pdk: Any, top: str,
     if stream_script_text is not None:
         write_text(script, stream_script_text)
     elif not script.is_file():
-        raise ValueError('FEEDBACK_STREAM_SCRIPT_MISSING')
+        raise _Absent('FEEDBACK_STREAM_SCRIPT_MISSING',
+                      f'no stream script file at {script}')
     gds = scratch / 'candidate.gds'
     lefs = [pdk.tech_lef, pdk.cell_lef, *pdk.macro_lefs]
     env = {'TOP': top, 'DEF': str(source_def), 'GDS_OUT': str(gds),
@@ -342,7 +357,8 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
     scratch_root.mkdir(parents=True, exist_ok=True)
     try:
         if not source_def.is_file():
-            raise ValueError('FEEDBACK_ROUTED_DEF_MISSING')
+            raise _Absent('FEEDBACK_ROUTED_DEF_MISSING',
+                          f'no routed DEF file at {source_def}')
         digest = _sha(source_def)
         routed = pnr / 'routed.def'
         if publish and (not routed.is_file() or _sha(routed) != digest):
@@ -356,7 +372,8 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
         lefs = [pdk.tech_lef, pdk.cell_lef, *pdk.macro_lefs]
         stream_script = pnr / 'stream_out.py'
         if stream_script_text is None and not stream_script.is_file():
-            raise ValueError('FEEDBACK_STREAM_SCRIPT_MISSING')
+            raise _Absent('FEEDBACK_STREAM_SCRIPT_MISSING',
+                          f'no stream script file at {stream_script}')
         stream_digest = (hashlib.sha256(stream_script_text.encode()).hexdigest()
                          if stream_script_text is not None else _sha(stream_script))
         basis = {'def_sha256': digest, 'image': image, 'deck': pdk.drc_deck,
@@ -449,6 +466,8 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
     except (OSError, ValueError, ET.ParseError) as exc:
         record['status'] = 'REFUSED'
         record['reason'] = str(exc)
+        if isinstance(exc, _Absent):
+            record['reason_where'] = exc.where
     if 'temp' in locals():
         record['scratch_cleaned'] = not Path(temp).exists()
     receipt.parent.mkdir(parents=True, exist_ok=True)
@@ -474,7 +493,8 @@ def verify_streamed(project: Path, top: str, pdk: Any, image: str,
         if not routed.is_file() or _sha(routed) != _sha(source):
             raise ValueError('FEEDBACK_CANONICAL_DEF_DIVERGED')
         if not gds.is_file():
-            raise ValueError('FEEDBACK_FINISHED_GDS_MISSING')
+            raise _Absent('FEEDBACK_FINISHED_GDS_MISSING',
+                          f'no finished GDS file at {gds}')
         measured_source_sha = _sha(source)
         measured_gds_sha = _sha(gds)
         design = _def_design(source)
@@ -501,6 +521,8 @@ def verify_streamed(project: Path, top: str, pdk: Any, image: str,
         record = locals().get('record', {})
         record['finished_status'] = 'REFUSED'
         record['finished_reason'] = str(exc)
+        if isinstance(exc, _Absent):
+            record['finished_reason_where'] = exc.where
     write_text(receipt, json.dumps(record, indent=2, sort_keys=True) + '\n')
     return record
 
