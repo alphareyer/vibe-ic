@@ -149,26 +149,40 @@ def collect_create_clocks(project: Path,
             text = sdc.read_text(errors="replace")
         except OSError:
             continue
-        variables = _collect_tcl_vars(text)
-        for line in text.splitlines():
-            if "create_clock" not in line.lower():
-                continue
-            resolved = _substitute_vars(line, variables) if variables else line
-            mp = _PERIOD_RE.search(resolved)
-            if not mp:
-                continue
-            try:
-                period_ns = float(mp.group(1))
-            except ValueError:
-                continue
-            mport = _PORT_RE.search(resolved)
-            mname = _NAME_RE.search(resolved)
-            out.append({
-                "period_ns": period_ns,
-                "port_name": mport.group(1) if mport else None,
-                "name": mname.group(1) if mname else None,
-                "source": str(sdc),
-            })
+        out.extend({"period_ns": clock["period_ns"],
+                    "port_name": clock["port_name"], "name": clock["name"],
+                    "source": str(sdc)}
+                   for clock in create_clocks_in_text(text)
+                   if clock["period_ns"] is not None)
+    return out
+
+
+def create_clocks_in_text(text: str) -> List[Dict]:
+    """Every ``create_clock`` line of ONE SDC text, Tcl ``$var`` references
+    substituted, as ``{period_ns, port_name, name, line}``. ``period_ns`` is
+    ``None`` when the line states no literal period this grammar can read (an
+    ``[expr ...]``, an unset variable): the caller decides whether that is a
+    skip or a refusal, never this reader. The number is in the SDC's own time
+    unit; nothing here converts it."""
+    variables = _collect_tcl_vars(text)
+    out: List[Dict] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if "create_clock" not in line.lower():
+            continue
+        resolved = _substitute_vars(line, variables) if variables else line
+        mp = _PERIOD_RE.search(resolved)
+        try:
+            period_ns = float(mp.group(1)) if mp else None
+        except ValueError:
+            period_ns = None
+        mport = _PORT_RE.search(resolved)
+        mname = _NAME_RE.search(resolved)
+        out.append({
+            "period_ns": period_ns,
+            "port_name": mport.group(1) if mport else None,
+            "name": mname.group(1) if mname else None,
+            "line": lineno,
+        })
     return out
 
 

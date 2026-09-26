@@ -1,0 +1,45 @@
+Error: Could not find net. Did you run iverilog with '-ginterconnect'?
+SDF INFO: Loading cal_sdf_class.sdf from tb_cal.v:5
+SDF INFO: cal_sdf_class.sdf:2: Version: 3.0
+SDF INFO: cal_sdf_class.sdf:3: Design: cal_sdf_class
+SDF INFO: cal_sdf_class.sdf:4: Date: Sat Sep 26 18:48:15 2026
+SDF INFO: cal_sdf_class.sdf:5: Vendor: Parallax
+SDF INFO: cal_sdf_class.sdf:6: Program: STA
+SDF INFO: cal_sdf_class.sdf:7: Program Version: 3.1.0
+SDF INFO: cal_sdf_class.sdf:8: Divider: "."
+SDF INFO: cal_sdf_class.sdf:9: Timescale: 1ns
+SDF INFO: cal_sdf_class.sdf:15: INTERCONNECT with port1 = a index = 0, port2 = u0.I0 index = 0
+SDF INFO: cal_sdf_class.sdf:15: Created a vpiInterModPath
+SDF INFO: cal_sdf_class.sdf:15: Putting delay: 0.000000 for index 0
+SDF INFO: cal_sdf_class.sdf:16: INTERCONNECT with port1 = b index = 0, port2 = u0.I1 index = 0
+SDF INFO: cal_sdf_class.sdf:16: Created a vpiInterModPath
+SDF INFO: cal_sdf_class.sdf:16: Putting delay: 0.000000 for index 0
+SDF INFO: cal_sdf_class.sdf:17: INTERCONNECT with port1 = s index = 0, port2 = u0.S index = 0
+SDF INFO: cal_sdf_class.sdf:17: Created a vpiInterModPath
+SDF INFO: cal_sdf_class.sdf:17: Putting delay: 0.000000 for index 0
+SDF INFO: cal_sdf_class.sdf:18: INTERCONNECT with port1 = oe index = 0, port2 = u_pad.OE index = 0
+SDF INFO: cal_sdf_class.sdf:18: Created a vpiInterModPath
+SDF INFO: cal_sdf_class.sdf:18: Putting delay: 0.000000 for index 0
+SDF INFO: cal_sdf_class.sdf:19: INTERCONNECT with port1 = ie index = 0, port2 = u_pad.CS index = 0
+SDF INFO: cal_sdf_class.sdf:19: Created a vpiInterModPath
+SDF INFO: cal_sdf_class.sdf:19: Putting delay: 0.000000 for index 0
+SDF INFO: cal_sdf_class.sdf:20: INTERCONNECT with port1 = ie index = 0, port2 = u_pad.SL index = 0
+SDF INFO: cal_sdf_class.sdf:20: Created a vpiInterModPath
+SDF INFO: cal_sdf_class.sdf:20: Putting delay: 0.000000 for index 0
+SDF INFO: cal_sdf_class.sdf:21: INTERCONNECT with port1 = ie index = 0, port2 = u_pad.IE index = 0
+SDF INFO: cal_sdf_class.sdf:21: Created a vpiInterModPath
+SDF INFO: cal_sdf_class.sdf:21: Putting delay: 0.000000 for index 0
+SDF INFO: cal_sdf_class.sdf:22: INTERCONNECT with port1 = ie index = 0, port2 = u_pad.PU index = 0
+SDF INFO: cal_sdf_class.sdf:22: Created a vpiInterModPath
+SDF INFO: cal_sdf_class.sdf:22: Putting delay: 0.000000 for index 0
+SDF INFO: cal_sdf_class.sdf:23: INTERCONNECT with port1 = ie index = 0, port2 = u_pad.PD index = 0
+SDF INFO: cal_sdf_class.sdf:23: Created a vpiInterModPath
+SDF INFO: cal_sdf_class.sdf:23: Putting delay: 0.000000 for index 0
+SDF INFO: cal_sdf_class.sdf:24: INTERCONNECT with port1 = u0.Z index = 0, port2 = u_pad.A index = 0
+SDF INFO: cal_sdf_class.sdf:24: Created a vpiInterModPath
+SDF INFO: cal_sdf_class.sdf:24: Putting delay: 0.000000 for index 0
+SDF INFO: cal_sdf_class.sdf:25: INTERCONNECT with port1 = u_pad.PAD index = 0, port2 = p index = 0
+SDF ERROR: cal_sdf_class.sdf:25: Could not find intermodpath!
+SDF ERROR: cal_sdf_class.sdf:44: Unable to match ModPath S -> Z in tb.dut.u0
+SDF ERROR: cal_sdf_class.sdf:45: Unable to match ModPath S -> Z in tb.dut.u0
+tb_cal.v:5: $finish called at 10000 (1ps)

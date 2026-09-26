@@ -807,6 +807,71 @@ _register(Instrument(
         artefact=_read("sdf_error_negative.log")),
 ))
 
+def _sdf_class_bundle(side: str) -> Callable[[], Dict[str, str]]:
+    def _load() -> Dict[str, str]:
+        return {"transcript": _read(f"cal_sdf_class_{side}.log")(),
+                "compile_log": _read(f"cal_sdf_class_{side}.compile.log")(),
+                "sdf": _read("cal_sdf_class.sdf")(),
+                "netlist": _read("cal_sdf_class.v")(),
+                "cal_sdf_class_cells.v": _read("cal_sdf_class_cells.v")(),
+                "cal_sdf_class_pad.v": _read("cal_sdf_class_pad.v")()}
+    return _load
+
+
+def _judge_sdf_error_classes(bundle: Dict[str, str]) -> Optional[str]:
+    import sdf_gate_sim as SG
+    explainer = SG.SdfErrorExplainer(bundle["netlist"], {
+        name: bundle[name] for name in ("cal_sdf_class_cells.v", "cal_sdf_class_pad.v")})
+    classes = SG.classify_sdf_errors(bundle["transcript"],
+                                     compile_log=bundle["compile_log"],
+                                     sdf_text=bundle["sdf"], explainer=explainer)
+    return (f"UNEXPLAINED SDF ERROR RECORDS: {classes['unexplained']}"
+            if classes["unexplained"] else None)
+
+
+_register(Instrument(
+    name="sdf_gate_sim::classify_sdf_errors",
+    reads=("the `vvp -sdf-info` transcript, the iverilog compile log, the SDF, "
+           "the gate netlist and the cell/pad Verilog models of one simulation"),
+    ruling="F21 (step 29 refuses on an SDF ERROR no class explains)",
+    owner="migf21",
+    why=("Step 29 counts every refused SDF record by class and fails only on an "
+         "unexplained one. MEASURED on spm x gf180mcuD: 315 per corner, two "
+         "classes, both Icarus's -- 62/case `ifnone` edge paths the parser "
+         "dropped (`sorry` in the compile log; fork PR vibeic/iverilog#4) and "
+         "1/case INTERCONNECT on a bidirectional pad's inout PAD (vibeic/"
+         "iverilog#5). A class is granted only on this run's own proof: the "
+         "`sorry` names that cell's `ifnone` line; the model declares the "
+         "endpoint `inout`. The pair is ONE structure and ONE SDF: without "
+         "`-gspecify` the same records multiply with a cause neither class "
+         "names, and the reader must see them."),
+    judge=_judge_sdf_error_classes,
+    positive=Sample(
+        provenance=(
+            "REAL transcripts, 8HD-4, vibeic-eda 0.3.79 (by digest), Icarus 14.0 "
+            "(devel) 07454266b. Structure `calibration/cal_sdf_class.v`: one "
+            "`gf180mcu_fd_sc_mcu7t5v0__mux2_2` driving one `gf180mcu_fd_io__bi_24t` "
+            "whose PAD is the top output. Models: `calibration/cal_sdf_class_cells.v` "
+            "and `calibration/cal_sdf_class_pad.v`, verbatim excerpts of the PDK's "
+            "own models. SDF `calibration/cal_sdf_class.sdf`: OpenSTA 3.1.0 "
+            "`write_sdf -include_typ -divider .` at the tt liberties. Bench "
+            "`calibration/cal_sdf_class_tb.v`. Compiled `iverilog -g2012 "
+            "-ginterconnect` WITHOUT `-gspecify`: MEASURED 19 `SDF ERROR`, of "
+            "which 16 (`Unable to match COND ModPath` and plain paths with no "
+            "`ifnone`) no class explains."),
+        artefact=_sdf_class_bundle("positive")),
+    expect="UNEXPLAINED SDF ERROR RECORDS",
+    negative=Sample(
+        provenance=(
+            "The SAME structure, models, SDF and bench, compiled `iverilog -g2012 "
+            "-ginterconnect -gspecify` (the flags step 29 uses). MEASURED: 3 `SDF "
+            "ERROR` -- 2 `Unable to match ModPath S -> Z` with the compile log's "
+            "`sorry: ifnone with an edge-sensitive path` on the mux2's two `ifnone` "
+            "lines, 1 `Could not find intermodpath!` on `(INTERCONNECT u_pad.PAD p)` "
+            "-- every one explained; 10 `Putting delay`."),
+        artefact=_sdf_class_bundle("negative")),
+))
+
 _register(Instrument(
     name="_container_exec::container_tree_probe",
     reads="the live process tree of the work (not the client that launched it)",
