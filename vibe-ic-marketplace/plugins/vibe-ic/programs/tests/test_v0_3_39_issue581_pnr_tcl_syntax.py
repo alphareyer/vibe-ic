@@ -61,6 +61,19 @@ def _stage_captable(tmp_path: Path) -> str:
     return str(tmp_path / "pdk" / "libs.ref" / "fix" / "tech.lef")
 
 
+def _declared_nom(tech_lef_c: str) -> dict:
+    """F13b: the post-route deck takes the ruleset the PDK DECLARES
+    (`_openrcx_ruleset_declaration`'s record), never a glob. The declaration
+    here names the very file `_stage_captable` wrote."""
+    root = tech_lef_c.split("/libs.ref/")[0]
+    path = next(str(p) for p in sorted(Path(root, "libs.tech").rglob(
+        "rules.openrcx.*.nom.magic")))
+    return {"status": "DECLARED", "declaration": ["fixture config.tcl"],
+            "corners": {"nom": {"path": path, "pattern": "nom_*",
+                                "declared_by": "config.tcl:RCX_RULES"}},
+            "detail": ""}
+
+
 def _pdk() -> "R.PdkConfig":
     return R.PdkConfig(
         name="fixture_pdk",
@@ -104,7 +117,8 @@ def _full_pnr_tcl(tmp_path: Path) -> str:
         routing_constraint_tcl="",
         pg_cleanup_block=R._pg_net_cleanup_tcl(),
         spef_repair_block=R._post_route_spef_repair_tcl(
-            out_dir_c, tech_lef_c),
+            out_dir_c, tech_lef_c,
+            rcx_declaration=_declared_nom(tech_lef_c)),
         antenna_repair_block=R._antenna_repair_tcl(pdk),
         filler_block="",
     )
@@ -134,7 +148,9 @@ def test_spef_repair_block_captable_path_reaches_complete(tmp_path):
     """The captable branch (the formerly broken one) must evaluate through
     to SPEF_MEASURE_COMPLETE (#581 r3: measure-only, no repair)."""
     tech_lef_c = _stage_captable(tmp_path)
-    block = R._post_route_spef_repair_tcl(str(tmp_path / "out"), tech_lef_c)
+    block = R._post_route_spef_repair_tcl(
+        str(tmp_path / "out"), tech_lef_c,
+        rcx_declaration=_declared_nom(tech_lef_c))
     script = tmp_path / "block.tcl"
     script.write_text(_STUB + block)
     result = _run_tclsh(script)

@@ -179,16 +179,32 @@ def test_emitted_spef_decks_glob_both_conventions():
     Guards the exact failure mode: a deck that globs only `rules.openrcx.*`
     falls through to `-lef_rc` and produces a coupling-free SPEF."""
     src = (PROG / "phase3_one_shot_runner.py").read_text()
-    # the remaining glob deck (post-route measure-only extraction)
+    # F13b: the post-route measure-only deck reads the declaration too, so
+    # it globs nothing either (its IHP-layout behaviour is asserted on the
+    # reader's output in the test below).
     i = src.find("def _post_route_spef_repair_tcl(")
     body = src[i:src.find("\ndef ", i + 10)]
-    assert "rules.openrcx.*.nom.magic" in body, body[:400]
-    assert "openrcx/*.nom.magic.rules" in body, (
-        "the post-route deck globs one convention only — an IHP-layout PDK "
-        "would still degrade to a coupling-free SPEF there")
+    assert "glob -nocomplain" not in body, "the post-route deck must not glob"
+    assert "set _prs_rules {{{_prs_nom}}}" in body, body[:400]
+    k = src.find("def step_pnr(")
+    pnr = src[k:src.find("\ndef ", k + 10)]
+    assert "_openrcx_ruleset_declaration(pdk, container)" in pnr
     # the step-22 deck: no glob; the declared ruleset (either layout) is read
     j = src.find("def _emit_spef(")
     spef = src[j:src.find("\ndef ", j + 10)]
     assert "glob -nocomplain" not in spef, "step 22 must not glob its ruleset"
     assert "set _rules {{{rules_nom}}}" in spef
     assert "_openrcx_ruleset_declaration(pdk, container)" in spef
+
+
+def test_post_route_deck_takes_the_ihp_layout_declaration(tmp_path, monkeypatch):
+    """F13b: the post-route deck, handed the reader's record for an
+    IHP-layout PDK, extracts and repairs with that layout's rulesets -- the
+    coupling model, not the `-lef_rc` fall-through."""
+    monkeypatch.setattr(R, "_docker_exec", _host_exec)
+    tlef = _stage_ihp(tmp_path)
+    _declare(tmp_path, _IHP)
+    decl = R._openrcx_ruleset_declaration(_pdk_with(tlef), container="fake")
+    tcl = R._post_route_spef_repair_tcl("/out", tlef, rcx_declaration=decl)
+    assert "/libs.tech/librelane/openrcx/ihp-sg13g2.nom.magic.rules}" in tcl
+    assert "/libs.tech/librelane/openrcx/ihp-sg13g2.max.magic.rules}" in tcl

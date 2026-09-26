@@ -267,14 +267,32 @@ def _stage_tcl(root: Path, subdir: str) -> str:
     return str(ref / "tech.lef")
 
 
+# F13b (§4.05): the post-route deck no longer globs; it takes the ruleset the
+# PDK DECLARES through step 22's reader. The properties are unchanged and are
+# now asserted end to end through that reader: the new image's declaration
+# is found, an older image's still is, and the new image's wins when both
+# exist -- and the deck then extracts with exactly that file.
+def _post_route_decl(root: Path, subdirs, monkeypatch):
+    monkeypatch.setattr(R, "_docker_exec", _host_exec)
+    tlef = ""
+    for sd in subdirs:
+        t = _stage(root, sd)
+        tlef = tlef or t
+        _declare(root, sd)
+    pdk = _pdk()
+    pdk.tech_lef = tlef
+    return tlef, R._openrcx_ruleset_declaration(pdk, container="fake")
+
+
 @needs_tclsh
 @pytest.mark.parametrize("subdir", ["librelane", "openlane"])
-def test_post_route_spef_tcl_globs_both_dirs(tmp_path, subdir):
-    """The post-route-repair SPEF glob (`_post_route_spef_repair_tcl`) must
-    resolve the captable whether it lives under librelane (new image) or
-    openlane (old image)."""
-    tlef = _stage_tcl(tmp_path / subdir, subdir)
-    block = R._post_route_spef_repair_tcl(str(tmp_path / "out"), tlef)
+def test_post_route_spef_tcl_globs_both_dirs(tmp_path, subdir, monkeypatch):
+    """The post-route-repair SPEF deck (`_post_route_spef_repair_tcl`) must
+    resolve the captable whether it is declared under librelane (new image)
+    or openlane (old image)."""
+    tlef, decl = _post_route_decl(tmp_path / subdir, [subdir], monkeypatch)
+    block = R._post_route_spef_repair_tcl(str(tmp_path / "out"), tlef,
+                                          rcx_declaration=decl)
     script = tmp_path / f"prs_{subdir}.tcl"
     script.write_text(_STUB + block)
     result = _run_tclsh(script)
@@ -285,11 +303,11 @@ def test_post_route_spef_tcl_globs_both_dirs(tmp_path, subdir):
 
 
 @needs_tclsh
-def test_post_route_spef_tcl_prefers_librelane(tmp_path):
+def test_post_route_spef_tcl_prefers_librelane(tmp_path, monkeypatch):
     base = tmp_path / "both"
-    tlef = _stage_tcl(base, "librelane")
-    _stage_tcl(base, "openlane")
-    block = R._post_route_spef_repair_tcl(str(tmp_path / "out"), tlef)
+    tlef, decl = _post_route_decl(base, ["librelane", "openlane"], monkeypatch)
+    block = R._post_route_spef_repair_tcl(str(tmp_path / "out"), tlef,
+                                          rcx_declaration=decl)
     script = tmp_path / "prs_both.tcl"
     script.write_text(_STUB + block)
     result = _run_tclsh(script)

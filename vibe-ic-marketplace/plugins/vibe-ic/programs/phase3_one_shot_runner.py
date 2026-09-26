@@ -29229,7 +29229,8 @@ def _post_route_spef_repair_tcl(out_dir_c: str, tech_lef_c: str,
                                 reserved_instance_names:
                                     Optional[Sequence[str]] = None,
                                 pdk: Optional["PdkConfig"] = None,
-                                filler_spec: Optional[Dict[str, Any]] = None
+                                filler_spec: Optional[Dict[str, Any]] = None,
+                                rcx_declaration: Optional[Dict[str, Any]] = None
                                 ) -> str:
     """ORGANIC #557 / #581 — emit the OpenROAD Tcl for the
     post-detailed-route SPEF extraction (MEASURE-ONLY).
@@ -29243,9 +29244,14 @@ def _post_route_spef_repair_tcl(out_dir_c: str, tech_lef_c: str,
     that never touches the shipped design. This block stays pure extraction.
 
     Sequence (all NONFATAL-guarded):
-      1. Discover the OpenRCX captable for the loaded PDK (same logic as
-         _emit_spef; chip-AGNOSTIC: globs rules.openrcx.*.nom.magic under
-         the PDK root derived from the tech-LEF path).
+      1. The OpenRCX ruleset this PDK DECLARES (F13b): ``rcx_declaration`` is
+         `_openrcx_ruleset_declaration`'s record -- the same reader, and the
+         same record, step 22 extracts with. nom for the measurement, max
+         for the sign-off-domain DRV repair (nom when no max is declared).
+         Never globbed: the glob preferred an undeclared ``*.magic`` model.
+         UNREADABLE, or a declaration without a nom corner, REFUSES
+         (``SPEF_REPAIR_REFUSED``): no extraction and no repair on a
+         substituted model. No declaration at all takes the skip path.
       2. If captable found: extract_parasitics → write_spef (sign-off
          grade; this SPEF feeds #527's SPEF-true Step-23 STA) → emit
          SPEF_MEASURE_COMPLETE.
@@ -29270,8 +29276,39 @@ def _post_route_spef_repair_tcl(out_dir_c: str, tech_lef_c: str,
     e]} {...}` statements (no multi-line catch inside a bracketed
     expression); pinned by a real tclsh parse/eval test.
 
-    Chip-AGNOSTIC: pure standard OpenROAD TCL, captable path discovered by glob.
+    Chip-AGNOSTIC: pure standard OpenROAD TCL; the ruleset path is the PDK's
+    own declaration.
     """
+    # F13b -- the declared ruleset, never a glob of the PDK tree.
+    def _tcl_word(text: str) -> str:
+        return "".join(" " if c in '"[]${}\\' else c for c in str(text))
+    _decl = rcx_declaration or {
+        "status": "NOT_RESOLVED", "corners": {},
+        "detail": "no ruleset declaration was handed to this deck"}
+    _corners = _decl.get("corners") or {}
+    _prs_nom = _prs_sig = _prs_maxnote = ""
+    _prs_else = ""
+    if _decl.get("status") == "DECLARED" and _corners.get("nom"):
+        _prs_nom = _corners["nom"]["path"]
+        _prs_sig = (_corners.get("max") or _corners["nom"])["path"]
+        if not _corners.get("max"):
+            _prs_maxnote = ("the PDK declares no max ruleset; the sign-off "
+                            "DRV repair measures on the declared nom one")
+    elif _decl.get("status") == "DECLARED":
+        _prs_else = (
+            "SPEF_REPAIR_REFUSED: RCX_NOM_RULESET_UNDECLARED: the PDK declares "
+            f"OpenRCX rulesets only for {_tcl_word(sorted(_corners))}; no "
+            "post-route extraction or repair on a neighbouring corner's model")
+    elif _decl.get("status") == "UNREADABLE":
+        _prs_else = (
+            "SPEF_REPAIR_REFUSED: RCX_RULESET_DECLARATION_UNREADABLE: "
+            f"{_tcl_word(_decl.get('detail', ''))}; no post-route extraction "
+            "or repair on a substituted model")
+    if not _prs_else:
+        _prs_else = ("SPEF_REPAIR_SKIP: no declared OpenRCX ruleset (RCX_RULESET_"
+                     f"{_tcl_word(_decl.get('status'))}: "
+                     f"{_tcl_word(_decl.get('detail', ''))}); post-route SPEF "
+                     "extract skipped")
     return (
         "# --- ORGANIC #557/#581/#147: post-route SPEF extraction (MEASURE-ONLY) ---\n"
         "# This block runs BEFORE write_def/write_verilog, so it must NOT modify\n"
@@ -29279,85 +29316,14 @@ def _post_route_spef_repair_tcl(out_dir_c: str, tech_lef_c: str,
         "# repair cells). It only EXTRACTS the sign-off SPEF (feeds #527's SPEF-true\n"
         "# Step-23 STA). The fork setup-repair on this SPEF is an estimate-only\n"
         "# END-of-pnr block (_postroute_repair_estimate_tcl).\n"
-        f"set _prs_tlef {tech_lef_c}\n"
-        "set _prs_i [string first \"/libs.ref/\" $_prs_tlef]\n"
-        "set _prs_rules \"\"\n"
-        "if {$_prs_i > 0} {\n"
-        "  set _prs_root [string range $_prs_tlef 0 [expr {$_prs_i - 1}]]\n"
-        "  # v1.3.46: the fork's newer image ships the captable under\n"
-        "  # libs.tech/librelane; the older image used libs.tech/openlane. Glob\n"
-        "  # BOTH (brace expansion) — lsort orders librelane before openlane so\n"
-        "  # [lindex $_prs_c 0] prefers librelane, falling back to openlane.\n"
-        "  set _prs_c [lsort [glob -nocomplain "
-        "$_prs_root/libs.tech/{librelane,openlane}/rules.openrcx.*.nom.magic]]\n"
-        "  if {[llength $_prs_c] == 0} {\n"
-        "    set _prs_c [lsort [glob -nocomplain "
-        "$_prs_root/libs.tech/{librelane,openlane}/rules.openrcx.*.nom]]\n"
-        "  }\n"
-        # SPM-SI-1 — SECOND captable NAMING CONVENTION (chip/PDK-AGNOSTIC).
-        #     libs.tech/librelane/openrcx/<pdk>.<corner>.magic.rules
-        # A PDK shipping only this layout resolved NOTHING here and fell through
-        # to the `-lef_rc` branch, producing a SPEF with ZERO coupling caps —
-        # which makes the downstream crosstalk screen VACUOUS (N nets, 0 coupling
-        # pairs) even though the PDK ships a full coupling model. Glob the second
-        # layout too, ordered AFTER the first so no PDK that resolves today
-        # changes what it resolves to.
-        "  if {[llength $_prs_c] == 0} {\n"
-        "    set _prs_c [lsort [glob -nocomplain "
-        "$_prs_root/libs.tech/{librelane,openlane}/openrcx/*.nom.magic.rules "
-        "$_prs_root/libs.tech/{librelane,openlane}/openrcx/*.nom.rules]]\n"
-        "  }\n"
-        "  if {[llength $_prs_c] > 0} { set _prs_rules [lindex $_prs_c 0] }\n"
-        "}\n"
-        "# PR-B2b — staged tech-LEF fallback: a named PDK whose tech LEF was\n"
-        "# staged into the project (e.g. asap7, normalized for negative\n"
-        "# OFFSETs) carries no \"/libs.ref/\" in its path, so the derivation\n"
-        "# above silently finds nothing. The CELL LEF of a named PDK always\n"
-        "# lives in-container under <PDK>/libs.ref/ — derive the PDK root from\n"
-        "# it when the tech-LEF path yields no captable. chip-AGNOSTIC.\n"
-        "if {$_prs_rules eq \"\"} {\n"
-        # Brace-quote the interpolated cell-LEF path: when no cell LEF is known
-        # (the skip path), cell_lef_c is "" and a bare `set _prs_clef ` becomes a
-        # one-arg `set` that READS the (undefined) variable -> tclsh aborts the
-        # whole deck with `can't read "_prs_clef"`. `{}` makes it a valid empty
-        # string, and braces also protect a real path that contains spaces.
-        f"  set _prs_clef {{{cell_lef_c}}}\n"
-        "  set _prs_j [string first \"/libs.ref/\" $_prs_clef]\n"
-        "  if {$_prs_j > 0} {\n"
-        "    set _prs_root2 [string range $_prs_clef 0 [expr {$_prs_j - 1}]]\n"
-        "    set _prs_c2 [lsort [glob -nocomplain "
-        "$_prs_root2/libs.tech/{librelane,openlane}/rules.openrcx.*.nom.magic]]\n"
-        "    if {[llength $_prs_c2] == 0} {\n"
-        "      set _prs_c2 [lsort [glob -nocomplain "
-        "$_prs_root2/libs.tech/{librelane,openlane}/rules.openrcx.*.nom]]\n"
-        "    }\n"
-        # SPM-SI-1 — second convention on the cell-LEF-derived root too. Both
-        # roots must glob the same set, or a staged-tech-LEF PDK keeps the
-        # vacuous-by-construction crosstalk screen the first site just fixed.
-        "    if {[llength $_prs_c2] == 0} {\n"
-        "      set _prs_c2 [lsort [glob -nocomplain "
-        "$_prs_root2/libs.tech/{librelane,openlane}/openrcx/*.nom.magic.rules "
-        "$_prs_root2/libs.tech/{librelane,openlane}/openrcx/*.nom.rules]]\n"
-        "    }\n"
-        "    if {[llength $_prs_c2] > 0} { set _prs_rules [lindex $_prs_c2 0] }\n"
-        "  }\n"
-        "}\n"
-        # v1.8.100 — the SIGN-OFF deck, discovered beside the nom one. The DRV
-        # the flow is judged on is measured with `rules.openrcx.*.max.*`
-        # (signoff_spef_repair.tcl, and the multi-corner STA); repairing
-        # against `nom` while signing off on `max` leaves ~2x of the
-        # capacitance unrepaired (measured: nom 46.90 pF vs max 93.16 pF on the
-        # identical routed DEF). Falls back to the nom deck when no max deck
-        # ships, so a PDK with only one deck behaves exactly as before.
-        "set _prs_max \"\"\n"
-        "foreach _prs_r [list $_prs_rules] {\n"
-        "  if {$_prs_r eq \"\"} { continue }\n"
-        "  set _prs_cand [string map {.nom. .max.} $_prs_r]\n"
-        "  if {$_prs_cand ne $_prs_r && [file exists $_prs_cand]} "
-        "{ set _prs_max $_prs_cand }\n"
-        "}\n"
-        "if {$_prs_max eq \"\"} { set _prs_max $_prs_rules }\n"
-        "if {$_prs_rules ne \"\"} {\n"
+        "# F13b -- the OpenRCX ruleset this PDK DECLARES (resolved in Python\n"
+        "# by `_openrcx_ruleset_declaration`, the reader step 22 uses; recorded\n"
+        f"# in {_RCX_DECLARATION_RECORD} beside pnr.tcl). Never globbed.\n"
+        f"set _prs_rules {{{_prs_nom}}}\n"
+        f"set _prs_max {{{_prs_sig}}}\n"
+        + (f"puts \"SPEF_REPAIR_SIGNOFF_RULESET_NOM: {_prs_maxnote}\"\n"
+           if _prs_maxnote else "")
+        + "if {$_prs_rules ne \"\"} {\n"
         "  puts \"SPEF_REPAIR_CAPTABLE: $_prs_rules\"\n"
         "  puts \"SPEF_REPAIR_SIGNOFF_CAPTABLE: $_prs_max\"\n"
         # R9 — the sign-off-domain DRV repair loop is emitted ONLY on an
@@ -29431,7 +29397,7 @@ def _post_route_spef_repair_tcl(out_dir_c: str, tech_lef_c: str,
         "    puts \"SPEF_MEASURE_COMPLETE\"\n"
         "  }\n"
         "} else {\n"
-        "  puts \"SPEF_REPAIR_SKIP: no captable found; post-route SPEF extract skipped\"\n"
+        f"  puts \"{_prs_else}\"\n"
         "}\n"
     )
 
@@ -37994,6 +37960,15 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         print(f"[pnr] SPARE_PADS_PLANNED_NOT_PLACED: {_spare_pads_unplaced} — "
               f"no producer instantiates them, so the route deck does not "
               f"reserve them", file=sys.stderr)
+    # F13b -- the post-route extraction reads the ruleset the PDK DECLARES,
+    # through step 22's reader, and the declaration is recorded beside pnr.tcl.
+    _prs_rcx_decl = _openrcx_ruleset_declaration(pdk, container)
+    _write_rcx_declaration_record(out_dir, _prs_rcx_decl)
+    if _prs_rcx_decl.get("status") == "UNREADABLE":
+        print(f"[pnr] RCX_RULESET_DECLARATION_UNREADABLE: "
+              f"{_prs_rcx_decl.get('detail')} -- the post-route SPEF "
+              f"extraction and its DRV repair are refused (SPEF_REPAIR_REFUSED "
+              f"in openroad.log)", file=sys.stderr)
     spef_repair_block = _post_route_spef_repair_tcl(
         out_dir_c, tech_lef_c, cell_lef_c,
         fork_repair_capable=_fork_repair_capable,
@@ -38001,7 +37976,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         # the child's own residual reroute must protect the SAME bindings the
         # parent's does -- the spares and spare pads are reserved in both.
         reserved_instance_names=_reserved_names,
-        pdk=pdk, filler_spec=_postroute_filler_spec)
+        pdk=pdk, filler_spec=_postroute_filler_spec,
+        rcx_declaration=_prs_rcx_decl)
 
     # === R8 (v1.9.3) — DRV RE-CONVERGENCE AFTER ANTENNA REPAIR ===
     # MEASURED (R7 iter3): the sign-off DRV loop reported `SDR_CONVERGED: pass 6`
