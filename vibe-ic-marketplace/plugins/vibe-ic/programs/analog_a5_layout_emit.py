@@ -1168,8 +1168,9 @@ class Plan:
         # the declared ports as PINS: one record per port, with the
         # rectangle its label covers (see `_draw_pins`)
         self.pins: List[dict] = []
-        # `floating_metal_patches` census
+        # `floating_metal_patches` census, and each patch's own device
         self.island_patches: dict = {}
+        self.patch_of: Dict[Tuple[str, tuple], str] = {}
         self.row_base = 0
         # the gencells' OWN geometry, placed. The emitter does not draw it
         # and cannot change it, but its routing runs beside it, and a
@@ -1438,7 +1439,8 @@ def floating_device_metal(cell: dict, geo: "Geo") -> List[dict]:
 
 def _clear_but(sites: "Sites", box: Sequence[int], layer: str,
                allowed: set, net: str,
-               origin: Sequence[Sequence[int]] = ()) -> bool:
+               origin: Sequence[Sequence[int]] = (),
+               joins: Sequence[Sequence[int]] = ()) -> bool:
     """`Sites.clear` for a box that is ALLOWED to join several conductors:
     every device conductor in `allowed` may touch it, every other conductor
     must keep the deck's space and must not touch, and this emitter's own
@@ -1457,7 +1459,10 @@ def _clear_but(sites: "Sites", box: Sequence[int], layer: str,
     `origin`: the polygons the box EXTENDS. A neighbour those already sit
     closer to than the rule (by `parse_cell`'s outward rounding, or because
     the gencell drew them so) is not made worse by a box that comes no
-    closer to it than they do, so only a box that comes CLOSER is refused."""
+    closer to it than they do, so only a box that comes CLOSER is refused.
+
+    `joins`: this net's own rectangles the caller is joining in the same
+    stroke (a patch drawn as two rectangles is checked one at a time)."""
     s = sites.geo.metal_space(layer)
 
     def d2(a, b) -> int:
@@ -1468,9 +1473,18 @@ def _clear_but(sites: "Sites", box: Sequence[int], layer: str,
     for r in sites.near(layer, box, s):
         if "lcomp" in r and r.get("comp") in allowed:
             continue
-        if "lcomp" not in r and r["net"] == net:
-            continue
         got = d2(box, r["box"])
+        if "lcomp" not in r and r["net"] == net and \
+                tuple(r["box"]) in {tuple(j) for j in joins}:
+            continue
+        if "lcomp" not in r and r["net"] == net:
+            # this emitter's own paint of the SAME net: joining it is fine,
+            # standing short of it is not — two polygons of one net are
+            # still two polygons to the spacing rule (MEASURED: a same-net
+            # escape 0.11 um from a patch, M2.b on delta_sigma)
+            if got and got < s * s:
+                return False
+            continue
         if got >= s * s:
             continue
         if got == 0 or not origin or got < min(d2(o, r["box"])
@@ -1480,9 +1494,10 @@ def _clear_but(sites: "Sites", box: Sequence[int], layer: str,
 
 
 def floating_metal_patches(plan: "Plan", per_dev: Sequence[dict],
-                           geo: "Geo", sites: "Sites") -> dict:
-    """Bring every unrouted, sub-minimum-area gencell polygon to a legal area,
-    as the net it belongs to, BEFORE any routing is drawn.
+                           geo: "Geo", sites: "Sites") -> List[dict]:
+    """PLAN a legal area for every unrouted, sub-minimum-area gencell polygon,
+    and RESERVE it, before any routing is drawn. `commit_metal_patches`
+    paints them after the routing.
 
     WHOSE IT IS. A polygon no label reaches still belongs to a terminal: it is
     drawn over a section of the same type as one of the device's labels (a
@@ -1490,24 +1505,24 @@ def floating_metal_patches(plan: "Plan", per_dev: Sequence[dict],
     labels sit on that type, the polygon is that net's; otherwise it is the
     device's own and every other net keeps clear of the patch.
 
-    HOW IT IS MADE LEGAL, first that fits:
+    HOW IT IS MADE LEGAL — every option that fits, in this order:
       1. GROWN along one axis until it holds the deck's minimum area, into
          space that keeps the deck's spacing from every other conductor;
       2. BRIDGED to the nearest polygon of the SAME net on the same layer —
          the case of a multiplied device, whose stacked gate contacts sit one
          minimum space apart with no room to grow between them.
-    Neither fits: the polygon is left as drawn and recorded as a deviation,
-    because this emitter records shortfalls and the deck adjudicates.
 
-    The patches are drawn through `Plan.paint` under the owning net, so the
-    island placer steers the routing around them and the short audit sees
-    them. Returns the census for the provenance."""
-    census = {"examined": 0, "below_min_area": 0, "grown": 0, "bridged": 0,
-              "left": 0, "patches": []}
+    WHY TWO PASSES, MEASURED on u_hawaii_adc. Painted before the routing, 302
+    of 302 delta_sigma islands grew — and one escape strap, which the plan's
+    structure places without asking the index, landed 0.11 um from a patch
+    (M2.b). Painted after the routing, 301 of 302 found no room: the escapes
+    had taken it. So the first option is RESERVED in the index here — the
+    island placer then steers every via island around it — and the options
+    are re-checked against the finished routing when they are painted."""
+    pending: List[dict] = []
     cache: Dict[int, List[dict]] = {}
     for d in per_dev:
         cell, dev = d["cell"], d["dev"]
-        census["examined"] += 1
         if id(cell) not in cache:
             cache[id(cell)] = floating_device_metal(cell, geo)
         if not cache[id(cell)]:
@@ -1530,7 +1545,6 @@ def floating_metal_patches(plan: "Plan", per_dev: Sequence[dict],
                     if b[0] <= lx <= b[2] and b[1] <= ly <= b[3]:
                         net_comps.setdefault(net, set()).add(r["comp"])
         for isl in cache[id(cell)]:
-            census["below_min_area"] += 1
             owners = set()
             for sec in isl["sections"]:
                 owners |= nets_on.get(sec, set())
@@ -1541,19 +1555,18 @@ def floating_metal_patches(plan: "Plan", per_dev: Sequence[dict],
             x1, y1, x2, y2 = x1 + ox, y1 + oy, x2 + ox, y2 + oy
             w, h = x2 - x1, y2 - y1
             me = (name, isl["comp"])
-            done = None
+            here = (x1, y1, x2, y2)
+            options: List[tuple] = []
             hh = int(math.ceil(need / max(w, 1))) + 1
             ww = int(math.ceil(need / max(h, 1))) + 1
             for box in ((x1, y2 - hh, x2, y2), (x1, y1, x2, y1 + hh),
                         (x2 - ww, y1, x2, y2), (x1, y1, x1 + ww, y2)):
-                if _clear_but(sites, box, layer, {me}, net,
-                              [(x1, y1, x2, y2)]):
-                    done = ("grown", box)
-                    break
-            if done is None and not net.startswith("<device "):
+                if _clear_but(sites, box, layer, {me}, net, [here]):
+                    options.append(("grown", box, {me}, [here]))
+            if not net.startswith("<device "):
                 reach = 2 * geo.metal_space(layer)
                 best = None
-                for r in sites.near(layer, (x1, y1, x2, y2), reach):
+                for r in sites.near(layer, here, reach):
                     if "lcomp" not in r or r.get("comp") == me \
                             or not r["net"].startswith(f"<device {name}>"):
                         continue
@@ -1566,29 +1579,93 @@ def floating_metal_patches(plan: "Plan", per_dev: Sequence[dict],
                         box = (min(x1, b[0]), oy1, max(x2, b[2]), oy2)
                     else:
                         continue
-                    gap = box_separation((x1, y1, x2, y2), b)
+                    gap = box_separation(here, b)
                     if gap > reach or (best and gap >= best[0]):
                         continue
                     best = (gap, box, r.get("comp"), tuple(b))
                 if best and best[2] in net_comps.get(net, ()) \
                         and _clear_but(sites, best[1], layer, {me, best[2]},
-                                       net, [(x1, y1, x2, y2), best[3]]):
-                    done = ("bridged", best[1])
-            if done is None:
-                census["left"] += 1
-                plan.deviate(dev, "device_metal_island_area_lambda2", need,
-                             isl["area_lambda2"],
-                             f"an unrouted {layer} polygon of {name} at "
-                             f"{[x1, y1, x2, y2]} is below the deck's minimum "
-                             f"area and no legal growth or same-net bridge "
-                             f"exists; DRAWN as the gencell made it")
-                continue
-            kind, box = done
-            census[kind] += 1
-            plan.paint(net, layer, *box)
-            census["patches"].append({"device": name, "net": net,
-                                      "layer": layer, "how": kind,
-                                      "box": list(box)})
+                                       net, [here, best[3]]):
+                    options.append(("bridged", best[1], {me, best[2]},
+                                    [here, best[3]]))
+            if options:
+                sites.add({"net": net, "layer": layer, "box": options[0][1]})
+            pending.append({"dev": dev, "name": name, "net": net,
+                            "layer": layer, "here": here, "need": need,
+                            "area": isl["area_lambda2"], "options": options})
+    return pending
+
+
+def commit_metal_patches(plan: "Plan", pending: Sequence[dict],
+                         sites: "Sites", examined: int) -> dict:
+    """Paint the first option of each planned patch that is still clear of
+    everything the routing has drawn since; record the ones none is.
+
+    The patches are drawn through `Plan.paint` under the owning net, so the
+    short audit sees them. Returns the census for the provenance."""
+    census = {"examined": examined, "below_min_area": len(pending),
+              "grown": 0, "bridged": 0, "joined": 0, "left": 0,
+              "patches": []}
+    for p in pending:
+        done = next(((kind, box) for kind, box, allowed, origin in p["options"]
+                     if _clear_but(sites, box, p["layer"], allowed, p["net"],
+                                   origin)), None)
+        if done is None and not p["net"].startswith("<device "):
+            # THE ROUTING OF THE SAME NET CAME CLOSE: join it instead. An
+            # option refused only because this net's own wire now stands
+            # short of it is extended over that wire, which makes the two
+            # one polygon (MEASURED: one delta_sigma gate contact whose own
+            # escape landed 0.11 um below the planned growth).
+            s = sites.geo.metal_space(p["layer"])
+            for kind, box, allowed, origin in p["options"]:
+                near = [r for r in sites.near(p["layer"], box, s)
+                        if "lcomp" not in r and r["net"] == p["net"]
+                        and 0 < box_separation(box, r["box"]) < s]
+                for r in sorted(near, key=lambda r: box_separation(
+                        box, r["box"])):
+                    b = r["box"]
+                    # the patch is stretched along the wire's side to cover
+                    # the wire's whole span, and the gap between them is
+                    # filled across that span: two full-width rectangles, no
+                    # neck thinner than either of them
+                    if b[2] < box[0] or b[0] > box[2]:
+                        ext = (box[0], min(box[1], b[1]), box[2],
+                               max(box[3], b[3]))
+                        gx = (b[2], box[0]) if b[2] < box[0] \
+                            else (box[2], b[0])
+                        fill = (gx[0], b[1], gx[1], b[3])
+                    else:
+                        ext = (min(box[0], b[0]), box[1], max(box[2], b[2]),
+                               box[3])
+                        gy = (b[3], box[1]) if b[3] < box[1] \
+                            else (box[3], b[1])
+                        fill = (b[0], gy[0], b[2], gy[1])
+                    if all(_clear_but(sites, q, p["layer"], allowed,
+                                      p["net"], list(origin) + [b, box],
+                                      joins=[b])
+                           for q in (ext, fill)):
+                        done = ("joined", ext, fill)
+                        break
+                if done:
+                    break
+        if done is None:
+            census["left"] += 1
+            plan.deviate(p["dev"], "device_metal_island_area_lambda2",
+                         p["need"], p["area"],
+                         f"an unrouted {p['layer']} polygon of {p['name']} at "
+                         f"{list(p['here'])} is below the deck's minimum area "
+                         f"and no legal growth or same-net bridge exists; "
+                         f"DRAWN as the gencell made it")
+            continue
+        kind, boxes = done[0], done[1:]
+        census[kind] += 1
+        for box in boxes:
+            plan.paint(p["net"], p["layer"], *box)
+            plan.patch_of[(p["layer"], tuple(box))] = p["name"]
+        census["patches"].append({"device": p["name"], "net": p["net"],
+                                  "layer": p["layer"], "how": kind,
+                                  "box": [list(b) for b in boxes]
+                                  if len(boxes) > 1 else list(boxes[0])})
     return census
 
 
@@ -2123,9 +2200,9 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
     # placer that cannot see them places into them.
     sites = Sites(plan.device_shapes, geo)
     plan.sites = sites
-    # What the gencells leave unrouted and too small, made legal before a
-    # single wire is drawn, so every wire is placed around the patches.
-    plan.island_patches = floating_metal_patches(plan, per_dev, geo, sites)
+    # What the gencells leave unrouted and too small: planned and reserved
+    # now, painted after the routing (see `floating_metal_patches`).
+    patches = floating_metal_patches(plan, per_dev, geo, sites)
 
     # Lanes are handed out in order of the height they come from: the lane
     # nearest the device serves the LOWEST escape. An escape therefore never
@@ -2246,6 +2323,9 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
             plan.paint(net, "metal3", lane - hw3, rail_y[net], lane + hw3, ey)
             _via_stack(plan, net, lane, rail_y[net], 2, geo, top=3,
                        sites=sites)
+
+    plan.island_patches = commit_metal_patches(plan, patches, sites,
+                                               len(per_dev))
 
     # ── one metal2 rail per net, and a label on each declared port ──────
     rail_box: Dict[str, Tuple[int, int, int, int]] = {}
@@ -2702,6 +2782,12 @@ def clearance_deviations(plan: Plan, geo: Geo,
                 continue
             seen.add(key)
             who = (na if dev_a else nb)[len("<device "):-1]
+            if plan.patch_of.get((layer, tuple(bb if dev_a else ba))) == who:
+                # a patch on one of the device's OWN polygons, which by
+                # construction comes no closer to the rest of that device than
+                # the polygon it extends (`_clear_but`): the gencell's own
+                # spacing, and what a gencell draws is the PDK's business
+                continue
             plan.deviate(owner.get(who, anon),
                          f"{layer}_space_to_device_lambda",
                          min_space[layer], round(gap, 3),
