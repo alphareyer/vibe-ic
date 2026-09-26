@@ -46,6 +46,9 @@ X_i_0 Q D VSS VPW nfet_05v0 W=8.2e-07 L=6e-07
 .ENDS
 .SUBCKT cells__fill_1 VDD VNW VPW VSS
 .ENDS
+.SUBCKT cells__inv_1 I ZN VDD VNW VPW VSS
+X_i_0 ZN I VSS VPW nfet_05v0 W=8.2e-07 L=6e-07
+.ENDS
 '''
 
 #: Magic's ext2spice of the PDK's nand2_1 layout (ports in LAYOUT order).
@@ -67,6 +70,7 @@ NETLIST = '''module chip_top (clk, x, p);
  cells__nand2_1 _335_ (.A1(a), .A2(b), .ZN(c));
  cells__dffq_1 _417_ (.D(c), .CLK(clk), .Q(p));
  cells__fill_1 FILLER_0 ();
+ cells__inv_1 _500_ (.I(c), .ZN(d));
 endmodule
 '''
 
@@ -103,7 +107,11 @@ def test_the_layout_view_takes_the_schematic_subckts_place_in_the_schematic_port
     root = _pdk(tmp_path)
     netlist = write(tmp_path / 'design/nl.v', NETLIST)
     calls = []
-    monkeypatch.setattr(pst, '_docker', _magic_edge(calls))
+    # dffq_1: the layout extracts to wiring alone (no device); inv_1: absent
+    # from the GDS, Magic writes nothing (MEASURED: "Cell ... couldn't be read").
+    monkeypatch.setattr(pst, '_docker', _magic_edge(calls, {
+        'cells__nand2_1': EXTRACTED_NAND2,
+        'cells__dffq_1': '.subckt cells__dffq_1 D CLK Q VDD VNW VPW VSS\nC0 Q VSS 0.1f\n.ends\n'}))
     view = pst.cell_view('img', tmp_path / 'design', [(root / 'x', '/pdk/x')],
                          config={'CELL_GDS': ['/pdk/x/libs.ref/cells/gds/cells.gds']},
                          pdk_dir=root / 'x', guest_root='/pdk', pdk='x', netlist=netlist,
@@ -120,7 +128,9 @@ def test_the_layout_view_takes_the_schematic_subckts_place_in_the_schematic_port
     assert 'load cells__fill_1' not in tcl
     assert view['extracted'] == ['cells__nand2_1']
     # A cell the layout could not stand in for keeps its schematic, by name.
-    assert list(view['kept_schematic']) == ['cells__dffq_1']
+    assert view['kept_schematic'] == {
+        'cells__dffq_1': 'no device extracted from the declared layout',
+        'cells__inv_1': 'no device extracted from the declared layout'}
     assert view['view'] == 'mixed'
     text = Path(view['path']).read_text()
     assert '.subckt cells__nand2_1 A1 A2 ZN VDD VNW VPW VSS' in text
