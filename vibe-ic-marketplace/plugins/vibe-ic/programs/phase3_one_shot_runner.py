@@ -36396,11 +36396,10 @@ def _prepare_librelane_floorplan_for_route(
         image = _ll.resolve_image(project)
     except _ll.Refusal as exc:
         return _fail(exc.code, str(exc), "NOT_MEASURED")
-    pdk_root = _ll.resolve_pdk_root(project)
-    if not pdk_root:
-        return _fail("LL_PDK_ROOT_NOT_DECLARED",
-                     "phase3/librelane_switch.json pdk_root_host or "
-                     "VIBEIC_LIBRELANE_PDK_ROOT", "NOT_MEASURED")
+    try:
+        pdk_root = _ll.pdk_root_resolution(project, pdk.name, image=image)["path"]
+    except _ll.Refusal as exc:
+        return _fail("LL_PDK_ROOT_NOT_DECLARED", str(exc), "NOT_MEASURED")
     producer = (StepResult("io_pad_chip_top_gen", "PASS", 0.0, "already run")
                 if _padring_chip_top_record(project) is not None
                 else step_io_pad_chip_top_gen(project, container, pdk))
@@ -47323,7 +47322,7 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     except Refusal as exc:
         return StepResult("gds", "NOT_MEASURED", time.time() - t0, str(exc),
                           reason_class=_V.ReasonClass.TOOL_ABSENT)
-    root = resolve_pdk_root(project)
+    root = resolve_pdk_root(project, pdk.name, image=image)
     if not image or not root:
         return StepResult("gds", "NOT_MEASURED", time.time() - t0,
                           "LL_IMAGE_OR_PDK_ROOT_NOT_DECLARED",
@@ -63025,11 +63024,11 @@ def _librelane_signoff_run(project: Path, top: str, pdk: PdkConfig, *,
                                       if Path(v).is_file()}))
     if key in _LL_SIGNOFF_RUNS:
         return _LL_SIGNOFF_RUNS[key]
-    root = _ll.resolve_pdk_root(project)
-    if not root:
+    try:
+        root = _ll.pdk_root_resolution(project, pdk.name)["path"]
+    except _ll.Refusal as exc:
         raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
-                          "steps 22/23 on LibreLane need pdk_root_host in the "
-                          "switch or VIBEIC_LIBRELANE_PDK_ROOT")
+                          f"steps 22/23 on LibreLane: {exc}") from None
     image = _ll.resolve_image(project)
     result = _ls.run(project, image, Path(root), pdk.name,
                      routed_def=pnr / f"{top}.def", netlist=pnr / f"{top}_pnr.v",
@@ -67919,12 +67918,12 @@ def _librelane_si_corner_inputs(project: Path) -> Optional[dict]:
         image = _ll.resolve_image(project)
     except (OSError, ValueError, KeyError, TypeError, _ll.Refusal):
         return None
-    root = _ll.resolve_pdk_root(project)
-    if not root:
-        return None
     pdk_name = next((p.split("/")[2] for p in inputs["liberties"]
                      if p.startswith("/pdk/")), None)
     if pdk_name is None:
+        return None
+    root = _ll.resolve_pdk_root(project, pdk_name, image=image)
+    if not root:
         return None
     return {"state": state, "corner": corner, "design": design,
             "liberties": inputs["liberties"],

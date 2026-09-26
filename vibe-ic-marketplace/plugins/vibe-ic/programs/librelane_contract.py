@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -907,11 +908,169 @@ def placement_levers(project: Path) -> dict[str, tuple[Any, str]]:
     return overlay
 
 
-def resolve_pdk_root(project: Path | None = None) -> str | None:
-    """Switch ``pdk_root_host`` > ``VIBEIC_LIBRELANE_PDK_ROOT``; never guessed."""
+#: The host cache a resolved PDK root is materialised into, one directory per
+#: IMAGE ID. `VIBEIC_PDK_ROOT_CACHE` names it; else the XDG cache convention.
+#: This is where the COPY lives, never where a PDK is guessed to be: the content
+#: always comes out of the resolved image.
+PDK_ROOT_CACHE_ENV = 'VIBEIC_PDK_ROOT_CACHE'
+PDK_ROOT_MARKER = '.vibeic_pdk_root.json'
+PDK_ROOT_PROVENANCE_REL = 'phase3/librelane_pdk_root.provenance.json'
+_PDK_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._+-]*$')
+
+
+def image_pdk_root(image: str, docker: str = 'docker') -> dict[str, str]:
+    """The image's OWN PDK location: its `PDK_ROOT` env, and its image ID.
+
+    Read with `docker image inspect` (never a pull, never a run). The digest is
+    the identity and the repository is configuration (#2170): a `repo@digest`
+    this host holds under another repository name is inspected by that name.
+    An image not on this host, or one declaring no absolute `PDK_ROOT`, refuses.
+    """
+    def _inspect(ref: str) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run([docker, 'image', 'inspect', '--format',
+                                   '{{json .Id}} {{json .Config.Env}}', ref],
+                                  capture_output=True, text=True)
+        except OSError as exc:
+            raise Refusal('LL_IMAGE_NOT_INSPECTABLE', f'{image}: {exc}') from None
+    result = _inspect(image)
+    if result.returncode:
+        import _eda_pin
+        digest = _eda_pin.reference_digest(image)
+        held = _eda_pin.local_references_for_digest(digest)[0] if digest else ()
+        if held:
+            result = _inspect(held[0])
+    if result.returncode:
+        raise Refusal('LL_IMAGE_NOT_INSPECTABLE',
+                      f'{image}: rc={result.returncode} {result.stderr.strip()[:200]}')
+    try:
+        image_id, env = (json.loads(part) for part in result.stdout.strip().split(' ', 1))
+    except ValueError:
+        raise Refusal('LL_IMAGE_NOT_INSPECTABLE', f'{image}: {result.stdout[:200]!r}') from None
+    values = [e.split('=', 1)[1] for e in (env or []) if e.startswith('PDK_ROOT=')]
+    root = values[-1] if values else ''
+    if not (isinstance(image_id, str) and re.fullmatch(r'sha256:[0-9a-f]{64}', image_id)):
+        raise Refusal('LL_IMAGE_NOT_INSPECTABLE', f'{image}: image id {image_id!r}')
+    if not root.startswith('/'):
+        raise Refusal('LL_IMAGE_PDK_ROOT_UNDECLARED', f'{image}: PDK_ROOT={root!r}')
+    return {'image_id': image_id, 'pdk_root': root.rstrip('/') or '/'}
+
+
+def _pdk_root_cache() -> Path:
+    declared = os.environ.get(PDK_ROOT_CACHE_ENV)
+    if declared:
+        return Path(declared)
+    xdg = os.environ.get('XDG_CACHE_HOME')
+    return (Path(xdg) if xdg else Path.home() / '.cache') / 'vibeic' / 'pdk_root'
+
+
+def _materialise_image_pdk(image: str, found: dict[str, str], pdk: str,
+                           docker: str) -> tuple[Path, str]:
+    """Copy `<image PDK_ROOT>/<pdk>` out of the image, once per image ID.
+
+    The copy lands in a scratch name and is renamed into place, and its marker
+    is written last, so a reader sees a finished tree or none. Returns the host
+    root (which holds `<pdk>/`) and whether it was `copied` or `reused`.
+    """
+    root = _pdk_root_cache() / found['image_id'].split(':', 1)[1]
+    marker = root / f'{pdk}{PDK_ROOT_MARKER}'
+    guest = f"{found['pdk_root']}/{pdk}"
+    want = {'image_id': found['image_id'], 'pdk': pdk, 'guest_path': guest}
+    try:
+        recorded = json.loads(marker.read_text())
+    except (OSError, ValueError):
+        recorded = None
+    if isinstance(recorded, dict) and all(recorded.get(k) == v for k, v in want.items()) \
+            and (root / pdk).is_dir():
+        return root, 'reused'
+    import _docker_memory as _dmem
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        scratch = Path(tempfile.mkdtemp(prefix=f'.{pdk}.partial-', dir=root))
+    except OSError as exc:
+        raise Refusal('LL_PDK_ROOT_CACHE_UNWRITABLE', f'{root}: {exc}') from None
+    created = subprocess.run([docker, 'create', *_dmem.docker_memory_flags(),
+                              '--network', 'none', '--entrypoint', 'true',
+                              found['image_id']], capture_output=True, text=True)
+    try:
+        if created.returncode:
+            raise Refusal('LL_IMAGE_PDK_NOT_EXTRACTABLE',
+                          f'{image}: docker create rc={created.returncode} {created.stderr.strip()[:200]}')
+        copied = subprocess.run([docker, 'cp', '-L', f'{created.stdout.strip()}:{guest}',
+                                 str(scratch / pdk)], capture_output=True, text=True)
+        if copied.returncode or not (scratch / pdk).is_dir():
+            raise Refusal('LL_IMAGE_PDK_ABSENT',
+                          f'{image}: {guest} not a directory in the image '
+                          f'(rc={copied.returncode} {copied.stderr.strip()[:200]})')
+        try:
+            (scratch / pdk).rename(root / pdk)
+        except OSError:
+            if not (root / pdk).is_dir():   # another resolver won the rename; keep theirs
+                raise
+        write_json(marker, {**want, 'image': image, 'host_path': str(root / pdk)})
+    finally:
+        if not created.returncode:
+            subprocess.run([docker, 'rm', '-f', created.stdout.strip()], capture_output=True)
+        shutil.rmtree(scratch, ignore_errors=True)
+    return root, 'copied'
+
+
+def pdk_root_resolution(project: Path | None = None, pdk: str | None = None, *,
+                        image: str | None = None, docker: str = 'docker') -> dict[str, Any]:
+    """Declared > resolved at run time > refused by name, like `resolve_image`.
+
+    1. declared: switch ``pdk_root_host``, else ``VIBEIC_LIBRELANE_PDK_ROOT``.
+    2. resolved: the RESOLVED image's own ``PDK_ROOT`` env, joined with the
+       design's PDK (the caller's resolved PDK, else the switch's ``pdk``) and
+       copied once per image ID to a host directory every consumer can bind.
+    3. neither: `LL_PDK_ROOT_NOT_RESOLVABLE`, naming why resolution failed.
+    The answer says where the root came from; with a project it is also
+    recorded in `phase3/librelane_pdk_root.provenance.json`.
+    """
     path = project / 'phase3/librelane_switch.json' if project else None
-    declared = _load(path).get('pdk_root_host') if path and path.is_file() else None
-    return str(declared or os.environ.get('VIBEIC_LIBRELANE_PDK_ROOT') or '') or None
+    switch = _load(path) if path and path.is_file() else {}
+    if switch.get('pdk_root_host'):
+        answer = {'path': str(switch['pdk_root_host']), 'source': 'declared',
+                  'declared_by': 'phase3/librelane_switch.json pdk_root_host'}
+    elif os.environ.get('VIBEIC_LIBRELANE_PDK_ROOT'):
+        answer = {'path': os.environ['VIBEIC_LIBRELANE_PDK_ROOT'], 'source': 'declared',
+                  'declared_by': 'env VIBEIC_LIBRELANE_PDK_ROOT'}
+    else:
+        pdk_source = 'caller (the design\'s resolved PDK)' if pdk else \
+            'phase3/librelane_switch.json pdk'
+        pdk = pdk or switch.get('pdk')
+        try:
+            if not pdk:
+                raise Refusal('LL_PDK_UNDECLARED', 'no design PDK (caller or switch pdk)')
+            if not _PDK_NAME.match(str(pdk)):
+                raise Refusal('LL_PDK_NAME_INVALID', repr(pdk))
+            image = image or resolve_image(project)
+            found = image_pdk_root(image, docker)
+            root, how = _materialise_image_pdk(image, found, str(pdk), docker)
+        except Refusal as exc:
+            raise Refusal('LL_PDK_ROOT_NOT_RESOLVABLE',
+                          'not declared (switch pdk_root_host / VIBEIC_LIBRELANE_PDK_ROOT) '
+                          f'and not resolved from the image: {exc}') from None
+        answer = {'path': str(root), 'source': 'resolved',
+                  'derivation': {'image': image, 'image_id': found['image_id'],
+                                 'image_pdk_root': found['pdk_root'],
+                                 'image_pdk_root_from': 'docker image inspect Config.Env PDK_ROOT',
+                                 'pdk': str(pdk), 'pdk_from': pdk_source,
+                                 'guest_path': f"{found['pdk_root']}/{pdk}",
+                                 'host_path': str(root / str(pdk)),
+                                 'cache': how}}
+    if project is not None and (project / 'phase3').is_dir():
+        write_json(project / PDK_ROOT_PROVENANCE_REL, answer)
+    return answer
+
+
+def resolve_pdk_root(project: Path | None = None, pdk: str | None = None, *,
+                     image: str | None = None, docker: str = 'docker') -> str | None:
+    """The host PDK root per `pdk_root_resolution`, or None when it refuses."""
+    try:
+        return pdk_root_resolution(project, pdk, image=image, docker=docker)['path']
+    except Refusal:
+        return None
 
 
 def resolve_image(project: Path | None = None) -> str:
