@@ -46,13 +46,157 @@ def _set(out: dict, provenance: dict, key: str, value: Any, source: str) -> None
     provenance[key] = source
 
 
+#: The L-docs `emit_config` consumes, by EXACT name. A prefix match lets one
+#: document stand in for another (D1: `L8_TIMING_WAVEFORM` satisfied an `L8_`
+#: slot while `L8_RTL_CONSTANTS` was absent, and the clauses reading it SKIPPED).
+EMIT_CONFIG_LDOCS = ('L8_TIMING_WAVEFORM.json', 'L9_INTEGRATION_SPEC.json',
+                     'L19_CONSTRAINTS_PDK.json')
+DECLARATION_REL = 'input/submission_template/tapeout_declaration.json'
+SLOTS_REL = 'input/submission_template/slots'
+
+
+def _ldoc(root: Path, name: str) -> dict[str, Any]:
+    path = root / name
+    if not path.is_file():
+        raise Refusal('LL_LDOC_MISSING', f'{name} (emit_config reads it by exact name)')
+    return _load(path)
+
+
+def _rect(value: Any, key: str) -> list[float | int]:
+    if not (isinstance(value, list) and len(value) == 4 and
+            all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)
+            and value[0] < value[2] and value[1] < value[3]):
+        raise Refusal('LL_DECLARATION_RECT_INVALID', f'{key}: {value!r}')
+    return value
+
+
+def _def_die_area(path: Path) -> list[float] | None:
+    """DIEAREA of a DEF template in microns, or None when it states none."""
+    text = path.read_text(errors='replace')
+    units = re.search(r'^\s*UNITS\s+DISTANCE\s+MICRONS\s+(\d+)\s*;', text, re.M)
+    area = re.search(r'^\s*DIEAREA((?:\s*\(\s*-?\d+\s+-?\d+\s*\))+)\s*;', text, re.M)
+    if not (units and area):
+        return None
+    points = [(int(x), int(y)) for x, y in re.findall(r'\(\s*(-?\d+)\s+(-?\d+)\s*\)', area.group(1))]
+    scale = int(units.group(1))
+    xs, ys = [x for x, _ in points], [y for _, y in points]
+    return [min(xs) / scale, min(ys) / scale, max(xs) / scale, max(ys) / scale]
+
+
+def _slot_def_template(project: Path) -> tuple[str, str] | None:
+    """The operator slot's own ``FP_DEF_TEMPLATE``, as (dir:: path, source)."""
+    import yaml
+    found: dict[str, str] = {}
+    slots = project / SLOTS_REL
+    for slot in sorted(list(slots.glob('*.yaml')) + list(slots.glob('*.yml'))):
+        try:
+            mapping = yaml.safe_load(slot.read_text())
+        except (OSError, yaml.YAMLError) as exc:
+            raise Refusal('LL_SLOT_UNREADABLE', f'{slot}: {exc}') from exc
+        value = mapping.get('FP_DEF_TEMPLATE') if isinstance(mapping, dict) else None
+        if value in (None, ''):
+            continue
+        raw = str(value)
+        raw = raw[5:] if raw.startswith('dir::') else raw
+        template = (slot.parent / raw).resolve()
+        if not template.is_file() or not template.is_relative_to(project.resolve()):
+            raise Refusal('LL_DEF_TEMPLATE_MISSING', f'{slot.name}: {value}')
+        found[str(template)] = (f'{slot.relative_to(project)}.FP_DEF_TEMPLATE '
+                                f'(sha256:{digest(template)})')
+    if len(found) > 1:
+        raise Refusal('LL_DEF_TEMPLATE_AMBIGUOUS', ', '.join(sorted(found)))
+    if not found:
+        return None
+    path, source = next(iter(found.items()))
+    return 'dir::' + str(Path(path).relative_to(project.resolve())), source
+
+
+#: Declaration pad answers -> the LibreLane variables the pad producer writes.
+_PAD_ANSWERS = {'pad_site_name': 'PAD_SITE_NAME',
+                'pad_corner_site_name': 'PAD_CORNER_SITE_NAME',
+                'pad_edge_spacing_um': 'PAD_EDGE_SPACING',
+                'pad_fillers': 'PAD_FILLERS'}
+
+
+def declaration_config(project: Path) -> tuple[dict[str, Any], dict[str, str]]:
+    """Step 0.5ic -> LibreLane: the declared die, core and pads as config.
+
+    Every value is read through ``_tapeout_declaration.answer`` -- the one
+    reader, which withholds an owner-only answer nobody attested -- never out
+    of ``answers`` directly. A HARDMACRO's own rectangle is ``macro_area_um``;
+    its ``die_area_um`` is a question it does not owe (vibe-ic#2118). A die
+    whose declared ``fp_sizing`` is ``relative`` was DERIVED from a
+    utilisation, so its rectangles are not emitted as the truth.
+    """
+    import _tapeout_declaration as TD
+    source = DECLARATION_REL.removesuffix('.json') + '.answers.'
+    doc = _load(project / DECLARATION_REL)
+    result: dict[str, Any] = {}
+    sources: dict[str, str] = {}
+    answered = {key: TD.answer(doc, key) for key in (
+        'deliverable', 'top_cell', 'die_area_um', 'core_area_um', 'fp_sizing',
+        'die_origin_um', 'macro_area_um', 'pad_order_by_side', 'pad_rotations',
+        'pad_corner_master', *_PAD_ANSWERS)}
+    given = {k: v for k, v in answered.items() if v != TD.NOT_DETERMINED}
+    _set(result, sources, 'DESIGN_NAME', given.get('top_cell'), source + 'top_cell')
+    sizing = given.get('fp_sizing')
+    if sizing is not None and sizing not in ('absolute', 'relative'):
+        raise Refusal('LL_DECLARATION_FP_SIZING_INVALID', repr(sizing))
+    if given.get('deliverable') == TD.DELIVERABLE_HARDMACRO:
+        if 'macro_area_um' in given:
+            _set(result, sources, 'DIE_AREA', _rect(given['macro_area_um'], 'macro_area_um'),
+                 source + 'macro_area_um (deliverable HARDMACRO)')
+    elif sizing != 'relative':
+        if 'die_area_um' in given:
+            die = _rect(given['die_area_um'], 'die_area_um')
+            origin = given.get('die_origin_um')
+            if isinstance(origin, list) and len(origin) == 2 and list(die[:2]) != list(origin):
+                raise Refusal('LL_DECLARATION_ORIGIN_MISMATCH',
+                              f'die_area_um {die} vs die_origin_um {origin}')
+            _set(result, sources, 'DIE_AREA', die, source + 'die_area_um')
+        if 'core_area_um' in given:
+            core = _rect(given['core_area_um'], 'core_area_um')
+            die = result.get('DIE_AREA')
+            if die and not (core[0] >= die[0] and core[1] >= die[1] and
+                            core[2] <= die[2] and core[3] <= die[3]):
+                raise Refusal('LL_DECLARATION_CORE_OUTSIDE_DIE', f'{core} vs {die}')
+            _set(result, sources, 'CORE_AREA', core, source + 'core_area_um')
+    if sizing is not None:
+        _set(result, sources, 'FP_SIZING', sizing, source + 'fp_sizing')
+    elif 'DIE_AREA' in result:
+        _set(result, sources, 'FP_SIZING', 'absolute', sources['DIE_AREA'])
+    order = given.get('pad_order_by_side')
+    if isinstance(order, dict):
+        for side in ('south', 'east', 'north', 'west'):
+            if isinstance(order.get(side), list):
+                _set(result, sources, 'PAD_' + side.upper(), order[side],
+                     f'{source}pad_order_by_side.{side}')
+    rotations = given.get('pad_rotations')
+    if isinstance(rotations, dict):
+        for axis in ('horizontal', 'vertical', 'corner'):
+            _set(result, sources, 'PAD_ROTATION_' + axis.upper(), rotations.get(axis),
+                 f'{source}pad_rotations.{axis}')
+    if isinstance(given.get('pad_corner_master'), str):
+        _set(result, sources, 'PAD_CORNER', [given['pad_corner_master']],
+             source + 'pad_corner_master')
+    for answer_key, key in _PAD_ANSWERS.items():
+        _set(result, sources, key, given.get(answer_key), source + answer_key)
+    template = _slot_def_template(project)
+    if template:
+        path, origin = template
+        _set(result, sources, 'FP_DEF_TEMPLATE', path, origin)
+        die = _def_die_area(project / path[5:])
+        if die is not None and 'DIE_AREA' in result and \
+                any(abs(a - b) > 1e-6 for a, b in zip(die, result['DIE_AREA'])):
+            raise Refusal('LL_DEF_TEMPLATE_DIE_MISMATCH',
+                          f'{path} DIEAREA {die} vs declared {result["DIE_AREA"]}')
+    return result, sources
+
+
 def emit_config(project: Path, pdk: str, output: Path) -> dict:
     """Emit only declared inputs; unavailable values stay absent, never guessed."""
     root = project / 'phase1/generated_docs'
-    l8 = _load(root / 'L8_TIMING_WAVEFORM.json')
-    l9 = _load(root / 'L9_INTEGRATION_SPEC.json')
-    l19 = _load(root / 'L19_CONSTRAINTS_PDK.json')
-    declaration = _load(project / 'input/submission_template/tapeout_declaration.json')
+    l8, l9, l19 = (_ldoc(root, name) for name in EMIT_CONFIG_LDOCS)
     # The pad producer (step 15.5ic) runs after synthesis and pre-layout STA;
     # before it has run the PAD_* keys are undeclared, so they stay absent.
     pad_path = project / 'phase3/stage3/pnr/pad_assignment.json'
@@ -77,12 +221,9 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
         for key in ('PNR_SDC_FILE', 'SIGNOFF_SDC_FILE'):
             _set(result, sources, key, 'dir::' + str(sdc.relative_to(project)),
                  'phase3/stage3/pnr/constraint.sdc (L9-derived producer artefact)')
-    answers = declaration.get('answers', {})
-    _set(result, sources, 'DESIGN_NAME', answers.get('top_cell'), 'input/submission_template/tapeout_declaration.answers.top_cell')
-    _set(result, sources, 'DIE_AREA', answers.get('die_area_um'), 'input/submission_template/tapeout_declaration.answers.die_area_um')
-    _set(result, sources, 'CORE_AREA', answers.get('core_area_um'), 'input/submission_template/tapeout_declaration.answers.core_area_um')
-    if 'DIE_AREA' in result:
-        _set(result, sources, 'FP_SIZING', 'absolute', 'input/submission_template/tapeout_declaration.answers.die_area_um')
+    declared, declared_sources = declaration_config(project)
+    for key, value in declared.items():
+        _set(result, sources, key, value, declared_sources[key])
     declarations = l19.get('fields', {}).get('constraint_declarations', [])
     supported = {'MAX_FANOUT_CONSTRAINT', 'MAX_TRANSITION_CONSTRAINT',
                  'MAX_CAPACITANCE_CONSTRAINT', 'FP_CORE_UTIL', 'PL_TARGET_DENSITY',
@@ -123,27 +264,43 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
             raise Refusal('LL_CONSTRAINT_CONFLICT', key)
         _, value, source = applicable[0]
         _set(result, sources, key, value, source)
-    for key in ('PAD_SOUTH', 'PAD_EAST', 'PAD_NORTH', 'PAD_WEST'):
-        _set(result, sources, key, pads.get(key), 'phase3/stage3/pnr/pad_assignment.json.' + key)
-    for key in ('PAD_SITE_NAME', 'PAD_CORNER_SITE_NAME', 'PAD_FILLERS',
-                'PAD_ROTATION_HORIZONTAL', 'PAD_ROTATION_VERTICAL',
-                'PAD_ROTATION_CORNER'):
-        _set(result, sources, key, pads.get(key),
-             'phase3/stage3/pnr/pad_assignment.json.' + key)
-    if pads.get('PAD_CORNER'):
-        corner = pads['PAD_CORNER']
-        _set(result, sources, 'PAD_CORNER',
-             corner if isinstance(corner, list) else [corner],
-             'phase3/stage3/pnr/pad_assignment.json.PAD_CORNER')
-    if pads.get('PAD_EDGE_SPACING') is not None:
-        try:
-            spacing = float(pads['PAD_EDGE_SPACING'])
-        except (TypeError, ValueError) as exc:
-            raise Refusal('LL_PAD_SPACING_INVALID', str(pads['PAD_EDGE_SPACING'])) from exc
-        if not 0 <= spacing < float('inf'):
-            raise Refusal('LL_PAD_SPACING_INVALID', str(spacing))
-        _set(result, sources, 'PAD_EDGE_SPACING', spacing,
-             'phase3/stage3/pnr/pad_assignment.json.PAD_EDGE_SPACING')
+    # The pad producer (15.5ic) translates the declaration; where both state
+    # a value they must agree. The declaration is the input, so it wins the
+    # provenance; a disagreement is refused, never resolved by either side.
+    produced: dict[str, Any] = {}
+    for key in ('PAD_SOUTH', 'PAD_EAST', 'PAD_NORTH', 'PAD_WEST', 'PAD_SITE_NAME',
+                'PAD_CORNER_SITE_NAME', 'PAD_FILLERS', 'PAD_ROTATION_HORIZONTAL',
+                'PAD_ROTATION_VERTICAL', 'PAD_ROTATION_CORNER', 'PAD_CORNER',
+                'PAD_EDGE_SPACING'):
+        value = pads.get(key)
+        if key == 'PAD_CORNER' and value and not isinstance(value, list):
+            value = [value]
+        produced[key] = value
+    for key in ('PAD_EDGE_SPACING',):
+        for owner, value in (('pad_assignment.json', produced.get(key)),
+                             ('declaration', result.get(key))):
+            if value is None:
+                continue
+            try:
+                spacing = float(value)
+            except (TypeError, ValueError) as exc:
+                raise Refusal('LL_PAD_SPACING_INVALID', f'{owner}: {value}') from exc
+            if not 0 <= spacing < float('inf'):
+                raise Refusal('LL_PAD_SPACING_INVALID', f'{owner}: {spacing}')
+            if owner == 'pad_assignment.json':
+                produced[key] = spacing
+            else:
+                result[key] = spacing
+    for key, value in produced.items():
+        if value in (None, '', []):
+            continue
+        if key in result:
+            if result[key] != value:
+                raise Refusal('LL_PAD_DECLARATION_CONFLICT',
+                              f'{key}: declaration {result[key]!r} vs '
+                              f'phase3/stage3/pnr/pad_assignment.json {value!r}')
+            continue
+        _set(result, sources, key, value, 'phase3/stage3/pnr/pad_assignment.json.' + key)
     # Supply nets: the chip-top producer's power-pad plan names them.  A PDN
     # grid with no net names and no ring cannot reach the supply pads: on the
     # spm chip path the PDK-default GeneratePDN measured 3,391,999
@@ -182,9 +339,11 @@ def emit_synthesis_config(project: Path, pdk: str, output: Path,
                           rtl_files: list[Path], defines: list[str],
                           use_slang: bool,
                           std_cell_library: str | None = None,
-                          synth_liberty: str | None = None) -> dict:
+                          synth_liberty: str | None = None,
+                          top: str | None = None) -> dict:
     """Bind Yosys.Synthesis to the caller's selected design inputs."""
     import sparse_fsm_detect
+    import catalog_synth_safe_params_check
 
     if not rtl_files or any(not path.is_file() or not path.resolve().is_relative_to(project.resolve())
                             for path in rtl_files):
@@ -215,6 +374,11 @@ def emit_synthesis_config(project: Path, pdk: str, output: Path,
          'sparse_fsm_detect over selected design RTL')
     _set(result, sources, 'SYNTH_FSM_ENCFILE', True,
          'step 13 LEC requires the synthesis FSM recoding table')
+    # A catalogued IP that is itself the top: SYNTH_PARAMETERS reaches it
+    # (`chparam ... <top>`). Below the top, the glue pins it (step-1 gate).
+    pinned = catalog_synth_safe_params_check.top_synth_parameters(project, top) if top else None
+    if pinned:
+        _set(result, sources, 'SYNTH_PARAMETERS', pinned[0], pinned[1])
     write_json(output, result)
     write_json(output.with_suffix('.provenance.json'), sources)
     return result

@@ -16705,7 +16705,8 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
             liberty_guest = str(liberty_path)
         config = _ll.emit_synthesis_config(
             project, str(pdk.name), config_path, rtl, defines, use_slang,
-            std_cell_library=std_cell_library, synth_liberty=liberty_guest)
+            std_cell_library=std_cell_library, synth_liberty=liberty_guest,
+            top=top)
         config["DESIGN_NAME"] = top
         _ll.write_json(config_path, config)
         provenance = json.loads(config_path.with_suffix('.provenance.json').read_text())

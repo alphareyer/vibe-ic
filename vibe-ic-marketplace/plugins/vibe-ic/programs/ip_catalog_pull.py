@@ -212,16 +212,20 @@ def pull_catalog_ip(match: CatalogMatch,
     #    populated fallback mirror; ORGANIC #665).
     src_dir = find_local_mirror(match.ip_name, match.rtl_files)
     pull_method = "local_mirror"
+    clone_pin: Optional[Dict[str, Any]] = None
     if src_dir is None:
-        # Fallback: git clone canonical_url at canonical_commit
-        # (only when network available + canonical_url set)
-        src_dir = _git_clone_to_cache(match)
+        # Fallback: git clone canonical_url, checked out AT canonical_commit
+        # and proven by sha -- never a silent fall-back to the branch tip.
+        src_dir, clone_pin = _git_clone_to_cache(match)
         pull_method = "git_clone"
     if src_dir is None or not src_dir.is_dir():
         return {
             "ip_name": match.ip_name,
             "status": "FAIL",
-            "reason": f"no local mirror in {LOCAL_MIRROR_ROOTS} and git clone not available",
+            "reason": (f"no local mirror in {LOCAL_MIRROR_ROOTS}, and the git "
+                       f"clone fallback did not yield canonical_commit: "
+                       f"{(clone_pin or {}).get('reason')}"),
+            "clone_pin": clone_pin,
         }
 
     # 3. Copy listed RTL files
@@ -314,6 +318,7 @@ def pull_catalog_ip(match: CatalogMatch,
         "spec_match_pattern": match.matched_pattern,
         "spec_match_confidence": match.confidence,
         "local_mirror_audit": mirror_audit,
+        "clone_pin": clone_pin,
         "files_copied": files_copied,
         "files_missing": files_missing,
         "n_files_copied": len(files_copied),
@@ -350,6 +355,7 @@ def pull_catalog_ip(match: CatalogMatch,
             "version": match.version,
             "license": match.license,
             "commit_pinned": match.canonical_commit,
+            "commit_checked_out": (clone_pin or {}).get("checked_out_sha"),
             "license_verified_against_mirror": (
                 None if mirror_audit is None
                 else mirror_audit.get("license_check", {}).get("match")),
@@ -465,35 +471,71 @@ def prune_catalog_ip(project: Path, ip_name: str,
     }
 
 
-def _git_clone_to_cache(match: CatalogMatch) -> Optional[Path]:
-    """Best-effort clone canonical_url at canonical_commit to a session cache.
+#: Session cache for the clone fallback. One directory per (IP, pin), so a
+#: cache holding another commit is never mistaken for this pin.
+CACHE_ROOT = Path("/tmp/vibe_ic_catalog_cache")
 
-    Returns dir path or None on failure. Network-required path; usually
-    skipped in favor of local mirrors.
+
+def _git(args: List[str], timeout: int = 120) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", *args], capture_output=True, text=True,
+                          timeout=timeout, check=False)
+
+
+def _pinned_head(repo: Path, pin: str) -> Dict[str, Any]:
+    """HEAD and the pin, both resolved to commit shas by git itself."""
+    head = _git(["-C", str(repo), "rev-parse", "HEAD"])
+    want = _git(["-C", str(repo), "rev-parse", "--verify", "--quiet",
+                 f"{pin}^{{commit}}"])
+    return {"checked_out_sha": head.stdout.strip() if head.returncode == 0 else None,
+            "canonical_commit_sha": want.stdout.strip() if want.returncode == 0 else None}
+
+
+def _git_clone_to_cache(match: CatalogMatch) -> tuple[Optional[Path], Dict[str, Any]]:
+    """Clone canonical_url and check out canonical_commit, PROVEN by sha.
+
+    Returns ``(dir, record)``; ``dir`` is None unless git resolves HEAD and
+    ``canonical_commit`` to the same commit. The clone used to be ``--depth
+    1`` with the checkout inside ``except: pass``, and any existing cache dir
+    was reused whatever its commit: a tag pin such as ``1.4.0`` fell back to
+    the default branch's tip without a word. A cache is reused only when it
+    proves the same pin.
     """
-    if not match.canonical_url:
-        return None
-    cache_dir = Path("/tmp/vibe_ic_catalog_cache") / match.ip_name
-    if cache_dir.is_dir():
-        return cache_dir
-    cache_dir.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        subprocess.run(
-            ["git", "clone", "--depth", "1", match.canonical_url, str(cache_dir)],
-            check=True, capture_output=True, timeout=120,
-        )
-        # Pin to canonical commit if provided
-        if match.canonical_commit and match.canonical_commit != "master":
-            try:
-                subprocess.run(
-                    ["git", "-C", str(cache_dir), "checkout", match.canonical_commit],
-                    check=True, capture_output=True, timeout=30,
-                )
-            except Exception:
-                pass  # best-effort
-        return cache_dir
-    except Exception:
-        return None
+    pin = match.canonical_commit or ""
+    record: Dict[str, Any] = {"canonical_url": match.canonical_url,
+                              "canonical_commit": pin, "checked_out_sha": None,
+                              "canonical_commit_sha": None, "reason": None}
+    if not match.canonical_url or not pin:
+        record["reason"] = "manifest names no canonical_url/canonical_commit"
+        return None, record
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in pin)
+    cache_dir = CACHE_ROOT / f"{match.ip_name}@{safe}"
+    if not cache_dir.is_dir():
+        cache_dir.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_dir.with_name(cache_dir.name + f".partial{time.time_ns()}")
+        try:
+            cloned = _git(["clone", "--quiet", match.canonical_url, str(tmp)])
+            if cloned.returncode == 0:
+                checked = _git(["-C", str(tmp), "checkout", "--quiet", "--detach",
+                                pin], timeout=60)
+                if checked.returncode != 0:
+                    record["reason"] = ("git checkout of canonical_commit failed: "
+                                        + checked.stderr.strip()[-300:])
+                    return None, record
+                tmp.rename(cache_dir)
+            else:
+                record["reason"] = "git clone failed: " + cloned.stderr.strip()[-300:]
+                return None, record
+        except (OSError, subprocess.SubprocessError) as exc:
+            record["reason"] = f"git unavailable: {exc}"
+            return None, record
+    record.update(_pinned_head(cache_dir, pin))
+    if not record["checked_out_sha"] or \
+            record["checked_out_sha"] != record["canonical_commit_sha"]:
+        record["reason"] = (f"checked-out {record['checked_out_sha']} is not "
+                            f"canonical_commit {pin} "
+                            f"({record['canonical_commit_sha']}) in {cache_dir}")
+        return None, record
+    return cache_dir, record
 
 
 def pull_all_catalog_matches(project: Path,

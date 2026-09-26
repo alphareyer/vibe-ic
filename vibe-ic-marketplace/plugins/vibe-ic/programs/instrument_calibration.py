@@ -1798,6 +1798,39 @@ _register(Instrument(
 ))
 
 
+def _judge_catalog_synth_safe(text: str) -> Optional[str]:
+    import catalog_synth_safe_params_check as C
+    rows = C.judge(json.loads(text), [{"ip_name": "cal", "files": ["ip.v"],
+                                       "params": {"sim": 0}}])
+    return "SYNTH_UNSAFE_PARAM" if any(not r["safe"] for r in rows) else None
+
+
+_register(Instrument(
+    name="catalog_synth_safe_params_check::judge",
+    reads="Yosys write_json after `hierarchy -check -top` (step 1)",
+    ruling="T95 step 1 (review70 correction: SYNTH_PARAMETERS reaches only the top)",
+    owner="mig-front",
+    why=("A catalog IP's synth-safe parameter is pinned by the glue at the "
+         "instantiation, possibly through a wrapper. The pair is one IP and "
+         "wrapper, instantiated once with sim=1 through the wrapper and once "
+         "with sim=0; the reader must see the value the INNER module gets."),
+    judge=_judge_catalog_synth_safe,
+    positive=Sample(
+        provenance=("Real Yosys 0.69+ 4d572059c (vibeic-eda 0.3.79, 8HD-4, "
+                    "2026-09-26): `read_verilog -sv ip.v glue_bad.v; hierarchy "
+                    "-top top; proc; write_json` of calibration/cal_catalog_ip.v "
+                    "(staged as ip.v) and cal_catalog_glue_unsafe.v. Unedited. "
+                    "calibration/catalog_synth_safe_unsafe_positive.json"),
+        artefact=_read("catalog_synth_safe_unsafe_positive.json")),
+    expect="SYNTH_UNSAFE_PARAM",
+    negative=Sample(
+        provenance=("The same command on cal_catalog_glue_pinned.v (the wrapper "
+                    "instantiated with sim=0). Unedited. "
+                    "calibration/catalog_synth_safe_pinned_negative.json"),
+        artefact=_read("catalog_synth_safe_pinned_negative.json")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════
