@@ -381,6 +381,13 @@ def _swallowing_probe_sites(directory: Path):
             tree = ast.parse(path.read_text(errors="replace"))
         except SyntaxError:                                # pragma: no cover
             continue
+        except FileNotFoundError:
+            # A file LISTED and then gone: `test_not_verified_tier.py` writes a
+            # transient `test_zz_*` probe into this directory and removes it,
+            # and under xdist that races this scan (measured, lane mig114:
+            # FileNotFoundError on test_zz_not_verified_rot_probe.py, 19/19
+            # alone). A file that no longer exists carries no probe site.
+            continue
         for try_node in ast.walk(tree):
             # `ast.TryStar` (`try/except*`) exists from Python 3.11; this
             # fleet's hosts run 3.10, where naming it is an AttributeError
