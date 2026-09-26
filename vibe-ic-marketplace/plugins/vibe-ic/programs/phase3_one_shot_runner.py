@@ -16675,7 +16675,6 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
     t0 = time.time()
     set_invocation_provenance_sink(project)
     switch = json.loads((project / "phase3/librelane_switch.json").read_text())
-    image = _ll.resolve_image(project)
     from _rtl_include_hub import silicon_rtl_selection
     rtl = silicon_rtl_selection(_pl.rtl_dir(project))
     if not rtl:
@@ -16693,6 +16692,7 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = config_dir / "synth_config.json"
     try:
+        image = _ll.resolve_image(project)
         liberty_stem = Path(str(getattr(pdk, "liberty", ""))).stem
         std_cell_library = liberty_stem.split("__", 1)[0]
         if not liberty_stem or "__" not in liberty_stem:
@@ -36352,7 +36352,10 @@ def _prepare_librelane_floorplan_for_route(
         return _fail("LL_FLOORPLAN_PADRING_SPLIT_UNSUPPORTED",
                      "LibreLane PadRing runs between Floorplan and TapEndcap; "
                      "select 15.5ic=librelane with 15=librelane")
-    image = _ll.resolve_image(project)
+    try:
+        image = _ll.resolve_image(project)
+    except _ll.Refusal as exc:
+        return _fail(exc.code, str(exc), "NOT_MEASURED")
     pdk_root = _ll.resolve_pdk_root(project)
     if not pdk_root:
         return _fail("LL_PDK_ROOT_NOT_DECLARED",
@@ -47248,7 +47251,11 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
         if fb.get("status") != "PASS" or fb.get("source_sha256") != _sha256_file(def_file):
             return StepResult("gds", "FAIL", time.time() - t0,
                               "FEEDBACK_ROUTE_DIGEST_MISMATCH: pre-stream admission refused")
-    image = resolve_image(project)
+    try:
+        image = resolve_image(project)
+    except Refusal as exc:
+        return StepResult("gds", "NOT_MEASURED", time.time() - t0, str(exc),
+                          reason_class=_V.ReasonClass.TOOL_ABSENT)
     root = resolve_pdk_root(project)
     if not image or not root:
         return StepResult("gds", "NOT_MEASURED", time.time() - t0,
