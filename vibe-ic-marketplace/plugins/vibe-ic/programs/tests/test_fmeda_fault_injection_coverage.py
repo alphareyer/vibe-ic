@@ -683,6 +683,16 @@ def test_local_image_probe_reports_absence_where_resolve_invents_a_pin(
     monkeypatch.delenv("VIBEIC_EDA_IMAGE", raising=False)
     monkeypatch.delenv("IIC_EDA_IMAGE", raising=False)
     monkeypatch.setattr(fi.shutil, "which", lambda n: "/usr/bin/docker")
+    # THE PIN IS STATED, THE HOLDINGS ARE NOT (lane rfimg2): the fake daemon
+    # below answers "nothing here" to every local read, and the digest being
+    # asked about is named rather than read from this host's docker -- which,
+    # inside the image, does not exist and reddened this test before its
+    # subject. Only the digest is stated; what the host holds is still the
+    # fake daemon's answer.
+    import _eda_pin as _pin_                                      # noqa: PLC0415
+    from _stated_eda_image import STATED_DIGEST                   # noqa: PLC0415
+    monkeypatch.setattr(_pin_, "resolved_image_digest",
+                        lambda env=None, *, allow_pull=False: STATED_DIGEST)
 
     class _Absent:
         returncode = 1        # `docker image inspect` -> not present locally
@@ -715,9 +725,18 @@ def test_local_image_probe_reports_absence_where_resolve_invents_a_pin(
     # rule belongs to the resolver's own happy path and is guarded there, by
     # `test_the_eda_image_is_resolved_not_remembered.py
     #  ::test_resolve_returns_a_digest_not_a_floating_tag`.
-    resolved = fi._resolve_docker_image()
-    assert resolved and isinstance(resolved, str), (
-        f"resolve must always name a runnable ref; got {resolved!r}")
+    #
+    # AND THE RESOLVER NO LONGER INVENTS ONE (orchestrator ruling, lane
+    # rfimg2): with nothing held, `_eda_image.resolve` refuses by name instead
+    # of naming a reference `docker run` would fetch. The distinction this test
+    # guards survives in its strict form: the local probe says "nothing here"
+    # (None), the run path says WHY (IMAGE_NOT_PRESENT), and neither hands a
+    # caller a pull.
+    import pytest                                                 # noqa: PLC0415
+    import _eda_pin as _pin                                       # noqa: PLC0415
+    with pytest.raises(_pin.ImageNotHeld) as exc:
+        fi._resolve_docker_image()
+    assert _pin.IMAGE_NOT_PRESENT in str(exc.value), exc.value
     assert fi._local_docker_image() is None                       # honest None
 
 

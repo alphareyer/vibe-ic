@@ -51,6 +51,7 @@ _PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROGRAMS))
 import _eda_image as M
 import _eda_pin as _pin  # noqa: E402
+from _stated_eda_image import state_the_image  # noqa: E402
 
 #: Every program whose rc 1 can stop a landing while being a statement about the
 #: IMAGE's contents. Each is wired in `tools/ci/repo_hygiene_gates.sh`.
@@ -59,6 +60,15 @@ _BLOCKING_IMAGE_GATES = (
     "pdk_registry_selectable_check.py",
     "pdk_via_patch_meets_layer_min_width_check.py",
 )
+
+
+@pytest.fixture(autouse=True)
+def _the_stated_image(monkeypatch):
+    """The pin is STATED
+    (lane rfimg2). Unstated, it was read from THIS HOST's docker: inside the
+    image (no docker) `ImageNotResolvable` reddened these tests before they
+    reached their subject, or turned a staged mismatch into UNREADABLE."""
+    state_the_image(monkeypatch)
 
 
 def _local_only(monkeypatch, *, digest=None):

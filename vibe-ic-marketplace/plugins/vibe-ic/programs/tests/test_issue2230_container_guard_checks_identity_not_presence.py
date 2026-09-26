@@ -54,6 +54,7 @@ for _p in (str(_PROGRAMS), str(_TESTS_DIR)):
         sys.path.insert(0, _p)
 
 import _eda_pin as _pin  # noqa: E402
+from _stated_eda_image import state_the_image_for_children  # noqa: E402
 
 #: The digest of some other build. Any value that is not the pin will do; it is
 #: written as an obvious fake so nobody reads it as a real image.
@@ -82,6 +83,15 @@ _GUARDED = [
     # flag, so the callable IS what the `skipif` consumes.
     ("test_v1_0_86_issue771_ppa_metric_window", "_container_up"),
 ]
+
+
+@pytest.fixture(autouse=True)
+def _the_stated_image(monkeypatch):
+    """The pin is STATED, here and in every program this file spawns
+    (lane rfimg2). Unstated, it was read from THIS HOST's docker: inside the
+    image (no docker) `ImageNotResolvable` reddened these tests before they
+    reached their subject, or turned a staged mismatch into UNREADABLE."""
+    state_the_image_for_children(monkeypatch)
 
 
 def _arrange(monkeypatch, *, digest: str) -> None:

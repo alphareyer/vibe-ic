@@ -348,7 +348,7 @@ def ic_name_of(root: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # the image the run used
 
-def image_of(root: Path, pin: str) -> Dict[str, Any]:
+def image_of(root: Path, pin: Optional[str]) -> Dict[str, Any]:
     """What image this run recorded, and how it stands to the CURRENT pin.
 
     `pin` is passed in (never re-spelled here) so that the pin has exactly one
@@ -360,6 +360,13 @@ def image_of(root: Path, pin: str) -> Dict[str, Any]:
                 "reason": f"reports/container_image.json: {reason or 'not an object'}"}
     ref = str(doc.get("image_ref") or "")
     digest = _eda_pin.reference_digest(ref)
+    if digest and pin is None:
+        # THE CURRENT PIN COULD NOT BE READ HERE (no docker, or nothing held):
+        # the run's own record is still reported, and its relation to a pin
+        # nobody could name is NOT_COMPARABLE -- never "on pin", never "off".
+        return {"digest": digest, "kind": "repo_digest", "ref": ref,
+                "pin_state": "NOT_COMPARABLE",
+                "reason": "the current pin could not be resolved on this host"}
     if digest:
         return {"digest": digest, "kind": "repo_digest", "ref": ref,
                 "pin_state": "ON_PIN" if digest == pin else "OFF_PIN", "reason": None}
@@ -601,7 +608,7 @@ def signoff_of(root: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # a row
 
-def derive(root: Path, pin: str, host: str = "") -> Dict[str, Any]:
+def derive(root: Path, pin: Optional[str], host: str = "") -> Dict[str, Any]:
     root = Path(root)
     if not root.exists():
         return {"status": NOT_MEASURED, "run_root": str(root), "host": host,
@@ -993,7 +1000,17 @@ def main(argv=None) -> int:
     import socket                                        # noqa: PLC0415
     this_host = socket.gethostname()
 
-    pin = _eda_pin.IMAGE_DIGEST
+    # A STATUS REPORT NEEDS NO DOCKER. Reading the pin asks this host's docker
+    # (`_eda_pin`, since v1.22.4); with none (inside the image, or a host
+    # without the pinned bytes) `ImageNotResolvable` used to escape as a
+    # traceback and the whole report -- every run's verdict -- was lost over
+    # the one column that needs the pin. It is now `pin: null` with the
+    # refusal named, and each recorded image is NOT_COMPARABLE.
+    try:
+        pin, pin_refusal = _eda_pin.IMAGE_DIGEST, None
+    except _eda_pin.ImageNotResolvable as exc:
+        pin, pin_refusal = None, str(exc)
+        print(f"ic_run_status_derive: {exc}", file=_sys.stderr)
     plugin_root = Path(__file__).resolve().parent.parent
 
     rows: List[Dict[str, Any]] = []
@@ -1064,7 +1081,7 @@ def main(argv=None) -> int:
     hosts = host_population(rows, args.declared_host)
     resolved = [r for r in rows if r["status"] == "RESOLVED"]
     if args.as_json:
-        print(json.dumps({"pin": pin, "hosts": hosts, "declared_order": order,
+        print(json.dumps({"pin": pin, "pin_refusal": pin_refusal, "hosts": hosts, "declared_order": order,
                           "rows": rows,
                           "counts": {"resolved": len(resolved),
                                      "no_run": sum(1 for r in rows if r["status"] == NO_RUN),
