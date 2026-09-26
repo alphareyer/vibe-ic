@@ -177,3 +177,43 @@ def test_port_marker_producer_keeps_mask_bytes_out_of_lvs_copy(tmp_path, monkeyp
     assert ok
     assert gds.read_bytes() == before
     assert gds.with_suffix('.lvs.gds').read_bytes() == b'LVS-only-marker-100/8'
+
+
+def test_an_absent_finished_mask_names_where_it_looked(tmp_path):
+    """`reason` stays the bare machine code; the receipt also names the path
+    the refusal searched, so "not there" cannot read as "never looked"."""
+    project, _, gds, receipt = _layout(tmp_path)
+    gds.unlink()
+    result = feedback.verify_streamed(
+        project, 'unit', SimpleNamespace(drc_deck='/pdk/gf180mcu.drc'),
+        'sha256:' + '0' * 64, gds)
+    assert result['finished_status'] == 'REFUSED'
+    assert result['finished_reason'] == 'FEEDBACK_FINISHED_GDS_MISSING'
+    assert str(gds) in result['finished_reason_where']
+    assert json.loads(receipt.read_text())['finished_reason_where'] == (
+        result['finished_reason_where'])
+
+
+@pytest.mark.parametrize('deck_text,count', [(None, None),
+                                             ('puts no-policy\n', 0)])
+def test_an_absent_route_layer_policy_names_the_deck_it_read(
+        tmp_path, deck_text, count):
+    deck = tmp_path / 'phase3/stage3/pnr/pnr.tcl'
+    if deck_text is not None:
+        deck.parent.mkdir(parents=True)
+        deck.write_text(deck_text)
+    with pytest.raises(ValueError) as caught:
+        feedback._route_layer_policy(tmp_path)
+    assert str(caught.value) == 'FEEDBACK_ROUTE_LAYER_POLICY_MISSING'
+    assert str(deck) in caught.value.where
+    if count is not None:
+        assert f'{count} distinct' in caught.value.where
+
+
+def test_a_def_without_a_design_statement_names_the_def(tmp_path):
+    source = tmp_path / 'unit.def'
+    source.write_text('VERSION 5.8 ;\n')
+    with pytest.raises(ValueError) as caught:
+        feedback._def_design(source)
+    assert str(caught.value) == 'FEEDBACK_DEF_DESIGN_MISSING'
+    assert str(source) in caught.value.where

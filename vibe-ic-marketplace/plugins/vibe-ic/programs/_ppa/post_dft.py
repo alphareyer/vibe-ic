@@ -31,7 +31,8 @@ def run_resynthesis_arms(project: Path, image: str, base_config: dict,
                          pdk_root: str | None = None) -> dict[str, Path]:
     """Run Yosys.Resynthesis per strategy on the scan netlist; keep every arm."""
     if not scan_netlist.is_file():
-        raise ll.Refusal('LL_SCAN_NETLIST_MISSING', str(scan_netlist))
+        raise ll.Refusal('LL_SCAN_NETLIST_MISSING',
+                         f'no scan netlist file at {scan_netlist}')
     if not strategies or any(s not in STRATEGIES for s in strategies):
         raise ll.Refusal('LL_SYNTH_STRATEGY_INVALID', str(strategies))
     root = project / 'phase3/librelane/ppa_post_dft'

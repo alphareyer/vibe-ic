@@ -189,9 +189,9 @@ def run_prelayout(project: Path, image: str, pdk: str, top: str, netlist: Path,
                   pdk_root: Optional[str] = None) -> Path:
     """Run CheckSDCFiles -> STAPrePNR on `netlist`; return the STAPrePNR folder."""
     if not netlist.is_file():
-        raise Refusal("LL_PRELAYOUT_NETLIST_MISSING", str(netlist))
+        raise Refusal("LL_PRELAYOUT_NETLIST_MISSING", f"no netlist file at {netlist}")
     if sdc is not None and not sdc.is_file():
-        raise Refusal("LL_PRELAYOUT_SDC_MISSING", str(sdc))
+        raise Refusal("LL_PRELAYOUT_SDC_MISSING", f"no SDC file at {sdc}")
     root = project / "phase3/librelane/prelayout-config" / arm
     root.mkdir(parents=True, exist_ok=True)
     config = emit_prelayout_config(project, pdk, top, sdc, rtl, root / "design.json",
