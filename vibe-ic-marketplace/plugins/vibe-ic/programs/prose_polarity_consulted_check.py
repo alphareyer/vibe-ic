@@ -139,16 +139,6 @@ _NOT_PROSE: Dict[str, str] = {
         "`puts` from sta::unit_scale_abbreviation/unit_suffix. Every field is a "
         "name, a number or a unit token anchored at line start; an absent unit "
         "or an empty clock report REFUSES instead of guessing.",
-    "path_spice_tool::run_arm":
-        "TWO MACHINE GRAMMARS, NO SENTENCE. The Liberty header's "
-        "`library(<name>)` and `operating_conditions(<name>)` groups are "
-        "Liberty syntax, anchored at line start, read only to NAME the "
-        "operating conditions the arm sets (a wrong name makes OpenSTA refuse "
-        "the command, it cannot invert a claim); `VIBEIC_WPS_FAIL <n> <msg>` "
-        "is printed by this module's own arm Tcl with `puts` and anchored at "
-        "line start. Neither has a negated form, and the direction is safe: a "
-        "header without both groups refuses LL_LIBERTY_OPCOND_UNDECLARED, and "
-        "an unparsed path is NOT_MEASURED, never CORRELATED.",
     "path_spice_tool::subckt_devices":
         "ONE MACHINE GRAMMAR, NO SENTENCE. SPICE netlist syntax as the PDK's "
         "declared CELL_SPICE_MODELS and Magic's ext2spice write it: `.subckt "
