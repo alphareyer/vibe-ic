@@ -365,6 +365,158 @@ def _sdc_clock_names(sdc_files):
     return names, files_with
 
 
+# ----------------------------------------------------------------------
+# The tool side (step-16 migration, review70 row 16)
+# ----------------------------------------------------------------------
+# LibreLane's clocks are CONFIG: `CLOCK_PORT` (str | list) and `CLOCK_NET`
+# in the resolved step config. Its CTS step, given a design whose SDC clock is
+# not among them, WARNS and returns the state unaltered
+# (librelane/steps/openroad.py CTS.run) -- no tree, and no failure. And the
+# direct deck's `clock_tree_synthesis` names every clock it built in its own
+# `[INFO CTS-0007] Net "<net>" found for clock "<clock>".` line. So a clock the
+# SDC constrains can silently lose its tree on either path; this gate is where
+# that stops being silent.
+_LL_CONFIG_GLOB = "phase3/librelane/*-config/*.json"
+_CTS_REPORT_REL = "phase3/stage3/cts/clock_tree.rpt"
+# TritonCTS names each clock root it took up, in one of two grammars:
+#   [INFO CTS-0007] Net "<net>" found for clock "<clock>".   (roots from the SDC)
+#   [INFO CTS-0095] Net "<net>" found.                       (-clk_nets roots)
+# MEASURED (0.3.79, OpenROAD 26Q3-2963, calibration/cts_*.log): a root net is
+# named even when CTS then skips it for having too few sinks (CTS-0041), so
+# these lines mean "CTS saw this clock", not "a tree was built" -- which is
+# the question a DROPPED clock asks. A clock whose root CTS never names is
+# the one LibreLane's CTS leaves without a tree when CLOCK_PORT omits it.
+_CTS_CLOCK_RE = re.compile(r'\bCTS-0007\]\s+Net\s+"([^"]+)"\s+found for clock\s+"([^"]+)"')
+_CTS_ROOT_RE = re.compile(r'\bCTS-0095\]\s+Net\s+"([^"]+)"\s+found\.')
+
+
+def _sdc_primary_clock_sources(sdc_files):
+    """{clock name: source object} for every create_clock (not generated)
+    that names a source object. A virtual clock (no source) has no net and
+    no tree by definition, so it is not asked for one."""
+    out = {}
+    for f in sdc_files:
+        try:
+            text = re.sub(r"#[^\n]*", "", f.read_text(errors="ignore"))
+        except OSError:
+            continue
+        for m in re.finditer(r"\bcreate_clock\b(?P<body>[^\n;]*)", text):
+            body = m.group("body") or ""
+            src = _GET_OBJ_RE.search(body)
+            nm = _NAME_RE.search(body)
+            name = nm.group("name") if nm else (src.group("obj") if src else None)
+            if name and src:
+                out.setdefault(name, src.group("obj"))
+    return out
+
+
+def _librelane_clock_configs(project: Path):
+    """[(config, CLOCK_PORT list, CLOCK_NET)] from LibreLane RESOLVED step
+    configs (they carry `meta.step`; the design fragment does not)."""
+    rows = []
+    for path in sorted(project.glob(_LL_CONFIG_GLOB)):
+        if path.name.endswith((".views.json", ".provenance.json")):
+            continue
+        try:
+            doc = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict) or not isinstance(doc.get("meta"), dict) \
+                or "CLOCK_PORT" not in doc:
+            continue
+        port = doc.get("CLOCK_PORT")
+        ports = [port] if isinstance(port, str) else list(port or [])
+        rows.append((str(path.relative_to(project)), sorted(ports),
+                     doc.get("CLOCK_NET")))
+    return rows
+
+
+def cts_clock_roots(text: str):
+    """(clocks, root nets) TritonCTS says it found, from its own transcript:
+    `{clock: net}` from CTS-0007 lines and `{net}` from CTS-0095 lines."""
+    import instrument_calibration as _ic  # noqa: PLC0415
+    _ic.assert_calibrated("clock_plan_check::cts_clock_roots")
+    text = text or ""
+    return ({clock: net for net, clock in _CTS_CLOCK_RE.findall(text)},
+            set(_CTS_ROOT_RE.findall(text)))
+
+
+def cts_missing_clocks(text: str, sources):
+    """SDC clocks (`{name: source}`) whose root CTS never names."""
+    clocks, roots = cts_clock_roots(text)
+    return sorted(n for n, src in sources.items()
+                  if n not in clocks and src not in roots)
+
+
+def _tool_clock_findings(project: Path, sdc_files):
+    """FAIL findings for an SDC clock the TOOL side dropped, and INFO for
+    what was checked. Empty when there is no tool side to compare with."""
+    findings = []
+    sources = _sdc_primary_clock_sources(sdc_files)
+    if not sources:
+        return findings
+    configs = _librelane_clock_configs(project)
+    if configs:
+        distinct = {(tuple(ports), net) for _, ports, net in configs}
+        if len(distinct) > 1:
+            findings.append({
+                "severity": "FAIL", "rule": "LIBRELANE_CLOCK_CONFIG_INCONSISTENT",
+                "message": f"resolved LibreLane configs disagree on CLOCK_PORT/"
+                           f"CLOCK_NET: {sorted(distinct, key=str)}",
+            })
+        _, ports, net = configs[0]
+        declared = set(ports) | ({net} if net else set())
+        missing = sorted(n for n, src in sources.items()
+                         if src not in declared and n not in declared)
+        if missing:
+            findings.append({
+                "severity": "FAIL", "rule": "LIBRELANE_CLOCK_MISSING",
+                "message": f"SDC create_clock {missing} (sources "
+                           f"{[sources[m] for m in missing]}) not in LibreLane "
+                           f"CLOCK_PORT={ports} / CLOCK_NET={net!r} "
+                           f"({configs[0][0]}). LibreLane's CTS builds no tree "
+                           f"for a clock it is not given and only warns.",
+            })
+        unconstrained = sorted(p for p in declared
+                               if p not in sources.values() and p not in sources)
+        if unconstrained:
+            findings.append({
+                "severity": "FAIL", "rule": "LIBRELANE_CLOCK_UNCONSTRAINED",
+                "message": f"LibreLane CLOCK_PORT/CLOCK_NET {unconstrained} has "
+                           f"no create_clock in any SDC: a tree would be built "
+                           f"for a clock timing never checks.",
+            })
+        if not missing and not unconstrained:
+            findings.append({
+                "severity": "INFO", "rule": "LIBRELANE_CLOCKS_MATCH_SDC",
+                "message": f"every SDC create_clock is a LibreLane clock "
+                           f"(CLOCK_PORT={ports}, CLOCK_NET={net!r}; "
+                           f"{len(configs)} resolved config(s))",
+            })
+    report = project / _CTS_REPORT_REL
+    if report.is_file():
+        text = report.read_text(errors="replace")
+        dropped = cts_missing_clocks(text, sources)
+        clocks, roots = cts_clock_roots(text)
+        if dropped:
+            findings.append({
+                "severity": "FAIL", "rule": "CTS_CLOCK_MISSING",
+                "message": f"SDC create_clock {dropped} (sources "
+                           f"{[sources[d] for d in dropped]}): TritonCTS never "
+                           f"names its root in {_CTS_REPORT_REL} (it named "
+                           f"clocks {sorted(clocks)}, roots {sorted(roots)}), "
+                           f"so no clock tree was considered for it.",
+            })
+        else:
+            findings.append({
+                "severity": "INFO", "rule": "CTS_CLOCKS_SEEN",
+                "message": f"TritonCTS took up every SDC clock root: "
+                           f"{sorted(clocks.items())} {sorted(roots)} "
+                           f"({_CTS_REPORT_REL})",
+            })
+    return findings
+
+
 def _plan_clock_token_set(clocks, plan):
     """Tokens a plan provides for matching against SDC clock names: clock names
     plus any source object names referenced anywhere in the plan."""
@@ -526,6 +678,17 @@ def main(argv=None):
             "message": "no SDC create_clock found — dropped-clock cross-check "
                        "skipped (plan substance still verified)",
         })
+
+    # ---- the TOOL side: LibreLane clock config + the CTS transcript ------
+    try:
+        tool = _tool_clock_findings(project, sdc_files)
+    except Exception as exc:  # noqa: BLE001 — an uncalibrated reader
+        tool = [{"severity": "INFO", "rule": "TOOL_CLOCKS_NOT_MEASURED",
+                 "message": f"the tool-side clock comparison could not run: "
+                            f"{exc} — NOT MEASURED, never a pass"}]
+    findings.extend(tool)
+    if any(f["severity"] == "FAIL" for f in tool):
+        ok = False
 
     # ---- freshness DISCLOSURE (advisory) -------------------------------
     # Fires ONLY when the plan recorded a `derived_from` digest map AND an

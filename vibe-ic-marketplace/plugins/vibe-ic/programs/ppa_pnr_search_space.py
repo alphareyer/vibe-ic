@@ -139,6 +139,11 @@ MARK_REFUSE = "[REFUSE]"
 #: The runner this space is measured against. It is the program that would have
 #: to APPLY every lever, so it is the only thing that can say which exist.
 RUNNER_REL = "phase3_one_shot_runner.py"
+#: Step 17's LibreLane arm reads its placement levers from the project's
+#: `phase3/librelane_switch.json` `placement_levers`, through this contract's
+#: `PLACEMENT_LEVERS` table -- a second, declared-input channel beside the CLI.
+CONTRACT_REL = "librelane_contract.py"
+SWITCH_PREFIX = "placement_levers."
 
 STATUS_EXPOSED = "EXPOSED"
 STATUS_NOT_EXPOSED = "NOT_EXPOSED"
@@ -222,7 +227,48 @@ LEVERS: Tuple[Dict[str, Any], ...] = (
     {"lever": "cell_padding", "layer": "placement", "kind": "integer",
      "flags": ("--cell-padding", "--pad-left", "--pad-right"),
      "normaliser": None, "domain": "site columns of padding per instance",
-     "note": "no flag applies it in this flow"},
+     "note": ("no flag applies it on the direct arm; on the LibreLane arm "
+              "(step 17 = librelane) it is `gpl_cell_padding` / "
+              "`dpl_cell_padding` below")},
+    # ---- step 17 on LibreLane: GlobalPlacement / RepairDesignPostGPL /
+    # DetailedPlacement config, declared per project in the switch file
+    # (review70 row 17 ppa_layer_opportunity). Admitted only when the contract
+    # declares the key AND the runner's step-17 producer reads the table.
+    {"lever": "pl_target_density_pct", "layer": "placement", "kind": "number",
+     "flags": (SWITCH_PREFIX + "PL_TARGET_DENSITY_PCT",), "normaliser": None,
+     "domain": "GlobalPlacement target density, percent in (0, 100]",
+     "note": ("the LibreLane arm's density target; the direct arm's is "
+              "`placement_density` (--util)")},
+    {"lever": "pl_timing_driven", "layer": "placement", "kind": "boolean",
+     "flags": (SWITCH_PREFIX + "PL_TIMING_DRIVEN",), "normaliser": None,
+     "domain": "a boolean, true or false",
+     "note": ("LibreLane 3.1 defaults it to false; the direct deck always "
+              "passes -timing_driven, which this lever makes a measured "
+              "choice instead of an assumed default")},
+    {"lever": "pl_routability_driven", "layer": "placement", "kind": "boolean",
+     "flags": (SWITCH_PREFIX + "PL_ROUTABILITY_DRIVEN",), "normaliser": None,
+     "domain": "a boolean, true or false", "note": "GlobalPlacement -routability_driven"},
+    {"lever": "gpl_cell_padding", "layer": "placement", "kind": "integer",
+     "flags": (SWITCH_PREFIX + "GPL_CELL_PADDING",), "normaliser": None,
+     "domain": "sites of global-placement padding, >= 0",
+     "note": "the LibreLane arm's cell_padding"},
+    {"lever": "dpl_cell_padding", "layer": "placement", "kind": "integer",
+     "flags": (SWITCH_PREFIX + "DPL_CELL_PADDING",), "normaliser": None,
+     "domain": "sites of detailed-placement padding, >= 0",
+     "note": "should be <= gpl_cell_padding (LibreLane's own guidance)"},
+    {"lever": "pl_wire_length_coef", "layer": "placement", "kind": "number",
+     "flags": (SWITCH_PREFIX + "PL_WIRE_LENGTH_COEF",), "normaliser": None,
+     "domain": "GlobalPlacement initial wirelength coefficient, > 0",
+     "note": "gpl -init_wirelength_coef"},
+    {"lever": "pl_max_displacement_x", "layer": "placement", "kind": "integer",
+     "flags": (SWITCH_PREFIX + "PL_MAX_DISPLACEMENT_X",), "normaliser": None,
+     "domain": "DetailedPlacement max displacement in um, >= 0",
+     "note": ("replaces the direct deck's displacement-escalation ladder "
+              "with a measured sweep")},
+    {"lever": "pl_max_displacement_y", "layer": "placement", "kind": "integer",
+     "flags": (SWITCH_PREFIX + "PL_MAX_DISPLACEMENT_Y",), "normaliser": None,
+     "domain": "DetailedPlacement max displacement in um, >= 0",
+     "note": "see pl_max_displacement_x"},
     {"lever": "cts_cluster_size", "layer": "cts", "kind": "integer",
      "flags": ("--cts-cluster-size",), "normaliser": None,
      "domain": "sinks per clock-tree cluster",
@@ -356,6 +402,32 @@ def cli_flags(source: str) -> Dict[str, int]:
     return out
 
 
+def switch_levers(contract_src: Optional[str], runner_src: str) -> Dict[str, int]:
+    """`placement_levers.<KEY>` -> the contract line declaring KEY, for every
+    key of `PLACEMENT_LEVERS` -- but only when the runner's step-17 producer
+    actually calls `placement_levers(...)`. A table nobody reads applies
+    nothing, and a lever admitted through it would be a space entry no run
+    could distinguish. Measured from the two sources, never asserted."""
+    if not contract_src:
+        return {}
+    consumed = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                   and n.func.attr == "placement_levers"
+                   for n in ast.walk(ast.parse(runner_src)))
+    if not consumed:
+        return {}
+    out: Dict[str, int] = {}
+    for node in ast.walk(ast.parse(contract_src)):
+        target = (node.target if isinstance(node, ast.AnnAssign)
+                  else node.targets[0] if isinstance(node, ast.Assign)
+                  and len(node.targets) == 1 else None)
+        if isinstance(target, ast.Name) and target.id == "PLACEMENT_LEVERS" \
+                and isinstance(node.value, ast.Dict):
+            for key in node.value.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    out[SWITCH_PREFIX + key.value] = key.lineno
+    return out
+
+
 def read_runner(programs_dir: Path) -> Tuple[Optional[str], Optional[str]]:
     """(source, reason-it-could-not-be-read). Exactly one is None."""
     p = programs_dir / RUNNER_REL
@@ -427,15 +499,18 @@ def build_space(flags: Dict[str, int], runner_digest: str,
                 checked: Optional[Dict[str, Dict[str, Any]]] = None,
                 eco: Optional[Mapping[str, Any]] = None,
                 route: Optional[Mapping[str, Any]] = None,
+                switch: Optional[Dict[str, int]] = None,
                 ) -> Dict[str, Any]:
     """One entry per lever, admitted or refused, and the flag that decided it."""
+    switch = dict(switch or {})
     explicit = dict(explicit or {})
     checked = dict(checked or {})
     eco = dict(eco or {"state": ECO_NOT_SUPPLIED})
     levers: List[Dict[str, Any]] = []
     for spec in LEVERS:
         name = str(spec["lever"])
-        found = [f for f in spec["flags"] if f in flags]
+        found = [f for f in spec["flags"] if f in flags or f in switch]
+        via_switch = bool(found) and found[0] not in flags
         row: Dict[str, Any] = {
             "lever": name,
             "layer": spec["layer"],
@@ -443,8 +518,11 @@ def build_space(flags: Dict[str, int], runner_digest: str,
             "note": spec["note"],
             "flags_looked_for": list(spec["flags"]),
             "applies_via": found[0] if found else None,
-            "citation": ({"path": RUNNER_REL, "line": flags[found[0]],
-                          "literal": found[0]} if found else None),
+            "citation": (({"path": CONTRACT_REL, "line": switch[found[0]],
+                           "literal": found[0][len(SWITCH_PREFIX):]}
+                          if via_switch else
+                          {"path": RUNNER_REL, "line": flags[found[0]],
+                           "literal": found[0]}) if found else None),
         }
         if not found:
             row.update({
@@ -460,10 +538,16 @@ def build_space(flags: Dict[str, int], runner_digest: str,
             continue
         row.update({
             "admitted": True, "status": STATUS_EXPOSED,
-            "justification": (
+            "justification": ((
+                f"{found[0][len(SWITCH_PREFIX):]} is declared at "
+                f"{CONTRACT_REL}:{switch[found[0]]} and {RUNNER_REL}'s step-17 "
+                "producer reads it from phase3/librelane_switch.json "
+                "`placement_levers` on the LibreLane arm, so a candidate that "
+                "names a value for this lever is a run this flow can perform")
+                if via_switch else (
                 f"{found[0]} is declared at {RUNNER_REL}:{flags[found[0]]}, "
                 "so a candidate that names a value for this lever is a run "
-                "this flow can actually perform"),
+                "this flow can actually perform")),
         })
         if spec.get("eco_bounded"):
             floor_row = eco_floor_row(eco)
@@ -494,7 +578,9 @@ def build_space(flags: Dict[str, int], runner_digest: str,
         "program": PROGRAM,
         "status": "MEASURED",
         "measured_against": {"path": RUNNER_REL, "sha256": runner_digest,
-                             "cli_flags": sorted(flags)},
+                             "cli_flags": sorted(flags),
+                             "switch_levers": {"path": CONTRACT_REL,
+                                               "keys": sorted(switch)}},
         "eco_declaration": dict(eco),
         "delivery_path": dict(route or {}) or None,
         "levers": levers,
@@ -749,6 +835,11 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return RC_UNDETERMINED
     flags = cli_flags(src)
+    try:
+        contract_src = (programs / CONTRACT_REL).read_text(encoding="utf-8")
+    except OSError:
+        contract_src = None
+    switch = switch_levers(contract_src, src)
     if not flags:
         # The runner parsed and declared no option at all. That is far more
         # likely a parse this program got wrong than a runner with no CLI, and
@@ -776,13 +867,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         problems = audit_space(space if isinstance(space, dict) else {})
         for l in (space.get("levers") or []) if isinstance(space, dict) else []:
             via = l.get("applies_via")
-            if l.get("admitted") and via not in flags:
+            if l.get("admitted") and via not in flags and via not in switch:
                 problems.append(
                     f"{l.get('lever')}: admitted via {via!r}, which is not on "
                     f"{RUNNER_REL}'s command line on this tree.")
             if not l.get("admitted"):
                 still = [f for f in (l.get("flags_looked_for") or [])
-                         if f in flags]
+                         if f in flags or f in switch]
                 if still:
                     problems.append(
                         f"{l.get('lever')}: refused as not exposed, but "
@@ -800,7 +891,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if explicit:
         unknown = [n for n in explicit if n not in by_name]
         not_exposed = [n for n in explicit if n in by_name
-                       and not any(f in flags for f in by_name[n]["flags"])]
+                       and not any(f in flags or f in switch
+                                   for f in by_name[n]["flags"])]
         if unknown or not_exposed:
             for n in unknown:
                 print(f"{MARK_REFUSE} [{PROGRAM}] {n!r} is not a lever this "
@@ -815,6 +907,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         mod, load_why = _load_runner_module()
         for name, vals in sorted(explicit.items()):
             norm = by_name[name]["normaliser"]
+            lit = by_name[name]["flags"][0]
+            if lit.startswith(SWITCH_PREFIX):
+                # The contract's own validator -- the one the runner's step-17
+                # producer applies -- is the guard these values round-trip.
+                import librelane_contract as _llc                # noqa: WPS433
+                rows = []
+                for raw in vals:
+                    try:
+                        used = _llc._lever_value(lit[len(SWITCH_PREFIX):], raw)
+                        rows.append({"value": raw, "applied_as": used,
+                                     "unchanged": True, "runner_warning": None})
+                    except ValueError as exc:
+                        refusals.append(
+                            f"{name}={raw}: {CONTRACT_REL} refuses it "
+                            f"(LL_PLACEMENT_LEVER_INVALID: {exc})")
+                checked[name] = {"checked": True,
+                                 "normaliser": f"{CONTRACT_REL}._lever_value",
+                                 "values": rows}
+                continue
             if norm is None:
                 checked[name] = {
                     "checked": False,
@@ -863,7 +974,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"{MARK_REFUSE} [{PROGRAM}] {r}", file=sys.stderr)
             return RC_REFUSED
 
-    space = build_space(flags, _sha256(src), explicit, checked, eco, route)
+    space = build_space(flags, _sha256(src), explicit, checked, eco, route,
+                        switch=switch)
     problems = audit_space(space)
     space["self_audit_problems"] = problems
     out_path.parent.mkdir(parents=True, exist_ok=True)

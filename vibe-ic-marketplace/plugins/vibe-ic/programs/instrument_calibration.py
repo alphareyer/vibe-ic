@@ -1833,6 +1833,51 @@ _register(Instrument(
 ))
 
 
+#: calibration/cal_two_clocks.sdc, the clocks both CTS samples were timed with.
+_CTS_CAL_SOURCES = {"clk": "clk", "clk2": "clk2"}
+
+
+def _judge_cts_clock_roots(log_txt: str) -> Optional[str]:
+    import clock_plan_check as C
+    return ("CTS_CLOCK_MISSING"
+            if C.cts_missing_clocks(log_txt, _CTS_CAL_SOURCES) else None)
+
+
+_CTS_CAL_PROV = (
+    "Real OpenROAD 26Q3-2963-gc73a322d30 (the pinned vibeic-eda 0.3.79, 8HD-4, "
+    "2026-09-26), unedited transcripts: read the gf180mcu_fd_sc_mcu7t5v0 nom "
+    "tech LEF, cell LEF and tt liberty; a 60x60 um floorplan; place; "
+    "`clock_tree_synthesis -buf_list clkbuf_4 -root_buf clkbuf_4`, with "
+    "calibration/cal_two_clocks.sdc (create_clock clk on port clk, clk2 on "
+    "port clk2). ")
+
+_register(Instrument(
+    name="clock_plan_check::cts_clock_roots",
+    reads="the CTS transcript (`phase3/stage3/cts/clock_tree.rpt`)",
+    ruling="review70 step 16 (T97)", owner="mig97",
+    why=("Step 16's gate refuses an SDC clock CTS never took up; LibreLane's "
+         "CTS only warns when CLOCK_PORT omits it. TritonCTS names a root it "
+         "took up even when it then skips it for too few sinks (CTS-0041), so "
+         "the pair is a root named vs a root never named -- not built vs "
+         "skipped."),
+    judge=_judge_cts_clock_roots,
+    positive=Sample(
+        provenance=(_CTS_CAL_PROV + "`-clk_nets clk` on "
+                    "calibration/cal_two_clock_gf180.v (f0 on clk, f1 on "
+                    "clk2): `[INFO CTS-0095] Net \"clk\" found.` and nothing "
+                    "for clk2. calibration/cts_clock_root_dropped_positive.log"),
+        artefact=_read("cts_clock_root_dropped_positive.log")),
+    expect="CTS_CLOCK_MISSING",
+    negative=Sample(
+        provenance=(_CTS_CAL_PROV + "SDC roots, on "
+                    "calibration/cal_two_clock_shared_gf180.v (both flops on "
+                    "clk, clk2 unloaded): CTS-0007 names both clocks and "
+                    "CTS-0041 skips clk2. "
+                    "calibration/cts_clock_roots_seen_negative.log"),
+        artefact=_read("cts_clock_roots_seen_negative.log")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════

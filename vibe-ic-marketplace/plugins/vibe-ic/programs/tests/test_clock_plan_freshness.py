@@ -318,18 +318,22 @@ def test_a_stale_refresh_that_can_re_derive_does_rewrite(tmp_path):
     assert C._stale_inputs(proj, after) == []
 
 
-def test_a_first_write_with_no_sdc_still_gets_the_nominal_fallback(tmp_path):
-    """The guard is scoped to the STALENESS trigger. On the original trigger
-    (no plan, or a plan with no clocks) there is no real measurement to
-    destroy, and the synthetic nominal clock is still better than nothing."""
+def test_a_first_write_with_no_sdc_invents_no_clock(tmp_path):
+    """Step-16 migration (review70 row 16): the synthetic nominal 10 ns "clk"
+    is gone on EVERY trigger, the first write included. A design with no
+    declared clock says so -- the way LibreLane's CTS does -- and the gate then
+    grades what is really there: the thin plan fails its own substance check
+    instead of passing on a clock nobody declared."""
     proj = _project(tmp_path, plan={"primary_clock": "clk"})   # no `clocks`
     (proj / _SDC_REL).unlink()
     _write(proj / "phase3/stage3/pnr/routed.def",
            "VERSION 5.8 ;\nDESIGN top ;\nEND DESIGN\n")
     _run_step16(proj)
     after = _read_plan(proj)
-    assert [c["name"] for c in after["clocks"]] == ["clk"], after
-    assert after["clocks"][0]["period_ns"] == 10.0
+    assert "clocks" not in after, after          # nothing fabricated
+    r, doc = _run_gate(proj, tmp_path / "gate.json")
+    assert r.returncode == 1
+    assert ("FAIL", "CLOCK_NO_PERIOD") in _rules(doc)
 
 
 def test_the_step16_block_actually_calls_the_producer_under_test():

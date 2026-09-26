@@ -418,6 +418,76 @@ def _legalizer_markers(project: Path) -> tuple[List[str], List[str]]:
     return failed, ok
 
 
+#: Written by the runner when steps 17/18 run on LibreLane
+#: (`librelane_contract.handoff_to_direct`): the placed DEF this gate reads,
+#: bound by sha256 to the tool State it came from.
+_LL_PLACEMENT_RECEIPT_REL = "reports/phase3/librelane_placement_handoff.json"
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _librelane_placement(project: Path) -> Optional[dict]:
+    """The LibreLane arm's placement verdict, or None on the direct path.
+
+    Two facts, both read from the tool's own records, never inferred:
+      * BINDING -- `placed.def` is the file the handoff receipt copied from
+        the tool's final State (same sha256), so every DEF check in this gate
+        is about the tool's placement, not a stale direct checkpoint;
+      * THE PLACER'S VERDICT -- `OpenROAD.DetailedPlacement` ran to completion
+        in the chain that produced that State. Its script ends in
+        `check_placement -verbose`, which raises (DPL-0033) and fails the step
+        on any violation, so a completed step IS a zero count. The spare step
+        after it prints its own `SPARE_CHECK_PLACEMENT_VIOLATIONS <n>` into
+        `pnr/librelane_spare_cells.log`, which the log readers below consume.
+    """
+    receipt = project / _LL_PLACEMENT_RECEIPT_REL
+    if not receipt.is_file():
+        return None
+    out = {"receipt": _LL_PLACEMENT_RECEIPT_REL, "bound": False,
+           "detailed_placement": "NOT DETERMINED", "reason": ""}
+    try:
+        doc = json.loads(receipt.read_text())
+        row = (doc.get("views") or {}).get("def") or {}
+        placed = project / _PLACED_DEF_REL
+        if not placed.is_file() or Path(row.get("dest", "")).resolve() != placed.resolve():
+            out["reason"] = f"the receipt hands no DEF to {_PLACED_DEF_REL}"
+            return out
+        if row.get("dest_sha256") != _sha256(placed):
+            out["reason"] = (f"{_PLACED_DEF_REL} is not the DEF the receipt "
+                             f"handed over (sha256 differs)")
+            return out
+        out["bound"] = True
+        state = Path(doc.get("state", ""))
+        chain = state.parent.parent if state.is_file() else None
+        steps = []
+        for rec in sorted(chain.glob("*/vibeic_receipt.json")) if chain else []:
+            try:
+                steps.append((json.loads(rec.read_text()).get("input", {})
+                              .get("step"), rec.parent))
+            except (OSError, ValueError):
+                continue
+        dpl = [d for step, d in steps if step == "OpenROAD.DetailedPlacement"]
+        if not dpl:
+            out["reason"] = ("no OpenROAD.DetailedPlacement step in the chain "
+                             f"that wrote {state}")
+        elif (dpl[-1] / "state_out.json").is_file():
+            out["detailed_placement"] = "COMPLETED"
+            out["detailed_placement_dir"] = str(dpl[-1])
+        else:
+            out["detailed_placement"] = "FAILED"
+            out["reason"] = f"{dpl[-1]} wrote no state_out.json"
+    except (OSError, ValueError) as exc:
+        out["reason"] = f"receipt unreadable: {exc}"
+    return out
+
+
 def inspect(project: Path):
     """Return (verdict, rc, findings, summary)."""
     findings: List[dict] = []
@@ -575,6 +645,38 @@ def inspect(project: Path):
                 "pass."),
         })
 
+    # ---- The LibreLane arm (steps 17/18 on LibreLane) --------------------
+    ll = _librelane_placement(project)
+    summary["librelane_placement"] = ll
+    if ll is not None:
+        if not ll["bound"]:
+            findings.append({
+                "severity": "FAIL", "rule": "LIBRELANE_PLACEMENT_UNBOUND",
+                "message": (f"{ll['reason']} ({ll['receipt']}): the DEF this "
+                            f"gate read is not proven to be the tool's "
+                            f"placement."),
+            })
+            verdict, rc = "FAIL", 1
+        elif ll["detailed_placement"] != "COMPLETED":
+            findings.append({
+                "severity": "FAIL", "rule": "LIBRELANE_DETAILED_PLACEMENT_NOT_CLEAN",
+                "message": (f"OpenROAD.DetailedPlacement {ll['detailed_placement']}"
+                            f": {ll['reason']}. Its closing check_placement "
+                            f"fails the step on any violation, so no completed "
+                            f"step means no legality verdict."),
+            })
+            verdict, rc = "FAIL", 1
+        else:
+            summary["placer_legality_verdict"] = "LEGAL"
+            findings.append({
+                "severity": "INFO", "rule": "LIBRELANE_DETAILED_PLACEMENT_CLEAN",
+                "message": (f"{_PLACED_DEF_REL} is the tool's handed-over DEF "
+                            f"(sha256-bound by {ll['receipt']}) and "
+                            f"OpenROAD.DetailedPlacement completed "
+                            f"({ll['detailed_placement_dir']}): its "
+                            f"check_placement found 0 violations."),
+            })
+
     # ---- `check_placement`'s OWN violation COUNT -------------------------
     # The ladder markers above are a boolean, and they cover only the rungs
     # inside the legalization ladder. This reads the tool's NUMBER, from every
@@ -709,6 +811,7 @@ def _emit(args, project, verdict, summary, findings, waiver):
             summary.get("check_placement_unavailable"),
         "legalizer_failed_markers": summary.get("legalizer_failed_markers"),
         "legalizer_ok_markers": summary.get("legalizer_ok_markers"),
+        "librelane_placement": summary.get("librelane_placement"),
         "waiver": waiver,
         "findings": findings,
     }

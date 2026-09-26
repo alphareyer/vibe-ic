@@ -1,0 +1,132 @@
+OpenROAD 26Q3-2963-gc73a322d30 
+Features included (+) or not (-): -GPU +GUI -Python
+This program is licensed under the BSD-3 license. See the LICENSE file for details.
+Components of this program may be licensed under more restrictive licenses which must be honored.
+[INFO ODB-0388] unsupported LEF58_EOLENCLOSURE property for layer Via1 :"
+  	EOLENCLOSURE 0.34 0.06 ;"
+[INFO ODB-0388] unsupported LEF58_EOLENCLOSURE property for layer Via2 :" EOLENCLOSURE 0.34 0.06 ; "
+[INFO ODB-0388] unsupported LEF58_EOLENCLOSURE property for layer Via3 :" EOLENCLOSURE 0.34 0.06 ; "
+[INFO ODB-0388] unsupported LEF58_EOLENCLOSURE property for layer Via4 :" EOLENCLOSURE 0.34 0.06 ; "
+[INFO ODB-0227] LEF file: /foss/pdks/ciel/gf180mcu/versions/b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/techlef/gf180mcu_fd_sc_mcu7t5v0__nom.tlef, created 15 layers, 56 vias
+[WARNING ODB-0220] WARNING (LEFPARS-2008): NOWIREEXTENSIONATPIN statement is obsolete in version 5.6 or later.
+The NOWIREEXTENSIONATPIN statement will be ignored. See file /foss/pdks/ciel/gf180mcu/versions/b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lef/gf180mcu_fd_sc_mcu7t5v0.lef at line 2.
+
+[INFO ODB-0227] LEF file: /foss/pdks/ciel/gf180mcu/versions/b344c97eacc2aaf8e14ae7e43e2e9dc0871de2c0/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lef/gf180mcu_fd_sc_mcu7t5v0.lef, created 229 library cells
+[WARNING IFP-0028] Core area lower left (5.000, 5.000) snapped to (5.040, 7.840).
+[INFO IFP-0001] Added 12 rows of 89 site GF018hv5v_mcu_sc7.
+[INFO IFP-0100] Die BBox:  (  0.000  0.000 ) ( 60.000 60.000 ) um
+[INFO IFP-0101] Core BBox: (  5.040  7.840 ) ( 54.880 54.880 ) um
+[INFO IFP-0102] Core area:                         2344.474 um^2
+[INFO IFP-0103] Total instances area:               127.322 um^2
+[INFO IFP-0104] Effective utilization:                0.054
+[INFO IFP-0105] Number of instances:                      2
+Found 0 macro blocks.
+Using 2 tracks default min distance between IO pins.
+[INFO PPL-0001] Number of available slots 204
+[INFO PPL-0002] Number of I/O             5
+[INFO PPL-0003] Number of I/O w/sink      5
+[INFO PPL-0004] Number of I/O w/o sink    0
+[INFO PPL-0005] Slots per section         200
+[INFO PPL-0008] Successfully assigned pins to sections.
+[INFO PPL-0012] I/O nets HPWL: 157.04 um.
+[INFO GPL-0001] ---- Initialize GPL Main Data Structures
+[INFO GPL-0002] DBU: 2000
+[INFO GPL-0003] SiteSize: (  0.560  3.920 ) um
+[INFO GPL-0004] CoreBBox: (  5.040  7.840 ) ( 54.880 54.880 ) um
+[INFO GPL-0016] Core area:                    2344.474 um^2
+[INFO GPL-0036] Movable instances area:        127.322 um^2
+[INFO GPL-0037] Total instances area:          127.322 um^2
+[INFO GPL-0035] Pin density area adjust:         0.000 um^2
+[INFO GPL-0032] ---- Initialize Region: Top-level
+[INFO GPL-0006] Number of instances:                 2
+[INFO GPL-0007] Movable instances:                   2
+[INFO GPL-0008] Fixed instances:                     0
+[INFO GPL-0009] Dummy instances:                     0
+[INFO GPL-0010] Number of nets:                      5
+[INFO GPL-0011] Number of pins:                     11
+[INFO GPL-0012] Die BBox:       (  0.000  0.000 ) ( 60.000 60.000 ) um
+[INFO GPL-0013] Placement BBox: (  5.040  7.840 ) ( 54.880 54.880 ) um
+[INFO GPL-0014] Region name: top-level.
+[INFO GPL-0015] Region area:                  2344.474 um^2
+[INFO GPL-0017] Fixed instances area:            0.000 um^2
+[INFO GPL-0018] Movable instances area:        127.322 um^2
+[INFO GPL-0019] Utilization:                     5.431 %
+[INFO GPL-0020] Standard cells area:           127.322 um^2
+[INFO GPL-0021] Large instances area:            0.000 um^2
+[INFO GPL-0005] ---- Execute Conjugate Gradient Initial Placement.
+[INFO GPL-0051] Source of initial instance position counters:
+	Odb location = 0	Core center = 2	Region center = 0
+[InitialPlace]  Iter: 1 conjugate gradient residual: 0.00000003 HPWL: 337400
+[InitialPlace]  Iter: 2 conjugate gradient residual: 0.00000004 HPWL: 260402
+[InitialPlace]  Iter: 3 conjugate gradient residual: 0.00000000 HPWL: 260401
+[InitialPlace]  Iter: 4 conjugate gradient residual: 0.00000000 HPWL: 260401
+[InitialPlace]  Iter: 5 conjugate gradient residual: 0.00000000 HPWL: 260400
+[INFO GPL-0033] ---- Initialize Nesterov Region: Top-level
+[INFO GPL-0023] Placement target density:       0.3000
+[INFO GPL-0024] Movable insts average area:     63.661 um^2
+[INFO GPL-0025] Ideal bin area:                212.203 um^2
+[INFO GPL-0026] Ideal bin count:                    11
+[INFO GPL-0027] Total bin area:               2344.474 um^2
+[INFO GPL-0028] Bin count (X, Y):           2 ,      2
+[INFO GPL-0029] Bin size (W * H):      24.920 * 23.520 um
+[INFO GPL-0030] Number of bins:                      4
+[INFO GPL-0084] ---- Execute Nesterov Global Placement.
+[INFO GPL-0031] HPWL: Half-Perimeter Wirelength
+Iteration | Overflow |     HPWL (um) |  HPWL(%) |   Penalty | Group
+---------------------------------------------------------------
+        0 |   0.0000 |  1.526765e+02 |   +0.00% |  1.43e-12 |      
+        0 |   0.0000 |  1.526765e+02 |          |  1.49e-12 |      
+---------------------------------------------------------------
+[INFO GPL-1001] Global placement finished at iteration 0
+[INFO GPL-1002] Placed Cell Area              127.3216
+[INFO GPL-1003] Available Free Area          2344.4736
+[INFO GPL-1004] Minimum Feasible Density        0.0600 (cell_area / free_area)
+[INFO GPL-1006]   Suggested Target Densities:
+[INFO GPL-1007]     - For 90% usage of free space: 0.0603
+[INFO GPL-1008]     - For 80% usage of free space: 0.0679
+[INFO GPL-1009]     - For 50% usage of free space: 0.1086
+[INFO GPL-1014] Final placement area: 127.32 (+0.00%)
+[INFO GPL-1018] Final HPWL (um): 153.56
+[INFO DPL-0006] Core area: 2344.47 um^2
+[INFO DPL-0007] Movable instances area: 127.32 um^2
+[INFO DPL-0008] Fixed instances area within core: 0.00 um^2
+[INFO DPL-0009] Utilization: 5.4%
+[INFO DPL-0005] Diamond search max displacement: +/- 500 sites horizontally, +/- 100 rows vertically.
+[INFO DPL-1102] Legalizing using negotiation legalizer.
+[INFO DPL-1103] Negotiation base search window: +/-20 sites horizontally, +/-5 rows vertically 
+	Automatic search window extension enabled.
+	Search window extendable up to the max displacement cap of +/-500 sites, +/-100 rows near walls.
+[INFO DPL-1104] NegotiationLegalizer DRC penalty: 5.
+[INFO DPL-0392] Negotiation cell height distribution (1 unique row-count(s)):
+[INFO DPL-0393]   height 1 row(s): 2 cells
+          |      Total |  Illegal |  Illegal
+Iteration | Violations |    Cells |    Sites
+---------------------------------------------
+        0 |          0 |         0 |         0
+Negotiation phase 1 converged at iteration 0.
+[INFO DPL-0500] Runtime: 0.00s
+Detailed Placement Analysis
+---------------------------------
+legalizer            negotiation
+total moves                   2
+total displacement         10.1 u
+average displacement        5.0 u
+max displacement            8.9 u
+original HPWL             153.6 u
+legalized HPWL            170.0 u
+delta HPWL                   11 %
+
+[WARNING CTS-0104] Clock wire resistance/capacitance values are zero.
+Use set_wire_rc to set them.
+[INFO CTS-0050] Root buffer is gf180mcu_fd_sc_mcu7t5v0__clkbuf_4.
+[INFO CTS-0051] Sink buffer is gf180mcu_fd_sc_mcu7t5v0__clkbuf_4.
+[INFO CTS-0052] The following clock buffers will be used for CTS:
+                    gf180mcu_fd_sc_mcu7t5v0__clkbuf_4
+[INFO CTS-0049] Characterization buffer is gf180mcu_fd_sc_mcu7t5v0__clkbuf_4.
+[INFO CTS-0001] Running TritonCTS with user-specified clock roots: clk.
+[INFO CTS-0095] Net "clk" found.
+[WARNING CTS-0041] Net "clk" has 1 sinks. Skipping...
+[WARNING CTS-0083] No clock nets have been found.
+[INFO CTS-0008] TritonCTS found 0 clock nets.
+[WARNING CTS-0082] No valid clock nets in the design.
+[INFO CTS-0500] Runtime: 0.18s
