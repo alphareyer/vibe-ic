@@ -149,6 +149,16 @@ _NOT_PROSE: Dict[str, str] = {
         "line start. Neither has a negated form, and the direction is safe: a "
         "header without both groups refuses LL_LIBERTY_OPCOND_UNDECLARED, and "
         "an unparsed path is NOT_MEASURED, never CORRELATED.",
+    "path_spice_tool::subckt_devices":
+        "ONE MACHINE GRAMMAR, NO SENTENCE. SPICE netlist syntax as the PDK's "
+        "declared CELL_SPICE_MODELS and Magic's ext2spice write it: `.subckt "
+        "<name> <ports>`, `.ends`, and device lines named by their first letter "
+        "(X/M/D). It reads a subckt's port list and COUNTS its device lines; "
+        "no token is interpreted, so no denial can be spelled. The direction is "
+        "safe: a cell whose count reads zero is not simulated from its layout "
+        "(inert, or kept on its schematic subckt and named), never promoted to "
+        "the layout view. Falsifier: tests/test_f22_spice_corr.py"
+        "::test_the_not_prose_claim_for_the_subckt_reader_is_falsifiable.",
     "librelane_signoff::agreement":
         "TWO MACHINE GRAMMARS, NO SENTENCE. `Reading cell library for the "
         "'<corner>' corner at '<path>'` is LibreLane 3.1 sta/corner.tcl's own "

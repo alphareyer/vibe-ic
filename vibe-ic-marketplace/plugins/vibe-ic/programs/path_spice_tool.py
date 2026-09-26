@@ -43,6 +43,25 @@ typed:
   `default_operating_conditions` crashes it (SIGSEGV, measured). The arm sets
   the corner's first (cell) library's own operating conditions.
 
+The CELL VIEW is the layout's, not the schematic's (F22). The PDK's declared
+`CELL_SPICE_MODELS` are schematic netlists: device W/L only, `as=ad=ps=pd=0`
+(no junction capacitance) and no wiring capacitance. The liberty was
+characterised on the cells' LAYOUT. MEASURED on gf180mcuD ss_125C_4v50, one
+cell per deck at liberty grid points driven by the liberty's own
+`normalized_driver_waveform`: the schematic view reads -35..-50% at the
+smallest load (nand2_1, buf_1) and still -5%/-18% at a mid grid point, while
+the same cells extracted from the PDK's own GDS read -0.4%/-4.6% there; the
+model corner, temperature and supply the arm uses are already the liberty's
+(changing any of them moves the error away from zero). On spm max_ss that
+schematic view alone put the register-to-register path at -29%. So
+``extract_cells`` extracts every standard cell the routed netlist
+instantiates from the declared `CELL_GDS`, with the PDK's declared `MAGICRC`
+(`libs.tech/librelane/config.tcl`), and those subckts take the place of the
+schematic ones. A cell the layout cannot stand in for (absent from the GDS,
+or a different port set) keeps its schematic subckt and is named; a run
+with no declared layout or rcfile simulates the schematic view and says so
+(`cell_view`).
+
 Dual: ngspice and Xyce. The device models are chosen from the PDK's
 `libs.tech/<simulator>` tree by what the cells instantiate; a simulator tree
 that defines none of those devices refuses by name
@@ -110,8 +129,9 @@ def fold_subckts(sources: Sequence[Path], voltages: Dict[str, float],
     rails = {power, ground}
     lines: List[str] = []
     folded_cells = indented = dropped = 0
+    defined: set = set()
     for source in sources:
-        inside = False
+        inside = shadowed = False
         statements: List[List[str]] = []
         for raw in Path(source).read_text(errors='replace').splitlines():
             if raw.startswith('+') and statements:
@@ -121,7 +141,17 @@ def fold_subckts(sources: Sequence[Path], voltages: Dict[str, float],
         for statement in statements:
             head = statement[0]
             m = _SUBCKT_RE.match(head)
+            if shadowed:
+                # An earlier source already defines this cell: its first
+                # definition is the one simulated (the extracted view is
+                # passed ahead of the declared schematic one).
+                shadowed = not head.strip().lower().startswith('.ends')
+                continue
+            if m and m.group(1).lower() in defined:
+                shadowed = True
+                continue
             if m:
+                defined.add(m.group(1).lower())
                 inside = True
                 ports = m.group(2).split()
                 kept = [p for p in ports if p not in fold]
@@ -308,24 +338,169 @@ def arm_tcl(inputs: Dict[str, Any], project: Path, top: str, spef: str,
 
 
 def _docker(image: str, project: Path, mounts: List[Tuple[Path, str]], argv: List[str],
-            cwd: Path, docker: str = 'docker') -> subprocess.CompletedProcess:
+            cwd: Path, docker: str = 'docker', env: Optional[Dict[str, str]] = None
+            ) -> subprocess.CompletedProcess:
     volumes = ['-v', f'{project.resolve()}:{project.resolve()}']
     for host, guest in mounts:
         volumes += ['-v', f'{Path(host).resolve()}:{guest}:ro']
+    for key, value in (env or {}).items():
+        volumes += ['-e', f'{key}={value}']
     return subprocess.run([docker, 'run', '--rm', '--network', 'none',
                            *_dmem.docker_memory_flags(), *volumes, '-w', str(cwd),
                            '--entrypoint', argv[0], image, *argv[1:]],
                           capture_output=True, text=True)
 
 
+# --- the cell view: the layout the liberty was characterised on ------------
+
+#: Where a PDK declares its Magic rcfile for its own flow.
+_PDK_FLOW_CONFIGS = ('libs.tech/librelane/config.tcl', 'libs.tech/openlane/config.tcl')
+_MAGICRC_RE = re.compile(r'^\s*set\s+::env\(MAGICRC\)\s+"?([^"\s]+)"?', re.M)
+_INSTANCE_RE = re.compile(r'^\s*([A-Za-z_][\w$]*)\s+(?:#\s*\(.*?\)\s*)?\\?\S+\s*\(', re.M)
+
+
+def pdk_magicrc(pdk_dir: Path, guest_root: str, pdk: str) -> Optional[Tuple[str, str]]:
+    """(guest path, source) of the Magic rcfile the PDK's own flow config
+    declares, its `$::env(PDK_ROOT)`/`$::env(PDK)` resolved to the guest."""
+    for rel in _PDK_FLOW_CONFIGS:
+        path = Path(pdk_dir) / rel
+        m = _MAGICRC_RE.search(path.read_text(errors='replace')) if path.is_file() else None
+        if m:
+            value = (m.group(1).replace('$::env(PDK_ROOT)', guest_root)
+                     .replace('$::env(PDK)', pdk))
+            if '$' not in value:
+                return value, f'{rel}:MAGICRC'
+    return None
+
+
+_DEVICE_LINE_RE = re.compile(r'^\s*[xXmMdD]\S*\s')
+
+
+def subckt_ports(text: str) -> Dict[str, List[str]]:
+    """{subckt name: its ports in declaration order}."""
+    return {name: ports for name, (ports, _) in subckt_devices(text).items()}
+
+
+def subckt_devices(text: str) -> Dict[str, Tuple[List[str], int]]:
+    """{subckt name: (its ports in declaration order, how many device lines
+    -- transistor, diode or subckt call -- it holds)}. First definition wins."""
+    out: Dict[str, Tuple[List[str], int]] = {}
+    current = None
+    for line in text.splitlines():
+        m = _SUBCKT_RE.match(line)
+        if m:
+            current = None if m.group(1) in out else m.group(1)
+            if current:
+                out[current] = ([p for p in m.group(2).split() if not _PARAM_TOKEN.match(p)], 0)
+        elif line.strip().lower().startswith('.ends'):
+            current = None
+        elif current and _DEVICE_LINE_RE.match(line):
+            ports, n = out[current]
+            out[current] = (ports, n + 1)
+    return out
+
+
+def netlist_cells(netlist_text: str, known: Sequence[str]) -> List[str]:
+    """The cells among `known` the structural netlist instantiates."""
+    used = set(_INSTANCE_RE.findall(netlist_text))
+    return sorted(c for c in known if c in used)
+
+
+def extraction_tcl(gds: Sequence[str], cells: Sequence[str], out_dir: Path) -> str:
+    """One Magic session: the declared cell GDS read once, then each cell
+    extracted with its device geometry (AS/AD/PS/PD) and every coupling and
+    ground capacitance (`cthresh 0`), no resistance."""
+    lines = ['gds readonly true', 'gds rescale false']
+    lines += [f'gds read {g}' for g in gds]
+    for cell in cells:
+        lines += [f'load {cell}', 'select top cell', f'extract path {out_dir}', 'extract all',
+                  'ext2spice lvs', 'ext2spice cthresh 0', 'ext2spice extresist off',
+                  f'ext2spice -p {out_dir} -o {out_dir}/{cell}.spice']
+    return '\n'.join(lines + ['quit -noprompt']) + '\n'
+
+
+def extract_cells(image: str, project: Path, mounts: List[Tuple[Path, str]], *,
+                  gds: Sequence[str], magicrc: str, guest_root: str,
+                  schematic: Dict[str, List[str]], cells: Sequence[str],
+                  out_dir: Path) -> Dict[str, Any]:
+    """The layout view of `cells`, one subckt per cell in the schematic's
+    port order, written to `out_dir/cells_extracted.spice`. A cell whose
+    extraction has no device, or whose ports are not the schematic's, is
+    left to its schematic subckt and named in `kept_schematic`."""
+    work = out_dir / 'extract'
+    work.mkdir(parents=True, exist_ok=True)
+    tcl = work / 'extract.tcl'
+    tcl.write_text(extraction_tcl(gds, cells, work))
+    run = _docker(image, project, mounts,
+                  ['magic', '-dnull', '-noconsole', '-rcfile', magicrc, str(tcl)], work,
+                  env={'PDK_ROOT': guest_root})
+    (work / 'magic.log').write_text(run.stdout + '\n' + run.stderr)
+    kept: Dict[str, str] = {}
+    body: List[str] = []
+    for cell in cells:
+        path = work / f'{cell}.spice'
+        text = path.read_text(errors='replace') if path.is_file() else ''
+        ports, devices = subckt_devices(text).get(cell, ([], 0))
+        start = re.search(r'^\.subckt\s+' + re.escape(cell) + r'\b.*$', text, re.M | re.I)
+        end = re.search(r'^\.ends\b.*$', text[start.end():], re.M | re.I) if start else None
+        inner = text[start.end():start.end() + end.start()].strip('\n') if end else ''
+        if not ports or not devices:
+            kept[cell] = 'no device extracted from the declared layout'
+            continue
+        if set(ports) != set(schematic[cell]):
+            kept[cell] = f'layout ports {sorted(ports)} are not the schematic ports'
+            continue
+        body += [f'.subckt {cell} ' + ' '.join(schematic[cell]), inner, '.ends']
+    out = out_dir / 'cells_extracted.spice'
+    out.write_text('* vibe-ic step 30: cells extracted from the declared layout\n'
+                   + '\n'.join(body) + '\n')
+    return {'path': str(out), 'magic_rc': run.returncode, 'magicrc': magicrc,
+            'extracted': sorted(set(cells) - set(kept)), 'kept_schematic': kept}
+
+
+def cell_view(image: str, project: Path, mounts: List[Tuple[Path, str]], *, config: dict,
+              pdk_dir: Path, guest_root: str, pdk: str, netlist: Path,
+              cell_sources: Sequence[Path], out_dir: Path) -> Dict[str, Any]:
+    """Which standard-cell netlists the deck simulates, and why (module
+    docstring). `cell_sources` are the declared `CELL_SPICE_MODELS`; pads keep
+    their declared netlists (the arm's subject is register to register)."""
+    schematic: Dict[str, List[str]] = {}
+    inert: set = set()
+    for source in cell_sources:
+        for name, (ports, devices) in subckt_devices(Path(source).read_text(errors='replace')).items():
+            if name not in schematic:
+                schematic[name] = ports
+                if not devices:
+                    # No device in the declared netlist (fill, tie-less
+                    # spacers): nothing to simulate in either view.
+                    inert.add(name)
+    gds = list(config.get('CELL_GDS') or [])
+    rc = pdk_magicrc(pdk_dir, guest_root, pdk)
+    if not gds or rc is None:
+        return {'view': 'schematic', 'sources': [],
+                'reason': ('no CELL_GDS declared' if not gds else
+                           'no MAGICRC declared in ' + ' or '.join(_PDK_FLOW_CONFIGS))}
+    used = netlist_cells(Path(netlist).read_text(errors='replace'),
+                         [c for c in schematic if c not in inert])
+    got = extract_cells(image, project, mounts, gds=gds, magicrc=rc[0], guest_root=guest_root,
+                        schematic=schematic, cells=used, out_dir=out_dir)
+    view = ('layout-extracted' if got['extracted'] and not got['kept_schematic'] else
+            'mixed' if got['extracted'] else 'schematic')
+    return {'view': view, 'sources': [Path(got['path'])] if got['extracted'] else [],
+            'magicrc_source': rc[1], 'gds': gds, **got}
+
+
 # --- waveform and measurement --------------------------------------------
 
 def read_waveform(path: Path, simulator: str) -> Dict[str, List[Tuple[float, float]]]:
     """{node: [(t, v)]} from the simulator's table: ngspice `wrdata` with
-    `wr_vecnames`/`wr_singlescale`, or Xyce's `.prn`. Node names are keyed
-    lowercase with `v(...)` and escapes removed."""
-    lines = [line.split() for line in path.read_text(errors='replace').splitlines()
-             if line.split()]
+    `wr_vecnames`/`wr_singlescale`, or Xyce's `.print` table (`.prn`, or the
+    `format=csv` file the tool's deck names). Node names are keyed lowercase
+    with `v(...)` and escapes removed."""
+    raw = path.read_text(errors='replace').splitlines()
+    split = (lambda line: line.split(',')) if raw and ',' in raw[0] else str.split  # noqa: E731
+    lines = [[w.strip() for w in split(line)] for line in raw if line.split()]
+    lines = [[w for w in line if w] for line in lines]
     head = lines[0]
     rows = [r for r in lines[1:] if len(r) == len(head)]
     key = lambda n: re.sub(r'^v\((.*)\)$', r'\1', n.lower()).replace('\\', '')  # noqa: E731
@@ -405,8 +580,7 @@ def measure(deck: Path, simulator: str, sta: dict, header: dict) -> Dict[str, An
     text = deck.read_text(errors='replace')
     supplies = [float(v) for v in re.findall(r'^v\d+\s+\S+\s+0\s+([-\d.eE+]+)\s*$', text, re.M)]
     vdd = max(supplies) if supplies else None
-    wave_path = (deck.with_suffix('.run.sp.prn') if simulator == 'xyce'
-                 else deck.with_suffix('.wave'))
+    wave_path = xyce_table(deck) if simulator == 'xyce' else deck.with_suffix('.wave')
     if vdd is None or not wave_path.is_file():
         return {'status': 'NOT_MEASURED', 'reason': 'no waveform or no supply in the deck'}
     wave = read_waveform(wave_path, simulator)
@@ -447,10 +621,37 @@ def transient_step_s(deck: Path, rows: List[dict]) -> Tuple[float, float]:
     return max(asked, derived), asked
 
 
+def xyce_table(deck: Path) -> Path:
+    """The file Xyce writes the deck's `.print tran` to: the `file=` the
+    tool's deck names (`format=csv`), else Xyce's default `<netlist>.prn`."""
+    m = re.search(r'^\.print\s+tran\b[^\n]*?\bfile=(\S+)', deck.read_text(errors='replace'),
+                  re.M | re.I)
+    return Path(m.group(1)) if m else deck.with_suffix('.run.sp.prn')
+
+
+def runnable_subckts(text: str, deck_dir: Path) -> str:
+    """`text` with each `.include`d `.subckt` file the tool wrote replaced by a
+    copy whose device lines start at column 0. ``fold_subckts`` indents the
+    parameterised device calls so OpenSTA's subckt READER skips them; that
+    indentation is for the reader only. Xyce reads a line that starts with
+    white space as a continuation of the line before (MEASURED on spm: "Unrecognized
+    fields for device D37", the pad diode followed by an indented X line), so
+    both simulators read the same de-indented bytes."""
+    def swap(m):
+        source = deck_dir / m.group(2)
+        if not source.is_file():
+            return m.group(0)
+        target = source.with_suffix('.run.subckt')
+        target.write_text(re.sub(r'^[ \t]+(?=[A-Za-z])', '',
+                                 source.read_text(errors='replace'), flags=re.M))
+        return f'{m.group(1)}"{target.name}"'
+    return re.sub(r'^(\.include\s+)"([^"/]+\.subckt)"', swap, text, flags=re.M | re.I)
+
+
 def _simulate(deck: Path, simulator: str, image: str, project: Path,
               mounts: List[Tuple[Path, str]], step_s: Optional[float] = None
               ) -> subprocess.CompletedProcess:
-    text = deck.read_text()
+    text = runnable_subckts(deck.read_text(), deck.parent)
     stop = re.search(r'^\.tran\s+\S+\s+(\S+)', text, re.M | re.I).group(1)
     runnable = deck.with_suffix('.run.sp')
     if simulator == 'ngspice':
@@ -531,10 +732,16 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
     if not (opc and libname):
         raise Refusal('LL_LIBERTY_OPCOND_UNDECLARED', inputs['liberties'][0])
     out_dir.mkdir(parents=True, exist_ok=True)
-    spice_sources = [host(p) for key in ('CELL_SPICE_MODELS', 'PAD_SPICE_MODELS')
-                     for p in (config.get(key) or [])]
-    cells = fold_subckts(spice_sources, supply_voltages(lib_texts), power, ground,
-                         out_dir / 'cells_folded.spice')
+    cell_sources = [host(p) for p in (config.get('CELL_SPICE_MODELS') or [])]
+    spice_sources = cell_sources + [host(p) for p in (config.get('PAD_SPICE_MODELS') or [])]
+    mounts = [(pdk_root / pdk, guest)]
+    view = cell_view(image, project, mounts, config=config, pdk_dir=pdk_root / pdk,
+                     guest_root=str(Path(guest).parent), pdk=pdk,
+                     netlist=project / inputs['sta_netlist'], cell_sources=cell_sources,
+                     out_dir=out_dir)
+    cells = fold_subckts(view['sources'] + spice_sources, supply_voltages(lib_texts), power,
+                         ground, out_dir / 'cells_folded.spice')
+    cells['cell_view'] = {k: v for k, v in view.items() if k != 'sources'}
     models = model_file(pdk_root / pdk / 'libs.tech' / simulator, f'{guest}/libs.tech/{simulator}',
                         simulator, Path(inputs['liberties'][0]).name,
                         device_names(Path(cells['path']).read_text()),
@@ -546,7 +753,6 @@ def prepare_arm(project: Path, image: str, state_path: Path, corner: str, *,
     tcl = out_dir / 'arm.tcl'
     tcl.write_text(arm_tcl(inputs, project, top, str(spef_path), (libname.group(1), opc.group(1)),
                            args, out_dir, cells['path'], models['path'], power, ground, simulator))
-    mounts = [(pdk_root / pdk, guest)]
     sta = _docker(image, project, mounts, ['sta', '-no_init', '-no_splash', '-exit', str(tcl)], out_dir)
     (out_dir / 'sta.log').write_text(sta.stdout + '\n' + sta.stderr)
     failed = re.findall(r'^VIBEIC_WPS_FAIL (\d+) (.*)$', sta.stdout, re.M)
@@ -695,7 +901,11 @@ def run_step30(project: Path, image: str, pdk_root: Path, pdk: str, *,
             done_mut = (None if mutated is None else
                         {k: v for k, v in simulate_arm(dict(mutated, prepared=[])).items()}
                         | {'paths': rows[len(base['prepared']):]})
-            arms[simulator] = {'judgment': judge(done_base, done_mut), 'base': done_base,
+            # The cell view is part of the verdict: a schematic-view number
+            # carries the PDK's missing layout parasitics (module docstring).
+            arms[simulator] = {'judgment': dict(judge(done_base, done_mut),
+                                                cell_view=base['cells']['cell_view']['view']),
+                               'base': done_base,
                                'mutated': done_mut, 'mutation': mutated_spef}
         except Refusal as exc:
             arms[simulator] = {'judgment': {'verdict': 'NOT_MEASURED', 'reason': str(exc)}}
