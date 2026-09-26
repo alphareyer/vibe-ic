@@ -13,24 +13,24 @@ to a real PASS.
 
 What is genuinely back-annotated
 --------------------------------
-Icarus Verilog's ``$sdf_annotate`` on this SDF applies the **INTERCONNECT**
-(net RC / routing-parasitic) delays derived from the extracted SPEF — the run
-log records the count via ``-sdf-info`` ("Created a vpiInterModPath").  This is
-real post-layout delay back-annotation of the routed netlist.
+Every case compiles with ``_IVERILOG_FLAGS`` (R-0915-75, one constant for
+every call site): ``-ginterconnect`` applies the SDF **INTERCONNECT**
+(net RC) delays and ``-gspecify`` builds the module paths the SDF **IOPATH**
+cell-arc delays attach to (isolated probe: 0 ps without it, 98 ps with it;
+run15's netlist: ModPath failures 31061 -> 0). ``sdf_annotation_census``
+counts what the simulator actually applied (``Putting delay``) and
+``sdf_error_count`` every record it refused (``SDF ERROR``).
 
 Honest residual (documented, not hidden)
 ----------------------------------------
-* This Icarus build applies **INTERCONNECT** delays but not the SDF **IOPATH**
-  cell arc delays (its ``$sdf_annotate`` emits 0 "Putting delay" for IOPATH and
-  0 match-errors — a known Icarus limitation).  At-speed *cell* timing sign-off
-  therefore remains STA's job (Step 23/28), which this program does not
-  duplicate.
-* ``-gspecify`` is intentionally *not* used: this PDK's sequential models drive
-  their outputs through NOTIFIER-based ``$setuphold``/``$width`` timing checks
-  that Icarus does not support ("Timing checks are not supported"), which injects
-  X and breaks functional simulation.  Cells therefore simulate with their
-  logical (zero-arc) behaviour while the SDF interconnect delays stay active —
-  a functionally-correct gate-level sim of the routed netlist.
+* Icarus does not support timing checks ("Timing checks are not supported"):
+  NOTIFIER-based ``$setuphold``/``$width`` in a PDK's sequential models do not
+  fire, so setup/hold is STA's job (Step 23/28), not this simulation's.
+* An SDF IOPATH the model's specify block does not declare (for example an
+  unconditional ``(IOPATH S Z ...)`` against a mux whose model has only
+  conditional S->Z paths) is refused as ``SDF ERROR``; T106 measured 63 such
+  records per case on spm x gf180mcuD (xor2 / mux2). The tool arm
+  (``judge_tool_arm``) fails a corner on any of them.
 
 NEVER fabricates a results.log: the file is written only from the *captured*
 simulator output, and a functional mismatch is surfaced as an ERROR line so the
@@ -1522,22 +1522,10 @@ def run(project, top: str = "spm", container: str = DEFAULT_CONTAINER,
     # compile + run inside the container.  -ginterconnect enables SDF net-delay
     # back-annotation.
     #
-    # CELL-ARC (IOPATH) status — v1.3.97, HONEST (corrects the earlier
-    # "iverilog can't do cell-arc" claim): iverilog CAN back-annotate SDF IOPATH
-    # cell-arc delays with `-gspecify` — PROVEN on real PDK cells (a DFFHQD1
-    # posedge-CK->Q SDF arc of 2ns lands exactly: posedge@5ns -> Q@7ns; an INVD1
-    # A->Y arc of 5ns lands exactly). The OpenSTA-written spm.sdf already carries
-    # 979 IOPATH cell-arc entries. BUT enabling `-gspecify` on the WHOLE-DESIGN
-    # gate-sim breaks the CALIBRATED streaming-scoreboard TB: the added per-stage
-    # cell-arc delays shift transitions past the TB's fixed sample edges ->
-    # CALIBRATION_FAIL. Making the functional TB cell-delay-aware (sample on the
-    # SDF-annotated valid window instead of a fixed latency) is a tracked
-    # residual (NOT a commercial gap, NOT an iverilog limit). Until then the
-    # gate-sim validates FUNCTION under real net-RC delays (the 50/50 result) and
-    # at-speed CELL timing is signed off by STA (Step 23/28), which uses the same
-    # Liberty arcs the SDF is derived from. So `-gspecify` is intentionally NOT
-    # enabled here to keep the functional sim sound. See docs/ADVANCED_NODE_
-    # EXTENSION.md "cell-arc gate-sim".
+    # CELL-ARC (IOPATH) status: `_IVERILOG_FLAGS` carries `-gspecify`
+    # (R-0915-75, see its definition), so the SDF's IOPATH cell-arc delays are
+    # applied as well as the net RC; the census of the transcript says how
+    # many were.
     vvp = sim_dir / f"{top}_gatesim.vvp"
     compile_flags = _IVERILOG_FLAGS
     runtime_flags = "-sdf-info"
