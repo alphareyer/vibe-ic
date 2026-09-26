@@ -2008,6 +2008,7 @@ ARTEFACT_MUTATIONS: Tuple[ArtefactMutation, ...] = (
                     "antenna check: 7 net violations, 0 pin violations\n"
                     "antenna clean: NO", 1),),
         gate=("antenna_report_check . --mode antenna "
+              "--under reports/phase3/antenna.rpt "
               "--json reports/phase3/antenna_signoff.json"),
         what="rewrite the antenna result from 0 net violations / clean YES to "
              "7 net violations / clean NO",
