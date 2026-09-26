@@ -292,11 +292,31 @@ def images_are_comparable(base_image: Any, candidate_image: Any) -> bool:
     return base is not None and base == candidate
 
 
-def derived_runner() -> dict:
-    """The runner row a manifest must carry, built from this file's own rules."""
+def derived_runner_profile() -> dict:
+    """The runner row WITHOUT its image: the half this verifier DERIVES.
+
+    THE IMAGE IS NOT POLICY, AND IT IS NOT THIS HOST'S TO SAY.  `_runner_profile`
+    asks only that a recorded image be an immutable reference (owner ruling,
+    2026-09-21), and a PREPARE may not replace the one the BASE records
+    (`test_prepare_cannot_replace_the_base_owned_runner_digest`).  So the image
+    in the register is a RECORD the base owns -- provenance of the run that
+    authored the runner row -- and everything else in the row is derived here.
+    `protected_landing_manifest_author.render` composes the two; asking the
+    host for the image instead is what made one tree pass or fail by host
+    (MEASURED 2026-09-26 on 8hd-3: register `@sha256:4215132e…`, 0.3.63,
+    against the host-resolved `@sha256:93d88e9e…`, 0.3.79).  Resolves nothing,
+    so it also answers in a process that has no engine.
+    """
     return {"schema": 1, "profile_id": RUNNER_PROFILE_ID, "engine": "docker",
-            "image": runner_image(), **{k: (list(v) if isinstance(v, list) else v)
-                                      for k, v in RUNNER_PROFILE_EXPECTED.items()}}
+            **{k: (list(v) if isinstance(v, list) else v)
+               for k, v in RUNNER_PROFILE_EXPECTED.items()}}
+
+
+def derived_runner() -> dict:
+    """The runner row this HOST would record: the derived profile plus the image
+    resolved here.  A register is authored from `derived_runner_profile()` and
+    the base's recorded image, never from this."""
+    return {**derived_runner_profile(), "image": runner_image()}
 
 
 def derived_paths() -> list:
