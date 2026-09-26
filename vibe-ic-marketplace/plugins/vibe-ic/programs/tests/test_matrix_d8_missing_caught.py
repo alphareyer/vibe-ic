@@ -1629,7 +1629,9 @@ REAL_GATE_PASS_TIER_STEPS: Tuple[str, ...] = (
     # 2026-09-24: 32 and 35 leave this synthetic fixture's PASS tier because
     # their new blocking content checks reject its placeholder documents.
     # Their measured FAIL tiers remain pinned below.
-    "1", "38",
+    # 2026-09-26 (F9), SHRINK, 2 -> 1: "1" leaves and is RECORDED in
+    # REAL_GATE_LEFT_THE_PASS_TIER below with the tier it reaches, FAIL.
+    "38",
 )
 
 #: The steps whose real gate USED to reach a PASS tier on the seeded fixture
@@ -1762,6 +1764,16 @@ REAL_GATE_LEFT_THE_PASS_TIER: Dict[str, str] = {
     # This is a stronger refusal on this fixture, not a claim of design PASS.
     "32": "FAIL",
     "35": "FAIL",
+    # 2026-09-26 (F9), PASS -> FAIL. Step 1 now runs
+    # `catalog_synth_safe_params_check`, whose applicability is the design's
+    # DECLARATION (the catalog IP its input docs name as reuse). This seeded
+    # tree carries step 1's declared outputs and none of its declared INPUT --
+    # D1's L-docs -- so the gate refuses "declaration missing" (rc 1): unread
+    # is not empty. Not a gate losing the tier on a real design: with a
+    # readable no-catalog declaration step 1 reaches PASS through its own real
+    # gate and dropping the RTL output takes it off that tier, both asserted in
+    # test_f9_step1_catalog_synth_safe_gate.py.
+    "1": "FAIL",
 }
 # 2026-07-28: the SET is unchanged (lost: none, gained: none). This tuple is
 # compared in flow DECLARATION order, and the dimension-5 fix moved A6's yaml

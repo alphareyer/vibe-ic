@@ -160,3 +160,13 @@ def test_a_pull_record_widens_the_judged_set_and_never_makes_it_na(root):
     assert (report['verdict'], result.status) == ('FAIL', 'FAIL')
     assert _declared(report) == []
 
+
+
+def test_declared_na_step1_still_owes_its_rtl(root):
+    # d8's question for step 1, on a tree that carries its declaration: the
+    # real gate reaches PASS, and removing the declared RTL moves it off PASS.
+    p = _plain_design(root)
+    assert _run(p)[0].status == 'PASS'
+    (p / 'phase2/stage1/rtl/core.v').unlink()
+    result = fcc.check_step(p, _step1(), {})
+    assert result.status not in ('PASS', 'PASS_WITH_WAIVERS'), result.reasons

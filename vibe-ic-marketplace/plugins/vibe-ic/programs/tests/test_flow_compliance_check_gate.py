@@ -835,6 +835,13 @@ def test_strict_structural_does_not_excuse_a_broken_p0_ancestry(
     its chain is closed, NOT because step-level state stopped counting.
     """
     project = _make_phase2_project(tmp_path, ())   # deliberately bare
+    # F9: ONE L-doc, and D1 still FAILs on the 18 it lacks. Without any, step 1
+    # itself refuses (catalog_synth_safe_params_check: "declaration missing"),
+    # so no step is marked done and the ordering guard this test pins is never
+    # reached -- the chain would break one step earlier, not be excused.
+    l1 = project / "phase1" / "generated_docs" / "L1_DATASHEET.json"
+    l1.parent.mkdir(parents=True)
+    l1.write_text('{"description": "a core"}')
 
     mod = _import_fcc()
     _patch_run(monkeypatch, mod, {})
