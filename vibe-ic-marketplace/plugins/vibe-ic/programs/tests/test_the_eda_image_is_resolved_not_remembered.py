@@ -70,6 +70,15 @@ _PLUGIN = _PROGRAMS.parent
 sys.path.insert(0, str(_PROGRAMS))
 import _eda_image as M  # noqa: E402
 import _eda_pin as _pin  # noqa: E402
+from _stated_eda_image import STATED_DIGEST, state_the_image  # noqa: E402
+
+
+def _state_the_pin(monkeypatch):
+    """The arms below test what `_eda_image` does with a RESOLVED pin; the pin
+    itself is resolved by `_eda_pin` from this host's docker. STATED here, so
+    they do not inherit that host fact: inside the image there is no docker,
+    and each of them raised ImageNotResolvable before reaching its assertion."""
+    state_the_image(monkeypatch)
 import not_verified_tier as NV  # noqa: E402
 
 from pathlib import Path
@@ -273,6 +282,7 @@ def test_the_deleted_anchor_is_actually_gone_from_the_repo():
 def test_resolve_returns_a_digest_not_a_floating_tag(monkeypatch):
     """Still the property; the ANSWER is now the pin rather than whatever the
     registry says `latest` means this minute."""
+    _state_the_pin(monkeypatch)
     monkeypatch.setattr(M, "registry_digest", lambda *a, **k: pytest.fail(
         "the run path asked the registry"))
     monkeypatch.setattr(_pin, "pinned_image_present",
@@ -296,6 +306,7 @@ def test_the_run_path_takes_the_pin_and_not_the_newest_local_tag(monkeypatch, ca
     there is no fallback left to be dishonest about, and the one case that used
     to be silent (a host without the bytes) is announced by name.
     """
+    _state_the_pin(monkeypatch)
     monkeypatch.setattr(M, "registry_digest", lambda *a, **k: pytest.fail(
         "the run path asked the registry"))
     monkeypatch.setattr(M, "local_tags", lambda *a, **k: ["0.3.9", "0.3.10"])
@@ -311,6 +322,7 @@ def test_a_run_on_a_host_without_the_pinned_bytes_SAYS_SO(monkeypatch, capsys):
     it fetches exactly those bytes — but the operator is told, because a
     multi-gigabyte fetch nobody expected is the other half of this module's
     history."""
+    _state_the_pin(monkeypatch)
     monkeypatch.setattr(_pin, "pinned_image_present",
                         lambda env=None: (None, "IMAGE_NOT_PRESENT: x"))
     got = M.resolve(env={})
@@ -325,6 +337,7 @@ def test_the_run_path_never_reaches_for_the_legacy_upstream_image(monkeypatch, c
     iic-osic-tools hands a DFT step a toolchain with no Fault and no patched
     yosys. It used to be the last rung; it is not a rung at all now, and this is
     the assertion that keeps it from becoming one again."""
+    _state_the_pin(monkeypatch)
     monkeypatch.setattr(_pin, "pinned_image_present",
                         lambda env=None: (None, "IMAGE_NOT_PRESENT: x"))
     monkeypatch.setattr(M, "local_tags", lambda *a, **k: [])
@@ -347,6 +360,7 @@ def test_local_image_never_touches_the_registry(monkeypatch):
     """Collapsing this into `resolve` turns a skip guard's local check into an
     unbounded pull. The question it answers is now "are the PINNED bytes here",
     which is the only version of it a skip guard can act on."""
+    _state_the_pin(monkeypatch)
     monkeypatch.setattr(M, "registry_digest",
                         lambda *a, **k: pytest.fail("local_image asked the registry"))
     monkeypatch.setattr(M, "local_tags", lambda *a, **k: ["0.3.16"])
@@ -420,6 +434,7 @@ def test_judged_image_makes_no_registry_call_unless_asked(monkeypatch):  # noqa:
     gates in the same run cannot silently judge two different images. Reaching
     the registry is possible, and it is OPT-IN.
     """
+    _state_the_pin(monkeypatch)
     monkeypatch.setattr(M, "registry_digest",
                         lambda *a, **k: pytest.fail(
                             "judged_image asked the registry without allow_pull"))
@@ -533,6 +548,7 @@ def test_with_nothing_local_it_refuses_rather_than_starting_a_pull(monkeypatch):
     """`docker run` on an absent reference FETCHES. Measured 2026-08-21: the
     anchored image was absent on this host and `docker run` began pulling it,
     inside a hygiene gate. A gate that does that gets switched off."""
+    _state_the_pin(monkeypatch)
     asked = _nothing_local(monkeypatch)
     j = M.judged_image(env={})
     assert j.ref is None
@@ -585,6 +601,7 @@ def test_allow_pull_is_the_way_to_reach_the_registry(monkeypatch):
     """And what it reaches for is THE PINNED DIGEST. Opting into a pull is
     opting into fetching the bytes that were pinned; it must not have become
     opting into whichever bytes are newest."""
+    _state_the_pin(monkeypatch)
     monkeypatch.setattr(_pin, "pinned_image_present",
                         lambda env=None: (None, "IMAGE_NOT_PRESENT: x"))
     monkeypatch.setattr(M, "image_digest",
@@ -898,7 +915,13 @@ _LEF_NARROW = _LEF_CLEAN.replace("RECT -0.8 -0.8 0.8 0.8 ;",
 #:
 #: The arms vary the LABEL, the STA answers and the tech LEF. The digest was
 #: never the variable, and binding it to the pin keeps it from becoming one.
-_FIXTURE_DIGEST = _pin.IMAGE_DIGEST
+#:
+#: STATED, NOT ASKED OF THIS HOST. Reading `_pin.IMAGE_DIGEST` here asked the
+#: host's docker while the module was COLLECTED, so with no docker (inside the
+#: image) the whole file was a collection error. The arms run the gates in a
+#: child whose only docker is `_FAKE_DOCKER`, which answers `FAKE_DIGEST`: in
+#: there, the pin IS this digest, so it is still the pinned image by construction.
+_FIXTURE_DIGEST = STATED_DIGEST
 _FIXTURE_LABEL = "0.3.19"
 
 
