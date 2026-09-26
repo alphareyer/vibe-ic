@@ -286,3 +286,62 @@ def test_an_extraction_that_changed_the_devices_is_refused(stub, monkeypatch):
                      .read_text())
     assert rec["rule"] == "A7_RCX_DEVICE_INVENTORY_MISMATCH"
     assert "cap" in rec["detail"]
+
+
+# ── the `_NOT_PROSE` claim for the two card readers, re-measured ──────────
+def _denial_vocabulary() -> list:
+    """`_prose_polarity`'s OWN denial words, read out of its own patterns."""
+    import re
+    import _prose_polarity as PP
+    raw = PP._DENIAL_CORE + "|" + PP._DENIAL_RETIRED
+    out = set()
+    for m in re.findall(r"([A-Za-z][A-Za-z' -]{2,})", raw):
+        m = m.strip()
+        out.add(m[1:] if m.startswith("b") and len(m) > 3 else m)
+    return sorted(w for w in out if len(w) >= 2 and not w.startswith("b"))
+
+
+_CARD_SHAPES = (
+    "meas tran {t} max v(x1.nint)",
+    "meas tran k max v(x1.{t})",
+    "meas tran k max v(x1.ghost)\nlet {t} = k / 2",
+    "meas tran {t} max v(x1.ghost)\necho \"MEAS a=\" $&{t} \" b=\" $&w",
+    "meas tran k max v(x1.ghost)\necho \"MEAS {t}=\" $&k \" b=\" $&w",
+    ".save v(x1.{t}) v(x1.ghost) v(b)",
+    "* {t} v(x1.nint)",
+)
+
+
+def test_the_not_prose_claim_for_the_probe_remap_is_falsifiable():
+    """`remap_probes` and `_echo_without` are in
+    `prose_polarity_consulted_check._NOT_PROSE` as grammar readers. THE
+    PROPERTY: a denial word in any name position changes nothing but the
+    name — the output equals the output for a neutral name, with the name
+    substituted — so a polarity consult there is a branch that cannot fire.
+    THE CONTRAST: the identical strings, read as prose, are denied."""
+    import re
+    import _prose_polarity as PP
+    tokens = [t for t in _denial_vocabulary()
+              if re.fullmatch(r"[A-Za-z_]\w*", t)]
+    assert len(tokens) >= 5, "the vocabulary was not read"
+    trials = changed = 0
+    for tok in tokens:
+        for shape in _CARD_SHAPES:
+            trials += 1
+            head = "X1 a b 0 blk\n"
+            got = A7.remap_probes(head + shape.format(t=tok) + "\n", "blk",
+                                  {"a", "b"}, {"nint", tok.lower()}, {})
+            ref = A7.remap_probes(head + shape.format(t="zqz") + "\n", "blk",
+                                  {"a", "b"}, {"nint", "zqz"}, {})
+            want = (ref[0].replace("zqz", tok),
+                    {k.replace("zqz", tok.lower()): v.replace("zqz", tok.lower())
+                     for k, v in ref[1].items()})
+            if got != want:
+                changed += 1
+    assert trials >= 35
+    assert changed == 0, ("a denial word changed what the card reader wrote "
+                          "— the _NOT_PROSE entries for analog_a7_post_layout"
+                          "_emit are false; delete them, not this assertion")
+    prose = sum(1 for t in tokens for s in _CARD_SHAPES
+                if PP.is_denied(s.format(t=t)))
+    assert prose >= len(tokens), "the vocabulary is not inert as prose"
