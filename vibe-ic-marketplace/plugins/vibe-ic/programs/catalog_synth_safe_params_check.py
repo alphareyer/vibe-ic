@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Step 1: every elaborated catalog-IP instance carries its synth-safe values.
 
+ENFORCEMENT: advisory — step runners do not invoke this gate inline.
+
+Its required step-1 ``program_exit_zero`` clause denies step 1 a PASS tier in
+flow_compliance_check, but this gate cannot stop the RTL author while it runs.
+
 A catalog manifest may declare ``synth_safe_params`` (serv: ``sim=0``, #492).
 With the unsafe value Yosys aborts synthesis, or elaborates a simulation-only
 block. The catalog-glue author is told to pin the value at the instantiation;
