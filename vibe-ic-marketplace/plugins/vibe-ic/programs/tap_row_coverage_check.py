@@ -223,7 +223,7 @@ def audit(def_text: str, lef_texts: Sequence[str], tap_master: str,
     """The coverage measurement. Raises ValueError (named) on unreadable input
     and `instrument_calibration.Uncalibrated` when the instrument may not judge."""
     import instrument_calibration                                  # noqa: PLC0415
-    instrument_calibration.assert_calibrated(INSTRUMENT)
+    instrument_calibration.assert_calibrated("tap_row_coverage_check::audit")
     masters = read_lef_masters(lef_texts)
     tap = masters.get(tap_master)
     if not tap or not tap["width_um"] or not tap["height_um"]:

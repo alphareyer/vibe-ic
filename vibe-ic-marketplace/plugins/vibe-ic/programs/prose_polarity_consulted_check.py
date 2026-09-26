@@ -1323,6 +1323,17 @@ _NOT_PROSE: Dict[str, str] = {
         "`_def_specialnet_iterm_map` above. Nothing is declared from either: "
         "an absent line, component or terminal is a FAIL finding, never a "
         "default.",
+    "tap_row_coverage_check::read_lef_masters":
+        "Library-LEF MACRO productions (`CLASS`, `SIZE <w> BY <h>`, and per PIN "
+        "`USE`, `DIRECTION`, `LAYER`, `RECT`), each anchored at line start inside "
+        "its own `MACRO <name> ... END <name>` block. LEF is a formal grammar: a "
+        "statement is present or absent and has no form that DENIES it, and a "
+        "LEF comment (`#`) never matches the anchored keywords. Nothing is "
+        "declared from it: an absent SIZE is `None` (the audit then refuses the "
+        "master, NOT_MEASURED), and a master whose supply pins draw no well "
+        "shape is simply not counted as a tie. Falsifier: calibration/"
+        "tap_coverage_cells.lef, copied verbatim from the PDK cell LEF, drives "
+        "the instrument's positive and negative pair. (T96, lane mig96.)",
     "librelane_contract::prune_pdk_root_cache":
         "Directory NAMES under the PDK-root cache, which `_materialise_image_pdk` "
         "itself creates as the 64-hex image ID (`<cache>/<hex>/<pdk>`), matched "
