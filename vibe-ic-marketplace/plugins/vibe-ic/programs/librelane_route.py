@@ -236,6 +236,13 @@ def direct_arm_deck(R, deck: str, *, pre_odb_c: str, pre_def_c: str, out_dir_c: 
     ]) + "\n"
 
 
+def deck_sdc(R, deck: str, *, container: str, project: Path, out_dir: Path) -> Path:
+    """The SDC the deck itself times with (its `read_sdc` line), on the host."""
+    match = re.search(r"(?m)^read_sdc\s+(\S+)", deck)
+    return (R._container_path_to_host(match.group(1), container, project)
+            if match else out_dir / "constraint.sdc")
+
+
 def overlay(R, project: Path, sdc: Path, scratch: Path) -> Dict[str, Tuple[Any, str]]:
     """Declared step-21 config for LibreLane, each value with its source.
 
@@ -430,9 +437,7 @@ def execute(
                            "phase3/librelane_switch.json pdk_root_host or "
                            "VIBEIC_LIBRELANE_PDK_ROOT", out)
         mounts = [(Path(pdk_root) / str(pdk.name), f"/pdk/{pdk.name}")]
-        _sdc_m = re.search(r"(?m)^read_sdc\s+(\S+)", deck)
-        sdc = (R._container_path_to_host(_sdc_m.group(1), container, project)
-               if _sdc_m else out_dir / "constraint.sdc")
+        sdc = deck_sdc(R, deck, container=container, project=project, out_dir=out_dir)
         cfg_dir = project / "phase3/librelane/21-config"
         reserved = [i.get("name") for i in (spare_plan or {}).get("instances", [])
                     if i.get("name")] or None
