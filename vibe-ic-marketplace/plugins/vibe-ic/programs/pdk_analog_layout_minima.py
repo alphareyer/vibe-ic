@@ -74,6 +74,8 @@ _MINIMA_KEY = "analog_device_layout_minima"
 # see `layout_maxima`.
 MAX_WIDTH_KEY = "max_width_um"
 MAX_LENGTH_KEY = "max_length_um"
+MAX_AREA_KEY = "max_area_um2"
+MIN_LENGTH_KEY = "min_length_um"
 _MAXIMA_KEY = "analog_device_layout_maxima"
 
 
@@ -173,6 +175,24 @@ def max_width_um(roles: Dict[str, Any], role: str) -> Optional[float]:
 def max_length_um(roles: Dict[str, Any], role: str) -> Optional[float]:
     """The declared drawn-length ceiling for `role`, or None."""
     return _role_number(roles, role, MAX_LENGTH_KEY)
+
+
+def max_area_um2(roles: Dict[str, Any], role: str) -> Optional[float]:
+    """The declared per-device AREA ceiling for `role`, or None.
+
+    A different KIND of bound from the side lengths beside it, and the record
+    says which is which: on a family whose side-length ceiling is a layout
+    TOOL's (a gencell default that clamps) while the foundry states only an
+    area, both are real and they are not the same fact."""
+    return _role_number(roles, role, MAX_AREA_KEY)
+
+
+def min_length_um(roles: Dict[str, Any], role: str) -> Optional[float]:
+    """The declared drawn-LENGTH floor for `role`, falling back to the width
+    floor when the family states only one (a role whose record names a single
+    minimum states it for both sides), or None."""
+    v = _role_number(roles, role, MIN_LENGTH_KEY)
+    return v if v is not None else min_width_um(roles, role)
 
 
 def _role_number(roles: Dict[str, Any], role: str, key: str

@@ -972,7 +972,7 @@
       },
       "analog_device_layout_maxima": {
         "_comment": "Same schema, same reader and same generic role tokens as `analog_device_layout_minima`; no code path is specific to this family. A role absent here is NOT MEASURED and bounds nothing.",
-        "_measured_from": "libs.tech/magic/ihp-sg13g2-cap.tcl \u2014 the gencell's own `_defaults` proc states `lmax 30.0 wmax 30.0` beside the `lmin 2.00 wmin 2.00` the minima record already reads, and magic writes all four into every generated cell's `string parameters` property, so a generated cell carries its own citation.",
+        "_measured_from": "libs.tech/magic/ihp-sg13g2-cap.tcl:24-30 \u2014 the Magic GENCELL `sg13g2::cap_cmim_defaults` states `lmax 30.0 wmax 30.0` (:27) beside `lmin 2.00 wmin 2.00` (:26), and magic writes all four into every generated cell's `string parameters` property, so a generated cell carries its own citation. THIS IS A TOOL BOUND, NOT A FOUNDRY RULE: the same file opens the section with `NOTE:  Work in progress.  These values need to be corrected.` (:20), and IHP SG13G2 Layout Rules Rev 0.4 \u00a76.11 states NO maximum width or length for MIM \u2014 its only per-device ceiling is MIM.g, an AREA (recorded as `max_area_um2` beside it). It binds this flow anyway because A5 draws through this gencell and `cap_check` (:727-746) CLAMPS to it silently. The minimum is recorded in `analog_device_layout_minima.roles.cap` (it was claimed here to be 'already read' by that record before it was; it was not).",
         "_note": "The `cap` role resolves to `cap_cmim` (device_map `cap_mim`), whose maximum this is; the sibling RF flavour `cap_rfcmim` (libs.tech/magic/ihp-sg13g2-cap.tcl:33) states a DIFFERENT `lmax 75.0 wmax 75.0` at :37, and is recorded nowhere here because no generic role resolves to it \u2014 said so that the 30.0 cannot later read as the only number this family states. `res`/`nmos`/`pmos` are absent because no resistor or fet gencell in this family states a maximum. ACCOUNTING FOR THE REST, so that this is not read as \"nothing else states one\": four more gencells in TWO classes the generic role vocabulary does not cover do state maxima \u2014 the varactor `SVaricap` (libs.tech/magic/ihp-sg13g2-var.tcl:25, lmax 0.8 wmax 9.74) and the three bipolar devices `npn13g2` / `npn13g2l` / `npn13g2v` (libs.tech/magic/ihp-sg13g2-bjt.tcl:35,41,48, lmax 0.9 / 2.5 / 5.0). They are recorded nowhere here because no role token resolves to them, not because they were missed. Measured on u_hawaii_adc, image 0.3.46: a gencell asked for a geometry ABOVE these does not refuse \u2014 it CLAMPS to the maximum and draws. CORRECTION (vibe-ic#2187, re-measured against the SOURCE in the pinned image 0.3.49): this sentence used to end \u0027the way one below the minimum does\u0027, asserting that the gencell refuses at the minimum. It does not. `sg13g2::cap_check` (libs.tech/magic/ihp-sg13g2-cap.tcl:727-746) treats all FOUR bounds identically \u2014 each of `w < wmin`, `l < lmin`, `w > wmax`, `l > lmax` writes one sentence to stderr, rewrites the parameter to the bound, and the proc returns normally. NEITHER END REFUSES, so nothing downstream may rely on the gencell stopping at either one; the flow pre-empts both itself, `floor_geometry_to_pdk` at the minimum and `split_oversize_capacitors` at the maximum. Eight `delta_sigma` capacitors asked for at l = 34.75 .. 629.08 um came back drawn at l = 30, twelve netlist capacitors collapsed into two drawn cells, and the only artefact that noticed was the sign-off LVS six steps later.",
         "roles": {
           "cap": {
@@ -980,7 +980,14 @@
             "max_length_um": 30.0,
             "device": "cap_cmim",
             "rule": "cap_cmim.lmax/wmax",
-            "rule_text": "lmax 30.0 wmax 30.0"
+            "rule_text": "lmax 30.0 wmax 30.0",
+            "bound_kind": "magic_gencell",
+            "bound_label": "Magic gencell cap_cmim bound (tool clamps; file marked WIP)",
+            "max_area_um2": 5625.0,
+            "max_area_rule": "MIM.g",
+            "max_area_rule_text": "Max. MIM area per MIM device (\u00b5m\u00b2) = 5625.00",
+            "max_area_source": "IHP SG13G2 Layout Rules Rev 0.4 \u00a76.11 (libs.doc/doc/SG13G2_os_layout_rules.pdf); libs.tech/klayout/tech/drc/rule_decks/sg13g2_maximal.drc:2830-2831 `MIM.ext_with_area([[\">\", 5625.0.um2]])`",
+            "max_area_kind": "foundry_rule"
           }
         }
       },
@@ -994,6 +1001,21 @@
             "device": "rppd",
             "rule": "Rppd.a",
             "rule_text": "Min. GatPoly width = 0.50"
+          },
+          "cap": {
+            "min_width_um": 2.0,
+            "min_length_um": 2.0,
+            "device": "cap_cmim",
+            "rule": "cap_cmim.lmin/wmin",
+            "rule_text": "lmin 2.00 wmin 2.00",
+            "bound_kind": "magic_gencell",
+            "bound_label": "Magic gencell cap_cmim bound (tool clamps; file marked WIP)",
+            "source": "libs.tech/magic/ihp-sg13g2-cap.tcl:26 `nx 1 ny 1 dummy 0 square 0 lmin 2.00 wmin 2.00` in `sg13g2::cap_cmim_defaults`; `cap_check` (:727-746) clamps a smaller w/l UP to it and draws, so a device below it is not the device the netlist asks for",
+            "foundry_floors": {
+              "MIM.a": {"min_width_um": 1.14, "rule_text": "Min. MIM width = 1.14"},
+              "MIM.f": {"min_area_um2": 1.3, "rule_text": "Min. MIM area per MIM device (\u00b5m\u00b2) = 1.30"},
+              "source": "IHP SG13G2 Layout Rules Rev 0.4 \u00a76.11; corroboration only \u2014 the gencell's 2.00 is the tighter and therefore binding floor"
+            }
           }
         }
       },

@@ -141,6 +141,7 @@ import pdk_analog_device_params as _pdp  # noqa: E402
 import pdk_analog_layout_minima as _minima  # noqa: E402
 import analog_transient_record as _record  # noqa: E402
 import analog_incremental_resolution as _res  # noqa: E402
+import analog_incremental_decimator as _dec  # noqa: E402
 import analog_resolution_stimulus as _stim  # noqa: E402
 
 PRODUCER = "analog_a2_topology_emit"
@@ -640,14 +641,74 @@ DIMENSIONLESS_UNITS = frozenset(
 #
 # Setting the first equal to the second and solving for C:
 #
-#   C  =  12 * k*T * 2**(2*ENOB) / (OSR * Vref**2)
+#   C  =  12 * k*T * 2**(2*ENOB) / (N_eff * Vref**2)
 #
-# Every name in it is either a bound spec row (`enob`, `osr`, `vref`), a
-# universal physical constant, or a MEASURED process constant read from the
-# registry — no design, PDK SKU or vendor number appears.
+# N_EFF, NOT OSR (q6-a2-cap-osr). An INCREMENTAL converter does not average its
+# samples with equal weight: the decimator weights sample k by the loop's own
+# input response w_k (triangular at order 2), so the variance of the sampled
+# noise it passes falls by sum(w**2)/sum(w)**2, not by 1/N. The divisor is
+# therefore N_eff = (sum w)**2 / sum(w**2) of `analog_incremental_decimator.
+# input_weights` for this window and order — MEASURED 0.744/0.749/0.749 N at
+# N = 64/256/512 (the textbook 3/4 for order 2). Dividing by OSR sized every
+# capacitor 1/0.749 too SMALL for its own noise budget. Published as the
+# constant `n_eff` (see `averaging_n_eff`) the way `window_clocks` is, because
+# the expression grammar cannot compute it.
+#
+# Every name in it is either a bound spec row (`enob`, `vref`), a constant
+# this program derives from the bound `osr` and `order`, a universal physical
+# constant, or a MEASURED process constant read from the registry — no
+# design, PDK SKU or vendor number appears.
+N_EFF_CONSTANT = "n_eff"
+
 SAMPLING_CAP_FF_EXPR = (
     "noise_budget_factor * kt_j_300k * farad_to_ff * 2 ** (2 * enob) "
-    "/ (osr * vref ** 2)")
+    "/ (n_eff * vref ** 2)")
+
+
+def averaging_n_eff(window: int, order: int, coeff: float = 1.0
+                    ) -> Optional[float]:
+    """`(sum w)**2 / sum(w**2)` of the decimator's own INPUT weights for this
+    window and loop order — the number of equally-weighted samples the
+    incremental decode is worth against white sampled noise. None when the
+    weights are degenerate. Scale-free in `coeff`, which is passed only so
+    the weights are the ones the decode itself uses."""
+    if window < 2 or order < 1:
+        return None
+    w = _dec.input_weights(int(window), int(order), float(coeff or 1.0))
+    s1 = sum(w)
+    s2 = sum(x * x for x in w)
+    if s2 <= 0:
+        return None
+    return s1 * s1 / s2
+
+
+def _counter_spec_of(lib: Dict[str, Any]) -> Optional[str]:
+    """The bound spec a conversion-window counter group counts to, or None."""
+    for g in _stage_groups(lib):
+        if g.get(COUNT_BITS_KEY):
+            return str(g[COUNT_BITS_KEY])
+    return None
+
+
+def declared_averaging_env(lib: Dict[str, Any],
+                           spec_values: Dict[str, float]
+                           ) -> Dict[str, float]:
+    """`{"n_eff": ...}` for an entry with a conversion-window counter, from
+    the window that counter would realise for these spec values (the fewest
+    powers of two reaching the bound count) and the bound `order`; `{}` for
+    every other entry, or when the rows are not bound — an ABSENT name, so an
+    expression that needs it is reported unresolved rather than defaulted."""
+    spec = _counter_spec_of(lib)
+    if not spec:
+        return {}
+    n = spec_values.get(spec)
+    order = spec_values.get("order")
+    if not isinstance(n, (int, float)) or n < 2 or \
+            not isinstance(order, (int, float)) or order < 1:
+        return {}
+    window = 2 ** int(math.ceil(math.log2(float(n)) - 1e-12))
+    v = averaging_n_eff(window, int(order))
+    return {} if v is None else {N_EFF_CONSTANT: v}
 #: ...and the DRAWN LENGTH that realises it at the library drawn width.
 #: Deliberately a LENGTH: a width is subject to the PDK layout floor applied
 #: in `build_ir`, and a `device_param_exprs` entry is resolved one step later
@@ -1453,6 +1514,10 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
                           # the RESET-GATED sampling clock of the feedback
                           # branch, and its complement (F164/F165)
                           "nndac", "nndacs", "nckdac", "nckdacb",
+                          # the DELAYED sampling phase of the input and
+                          # inter-stage branches (bottom-plate sampling,
+                          # q6-a2-cap-osr), and its complement
+                          "nph1d", "nph1db",
                           # the auto-zeroed quantiser input
                           "nqz",
                           # nets the devices below touch that this list
@@ -1483,6 +1548,11 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
         "clock_phase_aliases": {"nph1": "clk", "nph2": "nclkb",
                                 "nph1b": "nclkb", "nph2b": "clk",
                                 "nckdac": "nph1", "nckdacb": "nph1b",
+                                # the input/inter-stage branches' DELAYED
+                                # sampling phase: `nph1` inverted twice, so it
+                                # IS the sampling phase, a few gate delays
+                                # late (bottom-plate sampling)
+                                "nph1d": "nph1", "nph1db": "nph1b",
                                 # the quantiser's strobe chain: `nqd1` is the
                                 # clock inverted twice off `nclkb`, `nqstb`
                                 # once more — declared beside the devices that
@@ -2201,6 +2271,38 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
             {"name": "mn_ckdacb", "role": "nmos", "function":
              "complement of the feedback-branch sampling clock, pull-down",
              "nets": ["nckdacb", "nckdac", "vss", "vss"], "w": 4.0, "l": 0.5},
+            # ── BOTTOM-PLATE SAMPLING FOR THE INPUT AND INTER-STAGE BRANCHES
+            # (q6-a2-cap-osr, verifier's B1'). MEASURED on the emitted netlist
+            # (tt, 27C, four DC inputs, per-clock regression of the first
+            # integrator): the DAC branch realises its capacitor ratio (0.2494
+            # against 0.2499) but the INPUT branch reads 0.2686 against the
+            # SAME ratio, +7.5 %, with a 7.0 mV/clock offset. The input
+            # branch's source switch (`mn_smp{i}`) and its upper-plate switch
+            # (`mn_cstc{i}`) both opened on `nph1`, so the source switch's
+            # charge — which depends on the SIGNAL it was carrying — was
+            # trapped on the sampling capacitor. The DAC branch's source
+            # switch runs on `nckdac`, gated later through `nndac`, so its
+            # upper plate is already floating when it opens, and it does not.
+            # The standard remedy, and the one the DAC branch already has:
+            # open the upper-plate (`cstc`) switch FIRST, then the source.
+            # `nph1d` is `nph1` inverted twice — the same phase, a few gate
+            # delays late — and `nph1db` its complement; the source switch
+            # and its return-to-vcm partner run on them.
+            {"name": "mp_ph1db", "role": "pmos", "function":
+             "delayed sampling phase, first inverter (pull-up): `nph1db` is "
+             "`nph1` inverted",
+             "nets": ["nph1db", "nph1", "vdd", "vdd"], "w": 4.0, "l": 0.5},
+            {"name": "mn_ph1db", "role": "nmos", "function":
+             "delayed sampling phase, first inverter (pull-down)",
+             "nets": ["nph1db", "nph1", "vss", "vss"], "w": 2.0, "l": 0.5},
+            {"name": "mp_ph1d", "role": "pmos", "function":
+             "delayed sampling phase, second inverter (pull-up): `nph1d` is "
+             "`nph1` two gate delays late, so a switch it drives opens after "
+             "the upper-plate switch on `nph1` has",
+             "nets": ["nph1d", "nph1db", "vdd", "vdd"], "w": 4.0, "l": 0.5},
+            {"name": "mn_ph1d", "role": "nmos", "function":
+             "delayed sampling phase, second inverter (pull-down)",
+             "nets": ["nph1d", "nph1db", "vss", "vss"], "w": 2.0, "l": 0.5},
             # ── WHAT PHASE THE GATE ABOVE CARRIES ─────────────────────────
             # declared beside the devices that build it, and consumed by
             # `sc_branch_polarities` — see `CLOCK_PHASE_ALIASES_KEY`. With the
@@ -2274,6 +2376,25 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
              "nets": ["ndacb", "bit_out", "vrefn", "vdd"], "w": 8.0,
              "l": 0.15},
         ],
+        # WHICH NETS AND DEVICES REALISE THE LOOP'S COEFFICIENTS, so the loop
+        # can be MEASURED on the emitted netlist (`analog_sc_loop_probe`) and
+        # re-sized from the measurement (`LOOP_PROBE_KEY`). Names only, all of
+        # them this entry's own; no program carries them.
+        "loop_probe": {
+            "input_port": "vin",
+            "clock_port": "clk",
+            "reference_ports": ["vrefp", "vrefn"],
+            "common_mode_net": "vcm",
+            "feedback_net": "ndac",
+            "reset_net": "nall",
+            "input_span_spec": "vindiff",
+            "coefficient_devices": {"sampling": "cs{i}",
+                                    "integrating": "ci{i}",
+                                    "feedback": "cf{i}"},
+            # devices whose capacitance is a declared multiple of the
+            # integrating capacitor, and the constant naming the multiple
+            "follows_integrating": {"cc{i}": "miller_fraction_of_load"},
+        },
         "spec_knobs": [],
         "device_param_exprs": [
             {"device": "caz", "param": "l",
@@ -2705,28 +2826,35 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
                 # n-channel pass device cannot carry a level near the
                 # positive rail, and every node these switches move sits
                 # at or above the common mode.
+                # BOTTOM-PLATE SAMPLING (q6-a2-cap-osr): the source switch
+                # and its return-to-vcm partner run on the DELAYED phase
+                # pair `nph1d`/`nph1db`, exactly as the DAC branch's run on
+                # `nckdac`/`nckdacb`, so the upper plate (`mn_cstc{i}`, on
+                # `nph1`) is already floating when the source switch opens.
+                # See `mp_ph1db` for the measurement.
                 {"name": "mn_smp{i}", "role": "nmos", "function":
                  "stage {i} SAMPLING switch (n-side): on the clock-high "
                  "phase the stage input is sampled onto the bottom plate "
-                 "of cs{i}",
-                 "nets": ["nsmp{i}", "nph1", "{in}", "vss"],
+                 "of cs{i} — on the DELAYED phase, so it opens after the "
+                 "upper plate has",
+                 "nets": ["nsmp{i}", "nph1d", "{in}", "vss"],
                  "w": 2.0, "l": 0.15},
                 {"name": "mp_smp{i}", "role": "pmos", "function":
                  "stage {i} SAMPLING switch (p-side of the transmission "
                  "gate)",
-                 "nets": ["nsmp{i}", "nph1b", "{in}", "vdd"],
+                 "nets": ["nsmp{i}", "nph1db", "{in}", "vdd"],
                  "w": 4.0, "l": 0.15},
                 {"name": "mn_smpb{i}", "role": "nmos", "function":
-                 "stage {i} CHARGE-TRANSFER switch (n-side): on the "
-                 "clock-low phase the bottom plate is driven to the "
-                 "common-mode reference and the sampled charge moves "
-                 "into ci{i}",
-                 "nets": ["nsmp{i}", "nph2", "vcm", "vss"],
+                 "stage {i} CHARGE-TRANSFER switch (n-side): outside the "
+                 "delayed sampling phase the bottom plate is driven to the "
+                 "common-mode reference, so on the charge-transfer phase "
+                 "the sampled charge moves into ci{i}",
+                 "nets": ["nsmp{i}", "nph1db", "vcm", "vss"],
                  "w": 2.0, "l": 0.15},
                 {"name": "mp_smpb{i}", "role": "pmos", "function":
                  "stage {i} CHARGE-TRANSFER switch (p-side of the "
                  "transmission gate)",
-                 "nets": ["nsmp{i}", "nph2b", "vcm", "vdd"],
+                 "nets": ["nsmp{i}", "nph1d", "vcm", "vdd"],
                  "w": 4.0, "l": 0.15},
                 {"name": "cs{i}", "role": "cap", "function":
                  "stage {i} SAMPLING capacitor — the absolute value is the "
@@ -3762,6 +3890,254 @@ def bound_spec_units(project: Path, block: str) -> Dict[str, str]:
     return out
 
 
+#: The entry/IR key declaring how a switched-capacitor loop is realised and
+#: probed. See `analog_sc_loop_probe` and `loop_swing_and_sizing`.
+LOOP_PROBE_KEY = "loop_probe"
+#: The per-block artefact the probe writes and this emitter reads back.
+LOOP_MEASUREMENT_ARTEFACT = "loop_coefficients.json"
+
+
+def loop_structure_fingerprint(ir: Dict[str, Any]) -> str:
+    """sha256 over every NON-capacitor device's name, role and nets — the
+    switch network a loop measurement is a property of. Capacitor sizes are
+    excluded on purpose: they are exactly what re-sizing from a measurement
+    changes, and a measured gain/ratio is a property of the switches."""
+    rows = sorted((str(d.get("name")), str(d.get("role")),
+                   [str(n) for n in d.get("nets") or []])
+                  for d in ir.get("devices") or []
+                  if d.get("role") != CAP_ROLE)
+    return hashlib.sha256(json.dumps(rows).encode()).hexdigest()
+
+
+def read_loop_measurement(project: Path, block: str
+                          ) -> Optional[Dict[str, Any]]:
+    """The probe's record for this block, or None."""
+    p = project / "phase3" / "analog" / block / LOOP_MEASUREMENT_ARTEFACT
+    try:
+        rec = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def loop_swing_and_sizing(lib: Dict[str, Any],
+                          stage_rec: Optional[Dict[str, Any]],
+                          choice: Optional[Dict[str, Any]],
+                          declared: Dict[str, float],
+                          constants: Dict[str, Any],
+                          measured_loop: Optional[Dict[str, Any]],
+                          structure_sha: str,
+                          ) -> Optional[Dict[str, Any]]:
+    """The loop's SWING record and the per-stage capacitor multipliers that
+    realise it, or None for an entry that declares no `loop_probe`.
+
+    q6-a2-cap-osr, with the verifier's corrections:
+
+    * B1' — the coefficients come from a MEASUREMENT of the emitted netlist
+      (`analog_sc_loop_probe`), taken on the same switch network
+      (`loop_structure_fingerprint`). With none, the capacitor ratios are the
+      disclosed starting point (`coefficient_source: cap_ratio_unmeasured`)
+      and the record says the swing is unvalidated. A measured coefficient
+      further than `COEFFICIENT_RATIO_TOLERANCE` from its ratio is used AS
+      MEASURED and flagged `ratio_not_realised` — the fix for that is in the
+      circuit, and sizing from the ratio would hide it.
+    * B2 — evaluated at the DECLARED input span and the DECLARED WORST CORNER
+      (`declared_input_span`, `declared_swing_limit`), not at the plugin's
+      test tone and target supply.
+    * B4'/B3' — `analog_incremental_resolution.swing_design`: attenuation
+      with margin below the stable input limit, then diagonal scaling to
+      x_lim * (1 - m), with the bitstream-identity assertion.
+
+    The multipliers size every stage's integrating and feedback capacitor
+    from the SCALED coefficients against the kT/C sampling capacitor Cs,
+    which stays where the noise budget put it:
+
+        stage 1   ci = g_in * Cs / b1'      cf = a1' * ci / g_dac
+        stage i   ci = g_in * Cs / c_i'     cf = a_i' * ci / g_dac
+
+    where g = measured coefficient / capacitor ratio (1 when unmeasured), so
+    the DRAWN ratios realise the scaled loop through the switch network the
+    measurement saw.
+    """
+    decl = lib.get(LOOP_PROBE_KEY)
+    if not isinstance(decl, dict) or not stage_rec:
+        return None
+    casc = [g for g in [stage_rec] + list(stage_rec.get("groups") or [])
+            if isinstance(g, dict) and g.get("role") == "cascade"]
+    if not casc or "window_clocks" not in constants:
+        return None
+    coeffs = [float(x) for x in casc[0].get("coefficients") or []]
+    order = len(coeffs)
+    window = int(constants["window_clocks"])
+    delay = int(constants.get(_res_stim_delay_key(), 1))
+    cands = [int(r["window_clocks"]) for r in (choice or {}).get(
+        "candidates") or [] if "window_clocks" in r]
+    ref_window = min(cands) if cands else max(2, window // 8)
+    g_in, g_dac, off = [1.0] * order, [1.0] * order, [0.0] * order
+    source, stale = "cap_ratio_unmeasured", None
+    meas_rows: List[Dict[str, Any]] = []
+    if isinstance(measured_loop, dict):
+        rows = [r for r in measured_loop.get("stages") or []
+                if isinstance(r, dict)]
+        if measured_loop.get("structure_sha256") != structure_sha:
+            stale = ("the measurement was taken on a different switch "
+                     "network (structure_sha256 differs), so it describes "
+                     "another circuit and is not used")
+        elif measured_loop.get("status") != "MEASURED" or len(rows) != order \
+                or any(r.get("status") != "MEASURED"
+                       or not isinstance(r.get("gain_input_over_ratio"),
+                                         (int, float))
+                       or not isinstance(r.get("gain_dac_over_ratio"),
+                                         (int, float)) for r in rows):
+            stale = "the measurement is incomplete (a stage NOT_MEASURED)"
+        else:
+            rows = sorted(rows, key=lambda r: int(r["stage"]))
+            g_in = [float(r["gain_input_over_ratio"]) for r in rows]
+            g_dac = [float(r["gain_dac_over_ratio"]) for r in rows]
+            off = [float(r.get("offset_state_per_clock") or 0.0)
+                   for r in rows]
+            source = "measured"
+            meas_rows = rows
+    a = [g_dac[i] * coeffs[i] for i in range(order)]
+    c = [0.0] + [g_in[i] * coeffs[i] for i in range(1, order)]
+    gain_ratio = g_in[0] / g_dac[0]
+    offset_u = abs(off[0]) / a[0] if a[0] else 0.0
+    u_decl = _res.declared_input_span(declared,
+                                      str(decl.get("input_span_spec")
+                                          or "vindiff"))
+    x_lim = _res.declared_swing_limit(constants, declared)
+    rec: Dict[str, Any] = {
+        "coefficient_source": source,
+        "measurement_rejected": stale,
+        "structure_sha256": structure_sha,
+        "nominal_coefficients": coeffs,
+        "gain_input_over_ratio": g_in, "gain_dac_over_ratio": g_dac,
+        "offset_state_per_clock": off,
+        "ratio_not_realised": [
+            i + 1 for i in range(order)
+            if max(abs(g_in[i] - 1.0), abs(g_dac[i] - 1.0))
+            > _res.COEFFICIENT_RATIO_TOLERANCE],
+        "ratio_tolerance": _res.COEFFICIENT_RATIO_TOLERANCE,
+    }
+    if meas_rows:
+        rec["measured"] = [{k: r.get(k) for k in (
+            "stage", "input_coefficient", "dac_coefficient",
+            "offset_v_per_clock", "cap_ratio_input", "cap_ratio_dac",
+            "rms_residual_v", "n")} for r in meas_rows]
+    if u_decl is None or x_lim is None:
+        rec.update({"feasible": False,
+                    "reason": ("the declared input span or the worst-corner "
+                               "swing limit is not bound, so there is no "
+                               "declared condition to size the swing at")})
+        return rec
+    sw = _res.swing_design(window, ref_window, delay, a, c, gain_ratio,
+                           offset_u, u_decl, x_lim)
+    rec.update(sw)
+    if not sw.get("feasible") or not sw.get("bitstream_identical"):
+        return rec
+    scl = sw["coefficients_scaled"]
+    mult: Dict[int, Dict[str, float]] = {}
+    for i in range(order):
+        cin = scl["b1"] if i == 0 else scl["c"][i]
+        m_ci = g_in[i] / cin
+        mult[i + 1] = {"ci_over_cs": m_ci,
+                       "cf_over_cs": m_ci * scl["a"][i] / g_dac[i]}
+    rec["capacitor_multipliers"] = {str(k): v for k, v in mult.items()}
+    # B5: ONE swing record, and the N-invariance it rests on, shown per
+    # candidate rather than asserted.
+    per = {}
+    for n in sorted(set(cands + [window])):
+        pk = _res.loop_peaks(n, scl["b1"] / sw["b1_over_a1"], scl["a"],
+                             scl["c"], delay, sw["u_eval"])
+        per[str(n)] = pk["peak_per_stage"]
+    rec["peaks_after_per_candidate_window"] = per
+    return rec
+
+
+def apply_loop_sizing(param_exprs: List[Dict[str, Any]],
+                      decl: Dict[str, Any], swing: Dict[str, Any]
+                      ) -> List[Dict[str, Any]]:
+    """Rewrite each stage's integrating / feedback (and integrating-following)
+    capacitor expressions as multiples of the kT/C sampling capacitor, from
+    `loop_swing_and_sizing`'s multipliers. The sampling capacitor itself is
+    not touched. Returns a new list."""
+    mult = swing.get("capacitor_multipliers") or {}
+    dev = decl.get("coefficient_devices") or {}
+    follow = decl.get("follows_integrating") or {}
+    out = []
+    for e in param_exprs:
+        st = e.get("stage")
+        m = mult.get(str(st)) if st is not None else None
+        if m is None or e.get("param") != "l":
+            out.append(e)
+            continue
+        name = str(e.get("device"))
+        ne = dict(e)
+        if name == str(dev.get("integrating", "")).format(i=st):
+            ff = f"({SAMPLING_CAP_FF_EXPR}) * {m['ci_over_cs']!r}"
+            why = "integrating capacitor"
+        elif name == str(dev.get("feedback", "")).format(i=st):
+            ff = f"({SAMPLING_CAP_FF_EXPR}) * {m['cf_over_cs']!r}"
+            why = "feedback (DAC) capacitor"
+        else:
+            hit = [k for k in follow if str(k).format(i=st) == name]
+            if not hit:
+                out.append(e)
+                continue
+            ff = (f"{follow[hit[0]]} * ({SAMPLING_CAP_FF_EXPR}) * "
+                  f"{m['ci_over_cs']!r}")
+            why = "capacitor declared as a multiple of the integrating one"
+        ne["expr"] = cap_l_expr(ff)
+        ne["ff_expr"] = ff
+        ne["rationale"] = (
+            f"{why} sized from the SCALED loop coefficients "
+            f"(q6-a2-cap-osr: attenuation and diagonal state scaling at the "
+            f"declared span and worst corner, `loop_swing` in this IR), as a "
+            f"multiple of the kT/C sampling capacitor")
+        out.append(ne)
+    return out
+
+
+#: The IR key carrying the spec values THIS emission applied on top of the
+#: declared ones — today only the graded-range choice (`GRADED_CHOICE_KEY`)
+#: writes one. Absent on every IR that applied nothing, so such an IR renders
+#: exactly as it always did.
+EFFECTIVE_SPEC_KEY = "effective_spec_values"
+
+
+def rendering_env(measured: Optional[Dict[str, Any]],
+                  constants: Optional[Dict[str, Any]],
+                  knobs: Optional[Dict[str, Any]],
+                  spec_values: Optional[Dict[str, Any]],
+                  effective: Optional[Dict[str, Any]] = None
+                  ) -> Dict[str, Any]:
+    """THE one environment a `device_param_exprs` entry is resolved in, by
+    A2's own passes and by `analog_a3_netlist_emit._resolve_params` alike.
+
+    Order: measured process constants -> library constants -> knobs ->
+    DECLARED spec values -> EFFECTIVE spec values (what this emission chose
+    inside a declared range).
+
+    WHY IT IS ONE FUNCTION (q6-a2-cap-osr). A2 used to overwrite the declared
+    `osr` with the graded-range choice (512) and split capacitors in that
+    environment, while A3 rendered the same expressions with the declared
+    `osr` (256) applied LAST. MEASURED on u_hawaii_adc delta_sigma: `caz` was
+    17.23u at A2 (so not split) and 34.51u at A3; `c_vcm` was split at A2 into
+    3 x 22.99u and A3 rendered each unit at 46.03u. Those are exactly the four
+    capacitors A5 refused as above the gencell maximum. Two copies of the
+    seeding order were the defect; one function is the fix."""
+    env: Dict[str, Any] = {}
+    env.update({k: v for k, v in (measured or {}).items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)})
+    env.update(constants or {})
+    env.update({k: v for k, v in (knobs or {}).items()
+                if isinstance(v, (int, float))})
+    env.update(spec_values or {})
+    env.update({k: v for k, v in (effective or {}).items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool)})
+    return env
+
+
 def admission_env(lib: Dict[str, Any], spec_values: Dict[str, float],
                   measured: Dict[str, float]) -> Dict[str, float]:
     """The environment an entry's OWN expressions resolve in, seeded exactly
@@ -3782,6 +4158,9 @@ def admission_env(lib: Dict[str, Any], spec_values: Dict[str, float],
                 if isinstance(v, (int, float)) and not isinstance(v, bool)})
     env.update({k: float(v) for k, v in (lib.get("constants") or {}).items()
                 if isinstance(v, (int, float)) and not isinstance(v, bool)})
+    # DERIVED averaging constant (see `SAMPLING_CAP_FF_EXPR`), at the window
+    # the declared spec would give — the same derivation `build_ir` publishes.
+    env.update(declared_averaging_env(lib, spec_values))
     env.update(spec_values)
     return env
 
@@ -4900,11 +5279,42 @@ def capacitance_ff(w_um: float, l_um: float, carea: float, cperi: float
     return carea * w_um * l_um + 2.0 * cperi * (w_um + l_um)
 
 
+def square_unit_side(target_ff: float, carea: float, cperi: float
+                     ) -> Optional[float]:
+    """The side `s` of the SQUARE device that realises `target_ff` on the
+    PDK's own two-term model, `carea*s**2 + 4*cperi*s = C`, or None when the
+    constants define no positive root.
+
+    The re-solve for a capacitor that comes out SHORTER than the drawable
+    minimum at the library width: narrowing it to a square raises its length
+    at the same capacitance, and a square is the shape a matched unit cell
+    wants anyway."""
+    if carea <= 0 or target_ff <= 0:
+        return None
+    disc = 16.0 * cperi * cperi + 4.0 * carea * target_ff
+    s = (math.sqrt(disc) - 4.0 * cperi) / (2.0 * carea)
+    return s if s > 0 else None
+
+
+def square_unit_side_expr(ff_expr: str, carea: float, cperi: float) -> str:
+    """`square_unit_side` as an expression, so a device re-solved to a square
+    still names the budget that sized it."""
+    at, bt = repr(float(carea)), repr(float(cperi))
+    return (f"((16 * {bt} * {bt} + 4 * {at} * ({ff_expr})) ** 0.5 "
+            f"- 4 * {bt}) / (2 * {at})")
+
+
+#: The two ends of a drawable capacitor. Refusal text names WHICH, because a
+#: device below the floor and one above the ceiling need opposite repairs.
+BELOW_MINIMUM = "below_minimum"
+
+
 def unit_capacitor_split(w_um: float, l_um: float, *,
                          max_l: Optional[float], max_w: Optional[float],
                          min_l: Optional[float], carea: float, cperi: float,
                          tolerance: float = CAP_SPLIT_TOLERANCE,
-                         limit: int = 4096
+                         limit: int = 4096,
+                         max_area: Optional[float] = None,
                          ) -> Tuple[Optional[int], Optional[float], str]:
     """`(n, unit_length_um, why)` for one capacitor.
 
@@ -4912,13 +5322,34 @@ def unit_capacitor_split(w_um: float, l_um: float, *,
     `tolerance` — the caller REFUSES BY NAME on that; it never draws the
     nearest thing it can. `(1, l_um, "")` when the device is already legal, so
     a design that needs no split takes a path that changes nothing.
+
+    BOTH ENDS ARE CHECKED (q6-a2-cap-osr). The single-device path used to
+    return `(1, l_um, "")` for anything at or under the maximum, so a length
+    BELOW the drawable minimum left here as "legal" and reached a gencell that
+    clamps it UP and draws a larger capacitor than the netlist asks for.
+    MEASURED on u_hawaii_adc delta_sigma at the ratio A2 chooses: cs/cf come
+    out at 1.675u against a gencell minimum of 2.0u. That path now returns
+    `(1, None, BELOW_MINIMUM ...)`, and the caller re-solves the device as a
+    square (`square_unit_side`) or refuses it by name.
+
+    `max_area` is the foundry's per-device AREA ceiling where the family
+    states one; it caps the unit length at `max_area / w` exactly the way the
+    side-length ceiling does.
     """
     if max_w is not None and w_um > max_w + 1e-12:
         return None, None, (
             f"drawn width {w_um}u is above the PDK maximum {max_w}u and this "
             f"split divides LENGTH only; a width above the maximum is a "
             f"device this library cannot realise")
+    if max_area is not None and w_um > 0:
+        area_l = float(max_area) / w_um
+        max_l = area_l if max_l is None else min(float(max_l), area_l)
     if max_l is None or l_um <= max_l + 1e-12:
+        if min_l is not None and l_um < min_l - 1e-12:
+            return 1, None, (
+                f"{BELOW_MINIMUM}: drawn length {l_um:.6g}u at width {w_um}u "
+                f"is below the drawable minimum {min_l}u; the gencell would "
+                f"clamp it up and draw a larger capacitor than asked for")
         return 1, l_um, ""
     target = capacitance_ff(w_um, l_um, carea, cperi)
     denom = carea * w_um + 2.0 * cperi
@@ -5038,7 +5469,14 @@ def split_oversize_capacitors(devices: List[Dict[str, Any]],
     """
     lmax = _minima.max_length_um(role_maxima, CAP_ROLE)
     wmax = _minima.max_width_um(role_maxima, CAP_ROLE)
-    lmin = _minima.min_width_um(role_minima, CAP_ROLE)
+    # The LENGTH floor, falling back to the width floor where a family states
+    # one number for both sides. It used to read the width key only — which on
+    # the one family that states a cap maximum carried no cap role at all, so
+    # the floor this split passes down was always None there.
+    lmin = _minima.min_length_um(role_minima, CAP_ROLE)
+    amax = _minima.max_area_um2(role_maxima, CAP_ROLE)
+    bound_label = ((role_maxima.get(CAP_ROLE) or {}).get("bound_label")
+                   if isinstance(role_maxima.get(CAP_ROLE), dict) else None)
     carea = measured.get("cap_area_ff_per_um2")
     cperi = measured.get("cap_perim_ff_per_um")
     if lmax is None:
@@ -5149,10 +5587,72 @@ def split_oversize_capacitors(devices: List[Dict[str, Any]],
             continue
         n, lu, why = unit_capacitor_split(
             float(w), l_um, max_l=lmax, max_w=wmax, min_l=lmin,
-            carea=float(carea), cperi=cperi)
+            carea=float(carea), cperi=cperi, max_area=amax)
         if n is None:
             refusals.append(f"{d.get('name')}: {why}")
             out_devs.append(d)
+            continue
+        if n == 1 and lu is None:
+            # BELOW THE DRAWABLE MINIMUM at the library width. Re-solved as a
+            # SQUARE of the same capacitance: narrowing the device lengthens
+            # it. Legal only if the square's side sits inside both ends;
+            # otherwise refused by name — never handed to a gencell that
+            # would clamp it.
+            target = capacitance_ff(float(w), l_um, float(carea), cperi)
+            s = square_unit_side(target, float(carea), cperi)
+            smax = lmax
+            if amax is not None:
+                smax = min(float(smax), math.sqrt(float(amax)))
+            if s is None or (lmin is not None and s < lmin - 1e-12) or \
+                    (smax is not None and s > float(smax) + 1e-12):
+                refusals.append(
+                    f"{d.get('name')}: {why}; re-solved as a square of the "
+                    f"same {target:.6g}fF its side is "
+                    + (f"{s:.6g}u" if s is not None else "undefined")
+                    + f", outside the drawable [{lmin}, {smax}]u "
+                    f"({bound_label or 'PDK bound'}) — no single legal device "
+                    f"realises it, and a smaller capacitor is a library "
+                    f"choice this pass will not make")
+                out_devs.append(d)
+                continue
+            sq = dict(d)
+            sq["w"] = s
+            sq["l"] = s
+            out_devs.append(sq)
+            if expr is not None:
+                # The capacitance the ORIGINAL length realises at the
+                # library width, written from the (already stage-formatted)
+                # length expression itself — `ff_expr` rows are not
+                # formatted per stage, so they are not read here.
+                ff = (f"({float(carea)!r} * {float(w)!r} * ({expr['expr']})"
+                      f" + 2 * {cperi!r} * ({float(w)!r} + "
+                      f"({expr['expr']})))")
+                s_expr = square_unit_side_expr(str(ff), float(carea), cperi)
+                out_exprs = [e for e in out_exprs if e is not expr]
+                for prm in ("w", "l"):
+                    e = dict(expr)
+                    e["param"] = prm
+                    e["expr"] = s_expr
+                    e["rationale"] = (
+                        "re-solved as a square: at the library width this "
+                        "capacitor's length falls below the drawable minimum, "
+                        "so its side is solved from the PDK's own area and "
+                        "perimeter capacitance at the same value"
+                        + (f"; {expr.get('rationale')}"
+                           if expr.get("rationale") else ""))
+                    out_exprs.append(e)
+            records.append({
+                "device": d.get("name"), "role": CAP_ROLE, "units": 1,
+                "unit_w_um": s, "unit_l_um": s, "library_l_um": l_um,
+                "library_w_um": float(w), "length_source": l_src,
+                "resolution": "square_resolve_below_minimum",
+                "pdk_min_l_um": lmin, "pdk_max_l_um": lmax,
+                "pdk_max_area_um2": amax, "bound_label": bound_label,
+                "target_ff": target,
+                "realised_ff": capacitance_ff(s, s, float(carea), cperi),
+                "cap_area_ff_per_um2": float(carea),
+                "cap_perim_ff_per_um": cperi,
+            })
             continue
         if n == 1:
             out_devs.append(d)
@@ -5216,6 +5716,8 @@ def split_oversize_capacitors(devices: List[Dict[str, Any]],
             # to see that they were.
             "length_source": l_src,
             "pdk_max_l_um": lmax, "pdk_max_w_um": wmax,
+            "pdk_min_l_um": lmin, "pdk_max_area_um2": amax,
+            "bound_label": bound_label,
             "target_ff": target, "realised_ff": got,
             "relative_value_error": (abs(got - target) / target
                                      if target else None),
@@ -5385,6 +5887,7 @@ def build_ir(block: str, btype: str, entry: Dict[str, Any],
              measured_provenance: Optional[Dict[str, Any]] = None,
              role_maxima: Optional[Dict[str, Any]] = None,
              maxima_source: Optional[str] = None,
+             measured_loop: Optional[Dict[str, Any]] = None,
              ) -> Dict[str, Any]:
     # ── WHAT THE LOOP'S FEEDBACK DELAY IS, DERIVED FROM THE BRANCH ───────
     # It used to be a typed constant, and a typed constant about the emitted
@@ -5399,12 +5902,20 @@ def build_ir(block: str, btype: str, entry: Dict[str, Any],
     # - 0.00005*(ndac[n]-vcm)` — the shipped delaying branch carries
     # `ndac[n-1]`, and nothing on `ndac[n]`.
     spec_values = dict(spec_values)
+    # The DECLARED values, kept apart from what this emission applies on top
+    # of them. Everything this pass derives (knobs, stages, the record) runs
+    # in the effective set; what is PUBLISHED as the rendering environment is
+    # the declared set plus `effective_spec_values`, applied in that order by
+    # `rendering_env` here and in A3 alike.
+    declared_spec_values = dict(spec_values)
+    effective_spec_values: Dict[str, float] = {}
     _fb_delay = derived_feedback_delay(lib)
     _choice = (resolve_graded_range_choice(lib, spec_values, _fb_delay)
                if _fb_delay is not None else None)
     if _choice and _choice.get("applied") and _choice.get("chosen"):
-        spec_values[str(_choice["free_spec"])] = float(
+        effective_spec_values[str(_choice["free_spec"])] = float(
             _choice["chosen"]["window_clocks"])
+        spec_values.update(effective_spec_values)
 
     knobs: Dict[str, Any] = {}
     knob_sources: Dict[str, str] = {}
@@ -5444,6 +5955,50 @@ def build_ir(block: str, btype: str, entry: Dict[str, Any],
                   if stage_rec else []):
         if isinstance(_grec, dict) and _grec.get("window_clocks"):
             constants["window_clocks"] = float(_grec["window_clocks"])
+    # THE AVERAGING THE DECODE REALLY DOES, published beside the window it is
+    # computed for (q6-a2-cap-osr; see `SAMPLING_CAP_FF_EXPR`). The loop order
+    # and coefficient are the cascade's own, so the weights are the ones the
+    # decimator uses.
+    if "window_clocks" in constants:
+        _casc = [g for g in ([stage_rec] + list(
+            (stage_rec or {}).get("groups") or []) if stage_rec else [])
+            if isinstance(g, dict) and g.get("role") == "cascade"]
+        if _casc:
+            _neff = averaging_n_eff(int(constants["window_clocks"]),
+                                    int(_casc[0]["stages"]),
+                                    float((_casc[0].get("coefficients")
+                                           or [1.0])[0]))
+            if _neff is not None:
+                constants[N_EFF_CONSTANT] = _neff
+    # THE SWING MODEL AND THE SIZING IT IMPLIES (q6-a2-cap-osr). Computed from
+    # the loop as MEASURED on the emitted netlist when a measurement of this
+    # switch network exists, and from the capacitor ratios (disclosed as
+    # unmeasured) when it does not.
+    _loop_decl = lib.get(LOOP_PROBE_KEY)
+    loop_swing = None
+    if isinstance(_loop_decl, dict):
+        _struct = loop_structure_fingerprint({"devices": devices})
+        loop_swing = loop_swing_and_sizing(
+            lib, stage_rec, _choice, declared_spec_values, constants,
+            measured_loop, _struct)
+        if loop_swing and loop_swing.get("capacitor_multipliers"):
+            param_exprs = apply_loop_sizing(param_exprs, _loop_decl,
+                                            loop_swing)
+        if _choice and _choice.get("applied") and loop_swing:
+            # B5 — the per-candidate `over_swing_budget` rows describe the
+            # UNSCALED, cap-ratio loop at the plugin's test tone against the
+            # target-corner budget; they are kept as that screen. What the
+            # choice is judged on is THIS record: the scaled loop at the
+            # declared span and worst corner, N-invariant by construction.
+            _choice["swing"] = {
+                "record": "loop_swing",
+                "within_x_lim": loop_swing.get("within_x_lim"),
+                "x_lim": loop_swing.get("x_lim"),
+                "coefficient_source": loop_swing.get("coefficient_source"),
+            }
+            if loop_swing.get("feasible"):
+                _choice["chosen_over_swing_budget"] = not bool(
+                    loop_swing.get("within_x_lim"))
     # THE TRANSIENT RECORD, derived from EVERY declared constraint. Published
     # as a constant for the same reason `window_clocks` is: the expression
     # grammar has no `max` and no way to reach the graded spec set, so nothing
@@ -5481,14 +6036,8 @@ def build_ir(block: str, btype: str, entry: Dict[str, Any],
     # expressions in, seeded in the same order, so the length this pass reads
     # is the length that pass will render.
     role_maxima = dict(role_maxima or {})
-    split_env: Dict[str, Any] = {}
-    split_env.update({k: v for k, v in (measured_params or {}).items()
-                      if isinstance(v, (int, float))
-                      and not isinstance(v, bool)})
-    split_env.update(constants)
-    split_env.update({k: v for k, v in knobs.items()
-                      if isinstance(v, (int, float))})
-    split_env.update(spec_values)
+    split_env = rendering_env(measured_params, constants, knobs,
+                              declared_spec_values, effective_spec_values)
     devices, param_exprs, splits, split_refusals = split_oversize_capacitors(
         devices, param_exprs, split_env, role_maxima, role_minima,
         dict(measured_params or {}))
@@ -5523,6 +6072,11 @@ def build_ir(block: str, btype: str, entry: Dict[str, Any],
         # EVERY candidate's measurement — so a reader checks the choice
         # instead of re-deriving it. None for an entry that declares none.
         "graded_range_choice": _choice,
+        # None for an entry that declares no `loop_probe`. See
+        # `loop_swing_and_sizing`.
+        "loop_swing": loop_swing,
+        "loop_probe": (dict(_loop_decl) if isinstance(_loop_decl, dict)
+                       else None),
         "devices": devices,
         "spec_knobs": [dict(k) for k in lib.get("spec_knobs", [])],
         "knobs": knobs,
@@ -5708,6 +6262,20 @@ def build_ir(block: str, btype: str, entry: Dict[str, Any],
                    if _declared else
                    "topology library (the design declares no interface)"),
     }
+    # WHAT THIS EMISSION APPLIED ON TOP OF THE DECLARED SPEC, published so A3
+    # renders in the environment A2 sized in (see `rendering_env`). Written
+    # only when something was applied: an IR without it renders exactly as it
+    # always did.
+    if effective_spec_values:
+        ir[EFFECTIVE_SPEC_KEY] = dict(effective_spec_values)
+        ir[EFFECTIVE_SPEC_KEY + "_source"] = {
+            "record": GRADED_CHOICE_KEY,
+            "declared": {k: declared_spec_values.get(k)
+                         for k in effective_spec_values},
+            "rule": ("applied after the declared spec values by "
+                     "analog_a2_topology_emit.rendering_env, in A2's split "
+                     "and in A3's _resolve_params alike"),
+        }
     return ir
 
 
@@ -6173,7 +6741,8 @@ def emit_for_block(project: Path, entry: Dict[str, Any],
         ir = build_ir(name, btype, entry, lib, spec_values, spec_path, project,
                       fam, params, role_minima, _minima.minima_source(pdk),
                       measured, measured_prov,
-                      role_maxima, _minima.maxima_source(pdk))
+                      role_maxima, _minima.maxima_source(pdk),
+                      measured_loop=read_loop_measurement(project, name))
     except _record.RecordNotDerivable as exc:
         # Same shape as an admission refusal, and for the same reason: a deck
         # whose record this declaration cannot size must not reach disk. The

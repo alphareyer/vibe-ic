@@ -299,11 +299,15 @@ def over_maxima(devs: Sequence[dict], facts: PdkFacts) -> List[dict]:
             out.append({
                 "device": dev["name"], "model": dev["model"], "parameter": key,
                 "requested_um": got, "pdk_maximum_um": cap, "source": src,
+                # q6-a2-cap-osr: the bound is the Magic GENCELL's, which is
+                # what this emitter draws through — on ihp-sg13g2 the foundry
+                # states no side-length maximum at all (only MIM.g, an area),
+                # so "PDK maximum" named the wrong authority.
                 "detail": (f"{dev['name']} ({dev['model']}): {key}={got}u is "
-                           f"above the PDK maximum {key}max={cap}u ({src}). "
-                           f"The gencell does not refuse it — it CLAMPS to "
-                           f"{cap}u and draws, so the drawn device is not the "
-                           f"one this netlist asks for."),
+                           f"above the Magic gencell maximum {key}max={cap}u "
+                           f"({src}). The gencell does not refuse it — it "
+                           f"CLAMPS to {cap}u and draws, so the drawn device "
+                           f"is not the one this netlist asks for."),
             })
     return out
 
