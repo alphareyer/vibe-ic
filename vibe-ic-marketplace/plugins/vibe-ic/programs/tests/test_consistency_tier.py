@@ -149,6 +149,36 @@ def test_the_landing_exports_the_variable_exactly_at_full(answer, inherited, exp
         subprocess.run(["rm", "-rf", "--", str(d)], check=False)
 
 
+def test_tiers_are_the_runners_own_answer():
+    """`_tiers` reports what run_tests.sh --list-tiers prints, nothing else."""
+    tiers = ct._tiers()
+    assert "programs/tests" in tiers
+    assert all((_PLUGIN / t).is_dir() for t in tiers), tiers
+
+
+def test_tiers_refuses_a_runner_that_does_not_answer(monkeypatch, tmp_path):
+    (tmp_path / "programs").mkdir()
+    (tmp_path / "run_tests.sh").write_text(
+        "#!/bin/bash\n# --list-tiers\necho 'no such tier' >&2\nexit 3\n")
+    monkeypatch.setattr(ct, "_PLUGIN", tmp_path)
+    with pytest.raises(RuntimeError, match="gave no tiers"):
+        ct._tiers()
+
+
+def test_the_tier_listing_launch_is_supervised():
+    """run_tests.sh is an opaque shell runner: the launch that asks it for its
+    tiers must go through the watchdog, which the compliance gate checks."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "loop_watchdog_compliance_check",
+        _PLUGIN / "programs" / "loop_watchdog_compliance_check.py")
+    gate = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("loop_watchdog_compliance_check", gate)
+    spec.loader.exec_module(gate)
+    offs = gate.scan_file(Path(ct.__file__))
+    assert offs == [], [(o.line, o.kind, o.detail) for o in offs]
+
+
 def test_resync_sorts_reds_into_regenerate_and_hand_edit(monkeypatch, capsys):
     regen = next(iter(ct.REGENERATORS))
     monkeypatch.setattr(ct, "_tiers", lambda: ["programs/tests"])

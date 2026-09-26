@@ -261,14 +261,24 @@ WEBSITE_FACTS: Tuple[Tuple[str, str, str, str], ...] = (
 
 
 def _tiers() -> List[str]:
-    """The full suite's tiers, asked of run_tests.sh — never a second roster."""
-    proc = subprocess.run(["bash", str(_PLUGIN / "run_tests.sh"), "--list-tiers"],
-                          cwd=str(_PLUGIN), capture_output=True, text=True,
-                          timeout=300)
-    tiers = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
-    if proc.returncode != 0 or not tiers:
-        raise RuntimeError(f"run_tests.sh --list-tiers gave no tiers "
-                           f"(rc={proc.returncode}): {proc.stderr[-500:]}")
+    """The full suite's tiers, asked of run_tests.sh — never a second roster.
+
+    Asked through `full_suite_run_check.runner_tiers`, the one interrogation
+    of a runner's `--list-tiers` this tree has. It launches the script under
+    `_watchdog.run_supervised`; a bare `subprocess.run(["bash", <script>])` is
+    an opaque shell runner that `loop_watchdog_compliance_check` rightly
+    refuses, since no AST pass can see what the script launches.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "full_suite_run_check", _PROGRAMS / "full_suite_run_check.py")
+    fsrc = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("full_suite_run_check", fsrc)  # its @dataclass needs it
+    spec.loader.exec_module(fsrc)
+    tiers = fsrc.runner_tiers(_PLUGIN / "run_tests.sh")
+    if not tiers:
+        raise RuntimeError("run_tests.sh --list-tiers gave no tiers (it failed, "
+                           "stalled, or named something that is not a directory)")
     return tiers
 
 
