@@ -33,9 +33,25 @@ def _sdf():
         sys.path.insert(0, str(PROGRAMS))
     spec = importlib.util.spec_from_file_location(
         "_signoff_drc_format", PROGRAMS / "_signoff_drc_format.py")
+    return _exec_registered("_signoff_drc_format", spec)
+
+
+def _exec_registered(name, spec):
+    """Execute a fresh copy under its real name, then restore the previous
+    `sys.modules` entry. Left registered, the copy replaced the runner for
+    every later test on the same xdist worker, whose monkeypatches then sat on
+    a module their code under test no longer imported (d3 live measurement,
+    pdn_em identity, r34 pad drop: red in the sweep, green alone)."""
     m = importlib.util.module_from_spec(spec)
-    sys.modules["_signoff_drc_format"] = m
-    spec.loader.exec_module(m)
+    previous = sys.modules.get(name)
+    sys.modules[name] = m
+    try:
+        spec.loader.exec_module(m)
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
     return m
 
 
@@ -101,10 +117,7 @@ def _pnr():
         sys.path.insert(0, str(PROGRAMS))
     spec = importlib.util.spec_from_file_location(
         "phase3_one_shot_runner", PROGRAMS / "phase3_one_shot_runner.py")
-    m = importlib.util.module_from_spec(spec)
-    sys.modules["phase3_one_shot_runner"] = m
-    spec.loader.exec_module(m)
-    return m
+    return _exec_registered("phase3_one_shot_runner", spec)
 
 
 def test_runa_publishes_pass_and_records_the_diagnostic():
