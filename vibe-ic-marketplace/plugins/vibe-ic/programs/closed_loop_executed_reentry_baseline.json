@@ -44,11 +44,6 @@
     "INERT": 0,
     "SELF_CHECKED_ONLY": 0
   },
-  "phase3_one_shot_runner.py::_max_captable_c::_docker_exec": {
-    "ACTUATING": 1,
-    "INERT": 0,
-    "SELF_CHECKED_ONLY": 0
-  },
   "phase3_one_shot_runner.py::_resolve_auto_die_um::_docker_exec": {
     "ACTUATING": 1,
     "INERT": 0,
