@@ -176,6 +176,9 @@ def test_the_native_runner_grades_the_extra_runset_beside_the_deck(
     auth = meta.get("authoritative") or {}
     assert set(auth.get("graded") or []) >= {"A.1", "MIM.c", "M2.d", "MIM.e"}
     assert meta["extra_runsets"][0]["flat_counts"] == {"M2.d": 7}
+    # graded = distinct rules over both runsets, not `<category>` tags
+    # (each violation item carries one too)
+    assert meta["rules_pass"] == 4
     assert (tmp_path / "drc.tpdk_maximal.lyrdb").is_file()
 
 

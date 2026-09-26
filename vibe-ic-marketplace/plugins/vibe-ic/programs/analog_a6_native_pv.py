@@ -373,12 +373,17 @@ def _klayout_drc_runner(deck: str, gds: str, block: str, container: str,
         extra_meta.append(rec)
         passes[str(ex)] = erules
         violations += sum(erules["violations"].values())
-        graded += _count_lyrdb_categories(etext)
+    authoritative = _auth.merge_passes(passes)
+    # RULES GRADED = DISTINCT RULES ACROSS EVERY RUNSET. `_count_lyrdb_
+    # categories` counts every `<category>` tag, and each violation `<item>`
+    # carries one too, so on a report with hits it over-counts (MEASURED:
+    # 846 for 560 + 272 graded rules and 14 items).
     meta: Dict[str, Any] = {"method": "klayout_runset", "rc": rc,
-                            "rules_pass": graded}
+                            "rules_pass": len(authoritative["graded"])
+                            or graded}
     if extra_meta:
         meta["extra_runsets"] = extra_meta
-    meta["authoritative"] = _auth.merge_passes(passes)
+    meta["authoritative"] = authoritative
     return violations, meta
 
 
