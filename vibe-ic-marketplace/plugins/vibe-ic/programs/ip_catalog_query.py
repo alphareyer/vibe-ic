@@ -1508,6 +1508,31 @@ def declared_reuse_idents(project: Path) -> set:
     return {t for t in toks if t not in _GENERIC_IDENT_STOP}
 
 
+def declared_catalog_reuse(project: Path, matches: Optional[List[Any]] = None,
+                           min_confidence: float = 0.4) -> List[str]:
+    """The catalog IPs this design DECLARES it reuses. RB2-01 (#2063).
+
+    A surviving catalog match that the input docs themselves name
+    (:func:`declared_reuse_idents`). This is the one reading of "this design
+    pulls catalog IP": ``design_one_shot_runner.step_rtl_gen`` hands the step to
+    ``catalog-glue-author`` on it, and step 1's
+    ``catalog_synth_safe_params_check`` takes its applicability from it.
+    ``matches`` are :class:`CatalogMatch` objects or the runner's summary dicts;
+    ``None`` queries the catalog here.
+    """
+    if matches is None:
+        matches = query_catalog(project, min_confidence=min_confidence)
+    if not matches:
+        return []
+    named = declared_reuse_idents(project)
+    out: List[str] = []
+    for m in matches:
+        name = m.get("ip_name") if isinstance(m, dict) else getattr(m, "ip_name", "")
+        if str(name or "").strip().lower() in named:
+            out.append(name)
+    return out
+
+
 def _origin_match_reason(mt: CatalogMatch, manifest: Dict[str, Any],
                          origin_idents: set) -> str:
     """Non-empty reason when the entry's UPSTREAM REPO is the design's own

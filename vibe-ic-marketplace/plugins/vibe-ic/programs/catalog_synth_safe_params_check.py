@@ -24,9 +24,18 @@ LibreLane's ``SYNTH_PARAMETERS`` reaches only the top module (``chparam
 ``librelane_contract.emit_synthesis_config`` pins the value there; this gate
 still judges the RTL as the direct synthesis path elaborates it.
 
-Verdicts: PASS (rc 0), FAIL (rc 1), NOT_APPLICABLE (rc 0: no pulled IP
-declares a synth-safe parameter), NOT_MEASURED (rc 1: no top, or Yosys did
-not elaborate). NOT_MEASURED exits 1 so no rc-reading consumer credits it:
+APPLICABILITY COMES FROM THE DESIGN'S DECLARATION (F9, the v1.25.0 rule): the
+catalog IPs the input docs name as this design's own reuse,
+``ip_catalog_query.declared_catalog_reuse`` -- the same reading that hands
+``design_one_shot_runner.step_rtl_gen`` to ``catalog-glue-author``. The pull
+record (``plugin_output/declaration.json``, which the flow itself writes) may
+only ADD an IP to the judged set; it never makes the gate NOT_APPLICABLE. A
+declaration that is missing or unreadable is refused: unread is not empty.
+
+Verdicts: PASS (rc 0), FAIL (rc 1), NOT_APPLICABLE (rc 0, ``reason_class``
+DESIGN_DECLARED_NA: no declared or pulled catalog IP declares a synth-safe
+parameter), NOT_MEASURED (rc 1: the declaration was not read, no top, or Yosys
+did not elaborate). NOT_MEASURED exits 1 so no rc-reading consumer credits it:
 flow_compliance_check reads rc 2 as a non-verdict it may promote to
 VACUOUS_PASS.
 
@@ -50,8 +59,75 @@ import instrument_calibration as _calibration  # noqa: E402
 PROGRAM = "catalog_synth_safe_params_check"
 DECLARATION_REL = "plugin_output/declaration.json"
 REPORT_REL = "reports/phase2/gates/catalog_synth_safe_params.json"
+#: Where ``ip_catalog_query.load_project_facts`` reads the design's declaration.
+DECLARATION_DOCS = (("phase1/generated_docs", "L*.json"), ("input/docs", "L*.md"))
 YOSYS_JSON_REL = "reports/phase2/gates/catalog_synth_safe_params.yosys.json"
 _PULLED = ("PASS", "PARTIAL")
+
+
+def _safe_params(manifest: dict) -> dict[str, Any]:
+    params = {}
+    for entry in manifest.get("synth_safe_params") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("param"), str) \
+                and "synth_safe_value" in entry:
+            params[entry["param"]] = entry["synth_safe_value"]
+    return params
+
+
+def read_declaration(project: Path) -> tuple[list[str] | None, dict[str, Any]]:
+    """``(declared catalog IP names, record)``; the names are None when unread.
+
+    Every document ``declared_catalog_reuse`` reads must be present and parse.
+    ``load_project_facts`` skips a document it cannot parse, so an unparseable
+    L-doc would otherwise read as a design that names no IP.
+    """
+    import ip_catalog_query
+    docs = [path for rel, pattern in DECLARATION_DOCS
+            for path in sorted((project / rel).glob(pattern))]
+    record: dict[str, Any] = {
+        "source": "ip_catalog_query.declared_catalog_reuse",
+        "documents": [str(p.relative_to(project)) for p in docs]}
+    unreadable = []
+    for path in docs:
+        try:
+            text = path.read_text()
+            if path.suffix == ".json":
+                json.loads(text)
+        except (OSError, ValueError):
+            unreadable.append(str(path.relative_to(project)))
+    if not docs:
+        record["refused"] = ("declaration missing: no phase1/generated_docs/L*.json "
+                             "or input/docs/L*.md")
+        return None, record
+    if unreadable:
+        record["refused"] = f"declaration unreadable: {', '.join(unreadable)}"
+        return None, record
+    if not ip_catalog_query.load_manifests():
+        record["refused"] = "the IP catalog has no loadable manifest"
+        return None, record
+    declared = ip_catalog_query.declared_catalog_reuse(project)
+    record["declared_catalog_reuse"] = declared
+    return declared, record
+
+
+def judged_ips(project: Path, declared: list[str]) -> list[dict[str, Any]]:
+    """The declared catalog IPs, plus any IP the pull record says was copied.
+
+    A module belongs to an IP when its source file is one of the manifest's
+    ``rtl_files`` or one ``ip_catalog_pull`` copied for it.
+    """
+    import ip_catalog_query
+    manifests = {m.get("ip_name"): m for m in ip_catalog_query.load_manifests()}
+    ips = {ip["ip_name"]: dict(ip, declared=False) for ip in pulled_ips(project)}
+    for name in declared:
+        manifest = manifests.get(name) or {}
+        files = {Path(f).name for f in manifest.get("rtl_files") or []
+                 if isinstance(f, str)}
+        files |= set((ips.get(name) or {}).get("files") or [])
+        ips[name] = {"ip_name": name, "files": sorted(files),
+                     "params": _safe_params(manifest),
+                     "manifest": manifest.get("_manifest_path"), "declared": True}
+    return list(ips.values())
 
 
 def pulled_ips(project: Path) -> list[dict[str, Any]]:
@@ -69,11 +145,7 @@ def pulled_ips(project: Path) -> list[dict[str, Any]]:
         if not isinstance(row, dict) or row.get("status") not in _PULLED:
             continue
         manifest = manifests.get(row.get("ip_name")) or {}
-        params = {}
-        for entry in manifest.get("synth_safe_params") or []:
-            if isinstance(entry, dict) and isinstance(entry.get("param"), str) \
-                    and "synth_safe_value" in entry:
-                params[entry["param"]] = entry["synth_safe_value"]
+        params = _safe_params(manifest)
         files = sorted({Path(str(f.get("dest"))).name
                         for f in row.get("files_copied") or []
                         if isinstance(f, dict) and f.get("dest")})
@@ -174,11 +246,26 @@ def run(project: Path, image: str | None) -> tuple[int, dict[str, Any]]:
     import p0_tool_frontend_check as frontend
     from _specrtl_common import rtl_source_files
     report: dict[str, Any] = {"program": PROGRAM, "project": str(project)}
-    ips = [ip for ip in pulled_ips(project) if ip["params"]]
+    declared, report["declaration"] = read_declaration(project)
+    if declared is None:
+        report.update(verdict="NOT_MEASURED", reason=report["declaration"]["refused"])
+        return 1, report
+    judged = judged_ips(project, declared)
+    ips = [ip for ip in judged if ip["params"]]
     report["ips"] = ips
     if not ips:
-        report.update(verdict="NOT_APPLICABLE",
-                      reason="no pulled catalog IP declares synth_safe_params")
+        names = sorted(ip["ip_name"] for ip in judged)
+        report.update(
+            verdict="NOT_APPLICABLE", reason_class="DESIGN_DECLARED_NA",
+            skip_kind="declaration-not-present",
+            reason=(f"catalog IP {names} declares no synth_safe_params" if names else
+                    "the design declares no catalog IP reuse and none was pulled"),
+            applicability_evidence={
+                "kind": "design-declared-zero-population",
+                "population_paths": report["declaration"]["documents"],
+                "declared_population": 0,
+                "examined_files": report["declaration"]["documents"],
+                "assertions": []})
         return 0, report
     top = frontend._top(project)
     files = [str(p.resolve()) for p in rtl_source_files(project)]
