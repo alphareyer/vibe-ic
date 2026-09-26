@@ -21,6 +21,9 @@ Failure rules:
   A8_HARDMACRO_LIB_MISSING    — .lib absent
   A8_HARDMACRO_V_MISSING      — .v absent
   A8_HARDMACRO_TOO_SMALL      — present but below per-ext threshold
+  A8_HARDMACRO_LEF_NO_PINS    — the LEF has no PIN for any declared port
+  A8_HARDMACRO_LEF_PIN_MISSING — a declared port is not a LEF PIN
+  A8_HARDMACRO_RAIL_NOT_PG    — a declared rail PIN is not USE POWER/GROUND
   A8_HARDMACRO_STUB_MARKER    — file matches stub-marker panel
                                   (`ai_authored_methodology_stub`,
                                   `behavioral stub`, `placeholder
@@ -130,6 +133,76 @@ _STUB_MARKERS = (
 )
 
 
+def _lef_pin_blocks(text: str) -> dict:
+    """`{pin name (lower): USE value (upper) or None}` over a LEF MACRO body.
+    LEF is a formal grammar (`PIN <n> ... END <n>`), read structurally."""
+    pins: dict = {}
+    current = None
+    for raw in text.splitlines():
+        tok = raw.split()
+        if not tok:
+            continue
+        if tok[0] == "PIN" and len(tok) > 1:
+            current = tok[1].lower()
+            pins[current] = None
+        elif current is not None and tok[0] == "USE" and len(tok) > 1:
+            pins[current] = tok[1].rstrip(";").upper()
+        elif current is not None and tok[0] == "END" and len(tok) > 1 \
+                and tok[1].lower() == current:
+            current = None
+    return pins
+
+
+def _declared_ports(project: Path, block: str) -> tuple:
+    """`(ports, rails)` from the block's A2 topology IR, or `(None, None)`."""
+    import json as _json
+    ir = project / "phase3" / "analog" / block / "topology.json"
+    try:
+        doc = _json.loads(ir.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, None
+    ports = [str(p).lower() for p in (doc.get("ports") or [])]
+    rails = {str(v).lower() for v in (doc.get("rails") or {}).values()}
+    return ports, rails & set(ports)
+
+
+def _lef_pin_findings(project: Path, block: str, lef_path: Path) -> List[dict]:
+    """A MACRO IS PLACED BY ITS PINS (T94, A8 harvest #1). MEASURED on
+    vibeic-eda 0.3.77 / u_hawaii_adc/ldo: the emitted LEF carried SIZE and OBS
+    and zero PIN statements (A5's port labels sit on a cut layer, which
+    Magic's `lef write` does not turn into a pin), while the emitter printed
+    "4 pin(s)" from the topology and this gate PASSED it on size alone.
+
+    Every port the block's topology declares must be a LEF PIN; a declared
+    rail that is a PIN must carry USE POWER or USE GROUND, or pdngen reads
+    the supply as a signal. No topology IR → nothing to compare, no finding.
+    """
+    ports, rails = _declared_ports(project, block)
+    if not ports:
+        return []
+    pins = _lef_pin_blocks(lef_path.read_text(encoding="utf-8",
+                                              errors="replace"))
+    rel = str(lef_path.relative_to(project))
+    missing = [p for p in ports if p not in pins]
+    out: List[dict] = []
+    if missing:
+        out.append({"block": block, "rule": ("A8_HARDMACRO_LEF_NO_PINS"
+                                             if not pins else
+                                             "A8_HARDMACRO_LEF_PIN_MISSING"),
+                    "rel_path": rel,
+                    "detail": (f"declared port(s) {missing} are not PINs of "
+                               f"the macro LEF ({len(pins)} PIN(s) present); "
+                               f"digital PnR has nothing to connect them to")})
+    bad = sorted(r for r in rails if r in pins
+                 and pins[r] not in ("POWER", "GROUND"))
+    if bad:
+        out.append({"block": block, "rule": "A8_HARDMACRO_RAIL_NOT_PG",
+                    "rel_path": rel,
+                    "detail": (f"declared rail pin(s) {bad} carry USE "
+                               f"{[pins[r] for r in bad]}, not POWER/GROUND")})
+    return out
+
+
 def _check_block(project: Path, block: str
                  ) -> tuple[Optional[str], List[dict]]:
     hdir = project / "phase3" / "analog" / "hardmacro" / block
@@ -178,6 +251,9 @@ def _check_block(project: Path, block: str
     # All three missing → MISSING (per-block --block mode → WAIVED).
     if missing_count == 3:
         return "MISSING", findings
+    lef_path = hdir / f"{block}.lef"
+    if lef_path.is_file():
+        findings.extend(_lef_pin_findings(project, block, lef_path))
     if findings:
         return "FAIL", findings
 
