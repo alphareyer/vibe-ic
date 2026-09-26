@@ -494,3 +494,27 @@ def test_a2_uses_the_measured_stage_and_discloses_the_other(emitted):
                                                   "cap_ratio_unmeasured"]
     assert sw["gain_input_over_ratio"][1] == 1.0
     assert sw["gain_input_over_ratio"][0] == pytest.approx(1.077)
+
+
+def test_the_probe_runs_every_deck_under_one_supervised_waiter(tmp_path,
+                                                               monkeypatch):
+    """One supervised call per deck let a FINISHED deck's CPU leave every other
+    call's container sum, and five computing decks were reaped as STALLED
+    (rc 199). All decks now run as children of ONE in-container shell that
+    waits for them; each deck's own rc is read back from beside its log."""
+    calls = []
+
+    def fake(container, cmd, ceiling_s=0.0, **_kw):
+        calls.append(cmd)
+        for n in ("a", "b", "c"):
+            (tmp_path / f"{n}.rc").write_text("0\n" if n != "b" else "1\n")
+        import subprocess
+        return subprocess.CompletedProcess([], 0, "", "")
+    monkeypatch.setattr(probe._ce, "run_in_container_supervised", fake)
+    decks = {n: tmp_path / f"{n}.sp" for n in ("a", "b", "c")}
+    rcs = probe._run_decks(decks, "ctr", 10.0)
+    assert len(calls) == 1
+    assert calls[0].rstrip().endswith("wait")
+    for n in ("a", "b", "c"):
+        assert f"ngspice -b {n}.sp" in calls[0]
+    assert rcs == {"a": 0, "b": 1, "c": 0}

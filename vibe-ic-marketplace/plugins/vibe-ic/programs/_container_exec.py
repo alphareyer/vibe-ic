@@ -330,10 +330,22 @@ def container_tree_probe(container: str):
                 if not _in_container(pid, cid):
                     continue
                 try:
+                    # utime + stime, AND cutime + cstime: the CPU of children
+                    # this process has already REAPED. Without the second pair
+                    # a finished child's CPU vanishes from the sum, the total
+                    # DROPS, and a monotonic-max meter reads its still-working
+                    # siblings as still until they re-earn it. MEASURED (lane
+                    # mig114, 2026-09-26): six parallel ngspice decks, one
+                    # finished after 2 h 45 min, and the other five — all
+                    # computing — were reaped as STALLED (rc 199) 3 min later.
                     total += (int(f[11]) + int(f[12])) / _CLK_TCK
                     seen = True
                 except (ValueError, IndexError):
                     continue
+                try:
+                    total += (int(f[13]) + int(f[14])) / _CLK_TCK
+                except (ValueError, IndexError):
+                    pass
                 try:
                     with open(f"/proc/{pid}/io", "rb") as fh:
                         for line in fh:

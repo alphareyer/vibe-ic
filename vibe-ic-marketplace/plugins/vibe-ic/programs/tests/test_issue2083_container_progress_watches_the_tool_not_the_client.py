@@ -186,3 +186,35 @@ def test_run_in_container_hands_the_container_channel_to_the_supervisor(
         "runtime's shim and appears in no process tree the client owns")
     monkeypatch.setattr(ce, "container_id", lambda _c: None)
     assert callable(seen["progress_probe"]({}))
+
+
+def test_a_finished_child_does_not_make_its_siblings_look_still(monkeypatch):
+    """MEASURED (lane mig114, 2026-09-26): six parallel ngspice decks under one
+    supervised job; one finished after 2 h 45 min and the other five — all
+    still computing — were reaped as STALLED (rc 199) three minutes later.
+    The finished deck's CPU vanished from the container sum, and a meter that
+    credits only a new MAXIMUM read the survivors as still until they had
+    re-earned it. The reaping parent's `cutime`/`cstime` carry that CPU, so
+    the sum must not drop when a child is reaped."""
+    pids = {10: [1500.0, 0, 0], 11: [1500.0, 9000, 0], 12: [1500.0, 9000, 0]}
+    monkeypatch.setattr(ce, "container_id", lambda _c: "d" * 64)
+    monkeypatch.setattr(ce, "_uptime_ticks", lambda: 1000.0)
+    monkeypatch.setattr(ce.os, "listdir", lambda _p: [str(p) for p in pids])
+    monkeypatch.setattr(ce, "_in_container", lambda pid, _cid: True)
+
+    def stat_fields(pid):
+        start, cpu, reaped = pids[int(pid)]
+        f = [b"0"] * 22
+        f[11] = str(int(cpu)).encode()
+        f[13] = str(int(reaped)).encode()
+        f[19] = str(int(start)).encode()
+        return f
+    monkeypatch.setattr(ce, "_stat_fields", stat_fields)
+    probe = ce.container_tree_probe("c")({})
+    before = probe(None)
+    # child 11 exits and is reaped by the waiting shell 10; 12 keeps working
+    del pids[11]
+    pids[10][2] = 9000
+    pids[12][1] = 9001
+    after = probe(None)
+    assert after > before, (before, after)

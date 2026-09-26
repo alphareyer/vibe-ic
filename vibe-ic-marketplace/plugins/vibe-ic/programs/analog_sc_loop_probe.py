@@ -414,19 +414,37 @@ def _sha(p: Path) -> Optional[str]:
 
 def _run_decks(decks: Dict[str, Path], container: str, budget_s: float
                ) -> Dict[str, int]:
-    """Every deck in parallel, each SUPERVISED (no clock: reaped only on a
-    progress stall, vibe-ic#2051/#2083). `budget_s` is a recorded budget whose
-    crossing is announced, never a kill."""
-    def one(item):
-        tag, deck = item
-        cmd = (f"cd {shlex.quote(str(deck.parent))} && ngspice -b "
-               f"{shlex.quote(deck.name)} > {shlex.quote(deck.stem)}.log 2>&1")
-        cp = _ce.run_in_container_supervised(container, cmd,
-                                             ceiling_s=float(budget_s))
-        return tag, cp.returncode
+    """Every deck in parallel under ONE supervised command (no clock: reaped
+    only on a progress stall, vibe-ic#2051/#2083). `budget_s` is a recorded
+    budget whose crossing is announced, never a kill.
 
-    with _cf.ThreadPoolExecutor(max_workers=max(1, len(decks))) as ex:
-        return dict(ex.map(one, decks.items()))
+    ONE command, not one per deck, and that is load-bearing. The stillness
+    probe watches the whole container; with one supervised call per deck, a
+    deck that FINISHED took its CPU out of every other call's sum and the
+    still-computing decks were reaped as STALLED (measured: five of six, rc
+    199, three minutes after the first finished). Here the decks are children
+    of one in-container shell that `wait`s for them, so a finished deck's CPU
+    moves into that shell's reaped-children time and the sum never drops.
+    Each deck's rc is written beside its log."""
+    if not decks:
+        return {}
+    wdir = next(iter(decks.values())).parent
+    parts = [f"cd {shlex.quote(str(wdir))}"]
+    for tag, deck in decks.items():
+        parts.append(
+            f"( ngspice -b {shlex.quote(deck.name)} > "
+            f"{shlex.quote(deck.stem)}.log 2>&1; echo $? > "
+            f"{shlex.quote(deck.stem)}.rc ) &")
+    parts.append("wait")
+    cp = _ce.run_in_container_supervised(container, "\n".join(parts),
+                                         ceiling_s=float(budget_s))
+    out: Dict[str, int] = {}
+    for tag, deck in decks.items():
+        try:
+            out[tag] = int((wdir / f"{deck.stem}.rc").read_text().strip())
+        except (OSError, ValueError):
+            out[tag] = cp.returncode
+    return out
 
 
 def probe(project: Path, block: str, container: str, validate: bool = False,
