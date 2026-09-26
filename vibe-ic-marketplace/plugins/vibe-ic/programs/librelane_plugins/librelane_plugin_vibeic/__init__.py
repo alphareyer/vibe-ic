@@ -33,6 +33,10 @@ calibrated.
 ``Vibeic.ClockPathDriveSizing`` (flow step 19, T98) runs after
 ``OpenROAD.CTS``: the #2160 clock-path drive sizing, see its class docstring
 and ``clock_path_drive_sizing.tcl``.
+
+``Vibeic.DetailedRoutingSeeded`` and ``Vibeic.NamedViolationReroute`` (flow
+step 21, mig99): the router seed as a declared PPA lever, and the targeted
+reroute of the nets the router's own report names. See ``routing.py``.
 """
 from __future__ import annotations
 
@@ -138,6 +142,12 @@ class InsertSpareCells(OdbpyStep):
 from .ir_drop import IRDropChecker, TransientIR  # noqa: E402,F401
 
 __all__ += ["IRDropChecker", "TransientIR"]
+
+# Step 21 (lane mig99): the declared-seed detailed route and the named-violation
+# reroute after it.
+from .routing import DetailedRoutingSeeded, NamedViolationReroute  # noqa: E402,F401
+
+__all__ += ["DetailedRoutingSeeded", "NamedViolationReroute"]
 
 
 @Step.factory.register()
