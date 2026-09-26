@@ -2038,8 +2038,8 @@ _register(Instrument(
 
 
 def _judge_em_power_basis(log_txt: str) -> Optional[str]:
-    from _ppa import power as P
-    basis = P.em_power_basis(log_txt, sdc="calibration/cal_em_clock_pad.sdc", spef=None,
+    import phase3_one_shot_runner as R
+    basis = R._ppa_power.em_power_basis(log_txt, sdc="calibration/cal_em_clock_pad.sdc", spef=None,
                              spef_reason="calibration structure: unrouted",
                              liberties=[])
     return "CLOCK_NOT_REACHED" if basis["clock_reaches_network"] is False else None

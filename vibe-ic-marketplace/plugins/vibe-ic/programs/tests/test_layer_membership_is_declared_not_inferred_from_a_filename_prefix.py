@@ -59,6 +59,15 @@ _PPA_OUTSIDE_MEMBERS = frozenset({
     # program on 8cdef7a95 and on 40315b3aa: identical outside set, this one
     # member added, none left. Recorded by T109c; the pin was red since T83.
     "librelane_contract.py",
+    # ENTERED with T103 (steps 25/25b, lane mig103): `_ppa/pdn_em_presweep.py`
+    # is the pre-route PDN EM search. The PnR session executes its staged copy
+    # by path (`next <sweep_dir>`, a `__main__` guard) and its host side builds
+    # the frontier with `from _ppa import feasibility, pareto`, so by this
+    # gate's relation it is a ppa-layer executable no `ppa_*.py` glob reaches;
+    # its tests are `test_t103_pdn_em_presweep.py`. Re-derived by running the
+    # program on f33242415 (this outside set) and on the T103 branch: this one
+    # member added, none left.
+    "pdn_em_presweep.py",
 })
 
 
