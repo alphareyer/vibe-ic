@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1358
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1358)
+- **Total programs (excluding helpers / shims):** 1359
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1359)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1349 |
+| `any` | 1350 |
 
 ## Alphabetical listing
 
@@ -206,6 +206,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `caravel_wrapper_emit` | any | v0.1.51 | Caravel user_project_wrapper emitter (B3 from spm pilot). |
 | `caravel_wrapper_harden_driver` | any | — | Caravel user_project_wrapper HARDEN + full-chip MERGE + live XOR driver. |
 | `catalog_glue_closure_resolver` | any | — | REUSED-IP / catalog-glue staging instantiation-closure resolver + duplicate-module detector (ORGANIC #639). |
+| `catalog_synth_safe_params_check` | any | — | Step 1: every elaborated catalog-IP instance carries its synth-safe values. |
 | `cdc_async_input_check` | any | — | deterministic compliance check derived from <chip-class> v040 debug. |
 | `cdc_crossing_check` | any | — | cdc_crossing_check.py -- Deterministic CDC report checker. |
 | `cellular_automaton_synth` | any | — | DETERMINISTIC 1-D cellular-automaton → RTL synth. |
@@ -1430,7 +1431,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1349 programs)
+### `any` (1350 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1611,6 +1612,7 @@ _(no programs in this group)_
 - `caravel_wrapper_emit` — Caravel user_project_wrapper emitter (B3 from spm pilot).  _[v0.1.51]_
 - `caravel_wrapper_harden_driver` — Caravel user_project_wrapper HARDEN + full-chip MERGE + live XOR driver.
 - `catalog_glue_closure_resolver` — REUSED-IP / catalog-glue staging instantiation-closure resolver + duplicate-module detector (ORGANIC #639).
+- `catalog_synth_safe_params_check` — Step 1: every elaborated catalog-IP instance carries its synth-safe values.
 - `cdc_async_input_check` — deterministic compliance check derived from <chip-class> v040 debug.
 - `cdc_crossing_check` — cdc_crossing_check.py -- Deterministic CDC report checker.
 - `cellular_automaton_synth` — DETERMINISTIC 1-D cellular-automaton → RTL synth.
