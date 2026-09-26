@@ -891,8 +891,13 @@ def build_opensta_si_tcl(
     vdd_v: float = 1.8,
     extra_lefs: Optional[List[str]] = None,
     extra_liberties: Optional[List[str]] = None,
+    propagated_clock: bool = False,
 ) -> str:
     """Emit the EXACT OpenSTA TCL recipe that produces the SI timing JSON.
+
+    ``propagated_clock``: time the windows against the built clock tree, as a
+    post-route sign-off corner does (LibreLane STAPostPNR propagates every
+    clock); an ideal clock places every register's window at t=0.
 
     All paths are used verbatim (the caller is responsible for translating
     host paths to container paths, e.g. via the runner's _to_container_path).
@@ -927,6 +932,7 @@ read_verilog {netlist}
 link_design {top}
 read_sdc {sdc}
 read_spef {spef}
+{"set_propagated_clock [all_clocks]" if propagated_clock else ""}
 
 proc _si_capture {{cmd args}} {{
   sta::redirect_string_begin
@@ -1025,6 +1031,84 @@ puts $_si_out "}}"
 close $_si_out
 puts "SI_TIMING_JSON_EMIT_DONE pins=$_si_n out={out_json}"
 """
+
+
+# ===========================================================================
+# Kernel cross-check: the window arithmetic on the OpenSTA fork's own kernel
+# ===========================================================================
+#: One line per pair from the kernel batch: `VIBEIC_KOV <index> <fraction>`.
+_KOV_LINE = re.compile(r"^VIBEIC_KOV (\d+) (\S+)$", re.M)
+
+
+def kernel_overlap_rows(spef: Union[str, dict], timing: Union[str, dict, PathLike],
+                        overlap_guard_ns: float = 0.0) -> Tuple[List[dict], int]:
+    """Every (victim, aggressor) direction of every coupling pair whose two
+    switching windows are KNOWN, with this module's own overlap decision.
+
+    A pair with an unknown window is not sent: this screen assumes overlap
+    there by policy, which is not arithmetic a kernel can check.  Returns the
+    rows and the count of directions skipped for an unknown window."""
+    sp = spef if isinstance(spef, dict) else parse_spef(spef)
+    tj = timing if isinstance(timing, dict) else load_timing_json(timing)
+    windows = compute_net_windows(sp["net_driver_pins"], tj.get("pins", {}))
+    rows: List[dict] = []
+    unknown = 0
+    for pair in sp["pair_cc"]:
+        n1, n2 = tuple(pair)
+        for victim, aggressor in ((n1, n2), (n2, n1)):
+            wv = (windows.get(victim) or {}).get("win")
+            wa = (windows.get(aggressor) or {}).get("win")
+            if wv is None or wa is None:
+                unknown += 1
+                continue
+            rows.append({"victim": victim, "aggressor": aggressor,
+                         "victim_window": wv, "aggressor_window": wa,
+                         "python_overlap": _windows_overlap(wa, wv, overlap_guard_ns)})
+    return rows, unknown
+
+
+def kernel_overlap_tcl(rows: List[dict]) -> str:
+    """The batch the fork's `timing_window_overlap` evaluates, one call per row."""
+    lines = []
+    for i, r in enumerate(rows):
+        (vl, vh), (al, ah) = r["victim_window"], r["aggressor_window"]
+        lines.append(f"puts \"VIBEIC_KOV {i} [timing_window_overlap "
+                     f"-victim_window {{{vl!r} {vh!r}}} -aggressor_window {{{al!r} {ah!r}}}]\"")
+    return "\n".join(lines) + "\n"
+
+
+def compare_kernel_overlap(rows: List[dict], kernel_stdout: str) -> dict:
+    """AGREE when, for every row, the kernel's overlap fraction is > 0 exactly
+    where this module decided the windows overlap.  A window that only TOUCHES
+    the other (zero-length intersection) is reported separately: the kernel
+    returns 0 for it and this module's closed-interval test calls it an
+    overlap -- a definitional difference, named, not averaged away."""
+    fractions: Dict[int, float] = {}
+    for idx, raw in _KOV_LINE.findall(kernel_stdout or ""):
+        try:
+            fractions[int(idx)] = float(raw)
+        except ValueError:
+            continue
+    missing = [i for i in range(len(rows)) if i not in fractions]
+    disagree: List[dict] = []
+    touching = 0
+    for i, r in enumerate(rows):
+        if i not in fractions:
+            continue
+        kernel = fractions[i] > 0.0
+        if kernel == r["python_overlap"]:
+            continue
+        (vl, vh), (al, ah) = r["victim_window"], r["aggressor_window"]
+        if r["python_overlap"] and (al == vh or ah == vl):
+            touching += 1
+            continue
+        disagree.append({**r, "kernel_fraction": fractions[i]})
+    verdict = ("NOT_MEASURED" if not rows or missing else
+               "DISAGREE" if disagree else "AGREE")
+    return {"verdict": verdict, "pairs": len(rows), "kernel_answered": len(fractions),
+            "missing": len(missing), "touching_only": touching,
+            "disagreements": disagree[:50], "disagreement_count": len(disagree),
+            "overlapping_by_kernel": sum(1 for f in fractions.values() if f > 0.0)}
 
 
 # ===========================================================================

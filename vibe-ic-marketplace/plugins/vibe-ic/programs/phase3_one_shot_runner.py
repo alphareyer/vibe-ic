@@ -58392,7 +58392,22 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # SPEF-based report CAN be the canonical one (the old code extracted
     # SPEF only after the alias was already written from the estimate).
     spef_out = extracted_out / f"{top}.spef"
-    if primary_def.is_file() and _signoff_regen(spef_out, primary_def):
+    # Steps 22/23 opt in to LibreLane OpenROAD.RCX / STAPostPNR per
+    # `phase3/librelane_switch.json` (librelane_signoff).  With 22 on the tool
+    # its SPEFs are handed to `spef_out` and `spef_corners/`, so step 23's
+    # decks, step 27 and DT2/DT3 read the tool's parasitics.
+    _ll_m22, _ll_m23 = _librelane_signoff_modes(project)
+    _ll_rcx_receipt = rpt_phase3 / "librelane_rcx_handoff.json"
+    if primary_def.is_file() and _ll_m22 == "librelane":
+        if _signoff_regen(spef_out, primary_def):
+            try:
+                _librelane_rcx_publish(project, top, pdk, spef_out,
+                                       extracted_out / "spef_corners",
+                                       _ll_rcx_receipt)
+                written.append(str(spef_out))
+            except Exception as exc:  # a refusal names itself; never direct
+                signoff_failures.append(f"step 22 LibreLane RCX: {exc}")
+    elif primary_def.is_file() and _signoff_regen(spef_out, primary_def):
         if _emit_spef(project, top, pdk, container, spef_out, notes):
             written.append(str(spef_out))
 
@@ -58400,7 +58415,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     spef_sta_rpt = sta_out / "sta_spef_based.rpt"
     spef_sta_attempt_ok = None
     if (spef_out.is_file() and spef_out.stat().st_size > 0
-            and _signoff_regen(spef_sta_rpt, primary_def)):
+            and _signoff_regen(spef_sta_rpt, primary_def, spef_out)):
         spef_sta_attempt_ok = _emit_spef_sta(project, top, pdk, container, spef_out,
                                              spef_sta_rpt, notes)
         if spef_sta_attempt_ok:
@@ -58419,14 +58434,22 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # in multi_corner_spef_stance.json.
     mc_spef_dir = extracted_out / "spef_corners"
     mc_stance = rpt_phase3 / "multi_corner_spef_stance.json"
-    if primary_def.is_file() and _signoff_regen(mc_stance, primary_def):
-        corner_spefs = _emit_spef_corners(
-            project, top, pdk, container, mc_spef_dir, notes)
+    # Dated against the nominal SPEF too: a re-extraction (step 22 switched
+    # to the tool, say) supersedes the corner set and every report timed on it.
+    if primary_def.is_file() and _signoff_regen(mc_stance, primary_def, spef_out):
+        if _ll_m22 == "librelane":
+            # The tool's corners, as the handoff receipt binds them; a file
+            # the receipt does not bind (an older direct corner) is not read.
+            corner_spefs = _librelane_handed_spefs(_ll_rcx_receipt)
+        else:
+            corner_spefs = _emit_spef_corners(
+                project, top, pdk, container, mc_spef_dir, notes)
         for p in corner_spefs.values():
             # Same analytical lateral-coupling augment as the nom SPEF —
             # self-gated: a real-captable corner SPEF already carries
             # coupling (`-coupling_threshold`), so this no-ops there.
-            _emit_spef_coupling_augment(primary_def, pdk.tech_lef, p, notes)
+            if _ll_m22 != "librelane":
+                _emit_spef_coupling_augment(primary_def, pdk.tech_lef, p, notes)
             written.append(str(p))
         mc_sta_ok = False
         mc_lib_resolution: Optional[Dict[str, object]] = None
@@ -58436,7 +58459,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         if len(corner_spefs) >= 2 and ("min" in corner_spefs
                                        or "max" in corner_spefs):
             mc_sta_rpt = sta_out / "sta_spef_multicorner.rpt"
-            if _signoff_regen(mc_sta_rpt, primary_def):
+            if _signoff_regen(mc_sta_rpt, primary_def, spef_out):
                 _mc_res = _emit_corner_spef_sta(
                     project, top, pdk, container, corner_spefs,
                     mc_sta_rpt, notes,
@@ -58455,6 +58478,10 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         _multi = len(corner_spefs) >= 2
         mc_stance.write_text(json.dumps({
             "signoff_dimension": "multi_corner_spef",
+            "producer": ("librelane:OpenROAD.RCX" if _ll_m22 == "librelane"
+                         else "direct:_emit_spef_corners"),
+            "handoff_receipt": (str(_ll_rcx_receipt.relative_to(project))
+                                if _ll_m22 == "librelane" else None),
             "corners_extracted": _corners,
             "corner_count": len(_corners),
             "multi_corner": _multi,
@@ -58520,7 +58547,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # disclosure — no fabricated ss/ff). Internalises the hand-run mcorner_ocv_sta.tcl.
     mc_ocv_rpt = sta_out / "sta_mcorner_ocv.rpt"
     mc_ocv_stance = rpt_phase3 / "mcorner_ocv_stance.json"
-    if primary_def.is_file() and _signoff_regen(mc_ocv_stance, primary_def):
+    if primary_def.is_file() and _signoff_regen(mc_ocv_stance, primary_def, spef_out):
         corner_libs = _resolve_signoff_corner_libs(project, pdk, container)
         # Rediscover any per-corner SPEFs on disk (min/nom/max) + the nom SPEF.
         ocv_corner_spefs: Dict[str, Path] = {}
@@ -58542,7 +58569,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                          and setup_lbl != hold_lbl)
         mc_ocv_ok = False
         setup_wns = hold_wns = None
-        if multi_process and _signoff_regen(mc_ocv_rpt, primary_def):
+        if multi_process and _signoff_regen(mc_ocv_rpt, primary_def, spef_out):
             mc_ocv_ok = _emit_mcorner_ocv_sta(
                 project, top, pdk, container, corner_libs, ocv_corner_spefs,
                 _nom_spef, mc_ocv_rpt, notes)
@@ -58665,6 +58692,15 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 "multi-corner OCV STA SURFACED a real violation at "
                 f"{'/'.join(_viol)} corner(s): setup_wns={setup_wns} "
                 f"hold_wns={hold_wns} — post-route timing repair required (not a plugin bug).")
+
+    # --- Steps 22 (dual) / 23 (librelane|dual): LibreLane STAPostPNR -------
+    # Every STA corner, timed on the canonical SPEFs (the tool's, or the
+    # direct path's when 22 stays direct), re-timed by a second engine and
+    # compared with the direct OCV deck above.  A disagreement refuses.
+    if primary_def.is_file() and (_ll_m23 != "direct" or _ll_m22 == "dual"):
+        _librelane_signoff_record(project, top, pdk, _ll_m22, _ll_m23,
+                                  mc_spef_dir, mc_ocv_rpt, notes,
+                                  signoff_failures, written)
 
     # --- Step 23: post-route STA report (canonical) ---------------------
     # #527 — SPEF-based is CANONICAL when available (closer to sign-off
@@ -62688,6 +62724,187 @@ def _emit_spef_corners(project: Path, top: str, pdk: PdkConfig, container: str,
             "multi-corner SPEF: extracted " + ", ".join(sorted(produced)) +
             f" ({len(produced)} corner(s)).")
     return produced
+
+
+# ── Steps 22/23 through LibreLane OpenROAD.RCX / STAPostPNR (opt-in) ─────────
+def _librelane_signoff_modes(project: Path) -> Tuple[str, str]:
+    """The switch's modes for steps 22 and 23 (`direct` unless declared)."""
+    from librelane_contract import selected_mode
+    return selected_mode(project, "22"), selected_mode(project, "23")
+
+
+def _librelane_signoff_report_body() -> str:
+    """The step-23 report body, run by OpenSTA inside each STAPostPNR corner.
+
+    The same emitters the direct decks use (worst slack, TNS, WNS, worst
+    paths, recovery/removal/MPW + DRV census, each with its marker), written
+    to `vibeic_signoff.rpt` beside the tool's own `max.rpt`/`min.rpt`."""
+    rpt = "$_vibeic_rpt"
+    body = []
+    for flag in ("-max", "-min"):
+        body.append(f"report_worst_slack {flag} >> {rpt}\n")
+        body.append(f"report_tns {flag} >> {rpt}\n")
+        body.append(_report_wns_tcl(rpt, flag))
+        body.append(_report_worst_paths_tcl(rpt, flag))
+    body.append(_report_check_types_tcl(rpt))
+    return "".join(body)
+
+
+#: One tool chain per (project, layout, selection): steps 22 and 23 share it.
+#: Two separate invocations each re-derive the bridge ODB, so the second
+#: re-runs RCX and its SPEF differs from the one already handed over (by its
+#: `*DATE` line) -- the deck comparison then reads two different parasitics.
+_LL_SIGNOFF_RUNS: Dict[Tuple[str, str, bool, bool, str], dict] = {}
+
+
+def _librelane_signoff_run(project: Path, top: str, pdk: PdkConfig, *,
+                           extract: bool, time: bool,
+                           direct_spefs: Optional[Dict[str, Path]] = None) -> dict:
+    import librelane_contract as _ll
+    import librelane_signoff as _ls
+    pnr = _pl.pnr_dir(project)
+    layout = pnr / f"{top}.def"
+    key = (str(project.resolve()), _sha256_file(layout) if layout.is_file() else "",
+           extract, time, json.dumps({k: _sha256_file(Path(v)) for k, v in
+                                      sorted((direct_spefs or {}).items())
+                                      if Path(v).is_file()}))
+    if key in _LL_SIGNOFF_RUNS:
+        return _LL_SIGNOFF_RUNS[key]
+    root = _ll.resolve_pdk_root(project)
+    if not root:
+        raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
+                          "steps 22/23 on LibreLane need pdk_root_host in the "
+                          "switch or VIBEIC_LIBRELANE_PDK_ROOT")
+    image = _ll.resolve_image(project)
+    result = _ls.run(project, image, Path(root), pdk.name,
+                     routed_def=pnr / f"{top}.def", netlist=pnr / f"{top}_pnr.v",
+                     sdc=pnr / "constraint.sdc", extract=extract, time=time,
+                     direct_spefs=direct_spefs,
+                     report_body=_librelane_signoff_report_body() if time else "",
+                     lane="22-23" if extract else "23")
+    result["image"] = image
+    _LL_SIGNOFF_RUNS[key] = result
+    return result
+
+
+def _librelane_rcx_publish(project: Path, top: str, pdk: PdkConfig,
+                           spef_out: Path, corner_dir: Path, receipt: Path) -> None:
+    """Step 22 on the tool: RCX, then hand every corner SPEF (and the nominal
+    one) to the paths the direct consumers read, bound by sha256."""
+    import librelane_signoff as _ls
+    result = _librelane_signoff_run(project, top, pdk, extract=True, time=False)
+    _ls.publish_spefs(result, top, spef_out, corner_dir, receipt)
+
+
+def _librelane_handed_spefs(receipt: Path) -> Dict[str, Path]:
+    """`{rc_corner: path}` the step-22 handoff receipt binds, sha-verified."""
+    import librelane_signoff as _ls
+    try:
+        doc = json.loads(receipt.read_text())
+    except (OSError, ValueError):
+        return {}
+    out: Dict[str, Path] = {}
+    for view, row in (doc.get("views") or {}).items():
+        dest = Path(row.get("dest") or "")
+        if dest.is_file() and _sha256_file(dest) == row.get("dest_sha256"):
+            out[_ls.rc_corner(view.partition(":")[2])] = dest
+    return out
+
+
+def _librelane_signoff_record(project: Path, top: str, pdk: PdkConfig,
+                              m22: str, m23: str, corner_dir: Path,
+                              ocv_rpt: Path, notes: List[str],
+                              signoff_failures: List[str],
+                              written: List[str]) -> None:
+    """Step 23 on STAPostPNR (librelane: the verdict; dual: a cross-check)
+    and step 22's dual comparison.  Records `reports/phase3/
+    sta_postpnr_signoff.json` and `rc_extraction_arms.json`."""
+    import librelane_signoff as _ls
+    rpt = _pl.reports_phase3_dir(project)
+    arms = project / "phase3/tool_arms"
+    nominal = corner_dir.parent / f"{top}.spef"
+    sta_folder: Optional[Path] = None
+    try:
+        if m23 != "direct":
+            record = rpt / "sta_postpnr_signoff.json"
+            # Timed on the CANONICAL corner files -- the tool's as handed over
+            # (receipt-bound) or the direct path's -- so the tool, the second
+            # engine and our deck read the same parasitic bytes.  Re-running
+            # RCX here would not: the bridge re-derives its ODB and the new
+            # SPEF differs from the handed one (its `*DATE` line at least).
+            canonical = (_librelane_handed_spefs(rpt / "librelane_rcx_handoff.json")
+                         if m22 == "librelane" else
+                         {c: corner_dir / f"{top}.{c}.spef" for c in _SPEF_CORNERS})
+            result = _librelane_signoff_run(project, top, pdk, extract=False,
+                                            time=True, direct_spefs=canonical)
+            sta_folder = result["sta"]
+            corners = _ls.corner_timing(sta_folder)
+            judged = _ls.judge_timing(corners)
+            engines = _ls.agreement(project, result["image"], sta_folder,
+                                    result["mounts"], arms / "23/engine_agreement.json")
+            deck = (_ls.deck_agreement(ocv_rpt.read_text(errors="replace"), sta_folder,
+                                       arms / "23/deck_agreement.json",
+                                       spef_dir=corner_dir)
+                    if ocv_rpt.is_file() else
+                    {"verdict": "NOT_MEASURED", "reason": f"no {ocv_rpt.name}"})
+            _aa.write_json(record, {
+                "step": "23", "mode": m23,
+                "spef_producer": ("librelane:OpenROAD.RCX" if m22 == "librelane"
+                                  else "direct:_emit_spef_corners"),
+                "spef_sha256": {c: _sha256_file(p) for c, p in sorted(canonical.items())
+                                if p.is_file()},
+                "sta_state": str(sta_folder / "state_out.json"),
+                "sta_state_sha256": _sha256_file(sta_folder / "state_out.json"),
+                "derate_source": _ls.DERATE_SOURCE,
+                "corners": corners, "judgment": judged,
+                "engine_agreement": {"verdict": engines["verdict"],
+                                     "record": str(arms / "23/engine_agreement.json")},
+                "deck_agreement": {"verdict": deck["verdict"],
+                                   "record": str(arms / "23/deck_agreement.json")},
+            })
+            written.append(str(record))
+            # The dual is an agreement check: two engines, or the tool and
+            # our deck, reading the same inputs must not disagree.
+            if engines["verdict"] != "AGREE":
+                signoff_failures.append(
+                    f"LL_STA_ARMS_DISAGREE: engine agreement {engines['verdict']} "
+                    f"({engines.get('disagreeing_corners')})")
+            if deck["verdict"] == "DISAGREE":
+                signoff_failures.append(
+                    "LL_STA_ARMS_DISAGREE: the direct OCV deck and STAPostPNR "
+                    "disagree on a shared corner")
+            if judged["verdict"] != "PASS":
+                (signoff_failures if m23 == "librelane" else notes).append(
+                    f"step 23 LibreLane STAPostPNR: {judged['verdict']} "
+                    f"{json.dumps({k: v for k, v in judged.items() if k != 'verdict'}, sort_keys=True)}")
+        if m22 == "dual":
+            result22 = _librelane_signoff_run(project, top, pdk, extract=True, time=False)
+            tool = {_ls.rc_corner(p): s for p, s in result22["spef"].items()}
+            direct = {c: corner_dir / f"{top}.{c}.spef" for c in _SPEF_CORNERS
+                      if (corner_dir / f"{top}.{c}.spef").is_file()}
+            sampled: List[str] = []
+            if sta_folder is not None:
+                judged_rows = _ls.judge_timing(_ls.corner_timing(sta_folder))
+                for key in ("worst_setup", "worst_hold"):
+                    corner = (judged_rows.get(key) or {}).get("corner")
+                    if corner:
+                        sampled += [n for n in _ls.critical_nets(sta_folder, corner)
+                                    if n not in sampled]
+            arms_doc = {
+                "step": "22", "mode": "dual", "canonical": "direct",
+                # No field-solver reference exists for this comparison yet, so
+                # neither arm can be called more accurate: the frontier is kept.
+                "selection": "UNDETERMINED",
+                "reason": ("LL_RC_ACCURACY_NOT_MEASURED: arms are compared "
+                           "with each other; no field-solver reference"),
+                "direct_nominal": str(nominal),
+                "tool_rcx_state": str(result22["rcx"] / "state_out.json"),
+                "corners": _ls.compare_extraction(direct, tool, sampled),
+            }
+            _aa.write_json(rpt / "rc_extraction_arms.json", arms_doc)
+            written.append(str(rpt / "rc_extraction_arms.json"))
+    except Exception as exc:  # a refusal names itself; nothing falls back
+        signoff_failures.append(f"steps 22/23 LibreLane: {exc}")
 
 
 def _emit_corner_spef_sta(project: Path, top: str, pdk: PdkConfig,
@@ -66920,6 +67137,92 @@ def _emit_si_timing_json(project: Path, top: str, pdk: PdkConfig, container: str
     return True
 
 
+def _librelane_si_corner_inputs(project: Path) -> Optional[dict]:
+    """Step 23's tool state and its setup sign-off corner, for step 27.
+
+    None when step 23 is direct, or when its record names no measured worst
+    setup corner (step 27 then keeps the direct inputs)."""
+    if _librelane_signoff_modes(project)[1] == "direct":
+        return None
+    import librelane_contract as _ll
+    try:
+        record = json.loads((_pl.reports_phase3_dir(project)
+                             / "sta_postpnr_signoff.json").read_text())
+        state = Path(record["sta_state"])
+        corner = record["judgment"]["worst_setup"]["corner"]
+        inputs = _ll.post_pnr_timing_inputs(project, state, corner)
+        design = json.loads((state.parent / "config.json").read_text())["DESIGN_NAME"]
+    except (OSError, ValueError, KeyError, TypeError, _ll.Refusal):
+        return None
+    root = _ll.resolve_pdk_root(project)
+    if not root:
+        return None
+    pdk_name = next((p.split("/")[2] for p in inputs["liberties"]
+                     if p.startswith("/pdk/")), None)
+    if pdk_name is None:
+        return None
+    return {"state": state, "corner": corner, "design": design,
+            "liberties": inputs["liberties"],
+            "netlist": project / inputs["sta_netlist"], "sdc": project / inputs["sdc"],
+            "spef": project / inputs["spef"], "image": _ll.resolve_image(project),
+            "mounts": [(Path(root) / pdk_name, f"/pdk/{pdk_name}")]}
+
+
+def _librelane_si_windows_json(project: Path, top: str, tool: dict, out_json: Path,
+                              notes: List[str], vdd_v: float = 1.8) -> bool:
+    """The SI timing JSON on the tool corner's inputs, in the tool's image."""
+    mod = _si_timing_aware_module()
+    import librelane_signoff as _ls
+    tcl = mod.build_opensta_si_tcl(
+        tool["liberties"][0], str(tool["netlist"]), tool["design"], str(tool["sdc"]),
+        str(tool["spef"]), str(out_json), vdd_v=vdd_v,
+        extra_liberties=tool["liberties"][1:], propagated_clock=True)
+    tcl_path = out_json.parent / f"si_timing_{top}.librelane.tcl"
+    tcl_path.write_text(tcl)
+    done = _ls.run_sta_script(project, tool["image"], tool["mounts"], tcl_path,
+                              out_json.parent / "si_timing.log")
+    try:
+        json.loads(out_json.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
+        notes.append(f"SI timing-aware: the tool-corner timing JSON did not "
+                     f"parse (rc={done.returncode}; {exc}) — keeping the "
+                     f"floating-victim screen.")
+        return False
+    notes.append(f"SI timing-aware: windows from LibreLane STAPostPNR corner "
+                 f"{tool['corner']} (routed netlist, its SDC/SPEF/liberties).")
+    return True
+
+
+def _librelane_si_kernel_check(project: Path, top: str, tool: dict, spef: Path,
+                               timing_json: Path, sbody: dict,
+                               notes: List[str]) -> None:
+    """The per-pair window arithmetic, re-done by the fork's OpenSTA kernel
+    (`timing_window_overlap`).  The two must agree; a disagreement withdraws
+    the delta-delay reading (NOT_MEASURED), so step 27's verdict basis falls
+    back to the conservative envelope instead of trusting either arm."""
+    mod = _si_timing_aware_module()
+    import librelane_signoff as _ls
+    rows, unknown = mod.kernel_overlap_rows(spef.read_text(errors="replace"),
+                                            str(timing_json))
+    script = timing_json.parent / f"si_kernel_overlap_{top}.tcl"
+    script.write_text(mod.kernel_overlap_tcl(rows))
+    done = _ls.run_sta_script(project, tool["image"], tool["mounts"], script,
+                              timing_json.parent / "si_kernel_overlap.log")
+    result = mod.compare_kernel_overlap(rows, done.stdout)
+    result.update(rc=done.returncode, unknown_window_directions=unknown,
+                  kernel="timing_window_overlap (vibeic OpenSTA fork)")
+    sbody["kernel_cross_check"] = result
+    if result["verdict"] != "AGREE" and isinstance(sbody.get("delta_delay"), dict):
+        sbody["delta_delay"]["verdict"] = "NOT_MEASURED"
+        sbody["delta_delay"]["withdrawn_because"] = (
+            f"the window arithmetic and the OpenSTA kernel {result['verdict']} "
+            f"({result.get('disagreement_count')} pair(s))")
+        sbody["delta_delay_verdict"] = "NOT_MEASURED"
+    notes.append(f"SI kernel cross-check: {result['verdict']} over "
+                 f"{result['pairs']} pair direction(s) with known windows "
+                 f"({unknown} unknown, {result['touching_only']} touching only).")
+
+
 def _merge_si_timing_aware(project: Path, top: str, pdk: PdkConfig,
                            container: str, spef: Path, sbody: dict,
                            notes: List[str], vdd_v: float = 1.8) -> None:
@@ -66941,21 +67244,33 @@ def _merge_si_timing_aware(project: Path, top: str, pdk: PdkConfig,
     mod = _si_timing_aware_module()
     if mod is None:
         return
-    primary_sta = _pl.pnr_dir(project) / "sta.rpt"
-    if not primary_sta.is_file():
-        notes.append("SI timing-aware: no post-route STA report — the "
-                     "switching-window advisory needs arrival windows; "
-                     "keeping the floating-victim screen (no over-claim).")
-        return
-    sdc = _pl.pnr_dir(project) / "constraint.sdc"
-    netlist = _pl.synth_dir(project) / f"{top}_synth.v"
     extracted = _pl.extracted_dir(project)
     extracted.mkdir(parents=True, exist_ok=True)
     out_json = extracted / f"{top}_si_timing.json"
-    if not out_json.is_file():
-        if not _emit_si_timing_json(project, top, pdk, container, spef, sdc,
-                                    netlist, out_json, notes, vdd_v=vdd_v):
+    # Step 23 on LibreLane: the windows come from the tool's own sign-off
+    # corner (its routed netlist, SDC, SPEF and liberties), timed in its image.
+    tool = _librelane_si_corner_inputs(project)
+    if tool is not None:
+        spef = tool["spef"]
+        if _signoff_regen(out_json, spef, tool["state"]):
+            if not _librelane_si_windows_json(project, top, tool, out_json, notes,
+                                             vdd_v=vdd_v):
+                return
+    else:
+        primary_sta = _pl.pnr_dir(project) / "sta.rpt"
+        if not primary_sta.is_file():
+            notes.append("SI timing-aware: no post-route STA report — the "
+                         "switching-window advisory needs arrival windows; "
+                         "keeping the floating-victim screen (no over-claim).")
             return
+        sdc = _pl.pnr_dir(project) / "constraint.sdc"
+        netlist = _pl.synth_dir(project) / f"{top}_synth.v"
+        # Dated against the SPEF it is read with: a re-extraction must not be
+        # scored against the previous extraction's windows.
+        if _signoff_regen(out_json, spef):
+            if not _emit_si_timing_json(project, top, pdk, container, spef, sdc,
+                                        netlist, out_json, notes, vdd_v=vdd_v):
+                return
     try:
         adv = mod.run_si_signoff_timing_aware(
             spef, out_json,
@@ -67010,6 +67325,8 @@ def _merge_si_timing_aware(project: Path, top: str, pdk: PdkConfig,
             "scope": dd.get("scope"),
         }
         sbody["delta_delay_verdict"] = dd.get("delta_delay_verdict")
+    if tool is not None:
+        _librelane_si_kernel_check(project, top, tool, spef, out_json, sbody, notes)
     notes.append(
         "SI timing-aware (ADVISORY): "
         f"{adv.get('pairs_decoupled_by_window', 0)} pairs decoupled by window, "
