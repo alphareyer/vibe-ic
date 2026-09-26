@@ -45113,7 +45113,7 @@ def step_postroute_repair_librelane(project: Path, top: str, pdk: "PdkConfig",
         _drv_promotion_disclose(
             pnr_out, "librelane_closure_kept_input",
             "the closure adopted no candidate, so the input route was kept: "
-            + "; ".join(f"{r.get('controller_id')}: {r.get('outcome')}"
+            + "; ".join(f"{r.get('controller')}: {r.get('outcome')}"
                         for r in report.get("closure") or []))
         return StepResult("postroute_repair_librelane", "PASS", time.time() - t0,
                           f"no candidate adopted (input route kept): {summary}")

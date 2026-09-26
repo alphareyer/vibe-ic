@@ -363,7 +363,8 @@ def signoff_scene_sdc(sdc: Path, out: Path, derate_early: float,
 def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
         views: Dict[str, Path], sdc: Path, derate: Tuple[float, float],
         pg_rules_tcl: Optional[Path] = None, refill_tcl: Optional[Path] = None,
-        registry: Optional[Path] = None, docker: str = "docker") -> Dict[str, Any]:
+        registry: Optional[Path] = None, programs_dir: Optional[Path] = None,
+        docker: str = "docker") -> Dict[str, Any]:
     """Step 32 on LibreLane: bridge, baseline, closure, record.
 
     Returns the report (also written to `REPORT_REL`). `adopted` is the
@@ -424,14 +425,22 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
                                 "repair_state": str(state0), "repair_folder": str(folder0),
                                 "measurement": baseline, "antenna": _antenna(folder0)})
     report.update(corners=corners, baseline=baseline, baseline_antenna=_antenna(folder0))
-    reg = _cl.load_registry(registry)
+    reg = _cl.load_registry(registry, programs_dir=programs_dir)
     controller = _cl.ClosureController(reg, impl, arm / "closure")
     runs = []
     for cid in CONTROLLERS:
         done = controller.run_controller(cid)
         runs.append(done.to_record())
     report["closure"] = runs
-    report["candidates"] = (_load(ledger)["candidates"] if ledger.is_file() else [])
+    candidates = _load(ledger)["candidates"] if ledger.is_file() else []
+    # One ledger row per actuation, in order: the closure's verdict on each.
+    actuated = [(r.get("controller"), it) for r in runs
+                for it in r.get("iterations") or [] if it.get("argv")]
+    for row, (cid, it) in zip(candidates, actuated):
+        row["controller"] = cid
+        row["closure_decision"] = it.get("decision")
+        row["closure_reason"] = it.get("decision_reason")
+    report["candidates"] = candidates
     final = _load(impl / CURRENT)
     report["adopted"] = final.get("candidate")
     report["final"] = final.get("measurement")

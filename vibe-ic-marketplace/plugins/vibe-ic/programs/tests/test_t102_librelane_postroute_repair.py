@@ -354,6 +354,55 @@ def test_a_hold_repair_that_leaves_an_antenna_is_rolled_back(tmp_path, monkeypat
     assert 'antenna.violation_count: 0.0 -> 2.0' in run.iterations[0].decision_reason
 
 
+def test_run_bridges_measures_closes_and_records_every_candidates_fate(tmp_path, monkeypatch):
+    """`run` end to end: the bridge, the census baseline (same instruments),
+    the three controllers in order, and a report naming the adopted candidate
+    and the closure's verdict on every candidate."""
+    project = tmp_path / 'proj'
+    lef = write(tmp_path / 'cells.lef', LEF)
+    base, cand = (4.026052, -0.335), _cand(4.025948, 0.326)
+    scenario = {'32-base': {'def': _def(True), 'sta_metrics': _sta_metrics(*base),
+                            'repair_metrics': {'vibeic__prr__changed': 0,
+                                               'vibeic__prr__before__antenna__violating_nets': 0}},
+                '32-cand01': cand}
+    put(tmp_path / 'scenario.json', scenario)
+    shim = tmp_path / 'shim'
+    write(shim / 'librelane_postroute_repair.py', SHIM)
+    monkeypatch.setenv('PRR_REAL_PROGRAMS', str(PROGRAMS))
+    monkeypatch.setenv('PRR_SCENARIO', str(tmp_path / 'scenario.json'))
+    ns = {}
+    exec(compile(SHIM.split('ll.run_chain = run_chain')[0].replace(
+        'sys.path.insert(0, os.environ["PRR_REAL_PROGRAMS"])', ''), 'shim', 'exec'), ns)
+    monkeypatch.setattr(contract, 'run_chain', ns['run_chain'])
+    monkeypatch.setattr(prr, 'fork_capability',
+                        lambda image, docker='docker': {'capable': True, 'image': image})
+    seen = {}
+
+    def configs(project_, image, pdk, ids, *, pdk_root, folder, overlay, docker):
+        seen['overlay'] = overlay
+        root = project_ / 'phase3/librelane' / folder
+        return {i: put(root / f'{i}.json', {'meta': {'step': i}, 'CELL_LEFS': [str(lef)],
+                                            'STA_CORNERS': CORNERS}) for i in ids}
+    monkeypatch.setattr(contract, 'resolve_step_configs', configs)
+    monkeypatch.setattr(contract, 'state_from_direct',
+                        lambda project_, image, cfg, views, out, **k: put(out / 'state_in.json',
+                                                                         {'def': str(views['def'])}))
+    sdc = write(project / 'phase3/stage3/pnr/constraint.sdc', 'create_clock -period 10 [get_ports clk]\n')
+    report = prr.run(project, image='img', pdk='pdk', pdk_root=tmp_path, views={'def': sdc},
+                     sdc=sdc, derate=(0.95, 1.05), programs_dir=shim)
+    assert report['verdict'] == 'PASS' and report['adopted'] == '32-cand01'
+    assert [r['outcome'] for r in report['closure']] == ['NOT_TRIGGERED', 'CONVERGED', 'NOT_TRIGGERED']
+    assert report['candidates'][0]['closure_decision'] == 'PROMOTED'
+    assert report['candidates'][0]['controller'] == 'postroute.repair_hold'
+    assert report['baseline']['hold_ws_min'] == -0.335 and report['final']['hold_ws_min'] == 0.326
+    # the repair scene is the sign-off scene
+    scene = Path(seen['overlay']['PNR_SDC_FILE'][0])
+    assert seen['overlay']['SIGNOFF_SDC_FILE'][0] == str(scene)
+    assert scene.read_text().endswith('set_timing_derate -early 0.95\nset_timing_derate -late 1.05\n')
+    census = json.loads((project / 'phase3/librelane/32-config/Vibeic.PostRouteRepair@census.json').read_text())
+    assert census['VIBEIC_PRR_CENSUS_ONLY'] is True
+
+
 # ----------------------------------------------------- the plugin step ---
 
 def _tcl_env_vars():
@@ -473,3 +522,76 @@ def test_with_step_32_on_librelane_the_deck_carries_no_repair_of_its_own(tmp_pat
     norm = lambda kw: {k: str(v).replace(str(tmp_path / 'o'), 'P').replace(str(tmp_path / 'd'), 'P')
                        for k, v in kw.items()}
     assert norm(other) == norm(direct)
+
+
+def _runner_step(tmp_path, monkeypatch, report):
+    import test_pad_connected_pdn_ring as ring_fixture
+    runner = importlib.import_module('phase3_one_shot_runner')
+    project = tmp_path / 'proj'
+    pnr = project / 'phase3/stage3/pnr'
+    write(pnr / 'routed.def', 'DESIGN top ;\nEND DESIGN\n')
+    write(pnr / 'dut_pnr.v', 'module top(); endmodule\n')
+    write(pnr / 'constraint.sdc', '')
+    write(pnr / 'pnr.tcl', 'add_global_connection -net VDD -pin_pattern {^VDD$} -power\n')
+    put(project / 'phase3/librelane_switch.json', {'steps': {'32': 'librelane'}})
+    pdk = ring_fixture._pdk(tmp_path, ring=None)
+    monkeypatch.setattr(contract, 'resolve_image', lambda p=None: 'img')
+    monkeypatch.setattr(contract, 'pdk_root_resolution',
+                        lambda *a, **k: {'path': str(tmp_path / 'pdkroot')})
+    calls = {}
+
+    def run(project_, **kw):
+        calls.update(kw)
+        return report(project_)
+    monkeypatch.setattr(prr, 'run', run)
+    result = runner.step_postroute_repair_librelane(project, 'dut', pdk, 'unused')
+    return runner, project, pnr, result, calls
+
+
+def test_the_runner_hands_the_adopted_route_to_the_direct_paths(tmp_path, monkeypatch):
+    def report(project):
+        folder = project / 'phase3/librelane/32-cand01/01-vibeic-postrouterepair'
+        d = write(folder / 'top.def', 'DESIGN top ;\n# repaired\nEND DESIGN\n')
+        n = write(folder / 'top.nl.v', 'module top(); /* repaired */ endmodule\n')
+        state = put(folder / 'state_out.json', {'def': str(d), 'nl': str(n)})
+        return {'verdict': 'PASS', 'adopted': '32-cand01', 'adopted_state': str(state),
+                'baseline': {'hold_ws_min': -0.335, 'drv_count': 0},
+                'final': {'hold_ws_min': 0.326, 'drv_count': 0}, 'corners': CORNERS,
+                'final_supply_ownership': {'verdict': 'PASS'}}
+    runner, project, pnr, result, calls = _runner_step(tmp_path, monkeypatch, report)
+    assert result.status == 'PASS' and result.detail.startswith('ADOPTED 32-cand01'), result.detail
+    assert '# repaired' in (pnr / 'routed.def').read_text()
+    assert 'repaired' in (pnr / 'dut_pnr.v').read_text()
+    assert '# repaired' not in (pnr / 'routed_base_prerepair.def').read_text()
+    claim = json.loads((pnr / runner._DRV_PROMOTION_CLAIM).read_text())
+    assert claim['program'] == 'librelane_postroute_repair' and claim['promoted'] is True
+    assert not (pnr / runner._DRV_PROMOTION_NOT_RUN).exists()
+    # the deck's own supply rules and fill policy travel with the database
+    assert 'add_global_connection' in Path(calls['pg_rules_tcl']).read_text()
+    assert calls['derate'] == (runner._FLAT_OCV_DERATE_EARLY, runner._FLAT_OCV_DERATE_LATE)
+    handoff = json.loads((project / 'reports/phase3/librelane_postroute_repair_handoff.json').read_text())
+    assert set(handoff['views']) == {'def', 'nl'}
+
+
+def test_the_runner_keeps_the_input_route_and_says_why_when_nothing_is_adopted(tmp_path, monkeypatch):
+    def report(project):
+        return {'verdict': 'PASS', 'adopted': None, 'baseline': {}, 'final': {},
+                'closure': [{'controller': 'postroute.repair_hold', 'outcome': 'PLATEAU'}]}
+    runner, project, pnr, result, _ = _runner_step(tmp_path, monkeypatch, report)
+    assert result.status == 'PASS' and 'no candidate adopted' in result.detail
+    assert (pnr / 'routed.def').read_text() == 'DESIGN top ;\nEND DESIGN\n'
+    assert not (pnr / 'routed_base_prerepair.def').exists()
+    rec = json.loads((pnr / runner._DRV_PROMOTION_NOT_RUN).read_text())
+    assert rec['not_run_stage'] == 'librelane_closure_kept_input'
+    assert 'postroute.repair_hold: PLATEAU' in rec['reason']
+
+
+def test_the_main_flow_replaces_the_direct_repair_producers_only_when_selected():
+    """Source contract of the one call site: the LibreLane producer runs only
+    when selected, and then neither direct producer does."""
+    src = (PROGRAMS / 'phase3_one_shot_runner.py').read_text()
+    at = src.index('_prr_on_librelane = _librelane_postroute_repair_mode(project) != "direct"')
+    block = src[at:at + 3000]
+    assert 'if _chain_ok and _prr_on_librelane:' in block
+    assert block.index('step_postroute_repair_librelane') < block.index('step_signoff_spef_repair')
+    assert block.count('if _chain_ok and not _prr_on_librelane:') == 2
