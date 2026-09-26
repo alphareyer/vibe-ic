@@ -1,11 +1,11 @@
-# vibe-ic — AI-Native IC Design plugin (**v1.25.16**)
+# vibe-ic — AI-Native IC Design plugin (**v1.25.17**)
 
 **A deterministic program layer with AI-backup skills, driving spec → RTL → GDS.**
 
 The plugin is no longer "compliance regexes over agent prose". It is **1489 top-level Python
 programs** (1360 of them catalogued in [`programs/INDEX.md`](programs/INDEX.md); the other
-129 are helper modules and shims) that run the flow, **60 skills** that back the programs up
-where judgment is genuinely required, **6 slash commands**, **9 agents**, and
+129 are helper modules and shims) that run the flow, **70 skills** that back the programs up
+where judgment is genuinely required, **7 slash commands**, **9 agents**, and
 **4042 test files**. Programs decide; skills only fill the holes the programs
 deliberately leave.
 
@@ -109,8 +109,8 @@ artifact on disk — see **Honesty gates** below.
 | **L2 — Deterministic programs** | Artifact checks (files, JSON, RTL, reports) | Agent claims without evidence |
 | **L3 — mcp_execution_verify** | MCP tool execution proof via manifest | Agent faking tool runs |
 
-Measured over the 60 skills: **60/60** ship a `compliance.yaml` (L1), **33/60** declare a
-non-empty `cross_checks:` block (L2), **6/60** wire `mcp_execution_verify` (L3).
+Measured over the 70 skills: **70/70** ship a `compliance.yaml` (L1), **41/70** declare a
+non-empty `cross_checks:` block (L2), **6/70** wire `mcp_execution_verify` (L3).
 Coverage is deliberately uneven — advisory/methodology skills have no artifact to check,
 which is the physical limit of the approach, not a backlog item.
 
@@ -236,9 +236,9 @@ plugins/vibe-ic/
 │   ├── _commercial_pdk.py         — config-driven commercial-PDK resolution
 │   ├── gds_antenna/, metal_fill/  — sub-packages
 │   └── tests/                     — 4042 test files
-├── skills/                        — 60 skills, each with SKILL.md + compliance.yaml
+├── skills/                        — 70 skills, each with SKILL.md + compliance.yaml
 │   └── <skill>/tests/             — 82 per-skill compliance regression files
-├── commands/                      — 6 slash commands + _anti_fabrication_rules.md
+├── commands/                      — 7 slash commands + _anti_fabrication_rules.md
 ├── agents/                        — 9 agents (ic-expert, core, field, gatekeeper,
 │                                    repo-gatekeeper, benchmark, 3 personas)
 ├── mcp-eda/                       — the eda-tools MCP server (Node)

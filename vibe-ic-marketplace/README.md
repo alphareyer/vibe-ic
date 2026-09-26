@@ -13,7 +13,7 @@ and the contribution guides for extending it.
 | | |
 |---|---|
 | Plugins in this marketplace | **1** — [`plugins/vibe-ic`](plugins/vibe-ic/) |
-| Plugin version | **1.25.16** |
+| Plugin version | **1.25.17** |
 | Deterministic programs | **1489** top level (`plugins/vibe-ic/programs/*.py`), of which **1360** are catalogued in [`INDEX.md`](plugins/vibe-ic/programs/INDEX.md) |
 | Skills | **60** (`plugins/vibe-ic/skills/*/SKILL.md`, each with a `compliance.yaml`) |
 | Slash commands | **7** (`plugins/vibe-ic/commands/*.md`) |
@@ -476,7 +476,7 @@ cd plugins/vibe-ic && python3 -m pytest programs/tests/ -q
 
 | Program | Role |
 |---|---|
-| **`flow_compliance_check.py`** | Strict 68-step gate — reads `flow/phase1_phase2_phase3.yaml`, validates every step's outputs + gate predicate, rejects rubber-stamp waivers. **Exit 0 is the only PASS.** |
+| **`flow_compliance_check.py`** | Strict 70-step gate — reads `flow/phase1_phase2_phase3.yaml`, validates every step's outputs + gate predicate, rejects rubber-stamp waivers. **Exit 0 is the only PASS.** |
 | `stage{1,2,3,4}_compliance.py` | Per-stage interim gates |
 | `analog_flow_compliance_check.py` | A1-A9 analog-stage gate |
 | **`waivers_schema_check.py`** | Rejects placeholder reasons (`TODO`, `n/a`), self-approvers (`agent`, `claude`), duplicate ids |
@@ -546,10 +546,10 @@ vibe-ic-marketplace/
 ├── templates/partner-plugin-skeleton/
 ├── community/backlogs/
 └── plugins/
-    └── vibe-ic/                         ← the single plugin (v1.25.16)
+    └── vibe-ic/                         ← the single plugin (v1.25.17)
         ├── .claude-plugin/plugin.json
         ├── flow/
-        │   └── phase1_phase2_phase3.yaml   ← 68-step source of truth
+        │   └── phase1_phase2_phase3.yaml   ← 70-step source of truth
         ├── commands/                    ← 7 slash commands
         ├── agents/
         │   ├── ic-expert-agent.md       ← assembles JSON from answers + defaults
@@ -557,7 +557,7 @@ vibe-ic-marketplace/
         │   └── lessons/
         │       ├── ic_expert_L1..L9.md  ← prose lessons per layer
         │       └── manifests/L1_manifest.json  ← 40-fact Q-bank (PoC)
-        ├── skills/                      ← 60 skills, each + compliance.yaml
+        ├── skills/                      ← 70 skills, each + compliance.yaml
         ├── programs/                    ← 5623 *.py at any depth (1489 top level)
         │   ├── flow_compliance_check.py ← final gate
         │   ├── stage{1,2,3,4}_compliance.py
