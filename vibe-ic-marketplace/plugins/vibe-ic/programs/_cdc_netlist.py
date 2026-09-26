@@ -110,12 +110,13 @@ def build(project: Path, rtl_files: List[Path], top: Optional[str],
         argv = ["yosys", "-q", "-p", script]
     elif image:
         import os
+        import _docker_memory as _dmem
         mounts = {project} | {f.parent for f in files
                               if not f.parent.is_relative_to(project)}
         vols: List[str] = []
         for m in sorted(mounts):
             vols += ["-v", f"{m}:{m}"]
-        argv = [docker, "run", "--rm", "--network", "none",
+        argv = [docker, "run", *_dmem.docker_memory_flags(), "--rm", "--network", "none",
                 "-u", f"{os.getuid()}:{os.getgid()}", *vols,
                 "--entrypoint", "yosys", image, "-q", "-p", script]
     else:
