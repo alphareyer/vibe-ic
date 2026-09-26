@@ -16675,10 +16675,7 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
     t0 = time.time()
     set_invocation_provenance_sink(project)
     switch = json.loads((project / "phase3/librelane_switch.json").read_text())
-    image = switch.get("image")
-    if not image:
-        return StepResult("synth", "FAIL", time.time() - t0,
-                          "LL_IMAGE_UNDECLARED: phase3/librelane_switch.json needs image")
+    image = _ll.resolve_image(project)
     rtl = sorted(_pl.rtl_dir(project).glob("*.sv")) + sorted(_pl.rtl_dir(project).glob("*.v"))
     skipped = ("assertions", "de10lite_top", "host_emulator", "_tb", "testbench", "stimulus")
     rtl = _drop_include_hubs([path for path in rtl
@@ -36367,6 +36364,198 @@ def _prepare_padring_for_route(
     return result, consumer
 
 
+def _librelane_admission_facts(project: Path) -> Dict[str, Any]:
+    """What a declared step switch adds to the canonical admission identity.
+
+    The switch selects a different PRODUCER for its steps, and that producer's
+    logic lives in `librelane_contract.py`, which the runner-only program
+    digest does not cover.  MEASURED on the spm copy: a contract-only fix was
+    refused DUPLICATE_NO_NEW_EVIDENCE, and so would a direct run followed by
+    the same run with the switch added.  Absent switch: nothing is added, so
+    every existing identity is unchanged.
+    """
+    switch = project / "phase3/librelane_switch.json"
+    if not switch.is_file():
+        return {}
+    import librelane_contract as _ll
+    try:
+        declared: Any = json.loads(switch.read_text())
+    except (OSError, ValueError) as exc:
+        declared = f"UNREADABLE:{exc}"
+    return {"librelane_switch": declared,
+            "librelane_contract_sha256": _ll.digest(PROGRAMS_DIR / "librelane_contract.py")}
+
+
+def _librelane_floorplan_modes(project: Path) -> Dict[str, str]:
+    """The contract switch for the two floorplan producers (15, 15.5ic)."""
+    import librelane_contract as _ll
+    return {step: _ll.selected_mode(project, step) for step in ("15", "15.5ic")}
+
+
+def _prepare_librelane_floorplan_for_route(
+        project: Path, pdk: PdkConfig, container: str, out_dir: Path,
+        generic_pnr_tcl: str, modes: Dict[str, str],
+        io_view_discover=_discover_padring_io_views,
+        ) -> Tuple[StepResult, Optional[str]]:
+    """Steps 15/15.5ic through LibreLane, handed to the direct routing deck.
+
+    The chain is the image's own Chip-flow segment from `OpenROAD.Floorplan`
+    to `OpenROAD.PadRing` (15.5ic only) or `Odb.RemovePDNObstructions` (15 as
+    well), with configs resolved from the design's declarations.  Its State is
+    handed to the paths the direct consumer and gates already read, bound by
+    sha256; the tool DEF is then gated by `pad_ring_check --librelane-state`
+    and consumed by the same `read_def -floorplan_initialize` seam as the
+    direct ring.  No producer failure falls back to the direct path.
+    """
+    import librelane_contract as _ll
+    t0 = time.time()
+
+    def _fail(code: str, detail: str, status: str = "FAIL") -> Tuple[StepResult, None]:
+        return StepResult("pad_ring_gen", status, time.time() - t0,
+                          detail if detail.startswith(code) else f"{code}: {detail}",
+                          extras={"finding": code, "librelane_modes": modes},
+                          reason_class=(_V.ReasonClass.INPUT_ABSENT.value
+                                        if status == "NOT_MEASURED" else "")), None
+
+    if "dual" in modes.values():
+        return _fail("LL_DUAL_FLOORPLAN_NOT_READY",
+                     "no same-scope routed measurements for both floorplan arms")
+    if modes["15"] == "librelane" and modes["15.5ic"] != "librelane":
+        return _fail("LL_FLOORPLAN_PADRING_SPLIT_UNSUPPORTED",
+                     "LibreLane PadRing runs between Floorplan and TapEndcap; "
+                     "select 15.5ic=librelane with 15=librelane")
+    image = _ll.resolve_image(project)
+    pdk_root = _ll.resolve_pdk_root(project)
+    if not pdk_root:
+        return _fail("LL_PDK_ROOT_NOT_DECLARED",
+                     "phase3/librelane_switch.json pdk_root_host or "
+                     "VIBEIC_LIBRELANE_PDK_ROOT", "NOT_MEASURED")
+    producer = (StepResult("io_pad_chip_top_gen", "PASS", 0.0, "already run")
+                if _padring_chip_top_record(project) is not None
+                else step_io_pad_chip_top_gen(project, container, pdk))
+    record = _padring_chip_top_record(project)
+    if producer.status == "FAIL" or record is None:
+        return _fail("LL_CHIP_TOP_MISSING", producer.detail)
+    core = str(record.get("core_module") or "")
+    wrapper = project / record["chip_top_verilog"]
+    netlist, _, _ = pnr_input_netlist(project, core)
+    notes: List[str] = []
+    pdk_args: List[str] = []
+    try:
+        pdk_root_c, pdk_tree = _padring_pdk_root_and_tree(pdk, container)
+        pdk_args = ["--pdk-root", str(pdk_root_c), "--pdk", str(pdk_tree)]
+    except ValueError as exc:
+        return _fail("LL_PDK_TREE_UNRESOLVED", str(exc))
+    # The PAD_* translation (librelane_config harvest) is the design's
+    # declared input to the tool placer; the Python ring placer does not run.
+    for name, extra in (("pad_assignment_gen.py", pdk_args),):
+        prog_c = _to_container_path(str(PROGRAMS_DIR / name), container)
+        cmd = " ".join(shlex.quote(x) for x in (
+            "python3", prog_c, _to_container_path(str(project), container), *extra))
+        rc, out, err = _docker_exec(container, cmd, marker=prog_c)
+        notes.append(f"{name}: rc={rc}")
+        if rc != 0:
+            return _fail("LL_PAD_ASSIGNMENT_FAILED", f"{name} rc={rc}: {(out + err)[-800:]}")
+    last = ("Odb.RemovePDNObstructions" if modes["15"] == "librelane"
+            else "OpenROAD.PadRing")
+    mounts = [(Path(pdk_root) / str(pdk.name), f"/pdk/{pdk.name}")]
+    try:
+        # `Yosys.JsonHeader` is the tool's producer of the `json_h` power view
+        # that `Odb.SetPowerConnections` declares; it reads the declared RTL.
+        steps = ["Yosys.JsonHeader"] + _ll.flow_segment(
+            image, "OpenROAD.Floorplan", last)
+        pdn_cfg = _ll.emit_pdn_cfg(image, str(pdk.name),
+                                   project / "phase3/librelane/15-config/pdn_cfg.tcl")
+        overlay = ({"PDN_CFG": (str(pdn_cfg.resolve()),
+                                "image librelane/scripts/openroad/common/pdn_cfg.tcl + "
+                                f"pdk_registry.json pdks[name={pdk.name}].pdn_ring.connects")}
+                   if pdn_cfg and modes["15"] == "librelane" else None)
+        configs = _ll.resolve_step_configs(project, image, str(pdk.name), steps,
+                                           pdk_root=Path(pdk_root), folder="15-config",
+                                           overlay=overlay)
+        state0 = _ll.state_from_direct(
+            project, image, configs[steps[0]],
+            {"nl": [netlist, wrapper]},
+            project / "phase3/librelane/15-config/bridge", mounts=mounts,
+            chain=[configs[s] for s in steps[1:]])
+        folders = _ll.run_chain(project, image, [(s, configs[s], state0) for s in steps],
+                                mounts=mounts, lane="15-floorplan")
+    except _ll.Refusal as exc:
+        return _fail(exc.code, str(exc))
+    by_step = dict(zip(steps, folders))
+    ring_state = by_step["OpenROAD.PadRing"] / "state_out.json"
+    final_state = folders[-1] / "state_out.json"
+    padring = out_dir / "padring.def"
+    handoff = project / "reports/phase3/librelane_floorplan_handoff.json"
+    try:
+        _ll.handoff_to_direct(ring_state, {"def": padring}, handoff.with_name(
+            "librelane_padring_handoff.json"))
+        _ll.handoff_to_direct(final_state, {"def": out_dir / "floorplan.def",
+                                            "odb": out_dir / "librelane_floorplan.odb"},
+                              handoff)
+    except _ll.Refusal as exc:
+        return _fail(exc.code, str(exc))
+    # The existing 15.5ic gate, on the tool's own PadRing DEF.  Its PDK reads go
+    # through `_pad_ring`'s environment seam -- the run's container once phase
+    # 3 has published one -- so it takes the SAME container-side PDK tree as the
+    # direct gates, never the host path the LibreLane mount uses (MEASURED on
+    # the spm copy: the host root made every IO master unresolvable,
+    # PADRING_TOOL_MASTER_OR_PLACEMENT_UNRESOLVED on the first corner).
+    gate = _pr.run([sys.executable, str(PROGRAMS_DIR / "pad_ring_check.py"),
+                    str(project), "--librelane-state", str(ring_state), *pdk_args],
+                   capture_output=True, text=True, errors="replace")
+    notes.append(f"pad_ring_check --librelane-state: rc={gate.returncode}")
+    if gate.returncode != 0:
+        return _fail("PADRING_TOOL_GATE_FAILED", (gate.stdout + gate.stderr)[-800:])
+    if getattr(pdk, "tech_lef", None):
+        prog_c = _to_container_path(str(PROGRAMS_DIR / "pad_bterm_coincidence_check.py"),
+                                    container)
+        cmd = " ".join(shlex.quote(x) for x in (
+            "python3", prog_c, _to_container_path(str(project), container),
+            *pdk_args, "--tech-lef", str(pdk.tech_lef)))
+        rc, out, err = _docker_exec(container, cmd, marker=prog_c)
+        notes.append(f"pad_bterm_coincidence_check.py: rc={rc}")
+        if rc != 0:
+            return _fail("PADRING_BTERM_GATE_FAILED", (out + err)[-800:])
+    consumed = out_dir / ("floorplan.def" if modes["15"] == "librelane" else "padring.def")
+    try:
+        io_lefs, io_gds = io_view_discover(pdk, container)
+        deck = _inject_padring_io_lefs(generic_pnr_tcl, io_lefs)
+        deck = _inject_padring_chip_top(
+            deck, _to_container_path(str(wrapper), container),
+            str(record.get("chip_top_module") or "chip_top"), core)
+        if modes["15"] == "librelane":
+            deck = _ll.elide_tap_pdn_region(deck, _PNR_STAGE_MARKER)
+        coincidence = project / "reports" / "phase3" / "pad_bterm_coincidence.json"
+        exclusion_tcl, excluded = ("", [])
+        if coincidence.is_file():
+            exclusion_tcl, excluded = _padring_bterm_exclusion_tcl(
+                coincidence.read_text(encoding="utf-8", errors="replace"))
+        text = consumed.read_text(encoding="utf-8", errors="replace")
+        consumer = _padring_routing_consumer_tcl(
+            deck, _to_container_path(str(consumed), container),
+            _padring_physical_only_instance_tcl(text) + "\n"
+            + _ll.def_supply_tcl(text, _PNR_STAGE_MARKER),
+            exclusion_tcl)
+    except (OSError, ValueError) as exc:
+        return _fail("LL_FLOORPLAN_NO_CONSUMER", str(exc))
+    for view in io_lefs:
+        if view not in pdk.macro_lefs:
+            pdk.macro_lefs.append(view)
+    for view in io_gds:
+        if view not in pdk.macro_gds:
+            pdk.macro_gds.append(view)
+    _record_physical_view_inventory(project, consumer)
+    notes.append(f"LibreLane {steps[0]}..{steps[-1]} ({len(steps)} steps, {image}); "
+                 f"routing consumer reads {consumed.relative_to(project)} "
+                 f"(handoff receipt {handoff.relative_to(project)}); "
+                 f"{len(excluded)} port net(s) excluded")
+    return StepResult("pad_ring_gen", "PASS", time.time() - t0, "; ".join(notes),
+                      [str(padring), str(consumed), str(handoff)],
+                      extras={"librelane_modes": modes,
+                              "librelane_steps": steps}), consumer
+
+
 def _pin_access_layers_from_cell_lef(cell_lef_text: str) -> "set[str]":
     """Layers that standard-cell PINS are drawn on, from the cell LEF itself.
 
@@ -37444,7 +37633,13 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         (int(_si.get("llx", 0)), int(_si.get("lly", 0)))
         for _si in spare_plan.get("instances", [])
         if _si.get("cell")]
-    tapcell_prune_block = _build_tapcell_prune_tcl(pdk, _spare_pts_um)
+    # Steps 15/15.5ic producer switch (librelane_contract).  With 15 on
+    # LibreLane the taps are TapEndcapInsertion's, so the direct prune and the
+    # post-route well-tie repair (the source of the y~666 um NW/DV/PP seam on
+    # spm final14) must not edit them.  Absent switch: byte-identical deck.
+    _ll_fp_modes = _librelane_floorplan_modes(project)
+    tapcell_prune_block = ("" if _ll_fp_modes["15"] == "librelane"
+                           else _build_tapcell_prune_tcl(pdk, _spare_pts_um))
     # #1215-PDN — derived (never tuned) EM strap-width floor from this
     # project's own prior measurement + the PDK's own Jmax; None on a first
     # pass (no measurement yet) keeps the PDN byte-identical. NONFATAL.
@@ -37593,8 +37788,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         "design_declared_die": bool(_l9_die_note),
         "sparse_active_row_fill": bool(
             _ring_inset is not None and fp_rect is None and not _l9_die_note),
-        "welltie_repair_tcl": _build_welltie_coverage_repair_tcl(
-            pdk, _tap_pitch, _tap_pitch_src),
+        "welltie_repair_tcl": ("" if _ll_fp_modes["15"] == "librelane" else
+                               _build_welltie_coverage_repair_tcl(
+            pdk, _tap_pitch, _tap_pitch_src)),
     }
     filler_block = _postroute_filler_spec["welltie_repair_tcl"] + \
         _build_sparse_die_aware_filler_tcl(
@@ -37980,9 +38176,18 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _chip_padring = _chip_path_requests_pad_ring(project)
 
     _sdr_child_deck_failures: Dict[str, str] = {}
+    _ll_fp_geometry: List[Any] = []
 
     def _install_route_deck() -> Optional[StepResult]:
         """Write the current geometry's route deck, refreshing its ring first."""
+        if not _chip_padring and set(_ll_fp_modes.values()) != {"direct"}:
+            # The proven LibreLane segment is the Chip flow's; a core-only
+            # design has no pad declarations for it.  Never a silent direct run.
+            return StepResult(
+                "pnr", "FAIL", time.time() - t0,
+                "LL_FLOORPLAN_CORE_ONLY_UNSUPPORTED: steps 15/15.5ic on "
+                f"LibreLane need the chip-path pad declaration ({_ll_fp_modes})",
+                extras={"finding": "LL_FLOORPLAN_CORE_ONLY_UNSUPPORTED"})
         if not _chip_padring:
             pnr_tcl.write_text(_generic_pnr_tcl)
             # #2253 — and the CHILD deck for each SDR site, derived from the
@@ -37995,9 +38200,26 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                 _write_sdr_child_decks(pnr_tcl, out_dir, container,
                                        spare_plan=spare_plan))
             return None
-        pad_result, consumer_tcl = _prepare_padring_for_route(
-            project, pdk, container, out_dir, out_dir_c,
-            _generic_pnr_tcl, pad_ring_step=pad_ring_step)
+        if set(_ll_fp_modes.values()) != {"direct"}:
+            # Every die/core rewrite of this step goes through
+            # `_rewrite_pnr_floorplan_die(deck, die_w, die_h, core_pad, core_w,
+            # core_h, ...)`; a placement-only retry (GPL-0305) changes none of
+            # these, and must reach the same tool floorplan again.
+            _fp_now = (die_w, die_h, core_pad, core_w, core_h, fp_rect)
+            if _ll_fp_geometry and _fp_now != _ll_fp_geometry[0]:
+                return StepResult(
+                    "pnr", "FAIL", time.time() - t0,
+                    "LL_FLOORPLAN_RESIZE_REFUSED: the floorplan is the "
+                    "LibreLane step-15 output; a die rewrite cannot reach it",
+                    extras={"finding": "LL_FLOORPLAN_RESIZE_REFUSED"})
+            _ll_fp_geometry[:] = [_fp_now]
+            pad_result, consumer_tcl = _prepare_librelane_floorplan_for_route(
+                project, pdk, container, out_dir, _generic_pnr_tcl,
+                _ll_fp_modes)
+        else:
+            pad_result, consumer_tcl = _prepare_padring_for_route(
+                project, pdk, container, out_dir, out_dir_c,
+                _generic_pnr_tcl, pad_ring_step=pad_ring_step)
         if pad_ring_results is not None:
             pad_ring_results[:] = [pad_result]
         if pad_result.status != "PASS" or consumer_tcl is None:
@@ -46948,7 +47170,8 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     """Opt-in tool stream-out; direct remains the production default."""
     if candidate:
         return _step_gds_direct(project, top, pdk, container, candidate=True)
-    from librelane_contract import Refusal, selected_mode
+    from librelane_contract import (Refusal, resolve_image, resolve_pdk_root,
+                                    selected_mode)
     mode = selected_mode(project, "37")
     if mode == "direct":
         return _step_gds_direct(project, top, pdk, container)
@@ -46981,8 +47204,8 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
         if fb.get("status") != "PASS" or fb.get("source_sha256") != _sha256_file(def_file):
             return StepResult("gds", "FAIL", time.time() - t0,
                               "FEEDBACK_ROUTE_DIGEST_MISMATCH: pre-stream admission refused")
-    image = os.environ.get("VIBEIC_LIBRELANE_IMAGE")
-    root = os.environ.get("VIBEIC_LIBRELANE_PDK_ROOT")
+    image = resolve_image(project)
+    root = resolve_pdk_root(project)
     if not image or not root:
         return StepResult("gds", "NOT_MEASURED", time.time() - t0,
                           "LL_IMAGE_OR_PDK_ROOT_NOT_DECLARED",
@@ -70628,7 +70851,8 @@ def main() -> int:
          "die_um": args.die_um, "util": args.util, "pdk": args.pdk,
          "allow_oss_pdk_fallback": bool(args.allow_oss_pdk_fallback),
          "allow_pdk_target_mismatch": bool(args.allow_pdk_target_mismatch),
-         "spare_density": args.spare_density}
+         "spare_density": args.spare_density,
+         **_librelane_admission_facts(project)}
     if _window_sites is not None:
         import tempfile
         with tempfile.TemporaryDirectory(prefix="phase3-admission-",

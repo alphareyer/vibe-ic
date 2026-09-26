@@ -129,17 +129,26 @@ def def_pins(text: str) -> Dict[str, Dict[str, Any]]:
 
 
 def def_net_terminals(text: str) -> Dict[str, List[Tuple[str, str]]]:
-    """`{net: [(instance, pin), ...]}` for every instance terminal on it."""
+    """`{net: [(instance, pin), ...]}` for every instance terminal on it.
+
+    Both NETS and SPECIALNETS: OpenROAD's `place_io_terminals` (LibreLane
+    OpenROAD.PadRing) writes each port net it lands on a pad as a SPECIAL net,
+    `- clk ( PIN clk ) ( u_pad_clk PAD ) + USE SIGNAL ;`. MEASURED on the spm
+    PadRing DEF: all 36 port nets were there and none in NETS, so reading NETS
+    alone found 0 ports on a pad. A SPECIALNETS routing coordinate `( x y )` or
+    wildcard `( * VDD )` names no placed component and is skipped by the caller.
+    """
     out: Dict[str, List[Tuple[str, str]]] = {}
-    for entry in PR._section(text, "NETS").split(";"):
-        entry = entry.strip()
-        m = _NET_RE.match(entry)
-        if not m:
-            continue
-        conns = [(c.group("inst"), c.group("pin"))
-                 for c in _CONN_RE.finditer(m.group("tail"))
-                 if c.group("inst") != "PIN"]
-        out[m.group("name")] = conns
+    for section in ("NETS", "SPECIALNETS"):
+        for entry in PR._section(text, section).split(";"):
+            entry = entry.strip()
+            m = _NET_RE.match(entry)
+            if not m:
+                continue
+            conns = [(c.group("inst"), c.group("pin"))
+                     for c in _CONN_RE.finditer(m.group("tail"))
+                     if c.group("inst") != "PIN"]
+            out[m.group("name")] = out.get(m.group("name"), []) + conns
     return out
 
 

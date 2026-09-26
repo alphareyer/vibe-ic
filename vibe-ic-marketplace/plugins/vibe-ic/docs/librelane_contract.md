@@ -8,7 +8,11 @@ The adapter invokes the installed LibreLane CLI, `python3 -m librelane.steps run
 
 Each step directory holds LibreLane output, `input_fingerprint.json`, `invocation.log`, and `vibeic_receipt.json`. The fingerprint includes image name, config hash, state JSON hash and every referenced state-file hash. A matching complete receipt resumes without re-running; a failed or changed step is archived under `phase3/librelane/attempts/` and re-run. Later steps use the newly emitted state. Receipts hash `state_out.json`, local geometry/views, JSON reports and `.rpt` reports. The `run_chain` caller supplies the existing image override candidate; image names are pinned per run.
 
-Before any step the adapter runs the image's LibreLane CLI help and **actually executes** `yosys -Q -T -y /dev/null -p help`. A nonzero result raises `LL_IMAGE_INCAPABLE`; it never selects the direct path in response. `0.3.76` fails this probe; `0.3.71-librelane-rc11` passes. No candidate image release is implied.
+Before any step the adapter runs the image's LibreLane CLI help and **actually executes** `yosys -Q -T -y /dev/null -p help`. A nonzero result raises `LL_IMAGE_INCAPABLE`; it never selects the direct path in response. `0.3.76` fails this probe; `0.3.71-librelane-rc11` passes.
+
+**Default image (T89).** `resolve_image(project)` returns the switch's `image`, else `VIBEIC_LIBRELANE_IMAGE`, else `RELEASED_IMAGE`: the released 0.3.77 **by digest**, `ghcr.io/vibeic/vibeic-eda@sha256:b966901ee828d5e5d2c8a20c1e5306a614b529a1a07ed2d15204b7651f58e9fd`. `resolve_pdk_root(project)` returns the switch's `pdk_root_host`, else `VIBEIC_LIBRELANE_PDK_ROOT`; it is never guessed.
+
+**Tcl command-name probe (T89).** Released 0.3.77 passes the CLI probe but, unaided, aborts the Chip flow at `OpenROAD.STAMidPNR` (`invalid command name "est::check_corner_wire_cap"`). LibreLane's OpenROAD scripts call two commands by an abbreviation (`est::check_corner_wire_cap` for `est::check_corner_wire_caps`; `utl::metric_int` for `utl::metric_integer`). OpenROAD 26Q3-2943 installs OpenSTA's unknown-command handler, which expands a prefix relative to `::sta`, so these no longer resolve. `image_capability` therefore also runs a probe in the image: it lists every namespaced command the image's `librelane/scripts/openroad` tree calls, excluding namespaces the scripts define themselves, and asks the image's own `openroad` and `openroad-python` which exist. An absent command with exactly one expansion becomes an alias. `run_chain` defines exactly those aliases in an OpenROAD init file (`$HOME/.openroad`, under `phase3/librelane/.openroad_home/`), and the fingerprint records them. An absent command with several expansions refuses `LL_IMAGE_TCL_API_SKEW`. An absent command with no expansion is recorded as `unresolved_guarded`; on 0.3.77 these are the three `sta::corners` fallbacks behind a `sta::scenes` guard. The CLI/`yosys -y` probe is the capability verdict; if the Tcl probe itself cannot run, the capability records `tcl_probe: NOT_MEASURED` and adds no alias (a step that needs one then fails by name). The source fix is fork PR `vibeic/librelane` `next/claude-t89-openroad-full-command-names`; once an image carries it, the probe finds no alias to add. No candidate image release is implied.
 
 ## Config and provenance
 
@@ -79,3 +83,32 @@ Step 14: the step-9 tool path also runs `Checker.YosysUnmappedCells`, `Checker.Y
 - **b3 no extra closed-loop re-entry** — the step's declared `closed_loop` trigger (A7: degradation > 10 % → A3, threshold read from the flow YAML) fires in the tool arm only where it fires in direct.
 
 `drive` runs A6..A9 per block through the runner's own `_spf.gate(..., _preflight_refusal(...), step_for_block, ...)` path. M1..M4 are covered by b1. A step cuts over only when b-analog passes on every analog block of the proof design; A6 additionally needs its authoritative decks CLEAN on both blocks, which waits for A5's Mn.d fix.
+
+## T89 two-way state bridge
+
+**direct → LibreLane: `state_from_direct(project, image, config, views, output_dir, *, chain=None, mounts, metrics, metrics_source)`.** It builds the State a resolved LibreLane step can consume from a direct step's real files: `def`, `odb`, `nl` (one file, or the ordered files the direct deck reads before `link_design`, concatenated with per-file sha256 comments), `sdc`, `pnl`, `spef` (`{corner_pattern: path}`), `gds` and so on.
+
+- **Required views** come from LibreLane itself. `resolve_step_configs` writes each step's declared `inputs`/`outputs` to `<step>.views.json` beside the config, because LibreLane's `Meta` refuses unknown keys. Walking `[config, *chain]` in order, every view some step consumes (plus the run_chain floor) that no earlier step declares as output must be in the first State. A missing view refuses `LL_BRIDGE_VIEW_MISSING` before any step runs; a config without the sidecar refuses `LL_STEP_INPUTS_UNDECLARED`.
+- **Derived views.** An ODB missing beside a DEF is written by OpenROAD in the image from the step config's own `TECH_LEFS`/`CELL_LEFS`/`PAD_LEFS`/`MACRO_LEFS`/`EXTRA_LEFS`. A DEF missing beside an ODB is written from it. Failure refuses `LL_BRIDGE_CONVERSION_FAILED`. Nothing else is synthesized.
+- **Checks.** A DEF whose `DESIGN` differs from the config's `DESIGN_NAME` refuses `LL_BRIDGE_DESIGN_MISMATCH`. SPEF without corner keys refuses `LL_BRIDGE_SPEF_CORNERS_UNDECLARED`. Metrics enter only with a named `metrics_source`, else `LL_BRIDGE_METRICS_UNSOURCED`.
+- **Receipt.** `bridge_receipt.json` binds every source, every derived view and the State by sha256. Step 37's `_routed_state` now uses this bridge.
+
+**LibreLane → direct: `handoff_to_direct(state_out, {view: dest}, receipt, *, path_map=None)`.** It copies each named State view (`def`, `odb`, `nl`, `spef:<corner>`) to the path the direct consumer reads. `path_map` rewrites a container prefix such as `/work` for a whole-flow run's State. The receipt binds the State and every file by sha256 on both sides, plus the sha256 of the file it replaced. An absent view refuses `LL_HANDOFF_VIEW_MISSING`.
+
+**Steps 15 / 15.5ic at the producer.** `step_pnr` consults `selected_mode(project, "15")` and `("15.5ic")`. With both `direct` (switch absent, or naming other steps) the deck and its call path are unchanged. Otherwise `_prepare_librelane_floorplan_for_route` does the following:
+
+1. Runs `pad_assignment_gen` (the declared PAD_* translation).
+2. Runs `Yosys.JsonHeader` (the tool's producer of `json_h`) and then the image's own Chip segment `OpenROAD.Floorplan`..`OpenROAD.PadRing` (15.5ic only), or ..`Odb.RemovePDNObstructions` (15 as well). Configs are resolved from declarations. The bridge's first State is the direct deck's own netlist load (core netlist + `chip_top_io.v`).
+3. Hands the PadRing DEF to `phase3/stage3/pnr/padring.def`, and the final DEF/ODB to `floorplan.def`/`librelane_floorplan.odb`, with receipts `reports/phase3/librelane_{padring,floorplan}_handoff.json`.
+4. Gates the tool's PadRing state with `pad_ring_check --librelane-state` and `pad_bterm_coincidence_check`.
+5. Builds the routing deck from the same `read_def -floorplan_initialize` seam as the direct ring. `librelane_contract.def_supply_tcl` first creates the supply nets and pins the DEF itself declares `USE POWER/GROUND`. Without them the floorplan read drops the whole PDN (measured: 30,462 special-wire shapes and 38 BTerms from `read_db`; 0 and 36 without; 30,462 and 38 with, and COMPONENTS/SPECIALNETS/VIAS byte-identical).
+6. With 15 on LibreLane, drops the direct deck's own tap/supply/PDN region, and its post-placement tap prune and post-route well-tie repair, which would edit the tool's taps.
+
+Refusals: `LL_DUAL_FLOORPLAN_NOT_READY`, `LL_FLOORPLAN_PADRING_SPLIT_UNSUPPORTED` (15 LibreLane with 15.5ic direct), `LL_FLOORPLAN_CORE_ONLY_UNSUPPORTED` (no chip-path pad declaration), `LL_PDK_ROOT_NOT_DECLARED`, `LL_FLOORPLAN_RESIZE_REFUSED` (a die rewrite cannot reach a tool floorplan), and `PADRING_TOOL_GATE_FAILED`. None falls back to the direct path.
+
+**Declared config added for this segment.**
+- `VDD_NETS`/`GND_NETS` come from `reports/phase3/io_pad_chip_top.json.power_pad_plan`.
+- `PDN_CORE_RING` and `PDN_CORE_RING_CONNECT_TO_PADS` come from the PDK registry's pad-connected `pdn_ring`.
+- `PDN_CFG` is generated by `emit_pdn_cfg`: the image's own `pdn_cfg.tcl` verbatim, plus `add_pdn_connect` for each registry `pdn_ring.connects` pair.
+
+Without the connects, the default grid never reaches the pads: 3,391,999 power-grid violations. With them, 0, and the spm GeneratePDN SPECIALNETS and VIAS are byte-identical to the t78 hand-deck reference. `resolve_step_configs(..., overlay={key: (value, source)})` adds such values to the design config and its provenance before LibreLane resolves the PDK.

@@ -271,3 +271,49 @@ def test_the_richer_macro_size_decides_where_the_terminal_lands(tmp_path):
     assert narrow_alone["not_connected_nets"] == ["sig"], (
         "precondition: the two SIZE records really do read differently")
     assert fwd["connected_nets"] != narrow_alone["connected_nets"]
+
+
+# ── a tool ring writes its port nets as SPECIAL ────────────────────────────
+_IO_LEF = """MACRO PADX
+  CLASS PAD INPUT ;
+  SIZE 75 BY 350 ;
+  PIN PAD
+    DIRECTION INOUT ;
+    PORT
+      LAYER Metal5 ;
+        RECT 7.5 290 67.5 350 ;
+    END
+  END PAD
+END PADX
+"""
+_TECH = "LAYER Metal5\n  TYPE ROUTING ;\n  WIDTH 0.44 ;\nEND Metal5\n"
+
+
+def _ring_def(section):
+    """One pad at the origin, its port BTerm on the bond terminal; the port net
+    listed in `section` (OpenROAD place_io_terminals writes SPECIALNETS)."""
+    body = "    - clk ( PIN clk ) ( u_pad_clk PAD ) + USE SIGNAL ;\n"
+    nets = f"{section} 1 ;\n{body}END {section}\n"
+    return ("VERSION 5.8 ;\nDESIGN chip_top ;\nUNITS DISTANCE MICRONS 2000 ;\n"
+            "DIEAREA ( 0 0 ) ( 2000000 2000000 ) ;\n"
+            "COMPONENTS 1 ;\n    - u_pad_clk PADX + FIXED ( 0 0 ) N ;\nEND COMPONENTS\n"
+            "PINS 1 ;\n    - clk + NET clk + SPECIAL + DIRECTION INPUT + USE SIGNAL\n"
+            "      + PORT\n        + LAYER Metal5 ( -60000 -60000 ) ( 60000 60000 )\n"
+            "        + FIXED ( 75000 640000 ) N ;\nEND PINS\n" + nets + "END DESIGN\n")
+
+
+def test_a_port_net_the_tool_wrote_as_special_is_still_measured(tmp_path):
+    lef = tmp_path / "io.lef"
+    lef.write_text(_IO_LEF)
+    for section in ("NETS", "SPECIALNETS"):
+        rc, report = C.run(_ring_def(section), _TECH, [lef])
+        assert (rc, report["n_ports_on_a_pad"]) == (0, 1), section
+        assert report["connected_nets"] == ["clk"], section
+
+
+def test_a_special_net_off_its_pad_still_goes_back_to_the_router(tmp_path):
+    lef = tmp_path / "io.lef"
+    lef.write_text(_IO_LEF)
+    moved = _ring_def("SPECIALNETS").replace("( 75000 640000 )", "( 1500000 1500000 )")
+    rc, report = C.run(moved, _TECH, [lef])
+    assert report["connected_nets"] == [] and report["not_connected_nets"] == ["clk"]
