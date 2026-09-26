@@ -163,6 +163,20 @@ domains:
     flow_steps: ["21", "26"]
     satisfied_when: {op: "<=", value: 0}
 
+  em.current_density:
+    summary: >-
+      Worst power-grid segment current density as a fraction of the tech
+      LEF's margined Jmax (em_current_density_check, the Step-25 gate). Sized
+      before routing by the PnR session's own strap search
+      (_ppa/pdn_em_presweep, T103), which is an in-session search, not a
+      closure-controller binding.
+    metric: em.jmax_utilization
+    unit: ratio
+    direction: minimize
+    binding: DECLARED_ONLY
+    flow_steps: ["15", "25"]
+    satisfied_when: {op: "<", value: 0.9}
+
   drc.violations:
     summary: Sign-off DRC violation count.
     metric: drc.violation_count
@@ -279,7 +293,7 @@ actuators:
     blast_radius: FULL_IMPLEMENTATION
     resource_ceilings: {wall_seconds: 3600, max_invocations_per_run: 3}
     rollback: SNAPSHOT_RESTORE
-    remeasure_domains: [ir.static, area.physical, drc.violations, timing.setup]
+    remeasure_domains: [ir.static, em.current_density, area.physical, drc.violations, timing.setup]
 
   routing.antenna_diode_insert:
     summary: Insert antenna diodes / re-route offending nets. Not bound.
@@ -356,7 +370,7 @@ edges:
   "20":   {controller: null, fallback_to: 19,  note: "Hold violation -> delay cell or re-CTS. timing.hold is DECLARED_ONLY; pnr.deck.hold_block_emission repairs a DECK, not hold timing, and binding it here would overclaim."}
   "23":   {controller: null, fallback_to: 32,  note: "Setup/hold -> post-route timing repair. Hands forward to Step 32."}
   "24":   {controller: null, fallback_to: 15,  note: "IR drop > 5% -> PDN strengthen. pdn.strengthen is DECLARED_ONLY."}
-  "25":   {controller: null, fallback_to: 21,  note: "EM violation -> widen wire or re-route. No EM domain is declared yet."}
+  "25":   {controller: null, fallback_to: 21,  note: "EM violation -> widen the PDN. em.current_density is DECLARED_ONLY; the PnR session sizes the straps before routing (_ppa/pdn_em_presweep), and the post-route resize + second PnR is gone, so nothing re-enters 21."}
   "26":   {controller: null, fallback_to: 21,  note: "Antenna violation -> diode or re-route. routing.antenna_diode_insert is DECLARED_ONLY."}
   "27":   {controller: null, fallback_to: 21,  note: "Crosstalk/noise -> shielding or spacing."}
   "28":   {controller: null, fallback_to: 15,  note: "ESD/well-tap/cross-domain gap -> floorplan change."}

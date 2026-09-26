@@ -678,6 +678,36 @@ def finalize(project: Path, pnr_dir: Path) -> Optional[Dict[str, Any]]:
     return rec
 
 
+def librelane_pdn_config(project: Path) -> Tuple[Dict[str, Any], Optional[str]]:
+    """The straps this design's own pre-route EM search chose, as the LibreLane
+    variables `OpenROAD.GeneratePDN` reads ({} when there is no usable record).
+    The strap layers are named with them, so a width is never applied to a
+    layer it was not measured on. Offsets stay LibreLane's: they were not the
+    swept quantity."""
+    path = project / REPORT_REL
+    try:
+        rec = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}, None
+    straps = rec.get("chosen_straps") or {}
+    dirs = (rec.get("lattice") or {}).get("directions") or {}
+    if rec.get("verdict") not in ("PASS", "PASS_WITHOUT_HEADROOM") or not straps:
+        return {}, None
+    by_dir: Dict[str, List[str]] = {}
+    for layer in straps:
+        by_dir.setdefault(str(dirs.get(layer) or ""), []).append(layer)
+    if sorted(by_dir) != ["HORIZONTAL", "VERTICAL"] or any(len(v) != 1 for v in by_dir.values()):
+        return {}, None
+    out: Dict[str, Any] = {}
+    for d, key in (("VERTICAL", "V"), ("HORIZONTAL", "H")):
+        layer = by_dir[d][0]
+        out[f"PDN_{'VERTICAL' if key == 'V' else 'HORIZONTAL'}_LAYER"] = layer
+        out[f"PDN_{key}WIDTH"] = straps[layer]["width"]
+        out[f"PDN_{key}PITCH"] = straps[layer]["pitch"]
+    return out, (f"{REPORT_REL}.chosen_straps (candidate {rec.get('chosen')}, "
+                 f"{rec.get('verdict')}: this design's pre-route PSM EM search)")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 2 or args[0] != "next":
