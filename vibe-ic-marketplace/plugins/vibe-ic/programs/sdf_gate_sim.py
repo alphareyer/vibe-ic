@@ -764,12 +764,10 @@ _SDF_ERROR_RE = re.compile(r"^SDF ERROR:", re.M)
 
 
 def sdf_annotation_census(text: str) -> Dict[str, object]:
-    """How many delays the simulator applied, and how many records it refused.
+    """How many delays the simulator applied, and how many arcs it could not.
 
     PURE — transcript in, counts out. `annotated` is False ONLY when not one
     delay was applied, which is the state that makes "SDF-annotated" false.
-    `sdf_errors` counts every `SDF ERROR` line, of which `modpath_unmatched`
-    is one kind.
     """
     _instrument_calibration.assert_calibrated(
         "sdf_gate_sim::sdf_annotation_census")  # R-0915-86(3)
@@ -777,8 +775,13 @@ def sdf_annotation_census(text: str) -> Dict[str, object]:
     unmatched = len(_SDF_MODPATH_FAIL_RE.findall(text or ""))
     return {"delays_applied": applied,
             "modpath_unmatched": unmatched,
-            "sdf_errors": len(_SDF_ERROR_RE.findall(text or "")),
             "annotated": applied > 0}
+
+
+def sdf_error_count(text: str) -> int:
+    """Every SDF record the simulator refused, of any kind. PURE (T106)."""
+    _instrument_calibration.assert_calibrated("sdf_gate_sim::sdf_error_count")
+    return len(_SDF_ERROR_RE.findall(text or ""))
 
 
 def name_unannotated_run(census: Dict[str, object]) -> Optional[str]:
@@ -1892,14 +1895,15 @@ def judge_tool_arm(step_dir: Path, manifest: Dict[str, object]) -> Dict[str, obj
         parsed = (parse_l10_case_stdout(text) if row.get("compile_rc") == 0
                   else {"verdict": None, "passed": 0, "total": 0, "marker": None})
         census = sdf_annotation_census(text)
+        errors = sdf_error_count(text)
         corner["delays_applied"] += census["delays_applied"]
-        corner["sdf_errors"] += census["sdf_errors"]
+        corner["sdf_errors"] += errors
         corner["modpath_unmatched"] += census["modpath_unmatched"]
         case = {"id": row["case"], "verdict": parsed.get("verdict"),
                 "passed": parsed.get("passed"), "total": parsed.get("total"),
                 "compile_rc": row.get("compile_rc"), "sim_rc": row.get("sim_rc"),
                 "sdf_delays_applied": census["delays_applied"],
-                "sdf_errors": census["sdf_errors"]}
+                "sdf_errors": errors}
         if row.get("compile_rc") != 0:
             case["detail"] = "did not compile against the gate netlist"
         elif parsed.get("verdict") is None:

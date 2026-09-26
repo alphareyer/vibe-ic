@@ -59647,15 +59647,19 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     if _cts_emitted:
         written.append(_cts_emitted)
 
-    # --- Step 29: SDF emit + honest SDF-sim self-report (#437d) --------
-    # OpenROAD's `write_sdf` produces the SDF the gate's check looks for.
-    # T106: with step 29 on `librelane` the SDFs are STAPostPNR's per-corner
-    # ones (consumed from step 23's record) and neither `_emit_sdf` nor the
-    # direct simulation runs; `dual` runs both.
+    # T106: step 29 on the tool -- STAPostPNR's per-corner SDFs through the
+    # custom step (`_step29_tool_arm`). On `librelane` neither `_emit_sdf`
+    # nor the direct simulation runs (`_d29`); `dual` runs both.
     from librelane_contract import selected_mode as _ll_mode29
     _m29 = _ll_mode29(project, "29")
+    _d29 = _m29 != "librelane"
+    if _m29 != "direct":
+        _step29_tool_arm(project, top, pdk, _m29, sim_pl_out,
+                         sim_pl_out / f"{top}.sdf", written, notes)
+    # --- Step 29: SDF emit + honest SDF-sim self-report (#437d) --------
+    # OpenROAD's `write_sdf` produces the SDF the gate's check looks for.
     sdf_out = sim_pl_out / f"{top}.sdf"
-    if _m29 != "librelane" and primary_def.is_file() and _signoff_regen(sdf_out, primary_def):
+    if _d29 and primary_def.is_file() and _signoff_regen(sdf_out, primary_def):
         _emit_sdf(project, top, pdk, container, sdf_out, notes)
         if sdf_out.is_file() and sdf_out.stat().st_size > 0:
             written.append(str(sdf_out))
@@ -59671,9 +59675,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # applies net (interconnect) SDF delays but not IOPATH cell-arc delays (a
     # known Icarus limit); at-speed CELL timing stays STA's job (Step 23/28).
     _sdf_sim_result: Optional[Dict[str, object]] = None
-    if _m29 != "direct":
-        _step29_tool_arm(project, top, pdk, _m29, sim_pl_out, sdf_out, written, notes)
-    if _m29 != "librelane" and sdf_out.is_file() and sdf_out.stat().st_size > 0:
+    if _d29 and sdf_out.is_file() and sdf_out.stat().st_size > 0:
         try:
             import sdf_gate_sim
             _sdf_sim_result = sdf_gate_sim.run(
@@ -65616,9 +65618,9 @@ def _step29_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
             raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
                               "step 29 on LibreLane needs pdk_root_host in the "
                               "switch or VIBEIC_LIBRELANE_PDK_ROOT")
+        # The direct arm writes ONE SDF (`_emit_sdf`, the PDK's default liberty).
         judged = _lp.gate_level_sim(project, top, _ll.resolve_image(project),
-                                    Path(root), pdk.name,
-                                    direct_sdfs=[direct_sdf] if direct_sdf.is_file() else [])
+                                    Path(root), pdk.name, direct_sdfs=[direct_sdf])
         written.append(str(project / "reports/phase3/gls_corners.json"))
         if mode == "librelane":
             written.extend(_sgs.write_tool_arm_results(sim_dir, judged, top))
