@@ -71,7 +71,10 @@ NVR = "Vibeic.NamedViolationReroute"
 #: module never picks a value itself.
 PPA_KNOBS = ("GRT_ADJUSTMENT", "GRT_LAYER_ADJUSTMENTS", "GRT_ANTENNA_REPAIR_ITERS",
              "GRT_ANTENNA_REPAIR_MARGIN", "DRT_OPT_ITERS", "DRT_ANTENNA_REPAIR_ITERS",
-             "VIBEIC_DRT_OR_SEED")
+             "VIBEIC_DRT_OR_SEED",
+             # the flow's own gates on post-GRT repair (off in the Chip flow's
+             # defaults, which the t78 reference routed with)
+             "RUN_POST_GRT_DESIGN_REPAIR", "RUN_POST_GRT_RESIZER_TIMING")
 
 #: The metrics every arm is judged on, and the review's order of "better"
 #: (review70 step 21 dual_tool_option): router DRC first; antenna nets must
@@ -135,14 +138,17 @@ def seed_arms(project: Path) -> List[int]:
 
 
 def chain_ids(image: str, *, seeded: bool = False,
-              flow_segment: Optional[Callable[..., List[str]]] = None) -> List[str]:
+              flow_segment: Optional[Callable[..., List[str]]] = None,
+              gated_off: Optional[Dict[str, List[str]]] = None) -> List[str]:
     """The image's own Chip-flow order for the segment, as step ids (a flow
-    instance suffix such as `-1` dropped), the measure-only STA removed, the
-    named-violation reroute right after the detailed route."""
+    instance suffix such as `-1` dropped), the measure-only STA removed, every
+    step the flow's own gates switch off (`gated_off`, from
+    `librelane_contract.flow_gated_off`) removed, the named-violation reroute
+    right after the detailed route."""
     import librelane_contract as _ll
     order = (flow_segment or _ll.flow_segment)(image, *SEGMENT)
     ids = [re.sub(r"-\d+$", "", s) for s in order]
-    ids = [s for s in ids if s not in MEASURE_ONLY]
+    ids = [s for s in ids if s not in MEASURE_ONLY and s not in (gated_off or {})]
     if DRT not in ids:
         raise ValueError(f"LL_ROUTE_SEGMENT_HAS_NO_DETAILED_ROUTE: {order}")
     at = ids.index(DRT)
@@ -452,12 +458,14 @@ def execute(
         try:
             seeds = seed_arms(project) if mode == "dual" else []
             ov = overlay(R, project, sdc, cfg_dir)
-            ids = chain_ids(image)
-            all_ids = list(dict.fromkeys(ids + [DRT_SEEDED] * bool(seeds)
+            segment = chain_ids(image)
+            all_ids = list(dict.fromkeys(segment + [DRT_SEEDED] * bool(seeds)
                                          + ["OpenROAD.CheckAntennas", "OpenROAD.STAMidPNR"]))
             configs = _ll.resolve_step_configs(
                 project, image, str(pdk.name), all_ids, pdk_root=Path(pdk_root),
                 folder="21-config", overlay=ov)
+            gated_off = _ll.flow_gated_off(cfg_dir)
+            ids = chain_ids(image, gated_off=gated_off)
             sta_cfg = json.loads(configs["OpenROAD.STAMidPNR"].read_text())
             corners = list(sta_cfg.get("STA_CORNERS") or [])
             if not corners:
@@ -481,7 +489,7 @@ def execute(
             return _refuse(getattr(exc, "code", "LL_ROUTE_CONFIG_REFUSED"), str(exc), out)
 
         def _ll_arm(lane: str, seed: Optional[int]) -> Dict[str, Any]:
-            arm_ids = chain_ids(image, seeded=seed is not None)
+            arm_ids = chain_ids(image, seeded=seed is not None, gated_off=gated_off)
             base = project / "phase3/librelane" / lane
             drt_index = next(i for i, s in enumerate(arm_ids) if s in (DRT, DRT_SEEDED))
             # run_chain names each step folder from its position; the reroute
@@ -627,6 +635,7 @@ def execute(
         receipt: Dict[str, Any] = {
             "program": "librelane_route.execute", "mode": mode, "selected": selected,
             "image": image, "corners": corners, "seeds": seeds,
+            "flow_gated_off": gated_off,
             "arms": {n: {"steps": a["ids"],
                          "chain": [str(f.relative_to(project)) for f in a["folders"]],
                          "drt_runs": drt_runs(a["drt"])} for n, a in arms.items()},

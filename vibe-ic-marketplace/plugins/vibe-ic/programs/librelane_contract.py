@@ -1444,6 +1444,13 @@ for step_id in json.loads(Path(requested).read_text()):
         "step": step_id,
         "inputs": [getattr(f, "id", None) or f.value.id for f in target.inputs],
         "outputs": [getattr(f, "id", None) or f.value.id for f in target.outputs]}) + "\\n")
+# The flow's own gates (`Flow.gating_config_vars`): a flow skips a step whose
+# gating variable is false; a caller running steps one by one must too.
+gates = getattr(Chip, "gating_config_vars", {}) or {}
+Path(output, "flow_gates.json").write_text(json.dumps({
+    step_id: {var: raw.get(var) for var in gates.get(step_id, [])}
+    for step_id in json.loads(Path(requested).read_text()) if step_id in gates},
+    indent=2, default=str) + "\\n")
 '''
     cmd = [docker, 'run', '--rm', '-v', f'{project.resolve()}:{project.resolve()}',
            '-v', f'{pdk_root.resolve()}:/pdk:ro', *_plugin_args(step_ids),
@@ -1459,6 +1466,21 @@ for step_id in json.loads(Path(requested).read_text()):
             raise Refusal('LL_STEP_CONFIG_MISSING',
                           f'{step}: no config at {path} naming meta.step {step!r}')
     return configs
+
+
+def flow_gated_off(config_root: Path) -> dict[str, list[str]]:
+    """The requested steps the flow itself would skip, each with the gating
+    variables that are false, from ``flow_gates.json`` written by
+    ``resolve_step_configs`` (the image's ``Flow.gating_config_vars`` over the
+    resolved design config). A missing file refuses: an ungated chain would
+    run steps the flow never runs (a heuristic diode on every pin, MEASURED
+    on spm: 206 diodes and 92 max-fanout DRVs)."""
+    path = config_root / 'flow_gates.json'
+    if not path.is_file():
+        raise Refusal('LL_FLOW_GATES_UNRESOLVED', str(path))
+    return {step: sorted(var for var, value in gates.items() if not value)
+            for step, gates in _load(path).items()
+            if any(not value for value in gates.values())}
 
 
 def emit_pdn_cfg(image: str, pdk: str, output: Path, *, docker: str = 'docker') -> Path | None:

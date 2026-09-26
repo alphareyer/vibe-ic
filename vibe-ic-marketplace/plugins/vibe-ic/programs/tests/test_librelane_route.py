@@ -328,6 +328,13 @@ def _fake_tools(project, *, route_ll=None, seed_ll=None, fail_step=None):
                                                    'STA_CORNERS': CORNERS, 'PNR_CORNERS': None,
                                                    'DESIGN_NAME': 'chip_top'})
             put(root / f'{step}.views.json', {'inputs': ['odb'], 'outputs': []})
+        # the flow's own gates, as the image resolves them for spm (MEASURED)
+        put(root / 'flow_gates.json', {
+            'OpenROAD.RepairDesignPostGRT': {'RUN_POST_GRT_DESIGN_REPAIR': False},
+            'Odb.HeuristicDiodeInsertion': {'RUN_HEURISTIC_DIODE_INSERTION': False},
+            'OpenROAD.RepairAntennas': {'RUN_ANTENNA_REPAIR': True},
+            'OpenROAD.ResizerTimingPostGRT': {'RUN_POST_GRT_RESIZER_TIMING': False},
+            'OpenROAD.DetailedRouting': {'RUN_DRT': True}})
         return out
 
     return chain, resolve, seen
@@ -406,7 +413,12 @@ def test_librelane_route_reaches_the_paths_the_post_route_tail_reads(tmp_path, m
     assert run.rc == 0, run.out
     lane, steps, configs = run.seen['chains'][0]
     assert lane == '21-route'
-    assert steps == route.chain_ids('img', flow_segment=lambda *a: IMAGE_SEGMENT)
+    # the flow's own gates hold: a step the Chip flow skips is not run
+    assert steps == ['OpenROAD.GlobalRouting', 'OpenROAD.CheckAntennas', 'Odb.DiodesOnPorts',
+                     'OpenROAD.RepairAntennas', 'OpenROAD.DetailedRouting', route.NVR,
+                     'Odb.RemoveRoutingObstructions', 'OpenROAD.CheckAntennas',
+                     'Checker.TrDRC', 'Odb.ReportDisconnectedPins', 'Checker.DisconnectedPins',
+                     'Odb.ReportWireLength', 'Checker.WireLength', 'OpenROAD.FillInsertion']
     # head, then the tail appended to the same log; the unsplit deck never runs
     assert len(run.execs) == 2 and 'pnr_route_head.tcl' in run.execs[0]
     assert 'pnr_route_tail.tcl' in run.execs[1] and 'tee -a' in run.execs[1]
@@ -427,6 +439,8 @@ def test_librelane_route_reaches_the_paths_the_post_route_tail_reads(tmp_path, m
     for view in receipt['views'].values():
         assert contract.digest(run.project / view['dest']) == view['dest_sha256']
     assert receipt['selected'] == 'librelane'
+    assert receipt['flow_gated_off']['Odb.HeuristicDiodeInsertion'] == \
+        ['RUN_HEURISTIC_DIODE_INSERTION']
     # the router's own per-run reports, each read on its own (review70 correction)
     assert [r['markers'] for r in receipt['arms']['librelane']['drt_runs']] == [4, 0]
     log = (run.out_dir / 'openroad.log').read_text()
@@ -717,3 +731,23 @@ def test_every_plugin_step_stays_registered():
     for name in ('InsertSpareCells', 'GateLevelSim', 'ClockPathDriveSizing', 'IRDropChecker',
                  'TransientIR', 'DetailedRoutingSeeded', 'NamedViolationReroute'):
         assert f'"{name}"' in init
+
+
+def test_the_flow_gates_are_read_from_the_resolved_config_and_required(tmp_path):
+    put(tmp_path / 'flow_gates.json', {'A.x': {'RUN_A': False, 'RUN_B': True},
+                                       'B.y': {'RUN_B': True}})
+    assert contract.flow_gated_off(tmp_path) == {'A.x': ['RUN_A']}
+    with pytest.raises(contract.Refusal, match='LL_FLOW_GATES_UNRESOLVED'):
+        contract.flow_gated_off(tmp_path / 'absent')
+    ids = route.chain_ids('img', flow_segment=lambda *a: IMAGE_SEGMENT,
+                          gated_off={'Odb.HeuristicDiodeInsertion': ['RUN_HEURISTIC_DIODE_INSERTION']})
+    assert 'Odb.HeuristicDiodeInsertion' not in ids and 'OpenROAD.DetailedRouting' in ids
+    with pytest.raises(ValueError, match='NO_DETAILED_ROUTE'):
+        route.chain_ids('img', flow_segment=lambda *a: IMAGE_SEGMENT,
+                        gated_off={'OpenROAD.DetailedRouting': ['RUN_DRT']})
+
+
+def test_the_resolver_writes_the_flows_own_gates():
+    src = Path(contract.__file__).read_text()
+    assert 'getattr(Chip, "gating_config_vars", {})' in src
+    assert '"flow_gates.json"' in src
