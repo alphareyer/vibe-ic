@@ -194,6 +194,33 @@ def declaration_config(project: Path) -> tuple[dict[str, Any], dict[str, str]]:
     return result, sources
 
 
+def aux_tie_dont_touch(chip_top_record: dict[str, Any]) -> list[str]:
+    """The pad-control tie identities the chip-top producer declared (F23).
+
+    Each `aux_pin_signal_connections` row names a tie instance and the net
+    that joins it to one pad control pin; post-layout LEC proves exactly that
+    instance/pin on exactly that net. LibreLane's RepairDesignPostGPL runs
+    `repair_tie_fanout` (DESIGN_REPAIR_TIE_FANOUT), which deletes each tie and
+    re-drives its load from a clone on a fresh net. MEASURED on spm x gf180mcuD
+    (0.3.79): all 76 declared ties were replaced (`u_pad_clk/PD` on `net`), and
+    with these names `set_dont_touch` the same call inserted 0 ties and every
+    declared net survived. So they reach RSZ_DONT_TOUCH_LIST, which LibreLane's
+    resizer steps apply before repairing.
+    """
+    rows = chip_top_record.get('aux_pin_signal_connections') or []
+    if not isinstance(rows, list):
+        raise Refusal('LL_AUX_TIE_RECORD_INVALID',
+                      'io_pad_chip_top.json.aux_pin_signal_connections is not a list')
+    names: list[str] = []
+    for index, row in enumerate(rows):
+        values = [row.get(k) for k in ('tie_instance', 'net')] if isinstance(row, dict) else []
+        if len(values) != 2 or not all(isinstance(v, str) and v for v in values):
+            raise Refusal('LL_AUX_TIE_RECORD_INVALID',
+                          f'aux_pin_signal_connections[{index}] names no tie_instance/net')
+        names.extend(v for v in values if v not in names)
+    return names
+
+
 def emit_config(project: Path, pdk: str, output: Path) -> dict:
     """Emit only declared inputs; unavailable values stay absent, never guessed."""
     root = project / 'phase1/generated_docs'
@@ -324,6 +351,11 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
         if isinstance(plan.get(field), str) and plan[field]:
             _set(result, sources, key, [plan[field]],
                  f'reports/phase3/io_pad_chip_top.json.power_pad_plan.{field}')
+    if chip_top_record.is_file():
+        _set(result, sources, 'RSZ_DONT_TOUCH_LIST',
+             aux_tie_dont_touch(_load(chip_top_record)) or None,
+             'reports/phase3/io_pad_chip_top.json.aux_pin_signal_connections'
+             '[].{tie_instance,net}')
     # Core ring + pad connection: the PDK registry's pad-connected ring, the
     # same declaration the direct deck's `add_pdn_ring` is built from.
     registry = Path(__file__).resolve().parent / 'pdk_registry.json'

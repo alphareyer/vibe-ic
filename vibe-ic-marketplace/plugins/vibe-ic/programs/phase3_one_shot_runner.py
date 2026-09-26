@@ -45736,6 +45736,144 @@ def _padring_flat_geometry_proof(project: Path, container: Optional[str],
     return rec
 
 
+#: F23 -- the routing session's ingest when steps 15..18 ran in LibreLane
+#: (`librelane_contract.placement_consumer_tcl`). The ring then reaches the deck
+#: inside the tool's placed DEF, not through `read_def -floorplan_initialize`.
+_LL_PLACEMENT_CONSUMED_RE = re.compile(
+    r'(?m)^puts "LIBRELANE_PLACEMENT_CONSUMED: (?P<path>[^"\s]+)"\s*$')
+
+
+def _def_net_members(def_text: str) -> Dict[str, List[Tuple[str, str]]]:
+    """`{net: [(instance, pin), ...]}` over a DEF's NETS and SPECIALNETS.
+
+    A top-level port appears as `("PIN", port)`. SPECIALNETS is read too
+    because OpenROAD writes a net joining a port to a pad pin there (MEASURED:
+    LibreLane PadRing on spm x gf180mcuD, `- clk ( PIN clk ) ( u_pad_clk PAD )
+    + USE SIGNAL`). Wildcard `( * pin )` members are global-connect rules, not
+    connections, and are skipped. A net named in both sections is one net.
+    """
+    out: Dict[str, List[Tuple[str, str]]] = {}
+    for section_name in ("SPECIALNETS", "NETS"):
+        start = re.search(rf"^\s*{section_name}\s+\d+\s*;", def_text, re.MULTILINE)
+        if not start:
+            if section_name == "NETS":
+                raise ValueError("DEF has no NETS section")
+            continue
+        end = re.search(rf"^\s*END\s+{section_name}\b", def_text[start.end():],
+                        re.MULTILINE)
+        if not end:
+            raise ValueError(f"DEF {section_name} section is unterminated")
+        section = def_text[start.end():start.end() + end.start()]
+        for entry in re.finditer(r"^\s*-\s+(?P<net>\S+)\s+(?P<body>.*?);",
+                                 section, re.MULTILINE | re.DOTALL):
+            members = out.setdefault(entry.group("net"), [])
+            for inst, pin in re.findall(r"\(\s+(\S+)\s+(\S+)\s*\)",
+                                        entry.group("body").split("+", 1)[0]):
+                member = ("PIN" if inst.upper() == "PIN" else inst, pin)
+                if inst != "*" and member not in members:
+                    members.append(member)
+    return out
+
+
+def _librelane_placed_ring_evidence(project: Path, pnr_dir: Path,
+                                    records: List[Dict[str, Any]], tcl: str,
+                                    _pr: Any) -> Tuple[List[str], Dict[str, Any]]:
+    """F23: the pad ring the routing session consumed through LibreLane's DEF.
+
+    With steps 15..18 on LibreLane the deck loads the tool's placed DEF and
+    CTS/route run on it; the ring was ingested by the tool's own PadRing step,
+    whose DEF (`padring.def`, receipt `librelane_padring_handoff.json`) is the
+    reference. What this reads, and each FAIL it can write:
+
+    * the deck's `read_def` of the file its LIBRELANE_PLACEMENT_CONSUMED marker
+      names, and a live detailed route after it (PADRING_CONSUMER_MISSING);
+    * that file IS the one the placement handoff receipt bound, byte for byte
+      (PADRING_LL_PLACEMENT_UNBOUND), and padring.def is the one the PadRing
+      receipt bound, when that receipt exists (PADRING_LL_RING_UNBOUND);
+    * every ring instance in the consumed DEF with its reference master,
+      status, origin and orientation (PADRING_LL_RING_MOVED);
+    * every ring pin the reference connects is still connected
+      (PADRING_LL_RING_PIN_DISCONNECTED), and a ring pin the reference joins to
+      top-level ports is still on a net with exactly those ports
+      (PADRING_LL_PORT_CONNECTION_LOST). A ring pin's core-side net may be
+      renamed by buffering; that equivalence is LEC's, not this gate's.
+    """
+    findings: List[str] = []
+    evidence: Dict[str, Any] = {"mode": "librelane_placed_def"}
+    marker = _LL_PLACEMENT_CONSUMED_RE.search(tcl)
+    if marker is None:
+        return ["PADRING_CONSUMER_MISSING:no LIBRELANE_PLACEMENT_CONSUMED marker"], evidence
+    name = PurePosixPath(marker.group("path")).name
+    consumed = pnr_dir / name
+    evidence["consumed_def"] = str(consumed.relative_to(project))
+    if not re.search(rf"(?m)^read_def\s+\S*/{re.escape(name)}\s*$",
+                     tcl[:marker.start()]):
+        findings.append(f"PADRING_CONSUMER_MISSING:no read_def of {name} before the marker")
+    if _PNR_CMD_DETAILED_ROUTE.search(tcl[marker.end():]) is None:
+        findings.append("PADRING_CONSUMER_MISSING:no live detailed_route after the ingest")
+    reports = project / "reports" / "phase3"
+    for receipt_name, target, code, required in (
+            ("librelane_placement_handoff.json", consumed,
+             "PADRING_LL_PLACEMENT_UNBOUND", True),
+            ("librelane_padring_handoff.json", pnr_dir / "padring.def",
+             "PADRING_LL_RING_UNBOUND", False)):
+        receipt = reports / receipt_name
+        if not receipt.is_file():
+            if required:
+                findings.append(f"{code}:{receipt_name} absent")
+            continue
+        try:
+            view = json.loads(receipt.read_text(errors="replace"))["views"]["def"]
+            bound = (PurePosixPath(str(view["dest"])).name == target.name
+                     and target.is_file()
+                     and view.get("dest_sha256") == _sha256_file(target))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            findings.append(f"{code}:{receipt_name} unreadable: {exc}")
+            continue
+        if not bound:
+            findings.append(f"{code}:{target.name} is not the bytes {receipt_name} bound")
+    try:
+        ref_text = (pnr_dir / "padring.def").read_text(errors="replace")
+        got_text = consumed.read_text(errors="replace")
+        ref, got = _pr.parse_def(ref_text), _pr.parse_def(got_text)
+        ref_nets, got_nets = _def_net_members(ref_text), _def_net_members(got_text)
+    except (OSError, ValueError, AttributeError) as exc:
+        findings.append(f"PADRING_CONSUMER_MISSING:ring DEFs unreadable: {exc}")
+        return findings, evidence
+    ring = {str(r.get("instance") or "") for r in records} - {""}
+    moved = []
+    for inst in sorted(ring):
+        a, b = ref.components.get(inst), got.components.get(inst)
+        if (a is None or b is None or not b.placed
+                or (a.master, a.status, a.x, a.y, a.orient)
+                != (b.master, b.status, b.x, b.y, b.orient)):
+            moved.append(inst)
+    if moved:
+        findings.append(f"PADRING_LL_RING_MOVED:{moved[:8]}")
+
+    def _ring_pins(nets: Dict[str, List[Tuple[str, str]]]
+                   ) -> Dict[Tuple[str, str], FrozenSet[str]]:
+        return {(inst, pin): frozenset(p for i, p in members if i == "PIN")
+                for members in nets.values() for inst, pin in members
+                if inst in ring}
+    ref_pins, got_pins = _ring_pins(ref_nets), _ring_pins(got_nets)
+    lost = sorted(f"{i}/{p}" for i, p in ref_pins if (i, p) not in got_pins)
+    ports = sorted(f"{i}/{p}" for (i, p), want in ref_pins.items()
+                   if want and (i, p) in got_pins and got_pins[(i, p)] != want)
+    if lost:
+        findings.append(f"PADRING_LL_RING_PIN_DISCONNECTED:{lost[:8]}")
+    if ports:
+        findings.append(f"PADRING_LL_PORT_CONNECTION_LOST:{ports[:8]}")
+    evidence.update({
+        "consumed_def_sha256": _sha256_file(consumed),
+        "ring_instances": len(ring), "ring_instances_unmoved": len(ring) - len(moved),
+        "ring_pins_connected_reference": len(ref_pins),
+        "ring_pins_connected_consumed": len(ref_pins) - len(lost),
+        "ring_port_connections": sum(1 for v in ref_pins.values() if v),
+        "ring_port_connections_lost": len(ports)})
+    return findings, evidence
+
+
 def step_pad_ring_final_evidence(project: Path, top: str,
                                  gds_result: StepResult,
                                  container: Optional[str] = None
@@ -45813,22 +45951,38 @@ def step_pad_ring_final_evidence(project: Path, top: str,
 
     route_tcl = pnr_dir / "pnr.tcl"
     route_log = pnr_dir / "openroad.log"
+    live_marker = "PADRING_ROUTING_CONSUMED:"
+    routing_consumer = "read_def phase3/stage3/pnr/padring.def"
+    ll_ring: Optional[Dict[str, Any]] = None
     try:
         tcl = route_tcl.read_text(errors="replace")
-        ingest_i = tcl.index("PADRING_ROUTING_CONSUMED:")
-        place_m = _PNR_CMD_GLOBAL_PLACEMENT.search(tcl[ingest_i:])
-        route_m = _PNR_CMD_DETAILED_ROUTE.search(tcl[ingest_i:])
-        if place_m is None or route_m is None:
-            raise ValueError("live placement/route commands absent after ingest")
-        place_i = ingest_i + place_m.start()
-        route_i = ingest_i + route_m.start()
-        if not ingest_i < place_i < route_i:
-            findings.append("PADRING_CONSUMER_ORDER_INVALID")
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
+        tcl = None
         findings.append(f"PADRING_CONSUMER_MISSING:{exc}")
+    if (tcl is not None and "PADRING_ROUTING_CONSUMED:" not in tcl
+            and _LL_PLACEMENT_CONSUMED_RE.search(tcl)):
+        # F23: steps 15..18 ran in LibreLane; the ring arrives inside the
+        # tool's placed DEF and is judged there.
+        ll_findings, ll_ring = _librelane_placed_ring_evidence(
+            project, pnr_dir, records, tcl, _pr)
+        findings.extend(ll_findings)
+        live_marker = "LIBRELANE_PLACEMENT_CONSUMED:"
+        routing_consumer = f"read_def {ll_ring.get('consumed_def')} (LibreLane 15..18)"
+    elif tcl is not None:
+        try:
+            ingest_i = tcl.index("PADRING_ROUTING_CONSUMED:")
+            place_m = _PNR_CMD_GLOBAL_PLACEMENT.search(tcl[ingest_i:])
+            route_m = _PNR_CMD_DETAILED_ROUTE.search(tcl[ingest_i:])
+            if place_m is None or route_m is None:
+                raise ValueError("live placement/route commands absent after ingest")
+            place_i = ingest_i + place_m.start()
+            route_i = ingest_i + route_m.start()
+            if not ingest_i < place_i < route_i:
+                findings.append("PADRING_CONSUMER_ORDER_INVALID")
+        except ValueError as exc:
+            findings.append(f"PADRING_CONSUMER_MISSING:{exc}")
     try:
-        if "PADRING_ROUTING_CONSUMED:" not in route_log.read_text(
-                errors="replace"):
+        if live_marker not in route_log.read_text(errors="replace"):
             findings.append("PADRING_CONSUMER_NOT_OBSERVED_IN_LIVE_LOG")
     except OSError as exc:
         findings.append(f"PADRING_ROUTE_LOG_UNREADABLE:{exc}")
@@ -45934,7 +46088,8 @@ def step_pad_ring_final_evidence(project: Path, top: str,
         "gds_source_def_sha256": (
             _sha256_file(pnr_dir / f"{top}.def")
             if (pnr_dir / f"{top}.def").is_file() else None),
-        "routing_consumer": "read_def phase3/stage3/pnr/padring.def",
+        "routing_consumer": routing_consumer,
+        "librelane_ring_evidence": ll_ring,
         "findings": findings,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
