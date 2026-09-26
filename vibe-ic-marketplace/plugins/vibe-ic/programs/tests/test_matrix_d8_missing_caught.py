@@ -200,6 +200,7 @@ from flow_matrix import waivers as W
 # and so the live capability-gap tables below are read from the module rather
 # than copied into this file.
 import flow_compliance_check as FCC
+from _declared_design_inputs import consumes_declaration, declare_no_reuse
 
 DIM = 8
 
@@ -556,6 +557,15 @@ def _materialize(project: Path, step: Dict[str, Any],
     (project / _GATE_DIR).mkdir(parents=True, exist_ok=True)
     if gate_ok:
         _write(project, _GATE_OK, "d8 gate control\n")
+
+    # F27: a step that declares D1's declaration as its INPUT (step 1:
+    # `required_inputs: {from: D1, outputs: all}`) gets the no-reuse
+    # declaration a real run past D1 holds. Without it step 1's catalog gate
+    # (F9) refuses "declaration missing" -- a fact about a tree no run builds.
+    # Keyed on the step's declared inputs, never on the gate it runs; an input
+    # is never one of the step's own entries, so no drop can reach it.
+    if consumes_declaration(step):
+        declare_no_reuse(project)
 
     for pat in _condition_patterns(step):
         _write(project, concretize(pat), _COND_BODY)
@@ -1631,7 +1641,13 @@ REAL_GATE_PASS_TIER_STEPS: Tuple[str, ...] = (
     # Their measured FAIL tiers remain pinned below.
     # 2026-09-26 (F9), SHRINK, 2 -> 1: "1" leaves and is RECORDED in
     # REAL_GATE_LEFT_THE_PASS_TIER below with the tier it reaches, FAIL.
-    "38",
+    # 2026-09-27 (F27), GROW, 1 -> 2: "1" RETURNS, earned by a declaration and
+    # not by an exemption. The seeded tree now carries step 1's declared INPUT
+    # (D1's no-reuse L1 datasheet, `_declared_design_inputs`), so its real
+    # catalog gate reads the declaration and reports DESIGN_DECLARED_NA, and
+    # dropping the RTL output still moves the step off the tier (the survivor
+    # check below). Remove the seeded declaration and step 1 is FAIL again.
+    "1", "38",
 )
 
 #: The steps whose real gate USED to reach a PASS tier on the seeded fixture
@@ -1764,16 +1780,11 @@ REAL_GATE_LEFT_THE_PASS_TIER: Dict[str, str] = {
     # This is a stronger refusal on this fixture, not a claim of design PASS.
     "32": "FAIL",
     "35": "FAIL",
-    # 2026-09-26 (F9), PASS -> FAIL. Step 1 now runs
-    # `catalog_synth_safe_params_check`, whose applicability is the design's
-    # DECLARATION (the catalog IP its input docs name as reuse). This seeded
-    # tree carries step 1's declared outputs and none of its declared INPUT --
-    # D1's L-docs -- so the gate refuses "declaration missing" (rc 1): unread
-    # is not empty. Not a gate losing the tier on a real design: with a
-    # readable no-catalog declaration step 1 reaches PASS through its own real
-    # gate and dropping the RTL output takes it off that tier, both asserted in
-    # test_f9_step1_catalog_synth_safe_gate.py.
-    "1": "FAIL",
+    # 2026-09-26 (F9), PASS -> FAIL: "1" was recorded here because the seeded
+    # tree carried none of step 1's declared INPUT (D1's L-docs), so its
+    # catalog gate refused "declaration missing". 2026-09-27 (F27): it LEFT
+    # this map and is back in REAL_GATE_PASS_TIER_STEPS, because `_materialize`
+    # now seeds that declared input (see the note there).
 }
 # 2026-07-28: the SET is unchanged (lost: none, gained: none). This tuple is
 # compared in flow DECLARATION order, and the dimension-5 fix moved A6's yaml

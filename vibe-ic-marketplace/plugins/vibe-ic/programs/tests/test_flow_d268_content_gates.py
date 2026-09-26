@@ -9,6 +9,7 @@ import yaml
 
 from programs import flow_compliance_check as compliance
 from programs import flow_gate_enforcement_audit as enforcement
+from _declared_design_inputs import consumes_declaration, declare_no_reuse
 
 FLOW = Path(__file__).resolve().parents[2] / "flow/phase1_phase2_phase3.yaml"
 
@@ -43,10 +44,24 @@ CASES = {
 }
 
 
+def _declare_inputs(root: Path, step_id: str) -> None:
+    """A step that declares D1's declaration as its input gets it (F27).
+
+    Step 1 takes D1's outputs whole, and its catalog synth-safe gate (F9)
+    reads its applicability from them and refuses a tree that has none. The
+    case carries the no-reuse declaration a real run past D1 holds. The
+    content clause is still the subject: the declaration is never the file
+    that is damaged.
+    """
+    if consumes_declaration(_steps()[step_id]):
+        declare_no_reuse(root)
+
+
 @pytest.mark.parametrize("step_id", CASES)
 def test_real_gate_accepts_good_bytes_and_rejects_blank_output(tmp_path, step_id):
     rel, good, damaged = CASES[step_id]
     path = _write(tmp_path, rel, good)
+    _declare_inputs(tmp_path, step_id)
     if step_id == "27":
         _write(tmp_path, "reports/phase3/si_mcf_sta.json", {
             "nominal": {"worst_setup_slack_ns": 1.0},
@@ -91,6 +106,7 @@ def test_content_refusal_denies_the_owning_step_pass_tier(tmp_path, step_id):
     """
     rel, good, _ = CASES[step_id]
     path = _write(tmp_path, rel, good)
+    _declare_inputs(tmp_path, step_id)
     step = _steps()[step_id]
     gate = step["gate"]
     if step_id == "27":
@@ -120,6 +136,33 @@ def test_content_refusal_denies_the_owning_step_pass_tier(tmp_path, step_id):
     path.unlink()
     absent = compliance.check_step(tmp_path, subject, {})
     assert absent.status in {"FAIL", "NOT_MEASURED"}, (step_id, absent.reasons)
+
+
+def test_step1_case_is_judged_on_its_declaration(tmp_path):
+    """F27: the step-1 case reaches PASS through the catalog gate's reading of
+    the seeded declaration (no reuse -> DESIGN_DECLARED_NA), not around it.
+    Without the declaration the same tree is refused, never N/A."""
+    rel, good, _ = CASES["1"]
+    _write(tmp_path, rel, good)
+    step = _steps()["1"]
+    assert consumes_declaration(step)
+    declared = declare_no_reuse(tmp_path)
+    report = tmp_path / "reports/phase2/gates/catalog_synth_safe_params.json"
+    seeded = compliance.check_step(tmp_path, step, {})
+    gate = json.loads(report.read_text())
+    assert (gate["verdict"], gate.get("reason_class")) == (
+        "NOT_APPLICABLE", "DESIGN_DECLARED_NA"), gate
+    assert gate["declaration"]["declared_catalog_reuse"] == []
+    assert seeded.status == "PASS", seeded.reasons
+    assert any("stated_class=DESIGN_DECLARED_NA" in r
+               for r in seeded.reasons), seeded.reasons
+    # The second run's receipt is redirected (the report already exists), so
+    # its verdict is read from the step's own reasons, not the stale file.
+    declared.unlink()
+    unread = compliance.check_step(tmp_path, step, {})
+    assert unread.status == "FAIL", unread.reasons
+    assert any("[NOT_MEASURED] catalog_synth_safe_params_check: declaration "
+               "missing" in r for r in unread.reasons), unread.reasons
 
 
 def test_content_gate_declares_runner_advisory_and_required_step_clauses():

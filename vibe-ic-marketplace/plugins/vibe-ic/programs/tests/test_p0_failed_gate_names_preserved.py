@@ -64,6 +64,8 @@ from pathlib import Path
 
 import pytest
 
+from _declared_design_inputs import declare_no_reuse_input
+
 _PROGRAMS = Path(__file__).resolve().parents[1]
 
 
@@ -249,6 +251,12 @@ def _run_main(tmp_path, monkeypatch, records):
     rtl_dir.mkdir(parents=True)
     (rtl_dir / "top.v").write_text(
         "module top(input a, output b); assign b = a; endmodule\n")
+    # F27: step 1's catalog gate (F9) reads the design's declaration and
+    # refuses "declaration missing" on a tree with none, adding a failing gate
+    # name no P0 record produced. The user's no-reuse input doc is the
+    # declaration at its source, so the only failing names are the stubbed
+    # records. (An L-doc would be a partial D1 output and wake D1's gates.)
+    declare_no_reuse_input(proj)
 
     def _stub(_project, **kw):
         out = kw.get("records_out")
