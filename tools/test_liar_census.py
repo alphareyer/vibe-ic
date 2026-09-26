@@ -3719,3 +3719,174 @@ def test_the_prefix_and_step_requirements_survive_the_widening():
     # an empty --json path
     assert not lc._is_monotonic_json_promotion(
         base, _clause("4", "advisory_program_exit_zero", "some_gate . --json="))
+
+
+# --------------------------------------------------------------------------
+# RENAMES: a clause the flow RE-SPELLED is one obligation, not a removal.
+#
+# Six recorded clauses (steps 18 26 27 32 36 38) read MISSING on main while
+# every one of those gates was still declared and still ran: three had become
+# blocking (D268), one had been pointed at its signed report with `--under`
+# (SPM9), and two wrote their verdict to a new path (R-0915-141). The only way
+# out the floor offered was deleting the entries, which drops the obligation.
+# A `renames` row keeps it: the successor becomes the minimum, and going back
+# to the old spelling is MISSING. Each shape is pinned both ways below.
+# --------------------------------------------------------------------------
+_OPT, _REQ, _ADV = ("optional_program_exit_zero", "program_exit_zero",
+                    "advisory_program_exit_zero")
+
+
+def test_a_kind_rename_accepts_only_a_stronger_kind_on_the_same_argv():
+    cmd = "some_gate . --json reports/x.json"
+    assert lc._is_recorded_rename(_clause("18", _OPT, cmd),
+                                  _clause("18", _REQ, cmd), "kind")
+    assert lc._is_recorded_rename(_clause("18", _ADV, cmd),
+                                  _clause("18", _OPT, cmd), "kind")
+    # weakening, and no change at all, are not renames
+    assert not lc._is_recorded_rename(_clause("18", _REQ, cmd),
+                                      _clause("18", _OPT, cmd), "kind")
+    assert not lc._is_recorded_rename(_clause("18", _REQ, cmd),
+                                      _clause("18", _ADV, cmd), "kind")
+    assert not lc._is_recorded_rename(_clause("18", _REQ, cmd),
+                                      _clause("18", _REQ, cmd), "kind")
+    # a kind row may not also change the argv, move the step or the program
+    assert not lc._is_recorded_rename(
+        _clause("18", _OPT, cmd),
+        _clause("18", _REQ, "some_gate . --json reports/y.json"), "kind")
+    assert not lc._is_recorded_rename(_clause("18", _OPT, cmd),
+                                      _clause("19", _REQ, cmd), "kind")
+    assert not lc._is_recorded_rename(
+        _clause("18", _OPT, cmd),
+        _clause("18", _REQ, "other_gate . --json reports/x.json"), "kind")
+
+
+def test_a_verdict_path_rename_changes_only_the_json_value():
+    was = _clause("36", _REQ, "g . --mode t --json reports/a.json")
+    ok = _clause("36", _REQ, "g . --mode t --json reports/b.json")
+    assert lc._is_recorded_rename(was, ok, "verdict_path")
+    for bad in (
+            _clause("36", _ADV, "g . --mode t --json reports/b.json"),  # weaker
+            _clause("36", _REQ, "g . --mode x --json reports/b.json"),  # input
+            _clause("36", _REQ, "g . --mode t"),                        # dropped
+            _clause("36", _REQ, "g . --mode t --json reports/a.json"),  # same
+            _clause("36", _REQ, "g . --mode t --strict --json r/b.json"),
+            _clause("36", _REQ, "g . --mode t --json r/b.json --json r/c"),
+            _clause("37", _REQ, "g . --mode t --json reports/b.json"),  # step
+            _clause("36", _REQ, "h . --mode t --json reports/b.json")):  # prog
+        assert not lc._is_recorded_rename(was, bad, "verdict_path"), bad
+    # a clause that never published a verdict has no verdict path to move
+    assert not lc._is_recorded_rename(_clause("36", _REQ, "g . --mode t"),
+                                      ok, "verdict_path")
+
+
+def test_an_input_scope_rename_adds_exactly_one_under_pair():
+    was = _clause("26", _REQ, "g . --mode a --json r/s.json")
+    ok = _clause("26", _REQ, "g . --mode a --under r/a.rpt --json r/s.json")
+    assert lc._is_recorded_rename(was, ok, "input_scope")
+    for bad in (
+            _clause("26", _ADV, "g . --mode a --under r/a.rpt --json r/s.json"),
+            _clause("26", _REQ, "g . --mode a --under r/a.rpt"),
+            _clause("26", _REQ, "g . --mode a --under r/a.rpt --json r/t.json"),
+            _clause("26", _REQ, "g . --mode a --under a --under b --json r/s.json"),
+            _clause("26", _REQ, "g . --mode a --under --json r/s.json"),
+            _clause("26", _REQ, "g . --mode b --under r/a.rpt --json r/s.json")):
+        assert not lc._is_recorded_rename(was, bad, "input_scope"), bad
+    # re-scoping an already-scoped clause is not this shape
+    scoped = _clause("26", _REQ, "g . --under r/x --json r/s.json")
+    assert not lc._is_recorded_rename(
+        scoped, _clause("26", _REQ, "g . --under r/x --under r/y --json r/s.json"),
+        "input_scope")
+
+
+def test_an_unknown_transition_is_never_a_rename():
+    cmd = "g . --json r/x.json"
+    assert not lc._is_recorded_rename(_clause("1", _OPT, cmd),
+                                      _clause("1", _REQ, cmd), "anything")
+
+
+def _rename_floor(where: Path, row) -> Path:
+    where.mkdir(parents=True, exist_ok=True)
+    f = where / "floor.json"
+    f.write_text(json.dumps({
+        "clauses": [{"step": "99", "kind": _OPT, "cmd": "alpha ."}],
+        "renames": [row]}), encoding="utf-8")
+    return f
+
+
+_GOOD_ROW = {"from": {"step": "99", "kind": _OPT, "cmd": "alpha ."},
+             "to": {"step": "99", "kind": _REQ, "cmd": "alpha ."},
+             "transition": "kind", "reason": "became blocking",
+             "landing": "abc1234"}
+
+
+def test_a_rename_row_replaces_the_old_spelling_in_the_effective_floor(tmp_path):
+    effective = lc.read_clause_floor(_rename_floor(tmp_path, _GOOD_ROW))
+    assert effective == collections.Counter({("99", _REQ, "alpha ."): 1})
+
+
+@pytest.mark.parametrize("field", ["reason", "landing", "transition", "to"])
+def test_a_rename_row_missing_a_field_is_refused(tmp_path, field):
+    row = {k: v for k, v in _GOOD_ROW.items() if k != field}
+    with pytest.raises(ValueError, match="renames\\[0\\]"):
+        lc.read_clause_floor(_rename_floor(tmp_path, row))
+
+
+def test_a_rename_row_with_a_blank_reason_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="no reason or landing"):
+        lc.read_clause_floor(_rename_floor(tmp_path, dict(_GOOD_ROW, reason=" ")))
+
+
+def test_a_rename_row_that_weakens_is_refused(tmp_path):
+    row = dict(_GOOD_ROW, **{"from": _GOOD_ROW["to"], "to": _GOOD_ROW["from"]})
+    with pytest.raises(ValueError, match="is not the 'kind' rename"):
+        lc.read_clause_floor(_rename_floor(tmp_path, row))
+
+
+def test_an_unanchored_rename_row_is_refused(tmp_path):
+    row = dict(_GOOD_ROW, **{"from": {"step": "99", "kind": _OPT,
+                                      "cmd": "beta ."},
+                             "to": {"step": "99", "kind": _REQ,
+                                    "cmd": "beta ."}})
+    with pytest.raises(ValueError, match="unanchored rename"):
+        lc.read_clause_floor(_rename_floor(tmp_path, row))
+
+
+def _revert_rename(source: str, row) -> str:
+    """The live flow with ONE shipped rename spelled the old way again."""
+    was, now = row["from"], row["to"]
+    if row["transition"] != "kind":
+        needle = f'"{now["cmd"]}"'
+        assert source.count(needle) == 1, needle
+        return source.replace(needle, f'"{was["cmd"]}"', 1)
+    string_form = f'- {now["kind"]}: "{now["cmd"]}"'
+    mapping_form = f'- {now["kind"]}:\n'
+    if source.count(string_form) == 1:
+        indent = " " * 12
+        return source.replace(string_form, (
+            f'- {was["kind"]}:\n{indent}command: "{now["cmd"]}"\n'
+            f'{indent}condition_files_exist: ["reverted/by/test.json"]\n'
+            f'{indent}absent_condition_reason: "reverted by the test"'), 1)
+    command_line = f'command: "{now["cmd"]}"'
+    assert source.count(command_line) == 1, command_line
+    at = source.index(command_line)
+    head = source.rindex(mapping_form, 0, at)
+    return (source[:head] + f'- {was["kind"]}:\n' + source[head + len(mapping_form):])
+
+
+_SHIPPED_RENAMES = json.loads(
+    lc.CLAUSE_FLOOR.read_text(encoding="utf-8")).get("renames") or []
+
+
+@pytest.mark.parametrize(
+    "row", _SHIPPED_RENAMES,
+    ids=[f'{r["to"]["step"]}-{r["transition"]}' for r in _SHIPPED_RENAMES])
+def test_a_shipped_rename_spelled_the_old_way_again_is_MISSING(tmp_path, row):
+    """The successor is the floor now. Reverting the flow to the recorded old
+    spelling must name the successor as MISSING -- the rename made the floor
+    no weaker than the clause the flow declares today."""
+    flow = tmp_path / "reverted.yaml"
+    flow.write_text(_revert_rename(
+        lc.FLOW_YAML.read_text(encoding="utf-8"), row), encoding="utf-8")
+    short = lc.clause_floor_shortfall(flow, lc.CLAUSE_FLOOR)
+    assert short["missing"] == [row["to"]], short["missing"]
+    assert row["from"] in short["surplus"], short["surplus"]
