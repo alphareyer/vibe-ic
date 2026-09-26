@@ -57,9 +57,12 @@ from pathlib import Path
 # 15 ids went red describing the operator's registry rather than the runner.
 # Taking the whole reference from the runner keeps both halves in step.
 # Two ways in, because not every caller goes through `invoke()`: the explicit
-# handoff, else the identity the runner published into the environment when it
-# resolved (`_eda_pin` exports it so a whole process tree agrees) -- and this
-# fake IS part of that tree.
+# handoff, else the identity `_eda_pin` published into the environment when it
+# resolved (so a whole process tree agrees) -- and this fake IS part of that
+# tree. The export agrees on the DIGEST, not on the repository: it names the
+# reference this host HOLDS the bytes under, while the runner asks for its
+# CONFIGURED reference first (#2170). So a caller that starts the runner itself
+# must make the explicit handoff, exactly as `invoke()` does.
 IMAGE = (os.environ.get("FAKE_DOCKER_IMAGE")
          or os.environ.get("VIBEIC_EDA_IMAGE")
          or (((os.environ.get("VIBEIC_EDA_IMAGE_REPO") or "").strip()
@@ -877,6 +880,9 @@ def test_signal_cleanup_removes_owned_container_and_volume(case):
     env = dict(os.environ)
     env["FAKE_DOCKER_STATE"] = str(case["state"])
     env["FAKE_DOCKER_BEHAVIOR"] = "stall"
+    # The same explicit handoff `invoke()` makes: the fake world holds the image
+    # the runner demands (#2100), which is `runner.IMAGE`, not the pin's export.
+    env["FAKE_DOCKER_IMAGE"] = runner.IMAGE
     cmd = [
         sys.executable, str(RUNNER_PATH), "run",
         "--docker-bin", str(case["docker"]), "--subject", str(case["subject"]),
