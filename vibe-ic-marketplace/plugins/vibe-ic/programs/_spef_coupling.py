@@ -154,11 +154,19 @@ def parse_def_wires(def_text: str, layers: Dict[str, LayerInfo],
         units = parse_def_units(def_text)
     segs: List[Segment] = []
     point_re = re.compile(r"\(\s*([\d\-]+|\*)\s+([\d\-]+|\*)\s*\)")
+    # The routing layer is whatever the tech LEF names it.  A spelling pattern
+    # (`MET1`, `metal1`, `M1`) missed gf180's `Metal1`..`Metal5` entirely, and
+    # every consumer of these segments (analytical coupling, the FasterCap
+    # cluster) then read the routed DEF as unrouted.
+    if not layers:
+        return segs
+    layer_re = re.compile(r"(?<![\w.])(" + "|".join(
+        re.escape(name) for name in sorted(layers, key=len, reverse=True)) + r")(?![\w.])")
     for net, body in _iter_net_bodies(def_text):
         # A route path is: <ROUTED|NEW> <LAYER> ( x y ) ( x y ) ...
         chunks = re.split(r"\b(?:ROUTED|NEW)\b", body)
         for ch in chunks:
-            lm = re.search(r"\b(MET\d+|metal\d+|M\d+)\b", ch)
+            lm = layer_re.search(ch)
             if not lm:
                 continue
             layer = lm.group(1)
