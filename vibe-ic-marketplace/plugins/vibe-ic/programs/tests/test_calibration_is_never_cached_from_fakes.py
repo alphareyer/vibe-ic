@@ -158,6 +158,49 @@ def test_a_replaced_judge_is_measured_and_never_stored(order):
     assert C.check(ROUTE).state == C.CALIBRATED
 
 
+# ── an environment's start-up bindings are not a caller's fakes ────────────
+
+def _installed_hook():
+    """The shape the EDA image's `sitecustomize` leaves in `sys.excepthook`:
+    apport's `install.<locals>.partial_apport_excepthook`, a closure defined
+    outside the interpreter's library. The host has no such hook."""
+    def partial_excepthook(*_exc):
+        return None
+    return partial_excepthook
+
+
+def test_a_start_up_hook_the_pair_never_calls_does_not_block_the_cache(
+        monkeypatch):
+    """F8b: with apport's hook in `sys.excepthook`, every calibration in the
+    image was measured and never stored, so a caller that pre-calibrated and
+    then faked a collaborator (test_t63c's `_measure`) was re-calibrated under
+    its own fake and refused as Uncalibrated -- in the image only."""
+    hook = _installed_hook()
+    monkeypatch.setattr(sys, "excepthook", hook)
+    # the witness: read alone, the hook IS a foreign binding of `sys`
+    assert C._is_foreign(hook, "sys", "excepthook")
+    _fresh(ROUTE)
+    real = C.check(ROUTE)
+    assert real.state == C.CALIBRATED, real.detail
+    assert C._CACHE.get(ROUTE) is real
+    # and the caller who fakes afterwards is served the real calibration
+    with monkeypatch.context() as m:
+        m.setattr(R, "antenna_routing_incomplete", _always_fires)
+        assert C.check(ROUTE) is real
+
+
+def test_a_start_up_hook_does_not_hide_a_fake_the_pair_calls(monkeypatch):
+    """The other side: the fake the judge DOES call is still never stored,
+    hook or no hook."""
+    monkeypatch.setattr(sys, "excepthook", _installed_hook())
+    _fresh(ROUTE)
+    with monkeypatch.context() as m:
+        m.setattr(R, "antenna_routing_incomplete", _always_fires)
+        assert C.check(ROUTE).state == C.MISCALIBRATED
+    assert ROUTE not in C._CACHE
+    assert C.check(ROUTE).state == C.CALIBRATED
+
+
 # ── the positive control: nothing in the real tree reads as a fake ─────────
 
 def test_every_real_calibration_is_stored():
