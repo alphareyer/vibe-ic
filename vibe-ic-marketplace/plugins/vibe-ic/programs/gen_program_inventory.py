@@ -383,12 +383,11 @@ _NOT_A_POPULATION_COUNT: tuple[tuple[str, str, str], ...] = (
      "63 counts FLOW STEPS, not programs. The flow step count is owned by "
      "flow/phase1_phase2_phase3.yaml and flow_compliance_check.py."),
     ("plugins/vibe-ic/README.md",
-     "**60 skills** that back the programs up",
-     "60 counts SKILLS, not programs, so this gate does not own it — but it "
-     "is STALE: skills/*/SKILL.md measured 63 on 2026-08-19. Left "
-     "unchanged here deliberately rather than silently corrected, "
-     "because a skills inventory is a separate population that needs "
-     "its own generator; recorded so it is not mistaken for verified."),
+     "**70 skills** that back the programs up",
+     "70 counts SKILLS, not programs, so this gate does not own it. Its "
+     "owner is SKILL_INVENTORY.json .total (programs/gen_skill_inventory.py); "
+     "re-stated from 60 to 70 by the v1.25.0 consistency resync, when "
+     "skills/*/SKILL.md measured 70."),
     ("plugins/vibe-ic/README.md",
      "**9 agents**, and",
      "9 counts AGENTS, not programs. Out of this gate's scope."),

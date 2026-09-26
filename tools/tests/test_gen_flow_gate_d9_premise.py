@@ -82,7 +82,11 @@ def test_the_shipped_report_describes_a_smaller_flow():
     # maps changed modules to tests under `programs/tests/` only, so no
     # selection driven by the flow YAML edit reaches `tools/tests/`. This
     # assertion was the one live `== 68` outside that scan.
-    assert g.flow_step_count(_ROOT) == 69
+    #
+    # 69 -> 70 (2026-09-22, ee7944dca): step 37.3 `gds_xor_check`. Found by
+    # the v1.25.0 FULL run with VIBEIC_RUN_CONSISTENCY=1; the shipped report
+    # still says 63, so the gap it pins widened by one more.
+    assert g.flow_step_count(_ROOT) == 70
 
 
 def test_every_path_refuses_and_says_why(tmp_path):

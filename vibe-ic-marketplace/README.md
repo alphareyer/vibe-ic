@@ -476,7 +476,7 @@ cd plugins/vibe-ic && python3 -m pytest programs/tests/ -q
 
 | Program | Role |
 |---|---|
-| **`flow_compliance_check.py`** | Strict 68-step gate — reads `flow/phase1_phase2_phase3.yaml`, validates every step's outputs + gate predicate, rejects rubber-stamp waivers. **Exit 0 is the only PASS.** |
+| **`flow_compliance_check.py`** | Strict 70-step gate — reads `flow/phase1_phase2_phase3.yaml`, validates every step's outputs + gate predicate, rejects rubber-stamp waivers. **Exit 0 is the only PASS.** |
 | `stage{1,2,3,4}_compliance.py` | Per-stage interim gates |
 | `analog_flow_compliance_check.py` | A1-A9 analog-stage gate |
 | **`waivers_schema_check.py`** | Rejects placeholder reasons (`TODO`, `n/a`), self-approvers (`agent`, `claude`), duplicate ids |
@@ -549,7 +549,7 @@ vibe-ic-marketplace/
     └── vibe-ic/                         ← the single plugin (v1.25.16)
         ├── .claude-plugin/plugin.json
         ├── flow/
-        │   └── phase1_phase2_phase3.yaml   ← 68-step source of truth
+        │   └── phase1_phase2_phase3.yaml   ← 70-step source of truth
         ├── commands/                    ← 7 slash commands
         ├── agents/
         │   ├── ic-expert-agent.md       ← assembles JSON from answers + defaults
@@ -557,7 +557,7 @@ vibe-ic-marketplace/
         │   └── lessons/
         │       ├── ic_expert_L1..L9.md  ← prose lessons per layer
         │       └── manifests/L1_manifest.json  ← 40-fact Q-bank (PoC)
-        ├── skills/                      ← 60 skills, each + compliance.yaml
+        ├── skills/                      ← 70 skills, each + compliance.yaml
         ├── programs/                    ← 5623 *.py at any depth (1489 top level)
         │   ├── flow_compliance_check.py ← final gate
         │   ├── stage{1,2,3,4}_compliance.py
