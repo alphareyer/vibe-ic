@@ -1710,6 +1710,15 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     # cannot round up to a green verdict) and carries the
                     # ENV_UNAVAILABLE tier and the container name in `extras`.
                     _env_gap = _producer_env_gap(rs_cp)
+                    if not _env_gap and rs_cp is not None and \
+                            rs_cp.returncode == _pc.EX_ENV_REFUSED:
+                        # The exit code is the producer's contract for this
+                        # tier (A3's branch reads it the same way); a refusal
+                        # whose sentence lacks the line-start token is still
+                        # a refusal.
+                        _env_gap = (f"{_pc.ENV_REFUSED_TOKEN} "
+                                    f"{real_prog.name} exited "
+                                    f"{_pc.EX_ENV_REFUSED}")
                     if _env_gap and not _corner_results_exists(project, bname):
                         return StepResult(
                             step_name, bname, _spf.REFUSAL_STATUS,
