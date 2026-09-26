@@ -89,6 +89,9 @@ def test_the_testbench_must_include_the_block_netlist_exactly_once(tmp_path):
                                    tmp_path / "post_layout")
     assert ".include blk_post.sp" in out
     assert ".lib ../../../m.lib tt" in out
+    pre = A7.post_layout_testbench(tb, "blk", None, tmp_path,
+                                   tmp_path / "post_layout")
+    assert ".include ../blk.sp" in pre
     for bad in ("X1 a b 0 blk\n", ".include blk.sp\n.include blk.sp\n"):
         with pytest.raises(ValueError, match="A7_TB_INCLUDE_AMBIGUOUS"):
             A7.post_layout_testbench(bad, "blk", "p.sp", tmp_path, tmp_path)
@@ -204,6 +207,10 @@ def test_the_producer_writes_a_comparison_the_a7_gate_certifies(stub):
     assert (project / doc["_provenance"]["extracted_netlist"]).is_file()
     rec = json.loads((bdir / "a7_post_layout.json").read_text())
     assert [c["depth"] for c in rec["corners"]] == ["RC", "RC"]
+    # nothing the resimulation wrote lands beside the A3 deck
+    assert sorted(p.name for p in bdir.iterdir() if p.is_file()) == sorted([
+        "a7_post_layout.json", "blk.gds", "blk.sp", "corner_results.json",
+        "layout_provenance.json", "pre_vs_post.json", "tb_blk.sp"])
     # every extraction ran through the contract, one step dir per style
     assert len(list((project / "phase3/librelane/analog/blk").glob(
         "a7_*/01-magic-rcx/vibeic_receipt.json"))) == 2

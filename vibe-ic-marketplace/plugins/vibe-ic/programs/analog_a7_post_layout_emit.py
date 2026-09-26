@@ -206,11 +206,14 @@ def post_layout_netlist(block: str, ports: List[str], rcx_text: str,
     return text, mapping
 
 
-def post_layout_testbench(tb_text: str, block: str, post_name: str,
+def post_layout_testbench(tb_text: str, block: str, post_name: Optional[str],
                           tb_dir: Path, new_dir: Path) -> str:
-    """The A3 testbench with its one include of `<block>.sp` pointed at the
-    post-layout netlist; every other relative card re-expressed for
-    `new_dir`. Refused unless the block netlist is included exactly once."""
+    """The A3 testbench relocated to `new_dir`, with its one include of
+    `<block>.sp` pointed at `post_name` (the post-layout netlist) — or, when
+    `post_name` is None, at the delivered netlist itself (the pre-layout run,
+    kept out of the block directory other readers glob). Every other relative
+    card is re-expressed for `new_dir`. Refused unless the block netlist is
+    included exactly once."""
     hits = 0
     out = []
     for line in tb_text.splitlines():
@@ -219,6 +222,9 @@ def post_layout_testbench(tb_text: str, block: str, post_name: str,
             target = m.group(2).strip("'\"")
             if Path(target).name == f"{block}.sp":
                 hits += 1
+                if post_name is None:
+                    post_name = os.path.relpath(
+                        (tb_dir / target).resolve(), new_dir)
                 out.append(f"{m.group(1)}{post_name}{m.group(3)}")
                 continue
             if not os.path.isabs(target):
@@ -325,11 +331,19 @@ def run(project: Path, block: str, container: str, image: str,
         return {"ok": ok, "meas": meas, "status": status,
                 "log": str(deck.with_suffix(".ngspice.log").relative_to(project))}
 
-    pre = simulate(tb)
+    try:
+        pre_tb = work / f"tb_{block}_pre.sp"
+        write_text(pre_tb, post_layout_testbench(tb_text, block, None, bdir,
+                                                 work))
+    except ValueError as exc:
+        return _refuse(record, record_path, str(exc).split(":", 1)[0],
+                       str(exc), 1)
+    pre = simulate(pre_tb)
     if not pre["ok"]:
         return _refuse(record, record_path, "A7_PRE_SIM_FAILED",
                        f"the A3 testbench did not simulate ({pre['log']})", 1)
-    record["pre"] = {"testbench": str(tb.relative_to(project)),
+    record["pre"] = {"testbench": str(pre_tb.relative_to(project)),
+                     "relocated_from": str(tb.relative_to(project)),
                      "measurements": pre["meas"], "log": pre["log"]}
 
     specs: List[dict] = []
