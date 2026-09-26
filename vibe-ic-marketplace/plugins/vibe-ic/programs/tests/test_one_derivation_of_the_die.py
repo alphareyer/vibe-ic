@@ -170,7 +170,15 @@ _READERS = (
 #: `die_finishing_gen` PREFERS the built die to the agreed one because the ring
 #: must fit the layout it is added to, and says the disagreement belongs to the
 #: 37.5ic precheck — which is now the rung that reports it.
-_DELIBERATE = ("die_finishing_gen.py",)
+#: `librelane_contract.declaration_config` (T95, step 0.5ic) reads the DIEAREA
+#: of the operator slot's own `FP_DEF_TEMPLATE` -- an INPUT, not a DEF this
+#: run wrote -- only to COMPARE it with the declared die and refuse
+#: `LL_DEF_TEMPLATE_DIE_MISMATCH`. The die it emits is the declaration's
+#: `die_area_um`, never the template's rectangle; and `_declared_die` cannot be
+#: its declared side, because `floorplan_rectangles.json` is written by
+#: `step_pnr`, after 0.5ic. Pinned by
+#: `test_the_contract_compares_the_template_die_and_never_adopts_it`.
+_DELIBERATE = ("die_finishing_gen.py", "librelane_contract.py")
 #: Out of this lane: the runner is serialised to another lane, and the
 #: aggregator already carries the FP-08 fix this item generalises.
 _ELSEWHERE = ("phase3_one_shot_runner.py", "signoff_metrics_aggregate.py")
@@ -234,6 +242,31 @@ def test_the_named_non_readers_really_do_not_read_a_die():
     assert "if DIE_AREA_RE.search(txt):" in fb, \
         "frontend_backend_handoff_check now does something with the match " \
         "besides recognising a config file — re-examine it"
+
+
+def test_the_contract_compares_the_template_die_and_never_adopts_it(tmp_path):
+    """The reason `librelane_contract` is in `_DELIBERATE`, asserted rather
+    than noted: with a slot template stating a die and NO declared die, the
+    config carries the template path and no DIE_AREA -- the DEF's rectangle is
+    never emitted as the die. A declared die that disagrees is refused."""
+    import librelane_contract as LC
+    sub = tmp_path / "input" / "submission_template"
+    (sub / "slots").mkdir(parents=True)
+    (sub / "template").mkdir()
+    (sub / "slots" / "slot_1x1.yaml").write_text(
+        "FP_DEF_TEMPLATE: ../template/slot.def\n")
+    (sub / "template" / "slot.def").write_text(_def_text(SLOT_DIE_UM))
+    (tmp_path / LC.DECLARATION_REL).write_text(json.dumps({"answers": {}}))
+    result, _ = LC.declaration_config(tmp_path)
+    assert result["FP_DEF_TEMPLATE"] == "dir::input/submission_template/template/slot.def"
+    assert "DIE_AREA" not in result, result
+    assert SLOT_DIE_UM not in [list(v) for v in result.values()
+                               if isinstance(v, (list, tuple))], result
+
+    (tmp_path / LC.DECLARATION_REL).write_text(json.dumps(
+        {"answers": {"die_area_um": SLOT_CORE_UM}}))
+    with pytest.raises(LC.Refusal, match="LL_DEF_TEMPLATE_DIE_MISMATCH"):
+        LC.declaration_config(tmp_path)
 
 
 # --------------------------------------------------------------------------- #

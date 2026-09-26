@@ -260,6 +260,34 @@ def test_pdk_image_reader_argv_carries_the_ceiling(monkeypatch):
     assert argv.index("--memory") < argv.index("img:1"), argv
 
 
+def test_cdc_netlist_image_argv_carries_the_ceiling(tmp_path, monkeypatch):
+    """`_cdc_netlist.build` (T91 step 3) runs yosys in the image when the host
+    has none. Driven, not grepped: the argv it hands `subprocess.run` carries
+    both flags, equal, before the image."""
+    import _cdc_netlist as cdc
+    monkeypatch.setenv("VIBEIC_DOCKER_MEMORY", "3g")
+    monkeypatch.setattr(cdc.shutil, "which", lambda _name: None)
+    seen = []
+
+    class _CP:
+        returncode, stdout, stderr = 1, "", ""
+
+    def _fake(argv, **_kw):
+        seen.append(list(argv))
+        return _CP()
+    monkeypatch.setattr(cdc.subprocess, "run", _fake)
+    rtl = tmp_path / "top.v"
+    rtl.write_text("module top; endmodule\n")
+    with pytest.raises(cdc.Refusal, match="CDC_NETLIST_BUILD_FAILED"):
+        cdc.build(tmp_path, [rtl], "top", image="img:1")
+    assert len(seen) == 1, seen
+    argv = seen[0]
+    assert argv[:2] == ["docker", "run"], argv
+    assert argv[argv.index("--memory") + 1] == "3g", argv
+    assert argv[argv.index("--memory-swap") + 1] == "3g", argv
+    assert argv.index("--memory") < argv.index("img:1"), argv
+
+
 def test_technology_facts_argv_carries_the_ceiling(monkeypatch):
     """The tech-LEF read in `submission_template_fetch` (vibe-ic#2111).
 

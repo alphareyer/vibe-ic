@@ -1,4 +1,4 @@
-"""T89: the two-way state bridge, the released-image default and the 15/15.5ic switch.
+"""T89: the two-way state bridge, the resolved-image default and the 15/15.5ic switch.
 
 The contract and the runner run for real; only an EDA tool's file writes are
 substituted at the subprocess edge.
@@ -14,6 +14,8 @@ import pytest
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 contract = importlib.import_module('librelane_contract')
+import _eda_pin  # noqa: E402
+from _stated_eda_image import STATED_DIGEST, stated_image, state_the_image  # noqa: E402
 
 #: Verbatim probe output from the released 0.3.77 image
 #: (ghcr.io/vibeic/vibeic-eda@sha256:b966901e...), openroad and openroad-python.
@@ -38,18 +40,34 @@ def _fresh_capability_cache(monkeypatch):
     monkeypatch.setattr(contract, '_CAPABILITY', {}, raising=False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_IMAGE', raising=False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_PDK_ROOT', raising=False)
+    state_the_image(monkeypatch)
 
 
 # ---------------------------------------------------------------- image ---
 
-def test_default_image_is_the_released_digest_and_declarations_override(tmp_path, monkeypatch):
-    assert contract.resolve_image(tmp_path) == contract.RELEASED_IMAGE
-    assert '@sha256:b966901ee828d5e5d2c8a20c1e5306a614b529a1a07ed2d15204b7651f58e9fd' \
-        in contract.RELEASED_IMAGE
+def test_default_image_is_the_host_resolved_image_and_declarations_override(tmp_path, monkeypatch):
+    # the fallback is the plugin's one runtime resolver, never a stored constant
+    assert contract.resolve_image(tmp_path) == stated_image()
+    monkeypatch.setattr(_eda_pin, 'resolved_image_digest',
+                        lambda env=None, *, allow_pull=False: 'sha256:' + '9e' * 32)
+    assert contract.resolve_image(tmp_path) == f"{_eda_pin.IMAGE_REPO_DEFAULT}@sha256:{'9e' * 32}"
     monkeypatch.setenv('VIBEIC_LIBRELANE_IMAGE', 'env-image')
     assert contract.resolve_image(tmp_path) == 'env-image'
     put(tmp_path / 'phase3/librelane_switch.json', {'image': 'declared-image'})
     assert contract.resolve_image(tmp_path) == 'declared-image'
+
+
+def test_unresolvable_image_is_refused_by_name_never_guessed(tmp_path, monkeypatch):
+    def unresolvable(env=None, *, allow_pull=False):
+        raise _eda_pin.ImageNotResolvable(['this host: no vibeic-eda image carries a digest'])
+    monkeypatch.setattr(_eda_pin, 'resolved_image_digest', unresolvable)
+    with pytest.raises(contract.Refusal, match='LL_IMAGE_NOT_RESOLVABLE') as info:
+        contract.resolve_image(tmp_path)
+    assert info.value.code == 'LL_IMAGE_NOT_RESOLVABLE'
+    assert 'no vibeic-eda image carries a digest' in str(info.value)
+    # an explicit declaration still wins without asking the host
+    monkeypatch.setenv('VIBEIC_LIBRELANE_IMAGE', 'env-image')
+    assert contract.resolve_image(tmp_path) == 'env-image'
 
 
 def test_capability_derives_only_unique_abbreviation_aliases(monkeypatch):
@@ -416,6 +434,24 @@ def test_floorplan_switch_refuses_by_name_and_never_runs_direct(tmp_path, monkey
     assert consumer is None
 
 
+def test_floorplan_with_no_resolvable_image_is_not_measured_by_name(tmp_path, monkeypatch):
+    def must_not(*_a, **_k):  # pragma: no cover
+        raise AssertionError('direct producer or tool ran')
+
+    def unresolvable(env=None, *, allow_pull=False):
+        raise _eda_pin.ImageNotResolvable(['this host: none'])
+    monkeypatch.setattr(_eda_pin, 'resolved_image_digest', unresolvable)
+    monkeypatch.setattr(runner, '_docker_exec', must_not)
+    monkeypatch.setattr(runner, 'step_pad_ring_gen', must_not)
+    monkeypatch.setenv('VIBEIC_LIBRELANE_PDK_ROOT', str(tmp_path / 'pdks'))
+    result, consumer = runner._prepare_librelane_floorplan_for_route(
+        tmp_path, _pdk(tmp_path), 'c', tmp_path / 'phase3/stage3/pnr', _deck(),
+        {'15': 'librelane', '15.5ic': 'librelane'})
+    assert result.status == 'NOT_MEASURED'
+    assert result.detail.startswith('LL_IMAGE_NOT_RESOLVABLE')
+    assert consumer is None
+
+
 def test_librelane_floorplan_state_reaches_the_direct_routing_deck(tmp_path, monkeypatch):
     project = tmp_path / 'project'
     out_dir = project / 'phase3/stage3/pnr'
@@ -464,7 +500,7 @@ def test_librelane_floorplan_state_reaches_the_direct_routing_deck(tmp_path, mon
         project, pdk, 'c', out_dir, _deck(), {'15': 'librelane', '15.5ic': 'librelane'},
         io_view_discover=lambda *a: (['/pdk/io.lef'], ['/pdk/io.gds']))
     assert result.status == 'PASS', result.detail
-    assert seen['image'] == contract.RELEASED_IMAGE and seen['folder'] == '15-config'
+    assert seen['image'] == stated_image() and seen['folder'] == '15-config'
     assert seen['lane'] == '15-floorplan'
     # the declared PDN deck reaches the tool config with its provenance
     value, source = seen['overlay']['PDN_CFG']

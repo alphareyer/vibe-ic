@@ -19,6 +19,7 @@ import pytest
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 contract = importlib.import_module('librelane_contract')
+from _stated_eda_image import state_the_image  # noqa: E402
 runner = importlib.import_module('phase3_one_shot_runner')
 sp = importlib.import_module('_spare_plan')
 import test_librelane_state_bridge as bridge  # noqa: E402  (T89 fixtures)
@@ -33,6 +34,7 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(contract, '_CAPABILITY', {}, raising=False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_IMAGE', raising=False)
     monkeypatch.delenv('VIBEIC_LIBRELANE_PDK_ROOT', raising=False)
+    state_the_image(monkeypatch)   # the identity is stated, never asked of this host
 
 
 # ============================================================ contract ====

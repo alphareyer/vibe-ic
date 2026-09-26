@@ -904,13 +904,6 @@ def placement_levers(project: Path) -> dict[str, tuple[Any, str]]:
     return overlay
 
 
-#: The released LibreLane-capable vibeic-eda image, pinned BY DIGEST (owner
-#: 2026-09-26: 0.3.77, librelane 3.1.0.dev1, OpenROAD 26Q3-2943).  A tag can
-#: move; a digest cannot.  An explicit switch/env declaration overrides it.
-RELEASED_IMAGE = ('ghcr.io/vibeic/vibeic-eda@sha256:'
-                  'b966901ee828d5e5d2c8a20c1e5306a614b529a1a07ed2d15204b7651f58e9fd')
-
-
 def resolve_pdk_root(project: Path | None = None) -> str | None:
     """Switch ``pdk_root_host`` > ``VIBEIC_LIBRELANE_PDK_ROOT``; never guessed."""
     path = project / 'phase3/librelane_switch.json' if project else None
@@ -919,10 +912,23 @@ def resolve_pdk_root(project: Path | None = None) -> str | None:
 
 
 def resolve_image(project: Path | None = None) -> str:
-    """Switch ``image`` > ``VIBEIC_LIBRELANE_IMAGE`` > the released digest."""
+    """Switch ``image`` > ``VIBEIC_LIBRELANE_IMAGE`` > the host's resolved image.
+
+    The fallback is the plugin's ONE runtime resolver, `_eda_pin.image_reference`
+    (the newest released vibeic-eda image on this host, by its own version
+    label, as a digest).  The source never stores a digest or version: the EDA
+    image and the plugin release separately (owner 2026-08-21, 2026-09-17).
+    When nothing resolves this refuses by name; it never guesses.
+    """
     path = project / 'phase3/librelane_switch.json' if project else None
     declared = _load(path).get('image') if path and path.is_file() else None
-    return str(declared or os.environ.get('VIBEIC_LIBRELANE_IMAGE') or RELEASED_IMAGE)
+    if declared or os.environ.get('VIBEIC_LIBRELANE_IMAGE'):
+        return str(declared or os.environ['VIBEIC_LIBRELANE_IMAGE'])
+    import _eda_pin
+    try:
+        return _eda_pin.image_reference()
+    except _eda_pin.ImageNotResolvable as exc:
+        raise Refusal('LL_IMAGE_NOT_RESOLVABLE', str(exc)) from None
 
 
 # LibreLane's OpenROAD scripts name some commands by an ABBREVIATION of the
