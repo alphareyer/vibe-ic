@@ -1,0 +1,534 @@
+#!/usr/bin/env python3
+"""Step 30's tool arm: OpenSTA `write_path_spice` on the STAPostPNR corner.
+
+The deck is the TOOL's (T106). OpenSTA `write_path_spice` writes, for each of
+the top-N setup paths, the path's cells as subckt instances, every net's SPEF
+RC network, the side-input sensitisation and the stimulus, for ngspice or
+Xyce. `spice_correlation_check`'s own deck builders never read the SPEF's RC
+network (measured: scaling every `*D_NET` cap by 10 moved nothing,
+RULINGS CT-08); this deck carries it.
+
+What stays vibe-ic's (the gate), applied to the tool's result:
+
+* the POST-ROUTE BASIS: the netlist, SDC, SPEF and liberties are exactly the
+  ones `OpenROAD.STAPostPNR` timed this corner with
+  (`librelane_contract.post_pnr_timing_inputs`), from the state step 23
+  recorded (`librelane_postroute.stapostpnr_state`), or the arm refuses by
+  name;
+* the LIBERTY-GRID TOLERANCE: `spice_correlation_check.
+  derive_liberty_path_tolerance` over the stages the STA path reports, at the
+  slew and load STA used, with no fixed percentage;
+* the SAME ARC: SPICE is measured from the start pin to the end pin at the
+  transitions the STA path names, at the liberty's own thresholds;
+* the SPEF-MUTATION CONTROL: every `*CAP` (and `*D_NET` total) is scaled by
+  ``MUTATION_FACTOR`` and the same start/end pins are re-timed and
+  re-simulated. A SPICE delay that does not move is not a post-layout
+  correlation (`SPEF_UNRESPONSIVE`).
+
+Two things the installed OpenSTA needs from its inputs, both derived, never
+typed:
+
+* its subckt reader treats the LAST token of every `X` line as a subckt name,
+  so a PDK whose devices are subckts called with parameters
+  (`X_i_0 ZN I VSS VPW nfet_05v0 W=8.2e-07 L=6e-07`) fails with "missing
+  definitions for L=6e-07"; and every subckt port that is neither a liberty
+  pin nor the power/ground name is refused (error 1606). ``fold_subckts``
+  writes a derived copy of the PDK's declared `CELL_SPICE_MODELS` /
+  `PAD_SPICE_MODELS` where supply ports the liberties declare at the SAME
+  voltage as the power (ground) name are folded into it, and parameterised
+  device lines are indented so that reader skips them (ngspice reads them
+  unchanged). The source fix is a fork PR on vibeic/OpenSTA.
+* `write_path_spice` dereferences the operating conditions of the library the
+  path's first liberty pin belongs to; a pad library without
+  `default_operating_conditions` crashes it (SIGSEGV, measured). The arm sets
+  the corner's first (cell) library's own operating conditions.
+
+Dual: ngspice and Xyce. The device models are chosen from the PDK's
+`libs.tech/<simulator>` tree by what the cells instantiate; a simulator tree
+that defines none of those devices refuses by name
+(`LL_SPICE_DEVICE_UNMODELLED`).
+
+chip-AGNOSTIC: no design, PDK, cell or corner literal selects a branch.
+"""
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
+from _atomic_artefact import write_json  # noqa: E402
+from librelane_contract import Refusal, _load, digest, post_pnr_timing_inputs  # noqa: E402
+import spice_correlation_check as _scc  # noqa: E402 — the gate's pure helpers
+
+SIMULATORS = ('ngspice', 'xyce')
+#: The lesson's own mutation: every capacitance scaled by 10 (RULINGS CT-08).
+MUTATION_FACTOR = 10.0
+
+_VOLTAGE_MAP_RE = re.compile(r'voltage_map\s*\(\s*"?(\w+)"?\s*,\s*([-\d.eE+]+)\s*\)')
+_POWER_RAIL_RE = re.compile(r'power_rail\s*\(\s*"?(\w+)"?\s*,\s*([-\d.eE+]+)\s*\)')
+_OPCOND_RE = re.compile(r'^\s*operating_conditions\s*\(\s*"?([\w.]+)"?\s*\)', re.M)
+_LIBRARY_RE = re.compile(r'^\s*library\s*\(\s*"?([\w.]+)"?\s*\)', re.M)
+_SUBCKT_RE = re.compile(r'^\s*\.subckt\s+(\S+)(.*)$', re.I)
+_PARAM_TOKEN = re.compile(r'^\w+=\S*$')
+
+
+def supply_voltages(liberty_texts: Sequence[str]) -> Dict[str, float]:
+    """{supply pin: volts} as the liberties declare them (`voltage_map`, and
+    the operating conditions' `power_rail`). First declaration wins."""
+    out: Dict[str, float] = {}
+    for text in liberty_texts:
+        for name, value in _VOLTAGE_MAP_RE.findall(text) + _POWER_RAIL_RE.findall(text):
+            out.setdefault(name, float(value))
+    return out
+
+
+def fold_subckts(sources: Sequence[Path], voltages: Dict[str, float],
+                 power: str, ground: str, out: Path) -> Dict[str, Any]:
+    """A copy of the declared cell SPICE the installed `write_path_spice` can
+    read (see the module docstring). Only supply ports at the power (ground)
+    name's declared voltage are folded; any other port is left as it is, so
+    OpenSTA refuses it by name rather than this function guessing."""
+    if power not in voltages or ground not in voltages:
+        raise Refusal('LL_SPICE_SUPPLY_UNDECLARED',
+                      f'{power}/{ground} have no declared voltage in the corner liberties')
+    fold = {pin: (power if volts == voltages[power] else ground)
+            for pin, volts in voltages.items()
+            if pin not in (power, ground) and volts in (voltages[power], voltages[ground])}
+    rails = {power, ground}
+    lines: List[str] = []
+    folded_cells = indented = dropped = 0
+    for source in sources:
+        inside = False
+        statements: List[List[str]] = []
+        for raw in Path(source).read_text(errors='replace').splitlines():
+            if raw.startswith('+') and statements:
+                statements[-1].append(raw)
+            else:
+                statements.append([raw])
+        for statement in statements:
+            head = statement[0]
+            m = _SUBCKT_RE.match(head)
+            if m:
+                inside = True
+                ports = m.group(2).split()
+                kept = [p for p in ports if p not in fold]
+                for p in ports:
+                    if p in fold and fold[p] not in kept:
+                        kept.append(fold[p])
+                folded_cells += kept != ports
+                lines.append(f'.subckt {m.group(1)} ' + ' '.join(kept))
+                lines += statement[1:]
+                continue
+            if inside and head.strip().lower().startswith('.ends'):
+                inside = False
+                lines += statement
+                continue
+            kind = head[:1].lower()
+            if not inside or kind not in 'xmdcr' or not head.strip():
+                lines += statement
+                continue
+            tokens = [fold.get(t, t) for t in head.split()]
+            words = [t for t in tokens[1:] + ' '.join(statement[1:]).replace('+', ' ').split()
+                     if not _PARAM_TOKEN.match(t)]
+            nodes = {'x': words[:-1], 'm': words[:4], 'd': words[:2],
+                     'c': words[:2], 'r': words[:2]}[kind]
+            if nodes and set(nodes) <= rails:
+                # Every terminal on a supply the deck drives from an ideal
+                # source: the element carries no signal (decoupling / ESD
+                # capacitance and diodes between rails).
+                dropped += 1
+                continue
+            body = ' '.join(tokens)
+            if kind == 'x' and any(_PARAM_TOKEN.match(t) for t in tokens[1:]
+                                   + ' '.join(statement[1:]).replace('+', ' ').split()):
+                # A device call carries parameters; the installed reader would
+                # take its last parameter for a subckt name.
+                indented += 1
+                body = ' ' + body
+            lines.append(body)
+            lines += statement[1:]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text('\n'.join(lines) + '\n')
+    return {'path': str(out), 'folded': fold, 'cells_folded': folded_cells,
+            'device_lines_indented': indented, 'rail_only_elements_dropped': dropped,
+            'sources': {str(s): digest(Path(s)) for s in sources}}
+
+
+def device_names(subckt_text: str) -> set:
+    """Devices the cells instantiate: the subckt an `X` line calls (its last
+    non-parameter token) and the model an `M` or `D` line names."""
+    out = set()
+    statement = ''
+    for raw in subckt_text.splitlines() + ['']:
+        if raw.startswith('+'):
+            statement += ' ' + raw[1:]
+            continue
+        tokens = statement.split()
+        if tokens and tokens[0][:1] in 'Xx':
+            names = [t for t in tokens[1:] if not _PARAM_TOKEN.match(t)]
+            if names:
+                out.add(names[-1].lower())
+        elif tokens and tokens[0][:1] in 'Mm' and len(tokens) >= 6:
+            out.add(tokens[5].lower())
+        elif tokens and tokens[0][:1] in 'Dd' and len(tokens) >= 4:
+            out.add(tokens[3].lower())
+        statement = raw.strip()
+    cells = {m.group(1).lower() for m in
+             (_SUBCKT_RE.match(line) for line in subckt_text.splitlines()) if m}
+    return out - cells
+
+
+_LIB_OPEN_RE = re.compile(r"^\s*\.lib\s+([A-Za-z0-9_]+)\s*$", re.I)
+_LIB_REF_RE = re.compile(r"^\s*\.lib\s+['\"]?([^'\"\s]+)['\"]?\s+([A-Za-z0-9_]+)\s*$", re.I)
+_DEF_RE = re.compile(r"^\s*\.(?:subckt|model)\s+(\S+)", re.I)
+
+
+def model_sections(tech_dir: Path, simulator: str) -> Dict[Tuple[str, str], set]:
+    """{(file, section): every device name the section defines, following its
+    `.lib <file> <section>` references}. Files carrying the simulator's own
+    suffix are read when there are any (a PDK ships one tree per dialect)."""
+    files = sorted(p for p in Path(tech_dir).glob('*') if p.is_file())
+    own = [p for p in files if p.suffix.lstrip('.').lower() == simulator.lower()]
+    files = own or files
+    direct: Dict[Tuple[str, str], set] = {}
+    refs: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
+    for path in files:
+        current = None
+        for line in path.read_text(errors='replace').splitlines():
+            if line.lstrip().lower().startswith('.endl'):
+                current = None
+                continue
+            opened = _LIB_OPEN_RE.match(line)
+            if opened and current is None:
+                current = (str(path), opened.group(1))
+                direct.setdefault(current, set())
+                refs.setdefault(current, [])
+                continue
+            if current is None:
+                continue
+            ref = _LIB_REF_RE.match(line)
+            if ref:
+                target = Path(tech_dir) / Path(ref.group(1)).name
+                target = target if target in files else path
+                refs[current].append((str(target), ref.group(2)))
+                continue
+            defined = _DEF_RE.match(line)
+            if defined:
+                direct[current].add(defined.group(1).lower())
+    closure: Dict[Tuple[str, str], set] = {}
+
+    def resolve(key: Tuple[str, str], seen: set) -> set:
+        if key in closure:
+            return closure[key]
+        out = set(direct.get(key, set()))
+        for ref in refs.get(key, []):
+            if ref not in seen:
+                out |= resolve(ref, seen | {ref})
+        closure[key] = out
+        return out
+    for key in direct:
+        resolve(key, {key})
+    return closure
+
+
+def model_file(tech_dir: Path, guest_dir: str, simulator: str, liberty: str,
+               devices: set, temperature: Optional[float], out: Path) -> Dict[str, Any]:
+    """The `-model_file` for one corner: the PDK's parameter preludes, then, for
+    every device the cells call, the library section `select_model_section`
+    picks for the corner's liberty among the sections that define it."""
+    sections = model_sections(tech_dir, simulator)
+    chosen: List[Tuple[str, str]] = []
+    covered: set = set()
+    for device in sorted(devices):
+        if device in covered:
+            continue
+        candidates = [key for key, defined in sections.items() if device in defined]
+        pick = _scc.select_model_section(candidates, liberty)
+        if pick is None:
+            continue
+        chosen.append(tuple(pick))
+        covered |= sections[tuple(pick)]
+    missing = sorted(devices - covered)
+    if missing:
+        raise Refusal('LL_SPICE_DEVICE_UNMODELLED',
+                      f'{simulator}: no section under {tech_dir} defines {missing}')
+    files = sorted(p for p in Path(tech_dir).glob('*') if p.is_file())
+    own = [p for p in files if p.suffix.lstrip('.').lower() == simulator.lower()] or files
+    preludes = [p for p in own
+                if re.search(r'^\s*\.param\s', p.read_text(errors='replace'), re.M | re.I)
+                and not re.search(r'^\s*\.lib\s', p.read_text(errors='replace'), re.M | re.I)]
+    guest = lambda p: f'{guest_dir}/{Path(p).name}'  # noqa: E731
+    lines = [f'* vibe-ic step 30: device models for {liberty} ({simulator})']
+    lines += [f'.include {guest(p)}' for p in preludes]
+    lines += [f'.lib {guest(f)} {s}' for f, s in chosen]
+    if temperature is not None:
+        lines.append(f'.temp {temperature:g}' if simulator == 'ngspice'
+                     else f'.options device temp={temperature:g}')
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text('\n'.join(lines) + '\n')
+    return {'path': str(out), 'sections': [list(c) for c in chosen],
+            'preludes': [str(p) for p in preludes], 'temperature': temperature,
+            'devices': sorted(devices)}
+
+
+def arm_tcl(inputs: Dict[str, Any], project: Path, top: str, spef: str,
+            opcond: Tuple[str, str], path_args: List[str], deck_dir: Path,
+            cells: str, models: str, power: str, ground: str, simulator: str) -> str:
+    """One `sta` session: the corner's own inputs, then for each path its
+    `report_checks` and its `write_path_spice`."""
+    lines = ['set_cmd_units -time ns -capacitance pF -current mA -voltage V '
+             '-resistance kOhm -distance um']
+    lines += [f'read_liberty {lib}' for lib in inputs['liberties']]
+    lines += [f'read_verilog {project / inputs["sta_netlist"]}', f'link_design {top}',
+              f'read_sdc {project / inputs["sdc"]}',
+              f'set_operating_conditions -library {opcond[0]} {opcond[1]}',
+              'set_propagated_clock [all_clocks]', f'read_spef {spef}']
+    for index, args in enumerate(path_args, 1):
+        lines.append(f'report_checks {args} -fields {{slew cap input_pins}} -digits 6 '
+                     f'-format full > {deck_dir}/path_{index}.rpt')
+        lines.append(f'if {{[catch {{write_path_spice -path_args {{{args}}} '
+                     f'-spice_file {deck_dir}/path_{index}.sp -lib_subckt_files {{{cells}}} '
+                     f'-model_file {models} -power {power} -ground {ground} '
+                     f'-simulator {simulator}}} _e]}} {{ puts "VIBEIC_WPS_FAIL {index} $_e" }} '
+                     f'else {{ puts "VIBEIC_WPS_OK {index}" }}')
+    return '\n'.join(lines) + '\n'
+
+
+def _docker(image: str, project: Path, mounts: List[Tuple[Path, str]], argv: List[str],
+            cwd: Path, docker: str = 'docker') -> subprocess.CompletedProcess:
+    volumes = ['-v', f'{project.resolve()}:{project.resolve()}']
+    for host, guest in mounts:
+        volumes += ['-v', f'{Path(host).resolve()}:{guest}:ro']
+    return subprocess.run([docker, 'run', '--rm', '--network', 'none',
+                           *_dmem.docker_memory_flags(), *volumes, '-w', str(cwd),
+                           '--entrypoint', argv[0], image, *argv[1:]],
+                          capture_output=True, text=True)
+
+
+# --- waveform and measurement --------------------------------------------
+
+def read_waveform(path: Path, simulator: str) -> Dict[str, List[Tuple[float, float]]]:
+    """{node: [(t, v)]}. ngspice: `wrdata` pairs (time, value) per vector, in
+    the order ``nodes.json`` beside it names them; Xyce: the `.prn` table."""
+    text = path.read_text(errors='replace').splitlines()
+    if simulator == 'xyce':
+        head = text[0].split()
+        rows = [line.split() for line in text[1:] if line.split() and line.split()[0].isdigit()]
+        t = head.index('TIME')
+        return {name.lower(): [(float(r[t]), float(r[i])) for r in rows]
+                for i, name in enumerate(head) if i not in (0, t)}
+    nodes = json.loads(path.with_suffix('.nodes.json').read_text())
+    rows = [[float(x) for x in line.split()] for line in text if line.strip()]
+    return {node.lower(): [(r[2 * i], r[2 * i + 1]) for r in rows]
+            for i, node in enumerate(nodes)}
+
+
+def crossings(wave: List[Tuple[float, float]], level: float, edge: str) -> List[float]:
+    """Linear-interpolated times `wave` crosses `level` rising or falling."""
+    out = []
+    for (t0, v0), (t1, v1) in zip(wave, wave[1:]):
+        if edge == 'rise' and v0 < level <= v1 or edge == 'fall' and v0 > level >= v1:
+            out.append(t0 + (level - v0) * (t1 - t0) / (v1 - v0) if v1 != v0 else t1)
+    return out
+
+
+def path_stages(rows: List[dict]) -> List[dict]:
+    """Stages for the tolerance: each cell's input-pin row then output-pin row."""
+    stages = []
+    for prev, row in zip(rows, rows[1:]):
+        if prev['inst'] == row['inst'] and '/' in prev['pin'] and '/' in row['pin'] \
+                and row['cell'] not in ('in', 'out'):
+            stages.append({'inst': row['inst'], 'cell': row['cell'],
+                           'toggle_pin': prev['pin'].rsplit('/', 1)[1],
+                           'transition': 'fall' if row['tr'] == 'v' else 'rise',
+                           'input_slew_ns': prev.get('slew_ns'),
+                           'sta_load_pf': row.get('cap_pf'), 'sta_delay_ns': row['incr']})
+    return stages
+
+
+def measure(deck: Path, simulator: str, sta: dict, header: dict) -> Dict[str, Any]:
+    """SPICE delay from the STA path's start pin to its end pin, same edges."""
+    text = deck.read_text(errors='replace')
+    supplies = [float(v) for v in re.findall(r'^v\d+\s+\S+\s+0\s+([-\d.eE+]+)\s*$', text, re.M)]
+    vdd = max(supplies) if supplies else None
+    wave_path = deck.with_suffix('.prn' if simulator == 'xyce' else '.wave')
+    if vdd is None or not wave_path.is_file():
+        return {'status': 'NOT_MEASURED', 'reason': 'no waveform or no supply in the deck'}
+    wave = read_waveform(wave_path, simulator)
+    start = next((r for r in sta['rows'] if r['inst'] == sta['startpoint']
+                  or r['cell'] == 'in'), sta['rows'][0])
+    end = sta['rows'][-1]
+    wave = {k.replace('\\', ''): v for k, v in wave.items()}
+    a = wave.get(start['pin'].lower().replace('\\', ''))
+    b = wave.get(end['pin'].lower().replace('\\', ''))
+    if not a or not b:
+        return {'status': 'NOT_MEASURED', 'reason': f'no waveform for {start["pin"]} / {end["pin"]}'}
+    s_edge = 'fall' if start['tr'] == 'v' else 'rise'
+    e_edge = sta['endpoint_transition']
+    s_level = vdd * header[f'input_threshold_{s_edge}'] / 100.0
+    e_level = vdd * header[f'output_threshold_{e_edge}'] / 100.0
+    starts = crossings(a, s_level, s_edge)
+    for t_end in crossings(b, e_level, e_edge):
+        before = [t for t in starts if t <= t_end]
+        if before:
+            return {'status': 'MEASURED', 'spice_ns': (t_end - before[-1]) * 1e9,
+                    'start_pin': start['pin'], 'end_pin': end['pin'],
+                    'edges': [s_edge, e_edge], 'vdd': vdd}
+    return {'status': 'NOT_MEASURED', 'reason': 'the end pin never made the STA transition '
+                                                 'after the start pin did'}
+
+
+def _simulate(deck: Path, simulator: str, image: str, project: Path,
+              mounts: List[Tuple[Path, str]]) -> subprocess.CompletedProcess:
+    if simulator == 'ngspice':
+        text = deck.read_text()
+        nodes = re.search(r'^\.print tran (.*)$', text, re.M).group(1).split()
+        names = [n[2:-1] for n in nodes if n.lower().startswith('v(')]
+        deck.with_suffix('.nodes.json').write_text(json.dumps(names))
+        control = ('.control\nrun\nwrdata ' + str(deck.with_suffix('.wave')) + ' '
+                   + ' '.join(f'v({n})' for n in names) + '\n.endc\n')
+        runnable = deck.with_suffix('.run.sp')
+        runnable.write_text(re.sub(r'^\.end\s*$', control + '.end', text, flags=re.M))
+        return _docker(image, project, mounts, ['ngspice', '-b', str(runnable)], deck.parent)
+    return _docker(image, project, mounts, ['Xyce', str(deck)], deck.parent)
+
+
+def mutate_spef(source: Path, factor: float, out: Path) -> Dict[str, Any]:
+    """Every `*CAP` value and every `*D_NET` total scaled by `factor`."""
+    lines = []
+    section = None
+    scaled = 0
+    for raw in Path(source).read_text(errors='replace').splitlines():
+        words = raw.split()
+        head = words[0] if words else ''
+        if head == '*D_NET' and len(words) >= 3:
+            section = 'net'
+            words[2] = f'{float(words[2]) * factor:.6g}'
+            raw = ' '.join(words)
+        elif head == '*CAP':
+            section = 'cap'
+        elif head.startswith('*') and head not in ('*CAP',):
+            section = None if head == '*END' else ('net' if head in ('*CONN', '*RES') else section)
+        elif section == 'cap' and head.isdigit() and len(words) in (3, 4):
+            words[-1] = f'{float(words[-1]) * factor:.6g}'
+            raw = ' '.join(words)
+            scaled += 1
+        lines.append(raw)
+    out.write_text('\n'.join(lines) + '\n')
+    return {'path': str(out), 'factor': factor, 'cap_rows_scaled': scaled,
+            'source_sha256': digest(Path(source))}
+
+
+def run_arm(project: Path, image: str, state_path: Path, corner: str, *,
+            pdk_root: Path, pdk: str, out_dir: Path, simulator: str = 'ngspice',
+            paths: int = 3, path_args: Optional[List[str]] = None,
+            spef: Optional[Path] = None) -> Dict[str, Any]:
+    """Top-N setup paths of `corner` through the tool's deck and `simulator`."""
+    inputs = post_pnr_timing_inputs(project, state_path, corner)
+    config = _load(state_path.parent / 'config.json')
+    top, power, ground = config.get('DESIGN_NAME'), config.get('VDD_PIN'), config.get('GND_PIN')
+    if not (top and power and ground):
+        raise Refusal('LL_STA_CONFIG_UNREAD', str(state_path.parent / 'config.json'))
+    guest = f'/pdk/{pdk}'
+    host = lambda p: Path(str(p).replace(guest, str(pdk_root / pdk), 1))  # noqa: E731
+    lib_texts = [host(p).read_text(errors='replace') for p in inputs['liberties']]
+    header = _scc.parse_liberty_header(lib_texts[0])
+    opc, libname = _OPCOND_RE.search(lib_texts[0]), _LIBRARY_RE.search(lib_texts[0])
+    if not (opc and libname):
+        raise Refusal('LL_LIBERTY_OPCOND_UNDECLARED', inputs['liberties'][0])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    spice_sources = [host(p) for key in ('CELL_SPICE_MODELS', 'PAD_SPICE_MODELS')
+                     for p in (config.get(key) or [])]
+    cells = fold_subckts(spice_sources, supply_voltages(lib_texts), power, ground,
+                         out_dir / 'cells_folded.spice')
+    models = model_file(pdk_root / pdk / 'libs.tech' / simulator, f'{guest}/libs.tech/{simulator}',
+                        simulator, Path(inputs['liberties'][0]).name,
+                        device_names(Path(cells['path']).read_text()),
+                        header.get('nom_temperature'), out_dir / f'models_{simulator}.sp')
+    # `-group_path_count N` writes N decks (`path_1.sp_<n>.sp`); the STA side
+    # is one `report_checks` with the same arguments, split per path.
+    args = path_args or [f'-path_delay max -group_path_count {paths}']
+    spef_path = spef or (project / inputs['spef'])
+    tcl = out_dir / 'arm.tcl'
+    tcl.write_text(arm_tcl(inputs, project, top, str(spef_path), (libname.group(1), opc.group(1)),
+                           args, out_dir, cells['path'], models['path'], power, ground, simulator))
+    mounts = [(pdk_root / pdk, guest)]
+    sta = _docker(image, project, mounts, ['sta', '-no_init', '-no_splash', '-exit', str(tcl)], out_dir)
+    (out_dir / 'sta.log').write_text(sta.stdout + '\n' + sta.stderr)
+    failed = re.findall(r'^VIBEIC_WPS_FAIL (\d+) (.*)$', sta.stdout, re.M)
+    rows: List[Dict[str, Any]] = []
+    decks = sorted(out_dir.glob('path_*.sp_*.sp'),
+                   key=lambda d: [int(n) for n in re.findall(r'\d+', d.name)])
+    reports = []
+    for rpt in sorted(out_dir.glob('path_*.rpt')):
+        reports += [b for b in _scc.split_sta_path_blocks(rpt.read_text(errors='replace'))]
+    liberty_text = '\n'.join(lib_texts)
+    for index, block in enumerate(reports):
+        parsed = _scc.parse_sta_path(block)
+        deck = decks[index] if index < len(decks) else None
+        row: Dict[str, Any] = {'path': index + 1, 'deck': str(deck) if deck else None}
+        if parsed is None or deck is None or deck.stat().st_size == 0:
+            row.update(status='NOT_MEASURED', reason='no STA path or no deck',
+                       wps_fail=[f for i, f in failed if int(i) == index + 1])
+            rows.append(row)
+            continue
+        sim = _simulate(deck, simulator, image, project, mounts)
+        deck.with_suffix('.log').write_text(sim.stdout + '\n' + sim.stderr)
+        got = measure(deck, simulator, parsed, header)
+        sta_ns = parsed['path_delay_ns']
+        stages = path_stages(parsed['rows'])
+        tol = _scc.derive_liberty_path_tolerance(liberty_text, stages, sta_ns) if stages else None
+        row.update(startpoint=parsed['startpoint'], endpoint=parsed['endpoint'],
+                   sta_ns=sta_ns, stages=len(stages), sim_rc=sim.returncode, **got)
+        if got.get('status') == 'MEASURED':
+            err = (got['spice_ns'] - sta_ns) / sta_ns * 100.0 if sta_ns else None
+            row.update(error_pct=err, abs_error_ns=abs(got['spice_ns'] - sta_ns),
+                       tolerance_pct=tol['tolerance_pct'] if tol else None,
+                       verdict=(_scc.path_correlation_verdict(err, tol['tolerance_pct'])
+                                if tol and err is not None else 'TOLERANCE_UNDERIVABLE'))
+        rows.append(row)
+    return {'corner': corner, 'simulator': simulator, 'inputs': inputs,
+            'spef': str(spef_path), 'spef_sha256': digest(spef_path), 'cells': cells,
+            'models': models, 'sta_rc': sta.returncode, 'paths': rows}
+
+
+def judge(arm: Dict[str, Any], mutated: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """CORRELATED only when every measured path is within its derived
+    tolerance AND responds to the SPEF mutation."""
+    rows = [r for r in arm['paths'] if r.get('status') == 'MEASURED']
+    if not rows:
+        return {'verdict': 'NOT_MEASURED', 'reason': 'no path was simulated'}
+    response = []
+    for row in rows:
+        other = next((m for m in (mutated or {}).get('paths') or []
+                      if m.get('startpoint') == row['startpoint']
+                      and m.get('endpoint') == row['endpoint']
+                      and m.get('status') == 'MEASURED'), None)
+        if other is None:
+            response.append({'path': row['path'], 'responds': None})
+            continue
+        step = _tran_step_ns(row['deck'])
+        delta = other['spice_ns'] - row['spice_ns']
+        response.append({'path': row['path'], 'spice_delta_ns': delta,
+                         'sta_delta_ns': other['sta_ns'] - row['sta_ns'],
+                         'resolution_ns': 2 * step,
+                         'responds': abs(delta) > 2 * step and delta > 0})
+    unresponsive = [r for r in response if r['responds'] is not True]
+    worst = max(rows, key=lambda r: abs(r.get('error_pct') or 0.0))
+    verdicts = {r.get('verdict') for r in rows}
+    verdict = ('SPEF_UNRESPONSIVE' if unresponsive else
+               'CORRELATED' if verdicts == {'CORRELATED'} else
+               'CRITICAL_MISMATCH' if 'CRITICAL_MISMATCH' in verdicts else
+               'MISMATCH' if 'MISMATCH' in verdicts else 'TOLERANCE_UNDERIVABLE')
+    return {'verdict': verdict, 'worst_path': worst['path'],
+            'worst_error_pct': worst.get('error_pct'), 'mutation': response}
+
+
+def _tran_step_ns(deck: Any) -> float:
+    m = re.search(r'^\.tran\s+(\S+)', Path(deck).read_text(errors='replace'), re.M | re.I)
+    return float(m.group(1)) * 1e9 if m else 0.0

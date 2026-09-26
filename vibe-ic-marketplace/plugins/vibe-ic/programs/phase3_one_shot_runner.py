@@ -59649,8 +59649,13 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
 
     # --- Step 29: SDF emit + honest SDF-sim self-report (#437d) --------
     # OpenROAD's `write_sdf` produces the SDF the gate's check looks for.
+    # T106: with step 29 on `librelane` the SDFs are STAPostPNR's per-corner
+    # ones (consumed from step 23's record) and neither `_emit_sdf` nor the
+    # direct simulation runs; `dual` runs both.
+    from librelane_contract import selected_mode as _ll_mode29
+    _m29 = _ll_mode29(project, "29")
     sdf_out = sim_pl_out / f"{top}.sdf"
-    if primary_def.is_file() and _signoff_regen(sdf_out, primary_def):
+    if _m29 != "librelane" and primary_def.is_file() and _signoff_regen(sdf_out, primary_def):
         _emit_sdf(project, top, pdk, container, sdf_out, notes)
         if sdf_out.is_file() and sdf_out.stat().st_size > 0:
             written.append(str(sdf_out))
@@ -59666,7 +59671,9 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # applies net (interconnect) SDF delays but not IOPATH cell-arc delays (a
     # known Icarus limit); at-speed CELL timing stays STA's job (Step 23/28).
     _sdf_sim_result: Optional[Dict[str, object]] = None
-    if sdf_out.is_file() and sdf_out.stat().st_size > 0:
+    if _m29 != "direct":
+        _step29_tool_arm(project, top, pdk, _m29, sim_pl_out, sdf_out, written, notes)
+    if _m29 != "librelane" and sdf_out.is_file() and sdf_out.stat().st_size > 0:
         try:
             import sdf_gate_sim
             _sdf_sim_result = sdf_gate_sim.run(
@@ -60365,7 +60372,15 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # default) is the pre-PnR preview basis, which is what this call used to
     # get while its own header claimed the post-PnR netlist.
     power_rpt = rpt_phase3 / "power.rpt"
-    if _signoff_regen(power_rpt, primary_def) and primary_def.is_file():
+    # T106: with step 33 on `librelane`, sign-off power is STAPostPNR's
+    # per-corner report and this OpenSTA session runs only as the VCD/SAIF
+    # arm (a declared activity file); `dual` runs both and checks agreement.
+    from librelane_contract import selected_mode as _ll_mode33
+    _m33 = _ll_mode33(project, "33")
+    _power_direct = (_m33 != "librelane" or _ppa_power.select_activity(
+        [_pl.sim_dir(project), _pl.sim_full_stack_dir(project)]) is not None)
+    _power_direct_ran = False
+    if _power_direct and _signoff_regen(power_rpt, primary_def) and primary_def.is_file():
         # THE MOMENT THIS STEP BEGAN. A power step can fail WITHOUT the runner
         # knowing -- `docker exec` fails before bash starts, so the
         # `> power.rpt` redirect never truncates and the PREVIOUS layout's
@@ -60375,6 +60390,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         _power_t0 = time.time()
         ok = _emit_power_report(project, top, pdk, container, power_rpt, notes,
                                 basis="post_pnr")
+        _power_direct_ran = ok
         if ok:
             written.append(str(power_rpt))
             # Companion .json for the gate's structured-form aspirations.
@@ -60407,6 +60423,9 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 rpt_phase3 / "power.json",
                 "report_power produced no usable output for this run "
                 "(see reports/phase3/power.rpt)", notes)
+    if _m33 != "direct" and primary_def.is_file():
+        _step33_tool_arm(project, top, pdk, _m33, rpt_phase3,
+                         _power_direct_ran, written, notes)
 
     # --- Step 21: routed.drc.rpt — derived from OpenROAD routing log ---
     # OpenROAD's detailed_route emits DRC violations to its log; the gate
@@ -65580,6 +65599,42 @@ def _spice_correlation_skip_disclosure(
             "an implemented-capability failure, not a capability gap.")
 
 
+def _step29_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
+                     sim_dir: Path, direct_sdf: Path, written: List[str],
+                     notes: List[str]) -> None:
+    """Step 29 on the tool (T106): the L10 suite against every STAPostPNR
+    corner SDF as the LibreLane custom step `Vibeic.GateLevelSim`
+    (`reports/phase3/gls_corners.json`). On `librelane` its result is the
+    step's declared evidence in `sim_postlayout/`; on `dual` it is recorded
+    beside the direct arm. A refusal names itself and never falls back."""
+    import librelane_contract as _ll
+    import librelane_postroute as _lp
+    import sdf_gate_sim as _sgs
+    try:
+        root = _ll.resolve_pdk_root(project)
+        if not root:
+            raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
+                              "step 29 on LibreLane needs pdk_root_host in the "
+                              "switch or VIBEIC_LIBRELANE_PDK_ROOT")
+        judged = _lp.gate_level_sim(project, top, _ll.resolve_image(project),
+                                    Path(root), pdk.name,
+                                    direct_sdfs=[direct_sdf] if direct_sdf.is_file() else [])
+        written.append(str(project / "reports/phase3/gls_corners.json"))
+        if mode == "librelane":
+            written.extend(_sgs.write_tool_arm_results(sim_dir, judged, top))
+        notes.append(f"step 29 LibreLane ({mode}): {judged['verdict']} over "
+                     f"{len(judged['corners'])} STAPostPNR corner SDF(s)")
+    except Exception as exc:  # a refusal names itself; nothing falls back
+        notes.append(f"step 29 LibreLane: {exc}")
+        if mode == "librelane":
+            # No earlier run's evidence may stand in for this step.
+            sim_dir.mkdir(parents=True, exist_ok=True)
+            for stale in ("results.log", "results.json", "pass.flag"):
+                (sim_dir / stale).unlink(missing_ok=True)
+            _aa.write_text(sim_dir / "sdf_sim_skipped.json", json.dumps({
+                "verdict": "ERROR", "reason": f"step 29 on LibreLane: {exc}"}) + "\n")
+
+
 def _emit_sdf(project: Path, top: str, pdk: PdkConfig, container: str,
               sdf_out: Path, notes: List[str]) -> bool:
     """Best-effort SDF emission via OpenROAD `write_sdf`."""
@@ -65675,6 +65730,63 @@ exit
         notes.append(f"SDF emit failed (rc={rc}); no stub written (#441)")
         return False
     return True
+
+
+def _step33_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
+                     rpt3: Path, direct_ran: bool, written: List[str],
+                     notes: List[str]) -> None:
+    """Step 33 from the tool (T106): STAPostPNR's per-corner `report_power`,
+    consumed from step 23's record; the arm choice and the agreement check
+    are `_ppa.power.signoff_power_arms` (`reports/phase3/power_arms.json`).
+    On `librelane` with the tool arm canonical, the worst corner's report is
+    handed to `power.rpt` unedited and `power.json` is written from it."""
+    import fnmatch
+    import librelane_postroute as _lp
+    try:
+        folder, state = _lp.stapostpnr_state(project)
+        corners = _ppa_power.stapostpnr_corner_power(folder)
+        spefs = state.get("spef") or {}
+        tool_spef = {}
+        for corner in corners:
+            match = [s for pat, s in spefs.items() if fnmatch.fnmatch(corner, pat)]
+            if len(match) == 1 and Path(match[0]).is_file():
+                tool_spef[corner] = _sha256_file(Path(match[0]))
+        direct_spef = _pl.extracted_dir(project) / f"{top}.spef"
+        direct = direct_report = None
+        if direct_ran and (rpt3 / "power.json").is_file():
+            direct = json.loads((rpt3 / "power.json").read_text())
+            direct_report = _ppa_power.read_power_report(rpt3 / "power.rpt")
+        decision = _ppa_power.signoff_power_arms(
+            direct, direct_report, corners, direct_liberty=str(pdk.liberty),
+            direct_spef_sha256=(_sha256_file(direct_spef)
+                                if direct_ran and direct_spef.is_file() else None),
+            tool_spef_sha256=tool_spef)
+        state_sha = _sha256_file(folder / "state_out.json")
+        _aa.write_json(rpt3 / "power_arms.json", {
+            "step": "33", "mode": mode, "sta_state": str(folder / "state_out.json"),
+            "sta_state_sha256": state_sha, "direct_ran": direct_ran, **decision})
+        written.append(str(rpt3 / "power_arms.json"))
+        if mode == "librelane" and decision.get("canonical") == "librelane":
+            worst = decision["worst_corner"]
+            row = corners[worst]
+            # Written by this call from the recorded state, so it is bound to
+            # this run by construction; an mtime-vs-clock test would only race
+            # the filesystem's timestamp granularity.
+            _aa.write_text(rpt3 / "power.rpt", _ppa_power.tool_power_report_text(
+                worst, row, Path(row["report"]).read_text(errors="replace"), state_sha))
+            _ppa_power.emit_signoff_record(project, rpt3 / "power.rpt",
+                                           rpt3 / "power.json", "vectorless_sdc",
+                                           notes, tool_rc=0)
+            written += [str(rpt3 / "power.rpt"), str(rpt3 / "power.json")]
+        if (decision.get("agreement") or {}).get("verdict") == "DISAGREE":
+            notes.append("LL_POWER_ARMS_DISAGREE: the direct vectorless session and "
+                         "STAPostPNR disagree on the same netlist, SPEF and liberty "
+                         f"({decision['agreement']})")
+    except Exception as exc:  # a refusal names itself; nothing falls back
+        notes.append(f"step 33 LibreLane: {exc}")
+        if mode == "librelane" and not direct_ran:
+            _ppa_power.retire_signoff_record(
+                rpt3 / "power.json", f"step 33 on LibreLane: {exc}", notes)
 
 
 def _emit_power_report(project: Path, top: str, pdk: PdkConfig,
@@ -70353,12 +70465,35 @@ def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
         return out
 
     categories: List[Dict[str, Any]] = []
-    categories.append(_auto(
+    # T106 — where a LibreLane step of THIS run already measured a category
+    # (antenna, PDN connectivity), the category reads the tool's metrics; the
+    # direct report's verdict stays beside it as `direct_verdict`. No
+    # LibreLane state in the run -> nothing here changes.
+    import librelane_postroute as _llpr
+    _tool = _llpr.perc_tool_metrics(project)
+
+    def _tool_cat(name: str, direct: Dict[str, Any]) -> Dict[str, Any]:
+        src = _tool.get(name)
+        if not src:
+            return direct
+        bad = {k: v for k, v in src["metrics"].items() if v != 0}
+        return {"category": name, "status": "AUTOMATED",
+                "result": "FAIL" if bad else "PASS",
+                "tool": f"LibreLane {src['step']} metrics",
+                "evidence": src["state"], "state_sha256": src["state_sha256"],
+                "metrics": src["metrics"],
+                "direct_verdict": direct.get("source_verdict")}
+
+    categories.append(_tool_cat("Antenna", _auto(
         "Antenna", antenna_v, "OpenROAD check_antennas",
-        "reports/phase3/antenna.json"))
-    categories.append(_auto(
-        "IR drop", ir_v, "OpenROAD PSM analyze_power_grid",
-        "reports/phase3/ir_drop.json"))
+        "reports/phase3/antenna.json")))
+    _ir_cat = _auto("IR drop", ir_v, "OpenROAD PSM analyze_power_grid",
+                    "reports/phase3/ir_drop.json")
+    if _tool:
+        _ir_cat["tool_seam"] = _llpr.PERC_IR_TOOL_SEAM
+    categories.append(_ir_cat)
+    if "PDN connectivity" in _tool:
+        categories.append(_tool_cat("PDN connectivity", {}))
     # EM is AUTOMATED (PSM -enable_em) PLUS a GUARDBAND design rule.
     em_cat = _auto("EM (electromigration)", em_v,
                    "OpenROAD PSM analyze_power_grid -enable_em",
@@ -70731,8 +70866,19 @@ def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
                 if cand.is_file():
                     netlist_for_clamp = str(cand)
                     break
+        # T106 — the screen distance is the PDK's own tap distance as
+        # LibreLane resolves it (`FP_TAPCELL_DIST`), else as the PDK's
+        # LibreLane config states it; the radius is that distance
+        # (R-0915-108). Only a PDK that declares none keeps the program's
+        # conservative default, and the category says which.
+        _pitch = (_llpr.tap_pitch(project)
+                  or (lambda v: (v[0], v[1]) if v[0] is not None else None)(
+                      pdk_declared_tapcell_pitch_um(pdk, container)))
+        _screen = ({"screen_um": tapcell_coverage_radius_um(_pitch[0])}
+                   if _pitch else {})
         geo = _geo.run_geometry_layer(
             str(def_file),
+            **_screen,
             netlist_file=netlist_for_clamp,
             rated_tap_masters=([pdk.tapcell_master]
                                if getattr(pdk, "tapcell_master", None)
@@ -70817,9 +70963,14 @@ def _emit_perc_equivalent(project: Path, top: str, pdk: PdkConfig,
                              "(device physics unverified — see foundry residual)."),
             }
 
-        categories.append(_geo_category(
+        _spacing_cat = _geo_category(
             "Latch-up tap spacing (geometry)", geo["spacing"],
-            "DEF tap/std-cell placement coverage screen (open-source)"))
+            "DEF tap/std-cell placement coverage screen (open-source)")
+        _spacing_cat["screen_um"] = _screen.get("screen_um")
+        _spacing_cat["screen_source"] = (
+            _pitch[1] if _pitch else
+            "latchup_esd_spacing_check default; the PDK declares no FP_TAPCELL_DIST")
+        categories.append(_spacing_cat)
         categories.append(_geo_category(
             "Guard-ring topology (geometry)", geo["guardring"],
             "DEF guard-ring master + IO/high-current proximity screen"))

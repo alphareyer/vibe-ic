@@ -16,11 +16,25 @@ legalizes only the spares, ties every floating spare input to that spare's own
 tie-low driver, connects the spares' supply pins explicitly, locks them FIRM,
 marks them dont_touch, and records ``check_placement``'s count. See
 ``insert_spare_cells.py``.
+
+``Vibeic.GateLevelSim`` (flow step 29, T106) consumes the state
+``OpenROAD.STAPostPNR`` leaves -- the netlist it timed and its per-corner SDFs
+(``write_sdf -include_typ -divider . -corner <c>``) -- and re-runs the design's
+own executed L10 suite against each corner SDF in Icarus Verilog
+(``iverilog -gspecify -ginterconnect``, ``vvp -sdf-info``). It JUDGES
+NOTHING: what it runs comes from ``VIBEIC_GLS_MANIFEST``
+(``sdf_gate_sim.tool_arm_manifest``: bound testbenches, the model closure of
+the PDK's declared Verilog models, compile flags); it records each run's exit
+codes and transcript paths (``gls_runs.json``). The verdict -- every case
+passed, delays applied > 0, SDF ERROR = 0 -- is
+``sdf_gate_sim.judge_tool_arm`` on the host, where the transcript grammar is
+calibrated.
 """
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 from decimal import Decimal
 from typing import List, Optional, Tuple
 
@@ -31,7 +45,7 @@ from librelane.steps.common_variables import dpl_variables
 from librelane.steps.odb import OdbpyStep
 from librelane.steps.step import MetricsUpdate, Step, StepError, ViewsUpdate
 
-__all__ = ["InsertSpareCells"]
+__all__ = ["InsertSpareCells", "GateLevelSim"]
 
 
 @Step.factory.register()
@@ -119,3 +133,70 @@ class InsertSpareCells(OdbpyStep):
 from .ir_drop import IRDropChecker, TransientIR  # noqa: E402,F401
 
 __all__ += ["IRDropChecker", "TransientIR"]
+@Step.factory.register()
+class GateLevelSim(Step):
+    """SDF-annotated gate-level simulation of the design's L10 suite, one run
+    per case per STA corner SDF."""
+
+    id = "Vibeic.GateLevelSim"
+    name = "Gate-Level Simulation (vibe-ic L10 suite x STA corner SDFs)"
+    inputs = [DesignFormat.NETLIST, DesignFormat.SDF]
+    outputs = []
+
+    config_vars = [
+        Variable("VIBEIC_GLS_MANIFEST", Path,
+                 "The gate-level suite manifest (sdf_gate_sim.tool_arm_manifest)."),
+        Variable("VIBEIC_GLS_TIMEOUT_S", int,
+                 "Wall-clock limit for one compile or one simulation, seconds.",
+                 default=900),
+    ]
+
+    def run(self, state_in: State, **kwargs) -> Tuple[ViewsUpdate, MetricsUpdate]:
+        with open(str(self.config["VIBEIC_GLS_MANIFEST"])) as stream:
+            manifest = json.load(stream)
+        netlist = str(state_in[DesignFormat.NETLIST])
+        sdfs = state_in[DesignFormat.SDF] or {}
+        if not isinstance(sdfs, dict):
+            sdfs = {"default": sdfs}
+        limit = int(self.config["VIBEIC_GLS_TIMEOUT_S"])
+        runs = []
+        for corner in sorted(sdfs):
+            folder = os.path.join(self.step_dir, corner)
+            os.makedirs(folder, exist_ok=True)
+            for case in manifest["cases"]:
+                cid = case["id"]
+                with open(case["testbench"]) as stream:
+                    tb_text = stream.read()
+                tb = os.path.join(folder, f"{cid}_tb.v")
+                with open(tb, "w") as stream:
+                    stream.write(tb_text.replace(manifest["sdf_placeholder"],
+                                                 str(sdfs[corner])))
+                vvp = os.path.join(folder, f"{cid}.vvp")
+                compile_log = os.path.join(folder, f"{cid}.compile.log")
+                stdout = os.path.join(folder, f"{cid}.stdout.log")
+                argv = (["iverilog", *manifest["compile_flags"].split(),
+                         "-s", case["module"], "-o", vvp, tb, netlist,
+                         manifest["stubs"], *manifest["models"]])
+                compile_rc = self._run(argv, compile_log, limit)
+                sim_rc = None
+                if compile_rc == 0:
+                    sim_rc = self._run(["vvp", vvp, "-sdf-info"], stdout, limit,
+                                       cwd=folder)
+                runs.append({"corner": corner, "case": cid, "sdf": str(sdfs[corner]),
+                             "compile_rc": compile_rc, "sim_rc": sim_rc,
+                             "compile_log": compile_log, "stdout": stdout})
+        with open(os.path.join(self.step_dir, "gls_runs.json"), "w") as stream:
+            json.dump({"manifest": str(self.config["VIBEIC_GLS_MANIFEST"]),
+                       "netlist": netlist, "runs": runs}, stream, indent=2)
+        return {}, {"vibeic__gls__run__count": len(runs),
+                    "vibeic__gls__corner__count": len(sdfs)}
+
+    @staticmethod
+    def _run(argv, log: str, limit: int, cwd=None) -> int:
+        with open(log, "w") as sink:
+            try:
+                return subprocess.run(argv, stdout=sink, stderr=subprocess.STDOUT,
+                                      cwd=cwd, timeout=limit).returncode
+            except subprocess.TimeoutExpired:
+                sink.write(f"\nVIBEIC_GLS_TIMEOUT after {limit} s\n")
+                return 124
