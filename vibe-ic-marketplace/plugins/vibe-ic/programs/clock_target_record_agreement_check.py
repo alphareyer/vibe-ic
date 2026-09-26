@@ -242,6 +242,10 @@ def check(project: Path) -> Dict[str, object]:
         rep["reason"] = ("the run's clock target and the period the step-23 "
                          "sign-off timed disagree: " + "; ".join(dis))
     else:
+        # Two records WERE compared -- the run's and the tool's -- so a run
+        # with no L19 record is no longer "nothing to compare".
+        if rep["verdict"] == "NOT_APPLICABLE":
+            rep["verdict"] = "PASS"
         rep["reason"] = (f"{rep.get('reason')}; STAPostPNR timed {run_p} ns at "
                          f"every one of its {len(periods)} corners")
     return rep
