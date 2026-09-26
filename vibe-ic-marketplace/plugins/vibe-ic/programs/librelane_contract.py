@@ -52,7 +52,10 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
     l9 = _load(root / 'L9_INTEGRATION_SPEC.json')
     l19 = _load(root / 'L19_CONSTRAINTS_PDK.json')
     declaration = _load(project / 'input/submission_template/tapeout_declaration.json')
-    pads = _load(project / 'phase3/stage3/pnr/pad_assignment.json')
+    # The pad producer (step 15.5ic) runs after synthesis and pre-layout STA;
+    # before it has run the PAD_* keys are undeclared, so they stay absent.
+    pad_path = project / 'phase3/stage3/pnr/pad_assignment.json'
+    pads = _load(pad_path) if pad_path.is_file() else {}
     result: dict[str, Any] = {}
     sources: dict[str, str] = {}
     clocks = [c for c in l8.get('clock_domains', []) if c.get('role') == 'primary'

@@ -55895,6 +55895,87 @@ def _repair_residual_note(project: "Path", residual: bool,
         "and the worst-path slew profile before recording one.")
 
 
+def _prelayout_librelane(project: Path, top: str, pdk: PdkConfig,
+                         runner_sdc: Path, design_staged: bool,
+                         modes: Dict[str, str], notes: List[str]) -> Dict[str, Any]:
+    """Steps 7/8/10 through LibreLane CheckSDCFiles -> STAPrePNR (opt-in).
+
+    Returns the STAPrePNR folder, its resolved config and the gate reports.
+    Every gate judges the TOOL's output; see `librelane_prelayout`.
+    """
+    import librelane_contract as _llc
+    import librelane_prelayout as _llp
+    switch = json.loads((project / "phase3/librelane_switch.json").read_text())
+    image = switch.get("image")
+    if not image:
+        raise _llc.Refusal("LL_IMAGE_UNDECLARED",
+                           "phase3/librelane_switch.json needs image")
+    mounts: List[Tuple[Path, str]] = []
+    pdk_root_guest = None
+    if switch.get("pdk_root_host"):
+        root = Path(switch["pdk_root_host"])
+        if not root.is_dir():
+            raise _llc.Refusal("LL_PDK_ROOT_MISSING", str(root))
+        mounts.append((root, "/pdk"))
+        pdk_root_guest = "/pdk"
+    netlist = _pl.synth_dir(project) / f"{top}_synth.v"
+    rtl = sorted(_pl.rtl_dir(project).glob("*.sv")) + \
+        sorted(_pl.rtl_dir(project).glob("*.v"))
+    stem = Path(str(getattr(pdk, "liberty", ""))).stem
+    scl = stem.split("__", 1)[0] if "__" in stem else None
+    folder = _llp.run_prelayout(project, image, str(pdk.name), top, netlist,
+                                runner_sdc, rtl, arm="design_sdc",
+                                std_cell_library=scl, mounts=mounts,
+                                pdk_root=pdk_root_guest)
+    resolved = json.loads((folder / "config.json").read_text())
+    gates = project / "phase3/librelane/prelayout/gates"
+    out: Dict[str, Any] = {"folder": folder, "resolved": resolved}
+    out["sdc"] = _llp.judge_sdc(folder, resolved, runner_sdc, gates / "step8_sdc_opensta.json")
+    out["slack"] = _llp.judge_slack(folder, gates / "step10_slack.json")
+    notes.append(f"LibreLane STAPrePNR: {folder.relative_to(project)} "
+                 f"(step 8 gate {out['sdc']['verdict']}, "
+                 f"step 10 gate {out['slack']['verdict']})")
+    if modes.get("7") == "dual" and not design_staged:
+        # Single-clock fallback deck: runner auto-SDC vs LibreLane base.sdc
+        # rendered from the same declared clock / I/O delay. Better = fewer
+        # untimed endpoints and missing input delays (OpenSTA check_setup).
+        fallback = _llp.run_prelayout(project, image, str(pdk.name), top, netlist,
+                                      None, rtl, arm="base_sdc",
+                                      std_cell_library=scl, mounts=mounts,
+                                      pdk_root=pdk_root_guest)
+        arms = {}
+        scope = {"step": "7", "netlist_sha256": _llc.digest(netlist),
+                 "clock_period": str(resolved.get("CLOCK_PERIOD"))}
+        for name, arm in (("vibeic_auto_sdc", folder), ("librelane_base_sdc", fallback)):
+            counts: Dict[str, int] = {}
+            measured = True
+            for corner in sorted(p for p in arm.iterdir() if (p / "checks.rpt").is_file()):
+                got = _llp.check_setup_counts((corner / "checks.rpt").read_text())
+                if got is None:
+                    measured = False
+                    continue
+                for key in ("unconstrained_endpoints", "no_input_delay"):
+                    counts[key] = max(counts.get(key, 0), got.get(key, 0))
+            arm_scope = dict(scope)
+            arm_scope["clock_period"] = str(json.loads(
+                (arm / "config.json").read_text()).get("CLOCK_PERIOD"))
+            doc = {"verdict": "PASS" if measured and counts else "NOT_MEASURED",
+                   "scope": arm_scope, "source": str(arm),
+                   "metrics": {k: {"status": "MEASURED", "value": v}
+                               for k, v in counts.items()}}
+            path = project / "phase3/tool_arms/7" / f"{name}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _llc.write_json(path, doc)
+            arms[name] = path
+        out["sdc_arms"] = _llc.select_arms(
+            arms, {"unconstrained_endpoints": "min", "no_input_delay": "min"},
+            project / "phase3/tool_arms/7/selection.json")
+        notes.append(f"step 7 fallback-deck arms: {out['sdc_arms'].get('selection')} "
+                     f"({out['sdc_arms'].get('reason')}); the spec-derived deck "
+                     "stays the design's deck")
+    return out
+
+
 def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                            container: str) -> StepResult:
     """Steps 7 + 10 (pre-layout, stage-2) — emitted RIGHT AFTER synth, BEFORE PnR.
@@ -56092,8 +56173,29 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
             _stamp_sdc_provenance(runner_sdc.read_text(), pdk.name))
         written.append(str(canon_sdc))
 
+    # --- Steps 7/8/10 opt-in tool path (phase3/librelane_switch.json) ----
+    import librelane_contract as _llc
+    _ll_modes = {s: _llc.selected_mode(project, s) for s in ("7", "8", "10")}
+    _ll: Dict[str, Any] = {}
+    if any(m != "direct" for m in _ll_modes.values()) and runner_sdc.is_file():
+        try:
+            _ll = _prelayout_librelane(project, top, pdk, runner_sdc,
+                                       design_staged, _ll_modes, notes)
+        except (_llc.Refusal, OSError, ValueError) as exc:
+            return StepResult("prelayout_signoff", "FAIL", time.time() - t0,
+                              f"LibreLane pre-layout path ({_ll_modes}): {exc}",
+                              written)
+
     # --- Step 7c: pvt_matrix.json (design-staged Liberty corners) --------
     pvt_path = constraints_out / "pvt_matrix.json"
+    if _ll and _ll_modes["7"] != "direct":
+        # One corner set: the tool's resolved STA_CORNERS.
+        import librelane_prelayout as _llp
+        _pvt_ll = _llp.pvt_matrix_from_sta_corners(
+            _ll["resolved"], _ll["folder"], _classify_corner_from_name)
+        stamp_pvt_corner_coverage(_pvt_ll, _pvt_ll["corners"])
+        pvt_path.write_text(json.dumps(_pvt_ll, indent=2) + "\n")
+        written.append(str(pvt_path))
     if not pvt_path.is_file():
         corners = []
         for lib in staged_libs:
@@ -56124,12 +56226,31 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     # file-existence precedence would emit a POST_ROUTE report here and label it
     # pre-layout (the contradiction sta_report_check flags).
     per_corner = sta_out / "per_corner"
-    if runner_sdc.is_file():
+    pre_pnr = sta_out / "pre_pnr_timing.rpt"
+    if _ll and _ll_modes["10"] == "librelane":
+        # The tool timed the synthesis netlist in its own step directory; its
+        # corner reports are published under the step-10 names and the
+        # composed report is always re-derived from THIS run.
+        import librelane_prelayout as _llp
+        _ll_reports = _llp.compose_corner_reports(
+            _ll["folder"], per_corner, _classify_corner_from_name)
+        written.append(str(per_corner))
+        pre_pnr.unlink(missing_ok=True)
+    elif runner_sdc.is_file():
         per_corner.mkdir(parents=True, exist_ok=True)
         if _emit_multi_corner_sta(project, top, pdk, container,
                                   staged_libs, per_corner, notes,
                                   force_prelayout=True):
             written.append(str(per_corner))
+        if _ll and _ll_modes["10"] == "dual":
+            # Cross-check, not pick-the-better: the same netlist/SDC/liberty
+            # must give the same worst slack in both engines' packaging.
+            import librelane_prelayout as _llp
+            _arm = project / "phase3/tool_arms/10/librelane/per_corner"
+            _llp.compose_corner_reports(_ll["folder"], _arm,
+                                        _classify_corner_from_name)
+            notes.append(f"step 10 dual: LibreLane arm reports in "
+                         f"{_arm.relative_to(project)}; direct arm published")
     # Compose pre_pnr_timing.rpt from a GENUINE per-corner report (setup-worst
     # SS preferred, else TT/FF/any) — NOT a copy of the post-route sta.rpt.
     # Re-compose when a stale pre_pnr_timing.rpt from an earlier post-route
@@ -56260,6 +56381,23 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                   f"(pre_pnr_timing.rpt declared "
                   f"{_pre_pnr_basis or 'no STA_BASIS'}, not PRE_LAYOUT) — "
                   + detail)
+    # Tool path: the gates judge the tool's own output, and they block.
+    _ll_verdicts = [(step, _ll[key]) for step, key in (("8", "sdc"), ("10", "slack"))
+                    if _ll and _ll_modes[step] != "direct"]
+    for step, gate in _ll_verdicts:
+        written.append(str(project / "phase3/librelane/prelayout/gates" /
+                           ("step8_sdc_opensta.json" if step == "8"
+                            else "step10_slack.json")))
+    _ll_bad = [f"step {s} gate {g['verdict']}: " + "; ".join(g["findings"][:2])
+               for s, g in _ll_verdicts if g["verdict"] != "PASS"]
+    if _ll_bad:
+        return StepResult(
+            "prelayout_signoff",
+            "FAIL" if any(g["verdict"] == "FAIL" for _, g in _ll_verdicts)
+            else "NOT_MEASURED",
+            time.time() - t0, " | ".join(_ll_bad) + " — " + detail, written,
+            reason_class=("" if any(g["verdict"] == "FAIL" for _, g in _ll_verdicts)
+                          else _V.ReasonClass.INCONCLUSIVE))
     # `WARN` (the pre-layout sign-off BASIS is unsubstantiated) is a pass the
     # step itself declined to make clean — R-0915-85's word for that is
     # PASS_WITH_WAIVERS, and `validate_step_row` derives the must-close row

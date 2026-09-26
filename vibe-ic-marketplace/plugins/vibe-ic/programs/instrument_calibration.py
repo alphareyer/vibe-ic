@@ -1376,6 +1376,105 @@ _register(Instrument(
 ))
 
 
+# ---- LibreLane OpenROAD.STAPrePNR readers (steps 8 and 10, T92) -----------
+
+_STA_PREPNR_RUN = (
+    "Real LibreLane 3.1.0.dev1 OpenROAD.STAPrePNR (OpenSTA via `sta`) in the "
+    "released vibeic-eda 0.3.77 image, run by digest on 8hd-3 (.121) on "
+    "2026-09-26 through librelane_contract.run_chain, nom_tt_025C_5v00 "
+    "corner of gf180mcuD. Calibration structure: calibration/"
+    "cal_chain_gf180.v (two dffq_1 around one inv_1, no design under test)")
+
+
+def _judge_sta_black_box(log: str) -> Optional[str]:
+    import librelane_prelayout as L
+    return "BLACK_BOX" if L.black_boxes(log) else None
+
+
+def _judge_sta_sdc_diag(sample: Tuple[str, str]) -> Optional[str]:
+    import librelane_prelayout as L
+    log, sdc = sample
+    return "SDC_DIAGNOSTIC" if L.sdc_diagnostics(log, Path(sdc)) else None
+
+
+def _judge_sta_check_setup(rpt: str) -> Optional[str]:
+    import librelane_prelayout as L
+    counts = L.check_setup_counts(rpt)
+    if counts is None:
+        return "NOT_MEASURED"
+    return "UNTIMED" if any(counts.values()) else None
+
+
+_register(Instrument(
+    name="librelane_prelayout::black_boxes",
+    reads="OpenSTA sta.log written by LibreLane STAPrePNR (link_design)",
+    ruling="T92 step 10", owner="mig-sdcsta",
+    why=("OpenSTA links a master missing from every liberty as an empty black "
+         "box and exits 0; the slack it then reports omits that logic "
+         "(harvest: 'No paths found' / wns 0.00 where the linked run had "
+         "-33.88 ns). The pair differs only in one cell master."),
+    judge=_judge_sta_black_box,
+    positive=Sample(
+        provenance=(_STA_PREPNR_RUN + ", with i0's master renamed to "
+                    "cal_absent_master (calibration/cal_chain_absent.v). "
+                    "Unedited sta.log; carries Warning 198 'Creating black "
+                    "box for i0'. calibration/sta_prepnr_black_box_positive.log"),
+        artefact=_read("sta_prepnr_black_box_positive.log")),
+    expect="BLACK_BOX",
+    negative=Sample(
+        provenance=(_STA_PREPNR_RUN + ", unmodified netlist and "
+                    "calibration/cal_full.sdc. Unedited sta.log. "
+                    "calibration/sta_prepnr_linked_clean_negative.log"),
+        artefact=_read("sta_prepnr_linked_clean_negative.log")),
+))
+
+_register(Instrument(
+    name="librelane_prelayout::sdc_diagnostics",
+    reads="OpenSTA sta.log diagnostics raised while reading the SDC",
+    ruling="T92 step 8", owner="mig-sdcsta",
+    why=("A constraint aimed at a port OpenSTA cannot find is a warning, the "
+         "run exits 0 and the constraint applies to nothing. A regex over the "
+         "SDC text cannot see it; OpenSTA's own read_sdc diagnostic can."),
+    judge=_judge_sta_sdc_diag,
+    positive=Sample(
+        provenance=(_STA_PREPNR_RUN + ", SDC calibration/cal_bad_port.sdc "
+                    "(set_input_delay on a port that does not exist). "
+                    "Unedited sta.log; Warning 366 at cal_bad_port.sdc line 2. "
+                    "calibration/sta_prepnr_sdc_bad_port_positive.log"),
+        artefact=lambda: (_read("sta_prepnr_sdc_bad_port_positive.log")(),
+                          "cal_bad_port.sdc")),
+    expect="SDC_DIAGNOSTIC",
+    negative=Sample(
+        provenance=(_STA_PREPNR_RUN + ", SDC calibration/cal_full.sdc. "
+                    "calibration/sta_prepnr_linked_clean_negative.log"),
+        artefact=lambda: (_read("sta_prepnr_linked_clean_negative.log")(),
+                          "cal_full.sdc")),
+))
+
+_register(Instrument(
+    name="librelane_prelayout::check_setup_counts",
+    reads="OpenSTA check_setup section of STAPrePNR checks.rpt",
+    ruling="T92 step 8", owner="mig-sdcsta",
+    why=("A staged SDC declaring only create_clock leaves every primary I/O "
+         "untimed, which turns a red sign-off green by subtraction. OpenSTA's "
+         "check_setup counts the missing input delays and unconstrained "
+         "endpoints; the pair differs only in the SDC."),
+    judge=_judge_sta_check_setup,
+    positive=Sample(
+        provenance=(_STA_PREPNR_RUN + ", SDC calibration/cal_clock_only.sdc. "
+                    "Unedited checks.rpt: 1 input port missing "
+                    "set_input_delay, 2 unconstrained endpoints. "
+                    "calibration/sta_prepnr_check_setup_clock_only_positive.rpt"),
+        artefact=_read("sta_prepnr_check_setup_clock_only_positive.rpt")),
+    expect="UNTIMED",
+    negative=Sample(
+        provenance=(_STA_PREPNR_RUN + ", SDC calibration/cal_full.sdc. "
+                    "Unedited checks.rpt with an empty check_setup section. "
+                    "calibration/sta_prepnr_check_setup_clean_negative.rpt"),
+        artefact=_read("sta_prepnr_check_setup_clean_negative.rpt")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════
