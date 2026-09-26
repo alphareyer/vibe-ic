@@ -58,15 +58,35 @@ end
 #: which measures how well I can satisfy it, not whether a real PDK passes.
 _REAL_TECH_IN_IMAGE = "/foss/pdks/sky130A/libs.tech/magic/sky130A.tech"
 import _eda_image as _img
-
-_IMAGE = _img.local_image() or (_img.IMAGE_REPO + ":latest")
+import _eda_pin as _pin
 
 
 def _real_tech(tmp_path):
-    """Copy the PDK's own tech file out of the image, or skip."""
+    """Copy the PDK's own tech file out of the image, or skip.
+
+    THE IMAGE IS ASKED FOR HERE, NOT AT COLLECTION (lane rfimg2). This was
+    `_IMAGE = _img.local_image() or (IMAGE_REPO + ":latest")` at module level:
+    `local_image()` asks this host's docker, so inside the image (no docker) the
+    whole file was a collection error and none of its tech-file tests ran; and
+    on a host without the pinned bytes the `:latest` fallback handed
+    `docker run` a floating tag it would have to FETCH. Now: inside the image
+    the PDK's own file is read where it is; on a host, only an image it HOLDS
+    is run, and anything else is NOT_VERIFIED with the remedy.
+    """
     import subprocess
-    import pytest
     out = tmp_path / "sky130A.tech"
+    in_image = Path(_REAL_TECH_IN_IMAGE)
+    if in_image.is_file():
+        out.write_text(in_image.read_text())
+        return out
+    try:
+        image = _img.local_image()
+    except _pin.ImageNotResolvable as exc:
+        skip_not_verified(f"no EDA image identity resolves here ({exc})",
+                          PULL_REMEDY)
+    if not image:
+        skip_not_verified("the pinned EDA image is not held on this host",
+                          PULL_REMEDY)
     # 300s here tripped `ci_harness_timeout_ceiling_check`: the CI harness bound
     # is 180s, so an inner bound above it does not fail the TEST, it outlives the
     # harness and kills the SESSION — a much worse failure than the skip this
@@ -76,7 +96,7 @@ def _real_tech(tmp_path):
     # the 60s ceiling AND a timeout joins the skip path instead of propagating.
     try:
         r = subprocess.run(
-            ["docker", "run", "--rm", "--entrypoint", "cat", _IMAGE,
+            ["docker", "run", "--rm", "--entrypoint", "cat", image,
              _REAL_TECH_IN_IMAGE],
             capture_output=True, text=True, timeout=45)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:

@@ -80,6 +80,9 @@ def __getattr__(name):
     """
     if name == "IMAGE_DIGEST":
         return _resolve_digest()
+    if name in ("IMAGE", "IMAGE_REPO_DIGEST"):
+        runtime_image()
+        return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -101,11 +104,29 @@ def image_reference() -> str:
     return f"{image_repo()}@{_resolve_digest()}"
 
 
-#: Resolved once, at import, so that every check in this module and every
-#: container it inspects are talking about the same string for the life of the
-#: process.  `_image_profile` binds this against the image's own RepoDigests.
-IMAGE = image_reference()
-IMAGE_REPO_DIGEST = IMAGE
+def runtime_image() -> str:
+    """`IMAGE`: resolved ONCE, on first use, then fixed for the process.
+
+    Resolved once so that every check in this module and every container it
+    inspects are talking about the same string for the life of the process;
+    `_image_profile` binds it against the image's own RepoDigests (and may
+    rebind it to the local name that holds the digest).
+
+    ON FIRST USE, NOT AT IMPORT. It was `IMAGE = image_reference()` at module
+    level, and resolving asks this host's docker (`_eda_pin`, since v1.22.4):
+    on a host or in an image with no docker, `import hermetic_candidate_runner`
+    raised `ImageNotResolvable`, and so did every module and test that merely
+    imports it for its receipt grammar. `IMAGE` / `IMAGE_REPO_DIGEST` stay
+    readable as module attributes through `__getattr__` (PEP 562).
+    """
+    g = globals()
+    if "IMAGE" not in g:
+        ref = image_reference()
+        g["IMAGE"] = ref
+        g.setdefault("IMAGE_REPO_DIGEST", ref)
+    return g["IMAGE"]
+
+
 USER = "65534:65534"
 PLATFORM = "linux/amd64"
 WORKDIR = "/subject"
@@ -846,7 +867,7 @@ def carries_pinned_digest(ref: Any) -> bool:
     # second time and could answer differently, which is the mid-run drift this
     # decoupling had to avoid; it also makes the check unanswerable for any
     # caller that set `IMAGE` deliberately.
-    required = reference_digest(IMAGE)
+    required = reference_digest(runtime_image())
     return required is not None and reference_digest(ref) == required
 
 
@@ -892,7 +913,7 @@ def _image_profile(docker: Docker) -> dict[str, Any]:
     refused exactly as strictly as before, and nothing here pulls.
     """
     global IMAGE, IMAGE_REPO_DIGEST
-    configured = IMAGE
+    configured = runtime_image()
     proc = docker.call(["image", "inspect", IMAGE])
     if proc.returncode != 0:
         held = _local_reference_carrying_pin(docker)
@@ -1301,7 +1322,7 @@ def _provision_volume(
         "--workdir", "/",
         "--entrypoint", "/usr/bin/env",
         "--mount", _mount_arg(volume, "/var/tmp", readonly=False, volume=True),
-        IMAGE,
+        runtime_image(),
         "-i", "--", "/usr/bin/touch", f"/var/tmp/{_VOLUME_READY_MARKER}",
     ]
     raw_cid = docker.checked(create_args, "evidence volume provisioner creation")
@@ -1363,7 +1384,7 @@ def _post_stop_export(
         "--entrypoint", copy_command[0],
         "--mount", _mount_arg(volume, "/evidence", readonly=True, volume=True),
         "--mount", _mount_arg(destination, "/export", readonly=False),
-        IMAGE,
+        runtime_image(),
         *copy_command[1:],
     ]
     raw_cid = docker.checked(create_args, "post-stop evidence exporter creation")
@@ -2207,7 +2228,7 @@ def run(args: argparse.Namespace) -> int:
                         overlay["source"], overlay["destination"], readonly=True),
                 )
             ],
-            IMAGE,
+            runtime_image(),
             "-i", "--", *process_environment, *command,
         ]
         raw_cid = docker.checked(create_args, "candidate container creation")

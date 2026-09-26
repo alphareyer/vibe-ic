@@ -147,6 +147,17 @@ class _YosysSite:
         return cp.returncode, out
 
 
+def _identity_mount_fixture_dirs(container):
+    """A fixture directory under each bind mount `container` sees at the SAME
+    path as this host (`Source == Destination`), from the container's own mount
+    table. `[]` when the table cannot be read -- "could not look" is never
+    turned into a guessed path."""
+    import _designs_root  # noqa: PLC0415 -- the one reader of the mount table
+    return [src / ".vibeic-lec-fixtures"
+            for src, dst in _designs_root.container_mounts(container)
+            if str(src) == str(Path(dst)) and src.is_dir()]
+
+
 def _resolve_yosys_site(tmp_path):
     """`lec_run`'s own probes, in `lec_run`'s own order. Never raises."""
     tried = []
@@ -170,9 +181,19 @@ def _resolve_yosys_site(tmp_path):
     # host paths it was started with, and a pytest `tmp_path` under /tmp is
     # usually not one of them -- so ASK, with lec_run's own probe, rather than
     # assume a mount table. The candidates are this run's tmp_path (correct in
-    # the image, where both sides are one filesystem) and the account home,
-    # which is what the plugin's own container convention mounts.
-    for cand in (tmp_path, Path.home() / ".cache" / "vibeic-lec-fixtures"):
+    # the image, where both sides are one filesystem), then every directory
+    # the container itself says it binds AT THE SAME PATH (`_designs_root`'s
+    # reading of its own mount table), then the account home.
+    #
+    # THE MOUNT TABLE IS STATED, NOT ASSUMED. MEASURED on 8HD-6 (main
+    # 539cd739d): pytest's basetemp is /tmp/pytest-of-<user>/..., the shared
+    # `vibeic-eda` container binds only `~/vibeic-designs` (at the identical
+    # path) and not ~/.cache, so all four real-yosys tests failed NOT_MEASURED
+    # on a host whose container HAD yosys and HAD a shared path -- one this
+    # probe never asked about. A mount whose container path differs is not a
+    # candidate: the yosys scripts name host paths verbatim.
+    for cand in (tmp_path, *_identity_mount_fixture_dirs(container),
+                 Path.home() / ".cache" / "vibeic-lec-fixtures"):
         try:
             cand.mkdir(parents=True, exist_ok=True)
             probe = cand / f".visible-{os.getpid()}"
@@ -199,6 +220,10 @@ def yosys(tmp_path):
     finally:
         if site.dir is not None and site.dir != tmp_path:
             shutil.rmtree(site.dir, ignore_errors=True)
+            try:                    # the fixture parent, only if now empty
+                site.dir.parent.rmdir()
+            except OSError:
+                pass
 
 
 _GOLD = ["/g/a.sv", "/g/b.sv"]

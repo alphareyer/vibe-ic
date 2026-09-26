@@ -29,8 +29,19 @@ import pytest
 import _plugin_tree  # noqa: F401 — puts programs/ on sys.path
 import _eda_pin as PIN
 import analog_a7_post_layout_emit as A7
+from _stated_eda_image import state_the_image, stated_image  # noqa: E402
 
-IMAGE = "ghcr.io/vibeic/vibeic-eda@" + PIN.IMAGE_DIGEST
+#: STATED, NOT READ FROM THIS HOST (lane rfimg2). This was
+#: `"ghcr.io/vibeic/vibeic-eda@" + PIN.IMAGE_DIGEST` at module level, which
+#: asks this host's docker at collection: inside the image (no docker) the
+#: whole file was a collection error. The runs below are in-process, so the
+#: pin is stated for each test by `_the_stated_image`.
+IMAGE = stated_image()
+
+
+@pytest.fixture(autouse=True)
+def _the_stated_image(monkeypatch):
+    state_the_image(monkeypatch)
 
 TECH = "tech\n  format 35\n  t\nend\ninclude t-extract\n"
 TECH_EXTRACT = """extract

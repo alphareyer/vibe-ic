@@ -53,13 +53,21 @@ IMPORTED_WITHOUT_A_RESOLVE = [
     "landing_pytest_runtime_preflight",
     "p0_tool_frontend_check",
     "flow_step_output_content_check",
+    # tools/ci, outside `programs/` (lane rfimg2): `IMAGE = image_reference()`
+    # at module level made `import hermetic_candidate_runner` raise
+    # ImageNotResolvable with no docker, for every importer of its grammar.
+    "hermetic_candidate_runner",
 ]
+
+#: tools/ci modules the child may import (the repo's CI runner lives there).
+TOOLS_CI = PROGRAMS.parents[3] / "tools" / "ci"
 
 # Run in a child with NO docker on PATH, every resolver poisoned, and every
 # docker subprocess recorded. The child prints what it saw.
 _CHILD = r"""
 import json, os, subprocess, sys
 sys.path.insert(0, {programs!r})
+sys.path.append({tools_ci!r})
 seen = []
 import _eda_pin, _eda_image
 def _poison(name):
@@ -95,7 +103,9 @@ def _import_without_docker(module: str, tmp_path: Path) -> dict:
     env["PATH"] = str(empty)            # no docker client can be found
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     r = subprocess.run(
-        [sys.executable, "-c", _CHILD.format(programs=str(PROGRAMS), module=module)],
+        [sys.executable, "-c", _CHILD.format(programs=str(PROGRAMS),
+                                            tools_ci=str(TOOLS_CI),
+                                            module=module)],
         capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=300)
     lines = [ln for ln in r.stdout.splitlines() if ln.startswith("@@")]
     assert lines, f"{module}: child printed no verdict (rc={r.returncode}): {r.stderr[-1500:]}"

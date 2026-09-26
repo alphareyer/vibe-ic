@@ -50,6 +50,7 @@ import _plugin_tree  # noqa: F401 — puts programs/ on sys.path
 import _analog_producer_common as PC
 import _container_exec as CE
 import _eda_pin as PIN
+from _stated_eda_image import STATED_DIGEST, state_the_image_for_children  # noqa: E402
 import analog_a3_netlist_emit as A3
 
 from _analog_producer_fixture import (
@@ -62,7 +63,17 @@ LDO_SPEC = [{"name": "Vout", "target": 1.8, "unit": "V"},
 #: pin by construction so it can never accidentally become equal to it.
 OTHER_DIGEST = "sha256:" + "".join(
     ("0" if c != "0" else "1") if c.isdigit() or c in "abcdef" else c
-    for c in PIN.IMAGE_DIGEST.split(":", 1)[1])
+    for c in STATED_DIGEST.split(":", 1)[1])
+
+
+@pytest.fixture(autouse=True)
+def _the_stated_image(monkeypatch):
+    """The pin is STATED, in this process and in every program it spawns
+    (lane rfimg2). It used to be read from THIS HOST's docker at collection
+    (`PIN.IMAGE_DIGEST` in a module constant), so inside the image (no docker)
+    the whole file was a collection error, and on a host the arms compared the
+    stub container against whatever that host happened to hold."""
+    state_the_image_for_children(monkeypatch)
 
 
 def _stub_docker(tmp_path: Path, digest: str) -> Path:

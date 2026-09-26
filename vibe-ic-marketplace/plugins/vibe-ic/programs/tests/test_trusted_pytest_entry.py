@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -33,7 +34,17 @@ ENTRY = PROGRAMS / "trusted_pytest_entry.py"
 #: `_eda_pin` is a different module from the subject (`trusted_pytest_entry`),
 #: so reading it here is not circular; it is the same composition every other
 #: run-path site performs.
-IMAGE = _pin.image_reference()
+#:
+#: RESOLVED WHEN THE TEST RUNS, NOT AT COLLECTION (lane rfimg2). This was
+#: `IMAGE = _pin.image_reference()` at module level, which asks THIS HOST's
+#: docker: inside the image (no docker) the whole file was a collection error,
+#: so the eleven tests here that need no image at all never ran either.
+def _landing_image():
+    """`(reference, why_not)` -- the reference this host holds for the pin."""
+    try:
+        return _pin.image_reference(), ""
+    except _pin.ImageNotResolvable as exc:
+        return None, str(exc)
 
 #: THE STREAM THIS FILE'S CHILDREN MUST NOT JOIN.
 #:
@@ -100,6 +111,18 @@ def test_pinned_hermetic_image_ignores_subject_module_shadows(tmp_path):
     # place the other tests here most need to be exercised. Measured in the
     # pinned image: `FileNotFoundError: [Errno 2] ... 'docker'`, a red that says
     # nothing about the subject.
+    if shutil.which("docker") is None:
+        NV.skip_not_verified(
+            "no container engine is reachable here (no `docker` on PATH), so "
+            "the hermetic image claim could not be tested",
+            remedy="install a container engine and pull the pinned vibeic-eda "
+                   "image")
+    IMAGE, why_not = _landing_image()
+    if IMAGE is None:
+        NV.skip_not_verified(
+            f"the pinned landing image is not held on this host ({why_not}), "
+            f"so the hermetic image claim could not be tested",
+            remedy="pull the pinned vibeic-eda image onto this host")
     try:
         available = subprocess.run(
             ["docker", "image", "inspect", IMAGE],

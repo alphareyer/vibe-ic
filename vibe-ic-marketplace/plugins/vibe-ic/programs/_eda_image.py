@@ -684,16 +684,53 @@ def _note(message: str) -> None:
     print(f"_eda_image: {message}", file=sys.stderr)
 
 
-def resolve(env=None, *, repo: str = IMAGE_REPO) -> str:
-    """A runnable image reference for the vibeic-eda toolchain.
+def held_names(env=None) -> Tuple[Tuple[str, ...], str]:
+    """`(names, why_not)` -- every LOCAL `<repo>[:tag]@<digest>` of the
+    configured image's repository, under any registry prefix. Local metadata
+    only, never the network: the list a refusal names so an operator can see
+    what this host DOES hold instead of the pinned bytes."""
+    base = _pin.image_repo(env).rsplit("/", 1)[-1]
+    rc, out, err = _pin._docker(
+        "image", "ls", "-a", "--digests", "--no-trunc", "--format",
+        "{{.Repository}}\t{{.Tag}}\t{{.Digest}}")
+    if rc == -1:
+        return (), err
+    if rc != 0:
+        return (), "docker image ls could not be read"
+    names = []
+    for line in out.splitlines():
+        repo_name, _, rest = line.strip().partition("\t")
+        tag, _, digest = rest.partition("\t")
+        if repo_name.rsplit("/", 1)[-1] != base:
+            continue
+        name = repo_name + ("" if tag in ("", "<none>") else f":{tag}")
+        names.append(name + ("" if digest in ("", "<none>") else f"@{digest}"))
+    return tuple(dict.fromkeys(names)), ""
 
-    Order: an explicit override IN REFERENCE SHAPE → the pinned reference. A
-    bare image Id override is refused with `IMAGE_ID_NOT_A_REFERENCE` and the
-    pinned reference is run instead, announced: `docker run` accepts an Id, so
-    this is the one door that would otherwise have let a shape the gate path
-    refuses reach the toolchain unremarked (#2101). Never returns a bare
-    `:latest`, which is the one answer that can silently mean "whatever this
-    machine happened to pull months ago".
+
+def resolve(env=None, *, repo: str = IMAGE_REPO, allow_pull: bool = False
+            ) -> str:
+    """A runnable image reference for the vibeic-eda toolchain -- one THIS HOST
+    HOLDS, or a refusal. Never a reference `docker run` would have to fetch,
+    unless the caller passes `allow_pull=True`.
+
+    Order: an explicit override IN REFERENCE SHAPE → the reference this host
+    holds for the pinned digest. A bare image Id override is refused with
+    `IMAGE_ID_NOT_A_REFERENCE` and the pinned reference is run instead,
+    announced: `docker run` accepts an Id, so this is the one door that would
+    otherwise have let a shape the gate path refuses reach the toolchain
+    unremarked (#2101). Never returns a bare `:latest`, which is the one answer
+    that can silently mean "whatever this machine happened to pull months ago".
+
+    A MISSING IMAGE IS REFUSED, NEVER FETCHED (orchestrator ruling, lane
+    rfimg2). This used to return the CONFIGURED reference when no local name
+    held the digest, announced as "running it will fetch exactly those pinned
+    bytes". Every fleet host sets `VIBEIC_EDA_IMAGE_REPO` to the fleet mirror,
+    so that announcement preceded a `docker run` that PULLED FROM THE MIRROR --
+    a multi-gigabyte fetch from a registry no run may touch, started by a
+    function whose caller only asked "which image". Now: `ImageNotHeld`
+    (`IMAGE_NOT_PRESENT`), naming the digest, the names this host does hold,
+    and the opt-in. `allow_pull=True` is that opt-in, and is still announced.
     """
     env = os.environ if env is None else env
     override, why_unusable = _override(env)
@@ -710,25 +747,30 @@ def resolve(env=None, *, repo: str = IMAGE_REPO) -> str:
     # point. It used to ask the registry what `latest` meant and then walk down
     # through the newest local tag to upstream iic-osic-tools -- three rungs,
     # each naming a DIFFERENT toolchain, none of them the one anybody pinned.
-    # Composing the reference cannot fail and cannot go stale; whether this host
-    # HOLDS those bytes is `local_image()`'s question and is deliberately still
-    # a separate one, because collapsing the two turns a skip guard's local
-    # check into an unbounded fetch.
     #
     # THE REFERENCE THIS HOST HOLDS for the pinned digest, not the configured
     # repository composed with it (lane migf14): on a fleet whose configured
     # repository is a mirror, that composition named an image no host holds.
-    # Only when NO local name carries the digest is the configured reference
-    # returned; an absent image is announced, as this function always has.
     try:
-        ref = _pin.image_reference(env)
-    except _pin.ImageNotHeld:
-        ref = _pin.configured_reference(env)
-    if not local_image(env=env):
-        _note(f"{_pin.IMAGE_NOT_PRESENT}: {ref} is not on this host; running it "
-              f"will fetch exactly those pinned bytes. Nothing older is "
-              f"substituted.")
-    return ref
+        return _pin.image_reference(env)
+    except _pin.ImageNotHeld as exc:
+        configured = _pin.configured_reference(env)
+        if allow_pull:
+            _note(f"{_pin.IMAGE_NOT_PRESENT}: {exc.digest} is not on this "
+                  f"host; allow_pull was passed, so running {configured} will "
+                  f"fetch exactly those pinned bytes. Nothing older is "
+                  f"substituted.")
+            return configured
+        names, why_names = held_names(env)
+        holds = (f"this host could not be asked what it holds ({why_names})"
+                 if why_names else
+                 f"this host holds {list(names)}" if names else
+                 "this host holds no image of that repository")
+        raise _pin.ImageNotHeld(exc.digest, (
+            f"{holds}; a run would have to fetch {configured}, and fetching is "
+            f"the caller's explicit call (`allow_pull=True`, or "
+            f"`_eda_image.py --allow-pull`), never this function's. Nothing "
+            f"older is substituted")) from exc
 
 
 def main(argv=None) -> int:
@@ -745,7 +787,11 @@ def main(argv=None) -> int:
             return 2
         print(judged.ref)
         return 0
-    print(resolve())
+    try:
+        print(resolve(allow_pull="--allow-pull" in argv))
+    except _pin.ImageNotResolvable as exc:
+        print(f"_eda_image: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

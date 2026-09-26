@@ -26,7 +26,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _eda_pin as _pin  # noqa: E402
 
-__all__ = ["STATED_DIGEST", "stated_image", "state_the_image"]
+__all__ = ["STATED_DIGEST", "stated_image", "state_the_image",
+           "state_the_image_for_children"]
 
 STATED_DIGEST = "sha256:" + "7c" * 32
 
@@ -47,3 +48,19 @@ def state_the_image(monkeypatch, digest: str = STATED_DIGEST) -> str:
     monkeypatch.setattr(_pin, "local_references_for_digest",
                         lambda d: ((stated_image(d),), ""))
     return stated_image(digest)
+
+
+def state_the_image_for_children(monkeypatch, digest: str = STATED_DIGEST) -> str:
+    """`state_the_image`, and the SAME identity for every child process.
+
+    For tests that run a program as a SUBPROCESS: a monkeypatch does not cross
+    the fork, so the child would ask the host's docker (or the test's stub
+    docker) again. The identity is exported as `VIBEIC_EDA_IMAGE`, the override
+    `_eda_pin.resolved_image_digest` takes FIRST -- exactly the export its own
+    `_hold` makes so that a run's whole process tree agrees -- so the child
+    reads the digest out of the reference and asks docker nothing.
+    """
+    ref = state_the_image(monkeypatch, digest)
+    monkeypatch.setenv("VIBEIC_EDA_IMAGE", ref)
+    monkeypatch.delenv("IIC_EDA_IMAGE", raising=False)
+    return ref
