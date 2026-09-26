@@ -17,8 +17,8 @@ FRONT END. The netlist is exactly what LibreLane's `Yosys.JsonHeader` writes
     hierarchy -check -top <T> -nokeep_prints -nokeep_asserts
     rename -top <T>; proc; flatten; opt_clean -purge; json -o <out>
 
-`build()` runs those passes (local yosys, else the image the step switch
-declares), and `load()` accepts either that output or a LibreLane
+`build()` runs those passes (local yosys, else the image
+`librelane_contract.resolve_image` answers), and `load()` accepts either that output or a LibreLane
 `Yosys.JsonHeader` `json_h` file. After `proc` without `opt_dff`, a sync
 reset is the outermost `$mux` in front of D with a constant arm, an enable is
 a `$mux` whose other arm is the flop's own Q, and an async reset is the `ARST`
@@ -108,7 +108,17 @@ def build(project: Path, rtl_files: List[Path], top: Optional[str],
     script = yosys_script(files, top, tmp)
     if shutil.which("yosys"):
         argv = ["yosys", "-q", "-p", script]
-    elif image:
+    else:
+        # Only the docker path needs an image: the caller's, else the one the
+        # contract resolves (switch `image` > VIBEIC_LIBRELANE_IMAGE > this
+        # host's released image). A refusal names the resolver's cause.
+        if not image:
+            import librelane_contract as _ll
+            try:
+                image = _ll.resolve_image(project)
+            except _ll.Refusal as exc:
+                raise Refusal("CDC_NETLIST_TOOL_UNAVAILABLE",
+                              f"no yosys on PATH and no image: {exc}") from None
         import os
         import _docker_memory as _dmem
         mounts = {project} | {f.parent for f in files
@@ -119,9 +129,6 @@ def build(project: Path, rtl_files: List[Path], top: Optional[str],
         argv = [docker, "run", *_dmem.docker_memory_flags(), "--rm", "--network", "none",
                 "-u", f"{os.getuid()}:{os.getgid()}", *vols,
                 "--entrypoint", "yosys", image, "-q", "-p", script]
-    else:
-        raise Refusal("CDC_NETLIST_TOOL_UNAVAILABLE",
-                      "no yosys on PATH and no image in phase3/librelane_switch.json")
     done = subprocess.run(argv, capture_output=True, text=True)
     log.write_text("$ " + " ".join(argv) + "\n" + done.stdout + done.stderr)
     if done.returncode or not tmp.is_file():
