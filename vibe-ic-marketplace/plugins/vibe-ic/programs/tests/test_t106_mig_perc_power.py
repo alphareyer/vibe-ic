@@ -197,7 +197,7 @@ def test_step_33_on_librelane_publishes_the_worst_corner_report_unedited(tmp_pat
     rpt3 = runner._pl.reports_phase3_dir(tmp_path)
     rpt3.mkdir(parents=True, exist_ok=True)
     written, notes = [], []
-    runner._step33_tool_arm(tmp_path, 'spm', pdk, 'librelane', rpt3, False, written, notes)
+    runner._step33_tool_arm(tmp_path, 'spm', pdk, 'librelane', rpt3 / 'power.rpt', False, written, notes)
     record = json.loads((rpt3 / 'power.json').read_text())
     assert record['total_power_w'] == pytest.approx(2.646044e-02), notes
     assert record['power_basis'] == 'POST_ROUTE_SPEF'
@@ -214,7 +214,7 @@ def test_step_33_dual_keeps_the_direct_record_and_adds_the_arms(tmp_path):
     rpt3 = runner._pl.reports_phase3_dir(tmp_path)
     put(rpt3 / 'power.json', {'total_power_w': 0.0215, 'activity': {'basis': 'VECTORLESS'}})
     write(rpt3 / 'power.rpt', 'Total 1.65e-02 4.94e-03 1.58e-06 2.15e-02 100.0%\n')
-    runner._step33_tool_arm(tmp_path, 'spm', pdk, 'dual', rpt3, True, [], [])
+    runner._step33_tool_arm(tmp_path, 'spm', pdk, 'dual', rpt3 / 'power.rpt', True, [], [])
     assert json.loads((rpt3 / 'power.json').read_text())['total_power_w'] == 0.0215
     assert json.loads((rpt3 / 'power_arms.json').read_text())['mode'] == 'dual'
 
@@ -587,3 +587,114 @@ def test_the_post_route_power_deck_propagates_the_clock_the_routed_netlist_has(t
         assert ('set_propagated_clock [all_clocks]' in deck) is propagated, basis
         if propagated:
             assert deck.index('read_spef') < deck.index('set_propagated_clock')
+
+
+STA_PATH = '''Startpoint: u_core/_417_ (rising edge-triggered flip-flop clocked by clk)
+Endpoint: u_core/_416_ (rising edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: max
+
+        Cap        Slew       Delay        Time   Description
+---------------------------------------------------------------------------------------
+                           0.000000    0.000000   clock clk (rise edge)
+                           3.762521    3.762521   clock network delay (propagated)
+               0.101318    0.000000    3.762521 ^ u_core/_417_/CLK (cells__dffq_1)
+   0.013435    0.186434    {d1}    {t1} v u_core/_417_/Q (cells__dffq_1)
+               0.186434    0.000410    {t2} v u_core/_416_/D (cells__dffq_1)
+                                       {t2}   data arrival time
+'''
+
+LIBERTY = '''library (cells_tt) {
+  time_unit : "1ns";
+  capacitive_load_unit (1,pf);
+  voltage_map(VDD, 5);
+  voltage_map(VNW, 5);
+  voltage_map(VSS, 0);
+  voltage_map(VPW, 0);
+  operating_conditions(cells_ss_125C_4v50) {
+  }
+  cell ("cells__dffq_1") {
+    pin (Q) {
+      timing () {
+        related_pin : "CLK";
+        cell_fall (tbl) {
+          index_1 ("0.1, 0.2");
+          index_2 ("0.01, 0.02");
+          values ("0.70, 0.72", "0.74, 0.76");
+        }
+      }
+    }
+  }
+}
+'''
+
+
+def _wps_edge(calls):
+    """What `sta` (write_path_spice) and `ngspice` write, at the `_docker` edge.
+    The deck's SPICE delay follows the SPEF the session read: x10 caps, slower."""
+    def fake(image, project, mounts, argv, cwd, docker='docker'):
+        calls.append(argv)
+        if argv[0] == 'sta':
+            tcl = Path(argv[-1]).read_text()
+            spef = tcl.split('read_spef ')[1].split('\n')[0]
+            slow = 'mutated' in spef
+            d1 = 0.95 if slow else 0.710804
+            for rpt in __import__('re').findall(r'> (\S+\.rpt)', tcl):
+                write(Path(rpt), STA_PATH.format(d1=f'{d1:.6f}', t1=f'{3.762521 + d1:.6f}',
+                                                 t2=f'{3.762931 + d1:.6f}'))
+            for deck in __import__('re').findall(r'-spice_file (\S+)', tcl):
+                write(Path(deck + '_1.sp'), '* Path\n.tran 1e-13 2e-08\n'
+                      '.print tran v(u_core\\\\/_417_/CLK) v(u_core\\\\/_417_/Q) v(u_core\\\\/_416_/D)\n'
+                      'v2 u_core\\\\/_417_/VDD 0 4.500\n.end\n')
+            return SimpleNamespace(returncode=0, stdout='VIBEIC_WPS_OK 1\n', stderr='')
+        if argv[0] == 'ngspice':
+            run = Path(argv[-1])
+            spef_slow = 'mutated' in str(run)
+            nodes = json.loads(run.with_suffix('').with_suffix('.nodes.json').read_text())
+            delay = 1.10e-9 if spef_slow else 0.72e-9
+            rows = []
+            for i in range(200):
+                t = i * 1e-11
+                clk = 4.5 if t >= 0.5e-9 else 0.0
+                d = 0.0 if t >= 0.5e-9 + delay else 4.5
+                rows.append(f'{t} {clk} {t} {d} {t} {d}\n')
+            write(run.with_suffix('').with_suffix('.wave'), ''.join(rows))
+            assert len(nodes) == 3
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
+        raise AssertionError(argv)
+    return fake
+
+
+def test_step_30_runs_the_tool_deck_and_the_spef_mutation_and_records_every_arm(tmp_path, monkeypatch):
+    project = tmp_path / 'design'
+    folder, _ = _stapostpnr(project)
+    record = json.loads((project / postroute.STEP23_RECORD).read_text())
+    record['judgment'] = {'worst_setup': {'corner': 'max_ss_125C_4v50'}}
+    put(project / postroute.STEP23_RECORD, record)
+    root = tmp_path / 'pdkroot'
+    write(root / 'x/libs.ref/cells/lib/cells__ss_125C_4v50.lib', LIBERTY)
+    write(root / 'x/libs.ref/cells/spice/cells.spice',
+          '.SUBCKT cells__dffq_1 D CLK Q VDD VNW VPW VSS\n'
+          'X_i_0 Q D VSS VPW nfet_05v0 W=8.2e-07 L=6e-07\n.ENDS\n')
+    write(root / 'x/libs.tech/ngspice/m.ngspice', MODELS)
+    (root / 'x/libs.tech/xyce').mkdir(parents=True)
+    config = json.loads((folder / 'config.json').read_text())
+    config['CELL_SPICE_MODELS'] = ['/pdk/x/libs.ref/cells/spice/cells.spice']
+    put(folder / 'config.json', config)
+    calls = []
+    monkeypatch.setattr(pst, '_docker', _wps_edge(calls))
+    doc = pst.run_step30(project, 'img', root, 'x', paths=1)
+    assert doc['corner'] == 'max_ss_125C_4v50'
+    assert doc['arms']['xyce']['verdict'] == 'NOT_MEASURED'
+    assert 'LL_SPICE_DEVICE_UNMODELLED' in doc['arms']['xyce']['reason']
+    ngspice = doc['arms']['ngspice']
+    assert ngspice['mutation'][0]['responds'] is True
+    base = json.loads((project / 'reports/phase3/spice_path_tool.json').read_text())[
+        'detail']['ngspice']['base']['paths'][0]
+    # STA: the launching clock pin to the endpoint pin; SPICE: the same pins.
+    assert base['sta_ns'] == pytest.approx(0.711214)
+    assert base['start_pin'] == 'u_core/_417_/CLK' and base['end_pin'] == 'u_core/_416_/D'
+    assert base['spice_ns'] == pytest.approx(0.72, abs=0.011)
+    sta_runs = [c for c in calls if c[0] == 'sta']
+    assert '-from u_core/_417_ -to u_core/_416_' in Path(sta_runs[1][-1]).read_text()
+    assert json.loads((project / 'reports/phase3/spice_path_tool.json').read_text())['step'] == '30'

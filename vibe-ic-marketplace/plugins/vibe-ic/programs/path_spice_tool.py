@@ -342,6 +342,41 @@ def crossings(wave: List[Tuple[float, float]], level: float, edge: str) -> List[
     return out
 
 
+#: A `report_checks -fields {slew cap input_pins} -format full` data row:
+#: `[cap] slew delay time <v|^> <pin> (<cell>)`. An input-pin row prints no
+#: cap (three numbers), a driver row prints it (four).
+_PATH_ROW_RE = re.compile(
+    r"^\s*(?:(-?[\d.]+)\s+)?(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+([v^])\s+(\S+)\s+\(([^)]+)\)\s*$")
+
+
+def parse_path_report(text: str) -> Optional[Dict[str, Any]]:
+    """One path of `report_checks -format full` with `slew cap input_pins`:
+    the data rows up to `data arrival time`, and the start and end the STA
+    measures between (the start pin's row -- a launching flop's clock pin or
+    an input port -- to the endpoint's)."""
+    start = re.search(r"^Startpoint:\s+(\S+)", text, re.M)
+    end = re.search(r"^Endpoint:\s+(\S+)", text, re.M)
+    body = text.split('data arrival time')[0]
+    rows = []
+    for line in body.splitlines():
+        m = _PATH_ROW_RE.match(line)
+        if not m:
+            continue
+        cap, slew, incr, time_, tr, pin, cell = m.groups()
+        rows.append({'cap_pf': float(cap) if cap is not None else None,
+                     'slew_ns': float(slew), 'incr': float(incr), 'time': float(time_),
+                     'tr': tr, 'pin': pin, 'cell': cell,
+                     'inst': pin.rsplit('/', 1)[0] if '/' in pin else pin})
+    if not (start and end and rows):
+        return None
+    first = next((r for r in rows if r['inst'] == start.group(1) or r['cell'] == 'in'), rows[0])
+    return {'startpoint': start.group(1), 'endpoint': end.group(1),
+            'start_row': first, 'rows': rows[rows.index(first):],
+            'start_time_ns': first['time'], 'end_time_ns': rows[-1]['time'],
+            'path_delay_ns': round(rows[-1]['time'] - first['time'], 9),
+            'endpoint_transition': 'fall' if rows[-1]['tr'] == 'v' else 'rise'}
+
+
 def path_stages(rows: List[dict]) -> List[dict]:
     """Stages for the tolerance: each cell's input-pin row then output-pin row."""
     stages = []
@@ -366,8 +401,7 @@ def measure(deck: Path, simulator: str, sta: dict, header: dict) -> Dict[str, An
     if vdd is None or not wave_path.is_file():
         return {'status': 'NOT_MEASURED', 'reason': 'no waveform or no supply in the deck'}
     wave = read_waveform(wave_path, simulator)
-    start = next((r for r in sta['rows'] if r['inst'] == sta['startpoint']
-                  or r['cell'] == 'in'), sta['rows'][0])
+    start = sta.get('start_row') or sta['rows'][0]
     end = sta['rows'][-1]
     wave = {k.replace('\\', ''): v for k, v in wave.items()}
     a = wave.get(start['pin'].lower().replace('\\', ''))
@@ -494,10 +528,11 @@ def run_arm(project: Path, image: str, state_path: Path, corner: str, *,
                    key=lambda d: [int(n) for n in re.findall(r'\d+', d.name)])
     reports = []
     for rpt in sorted(out_dir.glob('path_*.rpt')):
-        reports += [b for b in _scc.split_sta_path_blocks(rpt.read_text(errors='replace'))]
+        reports += ['Startpoint: ' + b for b in
+                    rpt.read_text(errors='replace').split('Startpoint: ')[1:]]
     liberty_text = '\n'.join(lib_texts)
     for index, block in enumerate(reports):
-        parsed = _scc.parse_sta_path(block)
+        parsed = parse_path_report(block)
         deck = decks[index] if index < len(decks) else None
         row: Dict[str, Any] = {'path': index + 1, 'deck': str(deck) if deck else None}
         if parsed is None or deck is None or deck.stat().st_size == 0:
@@ -562,3 +597,52 @@ def judge(arm: Dict[str, Any], mutated: Optional[Dict[str, Any]]) -> Dict[str, A
 def _tran_step_ns(deck: Any) -> float:
     m = re.search(r'^\.tran\s+(\S+)', Path(deck).read_text(errors='replace'), re.M | re.I)
     return float(m.group(1)) * 1e9 if m else 0.0
+
+
+def run_step30(project: Path, image: str, pdk_root: Path, pdk: str, *,
+               corner: Optional[str] = None, paths: int = 3,
+               simulators: Sequence[str] = SIMULATORS) -> Dict[str, Any]:
+    """Step 30's tool arm on the STAPostPNR state step 23 recorded: each
+    simulator on the base SPEF and on the mutated one, judged, and written to
+    `reports/phase3/spice_path_tool.json`. The corner is the one step 23 named
+    worst for setup unless one is given. A simulator that cannot run this PDK
+    is recorded by its refusal; nothing falls back."""
+    import librelane_postroute as _lp
+    folder, _state = _lp.stapostpnr_state(project)
+    record = _load(project / _lp.STEP23_RECORD)
+    corner = corner or ((record.get('judgment') or {}).get('worst_setup') or {}).get('corner')
+    if not corner:
+        raise Refusal('LL_STEP30_CORNER_UNDECLARED', 'step 23 named no worst setup corner')
+    state_path = folder / 'state_out.json'
+    root = project / 'phase3/tool_arms/30'
+    arms: Dict[str, Any] = {}
+    for simulator in simulators:
+        try:
+            base = run_arm(project, image, state_path, corner, pdk_root=pdk_root, pdk=pdk,
+                           out_dir=root / simulator / 'base', simulator=simulator, paths=paths)
+            mutated_spef = mutate_spef(Path(base['spef']), MUTATION_FACTOR,
+                                       root / simulator / 'mutated.spef')
+            pins = [f"-path_delay max -from {r['startpoint']} -to {r['endpoint']}"
+                    for r in base['paths'] if r.get('status') == 'MEASURED']
+            mutated = (run_arm(project, image, state_path, corner, pdk_root=pdk_root, pdk=pdk,
+                               out_dir=root / simulator / 'mutated', simulator=simulator,
+                               path_args=pins, spef=Path(mutated_spef['path']))
+                       if pins else None)
+            arms[simulator] = {'judgment': judge(base, mutated), 'base': base,
+                               'mutated': mutated, 'mutation': mutated_spef}
+        except Refusal as exc:
+            arms[simulator] = {'judgment': {'verdict': 'NOT_MEASURED', 'reason': str(exc)}}
+    measured = {s: a for s, a in arms.items() if a['judgment']['verdict'] != 'NOT_MEASURED'}
+    better = [s for s, a in measured.items() if a['judgment']['verdict'] == 'CORRELATED']
+    document = {'step': '30', 'corner': corner, 'sta_state': str(state_path),
+                'sta_state_sha256': digest(state_path),
+                'deck': 'OpenSTA write_path_spice (SPEF-annotated)',
+                'arms': {s: a['judgment'] for s, a in arms.items()},
+                'selection': (better[0] if len(better) == 1 else
+                              'UNDETERMINED' if len(better) > 1 else None),
+                'rule': ('an arm is better when |SPICE-STA| is within the Liberty-grid '
+                         'tolerance AND the result responds to the SPEF mutation'),
+                'detail': {s: {k: v for k, v in a.items() if k != 'judgment'}
+                           for s, a in arms.items()}}
+    write_json(project / 'reports/phase3/spice_path_tool.json', document)
+    return document

@@ -2380,10 +2380,13 @@ def _record_pdn_em_resize_spend(project: Path, decision: Mapping[str, Any]
 # LibreLane `OpenROAD.STAPostPNR` runs `report_power -corner <c>` for every STA
 # corner on the post-PnR state with that corner's SPEF (`sta/corner.tcl`), and
 # writes it to `<corner>/power.rpt`. Its `power__total` METRIC is written
-# without a corner suffix by every corner process, so the one that survives is
-# whichever corner wrote last -- MEASURED on spm: `power__total` 26.46 mW is
-# the max_ff corner's number while nom_tt reads 20.76 mW. The metric is
-# therefore never read here; the per-corner reports are.
+# WITHOUT a `__corner:` modifier by every corner process, and
+# `OpenROAD.STAPostPNR.run` merges the corners' metric dicts in `STA_CORNERS`
+# order, so the value that survives is the LAST listed corner's; the metric's
+# declared `sum_aggregator` never sees a per-corner key. MEASURED on spm
+# (0.3.79): `power__total` 26.46 mW = max_ff (last in STA_CORNERS) while
+# nom_tt reads 20.76 mW; t89_ref_077 likewise 11.37 mW = max_ff vs nom_tt
+# 8.78 mW. The metric is therefore never read here; the per-corner reports are.
 #
 # The tool reads no activity file (`backends/librelane.py`, measured: zero
 # `read_vcd`/`read_saif` in the installed tool), so its basis is VECTORLESS by

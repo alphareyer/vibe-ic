@@ -59904,6 +59904,12 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             if _pls_json.is_file():
                 written.append(str(_pls_json))
 
+    # T106: step 30's tool arm (OpenSTA write_path_spice on the STAPostPNR
+    # corner step 23 recorded), opt-in; recorded beside the direct gate, which
+    # still reads the direct record (not cut over).
+    from librelane_contract import selected_mode as _ll_mode30
+    if _ll_mode30(project, "30") != "direct":
+        _step30_tool_arm(project, pdk, written, notes)
     # --- Step 30: transistor-level critical-path correlation ---------------
     # The active PDK configuration supplies Liberty. The producer discovers
     # its sibling cell SPICE + device model section at runtime, extracts the
@@ -60426,7 +60432,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 "report_power produced no usable output for this run "
                 "(see reports/phase3/power.rpt)", notes)
     if _m33 != "direct" and primary_def.is_file():
-        _step33_tool_arm(project, top, pdk, _m33, rpt_phase3,
+        _step33_tool_arm(project, top, pdk, _m33, power_rpt,
                          _power_direct_ran, written, notes)
 
     # --- Step 21: routed.drc.rpt — derived from OpenROAD routing log ---
@@ -65601,6 +65607,27 @@ def _spice_correlation_skip_disclosure(
             "an implemented-capability failure, not a capability gap.")
 
 
+def _step30_tool_arm(project: Path, pdk: PdkConfig, written: List[str],
+                     notes: List[str]) -> None:
+    """Step 30 on the tool (T106): `path_spice_tool.run_step30` -- the tool's
+    SPEF-annotated path decks in ngspice and Xyce, the Liberty-grid tolerance
+    and the SPEF-mutation control -- to `reports/phase3/spice_path_tool.json`."""
+    import librelane_contract as _ll
+    import path_spice_tool as _pst
+    try:
+        root = _ll.resolve_pdk_root(project)
+        if not root:
+            raise _ll.Refusal("LL_PDK_ROOT_NOT_DECLARED",
+                              "step 30 on LibreLane needs pdk_root_host in the "
+                              "switch or VIBEIC_LIBRELANE_PDK_ROOT")
+        doc = _pst.run_step30(project, _ll.resolve_image(project), Path(root), pdk.name)
+        written.append(str(project / "reports/phase3/spice_path_tool.json"))
+        notes.append("step 30 write_path_spice arm: " + ", ".join(
+            f"{s}={j['verdict']}" for s, j in doc["arms"].items()))
+    except Exception as exc:  # a refusal names itself; nothing falls back
+        notes.append(f"step 30 LibreLane: {exc}")
+
+
 def _step29_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
                      sim_dir: Path, direct_sdf: Path, written: List[str],
                      notes: List[str]) -> None:
@@ -65735,15 +65762,17 @@ exit
 
 
 def _step33_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
-                     rpt3: Path, direct_ran: bool, written: List[str],
+                     power_rpt: Path, direct_ran: bool, written: List[str],
                      notes: List[str]) -> None:
     """Step 33 from the tool (T106): STAPostPNR's per-corner `report_power`,
     consumed from step 23's record; the arm choice and the agreement check
     are `_ppa.power.signoff_power_arms` (`reports/phase3/power_arms.json`).
     On `librelane` with the tool arm canonical, the worst corner's report is
-    handed to `power.rpt` unedited and `power.json` is written from it."""
+    handed unedited to the step-33 report path (its text carries the
+    STA/POWER basis stamps) and `power.json` is written from it."""
     import fnmatch
     import librelane_postroute as _lp
+    rpt3 = power_rpt.parent
     try:
         folder, state = _lp.stapostpnr_state(project)
         corners = _ppa_power.stapostpnr_corner_power(folder)
@@ -65757,7 +65786,7 @@ def _step33_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
         direct = direct_report = None
         if direct_ran and (rpt3 / "power.json").is_file():
             direct = json.loads((rpt3 / "power.json").read_text())
-            direct_report = _ppa_power.read_power_report(rpt3 / "power.rpt")
+            direct_report = _ppa_power.read_power_report(power_rpt)
         decision = _ppa_power.signoff_power_arms(
             direct, direct_report, corners, direct_liberty=str(pdk.liberty),
             direct_spef_sha256=(_sha256_file(direct_spef)
@@ -65774,12 +65803,14 @@ def _step33_tool_arm(project: Path, top: str, pdk: PdkConfig, mode: str,
             # Written by this call from the recorded state, so it is bound to
             # this run by construction; an mtime-vs-clock test would only race
             # the filesystem's timestamp granularity.
-            _aa.write_text(rpt3 / "power.rpt", _ppa_power.tool_power_report_text(
+            # The step-33 report path the direct session writes; the text
+            # carries its own STA_BASIS / POWER_BASIS stamps.
+            _aa.write_text(power_rpt, _ppa_power.tool_power_report_text(
                 worst, row, Path(row["report"]).read_text(errors="replace"), state_sha))
-            _ppa_power.emit_signoff_record(project, rpt3 / "power.rpt",
+            _ppa_power.emit_signoff_record(project, power_rpt,
                                            rpt3 / "power.json", "vectorless_sdc",
                                            notes, tool_rc=0)
-            written += [str(rpt3 / "power.rpt"), str(rpt3 / "power.json")]
+            written += [str(power_rpt), str(rpt3 / "power.json")]
         if (decision.get("agreement") or {}).get("verdict") == "DISAGREE":
             notes.append("LL_POWER_ARMS_DISAGREE: the direct vectorless session and "
                          "STAPostPNR disagree on the same netlist, SPEF and liberty "
