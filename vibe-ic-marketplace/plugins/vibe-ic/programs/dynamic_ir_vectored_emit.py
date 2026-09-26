@@ -408,21 +408,27 @@ def decap_effect(reference: str, solve: str, requested_f: float) -> Dict[str, ob
 # it never reaches its tree. Two tiers on two bases published a "dynamic" drop
 # twelve times BELOW the static one.
 
+def _tcl_word(path) -> str:
+    """A bare Tcl word when the path needs no quoting (how the flow's other
+    decks spell paths), else the quoted form."""
+    text = str(path)
+    return text if re.fullmatch(r"[A-Za-z0-9_./+:@=,-]+", text) else _lef_tcl_word(Path(text))
+
+
 def power_basis_tcl(extra_liberties: List[str], sdc: Optional[str],
-                    spef: Optional[str], stage: str) -> str:
-    """The basis block. `stage="libs"` goes after the cell liberty, `"design"`
-    after `read_def`. A read that fails prints a marker `power_basis` reads."""
-    if stage == "libs":
-        return "".join(f"read_liberty {_lef_tcl_word(Path(x))}\n"
-                       for x in dict.fromkeys(extra_liberties))
-    out = ""
+                    spef: Optional[str]) -> str:
+    """The basis block, placed after `read_def` (T103's order, which its
+    landed producer test pins): the IO/macro liberties, the SDC with
+    propagated clocks, the SPEF. A read that fails prints a marker
+    `power_basis` records instead of being swallowed."""
+    out = "".join(f"read_liberty {_tcl_word(x)}\n" for x in dict.fromkeys(extra_liberties))
     if sdc:
-        out += (f"if {{[catch {{read_sdc {_lef_tcl_word(Path(sdc))}}} _b_e]}} "
+        out += (f"if {{[catch {{read_sdc {_tcl_word(sdc)}}} _b_e]}} "
                 "{ puts \"IR_BASIS_SDC_UNREAD: $_b_e\" } else {\n"
                 "  if {[catch {set_propagated_clock [all_clocks]} _b_e]} "
                 "{ puts \"IR_BASIS_CLOCKS_UNPROPAGATED: $_b_e\" }\n}\n")
     if spef:
-        out += (f"if {{[catch {{read_spef {_lef_tcl_word(Path(spef))}}} _b_e]}} "
+        out += (f"if {{[catch {{read_spef {_tcl_word(spef)}}} _b_e]}} "
                 "{ puts \"IR_BASIS_SPEF_UNREAD: $_b_e\" }\n")
     return out
 
@@ -883,7 +889,7 @@ def _build_transient_tcl(def_file: Path, tech_lef: Path, cell_lef: Path,
                       for c, r in sorted(via_res.items()))
     extra = [x for x in (extra_liberties or []) if str(x) != str(liberty)]
     basis_design = power_basis_tcl(extra, str(sdc) if sdc else None,
-                                   str(spef) if spef else None, "design")
+                                   str(spef) if spef else None)
     _oc = liberty_operating_condition(liberty, container)
     solves = ""
     for net in nets:
@@ -901,7 +907,6 @@ def _build_transient_tcl(def_file: Path, tech_lef: Path, cell_lef: Path,
             f'  puts "PSM_TRANSIENT_NONFATAL {net}: $_psm_err"\n}}\n')
     return (
         lef_tcl + f"read_liberty {liberty}\n"
-        + power_basis_tcl(extra, None, None, "libs")
         # vibe-ic#362 — select the library's own operating condition when it
         # declares one but names no default; without it PSM aborts PSM-0079
         # and the transient run produces nothing. Emitted only when a block

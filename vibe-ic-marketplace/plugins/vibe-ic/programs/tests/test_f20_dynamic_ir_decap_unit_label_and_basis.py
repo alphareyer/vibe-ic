@@ -38,6 +38,15 @@ if str(_PROGRAMS) not in sys.path:
     sys.path.insert(0, str(_PROGRAMS))
 
 import dynamic_ir_vectored_emit as E  # noqa: E402
+from _stated_eda_image import state_the_image  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _stated_image(monkeypatch):
+    """Every test here STATES its EDA image: none may inherit this host's
+    docker, so the file gives one verdict on a docker host and inside the
+    vibeic-eda image (no docker client) alike."""
+    return state_the_image(monkeypatch)
 
 _FIX = _PROGRAMS / "tests" / "fixtures" / "dynamic_ir_f20"
 _CAL = _PROGRAMS / "calibration"
@@ -260,10 +269,10 @@ def test_the_transient_deck_reads_the_declared_basis(tmp_path):
                                  {}, "Metal",
                                  **_kw(E._build_transient_tcl, spef=spef,
                                        extra_liberties=[io]))
-    assert tcl.index(f'read_liberty "{io}"') < tcl.index("read_def")
     tail = tcl[tcl.index("read_def"):]
+    assert f"read_liberty {io}" in tail
     assert "read_sdc" in tail and "set_propagated_clock [all_clocks]" in tail
-    assert f'read_spef "{spef}"' in tail
+    assert f"read_spef {spef}" in tail
     assert "IR_BASIS_SDC_UNREAD" in tail and "IR_BASIS_SPEF_UNREAD" in tail
 
 
@@ -351,9 +360,10 @@ def test_the_static_session_reads_the_same_basis(tmp_path, monkeypatch):
     R._emit_ir_em_reports(project, "chip_top", pdk, "image", rpt / "ir_drop.rpt",
                           rpt / "em.rpt", [])
     tcl = (rpt / "ir_em_chip_top.tcl").read_text()
-    assert tcl.index(f'read_liberty "{io}"') < tcl.index("read_def")
-    tail = tcl[tcl.index("read_def"):]
+    tail = tcl[tcl.index("read_def"):tcl.index("analyze_power_grid")]
+    assert f"read_liberty {io}" in tail
     assert "read_sdc" in tail and "set_propagated_clock" in tail and "read_spef" in tail
+    assert "report_power" in tail           # T103's calibrated EM basis reader, kept
     record = json.loads((rpt / "ir_drop.json").read_text())
     assert record.get("power_basis", {}).get("complete") is True, record.get("power_basis")
     assert record["power_basis"]["total_power_w"] == pytest.approx(0.0219)
@@ -427,3 +437,25 @@ def test_both_runner_call_sites_build_the_emitter_argv_from_the_basis():
         emits = [c for c in ast.walk(fn) if isinstance(c, ast.Constant)
                  and c.value == "dynamic_ir_vectored_emit.py"]
         assert not emits, f"{name} still spells its own emitter argv"
+
+
+def test_static_ir_step25_em_and_the_transient_tier_share_one_declared_basis(tmp_path, monkeypatch):
+    """r2, after T103 landed: ONE declaration (`_step24_basis_inputs`), one
+    record. T103's own producer harness drives the static IR + EM session;
+    em.json's calibrated basis record carries the id of ir_drop.json's, and the
+    transient argv is built from the same declaration."""
+    import phase3_one_shot_runner as R
+    from test_t103_pdn_em_presweep import _producer
+    project, _tcl, em = _producer(tmp_path, monkeypatch, spef_age=+5)
+    ir = json.loads((R._pl.reports_phase3_dir(project) / "ir_drop.json").read_text())
+    assert ir["power_basis"]["id"] and em["power_basis"]["basis_id"] == ir["power_basis"]["id"]
+    assert em["power_basis"]["calibration"] == "CALIBRATED"
+    d = R._pl.pnr_dir(project) / "chip_top.def"
+    from test_phase3_signoff_chain_organic import _fake_pdk
+    pdk = _fake_pdk()
+    pdk.liberty = "/pdk/sc/lib/sc__tt_025C_1v80.lib"
+    argv = R._step24_transient_argv(project, d, pdk, "image", tmp_path / "dyn.json")
+    libs = [argv[i + 1] for i, a in enumerate(argv) if a in ("--liberty", "--extra-liberty")]
+    dyn = E.power_basis(Path(argv[argv.index("--def") + 1]), Path(argv[argv.index("--sdc") + 1]),
+                        Path(argv[argv.index("--spef") + 1]), libs)
+    assert dyn["id"] == ir["power_basis"]["id"]

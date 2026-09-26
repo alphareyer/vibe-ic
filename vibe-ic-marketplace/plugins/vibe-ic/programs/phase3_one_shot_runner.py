@@ -67394,12 +67394,11 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     import dynamic_ir_vectored_emit as _dyn_basis
     _basis = _step24_basis_inputs(project, def_file, pdk)
     _pb_libs = [_to_container_path(x, container) for x in _basis["extra_liberties"]]
-    _basis_libs_tcl = _dyn_basis.power_basis_tcl(_pb_libs, None, None, "libs")
     _pb_tcl = _dyn_basis.power_basis_tcl(
-        [], (_to_container_path(str(_basis["sdc"]), container)
+        _pb_libs, (_to_container_path(str(_basis["sdc"]), container)
              if _basis["sdc"] else None),
         (_to_container_path(str(_basis["spef"]), container)
-         if _basis["spef"] else None), "design")
+         if _basis["spef"] else None))
     try:
         _instrument_calibration.assert_calibrated("_ppa.power::em_power_basis")
         _pb_uncal = None
@@ -67414,7 +67413,7 @@ read_lef {tech_lef_c}
 read_lef {cell_lef_c}
 {macro_lefs_tcl}
 read_liberty {liberty_c}
-{_basis_libs_tcl}{_oc_tcl}read_def {def_c}
+{_oc_tcl}read_def {def_c}
 {_pb_tcl}{geometry_tcl}
 if {{[catch {{set_wire_rc -signal -layer {mp}1}} _e1]}} {{
   catch {{set_wire_rc -layer {mp}1}}
