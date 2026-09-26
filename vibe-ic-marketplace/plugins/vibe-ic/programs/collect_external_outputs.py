@@ -62,10 +62,33 @@ def _non_log_files(project: Path):
             yield f
 
 
+def is_external(path_str: str, project: Path) -> bool:
+    """True only when `path_str` lies OUTSIDE `project`, judged on resolved real
+    paths (symlinks followed), never on where either one sits.
+
+    F16: `_PATH_RE` matches by PREFIX (`/tmp/...`), and a project that itself
+    lives under /tmp makes every self-reference its reports carry match it. The
+    collector took those for external outputs and copied the project into its
+    own `collected_external/` -- MEASURED on a 4 KiB synthetic project under
+    /tmp: ONE call left 340 files nested 169 levels deep, stopped only by
+    ENAMETOOLONG, and reported `collected=1`. On spm each run grew ~245 GB.
+
+    A path that CONTAINS the project is not external either: copying it would
+    copy the collection directory into itself, which is the same recursion.
+    """
+    try:
+        p = Path(path_str).resolve()
+        root = project.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False                     # unresolvable — never copy it
+    return not (p.is_relative_to(root) or root.is_relative_to(p))
+
+
 def _live_external_paths(project: Path) -> Dict[str, List[Path]]:
     """{volatile_path -> [recording files]} for every LIVE (still-on-disk)
-    volatile-path reference in a non-log canonical file. Skips pinned-plugin
-    sources and dangling references."""
+    volatile-path reference in a non-log canonical file that lies OUTSIDE the
+    project (`is_external`). Skips pinned-plugin sources, in-project paths and
+    dangling references."""
     out: Dict[str, List[Path]] = {}
     for f in _non_log_files(project):
         try:
@@ -78,6 +101,8 @@ def _live_external_paths(project: Path) -> Dict[str, List[Path]]:
                 continue                     # legit plugin source — never touch
             if not Path(p).exists():
                 continue                     # DANGLING — leave it (gate FAILs it)
+            if not is_external(p, project):
+                continue                     # in-tree (or contains it) — F16
             out.setdefault(p, [])
             if f not in out[p]:
                 out[p].append(f)
