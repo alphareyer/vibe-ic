@@ -106,9 +106,15 @@ HOST_LANE_AUTO = "auto"
 def runner_image() -> str:
     """The pinned runner image reference, resolved at call time.
 
-    With nothing resolvable this raises `_eda_pin.ImageNotResolvable`; the
-    remedy text catches that and says so rather than naming a guess."""
-    return _pin.image_reference()
+    This module never RUNS it; it names it in a remedy. So it is the reference
+    this host holds for the pinned digest when there is one, else the
+    configured `<repo>@<digest>` an operator would pull. With no digest at all
+    this raises `_eda_pin.ImageNotResolvable`; the remedy text catches that
+    and says so rather than naming a guess."""
+    try:
+        return _pin.image_reference()
+    except _pin.ImageNotHeld:
+        return _pin.configured_reference()
 
 
 def __getattr__(name):
