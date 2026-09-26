@@ -20834,6 +20834,100 @@ def _verilator_stage_exec(container: str):
     return _exec
 
 
+#: Flow step FS1's producer and the report its gate clause names.
+FMEDA_STEP_ID = "FS1"
+FMEDA_PRODUCER = "fmeda_fault_injection_coverage"
+
+
+def fmeda_producer_command(flow_yaml: Optional[Path] = None) -> Optional[str]:
+    """Step FS1's producer command, exactly as the flow's gate states it.
+
+    Read from the flow YAML instead of repeated here, so the run and the
+    audit invoke the producer with the same arguments. None when the flow no
+    longer lists the producer under FS1's `programs:` or no gate clause of
+    FS1 runs it with a `--json` report.
+    """
+    import flow_declared_producer_run as _fdp
+    import yaml
+    path = flow_yaml or _fdp.FLOW_YAML
+    try:
+        doc = yaml.safe_load(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    for step in _fdp._iter_steps(doc):
+        if str(step.get("id")) != FMEDA_STEP_ID:
+            continue
+        if FMEDA_PRODUCER not in (step.get("programs") or []):
+            return None
+        for cmd in _fdp._iter_commands(step.get("gate") or {}, []):
+            parts = cmd.split()
+            if parts and parts[0] == FMEDA_PRODUCER and _fdp._JSON_RE.search(cmd):
+                return cmd
+    return None
+
+
+def step_fmeda_fault_injection(project: Path,
+                               flow_yaml: Optional[Path] = None) -> StepResult:
+    """Flow step FS1: run the FMEDA fault-injection producer.
+
+    The flow's FS1 gate named `fmeda_fault_injection_coverage` as its first
+    clause and no runner called it, so its report existed only after the audit
+    wrote it (flow YAML, FS1). This runs the same command the gate states,
+    from the project directory, so the report is run evidence before the audit
+    reads it. The gate still re-runs the producer and keeps its own verdict.
+    """
+    t0 = time.time()
+    name = "fmeda_fault_injection"
+    command = fmeda_producer_command(flow_yaml)
+    if command is None:
+        return StepResult(name, "NOT_MEASURED", time.time() - t0,
+                          f"the flow declares no {FMEDA_PRODUCER} --json "
+                          f"clause under step {FMEDA_STEP_ID}, so there is "
+                          f"no producer command to run",
+                          reason_class=_V.ReasonClass.NOT_EXECUTED)
+    import flow_declared_producer_run as _fdp
+    rel = _fdp._JSON_RE.search(command).group(1)
+    out = project / rel
+    argv = [sys.executable, str(PROGRAMS_DIR / f"{FMEDA_PRODUCER}.py"),
+            *command.split()[1:]]
+    try:
+        proc = _pr.run(argv, cwd=str(project), capture_output=True, text=True)
+    except Exception as exc:  # noqa: BLE001 — named in the row
+        return StepResult(name, "NOT_MEASURED", time.time() - t0,
+                          f"{FMEDA_PRODUCER} could not be executed: "
+                          f"{type(exc).__name__}: {exc}",
+                          reason_class=_V.ReasonClass.EXECUTION_ERROR)
+    tail = (proc.stdout or proc.stderr or "").strip()[-300:]
+    try:
+        rep = json.loads(out.read_text())
+    except (OSError, ValueError):
+        return StepResult(name, "NOT_MEASURED", time.time() - t0,
+                          f"{FMEDA_PRODUCER} exited {proc.returncode} and "
+                          f"wrote no readable {rel}: {tail}",
+                          reason_class=_V.ReasonClass.EXECUTION_ERROR,
+                          extras={"producer_exit": proc.returncode})
+    files = [rel]
+    extras = {"producer_exit": proc.returncode, "command": command}
+    verdict = str(rep.get("verdict", ""))
+    detail = f"{FMEDA_PRODUCER}: {verdict} (exit {proc.returncode}) — {tail}"
+    if verdict in ("PASS", "FAIL"):
+        return StepResult(name, verdict, time.time() - t0, detail, files,
+                          extras)
+    import _structural_absence as _sa
+    absence = _sa.evidence_of(rep)
+    if absence is not None:
+        return StepResult(name, "NOT_APPLICABLE", time.time() - t0, detail,
+                          files, extras,
+                          declared_by=f"{rel}: {_sa.EVIDENCE_KEY} over "
+                                      f"{absence['population']} "
+                                      f"({absence['scanned']} scanned, 0 found)")
+    reason = (_V.ReasonClass.INPUT_ABSENT
+              if rep.get("rtl_sources_read") == 0 else
+              _V.ReasonClass.INCONCLUSIVE)
+    return StepResult(name, "NOT_MEASURED", time.time() - t0, detail, files,
+                      extras, reason_class=reason)
+
+
 def step_verilator_coverage(project: Path, top_name: str = "",
                             container: str = "") -> StepResult:
     """MEASURE line / toggle / branch coverage by instrumenting the run's own
@@ -23808,6 +23902,17 @@ def main() -> int:
             _preflight_not_applicable=(_analog_reason if _analog_absent
                                        else None))
         plan.extend(_dft_chain)
+
+    # Flow step FS1 (blocks on step 11). Its gate's producer is run here so
+    # the report exists before the audit reads it. A declared window does
+    # not own FS1, so a bounded run does not dispatch it.
+    if _after_exit("dft_lec_chain") or _bounded:
+        plan.append(StepResult(
+            "fmeda_fault_injection", "NOT_APPLICABLE", 0.0,
+            "outside this run's declared window; step FS1 was not "
+            "dispatched", declared_by=" ".join(_window_flags)))
+    else:
+        plan.append(step_fmeda_fault_injection(project))
 
     # Phase 2 only — Phase 3 lives in phase3_one_shot_runner.py and is
     # chained by phase23_one_shot_runner.py.
