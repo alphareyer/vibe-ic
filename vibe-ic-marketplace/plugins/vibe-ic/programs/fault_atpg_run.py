@@ -118,7 +118,27 @@ def _resolve_docker_image() -> str:
     return _img.resolve()
 
 
-DOCKER_IMAGE = _resolve_docker_image()
+def docker_image() -> str:
+    """The image a `docker run` of the ATPG engine starts, resolved NOW.
+
+    Called only on the container route, at the moment the argv is built. It
+    used to be a module constant assigned from `_resolve_docker_image()`,
+    which resolved at IMPORT: inside the image (no docker client) or on any
+    host without docker, `import fault_atpg_run` raised `ImageNotResolvable`,
+    and so did every program and test that imports it, although the local
+    route needs no image at all. A declared image (`VIBEIC_EDA_IMAGE` & co.,
+    honoured by `_eda_image.resolve`) is used as is; with none declared and
+    nothing resolvable this still refuses by name, never guesses."""
+    return _resolve_docker_image()
+
+
+def __getattr__(name):
+    """`DOCKER_IMAGE` stays readable as a module attribute (PEP 562), resolved
+    on each read, never stored -- the `_eda_pin.IMAGE_DIGEST` pattern. Code in
+    this module calls `docker_image()` on the container route instead."""
+    if name == "DOCKER_IMAGE":
+        return docker_image()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Foundry / ATE sign-off bar. Stuck-at coverage at 95 %+ is the widely-quoted
 # minimum foundry acceptance floor; 98 %+ is the common aggressive target.
@@ -1381,7 +1401,7 @@ def atpg_engine_identity() -> dict:
                            "filesystem, not in a container, so there is no "
                            "image digest to record"),
         }
-    return {"exec_route": "container", "image": DOCKER_IMAGE}
+    return {"exec_route": "container", "image": docker_image()}
 
 
 def _run_docker(
@@ -1545,7 +1565,7 @@ def _run_docker(
     if _pdk is not None:
         docker_cmd += ["-v", f"{_pdk}:/pdk"]
     docker_cmd += [
-        DOCKER_IMAGE,
+        docker_image(),
         "-c", (f"timeout -k {_CE.DEFAULT_KILL_GRACE_S} {deadline} bash -c "
                + shlex.quote(_inner)),
     ]

@@ -30,7 +30,9 @@ def _rtl_errors(project: Path) -> tuple[list[str], dict | None]:
               if not path.read_text(errors="replace").strip()]
     if errors:
         return errors, None
-    verdict = _rtl_frontend.check(project, _rtl_frontend.default_image())
+    # No image is resolved here: the front end resolves one only if a tool
+    # has to run in docker (a tool on PATH, e.g. in-image, needs none).
+    verdict = _rtl_frontend.check(project)
     return list(verdict["findings"]), verdict
 
 

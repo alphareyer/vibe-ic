@@ -41,4 +41,9 @@ def state_the_image(monkeypatch, digest: str = STATED_DIGEST) -> str:
     monkeypatch.delenv(_pin.IMAGE_REPO_ENV, raising=False)
     monkeypatch.setattr(_pin, "resolved_image_digest",
                         lambda env=None, *, allow_pull=False: digest)
+    # `image_reference` names only a reference this host HOLDS for the digest.
+    # A stated host is not asked what it holds either: whatever digest the
+    # (stated) resolver answers is held under the published repository.
+    monkeypatch.setattr(_pin, "local_references_for_digest",
+                        lambda d: ((stated_image(d),), ""))
     return stated_image(digest)

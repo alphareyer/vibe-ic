@@ -189,7 +189,9 @@ def test_the_image_is_found_by_digest_under_another_repository(env, monkeypatch)
     monkeypatch.setattr(_eda_pin, 'local_references_for_digest',
                         lambda digest: ((held,) if digest == STATED_DIGEST else (), ''))
     answer = resolution(env.project, 'stated_pdk')
-    assert answer['source'] == 'resolved' and answer['derivation']['image'] == stated_image()
+    # The image RUN is the name this host holds: `image_reference` no longer
+    # composes the configured repository with the digest (lane migf14).
+    assert answer['source'] == 'resolved' and answer['derivation']['image'] == held
 
 
 # --------------------------------------------------------------- refusal ---
@@ -203,7 +205,12 @@ def test_the_image_is_found_by_digest_under_another_repository(env, monkeypatch)
     (lambda f: None, '../escape', 'LL_PDK_NAME_INVALID'),
 ])
 def test_neither_declared_nor_resolved_refuses_by_name(env, monkeypatch, mutate, pdk, inner):
-    monkeypatch.setattr(_eda_pin, 'local_references_for_digest', lambda digest: ((), ''))
+    # Held under the configured name only, so the image resolves and each
+    # mutation of the (fake) daemon is what refuses. Holding NOTHING would
+    # refuse earlier, at `image_reference` (IMAGE_NOT_PRESENT), and never
+    # reach the inner cause this test names.
+    monkeypatch.setattr(_eda_pin, 'local_references_for_digest',
+                        lambda digest: ((stated_image(),), ''))
     mutate(env.fake)
     with pytest.raises(contract.Refusal) as caught:
         resolution(env.project, pdk)

@@ -171,23 +171,41 @@ def _run_image():
 # inspect` reads local metadata and answers in milliseconds on an idle box; on
 # a loaded one it loses the race, and the old shape then published "container
 # not available" about an image whose presence it never established.
-from not_verified_tier import (PROBE_PRESENT, probe,  # noqa: E402
+from not_verified_tier import (PROBE_ABSENT, PROBE_PRESENT, probe,  # noqa: E402
                                probe_skip_reason)
+import _eda_pin  # noqa: E402
+
+
+def _run_image_or_refusal():
+    """`(reference, "")`, or `(None, <the named refusal>)` on a host where the
+    image cannot be resolved at all (no docker, e.g. inside the image). That
+    host cannot run this proof, which makes it ABSENT and a named skip -- it
+    used to raise ImageNotResolvable while the module was COLLECTED, turning
+    "this verification did not happen" into a collection error for the file."""
+    try:
+        return _run_image(), ""
+    except _eda_pin.ImageNotResolvable as exc:
+        return None, str(exc)
+
+
+_RUN_REF, _RUN_REF_REFUSAL = _run_image_or_refusal()
+
 # The remedy names the reference the run demands, composed the same way the
 # run composes it — never a tag, which is how a host ends up holding bytes
 # nobody pinned while a probe reports success.
-PULL_REMEDY = 'docker pull ' + _run_image()
+PULL_REMEDY = 'docker pull ' + (_RUN_REF or '<the resolved vibeic-eda reference>')
 RUN_REMEDY = 'bash tools/vibeic-eda/restart-eda.sh'
 
-_IMAGE_STATE, _IMAGE_DETAIL = probe(
-    ["docker", "image", "inspect", _run_image()])
+_IMAGE_STATE, _IMAGE_DETAIL = (
+    probe(["docker", "image", "inspect", _RUN_REF]) if _RUN_REF
+    else (PROBE_ABSENT, _RUN_REF_REFUSAL))
 
 
 @pytest.mark.skipif(
     _IMAGE_STATE != PROBE_PRESENT,
     reason=probe_skip_reason(_IMAGE_STATE, _IMAGE_DETAIL,
                              "the pinned vibeic-eda image is not on this host: "
-                             + _run_image(),
+                             + (_RUN_REF or _RUN_REF_REFUSAL),
                              RUN_REMEDY + '  |  ' + PULL_REMEDY))
 def test_sky130_fault_cut_produces_real_scan_pairs(tmp_path, monkeypatch):
     import fault_atpg_run as far  # noqa: E402

@@ -261,7 +261,7 @@ def local_image(repo: str = IMAGE_REPO, env=None) -> Optional[str]:
         # a present-and-runnable answer naming something no other host can ask
         # for.
         _note(f"{why_unusable} Ignoring the override; answering about the "
-              f"pinned reference {_pin.image_reference(env)} instead.")
+              f"pinned digest {_pin.resolved_image_digest(env)} instead.")
     # THE PINNED BYTES, OR NOTHING. The newest local semver tag used to be the
     # answer here, and it answers a different question -- "what does this
     # machine happen to have?" -- which is how a host holding the pinned image
@@ -555,7 +555,10 @@ def _judged_image(env=None, *, explicit: Optional[str] = None,
     # while the pinned bytes were present under the configured repository. The
     # gate judged 0.3.16 and the report named it, so it read as reproducible;
     # it was reproducibly about the wrong image.
-    ref = _pin.image_reference(env)
+    # The CONFIGURED reference: where an opt-in pull would fetch the pinned
+    # digest from, and the name the refusal below reports. What a gate judges
+    # is `present`, a reference this host holds.
+    ref = _pin.configured_reference(env)
     present, why_absent = _pin.pinned_image_present(env)
     if present:
         return _with_version(JudgedImage(present, _pin.IMAGE_DIGEST,
@@ -700,8 +703,8 @@ def resolve(env=None, *, repo: str = IMAGE_REPO) -> str:
         # NORMALISED BEFORE DOCKER SEES IT, and announced. `docker run` accepts
         # a bare Id, so nothing downstream would have complained -- the run
         # would simply have been about bytes the report could not name.
-        _note(f"{why_unusable} Running the pinned reference "
-              f"{_pin.image_reference(env)} instead.")
+        _note(f"{why_unusable} Running the pinned digest "
+              f"{_pin.resolved_image_digest(env)} instead.")
 
     # THE RUN PATH READS THE SAME PIN THE GATE PATH DOES, from the same config
     # point. It used to ask the registry what `latest` meant and then walk down
@@ -711,7 +714,16 @@ def resolve(env=None, *, repo: str = IMAGE_REPO) -> str:
     # HOLDS those bytes is `local_image()`'s question and is deliberately still
     # a separate one, because collapsing the two turns a skip guard's local
     # check into an unbounded fetch.
-    ref = _pin.image_reference(env)
+    #
+    # THE REFERENCE THIS HOST HOLDS for the pinned digest, not the configured
+    # repository composed with it (lane migf14): on a fleet whose configured
+    # repository is a mirror, that composition named an image no host holds.
+    # Only when NO local name carries the digest is the configured reference
+    # returned; an absent image is announced, as this function always has.
+    try:
+        ref = _pin.image_reference(env)
+    except _pin.ImageNotHeld:
+        ref = _pin.configured_reference(env)
     if not local_image(env=env):
         _note(f"{_pin.IMAGE_NOT_PRESENT}: {ref} is not on this host; running it "
               f"will fetch exactly those pinned bytes. Nothing older is "

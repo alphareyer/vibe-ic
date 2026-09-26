@@ -178,6 +178,10 @@ def _closure_lane() -> str:
 
 def test_it_refuses_when_the_isolated_runtime_cannot_import_and_no_lane_is_set(
         program, tmp_path, monkeypatch):
+    # The container route reads the image it starts; STATE it rather than ask
+    # this host's docker (inside the image there is none).
+    from _stated_eda_image import state_the_image
+    state_the_image(monkeypatch)
     monkeypatch.delenv(program.HOST_LANE_ENV, raising=False)
     result = program.preflight(programs=PROGRAMS,
                                python=_fleet_shaped_python(tmp_path))

@@ -171,7 +171,10 @@ def test_allow_pull_over_a_digest_pinned_reference_says_reference_digest(
     _no_docker_at_all(monkeypatch, calls)
     _state_the_pin(monkeypatch, _B)
     j = M.judged_image(env={}, allow_pull=True)
-    assert j.ref == _pin.image_reference({})
+    # Nothing local, so the reference is the CONFIGURED one the opt-in pull
+    # fetches from. `image_reference` names only a reference this host holds
+    # (lane migf14) and refuses here; the composition is `configured_reference`.
+    assert j.ref == _pin.configured_reference({})
     assert j.digest == _B
     assert j.digest == _pin.IMAGE_DIGEST
     assert j.digest_kind == "reference-digest", (

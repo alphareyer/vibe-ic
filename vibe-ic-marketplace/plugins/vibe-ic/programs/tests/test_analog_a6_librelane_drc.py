@@ -26,7 +26,18 @@ import _plugin_tree  # noqa: F401 — puts programs/ on sys.path
 import _eda_pin as PIN
 import analog_a6_librelane_drc as A6
 
-IMAGE = "ghcr.io/vibeic/vibeic-eda@" + PIN.IMAGE_DIGEST
+from _stated_eda_image import stated_image, state_the_image  # noqa: E402
+
+# STATED, not resolved at import: `PIN.IMAGE_DIGEST` here asked this host's
+# docker while the module was collected, so inside the image (no docker) the
+# whole file was a collection error. The identity is stated at `_eda_pin`, and
+# every read of `PIN.IMAGE_DIGEST` below still goes through it.
+IMAGE = stated_image()
+
+
+@pytest.fixture(autouse=True)
+def _stated_identity(monkeypatch):
+    state_the_image(monkeypatch)
 
 
 def _lyrdb(cats, items):

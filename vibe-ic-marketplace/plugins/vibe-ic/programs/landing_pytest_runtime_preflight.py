@@ -99,7 +99,31 @@ HOST_LANE_AUTO = "auto"
 #: READ, NOT COPIED.  This file used to spell the digest itself, which made it a
 #: SECOND definition of the runtime -- the same shape that let the landing
 #: harness sit forty patch releases behind the pin it believed it had.
-RUNNER_IMAGE = _pin.image_reference()
+#:
+#: RESOLVED WHEN READ, NEVER AT IMPORT.  An import-time resolve made this module
+#: unimportable on any host without docker, including the runner image itself,
+#: although only the remedy text below ever names the image.
+def runner_image() -> str:
+    """The pinned runner image reference, resolved at call time.
+
+    This module never RUNS it; it names it in a remedy. So it is the reference
+    this host holds for the pinned digest when there is one, else the
+    configured `<repo>@<digest>` an operator would pull. With no digest at all
+    this raises `_eda_pin.ImageNotResolvable`; the remedy text catches that
+    and says so rather than naming a guess."""
+    try:
+        return _pin.image_reference()
+    except _pin.ImageNotHeld:
+        return _pin.configured_reference()
+
+
+def __getattr__(name):
+    """`RUNNER_IMAGE` stays readable as a module attribute (PEP 562),
+    resolved on each read -- the `_eda_pin.IMAGE_DIGEST` pattern."""
+    if name == "RUNNER_IMAGE":
+        return runner_image()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 #: The parent's semantic progress stream, which this probe must NOT join.
 #:
@@ -177,6 +201,13 @@ def entry_probe(python: str, entry: Path) -> subprocess.CompletedProcess:
                     cwd=subject, env=env)
 
 
+def _runner_image_or_refusal() -> str:
+    try:
+        return runner_image()
+    except _pin.ImageNotResolvable as exc:
+        return f"<runner image not resolvable here: {exc}>"
+
+
 def _refusal_lines(*, python: str, isolated_ok: bool, resolved: str,
                    lane: Optional[str], probe: Optional[subprocess.CompletedProcess],
                    ) -> List[str]:
@@ -245,7 +276,7 @@ def _refusal_lines(*, python: str, isolated_ok: bool, resolved: str,
         "          where the test runner is in the system site directory:",
         "",
         f'            docker run --rm -v "$PWD:$PWD" -w "$PWD" \\',
-        f"              {RUNNER_IMAGE} \\",
+        f"              {_runner_image_or_refusal()} \\",
         "              bash tools/gatekeeper-land.sh",
         "",
         "          OR open the HOST LANE explicitly, accepting that the runtime is",
