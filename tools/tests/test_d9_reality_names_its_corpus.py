@@ -79,6 +79,7 @@ def test_the_artefact_names_the_corpus_it_measured(report):
         assert identity.get(field), f"`corpus.identity.{field}` is missing or empty"
 
 
+@pytest.mark.consistency
 def test_the_named_commit_actually_reproduces_the_figure(report):
     """The identity must be TRUE, not merely present.
 

@@ -235,6 +235,7 @@ def test_branch_owned_evidence_still_outranks_the_prose():
 
 # ── the populations are real ──────────────────────────────────────────────
 
+@pytest.mark.consistency
 def test_the_populations_are_non_empty_and_disjoint():
     """A denominator of zero would make both directions vacuously true."""
     assert len(MUST_BE_DESIGN_NA) >= 20
@@ -256,6 +257,7 @@ def test_the_populations_are_non_empty_and_disjoint():
     assert not (set(MUST_BE_DESIGN_NA) & set(MUST_NOT_BE_DESIGN_NA))
 
 
+@pytest.mark.consistency
 def test_every_MUST_NOT_sentence_is_a_literal_this_tree_ships_or_emitted():
     """The refusing population is DERIVED, not invented: each of the shipped
     `skipped_reason` literals below is greppable in programs/."""

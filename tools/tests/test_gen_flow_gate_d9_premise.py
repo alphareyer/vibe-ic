@@ -25,6 +25,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 for _anc in Path(__file__).resolve().parents:
     if (_anc / "tools" / "gen_flow_gate_d9_section.py").is_file():
         _ROOT = _anc
@@ -62,6 +64,7 @@ def _run(*args: str):
 
 
 # ---------------------------------------------------------------- can FAIL --
+@pytest.mark.consistency
 def test_the_shipped_report_describes_a_smaller_flow():
     """Not a synthetic number: the json in the tree, against the flow in the tree."""
     g = _module()

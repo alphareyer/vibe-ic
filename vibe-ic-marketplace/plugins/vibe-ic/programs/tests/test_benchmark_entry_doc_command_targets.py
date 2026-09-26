@@ -5,6 +5,7 @@ The harness directory was relocated from ``benchmark-harness/`` to
 stale example is an executable failure rather than harmless prose drift.
 """
 from __future__ import annotations
+import pytest
 
 import re
 from pathlib import Path
@@ -35,6 +36,7 @@ def _missing_targets(text: str, plugin_root: Path):
     return references, missing
 
 
+@pytest.mark.consistency
 def test_all_benchmark_entry_doc_targets_are_shipped():
     references = []
     missing = []

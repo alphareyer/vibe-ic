@@ -1764,6 +1764,7 @@ def test_the_module_header_can_still_do_its_own_arithmetic():
         f"and omits {omitted}, which is {named + omitted}, not {total}")
 
 
+@pytest.mark.consistency
 def test_the_header_count_matches_what_the_module_actually_names():
     """The arithmetic closing is necessary and not sufficient -- two wrong
     numbers can still sum correctly. This one counts the PAD_* variables the

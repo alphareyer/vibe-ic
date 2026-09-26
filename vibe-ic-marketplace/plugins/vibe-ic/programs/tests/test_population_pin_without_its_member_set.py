@@ -175,6 +175,7 @@ def test_the_shipped_tree_passes_its_own_rule():
     assert r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}"
 
 
+@pytest.mark.consistency
 def test_no_shipped_exemption_row_matches_nothing():
     """An exemption that matches nothing can no longer be falsified by the tree.
 

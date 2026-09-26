@@ -76,6 +76,7 @@ def test_every_registry_entry_declares_a_mapping() -> None:
     assert not missing, f"entries with no declared mapping/basis: {missing}"
 
 
+@pytest.mark.consistency
 @pytest.mark.parametrize("entry", ENTRIES, ids=[c["name"] for c in ENTRIES])
 def test_declared_status_matches_the_kb_on_disk(entry: dict) -> None:
     node = entry["class_tree_node"]

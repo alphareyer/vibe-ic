@@ -104,6 +104,7 @@ def test_the_orphan_now_has_a_real_runner_and_the_false_positive_always_had_one(
 
 
 # ── 2. the SKILL-only disclosure register ──────────────────────────────────
+@pytest.mark.consistency
 def test_skill_only_register_is_loadable_and_describes_skill_only_checkers():
     """`_UNROUTED_INVENTORY` is an exact-equality ratchet over unrouted SKIP
     PATHS and `checker_execution_wiring_baseline.json` FAILs on any entry that

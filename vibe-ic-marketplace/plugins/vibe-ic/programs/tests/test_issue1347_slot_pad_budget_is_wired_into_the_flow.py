@@ -832,6 +832,7 @@ def test_no_gate_declaration_anywhere_sits_outside_the_readers_window():
         "above it un-declares the gate silently:\n  " + "\n  ".join(thin))
 
 
+@pytest.mark.consistency
 def test_the_docstrings_cited_table_matches_what_the_program_measures():
     """The table in `slot_pad_budget_check`'s docstring is the program's own
     published evidence. Nothing re-derived it, so it drifted: one row read 107

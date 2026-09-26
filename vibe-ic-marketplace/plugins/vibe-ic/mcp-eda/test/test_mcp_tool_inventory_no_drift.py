@@ -6,6 +6,7 @@ registered 47). If a tool is added/removed without regenerating the inventory,
 this test fails — forcing `python3 tools/gen_mcp_tool_inventory.py` to be re-run.
 """
 from __future__ import annotations
+import pytest
 import importlib.util
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ def _load_gen():
     return mod
 
 
+@pytest.mark.consistency
 def test_committed_inventory_matches_code() -> None:
     code = _load_gen().discover()
     committed = json.loads(INV.read_text())
@@ -40,6 +42,7 @@ def test_total_equals_enumeration() -> None:
                             + inv["by_category"]["other"])
 
 
+@pytest.mark.consistency
 def test_known_categories_present() -> None:
     inv = json.loads(INV.read_text())
     # camera device tools must be counted as device (the website omitted them)

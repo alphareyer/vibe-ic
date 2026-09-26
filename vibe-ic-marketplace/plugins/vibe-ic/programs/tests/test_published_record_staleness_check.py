@@ -676,6 +676,7 @@ def test_ignore_baseline_gives_the_raw_answer(tmp_path):
     assert _run(root, "--baseline", str(bl), "--ignore-baseline")[0] == 1
 
 
+@pytest.mark.consistency
 @needs_corpus
 def test_the_shipped_register_is_current(tmp_path):
     """Every recorded entry is still stale, and nothing stale is unrecorded.

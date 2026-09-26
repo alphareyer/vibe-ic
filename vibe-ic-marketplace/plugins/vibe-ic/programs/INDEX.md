@@ -252,6 +252,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `competing_pr_claim_groups` | any | — | Group open PRs by the ISSUE they claim, and name the groups that a merge conflict can never surface (vibe-ic#1411). |
 | `compose_synth` | any | — | a CVDP DECOMPOSE -> SOLVE-EACH -> COMPOSE engine. |
 | `connect_vs_send_test_parity_check` | any | Wave 27 | Wave 27 (v0.119.59) gate. |
+| `consistency_tier` | any | — | bookkeeping tests run at a milestone or on request, never routinely. |
 | `console_tool_termination_check` | any | — | an EDA tool that can drop into its own text console must be stopped by something that TRAVELS WITH THE COMMAND. |
 | `constants_validation` | any | — | Deterministic compliance check for rtl-constants-gen. |
 | `constraint_prose_tokens` | any | — | the ONE reader for constraint declarations that a design states in PROSE rather than in a machine-readable deck. |
@@ -1651,6 +1652,7 @@ _(no programs in this group)_
 - `competing_pr_claim_groups` — Group open PRs by the ISSUE they claim, and name the groups that a merge conflict can never surface (vibe-ic#1411).
 - `compose_synth` — a CVDP DECOMPOSE -> SOLVE-EACH -> COMPOSE engine.
 - `connect_vs_send_test_parity_check` — Wave 27 (v0.119.59) gate.  _[Wave 27]_
+- `consistency_tier` — bookkeeping tests run at a milestone or on request, never routinely.
 - `console_tool_termination_check` — an EDA tool that can drop into its own text console must be stopped by something that TRAVELS WITH THE COMMAND.
 - `constants_validation` — Deterministic compliance check for rtl-constants-gen.
 - `constraint_prose_tokens` — the ONE reader for constraint declarations that a design states in PROSE rather than in a machine-readable deck.

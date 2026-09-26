@@ -54,6 +54,7 @@ def test_generator_and_inventory_are_shipped():
         f"{INV} missing — run `python3 programs/gen_program_inventory.py`")
 
 
+@pytest.mark.consistency
 def test_committed_inventory_matches_the_tree():
     code = _load_gen().discover()
     committed = json.loads(INV.read_text())
@@ -126,6 +127,7 @@ def test_the_artefact_ships_no_list_of_program_names():
     assert len(list(GEN.parent.glob("*.py"))) > 1000, "the stem probe found no corpus"
 
 
+@pytest.mark.consistency
 def test_catalogued_agrees_with_the_shipped_index():
     inv = json.loads(INV.read_text())
     index = plugin_path("programs", "INDEX.md")
@@ -184,7 +186,13 @@ def test_a_source_mismatch_is_not_checked_rather_than_a_drift_verdict():
     """
     gen = _load_gen()
     inv = gen.discover()
-    committed = json.loads(INV.read_text())
+    # THE AGREEING ARTEFACT IS BUILT FROM THE MEASUREMENT, not read from disk.
+    # Whether the COMMITTED file is fresh is a bookkeeping question, asked by
+    # `test_committed_inventory_matches_the_tree` in the consistency tier
+    # (x.y.0 / owner request). This test asks a behavioural one — does
+    # `compare_committed` keep its three outcomes apart — and must not go red
+    # because somebody added a program and has not regenerated yet.
+    committed = json.loads(json.dumps(inv))
 
     status, msgs = gen.compare_committed(inv, committed)
     assert (status, msgs) == ("MEASURED", []), (status, msgs)
@@ -229,6 +237,7 @@ def test_an_unreadable_artefact_is_not_checked_not_a_clean_sweep(
     assert e.value.code == 2, f"{label} artefact exited {e.value.code}, not 2"
 
 
+@pytest.mark.consistency
 def test_stated_counts_in_the_documents_match_the_tree():
     """The gate proper: every stated count in the bound READMEs."""
     gen = _load_gen()
@@ -236,6 +245,7 @@ def test_stated_counts_in_the_documents_match_the_tree():
     assert not fails, "stated count drift:\n  " + "\n  ".join(fails)
 
 
+@pytest.mark.consistency
 def test_check_mode_exits_zero_on_the_committed_tree():
     """The CLI is the form CI and a human both run; exercise it end to end."""
     r = _pr.run([sys.executable, str(GEN), "--check"],
@@ -494,6 +504,7 @@ def test_the_resolver_asks_this_generator_for_the_artefact_alone():
         f"--artifact-only it would also rewrite prose it does not stage")
 
 
+@pytest.mark.consistency
 def test_clean_tree_reports_no_failure():
     """Negative control for the three tests above: the same code path must be
     silent on the tree as committed, or their red proves nothing."""
@@ -501,6 +512,7 @@ def test_clean_tree_reports_no_failure():
     assert gen.check_documents(gen.discover()) == []
 
 
+@pytest.mark.consistency
 @pytest.mark.parametrize("snippet", [s for _, s, _ in _load_gen()._NOT_A_POPULATION_COUNT])
 def test_declared_non_counts_are_still_present(snippet):
     """The not-a-count list is an assertion about specific sentences, not a

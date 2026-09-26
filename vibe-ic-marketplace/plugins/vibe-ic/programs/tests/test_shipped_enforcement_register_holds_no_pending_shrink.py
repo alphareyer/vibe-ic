@@ -47,6 +47,7 @@ back; put a paid-down entry back in the register and the tightening must come
 back; record the orphan as debt and this file must still refuse it.
 """
 from __future__ import annotations
+import pytest
 
 import json
 import re
@@ -94,6 +95,7 @@ def _tightened_lines(out: str):
 # 1. the register owes no unrecorded paydown
 # --------------------------------------------------------------------------
 
+@pytest.mark.consistency
 def test_the_shipped_audit_reports_no_pending_tightening():
     """The shipped register equals what the shipped tree measures.
 
@@ -109,6 +111,7 @@ def test_the_shipped_audit_reports_no_pending_tightening():
     assert "--record-shrink" not in r.stdout, r.stdout
 
 
+@pytest.mark.consistency
 def test_the_recorded_undeclared_set_is_exactly_what_the_cli_measures():
     """Not `<=` and not `does not contain X` — the same set, both directions.
 

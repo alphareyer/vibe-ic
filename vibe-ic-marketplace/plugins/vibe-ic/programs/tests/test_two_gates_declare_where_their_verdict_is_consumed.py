@@ -235,8 +235,21 @@ def test_the_recorded_register_did_not_grow_to_absorb_the_two():
             assert gate not in reason, (
                 f"the {key} reason names {gate}, so the register was widened "
                 f"to absorb it instead of the gate declaring an intent")
-    # And the register must still be EXACT. "does not contain the two" is also
-    # satisfied by a register that has drifted out of step some other way.
+
+
+@pytest.mark.consistency
+def test_the_recorded_register_is_exactly_what_the_audit_measures():
+    """The register must still be EXACT.
+
+    Split out of `test_the_recorded_register_did_not_grow_to_absorb_the_two`
+    (2026-09-26): "does not contain the two" and "did not grow" are the policy
+    that test keeps routinely; "the register equals today's measurement" is
+    bookkeeping that goes red when ANY gate anywhere is declared or paid, and
+    it runs in the consistency tier (x.y.0 FULL cadence / owner request).
+    "does not contain the two" is also satisfied by a register that has drifted
+    out of step some other way — this is the half that says so."""
+    doc = json.loads(_BASELINE.read_text())
+    recorded = set(doc["undeclared_known"])
     mod = _audit_mod()
     computed = {f"undeclared::{u['gate']}"
                 for u in mod.audit(_FLOW, _PROGRAMS)["undeclared_audit_only"]}

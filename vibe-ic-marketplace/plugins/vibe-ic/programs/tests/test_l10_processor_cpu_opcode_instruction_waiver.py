@@ -1305,6 +1305,7 @@ def test_every_pinned_oracle_field_is_individually_load_bearing(field):
         c, "processor_cpu", l3) is False, field
 
 
+@pytest.mark.consistency
 def test_pinned_oracle_set_matches_what_this_file_covers():
     assert set(gate._PINNED_ORACLE_FIELDS) == set(PINNED_ORACLE_FIELDS)
 

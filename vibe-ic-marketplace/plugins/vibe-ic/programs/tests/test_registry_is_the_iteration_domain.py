@@ -213,6 +213,7 @@ REACH_AND_WHAT_BINDS_IT = {
 }
 
 
+@pytest.mark.consistency
 def test_the_reach_is_pinned_by_MEMBERS_not_by_a_count():
     """The reach is 1 of 21 — and this pins WHICH 1.
 

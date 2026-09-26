@@ -964,6 +964,7 @@ def test_the_disclosure_is_printed_on_a_refusal_too(tmp_path):
     assert "examined:" in checked.stderr, checked.stderr
 
 
+@pytest.mark.consistency
 def test_every_finding_code_is_registered_and_documented():
     """A report carrying an identifier no document explains cannot be acted on.
 

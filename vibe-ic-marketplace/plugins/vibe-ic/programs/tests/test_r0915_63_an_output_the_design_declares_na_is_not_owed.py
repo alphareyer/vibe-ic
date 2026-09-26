@@ -91,6 +91,7 @@ def test_the_capability_flag_is_NOT_restored():
     assert "capability_flag" not in D._POST_DFT_SKIP_DECLARED
 
 
+@pytest.mark.consistency
 def test_the_citation_cannot_drift_from_the_flow_condition():
     assert D._POST_DFT_SKIP_DECLARED["declaration"]["fields"] == dict(
         sorted(D._L20_DFT_ABSENT_FIELDS.items()))

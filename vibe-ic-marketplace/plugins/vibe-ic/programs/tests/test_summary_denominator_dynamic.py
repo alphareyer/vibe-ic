@@ -7,6 +7,7 @@ emission target past the v1.6.x baseline of 14. A N/14 print with N > 14
 is misleading.
 """
 import re
+import pytest
 import sys
 from pathlib import Path
 
@@ -36,6 +37,7 @@ def test_summary_uses_taxonomy_count():
         "the taxonomy grows.")
 
 
+@pytest.mark.consistency
 def test_taxonomy_currently_28_codes():
     """ANTI-REGRESSION: pin the current size so a future taxonomy expansion
     that breaks this test forces an audit. #157 grew the taxonomy from 24 to

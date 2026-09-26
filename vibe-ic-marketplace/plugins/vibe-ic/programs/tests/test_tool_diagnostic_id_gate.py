@@ -533,6 +533,7 @@ def test_the_published_cells_that_state_no_pdk_are_refused_too():
             f"not match.")
 
 
+@pytest.mark.consistency
 def test_the_unwired_state_is_disclosed_or_gone():
     """Wiring is MEASURED, and the disclosure dies with it.
 

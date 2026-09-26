@@ -16,6 +16,7 @@ NEGATIVE slack. Every clean design would then report a negative-slack number it
 does not have. So these tests care most about what must NOT resolve.
 """
 from __future__ import annotations
+import pytest
 
 import importlib
 import sys
@@ -48,6 +49,7 @@ def test_every_canonical_key_named_here_is_a_real_axis_key():
         f"the synonym table names canonical keys the axes do not: {stray}")
 
 
+@pytest.mark.consistency
 def test_every_emitted_spelling_named_here_is_emitted_somewhere():
     """A synonym for a name nothing produces is a table describing fiction."""
     src = "\n".join(p.read_text(errors="replace")

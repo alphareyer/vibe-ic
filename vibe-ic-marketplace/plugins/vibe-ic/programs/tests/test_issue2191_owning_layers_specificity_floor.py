@@ -299,6 +299,7 @@ _ENVELOPE_KEYS_UNDER_TEST = (
 )
 
 
+@pytest.mark.consistency
 def test_the_witness_list_is_the_whole_roster():
     """The pinned population IS the program's roster -- no more, no less."""
     assert set(_ENVELOPE_KEYS_UNDER_TEST) == set(T._L_DOC_ENVELOPE_KEYS)

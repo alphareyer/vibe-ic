@@ -218,6 +218,7 @@ def test_the_margin_gates_own_header_records_the_same_reason():
     assert "build_pvt_grid" in head
 
 
+@pytest.mark.consistency
 def test_the_skill_no_longer_names_it_as_a4s_gate_of_record():
     """The A4 row named it, and a sentence beside the row promised that the
     A1-A9 gates run inside the analog runner. The runner's A4 entry is

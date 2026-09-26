@@ -387,6 +387,7 @@ def test_dimension_table_is_1_through_9_with_a_name_each():
     assert len(C.AUDIT_FIELDS) == 8 < len(C.DIMENSIONS)
 
 
+@pytest.mark.consistency
 def test_ledger_is_the_live_cross_product():
     live_steps = len(F.step_ids())
     live_dims = len(C.DIMENSIONS)
@@ -1444,6 +1445,7 @@ def test_or_is_matched_as_a_separator_not_a_substring():
     assert F.split_any_of("a/b.json OR c/d.json") == ("a/b.json", "c/d.json")
 
 
+@pytest.mark.consistency
 def test_total_steps_field_is_not_the_step_count():
     """`total_steps: 44` counts the numeric steps only.
 

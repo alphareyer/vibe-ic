@@ -17,6 +17,7 @@ Pre-release flow correction (no backward-compat debt):
 chip-AGNOSTIC: structural yaml/program assertions only.
 """
 import json
+import pytest
 import sys
 from pathlib import Path
 
@@ -55,6 +56,7 @@ def test_step28_is_perc_reliability_signoff():
     assert set(s["blocks_on"]) >= {24, 25, 26, 27}
 
 
+@pytest.mark.consistency
 def test_renumbered_steps_kept_identity():
     # spot-pins across the shifted span (incl. the Step-35 DFM insertion)
     assert "Gate-Level Simulation" in _STEPS[29]["name"]
@@ -287,6 +289,7 @@ def _numeric_first_topological_order(steps):
     return [int(i) for i in out if i in as_int]
 
 
+@pytest.mark.consistency
 def test_file_order_is_numeric():
     """Integer steps are declared in numeric order unless a `blocks_on` edge
     forces otherwise.

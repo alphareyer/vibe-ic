@@ -26,6 +26,7 @@ one?" cannot be answered by counting, and a majority vote among stale checkouts
 is not an authority; the repo-root manifest's `plugins[].source` is.
 """
 from __future__ import annotations
+import pytest
 
 import importlib
 import json
@@ -198,6 +199,7 @@ def test_fix_is_idempotent(tmp_path):
 
 
 # ── the shipped tree ────────────────────────────────────────────────────────
+@pytest.mark.consistency
 def test_the_real_repo_agrees_with_its_own_plugin_json():
     """The ratchet. This is what #621 makes true and what keeps it true."""
     if not (_REPO / ".claude-plugin" / "marketplace.json").is_file():

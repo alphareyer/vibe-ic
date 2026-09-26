@@ -136,6 +136,7 @@ _ROUND7_RULE_B_FOUR = {
 }
 
 
+@pytest.mark.consistency
 def test_table_covers_exactly_the_undecided_gates_found_so_far():
     """Anchors the triage frontier. A change to this set is a real change to it
     and must be deliberate.

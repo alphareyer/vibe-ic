@@ -151,6 +151,7 @@ def _swept_population(gates: Path) -> str:
     return hits[0].replace("${ROOT}/", "").replace("$ROOT/", "")
 
 
+@pytest.mark.consistency
 def test_the_recorded_population_is_the_one_the_ci_gate_sweeps():
     """THE AGREEMENT NOTHING CHECKED (vibe-ic#1223).
 
@@ -188,6 +189,7 @@ def _live() -> dict:
     return m.check_corpus(CORPUS)
 
 
+@pytest.mark.consistency
 @needs_corpus
 def test_the_baseline_cites_no_run_tree_that_is_gone():
     """A citation that outlives its cell.
@@ -215,6 +217,7 @@ def test_the_baseline_cites_no_run_tree_that_is_gone():
         f"--write-baseline`.")
 
 
+@pytest.mark.consistency
 @needs_corpus
 def test_the_baseline_does_not_claim_debt_that_is_paid():
     """The recorded total must equal the live one.

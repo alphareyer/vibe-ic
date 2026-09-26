@@ -234,6 +234,7 @@ def test_the_population_is_non_empty_and_disclosed(record_property):
     )
 
 
+@pytest.mark.consistency
 def test_the_set_that_declares_nothing_is_exactly_as_pinned(record_property):
     """L1 — the JUDGEMENT, pinned so that changing it is loud.
 

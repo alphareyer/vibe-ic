@@ -248,6 +248,7 @@ def test_tracked_audit_category_names(tmp_path):
 
 # ── the watched directory is the one the skills tell you to write to ────────
 
+@pytest.mark.consistency
 def test_every_documented_backlog_directory_resolves_to_a_real_one():
     """A backlog written where the gate does not look is lost the same way.
 

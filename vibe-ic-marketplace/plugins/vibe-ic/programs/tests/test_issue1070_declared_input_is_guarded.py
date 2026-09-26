@@ -139,6 +139,7 @@ def test_no_new_unguarded_declared_input_appears():
           "KNOWN_UNGUARDED with an issue and a measured blast radius.")
 
 
+@pytest.mark.consistency
 def test_the_allowlist_does_not_outlive_its_truth():
     """A register that forgives a repaired edge is a register that has stopped
     describing the tree. Shrink-only means the entry goes when the edge does."""

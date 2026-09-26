@@ -614,6 +614,7 @@ def test_the_shipped_tree_is_clean_under_the_ratchet():
     assert r.stdout.startswith("[PASS]")
 
 
+@pytest.mark.consistency
 def test_the_published_residual_is_not_zero_and_says_so():
     """An audit that reports a clean zero it cannot back is the whole bug.
 

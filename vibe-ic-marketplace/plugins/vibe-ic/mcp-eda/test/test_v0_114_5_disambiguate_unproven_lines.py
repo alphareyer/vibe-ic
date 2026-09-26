@@ -25,6 +25,7 @@ Fix in v0.114.5:
     (equiv_simple entry ONLY)
 """
 from __future__ import annotations
+import pytest
 
 import re
 import sys
@@ -192,6 +193,7 @@ def test_v0_114_5_source_has_both_anchored_regexes():
         "`in module equiv:` suffix")
 
 
+@pytest.mark.consistency
 def test_v0_114_5_server_version_canonicalised():
     # v0.1.4 unified the version scheme: the old 0.114.x numeric floor is
     # obsolete. The disambiguation feature is guarded by the regex tests above;

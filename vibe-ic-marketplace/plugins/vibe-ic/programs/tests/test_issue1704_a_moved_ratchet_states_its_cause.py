@@ -113,6 +113,7 @@ def test_the_block_is_shaped_like_a_transition():
                 f"{b[end].get(n)!r}")
 
 
+@pytest.mark.consistency
 def test_the_transition_ends_where_the_record_actually_stands():
     """THE PREDICATE THAT MAKES THE NEXT MOVE LOUD.
 
@@ -191,6 +192,7 @@ def test_the_numerator_movement_reconciles_against_the_same_runs():
         f"account of it.")
 
 
+@pytest.mark.consistency
 def test_a_departed_run_is_not_also_a_present_one():
     rec, b = _record(), _block()
     both = sorted(set(b["runs_that_left"]) & set(rec["per_run"]))
@@ -200,6 +202,7 @@ def test_a_departed_run_is_not_also_a_present_one():
         f"ratchet is holding a line over a set it cannot name.")
 
 
+@pytest.mark.consistency
 def test_a_departed_run_that_carried_debt_is_on_the_withdrawal_ledger():
     """The two ledgers must agree about the same event.
 
@@ -256,6 +259,7 @@ def test_a_departed_run_that_carried_debt_is_on_the_withdrawal_ledger():
 
 # ------------------------------------------------ falsifiable against the tree
 
+@pytest.mark.consistency
 @needs_corpus
 def test_no_run_recorded_as_departed_is_still_in_the_corpus():
     """The self-consistency above is worth nothing if the block is fiction.
@@ -276,6 +280,7 @@ def test_no_run_recorded_as_departed_is_still_in_the_corpus():
         f"describes something that did not happen.")
 
 
+@pytest.mark.consistency
 @needs_corpus
 def test_the_transition_ends_where_the_live_sweep_stands():
     """`to` against the corpus, not against the register.

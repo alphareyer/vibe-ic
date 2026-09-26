@@ -331,6 +331,7 @@ def test_the_runner_invokes_the_checker_in_executable_text():
         f"{RUNNER.name} does not reach {PRODUCER.stem} from executable text")
 
 
+@pytest.mark.consistency
 def test_the_checker_is_not_in_the_unwired_register():
     """The register may only shrink, so the gate has to leave it by being
     wired — never by being recorded."""

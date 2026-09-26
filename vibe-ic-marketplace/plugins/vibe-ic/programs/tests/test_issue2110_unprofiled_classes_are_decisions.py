@@ -124,6 +124,7 @@ def test_each_skipped_class_is_registered_and_still_a_DECLARED_gap(cls):
 _PENDING_ELSEWHERE: dict = {}
 
 
+@pytest.mark.consistency
 def test_every_null_class_is_accounted_for():
     """MEMBERSHIP, not count, and by set UNION rather than by addition: every
     class still mapped to null is either a recorded SKIP with a measured reason

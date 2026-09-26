@@ -268,6 +268,28 @@ The gatekeeper workflow layers on `plugin_full_audit.py` (D1: every program has 
 D2: every flow step has a compliance checker) and, at `x.y.0` milestones only, the
 both-tree full suite.
 
+### The consistency tier (bookkeeping tests)
+
+Tests marked `@pytest.mark.consistency` check that INFORMATION matches the code —
+stated counts, inventories and indexes, registers that must equal a measured set,
+file or step order, figures in READMEs and docs. They are **deselected** (not run,
+not counted) on every routine run, and every session that deselects some says how
+many. They run only at the `x.y.0` FULL cadence (`tools/gatekeeper-land.sh` exports
+`VIBEIC_RUN_CONSISTENCY=1` when `landing_cadence.py` answers FULL) or on the owner's
+request:
+
+```bash
+cd vibe-ic-marketplace/plugins/vibe-ic
+VIBEIC_RUN_CONSISTENCY=1 bash run_tests.sh               # the full suite, consistency included
+python3 programs/consistency_tier.py --resync \
+    --website-repo <vibeic.ai checkout>                   # consistency only, then the resync report
+python3 programs/consistency_tier.py --resync --apply     # ... and run the regenerators
+```
+
+`--resync` runs every consistency test, names what a generator re-derives
+(inventory, index), lists what must be edited by hand, and lists the
+vibeic/vibeic.ai statements of codebase facts with the live value of each source.
+
 ## Usage
 
 ### For agents executing a skill

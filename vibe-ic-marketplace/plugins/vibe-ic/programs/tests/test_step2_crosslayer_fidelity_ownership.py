@@ -1,6 +1,7 @@
 """Contract tests for folding the former step 1.6x into flow Step 2."""
 
 import os
+import pytest
 from pathlib import Path
 
 import yaml
@@ -53,6 +54,7 @@ _CANONICAL_STEP_IDS = {
 }
 
 
+@pytest.mark.consistency
 def test_canonical_flow_remains_69_steps_without_a_1_6x_step():
     ids = tuple(str(step["id"]) for step in _steps())
     # NO `len(_CANONICAL_STEP_IDS) == 68` HERE, and that is deliberate. I wrote

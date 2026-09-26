@@ -418,6 +418,7 @@ def test_p0_documentation_exists_and_describes_the_structural_umbrella():
         assert "structural" in text.lower(), f"{where} no longer describes P0"
 
 
+@pytest.mark.consistency
 def test_p0_documentation_states_no_stale_gate_count():
     """Any gate count P0's documentation states must be the live count.
 

@@ -223,6 +223,7 @@ def test_both_instruments_measure_under_the_same_rule_id():
 
 
 # ── the register records the rule it was measured under ────────────────────
+@pytest.mark.consistency
 def test_the_register_is_stamped_with_the_rule_that_produced_it():
     d = json.loads(BASELINE.read_text(encoding="utf-8"))
     assert d.get("measured_under") == C.RULE_ID
