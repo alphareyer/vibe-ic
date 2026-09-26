@@ -135,7 +135,9 @@ import os
 import re
 import subprocess
 import sys
+import sysconfig
 import tempfile
+import types
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -1839,6 +1841,13 @@ _register(Instrument(
 #: progress detector, tclsh for the DRV census — and an instrument asked twice
 #: in one run must not pay for it twice. This is a cache, not a mode: there is
 #: no flag, env var or argument anywhere in this module that skips a check.
+#:
+#: WHAT MAY BE STORED HERE. Only a calibration of the REGISTERED instrument —
+#: its own judge, samples and expectation (`_REGISTERED`) — measured over
+#: collaborators nobody had replaced (`_foreign_bindings`). A calibration taken
+#: under a caller's fakes is returned to that caller and forgotten: stored, it
+#: was a verdict about fakes handed to every later caller, the real one
+#: included, and the outcome depended on who asked first (lane rfa, T118).
 _CACHE: Dict[str, Calibration] = {}
 
 #: THE BASE CASE OF THE RECURSION, and it is not an escape hatch.
@@ -1857,21 +1866,23 @@ _IN_PROGRESS: set = set()
 
 def check(name: str) -> Calibration:
     """Run both sides of `name`'s pair. CALIBRATED iff both hold."""
-    if name in _CACHE:
-        return _CACHE[name]
     inst = INSTRUMENTS.get(name)
     if inst is None:
-        cal = Calibration(name, MISCALIBRATED, failed_sides=("unregistered",),
-                          detail="not in INSTRUMENTS")
-        _CACHE[name] = cal
-        return cal
+        return Calibration(name, MISCALIBRATED, failed_sides=("unregistered",),
+                           detail="not in INSTRUMENTS")
+    registered = _is_registered(inst)
+    if registered and name in _CACHE:
+        return _CACHE[name]
     failed: List[str] = []
     detail: List[str] = []
     _IN_PROGRESS.add(name)
     try:
-        return _run_pair(inst, failed, detail)
+        cal, reached = _reaching(lambda: _run_pair(inst, failed, detail))
     finally:
         _IN_PROGRESS.discard(name)
+    if registered and not _foreign_bindings(reached):
+        _CACHE[name] = cal
+    return cal
 
 
 def _run_pair(inst: Instrument, failed: List[str],
@@ -1901,8 +1912,227 @@ def _run_pair(inst: Instrument, failed: List[str],
         state=MISCALIBRATED if failed else CALIBRATED,
         positive_outcome=pos, negative_outcome=neg,
         failed_sides=tuple(failed), detail="; ".join(detail))
-    _CACHE[name] = cal
     return cal
+
+
+# ── what a calibration measured: the registered instrument, or a fake? ─────
+
+#: The fields that make an instrument what was registered, by identity. Taken
+#: in `_register`; an instrument whose judge, samples or expectation are no
+#: longer these objects is a different instrument, measured and never stored.
+_IDENTITY_FIELDS: Tuple[str, ...] = ("judge", "positive", "negative", "expect")
+_REGISTERED: Dict[str, Tuple[Any, ...]] = {
+    n: tuple(getattr(i, f) for f in _IDENTITY_FIELDS)
+    for n, i in INSTRUMENTS.items()}
+
+
+def _is_registered(inst: Instrument) -> bool:
+    want = _REGISTERED.get(inst.name)
+    return want is not None and all(
+        getattr(inst, f) is w for f, w in zip(_IDENTITY_FIELDS, want))
+
+
+#: Where the import system's own `_find_and_load` lives.
+_IMPORT_FILE = "<frozen importlib._bootstrap>"
+
+
+def _reaching(run: Callable[[], Any]) -> Tuple[Any, List[Dict[str, Any]]]:
+    """Run `run` and return its result with every module namespace it reached.
+
+    Reached = the globals of every Python frame entered, the modules each
+    entered code object names (`import X as R` inside a judge, whose module
+    code never runs when its function is faked), and the modules bound in the
+    globals of the frames entered (`subprocess.run` faked: `subprocess`'s own
+    code never runs either). A profiler already installed keeps receiving
+    every event.
+
+    NOT reached: whatever runs inside an import. A judge that imports its
+    module for the first time runs the import system and every finder a host
+    installed (pytest's assertion-rewriting hook, whose module binds a
+    per-test closure); that is how the module arrived, not what the judge read.
+    """
+    spaces: Dict[int, Dict[str, Any]] = {}
+    codes: Dict[int, Any] = {}
+    importing = [0]
+    prior = sys.getprofile()
+
+    def _seen(frame, event, arg):
+        code = frame.f_code
+        if code.co_name == "_find_and_load" and code.co_filename == _IMPORT_FILE:
+            importing[0] += 1 if event == "call" else -1 if event == "return" else 0
+        elif event == "call" and not importing[0]:
+            spaces.setdefault(id(frame.f_globals), frame.f_globals)
+            codes.setdefault(id(code), code)
+        if prior is not None:
+            prior(frame, event, arg)
+
+    sys.setprofile(_seen)
+    try:
+        result = run()
+    finally:
+        sys.setprofile(prior)
+    reached = dict(spaces)
+    for code in codes.values():
+        for n in code.co_names:
+            mod = sys.modules.get(n)
+            if isinstance(mod, types.ModuleType):
+                reached.setdefault(id(mod.__dict__), mod.__dict__)
+    for g in list(spaces.values()):
+        for v in list(g.values()):
+            if isinstance(v, types.ModuleType):
+                reached.setdefault(id(v.__dict__), v.__dict__)
+    return result, list(reached.values())
+
+
+def _is_foreign(value: Any, home: Optional[str], name: str) -> bool:
+    """True when `value`, bound as `home.name`, is not what that module binds
+    there: a mock; a lambda or closure from somewhere else; a function its own
+    module no longer binds; or — read from `home`'s own source — a function
+    from another module under a name `home` DEFINES, or under a name it
+    imports from a module that binds something else."""
+    mocks = sys.modules.get("unittest.mock")
+    if mocks is not None and isinstance(value, mocks.NonCallableMock):
+        return True
+    if not isinstance(value, types.FunctionType):
+        return False
+    if value.__module__ == home or _interpreters_own(value.__code__.co_filename):
+        return False
+    obj: Any = sys.modules.get(value.__module__ or "")
+    try:
+        for part in value.__qualname__.split("."):
+            obj = getattr(obj, part)
+    except Exception:
+        return True
+    if obj is not value:
+        return True
+    decls = _declared_bindings(home).get(name, ())
+    return bool(decls) and not any(
+        d[0] == "other"
+        or (d[0] == "from" and getattr(sys.modules.get(d[1]), d[2], None)
+            is value)
+        or (d[0] == "alias" and _resolve(home, d[1]) is value)
+        for d in decls)
+
+
+def _dotted(node: ast.AST) -> str:
+    """`a.b.c` for a Name/Attribute chain, else ""."""
+    parts: List[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return ""
+    return ".".join([node.id] + parts[::-1])
+
+
+def _resolve(home: Optional[str], dotted: str) -> Any:
+    """`dotted` looked up in `home`'s globals, as the module's own line did."""
+    head, *rest = dotted.split(".")
+    obj = vars(sys.modules[home]).get(head) if home in sys.modules else None
+    for part in rest:
+        obj = getattr(obj, part, None)
+    return obj
+
+
+#: module name -> {bound name -> how its source binds it}, parsed once.
+_DECLARED: Dict[str, Dict[str, Tuple[Tuple[str, ...], ...]]] = {}
+
+
+def _declared_bindings(home: Optional[str]
+                       ) -> Dict[str, Tuple[Tuple[str, ...], ...]]:
+    """How `home`'s source binds each module-level name: ("def",) for a def or
+    class, ("from", module, name) for a from-import, ("alias", "a.b") for
+    `name = a.b`, ("other",) for anything else. Empty when there is no Python
+    source to read."""
+    key = home or ""
+    if key in _DECLARED:
+        return _DECLARED[key]
+    found: Dict[str, List[Tuple[str, ...]]] = {}
+    mod = sys.modules.get(key)
+    src = getattr(mod, "__file__", None) or ""
+    try:
+        tree = ast.parse(Path(src).read_text()) if src.endswith(".py") else None
+    except (OSError, SyntaxError, ValueError):
+        tree = None
+    package = (getattr(mod, "__package__", None) or "").split(".")
+
+    def _other(target: ast.AST) -> None:
+        for n in ast.walk(target):
+            if isinstance(n, ast.Name):
+                found.setdefault(n.id, []).append(("other",))
+
+    def _walk(body: List[ast.stmt]) -> None:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                found.setdefault(node.name, []).append(("def",))
+            elif isinstance(node, ast.ImportFrom):
+                base = node.module or ""
+                if node.level:
+                    parent = package[:len(package) - node.level + 1]
+                    base = ".".join(p for p in parent + [base] if p)
+                for a in node.names:
+                    found.setdefault(a.asname or a.name, []).append(
+                        ("from", base, a.name))
+            elif isinstance(node, ast.Import):
+                for a in node.names:
+                    found.setdefault(a.asname or a.name.partition(".")[0],
+                                     []).append(("other",))
+            elif isinstance(node, ast.Assign):
+                dotted = _dotted(node.value)
+                for t in node.targets:
+                    if dotted and isinstance(t, ast.Name):
+                        found.setdefault(t.id, []).append(("alias", dotted))
+                    else:
+                        _other(t)
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.For)):
+                _other(node.target)
+            elif isinstance(node, ast.With):
+                for item in node.items:
+                    if item.optional_vars is not None:
+                        _other(item.optional_vars)
+            for field_name in ("body", "orelse", "finalbody"):
+                sub = getattr(node, field_name, None)
+                if isinstance(sub, list) and not isinstance(
+                        node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                               ast.ClassDef)):
+                    _walk(sub)
+            for handler in getattr(node, "handlers", None) or []:
+                _walk(handler.body)
+
+    if tree is not None:
+        _walk(tree.body)
+    _DECLARED[key] = {k: tuple(v) for k, v in found.items()}
+    return _DECLARED[key]
+
+
+#: The interpreter's own library. A caller's fake is never defined there, and
+#: it binds functions this rule would otherwise misread: a `site` closure as
+#: `sys.__interactivehook__`, frozen importlib's `_relax_case`, `os`'s import of
+#: `_check_methods` from the module that calls itself `collections.abc`.
+_STDLIB_ROOTS: Tuple[str, ...] = tuple(sorted({
+    os.path.realpath(sysconfig.get_paths()[k]) + os.sep
+    for k in ("stdlib", "platstdlib")}))
+
+
+def _interpreters_own(filename: str) -> bool:
+    if filename.startswith("<frozen "):
+        return True
+    path = os.path.realpath(filename)
+    parts = path.split(os.sep)
+    return (path.startswith(_STDLIB_ROOTS)
+            and "site-packages" not in parts and "dist-packages" not in parts)
+
+
+def _foreign_bindings(reached: List[Dict[str, Any]]) -> List[str]:
+    """Every binding in `reached` a caller replaced, as `module.name`."""
+    found = [f"{__name__}.{k}" for k, v in _IMPORTED_STATE.items()
+             if globals().get(k) is not v]
+    for g in reached:
+        home = g.get("__name__")
+        found.extend(f"{home}.{k}" for k, v in list(g.items())
+                     if _is_foreign(v, home, k))
+    return found
 
 
 def check_all() -> Dict[str, Calibration]:
@@ -2411,6 +2641,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     print(f"\n[OK] {len(cals)} instrument(s) CALIBRATED.")
     return 0
+
+
+#: This module's own globals as imported — FIXTURES, the judges, the readers.
+#: One rebound by a caller (a moved FIXTURES, a faked `run_drv_census`) makes
+#: every calibration taken meanwhile a calibration of something else.
+_IMPORTED_STATE: Dict[str, Any] = dict(globals())
 
 
 if __name__ == "__main__":                              # pragma: no cover
