@@ -249,10 +249,62 @@ def test_step44_htol_conditional():
     assert "htol_results.json" in json.dumps(s.get("required_outputs", []))
 
 
+def _numeric_first_topological_order(steps):
+    """The declaration order the numbering implies, where the flow allows it.
+
+    Kahn's algorithm over the declared `blocks_on` edges (all ids, so a path
+    through a fractional or lettered step still orders its ends), always taking
+    the lowest-numbered integer step that is ready. An integer step goes out of
+    numeric order ONLY where a declared edge forces it.
+    """
+    import heapq
+    ids = [str(s["id"]) for s in steps if isinstance(s, dict)]
+    deps = {str(s["id"]): {str(e) for e in (s.get("blocks_on") or [])} & set(ids)
+            for s in steps if isinstance(s, dict)}
+    as_int = {i: int(i) for i in ids if i.lstrip("-").isdigit()}
+    # A non-integer step never appears in the integer sequence, so it is taken
+    # the moment it is ready: that only ever releases integer steps sooner.
+    rank = {i: n for n, i in enumerate(ids)}
+    ready, out, done = [], [], set()
+
+    def _push(i):
+        heapq.heappush(ready, (1, as_int[i], i) if i in as_int
+                       else (0, rank[i], i))
+    waiting = {i: set(d) for i, d in deps.items()}
+    for i in ids:
+        if not waiting[i]:
+            _push(i)
+    while ready:
+        _k, _n, i = heapq.heappop(ready)
+        out.append(i)
+        done.add(i)
+        for j in ids:
+            if i in waiting[j]:
+                waiting[j].discard(i)
+                if not waiting[j] and j not in done:
+                    _push(j)
+    assert len(out) == len(ids), "blocks_on has a cycle"
+    return [int(i) for i in out if i in as_int]
+
+
 def test_file_order_is_numeric():
+    """Integer steps are declared in numeric order unless a `blocks_on` edge
+    forces otherwise.
+
+    Until v1.24.73 this was a bare `seq == sorted(seq)`. #2635 ("no GDS before
+    the layout has passed its gates") made physical verification (31) consume
+    the stream-out (`31 blocks_on [.., 34, 37]`), so 31 is declared after 37.
+    The #503 cascade walks the declared order and cannot cut a forward edge
+    (D5-FORWARD-EDGE), so numbering and dependencies can no longer both hold.
+    The property kept is the one the renumber needed: the order is the
+    numbering, and the only departures are the ones the flow's own edges
+    force. A move that no edge forces still fails here."""
     seq = [s["id"] for s in _FLOW["steps"]
            if isinstance(s, dict) and isinstance(s["id"], int)]
-    assert seq == sorted(seq), "yaml physical order must follow numbering"
+    forced = _numeric_first_topological_order(_FLOW["steps"])
+    assert seq == forced, (
+        "yaml physical order must follow numbering except where blocks_on "
+        f"forces otherwise: declared {seq}, expected {forced}")
 
 
 def test_capability_gaps_follow_renumber():

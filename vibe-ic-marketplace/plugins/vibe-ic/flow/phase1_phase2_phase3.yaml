@@ -5073,7 +5073,14 @@ steps:
         # 0 FAIL / 6 PASS / 28 rc=2 NOT CHECKED. No published run turns red.
         - program_exit_zero: "pnr_timing_repair_completeness_check phase3/stage3/pnr --json reports/phase3/pnr/timing_repair_completeness.json"
         - files_exist: ["phase3/stage3/pnr/placed.def"]
-        - program_exit_zero: "placement_legality_check . --json reports/phase3/placement_legality.json"
+        # The declared `reports/phase3/placement_legality.json` is the pre-stream
+        # runner's receipt (program_outputs above; the runner admits the layout
+        # on its rc). The gate names that receipt and writes its own
+        # re-measurement to its own path (R-0915-141). Writing the declared
+        # path from the gate made the step self-certify by construction and put
+        # two writers on one file (R-0915-152).
+        - files_exist: ["reports/phase3/placement_legality.json"]
+        - program_exit_zero: "placement_legality_check . --json reports/phase3/placement_legality_verdict.json"
     blocks_on: [16]
 
   # ── Step 18: Spare-cell + ECO-prep insertion (Design-for-ECO) ──
@@ -5411,7 +5418,10 @@ steps:
       all_of:
         - files_exist: ["phase3/stage3/extracted/*.spef"]
           any_of: true
-        - program_exit_zero: "spef_extraction_check . --json reports/phase2/gates/spef_extraction.json"
+        # Same split as step 17: the declared receipt is the pre-stream
+        # runner's document; the gate names it and re-measures to its own path.
+        - files_exist: ["reports/phase2/gates/spef_extraction.json"]
+        - program_exit_zero: "spef_extraction_check . --json reports/phase2/gates/spef_extraction_verdict.json"
         - program_exit_zero: "provenance_check . --output phase3/stage3/extracted/*.spef --tool magic,openroad --require-measured"
     blocks_on: [21]
     notes: |
