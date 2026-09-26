@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1363
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1363)
+- **Total programs (excluding helpers / shims):** 1364
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1364)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1354 |
+| `any` | 1355 |
 
 ## Alphabetical listing
 
@@ -726,6 +726,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `level_shifter_required_check` | any | — | M2 gate (substance-verifying). |
 | `lfsr_synth` | any | — | deterministic SOLVER for the LINEAR-FEEDBACK-SHIFT-REGISTER family (Galois form), turning a fully-specified LFSR spec into correct RTL bl... |
 | `librelane_contract` | any | — | Project-local LibreLane step handoff. No Phase-3 step opts in implicitly. |
+| `librelane_cts_hold` | any | — | steps 19 (CTS) and 20 (post-CTS hold repair) on LibreLane (T98). |
 | `librelane_eqy` | any | — | Step 13 arm B: LibreLane Yosys.EQY beside lec_run (arm A). |
 | `librelane_ir_antenna` | any | — | Opt-in steps 24, 26 and 26.5ic through LibreLane tool steps. |
 | `librelane_postroute` | any | — | Steps 28, 29 and 33 read the post-route state the tool already produced. |
@@ -1435,7 +1436,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1354 programs)
+### `any` (1355 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2132,6 +2133,7 @@ _(no programs in this group)_
 - `level_shifter_required_check` — M2 gate (substance-verifying).
 - `lfsr_synth` — deterministic SOLVER for the LINEAR-FEEDBACK-SHIFT-REGISTER family (Galois form), turning a fully-specified LFSR spec into correct RTL bl...
 - `librelane_contract` — Project-local LibreLane step handoff. No Phase-3 step opts in implicitly.
+- `librelane_cts_hold` — steps 19 (CTS) and 20 (post-CTS hold repair) on LibreLane (T98).
 - `librelane_eqy` — Step 13 arm B: LibreLane Yosys.EQY beside lec_run (arm A).
 - `librelane_ir_antenna` — Opt-in steps 24, 26 and 26.5ic through LibreLane tool steps.
 - `librelane_postroute` — Steps 28, 29 and 33 read the post-route state the tool already produced.

@@ -401,6 +401,19 @@ def _to_container_path(host_path: str, container: str) -> str:
     return p
 
 
+def _container_path_to_host(container_path: str, container: str,
+                             project: Path) -> Path:
+    """The inverse of `_to_container_path` over the same mounts (longest
+    container prefix first); an unmapped path is returned unchanged."""
+    p = str(container_path)
+    for src, dst in sorted(_container_mounts(container), key=lambda m: -len(m[1])):
+        if p == dst:
+            return Path(src)
+        if p.startswith(dst + "/"):
+            return Path(src + p[len(dst):])
+    return Path(p)
+
+
 #: Where a step records that one artefact is a COPY of another it wrote.
 #: Read by `_ppa/timing.py` so a mirrored report is not counted twice.
 ARTEFACT_MIRRORS_REL = "reports/phase3/artefact_mirrors.json"
@@ -17974,6 +17987,12 @@ def _signal_name(sig: int) -> str:
 _PNR_STAGE_MARKER = "PNR_STAGE:"
 _PNR_RESUME_ELIDE_BEGIN = "# <<<PNR_RESUME_ELIDE_BEGIN>>>"
 _PNR_RESUME_ELIDE_END = "# <<<PNR_RESUME_ELIDE_END>>>"
+#: Steps 19/20 (CTS, post-CTS hold repair) inside the resume-elided region.
+#: A LibreLane selection of those steps splits the session at these two lines:
+#: the direct deck runs up to BEGIN, LibreLane runs the region's work, and the
+#: deck resumes from the handed-over ODB after END (`librelane_cts_hold`).
+_PNR_CTS_HOLD_BEGIN = "# <<<PNR_CTS_HOLD_BEGIN>>>"
+_PNR_CTS_HOLD_END = "# <<<PNR_CTS_HOLD_END>>>"
 
 
 def _pnr_stage_begin(label: str) -> str:
@@ -31899,6 +31918,10 @@ def _corner_qualify_extra_libs(macro_libs_tcl: str,
 
 
 CLKPATH_SIZE_MARKER = "CLKPATH_SIZE"
+#: The CTS `-distance_between_buffers` the direct deck uses when no reference
+#: flow declares one, and the value the LibreLane step-19 config carries in
+#: the same case (see the MEASURED two-level collapse in `_pnr_tcl`).
+_CTS_DEFAULT_DISTANCE_BETWEEN_BUFFERS_UM = 10.0
 
 
 def _clock_path_pre_cts_snapshot_tcl(marker: str = CLKPATH_SIZE_MARKER) -> str:
@@ -32382,7 +32405,8 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
         # silently recur on a design that never tuned this. chip-AGNOSTIC: a
         # PnR-quality knob, not a per-chip literal.
         _dist_buf = (cts_distance_between_buffers
-                     if cts_distance_between_buffers is not None else 10.0)
+                     if cts_distance_between_buffers is not None
+                     else _CTS_DEFAULT_DISTANCE_BETWEEN_BUFFERS_UM)
         _cts_cluster += f" -distance_between_buffers {_dist_buf:g}"
     # approach (a) — multi-corner liberty (ss setup / ff hold) or the
     # byte-identical single tt read_liberty when the caller passed none.
@@ -32562,6 +32586,7 @@ if {{[catch {{detailed_placement}} _rt_dp_err]}} {{
   }} else {{ puts "REPAIR_LEGALIZE_OK disp=diamond" }}
 }}
 puts "{_PNR_STAGE_MARKER} cts"
+# <<<PNR_CTS_HOLD_BEGIN>>>
 {_clk_path_snapshot}{_cts_legal_selection}if {{[catch {{clock_tree_synthesis -buf_list $_cts_bufs -root_buf $_cts_legal_root{_cts_cluster}}} cts_err]}} {{
   puts "CTS_NONFATAL: $cts_err -- continuing without explicit CTS"
 }}
@@ -32604,6 +32629,7 @@ if {{[catch {{
 }} _whs_err]}} {{
   puts "HOLD_WHS_NONFATAL: $_whs_err"
 }}
+# <<<PNR_CTS_HOLD_END>>>
 {routing_constraint_tcl}# === v0.2.14 — DRT-0305 PG-net cleanup (MUST precede global_route) ===
 # A non-special POWER/GROUND net in regular NETS (dangling zero_/one_ tie stub)
 # makes TritonRoute abort ALL detailed routing; remove/reclassify it first so the
@@ -33089,7 +33115,8 @@ def _build_pnr_resume_tcl_text(pnr_tcl_text: str, *, checkpoint_def_c: str,
 def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
                               omit_stages: Sequence[str] = (),
                               after_restore_tcl: str = "",
-                              restore_odb_c: str = "") -> List[str]:
+                              restore_odb_c: str = "",
+                              elide_end: str = _PNR_RESUME_ELIDE_END) -> List[str]:
     """The line surgery shared by the fatal-signal RESUME deck and the #2253
     SDR CHILD deck: re-seat the design load on a checkpoint DEF, delete the
     region that BUILDS that checkpoint, and drop each named stage.
@@ -33105,6 +33132,11 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
     get set, because they have to be in force before the work the checkpoint
     contains. See `_spare_reassert_dont_touch_tcl` for the measured case.
     Default "" keeps a caller that passes nothing byte-identical.
+
+    ``elide_end`` is where the elided region stops. The resume and SDR decks
+    elide up to ``_PNR_RESUME_ELIDE_END``; the step-19/20 LibreLane split
+    (T98) resumes after ``_PNR_CTS_HOLD_END``, before the route, so the rest
+    of the region still runs.
 
     Returns the lines; the callers join and terminate them."""
     lines = pnr_tcl_text.splitlines()
@@ -33185,9 +33217,11 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
                 f"{what} markers are out of order in pnr.tcl")
         lines[i0:i1 + 1] = list(replacement)
 
-    _drop(_PNR_RESUME_ELIDE_BEGIN, _PNR_RESUME_ELIDE_END,
+    _drop(_PNR_RESUME_ELIDE_BEGIN, elide_end,
           ["# --- floorplan..detailed_route elided: already in the checkpoint "
-           "---"],
+           "---"] if elide_end == _PNR_RESUME_ELIDE_END else
+          [f"# --- floorplan..{elide_end.strip('# <>')} elided: already in "
+           "the checkpoint ---"],
           "resume-elide")
     for stage in omit_stages:
         _drop(_pnr_stage_begin(stage), _pnr_stage_end(stage),
@@ -37697,6 +37731,15 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # Steps 17/18 producer switch: LibreLane GlobalPlacement..DetailedPlacement
     # + `Vibeic.InsertSpareCells`, continuing the step-15 LibreLane chain.
     _ll_pl_modes = _librelane_placement_modes(project)
+    # Steps 19/20 (CTS, post-CTS hold repair) producer switch (T98). Absent
+    # switch: the deck and its single session are unchanged.
+    import librelane_cts_hold as _llcts
+    _ll_cts_modes = _llcts.modes(project)
+    _ll_cts_refusal = _llcts.refusal(_ll_cts_modes)
+    if _ll_cts_refusal:
+        return StepResult("pnr", "FAIL", time.time() - t0, _ll_cts_refusal,
+                          extras={"finding": _ll_cts_refusal.split(":")[0],
+                                  "librelane_modes": _ll_cts_modes})
     tapcell_prune_block = ("" if _ll_fp_modes["15"] == "librelane"
                            else _build_tapcell_prune_tcl(pdk, _spare_pts_um))
     # #1215-PDN — derived (never tuned) EM strap-width floor from this
@@ -38320,6 +38363,20 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _pad_install_failure = _install_route_deck()
     if _pad_install_failure is not None:
         return _pad_install_failure
+    _ll_cts_overlay: Dict[str, Tuple[Any, str]] = {}
+    if set(_ll_cts_modes.values()) != {"direct"}:
+        try:
+            _ll_cts_overlay = _llcts.overlay(
+                sys.modules[__name__], project, str(pdk.name), _rf_map, _cts_fanout_target,
+                "phase3_one_shot_runner._cts_fanout_target (the SDC / sign-off "
+                "set_max_fanout: L9, RTL replication bound or liberty "
+                "default_max_fanout)",
+                project / "phase3/librelane/19-config")
+        except (ValueError, OSError) as exc:
+            return StepResult("pnr", "FAIL", time.time() - t0,
+                              f"LL_CTS_HOLD_CONFIG_REFUSED: {exc}",
+                              extras={"finding": "LL_CTS_HOLD_CONFIG_REFUSED",
+                                      "librelane_modes": _ll_cts_modes})
     cmd = (f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
            f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
            f"openroad -no_init -exit -metrics {out_dir_c}/{_PNR_METRICS} "
@@ -38402,18 +38459,30 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         # loop-invariant (computed once, above the loop).
         _pnr_aside = _set_aside_session_products(_pnr_products)
         try:
-            rc, out, err = _docker_exec(
-                container, cmd, outputs=_pnr_outputs,
-                marker=pnr_tcl_c, log_path=_pnr_logp,
-                # R-0915-131. PnR hands post-route DRV repair to an SDR CHILD
-                # session and then waits. While that child runs, the parent's own
-                # transcript, argv marker and CPU all go quiet, and a watchdog
-                # reading only the parent called a working job hung and threw away
-                # seven hours of place-and-route (subservient, 2026-09-23). The
-                # child writes `sdr_child_*.log` next to this log, so the progress
-                # signal includes them, resolved at every look.
-                progress_globs=["sdr_child_*.log"],
-                hard_ceiling_s=_pnr_ceiling)
+            if set(_ll_cts_modes.values()) != {"direct"}:
+                # Steps 19/20 on LibreLane: the same approach, split at the
+                # CTS/hold region (`librelane_cts_hold.execute`).
+                rc, out, err = _llcts.execute(
+                    sys.modules[__name__], project=project, pdk=pdk, container=container, out_dir=out_dir,
+                    out_dir_c=out_dir_c, pnr_tcl=pnr_tcl, modes=_ll_cts_modes,
+                    cmd=cmd, spare_plan=spare_plan,
+                    overlay=_ll_cts_overlay,
+                    exec_kwargs={"log_path": _pnr_logp,
+                                 "progress_globs": ["sdr_child_*.log"],
+                                 "hard_ceiling_s": _pnr_ceiling})
+            else:
+                rc, out, err = _docker_exec(
+                    container, cmd, outputs=_pnr_outputs,
+                    marker=pnr_tcl_c, log_path=_pnr_logp,
+                    # R-0915-131. PnR hands post-route DRV repair to an SDR CHILD
+                    # session and then waits. While that child runs, the parent's own
+                    # transcript, argv marker and CPU all go quiet, and a watchdog
+                    # reading only the parent called a working job hung and threw away
+                    # seven hours of place-and-route (subservient, 2026-09-23). The
+                    # child writes `sdr_child_*.log` next to this log, so the progress
+                    # signal includes them, resolved at every look.
+                    progress_globs=["sdr_child_*.log"],
+                    hard_ceiling_s=_pnr_ceiling)
         finally:
             _restore_unwritten_products(_pnr_aside)
         # vibe-ic#2108 — THIS APPROACH'S LOG, BEFORE THE NEXT ONE

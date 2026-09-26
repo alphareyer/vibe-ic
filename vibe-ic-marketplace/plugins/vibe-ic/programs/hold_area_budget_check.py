@@ -218,6 +218,18 @@ def find_producer(project: Path) -> Optional[Path]:
     return None
 
 
+def _tool_counted_zero(path: Optional[str]) -> bool:
+    """True when the input JSON carries ``hold_buffer_count`` == 0 (an int)."""
+    if not path or not Path(path).is_file():
+        return False
+    try:
+        count = json.loads(Path(path).read_text(errors="replace")).get(
+            "hold_buffer_count")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(count, int) and not isinstance(count, bool) and count == 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Enforce the 5% hold-buffer area-budget guardrail")
@@ -271,7 +283,12 @@ def main(argv=None) -> int:
         args.input_json = str(found)
 
     hba, tca, bta, ata = _load_input(args)
-    verdict, rc, report = evaluate(hba, tca, bta, ata, allow_zero=args.allow_zero)
+    # A producer that also records the TOOL's own hold-buffer count (T98: the
+    # LibreLane ResizerTimingPostCTS metric) settles the zero case by
+    # measurement: 0 buffers inserted is "nothing to budget", the same fact
+    # --allow-zero states by hand.
+    allow_zero = args.allow_zero or _tool_counted_zero(args.input_json)
+    verdict, rc, report = evaluate(hba, tca, bta, ata, allow_zero=allow_zero)
 
     if args.json:
         outp = Path(args.json)

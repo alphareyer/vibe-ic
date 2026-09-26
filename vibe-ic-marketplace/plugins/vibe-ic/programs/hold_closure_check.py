@@ -84,6 +84,14 @@ Usage
 """
 from __future__ import annotations
 
+# --- sibling-import path (vibe-ic#2104): bare sibling imports resolve when
+# this file is loaded by path, not only when it runs as __main__. ----------
+import os as _os                                                    # noqa: E402
+import sys as _sys                                                  # noqa: E402
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# ---------------------------------------------------------------------------
+
 import argparse
 import hashlib
 import json
@@ -358,6 +366,44 @@ def _read_def(path: Path) -> Tuple[Optional[str], int, Optional[str]]:
     return text, size, None
 
 
+def _librelane_hold_verdict(project: Path, findings: List[dict], summary: dict):
+    """None when step 20 is not on LibreLane; else (verdict, rc, findings,
+    summary) judged from `_librelane_cts_hold_evidence`."""
+    import _librelane_cts_hold_evidence as _llev
+    ev = _llev.evidence(project)
+    if ev is None:
+        return None
+    summary["librelane"] = {k: ev.get(k) for k in ("modes", "selected",
+                                                  "receipt_path", "problem")}
+    if ev["problem"]:
+        findings.append({"severity": "FAIL", "rule": "LIBRELANE_HANDOFF_INVALID",
+                         "message": ev["problem"]})
+        return "FAIL", 1, findings, summary
+    hv = _llev.hold_verdict(ev)
+    summary["librelane"].update(hold=hv)
+    if hv["clean"] is None:
+        findings.append({
+            "severity": "FAIL", "rule": "HOLD_CORNER_NOT_MEASURED",
+            "message": "the tool measured no hold slack at corner(s) "
+                       f"{hv['unmeasured'] or '(none declared)'}; hold closure "
+                       "cannot be certified on the corners that were measured"})
+        return "FAIL", 1, findings, summary
+    if not hv["clean"]:
+        worst = {c: hv["by_corner"][c] for c in hv["violating"]}
+        findings.append({
+            "severity": "FAIL", "rule": "HOLD_VIOLATION",
+            "message": f"hold worst slack < 0 after ResizerTimingPostCTS at "
+                       f"{worst} (ns; OpenROAD.STAMidPNR per corner)"})
+        return "FAIL", 1, findings, summary
+    findings.append({
+        "severity": "INFO", "rule": "HOLD_CLEAN_EVERY_CORNER",
+        "message": f"hold worst slack {hv['worst']:.4f} ns >= 0 at all "
+                   f"{len(hv['by_corner'])} STA corners; hold buffers inserted: "
+                   f"{hv['hold_buffers']} (LibreLane "
+                   f"{summary['librelane'].get('selected')} arm)"})
+    return "PASS", 0, findings, summary
+
+
 def evaluate(project: Path) -> Tuple[str, int, List[dict], dict]:
     """Return (verdict, rc, findings, summary)."""
     findings: List[dict] = []
@@ -418,6 +464,15 @@ def evaluate(project: Path) -> Tuple[str, int, List[dict], dict]:
         "message": f"post_hold.def parsed: {ph_size} B, "
                    f"components={ph_components}",
     })
+
+    # ---- 1b. Step 20 on LibreLane (T98): the TOOL's per-corner hold ----
+    # ResizerTimingPostCTS repaired hold at every STA corner, and
+    # OpenROAD.STAMidPNR measured each corner. The verdict is those numbers:
+    # every corner measured and >= 0. A DEF diff is never evidence here
+    # (review70 step 20: judge hold WNS per corner, never file identity).
+    ll = _librelane_hold_verdict(project, findings, summary)
+    if ll is not None:
+        return ll
 
     # ---- 2. PRIMARY: parse a hold-slack report if one exists ----
     hold_reports = _find_hold_reports(project)

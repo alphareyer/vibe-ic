@@ -29,6 +29,10 @@ codes and transcript paths (``gls_runs.json``). The verdict -- every case
 passed, delays applied > 0, SDF ERROR = 0 -- is
 ``sdf_gate_sim.judge_tool_arm`` on the host, where the transcript grammar is
 calibrated.
+
+``Vibeic.ClockPathDriveSizing`` (flow step 19, T98) runs after
+``OpenROAD.CTS``: the #2160 clock-path drive sizing, see its class docstring
+and ``clock_path_drive_sizing.tcl``.
 """
 from __future__ import annotations
 
@@ -43,9 +47,10 @@ from librelane.config import Variable
 from librelane.state import DesignFormat, State
 from librelane.steps.common_variables import dpl_variables
 from librelane.steps.odb import OdbpyStep
+from librelane.steps.openroad import OpenROADStep
 from librelane.steps.step import MetricsUpdate, Step, StepError, ViewsUpdate
 
-__all__ = ["InsertSpareCells", "GateLevelSim"]
+__all__ = ["InsertSpareCells", "GateLevelSim", "ClockPathDriveSizing"]
 
 
 @Step.factory.register()
@@ -202,3 +207,39 @@ class GateLevelSim(Step):
             except subprocess.TimeoutExpired:
                 sink.write(f"\nVIBEIC_GLS_TIMEOUT after {limit} s\n")
                 return 124
+
+
+@Step.factory.register()
+class ClockPathDriveSizing(OpenROADStep):
+    """Size the clock-path cells that neither CTS nor the resizer owns (#2160).
+
+    TritonCTS starts its tree at the first cell it may buffer and the OpenROAD
+    resizer excludes clock-network cells, so a cell upstream of the CTS root
+    (the DFT test-clock multiplexer on subservient x gf180mcuD: 2.00 ns, 30 %
+    of the insertion delay) is sized by nobody.  This step runs right after
+    ``OpenROAD.CTS`` on its ODB.  The algorithm is the runner's own
+    ``_clock_path_drive_sizing_tcl`` (one copy): the caller writes it to
+    ``VIBEIC_CLKPATH_SIZING_TCL``.  ``VIBEIC_CLKPATH_PRECTS_INSTANCES`` lists
+    every instance of the CTS step's INPUT ODB, one per line: the set CTS did
+    not create, which is how a CTS buffer is told from a cell nobody owns.
+    """
+
+    id = "Vibeic.ClockPathDriveSizing"
+    name = "Clock-path drive sizing (vibe-ic #2160)"
+
+    config_vars = OpenROADStep.config_vars + [
+        Variable(
+            "VIBEIC_CLKPATH_PRECTS_INSTANCES",
+            Path,
+            "Instance names of the ODB that OpenROAD.CTS read, one per line.",
+        ),
+        Variable(
+            "VIBEIC_CLKPATH_SIZING_TCL",
+            Path,
+            "The sizing pass, emitted by phase3_one_shot_runner."
+            "_clock_path_drive_sizing_tcl.",
+        ),
+    ]
+
+    def get_script_path(self) -> str:
+        return os.path.join(os.path.dirname(__file__), "clock_path_drive_sizing.tcl")
