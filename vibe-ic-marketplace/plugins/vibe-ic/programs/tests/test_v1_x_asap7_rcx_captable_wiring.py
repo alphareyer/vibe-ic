@@ -70,17 +70,36 @@ def test_asap7_staged_captable_matches_runner_glob():
     )
 
 
-def test_runner_still_globs_the_captable_convention_we_staged_against():
-    """Guard the load-bearing assumption: the runner still globs
-    libs.tech/{librelane,openlane}/rules.openrcx.*.nom[.magic]. If this drifts the
-    staged asap7 asset would silently stop being found."""
-    assert _CAPTABLE_DIR_GLOB in RUNNER_SRC, (
-        "runner no longer globs libs.tech/{librelane,openlane} — asap7 captable path "
-        "convention drifted; re-check the staging path in the Dockerfile"
-    )
-    assert "rules.openrcx.*.nom" in RUNNER_SRC, (
-        "runner no longer globs rules.openrcx.*.nom — asap7 captable name convention drifted"
-    )
+def test_runner_still_globs_the_captable_convention_we_staged_against(
+        monkeypatch):
+    """Guard the load-bearing assumption: the runner still FINDS the staged
+    asap7 captable. F13/F13b: nothing globs any more -- the ruleset is the
+    PDK's DECLARATION, and asap7 (no LibreLane config) declares it in this
+    registry's `rcx_rules`. So the same property is asserted on the runner's
+    own reader: the registry pointer is what the extraction decks receive."""
+    import phase3_one_shot_runner as R
+    root = "/foss/pdks/asap7"
+    pdk = R.PdkConfig(
+        name="asap7", liberty=f"{root}/libs.ref/asap7sc7p5t/lib/x.lib",
+        tech_lef=f"{root}/libs.ref/asap7sc7p5t/techlef/t.lef",
+        cell_lef=f"{root}/libs.ref/asap7sc7p5t/lef/c.lef", cell_gds=None,
+        site="asap7sc7p5t", drc_deck=None, metal_prefix="M")
+    # The container: no LibreLane/OpenLane config for asap7 (the probe's own
+    # NO_CONFIG record), and the registry-declared file exists.
+    monkeypatch.setattr(R, "_docker_exec", lambda *a, **k: (
+        0, f"RCX_DECL_NO_CONFIG {root}/libs.tech/librelane/config.tcl\n"
+           "RCX_DECL_END\n", ""))
+    monkeypatch.setattr(R, "_container_ls_paths",
+                        lambda c, expr, must, timeout=20: [
+                            p.strip("'") for p in expr.split()])
+    decl = R._openrcx_ruleset_declaration(pdk, "fake")
+    assert decl["status"] == "DECLARED", decl
+    want = f"{root}/{_asap7_entry()['rcx_rules']}"
+    assert decl["corners"]["nom"]["path"] == want, (
+        "asap7 captable no longer reaches the runner's declared-ruleset reader")
+    assert decl["corners"]["nom"]["declared_by"] == "pdk_registry.json:asap7.rcx_rules"
+    tcl = R._post_route_spef_repair_tcl("/o", pdk.tech_lef, rcx_declaration=decl)
+    assert f"set _prs_rules {{{want}}}" in tcl
 
 
 def test_asap7_lvs_deck_deferred_and_disclosed():

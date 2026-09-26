@@ -289,7 +289,21 @@ def test_spef_sta_prerequisites_missing_returns_false_with_notes(tmp_path):
 
 def test_spef_repair_tcl_captable_discovery_uses_libs_ref_anchor(tmp_path):
     """Captable discovery must use the /libs.ref/ anchor from the tech-LEF
-    path (chip-AGNOSTIC: no PDK-name literal in the Python code)."""
-    tcl = R._post_route_spef_repair_tcl("/out", "/pdk/libs.ref/sky130A/tech.lef")
-    assert "/libs.ref/" in tcl
-    assert "rules.openrcx" in tcl
+    path (chip-AGNOSTIC: no PDK-name literal in the Python code).
+
+    F13b: the anchor now lives in `_pdk_root_c`, which feeds the declared-
+    ruleset reader; the deck extracts with the declared file and derives
+    nothing itself."""
+    pdk = R.PdkConfig(name="fixture_pdk", liberty="/x.lib",
+                      tech_lef="/pdk/libs.ref/sky130A/tech.lef",
+                      cell_lef="/x.lef", cell_gds=None, site="s",
+                      drc_deck=None, metal_prefix="M", tapcell_master="t",
+                      antenna_diode_cell=None, pnr_exclude_cell_file=None)
+    assert R._pdk_root_c(pdk) == "/pdk"
+    rules = "/pdk/libs.tech/librelane/rules.openrcx.sky130A.nom.calibre"
+    tcl = R._post_route_spef_repair_tcl(
+        "/out", "/pdk/libs.ref/sky130A/tech.lef",
+        rcx_declaration={"status": "DECLARED", "declaration": ["c"],
+                         "corners": {"nom": {"path": rules}}, "detail": ""})
+    assert f"set _prs_rules {{{rules}}}" in tcl
+    assert "rules.openrcx.*" not in tcl

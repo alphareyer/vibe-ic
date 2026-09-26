@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1364
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1364)
+- **Total programs (excluding helpers / shims):** 1365
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1365)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1355 |
+| `any` | 1356 |
 
 ## Alphabetical listing
 
@@ -898,6 +898,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `periodic_signal_required_check` | any | — | Verify that for every protocol-mandated periodic device-side activity (wake pulse, heartbeat, keepalive), the RTL contains a generator mo... |
 | `periodic_timer_vs_rx_activity_check` | any | — | Periodic TX-triggering timer must reset on RX activity, on a shared bidirectional wire. |
 | `pg_rail_geometry_check` | any | — | 每一條宣告的電源/地軌，在 DEF 裡都必須至少帶一段佈線幾何，否則它只是一個名字。 |
+| `pg_supply_pin_ownership_check` | any | — | every supply pin of every instance sits on a DECLARED supply net of its own kind, read back from the DEF that ships. |
 | `phase1_all_l_docs_present_check` | any | Wave 23 | gate (Wave 23, v0.119.55). |
 | `phase1_consistency_check` | any | — | Cross-layer consistency gate (K4). |
 | `phase1_coverage_report_gen` | any | Wave 4 | Phase 1 (doc-extraction) extraction-coverage REPORT. |
@@ -1436,7 +1437,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1355 programs)
+### `any` (1356 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2305,6 +2306,7 @@ _(no programs in this group)_
 - `periodic_signal_required_check` — Verify that for every protocol-mandated periodic device-side activity (wake pulse, heartbeat, keepalive), the RTL contains a generator mo...
 - `periodic_timer_vs_rx_activity_check` — Periodic TX-triggering timer must reset on RX activity, on a shared bidirectional wire.
 - `pg_rail_geometry_check` — 每一條宣告的電源/地軌，在 DEF 裡都必須至少帶一段佈線幾何，否則它只是一個名字。
+- `pg_supply_pin_ownership_check` — every supply pin of every instance sits on a DECLARED supply net of its own kind, read back from the DEF that ships.
 - `phase1_all_l_docs_present_check` — gate (Wave 23, v0.119.55).  _[Wave 23]_
 - `phase1_consistency_check` — Cross-layer consistency gate (K4).
 - `phase1_coverage_report_gen` — Phase 1 (doc-extraction) extraction-coverage REPORT.  _[Wave 4]_

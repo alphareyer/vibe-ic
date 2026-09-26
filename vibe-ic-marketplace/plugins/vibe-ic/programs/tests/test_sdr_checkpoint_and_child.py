@@ -52,6 +52,19 @@ def _stage_captable(tmp_path: Path) -> str:
     return str(tmp_path / "pdk" / "libs.ref" / "fix" / "tech.lef")
 
 
+def _declared_nom(tech_lef_c: str) -> dict:
+    """F13b: the post-route deck takes the ruleset the PDK DECLARES
+    (`_openrcx_ruleset_declaration`'s record), never a glob. The declaration
+    here names the very file `_stage_captable` wrote."""
+    root = tech_lef_c.split("/libs.ref/")[0]
+    path = next(str(p) for p in sorted(Path(root, "libs.tech").rglob(
+        "rules.openrcx.*.nom.magic")))
+    return {"status": "DECLARED", "declaration": ["fixture config.tcl"],
+            "corners": {"nom": {"path": path, "pattern": "nom_*",
+                                "declared_by": "config.tcl:RCX_RULES"}},
+            "detail": ""}
+
+
 def _full_pnr_tcl(tmp_path: Path) -> str:
     """The COMPLETE pnr.tcl, from its REAL builder, with the fork post-route
     repair probe POSITIVE so both SDR sites are emitted."""
@@ -82,7 +95,8 @@ def _full_pnr_tcl(tmp_path: Path) -> str:
         routing_constraint_tcl="",
         pg_cleanup_block=R._pg_net_cleanup_tcl(),
         spef_repair_block=R._post_route_spef_repair_tcl(
-            out_dir_c, tech_lef_c, fork_repair_capable=True),
+            out_dir_c, tech_lef_c, fork_repair_capable=True,
+            rcx_declaration=_declared_nom(tech_lef_c)),
         antenna_repair_block=antenna,
         drv_reconverge_block=(
             R._pnr_stage_begin(SITE2) + "\n"
