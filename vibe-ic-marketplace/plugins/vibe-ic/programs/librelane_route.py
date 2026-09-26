@@ -436,7 +436,15 @@ def execute(
         view.unlink(missing_ok=True)
     ckpt = dict(odb_c=f"{work_c}/pre_route.odb", def_c=f"{work_c}/pre_route.def",
                 nl_c=f"{work_c}/pre_route.nl.v")
-    after_route = R._after_restore_tcl(deck, spare_plan, reroutes_immediately=False)
+    # The route region's `preroute_fill` stage ends with the PG re-connect and
+    # its PG_NET_OWNERSHIP_AUDIT (the pnr gate's primary evidence); on the
+    # tool path `OpenROAD.FillInsertion` placed the fillers, so the same block
+    # (no re-route: the tool's route is final) runs on the restored database
+    # before any post-route stage. MEASURED without it (spm, arm I2): the
+    # post-route fill stage was skipped by an antenna rollback and pnr ended
+    # NOT_MEASURED (PG_NET_OWNERSHIP_UNMEASURED).
+    after_route = (R._after_restore_tcl(deck, spare_plan, reroutes_immediately=False)
+                   + R._build_pg_reconnect_tcl(reroute=False))
 
     def _route_from_checkpoint(out: str, err: str) -> Tuple[int, str, str]:
         if not all(v.is_file() and v.stat().st_size for v in pre.values()):

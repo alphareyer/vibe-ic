@@ -426,6 +426,11 @@ def test_librelane_route_reaches_the_paths_the_post_route_tail_reads(tmp_path, m
     tail = (run.out_dir / 'pnr_route_tail.tcl').read_text()
     assert f'read_db {run.out_dir}/routed_preantenna.odb' in tail
     assert 'repair_antennas' in tail and 'global_route' not in tail
+    # the preroute_fill stage's PG re-connect + ownership audit, on the tool's
+    # filled database, with no re-route, before any post-route stage
+    audit = tail.index('PG_NET_OWNERSHIP_AUDIT')
+    assert tail.index('read_db') < audit < tail.index('repair_antennas')
+    assert 'PG_RECONNECT_DONE' in tail and not _has(tail, 'detailed_route')
     base = run.project / 'phase3/librelane/21-route'
     fill = base / f'{len(steps):02d}-openroad-fillinsertion'
     assert (run.out_dir / 'routed_preantenna.odb').read_text() == \
