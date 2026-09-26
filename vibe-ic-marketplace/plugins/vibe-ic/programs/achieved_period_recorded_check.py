@@ -52,6 +52,19 @@ slack exists; rc 1 only when a slack EXISTS and the achieved period does not.
 writes an SDC, and never proposes a period — `relaxation_applied` staying False
 is asserted here as well, so a future edit that turned the report into a
 relaxation would redden this gate rather than pass through it.
+
+STEP 23 ON THE TOOL (F15)
+=========================
+When step 23 runs `librelane` or `dual` (`phase3/librelane_switch.json`), the
+slack is the TOOL's: the worst `worst slack max` over every corner
+`OpenROAD.STAPostPNR` declared, read from each corner's own
+`vibeic_signoff.rpt` through `librelane_signoff.step23_tool_arm` (each file
+bound to the sha256 the tool wrote, each timed view still current). A corner
+report that is missing, unbound, stale or carries no setup slack REFUSES
+(rc 1, verdict REFUSED): it is never read as "no slack" and never replaced by
+the direct deck's report. The record's `worst_setup_slack_ns` must then be
+that slack (to the two decimals it prints): a reached period computed from
+any other number is not the one this run signed off.
 """
 from __future__ import annotations
 
@@ -62,6 +75,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # so the sibling import below resolves however this is invoked
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
+import librelane_signoff as _ls  # noqa: E402 — step 23 on the tool (F15)
+from librelane_contract import Refusal  # noqa: E402
 
 try:
     import _vacuous_exit as _vx
@@ -134,9 +149,42 @@ def measured_setup_slack(project: Path):
     return None, None
 
 
+#: The achieved-period record prints its slack to two decimals.
+TOOL_SLACK_TOLERANCE_NS = 0.006
+
+
+def tool_setup_slack(arm: dict):
+    """``(slack_ns, source, per_corner)``: the worst setup slack over every
+    corner the tool declared, each from that corner's own report."""
+    per_corner = {}
+    for corner, row in arm["corners"].items():
+        found = _WORST_SLACK_RE.search(row["files"][_ls.CORNER_REPORT]["text"])
+        if not found:
+            raise Refusal("LL_STA_CORNER_SLACK_MISSING",
+                          row["files"][_ls.CORNER_REPORT]["path"])
+        per_corner[corner] = float(found.group(1))
+    worst = min(per_corner, key=per_corner.get)
+    return (per_corner[worst], f"{worst}/{_ls.CORNER_REPORT} (STAPostPNR)",
+            per_corner)
+
+
 def evaluate(project: Path) -> dict:
     """The whole verdict, as data, so the test can assert on it directly."""
-    slack, source = measured_setup_slack(project)
+    try:
+        arm = _ls.step23_tool_arm(project)
+        tool = tool_setup_slack(arm) if arm is not None else None
+    except Refusal as exc:
+        return {
+            "program": "achieved_period_recorded_check",
+            "verdict": "REFUSED", "rc": RC_FAIL, "refusal": exc.code,
+            "setup_slack_ns": None, "slack_source": None, "findings": [],
+            "note": (f"step 23 runs on the tool and its sign-off cannot be "
+                     f"read: {exc} -- a refusal, never a vacuous pass"),
+        }
+    if tool is not None:
+        slack, source, per_corner = tool
+    else:
+        slack, source = measured_setup_slack(project)
     rec = project / ACHIEVED_REL
     present = rec.is_file()
     payload = None
@@ -201,6 +249,18 @@ def evaluate(project: Path) -> dict:
                     "artefact must never become a clock relaxation (#1083 "
                     "records ORFS's `update_ok`/`--failing` as NOT adopted)"),
             })
+        recorded = payload.get("worst_setup_slack_ns")
+        if (tool is not None and isinstance(recorded, (int, float))
+                and abs(float(recorded) - slack) > TOOL_SLACK_TOLERANCE_NS):
+            findings.append({
+                "rule": "ACHIEVED_PERIOD_NOT_FROM_SIGNOFF",
+                "severity": "ERROR",
+                "message": (
+                    f"{ACHIEVED_REL} records a worst setup slack of {recorded} "
+                    f"ns but the step-23 sign-off (STAPostPNR) measured {slack} "
+                    f"ns at {source}: the reached period is not the one this "
+                    f"run signed off"),
+            })
 
     return {
         "program": "achieved_period_recorded_check",
@@ -212,6 +272,8 @@ def evaluate(project: Path) -> dict:
         "asked_period_ns": (payload or {}).get("spec_period_ns"),
         "reached_period_ns": (payload or {}).get("achievable_period_ns"),
         "findings": findings,
+        **({"basis": _ls.tool_arm_basis(arm), "tool_setup_slack_ns": per_corner}
+           if tool is not None else {}),
     }
 
 

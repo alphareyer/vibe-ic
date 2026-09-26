@@ -109,6 +109,17 @@ EXIT CODES
   1  FAIL           — the two records disagree; the reason names both.
   2  NOT CHECKED    — a record exists on disk and could not be read.
 
+STEP 23 ON THE TOOL (F15)
+=========================
+When step 23 runs `librelane` or `dual`, the period the design was SIGNED OFF
+against is the one STAPostPNR timed, and that is a third record of the same
+answer: each corner's `clock.rpt` (`Clock: <name>` / `Period: <p>`, in the
+unit the corner's own report states as `STA_TIME_UNIT`) is read through
+`librelane_signoff.step23_tool_arm`, bound to the sha256 the tool wrote. The
+run record's `period_ns` must be the period of a clock the tool timed, at
+every corner; otherwise FAIL, naming the corner. A corner whose clock report
+or time unit cannot be read REFUSES (rc 1), never NOT_APPLICABLE.
+
 Chip / PDK-AGNOSTIC: no chip, vendor, PDK or library literal appears here.
 Every name compared comes from the run's own records.
 """
@@ -130,6 +141,17 @@ from _atomic_artefact import write_text as atomic_write_text  # noqa: E402
 from clock_target_provenance import PROVENANCE_REL as _PROVENANCE_REL  # noqa: E402
 from l19_constraint_token_emit import (  # noqa: E402
     _CLOCK_TARGET_KEY as _CT_KEY, _L19_NAME)
+import re  # noqa: E402
+import librelane_signoff as _ls  # noqa: E402 — step 23 on the tool (F15)
+from librelane_contract import Refusal  # noqa: E402
+
+#: The corner's clock report (LibreLane `sta/corner.tcl` `report_clock_properties`).
+TOOL_CLOCK_REPORT = "clock.rpt"
+_CLOCK_RE = re.compile(r"^Clock:\s*(\S+)\s*\n(?:.*\n)*?Period:\s*([-+0-9.eE]+)", re.M)
+_TIME_UNIT_RE = re.compile(r"^STA_TIME_UNIT:\s*([munpf]?s)\b", re.M)
+_TO_NS = {"s": 1e9, "ms": 1e6, "us": 1e3, "ns": 1.0, "ps": 1e-3, "fs": 1e-6}
+#: The clock report prints six decimals.
+_PERIOD_TOL_NS = 1e-6
 
 #: Where L19 lives, project-relative. Mirrors
 #: `l19_constraint_token_emit._generated_docs`.
@@ -171,7 +193,61 @@ def _num(v) -> Optional[float]:
         return None
 
 
+def tool_clock_periods(arm: dict) -> Dict[str, Dict[str, float]]:
+    """``{corner: {clock: period_ns}}`` as STAPostPNR timed each corner."""
+    out: Dict[str, Dict[str, float]] = {}
+    for corner, row in arm["corners"].items():
+        unit = _TIME_UNIT_RE.search(row["files"][_ls.CORNER_REPORT]["text"])
+        if not unit:
+            raise Refusal("LL_STA_TIME_UNIT_UNSTATED",
+                          row["files"][_ls.CORNER_REPORT]["path"])
+        clocks = {name: float(period) * _TO_NS[unit.group(1)] for name, period
+                  in _CLOCK_RE.findall(row["files"][TOOL_CLOCK_REPORT]["text"])}
+        if not clocks:
+            raise Refusal("LL_STA_CLOCK_REPORT_EMPTY",
+                          row["files"][TOOL_CLOCK_REPORT]["path"])
+        out[corner] = clocks
+    return out
+
+
 def check(project: Path) -> Dict[str, object]:
+    """The two records' agreement, and, with step 23 on the tool, the period
+    STAPostPNR timed at every corner against the run's own record."""
+    try:
+        arm = _ls.step23_tool_arm(project, (_ls.CORNER_REPORT, TOOL_CLOCK_REPORT))
+        periods = tool_clock_periods(arm) if arm is not None else None
+    except Refusal as exc:
+        return {"program": "clock_target_record_agreement_check",
+                "project": str(project), "verdict": "REFUSED",
+                "refusal": exc.code, "disagreements": [],
+                "reason": (f"step 23 runs on the tool and its sign-off cannot "
+                           f"be read: {exc}")}
+    rep = _check_records(project)
+    if arm is None:
+        return rep
+    rep["basis"] = _ls.tool_arm_basis(arm)
+    rep["tool_clock_periods_ns"] = periods
+    prov = _load(project / _PROVENANCE_REL)
+    if prov is None:
+        return rep
+    run_p = _num(prov.get("period_ns"))
+    dis = [f"period: the run signs off against {run_p} ns and STAPostPNR "
+           f"timed corner '{c}' with clock period(s) {sorted(ps.values())} ns"
+           for c, ps in sorted(periods.items())
+           if run_p is None or not any(abs(v - run_p) <= _PERIOD_TOL_NS
+                                       for v in ps.values())]
+    if dis:
+        rep["verdict"] = "FAIL"
+        rep["disagreements"] = list(rep.get("disagreements") or []) + dis
+        rep["reason"] = ("the run's clock target and the period the step-23 "
+                         "sign-off timed disagree: " + "; ".join(dis))
+    else:
+        rep["reason"] = (f"{rep.get('reason')}; STAPostPNR timed {run_p} ns at "
+                         f"every one of its {len(periods)} corners")
+    return rep
+
+
+def _check_records(project: Path) -> Dict[str, object]:
     rep: Dict[str, object] = {
         "program": "clock_target_record_agreement_check",
         "project": str(project),
@@ -301,7 +377,7 @@ def main(argv=None) -> int:
     print(f"[{rep['verdict']}] clock_target_record_agreement_check — "
           f"{rep['reason']}")
     print(json.dumps(rep, indent=2))
-    return {"PASS": 0, "NOT_APPLICABLE": 0, "FAIL": 1}.get(
+    return {"PASS": 0, "NOT_APPLICABLE": 0, "FAIL": 1, "REFUSED": 1}.get(
         str(rep["verdict"]), 2)
 
 

@@ -1286,10 +1286,167 @@ def read_axis_evidence(project: Path,
 
 
 # ── evaluation ─────────────────────────────────────────────────────────────
+#: A STAPostPNR corner is one point of the RC x process matrix, not a point
+#: on either axis alone.
+AXIS_TOOL = "rc_x_process"
+
+
+def _pvt_required_liberties(project: Path, required: List[str]) -> Dict[str, Optional[str]]:
+    """Required corner name -> the liberty FILE NAME the design's own PVT
+    matrix binds to it (by label or by name), or None when it binds none."""
+    pvt = _load_json(_first_existing(project, _PVT_CANDIDATES)) or {}
+    out: Dict[str, Optional[str]] = {}
+    for name in required:
+        hit = None
+        for c in pvt.get("corners") or []:
+            if not isinstance(c, dict) or not isinstance(c.get("liberty"), str):
+                continue
+            if name.strip().lower() in {str(c.get("label") or "").strip().lower(),
+                                        str(c.get("name") or "").strip().lower()}:
+                hit = Path(c["liberty"].strip()).name
+        out[name] = hit
+    return out
+
+
+def evaluate_tool(project: Path, arm: Dict[str, object],
+                  slack_tol: float = _DEFAULT_SLACK_TOL_NS) -> Dict[str, object]:
+    """Step 23 on the tool (F15): the record is STAPostPNR's.
+
+    The corners OWED are the ones the tool declared (its `STA_CORNERS`) and
+    the design's required PVT corners (L24, bound to a liberty by the design's
+    own PVT matrix); the direct deck's stance files are not read.  Every tool
+    corner is a sign-off corner for BOTH roles -- the tool times setup and
+    hold at each -- and is judged by the same rules: R1 its scope (RC corner,
+    process) must be intact, R2 both slacks reported, R3 neither violated, R4
+    the corners read distinct liberties, R5 DRV queried and clean, R6 each
+    required PVT corner measured post-route by some tool corner."""
+    import _sta_basis
+    import librelane_signoff as _ls
+    from l24_signoff_requirements_extract import extract_signoff_requirements
+    table: List[Dict[str, object]] = []
+    axes: List[Dict[str, object]] = []
+    findings: List[str] = []
+    rules: List[str] = []
+    for name, row in arm["corners"].items():                  # type: ignore[union-attr]
+        report = row["files"][_ls.CORNER_REPORT]
+        text = report["text"]
+        vals = extract_slacks(text)
+        table.append({
+            "corner": name, "axis": AXIS_TOOL,
+            "rc_corner": row["rc_corner"], "process": row["process"],
+            "voltage_v": row["voltage_v"], "temperature_c": row["temperature_c"],
+            "liberty": row["liberty"], "scope_gaps": row["scope_gaps"],
+            "label": None, "liberty_aliases": [],
+            "roles": ["setup", "hold"], "role_class": "signoff",
+            "declared": True, "reported": True,
+            # The tool's report states its own basis; unstamped is not post-route.
+            "basis_used": {f: (BASIS_SIGNOFF if _sta_basis.declared_basis(text) == "POST_ROUTE"
+                               else BASIS_PRE_LAYOUT)
+                           for f in ("setup_wns_ns", "hold_wns_ns") if vals.get(f) is not None},
+            "pre_layout_superseded_ns": None,
+            "setup_wns_ns": vals["setup_wns_ns"], "hold_wns_ns": vals["hold_wns_ns"],
+            "tns_ns": vals["tns_ns"], "source": report["path"],
+            "source_sha256": report["sha256"]})
+        drv = _drv_with_attribution(project, text)
+        axes.append({"axis": AXIS_TOOL, "corner": name, "report": report["path"],
+                     "drv": drv, "liberty_by_corner": {name: row["liberty"]}})
+    for r in table:
+        gaps = {k: v for k, v in (r["scope_gaps"] or {}).items()
+                if k in ("rc_corner", "process")}
+        if gaps:
+            rules.append("R1_INCOMPLETE_CORNER_RECORD")
+            findings.append(f"R1 tool corner '{r['corner']}' has no intact scope "
+                            f"({gaps}) — its numbers cannot be placed on the "
+                            f"RC x process matrix (source: {r['source']})")
+        for field, role in (("setup_wns_ns", "setup"), ("hold_wns_ns", "hold")):
+            if r[field] is None:
+                rules.append("R2_DECLARED_BUT_UNREPORTED")
+                findings.append(f"R2 tool corner '{r['corner']}' reports no worst "
+                                f"{role} slack (source: {r['source']})")
+            elif (r["basis_used"] or {}).get(field) != BASIS_SIGNOFF:
+                rules.append("R2_DECLARED_BUT_UNREPORTED")
+                findings.append(f"R2 tool corner '{r['corner']}' {role} slack is not "
+                                f"stamped post-route (source: {r['source']})")
+            elif float(r[field]) < -slack_tol:                 # type: ignore[arg-type]
+                rules.append("R3_SIGNOFF_CORNER_VIOLATION")
+                findings.append(f"R3 SIGN-OFF corner '{r['corner']}' (rc "
+                                f"{r['rc_corner']}, process {r['process']}) is VIOLATED: "
+                                f"{role} {float(r[field]):+.3f} ns (source: {r['source']})")
+    libs = {r["liberty"] for r in table if r["liberty"]}
+    if len(table) >= 2 and len(libs) <= 1:
+        rules.append("R4_MULTI_CORNER_CLAIM_UNSUPPORTED")
+        findings.append(f"R4 the tool reports {len(table)} corners but binds "
+                        f"{len(libs)} distinct cell liberty — not multi-corner sign-off")
+    for ax in axes:
+        drv = ax["drv"] or {}
+        if not drv.get("queried"):
+            rules.append("R5_DRV_UNQUERIED")
+            findings.append(f"R5 {ax['report']} carries sign-off timing but no DRV "
+                            f"query (report_check_types) is recorded")
+        elif drv.get("violations"):
+            rules.append("R5_DRV_VIOLATION")
+            findings.append(f"R5 {ax['report']} reports {drv.get('total')} DRV "
+                            f"violation(s): {drv.get('violations')}")
+    obligations = extract_signoff_requirements(project) or {}
+    required = sorted({c for row in obligations.get("signoff_requirements", [])
+                       if row.get("check") == "STA" and row.get("stated")
+                       for c in row.get("corners", [])})
+    for name, lib in _pvt_required_liberties(project, required).items():
+        covering = [r for r in table
+                    if (lib and Path(str(r["liberty"] or "")).name == lib)
+                    or (not lib and str(r["process"] or "") == name.strip().lower())]
+        measured = [r for r in covering if r["setup_wns_ns"] is not None
+                    and r["hold_wns_ns"] is not None
+                    and len(r["basis_used"] or {}) == 2]
+        if not measured:
+            rules.append("R6_REQUIRED_PVT_NOT_MEASURED")
+            findings.append(f"R6 required PVT corner '{name}' (liberty {lib}) is "
+                            f"NOT_MEASURED post-route by any tool corner")
+    ordered = [r for r in ("R1_INCOMPLETE_CORNER_RECORD", "R2_DECLARED_BUT_UNREPORTED",
+                           "R3_SIGNOFF_CORNER_VIOLATION",
+                           "R4_MULTI_CORNER_CLAIM_UNSUPPORTED", "R5_DRV_UNQUERIED",
+                           "R5_DRV_VIOLATION", "R6_REQUIRED_PVT_NOT_MEASURED")
+               if r in rules]
+    if "R6_REQUIRED_PVT_NOT_MEASURED" in ordered and set(ordered) <= {
+            "R2_DECLARED_BUT_UNREPORTED", "R6_REQUIRED_PVT_NOT_MEASURED"}:
+        verdict = "NOT_MEASURED"
+    else:
+        verdict = "FAIL" if ordered else "PASS"
+    reasons = findings or [
+        f"timing record complete: {len(table)} STAPostPNR corner(s) (RC x process), "
+        f"each reported for setup and hold, every one MET (tol {slack_tol} ns), "
+        f"{len(libs)} distinct cell liberty, DRV queried and clean"
+        + (f"; required PVT corners {required} measured" if required else "")]
+    return {
+        "verdict": verdict, "status": verdict, "reasons": reasons,
+        "corners": table, "primary_corner": None,
+        "declaration_sources": {"tool_record": arm["record"],
+                                "required_pvt_corners": required},
+        "axis_evidence": axes, "single_corner_only": False,
+        "corner_rows": len(table), "signoff_corner_rows": len(table),
+        "slack_tol_ns": slack_tol, "rules_violated": ordered,
+        "basis": _ls.tool_arm_basis(arm),                     # type: ignore[arg-type]
+    }
+
+
 def evaluate(project: Path,
              slack_tol: float = _DEFAULT_SLACK_TOL_NS) -> Dict[str, object]:
     """Pure evaluator over a run dir. ALWAYS returns the full per-corner
-    evidence table under `corners`, whatever the verdict."""
+    evidence table under `corners`, whatever the verdict.
+
+    Step 23 on the tool (F15): `evaluate_tool` over STAPostPNR's corners; a
+    tool record that cannot be read is REFUSED, never judged from our deck."""
+    import librelane_signoff as _ls
+    from librelane_contract import Refusal
+    try:
+        arm = _ls.step23_tool_arm(project)
+    except Refusal as exc:
+        return {"verdict": "REFUSED", "status": "REFUSED", "refusal": exc.code,
+                "reasons": [f"step 23 runs on the tool and its sign-off cannot be "
+                            f"read: {exc}"], "corners": [],
+                "slack_tol_ns": slack_tol, "rules_violated": []}
+    if arm is not None:
+        return evaluate_tool(project, arm, slack_tol)
     decl = read_declarations(project)
     records = read_records(project, decl)
     axes = read_axis_evidence(project, decl)

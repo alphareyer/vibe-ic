@@ -261,6 +261,20 @@ Verdicts
                 tier an unconditional wire reddened 31 of 33 published runs for
                 INPUT_MISSING.
 
+Step 23 on the tool (F15)
+-------------------------
+PROJECT-DIRECTORY mode, when step 23 runs `librelane` or `dual`: the hold
+sign-off is STAPostPNR's, which times hold at EVERY corner it declared. The
+question is unchanged -- is hold signed off at a FAST process corner -- and is
+answered from the tool's corners (`librelane_signoff.step23_tool_arm`, each
+bound to the sha256 the tool wrote): a corner's process is the one its
+config-bound cell liberty names (`_ppa` `parse_liberty_pvt`), and its hold
+analysis is its own report's `worst slack min` (the no-paths `INF` sentinel
+is NO hold analysis). PASS when every fast corner the tool declared analysed
+hold; FAIL HOLD_NOT_AT_FF when it declared none, NO_HOLD_ANALYSIS when a fast
+corner timed no hold path. The direct stance and hold script are not read. A
+corner whose report or process cannot be read REFUSES (rc 1), never rc 2.
+
 chip-AGNOSTIC: corner designators are matched by the same general convention
 patterns used by corner_coverage_audit.py; no PDK / vendor cell is hard-coded.
 
@@ -278,6 +292,10 @@ import re
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import librelane_signoff as _ls  # noqa: E402 — step 23 on the tool (F15)
+from librelane_contract import Refusal  # noqa: E402
 
 
 _TOOL = "hold_corner_coverage_check"
@@ -889,14 +907,66 @@ def _judge_source(kind: str, path: Path) -> Tuple[str, int, dict]:
     return verdict, rc, report
 
 
+def judge_tool(arm: dict) -> Tuple[str, int, dict]:
+    """Hold at a fast corner, from STAPostPNR's own corners (F15)."""
+    from sta_corner_record_completeness_check import extract_slacks
+    rows = []
+    for corner, row in arm["corners"].items():
+        if not row["process"]:
+            raise Refusal("LL_STA_CORNER_SCOPE_UNREAD",
+                          f"{corner}: process {row['scope_gaps'].get('process')}")
+        rows.append({"corner": corner, "process": row["process"],
+                     "class": _classify_corner(row["process"]),
+                     "liberty": row["liberty"],
+                     "hold_worst_slack_ns": extract_slacks(
+                         row["files"][_ls.CORNER_REPORT]["text"])["hold_wns_ns"],
+                     "report": row["files"][_ls.CORNER_REPORT]["path"]})
+    fast = [r for r in rows if r["class"] == "FF"]
+    unanalysed = [r["corner"] for r in fast if r["hold_worst_slack_ns"] is None]
+    report = {"tool": _TOOL, "mode": "librelane_stapostpnr",
+              "artefact": arm["record"], "tool_corners": rows,
+              "judged_corners": [r["corner"] for r in fast],
+              "corner_basis": "the corner's config-bound cell liberty "
+                              "(_ppa parse_liberty_pvt)",
+              "basis": _ls.tool_arm_basis(arm)}
+    if not fast:
+        report.update(verdict="FAIL", reason="HOLD_NOT_AT_FF", message=(
+            f"STAPostPNR declared {len(rows)} corner(s), processes "
+            f"{sorted({r['process'] for r in rows})}, and none is a FAST corner: "
+            f"hold is never signed off where it is worst"))
+        return "FAIL", 1, report
+    if unanalysed:
+        report.update(verdict="FAIL", reason="NO_HOLD_ANALYSIS", message=(
+            f"fast corner(s) {unanalysed} timed no hold path (no finite "
+            f"`worst slack min`) — nothing was verified there"))
+        return "FAIL", 1, report
+    report.update(verdict="PASS", reason="HOLD_AT_FF", message=(
+        f"hold signed off by STAPostPNR at fast corner(s) "
+        f"{[r['corner'] for r in fast]}"))
+    return "PASS", 0, report
+
+
 def judge_project(project: Path) -> Tuple[str, int, dict]:
     """Judge a project directory: every published source, WORST wins.
+
+    Step 23 on the tool: `judge_tool` over STAPostPNR's corners instead; a
+    tool record that cannot be read is REFUSED (rc 1).
 
     The deciding source's report is what the caller sees at top level (so the
     JSON shape a reader already knows is preserved), with every source's
     reading published under `sources` and a `contradiction` flag when two
     sources disagree.
     """
+    try:
+        arm = _ls.step23_tool_arm(project)
+        if arm is not None:
+            return judge_tool(arm)
+    except Refusal as exc:
+        return "REFUSED", 1, {
+            "tool": _TOOL, "mode": "librelane_stapostpnr", "verdict": "REFUSED",
+            "reason": exc.code, "artefact": str(project), "project": str(project),
+            "message": f"step 23 runs on the tool and its sign-off cannot be "
+                       f"read: {exc}"}
     sources = _discover(project)
     if not sources:
         # DISCLOSED SKIP — this run produced no hold sign-off record at all.

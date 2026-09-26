@@ -83,6 +83,15 @@ if {[info exists ::env(TIME_DERATING_CONSTRAINT)] && [string is double -strict $
 }
 puts $_vibeic_f "STA_BASIS: POST_ROUTE_SPEF"
 puts $_vibeic_f "STA_BASIS_CORNER: $corner_name"
+# The unit the corner's slack is printed in, asked of this OpenSTA (the
+# direct decks' stamp): without it the step-23 audit publishes no slack in ns.
+set _vibeic_tu ""
+catch {set _vibeic_tu "[sta::unit_scale_abbreviation time][sta::unit_suffix time]"}
+if {$_vibeic_tu ne ""} {
+  puts $_vibeic_f "STA_TIME_UNIT: $_vibeic_tu"
+} else {
+  puts $_vibeic_f "STA_TIME_UNIT_NOT_STATED: this interpreter could not answer sta::unit_scale_abbreviation/unit_suffix for time"
+}
 close $_vibeic_f
 '''
 
@@ -330,6 +339,111 @@ def judge_timing(corners: dict) -> dict:
     return {'verdict': 'FAIL' if failing else 'PASS', 'failing_corners': failing,
             'worst_setup': {'corner': worst_setup, 'ws': corners[worst_setup]['setup_ws']},
             'worst_hold': {'corner': worst_hold, 'ws': corners[worst_hold]['hold_ws']}}
+
+
+# --- the step-23 gates' reader of the tool arm -----------------------------
+
+#: The step-23 tool record `_librelane_signoff_record` writes.
+SIGNOFF_RECORD = 'reports/phase3/sta_postpnr_signoff.json'
+#: The views a STAPostPNR corner timed.  Each must still be the bytes the
+#: tool was given, or its reports describe a design that is no longer there.
+_TIMED_VIEWS = ('def', 'nl', 'sdc', 'spef')
+
+
+def step23_tool_arm(project: Path, artefacts: tuple[str, ...] = (CORNER_REPORT,)) -> Optional[dict]:
+    """What a step-23 gate judges when step 23 runs `librelane` or `dual`.
+
+    ``None`` when step 23 runs ``direct`` (the gate reads the direct decks, as
+    before).  Otherwise, per corner the tool declared (`STA_CORNERS` in the
+    step's own config): the ``artefacts`` it wrote in that corner's directory
+    (text + sha256), its metrics, and its scope.  The scope comes only from
+    files the tool bound: the RC corner from the SPEF pattern the tool matched
+    for the corner, and process / voltage / temperature from the cell
+    liberty its config binds to the corner, read by `_ppa`'s own
+    `parse_liberty_pvt` (an unreadable field stays a named gap, never a guess).
+
+    Every file is checked against the sha256 the contract's receipt recorded
+    when the tool wrote it, and every view the tool timed against the file on
+    disk now.  Anything missing, unreadable, unbound or stale raises
+    `Refusal`: a gate must refuse, never fall back to our own deck.
+    """
+    from librelane_contract import selected_mode
+    from _ppa.backends.opensta import parse_liberty_pvt
+    mode = selected_mode(project, '23')
+    if mode == 'direct':
+        return None
+    record = project / SIGNOFF_RECORD
+    try:
+        doc = _load(record)
+        state_path = Path(doc['sta_state'])
+        folder = state_path.parent
+        receipt = _load(folder / 'vibeic_receipt.json')
+        state = _load(state_path)
+        config = _load(folder / 'config.json')
+    except (OSError, ValueError, KeyError, TypeError, Refusal) as exc:
+        raise Refusal('LL_STA_TOOL_ARM_UNREADABLE', f'{record}: {exc}') from exc
+    if doc.get('mode') != mode:
+        raise Refusal('LL_STA_RECORD_STALE', f'{record} is mode {doc.get("mode")}, the switch says {mode}')
+    bound = receipt.get('sha256') or {}
+    for name in ('state_out.json', 'config.json'):
+        if bound.get(name) != digest(folder / name):
+            raise Refusal('LL_STA_ARTEFACT_UNBOUND', f'{folder / name}: not the bytes the tool wrote')
+    if doc.get('sta_state_sha256') != bound['state_out.json']:
+        raise Refusal('LL_STA_RECORD_STALE', f'{record} names another STAPostPNR state')
+    timed = (receipt.get('input') or {}).get('state_files') or {}
+    spefs = state.get('spef') or {}
+    views = [state.get(v) for v in _TIMED_VIEWS if v != 'spef'] + list(spefs.values())
+    for view in views:
+        if not view or str(view) not in timed or not Path(view).is_file() \
+                or digest(Path(view)) != timed[str(view)]:
+            raise Refusal('LL_STA_INPUT_STALE', f'{view}: not the file the tool timed')
+    declared = config.get('STA_CORNERS') or []
+    if not declared:
+        raise Refusal('LL_STA_NO_CORNER', f'{folder / "config.json"}: STA_CORNERS is empty')
+    metrics = state.get('metrics') or {}
+    corners: dict[str, Any] = {}
+    for name in declared:
+        matched = [p for p in spefs if fnmatch.fnmatch(name, p)]
+        libs = [lib for p, row in (config.get('CELL_LIBS') or {}).items()
+                if fnmatch.fnmatch(name, p) for lib in row]
+        pvt = parse_liberty_pvt(libs[0]) if len(libs) == 1 else None
+        gaps = dict(pvt.gaps) if pvt else {'process': f'{len(libs)} cell liberties bound'}
+        row: dict[str, Any] = {
+            'rc_corner': rc_corner(matched[0]) if len(matched) == 1 else None,
+            'process': pvt.process if pvt else None,
+            'voltage_v': pvt.voltage_v if pvt else None,
+            'temperature_c': pvt.temperature_c if pvt else None,
+            'liberty': libs[0] if len(libs) == 1 else None,
+            'metrics': {k: metrics.get(f'{m}__corner:{name}') for k, m in TIMING_METRICS.items()},
+            'files': {}}
+        if len(matched) != 1:
+            gaps['rc_corner'] = f'{len(matched)} SPEF patterns match'
+        row['scope_gaps'] = gaps
+        for artefact in artefacts:
+            rel = f'{name}/{artefact}'
+            path = folder / rel
+            if not path.is_file():
+                raise Refusal('LL_STA_CORNER_ARTEFACT_MISSING', str(path))
+            sha = digest(path)
+            if bound.get(rel) != sha:
+                raise Refusal('LL_STA_ARTEFACT_UNBOUND', f'{path}: not the bytes the tool wrote')
+            row['files'][artefact] = {'path': str(path), 'sha256': sha,
+                                      'text': path.read_text(errors='replace')}
+        corners[name] = row
+    return {'mode': mode, 'record': str(record), 'record_sha256': digest(record),
+            'folder': str(folder), 'state_sha256': bound['state_out.json'],
+            'corners': corners}
+
+
+def tool_arm_basis(arm: dict) -> dict:
+    """The part of `step23_tool_arm` a gate records as its basis (no text)."""
+    return {'producer': 'librelane:OpenROAD.STAPostPNR', 'mode': arm['mode'],
+            'record': arm['record'], 'record_sha256': arm['record_sha256'],
+            'state_sha256': arm['state_sha256'],
+            'corners': {name: {**{k: v for k, v in row.items() if k != 'files'},
+                               'files': {a: {k: v for k, v in f.items() if k != 'text'}
+                                         for a, f in row['files'].items()}}
+                        for name, row in arm['corners'].items()}}
 
 
 # --- critical nets --------------------------------------------------------

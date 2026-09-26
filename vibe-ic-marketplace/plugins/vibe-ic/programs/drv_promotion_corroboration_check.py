@@ -60,6 +60,8 @@ from typing import List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _flow_reason_taxonomy as _reason_taxonomy  # noqa: E402  vibe-ic#1978
+import librelane_signoff as _ls  # noqa: E402 — step 23 on the tool (F15)
+from librelane_contract import Refusal  # noqa: E402
 
 # The promotion leaves this behind when (and only when) it swapped the route.
 _PROMOTION_MARKER = "routed_base_prerepair.def"
@@ -187,6 +189,20 @@ def signoff_drv_violations(rpt_text: str) -> int:
 
 
 def check(project: Path) -> dict:
+    """Step 23 on the tool (F15): when step 23 runs `librelane` or `dual`, the
+    sign-off report is STAPostPNR's, one per corner it declared (read through
+    `librelane_signoff.step23_tool_arm`, bound to the sha256 the tool wrote),
+    and the count is the WORST corner's DRV rows -- each corner is one
+    session's count, as the promotion's own is.  The promotion's same-basis
+    number was measured on our deck's report, so it is not the tool's basis
+    and is not used; the claim is compared as a claim.  A tool report that
+    cannot be read REFUSES (rc 1) before anything is judged."""
+    try:
+        arm = _ls.step23_tool_arm(project)
+    except Refusal as exc:
+        return {"verdict": "REFUSED", "rc": 1, "refusal": exc.code,
+                "reason": (f"step 23 runs on the tool and its sign-off cannot "
+                           f"be read: {exc}")}
     promo = promotion_happened(project)
     if promo is None:
         # NOT-PROMOTED, DECLARED. The producer left its own record saying it
@@ -255,6 +271,8 @@ def check(project: Path) -> dict:
                            "ran; gate inapplicable"),
                 "promoted": False}
 
+    if arm is not None:
+        return _corroborate_on_tool(project, arm)
     rpt = find_signoff_report(project)
     if rpt is None:
         return {"verdict": "FAIL", "rc": 1, "promoted": True,
@@ -327,6 +345,32 @@ def check(project: Path) -> dict:
     out.update({"verdict": "PASS", "rc": 0,
                 "reason": (f"promotion corroborated by the sign-off report "
                            f"({actual} DRV violation(s)"
+                           + (f", claimed {claimed}" if claimed is not None else "")
+                           + ")")})
+    return out
+
+
+def _corroborate_on_tool(project: Path, arm: dict) -> dict:
+    per_corner = {c: signoff_drv_violations(row["files"][_ls.CORNER_REPORT]["text"])
+                  for c, row in arm["corners"].items()}
+    worst = max(per_corner, key=per_corner.get)
+    actual = per_corner[worst]
+    log = repair_log(project)
+    claimed = claimed_drv_after(log.read_text(errors="replace")) if log else None
+    out = {"promoted": True, "signoff_report": arm["record"],
+           "signoff_drv_violations": actual, "signoff_drv_worst_corner": worst,
+           "signoff_drv_by_corner": per_corner, "claimed_drv_after": claimed,
+           "basis": _ls.tool_arm_basis(arm)}
+    if claimed is not None and actual > claimed:
+        out.update({"verdict": "FAIL", "rc": 1,
+                    "reason": (f"the promotion claimed it ended at {claimed} DRV "
+                               f"violation(s) from its own session, but the "
+                               f"STAPostPNR sign-off shows {actual} at corner "
+                               f"'{worst}' — do not ship this route.")})
+        return out
+    out.update({"verdict": "PASS", "rc": 0,
+                "reason": (f"promotion corroborated by the STAPostPNR sign-off "
+                           f"(worst corner '{worst}': {actual} DRV violation(s)"
                            + (f", claimed {claimed}" if claimed is not None else "")
                            + ")")})
     return out

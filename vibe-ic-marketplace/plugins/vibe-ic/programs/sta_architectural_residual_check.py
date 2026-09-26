@@ -139,6 +139,8 @@ from _sta_basis import declared_basis  # noqa: E402
 # about a file nobody writes and passes forever.
 from sta_corner_record_completeness_check import (  # noqa: E402
     _MCORNER_OCV_CANDIDATES, _MULTICORNER_CANDIDATES, _NOMINAL_SPEF_CANDIDATES)
+import librelane_signoff as _ls  # noqa: E402 — step 23 on the tool (F15)
+from librelane_contract import Refusal  # noqa: E402
 try:
     import _path_layout as _pl  # noqa: E402
 except Exception:  # pragma: no cover - _path_layout is always present in-tree
@@ -514,7 +516,32 @@ def check(project: Path) -> Dict[str, object]:
         "reasons": [],
         "latency_contract": None,
     }
-    present = _candidates(project)
+    # STEP 23 ON THE TOOL (F15): when step 23 runs `librelane` or `dual`, the
+    # reports judged are STAPostPNR's own, one per corner the tool declared,
+    # each bound to the sha256 the tool wrote (`step23_tool_arm`); a path is
+    # named by its tool corner. Our deck's reports are not read, and a corner
+    # report that cannot be read REFUSES rather than leaving fewer to judge.
+    try:
+        arm = _ls.step23_tool_arm(project)
+    except Refusal as exc:
+        rep["verdict"] = "REFUSED"
+        rep["refusal"] = exc.code
+        rep["reason"] = (f"step 23 runs on the tool and its sign-off cannot be "
+                         f"read: {exc}")
+        rep["reasons"] = [rep["reason"]]
+        return rep
+    tool_corner: Dict[Path, str] = {}
+    tool_text: Dict[Path, str] = {}
+    if arm is not None:
+        rep["basis"] = _ls.tool_arm_basis(arm)
+        present = []
+        for corner, row in arm["corners"].items():
+            path = Path(row["files"][_ls.CORNER_REPORT]["path"])
+            tool_corner[path] = corner
+            tool_text[path] = row["files"][_ls.CORNER_REPORT]["text"]
+            present.append(path)
+    else:
+        present = _candidates(project)
     if not present:
         rep["reason"] = ("NOT CHECKED — no post-route sign-off timing report "
                          "on disk; this gate has no input, which is not a pass")
@@ -523,7 +550,7 @@ def check(project: Path) -> Dict[str, object]:
 
     judged = False
     for path in present:
-        text = path.read_text(errors="replace")
+        text = tool_text.get(path) or path.read_text(errors="replace")
         basis, paths = analyse_report(text)
         rel = str(path.relative_to(project)) if path.is_relative_to(project) \
             else str(path)
@@ -538,6 +565,8 @@ def check(project: Path) -> Dict[str, object]:
         judged = True
         rep["reports_read"].append(rel)
         for rec in paths:
+            if path in tool_corner and rec.get("corner") is None:
+                rec["corner"] = tool_corner[path]
             rec["report"] = rel
             rep["paths"].append(rec)
 
@@ -615,7 +644,7 @@ def main(argv=None) -> int:
     print(f"[{rep['verdict']}] sta_architectural_residual_check — "
           f"{rep['reason']}")
     print(json.dumps(rep, indent=2))
-    return {"PASS": 0, "FAIL": 1}.get(str(rep["verdict"]), 2)
+    return {"PASS": 0, "FAIL": 1, "REFUSED": 1}.get(str(rep["verdict"]), 2)
 
 
 if __name__ == "__main__":

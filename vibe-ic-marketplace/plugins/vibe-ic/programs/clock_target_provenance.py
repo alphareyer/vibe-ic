@@ -407,7 +407,10 @@ def stamp_signoff_records(project: Path) -> List[str]:
     note = (f"{ASSUMED_DISCLOSURE}: {float(prov['period_ns']):g} ns was "
             f"supplied by the flow, not by the design input. "
             f"{prov.get('would_have_stated', '')}")
-    for rel in SIGNOFF_RELS:
+    # Step 23 on the tool (F15): STAPostPNR's own sign-off record is a
+    # sign-off record too, and `sta_assumed_clock_disclosure_check` reads it.
+    from librelane_signoff import SIGNOFF_RECORD
+    for rel in SIGNOFF_RELS + (SIGNOFF_RECORD,):
         f = project / rel
         if not f.is_file():
             continue
