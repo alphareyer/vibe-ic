@@ -244,7 +244,7 @@ from flow_matrix import cells as C, flowref as F, waivers as W
 
 The ledger's unit is a step, but dimensions 2 (falsifiability), 4
 (criteria-match) and 6 (skip discipline) each ask their question of a gate
-CLAUSE — 202<!--figure:blocking_clauses--> blocking clauses over 70<!--figure:gated_steps--> gated steps. A cell-level
+CLAUSE — 203<!--figure:blocking_clauses--> blocking clauses over 70<!--figure:gated_steps--> gated steps. A cell-level
 `xfail(strict=True)` cannot express "5 of this step's 6 clauses are proven and
 the 6th is not", so those modules carry an in-module per-clause register with
 the same both-directions anti-rot semantics (a stale entry reddens; an entry
@@ -341,8 +341,8 @@ Corpus at generation: NOT_OFFERED — no published cell was read. Every figure b
 
 `ENFORCED` is published SPLIT, because it is not one thing. It means a live predicate ran and passed; it does not say WHAT it ran against, and that turns out to be three different answers:
 
-* **3** — measured against the step's OWN mechanism. This is the only figure that means what "enforcing" sounds like, and it is a floor: the two rows below are not evidence against it, they are the part nobody has evidence for.
-* **135** — measured against a SUBSTITUTED stand-in. The predicate runs and passes; what it exercises is not the mechanism the cell is named after. Each one carries a disclosure from the module that owns it.
+* **2** — measured against the step's OWN mechanism. This is the only figure that means what "enforcing" sounds like, and it is a floor: the two rows below are not evidence against it, they are the part nobody has evidence for.
+* **136** — measured against a SUBSTITUTED stand-in. The predicate runs and passes; what it exercises is not the mechanism the cell is named after. Each one carries a disclosure from the module that owns it.
 * **414** — in dimensions that have not answered the question at all. NOT counted as clean: UNDECLARED is a state, not a synonym for "own mechanism". See `substitution.py`, "WHY UNDECLARED IS A STATE AND NOT A DEFAULT".
 
 The 5 WAIVED and 16 NA cells are not enforcing anything and enter none of those columns. There is deliberately no single "enforcing" total to quote.
@@ -356,9 +356,9 @@ The 5 WAIVED and 16 NA cells are not enforcing anything and enter none of those 
 | 5 | `deps_correct` — Is blocks_on the true upstream set — no missing and no phantom edge? | 0 | 0 | 69 | 0 | 0 | 1 | 0 |
 | 6 | `skip_discipline` — Is every skip / vacuous-pass disclosed rather than counted as a pass? | 0 | 0 | 70 | 0 | 0 | 0 | 0 |
 | 7 | `outputs_list_complete` — Is required_outputs complete — does the step emit artefacts it never declares? | 0 | 0 | 65 | 0 | 0 | 4 | 1 |
-| 8 | `missing_caught` — When a declared output IS missing, which mechanism catches it? | 2 | 66 | 0 | 0 | 0 | 0 | 2 |
+| 8 | `missing_caught` — When a declared output IS missing, which mechanism catches it? | 1 | 67 | 0 | 0 | 0 | 0 | 2 |
 | 9 | `verdict_consumed` — When this step FAILs, does the verdict reach the exit code — or is it reported and discarded? | 1 | 69 | 0 | 0 | 0 | 0 | 0 |
-| **total** | | **3** | **135** | **414** | **0** | **57** | **5** | **16** |
+| **total** | | **2** | **136** | **414** | **0** | **57** | **5** | **16** |
 
 **NOT MEASURED is not a pass and not a defect.** Those 57 cells have a predicate that declined to run, naming a resource it could not reach — most often a published corpus this checkout does not carry. They are counted here so a dimension whose cells could not be driven cannot read as a dimension with nothing to report; read them as UNKNOWN, never as coverage.
 
