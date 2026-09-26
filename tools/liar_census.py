@@ -721,6 +721,84 @@ def _is_monotonic_json_promotion(was, now) -> bool:
             and bool(new_argv[-1][len("--json="):]))
 
 
+#: Weakest-to-strongest for a RENAME row's kind. `optional_program_exit_zero`
+#: runs its program only when a `condition_files_exist` glob matches and
+#: otherwise passes as not-applicable; `program_exit_zero` reads only
+#: `command` from its mapping (flow_compliance_check `_evaluate_gate`), so any
+#: `condition_files_exist` beside it is ignored and the program ALWAYS runs.
+#: Kept apart from `_CLAUSE_RANK` so the --json promotion rule above is not
+#: widened by this one.
+_RENAME_KIND_RANK = {"advisory_program_exit_zero": 0,
+                     "optional_program_exit_zero": 1,
+                     "program_exit_zero": 2}
+
+#: The only shapes a `renames` row may record. Each keeps the step and the
+#: program, never lowers the kind, and changes exactly one named thing:
+#:   kind          same argv, a strictly stronger kind
+#:   verdict_path  same argv except the value after `--json` -- where the
+#:                 gate WRITES its verdict, never what it reads
+#:   input_scope   same argv plus one `--under PATH` pair -- the gate is
+#:                 pointed at the artefact its step declares
+_RENAME_TRANSITIONS = ("kind", "verdict_path", "input_scope")
+
+
+def _json_value_index(argv):
+    """Index of the single `--json` VALUE token, or None when not exactly one."""
+    hits = [i for i, t in enumerate(argv) if t == "--json"]
+    if (len(hits) != 1 or hits[0] + 1 >= len(argv)
+            or any(t.startswith("--json=") for t in argv)):
+        return None
+    return hits[0] + 1
+
+
+def _is_recorded_rename(was, now, transition) -> bool:
+    """True when ``was -> now`` is exactly the one change ``transition`` names.
+
+    A rename row is how a clause that the flow RE-SPELLED, rather than
+    removed, stays one obligation: the successor replaces the old spelling
+    in the effective floor, and from then on reverting to the old spelling is
+    MISSING. Anything wider than the named shape -- a different program, a
+    moved step, a lowered kind, a second changed argument -- is refused, so a
+    real removal still has to be deleted by hand and said out loud.
+    """
+    import shlex  # noqa: PLC0415
+
+    old_step, old_kind, old_cmd = was
+    new_step, new_kind, new_cmd = now
+    if transition not in _RENAME_TRANSITIONS or old_step != new_step:
+        return False
+    if old_kind not in _RENAME_KIND_RANK or new_kind not in _RENAME_KIND_RANK:
+        return False
+    if _RENAME_KIND_RANK[new_kind] < _RENAME_KIND_RANK[old_kind]:
+        return False
+    try:
+        old_argv, new_argv = shlex.split(old_cmd), shlex.split(new_cmd)
+    except ValueError:
+        return False
+    if not old_argv or not new_argv or old_argv[0] != new_argv[0]:
+        return False
+    if transition == "kind":
+        return (old_argv == new_argv
+                and _RENAME_KIND_RANK[new_kind] > _RENAME_KIND_RANK[old_kind])
+    if transition == "verdict_path":
+        oi, ni = _json_value_index(old_argv), _json_value_index(new_argv)
+        if oi is None or ni is None or oi != ni:
+            return False
+        if old_argv[oi] == new_argv[ni] or new_argv[ni].startswith("-"):
+            return False
+        return old_argv[:oi] + old_argv[oi + 1:] == new_argv[:ni] + new_argv[ni + 1:]
+    # input_scope
+    if any(t == "--under" or t.startswith("--under=") for t in old_argv):
+        return False
+    hits = [i for i, t in enumerate(new_argv) if t == "--under"]
+    if (len(hits) != 1 or hits[0] + 1 >= len(new_argv)
+            or not new_argv[hits[0] + 1]
+            or new_argv[hits[0] + 1].startswith("-")):
+        return False
+    i = hits[0]
+    return new_argv[:i] + new_argv[i + 2:] == old_argv
+
+
 def _reconcile_monotonic_promotions(removed, added, promotions):
     """Cancel only strict promotions recorded by the production floor."""
     old_left, new_left = removed.copy(), added.copy()
@@ -804,6 +882,36 @@ def _clause_floor_contract(floor_path: Path = CLAUSE_FLOOR):
             raise ValueError(
                 f"{floor_path} promotes {was!r} more times than clauses "
                 "records it; an unanchored promotion cannot set a floor.")
+        effective[was] -= 1
+        if not effective[was]:
+            del effective[was]
+        effective[now] += 1
+        promotions.append((was, now))
+    for index, row in enumerate(doc.get("renames") or []):
+        try:
+            was_row, now_row = row["from"], row["to"]
+            was = (was_row["step"], was_row["kind"], was_row["cmd"])
+            now = (now_row["step"], now_row["kind"], now_row["cmd"])
+            transition = row["transition"]
+            reason, landing = row["reason"], row["landing"]
+        except (KeyError, TypeError) as exc:
+            raise ValueError(
+                f"{floor_path} renames[{index}] is malformed; a rename must "
+                "name from, to, transition, reason and landing.") from exc
+        if not (isinstance(reason, str) and reason.strip()
+                and isinstance(landing, str) and landing.strip()):
+            raise ValueError(
+                f"{floor_path} renames[{index}] states no reason or landing; "
+                "an unexplained rename is a deletion by another name.")
+        if not _is_recorded_rename(was, now, transition):
+            raise ValueError(
+                f"{floor_path} renames[{index}] is not the {transition!r} "
+                f"rename it claims: {was!r} -> {now!r}")
+        promoted_from[was] += 1
+        if promoted_from[was] > raw[was]:
+            raise ValueError(
+                f"{floor_path} renames {was!r} more times than clauses "
+                "records it; an unanchored rename cannot set a floor.")
         effective[was] -= 1
         if not effective[was]:
             del effective[was]

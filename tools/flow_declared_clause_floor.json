@@ -5,6 +5,7 @@
   "_how_to_authorise_a_shrink": "Delete the entry BY HAND, in the same change that removes the clause from the flow, and say why in that commit. `liar_census.record_clause_floor` REFUSES to do it for you: it only ever adds, because dropping an entry is exactly how a shrink would be authorised by accident.",
   "_how_to_refresh_after_a_grow": "python3 -c \"import sys; sys.path.insert(0,'tools'); import liar_census as lc; lc.record_clause_floor()\"  -- additive only, safe to run without judgement, and it refuses if anything is MISSING.",
   "_monotonic_promotion_rule": "A row below replaces one recorded clause with an exact successor that only appends --json PATH and does NOT weaken its kind (advisory may stay advisory or become blocking; blocking may never become advisory). liar_census validates that shape, replaces the old obligation in the effective floor, and therefore treats any weakening as a downgrade. These rows can only make the floor stricter; they are not exemptions.",
+  "_rename_rule": "A `renames` row records a clause the flow RE-SPELLED, not one it removed. It names the landing and the reason, and it must be exactly one of liar_census._RENAME_TRANSITIONS on the same step and the same program, with a kind that never weakens: `kind` (same argv, stronger kind), `verdict_path` (only the --json value changes), `input_scope` (one --under PATH added). The successor replaces the old spelling in the effective floor, so reverting to the old spelling is MISSING. A removal is never a rename: delete it by hand per _how_to_authorise_a_shrink.",
   "monotonic_promotions": [
     {
       "from": {
@@ -44,6 +45,98 @@
         "cmd": "l9_floorplan_contract_check . --json reports/phase1/gates/l9_floorplan_contract.json"
       },
       "reason": "The gate now publishes its own report where it published nothing, so its verdict can be read instead of inferred from an exit code. Same step, same invocation, one --json PATH appended, kind unchanged \u2014 strictly more disclosing and never weaker. Recorded as a promotion rather than authorised as a shrink: deleting the row would drop the obligation, while this keeps the successor as the minimum forever. The clause changed in 39244b70b; the lane that made it is gone, and the shipped-floor control had been firing on it since."
+    }
+  ],
+  "renames": [
+    {
+      "from": {
+        "step": "18",
+        "kind": "optional_program_exit_zero",
+        "cmd": "spare_cell_coverage_check . --json reports/phase2/gates/spare_cell_coverage.json"
+      },
+      "to": {
+        "step": "18",
+        "kind": "program_exit_zero",
+        "cmd": "spare_cell_coverage_check . --json reports/phase2/gates/spare_cell_coverage.json"
+      },
+      "transition": "kind",
+      "landing": "61f610636 (v1.24.33, batch-D268)",
+      "reason": "optional -> blocking. program_exit_zero ignores the condition_files_exist left beside it, so the spare-cell readiness check now always runs instead of passing as not-applicable."
+    },
+    {
+      "from": {
+        "step": "26",
+        "kind": "program_exit_zero",
+        "cmd": "antenna_report_check . --mode antenna --json reports/phase3/antenna_signoff.json"
+      },
+      "to": {
+        "step": "26",
+        "kind": "program_exit_zero",
+        "cmd": "antenna_report_check . --mode antenna --under reports/phase3/antenna.rpt --json reports/phase3/antenna_signoff.json"
+      },
+      "transition": "input_scope",
+      "landing": "eeb31891e (batch-SPM9)",
+      "reason": "The sign-off antenna gate reads the canonical check_antennas report its step signs, not every *antenna* file in the tree (test_t56_signoff_view_and_antenna_scope). Measured: still rc=1 on violations in antenna.rpt, and rc=1 (SCOPE_NOT_FOUND) with antenna.rpt absent. Deliberately no longer red when antenna.rpt is clean and a non-sign-off antenna report elsewhere shows violations."
+    },
+    {
+      "from": {
+        "step": "27",
+        "kind": "optional_program_exit_zero",
+        "cmd": "si_crosstalk_check . --json reports/phase2/gates/si_crosstalk.json"
+      },
+      "to": {
+        "step": "27",
+        "kind": "program_exit_zero",
+        "cmd": "si_crosstalk_check . --json reports/phase2/gates/si_crosstalk.json"
+      },
+      "transition": "kind",
+      "landing": "61f610636 (v1.24.33, batch-D268)",
+      "reason": "optional (ran only when si_crosstalk.rpt existed) -> one unconditional blocking SI check covering .rpt and .json-only evidence."
+    },
+    {
+      "from": {
+        "step": "32",
+        "kind": "optional_program_exit_zero",
+        "cmd": "postroute_timing_repair_audit . --json reports/phase2/gates/postroute_timing_repair_audit.json"
+      },
+      "to": {
+        "step": "32",
+        "kind": "program_exit_zero",
+        "cmd": "postroute_timing_repair_audit . --json reports/phase2/gates/postroute_timing_repair_audit.json"
+      },
+      "transition": "kind",
+      "landing": "61f610636 (v1.24.33, batch-D268)",
+      "reason": "optional -> blocking. program_exit_zero ignores the condition_files_exist left beside it, so the repair audit now always runs."
+    },
+    {
+      "from": {
+        "step": "36",
+        "kind": "program_exit_zero",
+        "cmd": "tapeout_signoff_check . --mode tapeout --json reports/audit/tapeout_checklist.json"
+      },
+      "to": {
+        "step": "36",
+        "kind": "program_exit_zero",
+        "cmd": "tapeout_signoff_check . --mode tapeout --json reports/audit/tapeout_signoff.json"
+      },
+      "transition": "verdict_path",
+      "landing": "560a7427a (v1.23.63, batch-SLT68B, R-0915-141)",
+      "reason": "The gate wrote its verdict over the step's own required output, tapeout_checklist.json; tapeout_checklist_gen now produces the checklist and this gate writes its verdict beside it. Same program, same inputs, same kind."
+    },
+    {
+      "from": {
+        "step": "38",
+        "kind": "program_exit_zero",
+        "cmd": "foundry_handoff_package_check . --json reports/phase3/foundry_handoff_audit.json"
+      },
+      "to": {
+        "step": "38",
+        "kind": "program_exit_zero",
+        "cmd": "foundry_handoff_package_check . --json reports/phase3/foundry_handoff_check.json"
+      },
+      "transition": "verdict_path",
+      "landing": "560a7427a (v1.23.63, batch-SLT68B, R-0915-141)",
+      "reason": "foundry_handoff_audit.json is foundry_handoff_pack_gen's own audit document, which this gate reads; the gate's verdict moved to its own path. Same program, same inputs, same kind."
     }
   ],
   "clauses": [
