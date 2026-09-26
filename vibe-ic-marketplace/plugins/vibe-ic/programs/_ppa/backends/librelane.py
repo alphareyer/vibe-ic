@@ -116,6 +116,8 @@ AREA_METRICS = ("design__instance__area", "design__instance__count",
 TIMING_METRICS = ("timing__setup__ws", "timing__hold__ws", "timing__setup__tns",
                   "timing__hold__tns", "timing__setup_vio__count",
                   "timing__hold_vio__count",
+                  # T98: skew as a PPA objective for the step-19 CTS knobs.
+                  "clock__skew__worst_setup", "clock__skew__worst_hold",
                   "design__max_cap_violation__count",
                   "design__max_slew_violation__count")
 POWER_METRICS = ("power__internal__total", "power__switching__total",

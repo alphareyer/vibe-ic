@@ -129,6 +129,15 @@ def _hold_clean_noop_ok(project: Path) -> bool:
     when no report exists, the slack is negative (unrepaired hold violations),
     or the report is unparseable. Chip-AGNOSTIC: parses OpenROAD's own hold
     slack number, no chip literal."""
+    # Step 20 on LibreLane (T98): the proof is the tool's own per-corner hold
+    # (ResizerTimingPostCTS, then OpenROAD.STAMidPNR at every STA corner) --
+    # the receipt binds both DEFs to two different tool steps by sha256. The
+    # deck no longer writes a relabelled report, nor legalizes a second time
+    # just so the two files differ (review70 step 20, correction 2).
+    import _librelane_cts_hold_evidence as _llev
+    ev = _llev.evidence(project)
+    if ev is not None:
+        return not ev["problem"] and _llev.hold_verdict(ev)["clean"] is True
     rpt = _pl.pnr_dir(project) / "post_hold_timing.rpt"
     try:
         text = rpt.read_text(errors="replace")

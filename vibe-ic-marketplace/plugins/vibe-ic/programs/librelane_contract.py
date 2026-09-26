@@ -265,6 +265,14 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
             raise Refusal('LL_CONSTRAINT_CONFLICT', key)
         _, value, source = applicable[0]
         _set(result, sources, key, value, source)
+    # Step 19 (T98): CTS leaf clusters stay within the declared fanout cap.
+    # `set_max_fanout` in the SDC does not constrain clock_tree_synthesis
+    # (MEASURED on spm x ihp-sg13g2: a 16-sink leaf against a declared 8), so
+    # the cap reaches `-sink_clustering_size` directly, from the same
+    # declaration; LibreLane's own default leaves the size unset.
+    if 'MAX_FANOUT_CONSTRAINT' in result:
+        _set(result, sources, 'CTS_SINK_CLUSTERING_SIZE', result['MAX_FANOUT_CONSTRAINT'],
+             sources['MAX_FANOUT_CONSTRAINT'] + ' (CTS_SINK_CLUSTERING_SIZE = MAX_FANOUT_CONSTRAINT)')
     # The pad producer (15.5ic) translates the declaration; where both state
     # a value they must agree. The declaration is the input, so it wins the
     # provenance; a disagreement is refused, never resolved by either side.
@@ -1188,6 +1196,29 @@ def openroad_home(folder: Path, capability: dict | None,
     (folder / '.openroad').write_text('\n'.join(lines) + '\n')
     (folder / '.bashrc').write_text('')
     return folder
+
+
+def derive_step_config(config: Path, output: Path, updates: dict[str, tuple[Any, str]]) -> Path:
+    """A copy of a resolved step config with named keys set, each with its source.
+
+    Used for values LibreLane's design-config loader drops before a step sees
+    them (a plugin step's own variables) and for one step run per corner.  The
+    step's view sidecar is copied beside it; every change is recorded in
+    ``<output>.provenance.json``.  An unknown key is refused: the step's own
+    ``Step.load`` validates the result against its declared variables.
+    """
+    doc = _load(config)
+    provenance = {}
+    for key, (value, source) in updates.items():
+        doc[key] = value
+        provenance[key] = source
+    write_json(output, doc)
+    write_json(output.with_suffix('.provenance.json'),
+               {'derived_from': str(config), 'derived_from_sha256': digest(config),
+                'keys': provenance})
+    if views_path(config).is_file():
+        write_json(views_path(output), _load(views_path(config)))
+    return output
 
 
 #: A step's production default once its lane has CUT OVER (MIGRATION_COMMON

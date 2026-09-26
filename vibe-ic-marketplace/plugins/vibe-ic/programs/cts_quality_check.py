@@ -78,6 +78,14 @@ Usage
 """
 from __future__ import annotations
 
+# --- sibling-import path (vibe-ic#2104): bare sibling imports resolve when
+# this file is loaded by path, not only when it runs as __main__. ----------
+import os as _os                                                    # noqa: E402
+import sys as _sys                                                  # noqa: E402
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# ---------------------------------------------------------------------------
+
 import argparse
 import json
 import re
@@ -206,12 +214,19 @@ def _parse_report(text: str):
     out["created_buffers"] = _sum(
         r"Created\s+(\d+)\s+clock\s+buffers")
     out["created_nets"] = _sum(r"Created\s+(\d+)\s+clock\s+nets")
+    # `report_cts` (what LibreLane's OpenROAD.CTS writes as cts.rpt, T98):
+    # "Total number of Buffers Inserted: N." / "Total number of Sinks: N."
+    if out["created_buffers"] is None:
+        out["created_buffers"] = _sum(
+            r"Total\s+number\s+of\s+Buffers\s+Inserted\s*:\s*(\d+)")
 
     # sinks — take the largest "N sinks" / "Sinks N" we see.
     sink_nums = []
     for m in re.finditer(r"(\d+)\s+sinks", text, re.IGNORECASE):
         sink_nums.append(int(m.group(1)))
     for m in re.finditer(r"\bSinks\s+(\d+)", text):
+        sink_nums.append(int(m.group(1)))
+    for m in re.finditer(r"Total\s+number\s+of\s+Sinks\s*:\s*(\d+)", text):
         sink_nums.append(int(m.group(1)))
     if sink_nums:
         out["sinks"] = max(sink_nums)
@@ -453,6 +468,46 @@ def main(argv=None):
                      metrics, findings, 1)
 
     r = _parse_report(rpt_text)
+    # Step 19 on LibreLane (T98): the report is the tool's own `report_cts`
+    # (cts.rpt, handed over sha256-bound); skew is the tool's per-corner
+    # `clock__skew__worst_*` measured by OpenROAD.STAMidPNR, never re-derived.
+    import _librelane_cts_hold_evidence as _llev
+    _ll_ev = _llev.evidence(project)
+    if _ll_ev is not None:
+        metrics["librelane"] = {k: _ll_ev.get(k) for k in (
+            "modes", "selected", "receipt_path", "problem")}
+        if _ll_ev["problem"]:
+            findings.append({"severity": "FAIL", "rule": "LIBRELANE_HANDOFF_INVALID",
+                             "message": _ll_ev["problem"]})
+            return _emit(args, project, "FAIL", def_rel, rpt_rel, waiver,
+                         metrics, findings, 1)
+        fo = _llev.clock_tree_fanout(project, _ll_ev)
+        metrics["clock_tree_fanout"] = fo
+        if fo["cap"] is not None and fo["max_fanout"] is None:
+            findings.append({
+                "severity": "FAIL", "rule": "CLOCK_FANOUT_NOT_MEASURED",
+                "message": f"MAX_FANOUT_CONSTRAINT {fo['cap']} is declared but the "
+                           "tool measured no clock-tree fanout "
+                           "(vibeic__cts__max_fanout)"})
+            return _emit(args, project, "FAIL", def_rel, rpt_rel, waiver,
+                         metrics, findings, 1)
+        if fo["cap"] is not None and fo["max_fanout"] > fo["cap"]:
+            findings.append({
+                "severity": "FAIL", "rule": "CLOCK_FANOUT_EXCEEDS_CAP",
+                "message": f"a net driven by a CTS-created instance has "
+                           f"{fo['max_fanout']} loads > declared "
+                           f"MAX_FANOUT_CONSTRAINT {fo['cap']}"})
+            return _emit(args, project, "FAIL", def_rel, rpt_rel, waiver,
+                         metrics, findings, 1)
+        if r["skew_value"] is None and not r["is_vacuous"]:
+            skew = _llev.worst_skew(_ll_ev)
+            if skew is not None:
+                r["skew_value"], r["skew_unit"] = skew, "ns"
+                findings.append({
+                    "severity": "INFO", "rule": "SKEW_FROM_TOOL_METRICS",
+                    "message": f"worst |clock skew| {skew:.4f} ns over "
+                               f"{len(_ll_ev.get('corners') or [])} corner(s), "
+                               "LibreLane OpenROAD.STAMidPNR clock__skew__worst_*"})
 
     if r["is_vacuous"]:
         findings.append({

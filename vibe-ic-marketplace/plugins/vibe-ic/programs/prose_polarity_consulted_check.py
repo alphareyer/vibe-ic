@@ -1289,6 +1289,17 @@ _NOT_PROSE: Dict[str, str] = {
         "a fixed-format record, not a sentence: the count is the only field, a "
         "raise prints a different marker (`_RAISED`), and an absent marker is "
         "read as NOT_MEASURED, never as zero.",
+    "librelane_cts_hold::execute":
+        "The runner-emitted pnr.tcl's own `read_sdc <path>` command line: a Tcl "
+        "command the deck builder writes as the first token of a line, read "
+        "back only to find which SDC file the SAME deck times with. Tcl has no "
+        "form that DENIES a command: the line is `read_sdc` with a path or it "
+        "is not, and a comment (`#`) never starts with `read_sdc`, so the "
+        "`(?m)^read_sdc` anchor cannot match prose. Same class as "
+        "`design_one_shot_runner::step_full_stack_tb_gen` (runner-owned "
+        "generated source parsed back). Absent the line, the deck's default "
+        "PnR SDC path is used, and the path is only an input to the step -- no "
+        "declaration is written from it.",
     "librelane_contract::def_supply_tcl":
         "A tool-written DEF's SPECIALNETS `- <net> ... + USE POWER|GROUND ;` "
         "and PINS `- <pin> + NET <net> ... + DIRECTION <dir> ;` productions "
