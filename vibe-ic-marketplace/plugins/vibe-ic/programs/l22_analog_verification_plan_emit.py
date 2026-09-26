@@ -73,6 +73,7 @@ from ic_class_profile import (  # noqa: E402
 from l_doc_consumer_contract import l_doc_fields, load_l_doc  # noqa: E402
 import l_doc_generator_stamp as _stamp  # noqa: E402
 from _atomic_artefact import write_json as _atomic_write_json  # noqa: E402
+import _prose_polarity as _polarity  # noqa: E402
 
 
 TOOL = "l22_analog_verification_plan_emit"
@@ -81,7 +82,8 @@ _L5_NAME = "L5_ADI_SPEC.json"
 _INTENT_STRATEGY = "verification_intent_bullet_v634"
 _EMITTER_OWNED_PLAN_KEYS = frozenset({
     "schema_version", "track", "ic_class", "analog", "unscoped_intent",
-    "corner_matrix",
+    "corner_matrix", "cosim_scenarios", "cosim_scenario_gaps",
+    "cosim_status",
 })
 
 _PROCESS_CORNER_RE = re.compile(
@@ -295,9 +297,40 @@ def _intent_by_block(
     return scoped, unscoped
 
 
+def _clauses(intent: List[dict]) -> List[dict]:
+    """One intent row per ';'-separated clause of each bullet.
+
+    A bullet can join two requirements about two different blocks with a
+    semicolon. MEASURED on a real input: "DC operating point + line/load
+    regulation (<regulator>); SNDR/ENOB transient + input sweep (modulator)."
+    was attributed WHOLE to the regulator, because the regulator's identity
+    token matched and identity outranks specification vocabulary, and the
+    modulator's plan carried no intent at all. Split first, then associate: each
+    clause is judged on its own words. A bullet with no ';' is returned
+    byte-identical. The row keeps its ``phase`` (the L10 join key) and names
+    the bullet it came from.
+    """
+    out: List[dict] = []
+    for row in intent:
+        method = row.get("method")
+        parts = ([p.strip() for p in method.split(";")]
+                 if isinstance(method, str) else [])
+        parts = [p for p in parts if p]
+        if len(parts) < 2:
+            out.append(row)
+            continue
+        for index, part in enumerate(parts):
+            clause = copy.deepcopy(row)
+            clause["method"] = part
+            clause["clause_of"] = method
+            clause["clause_index"] = index
+            out.append(clause)
+    return out
+
+
 def _plan(ic_class: str, blocks: List[dict], intent: List[dict]) -> dict:
     rows: List[dict] = []
-    scoped_intent, unscoped_intent = _intent_by_block(blocks, intent)
+    scoped_intent, unscoped_intent = _intent_by_block(blocks, _clauses(intent))
     for index, block in enumerate(blocks):
         name = block.get("name") or block.get("block") or block.get("type")
         if not isinstance(name, str) or not name.strip():
@@ -322,6 +355,644 @@ def _plan(ic_class: str, blocks: List[dict], intent: List[dict]) -> dict:
     if matrix:
         plan["corner_matrix"] = matrix
     return plan
+
+
+# ── co-simulation scenarios (A9's denominator) ───────────────────────────────
+# The A9 co-simulation used to be graded on the scenario list its own producer
+# wrote, so the producer decided how many scenarios there were and the gate
+# counted them. The set is fixed HERE instead, in Phase 1, from the design
+# input alone, before any A9 producer exists. Precedence:
+#
+#   1. an input section whose heading names co-simulation, taken literally;
+#   2. otherwise rows derived ONLY from declarations, each citing its line:
+#        R1  a Verification-intent clause naming an L5 quantity of a block
+#            whose declared output is digital;
+#        R2  a declared cross-block supply/signal relation;
+#        R3  a digital boundary pin with a declared range (a clock rate);
+#        R4  declared per-window reset semantics;
+#   3. the standard categories no rule could derive, written to
+#      ``cosim_scenario_gaps`` — disclosed, never executed.
+#
+# NO NUMBER IS INVENTED. A bound is an L5 record's own min/target/max. The
+# structural criteria below are converter DEFINITIONS (sign, monotonic, in
+# range, valid logic level, window independence) and carry no number. A row
+# with no criterion at all is kept as UNBOUNDED_IN_INPUT: it runs and is
+# reported, and can never PASS.
+#
+# Zero rows is NOT a producer refusal. The analog plan above is still owed and
+# still written; ``cosim_status`` says NO_DERIVABLE_SCENARIOS and the gaps say
+# why. Only the A9 gate turns that into its own not-verified tier.
+
+_COSIM_STRATEGY_SECTION = "cosim_scenario_section_v1"
+_COSIM_HEADING_RE = re.compile(
+    r"^\s*#{1,6}\s*(?P<title>.*\b(?:co-?sim\w*|mixed[- ]signal\s+sim\w*)\b.*)$",
+    re.IGNORECASE)
+_MD_HEADING_RE = re.compile(r"^\s*(?P<hashes>#{1,6})\s")
+_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?P<body>\S.*)$")
+_SUBCKT_RE = re.compile(r"^\s*\.subckt\s+(?P<name>\S+)\s+(?P<pins>[^*]*)",
+                        re.IGNORECASE)
+_TABLE_QUOTE_RE = r"\|\s*{name}\s*\|(?P<target>[^|]*)\|(?P<range>[^|]*)\|"
+_INPUT_TEXT_SUFFIXES = (".md", ".txt", ".rst", ".sp", ".spi", ".spice", ".cir")
+#: Input subtrees that hold the DESIGN's own words. A PDK or a submission
+#: template is not a declaration about this design.
+_INPUT_TEXT_DIRS = ("docs", "interfaces")
+
+#: A spec row that names the block's OUTPUT and says it is digital. Generic
+#: signalling vocabulary; no block, pin or design literal.
+_DIGITAL_WORDS = frozenset({"digital", "bitstream", "serial", "logic", "bit"})
+_OUTPUT_WORDS = frozenset({"output", "out", "dout"})
+_FREQUENCY_UNITS = frozenset({"hz", "khz", "mhz", "ghz"})
+_SWEEP_WORDS = frozenset({"sweep", "sweeps", "swept", "ramp"})
+_RESET_WORDS = frozenset({"reset", "resets", "rst"})
+_WINDOW_WORDS = frozenset({"window", "windows", "conversion"})
+_OVERSAMPLING_WORDS = frozenset({"osr", "oversampling"})
+_RESOLUTION_WORDS = frozenset({"enob", "sndr", "sinad"})
+_POWER_UP_RE = re.compile(r"power[- ]?(?:up|on)|sequenc\w*|start[- ]?up",
+                          re.IGNORECASE)
+_DECIMATOR_RE = re.compile(r"decimat\w*", re.IGNORECASE)
+_RESET_PIN_RE = re.compile(r"\b(?:rst\w*|reset\w*)\b", re.IGNORECASE)
+#: The normalised input grid a sweep row is run at. A STIMULUS grid, not a
+#: criterion: it decides where the transfer is sampled, and no verdict reads a
+#: number from it.
+_SWEEP_GRID = (0.0, 0.25, 0.5, 0.75, 1.0)
+_STRUCTURAL = ("polarity", "monotonic", "in_range", "logic_level",
+               "window_independent")
+
+
+def _input_lines(project: Path) -> List[Tuple[str, int, str]]:
+    """(project-relative path, 1-based line, text) for the design's input."""
+    root = project / "input"
+    files: List[Path] = []
+    for sub in _INPUT_TEXT_DIRS:
+        base = root / sub
+        if base.is_dir():
+            files.extend(p for p in sorted(base.rglob("*"))
+                         if p.is_file()
+                         and p.suffix.lower() in _INPUT_TEXT_SUFFIXES)
+    if root.is_dir():
+        files.extend(p for p in sorted(root.glob("*"))
+                     if p.is_file() and p.suffix.lower() in _INPUT_TEXT_SUFFIXES)
+    out: List[Tuple[str, int, str]] = []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        rel = path.relative_to(project).as_posix()
+        for number, line in enumerate(text.splitlines(), 1):
+            out.append((rel, number, line))
+    return out
+
+
+def _cite(rel: str, number: int) -> str:
+    return f"{rel}:{number}"
+
+
+def _cells(line: str) -> List[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _norm_raw(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "")).replace(
+        "\N{EN DASH}", "-").replace("\N{EM DASH}", "-").replace(
+        "\N{MINUS SIGN}", "-").lower()
+
+
+def _spec_line(lines: List[Tuple[str, int, str]], spec: dict
+               ) -> Optional[str]:
+    """The input table row an L5 spec record was read from."""
+    name = str(spec.get("name") or "").strip()
+    if not name:
+        return None
+    source = Path(str(spec.get("source") or "")).name
+    target = _norm_raw(spec.get("target_raw"))
+    hits = []
+    for rel, number, line in lines:
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = _cells(line)
+        if len(cells) < 2 or cells[0] != name:
+            continue
+        if target and _norm_raw(cells[1]) != target:
+            continue
+        hits.append((Path(rel).name != source, rel, number))
+    if not hits:
+        return None
+    hits.sort()
+    return _cite(hits[0][1], hits[0][2])
+
+
+def _text_line(lines: List[Tuple[str, int, str]], text: str
+               ) -> Optional[str]:
+    """The input line holding `text` (markup ignored)."""
+    def clean(value: str) -> str:
+        return re.sub(r"[*_`]+", "", value).strip()
+    needle = clean(text)[:60]
+    if not needle:
+        return None
+    for rel, number, line in lines:
+        if needle in clean(line):
+            return _cite(rel, number)
+    return None
+
+
+def _block_pins(lines: List[Tuple[str, int, str]], block: dict
+                ) -> List[dict]:
+    """The block's boundary pins as the input's interface netlist declares."""
+    names = {str(block.get(k) or "").lower() for k in ("name", "block")}
+    names.discard("")
+    for rel, number, line in lines:
+        m = _SUBCKT_RE.match(line)
+        if not m or m.group("name").lower() not in names:
+            continue
+        pins = [p for p in m.group("pins").split() if "=" not in p]
+        return [{"pin": p, "evidence": _cite(rel, number)} for p in pins]
+    return []
+
+
+def _spec_text_tokens(spec: dict) -> set:
+    return (_tokens(spec.get("name")) | _tokens(spec.get("note"))
+            | _tokens(spec.get("target_raw")))
+
+
+def _pin_for(pins: List[dict], spec: dict, *, use_text: bool = False
+             ) -> Optional[dict]:
+    """The one pin a spec record describes, or None when that is not unique."""
+    name_tokens = _tokens(spec.get("name"))
+    text_tokens = _spec_text_tokens(spec) if use_text else name_tokens
+    scores = []
+    for pin in pins:
+        pname = pin["pin"].lower()
+        parts = {t for t in pname.split("_") if t}
+        score = 0
+        if pname in name_tokens:
+            score += 3
+        score += len(parts & text_tokens)
+        if any(len(pname) >= 3 and pname in tok for tok in name_tokens):
+            score += 2
+        scores.append(score)
+    best = max(scores, default=0)
+    if not best or scores.count(best) != 1:
+        return None
+    return pins[scores.index(best)]
+
+
+def _has_bound(spec: dict) -> bool:
+    return any(isinstance(spec.get(k), (int, float)) for k in ("min", "max"))
+
+
+def _bound_criterion(block: str, spec: dict, pin: Optional[dict]) -> dict:
+    out: Dict[str, Any] = {"block": block, "quantity": spec.get("name"),
+                           "unit": spec.get("unit"),
+                           "bound_raw": {"target": spec.get("target_raw"),
+                                         "range": spec.get("range_raw")}}
+    for key in ("min", "max", "target"):
+        if isinstance(spec.get(key), (int, float)):
+            out[key] = spec[key]
+    if pin:
+        out["pin"] = pin["pin"]
+    return out
+
+
+def _digital_output(block: dict, pins: List[dict]
+                    ) -> Optional[Tuple[dict, Optional[dict]]]:
+    """(the spec declaring a digital output, its pin) or None."""
+    for spec in _block_specs(block):
+        if not (_tokens(spec.get("name")) & _OUTPUT_WORDS):
+            continue
+        if _spec_text_tokens(spec) & _DIGITAL_WORDS:
+            return spec, _pin_for(pins, spec, use_text=True)
+    return None
+
+
+def _grading(criteria: List[dict]) -> str:
+    if any("quantity" in c for c in criteria):
+        return "BOUNDED"
+    if criteria:
+        return "STRUCTURAL"
+    return "UNBOUNDED_IN_INPUT"
+
+
+def _corners_of(text: str) -> dict:
+    named = [m.group(1).lower() for m in _PROCESS_CORNER_RE.finditer(text)]
+    if named:
+        return {"process": _ordered_unique(named), "source": "clause"}
+    return {"process": ["tt"], "temperature": "nominal",
+            "source": "no corner named by the row's own clause"}
+
+
+def _find_spec(block: dict, words: frozenset) -> Optional[dict]:
+    for spec in _block_specs(block):
+        if _tokens(spec.get("name")) & words:
+            return spec
+    return None
+
+
+def _explicit_section(lines: List[Tuple[str, int, str]], blocks: List[dict]
+                      ) -> List[dict]:
+    """Rows of an input section headed co-simulation, taken literally."""
+    rows: List[dict] = []
+    index = 0
+    while index < len(lines):
+        rel, number, line = lines[index]
+        m = _COSIM_HEADING_RE.match(line)
+        index += 1
+        if not m or _polarity.is_denied(m.group("title")):
+            continue
+        level = len(_MD_HEADING_RE.match(line).group("hashes"))
+        while index < len(lines) and lines[index][0] == rel:
+            _, n2, body_line = lines[index]
+            h = _MD_HEADING_RE.match(body_line)
+            if h and len(h.group("hashes")) <= level:
+                break
+            index += 1
+            b = _BULLET_RE.match(body_line)
+            text = b.group("body").strip() if b else ""
+            if not text and body_line.lstrip().startswith("|"):
+                cells = _cells(body_line)
+                if cells and not all(set(c) <= set("-: ") for c in cells):
+                    text = " | ".join(c for c in cells if c)
+            if not text:
+                continue
+            words = _tokens(text)
+            named = [blk for blk in blocks
+                     if _block_identity_tokens(blk) & words]
+            criteria: List[dict] = []
+            for blk in named:
+                bname = str(blk.get("name") or blk.get("block"))
+                for spec in _block_specs(blk):
+                    if _has_bound(spec) and _tokens(spec.get("name")) & words:
+                        criteria.append(_bound_criterion(bname, spec, None))
+            rows.append({
+                "description": text,
+                "blocks": [str(b.get("name") or b.get("block"))
+                           for b in named],
+                "criteria": criteria,
+                "corners": _corners_of(text),
+                "grading": _grading(criteria),
+                "evidence": [_cite(rel, n2)],
+                "extraction_strategy": _COSIM_STRATEGY_SECTION,
+            })
+    return rows
+
+
+def _derive_rows(lines: List[Tuple[str, int, str]], blocks: List[dict],
+                 scoped_intent: List[List[dict]]) -> Tuple[List[dict], dict]:
+    """R1..R4. Returns (rows, facts the gap pass needs)."""
+    pins = [_block_pins(lines, blk) for blk in blocks]
+    names = [str(blk.get("name") or blk.get("block")) for blk in blocks]
+    outputs = [_digital_output(blk, p) for blk, p in zip(blocks, pins)]
+    r1: List[dict] = []
+    r2: List[dict] = []
+    r3: List[dict] = []
+    r4: List[dict] = []
+    ambiguities: List[dict] = []
+
+    # R1 — an intent clause naming an L5 quantity of a digital-output block.
+    for i, blk in enumerate(blocks):
+        if outputs[i] is None:
+            continue
+        out_spec, out_pin = outputs[i]
+        observe = ([{"block": names[i], "pin": out_pin["pin"]}]
+                   if out_pin else [])
+        for clause in scoped_intent[i]:
+            text = str(clause.get("method") or "")
+            if _polarity.is_denied(text):
+                continue
+            where = _text_line(lines, str(clause.get("clause_of") or text))
+            for phrase in (p.strip() for p in text.split("+")):
+                # A bracketed word QUALIFIES the phrase — it names the block
+                # the clause is about, which association already used — and is
+                # not a quantity the phrase asks for.
+                words = _tokens(_polarity.blank_bracketed(phrase))
+                named = [s for s in _block_specs(blk)
+                         if s.get("name") != out_spec.get("name")
+                         and _tokens(s.get("name")) & words]
+                evidence = [e for e in [where] if e]
+                if named:
+                    for spec in named:
+                        crit = ([_bound_criterion(names[i], spec, None)]
+                                if _has_bound(spec) else [])
+                        line = _spec_line(lines, spec)
+                        r1.append({
+                            "description": phrase,
+                            "blocks": [names[i]],
+                            "stimulus": {"kind": "transient",
+                                         "clause": phrase},
+                            "observe": observe,
+                            "criteria": crit,
+                            "corners": _corners_of(text),
+                            "grading": _grading(crit),
+                            "evidence": evidence + ([line] if line else []),
+                            "rule": "R1",
+                        })
+                    continue
+                if not words & _SWEEP_WORDS:
+                    continue
+                swept = [s for s in _block_specs(blk)
+                         if s.get("name") != out_spec.get("name") and _has_bound(s)
+                         and (_tokens(s.get("note")) & words - _SWEEP_WORDS)]
+                if len(swept) != 1:
+                    continue
+                spec = swept[0]
+                pin = _pin_for(pins[i], spec)
+                ref_words = _tokens(spec.get("note")) - words
+                refs = [s for s in _block_specs(blk)
+                        if s.get("name") != spec.get("name") and s.get("unit") == spec.get("unit")
+                        and _has_bound(s)
+                        and _spec_text_tokens(s) & ref_words]
+                ref = refs[0] if len(refs) == 1 else None
+                stimulus: Dict[str, Any] = {
+                    "kind": "dc_sweep", "clause": phrase,
+                    "quantity": spec.get("name"), "unit": spec.get("unit"),
+                    "declared_range": {k: spec[k] for k in ("min", "max")
+                                       if isinstance(spec.get(k),
+                                                     (int, float))},
+                    "pin": pin["pin"] if pin else None,
+                }
+                line = _spec_line(lines, spec)
+                evidence = evidence + ([line] if line else [])
+                if ref is not None and isinstance(ref.get("target"),
+                                                  (int, float)):
+                    # Expressed against the declared reference, because a
+                    # converter's full scale IS its reference: sweeping the
+                    # raw range would drive past full scale by construction
+                    # wherever the input range exceeds the reference.
+                    stimulus.update({
+                        "normalised_to": ref.get("name"),
+                        "reference_values": [ref["target"]],
+                        "u_grid": list(_SWEEP_GRID),
+                        "u_definition": "(input - low reference) / reference",
+                        "grid_role": "instrument (stimulus sampling, not a bound)",
+                    })
+                    ref_line = _spec_line(lines, ref)
+                    if ref_line:
+                        evidence.append(ref_line)
+                    if (isinstance(spec.get("max"), (int, float))
+                            and spec["max"] > ref["target"]):
+                        ambiguities.append({
+                            "category": "input_ambiguity",
+                            "reason": "range rows not paired",
+                            "detail": (f"{spec.get('name')} declares up to "
+                                       f"{spec.get('max')} "
+                                       f"{spec.get('unit')} while "
+                                       f"{ref.get('name')} declares "
+                                       f"{ref.get('target')}; the sweep is "
+                                       "run over the reference, and "
+                                       "overload is graded only up to it"),
+                            "evidence": [e for e in (line, ref_line) if e],
+                        })
+                crit = [{"structural": k, "block": names[i]}
+                        for k in ("polarity", "monotonic", "in_range")]
+                r1.append({
+                    "description": phrase,
+                    "blocks": [names[i]],
+                    "boundary_pins": ([{"block": names[i], **pin}]
+                                      if pin else []),
+                    "stimulus": stimulus,
+                    "observe": observe,
+                    "criteria": crit,
+                    "corners": _corners_of(text),
+                    "grading": _grading(crit),
+                    "evidence": evidence,
+                    "rule": "R1",
+                })
+
+    # R2 — a spec of one block that names another block: a declared relation.
+    for i, blk in enumerate(blocks):
+        for spec in _block_specs(blk):
+            words = _spec_text_tokens(spec)
+            if _polarity.is_denied(str(spec.get("note") or "")):
+                continue
+            for j, other in enumerate(blocks):
+                if j == i or not (_block_identity_tokens(other) & words):
+                    continue
+                if not _has_bound(spec):
+                    continue
+                lo = spec.get("min", float("-inf"))
+                hi = spec.get("max", float("inf"))
+                partners = []
+                for cand in _block_specs(other):
+                    if cand.get("unit") != spec.get("unit") \
+                            or not _has_bound(cand):
+                        continue
+                    if not (isinstance(cand.get("min"), (int, float))
+                            and isinstance(cand.get("max"), (int, float))):
+                        continue
+                    if cand["max"] < lo or cand["min"] > hi:
+                        continue
+                    shared = len(_spec_text_tokens(cand) & words)
+                    partners.append((shared, cand))
+                if not partners:
+                    continue
+                partners.sort(key=lambda p: -p[0])
+                if len(partners) > 1 and partners[0][0] == partners[1][0]:
+                    continue
+                cand = partners[0][1]
+                pin_a = _pin_for(pins[i], spec)
+                pin_b = _pin_for(pins[j], cand)
+                crit = [_bound_criterion(names[j], cand, pin_b),
+                        _bound_criterion(names[i], spec, pin_a)]
+                evidence = [e for e in (_spec_line(lines, spec),
+                                        _spec_line(lines, cand)) if e]
+                boundary = [x for x in (
+                    {"block": names[j], **pin_b} if pin_b else None,
+                    {"block": names[i], **pin_a} if pin_a else None) if x]
+                r2.append({
+                    "description": (f"{names[j]}.{cand.get('name')} feeds "
+                                    f"{names[i]}.{spec.get('name')}"),
+                    "blocks": [names[j], names[i]],
+                    "boundary_pins": boundary,
+                    "stimulus": {"kind": "transient", "connect": [
+                        {"block": b["block"], "pin": b["pin"]}
+                        for b in boundary]},
+                    "observe": [{"block": b["block"], "pin": b["pin"]}
+                                for b in boundary],
+                    "criteria": crit,
+                    "corners": _corners_of(""),
+                    "grading": _grading(crit),
+                    "evidence": evidence,
+                    "rule": "R2",
+                })
+
+    # R3 — a digital boundary pin with a declared range: a clock rate.
+    for i, blk in enumerate(blocks):
+        for spec in _block_specs(blk):
+            if str(spec.get("unit") or "").lower() not in _FREQUENCY_UNITS:
+                continue
+            points = [spec[k] for k in ("min", "target", "max")
+                      if isinstance(spec.get(k), (int, float))]
+            pin = _pin_for(pins[i], spec)
+            if len(points) < 2 or pin is None:
+                continue
+            observe = ([{"block": names[i], "pin": outputs[i][1]["pin"]}]
+                       if outputs[i] and outputs[i][1] else [])
+            crit = ([{"structural": k, "block": names[i]}
+                     for k in ("logic_level", "in_range")] if observe else [])
+            line = _spec_line(lines, spec)
+            r3.append({
+                "description": (f"{names[i]}.{pin['pin']} at the declared "
+                                f"{spec.get('name')} points"),
+                "blocks": [names[i]],
+                "boundary_pins": [{"block": names[i], **pin}],
+                "stimulus": {"kind": "clock", "pin": pin["pin"],
+                             "quantity": spec.get("name"),
+                             "unit": spec.get("unit"),
+                             "points": _ordered_unique(points)},
+                "observe": observe,
+                "criteria": crit,
+                "corners": _corners_of(""),
+                "grading": _grading(crit),
+                "evidence": [line] if line else [],
+                "rule": "R3",
+            })
+
+    # R4 — declared per-window reset semantics.
+    for i, blk in enumerate(blocks):
+        for spec in _block_specs(blk):
+            words = _spec_text_tokens(spec)
+            if not (words & _RESET_WORDS and words & _WINDOW_WORDS):
+                continue
+            if _polarity.is_denied(str(spec.get("note") or "")):
+                continue
+            observe = ([{"block": names[i], "pin": outputs[i][1]["pin"]}]
+                       if outputs[i] and outputs[i][1] else [])
+            window = _find_spec(blk, _OVERSAMPLING_WORDS)
+            evidence = [e for e in (_spec_line(lines, spec),
+                                    _spec_line(lines, window)
+                                    if window else None) if e]
+            crit = ([{"structural": "window_independent", "block": names[i]}]
+                    if observe else [])
+            r4.append({
+                "description": (f"{names[i]}: consecutive conversion windows "
+                                "with the same input give the same code"),
+                "blocks": [names[i]],
+                "stimulus": {"kind": "held_input", "windows": "consecutive",
+                             "window_length": (
+                                 {"quantity": window.get("name"),
+                                  "value": window.get("target")}
+                                 if window else None)},
+                "observe": observe,
+                "criteria": crit,
+                "corners": _corners_of(""),
+                "grading": _grading(crit),
+                "evidence": evidence,
+                "rule": "R4",
+            })
+    facts = {"pins": dict(zip(names, pins)), "ambiguities": ambiguities,
+             "oversampled": [names[i] for i, b in enumerate(blocks)
+                             if _find_spec(b, _OVERSAMPLING_WORDS)
+                             and outputs[i]]}
+    return r1 + r2 + r3 + r4, facts
+
+
+def _quoted_elsewhere(lines: List[Tuple[str, int, str]], rows: List[dict],
+                      blocks: List[dict]) -> List[dict]:
+    """A spec the rows use, quoted elsewhere in the input with another range."""
+    out: List[dict] = []
+    for blk in blocks:
+        for spec in _block_specs(blk):
+            name = str(spec.get("name") or "")
+            home = _spec_line(lines, spec)
+            if not name or not home or not any(
+                    home in r.get("evidence", []) for r in rows):
+                continue
+            pattern = re.compile(_TABLE_QUOTE_RE.format(name=re.escape(name)))
+            for rel, number, line in lines:
+                if _cite(rel, number) == home:
+                    continue
+                m = pattern.search(line)
+                if not m or not m.group("range").strip():
+                    continue
+                if _norm_raw(m.group("range")) == _norm_raw(spec.get("range_raw")):
+                    continue
+                out.append({
+                    "category": "input_ambiguity",
+                    "reason": "a declared range is quoted differently",
+                    "detail": (f"{name}: {m.group('range').strip()} at "
+                               f"{_cite(rel, number)} vs "
+                               f"{spec.get('range_raw')} at {home}; the "
+                               "rows take the bound from the L5 record"),
+                    "evidence": [_cite(rel, number), home],
+                })
+    return out
+
+
+def _gaps(lines: List[Tuple[str, int, str]], rows: List[dict],
+          facts: dict) -> List[dict]:
+    """The standard co-simulation categories no row covers, each disclosed."""
+    gaps: List[dict] = []
+    crit = [c for r in rows for c in r.get("criteria", [])]
+
+    def first(regex) -> Optional[str]:
+        for rel, number, line in lines:
+            if regex.search(line):
+                return _cite(rel, number)
+        return None
+
+    seq = first(_POWER_UP_RE)
+    gaps.append({"category": "power_up_sequencing",
+                 "reason": ("no derivation rule reads a declared sequence"
+                            if seq else "no power-up sequence is declared"),
+                 "evidence": [seq] if seq else []})
+    if any(r.get("rule") == "R4" for r in rows):
+        declared = [p for pins in facts["pins"].values() for p in pins
+                    if _RESET_PIN_RE.fullmatch(p["pin"])]
+        if not declared:
+            where = None
+            for rel, number, line in lines:
+                if Path(rel).suffix.lower() in _INPUT_TEXT_SUFFIXES[3:] \
+                        and _RESET_PIN_RE.search(line):
+                    where = _cite(rel, number)
+                    break
+            gaps.append({"category": "reset_pin",
+                         "reason": ("per-window reset is declared but no "
+                                    "block boundary declares a reset pin"),
+                         "evidence": [where] if where else []})
+    if not any(c.get("structural") == "polarity" for c in crit):
+        gaps.append({"category": "connectivity_polarity",
+                     "reason": "no row grades sign or polarity at a boundary",
+                     "evidence": []})
+    if facts["oversampled"]:
+        where = first(_DECIMATOR_RE)
+        gaps.append({"category": "decimator",
+                     "reason": ("the input declares no decimator block; the "
+                                "A9 observer is a testbench-side instrument "
+                                "derived from the declared order and "
+                                "oversampling ratio"),
+                     "blocks": facts["oversampled"],
+                     "evidence": [where] if where else []})
+    if not any(_tokens(c.get("quantity")) & _RESOLUTION_WORDS for c in crit):
+        gaps.append({"category": "sinad_sine_fit",
+                     "reason": "no row names a resolution quantity",
+                     "evidence": []})
+    return gaps
+
+
+def _cosim(project: Path, blocks: List[dict], intent: List[dict]) -> dict:
+    """``cosim_scenarios``, ``cosim_scenario_gaps`` and ``cosim_status``."""
+    lines = _input_lines(project)
+    scoped, _unscoped = _intent_by_block(blocks, _clauses(intent))
+    rows = _explicit_section(lines, blocks)
+    status = "DECLARED" if rows else None
+    facts: dict = {"pins": {}, "ambiguities": [], "oversampled": []}
+    if not rows:
+        rows, facts = _derive_rows(lines, blocks, scoped)
+        status = "DERIVED" if rows else "NO_DERIVABLE_SCENARIOS"
+    for number, row in enumerate(rows, 1):
+        row["id"] = f"S{number}"
+        row.setdefault("boundary_pins", [])
+        row.setdefault("observe", [])
+    gaps = (_gaps(lines, rows, facts) + facts["ambiguities"]
+            + _quoted_elsewhere(lines, rows, blocks)) if status != "DECLARED" \
+        else []
+    for row in rows:
+        if "rule" in row:
+            row["extraction_strategy"] = f"derived_{row.pop('rule')}"
+    ordered = [{"id": r["id"], **{k: v for k, v in r.items() if k != "id"}}
+               for r in rows]
+    return {"cosim_scenarios": ordered, "cosim_scenario_gaps": gaps,
+            "cosim_status": status}
 
 
 def run(project: Path, *, ic_class: Optional[str] = None,
@@ -364,6 +1035,7 @@ def run(project: Path, *, ic_class: Optional[str] = None,
 
     intent, l7_path = _l5_intent(project)
     analog_plan = _plan(ic_class, blocks, intent)
+    analog_plan.update(_cosim(project, blocks, intent))
     if not analog_plan["analog"]:
         # REFUSED, not SKIPPED, and the distinction is the whole verdict.
         # Everything above this line is "there was nothing to project": a
@@ -409,6 +1081,8 @@ def run(project: Path, *, ic_class: Optional[str] = None,
         "emitted_count": len(plan["analog"]),
         "blocks_total": len(plan["analog"]),
         "intent_count": len(intent),
+        "cosim_status": plan.get("cosim_status"),
+        "cosim_scenarios": len(plan.get("cosim_scenarios") or []),
         "l7_source": (str(l7_path.relative_to(project))
                       if l7_path is not None else None),
         "doc_written": None if dry_run else str(l22_path),
