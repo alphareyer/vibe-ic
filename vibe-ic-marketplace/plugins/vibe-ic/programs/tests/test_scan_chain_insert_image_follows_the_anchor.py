@@ -103,7 +103,10 @@ def test_a_total_blackout_STILL_ANSWERS_THE_PIN_AND_SAYS_SO(monkeypatch,
             monkeypatch.setattr(_launcher, "run_best_effort", _never_present,
                                 raising=False)
     got = far._resolve_docker_image()
-    assert got == _pin.image_reference(), got
+    # This host holds nothing, so the pinned reference is the CONFIGURED one
+    # (announced below). `image_reference` names only a HELD reference now
+    # (lane migf14) and refuses here; the composition is `configured_reference`.
+    assert got == _pin.configured_reference(), got
     assert got != M.LEGACY_IMAGE, (
         "a blackout answered upstream iic-osic-tools, which carries neither "
         "Fault nor the patched yosys")
@@ -146,7 +149,10 @@ def test_the_resolver_never_substitutes_a_local_tag_for_the_pin(monkeypatch):
     # check.
     monkeypatch.setattr(M, "local_image", lambda *a, **k: None)
     got = far._resolve_docker_image()
-    assert got == _pin.image_reference(), got
+    # This host holds nothing, so the pinned reference is the CONFIGURED one
+    # (announced below). `image_reference` names only a HELD reference now
+    # (lane migf14) and refuses here; the composition is `configured_reference`.
+    assert got == _pin.configured_reference(), got
     assert got != f"{M.IMAGE_REPO}:0.3.13", (
         "a local semver tag was substituted for the pinned digest")
     assert got != M.LEGACY_IMAGE, got
@@ -187,17 +193,19 @@ def test_scan_chain_reports_the_image_the_atpg_module_resolved():
     assert fsci._fatpg.DOCKER_IMAGE == far.DOCKER_IMAGE
 
 
-# ── the EDA image identity is STATED for this module ─────────────────────────
-# These tests drive the ATPG container route with a docker client STUBBED
-# present, and read the image the route starts. That image is resolved at call
-# time now (never at import), so unstated it would be asked of THIS host's real
-# docker: a host fact, and inside the image (no docker) an ImageNotResolvable
-# before any assertion. Stated at `_eda_pin` (the `_stated_eda_image` pattern),
-# every read still goes through the real resolver path.
+# ── the EDA image IDENTITY is stated for this module; what the host HOLDS is not
+# These tests stage what this host holds (a blackout, a stale local tag) and
+# assert what the resolver answers about the PINNED digest. The digest itself is
+# resolved from THIS host's docker unless stated: a host fact, and inside the
+# image (no docker) an ImageNotResolvable before any assertion. Only the digest
+# is stated, so the presence question is still the one each test stages.
 import pytest  # noqa: E402
-from _stated_eda_image import state_the_image as _state_the_image  # noqa: E402
+from _stated_eda_image import STATED_DIGEST as _STATED_DIGEST  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _stated_eda_identity(monkeypatch):
-    _state_the_image(monkeypatch)
+    import _eda_pin
+    monkeypatch.delenv(_eda_pin.IMAGE_REPO_ENV, raising=False)
+    monkeypatch.setattr(_eda_pin, "resolved_image_digest",
+                        lambda env=None, *, allow_pull=False: _STATED_DIGEST)

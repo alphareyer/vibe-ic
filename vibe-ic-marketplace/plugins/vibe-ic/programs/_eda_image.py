@@ -719,14 +719,15 @@ def resolve(env=None, *, repo: str = IMAGE_REPO) -> str:
     # repository composed with it (lane migf14): on a fleet whose configured
     # repository is a mirror, that composition named an image no host holds.
     # Only when NO local name carries the digest is the configured reference
-    # returned, announced, as this function always has for an absent image.
+    # returned; an absent image is announced, as this function always has.
     try:
-        return _pin.image_reference(env)
+        ref = _pin.image_reference(env)
     except _pin.ImageNotHeld:
         ref = _pin.configured_reference(env)
-    _note(f"{_pin.IMAGE_NOT_PRESENT}: {ref} is not on this host; running it "
-          f"will fetch exactly those pinned bytes. Nothing older is "
-          f"substituted.")
+    if not local_image(env=env):
+        _note(f"{_pin.IMAGE_NOT_PRESENT}: {ref} is not on this host; running it "
+              f"will fetch exactly those pinned bytes. Nothing older is "
+              f"substituted.")
     return ref
 
 
