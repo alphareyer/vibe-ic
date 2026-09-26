@@ -492,7 +492,11 @@ class TestSelectionIsUnchanged:
         original suite; this makes it visible.
         """
         import design_one_shot_runner as _runner
-        src = inspect.getsource(_runner.step_dft_lec_chain)
+        # Step 13 lives in `step_lec_equivalence` since F1 split it out so
+        # phase 3 can re-prove alone; the chain calls it. Both are read, so
+        # every assertion below covers at least the source it covered before.
+        src = (inspect.getsource(_runner.step_dft_lec_chain)
+               + inspect.getsource(_runner.step_lec_equivalence))
         # Comments explain the decision; only executable lines are pinned.
         code = "\n".join(re.sub(r"#.*$", "", ln) for ln in src.splitlines())
         assert "_lec_gns.gate_netlist_for_lec(" in code, (

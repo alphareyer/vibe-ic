@@ -83,14 +83,47 @@ specific wording "confirmed ATPG-cut artifact" — the structural-abort FAIL
 still fires from the log.  A FALSE POSITIVE would put a fabricated cause in a
 sign-off report.  So every judgement call in here is biased towards the miss.
 
+The step-13 SUBJECT is the netlist step 15 routes (owner decision F1)
+--------------------------------------------------------------------
+``gate_netlist_for_lec`` above answers "which file did step 12 hand on", and it
+still does, for the cut-artifact diagnosis.  It is no longer the file arm A
+proves.  Measured on spm (run23): arm A proved RTL == ``netlist.v``, the
+technology-GENERIC phase-2 netlist (``$_NAND_``/``$_DFF_P_``), sha256
+``41e72ef1...``, while step 15 routed ``spm_synth.v``, the MAPPED netlist,
+sha256 ``15cd5ac7...``.  A proof about a netlist nobody builds says nothing
+about the chip.
+
+``lec_subject_for_step13`` therefore asks step 15's OWN resolver,
+``phase3_one_shot_runner.pnr_input_netlist``, which netlist it routes: the
+post-DFT netlist when step 11's published scan record authorises it, the mapped
+pre-DFT netlist otherwise.  One implementation, so the proof and the router
+cannot disagree about the file.  The flow YAML declares the same edge: step 13
+and step 15 both read step 12's output.
+
+``proof_subject_binding`` is the check behind the gate's refusal: the sha256
+the proof recorded for its gate side (``lec.json:proof_identity.gate_netlist``)
+must equal the sha256 of the file step 15 reads.
+
 PURE: no subprocess, no Docker, no network.  Filesystem reads only.
 Chip-AGNOSTIC: no design, module, or PDK literal is hard-coded.
 """
 from __future__ import annotations
 
+# --- sibling-import path (vibe-ic#2104) ------------------------------------
+# The step-15 resolver is imported by bare name, which works under
+# `spec_from_file_location` only with this file's directory on sys.path.
+# Spelled with pathlib: this module stays free of `os` (see its purity test).
+import sys as _sys                                                  # noqa: E402
+from pathlib import Path as _Path                                   # noqa: E402
+
+if str(_Path(__file__).resolve().parent) not in _sys.path:
+    _sys.path.insert(0, str(_Path(__file__).resolve().parent))
+# ---------------------------------------------------------------------------
+
+import hashlib
 import re
 from pathlib import Path
-from typing import Optional, Set, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 # ---------------------------------------------------------------------------
 # Exported status / verdict tokens (used by callers and the test suite)
@@ -443,3 +476,130 @@ def port_abort_cause(project: Path,
     if not is_cut:
         return False, ""
     return True, f"{name}: {reason}"
+
+
+# ---------------------------------------------------------------------------
+# Public API — the step-13 subject: the netlist step 15 routes
+# ---------------------------------------------------------------------------
+
+#: `proof_subject_binding` states. Only MATCH lets the proof stand.
+BINDING_MATCH = "MATCH"
+BINDING_STALE = "STALE"                    # proved sha != step-15 input sha
+BINDING_UNBOUND = "UNBOUND"                # the proof recorded no gate sha256
+BINDING_SCAN_UNCONSTRAINED = "SCAN_UNCONSTRAINED"
+BINDING_NO_CONSUMER = "NO_CONSUMER"        # step 15's input does not exist yet
+BINDING_TOP_UNKNOWN = "TOP_UNKNOWN"
+
+
+def pnr_consumed_netlist(project: Path,
+                         top: str) -> Tuple[Optional[Path], str, bool]:
+    """``(path, note, is_scan_inserted)`` of the netlist step 15 routes.
+
+    Asks ``phase3_one_shot_runner.pnr_input_netlist``, the resolver
+    ``step_pnr`` itself calls, and restates none of its rule. ``path`` is None
+    only when that resolver cannot be asked; a returned path may not exist yet
+    (the mapped netlist is written by phase 3's synthesis half).
+    """
+    try:
+        import phase3_one_shot_runner as _p3
+        path, note, is_scan = _p3.pnr_input_netlist(Path(project), top)
+    except Exception as exc:  # noqa: BLE001 — an unanswerable resolver is data
+        return None, (f"step-15 netlist resolver unavailable: "
+                      f"{type(exc).__name__}: {exc}"), False
+    return Path(path), str(note), bool(is_scan)
+
+
+def lec_subject_for_step13(project: Path,
+                           top: str) -> Tuple[str, str, bool]:
+    """``(gate_netlist, note, is_scan_inserted)`` for arm A of step 13.
+
+    ``gate_netlist`` is project-relative when the file lies inside the project,
+    and is ``""`` when step 15's resolver cannot be asked. The caller proves
+    this file or nothing: it never substitutes another netlist when this one
+    is absent.
+    """
+    path, note, is_scan = pnr_consumed_netlist(project, top)
+    if path is None:
+        return "", note, False
+    try:
+        rel = str(path.resolve().relative_to(Path(project).resolve()))
+    except ValueError:
+        rel = str(path)
+    return rel, note, is_scan
+
+
+def _file_sha256(path: Path) -> Optional[str]:
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return "sha256:" + h.hexdigest()
+
+
+def _proof_top(doc: Dict[str, Any]) -> str:
+    identity = doc.get("proof_identity")
+    if isinstance(identity, dict) and isinstance(identity.get("top"), str):
+        return identity["top"]
+    gold = doc.get("gold")
+    if isinstance(gold, str) and gold.strip():
+        return gold.split()[0]
+    return ""
+
+
+def proof_subject_binding(project: Path, doc: Dict[str, Any],
+                          top: str = "") -> Dict[str, Any]:
+    """Did the proof in ``doc`` (a ``reports/lec.json``) prove the netlist
+    step 15 routes?
+
+    Compares the sha256 lec_run bound into ``proof_identity.gate_netlist``
+    with the sha256 of the file ``pnr_consumed_netlist`` names, and, when that
+    file is the scan-inserted netlist, requires the proof to have applied the
+    functional-mode constraint from step 11's own record
+    (``scan_functional_mode.applied``). ``state`` is one of the ``BINDING_*``
+    constants; only ``MATCH`` lets the proof stand for step 15's input.
+    """
+    doc = doc if isinstance(doc, dict) else {}
+    top = top or _proof_top(doc)
+    identity = doc.get("proof_identity")
+    gate_id = identity.get("gate_netlist") if isinstance(identity, dict) else None
+    proved_sha = (gate_id.get("sha256") if isinstance(gate_id, dict) else None)
+    if not (isinstance(proved_sha, str) and proved_sha.startswith("sha256:")
+            and len(proved_sha) > len("sha256:")):
+        proved_sha = None
+    out: Dict[str, Any] = {
+        "top": top or None,
+        "proved_path": (gate_id.get("path") if isinstance(gate_id, dict)
+                        else None) or doc.get("gate"),
+        "proved_sha256": proved_sha,
+        "consumer_path": None, "consumer_sha256": None,
+        "consumer_note": "", "consumer_scan_inserted": False,
+    }
+    if not top:
+        out["state"] = BINDING_TOP_UNKNOWN
+        return out
+    path, note, is_scan = pnr_consumed_netlist(project, top)
+    out["consumer_note"] = note
+    out["consumer_scan_inserted"] = is_scan
+    if path is None or not path.is_file():
+        out["consumer_path"] = str(path) if path is not None else None
+        out["state"] = BINDING_NO_CONSUMER
+        return out
+    try:
+        out["consumer_path"] = str(
+            path.resolve().relative_to(Path(project).resolve()))
+    except ValueError:
+        out["consumer_path"] = str(path)
+    out["consumer_sha256"] = _file_sha256(path)
+    if proved_sha is None:
+        out["state"] = BINDING_UNBOUND
+    elif proved_sha != out["consumer_sha256"]:
+        out["state"] = BINDING_STALE
+    elif is_scan and not (isinstance(doc.get("scan_functional_mode"), dict)
+                          and doc["scan_functional_mode"].get("applied") is True):
+        out["state"] = BINDING_SCAN_UNCONSTRAINED
+    else:
+        out["state"] = BINDING_MATCH
+    return out

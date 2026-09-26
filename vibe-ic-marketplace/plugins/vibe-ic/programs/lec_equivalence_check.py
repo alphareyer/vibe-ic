@@ -107,6 +107,13 @@ except ImportError:  # graceful degradation if the module is absent
         return False, ""
 
 
+from lec_gate_netlist_select import (  # noqa: E402 — F1 subject binding
+    proof_subject_binding as _proof_subject_binding,
+    BINDING_STALE as _B_STALE,
+    BINDING_UNBOUND as _B_UNBOUND,
+    BINDING_SCAN_UNCONSTRAINED as _B_SCAN_UNCONSTRAINED,
+)
+
 GATE = "lec_equivalence_check"
 
 # Relative artefact locations (per flow step13-lec required_outputs).
@@ -488,6 +495,47 @@ def audit(project: Path) -> AuditResult:
         "evidence_source": res.evidence_source,
         "rpt": rpt_info,
     }
+
+    # --- (a0) F1 — THE PROOF MUST BE ABOUT THE NETLIST STEP 15 ROUTES ------
+    # Checked before any verdict, because a verdict about another file is not
+    # a verdict about this chip, whatever it says. Measured on spm (run23):
+    # PASS 66/66 on the generic `netlist.v` while PnR routed `spm_synth.v`.
+    # The comparison is by sha256: lec_run binds the gate side it read into
+    # `proof_identity.gate_netlist`, and step 15's own resolver names the file
+    # it routes. Before that file exists (phase 2, no mapped netlist yet) there
+    # is nothing routed to be stale against, and the substance rules decide.
+    binding = _proof_subject_binding(project, doc)
+    res.summary["subject_binding"] = binding
+    _bind_state = binding.get("state")
+    if _bind_state in (_B_STALE, _B_UNBOUND, _B_SCAN_UNCONSTRAINED):
+        if _bind_state == _B_STALE:
+            rule = "LEC_STALE_PROOF"
+            msg = (f"{LEC_JSON_REL} proved {binding.get('proved_path')} "
+                   f"({binding.get('proved_sha256')}), but step 15 routes "
+                   f"{binding.get('consumer_path')} "
+                   f"({binding.get('consumer_sha256')}). The proof is about "
+                   f"a different netlist and says nothing about the one that "
+                   f"becomes the chip. Re-run step 13 on the netlist step 15 "
+                   f"routes.")
+        elif _bind_state == _B_UNBOUND:
+            rule = "LEC_SUBJECT_UNBOUND"
+            msg = (f"{LEC_JSON_REL} records no sha256 for the gate netlist it "
+                   f"proved (proof_identity.gate_netlist), so it cannot be "
+                   f"shown to be about {binding.get('consumer_path')} "
+                   f"({binding.get('consumer_sha256')}), the netlist step 15 "
+                   f"routes. Re-run step 13 with lec_run.")
+        else:
+            rule = "LEC_SCAN_MODE_UNCONSTRAINED"
+            msg = (f"step 15 routes the scan-inserted "
+                   f"{binding.get('consumer_path')}, and the proof did not "
+                   f"apply the functional-mode constraint from step 11's "
+                   f"record (scan_functional_mode.applied is not true): scan "
+                   f"enable was not tied inactive on the implementation side.")
+        res.findings.append(Finding(rule=rule, severity="ERROR", message=msg,
+                                    file=LEC_JSON_REL))
+        res.passed = False
+        res.inconclusive = False
+        return res
 
     # --- (b0) #2068 — BUDGET EXHAUSTED WITH NO VERDICT: a terminal state of
     # its own, and the one state that is NOT waivable ----------------------
