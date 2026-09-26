@@ -2877,13 +2877,6 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
 #: ``flow_compliance_check._check_program_exit_zero`` against all 12 fixtures
 #: in :data:`FIXTURES`.
 UNREDDENED: Dict[Tuple[str, str], str] = {
-    ("1", "catalog_synth_safe_params_check . --json "
-          "reports/phase2/gates/catalog_synth_safe_params.json"):
-        "DISCLOSED_INCOMPLETE (NOT_APPLICABLE): needs a pulled catalog IP whose "
-        "manifest declares synth_safe_params plus a Yosys elaboration; the "
-        "content FAIL is proven by the calibrated pair "
-        "(instrument_calibration: catalog_synth_safe_params_check::judge) and "
-        "test_t95_mig_front.py, not by a generic broken-RTL fixture",
     ("2", "rom_init_lint phase2/stage1/rtl/*.sv phase2/stage1/rtl/*.v --json "
           "reports/phase2/lint/rom_init_lint.json"):
         "PASS/VACUOUS: needs RTL carrying a Quartus-unsafe ROM initialiser "

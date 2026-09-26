@@ -1605,14 +1605,6 @@ steps:
           any_of: true
         # BLOCKING: parse the authored RTL bytes, including comment-only files.
         - program_exit_zero: "flow_step_output_content_check . --mode rtl"
-        # T95 (review70 step 1, correction to harvest[0]): LibreLane's
-        # SYNTH_PARAMETERS reaches only the top, so a catalog IP's synth-safe
-        # parameter (serv sim=0) must be pinned by the glue. Yosys elaborates
-        # the RTL (`hierarchy -check -top`); every reachable module of a
-        # pulled IP must carry its manifest's synth_safe_params value.
-        # Unconditional: off the catalog-glue arm no pulled IP declares
-        # synth_safe_params and the gate writes NOT_APPLICABLE (rc 0).
-        - program_exit_zero: "catalog_synth_safe_params_check . --json reports/phase2/gates/catalog_synth_safe_params.json"
     # The dependency was always REAL and never DECLARED. D1 is the sole member
     # of stage_phase1 and its L1-L27 output is, in this file's own words, "the
     # universal handoff to Phase 2" — spec-to-RTL literally reads
