@@ -434,8 +434,8 @@ def execute(
         sdc = (R._container_path_to_host(_sdc_m.group(1), container, project)
                if _sdc_m else out_dir / "constraint.sdc")
         cfg_dir = project / "phase3/librelane/21-config"
-        nvr_rpt = cfg_dir / "nvr" / R.ROUTER_DRC_REPORT_NAME
-        nvr_tcl = cfg_dir / "named_violation_reroute.body.tcl"
+        reserved = [i.get("name") for i in (spare_plan or {}).get("instances", [])
+                    if i.get("name")] or None
         try:
             seeds = seed_arms(project) if mode == "dual" else []
             ov = overlay(R, project, sdc, cfg_dir)
@@ -445,10 +445,6 @@ def execute(
             configs = _ll.resolve_step_configs(
                 project, image, str(pdk.name), all_ids, pdk_root=Path(pdk_root),
                 folder="21-config", overlay=ov)
-            R._aa.write_text(nvr_tcl, R._named_violation_reroute_tcl(
-                str(nvr_rpt.resolve()),
-                reserved_instance_names=[i.get("name") for i in (spare_plan or {})
-                                         .get("instances", []) if i.get("name")] or None))
             sta_cfg = json.loads(configs["OpenROAD.STAMidPNR"].read_text())
             corners = list(sta_cfg.get("STA_CORNERS") or [])
             if not corners:
@@ -480,6 +476,13 @@ def execute(
             drt_folder = base / (f"{drt_index + 1:02d}-"
                                  + arm_ids[drt_index].lower().replace(".", "-"))
             design = json.loads(configs[DRT].read_text()).get("DESIGN_NAME")
+            # The runner's one reroute pass, emitted for the report path this
+            # arm's reroute step reads and rewrites.
+            nvr_rpt = (cfg_dir / "nvr" / lane / R.ROUTER_DRC_REPORT_NAME).resolve()
+            nvr_tcl = cfg_dir / "nvr" / lane / "named_violation_reroute.body.tcl"
+            nvr_rpt.parent.mkdir(parents=True, exist_ok=True)
+            R._aa.write_text(nvr_tcl, R._named_violation_reroute_tcl(
+                str(nvr_rpt), reserved_instance_names=reserved))
             steps = []
             for sid in arm_ids:
                 cfg = configs[sid]
@@ -488,8 +491,7 @@ def execute(
                         "VIBEIC_NVR_TCL": (str(nvr_tcl.resolve()),
                                            "phase3_one_shot_runner._named_violation_reroute_tcl"),
                         "VIBEIC_NVR_REPORT_PATH": (
-                            str((cfg_dir / "nvr" / lane / R.ROUTER_DRC_REPORT_NAME).resolve()),
-                            "this arm's working copy of the router's report"),
+                            str(nvr_rpt), "this arm's working copy of the router's report"),
                         "VIBEIC_NVR_DRC_REPORT": (
                             str((drt_folder / f"{design}.drc").resolve()),
                             f"{arm_ids[drt_index]}'s own -output_drc report (its final "
