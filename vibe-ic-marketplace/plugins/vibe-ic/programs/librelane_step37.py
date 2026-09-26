@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json
 from librelane_contract import (Refusal, digest, judge_step, resolve_step_configs,
-                                run_chain, select_arms)
+                                run_chain, select_arms, state_from_direct)
 
 STEPS = ("Magic.StreamOut", "KLayout.StreamOut", "KLayout.XOR",
          "Magic.DRC", "KLayout.DRC", "KLayout.SealRing",
@@ -31,43 +31,19 @@ def _run(project: Path, image: str, pdk_root: Path, pdk: str,
 def _routed_state(project: Path, image: str, pdk_root: Path, pdk: str,
                   config: Path, routed_def: Path, netlist: Path,
                   sdc: Path) -> Path:
-    """Read the admitted DEF with OpenROAD and pin an equivalent ODB view."""
-    root = project / "phase3/librelane/37-config"
-    document = json.loads(config.read_text())
-    tech = document.get("TECH_LEFS") or {}
-    tech_lef = tech.get("nom_*") or next(iter(tech.values()), None)
-    if not tech_lef:
-        raise Refusal("LL_TECH_LEF_MISSING", str(config))
-    lefs = list(dict.fromkeys([tech_lef] + (document.get("CELL_LEFS") or [])
-                              + (document.get("PAD_LEFS") or [])
-                              + (document.get("EXTRA_LEFS") or [])))
+    """Read the admitted DEF with OpenROAD and pin an equivalent ODB view.
+
+    The shared contract bridge does the conversion, with the resolved step
+    config's own LEFs; a missing view refuses by name.
+    """
     for source in (routed_def, netlist, sdc):
         if not source.is_file():
             raise Refusal("LL_ROUTE_VIEW_MISSING", str(source))
-    odb = root / "routed.odb"
-    tcl = root / "routed_to_odb.tcl"
-    tcl.write_text("\n".join([f"read_lef {{{path}}}" for path in lefs]
-                             + [f"read_def {{{routed_def}}}", f"write_db {{{odb}}}"]) + "\n")
-    fingerprint = {"def_sha256": digest(routed_def), "tcl_sha256": digest(tcl),
-                   "image": image}
-    receipt = root / "routed_odb_receipt.json"
-    if not (odb.is_file() and receipt.is_file() and
-            json.loads(receipt.read_text()).get("input") == fingerprint and
-            json.loads(receipt.read_text()).get("odb_sha256") == digest(odb)):
-        odb.unlink(missing_ok=True)
-        cmd = ["docker", "run", "--rm", "--network", "none",
-               "-v", f"{project.resolve()}:{project.resolve()}",
-               "-v", f"{(pdk_root / pdk).resolve()}:/pdk/{pdk}:ro",
-               image, "--skip", "openroad", "-exit", str(tcl)]
-        completed = subprocess.run(cmd, capture_output=True, text=True)
-        (root / "routed_to_odb.log").write_text(completed.stdout + "\n" + completed.stderr)
-        if completed.returncode or not odb.is_file():
-            raise Refusal("LL_ROUTE_ODB_FAILED", str(root / "routed_to_odb.log"))
-        write_json(receipt, {"input": fingerprint, "odb_sha256": digest(odb)})
-    state = root / "state_in.json"
-    write_json(state, {"odb": str(odb), "def": str(routed_def),
-                       "nl": str(netlist), "sdc": str(sdc), "metrics": {}})
-    return state
+    return state_from_direct(
+        project, image, config,
+        {"def": routed_def, "nl": netlist, "sdc": sdc},
+        project / "phase3/librelane/37-config/bridge",
+        mounts=[(pdk_root / pdk, f"/pdk/{pdk}")])
 
 
 def _gds_state(state_path: Path, gds: Path, out: Path) -> Path:

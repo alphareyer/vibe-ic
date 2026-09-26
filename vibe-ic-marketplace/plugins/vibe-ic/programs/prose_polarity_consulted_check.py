@@ -1210,6 +1210,17 @@ _NOT_PROSE: Dict[str, str] = {
         "Generated Verilog named-port connection syntax is parsed from the "
         "runner-owned testbench skeleton. The matched `.name(` token is an HDL "
         "grammar production and Verilog has no prose form that denies it.",
+    "librelane_contract::def_supply_tcl":
+        "A tool-written DEF's SPECIALNETS `- <net> ... + USE POWER|GROUND ;` "
+        "and PINS `- <pin> + NET <net> ... + DIRECTION <dir> ;` productions "
+        "(LibreLane OpenROAD.GeneratePDN / PadRing output). DEF has no form "
+        "that DENIES a net's USE or a pin's NET: an attribute is present in the "
+        "production or it is not, and nothing outside the `;`-terminated "
+        "statement can take it back. Same grammar, same reason as "
+        "`phase3_one_shot_runner::_def_specialnet_iterm_map` (SPECIALNETS) and "
+        "`digital_hardmacro_gen::_specialnet_entries`. It creates only nets the "
+        "DEF itself marks POWER/GROUND and only pins bound to them; a missing "
+        "DIRECTION falls back to INOUT, the DEF default for a supply pin.",
     "phase3_one_shot_runner::_def_specialnet_iterm_map":
         "Routed DEF SPECIALNETS terminal tuples, `- <net> ... ( <inst> <pin> ) "
         "... ;` productions written by the router. DEF has no form that DENIES a "
@@ -1648,8 +1659,10 @@ _NOT_PROSE: Dict[str, str] = {
         'is spellable and was spelled; consulting `_prose_polarity` here '
         'would add a branch that can never fire.',
     'pad_bterm_coincidence_check::def_net_terminals':
-        'DEF `NETS` entries, `- <net> ( <inst> <pin> ) ... ;` productions '
-        'emitted by the router. DEF has no form that denies a connection: a '
+        'DEF `NETS` and `SPECIALNETS` entries, `- <net> ( <inst> <pin> ) ... '
+        ';` productions emitted by the router or by OpenROAD '
+        '`place_io_terminals` (which writes port nets as SPECIAL). DEF has no '
+        'form that denies a connection: a '
         'terminal is listed on the net or it is not. Direct precedent: '
         '`digital_hardmacro_gen::_specialnet_entries` (DEF SPECIALNETS) and '
         '`macro_obs_geometry_intersect_check::parse_via_layers` (DEF VIAS), '
