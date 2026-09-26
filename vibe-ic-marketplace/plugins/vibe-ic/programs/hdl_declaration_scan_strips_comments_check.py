@@ -159,6 +159,11 @@ _SCAN = {"search", "finditer", "findall", "match", "fullmatch", "split", "sub"}
 #: population. Every row must remain a live raw finding and carry an argument.
 _EXEMPT_REASON_MIN = 80
 _NOT_HDL_DECLARATION: Dict[str, str] = {
+    "librelane_prelayout::black_boxes::_BLACK_BOX_RE(sta_log)":
+        "The regex reads OpenSTA's own link diagnostic in a STAPrePNR sta.log, "
+        "'Warning 198: <file> line N, module X not found. Creating black box "
+        "for Y.' The word 'module' is part of the tool message, not a Verilog "
+        "declaration; the log is not HDL and has no comments to strip.",
     "_flow_reason_taxonomy::infer_nonverdict_reason::_BLOCKED_RE(text)":
         "The regex classifies English non-verdict reasons such as 'required "
         "output missing' and 'input docs absent'. Its input/output words are "
