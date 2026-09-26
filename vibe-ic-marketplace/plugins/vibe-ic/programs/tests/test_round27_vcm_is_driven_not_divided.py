@@ -127,7 +127,14 @@ def test_the_compensation_is_derived_not_a_number_that_was_once_right():
     exprs = {e["device"]: e for e in _entry()["device_param_exprs"]}
     assert "c_cmc" in exprs, "the buffer's compensation is hand-written"
     e = exprs["c_cmc"]["expr"]
-    assert "miller_fraction_of_load" in e and "enob" in e and "osr" in e
+    # The oversampling reaches it through `n_eff` (q6-a2-cap-osr: the kT/C
+    # budget and the load ratio are both written in the decode's EFFECTIVE
+    # samples), which A2 derives from the bound `osr` — so it still follows
+    # the declaration, and the product is the quantity it always was.
+    assert "miller_fraction_of_load" in e and "enob" in e and "n_eff" in e
+    lo = m.declared_averaging_env(_entry(), {"osr": 64.0, "order": 2.0})
+    hi = m.declared_averaging_env(_entry(), {"osr": 256.0, "order": 2.0})
+    assert hi["n_eff"] > 3.9 * lo["n_eff"]
 
 
 def test_the_shipped_library_still_holds_its_own_invariants():
