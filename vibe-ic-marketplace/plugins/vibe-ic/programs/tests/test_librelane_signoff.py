@@ -201,6 +201,41 @@ def test_rcx_spefs_reach_the_direct_consumers_bound_by_sha(tmp_path, monkeypatch
     assert sorted(runner._librelane_handed_spefs(receipt)) == ['max', 'nom']
 
 
+def test_a_missing_nominal_corner_names_the_state_it_searched(tmp_path, monkeypatch):
+    """An absence refusal says where it looked: the RCX state_out.json whose
+    SPEF map lacks the nominal corner, and the corners that map does hold."""
+    p, pnr, root = _project(tmp_path)
+    no_nom = {k: v for k, v in RULESETS.items() if not k.startswith('nom')}
+    monkeypatch.setattr(contract.subprocess, 'run', _tool_edge(tmp_path, rulesets=no_nom))
+    result = signoff.run(p, 'img', root, 'gf', routed_def=pnr / 'spm.def', netlist=pnr / 'spm_pnr.v',
+                         sdc=pnr / 'constraint.sdc', extract=True, time=False)
+    extracted = p / 'phase3/stage3/extracted'
+    with pytest.raises(contract.Refusal) as caught:
+        signoff.publish_spefs(result, 'spm', extracted / 'spm.spef', extracted / 'spef_corners',
+                              p / 'reports/phase3/librelane_rcx_handoff.json')
+    assert caught.value.code == 'LL_RCX_NOMINAL_MISSING'
+    assert str(result['rcx'] / 'state_out.json') in str(caught.value)
+    assert "['max_*', 'min_*']" in str(caught.value)
+    assert not (extracted / 'spm.spef').exists()
+
+
+def test_a_corner_absent_from_the_direct_map_names_the_corners_offered(tmp_path, monkeypatch):
+    p, pnr, root = _project(tmp_path)
+    monkeypatch.setattr(contract.subprocess, 'run', _tool_edge(tmp_path))
+    direct = {c: write(p / f'x/spm.{c}.spef', c) for c in ('nom', 'min')}
+    with pytest.raises(contract.Refusal) as caught:
+        signoff.run(p, 'img', root, 'gf', routed_def=pnr / 'spm.def', netlist=pnr / 'spm_pnr.v',
+                    sdc=pnr / 'constraint.sdc', extract=False, time=True, direct_spefs=direct)
+    assert str(caught.value) == ("LL_DIRECT_SPEF_MISSING: max_*: no 'max' entry among the "
+                                 "direct corner SPEFs ['min', 'nom']")
+    # a corner the map names but whose file is gone names that file
+    direct['max'] = p / 'x/spm.max.spef'
+    with pytest.raises(contract.Refusal) as caught:
+        signoff.run(p, 'img', root, 'gf', routed_def=pnr / 'spm.def', netlist=pnr / 'spm_pnr.v',
+                    sdc=pnr / 'constraint.sdc', extract=False, time=True, direct_spefs=direct)
+    assert str(caught.value) == f"LL_DIRECT_SPEF_MISSING: max_*: no file at {direct['max']}"
+
+
 # ----------------------------------------------------------- SPEF census ---
 
 SPEF = '''*SPEF "IEEE 1481-1998"

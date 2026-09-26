@@ -141,8 +141,12 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str, *,
         spef: dict[str, Path] = {}
         for pattern in rulesets:
             source = (direct_spefs or {}).get(rc_corner(pattern))
-            if source is None or not Path(source).is_file():
-                raise Refusal('LL_DIRECT_SPEF_MISSING', f'{pattern}: {source}')
+            if source is None:
+                raise Refusal('LL_DIRECT_SPEF_MISSING',
+                              f'{pattern}: no {rc_corner(pattern)!r} entry among the '
+                              f'direct corner SPEFs {sorted(direct_spefs or {})}')
+            if not Path(source).is_file():
+                raise Refusal('LL_DIRECT_SPEF_MISSING', f'{pattern}: no file at {source}')
             spef[pattern] = Path(source)
         views['spef'] = spef
     state = state_from_direct(project, image, configs[steps[0]], views,
@@ -173,7 +177,12 @@ def publish_spefs(result: dict, top: str, nominal: Path, corner_dir: Path,
         targets[f'spef:{pattern}'] = corner_dir / f'{top}.{name}.spef'
     nominal_pattern = next((p for p in result['spef'] if rc_corner(p) == 'nom'), None)
     if nominal_pattern is None:
-        raise Refusal('LL_RCX_NOMINAL_MISSING', ', '.join(result['spef']))
+        # The corners came from the state the first step of the chain wrote:
+        # RCX's when step 22 ran on the tool, else STAPostPNR's.
+        state_out = (result['rcx'] or result['sta']) / 'state_out.json'
+        raise Refusal('LL_RCX_NOMINAL_MISSING',
+                      f"no 'nom' corner among the SPEF corners "
+                      f"{sorted(result['spef'])} in {state_out}")
     doc = handoff_to_direct(result['rcx'] / 'state_out.json', targets, receipt)
     # The nominal SPEF is the same tool file handed to a second consumer path
     # (one receipt maps a view to one destination).
