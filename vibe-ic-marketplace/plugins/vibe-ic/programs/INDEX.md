@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1347
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1347)
+- **Total programs (excluding helpers / shims):** 1348
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1348)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1338 |
+| `any` | 1339 |
 
 ## Alphabetical listing
 
@@ -66,6 +66,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `analog_a8_before_floorplan_check` | any | — | analog/digital ordering gate. |
 | `analog_a8_hardmacro_emit` | any | — | A8 PRODUCER for an ANALOG block: emit the real hardmacro abstract kit from the block's own signed-off layout. |
 | `analog_a8_hardmacro_gen_check` | any | — | Verifies that the upstream `analog-hardmacro-gen` skill has emitted |
+| `analog_a9_cosim_emit` | any | — | A9 mixed-signal co-simulation PRODUCER — it runs the scenarios L22 declares. |
 | `analog_a9_hw_verify_check` | any | — | A9 deterministic gate (Co-Sim / HW Verify). |
 | `analog_acceptance_tb_gen` | any | — | PRODUCER of executable acceptance checks for the analog `verification_intent` rows Phase 1 declares. |
 | `analog_adc_enob_corner_check` | any | — | R12 system-ENOB per-corner gate (A4). |
@@ -1419,7 +1420,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1338 programs)
+### `any` (1339 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1461,6 +1462,7 @@ _(no programs in this group)_
 - `analog_a8_before_floorplan_check` — analog/digital ordering gate.
 - `analog_a8_hardmacro_emit` — A8 PRODUCER for an ANALOG block: emit the real hardmacro abstract kit from the block's own signed-off layout.
 - `analog_a8_hardmacro_gen_check` — Verifies that the upstream `analog-hardmacro-gen` skill has emitted
+- `analog_a9_cosim_emit` — A9 mixed-signal co-simulation PRODUCER — it runs the scenarios L22 declares.
 - `analog_a9_hw_verify_check` — A9 deterministic gate (Co-Sim / HW Verify).
 - `analog_acceptance_tb_gen` — PRODUCER of executable acceptance checks for the analog `verification_intent` rows Phase 1 declares.
 - `analog_adc_enob_corner_check` — R12 system-ENOB per-corner gate (A4).
