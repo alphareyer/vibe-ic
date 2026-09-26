@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _specrtl_common import rtl_source_files  # noqa: E402
 import instrument_calibration as _calibration  # noqa: E402
+import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
 
 
 # The retired bit-range and port regex gates blocked range errors and
@@ -82,7 +83,8 @@ def _invoke(tool: str, args: list[str], project: Path,
         # Phase 2 needs only the released EDA image's tool binaries. LibreLane
         # CLI capability is neither requested nor assumed here.
         root = str(project.resolve())
-        command = ["docker", "run", "--rm", "--network", "none",
+        command = ["docker", "run", "--rm", *_dmem.docker_memory_flags(),
+                   "--network", "none",
                    "-v", f"{root}:{root}:ro", "--entrypoint", tool,
                    image, *args]
     else:

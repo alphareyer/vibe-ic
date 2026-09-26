@@ -11548,7 +11548,37 @@ def _run_structural_rtl_gates(project: Path,
                         {"skip_kind": "no-backing-program"},
                         reason_class=_reason_taxonomy.EXECUTION_ERROR)))
                 continue
-            if gate_name in class_skips:
+            # A gate with a declared invocation contract (#1968) takes its
+            # applicability from the DESIGN's declarations, never from a class
+            # flag alone. v1.24.86 (1a27f263d) added two class rosters that,
+            # for the first time, reached contracted gates: the half-duplex
+            # roster keys on the class flag only, so for a contracted gate it
+            # does not preempt -- the declaration roster below answers, or the
+            # gate runs. The command-intent roster is double-keyed on L3/L4
+            # POSITIVELY declaring no opcode/register map, so its N/A is a
+            # declaration-derived one and is recorded as such.
+            if (gate_name in class_skips
+                    and gate_name in _STRUCTURAL_GATE_INVOCATION_CONTRACTS):
+                if gate_name in _CLASS_SKIPPABLE_COMMAND_INTENT_GATES:
+                    _pending.append(
+                        ("imm", _p0_gate_record(
+                            gate_name, "SKIP",
+                            "N/A derived from the design declaration: "
+                            "L3/L4 declare no opcodes or register map, and "
+                            "the detected IC class declares "
+                            "command_protocol_applicable=false. "
+                            "A present protocol declaration keeps this gate "
+                            "live.",
+                            {"skip_kind": "declaration-not-present",
+                             "applicability_source":
+                             "L3/L4 no-opcode/no-regmap declaration "
+                             "(_ldocs_record_no_opcodes) and class flag "
+                             "command_protocol_applicable=false",
+                             "invocation_contract":
+                             _STRUCTURAL_GATE_INVOCATION_CONTRACTS[gate_name]},
+                            reason_class=_reason_taxonomy.DESIGN_DECLARED_NA)))
+                    continue
+            elif gate_name in class_skips:
                 _pending.append(
                     ("imm", _p0_gate_record(
                         gate_name, "SKIP", class_skips[gate_name],
