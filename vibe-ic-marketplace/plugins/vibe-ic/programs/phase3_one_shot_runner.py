@@ -59218,8 +59218,10 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     #     DVD (SAIF/VCD + package L·di/dt) is the accuracy tier tracked separately.
     dyn_ir_json = rpt_phase3 / "dynamic_ir.json"
     # Step 24 on LibreLane publishes this file from Vibeic.TransientIR
-    # (the same fork solve, on the tool's SDC+SPEF basis); never both.
-    if (primary_def.is_file() and _ll_selected_mode(project, "24") != "librelane"
+    # (the same fork solve, on the tool's SDC+SPEF basis); never both.  The
+    # switch is read inside the condition so this block stands on its own.
+    if (primary_def.is_file()
+            and __import__("librelane_contract").selected_mode(project, "24") != "librelane"
             and _signoff_regen(dyn_ir_json, primary_def)):
         try:
             # Pass the design's ACTUAL tech/cell LEF + LIBERTY (the runner knows
