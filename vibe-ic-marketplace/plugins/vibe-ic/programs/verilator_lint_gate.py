@@ -48,7 +48,6 @@ from _atomic_artefact import write_json  # noqa: E402
 import instrument_calibration as _calibration  # noqa: E402
 
 GATE = "verilator_lint_gate"
-INSTRUMENT = "verilator_lint_gate::parse_transcript"
 
 BLOCKING_WARNINGS = frozenset({
     "UNDRIVEN", "MULTIDRIVEN", "PROCASSWIRE", "COMBDLY", "LATCH",
@@ -68,7 +67,7 @@ def _sha(path: Path) -> str:
 
 def parse_transcript(text: str) -> dict:
     """Diagnostics and the tool's own error total, from a Verilator log."""
-    _calibration.assert_calibrated(INSTRUMENT)
+    _calibration.assert_calibrated("verilator_lint_gate::parse_transcript")
     diagnostics = []
     exiting: Optional[int] = None
     for raw in text.splitlines():
