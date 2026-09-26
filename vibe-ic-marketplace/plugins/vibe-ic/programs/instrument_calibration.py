@@ -2037,6 +2037,52 @@ _register(Instrument(
 ))
 
 
+def _judge_em_power_basis(log_txt: str) -> Optional[str]:
+    from _ppa import power as P
+    basis = P.em_power_basis(log_txt, sdc="calibration/cal_em_clock_pad.sdc", spef=None,
+                             spef_reason="calibration structure: unrouted",
+                             liberties=[])
+    return "CLOCK_NOT_REACHED" if basis["clock_reaches_network"] is False else None
+
+
+_EM_BASIS_CAL_PROV = (
+    "Real OpenROAD 26Q3-2963-gc73a322d30 (the pinned vibeic-eda 0.3.79, 8HD-4, "
+    "2026-09-27), the report_power the Step-25 EM session prints between its "
+    "EM_POWER_BASIS markers, unedited: calibration/cal_em_clock_pad.v (the "
+    "PDK's gf180mcu_fd_io__in_c input pad driving one clkbuf_16 and two "
+    "dffq_1) linked from the nom tech LEF, the cell LEF, the pad LEF and the "
+    "tt_025C_5v00 cell liberty, calibration/cal_em_clock_pad.sdc (create_clock "
+    "on the pad's PAD port), set_propagated_clock. ")
+
+_register(Instrument(
+    name="_ppa.power::em_power_basis",
+    reads="the Step-25 PSM session log (`reports/phase3/ir_em.log`), its "
+          "report_power between the EM_POWER_BASIS markers",
+    ruling="review70 step 25 (T103)", owner="mig103",
+    why=("PSM turns each instance's power into grid current, so an EM verdict "
+         "is only as true as that power. With the SDC but without the IO pad's "
+         "liberty, the clock stops at the pad and never reaches its tree: spm "
+         "read 1.19 mW instead of 21.0 mW, an EM PASS that measured nothing. "
+         "The pair is the same structure with and without the pad's liberty. "
+         "The one line sits in the Step-25 producer, its only caller: the "
+         "wired set is derived from programs/*.py, and MEASURED on this tree "
+         "a call inside `_ppa/power.py` read as 'calibrated but not wired'."),
+    calls_at="phase3_one_shot_runner::_emit_ir_em_reports",
+    judge=_judge_em_power_basis,
+    positive=Sample(
+        provenance=(_EM_BASIS_CAL_PROV + "WITHOUT the pad's tt liberty: Clock "
+                    "group 0.00e+00 W, total 9.54e-06 W. "
+                    "calibration/em_power_basis_clock_unreached_positive.log"),
+        artefact=_read("em_power_basis_clock_unreached_positive.log")),
+    expect="CLOCK_NOT_REACHED",
+    negative=Sample(
+        provenance=(_EM_BASIS_CAL_PROV + "WITH gf180mcu_fd_io__tt_025C_5v00: "
+                    "Clock group 1.52e-04 W, total 5.11e-04 W. "
+                    "calibration/em_power_basis_clock_reached_negative.log"),
+        artefact=_read("em_power_basis_clock_reached_negative.log")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════

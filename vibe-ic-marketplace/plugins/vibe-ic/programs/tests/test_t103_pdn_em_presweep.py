@@ -450,6 +450,7 @@ def test_em_currents_are_solved_on_the_designs_clock_spef_and_io_liberty(tmp_pat
     assert basis["power_W"]["total"] == pytest.approx(2.10e-2)
     assert basis["power_W"]["clock"] == pytest.approx(1.43e-2)
     assert basis["clock_reaches_network"] is True
+    assert basis["calibration"] == "CALIBRATED"
     assert "PSM default" in doc["source_model"]
 
 
@@ -520,3 +521,15 @@ def test_emit_config_hands_the_chosen_straps_to_generate_pdn(tmp_path):
     (p / S.REPORT_REL).unlink()
     out = contract.emit_config(p, 'processA', p / 'phase3/librelane/config.json')
     assert "PDN_VWIDTH" not in out
+
+
+def test_the_basis_reader_is_calibrated_on_a_pdk_structure_and_withholds_when_not():
+    import instrument_calibration as C
+    cal = C.check("_ppa.power::em_power_basis")
+    assert cal.state == C.CALIBRATED, cal.detail
+    assert (cal.positive_outcome, cal.negative_outcome) == ("CLOCK_NOT_REACHED", None)
+    held = R._ppa_power.em_power_basis(
+        (C.FIXTURES / "em_power_basis_clock_unreached_positive.log").read_text(),
+        sdc="x.sdc", spef=None, spef_reason=None, liberties=[], uncalibrated="pair broken")
+    assert held["clock_reaches_network"] is None
+    assert held["calibration"] == "uncalibrated: pair broken"

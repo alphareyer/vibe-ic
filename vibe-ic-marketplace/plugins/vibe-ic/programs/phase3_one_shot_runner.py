@@ -67291,6 +67291,11 @@ def _emit_ir_em_reports(project: Path, top: str, pdk: PdkConfig,
     if _pb_spef_why is None:
         _pb_tcl += (f"if {{[catch {{read_spef {_to_container_path(str(_pb_spef), container)}}} _e]}} "
                     f"{{ puts \"EM_BASIS_SPEF_UNREAD: $_e\" }}\n")
+    try:
+        _instrument_calibration.assert_calibrated("_ppa.power::em_power_basis")
+        _pb_uncal = None
+    except _instrument_calibration.Uncalibrated as _pb_exc:
+        _pb_uncal = str(_pb_exc)
     _pb_tcl += ('puts "=== EM_POWER_BASIS ==="\n'
                 'if {[catch {report_power} _e]} { puts "EM_BASIS_POWER_UNREPORTED: $_e" }\n'
                 'puts "=== EM_POWER_BASIS_END ==="\n')
@@ -67603,7 +67608,8 @@ catch {{set_wire_rc -clock -layer {mp}5}}
             "power_basis": _ppa_power.em_power_basis(
                 log, sdc=(str(_pb_sdc.relative_to(project)) if _pb_sdc.is_file() else None),
                 spef=(None if _pb_spef_why else str(_pb_spef.relative_to(project))),
-                spef_reason=_pb_spef_why, liberties=[liberty_c, *_pb_libs]),
+                spef_reason=_pb_spef_why, liberties=[liberty_c, *_pb_libs],
+                uncalibrated=_pb_uncal),
             "segments_analysed": seg_count,
             "max_segment_current_A": max_cur,
             "source": str(em_rpt.relative_to(project)),
