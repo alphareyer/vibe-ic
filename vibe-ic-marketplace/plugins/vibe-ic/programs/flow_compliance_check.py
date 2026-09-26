@@ -11025,8 +11025,9 @@ def _p0_umbrella_status(executed: Optional[bool],
     # NOT_MEASURED, and the thing a reader needed all along is in the second
     # element.
     if executed is None:
-        # A completed Step 1 promises RTL. Before that producer completes,
-        # P0 has no structural subject; the caller supplies that distinction.
+        # #447 — no checker executed, so this is never a PASS. A completed
+        # Step 1 promises RTL. Before that producer completes, P0 has no
+        # structural subject; the caller supplies that distinction.
         if not rtl_promised:
             return (_T.Verdict.NOT_APPLICABLE.value,
                     _reason_taxonomy.ASKED_BEFORE_PRODUCER)

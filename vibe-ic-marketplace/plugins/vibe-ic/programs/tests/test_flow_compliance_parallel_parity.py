@@ -88,6 +88,9 @@ def _run_json(proj: Path, workers: str, out: Path) -> None:
     import os
     env = dict(os.environ)
     env["VIBE_IC_COMPLIANCE_WORKERS"] = workers
+    # Each run is its own top-level pass and mints its own identity; an id
+    # inherited from whatever launched pytest would make the two runs share one.
+    env.pop("VIBEIC_FCC_INVOCATION", None)
     subprocess.run(
         [sys.executable, str(PROG), str(proj), "--json", str(out)],
         capture_output=True, text=True, env=env,
@@ -114,11 +117,19 @@ def test_serial_and_parallel_reports_are_identical(tmp_path):
 
     assert ra.exists() and rb.exists(), "both runs must emit a report"
 
-    # Normalise the only legitimate difference — the project path basename —
-    # then require byte-for-byte equality of the report (verdict + per-step
-    # status + ordering all pinned).
-    ta = ra.read_text().replace("proj_A", "proj_X")
-    tb = rb.read_text().replace("proj_B", "proj_X")
+    # Normalise the two legitimate differences, then require byte-for-byte
+    # equality of the report (verdict + per-step status + ordering all pinned):
+    #   * the project path basename;
+    #   * the report's `invocation` -- the authorship id (pid + ms) a top-level
+    #     pass mints for itself (R-0915-150 / v1.23.86) and later reads back to
+    #     decide whether a receipt is its own. It is identity, not evaluation, so
+    #     two processes MUST differ on it; that is asserted, not ignored.
+    ia = json.loads(ra.read_text()).get("invocation")
+    ib = json.loads(rb.read_text()).get("invocation")
+    assert ia and ib and ia != ib, (
+        "each pass must stamp its own invocation id", ia, ib)
+    ta = ra.read_text().replace("proj_A", "proj_X").replace(ia, "INVOCATION")
+    tb = rb.read_text().replace("proj_B", "proj_X").replace(ib, "INVOCATION")
     assert ta == tb, (
         "parallel gate evaluation changed the compliance report — "
         "concurrency must be verdict-safe and order-preserving"
