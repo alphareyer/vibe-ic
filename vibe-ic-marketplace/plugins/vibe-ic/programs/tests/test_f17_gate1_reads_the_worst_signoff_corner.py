@@ -210,14 +210,25 @@ def test_the_direct_deck_writes_the_record_only_when_step_23_is_direct():
     """The direct write of `achievable_fmax.json` sits under
     `_ll_m23 == "direct"`, and the tool-arm producer is called when it is not."""
     tree = _step23_source()
-    guarded_write = called = False
+    guarded_write = False
     for node in ast.walk(tree):
         if isinstance(node, ast.If):
             test = ast.unparse(node.test)
             body = ast.unparse(ast.Module(body=node.body, type_ignores=[]))
             if test == "_ll_m23 == 'direct'" and 'achievable_fmax.json' in body:
                 guarded_write = True
-            if "_ll_m23 != 'direct'" in test and '_achievable_fmax_from_tool_arm(' in body:
-                called = True
     assert guarded_write, 'the direct deck writes achievable_fmax.json in every mode'
-    assert called, 'no call records the reached period from the tool arm'
+    # The tool-arm producer runs, in every non-direct mode, AFTER STAPostPNR's
+    # record is written (the reader binds to that record).
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        tops = [(ast.unparse(n.test), ast.unparse(ast.Module(body=n.body, type_ignores=[])))
+                for n in fn.body if isinstance(n, ast.If)]
+        record = [i for i, (_t, b) in enumerate(tops) if '_librelane_signoff_record(' in b]
+        fmax = [i for i, (t, b) in enumerate(tops) if '_achievable_fmax_from_tool_arm(' in b]
+        if record and fmax:
+            assert tops[fmax[0]][0] == "primary_def.is_file() and _ll_m23 != 'direct'", tops[fmax[0]]
+            assert fmax[0] > record[0]
+            return
+    pytest.fail('no call records the reached period from the tool arm')
