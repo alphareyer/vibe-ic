@@ -201,6 +201,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from collections import Counter
@@ -2678,7 +2679,22 @@ def test_audit_created_evidence_is_excluded_by_default_and_preexisting_passes():
     checked = 0
     paired_done_claims = 0
     untouched_graded = 0
-    for step in partial:
+    # ONE CHECKPOINT PER STEP WHOSE AUDITS HAVE ALL FINISHED. Each step runs the
+    # real `check_step` up to four times (pre-existing, default, pass 2,
+    # explicit False), ~19 steps x 4 gate launches in all -- MEASURED 53.6 s
+    # alone and 63.3 s at load 15 on 8HD-8, with no pytest transition inside
+    # it. The nested census run (`test_flow_matrix_coverage.
+    # _run_one_module_outcome`) supervises this module with a 60 s window that
+    # only semantic progress renews, so this case was killed as STALLED while
+    # it was working, and the whole census came back NORECORD. The population
+    # is frozen before the loop, so the total is finite. Step N-1 is credited
+    # when step N begins (every `continue` below ends a step), the last one
+    # after the loop, and an exception leaves the loop before any credit: a
+    # step stuck inside one audit publishes nothing and is still a stall.
+    publish = G._stride_publisher(
+        "d7-audit-created-partial-steps", len(partial), stride=1)
+    for begun, step in enumerate(partial, start=1):
+        publish(begun - 1)
         sid = step["id"]
         outs = list(step["required_outputs"])
         targets = FCC._gate_json_targets(step)
@@ -2876,6 +2892,7 @@ def test_audit_created_evidence_is_excluded_by_default_and_preexisting_passes():
                 )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+    publish(len(partial))
     assert checked, (
         "no partial step's gate wrote its declared `--json` target on the "
         "synthesized fixture, so the default refusal was not exercised — "
@@ -2902,6 +2919,77 @@ def test_audit_created_evidence_is_excluded_by_default_and_preexisting_passes():
         "untouched, so the not-over-broad direction was never graded — every "
         "assertion in that arm passed on an empty population"
     )
+
+
+#: How many real `partial` steps the progress contract below grades. Three is
+#: the population's head in flow order -- enough for a first, a middle and a
+#: last checkpoint, at a few seconds instead of the full case's ~60.
+_PROGRESS_CONTRACT_STEPS = 3
+
+
+def test_the_partial_step_audit_reports_progress_per_finished_step(
+        monkeypatch):
+    """The silence inside the case is ONE step's audits, never the population's.
+
+    `test_audit_created_evidence_is_excluded_by_default_and_preexisting_passes`
+    runs the real `check_step` up to four times per `partial` step, and the
+    nested census run (`test_flow_matrix_coverage._run_one_module_outcome`)
+    supervises this module with a 60 s window that only semantic progress
+    renews. MEASURED on v1.25.11: the case was 53.6 s alone and 63.3 s at load
+    15, silent throughout, so the census run was killed WATCHDOG_STALLED on a
+    case that was working and `test_flow_matrix_census_freshness` /
+    `test_flow_matrix_coverage` reported NORECORD instead of a verdict.
+
+    Graded here on the case itself, over the real head of `partial` and the
+    real `check_step`: every step publishes exactly one checkpoint, in order,
+    over a finite total, and no checkpoint is preceded by more than one step's
+    audits. Only the last step's credit is read after the loop, so an audit
+    that never returns still publishes nothing.
+    """
+    _all_self, partial = _steps_by_self_produced_share()
+    head = partial[:_PROGRESS_CONTRACT_STEPS]
+    assert len(head) == _PROGRESS_CONTRACT_STEPS, (
+        f"the flow has {len(partial)} partial step(s); the contract needs "
+        f"{_PROGRESS_CONTRACT_STEPS} to observe a first, middle and last "
+        f"checkpoint")
+    scope = "d7-audit-created-partial-steps"
+    events: List[Tuple[Any, ...]] = []
+    real_check_step = FCC.check_step
+
+    def counted_check_step(*args, **kwargs):
+        events.append(("audit",))
+        return real_check_step(*args, **kwargs)
+
+    def recorded(scope_, completed, total):
+        events.append(("checkpoint", scope_, completed, total))
+
+    monkeypatch.setattr(
+        sys.modules[__name__], "_steps_by_self_produced_share",
+        lambda: ([], head))
+    monkeypatch.setattr(FCC, "check_step", counted_check_step)
+    monkeypatch.setattr(G, "_publish_ast_index_progress", recorded)
+
+    test_audit_created_evidence_is_excluded_by_default_and_preexisting_passes()
+
+    checkpoints = [e[1:] for e in events if e[0] == "checkpoint"]
+    assert checkpoints == [(scope, n, len(head))
+                           for n in range(1, len(head) + 1)], (
+        f"expected one checkpoint per finished step over a total of "
+        f"{len(head)}, got {checkpoints}. Without them the case is silent for "
+        f"the whole population and the nested census run kills it as stalled.")
+    audits_since = 0
+    for event in events:
+        if event[0] == "audit":
+            audits_since += 1
+            continue
+        assert 1 <= audits_since <= 4, (
+            f"checkpoint {event[2]} was preceded by {audits_since} audit(s); "
+            f"one step runs at most four, so a larger silence spans more than "
+            f"one step's work and a checkpoint of 0 audits credits nothing")
+        audits_since = 0
+    assert audits_since == 0, (
+        f"{audits_since} audit(s) ran after the last checkpoint; the final "
+        f"step's work was never credited")
 
 
 # ──────────────────────────────────────────────────────────────────────
