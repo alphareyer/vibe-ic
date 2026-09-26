@@ -16745,11 +16745,21 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
             project, image, config_dir / "synthesis_config.json",
             config_dir / "synthesis_resolved.json", mounts=mounts,
             pdk_root=pdk_root_guest)
+        # Step 14 (synthesis handoff): LibreLane's own netlist checkers run
+        # right behind the synthesis step, as in its Chip flow.
+        checker_steps = []
+        for step_id in ("Checker.YosysUnmappedCells", "Checker.YosysSynthChecks",
+                        "Checker.NetlistAssignStatements"):
+            raw = config_dir / (step_id.lower().replace(".", "_") + "_config.json")
+            _ll.write_json(raw, {**config, "meta": {"step": step_id}})
+            checker_steps.append((step_id, _ll.resolve_step_config(
+                project, image, raw, raw.with_name(raw.stem + "_resolved.json"),
+                mounts=mounts, pdk_root=pdk_root_guest), state_in))
         folders = _ll.run_chain(project, image, [
             ("Yosys.JsonHeader", header_config, state_in),
-            ("Yosys.Synthesis", synthesis_config, state_in)],
+            ("Yosys.Synthesis", synthesis_config, state_in)] + checker_steps,
             mounts=mounts, pdk_root=pdk_root_guest)
-        folder = folders[-1]
+        folder = folders[1]
         state = json.loads((folder / "state_out.json").read_text())
         source = Path(state.get("nl") or "")
         stat = folder / "reports/stat.json"
@@ -16812,11 +16822,19 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
             capture_output=True, text=True)
         if provenance_gate.returncode:
             raise _ll.Refusal("LL_PROVENANCE_FAILED", provenance_gate.stdout[-500:])
+        handoff_gate = subprocess.run(
+            [sys.executable, str(PROGRAMS_DIR / "synth_handoff_netlist_check.py"),
+             "--netlist", str(source), "--resolved", str(folder / "config.json"),
+             "--json", str(folder / "handoff_netlist_gate.json")],
+            capture_output=True, text=True)
+        if handoff_gate.returncode:
+            raise _ll.Refusal("LL_HANDOFF_NETLIST_FAILED", handoff_gate.stdout[-500:])
         return StepResult("synth", "PASS", time.time() - t0,
                           f"LibreLane Yosys.Synthesis: {netlist.name}; "
                           f"area gate rc={gate.returncode}; "
                           f"pdk gate rc={pdk_gate.returncode}; "
-                          "netlist/provenance gates rc=0",
+                          "netlist/provenance/handoff gates rc=0; "
+                          "LibreLane netlist checkers ran",
                           [str(netlist), str(stat), str(stats), str(folder / "state_out.json")])
     except (_ll.Refusal, OSError, ValueError) as exc:
         return StepResult("synth", "FAIL", time.time() - t0, str(exc))

@@ -73,6 +73,33 @@ def _dff_instance_count(netlist_text: str) -> int:
     return sum(1 for _ in _DFF_INST_RE.finditer(netlist_text or ""))
 
 
+def _missing_dft_ports(project: Path, netlist_text: str) -> list:
+    """DFT ports the published scan chain declares, absent from the netlist.
+
+    Failure mode 4 (T92 step 12 harvest): a netlist can keep its flops and
+    still lose the chain's access ports. The names are the ones the scan
+    producer published (`functional_mode_tieoff` keys and `scan_out_port` in
+    reports/phase2/dft/scan_chain.json), never sniffed. Unpublished or absent
+    metadata names no port, so nothing is asserted.
+    """
+    import json as _json
+    import re as _re
+    meta_path = project / "reports" / "phase2" / "dft" / "scan_chain.json"
+    try:
+        meta = _json.loads(meta_path.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(meta, dict) or not meta.get("published"):
+        return []
+    names = list((meta.get("functional_mode_tieoff") or {}).keys())
+    if isinstance(meta.get("scan_out_port"), str):
+        names.append(meta["scan_out_port"])
+    declared = set()
+    for m in _re.finditer(r"\b(?:input|output|inout)\b([^;]*);", netlist_text):
+        declared.update(_re.findall(r"\\?([A-Za-z_][\w$]*)", m.group(1)))
+    return sorted(n for n in names if n not in declared)
+
+
 def assess(project: Path) -> dict:
     post_dft = project / "phase2" / "stage2" / "synth" / "post_dft_netlist.v"
     pre_dft = project / "phase2" / "stage2" / "synth" / "netlist.v"
@@ -108,6 +135,17 @@ def assess(project: Path) -> dict:
                            f"DFF-family cell(s) (scan insertion ran), but "
                            f"post_dft_netlist.v instantiates 0 — the scan "
                            f"chain did not survive post-DFT optimization"),
+                "scan_netlist_dff_count": scan_dffs,
+                "post_dft_netlist_dff_count": post_dffs}
+
+    missing_ports = _missing_dft_ports(project, post_text)
+    if missing_ports:
+        return {"verdict": "FAIL", "rc": 1,
+                "reason": (f"reports/phase2/dft/scan_chain.json publishes DFT "
+                           f"port(s) {missing_ports} that post_dft_netlist.v no "
+                           f"longer declares — the chain lost its access "
+                           f"ports during post-DFT optimization"),
+                "missing_dft_ports": missing_ports,
                 "scan_netlist_dff_count": scan_dffs,
                 "post_dft_netlist_dff_count": post_dffs}
 

@@ -1546,6 +1546,36 @@ _register(Instrument(
 ))
 
 
+def _judge_handoff_constants(netlist: str) -> Optional[str]:
+    import synth_handoff_netlist_check as H
+    return "CONSTANT_NOT_TIED" if H.constant_connections(netlist) else None
+
+
+_register(Instrument(
+    name="synth_handoff_netlist_check::constant_connections",
+    reads="the Yosys write_verilog handoff netlist (step 14)",
+    ruling="T92 step 14", owner="mig-sdcsta",
+    why=("A constant left as a literal instead of a tie cell becomes an "
+         "OpenROAD zero_/one_ net and fails detailed route (DRT-0305). The "
+         "pair is one RTL synthesised with and without hilomap."),
+    judge=_judge_handoff_constants,
+    positive=Sample(
+        provenance=("Real Yosys 0.69+ 4d572059c (vibeic-eda 0.3.77, 8hd-3, "
+                    "2026-09-26): `synth -flatten; dfflibmap; abc -liberty "
+                    "<gf180mcu tt lib>; opt_clean -purge; write_verilog "
+                    "-noattr` of calibration/cal_const_rtl.v, NO hilomap. "
+                    "Unedited: `assign lo = 1'h0; assign hi = 1'h1;`. "
+                    "calibration/synth_const_no_hilomap_positive.v"),
+        artefact=_read("synth_const_no_hilomap_positive.v")),
+    expect="CONSTANT_NOT_TIED",
+    negative=Sample(
+        provenance=("Same RTL through LibreLane 3.1.0.dev1 Yosys.Synthesis in "
+                    "the same image (tieh/tiel placed). Unedited netlist. "
+                    "calibration/synth_const_tied_negative.v"),
+        artefact=_read("synth_const_tied_negative.v")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════
