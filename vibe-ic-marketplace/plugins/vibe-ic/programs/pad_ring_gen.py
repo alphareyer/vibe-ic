@@ -1038,15 +1038,6 @@ def _emit_def(die: PR.Def, pads: List[Dict[str, Any]],
 LL_PADRING_HANDOFF_REL = "reports/phase3/librelane_padring_handoff.json"
 
 
-def _sha256(path: Path) -> str:
-    import hashlib  # noqa: PLC0415
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def librelane_placed_ring_report(project: Path, state_path: Path,
                                  lib: "PR.IoLibrary") -> Dict[str, Any]:
     """Step 15.5ic's report for the ring LibreLane's `OpenROAD.PadRing` PLACED.
@@ -1056,7 +1047,7 @@ def librelane_placed_ring_report(project: Path, state_path: Path,
     `reports/phase3/padring.json`: the population the ring gate audits and
     `step_pad_ring_final_evidence` carries to the routed DEF and the GDS.
 
-    Every fact comes from the tool's own output, bound by sha256 to the receipt
+    Every fact comes from the tool's own output, bound by content digest to the receipt
     the handoff wrote: the State file is the one the receipt names, its DEF is
     the receipt's source, and `padring.def` is still exactly those bytes. The
     ring is then described from that DEF, the declared assignment and the PDK
@@ -1065,6 +1056,8 @@ def librelane_placed_ring_report(project: Path, state_path: Path,
     named code; nothing is copied from another arm and nothing is declared.
     """
     from pad_ring_check import _librelane_report  # noqa: PLC0415
+    # the digest the handoff wrote its receipt with, so both sides agree
+    from librelane_contract import digest as _digest  # noqa: PLC0415
     receipt_path = project / LL_PADRING_HANDOFF_REL
     try:
         receipt = json.loads(receipt_path.read_text())
@@ -1079,8 +1072,8 @@ def librelane_placed_ring_report(project: Path, state_path: Path,
         raise ValueError(f"PADRING_LL_DEF_MISSING: {PR.PADRING_DEF_REL} present="
                          f"{padring.is_file()}, State DEF {tool_def} present="
                          f"{tool_def.is_file()}")
-    got = {"state": _sha256(state_path), "tool_def": _sha256(tool_def),
-           "padring_def": _sha256(padring)}
+    got = {"state": _digest(state_path), "tool_def": _digest(tool_def),
+           "padring_def": _digest(padring)}
     want = {"state": receipt.get("state_sha256"),
             "tool_def": view.get("source_sha256"),
             "padring_def": view.get("dest_sha256")}
@@ -1097,13 +1090,13 @@ def librelane_placed_ring_report(project: Path, state_path: Path,
         "reason": (f"described the ring OpenROAD.PadRing placed "
                    f"({len(report['pads'])} pad(s), {len(report['corners'])} "
                    f"corner(s), {report['fillers_placed']} filler(s)) from "
-                   f"{PR.PADRING_DEF_REL}, bound by sha256 to "
+                   f"{PR.PADRING_DEF_REL}, bound by content digest to "
                    f"{LL_PADRING_HANDOFF_REL}; this program placed nothing"),
         "padring_def": PR.PADRING_DEF_REL,
         "inputs": {"floorplan_def": None, "pad_assignment": PR.ASSIGNMENT_REL},
         "tool_evidence": {
             "receipt": LL_PADRING_HANDOFF_REL,
-            "receipt_sha256": _sha256(receipt_path),
+            "receipt_sha256": _digest(receipt_path),
             "state": (str(state_path.relative_to(project))
                       if state_path.is_relative_to(project) else str(state_path)),
             "state_sha256": got["state"],
