@@ -24,7 +24,17 @@ prr = importlib.import_module('librelane_postroute_repair')
 closure = importlib.import_module('_ppa.closure')
 contract = importlib.import_module('librelane_contract')
 
+from _stated_eda_image import state_the_image  # noqa: E402
+
 STEP_DIR = PROGRAMS / 'librelane_plugins' / 'librelane_plugin_vibeic'
+
+
+@pytest.fixture(autouse=True)
+def _stated_image(monkeypatch):
+    # the identity is stated, never asked of this host (no docker in the image)
+    state_the_image(monkeypatch)
+    for name in ('VIBEIC_LIBRELANE_IMAGE', 'VIBEIC_LIBRELANE_PDK_ROOT'):
+        monkeypatch.delenv(name, raising=False)
 REGISTRY = PLUGIN / 'config' / 'ppa_actuator_registry.yaml'
 CORNERS = ['nom_tt_025C_5v00', 'nom_ss_125C_4v50', 'nom_ff_n40C_5v50']
 
@@ -519,7 +529,9 @@ def test_the_switch_selects_step_32_and_refuses_dual(tmp_path):
     put(tmp_path / 'phase3/librelane_switch.json', {'steps': {'32': 'librelane'}})
     assert runner._librelane_postroute_repair_mode(tmp_path) == 'librelane'
     assert prr.refusal('librelane') is None
-    assert prr.refusal('dual').startswith('LL_PRR_DUAL_UNSUPPORTED')
+    # dual needs step 21 on LibreLane: its pre-DRT arm is that chain's own
+    assert prr.refusal('dual').startswith('LL_PRR_DUAL_NEEDS_LL21')
+    assert prr.refusal('dual', 'librelane') is None and prr.refusal('dual', 'dual') is None
 
 
 def _deck_kwargs(tmp_path, monkeypatch, switch):
@@ -617,3 +629,171 @@ def test_the_main_flow_replaces_the_direct_repair_producers_only_when_selected()
     assert 'if _chain_ok and _prr_on_librelane:' in block
     assert block.index('step_postroute_repair_librelane') < block.index('step_signoff_spef_repair')
     assert block.count('if _chain_ok and not _prr_on_librelane:') == 2
+
+
+# --------------------------------------------- r2: inside the LL21 chain, dual ---
+
+def _chain_setup(tmp_path, monkeypatch, scenario):
+    """`run_in_chain` with the real closure (subprocess shim), the real
+    registry and only the docker runs faked."""
+    project = tmp_path / 'proj'
+    lef = write(tmp_path / 'cells.lef', LEF)
+    put(tmp_path / 'scenario.json', scenario)
+    shim = tmp_path / 'shim'
+    write(shim / 'librelane_postroute_repair.py', SHIM)
+    monkeypatch.setenv('PRR_REAL_PROGRAMS', str(PROGRAMS))
+    monkeypatch.setenv('PRR_SCENARIO', str(tmp_path / 'scenario.json'))
+    ns = {}
+    exec(compile(SHIM.split('ll.run_chain = run_chain')[0].replace(
+        'sys.path.insert(0, os.environ["PRR_REAL_PROGRAMS"])', ''), 'shim', 'exec'), ns)
+    monkeypatch.setattr(contract, 'run_chain', ns['run_chain'])
+    monkeypatch.setattr(prr, 'fork_capability',
+                        lambda image, docker='docker': {'capable': True, 'image': image})
+
+    def configs(project_, image, pdk, ids, *, pdk_root, folder, overlay, docker):
+        root = project_ / 'phase3/librelane' / folder
+        return {i: put(root / f'{i}.json', {'meta': {'step': i}, 'CELL_LEFS': [str(lef)],
+                                            'STA_CORNERS': CORNERS}) for i in ids}
+    monkeypatch.setattr(contract, 'resolve_step_configs', configs)
+    monkeypatch.setattr(contract, 'state_from_direct',
+                        lambda *a, **k: pytest.fail('inside the chain nothing is bridged'))
+    sdc = write(project / 'phase3/stage3/pnr/constraint.sdc', '')
+    route = put(project / 'phase3/librelane/21-route/13-fill/state_out.json',
+                {'odb': 'r.odb', 'def': 'r.def'})
+    return project, shim, sdc, route
+
+
+def _base(setup, hold, antenna=0):
+    return {'def': _def(True), 'sta_metrics': _sta_metrics(setup, hold),
+            'antenna_metrics': _ant(antenna), 'repair_metrics': {'vibeic__prr__changed': 0}}
+
+
+def test_in_the_chain_the_route_state_is_repaired_without_a_bridge(tmp_path, monkeypatch):
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': _base(4.026052, -0.335), '32-cand01': _cand(4.025948, 0.326)})
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    assert report['site'] == 'after_route' and report['adopted'] == '32-cand01'
+    assert report['baseline']['hold_ws_min'] == -0.335
+    ctx = json.loads((project / prr.ARM_REL / prr.IMPL_DIR / prr.CONTEXT).read_text())
+    assert 'VIBEIC_PRR_REFILL_TCL' not in json.loads(
+        Path(ctx['configs'][prr.REPAIR_STEP]).read_text()), \
+        "the LL21 route's fillers are LibreLane's; the refill is too"
+
+
+def test_dual_runs_three_arms_and_selects_by_hold_then_setup(tmp_path, monkeypatch):
+    """review70 step 32 dual: A = the pre-DRT repair (step 21's LibreLane
+    route with the flow's RUN_POST_GRT_* gates on), B = this repair after
+    DRT, and A then B. Every arm is measured by the same instruments."""
+    scenario = {
+        '32-postdrt-base': _base(4.0, -0.3), '32-postdrt-cand01': _cand(3.99995, 0.30),
+        '32-pregrt-base': _base(4.2, 0.10),
+        '32-pregrt_postdrt-base': _base(4.2, 0.10)}
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, scenario)
+    pre_state = put(project / 'phase3/librelane/21-route-pregrt/13-fill/state_out.json',
+                    {'odb': 'p.odb', 'def': 'p.def'})
+    seen = {}
+
+    def variant_arm(lane, extra):
+        seen[lane] = extra
+        return {'final': pre_state, 'route_drc': [{'run': 'drt-run-0', 'markers': 0}]}
+    report = prr.run_in_chain(project, mode='dual', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, variant_arm=variant_arm,
+                              programs_dir=shim)
+    assert set(seen['21-route-pregrt']) == set(prr.PREGRT_GATES)
+    assert all(v[0] is True for v in seen['21-route-pregrt'].values())
+    assert set(report['arms']) == set(prr.DUAL_ARMS)
+    assert report['arms']['pregrt']['closure'] == [], 'arm A is the route alone'
+    assert report['selected_arm'] == 'postdrt', report['selection']
+    assert report['adopted'] == '32-postdrt-cand01'
+
+
+def test_dual_never_selects_an_arm_with_a_route_or_antenna_violation(tmp_path, monkeypatch):
+    scenario = {
+        '32-postdrt-base': _base(4.0, 0.2),
+        '32-pregrt-base': _base(4.5, 0.5, antenna=2),
+        '32-pregrt_postdrt-base': _base(4.5, 0.5, antenna=2)}
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, scenario)
+    pre_state = put(project / 'phase3/librelane/21-route-pregrt/13-fill/state_out.json',
+                    {'odb': 'p.odb', 'def': 'p.def'})
+    report = prr.run_in_chain(
+        project, mode='dual', image='img', pdk='pdk', pdk_root=tmp_path, sdc=sdc,
+        derate=(0.95, 1.05), route_state=route, route_drc=0, programs_dir=shim,
+        variant_arm=lambda lane, extra: {'final': pre_state, 'route_drc': []})
+    assert report['selection']['feasible'] == ['postdrt']
+    assert report['selected_arm'] == 'postdrt'
+
+
+def test_the_route_chain_calls_step_32_before_its_handoff():
+    """Source contract of step 21's one call site: step 32 runs on the
+    selected route before the views are copied and the tail resumes."""
+    src = (PROGRAMS / 'librelane_route.py').read_text()
+    at = src.index('step32 = getattr(R, "postroute_repair_after_route", None)')
+    assert at < src.index('targets = {"odb": out_dir / "routed_preantenna.odb",')
+    assert 'views = dict(views, **post32["views"])' in src
+    runner = importlib.import_module('phase3_one_shot_runner')
+    assert callable(runner.postroute_repair_after_route)
+
+
+def test_the_runner_records_the_in_chain_repair_without_repairing_twice(tmp_path, monkeypatch):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    import test_pad_connected_pdn_ring as ring_fixture
+    project = tmp_path / 'proj'
+    pnr = project / 'phase3/stage3/pnr'
+    write(pnr / 'routed.def', 'DESIGN top ;\n# adopted\nEND DESIGN\n')
+    write(pnr / 'dut_pnr.v', 'module top(); endmodule\n')
+    write(pnr / 'constraint.sdc', '')
+    put(project / 'phase3/librelane_switch.json',
+        {'steps': {'21': 'librelane', '32': 'librelane'}})
+    report = put(project / prr.REPORT_REL, {
+        'verdict': 'PASS', 'site': 'after_route', 'adopted': '32-cand01',
+        'baseline': {'hold_ws_min': -0.3}, 'final': {'hold_ws_min': 0.3}})
+    put(project / 'reports/phase3/librelane_route_handoff.json',
+        {'postroute_repair': {'report_sha256': contract.digest(report)}})
+    monkeypatch.setattr(prr, 'run', lambda *a, **k: pytest.fail('repaired twice'))
+    pdk = ring_fixture._pdk(tmp_path, ring=None)
+    result = runner.step_postroute_repair_librelane(project, 'dut', pdk, 'unused')
+    assert result.status == 'PASS' and 'in the step-21 LibreLane chain' in result.detail
+    assert '# adopted' in (pnr / 'routed.def').read_text()
+    assert json.loads((pnr / runner._DRV_PROMOTION_CLAIM).read_text())['promoted'] is True
+    # a report the route receipt does not name is not this run's
+    put(project / 'reports/phase3/librelane_route_handoff.json',
+        {'postroute_repair': {'report_sha256': 'other'}})
+    assert runner._postroute_repair_in_chain_report(project) is None
+
+
+def test_the_route_hook_hands_on_the_adopted_database_and_keeps_the_base(tmp_path, monkeypatch):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    import test_pad_connected_pdn_ring as ring_fixture
+    project = tmp_path / 'proj'
+    put(project / 'phase3/librelane_switch.json', {'steps': {'21': 'librelane', '32': 'dual'}})
+    base_def = write(tmp_path / 'route.def', 'DESIGN top ;\nEND DESIGN\n')
+    route_state = put(tmp_path / 'route_state.json', {'odb': 'r.odb', 'def': str(base_def)})
+    adopted = put(tmp_path / 'cand/state_out.json', {'odb': str(tmp_path / 'c.odb'),
+                                                     'def': str(tmp_path / 'c.def')})
+    calls = {}
+
+    def run_in_chain(project_, **kw):
+        calls.update(kw)
+        return put(project_ / prr.REPORT_REL, {'verdict': 'PASS', 'adopted': '32-postdrt-cand01',
+                                               'adopted_state': str(adopted),
+                                               'selected_arm': 'postdrt'}) and \
+            json.loads((project_ / prr.REPORT_REL).read_text())
+    monkeypatch.setattr(prr, 'run_in_chain', run_in_chain)
+    pdk = ring_fixture._pdk(tmp_path, ring=None)
+    out = runner.postroute_repair_after_route(
+        project=project, pdk=pdk, image='img', pdk_root=tmp_path, sdc=base_def,
+        deck='add_global_connection -net VDD -pin_pattern {^VDD$} -power\n',
+        route_state=route_state, route_views={'odb': tmp_path / 'r.odb', 'def': base_def},
+        route_drc=0, variant_arm=lambda *a: None)
+    assert calls['mode'] == 'dual' and calls['route_state'] == route_state
+    assert out['views'] == {'odb': tmp_path / 'c.odb', 'def': tmp_path / 'c.def'}
+    assert out['record']['report_sha256'] == contract.digest(project / prr.REPORT_REL)
+    assert (runner._pl.pnr_dir(project) / 'routed_base_prerepair.def').read_text() == base_def.read_text()
+    # step 32 direct, or a direct route handed over: nothing runs here
+    put(project / 'phase3/librelane_switch.json', {'steps': {'21': 'librelane'}})
+    assert runner.postroute_repair_after_route(
+        project=project, pdk=pdk, image='img', pdk_root=tmp_path, sdc=base_def, deck='',
+        route_state=route_state, route_views={}, route_drc=0, variant_arm=None) is None

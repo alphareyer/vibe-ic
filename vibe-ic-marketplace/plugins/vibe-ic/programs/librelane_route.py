@@ -498,7 +498,8 @@ def execute(
         except (_ll.Refusal, ValueError, OSError, R.PnrResumeUnavailable) as exc:
             return _refuse(getattr(exc, "code", "LL_ROUTE_CONFIG_REFUSED"), str(exc), out)
 
-        def _ll_arm(lane: str, seed: Optional[int]) -> Dict[str, Any]:
+        def _ll_arm(lane: str, seed: Optional[int], *, configs=configs,
+                    gated_off=gated_off, cfg_dir=cfg_dir) -> Dict[str, Any]:
             arm_ids = chain_ids(image, seeded=seed is not None, gated_off=gated_off)
             base = project / "phase3/librelane" / lane
             drt_index = next(i for i, s in enumerate(arm_ids) if s in (DRT, DRT_SEEDED))
@@ -639,6 +640,37 @@ def execute(
                          "drc": arms[selected]["nvr"] / "named_viol_after.drc"}
         elif json.loads(gates["librelane"].read_text()).get("verdict") == "NOT_MEASURED":
             return _refuse("LL_ROUTE_NOT_MEASURED", str(gates["librelane"]), out)
+        # Step 32 on LibreLane (T102 r2) runs HERE, on the routed database the
+        # selection just chose, before the tail: LL21 -> Vibeic.PostRouteRepair
+        # -> tail. `variant_arm` is this step's own LibreLane route with extra
+        # declared config, which step 32's `dual` uses for its pre-DRT arm
+        # (RUN_POST_GRT_*); nothing here selects between repair arms.
+        step32 = getattr(R, "postroute_repair_after_route", None)
+        post32: Optional[Dict[str, Any]] = None
+        if step32 is not None:
+            def _variant_arm(lane: str, extra: Dict[str, Tuple[Any, str]]) -> Dict[str, Any]:
+                vdir = f"21-config-{lane}"
+                vconfigs = _ll.resolve_step_configs(
+                    project, image, str(pdk.name), all_ids, pdk_root=Path(pdk_root),
+                    folder=vdir, overlay=dict(ov, **extra))
+                vroot = project / "phase3/librelane" / vdir
+                arm_ = _ll_arm(lane, None, configs=vconfigs,
+                               gated_off=_ll.flow_gated_off(vroot), cfg_dir=vroot)
+                arm_["route_drc"] = drt_runs(arm_["drt"])
+                return arm_
+            try:
+                post32 = step32(project=project, pdk=pdk, image=image,
+                                pdk_root=Path(pdk_root), sdc=sdc, deck=deck,
+                                route_state=(arms[selected]["final"]
+                                             if selected in arms else None),
+                                route_views={k: views[k] for k in ("odb", "def")},
+                                route_drc=((drt_runs(arms[selected]["drt"]) or [{}])[-1]
+                                           .get("markers") if selected in arms else None),
+                                variant_arm=_variant_arm)
+            except (_ll.Refusal, ValueError, OSError, StopIteration) as exc:
+                return _refuse(getattr(exc, "code", "LL_PRR_REFUSED"), str(exc), out)
+            if post32 is not None and post32.get("views"):
+                views = dict(views, **post32["views"])
         targets = {"odb": out_dir / "routed_preantenna.odb",
                    "def": out_dir / "routed_preantenna.def",
                    "drc": out_dir / R.ROUTER_DRC_REPORT_NAME}
@@ -652,7 +684,8 @@ def execute(
             "gates": {n: str(p.relative_to(project)) for n, p in gates.items()},
             "pre_route": {k: {"path": str(v.relative_to(project)), "sha256": _ll.digest(v)}
                           for k, v in pre.items()},
-            "selection": selection, "views": {}}
+            "selection": selection, "views": {},
+            "postroute_repair": (post32 or {}).get("record")}
         for name in ("odb", "def", "drc"):
             src, dst = views[name], targets[name]
             if not src.is_file():

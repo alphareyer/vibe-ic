@@ -70,7 +70,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
@@ -115,13 +115,14 @@ def mode(project: Path) -> str:
     return _ll.selected_mode(project, STEP)
 
 
-def refusal(selected: str) -> Optional[str]:
-    """Why a step-32 selection cannot run here, or None."""
-    if selected == "dual":
-        return ("LL_PRR_DUAL_UNSUPPORTED: step 32's second tool path is the "
-                "pre-detailed-route repair (LibreLane RepairDesignPostGRT + "
-                "ResizerTimingPostGRT), which lives in step 21's routing chain; "
-                "select `librelane` or `direct` here")
+def refusal(selected: str, route_mode: str = "direct") -> Optional[str]:
+    """Why a step-32 selection cannot run, or None. `dual` needs step 21 on
+    LibreLane: its second arm is the pre-detailed-route repair
+    (RepairDesignPostGRT + ResizerTimingPostGRT) inside step 21's chain."""
+    if selected == "dual" and route_mode == "direct":
+        return ("LL_PRR_DUAL_NEEDS_LL21: step 32's second tool path is the "
+                "pre-detailed-route repair inside step 21's LibreLane chain; "
+                "select 21 `librelane` or `dual`, or 32 `librelane`")
     return None
 
 
@@ -310,7 +311,7 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
     project = Path(ctx["project"])
     ledger = _load(_ledger_path(impl))["candidates"] if _ledger_path(impl).is_file() else []
     index = len(ledger) + 1
-    lane = f"32-cand{index:02d}"
+    lane = f"{ctx.get('lane', '32')}-cand{index:02d}"
     updates = {PARAM_VARS[k]: (v, f"actuator timing.repair_setup parameter {k}")
                for k, v in params.items() if v is not None}
     base_cfg = Path(ctx["configs"][REPAIR_STEP])
@@ -384,30 +385,24 @@ def signoff_scene_sdc(sdc: Path, out: Path, derate_early: float,
     return out
 
 
-def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
-        views: Dict[str, Path], sdc: Path, derate: Tuple[float, float],
-        pg_rules_tcl: Optional[Path] = None, refill_tcl: Optional[Path] = None,
-        registry: Optional[Path] = None, programs_dir: Optional[Path] = None,
-        docker: str = "docker") -> Dict[str, Any]:
-    """Step 32 on LibreLane: bridge, baseline, closure, record.
-
-    Returns the report (also written to `REPORT_REL`). `adopted` is the
-    candidate the closure left adopted (`None`: the input route stays)."""
-    import librelane_contract as _ll
-    from _ppa import closure as _cl
-    report: Dict[str, Any] = {"step": STEP, "mode": "librelane", "image": image}
-    out = project / REPORT_REL
-    cap = fork_capability(image, docker)
+def _refused_by_tool(report: Dict[str, Any], cap: Dict[str, Any], out: Path) -> bool:
     report["fork_capability"] = cap
-    if cap.get("capable") is not True:
-        report.update(verdict="NOT_MEASURED", code="LL_PRR_TOOL_INCAPABLE",
-                      reason="the image's OpenROAD does not accept the fork's "
-                             "estimate_parasitics -detailed_routing")
-        write_json(out, report)
-        return report
-    arm = project / ARM_REL
-    impl = arm / IMPL_DIR
-    impl.mkdir(parents=True, exist_ok=True)
+    if cap.get("capable") is True:
+        return False
+    report.update(verdict="NOT_MEASURED", code="LL_PRR_TOOL_INCAPABLE",
+                  reason="the image's OpenROAD does not accept the fork's "
+                         "estimate_parasitics -detailed_routing")
+    write_json(out, report)
+    return True
+
+
+def _prepare(project: Path, *, image: str, pdk: str, pdk_root: Path, sdc: Path,
+             derate: Tuple[float, float], pg_rules_tcl: Optional[Path],
+             refill_tcl: Optional[Path], docker: str) -> Tuple[Dict[str, Path], List[str],
+                                                               List[Tuple[Path, str]]]:
+    """The resolved configs (repair step + the three measuring steps) in the
+    sign-off scene, the STA corners, and the PDK mount."""
+    import librelane_contract as _ll
     folder = project / "phase3/librelane/32-config"
     scene = signoff_scene_sdc(sdc, folder / "signoff_scene.sdc", *derate)
     source = "the deck's SDC + the sign-off STA's flat-OCV derate"
@@ -426,17 +421,30 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
     if extra:
         configs[REPAIR_STEP] = _ll.derive_step_config(configs[REPAIR_STEP],
                                                       configs[REPAIR_STEP], extra)
-    sta_cfg = _load(configs["OpenROAD.STAPostPNR"])
-    corners = list(sta_cfg.get("STA_CORNERS") or [])
-    mounts = [(pdk_root / pdk, f"/pdk/{pdk}")]
-    state0 = _ll.state_from_direct(project, image, configs[REPAIR_STEP], views,
-                                   folder / "bridge", mounts=mounts,
-                                   chain=[configs[s] for s in MEASURE_STEPS],
-                                   docker=docker)
+    corners = list(_load(configs["OpenROAD.STAPostPNR"]).get("STA_CORNERS") or [])
+    return configs, corners, [(pdk_root / pdk, f"/pdk/{pdk}")]
+
+
+def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
+              configs: Dict[str, Path], corners: List[str],
+              mounts: List[Tuple[Path, str]], controllers: Sequence[str] = CONTROLLERS,
+              registry: Optional[Path] = None,
+              programs_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """One repair arm from `state0`: the census baseline (same instruments as
+    every candidate), then the closure's controllers in order. With no
+    controllers it is the measurement of `state0` alone (a route that is its
+    own arm, e.g. the pre-DRT repair's). `name == "librelane"` keeps the
+    single-arm layout (`ARM_REL/impl`, lanes `32-*`)."""
+    import librelane_contract as _ll
+    from _ppa import closure as _cl
+    arm = project / ARM_REL if name == "librelane" else project / ARM_REL / name
+    impl = arm / IMPL_DIR
+    impl.mkdir(parents=True, exist_ok=True)
+    lane = "32" if name == "librelane" else f"32-{name}"
     ctx = {"project": str(project.resolve()), "image": image, "pdk": pdk,
            "mounts": [(str(h.resolve()), g) for h, g in mounts],
            "configs": {k: str(v.resolve()) for k, v in configs.items()},
-           "corners": corners}
+           "corners": corners, "lane": lane, "arm": name}
     write_json(impl / CONTEXT, ctx)
     ledger = _ledger_path(impl)
     if ledger.is_file():
@@ -444,18 +452,19 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
     census = _ll.derive_step_config(
         configs[REPAIR_STEP], configs[REPAIR_STEP].with_name(f"{REPAIR_STEP}@census.json"),
         {"VIBEIC_PRR_CENSUS_ONLY": (True, "the input route's census: repair nothing")})
-    folder0, baseline = _candidate(ctx, census, state0, "32-base")
+    folder0, baseline = _candidate(ctx, census, state0, f"{lane}-base")
     write_json(impl / CURRENT, {"candidate": None, "repair_input": str(state0),
                                 "repair_state": str(state0), "repair_folder": str(folder0),
                                 "measurement": baseline})
-    report.update(corners=corners, baseline=baseline,
-                  baseline_antenna=baseline.get("antenna_nets"))
-    reg = _cl.load_registry(registry, programs_dir=programs_dir)
-    controller = _cl.ClosureController(reg, impl, arm / "closure")
+    report: Dict[str, Any] = {"arm": name, "input_state": str(state0), "corners": corners,
+                              "baseline": baseline,
+                              "baseline_antenna": baseline.get("antenna_nets")}
     runs = []
-    for cid in CONTROLLERS:
-        done = controller.run_controller(cid)
-        runs.append(done.to_record())
+    if controllers:
+        reg = _cl.load_registry(registry, programs_dir=programs_dir)
+        controller = _cl.ClosureController(reg, impl, arm / "closure")
+        for cid in controllers:
+            runs.append(controller.run_controller(cid).to_record())
     report["closure"] = runs
     candidates = _load(ledger)["candidates"] if ledger.is_file() else []
     # One ledger row per actuation, in order: the closure's verdict on each.
@@ -472,6 +481,168 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
     report["final_antenna"] = (final.get("measurement") or {}).get("antenna_nets")
     report["final_supply_ownership"] = final.get("supply_ownership")
     report["adopted_state"] = final.get("repair_state")
+    return report
+
+
+def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
+        views: Dict[str, Path], sdc: Path, derate: Tuple[float, float],
+        pg_rules_tcl: Optional[Path] = None, refill_tcl: Optional[Path] = None,
+        registry: Optional[Path] = None, programs_dir: Optional[Path] = None,
+        docker: str = "docker") -> Dict[str, Any]:
+    """Step 32 on LibreLane after a DIRECT route: bridge the routed views,
+    then one closure arm. Returns the report (also written to `REPORT_REL`).
+    `adopted` is the candidate the closure left adopted (`None`: the input
+    route stays)."""
+    import librelane_contract as _ll
+    report: Dict[str, Any] = {"step": STEP, "mode": "librelane", "image": image,
+                              "site": "after_direct_route"}
+    out = project / REPORT_REL
+    if _refused_by_tool(report, fork_capability(image, docker), out):
+        return report
+    configs, corners, mounts = _prepare(
+        project, image=image, pdk=pdk, pdk_root=pdk_root, sdc=sdc, derate=derate,
+        pg_rules_tcl=pg_rules_tcl, refill_tcl=refill_tcl, docker=docker)
+    state0 = _ll.state_from_direct(project, image, configs[REPAIR_STEP], views,
+                                   project / "phase3/librelane/32-config/bridge",
+                                   mounts=mounts,
+                                   chain=[configs[s] for s in MEASURE_STEPS],
+                                   docker=docker)
+    report.update(close_arm(project, "librelane", state0, image=image, pdk=pdk,
+                            configs=configs, corners=corners, mounts=mounts,
+                            registry=registry, programs_dir=programs_dir))
+    report["verdict"] = "PASS"
+    write_json(out, report)
+    return report
+
+
+#: review70 step 32, dual_tool_option: arm A is the repair BEFORE detailed
+#: routing (LibreLane RepairDesignPostGRT + ResizerTimingPostGRT, switched on
+#: by the flow's own gates), arm B is this step's repair AFTER it, and the two
+#: can be chained. The variables are LibreLane's own flow gates.
+PREGRT_GATES = ("RUN_POST_GRT_DESIGN_REPAIR", "RUN_POST_GRT_RESIZER_TIMING")
+DUAL_ARMS = ("postdrt", "pregrt", "pregrt_postdrt")
+#: The review's "better": per-corner hold and setup worst slack (STAPostPNR),
+#: with router DRC and antenna held at 0 (feasibility) and DRV too.
+DUAL_OBJECTIVES = {"hold_ws_min": "max", "setup_ws_min": "max"}
+
+
+def _arm_gate(folder: Path, arm: Dict[str, Any], route_drc: Optional[int],
+              scope: Dict[str, str]) -> Path:
+    final = arm.get("final") or {}
+    rows = {k: ({"status": "MEASURED", "value": final.get(k)}
+                if isinstance(final.get(k), (int, float)) else {"status": "NOT_MEASURED"})
+            for k in (*DUAL_OBJECTIVES, "drv_count", "antenna_nets")}
+    rows["route_drc"] = ({"status": "MEASURED", "value": route_drc}
+                         if isinstance(route_drc, int) else {"status": "NOT_MEASURED"})
+    verdict = "PASS" if all(r["status"] == "MEASURED" for r in rows.values()) else "NOT_MEASURED"
+    path = folder / "gate.json"
+    write_json(path, {"verdict": verdict, "metrics": rows, "scope": scope})
+    return path
+
+
+def select_dual(project: Path, arms: Dict[str, Dict[str, Any]],
+                route_drc: Dict[str, Optional[int]], scope: Dict[str, str]) -> Dict[str, Any]:
+    """Feasible first (route DRC 0, antenna 0, DRV 0, all measured), then the
+    Pareto frontier on worst hold and setup slack (`select_arms`); a frontier
+    tie goes to hold, then setup, then the arm order of `DUAL_ARMS` (the
+    cheaper arm first: no extra route)."""
+    import librelane_contract as _ll
+    root = project / ARM_REL
+    gates = {n: _arm_gate(root / "gates" / n, a, route_drc.get(n), scope)
+             for n, a in arms.items()}
+    docs = {n: _load(p) for n, p in gates.items()}
+
+    def value(n: str, k: str) -> Any:
+        return docs[n]["metrics"][k].get("value")
+
+    feasible = [n for n in arms if docs[n]["verdict"] == "PASS"
+                and value(n, "route_drc") == 0 and value(n, "antenna_nets") == 0
+                and value(n, "drv_count") == 0]
+    pool = feasible or [n for n in arms if docs[n]["verdict"] == "PASS"]
+    if not pool:
+        sel = {"selection": "UNDETERMINED", "reason": "LL_PRR_DUAL_NOT_MEASURED",
+               "arms": list(arms)}
+        write_json(root / "selection.json", sel)
+        return sel
+    sel = _ll.select_arms({n: gates[n] for n in pool}, DUAL_OBJECTIVES,
+                          root / "selection.json")
+    sel = dict(sel, feasible=feasible, considered=pool)
+    if sel.get("selection") not in pool:
+        frontier = sel.get("frontier") or pool
+        order = {n: i for i, n in enumerate(DUAL_ARMS)}
+        sel = dict(sel, selection=min(frontier, key=lambda n: (
+            -value(n, "hold_ws_min"), -value(n, "setup_ws_min"), order.get(n, 99))),
+                   tie_break="review70 step 32: hold, then setup, then the arm "
+                             "without an extra route")
+    write_json(root / "selection.json", sel)
+    return sel
+
+
+def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Path,
+                 sdc: Path, derate: Tuple[float, float], route_state: Path,
+                 route_drc: Optional[int],
+                 variant_arm: Optional[Callable[[str, Dict[str, Tuple[Any, str]]],
+                                                Dict[str, Any]]] = None,
+                 pg_rules_tcl: Optional[Path] = None,
+                 registry: Optional[Path] = None, programs_dir: Optional[Path] = None,
+                 docker: str = "docker") -> Dict[str, Any]:
+    """Step 32 on LibreLane INSIDE the step-21 LibreLane chain
+    (LL21 -> Vibeic.PostRouteRepair -> tail): the routed State is the
+    selected route arm's own (no DEF crosses a session), and the route's
+    fillers are LibreLane's (`OpenROAD.FillInsertion`), so the refill is
+    LibreLane's too.
+
+    `dual`: arm `postdrt` (this repair on the route), arm `pregrt` (step 21's
+    LibreLane route again with the flow's post-GRT repair gates on, measured
+    by the same instruments), and arm `pregrt_postdrt` (this repair on that
+    route); `select_dual` picks."""
+    report: Dict[str, Any] = {"step": STEP, "mode": mode, "image": image,
+                              "site": "after_route", "route_state": str(route_state)}
+    out = project / REPORT_REL
+    if _refused_by_tool(report, fork_capability(image, docker), out):
+        return report
+    configs, corners, mounts = _prepare(
+        project, image=image, pdk=pdk, pdk_root=pdk_root, sdc=sdc, derate=derate,
+        pg_rules_tcl=pg_rules_tcl, refill_tcl=None, docker=docker)
+    common = dict(image=image, pdk=pdk, configs=configs, corners=corners, mounts=mounts,
+                  registry=registry, programs_dir=programs_dir)
+    if mode != "dual":
+        report.update(close_arm(project, "librelane", route_state, **common))
+        report["verdict"] = "PASS"
+        write_json(out, report)
+        return report
+    if variant_arm is None:
+        raise ValueError("LL_PRR_DUAL_NEEDS_LL21: the pre-DRT arm is step 21's "
+                         "LibreLane route; select 21 librelane or dual")
+    arms: Dict[str, Dict[str, Any]] = {}
+    drcs: Dict[str, Optional[int]] = {}
+    arms["postdrt"] = close_arm(project, "postdrt", route_state, **common)
+    drcs["postdrt"] = route_drc
+    pre = variant_arm("21-route-pregrt", {
+        g: (True, "review70 step 32 dual arm A: the flow's own post-GRT repair")
+        for g in PREGRT_GATES})
+    runs = pre.get("route_drc") or []
+    pre_drc = runs[-1].get("markers") if runs else None
+    arms["pregrt"] = close_arm(project, "pregrt", Path(pre["final"]), controllers=(),
+                               **common)
+    drcs["pregrt"] = pre_drc
+    arms["pregrt_postdrt"] = close_arm(project, "pregrt_postdrt", Path(pre["final"]),
+                                       **common)
+    drcs["pregrt_postdrt"] = pre_drc
+    scope = {"step": STEP, "corners": ",".join(corners),
+             "measured_by": "OpenROAD.CheckAntennas + RCX + STAPostPNR (sign-off scene)"}
+    sel = select_dual(project, arms, drcs, scope)
+    report.update(arms=arms, route_drc=drcs, selection=sel)
+    chosen = arms.get(sel.get("selection"))
+    if chosen is None:
+        report.update(verdict="NOT_MEASURED", code="LL_PRR_DUAL_UNDETERMINED")
+        write_json(out, report)
+        return report
+    report.update({k: chosen[k] for k in ("baseline", "final", "adopted", "adopted_state",
+                                           "final_antenna", "baseline_antenna",
+                                           "final_supply_ownership", "candidates",
+                                           "closure")})
+    report["selected_arm"] = sel["selection"]
     report["verdict"] = "PASS"
     write_json(out, report)
     return report
