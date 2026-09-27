@@ -158,11 +158,15 @@ def _run_to_admission(monkeypatch, module_name, project, *argv, wired=True):
 def test_the_real_main_admits_with_the_mode(monkeypatch, tmp_path, module_name):
     # Two identical projects: each main takes (and keeps) its project lock.
     a, b = _make(tmp_path / "a"), _make(tmp_path / "b")
-    default = _run_to_admission(monkeypatch, module_name, a, wired=False)
+    # W24: under the flag a runner that takes --pdk must name an in-scope
+    # one; both arms name it, so the configs differ by the mode alone.
+    pdk = (["--pdk", "gf180mcuD"] if module_name == "phase3_one_shot_runner"
+           else [])
+    default = _run_to_admission(monkeypatch, module_name, a, *pdk, wired=False)
     assert "impl" not in default
     assert not IF.record_path(a).exists()   # the default wrote nothing
 
-    flagged = _run_to_admission(monkeypatch, module_name, b, "--librelane")
+    flagged = _run_to_admission(monkeypatch, module_name, b, "--librelane", *pdk)
     assert flagged == {**default, "impl": "librelane"}
     rec = IF.read_record(b)
     assert rec["impl"] == "librelane" and rec["resolved_by"] == module_name
@@ -243,7 +247,8 @@ def test_the_front_door_records_and_its_first_child_carries_the_flag(
         proj = _make(tmp_path / name)
         if flagged:
             _wire(monkeypatch, "vibe_ic_one_shot_runner")
-        argv = [str(proj), "--no-dashboard"] + (["--librelane"] if flagged else [])
+        argv = [str(proj), "--no-dashboard"] + (
+            ["--librelane", "--pdk", "gf180mcuD"] if flagged else [])
         monkeypatch.setattr(sys, "argv", ["vibe_ic_one_shot_runner", *argv])
         with pytest.raises(_Spawned) as ei:
             V.main()
@@ -295,7 +300,8 @@ def test_phase23_records_before_its_children_are_told(monkeypatch, tmp_path):
         if flagged:
             _wire(monkeypatch, "phase23_one_shot_runner")
         monkeypatch.setattr(sys, "argv", ["phase23_one_shot_runner", str(proj)]
-                            + (["--librelane"] if flagged else []))
+                            + (["--librelane", "--pdk", "gf180mcuD"]
+                               if flagged else []))
         with pytest.raises(_Spawned) as ei:
             P23.main()
         if flagged:

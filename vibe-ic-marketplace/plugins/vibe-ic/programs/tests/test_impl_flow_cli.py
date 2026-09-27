@@ -106,9 +106,13 @@ def test_the_gate_on_the_real_phase3_parser(project, monkeypatch):
     # A window is the parser default's opposite, and a default is no request.
     assert gate("--entry-step", "17", "--exit-step", "17") == IF.IMPL_DEFAULT
     for argv, cls in ((["--orfs"], IF.IMPL_NOT_YET_SUPPORTED),
-                      (["--librelane"], IF.IMPL_NOT_YET_WIRED),
-                      (["--librelane", "--die-um", "400x400", "--util", "0.5",
-                        "--spare-density", "0.05"], IF.IMPL_NOT_YET_WIRED),
+                      # W24: an `auto` PDK is refused at the gate under a flag
+                      (["--librelane"], IF.IMPL_PDK_UNSUPPORTED),
+                      (["--librelane", "--pdk", "gf180mcuD"],
+                       IF.IMPL_NOT_YET_WIRED),
+                      (["--librelane", "--pdk", "gf180mcuD", "--die-um",
+                        "400x400", "--util", "0.5", "--spare-density", "0.05"],
+                       IF.IMPL_NOT_YET_WIRED),
                       (["--librelane", "--entry-step", "17", "--exit-step",
                         "17"], IF.IMPL_KNOB_UNSUPPORTED),
                       (["--librelane", "--force-step", "pnr"],
@@ -126,7 +130,7 @@ def test_a_wired_runner_passes_the_gate(project, monkeypatch):
     parser = _real_parser("phase3_one_shot_runner", monkeypatch)
     monkeypatch.setattr(IF, "WIRED_RUNNERS",
                         frozenset({"phase3_one_shot_runner"}))
-    args = parser.parse_args([str(project), "--librelane"])
+    args = parser.parse_args([str(project), "--librelane", "--pdk", "gf180mcuD"])
     assert IF.gate(project, args, runner="phase3_one_shot_runner",
                    parser=parser) == IF.IMPL_LIBRELANE
     assert not IF.record_path(project).exists()   # the gate never writes
@@ -149,7 +153,11 @@ def _run_main(runner: str, project: Path, *argv: str):
 @pytest.mark.parametrize("runner", RUNNERS)
 def test_each_real_main_refuses_by_name_and_writes_nothing(runner, project):
     before = _tree(project)
-    cp = _run_main(runner, project, "--librelane")
+    # W24: a runner that takes --pdk must name an in-scope one under the flag.
+    pdk = (["--pdk", "gf180mcuD"] if runner in (
+        "vibe_ic_one_shot_runner", "phase23_one_shot_runner",
+        "phase3_one_shot_runner") else [])
+    cp = _run_main(runner, project, "--librelane", *pdk)
     assert cp.returncode == 2, cp.stderr[-2000:]
     # The analog track is out of v1 (W24): refused by name before the
     # not-yet-wired check that every other runner reaches.

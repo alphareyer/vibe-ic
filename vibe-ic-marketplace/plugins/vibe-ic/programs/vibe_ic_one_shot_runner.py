@@ -1492,6 +1492,14 @@ def main() -> int:
                                        parser=p)
     if _impl_rc is not None:
         return _impl_rc
+    # llv1 W24: analog the INPUTS already declare is refused before the mode
+    # is recorded, so the remedy it names (the default flow) still works.
+    _impl_early = _impl_flow.analog_scope_refusal(
+        project, _need_analog(project, args.skip_analog),
+        requested=_impl_flow.requested_from_args(args))
+    if _impl_early is not None:
+        print(f"REFUSED: {_impl_early}", file=sys.stderr)
+        return 2
 
     # ---------------- Single-driver project lock (ORGANIC #498) ----------
     # Refuse a second concurrent invocation on a project already being
@@ -1994,10 +2002,15 @@ def main() -> int:
     # treated analog A9 as a HARD condition → every pure-digital run
     # halted at phase2. The two decision points now agree.
     run_analog = _need_analog(project, args.skip_analog)
-    # llv1 W24: analog is out of --librelane v1 (decision 13).
-    _impl_rc = _impl_flow.scope_exit_if_analog(project, run_analog)
-    if _impl_rc is not None:
-        return _impl_rc
+    # llv1 W24: analog is out of --librelane v1 (decision 13). Analog the
+    # inputs declared was refused before the mode was recorded (above); what
+    # Phase 1 revealed is refused here, AFTER the record: a plan row, and the
+    # run goes on to its report tail with every later phase halted.
+    _impl_scope = _impl_flow.analog_scope_refusal(project, run_analog)
+    if _impl_scope is not None:
+        print(f"REFUSED: {_impl_scope}", file=sys.stderr)
+        plan.append(("analog", f"REFUSED-{_impl_scope.reason_class}", 2))
+        halted_at = "analog"
 
     # ---------------- Top-module resolution (once, for BOTH phase 2 & 3) ------
     # The historical default '--top-name chip_top' is wrong for a standalone

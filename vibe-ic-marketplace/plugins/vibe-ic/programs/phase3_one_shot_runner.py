@@ -74103,10 +74103,29 @@ def main() -> int:
         print("[SKIP] phase3_one_shot_runner: no usable PDK detected. "
               "Provide input/pdk/{liberty,lef}/ or use --pdk sky130A.")
         return 0
-    # llv1 W24: the PDK `auto` resolved to must be in the flagged mode's scope.
-    _impl_rc = _impl_flow.scope_exit_after_pdk(project, pdk.name)
-    if _impl_rc is not None:
-        return _impl_rc
+    # llv1 W24 BACKSTOP: the gate already refused `auto` under a flag; a named
+    # PDK is judged there too. Should the resolved PDK still fall outside the
+    # scope, refuse with the remedy that works after the record (a fresh
+    # clone) and a report carrying the reason class, like the guards below.
+    _impl_scope = _impl_flow.scope_refusal_after_pdk(project, pdk.name)
+    if _impl_scope is not None:
+        print(f"REFUSED: {_impl_scope}", file=sys.stderr)
+        if _window_sites is None:
+            try:
+                _rp = _pl.reports_phase3_dir(project)
+                _rp.mkdir(parents=True, exist_ok=True)
+                (_rp / "impl_scope_refusal.json").write_text(json.dumps({
+                    "program": "phase3_one_shot_runner",
+                    "gate": "impl_scope",
+                    "verdict": "REFUSED",
+                    "pass": False,
+                    "reason_class": _impl_scope.reason_class,
+                    "resolved_pdk": pdk.name,
+                    "rationale": str(_impl_scope),
+                }, indent=2) + "\n")
+            except Exception:
+                pass
+        return 4
 
     # Silent wrong-PDK fallback guard — a configured commercial PDK must NEVER
     # become an OSS in-container fallback without the operator saying so. A
