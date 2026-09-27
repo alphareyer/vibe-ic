@@ -88,6 +88,46 @@ def _gate(tmp_path: pathlib.Path, name: str, body: str) -> pathlib.Path:
     return p
 
 
+@pytest.fixture
+def programs_shadow(tmp_path_factory, monkeypatch):
+    """A PRIVATE programs dir the umbrella resolves gate names against.
+
+    The two growth-hole tests used to plant their brand-new gate in the
+    SHIPPED programs/ and delete it in a `finally`. Under xdist every other
+    worker that lists programs/*.py saw it appear and vanish:
+    `test_upstream_mirror_is_pinned::test_the_shipped_tree_is_clean` listed
+    it, then read it after the unlink, and failed with FileNotFoundError
+    (stacked census on 8HD-8, 2026-09-28). `suite_write_guard` cannot see
+    such a write: it compares snapshots, and this one is undone before the
+    session ends.
+
+    The shadow holds a symlink to every real entry of programs/, so every
+    registered gate still runs the shipped bytes, plus the planted gate as a
+    real file there and nowhere else. `F.PROGRAMS_DIR` is the one directory
+    `_structural_gate_argv` (and the contract/N-A/declared-report helpers it
+    calls) joins a gate name onto, so the probe is still reached BY NAME
+    through the umbrella's own argv builder. `measure()` and
+    `_split_undecided()` each do their own `import flow_compliance_check`,
+    and sibling test modules load their own copy into `sys.modules`, so the
+    module whose `PROGRAMS_DIR` is patched is also the one they import.
+    """
+    shadow = tmp_path_factory.mktemp("programs_shadow")
+    for entry in _PROGRAMS.iterdir():
+        (shadow / entry.name).symlink_to(entry)
+    monkeypatch.setitem(sys.modules, "flow_compliance_check", F)
+    monkeypatch.setattr(F, "PROGRAMS_DIR", shadow)
+    return shadow
+
+
+def _plant(shadow: pathlib.Path, name: str) -> pathlib.Path:
+    """The Rule-B gate as a registered program in the shadow, never in the
+    shipped tree."""
+    assert shadow.resolve() != _PROGRAMS, (
+        "refusing to plant a probe gate in the shipped programs/")
+    assert not (shadow / f"{name}.py").exists(), name
+    return _gate(shadow, name, _HAND_ROLLED)
+
+
 # ---------------------------------------------------------------------------
 # 1. the predicate itself
 # ---------------------------------------------------------------------------
@@ -189,30 +229,26 @@ def test_a_nonzero_exit_that_is_not_2_is_never_a_rejection(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_a_newly_registered_hand_rolled_gate_fails_the_ratchet(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, programs_shadow):
     """THE POINT OF THE FILE. Register a brand-new gate of the Rule-B shape and
     the ratchet must go red. On origin/main it prints `[PASS] ... No new silent
     gate` while P0 reports PASS over a check that never ran."""
     name = "brand_new_hand_rolled_check"
-    _gate(_PROGRAMS, name, _HAND_ROLLED)
-    try:
-        # `measure()` does its own `import flow_compliance_check`, and sibling
-        # test modules in the same session load their own copy into
-        # `sys.modules` — patching only our `F` would patch an object the
-        # measurement never reads, and the test would pass or fail on file
-        # ordering.
-        monkeypatch.setitem(sys.modules, "flow_compliance_check", F)
-        monkeypatch.setattr(F, "_STRUCTURAL_RTL_GATES",
-                            tuple(F._STRUCTURAL_RTL_GATES) + (name,))
-        res = D.measure(jobs=4)
-        assert name in res["measured"], (
-            "a newly registered gate that hand-rolls its required-argument "
-            "check was measured as INVOCABLE; it returns no verdict, P0 still "
-            "says PASS, and the ratchet built to notice says nothing")
-        assert D.main([]) == D.RC_DRIFT
-        assert name in capsys.readouterr().err
-    finally:
-        (_PROGRAMS / f"{name}.py").unlink(missing_ok=True)
+    _plant(programs_shadow, name)
+    # `measure()` does its own `import flow_compliance_check`, and sibling
+    # test modules in the same session load their own copy into
+    # `sys.modules` — patching only our `F` would patch an object the
+    # measurement never reads, and the test would pass or fail on file
+    # ordering. (`programs_shadow` pins `sys.modules` to `F`.)
+    monkeypatch.setattr(F, "_STRUCTURAL_RTL_GATES",
+                        tuple(F._STRUCTURAL_RTL_GATES) + (name,))
+    res = D.measure(jobs=4)
+    assert name in res["measured"], (
+        "a newly registered gate that hand-rolls its required-argument "
+        "check was measured as INVOCABLE; it returns no verdict, P0 still "
+        "says PASS, and the ratchet built to notice says nothing")
+    assert D.main([]) == D.RC_DRIFT
+    assert name in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -231,18 +267,16 @@ def test_a_rule_b_gates_needs_are_read_from_its_own_error_line(tmp_path):
     assert D.POSITIONAL_MARKER not in D._required_flags(argv)
 
 
-def test_a_rule_b_gate_is_not_filed_as_mechanical_wiring(tmp_path, monkeypatch):
+def test_a_rule_b_gate_is_not_filed_as_mechanical_wiring(
+        tmp_path, monkeypatch, programs_shadow):
     """The split, end to end: a design-specific value must land in
     `needs_design_value`. Filing it as a wiring gap tells the next reader that
     an adapter row would fix it, and it would not."""
     name = "brand_new_semantic_check"
-    _gate(_PROGRAMS, name, _HAND_ROLLED)
-    try:
-        out = D._split_undecided([name])
-        assert out["needs_design_value"] == [name], out
-        assert out["wiring_gap"] == [], out
-    finally:
-        (_PROGRAMS / f"{name}.py").unlink(missing_ok=True)
+    _plant(programs_shadow, name)
+    out = D._split_undecided([name])
+    assert out["needs_design_value"] == [name], out
+    assert out["wiring_gap"] == [], out
 
 
 # ---------------------------------------------------------------------------
