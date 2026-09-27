@@ -206,3 +206,52 @@ def test_write_manifest_takes_one_form(tmp_path):
     with pytest.raises(M.ManifestError):
         M.write_manifest(proj, flow="librelane", segments=bad)
     assert M.manifest_path(proj).read_bytes() == before     # invalid → nothing
+
+
+# ── W0 fix 3's measurement rule holds inside every segment ─────────────────
+
+def _derived_row(doc, seg_index: int):
+    """A row of that segment whose artefact yields a derived record."""
+    return next(r for r in doc["segments"][seg_index]["rows"]
+                if r["measurement"] is not None)
+
+
+@pytest.mark.parametrize("seg_index", [0, 1])
+@pytest.mark.parametrize("edit,why", [
+    # a self-report: measured true, stated by the caller, not the artefact
+    (lambda r: r.update(measurement=dict(r["measurement"], measured=True,
+                                         stated_by="self")),
+     "is not the record derived from the imported artefact"),
+    # another tool's record
+    (lambda r: r.update(measurement=dict(r["measurement"], tool="klayout")),
+     "'s record, not"),
+    # a record naming no tool
+    (lambda r: r.update(measurement={k: v for k, v in r["measurement"].items()
+                                     if k != "tool"}),
+     "'s record, not"),
+])
+def test_a_measurement_not_derived_from_the_artefact_is_refused_in_a_segment(
+        tmp_path, seg_index, edit, why):
+    import _external_flow_manifest as M
+    proj = _two_runs(tmp_path)
+    doc = _manifest(proj)
+    row = _derived_row(doc, seg_index)
+    assert row["measurement"] == M.derived_measurement(
+        proj, row["canonical_path"], row["tool"])          # as written
+    edit(row)
+    name = doc["segments"][seg_index]["name"]
+    probs = _problems(proj, doc)
+    assert any(p.startswith(f"segment {name!r} row") and why in p
+               for p in probs), probs
+    # and W0's writer refuses to write it
+    with pytest.raises(M.ManifestError):
+        M.write_manifest(proj, flow="librelane", segments=doc["segments"])
+
+
+def test_null_is_the_one_other_measurement_a_segment_row_may_carry(tmp_path):
+    proj = _two_runs(tmp_path)
+    doc = _manifest(proj)
+    for seg in doc["segments"]:
+        for row in seg["rows"]:
+            row["measurement"] = None
+    assert _problems(proj, doc) == []
