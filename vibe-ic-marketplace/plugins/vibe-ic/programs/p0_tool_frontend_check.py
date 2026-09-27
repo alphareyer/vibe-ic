@@ -116,6 +116,11 @@ def _invoke(tool: str, args: list[str], project: Path,
                           text=True, check=False)
 
 
+#: FX_P2 — slang's declaration-order opt-out, and the disclosure that names it.
+DECL_RELAX_FLAG = "--allow-use-before-declare"
+DECL_RELAXED = "DECLARATION_ORDER_RELAXED"
+
+
 def check(project: Path, image: str | None = None) -> dict:
     """`image` is the declared one (`--image`); None resolves it only if a
     tool actually has to run in docker."""
@@ -136,14 +141,42 @@ def check(project: Path, image: str | None = None) -> dict:
     # write_json are the JsonHeader elaboration checks, without Phase-3 config.
     selected_top = f"--top {top} " if top else ""
     hierarchy = f"-top {top}" if top else "-auto-top"
-    script = ("read_slang --single-unit " + selected_top +
-              " ".join("-I " + directory for directory in include_dirs) +
-              " " + " ".join(names) +
-              "; hierarchy -check " + hierarchy + "; proc; write_json /dev/null")
+
+    def _script(extra: str = "") -> str:
+        return ("read_slang --single-unit " + extra + selected_top +
+                " ".join("-I " + directory for directory in include_dirs) +
+                " " + " ".join(names) +
+                "; hierarchy -check " + hierarchy +
+                "; proc; write_json /dev/null")
     import _eda_pin
     try:
         yosys_image = _route_image("yosys", image)
-        yosys = _invoke("yosys", ["-Q", "-T", "-p", script], project, yosys_image)
+        yosys = _invoke("yosys", ["-Q", "-T", "-p", _script()], project,
+                        yosys_image)
+        # FX_P2 — the D3 rule at this site. slang, like strict Icarus, refuses
+        # a net used before its declaration ("identifier 'x' used before its
+        # declaration"); Verilator and read_verilog accept it. MEASURED on
+        # subservient (reused serv 1.4.0): serv_state.v uses `trap_pending` at
+        # 111/118 and declares it at 223, and this gate FAILed the P0 umbrella
+        # over a closure that synthesises and simulates. Retried ONCE with
+        # slang's own `--allow-use-before-declare`, which changes only name
+        # lookup order and invents no net: only if THAT elaborates is the
+        # refusal booked as declaration order, and it is DISCLOSED with the
+        # strict output. An undeclared name, a missing module or a syntax
+        # error still fails, with the strict output (checked in the image:
+        # `use of undeclared identifier` under both).
+        if yosys.returncode:
+            relaxed = _invoke("yosys", ["-Q", "-T", "-p",
+                                        _script(DECL_RELAX_FLAG + " ")],
+                              project, yosys_image)
+            if relaxed.returncode == 0:
+                result["disclosures"] = [
+                    f"{DECL_RELAXED}: strict read_slang refused and "
+                    f"{DECL_RELAX_FLAG} elaborated, so declaration order was "
+                    f"the only obstacle -- a portability finding in the RTL, "
+                    f"not an elaboration failure"]
+                result["strict_refusal"] = (yosys.stdout + yosys.stderr)[-4000:]
+                yosys = relaxed
         verilator_args = ["--lint-only", "--Wall", "-Wno-fatal"]
         if top:
             verilator_args += ["--top-module", top]
