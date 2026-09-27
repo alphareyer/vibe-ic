@@ -171,10 +171,19 @@ def test_a_cwd_relative_diagnostic_path_is_matched(monkeypatch, tmp_path):
     assert len(_yosys(calls)) == 2
 
 
-def test_an_ambiguous_bare_name_matches_nothing(tmp_path):
-    rtl = ["/p/a/ip_core.v", "/p/b/ip_core.v"]
-    assert F._diagnostic_file("ip_core.v", rtl) is None
-    assert F._diagnostic_file("../../p/a/ip_core.v", rtl) == "/p/a/ip_core.v"
+def test_an_ambiguous_file_name_is_never_relaxed(monkeypatch, tmp_path):
+    """Two RTL files share the leaf `ip_core.v` (the supplied one and a
+    plugin-authored one in a subdirectory) and slang names only the leaf: the
+    diagnostic cannot be attributed to the supplied IP, so nothing is relaxed."""
+    root = _project(tmp_path)
+    other = _rtl(root) / "zz_glue" / "ip_core.v"
+    other.parent.mkdir()
+    other.write_text("module glue_core(input a, output y);\n"
+                     "  assign y = late;\n  wire late = a;\nendmodule\n")
+    calls = _fake(monkeypatch, LATE.replace("rtl/late.v", "ip_core.v"))
+    r = F.check(root)
+    assert r["passed"] is False, r
+    assert len(_yosys(calls)) == 1
 
 
 # ---- (6a) deadlines -------------------------------------------------------
@@ -310,7 +319,15 @@ def test_the_flows_own_ledger_row_carries_the_disclosure(monkeypatch, tmp_path,
                for d in row.get("disclosures", [])), row
 
 
-def test_a_gate_that_discloses_nothing_gets_no_disclosure_field():
+def test_a_gate_that_discloses_nothing_gets_no_disclosure_field(monkeypatch,
+                                                                tmp_path):
+    """CONTROL: an unrelaxed PASS's ledger row is exactly what it was."""
     import flow_compliance_check as FCC
-    assert FCC.gate_stdout_disclosures("PASS: rtl output content\n"
-                                       "TOOL_EVIDENCE: {}\n") == []
+    snippet = FCC.output_snippet(
+        "PASS: rtl output content\nTOOL_EVIDENCE: {}\n", "")
+    monkeypatch.setattr(FCC, "__check_program_exit_zero",
+                        lambda project, cmd: FCC._ProgramCheckOutcome(
+                            True, snippet, 0))
+    FCC._check_program_exit_zero(
+        tmp_path, "flow_step_output_content_check . --mode rtl")
+    assert "disclosures" not in FCC._GATE_LEDGER[-1]
