@@ -22,6 +22,47 @@ proc vic_metric {name value} {
     if {[string is double -strict $value]} { utl::metric_float $name $value }
 }
 
+# ---- route census ------------------------------------------------------------
+# A signal net that needs a wire: two or more terminals, not joined by
+# abutment (a pad's PAD pin on its own port). `check_antennas` SKIPS a net
+# with no wire (ANT-0018), and the ECO route's report covers only the nets it
+# was given, so neither can see a net some other command left unrouted.
+proc vic_needs_wire {net} {
+    if {[$net isSpecial] || [$net getSigType] in {POWER GROUND}} { return 0 }
+    if {[llength [$net getITerms]] + [llength [$net getBTerms]] < 2} { return 0 }
+    return [expr {![$net isConnectedByAbutment]}]
+}
+# name -> 1 for every signal net that needs a wire and has none.
+proc vic_unrouted_nets {} {
+    set out [dict create]
+    foreach net [$::block getNets] {
+        if {[vic_needs_wire $net] && [$net getWire] eq "NULL"} {
+            dict set out [$net getName] 1
+        }
+    }
+    return $out
+}
+# name -> 1 for every signal net that carries a wire now.
+proc vic_routed_nets {} {
+    set out [dict create]
+    foreach net [$::block getNets] {
+        if {[vic_needs_wire $net] && [$net getWire] ne "NULL"} {
+            dict set out [$net getName] 1
+        }
+    }
+    return $out
+}
+# name -> net for every net routed in `before` that has no wire now: what
+# the commands in between took and must be handed back.
+proc vic_lost_routes {before} {
+    set lost [dict create]
+    dict for {name _} $before {
+        set net [$::block findNet $name]
+        if {$net ne "NULL" && [$net getWire] eq "NULL"} { dict set lost $name $net }
+    }
+    return $lost
+}
+
 # ---- 0. the fork capability ----------------------------------------------
 # `estimate_parasitics -detailed_routing` is the vibeic/OpenROAD fork's flag.
 # The caller probes it before this step runs (librelane_postroute_repair.
@@ -114,6 +155,8 @@ vic_census before
 # uses, so a candidate is compared with its input on one instrument.
 set ::vic_ant_before [check_antennas]
 utl::metric_integer vibeic__prr__before__antenna__violating_nets $::vic_ant_before
+set ::vic_unrouted_before [vic_unrouted_nets]
+utl::metric_integer vibeic__prr__before__unrouted__count [dict size $::vic_unrouted_before]
 if {[info exists ::env(VIBEIC_PRR_CENSUS_ONLY)] && $::env(VIBEIC_PRR_CENSUS_ONLY)} {
     utl::metric_integer vibeic__prr__changed 0
     vic_say "census only: nothing repaired; the input database is the result"
@@ -323,10 +366,18 @@ if {!$::vic_eco_ok} {
 # by the same scoped, guarded route. The judge downstream still counts.
 set ::vic_ant_eco [check_antennas]
 set ::vic_diodes [list]
+set ::vic_ant_ripped [dict create]
 if {$::vic_ant_eco > $::vic_ant_before && [info exists ::env(DIODE_CELL)]
     && $::env(VIBEIC_PRR_ANTENNA_REPAIR)} {
     set names [dict create]
     foreach inst [$::block getInsts] { dict set names [$inst getName] 1 }
+    # MEASURED on spm x gf180mcuD (0.3.83, replay of 32-cand01): after
+    # `repair_antennas` FOUR nets had no wire -- the two it put diodes on and
+    # reported (`grt::repaired_net_names`: net48 net65), plus net47 and
+    # _vibeic_aux_tie_0040, both routed a moment before. Routing only the
+    # reported set shipped those two unrouted; so the set routed again is
+    # every net this call took, by census, not by what the tool says it did.
+    set routed [vic_routed_nets]
     set ant_args [list [lindex [split $::env(DIODE_CELL) "/"] 0]]
     append_if_exists_argument ant_args DRT_ANTENNA_REPAIR_MARGIN -ratio_margin
     if {[catch {log_cmd repair_antennas {*}$ant_args} err]} {
@@ -352,22 +403,38 @@ if {$::vic_ant_eco > $::vic_ant_before && [info exists ::env(DIODE_CELL)]
         foreach pair $locked { [lindex $pair 0] setPlacementStatus [lindex $pair 1] }
         check_placement -verbose
         global_connect
-        set ::vic_ant_dirty [dict create]
-        foreach inst $::vic_diodes {
-            lappend ::vic_created $inst
-            foreach it [$inst getITerms] {
-                set net [$it getNet]
-                if {$net ne "NULL" && [$net getSigType] ni {POWER GROUND}} {
-                    dict set ::vic_ant_dirty [$net getName] $net
-                }
+    }
+    set ::vic_ant_dirty [dict create]
+    foreach inst $::vic_diodes {
+        lappend ::vic_created $inst
+        foreach it [$inst getITerms] {
+            set net [$it getNet]
+            if {$net ne "NULL" && [$net getSigType] ni {POWER GROUND}} {
+                dict set ::vic_ant_dirty [$net getName] $net
             }
         }
-        if {![vic_eco_route ::vic_ant_dirty antenna_route]} {
-            puts stderr "VIBEIC_PRR_ECO_ROUTE_REFUSED: the antenna repair's scoped route added whole-design violations"
-            exit 1
+    }
+    set reported [expr {[llength [info commands grt::repaired_net_names]]
+                        ? [grt::repaired_net_names] : [list]}]
+    foreach name $reported {
+        set net [$::block findNet $name]
+        if {$net ne "NULL"} { dict set ::vic_ant_dirty $name $net }
+    }
+    dict for {name net} [vic_lost_routes $routed] {
+        if {![dict exists $::vic_ant_dirty $name]} {
+            dict set ::vic_ant_ripped $name $net
+            dict set ::vic_ant_dirty $name $net
         }
     }
+    if {[dict size $::vic_ant_ripped]} {
+        vic_say "antenna repair took the wire of [dict size $::vic_ant_ripped] net(s) it did not report: [dict keys $::vic_ant_ripped]"
+    }
+    if {![vic_eco_route ::vic_ant_dirty antenna_route]} {
+        puts stderr "VIBEIC_PRR_ECO_ROUTE_REFUSED: the antenna repair's scoped route added whole-design violations"
+        exit 1
+    }
 }
+utl::metric_integer vibeic__prr__antenna__ripped_unreported [dict size $::vic_ant_ripped]
 utl::metric_integer vibeic__prr__antenna__after_eco $::vic_ant_eco
 utl::metric_integer vibeic__prr__antenna__diodes [llength $::vic_diodes]
 vic_say "antenna after eco=$::vic_ant_eco diodes=[llength $::vic_diodes]"
@@ -387,7 +454,21 @@ if {[file exists $::env(STEP_DIR)/eco_route.drc]} {
 utl::metric_integer vibeic__prr__route__drc_errors $::vic_drt
 set ::vic_ant [check_antennas]
 utl::metric_integer vibeic__prr__after__antenna__violating_nets $::vic_ant
-vic_say "reverify route_drc=$::vic_drt antenna_nets=$::vic_ant"
+set ::vic_unrouted_after [vic_unrouted_nets]
+set ::vic_unrouted_new [list]
+dict for {name _} $::vic_unrouted_after {
+    if {![dict exists $::vic_unrouted_before $name]} { lappend ::vic_unrouted_new $name }
+}
+utl::metric_integer vibeic__prr__after__unrouted__count [dict size $::vic_unrouted_after]
+utl::metric_integer vibeic__prr__unrouted__added [llength $::vic_unrouted_new]
+vic_say "reverify route_drc=$::vic_drt antenna_nets=$::vic_ant unrouted_added=[llength $::vic_unrouted_new]"
+# A candidate that hands on a net its input had routed and it did not route
+# again is not a route; neither counter above can see one (ANT-0018 skips it,
+# the ECO report covers only the nets it was given).
+if {[llength $::vic_unrouted_new]} {
+    puts stderr "VIBEIC_PRR_LOST_ROUTE_REFUSED: [llength $::vic_unrouted_new] signal net(s) the input had routed carry no wire after the repair: [lrange $::vic_unrouted_new 0 19]; the candidate is not written"
+    exit 1
+}
 
 if {$::vic_fillers > 0} {
     if {[info exists ::env(VIBEIC_PRR_REFILL_TCL)] && $::env(VIBEIC_PRR_REFILL_TCL) ne ""} {
