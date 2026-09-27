@@ -1594,13 +1594,17 @@ def _czl9_sufficiency_gate(project: Path) -> Tuple[bool, str]:
 
 # ── Top-level dispatcher ───────────────────────────────────────────
 
-#: The project THIS invocation of `_main` resolved (None until it has one).
-#: Read only by `main`, right after `_main` returns, to stamp the identity.
+#: The project THIS invocation of `main` resolved (None until it has one).
+#: Read only by `main_recorded`, right after `main` returns, to stamp it.
 _RUN = {"project": None, "second_track_only": False, "extracting": False}
 
 
-def main() -> int:
+def main_recorded() -> int:
     """Phase 1, RECORDED, then stamped with its producer identity.
+
+    The script entry point (`__main__` below), so every run the front door
+    launches is recorded. `main` stays the phase itself: several landed gates
+    read `main`'s own body for the calls it must make, and it must keep them.
 
     FX_STALE_LDOCS. The front door reuses generated L docs only when they are
     what the CURRENT producer would write (`_phase1_producer_identity.assess`),
@@ -1622,7 +1626,7 @@ def main() -> int:
     before = _pid.docs_snapshot(_project_arg())
     recorder = _pid.ProducerRecorder(PROGRAMS_DIR)
     with recorder:
-        rc = _main()
+        rc = globals()["main"]()
     project = _RUN["project"]
     try:
         after = _pid.docs_snapshot(project)
@@ -1639,7 +1643,7 @@ def main() -> int:
 
 
 def _project_arg() -> Optional[Path]:
-    """The project positional, read the way `_main`'s parser will read it."""
+    """The project positional, read the way `main`'s parser will read it."""
     for tok in sys.argv[1:]:
         if not tok.startswith("-"):
             try:
@@ -1650,7 +1654,7 @@ def _project_arg() -> Optional[Path]:
     return None
 
 
-def _main() -> int:
+def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("project", type=Path)
@@ -1955,4 +1959,4 @@ def _main() -> int:
 if __name__ == "__main__":
     # A stall is not a verdict about the subject: it reaches the exit
     # code as rc 2 (UNDETERMINED), announced, never as a finding.
-    sys.exit(_pr.exit_undetermined_on_stall(main))
+    sys.exit(_pr.exit_undetermined_on_stall(main_recorded))

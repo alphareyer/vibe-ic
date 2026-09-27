@@ -244,7 +244,7 @@ def test_a_window_run_over_stale_docs_discloses_and_is_not_green():
 # ---------------------------------------------------------------------------
 def _p1(monkeypatch, body):
     import phase1_one_shot_runner as P1
-    monkeypatch.setattr(P1, "_main", body)
+    monkeypatch.setattr(P1, "main", body)
     return P1
 
 
@@ -260,7 +260,7 @@ def test_phase1_stamps_its_identity_when_it_writes_docs(tmp_path,
         return 0
 
     P1 = _p1(monkeypatch, body)
-    assert P1.main() == 0
+    assert P1.main_recorded() == 0
     rec = SI.read_sidecar(proj / "phase1", "phase1")
     assert rec and rec.get("code") and rec.get("recording"), rec
     assert set(rec["outputs"]) == {f"L{i}_DOC.json" for i in range(1, 14)}
@@ -275,7 +275,7 @@ def test_phase1_that_wrote_nothing_claims_nothing(tmp_path, monkeypatch):
         return 3                    # refused / locked out: never extracted
 
     P1 = _p1(monkeypatch, body)
-    P1.main()
+    P1.main_recorded()
     assert SI.read_sidecar(proj / "phase1", "phase1") is None
 
 
@@ -290,7 +290,7 @@ def test_an_extraction_that_rewrites_identical_bytes_still_stamps(
         return 0                                   # extraction ran, same bytes
 
     P1 = _p1(monkeypatch, body)
-    P1.main()
+    P1.main_recorded()
     assert PID.assess(proj, PROGRAMS)["state"] == "REUSE"
 
 
@@ -309,7 +309,7 @@ def test_a_second_track_pass_that_rewrites_a_doc_refreshes_its_digest(
         return 0
 
     P1 = _p1(monkeypatch, body)
-    P1.main()
+    P1.main_recorded()
     assert PID.assess(proj, PROGRAMS)["state"] == "REUSE"
 
 
