@@ -1003,11 +1003,7 @@ _register(Instrument(
             "each key is one `lec_run` writes, because the landed R-82 control "
             "was first written in a dialect its own grader could not read."),
         artefact=_lec_inconclusive_record),
-    # FX_P2 (owner ruling 2026-09-28): a ladder that ran, ran out of nothing,
-    # found no counterexample and left points unproven is NOT_MEASURED
-    # (inconclusive), never PASS. The instrument still FIRES on it -- the
-    # positive is still refused a clean walk-past; only its word changed.
-    expect="NOT_MEASURED (inconclusive)",
+    expect="FAIL",
     negative=Sample(
         provenance=(
             "A REAL `reports/lec.json` written by `lec_run.py` on 8HD-6: a "
