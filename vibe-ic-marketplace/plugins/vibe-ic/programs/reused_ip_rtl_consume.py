@@ -255,6 +255,48 @@ def discover_supplied_design_sources(project: Path) -> List[Path]:
             if f.suffix in (".v", ".sv") and declares_a_module(f)]
 
 
+def _sha256(path: Path) -> Optional[str]:
+    import hashlib
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def unstaged_supplied_design_sources(project: Path) -> List[Path]:
+    """The supplied design sources that are NOT already in rtl/.
+
+    D10 review (MAJOR): "the supplied RTL was not staged" is a claim about
+    rtl/, so it is checked against rtl/. A supplied source counts as staged
+    when rtl/ holds a file of the same name with the same sha256, or when this
+    program's own SOURCE_MANIFEST `staged_from_input` lists it (it was staged,
+    and may since have been edited in place on purpose). MEASURED before: a
+    second consume, and every rtl_gen re-run after consume, reported the
+    supplied spm.v as NOT staged while rtl/spm.v was byte-identical to it."""
+    rtl_dir = project / "phase2" / "stage1" / "rtl"
+    listed: set = set()
+    try:
+        mf = json.loads((rtl_dir / _MANIFEST_NAME).read_text(errors="replace"))
+        if isinstance(mf, dict) and isinstance(mf.get("staged_from_input"),
+                                               list):
+            listed = {str(x) for x in mf["staged_from_input"]}
+    except (OSError, ValueError):
+        listed = set()
+    out: List[Path] = []
+    for f in discover_supplied_design_sources(project):
+        try:
+            rel = str(f.relative_to(project))
+        except ValueError:
+            rel = str(f)
+        if rel in listed:
+            continue
+        twin = rtl_dir / f.name
+        if twin.is_file() and _sha256(twin) == _sha256(f):
+            continue
+        out.append(f)
+    return out
+
+
 def discover_supplied_unstageable_hdl(project: Path) -> List[Path]:
     """Supplied HDL this program cannot stage (VHDL), screened like
     `discover_provided_build_rtl`. Named so it is never silently dropped."""
@@ -422,7 +464,7 @@ def consume_reused_ip_rtl(project: Path) -> Dict:
                 f"skipped")
             # D10 — say what that skip left out. The design's own input
             # RTL not being built is the one fact a reader of this line needs.
-            _left = discover_supplied_design_sources(project)
+            _left = unstaged_supplied_design_sources(project)
             if _left:
                 _rel = []
                 for f in _left:
