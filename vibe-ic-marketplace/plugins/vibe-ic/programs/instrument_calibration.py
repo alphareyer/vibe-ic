@@ -2328,8 +2328,8 @@ _register(Instrument(
          "detailed routing ends."),
     judge=_judge_flow_log_witness,
     positive=Sample(
-        provenance=(_LL_FLOW_LOG_PROV + "Cut before step 44 (the first 45 "
-                    "kept lines), the shape an aborted run leaves. calibration/"
+        provenance=(_LL_FLOW_LOG_PROV + "Cut before step 44 (the first 78 "
+                    "kept lines, 45 step starts), the shape an aborted run leaves. calibration/"
                     "librelane_flow_log_aborted_positive.log"),
         artefact=_read("librelane_flow_log_aborted_positive.log")),
     expect="UNWITNESSED",

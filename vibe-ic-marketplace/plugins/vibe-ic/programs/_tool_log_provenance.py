@@ -56,8 +56,10 @@ THE ONE READER
 The flow-log grammar is read by two calibrated instruments (see
 ``instrument_calibration``): ``flow_log_steps`` and ``step_block``. When one
 of them may not judge, ``witnessed_row`` refuses (so the caller writes a #365
-back-fill), and ``verify_witness`` returns ``UNCALIBRATED``. That is a
-NOT_MEASURED state, never a FAIL.
+back-fill), and ``verify_witness`` returns ``UNCALIBRATED``, but only after
+every check that needs no reader (the cited shas and folders of points 3-5)
+has held; one that fails is a FAIL whatever the reader says. ``UNCALIBRATED``
+is a NOT_MEASURED state, never a FAIL.
 
 It writes no ``measurement`` record; see ``_runner_measurement``.
 
@@ -354,7 +356,8 @@ def verify_witness(entry: Dict[str, Any], project: Path) -> Tuple[Any, str]:
 
     ``(None, "")`` when the row claims none; ``(True, "")`` only when every
     point in the module docstring still holds; ``(UNCALIBRATED, reason)`` when
-    the flow-log reader may not judge (NOT_MEASURED, never a FAIL);
+    every check that needs no flow-log reader holds and the reader may not
+    judge the rest (NOT_MEASURED, never a FAIL);
     ``(False, reason)`` for every way a claimed witness fails.
     """
     if not claims_witness(entry):
@@ -422,16 +425,9 @@ def verify_witness(entry: Dict[str, Any], project: Path) -> Tuple[Any, str]:
             != str(fl.get("sha256")):
         return False, ("flow.log no longer begins with the bytes the row "
                        "cites")
-    try:
-        block = step_block(prefix.decode("utf-8", errors="replace"),
-                           step_id, step_rel)
-    except instrument_calibration.Uncalibrated as exc:
-        return UNCALIBRATED, f"the flow-log reader may not judge: {exc}"
-    if block is None:
-        return False, (f"the flow's own log never started {step_id!r} in "
-                       f"{step_rel!r}")
-    if block["skipped"]:
-        return False, f"the flow's own log reports {step_id!r} skipped"
+    # Every check that needs no flow-log reader runs FIRST, so a reader that
+    # may not judge can never turn a witness whose evidence is gone or
+    # rewritten into NOT_MEASURED: that is a FAIL whatever the reader says.
     comp = w.get("completion")
     if not isinstance(comp, dict) or \
             comp.get("path") != f"{step_rel}/state_out.json":
@@ -442,15 +438,10 @@ def verify_witness(entry: Dict[str, Any], project: Path) -> Tuple[Any, str]:
     logs = w.get("logs")
     if not isinstance(logs, list) or not logs:
         return False, "the witness cites no tool log"
-    named = block["subprocess_logs"]
     for obj in logs:
         p, why = _cited(obj, "step log", step_abs)
         if p is None:
             return False, why
-        if not any(_ends_with(parts, _parts(str(obj["path"])))
-                   for parts in named):
-            return False, (f"cited step log {obj['path']} is not a transcript "
-                           "the flow's own log names for this step")
     sources = w.get("sources")
     outputs = entry.get("outputs") or {}
     if not isinstance(sources, dict) or set(sources) != set(outputs):
@@ -462,6 +453,24 @@ def verify_witness(entry: Dict[str, Any], project: Path) -> Tuple[Any, str]:
         if _bare(obj["sha256"]) != _bare(outputs[canon]):
             return False, (f"{canon} is declared with bytes other than its "
                            f"source {obj['path']}")
+    # Only what the flow's own log says is left: started, not skipped, and
+    # each cited log a transcript it names.
+    try:
+        block = step_block(prefix.decode("utf-8", errors="replace"),
+                           step_id, step_rel)
+    except instrument_calibration.Uncalibrated as exc:
+        return UNCALIBRATED, f"the flow-log reader may not judge: {exc}"
+    if block is None:
+        return False, (f"the flow's own log never started {step_id!r} in "
+                       f"{step_rel!r}")
+    if block["skipped"]:
+        return False, f"the flow's own log reports {step_id!r} skipped"
+    named = block["subprocess_logs"]
+    for obj in logs:
+        if not any(_ends_with(parts, _parts(str(obj["path"])))
+                   for parts in named):
+            return False, (f"cited step log {obj['path']} is not a transcript "
+                           "the flow's own log names for this step")
     return True, ""
 
 

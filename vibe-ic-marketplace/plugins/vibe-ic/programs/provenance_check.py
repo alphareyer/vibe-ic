@@ -147,8 +147,10 @@ def _find_entry(entries: List[dict], out_rel: str,
     witness re-verifies against `project`: a cited log that is gone, rewritten
     or not started by the flow is a fabricated witness, not a weaker one. A
     plain logged run or a #365 back-fill claims none and is judged as before.
-    A witness the flow-log reader may not judge (UNCALIBRATED) still binds;
-    `main` then reports that artefact NOT_MEASURED, never PASS or FAIL.
+    A witness whose reader-free evidence all holds but which the flow-log
+    reader may not judge (UNCALIBRATED) still binds; `main` then reports that
+    artefact NOT_MEASURED, never PASS, unless the run states it measured
+    nothing (a --require-measured hard miss, which FAILs first).
     """
     reasons: List[str] = []
     matches = []
@@ -332,17 +334,16 @@ def main(argv: List[str] | None = None) -> int:
                 overall_ok = False
                 continue
 
+            # A witness the flow-log reader may not judge. `_find_entry` bound
+            # it only after every check that needs no reader held, and it is
+            # reported NOT_MEASURED only AFTER the --require-measured hard
+            # miss below: a run that states it measured nothing is a FAIL
+            # whether or not its witness can be judged.
+            unjudged = None
             if _tool_log_provenance.claims_witness(entry):
                 ok, why = _tool_log_provenance.verify_witness(entry, project)
                 if ok == _tool_log_provenance.UNCALIBRATED:
-                    check["status"] = "NOT_MEASURED"
-                    check["reason_class"] = "uncalibrated"
-                    check["reasons"].append(
-                        f"the witness of the run bound to this artefact could "
-                        f"not be judged: {why}")
-                    report["checks"].append(check)
-                    uncalibrated.append(out_rel)
-                    continue
+                    unjudged = why
 
             # ── THE MEASUREMENT QUESTION, asked where the binding is
             # decided. By here the artefact IS bound to an exit-0 run by this
@@ -366,6 +367,18 @@ def main(argv: List[str] | None = None) -> int:
                     report["checks"].append(check)
                     overall_ok = False
                     continue
+
+            if unjudged is not None:
+                check["status"] = "NOT_MEASURED"
+                check["reason_class"] = "uncalibrated"
+                check["reasons"].append(
+                    f"the witness of the run bound to this artefact could "
+                    f"not be judged: {unjudged}")
+                report["checks"].append(check)
+                uncalibrated.append(out_rel)
+                continue
+
+            if args.require_measured:
                 if meas.undeclared:
                     # NOT a failure and NOT a pass. See the module docstring.
                     check["status"] = "UNMEASURED"
