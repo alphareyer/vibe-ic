@@ -95,7 +95,7 @@ __all__ = [
     "activity_provenance", "parse_power_report", "read_power_report",
     "metric_records", "total_record", "comparable", "compare_total_power",
     "V_A_LOWER", "V_B_LOWER", "V_EQUAL", "V_UNDETERMINED",
-    "pdn_ring_dimensions",
+    "pdn_ring_dimensions", "pdn_strap_min_core_span_um",
     "POWER_VERDICT_MEASURED", "signoff_record", "emit_signoff_record",
     "retire_signoff_record",
     "verdict_is_backed_by_a_number",
@@ -134,6 +134,54 @@ def pdn_ring_dimensions(cfg: Dict[str, Any]
 
     footprint = max(2.0 * widths_f[i] + spacings_f[i] for i in range(2))
     return offset, clearance, widths_f, spacings_f, footprint
+
+
+def pdn_strap_min_core_span_um(stripes: Sequence[Mapping[str, Any]], *,
+                               nets: int = 2,
+                               site_dims_um: Optional[Tuple[float, float]] = None
+                               ) -> Tuple[Optional[int], str]:
+    """The smallest CORE side (um) on which every strap group of `stripes` fits.
+
+    pdngen lays one group per period: `nets` straps of `width` at the default
+    spacing `pitch/nets - width`, so a group spans `width + (nets-1)*pitch/nets`
+    and must start at `offset`. It refuses the grid when the core's extent is
+    shorter than `offset + group`. MEASURED in image 0.3.83 on gf180mcuD
+    (Metal4 1.6/153.6/16.32, Metal5 1.6/153.18/16.65; 2 nets): a 94.64 um
+    row extent was refused for Metal4 (needs 94.72), 94.08 for Metal5 (needs
+    94.84), and a 99.68 x 98.0 core built the grid.
+
+    The extent pdngen measures is the core after rows snap to the site grid,
+    which is up to one site width / row height short of the rectangle asked
+    for; so each axis is rounded UP to whole sites/rows and one more step is
+    added. Unknown site: +5 % instead. Returns `(None, why)` with no strap.
+    """
+    need = 0.0
+    worst = ""
+    n = max(int(nets), 1)
+    for st in stripes or []:
+        try:
+            w = float(st.get("width"))
+            p = float(st.get("pitch"))
+            off = float(st.get("offset") or 0.0)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if not (w > 0 and p > 0):
+            continue
+        span = off + w + (n - 1) * p / n
+        if span > need:
+            need, worst = span, (f"{st.get('layer')} offset {off:g} + width {w:g}"
+                                 f" + {n - 1}x pitch {p:g}/{n} = {span:.2f} um")
+    if need <= 0:
+        return None, "no strap with a width and pitch in the plan"
+    steps = [s for s in (site_dims_um or ()) if s and s > 0]
+    if steps:
+        side = max(math.ceil(need / s) * s + s for s in steps)
+        snap = (f"rounded up to whole site/row steps {'/'.join(f'{s:g}' for s in steps)} um"
+                f" plus one step for row snapping")
+    else:
+        side = need * 1.05
+        snap = "+5 % for row snapping (site size unknown)"
+    return int(math.ceil(side - 1e-9)), f"{worst}; {snap}"
 
 
 def pdn_rail_pitch_plan(segments: Sequence[Mapping[str, Any]], *,

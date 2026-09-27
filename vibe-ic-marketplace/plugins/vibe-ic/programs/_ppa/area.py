@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -896,6 +897,120 @@ def real_core_placement_density(cell_area_um2: float, core_w: int, core_h: int,
              f"({core_area:.0f}um^2) = natural {100.0 * natural:.2f}%, "
              f"x{_PLACEMENT_SPREAD_HEADROOM:g} headroom{clamped}")
     return density, basis
+
+
+# ── N4 — `--die-um auto` sizes the CORE from the cells this netlist HAS ─────
+# MEASURED, spm x gf180mcuD as a HARDMACRO (lane cmpb, 2026-09-28, image
+# 0.3.83): the auto-sizer took the mean cell to be `site area x 6.0` -- a
+# sky130-hd width in sites -- so 2.195 um^2 x 6 = 13.17 um^2, where this
+# netlist's own synthesis stat says 8857.632 um^2 / 273 cells = 32.4 um^2.
+# It then made that area the DIE and cut a 10 um inset out of it: an 85 um die,
+# a 65 um core, OpenROAD `Effective utilization: 2.193`, and a core narrower
+# than one period of the PDK's own power straps. No per-PDK constant can be
+# right for every library, so there is none here: the area is READ -- from the
+# synthesis stat bound to this exact netlist, else from each instance's own LEF
+# SIZE -- and when neither can be read the caller is told so.
+
+
+def lef_site_dims_um(lef_text: str, site_name: str = ""
+                     ) -> Optional[Tuple[float, float]]:
+    """`(width, height)` in um of a LEF SITE DEFINITION, or None.
+
+    The definition is a bare `SITE <name>` line bounded by its `END <name>`;
+    the `SITE <name> ;` inside every MACRO is a reference and is never read.
+    Selection: the site literally named `site_name` (the one the floorplan
+    builds rows from), else the first `CLASS CORE` site, else the first that
+    parses. chip-AGNOSTIC: LEF grammar only.
+    """
+    if not isinstance(lef_text, str) or not lef_text:
+        return None
+    named = core = first = None
+    want = (site_name or "").strip().lower()
+    for m in re.finditer(r"^[ \t]*SITE[ \t]+([^\s;]+)[ \t\r]*$",
+                         lef_text, re.MULTILINE | re.IGNORECASE):
+        name = m.group(1)
+        blk = lef_text[m.end():]
+        end = re.search(rf"^[ \t]*END[ \t]+{re.escape(name)}[ \t\r]*$",
+                        blk, re.MULTILINE | re.IGNORECASE)
+        if end:
+            blk = blk[:end.start()]
+        sm = re.search(r"\bSIZE\s+([0-9.]+)\s+BY\s+([0-9.]+)\s*;",
+                       blk, re.IGNORECASE)
+        if not sm:
+            continue
+        try:
+            w, h = float(sm.group(1)), float(sm.group(2))
+        except ValueError:
+            continue
+        if not (w > 0 and h > 0):
+            continue
+        if want and name.lower() == want and named is None:
+            named = (w, h)
+        if core is None and re.search(r"\bCLASS\s+CORE\s*;", blk, re.IGNORECASE):
+            core = (w, h)
+        if first is None:
+            first = (w, h)
+    if named is not None:
+        return named
+    return core if core is not None else first
+
+
+def synth_stat_cell_area_um2(netlist: Path) -> Tuple[Optional[float], str]:
+    """The cell area the synthesis stat reports for THIS netlist, in um^2.
+
+    Read from `<netlist dir>/stats.json` (schema `vibe-ic/synth-stats/1`) only
+    when all three hold: the record names this netlist, its recorded sha256 is
+    this file's, and its unit was ESTABLISHED as um^2 (liberty area checked
+    against the cell LEF). A figure for another netlist, or in an unproven
+    library unit, is not this design's area. Returns `(None, why)` otherwise.
+    """
+    try:
+        import _yosys_stat as _ys  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        return None, f"_yosys_stat could not be imported: {exc}"
+    stats = Path(netlist).parent / _ys.STATS_FILENAME
+    try:
+        rec = json.loads(stats.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"no readable synthesis stat at {stats.name} ({type(exc).__name__})"
+    if not isinstance(rec, dict):
+        return None, f"{stats.name} is not a record"
+    named = Path(str(rec.get("netlist") or "").replace("\\", "/")).name
+    if named != Path(netlist).name:
+        return None, f"{stats.name} describes {named or 'no netlist'}, not {Path(netlist).name}"
+    recorded = str(rec.get(_ys.NETLIST_DIGEST_FIELD) or "").strip().lower()
+    if not recorded or recorded != _ys.netlist_digest(Path(netlist)):
+        return None, f"{stats.name} is not bound to this netlist's sha256"
+    area = rec.get("chip_area")
+    ev = rec.get("chip_area_unit_evidence") or {}
+    if not (isinstance(area, (int, float)) and area > 0):
+        return None, f"{stats.name} carries no positive chip_area"
+    if rec.get("chip_area_unit") != "um^2" or not (isinstance(ev, dict) and ev.get("established")):
+        return None, f"{stats.name} chip_area unit is not established as um^2"
+    return float(area), (f"synthesis stat {stats.name} (chip_area {float(area):g} um^2, "
+                         f"bound to {recorded[:19]}…)")
+
+
+def instance_cell_area_um2(master_counts: Mapping[str, int],
+                           macro_sizes: Mapping[str, Tuple[float, float]]
+                           ) -> Tuple[Optional[float], str]:
+    """Sum of every instance's own LEF SIZE (w x h), or `(None, why)`.
+
+    Every master must resolve: a sum over the masters that happened to be in
+    one LEF is an under-count of unknown size, which is the defect this
+    replaces in a different spelling.
+    """
+    if not master_counts:
+        return None, "the netlist instantiates no cells"
+    missing = sorted(m for m in master_counts if m not in macro_sizes)
+    if missing:
+        return None, (f"{len(missing)} master(s) carry no LEF SIZE "
+                      f"(e.g. {', '.join(missing[:3])})")
+    area = sum(n * macro_sizes[m][0] * macro_sizes[m][1]
+               for m, n in master_counts.items())
+    n = sum(master_counts.values())
+    return float(area), (f"sum of {n} instances' LEF SIZE over "
+                         f"{len(master_counts)} master(s)")
 
 
 def _write_json(path_s: Optional[str], doc: Mapping[str, Any]) -> None:

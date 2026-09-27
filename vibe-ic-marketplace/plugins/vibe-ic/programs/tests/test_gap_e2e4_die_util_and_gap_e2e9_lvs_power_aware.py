@@ -65,7 +65,9 @@ class TestAutoDieRoutingHeadroomTarget:
         out, note = mod._resolve_auto_die_um("auto", nl, 0.40, self._Pdk())
         side = int(out.lower().split("x")[0])
         avg = mod._AUTO_DIE_FALLBACK_CELL_UM2
-        util = 5000 * avg / (side * side)
+        # N4: the target utilisation is the CORE's; the die adds the inset.
+        core = side - 2 * mod._AUTO_DIE_CORE_INSET_UM
+        util = 5000 * avg / (core * core)
         # The design lands near the 0.25 routing-headroom target, NOT the 0.40
         # placement util that was passed in.
         assert util == pytest.approx(mod._AUTO_DIE_TARGET_UTIL, rel=0.05)
