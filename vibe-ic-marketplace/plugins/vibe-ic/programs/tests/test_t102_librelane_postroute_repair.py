@@ -279,21 +279,96 @@ def _cand(setup, hold, drv=(0, 0, 0), *, changed=1, owned=True, antenna=0):
             'repair_metrics': {'vibeic__prr__changed': changed}}
 
 
-def test_a_drv_fix_that_gives_up_setup_is_rolled_back(tmp_path, monkeypatch):
-    """T98's finding: a DRV repair took SS setup +3.33 -> +0.14 because it was
-    the first candidate that passed DRV. Setup is re-measured on every
-    candidate, so that candidate is rolled back and the input route stays."""
+def _with_floors(impl, floors):
+    ctx = json.loads((impl / prr.CONTEXT).read_text())
+    ctx['floors'] = floors
+    (impl / prr.CONTEXT).write_text(json.dumps(ctx))
+
+
+def test_the_ll21_max_fanout_repair_is_adopted_with_setup_still_met(tmp_path, monkeypatch):
+    """OWNER RULING (T102 r3), on the case measured on the spm LL15..21 chain:
+    3 max_fanout violations per corner (27), the only fix costs setup
+    +5.259 -> +3.086. A HARD-violation repair may spend MET setup slack down
+    to the declared floor (spm declares none: WNS >= 0)."""
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.259, 0.391, (0, 0, 3)),
+        candidates=[_cand(3.086, 0.391, (0, 0, 0))])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_drv')
+    assert [it.decision for it in run.iterations] == ['PROMOTED'], run.to_record()
+    assert run.outcome is closure.Outcome.CONVERGED
+    assert 'hard-violation repair spent: timing.setup.wns_ns: 5.259 -> 3.086' \
+        in run.iterations[0].decision_reason
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] == '32-cand01'
+
+
+def test_a_hard_repair_that_makes_setup_negative_is_rejected(tmp_path, monkeypatch):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(0.8, 0.391, (0, 0, 3)),
+        candidates=[_cand(-0.05, 0.391, (0, 0, 0))])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_drv')
+    assert run.iterations[0].decision == 'ROLLED_BACK'
+    assert 'below its floor 0.0' in run.iterations[0].decision_reason
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+
+
+def test_a_hard_repair_stops_at_the_declared_floor(tmp_path, monkeypatch):
+    """T98's case (+3.33 -> +0.14) against a design that DECLARES 0.5 ns of
+    setup margin: the floor is the declaration's, and 0.14 is below it."""
     project, arm, impl, shim = _scenario_impl(
         tmp_path, baseline=(3.33, 0.2, (4, 0, 0)),
         candidates=[_cand(0.14, 0.2, (0, 0, 0))])
+    _with_floors(impl, {'setup': [0.5, 'L8_TIMING_WAVEFORM.json setup_margin_ns']})
     ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
-    assert ctl.run_controller('postroute.repair_setup').outcome is closure.Outcome.NOT_TRIGGERED
     run = ctl.run_controller('postroute.repair_drv')
-    assert run.iterations and run.iterations[0].decision == 'ROLLED_BACK', run.to_record()
-    assert 'timing.setup.wns_ns: 3.33 -> 0.14' in run.iterations[0].decision_reason
-    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
-    ledger = json.loads((arm / prr.LEDGER).read_text())['candidates']
-    assert [r['decision'] for r in ledger] == ['PROPOSED']
+    assert run.iterations[0].decision == 'ROLLED_BACK'
+    assert 'below its floor 0.5' in run.iterations[0].decision_reason
+    rec = run.to_record()['iterations'][0]['measurements']['timing.setup']
+    assert rec['floor'] == {'value': 0.5, 'source': 'L8_TIMING_WAVEFORM.json setup_margin_ns'}
+
+
+def test_a_soft_only_candidate_still_follows_the_one_ps_rule(tmp_path, monkeypatch):
+    """No hard violation is being fixed (a hold repair): setup may not move
+    more than the declared 1 ps, however much slack stays."""
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.259, -0.1),
+        candidates=[_cand(5.0, 0.2)])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_hold')
+    assert run.iterations[0].decision == 'ROLLED_BACK'
+    assert 'timing.setup.wns_ns: 5.259 -> 5.0 (maximize)' in run.iterations[0].decision_reason
+
+
+def test_the_floor_comes_from_declared_inputs_only(tmp_path):
+    project = tmp_path / 'p'
+    sdc = write(project / 'c.sdc', 'create_clock -name clk -period 10 [get_ports clk]\n')
+    f = prr.declared_timing_floor(project, sdc)
+    assert f['setup'][0] == 0.0 and 'WNS >= 0' in f['setup'][1]
+    write(sdc, 'set_clock_uncertainty -setup 0.25 [get_clocks clk]\n'
+               'set_clock_uncertainty 0.1 [get_clocks clk] # both checks\n')
+    f = prr.declared_timing_floor(project, sdc)
+    assert f['setup'][0] == 0.25 and 'set_clock_uncertainty' in f['setup'][1]
+    assert f['hold'][0] == 0.1
+    put(project / 'phase1/generated_docs/L8_TIMING_WAVEFORM.json',
+        {'timing': {'setup_margin_ns': 0.4}})
+    f = prr.declared_timing_floor(project, sdc)
+    assert f['setup'] == (0.4, 'L8_TIMING_WAVEFORM.json setup_margin_ns')
+    assert f['hold'][0] == 0.1
+
+
+def test_hardness_and_floor_are_declared_in_the_registry(tmp_path):
+    import yaml
+    reg = closure.load_registry(REGISTRY)
+    assert reg.domains['timing.drv'].hardness == 'hard'
+    assert reg.domains['antenna.violations'].hardness == 'hard'
+    assert reg.domains['timing.setup'].hardness == 'soft'
+    assert reg.domains['timing.setup'].floor_pointer == '/floor'
+    doc = yaml.safe_load(REGISTRY.read_text())
+    doc['domains']['timing.drv']['floor_pointer'] = '/floor'
+    bad = write(tmp_path / 'r.yaml', yaml.safe_dump(doc))
+    with pytest.raises(closure.RegistryError, match='HARD domain has no floor'):
+        closure.load_registry(bad)
 
 
 def test_a_setup_violation_is_repaired_and_the_improving_candidate_adopted(tmp_path, monkeypatch):

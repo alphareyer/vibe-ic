@@ -116,6 +116,14 @@ domains:
   # cannot answer (a corner unreported, a State that is not the one adopted),
   # which is NOT_MEASURED, never a number.
   #
+  # OWNER RULING (T102 r3): an iteration that removes HARD violations (DRV,
+  # antenna: `hardness: hard`) may spend setup/hold slack down to the floor the
+  # measurement derives from the design's DECLARED inputs (the spec's setup /
+  # hold margin, else the SDC's clock uncertainty, else WNS >= 0 on the
+  # sign-off scene) -- `floor_pointer` names where the measurement puts it,
+  # never a number here. A hard domain never regresses. Without a hard repair
+  # the 1 ps tolerance below is the rule.
+  #
   # regression_tolerance on the two slack domains, MEASURED (spm x gf180mcuD,
   # vibeic-eda 0.3.79, lane mig102 arm L): a hold repair that inserted 17
   # buffers on input paths took worst hold -0.335 -> +0.326 ns and moved
@@ -139,6 +147,7 @@ domains:
       argv_template: ["measure", "--domain", "setup", "--json", "{json_out}"]
       extract: {kind: json_pointer, pointer: "/value"}
       undetermined_rcs: [2, 3]
+    floor_pointer: "/floor"
     regression_tolerance: 0.001
     satisfied_when: {op: ">=", value: 0.0}
 
@@ -156,6 +165,7 @@ domains:
       argv_template: ["measure", "--domain", "hold", "--json", "{json_out}"]
       extract: {kind: json_pointer, pointer: "/value"}
       undetermined_rcs: [2, 3]
+    floor_pointer: "/floor"
     regression_tolerance: 0.001
     satisfied_when: {op: ">=", value: 0.0}
 
@@ -166,6 +176,7 @@ domains:
     metric: timing.drv.violation_count
     unit: count
     direction: minimize
+    hardness: hard
     binding: EXECUTABLE
     flow_steps: ["23", "32"]
     measure:
@@ -213,6 +224,7 @@ domains:
     metric: antenna.violation_count
     unit: count
     direction: minimize
+    hardness: hard
     binding: EXECUTABLE
     flow_steps: ["21", "26", "32"]
     measure:

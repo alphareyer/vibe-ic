@@ -260,9 +260,15 @@ def measure(impl: Path, domain: str, json_out: Path) -> int:
     if value is None:
         print(f"{domain}: the adopted candidate does not carry it", file=sys.stderr)
         return RC_UNDETERMINED
-    write_json(json_out, {"domain": domain, "value": value,
-                          "candidate": cur.get("candidate"),
-                          "sta_state": str(sta)})
+    doc = {"domain": domain, "value": value, "candidate": cur.get("candidate"),
+           "sta_state": str(sta)}
+    try:
+        floor = (_load(impl / CONTEXT).get("floors") or {}).get(domain)
+    except (OSError, ValueError):
+        floor = None
+    if floor:
+        doc["floor"], doc["floor_source"] = floor
+    write_json(json_out, doc)
     return 0
 
 
@@ -385,6 +391,79 @@ def signoff_scene_sdc(sdc: Path, out: Path, derate_early: float,
     return out
 
 
+#: The spec's declared timing margins (structured L-doc fields, ns).
+SPEC_MARGIN_KEYS = {"setup": ("setup_margin_ns",), "hold": ("hold_margin_ns",)}
+SPEC_MARGIN_LDOCS = ("L8_TIMING_WAVEFORM.json", "L19_CONSTRAINTS_PDK.json")
+
+
+def _walk_numbers(node: Any, keys: Sequence[str]) -> List[float]:
+    found: List[float] = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k in keys and isinstance(v, (int, float)) and not isinstance(v, bool):
+                found.append(float(v))
+            else:
+                found.extend(_walk_numbers(v, keys))
+    elif isinstance(node, list):
+        for v in node:
+            found.extend(_walk_numbers(v, keys))
+    return found
+
+
+def sdc_clock_uncertainty(sdc_text: str) -> Dict[str, List[float]]:
+    """`set_clock_uncertainty` values the SDC declares, by check. A command
+    with neither -setup nor -hold applies to both (the SDC standard)."""
+    out: Dict[str, List[float]] = {"setup": [], "hold": []}
+    for line in sdc_text.splitlines():
+        words = line.split("#", 1)[0].split()
+        if not words or words[0] != "set_clock_uncertainty":
+            continue
+        value = None
+        for word in words[1:]:
+            try:
+                value = float(word)
+                break
+            except ValueError:
+                continue
+        if value is None:
+            continue
+        checks = [c for c in ("setup", "hold") if f"-{c}" in words[1:]] or ["setup", "hold"]
+        for check in checks:
+            out[check].append(value)
+    return out
+
+
+def declared_timing_floor(project: Path, sdc: Path) -> Dict[str, Tuple[float, str]]:
+    """The floor a HARD-violation repair may spend setup/hold slack down to,
+    from the design's DECLARED inputs only (owner ruling, T102 r3): the spec's
+    declared margin, else the SDC's own clock uncertainty, else 0 (WNS >= 0 on
+    the sign-off scene). Never a typed number."""
+    docs = project / "phase1/generated_docs"
+    floors: Dict[str, Tuple[float, str]] = {}
+    try:
+        unc = sdc_clock_uncertainty(sdc.read_text(errors="replace"))
+    except OSError:
+        unc = {"setup": [], "hold": []}
+    for check, keys in SPEC_MARGIN_KEYS.items():
+        spec = []
+        for name in SPEC_MARGIN_LDOCS:
+            path = docs / name
+            try:
+                spec += [(v, f"{name} {'/'.join(keys)}")
+                         for v in _walk_numbers(json.loads(path.read_text()), keys)]
+            except (OSError, ValueError):
+                continue
+        if spec:
+            floors[check] = max(spec)
+        elif unc[check]:
+            floors[check] = (max(unc[check]),
+                             f"{sdc.name} set_clock_uncertainty ({check})")
+        else:
+            floors[check] = (0.0, "no declared margin or uncertainty: "
+                                  "WNS >= 0 on the sign-off scene")
+    return floors
+
+
 def _refused_by_tool(report: Dict[str, Any], cap: Dict[str, Any], out: Path) -> bool:
     report["fork_capability"] = cap
     if cap.get("capable") is True:
@@ -429,7 +508,8 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
               configs: Dict[str, Path], corners: List[str],
               mounts: List[Tuple[Path, str]], controllers: Sequence[str] = CONTROLLERS,
               registry: Optional[Path] = None,
-              programs_dir: Optional[Path] = None) -> Dict[str, Any]:
+              programs_dir: Optional[Path] = None,
+              floors: Optional[Dict[str, Tuple[float, str]]] = None) -> Dict[str, Any]:
     """One repair arm from `state0`: the census baseline (same instruments as
     every candidate), then the closure's controllers in order. With no
     controllers it is the measurement of `state0` alone (a route that is its
@@ -444,7 +524,8 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
     ctx = {"project": str(project.resolve()), "image": image, "pdk": pdk,
            "mounts": [(str(h.resolve()), g) for h, g in mounts],
            "configs": {k: str(v.resolve()) for k, v in configs.items()},
-           "corners": corners, "lane": lane, "arm": name}
+           "corners": corners, "lane": lane, "arm": name,
+           "floors": {k: list(v) for k, v in (floors or {}).items()}}
     write_json(impl / CONTEXT, ctx)
     ledger = _ledger_path(impl)
     if ledger.is_file():
@@ -457,6 +538,7 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
                                 "repair_state": str(state0), "repair_folder": str(folder0),
                                 "measurement": baseline})
     report: Dict[str, Any] = {"arm": name, "input_state": str(state0), "corners": corners,
+                              "floors": ctx["floors"],
                               "baseline": baseline,
                               "baseline_antenna": baseline.get("antenna_nets")}
     runs = []
@@ -509,7 +591,8 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
                                    docker=docker)
     report.update(close_arm(project, "librelane", state0, image=image, pdk=pdk,
                             configs=configs, corners=corners, mounts=mounts,
-                            registry=registry, programs_dir=programs_dir))
+                            registry=registry, programs_dir=programs_dir,
+                            floors=declared_timing_floor(project, sdc)))
     report["verdict"] = "PASS"
     write_json(out, report)
     return report
@@ -605,7 +688,8 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
         project, image=image, pdk=pdk, pdk_root=pdk_root, sdc=sdc, derate=derate,
         pg_rules_tcl=pg_rules_tcl, refill_tcl=None, docker=docker)
     common = dict(image=image, pdk=pdk, configs=configs, corners=corners, mounts=mounts,
-                  registry=registry, programs_dir=programs_dir)
+                  registry=registry, programs_dir=programs_dir,
+                  floors=declared_timing_floor(project, sdc))
     if mode != "dual":
         report.update(close_arm(project, "librelane", route_state, **common))
         report["verdict"] = "PASS"
