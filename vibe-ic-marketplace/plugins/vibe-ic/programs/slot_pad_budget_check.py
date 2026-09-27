@@ -1487,13 +1487,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             rc = 2
         else:
             _inv = declared_ring_inventory(_ring, ports)
-            # D2: the same two answers step 15.5ic refuses on, stated here
-            # first, from the same reader. A net the ring puts on two edges is
+            # D2: the same answers step 15.5ic refuses on, stated here first,
+            # from the same reader. A net the ring puts on two edges is
             # PORT_ON_TWO_SIDES there; a group row no implemented port (and
-            # no declared rename) resolves leaves its family unbonded.
+            # no accepted declared rename) resolves is PAD_GROUP_UNRESOLVED
+            # there, whether or not it also leaves an RTL bit unbonded (its
+            # family may have no implemented port at all).
             _two_sides = list(_ring.get("nets_on_two_sides") or [])
             _groups_unresolved = list(_ring.get("groups_unresolved") or [])
-            _fits = _inv["unbonded_count"] == 0 and not _two_sides
+            _renames_rejected = list(
+                _ring.get("renamed_interfaces_rejected") or [])
+            _fits = (_inv["unbonded_count"] == 0 and not _two_sides
+                     and not _groups_unresolved)
             # THE ARITHMETIC, STATED (R-0915-101): pads owed, pads the ring
             # places, and the supply pair the ring must also carry. The supply
             # COUNT is an obligation this gate states and does NOT decide on:
@@ -1560,25 +1565,40 @@ def main(argv: Optional[List[str]] = None) -> int:
                     k: _derived[k] for k in
                     ("source", "heading", "by_side", "groups",
                      "groups_unresolved", "renamed_interfaces",
+                     "renamed_interfaces_rejected",
                      "nets_on_two_sides", "documents_scanned",
                      "documents_unreadable", "parameter_defaults")
                     if k in _derived}
             if not _fits:
-                rep["reason"] = (
-                    f"{_inv['unbonded_count']} declared signal bit(s) have no "
-                    f"pad in the ring this design declares: "
-                    + ", ".join(_inv["unbonded_declared_bits"])
-                    + (f"; the ring puts {len(_two_sides)} net(s) on two "
-                       f"edges (PORT_ON_TWO_SIDES at step {OWN_RING_STEP}): "
-                       + ", ".join(_two_sides[:12]) if _two_sides else "")
-                    + (f"; pad-placement group row(s) on side(s) "
-                       f"{', '.join(_groups_unresolved)} resolve to no "
-                       f"implemented port. A reused IP whose ports were "
-                       f"renamed from the document's illustrative names "
-                       f"declares each rename in phase2/stage1/rtl/"
-                       f"SOURCE_MANIFEST.json renamed_interfaces, one pair "
-                       f"per placement group (catalog-glue-author)"
-                       if _groups_unresolved else ""))
+                _why = []
+                if _inv["unbonded_count"]:
+                    _why.append(
+                        f"{_inv['unbonded_count']} declared signal bit(s) "
+                        f"have no pad in the ring this design declares: "
+                        + ", ".join(_inv["unbonded_declared_bits"]))
+                if _two_sides:
+                    _why.append(
+                        f"the ring puts {len(_two_sides)} net(s) on two "
+                        f"edges (PORT_ON_TWO_SIDES at step {OWN_RING_STEP}): "
+                        + ", ".join(_two_sides[:12]))
+                if _groups_unresolved:
+                    _why.append(
+                        f"pad-placement group row(s) on side(s) "
+                        f"{', '.join(_groups_unresolved)} resolve to no "
+                        f"implemented port (PAD_GROUP_UNRESOLVED at step "
+                        f"{OWN_RING_STEP}). A reused IP whose ports were "
+                        f"renamed from the document's illustrative names "
+                        f"declares each rename in phase2/stage1/rtl/"
+                        f"SOURCE_MANIFEST.json renamed_interfaces, one pair "
+                        f"per placement group (catalog-glue-author)"
+                        + (f"; {len(_renames_rejected)} declared pair(s) were "
+                           f"rejected by the rename acceptance rule: "
+                           + "; ".join(
+                               f"{r['l9']}->{r['rtl']}: "
+                               + ", ".join(r["reasons"])
+                               for r in _renames_rejected[:4])
+                           if _renames_rejected else ""))
+                rep["reason"] = "; ".join(_why)
             rc = rep["rc"]
 
     elif _route_na is not None:

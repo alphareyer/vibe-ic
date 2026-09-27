@@ -204,6 +204,29 @@ def _read_top_ports(project: Path) -> List[Dict[str, object]]:
     return [p for p in ports if isinstance(p, dict)]
 
 
+def _implemented_core_ports(project: Path
+                            ) -> Optional[Tuple[Path, List[Dict[str, object]]]]:
+    """(selected netlist, its core's ports as {name, direction, width}), or
+    None when the netlist cannot be read or declares no port. `width` is None
+    when the range is not a literal."""
+    try:
+        from phase3_one_shot_runner import pnr_input_netlist
+        from lec_run import netlist_top_ports
+        spec = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+        core = str(json.loads(spec.read_text()).get("top_module") or "core")
+        netlist, _note, _scan = pnr_input_netlist(project, core)
+        header = netlist_top_ports(netlist.read_text(), core)
+    except Exception:  # noqa: BLE001 — unreadable: the caller decides
+        return None
+    out: List[Dict[str, object]] = []
+    for direction, rng, name in header:
+        m = re.fullmatch(r"\[\s*(-?\d+)\s*:\s*(-?\d+)\s*\]", rng.strip())
+        width = (abs(int(m.group(1)) - int(m.group(2))) + 1 if m
+                 else (1 if not rng.strip() else None))
+        out.append({"name": name, "direction": direction, "width": width})
+    return (netlist, out) if out else None
+
+
 def _drop_unimplemented_optional_ports(
         project: Path, ports: Sequence[Dict[str, object]]
 ) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
@@ -234,18 +257,11 @@ def _drop_unimplemented_optional_ports(
     `declared_by_staged_top: false` where an optional one carries
     `optional: true`. An UNLABELLED absent port still stays.
     """
-    try:
-        from phase3_one_shot_runner import pnr_input_netlist
-        from lec_run import netlist_top_ports
-        spec = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
-        core = str(json.loads(spec.read_text()).get("top_module") or "core")
-        netlist, _note, _scan = pnr_input_netlist(project, core)
-        implemented = {name for _d, _r, name in
-                       netlist_top_ports(netlist.read_text(), core)}
-    except Exception:  # noqa: BLE001 — unreadable: drop nothing
+    selected = _implemented_core_ports(project)
+    if not selected:
         return list(ports), []
-    if not implemented:
-        return list(ports), []
+    netlist, implemented_ports = selected
+    implemented = {p["name"] for p in implemented_ports}
     kept, dropped = [], []
     for p in ports:
         absent = str(p.get("name")) not in implemented
@@ -1041,10 +1057,20 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
 
     # A DECLARED RENAME CARRIES ITS GROUP'S SIDE (D2): the hand-authored
     # SOURCE_MANIFEST pairs, read by the same function step 2 reads them with.
-    renames = LPP.declared_renames(project)
+    # Only a pair phase 2's spec_conformance_check would accept counts
+    # (`accept_renames`); a rejected one is recorded with its reasons.
+    _selected = _implemented_core_ports(project)
+    renames, rejected_renames = LPP.accepted_renames(
+        project, _selected[1] if _selected else None)
     if renames:
         rec["renamed_interfaces"] = [
             {"l9": sorted(l9), "rtl": sorted(rtl)} for l9, rtl in renames]
+    # A refusal below names the rejected pairs too: they are why a group or
+    # a port the author meant to place has no side.
+    rename_evidence = ({"renamed_interfaces_rejected": rejected_renames}
+                       if rejected_renames else None)
+    if rejected_renames:
+        rec["renamed_interfaces_rejected"] = rejected_renames
     grouped, group_records = _resolve_declared_pad_groups(
         placement, functional_ports, renames=renames)
     if group_records:
@@ -1056,7 +1082,8 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
             "the pad placement names group(s) which match no complete "
             "identifier in the design's own top-level port list: "
             + "; ".join(
-                f"{r['side']}={r['statement']!r}" for r in unresolved_groups))
+                f"{r['side']}={r['statement']!r}" for r in unresolved_groups),
+            rename_evidence)
     for side, group_nets in grouped.items():
         side_ports.setdefault(side, []).extend(group_nets)
 
@@ -1081,7 +1108,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         raise Refusal("PORT_WITHOUT_A_SIDE",
                       f"{len(missing)} top-level net(s) are on no edge, and a "
                       f"chip-top that drops a port is a different design: "
-                      f"{missing[:8]}")
+                      f"{missing[:8]}", rename_evidence)
     stray = [n for n in placed if n not in direction_of]
     if stray:
         raise Refusal("SIDE_NAMES_UNKNOWN_PORT",

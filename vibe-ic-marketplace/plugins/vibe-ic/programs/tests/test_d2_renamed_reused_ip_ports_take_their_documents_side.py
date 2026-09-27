@@ -40,6 +40,7 @@ sys.path.insert(0, str(PROGRAMS))
 sys.path.insert(0, str(TESTS))
 
 import _l_doc_pad_placement as LPP                      # noqa: E402
+from _staged_top_module import EXTRACTION_STRATEGY as STAGED  # noqa: E402
 import test_io_pad_chip_top_gen as IO                    # noqa: E402
 
 GEN = PROGRAMS / "io_pad_chip_top_gen.py"
@@ -65,10 +66,15 @@ The I/O cell library is delegated to the PDK i/o pad defaults.
 
 
 def _p(name, direction, staged, width=1, **extra):
+    """An L9 entry. A staged one is what the phase-1 staged-top harvest ADDS
+    (its extraction strategy is exactly the harvester's); a doc one is the
+    document's own, labelled `declared_by_staged_top: false`."""
     port = {"name": name, "direction": direction, "width": width,
             "declared_by_staged_top": staged,
             "evidence": ("input/vendor_rtl/core.v" if staged
                          else "input/docs/L3_external_interface.md")}
+    if staged:
+        port["extraction_strategy"] = STAGED
     if width > 1:
         port.update(msb=width - 1, lsb=0)
     port.update(extra)
@@ -176,10 +182,19 @@ def test_the_wrapper_passes_the_runners_core_connection_backstop(tmp_path):
 # the refusals that stay
 # --------------------------------------------------------------------------- #
 def test_a_pair_spanning_two_groups_is_on_two_sides(tmp_path):
+    # every name in the pair 2 bits wide, so phase 2 accepts it
+    wide = {"o_memory_addr": False, "o_memory_waddr": True}
+    spec = dict(SPEC, top_ports=[
+        _p(p["name"], "output", wide[p["name"]], 2) if p["name"] in wide
+        else p for p in SPEC["top_ports"]])
+    netlist = NETLIST.replace("output o_memory_waddr;",
+                              "output [1:0] o_memory_waddr;")
     pairs = [{"l9": ["o_memory_data", "o_memory_addr"],
               "rtl": ["o_memory_wdata", "o_memory_waddr"]},
              {"l9": ["o_memory_we"], "rtl": ["o_memory_wen"]}]
-    _refused(*_gen(tmp_path, pairs=pairs), "PORT_ON_TWO_SIDES")
+    proj, res, out = _gen(tmp_path, spec=spec, netlist=netlist, pairs=pairs)
+    _refused(proj, res, out, "PORT_ON_TWO_SIDES")
+    assert "renamed_interfaces_rejected" not in IO._record(proj)
 
 
 @pytest.mark.parametrize("kw", [{"pairs": []}, {"pairs": None},
@@ -280,13 +295,28 @@ _STEP2_RTL = ("module widget (input wire i_clk, input wire i_rst,\n"
               "endmodule\n")
 
 _STEP2_PAIRS = [{"l9": ["o_sensor_data"], "rtl": ["o_sensor_wdata"]},
-                {"l9": ["o_sensor_addr", "o_sensor_we"],
-                 "rtl": ["o_sensor_waddr", "o_sensor_wen"]}]
+                {"l9": ["o_sensor_addr"], "rtl": ["o_sensor_waddr"]},
+                {"l9": ["o_sensor_we"], "rtl": ["o_sensor_wen"]}]
+
+#: L9 for the step-2 design: the staged top's ports plus the document's
+#: illustrative ones, as phase 1 writes it.
+_STEP2_L9 = {"top_module": "widget", "top_ports": [
+    _p("i_clk", "input", True), _p("i_rst", "input", True),
+    _p("o_sensor_waddr", "output", True, 2),
+    _p("o_sensor_wdata", "output", True, 2),
+    _p("o_sensor_wen", "output", True), _p("o_gpio", "output", True),
+    _p("o_sensor_data", "output", False, 2),
+    _p("o_sensor_addr", "output", False, 2),
+    _p("o_sensor_we", "output", False)]}
 
 
-def _step2(pairs):
+def _step2(pairs, l9=_STEP2_L9, rtl=_STEP2_RTL, l3=_STEP2_L3):
     import test_r0915101_a_die_budgets_against_its_own_pad_ring as R0915
-    proj = R0915._project(rtl=_STEP2_RTL, l3=_STEP2_L3)
+    proj = R0915._project(rtl=rtl, l3=l3)
+    if l9 is not None:
+        docs = proj / "phase1/generated_docs"
+        docs.mkdir(parents=True, exist_ok=True)
+        (docs / "L9_INTEGRATION_SPEC.json").write_text(json.dumps(l9))
     if pairs is not None:
         (proj / "phase2/stage1/rtl/SOURCE_MANIFEST.json").write_text(
             json.dumps({"reused_ip": True, "renamed_interfaces": pairs}))
@@ -374,3 +404,125 @@ def test_the_librelane_chip_path_refuses_a_phantom_pad_before_assignment(
         assert result.extras["finding"] == finding, result.detail
         assert result.detail.startswith(finding) and unknown in result.detail
         assert execs == []
+
+
+# --------------------------------------------------------------------------- #
+# a pair counts only when phase 2's rename acceptance rule accepts it
+# (spec_conformance_check: port-rename-*); step 2 and 15.5ic apply it alike
+# --------------------------------------------------------------------------- #
+_IMPL = [{"name": "o_memory_wdata", "dir": "output", "width": 2},
+         {"name": "o_memory_wen", "dir": "output", "width": 1},
+         {"name": "o_status", "dir": "output", "width": 1}]
+
+
+@pytest.mark.parametrize("pair,l9_extra,reason", [
+    (({"o_memory_ghost"}, {"o_memory_wdata"}), [],
+     "l9 'o_memory_ghost' is no L9 top_ports entry"),
+    (({"o_status"}, {"o_memory_wdata"}), [_p("o_status", "output", False)],
+     "l9 'o_status' is still an implemented port"),
+    (({"o_memory_data"}, {"o_memory_rdata"}), [],
+     "rtl 'o_memory_rdata' is no implemented port"),
+    (({"o_memory_data"}, {"o_memory_wdata"}),
+     [_p("o_memory_wdata", "output", False, 2)],
+     "rtl 'o_memory_wdata' is a port L9 declares"),
+    (({"o_memory_data"}, {"o_memory_wdata"}),
+     [_p("o_memory_data", "input", False, 2)],
+     "rtl 'o_memory_wdata' is output, l9 'o_memory_data' is input"),
+    (({"o_memory_data"}, {"o_memory_wdata"}),
+     [_p("o_memory_data", "output", False, 3)],
+     "rtl 'o_memory_wdata' is 2 bit(s), l9 'o_memory_data' is 3"),
+], ids=["l9-not-in-L9", "l9-still-implemented", "rtl-not-implemented",
+        "rtl-declared-by-the-document", "direction-changes", "width-changes"])
+def test_a_pair_phase2_rejects_carries_no_side(pair, l9_extra, reason):
+    l9 = [_p("o_memory_wdata", "output", True, 2),
+          _p("o_memory_wen", "output", True),
+          _p("o_memory_data", "output", False, 2)]
+    names = {p["name"] for p in l9_extra}
+    l9 = [p for p in l9 if p["name"] not in names] + l9_extra
+    accepted, rejected = LPP.accept_renames([pair], l9, _IMPL)
+    assert accepted == []
+    assert rejected == [{"l9": sorted(pair[0]), "rtl": sorted(pair[1]),
+                         "reasons": [reason]}]
+
+
+def test_an_accepted_pair_and_an_unreadable_interface():
+    l9 = [_p("o_memory_wdata", "output", True, 2),
+          _p("o_memory_data", "output", False, 2),
+          # width unknown on one side: not compared, as at phase 2
+          {"name": "o_memory_we", "direction": "output"}]
+    pairs = [({"o_memory_data"}, {"o_memory_wdata"}),
+             ({"o_memory_we"}, {"o_memory_wen"})]
+    impl = _IMPL + [{"name": "o_memory_wen", "dir": "output", "width": None}]
+    accepted, rejected = LPP.accept_renames(pairs, l9, impl)
+    assert accepted == pairs and rejected == []
+    # an interface nobody could read accepts NOTHING, never everything
+    accepted, rejected = LPP.accept_renames(pairs, l9, None)
+    assert accepted == [] and len(rejected) == 2
+    assert all(r["reasons"] == ["the implemented interface could not be read"]
+               for r in rejected)
+
+
+def test_a_rejected_pair_cannot_clear_port_without_a_side(tmp_path):
+    """The review's scenario: an implemented port no row names, and a manifest
+    pair from a name L9 does not have whose atoms fit a group row. Phase 2
+    rejects the pair (port-rename-undeclared-spec-port); 15.5ic must too."""
+    spec = dict(SPEC, top_ports=SPEC["top_ports"] + [
+        _p("o_dbg_status", "output", True)])
+    netlist = NETLIST.replace("o_status);", "o_status, o_dbg_status);") \
+        .replace("endmodule", "  output o_dbg_status;\nendmodule")
+    pairs = PAIRS + [{"l9": ["o_data_memory"], "rtl": ["o_dbg_status"]}]
+    proj, res, out = _gen(tmp_path, spec=spec, netlist=netlist, pairs=pairs)
+    _refused(proj, res, out, "PORT_WITHOUT_A_SIDE")
+    assert "o_dbg_status" in out
+    rec = IO._record(proj)
+    assert rec["renamed_interfaces_rejected"] == [{
+        "l9": ["o_data_memory"], "rtl": ["o_dbg_status"],
+        "reasons": ["l9 'o_data_memory' is no L9 top_ports entry"]}]
+
+
+def test_a_width_changing_pair_leaves_its_group_unresolved(tmp_path):
+    spec = dict(SPEC, top_ports=[
+        p if p["name"] != "o_memory_data" else _p("o_memory_data", "output",
+                                                  False, 3)
+        for p in SPEC["top_ports"]])
+    proj, res, out = _gen(tmp_path, spec=spec)
+    _refused(proj, res, out, "PAD_GROUP_UNRESOLVED")
+    rejected = IO._record(proj)["renamed_interfaces_rejected"]
+    assert [r["rtl"] for r in rejected] == [["o_memory_wdata"]]
+    assert "2 bit(s), l9 'o_memory_data' is 3" in rejected[0]["reasons"][0]
+
+
+def test_step2_refuses_the_pair_phase2_rejects():
+    pairs = [{"l9": ["o_sensor_data"], "rtl": ["o_sensor_wdata"]},
+             {"l9": ["o_sensor_addr"], "rtl": ["o_sensor_waddr"]},
+             # direction changes: phase 2 rejects it, so its bit gets no pad
+             {"l9": ["o_sensor_we"], "rtl": ["o_sensor_wen"]}]
+    l9 = dict(_STEP2_L9, top_ports=[
+        p if p["name"] != "o_sensor_we" else _p("o_sensor_we", "input", False)
+        for p in _STEP2_L9["top_ports"]])
+    rc, rep = _step2(pairs, l9=l9)
+    assert (rc, rep["verdict"]) == (1, "DOES_NOT_FIT")
+    assert "o_sensor_wen" in rep["reason"]
+    assert [r["rtl"] for r in rep["derived_ring"]
+            ["renamed_interfaces_rejected"]] == [["o_sensor_wen"]]
+
+
+# --------------------------------------------------------------------------- #
+# step 2 refuses an unresolved group row on its own account, as 15.5ic does
+# (PAD_GROUP_UNRESOLVED), even when no RTL bit is left without a pad
+# --------------------------------------------------------------------------- #
+def test_step2_refuses_a_group_row_whose_family_has_no_rtl_port():
+    """W | `gpio pin` names a family the core does not implement: no RTL
+    port, and no L9 entry the netlist carries. Every RTL bit is bonded by the
+    other rows, so the unbonded count is 0; the row still resolves to
+    nothing, which 15.5ic refuses."""
+    rtl = _STEP2_RTL.replace(", output wire o_gpio);", ");")
+    l9 = dict(_STEP2_L9, top_ports=[
+        p if p["name"] != "o_gpio" else _p("o_gpio", "output", False)
+        for p in _STEP2_L9["top_ports"]])
+    rc, rep = _step2(_STEP2_PAIRS, l9=l9, rtl=rtl)
+    assert rep["own_ring"]["unbonded_count"] == 0, rep.get("reason")
+    assert rep["derived_ring"]["groups_unresolved"] == ["W"]
+    assert (rc, rep["verdict"]) == (1, "DOES_NOT_FIT")
+    assert "PAD_GROUP_UNRESOLVED" in rep["reason"]
+    assert "have no pad" not in rep["reason"]
