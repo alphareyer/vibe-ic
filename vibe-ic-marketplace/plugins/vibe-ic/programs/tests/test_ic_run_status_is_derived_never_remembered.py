@@ -41,6 +41,17 @@ PROG = PROGRAMS / "ic_run_status_derive.py"
 
 sys.path.insert(0, str(PROGRAMS))
 import _eda_pin  # noqa: E402
+from _stated_eda_image import state_the_image_for_children  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _the_stated_image(monkeypatch):
+    """The pin is STATED, here and in the program each test spawns (lane
+    rfimg2). Unstated, the child read it from THIS HOST's docker: inside the
+    image (no docker) every test that runs the program went red on a
+    traceback, and on a host the ON_PIN arm compared against whatever that
+    host happened to hold."""
+    state_the_image_for_children(monkeypatch)
 
 
 # --------------------------------------------------------------------------
@@ -314,6 +325,28 @@ def test_the_pin_has_one_home(tmp_path):
     assert _eda_pin.IMAGE_DIGEST not in PROG.read_text()
     doc, _ = rows("--run-root", str(make_run(tmp_path / "r")))
     assert doc["pin"] == _eda_pin.IMAGE_DIGEST
+
+
+def test_an_unresolvable_pin_is_named_and_the_report_still_derives(tmp_path):
+    """A STATUS REPORT NEEDS NO DOCKER (lane rfimg2). With no pin resolvable --
+    no docker on PATH, nothing stated -- the program used to die on
+    `ImageNotResolvable` and publish no row at all. Now every run is still
+    reported, `pin` is null with the refusal named, and a recorded digest is
+    NOT_COMPARABLE: neither on nor off a pin nobody could name."""
+    import os                                                   # noqa: PLC0415
+    make_run(tmp_path / "r", image={
+        "image_ref": "example.invalid/repo@sha256:" + "5" * 64})
+    empty = tmp_path / "no-docker-bin"
+    empty.mkdir()
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("VIBEIC_EDA_IMAGE", "IIC_EDA_IMAGE")}
+    env["PATH"] = str(empty)
+    doc, _ = rows("--run-root", str(tmp_path / "r"), env=env)
+    assert doc["pin"] is None
+    assert _eda_pin.IMAGE_NOT_RESOLVABLE in (doc["pin_refusal"] or "")
+    img = doc["rows"][0]["image"]
+    assert img["pin_state"] == "NOT_COMPARABLE", img
+    assert doc["rows"][0]["verdict"] == "FAIL", "the run's own word survives"
 
 
 # --------------------------------------------------------------------------

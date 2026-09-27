@@ -52,9 +52,11 @@ if str(_PROGRAMS) not in sys.path:
 import design_one_shot_runner as D   # noqa: E402
 import _container_exec as _ce        # noqa: E402 — the guarded docker-exec argv
 import _eda_pin as _pin              # noqa: E402 — the ONE pin
+from _stated_eda_image import state_the_image  # noqa: E402
 
 #: The container the producer's own CLI default names, derived the same way.
 _CONTAINER = _pin.default_container_name()
+
 
 
 def _mk_project(tmp_path, reused_ip: bool) -> Path:
@@ -129,6 +131,7 @@ def test_a_wrong_image_container_is_refused_by_name(monkeypatch, tmp_path):
     is reported as one — not as a `ContainerImageMismatch` traceback out of a
     test about an SV subset. This is the red cz2146 and czsimbridge measured,
     driven at the pin read rather than by touching a shared container."""
+    state_the_image(monkeypatch)  # the pin is STATED (lane rfimg2): no host docker
     other = "sha256:" + "9" * 64
     monkeypatch.setattr(_pin, "container_image_digest",
                         lambda c: (other, "") if c == _CONTAINER
@@ -145,6 +148,7 @@ def test_the_waiver_still_holds_with_the_pinned_container_present(monkeypatch,
     """RUN WHEN PRESENT. With the derived container present AND running the
     pinned bytes, nothing about the subset verdict changes — the paired control
     that stops the refusal above being paid for in the case this file is for."""
+    state_the_image(monkeypatch)  # the pin is STATED (lane rfimg2): no host docker
     monkeypatch.setattr(_pin, "container_image_digest",
                         lambda c: (_pin.IMAGE_DIGEST, "") if c == _CONTAINER
                         else (None, f"{_pin.CONTAINER_ABSENT}: {c}"))

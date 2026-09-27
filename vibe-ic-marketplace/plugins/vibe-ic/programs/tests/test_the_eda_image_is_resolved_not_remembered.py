@@ -317,19 +317,82 @@ def test_the_run_path_takes_the_pin_and_not_the_newest_local_tag(monkeypatch, ca
     assert "0.3.9" not in got and "0.3.10" not in got
 
 
+def _a_host_holding_other_bytes(monkeypatch, pulls):
+    """A daemon holding vibeic-eda images, NONE of them the pinned digest. Any
+    command that could fetch -- `pull`, `run`, a manifest read -- is recorded
+    and answered as a failure; only local metadata reads answer."""
+    monkeypatch.setattr(_pin, "local_references_for_digest",
+                        lambda d: ((), ""))
+
+    def _docker(*argv, timeout=None):
+        if argv[:2] == ("image", "ls"):
+            return 0, ("ghcr.io/vibeic/vibeic-eda\t0.3.9\tsha256:" + "9" * 64
+                       + "\nother/tool\tlatest\tsha256:" + "8" * 64 + "\n"), ""
+        pulls.append(argv)
+        return 1, "", "the model daemon fetches nothing"
+    monkeypatch.setattr(_pin, "_docker", _docker)
+
+
 def test_a_run_on_a_host_without_the_pinned_bytes_SAYS_SO(monkeypatch, capsys):
-    """Degrade loudly. The reference returned is still the pinned one — running
-    it fetches exactly those bytes — but the operator is told, because a
-    multi-gigabyte fetch nobody expected is the other half of this module's
-    history."""
+    """Degrade loudly -- and now, by REFUSING.
+
+    WHAT THIS TEST USED TO SAY: the reference returned was still the configured
+    one, "running it fetches exactly those pinned bytes", announced on stderr.
+    ORCHESTRATOR RULING (lane rfimg2): every fleet host configures
+    `VIBEIC_EDA_IMAGE_REPO` as the fleet mirror, so that reference was a pull
+    from a registry no run may touch. The intent is KEPT and made strict: the
+    operator is told, by name, that the pinned bytes are absent (the digest and
+    what this host does hold), nothing older is substituted, and NOTHING IS
+    FETCHED -- no reference that would have to be pulled is returned at all.
+    """
     _state_the_pin(monkeypatch)
-    monkeypatch.setattr(_pin, "pinned_image_present",
-                        lambda env=None: (None, "IMAGE_NOT_PRESENT: x"))
-    got = M.resolve(env={})
-    assert got == f"{M.IMAGE_REPO}@{_pin.IMAGE_DIGEST}"
+    pulls = []
+    _a_host_holding_other_bytes(monkeypatch, pulls)
+    with pytest.raises(_pin.ImageNotHeld) as exc:
+        M.resolve(env={})
+    msg = str(exc.value)
+    assert _pin.IMAGE_NOT_PRESENT in msg
+    assert _pin.IMAGE_DIGEST in msg, "the refusal must name the digest"
+    assert "ghcr.io/vibeic/vibeic-eda:0.3.9@sha256:" + "9" * 64 in msg, (
+        "the refusal must name what this host DOES hold")
+    assert "other/tool" not in msg, "only the image's own repository is named"
+    assert "allow_pull" in msg, "the refusal must name the opt-in"
+    assert "Nothing older is substituted" in msg
+    assert not pulls, f"a missing image was fetched: {pulls}"
+    # A subclass of the refusal every caller already handles.
+    assert isinstance(exc.value, _pin.ImageNotResolvable)
+
+
+def test_a_missing_image_is_fetched_only_on_the_callers_explicit_opt_in(
+        monkeypatch, capsys):
+    """`allow_pull=True` is the one door to a fetch, and it is announced: the
+    configured reference (where the pinned bytes would come from), carrying the
+    PINNED digest -- never another version."""
+    _state_the_pin(monkeypatch)
+    pulls = []
+    _a_host_holding_other_bytes(monkeypatch, pulls)
+    got = M.resolve(env={}, allow_pull=True)
+    assert got == _pin.configured_reference({})
+    assert got.endswith("@" + _pin.IMAGE_DIGEST)
     err = capsys.readouterr().err
     assert _pin.IMAGE_NOT_PRESENT in err
     assert "Nothing older is substituted" in err
+
+
+def test_the_cli_refuses_a_missing_image_and_fetches_only_with_allow_pull(
+        monkeypatch, capsys):
+    """`python3 _eda_image.py` (the run question) exits 2 with the named
+    refusal; `--allow-pull` is its opt-in."""
+    _state_the_pin(monkeypatch)
+    for key in ("VIBEIC_EDA_IMAGE", "IIC_EDA_IMAGE"):  # main() reads os.environ
+        monkeypatch.delenv(key, raising=False)
+    pulls = []
+    _a_host_holding_other_bytes(monkeypatch, pulls)
+    assert M.main([]) == 2
+    assert _pin.IMAGE_NOT_PRESENT in capsys.readouterr().err
+    assert M.main(["--allow-pull"]) == 0
+    assert capsys.readouterr().out.strip().endswith("@" + _pin.IMAGE_DIGEST)
+    assert not pulls
 
 
 def test_the_run_path_never_reaches_for_the_legacy_upstream_image(monkeypatch, capsys):

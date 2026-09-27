@@ -102,17 +102,22 @@ def test_a_total_blackout_STILL_ANSWERS_THE_PIN_AND_SAYS_SO(monkeypatch,
             monkeypatch.setattr(_launcher, "run", _never_present)
             monkeypatch.setattr(_launcher, "run_best_effort", _never_present,
                                 raising=False)
-    got = far._resolve_docker_image()
-    # This host holds nothing, so the pinned reference is the CONFIGURED one
-    # (announced below). `image_reference` names only a HELD reference now
-    # (lane migf14) and refuses here; the composition is `configured_reference`.
-    assert got == _pin.configured_reference(), got
-    assert got != M.LEGACY_IMAGE, (
-        "a blackout answered upstream iic-osic-tools, which carries neither "
+    # A MISSING IMAGE IS REFUSED, NEVER FETCHED (orchestrator ruling, lane
+    # rfimg2). This host holds nothing, so the run path used to answer the
+    # CONFIGURED reference -- a pull from the fleet mirror -- and announce it.
+    # It now refuses by name; the announcement survives as the refusal, and no
+    # substitute (upstream, a floating tag) can be answered at all.
+    with pytest.raises(_pin.ImageNotHeld) as exc:
+        far._resolve_docker_image()
+    msg = str(exc.value)
+    assert _pin.IMAGE_NOT_PRESENT in msg
+    assert M.LEGACY_IMAGE not in msg, (
+        "a blackout named upstream iic-osic-tools, which carries neither "
         "Fault nor the patched yosys")
-    assert "@sha256:" in got, ("a blackout answered a floating tag, which is "
-                               "the one answer that means 'whatever this "
-                               "machine happened to pull'")
+    # The opt-in is the one door to a fetch, and it fetches the PINNED digest.
+    got = M.resolve(allow_pull=True)
+    assert got == _pin.configured_reference(), got
+    assert got != M.LEGACY_IMAGE and "@sha256:" in got, got
     assert _pin.IMAGE_NOT_PRESENT in capsys.readouterr().err
 
 
@@ -148,10 +153,13 @@ def test_the_resolver_never_substitutes_a_local_tag_for_the_pin(monkeypatch):
     # substitution branch was never reached. A check that cannot fail is not a
     # check.
     monkeypatch.setattr(M, "local_image", lambda *a, **k: None)
-    got = far._resolve_docker_image()
-    # This host holds nothing, so the pinned reference is the CONFIGURED one
-    # (announced below). `image_reference` names only a HELD reference now
-    # (lane migf14) and refuses here; the composition is `configured_reference`.
+    monkeypatch.setattr(_pin, "local_references_for_digest",
+                        lambda d: ((), ""))
+    # This host holds nothing: refused by name (lane rfimg2), and the local
+    # tag is still not substituted -- neither as an answer nor with the opt-in.
+    with pytest.raises(_pin.ImageNotHeld):
+        far._resolve_docker_image()
+    got = M.resolve(allow_pull=True)
     assert got == _pin.configured_reference(), got
     assert got != f"{M.IMAGE_REPO}:0.3.13", (
         "a local semver tag was substituted for the pinned digest")
@@ -185,10 +193,19 @@ def test_scan_chain_module_declares_no_image_of_its_own():
     )
 
 
-def test_scan_chain_reports_the_image_the_atpg_module_resolved():
+def test_scan_chain_reports_the_image_the_atpg_module_resolved(monkeypatch):
     """The value the module would publish in its report is the SAME value the
     registered module resolved — that indirection is what makes the exemption
-    cost no live coverage."""
+    cost no live coverage.
+
+    THE HOLDINGS ARE STATED (lane rfimg2): a missing image is now refused, not
+    named for a fetch, so a host holding nothing -- and the inside of the
+    image, with no docker -- has no reference to compare. What this test is
+    about is the indirection, not the host, so the stated image is held."""
+    from _stated_eda_image import state_the_image       # noqa: PLC0415
+    state_the_image(monkeypatch, _STATED_DIGEST)
+    for key in ("VIBEIC_EDA_IMAGE", "IIC_EDA_IMAGE"):
+        monkeypatch.delenv(key, raising=False)
     assert fsci._fatpg is far
     assert fsci._fatpg.DOCKER_IMAGE == far.DOCKER_IMAGE
 

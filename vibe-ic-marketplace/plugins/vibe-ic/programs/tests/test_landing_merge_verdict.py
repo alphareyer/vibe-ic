@@ -79,7 +79,15 @@ _T = 55
 
 # Synthetic receipts and BASE manifests use the shipped trusted declaration.
 # Candidate receipt fields never supply the validator's expected policy.
-_RUNNER_PROFILE = _PROTECTED.derived_runner()
+#
+# THE IMAGE IS STATED, NOT RESOLVED (lane rfimg2). This was
+# `_PROTECTED.derived_runner()`, which resolves the runner image from THIS
+# HOST's docker at collection: inside the image (no docker) the whole file was
+# a collection error. The profile half is derived exactly as before; the image
+# half of a synthetic receipt is a record, so it is a stated immutable
+# reference (the pattern `derived_runner_profile` documents).
+from _stated_eda_image import stated_image  # noqa: E402
+_RUNNER_PROFILE = {**_PROTECTED.derived_runner_profile(), "image": stated_image()}
 # Completion imports the execution declaration by path. This additional
 # BASE-owned authority must travel in the miniature manifest and snapshot,
 # just as it does in the real approved runtime bundle.

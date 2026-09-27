@@ -51,11 +51,21 @@ import _eda_pin as _pin  # noqa: E402
 import analog_a6_native_pv as PV  # noqa: E402
 import analog_a3_netlist_emit as A3  # noqa: E402
 import phase3_one_shot_runner as P3  # noqa: E402
+from _stated_eda_image import state_the_image  # noqa: E402
 
 #: A synthetic container name and a synthetic digest that is NOT the pin, so a
 #: refusal composed from them is unmistakably about this test.
 _CTN = "a-container-of-this-tests-own"
 _OTHER = "sha256:" + "9" * 64
+
+
+@pytest.fixture(autouse=True)
+def _the_stated_image(monkeypatch):
+    """The pin is STATED
+    (lane rfimg2). Unstated, it was read from THIS HOST's docker: inside the
+    image (no docker) `ImageNotResolvable` reddened these tests before they
+    reached their subject, or turned a staged mismatch into UNREADABLE."""
+    state_the_image(monkeypatch)
 
 
 def _refuse_this_container(monkeypatch, container: str = _CTN):

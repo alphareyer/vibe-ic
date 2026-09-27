@@ -1300,6 +1300,39 @@ def _fresh_runner(monkeypatch, repo=None):
     return module
 
 
+def _unresolvable_runner(monkeypatch):
+    """A fresh runner whose image identity cannot be resolved -- the no-docker
+    host or the inside of the image -- raised the way `_eda_pin` raises it."""
+    module = _fresh_runner(monkeypatch)
+    sys.path.insert(0, str(RUNNER_PATH.parents[2] / "vibe-ic-marketplace"
+                           / "plugins" / "vibe-ic" / "programs"))
+    import _eda_pin                                             # noqa: PLC0415
+
+    def _refuse():
+        raise _eda_pin.ImageNotResolvable(["this test: no docker"])
+    monkeypatch.setattr(module, "_resolve_digest", _refuse)
+    return module
+
+
+def test_an_absent_engine_is_named_before_an_unresolvable_image(monkeypatch):
+    """LAZY RESOLUTION MUST NOT CHANGE WHAT THE RUN REPORTS (lane rfimg2). The
+    image used to resolve at import; now it resolves on first use, inside the
+    run. With no engine the run must still say "cannot execute Docker CLI" --
+    the runner's own words, which the verifier classifies as NOT_MEASURED --
+    and never escape as an `ImageNotResolvable` traceback."""
+    module = _unresolvable_runner(monkeypatch)
+    with pytest.raises(module.Refusal, match="cannot execute Docker CLI"):
+        module._image_profile(module.Docker("/nonexistent/docker-cli"))
+
+
+def test_an_unresolvable_image_on_a_running_engine_is_refused_by_name(
+        monkeypatch):
+    module = _unresolvable_runner(monkeypatch)
+    with pytest.raises(module.Refusal,
+                       match="runtime image identity not resolvable"):
+        module._image_profile(_StubDocker(None))
+
+
 def test_image_profile_accepts_the_configured_repo_at_the_pinned_digest():
     profile = runner._image_profile(_StubDocker(_inspect_doc([runner.IMAGE])))
     assert profile["repo_digest"] == runner.IMAGE

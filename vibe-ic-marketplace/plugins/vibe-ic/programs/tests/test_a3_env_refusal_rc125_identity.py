@@ -6,6 +6,16 @@ import pytest
 import _plugin_tree  # noqa: F401
 import _container_exec as CE
 import analog_a3_netlist_emit as A3
+from _stated_eda_image import state_the_image_for_children  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _the_stated_image(monkeypatch):
+    """The pin is STATED, here and in every program this file spawns
+    (lane rfimg2). Unstated, it was read from THIS HOST's docker: inside the
+    image (no docker) `ImageNotResolvable` reddened these tests before they
+    reached their subject, or turned a staged mismatch into UNREADABLE."""
+    state_the_image_for_children(monkeypatch)
 
 
 @pytest.mark.parametrize('stderr', ['', 'container command could not start'])
