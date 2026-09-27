@@ -986,6 +986,8 @@ def placement_levers(project: Path) -> dict[str, tuple[Any, str]]:
 PDK_ROOT_CACHE_ENV = 'VIBEIC_PDK_ROOT_CACHE'
 PDK_ROOT_MARKER = '.vibeic_pdk_root.json'
 PDK_ROOT_PROVENANCE_REL = 'phase3/librelane_pdk_root.provenance.json'
+#: A local metadata read; the bound is for a stalled docker daemon, not a slow host.
+IMAGE_INSPECT_DEADLINE_S = 60
 _PDK_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._+-]*$')
 
 
@@ -1001,9 +1003,13 @@ def image_pdk_root(image: str, docker: str = 'docker') -> dict[str, str]:
         try:
             return subprocess.run([docker, 'image', 'inspect', '--format',
                                    '{{json .Id}} {{json .Config.Env}}', ref],
-                                  capture_output=True, text=True)
+                                  capture_output=True, text=True,
+                                  timeout=IMAGE_INSPECT_DEADLINE_S)
         except OSError as exc:
             raise Refusal('LL_IMAGE_NOT_INSPECTABLE', f'{image}: {exc}') from None
+        except subprocess.TimeoutExpired:
+            raise Refusal('LL_IMAGE_NOT_INSPECTABLE', f'{image}: docker image inspect gave no '
+                          f'answer within the {IMAGE_INSPECT_DEADLINE_S} s deadline') from None
     result = _inspect(image)
     if result.returncode:
         import _eda_pin
