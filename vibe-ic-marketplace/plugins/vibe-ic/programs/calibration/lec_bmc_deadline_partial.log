@@ -6,7 +6,7 @@
  \----------------------------------------------------------------------------/
  Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]
 
--- Executing script file `<reports>/lec_bmc_deadline_partial.ys' --
+-- Executing script file `<reports>/partial_new.ys' --
 
 1. Executing Verilog-2005 frontend: <project>/phase2/stage1/rtl/cal_bmc_rtl.v
 Parsing SystemVerilog input from `<project>/phase2/stage1/rtl/cal_bmc_rtl.v' to AST representation.
@@ -489,12 +489,18 @@ Using SAT solver `minisat`.
 Setting up time step 1:
 Import set-constraint for this timestep: \in_rst = 1'1
 Final constraint equation: \in_rst = 1'1
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 Import show expression: \in_rst
@@ -512,7 +518,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 869 variables and 2258 clauses..
+Solving problem with 3336 variables and 8788 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -533,18 +539,27 @@ Using SAT solver `minisat`.
 Setting up time step 1:
 Import set-constraint for this timestep: \in_rst = 1'1
 Final constraint equation: \in_rst = 1'1
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 3:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 Import show expression: \in_rst
@@ -562,7 +577,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 1312 variables and 3414 clauses..
+Solving problem with 5029 variables and 13253 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -583,30 +598,45 @@ Using SAT solver `minisat`.
 Setting up time step 1:
 Import set-constraint for this timestep: \in_rst = 1'1
 Final constraint equation: \in_rst = 1'1
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 3:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 4:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 5:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 Import show expression: \in_rst
@@ -624,7 +654,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 2196 variables and 5722 clauses..
+Solving problem with 8413 variables and 22179 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -645,54 +675,81 @@ Using SAT solver `minisat`.
 Setting up time step 1:
 Import set-constraint for this timestep: \in_rst = 1'1
 Final constraint equation: \in_rst = 1'1
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 3:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 4:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 5:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 6:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 7:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 8:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 9:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 Import show expression: \in_rst
@@ -710,7 +767,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 3964 variables and 10338 clauses..
+Solving problem with 15181 variables and 40031 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -731,102 +788,153 @@ Using SAT solver `minisat`.
 Setting up time step 1:
 Import set-constraint for this timestep: \in_rst = 1'1
 Final constraint equation: \in_rst = 1'1
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 3:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 4:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 5:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 6:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 7:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 8:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 9:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 10:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 11:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 12:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 13:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 14:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 15:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 16:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 17:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 Import show expression: \in_rst
@@ -844,7 +952,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 7500 variables and 19570 clauses..
+Solving problem with 28717 variables and 75735 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -865,198 +973,297 @@ Using SAT solver `minisat`.
 Setting up time step 1:
 Import set-constraint for this timestep: \in_rst = 1'1
 Final constraint equation: \in_rst = 1'1
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 3:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 4:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 5:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 6:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 7:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 8:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 9:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 10:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 11:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 12:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 13:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 14:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 15:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 16:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 17:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 18:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 19:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 20:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 21:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 22:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 23:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 24:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 25:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 26:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 27:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 28:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 29:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 30:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 31:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 32:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 33:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 Import show expression: \in_rst
@@ -1074,7 +1281,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 14572 variables and 38034 clauses..
+Solving problem with 55789 variables and 147143 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -1095,390 +1302,585 @@ Using SAT solver `minisat`.
 Setting up time step 1:
 Import set-constraint for this timestep: \in_rst = 1'1
 Final constraint equation: \in_rst = 1'1
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 3:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 4:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 5:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 6:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 7:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 8:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 9:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 10:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 11:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 12:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 13:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 14:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 15:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 16:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 17:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 18:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 19:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 20:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 21:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 22:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 23:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 24:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 25:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 26:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 27:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 28:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 29:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 30:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 31:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 32:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 33:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 34:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 35:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 36:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 37:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 38:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 39:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 40:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 41:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 42:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 43:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 44:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 45:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 46:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 47:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 48:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 49:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 50:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 51:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 52:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 53:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 54:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 55:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 56:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 57:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 58:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 59:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 60:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 61:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 62:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 63:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 64:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 65:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 Import show expression: \in_rst
@@ -1496,7 +1898,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 28716 variables and 74962 clauses..
+Solving problem with 109933 variables and 289959 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -1517,774 +1919,1161 @@ Using SAT solver `minisat`.
 Setting up time step 1:
 Import set-constraint for this timestep: \in_rst = 1'1
 Final constraint equation: \in_rst = 1'1
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 3:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 4:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 5:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 6:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 7:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 8:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 9:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 10:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 11:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 12:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 13:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 14:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 15:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 16:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 17:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 18:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 19:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 20:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 21:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 22:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 23:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 24:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 25:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 26:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 27:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 28:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 29:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 30:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 31:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 32:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 33:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 34:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 35:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 36:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 37:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 38:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 39:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 40:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 41:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 42:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 43:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 44:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 45:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 46:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 47:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 48:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 49:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 50:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 51:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 52:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 53:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 54:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 55:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 56:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 57:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 58:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 59:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 60:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 61:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 62:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 63:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 64:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 65:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 66:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 67:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 68:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 69:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 70:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 71:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 72:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 73:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 74:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 75:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 76:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 77:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 78:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 79:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 80:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 81:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 82:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 83:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 84:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 85:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 86:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 87:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 88:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 89:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 90:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 91:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 92:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 93:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 94:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 95:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 96:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 97:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 98:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 99:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 100:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 101:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 102:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 103:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 104:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 105:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 106:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 107:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 108:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 109:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 110:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 111:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 112:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 113:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 114:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 115:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 116:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 117:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 118:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 119:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 120:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 121:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 122:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 123:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 124:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 125:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 126:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 127:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 128:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 129:
 Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 110 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 Import show expression: \in_rst
@@ -2302,1578 +3091,4 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 57004 variables and 148818 clauses..
-SAT proof finished - no model found: SUCCESS!
-
-                  /$$$$$$      /$$$$$$$$     /$$$$$$$    
-                 /$$__  $$    | $$_____/    | $$__  $$   
-                | $$  \ $$    | $$          | $$  \ $$   
-                | $$  | $$    | $$$$$       | $$  | $$   
-                | $$  | $$    | $$__/       | $$  | $$   
-                | $$/$$ $$    | $$          | $$  | $$   
-                |  $$$$$$/ /$$| $$$$$$$$ /$$| $$$$$$$//$$
-                 \____ $$$|__/|________/|__/|_______/|__/
-                       \__/                              
-
-LEC_BMC_DEPTH_BEGIN 256
-
-26. Executing SAT pass (solving SAT problems in the circuit).
-Using SAT solver `minisat`.
-
-Setting up time step 1:
-Import set-constraint for this timestep: \in_rst = 1'1
-Final constraint equation: \in_rst = 1'1
-Imported 95 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
-
-Setting up time step 2:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 3:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 4:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 5:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 6:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 7:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 8:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 9:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 10:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 11:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 12:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 13:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 14:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 15:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 16:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 17:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 18:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 19:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 20:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 21:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 22:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 23:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 24:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 25:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 26:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 27:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 28:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 29:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 30:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 31:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 32:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 33:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 34:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 35:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 36:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 37:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 38:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 39:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 40:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 41:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 42:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 43:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 44:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 45:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 46:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 47:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 48:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 49:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 50:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 51:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 52:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 53:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 54:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 55:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 56:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 57:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 58:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 59:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 60:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 61:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 62:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 63:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 64:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 65:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 66:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 67:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 68:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 69:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 70:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 71:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 72:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 73:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 74:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 75:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 76:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 77:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 78:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 79:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 80:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 81:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 82:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 83:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 84:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 85:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 86:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 87:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 88:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 89:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 90:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 91:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 92:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 93:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 94:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 95:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 96:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 97:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 98:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 99:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 100:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 101:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 102:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 103:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 104:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 105:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 106:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 107:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 108:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 109:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 110:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 111:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 112:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 113:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 114:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 115:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 116:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 117:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 118:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 119:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 120:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 121:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 122:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 123:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 124:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 125:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 126:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 127:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 128:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 129:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 130:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 131:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 132:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 133:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 134:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 135:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 136:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 137:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 138:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 139:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 140:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 141:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 142:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 143:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 144:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 145:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 146:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 147:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 148:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 149:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 150:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 151:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 152:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 153:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 154:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 155:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 156:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 157:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 158:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 159:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 160:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 161:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 162:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 163:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 164:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 165:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 166:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 167:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 168:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 169:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 170:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 171:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 172:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 173:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 174:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 175:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 176:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 177:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 178:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 179:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 180:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 181:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 182:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 183:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 184:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 185:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 186:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 187:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 188:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 189:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 190:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 191:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 192:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 193:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 194:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 195:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 196:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 197:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 198:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 199:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 200:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 201:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 202:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 203:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 204:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 205:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 206:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 207:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 208:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 209:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 210:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 211:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 212:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 213:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 214:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 215:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 216:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 217:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 218:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 219:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 220:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 221:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 222:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 223:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 224:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 225:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 226:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 227:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 228:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 229:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 230:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 231:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 232:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 233:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 234:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 235:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 236:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 237:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 238:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 239:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 240:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 241:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 242:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 243:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 244:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 245:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 246:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 247:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 248:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 249:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 250:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 251:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 252:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 253:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 254:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 255:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 256:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 257:
-Final constraint equation: { } = { }
-Imported 95 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-Import show expression: \in_rst
-Import show expression: \in_en
-Import show expression: \in_clk
-Import show expression: \trigger
-Import show expression: \gate_hit
-Import show expression: \gold_hit
-Import show expression: \gate_q[0]
-Import show expression: \gold_q[0]
-Import show expression: \gate_q[1]
-Import show expression: \gold_q[1]
-Import show expression: \gate_q[2]
-Import show expression: \gold_q[2]
-Import show expression: \gate_q[3]
-Import show expression: \gold_q[3]
-
-Solving problem with 113580 variables and 296530 clauses..
+Solving problem with 218221 variables and 575591 clauses..

@@ -2963,9 +2963,7 @@ def build_report(parsed: Dict, top: str, gate_netlist: str,
         # RESET found differing (`bmc`), 0 when it searched to its bound and
         # found none, None when it could not search. Without a search it is
         # the empty list the equiv ladder yields.
-        "non_equivalent_points": (
-            0 if parsed["equivalent"] is True and not unproven
-            else bmc_non_equivalent_points(bmc)),
+        "non_equivalent_points": lec_non_equivalent_points(parsed, bmc),
         "bmc": bmc,
         "unproven_points": unproven if unproven is not None else 0,
         "gold": f"{top} (RTL)",
@@ -4740,6 +4738,38 @@ def bmc_non_equivalent_points(bmc: Optional[Dict]) -> Optional[int]:
     return None
 
 
+def lec_non_equivalent_points(parsed: Dict, bmc: Optional[Dict]
+                              ) -> Optional[int]:
+    """0 when the proof closed, else what the search found (`bmc`)."""
+    if parsed.get("equivalent") is True and not parsed.get("unproven"):
+        return 0
+    return bmc_non_equivalent_points(bmc)
+
+
+def attach_bmc(report: Dict, parsed: Dict, bmc: Dict) -> Dict:
+    """Put a search made AFTER the report was built into it."""
+    report["bmc"] = bmc
+    report["non_equivalent_points"] = lec_non_equivalent_points(parsed, bmc)
+    return report
+
+
+def bmc_step_stop_reason(budget: "StepBudget", ladder_stopped: bool,
+                         controlled_limit: bool) -> str:
+    """Why the search must not start: it is a new tool run, and none starts
+    on a step that was cut off, is bounded by the operator, or has spent its
+    budget (no attempt may re-arm a deadline). "" when it may start."""
+    if controlled_limit:
+        return ("the completed-rung policy stopped the ladder between rungs; "
+                "a search would run past the bound the operator set")
+    if ladder_stopped:
+        return ("the ladder was stopped (its budget or the progress watchdog) "
+                "before it finished; a search would re-arm a stopped step")
+    if budget.exhausted():
+        return (f"the step budget is spent ({budget.elapsed_s():.0f}s of "
+                f"{budget.total_s}s); a search would re-arm a deadline")
+    return ""
+
+
 def bmc_not_run(reason: str, **extra: Any) -> Dict:
     return {"schema_version": BMC_SCHEMA_VERSION, "result": BMC_NOT_RUN,
             "reason": reason, "depth_reached": extra.pop("depth_reached", 0),
@@ -4802,12 +4832,18 @@ def bmc_script(prefix: str, reset: Dict, depths: List[int],
     sets = " ".join(f"-set-at {c} in_{r['port']} {r['asserted']}"
                     for r in reset["resets"]
                     for c in range(1, BMC_RESET_CYCLES + 1))
-    body = (f"miter -equiv -flatten -make_outputs "
+    # X SEMANTICS: a gold `x` is a don't-care the gate may refine to either
+    # value (`-ignore_gold_x`), and `sat` must model x for that to mean
+    # anything (`-enable_undef`; `-set-def-inputs` keeps the inputs 0/1).
+    # MEASURED: `-ignore_gold_x` WITHOUT `-enable_undef` masked a real
+    # mismatch; neither flag reads a synthesised don't-care as a mismatch.
+    body = (f"miter -equiv -flatten -make_outputs -ignore_gold_x "
             f"gold gate {BMC_MITER}\n"
             f"hierarchy -top {BMC_MITER}\n")
     for d in depths:
         body += (f"log {_BMC_DEPTH_MARK} {d}\n"
-                 f"sat -verify -seq {BMC_RESET_CYCLES + d} -set-init-zero {sets} "
+                 f"sat -verify -enable_undef -set-def-inputs "
+                 f"-seq {BMC_RESET_CYCLES + d} -set-init-zero {sets} "
                  f"-prove-skip {BMC_RESET_CYCLES} -prove trigger 0 "
                  f"-show-ports -dump_vcd {shlex.quote(vcd_path)} {BMC_MITER}\n")
     return prefix + body
@@ -4843,10 +4879,13 @@ def parse_bmc_log(text: str, depth_target: int) -> Dict:
                                   "its trace names no step where the miter "
                                   "trigger is 1"}
             at = steps[cycle]
+            # A gold `x` bit is a don't-care: only a DEFINED gold bit the
+            # gate does not match makes an output differ.
             differing = sorted(
                 n[len("gold_"):] for n in at if n.startswith("gold_")
                 and "gate_" + n[len("gold_"):] in at
-                and at[n] != at["gate_" + n[len("gold_"):]])
+                and any(g in "01" and g != t for g, t in zip(
+                    at[n], at["gate_" + n[len("gold_"):]])))
             return {"result": BMC_COUNTEREXAMPLE, "depth_reached": depth,
                     "reason": f"outputs differ {cycle - BMC_RESET_CYCLES} "
                               f"cycle(s) after reset",
@@ -4867,6 +4906,30 @@ def parse_bmc_log(text: str, depth_target: int) -> Dict:
             "reason": (err.group(0).strip() if err else
                        f"the search stopped after depth {reached} of "
                        f"{depth_target}")}
+
+
+def bmc_kill_reason(rc: int, oom_delta: Optional[int], elapsed: float,
+                    deadline_s: int, depth: int, target: int) -> str:
+    """Which resource stopped a killed search, from what was observed.
+
+    rc 124 is GNU `timeout`'s own. rc 137 is a SIGKILL, from `timeout
+    --kill-after` at the deadline or from the cgroup OOM killer (#2182): the
+    container's oom_kill counter across the run tells them apart, and a
+    counter that could not be read names neither."""
+    where = f"at depth {depth} of {target} (rc={rc})"
+    if rc == 124:
+        return f"the {deadline_s}s deadline stopped the search {where}"
+    if oom_delta:
+        return (f"the container's OOM killer stopped the search {where}; "
+                f"oom_kill +{oom_delta} across the run")
+    if oom_delta == 0 and elapsed >= deadline_s - 10:
+        return f"the {deadline_s}s deadline stopped the search {where}"
+    if oom_delta == 0:
+        return (f"yosys was killed {where} after {elapsed:.0f}s, before the "
+                f"{deadline_s}s deadline and with no OOM kill counted")
+    return (f"yosys was killed {where} after {elapsed:.0f}s; the container's "
+            f"OOM counter could not be read, so deadline vs memory is not "
+            f"measured")
 
 
 def run_bmc(container: str, prefix: str, reset: Dict, reports_dir: Path,
@@ -4896,6 +4959,7 @@ def run_bmc(container: str, prefix: str, reset: Dict, reports_dir: Path,
     # reads a working search as a stall (MEASURED: subservient, 347 s).
     if _dw_mod() is not None:
         cmd = _dw_mod().wrap_with_container_timeout(cmd, deadline_s)
+    mem_before = probe_cgroup_memory(container)
     t0 = time.monotonic()
     try:
         rc = _docker(container, cmd, timeout=deadline_s,
@@ -4904,15 +4968,18 @@ def run_bmc(container: str, prefix: str, reset: Dict, reports_dir: Path,
         return bmc_not_run(f"the search could not be launched: {exc}",
                            depth_target=depth_target, deadline_s=deadline_s)
     elapsed = round(time.monotonic() - t0, 2)
+    mem_after = probe_cgroup_memory(container)
+    oom_delta = (mem_after["oom_kills"] - mem_before["oom_kills"]
+                 if mem_after["oom_kills"] is not None
+                 and mem_before["oom_kills"] is not None else None)
     text = log.read_text(errors="replace") if log.is_file() else ""
     got = parse_bmc_log(text, depth_target)
     if got["result"] == BMC_NONE_WITHIN_BOUND and rc != 0:
         got = {"result": BMC_NOT_RUN, "depth_reached": got["depth_reached"],
                "reason": f"yosys exited rc={rc} after the last rung"}
     if got["result"] == BMC_NOT_RUN and rc in _CONTAINER_TIMEOUT_RCS:
-        got["reason"] = (f"the {deadline_s}s deadline stopped the search at "
-                         f"depth {got['depth_reached']} of {depth_target} "
-                         f"(rc={rc})")
+        got["reason"] = bmc_kill_reason(rc, oom_delta, elapsed, deadline_s,
+                                        got["depth_reached"], depth_target)
     elif got["result"] == BMC_NOT_RUN and rc in _PROGRESS_STALL_RCS:
         got["reason"] = (f"the progress watchdog stopped the search at depth "
                          f"{got['depth_reached']} of {depth_target} (rc={rc})")
@@ -4923,6 +4990,8 @@ def run_bmc(container: str, prefix: str, reset: Dict, reports_dir: Path,
               "depth_reached": got["depth_reached"],
               "depth_target": depth_target, "deadline_s": deadline_s,
               "elapsed_s": elapsed, "reset": reset,
+              "oom_kill_delta": oom_delta,
+              "memory_max_bytes": mem_after["memory_max_bytes"],
               "log_path": str(log), "counterexample": None}
     if got["result"] == BMC_COUNTEREXAMPLE:
         record["counterexample"] = dict(
@@ -4933,8 +5002,10 @@ def run_bmc(container: str, prefix: str, reset: Dict, reports_dir: Path,
 
 def _bmc_after_ladder(parsed: Dict, project: Path, container: str,
                       gate_abs: str, top: str, reports_dir: Path,
-                      workdir: Optional[str], ladder_script) -> Dict:
-    """The search runs only when the ladder stopped with unproven points."""
+                      workdir: Optional[str], ladder_script,
+                      step_stop: str = "") -> Dict:
+    """The search runs only when the ladder finished with unproven points
+    on a step that may still launch a tool (`bmc_step_stop_reason`)."""
     unproven = parsed.get("unproven") or 0
     if unproven <= 0:
         return bmc_not_run(
@@ -4942,6 +5013,8 @@ def _bmc_after_ladder(parsed: Dict, project: Path, container: str,
             "search" if parsed.get("verdict") == "PASS" else
             f"the ladder left no unproven point to search "
             f"(verdict {parsed.get('verdict')})")
+    if step_stop:
+        return bmc_not_run(step_stop)
     try:
         ports = [n for _, _, n in netlist_top_ports(
             Path(gate_abs).read_text(encoding="utf-8", errors="ignore"), top)]
@@ -6890,12 +6963,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         # to build a miter, downgrade provisional INCONCLUSIVE to FAIL — a
         # design the capable frontend cannot elaborate is not a free pass.
         parsed = finalize_after_slang_retry(parsed, slang_retry_failed)
-        bmc = _bmc_after_ladder(
-            parsed, project, container, gate_abs, resolved_top,
-            rpt_out.parent, equiv_workdir,
-            lambda: _make_script(gold_frontend, slang_prefix, gold_defines))
         report = build_report(parsed, resolved_top, gate_abs, liberty,
-                              liberty_source, bmc=bmc)
+                              liberty_source)
         report["elapsed_sec"] = elapsed
         # WHAT was attempted, WHICH resource ran out, HOW MANY attempts.
         # `stopped` is MEASURED from this run's own log -- the producer writes
@@ -6904,6 +6973,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         report = annotate_step_budget(
             report, budget, stopped=stopped_this_run,
             ladder_complete=ladder_record.get("complete"))
+        # THE COUNTEREXAMPLE SEARCH, after the step's budget is booked: it
+        # has its own deadline and elapsed (`bmc`), and never spends or
+        # re-arms the ladder's.
+        attach_bmc(report, parsed, _bmc_after_ladder(
+            parsed, project, container, gate_abs, resolved_top,
+            rpt_out.parent, equiv_workdir,
+            lambda: _make_script(gold_frontend, slang_prefix, gold_defines),
+            step_stop=bmc_step_stop_reason(
+                budget, stopped_this_run, controlled_rung_limit_hit)))
         report["gold_rtl_files"] = [Path(f).name for f in gold_files]
         report["gold_frontend"] = gold_frontend
         report["gold_defines"] = (

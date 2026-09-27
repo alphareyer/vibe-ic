@@ -19563,9 +19563,31 @@ def lec_inconclusive_disposition(doc: dict) -> Tuple[str, str]:
             f"the comparison RAN and did not close: {proven} of "
             f"{total} point(s) proven, {unproven} unproven, and no resource "
             f"ran out (budget_exhausted/exhausted_resource/progress_stalled all "
-            f"clear). Non-convergence is NOT non-equivalence — no counterexample "
-            f"was recorded — but the netlist's equivalence to the RTL is OPEN "
-            f"and every downstream sign-off is measured on that netlist")
+            f"clear). {_lec_counterexample_sentence(doc)} The netlist's "
+            f"equivalence to the RTL is OPEN and every downstream sign-off is "
+            f"measured on that netlist")
+
+
+def _lec_counterexample_sentence(doc: dict) -> str:
+    """What the producer's bounded search from reset (`lec.json.bmc`) says.
+    Text only: no verdict above reads it."""
+    bmc = doc.get("bmc") if isinstance(doc.get("bmc"), dict) else None
+    result = (bmc or {}).get("result")
+    if result == "COUNTEREXAMPLE":
+        cex = bmc.get("counterexample") or {}
+        return (f"The bounded search from reset FOUND a counterexample: "
+                f"output(s) {', '.join(cex.get('differing_outputs') or [])} "
+                f"differ {cex.get('cycles_after_reset')} cycle(s) after reset "
+                f"(trace {cex.get('trace_path')}).")
+    if result == "NONE_WITHIN_BOUND":
+        return (f"Non-convergence is NOT non-equivalence: the bounded search "
+                f"from reset found no differing output within "
+                f"{bmc.get('depth_reached')} cycle(s) of reset.")
+    if result == "NOT_RUN":
+        return (f"Non-convergence is NOT non-equivalence, and no "
+                f"counterexample was searched for: {bmc.get('reason')}.")
+    return ("Non-convergence is NOT non-equivalence — no counterexample was "
+            "recorded.")
 
 
 def lec_record_reuse_note(doc: dict) -> str:

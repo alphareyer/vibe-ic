@@ -1042,24 +1042,30 @@ _register(Instrument(
     judge=_judge_bmc,
     positive=Sample(
         provenance=(
-            "yosys 0.69+ 4d572059c in vibeic-eda 0.3.83 (8HD-4, 2026-09-28). "
-            "calibration/cal_bmc_rtl.v (a counter, synchronous active-high "
-            "reset, registered `hit <= q == 4`) against "
-            "calibration/cal_bmc_gate_planted.v: its gf180mcuD netlist "
-            "(cal_bmc_gate.v, synthesised by that yosys) with ONE real edit "
-            "made in a scratch copy, or4 `_27_` .A1 `_06_` (= ~q[2]) -> q[2], "
-            "so `hit` fires at q == 0. Predicted before the run: reset in "
-            "step 1, en in step 2, `hit` differs in step 3 and nowhere else. "
-            "The script is lec_run's own ladder read cut before `equiv_make` "
-            "plus `bmc_script`; paths rewritten to <project>/<reports>."),
+            "yosys 0.69+ 4d572059c in vibeic-eda 0.3.83 (8HD-4, 2026-09-28), "
+            "the x-aware search (`miter -ignore_gold_x`, `sat -enable_undef "
+            "-set-def-inputs`). calibration/cal_bmc_rtl.v (a counter, "
+            "synchronous active-high reset, registered `hit <= q == 4`) "
+            "against calibration/cal_bmc_gate_planted.v: its gf180mcuD "
+            "netlist (cal_bmc_gate.v, synthesised by that yosys) with ONE real "
+            "edit made in a scratch copy, or4 `_27_` .A1 `_06_` (= ~q[2]) -> "
+            "q[2], so `hit` fires at q == 0. Predicted before the run: reset "
+            "in step 1, en in step 2, `hit` differs in step 3 and nowhere "
+            "else. The script is lec_run's own ladder read cut before "
+            "`equiv_make` plus `bmc_script`; paths rewritten to "
+            "<project>/<reports>."),
         artefact=_read("lec_bmc_cex_positive.log")),
     expect="COUNTEREXAMPLE cycle=3 outputs=hit",
     negative=Sample(
         provenance=(
-            "Same yosys, same script, the unedited cal_bmc_gate.v: every rung "
-            "to 16 cycles after reset ends `SAT proof finished - no model "
-            "found: SUCCESS!`."),
-        artefact=_read("lec_bmc_none_negative.log")),
+            "Same yosys and search on a DON'T-CARE, the trap a search "
+            "without x semantics falls into (review_wave4c BMC): "
+            "calibration/cal_bmc_xdc_rtl.v assigns `1'bx` for sel == 2'b11, "
+            "and its gf180mcuD netlist cal_bmc_xdc_gate.v (same yosys) chose "
+            "1 there. Without x semantics the same pair gave `model found: "
+            "FAIL!` at step 3 (sel=11, gold_y=0, gate_y=1). With them every "
+            "rung to 16 cycles after reset ends `no model found: SUCCESS!`."),
+        artefact=_read("lec_bmc_xdc_negative.log")),
 ))
 
 _register(Instrument(

@@ -6,7 +6,7 @@
  \----------------------------------------------------------------------------/
  Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]
 
--- Executing script file `<reports>/lec_bmc_cex_positive.ys' --
+-- Executing script file `<reports>/cex_new.ys' --
 
 1. Executing Verilog-2005 frontend: <project>/phase2/stage1/rtl/cal_bmc_rtl.v
 Parsing SystemVerilog input from `<project>/phase2/stage1/rtl/cal_bmc_rtl.v' to AST representation.
@@ -489,12 +489,18 @@ Using SAT solver `minisat`.
 Setting up time step 1:
 Import set-constraint for this timestep: \in_rst = 1'1
 Final constraint equation: \in_rst = 1'1
-Imported 94 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 109 cells to SAT database.
 Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
-Imported 94 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 109 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 Import show expression: \in_rst
@@ -512,7 +518,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 861 variables and 2238 clauses..
+Solving problem with 3310 variables and 8722 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -533,18 +539,27 @@ Using SAT solver `minisat`.
 Setting up time step 1:
 Import set-constraint for this timestep: \in_rst = 1'1
 Final constraint equation: \in_rst = 1'1
-Imported 94 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 109 cells to SAT database.
 Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
-Imported 94 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 109 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 
 Setting up time step 3:
 Final constraint equation: { } = { }
-Imported 94 cells to SAT database.
+Import def constraint for this timestep: \in_rst
+Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_clk
+Imported 109 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 Import show expression: \in_rst
@@ -562,7 +577,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 1300 variables and 3384 clauses..
+Solving problem with 4990 variables and 13154 clauses..
 SAT proof finished - model found: FAIL!
 
    ______                   ___       ___       _ _            _ _ 
@@ -627,9 +642,9 @@ SAT proof finished - model found: FAIL!
      3 \gold_q[2]                    0         0             0
      3 \gold_q[3]                    0         0             0
      3 \in_clk                       0         0             0
-     3 \in_en                        1         1             1
+     3 \in_en                        0         0             0
      3 \in_rst                       1         1             1
      3 \trigger                      1         1             1
-Dumping SAT model to VCD file <reports>/lec_bmc_cex_positive.vcd
+Dumping SAT model to VCD file <reports>/cex_new.vcd
 
 ERROR: Called with -verify and proof did fail!
