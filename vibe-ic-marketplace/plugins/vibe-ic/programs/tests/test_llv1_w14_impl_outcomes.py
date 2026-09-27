@@ -11,7 +11,6 @@ import ast
 import json
 import shutil
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -157,10 +156,11 @@ def test_the_default_adds_nothing(tmp_path, imported):
     assert IO.summary_lines({"steps": [], "verdict": "PASS"}) == []
 
 
-def test_the_mode_is_read_from_the_w0_record(tmp_path, monkeypatch):
-    fake = types.ModuleType("_impl_flow")
-    fake.recorded_impl = lambda project: "librelane"
-    monkeypatch.setitem(sys.modules, "_impl_flow", fake)
+def test_the_mode_is_read_from_the_w0_record(tmp_path):
+    """W0 is in the stack: the real mode record, not a stand-in module."""
+    import _impl_flow as F
+    assert IO.resolve_impl(tmp_path) == "vibe-ic"          # no record
+    F.write_record(tmp_path, "librelane", resolved_by="test")
     assert IO.resolve_impl(tmp_path) == "librelane"
     assert IO.report_fields(tmp_path)["impl"] == "librelane"
 
@@ -218,3 +218,74 @@ def test_the_whole_card_carries_the_section_only_under_a_flag(imported):
              if l not in default_card.splitlines() and not l.startswith("_")]
     assert extra and all(l.startswith(("## Implementation flow", "- Flow:",
                                        "|")) for l in extra), extra
+
+
+# ── the import is read through W0: load_manifest + segments_of ────────────
+
+SEG1, SEG2 = "phase3/librelane/seg1/runs/cmp3", "phase3/librelane/seg2/runs/cmp3"
+
+
+@pytest.fixture
+def imported_in_segments(tmp_path):
+    """The two-segment plan: segment 1 --to NetlistAssignStatements, segment
+    2 from CheckSDCFiles, each flow.log the real one cut the way LibreLane
+    writes such a run; ONE import writes one segmented manifest."""
+    import librelane_import as LI
+    proj = tmp_path / "proj"
+    for rel in (SEG1, SEG2):
+        (proj / rel).parent.mkdir(parents=True)
+        shutil.copytree(FIXTURE, proj / rel)
+    lines = (proj / SEG1 / "flow.log").read_text().splitlines(keepends=True)
+    cut = next(i for i, l in enumerate(lines) if l.startswith("Running")
+               and "'OpenROAD.CheckSDCFiles'" in l)
+    end = [l for l in lines if l.startswith(("Saving views", "Flow complete."))]
+    (proj / SEG1 / "flow.log").write_text("".join(lines[:cut] + end))
+    (proj / SEG2 / "flow.log").write_text("Starting…\n" + "".join(lines[cut:]))
+    # the trim kept state_out.json only where a rule imports; LibreLane
+    # writes one for every step that returns, the declared end included
+    (proj / SEG1 / "09-checker-netlistassignstatements/state_out.json") \
+        .write_text("{}\n")
+    LI.import_segments(proj, [(proj / SEG1, "Checker.NetlistAssignStatements"),
+                              (proj / SEG2, None)])
+    return proj
+
+
+def test_a_segmented_import_is_read_per_segment(imported_in_segments):
+    import _external_flow_manifest as M
+    doc = M.load_manifest(imported_in_segments)
+    assert "rows" not in doc and len(doc["segments"]) == 2
+    prod = IO.report_fields(imported_in_segments,
+                            IO.IMPL_LIBRELANE)["step_producers"]
+    assert prod["9"]["state"] == IO.DONE_BY_TOOL
+    assert prod["9"]["segments"] == ["segment-1"]
+    assert prod["9"]["tool_steps"] == ["Yosys.Synthesis"]
+    assert prod["21"]["state"] == IO.DONE_BY_TOOL
+    assert prod["21"]["segments"] == ["segment-2"]
+    # every row of a LibreLane-owned step, in either segment, is attributed
+    # once (step 31's rows are LibreLane's own DRC/LVS reports; the step is
+    # MEASURED_BY_VIBEIC, its verdict the kept vibe-ic decks')
+    total = sum(1 for s in doc["segments"] for r in s["rows"]
+                if r["step_id"] in IO.LIBRELANE_STEPS)
+    assert total and sum(p.get("files", 0) for p in prod.values()) == total
+    assert {r["step_id"] for s in doc["segments"] for r in s["rows"]} \
+        - IO.LIBRELANE_STEPS == {"31"}
+    # not_performed is the union over the segments
+    assert [s for s, p in prod.items() if p["state"] == IO.NOT_PERFORMED] \
+        == ["15.5ic"]
+
+
+def test_a_one_run_import_reads_as_before(imported):
+    prod = IO.report_fields(imported, IO.IMPL_LIBRELANE)["step_producers"]
+    assert prod["21"]["state"] == IO.DONE_BY_TOOL
+    assert not any("segments" in p for p in prod.values())
+
+
+def test_an_import_manifest_that_does_not_validate_claims_nothing(imported):
+    """A canonical file edited after the import: W0's load_manifest refuses
+    the manifest, so no step is DONE_BY_TOOL and none NOT_PERFORMED."""
+    (imported / "phase3/stage3/pnr/routed.def").write_text("edited\n")
+    prod = IO.report_fields(imported, IO.IMPL_LIBRELANE)["step_producers"]
+    flag = {s: p for s, p in prod.items() if s in IO.LIBRELANE_STEPS}
+    assert {p["state"] for p in flag.values()} == {IO.NOT_ATTRIBUTED}
+    assert all("does not validate" in p["reason"] and "routed.def" in p["reason"]
+               for p in flag.values())

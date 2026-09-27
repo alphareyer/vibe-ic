@@ -31,22 +31,27 @@ THE DEFAULT WRITES NOTHING
 `report_fields` returns ``{}`` when the mode is ``vibe-ic``, so a default run's
 phase reports and ``final_summary.md`` are byte-identical to before.
 
-WHERE THE MODE COMES FROM
-=========================
-The W0 mode record (``_impl_flow.recorded_impl``). Until W0 lands on main that
-module may be absent, and absent means the default, exactly as an absent record
-does; `resolve_impl` says which it read.
+WHERE THE MODE AND THE IMPORT COME FROM
+=======================================
+The mode is the W0 mode record (``_impl_flow.recorded_impl``); an absent record
+is the default. The import is W0's one import manifest, read ONLY through
+``_external_flow_manifest.load_manifest`` (validated against the disk) and
+``segments_of``: the two-segment plan writes one manifest whose rows live in
+``segments``, and a one-run manifest is one segment. A manifest that does not
+validate supports no claim: every flag step is NOT_ATTRIBUTED, and the reason
+says why.
 
 chip-AGNOSTIC: flow-step ids only; no design, PDK or cell literal.
 """
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _external_flow_manifest as _M  # noqa: E402
+import _impl_flow  # noqa: E402
 import verdict as _V  # noqa: E402
 
 IMPL_DEFAULT = "vibe-ic"
@@ -60,8 +65,8 @@ NOT_PERFORMED = "NOT_PERFORMED"
 #: (or the import has no rule that yields a file for it). No claim either way.
 NOT_ATTRIBUTED = "NOT_ATTRIBUTED"
 
-#: W6's manifest (librelane_import.MANIFEST_REL).
-IMPORT_MANIFEST_REL = "phase3/librelane/import_manifest.json"
+#: W0's import manifest, which W6 writes (librelane_import.MANIFEST_REL).
+IMPORT_MANIFEST_REL = _M.MANIFEST_REL
 
 #: PLAN §2, the "Under --librelane" column, for the steps after RTL.
 #: Steps LibreLane performs (segment 1: 9, 10, 14; segment 2: the rest).
@@ -85,52 +90,55 @@ def remedy(step_id: str, flow: str = IMPL_LIBRELANE) -> str:
 
 def resolve_impl(project: Path) -> str:
     """The project's implementation flow, from the W0 record."""
-    try:
-        import _impl_flow
-    except ImportError:            # W0 not landed: no record can exist
-        return IMPL_DEFAULT
     return _impl_flow.recorded_impl(Path(project))
 
 
 def load_import_manifest(project: Path) -> Optional[Dict[str, Any]]:
-    path = Path(project) / IMPORT_MANIFEST_REL
-    if not path.is_file():
+    """W0's import manifest, validated against the disk; None when there is
+    none. Raises ``_external_flow_manifest.ManifestError`` when it does not
+    validate."""
+    if not _M.manifest_path(project).is_file():
         return None
-    try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    return doc if isinstance(doc, dict) else None
+    return _M.load_manifest(Path(project))
 
 
-def step_producers(impl: str,
-                   manifest: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def step_producers(impl: str, manifest: Optional[Dict[str, Any]],
+                   manifest_error: Optional[str] = None
+                   ) -> Dict[str, Dict[str, Any]]:
     """Per flow step: who produced it under ``impl``. ``{}`` for the default.
 
-    Only the steps the flag changes are listed; every other step is vibe-ic's,
-    as it is without the flag.
+    ``manifest`` is a VALIDATED import manifest (``load_import_manifest``);
+    its rows are read per segment (``segments_of``). ``manifest_error`` is why
+    a manifest on disk did not validate (``manifest`` is then None, so no step
+    is claimed); it becomes the NOT_ATTRIBUTED reason. Only the
+    steps the flag changes are listed; every other step is vibe-ic's, as it is
+    without the flag.
     """
     if impl == IMPL_DEFAULT:
         return {}
     if impl != IMPL_LIBRELANE:
         raise ValueError(f"no outcome mapping for impl {impl!r}")
-    rows = [r for r in (manifest or {}).get("rows") or []
-            if isinstance(r, dict)]
+    rows = [(seg.get("name"), r)
+            for seg in (_M.segments_of(manifest) if manifest else [])
+            for r in seg.get("rows") or [] if isinstance(r, dict)]
     missing = {str(n.get("flow_step")): n for n in
                (manifest or {}).get("not_performed") or []
                if isinstance(n, dict)}
     out: Dict[str, Dict[str, Any]] = {}
     for sid in sorted(LIBRELANE_STEPS):
-        mine = [r for r in rows if str(r.get("step_id")) == sid]
+        mine = [(seg, r) for seg, r in rows if str(r.get("step_id")) == sid]
         if mine:
             kinds: Dict[str, int] = {}
-            for r in mine:
+            for _, r in mine:
                 kinds[str(r.get("provenance"))] = kinds.get(
                     str(r.get("provenance")), 0) + 1
             out[sid] = {"state": DONE_BY_TOOL, "producer": impl,
                         "tool_steps": sorted({str(r.get("tool_step_id"))
-                                              for r in mine}),
+                                              for _, r in mine}),
                         "files": len(mine), "provenance": kinds}
+            segs = sorted({seg for seg, _ in mine if seg is not None})
+            if segs:                       # a segmented import: which run
+                out[sid]["segments"] = segs
         elif sid in missing and manifest is not None:
             n = missing[sid]
             out[sid] = {"state": NOT_PERFORMED, "producer": impl,
@@ -141,7 +149,10 @@ def step_producers(impl: str,
                         "remedy": remedy(sid, impl)}
         else:
             out[sid] = {"state": NOT_ATTRIBUTED, "producer": impl,
-                        "reason": ("no import of this run yet"
+                        "reason": (f"the import manifest does not validate: "
+                                   f"{manifest_error}"
+                                   if manifest_error is not None else
+                                   "no import of this run yet"
                                    if manifest is None else
                                    "the import names no file for this step")}
     for sid in sorted(VIBEIC_MEASURES):
@@ -175,9 +186,12 @@ def report_fields(project: Path, impl: Optional[str] = None) -> Dict[str, Any]:
     impl = resolve_impl(project) if impl is None else impl
     if impl == IMPL_DEFAULT:
         return {}
+    try:
+        manifest, error = load_import_manifest(project), None
+    except _M.ManifestError as exc:
+        manifest, error = None, str(exc)
     return {"impl": impl,
-            "step_producers": step_producers(impl,
-                                             load_import_manifest(project))}
+            "step_producers": step_producers(impl, manifest, error)}
 
 
 def summary_lines(report: Optional[Dict[str, Any]]) -> List[str]:
