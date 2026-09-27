@@ -531,8 +531,14 @@ def test_a_step_block_reads_skips_and_transcripts():
     import _tool_log_provenance as T
     text = WHOLE.read_text()
     sta = T.step_block(text, "OpenROAD.STAPrePNR", "12-openroad-staprepnr")
-    # `Skipping corner ...` is not a step skip; three corners logged
-    assert sta["skipped"] is False and len(sta["subprocess_logs"]) == 3
+    # `Skipping corner ...` is not a step skip; each corner's transcript is
+    # logged (the members, compared both ways, not their count)
+    assert sta["skipped"] is False
+    want = {("runs", "cmp3", "12-openroad-staprepnr", c, "sta.log")
+            for c in ("nom_tt_025C_5v00", "nom_ss_125C_4v50",
+                      "nom_ff_n40C_5v50")}
+    got = set(sta["subprocess_logs"])
+    assert got == want, (sorted(got - want), sorted(want - got))
     skip_io = T.step_block(text, "OpenROAD.GlobalPlacementSkipIO",
                            "24-openroad-globalplacementskipio")
     assert skip_io["skipped"] is True            # "Returning state unaltered"
