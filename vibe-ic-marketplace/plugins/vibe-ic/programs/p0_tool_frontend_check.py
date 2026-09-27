@@ -121,6 +121,41 @@ DECL_RELAX_FLAG = "--allow-use-before-declare"
 DECL_RELAXED = "DECLARATION_ORDER_RELAXED"
 
 
+#: slang's own diagnostic grammar: `<file>:<line>:<col>: error: <message>`, and
+#: the ONE message the declaration-order retry may answer.
+_SLANG_ERROR = re.compile(r"^\S+:\d+:\d+: error: (.*)$", re.M)
+_USE_BEFORE_DECLARE = re.compile(
+    r"^identifier '[^']+' used before its declaration$")
+_BUILD_FAILED = re.compile(r"^Build failed: (\d+) errors?,", re.M)
+
+
+def only_use_before_declare(log: str) -> bool:
+    """True only when slang refused SOLELY on use-before-declare.
+
+    At least one `error:` diagnostic, every one of them is slang's exact
+    "identifier '<x>' used before its declaration", and slang's own
+    `Build failed: N errors` agrees with that count -- so an error in another
+    grammar, a timeout, or a transcript with no diagnostic never qualifies."""
+    _calibration.assert_calibrated(
+        "p0_tool_frontend_check::only_use_before_declare")
+    errors = [m.group(1).strip() for m in _SLANG_ERROR.finditer(log or "")]
+    if not errors or not all(_USE_BEFORE_DECLARE.match(e) for e in errors):
+        return False
+    counts = [int(m.group(1)) for m in _BUILD_FAILED.finditer(log or "")]
+    return bool(counts) and counts[-1] == len(errors)
+
+
+def _is_reused_ip(project: Path) -> bool:
+    """The runner's `_is_reused_ip_project`, read through the SAME manifest
+    loader (SOURCE_MANIFEST reused_ip:true); False on any error."""
+    try:
+        import l9_rtl_pin_consistency_check as _l9
+        mf = _l9.load_source_manifest(project)
+        return bool(isinstance(mf, dict) and mf.get("reused_ip") is True)
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
 def check(project: Path, image: str | None = None) -> dict:
     """`image` is the declared one (`--image`); None resolves it only if a
     tool actually has to run in docker."""
@@ -153,6 +188,12 @@ def check(project: Path, image: str | None = None) -> dict:
         yosys_image = _route_image("yosys", image)
         yosys = _invoke("yosys", ["-Q", "-T", "-p", _script()], project,
                         yosys_image)
+        # Orchestrator ruling (2026-09-28), the D3 review's two conditions:
+        # (a) REUSED IP ONLY -- plugin-authored RTL that uses a name before
+        #     declaring it stays a FAIL and goes to repair, which can edit it;
+        # (b) only when EVERY error slang printed is its use-before-declare
+        #     diagnostic (`only_use_before_declare`) -- never on any other
+        #     refusal, a mix, or a run that printed none.
         # FX_P2 — the D3 rule at this site. slang, like strict Icarus, refuses
         # a net used before its declaration ("identifier 'x' used before its
         # declaration"); Verilator and read_verilog accept it. MEASURED on
@@ -165,7 +206,8 @@ def check(project: Path, image: str | None = None) -> dict:
         # strict output. An undeclared name, a missing module or a syntax
         # error still fails, with the strict output (checked in the image:
         # `use of undeclared identifier` under both).
-        if yosys.returncode:
+        if (yosys.returncode and _is_reused_ip(project)
+                and only_use_before_declare(yosys.stdout + yosys.stderr)):
             relaxed = _invoke("yosys", ["-Q", "-T", "-p",
                                         _script(DECL_RELAX_FLAG + " ")],
                               project, yosys_image)
