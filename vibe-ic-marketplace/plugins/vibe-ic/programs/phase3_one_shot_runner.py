@@ -73656,6 +73656,44 @@ def _phase3_enclosing_supervised(project: Path, isolated: Path,
     return res, log
 
 
+#: How `phase3_one_shot_runner.main` ends WITHOUT a report of its own: 2 is
+#: a refusal before any step ran (delivery / canonical admission / not a
+#: directory, argparse) and `_progress_run.RC_UNDETERMINED`, a run that could
+#: not finish looking; 3 is the project lock; 4 is a PDK refusal. Each is a
+#: unit that did not run to a verdict, not one that ran and failed.
+_PHASE3_NOT_RUN_RCS = frozenset({2, 3, 4})
+
+
+def _enclosing_outcome(unit: str, unit_ok: bool, unit_rc: int,
+                       unit_verdict: Optional[str], unit_reason: str,
+                       launch_error: bool = False) -> Tuple[str, str, str]:
+    """(status, reason_class, what happened) for an enclosing unit.
+
+    A unit that RAN and failed is a plain FAIL: its own verdict FAIL, or an
+    exit with no verdict other than a refusal. NOT_MEASURED is only for a
+    unit that could not run (never spawned, refused before starting) or ran
+    and could not measure, each with its reason; a watchdog stop is decided
+    by the caller before this."""
+    if unit_ok:
+        return "PASS", "", "the unit ran and passed"
+    if launch_error:
+        return ("NOT_MEASURED", _V.ReasonClass.EXECUTION_ERROR,
+                "the unit could not be spawned")
+    if unit_verdict is not None:
+        if unit_verdict == "FAIL":
+            return "FAIL", "", "the unit ran and its verdict is FAIL"
+        if unit_verdict in ("PASS", "PASS_WITH_WAIVERS"):
+            return ("NOT_MEASURED", _V.ReasonClass.INPUT_ABSENT,
+                    "the unit passed but produced none of the selected outputs")
+        return ("NOT_MEASURED", unit_reason or _V.ReasonClass.INPUT_ABSENT,
+                f"the unit ran and could not measure (verdict {unit_verdict})")
+    if unit == "phase3" and unit_rc in _PHASE3_NOT_RUN_RCS:
+        return ("NOT_MEASURED", _V.ReasonClass.INPUT_ABSENT,
+                "the unit refused before running a step (see the stderr tail)")
+    return ("FAIL", "", f"the unit ran and exited rc={unit_rc} with no verdict"
+            if unit_rc else "the unit exited 0 without writing its report")
+
+
 def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                              args, step_ids: Set[str],
                              unit: str = "phase3") -> StepResult:
@@ -73676,6 +73714,7 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
             unit_rc = 0 if canonical_row.status in (
                 "PASS", "PASS_WITH_WAIVERS") else 1
             unit_verdict = canonical_row.status
+            unit_reason = canonical_row.reason_class
         elif unit == "pnr":
             pnr_row = step_pnr(isolated, top, pdk, args.container,
                                die_um=args.die_um, util=args.util,
@@ -73683,7 +73722,12 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                                pad_ring_step=step_pad_ring_gen)
             unit_rc = 0 if pnr_row.status in ("PASS", "PASS_WITH_WAIVERS") else 1
             unit_verdict = pnr_row.status
+            unit_reason = pnr_row.reason_class
         else:
+            unit_report = _pl.report_path(isolated, "phase3_one_shot.json")
+            # The copy carries the project's previous report; only the one
+            # this run writes may speak for it.
+            unit_report.unlink(missing_ok=True)
             res, log = _phase3_enclosing_supervised(
                 project, isolated,
                 _phase3_enclosing_cmd(isolated, top, pdk, args))
@@ -73700,7 +73744,7 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                     f"{_stderr_tail(res.err)}",
                     [], reason_class=_V.ReasonClass.STALLED)
             unit_rc = res.rc
-            unit_report = _pl.report_path(isolated, "phase3_one_shot.json")
+            unit_reason = ""
             try:
                 unit_verdict = json.loads(unit_report.read_text()).get("verdict")
             except (OSError, ValueError):
@@ -73722,6 +73766,9 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                                 copied.append(str(target))
         unit_ok = unit_rc == 0 and bool(produced) and unit_verdict in (
             "PASS", "PASS_WITH_WAIVERS")
+        status, reason_class, outcome = _enclosing_outcome(
+            unit, unit_ok, unit_rc, unit_verdict, unit_reason,
+            launch_error=(unit == "phase3" and res.outcome == "launch_error"))
         unit_log = ""
         if unit == "phase3":
             unit_log = f"; stderr log {log}"
@@ -73733,15 +73780,13 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                      "phase3": "phase3_one_shot_runner"}[unit]
         execution_note = ("ran as part of" if produced else
                           "requested through; no selected output was produced by")
-        return StepResult(name, "PASS" if unit_ok
-                          else "NOT_MEASURED", time.time() - t0,
+        return StepResult(name, status, time.time() - t0,
                           f"steps {', '.join(sorted(step_ids))} {execution_note} "
-                          f"{enclosing}; enclosing rc={unit_rc}; "
+                          f"{enclosing}; {outcome}; enclosing rc={unit_rc}; "
                           f"verdict={unit_verdict}; selected outputs newly "
                           f"produced={len(produced)}; only selected declared "
                           f"outputs published{unit_log}",
-                          copied, reason_class=("" if unit_ok else
-                                                _V.ReasonClass.INPUT_ABSENT))
+                          copied, reason_class=reason_class)
 
 
 def _phase3_file_manifest(project: Path) -> Dict[str, str]:

@@ -225,9 +225,12 @@ def test_enclosing_phase3_failure_keeps_and_surfaces_stderr(
                         lambda *a: [sys.executable, "-c", fail])
     monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "failrun")
     row = _enclose(project)
-    # Only the surfacing is this test's subject.  The status main gives a
-    # unit that ran and exited non-zero is not pinned here.
+    # It RAN and failed: a plain FAIL (owner outcome-state ruling), never a
+    # NOT_MEASURED about something that could not be run.
+    assert row.status == "FAIL", row.detail
+    assert not row.reason_class
     assert "enclosing rc=7" in row.detail
+    assert "ran and exited rc=7 with no verdict" in row.detail
     assert "line-29" in row.detail and "line-5\n" not in row.detail
     log = _window_log(project, "failrun")
     assert log.read_text().splitlines() == [f"line-{i}" for i in range(30)]
@@ -261,3 +264,89 @@ def test_a_zombie_is_not_a_surviving_orphan():
     finally:
         sleeper.kill()
         sleeper.wait(timeout=10)
+
+
+def _enclose_with(project, monkeypatch, code, run_id):
+    monkeypatch.setattr(p3, "_phase3_enclosing_cmd",
+                        lambda *a: [sys.executable, "-c", code])
+    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", run_id)
+    return _enclose(project)
+
+
+def test_an_enclosing_unit_whose_own_verdict_is_fail_is_fail(project, monkeypatch):
+    report = str(p3._pl.report_path(Path("ISOLATED"), "phase3_one_shot.json"))
+    # The unit writes its own report in the copy it was handed (argv[1]).
+    code = ("import json, pathlib, sys\n"
+            f"rel = pathlib.Path({report!r}).relative_to('ISOLATED')\n"
+            "p = pathlib.Path(sys.argv[1]) / rel\n"
+            "p.parent.mkdir(parents=True, exist_ok=True)\n"
+            "p.write_text(json.dumps({'verdict': 'FAIL'}))\n"
+            "sys.exit(1)\n")
+    monkeypatch.setattr(p3, "_phase3_enclosing_cmd",
+                        lambda iso, *a: [sys.executable, "-c", code, str(iso)])
+    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "verdictfail")
+    row = _enclose(project)
+    assert row.status == "FAIL", row.detail
+    assert "verdict is FAIL" in row.detail
+
+
+def test_a_previous_report_in_the_copy_does_not_speak_for_this_run(
+        project, monkeypatch):
+    """The copy carries the project's last report (PASS). A unit that dies
+    without writing one must not be read as that PASS."""
+    old = p3._pl.report_path(project, "phase3_one_shot.json")
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_text(json.dumps({"verdict": "PASS"}))
+    row = _enclose_with(project, monkeypatch, "import sys; sys.exit(9)", "stale")
+    assert row.status == "FAIL", row.detail
+    assert "verdict=None" in row.detail
+
+
+@pytest.mark.parametrize("rc", [2, 3, 4])  # main()'s no-report refusals
+def test_a_unit_refused_before_it_ran_stays_not_measured(project, monkeypatch, rc):
+    row = _enclose_with(
+        project, monkeypatch,
+        f"import sys; sys.stderr.write('REFUSED: test\\n'); sys.exit({rc})",
+        f"refused{rc}")
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.INPUT_ABSENT
+    assert "refused before running a step" in row.detail
+    assert "REFUSED: test" in row.detail
+
+
+def test_the_real_runner_refusing_an_unadmitted_copy_stays_not_measured(
+        project, monkeypatch):
+    """No stand-in: the real phase-3 CLI on an empty project refuses at
+    admission, which is a unit that never ran a step."""
+    monkeypatch.setattr(p3, "_WATCHDOG_STALL_GRACE_S", 120)
+    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "realrefusal")
+    monkeypatch.delenv(_runner_lock.REENTRANCY_ENV, raising=False)
+    row = _enclose(project)
+    assert row.status == "NOT_MEASURED", row.detail
+    assert "refused before running a step" in row.detail
+
+
+def test_a_unit_that_cannot_be_spawned_stays_not_measured(project, monkeypatch):
+    monkeypatch.setattr(p3, "_phase3_enclosing_cmd",
+                        lambda *a: [str(project / "no-such-interpreter")])
+    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "nospawn")
+    row = _enclose(project)
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.EXECUTION_ERROR
+    assert "could not be spawned" in row.detail
+
+
+@pytest.mark.parametrize("status, expected", [("FAIL", "FAIL"),
+                                              ("NOT_MEASURED", "NOT_MEASURED")])
+def test_an_in_process_unit_keeps_what_it_found(project, monkeypatch, status,
+                                                expected):
+    monkeypatch.setattr(p3, "step_canonicalize_artefacts", lambda *a, **k:
+                        p3.StepResult("canonicalize", status, 0.0, "x",
+                                      reason_class=("" if status == "FAIL" else
+                                                    p3._V.ReasonClass.TOOL_ABSENT)))
+    row = p3._phase3_window_enclosing(
+        project, "top", SimpleNamespace(name="gf180mcuD"),
+        SimpleNamespace(container="vibeic-eda"), {"24"}, unit="canonicalize")
+    assert row.status == expected, row.detail
+    if expected == "NOT_MEASURED":
+        assert row.reason_class == p3._V.ReasonClass.TOOL_ABSENT
