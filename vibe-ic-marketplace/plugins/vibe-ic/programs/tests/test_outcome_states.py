@@ -32,6 +32,15 @@ import not_verified_tier as NV  # noqa: E402
 
 import _progress_run as _pr  # noqa: E402
 
+import pytest  # noqa: E402
+
+#: This file's assertions quote the child's "`yosys` is not on PATH"; on a host
+#: without yosys, a regression here would otherwise be converted into the very
+#: state it is testing. Measured: the drop-the-presence-check mutation read
+#: "17 passed, 1 skipped" until this mark was added.
+pytestmark = pytest.mark.outcome_state_exempt(
+    "the subject is the outcome-state tier itself")
+
 PLUGIN = Path(__file__).resolve().parents[2]
 PROGRAMS = PLUGIN / "programs"
 
@@ -296,3 +305,9 @@ def test_a_setup_error_counts_as_fail(tmp_path):
                                  "    pass\n")
     assert _counts(out)["FAIL"] == 1, out
     assert rc == 1, out
+
+
+def test_an_exempt_test_reports_its_raw_failure(tmp_path):
+    body = ("@pytest.mark.outcome_state_exempt('subject: yosys absence')\n" + _RUNS_YOSYS)
+    rc, out = _session(tmp_path, body, path=_empty_bin(tmp_path))
+    assert _counts(out)["FAIL"] == 1 and _counts(out)["NOT_VERIFIED"] == 0, out

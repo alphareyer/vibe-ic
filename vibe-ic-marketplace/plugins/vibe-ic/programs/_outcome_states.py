@@ -54,6 +54,9 @@ WHAT IS NEVER CONVERTED
   or FileNotFoundError is a fixture, and a regression that lets it escape is
   exactly what such a test exists to catch.
 * xfail/xpass reports, and teardown failures.
+* A test marked ``outcome_state_exempt(reason)``: its subject IS a tool's
+  absence (or this tier), so the text it asserts on names the missing tool and
+  its own regression would otherwise read as the host's.
 
 THE SUMMARY
 ===========
@@ -91,6 +94,11 @@ STATES = (NOT_VERIFIED, NOT_MEASURED, BOOKKEEPING)
 
 MEASURES_MARK = "measures"
 BOOKKEEPING_MARK = "bookkeeping"
+#: A test whose SUBJECT is a tool's absence (or this tier itself) asserts on text
+#: that names a missing tool; on a host that lacks the tool, the text reader
+#: above would turn that test's own regression into NOT_VERIFIED. Such a test
+#: declares this mark, with a reason, and always reports its raw outcome.
+EXEMPT_MARK = "outcome_state_exempt"
 
 #: 1-min load average per online CPU above which a wall-clock measurement taken
 #: in this run is not trusted. At 1.0 every core already has a runnable task
@@ -283,6 +291,10 @@ def pytest_configure(config):
         f"{BOOKKEEPING_MARK}(regenerate=..., match=...): the test's only subject "
         f"is a stated statistic; a failure (matching `match`) is reported "
         f"{BOOKKEEPING}, not red (_outcome_states.py).")
+    config.addinivalue_line(
+        "markers",
+        f"{EXEMPT_MARK}(reason): the test's subject is a tool's absence or this "
+        f"tier itself, so its failures are always reported raw (_outcome_states.py).")
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -292,7 +304,7 @@ def pytest_runtest_makereport(item, call):
     if not rep.failed or rep.when not in ("setup", "call") or hasattr(rep, "wasxfail"):
         return
     exc = call.excinfo.value if call.excinfo is not None else None
-    if exc is None:
+    if exc is None or item.get_closest_marker(EXEMPT_MARK) is not None:
         return
     reason = classify_not_verified(exc)
     if reason is None and rep.when == "call":
