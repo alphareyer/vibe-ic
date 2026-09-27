@@ -11,12 +11,14 @@ Contracts:
   3. Each runner's real main(), as a subprocess: `--librelane`, `--orfs`, and
      a missing flag on a librelane project each exit 2 with the named reason
      and leave the project tree byte-identical.
-  4. Every runner-to-runner spawn site forwards `child_argv(project)`, which
-     is [] with no record: the default child argv is unchanged.
+  4. Every runner-to-runner spawn site, the phase3 self-spawn included,
+     forwards `child_argv(...)` before the call that runs it (checked per
+     site); it is [] with no record: the default child argv is unchanged.
 """
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import importlib
 import re
@@ -163,33 +165,121 @@ def test_each_real_main_refuses_by_name_and_writes_nothing(runner, project):
     assert _tree(project) == before
 
 
-# Runner-to-runner spawn sites, per file: how the file names a runner it
-# spawns, and which of those sites are exempt. A new site moves the count and
-# reddens this test until it forwards the mode (or is exempted with a reason).
-_SPAWN = re.compile(r'_phase_runner\("|"[a-z0-9_]+_one_shot_runner\.py"')
+# Runner-to-runner spawn sites. A site is a line that names a runner it will
+# spawn: `_phase_runner("...")`, a quoted `*_one_shot_runner.py`, or the
+# runner's own `str(Path(__file__))`. PER SITE, the mode must be forwarded
+# (`_impl_flow.child_argv(`) between that line and the first call that runs the
+# child. Counting forwards per file could not tell a moved forward from a
+# missing one; this cannot. The pins make a NEW site red until it is looked at.
+_SPAWN = re.compile(r'_phase_runner\("|"[a-z0-9_]+_one_shot_runner\.py"'
+                    r'|str\(Path\(__file__\)\)')
+_RUNS_CHILD = re.compile(r"\b_run_phase\(|\b_run\(|\b_pr\.run\("
+                         r"|\bsubprocess\.run\(")
 _SPAWN_SITES = {
     "vibe_ic_one_shot_runner.py": 5,
     "design_one_shot_runner.py": 3,
     "phase23_one_shot_runner.py": 2,
-    # phase1_doc_one_shot_runner is Phase 1's own doc track, not a gated
-    # runner: it takes no flag and Phase 1 runs unchanged under the flag.
+    "phase3_one_shot_runner.py": 1,     # the enclosing window unit
     "phase1_one_shot_runner.py": 0,
     "analog_one_shot_runner.py": 0,
 }
+#: Named exemptions, with the reason: a spawned program that is not a gated
+#: runner takes no flag.
+_NOT_A_GATED_RUNNER = {
+    "phase1_doc_one_shot_runner.py": "Phase 1's own doc track; Phase 1 runs "
+                                     "unchanged under the flag",
+}
+
+
+_RUN_FUNCS = {"_run_phase", "_run", "run"}
+
+
+def _is_run_call(node):
+    f = node.func
+    name = f.id if isinstance(f, ast.Name) else (
+        f.attr if isinstance(f, ast.Attribute) else "")
+    return name in _RUN_FUNCS and bool(_RUNS_CHILD.search(ast.unparse(f) + "("))
+
+
+def _spawn_sites(fname):
+    """(line, run-call line, forwarded?) per spawn site, read from the AST."""
+    src = (PROGRAMS / fname).read_text()
+    tree = ast.parse(src)
+    funcs = [n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    sites = []
+    for i, line in enumerate(src.splitlines(), 1):
+        if line.lstrip().startswith(("#", "def ")) or not _SPAWN.search(line):
+            continue
+        if any(f'"{name}"' in line for name in _NOT_A_GATED_RUNNER):
+            continue
+        fn = min((f for f in funcs if f.lineno <= i <= f.end_lineno),
+                 key=lambda f: f.end_lineno - f.lineno)
+        calls = sorted((c for c in ast.walk(fn) if isinstance(c, ast.Call)
+                        and _is_run_call(c) and c.end_lineno >= i),
+                       key=lambda c: c.lineno)
+        if not calls:
+            # A BUILDER (e.g. phase3's `_phase3_enclosing_cmd`): it returns
+            # the argv and another function runs it. The forward must then be
+            # inside the statement that holds the spawn.
+            stmt = min((st for st in ast.walk(fn) if isinstance(st, ast.stmt)
+                        and st is not fn and st.lineno <= i <= st.end_lineno),
+                       key=lambda st: st.end_lineno - st.lineno)
+            sites.append((i, stmt.lineno,
+                          "_impl_flow.child_argv(" in ast.unparse(stmt)))
+            continue
+        call = calls[0]
+        text = ast.unparse(call)
+        names = {n.id for n in ast.walk(call) if isinstance(n, ast.Name)}
+        feeds = [st for st in ast.walk(fn)
+                 if isinstance(st, (ast.Assign, ast.AugAssign))
+                 and st.lineno < call.lineno
+                 and any(isinstance(t, ast.Name) and t.id in names
+                         for t in (st.targets if isinstance(st, ast.Assign)
+                                   else [st.target]))]
+        forwarded = "_impl_flow.child_argv(" in text or any(
+            "_impl_flow.child_argv(" in ast.unparse(st) for st in feeds)
+        sites.append((i, call.lineno, forwarded))
+    return sites
 
 
 @pytest.mark.parametrize("fname", sorted(_SPAWN_SITES))
 def test_every_spawn_site_forwards_the_mode(fname):
-    src = (PROGRAMS / fname).read_text()
-    code = "\n".join(l for l in src.splitlines()
-                     if not l.lstrip().startswith("#"))
-    sites = len(_SPAWN.findall(code))
-    exempt = code.count('"phase1_doc_one_shot_runner.py"')
-    assert sites - exempt == _SPAWN_SITES[fname], (
-        f"{fname}: {sites - exempt} spawn sites, pinned "
-        f"{_SPAWN_SITES[fname]} -- forward _impl_flow.child_argv(project) "
-        "at the new one and move the pin")
-    assert code.count("_impl_flow.child_argv(project)") == _SPAWN_SITES[fname]
+    sites = _spawn_sites(fname)
+    assert len(sites) == _SPAWN_SITES[fname], (
+        f"{fname}: spawn sites at lines {[s[0] for s in sites]}, pinned "
+        f"{_SPAWN_SITES[fname]} -- forward _impl_flow.child_argv(...) at the "
+        "new one and move the pin")
+    for line, run_line, forwarded in sites:
+        assert run_line is not None, f"{fname}:{line}: no call runs this child"
+        assert forwarded, (
+            f"{fname}:{line}: the child spawned here (run at line {run_line}) "
+            "is not told the project's mode")
+
+
+def test_the_census_sees_a_site_that_does_not_forward(tmp_path, monkeypatch):
+    """The census is not blind to the shapes it claims to see."""
+    src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
+    fake = tmp_path / "phase3_one_shot_runner.py"
+    fake.write_text(src.replace("*_impl_flow.child_argv(isolated)]", "]", 1))
+    assert fake.read_text() != src
+    monkeypatch.setattr(sys.modules[__name__], "PROGRAMS", tmp_path)
+    with pytest.raises(AssertionError, match="is not told the project's mode"):
+        test_every_spawn_site_forwards_the_mode("phase3_one_shot_runner.py")
+
+
+def test_a_mapped_knob_does_not_claim_the_parents_default_is_explicit():
+    """Wave-3 review: the parents forward their own --util/--die-um defaults
+    to phase3, so "differs from phase3's default" cannot mean "declared"."""
+    front = IF.KNOBS["vibe_ic_one_shot_runner"]
+    for runner in ("vibe_ic_one_shot_runner", "phase23_one_shot_runner",
+                   "phase3_one_shot_runner"):
+        for knob in ("util", "die_um"):
+            disposition, why = IF.KNOBS[runner][knob]
+            assert disposition == IF.MAPPED
+            assert "declared" in why and "explicit value is passed" not in why
+    assert "provenance" in IF.MAPPED_PRECONDITION
+    assert front["util"][0] == IF.MAPPED
 
 
 def test_the_phase2_argv_builder_is_unchanged_by_default():

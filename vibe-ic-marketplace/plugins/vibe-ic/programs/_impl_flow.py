@@ -492,10 +492,23 @@ _ANALOG = ("the analog track is out of v1 and is refused as a whole under the "
 _UI = "operator interface only; no step reads it"
 _IMG = "the image is resolved at dispatch and recorded (decision 24)"
 _PDK = "vibe-ic resolves the PDK; v1 admits gf180mcuD only (W24)"
-_DIE = ("DIE_AREA: an explicit die is the design's, passed to the tool "
-        "(0.5ic/W9); 'auto' is vibe-ic's auto-die between the segments")
-_UTIL = ("FP_CORE_UTIL (Classic) / the auto-die's utilisation (Chip); an "
-         "explicit value is passed, the parser default is not a declaration")
+_DIE = ("DIE_AREA: a die the USER or the design declared is passed to the "
+        "tool (0.5ic/W9); 'auto' is vibe-ic's auto-die between the segments")
+_UTIL = ("FP_CORE_UTIL (Classic) / the auto-die's utilisation (Chip), when the "
+         "USER or the design declared it; a parser default is not a "
+         "declaration")
+#: PRECONDITION FOR W5/W7b (wave-3 review, W1): the MAPPED rows cannot be
+#: implemented from a child runner's own view of "differs from my default".
+#: The parents forward THEIR defaults explicitly: the front door passes
+#: `--util` (0.4) and `--die-um` (auto) to phase3 on every run, and phase23
+#: passes `--util 0.4` and `--die-um 1500x1500`, while phase3's own defaults
+#: are 0.30 and auto. So at phase3 an undeclared value looks explicit. Before a
+#: MAPPED knob reaches a tool config, the parents must forward it only when the
+#: user set it, or tell the child its provenance; until then no MAPPED knob is
+#: applied (every flagged run is IMPL_NOT_YET_WIRED).
+MAPPED_PRECONDITION = ("parents forward their own --util/--die-um defaults "
+                       "explicitly; a MAPPED knob needs its provenance from "
+                       "the parent before it may reach a tool config")
 
 #: Every option of every gated runner, by parser destination, with what it
 #: means under `--librelane`. `test_every_knob_has_a_disposition` reads the
