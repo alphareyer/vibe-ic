@@ -39785,6 +39785,17 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                           extras={"resize_history": resize_history,
                                   "spare_record_written": _spare_record_written,
                                  "loosen_declines": loosen_declines})
+    # N9 — the routed netlist names each supply port once. `pdngen` leaks one
+    # STA top port per supply per call (see `_netlist_port_decls`), and the
+    # PDN EM pre-sweep calls it once per candidate, so `write_verilog` above
+    # wrote `inout VDD;` as many times. Exact repeats are removed here, where
+    # the netlist is first written; a conflicting repeat is left for
+    # `step_prestream_gate` to refuse by name.
+    _netlist_ports = _dedupe_shipped_netlist_ports(project, top, "pnr")
+    if _netlist_ports.get("status") == "DEDUPED":
+        print(f"[pnr] NETLIST_PORT_DECLS_DEDUPED: "
+              f"{len(_netlist_ports.get('removed') or [])} exact repeat(s) "
+              f"removed from {top}_pnr.v", file=sys.stderr)
     # ORGANIC #585 — route-convergence gate. TritonRoute can run out of
     # iterations and COMPLETE with violations remaining (rc=0,
     # `Completing 100% with N violations`). A nonzero final DRT-0199
@@ -56009,11 +56020,65 @@ def _prestream_route_census(project: Path, top: str, pdk: PdkConfig,
     return record, ""
 
 
+def _dedupe_shipped_netlist_ports(project: Path, top: str,
+                                  stage: str) -> Dict[str, Any]:
+    """N9 — remove EXACT repeated top-port names/declarations from the
+    shipped `<pnr>/<top>_pnr.v`, and record what was done (or why nothing
+    was) in `reports/phase3/netlist_port_decls.json`, one row per stage.
+
+    The repeats are an OpenROAD session artefact (`pdngen` creates and then
+    destroys a supply BTerm; the STA top port it made is not removed, so each
+    call adds another), not a design fact: the routed DEF carries no such
+    terminal at all. The rule is structural (`_netlist_port_decls`): a
+    conflicting repeat is never merged, and a header this parser does not
+    understand is left untouched and recorded UNPARSED."""
+    import _netlist_port_decls as _npd  # noqa: PLC0415
+    netlist = _pl.pnr_dir(project) / f"{top}_pnr.v"
+    row: Dict[str, Any] = {"stage": stage, "netlist": str(netlist)}
+    try:
+        text = netlist.read_text(errors="replace")
+    except OSError as exc:
+        row.update(status="ABSENT", why=f"{type(exc).__name__}: {exc}")
+    else:
+        new, rec = _npd.dedupe(text, top)
+        row.update(rec)
+        row["sha256_before"] = hashlib.sha256(text.encode()).hexdigest()
+        if new != text:
+            netlist.write_text(new)
+            row["sha256_after"] = hashlib.sha256(new.encode()).hexdigest()
+        row["check_status"], row["findings"] = _npd.problems(new, top)
+    record = _pl.reports_dir(project) / "phase3" / "netlist_port_decls.json"
+    try:
+        doc = json.loads(record.read_text()) if record.is_file() else {}
+    except (OSError, ValueError):
+        doc = {}
+    rows = [r for r in (doc.get("rows") or []) if r.get("stage") != stage]
+    try:
+        _aa.write_json(record, {"schema": "vibe-ic/netlist-port-decls/1",
+                                "rows": rows + [row]})
+    except Exception:  # noqa: BLE001 — the record never blocks the step
+        pass
+    return row
+
+
 def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
                         container: str, *, _si_retry: bool = False,
                         _feedback_retry: bool = False) -> StepResult:
     """Measure the current routed revision before allowing any GDS stream."""
     t0 = time.time()
+    # N9 — the netlist this gate freezes names each port once and declares
+    # it once. Runs BEFORE the layout digest so the digest is of the netlist
+    # that ships; every promotion below re-enters this gate from the top.
+    _nports = _dedupe_shipped_netlist_ports(project, top, "prestream")
+    if _nports.get("check_status") == "PARSED" and _nports.get("findings"):
+        return StepResult(
+            "prestream_gate", "FAIL", time.time() - t0,
+            f"NETLIST_PORT_DECL_INVALID: {top}_pnr.v -- "
+            + "; ".join(_nports["findings"][:6])
+            + (f" ({_nports.get('why')})" if _nports.get("why") else "")
+            + ". iverilog and yosys refuse a netlist that names or declares "
+              "a port twice; it is not shipped.",
+            [str(_pl.reports_dir(project) / "phase3" / "netlist_port_decls.json")])
     digest, refusal = _layout_basis(project, top, pdk, container)
     if refusal:
         return StepResult("prestream_gate", "NOT_MEASURED", 0.0,
