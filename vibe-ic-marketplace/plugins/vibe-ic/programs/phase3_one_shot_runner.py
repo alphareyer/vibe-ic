@@ -37688,6 +37688,43 @@ def _prepnr_geometry(project: Path, top: str, pdk: PdkConfig,
     return PrePnrDieCore(die_um=die_um, die_w=die_w, die_h=die_h, core_pad=core_pad, core_w=core_w, core_h=core_h, fp_rect=fp_rect, util=util, auto_die_requested=_auto_die_requested, l9_die_note=_l9_die_note, ring_floor_pad=_ring_floor_pad, ring_inset=_ring_inset, ring_pinned_die=_ring_pinned_die, seal_rec=_seal_rec, slot=_slot, strap_floor_detail=_strap_floor_detail, strap_floor_um=_strap_floor_um, ct03_pin_rect=_ct03_pin_rect)
 
 
+def _prepnr_floorplan(project: Path, top: str, pdk: PdkConfig,
+                      container: str, die_um: str, util: float,
+                      netlist: Path, t0: float
+                      ) -> "PrePnrDieCore | StepResult":
+    """`_prepnr_geometry`, then the floorplan-rectangles record it settles.
+
+    The record call is MOVED VERBATIM from `step_pnr` (llv1 W7a): one
+    record, written on every run that reaches it, naming both rectangles.
+    """
+    _prep_dc = _prepnr_geometry(project, top, pdk, container, die_um,
+                                util, netlist, t0)
+    if isinstance(_prep_dc, StepResult):
+        return _prep_dc
+    (die_um, die_w, die_h, core_pad, core_w, core_h,
+     fp_rect, util, _auto_die_requested, _l9_die_note, _ring_floor_pad,
+     _ring_inset, _ring_pinned_die, _seal_rec, _slot,
+     _strap_floor_detail, _strap_floor_um, _ct03_pin_rect) = _prep_dc.as_locals()
+
+    # ONE RECORD, WRITTEN ON EVERY RUN, naming both rectangles and which of
+    # them each downstream consumer must read. A producer that writes nothing
+    # when it has nothing to say is indistinguishable from one that never ran.
+    _floorplan_rectangles_record(
+        project,
+        die_rect=([_slot["die_rect"][0], _slot["die_rect"][1],
+                   _slot["die_rect"][2], _slot["die_rect"][3]] if _slot
+                  else [0, 0, die_w, die_h]),
+        fp_rect=(list(fp_rect) if fp_rect is not None else None),
+        die_source=(f"shuttle slot {_slot['slot']} DIE_AREA "
+                    f"({_slot['source_file']})" if _slot
+                    else f"--die-um {die_w}x{die_h} at the origin"),
+        core_pad=core_pad,
+        ring_inset_um=_ring_inset,
+        seal_ring=_seal_rec,
+        pdn_core_floor=_strap_floor_detail)
+    return _prep_dc
+
+
 def step_pnr(project: Path, top: str, pdk: PdkConfig,
              container: str, die_um: str, util: float,
              spare_density=None, pad_ring_step=step_pad_ring_gen,
@@ -37950,33 +37987,17 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     except Exception:
         pass
 
-    # llv1 W7a — the die/core resolution lives in `_prepnr_geometry`,
-    # which the between-segments step calls too; moved verbatim.
-    _prep_dc = _prepnr_geometry(project, top, pdk, container, die_um,
-                                util, netlist, t0)
+    # llv1 W7a — the die/core resolution AND the floorplan record live in
+    # `_prepnr_floorplan`, which the between-segments step calls too;
+    # both moved verbatim.
+    _prep_dc = _prepnr_floorplan(project, top, pdk, container, die_um,
+                                 util, netlist, t0)
     if isinstance(_prep_dc, StepResult):
         return _prep_dc
     (die_um, die_w, die_h, core_pad, core_w, core_h,
      fp_rect, util, _auto_die_requested, _l9_die_note, _ring_floor_pad,
      _ring_inset, _ring_pinned_die, _seal_rec, _slot,
      _strap_floor_detail, _strap_floor_um, _ct03_pin_rect) = _prep_dc.as_locals()
-
-    # ONE RECORD, WRITTEN ON EVERY RUN, naming both rectangles and which of
-    # them each downstream consumer must read. A producer that writes nothing
-    # when it has nothing to say is indistinguishable from one that never ran.
-    _floorplan_rectangles_record(
-        project,
-        die_rect=([_slot["die_rect"][0], _slot["die_rect"][1],
-                   _slot["die_rect"][2], _slot["die_rect"][3]] if _slot
-                  else [0, 0, die_w, die_h]),
-        fp_rect=(list(fp_rect) if fp_rect is not None else None),
-        die_source=(f"shuttle slot {_slot['slot']} DIE_AREA "
-                    f"({_slot['source_file']})" if _slot
-                    else f"--die-um {die_w}x{die_h} at the origin"),
-        core_pad=core_pad,
-        ring_inset_um=_ring_inset,
-        seal_ring=_seal_rec,
-        pdn_core_floor=_strap_floor_detail)
 
     # Pick clock buffer cells: PdkConfig-carried masters win (every registry
     # PDK carries clk_buf_cell/root); otherwise DISCOVER them from the PDK's own

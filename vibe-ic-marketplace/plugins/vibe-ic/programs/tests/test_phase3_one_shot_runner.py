@@ -258,8 +258,13 @@ def test_chip_top_producer_precedes_sdc_and_die_resolution():
     # (shared with the between-segments step). The ORDER property is the
     # same: step_pnr calls it after the SDC, and the die resolution is still
     # the first thing that function does.
-    die = step.index("_prep_dc = _prepnr_geometry(")
+    die = step.index("_prep_dc = _prepnr_floorplan(")
     assert producer < sdc < die
+    floorplan = source[source.index("def _prepnr_floorplan("):]
+    floorplan = floorplan[:floorplan.index("\ndef ", 1)]
+    assert "_prep_dc = _prepnr_geometry(" in floorplan
+    assert floorplan.index("_prepnr_geometry(") < floorplan.index(
+        "_floorplan_rectangles_record(")
     geometry = source[source.index("def _prepnr_geometry("):]
     geometry = geometry[:geometry.index("\ndef ", 1)]
     body = geometry[geometry.index('"""', geometry.index('"""') + 3) + 3:]
