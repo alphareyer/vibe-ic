@@ -552,7 +552,7 @@ def test_check_fails_a_port_two_verified_pairs_put_on_two_sides(
     rc, res = _check(proj, capsys)
     assert all(v["verdict"] == "VERIFIED" for v in res["pairs"]), res["pairs"]
     assert rc == 1 and res["verdict"] == "FAIL"
-    assert res["ports_on_two_sides"] == {"o_memory_ack": ["N", "S"]}
+    assert res["nets_on_two_sides"] == {"o_memory_ack": ["N", "S"]}
 
 
 def test_a_port_an_exact_row_names_is_placed_even_if_its_range_is_open(
@@ -638,5 +638,163 @@ def test_the_waive_names_a_derivation_that_did_not_run(tmp_path, monkeypatch):
 
     monkeypatch.setattr(RID, "apply_to_manifest", _boom)
     detail = _waive(_project(tmp_path))
-    assert "did not run" in detail and "derivation unavailable" in detail, \
+    assert "not measured" in detail and "derivation unavailable" in detail, \
         detail[-600:]
+
+
+# --------------------------------------------------------------------------- #
+# REVIEW WAVE 4b: sides are per BIT NET, as 15.5ic places them
+# --------------------------------------------------------------------------- #
+_GROUP_ROWS = DOC.split("| **East (E)**")[0]
+_IMPL_STATUS4 = [q if q["name"] != "o_status" else
+                 _p("o_status", "output", True, 4) for q in IMPL]
+
+
+def _ring_nets(proj, impl):
+    """What step 2 / 15.5ic see: (nets with no side, nets on two sides)."""
+    import _l_doc_pad_placement as LPP
+    ring = LPP.derive_own_ring(proj, impl)
+    placed = {n for nets in ring["by_side"].values() for n in nets}
+    every = [n for q in impl for n in LPP.bit_names(q)]
+    return [n for n in every if n not in placed], ring["nets_on_two_sides"]
+
+
+def test_a_bus_the_document_splits_across_two_sides_passes(tmp_path, capsys):
+    """RED on 6df205cdc: `--check` counted sides per PORT and FAILed
+    o_status as on two sides, while the ring (one pad per bit) is whole."""
+    doc = (_GROUP_ROWS + "| **East (E)** | `clk` / `rst` / `o_status[1:0]` |\n"
+           "| **West (W)** | `o_status[3:2]` |\n")
+    proj = _project(tmp_path, impl=_IMPL_STATUS4, doc=doc)
+    mf = _emit(proj)
+    assert _ring_nets(proj, _IMPL_STATUS4) == ([], [])
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (0, "PASS"), res
+    assert res["nets_on_two_sides"] == {} and res["nets_without_side"] == []
+    assert mf["renamed_interfaces_check"]["verdict"] == "PASS"
+
+
+def test_a_bus_the_document_places_only_in_part_fails(tmp_path, capsys):
+    """RED on 6df205cdc (PASS): only o_status[1:0] has a side, and 15.5ic
+    refuses the other two bits as PORT_WITHOUT_A_SIDE."""
+    doc = _GROUP_ROWS + "| **East (E)** | `clk` / `rst` / `o_status[1:0]` |\n"
+    proj = _project(tmp_path, impl=_IMPL_STATUS4, doc=doc)
+    mf = _emit(proj)
+    no_side, _two = _ring_nets(proj, _IMPL_STATUS4)
+    assert no_side == ["o_status[3]", "o_status[2]"]
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (1, "FAIL"), res
+    assert res["nets_without_side"] == no_side
+    gap = {u["port"]: u for u in
+           mf["renamed_interfaces_derivation"]["unresolved"]}["o_status"]
+    assert "placement gap" in gap["reason"], gap
+
+
+def test_one_mismatched_port_does_not_take_the_side_from_its_siblings(
+        tmp_path):
+    """RED on 6df205cdc: R2 grouped wen, ren and a 4-bit sel under one l9
+    tuple BEFORE acceptance, so sel's width rejected all three."""
+    impl = IMPL + [_p("o_memory_sel", "output", True, 4)]
+    mf = _emit(_project(tmp_path, impl=impl))
+    r2 = [p for p in mf["derived_pad_pairs"] if p["rule"] == "R2"]
+    assert _lr(r2) == [{"l9": ["o_memory_cyc", "o_memory_we"],
+                        "rtl": ["o_memory_ren", "o_memory_wen"]}]
+    der = mf["renamed_interfaces_derivation"]
+    assert [r["rtl"] for r in der["rejected"]] == [["o_memory_sel"]]
+    unresolved = {u["port"]: u for u in der["unresolved"]}
+    assert set(unresolved) == {"o_memory_sel"}
+    assert "o_memory_sel" in unresolved["o_memory_sel"]["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# an author's copy stays; only what an earlier version wrote is moved
+# --------------------------------------------------------------------------- #
+def test_an_authors_copy_of_a_derived_pair_is_kept(tmp_path, capsys):
+    """RED on 6df205cdc: the SKILL lets an author declare a rename by copying
+    a derived entry; the next emit deleted it, stamp and all, every run."""
+    import l9_rtl_pin_consistency_check as G
+    proj = _project(tmp_path)
+    mf = _emit(proj)
+    addr = [p for p in mf["derived_pad_pairs"] if p["l9"] == ["o_memory_addr"]]
+    mf["renamed_interfaces"] = addr
+    (proj / "phase2/stage1/rtl/SOURCE_MANIFEST.json").write_text(json.dumps(mf))
+    mf2 = _emit(proj)
+    assert mf2["renamed_interfaces"] == addr
+    assert "moved_out_of_renamed_interfaces" not in \
+        mf2["renamed_interfaces_derivation"]
+    assert G._manifest_renamed_groups(G.load_source_manifest(proj)) == [
+        ({"o_memory_addr"}, {"o_memory_raddr", "o_memory_waddr"})]
+    rc, res = _check(proj, capsys)
+    assert rc == 0 and all(v["verdict"] == "VERIFIED" for v in res["pairs"])
+
+
+def test_the_waive_names_the_pairs_it_moved(tmp_path):
+    """RED on 6df205cdc: the move was recorded only inside the manifest."""
+    proj = _project(tmp_path)
+    legacy = [dict(p, derived_by="renamed_interface_derive") for p in EXPECTED]
+    rtl = proj / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "SOURCE_MANIFEST.json").write_text(json.dumps(
+        {"reused_ip": True, "renamed_interfaces": legacy}))
+    detail = _waive(proj)
+    assert "moved 4 pair(s)" in detail, detail[-900:]
+
+
+# --------------------------------------------------------------------------- #
+# --check reads authored pairs the way the pad side does (all rename keys)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("alias", ["renamed_buses", "interface_renames"])
+def test_check_verifies_a_pair_under_an_alias_rename_key(
+        tmp_path, capsys, alias):
+    """RED on 6df205cdc (rc 0): `declared_renames` reads all three rename
+    keys, so the alias pair puts o_memory_ack on N as well as S."""
+    import _l_doc_pad_placement as LPP
+    doc_only = [q if q["name"] != "o_memory_data" else
+                _p("o_memory_data", "output", False, 1) for q in DOC_ONLY]
+    proj = _project(tmp_path, impl=_NO_DATA_IMPL, doc_only=doc_only, manifest={
+        "reused_ip": True, "renamed_interfaces": [
+            {"l9": ["o_memory_we", "o_memory_cyc"],
+             "rtl": ["o_memory_wen", "o_memory_ren", "o_memory_ack"]}],
+        alias: [{"l9": ["o_memory_data"], "rtl": ["o_memory_ack"]}]})
+    _emit(proj)
+    assert LPP.derive_own_ring(proj, _NO_DATA_IMPL)["nets_on_two_sides"] == [
+        "o_memory_ack"]
+    rc, res = _check(proj, capsys)
+    assert rc == 1 and res["nets_on_two_sides"] == {"o_memory_ack": ["N", "S"]}
+    assert {v["key"] for v in res["pairs"]} == {"renamed_interfaces", alias}
+
+
+def test_a_port_paired_only_under_an_alias_key_is_not_unpaired(
+        tmp_path, capsys):
+    """RED on 6df205cdc: the reverse, a false FAIL."""
+    proj = _project(tmp_path, impl=_NO_DATA_IMPL, manifest={
+        "reused_ip": True, "interface_renames": [
+            {"l9": ["o_memory_we", "o_memory_cyc"],
+             "rtl": ["o_memory_wen", "o_memory_ren", "o_memory_ack"]}]})
+    _emit(proj)
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (0, "PASS"), res
+
+
+# --------------------------------------------------------------------------- #
+# "could not read the placement" is not "the question does not arise"
+# --------------------------------------------------------------------------- #
+def test_an_unreadable_placement_is_not_measured(tmp_path, capsys):
+    """RED on 6df205cdc: a document stating side N twice was labelled
+    NOT_APPLICABLE / rc 2, and the hand-off said nothing."""
+    proj = _project(tmp_path, doc=DOC + "| **North (N)** | status pin(s) |\n")
+    der = _emit(proj)["renamed_interfaces_derivation"]
+    assert der["verdict"] == "NOT_MEASURED", der
+    assert "could not be read" in der["reason"]
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (3, "NOT_MEASURED"), res
+    detail = _waive(proj)
+    assert "not measured" in detail and "could not be read" in detail, \
+        detail[-900:]
+
+
+def test_the_waive_says_a_reported_gap_keeps_rc_1(tmp_path):
+    """RED on 6df205cdc: the note asked for rc 0 even for a port with no
+    document counterpart, where only an invented pair reaches rc 0."""
+    detail = _waive(_project(tmp_path, impl=_NO_DATA_IMPL))
+    assert "keeps rc 1" in detail, detail[-900:]
+    assert "must exit 0" not in detail
