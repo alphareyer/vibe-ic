@@ -455,6 +455,13 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
              ['dir::' + str(path.relative_to(project)) for path in (*rtl, chip_top)],
              '_chip_synth_read.chip_rtl_files(phase2/stage1/rtl) (the read phase-3 '
              'synthesis and the Step-5 proof take) + phase3/stage3/pnr/chip_top_io.v')
+    elif rtl and resolution_flow(project) == FLOW_CLASSIC:
+        # A Classic (HARDMACRO / core-only) design under the flag has no
+        # chip-top wrapper: its layout top is the core itself.
+        _set(result, sources, 'VERILOG_FILES',
+             ['dir::' + str(path.relative_to(project)) for path in rtl],
+             '_chip_synth_read.chip_rtl_files(phase2/stage1/rtl) (the read phase-3 '
+             'synthesis and the Step-5 proof take; Classic flow, no chip top)')
     sdc = project / 'phase3/stage3/pnr/constraint.sdc'
     if sdc.is_file():
         for key in ('PNR_SDC_FILE', 'SIGNOFF_SDC_FILE'):
@@ -2033,16 +2040,80 @@ def _check_synthesised_read(project: Path, config: dict, sources: dict) -> None:
          f"{built.get('frontend', 'unrecorded')})")
 
 
+#: Decision 22: the LibreLane flow a design is resolved and run through.
+FLOW_CHIP = 'Chip'
+FLOW_CLASSIC = 'Classic'
+#: The die keys whose value, when the design declares none, is the tool's own
+#: default: recorded with that source, never written into the declaration.
+_DIE_DEFAULT_KEYS = ('FP_SIZING', 'FP_CORE_UTIL', 'DIE_AREA', 'CORE_AREA')
+
+
+def librelane_flow(project: Path) -> tuple[str, str]:
+    """(flow, why): Chip for a die that carries its own pad ring, Classic for
+    everything else (a HARDMACRO or core-only design), decision 22."""
+    if design_class(project) == DESIGN_CLASS_CHIP_PAD_RING:
+        return FLOW_CHIP, ('design class chip_pad_ring '
+                           '(_tapeout_declaration.requests_pad_ring): decision 22')
+    return FLOW_CLASSIC, ('no pad ring requested (HARDMACRO or core-only): '
+                          'decision 22')
+
+
+def resolution_flow(project: Path) -> str:
+    """The flow `resolve_step_configs` resolves through.
+
+    Chip, as it always was, unless the project runs under an implementation
+    flow (`impl_step_modes`), where decision 22 picks it. A project without
+    the flag keeps every resolved config it had.
+    """
+    if impl_step_modes(project) is None:
+        return FLOW_CHIP
+    return librelane_flow(project)[0]
+
+
+def tool_default_die(config_root: Path) -> dict[str, dict[str, Any]]:
+    """The die keys the tool supplied because the design declared none.
+
+    Read back from `resolve_step_configs`' own output: a key a resolved step
+    config carries that `design.json` did not hand it is the image's default,
+    recorded with the step and LibreLane version that applied it (W9 copies
+    these into the impl record's `tool_defaults`).
+    """
+    design = _load(config_root / 'design.json')
+    found: dict[str, dict[str, Any]] = {}
+    for path in sorted(config_root.glob('*.json')):
+        if path.name in ('design.json', 'steps.json', 'flow_gates.json') or \
+                path.name.endswith(('.views.json', '.provenance.json')):
+            continue
+        cfg = _load(path)
+        meta = cfg.get('meta') or {}
+        for key in _DIE_DEFAULT_KEYS:
+            if key in cfg and key not in design and cfg[key] is not None \
+                    and key not in found:
+                found[key] = {'value': cfg[key],
+                              'source': (f"LibreLane {meta.get('librelane_version')} "
+                                         f"default applied by {meta.get('step')} "
+                                         '(resolved by the image; the design declares none)')}
+    return found
+
+
 def resolve_step_configs(project: Path, image: str, pdk: str,
                          step_ids: list[str], *, pdk_root: Path,
                          docker: str = 'docker',
                          folder: str = '37-config',
-                         overlay: dict[str, tuple[Any, str]] | None = None) -> dict[str, Path]:
+                         overlay: dict[str, tuple[Any, str]] | None = None,
+                         flow: str | None = None) -> dict[str, Path]:
     """Resolve step configs from declared design inputs and the image's PDK.
 
     The installed LibreLane resolver supplies PDK values.  A prior run's
     resolved.json (including its design-specific numbers) is never an input.
+    `flow` (default `resolution_flow(project)`) names the image's Flow the
+    design is resolved through. Under Classic the run's own floorplan record
+    is not a die source: a declared die or utilisation wins, and with neither
+    the tool sizes it and `tool_default_die` records what it applied.
     """
+    flow = flow or resolution_flow(project)
+    if flow not in (FLOW_CHIP, FLOW_CLASSIC):
+        raise Refusal('LL_FLOW_UNSUPPORTED', repr(flow))
     image_capability(image, docker)
     if not (pdk_root / pdk).is_dir():
         raise Refusal('LL_PDK_MISSING', str(pdk_root / pdk))
@@ -2052,7 +2123,13 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     emitted = emit_config(project, pdk, design)
     sources = _load(design.with_suffix('.provenance.json'))
     _check_synthesised_read(project, emitted, sources)
-    _apply_runner_floorplan(project, emitted, sources, step_ids)
+    if flow == FLOW_CHIP:
+        _apply_runner_floorplan(project, emitted, sources, step_ids)
+    elif 'FP_CORE_UTIL' in emitted and 'DIE_AREA' not in emitted:
+        # A declared utilisation sizes a Classic die; the tool's own
+        # FP_SIZING default is not relied on to honour it.
+        _set(emitted, sources, 'FP_SIZING', 'relative',
+             sources['FP_CORE_UTIL'] + ' (a declared utilisation sizes the die)')
     _apply_layout_top(project, emitted, sources)
     for key, (value, source) in (overlay or {}).items():
         for older in _LEVER_SUPERSEDES.get(key, ()):
@@ -2108,6 +2185,13 @@ Path(output, "flow_gates.json").write_text(json.dumps({
     for step_id in json.loads(Path(requested).read_text()) if step_id in gates},
     indent=2, default=str) + "\\n")
 '''
+    if flow != FLOW_CHIP:
+        # The image's registered Flow by name, bound to the name the script
+        # already uses; the Chip script (every run without the flag) is
+        # byte-for-byte unchanged.
+        script = script.replace('from librelane.flows.chip import Chip\n',
+                                'from librelane.flows import Flow\n'
+                                f'Chip = Flow.factory.get({flow!r})\n', 1)
     cmd = [docker, 'run', *_dmem.docker_memory_flags(), '--rm',
            '-v', f'{project.resolve()}:{project.resolve()}',
            '-v', f'{pdk_root.resolve()}:/pdk:ro', *_plugin_args(step_ids),
