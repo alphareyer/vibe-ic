@@ -30,9 +30,11 @@ WHAT IT WRITES
 * ``phase3/stage3/pnr/openroad.log`` assembled from the OpenROAD step logs in
   flow order. Every inserted section is bracketed by a marker naming its source
   log and sha256; the assembled file is itself a back-fill row.
-* ``phase3/librelane/import_manifest.json``: one row per imported file (flow
-  step, canonical path, tool-run path, sha256 on both sides, tool, tool step
-  id, provenance kind), plus every rule whose step this run did not perform.
+* ``phase3/librelane/import_manifest.json``: one row per imported file, in the
+  field names of the W0 import-manifest schema (flow step, canonical path,
+  tool-run path, sha256 on both sides, tool, tool step id, the source log that
+  witnessed it, exit code, measurement), plus every rule whose step this run
+  did not perform.
 
 WHAT IT DOES NOT DO
 -------------------
@@ -255,6 +257,49 @@ def _state_views(state: Dict[str, Any], key: str) -> List[Tuple[str, str]]:
     return [(key, corner)] if corner in value else []
 
 
+def _source_log(ran: Ran, tool_file: Path) -> Optional[Path]:
+    """The transcript of the process that wrote ``tool_file``: a log in the
+    file's own directory (a corner subfolder has its own), else the step's
+    main log, which LibreLane names after the step folder."""
+    logs = _step_logs(ran.folder)
+    here = [l for l in logs if l.parent == tool_file.parent]
+    if len(here) == 1:
+        return here[0]
+    slug = re.sub(r"^\d+-", "", ran.folder.name) + ".log"
+    main = [l for l in logs if l.parent == ran.folder and l.name == slug]
+    if main:
+        return main[0]
+    top = [l for l in logs if l.parent == ran.folder]
+    return top[0] if len(top) == 1 else None
+
+
+def _file_row(project: Path, ran: Ran, tool_file: Path, dest: Path,
+              view: Optional[str] = None) -> Dict[str, Any]:
+    """One manifest row, in the field names of the W0 import-manifest schema
+    (``_external_flow_manifest``, lane llf). ``measurement`` is the
+    artefact-derived record, or None when nothing can be stated about this
+    file — never a guessed one. The flow step and ``exit_code`` are filled in
+    by the caller."""
+    log = _source_log(ran, tool_file)
+    rel = dest.relative_to(project).as_posix()
+    row: Dict[str, Any] = {
+        "canonical_path": rel,
+        "tool_run_path": tool_file.relative_to(project).as_posix(),
+        "canonical_sha256": "sha256:" + digest(dest),
+        "tool_run_sha256": "sha256:" + digest(tool_file),
+        "flow": FLOW,
+        "tool": _tlp.underlying_tool(ran.instance),
+        "tool_step_id": ran.instance,
+        "source_log": log.relative_to(project).as_posix() if log else None,
+        "source_log_sha256": ("sha256:" + digest(log)) if log else None,
+        "measurement": _runner_measurement.derive(
+            project, rel, _tlp.underlying_tool(ran.instance) or ""),
+    }
+    if view:
+        row["view"] = view
+    return row
+
+
 def _import_step(project: Path, run_dir: Path, ran: Ran, rule: Rule, top: str,
                  receipts: Path) -> Tuple[Dict[str, Path], List[Dict[str, Any]]]:
     state_path = ran.folder / "state_out.json"
@@ -288,13 +333,10 @@ def _import_step(project: Path, run_dir: Path, ran: Ran, rule: Rule, top: str,
                 path_map=path_map)
             for view, row in doc["views"].items():
                 dest = Path(row["dest"])
-                outputs[dest.relative_to(project).as_posix()] = dest
-                rows.append({"tool_run_path": Path(row["source"]).resolve()
-                             .relative_to(project).as_posix(),
-                             "canonical": dest.relative_to(project).as_posix(),
-                             "sha256_tool": row["source_sha256"],
-                             "sha256_canonical": row["dest_sha256"],
-                             "view": view})
+                outputs[dest.relative_to(project).as_posix()] = \
+                    Path(row["source"]).resolve()
+                rows.append(_file_row(project, ran, Path(row["source"]).resolve(),
+                                      dest, view=view))
         else:
             found = sorted(p for p in ran.folder.glob(src.pattern) if p.is_file())
             if not found:
@@ -304,11 +346,8 @@ def _import_step(project: Path, run_dir: Path, ran: Ran, rule: Rule, top: str,
                 rel = path.relative_to(ran.folder).as_posix()
                 dest = src.dest(project, top, rel)
                 _copy(path, dest)
-                outputs[dest.relative_to(project).as_posix()] = dest
-                rows.append({"tool_run_path": path.relative_to(project).as_posix(),
-                             "canonical": dest.relative_to(project).as_posix(),
-                             "sha256_tool": digest(path),
-                             "sha256_canonical": digest(dest)})
+                outputs[dest.relative_to(project).as_posix()] = path
+                rows.append(_file_row(project, ran, path, dest))
     files = [r for r in rows if "view" not in r]
     if files:
         write_json(receipt.with_name(f"{receipt.stem}_files.json"),
@@ -335,11 +374,12 @@ def _step_logs(folder: Path) -> List[Path]:
 
 def _provenance_row(project: Path, run_dir: Path, ran: Ran,
                     outputs: Dict[str, Path]) -> Dict[str, Any]:
+    """``outputs`` maps each canonical path to the file the step wrote."""
     try:
         row = _tlp.witnessed_row(
             project, flow=FLOW, step_id=ran.instance, run_dir=run_dir,
-            step_dir=ran.rel, logs=_step_logs(ran.folder), outputs=outputs,
-            exit_code=0, duration_ms=_duration_ms(ran.folder))
+            step_dir=ran.rel, outputs=outputs,
+            duration_ms=_duration_ms(ran.folder))
     except _tlp.WitnessRefused as exc:
         # #365: what the runner could not see being written is a back-fill.
         row = {"tool": _tlp.underlying_tool(ran.instance) or FLOW,
@@ -347,7 +387,8 @@ def _provenance_row(project: Path, run_dir: Path, ran: Ran,
                "duration_ms": None, "reconstructed": True,
                "timestamp": _dt.datetime.now(_dt.timezone.utc)
                .strftime("%Y-%m-%dT%H:%M:%SZ"),
-               "outputs": {rel: "sha256:" + digest(p) for rel, p in outputs.items()},
+               "outputs": {rel: "sha256:" + digest(project / rel)
+                           for rel in outputs},
                "note": f"imported, not witnessed: {exc}"}
     return _runner_measurement.attach(project, row)
 
@@ -418,7 +459,7 @@ def import_run(project: Path, run_dir: Path) -> Dict[str, Any]:
         "schema": "vibe-ic/librelane-import/1", "flow": FLOW,
         "run_dir": run_dir.relative_to(project).as_posix(), "top": top,
         "flow_log_sha256": digest(run_dir / "flow.log"),
-        "files": [], "not_performed": []}
+        "rows": [], "not_performed": []}
     prov: List[Dict[str, Any]] = []
     for rule in IMPORT_RULES:
         ran = [r for r in index if r.step == rule.step]
@@ -436,9 +477,9 @@ def import_run(project: Path, run_dir: Path) -> Dict[str, Any]:
         prov.append(row)
         kind = "witnessed" if row.get("reconstructed") is False else "reconstructed"
         for r in rows:
-            r.update({"flow_step": rule.flow_step, "tool": row["tool"],
-                      "tool_step_id": last.instance, "provenance": kind})
-            manifest["files"].append(r)
+            r.update({"step_id": rule.flow_step, "exit_code": row["exit_code"],
+                      "timestamp": row["timestamp"], "provenance": kind})
+            manifest["rows"].append(r)
     log = assemble_openroad_log(project, run_dir, index,
                                 _pl.pnr_dir(project) / "openroad.log")
     if log is not None:
@@ -468,7 +509,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Refusal as exc:
         print(f"REFUSED {exc.code}: {exc}", file=sys.stderr)
         return 1
-    print(f"imported {len(doc['files'])} file(s); "
+    print(f"imported {len(doc['rows'])} file(s); "
           f"{len(doc['not_performed'])} rule(s) not performed by this run")
     return 0
 

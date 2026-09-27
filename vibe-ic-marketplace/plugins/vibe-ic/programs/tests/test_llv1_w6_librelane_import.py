@@ -56,15 +56,21 @@ def _rows(proj: Path):
 def test_every_imported_file_is_a_copy_bound_on_both_sides(tmp_path, host):
     proj = _project(tmp_path, host)
     doc = _import(proj)
-    assert doc["top"] == "spm" and len(doc["files"]) > 100
-    for row in doc["files"]:
-        dest = proj / row["canonical"]
+    assert doc["top"] == "spm" and len(doc["rows"]) > 100
+    for row in doc["rows"]:
+        dest = proj / row["canonical_path"]
         src = proj / row["tool_run_path"]
         assert dest.is_file() and not dest.is_symlink(), row
         assert src.is_file() and not src.is_symlink(), row
-        assert row["sha256_tool"] == row["sha256_canonical"] == _sha(dest) \
-            == _sha(src), row
+        assert row["tool_run_sha256"] == row["canonical_sha256"] \
+            == "sha256:" + _sha(dest) == "sha256:" + _sha(src), row
         assert row["provenance"] == "witnessed", row
+        assert row["flow"] == "librelane" and row["exit_code"] == 0, row
+        if row["source_log"] is not None:          # the log that wrote it
+            log = proj / row["source_log"]
+            assert row["source_log_sha256"] == "sha256:" + _sha(log)
+            assert Path(row["source_log"]).parent in Path(
+                row["tool_run_path"]).parents, row
     manifest = json.loads((proj / "phase3/librelane/import_manifest.json")
                           .read_text())
     assert manifest == doc
@@ -73,7 +79,7 @@ def test_every_imported_file_is_a_copy_bound_on_both_sides(tmp_path, host):
 def test_the_canonical_views_land_where_the_gates_read_them(tmp_path):
     proj = _project(tmp_path)
     doc = _import(proj)
-    by = {r["canonical"]: r for r in doc["files"]}
+    by = {r["canonical_path"]: r for r in doc["rows"]}
     want = {
         "phase2/stage2/synth/netlist.v": ("9", "Yosys.Synthesis"),
         "phase3/stage3/pnr/floorplan.def": ("15", "OpenROAD.GeneratePDN"),
@@ -91,14 +97,24 @@ def test_the_canonical_views_land_where_the_gates_read_them(tmp_path):
     }
     for rel, (step, tool_step) in want.items():
         assert rel in by, rel
-        assert (by[rel]["flow_step"], by[rel]["tool_step_id"]) == (step, tool_step)
+        assert (by[rel]["step_id"], by[rel]["tool_step_id"]) == (step, tool_step)
+    # A corner folder holds two transcripts (sta.log, filter_unannotated.log):
+    # no single source log is named rather than guessing one. The step's
+    # provenance row still cites both.
+    corner = next(r for r in doc["rows"] if r["step_id"] == "23"
+                  and r["tool_run_path"].endswith("/nom_tt_025C_5v00/max.rpt"))
+    assert corner["source_log"] is None and corner["source_log_sha256"] is None
+    rcx = by["phase3/stage3/extracted/spef_corners/spm.nom.spef"]
+    assert rcx["source_log"].endswith("/54-openroad-rcx/nom/rcx.log")
+    assert by["phase3/stage3/pnr/routed.def"]["source_log"].endswith(
+        "/44-openroad-detailedrouting/openroad-detailedrouting.log")
     # the nominal SPEF is the same tool file as the nom corner
-    assert by["phase3/stage3/extracted/spm.spef"]["sha256_tool"] == \
-        by["phase3/stage3/extracted/spef_corners/spm.nom.spef"]["sha256_tool"]
+    assert by["phase3/stage3/extracted/spm.spef"]["tool_run_sha256"] == \
+        by["phase3/stage3/extracted/spef_corners/spm.nom.spef"]["tool_run_sha256"]
     # LibreLane's own sign-off reports never take a vibe-ic sign-off name
     for rel, row in by.items():
-        if row["flow_step"] in ("10", "23", "26", "31"):
-            assert rel.startswith(f"reports/phase3/librelane/{row['flow_step']}/"), rel
+        if row["step_id"] in ("10", "23", "26", "31"):
+            assert rel.startswith(f"reports/phase3/librelane/{row['step_id']}/"), rel
     assert not (proj / "reports/phase3/drc_signoff.rpt").exists()
     assert not (proj / "reports/phase3/lvs.rpt").exists()
 
@@ -117,7 +133,7 @@ def test_the_last_completed_run_of_a_class_is_imported(tmp_path):
     detailed route; the import takes the later one."""
     proj = _project(tmp_path)
     doc = _import(proj)
-    ant = [r for r in doc["files"] if r["flow_step"] == "26"]
+    ant = [r for r in doc["rows"] if r["step_id"] == "26"]
     assert ant and {r["tool_step_id"] for r in ant} == {"OpenROAD.CheckAntennas-1"}
     assert all("/46-openroad-checkantennas-1/" in r["tool_run_path"] for r in ant)
 
@@ -198,8 +214,8 @@ def test_the_import_keys_on_the_flow_log_not_the_folder_ordinal(tmp_path):
         st.write_text(st.read_text().replace("44-openroad-detailedrouting",
                                              "99-renamed"))
     doc = _import(proj)
-    routed = [r for r in doc["files"]
-              if r["canonical"] == "phase3/stage3/pnr/routed.def"]
+    routed = [r for r in doc["rows"]
+              if r["canonical_path"] == "phase3/stage3/pnr/routed.def"]
     assert routed and "/99-renamed/" in routed[0]["tool_run_path"]
 
 
