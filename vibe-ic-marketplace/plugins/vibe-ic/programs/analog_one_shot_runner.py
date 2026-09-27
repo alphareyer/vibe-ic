@@ -1683,6 +1683,7 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
             # the default stays the skill hand-off until the owner cuts over.
             if step_name == "A7_post_layout_resim":
                 import librelane_contract as _llc
+                import analog_a7_post_layout_emit as _a7_emit
                 try:
                     _a7_mode = _llc.selected_mode(project, "A7")
                 except _llc.Refusal as _exc:
@@ -1735,6 +1736,17 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                             extras={"producer": a7_prog.name,
                                     "producer_rc": 1,
                                     "mode": _a7_mode})
+                    # T130: a simulation spent its declared budget. Nothing
+                    # about the circuit was learned, so it is not a FAIL; the
+                    # record names the time reached, the wall and the remedy.
+                    if a7_cp.returncode == _a7_emit.EX_BUDGET_EXHAUSTED:
+                        return StepResult(
+                            step_name, bname, _V.Verdict.NOT_MEASURED.value,
+                            time.time() - t0, f"{a7_prog.name}: {_a7_tail}",
+                            extras={"producer": a7_prog.name,
+                                    "producer_rc": a7_cp.returncode,
+                                    "mode": _a7_mode},
+                            reason_class=_V.ReasonClass.BUDGET_EXHAUSTED)
                     if a7_cp.returncode == 0:
                         cp_real = _pr.run(cmd, capture_output=True, text=True)
                         _gate_tail = (cp_real.stdout.strip().splitlines()[-1]

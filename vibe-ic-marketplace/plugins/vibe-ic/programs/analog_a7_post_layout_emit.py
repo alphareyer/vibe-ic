@@ -16,9 +16,13 @@ the tool does it here:
      is the pre-layout circuit again, a false 0 % degradation); the depth
      achieved (RC / C_ONLY) is recorded.
   3. RESIMULATE with A4's own machinery (`analog_real_corner_sweep
-     ._run_ngspice`, run to completion): the block's A3 testbench, once as
-     delivered (pre) and once with the extracted netlist behind a wrapper
-     subcircuit that keeps the A3 port order (post), in the same container.
+     ._run_ngspice`): the block's A3 testbench, once as delivered (pre) and
+     once with the extracted netlist behind a wrapper subcircuit that keeps
+     the A3 port order (post), in the same container. The transient stops at
+     the end of the last window a `meas` card reads, plus one sample clock
+     (`measurement_span`), and every simulation runs under the SAME declared
+     budget (`simulation_budget`); a run that spends it is NOT_MEASURED with
+     the time it reached, never a hang and never a FAIL (T130).
   4. WRITE `phase3/analog/<block>/pre_vs_post.json` — one spec row per
      measurement per extraction style — naming the extracted netlist as its
      post-layout evidence. The A7 gate owns the verdict.
@@ -56,7 +60,8 @@ Opt-in: the analog runner calls this producer only when
 
 Exit codes: 0 written; 1 the tool ran and its product is refused (named in
 `a7_post_layout.json`); 2 honest gap (an upstream artefact this step reads is
-absent); 69 environment refusal (the tool could not be reached).
+absent); 69 environment refusal (the tool could not be reached); 75 a
+simulation spent its budget (NOT_MEASURED, reason `budget_exhausted`).
 chip-AGNOSTIC.
 """
 from __future__ import annotations
@@ -72,6 +77,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -551,7 +557,245 @@ def _style_slug(style: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", style).strip("_") or "default"
 
 
+# ── how long each simulation runs, and for how long it may (T130) ─────────
+#: WHY THE RUN IS CUT TO WHAT IT MEASURES. MEASURED (lane mig109, 8hd-3,
+#: delta_sigma on ihp-sg13g2): the A3 testbench asks for `tran 5n 28673000n`
+#: -- 28,673 clocks of a 1 MHz modulator, a record `record_constraints` sized
+#: for the A4 GRADED measurement -- while every windowed `meas` card it
+#: carries reads `from=523240n to=1025000n`, about 500 clocks. The pre-layout
+#: run alone went 32.5 h without finishing, with five post-layout styles
+#: queued behind it, because it ran ~28x past the last point any card reads.
+#: A7 compares what the deck MEASURES, so the transient stops at the end of
+#: the last measurement window plus a stated settle margin, unless a card
+#: genuinely needs a longer record (named, with its source, below).
+#:
+#: The margin is ONE period of the deck's own sample clock (the one top-level
+#: pulse source), so the window's last sample is an interior point of the
+#: record and not the run's final breakpoint; a deck with no such clock gets
+#: `_SETTLE_FRACTION` of the window end instead.
+_SETTLE_CLOCKS = 1
+_SETTLE_FRACTION = 0.01
+
+#: The budget each A7 simulation is given when the block declares none: a
+#: floor for start-up (model load, operating point) plus a per-clock cost.
+#: MEASURED on 8hd-3 (32 cores, load < 3, image vibeic-eda 0.3.79): the
+#: delta_sigma pre-layout deck advances ~9.2 s of wall per simulated 1 us
+#: clock. The default allows 30 s per clock -- about three times that, because
+#: an extracted netlist carries hundreds of R and C the pre-layout run does
+#: not -- and applies the SAME budget to the pre deck and every post deck, so
+#: no style is given more time than another. A block that knows better states
+#: `simulation_budget_s` (seconds per simulation) in its `spec.json`.
+BUDGET_FLOOR_S = 600
+BUDGET_S_PER_CLOCK = 30.0
+SPEC_BUDGET_KEY = "simulation_budget_s"
+
+#: The producer's fourth outcome: a simulation spent its budget. NOT a FAIL
+#: (nothing about the circuit was learned) and not an environment refusal (the
+#: tool ran): the step is NOT_MEASURED, reason `budget_exhausted`.
+EX_BUDGET_EXHAUSTED = 75
+NOT_MEASURED_TOKEN = "NOT_MEASURED:"
+
+_TRAN_CARD_RE = re.compile(r"^(\s*\.?tran\s+)(\S+)(\s+)(\S+)(.*)$", re.I)
+_TRAN_MEAS_RE = re.compile(r"^\s*\.?meas(?:ure)?\s+tran\s+(\w+)\s+(.*)$", re.I)
+_KV_RE = re.compile(r"\b(from|to|at|td)\s*=\s*(\S+)", re.I)
+_EVENT_RE = re.compile(r"\b(trig|targ|when)\b", re.I)
+#: Cards anchored at the END of the run: moving the end changes what they read.
+_END_ANCHORED_RE = re.compile(r"^\s*\.?(fourier|four)\b", re.I)
+#: Cards that dump the record over whatever span the run has.
+_RECORD_RE = re.compile(r"^\s*\.?(wrdata|write|print|plot)\b", re.I)
+#: ngspice's own progress line in batch mode: `Reference value :  4.05e-06`.
+_REFERENCE_RE = re.compile(r"Reference value\s*:\s*([-+0-9.eE]+)")
+
+
+def _seconds(tok: str) -> Optional[float]:
+    import analog_adc_enob_corner_check as _enob
+    return _enob._si(tok)
+
+
+def _ns_token(seconds: float) -> str:
+    ns = seconds * 1e9
+    return (f"{int(round(ns))}n" if abs(ns - round(ns)) < 1e-6
+            else f"{ns:.6f}".rstrip("0").rstrip(".") + "n")
+
+
+def measurement_span(tb_text: str) -> dict:
+    """What the deck's own cards need of the transient, in seconds.
+
+    Every `meas tran` card is one of three kinds:
+      * WINDOWED -- it names where it stops reading (`to=`, or `at=`); the
+        latest such end sets the stop, plus the settle margin;
+      * SPAN-FOLLOWING -- it reads from `from=` (or 0) to wherever the run
+        ends (the `railx_*` rail extremes are these): it takes the run's span
+        and never sets it, so pre and post read the SAME span;
+      * EVENT-LOCATED -- `trig`/`targ`/`when` with no stated end: where it
+        reads depends on the circuit, so the deck's declared stop stands.
+    An end-anchored card (`fourier`) also keeps the declared stop: it reads
+    the LAST periods of the run, so a shorter run would change its subject.
+    `wrdata`/`print` dump whatever span the run has; A7 compares none of them,
+    so they follow the span and are listed as doing so."""
+    lines = _joined_lines(tb_text or "")
+    declared = None
+    for line in lines:
+        m = _TRAN_CARD_RE.match(line)
+        if m:
+            declared = _seconds(m.group(4))
+            break
+    windowed: List[dict] = []
+    following: List[str] = []
+    holds: List[dict] = []
+    records: List[str] = []
+    for line in lines:
+        if line.lstrip().startswith("*"):
+            continue
+        m = _TRAN_MEAS_RE.match(line)
+        if m:
+            name, rest = m.group(1).lower(), m.group(2)
+            kv = {k.lower(): v for k, v in _KV_RE.findall(rest)}
+            end = next((_seconds(kv[k]) for k in ("to", "at")
+                        if k in kv and _seconds(kv[k]) is not None), None)
+            if end is not None:
+                windowed.append({"meas": name, "end_s": end})
+            elif _EVENT_RE.search(rest):
+                holds.append({"card": name, "reason": (
+                    "event-located (trig/targ/when) with no stated end: "
+                    "where it reads depends on the circuit")})
+            else:
+                following.append(name)
+            continue
+        if _END_ANCHORED_RE.match(line):
+            holds.append({"card": line.split()[0].lower(), "reason": (
+                "anchored at the end of the run: a shorter run changes the "
+                "periods it analyses")})
+        elif _RECORD_RE.match(line):
+            records.append(line.split()[0].lower())
+    span = {"declared_stop_s": declared, "windowed": windowed,
+            "span_following": following, "record_dumps": records,
+            "holds_declared_record": holds}
+    if declared is None:
+        span.update(stop_s=None, rule="no_transient_card")
+        return span
+    if holds:
+        span.update(stop_s=declared, rule="a_card_needs_the_declared_record")
+        return span
+    if not windowed:
+        span.update(stop_s=declared, rule="no_windowed_measurement")
+        return span
+    import analog_adc_enob_corner_check as _enob
+    last = max(w["end_s"] for w in windowed)
+    card = _enob.sample_clock_card(tb_text or "")
+    if card is not None:
+        margin = _SETTLE_CLOCKS * card[1]
+        source = f"{_SETTLE_CLOCKS} period of the deck's sample clock card"
+    else:
+        margin = _SETTLE_FRACTION * last
+        source = (f"{_SETTLE_FRACTION:g} of the last window end (the deck "
+                  f"names no single top-level pulse clock)")
+    stop = last + margin
+    span.update(last_window_end_s=last, settle_margin_s=margin,
+                settle_margin_source=source,
+                last_window_meas=[w["meas"] for w in windowed
+                                  if w["end_s"] == last])
+    if stop >= declared:
+        span.update(stop_s=declared,
+                    rule="declared_record_already_within_the_last_window")
+    else:
+        span.update(stop_s=stop, rule="last_measurement_window_plus_settle")
+    return span
+
+
+def bound_transient(tb_text: str) -> Tuple[str, dict]:
+    """The testbench with its transient stopped where `measurement_span`
+    says, and the span record. Only the stop token is rewritten; the step and
+    anything after the stop survive."""
+    span = measurement_span(tb_text)
+    if span.get("stop_s") is None or span["stop_s"] == span["declared_stop_s"]:
+        return tb_text, span
+    out, done = [], False
+    for line in (tb_text or "").splitlines():
+        m = None if done else _TRAN_CARD_RE.match(line)
+        if m:
+            line = (m.group(1) + m.group(2) + m.group(3)
+                    + _ns_token(span["stop_s"]) + m.group(5))
+            done = True
+        out.append(line)
+    return "\n".join(out) + "\n", span
+
+
+def simulation_budget(spec: Optional[dict], tb_text: str,
+                      stop_s: Optional[float]) -> Tuple[float, dict]:
+    """(seconds, source) for ONE A7 simulation. Never 0: 0 is "no deadline".
+
+    The block's `spec.json` `simulation_budget_s` wins when it is a positive
+    number; otherwise the default is derived from the clocks the (bounded)
+    deck simulates; a deck with no clock card falls back to A4's deck-scaled
+    deadline, named as such."""
+    declared = (spec or {}).get(SPEC_BUDGET_KEY)
+    if isinstance(declared, (int, float)) and not isinstance(declared, bool) \
+            and declared > 0:
+        return float(declared), {"source": f"spec.json:{SPEC_BUDGET_KEY}"}
+    import analog_adc_enob_corner_check as _enob
+    card = _enob.sample_clock_card(tb_text or "")
+    if card is not None and stop_s:
+        clocks = stop_s / card[1]
+        return (BUDGET_FLOOR_S + clocks * BUDGET_S_PER_CLOCK,
+                {"source": "default_per_clock", "clocks": clocks,
+                 "floor_s": BUDGET_FLOOR_S,
+                 "s_per_clock": BUDGET_S_PER_CLOCK})
+    import analog_real_corner_sweep as ars
+    return float(ars.sim_deadline_s(tb_text)), {
+        "source": "analog_real_corner_sweep.sim_deadline_s (no clock card)"}
+
+
+def simulated_time_reached_s(raw: str) -> Optional[float]:
+    """The last `Reference value` ngspice printed: how far the transient got
+    before it was stopped. None when it printed none."""
+    last = None
+    for m in _REFERENCE_RE.finditer(raw or ""):
+        last = m.group(1)
+    try:
+        return float(last) if last is not None else None
+    except ValueError:
+        return None
+
+
 # ── the producer ───────────────────────────────────────────────────────────
+def _not_measured(record: dict, out: Path, deck: Path, sim: dict,
+                  project: Path) -> int:
+    """A simulation spent its budget: NOT_MEASURED with the numbers a reader
+    needs to act on it -- never a hang and never a FAIL."""
+    span, budget = record.get("transient_span", {}), record.get("budget", {})
+    reached, requested = sim["reached_s"], span.get("stop_s")
+    need = (sim["wall_s"] * requested / reached
+            if reached and requested else None)
+    record.update({
+        "result": "NOT_MEASURED", "reason_class": "budget_exhausted",
+        "rule": "A7_SIM_BUDGET_EXHAUSTED",
+        "budget_exhausted": {
+            "deck": str(deck.relative_to(project)), "log": sim["log"],
+            "simulated_time_reached_s": reached,
+            "simulated_time_requested_s": requested,
+            "wall_s": round(sim["wall_s"], 1),
+            "budget_s": budget.get("seconds"),
+            "budget_source": budget.get("source"),
+            "remedy": (
+                f"state `{SPEC_BUDGET_KEY}` in phase3/analog/"
+                f"{record['block']}/spec.json at or above the wall this run "
+                f"extrapolates to"
+                + (f" (~{need:.0f} s at the rate it reached)" if need else "")
+                + ", or re-run on a host with less load; the deck's span is "
+                  "already cut to what it measures")}})
+    detail = (f"{deck.name}: simulated "
+              f"{reached if reached is not None else 'an unread'} s of "
+              f"{requested} s requested in {sim['wall_s']:.0f} s wall "
+              f"(budget {budget.get('seconds')} s from "
+              f"{budget.get('source')})")
+    record["detail"] = detail
+    write_json(out, record)
+    print(f"{NOT_MEASURED_TOKEN} {PRODUCER} A7_SIM_BUDGET_EXHAUSTED: {detail}",
+          file=sys.stderr)
+    return EX_BUDGET_EXHAUSTED
+
+
 def _refuse(record: dict, out: Path, rule: str, detail: str, rc: int) -> int:
     record.update({"result": "REFUSED" if rc == 1 else "NOT_PRODUCED",
                    "rule": rule, "detail": detail})
@@ -620,15 +864,31 @@ def run(project: Path, block: str, container: str, image: str,
     a3_devices = device_instances(netlist.read_text(errors="replace"), block)
 
     host_root = dr.resolve_host_root(project, container)
-    tb_text = tb.read_text(errors="replace")
+    # ONE span and ONE budget for the pre deck and every post deck: the
+    # comparison reads the same window in each, and no style gets more time.
+    tb_text, span = bound_transient(tb.read_text(errors="replace"))
     net_text = netlist.read_text(errors="replace")
+    spec_path = bdir / "spec.json"
+    try:
+        spec = json.loads(spec_path.read_text()) if spec_path.is_file() else {}
+    except (OSError, ValueError):
+        spec = {}
+    budget_s, budget_src = simulation_budget(
+        spec if isinstance(spec, dict) else {}, tb_text, span.get("stop_s"))
+    record["transient_span"] = span
+    record["budget"] = {"seconds": round(budget_s, 1), **budget_src,
+                        "applies_to": "each simulation (pre and every post)"}
 
     def simulate(deck: Path) -> dict:
+        t0 = time.monotonic()
         ok, meas, raw, status = ars._run_ngspice(
             container, ars._container_path(container, host_root, deck),
-            deck_text=deck.read_text(errors="replace"), run_to_completion=True)
+            deck_text=deck.read_text(errors="replace"), deadline_s=budget_s)
+        wall = time.monotonic() - t0
         write_text(deck.with_suffix(".ngspice.log"), raw or "")
-        return {"ok": ok, "meas": meas, "status": status,
+        return {"ok": ok, "meas": meas, "status": status, "wall_s": wall,
+                "stopped": bool((status or {}).get("stopped")),
+                "reached_s": simulated_time_reached_s(raw),
                 "log": str(deck.with_suffix(".ngspice.log").relative_to(project))}
 
     try:
@@ -639,6 +899,9 @@ def run(project: Path, block: str, container: str, image: str,
         return _refuse(record, record_path, str(exc).split(":", 1)[0],
                        str(exc), 1)
     pre = simulate(pre_tb)
+    record["pre_wall_s"] = round(pre["wall_s"], 1)
+    if pre["stopped"]:
+        return _not_measured(record, record_path, pre_tb, pre, project)
     if not pre["ok"]:
         return _refuse(record, record_path, "A7_PRE_SIM_FAILED",
                        f"the A3 testbench did not simulate ({pre['log']})", 1)
@@ -728,7 +991,11 @@ def run(project: Path, block: str, container: str, image: str,
         corner["private_nodes"] = sum(1 for p, n in mapping.items() if p != n)
         post = simulate(post_tb)
         corner["post_log"] = post["log"]
+        corner["post_wall_s"] = round(post["wall_s"], 1)
         corner["post_measurements"] = post["meas"]
+        if post["stopped"]:
+            record["corners"] = corners
+            return _not_measured(record, record_path, post_tb, post, project)
         if not post["ok"]:
             record["corners"] = corners
             return _refuse(record, record_path, "A7_POST_SIM_FAILED",
