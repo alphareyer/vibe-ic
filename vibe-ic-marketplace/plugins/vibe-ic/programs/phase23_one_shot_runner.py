@@ -54,6 +54,7 @@ import _path_layout as _pl
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 import verdict as _V  # noqa: E402 — the ONE vocabulary and its precedence
+import _impl_flow  # noqa: E402 — llv1: the --librelane mode record
 
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
@@ -225,12 +226,19 @@ def main() -> int:
                         "/loop close-loop monitoring where re-running an "
                         "idempotent PASS_WITH_WAIVERS pipeline burns CI "
                         "without value.")
+    _impl_flow.add_cli_flags(p)
     args = p.parse_args()
 
     project = args.project.resolve()
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
+    # --librelane (llv1 W1): resolve the implementation-flow mode, or refuse
+    # it by name, before anything is locked or written. Read-only.
+    _impl_rc = _impl_flow.gate_or_exit(project, args, runner='phase23_one_shot_runner',
+                                       parser=p)
+    if _impl_rc is not None:
+        return _impl_rc
 
     # v1.6.52 — `--detect-stable N`: if the previous N runs all produced
     # the same verdict, skip the heavy Phase 2 + 3 pipeline and emit a
@@ -271,6 +279,7 @@ def main() -> int:
             p2_args.append("--skip-hardware")
         if args.force_rtl_regen:
             p2_args.append("--force-rtl-regen")
+        p2_args += _impl_flow.child_argv(project)
         p2_rc, _ = _run_phase("PHASE 2 (= 2a + 2b)", p2_runner, p2_args)
         p2_json = _pl.report_path(project, "phase2_one_shot.json")
         if p2_json.is_file():
@@ -299,6 +308,7 @@ def main() -> int:
                    "--pdk", args.pdk]
         if getattr(args, "allow_oss_pdk_fallback", False):
             p3_args.append("--allow-oss-pdk-fallback")
+        p3_args += _impl_flow.child_argv(project)
         p3_rc, _ = _run_phase("PHASE 3 (synth → PnR → GDS → DRC → LVS)",
                               p3_runner, p3_args)
         p3_json = _pl.report_path(project, "phase3_one_shot.json")

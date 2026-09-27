@@ -102,6 +102,7 @@ import _container_exec as _cex  # the ONE route predicate AND the ONE guarded
 import _watchdog as _wd  # v1.3.47 — plugin-wide progress-stall supervision
 import _docker_watchdog as _dwd  # shared in-container CPU probe (tree-aware)
 import _runner_lock  # ORGANIC #588 — single-driver lock (all 4 runners)
+import _impl_flow  # llv1: the --librelane mode record
 import canonical_run_admission as _canonical_admission
 import lvs_verdict_tokens as _lvt  # #524 — shared netgen terminal-verdict tokens
 import extraction_input_capability_check as _eicap  # extraction-input precondition (BLOCKED)
@@ -73905,6 +73906,7 @@ def main() -> int:
     p.add_argument("--exit-step", help="Last canonical Phase-3 step")
     p.add_argument("--diagnostic-continue", action="store_true",
                    help="Retain diagnostic-only reports; a failed pre-stream gate never authorizes GDS or release")
+    _impl_flow.add_cli_flags(p)
     args = p.parse_args()
     if bool(args.entry_step) != bool(args.exit_step):
         p.error("--entry-step and --exit-step must be supplied together")
@@ -73955,6 +73957,12 @@ def main() -> int:
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
+    # --librelane (llv1 W1): resolve the implementation-flow mode, or refuse
+    # it by name, before anything is locked or written. Read-only.
+    _impl_rc = _impl_flow.gate_or_exit(project, args, runner='phase3_one_shot_runner',
+                                       parser=p)
+    if _impl_rc is not None:
+        return _impl_rc
 
     # ORGANIC #588 — single-driver lock honored by the standalone phase3
     # runner: this is the LONGEST-running, most-re-dispatched step, so it
