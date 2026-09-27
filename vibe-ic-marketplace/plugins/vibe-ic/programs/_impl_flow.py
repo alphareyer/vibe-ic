@@ -399,6 +399,11 @@ def write_record(project: Path, impl: str, *, resolved_by: str,
                 f"FILLED by {resolved_by} at "
                 f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}; "
                 f"was {existing.get('image_capture')}")
+            problems = validate_record(filled)
+            if problems:
+                raise ImplRefusal(IMPL_RECORD_UNREADABLE,
+                                  "refusing to fill the image: "
+                                  + "; ".join(problems))
             _atomic_artefact.write_json(path, filled, indent=2)
             return path
         if image is not None and image != existing.get("image"):
