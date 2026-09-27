@@ -1012,6 +1012,56 @@ _register(Instrument(
         artefact=_lec_proven_record),
 ))
 
+
+# ---- the LEC counterexample search (FX_LEC_BMC_CEX) ------------------------
+
+#: The depth both calibration runs searched to (`lec_run.bmc_script` rungs
+#: 1, 2, 4, 8, 16 cycles after reset).
+_BMC_CAL_DEPTH = 16
+
+
+def _judge_bmc(log: str) -> Optional[str]:
+    import lec_run
+    got = lec_run.parse_bmc_log(log, _BMC_CAL_DEPTH)
+    if got["result"] != lec_run.BMC_COUNTEREXAMPLE:
+        return None
+    cex = got["counterexample"]
+    return (f"COUNTEREXAMPLE cycle={cex['cycle']} "
+            f"outputs={','.join(cex['differing_outputs'])}")
+
+_register(Instrument(
+    name="lec_run::parse_bmc_log",
+    reads="yosys `sat -seq` output on the port miter lec_run builds",
+    ruling="FX_LEC_BMC_CEX",
+    owner="fxlock",
+    why=("The equiv ladder never prints a counterexample, and lec_run wrote "
+         "`non_equivalent_points: 0` as a constant, so an unclosed LEC could "
+         "not be told apart from a real sequential mismatch. The count now "
+         "comes from this reader, so it must fire on a real model and stay "
+         "silent on a real search that found none."),
+    judge=_judge_bmc,
+    positive=Sample(
+        provenance=(
+            "yosys 0.69+ 4d572059c in vibeic-eda 0.3.83 (8HD-4, 2026-09-28). "
+            "calibration/cal_bmc_rtl.v (a counter, synchronous active-high "
+            "reset, registered `hit <= q == 4`) against "
+            "calibration/cal_bmc_gate_planted.v: its gf180mcuD netlist "
+            "(cal_bmc_gate.v, synthesised by that yosys) with ONE real edit "
+            "made in a scratch copy, or4 `_27_` .A1 `_06_` (= ~q[2]) -> q[2], "
+            "so `hit` fires at q == 0. Predicted before the run: reset in "
+            "step 1, en in step 2, `hit` differs in step 3 and nowhere else. "
+            "The script is lec_run's own ladder read cut before `equiv_make` "
+            "plus `bmc_script`; paths rewritten to <project>/<reports>."),
+        artefact=_read("lec_bmc_cex_positive.log")),
+    expect="COUNTEREXAMPLE cycle=3 outputs=hit",
+    negative=Sample(
+        provenance=(
+            "Same yosys, same script, the unedited cal_bmc_gate.v: every rung "
+            "to 16 cycles after reset ends `SAT proof finished - no model "
+            "found: SUCCESS!`."),
+        artefact=_read("lec_bmc_none_negative.log")),
+))
+
 _register(Instrument(
     name="analog_resolution_stimulus::incremental_tone",
     reads="the emitted deck's decoded conversion-window plan",

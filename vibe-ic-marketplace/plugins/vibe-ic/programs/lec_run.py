@@ -2935,8 +2935,13 @@ def parse_equiv_output(text: str, *,
 
 def build_report(parsed: Dict, top: str, gate_netlist: str,
                  liberty: Optional[str],
-                 liberty_source: Optional[str] = None) -> Dict:
-    """Shape a parse result into the reports/lec.json schema the gate reads."""
+                 liberty_source: Optional[str] = None,
+                 bmc: Optional[Dict] = None) -> Dict:
+    """Shape a parse result into the reports/lec.json schema the gate reads.
+
+    `bmc` is the counterexample search `run_bmc` made after a ladder that
+    stopped with unproven points (FX_LEC_BMC_CEX). It is evidence only: no
+    verdict word below reads it."""
     proven = parsed["proven"]
     unproven = parsed["unproven"]
     return {
@@ -2952,9 +2957,16 @@ def build_report(parsed: Dict, top: str, gate_netlist: str,
         # magnitude beyond any budget on this machine". Those call for opposite
         # actions. None only when no total was parseable (never fabricated).
         "miter_points": parsed.get("total"),
-        # Yosys equiv_status does not emit a distinct proven-non-equivalent
-        # count; a genuine difference surfaces as `unproven`, so this stays 0.
-        "non_equivalent_points": 0,
+        # Yosys equiv_status emits no proven-non-equivalent count; a genuine
+        # difference surfaces as `unproven`. A proof that closed decided it:
+        # 0. Otherwise it is the miter outputs a bounded model check FROM
+        # RESET found differing (`bmc`), 0 when it searched to its bound and
+        # found none, None when it could not search. Without a search it is
+        # the empty list the equiv ladder yields.
+        "non_equivalent_points": (
+            0 if parsed["equivalent"] is True and not unproven
+            else bmc_non_equivalent_points(bmc)),
+        "bmc": bmc,
         "unproven_points": unproven if unproven is not None else 0,
         "gold": f"{top} (RTL)",
         "gate": f"{Path(gate_netlist).name} (synth)",
@@ -2990,6 +3002,285 @@ def build_report(parsed: Dict, top: str, gate_netlist: str,
         "liberty_source": liberty_source,
         "program": PROGRAM,
     }
+
+
+# ---------------------------------------------------------------------------
+# Bounded model check FROM RESET on the port miter (FX_LEC_BMC_CEX).
+#
+# The equiv ladder proves points or leaves them unproven; no pass in yosys's
+# passes/equiv prints a counterexample, so an unclosed LEC could not be told
+# apart from a real sequential mismatch. When the ladder stops with unproven
+# points, the SAME gold/gate pairing it read (its own script, cut before
+# `equiv_make`) becomes a port miter, and `sat` searches it from reset for a
+# cycle where an output differs. Evidence only: it changes no verdict mapping.
+# ---------------------------------------------------------------------------
+BMC_SCHEMA_VERSION = "vibeic.lec.bmc.v1"
+BMC_COUNTEREXAMPLE = "COUNTEREXAMPLE"
+BMC_NONE_WITHIN_BOUND = "NONE_WITHIN_BOUND"
+BMC_NOT_RUN = "NOT_RUN"
+#: Every run of a tool gets a deadline, and this search deepens without an end
+#: of its own, so it has a clock: 15 min, the budget ruled for it. A clock stop
+#: is NOT_RUN with the depth it reached, never "no counterexample".
+BMC_DEADLINE_ENV = "VIBEIC_LEC_BMC_DEADLINE_S"
+BMC_DEFAULT_DEADLINE_S = 900
+#: The depth searched for, in cycles after reset. 64 is four times the
+#: ladder's deepest `equiv_induct -seq 16` rung: a difference the ladder's
+#: induction window could not see is looked for well past it.
+BMC_DEPTH_ENV = "VIBEIC_LEC_BMC_DEPTH"
+BMC_DEFAULT_DEPTH = 64
+#: Cycles the declared reset is held asserted before outputs are compared.
+#: Both sides start from the same all-zero state, so one cycle takes each to
+#: its reset state; a longer declared reset sequence is not a declared field.
+BMC_RESET_CYCLES = 1
+BMC_MITER = "lec_bmc_miter"
+_BMC_DEPTH_MARK = "LEC_BMC_DEPTH_BEGIN"
+_BMC_MARK_RE = re.compile(rf"^{_BMC_DEPTH_MARK} (\d+)\s*$", re.M)
+_BMC_FAIL_RE = re.compile(r"SAT proof finished - model found: FAIL!")
+_BMC_OK_RE = re.compile(r"SAT proof finished - no model found: SUCCESS!")
+_BMC_ROW_RE = re.compile(
+    r"^\s+(\d+)\s+\\?(\S+)\s+\S+\s+\S+\s+([01xz]+)\s*$", re.M)
+_BMC_ERROR_RE = re.compile(r"^ERROR:.*$", re.M)
+
+
+def _bmc_env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def bmc_depth_schedule(target: int) -> List[int]:
+    """1, 2, 4, ... up to and including `target`: each rung is one complete
+    `sat -seq`, so the depth a deadline stopped at is a measured bound."""
+    depths, d = [], 1
+    while d < target:
+        depths.append(d)
+        d *= 2
+    return depths + [target]
+
+
+def bmc_non_equivalent_points(bmc: Optional[Dict]) -> Optional[int]:
+    """The differing miter outputs a search found; never a constant."""
+    if bmc is None:
+        return 0
+    if bmc.get("result") == BMC_COUNTEREXAMPLE:
+        return len((bmc.get("counterexample") or {}).get("differing_outputs")
+                   or [])
+    if bmc.get("result") == BMC_NONE_WITHIN_BOUND:
+        return 0
+    return None
+
+
+def bmc_not_run(reason: str, **extra: Any) -> Dict:
+    return {"schema_version": BMC_SCHEMA_VERSION, "result": BMC_NOT_RUN,
+            "reason": reason, "depth_reached": extra.pop("depth_reached", 0),
+            "depth_target": extra.pop("depth_target", None),
+            "deadline_s": extra.pop("deadline_s", None),
+            "elapsed_s": extra.pop("elapsed_s", 0.0),
+            "counterexample": None, **extra}
+
+
+def bmc_reset_from_declaration(project: Path, gate_ports: List[str]
+                               ) -> Tuple[Optional[Dict], str]:
+    """The reset the search asserts, from the design's own declaration.
+
+    `L8_TIMING_WAVEFORM.clock_and_reset_waveform` (the L8 clock/reset
+    declaration Step 5 reads) names each reset with a polarity. Nothing is
+    inferred from a port name: an undeclared reset or polarity, more than one
+    clock domain (one `sat` step is one cycle of one clock), or a reset that
+    is not a port of the compared top is (None, why)."""
+    import _path_layout as _plo
+    import formal_harness_gen as _fhg
+    path = _plo.generated_docs_dir(Path(project)) / "L8_TIMING_WAVEFORM.json"
+    rel = f"{path.parent.name}/{path.name}"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"no readable reset declaration ({rel}: {exc})"
+    decl = doc.get("clock_and_reset_waveform") if isinstance(doc, dict) else None
+    if not isinstance(decl, dict):
+        return None, f"{rel} declares no clock_and_reset_waveform"
+    clocks = decl.get("clocks") if isinstance(decl.get("clocks"), list) else []
+    if len(clocks) != 1:
+        return None, (f"{rel} declares {len(clocks)} clock(s); a `sat` step "
+                      f"is one cycle of ONE clock")
+    resets = decl.get("resets") if isinstance(decl.get("resets"), list) else []
+    if not resets:
+        return None, f"{rel} declares no reset, so there is no state to start from"
+    rows = []
+    for row in resets:
+        name = str((row or {}).get("name") or "") if isinstance(row, dict) else ""
+        if not re.fullmatch(r"[A-Za-z_]\w*", name):
+            return None, f"{rel} declares a reset with no port name: {row!r}"
+        polarity = _fhg._norm_polarity(str(row.get("polarity") or ""))
+        if polarity is None:
+            return None, (f"{rel} declares reset {name!r} with polarity "
+                          f"{row.get('polarity')!r}, not active_high/active_low")
+        if name not in gate_ports:
+            return None, (f"declared reset {name!r} is not a port of the "
+                          f"compared top")
+        rows.append({"port": name, "polarity": polarity,
+                     "asserted": 0 if polarity == "active_low" else 1})
+    return {"resets": rows, "clock": (clocks[0] or {}).get("name"),
+            "source": f"{rel}.clock_and_reset_waveform"}, ""
+
+
+def bmc_script(prefix: str, reset: Dict, depths: List[int],
+               vcd_path: str) -> str:
+    """The ladder's own read of both sides, then the port miter and the
+    iterative-deepening `sat` rungs. A depth counts cycles AFTER the reset
+    cycles (`-seq` is their sum). `-verify` stops at the first model."""
+    sets = " ".join(f"-set-at {c} in_{r['port']} {r['asserted']}"
+                    for r in reset["resets"]
+                    for c in range(1, BMC_RESET_CYCLES + 1))
+    body = (f"miter -equiv -flatten -make_outputs "
+            f"gold gate {BMC_MITER}\n"
+            f"hierarchy -top {BMC_MITER}\n")
+    for d in depths:
+        body += (f"log {_BMC_DEPTH_MARK} {d}\n"
+                 f"sat -verify -seq {BMC_RESET_CYCLES + d} -set-init-zero {sets} "
+                 f"-prove-skip {BMC_RESET_CYCLES} -prove trigger 0 "
+                 f"-show-ports -dump_vcd {shlex.quote(vcd_path)} {BMC_MITER}\n")
+    return prefix + body
+
+
+def parse_bmc_log(text: str, depth_target: int) -> Dict:
+    """Read a `bmc_script` yosys log: the first model found, else the deepest
+    rung that completed with none.
+
+    `result` is COUNTEREXAMPLE (cycle = the first `sat` time step, 1-based
+    with the reset cycle(s) first, at which `trigger` is 1;
+    differing_outputs = the miter output pairs that differ there),
+    NONE_WITHIN_BOUND only when the `depth_target` rung itself completed, and
+    NOT_RUN otherwise, with the depth that did complete."""
+    import instrument_calibration as _cal
+    _cal.assert_calibrated("lec_run::parse_bmc_log")
+    marks = list(_BMC_MARK_RE.finditer(text or ""))
+    reached = 0
+    for i, m in enumerate(marks):
+        depth = int(m.group(1))
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+        block = text[m.end():end]
+        if _BMC_FAIL_RE.search(block):
+            table = block[_BMC_FAIL_RE.search(block).end():]
+            steps: Dict[int, Dict[str, str]] = {}
+            for row in _BMC_ROW_RE.finditer(table):
+                steps.setdefault(int(row.group(1)), {})[row.group(2)] = row.group(3)
+            cycle = next((t for t in sorted(steps)
+                          if steps[t].get("trigger") == "1"), None)
+            if cycle is None:
+                return {"result": BMC_NOT_RUN, "depth_reached": reached,
+                        "reason": f"a model was found at depth {depth} but "
+                                  "its trace names no step where the miter "
+                                  "trigger is 1"}
+            at = steps[cycle]
+            differing = sorted(
+                n[len("gold_"):] for n in at if n.startswith("gold_")
+                and "gate_" + n[len("gold_"):] in at
+                and at[n] != at["gate_" + n[len("gold_"):]])
+            return {"result": BMC_COUNTEREXAMPLE, "depth_reached": depth,
+                    "reason": f"outputs differ {cycle - BMC_RESET_CYCLES} "
+                              f"cycle(s) after reset",
+                    "counterexample": {
+                        "cycle": cycle,
+                        "cycles_after_reset": cycle - BMC_RESET_CYCLES,
+                        "differing_outputs": differing}}
+        if _BMC_OK_RE.search(block):
+            reached = depth
+            continue
+        break
+    if marks and reached == depth_target:
+        return {"result": BMC_NONE_WITHIN_BOUND, "depth_reached": reached,
+                "reason": f"no output differs within {reached} cycle(s) "
+                          f"from reset"}
+    err = _BMC_ERROR_RE.search(text or "")
+    return {"result": BMC_NOT_RUN, "depth_reached": reached,
+            "reason": (err.group(0).strip() if err else
+                       f"the search stopped after depth {reached} of "
+                       f"{depth_target}")}
+
+
+def run_bmc(container: str, prefix: str, reset: Dict, reports_dir: Path,
+            workdir: Optional[str], *, deadline_s: Optional[int] = None,
+            depth_target: Optional[int] = None) -> Dict:
+    """Run the search in the container the ladder ran in, under a deadline
+    (an in-container `timeout`, so the tool dies with it). Its log is kept
+    at `reports/lec_bmc.log` and a counterexample trace at
+    `reports/lec_bmc_cex.vcd`."""
+    deadline_s = deadline_s or _bmc_env_int(BMC_DEADLINE_ENV,
+                                            BMC_DEFAULT_DEADLINE_S)
+    depth_target = depth_target or _bmc_env_int(BMC_DEPTH_ENV,
+                                                BMC_DEFAULT_DEPTH)
+    ys, log = reports_dir / "lec_bmc.ys", reports_dir / "lec_bmc.log"
+    vcd = reports_dir / "lec_bmc_cex.vcd"
+    for stale in (log, vcd):
+        stale.unlink(missing_ok=True)
+    ys.write_text(bmc_script(prefix, reset, bmc_depth_schedule(depth_target),
+                             str(vcd.resolve())), encoding="utf-8")
+    cmd = (f"yosys -q -l {shlex.quote(str(log.resolve()))} "
+           f"-s {shlex.quote(str(ys.resolve()))} >/dev/null 2>&1")
+    if workdir:
+        cmd = f"cd {shlex.quote(workdir)} && " + cmd
+    t0 = time.monotonic()
+    try:
+        rc = _docker(container, cmd, timeout=deadline_s).returncode
+    except (subprocess.SubprocessError, OSError) as exc:
+        return bmc_not_run(f"the search could not be launched: {exc}",
+                           depth_target=depth_target, deadline_s=deadline_s)
+    elapsed = round(time.monotonic() - t0, 2)
+    text = log.read_text(errors="replace") if log.is_file() else ""
+    got = parse_bmc_log(text, depth_target)
+    if got["result"] == BMC_NONE_WITHIN_BOUND and rc != 0:
+        got = {"result": BMC_NOT_RUN, "depth_reached": got["depth_reached"],
+               "reason": f"yosys exited rc={rc} after the last rung"}
+    if got["result"] == BMC_NOT_RUN and rc in _CONTAINER_TIMEOUT_RCS:
+        got["reason"] = (f"the {deadline_s}s deadline stopped the search at "
+                         f"depth {got['depth_reached']} of {depth_target} "
+                         f"(rc={rc})")
+    elif got["result"] == BMC_NOT_RUN and not text:
+        got["reason"] = f"yosys wrote no log (rc={rc})"
+    record = {"schema_version": BMC_SCHEMA_VERSION,
+              "result": got["result"], "reason": got["reason"],
+              "depth_reached": got["depth_reached"],
+              "depth_target": depth_target, "deadline_s": deadline_s,
+              "elapsed_s": elapsed, "reset": reset,
+              "log_path": str(log), "counterexample": None}
+    if got["result"] == BMC_COUNTEREXAMPLE:
+        record["counterexample"] = dict(
+            got["counterexample"],
+            trace_path=str(vcd) if vcd.is_file() else None)
+    return record
+
+
+def _bmc_after_ladder(parsed: Dict, project: Path, container: str,
+                      gate_abs: str, top: str, reports_dir: Path,
+                      workdir: Optional[str], ladder_script) -> Dict:
+    """The search runs only when the ladder stopped with unproven points."""
+    unproven = parsed.get("unproven") or 0
+    if unproven <= 0:
+        return bmc_not_run(
+            "the ladder proved every point it built, so there is nothing to "
+            "search" if parsed.get("verdict") == "PASS" else
+            f"the ladder left no unproven point to search "
+            f"(verdict {parsed.get('verdict')})")
+    try:
+        ports = [n for _, _, n in netlist_top_ports(
+            Path(gate_abs).read_text(encoding="utf-8", errors="ignore"), top)]
+    except OSError as exc:
+        return bmc_not_run(f"the gate netlist is unreadable: {exc}")
+    reset, why = bmc_reset_from_declaration(project, ports)
+    if reset is None:
+        return bmc_not_run(why)
+    script = ladder_script()
+    cut = script.find("equiv_make")
+    if cut < 0 or "design -copy-from gate -as gate" not in script[:cut]:
+        return bmc_not_run("the ladder script has no gold/gate pairing to "
+                           "reuse (no `equiv_make` after both copies)")
+    print(f"[lec_run] {unproven} point(s) unproven: bounded model check from "
+          f"reset ({', '.join(r['port'] for r in reset['resets'])}) on the "
+          f"port miter", file=sys.stderr)
+    return run_bmc(container, script[:cut], reset, reports_dir, workdir)
 
 
 # ---------------------------------------------------------------------------
@@ -5356,6 +5647,7 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
     gold_frontend = "verilog"
     gold_defines = "-DSIMULATION -DYOSYS"   # synth PRIMARY define set (mirrored)
+    slang_prefix = ""   # set by the slang gold-read retry below, if it runs
 
     # --- functional-mode (scan) comparison ---------------------------------
     # Only fires when the caller NAMED a scan-chain metadata file AND that file
@@ -6588,8 +6880,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         # to build a miter, downgrade provisional INCONCLUSIVE to FAIL — a
         # design the capable frontend cannot elaborate is not a free pass.
         parsed = finalize_after_slang_retry(parsed, slang_retry_failed)
+        bmc = _bmc_after_ladder(
+            parsed, project, container, gate_abs, resolved_top,
+            rpt_out.parent, equiv_workdir,
+            lambda: _make_script(gold_frontend, slang_prefix, gold_defines))
         report = build_report(parsed, resolved_top, gate_abs, liberty,
-                              liberty_source)
+                              liberty_source, bmc=bmc)
         report["elapsed_sec"] = elapsed
         # WHAT was attempted, WHICH resource ran out, HOW MANY attempts.
         # `stopped` is MEASURED from this run's own log -- the producer writes
