@@ -42824,7 +42824,8 @@ def _die_density_fill(project: Path, top: str, pdk: PdkConfig,
     # engine's own record: ownership stands only when that record's in-place
     # rewrite ends at this GDS's digest.
     if _owned:
-        argv += ["--owner-report", str(_density_fill_report(project))]
+        import metal_fill_emit as _mfe  # noqa: PLC0415
+        argv += ["--owner-report", str(project / _mfe._REPORT_REL)]
     # Same reason `_die_finishing` passes it, and the same trap if it is not:
     # the streamed GDS's own bbox is the slot's CORE_AREA since the floorplan
     # fix, so a generator told nothing would fill the CORE, report success, and
@@ -42876,12 +42877,6 @@ def _die_density_fill(project: Path, top: str, pdk: PdkConfig,
                   "the PDK's own density-fill generator filled the declared die")
 
 
-def _density_fill_report(project: Path) -> Path:
-    """Where `metal_fill_emit` writes its report when given no `--report`."""
-    import metal_fill_emit as _mfe  # noqa: PLC0415
-    return project / _mfe._REPORT_REL
-
-
 def _density_metal_fill(project: Path, top: str, pdk: PdkConfig,
                         gds_path: Path, container: Optional[str] = None) -> Tuple[bool, str]:
     """Per-layer DENSITY-TARGETED metal fill on the streamed GDS.
@@ -42904,8 +42899,9 @@ def _density_metal_fill(project: Path, top: str, pdk: PdkConfig,
     # `metal_fill_emit` writes none on its skip paths, and `_die_density_fill`
     # reads this one to decide whether this run's fill is in the GDS; a stale
     # one could speak for a fill this run never made.
+    import metal_fill_emit as _mfe  # noqa: PLC0415
     try:
-        _density_fill_report(project).unlink()
+        (project / _mfe._REPORT_REL).unlink()
     except FileNotFoundError:
         pass
     except OSError as exc:
