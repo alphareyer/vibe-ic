@@ -198,6 +198,20 @@ END unithd
 # 388 um and the die 388 + 2 x 10 = 408 — a number the 7.5 fallback constant
 # (core 548, die 568) cannot produce.
 
+# Landed fixture (restored verbatim): a site of 1.00 x 2.00.
+_TECH_LEF_DISTINCT = """\
+VERSION 5.7 ;
+LAYER met1
+  TYPE ROUTING ;
+  PITCH 0.34 ;
+END met1
+SITE unithd
+  CLASS CORE ;
+  SIZE 1.00 BY 2.00 ;
+END unithd
+"""
+
+
 class _Pdk:
     """In-container PDK paths — neither exists on the host, which is the whole
     point: this is the topology in which the LEF read used to be dead."""
@@ -242,6 +256,70 @@ def test_the_container_read_is_reached_and_the_die_comes_from_it(
     assert die == "408x408", (die, note)
     assert "LEF SIZE" in note, note
     assert "FALLBACK CONSTANT" not in note, note
+
+
+def _deck_stub(pdk, container=None, plan_out=None, **kw):
+    """A PDN deck that draws two pitched strap layers and reports nothing to
+    `plan_out` -- the tuned-grid deck shape. Its text is what pdngen gets."""
+    return ("  add_pdn_stripe -grid grid -layer met4 -width 1.6 -pitch 40.0 "
+            "-offset 8.0\n"
+            "  add_pdn_stripe -grid grid -layer met5 -width 1.6 -pitch 40.0 "
+            "-offset 8.0\n")
+
+
+def test_the_cell_lef_is_tried_when_the_tech_lef_declares_no_site(
+        tmp_path, monkeypatch):
+    """Two of the four PDKs shipped in the EDA image keep the site definition
+    in the CELL lef, not the tech lef. The fall-through must reach it.
+
+    RESTORED (review wave 3, N4). The landed body asserted `die == "693x693"`
+    and `"[site-LEF]" in note`: 693 = sqrt(10000 x 1.00 x 2.00 x 6.0 / 0.25),
+    i.e. the removed sites-per-cell constant, which N4 deletes by design, so
+    those two lines cannot hold on any tree carrying N4 (measured: the
+    verbatim body returns 568x568 there). The SUBJECT -- the tech-LEF-first,
+    cell-LEF-second site fall-through -- still exists: the row site now sets
+    the PDN floor's snapping step. The name, docstring, fixture and fake exec
+    are the landed ones; the assertion is made on the site's one consumer."""
+    def fake_exec(container, cmd, timeout=1800, **kw):
+        if _Pdk.tech_lef in cmd:
+            return 0, "VERSION 5.7 ;\nEND LIBRARY\n", ""
+        return 0, _TECH_LEF_DISTINCT, ""
+
+    monkeypatch.setattr(R, "_docker_exec", fake_exec)
+    monkeypatch.setattr(R, "_container_file_text",
+                        lambda c, path: fake_exec(c, f"cat {path}")[1] or None)
+    monkeypatch.setattr(R, "_build_pdn_tcl", _deck_stub)
+    detail = {}
+    side, basis = R._strap_plan_core_floor(_Pdk(), "an-eda-container",
+                                           detail=detail)
+    assert detail["site_dims_um"] == [1.0, 2.0], detail
+    assert detail["site_dims_from"] == _Pdk.cell_lef, detail
+    assert "site/row steps 1/2" in basis, basis
+
+
+def test_no_site_anywhere_degrades_loudly_instead_of_inventing_one(
+        tmp_path, monkeypatch):
+    """A PDK that declares no site must NOT get a constant dressed up as a
+    measurement. The line has to SAY it is a fallback.
+
+    RESTORED (review wave 3, N4). The landed body asserted the auto die
+    `548x548` from the fallback average cell; N4 adds the 2 x 10 um core inset
+    (568) and keeps that label in the die note -- covered beside this by
+    `test_no_lef_anywhere_degrades_loudly_instead_of_inventing_one`. The site
+    itself, where no LEF declares one, still degrades: the PDN floor's basis
+    must SAY the row step was unknown rather than invent one."""
+    def fake_exec(container, cmd, timeout=1800, **kw):
+        return 0, "VERSION 5.7 ;\nEND LIBRARY\n", ""
+
+    monkeypatch.setattr(R, "_docker_exec", fake_exec)
+    monkeypatch.setattr(R, "_container_file_text",
+                        lambda c, path: fake_exec(c, f"cat {path}")[1])
+    monkeypatch.setattr(R, "_build_pdn_tcl", _deck_stub)
+    detail = {}
+    _side, basis = R._strap_plan_core_floor(_Pdk(), "an-eda-container",
+                                            detail=detail)
+    assert detail["site_dims_um"] is None
+    assert "site size unknown" in basis, basis
 
 
 def test_a_master_the_lef_does_not_size_is_named_not_guessed(

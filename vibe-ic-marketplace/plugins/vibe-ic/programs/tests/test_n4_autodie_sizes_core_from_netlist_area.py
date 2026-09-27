@@ -167,8 +167,11 @@ _GF_STRAPS = [{"layer": "Metal4", "width": 1.6, "pitch": 153.6, "offset": 16.32}
 def test_the_strap_floor_matches_the_measured_pdngen_boundary():
     """CALIBRATED in image 0.3.83 (OpenROAD 26Q3-3002) with these two stripes:
     row extent 94.64 refused (Metal4 needs 94.72), 94.08 refused (Metal5 needs
-    94.84), 99.68 x 98.0 built. The floor must sit above every refused core
-    and at or below a core that, snapped to rows, builds."""
+    94.84), 99.68 x 98.0 built. This is the GROWTH floor -- a padded UPPER
+    bound for a core the flow owns: it must sit above every refused core, and
+    it may sit above a core that builds (102 > 100). It is never the refusal
+    threshold for a pinned core; that is `pdn_strap_core_misfit`, pinned to
+    the same eight measurements in the next test."""
     side, basis = PP.pdn_strap_min_core_span_um(_GF_STRAPS, nets=2,
                                                 site_dims_um=(_SITE_W, _SITE_H))
     assert "94.84" in basis and "Metal5" in basis, basis
@@ -214,10 +217,49 @@ def test_the_downsize_retry_cannot_shrink_below_the_floor_die():
     assert R._compute_downsized_die(209, 209, 20.0, die_min_um=122) is not None
 
 
-def test_a_pinned_core_below_the_strap_floor_is_refused_with_numbers(
-        tmp_path, monkeypatch):
-    """RED on main: main runs on to pdngen, which builds no grid. DRIVES
-    step_pnr itself — hermetic: no container, the strap floor supplied."""
+_GF_DIRS = {"Metal4": "VERTICAL", "Metal5": "HORIZONTAL"}
+#: core side -> the layers pdngen refused, MEASURED in image 0.3.83
+_MEASURED = {65: {"Metal4", "Metal5"}, 80: {"Metal4", "Metal5"},
+             90: {"Metal4", "Metal5"}, 94: {"Metal4", "Metal5"},
+             95: {"Metal4", "Metal5"}, 96: {"Metal5"}, 97: {"Metal5"},
+             100: set()}
+
+
+def test_the_pinned_check_reproduces_every_measured_pdngen_outcome():
+    """RED on main (no exact check). pdngen reported Metal4 first for 65-95
+    and Metal5 for 96/97, and built at 100; the exact per-axis check must
+    refuse exactly those layers and accept 100 x 100 (rows 99.68 x 98.0)."""
+    for core, layers in _MEASURED.items():
+        mis = PP.pdn_strap_core_misfit(_GF_STRAPS, core, core, nets=2,
+                                       site_dims_um=(_SITE_W, _SITE_H),
+                                       directions=_GF_DIRS)
+        assert {m["layer"] for m in mis} == layers, (core, mis)
+    ok = PP.pdn_strap_core_misfit(_GF_STRAPS, 100, 100, nets=2,
+                                  site_dims_um=(_SITE_W, _SITE_H),
+                                  directions=_GF_DIRS)
+    assert ok == []
+    growth, _ = PP.pdn_strap_min_core_span_um(_GF_STRAPS, nets=2,
+                                              site_dims_um=(_SITE_W, _SITE_H))
+    assert growth >= 100  # the padded growth floor is not the refusal bound
+
+
+def test_the_pinned_check_judges_each_layer_on_its_own_axis():
+    """A narrow tall core fits the HORIZONTAL straps and not the VERTICAL
+    ones; the square floor would call both wrong."""
+    mis = PP.pdn_strap_core_misfit(_GF_STRAPS, 60, 200, nets=2,
+                                   site_dims_um=(_SITE_W, _SITE_H),
+                                   directions=_GF_DIRS)
+    assert [m["layer"] for m in mis] == ["Metal4"] and mis[0]["axis"] == "width"
+    # direction unknown: judged on the larger extent, so it refuses LESS
+    assert PP.pdn_strap_core_misfit(_GF_STRAPS, 60, 200, nets=2,
+                                    site_dims_um=(_SITE_W, _SITE_H)) == []
+
+
+class _Stop(Exception):
+    pass
+
+
+def _pnr_until_the_pdn_check(tmp_path, monkeypatch, die, deck_detail=True):
     nl, pdk_stub = _stage(tmp_path)
     pdk = R.PdkConfig(name="testpdk", liberty=str(tmp_path / "x.lib"),
                       tech_lef=str(tmp_path / "absent.tlef"),
@@ -226,11 +268,145 @@ def test_a_pinned_core_below_the_strap_floor_is_refused_with_numbers(
     monkeypatch.setattr(R, "pnr_input_netlist",
                         lambda project, top: (nl, "fixture netlist", False),
                         raising=True)
-    monkeypatch.setattr(R, "_strap_plan_core_floor",
-                        lambda pdk, container="": (102, "Metal5 needs 94.84 um"),
-                        raising=False)
-    res = R.step_pnr(tmp_path, "top", pdk, "", "90x90", 0.3)
-    assert res.status == "FAIL", res
-    assert "PDN_CORE_TOO_SMALL" in str(res.detail), res.detail
-    assert "70x70" in str(res.detail) and "102x102" in str(res.detail), res.detail
-    assert "--die-um 90x90 (explicit)" in str(res.detail), res.detail
+
+    def floor(pdk, container="", detail=None):
+        if deck_detail:
+            detail.update(status="DERIVED", stripes=_GF_STRAPS,
+                          directions=_GF_DIRS,
+                          site_dims_um=[_SITE_W, _SITE_H],
+                          plan_source="fixture")
+            return 102, "Metal5 needs 94.84 um"
+        detail.update(status="NOT_DETERMINED", reason="fixture: no strap plan")
+        return None, "fixture: no strap plan"
+    monkeypatch.setattr(R, "_strap_plan_core_floor", floor, raising=False)
+
+    def stop(*a, **k):  # the first call after the PDN check
+        raise _Stop()
+    monkeypatch.setattr(R, "ct03_pin_rect", stop)
+    try:
+        return R.step_pnr(tmp_path, "top", pdk, "", die, 0.3)
+    except _Stop:
+        return None
+
+
+def test_a_pinned_core_that_pdngen_measured_building_is_accepted(
+        tmp_path, monkeypatch):
+    """RED on 41dbdd7f2 (review wave 3, MAJOR): a pinned 120x120 die has a
+    100 x 100 core, which pdngen was MEASURED to build; the padded floor (102)
+    refused it."""
+    res = _pnr_until_the_pdn_check(tmp_path, monkeypatch, "120x120")
+    assert res is None, res  # reached the step after the check
+
+
+def test_a_pinned_core_below_the_strap_floor_is_refused_with_numbers(
+        tmp_path, monkeypatch):
+    """RED on main: main runs on to pdngen, which builds no grid. DRIVES
+    step_pnr itself -- hermetic: no container, the strap plan supplied. A
+    115x115 die is a 95 x 95 core: rows 94.64 x 94.08, below Metal4's 94.72
+    and Metal5's 94.84, exactly as measured."""
+    res = _pnr_until_the_pdn_check(tmp_path, monkeypatch, "115x115")
+    assert res is not None and res.status == "FAIL", res
+    d = str(res.detail)
+    assert "PDN_CORE_TOO_SMALL" in d and "95x95" in d, d
+    assert "Metal4 (VERTICAL) needs 94.72" in d and "94.64" in d, d
+    assert "Metal5 (HORIZONTAL) needs 94.84" in d and "94.08" in d, d
+    assert "--die-um 115x115 (explicit)" in d, d
+
+
+def test_an_underivable_floor_is_named_not_silent(tmp_path, monkeypatch, capsys):
+    """RED on 41dbdd7f2 (review wave 3): with no floor the checks switched off
+    and nothing said so. Now a named line is printed, and a pinned core too
+    small for any plan is not refused on a floor nobody derived."""
+    res = _pnr_until_the_pdn_check(tmp_path, monkeypatch, "90x90",
+                                   deck_detail=False)
+    assert res is None
+    assert "PDN_CORE_FLOOR_NOT_DETERMINED: fixture: no strap plan" in capsys.readouterr().err
+
+
+def test_the_floor_record_is_persisted_with_the_floorplan(tmp_path):
+    rec = R._floorplan_rectangles_record(
+        tmp_path, die_rect=[0, 0, 154, 154], fp_rect=None,
+        die_source="--die-um auto", core_pad=10, ring_inset_um=None,
+        pdn_core_floor={"status": "NOT_DETERMINED", "reason": "why"})
+    on_disk = json.loads((tmp_path / R.FLOORPLAN_RECTANGLES_REL).read_text())
+    assert on_disk["pdn_core_floor"] == {"status": "NOT_DETERMINED", "reason": "why"}
+    assert rec["pdn_core_floor"]["reason"] == "why"
+
+
+def _write_leFS(tmp_path):
+    tech = tmp_path / "tech.tlef"
+    tech.write_text("VERSION 5.7 ;\n"
+                    "LAYER Metal4\n  TYPE ROUTING ;\n  DIRECTION VERTICAL ;\n"
+                    "  PITCH 0.56 ;\n  WIDTH 0.28 ;\nEND Metal4\n"
+                    "LAYER Metal5\n  TYPE ROUTING ;\n  DIRECTION HORIZONTAL ;\n"
+                    "  PITCH 0.56 ;\n  WIDTH 0.28 ;\nEND Metal5\nEND LIBRARY\n")
+    cell = tmp_path / "cells.lef"
+    cell.write_text(_cell_lef())
+    return tech, cell
+
+
+def test_the_floor_is_derived_from_the_decks_own_plan_without_mocking_it_out(
+        tmp_path, monkeypatch):
+    """Review wave 3: `_strap_plan_core_floor` itself, not patched away. The
+    deck double fills `plan_out` exactly as `_build_pdn_tcl` does; the tech
+    LEF declares no SITE, so the row step must come from the CELL LEF, and the
+    strap DIRECTIONS from the tech LEF."""
+    tech, cell = _write_leFS(tmp_path)
+
+    def deck(pdk, container=None, plan_out=None, **kw):
+        plan_out.update(straps=[dict(st) for st in _GF_STRAPS])
+        return "  add_pdn_stripe -grid grid -layer Metal1 -width 0.6 -followpins\n"
+    monkeypatch.setattr(R, "_build_pdn_tcl", deck)
+
+    class _P:
+        site = "coresite"
+        tech_lef = str(tech)
+        cell_lef = str(cell)
+    detail = {}
+    side, basis = R._strap_plan_core_floor(_P(), "", detail=detail)
+    assert side == 102 and "94.84" in basis
+    assert detail["site_dims_um"] == [_SITE_W, _SITE_H]
+    assert detail["site_dims_from"] == str(cell)
+    assert detail["directions"] == _GF_DIRS
+    assert detail["plan_source"] == "the PDN deck's plan_out"
+
+
+def test_a_deck_that_does_not_report_its_plan_is_read_from_its_own_text(
+        tmp_path, monkeypatch):
+    """The tuned-grid deck branch draws met4/met5 straps and fills no
+    `plan_out`; the floor used to say 'no strap plan' about it. It is now read
+    off the deck text pdngen receives."""
+    tech, cell = _write_leFS(tmp_path)
+    monkeypatch.setattr(R, "_build_pdn_tcl", lambda *a, **k: (
+        "  add_pdn_stripe -grid grid -layer met1 -width 0.48 -pitch 5.44 "
+        "-offset 0 -followpins\n"
+        "  add_pdn_stripe -grid grid -layer met4 -width 1.6 -pitch 40.0 "
+        "-offset 8.0 -extend_to_core_ring\n"
+        "  add_pdn_stripe -grid grid -layer met5 -width 1.6 -pitch 40.0 "
+        "-offset 8.0 -extend_to_core_ring\n"))
+
+    class _P:
+        site = "coresite"
+        tech_lef = str(tech)
+        cell_lef = str(cell)
+    detail = {}
+    side, _basis = R._strap_plan_core_floor(_P(), "", detail=detail)
+    layers = [st["layer"] for st in detail["stripes"]]
+    assert layers == ["met4", "met5"], detail   # follow-pin rails are no period
+    assert detail["plan_source"].startswith("the add_pdn_stripe lines")
+    assert side is not None
+
+
+def test_a_deck_with_no_pitched_strap_is_not_determined_with_its_reason(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "_build_pdn_tcl", lambda *a, **k: (
+        "  add_pdn_stripe -grid grid -layer Metal1 -width 0.6 -followpins\n"))
+
+    class _P:
+        site = "coresite"
+        tech_lef = str(tmp_path / "none.tlef")
+        cell_lef = str(tmp_path / "none.lef")
+    detail = {}
+    side, why = R._strap_plan_core_floor(_P(), "", detail=detail)
+    assert side is None and detail["status"] == "NOT_DETERMINED"
+    assert "no pitched strap" in why

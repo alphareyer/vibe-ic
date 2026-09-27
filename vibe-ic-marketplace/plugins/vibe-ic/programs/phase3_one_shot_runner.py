@@ -20627,40 +20627,83 @@ def _effective_die_um(die_um_flag: str,
     return die_um_flag, None
 
 
-def _strap_plan_core_floor(pdk: "PdkConfig", container: str = ""
+def _strap_plan_core_floor(pdk: "PdkConfig", container: str = "",
+                           detail: Optional[Dict[str, Any]] = None
                            ) -> Tuple[Optional[int], str]:
-    """`(side_um, basis)`: the smallest core side on which the strap plan this
-    run's PDN deck will emit can be built, or `(None, why)`.
+    """`(side_um, basis)`: the smallest SQUARE core on which the strap plan
+    this run's PDN deck will emit can be built -- the CONSERVATIVE floor an
+    auto-sized core is GROWN to -- or `(None, why)`.
 
-    The plan is taken from `_build_pdn_tcl`'s own `plan_out` — the SAME
+    `detail`, when given, receives what the EXACT check of a PINNED core
+    needs: the stripes, where they came from, each strap layer's DIRECTION
+    from the tech LEF, and the row site's dimensions. The pinned refusal must
+    not use the padded square floor (review wave 3, N4): an upper bound that
+    is right for growth is not a "below this pdngen fails" threshold.
+
+    The plan is taken from `_build_pdn_tcl`'s own `plan_out` -- the SAME
     resolution the deck uses (registry `pdn_straps`, else the tech-LEF-derived
-    plan) — so this floor and the deck cannot describe two different grids.
-    The EM floor and the pre-route sweep may later widen a strap; pdngen's own
-    refusal and the grid-built check stay the authority for that geometry.
-    The arithmetic is `_ppa.power.pdn_strap_min_core_span_um`; the site/row
-    step it rounds to is the PDK's own row site (`_ppa.area.lef_site_dims_um`).
+    plan). A deck branch that draws straps without reporting them to
+    `plan_out` (the tuned sky130-style grid) is read from the deck text it
+    emits instead: its `add_pdn_stripe ... -pitch` lines are what pdngen gets.
+    The EM floor and the pre-route sweep may later change a strap; pdngen and
+    the grid-built check stay the authority for that geometry.
     """
+    info: Dict[str, Any] = detail if detail is not None else {}
     plan: Dict[str, Any] = {}
     try:
-        _build_pdn_tcl(pdk, container or None, plan_out=plan)
+        deck = _build_pdn_tcl(pdk, container or None, plan_out=plan)
     except Exception as exc:  # noqa: BLE001
-        return None, (f"the strap plan could not be resolved "
-                      f"({type(exc).__name__}: {exc})")
-    straps = plan.get("straps") or []
+        why = (f"the PDN deck could not be built to read its strap plan "
+               f"({type(exc).__name__}: {exc})")
+        info.update(status="NOT_DETERMINED", reason=why)
+        return None, why
+    straps = [dict(st) for st in (plan.get("straps") or [])]
+    source = "the PDN deck's plan_out"
     if not straps:
-        return None, "the PDN deck reports no strap plan for this PDK"
+        # Line by line: a follow-pin rail may carry `-pitch` too (the row
+        # pitch), and a rail is not a strap period.
+        for line in (deck or "").splitlines():
+            if "-followpins" in line:
+                continue
+            m = re.search(
+                r"add_pdn_stripe\s+-grid\s+\S+\s+-layer\s+(\S+)\s+-width\s+"
+                r"([0-9.]+)\s+-pitch\s+([0-9.]+)\s+-offset\s+([0-9.]+)", line)
+            if m:
+                straps.append({"layer": m.group(1), "width": float(m.group(2)),
+                               "pitch": float(m.group(3)),
+                               "offset": float(m.group(4))})
+        source = "the add_pdn_stripe lines of the emitted PDN deck"
+    if not straps:
+        why = ("the PDN deck this PDK emits draws no pitched strap (follow-pin "
+               "rails only, or no grid), so there is no strap period to fit")
+        info.update(status="NOT_DETERMINED", reason=why)
+        return None, why
     site = str(getattr(pdk, "site", "") or "")
     dims = None
+    dims_from = None
+    directions: Dict[str, str] = {}
     for _lef in (getattr(pdk, "tech_lef", None), getattr(pdk, "cell_lef", None)):
         try:
             _txt = _read_pdk_text(_lef, container or None)
         except Exception:  # noqa: BLE001
             _txt = None
-        dims = _ppa_area.lef_site_dims_um(_txt or "", site)
-        if dims:
-            break
-    return _ppa_power.pdn_strap_min_core_span_um(straps, nets=2,
-                                                 site_dims_um=dims)
+        if not directions and _txt:
+            directions = {name: d for name, d, _p, _w
+                          in _techlef_routing_layers(_txt) if d}
+        if dims is None:
+            dims = _ppa_area.lef_site_dims_um(_txt or "", site)
+            dims_from = str(_lef) if dims else None
+    side, basis = _ppa_power.pdn_strap_min_core_span_um(
+        straps, nets=2, site_dims_um=dims)
+    info.update(status=("DERIVED" if side else "NOT_DETERMINED"),
+                reason=(None if side else basis),
+                growth_floor_um=side, growth_floor_basis=basis,
+                plan_source=source, stripes=straps,
+                directions={st["layer"]: directions.get(st["layer"])
+                            for st in straps},
+                site_dims_um=list(dims) if dims else None,
+                site_dims_from=dims_from)
+    return side, basis
 
 
 def _resolve_auto_die_um(die_um: str, netlist: Path, util: float,
@@ -21337,7 +21380,8 @@ def _floorplan_rectangles_record(project: Path,
                                  die_source: str,
                                  core_pad: int,
                                  ring_inset_um: Optional[float],
-                                 seal_ring: Optional[Dict[str, Any]] = None
+                                 seal_ring: Optional[Dict[str, Any]] = None,
+                                 pdn_core_floor: Optional[Dict[str, Any]] = None
                                  ) -> Dict[str, Any]:
     """Write both rectangles and say which is which. Written on EVERY run.
 
@@ -21356,6 +21400,9 @@ def _floorplan_rectangles_record(project: Path,
         "core_pad_um": int(core_pad),
         "ring_inset_um": ring_inset_um,
         "seal_ring_margin": seal_ring,
+        # N4: the strap floor this floorplan was grown to / checked against,
+        # or the NAMED reason it could not be derived (NOT_DETERMINED).
+        "pdn_core_floor": pdn_core_floor,
         "note": (
             "`floorplan_rect_um` is what OpenROAD was given as BOTH -die_area "
             "and -core_area. When it is not null the DEF's DIEAREA states it "
@@ -37365,7 +37412,17 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # N4 — the core must hold one period of the strap plan the deck emits. The
     # floor is derived ONCE here and read by both the auto-sizer (which grows
     # the core to it) and the refusal below (a pinned core that cannot hold it).
-    _strap_floor_um, _strap_floor_basis = _strap_plan_core_floor(pdk, container)
+    _strap_floor_detail: Dict[str, Any] = {}
+    _strap_floor_um, _strap_floor_basis = _strap_plan_core_floor(
+        pdk, container, detail=_strap_floor_detail)
+    if _strap_floor_um is None:
+        # Named, printed and persisted (floorplan_rectangles.json): with no
+        # floor neither the growth nor the pinned-core check runs, and a run
+        # that skipped them must not look like one that passed them.
+        print(f"[phase3] PDN_CORE_FLOOR_NOT_DETERMINED: {_strap_floor_basis} "
+              f"-- the auto core is not grown to a strap floor and a pinned "
+              f"core is not pre-checked; pdngen and the grid-built check "
+              f"remain the only authority", file=sys.stderr)
     die_um, _auto_die_note = _resolve_auto_die_um(
         die_um, netlist, util, pdk, project, top=top, container=container,
         metrics=_auto_die_metrics,
@@ -37603,19 +37660,34 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _chk_w, _chk_h = core_w, core_h
     if fp_rect:
         _chk_w, _chk_h = fp_rect[2] - fp_rect[0], fp_rect[3] - fp_rect[1]
-    if _strap_floor_um and min(_chk_w, _chk_h) < int(_strap_floor_um):
+    # EXACT, NOT PADDED (review wave 3): a pinned core is refused only when a
+    # strap group cannot fit its SNAPPED extent on the stripe's own axis --
+    # the check pdngen itself makes. The padded square floor above is for
+    # growing a core the flow owns and is never a refusal threshold.
+    _misfit = (_ppa_power.pdn_strap_core_misfit(
+                   _strap_floor_detail.get("stripes") or [], _chk_w, _chk_h,
+                   nets=2,
+                   site_dims_um=_strap_floor_detail.get("site_dims_um"),
+                   directions=_strap_floor_detail.get("directions"))
+               if _strap_floor_um else [])
+    _strap_floor_detail["pinned_core_checked_um"] = [_chk_w, _chk_h]
+    _strap_floor_detail["pinned_core_misfit"] = _misfit
+    if _misfit:
         _src_now = (f"shuttle slot {_slot['slot']} CORE_AREA" if _slot
                     else _die_source + (" inside the pad ring's die"
                                         if _ring_pinned_die else ""))
+        _why = "; ".join(
+            f"{m['layer']} ({m['direction'] or 'direction unknown'}) needs "
+            f"{m['need_um']:g} um of core {m['axis']}, this core's snapped "
+            f"extent is {m['have_um']:g} um" for m in _misfit)
         return StepResult(
             "pnr", "FAIL", time.time() - t0,
-            f"PDN_CORE_TOO_SMALL: core {_chk_w}x{_chk_h} um, needed "
-            f"{int(_strap_floor_um)}x{int(_strap_floor_um)} um for one period "
-            f"of every power-strap group ({_strap_floor_basis}); the core comes "
-            f"from {_src_now}. pdngen would build no grid on it. State a die "
-            f"whose core is at least that large, or a strap plan that fits.")
-    if isinstance(_auto_die_metrics, dict):
-        _auto_die_metrics["strap_core_floor_basis"] = _strap_floor_basis
+            f"PDN_CORE_TOO_SMALL: core {_chk_w}x{_chk_h} um: {_why} "
+            f"(strap plan: {_strap_floor_detail.get('plan_source')}; site "
+            f"{_strap_floor_detail.get('site_dims_um')}); the core comes from "
+            f"{_src_now}. pdngen refuses a strap group whose offset + width + "
+            f"half a pitch exceeds the rows' extent. State a die whose core "
+            f"holds it, or a strap plan that fits.")
 
     # === CT-03 — THE PINS, AND ONLY THE PINS ================================
     # MEASURED on spm x gf180mcuD (lane czspmtail, image 0.3.46): OpenROAD was
@@ -37690,7 +37762,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                     else f"--die-um {die_w}x{die_h} at the origin"),
         core_pad=core_pad,
         ring_inset_um=_ring_inset,
-        seal_ring=_seal_rec)
+        seal_ring=_seal_rec,
+        pdn_core_floor=_strap_floor_detail)
 
     # Pick clock buffer cells: PdkConfig-carried masters win (every registry
     # PDK carries clk_buf_cell/root); otherwise DISCOVER them from the PDK's own
@@ -39398,7 +39471,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                          f"the origin"),
         core_pad=core_pad,
         ring_inset_um=_ring_inset,
-        seal_ring=_seal_rec)
+        seal_ring=_seal_rec,
+        pdn_core_floor=_strap_floor_detail)
 
     def_file = out_dir / f"{top}.def"
     sta_file = out_dir / "sta.rpt"
