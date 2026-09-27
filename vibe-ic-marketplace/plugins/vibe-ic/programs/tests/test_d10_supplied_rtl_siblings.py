@@ -165,13 +165,15 @@ def test_a_supplied_submodule_replaces_only_that_generated_file(
     rec = res.extras["supplied_replaces_generated"]
     assert rec["replaced_by"] == {emitted: f"input/vendor_rtl/{emitted}.v"}
     assert rec["modules_now_owed"] == []
-    assert _defs(p, top) == 1 and _defs(p, emitted) == 0
+    # rtl_gen itself stages the supplied module (review_wave4c): one
+    # definition, the supplied bytes, the rest of the design kept
+    assert rec["staged_by_rtl_gen"] == [f"{emitted}.v"]
+    assert _defs(p, top) == 1 and _defs(p, emitted) == 1
     assert len(_rtl_files(p)) > 5            # the rest of the design is there
     assert "Do NOT author" not in res.detail
     assert not res.extras.get("fallback_skill")
     out = C.consume_reused_ip_rtl(p)
-    assert out["staged"] == [f"{emitted}.v"]
-    assert _defs(p, emitted) == 1 and _defs(p, top) == 1
+    assert out["staged"] == [] and "supplied_rtl_not_staged" not in out
     assert (p / "phase2/stage1/rtl" / f"{emitted}.v").read_text().startswith(
         "// supplied")
 
@@ -611,47 +613,30 @@ _SUPPLIED_OTP = ("// supplied\nmodule otp_mem(input clk, output q);\n"
                  "  assign q = clk;\nendmodule\n")
 
 
-def test_a_repair_rerun_restages_the_supplied_module(tmp_path, monkeypatch):
-    """MAJOR: consume ran once; the repair loop re-ran rtl_gen alone, so after
-    a repair pass a partial overlap left the build WITHOUT the supplied module.
-    Every re-run now goes through `_rtl_gen_then_stage_supplied`."""
+def test_a_repair_rerun_keeps_the_supplied_module_in_rtl(tmp_path,
+                                                        monkeypatch):
+    """MAJOR: consume runs once; the repair loop re-runs rtl_gen ALONE (its
+    order -- producer, digest, re-dispatch -- is pinned by #2225). A partial
+    overlap therefore stages the supplied module itself, so every re-run --
+    first pass or repair pass -- leaves it in rtl/. RED before: after the
+    re-run no otp_mem was defined at all."""
     monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
     monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
     p = _otp_project(tmp_path / "p")
     _vendor(p, {"otp_mem.v": _SUPPLIED_OTP})
-    first = R._rtl_gen_then_stage_supplied(p, "mixed_signal_otp", "chip_top")
-    assert [r.name for r in first] == ["rtl_gen", "reused_ip_consume"]
+    first = R.step_rtl_gen(p, "mixed_signal_otp")
+    assert first.extras["supplied_replaces_generated"]["staged_by_rtl_gen"] \
+        == ["otp_mem.v"]
     assert _defs(p, "otp_mem") == 1
-    # the repair loop's re-run, same process (the session owns rtl/)
-    again = R._rtl_gen_then_stage_supplied(p, "mixed_signal_otp", "chip_top")
-    assert again[0].extras["supplied_replaces_generated"]["replaced_by"] == {
-        "otp_mem": "input/vendor_rtl/otp_mem.v"}
+    again = R.step_rtl_gen(p, "mixed_signal_otp")    # the repair loop's re-run
+    assert again.status == "PASS", again.detail[:300]
     assert _defs(p, "otp_mem") == 1 and _defs(p, "chip_top") == 1
     assert (p / "phase2/stage1/rtl/otp_mem.v").read_text().startswith(
         "// supplied")
-
-
-def test_without_the_restage_a_rerun_loses_the_supplied_module(tmp_path,
-                                                                monkeypatch):
-    """The control that makes the test above mean something: rtl_gen ALONE
-    after the first pass leaves no otp_mem at all."""
-    monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
-    monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
-    p = _otp_project(tmp_path / "p")
-    _vendor(p, {"otp_mem.v": _SUPPLIED_OTP})
-    R._rtl_gen_then_stage_supplied(p, "mixed_signal_otp", "chip_top")
-    R.step_rtl_gen(p, "mixed_signal_otp")
-    assert _defs(p, "otp_mem") == 0
-
-
-def test_main_reruns_rtl_gen_only_through_the_restaging_helper():
-    src = (PROGRAMS / "design_one_shot_runner.py").read_text()
-    fn = next(n for n in __import__("ast").parse(src).body
-              if getattr(n, "name", "") == "main")
-    import ast as _ast
-    bare = [n.lineno for n in _ast.walk(fn) if isinstance(n, _ast.Call)
-            and isinstance(n.func, _ast.Name) and n.func.id == "step_rtl_gen"]
-    assert bare == [], f"main re-runs step_rtl_gen without consume at {bare}"
+    assert str(p / "phase2/stage1/rtl/otp_mem.v") in again.output_files
+    # consume afterwards is a no-op and reports nothing missing
+    out = C.consume_reused_ip_rtl(p)
+    assert out["staged"] == [] and "supplied_rtl_not_staged" not in out
 
 
 def test_a_context_file_overlapping_a_generated_module_is_a_hand_off(
