@@ -751,7 +751,10 @@ RECORD_ADJUDICATION = _ra.declare(
     # closure from here, so `_collect_present_and_tagged` and the tag helpers are
     # covered without being listed.
     decision_roots=("evaluate_preservation",),
-    decision_digest="3ad46abb059ddf1a1654902fce8da157455b982722aab85ccaf47cfcafd7d1c1",
+    # Re-reviewed after the linear collector: PASS still allows a surviving
+    # spare when no artefact can carry keep, and keep_check_applied records
+    # exactly that vacuity. Historical PASS must still become VACUOUS_PASS.
+    decision_digest="7da509404a17e242d7df3dff0aa1fdfa4cc29d85bfcfeac846010db8ff75ecdd",
     rules=(
         _ra.Rule(
             rule_id="spare_cell_preservation_check.keep-check-was-vacuous",
