@@ -237,8 +237,10 @@ def lef_geometry(lef_texts) -> Dict[str, Dict[str, Any]]:
             size = _LEF_SIZE.search(body)
             cls = _LEF_CLASS.search(body)
             if size:
+                # LEF keywords are case-insensitive (the gf180 cell LEF writes
+                # `CLASS core`, and OpenROAD reads it as CORE).
                 macros[name] = (float(size.group(1)), float(size.group(2)),
-                                cls.group(1) if cls else '')
+                                cls.group(1).upper() if cls else '')
     return {'macros': macros, 'sites': sites}
 
 

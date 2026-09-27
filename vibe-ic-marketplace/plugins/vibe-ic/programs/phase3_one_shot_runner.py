@@ -69471,6 +69471,26 @@ exit
         return False
     notes.append(f"metal fill supply ownership: {_pgo.get('verdict')} "
                  f"({_pgo.get('reason')})")
+    # WHICH cells this step placed, per master and class, beside the DEF that
+    # holds their positions -- the same record the tool path writes, read by
+    # the dynamic-IR decap (F20b). Decap vs fill is the discovery's own split
+    # (`_spacer_masters_of`), never a new name heuristic.
+    try:
+        import librelane_fill_dfm as _lf
+        _spacers = set(_spacer_masters_of(fillers))
+        _census = _lf.fill_census(
+            def_file.read_text(errors="replace"),
+            filled_def.read_text(errors="replace"),
+            {"decap": [m for m in fillers if m not in _spacers],
+             "fill": sorted(_spacers)})
+        _aa.write_json(project / _lf.CELLS_REL, _lf.cells_placed_record({
+            "step": "openroad filler_placement (direct)",
+            "filled_def": str(filled_def), "filled_def_sha256": _sha256_file(filled_def),
+            "subject_sha256": _sha256_file(def_file), "census": _census,
+            "patterns": {"decap": [m for m in fillers if m not in _spacers],
+                         "fill": sorted(_spacers)}}))
+    except Exception as exc:  # noqa: BLE001 -- disclosed, the fill stands
+        notes.append(f"metal fill: placed-cell record not written ({exc})")
     # Parse "Placed N filler instances" + utilization for the density report.
     placed_m = re.search(r"Placed\s+(\d+)\s+filler instances", log, re.I)
     placed_n = int(placed_m.group(1)) if placed_m else 0

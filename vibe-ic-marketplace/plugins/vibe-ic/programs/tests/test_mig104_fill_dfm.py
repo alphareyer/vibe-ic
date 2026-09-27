@@ -191,6 +191,26 @@ def test_a_fill_whose_supply_is_owned_stands(tmp_path, monkeypatch):
     assert any("supply ownership: PASS" in n for n in notes), notes
 
 
+def test_the_direct_fill_records_the_cells_it_placed(tmp_path, monkeypatch):
+    """F20b reads which cells step 34 placed; the production default writes it
+    too. The two fixture masters are in no LEF given, so ownership is
+    NOT_MEASURED -- published, never clean, and not a refusal."""
+    project, pnr, pdk, _ = _stage_fill(
+        tmp_path, monkeypatch, lambda tcl: CAL_NEG.read_text().replace(
+            "COMPONENTS 1 ;\n",
+            "COMPONENTS 3 ;\n    - F0 FILLX + PLACED ( 0 0 ) N ;\n"
+            "    - F1 lib__fillcap_4 + PLACED ( 0 0 ) N ;\n"))
+    monkeypatch.setattr(R, "_filler_masters_for_pdk", lambda p: ["lib__fillcap_4", "FILLX"])
+    assert R._emit_metal_fill(project, "top", pdk, "", pnr / "filled.def", [])
+    placed = json.loads((project / LF.CELLS_REL).read_text())
+    assert placed["per_master"] == {"FILLX": 1, "lib__fillcap_4": 1}
+    assert placed["class_of_master"] == {"FILLX": "fill", "lib__fillcap_4": "decap"}
+    assert placed["def_sha256"] == LLC.digest(pnr / "filled.def")
+    rec = json.loads((project / "reports/phase3/postroute_pg_ownership_metal_fill.json")
+                     .read_text())
+    assert rec["verdict"] == "NOT_MEASURED"
+
+
 # ── librelane_fill_dfm: the readers ────────────────────────────────────────
 
 def _def(components, rows="ROW R0 core 0 0 N DO 10 BY 1 STEP 100 0 ;\n"):
@@ -253,6 +273,14 @@ def test_row_occupancy_counts_core_class_area_over_row_sites():
     assert occ["status"] == "MEASURED"
     assert occ["row_area_um2"] == pytest.approx(1.0)
     assert occ["row_utilization_pct"] == pytest.approx(30.0)
+
+
+def test_a_lowercase_class_keyword_is_still_core():
+    """MEASURED: the gf180 cell LEF spells every standard cell `CLASS core ;`;
+    read case-sensitively, spm's 82,037-instance filled DEF measured 0 %."""
+    occ = LF.row_occupancy(_def([("u0", "lib__buf_1")]),
+                           [_LEF.replace("CLASS CORE ;", "CLASS core ;")])
+    assert occ["row_utilization_pct"] == pytest.approx(20.0)
 
 
 def test_the_not_prose_claim_for_the_lef_reader_is_falsifiable():
