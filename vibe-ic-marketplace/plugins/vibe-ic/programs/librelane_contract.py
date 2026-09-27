@@ -518,7 +518,10 @@ _EARLY_STEP_INPUTS: dict[str, tuple[str, ...]] = {
     'KLayout.DRC': ('gds',),
     # Stream-level checks and finishing read the stream alone (steps 26, 26.5ic).
     'KLayout.Antenna': ('gds',), 'Checker.KLayoutAntenna': (),
-    'KLayout.SealRing': ('gds',), 'KLayout.XOR': ('mag_gds', 'klayout_gds')}
+    'KLayout.SealRing': ('gds',), 'KLayout.XOR': ('mag_gds', 'klayout_gds'),
+    # Step 34's stream finishing (the PDK fill script, its density deck).
+    'KLayout.Filler': ('gds',), 'KLayout.Density': ('gds',),
+    'Checker.KLayoutDensity': ()}
 
 
 def _check_state(state: dict, *, outputs: bool = False,

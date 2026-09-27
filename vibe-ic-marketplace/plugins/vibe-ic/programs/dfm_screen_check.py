@@ -322,7 +322,14 @@ RECORD_ADJUDICATION = _ra.declare(
     # only the producer metadata field `verdict_mode`.  The rule below reads
     # `verdict` and `findings`; both decision paths and their meanings remain
     # unchanged, so no published record changes adjudication.
-    decision_digest="fa9ef091026cbcf75998b2adc6446e8f8f05f4505b3e40260d5f0aa8532a2372",
+    # Re-reviewed for mig104 (steps 34/35 on LibreLane): `audit` now takes its
+    # CMP reference from the step-34 tool record when step 34's switch is not
+    # `direct`, and cross-checks the via recount against the router's own
+    # counts. Both add only WARNING findings (DENSITY_REF, VIA_COUNT_DISAGREES)
+    # to the advisory tier; the rule reads a plain `verdict: PASS` beside
+    # VIA_*_NOT_FOUND, which neither path emits or removes, so no published
+    # record changes adjudication.
+    decision_digest="010cd9f774dbbc49e825c8e20ac1adab7f4eaefbb1bb48b7deb185923d9c35b0",
     rules=(
         _ra.Rule(
             rule_id="dfm_screen_check.via-screen-did-not-run",
@@ -333,6 +340,44 @@ RECORD_ADJUDICATION = _ra.declare(
         ),
     ),
 )
+
+
+def _step34_tool_density(project: Path):
+    """The step-34 tool density record, when step 34's switch is not
+    `direct` (a leftover record from an earlier tool run is not this run's)."""
+    try:
+        import librelane_contract as _llc  # noqa: PLC0415
+        import librelane_fill_dfm as _lf  # noqa: PLC0415
+        if _llc.selected_mode(project, "34") == "direct":
+            return None
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "UNREADABLE", "source": f"step-34 switch: {exc}"}
+    return _lf.tool_density(project) or {"status": "ABSENT",
+                                         "source": _lf.RECORD_REL}
+
+
+def _router_via_counts(project: Path):
+    """The detailed router's own via counts for this run: the direct PnR's
+    OpenROAD `-metrics` JSON, else the newest LibreLane state that has them."""
+    import librelane_fill_dfm as _lf  # noqa: PLC0415
+    sources = [_pl.pnr_dir(project) / "openroad.metrics.json"]
+    root = project / "phase3" / "librelane"
+    if root.is_dir():
+        sources += sorted((p for p in root.rglob("state_out.json")
+                           if "attempts" not in p.parts),
+                          key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in sources:
+        try:
+            doc = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        metrics = doc.get("metrics", doc) if isinstance(doc, dict) else {}
+        counts = _lf.router_via_counts(metrics if isinstance(metrics, dict) else {})
+        if counts:
+            counts["source"] = str(path.relative_to(project)) \
+                if path.is_relative_to(project) else str(path)
+            return counts
+    return None
 
 
 def audit(project: Path) -> dict:
@@ -346,11 +391,24 @@ def audit(project: Path) -> dict:
                            "run routing + metal fill first")}
 
     # 1) CMP density — CROSS-REFERENCE Step 34's gate (flow v2.3.1: no
-    # duplicate gating; three-natures split 31/34/35).
+    # duplicate gating; three-natures split 31/34/35). When step 34 ran on
+    # the tool, the reference is the PDK density deck's own count
+    # (`Checker.KLayoutDensity`, recorded by `librelane_fill_dfm`), read
+    # instead of step 34's side files (mig104).
     gate_json = project / "reports" / "phase2" / "gates" / \
         "metal_fill_density.json"
     density_ref = None
-    if gate_json.is_file():
+    tool_ref = _step34_tool_density(project)
+    if tool_ref is not None:
+        density_ref = {"source": tool_ref.get("source"),
+                       "tool": "KLayout.Density / Checker.KLayoutDensity",
+                       "status": tool_ref.get("status"),
+                       "errors": tool_ref.get("errors"),
+                       "rules": tool_ref.get("rules"),
+                       "state_sha256": tool_ref.get("state_sha256"),
+                       "step34_pass": (tool_ref.get("status") == "MEASURED"
+                                       and tool_ref.get("errors") == 0)}
+    elif gate_json.is_file():
         try:
             g = json.loads(gate_json.read_text(errors="replace"))
             density_ref = {
@@ -367,10 +425,18 @@ def audit(project: Path) -> dict:
             "message": ("Step-34 metal-fill density gate result not "
                         "present yet — density is GATED at Step 34, "
                         "referenced here (run metal_fill_density_check)")})
+    elif density_ref.get("tool") and density_ref.get("status") != "MEASURED":
+        findings.append({
+            "severity": "WARNING", "category": "DENSITY_REF",
+            "message": (f"step 34 ran on the tool but its density count is "
+                        f"{density_ref.get('status')} ({density_ref.get('source')}) "
+                        f"— resolve at Step 34")})
     elif density_ref.get("step34_pass"):
         findings.append({
             "severity": "INFO", "category": "DENSITY_REF",
-            "message": "Step-34 density gate: PASS (cross-reference)"})
+            "message": ("Step-34 density: PASS (cross-reference"
+                        + (", PDK density deck 0 errors)" if density_ref.get("tool")
+                           else ")"))})
     else:
         findings.append({
             "severity": "WARNING", "category": "DENSITY_REF",
@@ -437,6 +503,18 @@ def audit(project: Path) -> dict:
                 "advisory_threshold": _SINGLE_CUT_ADVISORY,
                 "cut_count_sources": ["routed.def VIAS"] + lef_sources,
             }
+            # The router's own counts for the same vias (the review's
+            # correction: DRT logs route__vias__singlecut / __multicut). The
+            # DEF recount must agree with them on the same route.
+            import librelane_fill_dfm as _lf  # noqa: PLC0415
+            via_summary["router_agreement"] = _lf.via_agreement(
+                single, resolved, _router_via_counts(project))
+            if via_summary["router_agreement"]["verdict"] == "DISAGREE":
+                findings.append({
+                    "severity": "WARNING", "category": "VIA_COUNT_DISAGREES",
+                    "message": ("the DEF recount and the router's own via counts "
+                                "disagree on the same route: "
+                                + via_summary["router_agreement"]["reason"])})
             if unresolved:
                 findings.append({
                     "severity": "WARNING",

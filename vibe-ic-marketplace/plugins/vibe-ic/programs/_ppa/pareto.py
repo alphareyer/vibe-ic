@@ -59,7 +59,8 @@ from . import feasibility as feas
 __all__ = [
     "PARETO_SCHEMA",
     "SENSE_MIN", "SENSE_MAX",
-    "Objective", "DEFAULT_OBJECTIVES",
+    "Objective", "DEFAULT_OBJECTIVES", "VIA_YIELD_OBJECTIVE", "YIELD_OBJECTIVES",
+    "prefer_on_yield",
     "objectives_from_document",
     "objective_values", "dominates", "build_frontier", "verify_frontier",
     "assert_no_collapsed_scalar", "COLLAPSED_SCALAR_KEYS",
@@ -131,6 +132,19 @@ DEFAULT_OBJECTIVES: Tuple[Objective, ...] = (
     Objective("power", "power.total_w", SENSE_MIN),
     Objective("timing", "timing.setup.wns_ns", SENSE_MAX),
 )
+
+
+#: A SECONDARY, yield objective (review row 35, mig104): at EQUAL PPA prefer
+#: the layout with more redundant (multi-cut) vias. The detailed router counts
+#: them itself (`detailedroute__route__vias__multicut`, MEASURED, the openroad
+#: backend's `route.via.multicut.count`). The single-cut FRACTION is DERIVED
+#: from two counts and so, by the MEASURED-only rule `_pick` enforces, never
+#: enters a comparison; the backend publishes it beside the counts instead.
+#: Never part of `DEFAULT_OBJECTIVES`: it decides only between candidates the
+#: PPA triple cannot separate (`prefer_on_yield`).
+VIA_YIELD_OBJECTIVE = Objective("via_redundancy", "route.via.multicut.count",
+                                SENSE_MAX, {"stage": "detailed_route"})
+YIELD_OBJECTIVES: Tuple[Objective, ...] = (VIA_YIELD_OBJECTIVE,)
 
 
 def objectives_from_document(doc: Mapping[str, Any]) -> Tuple[Objective, ...]:
@@ -281,6 +295,51 @@ def dominates(a: Mapping[str, Any], b: Mapping[str, Any],
         if _better(va, vb, obj.sense):
             strictly = True
     return strictly
+
+
+def prefer_on_yield(candidates: Sequence[Mapping[str, Any]],
+                    frontier_ids: Sequence[str],
+                    objectives: Sequence[Objective],
+                    yield_objectives: Sequence[Objective] = YIELD_OBJECTIVES
+                    ) -> Dict[str, Any]:
+    """Among frontier candidates the PPA objectives cannot separate (identical
+    raw values on every objective), keep those no other is better than on the
+    yield objectives. Nothing else moves: a candidate with different PPA is
+    never compared on yield, and a group in which any member's yield is not
+    comparable is left whole, with the reason -- an unmeasured candidate is
+    neither preferred nor dropped."""
+    by_id = {str(c.get("candidate_id") or ""): c for c in candidates}
+    groups: Dict[Tuple[Any, ...], List[str]] = {}
+    for cid in frontier_ids:
+        cand = by_id.get(cid)
+        if cand is None:
+            continue
+        row = objective_values(cand, objectives)
+        key = tuple((o.key, (row["values"].get(o.key) or {}).get("value"))
+                    for o in objectives)
+        groups.setdefault(key, []).append(cid)
+    preferred: List[str] = []
+    decisions: List[Dict[str, Any]] = []
+    for key, ids in groups.items():
+        if len(ids) == 1:
+            preferred.extend(ids)
+            continue
+        rows = {cid: objective_values(by_id[cid], yield_objectives) for cid in ids}
+        if not all(r["comparable"] for r in rows.values()):
+            preferred.extend(ids)
+            decisions.append({"group": ids, "kept": ids,
+                              "reason": "YIELD_NOT_COMPARABLE",
+                              "codes": {c: r["codes"] for c, r in rows.items()}})
+            continue
+        kept = [c for c in ids if not any(
+            dominates(rows[o], rows[c], yield_objectives) for o in ids if o != c)]
+        preferred.extend(kept)
+        decisions.append({"group": ids, "kept": kept, "reason": "YIELD_TIE_BREAK",
+                          "values": {c: {o.key: rows[c]["values"][o.key]["value"]
+                                         for o in yield_objectives} for c in ids}})
+    return {"preferred": preferred, "decisions": decisions,
+            "yield_objectives": [{"key": o.key, "metric": o.metric, "sense": o.sense,
+                                  "scope": dict(o.scope)} for o in yield_objectives]}
 
 
 # ---------------------------------------------------------------------------

@@ -412,6 +412,98 @@ def _sparse_die_fill_skip_attested(project_dir: Path) -> bool:
     return False
 
 
+def _sha256(path: Path) -> Optional[str]:
+    import hashlib
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def tool_arm_findings(project_dir: Path) -> Tuple[List[Finding], dict]:
+    """Step 34 on LibreLane (mig104): judge the TOOL's evidence, from the
+    record `librelane_fill_dfm` writes (`reports/phase3/fill_librelane.json`).
+
+    Nothing here when the step's switch says `direct`. Otherwise both halves
+    must have run and shipped something, about the route that ships:
+      * ODB (`OpenROAD.FillInsertion`): a refusal (NO-OP, a non-fill edit, a
+        supply pin off its net) or a record about another routed DEF FAILs;
+      * GDS (`KLayout.Filler` measured by the PDK density deck): the shipped
+        arm's `klayout__density_error__count` must be 0, and an unmeasured
+        count is never 0. When step 37 streamed on the tool, its own
+        SealRing -> Filler -> Density chain is the GDS half
+        (`phase3/librelane/37-promotion.json`)."""
+    try:
+        import librelane_contract as _llc  # noqa: PLC0415
+        import librelane_fill_dfm as _lf  # noqa: PLC0415
+        mode = _llc.selected_mode(project_dir, "34")
+    except Exception as exc:  # noqa: BLE001 -- an unreadable switch is not direct
+        return [Finding("ERROR", "STEP34_SWITCH_UNREADABLE", str(exc))], {"mode": None}
+    stats = {"mode": mode}
+    if mode == "direct":
+        return [], stats
+    findings: List[Finding] = []
+    record = project_dir / _lf.RECORD_REL
+    try:
+        doc = json.loads(record.read_text())
+    except (OSError, ValueError):
+        return [Finding("ERROR", "LL_FILL_RECORD_ABSENT",
+                        f"step 34 is `{mode}` but {_lf.RECORD_REL} is absent or "
+                        f"unreadable: the tool path left no evidence")], stats
+    odb = doc.get("odb") if isinstance(doc, dict) else None
+    routed = _pl.pnr_dir(project_dir) / "routed.def"
+    if not isinstance(odb, dict):
+        findings.append(Finding("ERROR", "LL_FILL_ODB_NOT_RUN",
+                                "OpenROAD.FillInsertion left no record"))
+    else:
+        if odb.get("def_sha256") != _sha256(routed):
+            findings.append(Finding("ERROR", "LL_FILL_RECORD_STALE",
+                                    "the fill record is about another routed DEF"))
+        if not odb.get("shipped"):
+            why = ((odb.get("tool") or {}).get("refusals") or
+                   [odb.get("refusal") or "no arm produced a filled DEF"])
+            findings.append(Finding("ERROR", "LL_FILL_REFUSED", "; ".join(map(str, why))))
+    gds = doc.get("gds") if isinstance(doc, dict) else None
+    count, source = None, None
+    if isinstance(gds, dict):
+        shipped = gds.get("shipped")
+        arm = gds.get(shipped) if shipped else None
+        source = f"{_lf.RECORD_REL} gds.{shipped}"
+        if not shipped:
+            findings.append(Finding("ERROR", "LL_FILL_GDS_REFUSED",
+                                    str(gds.get("tool_refusal") or "no GDS fill shipped")))
+        elif isinstance(arm, dict):
+            count = arm.get(_lf.DENSITY_METRIC)
+    elif _llc.selected_mode(project_dir, "37") != "direct":
+        s37 = _lf.step37_density(project_dir)
+        if s37 is None:
+            findings.append(Finding("ERROR", "LL_FILL_GDS_NOT_RUN",
+                                    "step 37 streamed on the tool and left no promotion record"))
+        else:
+            source = s37.get("source")
+            count = s37.get("errors")
+            if s37.get("status") == "STALE":
+                findings.append(Finding("ERROR", "LL_FILL_RECORD_STALE",
+                                        f"{source}: the density state moved since it was judged"))
+    else:
+        findings.append(Finding("ERROR", "LL_FILL_GDS_NOT_RUN",
+                                "the stream-out never ran step 34's GDS half"))
+    stats["density_errors"] = count
+    if source and (not isinstance(count, int) or isinstance(count, bool) or count < 0):
+        if not any(f.category == "LL_FILL_GDS_REFUSED" for f in findings):
+            findings.append(Finding("ERROR", "LL_DENSITY_NOT_MEASURED",
+                                    f"{source}: the PDK density deck gave no count"))
+    elif isinstance(count, int) and count > 0:
+        findings.append(Finding("ERROR", "DENSITY_DECK_FAIL",
+                                f"{source}: the PDK density deck reports {count} "
+                                f"violation(s) on the shipped fill"))
+    return findings, stats
+
+
 def build_report(findings: List[Finding], stats: dict,
                  project_dir: str) -> dict:
     return {
@@ -455,7 +547,11 @@ def main(argv: list = None) -> int:
         return 2
 
     findings, stats = audit(project_dir)
+    tool_findings, tool_stats = tool_arm_findings(project_dir)
+    findings.extend(tool_findings)
     report = build_report(findings, stats, str(project_dir))
+    report["summary"]["step34_mode"] = tool_stats.get("mode")
+    report["summary"]["tool_density_errors"] = tool_stats.get("density_errors")
 
     # vibe-ic#1080 — `report["summary"]` is already the machine-readable form
     # of what this gate measured, so the wiring is to HAND IT OVER rather than
