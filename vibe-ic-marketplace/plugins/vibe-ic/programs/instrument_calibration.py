@@ -1043,8 +1043,9 @@ _register(Instrument(
     positive=Sample(
         provenance=(
             "yosys 0.69+ 4d572059c in vibeic-eda 0.3.83 (8HD-4, 2026-09-28), "
-            "the x-aware search (`miter -ignore_gold_x`, `sat -enable_undef "
-            "-set-def-inputs`). calibration/cal_bmc_rtl.v (a counter, "
+            "the x-aware search from an undefined start (`miter "
+            "-ignore_gold_x`, `sat -enable_undef -set-def-inputs "
+            "-set-init-undef`). calibration/cal_bmc_rtl.v (a counter, "
             "synchronous active-high reset, registered `hit <= q == 4`) "
             "against calibration/cal_bmc_gate_planted.v: its gf180mcuD "
             "netlist (cal_bmc_gate.v, synthesised by that yosys) with ONE real "
@@ -1058,14 +1059,17 @@ _register(Instrument(
     expect="COUNTEREXAMPLE cycle=3 outputs=hit",
     negative=Sample(
         provenance=(
-            "Same yosys and search on a DON'T-CARE, the trap a search "
-            "without x semantics falls into (review_wave4c BMC): "
-            "calibration/cal_bmc_xdc_rtl.v assigns `1'bx` for sel == 2'b11, "
-            "and its gf180mcuD netlist cal_bmc_xdc_gate.v (same yosys) chose "
-            "1 there. Without x semantics the same pair gave `model found: "
-            "FAIL!` at step 3 (sel=11, gold_y=0, gate_y=1). With them every "
-            "rung to 16 cycles after reset ends `no model found: SUCCESS!`."),
-        artefact=_read("lec_bmc_xdc_negative.log")),
+            "Same yosys and search on a design whose registers are defined "
+            "only LATE, the trap an all-zero start falls into (review_wave6 "
+            "BMC): calibration/cal_bmc_rsync_rtl.v resets a 4-state FSM "
+            "through a 2-flop synchroniser (no register is defined until "
+            "cycle 3), and its gf180mcuD netlist cal_bmc_rsync_gate.v (same "
+            "yosys) re-encoded the FSM one-hot. Started at all-zero "
+            "(`-set-init-zero`) the pair gave `model found: FAIL!` (busy at "
+            "step 2); started UNDEFINED every rung to 16 cycles after reset "
+            "ends `no model found: SUCCESS!`. The x don't-care pair "
+            "(cal_bmc_xdc_*) is held by the tests."),
+        artefact=_read("lec_bmc_rsync_negative.log")),
 ))
 
 _register(Instrument(

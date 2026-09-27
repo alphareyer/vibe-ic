@@ -19569,25 +19569,18 @@ def lec_inconclusive_disposition(doc: dict) -> Tuple[str, str]:
 
 
 def _lec_counterexample_sentence(doc: dict) -> str:
-    """What the producer's bounded search from reset (`lec.json.bmc`) says.
-    Text only: no verdict above reads it."""
+    """What the producer's bounded search from reset (`lec.json.bmc`) says,
+    in `lec_run.bmc_summary`'s one wording. Text only: no verdict above
+    reads it."""
     bmc = doc.get("bmc") if isinstance(doc.get("bmc"), dict) else None
-    result = (bmc or {}).get("result")
-    if result == "COUNTEREXAMPLE":
-        cex = bmc.get("counterexample") or {}
-        return (f"The bounded search from reset FOUND a counterexample: "
-                f"output(s) {', '.join(cex.get('differing_outputs') or [])} "
-                f"differ {cex.get('cycles_after_reset')} cycle(s) after reset "
-                f"(trace {cex.get('trace_path')}).")
-    if result == "NONE_WITHIN_BOUND":
-        return (f"Non-convergence is NOT non-equivalence: the bounded search "
-                f"from reset found no differing output within "
-                f"{bmc.get('depth_reached')} cycle(s) of reset.")
-    if result == "NOT_RUN":
-        return (f"Non-convergence is NOT non-equivalence, and no "
-                f"counterexample was searched for: {bmc.get('reason')}.")
-    return ("Non-convergence is NOT non-equivalence — no counterexample was "
-            "recorded.")
+    if bmc is None:
+        return ("Non-convergence is NOT non-equivalence — no counterexample "
+                "was recorded.")
+    from lec_run import bmc_summary  # noqa: E402 — the producer's wording
+    if bmc.get("result") == "COUNTEREXAMPLE":
+        return "The bounded search from reset " + bmc_summary(bmc)
+    return ("Non-convergence is NOT non-equivalence. The bounded search "
+            "from reset: " + bmc_summary(bmc))
 
 
 def lec_record_reuse_note(doc: dict) -> str:

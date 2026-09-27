@@ -2804,8 +2804,8 @@ def parse_equiv_output(text: str, *,
             verdict_explanation = (
                 f"A {total if total is not None else '?'}-point equivalence "
                 "miter was built, but the proof recorded NO decided points "
-                f"({_noconv_ev}) and NO counterexample "
-                "(non_equivalent_points=0). A run that decided nothing is NOT "
+                f"({_noconv_ev}) and NO counterexample (the equiv ladder emits "
+                "none; `bmc` holds the search from reset). A run that decided nothing is NOT "
                 "evidence of non-equivalence: a real difference produces a "
                 "counterexample or a completed equiv_status with unproven>0. "
                 "→ INCONCLUSIVE (a killed/interrupted run outside the "
@@ -2854,8 +2854,8 @@ def parse_equiv_output(text: str, *,
                     f"{total if total is not None else '?'} proven, "
                     f"{unproven if unproven is not None else '?'} unproven — "
                     f"and the proof ladder STOPPED BELOW ITS INDUCTION RUNGS "
-                    f"({_noconv_ev}), with NO counterexample recorded "
-                    "(non_equivalent_points=0). This is NOT a statement about "
+                    f"({_noconv_ev}), with NO counterexample from the ladder "
+                    "(it emits none; `bmc` holds the search from reset). This is NOT a statement about "
                     "the engine's sequential depth and NOT a capability gap: "
                     "equiv_induct was never asked, so nothing about the "
                     "remainder was learned. → INCONCLUSIVE (the recipe stopped "
@@ -2871,8 +2871,8 @@ def parse_equiv_output(text: str, *,
                     f"{total if total is not None else '?'} proven, "
                     f"{unproven if unproven is not None else '?'} unproven — "
                     f"and the proof was STOPPED before it could finish "
-                    f"({_noconv_ev}), with NO counterexample recorded "
-                    "(non_equivalent_points=0). This is NOT a statement about "
+                    f"({_noconv_ev}), with NO counterexample from the ladder "
+                    "(it emits none; `bmc` holds the search from reset). This is NOT a statement about "
                     "the engine's sequential depth and NOT a capability gap: "
                     "the remainder was never attempted, so nothing about it was "
                     "learned. → INCONCLUSIVE (the run was cut off), never a "
@@ -2888,9 +2888,9 @@ def parse_equiv_output(text: str, *,
                     f"{total if total is not None else '?'} proven, "
                     f"{unproven if unproven is not None else '?'} unproven — but "
                     "equiv_induct did NOT converge "
-                    f"({_noconv_ev}) and NO counterexample was recorded "
-                    "(non_equivalent_points=0). Non-convergence is NOT "
-                    "non-equivalence: a real difference produces a counterexample. "
+                    f"({_noconv_ev}) and the ladder recorded NO counterexample "
+                    "(it emits none; `bmc` holds the search from reset). Non-convergence is NOT "
+                    "non-equivalence. "
                     "→ INCONCLUSIVE (a disclosed sequential-depth capability gap), "
                     "never a false NOT_EQUIVALENT. Close the remainder with sign-off "
                     "LEC (Conformal/VC LEC), which handles deep sequential "
@@ -4482,7 +4482,9 @@ def annotate_step_budget(report: Dict, budget: "StepBudget", *,
                     f"tool's own evidence -- the ladder ran to a closing "
                     f"equiv_status over {_miter} point(s): {_proven} proven, "
                     f"{_unproven} unproven, "
-                    f"{report.get('non_equivalent_points')} counterexample(s). "
+                    f"{report.get('non_equivalent_points')} counterexample(s) "
+                    "from the equiv ladder (it emits none; `bmc` holds the "
+                    "search from reset). "
                     "The limit it hit is the ENGINE's, named in the verdict "
                     "above; WALL-CLOCK TIME is not the resource that ran out "
                     "and raising --timeout / VIBEIC_LEC_YOSYS_TIMEOUT_S cannot "
@@ -4694,9 +4696,13 @@ BMC_DEFAULT_DEADLINE_S = 900
 #: induction window could not see is looked for well past it.
 BMC_DEPTH_ENV = "VIBEIC_LEC_BMC_DEPTH"
 BMC_DEFAULT_DEPTH = 64
-#: Cycles the declared reset is held asserted before outputs are compared.
-#: Both sides start from the same all-zero state, so one cycle takes each to
-#: its reset state; a longer declared reset sequence is not a declared field.
+#: Cycles the declared reset port is held asserted before outputs are
+#: compared. Nothing is assumed about the power-up state: every register
+#: starts UNDEFINED (`-set-init-undef`), so a gold register that no reset has
+#: reached yet is x -- a don't-care (`-ignore_gold_x`) -- however many cycles
+#: its reset takes to arrive (a synchroniser, a registered reset, no reset),
+#: and a re-encoded gate register is never paired with an invented gold
+#: value. The L-docs declare no reset LENGTH, so none is assumed either.
 BMC_RESET_CYCLES = 1
 BMC_MITER = "lec_bmc_miter"
 _BMC_DEPTH_MARK = "LEC_BMC_DEPTH_BEGIN"
@@ -4747,10 +4753,37 @@ def lec_non_equivalent_points(parsed: Dict, bmc: Optional[Dict]
 
 
 def attach_bmc(report: Dict, parsed: Dict, bmc: Dict) -> Dict:
-    """Put a search made AFTER the report was built into it."""
+    """Put a search made AFTER the report was built into it, and say what it
+    found in the report's own explanation."""
     report["bmc"] = bmc
     report["non_equivalent_points"] = lec_non_equivalent_points(parsed, bmc)
+    if (parsed.get("unproven") or 0) > 0:
+        report["verdict_explanation"] = (
+            (report.get("verdict_explanation") or "").rstrip()
+            + " BOUNDED SEARCH FROM RESET: " + bmc_summary(bmc))
     return report
+
+
+def bmc_summary(bmc: Optional[Dict]) -> str:
+    """One sentence on what the search from reset found, and how far it
+    looked. The one wording lec_run and step 13's reason both use."""
+    if not isinstance(bmc, dict):
+        return "no search from reset was recorded."
+    result = bmc.get("result")
+    depth = bmc.get("depth_reached") or 0
+    if result == BMC_COUNTEREXAMPLE:
+        cex = bmc.get("counterexample") or {}
+        return (f"FOUND a counterexample: output(s) "
+                f"{', '.join(cex.get('differing_outputs') or [])} differ "
+                f"{cex.get('cycles_after_reset')} cycle(s) after reset "
+                f"(trace {cex.get('trace_path')}).")
+    if result == BMC_NONE_WITHIN_BOUND:
+        return f"no differing output within {depth} cycle(s) of reset."
+    if depth > 0:
+        return (f"no differing output within {depth} cycle(s) of reset; it "
+                f"did not reach its target of {bmc.get('depth_target')}: "
+                f"{bmc.get('reason')}.")
+    return f"not searched: {bmc.get('reason')}."
 
 
 def bmc_step_stop_reason(budget: "StepBudget", ladder_stopped: bool,
@@ -4820,7 +4853,10 @@ def bmc_reset_from_declaration(project: Path, gate_ports: List[str]
                           f"compared top")
         rows.append({"port": name, "polarity": polarity,
                      "asserted": 0 if polarity == "active_low" else 1})
-    return {"resets": rows, "clock": (clocks[0] or {}).get("name"),
+    clock = clocks[0]
+    if not isinstance(clock, dict) or not clock.get("name"):
+        return None, f"{rel} declares its clock as {clock!r}, not a named row"
+    return {"resets": rows, "clock": clock.get("name"),
             "source": f"{rel}.clock_and_reset_waveform"}, ""
 
 
@@ -4843,7 +4879,7 @@ def bmc_script(prefix: str, reset: Dict, depths: List[int],
     for d in depths:
         body += (f"log {_BMC_DEPTH_MARK} {d}\n"
                  f"sat -verify -enable_undef -set-def-inputs "
-                 f"-seq {BMC_RESET_CYCLES + d} -set-init-zero {sets} "
+                 f"-seq {BMC_RESET_CYCLES + d} -set-init-undef {sets} "
                  f"-prove-skip {BMC_RESET_CYCLES} -prove trigger 0 "
                  f"-show-ports -dump_vcd {shlex.quote(vcd_path)} {BMC_MITER}\n")
     return prefix + body
@@ -4871,13 +4907,16 @@ def parse_bmc_log(text: str, depth_target: int) -> Dict:
             steps: Dict[int, Dict[str, str]] = {}
             for row in _BMC_ROW_RE.finditer(table):
                 steps.setdefault(int(row.group(1)), {})[row.group(2)] = row.group(3)
+            # Only a step the proof judged: the reset cycles are skipped
+            # (`-prove-skip`), and yosys still prints them.
             cycle = next((t for t in sorted(steps)
-                          if steps[t].get("trigger") == "1"), None)
+                          if t > BMC_RESET_CYCLES
+                          and steps[t].get("trigger") == "1"), None)
             if cycle is None:
                 return {"result": BMC_NOT_RUN, "depth_reached": reached,
                         "reason": f"a model was found at depth {depth} but "
-                                  "its trace names no step where the miter "
-                                  "trigger is 1"}
+                                  "its trace names no post-reset step where "
+                                  "the miter trigger is 1"}
             at = steps[cycle]
             # A gold `x` bit is a don't-care: only a DEFINED gold bit the
             # gate does not match makes an output differ.
@@ -4886,6 +4925,10 @@ def parse_bmc_log(text: str, depth_target: int) -> Dict:
                 and "gate_" + n[len("gold_"):] in at
                 and any(g in "01" and g != t for g, t in zip(
                     at[n], at["gate_" + n[len("gold_"):]])))
+            if not differing:
+                return {"result": BMC_NOT_RUN, "depth_reached": reached,
+                        "reason": f"a model was found at depth {depth} but no "
+                                  f"defined output differs at its step {cycle}"}
             return {"result": BMC_COUNTEREXAMPLE, "depth_reached": depth,
                     "reason": f"outputs differ {cycle - BMC_RESET_CYCLES} "
                               f"cycle(s) after reset",
@@ -6976,12 +7019,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         # THE COUNTEREXAMPLE SEARCH, after the step's budget is booked: it
         # has its own deadline and elapsed (`bmc`), and never spends or
         # re-arms the ladder's.
-        attach_bmc(report, parsed, _bmc_after_ladder(
-            parsed, project, container, gate_abs, resolved_top,
-            rpt_out.parent, equiv_workdir,
-            lambda: _make_script(gold_frontend, slang_prefix, gold_defines),
-            step_stop=bmc_step_stop_reason(
-                budget, stopped_this_run, controlled_rung_limit_hit)))
+        # Evidence only: a search that raises costs the run nothing but
+        # its own record.
+        try:
+            _bmc = _bmc_after_ladder(
+                parsed, project, container, gate_abs, resolved_top,
+                rpt_out.parent, equiv_workdir,
+                lambda: _make_script(gold_frontend, slang_prefix, gold_defines),
+                step_stop=bmc_step_stop_reason(
+                    budget, stopped_this_run, controlled_rung_limit_hit))
+        except Exception as exc:                            # noqa: BLE001
+            _bmc = bmc_not_run(f"the search raised {type(exc).__name__}: {exc}")
+        attach_bmc(report, parsed, _bmc)
         report["gold_rtl_files"] = [Path(f).name for f in gold_files]
         report["gold_frontend"] = gold_frontend
         report["gold_defines"] = (

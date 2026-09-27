@@ -6,11 +6,11 @@
  \----------------------------------------------------------------------------/
  Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]
 
--- Executing script file `<reports>/cex_new2.ys' --
+-- Executing script file `<reports>/rsync_old.ys' --
 
-1. Executing Verilog-2005 frontend: <project>/phase2/stage1/rtl/cal_bmc_rtl.v
-Parsing SystemVerilog input from `<project>/phase2/stage1/rtl/cal_bmc_rtl.v' to AST representation.
-Generating RTLIL representation for module `\cal_bmc'.
+1. Executing Verilog-2005 frontend: <project>/phase2/stage1/rtl/cal_bmc_rsync_rtl.v
+Parsing SystemVerilog input from `<project>/phase2/stage1/rtl/cal_bmc_rsync_rtl.v' to AST representation.
+Generating RTLIL representation for module `\cal_bmc_rsync'.
 Successfully finished Verilog frontend.
 
 2. Executing PREP pass.
@@ -18,10 +18,10 @@ Successfully finished Verilog frontend.
 2.1. Executing HIERARCHY pass (managing design hierarchy).
 
 2.1.1. Analyzing design hierarchy..
-Top module:  \cal_bmc
+Top module:  \cal_bmc_rsync
 
 2.1.2. Analyzing design hierarchy..
-Top module:  \cal_bmc
+Top module:  \cal_bmc_rsync
 Removed 0 unused modules.
 
 2.2. Executing PROC pass (convert processes to netlists).
@@ -30,12 +30,12 @@ Removed 0 unused modules.
 Cleaned up 0 empty switches.
 
 2.2.2. Executing PROC_RMDEAD pass (remove dead branches from decision trees).
-Marked 1 switch rules as full_case in process $proc$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:4$1 in module cal_bmc.
+Marked 2 switch rules as full_case in process $proc$<project>/phase2/stage1/rtl/cal_bmc_rsync_rtl.v:9$2 in module cal_bmc_rsync.
 Removed a total of 0 dead cases.
 
 2.2.3. Executing PROC_PRUNE pass (remove redundant assignments in processes).
 Removed 0 redundant assignments.
-Promoted 0 assignments to connections.
+Promoted 2 assignments to connections.
 
 2.2.4. Executing PROC_INIT pass (extract init attributes).
 
@@ -43,104 +43,138 @@ Promoted 0 assignments to connections.
 
 2.2.6. Executing PROC_ROM pass (convert switches to ROMs).
 Converted 0 switches.
-<suppressed ~2 debug messages>
+<suppressed ~3 debug messages>
 
 2.2.7. Executing PROC_MUX pass (convert decision trees to multiplexers).
-Creating decoders for process `\cal_bmc.$proc$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:4$1'.
-     1/2: $0\hit[0:0]
-     2/2: $0\q[3:0]
+Creating decoders for process `\cal_bmc_rsync.$proc$<project>/phase2/stage1/rtl/cal_bmc_rsync_rtl.v:9$2'.
+     1/1: $0\st[1:0]
+Creating decoders for process `\cal_bmc_rsync.$proc$<project>/phase2/stage1/rtl/cal_bmc_rsync_rtl.v:6$1'.
 
 2.2.8. Executing PROC_DLATCH pass (convert process syncs to latches).
 
 2.2.9. Executing PROC_DFF pass (convert process syncs to FFs).
-Creating register for signal `\cal_bmc.\q' using process `\cal_bmc.$proc$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:4$1'.
-  created $dff cell `$procdff$14' with positive edge clock.
-Creating register for signal `\cal_bmc.\hit' using process `\cal_bmc.$proc$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:4$1'.
+Creating register for signal `\cal_bmc_rsync.\st' using process `\cal_bmc_rsync.$proc$<project>/phase2/stage1/rtl/cal_bmc_rsync_rtl.v:9$2'.
   created $dff cell `$procdff$15' with positive edge clock.
+Creating register for signal `\cal_bmc_rsync.\rst_s1' using process `\cal_bmc_rsync.$proc$<project>/phase2/stage1/rtl/cal_bmc_rsync_rtl.v:6$1'.
+  created $dff cell `$procdff$16' with positive edge clock.
+Creating register for signal `\cal_bmc_rsync.\rst_s2' using process `\cal_bmc_rsync.$proc$<project>/phase2/stage1/rtl/cal_bmc_rsync_rtl.v:6$1'.
+  created $dff cell `$procdff$17' with positive edge clock.
 
 2.2.10. Executing PROC_MEMWR pass (convert process memory writes to cells).
 
 2.2.11. Executing PROC_CLEAN pass (remove empty switches from decision trees).
-Found and cleaned up 2 empty switches in `\cal_bmc.$proc$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:4$1'.
-Removing empty process `cal_bmc.$proc$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:4$1'.
-Cleaned up 2 empty switches.
+Found and cleaned up 3 empty switches in `\cal_bmc_rsync.$proc$<project>/phase2/stage1/rtl/cal_bmc_rsync_rtl.v:9$2'.
+Removing empty process `cal_bmc_rsync.$proc$<project>/phase2/stage1/rtl/cal_bmc_rsync_rtl.v:9$2'.
+Removing empty process `cal_bmc_rsync.$proc$<project>/phase2/stage1/rtl/cal_bmc_rsync_rtl.v:6$1'.
+Cleaned up 3 empty switches.
 
 2.2.12. Executing OPT_EXPR pass (perform const folding).
-Optimizing module cal_bmc.
+Optimizing module cal_bmc_rsync.
+<suppressed ~2 debug messages>
 
 2.3. Executing FUTURE pass.
 
 2.4. Executing OPT_EXPR pass (perform const folding).
-Optimizing module cal_bmc.
+Optimizing module cal_bmc_rsync.
 
 2.5. Executing CHECK pass (checking for obvious problems).
-Checking module cal_bmc...
+Checking module cal_bmc_rsync...
 Found and reported 0 problems.
 
 2.6. Executing OPT_CLEAN pass (remove unused cells and wires).
-Finding unused cells or wires in module \cal_bmc..
-Removed 0 unused cells and 6 unused wires.
+Finding unused cells or wires in module \cal_bmc_rsync..
+Removed 0 unused cells and 7 unused wires.
 <suppressed ~1 debug messages>
 
 2.7. Executing OPT pass (performing simple optimizations).
 
 2.7.1. Executing OPT_EXPR pass (perform const folding).
-Optimizing module cal_bmc.
+Optimizing module cal_bmc_rsync.
 
 2.7.2. Executing OPT_MERGE pass (detect identical cells).
-Finding identical cells in module `\cal_bmc'.
-Computing hashes of 8 cells of `\cal_bmc'.
-Finding duplicate cells in `\cal_bmc'.
-Removed a total of 0 cells.
+Finding identical cells in module `\cal_bmc_rsync'.
+Computing hashes of 11 cells of `\cal_bmc_rsync'.
+Finding duplicate cells in `\cal_bmc_rsync'.
+Computing hashes of 9 cells of `\cal_bmc_rsync'.
+Finding duplicate cells in `\cal_bmc_rsync'.
+<suppressed ~6 debug messages>
+Removed a total of 2 cells.
 
 2.7.3. Executing OPT_MUXTREE pass (detect dead branches in mux trees).
-Running muxtree optimizer on module \cal_bmc..
+Running muxtree optimizer on module \cal_bmc_rsync..
   Creating internal representation of mux trees.
   Evaluating internal representation of mux trees.
   Analyzing evaluation results.
 Removed 0 multiplexer ports.
-<suppressed ~6 debug messages>
+<suppressed ~4 debug messages>
 
 2.7.4. Executing OPT_REDUCE pass (consolidate $*mux and $reduce_* inputs).
-  Optimizing cells in module \cal_bmc.
+  Optimizing cells in module \cal_bmc_rsync.
 Performed a total of 0 changes.
 
 2.7.5. Executing OPT_MERGE pass (detect identical cells).
-Finding identical cells in module `\cal_bmc'.
-Computing hashes of 8 cells of `\cal_bmc'.
-Finding duplicate cells in `\cal_bmc'.
+Finding identical cells in module `\cal_bmc_rsync'.
+Computing hashes of 9 cells of `\cal_bmc_rsync'.
+Finding duplicate cells in `\cal_bmc_rsync'.
 Removed a total of 0 cells.
 
 2.7.6. Executing OPT_CLEAN pass (remove unused cells and wires).
-Finding unused cells or wires in module \cal_bmc..
+Finding unused cells or wires in module \cal_bmc_rsync..
+Removed 0 unused cells and 2 unused wires.
+<suppressed ~1 debug messages>
 
 2.7.7. Executing OPT_EXPR pass (perform const folding).
-Optimizing module cal_bmc.
+Optimizing module cal_bmc_rsync.
 
-2.7.8. Finished fast OPT passes. (There is nothing left to do.)
+2.7.8. Rerunning OPT passes. (Maybe there is more to do..)
+
+2.7.9. Executing OPT_MUXTREE pass (detect dead branches in mux trees).
+Running muxtree optimizer on module \cal_bmc_rsync..
+  Creating internal representation of mux trees.
+  Evaluating internal representation of mux trees.
+  Analyzing evaluation results.
+Removed 0 multiplexer ports.
+<suppressed ~4 debug messages>
+
+2.7.10. Executing OPT_REDUCE pass (consolidate $*mux and $reduce_* inputs).
+  Optimizing cells in module \cal_bmc_rsync.
+Performed a total of 0 changes.
+
+2.7.11. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\cal_bmc_rsync'.
+Computing hashes of 9 cells of `\cal_bmc_rsync'.
+Finding duplicate cells in `\cal_bmc_rsync'.
+Removed a total of 0 cells.
+
+2.7.12. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \cal_bmc_rsync..
+
+2.7.13. Executing OPT_EXPR pass (perform const folding).
+Optimizing module cal_bmc_rsync.
+
+2.7.14. Finished fast OPT passes. (There is nothing left to do.)
 
 2.8. Executing WREDUCE pass (reducing word size of cells).
-Removed top 3 bits (of 4) from port B of cell cal_bmc.$add$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:6$2 ($add).
-Removed top 1 bits (of 4) from port B of cell cal_bmc.$eq$<project>/phase2/stage1/rtl/cal_bmc_rtl.v:6$3 ($eq).
+Removed top 1 bits (of 2) from port B of cell cal_bmc_rsync.$procmux$8_CMP0 ($eq).
 
 2.9. Executing OPT_CLEAN pass (remove unused cells and wires).
-Finding unused cells or wires in module \cal_bmc..
+Finding unused cells or wires in module \cal_bmc_rsync..
 
 2.10. Executing MEMORY_COLLECT pass (generating $mem cells).
 
 2.11. Executing OPT pass (performing simple optimizations).
 
 2.11.1. Executing OPT_EXPR pass (perform const folding).
-Optimizing module cal_bmc.
+Optimizing module cal_bmc_rsync.
 
 2.11.2. Executing OPT_MERGE pass (detect identical cells).
-Finding identical cells in module `\cal_bmc'.
-Computing hashes of 8 cells of `\cal_bmc'.
-Finding duplicate cells in `\cal_bmc'.
+Finding identical cells in module `\cal_bmc_rsync'.
+Computing hashes of 9 cells of `\cal_bmc_rsync'.
+Finding duplicate cells in `\cal_bmc_rsync'.
 Removed a total of 0 cells.
 
 2.11.3. Executing OPT_CLEAN pass (remove unused cells and wires).
-Finding unused cells or wires in module \cal_bmc..
+Finding unused cells or wires in module \cal_bmc_rsync..
 
 2.11.4. Finished fast OPT passes.
 
@@ -148,24 +182,25 @@ Finding unused cells or wires in module \cal_bmc..
 
 2.13. Printing statistics.
 
-=== cal_bmc ===
+=== cal_bmc_rsync ===
 
         +----------Local Count, excluding submodules.
         | 
-       11 wires
-       23 wire bits
-        5 public wires
-        8 public wire bits
+       12 wires
+       16 wire bits
+        8 public wires
+        9 public wire bits
         5 ports
-        8 port bits
-        8 cells
-        1   $add
-        2   $dff
-        1   $eq
-        4   $mux
+        5 port bits
+        9 cells
+        3   $dff
+        2   $eq
+        1   $logic_not
+        2   $mux
+        1   $pmux
 
 2.14. Executing CHECK pass (checking for obvious problems).
-Checking module cal_bmc...
+Checking module cal_bmc_rsync...
 Found and reported 0 problems.
 
 3. Executing MEMORY_MAP pass (converting memories to logic and flip-flops).
@@ -175,7 +210,7 @@ Found and reported 0 problems.
 5. Executing ASYNC2SYNC pass.
 
 6. Executing OPT_CLEAN pass (remove unused cells and wires).
-Finding unused cells or wires in module \cal_bmc..
+Finding unused cells or wires in module \cal_bmc_rsync..
 
 7. Executing SPLITNETS pass (splitting up multi-bit signals).
 
@@ -185,35 +220,25 @@ Imported 229 cell types from liberty file.
 
 9. Executing Verilog-2005 frontend: <project>/phase2/stage2/synth/netlist.v
 Parsing Verilog input from `<project>/phase2/stage2/synth/netlist.v' to AST representation.
-Generating RTLIL representation for module `\cal_bmc'.
+Generating RTLIL representation for module `\cal_bmc_rsync'.
 Successfully finished Verilog frontend.
 
 10. Executing HIERARCHY pass (managing design hierarchy).
 
 10.1. Analyzing design hierarchy..
-Top module:  \cal_bmc
+Top module:  \cal_bmc_rsync
 Used module:     \gf180mcu_fd_sc_mcu7t5v0__dffq_1
-Used module:     \gf180mcu_fd_sc_mcu7t5v0__aoi21_1
 Used module:     \gf180mcu_fd_sc_mcu7t5v0__oai21_1
-Used module:     \gf180mcu_fd_sc_mcu7t5v0__or4_1
-Used module:     \gf180mcu_fd_sc_mcu7t5v0__nor3_1
-Used module:     \gf180mcu_fd_sc_mcu7t5v0__and3_1
 Used module:     \gf180mcu_fd_sc_mcu7t5v0__nor2_1
-Used module:     \gf180mcu_fd_sc_mcu7t5v0__xnor2_1
-Used module:     \gf180mcu_fd_sc_mcu7t5v0__and4_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__nand2_1
 Used module:     \gf180mcu_fd_sc_mcu7t5v0__clkinv_1
 
 10.2. Analyzing design hierarchy..
-Top module:  \cal_bmc
+Top module:  \cal_bmc_rsync
 Used module:     \gf180mcu_fd_sc_mcu7t5v0__dffq_1
-Used module:     \gf180mcu_fd_sc_mcu7t5v0__aoi21_1
 Used module:     \gf180mcu_fd_sc_mcu7t5v0__oai21_1
-Used module:     \gf180mcu_fd_sc_mcu7t5v0__or4_1
-Used module:     \gf180mcu_fd_sc_mcu7t5v0__nor3_1
-Used module:     \gf180mcu_fd_sc_mcu7t5v0__and3_1
 Used module:     \gf180mcu_fd_sc_mcu7t5v0__nor2_1
-Used module:     \gf180mcu_fd_sc_mcu7t5v0__xnor2_1
-Used module:     \gf180mcu_fd_sc_mcu7t5v0__and4_1
+Used module:     \gf180mcu_fd_sc_mcu7t5v0__nand2_1
 Used module:     \gf180mcu_fd_sc_mcu7t5v0__clkinv_1
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xor3_4'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xor3_2'.
@@ -226,6 +251,7 @@ Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xnor3_2'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xnor3_1'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xnor2_4'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xnor2_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__xnor2_1'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__tiel'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__tieh'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffsnq_4'.
@@ -242,6 +268,7 @@ Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffq_2'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__sdffq_1'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or4_4'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or4_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or4_1'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or3_4'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or3_2'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__or3_1'.
@@ -276,6 +303,7 @@ Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor4_2'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor4_1'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor3_4'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor3_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor3_1'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor2_4'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nor2_2'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand4_4'.
@@ -286,7 +314,6 @@ Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand3_2'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand3_1'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand2_4'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand2_2'.
-Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__nand2_1'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__mux4_4'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__mux4_2'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__mux4_1'.
@@ -420,11 +447,14 @@ Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi22_2'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi22_1'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi21_4'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi21_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__aoi21_1'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__antenna'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and4_4'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and4_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and4_1'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and3_4'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and3_2'.
+Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and3_1'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and2_4'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and2_2'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__and2_1'.
@@ -434,29 +464,24 @@ Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__addh_1'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__addf_4'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__addf_2'.
 Removing unused module `\gf180mcu_fd_sc_mcu7t5v0__addf_1'.
-Removed 219 unused modules.
+Removed 224 unused modules.
 
 11. Executing MEMORY_MAP pass (converting memories to logic and flip-flops).
 
 12. Executing FLATTEN pass (flatten design).
 Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__dffq_1.
-Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__and3_1.
-Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__nor3_1.
-Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__xnor2_1.
-Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__aoi21_1.
-Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__nor2_1.
 Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__oai21_1.
+Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__nand2_1.
+Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__nor2_1.
 Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__clkinv_1.
-Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__and4_1.
-Deleting now unused module gf180mcu_fd_sc_mcu7t5v0__or4_1.
-<suppressed ~20 debug messages>
+<suppressed ~15 debug messages>
 
 13. Executing ASYNC2SYNC pass.
 
 14. Executing OPT_CLEAN pass (remove unused cells and wires).
-Finding unused cells or wires in module \cal_bmc..
-Removed 11 unused cells and 41 unused wires.
-<suppressed ~18 debug messages>
+Finding unused cells or wires in module \cal_bmc_rsync..
+Removed 12 unused cells and 30 unused wires.
+<suppressed ~19 debug messages>
 
 15. Executing SPLITNETS pass (splitting up multi-bit signals).
 
@@ -468,8 +493,8 @@ Creating miter cell "lec_bmc_miter" with gold cell "gold" and gate cell "gate".
 
 16.2. Executing OPT_EXPR pass (perform const folding).
 Optimizing module lec_bmc_miter.
-<suppressed ~4 debug messages>
-Removed 2 unused cells and 10 unused wires.
+<suppressed ~3 debug messages>
+Removed 3 unused cells and 9 unused wires.
 
 17. Executing HIERARCHY pass (managing design hierarchy).
 
@@ -490,94 +515,29 @@ Setting up time step 1:
 Import set-constraint for this timestep: \in_rst = 1'1
 Final constraint equation: \in_rst = 1'1
 Import def constraint for this timestep: \in_rst
-Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_go
 Import def constraint for this timestep: \in_clk
-Imported 109 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
+Imported 59 cells to SAT database.
+Final init constraint equation: { \gold.st[1] \gold.st[0] \gold.rst_s1 \gold.rst_s2 \gate._23_.IQ1 \gate._22_.IQ1 \gate._21_.IQ1 \gate._20_.IQ1 \gate._19_.IQ1 \gate._18_.IQ1 } = 10'0000000000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
 Import def constraint for this timestep: \in_rst
-Import def constraint for this timestep: \in_en
+Import def constraint for this timestep: \in_go
 Import def constraint for this timestep: \in_clk
-Imported 109 cells to SAT database.
+Imported 59 cells to SAT database.
 Import proof-constraint: \trigger = 1'0
 Final proof equation: \trigger = 1'0
 Import show expression: \in_rst
-Import show expression: \in_en
+Import show expression: \in_go
 Import show expression: \in_clk
 Import show expression: \trigger
-Import show expression: \gate_hit
-Import show expression: \gold_hit
-Import show expression: \gate_q[0]
-Import show expression: \gold_q[0]
-Import show expression: \gate_q[1]
-Import show expression: \gold_q[1]
-Import show expression: \gate_q[2]
-Import show expression: \gold_q[2]
-Import show expression: \gate_q[3]
-Import show expression: \gold_q[3]
+Import show expression: \gate_ready
+Import show expression: \gold_ready
+Import show expression: \gate_busy
+Import show expression: \gold_busy
 
-Solving problem with 3300 variables and 8692 clauses..
-SAT proof finished - no model found: SUCCESS!
-
-                  /$$$$$$      /$$$$$$$$     /$$$$$$$    
-                 /$$__  $$    | $$_____/    | $$__  $$   
-                | $$  \ $$    | $$          | $$  \ $$   
-                | $$  | $$    | $$$$$       | $$  | $$   
-                | $$  | $$    | $$__/       | $$  | $$   
-                | $$/$$ $$    | $$          | $$  | $$   
-                |  $$$$$$/ /$$| $$$$$$$$ /$$| $$$$$$$//$$
-                 \____ $$$|__/|________/|__/|_______/|__/
-                       \__/                              
-
-LEC_BMC_DEPTH_BEGIN 2
-
-19. Executing SAT pass (solving SAT problems in the circuit).
-Using SAT solver `minisat`.
-
-Setting up time step 1:
-Import set-constraint for this timestep: \in_rst = 1'1
-Final constraint equation: \in_rst = 1'1
-Import def constraint for this timestep: \in_rst
-Import def constraint for this timestep: \in_en
-Import def constraint for this timestep: \in_clk
-Imported 109 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
-
-Setting up time step 2:
-Final constraint equation: { } = { }
-Import def constraint for this timestep: \in_rst
-Import def constraint for this timestep: \in_en
-Import def constraint for this timestep: \in_clk
-Imported 109 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-
-Setting up time step 3:
-Final constraint equation: { } = { }
-Import def constraint for this timestep: \in_rst
-Import def constraint for this timestep: \in_en
-Import def constraint for this timestep: \in_clk
-Imported 109 cells to SAT database.
-Import proof-constraint: \trigger = 1'0
-Final proof equation: \trigger = 1'0
-Import show expression: \in_rst
-Import show expression: \in_en
-Import show expression: \in_clk
-Import show expression: \trigger
-Import show expression: \gate_hit
-Import show expression: \gold_hit
-Import show expression: \gate_q[0]
-Import show expression: \gold_q[0]
-Import show expression: \gate_q[1]
-Import show expression: \gold_q[1]
-Import show expression: \gate_q[2]
-Import show expression: \gold_q[2]
-Import show expression: \gate_q[3]
-Import show expression: \gold_q[3]
-
-Solving problem with 4980 variables and 13124 clauses..
+Solving problem with 1515 variables and 3961 clauses..
 SAT proof finished - model found: FAIL!
 
    ______                   ___       ___       _ _            _ _ 
@@ -590,61 +550,34 @@ SAT proof finished - model found: FAIL!
 
   Time Signal Name                 Dec       Hex           Bin
   ---- ------------------- ----------- --------- -------------
-  init \gate._30_.IQ1               --        --             x
-  init \gate._31_.IQ1               --        --             x
-  init \gate._32_.IQ1               --        --             x
-  init \gate._33_.IQ1               --        --             x
-  init \gate._34_.IQ1               --        --             x
-  init \gold.hit                    --        --             x
-  init \gold.q[0]                   --        --             x
-  init \gold.q[1]                   --        --             x
-  init \gold.q[2]                   --        --             x
-  init \gold.q[3]                   --        --             x
+  init \gate._18_.IQ1                0         0             0
+  init \gate._19_.IQ1                0         0             0
+  init \gate._20_.IQ1                0         0             0
+  init \gate._21_.IQ1                0         0             0
+  init \gate._22_.IQ1                0         0             0
+  init \gate._23_.IQ1                0         0             0
+  init \gold.rst_s1                  0         0             0
+  init \gold.rst_s2                  0         0             0
+  init \gold.st[0]                   0         0             0
+  init \gold.st[1]                   0         0             0
   ---- ------------------- ----------- --------- -------------
-     1 \gate_hit                    --        --             x
-     1 \gate_q[0]                   --        --             x
-     1 \gate_q[1]                   --        --             x
-     1 \gate_q[2]                   --        --             x
-     1 \gate_q[3]                   --        --             x
-     1 \gold_hit                    --        --             x
-     1 \gold_q[0]                   --        --             x
-     1 \gold_q[1]                   --        --             x
-     1 \gold_q[2]                   --        --             x
-     1 \gold_q[3]                   --        --             x
+     1 \gate_busy                    0         0             0
+     1 \gate_ready                   0         0             0
+     1 \gold_busy                    0         0             0
+     1 \gold_ready                   1         1             1
      1 \in_clk                       0         0             0
-     1 \in_en                        1         1             1
+     1 \in_go                        1         1             1
      1 \in_rst                       1         1             1
-     1 \trigger                      0         0             0
+     1 \trigger                      1         1             1
   ---- ------------------- ----------- --------- -------------
-     2 \gate_hit                     0         0             0
-     2 \gate_q[0]                    0         0             0
-     2 \gate_q[1]                    0         0             0
-     2 \gate_q[2]                    0         0             0
-     2 \gate_q[3]                    0         0             0
-     2 \gold_hit                     0         0             0
-     2 \gold_q[0]                    0         0             0
-     2 \gold_q[1]                    0         0             0
-     2 \gold_q[2]                    0         0             0
-     2 \gold_q[3]                    0         0             0
+     2 \gate_busy                    0         0             0
+     2 \gate_ready                   0         0             0
+     2 \gold_busy                    1         1             1
+     2 \gold_ready                   0         0             0
      2 \in_clk                       0         0             0
-     2 \in_en                        1         1             1
+     2 \in_go                        1         1             1
      2 \in_rst                       0         0             0
-     2 \trigger                      0         0             0
-  ---- ------------------- ----------- --------- -------------
-     3 \gate_hit                     1         1             1
-     3 \gate_q[0]                    1         1             1
-     3 \gate_q[1]                    0         0             0
-     3 \gate_q[2]                    0         0             0
-     3 \gate_q[3]                    0         0             0
-     3 \gold_hit                     0         0             0
-     3 \gold_q[0]                    1         1             1
-     3 \gold_q[1]                    0         0             0
-     3 \gold_q[2]                    0         0             0
-     3 \gold_q[3]                    0         0             0
-     3 \in_clk                       0         0             0
-     3 \in_en                        0         0             0
-     3 \in_rst                       1         1             1
-     3 \trigger                      1         1             1
-Dumping SAT model to VCD file <reports>/cex_new2.vcd
+     2 \trigger                      1         1             1
+Dumping SAT model to VCD file <reports>/rsync_new.vcd
 
 ERROR: Called with -verify and proof did fail!

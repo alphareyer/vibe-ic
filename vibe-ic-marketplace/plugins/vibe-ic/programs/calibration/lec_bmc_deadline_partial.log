@@ -6,7 +6,7 @@
  \----------------------------------------------------------------------------/
  Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]
 
--- Executing script file `<reports>/partial_new.ys' --
+-- Executing script file `<reports>/partial_new2.ys' --
 
 1. Executing Verilog-2005 frontend: <project>/phase2/stage1/rtl/cal_bmc_rtl.v
 Parsing SystemVerilog input from `<project>/phase2/stage1/rtl/cal_bmc_rtl.v' to AST representation.
@@ -493,7 +493,7 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 110 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -518,7 +518,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 3336 variables and 8788 clauses..
+Solving problem with 3326 variables and 8758 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -543,7 +543,7 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 110 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -577,7 +577,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 5029 variables and 13253 clauses..
+Solving problem with 5019 variables and 13223 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -602,7 +602,7 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 110 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -654,7 +654,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 8413 variables and 22179 clauses..
+Solving problem with 8403 variables and 22149 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -679,7 +679,7 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 110 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -767,7 +767,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 15181 variables and 40031 clauses..
+Solving problem with 15171 variables and 40001 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -792,7 +792,7 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 110 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -952,7 +952,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 28717 variables and 75735 clauses..
+Solving problem with 28707 variables and 75705 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -977,7 +977,7 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 110 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -1281,7 +1281,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 55789 variables and 147143 clauses..
+Solving problem with 55779 variables and 147113 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -1306,7 +1306,7 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 110 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -1898,7 +1898,7 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 109933 variables and 289959 clauses..
+Solving problem with 109923 variables and 289929 clauses..
 SAT proof finished - no model found: SUCCESS!
 
                   /$$$$$$      /$$$$$$$$     /$$$$$$$    
@@ -1923,7 +1923,7 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 110 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'0000000000
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -3091,4 +3091,4 @@ Import show expression: \gold_q[2]
 Import show expression: \gate_q[3]
 Import show expression: \gold_q[3]
 
-Solving problem with 218221 variables and 575591 clauses..
+Solving problem with 218211 variables and 575561 clauses..

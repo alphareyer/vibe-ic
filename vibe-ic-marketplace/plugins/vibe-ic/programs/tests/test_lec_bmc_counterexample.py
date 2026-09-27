@@ -28,6 +28,8 @@ CAL = Path(lec_run.__file__).resolve().parent / "calibration"
 CEX_LOG = CAL / "lec_bmc_cex_positive.log"
 NONE_LOG = CAL / "lec_bmc_none_negative.log"
 XDC_LOG = CAL / "lec_bmc_xdc_negative.log"
+RSYNC_LOG = CAL / "lec_bmc_rsync_negative.log"
+RSYNC_ZERO_TRACE = CAL / "lec_bmc_rsync_initzero_trace.log"
 PARTIAL_LOG = CAL / "lec_bmc_deadline_partial.log"
 RESET = {"resets": [{"port": "rst", "polarity": "active_high",
                      "asserted": 1}],
@@ -79,10 +81,49 @@ def test_a_synthesised_dont_care_is_not_a_counterexample():
     assert got["depth_reached"] == 16
 
 
+def test_a_late_reset_is_not_a_counterexample():
+    """A recoded FSM whose reset arrives through a 2-flop synchroniser: from
+    an UNDEFINED start, no model within the bound (from all-zero it was a
+    false counterexample, kept in RSYNC_ZERO_TRACE)."""
+    got = lec_run.parse_bmc_log(RSYNC_LOG.read_text(), 16)
+    assert got["result"] == lec_run.BMC_NONE_WITHIN_BOUND, got
+    assert got["depth_reached"] == 16
+
+
+def test_the_reader_skips_the_reset_steps_the_proof_skipped():
+    """A real model table whose trigger is 1 already in the reset step
+    (`ready` differs while reset is held) and again at step 2 (`busy`, the
+    step the proof failed): the reader names step 2."""
+    got = lec_run.parse_bmc_log(RSYNC_ZERO_TRACE.read_text(), 16)
+    cex = got["counterexample"]
+    assert (cex["cycle"], cex["cycles_after_reset"], cex["differing_outputs"]) \
+        == (2, 1, ["busy"])
+
+
+def _table(*rows):
+    body = "".join(f"     {t} \\{n}        {v}   {v}   {v}\n" for t, n, v in rows)
+    return (f"{lec_run._BMC_DEPTH_MARK} 1\n"
+            "SAT proof finished - model found: FAIL!\n" + body)
+
+
+def test_a_trigger_only_in_the_reset_step_is_no_counterexample():
+    got = lec_run.parse_bmc_log(_table((1, "gold_y", 0), (1, "gate_y", 1),
+                                       (1, "trigger", 1), (2, "gold_y", 0),
+                                       (2, "gate_y", 0), (2, "trigger", 0)), 1)
+    assert got["result"] == "NOT_RUN" and "post-reset" in got["reason"]
+
+
+def test_a_trigger_with_no_differing_defined_output_is_no_counterexample():
+    got = lec_run.parse_bmc_log(_table((2, "gold_y", "x"), (2, "gate_y", 1),
+                                       (2, "trigger", 1)), 1)
+    assert got["result"] == "NOT_RUN" and "no defined output differs" in got["reason"]
+
+
 def test_the_search_is_x_aware():
     ys = lec_run.bmc_script("P\n", RESET, [1], "t.vcd")
     assert "miter -equiv -flatten -make_outputs -ignore_gold_x gold gate" in ys
-    assert "sat -verify -enable_undef -set-def-inputs -seq 2" in ys
+    assert "sat -verify -enable_undef -set-def-inputs -seq 2 -set-init-undef" in ys
+    assert "-set-init-zero" not in ys
 
 
 def test_a_gold_x_bit_is_not_a_differing_output():
@@ -182,7 +223,7 @@ def test_the_script_asserts_the_declared_reset_then_compares(tmp_path):
     ys = lec_run.bmc_script("PREFIX\n", RESET, [1, 2], "t.vcd")
     assert ys.startswith("PREFIX\nmiter -equiv -flatten -make_outputs "
                          "-ignore_gold_x gold gate")
-    assert "-seq 2 -set-init-zero -set-at 1 in_rst 1 -prove-skip 1" in ys
+    assert "-seq 2 -set-init-undef -set-at 1 in_rst 1 -prove-skip 1" in ys
     assert "-seq 3 " in ys
     low = dict(RESET, resets=[{"port": "rst_n", "polarity": "active_low",
                                "asserted": 0}])
@@ -324,6 +365,44 @@ def test_the_runner_sentence_reads_the_search_and_its_verdict_does_not():
     assert "no counterexample was recorded" in dosr.lec_inconclusive_disposition(base)[1]
 
 
+def test_the_summary_says_how_far_a_stopped_search_looked():
+    stopped = {"result": "NOT_RUN", "depth_reached": 16, "depth_target": 64,
+               "reason": "the 900s deadline stopped the search at depth 16 of 64"}
+    text = lec_run.bmc_summary(stopped)
+    assert "no differing output within 16 cycle(s) of reset" in text
+    assert "did not reach its target of 64" in text
+    assert lec_run.bmc_summary(dict(stopped, depth_reached=0)).startswith("not searched")
+    import design_one_shot_runner as dosr
+    doc = {"verdict": "INCONCLUSIVE", "compared_points": 3, "unproven_points": 2,
+           "miter_points": 5, "budget_exhausted": False, "bmc": stopped}
+    why = dosr.lec_inconclusive_disposition(doc)[1]
+    assert "was searched for" not in why and "within 16 cycle(s)" in why
+
+
+def test_the_producers_own_explanation_says_what_the_search_found(tmp_path,
+                                                                  monkeypatch):
+    _replay(monkeypatch, CEX_LOG, 1)
+    bmc = lec_run.run_bmc("c", "PREFIX\n", RESET, tmp_path, None,
+                          deadline_s=60, depth_target=16)
+    report = lec_run.build_report(UNCLOSED, "cal_bmc", "netlist.v", None)
+    lec_run.attach_bmc(report, UNCLOSED, bmc)
+    assert "BOUNDED SEARCH FROM RESET: FOUND a counterexample: output(s) hit" \
+        in report["verdict_explanation"]
+    assert "non_equivalent_points=0" not in report["verdict_explanation"]
+
+
+def test_a_search_that_raises_leaves_the_ladders_report(monkeypatch):
+    """Evidence only: an exception inside the search is its own NOT_RUN;
+    the run's lec.json is still written."""
+    def boom(*a, **k):
+        raise AttributeError("'str' object has no attribute 'get'")
+    monkeypatch.setattr(lec_run, "_bmc_after_ladder", boom)
+    report = _drive_with_clock(monkeypatch, bmc_seconds=0)
+    assert report["verdict"] == "INCONCLUSIVE"
+    assert report["bmc"]["result"] == "NOT_RUN"
+    assert "the search raised AttributeError" in report["bmc"]["reason"]
+
+
 # ── the reset comes from the declaration, or the search does not run ─────────
 
 def _l8(tmp_path, doc):
@@ -349,6 +428,8 @@ def test_the_declared_reset_and_polarity_are_read(tmp_path):
         clocks=[{"name": "a"}, {"name": "b"}]), "2 clock(s)"),
     (lambda d: d["clock_and_reset_waveform"]["resets"][0].update(name="nrst"),
      "not a port of the compared top"),
+    (lambda d: d["clock_and_reset_waveform"].update(clocks=["clk"]),
+     "declares its clock as 'clk', not a named row"),
 ])
 def test_an_underivable_reset_is_named_not_guessed(tmp_path, mutate, needle):
     doc = json.loads(json.dumps(L8))
@@ -383,7 +464,8 @@ def _liberty():
 @pytest.mark.parametrize("rtl, top, gate, expect", [
     ("cal_bmc_rtl.v", "cal_bmc", "cal_bmc_gate_planted.v", 1),
     ("cal_bmc_rtl.v", "cal_bmc", "cal_bmc_gate.v", 0),
-    ("cal_bmc_xdc_rtl.v", "cal_bmc_xdc", "cal_bmc_xdc_gate.v", 0)])
+    ("cal_bmc_xdc_rtl.v", "cal_bmc_xdc", "cal_bmc_xdc_gate.v", 0),
+    ("cal_bmc_rsync_rtl.v", "cal_bmc_rsync", "cal_bmc_rsync_gate.v", 0)])
 def test_lec_run_end_to_end_on_the_calibration_pair(rtl, top, gate, expect):
     lib = _liberty()
     if shutil.which("yosys") is None or lib is None:
