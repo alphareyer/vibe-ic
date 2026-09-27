@@ -166,9 +166,13 @@ def test_the_cli_refuses_rather_than_printing_nothing_when_it_cannot_tell():
 
 # ── the guard that has to survive future edits ──────────────────────────────
 
-# The binary is spelled three ways in programs/: the literal, `docker_bin`, and
-# a bare `docker` parameter (analog_a6_librelane_drc._image_run). The last one
-# escaped this guard with no ceiling until it was named here.
+# The binary is spelled four ways in programs/: the literal, `docker_bin`, a
+# bare `docker` parameter (analog_a6_librelane_drc._image_run), and a
+# conditional expression that starts with one of those
+# (`'docker' if docker == 'docker' else docker`, librelane_signoff's per-corner
+# `sta` arm). The bare parameter escaped this guard with no ceiling until it was
+# named here; the conditional was invisible to it until 2026-09-28 (it carried
+# its flags, but only its own driven test would have noticed them go).
 #
 # Both words are matched in EITHER quote style. Until 2026-09-28 this pattern
 # read only `"docker"` / `"run"`, and every one of librelane_contract.py's eight
@@ -176,7 +180,7 @@ def test_the_cli_refuses_rather_than_printing_nothing_when_it_cannot_tell():
 # resolver and its image probes — created a container with no ceiling while
 # this test passed. A guard that cannot see a site certifies it.
 _RUN_ARGV = re.compile(
-    r'''\[\s*(?:["']docker["']|docker_bin|docker)\s*,\s*["']run["']''')
+    r'''\[\s*(?:["']docker["']|docker_bin|docker)(?:\s+if\b[^,\n]*)?\s*,\s*["']run["']''')
 
 
 def test_no_docker_run_escapes_the_ceiling():
@@ -210,11 +214,14 @@ def test_the_guard_sees_every_spelling_of_a_docker_run_argv():
     verb that creates no running container must not."""
     seen = ['["docker", "run"', "['docker', 'run'", '["docker", \'run\'',
             "['docker', \"run\"", '[docker, "run"', "[docker, 'run'",
-            '[docker_bin, "run"', "[docker_bin, 'run'", "[\n        'docker', 'run'"]
+            '[docker_bin, "run"', "[docker_bin, 'run'", "[\n        'docker', 'run'",
+            "['docker' if docker == 'docker' else docker, 'run'",
+            '[docker if docker else "docker", "run"']
     for text in seen:
         assert _RUN_ARGV.search(text), text
     for text in ('["docker", "image", "inspect"', "[docker, 'ps', '-q'",
-                 "['docker', 'cp', '-L'", "[docker, 'rm', '-f'"):
+                 "['docker', 'cp', '-L'", "[docker, 'rm', '-f'",
+                 "['docker' if docker == 'docker' else docker, 'ps'"):
         assert not _RUN_ARGV.search(text), text
 
 
