@@ -2391,40 +2391,6 @@ _LL_WHOLE_PROV = ("Real LibreLane 3.1.0.dev1 (vibeic-eda 0.3.83 by digest), "
                   "spm x gf180mcuD, 192.168.1.121 /tmp/lla/spike 2026-09-28: ")
 
 
-def _judge_ll_steps_from_log(text: str) -> Optional[str]:
-    import librelane_whole_flow as whole
-    tags = re.findall(r"Running '[^']+' at '(?:[^']*/)?runs/([^/']+)/", text)
-    steps = whole.steps_from_log(text, tags[0]) if tags else []
-    started = len(re.findall(r"Running '[^']+' at '", text))
-    if steps and started > len(steps):
-        return f"SUBSTEPS_EXCLUDED:{len(steps)}/{started}"
-    return None
-
-
-_register(Instrument(
-    name="librelane_whole_flow::steps_from_log",
-    reads="LibreLane run flow.log (`Running '<id>' at '<path>'` lines)",
-    ruling="llv1 W5", owner="lla",
-    why=("The driver checks each segment's steps against the image's own plan "
-         "from the run's log. A composite step (OpenROAD.RepairAntennas) logs "
-         "its sub-steps one folder deeper; counting them would make every "
-         "complete segment read as an unexpected step list."),
-    judge=_judge_ll_steps_from_log,
-    positive=Sample(
-        provenance=(_LL_WHOLE_PROV + "Classic segment 2 (s2cl, --from "
-                    "OpenROAD.CheckSDCFiles): 67 steps, 69 Running lines "
-                    "(RepairAntennas' two sub-steps). "
-                    "calibration/librelane_flow_log_composite_pos.log"),
-        artefact=_read("librelane_flow_log_composite_pos.log")),
-    expect="SUBSTEPS_EXCLUDED:67/69",
-    negative=Sample(
-        provenance=(_LL_WHOLE_PROV + "Classic segment 1 (s1cl, --to "
-                    "Checker.NetlistAssignStatements): 9 steps, no composite. "
-                    "calibration/librelane_flow_log_plain_neg.log"),
-        artefact=_read("librelane_flow_log_plain_neg.log")),
-))
-
-
 def _judge_ll_deferred_lines(text: str) -> Optional[str]:
     import librelane_whole_flow as whole
     lines = whole.deferred_lines(text)

@@ -69,8 +69,6 @@ JSON_HEADER_STEP = "Yosys.JsonHeader"
 WHOLE_REL = "phase3/librelane/whole"
 HANDOFF_RECORD = "handoff.json"
 CHIP_TOP_RECORD_REL = "reports/phase3/io_pad_chip_top.json"
-#: A LibreLane run's own record of every step it started, in order.
-_RUNNING_RE = re.compile(r"Running '([^']+)' at '([^']+)'")
 #: Default deadline of one segment (seconds); a caller may pass its own.
 DEFAULT_DEADLINE_S = 4 * 3600
 
@@ -111,21 +109,16 @@ class Uncalibrated(Refusal):
 def steps_from_log(text: str, tag: str) -> List[Tuple[str, str]]:
     """[(step id, folder name)] for every step a run logged starting.
 
-    The logged path is relative to the CONTAINER's working directory, so only
-    its last two parts mean anything here: the run tag and the step folder. A
-    composite step logs its sub-steps one level deeper (`NN-step/1-sub`); only
-    the run directory's own children are the flow's steps."""
-    import instrument_calibration as _calibration
-    try:
-        _calibration.assert_calibrated("librelane_whole_flow::steps_from_log")
-    except _calibration.Uncalibrated as exc:
-        raise Uncalibrated("LL_INSTRUMENT_UNCALIBRATED", str(exc)) from None
-    out: List[Tuple[str, str]] = []
-    for step_id, folder in _RUNNING_RE.findall(text):
-        parts = Path(folder).parts
-        if len(parts) >= 2 and parts[-2] == tag:
-            out.append((step_id, parts[-1]))
-    return out
+    The grammar is read by `_tool_log_provenance.flow_log_steps` (W19's
+    calibrated reader of LibreLane's flow.log); this only selects the run's
+    own steps. The logged folder is relative to the CONTAINER's working
+    directory, so only its last two parts mean anything here: the run tag and
+    the step folder. A composite step logs its sub-steps one level deeper
+    (`<tag>/NN-step/1-sub`); only the run directory's own children are the
+    flow's steps."""
+    import _tool_log_provenance as _tlp
+    return [(step_id, parts[-1]) for step_id, parts in _tlp.flow_log_steps(text)
+            if len(parts) >= 2 and parts[-2] == tag]
 
 
 def started_steps(run_dir: Path) -> List[Tuple[str, Path]]:
