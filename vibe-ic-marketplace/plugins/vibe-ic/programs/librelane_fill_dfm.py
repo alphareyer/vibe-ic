@@ -139,7 +139,7 @@ def run_density(project: Path, image: str, pdk_root: Path, pdk: str, *,
     recorded beside it, never raised past it.  ``steps`` may lead with
     `KLayout.Filler` (the tool arm fills first)."""
     if not Path(gds).is_file():
-        raise Refusal('LL_GDS_MISSING', str(gds))
+        raise Refusal('LL_GDS_MISSING', f'no stream file at {Path(gds)}')
     configs = configs or resolve_step_configs(project, image, pdk, list(steps),
                                               pdk_root=pdk_root, folder=CONFIG_FOLDER)
     density_cfg = _load(configs['KLayout.Density'])

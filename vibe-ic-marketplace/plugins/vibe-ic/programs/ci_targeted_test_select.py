@@ -1429,8 +1429,8 @@ _DIR_GLOB_CALLS = ("glob", "rglob")
 _UNSHAPED_PATTERNS = frozenset({"*", "**", "**/*", "*/*"})
 
 
-def _glob_patterns_in(text: str) -> set[str]:
-    """Literal patterns this file passes to `.glob()` / `.rglob()`.
+def _glob_calls_in(text: str) -> set[tuple[str, str]]:
+    """`(call, pattern)` for every literal `.glob()` / `.rglob()` in this file.
 
     Fail-open like rule 4: an unparseable file contributes nothing rather than
     raising. A non-literal pattern (an f-string, a variable) is skipped for the
@@ -1440,7 +1440,7 @@ def _glob_patterns_in(text: str) -> set[str]:
         tree = ast.parse(text)
     except (SyntaxError, ValueError):
         return set()
-    out: set[str] = set()
+    out: set[tuple[str, str]] = set()
     for n in ast.walk(tree):
         if not isinstance(n, ast.Call):
             continue
@@ -1451,8 +1451,13 @@ def _glob_patterns_in(text: str) -> set[str]:
                 and isinstance(n.args[0].value, str):
             pat = n.args[0].value
             if pat not in _UNSHAPED_PATTERNS:
-                out.add(pat)
+                out.add((fn.attr, pat))
     return out
+
+
+def _glob_patterns_in(text: str) -> set[str]:
+    """Literal patterns this file passes to `.glob()` / `.rglob()`."""
+    return {pat for _, pat in _glob_calls_in(text)}
 
 
 def _build_dir_consumer_index(plugin_root: Path) -> dict[str, set[str]]:
@@ -1512,6 +1517,181 @@ def _dir_consumers(plugin_root: Path, changed_sources: list[str],
         hit_tests |= _helper_consumers(plugin_root, hit_helpers, source_stems)
         hit_tests |= {h for h in hit_helpers if Path(h).name.startswith("test_")}
     return hit_tests
+
+
+# RULE 8b — the glob lives in a PROGRAM, and the TEST chooses its root.
+#
+# MEASURED on the three landings that turned
+# `test_absence_verdict_names_its_search_space.py::test_the_shipped_tree_is_clean`
+# red for the third time (T99 9bd7eb1bb, T101 d255f9aad, T104 29d5b291b): each
+# added an absence refusal to a `programs/*.py`, and the landing selector
+# (import-edge mode) picked 665-685 files for each and never that test. The
+# test reads every program, but not by a glob of its own, so rule 8 cannot see
+# it:
+#
+#     res = AV.scan(PROGRAMS)          # the test hands over the directory
+#     for p in sorted(root.rglob("*.py")):   # the program walks it
+#
+# The glob sits in `absence_verdict_names_its_search_space_check.py`, and the
+# only thing tying the changed program to the test is that the test passes
+# `programs/` itself to a program that globs it. So that is the edge: a test is
+# selected when it DEPENDS ON a source module (rule 1 or rule 5 edge) that
+# globs a pattern matching the changed path, AND the test hands a directory
+# holding the changed path to a call — the file's own directory for `.glob`,
+# that directory or an ancestor inside the plugin for `.rglob`.
+#
+# Both halves are needed. The glob half alone is 70 programs and 487 dependent
+# test files for any new `programs/*.py`, most of which import a globbing
+# program for something else (`flow_compliance_check` alone carries 306). The
+# hand-over half is what says the sweep is pointed at THIS tree: measured on
+# 06d137c57 it keeps 102 files, the absence test among them.
+#
+# Applies in EVERY mode and uncapped, on rule 8's argument: no other rule sees
+# this population at all.
+#
+# Not reached, deliberately: a test that runs a sweep with the program's OWN
+# default root (`P.main([])`) hands over nothing, so no directory is named and
+# the edge would have to be read out of the program's argparse default.
+_PATH_KEEPING_CALLS = frozenset({"resolve", "absolute", "expanduser"})
+_PATH_WRAPPERS = frozenset({"str", "fspath", "Path", "PurePath", "PosixPath"})
+#: Calls that take a directory and do not read what is in it.
+_NOT_A_DIRECTORY_READ = frozenset({
+    "insert", "append", "syspath_prepend", "chdir", "is_dir", "exists",
+    "relative_to", "is_relative_to", "mkdir",
+})
+
+
+def _levels_above_file(node: ast.AST, binds: dict[str, list[ast.AST]],
+                       seen: tuple[str, ...] = ()) -> int | None:
+    """How many directories above `__file__` `node` denotes, or None.
+
+    Only the shapes this tree uses to name its own directories: `Path(__file__)`
+    followed by `.resolve()`/`.absolute()`, `.parent` and `.parents[n]`, through
+    names bound exactly once. Anything else is None — an unresolvable root is
+    not evidence of a sweep.
+    """
+    if isinstance(node, ast.Name):
+        if node.id in seen or len(binds.get(node.id, ())) != 1:
+            return None
+        return _levels_above_file(binds[node.id][0], binds, seen + (node.id,))
+    if isinstance(node, ast.Call):
+        fn = node.func
+        if _func_name(fn) in {"Path", "PurePath"} and len(node.args) == 1:
+            arg = node.args[0]
+            if isinstance(arg, ast.Name) and arg.id == "__file__":
+                return 0
+            return _levels_above_file(arg, binds, seen)
+        if isinstance(fn, ast.Attribute) and fn.attr in _PATH_KEEPING_CALLS \
+                and not node.args:
+            return _levels_above_file(fn.value, binds, seen)
+        return None
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        up = _levels_above_file(node.value, binds, seen)
+        return None if up is None else up + 1
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) \
+            and node.value.attr == "parents" \
+            and isinstance(node.slice, ast.Constant) \
+            and isinstance(node.slice.value, int):
+        up = _levels_above_file(node.value.value, binds, seen)
+        return None if up is None else up + node.slice.value + 1
+    return None
+
+
+def _func_name(fn: ast.AST) -> str:
+    if isinstance(fn, ast.Name):
+        return fn.id
+    if isinstance(fn, ast.Attribute):
+        return fn.attr
+    return ""
+
+
+def _handed_dirs(test_path: Path) -> set[Path]:
+    """Directories `test_path` passes, whole, as an argument to some call."""
+    try:
+        tree = ast.parse(test_path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError, ValueError):
+        return set()
+    binds: dict[str, list[ast.AST]] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    binds.setdefault(t.id, []).append(n.value)
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) \
+                and n.value is not None:
+            binds.setdefault(n.target.id, []).append(n.value)
+    here = test_path.resolve()
+    out: set[Path] = set()
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        name = _func_name(n.func)
+        if name in _NOT_A_DIRECTORY_READ or name in _PATH_WRAPPERS:
+            continue
+        args: list[ast.AST] = []
+        for a in [*n.args, *(k.value for k in n.keywords)]:
+            args += list(a.elts) if isinstance(a, (ast.List, ast.Tuple)) else [a]
+        for a in args:
+            while isinstance(a, ast.Call) and len(a.args) == 1 \
+                    and _func_name(a.func) in _PATH_WRAPPERS:
+                a = a.args[0]
+            up = _levels_above_file(a, binds)
+            if up and up <= len(here.parents):
+                out.add(here.parents[up - 1])
+    return out
+
+
+def _sweep_consumers(plugin_root: Path, changed_sources: list[str],
+                     source_stems: set[str],
+                     edge_index: dict[str, set[str]] | None = None) -> set[str]:
+    """Rule 8b: tests that hand a changed file's directory to a program that
+    globs it. See the block above for the measurement and both halves."""
+    if not changed_sources:
+        return set()
+    root = plugin_root.resolve()
+    # stem -> (does a matching `.rglob` exist) for every globbing source module
+    # whose pattern matches some changed source, keyed per changed source.
+    sweepers: dict[str, list[tuple[Path, bool]]] = {}
+    for d in _SOURCE_DIRS:
+        sdir = plugin_root / d
+        if not sdir.is_dir():
+            continue
+        for prog in sorted(sdir.glob("*.py")):
+            try:
+                text = prog.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if "glob(" not in text:
+                continue
+            calls = _glob_calls_in(text)
+            for src in changed_sources:
+                base = Path(src).name
+                hits = {c for c, p in calls
+                        if fnmatch.fnmatch(base, p) or fnmatch.fnmatch(src, p)}
+                if hits:
+                    sweepers.setdefault(prog.stem, []).append(
+                        ((root / src).parent, "rglob" in hits))
+    if not sweepers:
+        return set()
+    if edge_index is None:
+        edge_index = _build_import_edge_index(plugin_root, source_stems)
+    owned = _build_test_index(plugin_root, source_stems)
+    handed_cache: dict[str, set[Path]] = {}
+    out: set[str] = set()
+    for stem, targets in sweepers.items():
+        for rel in edge_index.get(stem, set()) | owned.get(stem, set()):
+            if rel in out:
+                continue
+            if rel not in handed_cache:
+                handed_cache[rel] = {h.resolve() for h in
+                                     _handed_dirs(plugin_root / rel)}
+            for handed in handed_cache[rel]:
+                if any(handed == d or (recursive and handed in d.parents
+                                       and (handed == root or root in handed.parents))
+                       for d, recursive in targets):
+                    out.add(rel)
+                    break
+    return out
 
 
 def _smoke_set(plugin_root: Path) -> set[str]:
@@ -1684,6 +1864,10 @@ def select_tests(
     # silent miss is most expensive — that is the #1265 failure, verbatim.
     if changed_sources:
         selected |= _dir_consumers(plugin_root, changed_sources, source_stems)
+        # (8b) the same read, with the glob in a PROGRAM and the root chosen
+        # by the test. See `_sweep_consumers`.
+        selected |= _sweep_consumers(plugin_root, changed_sources, source_stems,
+                                     edge_index if mode == MODE_IMPORT_EDGE else None)
 
     # (6) Built LAZILY, same as rule 4 and for the same reason.
     #

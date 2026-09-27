@@ -447,8 +447,10 @@ def execute(
                    + R._build_pg_reconnect_tcl(reroute=False))
 
     def _route_from_checkpoint(out: str, err: str) -> Tuple[int, str, str]:
-        if not all(v.is_file() and v.stat().st_size for v in pre.values()):
-            return _refuse("LL_ROUTE_CHECKPOINT_MISSING", str(work), out)
+        absent_paths = [str(v) for v in pre.values() if not (v.is_file() and v.stat().st_size)]
+        if absent_paths:
+            return _refuse("LL_ROUTE_CHECKPOINT_MISSING",
+                           f"absent or empty pre-route checkpoint: {', '.join(absent_paths)}", out)
         return _route(out, err)
 
     def _route(out: str, err: str) -> Tuple[int, str, str]:
