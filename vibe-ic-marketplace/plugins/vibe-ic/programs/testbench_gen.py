@@ -1162,28 +1162,15 @@ def states_a_checkable_answer(case: dict) -> bool:
     return bool(_STATED_LITERAL_RE.search(str(case.get("expected") or "")))
 
 
-def oracle_family_claiming(case: dict,
-                           ic_class: "str | None" = None) -> "str | None":
-    """The oracle family of THIS producer whose detector claims `case`, or None.
-
-    Each family is asked through its OWN detector -- the same predicate its
-    emitter refuses on first -- so this cannot disagree with the emitters about
-    which cases they own. A claimed case that did not run is this flow's gap.
-
-    FAIL-CLOSED. A detector (or a family module's import) that raises answers
-    `FAMILY_UNKNOWN`, never None: "no family claims it" is what moves a case
-    OUT of blocking, so it may only be said when every detector answered. The
-    stated-vector family claims every case that STATES a checkable value
-    (`states_a_checkable_answer`), not only the ones its driver can extract --
-    an extraction refusal is the driver's limit, not the input's gap. The
-    reset-invariant family claims a case either of its detectors fires on,
-    including the ambiguous both-fire case its emitter refuses to guess."""
+def _family_by_detector(case: dict,
+                        ic_class: "str | None" = None) -> "str | None":
+    """The family whose OWN detector claims `case` -- the predicate its emitter
+    refuses on first -- or None; `FAMILY_UNKNOWN` when a detector (or a family
+    module's import) raised."""
     try:
         import known_answer_vector_tb_gen as _ktb  # type: ignore
         if _ktb._kav is not None and _ktb._kav.is_known_answer_vector(case):
             return "known_answer_vector"
-        if states_a_checkable_answer(case):
-            return "stated_vector"
         import stated_vector_bus_oracle_gen as _svb  # type: ignore
         if _svb.stated_answer(case)[0] is not None:
             return "stated_vector"
@@ -1199,6 +1186,27 @@ def oracle_family_claiming(case: dict,
     except Exception:                                        # noqa: BLE001
         return FAMILY_UNKNOWN
     return None
+
+
+def oracle_family_claiming(case: dict,
+                           ic_class: "str | None" = None) -> "str | None":
+    """The oracle family of THIS producer that claims `case`, or None.
+
+    Each family is asked through its OWN detector (`_family_by_detector`), so
+    this cannot disagree with the emitters about which cases they own. A
+    claimed case that did not run is this flow's gap.
+
+    FAIL-CLOSED. A detector (or a family module's import) that raises answers
+    `FAMILY_UNKNOWN`, never None: "no family claims it" is what moves a case
+    OUT of blocking, so it may only be said when every detector answered. The
+    stated-vector family claims every case that STATES a checkable value
+    (`states_a_checkable_answer`), not only the ones its driver can extract --
+    an extraction refusal is the driver's limit, not the input's gap. The
+    reset-invariant family claims a case either of its detectors fires on,
+    including the ambiguous both-fire case its emitter refuses to guess."""
+    if states_a_checkable_answer(case):
+        return "stated_vector"
+    return _family_by_detector(case, ic_class)
 
 
 def _in_flow_testbench(project: Path, name: str) -> "Path | None":
@@ -1258,12 +1266,13 @@ def case_input_gap(project: Path, case: dict,
       * a program or testbench is DELIVERED for it in the input;
       * this run's own `sim/tb/` holds a testbench for it that is more than the
         substance floor (the flow had one and did not execute it);
-      * an oracle family claims it, or a family's detector could not answer
-        (`FAMILY_UNKNOWN`) -- including the stated-vector family for every
-        case whose expected half STATES a checkable value: the input supplied
-        both halves, so the missing piece is a driver;
+      * an oracle family's own detector claims it, or a detector could not
+        answer (`FAMILY_UNKNOWN`);
       * it states no stimulus at all (no evidence either way);
-      * every image its stimulus names IS in the design input.
+      * every image its stimulus names IS in the design input;
+      * it names no image and its expected half STATES a checkable value --
+        the stated-vector family's (`oracle_family_claiming`): the input
+        supplied both halves, so the missing piece is a driver.
     The input's gap is exactly: a named image absent from `input/**`, or no
     named image, no delivered program and an expected half that states no
     value (e.g. "PASS" -- the verdict of a program the input never delivers).
@@ -1275,8 +1284,7 @@ def case_input_gap(project: Path, case: dict,
         return None
     if _in_flow_testbench(project, name) is not None:
         return None
-    family = oracle_family_claiming(case, ic_class)
-    if family is not None:
+    if _family_by_detector(case, ic_class) is not None:
         return None
     stimulus = str(case.get("stimulus") or "").strip()
     if not stimulus:
@@ -1288,6 +1296,13 @@ def case_input_gap(project: Path, case: dict,
     present = _input_file_leaves(project)
     missing = [n for n in named if n.lower() not in present]
     if named and not missing:
+        return None
+    # A NAMED image the input does not contain is positive proof on its own,
+    # whatever the expected half states (MEASURED on subservient: hello_hex
+    # names hello.hex and expects a UART string "by 115200 baud" -- a number,
+    # but nothing can run without the image). Without a named image, a case
+    # whose expected half states a value is the stated-vector family's.
+    if not missing and states_a_checkable_answer(case):
         return None
     looked = list(_DELIVERED_TB_DIRS) + ["input/** (every file, by name)"]
     expected = str(case.get("expected") or "").strip()
