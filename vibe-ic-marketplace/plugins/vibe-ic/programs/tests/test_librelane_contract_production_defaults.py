@@ -53,6 +53,11 @@ def test_every_production_default_is_a_mode_the_contract_knows():
 
 # ── T96: the chip path's class defaults for steps 15..20 ────────────────────
 _CHAIN = ("15", "15.5ic", "17", "18", "19", "20")
+_CHAIN_R4 = _CHAIN + ("21", "32")
+#: The population, pinned by MEMBERS: T96 cut 15..20 over; T102 r4 added the
+#: route (21, T99) and the post-route repair (32) as one chain.
+_T96_MEMBERS = {"15", "15.5ic", "17", "18", "19", "20"}
+_T102_MEMBERS = {"21", "32"}
 
 
 def _chip(tmp_path, deliverable="DIE", *, marker="SELF_TAPEOUT.txt"):
@@ -72,12 +77,14 @@ def _chip(tmp_path, deliverable="DIE", *, marker="SELF_TAPEOUT.txt"):
     return tmp_path
 
 
-def test_the_chip_path_runs_15_to_20_on_librelane_with_no_switch(tmp_path):
+def test_the_chip_path_runs_15_to_21_and_32_on_librelane_with_no_switch(tmp_path):
     project = _chip(tmp_path)
     assert LC.design_class(project) == LC.DESIGN_CLASS_CHIP_PAD_RING
-    assert {s: LC.selected_mode(project, s) for s in _CHAIN} == dict.fromkeys(_CHAIN, "librelane")
+    assert set(LC.CLASS_PRODUCTION_DEFAULTS[LC.DESIGN_CLASS_CHIP_PAD_RING]) \
+        == _T96_MEMBERS | _T102_MEMBERS
+    assert {s: LC.selected_mode(project, s) for s in _CHAIN_R4} == dict.fromkeys(_CHAIN_R4, "librelane")
     # outside the cut-over, nothing moves
-    for step in ("9", "16", "21", "22", "37"):
+    for step in ("9", "16", "22", "23", "26", "37"):
         assert LC.selected_mode(project, step) == "direct"
 
 
@@ -91,7 +98,7 @@ def test_a_design_with_no_pad_ring_keeps_direct(tmp_path, fixture):
     project = (tmp_path if fixture == "core_only"
                else _chip(tmp_path, deliverable="HARDMACRO", marker="slots"))
     assert LC.design_class(project) is None
-    assert {LC.selected_mode(project, s) for s in _CHAIN} == {"direct"}
+    assert {LC.selected_mode(project, s) for s in _CHAIN_R4} == {"direct"}
     assert LC.class_defaults_in_force(project) == {}
 
 
@@ -123,6 +130,25 @@ def test_an_opt_out_takes_the_steps_that_continue_it_back_to_direct(tmp_path):
     assert LC.selected_mode(project, "15") == "librelane"
 
 
+def test_the_route_and_its_post_route_repair_opt_out_together(tmp_path):
+    """T102 r4: 32's class default is the repair inside 21's LibreLane chain.
+    Taking 21 direct takes 32 with it; 32 alone may still be opted out, and
+    21 does not depend on 19/20 (T99 routed after direct CTS/hold too)."""
+    project = _chip(tmp_path)
+    _switch(project, {"21": "direct"})
+    assert (LC.selected_mode(project, "21"), LC.selected_mode(project, "32")) == ("direct", "direct")
+    assert LC.selected_mode(project, "20") == "librelane"
+    _switch(project, {"32": "direct"})
+    assert (LC.selected_mode(project, "21"), LC.selected_mode(project, "32")) == ("librelane", "direct")
+    _switch(project, {"19": "direct", "20": "direct"})
+    assert (LC.selected_mode(project, "21"), LC.selected_mode(project, "32")) == ("librelane", "librelane")
+    _switch(project, {"21": "dual"})        # 32's own dual arm needs 21 on LibreLane: dual is
+    assert LC.selected_mode(project, "32") == "direct"   # not `librelane`, so 32 is not defaulted
+    _switch(project, {"21": "librelane", "32": "dual"})
+    assert LC.selected_mode(project, "32") == "dual"
+    assert "32" not in LC.class_defaults_in_force(project)
+
+
 def test_the_switch_and_a_step_wide_default_outrank_the_class(tmp_path, monkeypatch):
     project = _chip(tmp_path)
     _switch(project, {"19": "dual", "20": "dual"})
@@ -145,8 +171,8 @@ def test_the_class_default_is_part_of_the_admission_identity(tmp_path):
     assert R._librelane_admission_facts(tmp_path) == {}
     project = _chip(tmp_path / "chip")
     facts = R._librelane_admission_facts(project)
-    assert facts["librelane_class_defaults"] == dict.fromkeys(_CHAIN, "librelane")
+    assert facts["librelane_class_defaults"] == dict.fromkeys(_CHAIN_R4, "librelane")
     assert facts["librelane_contract_sha256"] == LC.digest(Path(LC.__file__))
-    _switch(project, dict.fromkeys(_CHAIN, "direct"))
+    _switch(project, dict.fromkeys(_CHAIN_R4, "direct"))
     facts = R._librelane_admission_facts(project)
     assert "librelane_class_defaults" not in facts and "librelane_switch" in facts

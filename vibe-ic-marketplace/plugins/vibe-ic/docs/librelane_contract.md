@@ -1,6 +1,6 @@
 # Phase 3 LibreLane contract (T83)
 
-`programs/librelane_contract.py` is the opt-in adapter for a migration lane. The existing Phase 3 runner remains the default for every step not named in `PRODUCTION_DEFAULTS` until a lane declares `phase3/librelane_switch.json` with `{"steps":{"15.5ic":"librelane"}}` or `"dual"`. `selected_mode(project, step_id)` returns the switch file's mode when it names the step; otherwise the step's entry in `PRODUCTION_DEFAULTS` (set only by a lane that has cut the step over), otherwise its design class's entry in `CLASS_PRODUCTION_DEFAULTS` (T96: steps 15..20 on the chip path, see "Cut-over of 15..20"), otherwise `direct`. An explicit `"direct"` in the switch is a project's opt-out of a cut-over default; unknown modes are refused from either source. Each migration lane must connect this decision at its own step's producer call site, run the existing vibe-ic gate on the selected output, and retain both arm directories. The T83 proof invokes the adapter directly; it does not switch production step 15.5ic.
+`programs/librelane_contract.py` is the opt-in adapter for a migration lane. The existing Phase 3 runner remains the default for every step not named in `PRODUCTION_DEFAULTS` until a lane declares `phase3/librelane_switch.json` with `{"steps":{"15.5ic":"librelane"}}` or `"dual"`. `selected_mode(project, step_id)` returns the switch file's mode when it names the step; otherwise the step's entry in `PRODUCTION_DEFAULTS` (set only by a lane that has cut the step over), otherwise its design class's entry in `CLASS_PRODUCTION_DEFAULTS` (T96: steps 15..20 on the chip path, see "Cut-over of 15..20"; T102 r4: steps 21 and 32 too), otherwise `direct`. An explicit `"direct"` in the switch is a project's opt-out of a cut-over default; unknown modes are refused from either source. Each migration lane must connect this decision at its own step's producer call site, run the existing vibe-ic gate on the selected output, and retain both arm directories. The T83 proof invokes the adapter directly; it does not switch production step 15.5ic.
 
 ## Invocation and state
 
@@ -220,6 +220,12 @@ Refusals: `LL_ROUTE_DECK_UNSPLITTABLE`, `LL_ROUTE_CHECKPOINT_MISSING`, `LL_PDK_R
 Refusals: `LL_PV_VIEW_MISSING`, `LL_PV_HALF_UNKNOWN`, `LL_PV_REPORT_MISSING`, `LL_ROUTE_TECH_LEF_UNBOUND`, `LL_FINISHING_CORE_UNDECLARED`, `LL_STATE_CHANGED`, and any `run_chain` refusal. Fork PRs (sent): vibeic/librelane#16 (checkers and ReportManufacturability: an absent metric is NOT_MEASURED), #18 (`xor.drc` census), #19 (`KLayout.LVS` runs any declared runset).
 
 ## Step 32: post-route repair (T102, opt-in)
+
+## Cut-over of 21 and 32 on the chip path (T99 + T102 r4)
+
+**The default.** `CLASS_PRODUCTION_DEFAULTS['chip_pad_ring']` also sets `21` (routing, T99) and `32` (post-route repair) to `librelane`: a chip-path design with no switch runs LL15..20 → LL21 → `Vibeic.PostRouteRepair` → tail. `CLASS_DEFAULT_REQUIRES['32'] = ('21',)`: step 32's default is the repair inside 21's LibreLane chain, so naming 21 anything but `librelane` takes 32 back to the deck's own post-route repair; 21 needs nothing (it routes after direct 19/20 too). The direct route and the direct step 32 stay as the opt-out and `dual` arms; nothing was deleted. Evidence: spm with no switch file vs the same code with 21/32 forced direct (T102 report r4).
+
+## Step 32: post-route repair (T102; chip-path default since r4)
 
 **Selection.** `"32": "librelane"` or `"dual"` in the switch.
 - **With step 21 on LibreLane (T102 r2):** step 32 runs INSIDE step 21's chain, on the selected route arm's own State. `librelane_route.execute` calls `phase3_one_shot_runner.postroute_repair_after_route` after its selection and before its handoff, so the order is LL15..20 → LL21 → `Vibeic.PostRouteRepair` → tail. The adopted candidate's ODB/DEF are what `routed_preantenna.*` carries; the receipt `librelane_route_handoff.json` names the step-32 report by sha256; the main flow's step-32 row only records it. The route's fillers are LibreLane's, so the refill is too.

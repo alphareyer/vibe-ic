@@ -1383,7 +1383,11 @@ DESIGN_CLASS_CHIP_PAD_RING = 'chip_pad_ring'
 CLASS_PRODUCTION_DEFAULTS: dict[str, dict[str, str]] = {
     DESIGN_CLASS_CHIP_PAD_RING: {'15': 'librelane', '15.5ic': 'librelane',
                                  '17': 'librelane', '18': 'librelane',
-                                 '19': 'librelane', '20': 'librelane'},
+                                 '19': 'librelane', '20': 'librelane',
+                                 # T99 + T102 r4 (owner ruling, CUT-OVER rule):
+                                 # routing and the post-route repair, as one
+                                 # chain (LL21 -> Vibeic.PostRouteRepair -> tail)
+                                 '21': 'librelane', '32': 'librelane'},
 }
 
 #: A class default runs only inside the chain it continues. The producers are
@@ -1395,7 +1399,12 @@ CLASS_PRODUCTION_DEFAULTS: dict[str, dict[str, str]] = {
 #: LL_CTS_HOLD_SPLIT_UNSUPPORTED) on a combination it never asked for.
 CLASS_DEFAULT_REQUIRES: dict[str, tuple[str, ...]] = {
     '15': ('15.5ic',), '17': ('15', '15.5ic', '18'), '18': ('15', '15.5ic', '17'),
-    '19': ('20',), '20': ('19',)}
+    '19': ('20',), '20': ('19',),
+    # Step 32's class default is the repair INSIDE step 21's LibreLane chain
+    # (the proven chain, T102 r3/r4); a project that takes 21 back to direct
+    # takes 32 with it, onto the deck's own post-route repair. Step 21 on
+    # LibreLane stands on its own (T99 routed after direct 19/20 too).
+    '32': ('21',)}
 
 
 def design_class(project: Path) -> str | None:
