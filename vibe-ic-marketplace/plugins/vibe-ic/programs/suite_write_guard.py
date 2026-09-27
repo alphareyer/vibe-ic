@@ -466,7 +466,7 @@ def _cwd_sibling_root(config, repo: Path):
     whose tests are running. It is NOT always the tree a write lands in. Any
     writer that names no directory writes into the PROCESS cwd, which is the
     directory pytest was invoked from — and nothing forces that to be the same
-    checkout. Measured in the vibeic-eda image (uid 1000, /home/reyerchu
+    checkout. Measured in the vibeic-eda image (uid 1000, account-home
     bind): the ATPG engine's local route inherits the cwd, and its PLY parser
     (`outputdir='.'`) and its per-thread simulation dir (`thr0x…/tb.sv`) land
     there. Run from checkout B's plugin root against checkout A's tests, the

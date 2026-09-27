@@ -2,7 +2,7 @@
 
 WHAT WAS MEASURED
 =================
-In the vibeic-eda image (uid 1000, /home/reyerchu bind) the ATPG engine's LOCAL
+In the vibeic-eda image (uid 1000, account-home bind) the ATPG engine's LOCAL
 route inherited the caller's cwd, and the engine writes relative to `.`: its PLY
 parser leaves `parser.out` + `parsetab.py`, its simulator a `thr0x…/tb.sv`. Run
 from the plugin root of the tree under test, `suite_write_guard` went RED on
