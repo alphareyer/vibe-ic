@@ -68,6 +68,7 @@ import _path_layout as _pl
 import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _runner_lock  # ORGANIC #588 — single-driver lock (all 4 runners)
+import _impl_flow  # llv1: the --librelane mode record
 import _watchdog as _wd  # progress supervision — never a runtime bound
 import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch site
 # THE L-document write chokepoint — records the producing release on the
@@ -1619,11 +1620,18 @@ def main() -> int:
                         "`vibe_ic_one_shot_runner` when a delivered answer is "
                         "on disk and the track's own record says nobody has "
                         "read it.")
+    _impl_flow.add_cli_flags(p)
     args, extras = p.parse_known_args()
     project = args.project.resolve()
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
+    # --librelane (llv1 W1): resolve the implementation-flow mode, or refuse
+    # it by name, before anything is locked or written. Read-only.
+    _impl_rc = _impl_flow.gate_or_exit(project, args, runner='phase1_one_shot_runner',
+                                       parser=p)
+    if _impl_rc is not None:
+        return _impl_rc
 
     # ORGANIC #588 — single-driver lock, honored by the standalone phase
     # runner too (not just the orchestrator). Re-enters cleanly when the

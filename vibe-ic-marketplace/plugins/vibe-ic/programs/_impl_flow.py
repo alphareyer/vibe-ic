@@ -443,3 +443,231 @@ def dispatch_config_entry(impl: str) -> Dict[str, str]:
     """
     impl = normalise(impl)
     return {} if impl == IMPL_DEFAULT else {"impl": impl}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# W1: THE COMMAND LINE — flags, the knob map, the child argv, the gate
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Every runner that can be invoked on its own (the front door and each phase
+# runner it delegates to) takes the same two flags and calls `gate` once,
+# before its project lock, with its REAL parser. The gate is read-only.
+#
+# `--librelane` selects the mode. `--orfs` is accepted by the parser only so it
+# is refused BY NAME (IMPL_NOT_YET_SUPPORTED) instead of as an unknown option.
+#
+# A child runner is told the mode by `child_argv(project)`, which reads the
+# project's record: the default has no record, so a default child argv is
+# exactly what it was. A child whose flag (or missing flag) disagrees with the
+# record refuses IMPL_MODE_CONFLICT — so a spawn site that forgets to forward
+# the flag fails closed, never runs the default flow on a flagged project.
+#
+# NOT YET WIRED. No runner consumes a non-default mode yet (the consumer mode
+# is W7b; admission and the step cache key on the mode in W2). Until a runner
+# is listed in WIRED_RUNNERS, `gate` refuses a non-default mode with
+# IMPL_NOT_YET_WIRED after every other check, and writes nothing — a flagged
+# run must never quietly run the default flow under a flagged name.
+
+HONOURED = "honoured"   # the knob keeps its meaning: vibe-ic still runs it
+MAPPED = "mapped"       # the knob becomes a tool config variable (named)
+REFUSED = "refused"     # the knob has no meaning under the flag: refused
+
+IMPL_KNOB_UNSUPPORTED = "IMPL_KNOB_UNSUPPORTED"
+IMPL_NOT_YET_WIRED = "IMPL_NOT_YET_WIRED"
+#: The refusals the command-line gate adds to REASON_CLASSES.
+CLI_REASON_CLASSES = (IMPL_KNOB_UNSUPPORTED, IMPL_NOT_YET_WIRED)
+
+#: The parser destinations the flags themselves own (never knobs).
+FLAG_DESTS = frozenset({"librelane", "orfs"})
+
+#: Runners whose consumer mode has landed. Empty in W1; W7b adds to it.
+WIRED_RUNNERS: frozenset = frozenset()
+
+_WINDOW = ("the external flow runs one span per segment; mapping a window "
+           "onto it is W7b, until then a window is refused under the flag")
+_P1 = "Phase 1 runs unchanged under the flag"
+_P2 = "Phase 2 steps 1-8 run unchanged under the flag"
+_ANALOG = ("the analog track is out of v1 and is refused as a whole under the "
+           "flag (W24); its knobs keep their meaning for the default flow")
+_UI = "operator interface only; no step reads it"
+_IMG = "the image is resolved at dispatch and recorded (decision 24)"
+_PDK = "vibe-ic resolves the PDK; v1 admits gf180mcuD only (W24)"
+_DIE = ("DIE_AREA: an explicit die is the design's, passed to the tool "
+        "(0.5ic/W9); 'auto' is vibe-ic's auto-die between the segments")
+_UTIL = ("FP_CORE_UTIL (Classic) / the auto-die's utilisation (Chip); an "
+         "explicit value is passed, the parser default is not a declaration")
+
+#: Every option of every gated runner, by parser destination, with what it
+#: means under `--librelane`. `test_every_knob_has_a_disposition` reads the
+#: real parsers, so a new option without a row here is red.
+KNOBS: Dict[str, Dict[str, tuple]] = {
+    "vibe_ic_one_shot_runner": {
+        "project": (HONOURED, "the project"),
+        "top_name": (HONOURED, "vibe-ic resolves the top; the tool's "
+                     "DESIGN_NAME follows it"),
+        "container": (HONOURED, _IMG),
+        "require_image": (HONOURED, _IMG),
+        "max_rtl_repair_retries": (HONOURED, _P2),
+        "lec_max_completed_rungs": (HONOURED, "step 13 stays vibe-ic LEC "
+                                    "(decision 11b)"),
+        "skip_hardware": (HONOURED, _P2),
+        "entry_step": (REFUSED, _WINDOW),
+        "exit_step": (REFUSED, _WINDOW),
+        "skip_phase1": (HONOURED, _P1),
+        "skip_analog": (HONOURED, _ANALOG),
+        "skip_phase3": (HONOURED, "stops before the tool runs"),
+        "die_um": (MAPPED, _DIE),
+        "util": (MAPPED, _UTIL),
+        "pdk": (HONOURED, _PDK),
+        "allow_pdk_target_mismatch": (HONOURED, _PDK),
+        "allow_oss_pdk_fallback": (HONOURED, _PDK),
+        "ic_name": (HONOURED, "the design identity"),
+        "dashboard": (HONOURED, _UI),
+        "dashboard_port": (HONOURED, _UI),
+        "dashboard_host": (HONOURED, _UI),
+        "dashboard_full": (HONOURED, _UI),
+    },
+    "phase1_one_shot_runner": {
+        "project": (HONOURED, "the project"),
+        "ic_name": (HONOURED, _P1),
+        "mode": (HONOURED, _P1),
+        "second_track_only": (HONOURED, _P1),
+    },
+    "design_one_shot_runner": {
+        "project": (HONOURED, "the project"),
+        "skip_hardware": (HONOURED, _P2),
+        "skip_analog": (HONOURED, _ANALOG),
+        "entry_step": (REFUSED, _WINDOW),
+        "exit_step": (REFUSED, _WINDOW),
+        "max_rtl_repair_retries": (HONOURED, _P2),
+        "lec_max_completed_rungs": (HONOURED, "step 13 stays vibe-ic LEC "
+                                    "(decision 11b)"),
+        "top_name": (HONOURED, "vibe-ic resolves the top"),
+        "container": (HONOURED, _IMG),
+        "skip_phase3": (HONOURED, "stops before the tool runs"),
+        "dry_run": (HONOURED, _P2),
+        "force_rtl_regen": (HONOURED, _P2),
+        "refresh_only": (HONOURED, "whole-flow roll-ups only; no step runs"),
+    },
+    "analog_one_shot_runner": {
+        "project": (HONOURED, "the project"),
+        "container": (HONOURED, _ANALOG),
+        "allow_deterministic_stubs": (HONOURED, _ANALOG),
+        "blocks": (HONOURED, _ANALOG),
+        "pdk": (HONOURED, _ANALOG),
+    },
+    "phase23_one_shot_runner": {
+        "project": (HONOURED, "the project"),
+        "top_name": (HONOURED, "vibe-ic resolves the top"),
+        "container": (HONOURED, _IMG),
+        "max_rtl_repair_retries": (HONOURED, _P2),
+        "skip_hardware": (HONOURED, _P2),
+        "force_rtl_regen": (HONOURED, _P2),
+        "skip_phase2": (HONOURED, "Phase 3 alone, on the staged RTL"),
+        "skip_phase3": (HONOURED, "stops before the tool runs"),
+        "die_um": (MAPPED, _DIE),
+        "util": (MAPPED, _UTIL),
+        "pdk": (HONOURED, _PDK),
+        "allow_oss_pdk_fallback": (HONOURED, _PDK),
+        "detect_stable": (HONOURED, "reads the runner's own verdict streak"),
+    },
+    "phase3_one_shot_runner": {
+        "project": (HONOURED, "the project"),
+        "top_name": (HONOURED, "vibe-ic resolves the top"),
+        "ic_name": (HONOURED, "the design identity"),
+        "container": (HONOURED, _IMG),
+        "die_um": (MAPPED, _DIE),
+        "util": (MAPPED, _UTIL),
+        "pdk": (HONOURED, _PDK),
+        "allow_oss_pdk_fallback": (HONOURED, _PDK),
+        "allow_pdk_target_mismatch": (HONOURED, _PDK),
+        "spare_density": (MAPPED, "the kept Vibeic.InsertSpareCells step's "
+                          "density (decision 12)"),
+        "force_step": (REFUSED, "the kinds name vibe-ic's cached producers; "
+                       "the tool's segments are re-run whole (W7b)"),
+        "entry_step": (REFUSED, _WINDOW),
+        "exit_step": (REFUSED, _WINDOW),
+        "diagnostic_continue": (HONOURED, "retains diagnostic reports; under "
+                                "the flag the pre-stream gate only measures"),
+    },
+}
+
+
+def add_cli_flags(parser) -> None:
+    """Add `--librelane` and the reserved `--orfs` to a runner's parser."""
+    g = parser.add_mutually_exclusive_group()
+    g.add_argument("--librelane", action="store_true",
+                   help="implement the project with LibreLane (v1: "
+                        "gf180mcuD, digital, no macros). Resolved once per "
+                        "project; a different mode needs a fresh clone.")
+    g.add_argument("--orfs", action="store_true",
+                   help="RESERVED for an OpenROAD-flow-scripts mode; refused "
+                        "as not yet supported.")
+
+
+def requested_from_args(args) -> Optional[str]:
+    """The mode a parsed argv asks for; None means no flag (the default)."""
+    if getattr(args, "orfs", False):
+        return IMPL_ORFS
+    if getattr(args, "librelane", False):
+        return IMPL_LIBRELANE
+    return None
+
+
+def refuse_knobs(runner: str, args, parser) -> None:
+    """Refuse, by name, every REFUSED knob the invocation actually set.
+
+    "Set" is "differs from the parser's own default": a default is not a
+    request, and the runner's parser is the only authority on its default.
+    """
+    table = KNOBS[runner]
+    set_refused = []
+    for dest, (disposition, why) in sorted(table.items()):
+        if disposition != REFUSED:
+            continue
+        if getattr(args, dest, None) != parser.get_default(dest):
+            set_refused.append(f"--{dest.replace('_', '-')} ({why})")
+    if set_refused:
+        raise ImplRefusal(
+            IMPL_KNOB_UNSUPPORTED,
+            f"{runner} under {FLAG_FOR[IMPL_LIBRELANE]}: "
+            + "; ".join(set_refused))
+
+
+def gate(project: Path, args, *, runner: str, parser) -> str:
+    """Resolve this invocation's mode or refuse by name. Writes nothing.
+
+    Order: the mode itself (unknown / reserved / in-place switch), then the
+    knobs the mode cannot honour, then whether this runner consumes the mode.
+    """
+    if runner not in KNOBS:
+        raise KeyError(f"{runner} has no knob table")
+    impl = resolve(project, requested_from_args(args))
+    if impl == IMPL_DEFAULT:
+        return impl
+    refuse_knobs(runner, args, parser)
+    if runner not in WIRED_RUNNERS:
+        raise ImplRefusal(
+            IMPL_NOT_YET_WIRED,
+            f"{runner} does not implement {FLAG_FOR[impl]} yet (the consumer "
+            "mode lands in W7b; admission and the step cache key on the mode "
+            "in W2). Nothing was run or recorded. Remedy: run the default "
+            "flow (no flag).")
+    return impl
+
+
+def child_argv(project: Path) -> List[str]:
+    """The flag a spawned runner must carry for this project: [] by default."""
+    impl = recorded_impl(project)
+    return [] if impl == IMPL_DEFAULT else [FLAG_FOR[impl]]
+
+
+def gate_or_exit(project: Path, args, *, runner: str, parser) -> Optional[int]:
+    """`gate` for a runner's main(): the exit code to return on a refusal
+    (2, with the reason on stderr), or None to proceed."""
+    try:
+        gate(project, args, runner=runner, parser=parser)
+    except ImplRefusal as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
+    return None

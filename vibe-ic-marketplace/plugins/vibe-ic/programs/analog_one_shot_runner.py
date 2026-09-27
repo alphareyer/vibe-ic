@@ -64,6 +64,7 @@ import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _analog_a_check_common as _acc
 import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch site
+import _impl_flow  # llv1: the --librelane mode record
 # vibe-ic#2080 — the master block-list SCHEMA gate. `main()` already refuses an
 # ABSENT list and SKIPs an explicitly-empty one; PRESENT-BUT-BROKEN was the
 # state neither covered, and this gate — the only thing that judges it — was
@@ -2284,12 +2285,19 @@ def main() -> int:
                          "CONTRADICTS the design's own L19 declaration the run "
                          "REFUSES with both named; when it is absent the "
                          "declaration is used; there is no literal default."))
+    _impl_flow.add_cli_flags(p)
     args = p.parse_args()
 
     project = args.project.resolve()
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
+    # --librelane (llv1 W1): resolve the implementation-flow mode, or refuse
+    # it by name, before anything is locked or written. Read-only.
+    _impl_rc = _impl_flow.gate_or_exit(project, args, runner='analog_one_shot_runner',
+                                       parser=p)
+    if _impl_rc is not None:
+        return _impl_rc
 
     # BIND OR REFUSE. A `--pdk` that contradicts the design's own declaration
     # is a question this runner is not entitled to answer by itself, so it
