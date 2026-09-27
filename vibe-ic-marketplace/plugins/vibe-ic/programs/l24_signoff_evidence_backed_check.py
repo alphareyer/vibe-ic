@@ -97,6 +97,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # when the module body starts, and a sibling import placed first dies with
 # `No module named '_signoff_drc_format'`.
 import _signoff_drc_format as _sdf  # noqa: E402
+import _path_layout as _pl  # noqa: E402
 from l_doc_evidence_util import (  # noqa: E402
     EvidenceVerdict,
     find_layer_files,
@@ -479,10 +480,46 @@ def _phase3_has_run(project: Path) -> bool:
     measured it. Before that it is simply not yet measurable, and saying so is
     not the same as saying it was missed.
     """
-    if (project / "reports" / "orchestrator" / "phase3_one_shot.json").is_file():
-        return True
+    records = []
+    top = project / "reports" / "orchestrator" / "phase3_one_shot.json"
+    if top.is_file():
+        records.append(top)
     d = project / "reports" / "phase3"
-    return d.is_dir() and any(d.rglob("*.json"))
+    if d.is_dir():
+        records.extend(d.rglob("*.json"))
+    if not records:
+        return False
+    # FX_P2 — PHASE 3 OF WHICH DESIGN? A phase-3 record older than this run's
+    # own phase-2 netlist measured a netlist that no longer exists, so it says
+    # nothing about the design being audited. MEASURED on subservient (8HD-4,
+    # 2026-09-28): the tree carried an earlier supplementary phase-3 attempt
+    # (phase3_one_shot.json 09-27 22:24, halted at pad_ring) while phase 2 had
+    # just re-synthesised (netlist 09-28 00:27); this gate read "phase 3 has
+    # run", booked four stated sign-off requirements UNMET, and final_audit
+    # halted phase 2 -- so the phase that would measure them could not start.
+    # With no phase-2 netlist on disk there is nothing to date the records
+    # against and they are taken as they are, exactly as before.
+    newest_record = max(_mtime(p) for p in records)
+    newest_netlist = _newest_phase2_netlist_mtime(project)
+    if newest_netlist is not None and newest_record < newest_netlist:
+        return False
+    return True
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _newest_phase2_netlist_mtime(project: Path) -> Optional[float]:
+    """mtime of the newest synthesised netlist phase 2 wrote, or None."""
+    d = _pl.synth_dir(project)
+    if not d.is_dir():
+        return None
+    stamps = [_mtime(p) for p in d.glob("*.v") if p.is_file()]
+    return max(stamps) if stamps else None
 
 
 def _declared_process_corner_roles(project: Path, native: Any, required: List[str]
