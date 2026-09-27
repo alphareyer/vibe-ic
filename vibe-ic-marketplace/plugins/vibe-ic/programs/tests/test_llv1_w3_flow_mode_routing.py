@@ -51,11 +51,14 @@ LAYER = {
 }
 #: Steps a call site asks about that the flag deliberately does not decide.
 OUT_OF_LAYER = {"A6", "A7"}
-#: Call sites whose step is a runtime value no literal names. Each entry says
-#: where its population comes from; a stale entry fails the test.
+#: Call sites whose step is a runtime value no literal names, keyed by the
+#: SITE: (file, enclosing function, argument variable). Each entry says where
+#: its population comes from. Every entry must be used by exactly one site in
+#: the census, and an unresolvable call no entry names is unresolved -- so a
+#: new dynamic call anywhere, even beside a listed one, fails the census.
 DYNAMIC_SITES = {
-    ("librelane_pv_signoff.py", "step"): "STATE_KEYS",
-    ("phase3_one_shot_runner.py", "step"): ("DT2", "DT3"),
+    ("librelane_pv_signoff.py", "state_metric", "step"): "STATE_KEYS",
+    ("phase3_one_shot_runner.py", "atpg_librelane_views", "step"): ("DT2", "DT3"),
 }
 
 
@@ -67,6 +70,16 @@ def _tree(project: Path) -> dict:
 
 def _record(project: Path, impl: str = "librelane") -> None:
     IF.write_record(project, impl, resolved_by="test")
+
+
+def _orfs(project: Path) -> None:
+    """A well-formed record of the reserved mode: the one W0 itself writes for
+    `librelane`, with only the mode and its flag changed."""
+    _record(project)
+    path = IF.record_path(project)
+    rec = json.loads(path.read_text())
+    rec.update(impl="orfs", flag="--orfs")
+    path.write_text(json.dumps(rec))
 
 
 def _switch(project: Path, steps: dict) -> None:
@@ -151,11 +164,12 @@ def _aliases(module: ast.Module) -> tuple[set, set]:
     return funcs, mods
 
 
-def call_sites(root: Path = PROGRAMS):
+def call_sites(root: Path = PROGRAMS, used: dict | None = None):
     """[(file, line, steps)] for every shipped call of the contract's
     `selected_mode`, under whatever name the file imported it as. Any other
     reference to it (passed, stored, wrapped) raises UnaccountedReference: a
-    site the census cannot see must fail it, never shrink it."""
+    site the census cannot see must fail it, never shrink it. `used`, when
+    given, counts the sites each DYNAMIC_SITES entry resolved."""
     sites = []
     for path in sorted(root.rglob("*.py")):
         rel = path.relative_to(root)
@@ -188,7 +202,14 @@ def call_sites(root: Path = PROGRAMS):
                         if steps is None and arg.id in consts:
                             steps = (consts[arg.id],)
                         if steps is None:
-                            source = DYNAMIC_SITES.get((path.name, arg.id))
+                            enclosing = next(
+                                (p.name for p in reversed(parents)
+                                 if isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef))),
+                                None)
+                            key = (path.name, enclosing, arg.id)
+                            source = DYNAMIC_SITES.get(key)
+                            if source is not None and used is not None:
+                                used[key] = used.get(key, 0) + 1
                             if isinstance(source, str):
                                 table = getattr(__import__(path.stem), source)
                                 steps = tuple(sorted({v[0] for v in table.values()}))
@@ -218,9 +239,11 @@ def test_every_call_site_is_enumerated_and_resolved():
     for known in ("phase3_one_shot_runner.py", "design_one_shot_runner.py",
                   "librelane_route.py", "librelane_pv_signoff.py"):
         assert known in files
-    # Every DYNAMIC_SITES entry still names a real site (no stale entries).
-    for (name, var) in DYNAMIC_SITES:
-        assert any(Path(f).name == name for f, _, _ in sites), (name, var)
+    # Every DYNAMIC_SITES entry resolved exactly one site: none is stale and
+    # none silently covers a second call.
+    used: dict = {}
+    call_sites(used=used)
+    assert used == {key: 1 for key in DYNAMIC_SITES}, used
 
 
 def test_the_contract_carries_the_ruled_layer():
@@ -304,12 +327,8 @@ def test_a_damaged_record_refuses_never_the_default(tmp_path):
 
 
 def test_a_mode_with_no_layer_refuses_by_name(tmp_path):
-    path = IF.record_path(tmp_path)
-    path.parent.mkdir(parents=True)
-    path.write_text(json.dumps({
-        "schema": IF.SCHEMA, "impl": "orfs", "flag": "--orfs",
-        "resolved_at": "2026-09-28T00:00:00Z", "resolved_by": "test",
-        "tool_defaults": {}, "image": None}))
+    _orfs(tmp_path)
+    assert IF.validate_record(json.loads(IF.record_path(tmp_path).read_text())) == []
     with pytest.raises(LC.Refusal) as exc:
         LC.selected_mode(tmp_path, "21")
     assert exc.value.code == IF.IMPL_NOT_YET_SUPPORTED
@@ -333,13 +352,6 @@ def _damaged(project: Path) -> None:
     path.write_text("{not json")
 
 
-def _orfs(project: Path) -> None:
-    path = IF.record_path(project)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "schema": IF.SCHEMA, "impl": "orfs", "flag": "--orfs",
-        "resolved_at": "2026-09-28T00:00:00Z", "resolved_by": "test",
-        "tool_defaults": {}, "image": None}))
 
 
 @pytest.mark.parametrize("record", ["damaged", "orfs", "conflict", "librelane"])
@@ -425,3 +437,46 @@ def test_a_reference_the_census_cannot_follow_fails_it(tmp_path):
         "TABLE = {'m': selected_mode}\n"))
     with pytest.raises(UnaccountedReference):
         call_sites(root)
+
+
+# ── review fix 2 (review_wave4c W3): a dynamic site is keyed by its call ────
+
+_DYNAMIC_BODY = (
+    "import librelane_contract as _ll\n"
+    "def atpg_librelane_views(project, step):\n"
+    "    return _ll.selected_mode(project, step)\n")
+
+
+def _scratch_named(tmp_path, name: str, body: str) -> Path:
+    root = tmp_path / "programs"
+    root.mkdir()
+    (root / name).write_text(body)
+    return root
+
+
+def test_the_listed_dynamic_site_resolves_in_a_scratch_tree(tmp_path):
+    root = _scratch_named(tmp_path, "phase3_one_shot_runner.py", _DYNAMIC_BODY)
+    used: dict = {}
+    assert [s for _, _, s in call_sites(root, used)] == [("DT2", "DT3")]
+    assert used == {("phase3_one_shot_runner.py", "atpg_librelane_views", "step"): 1}
+
+
+def test_a_new_dynamic_call_beside_a_listed_one_is_unresolved(tmp_path):
+    root = _scratch_named(tmp_path, "phase3_one_shot_runner.py", _DYNAMIC_BODY + (
+        "def some_new_step(project, step):\n"
+        "    return _ll.selected_mode(project, step)\n"))
+    sites = call_sites(root)
+    unresolved = [(f, line) for f, line, s in sites if not s]
+    assert unresolved == [("phase3_one_shot_runner.py", 5)]
+
+
+def test_a_second_call_inside_the_listed_function_is_counted_twice(tmp_path):
+    root = _scratch_named(tmp_path, "phase3_one_shot_runner.py", (
+        "import librelane_contract as _ll\n"
+        "def atpg_librelane_views(project, step):\n"
+        "    a = _ll.selected_mode(project, step)\n"
+        "    return a, _ll.selected_mode(project, step)\n"))
+    used: dict = {}
+    call_sites(root, used)
+    assert used != {key: 1 for key in DYNAMIC_SITES}
+    assert used[("phase3_one_shot_runner.py", "atpg_librelane_views", "step")] == 2
