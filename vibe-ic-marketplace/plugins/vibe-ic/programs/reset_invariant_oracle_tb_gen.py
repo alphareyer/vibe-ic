@@ -86,12 +86,15 @@ _RE_MUST_NOT = re.compile(r"不應|不得|不能|must\s*not|should\s*not|no\s+",
 _WRITE_TOKENS = ("we", "wen", "write", "wr", "wstrb", "wr_en")
 _WRITE_RES = [re.compile(rf"(?:^|_){t}(?:_o|_out)?$", re.IGNORECASE)
               for t in _WRITE_TOKENS]
-#: Read-enables are bus activity, the mirror of `wen` above; see the same
-#: vocabulary in `cpu_boot_latency_oracle_tb_gen` for the measurement.
-_BUS_ACTIVITY_TOKENS = ("cyc", "stb", "strobe", "req", "valid",
-                        "ren", "rden", "rd_en", "read_en")
+_BUS_ACTIVITY_TOKENS = ("cyc", "stb", "strobe", "req", "valid")
 _BUS_ACTIVITY_RES = [re.compile(rf"(?:^|_){t}(?:_o|_out)?$", re.IGNORECASE)
                      for t in _BUS_ACTIVITY_TOKENS]
+#: Read-enables are bus activity, the mirror of `wen` above; see the same
+#: vocabulary in `cpu_boot_latency_oracle_tb_gen` for the measurement. A
+#: FALLBACK ONLY: a top with a handshake output keeps observing it.
+_READ_ENABLE_TOKENS = ("ren", "rden", "rd_en", "read_en")
+_READ_ENABLE_RES = [re.compile(rf"(?:^|_){t}(?:_o|_out)?$", re.IGNORECASE)
+                    for t in _READ_ENABLE_TOKENS]
 _CLOCK_RE = re.compile(r"(?:^|_)(?:clk|clock)(?:$|_)", re.IGNORECASE)
 _RESET_RE = re.compile(r"(?:^|_)(?:rst|reset|resetn|rstn)(?:$|_)",
                        re.IGNORECASE)
@@ -174,7 +177,8 @@ def emit_case_oracle_from_ports(
         # not let the invariant be observed at all.
         return None
     observed = (_pick(outputs, _WRITE_RES) if family == FAMILY_HOLD
-                else _pick(outputs, _BUS_ACTIVITY_RES))
+                else (_pick(outputs, _BUS_ACTIVITY_RES)
+                      or _pick(outputs, _READ_ENABLE_RES)))
     if observed is None:
         return None
 
