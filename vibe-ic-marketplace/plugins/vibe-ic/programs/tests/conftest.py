@@ -64,6 +64,12 @@ import os as _os                                     # noqa: E402
 if str(_TESTS_DIR) not in sys.path:
     sys.path.insert(0, str(_TESTS_DIR))
 from _nda_fixture_tokens import FICTIONAL_NDA_TOKENS  # noqa: E402
+# No test file may leave a different copy of a program in sys.modules; see
+# that module for the measured order-dependent red it closes.
+from _sys_modules_isolation import (  # noqa: E402,F401
+    _program_modules_are_restored_after_each_test,
+    pytest_make_collect_report,
+)
 
 
 def _is_usable_token_store(raw) -> bool:
