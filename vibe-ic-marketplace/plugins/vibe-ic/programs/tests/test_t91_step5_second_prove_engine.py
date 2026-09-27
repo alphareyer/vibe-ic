@@ -34,6 +34,7 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 
 import formal_property_run as fpr  # noqa: E402
+from not_verified_tier import skip_not_verified  # noqa: E402
 
 CAL = PROGRAMS / "calibration"
 STEM = "formal_ctr"
@@ -145,7 +146,10 @@ def test_the_switch_puts_the_second_engine_into_the_real_proof():
     import formal_harness_gen as fhg
     import formal_proof_evidence_check as gate
     missing = [t for t in ("yosys", "sby", "yices-smt2") if shutil.which(t) is None]
-    assert not missing, f"{missing} not on PATH — run inside the vibeic-eda image"
+    if missing:
+        skip_not_verified(
+            f"{missing} not on PATH, so no harness can be proved here",
+            "tools/ci/run_suite_in_eda_image.sh -- programs/tests/test_t91_step5_second_prove_engine.py")
     project = Path(tempfile.mkdtemp(prefix="t91s5_"))
     docs = project / "phase1/generated_docs"
     docs.mkdir(parents=True)

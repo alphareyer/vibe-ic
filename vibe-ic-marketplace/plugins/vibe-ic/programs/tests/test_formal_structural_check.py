@@ -10,7 +10,8 @@ directly (`check()` and the CLI `main()`), both ways, on generic RTL:
   a reset port that reaches no flop   -> reset_port not PASS
 
 Needs yosys on PATH (the vibeic-eda image, as CI and falsref run it); without
-it the arms FAIL with the reason, never skip. chip-AGNOSTIC.
+it the arms are NOT_VERIFIED by name, and VIBEIC_REQUIRE_EDA_VERIFICATION=1
+turns that back into a failure. chip-AGNOSTIC.
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 
 import formal_structural_check as fsc  # noqa: E402
+from not_verified_tier import skip_not_verified  # noqa: E402
 
 SYNC = """module m(input clk, input rst, input [3:0] d, output reg [3:0] q);
   always @(posedge clk) if (rst) q <= 4'd0; else q <= d;
@@ -43,7 +45,10 @@ CLAIMS = [{"rule": "clock_edge", "signal": "clk", "value": "posedge"},
 
 
 def _yosys():
-    assert shutil.which("yosys"), "yosys not on PATH — run inside the vibeic-eda image"
+    if shutil.which("yosys") is None:
+        skip_not_verified(
+            "yosys not on PATH, so no structural claim can be checked here",
+            "tools/ci/run_suite_in_eda_image.sh -- programs/tests/test_formal_structural_check.py")
 
 
 def _check(tmp: Path, rtl: str) -> dict:
