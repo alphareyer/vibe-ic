@@ -1,0 +1,56 @@
++ define_corners min_ss_125C_4v50
+Reading timing models for corner min_ss_125C_4v50…
+Reading cell library for the 'min_ss_125C_4v50' corner at '/foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/gf180mcu_fd_sc_mcu7t5v0__ss_125C_4v50.lib'…
+Reading cell library for the 'min_ss_125C_4v50' corner at '/foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_io/lib/gf180mcu_fd_io__ss_125C_4v50.lib'…
+Reading top-level netlist at '/host/cmp3/librelane_8HD-9/design/runs/cmp3/52-openroad-fillinsertion/spm.nl.v'…
+Linking design 'spm' from netlist…
+Reading design constraints file at '/host/cmp3/librelane_8HD-9/design/src/signoff.sdc'…
+[INFO] Using clock clk…
+[INFO] Setting output delay to: 4.8
+[INFO] Setting input delay to: 4.8
+[INFO] Setting load to: 0.07291
+[INFO] Setting clock uncertainty to: 0.1
+[INFO] Setting timing derate to: 5%
+[INFO] No information on clock propagation in input SDC file-- propagating all clocks.
+Reading top-level design parasitics for the 'min_ss_125C_4v50' corner at '/host/cmp3/librelane_8HD-9/design/runs/cmp3/54-openroad-rcx/min/spm.min.spef'…
+%OL_CREATE_REPORT min.rpt
+
+===========================================================================
+report_checks -path_delay min (Hold)
+============================================================================
+======================= min_ss_125C_4v50 Corner ===================================
+
+Startpoint: _375_ (rising edge-triggered flip-flop clocked by clk)
+Endpoint: _375_ (rising edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: min
+
+Fanout         Cap        Slew       Delay        Time   Description
+---------------------------------------------------------------------------------------------
+                                  0.000000    0.000000   clock clk (rise edge)
+                                  0.000000    0.000000   clock source latency
+     1    0.030325    0.269331    0.123715    0.123715 ^ clk (in)
+                                                         clk (net)
+                      0.269332    0.000000    0.123715 ^ clkbuf_0_clk/I (gf180mcu_fd_sc_mcu7t5v0__clkbuf_16)
+    16    0.222440    0.470933    0.644965    0.768679 ^ clkbuf_0_clk/Z (gf180mcu_fd_sc_mcu7t5v0__clkbuf_16)
+                                                         clknet_0_clk (net)
+                      0.470951    0.004486    0.773166 ^ clkbuf_4_0_0_clk/I (gf180mcu_fd_sc_mcu7t5v0__clkbuf_8)
+     2    0.050643    0.278039    0.552398    1.325564 ^ clkbuf_4_0_0_clk/Z (gf180mcu_fd_sc_mcu7t5v0__clkbuf_8)
+                                                         clknet_4_0_0_clk (net)
+                      0.278039    0.001016    1.326580 ^ clkbuf_5_0__f_clk/I (gf180mcu_fd_sc_mcu7t5v0__clkbuf_16)
+     2    0.011218    0.144160    0.410727    1.737307 ^ clkbuf_5_0__f_clk/Z (gf180mcu_fd_sc_mcu7t5v0__clkbuf_16)
+                                                         clknet_5_0__leaf_clk (net)
+                      0.144160    0.000199    1.737506 ^ _375_/CLK (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+     1    0.004771    0.196066    1.274441    3.011947 v _375_/Q (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                                                         dsa[30].last_carry (net)
+                      0.196066    0.000047    3.011994 v _237_/I (gf180mcu_fd_sc_mcu7t5v0__clkinv_1)
+     2    0.011744    0.399075    0.294744    3.306738 ^ _237_/ZN (gf180mcu_fd_sc_mcu7t5v0__clkinv_1)
+                                                         _003_ (net)
+                      0.399075    0.000170    3.306908 ^ _260_/A1 (gf180mcu_fd_sc_mcu7t5v0__oai21_1)
+     1    0.004053    0.264520    0.223793    3.530701 v _260_/ZN (gf180mcu_fd_sc_mcu7t5v0__oai21_1)
+                                                         dsa[30].last_carry_next (net)
+                      0.264520    0.000075    3.530776 v _375_/D (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                                              3.530776   data arrival time
+
+                                  0.000000    0.000000   clock clk (rise edge)
+                                  0.000000    0.000000

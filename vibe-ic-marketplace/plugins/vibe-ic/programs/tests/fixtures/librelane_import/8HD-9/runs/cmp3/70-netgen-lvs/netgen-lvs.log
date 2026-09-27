@@ -1,0 +1,50 @@
+Netgen 1.5.324 compiled on Sat Sep 26 22:39:30 UTC 2026
+Warning: netgen command 'global' use fully-qualified name '::netgen::global'
+Warning: netgen command 'format' use fully-qualified name '::netgen::format'
+Warning:  A case-insensitive file has been read and so the	verilog file must be treated case-insensitive to match.
+Reading SPICE netlist file '/foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/spice/gf180mcu_fd_sc_mcu7t5v0.spice'...
+Call to undefined subcircuit nfet_05v0
+Creating placeholder cell definition.
+Call to undefined subcircuit pfet_05v0
+Creating placeholder cell definition.
+Reading SPICE netlist file '/foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_io/spice/gf180mcu_ef_io.spice'...
+Call to undefined subcircuit cap_nmos_06v0
+Creating placeholder cell definition.
+Call to undefined subcircuit nfet_06v0
+Creating placeholder cell definition.
+Call to undefined subcircuit pfet_06v0
+Creating placeholder cell definition.
+Call to undefined subcircuit pfet_06v0_dss
+Creating placeholder cell definition.
+Call to undefined subcircuit nfet_06v0_dss
+Creating placeholder cell definition.
+Call to undefined subcircuit ppolyf_u
+Creating placeholder cell definition.
+Reading SPICE netlist file '/foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_io/spice/gf180mcu_fd_io.spice'...
+Reading Verilog netlist file '/host/cmp3/librelane_8HD-9/design/runs/cmp3/52-openroad-fillinsertion/spm.pnl.v'...
+Warning:  A case-insensitive file has been read and so the	verilog file must be treated case-insensitive to match.
+Note:  Implicit pin VNW in instance PHY_EDGE_ROW_0_Left_38 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VPW in instance PHY_EDGE_ROW_0_Left_38 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VNW in instance PHY_EDGE_ROW_0_Right_0 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VPW in instance PHY_EDGE_ROW_0_Right_0 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VNW in instance PHY_EDGE_ROW_10_Left_48 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VPW in instance PHY_EDGE_ROW_10_Left_48 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VNW in instance PHY_EDGE_ROW_10_Right_10 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VPW in instance PHY_EDGE_ROW_10_Right_10 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VNW in instance PHY_EDGE_ROW_11_Left_49 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VPW in instance PHY_EDGE_ROW_11_Left_49 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VNW in instance PHY_EDGE_ROW_11_Right_11 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VPW in instance PHY_EDGE_ROW_11_Right_11 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VNW in instance PHY_EDGE_ROW_12_Left_50 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VPW in instance PHY_EDGE_ROW_12_Left_50 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VNW in instance PHY_EDGE_ROW_12_Right_12 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VPW in instance PHY_EDGE_ROW_12_Right_12 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VNW in instance PHY_EDGE_ROW_13_Left_51 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VPW in instance PHY_EDGE_ROW_13_Left_51 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VNW in instance PHY_EDGE_ROW_13_Right_13 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VPW in instance PHY_EDGE_ROW_13_Right_13 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VNW in instance PHY_EDGE_ROW_14_Left_52 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VPW in instance PHY_EDGE_ROW_14_Left_52 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VNW in instance PHY_EDGE_ROW_14_Right_14 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+Note:  Implicit pin VPW in instance PHY_EDGE_ROW_14_Right_14 of gf180mcu_fd_sc_mcu7t5v0__endcap in cell spm
+No
