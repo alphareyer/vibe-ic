@@ -248,13 +248,25 @@ def test_a_measurement_not_derived_from_the_artefact_is_refused_in_a_segment(
         M.write_manifest(proj, flow="librelane", segments=doc["segments"])
 
 
-def test_null_is_the_one_other_measurement_a_segment_row_may_carry(tmp_path):
+@pytest.mark.parametrize("seg_index", [0, 1])
+def test_null_cannot_hide_a_derivable_measurement_in_a_segment(tmp_path,
+                                                               seg_index):
+    """W0 fix 4: a row's measurement EQUALS the derivation; null is valid
+    only where the artefact yields none. Holds in every segment."""
+    import _external_flow_manifest as M
     proj = _two_runs(tmp_path)
     doc = _manifest(proj)
-    for seg in doc["segments"]:
-        for row in seg["rows"]:
-            row["measurement"] = None
-    assert _problems(proj, doc) == []
+    nulls = [r for s in doc["segments"] for r in s["rows"]
+             if r["measurement"] is None]
+    assert nulls and all(M.derived_measurement(proj, r["canonical_path"],
+                                               r["tool"]) is None
+                         for r in nulls)            # null where none derives
+    row = _derived_row(doc, seg_index)
+    row["measurement"] = None
+    name = doc["segments"][seg_index]["name"]
+    probs = _problems(proj, doc)
+    assert any(p.startswith(f"segment {name!r} row") and "is null but" in p
+               for p in probs), probs
 
 
 # ── a manifest never records a run that did not finish (review W6 wave 6) ──
