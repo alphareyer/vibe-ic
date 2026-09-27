@@ -597,6 +597,108 @@ def _coverage_totals(project: Path) -> "tuple[dict, str]":
                               + _COVERAGE_DIMENSION_RECEIPT_RELS))
 
 
+def _dimension_receipt(project: Path, dimension: str) -> "tuple[dict | None, str]":
+    """`(receipt, why_not)`: the per-dimension instrument's receipt for
+    `dimension`, when one of `_COVERAGE_DIMENSION_RECEIPT_RELS` owns it and it
+    was written by THIS run (no older than the L10 execution record the run's
+    testbenches just wrote). None with the reason otherwise."""
+    record = _l10x.resolve_record(project)
+    for rel in _COVERAGE_DIMENSION_RECEIPT_RELS:
+        f = Path(project) / rel
+        if not f.is_file():
+            continue
+        try:
+            doc = json.loads(f.read_text(errors="replace"))
+        except (OSError, ValueError):
+            return None, f"{rel} is unreadable"
+        if not isinstance(doc, dict) or doc.get("dimension") != dimension:
+            continue
+        try:
+            if record is not None and f.stat().st_mtime < \
+                    record.stat().st_mtime:
+                return None, (f"{rel} is older than this run's L10 execution "
+                              f"record: the instrument did not run here")
+        except OSError:
+            return None, f"{rel} could not be dated"
+        return doc, ""
+    return None, (f"no instrument receipt for the {dimension!r} dimension "
+                  f"(looked in {', '.join(_COVERAGE_DIMENSION_RECEIPT_RELS)})")
+
+
+def _delivered_programs(project: Path) -> "list[str]":
+    """Every declared L10 case (vector or goal) for which the design input
+    DELIVERS a testbench or a named program image."""
+    out: list = []
+    for name, row in _l10_rows_by_name(project).items():
+        stim = str(row.get("stimulus") or "")
+        if (_tbg.delivered_case_oracle(project, name) is not None
+                or _tbg.delivered_case_program(project, stim) is not None):
+            out.append(name)
+    return out
+
+
+def _goal_input_gap(project: Path, goal: "dict | None",
+                    dimension: str) -> "dict | None":
+    """The coverage goal's input gap, on POSITIVE EVIDENCE only, else None.
+
+    A goal's number is absent because no program the input delivers could
+    feed it only when ALL of these hold:
+      * the dimension is owned by a per-dimension instrument whose receipt
+        this run wrote (a line/toggle/branch goal has no such receipt: its
+        absent total is the verilator arm's, and stays a refusal);
+      * that receipt says the instrument applied, and found NO tally at all --
+        no contribution and no refusal, so no transcript of any case, passing
+        or not, carried the dimension's line;
+      * the design input delivers no testbench or program for ANY declared
+        case, so no executed program existed to report one;
+      * the goal itself is not claimed by this flow (`case_input_gap`'s own
+        delivery and in-flow-testbench tests).
+    Anything else -- the instrument did not run, ran before this run's
+    testbenches, timed out, or saw a tally it refused -- keeps the goal a
+    refusal (FAIL), because the flow could have measured it."""
+    if not isinstance(goal, dict):
+        return None
+    name = str(goal.get("name") or goal.get("id") or "")
+    if not name:
+        return None
+    receipt, _why = _dimension_receipt(project, dimension)
+    if receipt is None:
+        return None
+    if receipt.get("applicable") is not True or receipt.get("totals"):
+        return None
+    if receipt.get("contributions") or receipt.get("refusals"):
+        return None
+    if not isinstance(receipt.get("contributions"), list) or \
+            not isinstance(receipt.get("refusals"), list):
+        return None
+    if _delivered_programs(project):
+        return None
+    try:
+        if (_tbg.delivered_case_oracle(project, name) is not None
+                or _tbg._in_flow_testbench(project, name) is not None):
+            return None
+    except Exception:                                        # noqa: BLE001
+        return None
+    stimulus = str(goal.get("stimulus") or "").strip()
+    if not stimulus:
+        return None
+    rel = next((r for r in _COVERAGE_DIMENSION_RECEIPT_RELS), "")
+    return {
+        "case": name,
+        "missing_from_input": [
+            f"a program or testbench for {name!r} whose run reports the "
+            f"{dimension!r} tally"],
+        "stimulus": stimulus,
+        "reason": (f"coverage goal {name!r} cannot be measured: its "
+                   f"{dimension!r} instrument ran in this run ({rel}) and "
+                   f"found no tally in any case's transcript, and the design "
+                   f"input delivers no testbench or program for any declared "
+                   f"case -- it states the goal only as {stimulus[:120]!r}. "
+                   f"Supplying the program is the design input's; this flow "
+                   f"may not author it (§4.05)."),
+    }
+
+
 def _coverage_goal_summary(project: Path) -> dict:
     """The COVERAGE-GOAL population and its OWN denominator.
 
@@ -615,16 +717,19 @@ def _coverage_goal_summary(project: Path) -> dict:
     # FX_P2 — a goal whose dimension IS instrumented, but which no executed
     # program could feed because the design input delivers none, is the
     # input's gap: NOT_MEASURED by name, not a refusal. A goal the flow cannot
-    # bind, and one measured short of its percentage, are unchanged.
+    # bind, and one measured short of its percentage, are unchanged. Decided
+    # on the INSTRUMENT'S OWN RECEIPT (`_goal_input_gap`), never on the bare
+    # absence of a number -- an instrument that never ran, timed out or
+    # crashed leaves the same absence, and that is this flow's refusal.
     by_name = {str(g.get("name") or g.get("id") or ""): g for g in goals
                if isinstance(g, dict)}
-    ic_class = _tbg._detect_ic_class(project) if goals else None
     kept, gaps = [], []
     for r in summary.get("rows") or []:
         gap = None
         if (r.get("verdict") == _cgc.NOT_MEASURED and r.get("dimension")
                 and r.get("achieved_pct") is None):
-            gap = _input_gap(project, by_name.get(r.get("case")), ic_class)
+            gap = _goal_input_gap(project, by_name.get(r.get("case")),
+                                  str(r.get("dimension")))
         if gap is not None:
             gaps.append(dict(r, why=gap["reason"],
                              missing_from_input=gap["missing_from_input"]))

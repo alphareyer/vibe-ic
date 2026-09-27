@@ -143,8 +143,24 @@ def test_the_report_names_each_case_and_what_is_missing(tmp_path):
     assert by_case["blinky_hex"]["missing_from_input"] == ["blinky.hex"]
 
 
+def _instrument_ran_and_found_nothing(proj: Path) -> None:
+    """The instruction instrument's OWN receipt, as `instruction_coverage_
+    measure.measure` writes it when it applied and no transcript of any case
+    carried a tally -- written after the run's L10 execution record."""
+    import instruction_coverage_measure as ICM
+    receipt = ICM.measure(proj)
+    assert receipt["applicable"] is True and not receipt["totals"], receipt
+    ICM.write_receipt(proj, receipt)
+
+
 def test_an_unrunnable_coverage_goal_is_the_inputs_gap_too(tmp_path):
+    """Review fix (4): the goal is the input's gap only on the instrument's
+    own receipt -- it ran in this run and found no tally, and the input
+    delivers no program for any case. (At 065ef1c45 this test planted no
+    receipt at all, and certified exactly the conflation the review named;
+    that shape is now `test_fx_p2_review_input_gap_needs_positive_evidence`.)"""
     proj = _project(tmp_path, [BOOT, GOAL], {BOOT["name"]: "PASS"})
+    _instrument_ran_and_found_nothing(proj)
     rc, msg = GATE._evaluate(proj)
     assert rc == 2, (rc, msg)
     assert "rv32i_40" in msg
