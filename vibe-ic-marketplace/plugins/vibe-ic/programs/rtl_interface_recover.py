@@ -456,6 +456,84 @@ def recover_interface_from_text(text: str, target: str) -> List[dict]:
 
 
 
+# A fenced code block whose info string names an HDL. Its body is searched for
+# the declaration BEFORE the surrounding prose.
+_HDL_FENCE_RE = re.compile(
+    r"```[ \t]*(?:verilog|systemverilog|sv|v)\b[^\n]*\n(.*?)```",
+    re.IGNORECASE | re.DOTALL)
+
+
+def _declaration_end(text: str, start: int, target: str) -> Optional[int]:
+    """End of `module <target> [#( ... )] ( ... ) ;` at `start`, else None.
+
+    THE SHAPE, NOT THE NAME. Prose names a module as readily as RTL declares
+    one -- "Complete the module decoder (input-side stage of the pipeline)." --
+    and a parser that stops at the first `module <target>` reads that
+    parenthesis as a port list and publishes `stage`/`of`/`the` as ports. A
+    declaration is the keyword and name, an optional parameter block, a
+    balanced port list and the `;` that ends the header -- a sentence's
+    closing `)` is followed by prose punctuation, never by `;`.
+    """
+    m = re.compile(rf"module\s+{re.escape(target)}\b").match(text, start)
+    if not m:
+        return None
+    i = m.end()
+    pm = re.compile(r"\s*#\s*\(").match(text, i)
+    if pm:
+        close = _balanced(text, pm.end() - 1)
+        if close is None:
+            return None
+        i = close + 1
+    om = re.compile(r"\s*\(").match(text, i)
+    if not om:
+        return None
+    close = _balanced(text, om.end() - 1)
+    if close is None:
+        return None
+    sm = re.compile(r"\s*;").match(text, close + 1)
+    return sm.end() if sm else None
+
+
+def declared_module_text(text: str, target: str) -> Optional[str]:
+    """The text from the first real `module <target>` DECLARATION onward.
+
+    For a module embedded in prose (a prompt), where a bare `module <target>`
+    may be a sentence. HDL code fences are searched first, then the whole
+    text; within each, every `module <target>` occurrence is tried and the
+    first with the declaration shape (see :func:`_declaration_end`) wins.
+    None when no occurrence is a declaration. Chip-AGNOSTIC.
+    """
+    if not isinstance(text, str) or not text or not target:
+        return None
+    regions = [m.group(1) for m in _HDL_FENCE_RE.finditer(text)] + [text]
+    for region in regions:
+        for m in re.finditer(rf"\bmodule\s+{re.escape(target)}\b", region):
+            if _declaration_end(region, m.start(), target) is not None:
+                return region[m.start():]
+    return None
+
+
+def recover_from_prose_files(paths: List[Path],
+                             target: str) -> Dict[str, object]:
+    """`recover_from_files` for a prose document that may EMBED the header.
+
+    The target is required (prose never selects a top), and only a real
+    declaration of it is parsed (:func:`declared_module_text`).
+    """
+    texts = []
+    for p in paths:
+        try:
+            texts.append(p.read_text(errors="replace"))
+        except OSError:
+            continue
+    decl = declared_module_text("\n".join(texts), target) if target else None
+    if decl is None:
+        return {"top_module": target, "top_ports": [],
+                "source": "no-declaration-in-prose"}
+    ports = recover_interface_from_text(decl, target)
+    return {"top_module": target, "top_ports": ports,
+            "source": "rtl_header" if ports else "header-unparsed"}
+
 
 # ── general entry points ─────────────────────────────────────────────────────
 def recover_from_files(paths: List[Path],

@@ -282,3 +282,54 @@ def test_unresolved_zero_width_is_filled_from_resolved_parameter_header(tmp_path
                    ["pin_table"])["image_out"]
     assert (row["width"], row["msb"], row["lsb"]) == (16, 15, 0)
     assert width_gate.evaluate(proj)["verdict"] == "PASS"
+
+
+# --- a prompt NAMES a module as readily as it DECLARES one ------------------
+# The prompt-embedded header path parsed markdown with an RTL parser that stops
+# at the first `module <top>`. Prose "Complete the module decoder (input-side
+# stage ...)" became a port list: stage/of/the/pipeline were published as
+# 1-bit inputs and the real declaration below it was never read. Only the
+# declaration shape -- `module <top> [#(...)] (...) ;` -- is evidence.
+
+def test_prose_mention_before_a_fenced_declaration_is_not_a_port_list(tmp_path):
+    import json
+
+    proj = _mk_proj(tmp_path, [], "Build the decoder.")
+    gd = proj / "phase1" / "generated_docs"
+    (gd / "L9_INTEGRATION_SPEC.json").write_text(json.dumps(
+        {"top_module": "decoder", "top_ports": []}))
+    (proj / "input" / "phase1_prompt.md").write_text(
+        "Complete the module decoder (input-side stage of the pipeline).\n"
+        "```verilog\n"
+        "module decoder(input [3:0] sel, output [15:0] y);\n"
+        "```\n")
+
+    P1._post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(proj)
+    l9 = json.loads((gd / "L9_INTEGRATION_SPEC.json").read_text())
+    ports = _by_name(l9["top_ports"])
+    assert set(ports) == {"sel", "y"}, ports
+    assert (ports["sel"]["width"], ports["sel"]["msb"],
+            ports["sel"]["lsb"]) == (4, 3, 0)
+    assert (ports["y"]["width"], ports["y"]["msb"],
+            ports["y"]["lsb"]) == (16, 15, 0)
+
+
+def test_prose_that_only_names_the_module_publishes_no_header_ports(tmp_path):
+    import json
+
+    proj = _mk_proj(tmp_path, [], "Build the counter.")
+    gd = proj / "phase1" / "generated_docs"
+    (gd / "L9_INTEGRATION_SPEC.json").write_text(json.dumps(
+        {"top_module": "counter", "top_ports": []}))
+    (proj / "input" / "phase1_prompt.md").write_text(
+        "Implement module counter (input: clock clk, output: 8-bit count q).\n")
+
+    P1._post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(proj)
+    l9 = json.loads((gd / "L9_INTEGRATION_SPEC.json").read_text())
+    header_rows = [p for p in (l9.get("top_ports") or [])
+                   if p.get("extraction_strategy") == "prompt_rtl_header"]
+    assert header_rows == [], header_rows
+    names = {p.get("name") for p in (l9.get("top_ports") or [])}
+    assert not names & {"clock", "clk", "count"}, names
+    strategy = l9.get("extraction_strategy") or {}
+    assert strategy.get("top_ports") != "prompt_rtl_header_2026_09_28", strategy

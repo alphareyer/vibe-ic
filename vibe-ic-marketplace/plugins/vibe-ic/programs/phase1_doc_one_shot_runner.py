@@ -62188,7 +62188,11 @@ def _post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(
                     _embedded_header = True
             if _files:
                 _tgt = (l9.get("top_module") or l1.get("ic_name") or None)
-                _rec = _rir.recover_from_files(_files, _tgt)
+                # Prose names a module as readily as RTL declares one; only a
+                # real declaration of the target is interface evidence.
+                _rec = (_rir.recover_from_prose_files(_files, _tgt)
+                        if _embedded_header else
+                        _rir.recover_from_files(_files, _tgt))
                 _ports = _rec.get("top_ports") or []
                 # The SHIPPED RTL is ground truth for which modules exist. A
                 # declared target that is absent from it is a placeholder, not

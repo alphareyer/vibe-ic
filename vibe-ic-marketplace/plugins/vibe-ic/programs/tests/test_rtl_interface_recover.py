@@ -227,3 +227,36 @@ def test_a_record_dict_is_accepted_as_well_as_bare_prompt_text():
 def test_the_result_is_json_serialisable():
     # the CLI writes this out; a non-serialisable width would fail there, not here.
     json.dumps(R.recover_interface_from_text(ANSI_RTL, "alu"))
+
+
+# --- declared_module_text: the declaration SHAPE, not the name ---------------
+
+def test_prose_parenthesis_after_the_name_is_not_a_declaration():
+    text = "Implement module counter (input: clock clk, output: 8-bit count q)."
+    assert R.declared_module_text(text, "counter") is None
+
+
+def test_the_first_real_declaration_wins_over_an_earlier_prose_mention():
+    text = ("Complete the module decoder (input-side stage of the pipeline).\n"
+            "module decoder #(parameter N = 4) (input [N-1:0] sel, "
+            "output [15:0] y);\nendmodule\n")
+    decl = R.declared_module_text(text, "decoder")
+    assert decl is not None and decl.startswith("module decoder #(")
+    ports = _by_name(R.recover_interface_from_text(decl, "decoder"))
+    assert set(ports) == {"sel", "y"}
+    assert ports["sel"]["width"] == 4
+
+
+def test_an_hdl_fence_is_searched_before_the_prose():
+    text = ("module decoder(input a); is how NOT to write it; see below.\n"
+            "```systemverilog\nmodule decoder(input logic [1:0] b);\n```\n")
+    decl = R.declared_module_text(text, "decoder")
+    assert decl is not None and "[1:0] b" in decl.splitlines()[0]
+
+
+def test_recover_from_prose_files_refuses_a_name_only_mention(tmp_path):
+    p = tmp_path / "prompt.md"
+    p.write_text("The module fifo (a small buffer) stores bytes.\n")
+    rec = R.recover_from_prose_files([p], "fifo")
+    assert rec == {"top_module": "fifo", "top_ports": [],
+                   "source": "no-declaration-in-prose"}
