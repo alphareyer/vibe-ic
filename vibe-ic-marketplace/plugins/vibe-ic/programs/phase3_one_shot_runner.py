@@ -20125,7 +20125,8 @@ def _l9_declared_max_fanout(project: Path,
     # no matching scope, or a non-positive value all leave this None.
     try:
         _drv = _fpc.declared_drv_limits(project, pdk or "",
-                                        _active_std_cell_library(project, pdk))
+                                        _active_std_cell_library(
+                                            project, pdk, liberty_path))
         _fo_cfg = _drv.get("max_fanout")
         if isinstance(_fo_cfg, int) and _fo_cfg > 0:
             _LAST_FANOUT_SOURCE["note"] = (
@@ -29287,7 +29288,8 @@ def _v1_8_100_routing_layer_range(pdk, project, container
         import floorplan_contract as _fpc                     # noqa: PLC0415
         _d = _fpc.declared_drv_limits(project, getattr(pdk, "name", "") or "",
                                       _active_std_cell_library(
-                                          project, getattr(pdk, "name", "") or ""))
+                                          project, getattr(pdk, "name", "") or "",
+                                          str(getattr(pdk, "liberty", "") or "")))
         _dec = _d.get("route_max_layer")
         if _dec and _dec.lower() in lower:
             ceil_i = lower.index(_dec.lower())
@@ -29335,7 +29337,8 @@ def _v1_8_100_routing_layer_range(pdk, project, container
         import floorplan_contract as _fpc2                    # noqa: PLC0415
         _d2 = _fpc2.declared_drv_limits(project, getattr(pdk, "name", "") or "",
                                         _active_std_cell_library(
-                                            project, getattr(pdk, "name", "") or ""))
+                                            project, getattr(pdk, "name", "") or "",
+                                            str(getattr(pdk, "liberty", "") or "")))
         _dc = _d2.get("route_clock_min_layer")
         if _dc and _dc.lower() in lower and lower.index(_dc.lower()) <= ceil_i:
             clk_i = lower.index(_dc.lower())
@@ -57789,6 +57792,18 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
         pvt_path.write_text(json.dumps(pvt, indent=2) + "\n")
         written.append(str(pvt_path))
 
+    # --- Step 8: the SDC check, produced at step 8 (FX_STEP8_SDC_CHECK) ----
+    # Its inputs (step 7's SDC and PVT matrix) exist now; before, its only
+    # producer was the phase-3 tail, after PnR. `_ppa.timing` records the
+    # basis (every SDC it read, by sha256) so the tail keeps it only while
+    # that basis holds.
+    _s8 = _ppa_timing.emit_step8_sdc_check(_runner_module(), project)
+    if (project / _ppa_timing.SDC_CHECK_REL).is_file():
+        written.append(str(project / _ppa_timing.SDC_CHECK_REL))
+    written.append(str(project / _ppa_timing.SDC_CHECK_BASIS_REL))
+    if _s8.get("note"):
+        notes.append(_s8["note"])
+
     # --- Step 10: GENUINE pre-layout multi-corner STA --------------------
     # force_prelayout=True: this step is Step 10 (PRE-LAYOUT) by definition, so
     # it must time the synth netlist even on a re-run in a dir that already
@@ -59493,51 +59508,24 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         except Exception as exc:  # best-effort, never block the step
             notes.append(f"#694 single-corner stance emit failed: {exc}")
 
-    # --- Step 8: pre-emit SDC syntax check report ----------------------
-    # The gate runs sdc_syntax_check and writes to reports/phase2/sdc_check.json
-    # via --json; emitting here makes the required_outputs gate (file
-    # presence) pass without depending on the gate's invocation order.
-    sdc_check_json = project / "reports/phase2/sdc_check.json"
-    if (canon_sdc.is_file() or runner_sdc.is_file()) and not sdc_check_json.is_file():
-        sdc_check_json.parent.mkdir(parents=True, exist_ok=True)
+    # --- Step 8: the SDC check, kept only while it is current -------------
+    # Step 8 has its own producer (`step_prelayout_signoff`); this tail used
+    # to be its ONLY producer, and wrote the report only when absent, so a
+    # report checked against an older SDC survived as current. Now it is kept
+    # while its recorded basis holds and otherwise regenerated through the
+    # same producer, with the reason recorded (FX_STEP8_SDC_CHECK).
+    if canon_sdc.is_file() or runner_sdc.is_file():
         try:
-            r = subprocess.run(
-                [sys.executable,
-                 str(PROGRAMS_DIR / "sdc_syntax_check.py"),
-                 str(project), "--json", str(sdc_check_json)],
-                capture_output=True, text=True, timeout=60,
-            )
-            # `r` WAS BOUND AND NEVER READ. This step's own docstring promises
-            # "any individual emission failure logs WARN but the step
-            # continues", and this block logged nothing on any outcome: it
-            # tested only whether the file appeared. A step that swallows the
-            # result of a subprocess it ran, while its contract says it warns,
-            # is a disclosure that exists from the emitter's side and not the
-            # reader's.
-            #
-            # THE TWO OUTCOMES ARE NOT THE SAME THING and the note says which:
-            #   report written, rc != 0  -- NOT an emission failure. The
-            #       checker exits `0 if result.passed else 1`, so a non-zero
-            #       code means the SDC has real findings, and they are IN the
-            #       JSON that the downstream gate reads. Noted because the
-            #       runner's own notes are what a human reads first, and
-            #       "I emitted a report saying the SDC did not pass" must not
-            #       be silent.
-            #   report NOT written        -- a genuine emission failure, which
-            #       is what the docstring's WARN was promised for.
-            if sdc_check_json.is_file():
-                written.append(str(sdc_check_json))
-                if r.returncode != 0:
-                    notes.append(
-                        f"sdc_syntax_check reported findings (rc={r.returncode}); "
-                        f"the verdict is in "
-                        f"{sdc_check_json.relative_to(project)} and this step "
-                        "neither blocks on it nor hides it")
-            else:
-                tail = (r.stderr or r.stdout or "").strip().splitlines()
-                notes.append(
-                    f"sdc_syntax_check emitted no report (rc={r.returncode}): "
-                    + (tail[-1][:200] if tail else "no output"))
+            _s8, _s8_action = _ppa_timing.sdc_check_for_consumer(
+                _runner_module(), project)
+            if _s8_action == "regenerated":
+                if (project / _ppa_timing.SDC_CHECK_REL).is_file():
+                    written.append(str(project / _ppa_timing.SDC_CHECK_REL))
+                written.append(str(project / _ppa_timing.SDC_CHECK_BASIS_REL))
+                notes.append(f"step 8's SDC check regenerated by its own "
+                             f"producer: {_s8.get('regenerated')}")
+            if _s8.get("note"):
+                notes.append(_s8["note"])
         except Exception as exc:  # best-effort, never block the step
             notes.append(f"sdc_syntax_check emit failed: {exc}")
 

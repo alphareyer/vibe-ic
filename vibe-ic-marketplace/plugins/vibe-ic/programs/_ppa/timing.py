@@ -1486,5 +1486,115 @@ def asic_sdc_for_pnr(rt: Any, project: Path, top: str, pdk: Any,
         out["derivation"] = der
     return out
 
+
+# =========================================================================== #
+# STEP 8 — THE SDC CHECK, PRODUCED AT STEP 8 (FX_STEP8_SDC_CHECK)
+# =========================================================================== #
+# Step 8's declared `reports/phase2/sdc_check.json` had ONE in-run producer,
+# `step_canonicalize_artefacts` at the TAIL of phase 3 -- after PnR -- and it
+# wrote the report only when ABSENT, so (a) a run whose backend stopped before
+# the tail left step 8 with no output (measured on spm x gf180mcuD DIE: step 7
+# PASS, step 8 FAIL missing_artefact, step 15 blocked by it), and (b) a report
+# checked against an OLDER SDC was kept as current. Same rule as step 7: ONE
+# producer at step 8's own position, a basis record naming what it checked, and
+# later consumers keep it only while that basis still holds -- otherwise they
+# regenerate it through the same producer and say why.
+SDC_CHECK_REL = "reports/phase2/sdc_check.json"
+SDC_CHECK_BASIS_REL = "reports/phase2/sdc_check.basis.json"
+SDC_CHECK_DEADLINE_S = 60
+
+
+def _sdc_check_inputs(project: Path) -> Dict[str, str]:
+    """{rel: sha256} of every SDC the checker reads (its own discovery)."""
+    from sdc_syntax_check import discover_sdc_files
+    out: Dict[str, str] = {}
+    for f in discover_sdc_files(Path(project)):
+        try:
+            out[str(f.relative_to(project))] = hashlib.sha256(
+                f.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    return dict(sorted(out.items()))
+
+
+def emit_step8_sdc_check(rt: Any, project: Path,
+                         regenerated: Optional[str] = None) -> Dict[str, Any]:
+    """STEP 8's producer: run `sdc_syntax_check` (deadline
+    `SDC_CHECK_DEADLINE_S`) into the declared report, and write the basis:
+    the sha256 of every SDC it read, step 7's SDC and the report itself."""
+    import subprocess
+    project = Path(project)
+    report = project / SDC_CHECK_REL
+    report.parent.mkdir(parents=True, exist_ok=True)
+    inputs = _sdc_check_inputs(project)
+    rec: Dict[str, Any] = {"schema": "vibe-ic/step8-sdc-check-basis/1",
+                           "step": 8, "sdc_files": inputs,
+                           "regenerated": regenerated, "rc": None,
+                           "report_sha256": None, "note": ""}
+    try:
+        step7 = json.loads((rt._pl.constraints_dir(project) / ASIC_SDC_RECORD)
+                           .read_text(errors="replace"))
+        rec["step7_sdc"] = {"path": step7.get("path"),
+                            "sha256": step7.get("sha256")}
+    except (OSError, ValueError):
+        rec["step7_sdc"] = None
+    try:
+        r = subprocess.run(
+            [sys.executable, str(rt.PROGRAMS_DIR / "sdc_syntax_check.py"),
+             str(project), "--json", str(report)],
+            capture_output=True, text=True, timeout=SDC_CHECK_DEADLINE_S)
+        rec["rc"] = r.returncode
+        if not report.is_file():
+            tail = (r.stderr or r.stdout or "").strip().splitlines()
+            rec["note"] = (f"sdc_syntax_check emitted no report "
+                           f"(rc={r.returncode}): "
+                           + (tail[-1][:200] if tail else "no output"))
+        elif r.returncode != 0:
+            rec["note"] = (f"sdc_syntax_check reported findings "
+                           f"(rc={r.returncode}); the verdict is in "
+                           f"{SDC_CHECK_REL}")
+    except subprocess.TimeoutExpired:
+        rec["note"] = (f"sdc_syntax_check exceeded its "
+                       f"{SDC_CHECK_DEADLINE_S}s deadline; no report")
+    if report.is_file():
+        rec["report_sha256"] = hashlib.sha256(report.read_bytes()).hexdigest()
+    rt._aa.write_json(project / SDC_CHECK_BASIS_REL, rec)
+    return rec
+
+
+def sdc_check_for_consumer(rt: Any, project: Path
+                           ) -> Tuple[Dict[str, Any], str]:
+    """(basis, "current" | "regenerated") for a later consumer (the phase-3
+    tail): keep step 8's report only while every SDC it checked is unchanged
+    and the report is the one step 8 wrote; otherwise regenerate it through
+    `emit_step8_sdc_check`, recording why."""
+    project = Path(project)
+    report = project / SDC_CHECK_REL
+    why = ""
+    try:
+        basis = json.loads((project / SDC_CHECK_BASIS_REL)
+                           .read_text(errors="replace"))
+    except (OSError, ValueError):
+        basis, why = None, f"no step-8 basis ({SDC_CHECK_BASIS_REL})"
+    if basis is not None:
+        if not report.is_file():
+            why = f"{SDC_CHECK_REL} is absent"
+        elif (hashlib.sha256(report.read_bytes()).hexdigest()
+              != basis.get("report_sha256")):
+            why = f"{SDC_CHECK_REL} is not the report step 8 wrote"
+        else:
+            now = _sdc_check_inputs(project)
+            if now != basis.get("sdc_files"):
+                changed = sorted(set(now) ^ set(basis.get("sdc_files") or {})
+                                 | {k for k in now if k in (basis.get(
+                                     "sdc_files") or {}) and now[k]
+                                    != basis["sdc_files"][k]})
+                why = (f"the SDC(s) step 8 checked changed since: "
+                       f"{changed[:6]}")
+    if not why:
+        return basis, "current"
+    return emit_step8_sdc_check(rt, project, regenerated=why), "regenerated"
+
+
 if __name__ == "__main__":                                   # pragma: no cover
     raise SystemExit(main())
