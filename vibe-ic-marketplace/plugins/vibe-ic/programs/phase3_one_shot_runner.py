@@ -36228,6 +36228,60 @@ def _pad_ring_process_note(rc: int, out: str, err: str) -> str:
     return error if rc != 0 and error else (lines[0] if lines else "")
 
 
+def step_pad_assignment(project: Path, container: Optional[str] = None,
+                        pdk: Optional[PdkConfig] = None) -> StepResult:
+    """The pad ASSIGNMENT alone (`pad_assignment_gen`), for the between-segments
+    step (llv1 W7a): an external flow places the ring itself from this order,
+    so it needs the assignment before its implementation segment, not the
+    ring vibe-ic would generate from a floorplan DEF.
+
+    Same program, same PDK arguments, same launch and the same rc reading as
+    the first program of `step_pad_ring_gen`, which the default flow keeps
+    running unchanged (llv1 W7a leaves that step byte-identical).
+    """
+    t0 = time.time()
+    try:
+        pdk_root, pdk_tree = (_padring_pdk_root_and_tree(pdk, container)
+                              if pdk else (None, None))
+    except ValueError as exc:
+        return StepResult("pad_assignment", "FAIL", time.time() - t0, str(exc))
+    pdk_args = (["--pdk-root", str(pdk_root), "--pdk", str(pdk_tree)]
+                if pdk_root and pdk_tree else [])
+    prog = PROGRAMS_DIR / "pad_assignment_gen.py"
+    # The launch is spelled out here, exactly as `step_pad_ring_gen` spells
+    # it, so the gate-enforcement audit can see this spawn and where its
+    # status goes (a launch hidden behind a helper reads as unproven wiring).
+    if container:
+        prog_c = _to_container_path(str(prog), container)
+        project_c = _to_container_path(str(project), container)
+        argv = ["python3", prog_c, project_c, *pdk_args]
+        cmd = " ".join(shlex.quote(str(x)) for x in argv)
+        rc, out, err = _docker_exec(container, cmd, marker=prog_c)
+    else:
+        cp = _pr.run(
+            [sys.executable, str(prog), str(project), *pdk_args],
+            capture_output=True, text=True, errors="replace")
+        rc, out, err = cp.returncode, cp.stdout, cp.stderr
+    note = f"pad_assignment_gen.py: rc={rc} {_pad_ring_process_note(rc, out, err)}".strip()
+    # The rc reading `step_pad_ring_gen` applies to every program it runs.
+    if rc == 0:
+        status, reason = _V.Verdict.PASS.value, ""
+    else:
+        status, reason = {
+            1: (_V.Verdict.FAIL.value, ""),
+            2: (_V.Verdict.NOT_MEASURED.value,
+                _V.ReasonClass.NOT_EXECUTED.value),
+        }.get(rc, (_V.Verdict.NOT_MEASURED.value,
+                   _V.ReasonClass.TOOL_ABSENT.value))
+    report = project / "reports/phase3/pad_assignment.json"
+    if status == _V.Verdict.PASS.value and not report.is_file():
+        status = _V.Verdict.FAIL.value
+        note += "; rc=0 but reports/phase3/pad_assignment.json is absent"
+    return StepResult("pad_assignment", status, time.time() - t0, note,
+                      [str(report)] if report.is_file() else [],
+                      reason_class=reason)
+
+
 def step_pad_ring_gen(project: Path, container: Optional[str] = None,
                       pdk: Optional[PdkConfig] = None) -> StepResult:
     """Canonical step 15.5ic producer + independent gate, before routing.
