@@ -144,26 +144,73 @@ def test_the_generator_runs_without_supplied_rtl(tmp_path, cls, mk, top,
     assert _defs(p, emitted) == 1
 
 
-@pytest.mark.parametrize("cls,mk,top,emitted", CLASSES,
-                         ids=[c[0] for c in CLASSES])
-def test_a_supplied_module_the_generator_emits_declines_it(
+PARTIAL = [c for c in CLASSES if c[0] != "data_converter"]
+
+
+@pytest.mark.parametrize("cls,mk,top,emitted", PARTIAL,
+                         ids=[c[0] for c in PARTIAL])
+def test_a_supplied_submodule_replaces_only_that_generated_file(
         tmp_path, cls, mk, top, emitted):
-    """D10 review MAJOR 2: the design supplies a module the class generator
-    would EMIT (not the declared top). RED before: the generator ran, and its
-    module replaced (data_converter) or duplicated (aid) the supplied one."""
+    """review_wave4a MAJOR (partial overlap): the input supplies ONE module
+    the generator emits. The rest of the generated design stays, only the
+    generated file defining that module is dropped, consume stages the
+    supplied one into the now-open tree, and nothing forbids authoring.
+    RED on 77f5ba13e: rtl/ was emptied and the whole design handed off."""
     p = mk(tmp_path / "p")
-    own = _vendor(p, {f"{emitted}.v": f"// supplied\nmodule {emitted}"
-                                      f"(input clk, output q);\n"
-                                      f"  assign q = clk;\nendmodule\n"})
+    _vendor(p, {f"{emitted}.v": f"// supplied\nmodule {emitted}"
+                                f"(input clk, output q);\n"
+                                f"  assign q = clk;\nendmodule\n"})
     res = R.step_rtl_gen(p, cls)
-    assert res.status == "PASS_WITH_WAIVERS", res.detail[:300]
-    assert res.extras["declined_generator"] == R._lookup_class(cls)["rtl_gen"]
-    assert res.extras["overlapping_modules"] == [emitted]
-    assert _rtl_files(p) == []
+    assert res.status == "PASS", res.detail[:300]
+    rec = res.extras["supplied_replaces_generated"]
+    assert rec["replaced_by"] == {emitted: f"input/vendor_rtl/{emitted}.v"}
+    assert rec["modules_now_owed"] == []
+    assert _defs(p, top) == 1 and _defs(p, emitted) == 0
+    assert len(_rtl_files(p)) > 5            # the rest of the design is there
+    assert "Do NOT author" not in res.detail
+    assert not res.extras.get("fallback_skill")
     out = C.consume_reused_ip_rtl(p)
-    assert out["staged"] == [f"{emitted}.v"] and _defs(p, emitted) == 1
+    assert out["staged"] == [f"{emitted}.v"]
+    assert _defs(p, emitted) == 1 and _defs(p, top) == 1
     assert (p / "phase2/stage1/rtl" / f"{emitted}.v").read_text().startswith(
         "// supplied")
+
+
+def test_a_supplied_generator_top_is_full_coverage_and_yields(tmp_path):
+    """FULL coverage: data_converter's own top is the one module it emits
+    (`cic_decimator`, not the L9 top `adc_top`); supplying it supplies the
+    design, so the generated tree is discarded and the supplied RTL handed
+    off."""
+    p = _dc_project(tmp_path / "p")
+    _vendor(p, {"cic_decimator.v": "// supplied\nmodule cic_decimator"
+                                   "(input clk, output q);\n"
+                                   "  assign q = clk;\nendmodule\n"})
+    res = R.step_rtl_gen(p, "data_converter")
+    assert res.status == "PASS_WITH_WAIVERS", res.detail[:300]
+    assert res.extras["declined_generator"] == "data_converter_rtl_gen.py"
+    assert res.extras["generated_tops"] == ["cic_decimator"]
+    assert _rtl_files(p) == []
+    out = C.consume_reused_ip_rtl(p)
+    assert out["staged"] == ["cic_decimator.v"]
+    assert _defs(p, "cic_decimator") == 1
+
+
+def test_a_dropped_file_that_held_other_modules_names_them_owed(tmp_path):
+    """A generated file defining the supplied module AND another one is
+    dropped whole; the other module is named as OWED, never silently lost."""
+    p = tmp_path / "p"
+    rtl = p / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "pair.v").write_text("module a(input x); endmodule\n"
+                                "module b(input x); endmodule\n")
+    (rtl / "top.v").write_text("module top(input x);\n  a ua(.x(x));\n"
+                               "  b ub(.x(x));\nendmodule\n")
+    _vendor(p, {"a.v": "module a(input x); endmodule\n"})
+    rec = R._yield_generated_modules(p, rtl, ["a"])
+    assert rec == {"replaced_by": {"a": "input/vendor_rtl/a.v"},
+                   "dropped_generated_files": ["pair.v"],
+                   "modules_now_owed": ["b"]}
+    assert sorted(f.name for f in rtl.glob("*.v")) == ["top.v"]
 
 
 @pytest.mark.parametrize("cls,mk,top,emitted", CLASSES,
@@ -487,3 +534,71 @@ def test_a_skipped_generator_is_recorded_as_not_evaluated(tmp_path, _session):
     assert recs and all(r["applicability"] == "not_evaluated" for r in recs)
     assert "not run" in res.detail and "deferred to the supplied RTL" \
         not in res.detail
+
+
+
+# =========================================================================== #
+# review_wave4a (branch D10) MINORs
+# =========================================================================== #
+def _staged_once(tmp_path):
+    p = D6._spm_project(tmp_path)
+    own = D6._supply(p, "input/rtl", "spm.v", D6.SUPPLIED_SPM)
+    assert C.consume_reused_ip_rtl(p)["staged"] == ["spm.v"]
+    return p, own
+
+
+def test_an_input_changed_after_staging_is_reported(tmp_path):
+    p, own = _staged_once(tmp_path)
+    own.write_text(own.read_text() + "// revised input\n")
+    out = C.consume_reused_ip_rtl(p)
+    assert out["supplied_rtl_not_staged"] == ["input/rtl/spm.v"], out
+
+
+def test_a_deleted_staged_copy_is_reported(tmp_path):
+    p, _own = _staged_once(tmp_path)
+    (p / "phase2/stage1/rtl/spm.v").unlink()
+    (p / "phase2/stage1/rtl/chip_top.v").write_text(
+        "module chip_top(input clk); endmodule\n")
+    out = C.consume_reused_ip_rtl(p)       # rtl/ is closed: consume skips
+    assert out["staged"] == []
+    assert out["supplied_rtl_not_staged"] == ["input/rtl/spm.v"], out
+
+
+def test_an_in_place_edit_of_the_staged_copy_is_not_reported(tmp_path):
+    p, _own = _staged_once(tmp_path)
+    rtl_spm = p / "phase2/stage1/rtl/spm.v"
+    rtl_spm.write_text(rtl_spm.read_text() + "// completed in place\n")
+    out = C.consume_reused_ip_rtl(p)
+    assert "supplied_rtl_not_staged" not in out, out
+    mf = json.loads((p / "phase2/stage1/rtl/SOURCE_MANIFEST.json").read_text())
+    assert list(mf["staged_from_input_sha256"]) == ["input/rtl/spm.v"]
+
+
+def test_mixed_context_stub_and_vendor_ip_hand_off_per_file(tmp_path, _session):
+    """A completion stub in input/rtl beside a vendor IP: the stub is the
+    starting point (spec-to-rtl), the vendor file is kept as IP; nothing says
+    "Do NOT author". RED on 77f5ba13e (one vendor file made it all IP)."""
+    p = D6._spm_project(tmp_path)
+    D6._supply(p, "input/rtl", "spm.v", "module spm(input clk);\n  // TODO\n"
+                                        "endmodule\n")
+    D6._supply(p, "input/vendor_rtl", "ip_core.v",
+               "module ip_core(input clk); endmodule\n")
+    res = R.step_rtl_gen(p, ARITH)
+    assert res.extras["fallback_skill"] == "spec-to-rtl", res.extras
+    assert res.extras["supplied_rtl_roles"] == {
+        "starting_point": ["input/rtl/spm.v"],
+        "reused_ip": ["input/vendor_rtl/ip_core.v"]}
+    assert "Do NOT author" not in res.detail
+    assert "input/vendor_rtl/ip_core.v" in res.detail
+
+
+def test_input_source_manifest_declares_reused_ip(tmp_path, _session):
+    """`input/SOURCE_MANIFEST.json` reused_ip:true is a supported declaration
+    path: RTL under input/rtl it covers is reused IP (catalog-glue). RED on
+    77f5ba13e (only the phase2 manifest was read)."""
+    p = D6._spm_project(tmp_path)
+    D6._supply(p, "input/rtl", "spm.v", D6.SUPPLIED_SPM)
+    (p / "input/SOURCE_MANIFEST.json").write_text(json.dumps(
+        {"reused_ip": True}))
+    res = R.step_rtl_gen(p, ARITH)
+    assert res.extras["fallback_skill"] == "catalog-glue-author", res.extras

@@ -269,28 +269,33 @@ def unstaged_supplied_design_sources(project: Path) -> List[Path]:
     D10 review (MAJOR): "the supplied RTL was not staged" is a claim about
     rtl/, so it is checked against rtl/. A supplied source counts as staged
     when rtl/ holds a file of the same name with the same sha256, or when this
-    program's own SOURCE_MANIFEST `staged_from_input` lists it (it was staged,
-    and may since have been edited in place on purpose). MEASURED before: a
+    program's own SOURCE_MANIFEST `staged_from_input_sha256` records it with
+    the input's CURRENT sha256 and rtl/ still holds its copy (it was staged
+    from these bytes, and the copy may since have been edited in place). A
+    source changed after staging, or whose copy was deleted, is reported. MEASURED before: a
     second consume, and every rtl_gen re-run after consume, reported the
     supplied spm.v as NOT staged while rtl/spm.v was byte-identical to it."""
     rtl_dir = project / "phase2" / "stage1" / "rtl"
-    listed: set = set()
+    listed: Dict[str, str] = {}
     try:
         mf = json.loads((rtl_dir / _MANIFEST_NAME).read_text(errors="replace"))
-        if isinstance(mf, dict) and isinstance(mf.get("staged_from_input"),
-                                               list):
-            listed = {str(x) for x in mf["staged_from_input"]}
+        if isinstance(mf, dict) and isinstance(
+                mf.get("staged_from_input_sha256"), dict):
+            listed = {str(k): str(v)
+                      for k, v in mf["staged_from_input_sha256"].items()}
     except (OSError, ValueError):
-        listed = set()
+        listed = {}
     out: List[Path] = []
     for f in discover_supplied_design_sources(project):
         try:
             rel = str(f.relative_to(project))
         except ValueError:
             rel = str(f)
-        if rel in listed:
-            continue
         twin = rtl_dir / f.name
+        # Listed as staged AND the input still has the bytes it was staged
+        # with AND rtl/ still holds its copy (which may be edited in place).
+        if rel in listed and listed[rel] == _sha256(f) and twin.is_file():
+            continue
         if twin.is_file() and _sha256(twin) == _sha256(f):
             continue
         out.append(f)
@@ -365,6 +370,16 @@ def emit_consume_manifest(project: Path, staged_paths: List[Path],
     prov = mf.get("staged_from_input")
     if not isinstance(prov, list) or not prov:
         mf["staged_from_input"] = sorted(provenance)
+    # D10 review — the BYTES each source had when this call staged it. "Listed
+    # as staged" is only true while the input still has those bytes (an
+    # in-place edit of the rtl/ copy stays allowed; a changed input does not).
+    shas = mf.get("staged_from_input_sha256")
+    shas = dict(shas) if isinstance(shas, dict) else {}
+    for rel in provenance:
+        sha = _sha256(project / rel)
+        if sha:
+            shas[rel] = sha
+    mf["staged_from_input_sha256"] = dict(sorted(shas.items()))
     # EMPTY reconciliation scaffold (GAP-E2E-8 parity) — an empty scaffold
     # reconciles ZERO ports, so l9_rtl_pin_consistency_check's verdict is
     # byte-for-byte unchanged until a real pairing is authored.
