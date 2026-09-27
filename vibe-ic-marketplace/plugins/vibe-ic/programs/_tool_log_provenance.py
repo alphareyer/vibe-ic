@@ -5,44 +5,61 @@ WHY THIS EXISTS (plan W19, owner decision 4a, 2026-09-28)
 --------------------------------------------------------
 Under ``--librelane`` the layout is produced by LibreLane, not by a vibe-ic
 session, and vibe-ic IMPORTS the step outputs into its canonical tree. The
-provenance ledger then needs a row per imported artefact, and there are only
-two honest shapes for it:
+provenance ledger then needs a row per imported step, and there are only two
+honest shapes for it:
 
 * **A back-fill.** The runner hashes a file it did not watch being written.
   Doctrine #365 (``phase3_one_shot_runner._restamp_provenance_output``) says
   that row is ``reconstructed: true`` with ``duration_ms: None``. Nothing here
   changes that: a back-fill is still a back-fill.
 * **A witnessed run.** The owner ruled (decision 4a) that LibreLane's OWN step
-  log is a witness: the step ran, the tool wrote a transcript, and the flow's
-  own ``flow.log`` names the step and the folder it ran in. Such a row is
-  ``reconstructed: false``, is attributed to LibreLane, and CITES the evidence
-  by path and sha256 so any later reader can re-check it.
+  record is a witness. Such a row is ``reconstructed: false``, is attributed to
+  LibreLane, and CITES its evidence by path and sha256 so any later reader can
+  re-check it.
 
-The difference between the two is exactly the citation, so the citation is
-what this module builds and what ``verify_witness`` re-reads. A witness that
-cannot be re-read — its log is gone, rewritten, a symlink, outside the
-project, or its step is not in the flow's own log — is not a witness, and
-``provenance_check`` refuses a row that claims one.
+WHAT A WITNESS MUST SHOW, AND HOW EACH PART IS CHECKED
+------------------------------------------------------
+LibreLane prints ``Running '<id>' at '<dir>'`` in ``Step.start``, BEFORE the
+step decides to skip and before ``run()`` succeeds, so a started step proves
+nothing. A witness holds only when ALL of these re-verify:
 
-ATTRIBUTION
------------
-``tool`` stays the UNDERLYING tool (``openroad``, ``yosys``, ``magic``,
-``klayout``, ``netgen``, ``verilator``), derived from the LibreLane step id and
-never taken from the caller, so the flow's existing ``provenance_check
---tool`` allow-lists judge the row unchanged (decision 4a, not 4b: no
-allow-list or flow-YAML edit). ``attributed_to`` names the flow that ran the
-tool. A ``Checker.*`` / ``Misc.*`` step runs no subprocess and writes no tool
-log, so it can never be witnessed; neither can a step whose folder holds no
-log. Those imports stay back-fills.
+1. **The run's own log, pinned.** ``flow.log`` is append-only and a run tag can
+   be reused, so the witness cites the PREFIX the row was written against
+   (``bytes`` + the sha256 of those bytes), never the whole file. Later
+   appends leave the witness valid.
+2. **The step ran a tool and did not skip.** In that prefix, the step's block
+   (from its ``Running`` line to the next step outside its folder) must not
+   print ``Skipping '<id>'`` or ``Returning state unaltered``, and it must
+   name at least one ``Logging subprocess to '<path>'``: the transcript of a
+   real tool process. A pure-Python step names none, so it can never be
+   witnessed, whatever its step-id prefix.
+3. **The cited logs are those transcripts.** Each cited log is named by one of
+   the block's ``Logging subprocess`` lines, lies inside the step folder, and
+   still has its cited sha256.
+4. **The step finished.** Its ``state_out.json``, which LibreLane writes only
+   after ``run()`` returns, is cited by sha256.
+5. **The declared bytes are that step's bytes.** Every declared output names
+   its source file in the step folder (``sources``), and the source's sha256,
+   the file on disk, and the row's output digest are all equal.
 
-WHAT THIS DOES NOT DO
----------------------
-It does not write a ``measurement`` record. ``mcp-eda``'s
-``measurementRecord()`` is the only writer of that schema; a row without one
-reads UNMEASURED under ``provenance_check --require-measured`` (the
-INCOMPLETE tier, rc 0, never a PASS). Stating ``measured: true`` for an
-imported step is the importer's call (W6), made from the step's own state,
-not assumed here.
+``tool`` is the UNDERLYING tool (``openroad``, ``yosys``, ``magic``,
+``klayout``, ``netgen``, ``verilator``), derived from the step id and never
+taken from the caller, so the flow's existing ``provenance_check --tool``
+allow-lists judge the row unchanged (decision 4a, not 4b). ``exit_code`` is 0
+because of points 2 and 4, not because a caller said so.
+
+Every path in the witness is relative to ``run_dir`` (itself project-
+relative), the same convention as the W0 import manifest (lane llf).
+
+THE ONE READER
+--------------
+The flow-log grammar is read by two calibrated instruments (see
+``instrument_calibration``): ``flow_log_steps`` and ``step_block``. When one
+of them may not judge, ``witnessed_row`` refuses (so the caller writes a #365
+back-fill), and ``verify_witness`` returns ``UNCALIBRATED``. That is a
+NOT_MEASURED state, never a FAIL.
+
+It writes no ``measurement`` record; see ``_runner_measurement``.
 
 chip-AGNOSTIC: no design, PDK or corner literal. The only literals are
 LibreLane's own flow-log grammar and its step-id prefixes.
@@ -54,7 +71,7 @@ import hashlib
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -64,10 +81,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 SUPPORTED_FLOWS = ("librelane",)
 
 WITNESS_KIND = "tool_step_log"
+WITNESS_SCHEMA = 2
 
-#: LibreLane step-id prefix -> the tool that actually ran. ``Odb.*`` steps run
-#: inside OpenROAD's Python. Prefixes absent here (``Checker``, ``Misc``) run
-#: no tool and cannot be witnessed.
+#: ``verify_witness``'s answer when its flow-log reader may not judge.
+UNCALIBRATED = "uncalibrated"
+
+#: LibreLane step-id prefix -> the tool the step's subprocess is. ``Odb.*``
+#: steps run inside OpenROAD's Python. Whether a step ran a tool at all is
+#: decided by its flow-log block (point 2), not by this table.
 _STEP_PREFIX_TOOL = {
     "OpenROAD": "openroad",
     "Odb": "openroad",
@@ -78,9 +99,15 @@ _STEP_PREFIX_TOOL = {
     "Verilator": "verilator",
 }
 
-#: LibreLane's flow.log line for a step it started. Fixed grammar, printed by
-#: ``librelane.steps.step.Step.start``: ``Running '<id>' at '<dir>'…``.
+#: LibreLane's flow.log grammar (librelane/steps/step.py): a step starting,
+#: a step logging its subprocess, and a step declining to run.
 _RUNNING_RE = re.compile(r"^Running '([^']+)' at '([^']+)'…$", re.M)
+_SUBPROCESS_RE = re.compile(
+    r"^Logging subprocess to (?:\[repr\.filename\])?'([^']+)'"
+    r"(?:\[/repr\.filename\])?…$")
+_SKIPPING_RE = re.compile(r"Skipping '([^']+)'…$")
+_UNALTERED = "Returning state unaltered…"
+
 
 class WitnessRefused(ValueError):
     """The caller asked for a witnessed row the evidence does not support."""
@@ -94,9 +121,22 @@ def _sha256(path: Path) -> str:
     return "sha256:" + h.hexdigest()
 
 
+def _bare(value: Any) -> str:
+    s = str(value or "")
+    return s[7:] if s.startswith("sha256:") else s
+
+
 def underlying_tool(step_id: str) -> Optional[str]:
-    """The tool a LibreLane step runs, or None when it runs no tool."""
+    """The tool a LibreLane step's subprocess is, or None for no tool."""
     return _STEP_PREFIX_TOOL.get(str(step_id).split(".", 1)[0])
+
+
+def _parts(path: str) -> Tuple[str, ...]:
+    return tuple(p for p in Path(path).parts if p not in ("", "."))
+
+
+def _ends_with(parts: Tuple[str, ...], want: Tuple[str, ...]) -> bool:
+    return bool(want) and len(parts) >= len(want) and parts[-len(want):] == want
 
 
 def flow_log_steps(flow_log: str) -> List[Tuple[str, Tuple[str, ...]]]:
@@ -110,60 +150,97 @@ def flow_log_steps(flow_log: str) -> List[Tuple[str, Tuple[str, ...]]]:
     import instrument_calibration
     instrument_calibration.assert_calibrated(
         "_tool_log_provenance::flow_log_steps")
-    return [(m.group(1), tuple(p for p in Path(m.group(2)).parts
-                               if p not in ("", ".")))
+    return [(m.group(1), _parts(m.group(2)))
             for m in _RUNNING_RE.finditer(flow_log or "")]
 
 
-def flow_log_names_step(flow_log: str, step_id: str, step_dir: str) -> bool:
-    """Does the flow's own log say it started ``step_id`` in ``step_dir``?
+def step_block(flow_log: str, step_id: str,
+               step_dir: str) -> Optional[Dict[str, Any]]:
+    """What the flow's own log says about ONE step run, or None if it never
+    started ``step_id`` in ``step_dir``.
 
-    ``step_dir`` is the step folder relative to the run directory, e.g.
-    ``44-openroad-detailedrouting`` or a nested sub-step
-    ``42-openroad-repairantennas/2-openroad-checkantennas``. LibreLane prints
-    the folder relative to its working directory (``runs/<tag>/<dir>``), so a
-    match is a path whose trailing components equal ``step_dir``.
+    The block runs from the step's ``Running`` line to the next ``Running``
+    line of a step outside its folder (a nested sub-step stays inside). When a
+    reused run tag started the same step in the same folder twice, the LAST
+    block is the one described. Returns ``{"skipped": bool,
+    "subprocess_logs": [folder parts, ...]}``.
     """
-    want = tuple(p for p in Path(step_dir).parts if p not in ("", "."))
-    if not want:
-        return False
-    return any(sid == step_id and len(parts) >= len(want)
-               and parts[-len(want):] == want
-               for sid, parts in flow_log_steps(flow_log))
+    import instrument_calibration
+    instrument_calibration.assert_calibrated(
+        "_tool_log_provenance::step_block")
+    want = _parts(step_dir)
+    lines = (flow_log or "").splitlines()
+    found: Optional[Dict[str, Any]] = None
+    i = 0
+    while i < len(lines):
+        m = _RUNNING_RE.match(lines[i])
+        if not (m and m.group(1) == step_id
+                and _ends_with(_parts(m.group(2)), want)):
+            i += 1
+            continue
+        here = _parts(m.group(2))
+        block: Dict[str, Any] = {"skipped": False, "subprocess_logs": []}
+        j = i + 1
+        while j < len(lines):
+            n = _RUNNING_RE.match(lines[j])
+            if n and _parts(n.group(2))[:len(here)] != here:
+                break
+            s = _SKIPPING_RE.search(lines[j])
+            if (s and s.group(1) == step_id) or lines[j].endswith(_UNALTERED):
+                block["skipped"] = True
+            p = _SUBPROCESS_RE.match(lines[j])
+            if p:
+                block["subprocess_logs"].append(_parts(p.group(1)))
+            j += 1
+        found = block
+        i = j
+    return found
 
 
 def _inside(project: Path, path: Path, what: str) -> str:
     """``path`` relative to ``project``; refuses symlinks and escapes."""
     raw = path if path.is_absolute() else project / path
-    # Every component under the project must be a real directory/file:
-    # a symlinked log or folder is a pointer to evidence, not evidence.
     try:
         rel = raw.relative_to(project)
     except ValueError:
         raise WitnessRefused(f"{what} {raw} is outside the project {project}")
+    if ".." in rel.parts:
+        raise WitnessRefused(f"{what} {raw} escapes the project")
     cur = project
     for part in rel.parts:
         cur = cur / part
         if cur.is_symlink():
             raise WitnessRefused(f"{what} {raw} passes through a symlink ({cur})")
-    if ".." in rel.parts:
-        raise WitnessRefused(f"{what} {raw} escapes the project")
     return rel.as_posix()
 
 
+def _run_rel(project: Path, run_abs: Path, path: Path, what: str,
+             within: Optional[Path] = None) -> str:
+    """``path`` relative to the run directory, inside ``within`` if given."""
+    _inside(project, path, what)
+    if within is not None:
+        try:
+            path.relative_to(within)
+        except ValueError:
+            raise WitnessRefused(f"{what} {path} is not inside the step "
+                                 f"directory {within}")
+    return path.relative_to(run_abs).as_posix()
+
+
 def witnessed_row(project: Path, *, flow: str, step_id: str, run_dir: Path,
-                  step_dir: str, logs: Iterable[Path],
-                  outputs: Dict[str, Path], exit_code: int,
+                  step_dir: str, outputs: Dict[str, Path],
                   duration_ms: Optional[int] = None,
                   version: Optional[str] = None,
                   timestamp: Optional[str] = None) -> Dict[str, Any]:
-    """Build the provenance row for outputs imported from one external step.
+    """Build the provenance row for one step's outputs.
 
-    Every hash is computed here from the bytes on disk, never accepted from
-    the caller. Raises ``WitnessRefused`` when the evidence does not support a
-    witnessed row; the caller then writes a ``reconstructed: true`` back-fill
-    (#365) instead — never a weaker witness.
+    ``outputs`` maps each CANONICAL path (project-relative, already copied)
+    to the file the step wrote in its own folder. Every digest is computed
+    here from disk. Raises ``WitnessRefused`` whenever the evidence does not
+    support a witnessed row, including when the flow-log reader may not
+    judge; the caller then writes a #365 back-fill, never a weaker witness.
     """
+    import instrument_calibration
     project = Path(project).resolve()
     if flow not in SUPPORTED_FLOWS:
         raise WitnessRefused(f"flow {flow!r} has no witness rule "
@@ -172,8 +249,6 @@ def witnessed_row(project: Path, *, flow: str, step_id: str, run_dir: Path,
     if tool is None:
         raise WitnessRefused(f"step {step_id!r} runs no tool, so it writes no "
                              "tool log to witness it")
-    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
-        raise WitnessRefused(f"exit_code must be an int, got {exit_code!r}")
     run_rel = _inside(project, Path(run_dir), "run directory")
     run_abs = project / run_rel
     step_rel = Path(step_dir).as_posix()
@@ -182,36 +257,59 @@ def witnessed_row(project: Path, *, flow: str, step_id: str, run_dir: Path,
     if not step_abs.is_dir():
         raise WitnessRefused(f"step directory {step_abs} does not exist")
     flow_log = run_abs / "flow.log"
-    flow_log_rel = _inside(project, flow_log, "flow log")
+    _inside(project, flow_log, "flow log")
     if not flow_log.is_file():
         raise WitnessRefused(f"{flow_log} is missing: nothing names the step")
-    if not flow_log_names_step(flow_log.read_text(errors="replace"),
-                               step_id, step_rel):
-        raise WitnessRefused(f"{flow_log_rel} never started {step_id!r} in "
+    prefix = flow_log.read_bytes()
+    try:
+        block = step_block(prefix.decode("utf-8", errors="replace"),
+                           step_id, step_rel)
+    except instrument_calibration.Uncalibrated as exc:
+        raise WitnessRefused(f"the flow-log reader may not judge ({exc})")
+    if block is None:
+        raise WitnessRefused(f"flow.log never started {step_id!r} in "
                              f"{step_rel!r}")
-    cited: List[Dict[str, str]] = []
-    for log in logs:
-        rel = _inside(project, Path(log), "step log")
-        abs_log = project / rel
-        if not abs_log.is_file():
-            raise WitnessRefused(f"step log {rel} does not exist")
-        try:
-            abs_log.relative_to(step_abs)
-        except ValueError:
-            raise WitnessRefused(f"step log {rel} is not inside the step "
-                                 f"directory {step_rel}")
-        cited.append({"path": rel, "sha256": _sha256(abs_log)})
-    if not cited:
-        raise WitnessRefused(f"no tool log cited for {step_id!r}")
+    if block["skipped"]:
+        raise WitnessRefused(f"flow.log reports {step_id!r} skipped or "
+                             "returning its state unaltered")
+    logs: List[Dict[str, str]] = []
+    tail = _parts(step_rel)
+    for parts in block["subprocess_logs"]:
+        k = next((n for n in range(len(parts))
+                  if parts[n:n + len(tail)] == tail), None)
+        if k is None:
+            continue
+        log = step_abs.joinpath(*parts[k + len(tail):])
+        if log.is_file():
+            logs.append({"path": _run_rel(project, run_abs, log, "step log",
+                                          step_abs),
+                         "sha256": _sha256(log)})
+    if not logs:
+        raise WitnessRefused(f"flow.log names no subprocess transcript of "
+                             f"{step_id!r} that is on disk: no tool ran")
+    state_out = step_abs / "state_out.json"
+    if not state_out.is_file():
+        raise WitnessRefused(f"{step_rel}/state_out.json is missing: the step "
+                             "did not finish")
+    sources: Dict[str, Dict[str, str]] = {}
     outs: Dict[str, str] = {}
-    for rel_name, path in outputs.items():
-        rel = _inside(project, Path(path), "output")
-        if rel != Path(rel_name).as_posix():
-            raise WitnessRefused(f"output key {rel_name!r} is not the path "
-                                 f"of the file it declares ({rel})")
-        if not (project / rel).is_file():
-            raise WitnessRefused(f"output {rel} does not exist")
-        outs[rel] = _sha256(project / rel)
+    for rel_name, src in outputs.items():
+        canon = _inside(project, project / rel_name, "output")
+        if canon != Path(rel_name).as_posix():
+            raise WitnessRefused(f"output key {rel_name!r} is not a "
+                                 "project-relative path")
+        if not (project / canon).is_file():
+            raise WitnessRefused(f"output {canon} does not exist")
+        src = Path(src)
+        src_rel = _run_rel(project, run_abs, src, "output source", step_abs)
+        if not src.is_file():
+            raise WitnessRefused(f"output source {src_rel} does not exist")
+        sha = _sha256(src)
+        if _sha256(project / canon) != sha:
+            raise WitnessRefused(f"{canon} is not the bytes {step_id!r} wrote "
+                                 f"({src_rel})")
+        outs[canon] = sha
+        sources[canon] = {"path": src_rel, "sha256": sha}
     if not outs:
         raise WitnessRefused("a row must declare at least one output")
     row: Dict[str, Any] = {
@@ -220,18 +318,24 @@ def witnessed_row(project: Path, *, flow: str, step_id: str, run_dir: Path,
         "tool": tool,
         "attributed_to": flow,
         "step": step_id,
-        "exit_code": exit_code,
+        "exit_code": 0,
         "duration_ms": duration_ms,
         "outputs": outs,
         "reconstructed": False,
         "witness": {
             "kind": WITNESS_KIND,
+            "schema": WITNESS_SCHEMA,
             "flow": flow,
             "step_id": step_id,
             "run_dir": run_rel,
             "step_dir": step_rel,
-            "flow_log": {"path": flow_log_rel, "sha256": _sha256(flow_log)},
-            "logs": cited,
+            "flow_log": {"path": "flow.log", "bytes": len(prefix),
+                         "sha256": "sha256:"
+                         + hashlib.sha256(prefix).hexdigest()},
+            "completion": {"path": f"{step_rel}/state_out.json",
+                           "sha256": _sha256(state_out)},
+            "logs": logs,
+            "sources": sources,
         },
     }
     if version:
@@ -245,16 +349,17 @@ def claims_witness(entry: Dict[str, Any]) -> bool:
         "witness" in entry or "attributed_to" in entry)
 
 
-def verify_witness(entry: Dict[str, Any],
-                   project: Path) -> Tuple[Optional[bool], str]:
-    """Re-read a row's witness. ``(None, "")`` when the row claims none.
+def verify_witness(entry: Dict[str, Any], project: Path) -> Tuple[Any, str]:
+    """Re-read a row's witness.
 
-    ``(False, reason)`` for every way a claimed witness fails to hold up;
-    ``(True, "")`` only when each cited file is still the file it cites and
-    the flow's own log still names the step in the cited folder.
+    ``(None, "")`` when the row claims none; ``(True, "")`` only when every
+    point in the module docstring still holds; ``(UNCALIBRATED, reason)`` when
+    the flow-log reader may not judge (NOT_MEASURED, never a FAIL);
+    ``(False, reason)`` for every way a claimed witness fails.
     """
     if not claims_witness(entry):
         return None, ""
+    import instrument_calibration
     project = Path(project).resolve()
     w = entry.get("witness")
     if not isinstance(w, dict):
@@ -270,59 +375,93 @@ def verify_witness(entry: Dict[str, Any],
                        f"{entry.get('attributed_to')!r} is not a supported "
                        "matching pair")
     step_id = str(w.get("step_id") or "")
-    if entry.get("tool") != underlying_tool(step_id):
+    tool = underlying_tool(step_id)
+    if tool is None or entry.get("tool") != tool:
         return False, (f"tool {entry.get('tool')!r} is not the tool step "
-                       f"{step_id!r} runs ({underlying_tool(step_id)!r})")
-
-    def _cited(obj: Any, what: str) -> Tuple[Optional[Path], str]:
-        if not isinstance(obj, dict) or not obj.get("path") \
-                or not obj.get("sha256"):
-            return None, f"{what} citation is missing its path or sha256"
-        try:
-            rel = _inside(project, Path(str(obj["path"])), what)
-        except WitnessRefused as exc:
-            return None, str(exc)
-        p = project / rel
-        if not p.is_file():
-            return None, f"cited {what} {rel} does not exist"
-        if _sha256(p) != str(obj["sha256"]):
-            return None, (f"cited {what} {rel} no longer has the sha256 the "
-                          "row cites")
-        return p, ""
-
-    flow_log, why = _cited(w.get("flow_log"), "flow log")
-    if flow_log is None:
-        return False, why
+                       f"{step_id!r} runs ({tool!r})")
     try:
         run_rel = _inside(project, Path(str(w.get("run_dir") or "")),
                           "run directory")
+        run_abs = project / run_rel
+        step_rel = str(w.get("step_dir") or "")
+        step_abs = run_abs / step_rel
+        _inside(project, step_abs, "step directory")
     except WitnessRefused as exc:
         return False, str(exc)
-    if flow_log != project / run_rel / "flow.log":
+    if not step_rel or not step_abs.is_dir():
+        return False, f"step directory {step_rel!r} does not exist"
+
+    def _cited(obj: Any, what: str, within: Path) -> Tuple[Optional[Path], str]:
+        if not isinstance(obj, dict) or not obj.get("path") \
+                or not obj.get("sha256"):
+            return None, f"{what} citation is missing its path or sha256"
+        p = run_abs / str(obj["path"])
+        try:
+            _run_rel(project, run_abs, p, what, within)
+        except WitnessRefused as exc:
+            return None, str(exc)
+        if not p.is_file():
+            return None, f"cited {what} {obj['path']} does not exist"
+        if _sha256(p) != str(obj["sha256"]):
+            return None, (f"cited {what} {obj['path']} no longer has the "
+                          "sha256 the row cites")
+        return p, ""
+
+    fl = w.get("flow_log")
+    if not isinstance(fl, dict) or fl.get("path") != "flow.log":
         return False, "the cited flow log is not the run directory's flow.log"
-    step_dir = str(w.get("step_dir") or "")
-    step_abs = project / run_rel / step_dir
-    import instrument_calibration
+    size = fl.get("bytes")
+    log_path = run_abs / "flow.log"
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        return False, "the flow-log citation pins no byte length"
+    if not log_path.is_file() or log_path.is_symlink():
+        return False, "the run directory's flow.log is missing"
+    with log_path.open("rb") as fh:
+        prefix = fh.read(size)
+    if len(prefix) != size or "sha256:" + hashlib.sha256(prefix).hexdigest() \
+            != str(fl.get("sha256")):
+        return False, ("flow.log no longer begins with the bytes the row "
+                       "cites")
     try:
-        named = flow_log_names_step(flow_log.read_text(errors="replace"),
-                                    step_id, step_dir)
+        block = step_block(prefix.decode("utf-8", errors="replace"),
+                           step_id, step_rel)
     except instrument_calibration.Uncalibrated as exc:
-        return False, f"the flow-log reader may not judge: {exc}"
-    if not named:
+        return UNCALIBRATED, f"the flow-log reader may not judge: {exc}"
+    if block is None:
         return False, (f"the flow's own log never started {step_id!r} in "
-                       f"{step_dir!r}")
+                       f"{step_rel!r}")
+    if block["skipped"]:
+        return False, f"the flow's own log reports {step_id!r} skipped"
+    comp = w.get("completion")
+    if not isinstance(comp, dict) or \
+            comp.get("path") != f"{step_rel}/state_out.json":
+        return False, "the witness cites no state_out.json of the step"
+    p, why = _cited(comp, "completion record", step_abs)
+    if p is None:
+        return False, why
     logs = w.get("logs")
     if not isinstance(logs, list) or not logs:
         return False, "the witness cites no tool log"
+    named = block["subprocess_logs"]
     for obj in logs:
-        p, why = _cited(obj, "step log")
+        p, why = _cited(obj, "step log", step_abs)
         if p is None:
             return False, why
-        try:
-            p.relative_to(step_abs)
-        except ValueError:
-            return False, (f"cited step log {obj.get('path')} is not inside "
-                           f"the step directory {step_dir}")
+        if not any(_ends_with(parts, _parts(str(obj["path"])))
+                   for parts in named):
+            return False, (f"cited step log {obj['path']} is not a transcript "
+                           "the flow's own log names for this step")
+    sources = w.get("sources")
+    outputs = entry.get("outputs") or {}
+    if not isinstance(sources, dict) or set(sources) != set(outputs):
+        return False, "the witness does not name a source for every output"
+    for canon, obj in sources.items():
+        p, why = _cited(obj, "output source", step_abs)
+        if p is None:
+            return False, why
+        if _bare(obj["sha256"]) != _bare(outputs[canon]):
+            return False, (f"{canon} is declared with bytes other than its "
+                           f"source {obj['path']}")
     return True, ""
 
 

@@ -2302,9 +2302,11 @@ _LL_FLOW_LOG_PROV = (
     "Real LibreLane flow.log from the CMP3 LibreLane arm on 8HD-4 "
     "(`librelane --manual-pdk --pdk gf180mcuD --run-tag cmp3`, rc 0, "
     "`Flow complete.`; source sha256 303263b98a32083a0beefacbbcbc757e36615b65"
-    "f20d888efa6636f34e466dc2). Kept: only the `Running '<id>' at '<dir>'…` "
-    "lines and the closing line, each byte-unedited; every other line is "
-    "dropped because it names the design. ")
+    "f20d888efa6636f34e466dc2). Kept, byte-unedited except that the home "
+    "directory reads `/host/`: the `Running '<id>' at '<dir>'…`, `Logging "
+    "subprocess to '<path>'…`, `Skipping '<id>'…` and `Returning state "
+    "unaltered…` lines and the closing line; every other line is dropped "
+    "because it names the design. ")
 
 
 def _judge_flow_log_witness(log: str) -> Optional[str]:
@@ -2335,6 +2337,48 @@ _register(Instrument(
         provenance=(_LL_FLOW_LOG_PROV + "Whole. calibration/"
                     "librelane_flow_log_complete_negative.log"),
         artefact=_read("librelane_flow_log_complete_negative.log")),
+))
+
+
+def _judge_step_block(sample: Tuple[str, str, str]) -> Optional[str]:
+    import _tool_log_provenance as T
+    log, step_id, step_dir = sample
+    block = T.step_block(log, step_id, step_dir)
+    return (None if block and not block["skipped"]
+            and block["subprocess_logs"] else "NOT_A_TOOL_RUN")
+
+
+def _flow_log_query(step_id: str, step_dir: str) -> Callable[[], Tuple[str, str, str]]:
+    def _load() -> Tuple[str, str, str]:
+        return (_read("librelane_flow_log_complete_negative.log")(),
+                step_id, step_dir)
+    return _load
+
+
+_register(Instrument(
+    name="_tool_log_provenance::step_block",
+    reads="one step's block of LibreLane's flow.log (skip / subprocess lines)",
+    ruling="llv1 decision 4a (W19 review fix)", owner="llb",
+    why=("LibreLane prints `Running` before a step decides to skip, so a "
+         "started step is no witness. The reader must tell a step that ran a "
+         "tool subprocess from one the flow skipped. The pair is two steps of "
+         "the same real log: one skipped, one that logged its subprocess."),
+    judge=_judge_step_block,
+    positive=Sample(
+        provenance=(_LL_FLOW_LOG_PROV + "Queried for OpenROAD.IOPlacement at "
+                    "25-openroad-ioplacement, which the log reports as "
+                    "`IO_PIN_ORDER_CFG is set. Skipping 'OpenROAD.IOPlacement'`. "
+                    "calibration/librelane_flow_log_complete_negative.log"),
+        artefact=_flow_log_query("OpenROAD.IOPlacement",
+                                 "25-openroad-ioplacement")),
+    expect="NOT_A_TOOL_RUN",
+    negative=Sample(
+        provenance=(_LL_FLOW_LOG_PROV + "Queried for OpenROAD.DetailedRouting "
+                    "at 44-openroad-detailedrouting, whose block logs its "
+                    "subprocess openroad-detailedrouting.log. calibration/"
+                    "librelane_flow_log_complete_negative.log"),
+        artefact=_flow_log_query("OpenROAD.DetailedRouting",
+                                 "44-openroad-detailedrouting")),
 ))
 
 
