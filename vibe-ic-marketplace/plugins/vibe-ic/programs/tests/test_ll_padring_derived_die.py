@@ -71,10 +71,10 @@ def chip(tmp_path, record=RECORD, **answers):
     return p
 
 
-def resolve(tmp_path, p, steps=CHAIN):
+def resolve(tmp_path, p, steps=CHAIN, overlay=None):
     configs = contract.resolve_step_configs(p, 'img', 'processA', steps,
                                             pdk_root=tmp_path / 'pdkroot',
-                                            folder='15-config')
+                                            folder='15-config', overlay=overlay)
     root = p / 'phase3/librelane/15-config'
     return ({s: json.loads(c.read_text()) for s, c in configs.items()},
             json.loads((root / 'design.provenance.json').read_text()))
@@ -162,9 +162,11 @@ def test_a_declared_die_equal_to_the_record_keeps_its_declared_source(tmp_path, 
     assert configs['OpenROAD.Floorplan']['FP_SIZING'] == 'absolute'
 
 
-def test_a_chain_without_floorplan_or_padring_is_not_given_the_die(tmp_path, resolver):
+@pytest.mark.parametrize('overlay', [None, {'PL_TARGET_DENSITY': (0.5, 'test overlay')}])
+def test_a_chain_without_floorplan_or_padring_is_not_given_the_die(tmp_path, resolver, overlay):
+    # With an overlay the config is rewritten, so the step gate itself decides.
     p = chip(tmp_path)
-    configs, sources = resolve(tmp_path, p, ['OpenROAD.GlobalPlacement'])
+    configs, sources = resolve(tmp_path, p, ['OpenROAD.GlobalPlacement'], overlay)
     assert configs['OpenROAD.GlobalPlacement']['DIE_AREA'] is None
     assert 'DIE_AREA' not in sources and 'FP_SIZING' not in sources
 
