@@ -19073,9 +19073,6 @@ def _step_inputs(project: Path, kind: str, top: str, args: Any,
                 _in_design = False
             knobs["sdc_origin"] = ("design" if _in_design
                                    else "flow_emitted_or_legacy")
-        # FX_STEP7_ASIC_SDC: `step_pnr` loads step 7's SDC; its record carries
-        # that file's sha256, so a new step-7 deck invalidates the routed DEF.
-        _add("step7_asic_sdc", _pl.constraints_dir(project) / ASIC_SDC_RECORD)
         knobs["spare_density"] = str(getattr(args, "spare_density", ""))
         knobs[_TAP_PITCH_ENV] = os.environ.get(_TAP_PITCH_ENV, "")
         # r5 review finding 5: this one changes `step_pnr`'s filler Tcl and

@@ -206,7 +206,7 @@ def test_the_pad_ring_supply_ports_are_a_named_pnr_time_derivation(
 
 
 # --------------------------------------------------------------------------- #
-# the step-7 deck never feeds itself back, and it binds PnR's cache identity
+# the step-7 deck never feeds itself back as a clock source
 # --------------------------------------------------------------------------- #
 def test_the_clock_collector_never_reads_step7s_own_deck(tmp_path):
     proj = _project(tmp_path)
@@ -215,15 +215,6 @@ def test_the_clock_collector_never_reads_step7s_own_deck(tmp_path):
         "create_clock -name clk -period 7.0 [get_ports clk]\n")
     assert R._phase2_emitted_period_ns(proj, top=TOP) is None
 
-
-def test_the_step7_record_is_part_of_pnr_identity(tmp_path):
-    class _Args:
-        spare_density = 0.02
-        container = ""
-    proj = _project(tmp_path)
-    inputs, _k, _b = R._step_inputs(proj, "pnr", TOP, _Args())
-    assert ("step7_asic_sdc", proj / CONS / T.ASIC_SDC_RECORD) in [
-        (label, path) for label, path, _r in inputs]
 
 
 # --------------------------------------------------------------------------- #
