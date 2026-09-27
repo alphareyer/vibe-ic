@@ -121,6 +121,11 @@ PRODUCER_SIDECARS = ("producer_identity.json", "step_identity.json")
 #: Flow output under these trees is implementation work; Phase 1 is not.
 FLOW_OUTPUT_ROOTS = ("phase2", "phase3")
 
+NOT_CAPTURED = "NOT CAPTURED:"
+_IMAGE_NOT_GIVEN = (f"{NOT_CAPTURED} the runner that created this record "
+                    "resolved no image; the first dispatch that names one "
+                    "fills it")
+
 _REQUIRED_KEYS = ("schema", "impl", "flag", "resolved_at", "resolved_by",
                   "tool_defaults", "image")
 
@@ -196,6 +201,11 @@ def validate_record(obj: Any) -> List[str]:
                                 "non-empty source")
     if obj.get("image") is not None and not isinstance(obj.get("image"), str):
         problems.append("image is neither null nor a string")
+    # #312/#365: an unknown image is None WITH its reason, never a bare null.
+    if obj.get("image") is None and not str(
+            obj.get("image_capture") or "").startswith(NOT_CAPTURED):
+        problems.append("image is null without an image_capture "
+                        f"'{NOT_CAPTURED} <reason>'")
     for k in ("resolved_at", "resolved_by"):
         if k in obj and not (isinstance(obj[k], str) and obj[k]):
             problems.append(f"{k} is not a non-empty string")
@@ -379,10 +389,21 @@ def write_record(project: Path, impl: str, *, resolved_by: str,
                 IMPL_MODE_CONFLICT,
                 f"the project is implemented by '{existing['impl']}'; "
                 f"refusing to record '{impl}' over it")
+        if image is not None and existing.get("image") is None:
+            # Decision 24: the image the dispatch resolved. A record created
+            # before any runner named one is FILLED once, and says so; the
+            # reason it was missing is kept, never overwritten.
+            filled = dict(existing)
+            filled["image"] = image
+            filled["image_capture"] = (
+                f"FILLED by {resolved_by} at "
+                f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}; "
+                f"was {existing.get('image_capture')}")
+            _atomic_artefact.write_json(path, filled, indent=2)
+            return path
         if image is not None and image != existing.get("image"):
-            # Decision 24: the record names the image this project was
-            # implemented on. A second dispatch on another image would mix
-            # two images' artefacts under one record; it is never absorbed.
+            # A second dispatch on ANOTHER image would mix two images'
+            # artefacts under one record; it is never absorbed.
             raise ImplRefusal(
                 IMPL_IMAGE_CHANGED,
                 f"the project was implemented by '{impl}' on image "
@@ -400,6 +421,8 @@ def write_record(project: Path, impl: str, *, resolved_by: str,
         "tool_defaults": {},
         "image": image,
     }
+    if image is None:
+        rec["image_capture"] = _IMAGE_NOT_GIVEN
     problems = validate_record(rec)
     if problems:  # pragma: no cover - the constructor above is the schema
         raise ImplRefusal(IMPL_RECORD_UNREADABLE, "; ".join(problems))
