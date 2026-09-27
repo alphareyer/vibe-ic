@@ -60329,6 +60329,12 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             if _signoff_regen(mirror, primary_def):
                 written.extend(_publish_artefact_mirror(
                     spef_sta_rpt, mirror, project, "_emit_spef_sta"))
+    elif not (spef_out.is_file() and spef_out.stat().st_size > 0):
+        # N5 review 2: the declared-corner sweep cannot run without the run's
+        # own parasitics, and until now that wrote no record at all -- the
+        # producer is only called WITH a SPEF. Every declared (corner, check)
+        # is recorded NOT_MEASURED with this reason, replacing any older record.
+        _record_declared_corners_without_parasitics(project, spef_out)
     spef_sta_ok = (spef_sta_attempt_ok is not False
                    and spef_sta_rpt.is_file() and spef_sta_rpt.stat().st_size > 0)
 
@@ -63070,6 +63076,30 @@ def _sta_native_census_complete(body, def_file=None, io_masters=None):
             and not any(x.endswith(' UNRESOLVED') for x in instances))
 
 
+def _record_declared_corners_without_parasitics(project: Path,
+                                                spef_path: Path) -> Optional[Path]:
+    """Write the declared-corner record when step 22 left no non-empty SPEF:
+    every (corner, check) the design's own STA requirement states is
+    NOT_MEASURED, with the reason. Nothing is written when the design states
+    no corner (there is no obligation to record)."""
+    from l24_signoff_requirements_extract import extract_signoff_requirements
+    import _declared_process_record as _dpr
+    obligations = extract_signoff_requirements(project) or {}
+    required = sorted({c for row in obligations.get('signoff_requirements', [])
+                       if row.get('check') == 'STA' and row.get('stated')
+                       for c in row.get('corners', [])})
+    if not required:
+        return None
+    why = (f"step 22 left no non-empty SPEF at "
+           f"{_rel_to_project(spef_path, project)}; the declared-corner "
+           f"post-route sweep times the run's own parasitics, so it did not run")
+    try:
+        return _dpr.write(project, _dpr.build(required, status='NOT_RUN',
+                                              reason=why, report=None))
+    except Exception:  # noqa: BLE001 — the record never blocks the step
+        return None
+
+
 def _emit_declared_process_sta(project, top, pdk, container, spef_path,
                                rpt_out, notes, required):
     """Own fresh canonical native sections for explicit input process obligations.
@@ -63088,34 +63118,27 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     # now a refusal left only a note and an `.attempt-*` file, so the sign-off
     # gate saw no row for FF-setup / SS-hold / TT at all and the reason the
     # sweep did not count lived nowhere a reader of the record would look.
-    record_path = _pl.reports_dir(project) / 'phase3' / 'sta' / 'declared_process_sta.json'
-    sources = {}      # corner -> {role: source rows}, filled once inputs resolve
+    import _declared_process_record as _dpr
+    sources = {}      # corner -> source rows, filled once inputs resolve
 
-    def write_record(status, reason, measured_vals=None):
-        rows = {}
-        for c in required:
-            rows[c] = {}
-            for role in ('setup', 'hold'):
-                v = (measured_vals or {}).get((c, role.upper()))
-                rows[c][role] = dict(
-                    status=('MEASURED' if v is not None else 'NOT_MEASURED'),
-                    wns_ns=v,
-                    reason=(None if v is not None else reason),
-                    **(sources.get(c) or {}))
+    def write_record(status, reason, values=None, row_reasons=None,
+                     census=None, promoted=False):
         try:
-            _aa.write_json(record_path, {
-                'schema': 'vibe-ic/declared-process-sta/1',
-                'status': status, 'reason': reason,
-                'required_corners': list(required),
-                'report': (_rel_to_project(destination, project) if status == 'MEASURED'
-                           else None),
-                'corners': rows})
+            _dpr.write(project, _dpr.build(
+                required, status=status, reason=reason,
+                report=(_rel_to_project(destination, project) if promoted
+                        else None),
+                values=values, row_reasons=row_reasons, census=census,
+                sources=sources, promoted=promoted))
         except Exception as exc:                          # pragma: no cover
             notes.append(f'declared process STA record not written: {exc}')
 
-    def refuse(reason):
+    def refuse(reason, values=None, row_reasons=None, census=None):
+        # A refusal BEFORE the native report exists measured nothing, so every
+        # row carries this reason. A refusal AFTER it keeps every row that WAS
+        # measured (review wave 5): `values` / `row_reasons` say which.
         notes.append('declared process STA refused: ' + reason)
-        write_record('NOT_MEASURED', reason)
+        write_record('REFUSED', reason, values, row_reasons, census)
         return False
 
     def tq(value):
@@ -63165,7 +63188,7 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     # says which bytes a slack describes. The liberty lives inside the EDA
     # image; `_step_pdk_hasher` hashes it where it resolves.
     _lib_digest = _step_pdk_hasher(container)(
-        sorted({inventory[c][0] for c in required}))
+        sorted({x for c in required for x in inventory[c]}))
     _host_digest = {f: (_file_sha256(f) or '').replace('sha256:', '')
                     for f in (netlist, sdc, spef_path)}
     for c in required:
@@ -63177,7 +63200,13 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
             'spef_rc_corner': 'nom',
             'netlist': _rel_to_project(netlist, project),
             'netlist_sha256': _host_digest[netlist] or None,
-            'sdc': _rel_to_project(sdc, project), 'sdc_sha256': _host_digest[sdc] or None}
+            'sdc': _rel_to_project(sdc, project), 'sdc_sha256': _host_digest[sdc] or None,
+            # every other view the same STA run reads (IO-pad and macro
+            # liberties), each with its own digest -- review wave 5
+            'other_liberties': [
+                {'path': x, 'kind': ('io' if x in io_views else 'macro'),
+                 'sha256': _lib_digest.get(x) or None}
+                for x in inventory[c][1:]]}
     try:
         rpt_out.parent.mkdir(parents=True, exist_ok=True)
         report = _to_container_path(str(rpt_out), container)
@@ -63200,6 +63229,8 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
                              f'STA_BASIS_SHA256_SPEF: {sources[c]["spef_sha256"] or "UNAVAILABLE"}',
                              f'STA_BASIS_SHA256_NETLIST: {sources[c]["netlist_sha256"] or "UNAVAILABLE"}',
                              f'STA_BASIS_SHA256_SDC: {sources[c]["sdc_sha256"] or "UNAVAILABLE"}',
+                             ] + [f'STA_BASIS_SHA256_{o["kind"].upper()}_LIBERTY: {o["sha256"] or "UNAVAILABLE"} {_to_container_path(o["path"], container)}'
+                                  for o in sources[c]['other_liberties']] + [
                              f'OCV_DERATE_APPLIED early={_FLAT_OCV_DERATE_EARLY} late={_FLAT_OCV_DERATE_LATE} flat-OCV'] + [f'STA_BASIS_IO_LIBERTY: {_to_container_path(x, container)}' for x in inventory[c][1:] if x in io_views]:
                     tcl += f'puts $_f {tq(line)}\n'
                 if j == 0:
@@ -63231,23 +63262,46 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
         if role == 'SETUP':
             populations[corner] = classify(body, def_file, io_masters=io_masters)
     rpt_out.with_name(rpt_out.name + '.population.json').write_text(json.dumps(populations, indent=2) + '\n')
+    # Measure EVERY section first, then decide: a refusal must not erase a
+    # slack the run measured (review wave 5).
     values = {}
+    row_reasons = {}
+    census = {}
+    census_refusal = None
+    seen = {(corner, role) for role, corner, _b in sections}
     for role, corner, body in sections:
-        if role == 'SETUP' and not _sta_native_census_complete(body, def_file,
-                                                              io_masters=io_masters):
-            _unknown = [d['driver'] for d in
-                        (populations.get(corner) or {}).get('drivers') or []
-                        if d.get('classification') == 'REQUIRED_OR_UNKNOWN']
-            return refuse(f'{corner}: incomplete linked-master or parasitic annotation census'
-                          + (f' (unclassified unannotated driver(s): {", ".join(_unknown[:8])})'
-                             if _unknown else ''))
+        if role == 'SETUP':
+            if _sta_native_census_complete(body, def_file, io_masters=io_masters):
+                census[corner] = 'COMPLETE'
+            else:
+                _unknown = [d['driver'] for d in
+                            (populations.get(corner) or {}).get('drivers') or []
+                            if d.get('classification') == 'REQUIRED_OR_UNKNOWN']
+                census[corner] = ('INCOMPLETE' + (
+                    f': unclassified unannotated driver(s) {", ".join(_unknown[:8])}'
+                    if _unknown else ''))
+                if census_refusal is None:
+                    census_refusal = (f'{corner}: incomplete linked-master or parasitic annotation census'
+                                      + (f' (unclassified unannotated driver(s): {", ".join(_unknown[:8])})'
+                                         if _unknown else ''))
         if role in ('SETUP', 'HOLD'):
             value = extract_slacks(body).get('setup_wns_ns' if role == 'SETUP' else 'hold_wns_ns')
             if value is not None and math.isfinite(value):
                 measured.add((corner, role))
                 values[(corner, role)] = value
+            else:
+                row_reasons[(corner, role)] = (
+                    f'no finite {role.lower()} slack in the {corner} section')
+    for c in required:
+        for role in ('SETUP', 'HOLD'):
+            if (c, role) not in seen:
+                row_reasons[(c, role)] = (
+                    f'no {role} section for {c} in the native report')
+    if census_refusal is not None:
+        return refuse(census_refusal, values, row_reasons, census)
     if measured != {(c, role) for c in required for role in ('SETUP', 'HOLD')}:
-        return refuse('native process/role measurements incomplete')
+        return refuse('native process/role measurements incomplete',
+                      values, row_reasons, census)
     # R-0915-128 condition (b): the promoted report states, in its own header,
     # which drivers were excluded from the annotation census and why. A LEADING
     # COMMENT BLOCK ONLY: `_split_sections` keys on the `=== SETUP/HOLD` headers
@@ -63285,7 +63339,7 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     _log_surviving_artefact(
         [destination], produced_by="_emit_declared_process_sta",
         marker=str(destination))
-    write_record('MEASURED', None, values)
+    write_record('MEASURED', None, values, row_reasons, census, promoted=True)
     return True
 
 

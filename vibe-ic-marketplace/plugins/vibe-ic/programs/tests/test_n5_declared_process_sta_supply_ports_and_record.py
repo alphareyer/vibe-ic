@@ -176,29 +176,108 @@ def test_each_section_names_the_sha256_of_what_it_timed_and_the_record_has_every
             assert row["liberty"] == s["by"][c] and row["liberty_sha256"] == lib_sha
 
 
-def test_a_refused_sweep_records_every_corner_not_measured_with_the_reason(
+def test_a_refused_sweep_keeps_every_measured_row_and_records_the_refusal_beside_it(
         scene, monkeypatch):
-    """RED on main (no record). A supply port the DEF does NOT type is still
-    refused -- and the reason, naming the driver, is in the record for every
-    (corner, check), not only in a transient note."""
+    """Review wave 5 (integrity MAJOR). A supply port the DEF does NOT type
+    still refuses the sweep -- but the slacks the run DID measure stay
+    MEASURED (promoted: false), and the refusal naming the driver sits at the
+    top of the record and in each corner's census field."""
     s = scene
     _def(s["tmp_path"], vdd_use="SIGNAL")
     monkeypatch.setattr(p3, "_docker_exec", _native_double(_CENSUS_WITH_SUPPLY_PORTS))
     assert not s["emit"]()
     rec = json.loads((s["tmp_path"] / "reports/phase3/sta/declared_process_sta.json").read_text())
-    assert rec["status"] == "NOT_MEASURED" and "VDD" in rec["reason"], rec
+    assert rec["status"] == "REFUSED" and "VDD" in rec["reason"], rec
+    assert rec["report"] is None
     for c in ("SS", "TT", "FF"):
-        for role in ("setup", "hold"):
+        for role, wns in (("setup", 1.25), ("hold", 0.40)):
             row = rec["corners"][c][role]
-            assert row["status"] == "NOT_MEASURED" and row["wns_ns"] is None
-            assert "annotation census" in row["reason"]
+            assert row["status"] == "MEASURED" and row["wns_ns"] == wns, row
+            assert row["promoted"] is False
+            assert row["annotation_census"].startswith("INCOMPLETE"), row
+            assert "VDD" in row["annotation_census"]
 
 
-def test_a_missing_spef_records_not_measured_with_its_reason(scene):
-    """The corner whose SPEF was not extracted is NOT_MEASURED, reason stated."""
+def test_a_missing_section_is_its_own_reason_and_measured_rows_survive(
+        scene, monkeypatch):
+    """Only the rows that were not measured are NOT_MEASURED, each with its
+    own reason; the refusal (measurements incomplete) is beside them."""
+    s = scene
+    _def(s["tmp_path"])
+    base = _native_double(_CENSUS_WITH_SUPPLY_PORTS)
+
+    def drop_tt_hold(container, cmd, **kw):
+        rc = base(container, cmd, **kw)
+        out = Path(kw["isolate"][0])
+        text = out.read_text()
+        cut = text.find("=== HOLD corner: process=TT ===")
+        if cut >= 0:
+            nxt = text.find("=== ", cut + 4)
+            out.write_text(text[:cut] + (text[nxt:] if nxt >= 0 else ""))
+        return rc
+    monkeypatch.setattr(p3, "_docker_exec", drop_tt_hold)
+    assert not s["emit"]()
+    rec = json.loads((s["tmp_path"] / "reports/phase3/sta/declared_process_sta.json").read_text())
+    assert rec["status"] == "REFUSED" and "incomplete" in rec["reason"]
+    tt_hold = rec["corners"]["TT"]["hold"]
+    assert tt_hold["status"] == "NOT_MEASURED"
+    assert tt_hold["reason"] == "no HOLD section for TT in the native report"
+    assert rec["corners"]["TT"]["setup"]["status"] == "MEASURED"
+    assert rec["corners"]["SS"]["hold"]["wns_ns"] == 0.40
+
+
+def test_a_producer_refusal_before_any_measurement_marks_every_row(scene):
+    """Inside the producer: nothing was measured, so every row carries the
+    refusal's reason."""
     s = scene
     s["spef"].unlink()
     assert not s["emit"]()
     rec = json.loads((s["tmp_path"] / "reports/phase3/sta/declared_process_sta.json").read_text())
-    assert rec["status"] == "NOT_MEASURED" and "SPEF" in rec["reason"]
+    assert rec["status"] == "REFUSED" and "SPEF" in rec["reason"]
     assert {r["status"] for c in rec["corners"].values() for r in c.values()} == {"NOT_MEASURED"}
+
+
+def test_the_step23_caller_records_the_declared_corners_when_no_spef_exists(scene):
+    """Review wave 5: the producer is only CALLED with a SPEF, so the
+    no-SPEF record has to come from the caller. Drives the shipped step-23
+    block (the same slice the landed caller test executes)."""
+    import textwrap
+    s = scene
+    s["spef"].unlink()
+    source = Path(p3.__file__).read_text()
+    block = source.split('    # --- Step 23: SPEF-based post-route STA (#527)')[1].split(
+        '    # --- TAPEOUT-SIGNOFF P1: multi-corner SPEF')[0]
+    block = block[block.index('    spef_sta_rpt ='):]
+    scope = dict(vars(p3), sta_out=s["rpt"].parent, spef_out=s["spef"],
+                 primary_def=s["spef"], project=s["tmp_path"], top="dut",
+                 pdk=s["pdk"], container="fixture", notes=[], written=[],
+                 rpt_phase3=s["tmp_path"], _signoff_regen=lambda *a: True)
+    exec(textwrap.dedent(block), scope)
+    rec = json.loads((s["tmp_path"] / "reports/phase3/sta/declared_process_sta.json").read_text())
+    assert rec["status"] == "NOT_RUN" and "no non-empty SPEF" in rec["reason"]
+    assert sorted(rec["corners"]) == ["FF", "SS", "TT"]
+    assert {r["status"] for c in rec["corners"].values() for r in c.values()} == {"NOT_MEASURED"}
+
+
+def test_duplicate_identical_typing_of_the_ports_net_stays_unknown(tmp_path):
+    """Review wave 5: only the CONFLICTING half was tested; two identical
+    `USE POWER` statements for the port's net are still not one statement."""
+    res = classify(_CENSUS_WITH_SUPPLY_PORTS,
+                   _def(tmp_path, extra="- VDD ( * VPW ) + USE POWER ;"))
+    got = {r["driver"]: r["classification"] for r in res["drivers"]}
+    assert got["VDD"] == "REQUIRED_OR_UNKNOWN" and res["complete"] is False
+
+
+def test_the_io_pad_liberties_are_hashed_too(scene, monkeypatch):
+    """Review wave 5: every view the STA run reads is named WITH its digest."""
+    s = scene
+    _def(s["tmp_path"])
+    monkeypatch.setattr(p3, "_docker_exec", _native_double(_CENSUS_WITH_SUPPLY_PORTS))
+    assert s["emit"]()
+    rec = json.loads((s["tmp_path"] / "reports/phase3/sta/declared_process_sta.json").read_text())
+    for c in ("SS", "TT", "FF"):
+        others = rec["corners"][c]["setup"]["other_liberties"]
+        io = [o for o in others if o["kind"] == "io"]
+        assert io and all(o["sha256"] == p3._file_sha256(Path(o["path"])).split(":", 1)[1]
+                          for o in io), others
+    assert "STA_BASIS_SHA256_IO_LIBERTY:" in s["rpt"].read_text()
