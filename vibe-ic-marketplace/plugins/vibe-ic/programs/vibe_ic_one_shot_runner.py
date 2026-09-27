@@ -1175,26 +1175,56 @@ def _scan_rtl_modules(rtl_dir: Path) -> Tuple[set, set]:
     if the corpus contains `D [#(...)] <instname> (` somewhere — which the
     module's own `module D (` declaration never matches (D there is followed by
     `(` or the port list, not by an instance identifier). Deterministic; no LLM."""
+    if not rtl_dir.is_dir():
+        return set(), set()
+    return _scan_rtl_files([f for pat in ("*.v", "*.sv")
+                            for f in sorted(rtl_dir.glob(pat))])
+
+
+def _scan_rtl_files(files: List[Path]) -> Tuple[set, set]:
+    """`_scan_rtl_modules` over an explicit file list.
+
+    An instance name may carry an ARRAY range (`adder u[N-1:0] (`): a module
+    instantiated only that way is still instantiated, not a second root.
+
+    A module's own PARAMETERISED header (`module X #(...) (...);`) is not an
+    instantiation of X. The parameter group used to be matched with an
+    unbounded `[\s\S]*?`, which ran from that header into the body until any
+    `) <word> (` -- e.g. `negedge rst) if (` -- and read X as instantiated,
+    i.e. not a root. Declaration headers are masked before the search."""
     decls: set = set()
     text_parts: List[str] = []
-    if not rtl_dir.is_dir():
-        return decls, set()
-    for pat in ("*.v", "*.sv"):
-        for f in sorted(rtl_dir.glob(pat)):
-            try:
-                t = f.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            text_parts.append(t)
-            decls.update(_MODULE_DECL_RE.findall(t))
-    corpus = "\n".join(text_parts)
+    for f in files:
+        try:
+            t = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        text_parts.append(t)
+        decls.update(_MODULE_DECL_RE.findall(t))
+    corpus = re.sub(r"\b(module|macromodule)\s+[A-Za-z_]\w*", r"\1",
+                    "\n".join(text_parts))
     insts: set = set()
     for d in decls:
         inst_re = re.compile(
-            r"(?<![\w.])" + re.escape(d) + r"\s+(?:#\s*\([\s\S]*?\)\s*)?[A-Za-z_]\w*\s*\(")
+            r"(?<![\w.])" + re.escape(d) + r"\s+(?:#\s*\([\s\S]*?\)\s*)?"
+            r"[A-Za-z_]\w*\s*(?:\[[^\]\[;]*\]\s*)?\(")
         if inst_re.search(corpus):
             insts.add(d)
     return decls, insts
+
+
+def _supplied_build_rtl(project: Path) -> List[Path]:
+    """The design sources the design's INPUT supplies (.v/.sv), or [].
+
+    The same definition phase 2's consume step stages from
+    (`reused_ip_rtl_consume.discover_provided_build_rtl`). A probe failure
+    returns [], i.e. the behaviour before this reader existed."""
+    try:
+        import reused_ip_rtl_consume as _consume
+        return [f for f in _consume.discover_provided_build_rtl(project)
+                if f.suffix in (".v", ".sv")]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _resolve_top_name(project: Path, ic_name: str, top_name: str,
@@ -1224,6 +1254,12 @@ def _resolve_top_name(project: Path, ic_name: str, top_name: str,
     nothing creates a new top module in between.) Returns (top, note)."""
     rtl_dir = project / "phase2" / "stage1" / "rtl"
     decls, insts = _scan_rtl_modules(rtl_dir)
+    if not decls:
+        # A design that SUPPLIES its RTL has it under input/ until phase 2's
+        # consume step stages it, and this runs BEFORE phase 2. Reading only
+        # rtl/ saw nothing, kept the `chip_top` default, and handed every
+        # phase-2 step a module that does not exist in the design.
+        decls, insts = _scan_rtl_files(_supplied_build_rtl(project))
     override_note = ""
     if explicit:
         if not decls or top_name in decls:

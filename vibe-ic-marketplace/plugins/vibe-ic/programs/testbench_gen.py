@@ -110,10 +110,18 @@ _POWER_RE = re.compile(
 # A module instantiation, for the instantiation-graph root search. Two
 # identifiers before a '(' at a statement boundary, minus the keywords that
 # share that shape.
+#
+# The instance name may carry an ARRAY range (IEEE 1364 §12.1.2,
+# `adder u[N-1:0] (...)`), and the statement may open a generate item on the
+# same line as its `begin [: label]` / `else`. MEASURED on a supplied design
+# whose top instantiates its only child as an array: without the range the
+# child read as a second root, the root search refused as "ambiguous", and no
+# unit TB was emitted for any L10 case.
 _MODULE_DECL_RE = re.compile(r"^[ \t]*module\s+([A-Za-z_]\w*)", re.MULTILINE)
 _INST_RE = re.compile(
-    r"(?:^|[;\)]|\bend\b)\s*([A-Za-z_]\w*)\s*(?:#\s*\([^;]*?\)\s*)?"
-    r"([A-Za-z_]\w*)\s*\(", re.MULTILINE | re.DOTALL)
+    r"(?:^|[;\)]|\bend\b|\belse\b|\bbegin\b(?:\s*:\s*[A-Za-z_]\w*)?)"
+    r"\s*([A-Za-z_]\w*)\s*(?:#\s*\([^;]*?\)\s*)?"
+    r"([A-Za-z_]\w*)\s*(?:\[[^\]\[;]*\]\s*)?\(", re.MULTILINE | re.DOTALL)
 _NON_INST_KEYWORDS = frozenset("""
 module endmodule always always_ff always_comb always_latch initial final
 begin end if else for while repeat forever case casex casez endcase default
