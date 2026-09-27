@@ -174,10 +174,13 @@ _READERS = (
 #: of the operator slot's own `FP_DEF_TEMPLATE` -- an INPUT, not a DEF this
 #: run wrote -- only to COMPARE it with the declared die and refuse
 #: `LL_DEF_TEMPLATE_DIE_MISMATCH`. The die it emits is the declaration's
-#: `die_area_um`, never the template's rectangle; and `_declared_die` cannot be
-#: its declared side, because `floorplan_rectangles.json` is written by
-#: `step_pnr`, after 0.5ic. Pinned by
-#: `test_the_contract_compares_the_template_die_and_never_adopts_it`.
+#: `die_area_um`, never the template's rectangle. `_declared_die` cannot be
+#: 0.5ic's declared side, because `floorplan_rectangles.json` is written by
+#: `step_pnr`, after 0.5ic; `resolve_step_configs` DOES consume `_declared_die`
+#: for the 15/15.5ic chain (cmp3 D1), which runs after that write, and compares
+#: the template's DIEAREA with that record's die too. Pinned by
+#: `test_the_contract_compares_the_template_die_and_never_adopts_it` and
+#: `test_ll_padring_derived_die.py`.
 _DELIBERATE = ("die_finishing_gen.py", "librelane_contract.py")
 #: Out of this lane: the runner is serialised to another lane, and the
 #: aggregator already carries the FP-08 fix this item generalises.
