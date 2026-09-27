@@ -319,8 +319,9 @@ yours to pick and is NOT the IP's default. The phase-2 step
 `reused_ip_parameters` runs `programs/reused_ip_param_derive.py` right after
 staging: it takes the value the documents state (L8/L9 `parameters[]`), checks
 it against the IP's own math and the port widths L9 states (directly, or
-through your `renamed_interfaces` pairs), and writes it into the staged top's
-header default (the original is kept in `.<top>__param_overrides.json`).
+through the SOURCE_MANIFEST `renamed_interfaces` pairs, derived by
+`renamed_interface_derive.py` or authored, above), and writes it into the
+staged top's header default (the original is kept in `.<top>__param_overrides.json`).
 Two documents that disagree, or a document the IP math contradicts, is a
 REFUSE naming both values and sources: report it, do not pick a side.
 
