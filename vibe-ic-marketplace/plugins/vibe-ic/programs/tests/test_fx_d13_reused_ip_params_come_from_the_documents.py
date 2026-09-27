@@ -375,9 +375,10 @@ def test_not_prose_apply_never_inserts_a_parameter(tmp_path):
     assert (p / "phase2/stage1/rtl/widget.v").read_text() == before
 
 
-def test_not_prose_a_non_literal_netlist_range_changes_no_width(tmp_path,
-                                                               monkeypatch):
-    """`_NOT_PROSE["io_pad_chip_top_gen::_reconcile_port_widths"]`."""
+def test_a_non_literal_netlist_range_changes_no_width(tmp_path, monkeypatch):
+    """The reconciliation reads the netlist through D2's one reader,
+    `_implemented_core_ports`, whose non-literal range is width None: no
+    width is invented from it."""
     import io_pad_chip_top_gen as G
     import phase3_one_shot_runner as R
     p = tmp_path / "p"

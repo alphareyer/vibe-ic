@@ -135,13 +135,6 @@ _NOT_PROSE: Dict[str, str] = {
         "that block is an error and the file is left untouched, never a "
         "parameter inserted. Falsifier: tests/test_fx_d13_reused_ip_params_come_"
         "from_the_documents.py::test_not_prose_apply_never_inserts_a_parameter.",
-    "io_pad_chip_top_gen::_reconcile_port_widths":
-        "ONE MACHINE GRAMMAR. The selected netlist's module header as yosys "
-        "writes it (`output [9:0] name;`), read through lec_run.netlist_top_ports "
-        "for literal `[msb:lsb]` ranges only. A synthesised header cannot spell "
-        "a denial, and a range that is not two integers changes no width. "
-        "Falsifier: tests/test_fx_d13_reused_ip_params_come_from_the_documents"
-        ".py::test_not_prose_a_non_literal_netlist_range_changes_no_width.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "
