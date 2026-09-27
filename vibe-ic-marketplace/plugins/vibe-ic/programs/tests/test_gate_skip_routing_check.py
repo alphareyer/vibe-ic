@@ -71,7 +71,7 @@ def test_consumer_reads_the_unbracketed_token_and_not_the_bracketed_one():
     assert _vx.VACUOUS_STDOUT_SENTINEL.startswith(gsrc._CONSUMER_SENTINEL)
 
 
-def test_consumer_reads_only_two_channels(tmp_path):
+def test_consumer_reads_only_two_channels(tmp_path, monkeypatch):
     """A JSON report saying VACUOUS_PASS is NOT a third channel.
 
     `_check_program_exit_zero` never opens the report file, so a gate whose
@@ -79,9 +79,17 @@ def test_consumer_reads_only_two_channels(tmp_path):
     credited a plain PASS. This is why the check does not accept the report as
     routing.
     """
-    # `_resolve_program_cmd` resolves a bare name against PROGRAMS_DIR, so the
-    # fixture has to live there for the real consumer to run it at all.
-    gate = _PROGRAMS / "_i528_report_only_disclosure_check.py"
+    # `_resolve_program_cmd` resolves a bare name against the module's
+    # PROGRAMS_DIR, read at call time. The fixture is planted in a tmp programs
+    # dir and the REAL consumer is pointed at it -- never written into the
+    # shipped programs/, where a parallel worker globbing programs/*.py would
+    # see it appear and vanish.
+    progs = tmp_path / "programs"
+    progs.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(_flow, "PROGRAMS_DIR", progs)
+    gate = progs / "_i528_report_only_disclosure_check.py"
     gate.write_text(textwrap.dedent('''\
         """Temporary fixture planted by test_gate_skip_routing_check."""
         import json, sys
@@ -90,17 +98,14 @@ def test_consumer_reads_only_two_channels(tmp_path):
         print("examined nothing")
         sys.exit(0)
         '''), encoding="utf-8")
-    try:
-        passed, out = _flow._check_program_exit_zero(
-            tmp_path, "_i528_report_only_disclosure_check")
-        assert passed is True, out
-        assert not out.startswith("__VACUOUS_HINT__"), (
-            "a report-only disclosure was promoted to VACUOUS; the check's "
-            "two-channel model would then be wrong")
-        assert json.loads((tmp_path / "out.json").read_text())["verdict"] == \
-            "VACUOUS_PASS", "the fixture did write the report the consumer ignored"
-    finally:
-        gate.unlink()
+    passed, out = _flow._check_program_exit_zero(
+        project, "_i528_report_only_disclosure_check")
+    assert passed is True, out
+    assert not out.startswith("__VACUOUS_HINT__"), (
+        "a report-only disclosure was promoted to VACUOUS; the check's "
+        "two-channel model would then be wrong")
+    assert json.loads((project / "out.json").read_text())["verdict"] == \
+        "VACUOUS_PASS", "the fixture did write the report the consumer ignored"
 
 
 # ==========================================================================
@@ -581,8 +586,21 @@ def test_a_new_gate_with_an_unrouted_skip_fails_the_shipped_check(tmp_path):
 
     Driven against the REAL plugin tree with the REAL inventory, plus one
     planted gate — so this exercises the shipped ratchet, not a stub.
+
+    The "real tree" is a byte-for-byte tmp copy of the shipped programs/*.py
+    and flow/ (everything `audit()` reads under the plugin_root it is given);
+    the planted gate is added to the COPY, never to the shipped programs/,
+    where a parallel worker globbing programs/*.py would see it appear and
+    vanish. The shipped program and its shipped inventory are what run.
     """
-    planted = _PROGRAMS / "_i528_planted_unrouted_check.py"
+    root = _real_plugin_tree_copy(tmp_path)
+    # The copy IS the shipped tree to the ratchet: clean before the plant, so
+    # the red below is the planted gate and nothing the copy lost.
+    control = _pr.run(
+        [sys.executable, str(_PROGRAMS / "gate_skip_routing_check.py"),
+         str(root)], capture_output=True, text=True)
+    assert control.returncode == 0, control.stdout + control.stderr
+    planted = root / "programs" / "_i528_planted_unrouted_check.py"
     planted.write_text(textwrap.dedent('''\
         """Temporary fixture planted by test_gate_skip_routing_check."""
         import argparse, sys
@@ -595,15 +613,31 @@ def test_a_new_gate_with_an_unrouted_skip_fails_the_shipped_check(tmp_path):
         if __name__ == "__main__":
             sys.exit(main())
         '''), encoding="utf-8")
-    try:
-        r = _pr.run(
-            [sys.executable, str(_PROGRAMS / "gate_skip_routing_check.py"),
-             str(_PLUGIN)], capture_output=True, text=True)
-        assert r.returncode == 1, r.stdout
-        assert "_i528_planted_unrouted_check" in r.stdout
-        assert "RATCHET-NOT IN THE INVENTORY" in r.stdout
-    finally:
-        planted.unlink()
+    r = _pr.run(
+        [sys.executable, str(_PROGRAMS / "gate_skip_routing_check.py"),
+         str(root)], capture_output=True, text=True)
+    assert r.returncode == 1, r.stdout
+    assert "_i528_planted_unrouted_check" in r.stdout
+    assert "RATCHET-NOT IN THE INVENTORY" in r.stdout
+
+
+def _real_plugin_tree_copy(tmp_path: Path) -> Path:
+    """A tmp plugin_root holding a copy of the shipped programs/*.py and flow/.
+
+    A module that vanishes between the glob and the copy (another test's
+    transient file) is skipped, not fatal: it was never part of the shipped
+    tree.
+    """
+    import shutil
+    root = tmp_path / "plugin"
+    (root / "programs").mkdir(parents=True)
+    for src in sorted(_PROGRAMS.glob("*.py")):
+        try:
+            shutil.copyfile(src, root / "programs" / src.name)
+        except FileNotFoundError:
+            continue
+    shutil.copytree(_PLUGIN / "flow", root / "flow")
+    return root
 
 
 def test_the_shipped_tree_is_clean_under_the_ratchet():

@@ -11,6 +11,27 @@ from pathlib import Path
 PROGRAM = Path(__file__).parent.parent / "phase1_gate_contract_check.py"
 PROGRAMS_DIR = Path(__file__).parent.parent
 
+sys.path.insert(0, str(PROGRAMS_DIR))
+import phase1_gate_contract_check as _pgc  # noqa: E402
+
+
+def _run_on_planted_gate(monkeypatch, capsys, programs_dir: Path,
+                         gate: str) -> tuple[int, dict]:
+    """Run the shipped checker's own `main()` with its gate directory pointed
+    at `programs_dir`.
+
+    The fake gates are planted in tmp, never in the shipped programs/ -- a
+    parallel worker globbing programs/*.py would see a planted file appear and
+    vanish. `check_gate` resolves `<gate>.py` against the module-level
+    PROGRAMS_DIR at call time, so that one constant is redirected; TESTS_DIR
+    and FLOW_YAML keep their shipped values (read-only lookups, exactly what
+    the subprocess form consulted).
+    """
+    monkeypatch.setattr(_pgc, "PROGRAMS_DIR", programs_dir)
+    monkeypatch.setattr(sys, "argv", [str(PROGRAM), "--gates", gate, "--json"])
+    rc = _pgc.main()
+    return rc, json.loads(capsys.readouterr().out)
+
 
 def test_default_7_gates_pass():
     """The 7 gates shipped in v0.74 must all satisfy the contract."""
@@ -38,39 +59,32 @@ def test_missing_file_flagged(tmp_path, monkeypatch):
     assert "file_missing" in rules
 
 
-def test_fake_gate_missing_contract_clauses(tmp_path):
+def test_fake_gate_missing_contract_clauses(tmp_path, monkeypatch, capsys):
     """Create a fake gate that violates contract clauses, verify detection."""
     # Make a minimal gate that fails everything:
     # - No docstring → missing_docstring
     # - No --json in source → missing_json_flag
     # - No pytest file → missing_pytest
     # - Not in flow YAML → not_wired_into_flow
-    fake_gate = PROGRAMS_DIR / "__fake_gate_for_test__.py"
+    fake_gate = tmp_path / "__fake_gate_for_test__.py"
     fake_gate.write_text(textwrap.dedent("""
         import sys
         if __name__ == "__main__":
             sys.exit(0)
     """))
-    try:
-        r = subprocess.run(
-            [sys.executable, str(PROGRAM),
-             "--gates", "__fake_gate_for_test__", "--json"],
-            capture_output=True, text=True,
-        )
-        assert r.returncode == 1
-        out = json.loads(r.stdout)
-        rules = [f["rule"] for f in out["findings"]]
-        assert "missing_docstring" in rules
-        assert "missing_json_flag" in rules
-        assert "missing_pytest" in rules
-        assert "not_wired_into_flow" in rules
-    finally:
-        fake_gate.unlink(missing_ok=True)
+    rc, out = _run_on_planted_gate(monkeypatch, capsys, tmp_path,
+                                   "__fake_gate_for_test__")
+    assert rc == 1
+    rules = [f["rule"] for f in out["findings"]]
+    assert "missing_docstring" in rules
+    assert "missing_json_flag" in rules
+    assert "missing_pytest" in rules
+    assert "not_wired_into_flow" in rules
 
 
-def test_fake_gate_with_docstring_but_missing_sections(tmp_path):
+def test_fake_gate_with_docstring_but_missing_sections(tmp_path, monkeypatch, capsys):
     """Gate with docstring but no Usage/Exit-codes sections is flagged."""
-    fake_gate = PROGRAMS_DIR / "__fake_gate_sections_test__.py"
+    fake_gate = tmp_path / "__fake_gate_sections_test__.py"
     fake_gate.write_text(textwrap.dedent('''
         """
         Minimal gate — intentionally missing required sections.
@@ -82,24 +96,17 @@ def test_fake_gate_with_docstring_but_missing_sections(tmp_path):
             ap.parse_args()
             sys.exit(0)
     '''))
-    try:
-        r = subprocess.run(
-            [sys.executable, str(PROGRAM),
-             "--gates", "__fake_gate_sections_test__", "--json"],
-            capture_output=True, text=True,
-        )
-        assert r.returncode == 1
-        out = json.loads(r.stdout)
-        rules = [f["rule"] for f in out["findings"]]
-        assert "missing_usage_section" in rules
-        assert "missing_exit_codes_section" in rules
-    finally:
-        fake_gate.unlink(missing_ok=True)
+    rc, out = _run_on_planted_gate(monkeypatch, capsys, tmp_path,
+                                   "__fake_gate_sections_test__")
+    assert rc == 1
+    rules = [f["rule"] for f in out["findings"]]
+    assert "missing_usage_section" in rules
+    assert "missing_exit_codes_section" in rules
 
 
-def test_gate_without_help_flag_fails(tmp_path):
+def test_gate_without_help_flag_fails(tmp_path, monkeypatch, capsys):
     """Gate whose --help returns nonzero is flagged."""
-    fake_gate = PROGRAMS_DIR / "__fake_gate_help_test__.py"
+    fake_gate = tmp_path / "__fake_gate_help_test__.py"
     fake_gate.write_text(textwrap.dedent('''
         """
         Minimal gate with broken --help.
@@ -120,18 +127,11 @@ def test_gate_without_help_flag_fails(tmp_path):
                 sys.exit(99)
             sys.exit(0)
     '''))
-    try:
-        r = subprocess.run(
-            [sys.executable, str(PROGRAM),
-             "--gates", "__fake_gate_help_test__", "--json"],
-            capture_output=True, text=True,
-        )
-        assert r.returncode == 1
-        out = json.loads(r.stdout)
-        rules = [f["rule"] for f in out["findings"]]
-        assert "help_nonzero" in rules
-    finally:
-        fake_gate.unlink(missing_ok=True)
+    rc, out = _run_on_planted_gate(monkeypatch, capsys, tmp_path,
+                                   "__fake_gate_help_test__")
+    assert rc == 1
+    rules = [f["rule"] for f in out["findings"]]
+    assert "help_nonzero" in rules
 
 
 def test_empty_gates_list_errors():

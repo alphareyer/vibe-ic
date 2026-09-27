@@ -14,7 +14,6 @@ present, then auto-discovery proceeds against the populated
 from __future__ import annotations
 
 import importlib.util
-import shutil
 import sys
 from pathlib import Path
 
@@ -98,20 +97,26 @@ def test_graceful_warn_when_doc_extract_helper_missing(tmp_path, monkeypatch):
     in_dir.mkdir(parents=True)
     (in_dir / "spec.pdf").write_bytes(b"%PDF-1.4 fake")
 
-    # Move doc_extract.py temporarily out of programs/.
+    # Point each module's own `__file__` (which the helper resolves
+    # `doc_extract.py` against, as a sibling) at a tmp programs dir that
+    # does NOT contain doc_extract.py. The shipped helper is never moved,
+    # so no other xdist worker sees programs/doc_extract.py vanish.
     real = PROGRAMS / "doc_extract.py"
-    backup = PROGRAMS / "doc_extract.py.bak_test_w7"
     assert real.is_file()
-    shutil.move(str(real), str(backup))
-    try:
-        s = report_gen._ensure_extracted_docs(tmp_path)
-        assert s["action"] == "warn"
-        assert any("doc_extract.py not found" in w for w in s["warnings"])
-        s2 = ll38._ensure_extracted_docs(tmp_path)
-        assert s2["action"] == "warn"
-        assert any("doc_extract.py not found" in w for w in s2["warnings"])
-    finally:
-        shutil.move(str(backup), str(real))
+    fake_programs = tmp_path / "programs_without_doc_extract"
+    fake_programs.mkdir()
+    assert not (fake_programs / "doc_extract.py").exists()
+    monkeypatch.setattr(report_gen, "__file__",
+                        str(fake_programs / "phase1_coverage_report_gen.py"))
+    monkeypatch.setattr(ll38, "__file__",
+                        str(fake_programs / "extraction_coverage_check.py"))
+
+    s = report_gen._ensure_extracted_docs(tmp_path)
+    assert s["action"] == "warn"
+    assert any("doc_extract.py not found" in w for w in s["warnings"])
+    s2 = ll38._ensure_extracted_docs(tmp_path)
+    assert s2["action"] == "warn"
+    assert any("doc_extract.py not found" in w for w in s2["warnings"])
 
 
 # ----------------------------------------------------------------
