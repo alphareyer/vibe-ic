@@ -93,6 +93,7 @@ import _reference_flow_boundary as _rfb
 import _source_record_merge as _srm  # per-source merge: silence cannot erase
 from _ppa import power as _ppa_power                              # noqa: E402
 from _ppa import area as _ppa_area                                # noqa: E402
+from _ppa import timing as _ppa_timing                            # noqa: E402
 from _ppa import pdn_em_presweep as _ppa_presweep                # noqa: E402
 from _ppa.power import pdn_ring_dimensions as _pdn_ring_dimensions
 import floorplan_contract as _fpc  # design-declared fixed floorplan + DRV limits
@@ -4361,9 +4362,10 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
 # second copy of the same four-call chain inside `step_prelayout_signoff`),
 # and step 7's canonical file was written only when the design staged an SDC.
 #
-# Now ONE author (`_author_asic_sdc`, the code `step_pnr` ran inline) and ONE
-# step-7 producer (`emit_step7_asic_sdc`) writing the declared path plus a
-# sha-bound record. `step_pnr` READS that file (`asic_sdc_for_pnr`); it
+# Now ONE author (`_ppa.timing.author_asic_sdc`, the code `step_pnr` ran
+# inline) and ONE step-7 producer (`_ppa.timing.emit_step7_asic_sdc`) writing
+# the declared path plus a sha-bound record. `step_pnr` READS that file
+# (`_ppa.timing.asic_sdc_for_pnr`); it
 # regenerates it through the same producer only when it is absent, stale or
 # made for another PDK, and says so.
 #
@@ -4376,193 +4378,14 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
 # with NO supply ports; `step_pnr` applies that exclusion as a NAMED
 # derivation (`pad_ring_supply_port_drv_scope`), recorded with both shas, and
 # only when the producer names supply ports (a DIE with a generated pad ring).
-ASIC_SDC_RECORD = "asic_sdc.json"
-ASIC_SDC_DERIVATION = "pad_ring_supply_port_drv_scope"
+# The code is `_ppa.timing` (the runner's PPA ledger routes SDC logic there);
+# the runner passes itself as ``rt`` so the SDC builders above are composed,
+# never duplicated.
+ASIC_SDC_RECORD = _ppa_timing.ASIC_SDC_RECORD
 
 
-def _sha256_text(text: str) -> str:
-    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
-
-
-def _author_asic_sdc(project: Path, top: str, pdk: "PdkConfig",
-                     container: str,
-                     supply_ports: Sequence[str] = ()) -> Dict[str, Any]:
-    """THE author of the silicon SDC (what `step_pnr` did inline).
-
-    Design-staged SDC (`_resolve_staged_silicon_sdc`) -> unit rescale, DRV /
-    driving-cell reconcile, DRV and I/O-delay parity; else the runner's
-    auto-SDC. ``supply_ports`` is the only PnR-time input (see above).
-    Returns the deck text plus every record the old inline code wrote."""
-    staged = _resolve_staged_silicon_sdc(project)
-    out: Dict[str, Any] = {"design_staged": bool(staged and staged.is_file()),
-                           "staged_sdc": None, "drv_parity": None,
-                           "io_parity": None, "io_delay_contract": None,
-                           "cts_fanout_target": None,
-                           "supply_ports": list(supply_ports),
-                           "drv_block": None}
-    _blk: Dict[str, Any] = {}
-    if out["design_staged"]:
-        try:
-            out["staged_sdc"] = str(staged.relative_to(project))
-        except ValueError:
-            out["staged_sdc"] = str(staged)
-        txt = _scale_sdc_to_liberty_units(staged.read_text(), str(pdk.liberty))
-        txt = _reconcile_staged_sdc_drv(txt, pdk.name, str(pdk.liberty),
-                                        container)
-        txt = _reconcile_staged_sdc_driving_cell(txt, str(pdk.liberty),
-                                                 container)
-        txt, out["drv_parity"] = _ensure_staged_sdc_drv(
-            txt, str(pdk.liberty), container, project, pdk_name=str(pdk.name),
-            supply_ports=supply_ports, drv_block_out=_blk)
-        fm = _SDC_MAX_FANOUT_RE.search(txt)
-        if fm:
-            try:
-                out["cts_fanout_target"] = int(float(fm.group(2)))
-            except ValueError:
-                pass
-        txt, out["io_parity"] = _ensure_staged_sdc_io_delay(txt, project)
-    else:
-        drv = _liberty_drv_limits(str(pdk.liberty), container)
-        txt = _build_auto_silicon_sdc(
-            project, top=top,
-            drv_slew_ns=drv.get("max_transition_ns"),
-            drv_cap_pf=drv.get("max_capacitance_pf"),
-            drv_note=str(drv.get("note") or ""),
-            liberty_path=str(pdk.liberty), pdk_name=str(pdk.name),
-            supply_ports=supply_ports, drv_block_out=_blk)
-        try:
-            io_ns, _ = _declared_io_delay_ns(project,
-                                             _resolve_clock_spec(project)[0])
-        except Exception:                                    # noqa: BLE001
-            io_ns = None
-        out["io_delay_contract"] = dict(
-            io_delay_contract(io_ns, 2.0, io_delay_source()),
-            schema="vibe-ic/io-delay-contract/1")
-        try:
-            out["cts_fanout_target"] = (
-                _l9_declared_max_fanout(project, str(pdk.name),
-                                        str(pdk.liberty))
-                or _rtl_replication_fanout_bound(project)
-                or drv.get("max_fanout"))
-        except Exception:                                    # noqa: BLE001
-            out["cts_fanout_target"] = drv.get("max_fanout")
-    out["drv_block"] = _blk or None
-    out["text"] = txt
-    return out
-
-
-def step7_asic_sdc_path(project: Path, top: str, design_staged: bool) -> Path:
-    """The declared step-7 file. A design-staged deck keeps `<top>.sdc` (its
-    canonical copy); the runner's own deck is `<top>.asic.sdc`, so it is never
-    mistaken for a design-staged `<top>.sdc` (its banner already keeps it out
-    of `_resolve_staged_silicon_sdc`)."""
-    return _pl.constraints_dir(project) / (
-        f"{top}.sdc" if design_staged else f"{top}.asic.sdc")
-
-
-def emit_step7_asic_sdc(project: Path, top: str, pdk: "PdkConfig",
-                        container: str) -> Dict[str, Any]:
-    """STEP 7's producer: author the design-intent SDC and write it to the
-    declared path with its record. Returns the record (with `path`)."""
-    authored = _author_asic_sdc(project, top, pdk, container, supply_ports=())
-    path = step7_asic_sdc_path(project, top, authored["design_staged"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    stamped = _stamp_sdc_provenance(authored["text"], pdk.name)
-    _aa.write_text(path, stamped)
-    rec = {k: v for k, v in authored.items() if k != "text"}
-    rec.update({"schema": "vibe-ic/step7-asic-sdc/1", "step": 7,
-                "top": top, "pdk": str(pdk.name),
-                "path": str(path.relative_to(project)),
-                "sha256": _sha256_text(stamped),
-                "deck_sha256": _sha256_text(authored["text"]),
-                "split": {"design_intent": "this file",
-                          "pnr_time": ASIC_SDC_DERIVATION}})
-    _aa.write_json(path.parent / ASIC_SDC_RECORD, rec)
-    rec["text"] = authored["text"]
-    return rec
-
-
-def _read_step7_asic_sdc(project: Path, top: str, pdk: "PdkConfig"
-                         ) -> Tuple[Optional[Dict[str, Any]], str]:
-    """(record with `text`, "") when step 7's SDC is present, unmodified and
-    for this top and PDK; else (None, why)."""
-    rec_path = _pl.constraints_dir(project) / ASIC_SDC_RECORD
-    try:
-        rec = json.loads(rec_path.read_text(errors="replace"))
-    except (OSError, ValueError):
-        return None, f"no step-7 record ({rec_path.relative_to(project)})"
-    path = project / str(rec.get("path") or "")
-    if not path.is_file():
-        return None, f"step-7 SDC {rec.get('path')} is absent"
-    text = path.read_text(errors="replace")
-    if _sha256_text(text) != rec.get("sha256"):
-        return None, f"step-7 SDC {rec.get('path')} changed after step 7"
-    if rec.get("top") != top or rec.get("pdk") != str(pdk.name):
-        return None, (f"step-7 SDC was authored for top {rec.get('top')!r} / "
-                      f"PDK {rec.get('pdk')!r}, not {top!r} / {pdk.name!r}")
-    # The file is the provenance stamp line + the deck (exactly what the
-    # canonical step-7 copy has always been). A deck that already carried a
-    # stamp had it rewritten in place, so it is not recoverable byte-exactly:
-    # that case is answered by regenerating, never by guessing.
-    stamp = _stamp_sdc_provenance("", str(pdk.name))
-    deck = text[len(stamp):] if text.startswith(stamp) else None
-    if deck is None or _sha256_text(deck) != rec.get("deck_sha256"):
-        return None, ("the step-7 deck could not be recovered byte-exactly "
-                      "from its stamped file")
-    return dict(rec, text=deck), ""
-
-
-def asic_sdc_for_pnr(project: Path, top: str, pdk: "PdkConfig",
-                     container: str) -> Dict[str, Any]:
-    """The SDC `step_pnr` loads: step 7's file, plus the named PnR-time
-    derivation when the pad-ring producer proves supply ports. Regenerates
-    step 7's file through `emit_step7_asic_sdc` (never a second author) when
-    it is absent or stale, and records why."""
-    rec, why = _read_step7_asic_sdc(project, top, pdk)
-    regenerated = None
-    if rec is None:
-        regenerated = why
-        rec = emit_step7_asic_sdc(project, top, pdk, container)
-    out = dict(rec)
-    out["step7_sha256"] = rec["sha256"]
-    out["regenerated"] = regenerated
-    out["derivation"] = None
-    supplies = _producer_supply_ports_for_drv(project)
-    if supplies:
-        # ONLY the DRV block's SCOPE changes: the block step 7 rendered is
-        # re-rendered from the SAME recorded arguments with the proven supply
-        # ports excluded, and swapped in place. No other input is re-read at
-        # PnR time (re-running the author did: it re-resolved the fanout
-        # ladder from PnR-time artefacts).
-        io_rec = project / "reports" / "phase3" / "io_pad_chip_top.json"
-        der: Dict[str, Any] = {
-            "name": ASIC_SDC_DERIVATION,
-            "supply_ports": list(supplies),
-            "from_record": str(io_rec.relative_to(project)),
-            "from_record_sha256": _sha256_text(
-                io_rec.read_text(errors="replace")) if io_rec.is_file() else None,
-            "base_deck_sha256": rec["deck_sha256"]}
-        blk = rec.get("drv_block")
-        base_blk = (_drv_constraints_sdc_block(
-            blk["slew_ns"], blk["cap_pf"], blk["note"],
-            max_fanout=blk["max_fanout"], fanout_note=blk["fanout_note"],
-            supply_ports=()) if blk else "")
-        if not base_blk:
-            der.update(applied=False, reason="step 7's deck has no DRV block "
-                       "this plugin rendered, so there is no scope to narrow")
-        elif out["text"].count(base_blk) != 1:
-            der.update(applied=False, reason="step 7's DRV block is not "
-                       "present exactly once in its deck; left as authored")
-        else:
-            new_blk = _drv_constraints_sdc_block(
-                blk["slew_ns"], blk["cap_pf"], blk["note"],
-                max_fanout=blk["max_fanout"], fanout_note=blk["fanout_note"],
-                supply_ports=supplies)
-            out["text"] = out["text"].replace(base_blk, new_blk, 1)
-            der.update(applied=True)
-        der["deck_sha256"] = _sha256_text(out["text"])
-        out["derivation"] = der
-    return out
+def _runner_module():
+    return sys.modules[__name__]
 
 
 # ---------------------------------------------------------------------------
@@ -37410,7 +37233,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # (DRV/I-O parity, the I/O-delay contract, the CTS fanout target) are
     # written from the same authored result, so every consumer is unchanged.
     project_sdc_silicon = _resolve_staged_silicon_sdc(project)
-    _asic = asic_sdc_for_pnr(project, top, pdk, container)
+    _asic = _ppa_timing.asic_sdc_for_pnr(
+        _runner_module(), project, top, pdk, container)
     _cts_fanout_target: Optional[int] = _asic.get("cts_fanout_target")
     for _key, _name in (("drv_parity", "sdc_drv_parity.json"),
                         ("io_parity", "sdc_io_delay_parity.json")):
@@ -37433,7 +37257,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         "step7_sdc": _asic["path"],
         "step7_sha256": _asic["step7_sha256"],
         "step7_deck_sha256": _asic["deck_sha256"],
-        "deck_sha256": _sha256_text(_asic["text"]),
+        "deck_sha256": hashlib.sha256(
+            _asic["text"].encode("utf-8")).hexdigest(),
         "regenerated_by_step7_producer": _asic["regenerated"],
         "pnr_time_derivation": _asic["derivation"]})
     if _asic["regenerated"]:
@@ -57882,7 +57707,8 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     # out of `_resolve_staged_silicon_sdc` (no laundering). The pre-layout STA
     # reads the same deck PnR will, from the same bytes.
     runner_sdc = pnr_out / "constraint.sdc"
-    _step7 = emit_step7_asic_sdc(project, top, pdk, container)
+    _step7 = _ppa_timing.emit_step7_asic_sdc(
+        _runner_module(), project, top, pdk, container)
     design_staged = bool(_step7["design_staged"])
     runner_sdc.write_text(_step7["text"])
     written.append(str(project / _step7["path"]))
@@ -57895,7 +57721,8 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
         if design_staged else
         f"SDC: design staged none — runner auto-SDC, step 7's producer "
         f"({_step7['path']}, sha256 {_step7['sha256'][:12]})")
-    canon_sdc = step7_asic_sdc_path(project, top, design_staged)
+    canon_sdc = _ppa_timing.step7_asic_sdc_path(
+        _runner_module(), project, top, design_staged)
 
     # --- Steps 7/8/10 opt-in tool path (phase3/librelane_switch.json) ----
     import librelane_contract as _llc

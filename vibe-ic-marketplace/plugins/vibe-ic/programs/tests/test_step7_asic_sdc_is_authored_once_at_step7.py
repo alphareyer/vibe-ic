@@ -28,6 +28,7 @@ PROGRAMS = TESTS.parent
 sys.path.insert(0, str(PROGRAMS))
 
 import phase3_one_shot_runner as R                       # noqa: E402
+from _ppa import timing as T                              # noqa: E402
 
 _spec = importlib.util.spec_from_file_location(
     "fx_step7_prelayout_fixtures", TESTS / "test_prelayout_signoff_before_pnr.py")
@@ -63,7 +64,7 @@ def _step7(proj, pdk):
 
 
 def _record(proj):
-    return json.loads((proj / CONS / R.ASIC_SDC_RECORD).read_text())
+    return json.loads((proj / CONS / T.ASIC_SDC_RECORD).read_text())
 
 
 _DRV = {"max_transition_ns": 1.5, "max_capacitance_pf": 0.2}
@@ -92,13 +93,13 @@ def test_step7_writes_its_declared_sdc_when_the_design_stages_none(
     assert "-period 25" in text, text[:500]
     rec = _record(proj)
     assert rec["step"] == 7 and rec["path"] == str(CONS / f"{TOP}.asic.sdc")
-    assert rec["sha256"] == R._sha256_text(text)
+    assert rec["sha256"] == T._sha256_text(text)
     assert str(proj / rec["path"]) in res.output_files
     # never laundered into "design-staged"
     assert R._resolve_staged_silicon_sdc(proj) is None
     # the pre-layout STA reads the very deck step 7 wrote
     deck = (proj / "phase3/stage3/pnr/constraint.sdc").read_text()
-    assert R._sha256_text(deck) == rec["deck_sha256"]
+    assert T._sha256_text(deck) == rec["deck_sha256"]
 
 
 def test_a_design_staged_sdc_keeps_its_canonical_name(tmp_path, monkeypatch):
@@ -125,11 +126,11 @@ def test_pnr_loads_step7s_file_and_never_calls_the_author(tmp_path,
 
     def _no_second_author(*a, **k):
         raise AssertionError("step_pnr re-authored the SDC")
-    monkeypatch.setattr(R, "_author_asic_sdc", _no_second_author)
-    got = R.asic_sdc_for_pnr(proj, TOP, pdk, "some-container")
+    monkeypatch.setattr(T, "author_asic_sdc", _no_second_author)
+    got = T.asic_sdc_for_pnr(R, proj, TOP, pdk, "some-container")
     assert got["regenerated"] is None and got["derivation"] is None
     assert got["step7_sha256"] == rec["sha256"]
-    assert R._sha256_text(got["text"]) == rec["deck_sha256"]
+    assert T._sha256_text(got["text"]) == rec["deck_sha256"]
 
 
 def test_step_pnr_itself_contains_no_sdc_author():
@@ -138,11 +139,12 @@ def test_step_pnr_itself_contains_no_sdc_author():
     src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
     fn = next(n for n in ast.parse(src).body
               if isinstance(n, ast.FunctionDef) and n.name == "step_pnr")
-    called = {n.func.id for n in ast.walk(fn)
-              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    called = {n.func.id if isinstance(n.func, ast.Name) else n.func.attr
+              for n in ast.walk(fn) if isinstance(n, ast.Call)
+              and isinstance(n.func, (ast.Name, ast.Attribute))}
     assert "asic_sdc_for_pnr" in called
     assert not called & {"_build_auto_silicon_sdc", "_ensure_staged_sdc_drv",
-                         "_scale_sdc_to_liberty_units", "_author_asic_sdc"}
+                         "_scale_sdc_to_liberty_units", "author_asic_sdc"}
 
 
 # --------------------------------------------------------------------------- #
@@ -152,7 +154,7 @@ def test_an_old_project_without_step7_sdc_is_regenerated_by_its_producer(
         tmp_path, monkeypatch):
     proj = _project(tmp_path)
     pdk = _pdk(monkeypatch)
-    got = R.asic_sdc_for_pnr(proj, TOP, pdk, "some-container")
+    got = T.asic_sdc_for_pnr(R, proj, TOP, pdk, "some-container")
     assert got["regenerated"] and "no step-7 record" in got["regenerated"]
     assert (proj / CONS / f"{TOP}.asic.sdc").is_file()
     assert _record(proj)["sha256"] == got["step7_sha256"]
@@ -165,7 +167,7 @@ def test_a_step7_file_changed_after_step7_is_regenerated_not_trusted(
     _step7(proj, pdk)
     f = proj / CONS / f"{TOP}.asic.sdc"
     f.write_text(f.read_text() + "set_false_path -from [get_ports x]\n")
-    got = R.asic_sdc_for_pnr(proj, TOP, pdk, "some-container")
+    got = T.asic_sdc_for_pnr(R, proj, TOP, pdk, "some-container")
     assert "changed after step 7" in got["regenerated"]
     assert "set_false_path -from [get_ports x]" not in got["text"]
 
@@ -190,15 +192,15 @@ def test_the_pad_ring_supply_ports_are_a_named_pnr_time_derivation(
     _step7(proj, pdk)
     step7_text = (proj / CONS / f"{TOP}.asic.sdc").read_text()
     rec = _pad_record(proj)
-    got = R.asic_sdc_for_pnr(proj, TOP, pdk, "some-container")
+    got = T.asic_sdc_for_pnr(R, proj, TOP, pdk, "some-container")
     d = got["derivation"]
-    assert d["name"] == R.ASIC_SDC_DERIVATION
+    assert d["name"] == T.ASIC_SDC_DERIVATION
     assert d["supply_ports"] == ["VDD", "VSS"]
     assert d["from_record"] == "reports/phase3/io_pad_chip_top.json"
-    assert d["from_record_sha256"] == R._sha256_text(rec.read_text())
+    assert d["from_record_sha256"] == T._sha256_text(rec.read_text())
     assert d["base_deck_sha256"] == _record(proj)["deck_sha256"]
     assert "producer-proven supply ports excluded" in got["text"]
-    assert d["deck_sha256"] == R._sha256_text(got["text"])
+    assert d["deck_sha256"] == T._sha256_text(got["text"])
     # step 7's file is not rewritten by the PnR-time derivation
     assert (proj / CONS / f"{TOP}.asic.sdc").read_text() == step7_text
 
@@ -220,7 +222,7 @@ def test_the_step7_record_is_part_of_pnr_identity(tmp_path):
         container = ""
     proj = _project(tmp_path)
     inputs, _k, _b = R._step_inputs(proj, "pnr", TOP, _Args())
-    assert ("step7_asic_sdc", proj / CONS / R.ASIC_SDC_RECORD) in [
+    assert ("step7_asic_sdc", proj / CONS / T.ASIC_SDC_RECORD) in [
         (label, path) for label, path, _r in inputs]
 
 
@@ -273,9 +275,9 @@ def test_the_pnr_derivation_changes_only_the_drv_scope(tmp_path, monkeypatch):
     pdk = PL._corner_pdk(monkeypatch, _LIB)
     monkeypatch.setattr(R, "_liberty_drv_limits", lambda *a, **k: dict(_DRV))
     _step7(proj, pdk)
-    base = R._read_step7_asic_sdc(proj, TOP, pdk)[0]["text"]
+    base = T.read_step7_asic_sdc(R, proj, TOP, pdk)[0]["text"]
     _pad_record(proj)
-    got = R.asic_sdc_for_pnr(proj, TOP, pdk, "some-container")
+    got = T.asic_sdc_for_pnr(R, proj, TOP, pdk, "some-container")
     assert got["derivation"]["applied"] is True
     removed = [l for l in base.splitlines() if l not in got["text"].splitlines()]
     assert all("[current_design]" in l or l.startswith("#") for l in removed), \
