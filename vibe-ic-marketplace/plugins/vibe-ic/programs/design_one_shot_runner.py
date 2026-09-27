@@ -2456,10 +2456,98 @@ def _design_supplied_build_rtl(project: Path) -> List[Path]:
     """
     try:
         import reused_ip_rtl_consume as _consume_probe
-        return [f for f in _consume_probe.discover_provided_build_rtl(project)
-                if f.suffix in (".v", ".sv")]
+        # D10 — and only a file that DECLARES A MODULE: a `define-only
+        # `*_defines.v` supplies no design, and declining for it left rtl/
+        # with none (`discover_supplied_design_sources`).
+        return list(_consume_probe.discover_supplied_design_sources(project))
     except Exception:  # noqa: BLE001 — never block generation on the probe
         return []
+
+
+def _design_supplied_unstageable_hdl(project: Path) -> List[Path]:
+    """Supplied HDL consume cannot stage (VHDL). Never a reason to generate
+    silently: #403 still declines on it, and every rtl_gen result names it
+    (`unconsumed_supplied_hdl`). A probe failure returns []."""
+    try:
+        import reused_ip_rtl_consume as _consume_probe
+        return list(_consume_probe.discover_supplied_unstageable_hdl(project))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+#: D10 — the backup a stale generator-owned rtl/ was moved to this dispatch.
+_SUPPLY_RECLAIMED: List[str] = []
+#: D10 — a closed rtl/ this dispatch found and could NOT prove generated.
+_SUPPLY_BLOCKED: List[Dict[str, Any]] = []
+
+
+def _reclaim_stale_generated_rtl(project: Path) -> Optional[str]:
+    """Move a PREVIOUS run's generator-produced rtl/ aside when the input
+    supplies a design, so consume can stage it. Returns the backup name.
+
+    MEASURED (review of D6): re-running a project whose rtl/ came from a
+    generator, after adding the design's own RTL under input/, staged nothing
+    -- the generator's `rtl/` guard fired first, and consume saw a closed tree
+    it would not touch. Only what `rtl_provenance` classifies GENERATED is
+    moved (authored or unprovable trees are never touched), only before this
+    process owns rtl/, and into the same backup the registry path uses."""
+    if _RTL_SESSION_OWNED or not _design_supplied_build_rtl(project):
+        return None
+    rtl_dir = _pl.rtl_dir(project)
+    if not (rtl_dir.is_dir() and any(
+            f.is_file() and f.suffix in (".v", ".sv")
+            for f in rtl_dir.rglob("*"))):
+        return None
+    try:
+        verdict, _why, _ev = _rtl_prov.classify(project)
+    except Exception:  # noqa: BLE001 — unprovable: never move it
+        return None
+    if verdict != _rtl_prov.GENERATED:
+        # Kept, and said: a CLOSED tree consume will not stage around. (An
+        # open one is a glue wrapper, and consume's closure path completes it.)
+        try:
+            import reused_ip_rtl_consume as _consume_probe
+            held = [f for f in rtl_dir.rglob("*")
+                    if f.is_file() and f.suffix in (".v", ".sv")]
+            if not _consume_probe._unresolved_module_refs(held):
+                _SUPPLY_BLOCKED.append({
+                    "rtl_files": sorted(f.name for f in held),
+                    "provenance": verdict})
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+    import shutil
+    backup = _pl.rtl_pre_gen_backup_dir(project)
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
+    rtl_dir.rename(backup)
+    _SUPPLY_RECLAIMED.append(backup.name)
+    return backup.name
+
+
+#: D10 — what the D6 deferrals did during ONE `step_rtl_gen` dispatch. Reset
+#: at the start of `_step_rtl_gen_bound`, read back by `step_rtl_gen`, which
+#: attaches it to the result: a generator that stepped aside for the design's
+#: own RTL is a decision, and a decision is recorded.
+_SUPPLY_DEFERRALS: List[Dict[str, Any]] = []
+
+
+def _defer_to_supplied(generator: str, project: Path,
+                       force_regen: Optional[bool] = None) -> bool:
+    """True (and recorded) when ``generator`` must defer to supplied RTL."""
+    supplied = _design_supplied_build_rtl(project)
+    if not supplied:
+        return False
+    rec: Dict[str, Any] = {"generator": generator,
+                           "reason": "the design supplies its own build RTL; "
+                                     "consume stages it"}
+    if force_regen:
+        rec["force_rtl_regen_overridden"] = True
+        rec["reason"] += (" (--force-rtl-regen speaks for rtl/, not for the "
+                          "design's input, so it does not override this)")
+    _SUPPLY_DEFERRALS.append(rec)
+    return True
 
 
 def _try_spec_artifact_registry_rtl(
@@ -2482,7 +2570,7 @@ def _try_spec_artifact_registry_rtl(
     text = phase1_plain_text or ""
     if not text.strip():
         return None
-    if _design_supplied_build_rtl(project):
+    if _defer_to_supplied("spec_artifact_registry", project):
         return None  # D6 — the design's own implementation outranks an emit
     try:
         sys.path.insert(0, str(PROGRAMS_DIR))
@@ -2588,7 +2676,10 @@ def _try_deterministic_rtl_dispatch(project: Path, t0: float) -> Optional[StepRe
     # here globbed each source dir with no testbench filter, so a design whose
     # only input RTL was `input/vendor_rtl/tb/*.v` declined generation, consume
     # then staged nothing, and `rtl/` was left empty.
-    _own = _design_supplied_build_rtl(project)
+    # D10 — VHDL counts HERE, as it did before D6: consume cannot stage it,
+    # and a generated module beside it would replace the design silently.
+    _own = (_design_supplied_build_rtl(project)
+            + _design_supplied_unstageable_hdl(project))
     if _own:
         _rel = [str(f.relative_to(project)) for f in sorted(_own)[:5]]
         return StepResult(
@@ -2705,7 +2796,7 @@ def _try_serial_parallel_mul_rtl(project: Path, ic_class: str,
     if rtl_dir.is_dir() and (any(rtl_dir.rglob("*.v")) or
                              any(rtl_dir.rglob("*.sv"))):
         return None  # author/generator guard — never overwrite existing RTL
-    if _design_supplied_build_rtl(project):
+    if _defer_to_supplied("serial_parallel_mul_synth", project):
         return None  # D6 — consume stages the design's own RTL instead
     try:
         _phase1_project_checkpoint(project)
@@ -2762,7 +2853,7 @@ def _try_canonical_primitive_rtl(
     if rtl_dir.is_dir() and (any(rtl_dir.rglob("*.v")) or
                              any(rtl_dir.rglob("*.sv"))):
         return None  # author/generator guard — never overwrite existing RTL
-    if _design_supplied_build_rtl(project):
+    if _defer_to_supplied("canonical_primitive_synth", project):
         return None  # D6 — consume stages the design's own RTL instead
     solver = PROGRAMS_DIR / "canonical_primitive_synth.py"
     if not solver.is_file():
@@ -4905,7 +4996,7 @@ def _try_phase1_behavioral_fsm_rtl_bound(
     project_binding.require_current()
     if gathered.refusal is not None:
         return _phase1_plain_spec_refusal_result(t0, gathered.refusal)
-    if _design_supplied_build_rtl(project):
+    if _defer_to_supplied("behavioral_fsm", project, force_regen):
         return None  # D6 — consume stages the design's own RTL instead
     desc = gathered.text
     sources = list(gathered.sources)
@@ -7274,6 +7365,163 @@ def _stage_author_knowledge_digests(project: Path) -> Tuple[str, Dict[str, Any]]
     return lessons_hint + consumed_hint + db_hint + decl_hint, extras
 
 
+def _record_supply(result: StepResult, project: Path,
+                   published: bool) -> None:
+    """Attach what the design supplies, and what the dispatch did about it,
+    to the rtl_gen result (D10): `supplied_build_rtl`, `deferred_generators`,
+    `unconsumed_supplied_hdl`, `reclaimed_generated_rtl`. Silent when the
+    input supplies nothing, so every other result is byte-for-byte as before."""
+    supplied = _design_supplied_build_rtl(project)
+    hdl = _design_supplied_unstageable_hdl(project)
+    if not (supplied or hdl or _SUPPLY_DEFERRALS or _SUPPLY_RECLAIMED
+            or _SUPPLY_BLOCKED):
+        return
+    rel = lambda fs: [str(f.relative_to(project)) for f in fs]  # noqa: E731
+    extras = dict(result.extras or {})
+    extras.setdefault("supplied_build_rtl", rel(supplied))
+    notes: List[str] = []
+    if _SUPPLY_DEFERRALS:
+        extras["deferred_generators"] = [dict(d) for d in _SUPPLY_DEFERRALS]
+        notes.append("deferred to the supplied RTL: " + ", ".join(
+            d["generator"] + (" (--force-rtl-regen overridden)"
+                              if d.get("force_rtl_regen_overridden") else "")
+            for d in _SUPPLY_DEFERRALS))
+    if hdl:
+        extras["unconsumed_supplied_hdl"] = rel(hdl)
+        notes.append(f"supplied HDL this flow cannot stage (VHDL), NOT in "
+                     f"the build: {rel(hdl)}")
+    if _SUPPLY_RECLAIMED:
+        extras["reclaimed_generated_rtl"] = {"backup": _SUPPLY_RECLAIMED[-1],
+                                             "published": published}
+        notes.append(f"a previous run's generator-produced rtl/ was moved to "
+                     f"{_SUPPLY_RECLAIMED[-1]}/ so consume can stage the "
+                     f"supplied design"
+                     + ("" if published else
+                        " (NOT published: this result does not commit "
+                        "changes, so rtl/ is unchanged)"))
+    if _SUPPLY_BLOCKED:
+        _b = _SUPPLY_BLOCKED[-1]
+        extras["supplied_rtl_blocked_by"] = dict(_b)
+        notes.append(
+            f"phase2/stage1/rtl/ already held {len(_b['rtl_files'])} RTL "
+            f"file(s), a closed design whose provenance is "
+            f"{_b['provenance']!r} (not provably generator-produced, so not "
+            f"moved): the supplied RTL will NOT be staged over it")
+    result.extras = extras
+    if notes:
+        result.detail = f"{result.detail} [D10 supply: {'; '.join(notes)}]"
+
+
+def _rtl_gen_supplied_design_handoff(
+        project: Path, t0: float, ic_class: str, config: Dict[str, Any],
+        _staged: List[Path], note: str = "",
+        extra: Optional[Dict[str, Any]] = None) -> StepResult:
+    """The REUSED-IP / catalog-glue hand-off for a design the input supplies.
+
+    ORGANIC #542 wrote this for `input/vendor_rtl/` alone; D10 gives every
+    input root consume stages the same hand-off (a design under `input/rtl/`
+    used to reach the spec-to-rtl WAIVE, which tells the AI to author RTL the
+    input already supplies), and the registry generators' supplied-top
+    decline uses it too."""
+    _sample = [str(f.relative_to(project))
+               for f in _staged[:5]]
+    _more = (f" (+ {len(_staged)-5} more)"
+             if len(_staged) > 5 else "")
+    # ORGANIC #732 — auto-emit the keystone SOURCE_MANIFEST.json on
+    # the pre-staged-vendor-RTL catalog-glue path. ip_catalog_pull
+    # NEVER runs here (the RTL is already in the tree), so without
+    # this the manifest the reused-IP relaxations key on is absent →
+    # load_source_manifest()=None → #659/#711/#712 dead code and
+    # l9_rtl_pin_consistency_check hard-FAILs. MERGE-preserving:
+    # never clobbers a hand-authored flattened_buses / tie_offs /
+    # renamed_interfaces block. §4.05 NO-LEAK: emits ONLY because
+    # input/vendor_rtl/ holds a design source (it returns None otherwise;
+    # consume writes the manifest for the other input roots).
+    _mf_emitted = None
+    try:
+        import staged_rtl_reused_ip_manifest_emit as _srm
+        _mf = _srm.emit_prestaged_reused_ip_manifest(project)
+        if _mf is not None:
+            _mf_emitted = str(_mf.relative_to(project))
+    except Exception:
+        # Best-effort — the manifest emit must never block the
+        # WAIVE handoff to catalog-glue-author.
+        _mf_emitted = None
+    _mf_note = (f" Emitted keystone {_mf_emitted} "
+                f"(reused_ip:true) so #659/#711/#712 pin-gate "
+                f"relaxations are live."
+                if _mf_emitted else "")
+    # Authoring handoff (`catalog-glue-author` still authors the
+    # chip_top wrapper by hand) — so it gets the digests too.
+    _hint, _hint_extras = _stage_author_knowledge_digests(project)
+    # #2193 — serve the skill's BYTES, not just its name.
+    _sk_hint, _sk_extras = _stage_fallback_skill(
+        project, "catalog-glue-author")
+    _extras = {"fallback_skill": "catalog-glue-author",
+               "class_config": config,
+               "staged_vendor_rtl_count": len(_staged),
+               "staged_vendor_rtl_sample": _sample,
+               "supplied_build_rtl": [str(f.relative_to(project))
+                                      for f in _staged],
+               **(extra or {}),
+               **_sk_extras,
+               **_hint_extras}
+    if _mf_emitted:
+        _extras["source_manifest_emitted"] = _mf_emitted
+    return StepResult(
+        "rtl_gen", "PASS_WITH_WAIVERS",
+        time.time() - t0,
+        f"IC class {ic_class!r}: the design supplies its own RTL under "
+        f"input/ ({len(_staged)} file(s){_more}: {_sample}) — "
+        f"REUSED-IP path: `consume_reused_ip_rtl` stages it; use skill "
+        f"`catalog-glue-author` to author the chip_top wrapper around the "
+        f"staged files. Do NOT author the design itself: the input "
+        f"supplies it." + (note or "")
+        + _mf_note + _sk_hint + _hint,
+        extras=_extras)
+
+
+def _supplied_rtl_defining_declared_top(project: Path
+                                        ) -> Tuple[Optional[str], List[Path]]:
+    """(declared top, supplied files that DEFINE it) — ([], when none do).
+
+    THE REGISTRY GENERATORS' SHARE OF D6 (D10). A class generator
+    (`ic_class_registry.json` rtl_gen) writes a WHOLE design, and some of those
+    designs instantiate IP the project supplies: MEASURED on the
+    mixed_signal_otp fixture at v1.25.64, `aid_class_rtl_gen`'s `otp_mem`
+    instantiates `otp_macro_wrapper`, the project supplies it under
+    `input/vendor_rtl/`, and consume's closure path stages it around the
+    generated tree. Declining whenever anything is supplied would break that.
+    What must not happen is the other measured shape: the project supplies the
+    DESIGN ITSELF (a file defining the declared top `chip_top`), the generator
+    writes its own `chip_top.sv`, consume stages `chip_top.v` beside it, and
+    `rtl/` holds two definitions of the top.
+
+    So "supplied" is D6's one definition (`_design_supplied_build_rtl`:
+    consume's `discover_provided_build_rtl`, testbenches and oracle segments
+    never count), and "is the design" is the design's OWN answer: L9
+    `top_module`. No declared top, or no supplied file defining it: nothing
+    here stops the generator.
+    """
+    try:
+        l9 = json.loads((project / "phase1" / "generated_docs"
+                         / "L9_INTEGRATION_SPEC.json").read_text(errors="replace"))
+        top = str(l9.get("top_module") or "").strip() or None
+    except (OSError, ValueError, AttributeError):
+        top = None
+    if not top:
+        return None, []
+    rx = re.compile(r"^\s*module\s+" + re.escape(top) + r"\b", re.M)
+    hits: List[Path] = []
+    for f in _design_supplied_build_rtl(project):
+        try:
+            if rx.search(f.read_text(errors="replace")):
+                hits.append(f)
+        except OSError:
+            continue
+    return top, hits
+
+
 def step_rtl_gen(project: Path, ic_class: str,
                  force_regen: Optional[bool] = None) -> StepResult:
     """Run RTL dispatch in isolation, then CAS-publish its complete delta."""
@@ -7334,6 +7582,7 @@ def step_rtl_gen(project: Path, ic_class: str,
             # waived generator stopped publishing its own complete staging.
             publish_changes = result.status in (
                 _V.Verdict.PASS.value, _V.Verdict.PASS_WITH_WAIVERS.value)
+            _record_supply(result, stage_project, publish_changes)
             commit_manifest = final if publish_changes else baseline
             final_link = None
             if publish_changes:
@@ -7558,6 +7807,11 @@ def _step_rtl_gen_bound(
     # mechanically derivable (FSM table / truth table / gate netlist / vector op),
     # emit RTL deterministically with NO LLM before any class-registry / AI path.
     project_binding.require_current()
+    _SUPPLY_DEFERRALS.clear()
+    _SUPPLY_RECLAIMED.clear()
+    _SUPPLY_BLOCKED.clear()
+    _reclaim_stale_generated_rtl(project)
+    project_binding.require_current()
     _det = _try_deterministic_rtl_dispatch(project, t0)
     project_binding.require_current()
     if _det is not None:
@@ -7663,62 +7917,14 @@ def _step_rtl_gen_bound(
         # non-empty the project already has the IP files pre-staged. WAIVE
         # immediately with REUSED-IP/catalog-glue guidance — no point querying
         # the catalog when the RTL is literally in the project tree.
-        _vendor_dir = project / "input" / "vendor_rtl"
-        if _vendor_dir.is_dir():
-            _staged_v = sorted(_vendor_dir.rglob("*.v"))
-            _staged_sv = sorted(_vendor_dir.rglob("*.sv"))
-            _staged = _staged_v + _staged_sv
-            if _staged:
-                _sample = [str(f.relative_to(project))
-                           for f in _staged[:5]]
-                _more = (f" (+ {len(_staged)-5} more)"
-                         if len(_staged) > 5 else "")
-                # ORGANIC #732 — auto-emit the keystone SOURCE_MANIFEST.json on
-                # the pre-staged-vendor-RTL catalog-glue path. ip_catalog_pull
-                # NEVER runs here (the RTL is already in the tree), so without
-                # this the manifest the reused-IP relaxations key on is absent →
-                # load_source_manifest()=None → #659/#711/#712 dead code and
-                # l9_rtl_pin_consistency_check hard-FAILs. MERGE-preserving:
-                # never clobbers a hand-authored flattened_buses / tie_offs /
-                # renamed_interfaces block. §4.05 NO-LEAK: emits ONLY because
-                # input/vendor_rtl/ is populated (the reused-IP WAIVE condition).
-                _mf_emitted = None
-                try:
-                    import staged_rtl_reused_ip_manifest_emit as _srm
-                    _mf = _srm.emit_prestaged_reused_ip_manifest(project)
-                    if _mf is not None:
-                        _mf_emitted = str(_mf.relative_to(project))
-                except Exception:
-                    # Best-effort — the manifest emit must never block the
-                    # WAIVE handoff to catalog-glue-author.
-                    _mf_emitted = None
-                _mf_note = (f" Emitted keystone {_mf_emitted} "
-                            f"(reused_ip:true) so #659/#711/#712 pin-gate "
-                            f"relaxations are live."
-                            if _mf_emitted else "")
-                # Authoring handoff (`catalog-glue-author` still authors the
-                # chip_top wrapper by hand) — so it gets the digests too.
-                _hint, _hint_extras = _stage_author_knowledge_digests(project)
-                # #2193 — serve the skill's BYTES, not just its name.
-                _sk_hint, _sk_extras = _stage_fallback_skill(
-                    project, "catalog-glue-author")
-                _extras = {"fallback_skill": "catalog-glue-author",
-                           "class_config": config,
-                           "staged_vendor_rtl_count": len(_staged),
-                           "staged_vendor_rtl_sample": _sample,
-                           **_sk_extras,
-                           **_hint_extras}
-                if _mf_emitted:
-                    _extras["source_manifest_emitted"] = _mf_emitted
-                return StepResult(
-                    "rtl_gen", "PASS_WITH_WAIVERS",
-                    time.time() - t0,
-                    f"IC class {ic_class!r}: staged vendor RTL found in "
-                    f"input/vendor_rtl/ ({len(_staged)} file(s){_more}) — "
-                    f"REUSED-IP path: use skill `catalog-glue-author` to "
-                    f"author the chip_top wrapper around the staged files."
-                    + _mf_note + _sk_hint + _hint,
-                    extras=_extras)
+        # ORGANIC #542 / D10 — the design supplies its own design, from ANY
+        # input root consume stages (vendor_rtl, input/rtl, design_src/**/rtl,
+        # manifest-declared): hand off as REUSED-IP, never to spec-to-rtl,
+        # which would tell the AI to author a design the input supplies.
+        _staged = _design_supplied_build_rtl(project)
+        if _staged:
+            return _rtl_gen_supplied_design_handoff(
+                project, t0, ic_class, config, _staged)
         # Class registered but has no deterministic generator yet.
         # v1.6.570 — for IP catalog integration: query ip-catalog for
         # matches against this project's L1-L23 facts before falling
@@ -7864,6 +8070,23 @@ def _step_rtl_gen_bound(
         return StepResult("rtl_gen", "FAIL",
                           time.time() - t0,
                           f"registered generator missing: {gen}")
+
+    # D10 — the design's own implementation outranks the class generator, and
+    # supplied IP the generated design instantiates does not (see
+    # `_supplied_rtl_defining_declared_top`). Declined BEFORE rtl/ is touched,
+    # so `consume_reused_ip_rtl` finds it empty and stages the design.
+    _sup_top, _sup_files = _supplied_rtl_defining_declared_top(project)
+    if _sup_files:
+        _rel = [str(f.relative_to(project)) for f in sorted(_sup_files)[:5]]
+        return _rtl_gen_supplied_design_handoff(
+            project, t0, ic_class, config, _design_supplied_build_rtl(project),
+            note=(f" Class generator {gen_name!r} DECLINED: {_rel} define(s) "
+                  f"the declared top {_sup_top!r}, and a generated "
+                  f"{_sup_top!r} would sit beside it in phase2/stage1/rtl/ as "
+                  f"a second definition. Supplied IP that does not define the "
+                  f"top does not decline the generator."),
+            extra={"declined_generator": gen_name, "declared_top": _sup_top,
+                   "design_rtl_sample": _rel})
 
     import shutil
     rtl_dir = _pl.rtl_dir(project)

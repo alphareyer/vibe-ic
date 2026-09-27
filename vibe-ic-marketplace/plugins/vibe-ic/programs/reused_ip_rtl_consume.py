@@ -227,6 +227,51 @@ def discover_provided_build_rtl(project: Path) -> List[Path]:
     return files
 
 
+_UNSTAGEABLE_HDL_EXTS = (".vhd", ".vhdl")
+_RE_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+
+
+def declares_a_module(path: Path) -> bool:
+    """True when the file (comments stripped) declares a Verilog module."""
+    try:
+        text = _RE_COMMENT.sub("", path.read_text(errors="ignore"))
+    except OSError:
+        return False
+    return bool(_RE_MODULE_DECL.search(text))
+
+
+def discover_supplied_design_sources(project: Path) -> List[Path]:
+    """The DESIGN sources the input supplies: `discover_provided_build_rtl`
+    (no testbench, no oracle / harness segment) narrowed to `.v` / `.sv`
+    files that declare a module.
+
+    D10: the one answer to "does the input supply a design", read by the
+    runner's generator deferrals, its reused-IP hand-off and the #732 vendor
+    manifest. A header, or a module-less `.v` of `define lines (the common
+    `*_defines.v` include), supplies no module: counting it made every
+    generator decline and left rtl/ with no design. It is still STAGED by
+    consume beside the design, because the design may include it."""
+    return [f for f in discover_provided_build_rtl(project)
+            if f.suffix in (".v", ".sv") and declares_a_module(f)]
+
+
+def discover_supplied_unstageable_hdl(project: Path) -> List[Path]:
+    """Supplied HDL this program cannot stage (VHDL), screened like
+    `discover_provided_build_rtl`. Named so it is never silently dropped."""
+    out: List[Path] = []
+    for src_dir in candidate_source_dirs(project):
+        for ext in _UNSTAGEABLE_HDL_EXTS:
+            for f in sorted(src_dir.rglob(f"*{ext}")):
+                try:
+                    rel = f.relative_to(src_dir)
+                except ValueError:
+                    continue
+                if (f.is_file() and not _is_oracle_parts(rel.parts[:-1])
+                        and not _is_tb_file(f) and f not in out):
+                    out.append(f)
+    return out
+
+
 def _derive_ip_list(staged_paths: List[Path]) -> List[str]:
     """Structural ip_list = the ``module <name>`` declarations across the staged
     files (falls back to file stems). chip-AGNOSTIC."""
@@ -375,6 +420,22 @@ def consume_reused_ip_rtl(project: Path) -> Dict:
                 f"phase2/stage1/rtl/ already holds {len(existing)} RTL file(s) "
                 f"— a deterministic generator / author owns it; CONSUME "
                 f"skipped")
+            # D10 — say what that skip left out. The design's own input
+            # RTL not being built is the one fact a reader of this line needs.
+            _left = discover_supplied_design_sources(project)
+            if _left:
+                _rel = []
+                for f in _left:
+                    try:
+                        _rel.append(str(f.relative_to(project)))
+                    except ValueError:
+                        _rel.append(str(f))
+                result["supplied_rtl_not_staged"] = _rel
+                result["reason"] += (
+                    f". The input SUPPLIES {len(_rel)} design source(s) "
+                    f"({', '.join(_rel[:5])}) and they were NOT staged: the "
+                    f"build uses what rtl/ already holds, not the supplied "
+                    f"RTL")
             return result
         result["pre_existing_rtl"] = sorted(f.name for f in existing)
         result["unresolved_module_refs"] = unresolved
