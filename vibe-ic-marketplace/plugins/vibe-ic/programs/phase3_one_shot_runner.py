@@ -63084,9 +63084,38 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     destination = rpt_out
     rpt_out = rpt_out.with_name(rpt_out.name + ".attempt-" + uuid.uuid4().hex)
     from sta_corner_record_completeness_check import _split_sections, extract_slacks
+    # N5 — ONE RECORD PER (DECLARED CORNER, CHECK), WRITTEN EVERY TIME. Until
+    # now a refusal left only a note and an `.attempt-*` file, so the sign-off
+    # gate saw no row for FF-setup / SS-hold / TT at all and the reason the
+    # sweep did not count lived nowhere a reader of the record would look.
+    record_path = _pl.reports_dir(project) / 'phase3' / 'sta' / 'declared_process_sta.json'
+    sources = {}      # corner -> {role: source rows}, filled once inputs resolve
+
+    def write_record(status, reason, measured_vals=None):
+        rows = {}
+        for c in required:
+            rows[c] = {}
+            for role in ('setup', 'hold'):
+                v = (measured_vals or {}).get((c, role.upper()))
+                rows[c][role] = dict(
+                    status=('MEASURED' if v is not None else 'NOT_MEASURED'),
+                    wns_ns=v,
+                    reason=(None if v is not None else reason),
+                    **(sources.get(c) or {}))
+        try:
+            _aa.write_json(record_path, {
+                'schema': 'vibe-ic/declared-process-sta/1',
+                'status': status, 'reason': reason,
+                'required_corners': list(required),
+                'report': (_rel_to_project(destination, project) if status == 'MEASURED'
+                           else None),
+                'corners': rows})
+        except Exception as exc:                          # pragma: no cover
+            notes.append(f'declared process STA record not written: {exc}')
 
     def refuse(reason):
         notes.append('declared process STA refused: ' + reason)
+        write_record('NOT_MEASURED', reason)
         return False
 
     def tq(value):
@@ -63132,6 +63161,23 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
         if io_views and set(families) != declared_families:
             return refuse('incomplete IO family inventory for ' + c)
         inventory[c] = list(dict.fromkeys([lib] + ios + [str(x) for x in (pdk.macro_libs or [])]))
+    # Every section names the files it timed AND their sha256, so the record
+    # says which bytes a slack describes. The liberty lives inside the EDA
+    # image; `_step_pdk_hasher` hashes it where it resolves.
+    _lib_digest = _step_pdk_hasher(container)(
+        sorted({inventory[c][0] for c in required}))
+    _host_digest = {f: (_file_sha256(f) or '').replace('sha256:', '')
+                    for f in (netlist, sdc, spef_path)}
+    for c in required:
+        _lib = inventory[c][0]
+        sources[c] = {
+            'liberty': _lib, 'liberty_sha256': _lib_digest.get(_lib) or None,
+            'spef': _rel_to_project(spef_path, project),
+            'spef_sha256': _host_digest[spef_path] or None,
+            'spef_rc_corner': 'nom',
+            'netlist': _rel_to_project(netlist, project),
+            'netlist_sha256': _host_digest[netlist] or None,
+            'sdc': _rel_to_project(sdc, project), 'sdc_sha256': _host_digest[sdc] or None}
     try:
         rpt_out.parent.mkdir(parents=True, exist_ok=True)
         report = _to_container_path(str(rpt_out), container)
@@ -63150,6 +63196,10 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
                              f'STA_BASIS_LIBERTY: {views[0]}', f'STA_BASIS_NETLIST: {inputs[0]}',
                              f'STA_BASIS_SDC: {inputs[1]}', f'STA_BASIS_SPEF: {inputs[2]}',
                              'STA_BASIS_CORNER: nom',
+                             f'STA_BASIS_SHA256_LIBERTY: {sources[c]["liberty_sha256"] or "UNAVAILABLE"}',
+                             f'STA_BASIS_SHA256_SPEF: {sources[c]["spef_sha256"] or "UNAVAILABLE"}',
+                             f'STA_BASIS_SHA256_NETLIST: {sources[c]["netlist_sha256"] or "UNAVAILABLE"}',
+                             f'STA_BASIS_SHA256_SDC: {sources[c]["sdc_sha256"] or "UNAVAILABLE"}',
                              f'OCV_DERATE_APPLIED early={_FLAT_OCV_DERATE_EARLY} late={_FLAT_OCV_DERATE_LATE} flat-OCV'] + [f'STA_BASIS_IO_LIBERTY: {_to_container_path(x, container)}' for x in inventory[c][1:] if x in io_views]:
                     tcl += f'puts $_f {tq(line)}\n'
                 if j == 0:
@@ -63181,14 +63231,21 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
         if role == 'SETUP':
             populations[corner] = classify(body, def_file, io_masters=io_masters)
     rpt_out.with_name(rpt_out.name + '.population.json').write_text(json.dumps(populations, indent=2) + '\n')
+    values = {}
     for role, corner, body in sections:
         if role == 'SETUP' and not _sta_native_census_complete(body, def_file,
                                                               io_masters=io_masters):
-            return refuse(f'{corner}: incomplete linked-master or parasitic annotation census')
+            _unknown = [d['driver'] for d in
+                        (populations.get(corner) or {}).get('drivers') or []
+                        if d.get('classification') == 'REQUIRED_OR_UNKNOWN']
+            return refuse(f'{corner}: incomplete linked-master or parasitic annotation census'
+                          + (f' (unclassified unannotated driver(s): {", ".join(_unknown[:8])})'
+                             if _unknown else ''))
         if role in ('SETUP', 'HOLD'):
             value = extract_slacks(body).get('setup_wns_ns' if role == 'SETUP' else 'hold_wns_ns')
             if value is not None and math.isfinite(value):
                 measured.add((corner, role))
+                values[(corner, role)] = value
     if measured != {(c, role) for c in required for role in ('SETUP', 'HOLD')}:
         return refuse('native process/role measurements incomplete')
     # R-0915-128 condition (b): the promoted report states, in its own header,
@@ -63228,6 +63285,7 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     _log_surviving_artefact(
         [destination], produced_by="_emit_declared_process_sta",
         marker=str(destination))
+    write_record('MEASURED', None, values)
     return True
 
 

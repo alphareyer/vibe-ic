@@ -40,6 +40,7 @@ def classify(body, def_file, io_masters=None):
     normalize = lambda s: s.replace('\\', '').strip()
     bindings = defaultdict(list)
     wildcards = []
+    net_uses = defaultdict(list)   # DEF net name -> every USE its statements declare
     regular = False
     for section in ('NETS', 'SPECIALNETS'):
         block = re.search(r'^'+section+r'\s+(\d+)\s*;(.*?)^END '+section+r'\b', text, re.M | re.S)
@@ -59,6 +60,7 @@ def classify(body, def_file, io_masters=None):
                 result['reason'] = 'ambiguous DEF USE declaration'
                 return result
             value = (normalize(statement[1]), uses[0] if uses else 'UNDECLARED')
+            net_uses[value[0]].append(value[1])
             for inst, pin in re.findall(r'\(\s*(\S+)\s+(\S+)\s*\)', statement[2].split('+')[0]):
                 inst, pin = normalize(inst), normalize(pin)
                 if inst == '*':
@@ -100,6 +102,19 @@ def classify(body, def_file, io_masters=None):
         evidence = list(bindings[driver])
         if inst in linked:
             evidence += [value for pattern, value in wildcards if pattern == pin]
+        # A TOP-LEVEL PORT that is the design's own SUPPLY. A netlist written
+        # with its supply nets as ports (a hard-macro view: `inout VDD;`)
+        # makes STA list the port as an unannotated driver, and a DEF that
+        # carries the supply only as a special net -- `- VDD ( * VDD ) + USE
+        # POWER`, no `( PIN VDD )` and no PINS row -- binds nothing to it, so
+        # it fell through to REQUIRED_OR_UNKNOWN and refused a complete
+        # post-route PVT sweep (spm x gf180mcuD HARDMACRO, 2026-09-28: all
+        # six FF/SS/TT sections measured, quarantined as `.attempt-*`). A
+        # port and the net it drives share one name, so the DEF's own typing
+        # of THAT net is the evidence: exactly one statement, USE POWER or
+        # GROUND. Duplicate or conflicting typing stays unknown.
+        if inst is None and not evidence and len(net_uses.get(driver, ())) == 1:
+            evidence = [(driver, net_uses[driver][0])]
         if evidence and len(set(evidence)) == 1 and all(use in ('POWER', 'GROUND') for net, use in evidence):
             classification = 'EXPLICIT_PG_NOT_SIGNAL_PARASITICS'
         elif not evidence and inst in linked and driver in disconnected:
