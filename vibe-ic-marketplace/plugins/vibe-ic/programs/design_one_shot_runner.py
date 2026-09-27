@@ -10304,12 +10304,35 @@ def step_analog_acceptance_tb_run(project: Path) -> StepResult:
     # the sweep that would ever clear it; charging it here would make an honest
     # declaration a permanent red. It stays visible in the detail line above,
     # in the JUnit and in the ledger.
-    status = "PASS" if (rep.get("failed", 0) == 0
-                        and rep.get("not_measured", 0) == 0
-                        and rep.get("refused", 0) == 0
-                        and rep.get("passed", 0) > 0) else "FAIL"
+    #
+    # FX_ADC_PHASE_ORDER — ONLY A PLAIN FAIL IS RED. A clause that measured a
+    # value outside its bound, or that was refused by name, is a FAIL. A clause
+    # that is NOT_MEASURED here is not: this step runs in phase 2, BEFORE the
+    # analog A-track, and the records it reads (A4's corner sweep) are written
+    # by that track -- each such clause says so itself ("flow step A4 has not
+    # produced one ... it is not a pass and it is not a failure"). The front
+    # door re-evaluates the same checks after the A-track (#2064), which is
+    # where those clauses can first be measured. MEASURED on u_hawaii_adc
+    # (IC_STATUS_0928): 0 pass, 0 fail, 15 NOT_MEASURED was booked FAIL, and
+    # that FAIL alone made phase 2 red.
+    status = ("FAIL" if (rep.get("failed", 0) or rep.get("refused", 0))
+              else NOT_EXECUTED_STATUS if (rep.get("not_measured", 0)
+                                           or not rep.get("passed", 0))
+              else "PASS")
+    reason = None
+    if status == NOT_EXECUTED_STATUS:
+        if rep.get("not_measured", 0):
+            reason = _V.ReasonClass.NOT_EXECUTED
+            detail += (
+                "; NOT_MEASURED, not FAIL: the unmeasured clauses read records "
+                "the analog A-track writes AFTER this phase-2 step (A4 corner "
+                "sweep), and the front door re-evaluates them once it has run")
+        else:
+            reason = _V.ReasonClass.NO_POPULATION
+            detail += "; NOT_MEASURED: no clause passed, failed or was refused"
     return StepResult(
         "analog_acceptance_tb_run", status, time.time() - t0, detail,
+        reason_class=reason or "",
         output_files=[x for x in (rep.get("results_xml"), rep.get("record"))
                       if x],
         extras={"passed": rep.get("passed", 0), "failed": rep.get("failed", 0),
@@ -22004,7 +22027,9 @@ def fmeda_producer_command(flow_yaml: Optional[Path] = None) -> Optional[str]:
 
 
 def step_fmeda_fault_injection(project: Path,
-                               flow_yaml: Optional[Path] = None) -> StepResult:
+                               flow_yaml: Optional[Path] = None,
+                               not_applicable: Optional[str] = None
+                               ) -> StepResult:
     """Flow step FS1: run the FMEDA fault-injection producer.
 
     The flow's FS1 gate named `fmeda_fault_injection_coverage` as its first
@@ -22012,9 +22037,24 @@ def step_fmeda_fault_injection(project: Path,
     wrote it (flow YAML, FS1). This runs the same command the gate states,
     from the project directory, so the report is run evidence before the audit
     reads it. The gate still re-runs the producer and keeps its own verdict.
+
+    `not_applicable` is the CALLER's own applicability reason -- the runner's
+    `_analog_rtl_track_absent` predicate, the same one it hands
+    `dft_lec_chain` and `yosys_synth`. FX_ADC_PHASE_ORDER: MEASURED on
+    u_hawaii_adc (a data_converter with no digital datapath), the producer ran
+    against the by-design-absent `phase2/stage1/rtl` and this row FAILed, while
+    the audit's own FS1 row for the same run said NOT_APPLICABLE ("N/A for
+    analog IC (no digital datapath)"). With a reason given, nothing is run and
+    the row is NOT_APPLICABLE declared by that reason; without one, the
+    producer runs exactly as before.
     """
     t0 = time.time()
     name = "fmeda_fault_injection"
+    if not_applicable:
+        return StepResult(name, "NOT_APPLICABLE", time.time() - t0,
+                          f"no digital RTL to fault-inject by design: "
+                          f"{not_applicable}",
+                          declared_by=str(not_applicable))
     command = fmeda_producer_command(flow_yaml)
     if command is None:
         return StepResult(name, "NOT_MEASURED", time.time() - t0,
@@ -25185,7 +25225,9 @@ def main() -> int:
             "outside this run's declared window; step FS1 was not "
             "dispatched", declared_by=" ".join(_window_flags)))
     else:
-        plan.append(step_fmeda_fault_injection(project))
+        plan.append(step_fmeda_fault_injection(
+            project, not_applicable=(_analog_reason if _analog_absent
+                                     else None)))
 
     # Phase 2 only — Phase 3 lives in phase3_one_shot_runner.py and is
     # chained by phase23_one_shot_runner.py.
