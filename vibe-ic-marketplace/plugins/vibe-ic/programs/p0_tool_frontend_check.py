@@ -97,8 +97,28 @@ def _route_image(tool: str, image: str | None) -> str | None:
     return image or default_image()
 
 
+#: Every tool run here has a deadline (owner rule). Seconds; overridable per
+#: host through the environment, never unbounded.
+DEADLINE_ENV = "VIBEIC_P0_FRONTEND_TIMEOUT_S"
+DEFAULT_DEADLINE_S = 900
+
+
+def _deadline_s() -> int:
+    try:
+        value = int(os.environ.get(DEADLINE_ENV, DEFAULT_DEADLINE_S))
+    except (TypeError, ValueError):
+        value = DEFAULT_DEADLINE_S
+    return value if value > 0 else DEFAULT_DEADLINE_S
+
+
 def _invoke(tool: str, args: list[str], project: Path,
             image: str | None) -> subprocess.CompletedProcess[str]:
+    """Run `tool` once, bounded by `_deadline_s()`.
+
+    A run past its deadline raises `subprocess.TimeoutExpired`; on the docker
+    path the NAMED container is killed first, because killing the client does
+    not stop a `--rm` container."""
+    container = None
     if shutil.which(tool):
         command = [tool, *args]
     elif shutil.which("docker"):
@@ -106,14 +126,22 @@ def _invoke(tool: str, args: list[str], project: Path,
         # CLI capability is neither requested nor assumed here.
         image = image or default_image()
         root = str(project.resolve())
-        command = ["docker", "run", "--rm", *_dmem.docker_memory_flags(),
+        container = f"vibeic-p0-{tool}-{os.getpid()}-{os.urandom(4).hex()}"
+        command = ["docker", "run", "--rm", "--name", container,
+                   *_dmem.docker_memory_flags(),
                    "--network", "none",
                    "-v", f"{root}:{root}:ro", "--entrypoint", tool,
                    image, *args]
     else:
         raise FileNotFoundError(f"{tool} and docker unavailable")
-    return subprocess.run(command, cwd=project, capture_output=True,
-                          text=True, check=False)
+    try:
+        return subprocess.run(command, cwd=project, capture_output=True,
+                              text=True, check=False, timeout=_deadline_s())
+    except subprocess.TimeoutExpired:
+        if container:
+            subprocess.run(["docker", "kill", container], capture_output=True,
+                           text=True, check=False, timeout=60)
+        raise
 
 
 #: FX_P2 — slang's declaration-order opt-out, and the disclosure that names it.
@@ -124,6 +152,7 @@ DECL_RELAXED = "DECLARATION_ORDER_RELAXED"
 #: slang's own diagnostic grammar: `<file>:<line>:<col>: error: <message>`, and
 #: the ONE message the declaration-order retry may answer.
 _SLANG_ERROR = re.compile(r"^\S+:\d+:\d+: error: (.*)$", re.M)
+_SLANG_ERROR_AT = re.compile(r"^(\S+):\d+:\d+: error: (.*)$", re.M)
 _USE_BEFORE_DECLARE = re.compile(
     r"^identifier '[^']+' used before its declaration$")
 _BUILD_FAILED = re.compile(r"^Build failed: (\d+) errors?,", re.M)
@@ -154,6 +183,90 @@ def _is_reused_ip(project: Path) -> bool:
         return bool(isinstance(mf, dict) and mf.get("reused_ip") is True)
     except Exception:                                        # noqa: BLE001
         return False
+
+
+def _use_before_declare_files(log: str) -> list[str]:
+    """The file each slang use-before-declare diagnostic names, in order."""
+    return [m.group(1) for m in _SLANG_ERROR_AT.finditer(log or "")
+            if _USE_BEFORE_DECLARE.match(m.group(2).strip())]
+
+
+def _sha256(path: Path) -> str | None:
+    import hashlib
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _supplied_ip_sources(project: Path) -> dict[str, str]:
+    """`{resolved rtl path: where it came from}` for every RTL file that IS
+    the supplied IP, UNEDITED -- byte-identical to what the input delivered.
+
+    Two records say where a reused-IP file came from, and each is checked
+    against the bytes, not the name:
+      * SOURCE_MANIFEST `staged_from_input` (the design shipped its own RTL):
+        the staged file must equal the input file it names;
+      * provenance.jsonl `ip_catalog_pull` `outputs` (a catalog pull): the
+        file's sha256 must equal the one recorded when it was pulled.
+    A wrapper or chip_top the plugin authored appears in neither; a supplied
+    file the plugin has since edited no longer matches. Both stay FAILs and go
+    to repair."""
+    out: dict[str, str] = {}
+    try:
+        import l9_rtl_pin_consistency_check as _l9
+        mf = _l9.load_source_manifest(project) or {}
+    except Exception:                                        # noqa: BLE001
+        mf = {}
+    rtl = {p.name: p for p in rtl_source_files(project)}
+    for rel in mf.get("staged_from_input") or []:
+        if not isinstance(rel, str):
+            continue
+        src = project / rel
+        dst = rtl.get(Path(rel).name)
+        if dst is None or not src.is_file():
+            continue
+        digest = _sha256(dst)
+        if digest is not None and digest == _sha256(src):
+            out[str(dst.resolve())] = f"staged_from_input {rel}"
+    prov = project / "provenance.jsonl"
+    try:
+        lines = prov.read_text(errors="replace").splitlines() \
+            if prov.is_file() else []
+    except OSError:
+        lines = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("event") != "ip_catalog_pull":
+            continue
+        for rel, recorded in (entry.get("outputs") or {}).items():
+            dst = project / str(rel)
+            if not dst.is_file() or not isinstance(recorded, str):
+                continue
+            if recorded.split(":", 1)[-1] == _sha256(dst):
+                out[str(dst.resolve())] = (
+                    f"ip_catalog_pull {entry.get('ip')} {rel}")
+    return out
+
+
+def _all_in_supplied_ip(project: Path, log: str) -> tuple[bool, list[str]]:
+    """(every use-before-declare diagnostic is in an unedited supplied-IP
+    file, the files that are not)."""
+    files = _use_before_declare_files(log)
+    supplied = _supplied_ip_sources(project)
+    outside = []
+    for name in files:
+        try:
+            key = str((project / name).resolve()) if not Path(name).is_absolute() \
+                else str(Path(name).resolve())
+        except OSError:
+            key = name
+        if key not in supplied and name not in outside:
+            outside.append(name)
+    return bool(files) and not outside, outside
 
 
 def check(project: Path, image: str | None = None) -> dict:
@@ -206,18 +319,33 @@ def check(project: Path, image: str | None = None) -> dict:
         # strict output. An undeclared name, a missing module or a syntax
         # error still fails, with the strict output (checked in the image:
         # `use of undeclared identifier` under both).
-        if (yosys.returncode and _is_reused_ip(project)
-                and only_use_before_declare(yosys.stdout + yosys.stderr)):
+        # FX_P2 review: condition (a) is PER FILE, not per project. A
+        # reused-IP project still carries plugin-authored RTL (the wrapper,
+        # chip_top) that repair can edit; only a diagnostic in a file that IS
+        # the supplied IP, byte-identical to what the input delivered
+        # (`_supplied_ip_sources`), may be relaxed.
+        strict_log = yosys.stdout + yosys.stderr
+        strict_rc = yosys.returncode
+        in_ip, _outside = ((False, [])
+                           if not (strict_rc and _is_reused_ip(project)
+                                   and only_use_before_declare(strict_log))
+                           else _all_in_supplied_ip(project, strict_log))
+        if in_ip:
             relaxed = _invoke("yosys", ["-Q", "-T", "-p",
                                         _script(DECL_RELAX_FLAG + " ")],
                               project, yosys_image)
             if relaxed.returncode == 0:
+                files = sorted({Path(f).name for f in
+                                _use_before_declare_files(strict_log)})
                 result["disclosures"] = [
-                    f"{DECL_RELAXED}: strict read_slang refused and "
-                    f"{DECL_RELAX_FLAG} elaborated, so declaration order was "
-                    f"the only obstacle -- a portability finding in the RTL, "
-                    f"not an elaboration failure"]
-                result["strict_refusal"] = (yosys.stdout + yosys.stderr)[-4000:]
+                    f"{DECL_RELAXED}: strict read_slang refused (exit "
+                    f"{strict_rc}) and {DECL_RELAX_FLAG} elaborated, so "
+                    f"declaration order was the only obstacle -- in supplied "
+                    f"IP only ({', '.join(files)}); a portability finding in "
+                    f"the RTL, not an elaboration failure"]
+                result["strict_refusal"] = strict_log[-4000:]
+                result["strict_exit_code"] = strict_rc
+                result["relaxed_flags"] = [DECL_RELAX_FLAG]
                 yosys = relaxed
         verilator_args = ["--lint-only", "--Wall", "-Wno-fatal"]
         if top:
@@ -229,12 +357,28 @@ def check(project: Path, image: str | None = None) -> dict:
     except _eda_pin.ImageNotResolvable as exc:
         result["findings"].append(f"tool invocation refused: {exc}")
         return result
+    except subprocess.TimeoutExpired as exc:
+        # EXECUTION_ERROR, never retried: a front end past its deadline
+        # measured nothing, and a relaxed retry would not change that.
+        cmd = [str(c) for c in (exc.cmd or ["?"])]
+        tool = (cmd[cmd.index("--entrypoint") + 1]
+                if "--entrypoint" in cmd[:-1] else Path(cmd[0]).name)
+        result["findings"].append(
+            f"tool invocation timed out: {tool} exceeded its "
+            f"{exc.timeout:g} s deadline ({DEADLINE_ENV}) -- EXECUTION_ERROR")
+        return result
     except (FileNotFoundError, OSError) as exc:
         result["findings"].append(f"tool invocation unavailable: {exc}")
         return result
     result["tools"]["Yosys.JsonHeader"] = {"exit_code": yosys.returncode,
                                                "execution": "host" if shutil.which("yosys") else yosys_image,
                                                "output": (yosys.stdout + yosys.stderr)[-8000:]}
+    if "strict_exit_code" in result:
+        # The row says which run it shows: the strict refusal's exit code is
+        # kept beside the relaxed run's, never overwritten by it.
+        result["tools"]["Yosys.JsonHeader"].update(
+            strict_exit_code=result["strict_exit_code"],
+            relaxed_flags=list(result["relaxed_flags"]))
     lint_log = verilator.stdout + verilator.stderr
     try:
         diagnostics = _diagnostic_codes(lint_log)

@@ -47,16 +47,32 @@ GHOST = ("top.v:2:21: error: use of undeclared identifier 'ghost'\n"
          "Build failed: 1 error, 0 warnings\n")
 
 
+_SRC = ("module top(input a, output y);\n  assign y = late;\n"
+        "  wire late = a;\nendmodule\n")
+
+
 def _project(tmp_path: Path, reused_ip=True) -> Path:
+    """FX_P2 review: the file is SUPPLIED IP the way subservient's is -- staged
+    byte-for-byte from `input/vendor_rtl/` and named in the manifest's
+    `staged_from_input` -- so the per-file condition holds."""
     rtl = tmp_path / "phase2" / "stage1" / "rtl"
     rtl.mkdir(parents=True)
-    (rtl / "top.v").write_text(
-        "module top(input a, output y);\n  assign y = late;\n"
-        "  wire late = a;\nendmodule\n")
+    (rtl / "top.v").write_text(_SRC)
+    vendor = tmp_path / "input" / "vendor_rtl"
+    vendor.mkdir(parents=True)
+    (vendor / "top.v").write_text(_SRC)
     if reused_ip is not None:
         (rtl / "SOURCE_MANIFEST.json").write_text(
-            json.dumps({"reused_ip": bool(reused_ip)}))
+            json.dumps({"reused_ip": bool(reused_ip),
+                        "staged_from_input": ["input/vendor_rtl/top.v"]}))
     return tmp_path
+
+
+def _at(log: str, root: Path) -> str:
+    """The real transcript names the probe's `rtl/late.v`; the tool names the
+    absolute path it was handed, so point it at this project's file."""
+    top = str((root / "phase2" / "stage1" / "rtl" / "top.v").resolve())
+    return log.replace("rtl/late.v", top).replace("rtl/mixed.v", top)
 
 
 def _fake(monkeypatch, *, strict, relaxed_ok, strict_rc=1):
@@ -65,10 +81,11 @@ def _fake(monkeypatch, *, strict, relaxed_ok, strict_rc=1):
     def _invoke(tool, args, root, image):
         calls.append((tool, list(args)))
         if tool == "yosys":
+            log = _at(strict, Path(root))
             if FLAG in args[-1]:
-                rc, err = (0, "") if relaxed_ok else (1, strict)
+                rc, err = (0, "") if relaxed_ok else (1, log)
             else:
-                rc, err = strict_rc, strict
+                rc, err = strict_rc, log
             return subprocess.CompletedProcess([tool], rc, "", err)
         return subprocess.CompletedProcess([tool], 0, "", "")
 
