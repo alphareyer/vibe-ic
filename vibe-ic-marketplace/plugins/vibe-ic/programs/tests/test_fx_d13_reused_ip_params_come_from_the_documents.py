@@ -279,3 +279,75 @@ def test_the_runner_step_hands_an_undecided_value_to_the_ai_backup(tmp_path):
     assert sr.extras["fallback_skill"] == "catalog-glue-author"
     assert "--choose NAME=VALUE" in sr.extras["command"]
     assert _header_default(p, "memsize") == "512"
+
+
+# --------------------------------------------------------------------------- #
+# 15.5ic: a pad per bit of the IMPLEMENTED port, not of the harvest's width
+# --------------------------------------------------------------------------- #
+PAD_DOC = """---
+layer: L3
+---
+
+# L3 — External Interface
+
+The I/O cell library is delegated to the PDK i/o pad defaults.
+
+## Physical Pad Placement
+
+| Pad side | signals |
+|---|---|
+| **North (N)** | memory waddr bus |
+| **South (S)** | `rst` |
+| **East (E)** | `clk` |
+| **West (W)** | status pin(s) |
+"""
+
+PAD_NETLIST = """module core(clk, rst, o_memory_waddr, o_status);
+  input clk;
+  input rst;
+  output [9:0] o_memory_waddr;
+  output o_status;
+endmodule
+"""
+
+
+def _pad_project(tmp_path, waddr_entry):
+    import test_io_pad_chip_top_gen as IO
+    spec = {"top_module": "core", "top_ports": [
+        _port("clk", "input", 1, True), _port("rst", "input", 1, True),
+        _port("o_status", "output", 1, True), waddr_entry]}
+    for p in spec["top_ports"]:
+        if p["width"] == 1:
+            p.pop("msb"), p.pop("lsb")
+    proj = IO._project(tmp_path, doc=PAD_DOC, spec=spec)
+    synth = proj / "phase2/stage2/synth"
+    synth.mkdir(parents=True)
+    (synth / "core_synth.v").write_text(PAD_NETLIST)
+    res = IO._run(PROGRAMS / "io_pad_chip_top_gen.py", proj,
+                  IO._pdk(tmp_path / "pdk"))
+    return IO, proj, res, res.stdout + res.stderr
+
+
+def test_the_pads_follow_the_netlist_width_the_parameter_set(tmp_path):
+    """L9's harvested `o_memory_waddr` is 9 bits (the IP default); the core
+    built with the documents' memsize is 10. Every core bit gets a pad."""
+    IO, proj, res, out = _pad_project(
+        tmp_path, _port("o_memory_waddr", "output", 9, True, doc=False))
+    assert res.returncode == 0, out
+    rec = IO._record(proj)
+    north = rec["derived_answers"]["pad_order_by_side"]["north"]
+    assert len(north) == 10 and "u_pad_o_memory_waddr_9" in north
+    assert rec["port_widths_from_netlist"] == [{
+        "name": "o_memory_waddr", "l9_width": 9, "netlist_width": 10,
+        "netlist": str(proj / "phase2/stage2/synth/core_synth.v"),
+        "reason": "the staged-top harvest evaluated this width at the IP's "
+                  "default parameters"}]
+
+
+def test_a_document_width_the_netlist_contradicts_is_refused(tmp_path):
+    IO, proj, res, out = _pad_project(
+        tmp_path, _port("o_memory_waddr", "output", 9, False))
+    assert res.returncode == 1, out
+    assert "PORT_WIDTH_CONTRADICTS_DOCUMENT" in out
+    assert "declare 9 bit(s)" in out and "declares 10" in out
+    assert not (proj / "phase3/stage3/pnr/chip_top_io.v").exists()

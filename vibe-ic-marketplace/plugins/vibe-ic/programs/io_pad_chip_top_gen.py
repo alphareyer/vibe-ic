@@ -206,9 +206,14 @@ def _read_top_ports(project: Path) -> List[Dict[str, object]]:
 
 def _implemented_core_ports(project: Path
                             ) -> Optional[Tuple[Path, List[Dict[str, object]]]]:
-    """(selected netlist, its core's ports as {name, direction, width}), or
-    None when the netlist cannot be read or declares no port. `width` is None
-    when the range is not a literal."""
+    """(selected netlist, its core's ports as {name, direction, width, msb,
+    lsb}), or None when the netlist cannot be read or declares no port.
+    `width` (and `msb`/`lsb`) is None when the range is not a literal; a
+    scalar is width 1 with no msb/lsb.
+
+    THE ONE READER of the selected netlist's core header in this producer:
+    the optional/doc-only drop, the rename acceptance rule (D2) and the
+    port-width reconciliation (FX_D13) all read it."""
     try:
         from phase3_one_shot_runner import pnr_input_netlist
         from lec_run import netlist_top_ports
@@ -223,8 +228,72 @@ def _implemented_core_ports(project: Path
         m = re.fullmatch(r"\[\s*(-?\d+)\s*:\s*(-?\d+)\s*\]", rng.strip())
         width = (abs(int(m.group(1)) - int(m.group(2))) + 1 if m
                  else (1 if not rng.strip() else None))
-        out.append({"name": name, "direction": direction, "width": width})
+        out.append({"name": name, "direction": direction, "width": width,
+                    "msb": int(m.group(1)) if m else None,
+                    "lsb": int(m.group(2)) if m else None})
     return (netlist, out) if out else None
+
+
+def _reconcile_port_widths(
+        project: Path, ports: Sequence[Dict[str, object]]
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    """A pad per bit of the port the IMPLEMENTED core has, not a stale width.
+
+    FX_D13. L9 top_ports carries, for a reused top, the entries phase 1's
+    staged-top harvest ADDED (`_staged_top_module.EXTRACTION_STRATEGY`), and
+    their widths were evaluated at the IP's DEFAULT parameters. Once phase 2
+    sets a width parameter from the documents (`reused_ip_param_derive`),
+    that width is stale. MEASURED on subservient: memsize 1024 made the
+    core's `o_sram_waddr` 10 bits while L9 still said 9, and this producer
+    made 9 pads -- the address MSB would have left the chip unconnected.
+
+    For a port the selected netlist (`_implemented_core_ports`) declares with
+    a literal range:
+      * the harvest-only L9 entry takes the netlist's range, and is recorded;
+      * an entry the DOCUMENT declares with another width is refused
+        (PORT_WIDTH_CONTRADICTS_DOCUMENT), naming both widths.
+    An unreadable netlist changes nothing; the runner's connection check
+    still reads the wrapper against it.
+    """
+    from _staged_top_module import EXTRACTION_STRATEGY as staged_only
+    selected = _implemented_core_ports(project)
+    if not selected:
+        return list(ports), []
+    netlist, implemented = selected
+    by_name = {str(p["name"]): p for p in implemented
+               if p.get("width") is not None}
+    out: List[Dict[str, object]] = []
+    notes: List[Dict[str, object]] = []
+    for p in ports:
+        name = str(p.get("name") or "")
+        core = by_name.get(name)
+        if core is None:
+            out.append(p)
+            continue
+        nl_width = int(core["width"])
+        l9_width = len(_bit_names(p))
+        if nl_width == l9_width:
+            out.append(p)
+            continue
+        if p.get("extraction_strategy") != staged_only:
+            raise Refusal(
+                "PORT_WIDTH_CONTRADICTS_DOCUMENT",
+                f"{name}: the design documents declare {l9_width} bit(s) "
+                f"({p.get('evidence') or 'L9 top_ports'}), the selected "
+                f"netlist {netlist} declares {nl_width}")
+        fixed = dict(p)
+        if nl_width == 1:
+            fixed["width"] = 1
+            fixed.pop("msb", None)
+            fixed.pop("lsb", None)
+        else:
+            fixed.update(width=nl_width, msb=core["msb"], lsb=core["lsb"])
+        out.append(fixed)
+        notes.append({"name": name, "l9_width": l9_width,
+                      "netlist_width": nl_width, "netlist": str(netlist),
+                      "reason": "the staged-top harvest evaluated this width "
+                                "at the IP's default parameters"})
+    return out, notes
 
 
 def _drop_unimplemented_optional_ports(
@@ -1159,6 +1228,9 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
     if doc_only_absent:
         rec["doc_ports_not_implemented"] = doc_only_absent
     rec["functional_top_port_count"] = len(ports)
+    ports, width_notes = _reconcile_port_widths(project, ports)
+    if width_notes:
+        rec["port_widths_from_netlist"] = width_notes
     test_ports, test_sides, test_record = _declared_test_access(project, ports)
     functional_ports = ports
     ports = ports + test_ports
