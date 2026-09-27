@@ -45,6 +45,7 @@ LAYER = {
     "18": "librelane", "19": "librelane", "20": "librelane",
     "21": "librelane", "22": "librelane", "23": "librelane",
     "24": "dual", "25": "direct", "26": "dual", "26.5ic": "librelane",
+    "29": "librelane", "30": "direct",
     "31": "dual", "32": "librelane", "33": "librelane", "34": "librelane",
     "37": "librelane", "DT2": "librelane", "DT3": "librelane",
 }
@@ -56,7 +57,6 @@ DYNAMIC_SITES = {
     ("librelane_pv_signoff.py", "step"): "STATE_KEYS",
     ("phase3_one_shot_runner.py", "step"): ("DT2", "DT3"),
 }
-_CALLEES = {"selected_mode", "_ll_selected_mode"}
 
 
 def _tree(project: Path) -> dict:
@@ -116,24 +116,70 @@ def _loop_values(parents: list, name: str, consts: dict):
     return None
 
 
-def call_sites():
-    """[(file, line, steps)] for every shipped `selected_mode` call."""
+CONTRACT_MODULE = "librelane_contract"
+FUNCTION = "selected_mode"
+
+
+class UnaccountedReference(AssertionError):
+    """A reference to the function the census can neither call nor alias."""
+
+
+def _aliases(module: ast.Module) -> tuple[set, set]:
+    """(function aliases, module aliases) the file binds, read from its own
+    import and assignment statements, anywhere in the file."""
+    funcs, mods = set(), set()
+    for node in ast.walk(module):
+        if isinstance(node, ast.ImportFrom) and node.module == CONTRACT_MODULE:
+            for a in node.names:
+                if a.name == FUNCTION:
+                    funcs.add(a.asname or a.name)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name == CONTRACT_MODULE:
+                    mods.add(a.asname or a.name)
+    changed = True
+    while changed:                       # `f = _ll.selected_mode`, `g = f`
+        changed = False
+        for node in ast.walk(module):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], ast.Name):
+                v, name = node.value, node.targets[0].id
+                if ((isinstance(v, ast.Attribute) and v.attr == FUNCTION)
+                        or (isinstance(v, ast.Name) and v.id in funcs)) and name not in funcs:
+                    funcs.add(name)
+                    changed = True
+    return funcs, mods
+
+
+def call_sites(root: Path = PROGRAMS):
+    """[(file, line, steps)] for every shipped call of the contract's
+    `selected_mode`, under whatever name the file imported it as. Any other
+    reference to it (passed, stored, wrapped) raises UnaccountedReference: a
+    site the census cannot see must fail it, never shrink it."""
     sites = []
-    for path in sorted(PROGRAMS.rglob("*.py")):
-        rel = path.relative_to(PROGRAMS)
-        if rel.parts[0] == "tests" or path.name == "librelane_contract.py":
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
+        if rel.parts[0] == "tests" or path.name == f"{CONTRACT_MODULE}.py":
             continue
         text = path.read_text(encoding="utf-8")
-        if "selected_mode" not in text:
+        if FUNCTION not in text:
             continue
         module = ast.parse(text)
         consts = _constants(module)
+        funcs, _mods = _aliases(module)
+        accounted: set = set()
+
+        def is_ref(node) -> bool:
+            return ((isinstance(node, ast.Attribute) and node.attr == FUNCTION)
+                    or (isinstance(node, ast.Name) and node.id in funcs))
 
         def walk(node, parents):
-            if isinstance(node, ast.Call):
-                fn = node.func
-                name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
-                if name in _CALLEES and len(node.args) >= 2:
+            if isinstance(node, ast.Assign) and is_ref(node.value):
+                accounted.add(id(node.value))
+            if isinstance(node, ast.Call) and is_ref(node.func):
+                accounted.add(id(node.func))
+                steps = None
+                if len(node.args) >= 2:
                     arg = node.args[1]
                     if isinstance(arg, ast.Constant):
                         steps = (arg.value,)
@@ -148,13 +194,17 @@ def call_sites():
                                 steps = tuple(sorted({v[0] for v in table.values()}))
                             else:
                                 steps = source
-                    else:
-                        steps = None
-                    sites.append((str(rel), node.lineno, steps))
+                sites.append((str(rel), node.lineno, steps))
             for child in ast.iter_child_nodes(node):
                 walk(child, parents + [node])
 
         walk(module, [])
+        loose = [getattr(n, "lineno", "?") for n in ast.walk(module)
+                 if is_ref(n) and id(n) not in accounted
+                 and not (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))]
+        if loose:
+            raise UnaccountedReference(f"{rel}: references to {FUNCTION} at lines "
+                                       f"{loose} are neither a call nor an alias")
     return sites
 
 
@@ -221,11 +271,13 @@ def test_the_owners_kept_checks_are_not_replaced_by_the_tool(tmp_path):
 def test_a_switch_naming_a_step_the_flag_decides_refuses(tmp_path, mode):
     _record(tmp_path)
     _switch(tmp_path, {"21": mode})
-    for step in ("21", "9", "A6"):       # the run refuses, not just step 21
+    for step in ("21", "9", "30"):       # every step the flag decides refuses
         with pytest.raises(LC.Refusal) as exc:
             LC.selected_mode(tmp_path, step)
         assert exc.value.code == "IMPL_SWITCH_CONFLICT"
         assert "'21'" in str(exc.value)
+    # A step no layer decides is not the flag's: it answers as before.
+    assert LC.selected_mode(tmp_path, "A6") == "direct"
 
 
 def test_a_switch_naming_only_out_of_layer_steps_is_honoured(tmp_path):
@@ -271,3 +323,105 @@ def test_step9_librelane_arm_runs_without_a_switch_file(tmp_path):
     res = P3._step_synth_librelane(tmp_path, "top", None, "no-container")
     assert res.status == "FAIL"
     assert "LL_SYNTH_INPUT_MISSING" in res.detail
+
+
+# ── review fixes (review_wave3 W3) ───────────────────────────────────────────
+
+def _damaged(project: Path) -> None:
+    path = IF.record_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json")
+
+
+def _orfs(project: Path) -> None:
+    path = IF.record_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "schema": IF.SCHEMA, "impl": "orfs", "flag": "--orfs",
+        "resolved_at": "2026-09-28T00:00:00Z", "resolved_by": "test",
+        "tool_defaults": {}, "image": None}))
+
+
+@pytest.mark.parametrize("record", ["damaged", "orfs", "conflict", "librelane"])
+@pytest.mark.parametrize("step", sorted(OUT_OF_LAYER))
+def test_out_of_layer_steps_never_read_the_record(tmp_path, record, step):
+    _switch(tmp_path, {step: "dual"})
+    expected = LC.selected_mode(tmp_path, step)
+    assert expected == "dual"
+    if record == "damaged":
+        _damaged(tmp_path)
+    elif record == "orfs":
+        _orfs(tmp_path)
+    else:
+        _record(tmp_path)
+        if record == "conflict":
+            _switch(tmp_path, {step: "dual", "21": "librelane"})
+    assert LC.selected_mode(tmp_path, step) == expected
+
+
+def test_the_admission_identity_carries_the_layer(tmp_path, monkeypatch):
+    import phase3_one_shot_runner as P3
+    assert P3._librelane_admission_facts(tmp_path) == {}
+    _record(tmp_path)
+    facts = P3._librelane_admission_facts(tmp_path)
+    assert facts["librelane_impl_layer"] == LAYER
+    assert facts["librelane_contract_sha256"] == LC.digest(Path(LC.__file__))
+    # A different layer is a different identity.
+    moved = dict(LC.IMPL_STEP_MODES["librelane"], **{"8": "librelane"})
+    monkeypatch.setitem(LC.IMPL_STEP_MODES, "librelane", moved)
+    assert P3._librelane_admission_facts(tmp_path) != facts
+
+
+def test_a_damaged_record_is_part_of_the_identity_not_dropped(tmp_path):
+    import phase3_one_shot_runner as P3
+    _damaged(tmp_path)
+    facts = P3._librelane_admission_facts(tmp_path)
+    assert "IMPL_RECORD_UNREADABLE" in json.dumps(facts["librelane_impl_layer"])
+
+
+def test_a_chip_project_under_the_flag_keeps_a_contract_bound_identity(tmp_path):
+    import phase3_one_shot_runner as P3
+    project = _chip(tmp_path)
+    before = P3._librelane_admission_facts(project)
+    assert before.get("librelane_class_defaults")
+    _record(project)
+    after = P3._librelane_admission_facts(project)
+    assert after["librelane_impl_layer"] == LAYER and "librelane_contract_sha256" in after
+    assert after != before
+
+
+def _scratch(tmp_path, body: str) -> Path:
+    root = tmp_path / "programs"
+    root.mkdir()
+    (root / "aliased_site.py").write_text(body)
+    return root
+
+
+def test_the_census_sees_an_aliased_import(tmp_path):
+    root = _scratch(tmp_path, (
+        "def f(project):\n"
+        "    from librelane_contract import selected_mode as _renamed\n"
+        "    return _renamed(project, 'Z9')\n"))
+    sites = call_sites(root)
+    assert [(Path(f).name, s) for f, _, s in sites] == [("aliased_site.py", ("Z9",))]
+    # ... and the census goes red on it: Z9 is decided by no layer.
+    asked = {s for _, _, steps in sites for s in steps}
+    assert sorted(asked - set(LAYER) - OUT_OF_LAYER) == ["Z9"]
+
+
+def test_the_census_sees_an_assigned_alias(tmp_path):
+    root = _scratch(tmp_path, (
+        "import librelane_contract as _c\n"
+        "pick = _c.selected_mode\n"
+        "again = pick\n"
+        "def f(project):\n"
+        "    return again(project, 'Z8')\n"))
+    assert [s for _, _, s in call_sites(root)] == [("Z8",)]
+
+
+def test_a_reference_the_census_cannot_follow_fails_it(tmp_path):
+    root = _scratch(tmp_path, (
+        "from librelane_contract import selected_mode\n"
+        "TABLE = {'m': selected_mode}\n"))
+    with pytest.raises(UnaccountedReference):
+        call_sites(root)
