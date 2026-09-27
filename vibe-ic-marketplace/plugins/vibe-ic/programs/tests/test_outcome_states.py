@@ -328,7 +328,7 @@ def test_a_confirmed_container_mismatch_is_not_verified_naming_both_images():
 
     def probe(container):
         asked.append(container)
-        return "MISMATCH", _MISMATCH_TEXT.split("emit: ", 1)[1]
+        return "MISMATCH", _MISMATCH_TEXT.split("emit: ", 1)[1], container
 
     reason = OS.classify_container_mismatch(AssertionError(_MISMATCH_TEXT), probe)
     assert asked == ["vibeic-eda"], asked
@@ -342,7 +342,7 @@ def test_a_confirmed_container_mismatch_is_not_verified_naming_both_images():
 def test_a_container_that_matches_now_keeps_the_fail():
     for state in ("MATCH", "UNREADABLE"):
         assert OS.classify_container_mismatch(
-            AssertionError(_MISMATCH_TEXT), lambda c, s=state: (s, "")) is None, state
+            AssertionError(_MISMATCH_TEXT), lambda c, s=state: (s, "", c)) is None, state
 
 
 def test_a_refusal_naming_a_container_that_is_not_there_stays_fail(tmp_path):
@@ -356,3 +356,27 @@ def test_a_refusal_naming_a_container_that_is_not_there_stays_fail(tmp_path):
     rc, out = _session(tmp_path, body)
     assert _counts(out)["FAIL"] == 1 and _counts(out)["NOT_VERIFIED"] == 0, out
     assert rc == 1, out
+
+
+def test_a_truncated_container_name_asks_the_default_container():
+    """A repr cut the name ("vibeic-ed..."): the DEFAULT container is asked, and
+    only its confirmed MISMATCH converts."""
+    text = ("('A3_netlist_gen', 'NOT_MEASURED', 'ENV_REFUSED: CONTAINER_IMAGE_MISMATCH: "
+            "container vibeic-ed...db36dd; required sha256:7a01d48eb')")
+    asked = []
+
+    def probe(container):
+        asked.append(container)
+        return "MISMATCH", "container vibeic-eda runs sha256:93d8", "vibeic-eda"
+
+    reason = OS.classify_container_mismatch(AssertionError(text), probe)
+    assert asked == [""] and "container `vibeic-eda`" in reason, (asked, reason)
+    assert OS.classify_container_mismatch(
+        AssertionError(text), lambda c: ("MATCH", "", "vibeic-eda")) is None
+
+
+def test_text_without_the_refusal_code_never_asks_docker():
+    asked = []
+    OS.classify_container_mismatch(AssertionError("container vibeic-eda runs fine"),
+                                   lambda c: asked.append(c) or ("MISMATCH", "", c))
+    assert asked == [], asked

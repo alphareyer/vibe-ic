@@ -235,11 +235,16 @@ _PIN_PROBE = (
     "import json, sys\n"
     "sys.path.insert(0, sys.argv[1])\n"
     "import _eda_pin\n"
-    "print(json.dumps(_eda_pin.container_pin_state(sys.argv[2])))\n")
+    "name = sys.argv[2] or _eda_pin.default_container_name()\n"
+    "state, detail = _eda_pin.container_pin_state(name)\n"
+    "print(json.dumps([state, detail, name]))\n")
 
 
-def live_pin_state(container: str) -> Tuple[str, str]:
+def live_pin_state(container: str) -> Tuple[str, str, str]:
     """`_eda_pin.container_pin_state(container)`, asked NOW, in a fresh process.
+
+    Returns ``(state, detail, container)``; an empty *container* asks about the
+    plugin's default container (`_eda_pin.default_container_name`).
 
     A fresh interpreter under the SESSION's environment, because at report time
     the test's monkeypatches are still in force: a test that planted a fake
@@ -252,10 +257,10 @@ def live_pin_state(container: str) -> Tuple[str, str]:
         cp = subprocess.run(
             [sys.executable, "-c", _PIN_PROBE, str(_HERE), container],
             capture_output=True, text=True, env=env, timeout=120)
-        state, detail = json.loads(cp.stdout.strip().splitlines()[-1])
+        state, detail, name = json.loads(cp.stdout.strip().splitlines()[-1])
     except (OSError, subprocess.SubprocessError, ValueError, IndexError) as exc:
-        return "UNREADABLE", f"the live pin check could not run: {exc}"
-    return str(state), str(detail)
+        return "UNREADABLE", f"the live pin check could not run: {exc}", container
+    return str(state), str(detail), str(name)
 
 
 def classify_container_mismatch(exc: Optional[BaseException],
@@ -264,11 +269,15 @@ def classify_container_mismatch(exc: Optional[BaseException],
     runs other bytes than the pinned ones. A container that matches (or cannot
     be read) keeps the FAIL: then the refusal is not a fact about the host."""
     for e in _chain(exc):
-        m = _MISMATCH_RE.search(str(e))
-        if not m:
+        text = str(e)
+        if "CONTAINER_IMAGE_MISMATCH" not in text:
             continue
-        container = m.group(1).strip("`'\"")
-        state, detail = probe(container)
+        m = _MISMATCH_RE.search(text)
+        # A repr can truncate the name ("container vibeic-ed...db36dd"); then
+        # the plugin's DEFAULT container is the one asked, and it still has to
+        # be a live, confirmed MISMATCH before anything is converted.
+        container = m.group(1).strip("`'\"") if m and "..." not in m.group(1) else ""
+        state, detail, container = probe(container)
         if state != "MISMATCH":
             return None
         return _nv.not_verified_reason(
