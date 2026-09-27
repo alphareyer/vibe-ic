@@ -119,6 +119,29 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "reused_ip_param_derive::derive":
+        "VERILOG HEADER SYNTAX ONLY. Identifiers are read out of a module's own "
+        "`#( parameter <name> = <expr> )` defaults and its ANSI port ranges "
+        "`[<expr>:<expr>]`, and evaluated by verilog_width_resolve's vetted "
+        "token set; the document values it compares them with arrive as JSON "
+        "fields, not sentences. Verilog cannot spell a denial, and an "
+        "expression the evaluator cannot read yields NO width, never a guessed "
+        "one. Falsifier: tests/test_fx_d13_reused_ip_params_come_from_the_"
+        "documents.py::test_not_prose_an_unreadable_expression_invents_no_width.",
+    "reused_ip_param_derive::apply_overrides":
+        "VERILOG HEADER SYNTAX ONLY. Locates `<name> = <default>` inside the "
+        "staged top's own `#( ... )` block to replace a default the rule already "
+        "decided; it reads no value out of the text. A name with no default in "
+        "that block is an error and the file is left untouched, never a "
+        "parameter inserted. Falsifier: tests/test_fx_d13_reused_ip_params_come_"
+        "from_the_documents.py::test_not_prose_apply_never_inserts_a_parameter.",
+    "io_pad_chip_top_gen::_reconcile_port_widths":
+        "ONE MACHINE GRAMMAR. The selected netlist's module header as yosys "
+        "writes it (`output [9:0] name;`), read through lec_run.netlist_top_ports "
+        "for literal `[msb:lsb]` ranges only. A synthesised header cannot spell "
+        "a denial, and a range that is not two integers changes no width. "
+        "Falsifier: tests/test_fx_d13_reused_ip_params_come_from_the_documents"
+        ".py::test_not_prose_a_non_literal_netlist_range_changes_no_width.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "

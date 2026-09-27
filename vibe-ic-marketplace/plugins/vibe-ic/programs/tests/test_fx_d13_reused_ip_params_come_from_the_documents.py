@@ -351,3 +351,42 @@ def test_a_document_width_the_netlist_contradicts_is_refused(tmp_path):
     assert "PORT_WIDTH_CONTRADICTS_DOCUMENT" in out
     assert "declare 9 bit(s)" in out and "declares 10" in out
     assert not (proj / "phase3/stage3/pnr/chip_top_io.v").exists()
+
+
+# --------------------------------------------------------------------------- #
+# the _NOT_PROSE claims (prose_polarity_consulted_check) are falsifiable
+# --------------------------------------------------------------------------- #
+def test_not_prose_an_unreadable_expression_invents_no_width(tmp_path):
+    """`_NOT_PROSE["reused_ip_param_derive::derive"]`."""
+    top = TOP_V.replace("$clog2(memsize)", "vendor_log(memsize)")
+    rec = D.derive(_project(tmp_path, top_v=top))
+    assert rec["resolved"]["aw"] is None
+    assert not any(f["rule"] == "DOC_IP_PARAMETER_CONTRADICTION"
+                   for f in rec["findings"])
+
+
+def test_not_prose_apply_never_inserts_a_parameter(tmp_path):
+    """`_NOT_PROSE["reused_ip_param_derive::apply_overrides"]`."""
+    p = _project(tmp_path)
+    before = (p / "phase2/stage1/rtl/widget.v").read_text()
+    rec = dict(D.derive(p), overrides={"DEPTH": 64})
+    with pytest.raises(ValueError, match="no default for parameter DEPTH"):
+        D.apply_overrides(p, rec)
+    assert (p / "phase2/stage1/rtl/widget.v").read_text() == before
+
+
+def test_not_prose_a_non_literal_netlist_range_changes_no_width(tmp_path,
+                                                               monkeypatch):
+    """`_NOT_PROSE["io_pad_chip_top_gen::_reconcile_port_widths"]`."""
+    import io_pad_chip_top_gen as G
+    import phase3_one_shot_runner as R
+    p = tmp_path / "p"
+    (p / "phase1/generated_docs").mkdir(parents=True)
+    (p / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").write_text(
+        json.dumps({"top_module": "core"}))
+    nl = p / "core_synth.v"
+    nl.write_text("module core(o_w);\n  output [W-1:0] o_w;\nendmodule\n")
+    monkeypatch.setattr(R, "pnr_input_netlist", lambda proj, c: (nl, "t", False))
+    port = _port("o_w", "output", 9, True, doc=False)
+    out, notes = G._reconcile_port_widths(p, [port])
+    assert out == [port] and notes == []
