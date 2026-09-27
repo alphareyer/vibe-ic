@@ -1546,8 +1546,13 @@ def _dir_consumers(plugin_root: Path, changed_sources: list[str],
 # hand-over half is what says the sweep is pointed at THIS tree: measured on
 # 06d137c57 it keeps 102 files, the absence test among them.
 #
-# Applies in EVERY mode and uncapped, on rule 8's argument: no other rule sees
-# this population at all.
+# "Depends on" is the REQUESTED mode's own dependency notion, as in the third
+# hop: rule 1 ownership always, plus rule 5 import/loader edges in import-edge
+# mode, which is what the landing selection (`tools/ci/trusted_test_selection.py`)
+# runs. So this rule never selects more than editing the sweeping program itself
+# would in that mode. Uncapped, on rule 8's argument. In ownership mode it
+# reaches only sweep tests named after their program; the absence test loads its
+# checker under another name and is reached in import-edge mode.
 #
 # Not reached, deliberately: a test that runs a sweep with the program's OWN
 # default root (`P.main([])`) hands over nothing, so no directory is named and
@@ -1645,7 +1650,11 @@ def _sweep_consumers(plugin_root: Path, changed_sources: list[str],
                      source_stems: set[str],
                      edge_index: dict[str, set[str]] | None = None) -> set[str]:
     """Rule 8b: tests that hand a changed file's directory to a program that
-    globs it. See the block above for the measurement and both halves."""
+    globs it. See the block above for the measurement and both halves.
+
+    ``edge_index`` is the rule 5 index in import-edge mode and None otherwise;
+    with None only rule 1 ownership counts as a dependency.
+    """
     if not changed_sources:
         return set()
     root = plugin_root.resolve()
@@ -1673,8 +1682,7 @@ def _sweep_consumers(plugin_root: Path, changed_sources: list[str],
                         ((root / src).parent, "rglob" in hits))
     if not sweepers:
         return set()
-    if edge_index is None:
-        edge_index = _build_import_edge_index(plugin_root, source_stems)
+    edge_index = edge_index or {}
     owned = _build_test_index(plugin_root, source_stems)
     handed_cache: dict[str, set[Path]] = {}
     out: set[str] = set()

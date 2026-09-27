@@ -63,19 +63,19 @@ _LOAD = (
 
 
 def _changed(root: Path, *rels: str) -> list[str]:
-    return SEL.select_tests(list(rels), root, "", mode=SEL.MODE_OWNERSHIP)
+    return SEL.select_tests(list(rels), root, "", mode=SEL.MODE_IMPORT_EDGE)
 
 
 def test_the_absence_test_comes_with_any_changed_program():
     """The regression itself, on the real tree: a change to a program the test
-    never names must still select it, in the default AND the landing mode."""
+    never names must select it in the mode the landing runs
+    (`tools/ci/trusted_test_selection.py` passes import-edge)."""
     assert (_PLUGIN / _ABSENCE).is_file()
     unrelated = sorted(p for p in (_PLUGIN / "programs").glob("*.py")
                        if "absence" not in p.name)[0]
     changed = [f"{_PREFIX}/programs/{unrelated.name}"]
-    for mode in (SEL.MODE_OWNERSHIP, SEL.MODE_IMPORT_EDGE):
-        sel = SEL.select_tests(changed, _PLUGIN, _PREFIX, mode=mode)
-        assert _ABSENCE in sel, (mode, unrelated.name, len(sel))
+    sel = SEL.select_tests(changed, _PLUGIN, _PREFIX, mode=SEL.MODE_IMPORT_EDGE)
+    assert _ABSENCE in sel, (unrelated.name, len(sel))
 
 
 def test_a_test_handing_the_directory_to_a_sweeper_is_selected(tmp_path):
@@ -136,3 +136,17 @@ def test_a_pattern_that_does_not_match_the_change_selects_nothing(tmp_path):
     (root / "programs" / "notes.json").write_text("{}\n")
     assert "programs/tests/test_sweeps.py" not in _changed(root, "programs/notes.json")
     assert "programs/tests/test_sweeps.py" in _changed(root, "programs/new_program.py")
+
+
+def test_ownership_mode_counts_only_owned_dependents(tmp_path):
+    """The cheap lane keeps its own notion of "depends on": a sweep test named
+    after its program comes, one that only loads the program does not."""
+    body = "\n\ndef test_it():\n    assert S.scan(PROGRAMS)\n"
+    root = _fake_plugin(tmp_path, {
+        "test_sweeper.py": _LOAD.format(stem="sweeper") + body,
+        "test_loads_sweeper.py": _LOAD.format(stem="sweeper") + body,
+    })
+    sel = SEL.select_tests(["programs/new_program.py"], root, "",
+                           mode=SEL.MODE_OWNERSHIP)
+    assert "programs/tests/test_sweeper.py" in sel
+    assert "programs/tests/test_loads_sweeper.py" not in sel
