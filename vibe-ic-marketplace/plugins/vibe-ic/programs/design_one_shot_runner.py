@@ -154,6 +154,7 @@ import agent_report_presence_check as _agent_report_presence
 import eda_log_check as _eda_log
 import spec_declaration_emit as _decl  # the spec's FREE-CHOICE declaration contract
 import _runner_lock  # ORGANIC #588 — single-driver lock (all 4 runners)
+import _impl_flow  # llv1: the --librelane mode record
 import canonical_run_admission as _canonical_admission
 import rtl_provenance as _rtl_prov  # authored-RTL guard for phase2/stage1/rtl/
 import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch site
@@ -569,7 +570,7 @@ def _rtl_repair_remediate_with_hint(project: Path,
         return False, (f"phase1_one_shot_runner not found at "
                        f"{phase1}; cannot remediate")
     cmd = [sys.executable, str(phase1), str(project),
-           "--skip-text-extract"]
+           "--skip-text-extract", *_impl_flow.child_argv(project)]
     try:
         r = _pr.run(cmd, capture_output=True, text=True)
         ok = r.returncode in (0, 1)  # 0 = clean, 1 = strict warn
@@ -2045,7 +2046,8 @@ def step_phase1(project: Path) -> StepResult:
         return StepResult("phase1", "FAIL",
                           time.time() - t0,
                           f"phase1 runner missing: {runner}")
-    rc, out, err = _run(["python3", str(runner), str(project)],
+    rc, out, err = _run(["python3", str(runner), str(project),
+                         *_impl_flow.child_argv(project)],
                         timeout=600)
     L_files = list(gd.glob("L*.json")) if gd.is_dir() else []
     if rc == 0 and len(L_files) >= 13:
@@ -18768,7 +18770,8 @@ def step_phase3(project: Path, top_name: str,
                           f"phase3 runner missing: {runner}")
     rc, out, err = _run(["python3", str(runner), str(project),
                          "--top-name", top_name,
-                         "--container", container],
+                         "--container", container,
+                         *_impl_flow.child_argv(project)],
                         timeout=7200)
     summary_json = _pl.report_path(project, "phase3_one_shot.json")
     detail_obj: Dict[str, Any] = {}
@@ -23468,6 +23471,7 @@ def main() -> int:
                         "For the operator who wants the roll-ups rebuilt after "
                         "one or more bounded runs. REFUSES together with a "
                         "window: a refresh of the whole flow has no window.")
+    _impl_flow.add_cli_flags(p)
     args = p.parse_args()
 
     global _FORCE_RTL_REGEN
@@ -23477,6 +23481,12 @@ def main() -> int:
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
+    # --librelane (llv1 W1): resolve the implementation-flow mode, or refuse
+    # it by name, before anything is locked or written. Read-only.
+    _impl_rc = _impl_flow.gate_or_exit(project, args, runner='design_one_shot_runner',
+                                       parser=p)
+    if _impl_rc is not None:
+        return _impl_rc
 
     # ── A DECLARED WINDOW IS A DECLARED PROOF BURDEN (R-0924-1) ─────────────
     # The owner's ask: when a gate is wrong, re-run THAT step -- only it.
