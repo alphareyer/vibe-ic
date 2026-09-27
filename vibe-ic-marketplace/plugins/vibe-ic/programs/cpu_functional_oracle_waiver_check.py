@@ -23,6 +23,11 @@ Verdicts / exit codes (chip-AGNOSTIC — project artifacts only):
   2 = VACUOUS: no sim/results.xml at all — nothing for this gate to assess
       (the absence is the standard missing-file FAIL the files_exist gate
       reports; this gate stays out of the way).
+      OR NOT_MEASURED [EXTERNAL] (FX_P2): every case that could run ran and
+      passed, and some declared case could not run because the design input
+      supplies no stimulus for it (`testbench_gen.case_input_gap`). The JSON
+      report says verdict NOT_MEASURED, reason_class EXTERNAL, and names each
+      case and what is missing. Never a PASS, never a FAIL.
   1 = INCOMPLETE when a substantiated connectivity-only run exists without a
       real professional/oracle result; FAIL when the bridge evidence is forged
       or broken. Both are blocking and neither is a waiver.
@@ -40,6 +45,7 @@ import _path_layout as _pl  # noqa: E402
 import _sim_results_bridge as _srb  # noqa: E402
 import _l10_execution as _l10x  # R-0915-87(2): the ONE execution reader  # noqa: E402
 import l10_coverage_goal_classify as _cgc  # R-0915-113(4)  # noqa: E402
+import testbench_gen as _tbg  # who owns a case that did not run  # noqa: E402
 
 # The capability-gap token retained on a connectivity-PASS evidence record.
 # A chip-AGNOSTIC capability identifier, NOT a chip/vendor/SKU literal.
@@ -425,6 +431,31 @@ def _declared_l10_case_ids(project: Path) -> "list[str]":
     return out
 
 
+def _l10_rows_by_name(project: Path) -> dict:
+    """Every declared L10 row keyed by its name, for asking WHY one did not run."""
+    out: dict = {}
+    for row in _declared_rows(_pl.generated_docs_dir(project)
+                              / "L10_TEST_CASES.json",
+                              ("test_cases", "cases", "vectors")):
+        if isinstance(row, dict):
+            name = row.get("name") or row.get("id") or row.get("case")
+            if name:
+                out[str(name)] = row
+    return out
+
+
+def _input_gap(project: Path, row: "dict | None",
+               ic_class: "str | None") -> "dict | None":
+    """`testbench_gen.case_input_gap`, never raising: an unanswerable question
+    keeps the case where it was (blocking), it never moves it out."""
+    if not isinstance(row, dict):
+        return None
+    try:
+        return _tbg.case_input_gap(project, row, ic_class)
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
 def _oracles_that_actually_ran(project: Path) -> dict:
     """Which declared L10 cases EXECUTED their oracle, by name.
 
@@ -462,10 +493,27 @@ def _oracles_that_actually_ran(project: Path) -> dict:
     record = _l10x.load_record(project)
     executed: list = []
     not_executed: list = []
+    # FX_P2 — a case that did NOT run because the design INPUT supplies no
+    # stimulus for it is not this flow's failure and not the design's: it is
+    # NOT_MEASURED, named, with what is missing. Decided by
+    # `testbench_gen.case_input_gap` (delivery + the producer's own oracle
+    # families), never here. A case that RAN keeps its verdict (a FAIL stays
+    # a FAIL), and one this flow could have run stays blocking.
+    input_not_supplied: list = []
+    rows = _l10_rows_by_name(project) if declared else {}
+    ic_class = _tbg._detect_ic_class(project) if declared else None
     for case_id in declared:
         state, why = _l10x.case_state(case_id, record)
         if state == _l10x.PASS:
             executed.append(case_id)
+            continue
+        gap = (_input_gap(project, rows.get(case_id), ic_class)
+               if state == _l10x.NOT_EXECUTED else None)
+        if gap is not None:
+            input_not_supplied.append({"case": case_id, "state": state,
+                                       "why": gap["reason"],
+                                       "missing_from_input":
+                                           gap["missing_from_input"]})
         else:
             not_executed.append({"case": case_id, "state": state, "why": why})
     return {
@@ -475,6 +523,8 @@ def _oracles_that_actually_ran(project: Path) -> dict:
         "executed_count": len(executed),
         "not_executed": not_executed,
         "not_executed_count": len(not_executed),
+        "input_not_supplied": input_not_supplied,
+        "input_not_supplied_count": len(input_not_supplied),
         "record_available": bool(record.get("available")),
         "record_reason": record.get("reason"),
         "asked_through": "_l10_execution.case_state",
@@ -562,6 +612,30 @@ def _coverage_goal_summary(project: Path) -> dict:
     totals, source = _coverage_totals(project)
     summary = _cgc.measure_goals(goals, totals)
     summary["totals_source"] = source
+    # FX_P2 — a goal whose dimension IS instrumented, but which no executed
+    # program could feed because the design input delivers none, is the
+    # input's gap: NOT_MEASURED by name, not a refusal. A goal the flow cannot
+    # bind, and one measured short of its percentage, are unchanged.
+    by_name = {str(g.get("name") or g.get("id") or ""): g for g in goals
+               if isinstance(g, dict)}
+    ic_class = _tbg._detect_ic_class(project) if goals else None
+    kept, gaps = [], []
+    for r in summary.get("rows") or []:
+        gap = None
+        if (r.get("verdict") == _cgc.NOT_MEASURED and r.get("dimension")
+                and r.get("achieved_pct") is None):
+            gap = _input_gap(project, by_name.get(r.get("case")), ic_class)
+        if gap is not None:
+            gaps.append(dict(r, why=gap["reason"],
+                             missing_from_input=gap["missing_from_input"]))
+        else:
+            kept.append(r)
+    if gaps:
+        summary["rows"] = kept
+        summary["declared_count"] = len(kept)
+        summary["not_measured_count"] = sum(
+            1 for r in kept if r["verdict"] == _cgc.NOT_MEASURED)
+    summary["input_not_supplied"] = gaps
     return summary
 
 
@@ -614,7 +688,45 @@ def _oracle_execution_refusal(project: Path, transcript: str) -> "str | None":
         + ("" if ran["record_available"]
            else f"; execution record unavailable ({ran['record_reason']})")
         + (f". Separately, {goal_refusal}" if goal_refusal else "")
+        + (f". Not counted above: {_input_gap_sentence(ran['input_not_supplied'])}"
+           if ran.get("input_not_supplied") else "")
     )
+
+
+#: FX_P2 — the gate's one NOT_MEASURED outcome. The flow's reason taxonomy
+#: calls "something outside the run must supply it" EXTERNAL, which a step
+#: reads as `NOT_MEASURED(input_absent)` (`verdict._GATE_REASON_TO_STEP_REASON`).
+INPUT_GAP_REASON_CLASS = "EXTERNAL"
+NOT_MEASURED_PREFIX = "NOT_MEASURED [EXTERNAL]:"
+
+
+def _input_gaps(project: Path) -> list:
+    """Every declared case and goal that did not run because the design input
+    supplies no stimulus for it — each with its reason and what is missing."""
+    ran = _oracles_that_actually_ran(project)
+    goals = _coverage_goal_summary(project)
+    return (list(ran.get("input_not_supplied") or [])
+            + list(goals.get("input_not_supplied") or []))
+
+
+def _input_gap_sentence(gaps: list) -> str:
+    named = "; ".join(g["why"] for g in gaps[:4])
+    more = len(gaps) - 4
+    return (f"{len(gaps)} declared L10 case(s)/goal(s) could not run because "
+            f"the design input does not supply their stimulus: {named}"
+            + (f" (+{more} more)" if more > 0 else ""))
+
+
+def _not_measured_on_input(project: Path, passed_because: str
+                           ) -> "tuple[int, str] | None":
+    """(2, NOT_MEASURED …) when every case that COULD run ran and passed but
+    some declared case could not run for want of input; None otherwise."""
+    gaps = _input_gaps(project)
+    if not gaps:
+        return None
+    return 2, (f"{NOT_MEASURED_PREFIX} {passed_because}; but "
+               f"{_input_gap_sentence(gaps)}. Not a FAIL (nothing ran and "
+               f"failed) and not a PASS (those cases are unverified).")
 
 
 def _evidence_summary(project: Path) -> dict:
@@ -800,6 +912,11 @@ def _evaluate(project: Path) -> "tuple[int, str]":
             return 1, (
                 "FAIL: connectivity-PASS record asserts "
                 f"functional_verified=true and {_refusal}.")
+        _nm_input = _not_measured_on_input(
+            project, f"every case that could run executed and passed "
+                     f"({shown['rel_path']})")
+        if _nm_input:
+            return _nm_input
         return 0, (
             "PASS: the record's functional_verified=true is SUBSTANTIATED by "
             f"{shown['rel_path']}: tests={shown['tests']} "
@@ -850,6 +967,11 @@ def _evaluate(project: Path) -> "tuple[int, str]":
                 f"the {CAP_CPU_FUNCTIONAL_ORACLE} capability record — "
                 f"{_refusal}. No waiver is granted and Step 4 is NOT a "
                 "functional PASS.")
+        _nm_input = _not_measured_on_input(
+            project, f"every case that could run executed and passed "
+                     f"({';'.join(pro['rel_paths'])})")
+        if _nm_input:
+            return _nm_input
         return 0, (
             "PASS: functional verification ACHIEVED by the professional-TB "
             "result slot (producer: "
@@ -919,7 +1041,13 @@ def main(argv: "list[str] | None" = None) -> int:
         verdict = ({0: "PASS", 2: "VACUOUS_PASS"}.get(code)
                    or ("INCOMPLETE" if msg.startswith("INCOMPLETE:")
                        else "FAIL"))
+        extra: dict = {}
+        if code == 2 and msg.startswith(NOT_MEASURED_PREFIX):
+            verdict = "NOT_MEASURED"
+            extra = {"reason_class": INPUT_GAP_REASON_CLASS,
+                     "input_not_supplied": _input_gaps(project)}
         out = {"verdict": verdict, "exit_code": code, "message": msg,
+               **extra,
                "capability_gap": CAP_CPU_FUNCTIONAL_ORACLE,
                "gate": "cpu_functional_oracle_waiver_check",
                "enforcement": "BLOCKING",
