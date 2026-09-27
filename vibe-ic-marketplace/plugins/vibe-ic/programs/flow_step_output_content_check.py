@@ -19,7 +19,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _path_layout as _pl  # noqa: E402
 import p0_tool_frontend_check as _rtl_frontend
+
+
+#: Where the rtl mode keeps the front end's record and the tools' whole
+#: transcripts, so a refusal cites the tool's own words (path + sha256).
+RTL_RECORD = "phase2/lint/rtl_content_check.json"
 
 
 def _rtl_errors(project: Path) -> tuple[list[str], dict | None]:
@@ -32,8 +38,33 @@ def _rtl_errors(project: Path) -> tuple[list[str], dict | None]:
         return errors, None
     # No image is resolved here: the front end resolves one only if a tool
     # has to run in docker (a tool on PATH, e.g. in-image, needs none).
-    verdict = _rtl_frontend.check(project)
+    record = _pl.report_path(project, RTL_RECORD)
+    verdict = _rtl_frontend.check(project, log_dir=record.parent / "rtl_frontend")
+    try:
+        from _atomic_artefact import write_json
+        record.parent.mkdir(parents=True, exist_ok=True)
+        write_json(record, {k: v for k, v in verdict.items()})
+    except OSError:
+        pass
     return list(verdict["findings"]), verdict
+
+
+def _tool_disclosure(project: Path, frontend: dict | None) -> list[str]:
+    """What a refused rtl check must say: each failing tool's exit code, its
+    whole transcript (path + sha256) and its own first error lines."""
+    lines: list[str] = []
+    for name, row in ((frontend or {}).get("tools") or {}).items():
+        if not row.get("exit_code") and not row.get("errors"):
+            continue
+        log = row.get("log")
+        try:
+            log = str(Path(log).relative_to(project.resolve())) if log else None
+        except ValueError:
+            pass
+        lines.append(f"  {name}: exit {row.get('exit_code')}"
+                     + (f"; transcript {log} {row.get('log_sha256')}" if log else ""))
+        lines += [f"    {e}" for e in row.get("errors") or []]
+    return lines
 
 
 def check(project: Path, mode: str) -> list[str]:
@@ -104,9 +135,14 @@ def main() -> int:
     else:
         errors = check(args.project, args.mode)
         frontend = None
+    if frontend is not None and frontend.get("not_measured"):
+        print(f"NOT_MEASURED: {frontend['not_measured']}")
+        return 2
     for error in errors:
         print("FAIL:", error)
     if errors:
+        for line in _tool_disclosure(args.project, frontend):
+            print(line)
         return 1
     print(f"PASS: {args.mode} output content")
     if frontend is not None:

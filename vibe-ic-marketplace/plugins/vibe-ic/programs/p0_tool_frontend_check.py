@@ -97,6 +97,19 @@ def _route_image(tool: str, image: str | None) -> str | None:
     return image or default_image()
 
 
+#: Every tool run has a deadline (owner ruling). A lint or an elaboration of
+#: a whole design is minutes, not hours; past this the run measured nothing.
+TOOL_DEADLINE_S = 1800
+
+#: How many of a failing tool's own error lines a record carries inline. The
+#: whole transcript is written beside the record and cited by sha256.
+ERROR_EXCERPT_LINES = 20
+
+
+class ToolDeadline(RuntimeError):
+    """A tool ran past `TOOL_DEADLINE_S`: nothing was measured."""
+
+
 def _invoke(tool: str, args: list[str], project: Path,
             image: str | None) -> subprocess.CompletedProcess[str]:
     if shutil.which(tool):
@@ -112,14 +125,47 @@ def _invoke(tool: str, args: list[str], project: Path,
                    image, *args]
     else:
         raise FileNotFoundError(f"{tool} and docker unavailable")
-    return subprocess.run(command, cwd=project, capture_output=True,
-                          text=True, check=False)
+    try:
+        return subprocess.run(command, cwd=project, capture_output=True,
+                              text=True, check=False, timeout=TOOL_DEADLINE_S)
+    except subprocess.TimeoutExpired as exc:
+        raise ToolDeadline(f"{tool} ran past its {TOOL_DEADLINE_S} s deadline") from exc
 
 
-def check(project: Path, image: str | None = None) -> dict:
+def _error_lines(log: str) -> list[str]:
+    """The tool's OWN error lines, verbatim, first `ERROR_EXCERPT_LINES`:
+    Verilator's ``%Error`` and Yosys's ``ERROR:`` prefixes. A disclosure, not
+    a verdict: the verdict is the exit code and the calibrated codes."""
+    return [line for line in log.splitlines()
+            if line.startswith(("%Error", "ERROR:"))][:ERROR_EXCERPT_LINES]
+
+
+def _keep_log(log_dir: Path | None, name: str, log: str) -> dict:
+    """Write one tool's whole transcript to `log_dir` and cite it by sha256."""
+    if log_dir is None:
+        return {}
+    import hashlib
+    from _atomic_artefact import write_text
+    path = Path(log_dir) / f"{name}.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_text(path, log)
+    return {"log": str(path), "log_sha256": "sha256:" + hashlib.sha256(
+        path.read_bytes()).hexdigest()}
+
+
+def check(project: Path, image: str | None = None,
+          log_dir: Path | None = None) -> dict:
     """`image` is the declared one (`--image`); None resolves it only if a
-    tool actually has to run in docker."""
-    files = rtl_source_files(project)
+    tool actually has to run in docker. With `log_dir`, each tool's whole
+    transcript is written there and cited (path + sha256) in its record."""
+    # READ ORDER: packages in dependency order ahead of the RTL that uses
+    # them. Verilator elaborates in ONE pass, so a file that names a package
+    # type before the package is parsed fails "Reference to <type> before
+    # declaration" (IEEE 1800-2023 6.18) however correct the design is;
+    # read_slang --single-unit is order-tolerant, which is why Yosys passed
+    # the same set. The shared rule, not a second one (#682).
+    from rtl_transitive_cone import topological_package_first
+    files = topological_package_first(rtl_source_files(project))
     result = {"program": "p0_tool_frontend_check", "passed": False,
               "sources": [str(p.relative_to(project)) for p in files],
               "tools": {}, "findings": []}
@@ -157,9 +203,16 @@ def check(project: Path, image: str | None = None) -> dict:
     except (FileNotFoundError, OSError) as exc:
         result["findings"].append(f"tool invocation unavailable: {exc}")
         return result
+    except ToolDeadline as exc:
+        result["not_measured"] = str(exc)
+        result["findings"].append(f"NOT_MEASURED: {exc}")
+        return result
+    yosys_log = yosys.stdout + yosys.stderr
     result["tools"]["Yosys.JsonHeader"] = {"exit_code": yosys.returncode,
                                                "execution": "host" if shutil.which("yosys") else yosys_image,
-                                               "output": (yosys.stdout + yosys.stderr)[-8000:]}
+                                               "errors": _error_lines(yosys_log),
+                                               **_keep_log(log_dir, "yosys_jsonheader", yosys_log),
+                                               "output": yosys_log[-8000:]}
     lint_log = verilator.stdout + verilator.stderr
     try:
         diagnostics = _diagnostic_codes(lint_log)
@@ -169,6 +222,8 @@ def check(project: Path, image: str | None = None) -> dict:
     result["tools"]["Verilator.Lint"] = {"exit_code": verilator.returncode,
                                             "execution": "host" if shutil.which("verilator") else verilator_image,
                                             "diagnostics": diagnostics,
+                                            "errors": _error_lines(lint_log),
+                                            **_keep_log(log_dir, "verilator_lint", lint_log),
                                             "output": lint_log[-8000:]}
     if yosys.returncode:
         result["findings"].append("Yosys elaboration failed")
@@ -192,6 +247,8 @@ def main() -> int:
         return 2
     result = check(args.project.resolve(), args.image)
     print(json.dumps(result, sort_keys=True))
+    if result.get("not_measured"):
+        return 2
     return 0 if result["passed"] else 1
 
 
