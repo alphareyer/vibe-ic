@@ -218,17 +218,21 @@ def _supplied_ip_sources(project: Path) -> dict[str, str]:
         mf = _l9.load_source_manifest(project) or {}
     except Exception:                                        # noqa: BLE001
         mf = {}
-    rtl = {p.name: p for p in rtl_source_files(project)}
+    names: dict[str, list[Path]] = {}
+    for path in rtl_source_files(project):
+        names.setdefault(path.name, []).append(path)
     for rel in mf.get("staged_from_input") or []:
         if not isinstance(rel, str):
             continue
         src = project / rel
-        dst = rtl.get(Path(rel).name)
-        if dst is None or not src.is_file():
+        if not src.is_file():
             continue
-        digest = _sha256(dst)
-        if digest is not None and digest == _sha256(src):
-            out[str(dst.resolve())] = f"staged_from_input {rel}"
+        want = _sha256(src)
+        # Every RTL file with that leaf whose BYTES are the input's is that
+        # input's content; one the plugin edited, or wrote, is not.
+        for dst in names.get(Path(rel).name, []):
+            if want is not None and _sha256(dst) == want:
+                out[str(dst.resolve())] = f"staged_from_input {rel}"
     prov = project / "provenance.jsonl"
     try:
         lines = prov.read_text(errors="replace").splitlines() \
