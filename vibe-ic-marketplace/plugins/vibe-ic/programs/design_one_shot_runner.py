@@ -11397,9 +11397,24 @@ _TB_FRONTEND_DECL_RELAXED = "iverilog_g2012_decl_relaxed"
 _DECL_RELAXED_NOTE = "[iverilog declaration order relaxed"
 
 
+#: Icarus's own words on each side of the relaxation, as the image's Icarus
+#: (s20260301-570-gcf82c3ec5) prints them: the STRICT refusal ends its
+#: bind error with the declaration hint; the RELAXED compile warns, once per
+#: binding it moved, "<file>:<n>: warning: net/variable `x` used before
+#: declaration." (or "parameter `W` ..."). Neither can come from a timeout,
+#: a docker failure or a genuinely undeclared name.
+_ICARUS_STRICT_DECL_HINT = "Check for declaration after use"
+_ICARUS_RELAXED_DECL_WARNING = re.compile(
+    r"warning: [\w/ ]+ `[^`\n]+` used before declaration")
+#: rc that say the strict attempt did not RUN to a verdict: `_run`'s
+#: deadline (124), docker / shell dispatch failures (125, 126, 127) and a
+#: killed process (137 SIGKILL, 143 SIGTERM).
+_STRICT_ATTEMPT_DID_NOT_JUDGE_RC = frozenset({124, 125, 126, 127, 137, 143})
+
+
 def _iverilog_decl_relaxed_retry(
         base_cmd: List[str], rc: int, out: str, err: str,
-        run_dir: Path, container: str,
+        run_dir: Path, container: str, project: Optional[Path] = None,
         ) -> Optional[Tuple[int, str, str, str]]:
     """D3 — retry a REFUSED default compile once with Icarus's documented
     declaration-order opt-out, and say so. Returns None when the retry does
@@ -11424,19 +11439,40 @@ def _iverilog_decl_relaxed_retry(
     tagged `iverilog_g2012_decl_relaxed` and disclosed in the transcript. It
     is not an Icarus bug and not a design defect; it is a portability finding.
 
-    WHY OBSERVABLE, NOT WORDING. The flag changes only how a later-declared
-    net / variable / parameter binds; it creates no implicit net. So "the
-    relaxed compile succeeds" is itself the proof that declaration order was
-    the only obstacle: a genuinely undeclared identifier, a missing module or
-    a syntax error still refuses, and an Icarus that predates the flag
-    rejects the unknown -g option (rc 255) — both fall through unchanged.
+    WHY OBSERVABLE. The flag changes only how a later-declared net /
+    variable / parameter binds; it creates no implicit net. A genuinely
+    undeclared identifier, a missing module or a syntax error still refuses,
+    and an Icarus that predates the flag rejects the unknown -g option
+    (rc 255) — all fall through unchanged. The retry is ACCEPTED only when
+    Icarus itself shows the relaxation moved a binding: the strict refusal
+    carries its declaration-after-use hint AND the relaxed compile carries
+    its "used before declaration" warning (MEASURED, see the constants
+    above). A relaxed success without that warning proves nothing about
+    declaration order and keeps the original result.
     Same simulator (4-state), same dispatch (`_run_iverilog_stage`, so the
     #902 provenance record), same .vvp, and the TB's completion marker still
     decides the verdict: a functional FAIL stays a FAIL. Skipped when the
-    compiler was not found (#1394). chip-AGNOSTIC."""
+    compiler was not found (#1394), when the strict attempt timed out or
+    failed to dispatch, and for any project that is not REUSED IP
+    (`_is_reused_ip_project`). chip-AGNOSTIC."""
     if not base_cmd or os.path.basename(str(base_cmd[0])) != "iverilog":
         return None
+    # REUSED IP ONLY. "Cannot edit, so book the portability finding" holds
+    # only for upstream-validated vendor RTL. Plugin-authored RTL that uses a
+    # name before declaring it is an IEEE 1800 violation commercial
+    # simulators refuse, and this strict compile is the one place the flow
+    # catches it: it stays a FAIL and goes to rtl_repair, which CAN edit it.
+    if project is None or not _is_reused_ip_project(project):
+        return None
     if _compiler_was_not_found(rc, out, err):
+        return None
+    # The strict attempt must have JUDGED, and judged declaration order: not
+    # a deadline, not a dispatch failure (one run is the verdict — a retry
+    # must never launder an environment failure green), and its own output
+    # carries Icarus's declaration-after-use hint.
+    if rc in _STRICT_ATTEMPT_DID_NOT_JUDGE_RC:
+        return None
+    if _ICARUS_STRICT_DECL_HINT not in f"{out or ''}\n{err or ''}":
         return None
     if any(str(t).startswith("-gno-strict") for t in base_cmd):
         return None
@@ -11444,6 +11480,12 @@ def _iverilog_decl_relaxed_retry(
     rc_r, out_r, err_r = _run_iverilog_stage(relaxed, run_dir, container,
                                              timeout=120)
     if rc_r != 0:
+        return None
+    # The observable proof that the relaxation changed a binding: Icarus
+    # warns for each name it bound to a later declaration. A relaxed compile
+    # that succeeds WITHOUT it did not succeed because of the flag, so it
+    # proves nothing about declaration order; keep the original result.
+    if not _ICARUS_RELAXED_DECL_WARNING.search(f"{out_r or ''}\n{err_r or ''}"):
         return None
     note = (f"{_DECL_RELAXED_NOTE} ({_ICARUS_DECL_RELAX_FLAG}): the strict "
             f"compile refused (rc={rc}) and the relaxed one compiled, so "
@@ -11474,6 +11516,7 @@ def _tb_compile_failure_label(tb_frontend: str) -> str:
 def _iverilog_compile_with_sv_fallback(
         base_cmd: List[str], rtl_files: List[Path], tb_path: Path,
         run_dir: Path, container: str, top_name: str,
+        project: Optional[Path] = None,
         ) -> Tuple[int, str, str, str]:
     """Compile a TB+RTL set with iverilog, falling through to an sv2v
     pre-pass in the container on a SystemVerilog-construct failure.
@@ -11484,10 +11527,10 @@ def _iverilog_compile_with_sv_fallback(
 
     Returns (rc, out, err, frontend). `frontend` is one of
     'iverilog_g2012' (default, including the unchanged failure case),
-    'iverilog_g2012_decl_relaxed' (D3: only declaration order refused; see
-    `_iverilog_decl_relaxed_retry`) or 'iverilog_sv2v'. Honesty preserved:
-    a genuine RTL defect that the SV frontend also rejects keeps rc != 0 and
-    'iverilog_g2012'.
+    'iverilog_g2012_decl_relaxed' (D3: only declaration order refused, on a
+    REUSED-IP `project`; see `_iverilog_decl_relaxed_retry`) or
+    'iverilog_sv2v'. Honesty preserved: a genuine RTL defect that the SV
+    frontend also rejects keeps rc != 0 and 'iverilog_g2012'.
 
     The DEFAULT attempt runs where iverilog actually is: on the host when the
     host has it, else dispatched INTO `container` (the canonical containerised
@@ -11497,7 +11540,7 @@ def _iverilog_compile_with_sv_fallback(
     if rc == 0:
         return rc, out, err, "iverilog_g2012"
     relaxed = _iverilog_decl_relaxed_retry(base_cmd, rc, out, err,
-                                           run_dir, container)
+                                           run_dir, container, project)
     if relaxed is not None:
         return relaxed
 
@@ -12730,27 +12773,6 @@ def _persist_oracle_calibrated_framing(project: Path, log_text: str) -> None:
         return
 
 
-def _reused_ip_sv_subset_refusal(project: Path, out: str, err: str) -> bool:
-    """GAP-E2E-5, shared — is this reference-TB compile refusal the OSS
-    simulator's language subset meeting upstream-validated REUSED-IP, rather
-    than a defect in the design?
-
-    True only when BOTH hold: (a) the refusal carries a genuine SV-construct /
-    syntax signature (`IVERILOG_SV_ERROR_SIGNATURES`; a missing module or port
-    is not in that set and stays a defect), and (b) the project is REUSED-IP
-    (SOURCE_MANIFEST reused_ip:true). An AUTHORED RTL never qualifies.
-
-    D3 — ONE predicate for every reference-TB site. It used to be spelled only
-    inside `_run_oracle_tb`, so on the same reused-IP project the same Icarus
-    stderr was a disclosed waive when an oracle TB existed and a hard FAIL
-    ("real structural defect") when it did not — the verdict depended on
-    which TB happened to be on disk, not on the refusal. Each site still maps
-    a True onto its OWN not-a-defect outcome, never above what a successful
-    run there would earn. chip-AGNOSTIC."""
-    return (any(s in (out + err) for s in _sf.IVERILOG_SV_ERROR_SIGNATURES)
-            and _is_reused_ip_project(project))
-
-
 def _run_oracle_tb(project: Path, top_name: str, tb_path: Path,
                    track_reason: str, t0: float,
                    container: str) -> Optional[StepResult]:
@@ -12773,7 +12795,8 @@ def _run_oracle_tb(project: Path, top_name: str, tb_path: Path,
     cmd = ["iverilog", "-g2012", "-DSIMULATION", "-o", str(vvp),
            str(tb_path)] + [str(p) for p in rtl_files]
     rc, out, err, tb_frontend = _iverilog_compile_with_sv_fallback(
-        cmd, rtl_files, tb_path, run_dir, container, top_name)
+        cmd, rtl_files, tb_path, run_dir, container, top_name,
+        project=project)
     if rc != 0 and _compiler_was_not_found(rc, out, err):
         # vibe-ic#1394 residual — the SAME absent-compiler defect #1398 fixed
         # at the generic full-stack site, still live here. This site is
@@ -12812,8 +12835,10 @@ def _run_oracle_tb(project: Path, top_name: str, tb_path: Path,
         # "any .sv input failed" arm, which would ALSO waive a real missing-module
         # / dropped-file defect (iverilog "Unknown module type: <child>" is NOT in
         # the signature set, so such a defect correctly stays a hard FAIL).
+        _sv_subset = any(s in (out + err)
+                         for s in _sf.IVERILOG_SV_ERROR_SIGNATURES)
         _sv_reason = "iverilog/sv2v SV-subset parse signature"
-        if _reused_ip_sv_subset_refusal(project, out, err):
+        if _sv_subset and _is_reused_ip_project(project):
             return StepResult(
                 "reference_tb", "PASS_WITH_WAIVERS", time.time() - t0,
                 (f"per-IC oracle TB ({tb_path.name}) compile blocked by an SV "
@@ -13019,7 +13044,8 @@ def _reference_tb_generic_full_stack(project: Path, top_name: str,
         # before declaring a defect. Honesty preserved: a genuine RTL bug
         # the SV frontend also rejects still FAILs.
         rc, out, err, tb_frontend = _iverilog_compile_with_sv_fallback(
-            cmd, rtl_files, tb_path, run_dir, container, top_name)
+            cmd, rtl_files, tb_path, run_dir, container, top_name,
+            project=project)
         if rc != 0 and _compiler_was_not_found(rc, out, err):
             # vibe-ic#1394 — THE COMPILER WAS ABSENT, which is not a defect
             # in the DUT. `_iverilog_available(container)` above answers "is
@@ -13073,33 +13099,6 @@ def _reference_tb_generic_full_stack(project: Path, top_name: str,
                         "sim_executed": False,
                         "iverilog_available": False,
                         "tb_frontend": tb_frontend}, reason_class=NOT_EXECUTED_REASON)
-        if rc != 0 and _reused_ip_sv_subset_refusal(project, out, err):
-            # D3 — the SAME refusal `_run_oracle_tb` already discloses as a
-            # tool-subset limit on reused IP, judged by the same predicate.
-            # Nothing simulated, so this can never earn more than the
-            # connectivity outcome a completed run here earns: NOT_MEASURED,
-            # not PASS_WITH_WAIVERS, and not a FAIL that sends rtl_repair
-            # to edit vendor RTL it cannot change.
-            return StepResult(
-                "reference_tb", "NOT_MEASURED",
-                time.time() - t0,
-                (f"AID reference TB SKIPPED ({track_reason}); generic "
-                 f"full-stack TB ({tb_path.name}) compile blocked by a "
-                 f"construct beyond the OSS simulator's subset "
-                 f"(iverilog/sv2v SV-subset parse signature); DUT is "
-                 f"upstream-validated REUSED-IP (SOURCE_MANIFEST "
-                 f"reused_ip:true) — tool-subset limit, not a design "
-                 f"defect; NO sim ran. "
-                 f"{_TB_FRONTEND_NAMES.get(tb_frontend, tb_frontend)} "
-                 f"rc={rc} stderr={(err or out)[-1200:]}"),
-                extras={"verification_track": "generic_full_stack",
-                        "aid_tb_skipped_reason": track_reason,
-                        "functional_verified": False,
-                        "sim_executed": False,
-                        "sv_subset_waived": True,
-                        "reused_ip": True,
-                        "tb_frontend": tb_frontend},
-                reason_class=_V.ReasonClass.INCONCLUSIVE)
         if rc != 0:
             # A genuine compile/elaboration failure of the DUT is a REAL
             # functional/structural defect — FAIL (honesty preserved). Only
@@ -14101,7 +14100,8 @@ def step_reference_tb(project: Path, top_name: str = "chip_top",
     # declaring a defect. Honesty preserved: a genuine RTL bug the SV
     # frontend also rejects still FAILs.
     rc, out, err, tb_frontend = _iverilog_compile_with_sv_fallback(
-        cmd, rtl_files, PROTOCOL_TB, sim_dir, container, bound_top)
+        cmd, rtl_files, PROTOCOL_TB, sim_dir, container, bound_top,
+        project=project)
     if rc != 0 and _compiler_was_not_found(rc, out, err):
         # vibe-ic#1394 residual — the AID track had no availability probe at
         # all, so an absent compiler went straight to a bare
