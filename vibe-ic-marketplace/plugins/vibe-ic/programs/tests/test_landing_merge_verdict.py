@@ -1721,7 +1721,7 @@ if [ "${GATEKEEPER_STUB_ROUTED_TRANSITION:-0}" = "1" ] \
       local def="$1" cell design
       cell="${def%/phase3/stage3/pnr/routed.def}"
       verdir="$(basename "$cell")"
-      design="$(basename "$(dirname "$cell")")/${verdir#*_}"
+      design="$(basename "$(dirname "$cell")")/${verdir#*_}/${verdir%%_*}"
       uncheckable_until 2027-02-28 "fixture has no macro LEF"
       run_tolerating_uncheckable "macro OBS not crossed ($design)" \
         "$PLUGIN" python3 programs/macro_obs_geometry_intersect_check.py "$cell"
@@ -2327,10 +2327,10 @@ def test_end_to_end_trusted_verifier_supplies_the_one_bootstrap_evidence(
     # NOT_CHECKED here would mean an unknown candidate result had been accepted
     # in place of a measured one.
     assert transition["bounded_not_checked"] == [
-        "DRC PASS is not vacuous (tiny/openpdkx)",
-        "inner FAILs reach the verdict (tiny/openpdkx)",
-        "macro OBS not crossed (tiny/openpdkx)",
-        "new tool diagnostic id (tiny/openpdkx)",
+        "DRC PASS is not vacuous (tiny/openpdkx/v1)",
+        "inner FAILs reach the verdict (tiny/openpdkx/v1)",
+        "macro OBS not crossed (tiny/openpdkx/v1)",
+        "new tool diagnostic id (tiny/openpdkx/v1)",
     ], transition
     assert transition["benchmark_data_sha"], transition
 
