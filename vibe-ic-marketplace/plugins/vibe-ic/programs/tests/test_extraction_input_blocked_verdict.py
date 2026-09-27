@@ -58,6 +58,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import phase3_one_shot_runner as runner  # noqa: E402
 import verdict as _V  # noqa: E402  R-0915-85
 import extraction_input_capability_check as eicap  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _shipped_gds_lvs_double import shipped_gds_ready  # noqa: E402
 import eda_report_audit as audit  # noqa: E402
 
 
@@ -234,7 +236,10 @@ def _run(tmp_path, monkeypatch, tech_text, transcript, tech_lef="/t.tlef"):
     monkeypatch.setattr(runner, "_docker_exec",
                         _fake_docker(tech_text, transcript))
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    return p, runner.step_lvs(p, "chip_top", _pdk(tech_lef), "x")
+    # lane fxlvs: a clean step 31 also compares the SHIPPED GDS.
+    pdk = shipped_gds_ready(monkeypatch, runner, p, "chip_top",
+                            _pdk(tech_lef), tmp_path)
+    return p, runner.step_lvs(p, "chip_top", pdk, "x")
 
 
 def _verdict(project):
@@ -386,7 +391,10 @@ def test_unreadable_tech_does_not_block(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runner, "_docker_exec", fake)
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    # lane fxlvs: a clean step 31 also compares the SHIPPED GDS.
+    pdk = shipped_gds_ready(monkeypatch, runner, p, "chip_top", _pdk(),
+                            tmp_path)
+    r = runner.step_lvs(p, "chip_top", pdk, "x")
     assert r.status == "PASS", (r.status, r.detail)
 
 
@@ -673,7 +681,10 @@ def test_stub_with_unreadable_include_is_not_blocked_by_the_runner(
 
     monkeypatch.setattr(runner, "_docker_exec", fake)
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    # lane fxlvs: a clean step 31 also compares the SHIPPED GDS.
+    pdk = shipped_gds_ready(monkeypatch, runner, p, "chip_top", _pdk(),
+                            tmp_path)
+    r = runner.step_lvs(p, "chip_top", pdk, "x")
     assert r.status != "NOT_MEASURED", (r.status, r.detail)
 
 
@@ -964,7 +975,10 @@ def test_tcl_variable_tech_load_is_a_finding_not_a_silent_pass(tmp_path,
 
     monkeypatch.setattr(runner, "_docker_exec", fake_unresolvable)
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    # lane fxlvs: a clean step 31 also compares the SHIPPED GDS.
+    pdk = shipped_gds_ready(monkeypatch, runner, p, "chip_top", _pdk(),
+                            tmp_path)
+    r = runner.step_lvs(p, "chip_top", pdk, "x")
     # never a false BLOCKED — we still cannot judge the technology
     assert r.status != "NOT_MEASURED"
     pre = json.loads((p / "reports" / "phase3"
@@ -1002,7 +1016,10 @@ def test_a_tcl_variable_tech_load_that_RESOLVES_is_checked(tmp_path,
 
     monkeypatch.setattr(runner, "_docker_exec", fake_resolvable)
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    # lane fxlvs: a clean step 31 also compares the SHIPPED GDS.
+    pdk = shipped_gds_ready(monkeypatch, runner, p, "chip_top", _pdk(),
+                            tmp_path)
+    r = runner.step_lvs(p, "chip_top", pdk, "x")
     assert r.status != "NOT_MEASURED"
     pre = json.loads((p / "reports" / "phase3"
                       / "lvs_extraction_preflight.json").read_text())

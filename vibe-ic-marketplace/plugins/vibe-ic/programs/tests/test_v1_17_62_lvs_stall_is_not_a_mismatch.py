@@ -31,6 +31,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import phase3_one_shot_runner as runner  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _shipped_gds_lvs_double import shipped_gds_ready  # noqa: E402
 
 
 def _pdk():
@@ -108,7 +110,10 @@ def _run(tmp_path, monkeypatch, **kw):
     p = _proj(tmp_path)
     monkeypatch.setattr(runner, "_docker_exec", _fake_docker(**kw))
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    # lane fxlvs: a clean step 31 also compares the SHIPPED GDS.
+    pdk = shipped_gds_ready(monkeypatch, runner, p, "chip_top", _pdk(),
+                            tmp_path)
+    r = runner.step_lvs(p, "chip_top", pdk, "x")
     vpath = p / "reports" / "phase3" / "lvs_verdict.json"
     v = json.loads(vpath.read_text()) if vpath.is_file() else None
     return p, r, v

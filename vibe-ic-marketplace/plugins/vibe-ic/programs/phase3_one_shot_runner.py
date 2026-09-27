@@ -51755,8 +51755,15 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
         return _run_klayout_lvs(project, top, pdk, container, netlist, t0)
     _local_setup_host, local_setup_c = _emit_local_netgen_setup(
         project, pdk, container, spare_only_classes=_spare_classes)
-    return _run_extraction_lvs(project, top, pdk, container, def_file,
-                               netlist, magicrc, local_setup_c, t0)
+    # Two arms, both must be clean (see `_run_shipped_gds_lvs`): the routed
+    # DEF against the gate netlist, and the SIGN-OFF -- the shipped GDS, with
+    # the PDK's own extraction tech and netgen setup file (`netgen_setup`, not
+    # the project-local one above, which belongs to the DEF arm).
+    _def_row = _run_extraction_lvs(project, top, pdk, container, def_file,
+                                   netlist, magicrc, local_setup_c, t0)
+    _gds_row = _run_shipped_gds_lvs(project, top, pdk, container, def_file,
+                                    magicrc, netgen_setup, t0)
+    return _compose_lvs_signoff(project, _def_row, _gds_row, t0)
 
 
 # ORGANIC-20260606 #477 — sane ceiling for the ext2spice extraction
@@ -53312,7 +53319,16 @@ def _strip_nonlayer_blockages(def_text: str) -> Tuple[str, List[str]]:
 _ILLEGAL_OVERLAP_GATE_TIMEOUT = 120
 
 
-def _run_illegal_overlap_gate(project: Path, out_json: Path
+def _illegal_overlap_gate_argv(prog: Path, project: Path, out_json: Path,
+                               under: Optional[str] = None) -> List[str]:
+    """The gate producer's argv. `under` gates a SECOND extraction (step 31's
+    shipped-GDS arm) in its own directory, without overwriting the metrics the
+    step publishes for the routed-DEF extraction."""
+    return ([sys.executable, str(prog), str(project), "--json", str(out_json)]
+            + (["--under", under, "--no-metrics"] if under else []))
+
+
+def _run_illegal_overlap_gate(project: Path, out_json: Path, under=None
                               ) -> Tuple[int, str]:
     """Spawn producer + validator.
 
@@ -53338,7 +53354,7 @@ def _run_illegal_overlap_gate(project: Path, out_json: Path
         out_json.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         return 2, f"NOT CHECKED — cannot create {out_json.parent}: {exc}"
-    cmd = [sys.executable, str(prog), str(project), "--json", str(out_json)]
+    cmd = _illegal_overlap_gate_argv(prog, project, out_json, under)
     try:
         cp = subprocess.run(cmd, timeout=_ILLEGAL_OVERLAP_GATE_TIMEOUT,
                             check=False, capture_output=True, text=True)
@@ -54120,6 +54136,501 @@ def _run_extraction_lvs(project: Path, top: str, pdk: PdkConfig,
                 "lvs_localize_report": _loc_path,
                 "ext2spice_warning": ext_warning,
                 "transcript_tail": transcript[-600:]})
+
+
+# ---------------------------------------------------------------------------
+# SIGN-OFF LVS ON THE LAYOUT THAT SHIPS (lane fxlvs).
+#
+# `_run_extraction_lvs` above extracts the ROUTED DEF over LEF abstracts: every
+# standard cell is a black box whose pins come from the LEF. Nothing the stream
+# or the post-stream passes do to the GDS can reach it. MEASURED, spm x
+# gf180mcuD (same-RTL run, image 0.3.83): the flow's LVS PASSED
+# (`LVS_MATCH_POWER_VERIFIED`) on a shipped `spm.gds` whose 31 standard cells
+# carried 0 pin labels; extracting THAT file with the PDK's own Magic tech and
+# comparing it with the PDK's own netgen setup gives 29 pin mismatches (28 cells
+# + the top) and `Netlists do not match`. A sign-off LVS that never opens the
+# shipped layout is not a sign-off.
+#
+# So step 31 answers two questions, each by its own arm, and both must be clean:
+#
+#   SHIPPED GDS (the sign-off): does the layout that ships implement the routed
+#     database's powered netlist? `<pnr>/<top>.gds` -- the stream the stage-4
+#     alias is a byte copy of -- extracted by Magic with the PDK's own tech
+#     (`magicrc`), standard cells at transistor level, compared by netgen with
+#     the PDK's own setup file against the netlist OpenROAD writes from the
+#     routed DEF with `write_verilog -include_pwr_gnd`, plus the PDK's declared
+#     cell SPICE models. This is LibreLane's recipe (`Magic.SpiceExtraction`
+#     with `MAGIC_EXT_USE_GDS`, `Netgen.LVS` on the powered netlist); only the
+#     inputs are the direct flow's.
+#   ROUTED DEF (kept, a different question): does the P&R database that
+#     timing, parasitics and the hard-macro views were derived from connect the
+#     GATE netlist's cells as that netlist says? The shipped-GDS arm cannot see
+#     this -- its schematic is written FROM the DEF -- and this arm cannot see
+#     anything the stream does. Together they cover gate netlist -> shipped GDS;
+#     when only the GDS arm fails, the defect was born after routing.
+#
+# A missing input, deck or tool is NOT_MEASURED with the reason -- never a PASS.
+# chip/PDK-AGNOSTIC: every deck and model path is the PDK's own (its flow
+# configuration and `libs.tech`), no PDK, cell or design name appears in logic.
+# ---------------------------------------------------------------------------
+
+#: The questions the two step-31 arms answer, recorded beside each verdict.
+_LVS_SHIPPED_GDS_QUESTION = (
+    "shipped GDS vs the routed database's powered netlist, transistor level "
+    "(the PDK's Magic extraction tech + netgen setup): does the layout that "
+    "ships implement it")
+_LVS_ROUTED_DEF_QUESTION = (
+    "routed DEF vs the gate netlist, cell level over LEF abstracts: does the P&R "
+    "database that timing, parasitics and the hard-macro views derive from "
+    "connect the netlist's cells as the netlist says")
+
+#: Every tool run of the shipped-GDS arm is supervised (the progress-stall
+#: watchdog stops a hang) AND carries this deadline: a stopped run is
+#: NOT_MEASURED with the supervisor's evidence, never a verdict.
+_SHIPPED_GDS_LVS_CEILING_S = 6 * 3600
+
+#: The key a PDK's own flow configuration declares its standard-cell SPICE
+#: models under (open_pdks / LibreLane `config.tcl`).
+_PDK_CELL_SPICE_KEY = "CELL_SPICE_MODELS"
+_PDK_TCL_ENV_REF_RE = re.compile(
+    r"\$(?:::)?env\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)")
+
+#: LibreLane's `scripts/magic/extract_spice.tcl`, `MAGIC_EXT_USE_GDS` branch:
+#: read the stream, annotate the cells' port order from the PDK's SPICE models,
+#: abstract the hard macros (`MAGIC_EXT_ABSTRACT_CELLS`), then a device-level
+#: hierarchical extraction with `extract unique` (LibreLane's default `all`).
+_MAGIC_SHIPPED_GDS_EXT2SPICE_TCL = """\
+crashbackups stop
+drc off
+gds read $env(GDS)
+foreach f $env(CELL_SPICE) { readspice $f }
+foreach c $env(ABSTRACT_CELLS) { load $c; property LEFview true }
+load $env(TOP) -dereference
+cd $env(EXT_DIR)
+extract do local
+extract no capacitance
+extract no coupling
+extract no resistance
+extract no adjust
+extract unique all
+extract all
+ext2spice lvs
+ext2spice -o $env(SPICE_OUT) $env(TOP).ext
+feedback save $env(FEEDBACK_OUT)
+puts "MAGIC_EXT2SPICE_FEEDBACK $env(FEEDBACK_OUT) [feedback count]"
+puts "MAGIC_EXT2SPICE_DONE $env(SPICE_OUT)"
+quit -noprompt
+"""
+
+#: LibreLane's `Netgen.LVS` script: the extracted layout against the powered
+#: netlist read on top of the PDK's cell SPICE models.
+_NETGEN_SHIPPED_GDS_LVS_TCL = """\
+set circuit1 [readnet spice $env(LAYOUT_SPICE)]
+set circuit2 [readnet verilog /dev/null]
+foreach f $env(CELL_SPICE) { readnet spice $f $circuit2 }
+readnet verilog $env(PNL) $circuit2
+lvs "$circuit1 $env(TOP)" "$circuit2 $env(TOP)" $env(NETGEN_SETUP) $env(LVS_RPT) -blackbox -json
+"""
+
+
+def _pdk_cell_spice_models(pdk: "PdkConfig", container: Optional[str]
+                           ) -> Tuple[List[str], str]:
+    """(files, source) of the standard-cell SPICE models as the PDK itself
+    declares them (`CELL_SPICE_MODELS` in its flow configuration), or
+    ([], why-not).
+
+    `$::env(PDK_ROOT)` / `$::env(PDK)` come from the run's own PDK directory and
+    `$::env(STD_CELL_LIBRARY)` from the library the design was placed with (the
+    `libs.ref/<library>/` of its cell LEF); a `[glob ...]` declaration is
+    expanded. Every file must exist. chip/PDK-AGNOSTIC: the key grammar only.
+    """
+    root = _pdk_dir_of(pdk)
+    if not root:
+        return [], "no PDK directory resolved for this run"
+    root = root.rstrip("/")
+    cell_lef = str(getattr(pdk, "cell_lef", "") or "")
+    m_lib = re.search(r"/libs\.ref/([^/]+)/", cell_lef)
+    env = {"PDK_ROOT": os.path.dirname(root), "PDK": os.path.basename(root)}
+    if m_lib:
+        env["STD_CELL_LIBRARY"] = m_lib.group(1)
+    key_re = re.compile(
+        r"^\s*set\s+::env\(\s*" + _PDK_CELL_SPICE_KEY + r"\s*\)\s+(.+?)\s*$",
+        re.M)
+    for rel in _PDK_FLOW_CONFIG_RELPATHS:
+        cfg = f"{root}/{rel}"
+        text = _read_pdk_text(cfg, container)
+        if not text:
+            continue
+        m = key_re.search(text)
+        if not m:
+            continue
+        expr = m.group(1)
+        words = [a or b for a, b in re.findall(r'"([^"]*)"|\{([^}]*)\}', expr)]
+        if not words:
+            words = [w for w in expr.replace("[", " ").replace("]", " ").split()
+                     if w != "glob"]
+        pats: List[str] = []
+        for word in words:
+            unknown = [v for v in _PDK_TCL_ENV_REF_RE.findall(word)
+                       if v not in env]
+            if unknown:
+                return [], (f"{rel}:{_PDK_CELL_SPICE_KEY} names "
+                            f"{', '.join(sorted(set(unknown)))}, which this "
+                            f"run cannot resolve (cell LEF {cell_lef!r})")
+            pats.extend(_PDK_TCL_ENV_REF_RE.sub(
+                lambda mm: env[mm.group(1)], word).split())
+        files: List[str] = []
+        for pat in pats:
+            found = _pdk_existing_files(pat, container, "[glob" in expr)
+            if not found:
+                return [], (f"{rel}:{_PDK_CELL_SPICE_KEY} declares {pat}, "
+                            f"which does not exist")
+            files.extend(found)
+        return list(dict.fromkeys(files)), f"{cfg}:{_PDK_CELL_SPICE_KEY}"
+    return [], ("the PDK's flow configuration declares no "
+                f"{_PDK_CELL_SPICE_KEY} (searched "
+                + ", ".join(f"{root}/{r}" for r in _PDK_FLOW_CONFIG_RELPATHS)
+                + ")")
+
+
+def _pdk_existing_files(pattern: str, container: Optional[str],
+                        is_glob: bool) -> List[str]:
+    """The files `pattern` names, host first then inside `container`."""
+    import glob as _glob
+    if is_glob:
+        hits = sorted(p for p in _glob.glob(pattern) if os.path.isfile(p))
+    else:
+        hits = [pattern] if os.path.isfile(pattern) else []
+    if hits or not container:
+        return hits
+    probe = (f"for f in {pattern}; do [ -f \"$f\" ] && echo \"$f\"; done"
+             if is_glob else
+             f"[ -f {shlex.quote(pattern)} ] && echo {shlex.quote(pattern)}")
+    rc, out, _err = _docker_exec(container, probe, timeout=60)
+    return [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+
+
+def _lef_macro_names(lef_paths: List[str]) -> List[str]:
+    """The MACRO names the hard-macro LEFs declare (the cells the shipped-GDS
+    extraction abstracts, as LibreLane's `MAGIC_EXT_ABSTRACT_CELLS` does)."""
+    names: List[str] = []
+    for f in lef_paths or []:
+        try:
+            text = Path(f).read_text(errors="replace")
+        except OSError:
+            continue
+        names.extend(re.findall(r"^\s*MACRO\s+(\S+)", text, re.M))
+    return list(dict.fromkeys(names))
+
+
+def _shipped_gds_lvs_record(project: Path, doc: Dict[str, Any]) -> str:
+    path = _pl.reports_phase3_dir(project) / "lvs_shipped_gds_verdict.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _aa.write_json(path, doc)
+    return str(path.relative_to(project))
+
+
+def _run_shipped_gds_lvs(project: Path, top: str, pdk: "PdkConfig",
+                         container: str, def_file: Path, magicrc: str,
+                         netgen_setup: str, t0: float) -> StepResult:
+    """Step 31's SIGN-OFF arm: LVS of the layout that ships (see the block
+    comment above). Writes `phase3/stage3/extracted/shipped_gds/`,
+    `reports/phase3/lvs_shipped_gds.rpt` (+ netgen's `.json`) and the record
+    `reports/phase3/lvs_shipped_gds_verdict.json`; never touches `lvs.rpt` or
+    `lvs_verdict.json` (`_compose_lvs_signoff` decides those)."""
+    work = _pl.extracted_dir(project) / "shipped_gds"
+    work.mkdir(parents=True, exist_ok=True)
+    rpt_dir = _pl.reports_phase3_dir(project)
+    rpt_dir.mkdir(parents=True, exist_ok=True)
+    gds = _pl.pnr_dir(project) / f"{top}.gds"
+    cell_top, _top_note = _streamout_top(def_file, top)
+    record: Dict[str, Any] = {
+        "schema": "vibe-ic/lvs-shipped-gds/1",
+        "question": _LVS_SHIPPED_GDS_QUESTION,
+        "layout": _project_rel(project, gds) or str(gds),
+        "top_cell": cell_top,
+        "routed_def": _project_rel(project, def_file) or str(def_file),
+        "magicrc": magicrc, "netgen_setup": netgen_setup,
+    }
+
+    def _not_measured(finding: str, why: str, reason_class: str,
+                      **extra: Any) -> StepResult:
+        record.update({"status": "NOT_MEASURED", "finding": finding,
+                       "reason": why, "reason_class": reason_class, **extra})
+        rec = _shipped_gds_lvs_record(project, record)
+        return StepResult(
+            "lvs", "NOT_MEASURED", time.time() - t0,
+            f"shipped-GDS LVS not verified ({finding}): {why}",
+            [rec], extras={"finding": finding, "shipped_gds_record": rec,
+                           **extra}, reason_class=reason_class)
+
+    def _fail(finding: str, why: str, **extra: Any) -> StepResult:
+        record.update({"status": "FAIL", "finding": finding,
+                       "reason": why, **extra})
+        rec = _shipped_gds_lvs_record(project, record)
+        return StepResult("lvs", "FAIL", time.time() - t0,
+                          f"shipped-GDS LVS FAIL ({finding}): {why}", [rec],
+                          extras={"finding": finding,
+                                  "shipped_gds_record": rec, **extra})
+
+    if not gds.is_file() or gds.stat().st_size == 0:
+        return _not_measured(
+            "LVS_SHIPPED_GDS_ABSENT",
+            f"the shipped layout {record['layout']} is absent or empty, so "
+            f"the layout that ships was never compared",
+            _V.ReasonClass.INPUT_ABSENT)
+    record["layout_sha256"] = _file_sha256(gds)
+    spice_models, spice_src = _pdk_cell_spice_models(pdk, container)
+    if not spice_models:
+        return _not_measured("LVS_SHIPPED_GDS_NO_CELL_SPICE", spice_src,
+                             _V.ReasonClass.TOOL_ABSENT)
+    record["cell_spice_models"] = spice_models
+    record["cell_spice_source"] = spice_src
+    if not _tool_in_path(container, "openroad"):
+        return _not_measured(
+            "LVS_SHIPPED_GDS_TOOL_ABSENT",
+            f"`openroad` (writes the routed database's powered netlist) is "
+            f"not on container {container!r} PATH", _V.ReasonClass.TOOL_ABSENT,
+            missing_tool="openroad")
+
+    c = lambda p: _to_container_path(str(p), container)  # noqa: E731
+    # 1. The schematic: the routed database's powered netlist.
+    pnl = work / f"{cell_top}.pnl.v"
+    pnl_log = work / "write_powered_netlist.log"
+    pnl_tcl = work / "write_powered_netlist.tcl"
+    lefs = [str(pdk.tech_lef), str(pdk.cell_lef)] + [str(f) for f in
+                                                     pdk.macro_lefs]
+    pnl_tcl.write_text(
+        "".join(f"read_lef {{{c(f)}}}\n" for f in lefs)
+        + f"read_def {{{c(def_file)}}}\n"
+        + f"write_verilog -include_pwr_gnd {{{c(pnl)}}}\nexit\n")
+    rc, _out, err = _declared_session_exec(
+        container,
+        f"openroad -no_init -exit {c(pnl_tcl)} 2>&1 | tee {c(pnl_log)}",
+        [pnl, pnl_log], marker=c(pnl_tcl), log_path=pnl_log,
+        hard_ceiling_s=_SHIPPED_GDS_LVS_CEILING_S)
+    if rc in (_RC_STALLED, _RC_ABORTED, 124):
+        _docker_timeout_isolate([pnl])
+        return _not_measured(
+            "LVS_SHIPPED_GDS_STALLED",
+            f"openroad writing the powered netlist was stopped (rc={rc})",
+            _V.ReasonClass.STALLED, supervision=_supervision_evidence(err or ""))
+    if not pnl.is_file() or pnl.stat().st_size == 0:
+        return _not_measured(
+            "LVS_SHIPPED_GDS_NO_SCHEMATIC",
+            f"openroad wrote no powered netlist from {record['routed_def']} "
+            f"(rc={rc}); see {_project_rel(project, pnl_log)}",
+            _V.ReasonClass.EXECUTION_ERROR)
+    record["schematic"] = _project_rel(project, pnl)
+    record["schematic_sha256"] = _file_sha256(pnl)
+
+    # 2. The layout: Magic extraction of the shipped GDS, PDK tech.
+    spice_out = work / f"{cell_top}_extracted.spice"
+    feedback_out = work / _mio.FEEDBACK_NAMES[0]
+    ext_log = work / "ext2spice.log"
+    ext_tcl = work / f"ext2spice_{cell_top}.tcl"
+    ext_tcl.write_text(_MAGIC_SHIPPED_GDS_EXT2SPICE_TCL)
+    abstract = _lef_macro_names([str(f) for f in pdk.macro_lefs])
+    record["abstracted_cells"] = abstract
+    env = (
+        f'export CAD_ROOT="${{CAD_ROOT:-$(dirname "$(dirname '
+        f'"$(readlink -f "$(command -v magic)")")")/lib}}" && '
+        f"export GDS={shlex.quote(c(gds))} "
+        f"CELL_SPICE={shlex.quote(' '.join(spice_models))} "
+        f"ABSTRACT_CELLS={shlex.quote(' '.join(abstract))} "
+        f"TOP={shlex.quote(cell_top)} EXT_DIR={shlex.quote(c(work))} "
+        f"SPICE_OUT={shlex.quote(c(spice_out))} "
+        f"FEEDBACK_OUT={shlex.quote(c(feedback_out))} && "
+        f"cd {shlex.quote(c(work))} && ")
+    rc, out, err = _declared_session_exec(
+        container,
+        env + f"magic -dnull -noconsole -rcfile {shlex.quote(magicrc)} "
+              f"{c(ext_tcl)} 2>&1 | tee {c(ext_log)}",
+        [spice_out, feedback_out, ext_log], marker=c(ext_tcl),
+        log_path=ext_log, hard_ceiling_s=_SHIPPED_GDS_LVS_CEILING_S)
+    if rc in (_RC_STALLED, _RC_ABORTED, 124):
+        _docker_timeout_isolate([spice_out])
+        return _not_measured(
+            "LVS_SHIPPED_GDS_STALLED",
+            f"Magic extraction of the shipped GDS was stopped (rc={rc}); "
+            f"nothing was compared", _V.ReasonClass.STALLED,
+            supervision=_supervision_evidence(err or ""))
+    try:
+        mlog = ext_log.read_text(errors="replace")
+    except OSError:
+        mlog = (out or "") + (err or "")
+    if not spice_out.is_file() or spice_out.stat().st_size == 0:
+        return _fail(
+            "LVS_SHIPPED_GDS_EXTRACTION_NO_NETLIST",
+            f"Magic read {record['layout']} with the PDK tech and wrote no "
+            f"netlist (completion sentinel "
+            f"{'present' if 'MAGIC_EXT2SPICE_DONE' in mlog else 'ABSENT'}); "
+            f"see {_project_rel(project, ext_log)}")
+    record["layout_netlist"] = _project_rel(project, spice_out)
+    under = _project_rel(project, work)
+    mio_rc, mio_detail = _run_illegal_overlap_gate(
+        project, rpt_dir / "magic_illegal_overlap_shipped_gds.json",
+        under=under)
+    record["illegal_overlap_gate_rc"] = mio_rc
+    if mio_rc != 0:
+        return _fail(
+            "LVS_SHIPPED_GDS_EXTRACTION_ILLEGAL_OVERLAP",
+            f"the extraction feedback channel of the shipped GDS did not "
+            f"clear the zero-illegal-overlap gate (rc={mio_rc}): "
+            f"{mio_detail}; netgen was not run")
+
+    # 3. The compare: netgen, the PDK's setup file.
+    lvs_rpt = rpt_dir / "lvs_shipped_gds.rpt"
+    lvs_json = rpt_dir / "lvs_shipped_gds.json"
+    lvs_tcl = work / "netgen_lvs.tcl"
+    lvs_tcl.write_text(_NETGEN_SHIPPED_GDS_LVS_TCL)
+    env = (f"export PATH={TOOLS_IN_CONTAINER}/netgen/bin:"
+           f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
+           # The PDK setup's own switch for a layout extracted from GDS.
+           f"export MAGIC_EXT_USE_GDS=1 "
+           f"LAYOUT_SPICE={shlex.quote(c(spice_out))} "
+           f"CELL_SPICE={shlex.quote(' '.join(spice_models))} "
+           f"PNL={shlex.quote(c(pnl))} TOP={shlex.quote(cell_top)} "
+           f"NETGEN_SETUP={shlex.quote(netgen_setup)} "
+           f"LVS_RPT={shlex.quote(c(lvs_rpt))} && ")
+    rc, out, err = _declared_session_exec(
+        container, env + f"netgen -batch source {c(lvs_tcl)}",
+        [lvs_rpt, lvs_json], marker=c(lvs_tcl),
+        hard_ceiling_s=_SHIPPED_GDS_LVS_CEILING_S)
+    if rc in (_RC_STALLED, _RC_ABORTED, 124):
+        _docker_timeout_isolate([lvs_rpt])
+        return _not_measured(
+            "LVS_SHIPPED_GDS_STALLED",
+            f"netgen comparing the shipped GDS was stopped (rc={rc}); no "
+            f"terminal verdict", _V.ReasonClass.STALLED,
+            supervision=_supervision_evidence(err or ""))
+    rpt_txt = _read_lvs_report_flushed(lvs_rpt, rc=rc)
+    blob = (out or "") + "\n" + (err or "") + "\n" + rpt_txt
+    cls = _lvt.classify(blob)
+    record["report"] = _project_rel(project, lvs_rpt)
+    record["netgen_rc"] = rc
+    if cls == "MATCH":
+        record.update({"status": "PASS", "finding": "LVS_SHIPPED_GDS_MATCH"})
+        rec = _shipped_gds_lvs_record(project, record)
+        return StepResult(
+            "lvs", "PASS", time.time() - t0,
+            f"shipped-GDS LVS: netgen reports the shipped layout "
+            f"{record['layout']} matches the routed database's powered "
+            f"netlist (PDK tech + setup); report {record['report']}",
+            [rec, str(lvs_rpt)],
+            extras={"finding": "LVS_SHIPPED_GDS_MATCH",
+                    "shipped_gds_record": rec})
+    pin_ev = _lvt.pin_mismatch_evidence(blob)
+    if cls == "MISMATCH":
+        return _fail(
+            "LVS_SHIPPED_GDS_MISMATCH",
+            f"netgen: the shipped layout {record['layout']} does NOT match "
+            f"the routed database's powered netlist; "
+            f"{len(pin_ev)} pin-mismatch line(s)"
+            + (f", first: {pin_ev[0]}" if pin_ev else "")
+            + f". Report {record['report']}",
+            pin_mismatch_evidence=pin_ev[:40],
+            pin_mismatch_count=len(pin_ev))
+    return _fail(
+        "LVS_SHIPPED_GDS_NO_TERMINAL_VERDICT",
+        f"netgen exited (rc={rc}) with no terminal verdict in "
+        f"{record['report']} or its transcript; the compare did not complete")
+
+
+def _compose_lvs_signoff(project: Path, def_row: StepResult,
+                         gds_row: StepResult, t0: float) -> StepResult:
+    """Step 31 = the WORSE of the two arms (both must be clean, as in the dual
+    rule of `_step31_dispatch`). The worse arm owns the canonical record: when
+    the shipped-GDS arm is strictly worse, `lvs_verdict.json` carries its
+    verdict (BLOCKED for a not-verified one) and `lvs.rpt` its netgen report
+    (the routed-DEF transcript kept as `lvs_routed_def.rpt`); otherwise the
+    routed-DEF arm's record stands. Either way both arms are recorded."""
+    rank = {word: i for i, word in enumerate(_STEP31_ORDER)}
+    worse_gds = (rank.get(gds_row.status, len(rank))
+                 > rank.get(def_row.status, len(rank)))
+    rpt_dir = _pl.reports_phase3_dir(project)
+    verdict_path = rpt_dir / "lvs_verdict.json"
+    try:
+        def_doc = json.loads(verdict_path.read_text())
+    except (OSError, ValueError):
+        def_doc = {}
+    gds_rec_rel = gds_row.extras.get("shipped_gds_record")
+    try:
+        gds_doc = json.loads((project / gds_rec_rel).read_text()) \
+            if gds_rec_rel else {}
+    except (OSError, ValueError):
+        gds_doc = {}
+    arms = {
+        "signoff_layout": "shipped_gds",
+        "shipped_gds_arm": {"status": gds_row.status,
+                            "finding": gds_row.extras.get("finding"),
+                            "question": _LVS_SHIPPED_GDS_QUESTION,
+                            "record": gds_rec_rel},
+        "routed_def_arm": {"status": def_row.status,
+                           "finding": def_row.extras.get("finding"),
+                           "question": _LVS_ROUTED_DEF_QUESTION,
+                           "verdict": {k: def_doc.get(k) for k in
+                                       ("status", "finding", "message")}},
+    }
+    if worse_gds:
+        canonical = rpt_dir / "lvs.rpt"
+        # Only a report THIS run's netgen wrote (the record names it); a file
+        # left by an earlier run is never promoted.
+        shipped_rpt = project / str(gds_doc.get("report") or "")
+        if (gds_row.status == "FAIL" and gds_doc.get("report")
+                and shipped_rpt.is_file()):
+            if canonical.is_file():
+                shutil.copyfile(canonical, rpt_dir / "lvs_routed_def.rpt")
+                arms["routed_def_arm"]["report"] = \
+                    "reports/phase3/lvs_routed_def.rpt"
+            text = shipped_rpt.read_text(errors="replace")
+            _declared_transform_exec(
+                project, canonical, "lvs:shipped_gds", "netgen",
+                "write the shipped-GDS netgen result into lvs.rpt "
+                "(phase3_one_shot_runner)",
+                lambda: canonical.write_text(text), input_path=shipped_rpt)
+        word = "FAIL" if gds_row.status == "FAIL" else "BLOCKED"
+        verdict = _write_lvs_verdict(
+            project, word, gds_row.extras.get("finding") or "LVS_SHIPPED_GDS",
+            gds_row.detail + (
+                "" if word == "FAIL" else
+                " -- the layout that ships was NOT verified, so NOTHING is "
+                "known about its LVS state whatever the routed-DEF arm said. "
+                "Not a pass."),
+            extras={**arms, "shipped_gds": gds_doc})
+        status, reason_class = gds_row.status, gds_row.reason_class
+        finding = gds_row.extras.get("finding")
+    else:
+        extras = {k: v for k, v in def_doc.items()
+                  if k not in ("status", "result", "finding", "message",
+                               "compare_performed", "compare_evidence",
+                               "generated_by")}
+        extras.update(arms)
+        extras["shipped_gds"] = gds_doc
+        verdict = _write_lvs_verdict(
+            project, def_doc.get("status") or def_row.status,
+            def_doc.get("finding") or def_row.extras.get("finding") or "",
+            def_doc.get("message") or def_row.detail, extras=extras)
+        status, reason_class = def_row.status, def_row.reason_class
+        finding = def_row.extras.get("finding")
+    extras = dict(def_row.extras)
+    extras.update({"finding": finding, "lvs_verdict": verdict,
+                   "signoff_layout": "shipped_gds",
+                   "shipped_gds_lvs": gds_row.status,
+                   "shipped_gds_finding": gds_row.extras.get("finding"),
+                   "shipped_gds_record": gds_rec_rel,
+                   "routed_def_lvs": def_row.status,
+                   "routed_def_finding": def_row.extras.get("finding")})
+    for key in ("pin_mismatch_evidence", "pin_mismatch_count", "supervision"):
+        if worse_gds and key in gds_row.extras:
+            extras[key] = gds_row.extras[key]
+    return StepResult(
+        "lvs", status, time.time() - t0,
+        f"[shipped GDS, the sign-off] {gds_row.detail} "
+        f"[routed DEF] {def_row.detail}",
+        list(dict.fromkeys(list(def_row.output_files)
+                           + list(gds_row.output_files))),
+        extras, reason_class=reason_class if status == "NOT_MEASURED" else "")
 
 
 # ---------------------------------------------------------------------------

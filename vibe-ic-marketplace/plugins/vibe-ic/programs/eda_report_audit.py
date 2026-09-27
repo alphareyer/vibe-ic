@@ -2227,11 +2227,38 @@ def _lvs_blocked_verdict(project_dir: Path) -> Optional[dict]:
     return None
 
 
+def _lvs_shipped_gds_report_rel(project_dir: Path) -> Optional[str]:
+    """The project-relative shipped-GDS netgen report the runner's LVS verdict
+    names for THIS run (`shipped_gds.report`), or None. Read-only."""
+    p = Path(project_dir) / "reports" / "phase3" / "lvs_verdict.json"
+    try:
+        data = json.loads(p.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    shipped = data.get("shipped_gds") if isinstance(data, dict) else None
+    rel = shipped.get("report") if isinstance(shipped, dict) else None
+    if not isinstance(rel, str) or not rel or Path(rel).is_absolute() \
+            or ".." in Path(rel).parts:
+        return None
+    return rel
+
+
 def _check_lvs(project_dir: Path) -> AuditResult:
     result = AuditResult(program="eda_report_audit:lvs", passed=False)
     files = _discover(project_dir, ["*lvs*.rpt", "*lvs*.log", "*LVS*.rpt",
                                      "*LVS*.log", "*comp*.out"])
-    if not files:
+    # THE SHIPPED LAYOUT WAS NOT VERIFIED -> NOTHING ON DISK SPEAKS FOR IT (lane
+    # fxlvs). Step 31 compares two layouts: the routed DEF and the GDS that
+    # ships. When the runner could not compare the shipped GDS it records
+    # BLOCKED, and the routed-DEF transcript it DID write is still at the
+    # canonical path. Classifying that transcript would certify the shipped
+    # layout from a compare that never opened it -- the defect this lane
+    # removes -- so a literal BLOCKED record takes precedence over any report
+    # found. It never grants a pass (`passed` stays False).
+    _blocked_first = _lvs_blocked_verdict(project_dir)
+    _blocked_word = str((_blocked_first or {}).get("status")
+                        or (_blocked_first or {}).get("result") or "")
+    if not files or _blocked_word.strip().upper() == "BLOCKED":
         # A BLOCKED run produces NO netgen report by construction — extraction
         # never ran, because an input could not support it. "No LVS report
         # found" is true but says nothing about WHY, which is the ambiguity
@@ -2331,6 +2358,26 @@ def _check_lvs(project_dir: Path) -> AuditResult:
     # behaviour, unchanged.
     canonical = project_dir / "reports" / "phase3" / "lvs.rpt"
     scoped_files = [canonical] if canonical.is_file() else files
+    # The SIGN-OFF compare -- the shipped GDS -- is its own netgen report when
+    # the routed-DEF arm's transcript holds the canonical path (both arms
+    # clean, or the DEF arm the worse). The runner's verdict names THIS run's
+    # report (a stale one from an earlier run is never picked up by name), and
+    # the gate re-derives the verdict from that report's own text: both
+    # transcripts must say MATCH, and a mismatch token in either is
+    # authoritative. A named report that is not on disk is refused.
+    _shipped_rel = _lvs_shipped_gds_report_rel(project_dir)
+    if _shipped_rel:
+        _shipped = project_dir / _shipped_rel
+        if _shipped.is_file():
+            if _shipped not in scoped_files:
+                scoped_files = list(scoped_files) + [_shipped]
+        else:
+            result.findings.append(Finding(
+                rule="LVS_SHIPPED_GDS_REPORT_MISSING", severity="ERROR",
+                message=(f"the runner's LVS verdict names the shipped-GDS "
+                         f"netgen report {_shipped_rel}, which is not on disk "
+                         f"-- the sign-off compare cannot be re-derived."),
+                file=str(_shipped)))
 
     categories_re = {
         "instance": re.compile(r"instance", re.I),

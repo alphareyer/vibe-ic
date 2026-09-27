@@ -39,6 +39,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import phase3_one_shot_runner as runner  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _shipped_gds_lvs_double import shipped_gds_ready  # noqa: E402
 
 PLUGIN = Path(__file__).resolve().parent.parent.parent
 PROGRAMS = PLUGIN / "programs"
@@ -195,7 +197,10 @@ def test_small_ext2spice_error_count_is_warning_not_fail(tmp_path,
         _fake_docker("Final result: Circuits match uniquely.\n",
                      ext2spice_log=small_log))
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    # lane fxlvs: a clean step 31 also compares the SHIPPED GDS.
+    pdk = shipped_gds_ready(monkeypatch, runner, p, "chip_top", _pdk(),
+                            tmp_path)
+    r = runner.step_lvs(p, "chip_top", pdk, "x")
     assert r.status == "PASS", (r.status, r.detail)
     assert r.extras.get("ext2spice_warning")
     assert "3" in r.extras["ext2spice_warning"]
@@ -214,7 +219,10 @@ def test_clean_complete_lvs_still_passes(tmp_path, monkeypatch):
         runner, "_docker_exec",
         _fake_docker("Final result: Circuits match uniquely.\n"))
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    # lane fxlvs: a clean step 31 also compares the SHIPPED GDS.
+    pdk = shipped_gds_ready(monkeypatch, runner, p, "chip_top", _pdk(),
+                            tmp_path)
+    r = runner.step_lvs(p, "chip_top", pdk, "x")
     assert r.status == "PASS", (r.status, r.detail)
     assert (p / "reports" / "phase3" / "lvs.rpt").is_file()
     v = json.loads(

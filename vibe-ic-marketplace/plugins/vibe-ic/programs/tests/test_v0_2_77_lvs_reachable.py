@@ -21,6 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import phase3_one_shot_runner as runner  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _shipped_gds_lvs_double import shipped_gds_ready  # noqa: E402
 
 PLUGIN = Path(__file__).resolve().parent.parent.parent
 _SRC = (PLUGIN / "programs" / "phase3_one_shot_runner.py").read_text()
@@ -84,7 +86,10 @@ def test_lvs_runs_and_passes_on_match(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "_docker_exec",
                         _fake_docker("Final result: Circuits match uniquely.\n"))
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
-    r = runner.step_lvs(p, "chip_top", _pdk(), "x")
+    # lane fxlvs: a clean step 31 also compares the SHIPPED GDS.
+    pdk = shipped_gds_ready(monkeypatch, runner, p, "chip_top", _pdk(),
+                            tmp_path)
+    r = runner.step_lvs(p, "chip_top", pdk, "x")
     assert r.status == "PASS", (r.status, r.detail)
     assert (p / "reports" / "phase3" / "lvs.rpt").is_file()
     assert (p / "phase3/stage3/extracted/chip_top_extracted.sp").is_file()
