@@ -37,6 +37,25 @@ W14). Row:
 the same convention as W19's witness; every run path is resolved against it,
 never against the current directory.
 
+SEGMENTS (llv1 W6: one import of several runs)
+==============================================
+The ``--librelane`` plan runs LibreLane twice (segment 1 ``--to
+Checker.NetlistAssignStatements``, segment 2 from ``OpenROAD.CheckSDCFiles``),
+and ONE import covers both. A manifest of one run is written exactly as
+above (flat: ``run_dir`` + ``rows``). A manifest of two or more runs replaces
+those two keys with
+
+  ``segments``   ``[{"name", "run_dir", "rows", "flow_status"?}, ...]``
+
+in run order: each segment's rows are relative to ITS ``run_dir``, names and
+run_dirs are unique, and a ``canonical_path`` is imported once across all
+segments. A one-element ``segments`` list is refused (one run is written
+flat), so every one-run reader sees exactly the flat form. Readers iterate
+``segments_of(manifest)``, which yields the flat form as one segment.
+``flow_status`` (flat: top-level) is the importer's record that the run
+finished. ``write_manifest``'s ``extra`` carries importer fields (never one
+of the keys above).
+
 ONE WITNESS SCHEMA (orchestrator ruling, llf_r3)
 ================================================
 The provenance row for an imported file is W19's: `to_provenance_entry` calls
@@ -424,6 +443,28 @@ def manifest_path(project: Path) -> Path:
     return Path(project) / MANIFEST_REL
 
 
+#: Keys the manifest itself defines; ``write_manifest(extra=...)`` may not
+#: set them.
+MANIFEST_KEYS = ("schema", "flow", "run_dir", "rows", "segments",
+                 "not_performed", "flow_status")
+SEGMENT_KEYS = ("name", "run_dir", "rows")
+
+
+def segments_of(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The manifest's runs, in order, each ``{name, run_dir, rows, ...}``.
+
+    A flat (one-run) manifest is one segment named None; a segmented one is
+    its ``segments`` list. Readers that need a row's run go through this.
+    """
+    if "segments" in manifest:
+        return list(manifest["segments"])
+    seg = {"name": None, "run_dir": manifest.get("run_dir"),
+           "rows": manifest.get("rows")}
+    if "flow_status" in manifest:
+        seg["flow_status"] = manifest["flow_status"]
+    return [seg]
+
+
 def validate_manifest(manifest: Any, project: Path, *,
                       verify_disk: bool = True) -> List[str]:
     if not isinstance(manifest, dict):
@@ -435,40 +476,94 @@ def validate_manifest(manifest: Any, project: Path, *,
     flow = manifest.get("flow")
     if flow not in FLOWS:
         problems.append(f"flow {flow!r} is not one of {FLOWS}")
-    run_dir = manifest.get("run_dir")
-    if _bad_rel(run_dir):
-        return problems + [f"run_dir {run_dir!r} is not a project-relative "
-                           "path"]
     if not isinstance(manifest.get("not_performed", []), list):
         problems.append("not_performed, when present, is a list")
-    rows = manifest.get("rows")
-    if not isinstance(rows, list):
-        return problems + ["rows is not a list"]
-    seen: Dict[str, int] = {}
-    for i, row in enumerate(rows):
-        for p in validate_row(row, project, run_dir, verify_disk=verify_disk):
-            problems.append(f"row {i}: {p}")
-        if isinstance(row, dict):
-            if flow in FLOWS and row.get("flow") != flow:
-                problems.append(f"row {i}: flow {row.get('flow')!r} in a "
-                                f"{flow} manifest")
-            cp = row.get("canonical_path")
-            if cp in seen:
-                problems.append(f"row {i}: canonical_path {cp!r} is already "
-                                f"imported by row {seen[cp]}")
-            elif isinstance(cp, str):
-                seen[cp] = i
+    if "segments" in manifest:
+        segs = manifest["segments"]
+        mixed = [k for k in ("run_dir", "rows", "flow_status") if k in manifest]
+        if mixed:
+            return problems + [f"a segmented manifest carries {mixed} per "
+                               "segment, not at the top"]
+        if not isinstance(segs, list) or len(segs) < 2:
+            return problems + ["segments is a list of two or more runs (one "
+                               "run is written flat: run_dir + rows)"]
+        for i, seg in enumerate(segs):
+            if not isinstance(seg, dict):
+                return problems + [f"segment {i} is not an object"]
+            missing = [k for k in SEGMENT_KEYS if k not in seg]
+            if missing:
+                return problems + [f"segment {i} is missing {missing}"]
+            if not (isinstance(seg["name"], str) and seg["name"].strip()):
+                problems.append(f"segment {i}: name is not a non-empty string")
+        for key in ("name", "run_dir"):
+            vals = [seg[key] for seg in segs]
+            if len(set(map(str, vals))) != len(vals):
+                problems.append(f"segments repeat a {key}: {vals}")
+        labels = [f"segment {seg['name']!r} " for seg in segs]
+    else:
+        segs = segments_of(manifest)
+        labels = [""]
+    seen: Dict[str, str] = {}
+    for label, seg in zip(labels, segs):
+        run_dir = seg["run_dir"]
+        if _bad_rel(run_dir):
+            problems.append(f"{label}run_dir {run_dir!r} is not a "
+                            "project-relative path")
+            continue
+        if not isinstance(seg.get("flow_status", {}), dict):
+            problems.append(f"{label}flow_status, when present, is an object")
+        rows = seg["rows"]
+        if not isinstance(rows, list):
+            problems.append(f"{label}rows is not a list")
+            continue
+        for i, row in enumerate(rows):
+            for p in validate_row(row, project, run_dir,
+                                  verify_disk=verify_disk):
+                problems.append(f"{label}row {i}: {p}")
+            if isinstance(row, dict):
+                if flow in FLOWS and row.get("flow") != flow:
+                    problems.append(f"{label}row {i}: flow "
+                                    f"{row.get('flow')!r} in a {flow} manifest")
+                cp = row.get("canonical_path")
+                if cp in seen:
+                    problems.append(f"{label}row {i}: canonical_path {cp!r} is "
+                                    f"already imported by {seen[cp]}")
+                elif isinstance(cp, str):
+                    seen[cp] = f"{label}row {i}"
     return problems
 
 
-def write_manifest(project: Path, *, flow: str, run_dir: str,
-                   rows: List[Dict[str, Any]],
-                   not_performed: Optional[List[Any]] = None) -> Path:
-    """Validate against the disk, then write atomically. Invalid → nothing."""
-    manifest: Dict[str, Any] = {"schema": SCHEMA, "flow": flow,
-                                "run_dir": str(run_dir), "rows": rows}
+def write_manifest(project: Path, *, flow: str, run_dir: Optional[str] = None,
+                   rows: Optional[List[Dict[str, Any]]] = None,
+                   not_performed: Optional[List[Any]] = None,
+                   segments: Optional[List[Dict[str, Any]]] = None,
+                   flow_status: Optional[Dict[str, Any]] = None,
+                   extra: Optional[Dict[str, Any]] = None) -> Path:
+    """Validate against the disk, then write atomically. Invalid → nothing.
+
+    One run: ``run_dir`` + ``rows`` (+ ``flow_status``), written flat. Two or
+    more: ``segments`` (each ``{name, run_dir, rows, flow_status?}``).
+    """
+    if (segments is None) == (run_dir is None or rows is None):
+        raise ManifestError("give run_dir + rows (one run) or segments "
+                            "(two or more), not both and not neither")
+    if segments is not None:
+        if flow_status is not None:
+            raise ManifestError("a segmented manifest carries flow_status "
+                                "per segment")
+        manifest: Dict[str, Any] = {"schema": SCHEMA, "flow": flow,
+                                    "segments": segments}
+    else:
+        manifest = {"schema": SCHEMA, "flow": flow,
+                    "run_dir": str(run_dir), "rows": rows}
+        if flow_status is not None:
+            manifest["flow_status"] = flow_status
     if not_performed is not None:
         manifest["not_performed"] = not_performed
+    clash = sorted(set(extra or {}) & set(MANIFEST_KEYS))
+    if clash:
+        raise ManifestError(f"extra may not set the manifest's own keys {clash}")
+    manifest.update(extra or {})
     problems = validate_manifest(manifest, project, verify_disk=True)
     if problems:
         raise ManifestError("; ".join(problems))
