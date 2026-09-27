@@ -860,6 +860,28 @@ def local_copy(src: str, dst: str, container: str = "") -> tuple:
         return 1, "", "LOCAL_COPY failed %s -> %s: %s" % (s, d, e)
 
 
+def local_engine_cwd():
+    """A throwaway working directory for an engine launched on the LOCAL route.
+
+    The container route never gives the engine the caller's cwd: `docker run`
+    starts it in the image's WORKDIR, inside a filesystem `--rm` discards. The
+    local route launched the same argv with NO `cwd=`, so the engine inherited
+    whatever directory the CALLER was in -- and an engine that writes relative
+    to its cwd wrote there. Measured in the vibeic-eda image under pytest: the
+    ATPG engine's PLY parser (`parser.out`, `parsetab.py`, written to `.`) and
+    its per-thread simulation directory (`thr0x.../tb.sv`) landed in the plugin
+    root the suite was invoked from (F35).
+
+    Returned as a `TemporaryDirectory`, so the caller runs the engine inside a
+    `with` and the scratch disappears on exit, as the container's would. Every
+    path the command names is absolute (`localise_mounted_paths`), so the cwd
+    carries no input and loses no output.
+
+    Tool/PDK/chip-AGNOSTIC: names no tool, PDK or design."""
+    import tempfile as _tempfile
+    return _tempfile.TemporaryDirectory(prefix="vibeic_local_engine_")
+
+
 def localise_mounted_paths(shell: str,
                            mounts: Sequence[tuple]) -> str:
     """Rewrite the container-absolute paths in `shell` to THIS filesystem.
