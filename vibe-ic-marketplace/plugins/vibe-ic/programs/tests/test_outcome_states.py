@@ -286,3 +286,13 @@ def test_the_named_measuring_and_bookkeeping_tests_carry_their_marks():
              "test_the_published_total_equals_the_live_census", "bookkeeping"),
         )}
     assert [k for k, v in observed.items() if not v] == [], observed
+
+
+def test_a_setup_error_counts_as_fail(tmp_path):
+    rc, out = _session(tmp_path, "@pytest.fixture\n"
+                                 "def broken():\n"
+                                 "    raise RuntimeError('fixture broke')\n"
+                                 "def test_x(broken):\n"
+                                 "    pass\n")
+    assert _counts(out)["FAIL"] == 1, out
+    assert rc == 1, out

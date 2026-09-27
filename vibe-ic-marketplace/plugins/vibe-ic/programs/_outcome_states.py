@@ -132,10 +132,12 @@ _SESSION_PATH: Optional[str] = None
 
 # ── classification (pure; the hook below only wires it) ──────────────────────
 def host() -> str:
+    """The hostname; inside a container that name is a container id, so say so."""
     try:
-        return socket.gethostname() or "<unknown host>"
+        name = socket.gethostname() or "<unknown host>"
     except OSError:                                        # pragma: no cover
-        return "<unknown host>"
+        name = "<unknown host>"
+    return f"{name} (a container)" if os.path.exists("/.dockerenv") else name
 
 
 def _chain(exc: Optional[BaseException]) -> Iterator[BaseException]:
@@ -335,8 +337,9 @@ def outcome_lines(stats) -> List[str]:
         counts[state] += 1
         lines.append(f"{_SUMMARY_PREFIX} {state} {rep.nodeid} :: "
                      f"{_one_line(reason, 600)}")
-    failed = len([r for r in stats.get("failed", [])
-                  if getattr(r, "when", "call") in ("setup", "call", "teardown")])
+    # FAIL is everything red: pytest's `failed` and its `error` (a setup or
+    # teardown failure), which it counts separately and which are just as red.
+    failed = len(stats.get("failed", [])) + len(stats.get("error", []))
     lines.append(f"{_COUNT_PREFIX} {FAIL}={failed} "
                  + " ".join(f"{s}={counts[s]}" for s in STATES))
     return lines
