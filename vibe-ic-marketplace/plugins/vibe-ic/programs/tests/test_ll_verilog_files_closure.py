@@ -60,9 +60,11 @@ def built_record(p, files, simulation=True, bind=True):
     put(p / NETLIST, 'module core(); endmodule // synthesised\n')
     put(p / BUILT, {'files': [{'name': n, 'sha256': hashlib.sha256(
         (p / RTL / n).read_bytes()).hexdigest()} for n in files],
-        'define': {'simulation': simulation, 'verdict': 'test'}, 'top': 'core'})
+        'define': {'simulation': simulation, 'verdict': 'test'}, 'top': 'core',
+        'synthesis_id': 'this-synthesis'})
     if bind:
-        CSR.bind_built_record_netlist(p, p / NETLIST)
+        CSR.bind_built_record_netlist(p, p / NETLIST, synthesis_id='this-synthesis',
+                                      frontend='read_verilog_v2005')
 
 
 @pytest.fixture

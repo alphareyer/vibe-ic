@@ -16971,10 +16971,19 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # define decision flipped by A8's staged macros, the file set or contents,
     # the top) makes those closures STALE — `formal_proof_evidence_check`
     # refuses them; it is never a PASS about a different chip.
+    # The record is THIS synthesis's: any earlier record is removed first, so
+    # a failed write leaves none (a layout chain then reports NOT_MEASURED)
+    # rather than a previous run's record for the bind below to stamp.
+    import uuid as _uuid
+    _synth_id = _uuid.uuid4().hex
+    _chip_read_written = False
     try:
+        _csr.discard_built_record(project)
         _stale = _csr.write_built_record(
             project, rtl_files,
-            list(pdk.macro_libs) + list(pdk.macro_lefs) + list(pdk.macro_v), top)
+            list(pdk.macro_libs) + list(pdk.macro_lefs) + list(pdk.macro_v), top,
+            synthesis_id=_synth_id)
+        _chip_read_written = True
     except Exception as _e:  # noqa: BLE001 — the record never blocks synth
         _stale = []
         print(f"[phase3] chip-read record not written: {_e}", file=sys.stderr)
@@ -17570,10 +17579,23 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     _write_synth_inputs_sidecar(netlist, _pl.rtl_dir(project))
     # Bind the chip-read record to the netlist it produced, so a layout
     # chain compares against this read only while this netlist stands.
-    try:
-        _csr.bind_built_record_netlist(project, netlist)
-    except Exception as _e:  # noqa: BLE001 — the record never blocks synth
-        print(f"[phase3] chip-read record not bound to {netlist}: {_e}",
+    # Only the record this synthesis wrote is bound, rewritten to the defines
+    # of the attempt that produced the netlist (the -DSYNTHESIS retry reads
+    # without SIMULATION whatever the decision said).
+    _chip_read_bound = "not bound: this synthesis wrote no chip-read record"
+    if _chip_read_written:
+        try:
+            for _d in _csr.bind_built_record_netlist(
+                    project, netlist, synthesis_id=_synth_id,
+                    frontend=synth_frontend):
+                print(f"[phase3] STEP-5 PROOF STALE — the proof read a "
+                      f"different chip: {_d}", file=sys.stderr)
+            _chip_read_bound = f"bound ({synth_frontend})"
+        except Exception as _e:  # noqa: BLE001 — the record never blocks synth
+            _chip_read_bound = f"not bound: {_e}"
+    if not _chip_read_bound.startswith("bound"):
+        print(f"[phase3] chip-read record {_chip_read_bound}; layout chains "
+              f"report the synthesised-read comparison NOT_MEASURED",
               file=sys.stderr)
     # Lift the area figure out of the synthesis log and into the artefact the
     # flow's synthesis step declares. This MUST happen here, inside the run:
@@ -17811,6 +17833,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                       + _area_verdict,
                       _synth_evidence,
                       extras={"synth_frontend": synth_frontend,
+                              "chip_read_record": _chip_read_bound,
                               "reference_flow_qor_knobs": _rf_notes,
                               "synth_max_fanout": _fo_notes,
                               "macro_define_decision": _macro_def,

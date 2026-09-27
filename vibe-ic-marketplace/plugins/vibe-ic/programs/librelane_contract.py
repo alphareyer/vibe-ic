@@ -1707,10 +1707,15 @@ def _check_synthesised_read(project: Path, config: dict, sources: dict) -> None:
     if not isinstance(define, dict) or not isinstance(define.get('simulation'), bool):
         raise Refusal('LL_SYNTHESIS_DEFINE_UNRECORDED',
                       f'{rel}.define.simulation is {define!r}')
-    _set(config, sources, 'VERILOG_DEFINES',
-         ['SIMULATION'] if define['simulation'] else [],
-         f"{rel}.define.simulation (the synthesis define decision, "
-         f"{define.get('verdict')})")
+    # The defines of the read that PRODUCED the netlist: the record is
+    # rewritten at binding when a retry frontend read other defines than the
+    # decision (`_chip_synth_read.bind_built_record_netlist`).
+    defines = (['SIMULATION'] if define['simulation'] else []) + \
+        (['SYNTHESIS'] if define.get('synthesis') is True else [])
+    _set(config, sources, 'VERILOG_DEFINES', defines,
+         f"{rel}.define.simulation/.synthesis (the defines of the read that built "
+         f"{built['netlist']['path']}: {define.get('verdict')}, frontend "
+         f"{built.get('frontend', 'unrecorded')})")
 
 
 def resolve_step_configs(project: Path, image: str, pdk: str,
