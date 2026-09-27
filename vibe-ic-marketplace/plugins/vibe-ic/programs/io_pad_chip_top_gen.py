@@ -221,6 +221,18 @@ def _drop_unimplemented_optional_ports(
     dropped, and each is recorded. A required port that is absent stays, so
     the runner's connection check still refuses it; when the netlist cannot be
     read nothing is dropped, for the same reason.
+
+    L9's OWN RECONCILIATION LABEL COUNTS THE SAME WAY (D2). L9 top_ports is
+    the document's ports UNION the staged top's, and it labels the doc-only
+    ones `declared_by_staged_top: false` rather than deleting them. MEASURED
+    on subservient x gf180mcuD (v1.25.64): the L3 illustrative
+    `o_sram_data`/`o_sram_addr`/... kept their group sides while the core's
+    real `o_sram_wdata`/`o_sram_waddr`/... got none, and 15.5ic refused
+    PORT_WITHOUT_A_SIDE. An entry L9 itself says the staged top does not
+    declare, and which the netlist does not carry either, is a document port
+    the implemented core does not have: it is dropped and recorded, carrying
+    `declared_by_staged_top: false` where an optional one carries
+    `optional: true`. An UNLABELLED absent port still stays.
     """
     try:
         from phase3_one_shot_runner import pnr_input_netlist
@@ -236,8 +248,14 @@ def _drop_unimplemented_optional_ports(
         return list(ports), []
     kept, dropped = [], []
     for p in ports:
-        if p.get("optional") is True and str(p.get("name")) not in implemented:
+        absent = str(p.get("name")) not in implemented
+        if absent and p.get("optional") is True:
             dropped.append({"name": p.get("name"), "optional": True,
+                            "evidence": p.get("evidence"),
+                            "netlist": str(netlist)})
+        elif absent and p.get("declared_by_staged_top") is False:
+            dropped.append({"name": p.get("name"),
+                            "declared_by_staged_top": False,
                             "evidence": p.get("evidence"),
                             "netlist": str(netlist)})
         else:
@@ -997,10 +1015,14 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                       "the IO cell type to the PDK, so this producer will not "
                       "choose one on its behalf")
 
-    ports, optional_absent = _drop_unimplemented_optional_ports(
+    ports, not_implemented = _drop_unimplemented_optional_ports(
         project, _read_top_ports(project))
+    optional_absent = [d for d in not_implemented if d.get("optional") is True]
+    doc_only_absent = [d for d in not_implemented if d not in optional_absent]
     if optional_absent:
         rec["optional_ports_not_implemented"] = optional_absent
+    if doc_only_absent:
+        rec["doc_ports_not_implemented"] = doc_only_absent
     rec["functional_top_port_count"] = len(ports)
     test_ports, test_sides, test_record = _declared_test_access(project, ports)
     functional_ports = ports
@@ -1017,7 +1039,14 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                       f"range does not resolve from a declared parameter: "
                       f"{sorted(unresolved)}")
 
-    grouped, group_records = _resolve_declared_pad_groups(placement, functional_ports)
+    # A DECLARED RENAME CARRIES ITS GROUP'S SIDE (D2): the hand-authored
+    # SOURCE_MANIFEST pairs, read by the same function step 2 reads them with.
+    renames = LPP.declared_renames(project)
+    if renames:
+        rec["renamed_interfaces"] = [
+            {"l9": sorted(l9), "rtl": sorted(rtl)} for l9, rtl in renames]
+    grouped, group_records = _resolve_declared_pad_groups(
+        placement, functional_ports, renames=renames)
     if group_records:
         rec["pad_group_resolution"] = group_records
     unresolved_groups = [r for r in group_records if not r["resolved_nets"]]

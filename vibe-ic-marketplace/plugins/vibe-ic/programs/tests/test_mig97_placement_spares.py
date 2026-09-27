@@ -361,8 +361,8 @@ def _ll_deck():
 def _placement_producer(tmp_path, monkeypatch, *, spare_record=True):
     project = tmp_path / 'project'
     out_dir = project / 'phase3/stage3/pnr'
-    wrapper = write(out_dir / 'chip_top_io.v', 'module chip_top; endmodule\n')
-    netlist = write(project / 'phase3/stage2/core.v', 'module core; endmodule\n')
+    wrapper = write(out_dir / 'chip_top_io.v', 'module core(a);\n  input a;\nendmodule\nmodule chip_top(a);\n  input a;\n  core u_core (.a(a));\nendmodule\n')
+    netlist = write(project / 'phase3/stage2/core.v', 'module core(a);\n  input a;\nendmodule\nmodule chip_top(a);\n  input a;\n  core u_core (.a(a));\nendmodule\n')
     put(project / 'phase3/librelane_switch.json', {
         'steps': {'15': 'librelane', '15.5ic': 'librelane', '17': 'librelane'},
         'pdk_root_host': str(tmp_path / 'pdkroot'),
@@ -997,7 +997,7 @@ def _dual_fixture(tmp_path, monkeypatch, ll_ws, direct_ws, *, direct_violations=
     def docker(container, cmd, **k):
         arm = project / 'phase3/tool_arms/17/openroad'
         write(arm / 'placed.def', bridge.DEF_TEXT)
-        write(arm / 'placed.v', 'module chip_top; endmodule\n')
+        write(arm / 'placed.v', 'module core(a);\n  input a;\nendmodule\nmodule chip_top(a);\n  input a;\n  core u_core (.a(a));\nendmodule\n')
         write(arm / 'openroad.log', f'DIRECT_ARM_CHECK_PLACEMENT_VIOLATIONS {direct_violations}\n')
         return 0, '', ''
     monkeypatch.setattr(runner, '_docker_exec', docker)

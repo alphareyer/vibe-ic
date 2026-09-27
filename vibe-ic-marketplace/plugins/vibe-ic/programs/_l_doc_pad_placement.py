@@ -79,7 +79,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # THE POLARITY OF THE SENTENCE A VALUE IS READ OUT OF (vibe-ic#712).
 #
@@ -512,6 +512,7 @@ def bit_names(port: Dict[str, Any]) -> List[str]:
 def resolve_declared_pad_groups(
         placement: "PadPlacement",
         ports: "Any",
+        renames: "Sequence[Tuple[set, set]]" = (),
         ) -> Tuple[Dict[str, List[str]], List[Dict[str, Any]]]:
     """Resolve design-owned group rows against the design-owned port list.
 
@@ -520,6 +521,15 @@ def resolve_declared_pad_groups(
     family such as ``memory data bus``.  The resolver is strict, deterministic
     and auditable: every semantic atom of a selected port name must be present
     in the group statement, and a zero-match group is returned unresolved.
+
+    ``renames`` are the design's own declared (L9 names, RTL names) pairs
+    (`declared_renames`). A pair whose L9 name satisfies the SAME atom rule
+    carries that group's side to its RTL names present in ``ports``: the
+    document grouped the family under its illustrative name, the manifest
+    says which implemented ports that family became. Nothing fuzzier: a pair
+    is matched only through the exact rule above, an L9 name with no
+    semantic atom matches nothing, and a pair whose L9 names sit in two
+    groups puts its RTL names on two sides, which the caller refuses.
     """
     by_side: Dict[str, List[str]] = {}
     records: List[Dict[str, Any]] = []
@@ -531,17 +541,51 @@ def resolve_declared_pad_groups(
             port_atoms = group_atoms(name, port_name=True)
             if port_atoms and port_atoms <= statement_atoms:
                 matched.append(port)
+        via_rename: List[Dict[str, Any]] = []
+        for l9_names, rtl_names in renames:
+            carriers = []
+            for l9_name in sorted(l9_names):
+                l9_atoms = group_atoms(l9_name, port_name=True)
+                if l9_atoms and l9_atoms <= statement_atoms:
+                    carriers.append(l9_name)
+            if not carriers:
+                continue
+            for port in ports:
+                name = str(port.get("name") or "")
+                if name in rtl_names and port not in matched:
+                    matched.append(port)
+                    via_rename.append({"port": name, "l9": carriers,
+                                       "pair": {"l9": sorted(l9_names),
+                                                "rtl": sorted(rtl_names)}})
         nets = [net for port in matched for net in bit_names(port)]
         records.append({
             "side": side,
             "statement": statement,
             "statement_atoms": sorted(statement_atoms),
             "matched_ports": [str(p.get("name") or "") for p in matched],
+            "matched_via_rename": via_rename,
             "resolved_nets": list(nets),
         })
         if nets:
             by_side[side] = nets
     return by_side, records
+
+
+def declared_renames(project: Path) -> List[Tuple[set, set]]:
+    """The (L9 names, RTL names) pairs the design DECLARED on disk.
+
+    ONE READER for step 2's budget and step 15.5ic's ring: the reused-IP
+    SOURCE_MANIFEST's renamed-interface entries, read by the loader and
+    parser `l9_rtl_pin_consistency_check` already owns (absent manifest, or
+    `reused_ip` not true: no pair). Only the hand-authored pairs count; the
+    whole-interface pair that check derives in memory spans placement groups
+    and carries no side.
+    """
+    from l9_rtl_pin_consistency_check import (load_source_manifest,
+                                              _manifest_renamed_groups)
+    return [(set(l9), set(rtl)) for l9, rtl in
+            _manifest_renamed_groups(load_source_manifest(Path(project)) or {})
+            if l9 and rtl]
 
 
 # --------------------------------------------------------------------------- #
@@ -643,6 +687,7 @@ def derive_own_ring(project: Path, ports: Any) -> Dict[str, Any]:
         "documents_scanned": [], "documents_unreadable": [],
         "by_side": {}, "unresolved_tokens": [], "groups": [],
         "groups_unresolved": [], "parameter_defaults": {},
+        "renamed_interfaces": [], "nets_on_two_sides": [],
     }
     placement, params, unreadable, scanned = read_project_placement(project)
     out["documents_scanned"] = list(scanned)
@@ -654,7 +699,11 @@ def derive_own_ring(project: Path, ports: Any) -> Dict[str, Any]:
     out["heading"] = placement.heading
     exact, unresolved = expand_side_ports(placement, params)
     out["unresolved_tokens"] = list(unresolved)
-    grouped, records = resolve_declared_pad_groups(placement, ports or [])
+    renames = declared_renames(project)
+    out["renamed_interfaces"] = [{"l9": sorted(l9), "rtl": sorted(rtl)}
+                                 for l9, rtl in renames]
+    grouped, records = resolve_declared_pad_groups(placement, ports or [],
+                                                   renames=renames)
     out["groups"] = records
     out["groups_unresolved"] = [r["side"] for r in records
                                 if not r["resolved_nets"]]
@@ -671,6 +720,16 @@ def derive_own_ring(project: Path, ports: Any) -> Dict[str, Any]:
                 nets.append(net)
         by_side[side] = nets
     out["by_side"] = by_side
+    # A NET ON TWO EDGES is the contradiction step 15.5ic refuses as
+    # PORT_ON_TWO_SIDES (e.g. a declared rename whose L9 names sit in two
+    # groups). Reported, so the budget refuses it too instead of counting the
+    # net once and passing a ring the producer will not build.
+    sides_of: Dict[str, List[str]] = {}
+    for side in sorted(by_side):
+        for net in by_side[side]:
+            sides_of.setdefault(net, []).append(side)
+    out["nets_on_two_sides"] = sorted(n for n, sides in sides_of.items()
+                                      if len(sides) > 1)
     # ONE PAD PER NET, which is the design's own rule stated in the same
     # table, not this module's. The net IS the pad's identity here: an
     # INSTANCE name is the producer's to choose at 15.5ic, and inventing one
