@@ -311,3 +311,48 @@ def test_an_exempt_test_reports_its_raw_failure(tmp_path):
     body = ("@pytest.mark.outcome_state_exempt('subject: yosys absence')\n" + _RUNS_YOSYS)
     rc, out = _session(tmp_path, body, path=_empty_bin(tmp_path))
     assert _counts(out)["FAIL"] == 1 and _counts(out)["NOT_VERIFIED"] == 0, out
+
+
+# ---------------------------------------------------------------------------
+# 2b. the container runs other bytes than the pin (fleet upgraded mid-run)
+# ---------------------------------------------------------------------------
+_MISMATCH_TEXT = (
+    "ENV_REFUSED: analog_a3_netlist_emit: CONTAINER_IMAGE_MISMATCH: container "
+    "vibeic-eda runs sha256:7a01d48e, but the pinned runtime is "
+    "ghcr.io/vibeic/vibeic-eda@sha256:93d88e9e; required sha256:93d88e9e, "
+    "found sha256:7a01d48e")
+
+
+def test_a_confirmed_container_mismatch_is_not_verified_naming_both_images():
+    asked = []
+
+    def probe(container):
+        asked.append(container)
+        return "MISMATCH", _MISMATCH_TEXT.split("emit: ", 1)[1]
+
+    reason = OS.classify_container_mismatch(AssertionError(_MISMATCH_TEXT), probe)
+    assert asked == ["vibeic-eda"], asked
+    assert reason.startswith("NOT_VERIFIED: "), reason
+    for part in ("container `vibeic-eda`", "runs sha256:7a01d48e",
+                 "@sha256:93d88e9e", "remedy: recycle `vibeic-eda` to the resolved image",
+                 "re-run once the container and the pin agree"):
+        assert part in reason, (part, reason)
+
+
+def test_a_container_that_matches_now_keeps_the_fail():
+    for state in ("MATCH", "UNREADABLE"):
+        assert OS.classify_container_mismatch(
+            AssertionError(_MISMATCH_TEXT), lambda c, s=state: (s, "")) is None, state
+
+
+def test_a_refusal_naming_a_container_that_is_not_there_stays_fail(tmp_path):
+    """End to end through the LIVE pin check: nothing named that exists, so the
+    refusal is not a fact about this host and the FAIL stands."""
+    body = ("def test_x():\n"
+            "    import _container_exec\n"
+            "    raise _container_exec.ContainerImageMismatch(\n"
+            "        'CONTAINER_IMAGE_MISMATCH: container t129-no-such-container '\n"
+            "        'runs sha256:00, but the pinned runtime is x@sha256:11')\n")
+    rc, out = _session(tmp_path, body)
+    assert _counts(out)["FAIL"] == 1 and _counts(out)["NOT_VERIFIED"] == 0, out
+    assert rc == 1, out

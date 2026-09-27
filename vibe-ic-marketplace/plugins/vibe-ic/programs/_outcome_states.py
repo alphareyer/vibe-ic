@@ -16,7 +16,9 @@ re-runs a red to find out what kind of red it was. Four states:
     FAIL           a plain failure. The only red.
     NOT_VERIFIED   the failure is the HOST's: a tool binary it verifies with is
                    absent (checked on the session's own PATH at failure time),
-                   or there is no docker / no resolvable EDA image. The reason
+                   or there is no docker / no resolvable EDA image, or the EDA
+                   container runs other bytes than the pinned image
+                   (CONTAINER_IMAGE_MISMATCH, confirmed by a live pin check). The reason
                    names the host, the missing tool or resource, and the remedy.
     NOT_MEASURED   a test marked ``@pytest.mark.measures`` failed its
                    measurement while the run's own conditions make that
@@ -136,6 +138,16 @@ _ABSENT_TOOL_PATTERNS = (
 )
 
 _SESSION_PATH: Optional[str] = None
+_SESSION_ENV: Optional[Dict[str, str]] = None
+
+#: A container attach refused because the container runs bytes other than the
+#: pinned ones (`_eda_pin.container_pin_state` -> MISMATCH, raised as
+#: `_container_exec.ContainerImageMismatch` or carried as text in an ENV_REFUSED
+#: / pytest.fail message). The name is taken from the refusal's own sentence.
+_MISMATCH_RE = re.compile(r"CONTAINER_IMAGE_MISMATCH: container (\S+?),? runs ")
+
+#: The repo's own recycle command for the default container.
+RESTART_EDA = "tools/vibeic-eda/restart-eda.sh"
 
 
 # ── classification (pure; the hook below only wires it) ──────────────────────
@@ -219,6 +231,56 @@ def classify_not_verified(exc: Optional[BaseException],
     return None
 
 
+_PIN_PROBE = (
+    "import json, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import _eda_pin\n"
+    "print(json.dumps(_eda_pin.container_pin_state(sys.argv[2])))\n")
+
+
+def live_pin_state(container: str) -> Tuple[str, str]:
+    """`_eda_pin.container_pin_state(container)`, asked NOW, in a fresh process.
+
+    A fresh interpreter under the SESSION's environment, because at report time
+    the test's monkeypatches are still in force: a test that planted a fake
+    mismatch would otherwise answer this question with its own fake.
+    """
+    import json
+    import subprocess
+    env = dict(_SESSION_ENV if _SESSION_ENV is not None else os.environ)
+    try:
+        cp = subprocess.run(
+            [sys.executable, "-c", _PIN_PROBE, str(_HERE), container],
+            capture_output=True, text=True, env=env, timeout=120)
+        state, detail = json.loads(cp.stdout.strip().splitlines()[-1])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as exc:
+        return "UNREADABLE", f"the live pin check could not run: {exc}"
+    return str(state), str(detail)
+
+
+def classify_container_mismatch(exc: Optional[BaseException],
+                                probe=live_pin_state) -> Optional[str]:
+    """NOT_VERIFIED when the refusal names a container that, asked NOW, still
+    runs other bytes than the pinned ones. A container that matches (or cannot
+    be read) keeps the FAIL: then the refusal is not a fact about the host."""
+    for e in _chain(exc):
+        m = _MISMATCH_RE.search(str(e))
+        if not m:
+            continue
+        container = m.group(1).strip("`'\"")
+        state, detail = probe(container)
+        if state != "MISMATCH":
+            return None
+        return _nv.not_verified_reason(
+            f"host {host()}: container `{container}` runs other bytes than the "
+            f"image the plugin resolved, so the attach was refused and nothing "
+            f"was verified: {_one_line(detail, 320)}",
+            f"recycle `{container}` to the resolved image ({RESTART_EDA}, or "
+            f"`docker rm -f {container}` and re-create it from the pinned "
+            f"reference), or re-run once the container and the pin agree")
+    return None
+
+
 def _tool_reason(tool: str) -> str:
     if tool == "docker":
         remedy = (f"run on a host with a usable docker engine, or inside "
@@ -278,9 +340,11 @@ def _one_line(text: str, limit: int) -> str:
 
 # ── pytest wiring ─────────────────────────────────────────────────────────────
 def pytest_configure(config):
-    global _SESSION_PATH
+    global _SESSION_PATH, _SESSION_ENV
     if _SESSION_PATH is None:
         _SESSION_PATH = os.environ.get("PATH", "")
+    if _SESSION_ENV is None:
+        _SESSION_ENV = dict(os.environ)
     config.addinivalue_line(
         "markers",
         f"{MEASURES_MARK}: the test MEASURES wall-clock (ratios, budgets, stall "
@@ -306,7 +370,7 @@ def pytest_runtest_makereport(item, call):
     exc = call.excinfo.value if call.excinfo is not None else None
     if exc is None or item.get_closest_marker(EXEMPT_MARK) is not None:
         return
-    reason = classify_not_verified(exc)
+    reason = classify_not_verified(exc) or classify_container_mismatch(exc)
     if reason is None and rep.when == "call":
         message = str(exc)
         if item.get_closest_marker(MEASURES_MARK) is not None:
