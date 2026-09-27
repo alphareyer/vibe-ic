@@ -11,6 +11,10 @@ Contracts:
   4. A wired runner records the mode under its lock, once; the default
      records nothing.
   5. The mode record and the LibreLane contract are in the program identity.
+  6. Every runner that spawns children (front door, phase1, design, phase3,
+     phase23) records the mode before any `child_argv`, directly after its
+     project-lock check; the front door's, phase1's and phase23's real mains
+     prove it, and the first spawned child carries the flag.
 """
 from __future__ import annotations
 
@@ -120,9 +124,14 @@ def test_every_admission_site_spreads_the_mode(fname):
         if isinstance(cfg, ast.Name):
             cfg = configs[cfg.id]
         assert isinstance(cfg, ast.Dict), (fname, call.lineno)
-        spreads = [v for k, v in zip(cfg.keys, cfg.values) if k is None]
-        assert any("dispatch_config_entry" in ast.unparse(v) for v in spreads), (
-            f"{fname}:{call.lineno}: admission config does not carry the mode")
+        spreads = [ast.unparse(v) for k, v in zip(cfg.keys, cfg.values)
+                   if k is None]
+        # EXACTLY the project's recorded mode, not merely the helper's name:
+        # a constant argument would spread a mode the project never recorded.
+        assert ("_impl_flow.dispatch_config_entry("
+                "_impl_flow.recorded_impl(project))") in spreads, (
+            f"{fname}:{call.lineno}: admission config does not carry the "
+            f"project's recorded mode ({spreads})")
 
 
 def _run_to_admission(monkeypatch, module_name, project, *argv, wired=True):
@@ -163,3 +172,135 @@ def test_the_mode_code_is_in_the_program_identity(tmp_path):
     names = {p.name for p in CRA.canonical_program_paths(PROGRAMS)}
     assert {"_impl_flow.py", "librelane_contract.py"} <= names
     assert all(p.is_file() for p in CRA.canonical_program_paths(PROGRAMS))
+
+
+# ── wave-4b review (W2): every runner that spawns records the mode first ─────
+
+_RECORDING_RUNNERS = ("vibe_ic_one_shot_runner", "phase1_one_shot_runner",
+                      "design_one_shot_runner", "phase3_one_shot_runner",
+                      "phase23_one_shot_runner")
+
+
+def _main_body(module_name):
+    tree = ast.parse((PROGRAMS / f"{module_name}.py").read_text())
+    return next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+
+
+def _is_record_call(stmt, runner):
+    return (isinstance(stmt, ast.Expr) and ast.unparse(stmt.value) ==
+            f"_impl_flow.record_after_lock(project, args, runner={runner!r})")
+
+
+@pytest.mark.parametrize("runner", _RECORDING_RUNNERS)
+def test_every_spawning_runner_records_before_it_spawns(runner):
+    """Structural: the record call names this runner, sits DIRECTLY after the
+    project-lock None-check where the runner takes one, and precedes every
+    `child_argv` in main (which reads only the record)."""
+    main = _main_body(runner)
+    body = main.body
+    idx = [i for i, st in enumerate(body) if _is_record_call(st, runner)]
+    assert len(idx) == 1, f"{runner}: record_after_lock calls in main: {idx}"
+    rec = body[idx[0]]
+    prev = body[idx[0] - 1]
+    if "acquire_or_reenter" in ast.unparse(main):
+        assert (isinstance(prev, ast.If) and "is None" in ast.unparse(prev.test)
+                and "return 3" in ast.unparse(prev)), (
+            f"{runner}: record_after_lock is not the first statement after the "
+            "project-lock check")
+    else:
+        assert "gate_or_exit" in ast.unparse(body[idx[0] - 2]) and \
+            "_impl_rc" in ast.unparse(prev), f"{runner}: not right after the gate"
+    for node in ast.walk(main):
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == \
+                "_impl_flow.child_argv":
+            assert node.lineno > rec.lineno, (
+                f"{runner}:{node.lineno}: child_argv before the mode is recorded")
+
+
+class _Spawned(Exception):
+    def __init__(self, args):
+        super().__init__("spawn captured")
+        self.args_ = list(args)
+
+
+def _wire(monkeypatch, runner):
+    monkeypatch.setattr(IF, "WIRED_RUNNERS",
+                        frozenset(IF.WIRED_RUNNERS | {runner}))
+
+
+def test_the_front_door_records_and_its_first_child_carries_the_flag(
+        monkeypatch, tmp_path):
+    import vibe_ic_one_shot_runner as V
+
+    def _spawn(label, runner, args, env=None):
+        raise _Spawned(args)
+
+    monkeypatch.setattr(V, "_run_phase", _spawn)
+    monkeypatch.setattr(V, "_capture_container_image",
+                        lambda *a, **k: {"verdict": "SKIP"})
+    for flagged, name in ((False, "a"), (True, "b")):
+        proj = _make(tmp_path / name)
+        if flagged:
+            _wire(monkeypatch, "vibe_ic_one_shot_runner")
+        argv = [str(proj), "--no-dashboard"] + (["--librelane"] if flagged else [])
+        monkeypatch.setattr(sys, "argv", ["vibe_ic_one_shot_runner", *argv])
+        with pytest.raises(_Spawned) as ei:
+            V.main()
+        if flagged:
+            rec = IF.read_record(proj)
+            assert rec["impl"] == "librelane"
+            assert rec["resolved_by"] == "vibe_ic_one_shot_runner"
+            assert "--librelane" in ei.value.args_
+        else:
+            assert not IF.record_path(proj).exists()
+            assert "--librelane" not in ei.value.args_
+
+
+def test_phase1_records_under_its_lock(monkeypatch, tmp_path):
+    import phase1_one_shot_runner as P1
+
+    class _Past(Exception):
+        pass
+
+    def _stop(*a, **k):
+        raise _Past()
+
+    monkeypatch.setattr(P1, "_run_step_0_5ic", _stop)
+    for flagged, name in ((False, "a"), (True, "b")):
+        proj = _make(tmp_path / name)
+        if flagged:
+            _wire(monkeypatch, "phase1_one_shot_runner")
+        monkeypatch.setattr(sys, "argv", ["phase1_one_shot_runner", str(proj)]
+                            + (["--librelane"] if flagged else []))
+        with pytest.raises(_Past):
+            P1.main()
+        if flagged:
+            assert IF.read_record(proj)["resolved_by"] == "phase1_one_shot_runner"
+        else:
+            assert not IF.record_path(proj).exists()
+
+
+def test_phase23_records_before_its_children_are_told(monkeypatch, tmp_path):
+    """Wave-4b review: phase23 forwarded `child_argv`, which reads only the
+    record, and never wrote one -- so its children were told nothing."""
+    import phase23_one_shot_runner as P23
+
+    def _spawn(name, runner, args):
+        raise _Spawned(args)
+
+    monkeypatch.setattr(P23, "_run_phase", _spawn)
+    for flagged, name in ((False, "a"), (True, "b")):
+        proj = _make(tmp_path / name)
+        if flagged:
+            _wire(monkeypatch, "phase23_one_shot_runner")
+        monkeypatch.setattr(sys, "argv", ["phase23_one_shot_runner", str(proj)]
+                            + (["--librelane"] if flagged else []))
+        with pytest.raises(_Spawned) as ei:
+            P23.main()
+        if flagged:
+            assert IF.read_record(proj)["resolved_by"] == "phase23_one_shot_runner"
+            assert ei.value.args_[-1] == "--librelane"
+        else:
+            assert not IF.record_path(proj).exists()
+            assert "--librelane" not in ei.value.args_
