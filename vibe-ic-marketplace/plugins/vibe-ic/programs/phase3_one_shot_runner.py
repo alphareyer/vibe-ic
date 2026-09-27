@@ -73202,7 +73202,8 @@ def _phase3_enclosing_cmd(isolated: Path, top: str, pdk: PdkConfig,
     """The unbounded Phase-3 run on the window's private copy."""
     return [sys.executable, str(Path(__file__)), str(isolated),
             "--top-name", top, "--pdk", pdk.name,
-            "--container", args.container]
+            "--container", args.container,
+            *_impl_flow.child_argv(isolated)]
 
 
 def _phase3_enclosing_supervised(project: Path, isolated: Path,
