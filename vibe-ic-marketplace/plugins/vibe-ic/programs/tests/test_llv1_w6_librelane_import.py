@@ -79,6 +79,9 @@ def test_every_imported_file_is_a_copy_bound_on_both_sides(tmp_path, host):
     proj = _project(tmp_path, host)
     doc = _import(proj)
     assert doc["top"] == "spm" and len(doc["rows"]) > 100
+    witnessed = {(w["run_dir"], w["step_dir"]): {l["path"] for l in w["logs"]}
+                 for w in (r.get("witness") for r in _rows(proj)) if w}
+    no_log = []
     for row in doc["rows"]:
         # W0's meaning: tool-run paths are relative to the row's run_dir
         assert row["run_dir"] == RUN_REL, row
@@ -91,11 +94,21 @@ def test_every_imported_file_is_a_copy_bound_on_both_sides(tmp_path, host):
             == "sha256:" + _sha(dest) == "sha256:" + _sha(src), row
         assert row["provenance"] == "witnessed", row
         assert row["flow"] == "librelane" and row["exit_code"] == 0, row
-        if row["source_log"] is not None:          # the log that wrote it
-            log = base / row["source_log"]
-            assert row["source_log_sha256"] == "sha256:" + _sha(log)
-            assert Path(row["source_log"]).parent in Path(
+        # W0's final names: the logs that wrote it, each one the step's
+        # witness cites, inside the step's own folder
+        assert row["tool_run_path"].startswith(row["step_dir"] + "/"), row
+        cited = witnessed[(row["run_dir"], row["step_dir"])]
+        if not row["source_logs"]:
+            no_log.append(row["tool_run_path"])
+        for log in row["source_logs"]:
+            assert log["sha256"] == "sha256:" + _sha(base / log["path"]), row
+            assert log["path"] in cited, row
+            assert Path(log["path"]).parent in Path(
                 row["tool_run_path"]).parents, row
+    # only the STA summaries, which LibreLane's Python assembles from the
+    # corners, have no transcript of their own
+    assert sorted(no_log) == ["12-openroad-staprepnr/summary.rpt",
+                              "55-openroad-stapostpnr/summary.rpt"]
     manifest = json.loads((proj / "phase3/librelane/import_manifest.json")
                           .read_text())
     assert manifest == doc
@@ -123,16 +136,17 @@ def test_the_canonical_views_land_where_the_gates_read_them(tmp_path):
     for rel, (step, tool_step) in want.items():
         assert rel in by, rel
         assert (by[rel]["step_id"], by[rel]["tool_step_id"]) == (step, tool_step)
-    # A corner folder holds two transcripts (sta.log, filter_unannotated.log):
-    # no single source log is named rather than guessing one. The step's
-    # provenance row still cites both.
+    # A corner folder holds two transcripts the flow names (sta.log and
+    # filter_unannotated.log): both are listed, rather than one guessed.
     corner = next(r for r in doc["rows"] if r["step_id"] == "23"
                   and r["tool_run_path"].endswith("/nom_tt_025C_5v00/max.rpt"))
-    assert corner["source_log"] is None and corner["source_log_sha256"] is None
+    assert [l["path"] for l in corner["source_logs"]] == [
+        "55-openroad-stapostpnr/nom_tt_025C_5v00/filter_unannotated.log",
+        "55-openroad-stapostpnr/nom_tt_025C_5v00/sta.log"]
     rcx = by["phase3/stage3/extracted/spef_corners/spm.nom.spef"]
-    assert rcx["source_log"] == "54-openroad-rcx/nom/rcx.log"
-    assert by["phase3/stage3/pnr/routed.def"]["source_log"] == \
-        "44-openroad-detailedrouting/openroad-detailedrouting.log"
+    assert [l["path"] for l in rcx["source_logs"]] == ["54-openroad-rcx/nom/rcx.log"]
+    assert [l["path"] for l in by["phase3/stage3/pnr/routed.def"]["source_logs"]] \
+        == ["44-openroad-detailedrouting/openroad-detailedrouting.log"]
     # the nominal SPEF is the same tool file as the nom corner
     assert by["phase3/stage3/extracted/spm.spef"]["tool_run_sha256"] == \
         by["phase3/stage3/extracted/spef_corners/spm.nom.spef"]["tool_run_sha256"]
@@ -646,3 +660,15 @@ def test_a_run_whose_rcx_names_no_default_corner_is_refused(tmp_path):
         _import(proj2)
     assert exc.value.code == "LL_IMPORT_NO_NOMINAL_CORNER"
     _nothing_written(proj2)
+
+
+def test_a_log_the_flow_does_not_name_is_not_a_source_log(tmp_path):
+    """A stray log beside the routed DEF is not a transcript the flow named,
+    so the witness does not cite it and the row does not list it."""
+    proj = _project(tmp_path)
+    (proj / RUN_REL / "44-openroad-detailedrouting/notes.log").write_text("x\n")
+    doc = _import(proj)
+    routed = next(r for r in doc["rows"]
+                  if r["canonical_path"] == "phase3/stage3/pnr/routed.def")
+    assert [l["path"] for l in routed["source_logs"]] == \
+        ["44-openroad-detailedrouting/openroad-detailedrouting.log"]
