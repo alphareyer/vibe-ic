@@ -276,7 +276,7 @@ BANNER = "=== phase3_one_shot_runner — pdk=x top=top ==="
 def test_the_run_banner_is_the_one_main_prints():
     src = Path(p3.__file__).read_text()
     assert BANNER.startswith(p3._PHASE3_RUN_BANNER)
-    assert 'print(f"{_PHASE3_RUN_BANNER}{pdk.name} top={effective_top}"' in src
+    assert "_print_run_banner(pdk.name, effective_top, args.top_name)" in src
 
 
 def _enclose_with(project, monkeypatch, code, run_id, steps=("23",)):
@@ -319,7 +319,7 @@ def test_a_fail_in_the_windows_own_step_is_fail_and_names_it(project, monkeypatc
     assert row.status == "FAIL", row.detail
     assert "pnr (15,15.5ic,16,17,18,19,20,21,22) FAIL: global route diverged" in row.detail
     # The row outside the window is disclosed, not blamed.
-    assert "rows the window's steps do not own: drc (31) NOT_MEASURED" in row.detail
+    assert "rows of steps outside the window: drc (31) NOT_MEASURED" in row.detail
 
 
 def test_a_fail_outside_the_window_is_not_the_windows_fail(project, monkeypatch):
@@ -332,19 +332,96 @@ def test_a_fail_outside_the_window_is_not_the_windows_fail(project, monkeypatch)
     row = _enclose_with(project, monkeypatch, _unit(report, outputs=outputs),
                         "outfail", steps=("31",))
     assert row.status == "PASS", row.detail
-    assert "rows the window's steps do not own: pnr (15,15.5ic,16,17,18,19,20,21,22) FAIL" in row.detail
-    assert "sta_signoff (no step) FAIL" in row.detail
+    assert "rows of steps outside the window: pnr (15,15.5ic,16,17,18,19,20,21,22) FAIL" in row.detail
+    assert "sta_signoff (23) FAIL" in row.detail
 
 
 def test_a_fail_that_names_no_step_cannot_decide_an_unplaced_window(
         project, monkeypatch):
-    report = _rows(("sta_signoff", "FAIL", "y", ""))
+    """A window step with no row of its own (39: no Phase-3 row runs it) and
+    a failing row mapped to no step: the row may be this window's."""
+    report = _rows(("mystery_gate", "FAIL", "y", ""))
     row = _enclose_with(project, monkeypatch, _unit(report), "unplaced",
-                        steps=("23",))
+                        steps=("39",))
     assert row.status == "NOT_MEASURED", row.detail
     assert row.reason_class == p3._V.ReasonClass.INCONCLUSIVE
-    assert "steps 23 have no row of their own" in row.detail
-    assert "rows the window's steps do not own: sta_signoff (no step) FAIL" in row.detail
+    assert "steps 39 have no row of their own" in row.detail
+    assert ("rows mapped to no step (they may be this window's): "
+            "mystery_gate (no step) FAIL") in row.detail
+
+
+def test_a_sign_off_row_of_the_windows_step_decides_it(project, monkeypatch):
+    """Window 22..23 (enclosing): post-route STA is step 23's own gate. Its
+    FAIL is the window's FAIL, named, never "no row of their own"."""
+    assert p3._phase3_window_sites("22", "23") == ["enclosing_phase3"]
+    report = _rows(("pnr", "PASS", "", ""),
+                   ("sta_signoff", "FAIL", "WNS -0.42ns", ""))
+    row = _enclose_with(project, monkeypatch, _unit(report), "sta23",
+                        steps=p3._phase3_window_steps("22", "23"))
+    assert row.status == "FAIL", row.detail
+    assert "sta_signoff (23) FAIL: WNS -0.42ns" in row.detail
+
+
+def test_an_out_of_window_drc_fail_does_not_decide_window_9_to_30(
+        project, monkeypatch):
+    """The front door's `--exit-step 30` window: every row of steps 9..30
+    passes and only DRC (31, outside it) fails. The window PASSes."""
+    steps = p3._phase3_window_steps("9", "30")
+    assert p3._phase3_window_sites("9", "30") == ["enclosing_phase3"]
+    names = ["synth", "pad_ring_gen", "pnr", "canonicalize_artefacts",
+             "sta_signoff", "sta_corner", "sta_record", "em_signoff",
+             "ir_drop_final", "antenna_final", "si_final", "gds", "lvs"]
+    report = _rows(*[(n, "PASS", "", "") for n in names],
+                   ("drc", "FAIL", "12 violations", ""))
+    row = _enclose_with(project, monkeypatch,
+                        _unit(report, outputs=["reports/phase3/sta/post_route_summary.json"]),
+                        "win930", steps=steps)
+    assert row.status == "PASS", row.detail
+    assert "rows of steps outside the window: drc (31) FAIL" in row.detail
+
+
+def _rows_main_emits():
+    """Every StepResult row name `phase3_one_shot_runner` spells literally,
+    plus its declared gate tables: the rows a report can carry."""
+    import ast
+    tree = ast.parse(Path(p3.__file__).read_text())
+    names = {node.args[0].value for node in ast.walk(tree)
+             if isinstance(node, ast.Call)
+             and getattr(node.func, "id", None) == "StepResult"
+             and node.args and isinstance(node.args[0], ast.Constant)
+             and isinstance(node.args[0].value, str)}
+    return names | {g[0] for g in p3._PHASE3_GATE_TABLES()}
+
+
+def test_every_phase3_step_is_answered_for_by_a_row_main_emits():
+    """One map: dispatch and verdict read the same canonicalizer set, and
+    every canonical Phase-3 step 9..38 has a row family that answers for
+    it. Step 39 (FPGA sign-off) has none -- no Phase-3 row runs it -- so a
+    window over it can only be INCONCLUSIVE, which the test above pins."""
+    assert p3._phase3_steps_of_row("canonicalize_artefacts") == \
+        p3._PHASE3_CANONICALIZER_IDS
+    assert p3._phase3_window_sites("24", "25") == ["enclosing_canonicalize"]
+    covered = set().union(*(p3._phase3_steps_of_row(n) for n in _rows_main_emits()))
+    ids = p3._phase3_window_steps("9", "39")
+    assert [i for i in ids if i not in covered] == ["39"]
+
+
+def test_the_child_is_asked_the_operators_questions():
+    """Not the parent's resolved `custom:<dir>` name (refused by
+    `_assert_pdk_name_resolvable`), and the window's own geometry."""
+    args = SimpleNamespace(pdk="auto", container="c", die_um="600", util=0.4,
+                           spare_density=0.02, ic_name="chip",
+                           allow_oss_pdk_fallback=True,
+                           allow_pdk_target_mismatch=False)
+    cmd = p3._phase3_enclosing_cmd(Path("/x/p"), "top",
+                                   SimpleNamespace(name="custom:pdk"), args)
+    assert cmd[cmd.index("--pdk") + 1] == "auto" and "custom:pdk" not in cmd
+    assert cmd[cmd.index("--die-um") + 1] == "600"
+    assert cmd[cmd.index("--util") + 1] == "0.4"
+    assert cmd[cmd.index("--spare-density") + 1] == "0.02"
+    assert cmd[cmd.index("--ic-name") + 1] == "chip"
+    assert "--allow-oss-pdk-fallback" in cmd
+    assert "--allow-pdk-target-mismatch" not in cmd
 
 
 def test_a_window_step_not_measured_keeps_its_own_reason(project, monkeypatch):
@@ -418,7 +495,12 @@ def test_the_real_runner_refusing_an_unadmitted_copy_stays_not_measured(
 def test_a_unit_killed_by_a_signal(project, monkeypatch, sig, status):
     """Stopped from outside (TERM/KILL): an environment stop, NOT_MEASURED
     naming the signal. A crash of the unit's own (SEGV) after it ran: FAIL."""
-    code = (f"import os, signal, sys\nprint({BANNER!r}, flush=True)\n"
+    # The banner is printed by main's own `_print_run_banner` -- NOT flushed
+    # here -- so a crash right after it keeps the banner only if main does.
+    code = ("import os, signal, sys\n"
+            f"sys.path.insert(0, {str(Path(p3.__file__).parent)!r})\n"
+            "import phase3_one_shot_runner as p\n"
+            "p._print_run_banner('x', 'top', 'top')\n"
             f"os.kill(os.getpid(), signal.{sig})\n")
     row = _enclose_with(project, monkeypatch, code, f"sig{sig}")
     assert row.status == status, row.detail
