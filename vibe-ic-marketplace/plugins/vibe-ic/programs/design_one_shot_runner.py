@@ -7717,31 +7717,42 @@ def _rtl_gen_reused_ip_handoff(
             _rid_chk = _rid_mf.get("renamed_interfaces_check") or {}
         except (OSError, ValueError, AttributeError):
             _rid_der, _rid_chk = {}, {}
+    _rid_moved = _rid_der.get("moved_out_of_renamed_interfaces") or []
+    if _rid_moved:
+        _mf_note += (
+            f" renamed_interfaces: moved {len(_rid_moved)} pair(s) "
+            f"an earlier renamed_interface_derive wrote there into "
+            f"derived_pad_pairs ("
+            + "; ".join(f"{m.get('l9')}->{m.get('rtl')}"
+                        for m in _rid_moved[:4])
+            + "): they give pad sides, not declared renames.")
     if _rid_der.get("verdict") == "NOT_MEASURED":
         _mf_note += (
-            f" renamed_interfaces: the pad-side derivation did not "
-            f"run ({_rid_der.get('reason')}); no port got a side "
-            f"from it.")
+            f" renamed_interfaces: the pad-side derivation was not "
+            f"measured ({_rid_der.get('reason')}); no port got a "
+            f"side from it.")
     elif _rid_chk.get("verdict") == "FAIL":
         _unpaired = _rid_chk.get("unpaired_implemented_ports") or []
         _refused = [v for v in (_rid_chk.get("pairs") or [])
                     + (_rid_chk.get("derived_pairs") or [])
                     if v.get("verdict") == "REFUSED"]
-        _two = _rid_chk.get("ports_on_two_sides") or {}
+        _two = _rid_chk.get("nets_on_two_sides") or {}
         _mf_note += (
             f" renamed_interfaces: {len(_unpaired)} implemented "
-            f"port(s) have no pad side"
+            f"port(s) have bit net(s) with no pad side"
             + (f" ({', '.join(str(u) for u in _unpaired[:8])})"
                if _unpaired else "")
             + (f", {len(_refused)} pair(s) REFUSED ("
                + "; ".join(f"{v['pair']}: {v.get('reason')}"
                            for v in _refused[:3]) + ")"
                if _refused else "")
-            + (f", port(s) on two sides {_two}" if _two else "")
-            + " — author one pair per placement group (or report a "
-            "port with no document counterpart as a placement "
-            "gap), then `renamed_interface_derive.py <project> "
-            "--check` must exit 0.")
+            + (f", net(s) on two sides {_two}" if _two else "")
+            + " — author one pair per placement group, then "
+            "`renamed_interface_derive.py <project> --check` exits "
+            "0 once every bit net has exactly one side. A port "
+            "reported as a placement gap (no document counterpart, "
+            "or placed only in part) keeps rc 1: say so in the "
+            "hand-off instead of inventing a pair.")
     # Authoring handoff (`catalog-glue-author` still authors the
     # chip_top wrapper by hand) — so it gets the digests too.
     _hint, _hint_extras = _stage_author_knowledge_digests(project)

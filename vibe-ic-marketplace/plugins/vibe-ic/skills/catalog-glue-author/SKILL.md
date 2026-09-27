@@ -200,9 +200,13 @@ and #712 (wrapper-exposed output) are **dead code without this file**.
 > `spec_conformance_check` and `l9_rtl_pin_consistency_check` read
 > `renamed_interfaces` as a DECLARED RENAME, and an R2 pair is evidence of a
 > side, not of a rename. Do not copy a derived pair into `renamed_interfaces`
-> unless you are declaring that rename yourself. A derived pair the rule rejects
-> is listed in `renamed_interfaces_derivation.rejected` with its reasons, and its
-> ports stay unresolved. Ports it cannot decide are listed in
+> unless you are declaring that rename yourself. A copy you make is yours and
+> stays, fields and all. Only entries of the shape an earlier version wrote there
+> (stamped, with no top-level `rule`) are moved out, and the hand-off names them.
+> Acceptance runs per rtl port. A port the rule rejects is listed in
+> `renamed_interfaces_derivation.rejected` with its own reasons and stays
+> unresolved; its siblings keep their side. Ports it cannot decide, and ports the
+> document places only in part, are listed in
 > `renamed_interfaces_derivation.unresolved` with their candidate sides and the
 > reason. Every emit refreshes all three program keys. HARD RULES for this skill:
 > 1. For every port in `renamed_interfaces_derivation.unresolved`, do ONE of:
@@ -223,17 +227,21 @@ and #712 (wrapper-exposed output) are **dead code without this file**.
 >    the RTL disagree on is not yours to pair around: report it, do not author a
 >    pair that hides the disagreement.
 > 3. Then run `python3 programs/renamed_interface_derive.py <project> --check`.
->    It checks what the pad side will read (your pairs and the derived ones).
->    rc 0 means every implemented port ends on EXACTLY ONE side. rc 1 names:
+>    It checks what the pad side will read: your pairs under every rename key
+>    (`renamed_interfaces`, `renamed_buses`, `interface_renames`) and the
+>    derived ones. Sides are counted per BIT NET, one pad per bit, as 15.5ic
+>    places them, so a bus the document splits across two sides is fine. rc 0
+>    means every implemented bit net ends on EXACTLY ONE side. rc 1 names:
 >    - each REFUSED pair (an `rtl` name the implemented top lacks, an `rtl`
 >      name the document already places on another side, an `l9` name L9 lacks,
 >      an `l9` name in no group row, names in two groups, or any
 >      `accept_renames` reason);
->    - each still-unpaired port;
->    - each port on two sides.
->    Fix the pair, never the check. A port you reported under rule 1 keeps
->    rc 1. That is the honest state until the document places it, so say so in
->    the hand-off.
+>    - each net with no side (`nets_without_side`);
+>    - each net on two sides (`nets_on_two_sides`).
+>    rc 3 means a design document could not be read (NOT_MEASURED, with the
+>    reason): fix the document, not the pairs. Fix the pair, never the check. A
+>    port you reported under rule 1 keeps rc 1. That is the honest state until
+>    the document places it, so say so in the hand-off.
 
 > **`{l9, rtl}` schema (HARD doc-and-code contract, #775).** Every `{l9, rtl}`
 > dict above is parsed by `l9_rtl_pin_consistency_check._manifest_name_set()`:
