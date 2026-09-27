@@ -102,6 +102,31 @@ def _vibeic_gds_gates(project: Path, image: str, pdk_root: Path, pdk: str,
     return results
 
 
+def _finishing_core(project: Path) -> tuple:
+    """(core, source) the finishing XOR checks against, or a named refusal.
+
+    The declared core first. Under a flag (llv1 W9) the declaration may leave
+    it NOT_DETERMINED -- it stays the owner's (decision 6) -- and the core the
+    flow APPLIED is read from the mode record instead.
+    """
+    declared, sources = declaration_config(project)
+    core = declared.get("CORE_AREA")
+    core_source = sources.get("CORE_AREA")
+    if not core:
+        import _impl_flow
+        value, why = _impl_flow.applied_answer(project, "core_area_um")
+        if (_impl_flow.recorded_impl(project) != _impl_flow.IMPL_DEFAULT
+                and isinstance(value, list) and len(value) == 4):
+            core, core_source = [float(v) for v in value], why
+    if not core:
+        # Step 37.3's finishing XOR needs a core; a stream whose finishing
+        # cannot be checked is not promoted (never a silent pass).
+        raise Refusal("LL_FINISHING_CORE_UNDECLARED",
+                      "tape-out declaration answers.core_area_um (or, under "
+                      "a flag, the mode record's applied core_area_um)")
+    return core, core_source
+
+
 def run(project: Path, image: str, pdk_root: Path, pdk: str,
         routed_def: Path, netlist: Path, sdc: Path,
         canonical_gds: Path) -> dict:
@@ -116,13 +141,7 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
         # Upstream SealRing currently treats x1/y1 as width/height.  Until its
         # fork fix is in the image, a nonzero-origin die cannot be signed off.
         raise Refusal("LL_SEALRING_ORIGIN_UNSUPPORTED", str(die))
-    declared, sources = declaration_config(project)
-    core = declared.get("CORE_AREA")
-    if not core:
-        # Step 37.3's finishing XOR needs the declared core; a stream whose
-        # finishing cannot be checked is not promoted (never a silent pass).
-        raise Refusal("LL_FINISHING_CORE_UNDECLARED",
-                      "tape-out declaration answers.core_area_um")
+    core, core_source = _finishing_core(project)
     state = _routed_state(project, image, pdk_root, pdk,
                           configs["Magic.StreamOut"], routed_def, netlist, sdc)
     magic = _run(project, image, pdk_root, pdk,
@@ -170,7 +189,7 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
         sealed = Path(json.loads((finish[0] / "state_out.json").read_text())["gds"])
         finishing[arm] = _pv.run_finishing_xor(
             project, image, pdk_root, pdk, pre=path, sealed=sealed,
-            final=final_paths[arm], core=core, core_source=sources["CORE_AREA"],
+            final=final_paths[arm], core=core, core_source=core_source,
             lane=f"37.3-{arm}", record=root / f"37.3-{arm}-finishing-xor.json")
         gates[arm] = _vibeic_gds_gates(project, image, pdk_root, pdk,
                                       final_paths[arm], routed_def, arm,

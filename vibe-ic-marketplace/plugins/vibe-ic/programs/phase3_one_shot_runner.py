@@ -48080,7 +48080,24 @@ def publish_tapeout_declarations(project: Path, pdk: "PdkConfig",
                         rec["superseded"] = dict(rec.get("superseded") or {},
                                                  **{key: _why})
                     merge[key] = info["value"]
-                if merge:
+                _impl_mode = _impl_flow.recorded_impl(project)
+                if merge and _impl_mode != _impl_flow.IMPL_DEFAULT:
+                    # llv1 W9 / decision 6: under a flag the declaration
+                    # stays the owner's. What this run derived is recorded
+                    # as APPLIED, per question with its basis, in the mode
+                    # record -- never merged into the declaration.
+                    rec["recorded_as_applied"] = _impl_flow.record_applied(
+                        project,
+                        {k: {"value": merge[k],
+                             "source": derived[k]["basis"]} for k in merge},
+                        recorded_by="phase3_one_shot_runner."
+                                    "publish_tapeout_declarations")
+                    rec["not_published_reason"] = (
+                        f"under the {_impl_mode} flow the tape-out declaration "
+                        f"stays the owner's (decision 6); the derived answers "
+                        f"are recorded as applied in "
+                        f"{_impl_flow.record_path(project)}")
+                elif merge:
                     doc, ignored = _td.merge_answers(doc, merge)
                     decl_path.write_text(
                         json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
