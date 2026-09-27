@@ -19043,18 +19043,34 @@ def _step_image_digest(container: str) -> Optional[str]:
     this function, which is exactly the kind of green that does not survive
     contact with a real box; the r2 tests do not patch it.
 
-      1. the registry digest, when the image has one — portable and best;
-      2. the LOCAL image Id — not portable, and it does not need to be: a
+      1. `LOCAL_EXEC`, when there is no container route at all because the
+         runner is running INSIDE the image: the tools run from this process's
+         own PATH (`_local_exec_mode`, the same predicate). There is no second
+         image to be confused with, and the tool VERSIONS in `provenance.jsonl`
+         still carry the identity that matters;
+      2. the registry digest, when the image has one — portable and best;
+      3. the LOCAL image Id — not portable, and it does not need to be: a
          freshness key is compared on this machine against a stamp written on
-         this machine;
-      3. `LOCAL_EXEC`, when there is no container route at all because the
-         runner is running INSIDE the image. There is no second image to be
-         confused with, and the tool VERSIONS in `provenance.jsonl` still carry
-         the identity that matters.
+         this machine.
 
-    None only when a container IS the route and nothing about it can be named —
-    which remains a re-run, because an artefact built by an environment nobody
-    can name is not a proven artefact."""
+    LOCAL_EXEC IS THE FIRST RUNG, and before the NO_CONTAINER answer
+    (orchestrator ruling F34, 2026-09-27). The image is resolved only on the
+    docker path (v1.25.43): a run whose tools are on PATH resolves nothing, so
+    rungs 2-3 — both `docker inspect`s — are not even asked there. Asking them
+    first made the local route's answer depend on two probes that can only
+    fail on it.
+
+    The refusals stay named. With a docker route, a container nobody named
+    answers NO_CONTAINER, and None only when a container IS the route and
+    nothing about it can be named — which remains a re-run, because an
+    artefact built by an environment nobody can name is not a proven
+    artefact."""
+    try:
+        import _container_exec as _cx  # noqa: PLC0415
+        if _cx.no_container_route():
+            return "LOCAL_EXEC"
+    except Exception:  # noqa: BLE001
+        pass
     try:
         import canonical_run_admission as _cra  # noqa: PLC0415
         v = _cra.image_identity(container or "")
@@ -19067,12 +19083,6 @@ def _step_image_digest(container: str) -> Optional[str]:
         image_id, _why = _pin.container_image_id(container or "")
         if image_id:
             return f"imageid:{image_id}"
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        import _container_exec as _cx  # noqa: PLC0415
-        if _cx.no_container_route():
-            return "LOCAL_EXEC"
     except Exception:  # noqa: BLE001
         pass
     if not container:
