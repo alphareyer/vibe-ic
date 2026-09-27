@@ -152,6 +152,14 @@ def _run(base, cand, base_host=_HOST, cand_host=_HOST, extra=()):
 
 
 _BENCHMARK_SHA = "a" * 40
+#: ONE published cell, spelled once. Its label identity is DERIVED through the
+#: program's own `routed_cell_identity` (vibe-ic#2733 widened it to
+#: (design, pdk, version)); a hand-spelled label drifts from the manifest path
+#: and every manifest is then refused "not exact" before the property a test
+#: names is ever reached.
+_CELL_DESIGN, _CELL_VERSION_DIR = "demo", "v0.3.0_openpdkx"
+_CELL_ROUTED_DEF = (
+    f"ic/{_CELL_DESIGN}/{_CELL_VERSION_DIR}/phase3/stage3/pnr/routed.def")
 
 
 def _transition_pair(*, replacement_state="PASS", benchmark_sha=_BENCHMARK_SHA):
@@ -166,7 +174,8 @@ def _transition_pair(*, replacement_state="PASS", benchmark_sha=_BENCHMARK_SHA):
                   "expansion": "EXPANDED"}],
         corpus_inputs={"benchmark_data_sha": benchmark_sha})
 
-    labels = [template.format(cell="demo/openpdkx")
+    cell = H.routed_cell_identity(_CELL_DESIGN, _CELL_VERSION_DIR)
+    labels = [template.format(cell=cell)
               for template in H.ROUTED_DEF_GATE_LABELS]
     rows = [_gate(label, replacement_state if i == 0 else "PASS",
                   H.ROUTED_DEF_CORPUS)
@@ -208,7 +217,7 @@ def _transition_pair(*, replacement_state="PASS", benchmark_sha=_BENCHMARK_SHA):
             "name": H.ROUTED_DEF_CORPUS,
             "items": [{
                 "ordinal": 1,
-                "path": "ic/demo/v0.3.0_openpdkx/phase3/stage3/pnr/routed.def",
+                "path": _CELL_ROUTED_DEF,
                 "mode": "100644", "blob": "b" * 40,
                 "gates": manifest_gates,
             }],
