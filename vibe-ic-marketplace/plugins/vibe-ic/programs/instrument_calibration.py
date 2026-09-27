@@ -2296,6 +2296,46 @@ _register(Instrument(
 ))
 
 
+# ---- LibreLane flow.log as a provenance witness (llv1 W19, decision 4a) ----
+
+_LL_FLOW_LOG_PROV = (
+    "Real LibreLane flow.log from the CMP3 LibreLane arm on 8HD-4 "
+    "(`librelane --manual-pdk --pdk gf180mcuD --run-tag cmp3`, rc 0, "
+    "`Flow complete.`; source sha256 303263b98a32083a0beefacbbcbc757e36615b65"
+    "f20d888efa6636f34e466dc2). Kept: only the `Running '<id>' at '<dir>'…` "
+    "lines and the closing line, each byte-unedited; every other line is "
+    "dropped because it names the design. ")
+
+
+def _judge_flow_log_witness(log: str) -> Optional[str]:
+    import _tool_log_provenance as T
+    return (None if T.flow_log_names_step(
+        log, "OpenROAD.DetailedRouting", "44-openroad-detailedrouting")
+        else "UNWITNESSED")
+
+
+_register(Instrument(
+    name="_tool_log_provenance::flow_log_names_step",
+    reads="LibreLane's own run-level flow.log (`Running '<id>' at '<dir>'`)",
+    ruling="llv1 decision 4a (W19)", owner="llb",
+    why=("An imported row counts as a witnessed LibreLane run only when the "
+         "flow's own log started that step in the cited folder. The pair is "
+         "the same real log whole, and cut where a run that never reached "
+         "detailed routing ends."),
+    judge=_judge_flow_log_witness,
+    positive=Sample(
+        provenance=(_LL_FLOW_LOG_PROV + "Cut before step 44 (the first 45 "
+                    "kept lines), the shape an aborted run leaves. calibration/"
+                    "librelane_flow_log_aborted_positive.log"),
+        artefact=_read("librelane_flow_log_aborted_positive.log")),
+    expect="UNWITNESSED",
+    negative=Sample(
+        provenance=(_LL_FLOW_LOG_PROV + "Whole. calibration/"
+                    "librelane_flow_log_complete_negative.log"),
+        artefact=_read("librelane_flow_log_complete_negative.log")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════

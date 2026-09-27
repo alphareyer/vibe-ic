@@ -71,6 +71,7 @@ from typing import Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _mcp_measurement  # noqa: E402
+import _tool_log_provenance  # noqa: E402
 
 
 def _sha256_file(path: Path) -> str:
@@ -137,13 +138,29 @@ def _declares(entry: dict, out_rel: str, out_sha: str | None) -> bool:
 
 def _find_entry(entries: List[dict], out_rel: str,
                 allowed_tools: set,
-                out_sha: str | None = None) -> Tuple[dict | None, List[str]]:
-    """Return (matching_entry, reasons_if_none)."""
+                out_sha: str | None = None,
+                project: Path | None = None) -> Tuple[dict | None, List[str]]:
+    """Return (matching_entry, reasons_if_none).
+
+    An entry that CLAIMS a witness (a row imported from an external flow's own
+    step log, `_tool_log_provenance`, llv1 decision 4a) binds only when that
+    witness re-verifies against `project`: a cited log that is gone, rewritten
+    or not started by the flow is a fabricated witness, not a weaker one. A
+    plain logged run or a #365 back-fill claims none and is judged as before.
+    """
     reasons: List[str] = []
     matches = []
     for i, e in enumerate(entries):
         if not _declares(e, out_rel, out_sha):
             continue
+        if _tool_log_provenance.claims_witness(e):
+            ok, why = (_tool_log_provenance.verify_witness(e, project)
+                       if project is not None else
+                       (False, "no project to re-read the witness against"))
+            if not ok:
+                reasons.append(f"entry {e.get('timestamp','?')} for {out_rel} "
+                               f"claims a witness that does not hold: {why}")
+                continue
         if e.get("exit_code", -1) != 0:
             reasons.append(f"entry {e.get('timestamp','?')} "
                            f"for {out_rel} has exit_code="
@@ -277,7 +294,8 @@ def main(argv: List[str] | None = None) -> int:
             disk_hash = _sha256_file(abs_out)
 
             # Find a matching entry
-            entry, reasons = _find_entry(entries, out_rel, allowed, disk_hash)
+            entry, reasons = _find_entry(entries, out_rel, allowed, disk_hash,
+                                          project)
             if entry is None:
                 check["reasons"].extend(reasons)
                 report["checks"].append(check)
