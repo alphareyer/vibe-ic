@@ -233,7 +233,19 @@ def test_a_runner_back_fill_is_still_reconstructed_and_never_witnessed(
 
 def test_the_flow_log_reader_is_calibrated():
     import instrument_calibration as I
-    cal = I.check("_tool_log_provenance::flow_log_names_step")
+    cal = I.check("_tool_log_provenance::flow_log_steps")
     assert cal.state == I.CALIBRATED, cal.as_dict()
     assert cal.positive_outcome == "UNWITNESSED"
     assert cal.negative_outcome is None
+
+
+def test_the_flow_log_lists_instance_ids_in_run_order():
+    import _tool_log_provenance as T
+    steps = T.flow_log_steps(WHOLE.read_text())
+    ids = [s for s, _ in steps]
+    assert ids[0] == "Verilator.Lint"
+    assert "OpenROAD.STAMidPNR-3" in ids               # instance, not class, id
+    assert ("OpenROAD.CheckAntennas",
+            ("runs", "cmp3", "42-openroad-repairantennas",
+             "2-openroad-checkantennas")) in steps     # nested sub-step
+    assert ids.index("OpenROAD.GlobalRouting") < ids.index(STEP_ID)

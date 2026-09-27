@@ -2309,13 +2309,15 @@ _LL_FLOW_LOG_PROV = (
 
 def _judge_flow_log_witness(log: str) -> Optional[str]:
     import _tool_log_provenance as T
-    return (None if T.flow_log_names_step(
-        log, "OpenROAD.DetailedRouting", "44-openroad-detailedrouting")
-        else "UNWITNESSED")
+    started = T.flow_log_steps(log)
+    return (None if any(sid == "OpenROAD.DetailedRouting"
+                        and parts[-1:] == ("44-openroad-detailedrouting",)
+                        for sid, parts in started)
+            else "UNWITNESSED")
 
 
 _register(Instrument(
-    name="_tool_log_provenance::flow_log_names_step",
+    name="_tool_log_provenance::flow_log_steps",
     reads="LibreLane's own run-level flow.log (`Running '<id>' at '<dir>'`)",
     ruling="llv1 decision 4a (W19)", owner="llb",
     why=("An imported row counts as a witnessed LibreLane run only when the "

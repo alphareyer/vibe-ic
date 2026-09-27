@@ -99,6 +99,22 @@ def underlying_tool(step_id: str) -> Optional[str]:
     return _STEP_PREFIX_TOOL.get(str(step_id).split(".", 1)[0])
 
 
+def flow_log_steps(flow_log: str) -> List[Tuple[str, Tuple[str, ...]]]:
+    """Every step the flow's own log says it started, in the order it did.
+
+    Each item is ``(step_id, folder parts)`` exactly as LibreLane printed them:
+    the step id is the INSTANCE id (``OpenROAD.STAMidPNR-3`` for the fourth
+    run of a class), and the folder is relative to LibreLane's working
+    directory (``runs/<tag>/<dir>``, nested sub-steps included).
+    """
+    import instrument_calibration
+    instrument_calibration.assert_calibrated(
+        "_tool_log_provenance::flow_log_steps")
+    return [(m.group(1), tuple(p for p in Path(m.group(2)).parts
+                               if p not in ("", ".")))
+            for m in _RUNNING_RE.finditer(flow_log or "")]
+
+
 def flow_log_names_step(flow_log: str, step_id: str, step_dir: str) -> bool:
     """Does the flow's own log say it started ``step_id`` in ``step_dir``?
 
@@ -108,19 +124,12 @@ def flow_log_names_step(flow_log: str, step_id: str, step_dir: str) -> bool:
     the folder relative to its working directory (``runs/<tag>/<dir>``), so a
     match is a path whose trailing components equal ``step_dir``.
     """
-    import instrument_calibration
-    instrument_calibration.assert_calibrated(
-        "_tool_log_provenance::flow_log_names_step")
     want = tuple(p for p in Path(step_dir).parts if p not in ("", "."))
     if not want:
         return False
-    for m in _RUNNING_RE.finditer(flow_log or ""):
-        if m.group(1) != step_id:
-            continue
-        parts = Path(m.group(2)).parts
-        if len(parts) >= len(want) and tuple(parts[-len(want):]) == want:
-            return True
-    return False
+    return any(sid == step_id and len(parts) >= len(want)
+               and parts[-len(want):] == want
+               for sid, parts in flow_log_steps(flow_log))
 
 
 def _inside(project: Path, path: Path, what: str) -> str:
