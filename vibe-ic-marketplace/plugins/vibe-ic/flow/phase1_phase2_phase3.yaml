@@ -1612,7 +1612,9 @@ steps:
         # catalog IP its input docs name as its own reuse, the reading that
         # routes step_rtl_gen to catalog-glue-author -- never an artefact this
         # flow writes. No declared IP: DESIGN_DECLARED_NA. No readable
-        # declaration: refused (rc 1), never N/A.
+        # declaration: refused (rc 1), never N/A. A declared IP the top never
+        # reaches FAILs (CATALOG_REUSE_DECLARED_NOT_INSTANTIATED, F28). F28 also
+        # runs it INLINE: design_one_shot_runner.step_catalog_synth_safe_params.
         - program_exit_zero: "catalog_synth_safe_params_check . --json reports/phase2/gates/catalog_synth_safe_params.json"
     # The dependency was always REAL and never DECLARED. D1 is the sole member
     # of stage_phase1 and its L1-L27 output is, in this file's own words, "the

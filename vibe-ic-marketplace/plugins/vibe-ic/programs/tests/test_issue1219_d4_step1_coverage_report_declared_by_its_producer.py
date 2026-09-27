@@ -230,16 +230,28 @@ def test_wired_clause_still_fails_a_project_that_did_attempt_phase1(tmp_path):
 # 2026-08-14 correction in the module docstring; #1175 scoped `any_of` correctly)
 # --------------------------------------------------------------------------- #
 def test_step1_files_exist_block_still_holds_only_rtl():
+    # The property is the RTL block's CONTENTS, not the clause count: other
+    # program clauses may join step 1's `all_of` (F9 added the catalog
+    # synth-safe gate), but exactly one `files_exist` block may exist, it keeps
+    # `any_of`, it names only step-1 RTL, and the content gate stays beside it.
     gate = _step(_flow(), _SPEC_TO_RTL).get("gate") or {}
-    assert len(gate.get("all_of", [])) == 2, gate
-    files_gate, content_gate = gate["all_of"]
+    clauses = gate.get("all_of", [])
+    files_gates = [c for c in clauses
+                   if isinstance(c, dict) and "files_exist" in c]
+    assert len(files_gates) == 1, (
+        "step1 must carry exactly one files_exist block (its RTL)", gate)
+    files_gate = files_gates[0]
     files = files_gate.get("files_exist")
     assert isinstance(files, list) and files, (
         "step1 must retain its RTL files_exist predicate")
     assert files_gate.get("any_of") is True
-    assert content_gate == {
+    assert [f for f in files if not str(f).startswith("phase2/stage1/rtl/")] \
+        == [], files
+    assert {
         "program_exit_zero": "flow_step_output_content_check . --mode rtl"
-    }, content_gate
+    } in clauses, gate
+    assert [c for c in clauses
+            if "extraction_coverage_report" in str(c)] == [], gate
     for entry in files:
         assert "extraction_coverage_report" not in str(entry), (
             "`any_of: true` is a MODIFIER on this whole files_exist block, so "
