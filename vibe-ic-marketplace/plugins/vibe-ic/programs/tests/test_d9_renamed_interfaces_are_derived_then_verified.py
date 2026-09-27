@@ -798,3 +798,19 @@ def test_the_waive_says_a_reported_gap_keeps_rc_1(tmp_path):
     detail = _waive(_project(tmp_path, impl=_NO_DATA_IMPL))
     assert "keeps rc 1" in detail, detail[-900:]
     assert "must exit 0" not in detail
+
+
+def test_an_open_range_token_leaves_the_check_not_measured(tmp_path, capsys):
+    """RED on 6df205cdc (PASS). `o_memory_waddr[AW-1:0]` with AW undeclared
+    still places its port (so no pair moves it), but 15.5ic refuses the
+    partition as PARTITION_UNRESOLVED: which bit lands where is unknown."""
+    doc = DOC.replace("| **West (W)** | status pin(s) |",
+                      "| **West (W)** | `o_status` / `o_memory_waddr[AW-1:0]` |")
+    proj = _project(tmp_path, doc=doc)
+    mf = _emit(proj)
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (3, "NOT_MEASURED"), res
+    assert res["unresolved_tokens"] == ["o_memory_waddr[AW-1:0]"]
+    assert not any(n.startswith("o_memory_waddr") for n in
+                   res["nets_without_side"] + list(res["nets_on_two_sides"]))
+    assert mf["renamed_interfaces_check"]["verdict"] == "NOT_MEASURED"

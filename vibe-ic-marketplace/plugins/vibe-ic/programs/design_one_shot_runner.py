@@ -7731,6 +7731,10 @@ def _rtl_gen_reused_ip_handoff(
             f" renamed_interfaces: the pad-side derivation was not "
             f"measured ({_rid_der.get('reason')}); no port got a "
             f"side from it.")
+    elif _rid_chk.get("verdict") == "NOT_MEASURED":
+        _mf_note += (
+            f" renamed_interfaces: pad sides were not measured "
+            f"({_rid_chk.get('reason')}).")
     elif _rid_chk.get("verdict") == "FAIL":
         _unpaired = _rid_chk.get("unpaired_implemented_ports") or []
         _refused = [v for v in (_rid_chk.get("pairs") or [])
