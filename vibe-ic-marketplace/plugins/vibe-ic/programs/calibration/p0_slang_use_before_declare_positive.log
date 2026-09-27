@@ -1,0 +1,16 @@
+
+-- Running command `read_slang --single-unit --top core_top rtl/late.v; hierarchy -check -top core_top; proc; write_json /dev/null' --
+
+1. Executing SLANG frontend.
+ERROR: Design elaboration failed; see full log for details
+Top level design units:
+    core_top
+
+rtl/late.v:2:21: error: identifier 'late' used before its declaration
+  assign data_out = late;
+                    ^~~~
+rtl/late.v:3:8: note: declared here
+  wire late = data_in;
+       ^
+
+Build failed: 1 error, 0 warnings

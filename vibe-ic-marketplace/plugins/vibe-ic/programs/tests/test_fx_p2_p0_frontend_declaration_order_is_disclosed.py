@@ -15,11 +15,19 @@ The same portability defect D3 books for strict Icarus. In the image (0.3.83)
 `read_slang --allow-use-before-declare` elaborates that shape, and a genuinely
 undeclared name still fails ("use of undeclared identifier") with or without it.
 
-Only the EDA tools' answers are faked (`_invoke`), by argv, as measured.
+Orchestrator ruling (2026-09-28), the D3 review's two conditions:
+  (a) the retry runs ONLY for reused-IP projects -- plugin-authored RTL with a
+      use-before-declare stays a FAIL for repair;
+  (b) only when EVERY slang error is its exact use-before-declare diagnostic --
+      not a mix, not another refusal, not a transcript with no diagnostic.
+
+Only the EDA tools' answers are faked (`_invoke`), by argv, replaying REAL
+read_slang transcripts from the image (the calibration files).
 chip-AGNOSTIC: synthetic RTL.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -31,30 +39,36 @@ if str(PROGRAMS) not in sys.path:
 import p0_tool_frontend_check as F  # noqa: E402
 
 FLAG = "--allow-use-before-declare"
-LATE = "top.v:2:21: error: identifier 'late' used before its declaration\n"
-GHOST = "top.v:2:21: error: use of undeclared identifier 'ghost'\n"
+CAL = PROGRAMS / "calibration"
+#: real read_slang output: only a use-before-declare / that plus an undeclared
+LATE = (CAL / "p0_slang_use_before_declare_positive.log").read_text()
+MIXED = (CAL / "p0_slang_use_before_declare_negative.log").read_text()
+GHOST = ("top.v:2:21: error: use of undeclared identifier 'ghost'\n"
+         "Build failed: 1 error, 0 warnings\n")
 
 
-def _project(tmp_path: Path) -> Path:
+def _project(tmp_path: Path, reused_ip=True) -> Path:
     rtl = tmp_path / "phase2" / "stage1" / "rtl"
     rtl.mkdir(parents=True)
     (rtl / "top.v").write_text(
         "module top(input a, output y);\n  assign y = late;\n"
         "  wire late = a;\nendmodule\n")
+    if reused_ip is not None:
+        (rtl / "SOURCE_MANIFEST.json").write_text(
+            json.dumps({"reused_ip": bool(reused_ip)}))
     return tmp_path
 
 
-def _fake(monkeypatch, *, strict_err, relaxed_ok):
+def _fake(monkeypatch, *, strict, relaxed_ok, strict_rc=1):
     calls = []
 
     def _invoke(tool, args, root, image):
         calls.append((tool, list(args)))
         if tool == "yosys":
-            script = args[-1]
-            if FLAG in script:
-                rc, err = (0, "") if relaxed_ok else (1, strict_err)
+            if FLAG in args[-1]:
+                rc, err = (0, "") if relaxed_ok else (1, strict)
             else:
-                rc, err = 1, strict_err
+                rc, err = strict_rc, strict
             return subprocess.CompletedProcess([tool], rc, "", err)
         return subprocess.CompletedProcess([tool], 0, "", "")
 
@@ -62,23 +76,61 @@ def _fake(monkeypatch, *, strict_err, relaxed_ok):
     return calls
 
 
-def test_a_declaration_order_refusal_is_disclosed_not_failed(
-        monkeypatch, tmp_path):
-    calls = _fake(monkeypatch, strict_err=LATE, relaxed_ok=True)
+def _yosys(calls):
+    return [a for t, a in calls if t == "yosys"]
+
+
+# ---- the measured case: reused IP, only use-before-declare ---------------
+def test_reused_ip_declaration_order_refusal_is_disclosed(monkeypatch,
+                                                          tmp_path):
+    calls = _fake(monkeypatch, strict=LATE, relaxed_ok=True)
     r = F.check(_project(tmp_path))
     assert r["passed"] is True, r["findings"]
     assert any("DECLARATION_ORDER_RELAXED" in d
                for d in r.get("disclosures", [])), r
     assert "used before its declaration" in r.get("strict_refusal", "")
-    yosys = [a for t, a in calls if t == "yosys"]
-    assert len(yosys) == 2 and FLAG not in yosys[0][-1] and FLAG in yosys[1][-1]
-    # the flag is a read_slang OPTION, before the sources
-    script = yosys[1][-1]
-    assert script.index(FLAG) < script.index("top.v")
+    ys = _yosys(calls)
+    assert len(ys) == 2 and FLAG not in ys[0][-1] and FLAG in ys[1][-1]
+    assert ys[1][-1].index(FLAG) < ys[1][-1].index("top.v")
 
 
-def test_an_undeclared_identifier_still_fails(monkeypatch, tmp_path):
-    _fake(monkeypatch, strict_err=GHOST, relaxed_ok=False)
+# ---- (a) plugin-authored RTL is not retried ------------------------------
+def test_authored_rtl_use_before_declare_stays_a_fail(monkeypatch, tmp_path):
+    calls = _fake(monkeypatch, strict=LATE, relaxed_ok=True)
+    r = F.check(_project(tmp_path, reused_ip=False))
+    assert r["passed"] is False
+    assert "Yosys elaboration failed" in r["findings"]
+    assert len(_yosys(calls)) == 1 and not r.get("disclosures")
+
+
+def test_no_manifest_is_not_reused_ip(monkeypatch, tmp_path):
+    calls = _fake(monkeypatch, strict=LATE, relaxed_ok=True)
+    r = F.check(_project(tmp_path, reused_ip=None))
+    assert r["passed"] is False and len(_yosys(calls)) == 1
+
+
+# ---- (b) only slang's exact diagnostic, and only alone -------------------
+def test_a_mixed_refusal_is_not_retried(monkeypatch, tmp_path):
+    calls = _fake(monkeypatch, strict=MIXED, relaxed_ok=True)
+    r = F.check(_project(tmp_path))
+    assert r["passed"] is False and len(_yosys(calls)) == 1
+
+
+def test_an_undeclared_identifier_is_not_retried(monkeypatch, tmp_path):
+    calls = _fake(monkeypatch, strict=GHOST, relaxed_ok=True)
+    r = F.check(_project(tmp_path))
+    assert r["passed"] is False and len(_yosys(calls)) == 1
+
+
+def test_a_timeout_or_silent_failure_is_not_retried(monkeypatch, tmp_path):
+    calls = _fake(monkeypatch, strict="", relaxed_ok=True, strict_rc=124)
+    r = F.check(_project(tmp_path))
+    assert r["passed"] is False and len(_yosys(calls)) == 1
+
+
+def test_a_retry_that_does_not_elaborate_counts_for_nothing(monkeypatch,
+                                                            tmp_path):
+    _fake(monkeypatch, strict=LATE, relaxed_ok=False)
     r = F.check(_project(tmp_path))
     assert r["passed"] is False
     assert "Yosys elaboration failed" in r["findings"]
@@ -86,13 +138,14 @@ def test_an_undeclared_identifier_still_fails(monkeypatch, tmp_path):
 
 
 def test_a_clean_strict_elaboration_makes_one_call(monkeypatch, tmp_path):
-    calls = []
-
-    def _invoke(tool, args, root, image):
-        calls.append(tool)
-        return subprocess.CompletedProcess([tool], 0, "", "")
-
-    monkeypatch.setattr(F, "_invoke", _invoke)
+    calls = _fake(monkeypatch, strict="", relaxed_ok=True, strict_rc=0)
     r = F.check(_project(tmp_path))
-    assert r["passed"] is True and calls.count("yosys") == 1
+    assert r["passed"] is True and len(_yosys(calls)) == 1
     assert not r.get("disclosures")
+
+
+def test_the_reader_answers_on_the_real_transcripts():
+    assert F.only_use_before_declare(LATE) is True
+    assert F.only_use_before_declare(MIXED) is False
+    assert F.only_use_before_declare(GHOST) is False
+    assert F.only_use_before_declare("") is False
