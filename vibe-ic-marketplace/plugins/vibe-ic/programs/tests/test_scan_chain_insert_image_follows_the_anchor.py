@@ -31,6 +31,8 @@ import importlib
 import re
 from pathlib import Path
 
+import pytest
+
 import fault_atpg_run as far
 import fault_scan_chain_insert as fsci
 
