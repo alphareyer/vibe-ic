@@ -38238,9 +38238,15 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
               f"{_prs_rcx_decl.get('detail')} -- the post-route SPEF "
               f"extraction and its DRV repair are refused (SPEF_REPAIR_REFUSED "
               f"in openroad.log)", file=sys.stderr)
+    # T102 -- with step 32 on LibreLane the post-route repair is the custom
+    # step's, so the deck's own sign-off DRV repair transactions (both loops)
+    # are not emitted: the route this deck writes is the post-DRT route the
+    # step repairs, measured by the step's own closure.
+    _sdr_in_deck = (_fork_repair_capable
+                    and _librelane_postroute_repair_mode(project) == "direct")
     spef_repair_block = _post_route_spef_repair_tcl(
         out_dir_c, tech_lef_c, cell_lef_c,
-        fork_repair_capable=_fork_repair_capable,
+        fork_repair_capable=_sdr_in_deck,
         fanout_root_buffer_cell=_fanout_root_buffer_cell,
         # the child's own residual reroute must protect the SAME bindings the
         # parent's does -- the spares and spare pads are reserved in both.
@@ -38283,7 +38289,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                              + 'puts "SDR2_END"\n'
                              + _pnr_stage_end("postroute_drv_reconverge")
                              + "\n")
-                            if _fork_repair_capable else "")
+                            if _sdr_in_deck else "")
     # UNCONDITIONAL, exactly as when it was concatenated onto the string
     # above: the second antenna pass ran on both probe outcomes and still does.
     #
@@ -45005,6 +45011,250 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
         extras=({"refusal_code": _pgo.get("code"),
                  "pg_supply_ownership": _pgo.get("verdict")}
                 if _pg_refusal else {}))
+
+
+def _librelane_postroute_repair_mode(project: Path) -> str:
+    """The step-32 switch (`librelane_postroute_repair.mode`); `direct` when
+    the switch cannot be read, so a broken switch never silently changes the
+    flow -- `step_postroute_repair_librelane` refuses it by name instead."""
+    try:
+        import librelane_postroute_repair as _llprr  # noqa: PLC0415
+        return _llprr.mode(project)
+    except Exception:  # noqa: BLE001 -- refused where the mode is consumed
+        return "direct"
+
+
+def _postroute_repair_in_chain(project: Path) -> Tuple[Optional[Dict[str, Any]], str]:
+    """(the step-32 report `postroute_repair_after_route` wrote inside THIS
+    run's step-21 LibreLane chain, or None; why it is or is not that). Bound
+    by sha256: the route handoff receipt names the report it carried, so a
+    report from another run (or a route that ran direct) is never read as
+    this run's."""
+    import librelane_contract as _ll  # noqa: PLC0415
+    import librelane_postroute_repair as _llprr  # noqa: PLC0415
+    if _ll.selected_mode(project, "21") == "direct":
+        return None, "step 21 routed direct, so no LibreLane chain ran step 32"
+    receipt = project / "reports/phase3/librelane_route_handoff.json"
+    report = project / _llprr.REPORT_REL
+    try:
+        rec = (json.loads(receipt.read_text()).get("postroute_repair") or {})
+    except (OSError, ValueError) as exc:
+        return None, f"{receipt.name} is unreadable ({type(exc).__name__})"
+    if not rec:
+        return None, (f"{receipt.name} names no step-32 report (the route handed "
+                      f"over its direct arm, or step 32 was direct in the chain)")
+    if not report.is_file() or rec.get("report_sha256") != _ll.digest(report):
+        return None, (f"{_llprr.REPORT_REL} is not the report {receipt.name} "
+                      f"bound by sha256")
+    doc = json.loads(report.read_text())
+    if doc.get("site") != "after_route":
+        return None, f"{_llprr.REPORT_REL} was written at site {doc.get('site')!r}"
+    return doc, "the step-21 chain's own step-32 report"
+
+
+def _postroute_repair_in_chain_report(project: Path) -> Optional[Dict[str, Any]]:
+    """The in-chain step-32 report, or None (`_postroute_repair_in_chain`)."""
+    return _postroute_repair_in_chain(project)[0]
+
+
+def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
+                                 pdk_root: Path, sdc: Path, deck: str,
+                                 route_state: Optional[Path],
+                                 route_views: Dict[str, Path],
+                                 route_drc: Optional[int],
+                                 variant_arm: Any) -> Optional[Dict[str, Any]]:
+    """Step 32 on LibreLane inside step 21's LibreLane chain (T102 r2), called
+    by `librelane_route.execute` after its selection and before its handoff:
+    LL21 -> Vibeic.PostRouteRepair -> tail. None when step 32 is `direct`, or
+    when step 21 handed over its direct arm (step 32 then runs after the tail,
+    `step_postroute_repair_librelane`). Returns the views the handoff should
+    carry instead (the adopted candidate's ODB/DEF) and the receipt record."""
+    import librelane_contract as _ll  # noqa: PLC0415
+    import librelane_postroute_repair as _llprr  # noqa: PLC0415
+    selected = _librelane_postroute_repair_mode(project)
+    if selected == "direct" or route_state is None:
+        return None
+    work = project / "phase3/librelane/32-config"
+    work.mkdir(parents=True, exist_ok=True)
+    pg_rules = work / "deck_pg_rules.tcl"
+    _aa.write_text(pg_rules, _pg_global_connect_reassert_tcl(deck))
+    report = _llprr.run_in_chain(
+        project, mode=selected, image=image, pdk=str(pdk.name), pdk_root=pdk_root,
+        sdc=sdc, derate=(_FLAT_OCV_DERATE_EARLY, _FLAT_OCV_DERATE_LATE),
+        route_state=route_state, route_drc=route_drc, variant_arm=variant_arm,
+        pg_rules_tcl=pg_rules)
+    path = project / _llprr.REPORT_REL
+    record = {"report": str(path.relative_to(project)), "report_sha256": _ll.digest(path),
+              "mode": selected, "adopted": report.get("adopted"),
+              "selected_arm": report.get("selected_arm")}
+    views: Dict[str, Path] = {}
+    state = report.get("adopted_state")
+    if report.get("verdict") == "PASS" and state and Path(state) != Path(route_state):
+        doc = json.loads(Path(state).read_text())
+        views = {"odb": Path(doc["odb"]), "def": Path(doc["def"])}
+        pnr_out = _pl.pnr_dir(project)
+        pnr_out.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(route_views["def"], pnr_out / "routed_base_prerepair.def")
+    return {"views": views, "record": record}
+
+
+def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
+                                       report: Dict[str, Any], t0: float, *,
+                                       handed: bool, top: str = "") -> "StepResult":
+    """The step-32 row and the promotion records from a LibreLane step-32
+    report. `handed`: the adopted views still have to be copied onto the
+    direct paths (after a direct route); inside the LL21 chain the tail
+    already wrote them."""
+    import librelane_postroute_repair as _llprr  # noqa: PLC0415
+    if report.get("verdict") != "PASS":
+        _drv_promotion_disclose(pnr_out, "tool_unsupported",
+                                str(report.get("reason") or report.get("code")))
+        return StepResult("postroute_repair_librelane", "NOT_MEASURED",
+                          time.time() - t0,
+                          f"{report.get('code')}: {report.get('reason')}",
+                          reason_class=_V.ReasonClass.EXECUTION_ERROR)
+    base, final = report.get("baseline") or {}, report.get("final") or {}
+    summary = (f"setup {base.get('setup_ws_min')} -> {final.get('setup_ws_min')} ns, "
+               f"hold {base.get('hold_ws_min')} -> {final.get('hold_ws_min')} ns, "
+               f"DRV {base.get('drv_count')} -> {final.get('drv_count')}, antenna "
+               f"{report.get('baseline_antenna')} -> {report.get('final_antenna')} "
+               f"over {len(report.get('corners') or [])} STA corner(s) "
+               f"(OpenROAD.STAPostPNR, sign-off scene)")
+    if not report.get("adopted"):
+        _drv_promotion_disclose(
+            pnr_out, "librelane_closure_kept_input",
+            "the closure adopted no candidate, so the input route was kept: "
+            + "; ".join(f"{r.get('controller')}: {r.get('outcome')}"
+                        for r in report.get("closure") or []))
+        return StepResult("postroute_repair_librelane", "PASS", time.time() - t0,
+                          f"no candidate adopted (input route kept): {summary}")
+    routed = pnr_out / "routed.def"
+    netlist = pnr_out / f"{top}_pnr.v"
+    if handed:
+        shutil.copy2(routed, pnr_out / "routed_base_prerepair.def")
+        shutil.copy2(netlist, pnr_out / f"{top}_pnr_base_prerepair.v")
+        topdef = pnr_out / f"{top}.def"
+        targets = {"def": routed, "nl": netlist}
+        _llprr.handoff(project, report, targets)
+        if topdef.is_file():
+            shutil.copy2(routed, topdef)
+        _record_route_promotion(project, routed, [routed, topdef],
+                                "postroute_repair_librelane")
+        _record_route_promotion(project, netlist, [netlist],
+                                "postroute_repair_librelane")
+    _drv_promotion_clear(pnr_out)
+    _aa.write_json(pnr_out / _DRV_PROMOTION_CLAIM, {
+        "program": "librelane_postroute_repair", "promoted": True,
+        "claim_basis": ("OpenROAD.STAPostPNR design__max_{slew,cap,fanout}"
+                        "_violation__count summed over every STA corner, "
+                        "sign-off scene"),
+        "candidate": report.get("adopted"),
+        "drv_before": base.get("drv_count"), "drv_after": final.get("drv_count"),
+        "wns_before": base.get("setup_ws_min"), "wns_postroute": final.get("setup_ws_min"),
+        "report": str(project / _llprr.REPORT_REL)})
+    _gds = pnr_out / f"{top}.gds"
+    if top and _gds.is_file():
+        _gds.unlink()   # step_gds re-derives from the promoted route
+    return StepResult("postroute_repair_librelane", "PASS", time.time() - t0,
+                      f"ADOPTED {report.get('adopted')}"
+                      + (f" (dual arm {report['selected_arm']})"
+                         if report.get("selected_arm") else "")
+                      + (" in the step-21 LibreLane chain" if not handed else "")
+                      + f": {summary}",
+                      [str(routed), str(netlist)],
+                      extras={"pg_supply_ownership":
+                              (report.get("final_supply_ownership") or {}).get("verdict")})
+
+
+def step_postroute_repair_librelane(project: Path, top: str, pdk: "PdkConfig",
+                                    container: str) -> "Optional[StepResult]":
+    """Step 32 on LibreLane (T102): replaces `step_signoff_spef_repair` and the
+    DRV wire-length escalation when `phase3/librelane_switch.json` selects it.
+
+    The routed database (`routed.def`, `<top>_pnr.v`, the deck's SDC) is
+    bridged into a LibreLane State and repaired by the plugin step
+    `Vibeic.PostRouteRepair` under `_ppa/closure.py`
+    (`librelane_postroute_repair.run`). The deck's own supply rules and fill
+    policy travel with it (the same `_pg_global_connect_reassert_tcl` and
+    `_build_sparse_die_aware_filler_tcl` the direct repair session uses). A
+    candidate the closure adopts is handed to the paths the direct flow reads
+    and recorded as the promotion (`routed_base_prerepair.def`, the claim
+    record `drv_promotion_corroboration_check` reads); otherwise the input
+    route stays and the non-promotion is recorded with the closure's reason."""
+    import librelane_contract as _ll  # noqa: PLC0415
+    import librelane_postroute_repair as _llprr  # noqa: PLC0415
+    t0 = time.time()
+    pnr_out = _pl.pnr_dir(project)
+    routed = pnr_out / "routed.def"
+    netlist = pnr_out / f"{top}_pnr.v"
+    sdc = pnr_out / "constraint.sdc"
+    selected = _llprr.mode(project)
+    route_mode = _ll.selected_mode(project, "21")
+    refused = _llprr.refusal(selected, route_mode)
+    if refused:
+        return StepResult("postroute_repair_librelane", "FAIL", time.time() - t0,
+                          refused, reason_class=_V.ReasonClass.INPUT_ABSENT)
+    in_chain, in_chain_why = _postroute_repair_in_chain(project)
+    if in_chain is not None:
+        # Step 32 already ran inside step 21's LibreLane chain
+        # (`postroute_repair_after_route`), and the tail wrote routed.def from
+        # the database it handed on: this step records it, it never repairs
+        # the same route twice.
+        return _postroute_repair_librelane_result(
+            project, pnr_out, in_chain, t0, handed=False, top=top)
+    else:
+        # Not in the chain: said, with the reason, before the repair runs on
+        # the routed database here instead (the report this run then writes
+        # carries `site: after_direct_route`).
+        print(f"[postroute_repair_librelane] PRR_NOT_IN_CHAIN: {in_chain_why}; "
+              f"repairing the routed database after the route instead",
+              file=sys.stderr)
+    for view in (routed, netlist, sdc):
+        if not view.is_file():
+            _drv_promotion_disclose(
+                pnr_out, "no_base_route",
+                f"{view.name} is absent, so there is no routed database for "
+                f"the LibreLane post-route repair to start from")
+            return None
+    image = _ll.resolve_image(project)
+    try:
+        pdk_root = Path(_ll.pdk_root_resolution(project, str(pdk.name),
+                                                image=image)["path"])
+    except _ll.Refusal as exc:
+        return StepResult("postroute_repair_librelane", "NOT_MEASURED",
+                          time.time() - t0, f"LL_PDK_ROOT_NOT_DECLARED: {exc}",
+                          reason_class=_V.ReasonClass.INPUT_ABSENT)
+    work = project / "phase3/librelane/32-config"
+    work.mkdir(parents=True, exist_ok=True)
+    pg_rules = work / "deck_pg_rules.tcl"
+    _aa.write_text(pg_rules, _pg_global_connect_reassert_tcl(
+        _pnr_deck_pg_rules_text(pnr_out)))
+    _slot = _slot_geometry(project)
+    _declared_die = bool(_l9_declared_die_area(project)
+                         or _l19_declared_die_area(project))
+    _inset, _ = _padring_core_inset_um(project)
+    refill = work / "deck_refill.tcl"
+    _aa.write_text(refill, _build_sparse_die_aware_filler_tcl(
+        _filler_masters_for_pdk(pdk), slot_pinned_core=_slot is not None,
+        design_declared_die=_declared_die,
+        sparse_active_row_fill=bool(_inset is not None and _slot is None
+                                    and not _declared_die)))
+    try:
+        report = _llprr.run(
+            project, image=image, pdk=str(pdk.name), pdk_root=pdk_root,
+            views={"def": routed, "nl": netlist, "sdc": sdc}, sdc=sdc,
+            derate=(_FLAT_OCV_DERATE_EARLY, _FLAT_OCV_DERATE_LATE),
+            pg_rules_tcl=pg_rules, refill_tcl=refill)
+    except _ll.Refusal as exc:
+        _drv_promotion_disclose(
+            pnr_out, "librelane_refused",
+            f"the LibreLane post-route repair refused ({exc}); the input route "
+            f"was kept and nothing was promoted")
+        return StepResult("postroute_repair_librelane", "NOT_MEASURED",
+                          time.time() - t0, f"{exc}",
+                          reason_class=_V.ReasonClass.EXECUTION_ERROR)
+    return _postroute_repair_librelane_result(project, pnr_out, report, t0,
+                                              handed=True, top=top)
 
 
 # --- DRV wire-length escalation (a SEPARATE, independently-gated attempt) --
@@ -73928,7 +74178,16 @@ def main() -> int:
                         f"({_psc_exc}) — nothing is claimed about pad-side "
                         f"placement.", reason_class=_V.ReasonClass.EXECUTION_ERROR))
 
-        if _chain_ok:
+        # T102 -- step 32 on LibreLane (`phase3/librelane_switch.json` "32")
+        # replaces the two direct repair producers below.
+        _prr_on_librelane = _librelane_postroute_repair_mode(project) != "direct"
+        if _chain_ok and _prr_on_librelane:
+            _prr = _recorded(("pnr", "gds"), step_postroute_repair_librelane)(
+                project, effective_top, pdk, args.container)
+            if _prr is not None:
+                plan.append(_prr)
+                _chain_ok = (_prr.status == "PASS")
+        if _chain_ok and not _prr_on_librelane:
             # #527 estimate-vs-SPEF — SHIPPED post-route real-SPEF setup repair at
             # the slow sign-off corner, BEFORE gds/drc/lvs so the shipped design is
             # the repaired one. No-op (base route kept) unless it reaches setup>=0
@@ -73939,7 +74198,7 @@ def main() -> int:
             if _sr is not None:
                 plan.append(_sr)
                 _chain_ok = (_sr.status == "PASS")
-        if _chain_ok:
+        if _chain_ok and not _prr_on_librelane:
             # Caravel-class DRV closure — a SEPARATE, independently-gated
             # escalation for max_slew/max_capacitance violators that survive
             # the bounded loop above (measured: caravel_user_project x

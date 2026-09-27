@@ -547,6 +547,21 @@ class Domain:
     #: rc values from the measurement program that mean "I could not look".
     undetermined_rcs: Tuple[int, ...] = (2, 3)
     programs_dir: Path = PROGRAMS_DIR
+    #: How far this domain may move the wrong way, in its own unit, before a
+    #: change counts as a COLLATERAL regression. 0 (the default, and every
+    #: domain that declares none) is the strict rule. Declared per domain in
+    #: the registry, never passed at run time: a tolerance a caller could
+    #: widen is a guard a caller could remove. It never touches `improves`:
+    #: an objective still has to get strictly better to be promoted.
+    regression_tolerance: float = 0.0
+    #: HARD: a sign-off violation count (max slew/cap/fanout, antenna). SOFT:
+    #: everything else (slack, area, power). Declared in the registry.
+    hardness: str = "soft"
+    #: JSON pointer into this domain's measurement document naming the floor
+    #: the MEASUREMENT PROGRAM derived from the design's declared inputs (the
+    #: SDC's margin/uncertainty, the spec's declared margin), or None. The
+    #: registry never carries the number: it would be a hand-typed floor.
+    floor_pointer: Optional[str] = None
 
     def program_path(self) -> Path:
         if self.program is None:  # pragma: no cover - guarded by callers
@@ -584,7 +599,17 @@ class Domain:
         return new > old if self.direction is Direction.MAXIMIZE else new < old
 
     def regresses(self, new: float, old: float) -> bool:
-        return new < old if self.direction is Direction.MAXIMIZE else new > old
+        tol = self.regression_tolerance
+        return (new < old - tol if self.direction is Direction.MAXIMIZE
+                else new > old + tol)
+
+    def within_floor(self, new: float, floor: Optional[float]) -> bool:
+        """Still met, and on the right side of the declared floor (the
+        domain's own target when no floor was derived)."""
+        bound = self.satisfied_value if floor is None else floor
+        if not self.satisfied(new):
+            return False
+        return new >= bound if self.direction is Direction.MAXIMIZE else new <= bound
 
 
 @dataclass(frozen=True)
@@ -905,6 +930,23 @@ def _load_domain(name: str, spec: Any, programs_dir: Path) -> Domain:
         raise RegistryError(f"domain {name!r}: a metric without a unit is a number alone")
     if not spec.get("metric"):
         raise RegistryError(f"domain {name!r}: no metric name declared")
+    hardness = spec.get("hardness", "soft")
+    if hardness not in ("hard", "soft"):
+        raise RegistryError(f"domain {name!r}: hardness must be 'hard' or 'soft', "
+                            f"got {hardness!r}")
+    floor_pointer = spec.get("floor_pointer")
+    if floor_pointer is not None and (not isinstance(floor_pointer, str)
+                                      or not floor_pointer.startswith("/")):
+        raise RegistryError(f"domain {name!r}: floor_pointer must be a JSON pointer "
+                            f"into the measurement document, got {floor_pointer!r}")
+    if floor_pointer is not None and hardness == "hard":
+        raise RegistryError(f"domain {name!r}: a HARD domain has no floor; "
+                            f"it may never regress")
+    tol = spec.get("regression_tolerance", 0)
+    if isinstance(tol, bool) or not isinstance(tol, (int, float)) or tol < 0:
+        raise RegistryError(
+            f"domain {name!r}: regression_tolerance must be a number >= 0 in "
+            f"the domain's own unit, got {tol!r}")
     return Domain(
         name=name, metric=str(spec["metric"]), unit=str(spec["unit"]),
         direction=_enum(Direction, spec.get("direction"), f"domain {name!r}.direction"),
@@ -916,6 +958,9 @@ def _load_domain(name: str, spec: Any, programs_dir: Path) -> Domain:
         binding=binding,
         undetermined_rcs=tuple(int(r) for r in (measure.get("undetermined_rcs") or (2, 3))),
         programs_dir=programs_dir,
+        regression_tolerance=float(tol),
+        hardness=hardness,
+        floor_pointer=floor_pointer,
     )
 
 
@@ -1100,6 +1145,10 @@ class Measurement:
     #: there would make the same measurement of the same design incomparable
     #: with itself as soon as the tree moved.
     implementation_root: str = ""
+    #: The floor the measurement program derived from the design's declared
+    #: inputs (`Domain.floor_pointer`), with where it came from.
+    floor: Optional[float] = None
+    floor_source: str = ""
 
     def usable(self) -> bool:
         """docs/PPA_INTERFACES.md §2: only MEASURED and DERIVED may enter a
@@ -1117,6 +1166,8 @@ class Measurement:
                        "implementation_root": self.implementation_root,
                        "argv": list(self.argv), "rc": self.rc},
         }
+        if self.floor is not None:
+            rec["floor"] = {"value": self.floor, "source": self.floor_source}
         if self.usable():
             rec["value"] = self.value
             rec["formula"] = self.formula
@@ -1316,7 +1367,15 @@ class ClosureController:
         # The number is computed FROM parsed fields, so it is DERIVED and it
         # carries its formula -- docs/PPA_INTERFACES.md §2 and §3.
         status = "DERIVED" if domain.extract.kind != "json_pointer" else "MEASURED"
+        floor, floor_source = None, ""
+        if domain.floor_pointer:
+            node = _json_pointer(doc, domain.floor_pointer)
+            if isinstance(node, (int, float)) and not isinstance(node, bool):
+                floor = float(node)
+                src = _json_pointer(doc, domain.floor_pointer + "_source")
+                floor_source = src if isinstance(src, str) else domain.floor_pointer
         return Measurement(domain=domain.name, metric=domain.metric, status=status,
+                           floor=floor, floor_source=floor_source,
                            value=value, unit=domain.unit, rc=proc.returncode,
                            formula=formula, argv=tuple(argv), stdout_tail=tail,
                            implementation_root=str(self.impl_root))
@@ -1557,7 +1616,16 @@ class ClosureController:
 
             # A regression in ANY re-measured domain rolls back, even when the
             # objective improved. That is what remeasure_domains is FOR.
+            #
+            # Except (owner ruling, T102 r3): an iteration that REMOVES HARD
+            # violations (its objective is a hard domain and it improved) may
+            # spend a SOFT domain down to that domain's declared floor, as
+            # long as the domain stays met. A hard domain never regresses. A
+            # soft-objective iteration keeps the tolerance rule.
+            improved = objective.improves(float(obj_m.value), current)
+            hard_repair = objective.hardness == "hard" and improved
             collateral: List[str] = []
+            spent: List[str] = []
             for dom in remeasure:
                 if dom.name == objective.name:
                     continue
@@ -1566,11 +1634,21 @@ class ClosureController:
                 prev_value = prev.get("value") if isinstance(prev, dict) else None
                 if m.usable() and isinstance(prev_value, (int, float)) \
                         and dom.regresses(float(m.value), float(prev_value)):
+                    if hard_repair and dom.hardness == "soft" \
+                            and dom.within_floor(float(m.value), m.floor):
+                        bound = dom.satisfied_value if m.floor is None else m.floor
+                        spent.append(
+                            f"{dom.metric}: {prev_value} -> {m.value} stays met "
+                            f"and above its floor {bound} "
+                            f"({m.floor_source or 'the domain target'})")
+                        continue
                     collateral.append(
                         f"{dom.metric}: {prev_value} -> {m.value} "
-                        f"({dom.direction.value})")
+                        f"({dom.direction.value})"
+                        + (f", below its floor "
+                           f"{dom.satisfied_value if m.floor is None else m.floor}"
+                           if hard_repair and dom.hardness == "soft" else ""))
 
-            improved = objective.improves(float(obj_m.value), current)
             if collateral:
                 self._restore(snap)
                 it.digest_restored = tree_digest(self.impl_root)
@@ -1585,7 +1663,9 @@ class ClosureController:
                 it.decision = "PROMOTED"
                 it.decision_reason = (
                     f"{objective.metric}: {current} -> {obj_m.value} "
-                    f"({objective.direction.value})")
+                    f"({objective.direction.value})"
+                    + (f"; hard-violation repair spent: {'; '.join(spent)}"
+                       if spent else ""))
                 current = float(obj_m.value)
                 for dom in remeasure:
                     if after[dom.name].usable():

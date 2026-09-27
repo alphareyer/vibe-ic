@@ -445,18 +445,40 @@ def test_unchanged_geometry_still_reuses_the_gds(tmp_path, monkeypatch):
 # GDS whenever step_signoff_spef_repair returned a row.
 # ---------------------------------------------------------------------------
 
+#: The step-32 producer the main flow calls: the deck's own repair
+#: (`step_signoff_spef_repair`, where a project opts step 21/32 out) and, since
+#: T102 r4's chip-path cut-over, the LibreLane one. The guard property is the
+#: SAME for both rows, so both are asserted.
+_REPAIR_PRODUCERS = {
+    "direct": ("step_signoff_spef_repair", "signoff_spef_repair",
+               {"21": "direct", "32": "direct"}),
+    "librelane": ("step_postroute_repair_librelane", "postroute_repair_librelane",
+                  None),
+}
+
+
+def _repair_producer(monkeypatch, project, producer, status, detail):
+    fn, row, switch = _REPAIR_PRODUCERS[producer]
+    if switch is not None:
+        sw = project / "phase3" / "librelane_switch.json"
+        sw.parent.mkdir(parents=True, exist_ok=True)
+        sw.write_text(json.dumps({"steps": switch}))
+    monkeypatch.setattr(R, fn, lambda *a, **k: R.StepResult(row, status, 0.0, detail))
+    if producer == "librelane":
+        monkeypatch.setattr(R, "_librelane_postroute_repair_mode", lambda p: "librelane")
+    return row
+
+
+@pytest.mark.parametrize("producer", sorted(_REPAIR_PRODUCERS))
 def test_an_appended_repair_row_does_not_disable_the_guard(tmp_path,
-                                                           monkeypatch):
+                                                           monkeypatch, producer):
     project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
     d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
-    monkeypatch.setattr(
-        R, "step_signoff_spef_repair",
-        lambda *a, **k: R.StepResult("signoff_spef_repair", "PASS", 0.0,
-                                     "no repair needed"))
+    row = _repair_producer(monkeypatch, project, producer, "PASS", "no repair needed")
     R.main()
 
     plan = _plan(project)
-    assert "signoff_spef_repair" in plan
+    assert row in plan
     assert "gds" in d.called, (
         "a repair row between PnR and the GDS block must not disable the "
         f"#593 guard; gds row: {plan['gds']['detail']!r}")
@@ -467,17 +489,15 @@ def test_an_appended_repair_row_does_not_disable_the_guard(tmp_path,
 # stops the GDS/DRC-facing steps, as it did before.
 # ---------------------------------------------------------------------------
 
-def test_a_failing_repair_row_still_stops_the_gds(tmp_path, monkeypatch):
+@pytest.mark.parametrize("producer", sorted(_REPAIR_PRODUCERS))
+def test_a_failing_repair_row_still_stops_the_gds(tmp_path, monkeypatch, producer):
     project = _project(tmp_path, cached_die=OLD_DIE, cached_util=OLD_UTIL)
     d = _drive(monkeypatch, project, die=NEW_DIE, util=NEW_UTIL)
-    monkeypatch.setattr(
-        R, "step_signoff_spef_repair",
-        lambda *a, **k: R.StepResult("signoff_spef_repair", "FAIL", 0.0,
-                                     "repair blew up"))
+    row = _repair_producer(monkeypatch, project, producer, "FAIL", "repair blew up")
     R.main()
 
     plan = _plan(project)
-    assert plan["signoff_spef_repair"]["status"] == "FAIL"
+    assert plan[row]["status"] == "FAIL"
     assert "gds" not in d.called, (
         "a FAILED repair must still gate the GDS step (unchanged behaviour)")
 
