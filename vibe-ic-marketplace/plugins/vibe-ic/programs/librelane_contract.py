@@ -521,7 +521,9 @@ _EARLY_STEP_INPUTS: dict[str, tuple[str, ...]] = {
     'KLayout.SealRing': ('gds',), 'KLayout.XOR': ('mag_gds', 'klayout_gds'),
     # Step 34's stream finishing (the PDK fill script, its density deck).
     'KLayout.Filler': ('gds',), 'KLayout.Density': ('gds',),
-    'Checker.KLayoutDensity': ()}
+    'Checker.KLayoutDensity': (),
+    # Steps 37.3 / 37.5ic (mig105): vibe-ic's own stream checks.
+    'Vibeic.FinishingXOR': ('gds',), 'Vibeic.DatabaseUnit': ('gds',)}
 
 
 def _check_state(state: dict, *, outputs: bool = False,
@@ -620,7 +622,9 @@ def state_from_direct(project: Path, image: str, config_path: Path,
     required set is what LibreLane declares for the step (``meta.inputs`` in a
     config from ``resolve_step_configs``) plus the run_chain floor.  An ODB
     missing beside a DEF is produced by OpenROAD from the step config's own
-    LEFs; a DEF missing beside an ODB is written from it.  Any other missing
+    LEFs; a DEF missing beside an ODB is written from it; a powered netlist
+    (``pnl``) missing beside either is written from it with
+    ``write_verilog -include_pwr_gnd``, as LibreLane's own views are.  Any other missing
     view refuses ``LL_BRIDGE_VIEW_MISSING``; nothing is synthesized.  With
     ``chain`` (the later steps' configs, in order) the check covers every view
     a later step consumes that no earlier step produces.  Metrics
@@ -690,6 +694,22 @@ def state_from_direct(project: Path, image: str, config_path: Path,
         state['def'] = str(out_def.resolve())
         receipt['derived']['def'] = {'from': state['odb'], 'tcl_sha256': digest(tcl),
                                      'sha256': digest(out_def)}
+    if 'pnl' in required and 'pnl' not in state and ('odb' in state or 'def' in state):
+        # The powered netlist every LibreLane OpenROAD step writes with its
+        # views (io.tcl SAVE_PNL: `write_verilog -include_pwr_gnd`), from the
+        # same database; LVS (Netgen.LVS) consumes it (mig105).
+        pnl = output_dir / 'bridge.pnl.v'
+        pnl.unlink(missing_ok=True)
+        load = (f"read_db {{{state['odb']}}}" if 'odb' in state
+                else f"read_def {{{state['def']}}}")
+        tcl = _openroad_convert(project, image, config,
+                                [load, f'write_verilog -include_pwr_gnd {{{pnl}}}'],
+                                output_dir, 'to_pnl', mounts, docker)
+        if not pnl.is_file():
+            raise Refusal('LL_BRIDGE_CONVERSION_FAILED', str(output_dir / 'to_pnl.log'))
+        state['pnl'] = str(pnl.resolve())
+        receipt['derived']['pnl'] = {'from': state.get('odb') or state['def'],
+                                     'tcl_sha256': digest(tcl), 'sha256': digest(pnl)}
     missing = [view for view in required if view not in state]
     if missing:
         raise Refusal('LL_BRIDGE_VIEW_MISSING', f'{step_id}: {missing}')
@@ -1458,7 +1478,8 @@ def _plugin_digests(step_id: str) -> dict[str, str]:
     plan builder it imports, by sha256."""
     if not step_id.startswith(PLUGIN_STEP_PREFIX):
         return {}
-    files = sorted(PLUGIN_ROOT.rglob('*.py')) + sorted(PLUGIN_ROOT.rglob('*.tcl')) + [
+    files = sorted(PLUGIN_ROOT.rglob('*.py')) + sorted(PLUGIN_ROOT.rglob('*.tcl')) + sorted(
+        PLUGIN_ROOT.rglob('*.drc')) + [
         PLUGIN_ROOT.parent / name for name in PLUGIN_HOST_MODULES]
     return {str(path.relative_to(PLUGIN_ROOT.parent)): digest(path)
             for path in files if path.is_file()}

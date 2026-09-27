@@ -37,6 +37,10 @@ and ``clock_path_drive_sizing.tcl``.
 ``Vibeic.DetailedRoutingSeeded`` and ``Vibeic.NamedViolationReroute`` (flow
 step 21, mig99): the router seed as a declared PPA lever, and the targeted
 reroute of the nets the router's own report names. See ``routing.py``.
+
+``Vibeic.FinishingXOR`` (flow step 37.3, mig105) and ``Vibeic.DatabaseUnit``
+(flow step 37.5ic, mig105): finishing never removes or covers design geometry,
+and the stream's UNITS is the declared grid. See ``signoff.py``.
 """
 from __future__ import annotations
 
@@ -142,6 +146,12 @@ class InsertSpareCells(OdbpyStep):
 from .ir_drop import IRDropChecker, TransientIR  # noqa: E402,F401
 
 __all__ += ["IRDropChecker", "TransientIR"]
+
+# Steps 37.3 and 37.5ic (lane mig105): the finishing XOR and the database-unit
+# check over LibreLane's own streams.
+from .signoff import DatabaseUnit, FinishingXOR  # noqa: E402,F401
+
+__all__ += ["FinishingXOR", "DatabaseUnit"]
 
 # Step 21 (lane mig99): the declared-seed detailed route and the named-violation
 # reroute after it.

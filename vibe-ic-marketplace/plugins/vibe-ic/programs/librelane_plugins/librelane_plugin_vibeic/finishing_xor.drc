@@ -1,0 +1,113 @@
+# Step 37.3 (lane mig105): the finishing XOR.
+#
+# LibreLane's own XOR (`KLayout.XOR`, `scripts/klayout/xor.drc`) compares the
+# Magic and KLayout streams BEFORE finishing (`chip.py` puts SealRing/Filler
+# after `Checker.XOR`).  Nothing upstream checks that finishing left the design
+# alone.  This script runs on the same engine as xor.drc (KLayout DRC, tiled,
+# threaded) over three streams of ONE lane:
+#
+#   $pre     the stream finishing started from (the StreamOut output)
+#   $sealed  KLayout.SealRing's output (optional: no seal-ring step)
+#   $final   KLayout.Filler's output (the finished stream)
+#
+# Layer/datatype pairs are sorted by where they first appear, never by a
+# hand-written list:
+#
+#   FILL     in $final, absent from $sealed (or $pre):  the Filler's own
+#            pairs.  Ignored, exactly as KLAYOUT_XOR_IGNORE_LAYERS ignores.
+#   RING     in $sealed, absent from $pre: the seal ring's own marker pairs.
+#            Ignored the same way.
+#   DESIGN   every pair $pre carries.  MEASURED on spm x gf180mcuD: the ring
+#            draws on 13 of them (COMP, contact, Metal1..5, vias), so ignoring
+#            the seal-ring layers would blind the XOR on the design metal.
+#
+# On every DESIGN pair it counts four defects, each a polygon count:
+#
+#   removed          $pre NOT $final        finishing deleted design geometry
+#   fill_on_design   $final NOT $sealed     the Filler drew on a design pair
+#   added_in_core    ($final NOT $pre) AND the declared core rectangle
+#   added_touching   ($final NOT $pre) INTERACTING $pre, on that same pair:
+#                    an added shape that touches design geometry merges with
+#                    (or shorts) it
+#
+# and prints each as `%OL_METRIC_I` plus their sum as
+# `vibeic__finishing_xor__defect__count`.  The added ring itself is not a
+# defect; its polygon count is printed as `vibeic__finishing_xor__added__count`.
+# A pair missing from $final that $pre carries is a whole removed layer and
+# is counted in `removed` like any other removal.
+
+verbose
+
+$jobs = ($jobs.nil? || $jobs == "") ? 1 : $jobs.to_i
+threads($jobs)
+$tilesize = ($tilesize.nil? || $tilesize == "") ? 500 : $tilesize.to_i
+tiles($tilesize.um, $tilesize.um)
+tile_borders(1.um, 1.um)
+
+pre = source($pre, $top_cell)
+final = source($final, $top_cell)
+have_sealed = !($sealed.nil? || $sealed == "")
+sealed = have_sealed ? source($sealed, $top_cell) : pre
+
+report("finishing XOR #{$pre} -> #{$final}", $rdb_out)
+
+def pairs(layout)
+  found = {}
+  layout.layer_indices.each do |li|
+    info = layout.get_info(li)
+    found["#{info.layer}/#{info.datatype}"] = info
+  end
+  found
+end
+
+pre_pairs = pairs(pre.layout)
+sealed_pairs = pairs(sealed.layout)
+final_pairs = pairs(final.layout)
+
+fill = final_pairs.keys - sealed_pairs.keys - pre_pairs.keys
+ring = sealed_pairs.keys - pre_pairs.keys
+puts "%VIBEIC_PAIRS fill=#{fill.sort.join(';')} ring=#{ring.sort.join(';')}"
+
+core = nil
+if !($core.nil? || $core == "")
+  x0, y0, x1, y1 = $core.split(",").map(&:to_f)
+  core = polygon_layer
+  core.insert(RBA::DBox::new(x0, y0, x1, y1))
+end
+
+counts = { "removed" => 0, "fill_on_design" => 0, "added_in_core" => 0,
+           "added_touching" => 0, "added" => 0 }
+
+pre_pairs.keys.sort.each do |name|
+  info = pre_pairs[name]
+  a = pre.input(info.layer, info.datatype)
+  f = final.input(info.layer, info.datatype)
+  removed = a - f
+  added = f - a
+  n_removed = removed.data.size
+  n_added = added.data.size
+  n_core = core ? (added & core).data.size : 0
+  n_touch = added.interacting(a).data.size
+  n_fill = 0
+  if have_sealed
+    s = sealed.input(info.layer, info.datatype)
+    n_fill = (f - s).data.size
+    (f - s).output("fill_on_design #{name}", "Filler shapes on design pair #{name}") if n_fill > 0
+  end
+  removed.output("removed #{name}", "design geometry on #{name} missing from the finished stream") if n_removed > 0
+  (added & core).output("added_in_core #{name}", "finishing added geometry inside the declared core on #{name}") if n_core > 0
+  added.interacting(a).output("added_touching #{name}", "finishing added geometry touching design geometry on #{name}") if n_touch > 0
+  counts["removed"] += n_removed
+  counts["fill_on_design"] += n_fill
+  counts["added_in_core"] += n_core
+  counts["added_touching"] += n_touch
+  counts["added"] += n_added
+  puts "%VIBEIC_PAIR #{name} removed=#{n_removed} added=#{n_added} in_core=#{n_core} touching=#{n_touch} fill_on_design=#{n_fill}"
+  n_defect = n_removed + n_fill + n_core + n_touch
+  puts "%OL_METRIC_I vibeic__finishing_xor__defect__count__pair:#{info.layer}_#{info.datatype} #{n_defect}" if n_defect > 0
+end
+
+defects = counts["removed"] + counts["fill_on_design"] + counts["added_in_core"] + counts["added_touching"]
+counts.each { |key, value| puts "%OL_METRIC_I vibeic__finishing_xor__#{key}__count #{value}" }
+puts "%OL_METRIC_I vibeic__finishing_xor__design_pair__count #{pre_pairs.size}"
+puts "%OL_METRIC_I vibeic__finishing_xor__defect__count #{defects}"
