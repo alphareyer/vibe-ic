@@ -8584,7 +8584,7 @@ def _io_pg_global_connect_tcl(pdk: "PdkConfig", container: Optional[str],
     return out
 
 
-def _core_supply_pins_tcl(pin_layers: Sequence[str]) -> str:
+def _core_block_pin_layers_tcl(pin_layers: Sequence[str]) -> str:
     """Tcl that decides, from the placed database, whether the core grid's
     straps become the supply PINS of the block.
 
@@ -8895,7 +8895,7 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
             "  add_global_connection -net VGND -pin_pattern \"^VNB$\"  -ground\n"
             "  global_connect\n"
             "  set_voltage_domain -name CORE -power VPWR -ground VGND\n"
-            + _core_supply_pins_tcl(["met4", "met5"])
+            + _core_block_pin_layers_tcl(["met4", "met5"])
             + _CORE_GRID_DEFINE_TCL +
             "  add_pdn_stripe -grid grid -layer met1 -width 0.48 -pitch 5.44 -offset 0 -followpins\n"
             f"  add_pdn_stripe -grid grid -layer met4 -width {_w4} -pitch {_p45} -offset {_o45} -extend_to_core_ring\n"
@@ -9373,7 +9373,7 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
             + _sec["enumerate"]
             + f"  set_voltage_domain -name CORE -power {pwr} -ground {gnd}"
             + _sec["domain_opt"] + "\n"
-            + _core_supply_pins_tcl(
+            + _core_block_pin_layers_tcl(
                 [st.get("layer") for st in _stripes if st.get("layer")])
             + ring["grid"]
             + f"  add_pdn_stripe -grid grid -layer {fpl} -width {w} -followpins{ring['extend']}\n"
@@ -41160,7 +41160,7 @@ if {[info exists env(MACRO_GDS)] && [string trim $env(MACRO_GDS)] ne ""} {
 }
 # A DEF routing BLOCKAGE is a keep-out for the router, not mask geometry.
 # Without `-noblockage` magic paints it as the layer's obstruction type
-# (tech `obs obsmN MetalN`), `gds write` streams that to the layer's
+# (tech `obs obsmN MetalN`), the GDS output below carries it on the layer's
 # blockage datatype, and the PDK's own magic deck counts obsmN as metal
 # (gf180mcuD `area allm2,obsm2 ... (M2.3)`): spm shipped one 0.22 um
 # keep-out that way and failed sign-off on metal that does not exist.
