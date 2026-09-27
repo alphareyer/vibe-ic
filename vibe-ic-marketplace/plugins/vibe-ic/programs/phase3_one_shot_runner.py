@@ -36045,6 +36045,16 @@ def step_io_pad_chip_top_gen(project: Path, container: Optional[str] = None,
         if len(_pad_power) == 1 and len(_pad_ground) == 1:
             extra.extend(["--power-net", sorted(_pad_power)[0],
                           "--ground-net", sorted(_pad_ground)[0]])
+        # Which edges pdngen can strap a supply pad to the core ring from
+        # depends on the routing direction of the pad pin's layer, so the
+        # producer gets the directions of THIS run's tech LEF.
+        _pad_dirs = {name: direction for name, direction, _pitch, _width in
+                     _techlef_routing_layers(_read_pdk_text(
+                         getattr(pdk, "tech_lef", None), container) or "")
+                     if direction in ("HORIZONTAL", "VERTICAL")}
+        if _pad_dirs:
+            extra.extend(["--routing-layer-directions",
+                          json.dumps(_pad_dirs, sort_keys=True)])
         # IO auxiliary controls are SIGNAL pins.  Driving them directly from
         # the named POWER/GROUND nets leaves them outside both pdngen (not LEF
         # PG pins) and detailed routing (the rail nets are special), producing

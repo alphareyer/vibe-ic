@@ -820,6 +820,110 @@ def _derive_supply_pad_pair(
     }
 
 
+#: The direction a strap runs from a pad on each side to the core ring: across
+#: the edge, so vertical from the south and north rows, horizontal from the
+#: east and west columns.
+_STRAP_DIRECTION = {"S": "VERTICAL", "N": "VERTICAL",
+                    "E": "HORIZONTAL", "W": "HORIZONTAL"}
+
+
+def _faces_core(rect: Tuple[float, float, float, float], side: str,
+                placed_size: Tuple[float, float]) -> bool:
+    """Does a placed pin rectangle reach the pad edge that faces the core?
+
+    The same test pdngen's `PadDirectConnectionStraps::getPinsFacingCore`
+    applies: a pad in the south row faces the core with its top edge, the
+    north row with its bottom edge, the west column with its right edge and
+    the east column with its left edge.
+    """
+    w, h = placed_size
+    eps = 1e-6
+    return {"S": rect[3] >= h - eps, "N": rect[1] <= eps,
+            "W": rect[2] >= w - eps, "E": rect[0] <= eps}[side]
+
+
+def _supply_edge_reach(pair: Sequence[Dict[str, object]],
+                       pin_ports: Dict[str, Dict[str, List[Tuple[str, Tuple[
+                           float, float, float, float]]]]],
+                       sizes: Dict[str, Tuple[float, float]],
+                       layer_directions: Optional[Dict[str, str]],
+                       ) -> Dict[str, object]:
+    """On which die edges can the PDN strap every supply cell to the core ring?
+
+    pdngen (`add_pdn_ring -connect_to_pads`) connects a supply pad by drawing
+    a strap from each of the pad's rail pins that reaches the core-facing edge
+    straight across to the ring. It is reliable when that strap runs in its
+    layer's preferred routing direction. Against that direction it was
+    MEASURED to drop the strap (subservient x gf180mcuD, OpenROAD 26Q3-2963):
+    the ground cell's only core-facing pins are 1.0 um deep on a vertical
+    layer, and on the west edge pdngen built all six straps and then cut every
+    one of them away. The core's whole ground grid was left without a source
+    (`PSM-0069 Check connectivity failed on VSS`, 1,697,622 unconnected
+    shapes), while the same cell on the south or north edge, and the power
+    cell with 4.655 um pins on the west edge, connected.
+
+    So an edge is REACHED when every cell of the pair has a core-facing rail
+    pin on a layer whose preferred direction is the strap's. It is UNREACHED
+    when a cell's core-facing rail pins are all on layers routed across the
+    strap, and NOT_DETERMINED when the layer directions, the pin geometry or
+    the cell size is not in hand. Only the pin's layer and position are read,
+    from the IO LEF and the run's own tech LEF; no cell or layer is named.
+    """
+    sides: Dict[str, Dict[str, object]] = {}
+    if not layer_directions:
+        return {"verdict": "NOT_DETERMINED",
+                "reason": "no routing-layer directions were supplied "
+                          "(--routing-layer-directions)",
+                "sides": sides}
+    for side in SIDES:
+        orient = PR.SIDE_ORIENT[side]
+        strap = _STRAP_DIRECTION[side]
+        cells: Dict[str, Dict[str, object]] = {}
+        for entry in pair:
+            master = str(entry["master"])
+            size = sizes.get(master)
+            rails = sorted(dict(entry.get("supply_connections") or {}))
+            ports = pin_ports.get(master) or {}
+            if not size or not any(ports.get(pin) for pin in rails):
+                cells[master] = {"verdict": "NOT_DETERMINED",
+                                 "reason": "the IO LEF gives this cell no "
+                                           "size or no rail-pin geometry"}
+                continue
+            outline = PR.orient_rect((0.0, 0.0, size[0], size[1]), orient, size)
+            placed_size = (outline[2] - outline[0], outline[3] - outline[1])
+            facing = []
+            for pin in rails:
+                for layer, rect in ports.get(pin) or []:
+                    placed = PR.orient_rect(rect, orient, size)
+                    if _faces_core(placed, side, placed_size):
+                        facing.append({"pin": pin, "layer": layer,
+                                       "direction": layer_directions.get(layer)})
+            along = [f for f in facing if f["direction"] == strap]
+            unknown = [f for f in facing if f["direction"] is None]
+            if along:
+                verdict = "REACHED"
+            elif facing and not unknown:
+                verdict = "UNREACHED"
+            else:
+                verdict = "NOT_DETERMINED"
+            cells[master] = {"verdict": verdict, "strap_direction": strap,
+                             "core_facing_rail_pins": facing}
+        verdicts = {c["verdict"] for c in cells.values()}
+        side_verdict = ("UNREACHED" if "UNREACHED" in verdicts else
+                        "NOT_DETERMINED" if "NOT_DETERMINED" in verdicts else
+                        "REACHED")
+        sides[side] = {"verdict": side_verdict, "orient": orient,
+                       "cells": cells}
+    reached = [s for s in SIDES if sides[s]["verdict"] == "REACHED"]
+    return {"verdict": "REACHED" if reached else "NOT_DETERMINED",
+            "reached_sides": reached,
+            "reason": ("" if reached else
+                       "no edge is proven reachable for every supply cell, so "
+                       "the supply pads keep the shortest-edge rule and their "
+                       "ring connection is judged only by the PDN run"),
+            "sides": sides}
+
+
 def _emit_verilog(top: str, core: str,
                   ordered: Dict[str, List[str]],
                   chosen: Dict[str, Dict[str, object]],
@@ -1007,6 +1111,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         tie_low_pin: Optional[str] = None,
         tie_liberty: Optional[str] = None,
         supply_plan: Optional[Dict[str, object]] = None,
+        layer_directions: Optional[Dict[str, str]] = None,
         ) -> Tuple[int, Dict[str, object]]:
     rec: Dict[str, object] = {"program": PROGRAM, "verdict": "REFUSE",
                               "findings": [], "project": str(project)}
@@ -1224,6 +1329,16 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         pair, plan = _derive_supply_pad_pair(
             classes, sizes, pin_roles, prefix, power_net, ground_net,
             macro_sources)
+        # An edge the PDN cannot strap a supply cell to from is no edge for
+        # the pair (see `_supply_edge_reach`); the first LEF to give a master
+        # its pins is kept, as `pin_roles` keeps it.
+        pin_ports: Dict[str, Dict[str, List[Tuple[str, Tuple[
+            float, float, float, float]]]]] = {}
+        for text in per_lef:
+            for master, master_pins in PR.parse_lef_pin_ports(text).items():
+                pin_ports.setdefault(master, master_pins)
+        reach = _supply_edge_reach(pair, pin_ports, sizes, layer_directions)
+        reachable = list(reach.get("reached_sides") or []) or list(SIDES)
         # Without a measured current, one pair is the exploration baseline.
         # A same-run PSM plan may request more; it is never an input-side pad
         # assignment and it never changes the signal instances or their order.
@@ -1243,7 +1358,8 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         pair_width = sum(sizes[str(entry["master"])][0] for entry in pair)
         supply_placement: Dict[str, List[List[str]]] = {s: [] for s in SIDES}
         if supply_plan is None:
-            side = min(SIDES, key=lambda s: (side_widths[s], SIDES.index(s)))
+            side = min(reachable,
+                       key=lambda s: (side_widths[s], SIDES.index(s)))
             allocation = [side]
         else:
             die = float(supply_plan.get("die_side_um") or 0)
@@ -1296,7 +1412,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                                  for entry in pair]
                 legal[side] = []
                 final_widths[side] = {}
-                for count in range(pair_count + 1):
+                for count in range(pair_count + 1 if side in reachable else 1):
                     widths = base_widths + supply_widths * count
                     total = sum(widths)
                     if not widths:
@@ -1370,7 +1486,10 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         plan.update({
             "placement_side": allocation[0] if pair_count == 1 else None,
             "placement_basis": ("minimum pair on shortest signal edge" if pair_count == 1
-                                else "measured-current pairs balanced across legal sides; signal order retained"),
+                                else "measured-current pairs balanced across legal sides; signal order retained")
+                               + (" the PDN can strap the pair from"
+                                  if reach["verdict"] == "REACHED" else ""),
+            "edge_reach": reach,
             "pair_count": pair_count,
             "pairs_by_side": {s: len(supply_placement[s]) for s in SIDES},
             "measured_supply_entry_plan": supply_plan,
@@ -1652,6 +1771,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--tie-low-cell", default=None)
     ap.add_argument("--tie-low-pin", default=None)
     ap.add_argument("--tie-liberty", default=None)
+    ap.add_argument("--routing-layer-directions", default=None,
+                    help="JSON {layer: HORIZONTAL|VERTICAL} from the run's "
+                         "tech LEF; decides which edges the supply pads can "
+                         "be strapped to the core ring from")
     ap.add_argument("--json", dest="out_json", default=None)
     args = ap.parse_args(list(argv) if argv is not None else None)
 
@@ -1664,7 +1787,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         rc, rec = run(
             project, pdk_root, pdk, args.power_net, args.ground_net,
             args.tie_high_cell, args.tie_high_pin,
-            args.tie_low_cell, args.tie_low_pin, args.tie_liberty, plan)
+            args.tie_low_cell, args.tie_low_pin, args.tie_liberty, plan,
+            json.loads(args.routing_layer_directions)
+            if args.routing_layer_directions else None)
     except Unavailable as exc:
         rc, rec = 2, {"program": PROGRAM, "verdict": "NOT_AVAILABLE",
                       "rule": exc.rule, "findings": [exc.message]}
