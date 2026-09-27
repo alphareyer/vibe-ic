@@ -33,9 +33,33 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 
 
+#: `sys.modules` entries `_load` replaced in the running test, with what they
+#: held before (None: absent). Restored by `_restore_loaded_modules`.
+_REPLACED: dict = {}
+
+
+@pytest.fixture(autouse=True)
+def _restore_loaded_modules():
+    """Put back every `sys.modules` entry `_load` replaced.
+
+    `_load` executes a FRESH copy of a program and has to register it while it
+    executes. Left registered, that copy replaced the module object every
+    other test file had already bound: a later file monkeypatched its own
+    `arith_oracle_tb_gen`, `testbench_gen` imported the fresh one by name, and
+    the later file failed for a reason that lived here."""
+    yield
+    for name, prior in _REPLACED.items():
+        if prior is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = prior
+    _REPLACED.clear()
+
+
 def _load(name: str):
     spec = importlib.util.spec_from_file_location(name, PROGRAMS / f"{name}.py")
     mod = importlib.util.module_from_spec(spec)
+    _REPLACED.setdefault(name, sys.modules.get(name))
     sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return mod
