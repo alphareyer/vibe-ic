@@ -32,7 +32,6 @@ import sys
 import textwrap
 from pathlib import Path
 
-import pytest
 
 _TESTS = Path(__file__).resolve().parent
 _PLUGIN = _TESTS.parents[1]
@@ -68,12 +67,6 @@ FORMER_WRITERS = {
         "the same import-time corpus write, through its import of "
         "test_protocol_detector_no_misfire",
 }
-
-
-@pytest.fixture(scope="module")
-def audit():
-    return TWA.run_nodes(sorted(FORMER_WRITERS), plugin_root=_PLUGIN,
-                         root=_ROOT)
 
 
 def test_the_audit_sees_a_write_and_only_a_write(tmp_path):
@@ -124,29 +117,41 @@ def test_the_audit_sees_a_write_and_only_a_write(tmp_path):
     assert (root / "programs" / "real.py").read_text() == "x\n"
 
 
-@pytest.mark.parametrize("nodeid", sorted(FORMER_WRITERS))
-def test_a_former_writer_plants_nothing_in_the_shipped_tree(audit, nodeid):
-    got = audit.outcomes.get(nodeid)
-    assert got == "passed", (
-        f"{nodeid} did not PASS under the audit ({got or 'not run'}); a node "
-        f"that did not run proves nothing about what it writes.\n"
-        f"child rc={audit.rc}\n{audit.output[-3000:]}")
-    wrote = sorted({f"{e['event']} {e['path']}" for e in audit.events
-                    if e["test"].split(" ")[0] == nodeid})
-    assert not wrote, (
-        f"{nodeid} wrote into the checkout it tests: {'; '.join(wrote)}. "
-        f"On origin/main 76a277544 it {FORMER_WRITERS[nodeid]}; every "
-        f"concurrent worker listing that directory races it.")
+def test_no_former_writer_plants_anything_in_the_shipped_tree():
+    """ONE child session for every former writer, and ONE test, on purpose: a
+    module-scoped fixture is instantiated once per xdist WORKER, so spreading
+    per-node cases across workers re-ran the whole child session for each.
 
-
-def test_collecting_the_former_writers_plants_nothing(audit):
-    """An import-time write has no test id to carry. Both corpus modules wrote
-    during COLLECTION, so this is where they would show."""
+    Two failure classes, both named per node. A node that did not PASS proves
+    nothing about what it writes (renamed, deleted, or red for another
+    reason). A node that wrote under the checkout is the defect. An import-time
+    write carries no test id, so collection-time events are reported on their
+    own: both corpus modules wrote while they were being COLLECTED."""
+    audit = TWA.run_nodes(sorted(FORMER_WRITERS), plugin_root=_PLUGIN,
+                          root=_ROOT)
     assert audit.outcomes, (
         f"the audited child reported no test at all (rc={audit.rc}); an "
         f"empty session proves nothing:\n{audit.output[-3000:]}")
-    wrote = sorted({f"{e['event']} {e['path']}" for e in audit.events
-                    if not e["test"]})
-    assert not wrote, (
-        "collecting the former writers wrote into the checkout: "
-        + "; ".join(wrote))
+    problems = []
+    for nodeid in sorted(FORMER_WRITERS):
+        got = audit.outcomes.get(nodeid)
+        if got != "passed":
+            problems.append(
+                f"{nodeid} did not PASS under the audit ({got or 'not run'})")
+        wrote = sorted({f"{e['event']} {e['path']}" for e in audit.events
+                        if e["test"].split(" ")[0] == nodeid})
+        if wrote:
+            problems.append(
+                f"{nodeid} wrote into the checkout it tests: "
+                f"{'; '.join(wrote)} (on origin/main 76a277544 it "
+                f"{FORMER_WRITERS[nodeid]})")
+    collected = sorted({f"{e['event']} {e['path']}" for e in audit.events
+                        if not e["test"]})
+    if collected:
+        problems.append("collecting the former writers wrote into the "
+                        "checkout: " + "; ".join(collected))
+    assert not problems, (
+        "every concurrent worker listing these paths races the writer:\n  "
+        + "\n  ".join(problems)
+        + (f"\nchild rc={audit.rc}\n{audit.output[-3000:]}"
+           if any("did not PASS" in p for p in problems) else ""))
