@@ -3856,6 +3856,14 @@ def _staged_sdc_survey(project: Path) -> List[Dict[str, object]]:
     except Exception:
         staged = []
     for p in staged:
+        # §4.05 (FX_405): a staged SDC the authority denies is listed as
+        # excluded — so the header still accounts for it — and never opened.
+        denial = _rfb.design_input_denial(project, p)
+        if denial:
+            rows.append({"path": str(p.relative_to(project)),
+                         "consumed": False, "unevaluable_env_refs": [],
+                         "reason_not_consumed": denial})
+            continue
         try:
             text = p.read_text(errors="replace")
         except OSError:
@@ -15004,6 +15012,8 @@ def _reference_flow_qor_knobs(project: Path) -> Dict[str, object]:
     # given knob wins (Make/Tcl override semantics).
     files = sorted(rdir.rglob("*.mk")) + sorted(rdir.rglob("*.tcl"))
     for f in files:
+        if _rfb.design_input_denial(project, f):
+            continue  # §4.05 (FX_405): golden/, score/, golden.mk, expected_*
         try:
             text = f.read_text(errors="ignore")
         except Exception:
@@ -15414,10 +15424,20 @@ def _rf_pnr_scan(project: Path) -> Dict[str, object]:
     # §4.05: an ORACLE artifact in here is split out. It is classified by shape
     # and the parsed content is discarded on the spot — a classifier, never an
     # extractor; no value from it reaches the flow or the report.
+    #
+    # FX_405: an entry inside an off-limits DIRECTORY (golden/, score/,
+    # metrics/ ...) is excluded unopened by the repo's one authority. The file
+    # NAME's words are not judged here — this loop takes no value, and the
+    # contract for this bucket is content (a non-QoR `rules.json` is "not
+    # examined"). A dangling link cannot be read, so it keeps its bucket.
     for entry in sorted(rdir.rglob("*")):
         if entry.is_dir() or entry.suffix in _RF_SCANNED_SUFFIXES:
             continue
         rel_entry = _rel(entry)
+        if entry.is_file() and _rfb.design_input_denial(
+                project, entry, file_name_words=False):
+            excluded_oracle.append(rel_entry)
+            continue
         try:
             if _rfb.is_oracle_qor_rules(entry.read_text(errors="ignore")):
                 excluded_oracle.append(rel_entry)
@@ -15429,6 +15449,13 @@ def _rf_pnr_scan(project: Path) -> Dict[str, object]:
     files = sorted(rdir.rglob("*.mk")) + sorted(rdir.rglob("*.tcl"))
     for f in files:
         rel = _rel(f)
+        # §4.05 (FX_405). MEASURED before this: `golden/flow.mk`,
+        # `score/cfg.mk`, `golden.mk` and `expected_results.tcl` were parsed as
+        # recipes and their values ADOPTED. A recipe suffix does not make a
+        # known-good result a setting; it is excluded unopened, and reported.
+        if _rfb.design_input_denial(project, f):
+            excluded_oracle.append(rel)
+            continue
         config_files.append(rel)
         try:
             text = f.read_text(errors="ignore")
@@ -16326,7 +16353,8 @@ def _render_reference_flow_pnr_report(audit: Dict[str, object]) -> str:
                 "with comparison operators, and hashes of the golden netlist "
                 "— rather than how to configure a run. Reading them would "
                 "hand this run the timing, area and wirelength it is supposed "
-                "to reach independently. They were classified by shape and "
+                "to reach independently. They were classified by name or, "
+                "where the name does not decide, by shape, and "
                 "their contents discarded unread; NOTHING from them reached "
                 "the flow. Their exclusion is the rule working and is NOT a "
                 "coverage gap to be closed.", ""]

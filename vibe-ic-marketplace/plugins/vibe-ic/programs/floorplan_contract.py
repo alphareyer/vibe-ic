@@ -292,6 +292,10 @@ def _iter_input_files(project: Path) -> List[Tuple[str, Path, str]]:
             if _OFF_LIMITS_SEGMENTS.intersection(
                     part.lower() for part in f.parts):
                 continue
+            # …and whatever else the repo's one authority denies (FX_405:
+            # `input/constraints/golden_timing.sdc` was read here).
+            if _rfb.design_input_denial(project, f):
+                continue
             suf = f.suffix.lower()
             if suf in _SKIP_SUFFIXES:
                 continue

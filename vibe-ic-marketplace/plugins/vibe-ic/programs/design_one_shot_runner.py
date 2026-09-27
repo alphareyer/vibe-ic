@@ -12055,7 +12055,10 @@ def _v713_mk_include_dirs(project: Path) -> List[Path]:
         rd = _pl.rtl_dir(project)
     except Exception:
         rd = None
+    import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
     for mk in sorted(base.rglob("*.mk")):
+        if _rfb.design_input_denial(project, mk):
+            continue  # a golden/ or score/ recipe is not the IP's layout
         try:
             txt = mk.read_text(errors="replace")
         except OSError:

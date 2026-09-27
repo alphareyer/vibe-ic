@@ -575,6 +575,7 @@ def _count_input_declared_registers(project) -> "int | None":
     try:
         import re as _re
         from pathlib import Path as _P
+        import _reference_flow_boundary as _rfb
         roots = [
             _P(project) / "phase1" / "input_doc",
             _P(project) / "input" / "docs",
@@ -590,6 +591,11 @@ def _count_input_declared_registers(project) -> "int | None":
                         if f in seen:
                             continue
                         seen.add(f)
+                        # §4.05 (FX_405): an `input/expected/` table is the
+                        # answer, not the design's register map. Before the
+                        # stem de-dupe, so it cannot take a design doc's slot.
+                        if _rfb.design_input_denial(project, f):
+                            continue
                         # De-dupe STAGED COPIES of the same doc (e.g.
                         # phase1/input_doc/L5_register_map.txt vs
                         # input/docs/L5_register_map.md) by filename stem so a

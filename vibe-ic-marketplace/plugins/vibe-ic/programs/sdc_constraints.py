@@ -17,9 +17,19 @@ Chip-AGNOSTIC: pure standard-SDC syntax, no chip-class literals.
 """
 from __future__ import annotations
 
+# `programs/` is a flat directory whose modules import each other by bare name
+# (vibe-ic#2104): restore the condition a by-path load does not provide.
+import os as _os
+import sys as _sys
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+
 import re
 from pathlib import Path
 from typing import Dict, List, Optional
+
+import _reference_flow_boundary as _rfb  # noqa: E402  the §4.05 authority
 
 # ---------------------------------------------------------------------
 # Generator self-attribution (shared emitter/checker vocabulary)
@@ -99,14 +109,22 @@ def collect_sdc_files(project: Path,
     ``extra_dirs`` (ORGANIC #556 round-2) appends additional SDC
     directories AFTER the staged ground truth — e.g. phase3's synth step
     also reads the phase2-generated ``phase2/stage2/constraints/`` SDCs.
-    Default behaviour (no extra dirs) is unchanged."""
+    Default behaviour (no extra dirs) is unchanged.
+
+    §4.05 (FX_405): a staged SDC the repo's authority denies —
+    ``input/constraints/golden_timing.sdc``, ``reference_flow/golden/*.sdc`` —
+    is NOT design input and is never returned. MEASURED before this: the
+    golden SDC sorted first, became THE silicon SDC PnR and STA ran against,
+    and set the resolved clock period."""
     files: List[Path] = []
     cdir = project / "input" / "constraints"
     if cdir.is_dir():
-        files.extend(sorted(cdir.glob("*.sdc")))
+        files.extend(p for p in sorted(cdir.glob("*.sdc"))
+                     if not _rfb.design_input_denial(project, p))
     rdir = project / "input" / "reference_flow"
     if rdir.is_dir():
-        files.extend(sorted(rdir.rglob("*.sdc")))
+        files.extend(p for p in sorted(rdir.rglob("*.sdc"))
+                     if not _rfb.design_input_denial(project, p))
     for d in (extra_dirs or []):
         if d.is_dir():
             files.extend(sorted(d.glob("*.sdc")))
