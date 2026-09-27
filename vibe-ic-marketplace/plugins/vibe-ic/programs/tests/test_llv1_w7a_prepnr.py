@@ -81,3 +81,116 @@ def test_pad_assignment_reads_rc_like_the_ring_step(tmp_path, calls, rc,
 def test_pad_assignment_rc0_without_its_report_is_a_fail(tmp_path, calls):
     got = _r().step_pad_assignment(tmp_path, container="c", pdk=None)
     assert got.status == "FAIL" and "is absent" in got.detail
+
+
+# ── 4/4: the between-segments step ──────────────────────────────────────────
+
+import ast  # noqa: E402
+
+RUNNER = PROGRAMS / "phase3_one_shot_runner.py"
+
+
+def _fn_src(name):
+    src = RUNNER.read_text()
+    tree = ast.parse(src)
+    node = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == name)
+    return ast.get_source_segment(src, node)
+
+
+@pytest.fixture
+def staged(monkeypatch, tmp_path):
+    """step_prepnr with each piece it calls recorded, in order."""
+    r = _r()
+    order = []
+    nl = tmp_path / "phase2" / "stage2" / "synth" / "top_synth.v"
+    nl.parent.mkdir(parents=True)
+    nl.write_text("module top(); endmodule\n")
+    monkeypatch.setattr(r, "pnr_input_netlist", lambda p, t: (nl, "n", False))
+
+    def _padring(project, container, pdk, supply_plan=None):
+        order.append("chip_top")
+        return r.StepResult("io_pad_chip_top_gen", "PASS", 0.0, "ok")
+
+    def _assign(project, container, pdk):
+        order.append("pad_assignment")
+        return r.StepResult("pad_assignment", state.assign, 0.0, "a")
+
+    def _floorplan(project, top, pdk, container, die_um, util, netlist, t0):
+        order.append("floorplan")
+        if state.fp_fail:
+            return r.StepResult("pnr", "FAIL", 0.0, "PDN_CORE_TOO_SMALL: x")
+        return r.PrePnrDieCore(
+            die_um="100x100", die_w=100, die_h=100, core_pad=10, core_w=80,
+            core_h=80, fp_rect=None, util=0.4, auto_die_requested=True,
+            l9_die_note="", ring_floor_pad=10, ring_inset=None,
+            ring_pinned_die=False, seal_rec={}, slot=None,
+            strap_floor_detail={}, strap_floor_um=None, ct03_pin_rect=None)
+
+    state = SimpleNamespace(assign="PASS", fp_fail=False, ring=True)
+    monkeypatch.setattr(r, "_padring_producer_dispatch", _padring)
+    monkeypatch.setattr(r, "step_pad_assignment", _assign)
+    monkeypatch.setattr(r, "_prepnr_floorplan", _floorplan)
+    monkeypatch.setattr(r, "_chip_path_requests_pad_ring",
+                        lambda p: state.ring)
+    return SimpleNamespace(r=r, order=order, state=state, project=tmp_path)
+
+
+def _run(st):
+    return st.r.step_prepnr(st.project, "top", SimpleNamespace(), "c",
+                            "auto", 0.4)
+
+
+def test_prepnr_runs_the_pieces_in_step_pnrs_order(staged):
+    res = _run(staged)
+    assert staged.order == ["chip_top", "pad_assignment", "floorplan"]
+    assert res.status == "NOT_MEASURED"                  # no step-7 SDC yet
+    assert "SDC_SEAM_PENDING" in res.detail
+    assert res.extras["floorplan"]["die_w"] == 100
+    # it AUTHORS no SDC: nothing named constraint.sdc appears anywhere
+    assert not list(staged.project.rglob("constraint.sdc"))
+
+
+def test_prepnr_reads_step_7s_sdc(staged):
+    sdc = staged.project / "phase2" / "stage2" / "constraints" / "top.sdc"
+    sdc.parent.mkdir(parents=True)
+    sdc.write_text("create_clock -period 10 [get_ports clk]\n")
+    res = _run(staged)
+    assert res.status == "PASS"
+    assert res.extras["sdc"]["path"] == str(sdc)
+    assert sdc.read_text() == "create_clock -period 10 [get_ports clk]\n"
+
+
+def test_prepnr_refusals_stop_it(staged):
+    staged.state.assign = "FAIL"
+    assert _run(staged).status == "FAIL"
+    assert staged.order == ["chip_top", "pad_assignment"]
+    staged.order.clear()
+    staged.state.assign, staged.state.fp_fail = "PASS", True
+    res = _run(staged)
+    assert res.status == "FAIL" and "PDN_CORE_TOO_SMALL" in res.detail
+    staged.order.clear()
+    staged.state.fp_fail, staged.state.ring = False, False
+    _run(staged)
+    assert staged.order == ["chip_top", "floorplan"]     # no ring, no assignment
+
+
+def test_the_default_flow_and_the_step_run_the_same_code():
+    pnr, prep = _fn_src("step_pnr"), _fn_src("step_prepnr")
+    for call in ("_padring_producer_dispatch(", "_prepnr_floorplan("):
+        assert pnr.count(call) == 1 and prep.count(call) == 1, call
+    assert "constraint.sdc" not in prep
+    assert "_floorplan_rectangles_record(" in _fn_src("_prepnr_floorplan")
+    assert "_prepnr_geometry(" in _fn_src("_prepnr_floorplan")
+    assert "_floorplan_rectangles_record(" not in pnr.split(
+        "_prep_dc = _prepnr_floorplan(")[0]
+
+
+def test_the_window_plan_maps_the_prep_to_the_pnr_site():
+    import step_preflight as spf
+    r = _r()
+    sites = dict(spf.RUNNER_PLANS["phase3_one_shot_runner"].sites)
+    assert sites[r.PREPNR_DISPATCH_SITE][0] == r.PREPNR_CANONICAL_HEAD
+    steps = spf.enterable_steps("phase3_one_shot_runner")
+    assert r.PREPNR_CANONICAL_HEAD in steps
+    assert "prepnr" not in steps          # not a canonical step: refused by name

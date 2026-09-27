@@ -37779,6 +37779,83 @@ def _prepnr_floorplan(project: Path, top: str, pdk: PdkConfig,
     return _prep_dc
 
 
+#: llv1 W7a -- the pre-PnR preparation's place in the phase-3 window plan.
+#: In the default flow it runs INSIDE the `pnr` dispatch site (canonical span
+#: 15..22), so a window entering at 15 runs it and nothing new is enterable;
+#: an external flow dispatches `step_prepnr` between its two segments.
+PREPNR_DISPATCH_SITE = "pnr"
+PREPNR_CANONICAL_HEAD = "15"
+
+
+def _prepnr_constraint_file(project: Path, top: str) -> Tuple[Optional[Path], str]:
+    """SEAM (llv1 W7a): the SDC the implementation segment reads.
+
+    This step AUTHORS NO SDC. Step 7 authors the design-intent ASIC SDC once
+    at its declared output (lane fxport, `next/claude-fx-step7-asic-sdc`:
+    `phase2/stage2/constraints/<top>.sdc`); the between-segments step READS
+    it. Until that lands, an absent file is named as the seam, never filled
+    in here.
+    """
+    path = Path(project) / "phase2" / "stage2" / "constraints" / f"{top}.sdc"
+    if path.is_file():
+        return path, f"step 7's declared SDC ({path.relative_to(project)})"
+    return None, ("SDC_SEAM_PENDING: step 7 declares "
+                  f"phase2/stage2/constraints/{top}.sdc and it is absent; the "
+                  "between-segments step reads that file and authors none "
+                  "(fxport: next/claude-fx-step7-asic-sdc)")
+
+
+def step_prepnr(project: Path, top: str, pdk: PdkConfig, container: str,
+                die_um: str, util: float,
+                em_floor_for_resize: Optional[Dict[str, Any]] = None
+                ) -> StepResult:
+    """The pre-PnR preparation as ONE step, between two external-flow segments.
+
+    llv1 W7a: the chip-top producer (`_padring_producer_dispatch`, the same
+    dispatch `step_pnr` makes), the step-7 SDC it reads (a seam, see
+    `_prepnr_constraint_file`), the pad assignment (`step_pad_assignment`,
+    when the chip path requests a ring) and the die/core floorplan with its
+    record (`_prepnr_floorplan`) -- the same code the default flow runs inside
+    `step_pnr`, in the same order. Callable in the default mode too; the
+    default flow does not dispatch it (it runs the pieces in `step_pnr`).
+    """
+    t0 = time.time()
+    netlist, _nl_note, _nl_is_scan = pnr_input_netlist(project, top)
+    if not netlist.is_file():
+        return StepResult("prepnr", "FAIL", time.time() - t0,
+                          f"synth netlist missing: {netlist}")
+    extras: Dict[str, Any] = {"netlist": str(netlist)}
+    padring = _padring_producer_dispatch(
+        project, container, pdk,
+        supply_plan=(em_floor_for_resize or {}).get("supply_entry_plan"))
+    extras["chip_top"] = {"status": padring.status, "detail": padring.detail}
+    sdc, sdc_why = _prepnr_constraint_file(project, top)
+    extras["sdc"] = {"path": str(sdc) if sdc else None, "basis": sdc_why}
+    if _chip_path_requests_pad_ring(project):
+        assign = step_pad_assignment(project, container, pdk)
+        extras["pad_assignment"] = {"status": assign.status,
+                                    "detail": assign.detail}
+        if assign.status != _V.Verdict.PASS.value:
+            return StepResult("prepnr", assign.status, time.time() - t0,
+                              f"pad assignment: {assign.detail}",
+                              extras=extras, reason_class=assign.reason_class)
+    fp = _prepnr_floorplan(project, top, pdk, container, die_um, util,
+                           netlist, t0)
+    if isinstance(fp, StepResult):
+        return StepResult("prepnr", fp.status, time.time() - t0, fp.detail,
+                          extras=extras, reason_class=fp.reason_class)
+    extras["floorplan"] = asdict(fp)
+    status = (_V.Verdict.PASS.value if sdc is not None
+              else _V.Verdict.NOT_MEASURED.value)
+    return StepResult(
+        "prepnr", status, time.time() - t0,
+        (f"die {fp.die_w}x{fp.die_h} um, core pad {fp.core_pad} um; "
+         f"chip top {padring.status}; {sdc_why}"),
+        [str(project / FLOORPLAN_RECTANGLES_REL)], extras=extras,
+        reason_class=("" if sdc is not None
+                      else _V.ReasonClass.INPUT_ABSENT.value))
+
+
 def step_pnr(project: Path, top: str, pdk: PdkConfig,
              container: str, die_um: str, util: float,
              spare_density=None, pad_ring_step=step_pad_ring_gen,
