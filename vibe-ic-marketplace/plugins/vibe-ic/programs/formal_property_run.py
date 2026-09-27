@@ -3024,7 +3024,10 @@ RECORD_ADJUDICATION = _ra.declare(
     # Regenerate with:
     #   python3 published_record_staleness_check.py \
     #       --print-decision-digest formal_property_run
-    decision_digest="bfe3ec44467f0d8bebdabc306902e4a68bfc69592a3ca81b5ec34d355c7575ff",
+    # Re-reviewed after the prove-arm/resource changes: build_results still
+    # permits all-bounded tasks to say PASS while unbounded_proved is false;
+    # the rule below must continue to demote that archived claim to PARTIAL.
+    decision_digest="b6967ecacf30cce0e66da91ac89d9d68b63356fb7177fdb5ac4a5adc24f22abb",
     rules=(
         _ra.Rule(
             rule_id="formal_property_run.bounded-is-not-a-proof",
