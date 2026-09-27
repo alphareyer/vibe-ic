@@ -521,7 +521,9 @@ _EARLY_STEP_INPUTS: dict[str, tuple[str, ...]] = {
     'KLayout.SealRing': ('gds',), 'KLayout.XOR': ('mag_gds', 'klayout_gds'),
     # Step 34's stream finishing (the PDK fill script, its density deck).
     'KLayout.Filler': ('gds',), 'KLayout.Density': ('gds',),
-    'Checker.KLayoutDensity': ()}
+    'Checker.KLayoutDensity': (),
+    # Steps 37.3 / 37.5ic (mig105): vibe-ic's own stream checks.
+    'Vibeic.FinishingXOR': ('gds',), 'Vibeic.DatabaseUnit': ('gds',)}
 
 
 def _check_state(state: dict, *, outputs: bool = False,

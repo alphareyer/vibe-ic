@@ -669,3 +669,12 @@ def test_an_undeclared_core_refuses_before_any_stream(tmp_path, monkeypatch):
     with pytest.raises(contract.Refusal, match="LL_FINISHING_CORE_UNDECLARED"):
         step37.run(project, "img", tmp_path, "procA", pnr / "routed.def",
                    pnr / "chip_pnr.v", pnr / "constraint.sdc", pnr / "chip.gds")
+
+
+@pytest.mark.parametrize("step", ["Vibeic.FinishingXOR", "Vibeic.DatabaseUnit"])
+def test_the_stream_checks_need_the_stream_and_nothing_else(tmp_path, step):
+    gds = tmp_path / "chip.gds"
+    gds.write_bytes(b"stream")
+    contract._check_state({"gds": str(gds), "metrics": {}}, step_id=step)
+    with pytest.raises(contract.Refusal, match="LL_STATE_MISSING"):
+        contract._check_state({"metrics": {}}, step_id=step)
