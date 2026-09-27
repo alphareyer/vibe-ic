@@ -29,7 +29,8 @@ W14). Row:
                         several (an STA corner writes two) or, for a row
                         that will be a #365 back-fill, none
   ``timestamp``, ``exit_code``
-  ``measurement``       the tool's mcp-eda record, or null (UNDECLARED)
+  ``measurement``       null (UNDECLARED), or exactly the record
+                        `derived_measurement` reads from the artefact
   ``tool_version``      optional
 
 ``run_dir`` is PROJECT-relative (the LibreLane run lives inside the project),
@@ -63,7 +64,11 @@ WHAT `validate_row` REFUSES
   * a librelane row whose ``tool`` is not the tool its step runs, or without
     ``tool_step_id`` (an orfs row: ``make_stage``);
   * a ``measurement`` that is present but not an mcp-eda record stating
-    ``measured``, or is another tool's record.
+    ``measured``, names another tool or none, or (with ``verify_disk``) is
+    not exactly the record `_runner_measurement.derive` reads from the
+    canonical artefact (stated_by ``runner-derived``); where nothing can be
+    derived it must be null. LibreLane writes no mcp-eda record, so any
+    other value is a claim nobody measured.
 
 chip-AGNOSTIC / PDK-AGNOSTIC: paths and digests only; no design is read.
 """
@@ -83,6 +88,7 @@ if _PROGRAMS_DIR not in sys.path:
 
 import _atomic_artefact  # noqa: E402
 import _mcp_measurement  # noqa: E402
+import _runner_measurement  # noqa: E402
 import _tool_log_provenance as _tlp  # noqa: E402
 
 SCHEMA = "vibe-ic/external-flow-import/2"
@@ -251,7 +257,7 @@ def _shape_problems(row: Dict[str, Any]) -> List[str]:
         if meas.undeclared:
             problems.append("'measurement' is neither null nor an mcp-eda "
                             "measurement record stating measured true/false")
-        elif meas.tool and meas.tool != row["tool"]:
+        elif meas.tool != row["tool"]:
             problems.append(f"'measurement' is {meas.tool!r}'s record, not "
                             f"{row['tool']!r}'s")
     return problems
@@ -333,7 +339,30 @@ def validate_row(row: Any, project: Path, run_dir: Any, *,
                 problems.append(f"{key} {path} is not a file on disk")
             elif sha256_file(path) != want:
                 problems.append(f"{key} {path} no longer hashes to its row")
+        # THE MEASUREMENT IS RE-DERIVED, NEVER TAKEN FROM THE CALLER. LibreLane
+        # writes no mcp-eda record, so a non-null value can only be vibe-ic's
+        # own claim; the one honest source is the artefact itself
+        # (`_runner_measurement.derive`, stated_by runner-derived). A value
+        # that is not exactly that reading -- a self-report, a hand edit, a
+        # measured:true over a DEF with no components -- is refused, and so is
+        # any record where the artefact supports none (it must be null).
+        if row["measurement"] is not None and not link:
+            derived = derived_measurement(project, row["canonical_path"],
+                                          row["tool"])
+            if derived is None:
+                problems.append("'measurement' must be null: nothing can be "
+                                "derived from the imported artefact")
+            elif row["measurement"] != derived:
+                problems.append("'measurement' is not the record derived "
+                                "from the imported artefact")
     return problems
+
+
+def derived_measurement(project: Path, canonical_path: str,
+                        tool: str) -> Optional[Dict[str, Any]]:
+    """The only measurement a row may carry: read from the artefact itself,
+    or None when nothing can be stated (then the row's value is null)."""
+    return _runner_measurement.derive(Path(project), canonical_path, tool)
 
 
 def to_provenance_entry(row: Dict[str, Any], project: Path,
@@ -344,6 +373,11 @@ def to_provenance_entry(row: Dict[str, Any], project: Path,
     (the one witness schema). Raises ManifestError when either refuses: the
     importer then writes a #365 back-fill.
     """
+    # Resolved first, as witnessed_row resolves it: a relative or symlinked
+    # project path must not turn a genuine witness into a refusal.
+    project = Path(project).resolve()
+    # VALIDATE FIRST: witnessed_row re-derives the witness, but not the row's
+    # own fields (the measurement above all). A refused row is never rendered.
     problems = validate_row(row, project, run_dir, verify_disk=True)
     if problems:
         raise ManifestError("; ".join(problems))
