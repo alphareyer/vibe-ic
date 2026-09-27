@@ -223,7 +223,7 @@ def run(project: Path, block: str, image: str,
 
     def refused(step: str, exc: "lc.Refusal") -> int:
         rc = _pc.EX_ENV_REFUSED if exc.code in (
-            "LL_IMAGE_INCAPABLE", "LL_CONFIG_RESOLVE_FAILED") else 1
+            "LL_IMAGE_INCAPABLE", "LL_CONFIG_RESOLVE_FAILED", *lc.TIME_REFUSALS) else 1
         record.update({"result": "NOT_MEASURED", "rule": exc.code,
                        "detail": f"{step}: {exc}"})
         write_json(out, record)
