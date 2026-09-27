@@ -219,6 +219,7 @@ def test_enclosing_phase3_hang_is_stopped_by_the_watchdog(
 def test_enclosing_phase3_failure_keeps_and_surfaces_stderr(
         project, monkeypatch, capsys):
     fail = ("import sys\n"
+            f"print({BANNER!r})\n"
             "for i in range(30): sys.stderr.write(f'line-{i}\\n')\n"
             "sys.exit(7)\n")
     monkeypatch.setattr(p3, "_phase3_enclosing_cmd",
@@ -237,6 +238,7 @@ def test_enclosing_phase3_failure_keeps_and_surfaces_stderr(
     err = capsys.readouterr().err
     assert "ENCLOSING_PHASE3_RC=7" in err and "line-29" in err
     assert str(log) in err
+    assert "top=top" in log.with_name("enclosing_phase3.stdout.log").read_text()
 
 
 def test_a_zombie_is_not_a_surviving_orphan():
@@ -266,52 +268,136 @@ def test_a_zombie_is_not_a_surviving_orphan():
         sleeper.wait(timeout=10)
 
 
-def _enclose_with(project, monkeypatch, code, run_id):
-    monkeypatch.setattr(p3, "_phase3_enclosing_cmd",
-                        lambda *a: [sys.executable, "-c", code])
-    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", run_id)
-    return _enclose(project)
+#: What `main` prints once admission and PDK resolution are done (the run
+#: banner), spelled as the runner prints it.
+BANNER = "=== phase3_one_shot_runner — pdk=x top=top ==="
 
 
-def test_an_enclosing_unit_whose_own_verdict_is_fail_is_fail(project, monkeypatch):
-    report = str(p3._pl.report_path(Path("ISOLATED"), "phase3_one_shot.json"))
-    # The unit writes its own report in the copy it was handed (argv[1]).
-    code = ("import json, pathlib, sys\n"
-            f"rel = pathlib.Path({report!r}).relative_to('ISOLATED')\n"
-            "p = pathlib.Path(sys.argv[1]) / rel\n"
-            "p.parent.mkdir(parents=True, exist_ok=True)\n"
-            "p.write_text(json.dumps({'verdict': 'FAIL'}))\n"
-            "sys.exit(1)\n")
+def test_the_run_banner_is_the_one_main_prints():
+    src = Path(p3.__file__).read_text()
+    assert BANNER.startswith(p3._PHASE3_RUN_BANNER)
+    assert 'print(f"{_PHASE3_RUN_BANNER}{pdk.name} top={effective_top}"' in src
+
+
+def _enclose_with(project, monkeypatch, code, run_id, steps=("23",)):
+    """A stand-in unit: `code` runs with the private copy as argv[1]."""
     monkeypatch.setattr(p3, "_phase3_enclosing_cmd",
                         lambda iso, *a: [sys.executable, "-c", code, str(iso)])
-    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "verdictfail")
-    row = _enclose(project)
+    monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", run_id)
+    return p3._phase3_window_enclosing(
+        project, "top", SimpleNamespace(name="gf180mcuD"),
+        SimpleNamespace(container="vibeic-eda"), set(steps), unit="phase3")
+
+
+def _unit(report=None, rc=1, banner=True, outputs=()):
+    """A unit that got past admission (its banner), wrote `outputs` and its
+    own report in the copy it was handed, then exited `rc`."""
+    rel = str(p3._pl.report_path(Path("ISO"), "phase3_one_shot.json")
+              .relative_to("ISO"))
+    code = "import json, pathlib, sys\niso = pathlib.Path(sys.argv[1])\n"
+    if banner:
+        code += f"print({BANNER!r})\n"
+    for out in outputs:
+        code += (f"q = iso / {out!r}; q.parent.mkdir(parents=True, exist_ok=True);"
+                 f" q.write_text('produced')\n")
+    if report is not None:
+        code += (f"q = iso / {rel!r}; q.parent.mkdir(parents=True, exist_ok=True)\n"
+                 f"q.write_text(json.dumps({report!r}))\n")
+    return code + f"sys.exit({rc})\n"
+
+
+def _rows(*rows):
+    return {"verdict": "FAIL", "steps": [
+        dict(zip(("name", "status", "detail", "reason_class"), r)) for r in rows]}
+
+
+def test_a_fail_in_the_windows_own_step_is_fail_and_names_it(project, monkeypatch):
+    report = _rows(("pnr", "FAIL", "global route diverged", ""),
+                   ("drc", "NOT_MEASURED", "upstream", "upstream_failed"))
+    row = _enclose_with(project, monkeypatch, _unit(report), "ownfail",
+                        steps=("15", "16"))
     assert row.status == "FAIL", row.detail
-    assert "verdict is FAIL" in row.detail
+    assert "pnr (15,15.5ic,16,17,18,19,20,21,22) FAIL: global route diverged" in row.detail
+    # The row outside the window is disclosed, not blamed.
+    assert "rows the window's steps do not own: drc (31) NOT_MEASURED" in row.detail
+
+
+def test_a_fail_outside_the_window_is_not_the_windows_fail(project, monkeypatch):
+    """The unit ran every site. Its PnR FAILed and an unplaceable row
+    FAILed, but both rows of the window's own step 31 passed: the window
+    PASSes and the other rows are named."""
+    outputs = ["reports/phase3/drc_signoff.rpt"]
+    report = _rows(("pnr", "FAIL", "x", ""), ("drc", "PASS", "", ""),
+                   ("lvs", "PASS", "", ""), ("sta_signoff", "FAIL", "y", ""))
+    row = _enclose_with(project, monkeypatch, _unit(report, outputs=outputs),
+                        "outfail", steps=("31",))
+    assert row.status == "PASS", row.detail
+    assert "rows the window's steps do not own: pnr (15,15.5ic,16,17,18,19,20,21,22) FAIL" in row.detail
+    assert "sta_signoff (no step) FAIL" in row.detail
+
+
+def test_a_fail_that_names_no_step_cannot_decide_an_unplaced_window(
+        project, monkeypatch):
+    report = _rows(("sta_signoff", "FAIL", "y", ""))
+    row = _enclose_with(project, monkeypatch, _unit(report), "unplaced",
+                        steps=("23",))
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.INCONCLUSIVE
+    assert "steps 23 have no row of their own" in row.detail
+    assert "rows the window's steps do not own: sta_signoff (no step) FAIL" in row.detail
+
+
+def test_a_window_step_not_measured_keeps_its_own_reason(project, monkeypatch):
+    report = _rows(("drc", "NOT_MEASURED", "", "tool_absent"),
+                   ("lvs", "PASS", "", ""))
+    row = _enclose_with(project, monkeypatch, _unit(report), "ownnm",
+                        steps=("31",))
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == "tool_absent"
 
 
 def test_a_previous_report_in_the_copy_does_not_speak_for_this_run(
         project, monkeypatch):
-    """The copy carries the project's last report (PASS). A unit that dies
-    without writing one must not be read as that PASS."""
+    """The copy carries the project's last report (PASS). A unit that ran
+    and died without writing one must not be read as that PASS."""
     old = p3._pl.report_path(project, "phase3_one_shot.json")
     old.parent.mkdir(parents=True, exist_ok=True)
     old.write_text(json.dumps({"verdict": "PASS"}))
-    row = _enclose_with(project, monkeypatch, "import sys; sys.exit(9)", "stale")
+    row = _enclose_with(project, monkeypatch, _unit(rc=9), "stale")
     assert row.status == "FAIL", row.detail
     assert "verdict=None" in row.detail
 
 
-@pytest.mark.parametrize("rc", [2, 3, 4])  # main()'s no-report refusals
-def test_a_unit_refused_before_it_ran_stays_not_measured(project, monkeypatch, rc):
-    row = _enclose_with(
-        project, monkeypatch,
-        f"import sys; sys.stderr.write('REFUSED: test\\n'); sys.exit({rc})",
-        f"refused{rc}")
+@pytest.mark.parametrize("rc", [0, 1, 2, 3, 4])
+def test_a_unit_that_never_started_a_step_is_not_measured_whatever_its_rc(
+        project, monkeypatch, rc):
+    """No run banner, no report: every refusal before the first step,
+    including rc 1 (a PDK ValueError/SystemExit) and rc 0 (the no-PDK
+    `[SKIP]`), is a unit that did not run."""
+    code = ("import sys; sys.stderr.write('REFUSED: test\\n'); "
+            f"sys.exit({rc})")
+    row = _enclose_with(project, monkeypatch, code, f"norun{rc}")
     assert row.status == "NOT_MEASURED", row.detail
     assert row.reason_class == p3._V.ReasonClass.INPUT_ABSENT
-    assert "refused before running a step" in row.detail
+    assert "stopped before running a step" in row.detail
     assert "REFUSED: test" in row.detail
+
+
+def test_the_real_pdk_refusal_is_a_unit_that_never_ran(project, monkeypatch):
+    """`_detect_pdk`'s own refusal, run for real in the child on a project
+    with a staged input/pdk: a named PDK it cannot resolve raises
+    ValueError, the child exits 1 with a traceback and no report."""
+    (project / "input" / "pdk" / "lib").mkdir(parents=True)
+    (project / "input" / "pdk" / "lib" / "cells.lib").write_text("library(x){}\n")
+    code = ("import sys, pathlib\n"
+            f"sys.path.insert(0, {str(Path(p3.__file__).parent)!r})\n"
+            "import phase3_one_shot_runner as p\n"
+            "p._detect_pdk(pathlib.Path(sys.argv[1]), 'no_such_pdk_name')\n"
+            f"print({BANNER!r})\n")
+    row = _enclose_with(project, monkeypatch, code, "pdkrefusal")
+    assert row.status == "NOT_MEASURED", row.detail
+    assert "enclosing rc=1" in row.detail
+    assert "ValueError" in row.detail and "no_such_pdk_name" in row.detail
 
 
 def test_the_real_runner_refusing_an_unadmitted_copy_stays_not_measured(
@@ -323,7 +409,38 @@ def test_the_real_runner_refusing_an_unadmitted_copy_stays_not_measured(
     monkeypatch.delenv(_runner_lock.REENTRANCY_ENV, raising=False)
     row = _enclose(project)
     assert row.status == "NOT_MEASURED", row.detail
-    assert "refused before running a step" in row.detail
+    assert "stopped before running a step" in row.detail
+
+
+@pytest.mark.parametrize("sig, status", [("SIGTERM", "NOT_MEASURED"),
+                                         ("SIGKILL", "NOT_MEASURED"),
+                                         ("SIGSEGV", "FAIL")])
+def test_a_unit_killed_by_a_signal(project, monkeypatch, sig, status):
+    """Stopped from outside (TERM/KILL): an environment stop, NOT_MEASURED
+    naming the signal. A crash of the unit's own (SEGV) after it ran: FAIL."""
+    code = (f"import os, signal, sys\nprint({BANNER!r}, flush=True)\n"
+            f"os.kill(os.getpid(), signal.{sig})\n")
+    row = _enclose_with(project, monkeypatch, code, f"sig{sig}")
+    assert row.status == status, row.detail
+    assert sig in row.detail
+    if status == "NOT_MEASURED":
+        assert row.reason_class == p3._V.ReasonClass.EXECUTION_ERROR
+
+
+def test_a_stall_inside_the_unit_is_stalled_not_a_refusal(project, monkeypatch):
+    """rc 2 is also RC_UNDETERMINED: the real `exit_undetermined_on_stall`
+    around a step that stalled after the unit started."""
+    code = ("import sys\n"
+            f"sys.path.insert(0, {str(Path(p3.__file__).parent)!r})\n"
+            "import _progress_run as pr\n"
+            "def main():\n"
+            f"    print({BANNER!r})\n"
+            "    raise pr.Stalled(['tool'], 3, 1.0, 3.0, {'cpu': True})\n"
+            "sys.exit(pr.exit_undetermined_on_stall(main))\n")
+    row = _enclose_with(project, monkeypatch, code, "undetermined")
+    assert row.status == "NOT_MEASURED", row.detail
+    assert row.reason_class == p3._V.ReasonClass.STALLED
+    assert "enclosing rc=2" in row.detail and "stalled" in row.detail
 
 
 def test_a_unit_that_cannot_be_spawned_stays_not_measured(project, monkeypatch):
