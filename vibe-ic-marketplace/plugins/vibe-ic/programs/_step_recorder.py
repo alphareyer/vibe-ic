@@ -461,48 +461,16 @@ def _qualnames(tree: ast.AST, lines: List[str]
     return by_line, src
 
 
-def _spans(tree: ast.AST) -> Dict[str, Tuple[int, int]]:
-    """``{qualname: (first line incl. decorators, last line)}`` — same names
-    as `_qualnames`."""
-    out: Dict[str, Tuple[int, int]] = {}
+def _enclosing(by_line: Dict[int, str], lineno: int) -> Optional[str]:
+    """The qualname whose code object starts at or above ``lineno``.
 
-    def walk(node: ast.AST, prefix: str) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                  ast.ClassDef)):
-                qual = f"{prefix}{child.name}"
-                start = child.lineno
-                for dec in child.decorator_list or ():
-                    dlo = getattr(dec, "lineno", None)
-                    if dlo is not None and dlo < start:
-                        start = dlo
-                out[qual] = (start, getattr(child, "end_lineno", start))
-                walk(child, f"{qual}.")
-            else:
-                walk(child, prefix)
-
-    walk(tree, "")
-    return out
-
-
-def _containing(spans: Dict[str, Tuple[int, int]], lineno: int
-                ) -> Optional[str]:
-    """The INNERMOST definition whose span contains ``lineno``, or None when
-    the line is at module level.
-
-    FX_STALE_LDOCS. `_enclosing` answers "the definition that STARTS at or
-    above" -- which, for a comprehension at MODULE level, is either nothing
-    (the whole recording was then refused: MEASURED on phase 1, a module-level
-    list comprehension at readme_class_detector.py:332 left the producer with
-    no identity) or a function that ENDED above it (the comprehension was then
-    credited to a function it is not in, silently). Containment is the
-    question, and a module-level anonymous code object is the MODULE BODY's,
-    which `MODULE_BODY` already hashes."""
+    Used only to FOLD an anonymous code object (a comprehension, a lambda)
+    into the function it lives in."""
     best = None
-    for qual, (lo, hi) in spans.items():
-        if lo <= lineno <= hi and (best is None or lo >= best[1]):
-            best = (qual, lo)
-    return best[0] if best else None
+    for start, qual in by_line.items():
+        if start <= lineno and (best is None or start > best[0]):
+            best = (start, qual)
+    return best[1] if best else None
 
 
 def module_body_digest(tree: ast.AST, lines: List[str]) -> str:
@@ -558,15 +526,11 @@ def stamp_digests(path: Path, entries) -> Tuple[Dict[str, str],
     if err:
         return {}, f"{path} ran but {err}"
     by_line, src = _qualnames(tree, lines)
-    spans = _spans(tree)
     out: Dict[str, str] = {MODULE_BODY: module_body_digest(tree, lines)}
     for name, lineno in sorted(entries):
         qual = by_line.get(lineno)
         if qual is None and name in _ANON:
-            qual = _containing(spans, lineno)
-            if qual is None:
-                # module level: its text is in MODULE_BODY, already recorded
-                continue
+            qual = _enclosing(by_line, lineno)
         if qual is None or qual not in src:
             return {}, (f"{path}: a code object that RAN ({name} at line "
                         f"{lineno}) has no definition in this file, so what "
