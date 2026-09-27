@@ -90,15 +90,41 @@ def test_canonical_flow_remains_69_steps_without_a_1_6x_step():
     assert "1.6x" not in ids, "rewrite fidelity is a Step-2 clause, not a step"
 
 
+def _clause_program(clause):
+    command = clause.get("program_exit_zero")
+    return str(command).split()[0] if command else None
+
+
 def test_step_1_remains_the_irreducible_authoring_step():
+    """Step 1 authors RTL and owns nothing else; checks ON that RTL may join it.
+
+    The property is not the clause list (F9 added the catalog synth-safe gate,
+    a check on the authored RTL). Every expected value is read from step 1's
+    own entry, never retyped:
+      * its declared deliverable is authored RTL, and nothing but RTL;
+      * the gate requires exactly that deliverable, in ONE `any_of` block;
+      * the RTL-content judge is still wired;
+      * every other clause is a judge (`program_exit_zero`), not one of the
+        programs step 1 declares as its PRODUCERS (`program_outputs`);
+      * nothing in step 1 judges the cross-layer rewrite (below).
+    """
     step1 = _by_id()["1"]
-    assert step1["gate"] == {
-        "all_of": [
-            {"files_exist": ["phase2/stage1/rtl/*.sv", "phase2/stage1/rtl/*.v"],
-             "any_of": True},
-            {"program_exit_zero": "flow_step_output_content_check . --mode rtl"},
-        ],
-    }
+    rtl_dir = "phase2/stage1/rtl/"
+    deliverable = [alt.strip() for out in step1["required_outputs"]
+                   for alt in str(out).split(" OR ")]
+    assert deliverable and [d for d in deliverable
+                            if not d.startswith(rtl_dir)] == [], deliverable
+    clauses = step1["gate"]["all_of"]
+    files = [c for c in clauses if "files_exist" in c]
+    assert files == [{"files_exist": deliverable, "any_of": True}], files
+    assert {"program_exit_zero": "flow_step_output_content_check . --mode rtl"} \
+        in clauses, clauses
+    producers = {row["program"] for row in step1.get("program_outputs") or []}
+    checks = [c for c in clauses if "files_exist" not in c]
+    assert [c for c in checks if set(c) != {"program_exit_zero"}] == [], checks
+    assert [c for c in checks if _clause_program(c) in producers] == [], (
+        "a step-1 PRODUCER wired as a gate clause authors, it does not check",
+        checks)
     assert not any(
         "crosslayer" in str(value)
         for key, value in step1.items()
