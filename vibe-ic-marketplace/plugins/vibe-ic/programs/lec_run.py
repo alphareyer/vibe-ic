@@ -4697,12 +4697,16 @@ BMC_DEFAULT_DEADLINE_S = 900
 BMC_DEPTH_ENV = "VIBEIC_LEC_BMC_DEPTH"
 BMC_DEFAULT_DEPTH = 64
 #: Cycles the declared reset port is held asserted before outputs are
-#: compared. Nothing is assumed about the power-up state: every register
-#: starts UNDEFINED (`-set-init-undef`), so a gold register that no reset has
-#: reached yet is x -- a don't-care (`-ignore_gold_x`) -- however many cycles
-#: its reset takes to arrive (a synchroniser, a registered reset, no reset),
-#: and a re-encoded gate register is never paired with an invented gold
-#: value. The L-docs declare no reset LENGTH, so none is assumed either.
+#: compared. Nothing is assumed about the GOLD's power-up state: its
+#: registers start UNDEFINED (`-set-init-undef`), so an output whose state
+#: no reset has reached yet is x -- a don't-care (`-ignore_gold_x`) --
+#: however many cycles its reset takes to arrive (a synchroniser, a
+#: registered reset, no reset), and a re-encoded gate register is never
+#: paired with an invented gold value. The GATE starts at a DEFINED value
+#: (`setundef -zero -init gate`): an undefined gate state is x-pessimistic
+#: (a structural netlist propagates x where the RTL does not), and MEASURED
+#: on subservient that alone produced a gate-x vs gold-0 "difference" at
+#: step 2. The L-docs declare no reset LENGTH, so none is assumed either.
 BMC_RESET_CYCLES = 1
 BMC_MITER = "lec_bmc_miter"
 _BMC_DEPTH_MARK = "LEC_BMC_DEPTH_BEGIN"
@@ -4873,7 +4877,8 @@ def bmc_script(prefix: str, reset: Dict, depths: List[int],
     # anything (`-enable_undef`; `-set-def-inputs` keeps the inputs 0/1).
     # MEASURED: `-ignore_gold_x` WITHOUT `-enable_undef` masked a real
     # mismatch; neither flag reads a synthesised don't-care as a mismatch.
-    body = (f"miter -equiv -flatten -make_outputs -ignore_gold_x "
+    body = (f"setundef -zero -init gate\n"
+            f"miter -equiv -flatten -make_outputs -ignore_gold_x "
             f"gold gate {BMC_MITER}\n"
             f"hierarchy -top {BMC_MITER}\n")
     for d in depths:
@@ -4918,12 +4923,12 @@ def parse_bmc_log(text: str, depth_target: int) -> Dict:
                                   "its trace names no post-reset step where "
                                   "the miter trigger is 1"}
             at = steps[cycle]
-            # A gold `x` bit is a don't-care: only a DEFINED gold bit the
-            # gate does not match makes an output differ.
+            # A gold `x` bit is a don't-care, and a gate `x` bit decides
+            # nothing: only two DEFINED bits that differ make an output differ.
             differing = sorted(
                 n[len("gold_"):] for n in at if n.startswith("gold_")
                 and "gate_" + n[len("gold_"):] in at
-                and any(g in "01" and g != t for g, t in zip(
+                and any(g in "01" and t in "01" and g != t for g, t in zip(
                     at[n], at["gate_" + n[len("gold_"):]])))
             if not differing:
                 return {"result": BMC_NOT_RUN, "depth_reached": reached,

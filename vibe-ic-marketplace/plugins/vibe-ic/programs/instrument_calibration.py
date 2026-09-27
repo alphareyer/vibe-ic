@@ -1043,9 +1043,9 @@ _register(Instrument(
     positive=Sample(
         provenance=(
             "yosys 0.69+ 4d572059c in vibeic-eda 0.3.83 (8HD-4, 2026-09-28), "
-            "the x-aware search from an undefined start (`miter "
-            "-ignore_gold_x`, `sat -enable_undef -set-def-inputs "
-            "-set-init-undef`). calibration/cal_bmc_rtl.v (a counter, "
+            "the x-aware search (`miter -ignore_gold_x`, `sat -enable_undef "
+            "-set-def-inputs -set-init-undef`) from an undefined GOLD and a "
+            "defined gate (`setundef -zero -init gate`). calibration/cal_bmc_rtl.v (a counter, "
             "synchronous active-high reset, registered `hit <= q == 4`) "
             "against calibration/cal_bmc_gate_planted.v: its gf180mcuD "
             "netlist (cal_bmc_gate.v, synthesised by that yosys) with ONE real "
@@ -1066,8 +1066,8 @@ _register(Instrument(
             "cycle 3), and its gf180mcuD netlist cal_bmc_rsync_gate.v (same "
             "yosys) re-encoded the FSM one-hot. Started at all-zero "
             "(`-set-init-zero`) the pair gave `model found: FAIL!` (busy at "
-            "step 2); started UNDEFINED every rung to 16 cycles after reset "
-            "ends `no model found: SUCCESS!`. The x don't-care pair "
+            "step 2); from an undefined gold and a defined gate every rung "
+            "to 16 cycles after reset ends `no model found: SUCCESS!`. The x don't-care pair "
             "(cal_bmc_xdc_*) is held by the tests."),
         artefact=_read("lec_bmc_rsync_negative.log")),
 ))

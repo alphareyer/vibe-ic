@@ -113,8 +113,10 @@ def test_a_trigger_only_in_the_reset_step_is_no_counterexample():
     assert got["result"] == "NOT_RUN" and "post-reset" in got["reason"]
 
 
-def test_a_trigger_with_no_differing_defined_output_is_no_counterexample():
-    got = lec_run.parse_bmc_log(_table((2, "gold_y", "x"), (2, "gate_y", 1),
+@pytest.mark.parametrize("gold, gate", [("x", 1), (0, "x")])
+def test_a_trigger_with_no_differing_defined_output_is_no_counterexample(gold, gate):
+    """Gold x is a don't-care; gate x decides nothing (x-pessimism)."""
+    got = lec_run.parse_bmc_log(_table((2, "gold_y", gold), (2, "gate_y", gate),
                                        (2, "trigger", 1)), 1)
     assert got["result"] == "NOT_RUN" and "no defined output differs" in got["reason"]
 
@@ -221,8 +223,8 @@ def test_a_killed_search_names_what_killed_it(tmp_path, monkeypatch, rc, oom,
 
 def test_the_script_asserts_the_declared_reset_then_compares(tmp_path):
     ys = lec_run.bmc_script("PREFIX\n", RESET, [1, 2], "t.vcd")
-    assert ys.startswith("PREFIX\nmiter -equiv -flatten -make_outputs "
-                         "-ignore_gold_x gold gate")
+    assert ys.startswith("PREFIX\nsetundef -zero -init gate\n"
+                         "miter -equiv -flatten -make_outputs -ignore_gold_x gold gate")
     assert "-seq 2 -set-init-undef -set-at 1 in_rst 1 -prove-skip 1" in ys
     assert "-seq 3 " in ys
     low = dict(RESET, resets=[{"port": "rst_n", "polarity": "active_low",

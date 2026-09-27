@@ -6,7 +6,7 @@
  \----------------------------------------------------------------------------/
  Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]
 
--- Executing script file `<reports>/cex_new2.ys' --
+-- Executing script file `<reports>/cex_f.ys' --
 
 1. Executing Verilog-2005 frontend: <project>/phase2/stage1/rtl/cal_bmc_rtl.v
 Parsing SystemVerilog input from `<project>/phase2/stage1/rtl/cal_bmc_rtl.v' to AST representation.
@@ -460,30 +460,32 @@ Removed 11 unused cells and 41 unused wires.
 
 15. Executing SPLITNETS pass (splitting up multi-bit signals).
 
-16. Executing MITER pass (creating miter circuit).
+16. Executing SETUNDEF pass (replace undef values with defined constants).
+
+17. Executing MITER pass (creating miter circuit).
 Creating miter cell "lec_bmc_miter" with gold cell "gold" and gate cell "gate".
 
-16.1. Executing FLATTEN pass (flatten design).
+17.1. Executing FLATTEN pass (flatten design).
 <suppressed ~2 debug messages>
 
-16.2. Executing OPT_EXPR pass (perform const folding).
+17.2. Executing OPT_EXPR pass (perform const folding).
 Optimizing module lec_bmc_miter.
 <suppressed ~4 debug messages>
 Removed 2 unused cells and 10 unused wires.
 
-17. Executing HIERARCHY pass (managing design hierarchy).
+18. Executing HIERARCHY pass (managing design hierarchy).
 
-17.1. Analyzing design hierarchy..
+18.1. Analyzing design hierarchy..
 Top module:  \lec_bmc_miter
 
-17.2. Analyzing design hierarchy..
+18.2. Analyzing design hierarchy..
 Top module:  \lec_bmc_miter
 Removing unused module `\gate'.
 Removing unused module `\gold'.
 Removed 2 unused modules.
 LEC_BMC_DEPTH_BEGIN 1
 
-18. Executing SAT pass (solving SAT problems in the circuit).
+19. Executing SAT pass (solving SAT problems in the circuit).
 Using SAT solver `minisat`.
 
 Setting up time step 1:
@@ -493,7 +495,12 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 109 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
+Import set-constraint from init attribute: \gate._33_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._32_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._34_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._31_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._30_.IQ1 = 1'0
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._30_.IQ1 \gate._31_.IQ1 \gate._34_.IQ1 \gate._32_.IQ1 \gate._33_.IQ1 } = 10'xxxxx00000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -533,7 +540,7 @@ SAT proof finished - no model found: SUCCESS!
 
 LEC_BMC_DEPTH_BEGIN 2
 
-19. Executing SAT pass (solving SAT problems in the circuit).
+20. Executing SAT pass (solving SAT problems in the circuit).
 Using SAT solver `minisat`.
 
 Setting up time step 1:
@@ -543,7 +550,12 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 109 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
+Import set-constraint from init attribute: \gate._33_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._32_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._34_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._31_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._30_.IQ1 = 1'0
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._30_.IQ1 \gate._31_.IQ1 \gate._34_.IQ1 \gate._32_.IQ1 \gate._33_.IQ1 } = 10'xxxxx00000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -590,29 +602,29 @@ SAT proof finished - model found: FAIL!
 
   Time Signal Name                 Dec       Hex           Bin
   ---- ------------------- ----------- --------- -------------
-  init \gate._30_.IQ1               --        --             x
-  init \gate._31_.IQ1               --        --             x
-  init \gate._32_.IQ1               --        --             x
-  init \gate._33_.IQ1               --        --             x
-  init \gate._34_.IQ1               --        --             x
+  init \gate._30_.IQ1                0         0             0
+  init \gate._31_.IQ1                0         0             0
+  init \gate._32_.IQ1                0         0             0
+  init \gate._33_.IQ1                0         0             0
+  init \gate._34_.IQ1                0         0             0
   init \gold.hit                    --        --             x
   init \gold.q[0]                   --        --             x
   init \gold.q[1]                   --        --             x
   init \gold.q[2]                   --        --             x
   init \gold.q[3]                   --        --             x
   ---- ------------------- ----------- --------- -------------
-     1 \gate_hit                    --        --             x
-     1 \gate_q[0]                   --        --             x
-     1 \gate_q[1]                   --        --             x
-     1 \gate_q[2]                   --        --             x
-     1 \gate_q[3]                   --        --             x
+     1 \gate_hit                     0         0             0
+     1 \gate_q[0]                    0         0             0
+     1 \gate_q[1]                    0         0             0
+     1 \gate_q[2]                    0         0             0
+     1 \gate_q[3]                    0         0             0
      1 \gold_hit                    --        --             x
      1 \gold_q[0]                   --        --             x
      1 \gold_q[1]                   --        --             x
      1 \gold_q[2]                   --        --             x
      1 \gold_q[3]                   --        --             x
      1 \in_clk                       0         0             0
-     1 \in_en                        1         1             1
+     1 \in_en                        0         0             0
      1 \in_rst                       1         1             1
      1 \trigger                      0         0             0
   ---- ------------------- ----------- --------- -------------
@@ -645,6 +657,6 @@ SAT proof finished - model found: FAIL!
      3 \in_en                        0         0             0
      3 \in_rst                       1         1             1
      3 \trigger                      1         1             1
-Dumping SAT model to VCD file <reports>/cex_new2.vcd
+Dumping SAT model to VCD file <reports>/cex_f.vcd
 
 ERROR: Called with -verify and proof did fail!

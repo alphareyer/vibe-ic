@@ -6,7 +6,7 @@
  \----------------------------------------------------------------------------/
  Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]
 
--- Executing script file `<reports>/none_new2.ys' --
+-- Executing script file `<reports>/none_f.ys' --
 
 1. Executing Verilog-2005 frontend: <project>/phase2/stage1/rtl/cal_bmc_rtl.v
 Parsing SystemVerilog input from `<project>/phase2/stage1/rtl/cal_bmc_rtl.v' to AST representation.
@@ -460,30 +460,32 @@ Removed 10 unused cells and 40 unused wires.
 
 15. Executing SPLITNETS pass (splitting up multi-bit signals).
 
-16. Executing MITER pass (creating miter circuit).
+16. Executing SETUNDEF pass (replace undef values with defined constants).
+
+17. Executing MITER pass (creating miter circuit).
 Creating miter cell "lec_bmc_miter" with gold cell "gold" and gate cell "gate".
 
-16.1. Executing FLATTEN pass (flatten design).
+17.1. Executing FLATTEN pass (flatten design).
 <suppressed ~2 debug messages>
 
-16.2. Executing OPT_EXPR pass (perform const folding).
+17.2. Executing OPT_EXPR pass (perform const folding).
 Optimizing module lec_bmc_miter.
 <suppressed ~4 debug messages>
 Removed 2 unused cells and 10 unused wires.
 
-17. Executing HIERARCHY pass (managing design hierarchy).
+18. Executing HIERARCHY pass (managing design hierarchy).
 
-17.1. Analyzing design hierarchy..
+18.1. Analyzing design hierarchy..
 Top module:  \lec_bmc_miter
 
-17.2. Analyzing design hierarchy..
+18.2. Analyzing design hierarchy..
 Top module:  \lec_bmc_miter
 Removing unused module `\gate'.
 Removing unused module `\gold'.
 Removed 2 unused modules.
 LEC_BMC_DEPTH_BEGIN 1
 
-18. Executing SAT pass (solving SAT problems in the circuit).
+19. Executing SAT pass (solving SAT problems in the circuit).
 Using SAT solver `minisat`.
 
 Setting up time step 1:
@@ -493,7 +495,12 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 110 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
+Import set-constraint from init attribute: \gate._33_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._32_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._34_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._31_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._30_.IQ1 = 1'0
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._30_.IQ1 \gate._31_.IQ1 \gate._34_.IQ1 \gate._32_.IQ1 \gate._33_.IQ1 } = 10'xxxxx00000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -533,7 +540,7 @@ SAT proof finished - no model found: SUCCESS!
 
 LEC_BMC_DEPTH_BEGIN 2
 
-19. Executing SAT pass (solving SAT problems in the circuit).
+20. Executing SAT pass (solving SAT problems in the circuit).
 Using SAT solver `minisat`.
 
 Setting up time step 1:
@@ -543,7 +550,12 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 110 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
+Import set-constraint from init attribute: \gate._33_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._32_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._34_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._31_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._30_.IQ1 = 1'0
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._30_.IQ1 \gate._31_.IQ1 \gate._34_.IQ1 \gate._32_.IQ1 \gate._33_.IQ1 } = 10'xxxxx00000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -592,7 +604,7 @@ SAT proof finished - no model found: SUCCESS!
 
 LEC_BMC_DEPTH_BEGIN 4
 
-20. Executing SAT pass (solving SAT problems in the circuit).
+21. Executing SAT pass (solving SAT problems in the circuit).
 Using SAT solver `minisat`.
 
 Setting up time step 1:
@@ -602,7 +614,12 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 110 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
+Import set-constraint from init attribute: \gate._33_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._32_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._34_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._31_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._30_.IQ1 = 1'0
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._30_.IQ1 \gate._31_.IQ1 \gate._34_.IQ1 \gate._32_.IQ1 \gate._33_.IQ1 } = 10'xxxxx00000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -669,7 +686,7 @@ SAT proof finished - no model found: SUCCESS!
 
 LEC_BMC_DEPTH_BEGIN 8
 
-21. Executing SAT pass (solving SAT problems in the circuit).
+22. Executing SAT pass (solving SAT problems in the circuit).
 Using SAT solver `minisat`.
 
 Setting up time step 1:
@@ -679,7 +696,12 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 110 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
+Import set-constraint from init attribute: \gate._33_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._32_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._34_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._31_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._30_.IQ1 = 1'0
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._30_.IQ1 \gate._31_.IQ1 \gate._34_.IQ1 \gate._32_.IQ1 \gate._33_.IQ1 } = 10'xxxxx00000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -782,7 +804,7 @@ SAT proof finished - no model found: SUCCESS!
 
 LEC_BMC_DEPTH_BEGIN 16
 
-22. Executing SAT pass (solving SAT problems in the circuit).
+23. Executing SAT pass (solving SAT problems in the circuit).
 Using SAT solver `minisat`.
 
 Setting up time step 1:
@@ -792,7 +814,12 @@ Import def constraint for this timestep: \in_rst
 Import def constraint for this timestep: \in_en
 Import def constraint for this timestep: \in_clk
 Imported 110 cells to SAT database.
-Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._34_.IQ1 \gate._33_.IQ1 \gate._32_.IQ1 \gate._31_.IQ1 \gate._30_.IQ1 } = 10'x
+Import set-constraint from init attribute: \gate._33_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._32_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._34_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._31_.IQ1 = 1'0
+Import set-constraint from init attribute: \gate._30_.IQ1 = 1'0
+Final init constraint equation: { \gold.q[3] \gold.q[2] \gold.q[1] \gold.q[0] \gold.hit \gate._30_.IQ1 \gate._31_.IQ1 \gate._34_.IQ1 \gate._32_.IQ1 \gate._33_.IQ1 } = 10'xxxxx00000
 
 Setting up time step 2:
 Final constraint equation: { } = { }
@@ -965,6 +992,6 @@ SAT proof finished - no model found: SUCCESS!
                  \____ $$$|__/|________/|__/|_______/|__/
                        \__/                              
 
-End of script. Logfile hash: e461a3a9a8, time: 0.31s, user: 0.28s, system: 0.04s, MEM: 56.75 MB peak
+End of script. Logfile hash: 06afae41c8, time: 0.26s, user: 0.24s, system: 0.03s, MEM: 56.25 MB peak
 Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]
-Time spent: 77% 5x sat (0 sec), 18% 2x read_liberty (0 sec), ...
+Time spent: 76% 5x sat (0 sec), 20% 2x read_liberty (0 sec), ...
