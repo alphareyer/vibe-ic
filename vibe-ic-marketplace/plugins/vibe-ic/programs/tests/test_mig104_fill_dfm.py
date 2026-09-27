@@ -551,16 +551,33 @@ def test_the_gate_refuses_a_record_about_another_route(tmp_path):
         "LL_FILL_RECORD_STALE"}
 
 
+def _step37(project, arm="klayout", count=0):
+    root = project / "phase3/librelane"
+    state = root / f"37-{arm}-finish/03-klayout-density/state_out.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text("{}")
+    (root / "37-promotion.json").write_text(json.dumps({"selection": arm}))
+    (root / f"37-{arm}-density.json").write_text(json.dumps({
+        "verdict": "PASS" if count == 0 else "FAIL", "source": str(state),
+        "sha256": {"state_out.json": LLC.digest(state)},
+        "metrics": {LF.DENSITY_METRIC: {"status": "MEASURED" if count == 0 else "FAIL",
+                                        "value": count}}}))
+    return state
+
+
 def test_on_a_tool_stream_the_gds_half_is_step_37s_chain(tmp_path):
     project, sha = _gate_project(tmp_path)
     _switch(project, **{"34": "librelane", "37": "librelane"})
     _record(project, odb={"def_sha256": sha, "shipped": "librelane"})
-    promo = project / "phase3/librelane/37-promotion.json"
-    promo.parent.mkdir(parents=True, exist_ok=True)
-    promo.write_text(json.dumps({"selection": "klayout",
-                                 "density": {"magic": 1, "klayout": 0}}))
+    state = _step37(project, count=0)
     findings, stats = MFD.tool_arm_findings(project)
     assert findings == [] and stats["density_errors"] == 0
+    ref = DFM.audit(project)["density_ref"]
+    assert ref["status"] == "MEASURED" and ref["errors"] == 0
+    state.write_text('{"moved": 1}')
+    assert {f.category for f in MFD.tool_arm_findings(project)[0]} >= {"LL_FILL_RECORD_STALE"}
+    _step37(project, count=2)
+    assert {f.category for f in MFD.tool_arm_findings(project)[0]} == {"DENSITY_DECK_FAIL"}
 
 
 def test_the_dfm_screen_reads_cmp_density_from_the_tool(tmp_path):

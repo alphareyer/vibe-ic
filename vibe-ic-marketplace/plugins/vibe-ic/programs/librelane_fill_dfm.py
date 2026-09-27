@@ -474,7 +474,7 @@ def tool_density(project: Path) -> Optional[Dict[str, Any]]:
     shipped = arms.get('shipped')
     arm = arms.get(shipped) if shipped else None
     if not isinstance(arm, dict):
-        return None
+        return step37_density(project) if not arms else None
     state = Path(str(arm.get('state') or ''))
     if not state.is_file() or digest(state) != arm.get('state_sha256'):
         return {'status': 'STALE', 'source': RECORD_REL, 'state': str(state)}
@@ -485,6 +485,35 @@ def tool_density(project: Path) -> Optional[Dict[str, Any]]:
             'rules': arm.get('rules'), 'runset': arm.get('runset'),
             'source': RECORD_REL, 'state': str(state), 'state_sha256': arm.get('state_sha256'),
             'subject_sha256': arm.get('subject_sha256')}
+
+
+STEP37_PROMOTION_REL = 'phase3/librelane/37-promotion.json'
+
+
+def step37_density(project: Path) -> Optional[Dict[str, Any]]:
+    """When step 37 streamed on the tool, its own SealRing -> Filler ->
+    Density chain is step 34's GDS half: the density judgement of the stream
+    it promoted (`librelane_step37`'s `37-<arm>-density.json`), its state
+    re-hashed.  None when step 37 promoted nothing."""
+    promo = project / STEP37_PROMOTION_REL
+    if not promo.is_file():
+        return None
+    try:
+        arm = _load(promo).get('selection')
+        report = project / 'phase3/librelane' / f'37-{arm}-density.json'
+        judged = _load(report)
+    except (OSError, ValueError, Refusal):
+        return {'status': 'UNREADABLE', 'source': STEP37_PROMOTION_REL}
+    state = Path(str(judged.get('source') or ''))
+    if not state.is_file() or digest(state) != (judged.get('sha256') or {}).get('state_out.json'):
+        return {'status': 'STALE', 'source': str(report.relative_to(project)), 'state': str(state)}
+    row = (judged.get('metrics') or {}).get(DENSITY_METRIC) or {}
+    count = _count(row.get('value')) if row.get('status') in ('MEASURED', 'FAIL') else None
+    if count is None:
+        return {'status': 'NOT_MEASURED', 'source': str(report.relative_to(project))}
+    return {'status': 'MEASURED', 'errors': count, 'arm': f'step37:{arm}', 'rules': None,
+            'source': str(report.relative_to(project)), 'state': str(state),
+            'state_sha256': digest(state)}
 
 
 def router_via_counts(metrics: Dict[str, Any]) -> Optional[Dict[str, int]]:

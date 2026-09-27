@@ -479,13 +479,16 @@ def tool_arm_findings(project_dir: Path) -> Tuple[List[Finding], dict]:
         elif isinstance(arm, dict):
             count = arm.get(_lf.DENSITY_METRIC)
     elif _llc.selected_mode(project_dir, "37") != "direct":
-        try:
-            promo = json.loads((project_dir / "phase3/librelane/37-promotion.json").read_text())
-            count = (promo.get("density") or {}).get(promo.get("selection"))
-            source = "phase3/librelane/37-promotion.json density"
-        except (OSError, ValueError, AttributeError):
+        s37 = _lf.step37_density(project_dir)
+        if s37 is None:
             findings.append(Finding("ERROR", "LL_FILL_GDS_NOT_RUN",
                                     "step 37 streamed on the tool and left no promotion record"))
+        else:
+            source = s37.get("source")
+            count = s37.get("errors")
+            if s37.get("status") == "STALE":
+                findings.append(Finding("ERROR", "LL_FILL_RECORD_STALE",
+                                        f"{source}: the density state moved since it was judged"))
     else:
         findings.append(Finding("ERROR", "LL_FILL_GDS_NOT_RUN",
                                 "the stream-out never ran step 34's GDS half"))
