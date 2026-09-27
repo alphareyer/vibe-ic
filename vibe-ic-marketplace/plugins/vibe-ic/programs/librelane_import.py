@@ -54,15 +54,19 @@ WHAT IT WRITES
 * ``phase3/stage3/pnr/openroad.log`` assembled from the OpenROAD step logs in
   flow order. Every inserted section is bracketed by a marker naming its source
   log and sha256; the assembled file is itself a back-fill row.
-* ``phase3/librelane/import_manifest.json``: the segments (run_dir, declared
-  ``to``, flow.log sha256, flow status); one row per imported file, in the
-  final field names of the W0 import-manifest schema (flow step, canonical
-  path, tool-run path, sha256 on both sides, tool, tool step id, step_dir,
-  the source logs the step's witness cites, exit code, measurement), where,
-  as in W0, ``tool_run_path``, ``step_dir`` and ``source_logs`` are relative
-  to the row's ``run_dir`` (itself project-relative, as in W19's witness);
-  every rule no segment performed; and every file an earlier import of the
-  same runs wrote that this one removed.
+* W0's import manifest (``reports/phase3/impl/import_manifest.json``,
+  schema ``vibe-ic/external-flow-import/2``), written ONLY through
+  ``_external_flow_manifest.write_manifest``, which validates every row
+  against the disk. One run is written flat (``run_dir``, ``rows``,
+  ``flow_status``); two segment runs as ``segments: [{name, run_dir,
+  flow_status, rows}]`` (W0's segment extension, see that module). Rows are
+  in W0's final field names (flow step, canonical path, tool-run path,
+  sha256 on both sides, tool, tool step id, step_dir, the source logs the
+  step's witness cites, exit code, measurement), run-relative to their
+  segment's ``run_dir`` (itself project-relative). Also ``not_performed``
+  (every rule no segment performed), and, as importer fields, ``top``,
+  ``removed`` (files an earlier import of the same runs wrote that this one
+  does not) and ``openroad_log``.
 
 ALL OR NOTHING
 --------------
@@ -100,6 +104,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _external_flow_manifest as _efm  # noqa: E402
 import _path_layout as _pl  # noqa: E402
 import _runner_measurement  # noqa: E402
 import _tool_log_provenance as _tlp  # noqa: E402
@@ -107,7 +112,8 @@ from _atomic_artefact import write_json, write_text  # noqa: E402
 from librelane_contract import Refusal, _load, digest, handoff_to_direct  # noqa: E402
 
 FLOW = "librelane"
-MANIFEST_REL = "phase3/librelane/import_manifest.json"
+#: W0's import manifest, written only through `_efm.write_manifest`.
+MANIFEST_REL = _efm.MANIFEST_REL
 RECEIPT_DIR_REL = "reports/phase3/librelane_import"
 OPENROAD_LOG_MARK_BEGIN = "# >>> LIBRELANE"
 OPENROAD_LOG_MARK_END = "# <<< LIBRELANE"
@@ -442,7 +448,8 @@ def _source_logs(ran: Ran, tool_file: Path, cited: List[str]) -> List[Path]:
     the step's witness cites (``cited``, run-relative) are named; a
     back-fill cites none, so it names none."""
     logs = [l for l in _step_logs(ran.folder)
-            if l.relative_to(ran.run_dir).as_posix() in cited]
+            if l.relative_to(ran.run_dir).as_posix() in cited
+            and l != tool_file]      # a file never witnesses its own run
     here = [l for l in logs if l.parent == tool_file.parent]
     if here:
         return here
@@ -465,7 +472,6 @@ def _file_row(project: Path, ran: Ran, tool_file: Path, dest: Path,
     in by the caller."""
     rel = dest.relative_to(project).as_posix()
     row: Dict[str, Any] = {
-        "run_dir": ran.run_dir.relative_to(project).as_posix(),
         "canonical_path": rel,
         "tool_run_path": tool_file.relative_to(ran.run_dir).as_posix(),
         "canonical_sha256": "sha256:" + digest(dest),
@@ -744,22 +750,22 @@ def import_segments(project: Path,
     run_rels = [r.relative_to(project).as_posix() for r, _ in segs]
 
     # ── plan: every refusal is raised here, before anything is written ──
-    manifest: Dict[str, Any] = {
-        "schema": "vibe-ic/librelane-import/2", "flow": FLOW, "top": top,
-        "segments": [], "rows": [], "not_performed": [], "removed": []}
+    manifest: Dict[str, Any] = {"not_performed": [], "removed": []}
+    segments: List[Dict[str, Any]] = []
+    seg_of: Dict[Path, Dict[str, Any]] = {}
     indexes: List[List[Ran]] = []
-    for run_dir, to in segs:
+    for i, (run_dir, to) in enumerate(segs):
         index = run_index(run_dir)
         status = _require_finished(run_dir, index, to)
+        status["flow_log_sha256"] = "sha256:" + digest(run_dir / "flow.log")
         indexes.append(index)
-        manifest["segments"].append({
-            "run_dir": run_dir.relative_to(project).as_posix(), "to": to,
-            "flow_log_sha256": digest(run_dir / "flow.log"),
-            "flow_status": status})
+        segments.append({"name": f"segment-{i + 1}",
+                         "run_dir": run_dir.relative_to(project).as_posix(),
+                         "flow_status": status, "rows": []})
+        seg_of[run_dir] = segments[-1]
     previous = _previous_import(project)
     if previous is not None:
-        before = [s.get("run_dir") for s in previous.get("segments") or []] \
-            or [previous.get("run_dir")]
+        before = [s.get("run_dir") for s in _efm.segments_of(previous)]
         if before != run_rels:
             raise Refusal("LL_IMPORT_OTHER_RUN_PRESENT",
                           f"{project / MANIFEST_REL} already records an import "
@@ -802,7 +808,8 @@ def import_segments(project: Path,
                               f"from both {writes[dest]} and {src}")
             writes[dest] = src
     stale = sorted({project / r["canonical_path"]
-                    for r in (previous or {}).get("rows") or []
+                    for seg in (_efm.segments_of(previous) if previous else [])
+                    for r in seg.get("rows") or []
                     if isinstance(r, dict) and r.get("canonical_path")}
                    - set(writes))
     for entry in manifest["not_performed"]:
@@ -859,7 +866,7 @@ def import_segments(project: Path,
                 r.update({"step_id": plan.rule.flow_step,
                           "exit_code": row["exit_code"],
                           "timestamp": row["timestamp"], "provenance": kind})
-                manifest["rows"].append(r)
+                seg_of[plan.ran.run_dir]["rows"].append(r)
         log = assemble_openroad_log(project, [r for ix in indexes for r in ix],
                                     _pl.pnr_dir(project) / "openroad.log",
                                     journal)
@@ -879,12 +886,27 @@ def import_segments(project: Path,
         with (project / "provenance.jsonl").open("a") as fh:
             for row in prov:
                 fh.write(json.dumps(row) + "\n")
-        write_json(project / MANIFEST_REL, manifest)
+        extra = {"top": top, "removed": manifest["removed"]}
+        if "openroad_log" in manifest:
+            extra["openroad_log"] = manifest["openroad_log"]
+        try:
+            if len(segments) == 1:
+                seg = segments[0]
+                path = _efm.write_manifest(
+                    project, flow=FLOW, run_dir=seg["run_dir"],
+                    rows=seg["rows"], flow_status=seg["flow_status"],
+                    not_performed=manifest["not_performed"], extra=extra)
+            else:
+                path = _efm.write_manifest(
+                    project, flow=FLOW, segments=segments,
+                    not_performed=manifest["not_performed"], extra=extra)
+        except _efm.ManifestError as exc:
+            raise Refusal("LL_IMPORT_MANIFEST_INVALID", str(exc)) from None
     except BaseException:
         journal.rollback()
         raise
     journal.close()
-    return manifest
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def import_run(project: Path, run_dir: Path,
@@ -914,9 +936,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Refusal as exc:
         print(f"REFUSED {exc.code}: {exc}", file=sys.stderr)
         return 1
-    print(f"imported {len(doc['rows'])} file(s) from {len(doc['segments'])} "
-          f"finished run(s); {len(doc['not_performed'])} rule(s) not "
-          "performed by them")
+    segs = _efm.segments_of(doc)
+    print(f"imported {sum(len(s['rows']) for s in segs)} file(s) from "
+          f"{len(segs)} finished run(s); {len(doc['not_performed'])} rule(s) "
+          "not performed by them")
     return 0
 
 

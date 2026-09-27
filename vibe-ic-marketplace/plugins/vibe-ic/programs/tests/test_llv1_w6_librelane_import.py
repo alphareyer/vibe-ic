@@ -26,6 +26,15 @@ for _p in (str(PROGRAMS), str(_PLUGIN)):
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "librelane_import"
 RUN_REL = "phase3/librelane/runs/cmp3"
 CHECK = PROGRAMS / "provenance_check.py"
+MANIFEST = "reports/phase3/impl/import_manifest.json"      # W0's path
+
+
+def _rows_of(doc):
+    """Every row, with the run_dir of its segment, read the way W0's readers
+    read a manifest (`segments_of`: a flat one-run manifest is one segment)."""
+    import _external_flow_manifest as M
+    return [dict(r, run_dir=seg["run_dir"]) for seg in M.segments_of(doc)
+            for r in seg["rows"]]
 
 
 def _sha(p: Path) -> str:
@@ -78,11 +87,11 @@ def _at(lines, needle: str) -> int:
 def test_every_imported_file_is_a_copy_bound_on_both_sides(tmp_path, host):
     proj = _project(tmp_path, host)
     doc = _import(proj)
-    assert doc["top"] == "spm" and len(doc["rows"]) > 100
+    assert doc["top"] == "spm" and len(_rows_of(doc)) > 100
     witnessed = {(w["run_dir"], w["step_dir"]): {l["path"] for l in w["logs"]}
                  for w in (r.get("witness") for r in _rows(proj)) if w}
     no_log = []
-    for row in doc["rows"]:
+    for row in _rows_of(doc):
         # W0's meaning: tool-run paths are relative to the row's run_dir
         assert row["run_dir"] == RUN_REL, row
         base = proj / row["run_dir"]
@@ -106,10 +115,12 @@ def test_every_imported_file_is_a_copy_bound_on_both_sides(tmp_path, host):
             assert Path(log["path"]).parent in Path(
                 row["tool_run_path"]).parents, row
     # only the STA summaries, which LibreLane's Python assembles from the
-    # corners, have no transcript of their own
+    # corners, have no transcript of their own; and the imported StreamOut
+    # transcript, which cannot witness its own run (W0's validate_row)
     assert sorted(no_log) == ["12-openroad-staprepnr/summary.rpt",
-                              "55-openroad-stapostpnr/summary.rpt"]
-    manifest = json.loads((proj / "phase3/librelane/import_manifest.json")
+                              "55-openroad-stapostpnr/summary.rpt",
+                              "57-magic-streamout/magic-streamout.log"]
+    manifest = json.loads((proj / MANIFEST)
                           .read_text())
     assert manifest == doc
 
@@ -117,7 +128,7 @@ def test_every_imported_file_is_a_copy_bound_on_both_sides(tmp_path, host):
 def test_the_canonical_views_land_where_the_gates_read_them(tmp_path):
     proj = _project(tmp_path)
     doc = _import(proj)
-    by = {r["canonical_path"]: r for r in doc["rows"]}
+    by = {r["canonical_path"]: r for r in _rows_of(doc)}
     want = {
         "phase2/stage2/synth/netlist.v": ("9", "Yosys.Synthesis"),
         "phase3/stage3/pnr/floorplan.def": ("15", "OpenROAD.GeneratePDN"),
@@ -138,7 +149,7 @@ def test_the_canonical_views_land_where_the_gates_read_them(tmp_path):
         assert (by[rel]["step_id"], by[rel]["tool_step_id"]) == (step, tool_step)
     # A corner folder holds two transcripts the flow names (sta.log and
     # filter_unannotated.log): both are listed, rather than one guessed.
-    corner = next(r for r in doc["rows"] if r["step_id"] == "23"
+    corner = next(r for r in _rows_of(doc) if r["step_id"] == "23"
                   and r["tool_run_path"].endswith("/nom_tt_025C_5v00/max.rpt"))
     assert [l["path"] for l in corner["source_logs"]] == [
         "55-openroad-stapostpnr/nom_tt_025C_5v00/filter_unannotated.log",
@@ -165,7 +176,7 @@ def test_a_step_this_flow_did_not_run_is_listed_not_invented(tmp_path):
         "flow_step": "15.5ic", "tool_step": "OpenROAD.PadRing",
         "reason": "the run's own flow.log never started OpenROAD.PadRing",
         "flow_complete": True}]
-    assert doc["segments"][0]["flow_status"]["complete"] is True
+    assert doc["flow_status"]["complete"] is True        # one run: flat
     assert not (proj / "phase3/stage3/pnr/padring.def").exists()
 
 
@@ -175,7 +186,7 @@ def test_the_post_route_antenna_check_is_imported(tmp_path):
     takes the top-level run after DetailedRouting."""
     proj = _project(tmp_path)
     doc = _import(proj)
-    ant = [r for r in doc["rows"] if r["step_id"] == "26"]
+    ant = [r for r in _rows_of(doc) if r["step_id"] == "26"]
     assert ant and {r["tool_step_id"] for r in ant} == {"OpenROAD.CheckAntennas-1"}
     assert all(r["tool_run_path"].startswith("46-openroad-checkantennas-1/")
                for r in ant)
@@ -257,7 +268,7 @@ def test_the_import_keys_on_the_flow_log_not_the_folder_ordinal(tmp_path):
         st.write_text(st.read_text().replace("44-openroad-detailedrouting",
                                              "99-renamed"))
     doc = _import(proj)
-    routed = [r for r in doc["rows"]
+    routed = [r for r in _rows_of(doc)
               if r["canonical_path"] == "phase3/stage3/pnr/routed.def"]
     assert routed and routed[0]["tool_run_path"].startswith("99-renamed/")
 
@@ -434,10 +445,10 @@ def test_a_to_segment_is_complete_at_its_declared_end(tmp_path):
     import librelane_import as LI
     proj = _segment_project(tmp_path)
     doc = LI.import_run(proj, proj / SEG1, SEG1_END)
-    assert {r["canonical_path"] for r in doc["rows"]
+    assert {r["canonical_path"] for r in _rows_of(doc)
             if not r["canonical_path"].startswith("reports/")} == \
         {"phase2/stage2/synth/netlist.v"}
-    assert doc["segments"][0]["flow_status"]["to"] == SEG1_END
+    assert doc["flow_status"]["to"] == SEG1_END
     assert all(n["flow_complete"] is True for n in doc["not_performed"])
     proj2 = _segment_project(tmp_path / "b")
     with pytest.raises(C.Refusal) as exc:
@@ -451,12 +462,15 @@ def test_two_segments_import_as_one_tree(tmp_path):
     proj = _segment_project(tmp_path)
     rc = LI.main([str(proj), f"{proj / SEG1}={SEG1_END}", str(proj / SEG2)])
     assert rc == 0
-    doc = json.loads((proj / "phase3/librelane/import_manifest.json").read_text())
-    assert [s["run_dir"] for s in doc["segments"]] == [SEG1, SEG2]
-    by = {r["canonical_path"]: r for r in doc["rows"]}
+    doc = json.loads((proj / MANIFEST).read_text())
+    assert [(s["name"], s["run_dir"]) for s in doc["segments"]] == \
+        [("segment-1", SEG1), ("segment-2", SEG2)]
+    assert "run_dir" not in doc and "rows" not in doc
+    assert [s["flow_status"]["to"] for s in doc["segments"]] == [SEG1_END, None]
+    by = {r["canonical_path"]: r for r in _rows_of(doc)}
     assert by["phase2/stage2/synth/netlist.v"]["run_dir"] == SEG1
     assert by["phase3/stage3/pnr/routed.def"]["run_dir"] == SEG2
-    for r in doc["rows"]:
+    for r in _rows_of(doc):
         assert (proj / r["run_dir"] / r["tool_run_path"]).is_file(), r
     # not_performed over the union: only the step neither segment ran
     assert [n["tool_step"] for n in doc["not_performed"]] == ["OpenROAD.PadRing"]
@@ -584,7 +598,7 @@ def test_a_reimport_removes_what_the_same_runs_no_longer_perform(tmp_path):
     this import does not perform, is removed and the removal recorded."""
     proj = _project(tmp_path)
     _import(proj)
-    man = proj / "phase3/librelane/import_manifest.json"
+    man = proj / MANIFEST
     doc = json.loads(man.read_text())
     stale = proj / "phase3/stage3/pnr/padring.def"
     stale.write_text("an earlier import's pad ring\n")
@@ -668,7 +682,7 @@ def test_a_log_the_flow_does_not_name_is_not_a_source_log(tmp_path):
     proj = _project(tmp_path)
     (proj / RUN_REL / "44-openroad-detailedrouting/notes.log").write_text("x\n")
     doc = _import(proj)
-    routed = next(r for r in doc["rows"]
+    routed = next(r for r in _rows_of(doc)
                   if r["canonical_path"] == "phase3/stage3/pnr/routed.def")
     assert [l["path"] for l in routed["source_logs"]] == \
         ["44-openroad-detailedrouting/openroad-detailedrouting.log"]
