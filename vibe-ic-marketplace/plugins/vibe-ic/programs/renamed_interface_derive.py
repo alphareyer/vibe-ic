@@ -563,11 +563,24 @@ def check(project: Path, pairs: Any,
     ports_without = [str(p["name"]) for p in impl_ports
                      if any(n in without for n in LPP.bit_names(p))]
     refused = [v for v in authored_v + derived_v if v["verdict"] == "REFUSED"]
-    return {"verdict": "FAIL" if refused or without or two else "PASS",
-            "pairs": authored_v, "derived_pairs": derived_v,
-            "nets_without_side": without, "nets_on_two_sides": two,
-            "unpaired_implemented_ports": sorted(ports_without),
-            "derivation": d}
+    # A token whose bit range does not resolve is PARTITION_UNRESOLVED at
+    # 15.5ic and UNDECIDED at step 2: which bit lands where is unknown, so
+    # absent a definite defect the answer is NOT_MEASURED, never PASS.
+    _exact, open_tokens = LPP.expand_side_ports(placement, params)
+    verdict = ("FAIL" if refused or without or two
+               else "NOT_MEASURED" if open_tokens else "PASS")
+    res = {"verdict": verdict,
+           "pairs": authored_v, "derived_pairs": derived_v,
+           "nets_without_side": without, "nets_on_two_sides": two,
+           "unpaired_implemented_ports": sorted(ports_without),
+           "unresolved_tokens": sorted(open_tokens), "derivation": d}
+    if verdict == "NOT_MEASURED":
+        res["reason"] = (f"the placement names token(s) whose bit range does "
+                         f"not resolve from a declared parameter "
+                         f"{sorted(open_tokens)} (15.5ic refuses "
+                         f"PARTITION_UNRESOLVED): which bit lands on which side "
+                         f"cannot be measured")
+    return res
 
 
 def apply_to_manifest(project: Path, mf: Dict[str, Any]) -> Dict[str, Any]:
@@ -646,7 +659,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                    if isinstance(e, dict)]
         res = (check(project, authored_pairs(mf), derived) if a.check
                else derive(project))
-        rc = (1 if res.get("verdict") == "FAIL" else 0) if a.check else 0
+        rc = ({"FAIL": 1, "NOT_MEASURED": 3}.get(res.get("verdict"), 0)
+              if a.check else 0)
     except NotApplicable as exc:
         res, rc = {"verdict": "NOT_APPLICABLE", "reason": str(exc)}, 2
     except NotMeasured as exc:
