@@ -318,25 +318,45 @@ def acquire_or_reenter(project: Path,
     if stream is None:
         stream = sys.stderr
     project = Path(project)
-    token = os.environ.get(REENTRANCY_ENV, "")
-    if token:
-        try:
-            holder_pid_s, holder_proj = token.split(":", 1)
-            holder_pid = int(holder_pid_s)
-        except (ValueError, AttributeError):
-            holder_pid, holder_proj = -1, ""
-        if (holder_proj == str(project.resolve())
-                and holder_pid > 0 and _pid_alive(holder_pid)):
-            data = _read_lock(_lock_path(project))
-            # Re-enter only when a live lock file genuinely exists for
-            # the named holder — a stale token must not bypass a real
-            # foreign lock.
-            if data is not None and int(data.get("pid", -1)) == holder_pid:
-                print(
-                    f"RUNNER_LOCK_REENTRANT: {runner_name} re-enters the "
-                    f"lock held by parent pid={holder_pid} on {project} "
-                    f"(#588 delegated sub-run).",
-                    file=stream,
-                )
-                return ReentrantLock(project, runner_name, holder_pid)
+    holder_pid = reentrant_holder_pid(project)
+    if holder_pid is not None:
+        print(
+            f"RUNNER_LOCK_REENTRANT: {runner_name} re-enters the "
+            f"lock held by parent pid={holder_pid} on {project} "
+            f"(#588 delegated sub-run).",
+            file=stream,
+        )
+        return ReentrantLock(project, runner_name, holder_pid)
     return acquire(project, runner_name, stream=stream)
+
+
+def reentrant_holder_pid(project: Path) -> Optional[int]:
+    """The #588 re-entrancy decision, read-only: the pid of the parent
+    whose live lock on ``project`` this process may re-enter, else None.
+
+    It is that pid only when ``VIBE_IC_RUNNER_LOCK_TOKEN`` names THIS
+    project, the named pid is alive, and the project's lock file names
+    that same pid — a stale token must not bypass a real foreign lock.
+    Nothing is written, so a caller that must not touch the project (a
+    bounded Phase-3 window) makes the same decision as
+    :func:`acquire_or_reenter`."""
+    project = Path(project)
+    token = os.environ.get(REENTRANCY_ENV, "")
+    if not token:
+        return None
+    try:
+        holder_pid_s, holder_proj = token.split(":", 1)
+        holder_pid = int(holder_pid_s)
+    except (ValueError, AttributeError):
+        return None
+    if (holder_proj != str(project.resolve())
+            or holder_pid <= 0 or not _pid_alive(holder_pid)):
+        return None
+    data = _read_lock(_lock_path(project))
+    if data is None:
+        return None
+    try:
+        lock_pid = int(data.get("pid", -1))
+    except (TypeError, ValueError):
+        return None
+    return holder_pid if lock_pid == holder_pid else None

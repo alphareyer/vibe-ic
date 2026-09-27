@@ -72976,6 +72976,9 @@ def _phase3_window_clone(project: Path, target: Path) -> None:
                          str(target)], capture_output=True, text=True)
     if cp.returncode:
         raise RuntimeError(f"window isolation copy failed: {cp.stderr}")
+    # The source's lock is its control state, not project content: a runner
+    # on the copy takes its own lock there instead of refusing the parent's.
+    (target / _runner_lock.LOCK_FILENAME).unlink(missing_ok=True)
 
 
 def _phase3_window_full_gate_audit(project: Path, step_ids: Set[str]
@@ -73641,10 +73644,19 @@ def main() -> int:
                 live = _runner_lock._pid_alive(int(holder.get("pid", -1)))
             except (TypeError, ValueError):
                 live = False
-            if live:
+            # The #588 token decides, read-only: the live holder may be
+            # this run's own orchestrator, which this window re-enters.
+            parent = (_runner_lock.reentrant_holder_pid(project)
+                      if live else None)
+            if live and parent is None:
                 print("CONCURRENT_RUN_REFUSED: live project runner lock",
                       file=sys.stderr)
                 return 3
+            if parent is not None:
+                print(f"RUNNER_LOCK_REENTRANT: phase3_bounded_window "
+                      f"re-enters the lock held by parent pid={parent} on "
+                      f"{project} (#588 delegated sub-run).",
+                      file=sys.stderr)
         lock_root = project.parent / ".phase3_window_locks" / project.name
         lock_root.mkdir(parents=True, exist_ok=True)
         _lock = _runner_lock.acquire_or_reenter(
