@@ -31,16 +31,25 @@ AN IN-PLACE SWITCH IS REFUSED (orchestrator decision 20)
 A project implemented by one flow cannot be re-implemented by another in
 place: the step cache, the provenance ledger and the reports would mix two
 flows' artefacts under one set of names. A different mode needs a fresh project
-clone. Two places can show that a project already has a mode:
+clone. Three things can show that a project already has a mode:
 
   * the record itself (a non-default mode was resolved here before);
   * the canonical-run admission ledger: a project that has admitted a
     Phase-2/Phase-3 span has spent compute in the mode that span's
-    ``dispatch_config`` names, and an absent ``impl`` there is ``vibe-ic``.
+    ``dispatch_config`` names, and an absent ``impl`` there is ``vibe-ic``;
+  * default-flow OUTPUT (`default_output_evidence`): provenance rows for
+    phase2/phase3 outputs that no external flow is attributed with, and
+    step-cache producer sidecars. The phase-3 window path admits into a
+    temporary copy that is deleted, so its run leaves no ledger row; its
+    output stays. A hand-copied tree with neither is not seen.
 
-The ledger is consulted only when a NON-default mode is requested, so the
-default path never reads it. (A default request against a non-default project
-is caught by the record, which is written before any flagged span is admitted.)
+ONCE A RECORD EXISTS, IT IS THE ANSWER. History is consulted only when a
+NON-default mode is requested and no record exists yet -- i.e. exactly when
+a record would be created, by `resolve` or by `write_record`. Rows written
+after the record (a flagged admission whose ``dispatch_config`` lacks
+``impl``) can therefore never lock a project out of its own mode, and the
+default path never reads the ledger at all. (A default request against a
+non-default project is caught by the record.)
 
 Every refusal raises `ImplRefusal` with a stable ``reason_class``:
 
@@ -49,6 +58,8 @@ Every refusal raises `ImplRefusal` with a stable ``reason_class``:
     IMPL_MODE_CONFLICT      the request disagrees with the project's mode
     IMPL_RECORD_UNREADABLE  the record or the ledger cannot be read, so the
                             project's mode cannot be proven
+    IMPL_IMAGE_CHANGED      the recorded mode was implemented on another
+                            image than this dispatch resolved
 
 WHERE IT LIVES
 ==============
@@ -100,8 +111,15 @@ IMPL_UNKNOWN = "IMPL_UNKNOWN"
 IMPL_NOT_YET_SUPPORTED = "IMPL_NOT_YET_SUPPORTED"
 IMPL_MODE_CONFLICT = "IMPL_MODE_CONFLICT"
 IMPL_RECORD_UNREADABLE = "IMPL_RECORD_UNREADABLE"
+IMPL_IMAGE_CHANGED = "IMPL_IMAGE_CHANGED"
 REASON_CLASSES = (IMPL_UNKNOWN, IMPL_NOT_YET_SUPPORTED, IMPL_MODE_CONFLICT,
-                  IMPL_RECORD_UNREADABLE)
+                  IMPL_RECORD_UNREADABLE, IMPL_IMAGE_CHANGED)
+
+#: The step-cache sidecars a vibe-ic producer stamps beside what it wrote
+#: (phase3_one_shot_runner._PRODUCER_SIDECAR, _step_identity.SIDECAR).
+PRODUCER_SIDECARS = ("producer_identity.json", "step_identity.json")
+#: Flow output under these trees is implementation work; Phase 1 is not.
+FLOW_OUTPUT_ROOTS = ("phase2", "phase3")
 
 _REQUIRED_KEYS = ("schema", "impl", "flag", "resolved_at", "resolved_by",
                   "tool_defaults", "image")
@@ -241,6 +259,73 @@ def admitted_impls(project: Path) -> Set[str]:
     return modes
 
 
+def default_output_evidence(project: Path) -> List[str]:
+    """Flow output this project already holds that no external flow made.
+
+    The admission ledger does not see every run: the phase-3 window path
+    admits into a temporary copy that is deleted, and a run that never passed
+    admission leaves no row. Its OUTPUT stays, so this names it:
+
+      * a ``provenance.jsonl`` row declaring an output under phase2/ or
+        phase3/ that no external flow is attributed with (``attributed_to``
+        is what `_external_flow_manifest.to_provenance_entry` writes);
+      * a step-cache producer sidecar anywhere under phase2/ or phase3/.
+
+    Phase-1 output is not implementation work and is not counted. What this
+    still cannot see: a run that wrote no provenance row and no sidecar (a
+    hand-copied tree). Returns at most a few examples; empty means none.
+    """
+    project = Path(project)
+    found: List[str] = []
+    prov = project / "provenance.jsonl"
+    if prov.is_file():
+        try:
+            lines = prov.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ImplRefusal(IMPL_RECORD_UNREADABLE, f"{prov}: {exc}") from exc
+        for raw in lines:
+            try:
+                row = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict) or row.get("attributed_to"):
+                continue
+            outs = row.get("outputs") or {}
+            hit = next((o for o in (outs if isinstance(outs, dict) else ())
+                        if str(o).split("/", 1)[0] in FLOW_OUTPUT_ROOTS), None)
+            if hit:
+                found.append(f"provenance.jsonl: {row.get('tool')} -> {hit}")
+                break
+    for root in FLOW_OUTPUT_ROOTS:
+        base = project / root
+        if not base.is_dir():
+            continue
+        for name in PRODUCER_SIDECARS:
+            hit = next(iter(sorted(base.rglob(name))), None)
+            if hit is not None:
+                found.append(f"step-cache sidecar {hit.relative_to(project)}")
+    return found
+
+
+def _refuse_prior_history(project: Path, impl: str) -> None:
+    """Refuse a NEW non-default record on a project that already ran."""
+    ran = admitted_impls(project) - {impl}
+    if ran:
+        raise ImplRefusal(
+            IMPL_MODE_CONFLICT,
+            f"this invocation asks for '{impl}' but the project already "
+            f"admitted canonical spans in {sorted(ran)} "
+            f"({Path(project) / STATE_DIR / ADMISSION_LEDGER}). A mode is "
+            "never switched in place; run a fresh project clone.")
+    out = default_output_evidence(project)
+    if out:
+        raise ImplRefusal(
+            IMPL_MODE_CONFLICT,
+            f"this invocation asks for '{impl}' but the project already holds "
+            f"default-flow output ({'; '.join(out)}). A mode is never "
+            "switched in place; run a fresh project clone.")
+
+
 def resolve(project: Path, requested: Optional[str]) -> str:
     """The mode this invocation runs in, or a named refusal.
 
@@ -261,15 +346,13 @@ def resolve(project: Path, requested: Optional[str]) -> str:
             f"({FLAG_FOR.get(impl, 'no flag')}) but the project is implemented "
             f"by '{have}' (record {record_path(project)}). A mode is never "
             "switched in place; run a fresh project clone in the other mode.")
-    if impl != IMPL_DEFAULT:
-        ran = admitted_impls(project) - {impl}
-        if ran:
-            raise ImplRefusal(
-                IMPL_MODE_CONFLICT,
-                f"this invocation asks for '{impl}' but the project already "
-                f"admitted canonical spans in {sorted(ran)} "
-                f"({Path(project) / STATE_DIR / ADMISSION_LEDGER}). A mode is "
-                "never switched in place; run a fresh project clone.")
+    # A record that names this mode is the answer: it was written before any
+    # flagged span ran, so history recorded after it cannot overrule it (a
+    # flagged admission row that lacks `impl` would otherwise read as
+    # vibe-ic and lock the project out of both modes). History is asked only
+    # when there is no record yet, i.e. when a record would be created.
+    if impl != IMPL_DEFAULT and rec is None:
+        _refuse_prior_history(project, impl)
     return impl
 
 
@@ -296,7 +379,18 @@ def write_record(project: Path, impl: str, *, resolved_by: str,
                 IMPL_MODE_CONFLICT,
                 f"the project is implemented by '{existing['impl']}'; "
                 f"refusing to record '{impl}' over it")
+        if image is not None and image != existing.get("image"):
+            # Decision 24: the record names the image this project was
+            # implemented on. A second dispatch on another image would mix
+            # two images' artefacts under one record; it is never absorbed.
+            raise ImplRefusal(
+                IMPL_IMAGE_CHANGED,
+                f"the project was implemented by '{impl}' on image "
+                f"{existing.get('image')!r}; this dispatch resolved {image!r}. "
+                "Run a fresh project clone on the new image.")
         return path
+    # Creating the record is the in-place-switch decision (decision 20).
+    _refuse_prior_history(project, impl)
     rec = {
         "schema": SCHEMA,
         "impl": impl,
