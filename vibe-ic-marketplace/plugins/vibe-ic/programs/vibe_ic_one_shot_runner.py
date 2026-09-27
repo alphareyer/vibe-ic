@@ -68,10 +68,11 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import _path_layout as _pl
 import _audit_scope                     # R-0915-150 (one scope predicate)
 import _runner_lock
+import _impl_flow  # llv1: the --librelane mode record
 import canonical_run_admission as _canonical_admission
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
@@ -590,7 +591,8 @@ def _phase2_runner_argv(project: Path, *, top_name: str, container: str,
                        lec_max_completed_rungs: Optional[int],
                        skip_hardware: bool, skip_phase3: bool,
                        skip_analog: bool, entry_step: Optional[str],
-                       exit_step: Optional[str]) -> List[str]:
+                       exit_step: Optional[str],
+                       impl_argv: Sequence[str] = ()) -> List[str]:
     """Build the canonical Phase-2 argv with explicit opt-ins only.
 
     The bounded LEC value is absent by default, preserving Step 13's
@@ -611,6 +613,8 @@ def _phase2_runner_argv(project: Path, *, top_name: str, container: str,
         result += ["--entry-step", str(entry_step)]
     if exit_step:
         result += ["--exit-step", str(exit_step)]
+    # The project's flow mode (`_impl_flow.child_argv`): empty by default.
+    result += list(impl_argv)
     return result
 
 
@@ -1468,6 +1472,7 @@ def main() -> int:
                         "runs the flow_compliance gate matrix for true "
                         "PASS/SKIP/WAIVED verdicts; TTL-cached ~15s). Slower "
                         "than the default fast file-stat view.")
+    _impl_flow.add_cli_flags(p)
     args = p.parse_args()
 
     # Was --top-name given on the command line, or is it the historical default?
@@ -1481,6 +1486,12 @@ def main() -> int:
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
+    # --librelane (llv1 W1): resolve the implementation-flow mode, or refuse
+    # it by name, before anything is locked or written. Read-only.
+    _impl_rc = _impl_flow.gate_or_exit(project, args, runner='vibe_ic_one_shot_runner',
+                                       parser=p)
+    if _impl_rc is not None:
+        return _impl_rc
 
     # ---------------- Single-driver project lock (ORGANIC #498) ----------
     # Refuse a second concurrent invocation on a project already being
@@ -1667,6 +1678,7 @@ def main() -> int:
             p3_args.append("--allow-oss-pdk-fallback")
         if args.allow_pdk_target_mismatch:
             p3_args.append("--allow-pdk-target-mismatch")
+        p3_args += _impl_flow.child_argv(project)
         import secrets
         window_run_id = secrets.token_hex(16)
         p3_env = dict(_phase_env)
@@ -1796,6 +1808,7 @@ def main() -> int:
             # is not PDK-keyed.
             if args.pdk and str(args.pdk).strip().lower() != "auto":
                 p1_args += ["--pdk", str(args.pdk).strip()]
+        p1_args += _impl_flow.child_argv(project)
         label = ("PHASE 1 (expert second pass → consume the delivered "
                  "IC-Expert answer)"
                  if p1_mode == _P1_MODE_EXPERT_SECOND_PASS
@@ -2050,6 +2063,7 @@ def main() -> int:
         _analog_args = [str(project), "--container", args.container]
         if args.pdk and str(args.pdk).strip().lower() != "auto":
             _analog_args += ["--pdk", str(args.pdk).strip()]
+        _analog_args += _impl_flow.child_argv(project)
         _phase_started["analog"] = time.time()
         rc = _run_phase("ANALOG A1..A8", runner, _analog_args, env=_phase_env)
         rep = _read_report(_pl.report_path(project, "analog_one_shot.json"))
@@ -2091,7 +2105,8 @@ def main() -> int:
             skip_analog=False,
             entry_step=(str(args.entry_step)
                         if _entry_runner == "design_one_shot_runner" else None),
-            exit_step=(str(args.exit_step) if args.exit_step else None))
+            exit_step=(str(args.exit_step) if args.exit_step else None),
+            impl_argv=_impl_flow.child_argv(project))
         if args.skip_analog:
             p2_args.append("--skip-analog")
         elif not run_analog:
@@ -2126,7 +2141,6 @@ def main() -> int:
                 halted_at = "phase2"
     else:
         plan.append(("phase2", "SKIPPED", 0))
-
 
     plan.append(_analog_row)
 
@@ -2196,6 +2210,7 @@ def main() -> int:
             p3_args.append("--allow-oss-pdk-fallback")
         if getattr(args, "allow_pdk_target_mismatch", False):
             p3_args.append("--allow-pdk-target-mismatch")
+        p3_args += _impl_flow.child_argv(project)
         p3_admission = _canonical_admission.admit_span(
             project, "phase3", PROGRAMS_DIR, args.container,
             {"top_name": phase3_top, "ic_name": args.ic_name,
