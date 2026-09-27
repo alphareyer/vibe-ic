@@ -249,13 +249,19 @@ def _reconcile_port_widths(
 
     For a port the selected netlist (`_implemented_core_ports`) declares with
     a literal range:
-      * the harvest-only L9 entry takes the netlist's range, and is recorded;
-      * an entry the DOCUMENT declares with another width is refused
-        (PORT_WIDTH_CONTRADICTS_DOCUMENT), naming both widths.
+      * an entry whose width the DOCUMENT states
+        (`reused_ip_param_derive.stated_width`) and that disagrees is refused
+        (PORT_WIDTH_CONTRADICTS_DOCUMENT), naming both widths;
+      * any other entry takes the netlist's range, and is recorded with why:
+        the staged-top harvest or the shipped-RTL crosswalk read the IP's
+        default, phase 1 gave a width-less row its implicit 1 bit, or the
+        document states no width at all. None of those is a document width,
+        so none can contradict the core.
     An unreadable netlist changes nothing; the runner's connection check
     still reads the wrapper against it.
     """
     from _staged_top_module import EXTRACTION_STRATEGY as staged_only
+    from reused_ip_param_derive import stated_width
     selected = _implemented_core_ports(project)
     if not selected:
         return list(ports), []
@@ -271,16 +277,29 @@ def _reconcile_port_widths(
             out.append(p)
             continue
         nl_width = int(core["width"])
-        l9_width = len(_bit_names(p))
-        if nl_width == l9_width:
-            out.append(p)
-            continue
-        if p.get("extraction_strategy") != staged_only:
+        doc_width = stated_width(p)
+        l9_width = (len(_bit_names(p))
+                    if p.get("width") not in (None, "") else None)
+        if doc_width is not None:
+            if doc_width == nl_width:
+                out.append(p)
+                continue
             raise Refusal(
                 "PORT_WIDTH_CONTRADICTS_DOCUMENT",
-                f"{name}: the design documents declare {l9_width} bit(s) "
+                f"{name}: the design documents declare {doc_width} bit(s) "
                 f"({p.get('evidence') or 'L9 top_ports'}), the selected "
                 f"netlist {netlist} declares {nl_width}")
+        if l9_width == nl_width:
+            out.append(p)
+            continue
+        strategy = str(p.get("extraction_strategy") or "")
+        why = ("the staged-top harvest evaluated this width at the IP's "
+               "default parameters" if strategy == staged_only else
+               "the document states no width for this port"
+               if l9_width is None else
+               "the L9 width is not a document statement (the shipped RTL "
+               "header at the IP's defaults, or phase 1's implicit 1-bit "
+               "default)")
         fixed = dict(p)
         if nl_width == 1:
             fixed["width"] = 1
@@ -291,8 +310,7 @@ def _reconcile_port_widths(
         out.append(fixed)
         notes.append({"name": name, "l9_width": l9_width,
                       "netlist_width": nl_width, "netlist": str(netlist),
-                      "reason": "the staged-top harvest evaluated this width "
-                                "at the IP's default parameters"})
+                      "reason": why})
     return out, notes
 
 

@@ -93,59 +93,124 @@ _IDENT = re.compile(r"[A-Za-z_]\w*")
 # --------------------------------------------------------------------------- #
 # the reused top's header
 # --------------------------------------------------------------------------- #
+def _blank(text: str, strings: bool = True) -> str:
+    """``text`` with every comment byte and every string-literal byte (quotes
+    kept) replaced by a space: SAME LENGTH, so an offset found in it is an
+    offset in ``text``. Newlines survive, so line structure does too.
+
+    One scanner, so `//` inside a string is not a comment and `"` inside a
+    comment is not a string. ``strings=False`` blanks comments only (a
+    string default keeps its bytes)."""
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+        elif c == "/" and i + 1 < n and text[i + 1] == "*":
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            for k in range(i, j):
+                if text[k] != "\n":
+                    out[k] = " "
+            i = j
+        elif c == '"':
+            k = i + 1
+            while k < n and text[k] != '"' and text[k] != "\n":
+                if text[k] == "\\":
+                    if strings:
+                        out[k] = " "
+                    k += 1
+                if k < n and text[k] != "\n" and strings:
+                    out[k] = " "
+                k += 1
+            i = k + 1
+        else:
+            i += 1
+    return "".join(out)
+
+
 def _strip_comments(text: str) -> str:
-    return re.sub(r"/\*.*?\*/|//[^\n]*", " ", text, flags=re.S)
+    return _blank(text)
 
 
-def _split_top_level(text: str) -> List[str]:
-    out, depth, cur = [], 0, []
-    for ch in text:
+def _header_block(text: str, top: str) -> Optional[Tuple[int, int]]:
+    """``(start, end)`` offsets of ``top``'s ``#( ... )`` contents in
+    ``text``; (0, 0)-style ``(-1, -1)`` when the module has no header; None
+    when the module is absent or the header is unterminated. Found on the
+    blanked copy, so a comment or a string cannot move it."""
+    src = _blank(text)
+    m = re.search(r"\bmodule\s+" + re.escape(top) + r"\b", src)
+    if not m:
+        return None
+    hm = re.compile(r"\s*(?:import[^;]*;\s*)*#\s*\(").match(src, m.end())
+    if not hm:
+        return (-1, -1)
+    depth = 1
+    for i in range(hm.end(), len(src)):
+        if src[i] == "(":
+            depth += 1
+        elif src[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return (hm.end(), i)
+    return None
+
+
+def _header_chunks(blank_block: str) -> List[Tuple[str, int, int, int]]:
+    """``[(name, chunk_start, value_start, value_end)]`` per declaration in a
+    BLANKED header block: offsets into that block, value span trimmed. The
+    one parser `header_parameters` and `apply_overrides` share."""
+    out: List[Tuple[str, int, int, int]] = []
+    depth, start = 0, 0
+    bounds = []
+    for i, ch in enumerate(blank_block):
         if ch in "([{":
             depth += 1
         elif ch in ")]}":
             depth -= 1
-        if ch == "," and depth == 0:
-            out.append("".join(cur))
-            cur = []
-        else:
-            cur.append(ch)
-    out.append("".join(cur))
-    return [c for c in (s.strip() for s in out) if c]
+        elif ch == "," and depth == 0:
+            bounds.append((start, i))
+            start = i + 1
+    bounds.append((start, len(blank_block)))
+    for s, e in bounds:
+        chunk = blank_block[s:e]
+        eq = chunk.find("=")
+        if eq < 0:
+            continue
+        lhs = re.sub(r"^\s*(?:parameter|localparam)\b", "", chunk[:eq])
+        names = _IDENT.findall(re.sub(r"\[[^\]]*\]", " ", lhs))
+        if not names:
+            continue
+        vs, ve = s + eq + 1, e
+        while vs < ve and blank_block[vs].isspace():
+            vs += 1
+        while ve > vs and blank_block[ve - 1].isspace():
+            ve -= 1
+        out.append((names[-1], s, vs, ve))
+    return out
 
 
 def header_parameters(text: str, top: str) -> Optional[List[Tuple[str, str]]]:
     """``[(name, default_expr)]`` of ``top``'s ``#( ... )`` block, in order.
 
-    None when ``module top`` is absent; [] when it declares no parameter."""
-    src = _strip_comments(text)
-    m = re.search(r"\bmodule\s+" + re.escape(top) + r"\b", src)
-    if not m:
+    None when ``module top`` is absent; [] when it declares no parameter.
+    The default is the ORIGINAL text of the value span (a string default
+    keeps its bytes); the span itself is found on the blanked copy."""
+    span = _header_block(text, top)
+    if span is None:
         return None
-    rest = src[m.end():]
-    hm = re.match(r"\s*(?:import[^;]*;\s*)*#\s*\(", rest)
-    if not hm:
+    if span == (-1, -1):
         return []
-    depth, start = 1, hm.end()
-    for i in range(start, len(rest)):
-        if rest[i] == "(":
-            depth += 1
-        elif rest[i] == ")":
-            depth -= 1
-            if depth == 0:
-                block = rest[start:i]
-                break
-    else:
-        return None
-    params: List[Tuple[str, str]] = []
-    for chunk in _split_top_level(block):
-        chunk = re.sub(r"^\s*(?:parameter|localparam)\b", "", chunk).strip()
-        if "=" not in chunk:
-            continue
-        lhs, expr = chunk.split("=", 1)
-        names = _IDENT.findall(re.sub(r"\[[^\]]*\]", " ", lhs))
-        if names:
-            params.append((names[-1], expr.strip()))
-    return params
+    start, end = span
+    blank_block = _blank(text)[start:end]
+    block = text[start:end]
+    return [(name, " ".join(_blank(block[vs:ve], strings=False).split()))
+            for name, _s, vs, ve in _header_chunks(blank_block)]
 
 
 def evaluate_header(params: List[Tuple[str, str]],
@@ -233,24 +298,71 @@ def document_parameter_values(project: Path) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+#: Phase 1's own markers for a width that is NOT a document statement.
+#: `shipped_rtl_header` rows and the fill note are the phase-1 crosswalk
+#: (`phase1_doc_one_shot_runner`, v1.6.555) reading the vendor header at the
+#: IP's DEFAULT parameters; `implicit_1bit_default` is a grid table's default
+#: for a row that stated no width (v1.6.427).
+SHIPPED_RTL_STRATEGY = "shipped_rtl_header"
+RTL_FILL_NOTE = "filled from shipped RTL header:"
+IMPLICIT_WIDTH_TAG = "implicit_1bit_default"
+
+
+def stated_width(entry: Dict[str, Any]) -> Optional[int]:
+    """The width THE DOCUMENT states for an L9 top_ports entry, else None.
+
+    None -- not evidence -- when the entry states no width, when its width is
+    phase 1's implicit 1-bit default, or when the width came from the RTL:
+    the staged-top harvest alone added the entry, the shipped-RTL-header
+    crosswalk added it, or that crosswalk filled its blank width. Each of
+    those is the IP's DEFAULT speaking. The ONE predicate for this rule and
+    for 15.5ic's `io_pad_chip_top_gen._reconcile_port_widths`."""
+    from _staged_top_module import EXTRACTION_STRATEGY as staged_only
+    strategy = str(entry.get("extraction_strategy") or "")
+    if strategy in (staged_only, SHIPPED_RTL_STRATEGY):
+        return None
+    if IMPLICIT_WIDTH_TAG in strategy:
+        return None
+    note = str(entry.get("evidence") or "")
+    at = note.find(RTL_FILL_NOTE)
+    if at >= 0 and "width" in note[at + len(RTL_FILL_NOTE):].split("|")[0]:
+        return None
+    width = _as_int(entry.get("width"))
+    if width is None and _as_int(entry.get("msb")) is not None \
+            and _as_int(entry.get("lsb")) is not None:
+        width = abs(_as_int(entry["msb"]) - _as_int(entry["lsb"])) + 1
+    return width if width and width > 0 else None
+
+
+def width_pairs(manifest: Dict[str, Any]) -> List[Tuple[Dict[str, Any], str]]:
+    """The rename pairs that may carry a DOCUMENT width onto an RTL port.
+
+    Authored ``renamed_interfaces`` entries, and program-derived
+    ``derived_pad_pairs`` entries whose ``rule`` is ``R1`` ONLY: R1 pairs one
+    document port with the implemented ports it split into (read/write), so
+    the document's width is theirs. An R2 pair joins ports that merely share
+    a family atom and a pad side, which says nothing about a width."""
+    out: List[Tuple[Dict[str, Any], str]] = []
+    for pair in manifest.get("renamed_interfaces") or []:
+        if isinstance(pair, dict):
+            out.append((pair, f"{MANIFEST_REL} renamed_interfaces"))
+    for pair in manifest.get("derived_pad_pairs") or []:
+        if isinstance(pair, dict) and str(pair.get("rule") or "") == "R1":
+            out.append((pair, f"{MANIFEST_REL} derived_pad_pairs (R1)"))
+    return out
+
+
 def document_port_widths(project: Path) -> Dict[str, List[Dict[str, Any]]]:
     """``{rtl port: [{width, l9, source}]}`` -- widths the DOCUMENT states.
 
-    An L9 entry the staged-top harvest alone added is the RTL speaking (its
-    width is the IP default's), so it is not evidence. A renamed pair maps its
-    L9 names' widths onto its RTL names."""
-    from _staged_top_module import EXTRACTION_STRATEGY as staged_only
+    `stated_width` decides what is a document statement. A pair from
+    `width_pairs` maps its L9 names' widths onto its RTL names."""
     l9 = _read_json(project / L9_REL) or {}
     doc_ports: Dict[str, Dict[str, Any]] = {}
     for p in l9.get("top_ports") or []:
         if not isinstance(p, dict) or not p.get("name"):
             continue
-        if p.get("extraction_strategy") == staged_only:
-            continue
-        width = _as_int(p.get("width"))
-        if width is None and _as_int(p.get("msb")) is not None \
-                and _as_int(p.get("lsb")) is not None:
-            width = abs(_as_int(p["msb"]) - _as_int(p["lsb"])) + 1
+        width = stated_width(p)
         if width is not None:
             doc_ports[str(p["name"])] = {"width": width,
                                          "evidence": p.get("evidence")}
@@ -260,16 +372,13 @@ def document_port_widths(project: Path) -> Dict[str, List[Dict[str, Any]]]:
             {"width": info["width"], "l9": name, "source": L9_REL,
              "via": "same name"})
     manifest = _read_json(project / MANIFEST_REL) or {}
-    for pair in manifest.get("renamed_interfaces") or []:
-        if not isinstance(pair, dict):
-            continue
+    for pair, via in width_pairs(manifest):
         for rtl in pair.get("rtl") or []:
             for l9_name in pair.get("l9") or []:
                 if l9_name in doc_ports:
                     out.setdefault(str(rtl), []).append(
                         {"width": doc_ports[l9_name]["width"], "l9": l9_name,
-                         "source": L9_REL,
-                         "via": f"{MANIFEST_REL} renamed_interfaces"})
+                         "source": L9_REL, "via": via})
     return out
 
 
@@ -299,11 +408,22 @@ def derive(project: Path, choose: Optional[Dict[str, int]] = None
     """The record (see the module docstring). Pure over the project's files."""
     from module_port_audit import parse_modules
     project = Path(project)
-    choose = dict(choose or {})
+    explicit = dict(choose or {})
     rec: Dict[str, Any] = {"program": PROGRAM, "parameters": {},
                            "overrides": {}, "findings": []}
     top, text, path = _top_and_text(project)
     rec["top"] = top
+    # A VERIFIED AI CHOICE IS REMEMBERED, AND RE-VERIFIED. `--apply` records it
+    # in the sidecar; every later run (the runner never passes --choose) takes
+    # it back as a choice and judges it against the documents AS THEY ARE NOW.
+    recorded: Dict[str, int] = {}
+    if top:
+        side = _read_json(sidecar_path(project, top)) or {}
+        for k, v in (side.get("ai_choice") or {}).items():
+            if _as_int(v) is not None:
+                recorded[str(k)] = int(_as_int(v))
+    choose = dict(recorded, **explicit)
+    rec["ai_choice_recorded"] = recorded
     if top is None or text is None or path is None:
         rec.update(verdict="NOT_MEASURED", rc=2,
                    reason=(f"no L9 top_module in {L9_REL}" if top is None else
@@ -401,39 +521,53 @@ def derive(project: Path, choose: Optional[Dict[str, int]] = None
             fixed[name] = stated[0]
             entry["value"], entry["decided_by"] = stated[0], "document"
 
-    # a derived parameter a document also states must equal the IP's math
-    vals = evaluate_header(header, fixed)
+    # a derived parameter a document states is a constraint on the IP's math:
+    # checked AFTER every independent parameter is decided (below), and used
+    # meanwhile to choose among the values the documents allow
+    stated_derived = {}
     for name in names:
         info = doc_vals.get(name) or {"stated": []}
         stated = sorted({s["value"] for s in info["stated"]})
         if name in in_scope and name in derived_params and len(stated) == 1:
-            entry = rec["parameters"][name]
-            if vals[name] is not None and vals[name] != stated[0]:
-                refusals.append({
-                    "rule": "DOC_IP_PARAMETER_CONTRADICTION", "parameter": name,
-                    "message": (f"{name}: the document states {stated[0]} "
-                                f"({info['stated'][0]['document']}), the IP "
-                                f"computes {exprs[name]} = {vals[name]} from "
-                                f"the document's other values")})
-            entry["value"], entry["decided_by"] = vals[name], "ip_math"
+            stated_derived[name] = (stated[0], info["stated"][0])
+
+    def derived_mismatches(fixed_now: Dict[str, int]) -> List[str]:
+        vals_now = evaluate_header(header, fixed_now)
+        return [n for n, (v, _s) in stated_derived.items()
+                if vals_now[n] is not None and vals_now[n] != v]
+
+    # what each parameter reaches through the IP's own derivations
+    # (param -> derived param -> ... -> a port range), transitively
+    reach: Dict[str, set] = {n: {n} for n in names}
+    changed = True
+    while changed:
+        changed = False
+        for n in names:
+            for d in names:
+                if d not in reach[n] and set(_IDENT.findall(exprs[d])) & reach[n]:
+                    reach[n].add(d)
+                    changed = True
 
     # a parameter no document states, on which evidenced widths depend
     for name in names:
         entry = rec["parameters"][name]
+        if name in recorded and "value" in entry and name not in explicit:
+            if entry.get("decided_by") == "document":
+                # the documents now state it: they outrank a recorded choice
+                entry["ai_choice_superseded"] = recorded[name]
         if ("value" in entry or name in derived_params
                 or name not in in_scope):
             continue
-        depends = [e for e in evidenced
-                   if name in _IDENT.findall(e[1])
-                   or any(name in _IDENT.findall(exprs[d])
-                          and d in _IDENT.findall(e[1])
-                          for d in derived_params)]
+        depends = ([e for e in evidenced
+                    if set(_IDENT.findall(e[1])) & reach[name]]
+                   + [d for d in stated_derived if d in reach[name]])
         allowed = sorted({v for a in entry["document_allowed"]
                           for v in a["values"]})
         if not depends or not allowed:
             continue
         fits = [v for v in allowed
-                if not width_mismatches(dict(fixed, **{name: v}))]
+                if not width_mismatches(dict(fixed, **{name: v}))
+                and not derived_mismatches(dict(fixed, **{name: v}))]
         if name in choose:
             v = choose[name]
             if v not in allowed:
@@ -452,6 +586,8 @@ def derive(project: Path, choose: Optional[Dict[str, int]] = None
             else:
                 fixed[name] = v
                 entry["value"], entry["decided_by"] = v, "ai_choice_verified"
+                entry["ai_choice_source"] = ("--choose" if name in explicit
+                                             else "recorded (sidecar)")
             continue
         if len(fits) == 1:
             fixed[name] = fits[0]
@@ -463,6 +599,20 @@ def derive(project: Path, choose: Optional[Dict[str, int]] = None
                            f"{allowed} gives the port widths they state"})
         else:
             undecided[name] = fits
+
+    # the stated derived values against the IP's math on the DECIDED set
+    vals = evaluate_header(header, fixed)
+    for name, (value, src) in stated_derived.items():
+        entry = rec["parameters"][name]
+        entry["value"], entry["decided_by"] = vals[name], "ip_math"
+        if undecided or vals[name] is None or vals[name] == value:
+            continue
+        refusals.append({
+            "rule": "DOC_IP_PARAMETER_CONTRADICTION", "parameter": name,
+            "message": (f"{name}: the document states {value} "
+                        f"({src['document']}), the IP computes {exprs[name]} "
+                        f"= {vals[name]} under the decided values "
+                        f"{fixed or '(IP defaults)'}")})
 
     # the decided set against every evidenced width (an undecided parameter
     # is not judged at its IP default: the choice still to come decides it)
@@ -484,6 +634,8 @@ def derive(project: Path, choose: Optional[Dict[str, int]] = None
             "decided_by", "ip_default" if name in in_scope else "out_of_scope")
     rec["overrides"] = {n: v for n, v in fixed.items()
                         if n not in derived_params and v != ip_default[n]}
+    rec["ai_choice"] = {n: e["value"] for n, e in rec["parameters"].items()
+                        if e.get("decided_by") == "ai_choice_verified"}
     rec["resolved"] = final
     if refusals:
         rec.update(verdict="REFUSE", rc=1, findings=refusals)
@@ -517,57 +669,76 @@ def sidecar_path(project: Path, top: str) -> Path:
 
 
 def apply_overrides(project: Path, rec: Dict[str, Any]) -> Dict[str, Any]:
-    """Write a PASS record's overrides into the staged top's header defaults.
+    """Write a PASS record's overrides into the staged top's header defaults,
+    and record what was applied and the verified AI choice in the sidecar.
 
-    Returns ``{name: {"from": old_expr, "to": value}}`` for what changed. A
-    parameter whose header default cannot be located is an error, never a
-    silent skip."""
-    if rec.get("verdict") != "PASS" or not rec.get("overrides"):
+    Returns ``{name: {"from": old_expr, "to": value}}`` for what changed.
+
+    THE EDIT IS FOUND WHERE THE PARSER READS. The value span of each override
+    comes from `_header_chunks` over the BLANKED header (comments and string
+    contents are spaces of the same length), the same chunks
+    `header_parameters` reads the defaults from, so a comment that mentions
+    ``name = ...`` is never the target and a string default is never cut.
+    The original bytes are edited only at that span. THEN THE HEADER IS READ
+    BACK: every override must evaluate to its target under the IP's own
+    header math, else the file is restored and this raises -- a PASS that
+    left the IP at its default is not a PASS. A name with no default in the
+    header raises too, never a parameter inserted."""
+    if rec.get("verdict") != "PASS":
         return {}
     project = Path(project)
     path = project / rec["top_file"]
-    text = path.read_text(errors="replace")
-    src = _strip_comments(text)
-    m = re.search(r"\bmodule\s+" + re.escape(rec["top"]) + r"\b", text)
-    if not m or not re.search(r"\bmodule\s+" + re.escape(rec["top"]) + r"\b",
-                              src):
-        raise ValueError(f"module {rec['top']} not found in {path}")
-    hm = re.compile(r"\s*(?:import[^;]*;\s*)*#\s*\(").match(text, m.end())
-    if not hm:
-        raise ValueError(f"module {rec['top']} has no #( ) header in {path}")
-    depth, start, end = 1, hm.end(), None
-    for i in range(start, len(text)):
-        if text[i] == "(":
-            depth += 1
-        elif text[i] == ")":
-            depth -= 1
-            if depth == 0:
-                end = i
-                break
-    if end is None:
-        raise ValueError(f"module {rec['top']} header is unterminated in {path}")
-    block = text[start:end]
+    top = rec["top"]
     changed: Dict[str, Any] = {}
-    for name, value in sorted(rec["overrides"].items()):
-        pat = re.compile(r"(\b" + re.escape(name) + r"\s*=\s*)([^,;)\n]+?)"
-                         r"(\s*(?:,|//|$))", re.M)
-        hit = pat.search(block)
-        if not hit:
-            raise ValueError(f"no default for parameter {name} in the "
-                             f"{rec['top']} header of {path}")
-        changed[name] = {"from": hit.group(2).strip(), "to": value}
-        block = block[:hit.start(2)] + str(value) + block[hit.end(2):]
-    from _atomic_artefact import write_text
-    write_text(path, text[:start] + block + text[end:])
-    side = sidecar_path(project, rec["top"])
+    overrides = dict(rec.get("overrides") or {})
+    if overrides:
+        text = path.read_text(errors="replace")
+        span = _header_block(text, top)
+        if span is None or span == (-1, -1):
+            raise ValueError(f"module {top} has no readable #( ) header in "
+                             f"{path}")
+        start, end = span
+        chunks = {}
+        for name, _s, vs, ve in _header_chunks(_blank(text)[start:end]):
+            if name in chunks:
+                raise ValueError(f"parameter {name} is declared twice in the "
+                                 f"{top} header of {path}")
+            chunks[name] = (start + vs, start + ve)
+        edits = []
+        for name, value in sorted(overrides.items()):
+            if name not in chunks:
+                raise ValueError(f"no default for parameter {name} in the "
+                                 f"{top} header of {path}")
+            vs, ve = chunks[name]
+            changed[name] = {"from": text[vs:ve], "to": value}
+            edits.append((vs, ve, str(value)))
+        new = text
+        for vs, ve, value in sorted(edits, reverse=True):
+            new = new[:vs] + value + new[ve:]
+        from _atomic_artefact import write_text
+        write_text(path, new)
+        after = header_parameters(new, top)
+        got = evaluate_header(after or [], {})
+        wrong = {n: got.get(n) for n, v in overrides.items()
+                 if got.get(n) != v}
+        if wrong:
+            write_text(path, text)
+            raise ValueError(f"the header read back after the edit does not "
+                             f"carry the overrides: wanted {overrides}, got "
+                             f"{wrong}; {path} restored")
+    side = sidecar_path(project, top)
     prior = _read_json(side) or {}
     original = dict(prior.get("original") or {})
     for name, ch in changed.items():
         original.setdefault(name, ch["from"])
-    write_json(side, {
-        "program": PROGRAM, "file": rec["top_file"],
-        "applied": {n: str(v) for n, v in rec["overrides"].items()},
-        "original": original, "report": REPORT_REL})
+    applied = dict(prior.get("applied") or {})
+    applied.update({n: str(v) for n, v in overrides.items()})
+    ai_choice = dict(rec.get("ai_choice") or {})
+    if changed or ai_choice or prior:
+        write_json(side, {
+            "program": PROGRAM, "file": rec["top_file"],
+            "applied": applied, "original": original,
+            "ai_choice": ai_choice, "report": REPORT_REL})
     return changed
 
 

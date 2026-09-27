@@ -329,7 +329,10 @@ When the step FAILs `UNRESOLVED`, several values the documents ALLOW fit. Pick
 one of the listed values only, with the reason from the input, and run
 `python3 programs/reused_ip_param_derive.py <project> --choose NAME=VALUE
 --apply`. The program re-verifies the choice against the allowed set and the
-widths and refuses anything else. Never edit the parameter by hand.
+widths and refuses anything else; it records the choice in
+`.<top>__param_overrides.json` (`ai_choice`) and re-verifies it on every later
+run, so a document change that invalidates it is refused, and a document that
+later STATES the value supersedes it. Never edit the parameter by hand.
 
 ## Synthesis-safe parameters (`synth_safe_params`)
 

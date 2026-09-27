@@ -9904,18 +9904,35 @@ def step_reused_ip_parameters(project: Path) -> StepResult:
     """
     t0 = time.time()
     manifest = project / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+    # ABSENT is "no reused IP"; UNREADABLE is not. A manifest the AI appended a
+    # malformed block to must not quietly leave the IP at its default.
     try:
-        reused = json.loads(manifest.read_text(errors="replace")).get(
-            "reused_ip") is True
-    except (OSError, ValueError, AttributeError):
-        reused = False
-    if not reused:
+        doc = json.loads(manifest.read_text(errors="replace"))
+    except FileNotFoundError:
+        doc = {}
+    except (OSError, ValueError) as exc:
+        return StepResult(
+            "reused_ip_parameters", "NOT_MEASURED", time.time() - t0,
+            f"phase2/stage1/rtl/SOURCE_MANIFEST.json could not be read: {exc}",
+            reason_class=_V.ReasonClass.INPUT_ABSENT.value)
+    if not isinstance(doc, dict):
+        return StepResult(
+            "reused_ip_parameters", "NOT_MEASURED", time.time() - t0,
+            "phase2/stage1/rtl/SOURCE_MANIFEST.json is not a JSON object",
+            reason_class=_V.ReasonClass.INPUT_ABSENT.value)
+    if doc.get("reused_ip") is not True:
         return StepResult(
             "reused_ip_parameters", "NOT_APPLICABLE", time.time() - t0,
-            "no reused IP: phase2/stage1/rtl/SOURCE_MANIFEST.json does not "
-            "declare reused_ip true",
+            "no reused IP: phase2/stage1/rtl/SOURCE_MANIFEST.json is absent "
+            "or does not declare reused_ip true",
             declared_by="phase2/stage1/rtl/SOURCE_MANIFEST.json reused_ip")
     report = project / "reports/phase2/reused_ip_parameters.json"
+    # THIS run's answer only: a report left by an earlier run is not read as
+    # this one's if the program dies before writing.
+    try:
+        report.unlink()
+    except FileNotFoundError:
+        pass
     rc, out, err = _run([
         sys.executable, str(PROGRAMS_DIR / "reused_ip_param_derive.py"),
         str(project), "--apply", "--json", str(report),
@@ -9927,6 +9944,13 @@ def step_reused_ip_parameters(project: Path) -> StepResult:
     verdict = str(payload.get("verdict") or "")
     files = [str(report.relative_to(project))] if report.is_file() else []
     detail = (out or err).strip()[:900]
+    if rc not in (0, 1, 2) or not verdict:
+        # the program crashed: that is a FAIL carrying what it said, not an
+        # absent input
+        return StepResult(
+            "reused_ip_parameters", "FAIL", time.time() - t0,
+            f"reused_ip_param_derive rc={rc} wrote no verdict: "
+            f"{(err or out).strip()[-900:]}", files)
     if rc == 0 and verdict == "NOT_APPLICABLE":
         return StepResult("reused_ip_parameters", "NOT_APPLICABLE",
                           time.time() - t0, detail, files,
@@ -9937,7 +9961,7 @@ def step_reused_ip_parameters(project: Path) -> StepResult:
                           detail, files,
                           extras={"overrides": payload.get("overrides") or {},
                                   "applied": payload.get("applied") or {}})
-    if verdict == "NOT_MEASURED" or rc == 2 or not verdict:
+    if verdict == "NOT_MEASURED" or rc == 2:
         return StepResult(
             "reused_ip_parameters", "NOT_MEASURED", time.time() - t0,
             f"reused_ip_param_derive rc={rc}: "
@@ -24438,6 +24462,7 @@ def main() -> int:
     # Phase 1 that ran and failed.
     _entry_site = None
     _entry_staged = None
+    _entry_params = None
     if getattr(args, "entry_step", None):
         # STAGE SUPPLIED INPUTS FIRST (2026-08-25). Moving the design's own RTL
         # from input/ into phase2/stage1/rtl/ is INPUT HANDLING, not step-1
@@ -24452,6 +24477,13 @@ def main() -> int:
         # phase2/stage1/rtl/ already holds RTL, so the later dispatch of the
         # same step is a no-op rather than a second copy.
         _entry_staged = step_reused_ip_consume(project, args.top_name)
+        # FX_D13 — the documents' parameter values are part of staging the
+        # reused IP: whenever this run staged it (or no record of applying
+        # them exists yet), apply them now, whatever step the run enters at.
+        if ((_entry_staged.extras or {}).get("staged")
+                or not (project / "reports/phase2/reused_ip_parameters.json"
+                        ).is_file()):
+            _entry_params = step_reused_ip_parameters(project)
         _adm = _spf.entry_admission(project, "design_one_shot_runner",
                                     str(args.entry_step))
         if not _adm["admitted"]:
@@ -24573,6 +24605,9 @@ def main() -> int:
         # make the RTL's provenance unexplainable in the run's own report.
         _entry_staged.name = "reused_ip_consume(pre-entry)"
         plan.append(_entry_staged)
+    if _entry_params is not None:
+        _entry_params.name = "reused_ip_parameters(pre-entry)"
+        plan.append(_entry_params)
 
     # Step 0 — Phase 1 (doc-extraction) (v0.122: chain phase1_one_shot_runner if needed)
     plan.append(step_rig_topology_skeleton(project))

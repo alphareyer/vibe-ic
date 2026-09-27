@@ -317,8 +317,8 @@ def _pad_project(tmp_path, waddr_entry):
         _port("clk", "input", 1, True), _port("rst", "input", 1, True),
         _port("o_status", "output", 1, True), waddr_entry]}
     for p in spec["top_ports"]:
-        if p["width"] == 1:
-            p.pop("msb"), p.pop("lsb")
+        if p.get("width") == 1:
+            p.pop("msb", None), p.pop("lsb", None)
     proj = IO._project(tmp_path, doc=PAD_DOC, spec=spec)
     synth = proj / "phase2/stage2/synth"
     synth.mkdir(parents=True)
@@ -391,3 +391,267 @@ def test_a_non_literal_netlist_range_changes_no_width(tmp_path, monkeypatch):
     port = _port("o_w", "output", 9, True, doc=False)
     out, notes = G._reconcile_port_widths(p, [port])
     assert out == [port] and notes == []
+
+
+# --------------------------------------------------------------------------- #
+# review wave 2 (FX_D13_review_fix)
+# --------------------------------------------------------------------------- #
+ALLOW_600_1000_1024 = [_param("memsize", None, allowed=[600, 1000, 1024])]
+
+
+def test_a_verified_ai_choice_survives_the_runners_plain_rerun(tmp_path):
+    """MAJOR 1: UNRESOLVED -> --choose --apply -> the runner's plain rerun is
+    PASS (it used to be UNRESOLVED again on every pass)."""
+    import design_one_shot_runner as R
+    p = _project(tmp_path, l8=ALLOW_600_1000_1024)
+    assert R.step_reused_ip_parameters(p).status == "FAIL"
+    assert D.main([str(p), "--choose", "memsize=1000", "--apply"]) == 0
+    assert _header_default(p, "memsize") == "1000"
+    sr = R.step_reused_ip_parameters(p)                  # the plain rerun
+    assert sr.status == "PASS", sr.detail
+    side = json.loads(D.sidecar_path(p, "widget").read_text())
+    assert side["ai_choice"] == {"memsize": 1000}
+    rec = json.loads((p / D.REPORT_REL).read_text())
+    assert rec["parameters"]["memsize"]["decided_by"] == "ai_choice_verified"
+    assert rec["parameters"]["memsize"]["ai_choice_source"] == "recorded (sidecar)"
+
+
+@pytest.mark.parametrize("change,rule", [
+    ({"l8": [_param("memsize", None, allowed=[600, 1024, 4096])]},
+     "CHOICE_NOT_ALLOWED_BY_DOCUMENTS"),
+    ({"l9_addr": 11}, "CHOICE_CONTRADICTS_DOCUMENT_WIDTHS"),
+], ids=["no-longer-allowed", "width-changed"])
+def test_a_recorded_choice_a_changed_document_invalidates_is_refused(
+        tmp_path, change, rule):
+    p = _project(tmp_path, l8=ALLOW_600_1000_1024)
+    assert D.main([str(p), "--choose", "memsize=1000", "--apply"]) == 0
+    docs = p / "phase1/generated_docs"
+    if "l8" in change:
+        (docs / "L8_RTL_CONSTANTS.json").write_text(
+            json.dumps({"parameters": change["l8"]}))
+    else:
+        (docs / "L9_INTEGRATION_SPEC.json").write_text(
+            json.dumps(_l9(addr_width=change["l9_addr"])))
+    rec = D.derive(p)
+    assert rec["verdict"] == "REFUSE"
+    assert [f["rule"] for f in rec["findings"]][:1] == [rule]
+
+
+def test_a_document_that_now_states_the_value_supersedes_the_recorded_choice(
+        tmp_path):
+    p = _project(tmp_path, l8=ALLOW_600_1000_1024)
+    assert D.main([str(p), "--choose", "memsize=1000", "--apply"]) == 0
+    (p / "phase1/generated_docs/L8_RTL_CONSTANTS.json").write_text(json.dumps(
+        {"parameters": [_param("memsize", 1024, override=True)]}))
+    assert D.main([str(p), "--apply"]) == 0
+    rec = json.loads((p / D.REPORT_REL).read_text())
+    assert rec["parameters"]["memsize"]["decided_by"] == "document"
+    assert rec["parameters"]["memsize"]["ai_choice_superseded"] == 1000
+    assert _header_default(p, "memsize") == "1024"
+    assert json.loads(D.sidecar_path(p, "widget").read_text())["ai_choice"] == {}
+
+
+HEADER_TRAPS = {
+    "line-comment": TOP_V.replace(
+        "  #(//Memory parameters\n",
+        "  #(//Memory parameters\n    // memsize = RAM size in bytes\n"),
+    "commented-out-declaration": TOP_V.replace(
+        "    parameter memsize  = 512,\n",
+        "    //parameter memsize = 256,\n    parameter memsize  = 512,\n"),
+    "block-comment": TOP_V.replace(
+        "    parameter memsize  = 512,\n",
+        "    /* memsize = 256 for the small build */\n"
+        "    parameter memsize  = 512,\n"),
+    "string-and-expression": TOP_V.replace(
+        "    parameter memsize  = 512,\n",
+        '    parameter NOTE = "memsize = 3, fast//x",\n'
+        "    parameter memsize  = (1 << 9) /* bytes */,\n"),
+}
+
+
+@pytest.mark.parametrize("trap", sorted(HEADER_TRAPS))
+def test_apply_edits_the_declaration_never_a_comment_or_a_string(tmp_path,
+                                                                 trap):
+    """MAJOR 2: the edit lands on the default the parser reads."""
+    p = _project(tmp_path, top_v=HEADER_TRAPS[trap])
+    before = (p / "phase2/stage1/rtl/widget.v").read_text()
+    assert D.main([str(p), "--apply"]) == 0
+    after = (p / "phase2/stage1/rtl/widget.v").read_text()
+    assert _header_default(p, "memsize") == "1024"
+    assert D.evaluate_header(D.header_parameters(after, "widget"),
+                             {})["aw"] == 10
+    # every byte outside the one default is untouched
+    old = dict(D.header_parameters(before, "widget"))["memsize"]
+    assert after.replace("1024", old, 1) == before or \
+        before.count(old) > 1 and len(after) == len(before) - len(old) + 4
+    if trap == "string-and-expression":
+        assert '"memsize = 3, fast//x"' in after
+    assert D.main([str(p), "--apply"]) == 0              # converges
+    assert (p / "phase2/stage1/rtl/widget.v").read_text() == after
+
+
+def test_an_edit_the_header_does_not_carry_is_restored_and_not_measured(
+        tmp_path, monkeypatch):
+    """The read-back guard: whatever misplaces the edit, a PASS that left
+    the IP at its default is refused and the file is restored."""
+    p = _project(tmp_path)
+    before = (p / "phase2/stage1/rtl/widget.v").read_text()
+    real = D._header_chunks
+
+    def misplaced(blank_block):
+        return [(n, s, s, s) if n == "memsize" else (n, s, vs, ve)
+                for n, s, vs, ve in real(blank_block)]
+    monkeypatch.setattr(D, "_header_chunks", misplaced)
+    assert D.main([str(p), "--apply"]) == 2
+    rec = json.loads((p / D.REPORT_REL).read_text())
+    assert rec["verdict"] == "NOT_MEASURED"
+    assert "does not carry the overrides" in rec["reason"]
+    assert (p / "phase2/stage1/rtl/widget.v").read_text() == before
+
+
+def test_a_stated_derived_value_helps_choose_rather_than_refusing(tmp_path):
+    """MINOR: L8 states aw = 10 and allows memsize 256..2048: consistent
+    documents decide memsize 1024, never a contradiction at the IP default."""
+    p = _project(tmp_path, l8=[
+        _param("memsize", None, allowed=[256, 512, 1024, 2048]),
+        _param("aw", 10, override=True)])
+    rec = D.derive(p)
+    assert rec["verdict"] == "PASS", rec["findings"]
+    assert rec["overrides"] == {"memsize": 1024}
+    assert rec["parameters"]["aw"]["decided_by"] == "ip_math"
+
+
+def test_a_two_level_derivation_is_followed(tmp_path):
+    top = TOP_V.replace(
+        "    parameter aw       = $clog2(memsize),\n",
+        "    parameter aw       = $clog2(memsize),\n"
+        "    parameter amsb     = aw-1,\n").replace("[aw-1:0]", "[amsb:0]")
+    p = _project(tmp_path, top_v=top,
+                 l8=[_param("memsize", None, allowed=[256, 512, 1024, 2048])])
+    rec = D.derive(p)
+    assert rec["verdict"] == "PASS", rec["findings"]
+    assert rec["overrides"] == {"memsize": 1024}
+
+
+def _rtl_width_l9(addr_entry):
+    l9 = _l9()
+    l9["top_ports"] = [p for p in l9["top_ports"] if p["name"] != "o_mem_addr"]
+    return dict(l9, top_ports=l9["top_ports"] + [addr_entry])
+
+
+@pytest.mark.parametrize("entry", [
+    {"name": "o_mem_addr", "direction": "output", "width": 9, "msb": 8,
+     "lsb": 0, "extraction_strategy": "directional_prose_port",
+     "evidence": "L3.md:12 | filled from shipped RTL header: width"},
+    {"name": "o_mem_addr", "direction": "output", "width": 1, "msb": 0,
+     "lsb": 0, "extraction_strategy":
+         "rst_grid_interface_table+implicit_1bit_default_v1_6_427"},
+    {"name": "o_mem_addr", "direction": "output", "width": 9, "msb": 8,
+     "lsb": 0, "extraction_strategy": "shipped_rtl_header"},
+    {"name": "o_mem_addr", "direction": "output",
+     "extraction_strategy": "doc_table"},
+], ids=["filled-from-rtl-header", "implicit-1bit", "shipped-rtl-row",
+        "no-width"])
+def test_a_width_the_document_did_not_state_is_not_evidence(tmp_path, entry):
+    """MINOR: widths phase 1 took from the IP's default header, or its
+    implicit 1-bit default, or no width at all, are not document widths."""
+    assert D.stated_width(entry) is None
+    p = _project(tmp_path, l9=_rtl_width_l9(entry))
+    rec = D.derive(p)
+    assert rec["verdict"] == "PASS", rec["findings"]
+    assert rec["overrides"] == {"memsize": 1024}
+    assert rec["width_evidence"] == []
+
+
+def test_the_pads_follow_the_netlist_when_the_document_states_no_width(
+        tmp_path):
+    """MINOR: a width-less document entry is 'unknown', not 1 bit."""
+    entry = _port("o_memory_waddr", "output", 1, False)
+    for k in ("width", "msb", "lsb"):
+        entry.pop(k, None)
+    IO, proj, res, out = _pad_project(tmp_path, entry)
+    assert res.returncode == 0, out
+    rec = IO._record(proj)
+    assert len(rec["derived_answers"]["pad_order_by_side"]["north"]) == 10
+    note = rec["port_widths_from_netlist"][0]
+    assert note["l9_width"] is None and note["netlist_width"] == 10
+    assert note["reason"] == "the document states no width for this port"
+
+
+def test_only_an_r1_derived_pair_carries_a_width(tmp_path):
+    """Part 2: D9's derived pairs live in `derived_pad_pairs`; R1 (a document
+    port split into its implemented read/write ports) carries the width, R2
+    (a shared family atom and side) does not."""
+    for rule, evidenced in (("R1", True), ("R2", False)):
+        p = _project(tmp_path / rule, pairs=[], l8=[
+            _param("memsize", None, allowed=[256, 512, 1024, 2048])])
+        mf = p / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+        doc = json.loads(mf.read_text())
+        doc["derived_pad_pairs"] = [{
+            "l9": ["o_mem_addr"], "rtl": ["o_mem_waddr", "o_mem_raddr"],
+            "derived_by": "renamed_interface_derive", "rule": rule,
+            "evidence": "test"}]
+        mf.write_text(json.dumps(doc))
+        rec = D.derive(p)
+        assert bool(rec["width_evidence"]) is evidenced, rule
+        assert rec["overrides"] == ({"memsize": 1024} if evidenced else {})
+
+
+@pytest.mark.parametrize("manifest,status", [
+    (None, "NOT_APPLICABLE"),
+    ("{not json", "NOT_MEASURED"),
+    ("[1, 2]", "NOT_MEASURED"),
+], ids=["absent", "corrupt", "not-an-object"])
+def test_an_unreadable_manifest_is_not_no_reused_ip(tmp_path, manifest,
+                                                    status):
+    import design_one_shot_runner as R
+    p = _project(tmp_path)
+    mf = p / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+    if manifest is None:
+        mf.unlink()
+    else:
+        mf.write_text(manifest)
+    sr = R.step_reused_ip_parameters(p)
+    assert sr.status == status, sr.detail
+    assert _header_default(p, "memsize") == "512"
+
+
+def test_a_crashed_program_is_a_fail_and_never_reads_a_stale_report(
+        tmp_path, monkeypatch):
+    import design_one_shot_runner as R
+    p = _project(tmp_path)
+    stale = p / D.REPORT_REL
+    stale.parent.mkdir(parents=True)
+    stale.write_text(json.dumps({"verdict": "PASS", "rc": 0}))
+    monkeypatch.setattr(R, "_run", lambda cmd, **k: (
+        1, "", "Traceback ...\nKeyError: 'top_ports'"))
+    sr = R.step_reused_ip_parameters(p)
+    assert sr.status == "FAIL" and "KeyError" in sr.detail
+    assert not stale.exists()
+
+
+def test_entering_after_rtl_gen_still_applies_the_documents_values():
+    """MINOR: `--entry-step` stages the IP pre-entry; the documents' values
+    are applied with it, not booked NOT_APPLICABLE."""
+    src = RUNNER.read_text()
+    main = next(f for f in ast.parse(src).body
+                if isinstance(f, ast.FunctionDef) and f.name == "main")
+    body = ast.unparse(main)
+    at_consume = body.index("_entry_staged = step_reused_ip_consume(")
+    at_params = body.index("_entry_params = step_reused_ip_parameters(project)")
+    at_admission = body.index("_adm = _spf.entry_admission(")
+    assert at_consume < at_params < at_admission
+    assert "_entry_params.name = 'reused_ip_parameters(pre-entry)'" in body
+
+
+def test_a_stated_derived_value_alone_decides_among_the_allowed(tmp_path):
+    """No port width is evidenced; the documents state `aw = 10` and allow
+    memsize 256..2048. Only 1024 gives aw 10 under the IP's own math."""
+    p = _project(tmp_path, pairs=[], l8=[
+        _param("memsize", None, allowed=[256, 512, 1024, 2048]),
+        _param("aw", 10, override=True)])
+    rec = D.derive(p)
+    assert rec["width_evidence"] == []
+    assert rec["verdict"] == "PASS", rec["findings"]
+    assert rec["overrides"] == {"memsize": 1024}
+    assert rec["parameters"]["memsize"]["decided_by"] == "document_widths"
