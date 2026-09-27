@@ -486,7 +486,16 @@ def _phase3_has_run(project: Path) -> bool:
         records.append(top)
     d = project / "reports" / "phase3"
     if d.is_dir():
-        records.extend(d.rglob("*.json"))
+        # The AUDIT's own publication is not a phase-3 measurement, wherever
+        # it is written. MEASURED on subservient (8HD-4, 2026-09-28): the
+        # phase-2 final audit publishes `reports/phase3/gates/
+        # stage3_compliance.json` (`program: flow_compliance_check`), and this
+        # gate -- run inside that same audit -- then read "phase 3 has run"
+        # off the audit's own bookkeeping. Same rule as the requirement
+        # search's `reports/audit` exclusion, keyed on the record's own
+        # `program` because the path does not say it.
+        records.extend(r for r in d.rglob("*.json")
+                       if not _is_audit_publication(r))
     if not records:
         return False
     # FX_P2 — PHASE 3 OF WHICH DESIGN? A phase-3 record older than this run's
@@ -504,6 +513,16 @@ def _phase3_has_run(project: Path) -> bool:
     if newest_netlist is not None and newest_record < newest_netlist:
         return False
     return True
+
+
+def _is_audit_publication(path: Path) -> bool:
+    """Is this JSON the flow-compliance audit's own record?"""
+    try:
+        payload = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(payload, dict) and \
+        payload.get("program") == "flow_compliance_check"
 
 
 def _mtime(path: Path) -> float:
