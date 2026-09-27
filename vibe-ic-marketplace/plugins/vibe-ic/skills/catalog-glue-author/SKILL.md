@@ -188,6 +188,33 @@ and #712 (wrapper-exposed output) are **dead code without this file**.
 > reaches is refused (PAD_GROUP_UNRESOLVED at 15.5ic, DOES_NOT_FIT at step 2,
 > even when no RTL bit is left without a pad).
 
+> **`renamed_interfaces` — PROGRAM FIRST, then you, then the program again
+> (D9).** The manifest emitter runs `programs/renamed_interface_derive.py`: an
+> empty list is filled with the side-granular pairs the design's own records
+> decide (read/write split of a document port's atoms; the sole remaining
+> group side), each carrying `derived_by` + `evidence`, and it keeps ONLY the
+> pairs `accept_renames` accepts (the D2 rule above: a derived pair gives a pad
+> a side only if phase 2 accepts it). A derived pair the rule rejects is listed
+> in `renamed_interfaces_derivation.rejected` with its reasons, and its ports
+> stay unresolved. Ports it cannot decide are listed in
+> `renamed_interfaces_derivation.unresolved` with their candidate sides and
+> the reason. HARD RULES for this skill:
+> 1. If `renamed_interfaces_derivation.unresolved` is non-empty, you MUST author
+>    a pair for every listed port. Returning with `renamed_interfaces: []` (or
+>    with any listed port unpaired) is a failed hand-off, not a finished one.
+> 2. One pair per placement GROUP: every `l9` name of a pair must fall in the
+>    same pad-placement group row by the exact-atom rule, and the pair must
+>    pass `accept_renames` (same direction; same width where both are literal).
+>    Keep the program's derived pairs; add yours beside them. A port whose only
+>    candidate pair is rejected for a WIDTH the document and the RTL disagree
+>    on is not yours to pair around: report it, do not author a pair that hides
+>    the disagreement.
+> 3. Then run `python3 programs/renamed_interface_derive.py <project> --check`.
+>    It must exit 0. rc 1 names each REFUSED pair (an `rtl` name the implemented
+>    top lacks, an `l9` name L9 lacks, an `l9` name in no group row, names in
+>    two groups, or any `accept_renames` reason) and each still-unpaired port;
+>    fix the pair, never the check.
+
 > **`{l9, rtl}` schema (HARD doc-and-code contract, #775).** Every `{l9, rtl}`
 > dict above is parsed by `l9_rtl_pin_consistency_check._manifest_name_set()`:
 > for `flattened_buses` the `l9` value names the **L9 struct ROOT** the chip-top

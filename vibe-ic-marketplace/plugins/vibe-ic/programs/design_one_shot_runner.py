@@ -7706,6 +7706,24 @@ def _rtl_gen_reused_ip_handoff(
                 f"(reused_ip:true) so #659/#711/#712 pin-gate "
                 f"relaxations are live."
                 if _mf_emitted else "")
+    # D9: name ports with no derived pad-group pair in the author hand-off.
+    _rid_unresolved = []
+    if _mf_emitted:
+        try:
+            _rid_unresolved = (json.loads(
+                (project / _mf_emitted).read_text())
+                .get("renamed_interfaces_derivation") or {}
+            ).get("unresolved") or []
+        except (OSError, ValueError, AttributeError):
+            _rid_unresolved = []
+    if _rid_unresolved:
+        _mf_note += (
+            f" renamed_interfaces: {len(_rid_unresolved)} "
+            f"implemented port(s) have no derivable pad-group pair "
+            f"({', '.join(str(u.get('port')) for u in _rid_unresolved[:8])})"
+            f" — author one pair per placement group, then "
+            f"`renamed_interface_derive.py <project> --check` must "
+            f"exit 0.")
     # Authoring handoff (`catalog-glue-author` still authors the
     # chip_top wrapper by hand) — so it gets the digests too.
     _hint, _hint_extras = _stage_author_knowledge_digests(project)
