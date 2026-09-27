@@ -435,32 +435,89 @@ def test_the_def_the_gds_streams_is_part_of_its_identity(tmp_path):
     assert fresh is False, f"an in-place DEF promotion was missed: {why}"
 
 
+def _route(monkeypatch, docker_on_path: bool):
+    """Put this box on ONE exec route, whichever box runs the test.
+
+    The route predicate's own input — is there a `docker` client on PATH —
+    is what is set, not the ladder: `_container_exec.no_container_route` and
+    `_step_image_digest` run unpatched. Every `docker` the ladder would run
+    goes through `_eda_pin._docker`, which records the call and answers the
+    way docker answers for a container that does not exist, so the docker
+    route is measured without a daemon and the local route can prove it asked
+    none."""
+    import shutil as _sh
+    import _eda_pin as _pin
+    real_which = _sh.which
+
+    def _which(cmd, *a, **k):
+        if cmd == "docker":
+            return "/usr/bin/docker" if docker_on_path else None
+        return real_which(cmd, *a, **k)
+    monkeypatch.setattr(_sh, "which", _which)
+    calls = []
+
+    def _docker(*argv, **_k):
+        calls.append(argv)
+        return 1, "", "Error: No such object: " + (argv[-1] if argv else "")
+    monkeypatch.setattr(_pin, "_docker", _docker)
+    return calls
+
+
 def test_the_image_identity_ladder_answers_without_a_registry_digest():
     """FINDING 5. `image_identity` returns a REGISTRY digest or
     IMAGE_UNAVAILABLE; r1 turned anything else into None, so a locally built
     image — or running inside the image, where there is no docker client —
-    meant every step re-ran for ever. The r1 tests patched this away."""
-    assert _R._step_image_digest("") == "NO_CONTAINER", (
-        "a container nobody named has no identity to fail closed on")
-    # HOST-INDEPENDENT, which the r2 form was not: on a box with no docker
-    # client every named container resolves to LOCAL_EXEC (the runner is
-    # inside the image), and on a box with one an absent container cannot be
-    # identified at all. Both are correct answers from the same ladder, so the
-    # assertion is on the ladder, not on which box happens to run it.
+    meant every step re-ran for ever. The r1 tests patched this away.
+
+    UNPATCHED, on whichever box runs it. The ladder answers by the route this
+    box HAS: with no docker client the tools run from PATH and the answer is
+    LOCAL_EXEC, which comes BEFORE the NO_CONTAINER answer (ruling F34 — the
+    r2 form asserted NO_CONTAINER unconditionally and was red inside the
+    image); with one, an unnamed container is NO_CONTAINER and a named one
+    that cannot be identified refuses (None)."""
     import _container_exec as _cx
-    got = _R._step_image_digest("no-such-container-xyz-0924")
+    unnamed = _R._step_image_digest("")
+    named = _R._step_image_digest("no-such-container-xyz-0924")
     if _cx.no_container_route():
-        assert got == "LOCAL_EXEC", got
+        assert (unnamed, named) == ("LOCAL_EXEC", "LOCAL_EXEC"), (unnamed,
+                                                                  named)
     else:
-        assert got is None, (
+        assert unnamed == "NO_CONTAINER", (
+            "a container nobody named has no identity to fail closed on; "
+            f"got {unnamed!r}")
+        assert named is None, (
             "a container that WAS named and cannot be identified still "
-            f"refuses; got {got!r}")
+            f"refuses; got {named!r}")
 
 
+@pytest.mark.parametrize("container", ["", "no-such-container-xyz-0924"])
+def test_a_tool_on_path_answers_local_exec_and_resolves_no_image(
+        monkeypatch, container):
+    """RULING F34: LOCAL_EXEC is tried FIRST. With no docker client the
+    tools run from this process's PATH with no container, so the identity is
+    LOCAL_EXEC — whether or not a container was named (the runner's
+    `--container` default is always named) — and, the v1.25.43 rule, the
+    image is resolved only on the docker path: not one `docker` is asked."""
+    calls = _route(monkeypatch, docker_on_path=False)
+    assert _R._step_image_digest(container) == "LOCAL_EXEC"
+    assert calls == [], (
+        "the local route asked docker to identify an image it will never "
+        f"use: {calls}")
 
 
-
-
+def test_with_neither_a_local_route_nor_a_container_it_refuses_by_name(
+        monkeypatch):
+    """What r2 protected, kept: when the tools are NOT on the local route (a
+    docker client exists, so the container is the route) and no container
+    answers, nothing is invented. Unnamed -> NO_CONTAINER, by name; named and
+    unidentifiable -> None, a refusal that re-runs the step. Both asked
+    docker, which is the route they are on."""
+    calls = _route(monkeypatch, docker_on_path=True)
+    assert _R._step_image_digest("") == "NO_CONTAINER"
+    assert calls, "the docker route answered without asking docker"
+    del calls[:]
+    assert _R._step_image_digest("no-such-container-xyz-0924") is None
+    assert calls and all(c[-1] == "no-such-container-xyz-0924" for c in calls)
 
 
 # --- the PDK that the step itself derives ----------------------------------
