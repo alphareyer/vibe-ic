@@ -659,6 +659,7 @@ def gate(project: Path, args, *, runner: str, parser) -> str:
     if impl == IMPL_DEFAULT:
         return impl
     refuse_knobs(runner, args, parser)
+    refuse_out_of_scope(project, args, runner=runner)
     if runner not in WIRED_RUNNERS:
         raise ImplRefusal(
             IMPL_NOT_YET_WIRED,
@@ -680,6 +681,98 @@ def record_after_lock(project: Path, args, *, runner: str) -> str:
     impl = require_supported(normalise(requested_from_args(args)))
     write_record(project, impl, resolved_by=runner)
     return impl
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# W24: THE v1 SCOPE — refused by name, before any tool runs
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Owner ruling 2026-09-28: v1 of --librelane is gf180mcuD, digital, no macros;
+# anything else refuses BY NAME (and analog is out of v1, decision 13). Each
+# refusal names what put the design out of scope and the remedy: the default
+# flow, which runs all of it.
+
+#: The PDKs v1 runs under a non-default mode (owner ruling 2026-09-28).
+SUPPORTED_PDKS = frozenset({"gf180mcuD"})
+#: Staged hard-macro views (vendor IP, SRAM, OTP, ...) under input/pdk_local.
+MACRO_SUFFIXES = (".lef", ".gds", ".gds2", ".oas", ".lib")
+
+IMPL_PDK_UNSUPPORTED = "IMPL_PDK_UNSUPPORTED"
+IMPL_MACROS_UNSUPPORTED = "IMPL_MACROS_UNSUPPORTED"
+IMPL_ANALOG_UNSUPPORTED = "IMPL_ANALOG_UNSUPPORTED"
+SCOPE_REASON_CLASSES = (IMPL_PDK_UNSUPPORTED, IMPL_MACROS_UNSUPPORTED,
+                        IMPL_ANALOG_UNSUPPORTED)
+_SCOPE_REMEDY = "Remedy: run the default flow (no flag), which runs it."
+
+
+def staged_macros(project: Path) -> List[str]:
+    """Hard-macro views the design stages (project-relative), sorted."""
+    root = Path(project) / "input" / "pdk_local"
+    if not root.is_dir():
+        return []
+    return sorted(str(q.relative_to(project)) for q in root.rglob("*")
+                  if q.is_file() and q.suffix.lower() in MACRO_SUFFIXES)
+
+
+def require_pdk_in_scope(impl: str, pdk_name: str) -> None:
+    if impl != IMPL_DEFAULT and pdk_name not in SUPPORTED_PDKS:
+        raise ImplRefusal(
+            IMPL_PDK_UNSUPPORTED,
+            f"{FLAG_FOR.get(impl, impl)} v1 runs {sorted(SUPPORTED_PDKS)}; this "
+            f"run's PDK is {pdk_name!r}. {_SCOPE_REMEDY}")
+
+
+def require_no_macros(project: Path, impl: str) -> None:
+    macros = staged_macros(project)
+    if impl != IMPL_DEFAULT and macros:
+        raise ImplRefusal(
+            IMPL_MACROS_UNSUPPORTED,
+            f"{FLAG_FOR.get(impl, impl)} v1 implements designs without hard "
+            f"macros; this design stages {len(macros)} macro view(s), e.g. "
+            f"{', '.join(macros[:3])}. {_SCOPE_REMEDY}")
+
+
+def require_no_analog(impl: str, runs_analog: bool, why: str) -> None:
+    if impl != IMPL_DEFAULT and runs_analog:
+        raise ImplRefusal(
+            IMPL_ANALOG_UNSUPPORTED,
+            f"{FLAG_FOR.get(impl, impl)} v1 is digital only (decision 13); "
+            f"{why}. {_SCOPE_REMEDY}")
+
+
+def refuse_out_of_scope(project: Path, args, *, runner: str) -> None:
+    """What the gate can see before anything runs: the analog runner itself,
+    an explicitly named PDK, and staged macros. A PDK left to `auto` is
+    judged where it is resolved (`scope_exit_after_pdk`)."""
+    impl = normalise(requested_from_args(args))
+    if runner == "analog_one_shot_runner":
+        require_no_analog(impl, True, "the analog track was invoked")
+    named = str(getattr(args, "pdk", "") or "").strip()
+    if named and named.lower() != "auto":
+        require_pdk_in_scope(impl, named)
+    require_no_macros(project, impl)
+
+
+def scope_exit_after_pdk(project: Path, pdk_name: str) -> Optional[int]:
+    """For a runner that resolved `auto`: 2 (reason on stderr) when the
+    project's mode does not run this PDK, else None."""
+    try:
+        require_pdk_in_scope(recorded_impl(project), pdk_name)
+    except ImplRefusal as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
+    return None
+
+
+def scope_exit_if_analog(project: Path, runs_analog: bool) -> Optional[int]:
+    """For the front door, once it knows whether the design has analog."""
+    try:
+        require_no_analog(recorded_impl(project), runs_analog,
+                          "the design declares analog blocks")
+    except ImplRefusal as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
+    return None
 
 
 def child_argv(project: Path) -> List[str]:

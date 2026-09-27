@@ -74103,6 +74103,10 @@ def main() -> int:
         print("[SKIP] phase3_one_shot_runner: no usable PDK detected. "
               "Provide input/pdk/{liberty,lef}/ or use --pdk sky130A.")
         return 0
+    # llv1 W24: the PDK `auto` resolved to must be in the flagged mode's scope.
+    _impl_rc = _impl_flow.scope_exit_after_pdk(project, pdk.name)
+    if _impl_rc is not None:
+        return _impl_rc
 
     # Silent wrong-PDK fallback guard — a configured commercial PDK must NEVER
     # become an OSS in-container fallback without the operator saying so. A

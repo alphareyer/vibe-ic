@@ -1994,6 +1994,10 @@ def main() -> int:
     # treated analog A9 as a HARD condition → every pure-digital run
     # halted at phase2. The two decision points now agree.
     run_analog = _need_analog(project, args.skip_analog)
+    # llv1 W24: analog is out of --librelane v1 (decision 13).
+    _impl_rc = _impl_flow.scope_exit_if_analog(project, run_analog)
+    if _impl_rc is not None:
+        return _impl_rc
 
     # ---------------- Top-module resolution (once, for BOTH phase 2 & 3) ------
     # The historical default '--top-name chip_top' is wrong for a standalone

@@ -151,7 +151,11 @@ def test_each_real_main_refuses_by_name_and_writes_nothing(runner, project):
     before = _tree(project)
     cp = _run_main(runner, project, "--librelane")
     assert cp.returncode == 2, cp.stderr[-2000:]
-    assert f"REFUSED: {IF.IMPL_NOT_YET_WIRED}" in cp.stderr
+    # The analog track is out of v1 (W24): refused by name before the
+    # not-yet-wired check that every other runner reaches.
+    expected = (IF.IMPL_ANALOG_UNSUPPORTED if runner == "analog_one_shot_runner"
+                else IF.IMPL_NOT_YET_WIRED)
+    assert f"REFUSED: {expected}" in cp.stderr
     cp = _run_main(runner, project, "--orfs")
     assert cp.returncode == 2, cp.stderr[-2000:]
     assert f"REFUSED: {IF.IMPL_NOT_YET_SUPPORTED}" in cp.stderr
