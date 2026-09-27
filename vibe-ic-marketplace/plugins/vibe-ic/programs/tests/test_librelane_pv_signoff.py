@@ -508,3 +508,164 @@ def test_the_plugin_registers_both_steps_and_fingerprints_the_drc_script():
     digests = contract._plugin_digests("Vibeic.FinishingXOR")
     assert "librelane_plugins/librelane_plugin_vibeic/finishing_xor.drc" in digests
     assert contract._plugin_digests("KLayout.DRC") == {}
+
+
+# ── the tech LEF the route read (via-legalization record) ──────────────────
+def _legalized(project, *, status="APPLIED", recorded=None, content="VIA Via1 ;",
+               sha=None):
+    pnr = project / "phase3/stage3/pnr"
+    pnr.mkdir(parents=True, exist_ok=True)
+    tlef = pnr / "active_via_legalized.tlef"
+    tlef.write_text(content)
+    _put(project / pv.VIA_LEGALIZATION_REL, {
+        "status": status,
+        "derived_tech_lef": recorded or "/elsewhere/run/phase3/stage3/pnr/active_via_legalized.tlef",
+        "derived_sha256": sha or contract.digest(tlef)})
+    return tlef
+
+
+def test_no_record_or_no_remediation_means_the_pdk_tech_lef(tmp_path):
+    assert pv.route_tech_lef(tmp_path) is None
+    assert pv.tech_lef_overlay(tmp_path) is None
+    _legalized(tmp_path, status="NOT_APPLIED")
+    assert pv.route_tech_lef(tmp_path) is None
+
+
+def test_an_applied_remediation_is_the_tech_lef_every_geometry_step_reads(tmp_path):
+    tlef = _legalized(tmp_path)
+    path, source = pv.route_tech_lef(tmp_path)
+    assert path == tlef.resolve()
+    assert contract.digest(tlef) in source
+    overlay = pv.tech_lef_overlay(tmp_path)
+    assert overlay["TECH_LEFS"][0] == {"*": str(tlef.resolve())}
+
+
+def test_an_applied_remediation_whose_bytes_changed_refuses(tmp_path):
+    _legalized(tmp_path, sha="0" * 64)
+    with pytest.raises(contract.Refusal, match="LL_ROUTE_TECH_LEF_UNBOUND"):
+        pv.route_tech_lef(tmp_path)
+
+
+def test_an_applied_record_without_its_hash_refuses(tmp_path):
+    tlef = _legalized(tmp_path)
+    doc = json.loads((tmp_path / pv.VIA_LEGALIZATION_REL).read_text())
+    del doc["derived_sha256"]
+    _put(tmp_path / pv.VIA_LEGALIZATION_REL, doc)
+    with pytest.raises(contract.Refusal, match="LL_ROUTE_TECH_LEF_UNBOUND"):
+        pv.route_tech_lef(tmp_path)
+    assert tlef.is_file()
+
+
+def test_step_31_resolves_its_configs_with_the_routes_tech_lef(tmp_path, monkeypatch):
+    project, pnr, configs, pdk_root = _half_project(tmp_path, pv.DRC_CHAIN)
+    tlef = _legalized(project)
+    seen = {}
+
+    def resolve(*args, **kwargs):
+        seen.update(kwargs)
+        return configs
+    monkeypatch.setattr(pv, "resolve_step_configs", resolve)
+    _fake_tool(monkeypatch, {"Magic.DRC": {"magic__drc_error__count": 0},
+                             "KLayout.DRC": {"klayout__drc_error__count": 0},
+                             "KLayout.Density": {"klayout__density_error__count": 0}})
+    pv.run_half(project, "img", pdk_root, "procA", "drc", gds=pnr / "chip.gds",
+                routed_def=pnr / "chip.def", netlist=pnr / "chip_pnr.v",
+                sdc=pnr / "constraint.sdc")
+    assert seen["overlay"]["TECH_LEFS"][0] == {"*": str(tlef.resolve())}
+
+
+# ── step 37: the finishing XOR decides a stream's feasibility ───────────────
+def _step37_world(tmp_path, monkeypatch, finishing):
+    step37 = importlib.import_module("librelane_step37")
+    project = tmp_path / "p"
+    tlef = _legalized(project)
+    pnr = project / "phase3/stage3/pnr"
+    for name in ("routed.def", "chip_pnr.v", "constraint.sdc"):
+        (pnr / name).write_text(name)
+    seen = {}
+    configs = {step: _put(tmp_path / "cfg" / f"{step}.json",
+                          {"meta": {"step": step}, "DIE_AREA": [0, 0, 10, 10]})
+               for step in step37.STEPS}
+
+    def resolve(*args, **kwargs):
+        seen["overlay"] = kwargs.get("overlay")
+        return configs
+    monkeypatch.setattr(step37, "resolve_step_configs", resolve)
+    monkeypatch.setattr(step37, "declaration_config",
+                        lambda p: ({"CORE_AREA": [1, 1, 9, 9]}, {"CORE_AREA": "decl"}))
+    monkeypatch.setattr(step37, "_routed_state", lambda *a, **k: tmp_path / "bridge.json")
+    streams = {}
+
+    def run(project_, image, pdk_root, pdk, steps, state, lane, configs_):
+        out = []
+        for index, step in enumerate(steps, 1):
+            folder = project_ / "phase3/librelane" / lane / f"{index:02d}"
+            gds = folder / f"{lane}-{index}.gds"
+            gds.parent.mkdir(parents=True, exist_ok=True)
+            gds.write_text(lane)
+            doc = {"gds": str(gds), "mag_gds": str(folder / "m.gds"),
+                   "klayout_gds": str(folder / "k.gds"), "metrics": {}}
+            for key in ("mag_gds", "klayout_gds"):
+                Path(doc[key]).write_text(key)
+            _put(folder / "state_out.json", doc)
+            out.append(folder)
+        return out
+    monkeypatch.setattr(step37, "_run", run)
+
+    def judge(folder, keys, output, limits=None, **k):
+        return {"verdict": "PASS", "metrics": {key: {"status": "MEASURED", "value": 0}
+                                               for key in keys}}
+    monkeypatch.setattr(step37, "judge_step", judge)
+    monkeypatch.setattr(step37, "_vibeic_gds_gates",
+                        lambda *a, **k: {"substance": {"rc": 0, "sha256": "x"}})
+    monkeypatch.setattr(step37, "_measured_drc",
+                        lambda *a, **k: {"magic": 0, "klayout": 0, "total": 0, "report": "r"})
+    calls = []
+
+    def finishing_xor(project_, image, pdk_root, pdk, *, pre, sealed, final, core,
+                      core_source, lane, record):
+        arm = lane.split("-", 1)[1]
+        calls.append((arm, pre, sealed, final, core))
+        return {"verdict": finishing[arm]}
+    monkeypatch.setattr(pv, "run_finishing_xor", finishing_xor)
+    return step37, project, tlef, seen, calls
+
+
+def test_a_stream_whose_finishing_touched_the_design_is_not_promoted(tmp_path, monkeypatch):
+    step37, project, tlef, seen, calls = _step37_world(
+        tmp_path, monkeypatch, {"magic": "FAIL", "klayout": "FAIL"})
+    pnr = project / "phase3/stage3/pnr"
+    with pytest.raises(contract.Refusal, match="LL_NO_FEASIBLE_STREAM"):
+        step37.run(project, "img", tmp_path, "procA", pnr / "routed.def",
+                   pnr / "chip_pnr.v", pnr / "constraint.sdc", pnr / "chip.gds")
+    feasibility = json.loads((project / "phase3/librelane/37-feasibility.json").read_text())
+    assert feasibility["finishing_xor"] == {"magic": "FAIL", "klayout": "FAIL"}
+    assert not (pnr / "chip.gds").exists()
+    assert seen["overlay"]["TECH_LEFS"][0] == {"*": str(tlef.resolve())}
+    # each arm's XOR compares ITS stream, ITS seal-ring output and ITS final GDS
+    for arm, pre, sealed, final, core in calls:
+        assert Path(pre).name == ("m.gds" if arm == "magic" else "k.gds")
+        assert f"37-{arm}-finish" in str(sealed) and f"37-{arm}-finish" in str(final)
+        assert core == [1, 1, 9, 9]
+
+
+def test_only_the_stream_whose_finishing_is_clean_can_be_promoted(tmp_path, monkeypatch):
+    step37, project, _, _, _ = _step37_world(
+        tmp_path, monkeypatch, {"magic": "FAIL", "klayout": "PASS"})
+    pnr = project / "phase3/stage3/pnr"
+    result = step37.run(project, "img", tmp_path, "procA", pnr / "routed.def",
+                        pnr / "chip_pnr.v", pnr / "constraint.sdc", pnr / "chip.gds")
+    assert result["engine"] == "klayout"
+    promotion = json.loads((project / "phase3/librelane/37-promotion.json").read_text())
+    assert promotion["finishing_xor"] == {"magic": "FAIL", "klayout": "PASS"}
+
+
+def test_an_undeclared_core_refuses_before_any_stream(tmp_path, monkeypatch):
+    step37, project, _, _, calls = _step37_world(
+        tmp_path, monkeypatch, {"magic": "PASS", "klayout": "PASS"})
+    monkeypatch.setattr(step37, "declaration_config", lambda p: ({}, {}))
+    monkeypatch.setattr(step37, "_run", lambda *a, **k: pytest.fail("streamed without a core"))
+    pnr = project / "phase3/stage3/pnr"
+    with pytest.raises(contract.Refusal, match="LL_FINISHING_CORE_UNDECLARED"):
+        step37.run(project, "img", tmp_path, "procA", pnr / "routed.def",
+                   pnr / "chip_pnr.v", pnr / "constraint.sdc", pnr / "chip.gds")

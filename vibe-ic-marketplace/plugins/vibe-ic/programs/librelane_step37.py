@@ -14,8 +14,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
-from librelane_contract import (Refusal, digest, judge_step, resolve_step_configs,
-                                run_chain, select_arms, state_from_direct)
+from librelane_contract import (Refusal, declaration_config, digest, judge_step,
+                                resolve_step_configs, run_chain, select_arms,
+                                state_from_direct)
 
 STEPS = ("Magic.StreamOut", "KLayout.StreamOut", "KLayout.XOR",
          "Magic.DRC", "KLayout.DRC", "KLayout.SealRing",
@@ -105,12 +106,23 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
         routed_def: Path, netlist: Path, sdc: Path,
         canonical_gds: Path) -> dict:
     """Run two streams, require XOR zero, measure both, then finish the winner."""
-    configs = resolve_step_configs(project, image, pdk, list(STEPS), pdk_root=pdk_root)
+    import librelane_pv_signoff as _pv
+    # The stream renders the DEF's vias from the tech LEF the route read (a
+    # derived via-legalized LEF when the flow staged one), never the PDK's.
+    configs = resolve_step_configs(project, image, pdk, list(STEPS), pdk_root=pdk_root,
+                                   overlay=_pv.tech_lef_overlay(project))
     die = json.loads(configs["KLayout.SealRing"].read_text()).get("DIE_AREA")
     if die and [float(die[0]), float(die[1])] != [0.0, 0.0]:
         # Upstream SealRing currently treats x1/y1 as width/height.  Until its
         # fork fix is in the image, a nonzero-origin die cannot be signed off.
         raise Refusal("LL_SEALRING_ORIGIN_UNSUPPORTED", str(die))
+    declared, sources = declaration_config(project)
+    core = declared.get("CORE_AREA")
+    if not core:
+        # Step 37.3's finishing XOR needs the declared core; a stream whose
+        # finishing cannot be checked is not promoted (never a silent pass).
+        raise Refusal("LL_FINISHING_CORE_UNDECLARED",
+                      "tape-out declaration answers.core_area_um")
     state = _routed_state(project, image, pdk_root, pdk,
                           configs["Magic.StreamOut"], routed_def, netlist, sdc)
     magic = _run(project, image, pdk_root, pdk,
@@ -132,12 +144,14 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
     final_paths = {}
     density_errors = {}
     gates = {}
+    finishing = {}
     for arm, path in paths.items():
         state_path = _gds_state(compare[-1] / "state_out.json", path,
                                 root / f"37-{arm}-finish-state.json")
-        finished = _run(project, image, pdk_root, pdk,
-                        ["KLayout.SealRing", "KLayout.Filler", "KLayout.Density"],
-                        state_path, f"37-{arm}-finish", configs)[-1]
+        finish = _run(project, image, pdk_root, pdk,
+                      ["KLayout.SealRing", "KLayout.Filler", "KLayout.Density"],
+                      state_path, f"37-{arm}-finish", configs)
+        finished = finish[-1]
         density_report = root / f"37-{arm}-density.json"
         density = judge_step(finished, ["klayout__density_error__count"],
                              density_report,
@@ -151,6 +165,13 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
         final_paths[arm] = Path(finished_state["gds"])
         if not final_paths[arm].is_file():
             raise Refusal("LL_FINAL_GDS_MISSING", str(final_paths[arm]))
+        # Step 37.3 (mig105): finishing never removes, covers or touches the
+        # design geometry of the stream it started from.
+        sealed = Path(json.loads((finish[0] / "state_out.json").read_text())["gds"])
+        finishing[arm] = _pv.run_finishing_xor(
+            project, image, pdk_root, pdk, pre=path, sealed=sealed,
+            final=final_paths[arm], core=core, core_source=sources["CORE_AREA"],
+            lane=f"37.3-{arm}", record=root / f"37.3-{arm}-finishing-xor.json")
         gates[arm] = _vibeic_gds_gates(project, image, pdk_root, pdk,
                                       final_paths[arm], routed_def, arm,
                                       configs["Magic.StreamOut"])
@@ -164,10 +185,14 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
         reports[arm] = report
     feasible = {arm: report for arm, report in reports.items()
                 if density_errors[arm] == 0 and
+                finishing[arm]["verdict"] == "PASS" and
                 all(row["rc"] == 0 and row["sha256"] is not None
                     for row in gates[arm].values())}
     if not feasible:
         write_json(root / "37-feasibility.json", {"density_errors": density_errors,
+                                                   "finishing_xor": {
+                                                       arm: row["verdict"] for arm, row
+                                                       in finishing.items()},
                                                    "gates": gates, "drc": counts})
         raise Refusal("LL_NO_FEASIBLE_STREAM", str(root / "37-feasibility.json"))
     selection = select_arms(feasible, {"drc_total": "min"}, root / "37-selection.json")
@@ -185,6 +210,7 @@ def run(project: Path, image: str, pdk_root: Path, pdk: str,
                "selection_detail": selection, "streams": {k: str(v) for k, v in paths.items()},
                "finished": {k: str(v) for k, v in final_paths.items()},
                "drc": counts, "xor": 0, "density": density_errors, "gates": gates,
+               "finishing_xor": {arm: row["verdict"] for arm, row in finishing.items()},
                "source": str(final_gds), "source_sha256": digest(final_gds),
                "canonical": str(canonical_gds), "canonical_sha256": digest(canonical_gds)})
     return {"engine": winner, "gds": canonical_gds, "drc": counts,

@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _path_layout as _pl  # noqa: E402
 from _atomic_artefact import write_json  # noqa: E402
 from librelane_contract import (Refusal, _load, digest, resolve_step_configs,  # noqa: E402
                                 run_chain, state_from_direct)
@@ -71,6 +72,49 @@ HALVES = {'drc': DRC_CHAIN, 'lvs': LVS_CHAIN}
 
 #: Where each half's judgment is written (project-relative).
 RECORD_REL = 'reports/phase3/librelane_pv_{half}.json'
+
+
+#: The flow's via-landing remediation record (`_stage_via_legalized_tech_lef`).
+VIA_LEGALIZATION_REL = 'reports/pdk_via_patch_legalization.json'
+
+
+def route_tech_lef(project: Path) -> tuple[Path, str] | None:
+    """The tech LEF the route itself read, when the flow staged a derived one.
+
+    ``_stage_via_legalized_tech_lef`` rewrites the PDK's VIA landings (e.g. a
+    Metal2 enclosure widened to the layer's minimum area) and, when it records
+    ``APPLIED``, PnR, extraction and stream-out must all read that derived
+    file.  A LibreLane geometry step given the PDK's own tech LEF instead
+    renders the same DEF's vias with the PDK's smaller landings: MEASURED on
+    spm x gf180mcuD, 1,386 extra Metal2/3/4 minimum-area and spacing markers
+    in Magic DRC on the LibreLane stream, 0 of them on the direct stream.
+    The file is bound by the record's ``derived_sha256`` (looked for at the
+    recorded path, then in the run's pnr directory, where the flow stages
+    it); an APPLIED record whose file cannot be found by that hash refuses
+    ``LL_ROUTE_TECH_LEF_UNBOUND``.  None: the route read the PDK's own.
+    """
+    path = project / VIA_LEGALIZATION_REL
+    if not path.is_file():
+        return None
+    doc = _load(path)
+    if doc.get('status') != 'APPLIED':
+        return None
+    want, derived = doc.get('derived_sha256'), doc.get('derived_tech_lef')
+    if not (isinstance(want, str) and want and isinstance(derived, str) and derived):
+        raise Refusal('LL_ROUTE_TECH_LEF_UNBOUND',
+                      f'{VIA_LEGALIZATION_REL}: APPLIED without derived_tech_lef/sha256')
+    for candidate in (Path(derived), _pl.pnr_dir(project) / Path(derived).name):
+        if candidate.is_file() and digest(candidate) == want:
+            return candidate.resolve(), f'{VIA_LEGALIZATION_REL}: derived_tech_lef sha256 {want}'
+    raise Refusal('LL_ROUTE_TECH_LEF_UNBOUND',
+                  f'{VIA_LEGALIZATION_REL}: no file with sha256 {want} at {derived} '
+                  f'or in {_pl.pnr_dir(project)}')
+
+
+def tech_lef_overlay(project: Path) -> dict[str, tuple[Any, str]] | None:
+    """``resolve_step_configs`` overlay: every corner reads the route's tech LEF."""
+    found = route_tech_lef(project)
+    return None if found is None else {'TECH_LEFS': ({'*': str(found[0])}, found[1])}
 
 
 def _step_of(folder: Path) -> str | None:
@@ -184,7 +228,8 @@ def run_half(project: Path, image: str, pdk_root: Path, pdk: str, half: str, *,
         raise Refusal('LL_PV_HALF_UNKNOWN', half)
     chain = HALVES[half]
     configs = resolve_step_configs(project, image, pdk, list(chain), pdk_root=pdk_root,
-                                   folder=f'31-{half}-config')
+                                   folder=f'31-{half}-config',
+                                   overlay=tech_lef_overlay(project))
     state = bridge(project, image, pdk_root, pdk, configs, chain,
                    {'def': routed_def, 'nl': netlist, 'sdc': sdc, 'gds': gds},
                    f'31-{half}-config')
@@ -197,7 +242,8 @@ def run_half(project: Path, image: str, pdk_root: Path, pdk: str, half: str, *,
 
 def run_finishing_xor(project: Path, image: str, pdk_root: Path, pdk: str, *,
                       pre: Path, sealed: Path | None, final: Path, core: list,
-                      core_source: str, lane: str = '37.3-finishing') -> dict:
+                      core_source: str, lane: str = '37.3-finishing',
+                      record: Path | None = None) -> dict:
     """Step 37.3's finishing XOR on one lane's three streams."""
     if not (isinstance(core, (list, tuple)) and len(core) == 4):
         raise Refusal('LL_FINISHING_CORE_UNDECLARED', repr(core))
@@ -218,7 +264,7 @@ def run_finishing_xor(project: Path, image: str, pdk_root: Path, pdk: str, *,
                                           configs['Vibeic.FinishingXOR'], state)],
                         mounts=[(pdk_root / pdk, f'/pdk/{pdk}')], lane=lane)
     return judge_pv(folders, ('Vibeic.FinishingXOR',),
-                    project / 'reports/phase3/librelane_finishing_xor.json',
+                    record or project / 'reports/phase3/librelane_finishing_xor.json',
                     scope={'pre_sha256': digest(pre), 'final_sha256': digest(final),
                            'sealed_sha256': digest(sealed) if sealed else ''})
 
