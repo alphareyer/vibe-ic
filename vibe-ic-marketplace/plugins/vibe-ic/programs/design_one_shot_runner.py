@@ -7689,6 +7689,21 @@ def _supplied_rtl_defining_declared_top(project: Path
     return top, hits
 
 
+def _rtl_gen_then_stage_supplied(project: Path, ic_class: str,
+                                 top_name: str) -> List[StepResult]:
+    """A repair-loop re-run of `step_rtl_gen`, followed by consume.
+
+    D10 review_wave4c (MAJOR): the runner calls `step_reused_ip_consume` ONCE,
+    after the first `rtl_gen`; the repair loop re-runs `rtl_gen` alone. A
+    partial overlap drops the generated file of a supplied module and relies
+    on consume's closure path to stage the supplied one -- so after a repair
+    pass the build was missing that module. Consume is idempotent (a closed
+    rtl/ is left alone; an open one gets the supplied modules first-wins, with
+    its sha record), so it runs after EVERY rtl_gen."""
+    return [step_rtl_gen(project, ic_class),
+            step_reused_ip_consume(project, top_name)]
+
+
 def step_rtl_gen(project: Path, ic_class: str,
                  force_regen: Optional[bool] = None) -> StepResult:
     """Run RTL dispatch in isolation, then CAS-publish its complete delta."""
@@ -8441,11 +8456,37 @@ def _step_rtl_gen_bound(
                       f"file(s) {_partial['dropped_generated_files']} were "
                       f"dropped and consume stages the supplied one(s) "
                       f"into the rest of this generated design")
+            # D10 review_wave4c — a supplied file replaces a generated module
+            # SILENTLY only when it is reused IP. A CONTEXT file (input/rtl,
+            # design_src: e.g. a completion stub) is the starting point a task
+            # completes, so the replacement is a spec-to-rtl hand-off with the
+            # roles recorded, never a plain PASS.
+            _ov_files = sorted({project / r for r in
+                                _partial["replaced_by"].values()})
+            _ov_ip, _ov_ctx = _split_supplied_roles(project, _ov_files)
+            _roles = {"starting_point": [str(f.relative_to(project))
+                                         for f in _ov_ctx],
+                      "reused_ip": [str(f.relative_to(project))
+                                    for f in _ov_ip]}
+            _pextras["supplied_rtl_roles"] = _roles
+            if _ov_ctx:
+                _pstatus = "PASS_WITH_WAIVERS"
+                _sk_hint, _sk_extras = _stage_fallback_skill(
+                    project, "spec-to-rtl")
+                _pextras.update({"fallback_skill": "spec-to-rtl",
+                                 "supplied_rtl_role": "starting_point",
+                                 **_sk_extras})
+                _pnote += (f"; {_roles['starting_point']} is CONTEXT RTL, "
+                           f"not reused IP: it is the STARTING POINT for "
+                           f"module(s) the generator also emitted — use skill "
+                           f"`spec-to-rtl` to complete or modify it in place "
+                           f"as the spec requires" + _sk_hint)
             if _partial["modules_now_owed"]:
                 # A dropped file also defined modules the input does NOT
                 # supply: say which, and route them to the class author.
                 _pstatus = "PASS_WITH_WAIVERS"
-                _fbk = config.get("fallback_skill") or "spec-to-rtl"
+                _fbk = (_pextras.get("fallback_skill")
+                        or config.get("fallback_skill") or "spec-to-rtl")
                 _sk_hint, _sk_extras = _stage_fallback_skill(project, _fbk)
                 _pextras.update({"fallback_skill": _fbk, **_sk_extras})
                 _pnote += (f"; module(s) {_partial['modules_now_owed']} "
@@ -24748,7 +24789,8 @@ def main() -> int:
                                f"{rtl_repair_retry}/"
                                f"{args.max_rtl_repair_retries}", disclosures=[_V.Disclosure.PROGRESS_MARKER]))
         # Repair body: re-run RTL gen (idempotent if already current).
-        plan.append(step_rtl_gen(project, ic_class))
+        plan.extend(_rtl_gen_then_stage_supplied(project, ic_class,
+                                                 args.top_name))
         new_rtl_hash = _rtl_dir_sha256(project)
         # vibe-ic#2225 — the gates this producer had starved. AFTER the digest
         # above: that digest is the loop's byte-identical-retry
@@ -24778,7 +24820,8 @@ def main() -> int:
                             [s.get("kind") for s in
                              (hint.get("signatures") or [])]}))
                 if remediated:
-                    plan.append(step_rtl_gen(project, ic_class))
+                    plan.extend(_rtl_gen_then_stage_supplied(
+                        project, ic_class, args.top_name))
                     rehashed = _rtl_dir_sha256(project)
                     # vibe-ic#2225 — the gates this producer had starved. AFTER the digest
                     # above: that digest is the loop's byte-identical-retry
@@ -24903,7 +24946,8 @@ def main() -> int:
                                    f"<half-duplex-tester> FAIL → RTL repair "
                                    f"retry {rtl_repair_retry}/"
                                    f"{args.max_rtl_repair_retries}", disclosures=[_V.Disclosure.PROGRESS_MARKER]))
-            plan.append(step_rtl_gen(project, ic_class))
+            plan.extend(_rtl_gen_then_stage_supplied(project, ic_class,
+                                                     args.top_name))
             new_rtl_hash = _rtl_dir_sha256(project)
             # vibe-ic#2225 — the gates this producer had starved. AFTER the digest
             # above: that digest is the loop's byte-identical-retry
@@ -24931,7 +24975,8 @@ def main() -> int:
                                 [s.get("kind") for s in
                                  (hint.get("signatures") or [])]}))
                     if remediated:
-                        plan.append(step_rtl_gen(project, ic_class))
+                        plan.extend(_rtl_gen_then_stage_supplied(
+                            project, ic_class, args.top_name))
                         rehashed = _rtl_dir_sha256(project)
                         # vibe-ic#2225 — the gates this producer had starved. AFTER the digest
                         # above: that digest is the loop's byte-identical-retry

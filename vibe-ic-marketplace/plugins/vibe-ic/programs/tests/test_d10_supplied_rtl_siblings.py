@@ -602,3 +602,87 @@ def test_input_source_manifest_declares_reused_ip(tmp_path, _session):
         {"reused_ip": True}))
     res = R.step_rtl_gen(p, ARITH)
     assert res.extras["fallback_skill"] == "catalog-glue-author", res.extras
+
+
+# =========================================================================== #
+# review_wave4c (branch D10)
+# =========================================================================== #
+_SUPPLIED_OTP = ("// supplied\nmodule otp_mem(input clk, output q);\n"
+                 "  assign q = clk;\nendmodule\n")
+
+
+def test_a_repair_rerun_restages_the_supplied_module(tmp_path, monkeypatch):
+    """MAJOR: consume ran once; the repair loop re-ran rtl_gen alone, so after
+    a repair pass a partial overlap left the build WITHOUT the supplied module.
+    Every re-run now goes through `_rtl_gen_then_stage_supplied`."""
+    monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
+    monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
+    p = _otp_project(tmp_path / "p")
+    _vendor(p, {"otp_mem.v": _SUPPLIED_OTP})
+    first = R._rtl_gen_then_stage_supplied(p, "mixed_signal_otp", "chip_top")
+    assert [r.name for r in first] == ["rtl_gen", "reused_ip_consume"]
+    assert _defs(p, "otp_mem") == 1
+    # the repair loop's re-run, same process (the session owns rtl/)
+    again = R._rtl_gen_then_stage_supplied(p, "mixed_signal_otp", "chip_top")
+    assert again[0].extras["supplied_replaces_generated"]["replaced_by"] == {
+        "otp_mem": "input/vendor_rtl/otp_mem.v"}
+    assert _defs(p, "otp_mem") == 1 and _defs(p, "chip_top") == 1
+    assert (p / "phase2/stage1/rtl/otp_mem.v").read_text().startswith(
+        "// supplied")
+
+
+def test_without_the_restage_a_rerun_loses_the_supplied_module(tmp_path,
+                                                                monkeypatch):
+    """The control that makes the test above mean something: rtl_gen ALONE
+    after the first pass leaves no otp_mem at all."""
+    monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
+    monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
+    p = _otp_project(tmp_path / "p")
+    _vendor(p, {"otp_mem.v": _SUPPLIED_OTP})
+    R._rtl_gen_then_stage_supplied(p, "mixed_signal_otp", "chip_top")
+    R.step_rtl_gen(p, "mixed_signal_otp")
+    assert _defs(p, "otp_mem") == 0
+
+
+def test_main_reruns_rtl_gen_only_through_the_restaging_helper():
+    src = (PROGRAMS / "design_one_shot_runner.py").read_text()
+    fn = next(n for n in __import__("ast").parse(src).body
+              if getattr(n, "name", "") == "main")
+    import ast as _ast
+    bare = [n.lineno for n in _ast.walk(fn) if isinstance(n, _ast.Call)
+            and isinstance(n.func, _ast.Name) and n.func.id == "step_rtl_gen"]
+    assert bare == [], f"main re-runs step_rtl_gen without consume at {bare}"
+
+
+def test_a_context_file_overlapping_a_generated_module_is_a_hand_off(
+        tmp_path, monkeypatch):
+    """MAJOR (integrity): a CONTEXT file (input/rtl — e.g. a stub to finish)
+    that defines a generated module is the starting point to complete, never
+    a silent replacement of a complete generated module."""
+    monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
+    monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
+    p = _otp_project(tmp_path / "p")
+    stub = p / "input/rtl/otp_mem.v"
+    stub.parent.mkdir(parents=True)
+    stub.write_text("module otp_mem(input clk, output q);\n  // TODO\n"
+                    "endmodule\n")
+    res = R.step_rtl_gen(p, "mixed_signal_otp")
+    assert res.status == "PASS_WITH_WAIVERS", res.detail[:300]
+    assert res.extras["fallback_skill"] == "spec-to-rtl"
+    assert res.extras["supplied_rtl_roles"] == {
+        "starting_point": ["input/rtl/otp_mem.v"], "reused_ip": []}
+    assert "complete or modify it in place" in res.detail
+    assert "Do NOT author" not in res.detail
+    assert _defs(p, "chip_top") == 1          # the rest of the design stays
+
+
+def test_a_reused_ip_file_still_replaces_silently_with_its_role(tmp_path,
+                                                                monkeypatch):
+    monkeypatch.setattr(R, "_RTL_SESSION_OWNED", False)
+    monkeypatch.setattr(R, "_RTL_SESSION_PROJECT", None)
+    p = _otp_project(tmp_path / "p")
+    _vendor(p, {"otp_mem.v": _SUPPLIED_OTP})
+    res = R.step_rtl_gen(p, "mixed_signal_otp")
+    assert res.status == "PASS" and not res.extras.get("fallback_skill")
+    assert res.extras["supplied_rtl_roles"] == {
+        "starting_point": [], "reused_ip": ["input/vendor_rtl/otp_mem.v"]}
