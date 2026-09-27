@@ -23311,17 +23311,40 @@ def _publish_record_before_audit(project: Path, plan: List["StepResult"],
     Same shape as the tail's pre-audit `emit_final_summary`: written once before
     the audit so the audit reads this run, and again after it by the tail, so
     the record carries the audit's own row. The pre-audit copy says what it is
-    (`final_audit_pending`), and goes through the ONE write seam."""
+    (`final_audit_pending`), and goes through the ONE write seam.
+
+    ITS VERDICT IS FAIL, NOT THE PRE-AUDIT AGGREGATE. Every reader of this
+    file takes a `verdict` written in this invocation as phase 2's account of
+    itself: the front door's `_row_verdict` reads it without looking at rc, and
+    `phase23_one_shot_runner` halts only on "FAIL". A green aggregate here would
+    survive a process that dies during the audit or the tail (an uncaught
+    exception, rc 1; the stall watchdog, rc 2; an OOM or deadline kill) as a
+    phase-2 PASS the audit never confirmed -- and without the tail's
+    ai_judgements demotion. Before this record existed, that death left no
+    fresh record and R-0915-160 turned the rc into FAIL. FAIL here keeps that:
+    the copy says why, the tail overwrites it with the real verdict, and a run
+    that never reaches the tail stays FAIL wherever it is read."""
     out = _pl.report_path(project, "phase2_one_shot.json")
     _write_phase2_report(out, {
         "project": str(project),
         "ic_class": ic_class,
         "ic_class_evidence": evidence,
         "steps": [asdict(s) for s in plan],
-        "verdict": _aggregate_verdict(plan),
+        "verdict": "FAIL",
+        "verdict_reason": FINAL_AUDIT_PENDING_REASON,
+        "pre_audit_aggregate": _aggregate_verdict(plan),
         "final_audit_pending": True,
     }, project)
     return out
+
+
+#: Why the pre-audit copy of the record is FAIL. Read by the front door
+#: (`vibe_ic_one_shot_runner._row_verdict`) when the record is still pending.
+FINAL_AUDIT_PENDING_REASON = (
+    "final audit pending: this copy was published before the phase-2 final "
+    "audit so the audit judges this run's record; the audit and the tail had "
+    "not completed when it was written, so it is no verdict of phase 2 -- the "
+    "tail overwrites it, and a run that never reaches the tail stays FAIL")
 
 
 def _audit_after_declared_producers(project: Path, skip_analog: bool) -> StepResult:
