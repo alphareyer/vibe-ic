@@ -16,15 +16,23 @@ So this records the WRITE itself. A `sitecustomize` placed first on the child's
 process it starts (the same mechanism as `step_input_scope.install_guard`).
 CPython raises the `open` event from C for `open()`, `Path.write_text` and
 `os.open` alike, and `os.remove`/`os.rename`/`os.mkdir`/`os.chmod`/
-`shutil.rmtree`/... for the rest, so a write cannot get past it by the route it
-takes. Each event is tagged with `PYTEST_CURRENT_TEST` ('' = collection).
+`shutil.rmtree`/... for the rest, whether the path is absolute, relative to the
+cwd, or relative to a directory fd. Each event is tagged with
+`PYTEST_CURRENT_TEST` ('' = collection).
 
 WHAT IT DOES NOT SEE, stated so it is not read as a guarantee: a write made by a
 non-Python process (a shell `>`, a compiled tool); a Python child started with
 `-I`/`-S` or a scrubbed environment; a write under `__pycache__`/
-`.pytest_cache` or to a `*.pyc` (bytecode churn, excluded on purpose).
+`.pytest_cache` or to a `*.pyc` (bytecode churn, excluded on purpose); and a
+BARE-NAME `os.open` (no directory component), which cannot be placed -- see the
+fourth calibration below.
 
-PATH RESOLUTION -- five calibrations, all measured:
+PATH RESOLUTION -- six calibrations, all measured:
+  * with no `dir_fd`, CPython puts `dir_fd=-1` in every os-level event
+    (`os.remove`, `os.rename`/`os.replace`, `os.mkdir`, `os.rmdir`,
+    `os.chmod`, `os.chown`, `os.utime`, `os.symlink`, `os.link`); -1 means
+    the cwd. Treating it as a descriptor dropped every cwd-relative change
+    (review of PR fxprobe, 2026-09-28); only a descriptor >= 0 is joined.
   * `shutil.rmtree` removes entries by bare NAME relative to a directory fd;
     reading that name against the cwd invented deletions under the plugin root.
     The name is joined onto `/proc/self/fd/<dir_fd>` instead.
@@ -37,10 +45,11 @@ PATH RESOLUTION -- five calibrations, all measured:
   * `os.open` raises the `open` event WITHOUT its `dir_fd`, so a bare name from
     `os.open` cannot be placed: the runner's fd-bound publisher opens
     `.<name>.tmp.<pid>.<hex>` relative to a directory fd inside a tmp project,
-    and reading it against the cwd reported it in the plugin root. Such an
-    event is NOT recorded -- a stated blind spot for a bare-name `os.open`
-    into the cwd. A bare name through builtin `open()` (mode is a string) has
-    no directory fd to be relative to, so it IS recorded against the cwd.
+    and reading it against the cwd reported it in the plugin root. A bare-name
+    `os.open` is therefore NOT recorded -- the stated blind spot. A relative
+    `os.open` WITH a directory component (`Path("programs/x").touch()`) is read
+    against the cwd, and a bare name through builtin `open()` (mode is a
+    string) has no directory fd to be relative to, so both ARE recorded.
   * the `os.mkdir` event fires before the call, and `mkdir(exist_ok=True)` on a
     directory that already exists changes nothing. Seven such events (tracked
     fixture dirs, `_shared/integration_fixtures`, the plugin root itself)
@@ -65,6 +74,16 @@ import sys
 
 _ROOT = os.environ.get("VIBEIC_TREE_WRITE_AUDIT_ROOT", "")
 _LOG = os.environ.get("VIBEIC_TREE_WRITE_AUDIT_LOG", "")
+# Functions whose writes are the HARNESS's, not the audited node's, named by
+# IDENTITY: (resolved file, function name). A write made while one of them is
+# on the stack is still logged, tagged `exempt`.
+try:
+    import json as _json
+    _EXEMPT_IDS = {(os.path.realpath(f), n) for f, n in _json.loads(
+        os.environ.get("VIBEIC_TREE_WRITE_AUDIT_EXEMPT", "") or "[]")}
+except Exception:
+    _EXEMPT_IDS = set()
+_EXEMPT_NAMES = {n for _f, n in _EXEMPT_IDS}
 _W = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND
 # An O_TMPFILE open names a DIRECTORY and creates no entry in it: nothing a
 # reader can list ever appears. Measured: `tempfile.TemporaryFile()` in a
@@ -94,7 +113,10 @@ def _rel(p, dir_fd=None, follow=True):
     if not isinstance(p, (str, os.PathLike)):
         return None
     p = os.fspath(p)
-    if isinstance(dir_fd, int) and not os.path.isabs(p):
+    # dir_fd is a real descriptor only when >= 0. With no dir_fd CPython puts
+    # -1 in the event, which means "relative to the cwd": that path falls
+    # through to abspath() below, which reads the cwd at event time.
+    if isinstance(dir_fd, int) and dir_fd >= 0 and not os.path.isabs(p):
         try:
             p = os.path.join(os.readlink("/proc/self/fd/%d" % dir_fd), p)
         except OSError:
@@ -117,13 +139,29 @@ def _rel(p, dir_fd=None, follow=True):
     return None
 
 
+def _exempt_caller():
+    """The exempt function on the current stack, by identity, or None."""
+    if not _EXEMPT_NAMES:
+        return None
+    f = sys._getframe(1)
+    while f is not None:
+        c = f.f_code
+        if c.co_name in _EXEMPT_NAMES and \
+                (os.path.realpath(c.co_filename), c.co_name) in _EXEMPT_IDS:
+            return c.co_name
+        f = f.f_back
+    return None
+
+
 def _log(ev, rel):
     import json
+    exempt = _exempt_caller()
     fd = os.open(_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
     try:
         os.write(fd, (json.dumps({
             "event": ev, "path": rel,
             "test": os.environ.get("PYTEST_CURRENT_TEST", ""),
+            "exempt": exempt,
             "pid": os.getpid()}) + "\n").encode())
     finally:
         os.close(fd)
@@ -142,9 +180,13 @@ def _hook(ev, args):
                     and flags & _TMPFILE == _TMPFILE:
                 return
             # `os.open` raises this event with mode None and NO dir_fd, so a
-            # bare name here may be relative to a directory fd rather than to
-            # the cwd, and cannot be placed (see the module docstring).
-            if mode is None and not os.path.isabs(os.fspath(path)):
+            # BARE name here may be relative to a directory fd rather than to
+            # the cwd, and cannot be placed (see the module docstring). A
+            # relative path WITH a directory component is read against the
+            # cwd, as `Path("programs/x").touch()` means it.
+            _p = os.fspath(path)
+            if mode is None and not os.path.isabs(_p) \
+                    and not os.path.dirname(_p):
                 return
             if not ((isinstance(mode, str) and any(c in mode for c in "wax+"))
                     or (isinstance(flags, int) and flags & _W)):
@@ -187,15 +229,20 @@ class Audit:
     #: one dict per write-class event under the root: event, path, test, pid
     events: List[dict] = field(default_factory=list)
 
-    def events_for(self, nodeid: str) -> List[dict]:
-        """Events attributed to `nodeid`, plus every COLLECTION-time event
-        ('' test id): an import-time write belongs to whoever is imported."""
+    def writes_by(self, nodeid: str) -> List[dict]:
+        """The writes `nodeid` made (`''`: the ones made during COLLECTION,
+        which carry no test id). A write made inside a declared EXEMPT
+        function -- the harness's own cleanup -- is not the node's, and is
+        left out; the same write made by the node's own code is not."""
         return [e for e in self.events
-                if not e["test"] or e["test"].split(" ")[0] == nodeid]
+                if not e.get("exempt")
+                and (e["test"].split(" ")[0] if e["test"] else "") == nodeid]
 
 
-def audit_env(root: Path, workdir: Path) -> Dict[str, str]:
-    """An environment whose Python processes record writes under `root`."""
+def audit_env(root: Path, workdir: Path,
+              exempt: Sequence[tuple] = ()) -> Dict[str, str]:
+    """An environment whose Python processes record writes under `root`.
+    `exempt`: ((file, function name), ...) whose writes are tagged exempt."""
     hook = workdir / "hook"
     hook.mkdir(parents=True, exist_ok=True)
     (hook / "sitecustomize.py").write_text(_SITECUSTOMIZE, encoding="utf-8")
@@ -217,6 +264,8 @@ def audit_env(root: Path, workdir: Path) -> Dict[str, str]:
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["VIBEIC_TREE_WRITE_AUDIT_ROOT"] = str(Path(root).resolve())
     env["VIBEIC_TREE_WRITE_AUDIT_LOG"] = str(workdir / "events.jsonl")
+    env["VIBEIC_TREE_WRITE_AUDIT_EXEMPT"] = json.dumps(
+        [[str(Path(f).resolve()), str(n)] for f, n in exempt])
     return env
 
 
@@ -250,7 +299,7 @@ def _junit_outcomes(xml_path: Path, plugin_root: Path) -> Dict[str, str]:
 
 
 def run_nodes(nodeids: Sequence[str], *, plugin_root: Path,
-              root: Path) -> Audit:
+              root: Path, exempt: Sequence[tuple] = ()) -> Audit:
     """Run `nodeids` (relative to `plugin_root`) in ONE child pytest session
     under the write audit, and return what it did.
 
@@ -263,7 +312,7 @@ def run_nodes(nodeids: Sequence[str], *, plugin_root: Path,
     with tempfile.TemporaryDirectory(prefix="tree_write_audit_") as tmp:
         work = Path(tmp)
         junit = work / "junit.xml"
-        env = audit_env(root, work)
+        env = audit_env(root, work, exempt)
         try:
             r = _pr.run(
                 [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
