@@ -1002,11 +1002,20 @@ def _a_non_volatile_root() -> Path:
             why.append("volatile")
         if not os.access(d, os.W_OK):
             why.append("not writable")
-        elif not _can_really_mkdir_in(d):
+        elif not why and not _can_really_mkdir_in(d):
             # `os.access` answers about this uid against the mode bits; it says
             # yes on a read-only bind mount and on a full filesystem. The
             # question this arm needs is the one only `mkdir` answers, and it
             # is asked here rather than left to blow up inside the loop below.
+            #
+            # ASKED ONLY OF A CANDIDATE STILL IN THE RUNNING. The answer is a
+            # real `mkdir`, and the first five candidates are this checkout
+            # (programs/, the plugin root, ..., the repo root), already refused
+            # as "in a work tree". Probing them anyway planted a
+            # `vibeic1446-probe-*` directory in each while every concurrent
+            # worker listing those directories could see it (the whole-suite
+            # write audit, 2026-09-28). The answer for a refused candidate was
+            # never used: it cannot be returned either way.
             why.append("not writable (mkdir refused)")
         if not why:
             return d

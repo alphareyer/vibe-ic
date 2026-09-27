@@ -24,7 +24,7 @@ non-Python process (a shell `>`, a compiled tool); a Python child started with
 `-I`/`-S` or a scrubbed environment; a write under `__pycache__`/
 `.pytest_cache` or to a `*.pyc` (bytecode churn, excluded on purpose).
 
-PATH RESOLUTION -- three calibrations, all measured:
+PATH RESOLUTION -- five calibrations, all measured:
   * `shutil.rmtree` removes entries by bare NAME relative to a directory fd;
     reading that name against the cwd invented deletions under the plugin root.
     The name is joined onto `/proc/self/fd/<dir_fd>` instead.
@@ -34,6 +34,17 @@ PATH RESOLUTION -- three calibrations, all measured:
   * an `O_TMPFILE` open names a directory and creates no entry in it, so it is
     not a write a reader can see (`tempfile.TemporaryFile()` with the cwd as
     its temp dir did this 45 times in one sweep).
+  * `os.open` raises the `open` event WITHOUT its `dir_fd`, so a bare name from
+    `os.open` cannot be placed: the runner's fd-bound publisher opens
+    `.<name>.tmp.<pid>.<hex>` relative to a directory fd inside a tmp project,
+    and reading it against the cwd reported it in the plugin root. Such an
+    event is NOT recorded -- a stated blind spot for a bare-name `os.open`
+    into the cwd. A bare name through builtin `open()` (mode is a string) has
+    no directory fd to be relative to, so it IS recorded against the cwd.
+  * the `os.mkdir` event fires before the call, and `mkdir(exist_ok=True)` on a
+    directory that already exists changes nothing. Seven such events (tracked
+    fixture dirs, `_shared/integration_fixtures`, the plugin root itself)
+    came out of one sweep; a mkdir whose target already exists is not recorded.
 """
 from __future__ import annotations
 
@@ -130,6 +141,11 @@ def _hook(ev, args):
             if _TMPFILE and isinstance(flags, int) \
                     and flags & _TMPFILE == _TMPFILE:
                 return
+            # `os.open` raises this event with mode None and NO dir_fd, so a
+            # bare name here may be relative to a directory fd rather than to
+            # the cwd, and cannot be placed (see the module docstring).
+            if mode is None and not os.path.isabs(os.fspath(path)):
+                return
             if not ((isinstance(mode, str) and any(c in mode for c in "wax+"))
                     or (isinstance(flags, int) and flags & _W)):
                 return
@@ -141,8 +157,15 @@ def _hook(ev, args):
             if i < len(args) and not isinstance(args[i], int):
                 dfd = args[fdi] if fdi is not None and fdi < len(args) else None
                 rel = _rel(args[i], dfd, follow)
-                if rel is not None:
-                    _log(ev, rel)
+                if rel is None:
+                    continue
+                # The event fires BEFORE the call. `mkdir(exist_ok=True)` on a
+                # directory that is already there fails with EEXIST and changes
+                # nothing, so it is not a write.
+                if ev == "os.mkdir" and os.path.isdir(
+                        os.path.join(_ROOT, rel)):
+                    continue
+                _log(ev, rel)
     except Exception:
         pass
     finally:
