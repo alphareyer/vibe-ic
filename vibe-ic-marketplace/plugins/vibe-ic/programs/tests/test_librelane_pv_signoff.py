@@ -315,8 +315,11 @@ def test_direct_mode_never_touches_the_tool(tmp_path, runner, monkeypatch):
     seen = []
     monkeypatch.setattr(runner, "_step31_librelane",
                         lambda *a, **k: seen.append(a) or _row("drc", "PASS"))
-    row = runner._step31_dispatch(tmp_path, "chip", None, "drc", lambda: _row("drc", "FAIL", "d"))
-    assert (row.status, row.detail, seen) == ("FAIL", "d", [])
+    row = runner._step31_dispatch(tmp_path, "chip", None, "drc",
+                                  lambda: pytest.fail("direct mode calls no arm"))
+    assert (row, seen) == (None, [])
+    _switch(tmp_path, "direct")
+    assert runner._step31_dispatch(tmp_path, "chip", None, "drc", lambda: None) is None
 
 
 def test_librelane_mode_is_the_tools_verdict(tmp_path, runner, monkeypatch):
@@ -429,20 +432,36 @@ def test_step_drc_and_step_lvs_route_through_the_switch(tmp_path, runner, monkey
     _switch(tmp_path, "librelane")
     monkeypatch.setattr(runner, "_step31_librelane",
                         lambda p, t, k, half, publish: _row(half, "PASS", "tool"))
-    monkeypatch.setattr(runner, "_step_drc_direct", lambda *a, **k: pytest.fail("direct"))
-    monkeypatch.setattr(runner, "_step_lvs_direct", lambda *a, **k: pytest.fail("direct"))
     assert runner.step_drc(tmp_path, "chip", None, "c").detail == "tool"
     assert runner.step_lvs(tmp_path, "chip", None, "c").detail == "tool"
+
+
+def test_the_dual_arm_reenters_the_direct_body(tmp_path, runner, monkeypatch):
+    _switch(tmp_path, "dual")
+    monkeypatch.setattr(runner, "_step31_librelane",
+                        lambda p, t, k, half, publish: _row(half, "PASS", "tool"))
+    pdk = SimpleNamespace(name="procA", drc_deck=None, calibre_drc=None)
+    direct = runner.step_drc(tmp_path, "chip", pdk, "c", _direct=True)
+    row = runner.step_drc(tmp_path, "chip", pdk, "c")
+    assert (row.extras["dual_direct"], row.extras["dual_librelane"]) == (direct.status, "PASS")
+    assert row.status == direct.status  # a clean tool half never lifts the direct verdict
+    assert direct.detail in row.detail
 
 
 def test_an_incomplete_pnr_skips_lvs_on_every_mode(tmp_path, runner, monkeypatch):
     _switch(tmp_path, "librelane")
     monkeypatch.setattr(runner, "_step31_librelane",
                         lambda *a, **k: pytest.fail("the tool ran after a dead pnr"))
-    monkeypatch.setattr(runner, "_step_lvs_direct",
-                        lambda *a, **k: _row("lvs", "NOT_MEASURED", "skipped: upstream"))
     row = runner.step_lvs(tmp_path, "chip", None, "c", upstream_pnr=_row("pnr", "FAIL"))
-    assert row.detail == "skipped: upstream"
+    assert row.status == "NOT_MEASURED"
+    assert "upstream pnr step is FAIL" in row.detail
+
+
+def test_the_direct_bodies_are_still_the_step_functions():
+    import inspect
+    runner = importlib.import_module("phase3_one_shot_runner")
+    assert "offgrid_drc_classify_check" in inspect.getsource(runner.step_drc)
+    assert "upstream pnr step is" in inspect.getsource(runner.step_lvs)
 
 
 # ── the plugin steps' pure parts ────────────────────────────────────────────

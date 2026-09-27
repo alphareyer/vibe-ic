@@ -50029,15 +50029,15 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
 
 
 def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
-                     direct: Callable[[], StepResult]) -> StepResult:
+                     direct: Callable[[], StepResult]) -> Optional[StepResult]:
     """Step 31's producer switch (``phase3/librelane_switch.json`` "31").
 
-    ``direct`` (the default, and every absent switch): the direct half,
-    unchanged.  ``librelane``: the tool's verdict is the step's.  ``dual``: the
-    direct half stays canonical, the tool half is measured beside it, and for
-    verification "better" is not the lower count -- BOTH must be clean, so the
-    row is the worse of the two and a clean/dirty split is named
-    ``LL_PV_ARMS_DISAGREE``.
+    ``direct`` (the default, and every absent switch): None, and the caller's
+    own direct body runs unchanged.  ``librelane``: the tool's verdict is the
+    step's.  ``dual``: the direct half (``direct()``) stays canonical, the tool
+    half is measured beside it, and for verification "better" is not the lower
+    count -- BOTH must be clean, so the row is the worse of the two and a
+    clean/dirty split is named ``LL_PV_ARMS_DISAGREE``.
     """
     from librelane_contract import Refusal, selected_mode
     try:
@@ -50045,7 +50045,7 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
     except Refusal as exc:
         return StepResult(half, "FAIL", 0.0, str(exc))
     if mode == "direct":
-        return direct()
+        return None
     t0 = time.time()
     vacuous = _vacuous_on_unrouted(project, half, t0)
     if vacuous is not None:
@@ -50075,16 +50075,14 @@ def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
 
 
 def step_drc(project: Path, top: str, pdk: PdkConfig,
-             container: str, candidate: bool = False) -> StepResult:
-    """Canonical step 31, DRC half: the producer switch, then the half."""
-    if candidate:
-        return _step_drc_direct(project, top, pdk, container, candidate)
-    return _step31_dispatch(project, top, pdk, "drc", lambda: _step_drc_direct(
-        project, top, pdk, container, candidate))
-
-
-def _step_drc_direct(project: Path, top: str, pdk: PdkConfig,
-                     container: str, candidate: bool = False) -> StepResult:
+             container: str, candidate: bool = False, *,
+             _direct: bool = False) -> StepResult:
+    # Step 31's producer switch (mig105); ``_direct`` is the dual arm's re-entry.
+    if not candidate and not _direct:
+        _routed = _step31_dispatch(project, top, pdk, "drc", lambda: step_drc(
+            project, top, pdk, container, candidate, _direct=True))
+        if _routed is not None:
+            return _routed
     t0 = time.time()
     if candidate and "sdr_candidates" not in Path(project).parts:
         return StepResult("drc", "FAIL", time.time() - t0,
@@ -50959,26 +50957,20 @@ def _write_extraction_preflight(project: Path, magicrc: str,
 
 def step_lvs(project: Path, top: str, pdk: PdkConfig,
              container: str,
-             upstream_pnr: Optional[StepResult] = None) -> StepResult:
-    """Canonical step 31, LVS half: the producer switch, then the half.
-
-    The upstream-incomplete skip (#590) belongs to the step, not to one
-    producer: a pnr that died before its final writes is skipped on every
-    mode, by the direct half's own rule."""
-    _pnr_writes_done = bool(
-        (getattr(upstream_pnr, "extras", None) or {}).get(
-            "pnr_signoff_writes_complete"))
-    if (upstream_pnr is not None and upstream_pnr.status != "PASS"
-            and not _pnr_writes_done):
-        return _step_lvs_direct(project, top, pdk, container,
-                                upstream_pnr=upstream_pnr)
-    return _step31_dispatch(project, top, pdk, "lvs", lambda: _step_lvs_direct(
-        project, top, pdk, container, upstream_pnr=upstream_pnr))
-
-
-def _step_lvs_direct(project: Path, top: str, pdk: PdkConfig,
-                     container: str,
-                     upstream_pnr: Optional[StepResult] = None) -> StepResult:
+             upstream_pnr: Optional[StepResult] = None, *,
+             _direct: bool = False) -> StepResult:
+    # Step 31's producer switch (mig105). The upstream-incomplete skip (#590)
+    # below belongs to the step, not to one producer: a pnr that died before
+    # its final writes is skipped on every mode, so the switch is consulted
+    # only when that skip does not apply. ``_direct``: the dual arm's re-entry.
+    if not _direct and not (
+            upstream_pnr is not None and upstream_pnr.status != "PASS"
+            and not (getattr(upstream_pnr, "extras", None) or {}).get(
+                "pnr_signoff_writes_complete")):
+        _routed = _step31_dispatch(project, top, pdk, "lvs", lambda: step_lvs(
+            project, top, pdk, container, upstream_pnr=upstream_pnr, _direct=True))
+        if _routed is not None:
+            return _routed
     t0 = time.time()
     _vac = _vacuous_on_unrouted(project, "lvs", t0)
     if _vac is not None:
