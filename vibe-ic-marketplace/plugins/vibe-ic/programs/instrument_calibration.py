@@ -2437,6 +2437,52 @@ _register(Instrument(
 ))
 
 
+# ---- LibreLane flow.log: did the run finish? (llv1 W6 review) ----
+
+_LL_FLOW_END_PROV = (
+    "Real LibreLane flow.log (LibreLane 3.1.0.dev1, Classic flow, 8hd-3 "
+    "`librelane_spm/runs/`). Kept byte-unedited, only the flow's own grammar "
+    "lines: `Starting…`, `Running '<id>' at '<dir>'…`, `Logging subprocess to "
+    "'<path>'…`, `Skipping …`, `Returning state unaltered…`, `Saving views to "
+    "'<dir>'…` and `Flow complete.`; every other line is dropped because it "
+    "names the design. ")
+
+
+def _judge_flow_finished(log: str) -> Optional[str]:
+    import librelane_import as L
+    return None if L.flow_status(log)["complete"] else "FLOW_INCOMPLETE"
+
+
+_register(Instrument(
+    name="librelane_import::flow_status",
+    reads="LibreLane's own run-level flow.log (`Starting…` / `Flow complete.`)",
+    ruling="llv1: when LibreLane fails, an honest FAIL (W6 review)",
+    owner="rvw6",
+    why=("A run LibreLane did not finish must never be imported as final, "
+         "with its missing steps read as steps the flow does not do. "
+         "LibreLane prints its failure after flow.log is closed, so an "
+         "aborted log simply stops. The pair is a real aborted run and a "
+         "real finished run of the same flow."),
+    judge=_judge_flow_finished,
+    positive=Sample(
+        provenance=(_LL_FLOW_END_PROV + "Run t89_ref_077_pure_fail: "
+                    "OpenROAD.STAMidPNR (step 30) died in a Tcl error in "
+                    "sta/corner.tcl and wrote no state_out.json; flow.log "
+                    "sha256 486e6ee114cb4a14022645edb83d42976b6ade4c3879595c"
+                    "2e6a3d31c1d721df, 77 lines, 54 kept. calibration/"
+                    "librelane_flow_log_failed_positive.log"),
+        artefact=_read("librelane_flow_log_failed_positive.log")),
+    expect="FLOW_INCOMPLETE",
+    negative=Sample(
+        provenance=(_LL_FLOW_END_PROV + "Run t78_ref_0925 (the clean "
+                    "reference, rc 0): flow.log sha256 d9ac3abe43292932485f"
+                    "3697429a4551ec75bfb2d525dd5442405cf2181b846d, 317 lines, "
+                    "166 kept. calibration/"
+                    "librelane_flow_log_finished_negative.log"),
+        artefact=_read("librelane_flow_log_finished_negative.log")),
+))
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════
