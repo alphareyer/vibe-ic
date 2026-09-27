@@ -7689,21 +7689,6 @@ def _supplied_rtl_defining_declared_top(project: Path
     return top, hits
 
 
-def _rtl_gen_then_stage_supplied(project: Path, ic_class: str,
-                                 top_name: str) -> List[StepResult]:
-    """A repair-loop re-run of `step_rtl_gen`, followed by consume.
-
-    D10 review_wave4c (MAJOR): the runner calls `step_reused_ip_consume` ONCE,
-    after the first `rtl_gen`; the repair loop re-runs `rtl_gen` alone. A
-    partial overlap drops the generated file of a supplied module and relies
-    on consume's closure path to stage the supplied one -- so after a repair
-    pass the build was missing that module. Consume is idempotent (a closed
-    rtl/ is left alone; an open one gets the supplied modules first-wins, with
-    its sha record), so it runs after EVERY rtl_gen."""
-    return [step_rtl_gen(project, ic_class),
-            step_reused_ip_consume(project, top_name)]
-
-
 def step_rtl_gen(project: Path, ic_class: str,
                  force_regen: Optional[bool] = None) -> StepResult:
     """Run RTL dispatch in isolation, then CAS-publish its complete delta."""
@@ -8450,12 +8435,28 @@ def _step_rtl_gen_bound(
         _pstatus = "PASS"
         _pextras: Optional[Dict[str, Any]] = None
         if _partial:
+            # D10 review_wave4c (MAJOR): STAGE the supplied module(s) HERE.
+            # `step_reused_ip_consume` runs once, after the first rtl_gen; the
+            # repair loop re-runs rtl_gen alone, so leaving the staging to
+            # consume lost the supplied module on every repair pass. Consume's
+            # own code (closure path, first-wins, sha-recorded manifest) runs
+            # after the power-up fix and the stamp, so neither touches or
+            # claims the supplied bytes; files already present are kept.
+            try:
+                import reused_ip_rtl_consume as _consume_stage
+                _staged_now = _consume_stage.consume_reused_ip_rtl(project)
+            except Exception as exc:                       # noqa: BLE001
+                _staged_now = {"staged": [], "reason":
+                               f"staging raised {type(exc).__name__}: {exc}"}
+            _partial["staged_by_rtl_gen"] = list(_staged_now.get("staged") or [])
+            files = sorted(p.name for p in rtl_dir.iterdir() if p.is_file())
             _pextras = {"supplied_replaces_generated": _partial}
             _pnote = (f"; the input supplies module(s) "
                       f"{sorted(_partial['replaced_by'])} — the generated "
                       f"file(s) {_partial['dropped_generated_files']} were "
-                      f"dropped and consume stages the supplied one(s) "
-                      f"into the rest of this generated design")
+                      f"dropped and the supplied one(s) "
+                      f"{_partial['staged_by_rtl_gen']} staged into the rest "
+                      f"of this generated design")
             # D10 review_wave4c — a supplied file replaces a generated module
             # SILENTLY only when it is reused IP. A CONTEXT file (input/rtl,
             # design_src: e.g. a completion stub) is the starting point a task
@@ -24744,8 +24745,7 @@ def main() -> int:
                                f"{rtl_repair_retry}/"
                                f"{args.max_rtl_repair_retries}", disclosures=[_V.Disclosure.PROGRESS_MARKER]))
         # Repair body: re-run RTL gen (idempotent if already current).
-        plan.extend(_rtl_gen_then_stage_supplied(project, ic_class,
-                                                 args.top_name))
+        plan.append(step_rtl_gen(project, ic_class))
         new_rtl_hash = _rtl_dir_sha256(project)
         # vibe-ic#2225 — the gates this producer had starved. AFTER the digest
         # above: that digest is the loop's byte-identical-retry
@@ -24775,8 +24775,7 @@ def main() -> int:
                             [s.get("kind") for s in
                              (hint.get("signatures") or [])]}))
                 if remediated:
-                    plan.extend(_rtl_gen_then_stage_supplied(
-                        project, ic_class, args.top_name))
+                    plan.append(step_rtl_gen(project, ic_class))
                     rehashed = _rtl_dir_sha256(project)
                     # vibe-ic#2225 — the gates this producer had starved. AFTER the digest
                     # above: that digest is the loop's byte-identical-retry
@@ -24901,8 +24900,7 @@ def main() -> int:
                                    f"<half-duplex-tester> FAIL → RTL repair "
                                    f"retry {rtl_repair_retry}/"
                                    f"{args.max_rtl_repair_retries}", disclosures=[_V.Disclosure.PROGRESS_MARKER]))
-            plan.extend(_rtl_gen_then_stage_supplied(project, ic_class,
-                                                     args.top_name))
+            plan.append(step_rtl_gen(project, ic_class))
             new_rtl_hash = _rtl_dir_sha256(project)
             # vibe-ic#2225 — the gates this producer had starved. AFTER the digest
             # above: that digest is the loop's byte-identical-retry
@@ -24930,8 +24928,7 @@ def main() -> int:
                                 [s.get("kind") for s in
                                  (hint.get("signatures") or [])]}))
                     if remediated:
-                        plan.extend(_rtl_gen_then_stage_supplied(
-                            project, ic_class, args.top_name))
+                        plan.append(step_rtl_gen(project, ic_class))
                         rehashed = _rtl_dir_sha256(project)
                         # vibe-ic#2225 — the gates this producer had starved. AFTER the digest
                         # above: that digest is the loop's byte-identical-retry
