@@ -116,29 +116,60 @@ def _otp_project(root):
 
 
 def _dc_project(root):
+    """The REAL data_converter shape: L9 names the chip (`adc_top`, as a real
+    converter's L9 names its own top), while `data_converter_rtl_gen` emits
+    `cic_decimator` -- a module that is NOT the declared top."""
     p = DC_FX._mk(root, DC_FX.FULL)
     (p / "phase1/generated_docs/L9_INTEGRATION_SPEC.json").write_text(
-        json.dumps({"top_module": "cic_decimator", "top_ports": []}))
+        json.dumps({"top_module": "adc_top", "top_ports": []}))
     return p
 
 
-CLASSES = [("aid_class_half_duplex_single_wire", _otp_project, "chip_top"),
-           ("mixed_signal_otp", _otp_project, "chip_top"),
-           ("data_converter", _dc_project, "cic_decimator")]
+#: (class, project, the declared L9 top, a NON-top module the generator emits)
+CLASSES = [("aid_class_half_duplex_single_wire", _otp_project, "chip_top",
+            "otp_mem"),
+           ("mixed_signal_otp", _otp_project, "chip_top", "otp_mem"),
+           ("data_converter", _dc_project, "adc_top", "cic_decimator")]
 
 
-@pytest.mark.parametrize("cls,mk,top", CLASSES, ids=[c[0] for c in CLASSES])
-def test_the_generator_runs_without_supplied_rtl(tmp_path, cls, mk, top):
-    """The control: each class really reaches its generator here, so the
-    decline below is the supplied RTL's doing."""
+@pytest.mark.parametrize("cls,mk,top,emitted", CLASSES,
+                         ids=[c[0] for c in CLASSES])
+def test_the_generator_runs_without_supplied_rtl(tmp_path, cls, mk, top,
+                                                 emitted):
+    """The control: each class really reaches its generator here, and the
+    generator really emits the module the next test supplies."""
     p = mk(tmp_path / "p")
     res = R.step_rtl_gen(p, cls)
     assert res.status == "PASS", res.detail[:300]
-    assert _defs(p, top) >= 1
+    assert _defs(p, emitted) == 1
 
 
-@pytest.mark.parametrize("cls,mk,top", CLASSES, ids=[c[0] for c in CLASSES])
-def test_a_supplied_top_declines_the_class_generator(tmp_path, cls, mk, top):
+@pytest.mark.parametrize("cls,mk,top,emitted", CLASSES,
+                         ids=[c[0] for c in CLASSES])
+def test_a_supplied_module_the_generator_emits_declines_it(
+        tmp_path, cls, mk, top, emitted):
+    """D10 review MAJOR 2: the design supplies a module the class generator
+    would EMIT (not the declared top). RED before: the generator ran, and its
+    module replaced (data_converter) or duplicated (aid) the supplied one."""
+    p = mk(tmp_path / "p")
+    own = _vendor(p, {f"{emitted}.v": f"// supplied\nmodule {emitted}"
+                                      f"(input clk, output q);\n"
+                                      f"  assign q = clk;\nendmodule\n"})
+    res = R.step_rtl_gen(p, cls)
+    assert res.status == "PASS_WITH_WAIVERS", res.detail[:300]
+    assert res.extras["declined_generator"] == R._lookup_class(cls)["rtl_gen"]
+    assert res.extras["overlapping_modules"] == [emitted]
+    assert _rtl_files(p) == []
+    out = C.consume_reused_ip_rtl(p)
+    assert out["staged"] == [f"{emitted}.v"] and _defs(p, emitted) == 1
+    assert (p / "phase2/stage1/rtl" / f"{emitted}.v").read_text().startswith(
+        "// supplied")
+
+
+@pytest.mark.parametrize("cls,mk,top,emitted", CLASSES,
+                         ids=[c[0] for c in CLASSES])
+def test_a_supplied_top_declines_the_class_generator(tmp_path, cls, mk, top,
+                                                     emitted):
     p = mk(tmp_path / "p")
     _vendor(p, {f"{top}.v": f"module {top}(input clk, output q);\n"
                             f"  assign q = clk;\nendmodule\n",
@@ -183,13 +214,17 @@ def test_a_testbench_that_defines_the_top_is_not_the_design(tmp_path, files):
     assert R.step_rtl_gen(p, "mixed_signal_otp").status == "PASS"
 
 
-def test_no_declared_top_never_stops_the_generator(tmp_path):
+def test_no_declared_top_and_no_emitted_module_never_stops_the_generator(
+        tmp_path):
+    """Without a declared top, only the generator's OWN output decides: IP it
+    does not emit leaves it running (and a module it emits declines it, see
+    test_a_supplied_module_the_generator_emits_declines_it)."""
     p = _otp_project(tmp_path / "p")
     spec = p / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
     doc = json.loads(spec.read_text())
     doc.pop("top_module", None)
     spec.write_text(json.dumps(doc))
-    _vendor(p, {"chip_top.v": "module chip_top(input clk); endmodule\n"})
+    _vendor(p, {"some_ip.v": "module some_ip(input clk); endmodule\n"})
     assert R._supplied_rtl_defining_declared_top(p) == (None, [])
     assert R.step_rtl_gen(p, "mixed_signal_otp").status == "PASS"
 
@@ -247,11 +282,14 @@ def test_b_a_deferral_is_recorded_and_hands_off_as_reused_ip(
     D6._supply(p, route, "spm.v", D6.SUPPLIED_SPM)
     res = R.step_rtl_gen(p, ARITH)
     assert res.status == "PASS_WITH_WAIVERS", res.detail[:300]
-    assert res.extras["fallback_skill"] == "catalog-glue-author", res.extras
+    assert res.extras["fallback_skill"] == (
+        "catalog-glue-author" if route == "input/vendor_rtl"
+        else "spec-to-rtl"), res.extras
     assert res.extras["supplied_build_rtl"] == [f"{route}/spm.v"]
     assert "serial_parallel_mul_synth" in [
         d["generator"] for d in res.extras["deferred_generators"]]
-    assert "Do NOT author the design itself" in res.detail
+    assert ("Do NOT author the design itself" in res.detail) is (
+        route == "input/vendor_rtl")
 
 
 def test_b_force_regen_overridden_by_supplied_rtl_is_said(tmp_path, _session):
@@ -320,10 +358,132 @@ def test_d_an_unprovable_tree_is_kept_and_both_steps_say_so(tmp_path, _session):
     res = R.step_rtl_gen(p, ARITH)
     assert "reclaimed_generated_rtl" not in res.extras
     assert res.extras["supplied_rtl_blocked_by"] == {
-        "rtl_files": ["spm.v"], "provenance": "unknown"}
+        "rtl_files": ["spm.v"], "provenance": "unknown",
+        "supplied_not_in_rtl": ["input/rtl/spm.v"]}
     assert "will NOT be staged" in res.detail
     out = C.consume_reused_ip_rtl(p)
     assert out["supplied_rtl_not_staged"] == ["input/rtl/spm.v"]
 
     assert "already holds 1 RTL file(s)" in out["reason"]
     assert "were NOT staged" in out["reason"]
+
+
+
+# =========================================================================== #
+# review_wave2 (branch D10) fixes
+# =========================================================================== #
+# MAJOR 1 — the "supplied RTL was NOT staged" disclosures must answer no when
+# rtl/ already holds the supplied design (consume staged it).
+def test_consume_twice_does_not_claim_the_supplied_rtl_is_missing(tmp_path):
+    p = D6._spm_project(tmp_path)
+    D6._supply(p, "input/rtl", "spm.v", D6.SUPPLIED_SPM)
+    first = C.consume_reused_ip_rtl(p)
+    assert first["staged"] == ["spm.v"]
+    second = C.consume_reused_ip_rtl(p)
+    assert "supplied_rtl_not_staged" not in second, second
+    assert "NOT staged" not in second["reason"]
+
+
+def test_rtl_gen_after_consume_does_not_claim_the_supplied_rtl_is_blocked(
+        tmp_path, _session):
+    p = D6._spm_project(tmp_path)
+    D6._supply(p, "input/vendor_rtl", "spm.v", D6.SUPPLIED_SPM)
+    R.step_rtl_gen(p, ARITH)
+    assert C.consume_reused_ip_rtl(p)["staged"] == ["spm.v"]
+    # the catalog-glue author writes its wrapper, then the flow re-enters
+    (p / "phase2/stage1/rtl/chip_top.v").write_text(
+        "module chip_top(input clk, output y);\n  spm u (.clk(clk));\n"
+        "endmodule\n")
+    again = R.step_rtl_gen(p, ARITH)
+    assert "supplied_rtl_blocked_by" not in again.extras, again.extras
+    assert "will NOT be staged" not in again.detail
+
+
+def test_a_changed_supplied_file_is_still_reported(tmp_path):
+    """The filter is by content: the same name with DIFFERENT bytes, not
+    listed as staged, is still reported."""
+    p = D6._spm_project(tmp_path)
+    rtl = p / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "spm.v").write_text("module spm(input clk); endmodule\n")
+    D6._supply(p, "input/rtl", "spm.v", D6.SUPPLIED_SPM)
+    out = C.consume_reused_ip_rtl(p)
+    assert out["supplied_rtl_not_staged"] == ["input/rtl/spm.v"]
+
+
+# MAJOR 3 — context RTL for a task that MODIFIES it keeps the spec-to-rtl
+# WAIVE, told to start from the supplied RTL; reused IP gets catalog-glue.
+@pytest.mark.parametrize("route", ["input/rtl", "input/design_src/impl/rtl"])
+def test_context_rtl_keeps_spec_to_rtl_and_is_the_starting_point(
+        tmp_path, _session, route):
+    p = D6._spm_project(tmp_path)
+    D6._supply(p, route, "spm.v", "module spm(input clk);\n  // TODO\n"
+                                  "endmodule\n")
+    res = R.step_rtl_gen(p, ARITH)
+    assert res.extras["fallback_skill"] == "spec-to-rtl", res.extras
+    assert "Do NOT author" not in res.detail
+    assert "starting point" in res.detail.lower()
+    assert f"{route}/spm.v" in res.detail
+    # a re-run after consume wrote ITS manifest is still not "reused IP"
+    C.consume_reused_ip_rtl(p)
+    again = R.step_rtl_gen(p, ARITH)
+    assert again.extras["fallback_skill"] == "spec-to-rtl", again.extras
+
+
+def test_reused_ip_under_vendor_rtl_gets_catalog_glue(tmp_path, _session):
+    p = D6._spm_project(tmp_path)
+    D6._supply(p, "input/vendor_rtl", "spm.v", D6.SUPPLIED_SPM)
+    res = R.step_rtl_gen(p, ARITH)
+    assert res.extras["fallback_skill"] == "catalog-glue-author"
+    assert "Do NOT author the design itself" in res.detail
+
+
+def test_a_declared_reused_ip_manifest_gets_catalog_glue(tmp_path, _session):
+    """Reused IP through the runner's own loader: a manifest that DECLARES
+    reused_ip (not consume's own staging record) under input/rtl."""
+    p = D6._spm_project(tmp_path)
+    D6._supply(p, "input/rtl", "spm.v", D6.SUPPLIED_SPM)
+    rtl = p / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "SOURCE_MANIFEST.json").write_text(json.dumps(
+        {"reused_ip": True, "rtl_strategy": "catalog_lookup_plus_ai_glue"}))
+    res = R.step_rtl_gen(p, ARITH)
+    assert res.extras["fallback_skill"] == "catalog-glue-author"
+
+
+# MINOR — an unregistered class with a supplied design is not told to author
+# from scratch either.
+@pytest.mark.parametrize("route,skill", [
+    ("input/vendor_rtl", "catalog-glue-author"), ("input/rtl", "spec-to-rtl")])
+def test_an_unregistered_class_uses_the_same_supplied_rtl_hand_off(
+        tmp_path, _session, route, skill):
+    p = D6._spm_project(tmp_path)
+    D6._supply(p, route, "spm.v", D6.SUPPLIED_SPM)
+    res = R.step_rtl_gen(p, "no_such_class_d10")
+    assert res.extras["fallback_skill"] == skill, res.extras
+    assert res.extras["supplied_build_rtl"] == [f"{route}/spm.v"]
+
+
+# MINOR — the per-dispatch records never leak into the next call.
+def test_records_of_a_previous_call_never_reach_the_next_result(
+        tmp_path, _session, monkeypatch):
+    R._SUPPLY_DEFERRALS.append({"generator": "stale", "reason": "stale"})
+    R._SUPPLY_RECLAIMED.append("stale_backup")
+    R._SUPPLY_BLOCKED.append({"rtl_files": ["x.v"], "provenance": "unknown"})
+    monkeypatch.setattr(R, "_step_rtl_gen_bound", lambda *a, **k: R.StepResult(
+        "rtl_gen", "FAIL", 0.0, "an early refusal"))
+    res = R.step_rtl_gen(D6._spm_project(tmp_path), ARITH)
+    assert res.detail == "an early refusal", res.detail
+    assert not (res.extras or {}).get("deferred_generators")
+
+
+# MINOR — a guard that stepped aside says it was NOT evaluated, not that the
+# generator "deferred" as if it applied.
+def test_a_skipped_generator_is_recorded_as_not_evaluated(tmp_path, _session):
+    p = D6._spm_project(tmp_path)
+    D6._supply(p, "input/vendor_rtl", "spm.v", D6.SUPPLIED_SPM)
+    res = R.step_rtl_gen(p, ARITH, force_regen=True)
+    recs = res.extras["deferred_generators"]
+    assert recs and all(r["applicability"] == "not_evaluated" for r in recs)
+    assert "not run" in res.detail and "deferred to the supplied RTL" \
+        not in res.detail

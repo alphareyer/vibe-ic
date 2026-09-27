@@ -2509,10 +2509,13 @@ def _reclaim_stale_generated_rtl(project: Path) -> Optional[str]:
             import reused_ip_rtl_consume as _consume_probe
             held = [f for f in rtl_dir.rglob("*")
                     if f.is_file() and f.suffix in (".v", ".sv")]
-            if not _consume_probe._unresolved_module_refs(held):
+            _missing = _consume_probe.unstaged_supplied_design_sources(project)
+            if _missing and not _consume_probe._unresolved_module_refs(held):
                 _SUPPLY_BLOCKED.append({
                     "rtl_files": sorted(f.name for f in held),
-                    "provenance": verdict})
+                    "provenance": verdict,
+                    "supplied_not_in_rtl": sorted(
+                        str(f.relative_to(project)) for f in _missing)})
         except Exception:  # noqa: BLE001
             pass
         return None
@@ -2539,9 +2542,15 @@ def _defer_to_supplied(generator: str, project: Path,
     supplied = _design_supplied_build_rtl(project)
     if not supplied:
         return False
+    # NOT EVALUATED, and said so (D10 review MINOR): the guard steps aside
+    # before the generator decides whether its shape applies, so this records
+    # that it did not run, never that it would have emitted.
     rec: Dict[str, Any] = {"generator": generator,
-                           "reason": "the design supplies its own build RTL; "
-                                     "consume stages it"}
+                           "applicability": "not_evaluated",
+                           "reason": "not run: the design supplies its own "
+                                     "build RTL, which consume stages; whether "
+                                     "this generator's shape applies was not "
+                                     "evaluated"}
     if force_regen:
         rec["force_rtl_regen_overridden"] = True
         rec["reason"] += (" (--force-rtl-regen speaks for rtl/, not for the "
@@ -7382,7 +7391,8 @@ def _record_supply(result: StepResult, project: Path,
     notes: List[str] = []
     if _SUPPLY_DEFERRALS:
         extras["deferred_generators"] = [dict(d) for d in _SUPPLY_DEFERRALS]
-        notes.append("deferred to the supplied RTL: " + ", ".join(
+        notes.append("not run because the input supplies RTL (applicability "
+                     "not evaluated): " + ", ".join(
             d["generator"] + (" (--force-rtl-regen overridden)"
                               if d.get("force_rtl_regen_overridden") else "")
             for d in _SUPPLY_DEFERRALS))
@@ -7406,17 +7416,98 @@ def _record_supply(result: StepResult, project: Path,
             f"phase2/stage1/rtl/ already held {len(_b['rtl_files'])} RTL "
             f"file(s), a closed design whose provenance is "
             f"{_b['provenance']!r} (not provably generator-produced, so not "
-            f"moved): the supplied RTL will NOT be staged over it")
+            f"moved): the supplied RTL absent from it "
+            f"({_b['supplied_not_in_rtl']}) will NOT be staged over it")
     result.extras = extras
     if notes:
         result.detail = f"{result.detail} [D10 supply: {'; '.join(notes)}]"
+
+
+_RE_MODULE_NAME = re.compile(r"^\s*module\s+([A-Za-z_]\w*)", re.M)
+_RE_HDL_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+
+
+def _module_names(files: Sequence[Path]) -> set:
+    out: set = set()
+    for f in files:
+        try:
+            out |= set(_RE_MODULE_NAME.findall(
+                _RE_HDL_COMMENT.sub("", f.read_text(errors="replace"))))
+        except OSError:
+            continue
+    return out
+
+
+def _emitted_modules(rtl_dir: Path) -> set:
+    return _module_names([f for f in rtl_dir.rglob("*")
+                          if f.is_file() and f.suffix in (".v", ".sv")])
+
+
+def _supplied_module_names(project: Path) -> set:
+    return _module_names(_design_supplied_build_rtl(project))
+
+
+def _supplied_rtl_is_reused_ip(project: Path, staged: Sequence[Path]) -> bool:
+    """Is the supplied RTL REUSED IP (wrap it) rather than context RTL a task
+    modifies (start from it)? D10 review MAJOR 3.
+
+    Reused IP when it arrives under `input/vendor_rtl/` (the reused-IP input
+    root, #542/#732), or when the SOURCE_MANIFEST declares `reused_ip: true`
+    through the runner's own loader (`_is_reused_ip_project`) -- EXCEPT a
+    manifest that is only consume's own staging record
+    (`rtl_strategy: design_provided_rtl_plus_ai_glue`): consume writes that
+    for ANY supplied RTL, so on a re-run it would turn every completion /
+    functional-modification task's context RTL into "reused IP"."""
+    vendor = (project / "input" / "vendor_rtl").resolve()
+    for f in staged:
+        try:
+            f.resolve().relative_to(vendor)
+            return True
+        except ValueError:
+            continue
+    if not _is_reused_ip_project(project):
+        return False
+    try:
+        import l9_rtl_pin_consistency_check as _l9
+        mf = _l9.load_source_manifest(project) or {}
+    except Exception:  # noqa: BLE001
+        return False
+    return mf.get("rtl_strategy") != "design_provided_rtl_plus_ai_glue"
 
 
 def _rtl_gen_supplied_design_handoff(
         project: Path, t0: float, ic_class: str, config: Dict[str, Any],
         _staged: List[Path], note: str = "",
         extra: Optional[Dict[str, Any]] = None) -> StepResult:
-    """The REUSED-IP / catalog-glue hand-off for a design the input supplies.
+    """The hand-off for RTL the input supplies (D10): catalog-glue for REUSED
+    IP, and for context RTL a spec-to-rtl WAIVE that starts FROM it."""
+    if _supplied_rtl_is_reused_ip(project, _staged):
+        return _rtl_gen_reused_ip_handoff(project, t0, ic_class, config,
+                                          _staged, note, extra)
+    _rel = [str(f.relative_to(project)) for f in _staged]
+    _hint, _hint_extras = _stage_author_knowledge_digests(project)
+    _sk_hint, _sk_extras = _stage_fallback_skill(project, "spec-to-rtl")
+    return StepResult(
+        "rtl_gen", "PASS_WITH_WAIVERS", time.time() - t0,
+        f"IC class {ic_class!r}: the input supplies RTL that is not declared "
+        f"reused IP ({len(_rel)} file(s): {_rel[:5]}) — "
+        f"`consume_reused_ip_rtl` stages it into phase2/stage1/rtl/, and it "
+        f"is the STARTING POINT: use skill `spec-to-rtl` to complete or "
+        f"modify that RTL in place as the spec requires, not to replace it "
+        f"with a design written from scratch." + (note or "")
+        + _sk_hint + _hint,
+        extras={"fallback_skill": "spec-to-rtl",
+                "class_config": config,
+                "supplied_build_rtl": _rel,
+                "supplied_rtl_role": "starting_point",
+                **(extra or {}), **_sk_extras, **_hint_extras})
+
+
+def _rtl_gen_reused_ip_handoff(
+        project: Path, t0: float, ic_class: str, config: Dict[str, Any],
+        _staged: List[Path], note: str = "",
+        extra: Optional[Dict[str, Any]] = None) -> StepResult:
+    """The REUSED-IP / catalog-glue hand-off for supplied reused IP.
 
     ORGANIC #542 wrote this for `input/vendor_rtl/` alone; D10 gives every
     input root consume stages the same hand-off (a design under `input/rtl/`
@@ -7527,6 +7618,11 @@ def step_rtl_gen(project: Path, ic_class: str,
     """Run RTL dispatch in isolation, then CAS-publish its complete delta."""
     t0 = time.time()
     project = Path(project)
+    # D10 — the per-dispatch supply records start empty for EVERY call, before
+    # any early return can read the previous call's.
+    _SUPPLY_DEFERRALS.clear()
+    _SUPPLY_RECLAIMED.clear()
+    _SUPPLY_BLOCKED.clear()
     binding: Optional[_Phase1ProjectBinding] = None
     stage_binding: Optional[_Phase1ProjectBinding] = None
     transaction: Optional[_Phase1StagedTreeTransaction] = None
@@ -7884,6 +7980,12 @@ def _step_rtl_gen_bound(
         return _sar
     # Registry lookup → deterministic generator OR fallback skill.
     config = _lookup_class(ic_class)
+    if config is None and _design_supplied_build_rtl(project):
+        # D10 — the supplied-RTL hand-off does not depend on the class being
+        # registered: an unregistered class must not be told to author from
+        # scratch a design the input supplies.
+        return _rtl_gen_supplied_design_handoff(
+            project, t0, ic_class, {}, _design_supplied_build_rtl(project))
     if config is None:
         # Class not registered — defer entirely to AI / fallback skill.
         # This branch names an author skill, so it is an AUTHORING HANDOFF and
@@ -8197,6 +8299,28 @@ def _step_rtl_gen_bound(
     emitted_any = rtl_dir.is_dir() and any(
         p.is_file() for p in rtl_dir.iterdir())
     if rc == 0 and emitted_any:
+        # D10 review MAJOR 2 — THE GENERATOR'S OWN OUTPUT LIST decides, not
+        # only the L9 top: a real data_converter declares its chip as the top
+        # while this generator emits `cic_decimator`, and a supplied
+        # `cic_decimator.v` was then replaced by the generated one. Any module
+        # the generator EMITTED that the supplied RTL also defines means the
+        # design supplies that part: the generated tree is discarded, the
+        # prior rtl/ restored, and the supplied RTL handed off. Supplied IP
+        # the generated design only INSTANTIATES (no overlap) is unaffected.
+        _overlap = sorted(_emitted_modules(rtl_dir)
+                          & _supplied_module_names(project))
+        if _overlap:
+            shutil.rmtree(rtl_dir, ignore_errors=True)
+            if had_prior_rtl and backup_dir.exists():
+                backup_dir.rename(rtl_dir)
+            project_binding.require_current()
+            return _rtl_gen_supplied_design_handoff(
+                project, t0, ic_class, config,
+                _design_supplied_build_rtl(project),
+                note=(f" Class generator {gen_name!r} ran and was DISCARDED: "
+                      f"the input supplies module(s) {_overlap} it emitted."),
+                extra={"declined_generator": gen_name,
+                       "overlapping_modules": _overlap})
         files = sorted(p.name for p in rtl_dir.iterdir() if p.is_file())
         # ENFORCE power-up determinism on the freshly emitted RTL (before any
         # downstream lint/synth/sim). Plugin-level sediment of the rtl_hygiene
