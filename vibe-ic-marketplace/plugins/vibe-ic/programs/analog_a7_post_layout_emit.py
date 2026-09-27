@@ -769,10 +769,6 @@ def bound_transient(tb_text: str) -> Tuple[str, dict]:
                     + _ns_token(span["stop_s"]) + m.group(5))
             done = True
         out.append(line)
-    if not done:                        # nothing rewritten: nothing was cut
-        span.update(stop_s=span["declared_stop_s"],
-                    rule="transient_card_continued_across_lines")
-        return tb_text, span
     return "\n".join(out) + "\n", span
 
 

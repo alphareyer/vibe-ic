@@ -473,6 +473,10 @@ def test_a_window_ends_at_the_latest_time_it_references():
 
 def test_a_transient_card_split_across_lines_is_not_reported_as_cut(stub):
     tb = TB.replace("tran 5n 28673000n", "tran 5n\n+ 28673000n")
+    # the reader itself does not claim a cut it cannot make ...
+    assert A7.measurement_span(tb)["rule"] == \
+        "transient_card_continued_across_lines"
+    # ... and the writer, which is the one that would make it, agrees
     out, span = A7.bound_transient(tb)
     assert out == tb
     assert span["stop_s"] == pytest.approx(28673e-6)
