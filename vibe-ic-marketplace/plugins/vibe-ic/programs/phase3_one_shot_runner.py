@@ -73159,6 +73159,60 @@ def _phase3_window_pre_audit_producer(project: Path, site: str,
         return row
 
 
+_ENCLOSING_STDERR_TAIL_LINES = 20
+
+
+def _stderr_tail(err: str, lines: int = _ENCLOSING_STDERR_TAIL_LINES) -> str:
+    return "\n".join((err or "").splitlines()[-lines:]) or "(empty)"
+
+
+def _phase3_enclosing_cmd(isolated: Path, top: str, pdk: PdkConfig,
+                          args) -> List[str]:
+    """The unbounded Phase-3 run on the window's private copy."""
+    return [sys.executable, str(Path(__file__)), str(isolated),
+            "--top-name", top, "--pdk", pdk.name,
+            "--container", args.container]
+
+
+def _phase3_enclosing_supervised(project: Path, isolated: Path,
+                                 cmd: List[str]):
+    """Run the enclosing Phase-3 unit under the progress watchdog.
+
+    Its deadline is the one every Phase-3 tool run has: killed (whole
+    process group) as hung after `_WATCHDOG_STALL_GRACE_S` of no forward
+    progress, never for being slow; `_WATCHDOG_HARD_CEILING_S` is recorded
+    and announced, not a kill (#2051). Progress is its own output, its host
+    process tree's CPU, or any `*.log` written in the private copy (the
+    in-container tools write there while the host tree idles).
+
+    Its stderr is kept, never swallowed: written to a log beside the
+    project, in the window's own run dir (the window never writes window
+    control state into the project), and the tail is printed on failure."""
+    run_id = re.sub(r"[^A-Za-z0-9._-]", "_",
+                    os.environ.get("VIBEIC_PHASE3_WINDOW_RUN_ID")
+                    or f"{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}")
+    log = (project.parent / ".phase3_window_runs" / project.name / run_id
+           / "enclosing_phase3.stderr.log")
+    res = _wd.run_host_supervised(
+        cmd,
+        progress_paths=lambda: list(isolated.rglob("*.log")),
+        stall_grace_s=_WATCHDOG_STALL_GRACE_S,
+        hard_ceiling_s=_WATCHDOG_HARD_CEILING_S,
+        ceiling_notice=lambda s: print(
+            f"WATCHDOG_BUDGET: enclosing phase3 passed its recorded "
+            f"{s:g}s budget and runs on (#2051)", file=sys.stderr))
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(res.err or "")
+    except OSError as exc:
+        log = Path(f"(unwritten: {exc})")
+    if res.rc != 0:
+        print(f"ENCLOSING_PHASE3_RC={res.rc} ({res.outcome}, "
+              f"{res.elapsed_s:.0f}s); stderr log {log}; tail:\n"
+              f"{_stderr_tail(res.err)}", file=sys.stderr)
+    return res, log
+
+
 def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                              args, step_ids: Set[str],
                              unit: str = "phase3") -> StepResult:
@@ -73187,11 +73241,22 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
             unit_rc = 0 if pnr_row.status in ("PASS", "PASS_WITH_WAIVERS") else 1
             unit_verdict = pnr_row.status
         else:
-            cmd = [sys.executable, str(Path(__file__)), str(isolated),
-                   "--top-name", top, "--pdk", pdk.name,
-                   "--container", args.container]
-            cp = subprocess.run(cmd, capture_output=True, text=True)
-            unit_rc = cp.returncode
+            res, log = _phase3_enclosing_supervised(
+                project, isolated,
+                _phase3_enclosing_cmd(isolated, top, pdk, args))
+            if res.stalled:
+                return StepResult(
+                    "enclosing_" + unit, "NOT_MEASURED", time.time() - t0,
+                    f"steps {', '.join(sorted(step_ids))} were requested "
+                    f"through phase3_one_shot_runner, which the progress "
+                    f"watchdog stopped as hung after {res.elapsed_s:.0f}s "
+                    f"(no forward progress for > {_WATCHDOG_STALL_GRACE_S:g}s;"
+                    f" recorded budget {_WATCHDOG_HARD_CEILING_S:g}s); nothing "
+                    f"was published. Remedy: read {log} and re-run the "
+                    f"window once the hang is cleared. stderr tail: "
+                    f"{_stderr_tail(res.err)}",
+                    [], reason_class=_V.ReasonClass.STALLED)
+            unit_rc = res.rc
             unit_report = _pl.report_path(isolated, "phase3_one_shot.json")
             try:
                 unit_verdict = json.loads(unit_report.read_text()).get("verdict")
@@ -73214,6 +73279,11 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                                 copied.append(str(target))
         unit_ok = unit_rc == 0 and bool(produced) and unit_verdict in (
             "PASS", "PASS_WITH_WAIVERS")
+        unit_log = ""
+        if unit == "phase3":
+            unit_log = f"; stderr log {log}"
+            if not unit_ok:
+                unit_log += f"; stderr tail: {_stderr_tail(res.err)}"
         name = "enclosing_" + unit
         enclosing = {"pnr": "step_pnr",
                      "canonicalize": "step_canonicalize_artefacts",
@@ -73226,7 +73296,7 @@ def _phase3_window_enclosing(project: Path, top: str, pdk: PdkConfig,
                           f"{enclosing}; enclosing rc={unit_rc}; "
                           f"verdict={unit_verdict}; selected outputs newly "
                           f"produced={len(produced)}; only selected declared "
-                          "outputs published",
+                          f"outputs published{unit_log}",
                           copied, reason_class=("" if unit_ok else
                                                 _V.ReasonClass.INPUT_ABSENT))
 
