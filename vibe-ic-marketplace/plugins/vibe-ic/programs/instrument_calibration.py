@@ -1498,6 +1498,37 @@ _register(Instrument(
 ))
 
 
+def _judge_p0_slang_use_before_declare(log: str) -> Optional[str]:
+    import p0_tool_frontend_check as p0
+    return "USE_BEFORE_DECLARE_ONLY" if p0.only_use_before_declare(log) else None
+
+
+_register(Instrument(
+    name="p0_tool_frontend_check::only_use_before_declare",
+    reads="Yosys read_slang elaboration transcript",
+    ruling="FX_P2 (orchestrator 2026-09-28, D3 condition b)", owner="fxtb",
+    why=("The declaration-order retry may answer ONLY slang's use-before-"
+         "declare refusal. It must fire when that is the sole error and stay "
+         "silent when another error (an undeclared name) is beside it."),
+    judge=_judge_p0_slang_use_before_declare,
+    positive=Sample(
+        provenance=("Real Yosys 0.69+ (4d572059c) read_slang in the released "
+                    "vibeic-eda 0.3.83 image on 8HD-4 (.120), 2026-09-28, on "
+                    "a 4-line module that assigns a net above its "
+                    "declaration; the probe directory is rewritten to `rtl/` "
+                    "(no host path in a fixture). calibration/"
+                    "p0_slang_use_before_declare_positive.log."),
+        artefact=_read("p0_slang_use_before_declare_positive.log")),
+    expect="USE_BEFORE_DECLARE_ONLY",
+    negative=Sample(
+        provenance=("Same tool and image, the same module plus one "
+                    "genuinely undeclared identifier: 2 errors, one of them "
+                    "'use of undeclared identifier'. calibration/"
+                    "p0_slang_use_before_declare_negative.log."),
+        artefact=_read("p0_slang_use_before_declare_negative.log")),
+))
+
+
 # ---- LibreLane OpenROAD.STAPrePNR readers (steps 8 and 10, T92) -----------
 
 _STA_PREPNR_RUN = (
