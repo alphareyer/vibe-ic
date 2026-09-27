@@ -1548,8 +1548,11 @@ def _dir_consumers(plugin_root: Path, changed_sources: list[str],
 #
 # "Depends on" is the REQUESTED mode's own dependency notion, as in the third
 # hop: rule 1 ownership always, plus rule 5 import/loader edges in import-edge
-# mode, which is what the landing selection (`tools/ci/trusted_test_selection.py`)
-# runs. So this rule never selects more than editing the sweeping program itself
+# mode (what the landing selection, `tools/ci/trusted_test_selection.py`, runs),
+# or the reference index in the reference modes, so `reference` stays the
+# widest (`test_cli_mode_flag_plumbs_through`). `reference-capped` applies its
+# cap to the CHANGED stem, as rule 3 does: over the cap, ownership only
+# (`test_reference_capped_bounds_the_giant_stems_but_keeps_the_small_ones`). So this rule never selects more than editing the sweeping program itself
 # would in that mode. Uncapped, on rule 8's argument. In ownership mode it
 # reaches only sweep tests named after their program; the absence test loads its
 # checker under another name and is reached in import-edge mode.
@@ -1652,8 +1655,9 @@ def _sweep_consumers(plugin_root: Path, changed_sources: list[str],
     """Rule 8b: tests that hand a changed file's directory to a program that
     globs it. See the block above for the measurement and both halves.
 
-    ``edge_index`` is the rule 5 index in import-edge mode and None otherwise;
-    with None only rule 1 ownership counts as a dependency.
+    ``edge_index`` is the requested mode's stem -> dependent-tests index (rule 5
+    in import-edge mode, the reference index in the reference modes) and None
+    where only rule 1 ownership counts.
     """
     if not changed_sources:
         return set()
@@ -1874,8 +1878,21 @@ def select_tests(
         selected |= _dir_consumers(plugin_root, changed_sources, source_stems)
         # (8b) the same read, with the glob in a PROGRAM and the root chosen
         # by the test. See `_sweep_consumers`.
-        selected |= _sweep_consumers(plugin_root, changed_sources, source_stems,
-                                     edge_index if mode == MODE_IMPORT_EDGE else None)
+        if mode == MODE_IMPORT_EDGE:
+            selected |= _sweep_consumers(plugin_root, changed_sources,
+                                         source_stems, edge_index)
+        elif mode in (MODE_REFERENCE, MODE_REFERENCE_CAPPED):
+            # The cap is keyed on the CHANGED stem, exactly as rule 3 keys it.
+            wide = [c for c in changed_sources
+                    if mode == MODE_REFERENCE
+                    or len(ref_index.get(Path(c).stem, ())) <= ref_max_tests]
+            narrow = [c for c in changed_sources if c not in wide]
+            selected |= _sweep_consumers(plugin_root, wide, source_stems,
+                                         ref_index)
+            selected |= _sweep_consumers(plugin_root, narrow, source_stems)
+        else:
+            selected |= _sweep_consumers(plugin_root, changed_sources,
+                                         source_stems)
 
     # (6) Built LAZILY, same as rule 4 and for the same reason.
     #
