@@ -208,11 +208,12 @@ _spec_b.loader.exec_module(BR)
 def _drive_branch(tmp_path, monkeypatch, rc_by_program):
     project = tmp_path / "project"
     out_dir = project / "phase3/stage3/pnr"
-    wrapper = BR.write(out_dir / "chip_top_io.v", "module core(a);\n  input a;\nendmodule\nmodule chip_top(a);\n  input a;\n  core u_core (.a(a));\nendmodule\n")
+    wrapper = BR.write(out_dir / "chip_top_io.v", "module chip_top(a);\n  input a;\n  core u_core (.a(a));\nendmodule\n")
     BR.put(project / "phase3/librelane_switch.json", {"pdk_root_host": str(tmp_path)})
     monkeypatch.setattr(runner, "_padring_chip_top_record", lambda p: {
         "core_module": "core", "chip_top_verilog": str(wrapper.relative_to(project))})
-    monkeypatch.setattr(runner, "pnr_input_netlist", lambda p, core: (wrapper, "n", False))
+    netlist = BR.write(project / "phase3/stage2/core.v", "module core(a);\n  input a;\nendmodule\n")
+    monkeypatch.setattr(runner, "pnr_input_netlist", lambda p, core: (netlist, "n", False))
     monkeypatch.setattr(runner, "_docker_exec", lambda *a, **k: (0, "ok", ""))
     monkeypatch.setattr(contract, "flow_segment", lambda image, first, last, **k: [first, last])
     monkeypatch.setattr(contract, "resolve_step_configs", lambda p, i, pdk, ids, **k: {
