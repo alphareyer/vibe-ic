@@ -25,6 +25,7 @@ than left to the next reader to notice.
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
 
@@ -45,9 +46,28 @@ def _selector():
     return mod
 
 
-def _select(paths):
+def _select(paths, root=_PLUGIN):
     return _selector().select_tests(
-        [f"{_PREFIX}/{p}" for p in paths], _PLUGIN, plugin_prefix=_PREFIX)
+        [f"{_PREFIX}/{p}" for p in paths], root, plugin_prefix=_PREFIX)
+
+
+def _plant(tmp_path, name, body):
+    """A plugin tree in `tmp_path` holding the real `pytest.ini`, the real
+    changed source, and ONE planted test -- never the shipped tests dir.
+
+    Planting into the shipped `programs/tests/` raced every xdist worker that
+    lists that directory: `test_default_mode_equals_explicit_ownership_mode`
+    saw the probe in one `select_tests` call and not in the next ("Left
+    contains one more item: 'programs/tests/test_zz1387_derived_probe.py'",
+    main 06d137c57). The selector is a pure function of `plugin_root`, so the
+    probe needs no shared tree to prove the rule."""
+    root = tmp_path / "plugin"
+    (root / "programs" / "tests").mkdir(parents=True)
+    shutil.copy2(_PLUGIN / "pytest.ini", root / "pytest.ini")
+    shutil.copy2(_PLUGIN / "programs" / "eda_report_audit.py",
+                 root / "programs" / "eda_report_audit.py")
+    (root / "programs" / "tests" / name).write_text(body, encoding="utf-8")
+    return root
 
 
 def test_the_1265_case_selects_the_glob_consumer():
@@ -75,23 +95,19 @@ def test_the_edge_is_DERIVED_not_a_hand_list(tmp_path, monkeypatch):
     corpus-walking test. So the guard is that a BRAND-NEW file, never named
     anywhere, is picked up with no edit to the selector.
     """
-    probe = _PLUGIN / "programs" / "tests" / "test_zz1387_derived_probe.py"
-    probe.write_text(
+    root = _plant(
+        tmp_path, "test_zz1387_derived_probe.py",
         "import pathlib\n\n\n"
         "def test_probe():\n"
-        "    list(pathlib.Path('programs').glob('*.py'))\n",
-        encoding="utf-8")
-    try:
-        sel = _select(["programs/eda_report_audit.py"])
-    finally:
-        probe.unlink()
+        "    list(pathlib.Path('programs').glob('*.py'))\n")
+    sel = _select(["programs/eda_report_audit.py"], root)
     assert "programs/tests/test_zz1387_derived_probe.py" in sel, (
         "a newly written test that globs `*.py` was not selected — the rule is "
         "behaving like a hand-list, which is the defect #527/#530 removed and "
         "rule 4's docstring forbids")
 
 
-def test_an_UNSHAPED_glob_is_not_an_edge():
+def test_an_UNSHAPED_glob_is_not_an_edge(tmp_path):
     """`tmp_path.glob('*')` must not couple a fixture to the whole source tree.
 
     ANTI-COST guard, and it is load-bearing: measured on this tree, 38 of the 56
@@ -101,16 +117,12 @@ def test_an_UNSHAPED_glob_is_not_an_edge():
     matches everything names no shape, exactly the objection that keeps
     `iterdir()` out.
     """
-    probe = _PLUGIN / "programs" / "tests" / "test_zz1387_unshaped_probe.py"
-    probe.write_text(
+    root = _plant(
+        tmp_path, "test_zz1387_unshaped_probe.py",
         "import pathlib\n\n\n"
         "def test_probe(tmp_path):\n"
-        "    list(tmp_path.glob('*'))\n",
-        encoding="utf-8")
-    try:
-        sel = _select(["programs/eda_report_audit.py"])
-    finally:
-        probe.unlink()
+        "    list(tmp_path.glob('*'))\n")
+    sel = _select(["programs/eda_report_audit.py"], root)
     assert "programs/tests/test_zz1387_unshaped_probe.py" not in sel, (
         "a `glob('*')` over a tmp_path was treated as a dependency on the "
         "source tree; that edge is unshaped and would select 38 extra files "

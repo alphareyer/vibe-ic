@@ -170,11 +170,16 @@ def _skip_reason_text(node: ast.AST) -> str:
     return " ".join(chunks).lower()
 
 
-def _undeclared_infra_skips():
+def _undeclared_infra_skips(tests_dir: Path = TESTS_DIR):
     """Every `pytest.skip`/`skipif` in the corpus that names infrastructure and
-    did NOT come through the tier. Returns ``[(relpath, lineno, reason)]``."""
+    did NOT come through the tier. Returns ``[(relpath, lineno, reason)]``.
+
+    `tests_dir` exists so the paired control can plant its probe in a tmp
+    directory: a probe planted in the SHIPPED tests dir is listed, then deleted,
+    by xdist workers that scan the same corpus (FileNotFoundError in
+    test_ppa_schema_validation, measured on main 06d137c57)."""
     out = []
-    for path in sorted(TESTS_DIR.glob("test_*.py")):
+    for path in sorted(Path(tests_dir).glob("test_*.py")):
         if path.name == Path(__file__).name:
             continue
         try:
@@ -322,15 +327,12 @@ def test_the_rot_guard_can_actually_fire(tmp_path):
     corpus filled with undeclared sites. This plants one and shows the detector
     sees it, using the same function the real assertion uses.
     """
-    planted = TESTS_DIR / "test_zz_not_verified_rot_probe.py"
+    planted = tmp_path / "test_zz_not_verified_rot_probe.py"
     planted.write_text(
         "import pytest\n"
         "def test_planted():\n"
         "    pytest.skip('vibeic-eda container not available')\n")
-    try:
-        found = _undeclared_infra_skips()
-    finally:
-        planted.unlink(missing_ok=True)
+    found = _undeclared_infra_skips(tmp_path)
     assert any(f == planted.name for f, _ln, _r in found), (
         "the rot guard did not see a planted undeclared infrastructure skip, "
         f"so it is a ban rather than a check. Saw: {found}")
