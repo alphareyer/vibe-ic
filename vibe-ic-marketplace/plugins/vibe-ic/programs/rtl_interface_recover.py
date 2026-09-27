@@ -112,6 +112,25 @@ def _width_from_range(span: str, params: Dict[str, int]) -> Optional[int]:
     return None
 
 
+def _range_provenance(span: str, params: Dict[str, int]) -> Dict[str, object]:
+    """Keep the declared indices, not just their cardinality.
+
+    A six-bit ``[7:2]`` port really contains bit 7. Dropping its endpoints
+    makes the L1 width gate mistake an input reference to bit 7 for an
+    eight-bit minimum. An unresolved parameter range remains symbolic rather
+    than being guessed from a particular benchmark or implementation.
+    """
+    match = re.fullmatch(r"\[\s*(.+?)\s*:\s*(.+?)\s*\]", span.strip())
+    if not match:
+        return {}
+    hi, lo = match.group(1).strip(), match.group(2).strip()
+    hv = _wr.eval_width_expr(hi, params)
+    lv = _wr.eval_width_expr(lo, params)
+    if hv is not None and lv is not None:
+        return {"msb": hv, "lsb": lv}
+    return {"width_symbolic": f"{hi}:{lo}"}
+
+
 def _extract_param_value(text: str, start: int) -> str:
     """Extract a parameter value starting at `start` until a top-level `,`, `;`
     or `)`. Handles balanced parentheses so `$clog2(N)` is captured whole."""
@@ -228,6 +247,7 @@ def _parse_ansi_ports(header: str, params: Dict[str, int]) -> List[dict]:
     ports: List[dict] = []
     last_dir = None
     last_width: Optional[int] = 1
+    last_range: Dict[str, object] = {}
     for chunk in _split_top_commas(header):
         c = _strip_comments(chunk).strip()
         if not c:
@@ -251,13 +271,18 @@ def _parse_ansi_ports(header: str, params: Dict[str, int]) -> List[dict]:
         names = [n for n in re.split(r"[\s]+", c.strip()) if re.fullmatch(r"[A-Za-z_]\w*", n)]
         if rng:
             w = _width_from_range(rng, params)        # explicit range wins
+            provenance = _range_provenance(rng, params)
         elif new_dir:
             w = 1                                      # new group, no range -> scalar
+            provenance = {}
         else:
             w = last_width                             # pure continuation -> inherit
+            provenance = last_range
         last_width = w
+        last_range = provenance
         for nm in names:
-            ports.append({"name": nm, "dir": last_dir, "width": w})
+            ports.append({"name": nm, "dir": last_dir, "width": w,
+                          **provenance})
     return ports
 
 
@@ -277,8 +302,10 @@ def _parse_nonansi_ports(span: str, header_names: List[str],
         _strip_comments(decl_region)):
         d, rng, names = m.group(1), m.group(2) or "", m.group(3)
         w = _width_from_range(rng, params)
+        provenance = _range_provenance(rng, params)
         for nm in re.split(r"\s*,\s*", names):
-            decls[nm] = {"name": nm, "dir": d, "width": w}
+            decls[nm] = {"name": nm, "dir": d, "width": w,
+                         **provenance}
     # preserve header order; only emit ports the header actually listed
     out = []
     for nm in header_names:

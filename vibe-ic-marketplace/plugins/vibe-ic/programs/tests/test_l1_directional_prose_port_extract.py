@@ -163,3 +163,122 @@ def test_crosswalk_fills_empty_l1_from_l9_unchanged():
         l1, _l9("x", "y"))
     assert changed is True
     assert {p["name"] for p in l1["pin_table"]} == {"x", "y"}
+
+
+def test_shipped_rtl_range_survives_l9_to_l1_and_width_gate(tmp_path):
+    import json
+    import l1_pin_bus_width_actionable_check as width_gate
+
+    proj = _mk_proj(tmp_path, [{"name": "paddr", "mode": "in", "width": 6}],
+                    "The address interface uses paddr[7:2].")
+    gd = proj / "phase1" / "generated_docs"
+    (gd / "L9_INTEGRATION_SPEC.json").write_text(json.dumps(
+        {"top_module": "slice", "top_ports": []}))
+    rtl_dir = proj / "input" / "rtl"
+    rtl_dir.mkdir(parents=True)
+    (rtl_dir / "slice.v").write_text(
+        "module slice(input [7:2] paddr, output q); "
+        "assign q = paddr[7]; endmodule\n")
+
+    P1._post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(proj)
+    row = _by_name(json.loads((gd / "L1_DATASHEET.json").read_text())
+                   ["pin_table"])["paddr"]
+    assert (row["width"], row["msb"], row["lsb"]) == (6, 7, 2)
+    assert width_gate.evaluate(proj)["verdict"] == "PASS"
+
+
+def test_shipped_rtl_range_does_not_excuse_out_of_range_index(tmp_path):
+    import json
+    import l1_pin_bus_width_actionable_check as width_gate
+
+    proj = _mk_proj(tmp_path, [{"name": "paddr", "mode": "in", "width": 6}],
+                    "The requested interface accesses paddr[7:2].")
+    gd = proj / "phase1" / "generated_docs"
+    (gd / "L9_INTEGRATION_SPEC.json").write_text(json.dumps(
+        {"top_module": "slice", "top_ports": []}))
+    rtl_dir = proj / "input" / "rtl"
+    rtl_dir.mkdir(parents=True)
+    (rtl_dir / "slice.v").write_text(
+        "module slice(input [5:0] paddr, output q); "
+        "assign q = paddr[0]; endmodule\n")
+
+    P1._post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(proj)
+    report = width_gate.evaluate(proj)
+    assert report["verdict"] == "FAIL"
+    assert report["violations"][0]["kind"] == "bus_width_below_input_bound"
+
+
+def test_prompt_embedded_target_header_recovers_nonzero_lsb(tmp_path):
+    import json
+    import l1_pin_bus_width_actionable_check as width_gate
+
+    proj = _mk_proj(tmp_path, [{"name": "paddr", "mode": "in", "width": 6}],
+                    "The address interface uses paddr[7:2].")
+    gd = proj / "phase1" / "generated_docs"
+    (gd / "L9_INTEGRATION_SPEC.json").write_text(json.dumps(
+        {"top_module": "slice", "top_ports": []}))
+    (proj / "input" / "phase1_prompt.md").write_text(
+        "The design interface is:\n"
+        "module slice(input [7:2] paddr, output q); endmodule\n")
+
+    P1._post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(proj)
+    row = _by_name(json.loads((gd / "L1_DATASHEET.json").read_text())
+                   ["pin_table"])["paddr"]
+    assert (row["width"], row["msb"], row["lsb"]) == (6, 7, 2)
+    assert width_gate.evaluate(proj)["verdict"] == "PASS"
+
+
+def test_prompt_embedded_other_module_cannot_replace_target(tmp_path):
+    import json
+
+    proj = _mk_proj(tmp_path, [{"name": "paddr", "mode": "in", "width": 6}],
+                    "The address interface uses paddr[7:2].")
+    gd = proj / "phase1" / "generated_docs"
+    (gd / "L9_INTEGRATION_SPEC.json").write_text(json.dumps(
+        {"top_module": "slice", "top_ports": []}))
+    (proj / "input" / "phase1_prompt.md").write_text(
+        "Example only: module unrelated(input [7:2] paddr); endmodule\n")
+
+    P1._post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(proj)
+    l9 = json.loads((gd / "L9_INTEGRATION_SPEC.json").read_text())
+    assert l9["top_module"] == "slice"
+    assert not l9.get("top_ports")
+
+
+def test_conflicting_prose_width_is_not_silently_mixed_with_header_range(tmp_path):
+    import json
+
+    proj = _mk_proj(tmp_path, [{"name": "paddr", "mode": "in", "width": 8}],
+                    "paddr has a conflicting eight-bit prose claim.")
+    gd = proj / "phase1" / "generated_docs"
+    (gd / "L9_INTEGRATION_SPEC.json").write_text(json.dumps(
+        {"top_module": "slice", "top_ports": []}))
+    (proj / "input" / "phase1_prompt.md").write_text(
+        "module slice(input [7:2] paddr); endmodule\n")
+
+    P1._post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(proj)
+    row = _by_name(json.loads((gd / "L1_DATASHEET.json").read_text())
+                   ["pin_table"])["paddr"]
+    assert row["width"] == 8
+    assert "msb" not in row and "lsb" not in row
+
+
+def test_unresolved_zero_width_is_filled_from_resolved_parameter_header(tmp_path):
+    import json
+    import l1_pin_bus_width_actionable_check as width_gate
+
+    proj = _mk_proj(tmp_path, [{"name": "image_out", "mode": "out",
+                               "width": 0}],
+                    "image_out is an output bus of parameterized width.")
+    gd = proj / "phase1" / "generated_docs"
+    (gd / "L9_INTEGRATION_SPEC.json").write_text(json.dumps(
+        {"top_module": "rotate", "top_ports": []}))
+    (proj / "input" / "phase1_prompt.md").write_text(
+        "module rotate #(parameter N = 4) "
+        "(output logic [(N*N)-1:0] image_out); endmodule\n")
+
+    P1._post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(proj)
+    row = _by_name(json.loads((gd / "L1_DATASHEET.json").read_text())
+                   ["pin_table"])["image_out"]
+    assert (row["width"], row["msb"], row["lsb"]) == (16, 15, 0)
+    assert width_gate.evaluate(proj)["verdict"] == "PASS"
