@@ -913,7 +913,19 @@ def _image_profile(docker: Docker) -> dict[str, Any]:
     refused exactly as strictly as before, and nothing here pulls.
     """
     global IMAGE, IMAGE_REPO_DIGEST
-    configured = runtime_image()
+    try:
+        configured = runtime_image()
+    except RuntimeError as exc:
+        if type(exc).__name__ not in ("ImageNotResolvable", "ImageNotHeld"):
+            raise
+        # A REFUSAL BY NAME, NEVER A TRACEBACK (lane rfimg2). Resolving asks
+        # this host's docker; with none, the identity is unanswerable -- and
+        # the TRUER, EARLIER cause is that the engine cannot run at all. Ask
+        # it first, so an absent engine is reported in the runner's own words
+        # ("cannot execute Docker CLI", which the verifier classifies as
+        # NOT_MEASURED); only an engine that runs gets the identity refusal.
+        docker.call(["version", "--format", "{{.Server.Version}}"])
+        raise Refusal(f"runtime image identity not resolvable: {exc}") from exc
     proc = docker.call(["image", "inspect", IMAGE])
     if proc.returncode != 0:
         held = _local_reference_carrying_pin(docker)

@@ -193,10 +193,19 @@ def test_scan_chain_module_declares_no_image_of_its_own():
     )
 
 
-def test_scan_chain_reports_the_image_the_atpg_module_resolved():
+def test_scan_chain_reports_the_image_the_atpg_module_resolved(monkeypatch):
     """The value the module would publish in its report is the SAME value the
     registered module resolved — that indirection is what makes the exemption
-    cost no live coverage."""
+    cost no live coverage.
+
+    THE HOLDINGS ARE STATED (lane rfimg2): a missing image is now refused, not
+    named for a fetch, so a host holding nothing -- and the inside of the
+    image, with no docker -- has no reference to compare. What this test is
+    about is the indirection, not the host, so the stated image is held."""
+    from _stated_eda_image import state_the_image       # noqa: PLC0415
+    state_the_image(monkeypatch, _STATED_DIGEST)
+    for key in ("VIBEIC_EDA_IMAGE", "IIC_EDA_IMAGE"):
+        monkeypatch.delenv(key, raising=False)
     assert fsci._fatpg is far
     assert fsci._fatpg.DOCKER_IMAGE == far.DOCKER_IMAGE
 
