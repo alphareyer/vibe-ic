@@ -90,8 +90,41 @@ def _case(tmp_path: Path) -> dict[str, Path]:
     return case
 
 
-def _invoke(case: dict[str, Path], arm: str, *, behavior: str = "good"):
+# THE IMAGE ENVIRONMENT IS STATED, NOT INHERITED (F36).
+#
+# The runner demands `<configured repo>@<resolved digest>`, the repository read
+# from `$VIBEIC_EDA_IMAGE_REPO`; the fake docker answers about whatever it is
+# told. `_invoke` used to copy the host's environment and tell the fake nothing,
+# so the fake fell back to the `VIBEIC_EDA_IMAGE` export `_eda_pin` publishes.
+# Since 9c3384f60 (#2170) that export names the reference this host HOLDS the
+# bytes under, not the configured one -- so on a host exporting a mirror repo
+# (MEASURED 2026-09-27 on 8HD-8, `<lan-registry>/vibeic-eda`) the runner
+# asked for the mirror reference, the fake answered about ghcr, and 38 of 40
+# ids went red describing the operator's registry instead of this validator.
+#
+# Two statements now, both in `_invoke`: the repository each test runs under
+# (the published default unless the test names another), and the explicit
+# handoff to the fake of the reference the runner will demand under it -- the
+# same handoff `test_hermetic_candidate_runner.invoke()` makes. `HOST_ENV`
+# opts one test into the host's own value, so the real-host path stays covered.
+HOST_ENV = object()
+PUBLISHED_REPO = R.IMAGE_REPO_DEFAULT
+MIRROR_REPO = "registry.invalid:5000/vibeic-eda"
+
+
+def _demanded_reference(env: dict[str, str]) -> str:
+    repo = (env.get(R.IMAGE_REPO_ENV) or "").strip() or R.IMAGE_REPO_DEFAULT
+    return f"{repo}@{R.IMAGE_DIGEST}"
+
+
+def _invoke(case: dict[str, Path], arm: str, *, behavior: str = "good",
+            image_repo: object = PUBLISHED_REPO):
     env = dict(os.environ)
+    if image_repo is not HOST_ENV:
+        env.pop(R.IMAGE_REPO_ENV, None)
+        if image_repo != PUBLISHED_REPO:
+            env[R.IMAGE_REPO_ENV] = str(image_repo)
+    env["FAKE_DOCKER_IMAGE"] = _demanded_reference(env)
     env["FAKE_DOCKER_STATE"] = str(case["state"])
     env["FAKE_DOCKER_BEHAVIOR"] = behavior
     if arm in {"A1", "B1"}:
@@ -135,9 +168,10 @@ def _invoke(case: dict[str, Path], arm: str, *, behavior: str = "good"):
         command, env=env, text=True, capture_output=True, check=False)
 
 
-def _pytest_case(tmp_path: Path, arm: str = "A1") -> dict[str, Path]:
+def _pytest_case(tmp_path: Path, arm: str = "A1", *,
+                 image_repo: object = PUBLISHED_REPO) -> dict[str, Path]:
     case = _case(tmp_path)
-    proc = _invoke(case, arm)
+    proc = _invoke(case, arm, image_repo=image_repo)
     assert proc.returncode == 0, proc.stderr
     return case
 
@@ -286,6 +320,32 @@ def test_valid_pytest_arm_cli_record_and_publish(tmp_path, arm):
     ]) == 0
     assert destination.read_text(encoding="utf-8") == "candidate evidence\n"
     assert stat_mode(destination) == 0o600
+
+
+@pytest.mark.parametrize("image_repo", [PUBLISHED_REPO, MIRROR_REPO])
+def test_valid_arm_under_a_stated_image_repository(tmp_path, image_repo):
+    """The validator binds the arm whichever repository the runner is told.
+
+    Deterministic on every host: the repository is stated, not read from the
+    host, and the receipt must name the stated one as the configured
+    reference -- so a test that silently ran under the host's value fails here.
+    """
+    case = _pytest_case(tmp_path, "A1", image_repo=image_repo)
+    image = _receipt(case)["image"]
+    assert image["configured_reference"] == (
+        f"{image_repo}@{R.IMAGE_DIGEST}")
+    record_path = tmp_path / "validation.json"
+    assert V.main(_validate_argv(case, "A1", record_path)) == 0
+    assert V.strict_load_record(record_path)["payload"]["arm"] == "A1"
+
+
+def test_valid_arm_under_the_hosts_own_image_repository(tmp_path):
+    """The real-host path: whatever `$VIBEIC_EDA_IMAGE_REPO` this host exports."""
+    case = _pytest_case(tmp_path, "A1", image_repo=HOST_ENV)
+    assert _receipt(case)["image"]["configured_reference"] == (
+        _demanded_reference(dict(os.environ)))
+    record_path = tmp_path / "validation.json"
+    assert V.main(_validate_argv(case, "A1", record_path)) == 0
 
 
 def stat_mode(path: Path) -> int:
