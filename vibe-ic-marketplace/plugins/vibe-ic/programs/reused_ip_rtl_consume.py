@@ -385,6 +385,18 @@ def emit_consume_manifest(project: Path, staged_paths: List[Path],
     # byte-for-byte unchanged until a real pairing is authored.
     mf.setdefault("renamed_interfaces", [])
     mf.setdefault("flattened_buses", [])
+    # D9 — PROGRAM FIRST: an EMPTY list is filled with the side-granular pairs
+    # the design's own records decide (`renamed_interface_derive`), each with
+    # its evidence; the ports they do not decide are listed for the
+    # catalog-glue-author step. An AUTHORED list is never rewritten -- it is
+    # verified, and the verdict is recorded beside it.
+    try:
+        import renamed_interface_derive as _rid
+        _rid.apply_to_manifest(project, mf)
+    except Exception as exc:  # noqa: BLE001 — never block the emit
+        mf["renamed_interfaces_derivation"] = {
+            "verdict": "NOT_MEASURED",
+            "reason": f"renamed_interface_derive raised {type(exc).__name__}: {exc}"}
     mf.setdefault(
         "_reconciliation_scaffold_note",
         "EMPTY scaffold. If the provided RTL's interface differs from the L9 "
