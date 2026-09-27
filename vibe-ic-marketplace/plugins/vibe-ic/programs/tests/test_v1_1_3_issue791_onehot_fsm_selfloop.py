@@ -204,6 +204,17 @@ def test_check_text_still_skips_continuous_assign_onehot():
     assert fl == []
 
 
+@pytest.fixture(autouse=True)
+def _reloaded_modules_are_put_back():
+    """This file reloads spec_conformance_check; put their namespaces back after each test
+    (see `_sys_modules_isolation.module_namespaces_restored`)."""
+    import importlib as _il
+    from _sys_modules_isolation import module_namespaces_restored
+    mods = [_il.import_module(n) for n in ('spec_conformance_check',)]
+    with module_namespaces_restored(*mods):
+        yield
+
+
 # ---- spec_conformance_check wires the rule (emit-surface integration) -------
 def test_spec_conformance_emits_rule_for_buggy_onehot(tmp_path):
     import importlib

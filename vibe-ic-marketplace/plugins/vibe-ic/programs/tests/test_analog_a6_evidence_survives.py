@@ -111,6 +111,7 @@ def test_c_the_lvs_runset_is_told_where_to_put_its_extracted_netlist(tmp_path):
         return 0, "Congratulations! Netlists match", ""
 
     real = PV._docker_exec
+    real_tool_on_path = PV._tool_on_path
     PV._docker_exec = fake_exec
     PV._tool_on_path = lambda c, t: "/usr/bin/klayout"
     try:
@@ -121,6 +122,7 @@ def test_c_the_lvs_runset_is_told_where_to_put_its_extracted_netlist(tmp_path):
             "c", work)
     finally:
         PV._docker_exec = real
+        PV._tool_on_path = real_tool_on_path
     lvs_cmd = [c for c in cmds if "deck.lvs" in c and "-rd input=" in c]
     assert lvs_cmd, "the runset was invoked"
     assert "-rd target_netlist=" in lvs_cmd[0], (

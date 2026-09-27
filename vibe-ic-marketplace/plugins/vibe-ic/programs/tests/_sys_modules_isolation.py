@@ -29,6 +29,7 @@ nothing, is put back. Nothing else is touched:
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from typing import Dict
@@ -76,3 +77,21 @@ def _program_modules_are_restored_after_each_test():
     before = dict(sys.modules)
     yield
     restore_program_modules(before)
+
+
+@contextlib.contextmanager
+def module_namespaces_restored(*modules):
+    """Undo `importlib.reload` (or any rebinding) of `modules` on exit.
+
+    A reload re-executes a module IN PLACE: the object in `sys.modules` stays
+    the same, and every attribute on it -- functions, classes, constants --
+    is replaced. A file that bound those attributes earlier then holds the old
+    class while the module hands out the new one. The entry-level restore above
+    cannot see that, so a test that reloads puts the namespace back itself."""
+    saved = [(m, dict(vars(m))) for m in modules]
+    try:
+        yield
+    finally:
+        for mod, ns in saved:
+            mod.__dict__.clear()
+            mod.__dict__.update(ns)

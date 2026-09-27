@@ -150,6 +150,7 @@ def test_a_measured_slow_host_makes_the_primitive_more_patient_never_less():
     """Where a number is unavoidable it is measured in-session — but a
     measurement that could SHORTEN the window would be a new way to fail a
     slow host, which is the defect wearing a lab coat."""
+    saved = R._spawn_floor_cache
     R._spawn_floor_cache = None
     try:
         R.spawn_floor_s(_probe=lambda: 0.0)      # an impossibly fast host
@@ -158,7 +159,8 @@ def test_a_measured_slow_host_makes_the_primitive_more_patient_never_less():
         R.spawn_floor_s(_probe=lambda: 5.0)      # a very slow host
         slow_host = R._poll_interval()
     finally:
-        R._spawn_floor_cache = None
+        # The SESSION's measurement, not a blank: later files poll with it.
+        R._spawn_floor_cache = saved
     assert fast_host == R.DEFAULT_POLL_S, "a fast host must not shorten the window"
     assert slow_host > fast_host, "a slow host must widen the window"
 

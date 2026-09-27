@@ -72,6 +72,20 @@ def _seed_project(project: Path,
         json.dumps(l8_content))
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reloaded_modules_are_put_back():
+    """This file reloads aid_class_rtl_gen, design_one_shot_runner; put their namespaces back after each test
+    (see `_sys_modules_isolation.module_namespaces_restored`)."""
+    import importlib as _il
+    from _sys_modules_isolation import module_namespaces_restored
+    mods = [_il.import_module(n) for n in ('aid_class_rtl_gen', 'design_one_shot_runner')]
+    with module_namespaces_restored(*mods):
+        yield
+
+
 def _gen_module():
     if "aid_class_rtl_gen" in sys.modules:
         return importlib.reload(sys.modules["aid_class_rtl_gen"])

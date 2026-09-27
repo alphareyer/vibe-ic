@@ -60,6 +60,17 @@ def _seed_project(project: Path, crc_parameters: dict) -> None:
     }))
 
 
+@pytest.fixture(autouse=True)
+def _reloaded_modules_are_put_back():
+    """This file reloads aid_class_rtl_gen; put their namespaces back after each test
+    (see `_sys_modules_isolation.module_namespaces_restored`)."""
+    import importlib as _il
+    from _sys_modules_isolation import module_namespaces_restored
+    mods = [_il.import_module(n) for n in ('aid_class_rtl_gen',)]
+    with module_namespaces_restored(*mods):
+        yield
+
+
 def _gen_module():
     """Import (or re-import) aid_class_rtl_gen with PROGRAMS_DIR on
     sys.path. Re-importing per-test avoids module-level state leaks."""

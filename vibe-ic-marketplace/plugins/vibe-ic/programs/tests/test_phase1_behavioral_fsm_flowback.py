@@ -60,6 +60,9 @@ def _isolated_runner_session(monkeypatch):
     """Each unit case models one runner process and leaves no atexit target."""
     monkeypatch.setattr(runner, "_RTL_SESSION_OWNED", False)
     monkeypatch.setattr(runner, "_RTL_SESSION_PROJECT", None)
+    # The third session global. A run binds it and nothing unbinds it, so
+    # without this every later file inherited this file's last project.
+    monkeypatch.setattr(runner, "_RTL_SESSION_BINDING", None)
 
 
 def _project(tmp_path, text=COMPLETE_DIRECTIONAL_FALL, source="input_doc"):

@@ -173,6 +173,17 @@ def test_an_explicit_env_image_still_wins(monkeypatch):
     assert far._resolve_docker_image() == "example.invalid/some/image:9.9.9"
 
 
+@pytest.fixture(autouse=True)
+def _reloaded_modules_are_put_back():
+    """This file reloads fault_scan_chain_insert; put their namespaces back after each test
+    (see `_sys_modules_isolation.module_namespaces_restored`)."""
+    import importlib as _il
+    from _sys_modules_isolation import module_namespaces_restored
+    mods = [_il.import_module(n) for n in ('fault_scan_chain_insert',)]
+    with module_namespaces_restored(*mods):
+        yield
+
+
 def test_scan_chain_module_declares_no_image_of_its_own():
     """Walks the module NAMESPACE (runtime values), not the file text. Any
     module-level string that is a fully-qualified vibeic-eda image reference is a

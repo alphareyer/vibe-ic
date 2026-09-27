@@ -44,6 +44,15 @@ if str(PROGRAMS) not in sys.path:
 # declining to run.
 import _step_identity as si  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _declaration_registry_is_put_back(monkeypatch):
+    """`si.set_declaration_flow_keys` rebinds two module globals; a case that
+    calls it must not hand its registry to every later file."""
+    monkeypatch.setattr(si, "_DECLARATION_FLOW_KEYS", si._DECLARATION_FLOW_KEYS)
+    monkeypatch.setattr(si, "_DECLARATION_CLAIMED_TOP",
+                        si._DECLARATION_CLAIMED_TOP)
+
 RUNNER = PROGRAMS / "phase3_one_shot_runner.py"
 FLOW = PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml"
 

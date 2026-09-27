@@ -191,6 +191,20 @@ def test_real_approver_still_accepted(tmp_path):
 import importlib
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _reloaded_modules_are_put_back():
+    """This file reloads waivers_schema_check; put their namespaces back after each test
+    (see `_sys_modules_isolation.module_namespaces_restored`)."""
+    import importlib as _il
+    from _sys_modules_isolation import module_namespaces_restored
+    mods = [_il.import_module(n) for n in ('waivers_schema_check',)]
+    with module_namespaces_restored(*mods):
+        yield
+
+
 def _reload_schema():
     sys.path.insert(0, str(SCRIPT.parent))
     import waivers_schema_check as W
