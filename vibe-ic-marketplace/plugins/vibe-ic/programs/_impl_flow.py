@@ -703,23 +703,36 @@ IMPL_ANALOG_UNSUPPORTED = "IMPL_ANALOG_UNSUPPORTED"
 SCOPE_REASON_CLASSES = (IMPL_PDK_UNSUPPORTED, IMPL_MACROS_UNSUPPORTED,
                         IMPL_ANALOG_UNSUPPORTED)
 _SCOPE_REMEDY = "Remedy: run the default flow (no flag), which runs it."
+#: A refusal AFTER the mode was recorded cannot send the operator back to the
+#: default flow on the same project (the record refuses that in place).
+_SCOPE_REMEDY_RECORDED = ("Remedy: this project is now recorded as {impl!r}; "
+                          "run the default flow (no flag) on a fresh project "
+                          "clone, which runs it.")
+#: Where the flow's own A8 hard macros land (mirrors
+#: phase3_one_shot_runner._discover_local_macros).
+EMITTED_MACRO_ROOTS = ("phase3/analog/hardmacro", "analog/hardmacro")
 
 
 def staged_macros(project: Path) -> List[str]:
-    """Hard-macro views the design stages (project-relative), sorted."""
-    root = Path(project) / "input" / "pdk_local"
-    if not root.is_dir():
-        return []
-    return sorted(str(q.relative_to(project)) for q in root.rglob("*")
-                  if q.is_file() and q.suffix.lower() in MACRO_SUFFIXES)
+    """Hard-macro views this project carries (project-relative), sorted: the
+    design's staged vendor IP / SRAM / OTP under input/pdk_local AND the
+    flow's own A8 hard macros, which phase 3 places the same way."""
+    found: List[str] = []
+    for rel in ("input/pdk_local", *EMITTED_MACRO_ROOTS):
+        root = Path(project) / rel
+        if root.is_dir():
+            found += [str(q.relative_to(project)) for q in root.rglob("*")
+                      if q.is_file() and q.suffix.lower() in MACRO_SUFFIXES]
+    return sorted(found)
 
 
-def require_pdk_in_scope(impl: str, pdk_name: str) -> None:
+def require_pdk_in_scope(impl: str, pdk_name: str, *,
+                         remedy: str = _SCOPE_REMEDY) -> None:
     if impl != IMPL_DEFAULT and pdk_name not in SUPPORTED_PDKS:
         raise ImplRefusal(
             IMPL_PDK_UNSUPPORTED,
             f"{FLAG_FOR.get(impl, impl)} v1 runs {sorted(SUPPORTED_PDKS)}; this "
-            f"run's PDK is {pdk_name!r}. {_SCOPE_REMEDY}")
+            f"run's PDK is {pdk_name!r}. {remedy}")
 
 
 def require_no_macros(project: Path, impl: str) -> None:
@@ -732,12 +745,13 @@ def require_no_macros(project: Path, impl: str) -> None:
             f"{', '.join(macros[:3])}. {_SCOPE_REMEDY}")
 
 
-def require_no_analog(impl: str, runs_analog: bool, why: str) -> None:
+def require_no_analog(impl: str, runs_analog: bool, why: str, *,
+                      remedy: str = _SCOPE_REMEDY) -> None:
     if impl != IMPL_DEFAULT and runs_analog:
         raise ImplRefusal(
             IMPL_ANALOG_UNSUPPORTED,
             f"{FLAG_FOR.get(impl, impl)} v1 is digital only (decision 13); "
-            f"{why}. {_SCOPE_REMEDY}")
+            f"{why}. {remedy}")
 
 
 def refuse_out_of_scope(project: Path, args, *, runner: str) -> None:
@@ -747,31 +761,58 @@ def refuse_out_of_scope(project: Path, args, *, runner: str) -> None:
     impl = normalise(requested_from_args(args))
     if runner == "analog_one_shot_runner":
         require_no_analog(impl, True, "the analog track was invoked")
-    named = str(getattr(args, "pdk", "") or "").strip()
-    if named and named.lower() != "auto":
-        require_pdk_in_scope(impl, named)
+    if hasattr(args, "pdk"):
+        named = str(getattr(args, "pdk") or "").strip()
+        if named.lower() in ("", "auto"):
+            # `auto` resolves AFTER the mode is recorded, and phase 3's own
+            # resolver never answers gf180mcuD for it; so it is refused HERE,
+            # before anything is recorded or run.
+            if impl != IMPL_DEFAULT:
+                raise ImplRefusal(
+                    IMPL_PDK_UNSUPPORTED,
+                    f"{FLAG_FOR.get(impl, impl)} v1 runs "
+                    f"{sorted(SUPPORTED_PDKS)} and this run leaves the PDK to "
+                    f"`auto`. Remedy: name --pdk "
+                    f"{sorted(SUPPORTED_PDKS)[0]}, or run the default flow "
+                    f"(no flag).")
+        else:
+            require_pdk_in_scope(impl, named)
     require_no_macros(project, impl)
 
 
-def scope_exit_after_pdk(project: Path, pdk_name: str) -> Optional[int]:
-    """For a runner that resolved `auto`: 2 (reason on stderr) when the
-    project's mode does not run this PDK, else None."""
+def scope_refusal_after_pdk(project: Path,
+                            pdk_name: str) -> Optional[ImplRefusal]:
+    """BACKSTOP for a runner that resolved its PDK after the mode was
+    recorded (the gate already refused `auto`): the refusal, or None. Its
+    remedy is the one that works once a record exists: a fresh clone."""
+    impl = recorded_impl(project)
     try:
-        require_pdk_in_scope(recorded_impl(project), pdk_name)
+        require_pdk_in_scope(impl, pdk_name,
+                             remedy=_SCOPE_REMEDY_RECORDED.format(impl=impl))
     except ImplRefusal as exc:
-        print(f"REFUSED: {exc}", file=sys.stderr)
-        return 2
+        return exc
     return None
 
 
-def scope_exit_if_analog(project: Path, runs_analog: bool) -> Optional[int]:
-    """For the front door, once it knows whether the design has analog."""
+def analog_scope_refusal(project: Path, runs_analog: bool, *,
+                         requested: Optional[str] = None
+                         ) -> Optional[ImplRefusal]:
+    """The analog refusal for the front door, or None.
+
+    ``requested`` is this invocation's own mode, for the check made BEFORE the
+    record is written (analog the inputs already declare); without it the
+    project's recorded mode is judged and the remedy says a fresh clone.
+    """
+    if requested is not None:
+        impl, remedy = normalise(requested), _SCOPE_REMEDY
+    else:
+        impl = recorded_impl(project)
+        remedy = _SCOPE_REMEDY_RECORDED.format(impl=impl)
     try:
-        require_no_analog(recorded_impl(project), runs_analog,
-                          "the design declares analog blocks")
+        require_no_analog(impl, runs_analog,
+                          "the design declares analog blocks", remedy=remedy)
     except ImplRefusal as exc:
-        print(f"REFUSED: {exc}", file=sys.stderr)
-        return 2
+        return exc
     return None
 
 
