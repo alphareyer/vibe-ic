@@ -297,6 +297,56 @@ def test_the_cell_lef_is_tried_when_the_tech_lef_declares_no_site(
     assert "site/row steps 1/2" in basis, basis
 
 
+_CELL_LEF_OTHER_SITE = """\
+VERSION 5.7 ;
+SITE cellsite
+  CLASS CORE ;
+  SIZE 0.46 BY 2.72 ;
+END cellsite
+END LIBRARY
+"""
+
+
+def test_the_tech_lef_is_read_first_and_its_site_sets_the_floor(
+        tmp_path, monkeypatch):
+    """The first half of "tech LEF, then cell LEF" (review wave 5, N4).
+
+    On main this half was guarded by the landed
+    `test_the_container_read_is_reached_and_the_die_comes_from_it`: the tech
+    LEF had to be `cat`-ed through the container and the die came from its
+    1 x 2 site (693 = the removed sites-per-cell constant). The site now sets
+    the PDN floor's row step, so the value asserted is the one the NEW sizing
+    produces from that site -- derived here from the same strap plan, not a
+    remembered number. The cell LEF carries a DIFFERENT site (0.46 x 2.72,
+    which gives a different floor), so reading it first, or skipping the
+    tech LEF, turns this red."""
+    from _ppa import power as _pp
+    calls = []
+
+    def fake_read(container, path):
+        calls.append(path)
+        if path == _Pdk.tech_lef:
+            return _TECH_LEF_DISTINCT
+        if path == _Pdk.cell_lef:
+            return _CELL_LEF_OTHER_SITE
+        return None
+
+    monkeypatch.setattr(R, "_container_file_text", fake_read)
+    monkeypatch.setattr(R, "_build_pdn_tcl", _deck_stub)
+    detail = {}
+    side, basis = R._strap_plan_core_floor(_Pdk(), "an-eda-container",
+                                           detail=detail)
+    assert calls and calls[0] == _Pdk.tech_lef, calls   # read, and read first
+    assert detail["site_dims_um"] == [1.0, 2.0], detail
+    assert detail["site_dims_from"] == _Pdk.tech_lef, detail
+    stripes = detail["stripes"]
+    want, _ = _pp.pdn_strap_min_core_span_um(stripes, nets=2,
+                                             site_dims_um=(1.0, 2.0))
+    other, _ = _pp.pdn_strap_min_core_span_um(stripes, nets=2,
+                                              site_dims_um=(0.46, 2.72))
+    assert side == want and want != other, (side, want, other)
+
+
 def test_no_site_anywhere_degrades_loudly_instead_of_inventing_one(
         tmp_path, monkeypatch):
     """A PDK that declares no site must NOT get a constant dressed up as a
