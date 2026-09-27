@@ -128,20 +128,6 @@ _NOT_PROSE: Dict[str, str] = {
         "expression the evaluator cannot read yields NO width, never a guessed "
         "one. Falsifier: tests/test_fx_d13_reused_ip_params_come_from_the_"
         "documents.py::test_not_prose_an_unreadable_expression_invents_no_width.",
-    "reused_ip_param_derive::apply_overrides":
-        "VERILOG HEADER SYNTAX ONLY, AND NEVER ITS COMMENTS OR STRINGS. The "
-        "value span of each `<name> = <default>` is located by `_header_chunks` "
-        "on a copy of the staged top's `#( ... )` block in which every comment "
-        "byte and every string-literal byte is a space of the same length -- "
-        "the same chunks `header_parameters` reads the defaults from -- and the "
-        "original bytes are replaced only at that span with a value the rule "
-        "already decided; no value is read out of the text. After the write "
-        "the header is parsed back and every override must evaluate to its "
-        "target, else the file is restored. A name with no default in that "
-        "block is an error, never a parameter inserted. Falsifiers: "
-        "tests/test_fx_d13_reused_ip_params_come_from_the_documents.py::"
-        "test_not_prose_apply_never_inserts_a_parameter and ::test_apply_edits_"
-        "the_declaration_never_a_comment_or_a_string.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "

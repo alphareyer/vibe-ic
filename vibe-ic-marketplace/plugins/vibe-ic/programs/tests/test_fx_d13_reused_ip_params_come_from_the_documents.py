@@ -365,8 +365,9 @@ def test_not_prose_an_unreadable_expression_invents_no_width(tmp_path):
                    for f in rec["findings"])
 
 
-def test_not_prose_apply_never_inserts_a_parameter(tmp_path):
-    """`_NOT_PROSE["reused_ip_param_derive::apply_overrides"]`."""
+def test_apply_never_inserts_a_parameter(tmp_path):
+    """A name with no default in the header is an error; nothing is
+    inserted and the file is untouched."""
     p = _project(tmp_path)
     before = (p / "phase2/stage1/rtl/widget.v").read_text()
     rec = dict(D.derive(p), overrides={"DEPTH": 64})
