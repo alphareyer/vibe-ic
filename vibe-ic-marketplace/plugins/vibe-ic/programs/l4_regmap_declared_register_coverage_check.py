@@ -121,6 +121,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _hdl_enum as _hdlenum  # noqa: E402
+import _reference_flow_boundary as _rfb  # noqa: E402  §4.05 authority
 import _path_layout as _pl  # noqa: E402
 from _gate_denominator import Denominator, attach  # noqa: E402
 
@@ -175,6 +176,10 @@ def find_staged_hdl(project: Path) -> Dict[str, str]:
             if not p.is_file():
                 continue
             if p.suffix.lower() not in _hdlenum.HDL_SUFFIXES:
+                continue
+            # §4.05 (FX_405). Keyed by NAME below, so before this an
+            # `input/golden/top.v` REPLACED the design's `input/rtl/top.v`.
+            if _rfb.design_input_denial(project, p):
                 continue
             if p.name in out:
                 continue
@@ -582,14 +587,26 @@ def documentary_census(project: Path) -> Dict[str, Any]:
         "opened_count": 0,
         "not_opened": [],
         "not_opened_count": 0,
+        # §4.05 (FX_405): what the harvester deliberately did NOT read because
+        # the oracle rule denies it -- neither "read" nor "could not open".
+        "excluded_oracle": [],
+        "excluded_oracle_count": 0,
     }
     if not docs.is_dir():
         return census
     unopened: List[str] = []
+    excluded: List[str] = []
     for path in sorted(docs.rglob("*")):
         if not path.is_file():
             continue
         suffix = path.suffix.lower()
+        reason = _rfb.design_input_denial(project, path)
+        if reason:
+            try:
+                excluded.append(f"{path.relative_to(project)} ({reason})")
+            except ValueError:                              # pragma: no cover
+                excluded.append(f"{path.name} ({reason})")
+            continue
         if suffix in _DOC_SUFFIXES:
             census["opened_count"] += 1
             continue
@@ -601,6 +618,8 @@ def documentary_census(project: Path) -> Dict[str, Any]:
             unopened.append(path.name)
     census["not_opened"] = unopened[:_UNOPENED_LIST_CAP]
     census["not_opened_count"] = len(unopened)
+    census["excluded_oracle"] = excluded[:_UNOPENED_LIST_CAP]
+    census["excluded_oracle_count"] = len(excluded)
     return census
 
 
@@ -622,6 +641,8 @@ def documentary_declarations(project: Path) -> List[Dict[str, Any]]:
                 continue
             if path.suffix.lower() not in _DOC_SUFFIXES:
                 continue
+            if _rfb.design_input_denial(project, path):
+                continue  # §4.05 (FX_405): e.g. input/expected/*.txt
             if path.suffix.lower() in _hdlenum.HDL_SUFFIXES:
                 continue
             try:
@@ -1116,6 +1137,11 @@ def evaluate(project: Path) -> Tuple[int, Dict[str, Any]]:
                           f"— {named}{more} — so a register map stated in one "
                           f"of those was NOT LOOKED FOR, which is not the "
                           f"same as looked for and absent")
+            if census["excluded_oracle_count"]:
+                scope += (f"; it deliberately did not read "
+                          f"{census['excluded_oracle_count']} file(s) the "
+                          f"§4.05 oracle rule excludes — "
+                          f"{', '.join(census['excluded_oracle'])}")
         attach(summary, Denominator(
             unit="register address bindings declared by a staged HDL input",
             examined=0,

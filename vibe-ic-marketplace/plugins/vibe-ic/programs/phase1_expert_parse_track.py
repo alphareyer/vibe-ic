@@ -323,6 +323,7 @@ import _path_layout as _pl  # noqa: E402
 # guarded import for `assemble`, whose failure is a reportable state.
 import ic_expert_backup_pack as _pack  # noqa: E402
 import nvm_program_supply_intent as _nps  # noqa: E402
+import _reference_flow_boundary as _rfb  # noqa: E402  §4.05 authority (FX_405)
 
 PROGRAM = "phase1_expert_parse_track"
 VERSION = "1.0.0"
@@ -740,6 +741,16 @@ def input_text_report(project: Path) -> Dict[str, Any]:
         if q.suffix.lower() not in _INPUT_TEXT_EXTS:
             skipped.append({"path": str(rel), "suffix": q.suffix.lower(),
                             "bytes": size, "reason": SKIP_UNSUPPORTED_FORMAT})
+            continue
+        # §4.05 (FX_405), the repo's one authority, judged AFTER the format
+        # filter: inside reference_flow/ it may read content to classify, and
+        # a file this reader would never open must not be opened for that.
+        # MEASURED before this: ibex's `reference_flow/orfs_rules.json` (the
+        # golden QoR rules) was read into this text — the retrieval query and
+        # the AI sub-track's prompt.
+        if _rfb.design_input_denial(project, q):
+            skipped.append({"path": str(rel), "suffix": q.suffix.lower(),
+                            "bytes": size, "reason": SKIP_ORACLE_PATH})
             continue
         try:
             t = q.read_text(errors="replace")

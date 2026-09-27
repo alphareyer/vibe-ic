@@ -43966,9 +43966,12 @@ def _v1_14_50_declared_rtl_parameters(project) -> set:
         root = Path(project) / "input"
         if not root.is_dir():
             return names
+        import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
         for f in root.rglob("*"):
             if not f.is_file() or f.suffix.lower() not in _V1_14_50_RTL_SUFFIXES:
                 continue
+            if _rfb.design_input_denial(project, f):
+                continue  # golden/, canonical_samples/, `_ref.`, `verified_`
             try:
                 names.update(_V1_14_50_RTL_PARAM_RE.findall(
                     f.read_text(errors="replace")))
@@ -44426,8 +44429,13 @@ def _v1_14_50_present_but_never_ingested(project) -> list:
             except OSError:
                 continue
         out = []
+        import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
         for f in sorted(root.rglob("*")):
             if not f.is_file() or f.suffix.lower() not in _V1_14_50_DOC_SUFFIXES:
+                continue
+            # An oracle file is correctly ingested by NOTHING: listing it here
+            # (after hashing it) would report compliance as a gap.
+            if _rfb.design_input_denial(project, f):
                 continue
             rel = str(f.relative_to(Path(project)))
             if rel in visited:
@@ -60407,7 +60415,10 @@ def _post_emit_reference_clock_config(project: Path) -> None:
         return
     pair = re.compile(r"(?ms)^\s*set\s+(\w+)_clk_input\s+(\w+)\s*$.*?^\s*set\s+\1_clk_period\s+([0-9]+(?:\.[0-9]+)?)\s*$")
     scope = re.compile(r"(?i)using\s+the\s+([A-Za-z0-9_.+-]+)\s+library")
+    import _reference_flow_boundary as _rfb  # §4.05 authority (FX_405)
     for path in sorted(root.rglob("*.tcl")):
+        if _rfb.design_input_denial(project, path):
+            continue  # an `expected_results.tcl` clock is the answer's clock
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
