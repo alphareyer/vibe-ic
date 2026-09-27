@@ -21,9 +21,12 @@ from typing import Any
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
-from _atomic_artefact import write_text
+from _atomic_artefact import write_bytes, write_text
 from _docker_memory import docker_memory_flags
 import instrument_calibration as _instrument_calibration
+
+#: This step's own copy of the layout it published over the canonical DEFs.
+PUBLISHED_DEF_NAME = 'routed_drc_feedback.def'
 
 _MARKER = re.compile(r"-?\d+(?:\.\d+)?")
 _ROUTE_VIA = re.compile(r"(?:ROUTED|NEW)\s+\S+\s+\(\s*(\d+)\s+(\d+)\s*\)\s+(\S*Via\S*)", re.I)
@@ -295,6 +298,13 @@ def _reroute(image: str, project: Path, lefs: list[str], source_def: Path,
     drc = scratch / 'router.drc.rpt'
     script = scratch / 'trial.tcl'
     tcl = _openroad_prefix(lefs, source_def) + _route_layer_policy(project)
+    # The keep-outs below steer ONE scoped reroute; they are not design
+    # content. Remember what the block already had so exactly the ones made
+    # here are destroyed before the DEF is written -- a shipped DEF that keeps
+    # them streams them as the layer's blockage datatype, which the PDK's
+    # magic deck counts as metal (spm x gf180mcuD: one 0.22 um Metal2 keep-out
+    # from a CO.6a trial failed M2.3 on metal that does not exist).
+    tcl += 'set _fb_obs_before [[ord::get_db_block] getObstructions]\n'
     for m in mapped:
         x, y = m['via_um']
         box = f'{x-half_width:.4f} {y-half_width:.4f} {x+half_width:.4f} {y+half_width:.4f}'
@@ -308,6 +318,12 @@ def _reroute(image: str, project: Path, lefs: list[str], source_def: Path,
     tcl += ('global_route\n'
             f'detailed_route -nets {{{" ".join(targets)}}} '
             f'-droute_end_iter 30 -output_drc {{{drc}}}\n'
+            'set _fb_obs_made 0\n'
+            'foreach _fb_o [[ord::get_db_block] getObstructions] {\n'
+            '  if {$_fb_o ni $_fb_obs_before} '
+            '{ odb::dbObstruction_destroy $_fb_o; incr _fb_obs_made }\n'
+            '}\n'
+            'puts "FEEDBACK_OBSTRUCTIONS_REMOVED: $_fb_obs_made"\n'
             'check_antennas\n'
             f'write_def {{{target}}}\n')
     write_text(script, tcl)
@@ -361,6 +377,17 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
                           f'no routed DEF file at {source_def}')
         digest = _sha(source_def)
         routed = pnr / 'routed.def'
+        # A re-run on the DEF this step itself published measures nothing new
+        # and would otherwise overwrite the only record of that rewrite.
+        try:
+            prior = json.loads(receipt.read_text())
+        except (OSError, ValueError):
+            prior = {}
+        for key in ('publication', 'prior_publication'):
+            pub = prior.get(key) if isinstance(prior, dict) else None
+            if isinstance(pub, dict) and pub.get('to_sha256') == digest:
+                record['prior_publication'] = pub
+                break
         if publish and (not routed.is_file() or _sha(routed) != digest):
             raise ValueError('FEEDBACK_CANONICAL_DEF_DIVERGED')
         record['initial_source_sha256'] = digest
@@ -458,7 +485,21 @@ def run(project: Path, top: str, pdk: Any, image: str, *,
                     raise ValueError('FEEDBACK_BOUND_EXHAUSTED')
                 record['after_count'] = 0
             if current != source_def and publish:
+                # The accepted trial lives in scratch that is about to be
+                # deleted; keep its bytes as this step's own declared output
+                # so the rewrite of the canonical DEFs has a producer to name.
+                kept = pnr / PUBLISHED_DEF_NAME
+                write_bytes(kept, current.read_bytes())
                 _replace_selected(current, [source_def, routed])
+                record['publication'] = {
+                    'from_sha256': digest,
+                    'to_sha256': _sha(kept),
+                    'output': str(kept),
+                    'replaced': [str(source_def), str(routed)],
+                    'targets': sorted({t for tr in record['trials']
+                                       if tr.get('accepted')
+                                       for t in tr.get('targets') or []}),
+                }
             record['source_sha256'] = _sha(source_def)
             record['status'] = 'PASS'
             record['reason'] = 'RULE_ZERO_WITH_ROUTE_GUARDS'

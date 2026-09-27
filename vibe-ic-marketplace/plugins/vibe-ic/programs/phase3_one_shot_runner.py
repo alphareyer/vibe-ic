@@ -8584,6 +8584,63 @@ def _io_pg_global_connect_tcl(pdk: "PdkConfig", container: Optional[str],
     return out
 
 
+def _core_supply_pins_tcl(pin_layers: Sequence[str]) -> str:
+    """Tcl that decides, from the placed database, whether the core grid's
+    straps become the supply PINS of the block.
+
+    A block with no placed pad master is delivered as a core (a hard macro):
+    whoever instantiates it reaches its supply through its own ports, so the
+    routed DEF must declare them. Before this the core grid never asked, and
+    the spm core-only DEF carried VDD/VSS in SPECIALNETS only -- no PINS row --
+    while its GDS and its power-aware netlist both declared them as ports; the
+    judge's LVS was left with exactly that one top-level port mismatch.
+    LibreLane does the same thing with the same tool (`define_pdn_grid -pins`
+    on the PDN's strap layers, `PDN_ENABLE_PINS`).
+
+    A block WITH placed pads is a die: its supply enters through the pads and
+    the core grid must not grow top-level ports of its own, so the list stays
+    empty and the grid is the ordinary one. The supply NET names come from
+    `set_voltage_domain` (pdngen promotes the domain's nets); the layers are
+    the strap layers this PDN plan draws. No design, PDK or net literal.
+    """
+    layers = []
+    for lyr in pin_layers or ():
+        lyr = str(lyr)
+        if lyr and lyr not in layers:
+            layers.append(lyr)
+    if not layers or any(not re.fullmatch(r"[A-Za-z0-9_.\-]+", l)
+                         for l in layers):
+        return ("  set _vibeic_core_pin_layers {}\n"
+                "  puts \"PDN_SUPPLY_PINS_NOT_PROMOTED: no strap layer in the "
+                "PDN plan to promote\"\n")
+    lyr_s = " ".join(layers)
+    return (
+        "  set _vibeic_core_pin_layers {}\n"
+        "  set _vibeic_core_pads 0\n"
+        "  foreach _vibeic_cp_i [[ord::get_db_block] getInsts] {\n"
+        "    if {[[$_vibeic_cp_i getMaster] isPad] && [$_vibeic_cp_i isPlaced]} "
+        "{ incr _vibeic_core_pads }\n"
+        "  }\n"
+        "  if {$_vibeic_core_pads == 0} {\n"
+        f"    set _vibeic_core_pin_layers {{{lyr_s}}}\n"
+        "    puts \"PDN_SUPPLY_PINS: no placed pad master; the core grid "
+        f"promotes its straps on {lyr_s} to the supply pins of the block\"\n"
+        "  } else {\n"
+        "    puts \"PDN_SUPPLY_PINS_NOT_PROMOTED: $_vibeic_core_pads placed pad "
+        "master(s) carry the supply\"\n"
+        "  }\n")
+
+
+_CORE_GRID_DEFINE_TCL = (
+    "  if {[info exists _vibeic_core_pin_layers] && "
+    "[llength $_vibeic_core_pin_layers]} {\n"
+    "    define_pdn_grid -name grid -voltage_domains CORE "
+    "-pins $_vibeic_core_pin_layers\n"
+    "  } else {\n"
+    "  define_pdn_grid -name grid -voltage_domains CORE\n"
+    "  }\n")
+
+
 def _pad_connected_ring_tcl(pdk: "PdkConfig",
                             ring_plan: Optional[Dict[str, Any]] = None
                             ) -> Dict[str, str]:
@@ -8604,7 +8661,7 @@ def _pad_connected_ring_tcl(pdk: "PdkConfig",
     cfg = getattr(pdk, "pdn_ring", None) or {}
     if not cfg:
         return {
-            "grid": "  define_pdn_grid -name grid -voltage_domains CORE\n",
+            "grid": _CORE_GRID_DEFINE_TCL,
             "extend": "",
             "connects": "",
             "note": "",
@@ -8672,7 +8729,11 @@ def _pad_connected_ring_tcl(pdk: "PdkConfig",
     }}
   }}
   if {{$_vibeic_pr_pad_count == 0}} {{
+    if {{[info exists _vibeic_core_pin_layers] && [llength $_vibeic_core_pin_layers]}} {{
+      define_pdn_grid -name grid -voltage_domains CORE -pins $_vibeic_core_pin_layers
+    }} else {{
     define_pdn_grid -name grid -voltage_domains CORE
+    }}
     puts "PDN_PAD_RING_INERT: no placed PAD-class masters; ordinary core grid retained"
   }} elseif {{$_vibeic_pr_power_pad_count == 0 || $_vibeic_pr_side_count == 0 || $_vibeic_pr_gap_dbu < 0}} {{
     puts "PDN_PAD_RING_REFUSED: placed_pads=$_vibeic_pr_pad_count power_pads=$_vibeic_pr_power_pad_count but no side supply-pad/core gap was measurable"
@@ -8834,7 +8895,8 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
             "  add_global_connection -net VGND -pin_pattern \"^VNB$\"  -ground\n"
             "  global_connect\n"
             "  set_voltage_domain -name CORE -power VPWR -ground VGND\n"
-            "  define_pdn_grid -name grid -voltage_domains CORE\n"
+            + _core_supply_pins_tcl(["met4", "met5"])
+            + _CORE_GRID_DEFINE_TCL +
             "  add_pdn_stripe -grid grid -layer met1 -width 0.48 -pitch 5.44 -offset 0 -followpins\n"
             f"  add_pdn_stripe -grid grid -layer met4 -width {_w4} -pitch {_p45} -offset {_o45} -extend_to_core_ring\n"
             f"  add_pdn_stripe -grid grid -layer met5 -width {_w5} -pitch {_p45} -offset {_o45} -extend_to_core_ring\n"
@@ -9311,6 +9373,8 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
             + _sec["enumerate"]
             + f"  set_voltage_domain -name CORE -power {pwr} -ground {gnd}"
             + _sec["domain_opt"] + "\n"
+            + _core_supply_pins_tcl(
+                [st.get("layer") for st in _stripes if st.get("layer")])
             + ring["grid"]
             + f"  add_pdn_stripe -grid grid -layer {fpl} -width {w} -followpins{ring['extend']}\n"
             + strap_tcl
@@ -41094,7 +41158,14 @@ if {[info exists env(MACRO_GDS)] && [string trim $env(MACRO_GDS)] ne ""} {
         if {[string trim $mg] ne ""} { gds read $mg }
     }
 }
-def read $env(DEF)
+# A DEF routing BLOCKAGE is a keep-out for the router, not mask geometry.
+# Without `-noblockage` magic paints it as the layer's obstruction type
+# (tech `obs obsmN MetalN`), `gds write` streams that to the layer's
+# blockage datatype, and the PDK's own magic deck counts obsmN as metal
+# (gf180mcuD `area allm2,obsm2 ... (M2.3)`): spm shipped one 0.22 um
+# keep-out that way and failed sign-off on metal that does not exist.
+# LibreLane streams with the same flag. chip-AGNOSTIC: no layer named.
+def read $env(DEF) -noblockage
 load $env(TOP)
 select top cell
 cellname rename $env(TOP) $env(TOP)
@@ -55930,10 +56001,30 @@ def step_prestream_gate(project: Path, top: str, pdk: PdkConfig,
     # here, before the pre-stream gate certifies a fixed layout identity.
     import drc_feedback_repair as _drc_feedback
     if _drc_feedback.has_reviewed_rule(getattr(pdk, "drc_deck", None)):
+        _fb_t0 = time.time()
         _feedback = _drc_feedback.run(
             project, top, pdk,
             _drc_feedback.image_for_container(container),
             stream_script_text=_GDS_STREAMOUT_PY)
+        _fb_pub = _feedback.get("publication") or {}
+        if _feedback.get("status") == "PASS" and _fb_pub.get("output"):
+            # The feedback reroute is a LAYOUT WRITER: it replaces the routed
+            # DEF after the router's own ledger row. Undeclared, the newest
+            # row for routed.def names bytes that are no longer on disk
+            # (PROVENANCE_HASH_MISMATCH on spm), and nothing says who wrote
+            # the ones that are. Declare its output and the two canonical
+            # DEFs it replaced, with the DEF it read as the input.
+            _log_invocation(
+                "openroad -exit trial.tcl (drc_feedback_repair scoped reroute: "
+                f"rules={','.join(_feedback.get('rules') or [])} "
+                f"nets={','.join(_fb_pub.get('targets') or [])})",
+                0, int((time.time() - _fb_t0) * 1000),
+                marker=str(project / "reports/phase3/drc_feedback.json"),
+                container=container,
+                outputs=[Path(_fb_pub["output"]),
+                         *[Path(p) for p in _fb_pub.get("replaced") or []]],
+                input_hashes={str(_feedback.get("source_def")):
+                              "sha256:" + str(_fb_pub.get("from_sha256"))})
         if _feedback.get("status") != "PASS":
             return StepResult("prestream_gate", "FAIL", time.time() - t0,
                               "SIGNOFF_DECK_FEEDBACK_REFUSED: " +
