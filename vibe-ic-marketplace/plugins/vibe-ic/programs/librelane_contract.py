@@ -1623,11 +1623,24 @@ def layout_top(project: Path) -> tuple[str, str, str] | None:
     if not path.is_file():
         return None
     record = _load(path)
-    chip_top, core = record.get('chip_top_module'), record.get('core_module')
-    if (record.get('verdict') != 'WROTE' or not record.get('chip_top_verilog')
-            or not isinstance(chip_top, str) or not isinstance(core, str)
-            or not chip_top or not core or chip_top == core):
+    if record.get('verdict') != 'WROTE':
         return None
+    # WROTE claims a wrapper: a record that cannot name it, or names one
+    # module twice, contradicts itself and is refused, never read as "no top".
+    chip_top, core = record.get('chip_top_module'), record.get('core_module')
+    problems = []
+    if not record.get('chip_top_verilog'):
+        problems.append('no chip_top_verilog')
+    if not isinstance(chip_top, str) or not chip_top:
+        problems.append(f'chip_top_module {chip_top!r}')
+    if not isinstance(core, str) or not core:
+        problems.append(f'core_module {core!r}')
+    if not problems and chip_top == core:
+        problems.append(f'chip_top_module and core_module are both {core!r}')
+    if problems:
+        raise Refusal('LL_CHIP_TOP_RECORD_CONTRADICTORY',
+                      f"{CHIP_TOP_RECORD_REL} verdict WROTE but "
+                      f"{'; '.join(problems)}")
     return chip_top, core, f'{CHIP_TOP_RECORD_REL}.chip_top_module'
 
 
@@ -1660,28 +1673,44 @@ def _check_synthesised_read(project: Path, config: dict, sources: dict) -> None:
     """A layout chain reads the RTL the netlist was synthesised from, or refuses.
 
     Phase-3 synthesis records the read it built (`chip_read_built.json`,
-    every file with its sha256). The chain's VERILOG_FILES, minus the chip-top
-    wrapper step 15.5ic wrote after synthesis, must be that read exactly.
+    every file with its sha256 and the define decision) and binds it to the
+    netlist it produced. While that netlist stands, the chain's
+    VERILOG_FILES, minus the chip-top wrapper step 15.5ic wrote after
+    synthesis, must be that read exactly, and the chain carries synthesis's
+    define decision. A record that describes no netlist on disk is not
+    compared: the provenance says so, with the reason.
     """
     import _chip_synth_read as CSR
-    record_path = CSR.built_record_path(project)
     files = config.get('VERILOG_FILES')
-    if not files or not record_path.is_file():
+    if not files:
+        return
+    built, why = CSR.built_record_for_current_netlist(project)
+    if built is None:
+        sources['VERILOG_FILES'] += (
+            f'; synthesised-read comparison NOT_MEASURED: {why}; '
+            f'VERILOG_DEFINES not carried for the same reason')
         return
     wrapper = 'phase3/stage3/pnr/chip_top_io.v'
     paths = [project / str(f).removeprefix('dir::') for f in files]
     read = [p for p in paths if p.resolve() != (project / wrapper).resolve()]
-    built = _load(record_path)
-    # The define decision and the top are synthesis's own; only the file
-    # read is this chain's to match.
+    # The top is synthesis's own; the file read is this chain's to match.
     differences = CSR.chip_read_differences(
         {'files': built.get('files') or []},
         {'files': [{'name': p.name, 'sha256': digest(p)} for p in read]})
-    rel = record_path.relative_to(project)
+    rel = CSR.built_record_path(project).relative_to(project)
     if differences:
         raise Refusal('LL_LAYOUT_RTL_NOT_THE_SYNTHESISED_READ',
                       f"VERILOG_FILES vs {rel}: {'; '.join(differences)}")
-    sources['VERILOG_FILES'] += f'; equals {rel} (file names and sha256)'
+    sources['VERILOG_FILES'] += (f"; equals {rel} (file names and sha256, "
+                                 f"bound to {built['netlist']['path']})")
+    define = built.get('define')
+    if not isinstance(define, dict) or not isinstance(define.get('simulation'), bool):
+        raise Refusal('LL_SYNTHESIS_DEFINE_UNRECORDED',
+                      f'{rel}.define.simulation is {define!r}')
+    _set(config, sources, 'VERILOG_DEFINES',
+         ['SIMULATION'] if define['simulation'] else [],
+         f"{rel}.define.simulation (the synthesis define decision, "
+         f"{define.get('verdict')})")
 
 
 def resolve_step_configs(project: Path, image: str, pdk: str,

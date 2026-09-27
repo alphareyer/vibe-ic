@@ -17568,6 +17568,13 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # Record what this netlist was ACTUALLY synthesised from, so the next
     # run's cache-reuse decision compares CONTENT, not clocks (#349/#336).
     _write_synth_inputs_sidecar(netlist, _pl.rtl_dir(project))
+    # Bind the chip-read record to the netlist it produced, so a layout
+    # chain compares against this read only while this netlist stands.
+    try:
+        _csr.bind_built_record_netlist(project, netlist)
+    except Exception as _e:  # noqa: BLE001 — the record never blocks synth
+        print(f"[phase3] chip-read record not bound to {netlist}: {_e}",
+              file=sys.stderr)
     # Lift the area figure out of the synthesis log and into the artefact the
     # flow's synthesis step declares. This MUST happen here, inside the run:
     # the log is a working file that publication does not necessarily carry,

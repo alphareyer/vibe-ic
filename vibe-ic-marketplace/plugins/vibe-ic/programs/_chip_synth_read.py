@@ -195,6 +195,51 @@ def write_built_record(project: Path, rtl_files: Sequence[Path],
     return diffs
 
 
+def bind_built_record_netlist(project: Path, netlist: Path) -> None:
+    """Bind the built record to the netlist that read produced (path +
+    sha256), once synthesis has written it. A record with no binding, or
+    bound to other bytes, describes no netlist a later reader holds."""
+    path = built_record_path(project)
+    rec = json.loads(path.read_text())
+    netlist = Path(netlist)
+    try:
+        rel = str(netlist.resolve().relative_to(Path(project).resolve()))
+    except ValueError:
+        rel = str(netlist)
+    rec["netlist"] = {"path": rel, "sha256": _sha256(netlist)}
+    path.write_text(json.dumps(rec, indent=2) + "\n")
+
+
+def built_record_for_current_netlist(project: Path
+                                     ) -> Tuple[Optional[dict], str]:
+    """(the built record, "") when it describes the netlist on disk now,
+    else (None, why it cannot be compared). Only direct-mode synthesis
+    writes and binds the record; a LibreLane synthesis, a synthesis that
+    did not finish, or a later re-synthesis leaves it absent, unbound or
+    bound to bytes that are no longer the netlist."""
+    project = Path(project)
+    path = built_record_path(project)
+    if not path.is_file():
+        return None, f"no {BUILT_RECORD} (only direct-mode synthesis writes it)"
+    try:
+        rec = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return None, f"{BUILT_RECORD} is unreadable ({exc})"
+    bound = rec.get("netlist") if isinstance(rec, dict) else None
+    if not isinstance(bound, dict) or not bound.get("path") or not bound.get("sha256"):
+        return None, (f"{BUILT_RECORD} is bound to no netlist (synthesis did "
+                      f"not finish, or it predates the binding)")
+    netlist = project / str(bound["path"])
+    if not netlist.is_file():
+        return None, f"{BUILT_RECORD} describes {bound['path']}, which is absent"
+    now = _sha256(netlist)
+    if now != bound["sha256"]:
+        return None, (f"{BUILT_RECORD} describes {bound['path']} sha256 "
+                      f"{bound['sha256']}, but that netlist is now {now} "
+                      f"(re-synthesised since, e.g. by the LibreLane arm)")
+    return rec, ""
+
+
 def unstaged_analog_blocks(project: Path) -> List[str]:
     """Declared analog blocks whose A8 hard macro is NOT staged yet. While any
     is missing, the chip's define decision cannot be known (A8 stages the

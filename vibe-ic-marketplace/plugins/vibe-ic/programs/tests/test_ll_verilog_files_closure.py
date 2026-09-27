@@ -51,10 +51,18 @@ def project(tmp_path, wrapper=True):
     return p
 
 
-def built_record(p, files):
+NETLIST = 'phase2/stage2/synth/core_synth.v'
+
+
+def built_record(p, files, simulation=True, bind=True):
+    """The record direct synthesis writes, bound (as it now is once the
+    netlist exists) to the netlist that read produced."""
+    put(p / NETLIST, 'module core(); endmodule // synthesised\n')
     put(p / BUILT, {'files': [{'name': n, 'sha256': hashlib.sha256(
         (p / RTL / n).read_bytes()).hexdigest()} for n in files],
-        'define': {'simulation': True}, 'top': 'core'})
+        'define': {'simulation': simulation, 'verdict': 'test'}, 'top': 'core'})
+    if bind:
+        CSR.bind_built_record_netlist(p, p / NETLIST)
 
 
 @pytest.fixture
@@ -139,3 +147,58 @@ def test_emit_config_itself_never_refuses_on_an_older_synthesis_record(tmp_path)
     p = project(tmp_path)
     built_record(p, CLOSURE[:1])
     contract.emit_config(p, 'processA', p / 'phase3/librelane/config.json')
+
+
+# ── review_wave2 D7D8 minors: the comparison never skips silently, never
+#    compares a stale record, and carries synthesis's define decision ────────
+
+def test_no_synthesis_record_is_disclosed_not_skipped_silently(tmp_path, resolver):
+    p = project(tmp_path)
+    config, sources = resolve(tmp_path, p)
+    assert 'NOT_MEASURED' in sources['VERILOG_FILES'], sources['VERILOG_FILES']
+    assert 'no chip_read_built.json' in sources['VERILOG_FILES']
+    assert 'VERILOG_DEFINES not carried' in sources['VERILOG_FILES']
+    assert 'VERILOG_DEFINES' not in config
+
+
+def test_an_unbound_record_is_not_compared(tmp_path, resolver):
+    p = project(tmp_path)
+    built_record(p, CLOSURE[:-1], bind=False)
+    config, sources = resolve(tmp_path, p)
+    assert 'bound to no netlist' in sources['VERILOG_FILES'], sources['VERILOG_FILES']
+
+
+def test_a_record_of_an_earlier_netlist_is_not_compared(tmp_path, resolver):
+    """Direct synthesis wrote and bound the record; a later LibreLane
+    synthesis (which writes no record) replaced the netlist after an RTL
+    repair. The old record describes a netlist that is gone: it must not
+    refuse the chain over the repaired RTL, and the skip is disclosed."""
+    p = project(tmp_path)
+    built_record(p, CLOSURE)
+    put(p / RTL / 'core_sub.v', SOURCES['core_sub.v'] + '// repaired\n')
+    put(p / NETLIST, 'module core(); endmodule // re-synthesised by LibreLane\n')
+    config, sources = resolve(tmp_path, p)
+    assert 'NOT_MEASURED' in sources['VERILOG_FILES']
+    assert 'that netlist is now' in sources['VERILOG_FILES'], sources['VERILOG_FILES']
+
+
+@pytest.mark.parametrize('simulation, defines', [(True, ['SIMULATION']), (False, [])])
+def test_the_chain_carries_the_synthesis_define_decision(tmp_path, resolver,
+                                                          simulation, defines):
+    p = project(tmp_path)
+    built_record(p, CLOSURE, simulation=simulation)
+    config, sources = resolve(tmp_path, p)
+    assert config['VERILOG_DEFINES'] == defines
+    assert resolver[-1]['VERILOG_DEFINES'] == defines
+    assert BUILT + '.define.simulation' in sources['VERILOG_DEFINES']
+
+
+def test_a_record_without_a_define_decision_is_refused(tmp_path, resolver):
+    p = project(tmp_path)
+    built_record(p, CLOSURE)
+    rec = json.loads((p / BUILT).read_text())
+    rec.pop('define')
+    put(p / BUILT, rec)
+    with pytest.raises(contract.Refusal, match='LL_SYNTHESIS_DEFINE_UNRECORDED'):
+        resolve(tmp_path, p)
+    assert resolver == []

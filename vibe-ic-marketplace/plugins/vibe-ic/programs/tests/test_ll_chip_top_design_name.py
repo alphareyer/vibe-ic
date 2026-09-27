@@ -159,8 +159,7 @@ def test_a_core_only_design_keeps_its_declared_top(tmp_path, resolver):
     assert sources['DESIGN_NAME'].endswith('answers.top_cell')
 
 
-@pytest.mark.parametrize('record', [None, dict(RECORD, verdict='REFUSED'),
-                                    dict(RECORD, chip_top_module='core')])
+@pytest.mark.parametrize('record', [None, dict(RECORD, verdict='REFUSED')])
 def test_no_written_chip_top_leaves_the_declared_top(tmp_path, resolver, record):
     p = chip(tmp_path, record=record)
     configs, sources = resolve(tmp_path, p, ['OpenROAD.GlobalPlacement'])
@@ -181,10 +180,20 @@ def test_an_explicit_overlay_still_outranks_the_chip_top(tmp_path, resolver):
     assert json.loads(configs['OpenROAD.GlobalPlacement'].read_text())['DESIGN_NAME'] == 'other'
 
 
-def test_a_record_naming_one_module_twice_is_no_chip_top(tmp_path, resolver):
-    """A record whose chip top IS its core wrapped nothing: no substitution,
-    and no conflict against a declared name either."""
-    p = chip(tmp_path, record=dict(RECORD, chip_top_module='core'), top_cell='other')
-    configs, sources = resolve(tmp_path, p, ['OpenROAD.GlobalPlacement'])
-    assert json.loads(configs['OpenROAD.GlobalPlacement'].read_text())['DESIGN_NAME'] == 'other'
-    assert sources['DESIGN_NAME'].endswith('answers.top_cell')
+@pytest.mark.parametrize('record, problem', [
+    (dict(RECORD, chip_top_module='core'), "both 'core'"),
+    (dict(RECORD, chip_top_verilog=''), 'no chip_top_verilog'),
+    (dict(RECORD, core_module=None), 'core_module None'),
+    (dict(RECORD, chip_top_module=''), "chip_top_module ''"),
+])
+def test_a_contradictory_written_record_is_refused(tmp_path, resolver, record,
+                                                   problem):
+    """WROTE claims a wrapper around a core. A record that names one module
+    twice, or cannot name the wrapper, contradicts itself: refused by name,
+    never read as "no chip top" (review_wave2 D7D8 minor)."""
+    p = chip(tmp_path, record=record, top_cell='other')
+    with pytest.raises(contract.Refusal,
+                       match='LL_CHIP_TOP_RECORD_CONTRADICTORY') as refused:
+        resolve(tmp_path, p, ['OpenROAD.GlobalPlacement'])
+    assert problem in str(refused.value)
+    assert resolver == []
