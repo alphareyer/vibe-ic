@@ -1604,22 +1604,23 @@ def main() -> int:
 
     FX_STALE_LDOCS. The front door reuses generated L docs only when they are
     what the CURRENT producer would write (`_phase1_producer_identity.assess`),
-    so phase 1 has to say who wrote them: it runs inside `_step_recorder`'s
-    Recorder -- the flow's existing record of the code a step ACTUALLY ran --
-    and, as its last act, stamps `phase1/step_identity.json` (kind `phase1`).
+    so phase 1 has to say who wrote them: it runs inside
+    `_phase1_producer_identity.ProducerRecorder` -- the plugin modules it
+    loaded and the plugin scripts it launched, in the step recorder's record
+    format, with no profiler -- and, as its last act, stamps
+    `phase1/step_identity.json` (kind `phase1`).
 
     Stamped only when THIS run dispatched extraction (a refused or locked-out
     run did not, and must not claim the docs on disk). A `--second-track-only` pass
     is not the doc producer: it refreshes the recorded output digests of the
     docs it legitimately rewrote and leaves the producer's recording alone."""
-    import _step_recorder as _rec_mod
     import _phase1_producer_identity as _pid
     _RUN.update(project=None, second_track_only=False, extracting=False)
     # A second-track pass is judged by CONTENT, not by clock: a filesystem
     # mtime is coarser than time.time(), and "mtime >= start" missed docs
     # written in the first tick (measured: 2 runs in 3).
     before = _pid.docs_snapshot(_project_arg())
-    recorder = _rec_mod.Recorder(PROGRAMS_DIR)
+    recorder = _pid.ProducerRecorder(PROGRAMS_DIR)
     with recorder:
         rc = _main()
     project = _RUN["project"]

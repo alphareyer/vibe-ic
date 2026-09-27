@@ -21,8 +21,10 @@ WHAT THIS RECORDS, AND WHERE
 ----------------------------
 The flow's existing per-step identity, not a parallel record:
 `_step_identity`'s sidecar format (`step_identity.json`, kind `phase1`, in
-`phase1/`) and `_step_recorder`'s recording of the code a step ACTUALLY RAN.
-Phase 1 runs inside `with Recorder(...)` and stamps, as its last act:
+`phase1/`) and `_step_recorder`'s record format, filled at MODULE granularity
+by `ProducerRecorder` (what phase 1 loaded and launched -- no profiler; see
+its docstring for the measured 10x cost of the per-call recorder). Phase 1
+runs inside `with ProducerRecorder(...)` and stamps, as its last act:
 
   code     digest of the recording (functions + module bodies it executed,
            plus plugin scripts it launched) — `code_from_recording`
@@ -62,6 +64,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -82,6 +85,101 @@ GENERATED_DOC_EDITED = "GENERATED_DOC_EDITED"
 #: §4.05 — never hashed as design input, wherever they sit under input/.
 _FORBIDDEN_PARTS = frozenset(
     {"golden", "oracle", "reference_flow", "harness"})
+
+
+class ProducerRecorder:
+    """Which plugin code phase 1 RAN, at MODULE granularity, with no profiler.
+
+    MEASURED (subservient E2E, 8HD-4): phase 1 under `_step_recorder.Recorder`
+    -- a `sys.setprofile` hook on every call -- took ~200 s against ~20 s
+    without it. Phase 1 is cheap to regenerate, so function granularity buys
+    nothing worth a 10x tax on every run: any edit to a module phase 1 loaded
+    regenerates it, which costs ~20 s and can never reuse a stale doc.
+
+    RECORDS what the interpreter actually loaded -- every module in
+    `sys.modules` whose file is under the plugin root when phase 1 finishes,
+    which includes `importlib` / lazy imports -- plus every plugin SCRIPT
+    phase 1 launched out of process (watched at `subprocess.Popen`, the one
+    place every launch passes, as the step recorder does) and that script's
+    static import closure. Emitted in the step recorder's own whole-file entry
+    form (`launched:<rel>` -> `{"__whole__": sha256}`), so
+    `_step_identity.code_from_stored` re-derives and compares it unchanged.
+    Fails closed: nothing loaded, or an unreadable file, records nothing."""
+
+    def __init__(self, root: Path):
+        self._root = Path(root).resolve()
+        self._launched: set = set()
+        self._prev_popen = None
+
+    def __enter__(self) -> "ProducerRecorder":
+        import subprocess
+        self._prev_popen = subprocess.Popen
+        rec = self
+
+        class _WatchedPopen(self._prev_popen):  # type: ignore[misc]
+            def __init__(self, args, *a, **k):
+                rec._note(args)
+                super().__init__(args, *a, **k)
+        subprocess.Popen = _WatchedPopen   # type: ignore[assignment]
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        import subprocess
+        if self._prev_popen is not None:
+            subprocess.Popen = self._prev_popen  # type: ignore[assignment]
+
+    def _note(self, argv: Any) -> None:
+        import _step_recorder as _sr
+        try:
+            text = argv if isinstance(argv, str) else " ".join(
+                str(x) for x in argv)
+        except Exception:                                  # noqa: BLE001
+            return
+        self._launched.update(_sr._SCRIPT_RE.findall(text))
+
+    def _under_root(self, f: Any) -> Optional[Path]:
+        try:
+            q = Path(str(f)).resolve()
+        except (OSError, ValueError):
+            return None
+        if q.suffix != ".py" or not q.is_file():
+            return None
+        try:
+            q.relative_to(self._root)
+        except ValueError:
+            return None
+        return q
+
+    def recorded(self):
+        """``(record, why_not)`` in the step recorder's format."""
+        import _step_recorder as _sr
+        files = set()
+        for mod in list(sys.modules.values()):
+            q = self._under_root(getattr(mod, "__file__", None))
+            if q is not None:
+                files.add(q)
+        for tok in sorted(self._launched):
+            for cand in (Path(tok), self._root / tok,
+                         self._root / Path(tok).name):
+                q = self._under_root(cand)
+                if q is not None:
+                    files.add(q)
+                    files.update(p.resolve() for p in
+                                 _sr._static_imports(q, self._root))
+                    break
+        if not files:
+            return None, ("no plugin module was loaded by phase 1, so what it "
+                          "ran cannot be established")
+        out: Dict[str, Dict[str, str]] = {}
+        for q in sorted(files):
+            h = _sha256(q)
+            if h is None:
+                return None, f"{q} ran but could not be read"
+            out[f"launched:{q.relative_to(self._root).as_posix()}"] = {
+                "__whole__": h}
+        out["__engine_env__"] = {name: _sr._engine_marker(name)
+                                 for name in _sr.ENGINE_ENV}
+        return out, ""
 
 
 def sidecar_dir(project: Path) -> Path:

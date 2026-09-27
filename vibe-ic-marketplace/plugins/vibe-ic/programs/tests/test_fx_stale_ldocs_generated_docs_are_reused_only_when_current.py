@@ -20,9 +20,9 @@ The rule now (orchestrator ruling):
      over them is NOT_MEASURED -- not FAIL, not PASS.
 
 Identities are real: a tiny producer module in a temporary programs dir is
-RUN under `_step_recorder.Recorder` (the flow's existing recorder) and stamped
-through `_step_identity`'s sidecar, and "the producer changed" is an edit to
-that module's source. chip-AGNOSTIC.
+LOADED and RUN under phase 1's `ProducerRecorder` and stamped through
+`_step_identity`'s sidecar, and "the producer changed" is an edit to that
+module's source. chip-AGNOSTIC.
 """
 from __future__ import annotations
 
@@ -61,12 +61,17 @@ def _producer(tmp_path: Path, src: str) -> Path:
     return progs
 
 
-def _run_producer(progs: Path) -> "SR.Recorder":
+def _run_producer(progs: Path):
+    """Load and run the fake producer the way phase 1 loads its modules (into
+    `sys.modules`), under phase 1's own recorder when this tree has one."""
+    name = "fake_l_producer_%d" % id(progs)
     spec = importlib.util.spec_from_file_location(
-        "fake_l_producer_%d" % id(progs), progs / "fake_l_producer.py")
+        name, progs / "fake_l_producer.py")
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
     spec.loader.exec_module(mod)
-    rec = SR.Recorder(progs)
+    rec = (PID.ProducerRecorder(progs) if PID is not None
+           else SR.Recorder(progs))
     with rec:
         mod.produce(1)
     return rec
@@ -306,3 +311,45 @@ def test_a_second_track_pass_that_rewrites_a_doc_refreshes_its_digest(
     P1 = _p1(monkeypatch, body)
     P1.main()
     assert PID.assess(proj, PROGRAMS)["state"] == "REUSE"
+
+
+# ---------------------------------------------------------------------------
+# phase 1's recorder: what it LOADED and LAUNCHED, with no profiler
+# ---------------------------------------------------------------------------
+def test_the_recorder_sees_a_dynamic_import_and_installs_no_profiler(tmp_path):
+    """MEASURED: the per-call profiler made phase 1 ~10x slower (~200 s vs
+    ~20 s). This one records sys.modules, so an importlib import is seen."""
+    progs = _producer(tmp_path, PRODUCER_V1)
+    rec = PID.ProducerRecorder(progs)
+    with rec:
+        assert sys.getprofile() is None
+        spec = importlib.util.spec_from_file_location(
+            "dyn_%d" % id(progs), progs / "fake_l_producer.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+    record, why = rec.recorded()
+    assert record is not None, why
+    assert "launched:fake_l_producer.py" in record
+
+
+def test_the_recorder_sees_a_launched_plugin_script(tmp_path):
+    progs = _producer(tmp_path, PRODUCER_V1)
+    (progs / "tool_script.py").write_text("print('ran')\n")
+    rec = PID.ProducerRecorder(progs)
+    import subprocess
+    with rec:
+        subprocess.run([sys.executable, str(progs / "tool_script.py")],
+                       capture_output=True, timeout=60)
+    record, _ = rec.recorded()
+    assert "launched:tool_script.py" in record
+
+
+def test_a_recorder_that_saw_no_plugin_code_records_nothing(tmp_path):
+    empty = tmp_path / "empty_root"
+    empty.mkdir()
+    rec = PID.ProducerRecorder(empty)
+    with rec:
+        pass
+    record, why = rec.recorded()
+    assert record is None and "no plugin module" in why
