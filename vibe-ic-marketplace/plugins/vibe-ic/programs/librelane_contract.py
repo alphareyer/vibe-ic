@@ -768,8 +768,9 @@ def handoff_to_direct(state_path: Path, targets: dict[str, Path], receipt: Path,
         rows[view] = {'source': str(source), 'source_sha256': digest(source),
                       'dest': str(dest), 'dest_sha256': digest(dest),
                       'replaced_sha256': replaced}
-        if key == 'def':
-            # The top a later step judges is the one this DEF states.
+        if source.suffix.lower() == '.def':
+            # The top a later step judges is the one this DEF states, whatever
+            # the view is called (`def`, `post_cts_def`, `post_hold_def`).
             rows[view]['design'] = _def_design_name(source)
         if rows[view]['source_sha256'] != rows[view]['dest_sha256']:
             raise Refusal('LL_HANDOFF_COPY_MISMATCH', view)

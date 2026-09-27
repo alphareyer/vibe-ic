@@ -128,13 +128,17 @@ def test_the_direct_chip_def_bridges_into_a_later_chain(tmp_path, resolver):
                                    views, tmp_path / 'bridge2')
 
 
-def test_a_handed_def_names_its_top_in_the_receipt(tmp_path):
+@pytest.mark.parametrize('view', ['def', 'post_cts_def'])
+def test_a_handed_def_names_its_top_in_the_receipt(tmp_path, view):
     state = put(tmp_path / 'state_out.json',
-                {'def': str(put(tmp_path / 's/fp.def', _def('chip_top')))})
-    doc = contract.handoff_to_direct(state, {'def': tmp_path / 'd/floorplan.def'},
+                {view: str(put(tmp_path / 's/fp.def', _def('chip_top'))),
+                 'odb': str(put(tmp_path / 's/fp.odb', 'odb'))})
+    doc = contract.handoff_to_direct(state, {view: tmp_path / 'd/floorplan.def',
+                                             'odb': tmp_path / 'd/fp.odb'},
                                      tmp_path / 'receipt.json')
-    assert doc['views']['def']['design'] == 'chip_top'
-    assert json.loads((tmp_path / 'receipt.json').read_text())['views']['def']['design'] \
+    assert doc['views'][view]['design'] == 'chip_top'
+    assert 'design' not in doc['views']['odb']
+    assert json.loads((tmp_path / 'receipt.json').read_text())['views'][view]['design'] \
         == 'chip_top'
 
 
