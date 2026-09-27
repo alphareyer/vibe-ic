@@ -1,0 +1,66 @@
+
+===========================================================================
+report_checks -path_delay max (Setup)
+============================================================================
+======================= nom_ff_n40C_5v50 Corner ===================================
+
+Startpoint: rst (input port clocked by clk)
+Endpoint: _314_ (recovery check against rising-edge clock clk)
+Path Group: asynchronous
+Path Type: max
+
+Fanout         Cap        Slew       Delay        Time   Description
+---------------------------------------------------------------------------------------------
+                      0.150000    0.000000    0.000000   clock clk (rise edge)
+                                  0.000000    0.000000   clock network delay (ideal)
+                                  4.800000    4.800000 ^ input external delay
+    64    0.468544    5.164519    2.965014    7.765015 ^ rst (in)
+                                                         rst (net)
+                      5.164519    0.000000    7.765015 ^ _314_/RN (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                                              7.765015   data arrival time
+
+                      0.150000   24.000000   24.000000   clock clk (rise edge)
+                                  0.000000   24.000000   clock network delay (ideal)
+                                 -0.250000   23.750000   clock uncertainty
+                                  0.000000   23.750000   clock reconvergence pessimism
+                                             23.750000 ^ _314_/CLK (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                                 -1.909899   21.840099   library recovery time
+                                             21.840099   data required time
+---------------------------------------------------------------------------------------------
+                                             21.840099   data required time
+                                             -7.765015   data arrival time
+---------------------------------------------------------------------------------------------
+                                             14.075086   slack (MET)
+
+
+Startpoint: rst (input port clocked by clk)
+Endpoint: _315_ (recovery check against rising-edge clock clk)
+Path Group: asynchronous
+Path Type: max
+
+Fanout         Cap        Slew       Delay        Time   Description
+---------------------------------------------------------------------------------------------
+                      0.150000    0.000000    0.000000   clock clk (rise edge)
+                                  0.000000    0.000000   clock network delay (ideal)
+                                  4.800000    4.800000 ^ input external delay
+    64    0.468544    5.164519    2.965014    7.765015 ^ rst (in)
+                                                         rst (net)
+                      5.164519    0.000000    7.765015 ^ _315_/RN (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                                              7.765015   data arrival time
+
+                      0.150000   24.000000   24.000000   clock clk (rise edge)
+                                  0.000000   24.000000   clock network delay (ideal)
+                                 -0.250000   23.750000   clock uncertainty
+                                  0.000000   23.750000   clock reconvergence pessimism
+                                             23.750000 ^ _315_/CLK (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                                 -1.909899   21.840099   library recovery time
+                                             21.840099   data required time
+---------------------------------------------------------------------------------------------
+                                             21.840099   data required time
+                                             -7.765015   data arrival time
+---------------------------------------------------------------------------------------------
+                                             14.075086   slack (MET)
+
+
+Startpoint: rst (input port clocked by clk)
+Endpoint: _316_ (recovery check against rising-edge clock c

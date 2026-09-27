@@ -1,0 +1,89 @@
+
+ /----------------------------------------------------------------------------\
+ |  yosys -- Yosys Open SYnthesis Suite                                       |
+ |  Copyright (C) 2012 - 2026  Claire Xenia Wolf <claire@yosyshq.com>         |
+ |  Distributed under an ISC-like license, type "license" to see terms        |
+ \----------------------------------------------------------------------------/
+ Yosys 0.69+ (git sha1 4d572059c, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]
+
+1. Executing Liberty frontend: /foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00.lib
+Imported 229 cell types from liberty file.
+
+2. Executing Liberty frontend: /foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_io/lib/gf180mcu_fd_io__tt_025C_5v00.lib
+Imported 14 cell types from liberty file.
+[INFO] Using SDC file '/host/cmp3/librelane_8HD-9/design/runs/cmp3/06-yosys-synthesis/synthesis.abc.sdc' for ABC…wtaf
+
+3. Executing Verilog-2005 frontend: /host/cmp3/librelane_8HD-9/design/src/spm.v
+Parsing SystemVerilog input from `/host/cmp3/librelane_8HD-9/design/src/spm.v' to AST representation.
+Storing AST representation for module `$abstract\spm'.
+Storing AST representation for module `$abstract\delayed_serial_adder'.
+Successfully finished Verilog frontend.
+
+4. Executing HIERARCHY pass (managing design hierarchy).
+
+5. Executing AST frontend in derive mode using pre-parsed AST for module `\spm'.
+Generating RTLIL representation for module `\spm'.
+
+5.1. Analyzing design hierarchy..
+Top module:  \spm
+
+5.2. Executing AST frontend in derive mode using pre-parsed AST for module `\delayed_serial_adder'.
+Generating RTLIL representation for module `\delayed_serial_adder'.
+
+5.3. Analyzing design hierarchy..
+Top module:  \spm
+Used module:     \delayed_serial_adder
+
+5.4. Analyzing design hierarchy..
+Top module:  \spm
+Used module:     \delayed_serial_adder
+Removing unused module `$abstract\delayed_serial_adder'.
+Removing unused module `$abstract\spm'.
+Removed 2 unused modules.
+Renaming module spm to spm.
+
+6. Executing ATTRMAP pass (move or copy attributes).
+
+7. Executing HIERARCHY pass (managing design hierarchy).
+
+7.1. Analyzing design hierarchy..
+Top module:  \spm
+Used module:     \delayed_serial_adder
+
+7.2. Analyzing design hierarchy..
+Top module:  \spm
+Used module:     \delayed_serial_adder
+Removed 0 unused modules.
+
+8. Executing PROC_CLEAN pass (remove empty switches from decision trees).
+Cleaned up 0 empty switches.
+
+9. Executing PROC_RMDEAD pass (remove dead branches from decision trees).
+Marked 1 switch rules as full_case in process $proc$/host/cmp3/librelane_8HD-9/design/src/spm.v:64$4 in module delayed_serial_adder.
+Removed a total of 0 dead cases.
+
+10. Executing PROC_PRUNE pass (remove redundant assignments in processes).
+Removed 2 redundant assignments.
+Promoted 0 assignments to connections.
+
+11. Executing PROC_INIT pass (extract init attributes).
+
+12. Executing PROC_ARST pass (detect async resets in processes).
+Found async reset \rst in `\delayed_serial_adder.$proc$/host/cmp3/librelane_8HD-9/design/src/spm.v:64$4'.
+
+13. Executing PROC_ROM pass (convert switches to ROMs).
+Converted 0 switches.
+
+14. Executing PROC_MUX pass (convert decision trees to multiplexers).
+Creating decoders for process `\delayed_serial_adder.$proc$/host/cmp3/librelane_8HD-9/design/src/spm.v:64$4'.
+     1/2: $0\y_out[0:0]
+     2/2: $0\last_carry[0:0]
+
+15. Executing PROC_DLATCH pass (convert process syncs to latches).
+
+16. Executing PROC_DFF pass (convert process syncs to FFs).
+Creating register for signal `\delayed_serial_adder.\y_out' using process `\delayed_serial_adder.$proc$/host/cmp3/librelane_8HD-9/design/src/spm.v:64$4'.
+  created $adff cell `$procdff$10' with positive edge clock and positive level reset.
+Creating register for signal `\delayed_serial_adder.\last_carry' using process `\delayed_serial_adder.$proc$/host/cmp3/librelane_8HD-9/design/src/spm.v:64$4'.
+  created $adff cell `$procdff$15' with positive edge clock and positive level reset.
+

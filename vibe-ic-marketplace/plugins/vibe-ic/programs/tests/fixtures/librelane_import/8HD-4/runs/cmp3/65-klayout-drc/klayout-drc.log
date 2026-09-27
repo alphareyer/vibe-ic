@@ -1,0 +1,28 @@
+2026-09-27 16:03:58 +0200: Memory Usage (675040K) : Starting running GF180MCU Klayout DRC runset on /host/cmp3/librelane_8HD-4/design/runs/cmp3/57-magic-streamout/spm.gds
+2026-09-27 16:03:58 +0200: Memory Usage (675040K) : Ruby Version for klayout: 3.2.3
+2026-09-27 16:03:58 +0200: Memory Usage (675924K) : Input file: /host/cmp3/librelane_8HD-4/design/runs/cmp3/57-magic-streamout/spm.gds
+2026-09-27 16:03:58 +0200: Memory Usage (675924K) : DRC Run Report: /host/cmp3/librelane_8HD-4/design/runs/cmp3/65-klayout-drc/reports/drc.klayout.lyrdb
+2026-09-27 16:03:58 +0200: Memory Usage (675924K) : MIM Option selected: B
+2026-09-27 16:03:58 +0200: Memory Usage (675924K) : Verbose enabled: false
+2026-09-27 16:03:58 +0200: Memory Usage (675924K) : Number of parallel workers: 1
+2026-09-27 16:03:58 +0200: Memory Usage (675924K) : Number of threads for DRC functions: 32
+2026-09-27 16:03:58 +0200: Memory Usage (675924K) : Run mode: deep
+2026-09-27 16:03:58 +0200: Memory Usage (675924K) : metal_top selected: 11K
+2026-09-27 16:03:58 +0200: Memory Usage (675924K) : metal_level selected: 5LM
+2026-09-27 16:03:58 +0200: Memory Usage (675924K) : Selected decks: V1.1, V1.2a, V1.2b, V1.3a, V1.3c, V1.3d, V1.4a, V1.4b, V1.4c, V2.1, V2.2a, V2.2b, V2.3b, V2.3c, V2.3d, V2.4a, V2.4b, V2.4c, V3.1, V3.2a, V3.2b, V3.3b, V3.3c, V3.3d, V3.4a, V3.4b, V3.4c, V4.1, V4.2a, V4.2b, V4.3b, V4.3c, V4.3d, V4.4a, V4.4b, V4.4c, V5.1, V5.2a, V5.2b, V5.3b, V5.3c, V5.3d, V5.4a, V5.4b, V5.4c, geom_base_1, geom_base_2, geom_dbu, geom_m1m2, geom_m3, geom_m4, geom_m5, geom_metaltop, geom_topmarkers, CO.10_no_contact_on_poly_gate, CO.11_no_contact_on_field_oxide, CO.1_min_max_contact_size, CO.2a_min_contact_spacing, CO.2b_contact_array_spacing, CO.3_poly2_overlap, CO.4_comp_overlap, CO.5a_nplus_overlap_butted, CO.5b_pplus_overlap_butted, CO.6_metal1_overlap, CO.6a_metal1_eol_overlap, CO.6b_adjacent_edge_overlap, CO.7_comp_to_poly_spacing, CO.8_poly_to_comp_spacing, CO.9_no_contact_on_butting_edge, cup, df_10, df_11, df_12, df_13_lv, df_13_mv, df_14_lv, df_14_mv, df_16_lv, df_16_mv, df_17_lv, df_17_mv, df_18, df_19_lv, df_19_mv, df_1a_lv, df_1a_mv, df_1c, df_2a_lv, df_2a_mv, df_2b, df_3a_lv, df_3a_mv, df_3b, df_3c_lv, df_3c_mv, df_4a_lv, df_4a_mv, df_4b_lv, df_4b_mv, df_4c_lv, df_4c_mv, df_4d_lv, df_4d_mv, df_4e_lv, df_4e_mv, df_5_lv, df_5_mv, df_6_lv, df_6_mv, df_7_lv, df_7_mv, df_8_lv, df_8_mv, df_9, dnwell, drc_bjt, dualgate, dummy_comp, dummy_exclude, dummy_metal1, dummy_metal2, dummy_metal3, dummy_metal4, dummy_metal5, dummy_metal6, dummy_poly2, efuse, esd, guard_ring, guard_ring_wedge, hres, ldnmos, ldpmos, lres, lvpwell, lvs_bjt, mcell, metal1, metal2, metal3, metal4, metal5, metaltop, metaltop_30k, mim_a, mim_b, mslot1, mslot2, mslot3, mslot4, mslot5, mslot6, nat, nplus, nwell, otp_mk, poly2, pplus, pres, sab, sram_3p3, sram_5p0, ymtp_mk
+2026-09-27 16:03:58 +0200: Memory Usage (676760K) : Total area of the design is 29708.752425 um^2.
+2026-09-27 16:03:58 +0200: Memory Usage (676760K) : Read in polygons from layers
+2026-09-27 16:03:58 +0200: Memory Usage (676896K) : comp has 2823 polygons
+2026-09-27 16:03:58 +0200: Memory Usage (676896K) : dnwell has 0 polygons
+2026-09-27 16:03:58 +0200: Memory Usage (676896K) : nwell has 983 polygons
+2026-09-27 16:03:58 +0200: Memory Usage (677032K) : lvpwell has 983 polygons
+2026-09-27 16:03:58 +0200: Memory Usage (677032K) : dualgate has 983 polygons
+2026-09-27 16:03:58 +0200: Memory Usage (677032K) : poly2 has 4174 polygons
+2026-09-27 16:03:58 +0200: Memory Usage (677032K) : nplus has 983 polygons
+2026-09-27 16:03:58 +0200: Memory Usage (677176K) : pplus has 1199 polygons
+2026-09-27 16:03:58 +0200: Memory Usage (677176K) : sab has 0 polygons
+2026-09-27 16:03:58 +0200: Memory Usage (677176K) : esd has 0 polygons
+2026-09-27 16:03:58 +0200: Memory Usage (677320K) : resistor has 0 polygons
+2026-09-27 16:03:58 +0200: Memory Usage (677320K) : fhres has 0 polygons
+2026-09-27 16:03:58 +0200: Memory Usage (677320K) : fusetop has 0 polygons
+2026-09-27 16:03:58 +0200: Memory Usage (677484K) : fusewindow_d has 0 polyg

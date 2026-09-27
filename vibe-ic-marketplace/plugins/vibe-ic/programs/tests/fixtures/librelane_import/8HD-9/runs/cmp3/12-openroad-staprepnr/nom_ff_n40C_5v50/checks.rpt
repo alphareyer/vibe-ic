@@ -1,0 +1,64 @@
+
+===========================================================================
+report_checks -unconstrained
+===========================================================================
+======================= nom_ff_n40C_5v50 Corner ===================================
+
+Startpoint: rst (input port clocked by clk)
+Endpoint: _314_ (recovery check against rising-edge clock clk)
+Path Group: asynchronous
+Path Type: max
+
+Fanout         Cap        Slew       Delay        Time   Description
+---------------------------------------------------------------------------------------------
+                      0.150000    0.000000    0.000000   clock clk (rise edge)
+                                  0.000000    0.000000   clock network delay (ideal)
+                                  4.800000    4.800000 ^ input external delay
+    64    0.468544    5.164519    2.965014    7.765015 ^ rst (in)
+                                                         rst (net)
+                      5.164519    0.000000    7.765015 ^ _314_/RN (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                                              7.765015   data arrival time
+
+                      0.150000   24.000000   24.000000   clock clk (rise edge)
+                                  0.000000   24.000000   clock network delay (ideal)
+                                 -0.250000   23.750000   clock uncertainty
+                                  0.000000   23.750000   clock reconvergence pessimism
+                                             23.750000 ^ _314_/CLK (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                                 -1.909899   21.840099   library recovery time
+                                             21.840099   data required time
+---------------------------------------------------------------------------------------------
+                                             21.840099   data required time
+                                             -7.765015   data arrival time
+---------------------------------------------------------------------------------------------
+                                             14.075086   slack (MET)
+
+
+Startpoint: x (input port clocked by clk)
+Endpoint: _315_ (rising edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: max
+
+Fanout         Cap        Slew       Delay        Time   Description
+---------------------------------------------------------------------------------------------
+                      0.150000    0.000000    0.000000   clock clk (rise edge)
+                                  0.000000    0.000000   clock network delay (ideal)
+                                  4.800000    4.800000 ^ input external delay
+    95    0.438654    4.837433    2.776507    7.576507 ^ x (in)
+                                                         x (net)
+                      4.837433    0.000000    7.576507 ^ _261_/A1 (gf180mcu_fd_sc_mcu7t5v0__and3_1)
+     2    0.007485    0.233685    0.471159    8.047666 ^ _261_/Z (gf180mcu_fd_sc_mcu7t5v0__and3_1)
+                                                         dsa[0].last_carry_next (net)
+                      0.233685    0.000000    8.047666 ^ _315_/D (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                                              8.047666   data arrival time
+
+                      0.150000   24.000000   24.000000   clock clk (rise edge)
+                                  0.000000   24.000000   clock network delay (ideal)
+                                 -0.250000   23.750000   clock uncertainty
+                                  0.000000   23.750000   clock reconvergence pessimism
+                                             23.750000 ^ _315_/CLK (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                                 -0.199280   23.550720   library setup time
+                                             23.550720   data required time
+---------------------------------------------------------------------------------------------
+                                             23.550720   data required time
+                                             -8.047666   data arrival time
+----------

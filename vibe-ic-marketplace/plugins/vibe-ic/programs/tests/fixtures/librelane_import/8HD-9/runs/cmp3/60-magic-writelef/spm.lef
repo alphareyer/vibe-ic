@@ -1,0 +1,208 @@
+VERSION 5.7 ;
+  NOWIREEXTENSIONATPIN ON ;
+  DIVIDERCHAR "/" ;
+  BUSBITCHARS "[]" ;
+MACRO spm
+  CLASS BLOCK ;
+  FOREIGN spm ;
+  ORIGIN 0.000 0.000 ;
+  SIZE 163.635 BY 181.555 ;
+  PIN VDD
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER Metal4 ;
+        RECT 10.720 15.380 12.720 164.940 ;
+    END
+    PORT
+      LAYER Metal4 ;
+        RECT 40.720 15.380 42.720 164.940 ;
+    END
+    PORT
+      LAYER Metal4 ;
+        RECT 70.720 15.380 72.720 164.940 ;
+    END
+    PORT
+      LAYER Metal4 ;
+        RECT 100.720 15.380 102.720 164.940 ;
+    END
+    PORT
+      LAYER Metal4 ;
+        RECT 130.720 15.380 132.720 164.940 ;
+    END
+    PORT
+      LAYER Metal5 ;
+        RECT 6.720 19.680 156.800 21.680 ;
+    END
+    PORT
+      LAYER Metal5 ;
+        RECT 6.720 49.680 156.800 51.680 ;
+    END
+    PORT
+      LAYER Metal5 ;
+        RECT 6.720 79.680 156.800 81.680 ;
+    END
+    PORT
+      LAYER Metal5 ;
+        RECT 6.720 109.680 156.800 111.680 ;
+    END
+    PORT
+      LAYER Metal5 ;
+        RECT 6.720 139.680 156.800 141.680 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE GROUND ;
+    PORT
+      LAYER Metal4 ;
+        RECT 14.420 15.380 16.420 164.940 ;
+    END
+    PORT
+      LAYER Metal4 ;
+        RECT 44.420 15.380 46.420 164.940 ;
+    END
+    PORT
+      LAYER Metal4 ;
+        RECT 74.420 15.380 76.420 164.940 ;
+    END
+    PORT
+      LAYER Metal4 ;
+        RECT 104.420 15.380 106.420 164.940 ;
+    END
+    PORT
+      LAYER Metal4 ;
+        RECT 134.420 15.380 136.420 164.940 ;
+    END
+    PORT
+      LAYER Metal5 ;
+        RECT 6.720 23.380 156.800 25.380 ;
+    END
+    PORT
+      LAYER Metal5 ;
+        RECT 6.720 53.380 156.800 55.380 ;
+    END
+    PORT
+      LAYER Metal5 ;
+        RECT 6.720 83.380 156.800 85.380 ;
+    END
+    PORT
+      LAYER Metal5 ;
+        RECT 6.720 113.380 156.800 115.380 ;
+    END
+    PORT
+      LAYER Metal5 ;
+        RECT 6.720 143.380 156.800 145.380 ;
+    END
+  END VSS
+  PIN a[0]
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.396000 ;
+    PORT
+      LAYER Metal2 ;
+        RECT 11.200 180.995 11.760 181.555 ;
+    END
+  END a[0]
+  PIN a[10]
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.396000 ;
+    PORT
+      LAYER Metal2 ;
+        RECT 56.000 180.995 56.560 181.555 ;
+    END
+  END a[10]
+  PIN a[11]
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.396000 ;
+    PORT
+      LAYER Metal2 ;
+        RECT 60.480 180.995 61.040 181.555 ;
+    END
+  END a[11]
+  PIN a[12]
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.396000 ;
+    PORT
+      LAYER Metal2 ;
+        RECT 64.960 180.995 65.520 181.555 ;
+    END
+  END a[12]
+  PIN a[13]
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.396000 ;
+    PORT
+      LAYER Metal2 ;
+        RECT 69.440 180.995 70.000 181.555 ;
+    END
+  END a[13]
+  PIN a[14]
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.396000 ;
+    PORT
+      LAYER Metal2 ;
+        RECT 73.920 180.995 74.480 181.555 ;
+    END
+  END a[14]
+  PIN a[15]
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.396000 ;
+    PORT
+      LAYER Metal2 ;
+        RECT 78.400 180.995 78.960 181.555 ;
+    END
+  END a[15]
+  PIN a[16]
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.396000 ;
+    PORT
+      LAYER Metal2 ;
+        RECT 82.880 180.995 83.440 181.555 ;
+    END
+  END a[16]
+  PIN a[17]
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.396000 ;
+    PORT
+      LAYER Metal2 ;
+        RECT 87.360 180.995 87.920 181.555 ;
+    END
+  END a[17]
+  PIN a[18]
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.396000 ;
+    PORT
+      LAYER Metal2 ;
+        RECT 91.840 180.995 92.400 181.555 ;
+    END
+  END a[18]
+  PIN a[19]
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.396000 ;
+    PORT
+      LAYER Metal2 ;
+        RECT 96.320 180.995 96.880 181.555 ;
+    END
+  END a[19]
+  PIN a[1]
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    ANTENNAGATEAREA 0.396000 ;
+    PORT
+      LAYER Metal2 ;
+        RECT 15.680 180.995 16.240 181.555 ;
+    END
+  END a[1]
+  PIN a[20]
+    DIRECTION INPUT ;
+   

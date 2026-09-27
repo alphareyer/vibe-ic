@@ -1,0 +1,54 @@
+
+===========================================================================
+report_checks -unconstrained
+===========================================================================
+======================= min_tt_025C_5v00 Corner ===================================
+
+Startpoint: rst (input port clocked by clk)
+Endpoint: _376_ (recovery check against rising-edge clock clk)
+Path Group: asynchronous
+Path Type: max
+
+Fanout         Cap        Slew       Delay        Time   Description
+---------------------------------------------------------------------------------------------
+                                  0.000000    0.000000   clock clk (rise edge)
+                                  0.000000    0.000000   clock network delay (propagated)
+                                  4.800000    4.800000 ^ input external delay
+     1    0.004267    0.117981    0.042357    4.842357 ^ rst (in)
+                                                         rst (net)
+                      0.117981    0.000000    4.842357 ^ input33/I (gf180mcu_fd_sc_mcu7t5v0__dlyb_1)
+     1    0.007755    0.205631    0.906167    5.748524 ^ input33/Z (gf180mcu_fd_sc_mcu7t5v0__dlyb_1)
+                                                         net33 (net)
+                      0.205631    0.000179    5.748703 ^ fanout104/I (gf180mcu_fd_sc_mcu7t5v0__dlyb_1)
+     2    0.015590    0.320864    0.992130    6.740833 ^ fanout104/Z (gf180mcu_fd_sc_mcu7t5v0__dlyb_1)
+                                                         net104 (net)
+                      0.320864    0.000424    6.741257 ^ fanout90/I (gf180mcu_fd_sc_mcu7t5v0__dlyb_1)
+     2    0.014008    0.297541    0.989735    7.730991 ^ fanout90/Z (gf180mcu_fd_sc_mcu7t5v0__dlyb_1)
+                                                         net90 (net)
+                      0.297541    0.000258    7.731250 ^ fanout82/I (gf180mcu_fd_sc_mcu7t5v0__dlyb_1)
+     4    0.027173    0.497255    1.109600    8.840849 ^ fanout82/Z (gf180mcu_fd_sc_mcu7t5v0__dlyb_1)
+                                                         net82 (net)
+                      0.497255    0.000594    8.841443 ^ fanout79/I (gf180mcu_fd_sc_mcu7t5v0__dlyb_1)
+     4    0.032704    0.582175    1.169522   10.010965 ^ fanout79/Z (gf180mcu_fd_sc_mcu7t5v0__dlyb_1)
+                                                         net79 (net)
+                      0.582175    0.000166   10.011131 ^ fanout78/I (gf180mcu_fd_sc_mcu7t5v0__dlyb_1)
+     4    0.033938    0.600936    1.183711   11.194842 ^ fanout78/Z (gf180mcu_fd_sc_mcu7t5v0__dlyb_1)
+                                                         net78 (net)
+                      0.600940    0.000823   11.195666 ^ _376_/RN (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                                             11.195666   data arrival time
+
+                                 24.000000   24.000000   clock clk (rise edge)
+                                  0.000000   24.000000   clock source latency
+     1    0.030055    0.155925    0.075021   24.075020 ^ clk (in)
+                                                         clk (net)
+                      0.155927    0.000000   24.075020 ^ clkbuf_0_clk/I (gf180mcu_fd_sc_mcu7t5v0__clkbuf_16)
+    16    0.221000    0.268780    0.360057   24.435078 ^ clkbuf_0_clk/Z (gf180mcu_fd_sc_mcu7t5v0__clkbuf_16)
+                                                         clknet_0_clk (net)
+                      0.268813    0.004452   24.439528 ^ clkbuf_4_0_0_clk/I (gf180mcu_fd_sc_mcu7t5v0__clkbuf_8)
+     2    0.050103    0.157044    0.306471   24.746000 ^ clkbuf_4_0_0_clk/Z (gf180mcu_fd_sc_mcu7t5v0__clkbuf_8)
+                                                         clknet_4_0_0_clk (net)
+                      0.157046    0.001075   24.747074 ^ clkbuf_5_1__f_clk/I (gf180mcu_fd_sc_mcu7t5v0__clkbuf_16)
+     2    0.008488    0.077903    0.225462   24.972536 ^ clkbuf_5_1__f_clk/Z (gf180mcu_fd_sc_mcu7t5v0__clkbuf_16)
+                                                         clknet_5_1__leaf_clk (net)
+                      0.077903    0.000169   24.972706 ^ _376_/CLK (gf180mcu_fd_sc_mcu7t5v0__dffrnq_1)
+                  

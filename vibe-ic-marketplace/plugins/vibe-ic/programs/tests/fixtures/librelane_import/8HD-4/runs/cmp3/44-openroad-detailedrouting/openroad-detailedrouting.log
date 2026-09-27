@@ -1,0 +1,90 @@
+Reading timing models for corner nom_tt_025C_5v00…
+Reading timing library for the 'nom_tt_025C_5v00' corner at '/foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00.lib'…
+Reading timing library for the 'nom_tt_025C_5v00' corner at '/foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_io/lib/gf180mcu_fd_io__tt_025C_5v00.lib'…
+Reading OpenROAD database at '/host/cmp3/librelane_8HD-4/design/runs/cmp3/42-openroad-repairantennas/1-openroad-diodeinsertion/spm.odb'…
+Reading design constraints file at '/host/cmp3/librelane_8HD-4/design/src/impl.sdc'…
+[INFO] Using clock clk…
+[INFO] Setting output delay to: 4.8
+[INFO] Setting input delay to: 4.8
+[INFO] Setting load to: 0.07291
+[INFO] Setting clock uncertainty to: 0.25
+[INFO] Setting clock transition to: 0.15
+[INFO] Setting timing derate to: 5%
+[INFO] No information on clock propagation in input SDC file-- propagating all clocks.
+[INFO ORD-0030] Using 32 thread(s).
++ detailed_route -droute_end_iter 64 -or_seed 42 -or_k 0 -verbose 1 -output_drc /host/cmp3/librelane_8HD-4/design/runs/cmp3/44-openroad-detailedrouting/drt-run-0/spm.drc
+[INFO DRT-0149] Reading tech and libs.
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via1
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via1
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via2
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via2
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via3
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via3
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via4
+[WARNING DRT-0349] LEF58_ENCLOSURE with no CUTCLASS is not supported. Skipping for layer Via4
+
+Units:                2000
+Number of layers:     11
+Number of macros:     244
+Number of vias:       60
+Number of viarulegen: 16
+
+[INFO DRT-0150] Reading design.
+
+Design:                   spm
+Die area:                 ( 0 0 ) ( 327270 363110 )
+Number of track patterns: 10
+Number of DEF vias:       0
+Number of components:     622
+Number of terminals:      38
+Number of snets:          2
+Number of nets:           441
+
+[INFO DRT-0167] List of default vias:
+  Layer Via2
+    default via: Via2_VH
+  Layer Via3
+    default via: Via3_HV
+  Layer Via4
+    default via: Via4_VH
+[INFO DRT-0162] Library cell analysis.
+[INFO DRT-0163] Instance analysis.
+[INFO DRT-0164] Number of unique instances = 48.
+[INFO DRT-0168] Init region query.
+[INFO DRT-0024]   Complete Poly2.
+[INFO DRT-0024]   Complete CON.
+[INFO DRT-0024]   Complete Metal1.
+[INFO DRT-0024]   Complete Via1.
+[INFO DRT-0024]   Complete Metal2.
+[INFO DRT-0024]   Complete Via2.
+[INFO DRT-0024]   Complete Metal3.
+[INFO DRT-0024]   Complete Via3.
+[INFO DRT-0024]   Complete Metal4.
+[INFO DRT-0024]   Complete Via4.
+[INFO DRT-0024]   Complete Metal5.
+[INFO DRT-0033] Poly2 shape region query size = 0.
+[INFO DRT-0033] CON shape region query size = 0.
+[INFO DRT-0033] Metal1 shape region query size = 14012.
+[INFO DRT-0033] Via1 shape region query size = 780.
+[INFO DRT-0033] Metal2 shape region query size = 423.
+[INFO DRT-0033] Via2 shape region query size = 780.
+[INFO DRT-0033] Metal3 shape region query size = 393.
+[INFO DRT-0033] Via3 shape region query size = 780.
+[INFO DRT-0033] Metal4 shape region query size = 265.
+[INFO DRT-0033] Via4 shape region query size = 450.
+[INFO DRT-0033] Metal5 shape region query size = 70.
+[INFO DRT-0165] Start pin access.
+[INFO DRT-0078]   Complete 303 pins.
+[INFO DRT-0081]   Complete 44 unique inst patterns.
+[INFO DRT-0084]   Complete 239 groups.
+#scanned instances     = 622
+#unique  instances     = 48
+#stdCellGenAp          = 925
+#stdCellValidPlanarAp  = 0
+#stdCellValidViaAp     = 842
+#stdCellPinNoAp        = 0
+#stdCellPinCnt         = 1224
+#instTermValidViaApCnt = 0
+#macroGenAp            = 0
+#macroValidPlanarAp    = 0
+#macroValidViaAp      

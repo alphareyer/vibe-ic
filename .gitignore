@@ -114,6 +114,13 @@ runs/
 # would import a fixture that is not there.
 !vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/shuttle_precheck_refusal/runs/
 !vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/shuttle_precheck_refusal/runs/**
+# llv1 W6, the same hole as #1744 one more time: the LibreLane importer keys on
+# `runs/<tag>/<NN>-<step>/` exactly as LibreLane writes it, so its fixture must
+# keep that name. MEASURED: without these two lines the branch shipped only
+# PROVENANCE.md and none of the 764 run files, so its test could not run on a
+# clean checkout. Narrow: the two trimmed run trees under that fixture only.
+!vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/librelane_import/*/runs/
+!vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/librelane_import/*/runs/**
 
 # Quartus local
 db/

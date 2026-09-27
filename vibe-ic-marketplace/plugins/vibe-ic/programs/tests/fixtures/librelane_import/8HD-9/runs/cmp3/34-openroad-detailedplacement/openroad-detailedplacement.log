@@ -1,0 +1,59 @@
+Reading timing models for corner nom_tt_025C_5v00…
+Reading timing library for the 'nom_tt_025C_5v00' corner at '/foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/lib/gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00.lib'…
+Reading timing library for the 'nom_tt_025C_5v00' corner at '/foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_io/lib/gf180mcu_fd_io__tt_025C_5v00.lib'…
+Reading OpenROAD database at '/host/cmp3/librelane_8HD-9/design/runs/cmp3/32-openroad-repairdesignpostgpl/spm.odb'…
+Reading design constraints file at '/host/cmp3/librelane_8HD-9/design/src/impl.sdc'…
+[INFO] Using clock clk…
+[INFO] Setting output delay to: 4.8
+[INFO] Setting input delay to: 4.8
+[INFO] Setting load to: 0.07291
+[INFO] Setting clock uncertainty to: 0.25
+[INFO] Setting clock transition to: 0.15
+[INFO] Setting timing derate to: 5%
+[INFO] No information on clock propagation in input SDC file-- propagating all clocks.
++ detailed_placement -max_displacement  500 100 
+[INFO DPL-0006] Core area: 22355.92 um^2
+[INFO DPL-0007] Movable instances area: 12225.07 um^2
+[INFO DPL-0008] Fixed instances area within core: 948.33 um^2
+[INFO DPL-0009] Utilization: 58.9%
+[INFO DPL-0005] Diamond search max displacement: +/- 892 sites horizontally, +/- 25 rows vertically.
+[INFO DPL-1102] Legalizing using negotiation legalizer.
+[INFO DPL-1103] Negotiation base search window: +/-20 sites horizontally, +/-5 rows vertically 
+	Automatic search window extension enabled.
+	Search window extendable up to the max displacement cap of +/-892 sites, +/-25 rows near walls.
+[INFO DPL-1104] NegotiationLegalizer DRC penalty: 5.
+[INFO DPL-0392] Negotiation cell height distribution (1 unique row-count(s)):
+[INFO DPL-0393]   height 1 row(s): 573 cells
+[INFO DPL-0500] Runtime: 0.00s
+Detailed Placement Analysis
+---------------------------------
+legalizer            negotiation
+total moves                   0
+total displacement       1290.8 u
+average displacement        2.3 u
+max displacement           19.0 u
+original HPWL           10098.4 u
+legalized HPWL          10752.0 u
+delta HPWL                    6 %
+
+[INFO DPL-0020] Mirrored 164 instances
+[INFO DPL-0021] HPWL before           10752.0 u
+[INFO DPL-0022] HPWL after            10098.4 u
+[INFO DPL-0023] HPWL delta               -6.1 %
+Setting global connections for newly added cells…
+[INFO] Setting global connections...
+[INFO ODB-0403] 0 connections made, 0 conflicts skipped.
+Updating metrics…
+Cell type report:                       Count       Area
+  Endcap cell                              76     333.67
+  Tap cell                                140     614.66
+  Timing Repair Buffer                    104    3652.81
+  Inverter                                 31     272.20
+  Sequential cell                          64    4776.76
+  Multi-Input combinational cell          158    3523.30
+  Total                                   573   13173.40
+Writing OpenROAD database to '/host/cmp3/librelane_8HD-9/design/runs/cmp3/34-openroad-detailedplacement/spm.odb'…
+Writing netlist to '/host/cmp3/librelane_8HD-9/design/runs/cmp3/34-openroad-detailedplacement/spm.nl.v'…
+Writing powered netlist to '/host/cmp3/librelane_8HD-9/design/runs/cmp3/34-openroad-detailedplacement/spm.pnl.v'…
+Writing layout to '/host/cmp3/librelane_8HD-9/design/runs/cmp3/34-openroad-detailedplacement/spm.def'…
+Writing timing constraints to '/host/cmp3/librelane_8HD-9/design/runs/cmp3/34-openroad-detailedplacement/spm.sdc'…

@@ -1,0 +1,88 @@
+
+Magic 8.3 revision 684 - Compiled on Sat Sep 26 22:39:23 UTC 2026.
+Starting magic under Tcl interpreter
+Using the terminal as the console.
+WARNING: RLIMIT_NOFILE is above 1024 and Tcl_Version<9 this may cause runtime issues [rlim_cur=1000000]
+Using NULL graphics device.
+Processing system .magicrc file
+Switching to WIRING tool.
+Switching to NETLIST tool.
+Switching to PICK tool.
+Switching to BOX tool.
+Sourcing design .magicrc for technology gf180mcuD ...
+10 Magic internal units = 1 Lambda
+Input style import: scaleFactor=10, multiplier=2
+The following types are not handled by extraction and will be treated as non-electrical types:
+    obsactive mvobsactive filldiff fillpoly m1hole obsm1 fillm1 obsv1 m2hole obsm2 fillm2 obsv2 m3hole obsm3 fillm3 m4hole obsm4 fillm4 m5hole obsm5 fillm5 glass fillblock lvstext obscomment 
+Scaled tech values by 10 / 1 to match internal grid scaling
+Loading gf180mcuD Device Generator Menu ...
+Loading "/usr/local/lib/python3.12/dist-packages/librelane/scripts/magic/wrapper.tcl" from command line.
+> gds read /foss/pdks/gf180mcuD/libs.ref/gf180mcu_fd_sc_mcu7t5v0/gds/gf180mcu_fd_sc_mcu7t5v0.gds
+Warning: Calma reading is not undoable!  I hope that's OK.
+Library written using GDS-II Release 3.0
+Library name: gf180mcu_fd_sc_mcu7t5v0
+Reading "gf180mcu_fd_sc_mcu7t5v0__nor4_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai21_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai21_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai21_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai22_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai22_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai22_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai31_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai31_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai31_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai32_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai32_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai32_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai33_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai33_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai33_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai211_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai211_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai211_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai221_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai221_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai221_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai222_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai222_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__oai222_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__or2_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__or2_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__or2_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__or3_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__or3_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__or3_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__or4_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__or4_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__or4_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__sdffq_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__sdffq_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__sdffq_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__sdffrnq_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__sdffrnq_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__sdffrnq_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__sdffrsnq_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__sdffrsnq_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__sdffrsnq_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__sdffsnq_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__sdffsnq_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__sdffsnq_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__tieh".
+Reading "gf180mcu_fd_sc_mcu7t5v0__tiel".
+Reading "gf180mcu_fd_sc_mcu7t5v0__xnor2_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__xnor2_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__xnor2_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__xnor3_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__xnor3_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__xnor3_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__xor2_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__xor2_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__xor2_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__xor3_1".
+Reading "gf180mcu_fd_sc_mcu7t5v0__xor3_2".
+Reading "gf180mcu_fd_sc_mcu7t5v0__xor3_4".
+Reading "gf180mcu_fd_sc_mcu7t5v0__fillcap_32".
+Reading "gf180mcu_fd_sc_mcu7t5v0__fillcap_64".
+Reading "gf180mcu_fd_sc_mcu7t5v0__filltie".
+Reading "gf180mcu_fd_sc_mcu7t5v0__hold".
+Readi
