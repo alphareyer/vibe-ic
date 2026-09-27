@@ -48086,12 +48086,29 @@ def publish_tapeout_declarations(project: Path, pdk: "PdkConfig",
                     # stays the owner's. What this run derived is recorded
                     # as APPLIED, per question with its basis, in the mode
                     # record -- never merged into the declaration.
-                    rec["recorded_as_applied"] = _impl_flow.record_applied(
-                        project,
-                        {k: {"value": merge[k],
-                             "source": derived[k]["basis"]} for k in merge},
-                        recorded_by="phase3_one_shot_runner."
-                                    "publish_tapeout_declarations")
+                    # A key the merge above superseded (the physical top a
+                    # wrapper this run WROTE) outranks the declared answer in
+                    # the record exactly as it would in the declaration.
+                    try:
+                        rec["recorded_as_applied"] = _impl_flow.record_applied(
+                            project,
+                            {k: {"value": merge[k],
+                                 "source": derived[k]["basis"]} for k in merge},
+                            recorded_by="phase3_one_shot_runner."
+                                        "publish_tapeout_declarations",
+                            outrank=dict(rec.get("superseded") or {}))
+                    except _impl_flow.ImplRefusal as exc:
+                        # A NAMED refusal, never absorbed into a note: the
+                        # callers turn `refused` into this step's FAIL.
+                        rec["recorded_as_applied"] = []
+                        rec["refused"] = {"reason_class": exc.reason_class,
+                                          "detail": exc.detail}
+                    if rec.get("superseded"):
+                        rec["superseded"] = {
+                            k: (f"{v} -- under the {_impl_mode} flow it is "
+                                f"RECORDED AS APPLIED in the mode record, not "
+                                f"published into the declaration")
+                            for k, v in rec["superseded"].items()}
                     rec["not_published_reason"] = (
                         f"under the {_impl_mode} flow the tape-out declaration "
                         f"stays the owner's (decision 6); the derived answers "
@@ -48188,6 +48205,11 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # rungs report whichever they got.
     _decl_rec = publish_tapeout_declarations(project, pdk, container,
                                              def_file, top)
+    if _decl_rec.get("refused"):
+        _ref = _decl_rec["refused"]
+        return StepResult("gds", "FAIL", time.time() - t0,
+                          f"{_ref['reason_class']}: {_ref['detail']} "
+                          f"(tape-out declarations, {_decl_rec.get('record')})")
     print(f"      tape-out declarations: published "
           f"{', '.join(_decl_rec['published']) or 'nothing'}"
           + (f"; NOT_DETERMINED: "
@@ -48709,7 +48731,13 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
                           reason_class=_V.ReasonClass.TOOL_ABSENT)
     physical_top, top_note = _streamout_top(def_file, top)
     publish_database_unit_declaration(project, pdk, container, def_file)
-    publish_tapeout_declarations(project, pdk, container, def_file, physical_top)
+    _decl_rec = publish_tapeout_declarations(project, pdk, container, def_file,
+                                             physical_top)
+    if _decl_rec.get("refused"):
+        _ref = _decl_rec["refused"]
+        return StepResult("gds", "FAIL", time.time() - t0,
+                          f"{_ref['reason_class']}: {_ref['detail']} "
+                          f"(tape-out declarations, {_decl_rec.get('record')})")
     from librelane_step37 import run as _run_librelane
     direct_gds = None
     direct_result = None

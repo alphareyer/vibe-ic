@@ -102,22 +102,55 @@ def _vibeic_gds_gates(project: Path, image: str, pdk_root: Path, pdk: str,
     return results
 
 
+def _floorplan_record_core(project: Path):
+    """(core, source) of THIS run's own floorplan record, or (None, why)."""
+    path = project / "reports/phase3/floorplan_rectangles.json"
+    try:
+        rec = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        return None, f"{path}: {exc}"
+    rect, die, pad = (rec.get("floorplan_rect_um"), rec.get("die_rect_um"),
+                      rec.get("core_pad_um"))
+    if isinstance(rect, list) and len(rect) == 4:
+        return [float(v) for v in rect], f"{path}.floorplan_rect_um"
+    if (isinstance(die, list) and len(die) == 4
+            and isinstance(pad, (int, float)) and not isinstance(pad, bool)):
+        return ([float(die[0]) + pad, float(die[1]) + pad,
+                 float(die[2]) - pad, float(die[3]) - pad],
+                f"{path}.die_rect_um inset by core_pad_um")
+    return None, f"{path} names no core"
+
+
 def _finishing_core(project: Path) -> tuple:
     """(core, source) the finishing XOR checks against, or a named refusal.
 
-    The declared core first. Under a flag (llv1 W9) the declaration may leave
-    it NOT_DETERMINED -- it stays the owner's (decision 6) -- and the core the
-    flow APPLIED is read from the mode record instead.
+    The declared core first (as `declaration_config` emits it). Under a flag
+    (llv1 W9) the declaration may leave it NOT_DETERMINED -- it stays the
+    owner's (decision 6) -- and the core the flow APPLIED is read from the
+    mode record ONLY: `declaration_config` has already had its say on the
+    declaration, so a rectangle it withholds (a relative sizing) is never
+    read back through another door. That applied core must be THIS run's:
+    it is compared with the run's own floorplan record and refused by name
+    when an earlier run recorded a different one.
     """
     declared, sources = declaration_config(project)
     core = declared.get("CORE_AREA")
     core_source = sources.get("CORE_AREA")
     if not core:
         import _impl_flow
-        value, why = _impl_flow.applied_answer(project, "core_area_um")
-        if (_impl_flow.recorded_impl(project) != _impl_flow.IMPL_DEFAULT
-                and isinstance(value, list) and len(value) == 4):
-            core, core_source = [float(v) for v in value], why
+        if _impl_flow.recorded_impl(project) != _impl_flow.IMPL_DEFAULT:
+            got = _impl_flow.recorded_applied(project, "core_area_um")
+            if got is not None and isinstance(got[0], list) and len(got[0]) == 4:
+                core, core_source = [float(v) for v in got[0]], got[1]
+                run_core, run_why = _floorplan_record_core(project)
+                if run_core is not None and any(
+                        abs(a - b) > 1e-6 for a, b in zip(core, run_core)):
+                    raise Refusal(
+                        "LL_APPLIED_CORE_STALE",
+                        f"the mode record's applied core {core} ({core_source}) "
+                        f"is not this run's core {run_core} ({run_why}); a "
+                        f"project's applied answers belong to one run -- run a "
+                        f"fresh project clone")
     if not core:
         # Step 37.3's finishing XOR needs a core; a stream whose finishing
         # cannot be checked is not promoted (never a silent pass).

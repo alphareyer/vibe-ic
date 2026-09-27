@@ -704,8 +704,14 @@ def gate_or_exit(project: Path, args, *, runner: str, parser) -> Optional[int]:
 # ─────────────────────────────────────────────────────────────────────────────
 #
 # Decision 6: the tape-out declaration is vibe-ic's and owner-answered,
-# "NOT_DETERMINED, never a default". Under a non-default mode NOTHING the run
-# derives, and nothing the tool assumes, is written into it. Where the design
+# "NOT_DETERMINED, never a default". Under a non-default mode no ANSWER the run
+# derives, and nothing the tool assumes, is written into it. The only
+# declaration write under a flag is the PDK-measured database unit, identical
+# to the default flow (orchestrator ruling, 2026-09-28):
+# `publish_database_unit_declaration` merges vibe-ic's own measurement of the
+# PDK into the TECHNOLOGY section -- not a tool default and not an owner
+# answer, and byte-identical with or without the flag -- so decision 6
+# ("LibreLane's PDK defaults never go into the declaration") holds. Where the design
 # declares nothing, the value the flow APPLIED (the run's own die from the
 # auto-die, a LibreLane PDK default, ...) is recorded here, per question, as
 # {value, source, recorded_by} in the mode record's `tool_defaults`, beside the
@@ -714,43 +720,98 @@ def gate_or_exit(project: Path, args, *, runner: str, parser) -> Optional[int]:
 # flag only) this record, else NOT_DETERMINED with the reason.
 
 IMPL_APPLIED_CONFLICT = "IMPL_APPLIED_CONFLICT"
+IMPL_DECLARATION_UNREADABLE = "IMPL_DECLARATION_UNREADABLE"
 
-#: Resolved LibreLane config key -> the 0.5ic question it answers.
-CONFIG_QUESTIONS = {
-    "DESIGN_NAME": "top_cell",
-    "DIE_AREA": "die_area_um",
-    "CORE_AREA": "core_area_um",
-    "FP_SIZING": "fp_sizing",
-    "FP_CORE_UTIL": "core_utilization_pct",
-}
+#: Config keys that are NOT 0.5ic questions but whose applied value is still
+#: a tool default worth recording (decision 6). Recorded under `config:<KEY>`,
+#: so nothing mistakes them for an answer the declaration could give.
+CONFIG_ONLY_KEYS = ("FP_CORE_UTIL",)
+CONFIG_PREFIX = "config:"
+
+
+def config_question(key: str, deliverable: Any) -> Optional[str]:
+    """The 0.5ic question a resolved config key answers for THIS delivery.
+
+    The size rectangle is `macro_area_um` on a HARDMACRO and `die_area_um` on
+    a DIE (vibe-ic#2118); the core and the sizing are DIE-only questions; an
+    undeclared deliverable owns neither name, so the rectangle is not
+    recorded under a guess.
+    """
+    import _tapeout_declaration as TD  # noqa: PLC0415
+    if key == "DESIGN_NAME":
+        return "top_cell"
+    if key == "DIE_AREA":
+        return {TD.DELIVERABLE_DIE: "die_area_um",
+                TD.DELIVERABLE_HARDMACRO: "macro_area_um"}.get(deliverable)
+    if key in ("CORE_AREA", "FP_SIZING") and deliverable == TD.DELIVERABLE_DIE:
+        return {"CORE_AREA": "core_area_um", "FP_SIZING": "fp_sizing"}[key]
+    if key in CONFIG_ONLY_KEYS:
+        return CONFIG_PREFIX + key
+    return None
+
+
+def _declaration(project: Path) -> Optional[Dict[str, Any]]:
+    """The declaration, None when absent; an unreadable one is REFUSED -- an
+    unread declaration is not an empty one, and reading it as NOT_DETERMINED
+    would let an applied value sit over an answer the owner may have given."""
+    import _tapeout_declaration as TD  # noqa: PLC0415
+    path = Path(project) / TD.DECLARATION_REL
+    if not path.is_file():
+        return None
+    doc, err = TD.load(path)
+    if err is not None or not isinstance(doc, dict):
+        raise ImplRefusal(IMPL_DECLARATION_UNREADABLE,
+                          f"{path}: {err or 'not a JSON object'}")
+    return doc
 
 
 def _declared(project: Path, question: str) -> Any:
     import _tapeout_declaration as TD  # noqa: PLC0415
-    path = Path(project) / TD.DECLARATION_REL
-    if not path.is_file():
-        return TD.NOT_DETERMINED
-    doc, err = TD.load(path)
-    if err is not None or not isinstance(doc, dict):
-        return TD.NOT_DETERMINED
-    return TD.answer(doc, question)
+    doc = _declaration(project)
+    return TD.NOT_DETERMINED if doc is None else TD.answer(doc, question)
+
+
+def _withheld(project: Path, question: str) -> bool:
+    """A declared rectangle `declaration_config` does not emit as the truth:
+    a die whose `fp_sizing` is `relative` was DERIVED from a utilisation, and
+    a question the declared deliverable does not owe is not its answer."""
+    import _tapeout_declaration as TD  # noqa: PLC0415
+    if question.startswith(CONFIG_PREFIX):
+        return False
+    if (question in ("die_area_um", "core_area_um")
+            and _declared(project, "fp_sizing") == "relative"):
+        return True
+    q = TD.question(question)
+    return q is not None and not TD.applicable(
+        q, _declared(project, "deliverable"))
+
+
+def _answered(project: Path, question: str) -> bool:
+    import _tapeout_declaration as TD  # noqa: PLC0415
+    if question.startswith(CONFIG_PREFIX):
+        return False
+    return (TD.is_answered(_declared(project, question))
+            and not _withheld(project, question))
 
 
 def record_applied(project: Path, answers: Dict[str, Dict[str, Any]], *,
-                   recorded_by: str) -> List[str]:
+                   recorded_by: str,
+                   outrank: Optional[Dict[str, str]] = None) -> List[str]:
     """Record applied answers in the mode record; returns the questions written.
 
     ``answers`` maps question -> {"value", "source"}. Only under a recorded
     non-default mode (the default has no record, and writes nothing). A
-    question the declaration answers is never recorded: the owner's answer
-    outranks anything applied. A question already recorded keeps its value;
-    a DIFFERENT value is IMPL_APPLIED_CONFLICT (two applied answers to one
-    question in one project is two flows' artefacts under one name).
+    question the declaration answers is not recorded -- the owner's answer
+    outranks anything applied -- unless ``outrank`` names it with the reason
+    the publisher already decided it (the physical top a wrapper supersedes).
+    A declared answer `declaration_config` withholds is not an answer here
+    either. A recorded value is kept; a DIFFERENT one is IMPL_APPLIED_CONFLICT,
+    and the caller must turn that refusal into a verdict.
     """
-    import _tapeout_declaration as TD  # noqa: PLC0415
     rec = read_record(project)
     if rec is None:            # the default has no record: it writes nothing
         return []
+    outrank = dict(outrank or {})
     table = dict(rec["tool_defaults"])
     written: List[str] = []
     for question, ans in sorted(answers.items()):
@@ -758,8 +819,11 @@ def record_applied(project: Path, answers: Dict[str, Dict[str, Any]], *,
                 and isinstance(ans.get("source"), str) and ans["source"].strip()):
             raise ImplRefusal(IMPL_RECORD_UNREADABLE,
                               f"applied {question!r} needs a value and a source")
-        if TD.is_answered(_declared(project, question)):
-            continue
+        source = ans["source"]
+        if _answered(project, question):
+            if question not in outrank:
+                continue
+            source += f" (outranks the declared answer: {outrank[question]})"
         old = table.get(question)
         if old is not None:
             if old.get("value") != ans["value"]:
@@ -768,7 +832,7 @@ def record_applied(project: Path, answers: Dict[str, Dict[str, Any]], *,
                     f"{question}: recorded {old.get('value')!r} ({old.get('source')}) "
                     f"vs {ans['value']!r} ({ans['source']})")
             continue
-        table[question] = {"value": ans["value"], "source": ans["source"],
+        table[question] = {"value": ans["value"], "source": source,
                            "recorded_by": str(recorded_by)}
         written.append(question)
     if written:
@@ -781,39 +845,70 @@ def record_applied(project: Path, answers: Dict[str, Dict[str, Any]], *,
 
 
 def record_applied_config(project: Path, config: Dict[str, Any],
-                          sources: Dict[str, str], *,
-                          recorded_by: str) -> List[str]:
-    """Record the values a resolved tool config applies to 0.5ic questions,
-    with the config provenance's own source for each. A key whose source is
-    the declaration is the owner's answer, not an applied one, and is skipped.
+                          sources: Dict[str, str], *, recorded_by: str,
+                          resolved_config: Optional[Path] = None) -> List[str]:
+    """Record the values a resolved tool config applies, per question.
+
+    A key vibe-ic emitted carries the config provenance's source; one the
+    declaration gave is the owner's answer and is skipped. A key LibreLane
+    SUPPLIED itself has no emitted source: it is cited as the tool's resolved
+    default, by the resolved config's path and sha256 (``resolved_config``);
+    without that file there is nothing to cite and the key is not recorded.
+    A key the tool left unset (None) was not applied and is not recorded.
     """
     import _tapeout_declaration as TD  # noqa: PLC0415
     decl = TD.DECLARATION_REL.removesuffix(".json")
+    deliverable = _declared(project, "deliverable")
+    cite = None
+    if resolved_config is not None and Path(resolved_config).is_file():
+        import hashlib  # noqa: PLC0415
+        digest = hashlib.sha256(Path(resolved_config).read_bytes()).hexdigest()
+        cite = (f"librelane resolved default ({resolved_config} "
+                f"sha256:{digest})")
     answers = {}
-    for key, question in CONFIG_QUESTIONS.items():
-        if key not in config:
+    for key in sorted(config):
+        value = config[key]
+        question = config_question(key, deliverable)
+        if question is None or value is None:
             continue
         source = str(sources.get(key) or "")
         if source.startswith(decl):
             continue
-        answers[question] = {"value": config[key], "source": source}
+        source = source or cite or ""
+        if not source:
+            continue
+        answers[question] = {"value": value, "source": source}
     return record_applied(project, answers, recorded_by=recorded_by)
 
 
+def recorded_applied(project: Path, question: str) -> Optional[tuple]:
+    """(value, source) from the mode record ONLY, or None. For a consumer that
+    has already applied its own rule to the declaration and needs just what
+    this flow applied (librelane_step37's finishing core)."""
+    rec = read_record(project)
+    if rec is None:
+        return None
+    ans = rec["tool_defaults"].get(question)
+    if ans is None:
+        return None
+    return ans["value"], (f"{record_path(project)} tool_defaults.{question}: "
+                          f"{ans['source']}")
+
+
 def applied_answer(project: Path, question: str) -> tuple:
-    """(value, source) for a 0.5ic question: the declaration's answer; else,
-    under a recorded non-default mode, the value the flow applied; else
-    (NOT_DETERMINED, why). The default flow never reads the record."""
+    """(value, source) for a 0.5ic question: the declaration's answer (unless
+    `declaration_config` withholds it); else, under a recorded non-default
+    mode, the value the flow applied; else (NOT_DETERMINED, why). The default
+    flow never reads the record; an unreadable declaration is refused."""
     import _tapeout_declaration as TD  # noqa: PLC0415
-    got = _declared(project, question)
-    if TD.is_answered(got):
-        return got, f"{TD.DECLARATION_REL}.answers.{question}"
+    if _answered(project, question):
+        return (_declared(project, question),
+                f"{TD.DECLARATION_REL}.answers.{question}")
+    got = recorded_applied(project, question)
+    if got is not None:
+        return got
     rec = read_record(project)
     if rec is not None:        # a record always names a non-default mode
-        ans = rec["tool_defaults"].get(question)
-        if ans is not None:
-            return ans["value"], (f"{record_path(project)} tool_defaults."
-                                  f"{question}: {ans['source']}")
         return TD.NOT_DETERMINED, (f"not declared, and the {rec['impl']} run "
                                    f"recorded no applied {question}")
     return TD.NOT_DETERMINED, "not declared"

@@ -157,11 +157,12 @@ def test_record_applied_config_skips_what_the_declaration_gave(tmp_path):
                "FP_SIZING": "reports/phase3/floorplan_rectangles.json.die_rect_um",
                "FP_CORE_UTIL": "librelane:OpenROAD.Floorplan default"}
     got = IF.record_applied_config(p, config, sources, recorded_by="seg2")
-    assert got == ["core_area_um", "core_utilization_pct", "die_area_um",
+    assert got == ["config:FP_CORE_UTIL", "core_area_um", "die_area_um",
                    "fp_sizing"]
     table = IF.read_record(p)["tool_defaults"]
     assert "top_cell" not in table
-    assert table["core_utilization_pct"] == {
+    # FP_CORE_UTIL is not a 0.5ic question: recorded, and labelled as a config key.
+    assert table["config:FP_CORE_UTIL"] == {
         "value": 50, "source": "librelane:OpenROAD.Floorplan default",
         "recorded_by": "seg2"}
 
@@ -234,3 +235,144 @@ def test_the_auto_die_a_padring_chain_applies_is_recorded_not_declared(tmp_path)
     doc, _ = td.load(p / td.DECLARATION_REL)
     assert td.answer(doc, "die_area_um") == td.NOT_DETERMINED
     assert td.answer(doc, "core_area_um") == td.NOT_DETERMINED
+
+
+# ── wave-5 review fixes ─────────────────────────────────────────────────────
+
+def _resolved(tmp_path):
+    """A LibreLane resolved step config, in its real shape: every variable,
+    unset ones as null, the tool's own defaults with no vibe-ic provenance."""
+    cfg = {"DESIGN_NAME": "spm", "DIE_AREA": None, "CORE_AREA": None,
+           "FP_SIZING": "relative", "FP_CORE_UTIL": 50, "CLOCK_PERIOD": 10.0,
+           "PL_TARGET_DENSITY_PCT": None}
+    path = tmp_path / "runs" / "seg2" / "resolved.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(cfg))
+    return cfg, path
+
+
+def test_librelanes_own_defaults_are_recorded_with_the_resolved_config(tmp_path):
+    p = _flagged(tmp_path)
+    cfg, path = _resolved(tmp_path)
+    sources = {"DESIGN_NAME": td.DECLARATION_REL.removesuffix(".json")
+               + ".answers.top_cell"}
+    got = IF.record_applied_config(p, cfg, sources, recorded_by="seg2",
+                                   resolved_config=path)
+    assert got == ["config:FP_CORE_UTIL", "fp_sizing"]      # None: not applied
+    table = IF.read_record(p)["tool_defaults"]
+    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    for q in got:
+        assert table[q]["source"] == (f"librelane resolved default ({path} "
+                                      f"sha256:{sha})")
+    assert table["fp_sizing"]["value"] == "relative"
+
+
+def test_without_the_resolved_config_a_tool_default_is_not_recorded(tmp_path):
+    p = _flagged(tmp_path)
+    cfg, _ = _resolved(tmp_path)
+    assert IF.record_applied_config(p, cfg, {}, recorded_by="seg2") == []
+
+
+def test_a_hardmacro_records_its_rectangle_under_its_own_name(tmp_path):
+    p = _flagged(tmp_path)
+    doc, _ = td.load(p / td.DECLARATION_REL)
+    doc["answers"]["deliverable"] = td.DELIVERABLE_HARDMACRO
+    _OD.attest(doc)
+    (p / td.DECLARATION_REL).write_text(json.dumps(doc))
+    got = IF.record_applied_config(
+        p, {"DIE_AREA": [0, 0, 400, 400], "CORE_AREA": [10, 10, 390, 390],
+            "FP_SIZING": "absolute"},
+        {"DIE_AREA": "run", "CORE_AREA": "run", "FP_SIZING": "run"},
+        recorded_by="seg2")
+    assert got == ["macro_area_um"]           # core/sizing are DIE questions
+
+
+def test_an_unreadable_declaration_is_refused_never_empty(tmp_path):
+    p = _flagged(tmp_path)
+    (p / td.DECLARATION_REL).write_text("{not json")
+    for call in (lambda: IF.applied_answer(p, "core_area_um"),
+                 lambda: IF.record_applied(
+                     p, {"core_area_um": {"value": [1, 1, 9, 9],
+                                          "source": "x"}}, recorded_by="t")):
+        with pytest.raises(IF.ImplRefusal) as ei:
+            call()
+        assert ei.value.reason_class == IF.IMPL_DECLARATION_UNREADABLE
+
+
+def test_a_superseded_declared_answer_is_recorded_with_its_reason(tmp_path):
+    p = _flagged(tmp_path)
+    doc, _ = td.load(p / td.DECLARATION_REL)
+    doc, _ = td.merge_answers(doc, {"top_cell": "spm"})
+    (p / td.DECLARATION_REL).write_text(json.dumps(doc))
+    ans = {"top_cell": {"value": "chip_top", "source": "the DEF"}}
+    assert IF.record_applied(p, ans, recorded_by="t") == []
+    assert IF.record_applied(p, ans, recorded_by="t",
+                             outrank={"top_cell": "the wrapper this run WROTE"}
+                             ) == ["top_cell"]
+    src = IF.read_record(p)["tool_defaults"]["top_cell"]["source"]
+    assert "outranks the declared answer: the wrapper this run WROTE" in src
+
+
+def _relative_core(p):
+    doc, _ = td.load(p / td.DECLARATION_REL)
+    doc, _ = td.merge_answers(doc, {"fp_sizing": "relative",
+                                    "die_area_um": [0, 0, 3162, 3162],
+                                    "die_origin_um": [0, 0],
+                                    "core_area_um": [5, 5, 50, 50]})
+    (p / td.DECLARATION_REL).write_text(json.dumps(doc))
+
+
+def test_a_withheld_declared_core_never_reaches_the_finishing_xor(tmp_path):
+    """Wave-5 review: `declaration_config` withholds a relative-sized core.
+    The DEFAULT flow refuses it by name, and the flag must not read it back
+    through the applied-answer door."""
+    import librelane_contract as LC
+    import librelane_step37 as S37
+    default = _project(tmp_path, "default")
+    _relative_core(default)
+    with pytest.raises(LC.Refusal):
+        S37._finishing_core(default)
+    flagged = _project(tmp_path, "flagged")
+    _relative_core(flagged)
+    IF.write_record(flagged, "librelane", resolved_by="t")
+    with pytest.raises(LC.Refusal):
+        S37._finishing_core(flagged)
+    # ...a withheld declared core is not an answer, so the applied one records.
+    assert IF.record_applied(
+        flagged, {"core_area_um": {"value": [381, 381, 2400, 2400],
+                                   "source": "auto-die"}},
+        recorded_by="t") == ["core_area_um"]
+    core, source = S37._finishing_core(flagged)
+    assert core == [381.0, 381.0, 2400.0, 2400.0] and "auto-die" in source
+
+
+def test_an_applied_core_from_an_earlier_run_is_refused(tmp_path):
+    import librelane_contract as LC
+    import librelane_step37 as S37
+    p = _flagged(tmp_path)
+    IF.record_applied(p, {"core_area_um": {"value": [100, 100, 900, 900],
+                                           "source": "an earlier run"}},
+                      recorded_by="t")
+    with pytest.raises(LC.Refusal, match="LL_APPLIED_CORE_STALE"):
+        S37._finishing_core(p)
+
+
+def test_a_conflict_while_publishing_is_a_named_gds_fail(tmp_path, no_seal):
+    r = _r()
+    p = _flagged(tmp_path)
+    IF.record_applied(p, {"core_area_um": {"value": [1, 1, 9, 9],
+                                           "source": "an earlier run"}},
+                      recorded_by="t")
+    rec = r.publish_tapeout_declarations(
+        p, _Pdk(), "c", p / "phase3/stage3/pnr/routed.def", "spm")
+    assert rec["refused"]["reason_class"] == IF.IMPL_APPLIED_CONFLICT
+    import ast
+    src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
+    tree = ast.parse(src)
+    for name in ("_step_gds_direct", "step_gds"):
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == name)
+        body = ast.get_source_segment(src, fn)
+        call = body.index("publish_tapeout_declarations(")
+        guard = body.index('if _decl_rec.get("refused"):', call)
+        assert 'StepResult("gds", "FAIL"' in body[guard:guard + 300], name
