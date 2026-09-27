@@ -147,18 +147,27 @@ def test_inconclusive_naming_no_unproven_point_is_NOT_a_failure():
     assert "no open point" in reason
 
 
-def test_a_completed_ladder_that_did_not_close_FAILS():
+def test_a_completed_ladder_that_did_not_close_is_never_a_walk_past():
     """THE REGRESSION. Points were compared, the ladder finished, nothing ran
     out -- the equivalence question is OPEN and the flow may not walk past it.
-    Reverting to `INCONCLUSIVE -> SKIP` fails here."""
+    Reverting to `INCONCLUSIVE -> SKIP` fails here.
+
+    FX_P2 (owner ruling 2026-09-28, "only a plain FAIL is red"): the word is
+    NOT_MEASURED with reason class `inconclusive`, never PASS and never a SKIP
+    that reads as disposed of; the open counts stay in the reason. A recorded
+    COUNTEREXAMPLE is still FAIL -- see `test_fx_p2_lec_inconclusive_*`."""
     status, reason = dosr.lec_inconclusive_disposition(RUN16_UNCLOSED)
-    assert status == "FAIL"
+    assert status == dosr.NOT_EXECUTED_STATUS == "NOT_MEASURED"
+    assert status not in ("PASS", "PASS_WITH_WAIVERS")
     assert "846" in reason and "481" in reason
+    assert "never a PASS" in reason
+    assert dosr.lec_inconclusive_reason_class(RUN16_UNCLOSED) == "inconclusive"
 
 
 def test_the_step_mapper_agrees_with_the_disposition():
     """The mapper must DELEGATE, not keep its own opinion."""
-    assert _status_for(RUN16_UNCLOSED) == "FAIL"
+    assert _status_for(RUN16_UNCLOSED) == \
+        dosr.lec_inconclusive_disposition(RUN16_UNCLOSED)[0] == "NOT_MEASURED"
 
 
 def test_a_proof_that_was_cut_off_is_NOT_a_fail():
@@ -271,8 +280,9 @@ def test_a_resumed_record_that_climbed_no_rung_is_named_reused():
 
 def test_a_reused_record_still_earns_the_same_status():
     """Reuse is a disclosure, never a discount. The 2 s re-read of run16's
-    record must FAIL exactly as the 8306 s proof did."""
-    assert _status_for(RESUMED) == "FAIL"
+    record must earn exactly what the 8306 s proof did (FX_P2: NOT_MEASURED,
+    inconclusive -- never PASS)."""
+    assert _status_for(RESUMED) == _status_for(RUN16_UNCLOSED) == "NOT_MEASURED"
 
 
 def test_a_pass_cache_hit_is_named_reused():

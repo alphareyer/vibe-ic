@@ -98,3 +98,33 @@ def test_with_no_phase2_netlist_the_records_are_taken_as_they_are(tmp_path):
     _phase3_record(proj, T_OLD)
     rc, out = _gate(proj)
     assert rc == 1, out
+
+
+def test_the_audits_own_stage3_publication_is_not_phase3_evidence(tmp_path):
+    """MEASURED in the same run: the phase-2 final audit writes
+    `reports/phase3/gates/stage3_compliance.json` (program
+    flow_compliance_check) AFTER this run's synthesis, and the gate read it as
+    "phase 3 has run". The audit's own record is not a measurement."""
+    proj = _project(tmp_path)
+    _phase3_record(proj, T_OLD)
+    _netlist(proj, T_OLD + 10)
+    _at(proj / "reports" / "phase3" / "gates" / "stage3_compliance.json",
+        json.dumps({"program": "flow_compliance_check", "phase": "all"}),
+        T_NEW)
+    rc, out = _gate(proj)
+    assert rc == 0, out
+    assert "not yet measurable" in out
+
+
+def test_a_real_phase3_record_after_synthesis_still_counts(tmp_path):
+    """THE CONTROL for the exclusion: a phase-3 PRODUCER's record newer than
+    the netlist is phase 3 having run, and an unmeasured requirement FAILs."""
+    proj = _project(tmp_path)
+    _netlist(proj, T_OLD)
+    _at(proj / "reports" / "phase3" / "gates" / "stage3_compliance.json",
+        json.dumps({"program": "flow_compliance_check"}), T_NEW)
+    _at(proj / "reports" / "phase3" / "lvs_verdict.json",
+        json.dumps({"status": "PASS"}), T_NEW)
+    rc, out = _gate(proj)
+    assert rc == 1, out
+
