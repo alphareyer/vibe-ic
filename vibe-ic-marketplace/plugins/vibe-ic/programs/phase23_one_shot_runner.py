@@ -239,6 +239,11 @@ def main() -> int:
                                        parser=p)
     if _impl_rc is not None:
         return _impl_rc
+    # --librelane (llv1 W2): record a non-default mode BEFORE any child is
+    # spawned, because `child_argv` reads only the record. phase23 takes no
+    # project lock of its own (each child takes it); write_record is atomic
+    # and runs the in-place-switch check itself. The default writes nothing.
+    _impl_flow.record_after_lock(project, args, runner='phase23_one_shot_runner')
 
     # v1.6.52 — `--detect-stable N`: if the previous N runs all produced
     # the same verdict, skip the heavy Phase 2 + 3 pipeline and emit a
