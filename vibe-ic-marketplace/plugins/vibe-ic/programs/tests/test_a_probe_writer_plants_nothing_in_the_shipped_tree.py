@@ -98,6 +98,70 @@ FORMER_WRITERS = {
 #: cost and read as "did not PASS" whenever the suite runs on local edits.
 
 
+#: The child session's OWN autouse cleanup, by identity (file, function). Each
+#: deletes a stray waveform dump (.vcd/.fst/...) from the plugin root or
+#: programs/ after every test -- including one a CONCURRENT parent worker
+#: leaked while the child ran, which the audit would otherwise charge to the
+#: watched node (review of PR fxprobe, 2026-09-28). A write made inside one of
+#: these is the harness's, not the node's; the same write made by the node's
+#: own code is still the node's (see the exemption calibration below).
+CLEANUP_FIXTURES = (
+    (_PLUGIN / "conftest.py", "_strip_stray_waveform_artifacts"),
+    (_TESTS / "conftest.py", "_clean_stray_waveform_dumps"),
+)
+
+
+def test_the_exempt_cleanup_fixtures_exist_by_the_identity_declared():
+    """An exemption naming a function that no longer exists would exempt
+    nothing and say nothing; it must be anchored to the real definition."""
+    import ast
+    for path, name in CLEANUP_FIXTURES:
+        tree = ast.parse(Path(path).read_text())
+        defs = {n.name for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        assert name in defs, f"{path} no longer defines {name}"
+
+
+def test_an_exempt_function_is_exempt_and_a_node_write_is_still_caught(
+        tmp_path):
+    """Exemption is by IDENTITY, not by path or suffix: the same removal of
+    the same kind of file is exempt inside the declared function and is the
+    node's own write outside it."""
+    root = tmp_path / "tree"
+    root.mkdir()
+    child = tmp_path / "child.py"
+    child.write_text(textwrap.dedent("""
+        import os, sys
+        from pathlib import Path
+        root = Path(sys.argv[1])
+        def cleanup_fixture(p):
+            p.unlink()
+        def node_body(p):
+            os.remove(p)
+        for name in ("leaked_by_a_peer.vcd", "planted_by_the_node.vcd"):
+            (root / name).write_text("x")
+        cleanup_fixture(root / "leaked_by_a_peer.vcd")
+        node_body(root / "planted_by_the_node.vcd")
+    """))
+    work = tmp_path / "work"
+    work.mkdir()
+    env = TWA.audit_env(root, work, exempt=((child, "cleanup_fixture"),))
+    env["PYTEST_CURRENT_TEST"] = "pkg/test_x.py::test_node (teardown)"
+    r = _pr.run([sys.executable, str(child), str(root)], cwd=str(root),
+                env=env, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    events = TWA.read_events(work)
+    removed = {e["path"]: e.get("exempt") for e in events
+               if e["event"] == "os.remove"}
+    assert removed == {"leaked_by_a_peer.vcd": "cleanup_fixture",
+                       "planted_by_the_node.vcd": None}, events
+    audit = TWA.Audit(rc=0, output="", events=events)
+    charged = {(e["event"], e["path"]) for e in
+               audit.writes_by("pkg/test_x.py::test_node")}
+    assert ("os.remove", "planted_by_the_node.vcd") in charged, charged
+    assert ("os.remove", "leaked_by_a_peer.vcd") not in charged, charged
+
+
 def test_the_audit_sees_a_write_and_only_a_write(tmp_path):
     """Calibration. The instrument must record a planted-and-removed file,
     and must NOT record the three things that fooled its first version: a tmp
@@ -141,6 +205,24 @@ def test_the_audit_sees_a_write_and_only_a_write(tmp_path):
         (root / "programs").mkdir(exist_ok=True)
         (root / "programs" / "new_dir").mkdir()
         (root / "programs" / "new_dir").rmdir()
+        # CWD-RELATIVE os-level writes, one per operation. With no dir_fd
+        # CPython reports dir_fd=-1 in the audit event, which means "the cwd".
+        os.mkdir("programs/rel_dir")
+        with open("programs/rel_dir/f.txt", "w") as fh:
+            fh.write("x")
+        os.chmod("programs/rel_dir/f.txt", 0o644)
+        os.utime("programs/rel_dir/f.txt")
+        os.chown("programs/rel_dir/f.txt", os.getuid(), os.getgid())
+        os.symlink("f.txt", "programs/rel_dir/s")
+        os.link("programs/rel_dir/f.txt", "programs/rel_dir/h")
+        os.rename("programs/rel_dir/f.txt", "programs/rel_dir/g.txt")
+        os.replace("programs/rel_dir/g.txt", "programs/rel_dir/f.txt")
+        os.remove("programs/rel_dir/s")
+        Path("programs/rel_dir/h").unlink()
+        os.remove("programs/rel_dir/f.txt")
+        Path("programs/rel_dir/t").touch()
+        os.remove("programs/rel_dir/t")
+        os.rmdir("programs/rel_dir")
     """))
     work = tmp_path / "work"
     work.mkdir()
@@ -156,7 +238,30 @@ def test_the_audit_sees_a_write_and_only_a_write(tmp_path):
     assert ("os.remove", "programs/probe.py") in seen, events
     assert ("open", "cwd_relative.txt") in seen, events
     assert ("os.mkdir", "programs/new_dir") in seen, events
-    assert {e["path"] for e in events} == {"programs/probe.py",
+    # One per operation; the builtin `open` of the same path must not be what
+    # satisfies the remove (it once was: `os.remove("cwd_relative.txt")` went
+    # unrecorded while the set equality below still held).
+    rel = "programs/rel_dir"
+    for want in (("os.remove", "cwd_relative.txt"),
+                 ("os.mkdir", rel),
+                 ("os.chmod", f"{rel}/f.txt"),
+                 ("os.utime", f"{rel}/f.txt"),
+                 ("os.chown", f"{rel}/f.txt"),
+                 ("os.symlink", f"{rel}/s"),
+                 ("os.link", f"{rel}/h"),
+                 ("os.rename", f"{rel}/f.txt"),       # rename source
+                 ("os.rename", f"{rel}/g.txt"),       # rename target / replace
+                 ("os.remove", f"{rel}/s"),
+                 ("os.remove", f"{rel}/h"),
+                 ("os.remove", f"{rel}/f.txt"),
+                 ("open", f"{rel}/t"),                # Path.touch: os.open, relative
+                 ("os.rmdir", rel)):
+        assert want in seen, (
+            f"a cwd-relative {want[0]} of {want[1]} was not recorded: "
+            f"{sorted(seen)}")
+    assert {e["path"] for e in events} - {
+        f"{rel}", f"{rel}/f.txt", f"{rel}/g.txt", f"{rel}/s", f"{rel}/h",
+        f"{rel}/t"} == {"programs/probe.py",
                                           "cwd_relative.txt",
                                           "programs/new_dir"}, (
         "the audit reported a write the child never made under the tree: "
@@ -175,7 +280,7 @@ def test_no_former_writer_plants_anything_in_the_shipped_tree():
     write carries no test id, so collection-time events are reported on their
     own: both corpus modules wrote while they were being COLLECTED."""
     audit = TWA.run_nodes(sorted(FORMER_WRITERS), plugin_root=_PLUGIN,
-                          root=_ROOT)
+                          root=_ROOT, exempt=CLEANUP_FIXTURES)
     assert audit.outcomes, (
         f"the audited child reported no test at all (rc={audit.rc}); an "
         f"empty session proves nothing:\n{audit.output[-3000:]}")
@@ -185,15 +290,15 @@ def test_no_former_writer_plants_anything_in_the_shipped_tree():
         if got != "passed":
             problems.append(
                 f"{nodeid} did not PASS under the audit ({got or 'not run'})")
-        wrote = sorted({f"{e['event']} {e['path']}" for e in audit.events
-                        if e["test"].split(" ")[0] == nodeid})
+        wrote = sorted({f"{e['event']} {e['path']}"
+                        for e in audit.writes_by(nodeid)})
         if wrote:
             problems.append(
                 f"{nodeid} wrote into the checkout it tests: "
                 f"{'; '.join(wrote)} (on origin/main 76a277544 it "
                 f"{FORMER_WRITERS[nodeid]})")
-    collected = sorted({f"{e['event']} {e['path']}" for e in audit.events
-                        if not e["test"]})
+    collected = sorted({f"{e['event']} {e['path']}"
+                        for e in audit.writes_by("")})
     if collected:
         problems.append("collecting the former writers wrote into the "
                         "checkout: " + "; ".join(collected))
