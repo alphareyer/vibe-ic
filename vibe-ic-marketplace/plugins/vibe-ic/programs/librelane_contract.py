@@ -343,7 +343,7 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
     # spm chip path the PDK-default GeneratePDN measured 3,391,999
     # power-grid violations (every shape floating) until these were declared.
     plan = {}
-    chip_top_record = project / 'reports/phase3/io_pad_chip_top.json'
+    chip_top_record = project / CHIP_TOP_RECORD_REL
     if chip_top_record.is_file():
         plan = _load(chip_top_record).get('power_pad_plan') or {}
         if isinstance(plan, str):
@@ -640,6 +640,7 @@ def state_from_direct(project: Path, image: str, config_path: Path,
     state: dict[str, Any] = {}
     receipt: dict[str, Any] = {'step': step_id, 'image': image,
                                'config': str(config_path), 'config_sha256': digest(config_path),
+                               'design_name': config.get('DESIGN_NAME'),
                                'required': required, 'views': {}, 'derived': {}}
 
     def _file(view: str, value: Any) -> Path:
@@ -761,6 +762,9 @@ def handoff_to_direct(state_path: Path, targets: dict[str, Path], receipt: Path,
         rows[view] = {'source': str(source), 'source_sha256': digest(source),
                       'dest': str(dest), 'dest_sha256': digest(dest),
                       'replaced_sha256': replaced}
+        if key == 'def':
+            # The top a later step judges is the one this DEF states.
+            rows[view]['design'] = _def_design_name(source)
         if rows[view]['source_sha256'] != rows[view]['dest_sha256']:
             raise Refusal('LL_HANDOFF_COPY_MISMATCH', view)
     document = {'state': str(state_path), 'state_sha256': digest(state_path),
@@ -1591,6 +1595,60 @@ def _apply_runner_floorplan(project: Path, config: dict, sources: dict,
                       f'no declared answers.die_area_um and {why}')
 
 
+#: The chip-top producer's record (step 15.5ic, `io_pad_chip_top_gen`): the
+#: pad-carrying top it wrapped around the core, and which module is which.
+CHIP_TOP_RECORD_REL = 'reports/phase3/io_pad_chip_top.json'
+
+
+def layout_top(project: Path) -> tuple[str, str, str] | None:
+    """(chip_top, core, source) when this chip-path run built a pad-carrying top.
+
+    On the chip path step 15.5ic wraps the core in a top that instantiates the
+    IO cells, and every layout database from 15.5ic on is that top: the direct
+    deck links it (`_inject_padring_chip_top`) and LibreLane's PadRing places
+    the instances PAD_* name inside it. Read from the producer's record, never
+    from a name; None for a core-only or HARDMACRO design, or before the
+    producer wrote a top.
+    """
+    if design_class(project) != DESIGN_CLASS_CHIP_PAD_RING:
+        return None
+    path = project / CHIP_TOP_RECORD_REL
+    if not path.is_file():
+        return None
+    record = _load(path)
+    chip_top, core = record.get('chip_top_module'), record.get('core_module')
+    if (record.get('verdict') != 'WROTE' or not record.get('chip_top_verilog')
+            or not isinstance(chip_top, str) or not isinstance(core, str)
+            or not chip_top or not core or chip_top == core):
+        return None
+    return chip_top, core, f'{CHIP_TOP_RECORD_REL}.chip_top_module'
+
+
+def _apply_layout_top(project: Path, config: dict, sources: dict) -> None:
+    """A layout chain on the chip path links the chip top, not the core.
+
+    The declared `top_cell` may name the core (spm, subservient: the product
+    name); this run's own record says the layout's top is the wrapper around
+    it, which is the rule `general_precheck._recorded_physical_top` applies to
+    the streamed layout. A declared name that is neither refuses.
+    """
+    found = layout_top(project)
+    if found is None:
+        return
+    chip_top, core, source = found
+    declared = config.get('DESIGN_NAME')
+    if declared == chip_top:
+        return
+    if declared not in (None, core):
+        raise Refusal('LL_TOP_CELL_CONFLICT',
+                      f"{sources.get('DESIGN_NAME')} = {declared!r} names neither the "
+                      f"core {core!r} nor the chip top {chip_top!r} of {CHIP_TOP_RECORD_REL}")
+    _set(config, sources, 'DESIGN_NAME', chip_top,
+         f"{source} (the pad-carrying top around the core {core!r}; declared "
+         f"top_cell {declared!r} is that core)" if declared else
+         f"{source} (the pad-carrying top around the core {core!r})")
+
+
 def resolve_step_configs(project: Path, image: str, pdk: str,
                          step_ids: list[str], *, pdk_root: Path,
                          docker: str = 'docker',
@@ -1608,9 +1666,10 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     root.mkdir(parents=True, exist_ok=True)
     design = root / 'design.json'
     emitted = emit_config(project, pdk, design)
-    if _DIE_STEPS & set(step_ids) or overlay:
+    if _DIE_STEPS & set(step_ids) or overlay or layout_top(project):
         sources = _load(design.with_suffix('.provenance.json'))
         _apply_runner_floorplan(project, emitted, sources, step_ids)
+        _apply_layout_top(project, emitted, sources)
         for key, (value, source) in (overlay or {}).items():
             for older in _LEVER_SUPERSEDES.get(key, ()):
                 if older in emitted:
