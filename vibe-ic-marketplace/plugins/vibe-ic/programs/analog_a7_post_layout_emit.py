@@ -597,8 +597,10 @@ NOT_MEASURED_TOKEN = "NOT_MEASURED:"
 
 _TRAN_CARD_RE = re.compile(r"^(\s*\.?tran\s+)(\S+)(\s+)(\S+)(.*)$", re.I)
 _TRAN_MEAS_RE = re.compile(r"^\s*\.?meas(?:ure)?\s+tran\s+(\w+)\s+(.*)$", re.I)
-_KV_RE = re.compile(r"\b(from|to|at|td)\s*=\s*(\S+)", re.I)
-_EVENT_RE = re.compile(r"\b(trig|targ|when)\b", re.I)
+#: Keyword position only (whitespace on the left): a node spelled `to` or
+#: `trig` inside `v(<dut>.<node>)` is a name, not a keyword.
+_KV_RE = re.compile(r"(?:^|\s)(from|to|at|td)\s*=\s*(\S+)", re.I)
+_EVENT_RE = re.compile(r"(?:^|\s)(trig|targ|when)\s", re.I)
 #: Cards anchored at the END of the run: moving the end changes what they read.
 _END_ANCHORED_RE = re.compile(r"^\s*\.?(fourier|four)\b", re.I)
 #: Cards that dump the record over whatever span the run has.

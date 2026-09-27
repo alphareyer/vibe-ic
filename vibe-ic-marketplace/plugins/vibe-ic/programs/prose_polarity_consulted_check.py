@@ -916,6 +916,24 @@ _NOT_PROSE: Dict[str, str] = {
         "position of every card kind and requires the output to be the "
         "neutral-name output with the name substituted, while the same "
         "strings read as prose are denied. Owner: lane mig109.",
+    "analog_a7_post_layout_emit::measurement_span":
+        "NGSPICE TRANSIENT CARDS of the A3 testbench -- `tran <step> <stop>`, "
+        "`meas tran <name> ...` with its `from=`/`to=`/`at=`/`td=` keywords "
+        "and `trig`/`targ`/`when` clauses, and the `fourier`/`wrdata` command "
+        "words -- read to learn how long the run must be for the cards it "
+        "carries. It publishes TIMES (the stop, the last window end) and the "
+        "NAMES of the cards that set or hold them. Keywords are matched in "
+        "keyword position only, so a node or measurement spelled like a "
+        "keyword is a name, and `*` comment lines are skipped. ngspice's "
+        "measure grammar has no form that DENIES a window: a card states "
+        "`to=` or it does not. Direct precedents: `analog_a7_post_layout_emit"
+        "::remap_probes` and `analog_a3_netlist_emit::tran_rail_report`. "
+        "Falsifier: `test_t130_a7_budget.py::test_the_not_prose_claim_for_"
+        "the_span_reader_is_falsifiable`, which puts every identifier-shaped "
+        "denial token of `_prose_polarity`'s own vocabulary into every name "
+        "position of every card kind and requires the span to be the "
+        "neutral-name span with the name substituted, while the same strings "
+        "read as prose are denied. Owner: lane rfa7 (T130).",
     "analog_a7_post_layout_emit::_echo_without":
         "An ngspice `echo \"MEAS k1=\" $&v1 \" k2=\" $&v2` CARD, rebuilt "
         "without the `key= $&var` pairs whose variable `remap_probes` took "

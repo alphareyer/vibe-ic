@@ -357,3 +357,78 @@ def test_simulated_time_reached_reads_ngspice_progress():
            "Reference value :  4.13724e-06\rtran simulation interrupted\n")
     assert A7.simulated_time_reached_s(raw) == pytest.approx(4.13724e-06)
     assert A7.simulated_time_reached_s("no progress printed\n") is None
+
+
+# ── the span reader is a grammar reader (the `_NOT_PROSE` claim) ──────────
+_SPAN_SHAPES = (
+    "meas tran {t} avg v(b) from=523240n to=1025000n",
+    "meas tran k avg v(x1.{t}) from=523240n to=1025000n",
+    "meas tran k max v(x1.{t})",
+    "meas tran {t} find v(b) at=2000000n",
+    "meas tran k trig v(x1.{t}) val=0.6 rise=1 targ v(b) val=0.6 rise=1",
+    "meas tran k avg v(b) from=0 to=1025000n\nlet {t} = k / 2",
+    "wrdata {t}.txt v(b)",
+)
+
+
+def _denial_vocabulary() -> list:
+    """`_prose_polarity`'s OWN denial words, read out of its own patterns."""
+    import re
+    import _prose_polarity as PP
+    raw = PP._DENIAL_CORE + "|" + PP._DENIAL_RETIRED
+    out = set()
+    for m in re.findall(r"([A-Za-z][A-Za-z' -]{2,})", raw):
+        m = m.strip()
+        out.add(m[1:] if m.startswith("b") and len(m) > 3 else m)
+    return sorted(w for w in out if len(w) >= 2 and not w.startswith("b"))
+
+
+def _sub(obj, old: str, new: str):
+    if isinstance(obj, str):
+        return obj.replace(old, new)
+    if isinstance(obj, list):
+        return [_sub(x, old, new) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _sub(v, old, new) for k, v in obj.items()}
+    return obj
+
+
+def test_the_not_prose_claim_for_the_span_reader_is_falsifiable():
+    """`measurement_span` is in `prose_polarity_consulted_check._NOT_PROSE`.
+    THE PROPERTY: a denial word in any name position changes nothing but the
+    name. THE CONTRAST: the identical strings, read as prose, are denied."""
+    import re
+    import _prose_polarity as PP
+    tokens = [t for t in _denial_vocabulary()
+              if re.fullmatch(r"[A-Za-z_]\w*", t)]
+    assert len(tokens) >= 5, "the vocabulary was not read"
+    trials = changed = 0
+    for tok in tokens:
+        for shape in _SPAN_SHAPES:
+            trials += 1
+            deck = TB.replace("meas tran railx_max_b",
+                              shape.format(t=tok) + "\nmeas tran railx_max_b")
+            ref = TB.replace("meas tran railx_max_b",
+                             shape.format(t="zqz") + "\nmeas tran railx_max_b")
+            got = A7.measurement_span(deck)
+            want = _sub(A7.measurement_span(ref), "zqz", tok.lower())
+            if got != want:
+                changed += 1
+    assert trials >= 35
+    assert changed == 0, ("a denial word changed what the span reader "
+                          "derived -- the _NOT_PROSE entry for "
+                          "measurement_span is false; delete it, not this "
+                          "assertion")
+    prose = sum(1 for t in tokens for s in _SPAN_SHAPES
+                if PP.is_denied(s.format(t=t)))
+    assert prose >= len(tokens), "the vocabulary is not inert as prose"
+
+
+def test_a_node_spelled_like_a_keyword_is_a_name():
+    deck = TB.replace("meas tran railx_max_b",
+                      "meas tran railx_max_trig max v(x1.trig)\n"
+                      "meas tran railx_max_to max v(x1.to)\n"
+                      "meas tran railx_max_b")
+    span = A7.measurement_span(deck)
+    assert span["stop_s"] == pytest.approx(1026e-6)
+    assert {"railx_max_trig", "railx_max_to"} <= set(span["span_following"])
