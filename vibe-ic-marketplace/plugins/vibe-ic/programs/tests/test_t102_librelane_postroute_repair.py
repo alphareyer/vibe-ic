@@ -481,7 +481,12 @@ def test_the_script_orders_the_repair_and_connects_before_it_writes():
     assert at(r'detailed_placement') < at(r'^global_connect') < at(r'detailed_route') < at(r'^write_views')
     assert 'set_global_connections' in tcl
     # the ECO route is scoped to the touched nets
-    assert '-nets [dict keys $::vic_dirty]' in tcl
+    assert '-nets [dict keys $dirty]' in tcl
+    assert 'vic_eco_route ::vic_dirty eco_route' in tcl
+    # antenna residue goes to the tool's repair, on the new diodes' nets only,
+    # after the ECO route and before anything is written
+    assert at(r'set ::vic_eco_ok \[vic_eco_route') < at(r'log_cmd repair_antennas') \
+        < at(r'vic_eco_route ::vic_ant_dirty antenna_route') < at(r'^write_views')
 
 
 @pytest.mark.skipif(not __import__('shutil').which('tclsh'), reason='tclsh absent')
