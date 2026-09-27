@@ -14,8 +14,9 @@ Contracts:
      admission row without `impl`) cannot lock the project out of its mode.
      History -- the ledger AND default-flow output -- is asked when a record
      is CREATED, by resolve() or by write_record().
-  7. The record's image is never silently frozen: a second dispatch on
-     another image refuses IMPL_IMAGE_CHANGED.
+  7. The record's image is never silently frozen: a null image carries its
+     NOT CAPTURED reason and is filled once, recorded; a second dispatch on
+     ANOTHER image refuses IMPL_IMAGE_CHANGED.
 """
 from __future__ import annotations
 
@@ -140,7 +141,7 @@ def test_a_record_for_another_mode_is_never_overwritten(project):
     path.parent.mkdir(parents=True)
     other = {"schema": IF.SCHEMA, "impl": "orfs", "flag": "--orfs",
              "resolved_at": "t", "resolved_by": "t", "tool_defaults": {},
-             "image": None}
+             "image": None, "image_capture": "NOT CAPTURED: test"}
     path.write_text(json.dumps(other))
     before = path.read_bytes()
     for call in (lambda: IF.write_record(project, "librelane", resolved_by="t"),
@@ -275,8 +276,33 @@ def test_a_new_image_is_never_silently_frozen(project):
     assert IF.read_record(project)["image"] == "img-A"
 
 
-def test_an_image_after_a_null_image_is_refused(project):
-    IF.write_record(project, "librelane", resolved_by="t")
+def test_a_null_image_carries_its_reason_and_is_filled_once(project):
+    """Wave-4b review: a null image is NOT CAPTURED with a reason (#312/#365),
+    and the first dispatch that resolves an image fills it, saying so; only a
+    change from one image to ANOTHER is refused."""
+    IF.write_record(project, "librelane", resolved_by="front door")
+    rec = IF.read_record(project)
+    assert rec["image"] is None
+    assert rec["image_capture"].startswith("NOT CAPTURED:")
+    IF.write_record(project, "librelane", resolved_by="phase3", image="img-A")
+    rec = IF.read_record(project)
+    assert rec["image"] == "img-A"
+    assert rec["image_capture"].startswith("FILLED by phase3 at ")
+    assert "was NOT CAPTURED:" in rec["image_capture"]
+    assert rec["resolved_by"] == "front door"      # the first resolution kept
     with pytest.raises(IF.ImplRefusal) as ei:
-        IF.write_record(project, "librelane", resolved_by="t", image="img-A")
+        IF.write_record(project, "librelane", resolved_by="t", image="img-B")
     assert ei.value.reason_class == IF.IMPL_IMAGE_CHANGED
+
+
+def test_a_bare_null_image_is_a_damaged_record(project):
+    path = IF.record_path(project)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({
+        "schema": IF.SCHEMA, "impl": "librelane", "flag": "--librelane",
+        "resolved_at": "t", "resolved_by": "t", "tool_defaults": {},
+        "image": None}))
+    with pytest.raises(IF.ImplRefusal) as ei:
+        IF.read_record(project)
+    assert ei.value.reason_class == IF.IMPL_RECORD_UNREADABLE
+    assert "image_capture" in str(ei.value)
