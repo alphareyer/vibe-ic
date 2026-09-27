@@ -655,3 +655,44 @@ def test_a_stated_derived_value_alone_decides_among_the_allowed(tmp_path):
     assert rec["verdict"] == "PASS", rec["findings"]
     assert rec["overrides"] == {"memsize": 1024}
     assert rec["parameters"]["memsize"]["decided_by"] == "document_widths"
+
+
+def test_the_pad_pairs_derived_at_the_ip_default_are_refreshed(tmp_path):
+    """D9 derives `derived_pad_pairs` at staging from the header at the IP's
+    DEFAULT; D2's rule inside it rejects `o_memory_addr -> o_memory_[rw]addr`
+    (10 vs 9 bits). After the documents' memsize is applied, the R1 pair is
+    derived and accepted -- otherwise 15.5ic leaves 20 address bits sideless."""
+    import renamed_interface_derive as RID
+    p = tmp_path / "proj"
+    (p / "input/docs").mkdir(parents=True)
+    (p / "input/docs/L3_external_interface.md").write_text(
+        PAD_DOC.replace("memory waddr bus", "memory addr bus"))
+    docs = p / "phase1/generated_docs"
+    docs.mkdir(parents=True)
+    (docs / "L9_INTEGRATION_SPEC.json").write_text(json.dumps({
+        "top_module": "widget", "top_ports": [
+            _port("clk", "input", 1, True), _port("rst", "input", 1, True),
+            _port("o_status", "output", 1, True),
+            _port("o_memory_addr", "output", 10, False),
+            _port("o_memory_waddr", "output", 9, True, doc=False),
+            _port("o_memory_raddr", "output", 9, True, doc=False)]}))
+    (docs / "L8_RTL_CONSTANTS.json").write_text(json.dumps(
+        {"parameters": [_param("memsize", 1024, override=True)]}))
+    rtl = p / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "widget.v").write_text(
+        "module widget #(parameter memsize = 512,\n"
+        "  parameter aw = $clog2(memsize))\n"
+        "  (input wire clk, input wire rst,\n"
+        "   output wire [aw-1:0] o_memory_waddr,\n"
+        "   output wire [aw-1:0] o_memory_raddr, output wire o_status);\n"
+        "endmodule\n")
+    mf = RID.apply_to_manifest(p, {"reused_ip": True, "renamed_interfaces": []})
+    (rtl / "SOURCE_MANIFEST.json").write_text(json.dumps(mf))
+    assert mf["derived_pad_pairs"] == []                     # staging, at 512
+    assert D.main([str(p), "--apply"]) == 0
+    after = json.loads((rtl / "SOURCE_MANIFEST.json").read_text())
+    assert [(d["l9"], d["rtl"], d["rule"]) for d in after["derived_pad_pairs"]] \
+        == [(["o_memory_addr"], ["o_memory_raddr", "o_memory_waddr"], "R1")]
+    rec = json.loads((p / D.REPORT_REL).read_text())
+    assert rec["derived_pad_pairs_refreshed"]["derived_pad_pairs"] == 1

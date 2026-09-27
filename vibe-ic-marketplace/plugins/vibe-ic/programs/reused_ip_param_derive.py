@@ -346,7 +346,8 @@ def width_pairs(manifest: Dict[str, Any]) -> List[Tuple[Dict[str, Any], str]]:
     for pair in manifest.get("renamed_interfaces") or []:
         if isinstance(pair, dict):
             out.append((pair, f"{MANIFEST_REL} renamed_interfaces"))
-    for pair in manifest.get("derived_pad_pairs") or []:
+    from _l_doc_pad_placement import DERIVED_PAD_PAIRS_KEY
+    for pair in manifest.get(DERIVED_PAD_PAIRS_KEY) or []:
         if isinstance(pair, dict) and str(pair.get("rule") or "") == "R1":
             out.append((pair, f"{MANIFEST_REL} derived_pad_pairs (R1)"))
     return out
@@ -742,6 +743,31 @@ def apply_overrides(project: Path, rec: Dict[str, Any]) -> Dict[str, Any]:
     return changed
 
 
+def refresh_derived_pad_pairs(project: Path) -> Dict[str, Any]:
+    """Re-derive what staging derived from the header this program changed.
+
+    `renamed_interface_derive` (D9) derives SOURCE_MANIFEST's
+    `derived_pad_pairs` when the IP is staged, from the staged header at its
+    DEFAULT parameters, and D2's acceptance rule inside it rejects a pair
+    whose widths differ at those defaults. MEASURED on a subservient-shaped
+    fixture: at memsize 512 the `o_mem_addr -> o_mem_[rw]addr` R1 pair is
+    rejected (9 vs 10 bits); at the documents' 1024 it is derived. Once
+    `apply_overrides` has changed the header, that staging-time derivation
+    describes an IP that no longer exists, so it is refreshed through D9's
+    own `apply_to_manifest` (the one writer of those keys)."""
+    import renamed_interface_derive as _rid
+    mf_path = Path(project) / MANIFEST_REL
+    mf = _read_json(mf_path)
+    if mf is None:
+        raise ValueError(f"{MANIFEST_REL} is absent or unreadable")
+    mf = _rid.apply_to_manifest(Path(project), mf)
+    write_json(mf_path, mf)
+    derivation = mf.get("renamed_interfaces_derivation") or {}
+    return {"derived_pad_pairs": len(mf.get(_rid.DERIVED_KEY) or []),
+            "verdict": derivation.get("verdict"),
+            "rejected": len(derivation.get("rejected") or [])}
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("project")
@@ -769,6 +795,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         except (OSError, ValueError) as exc:
             rec.update(verdict="NOT_MEASURED", rc=2,
                        reason=f"the overrides could not be applied: {exc}")
+        if rec.get("applied"):
+            try:
+                rec["derived_pad_pairs_refreshed"] = \
+                    refresh_derived_pad_pairs(project)
+            except Exception as exc:  # noqa: BLE001 — named, never swallowed
+                rec.update(verdict="NOT_MEASURED", rc=2,
+                           reason=(f"the header changed but the pad pairs "
+                                   f"derived from it could not be refreshed: "
+                                   f"{type(exc).__name__}: {exc}"))
     prior = _read_json(sidecar_path(project, rec["top"])) if rec.get("top") \
         else None
     if prior:
