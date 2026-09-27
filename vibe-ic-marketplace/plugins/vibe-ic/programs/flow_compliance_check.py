@@ -16168,6 +16168,38 @@ def _with_signed_judgement(fn):
     return _judge
 
 
+def _output_not_owed(project: Path, step: Dict[str, Any], spec: Any
+                     ) -> Optional[str]:
+    """The reason ONE declared output is not owed by this delivery, or None.
+
+    FX_SPM_GATES_2. A step may declare `output_conditions`, mapping one of
+    its own `required_outputs` entries to a `delivery_declares` clause -- the
+    same grammar the die steps (15.5ic, 26.5ic, 37.5ic) condition on. MEASURED
+    on the same-RTL spm x gf180mcuD run (deliverable HARDMACRO, core-only):
+    step 37 FAILED `required_outputs missing: [...pad_ring_route_evidence.json]`
+    for an artefact its only producer (`step_pad_ring_final_evidence`, under
+    `_chip_path_requests_pad_ring`) correctly never writes for a hardmacro.
+
+    NOT APPLICABLE ONLY BY DECLARATION. The entry is exempt only when
+    `_delivery_declares_absence` CITES the design's own declaration (a
+    positively declared die-less delivery that bought no slot), and the
+    reason names it. Every other answer -- no clause, an absent or unreadable
+    declaration, a DIE, a bought slot -- leaves the entry owed exactly as
+    before: absence of a declaration is not a declaration of absence."""
+    conds = step.get("output_conditions")
+    if not isinstance(conds, dict):
+        return None
+    cond = conds.get(str(spec))
+    if not isinstance(cond, dict) or not cond.get("delivery_declares"):
+        return None
+    cited = _delivery_declares_absence(project, cond.get("delivery_declares"))
+    if cited is None:
+        return None
+    rel, detail = cited[0], cited[1]
+    return (f"declared output {spec!r} NOT_APPLICABLE for this delivery: "
+            f"{rel} records {detail}, so its producer owes it nothing")
+
+
 @_with_child_gate_step
 @_with_signed_judgement
 def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
@@ -16394,7 +16426,13 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     _bind_specs: List[Dict[str, Any]] = []
     _n_attr = 0
     _n_glob = 0
+    _not_owed: List[str] = []
     for pat in outputs:
+        _why_not_owed = _output_not_owed(project, step, pat)
+        if _why_not_owed:
+            _not_owed.append(pat)
+            result.reasons.append(_why_not_owed)
+            continue
         _sat, _ev, _mode, _note, _detail = _resolve_required_output(
             project, sid, pat, _binding or {})
         _bind_modes[pat] = _mode
@@ -17699,9 +17737,12 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                       if _bind_modes.get(p) == "step_attributed"]
         result.reasons.append(
             f"required_outputs missing: {missing_entries} "
-            f"(satisfied: {len(outputs) - len(missing_entries)}/{len(outputs)}"
-            f" — the gate passed, but every declared output must be produced, "
-            f"not just one)"
+            f"(satisfied: {len(outputs) - len(_not_owed) - len(missing_entries)}"
+            f"/{len(outputs) - len(_not_owed)}"
+            + (f", {len(_not_owed)} not owed by this delivery" if _not_owed
+               else "")
+            + " — the gate passed, but every declared output must be produced, "
+            "not just one)"
             + (f" — {len(_by_record)} of them on this step's OWN write record: "
                f"{_by_record}" if _by_record else ""))
 

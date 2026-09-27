@@ -7393,6 +7393,22 @@ steps:
       - "reports/phase3/pad_ring_route_evidence.json"
       - "reports/phase3/gates/stage3_compliance.json"
       - "reports/phase3/layout_receipts.json"
+    # THE ROUTE ATTESTATION IS OWED ONLY BY A DELIVERY WITH A PAD RING
+    # (FX_SPM_GATES_2). Its only producer, `step_pad_ring_final_evidence`,
+    # runs under `_chip_path_requests_pad_ring` -- the condition step 15.5ic
+    # declares. MEASURED on the same-RTL spm x gf180mcuD run (deliverable
+    # HARDMACRO, core-only): this step FAILED `required_outputs missing:
+    # [...pad_ring_route_evidence.json]` (missing_artefact) for a file that is
+    # correctly never written. `flow_compliance_check._output_not_owed` makes
+    # the ENTRY (not the step) NOT_APPLICABLE only when the design's own
+    # declaration says so -- the same `delivery_declares` clause as the die
+    # steps, cited in the reason -- and a DIE stays held to it.
+    output_conditions:
+      "reports/phase3/pad_ring_route_evidence.json":
+        delivery_declares:
+          declaration: "input/submission_template/tapeout_declaration.json"
+          field: "answers.deliverable"
+          absent_when: ["HARDMACRO"]
     gate:
       all_of:
         - program_exit_zero: "layout_receipt_identity_check . --json reports/phase3/layout_receipt_identity.json"
