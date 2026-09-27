@@ -1337,6 +1337,10 @@ def _print_contract(contracts: List[Dict[str, Any]], out_path: Path,
 #: of this file that treat top-level strings as declared spellings never see
 #: a port or file name from it.
 SUPPLIED_RTL_KEY = "supplied_rtl"
+#: Printed (stderr) with the path, only when THIS run wrote the record on the
+#: fail-closed path, so a caller reports what the emitter did rather than what
+#: happens to be on disk.
+SUPPLIED_RECORD_MARKER = "spec_declaration_emit: SUPPLIED_RTL_RECORD_WRITTEN "
 
 
 def _sha256(path: Path) -> Optional[str]:
@@ -1345,6 +1349,20 @@ def _sha256(path: Path) -> Optional[str]:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None
+
+
+def _pruned_out_of_cone(project: Path, rtl: Path) -> Tuple[set, Optional[str]]:
+    """(basenames the transitive-cone reduction moved out of `rtl`, where that
+    is recorded) -- empty when nothing was moved or it cannot be read."""
+    try:
+        import rtl_transitive_cone as _cone
+        man = (rtl.parent / (rtl.name + _cone.SIDECAR_SUFFIX)
+               / _cone.RESTORE_MANIFEST_NAME)
+        moved = json.loads(man.read_text()).get("moved") or []
+        return ({str(n) for n in moved},
+                str(man.relative_to(project)))
+    except Exception:  # noqa: BLE001
+        return set(), None
 
 
 def supplied_rtl_record(project: Path,
@@ -1373,20 +1391,34 @@ def supplied_rtl_record(project: Path,
             and isinstance(staged_from, list) and staged_from):
         return None
     mf_rel = str(mf_path.relative_to(project))
+    pruned, pruned_src = _pruned_out_of_cone(project, rtl)
     files: List[Dict[str, Any]] = []
     for rel in staged_from:
         if not isinstance(rel, str):
             continue
         src = project / rel
         dst = rtl / Path(rel).name
-        s_src, s_dst = _sha256(src), _sha256(dst)
-        files.append({
-            "input": rel,
-            "input_sha256": s_src,
-            "staged": str(dst.relative_to(project)),
-            "staged_sha256": s_dst,
-            "byte_identical": (s_src is not None and s_src == s_dst),
-        })
+        entry: Dict[str, Any] = {"input": rel, "input_sha256": _sha256(src),
+                                 "staged": str(dst.relative_to(project))}
+        # What is IN rtl/ now, not what consume once copied: a file the cone
+        # reduction moved out is not a modified file, and saying
+        # `byte_identical: false` about it would tell an auditor the flow
+        # changed supplied RTL.
+        if dst.is_file():
+            entry["status"] = "staged"
+            entry["staged_sha256"] = _sha256(dst)
+            entry["byte_identical"] = (
+                None if None in (entry["input_sha256"], entry["staged_sha256"])
+                else entry["input_sha256"] == entry["staged_sha256"])
+        elif dst.name in pruned:
+            entry.update(status="pruned_out_of_cone", staged_sha256=None,
+                         byte_identical=None, source=pruned_src)
+        else:
+            entry.update(status="absent_from_rtl", staged_sha256=None,
+                         byte_identical=None,
+                         reason=("no file of this name is in rtl/ (staging is "
+                                 "flat and first-wins on a name collision)"))
+        files.append(entry)
     record: Dict[str, Any] = {
         "note": ("facts about the RTL this design's input supplied, read by "
                  "the flow; not a declaration of any free choice"),
@@ -1784,13 +1816,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                     if args.from_rtl_declaration else {})
 
     existing: Dict[str, Any] = {}
+    existing_unreadable = False
     if out_path.is_file():
         try:
             loaded = json.loads(out_path.read_text())
             if isinstance(loaded, dict):
                 existing = loaded
+            else:
+                existing_unreadable = True
         except Exception:
             existing = {}
+            existing_unreadable = True
     sidecar = out_path.with_name(out_path.stem + ".provenance.json")
     prior = _load_prior_provenance(sidecar)
 
@@ -1818,7 +1854,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                       "treated as REQUIRED)" % e["required_marker"],
                       file=sys.stderr)
         supplied = supplied_rtl_record(project, args.supplied_top)
-        if supplied is not None:
+        if supplied is not None and existing_unreadable:
+            # The fail-closed path must not cost an author their file: one
+            # stray comma would otherwise be replaced by the record alone.
+            print("  The design supplied its RTL, but %s exists and is not a "
+                  "readable JSON object: the %r record was NOT written and the "
+                  "file was left untouched." % (out_path, SUPPLIED_RTL_KEY),
+                  file=sys.stderr)
+        elif supplied is not None:
             # Only the record: `existing` is written back as it was, and not
             # one contract field is added, so `verify_declaration` still names
             # every REQUIRED field as absent.
@@ -1828,6 +1871,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("  The design supplied its RTL: wrote ONLY the %r record "
                   "(staged files, top, ports) to %s. No free choice was "
                   "written." % (SUPPLIED_RTL_KEY, out_path), file=sys.stderr)
+            print("%s%s" % (SUPPLIED_RECORD_MARKER, out_path), file=sys.stderr)
         print("  Declare each with --set <field>=<value> (or --from-json). "
               "No contract field written — a default-filled declaration would "
               "turn the required-artifact gate green against a value nobody "

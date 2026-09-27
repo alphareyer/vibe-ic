@@ -1184,14 +1184,21 @@ def _scan_rtl_modules(rtl_dir: Path) -> Tuple[set, set]:
 def _scan_rtl_files(files: List[Path]) -> Tuple[set, set]:
     """`_scan_rtl_modules` over an explicit file list.
 
+    Both scans read CODE: comments and strings are blanked first
+    (`_hdl_code_text`, offset-preserving), so `// This module ...` is neither a
+    declaration nor half of an instantiation.
+
     An instance name may carry an ARRAY range (`adder u[N-1:0] (`): a module
     instantiated only that way is still instantiated, not a second root.
 
     A module's own PARAMETERISED header (`module X #(...) (...);`) is not an
-    instantiation of X. The parameter group is matched lazily and unbounded,
-    so from that header it ran into the body until any
-    `) <word> (` -- e.g. `negedge rst) if (` -- and read X as instantiated,
-    i.e. not a root. Declaration headers are masked before the search."""
+    instantiation of X: from that header a lazy parameter group ran into the
+    body until any `) <word> (` -- e.g. `negedge rst) if (`. So every
+    declaration header is replaced by `;` before the instance search: a
+    statement boundary, never a word the search could read as an instance
+    name. (A bare `module` keyword left in its place was one: after
+    `endmodule : top` or `endmodule // top` it read as `top module (`.)"""
+    import _hdl_code_text as _hct
     decls: set = set()
     text_parts: List[str] = []
     for f in files:
@@ -1199,10 +1206,11 @@ def _scan_rtl_files(files: List[Path]) -> Tuple[set, set]:
             t = f.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        text_parts.append(t)
-        decls.update(_MODULE_DECL_RE.findall(t))
-    corpus = re.sub(r"\b(module|macromodule)\s+[A-Za-z_]\w*", r"\1",
-                    "\n".join(text_parts))
+        code = _hct.strip_hdl_comments_and_strings(t)
+        text_parts.append(code)
+        decls.update(_MODULE_DECL_RE.findall(code))
+    corpus = "\n".join(text_parts)
+    corpus = re.sub(r"\b(?:macro)?module\s+[A-Za-z_]\w*", ";", corpus)
     insts: set = set()
     for d in decls:
         inst_re = re.compile(

@@ -21,6 +21,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _PROGRAMS = Path(__file__).resolve().parents[1]
 if str(_PROGRAMS) not in sys.path:
     sys.path.insert(0, str(_PROGRAMS))
@@ -175,6 +177,64 @@ endmodule
     assert top == "wide_top"
 
 
+# Review wave 4c: the header mask read comments, crossed newlines and left a
+# bare `module` keyword the instance search took for an instance name. Each
+# shape below is {file name: text}; the expected top is the design's only root.
+_LEAF = "module {n} (input a, output y); assign y = a; endmodule\n"
+COMMENT_SHAPES = {
+    # (a) a comment ending in "module", then an instance on the next line
+    "comment_then_instance": ({"top.v": (
+        "module top (input a, output y);\n"
+        "  // instantiate the leaf module\n"
+        "  leaf u_leaf (.a(a), .y(y));\n"
+        "endmodule\n" + _LEAF.format(n="leaf"))}, "top"),
+    # (b) a comment ending in "module" above a parameterised header
+    "comment_then_param_header": ({"wide_top.v": (
+        "// Top-level wrapper module\n"
+        "module wide_top #(parameter n = 2) (input clk, input rst, output q);\n"
+        "    small_leaf u_l (.clk(clk), .rst(rst), .q(q));\n"
+        "endmodule\n"
+        "module small_leaf (input clk, input rst, output reg q);\n"
+        "    always @(posedge clk or negedge rst)\n"
+        "        if (!rst) q <= 1'b0; else q <= ~q;\n"
+        "endmodule\n")}, "wide_top"),
+    # (c1) `endmodule // name` at the end of one file, a header in the next
+    "trailing_endmodule_comment": ({
+        "a_top.v": ("module a_top (input a, output y);\n"
+                    "  b_leaf u (.a(a), .y(y));\n"
+                    "endmodule // a_top\n"),
+        "b_leaf.v": _LEAF.format(n="b_leaf")}, "a_top"),
+    # (c2) a comment naming the top right above another module's header
+    "comment_names_the_top": ({"core.v": (
+        "module core_top (input a, output y);\n"
+        "  leaf_cell u (.a(a), .y(y));\n"
+        "endmodule\n"
+        "// leaf register used by core_top\n" + _LEAF.format(n="leaf_cell"))},
+        "core_top"),
+    # (c3) the SV end label
+    "sv_endmodule_label": ({"core.sv": (
+        "module core_top (input a, output y);\n"
+        "  leaf_cell u (.a(a), .y(y));\n"
+        "endmodule : core_top\n" + _LEAF.format(n="leaf_cell"))}, "core_top"),
+}
+
+
+@pytest.mark.parametrize("where", ["staged_rtl", "supplied_input"])
+@pytest.mark.parametrize("shape", sorted(COMMENT_SHAPES))
+def test_comments_and_labels_do_not_move_the_root(tmp_path, shape, where):
+    """RED on the header mask as first landed: each returned `chip_top`."""
+    files, want = COMMENT_SHAPES[shape]
+    project = tmp_path / "c"
+    d = (project / "phase2" / "stage1" / "rtl" if where == "staged_rtl"
+         else project / "input" / "vendor_rtl")
+    d.mkdir(parents=True)
+    for name, text in files.items():
+        (d / name).write_text(text)
+    top, _note = VIBE._resolve_top_name(project, "product_name", "chip_top",
+                                        False)
+    assert top == want
+
+
 def test_staged_rtl_still_outranks_supplied_rtl(tmp_path):
     """When rtl/ holds modules, it alone is read, as before."""
     project = _supplied_project(tmp_path)
@@ -324,3 +384,83 @@ def test_the_record_is_not_read_as_a_feature_decision(tmp_path):
     assert L10C.conditional_feature_declared(str(project), "M") is False
     (project / DECL_PATH).write_text(json.dumps({"isa_extensions": ["M"]}))
     assert L10C.conditional_feature_declared(str(project), "M") is True
+
+
+# --------------------------------------------------------------------------
+# Review wave 4c, MINORs: report what the emitter DID; never cost an author
+# their file; record what is in rtl/ now.
+# --------------------------------------------------------------------------
+def _sha(p: Path) -> str:
+    import hashlib
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def test_step_does_not_claim_a_pre_existing_file_as_the_record(tmp_path):
+    """No supplied RTL, a declaration another writer left: the step must not
+    say it wrote the record, nor list that file as its artefact."""
+    import design_one_shot_runner as R
+    project = _consumed_project(tmp_path, supplied=False)
+    decl = project / DECL_PATH
+    decl.parent.mkdir(parents=True)
+    decl.write_text(json.dumps({"ip_catalog_used": []}))
+    before = _sha(decl)
+    res = R.step_arith_declaration_emit(project)
+    assert _sha(decl) == before
+    assert "supplied-RTL record" not in res.detail, res.detail
+    assert "left untouched" in res.detail, res.detail
+    assert res.output_files == []
+
+
+def test_step_reports_the_path_the_contract_names(tmp_path):
+    """The record is written where the SPEC's clause points; the step names
+    that file, not an assumed plugin_output/declaration.json."""
+    import design_one_shot_runner as R
+    project = _consumed_project(tmp_path)
+    other = "plugin_output/impl_choices.json"
+    (project / "input" / "docs" / "L7_verification_plan.md").write_text(
+        CONTRACT.replace(DECL_PATH, other))
+    res = R.step_arith_declaration_emit(project)
+    assert (project / other).is_file()
+    assert not (project / DECL_PATH).exists()
+    assert str(project / other) in res.detail, res.detail
+    assert res.output_files == [str(project / other)]
+
+
+def test_fail_closed_leaves_an_unreadable_author_file_alone(tmp_path):
+    """One stray comma in the author's file must not be answered by replacing
+    the file with the record alone."""
+    project = _consumed_project(tmp_path)
+    decl = project / DECL_PATH
+    decl.parent.mkdir(parents=True)
+    decl.write_text('{"shift_direction": "left", "reset_style": "async",}\n')
+    before = _sha(decl)
+    cp = _emit(project, "--supplied-top", "shift_top")
+    assert cp.returncode == 1, cp.stderr
+    assert _sha(decl) == before
+    assert "left untouched" in cp.stderr, cp.stderr
+
+
+def test_a_file_the_cone_pruned_is_recorded_as_pruned_not_modified(tmp_path):
+    """The real cone reduction moves an orphan out of rtl/. The record must say
+    so; `byte_identical: false` would claim the flow changed supplied RTL."""
+    import reused_ip_rtl_consume as C
+    import rtl_transitive_cone as CONE
+    project = _supplied_project(tmp_path)
+    (project / "input" / "vendor_rtl" / "orphan.v").write_text(
+        "module orphan (input a, output y); assign y = a; endmodule\n")
+    docs = project / "input" / "docs"
+    docs.mkdir(parents=True)
+    (docs / "L7_verification_plan.md").write_text(CONTRACT)
+    assert C.consume_reused_ip_rtl(project)["reused_ip"] is True
+    rtl = project / "phase2" / "stage1" / "rtl"
+    cr = CONE.transitive_cone("shift_top", rtl)
+    assert CONE.prune_to_cone(rtl, cr) == ["orphan.v"]
+    _emit(project, "--supplied-top", "shift_top")
+    files = {f["input"]: f for f in json.loads(
+        (project / DECL_PATH).read_text())["supplied_rtl"]["files"]}
+    kept = files["input/vendor_rtl/shift_top.v"]
+    gone = files["input/vendor_rtl/orphan.v"]
+    assert (kept["status"], kept["byte_identical"]) == ("staged", True)
+    assert (gone["status"], gone["byte_identical"]) == ("pruned_out_of_cone",
+                                                        None)
+    assert gone["source"].endswith(CONE.RESTORE_MANIFEST_NAME)

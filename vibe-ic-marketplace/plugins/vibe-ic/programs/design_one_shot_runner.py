@@ -21710,12 +21710,26 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
                               f"[{_fields_of(out_p)}]", [str(out_p)])
         reason = (spec_cp.stderr or spec_cp.stdout
                   or "").strip().replace("\n", " ")[:400]
-        _wrote = ("wrote only the supplied-RTL record, no free choice"
-                  if out_p.is_file() else "no file written")
+        # What THIS run of the emitter did, from its own marker line -- not
+        # from whether some file happens to be on disk (another writer, an
+        # earlier run), and at the path the contract named, not an assumed one.
+        _rec = None
+        for _ln in (spec_cp.stderr or "").splitlines():
+            if _ln.startswith(_decl.SUPPLIED_RECORD_MARKER):
+                _rec = Path(_ln[len(_decl.SUPPLIED_RECORD_MARKER):].strip())
+        if _rec is not None and _rec.is_file():
+            _wrote = (f"wrote only the supplied-RTL record to {_rec}, "
+                      f"no free choice")
+        elif out_p.is_file():
+            _wrote = ("no file written by this step (a pre-existing "
+                      "plugin_output/declaration.json was left untouched)")
+        else:
+            _wrote = "no file written"
         return StepResult("arith_declaration_emit", "NOT_MEASURED", time.time() - t0,
                           f"spec_declaration_emit fail-closed "
                           f"(rc={spec_cp.returncode}); {_wrote} — "
-                          f"{reason}", [str(out_p)] if out_p.is_file() else [],
+                          f"{reason}",
+                          [str(_rec)] if _rec is not None and _rec.is_file() else [],
                           reason_class=_V.ReasonClass.EXECUTION_ERROR)
 
     # 2. No spec-declared contract — the previous behaviour, byte for byte.
