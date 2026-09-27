@@ -249,7 +249,17 @@ def test_an_ifnone_record_without_the_compilers_sorry_is_not_explained():
 
 
 def test_an_interconnect_record_on_a_non_inout_endpoint_is_not_explained():
+    # FX_SPM_GATES_2: the record here is `(INTERCONNECT u_pad.PAD p
+    # (0.000:0.000:0.000))` -- zero delay to the top port `p`, which the
+    # ZERO_DELAY_TOP_PORT_INTERCONNECT class now explains ON ITS OWN MERITS.
+    # This test pins a different fact: the INOUT class is never granted to a
+    # non-inout endpoint. So the record is given a NON-zero delay, which no
+    # class may explain, and every assertion below is unchanged.
     bundle = _cal('negative')
+    bundle['sdf_text'] = bundle['sdf_text'].replace(
+        '(INTERCONNECT u_pad.PAD p (0.000:0.000:0.000))',
+        '(INTERCONNECT u_pad.PAD p (0.004:0.004:0.004))')
+    assert '(INTERCONNECT u_pad.PAD p (0.004:0.004:0.004))' in bundle['sdf_text']
     pad = (CAL / 'cal_sdf_class_pad.v').read_text().replace('inout\tPAD;', 'output\tPAD;')
     explainer = sgs.SdfErrorExplainer((CAL / 'cal_sdf_class.v').read_text(),
                                       {'cal_sdf_class_cells.v': (CAL / 'cal_sdf_class_cells.v').read_text(),

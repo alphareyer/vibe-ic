@@ -10,12 +10,13 @@ the TOP module's own output `p`, which has no inter-module path for Icarus to
 put a delay on, and the delay is exactly 0.
 
 The fixtures are that run's own bytes, copied verbatim into
-`programs/calibration/`:
-  * `cal_sdf_top_port.sdf` = `phase3/stage3/sim_postlayout/spm.sdf`
+`tests/fixtures/sdf_top_port/` (a TEST fixture of a design under test, so not
+under `programs/calibration/`, whose samples must never come from one):
+  * `spm.sdf` = `phase3/stage3/sim_postlayout/spm.sdf`
     (sha256 34701f988daa3c48...),
-  * `cal_sdf_top_port.v` = `phase3/stage3/pnr/spm_pnr.v` (the netlist the
-    gate simulated; sha256 13a1aa2382b19840...),
-  * `cal_sdf_top_port.log` = lines 916-918 of `case_3.stdout.log` (the
+  * `spm_pnr.v` = `phase3/stage3/pnr/spm_pnr.v` (the netlist the gate
+    simulated; sha256 13a1aa2382b19840...),
+  * `case_3.sdf_errors.log` = lines 916-918 of `case_3.stdout.log` (the
     `vvp -sdf-info` transcript), with the run directory prefix made
     project-relative.
 The negative guards are the same real SDF: a zero-delay record whose sink is
@@ -33,10 +34,10 @@ sys.path.insert(0, str(PROGRAMS))
 
 import sdf_gate_sim as SG  # noqa: E402
 
-CAL = PROGRAMS / "calibration"
-SDF = (CAL / "cal_sdf_top_port.sdf").read_text()
-NETLIST = (CAL / "cal_sdf_top_port.v").read_text()
-TRANSCRIPT = (CAL / "cal_sdf_top_port.log").read_text()
+FIX = TESTS / "fixtures" / "sdf_top_port"
+SDF = (FIX / "spm.sdf").read_text()
+NETLIST = (FIX / "spm_pnr.v").read_text()
+TRANSCRIPT = (FIX / "case_3.sdf_errors.log").read_text()
 CLASS = "ZERO_DELAY_TOP_PORT_INTERCONNECT"
 
 
