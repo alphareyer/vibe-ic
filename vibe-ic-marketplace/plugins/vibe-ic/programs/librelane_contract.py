@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
+import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
 
 
 class Refusal(RuntimeError):
@@ -598,7 +599,8 @@ def _openroad_convert(project: Path, image: str, config: dict, tcl_body: list[st
     volumes = ['-v', f'{project.resolve()}:{project.resolve()}']
     for host, guest in mounts:
         volumes += ['-v', f'{host.resolve()}:{guest}:ro']
-    completed = subprocess.run([docker, 'run', '--rm', '--network', 'none', *volumes,
+    completed = subprocess.run([docker, 'run', *_dmem.docker_memory_flags(), '--rm',
+                                '--network', 'none', *volumes,
                                 image, '--skip', 'openroad', '-exit', str(tcl)],
                                capture_output=True, text=True)
     (folder / f'{name}.log').write_text(completed.stdout + '\n' + completed.stderr)
@@ -1052,7 +1054,6 @@ def _materialise_image_pdk(image: str, found: dict[str, str], pdk: str,
     if isinstance(recorded, dict) and all(recorded.get(k) == v for k, v in want.items()) \
             and (root / pdk).is_dir():
         return root, 'reused'
-    import _docker_memory as _dmem
     try:
         root.mkdir(parents=True, exist_ok=True)
         scratch = Path(tempfile.mkdtemp(prefix=f'.{pdk}.partial-', dir=root))
@@ -1296,14 +1297,14 @@ def image_capability(image: str, docker: str = 'docker') -> dict:
     key = (image, docker)
     if key in _CAPABILITY:
         return _CAPABILITY[key]
-    probe = [docker, 'run', '--rm', '--entrypoint', 'sh', image, '-c',
+    probe = [docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--entrypoint', 'sh', image, '-c',
              'python3 -m librelane.steps run --help >/dev/null && '
              'yosys -Q -T -y /dev/null -p help >/dev/null']
     result = subprocess.run(probe, capture_output=True, text=True)
     if result.returncode:
         raise Refusal('LL_IMAGE_INCAPABLE', f'{image}: LibreLane CLI or yosys CLI -y unavailable (rc={result.returncode})')
-    tcl = subprocess.run([docker, 'run', '--rm', '--network', 'none', '--entrypoint', 'bash',
-                          image, '-c', _TCL_PROBE], capture_output=True, text=True)
+    tcl = subprocess.run([docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network', 'none',
+                          '--entrypoint', 'bash', image, '-c', _TCL_PROBE], capture_output=True, text=True)
     if tcl.returncode:
         # The CLI probe above is the capability verdict; this one only derives
         # aliases.  Unmeasured means none are added: a step that needs one
@@ -1649,7 +1650,8 @@ Path(output, "flow_gates.json").write_text(json.dumps({
     for step_id in json.loads(Path(requested).read_text()) if step_id in gates},
     indent=2, default=str) + "\\n")
 '''
-    cmd = [docker, 'run', '--rm', '-v', f'{project.resolve()}:{project.resolve()}',
+    cmd = [docker, 'run', *_dmem.docker_memory_flags(), '--rm',
+           '-v', f'{project.resolve()}:{project.resolve()}',
            '-v', f'{pdk_root.resolve()}:/pdk:ro', *_plugin_args(step_ids),
            '--entrypoint', 'python3', image, '-c', script, str(design),
            str(requested), str(root), pdk, str(project.resolve())]
@@ -1702,8 +1704,9 @@ def emit_pdn_cfg(image: str, pdk: str, output: Path, *, docker: str = 'docker') 
         return None
     script = ('import os,librelane;print(open(os.path.join(os.path.dirname(librelane.__file__),'
               '"scripts","openroad","common","pdn_cfg.tcl")).read(),end="")')
-    result = subprocess.run([docker, 'run', '--rm', '--network', 'none', '--entrypoint',
-                             'python3', image, '-c', script], capture_output=True, text=True)
+    result = subprocess.run([docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network',
+                             'none', '--entrypoint', 'python3', image, '-c', script],
+                            capture_output=True, text=True)
     if result.returncode or 'add_pdn_connect' not in result.stdout:
         raise Refusal('LL_PDN_CFG_UNREADABLE', (result.stderr or '')[-500:])
     lines = [result.stdout.rstrip('\n'), '',
@@ -1720,8 +1723,8 @@ def flow_segment(image: str, first: str, last: str, *, flow: str = 'Chip',
     script = ('import json,sys;from librelane.flows import Flow;'
               'f=Flow.factory.get(sys.argv[1]);'
               'print(json.dumps([s.id for s in f.Steps]))')
-    result = subprocess.run([docker, 'run', '--rm', '--network', 'none', '--entrypoint',
-                             'python3', image, '-c', script, flow],
+    result = subprocess.run([docker, 'run', *_dmem.docker_memory_flags(), '--rm', '--network',
+                             'none', '--entrypoint', 'python3', image, '-c', script, flow],
                             capture_output=True, text=True)
     try:
         order = json.loads(result.stdout.strip().splitlines()[-1])
@@ -1751,7 +1754,7 @@ def resolve_step_config(project: Path, image: str, source: Path, output: Path,
     volumes = ['-v', f'{project.resolve()}:{project.resolve()}']
     for host, guest in mounts or []:
         volumes += ['-v', f'{host.resolve()}:{guest}:ro']
-    result = subprocess.run([docker, 'run', '--rm', *volumes,
+    result = subprocess.run([docker, 'run', *_dmem.docker_memory_flags(), '--rm', *volumes,
                              '--entrypoint', 'python3', image, '-c', script],
                             capture_output=True, text=True)
     if result.returncode or not output.is_file():
@@ -1836,7 +1839,8 @@ def run_chain(project: Path, image: str, steps: list[tuple[str, Path, Path]],
         if home:
             volume_args += ['-e', f'HOME={home.resolve()}']
         volume_args += _plugin_args([step_id])
-        cmd = [docker, 'run', '--rm', *volume_args, '--entrypoint', 'python3', image,
+        cmd = [docker, 'run', *_dmem.docker_memory_flags(), '--rm', *volume_args,
+               '--entrypoint', 'python3', image,
                '-m', 'librelane.steps', 'run', '--id', step_id, '-c', str(config),
                '-i', str(state_path), '-o', str(folder)]
         if pdk_root:

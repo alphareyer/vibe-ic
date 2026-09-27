@@ -166,10 +166,21 @@ def test_the_cli_refuses_rather_than_printing_nothing_when_it_cannot_tell():
 
 # ── the guard that has to survive future edits ──────────────────────────────
 
-# The binary is spelled three ways in programs/: the literal, `docker_bin`, and
-# a bare `docker` parameter (analog_a6_librelane_drc._image_run). The last one
-# escaped this guard with no ceiling until it was named here.
-_RUN_ARGV = re.compile(r'\[\s*(?:"docker"|docker_bin|docker)\s*,\s*"run"')
+# The binary is spelled four ways in programs/: the literal, `docker_bin`, a
+# bare `docker` parameter (analog_a6_librelane_drc._image_run), and a
+# conditional expression that starts with one of those
+# (`'docker' if docker == 'docker' else docker`, librelane_signoff's per-corner
+# `sta` arm). The bare parameter escaped this guard with no ceiling until it was
+# named here; the conditional was invisible to it until 2026-09-28 (it carried
+# its flags, but only its own driven test would have noticed them go).
+#
+# Both words are matched in EITHER quote style. Until 2026-09-28 this pattern
+# read only `"docker"` / `"run"`, and every one of librelane_contract.py's eight
+# `[docker, 'run', ...]` sites — the per-step LibreLane runs, its config
+# resolver and its image probes — created a container with no ceiling while
+# this test passed. A guard that cannot see a site certifies it.
+_RUN_ARGV = re.compile(
+    r'''\[\s*(?:["']docker["']|docker_bin|docker)(?:\s+if\b[^,\n]*)?\s*,\s*["']run["']''')
 
 
 def test_no_docker_run_escapes_the_ceiling():
@@ -193,6 +204,25 @@ def test_no_docker_run_escapes_the_ceiling():
         "these `docker run` sites create a container with no memory ceiling; "
         "splice `*_dmem.docker_memory_flags()` in after the run verb: "
         f"{escaped}")
+
+
+def test_the_guard_sees_every_spelling_of_a_docker_run_argv():
+    """Calibration of the guard's own instrument, so a blind pattern reads red.
+
+    Every combination of quote style on the binary and on the verb, each
+    binary spelling, and a line break after the bracket must MATCH; a docker
+    verb that creates no running container must not."""
+    seen = ['["docker", "run"', "['docker', 'run'", '["docker", \'run\'',
+            "['docker', \"run\"", '[docker, "run"', "[docker, 'run'",
+            '[docker_bin, "run"', "[docker_bin, 'run'", "[\n        'docker', 'run'",
+            "['docker' if docker == 'docker' else docker, 'run'",
+            '[docker if docker else "docker", "run"']
+    for text in seen:
+        assert _RUN_ARGV.search(text), text
+    for text in ('["docker", "image", "inspect"', "[docker, 'ps', '-q'",
+                 "['docker', 'cp', '-L'", "[docker, 'rm', '-f'",
+                 "['docker' if docker == 'docker' else docker, 'ps'"):
+        assert not _RUN_ARGV.search(text), text
 
 
 def test_the_ceiling_is_reachable_from_every_program_that_uses_it():
@@ -332,6 +362,126 @@ def test_technology_facts_argv_carries_the_ceiling(monkeypatch):
     assert argv[image_at + 1] == "--skip", (
         f"`--skip` is no longer the first argument after the image; the "
         f"image entrypoint ignores it anywhere else: {argv}")
+
+
+def _ll_design(root):
+    """The fewest declared inputs `librelane_contract.emit_config` accepts."""
+    import json
+    docs = root / "phase1" / "generated_docs"
+    docs.mkdir(parents=True)
+    (docs / "L8_TIMING_WAVEFORM.json").write_text(json.dumps({"clock_domains": [
+        {"role": "primary", "period_ns": 10, "source_pin": "clk"}]}))
+    (docs / "L9_INTEGRATION_SPEC.json").write_text(json.dumps({"top_module": "block"}))
+    (docs / "L19_CONSTRAINTS_PDK.json").write_text(json.dumps({"fields": {}}))
+    decl = root / "input" / "submission_template" / "tapeout_declaration.json"
+    decl.parent.mkdir(parents=True)
+    decl.write_text(json.dumps({"answers": {}}))
+    return root
+
+
+def test_librelane_contract_argv_carries_the_ceiling(tmp_path, monkeypatch):
+    """Every container `librelane_contract` creates, driven through the real
+    function that creates it (the per-step LibreLane run, the config resolvers,
+    the image probes, the flow-order read, the PDN script read and the direct ->
+    LibreLane view conversion). The heaviest container the plugin starts is a
+    LibreLane step, and all eight of these sites ran unbounded behind a sweep
+    that could not read single quotes; this names each one by its function so a
+    site that loses the splice is reported by name, not as a count."""
+    import json
+    from types import SimpleNamespace
+    import librelane_contract as ll
+    monkeypatch.setenv("VIBEIC_DOCKER_MEMORY", "3g")
+    image = "img:w15"
+    seen = []
+
+    def _recorder(reply):
+        def _fake(argv, **_kw):
+            argv = list(argv)
+            seen.append((_fake.site, argv))
+            return reply(argv)
+        return _fake
+
+    def _drive(site, reply, call):
+        fake = _recorder(reply)
+        fake.site = site
+        monkeypatch.setattr(ll.subprocess, "run", fake)
+        return call()
+
+    ok = lambda stdout="": (lambda argv: SimpleNamespace(returncode=0, stdout=stdout, stderr=""))
+
+    # image_capability: the CLI probe (rc 0), then the Tcl alias probe (rc 1:
+    # recorded NOT_MEASURED, not a refusal) — two containers.
+    monkeypatch.setattr(ll, "_CAPABILITY", {})
+    replies = iter([0, 1])
+    _drive("image_capability", lambda argv: SimpleNamespace(
+        returncode=next(replies), stdout="", stderr=""),
+        lambda: ll.image_capability(image))
+
+    project = _ll_design(tmp_path / "design")
+    folder = tmp_path / "convert"
+    folder.mkdir()
+    _drive("_openroad_convert", ok(), lambda: ll._openroad_convert(
+        project, image, {"TECH_LEFS": {"nom_*": str(tmp_path / "t.lef")}},
+        ["exit"], folder, "def_to_odb", [], "docker"))
+
+    monkeypatch.setattr(ll, "image_capability", lambda *a: None)
+    pdk = "pdkA"
+    (tmp_path / "pdk" / pdk).mkdir(parents=True)
+    with pytest.raises(ll.Refusal, match="LL_CONFIG_RESOLUTION_FAILED"):
+        _drive("resolve_step_configs",
+               lambda argv: SimpleNamespace(returncode=1, stdout="", stderr=""),
+               lambda: ll.resolve_step_configs(project, image, pdk, ["X.Step"],
+                                               pdk_root=tmp_path / "pdk"))
+
+    registry = json.loads((_PROGRAMS / "pdk_registry.json").read_text())
+    entries = registry.get("pdks", [])
+    if isinstance(entries, dict):
+        entries = [dict(v, name=k) for k, v in entries.items() if isinstance(v, dict)]
+    ringed = next(e["name"] for e in entries
+                  if (e.get("pdn_ring") or {}).get("connect_to_pad_layers")
+                  and (e.get("pdn_ring") or {}).get("connects"))
+    assert _drive("emit_pdn_cfg", ok("add_pdn_connect -grid g\n"),
+                  lambda: ll.emit_pdn_cfg(image, ringed, tmp_path / "pdn.tcl"))
+
+    assert _drive("flow_segment", ok('["A.One", "B.Two"]\n'),
+                  lambda: ll.flow_segment(image, "A.One", "B.Two")) == ["A.One", "B.Two"]
+
+    resolved = tmp_path / "resolved.json"
+    resolved.write_text("{}")
+    _drive("resolve_step_config", ok(), lambda: ll.resolve_step_config(
+        project, image, tmp_path / "source.json", resolved))
+
+    netlist = project / "block.nl.v"
+    netlist.write_text("module block; endmodule\n")
+    state = project / "initial.json"
+    state.write_text(json.dumps({"nl": str(netlist)}))
+    config = project / "config.json"
+    config.write_text(json.dumps({"meta": {"step": "OpenROAD.Floorplan"}}))
+
+    def _step(argv):
+        out = Path(argv[argv.index("-o") + 1])
+        (out / "state_out.json").write_text(json.dumps({"nl": str(netlist)}))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    _drive("run_chain", _step, lambda: ll.run_chain(
+        project, image, [("OpenROAD.Floorplan", config, state)]))
+
+    sites = [site for site, _ in seen]
+    assert sites == ["image_capability", "image_capability", "_openroad_convert",
+                     "resolve_step_configs", "emit_pdn_cfg", "flow_segment",
+                     "resolve_step_config", "run_chain"], sites
+    for site, argv in seen:
+        assert argv[:2] == ["docker", "run"], (site, argv)
+        assert "--memory" in argv and "--memory-swap" in argv, (
+            f"{site} creates a container with no memory ceiling: {argv}")
+        assert argv[argv.index("--memory") + 1] == "3g", (site, argv)
+        assert argv[argv.index("--memory-swap") + 1] == "3g", (site, argv)
+        image_at = argv.index(image)
+        assert argv.index("--memory") < image_at, (
+            f"{site}: the ceiling is an argument to the entrypoint, not to "
+            f"docker: {argv}")
+    convert = next(argv for site, argv in seen if site == "_openroad_convert")
+    assert convert[convert.index(image) + 1] == "--skip", (
+        f"`--skip` must stay the first argument after the image: {convert}")
 
 
 def test_the_installer_script_refuses_without_the_helper(tmp_path):
