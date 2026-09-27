@@ -90,7 +90,11 @@ def test_a_neighbour_across_the_other_edge_is_not_the_same_island():
     nwell, sub = T.well_islands(rows, 7840, True)
     y = sorted(rows)
     assert nwell[y[0]] == nwell[y[1]] != nwell[y[2]] == nwell[y[3]]
-    assert sub[y[1]] == sub[y[2]] and len({sub[y[0]], sub[y[1]], sub[y[3]]}) == 3
+    # the substrate edges, by name: row 0 (N) its bottom, rows 1/2 their shared
+    # ground rail, row 3 (FS) its top -- three distinct strips
+    assert sub[y[1]] == sub[y[2]] == y[2]
+    assert {r: sub[r] for r in (y[0], y[1], y[3])} == {
+        y[0]: y[0], y[1]: y[2], y[3]: y[3] + 7840}
     # f1 (row 2) keeps its n-well ties in row 3 but loses its substrate ties
     # when row 1's go: the two rules pair rows the opposite way
     rep = T.audit(re.sub(r'.*TAP_TAPCELL_ROW_1_.*\n', '', covered), [lef], TAP, 15.0, ENDCAP)
