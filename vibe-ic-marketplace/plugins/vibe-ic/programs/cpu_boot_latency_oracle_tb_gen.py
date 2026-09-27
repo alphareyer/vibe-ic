@@ -64,7 +64,15 @@ _RE_CYCLE_BOUND = re.compile(r"(\d+)\s*cycle", re.IGNORECASE)
 # Structural suffix match (word-boundary via `_`/string-end), never a chip
 # literal — `cyc`/`stb`/`req`/`valid` are standard bus-protocol terms used
 # across countless unrelated IP cores.
-_BUS_ACTIVITY_TOKENS = ("cyc", "stb", "strobe", "req", "valid")
+#: A memory READ-ENABLE is a bus request too: a core whose top exposes only a
+#: memory port (no cyc/stb/req handshake) shows its first fetch as the read
+#: strobe on that port. MEASURED on a reused-IP CPU top whose outputs are an
+#: SRAM port (`*_ren`, `*_wen`, addresses, data): with no read-enable token the
+#: design's own "within N cycles of reset release" case could not be observed
+#: and fell to the substance floor, although it runs and passes (first read at
+#: cycle 1 of 10). Write-enables stay out: a write is not the first fetch.
+_BUS_ACTIVITY_TOKENS = ("cyc", "stb", "strobe", "req", "valid",
+                        "ren", "rden", "rd_en", "read_en")
 _BUS_ACTIVITY_RES = [
     re.compile(rf"(?:^|_){tok}(?:_o)?$", re.IGNORECASE)
     for tok in _BUS_ACTIVITY_TOKENS
