@@ -993,7 +993,7 @@ SIM_DEADLINE_S_PER_TRAN_NS = 0.5
 SIM_DEADLINE_CEILING_S = 7200
 
 _TRAN_RE = re.compile(
-    r"^\s*tran\s+\S+\s+([0-9.eE+-]+)\s*([munpf]?)s?\b", re.M | re.I)
+    r"^\s*\.?tran\s+\S+\s+([0-9.eE+-]+)\s*([munpf]?)s?\b", re.M | re.I)
 _TIME_SCALE = {"": 1e9, "m": 1e6, "u": 1e3, "n": 1.0, "p": 1e-3, "f": 1e-6}
 
 

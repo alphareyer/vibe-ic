@@ -127,14 +127,16 @@ if a[0] == "exec":
         dur = a[a.index("timeout") + 3] if "timeout" in a else None
         with open(os.environ["STUB_EXEC_LOG"], "a") as fh:
             fh.write(json.dumps({"deck": deck, "timeout": dur}) + "\n")
-        if os.environ.get("STUB_EXPIRE") and (
-                os.environ["STUB_EXPIRE"] == "all"
-                or "_post_" in os.path.basename(deck)):
+        mode = os.environ.get("STUB_EXPIRE")
+        base = os.path.basename(deck)
+        if mode and (mode == "all" or (mode == "post" and "_post_" in base)
+                     or (mode not in ("all", "post") and mode in base)):
             sys.stdout.write("Reference value :  1.00000e-06\r"
                              "Reference value :  4.13724e-06\r")
             sys.exit(124)
-        print("MEAS density= "
-              + ("0.59" if "_post_" in os.path.basename(deck) else "0.60"))
+        post = "_post_" in os.path.basename(deck)
+        print("MEAS density= " + ((os.environ.get("STUB_POST_DENSITY")
+                                   or "0.59") if post else "0.60"))
         sys.exit(0)
     sys.exit(subprocess.run(["bash", "-c", cmd]).returncode)
 sys.exit(0)
@@ -174,6 +176,7 @@ def stub(tmp_path, monkeypatch):
                        str(tmp_path / "pdkroot/tpdk/libs.tech/magic/t.tech"))
     monkeypatch.setenv("STUB_EXEC_LOG", str(tmp_path / "exec.jsonl"))
     monkeypatch.delenv("STUB_EXPIRE", raising=False)
+    monkeypatch.delenv("STUB_POST_DENSITY", raising=False)
     monkeypatch.setenv("VIBEIC_DESIGNS_HOST_ROOT", str(tmp_path))
     rcx = tmp_path / "rcx.spice"
     rcx.write_text(RCX_RC)
@@ -274,7 +277,7 @@ def test_a_pre_run_that_spends_its_budget_is_not_measured_not_failed(
     assert why["simulated_time_requested_s"] == pytest.approx(1026e-6)
     assert why["wall_s"] >= 0 and why["budget_s"] > 0
     assert why["budget_source"] == "default_per_clock"
-    assert SPEC_BUDGET_KEY in why["remedy"]
+    assert "phase3/analog/simulation_budgets.json" in why["remedy"]
     assert why["deck"].endswith("tb_blk_pre.sp")
     assert not (project / "phase3/analog/blk/pre_vs_post.json").exists()
 
@@ -432,3 +435,106 @@ def test_a_node_spelled_like_a_keyword_is_a_name():
     span = A7.measurement_span(deck)
     assert span["stop_s"] == pytest.approx(1026e-6)
     assert {"railx_max_trig", "railx_max_to"} <= set(span["span_following"])
+
+
+# ── review wave 5 (T130): a card is cut only when it is PROVABLY covered ───
+@pytest.mark.parametrize("card, holder", [
+    # (a) reads from a point AFTER the cut stop to the end of the run
+    ("meas tran vtail avg v(b) from=20000000n", "vtail"),
+    # (b) a TRIG AT time is where the search STARTS; the TARG event is later
+    ("meas tran tset trig at=1000n targ v(b) val=0.5 rise=2 td=1000n",
+     "tset"),
+    # (c) a time this reader cannot evaluate
+    ("meas tran vend avg v(b) from=0 to={tend}", "vend"),
+    # whole-record reductions and analyses
+    ("let vmean = mean(v(b))", "vmean"),
+    ("fft v(b)", "fft"),
+])
+def test_a_card_not_provably_covered_keeps_the_declared_stop(
+        stub, card, holder):
+    tb = TB.replace("meas tran railx_max_b", card + "\nmeas tran railx_max_b")
+    project = _project(stub, tb=tb)
+    assert A7.run(project, "blk", "vibeic-eda", IMAGE) == 0
+    assert {tuple(_tran(s["deck"])) for s in _sims(stub)} == {
+        ("tran 5n 28673000n",)}
+    span = _record(project)["transient_span"]
+    assert span["rule"] == "a_card_needs_the_declared_record"
+    assert holder in [h["card"] for h in span["holds_declared_record"]]
+
+
+def test_a_window_ends_at_the_latest_time_it_references():
+    tb = TB.replace("meas tran railx_max_b",
+                    "meas tran vfind find v(b) at=2000000n\n"
+                    "meas tran railx_max_b")
+    span = A7.measurement_span(tb)
+    assert span["stop_s"] == pytest.approx(2001e-6)
+    assert span["last_window_meas"] == ["vfind"]
+
+
+def test_a_transient_card_split_across_lines_is_not_reported_as_cut(stub):
+    tb = TB.replace("tran 5n 28673000n", "tran 5n\n+ 28673000n")
+    out, span = A7.bound_transient(tb)
+    assert out == tb
+    assert span["stop_s"] == pytest.approx(28673e-6)
+    assert span["rule"] == "transient_card_continued_across_lines"
+
+
+# ── review wave 5 (T130): one style's spent budget voids only that style ──
+def test_a_measured_degradation_is_a_fail_even_if_a_later_style_expires(
+        stub, monkeypatch):
+    monkeypatch.setenv("STUB_POST_DENSITY", "0.30")   # -50 % post-layout
+    monkeypatch.setenv("STUB_EXPIRE", "hrhc")         # second style runs out
+    project = _project(stub)
+    assert A7.run(project, "blk", "vibeic-eda", IMAGE) == 1
+    rec = _record(project)
+    assert rec["rule"] == "A7_POSTSIM_DELTA_TOO_BIG"
+    assert rec["exhausted_styles"] == ["ngspice(hrhc)"]
+    doc = json.loads((project / "phase3/analog/blk/pre_vs_post.json")
+                     .read_text())
+    assert [s["name"] for s in doc["specs"]] == ["density@ngspice()"]
+    assert "*@ngspice(hrhc)" in doc["_provenance"]["not_compared"]
+
+
+def test_a_later_style_that_expires_keeps_the_rows_already_measured(
+        stub, monkeypatch):
+    monkeypatch.setenv("STUB_EXPIRE", "hrhc")
+    project = _project(stub)
+    assert A7.run(project, "blk", "vibeic-eda", IMAGE) == EX_BUDGET_EXHAUSTED
+    rec = _record(project)
+    assert (rec["result"], rec["reason_class"]) == ("NOT_MEASURED",
+                                                    "budget_exhausted")
+    assert rec["exhausted_styles"] == ["ngspice(hrhc)"]
+    assert rec["budget_exhausted"]["deck"].endswith(
+        "tb_blk_post_ngspice_hrhc.sp")
+    doc = json.loads((project / "phase3/analog/blk/pre_vs_post.json")
+                     .read_text())
+    assert [s["name"] for s in doc["specs"]] == ["density@ngspice()"]
+
+
+# ── review wave 5 (T130): budgets for decks with no clock, and where ──────
+def test_a_deck_without_a_clock_is_budgeted_from_its_declared_transient():
+    deck = ".tran 10n 2m\nmeas tran v avg v(b) from=0 to=1m\n.end\n"
+    secs, src = A7.simulation_budget({}, deck, 2e-3)
+    assert secs == pytest.approx(A7.BUDGET_FLOOR_S + 2e6 * 0.5)
+    assert src["source"] == "default_per_transient_ns"
+
+
+def test_an_op_or_ac_deck_gets_the_floor_not_the_old_120_s():
+    secs, _src = A7.simulation_budget({}, ".control\nac dec 20 1 1g\n.endc\n",
+                                      None)
+    assert secs == A7.BUDGET_FLOOR_S >= 600
+
+
+def test_the_projects_budget_file_wins_and_the_remedy_points_to_it(
+        stub, monkeypatch):
+    project = _project(stub, spec={SPEC_BUDGET_KEY: 4321})
+    (project / "phase3/analog/simulation_budgets.json").write_text(
+        json.dumps({"blk": 777}))
+    monkeypatch.setenv("STUB_EXPIRE", "all")
+    assert A7.run(project, "blk", "vibeic-eda", IMAGE) == EX_BUDGET_EXHAUSTED
+    assert [s["timeout"] for s in _sims(stub)] == ["777"]
+    rec = _record(project)
+    assert rec["budget"]["source"] == \
+        "phase3/analog/simulation_budgets.json:blk"
+    assert "phase3/analog/simulation_budgets.json" in \
+        rec["budget_exhausted"]["remedy"]
