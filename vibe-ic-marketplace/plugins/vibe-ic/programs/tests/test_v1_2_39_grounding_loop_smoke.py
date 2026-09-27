@@ -59,11 +59,10 @@ def test_committed_fixture_grounding_clean(proj):
 
 def test_fixtures_present():
     # the corpus should exist so the loop guard actually runs (not vacuous).
-    # It lives under programs/tests/fixtures/synthetic_benchmark_phase1/ but is
-    # NOT git-tracked (author-local test data); on a clean checkout / CI it is
-    # absent, so SKIP rather than hard-fail — the grounding guard itself is
-    # exercised elsewhere (test_committed_fixture_grounding_clean parametrizes
-    # over whatever IS present).
+    # It is built privately by its generator at import (see `_FIX`), so it is
+    # present on every checkout; the skip below now fires only if the
+    # generator itself yields no project, which is a real finding to see
+    # rather than a thin environment.
     n = len(_fixture_projects())
     if n == 0:
         import pytest
