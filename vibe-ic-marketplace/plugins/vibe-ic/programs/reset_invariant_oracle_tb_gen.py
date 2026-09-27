@@ -86,7 +86,10 @@ _RE_MUST_NOT = re.compile(r"不應|不得|不能|must\s*not|should\s*not|no\s+",
 _WRITE_TOKENS = ("we", "wen", "write", "wr", "wstrb", "wr_en")
 _WRITE_RES = [re.compile(rf"(?:^|_){t}(?:_o|_out)?$", re.IGNORECASE)
               for t in _WRITE_TOKENS]
-_BUS_ACTIVITY_TOKENS = ("cyc", "stb", "strobe", "req", "valid")
+#: Read-enables are bus activity, the mirror of `wen` above; see the same
+#: vocabulary in `cpu_boot_latency_oracle_tb_gen` for the measurement.
+_BUS_ACTIVITY_TOKENS = ("cyc", "stb", "strobe", "req", "valid",
+                        "ren", "rden", "rd_en", "read_en")
 _BUS_ACTIVITY_RES = [re.compile(rf"(?:^|_){t}(?:_o|_out)?$", re.IGNORECASE)
                      for t in _BUS_ACTIVITY_TOKENS]
 _CLOCK_RE = re.compile(r"(?:^|_)(?:clk|clock)(?:$|_)", re.IGNORECASE)
