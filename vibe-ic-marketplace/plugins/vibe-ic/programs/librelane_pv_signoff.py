@@ -39,8 +39,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _path_layout as _pl  # noqa: E402
 from _atomic_artefact import write_json  # noqa: E402
-from librelane_contract import (Refusal, _load, digest, resolve_step_configs,  # noqa: E402
-                                run_chain, state_from_direct)
+from librelane_contract import (Refusal, _load, declared_variables, digest,  # noqa: E402
+                                resolve_step_configs, run_chain, state_from_direct)
 
 NOT_MEASURED = 'NOT_MEASURED'
 
@@ -115,6 +115,47 @@ def tech_lef_overlay(project: Path) -> dict[str, tuple[Any, str]] | None:
     """``resolve_step_configs`` overlay: every corner reads the route's tech LEF."""
     found = route_tech_lef(project)
     return None if found is None else {'TECH_LEFS': ({'*': str(found[0])}, found[1])}
+
+
+#: The LVS half signs off on the layout that SHIPS (lane fxlvs), as the direct
+#: half does. LibreLane's ``Magic.SpiceExtraction`` extracts the routed DEF over
+#: LEF abstracts unless this variable is set -- MEASURED on vibeic-eda 0.3.83
+#: (LibreLane 3.1.0.dev1): declared, bool, default False -- so on the image's
+#: own default the half never opened the GDS: the unlabelled spm.gds that fails
+#: pin matching against the PDK's decks (29 mismatches) was signed off.
+GDS_EXTRACTION_VAR = 'MAGIC_EXT_USE_GDS'
+GDS_EXTRACTION_SOURCE = ('step 31 LVS signs off on the shipped GDS, the layout that '
+                         'ships, not the routed DEF (lane fxlvs)')
+
+
+def half_overlay(project: Path, half: str) -> dict[str, tuple[Any, str]] | None:
+    """The ``resolve_step_configs`` overlay of one step-31 half."""
+    overlay = dict(tech_lef_overlay(project) or {})
+    if half == 'lvs':
+        overlay[GDS_EXTRACTION_VAR] = (True, GDS_EXTRACTION_SOURCE)
+    return overlay or None
+
+
+def gds_extraction(config_path: Path) -> dict[str, Any]:
+    """The resolved extraction config reads the GDS, by the image's own word.
+
+    Existence and default come from the variables the image's step declares
+    (``declared_variables``); the value from the resolved config. An image
+    whose step does not declare the variable can only extract the DEF, and a
+    resolution that did not set it would: both refuse before any tool runs,
+    so nothing is compared and nothing can pass."""
+    declared = declared_variables(config_path)
+    if GDS_EXTRACTION_VAR not in declared:
+        raise Refusal('LL_PV_GDS_EXTRACTION_UNAVAILABLE',
+                      f"{config_path.name}: the image's step declares no "
+                      f'{GDS_EXTRACTION_VAR}, so it can only extract the routed DEF, '
+                      f'which is not the layout that ships')
+    value = _load(config_path).get(GDS_EXTRACTION_VAR)
+    if value is not True:
+        raise Refusal('LL_PV_GDS_EXTRACTION_OFF',
+                      f'{config_path.name}: resolved {GDS_EXTRACTION_VAR}={value!r}')
+    return {'variable': GDS_EXTRACTION_VAR, 'declared_by_image': True,
+            'image_default': declared[GDS_EXTRACTION_VAR], 'value': True}
 
 
 def _step_of(folder: Path) -> str | None:
@@ -229,15 +270,20 @@ def run_half(project: Path, image: str, pdk_root: Path, pdk: str, half: str, *,
     chain = HALVES[half]
     configs = resolve_step_configs(project, image, pdk, list(chain), pdk_root=pdk_root,
                                    folder=f'31-{half}-config',
-                                   overlay=tech_lef_overlay(project))
+                                   overlay=half_overlay(project, half))
+    extraction = (gds_extraction(configs['Magic.SpiceExtraction'])
+                  if half == 'lvs' else None)
     state = bridge(project, image, pdk_root, pdk, configs, chain,
                    {'def': routed_def, 'nl': netlist, 'sdc': sdc, 'gds': gds},
                    f'31-{half}-config')
     folders = run_chain(project, image, [(step, configs[step], state) for step in chain],
                         mounts=[(pdk_root / pdk, f'/pdk/{pdk}')], lane=f'31-{half}')
     required = tuple(step for step in chain if step in PRODUCED)
+    scope = {'gds_sha256': digest(gds), 'def_sha256': digest(routed_def)}
+    if extraction is not None:
+        scope.update(layout_source='shipped_gds', gds_extraction=extraction)
     return judge_pv(folders, required, project / RECORD_REL.format(half=half),
-                    scope={'gds_sha256': digest(gds), 'def_sha256': digest(routed_def)})
+                    scope=scope)
 
 
 def run_finishing_xor(project: Path, image: str, pdk_root: Path, pdk: str, *,

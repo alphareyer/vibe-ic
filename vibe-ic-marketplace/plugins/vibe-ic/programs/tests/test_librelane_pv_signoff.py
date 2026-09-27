@@ -163,12 +163,19 @@ def _half_project(tmp_path, chain):
              "KLayout.Density": (["gds"], []),
              "Magic.SpiceExtraction": (["gds", "def"], ["spice"]),
              "Netgen.LVS": (["spice", "pnl"], [])}
+    # lane fxlvs: what the resolution now returns for the LVS half -- the
+    # image's declared variables (with their defaults) beside each config, and
+    # the extraction resolved onto the shipped GDS by the half's overlay.
+    declared = {"Magic.SpiceExtraction": {"MAGIC_EXT_USE_GDS": False}}
+    resolved = {"Magic.SpiceExtraction": {"MAGIC_EXT_USE_GDS": True}}
     configs = {}
     for step in chain:
         configs[step] = _put(cfg / f"{step}.json", {"meta": {"step": step}, "DESIGN_NAME": "chip",
-                                                    "TECH_LEFS": {"nom_*": "/pdk/t.lef"}})
+                                                    "TECH_LEFS": {"nom_*": "/pdk/t.lef"},
+                                                    **resolved.get(step, {})})
         _put(contract.views_path(configs[step]), {"step": step, "inputs": views[step][0],
-                                                   "outputs": views[step][1]})
+                                                   "outputs": views[step][1],
+                                                   "variables": declared.get(step, {})})
     pdk_root = tmp_path / "pdk"
     (pdk_root / "procA").mkdir(parents=True)
     return project, pnr, configs, pdk_root

@@ -560,6 +560,20 @@ def _declared_views(config_path: Path) -> tuple[str, list[str], list[str]]:
     return step_id, list(declared['inputs']), list(declared.get('outputs') or [])
 
 
+def declared_variables(config_path: Path) -> dict[str, Any]:
+    """Every variable the resolved step declares, with its default, as the
+    image's LibreLane declares them (recorded by ``resolve_step_configs``).
+    A sidecar that does not record them refuses: absence would read as "the
+    step declares nothing", which is a claim about the image nobody made."""
+    step_id = _load(config_path).get('meta', {}).get('step', '')
+    sidecar = views_path(config_path)
+    declared = _load(sidecar) if sidecar.is_file() else {}
+    if declared.get('step') != step_id or not isinstance(declared.get('variables'), dict):
+        raise Refusal('LL_STEP_VARIABLES_UNDECLARED',
+                      f'{step_id}: resolve the config with resolve_step_configs')
+    return dict(declared['variables'])
+
+
 def _required_views(config_paths: list[Path]) -> list[str]:
     """What a chain's first State must carry, from LibreLane's own declarations.
 
@@ -1780,11 +1794,14 @@ for step_id in json.loads(Path(requested).read_text()):
                          if key in names and key not in selected})
     selected["meta"] = {"librelane_version": __import__("librelane.__version__", fromlist=["__version__"]).__version__, "step": step_id}
     Path(output, step_id + ".json").write_text(json.dumps(selected, indent=2, default=str) + "\\n")
-    # LibreLane's Meta refuses unknown keys, so the step's declared views live beside it.
+    # LibreLane's Meta refuses unknown keys, so the step's declared views live beside it,
+    # with every variable the step declares and its default AS THIS IMAGE DECLARES THEM.
     Path(output, step_id + ".views.json").write_text(json.dumps({
         "step": step_id,
         "inputs": [getattr(f, "id", None) or f.value.id for f in target.inputs],
-        "outputs": [getattr(f, "id", None) or f.value.id for f in target.outputs]}) + "\\n")
+        "outputs": [getattr(f, "id", None) or f.value.id for f in target.outputs],
+        "variables": {var.name: var.default for var in target.get_all_config_variables()}},
+        default=str) + "\\n")
 # The flow's own gates (`Flow.gating_config_vars`): a flow skips a step whose
 # gating variable is false; a caller running steps one by one must too.
 gates = getattr(Chip, "gating_config_vars", {}) or {}

@@ -50397,25 +50397,45 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
     import librelane_pv_signoff as _pv
     from librelane_contract import Refusal, resolve_image, resolve_pdk_root
     pnr = _pl.pnr_dir(project)
+
+    def _not_measured(finding: str, detail: str, reason_class: str) -> StepResult:
+        # Nothing was compared. A published LVS half says so in the record the
+        # gates read (BLOCKED, lane fxlvs): a stale or routed-DEF transcript at
+        # the canonical path must not speak for the layout that ships.
+        outputs: List[str] = []
+        if half == "lvs" and publish:
+            outputs.append(_write_lvs_verdict(
+                project, "BLOCKED", finding,
+                f"LibreLane step 31 LVS compared nothing: {detail}. The layout "
+                f"that ships was NOT verified; this is not a pass.",
+                {"generated_by": "librelane_pv_signoff.run_half (mig105)",
+                 "signoff_layout": "shipped_gds"}))
+        return StepResult(half, "NOT_MEASURED", time.time() - t0, detail, outputs,
+                          reason_class=reason_class)
+
     try:
         image = resolve_image(project)
     except Refusal as exc:
-        return StepResult(half, "NOT_MEASURED", time.time() - t0, str(exc),
-                          reason_class=_V.ReasonClass.TOOL_ABSENT)
+        return _not_measured(exc.code, str(exc), _V.ReasonClass.TOOL_ABSENT)
     root = resolve_pdk_root(project, pdk.name, image=image)
     if not root:
-        return StepResult(half, "NOT_MEASURED", time.time() - t0,
-                          "LL_PDK_ROOT_NOT_RESOLVABLE",
-                          reason_class=_V.ReasonClass.TOOL_ABSENT)
+        return _not_measured("LL_PDK_ROOT_NOT_RESOLVABLE", "LL_PDK_ROOT_NOT_RESOLVABLE",
+                             _V.ReasonClass.TOOL_ABSENT)
     try:
         record = _pv.run_half(project, image, Path(root), pdk.name, half,
                               gds=pnr / f"{top}.gds", routed_def=pnr / f"{top}.def",
                               netlist=pnr / f"{top}_pnr.v",
                               sdc=pnr / "constraint.sdc")
     except Refusal as exc:
-        if exc.code in ("LL_PV_VIEW_MISSING", "LL_BRIDGE_VIEW_MISSING"):
-            return StepResult(half, "NOT_MEASURED", time.time() - t0, str(exc),
-                              reason_class=_V.ReasonClass.INPUT_ABSENT)
+        reason = {"LL_PV_VIEW_MISSING": _V.ReasonClass.INPUT_ABSENT,
+                  "LL_BRIDGE_VIEW_MISSING": _V.ReasonClass.INPUT_ABSENT,
+                  # the image's LibreLane can only extract the routed DEF
+                  "LL_PV_GDS_EXTRACTION_UNAVAILABLE": _V.ReasonClass.TOOL_ABSENT,
+                  "LL_PV_GDS_EXTRACTION_OFF": _V.ReasonClass.EXECUTION_ERROR,
+                  "LL_STEP_VARIABLES_UNDECLARED": _V.ReasonClass.EXECUTION_ERROR,
+                  }.get(exc.code)
+        if reason:
+            return _not_measured(exc.code, str(exc), reason)
         return StepResult(half, "FAIL", time.time() - t0, f"LibreLane step 31: {exc}")
     record_path = project / _pv.RECORD_REL.format(half=half)
     extras: Dict[str, Any] = {"librelane_pv": str(record_path),
@@ -50448,7 +50468,10 @@ def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
                     "; ".join(record["reasons"]) or
                     "Netgen.LVS: circuits match uniquely (LibreLane chain)",
                     {"generated_by": "librelane_pv_signoff.run_half (mig105)",
-                     "librelane_pv": str(record_path)}))
+                     "librelane_pv": str(record_path),
+                     "signoff_layout": (record.get("scope") or {}).get("layout_source"),
+                     "layout_sha256": (record.get("scope") or {}).get("gds_sha256"),
+                     "gds_extraction": (record.get("scope") or {}).get("gds_extraction")}))
         except Refusal as exc:
             return StepResult(half, "FAIL", time.time() - t0,
                               f"LibreLane step 31 publication: {exc}", outputs, extras)
