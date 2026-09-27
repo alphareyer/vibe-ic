@@ -1043,6 +1043,8 @@ def test_landing_shaped_gates_stay_out_of_the_repo_hygiene_lane(gate):
 # ==========================================================================
 # 6. THE v1.7.92 INCIDENT, REPRODUCED AGAINST THE REAL TREE
 # ==========================================================================
+@pytest.mark.bookkeeping(regenerate="python3 tools/gen_programs_index.py",
+                         match=r"the index was ALREADY stale")
 def test_a_new_program_without_a_regenerated_index_is_refused():
     """The v1.7.92 state, end to end through the merge gate.
 

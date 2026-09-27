@@ -736,6 +736,7 @@ def test_the_file_with_no_record_is_named(tmp_path):
         "note rather than as 'this file's result is unknown'")
 
 
+@pytest.mark.measures
 def test_progress_stall_catches_a_hang_pytest_timeout_cannot_see(tmp_path):
     """A hang during module IMPORT.
 
@@ -759,6 +760,7 @@ def test_progress_stall_catches_a_hang_pytest_timeout_cannot_see(tmp_path):
         "merely exited without a report — they need different fixes")
 
 
+@pytest.mark.measures
 def test_cpu_activity_without_pytest_progress_is_still_a_stall(tmp_path):
     """An infinite import loop is busy, but it never completes collection."""
     corpus = _tree(tmp_path, {
@@ -774,6 +776,7 @@ def test_cpu_activity_without_pytest_progress_is_still_a_stall(tmp_path):
     assert "NORECORD  test_busy_import.py  STALLED" in proc.stdout
 
 
+@pytest.mark.measures
 def test_chatty_import_output_is_diagnostic_not_pytest_progress(tmp_path):
     """An import loop can log forever without completing collection."""
     corpus = _tree(tmp_path, {
@@ -791,6 +794,7 @@ def test_chatty_import_output_is_diagnostic_not_pytest_progress(tmp_path):
     assert "NORECORD  test_chatty_import.py  STALLED" in proc.stdout
 
 
+@pytest.mark.measures
 def test_silent_pytest_boundaries_keep_a_long_session_alive(
         tmp_path, monkeypatch):
     """Total runtime may exceed the grace while completed tests renew it.
@@ -823,6 +827,7 @@ def test_silent_pytest_boundaries_keep_a_long_session_alive(
     assert sum(D._count(s)[0] for s in suites) == 6
 
 
+@pytest.mark.measures
 def test_finite_domain_checkpoints_keep_one_long_test_item_alive(
         tmp_path, monkeypatch):
     """A bounded batch can expose real completed work inside one test item."""
@@ -853,6 +858,7 @@ def test_finite_domain_checkpoints_keep_one_long_test_item_alive(
     assert sum(D._count(s)[0] for s in suites) == 1
 
 
+@pytest.mark.measures
 def test_nested_validated_progress_is_relayed_to_the_outer_session(
         tmp_path, monkeypatch):
     """An inner healthy session may outlive the outer stall window."""
@@ -886,6 +892,7 @@ def test_nested_validated_progress_is_relayed_to_the_outer_session(
     assert sum(D._count(s)[0] for s in suites) == 1
 
 
+@pytest.mark.measures
 def test_nested_collect_progress_is_relayed_to_the_outer_session(
         tmp_path, monkeypatch):
     """The live matrix collection cannot be silent until its child exits."""
@@ -946,6 +953,7 @@ def test_pytest_deselection_is_a_complete_selected_subset(tmp_path):
     assert sum(D._count(s)[0] for s in suites) == 1
 
 
+@pytest.mark.measures
 def test_collect_only_has_its_own_complete_terminal_protocol(
         tmp_path, monkeypatch):
     """Zero test_finish events are valid only with the collect terminal."""
@@ -980,6 +988,7 @@ def test_short_natural_collect_relays_its_terminal_protocol(tmp_path):
     assert len(scores) >= 6, scores
 
 
+@pytest.mark.measures
 def test_progressing_collection_may_outlive_many_stall_windows(
         tmp_path, monkeypatch):
     """Completed file collections, not a total duration, renew the lease."""

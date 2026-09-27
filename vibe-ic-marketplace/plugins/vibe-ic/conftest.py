@@ -69,8 +69,14 @@ if str(_HERE) not in sys.path:
 # `tools/gatekeeper-land.sh` exports at the x.y.0 FULL cadence. Loaded here for
 # the same reason as the three above: it must ride every invocation. See
 # `programs/consistency_tier.py`.
+# 2026-09-27 (owner) — the fifth: `_outcome_states`. One run is the verdict,
+# and only a plain FAIL is red. A failure caused by a missing tool / docker /
+# image (NOT_VERIFIED), by a marked measurement taken under -n>1 or load
+# (NOT_MEASURED), or by a marked stated statistic (BOOKKEEPING) is reported as
+# its own state with a machine-readable reason. Loaded here so it rides every
+# invocation, like the four above. See `programs/_outcome_states.py`.
 pytest_plugins = ("suite_write_guard", "not_verified_tier", "scratch_root_guard",
-                  "consistency_tier")
+                  "consistency_tier", "_outcome_states")
 
 
 # ORGANIC #574 — robust waveform-artifact hygiene. Many tests run `vvp` on an

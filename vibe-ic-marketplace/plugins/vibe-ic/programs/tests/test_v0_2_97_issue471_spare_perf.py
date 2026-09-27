@@ -101,6 +101,7 @@ def _plan(spare_names):
 # (1) PERF — the issue's core symptom. Multi-MB DEF x hundreds of spares
 #     must complete FAR below the 300s budget. End-to-end CLI invocation.
 # ──────────────────────────────────────────────────────────────────
+@pytest.mark.measures
 def test_issue471_perf_multi_mb_def_completes_far_below_budget(tmp_path,
                                                                capsys):
     names = _spare_names(N_SPARES)

@@ -195,6 +195,7 @@ class TestTheHintScorerStaysLinear:
             best = dt if best is None else min(best, dt)
         return best
 
+    @pytest.mark.measures
     def test_doubling_the_input_does_not_quadruple_the_work(self):
         small = self._time(12500)
         large = self._time(25000)
@@ -208,6 +209,7 @@ class TestTheHintScorerStaysLinear:
             f"({small*1000:.1f}ms -> {large*1000:.1f}ms). Linear is ~2x; "
             f"~4x means the clause lookup went back to scanning.")
 
+    @pytest.mark.measures
     def test_a_pathological_prompt_still_returns(self):
         """A 1.2 MB adversarial prompt must classify, not hang."""
         import time

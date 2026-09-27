@@ -331,6 +331,7 @@ def _load_generator():
 #: nested outcome sessions now report finite pytest/domain checkpoints to the
 #: Landing Gate supervisor.  Disable pytest-timeout for this item: continuing
 #: measured work may finish; missing semantic progress becomes NORECORD.
+@pytest.mark.bookkeeping(regenerate=REGENERATE, match=r"is stale")
 @pytest.mark.timeout(0)
 def test_the_census_block_is_fresh(under_declared_provenance):
     """Re-derive it and refuse any drift.
@@ -427,6 +428,7 @@ def test_the_generator_cli_can_go_red_and_green(tmp_path):
         f"{red.stderr}")
 
 
+@pytest.mark.bookkeeping(regenerate=REGENERATE, match=r"does not reproduce")
 @pytest.mark.timeout(0)
 def test_the_published_total_equals_the_live_census(under_declared_provenance):
     """Independent of the generator: the numbers on the page vs the tree.

@@ -44,6 +44,7 @@ import re
 import sys
 import time
 from pathlib import Path
+import pytest
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
@@ -121,6 +122,7 @@ def test_the_matching_prefix_is_still_bullet_only():
         assert PRE_2060.match(_nested_list(21, indent, closed=False))
 
 
+@pytest.mark.measures
 def test_growth_is_flat_where_the_old_pattern_multiplies():
     """MUTATION, as a RATIO between two sizes measured on THIS host inside
     THIS test — never an absolute second-count, which would be a bound on how
