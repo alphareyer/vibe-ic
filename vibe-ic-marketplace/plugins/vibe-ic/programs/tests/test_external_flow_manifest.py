@@ -1,314 +1,361 @@
-"""W0 (`--librelane` v1): the import-manifest schema for external-flow runs.
+"""W0 (`--librelane` v1): the import manifest for external-flow runs (schema 2).
 
 Contracts:
-  1. A row built from disk validates, and its provenance entry is accepted by
-     the REAL `provenance_check` (allow-list on the underlying tool,
-     --require-measured) — decision 4a: a witnessed run attributed to the flow.
-  2. The witness is a TOOL RUN: tool_run_path and source_log are stored
-     relative to an absolute, existing run_dir, resolved against it whatever
-     the cwd, and a row that witnesses itself (the canonical file as its own
-     tool file or log, run_dir = the project) is refused.
-  3. A symlinked canonical file, a digest that differs between the tool run
-     and the canonical copy, a stale file, a stale source log, a missing flow
-     step id, and a malformed or foreign measurement are each refused with a
-     reason; `to_provenance_entry` refuses whatever `validate_row` refuses.
-  4. `measurement: null` is the honest UNDECLARED state: the entry carries no
-     record and provenance_check reports UNMEASURED (INCOMPLETE, rc 0).
-  5. No tool version renders `version: None` with a NOT CAPTURED disclosure.
-  6. An invalid manifest writes nothing.
+  1. ONE WITNESS SCHEMA (orchestrator ruling, llf_r3): a row's provenance
+     entry is W19's `witnessed_row`, re-derived from the run itself; the real
+     (witness-verifying) `provenance_check` accepts it, and it refuses what
+     W19 refuses (a skipped or unfinished step, a transcript the flow's own
+     log does not name).
+  2. The witness is a TOOL RUN inside the project: run_dir is project-
+     relative; tool_run_path, step_dir and source_logs are run-relative and
+     resolved against it whatever the cwd; a row that witnesses itself
+     (run_dir = the project, the canonical file as its own tool file or log)
+     is refused, as are paths outside the run or outside step_dir.
+  3. `source_logs` is a list: a step may cite several transcripts, or none
+     (a row that will be a #365 back-fill).
+  4. Symlinks, unequal digests, stale files, a missing step key, a tool that
+     is not the step's tool, malformed or foreign measurements are refused.
+  5. `measurement: null` is UNDECLARED: provenance_check reports UNMEASURED.
+  6. No tool version renders `version: None` with a NOT CAPTURED disclosure.
+  7. An invalid manifest writes nothing; `not_performed` is carried.
 """
 from __future__ import annotations
 
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+PROGRAMS = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROGRAMS))
 import _external_flow_manifest as M  # noqa: E402
-import provenance_check  # noqa: E402
+import _tool_log_provenance as T  # noqa: E402
 
+CHECK = PROGRAMS / "provenance_check.py"
+WHOLE = PROGRAMS / "calibration" / "librelane_flow_log_complete_negative.log"
 MEASURED = {"schema": "mcp-eda/measurement/1", "operation": "route",
             "measured": True, "not_measured_class": None,
             "not_measured_reason": None, "read": [], "wrote": [],
             "tool": "openroad"}
 CANON = "phase3/stage3/pnr/routed.def"
-STEP = "41-openroad-detailedrouting"
+RUN = "phase3/librelane/runs/seg2"
+STEP = "44-openroad-detailedrouting"
+STEP_ID = "OpenROAD.DetailedRouting"
+LOG = f"{STEP}/openroad-detailedrouting.log"
+SRC = f"{STEP}/top.def"
 
 
 @pytest.fixture
 def world(tmp_path: Path):
     project = tmp_path / "proj"
-    run_dir = tmp_path / "ll_run"
-    (run_dir / STEP).mkdir(parents=True)
-    tool_file = run_dir / STEP / "design.def"
-    tool_file.write_text("VERSION 5.8 ;\nDESIGN d ;\nEND DESIGN\n")
-    log = run_dir / STEP / "openroad-detailedrouting.log"
-    log.write_text("[INFO DRT-0198] Complete detail routing.\n")
+    run = project / RUN
+    (run / STEP).mkdir(parents=True)
+    shutil.copyfile(WHOLE, run / "flow.log")
+    (run / LOG).write_text("[INFO DRT-0198] Complete detail routing.\n")
+    (run / STEP / "state_out.json").write_text('{"def": "top.def"}\n')
+    (run / SRC).write_text("VERSION 5.8 ;\nDESIGN top ;\nEND DESIGN\n")
     (project / CANON).parent.mkdir(parents=True)
-    shutil.copyfile(tool_file, project / CANON)
-    return project, run_dir, tool_file, log
+    shutil.copyfile(run / SRC, project / CANON)
+    return project, run
 
 
-def _row(project, run_dir, tool_file, log, **over):
-    kw = dict(run_dir=run_dir, step_id="21", canonical_path=CANON,
-              tool_run_path=tool_file, flow="librelane", tool="openroad",
-              source_log=log, timestamp="2026-09-28T01:00:00Z", exit_code=0,
-              measurement=MEASURED, tool_step_id="OpenROAD.DetailedRouting",
-              tool_version="26Q3")
+def _row(project, run, **over):
+    kw = dict(run_dir=RUN, step_id="21", canonical_path=CANON,
+              tool_run_path=run / SRC, flow="librelane", tool="openroad",
+              step_dir=STEP, source_logs=[run / LOG],
+              timestamp="2026-09-28T01:00:00Z", exit_code=0,
+              measurement=MEASURED, tool_step_id=STEP_ID, tool_version="26Q3")
     kw.update(over)
     return M.make_row(project, **kw)
 
 
+def _check(project, *extra):
+    return subprocess.run([sys.executable, str(CHECK), str(project),
+                           "--output", CANON, "--tool", "openroad", *extra],
+                          capture_output=True, text=True, timeout=120)
+
+
+def test_the_field_names():
+    assert M.SCHEMA == "vibe-ic/external-flow-import/2"
+    assert M.ROW_KEYS == (
+        "step_id", "canonical_path", "tool_run_path", "canonical_sha256",
+        "tool_run_sha256", "flow", "tool", "step_dir", "source_logs",
+        "timestamp", "exit_code", "measurement")
+    assert M.MANIFEST_REL == "reports/phase3/impl/import_manifest.json"
+
+
 def test_a_copied_row_validates_and_round_trips(world):
-    project, run_dir, tool_file, log = world
-    row = _row(project, run_dir, tool_file, log)
-    assert row["tool_run_path"] == f"{STEP}/design.def"
-    assert row["source_log"] == f"{STEP}/openroad-detailedrouting.log"
-    assert M.validate_row(row, project, run_dir) == []
-    path = M.write_manifest(project, flow="librelane", run_dir=str(run_dir),
-                            rows=[row])
+    project, run = world
+    row = _row(project, run)
+    assert row["tool_run_path"] == SRC and row["step_dir"] == STEP
+    assert row["source_logs"] == [{"path": LOG,
+                                   "sha256": M.sha256_file(run / LOG)}]
+    assert M.validate_row(row, project, RUN) == []
+    path = M.write_manifest(project, flow="librelane", run_dir=RUN,
+                            rows=[row], not_performed=[{"step_id": "26.5ic"}])
     assert path == project / M.MANIFEST_REL
-    assert M.load_manifest(project)["rows"] == [row]
+    loaded = M.load_manifest(project)
+    assert loaded["rows"] == [row]
+    assert loaded["not_performed"] == [{"step_id": "26.5ic"}]
 
 
-def test_paths_resolve_against_run_dir_not_the_cwd(world, tmp_path, monkeypatch):
-    project, run_dir, tool_file, log = world
-    # A same-named file in the cwd must never be the one hashed.
-    elsewhere = tmp_path / "elsewhere"
-    (elsewhere / STEP).mkdir(parents=True)
-    (elsewhere / STEP / "design.def").write_text("OTHER BYTES\n")
-    (elsewhere / STEP / "openroad-detailedrouting.log").write_text("OTHER\n")
-    monkeypatch.chdir(elsewhere)
-    row = _row(project, run_dir, Path(STEP) / "design.def",
-               Path(STEP) / "openroad-detailedrouting.log")
-    assert row["tool_run_sha256"] == M.sha256_file(tool_file)
-    assert row["source_log_sha256"] == M.sha256_file(log)
-    assert M.validate_row(row, project, run_dir) == []
-    monkeypatch.chdir(run_dir)
-    assert M.validate_row(row, project, run_dir) == []
-    assert M.validate_row(row, project, str(run_dir)) == []
-
-
-def test_the_provenance_entry_passes_the_real_provenance_check(world, capsys):
-    project, run_dir, tool_file, log = world
-    entry = M.to_provenance_entry(_row(project, run_dir, tool_file, log),
-                                  project, run_dir)
-    assert entry["tool"] == "openroad" and entry["attributed_to"] == "librelane"
-    assert entry["reconstructed"] is False and entry["version"] == "26Q3"
-    assert entry["witness"] == {"kind": "tool_step_log",
-                                "tool_step_id": "OpenROAD.DetailedRouting",
-                                "run_dir": str(run_dir), "log": str(log),
-                                "log_sha256": M.sha256_file(log)}
+def test_the_entry_is_w19s_witness_and_the_real_check_accepts_it(world):
+    project, run = world
+    entry = M.to_provenance_entry(_row(project, run), project, RUN)
+    w19 = T.witnessed_row(project, flow="librelane", step_id=STEP_ID,
+                          run_dir=run, step_dir=STEP,
+                          outputs={CANON: run / SRC}, version="26Q3",
+                          timestamp="2026-09-28T01:00:00Z")
+    assert entry["witness"] == w19["witness"]
+    assert {k: entry[k] for k in w19} == w19
+    assert entry["measurement"] == MEASURED and entry["step_id"] == "21"
+    assert T.is_witnessed(entry, project)
     (project / "provenance.jsonl").write_text(json.dumps(entry) + "\n")
-    rc = provenance_check.main([str(project), "--output", CANON,
-                                "--tool", "openroad", "--require-measured"])
-    out = capsys.readouterr().out
-    assert rc == 0, out
-    assert "[PASS" in out and "INCOMPLETE:" not in out
-    # The flow is not the tool: an allow-list naming only the flow refuses it.
-    assert provenance_check.main([str(project), "--output", CANON,
-                                  "--tool", "librelane"]) == 1
+    r = _check(project, "--require-measured")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "INCOMPLETE:" not in r.stdout
 
 
-def test_an_undeclared_measurement_is_honestly_unmeasured(world, capsys):
-    project, run_dir, tool_file, log = world
-    row = _row(project, run_dir, tool_file, log, measurement=None)
-    assert M.validate_row(row, project, run_dir) == []
-    entry = M.to_provenance_entry(row, project, run_dir)
+def test_the_old_single_log_witness_is_refused_by_the_real_check(world):
+    """What W0 used to emit (one log, no prefix, no completion, no sources)."""
+    project, run = world
+    old = {"timestamp": "t", "tool": "openroad", "attributed_to": "librelane",
+           "outputs": {CANON: M.sha256_file(project / CANON)}, "exit_code": 0,
+           "reconstructed": False,
+           "witness": {"kind": "tool_step_log", "tool_step_id": STEP_ID,
+                       "log": str(run / LOG),
+                       "log_sha256": M.sha256_file(run / LOG)}}
+    (project / "provenance.jsonl").write_text(json.dumps(old) + "\n")
+    r = _check(project)
+    assert r.returncode == 1 and "claims a witness that does not hold" in r.stdout
+
+
+def test_an_undeclared_measurement_is_honestly_unmeasured(world):
+    project, run = world
+    row = _row(project, run, measurement=None)
+    assert M.validate_row(row, project, RUN) == []
+    entry = M.to_provenance_entry(row, project, RUN)
     assert "measurement" not in entry
     (project / "provenance.jsonl").write_text(json.dumps(entry) + "\n")
-    rc = provenance_check.main([str(project), "--output", CANON,
-                                "--tool", "openroad", "--require-measured"])
-    out = capsys.readouterr().out
-    assert rc == 0, out
-    assert "UNMEASURED" in out and "INCOMPLETE:" in out
+    r = _check(project, "--require-measured")
+    assert r.returncode == 0, r.stdout
+    assert "UNMEASURED" in r.stdout and "INCOMPLETE:" in r.stdout
 
 
 def test_no_tool_version_is_none_with_a_disclosure(world):
-    project, run_dir, tool_file, log = world
-    entry = M.to_provenance_entry(
-        _row(project, run_dir, tool_file, log, tool_version=None),
-        project, run_dir)
+    project, run = world
+    entry = M.to_provenance_entry(_row(project, run, tool_version=None),
+                                  project, RUN)
     assert entry["version"] is None
     assert entry["version_capture"].startswith("NOT CAPTURED:")
+    assert T.is_witnessed(entry, project)
 
 
-def test_a_failed_tool_step_does_not_bind_its_file(world, capsys):
-    project, run_dir, tool_file, log = world
-    entry = M.to_provenance_entry(_row(project, run_dir, tool_file, log,
-                                       exit_code=1), project, run_dir)
-    (project / "provenance.jsonl").write_text(json.dumps(entry) + "\n")
-    assert provenance_check.main([str(project), "--output", CANON,
-                                  "--tool", "openroad"]) == 1
+def test_what_w19_refuses_is_never_rendered(world):
+    project, run = world
+    row = _row(project, run)
+    (run / STEP / "state_out.json").unlink()          # the step never finished
+    with pytest.raises(M.ManifestError, match="did not finish"):
+        M.to_provenance_entry(row, project, RUN)
+
+
+def test_a_transcript_the_flow_log_does_not_name_is_refused(world):
+    project, run = world
+    (run / STEP / "notes.log").write_text("hand written\n")
+    row = _row(project, run, source_logs=[run / LOG, run / STEP / "notes.log"])
+    assert M.validate_row(row, project, RUN) == []   # a list is a valid shape
+    with pytest.raises(M.ManifestError, match="not a transcript"):
+        M.to_provenance_entry(row, project, RUN)
+
+
+def test_an_exit_code_that_disagrees_with_the_witness_is_refused(world):
+    project, run = world
+    with pytest.raises(M.ManifestError, match="disagrees with the witness"):
+        M.to_provenance_entry(_row(project, run, exit_code=1), project, RUN)
+
+
+def test_source_logs_may_list_several_or_none(world):
+    project, run = world
+    (run / STEP / "second.log").write_text("x\n")
+    two = _row(project, run, source_logs=[run / LOG, run / STEP / "second.log"])
+    none = _row(project, run, source_logs=[])
+    assert M.validate_row(two, project, RUN) == []
+    assert M.validate_row(none, project, RUN) == []
+    assert T.is_witnessed(M.to_provenance_entry(none, project, RUN), project)
+
+
+def test_paths_resolve_against_run_dir_not_the_cwd(world, tmp_path, monkeypatch):
+    project, run = world
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / STEP).mkdir(parents=True)
+    (elsewhere / SRC).write_text("OTHER BYTES\n")
+    (elsewhere / LOG).write_text("OTHER\n")
+    monkeypatch.chdir(elsewhere)
+    row = _row(project, run, tool_run_path=Path(SRC), source_logs=[Path(LOG)])
+    assert row["tool_run_sha256"] == M.sha256_file(run / SRC)
+    assert row["source_logs"][0]["sha256"] == M.sha256_file(run / LOG)
+    assert M.validate_row(row, project, RUN) == []
+    monkeypatch.chdir(run)
+    assert M.validate_row(row, project, RUN) == []
 
 
 def test_a_row_cannot_witness_itself(world):
-    """The integrity review's forgery: no tool run, the published file named
-    as its own tool file and log, run_dir the project."""
-    project, run_dir, tool_file, log = world
+    """The integrity review's forgery: the published file as its own tool file
+    and log, run_dir the project."""
+    project, run = world
     canon = project / CANON
     with pytest.raises(M.ManifestError):
-        _row(project, run_dir, canon, canon)          # outside run_dir
-    forged = _row(project, project, canon, canon)     # run_dir = project
-    problems = M.validate_row(forged, project, project)
+        _row(project, run, tool_run_path=canon, source_logs=[canon])
+    forged = _row(project, run, run_dir=".", tool_run_path=canon,
+                  source_logs=[canon], step_dir="phase3")
+    problems = M.validate_row(forged, project, ".")
     assert any("the witness must be a tool run" in p for p in problems), problems
     assert any("cannot witness its own run" in p for p in problems), problems
     assert any("tool_run_path is the canonical file" in p for p in problems)
     with pytest.raises(M.ManifestError):
-        M.to_provenance_entry(forged, project, project)
+        M.to_provenance_entry(forged, project, ".")
     with pytest.raises(M.ManifestError):
-        M.write_manifest(project, flow="librelane", run_dir=str(project),
-                         rows=[forged])
+        M.write_manifest(project, flow="librelane", run_dir=".", rows=[forged])
 
 
-def test_a_run_dir_holding_the_canonical_file_is_refused(world, tmp_path):
-    project, run_dir, tool_file, log = world
-    row = _row(project, run_dir, tool_file, log)
-    problems = M.validate_row(row, project, project / "phase3")
+def test_a_run_dir_holding_the_canonical_file_is_refused(world):
+    project, run = world
+    row = _row(project, run)
+    problems = M.validate_row(row, project, "phase3")
     assert any("canonical file lies inside run_dir" in p for p in problems), problems
 
 
-def test_witness_paths_outside_the_run_are_refused(world, tmp_path):
-    project, run_dir, tool_file, log = world
+def test_witness_paths_outside_the_run_or_the_step_are_refused(world, tmp_path):
+    project, run = world
     stray = tmp_path / "stray.def"
-    shutil.copyfile(tool_file, stray)
+    shutil.copyfile(run / SRC, stray)
     with pytest.raises(M.ManifestError, match="not inside run_dir"):
-        _row(project, run_dir, stray, log)
-    good = _row(project, run_dir, tool_file, log)
+        _row(project, run, tool_run_path=stray)
+    good = _row(project, run)
     for key, bad in (("tool_run_path", "../stray.def"),
                      ("tool_run_path", str(stray)),
-                     ("source_log", "../stray.def")):
-        problems = M.validate_row({**good, key: bad}, project, run_dir)
+                     ("step_dir", "../x")):
+        problems = M.validate_row({**good, key: bad}, project, RUN)
         assert any("not a relative path inside run_dir" in p
                    for p in problems), (key, bad, problems)
-    # ...and through a symlink inside the run.
-    os.symlink(stray, run_dir / STEP / "linked.def")
+    bad_log = {**good, "source_logs": [{"path": "../../x.log",
+                                        "sha256": good["source_logs"][0]["sha256"]}]}
+    assert any("not a relative path inside run_dir" in p
+               for p in M.validate_row(bad_log, project, RUN))
+    os.symlink(stray, run / STEP / "linked.def")
     problems = M.validate_row({**good, "tool_run_path": f"{STEP}/linked.def"},
-                              project, run_dir)
+                              project, RUN)
     assert any("resolves outside run_dir" in p for p in problems), problems
+    (run / "other").mkdir()
+    shutil.copyfile(run / SRC, run / "other" / "top.def")
+    problems = M.validate_row({**good, "tool_run_path": "other/top.def"},
+                              project, RUN)
+    assert any("not inside step_dir" in p for p in problems), problems
 
 
-@pytest.mark.parametrize("bad_run_dir", ["", "relative/run", None])
-def test_run_dir_must_be_absolute(world, bad_run_dir):
-    project, run_dir, tool_file, log = world
-    row = _row(project, run_dir, tool_file, log)
-    assert any("is not an absolute path" in p
+@pytest.mark.parametrize("bad_run_dir", ["", "/abs/run", "../run", None])
+def test_run_dir_must_be_project_relative(world, bad_run_dir):
+    project, run = world
+    row = _row(project, run)
+    assert any("is not a project-relative path" in p
                for p in M.validate_row(row, project, bad_run_dir))
     with pytest.raises(M.ManifestError):
-        M.make_row(project, **{**dict(
-            run_dir=Path("relative/run"), step_id="21", canonical_path=CANON,
-            tool_run_path=tool_file, flow="librelane", tool="openroad",
-            source_log=log, timestamp="t", exit_code=0, measurement=None,
-            tool_step_id="OpenROAD.DetailedRouting")})
+        _row(project, run, run_dir=bad_run_dir or "")
 
 
 def test_a_missing_run_dir_is_refused_on_disk(world):
-    project, run_dir, tool_file, log = world
-    row = _row(project, run_dir, tool_file, log)
-    shutil.rmtree(run_dir)
-    problems = M.validate_row(row, project, run_dir)
+    project, run = world
+    row = _row(project, run)
+    shutil.rmtree(run)
+    problems = M.validate_row(row, project, RUN)
     assert any("is not a directory" in p for p in problems), problems
-    assert M.validate_row(row, project, run_dir, verify_disk=False) == []
+    assert M.validate_row(row, project, RUN, verify_disk=False) == []
 
 
 def test_a_symlinked_canonical_file_is_refused_and_never_rendered(world):
-    project, run_dir, tool_file, log = world
+    project, run = world
     (project / CANON).unlink()
-    os.symlink(tool_file, project / CANON)
-    row = _row(project, run_dir, tool_file, log)
-    problems = M.validate_row(row, project, run_dir)
-    assert any("symlink" in p for p in problems), problems
+    os.symlink(run / SRC, project / CANON)
+    row = _row(project, run)
+    assert any("symlink" in p for p in M.validate_row(row, project, RUN))
     with pytest.raises(M.ManifestError, match="symlink"):
-        M.to_provenance_entry(row, project, run_dir)
-
-
-def test_a_symlinked_parent_directory_is_refused(world, tmp_path):
-    project, run_dir, tool_file, log = world
-    shutil.rmtree(project / "phase3")
-    elsewhere = tmp_path / "elsewhere" / "stage3" / "pnr"
-    elsewhere.mkdir(parents=True)
-    shutil.copyfile(tool_file, elsewhere / "routed.def")
-    os.symlink(tmp_path / "elsewhere", project / "phase3")
-    problems = M.validate_row(_row(project, run_dir, tool_file, log), project,
-                              run_dir)
-    assert any("symlink" in p for p in problems), problems
+        M.to_provenance_entry(row, project, RUN)
 
 
 def test_different_bytes_are_refused_and_never_rendered(world):
-    project, run_dir, tool_file, log = world
+    project, run = world
     (project / CANON).write_text("VERSION 5.8 ;\nDESIGN other ;\nEND DESIGN\n")
-    row = _row(project, run_dir, tool_file, log)
-    problems = M.validate_row(row, project, run_dir)
-    assert any("not the bytes the tool wrote" in p for p in problems), problems
+    row = _row(project, run)
+    assert any("not the bytes the tool wrote" in p
+               for p in M.validate_row(row, project, RUN))
     with pytest.raises(M.ManifestError, match="not the bytes"):
-        M.to_provenance_entry(row, project, run_dir)
+        M.to_provenance_entry(row, project, RUN)
 
 
 @pytest.mark.parametrize("which", ["canonical", "tool", "log"])
 def test_a_file_changed_after_the_row_was_written_is_refused(world, which):
-    project, run_dir, tool_file, log = world
-    row = _row(project, run_dir, tool_file, log)
-    target = {"canonical": project / CANON, "tool": tool_file, "log": log}[which]
+    project, run = world
+    row = _row(project, run)
+    target = {"canonical": project / CANON, "tool": run / SRC,
+              "log": run / LOG}[which]
     target.write_text(target.read_text() + "# edited\n")
-    problems = M.validate_row(row, project, run_dir)
-    assert any("no longer hashes" in p for p in problems), problems
-    assert M.validate_row(row, project, run_dir, verify_disk=False) == []
+    assert any("no longer hashes" in p for p in M.validate_row(row, project, RUN))
+    assert M.validate_row(row, project, RUN, verify_disk=False) == []
 
 
-def test_each_flow_names_its_own_step_key(world):
-    project, run_dir, tool_file, log = world
-    no_step = _row(project, run_dir, tool_file, log, tool_step_id=None)
-    assert any("tool_step_id" in p
-               for p in M.validate_row(no_step, project, run_dir))
-    wrong = _row(project, run_dir, tool_file, log, tool_step_id=None,
-                 make_stage="5_2_route")
-    assert M.validate_row(wrong, project, run_dir)
-    orfs = _row(project, run_dir, tool_file, log, flow="orfs",
-                tool_step_id=None, make_stage="5_2_route")
-    assert M.validate_row(orfs, project, run_dir) == []
-    entry = M.to_provenance_entry(orfs, project, run_dir)
-    assert entry["witness"]["make_stage"] == "5_2_route"
+def test_each_flow_names_its_own_step_key_and_its_tool(world):
+    project, run = world
+    assert any("tool_step_id" in p for p in M.validate_row(
+        _row(project, run, tool_step_id=None), project, RUN))
+    assert M.validate_row(_row(project, run, make_stage="5_2_route"),
+                          project, RUN)
+    orfs = _row(project, run, flow="orfs", tool_step_id=None,
+                make_stage="5_2_route")
+    assert M.validate_row(orfs, project, RUN) == []
+    with pytest.raises(M.ManifestError, match="no witness rule"):
+        M.to_provenance_entry(orfs, project, RUN)
+    wrong_tool = _row(project, run, tool="magic", measurement=None)
+    assert any("is not the tool" in p
+               for p in M.validate_row(wrong_tool, project, RUN))
 
 
 @pytest.mark.parametrize("measurement", [{}, {"measured": True},
                                          {**MEASURED, "measured": "yes"},
                                          "measured"])
 def test_a_malformed_measurement_record_is_refused(world, measurement):
-    project, run_dir, tool_file, log = world
-    row = _row(project, run_dir, tool_file, log, measurement=measurement)
-    assert any("measurement" in p for p in M.validate_row(row, project, run_dir))
+    project, run = world
+    row = _row(project, run, measurement=measurement)
+    assert any("measurement" in p for p in M.validate_row(row, project, RUN))
 
 
 def test_another_tools_measurement_is_refused(world):
-    project, run_dir, tool_file, log = world
-    row = _row(project, run_dir, tool_file, log,
-               measurement={**MEASURED, "tool": "klayout"})
+    project, run = world
+    row = _row(project, run, measurement={**MEASURED, "tool": "klayout"})
     assert any("'klayout''s record" in p
-               for p in M.validate_row(row, project, run_dir))
+               for p in M.validate_row(row, project, RUN))
 
 
 @pytest.mark.parametrize("rel", ["/abs/routed.def", "../outside.def"])
 def test_a_canonical_path_outside_the_project_is_refused(world, rel):
-    project, run_dir, tool_file, log = world
-    row = {**_row(project, run_dir, tool_file, log), "canonical_path": rel}
+    project, run = world
+    row = {**_row(project, run), "canonical_path": rel}
     assert any("not a relative path inside the project" in p
-               for p in M.validate_row(row, project, run_dir))
+               for p in M.validate_row(row, project, RUN))
 
 
 def test_an_invalid_manifest_writes_nothing(world):
-    project, run_dir, tool_file, log = world
-    good = _row(project, run_dir, tool_file, log)
+    project, run = world
+    good = _row(project, run)
     with pytest.raises(M.ManifestError, match="already imported"):
-        M.write_manifest(project, flow="librelane", run_dir=str(run_dir),
+        M.write_manifest(project, flow="librelane", run_dir=RUN,
                          rows=[good, good])
     with pytest.raises(M.ManifestError, match="flow"):
-        M.write_manifest(project, flow="orfs", run_dir=str(run_dir), rows=[good])
+        M.write_manifest(project, flow="orfs", run_dir=RUN, rows=[good])
+    with pytest.raises(M.ManifestError, match="not_performed"):
+        M.write_manifest(project, flow="librelane", run_dir=RUN, rows=[good],
+                         not_performed="x")
     assert not (project / M.MANIFEST_REL).exists()
-
-
-def test_the_manifest_sits_where_stage3_review_reads():
-    assert M.MANIFEST_REL.startswith("reports/phase3/")
