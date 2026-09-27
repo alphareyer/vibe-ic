@@ -140,24 +140,11 @@ def _error_lines(log: str) -> list[str]:
             if line.startswith(("%Error", "ERROR:"))][:ERROR_EXCERPT_LINES]
 
 
-def _keep_log(log_dir: Path | None, name: str, log: str) -> dict:
-    """Write one tool's whole transcript to `log_dir` and cite it by sha256."""
-    if log_dir is None:
-        return {}
-    import hashlib
-    from _atomic_artefact import write_text
-    path = Path(log_dir) / f"{name}.log"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_text(path, log)
-    return {"log": str(path), "log_sha256": "sha256:" + hashlib.sha256(
-        path.read_bytes()).hexdigest()}
-
-
-def check(project: Path, image: str | None = None,
-          log_dir: Path | None = None) -> dict:
+def check(project: Path, image: str | None = None) -> dict:
     """`image` is the declared one (`--image`); None resolves it only if a
-    tool actually has to run in docker. With `log_dir`, each tool's whole
-    transcript is written there and cited (path + sha256) in its record."""
+    tool actually has to run in docker. Each tool's WHOLE transcript is
+    returned under the private ``_transcripts`` key for a caller that keeps
+    it (the rtl content check writes and cites it); `main` does not print it."""
     # READ ORDER: packages in dependency order ahead of the RTL that uses
     # them. Verilator elaborates in ONE pass, so a file that names a package
     # type before the package is parsed fails "Reference to <type> before
@@ -211,8 +198,8 @@ def check(project: Path, image: str | None = None,
     result["tools"]["Yosys.JsonHeader"] = {"exit_code": yosys.returncode,
                                                "execution": "host" if shutil.which("yosys") else yosys_image,
                                                "errors": _error_lines(yosys_log),
-                                               **_keep_log(log_dir, "yosys_jsonheader", yosys_log),
                                                "output": yosys_log[-8000:]}
+    result["_transcripts"] = {"Yosys.JsonHeader": yosys_log}
     lint_log = verilator.stdout + verilator.stderr
     try:
         diagnostics = _diagnostic_codes(lint_log)
@@ -223,8 +210,8 @@ def check(project: Path, image: str | None = None,
                                             "execution": "host" if shutil.which("verilator") else verilator_image,
                                             "diagnostics": diagnostics,
                                             "errors": _error_lines(lint_log),
-                                            **_keep_log(log_dir, "verilator_lint", lint_log),
                                             "output": lint_log[-8000:]}
+    result["_transcripts"]["Verilator.Lint"] = lint_log
     if yosys.returncode:
         result["findings"].append("Yosys elaboration failed")
     if verilator.returncode:
@@ -246,6 +233,7 @@ def main() -> int:
         print("FAIL: project directory absent")
         return 2
     result = check(args.project.resolve(), args.image)
+    result.pop("_transcripts", None)
     print(json.dumps(result, sort_keys=True))
     if result.get("not_measured"):
         return 2

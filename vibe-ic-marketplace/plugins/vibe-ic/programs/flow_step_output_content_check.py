@@ -38,15 +38,32 @@ def _rtl_errors(project: Path) -> tuple[list[str], dict | None]:
         return errors, None
     # No image is resolved here: the front end resolves one only if a tool
     # has to run in docker (a tool on PATH, e.g. in-image, needs none).
-    record = _pl.report_path(project, RTL_RECORD)
-    verdict = _rtl_frontend.check(project, log_dir=record.parent / "rtl_frontend")
-    try:
-        from _atomic_artefact import write_json
-        record.parent.mkdir(parents=True, exist_ok=True)
-        write_json(record, {k: v for k, v in verdict.items()})
-    except OSError:
-        pass
+    verdict = _rtl_frontend.check(project)
+    _keep_record(project, verdict)
     return list(verdict["findings"]), verdict
+
+
+def _keep_record(project: Path, verdict: dict) -> None:
+    """Write each tool's whole transcript beside the record, cite it in the
+    tool's row (path + sha256 of the written bytes), and write the record."""
+    import hashlib
+    from _atomic_artefact import write_json, write_text
+    transcripts = verdict.pop("_transcripts", None) or {}
+    record = _pl.report_path(project, RTL_RECORD)
+    try:
+        for name, text in transcripts.items():
+            log = record.parent / "rtl_frontend" / f"{name}.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            write_text(log, text)
+            row = (verdict.get("tools") or {}).get(name)
+            if isinstance(row, dict):
+                row["log"] = str(log)
+                row["log_sha256"] = ("sha256:"
+                                     + hashlib.sha256(log.read_bytes()).hexdigest())
+        record.parent.mkdir(parents=True, exist_ok=True)
+        write_json(record, verdict)
+    except OSError as exc:
+        verdict.setdefault("record_not_written", str(exc))
 
 
 def _tool_disclosure(project: Path, frontend: dict | None) -> list[str]:
