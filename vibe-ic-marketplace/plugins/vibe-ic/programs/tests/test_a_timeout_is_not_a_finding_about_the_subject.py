@@ -283,7 +283,7 @@ def test_the_published_skip_reason_carries_the_distinction(
 
 # ── the pre-fix control ─────────────────────────────────────────────────────
 
-def test_no_runtime_bound_survives_at_any_of_these_sites():
+def test_no_runtime_bound_survives_at_any_of_these_sites(tmp_path):
     """THE CONTROL FOR THE RETRACTION, and the assertion that actually matters.
 
     The retracted version of this fix would have PASSED every behavioural test
@@ -373,7 +373,7 @@ def test_no_runtime_bound_survives_at_any_of_these_sites():
     import types
 
     def _probe(body):
-        f = Path(__file__).parent / "_probe.py"
+        f = tmp_path / "_probe.py"
         f.write_text(body, encoding="utf-8")
         return types.SimpleNamespace(__file__=str(f)), f
 

@@ -1053,36 +1053,53 @@ def test_a_new_program_without_a_regenerated_index_is_refused():
     `_audit`, so it is invisible to a name-shaped derivation of the gate list;
     only invoking the script reaches it.
 
-    Uses the REAL gate against the REAL tree — the probe program is written
-    into the live `programs/` directory and removed in `finally`, which is the
-    technique `test_gate_discloses_denominator.py` already uses for the same
-    reason: a fixture cannot prove a gate reads the artefacts it ships to read.
+    Uses the REAL gate, the REAL generator's bytes and a byte-for-byte
+    snapshot of the REAL tree it reads: `programs/*.py` and the committed
+    `INDEX.md`, copied into a temporary directory at the same relative layout, because
+    `gen_programs_index` resolves both from its own `__file__`. The probe is
+    written into that snapshot, never into the live `programs/` — a file that
+    appears and vanishes there is seen by every concurrent worker that lists
+    `programs/*.py` (FileNotFoundError, or a selection one file off). The (a)
+    control still proves the SHIPPED `INDEX.md` is fresh against the SHIPPED
+    programs, so the snapshot is not a fixture standing in for the artefact.
     """
+    import shutil
     import tempfile
     # NOT `_probe_…`: `gen_programs_index._is_helper` skips any name starting
     # with an underscore, so the underscore-prefixed probe the neighbouring
     # denominator test uses would leave the index legitimately fresh and this
     # test would pass while proving nothing. Caught by the (a) control below,
     # which is the reason it is there.
-    probe = _PROGRAMS / "probe_issue538_unindexed_throwaway.py"
-    line = ('run "programs index fresh" "$ROOT" '
-            f'python3 "{_REPO}/tools/gen_programs_index.py" --check\n')
-    try:
+    with tempfile.TemporaryDirectory() as mirror_td:
+        mirror = Path(mirror_td)
+        (mirror / "tools").mkdir()
+        gen = mirror / "tools" / "gen_programs_index.py"
+        shutil.copyfile(_REPO / "tools" / "gen_programs_index.py", gen)
+        programs = mirror / _PROGRAMS.relative_to(_REPO)
+        programs.mkdir(parents=True)
+        shutil.copyfile(_PROGRAMS / "INDEX.md", programs / "INDEX.md")
+        for src in _PROGRAMS.glob("*.py"):
+            try:
+                shutil.copyfile(src, programs / src.name)
+            except FileNotFoundError:
+                # Another test's transient probe, reaped between the listing
+                # and the copy: absent from the snapshot, as it is from the tree.
+                pass
+        probe = programs / "probe_issue538_unindexed_throwaway.py"
+        line = ('run "programs index fresh" "$ROOT" '
+                f'python3 "{gen}" --check\n')
         with tempfile.TemporaryDirectory() as td:
             script = _fixture_script(Path(td), line)
 
             # (a) control — before the program exists, the index is fresh.
-            before = GR.repo_hygiene_gate(_REPO, script=script)
+            before = GR.repo_hygiene_gate(mirror, script=script)
             assert before.rc == 0, (
                 "the index was ALREADY stale before this test touched "
                 f"anything, so it proves nothing: {before.summary}")
 
             # (b) the incident — a new program, no regenerated index.
             probe.write_text('"""throwaway (vibe-ic#538 test)."""\n')
-            after = GR.repo_hygiene_gate(_REPO, script=script)
-    finally:
-        if probe.exists():
-            probe.unlink()
+            after = GR.repo_hygiene_gate(mirror, script=script)
 
     assert after.rc == 1, (
         "the merge gate did NOT refuse a landing that adds a program without "

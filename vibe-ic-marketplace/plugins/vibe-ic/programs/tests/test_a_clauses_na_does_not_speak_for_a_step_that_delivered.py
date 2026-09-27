@@ -310,9 +310,45 @@ _T_NOT_MEASURED = F._T.Verdict.NOT_MEASURED.value
 import textwrap as _tw  # noqa: E402
 
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def _programs_shadow(tmp_path_factory):
+    shadow = tmp_path_factory.mktemp("programs_shadow")
+    for entry in PROGRAMS.iterdir():
+        (shadow / entry.name).symlink_to(entry)
+    return shadow
+
+
+@pytest.fixture(autouse=True)
+def _shadow_programs_dir(_programs_shadow, monkeypatch):
+    """Route `check_step`'s name resolution at a PRIVATE programs dir.
+
+    `_resolve_program_cmd` resolves a gate NAME against `F.PROGRAMS_DIR`.
+    Planting the fixture gates in the shipped programs/ made them appear and
+    vanish under every concurrent worker that lists programs/*.py. The shadow
+    dir holds a symlink to every real entry of programs/ (so every other
+    PROGRAMS_DIR lookup `check_step` makes resolves to the same bytes) plus the
+    fixture gates, which are real files there and nowhere else. The gates are
+    still invoked BY NAME through the real resolver."""
+    shadow = _programs_shadow
+    monkeypatch.setattr(F, "PROGRAMS_DIR", shadow)
+    # check_step prepends PROGRAMS_DIR to sys.path unless it is already on
+    # it. Listing the shadow LAST (per-test) keeps its lazy imports resolving
+    # from the real programs/ ahead of it, so no module is cached under a
+    # tmp path for later tests in this worker.
+    monkeypatch.setattr(sys, "path", list(sys.path) + [str(shadow)])
+    return shadow
+
+
 def _gate_program(tmp_path, name, body):
-    """A real program on PROGRAMS_DIR that check_step will actually invoke."""
-    p = PROGRAMS / f"{name}.py"
+    """A real program on PROGRAMS_DIR that check_step will actually invoke --
+    the test's shadow PROGRAMS_DIR, never the shipped tree."""
+    assert Path(F.PROGRAMS_DIR).resolve() != PROGRAMS, (
+        "refusing to plant a fixture gate in the shipped programs/")
+    p = Path(F.PROGRAMS_DIR) / f"{name}.py"
+    assert not p.exists(), p
     p.write_text(_tw.dedent(body))
     return p
 

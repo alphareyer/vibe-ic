@@ -297,7 +297,8 @@ def test_the_steps_lane_icspm3_wired_are_no_longer_gate_only(tmp_path):
             is False, (sid, stamp)
 
 
-def test_every_wrapper_in_the_tree_resolves_to_the_module_it_wraps():
+def test_every_wrapper_in_the_tree_resolves_to_the_module_it_wraps(
+        tmp_path):
     """The alias is read from the SOURCE, so this asserts the mechanism over
     the shipped programs rather than over a list retyped here."""
     import re
@@ -311,7 +312,7 @@ def test_every_wrapper_in_the_tree_resolves_to_the_module_it_wraps():
         found += 1
         stamp = f"{m.group(1)}:{md.group(1)}"
         name = src.stem
-        p = PROGRAMS / "tests" / "__alias_probe.json"
+        p = tmp_path / "__alias_probe.json"
         try:
             p.write_text(json.dumps({"program": stamp}))
             assert F._is_gate_verdict_document(

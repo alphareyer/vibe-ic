@@ -159,6 +159,31 @@ _FORMAL_GATE = '''
     '''
 
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture
+def shadow_programs(tmp_path_factory, monkeypatch):
+    """A PRIVATE programs dir for `check_step` to resolve gate names against.
+
+    `_resolve_program_cmd` resolves a gate NAME against `F.PROGRAMS_DIR`.
+    Planting the fixture gate in the shipped programs/ made it appear and
+    vanish under every concurrent worker that lists programs/*.py. The shadow
+    holds a symlink to every real entry of programs/ (every other PROGRAMS_DIR
+    lookup resolves to the same bytes) and the fixture gate as a real file,
+    which the real resolver still finds BY NAME."""
+    shadow = tmp_path_factory.mktemp("programs_shadow")
+    for entry in PROGRAMS.iterdir():
+        (shadow / entry.name).symlink_to(entry)
+    monkeypatch.setattr(F, "PROGRAMS_DIR", shadow)
+    # check_step prepends PROGRAMS_DIR to sys.path unless it is already on
+    # it. Listing the shadow LAST (per-test) keeps its lazy imports resolving
+    # from the real programs/ ahead of it, so no module is cached under a
+    # tmp path for later tests in this worker.
+    monkeypatch.setattr(sys, "path", list(sys.path) + [str(shadow)])
+    return shadow
+
+
 def _formal_step(prog: str) -> dict:
     return {"id": "5", "name": "Formal verification", "stage": "stage1",
             "gate": {"all_of": [
@@ -166,7 +191,8 @@ def _formal_step(prog: str) -> dict:
                  f"{prog} . --json reports/phase2/gates/formal_evidence.json"}]}}
 
 
-def test_the_wrapper_reads_step_five_as_an_awaiting_wait(tmp_path):
+def test_the_wrapper_reads_step_five_as_an_awaiting_wait(tmp_path,
+                                                          shadow_programs):
     """THE BEHAVIOUR, end to end on the rc-0 path.
 
     The gate exits 0 — so none of the rc-4 machinery applies — and says nothing
@@ -178,7 +204,7 @@ def test_the_wrapper_reads_step_five_as_an_awaiting_wait(tmp_path):
     back to the undifferentiated short-population reading this change exists to
     replace.
     """
-    prog = PROGRAMS / "_t_r0915_125_formal.py"
+    prog = shadow_programs / "_t_r0915_125_formal.py"
     prog.write_text(_tw.dedent(_FORMAL_GATE))
     try:
         (tmp_path / "reports" / "phase2" / "gates").mkdir(parents=True,
@@ -207,12 +233,13 @@ def test_the_wrapper_reads_step_five_as_an_awaiting_wait(tmp_path):
         prog.unlink(missing_ok=True)
 
 
-def test_a_gate_with_no_outstanding_obligations_is_not_made_to_wait(tmp_path):
+def test_a_gate_with_no_outstanding_obligations_is_not_made_to_wait(
+        tmp_path, shadow_programs):
     """THE OTHER DIRECTION, through the same wrapper. An identical gate whose
     report enumerates NO outstanding obligations must NOT be turned into a
     wait — otherwise the synthesis would manufacture an AWAITING for every
     rc-0 INCOMPLETE and the tier would stop meaning anything."""
-    prog = PROGRAMS / "_t_r0915_125_formal_done.py"
+    prog = shadow_programs / "_t_r0915_125_formal_done.py"
     prog.write_text(_tw.dedent(_FORMAL_GATE).replace(
         '"expert_fallback_outstanding": [',
         '"expert_fallback_outstanding": [] or [').replace(

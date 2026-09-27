@@ -78,7 +78,7 @@ def test_the_nda_suite_is_immune_to_an_ambient_token_store():
     assert " failed" not in p.stdout, p.stdout[-3000:]
 
 
-def test_the_ambient_store_is_genuinely_hostile():
+def test_the_ambient_store_is_genuinely_hostile(tmp_path):
     """THE NEGATIVE CONTROL for the test above, and it is not optional: if
     `_AMBIENT` were somehow equivalent to the fixture set, the test above would
     pass for no reason at all.
@@ -87,12 +87,17 @@ def test_the_ambient_store_is_genuinely_hostile():
     `setdefault` — must still be broken by it. This reproduces the pre-fix shape
     of the NDA suite in miniature: build the leak string from the fixture set,
     let the guard resolve its own tokens from the environment, and watch them
-    disagree."""
-    mod = _TESTS.parent / "_probe_ambient_store_test.py"
+    disagree.
+
+    The miniature module is written into `tmp_path`, never into the shipped
+    `programs/`: a file planted there is listed by every xdist worker that
+    scans the corpus, and deleted under it."""
+    mod = tmp_path / "_probe_ambient_store_test.py"
     mod.write_text(textwrap.dedent(f"""
         import json, os, subprocess, sys
         from pathlib import Path
-        _P = Path(__file__).resolve().parent
+        _P = Path({str(_TESTS.parent)!r})
+        _TMP = Path(__file__).resolve().parent
         sys.path.insert(0, str(_P)); sys.path.insert(0, str(_P / "tests"))
         from _nda_fixture_tokens import FICTIONAL_NDA_TOKENS
 
@@ -101,7 +106,7 @@ def test_the_ambient_store_is_genuinely_hostile():
             # a no-op, so the guard below never learns the fixture tokens.
             os.environ.setdefault("VIBEIC_NDA_TOKENS",
                                   json.dumps(FICTIONAL_NDA_TOKENS))
-            msg = _P / "m.txt"
+            msg = _TMP / "m.txt"
             msg.write_text("fix: port the flow to " + FICTIONAL_NDA_TOKENS["sku_full"])
             rc = subprocess.run(
                 [sys.executable, str(_P / "commit_msg_nda_check.py"),
@@ -110,14 +115,11 @@ def test_the_ambient_store_is_genuinely_hostile():
             msg.unlink()
             assert rc == 1, "LEAK NOT CAUGHT"
     """), encoding="utf-8")
-    try:
-        p = _pytest([str(mod)], {"VIBEIC_NDA_TOKENS": _AMBIENT}, timeout=300)
-        assert p.returncode != 0, (
-            "the ambient store did not break a module that defers to it, so "
-            "the immunity test above proves nothing:\n" + p.stdout[-3000:])
-        assert "LEAK NOT CAUGHT" in p.stdout, p.stdout[-3000:]
-    finally:
-        mod.unlink(missing_ok=True)
+    p = _pytest([str(mod)], {"VIBEIC_NDA_TOKENS": _AMBIENT}, timeout=300)
+    assert p.returncode != 0, (
+        "the ambient store did not break a module that defers to it, so "
+        "the immunity test above proves nothing:\n" + p.stdout[-3000:])
+    assert "LEAK NOT CAUGHT" in p.stdout, p.stdout[-3000:]
 
 
 # ===========================================================================
@@ -163,12 +165,30 @@ def _alive(pid: int) -> bool:
     widening that also reported a running `sleep` as dead would turn both
     tests green while proving nothing, and `test_a_zombie_is_dead_and_a_
     sleeping_orphan_is_not` below is the guard against exactly that.
+
+    THE READING MUST BE MONOTONIC. A zombie is reaped by whoever its parent is,
+    at a moment this probe does not choose: PID 1 can reap it between the
+    `kill(0)` and the `/proc` read, and the read then fails. MEASURED on an
+    idle host, 7 runs in 30: the wait loop read the zombie as dead, the final
+    assertion probed again, the stat read raced the reap, and "" was taken as
+    alive -- "outlived" for a grandchild that died in milliseconds. So an
+    unreadable `/proc` entry is not an answer on its own: the signal is asked
+    again, and a pid that has vanished is dead. Only a pid that still answers
+    the signal while `/proc` stays silent (no `/proc` at all) falls back to
+    the signal's alive. `test_a_reap_between_the_two_reads_reads_dead` holds
+    this.
     """
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):
         return False
-    return _proc_state(pid) not in ("Z", "X", "x")
+    state = _proc_state(pid)
+    if state == "":
+        try:
+            os.kill(pid, 0)          # reaped between the two reads?
+        except (ProcessLookupError, PermissionError):
+            return False
+    return state not in ("Z", "X", "x")
 
 
 def _proc_state(pid: int) -> str:
@@ -313,3 +333,30 @@ def test_alive_falls_back_to_the_signal_where_proc_does_not_answer():
     assert _proc_state(2 ** 22 + 7) == ""      # no such pid, no /proc entry
     assert not _alive(2 ** 22 + 7)             # and the signal agrees
     assert _alive(os.getpid()), "this very process must read alive"
+
+
+def test_a_reap_between_the_two_reads_reads_dead(monkeypatch):
+    """The race `_alive` must survive, injected deterministically: a real
+    zombie passes `kill(0)`, then is REAPED before `/proc/<pid>/stat` is read,
+    so the stat read fails. A reaped pid is gone, and gone is dead -- never
+    "alive because /proc did not answer"."""
+    zombie = subprocess.Popen([sys.executable, "-c", "raise SystemExit(0)"])
+    deadline = time.time() + 10
+    while time.time() < deadline and _proc_state(zombie.pid) != "Z":
+        time.sleep(0.05)
+    assert _proc_state(zombie.pid) == "Z", "could not create a zombie"
+    assert os.kill(zombie.pid, 0) is None      # the first read: it exists
+
+    real = _proc_state
+    reads = []
+
+    def _reaped_before_the_read(pid):
+        zombie.wait()                          # the reap lands HERE
+        reads.append(real(pid))
+        return reads[-1]
+
+    monkeypatch.setattr(sys.modules[__name__], "_proc_state",
+                        _reaped_before_the_read)
+    assert not _alive(zombie.pid), (
+        "a zombie reaped between kill(0) and the /proc read reads alive")
+    assert reads == [""], f"the injected race did not happen: {reads!r}"
