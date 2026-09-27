@@ -299,6 +299,7 @@ import shutil
 import subprocess
 
 import _audit_scope
+import _publication_identity as _pub_id
 import _published_tree
 import _release_docs_contract
 import _submission_template
@@ -2304,7 +2305,17 @@ def publish(args: argparse.Namespace) -> dict:
             raise Refuse(f"{label} {val!r} is not a safe path token "
                          f"(letters/digits/._- , no separators/spaces)")
 
-    verdir_name = f"v{args.plugin_version}_{args.pdk}"
+    # --- publication identity (llv1 W20, decision 25) ---
+    # Which flow implemented this run decides the slot: the default flow keeps
+    # `v<version>_<pdk>` exactly; a flagged run takes `..._<impl>` and can never
+    # be staged as, or over, the vibe-ic product result.
+    try:
+        identity = _pub_id.run_identity(run_dir)
+        _pub_id.check_declared(identity, getattr(args, "impl", None))
+    except _pub_id.IdentityRefusal as exc:
+        raise Refuse(str(exc)) from None
+    verdir_name = _pub_id.slot_name(args.plugin_version, args.pdk, identity["impl"])
+    impl_record = _pub_id.cell_record(identity)
 
     # --- convergence guard ---
     verdict_json = Path(args.verdict_json).resolve() if args.verdict_json else None
@@ -2363,6 +2374,15 @@ def publish(args: argparse.Namespace) -> dict:
     if not dry:
         shutil.copy2(result_md, dest / "RESULT.md")
     staged.append("RESULT.md")
+
+    # A flagged cell says what it is, in the cell (the run's mode record is
+    # runtime state and is not published). The default flow writes nothing.
+    if impl_record is not None:
+        if not dry:
+            import _atomic_artefact
+            _atomic_artefact.write_json(dest / _pub_id.CELL_IMPL_FILE, impl_record, indent=2)
+        staged.append(_pub_id.CELL_IMPL_FILE)
+        cell_rels.add(_pub_id.CELL_IMPL_FILE)
     copied_docs.append((result_md, "RESULT.md"))
     cell_rels.add("RESULT.md")
 
@@ -2593,6 +2613,11 @@ def publish(args: argparse.Namespace) -> dict:
         "pdk_revision": pdk_rev.get("revision"),
         "pdk_revision_record": pdk_rev,
         "plugin_version": args.plugin_version,
+        # llv1 W20: the flow that implemented the run, where that was read,
+        # and every claim seen. `vibe-ic` / `default` / [] on the default path.
+        "impl": identity["impl"],
+        "impl_source": identity["source"],
+        "impl_evidence": identity["evidence"],
         "verdict": verdict,
         "verdict_source": str(verdict_src),
         "result_md_verdict": rmd_verdict,
@@ -2995,6 +3020,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="compute + guard but write nothing")
     ap.add_argument("--json", default=None, help="write a machine-readable summary here")
+    ap.add_argument("--impl", default=None,
+                    help="the flow the operator states implemented the run "
+                         "(vibe-ic | librelane | orfs); checked against the run's "
+                         "own mode record and artefacts, and a flagged run "
+                         "declared as vibe-ic refuses PUBLISH_FLAGGED_INTO_DEFAULT_SLOT. "
+                         "Default: read from the run.")
     args = ap.parse_args(argv)
 
     try:
@@ -3008,6 +3039,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     verb = "WOULD STAGE" if summary["dry_run"] else "STAGED"
     print(f"[{verb}] {summary['ic']} × {summary['pdk']}  ->  {summary['dest']}")
+    if summary["impl"] != _pub_id._impl_flow.IMPL_DEFAULT:
+        print(f"  impl        : {summary['impl']} (from {summary['impl_source']}) — a "
+              f"flagged run, NOT the vibe-ic product result (decision 25)")
     print(f"  verdict     : {summary['verdict']} (source: {summary['verdict_source']})")
     print(f"  pdk revision: {summary['pdk_revision']} "
           f"(read from the tree that ran, not from --pdk)")
