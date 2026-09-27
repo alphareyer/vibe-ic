@@ -35,6 +35,14 @@ names / declaration.json; no chip or vendor literal anywhere.
 """
 from __future__ import annotations
 
+# --- sibling-import path (vibe-ic#2104) ------------------------------------
+import os as _os                                                    # noqa: E402
+import sys as _sys                                                  # noqa: E402
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# ---------------------------------------------------------------------------
+
 import json
 import re
 from pathlib import Path
@@ -47,6 +55,28 @@ from typing import List, Optional
 # bare file stems because a single file may declare several modules.
 _RE_MODULE_DECL = re.compile(
     r"^\s*module\s+([A-Za-z_]\w*)", re.MULTILINE)
+
+
+def vendor_build_rtl(project: Path) -> List[Path]:
+    """The design sources under ``input/vendor_rtl/`` (.v / .sv).
+
+    ONE DEFINITION (D10): consume's `discover_supplied_design_sources` (a
+    module-declaring `.v`/`.sv`, no testbench, no oracle segment), restricted
+    to this branch's directory. MEASURED before: a vendor tree holding
+    `spm.v` and the testbench `tb_spm.v` staged only `spm.v` (consume drops
+    testbenches) while this emitter counted 2 files and published
+    `ip_list: ['spm', 'tb_spm']`. A testbench, or anything under an oracle /
+    harness segment, is never IP."""
+    import reused_ip_rtl_consume as _consume
+    vendor = (project / "input" / "vendor_rtl").resolve()
+    out: List[Path] = []
+    for f in _consume.discover_supplied_design_sources(project):
+        try:
+            f.resolve().relative_to(vendor)
+        except ValueError:
+            continue
+        out.append(f)
+    return sorted(out)
 
 
 def _derive_ip_list(project: Path, vendor_dir: Path) -> List[str]:
@@ -85,7 +115,7 @@ def _derive_ip_list(project: Path, vendor_dir: Path) -> List[str]:
                 return sorted(stems)
 
     # (3) module declarations under the staged vendor RTL
-    staged = sorted(vendor_dir.rglob("*.v")) + sorted(vendor_dir.rglob("*.sv"))
+    staged = vendor_build_rtl(project)
     modules: set = set()
     for f in staged:
         try:
@@ -105,8 +135,8 @@ def emit_prestaged_reused_ip_manifest(project: Path) -> Optional[Path]:
     """ORGANIC #732 — emit the keystone phase2/stage1/rtl/SOURCE_MANIFEST.json
     for a PRE-STAGED-vendor-RTL reused-IP project.
 
-    Emits ONLY when ``input/vendor_rtl/`` is populated with ≥1 ``.v`` / ``.sv``
-    file (the exact condition under which ``step_rtl_gen`` WAIVES with
+    Emits ONLY when ``input/vendor_rtl/`` holds ≥1 ``.v`` / ``.sv`` DESIGN
+    source (`vendor_build_rtl`: testbenches and oracle segments excluded; the exact condition under which ``step_rtl_gen`` WAIVES with
     ``fallback_skill=catalog-glue-author``). Returns the manifest path on emit,
     or ``None`` when the no-leak guard declines (no vendor RTL → never write a
     reused_ip manifest for a non-reused design).
@@ -122,8 +152,7 @@ def emit_prestaged_reused_ip_manifest(project: Path) -> Optional[Path]:
     vendor_dir = project / "input" / "vendor_rtl"
     if not vendor_dir.is_dir():
         return None
-    staged = (sorted(vendor_dir.rglob("*.v"))
-              + sorted(vendor_dir.rglob("*.sv")))
+    staged = vendor_build_rtl(project)
     if not staged:
         # §4.05 NO-LEAK: an empty / absent vendor_rtl is NOT the reused-IP
         # WAIVE path — never fabricate a reused_ip:true manifest.
