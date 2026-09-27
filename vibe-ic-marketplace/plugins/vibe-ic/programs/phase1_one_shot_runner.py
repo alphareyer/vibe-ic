@@ -1640,6 +1640,9 @@ def main() -> int:
     _lock = _runner_lock.acquire_or_reenter(project, "phase1_one_shot_runner")
     if _lock is None:
         return 3
+    # --librelane (llv1 W2): under the lock, record a non-default mode once;
+    # the default writes nothing.
+    _impl_flow.record_after_lock(project, args, runner='phase1_one_shot_runner')
 
     # #2204 — the expert second pass short-circuits EVERYTHING below. Step
     # 0.5ic and D1 both already ran in the pass that emitted the hand-off;

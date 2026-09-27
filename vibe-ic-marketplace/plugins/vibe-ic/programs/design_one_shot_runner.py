@@ -23752,6 +23752,9 @@ def main() -> int:
     _lock = _runner_lock.acquire_or_reenter(project, "design_one_shot_runner")
     if _lock is None:
         return 3
+    # --librelane (llv1 W2): under the lock, record a non-default mode once;
+    # the default writes nothing.
+    _impl_flow.record_after_lock(project, args, runner='design_one_shot_runner')
 
     # Under the lock -- it writes -- and BEFORE canonical span admission, which
     # admits a phase-2 span this call does not dispatch.
@@ -23766,7 +23769,8 @@ def main() -> int:
          "skip_analog": args.skip_analog, "entry_step": args.entry_step,
          "exit_step": args.exit_step, "force_rtl_regen": args.force_rtl_regen,
          "dry_run": args.dry_run,
-         "lec_max_completed_rungs": args.lec_max_completed_rungs})
+         "lec_max_completed_rungs": args.lec_max_completed_rungs,
+         **_impl_flow.dispatch_config_entry(_impl_flow.recorded_impl(project))})
     if not _canonical.admitted:
         print(f"REFUSED: canonical Phase-2 admission: {_canonical.reason} "
               f"({_canonical.detail})", file=sys.stderr)

@@ -669,6 +669,19 @@ def gate(project: Path, args, *, runner: str, parser) -> str:
     return impl
 
 
+def record_after_lock(project: Path, args, *, runner: str) -> str:
+    """Record the mode `gate` resolved, under the runner's project lock.
+
+    The default writes nothing. A non-default mode is only reachable here
+    through `gate` (which refuses it until the runner is wired), and is
+    recorded once: every later runner reads it through `child_argv`, the
+    admission `dispatch_config` and the step cache.
+    """
+    impl = require_supported(normalise(requested_from_args(args)))
+    write_record(project, impl, resolved_by=runner)
+    return impl
+
+
 def child_argv(project: Path) -> List[str]:
     """The flag a spawned runner must carry for this project: [] by default."""
     impl = recorded_impl(project)

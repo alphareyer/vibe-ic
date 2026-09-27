@@ -1433,6 +1433,9 @@ def main() -> int:
     lock = _runner_lock.acquire_or_reenter(project, "vibe_ic_one_shot_runner")
     if lock is None:
         return 3
+    # --librelane (llv1 W2): under the lock, record a non-default mode once;
+    # the default writes nothing.
+    _impl_flow.record_after_lock(project, args, runner='vibe_ic_one_shot_runner')
     # ---------------- Container IMAGE provenance (capture always) ----------
     # Every containerised step downstream is dispatched as
     # `docker exec <container> ...`, so `--container` selects a CONTAINER and
@@ -1980,7 +1983,8 @@ def main() -> int:
              "skip_analog": "--skip-analog" in p2_args,
              "entry_step": args.entry_step, "exit_step": args.exit_step,
              "force_rtl_regen": False, "dry_run": False,
-             "lec_max_completed_rungs": args.lec_max_completed_rungs})
+             "lec_max_completed_rungs": args.lec_max_completed_rungs,
+             **_impl_flow.dispatch_config_entry(_impl_flow.recorded_impl(project))})
         if not p2_admission.admitted:
             print(f"REFUSED: canonical Phase-2 admission: {p2_admission.reason} "
                   f"({p2_admission.detail})", file=sys.stderr)
@@ -2131,7 +2135,8 @@ def main() -> int:
              "die_um": args.die_um, "util": args.util, "pdk": args.pdk,
              "allow_oss_pdk_fallback": bool(args.allow_oss_pdk_fallback),
              "allow_pdk_target_mismatch": bool(args.allow_pdk_target_mismatch),
-             "spare_density": 0.02})
+             "spare_density": 0.02,
+             **_impl_flow.dispatch_config_entry(_impl_flow.recorded_impl(project))})
         if not p3_admission.admitted:
             print(f"REFUSED: canonical Phase-3 admission: {p3_admission.reason} "
                   f"({p3_admission.detail})", file=sys.stderr)

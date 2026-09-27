@@ -18962,6 +18962,11 @@ def _step_inputs(project: Path, kind: str, top: str, args: Any,
 
     # ---- what EVERY kind reads -------------------------------------------
     _add("declaration", decl, "declaration_as_asked")
+    # llv1 W2: the flow mode. A DEF made by one flow is never reused by the
+    # other; absent for the default, so a default identity does not move.
+    _impl = _ask("_impl_flow.recorded_impl", _impl_flow.recorded_impl, project)
+    if _impl is not None and _impl != _impl_flow.IMPL_DEFAULT:
+        knobs["impl"] = _impl
     for f in sorted((project / "input" / "submission_template"
                      / "slots").glob("*.yaml")):
         _add("slot", f)
@@ -73784,6 +73789,9 @@ def main() -> int:
             project, "phase3_one_shot_runner")
     if _lock is None:
         return 3
+    # --librelane (llv1 W2): under the lock, record a non-default mode once;
+    # the default writes nothing.
+    _impl_flow.record_after_lock(project, args, runner='phase3_one_shot_runner')
 
     _delivery_refusal = _delivery_admission_refusal(project)
     if _delivery_refusal:
@@ -73806,7 +73814,8 @@ def main() -> int:
          "allow_oss_pdk_fallback": bool(args.allow_oss_pdk_fallback),
          "allow_pdk_target_mismatch": bool(args.allow_pdk_target_mismatch),
          "spare_density": args.spare_density,
-         **_librelane_admission_facts(project)}
+         **_librelane_admission_facts(project),
+         **_impl_flow.dispatch_config_entry(_impl_flow.recorded_impl(project))}
     if _window_sites is not None:
         import tempfile
         with tempfile.TemporaryDirectory(prefix="phase3-admission-",
