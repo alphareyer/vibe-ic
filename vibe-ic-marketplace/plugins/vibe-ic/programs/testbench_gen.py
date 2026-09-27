@@ -1134,43 +1134,86 @@ _STIMULUS_IMAGE_RE = re.compile(
     re.IGNORECASE)
 
 
+#: `oracle_family_claiming`'s answer when a family's detector (or its module)
+#: RAISED. Not a family and not "no family": the question is unanswered, and
+#: an unanswered question keeps the case where it was -- blocking.
+FAMILY_UNKNOWN = "UNKNOWN_DETECTOR_RAISED"
+
+#: A value the expected half STATES: a C / Verilog hex or binary literal, or
+#: any number. Presence only -- never the value -- so a case that states one
+#: is claimed by the stated-vector family even when its driver cannot read the
+#: shape (two outputs, an odd-length hex, a decimal). That is this flow's
+#: driver gap, and it stays blocking.
+_STATED_LITERAL_RE = re.compile(
+    r"0[xX][0-9a-fA-F_]+|\d*'[sS]?[bBoOdDhH][0-9a-fA-F_xXzZ]+|\d")
+
+
+def states_a_checkable_answer(case: dict) -> bool:
+    """Does the case's OWN expected half state a value a testbench could check?
+
+    `expected_outputs` with any entry does; so does an `expected` text carrying
+    any literal or number. "PASS" or a prose outcome with no value does not --
+    that expected half is the verdict of a program the input must deliver."""
+    outs = case.get("expected_outputs")
+    if isinstance(outs, (dict, list, tuple)) and len(outs) > 0:
+        return True
+    if isinstance(outs, str) and outs.strip():
+        return True
+    return bool(_STATED_LITERAL_RE.search(str(case.get("expected") or "")))
+
+
 def oracle_family_claiming(case: dict,
                            ic_class: "str | None" = None) -> "str | None":
     """The oracle family of THIS producer whose detector claims `case`, or None.
 
     Each family is asked through its OWN detector -- the same predicate its
     emitter refuses on first -- so this cannot disagree with the emitters about
-    which cases they own. A claimed case that did not run is this flow's gap."""
+    which cases they own. A claimed case that did not run is this flow's gap.
+
+    FAIL-CLOSED. A detector (or a family module's import) that raises answers
+    `FAMILY_UNKNOWN`, never None: "no family claims it" is what moves a case
+    OUT of blocking, so it may only be said when every detector answered. The
+    stated-vector family claims every case that STATES a checkable value
+    (`states_a_checkable_answer`), not only the ones its driver can extract --
+    an extraction refusal is the driver's limit, not the input's gap. The
+    reset-invariant family claims a case either of its detectors fires on,
+    including the ambiguous both-fire case its emitter refuses to guess."""
     try:
         import known_answer_vector_tb_gen as _ktb  # type: ignore
         if _ktb._kav is not None and _ktb._kav.is_known_answer_vector(case):
             return "known_answer_vector"
-    except Exception:                                        # noqa: BLE001
-        pass
-    try:
+        if states_a_checkable_answer(case):
+            return "stated_vector"
         import stated_vector_bus_oracle_gen as _svb  # type: ignore
         if _svb.stated_answer(case)[0] is not None:
             return "stated_vector"
-    except Exception:                                        # noqa: BLE001
-        pass
-    try:
         import cpu_boot_latency_oracle_tb_gen as _clg  # type: ignore
         if _clg.is_boot_latency_case(case):
             return "boot_latency"
-    except Exception:                                        # noqa: BLE001
-        pass
-    try:
         import reset_invariant_oracle_tb_gen as _riv  # type: ignore
-        if _riv.case_family(case):
+        if _riv.is_reset_hold_case(case) or _riv.is_reset_glitch_case(case):
             return "reset_invariant"
-    except Exception:                                        # noqa: BLE001
-        pass
-    try:
         import arith_oracle_tb_gen as _aog  # type: ignore
         if ic_class and ic_class in _aog._ARITH_CLASSES:
             return "arith_closed_form"
     except Exception:                                        # noqa: BLE001
-        pass
+        return FAMILY_UNKNOWN
+    return None
+
+
+def _in_flow_testbench(project: Path, name: str) -> "Path | None":
+    """This run's own testbench for the case, when it is more than the
+    substance floor (authored, generated or delivered into `sim/tb/`). A case
+    the flow HAD a testbench for, and did not execute, is the flow's failure."""
+    tb_dir = _pl.sim_dir(Path(project)) / "tb"
+    for ext in (".v", ".sv"):
+        f = tb_dir / f"{name}{ext}"
+        try:
+            if f.is_file() and ORACLE_NONE_MARKER not in f.read_text(
+                    errors="replace"):
+                return f
+        except OSError:
+            return f        # unreadable: not evidence of absence
     return None
 
 
@@ -1210,16 +1253,27 @@ def case_input_gap(project: Path, case: dict,
                    ic_class: "str | None" = None) -> "dict | None":
     """Why the design input cannot run `case`, or None when it is not the input.
 
-    None (the case's non-execution stays this flow's, blocking) when a program
-    or testbench is delivered for it, when an oracle family claims it, or when
-    every image its stimulus names IS in the design input, or when the case
-    states no stimulus at all (no evidence either way). Otherwise the
-    record names the case, what is missing from the input, and where it was
-    looked for."""
+    POSITIVE EVIDENCE ONLY -- the record names what is missing from the input.
+    None (the case's non-execution stays this flow's, blocking) when:
+      * a program or testbench is DELIVERED for it in the input;
+      * this run's own `sim/tb/` holds a testbench for it that is more than the
+        substance floor (the flow had one and did not execute it);
+      * an oracle family claims it, or a family's detector could not answer
+        (`FAMILY_UNKNOWN`);
+      * it states no stimulus at all (no evidence either way);
+      * every image its stimulus names IS in the design input;
+      * it names no image and its expected half STATES a checkable value --
+        the input supplied both halves, so the missing piece is a driver.
+    The input's gap is exactly: a named image absent from `input/**`, or no
+    named image, no delivered program and an expected half that states no
+    value (e.g. "PASS" -- the verdict of a program the input never delivers).
+    """
     name = str(case.get("name") or case.get("id") or "")
     if not name:
         return None
     if delivered_case_oracle(project, name) is not None:
+        return None
+    if _in_flow_testbench(project, name) is not None:
         return None
     family = oracle_family_claiming(case, ic_class)
     if family is not None:
@@ -1235,14 +1289,19 @@ def case_input_gap(project: Path, case: dict,
     missing = [n for n in named if n.lower() not in present]
     if named and not missing:
         return None
+    if not named and states_a_checkable_answer(case):
+        return None
     looked = list(_DELIVERED_TB_DIRS) + ["input/** (every file, by name)"]
+    expected = str(case.get("expected") or "").strip()
     if missing:
         what = (f"its stimulus names {', '.join(missing)}, which the design "
                 f"input does not contain")
     else:
         what = (f"the design input states its stimulus only as "
-                f"{stimulus[:120]!r} and delivers no program or testbench for "
-                f"it; no oracle family of this flow can derive one")
+                f"{stimulus[:120]!r}, delivers no program or testbench for "
+                f"it, and states its expected result only as "
+                f"{expected[:60]!r} (no value a testbench could check) -- the "
+                f"verdict of a program the input does not deliver")
     return {
         "case": name,
         "missing_from_input": missing or [
