@@ -54311,6 +54311,16 @@ def _pdk_existing_files(pattern: str, container: Optional[str],
     return [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
 
 
+def _placed_lef_masters(def_file: Path, lefs: List[str],
+                        container: Optional[str]) -> List[str]:
+    """The MACROs the `lefs` define that the DEF places, sorted. The DEF names
+    the masters and the LEFs name themselves (`_def_reopen_extra_lefs_c`'s
+    rule); an unreadable LEF contributes nothing."""
+    placed = {m for _, m in _def_reopen_resolution(def_file).components}
+    return sorted({n for f in lefs for n in _LEF_MACRO_NAME_RE.findall(
+        _read_pdk_text(f, container) or "") if n in placed})
+
+
 def _shipped_gds_lvs_record(project: Path, doc: Dict[str, Any]) -> str:
     path = _pl.reports_phase3_dir(project) / "lvs_shipped_gds_verdict.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -54423,9 +54433,7 @@ def _run_shipped_gds_lvs(project: Path, top: str, pdk: "PdkConfig",
     # Those cells are compared by their pins, not re-extracted to devices
     # (LibreLane's `MAGIC_EXT_ABSTRACT_CELLS`): a hard macro is verified by its
     # own LVS, a pad by its library. Recorded, so the scope is never implicit.
-    placed = {m for _, m in _def_reopen_resolution(def_file).components}
-    abstract = sorted({n for f in extra_lefs for n in _LEF_MACRO_NAME_RE.findall(
-        _read_pdk_text(f, container) or "") if n in placed})
+    abstract = _placed_lef_masters(def_file, extra_lefs, container)
     record["abstracted_cells"] = abstract
     env = (
         f'export CAD_ROOT="${{CAD_ROOT:-$(dirname "$(dirname '
