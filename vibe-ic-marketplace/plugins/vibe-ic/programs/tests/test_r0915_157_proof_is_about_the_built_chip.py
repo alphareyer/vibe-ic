@@ -18,7 +18,8 @@ round-8 review's RTL: `ifdef SIMULATION` resets `acc`; the macro arm leaves it
 unreset and instantiates a macro.
 
 The engine arms need yosys + sby on PATH (the vibeic-eda image, as CI and
-falsref run them); without them they FAIL with the reason, never skip.
+falsref run them); without them they are NOT_VERIFIED by name, and
+VIBEIC_REQUIRE_EDA_VERIFICATION=1 turns that back into a failure.
 chip-AGNOSTIC: generic fixtures written here.
 """
 from __future__ import annotations

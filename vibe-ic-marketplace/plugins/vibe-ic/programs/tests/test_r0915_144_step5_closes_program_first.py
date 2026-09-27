@@ -47,6 +47,7 @@ sys.path.insert(0, str(PROGRAMS))
 import formal_harness_gen as fhg  # noqa: E402
 import formal_property_run as fpr  # noqa: E402
 import formal_proof_evidence_check as gate  # noqa: E402
+from not_verified_tier import skip_not_verified  # noqa: E402
 
 RTL = """`default_nettype none
 module serial_mac #(
@@ -117,12 +118,14 @@ def _project(tmp_path: Path, rtl: str = RTL, l8: dict = None) -> Path:
 
 
 def _require_engine():
-    # Not a skip: an arm that cannot reach the engine has proved nothing, and
-    # it says so by failing with the reason.
+    # Not a pass: an arm that cannot reach the engine has proved nothing, and
+    # it says so as NOT_VERIFIED (a failure under
+    # VIBEIC_REQUIRE_EDA_VERIFICATION=1), never as a green skip.
     missing = [t for t in ("yosys", "sby") if shutil.which(t) is None]
-    assert not missing, (
-        f"{missing} not on PATH — these arms run the flow's own engine and "
-        f"must be run inside the vibeic-eda image (as CI/falsref do)")
+    if missing:
+        skip_not_verified(
+            f"{missing} not on PATH, so no harness can be proved here",
+            "tools/ci/run_suite_in_eda_image.sh -- programs/tests/test_r0915_144_step5_closes_program_first.py")
 
 
 def _step5(project: Path) -> tuple:
@@ -164,6 +167,7 @@ def test_prose_the_program_does_not_fully_understand_stays_with_the_expert():
 
 
 def test_generated_harness_observes_every_state_register_and_never_uses_dut_refs(tmp_path):
+    _require_engine()  # the observed state is read from the yosys netlist
     project = _project(tmp_path)
     gen = fhg.generate(project=project, top="serial_mac")
     text = Path(gen["harness_path"]).read_text()

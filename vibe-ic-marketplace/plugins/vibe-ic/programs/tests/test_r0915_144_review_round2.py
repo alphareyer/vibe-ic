@@ -23,7 +23,8 @@ open, named), and nothing that is not the rule's subject is a refutation.
   L9  the authored count never exceeds its denominator
 
 The engine arms need yosys + sby on PATH (the vibeic-eda image, as CI and
-falsref run them); without them they FAIL with the reason, never skip.
+falsref run them); without them they are NOT_VERIFIED by name, and
+VIBEIC_REQUIRE_EDA_VERIFICATION=1 turns that back into a failure.
 
 chip-AGNOSTIC: every fixture is a generic textbook circuit written here.
 """
@@ -40,6 +41,7 @@ sys.path.insert(0, str(PROGRAMS))
 import formal_harness_gen as fhg  # noqa: E402
 import formal_property_run as fpr  # noqa: E402
 import formal_proof_evidence_check as gate  # noqa: E402
+from not_verified_tier import skip_not_verified  # noqa: E402
 
 ZERO = "all internal state is zeroed one cycle after assertion"
 L8P = "L8.clock_and_reset_waveform."
@@ -101,8 +103,10 @@ def _project(tmp: Path, rtl: str, l8: dict) -> Path:
 
 def _engine():
     missing = [t for t in ("yosys", "sby") if shutil.which(t) is None]
-    assert not missing, (f"{missing} not on PATH — run inside the vibeic-eda "
-                         f"image (as CI/falsref do)")
+    if missing:
+        skip_not_verified(
+            f"{missing} not on PATH, so no harness can be proved here",
+            "tools/ci/run_suite_in_eda_image.sh -- programs/tests/test_r0915_144_review_round2.py")
 
 
 def _step5(project: Path, top: str = "m"):

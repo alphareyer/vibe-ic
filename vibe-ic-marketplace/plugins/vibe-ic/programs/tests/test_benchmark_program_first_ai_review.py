@@ -16,6 +16,7 @@ sys.path.insert(0, str(PROGRAMS))
 import benchmark_dispatch as bd                         # noqa: E402
 import benchmark_io_adapter as bio                      # noqa: E402
 import flow_phase_attribution as fpa                    # noqa: E402
+from not_verified_tier import not_verified_reason     # noqa: E402
 
 import sys as _rt_sys
 from pathlib import Path as _rt_path
@@ -64,9 +65,16 @@ def _simulator_absent() -> str:
               "test would be measuring the host, not the code")
 
 
+# Declared through the NOT_VERIFIED tier: a bare host reports these by name as
+# verifications that did not happen, and VIBEIC_REQUIRE_EDA_VERIFICATION=1
+# fails the session instead of letting the skip read as green.
 _NEEDS_SIMULATOR = pytest.mark.skipif(
     bool(_simulator_absent()),
-    reason=_simulator_absent() or "iverilog and vvp are both present")
+    reason=(not_verified_reason(
+        _simulator_absent(),
+        "tools/ci/run_suite_in_eda_image.sh -- "
+        "programs/tests/test_benchmark_program_first_ai_review.py")
+        if _simulator_absent() else "iverilog and vvp are both present"))
 
 
 def _no_simulator(monkeypatch) -> None:
@@ -1175,6 +1183,7 @@ def _solve_report(run: Path, task: dict) -> None:
     bd._write_jsonl(run / bd._BACKUP_WORKLIST, [])
 
 
+@_NEEDS_SIMULATOR
 def test_valid_blind_ai_review_is_hash_bound_and_accepted(tmp_path):
     run, task, got = _task(tmp_path)
     _solve_report(run, task)
@@ -1215,6 +1224,7 @@ def test_valid_blind_ai_review_is_hash_bound_and_accepted(tmp_path):
         bd._require_program_first_ai_acceptance(run)
 
 
+@_NEEDS_SIMULATOR
 def test_resume_refreshes_only_program_owned_obligations_for_unchanged_task(
         tmp_path):
     run, task, _ = _task(tmp_path)
@@ -1859,6 +1869,7 @@ def _override_review(task: dict) -> dict:
     return review
 
 
+@_NEEDS_SIMULATOR
 def test_ai_can_override_program_with_prompt_bound_evidence(tmp_path):
     run, task, _ = _task(tmp_path)
     _solve_report(run, task)
@@ -1887,6 +1898,7 @@ def test_unexplained_program_override_is_rejected(tmp_path):
     assert any("prompt-bound evidence" in r for r in verdict["reasons"])
 
 
+@_NEEDS_SIMULATOR
 def test_detailed_ai_interpretation_can_substitute_for_a_literal_excerpt(tmp_path):
     _, task, _ = _task(tmp_path)
     review = _override_review(task)
