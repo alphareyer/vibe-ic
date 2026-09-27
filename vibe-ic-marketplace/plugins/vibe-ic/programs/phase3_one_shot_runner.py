@@ -16783,7 +16783,11 @@ def _step_synth_librelane(project: Path, top: str, pdk: PdkConfig,
 
     t0 = time.time()
     set_invocation_provenance_sink(project)
-    switch = json.loads((project / "phase3/librelane_switch.json").read_text())
+    # A project under the `--librelane` flow selects this step with no switch
+    # file (librelane_contract.impl_step_modes); the file's only use here is
+    # the optional development source mount below.
+    _switch_path = project / "phase3/librelane_switch.json"
+    switch = json.loads(_switch_path.read_text()) if _switch_path.is_file() else {}
     from _rtl_include_hub import silicon_rtl_selection
     rtl = silicon_rtl_selection(_pl.rtl_dir(project))
     if not rtl:
