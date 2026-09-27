@@ -57,6 +57,13 @@ FLOOR = (
     "vibe-ic-marketplace/tools/program_reachability_check.py",
     # reached by PYTHON IMPORT several hops in — dies if import following stops
     "vibe-ic-marketplace/plugins/vibe-ic/programs/spec_artifact_registry.py",
+    # reached through a `$VAR` the same shell file assigns, in the MIDDLE of
+    # the path (`"$TRUSTED_REPO/$PLUGIN_REL/programs/..."`), and also by the
+    # cwd-relative `programs/` rule once the leading `$` segments are popped —
+    # dies only if BOTH stop (measured: either one alone keeps it; each has its
+    # own case in G1b). It was listed under PYTHON IMPORT, but nothing imports
+    # it: until 2026-09-27 the walk reached it only by tokenizing the
+    # protected-path byte register, which listed its path.
     "vibe-ic-marketplace/plugins/vibe-ic/programs/landing_merge_verdict.py",
 )
 #: A SHRINK DETECTOR, not a bound: it sits far below the 267 measured on
@@ -494,3 +501,71 @@ def test_a_dirty_tree_can_only_lose_members_through_TRACKED_files(tmp_path):
 
     # and the verdict path is immune to every one of the above
     assert m.judge_set_at(repo, "HEAD") == committed
+
+
+# --------------------------------------------------------------------------
+# G1b — the three ways a judge is named that a token-prefix walk cannot see
+#
+# The verifier names the VERDICT it runs as
+# `"$TRUSTED_REPO/$PLUGIN_REL/programs/landing_merge_verdict.py"`, the hygiene
+# lane runs most gates as `"$PLUGIN" python3 programs/<gate>.py`, and a gate
+# reads its acceptance table as `Path(__file__).with_name("<table>.json")`.
+# None of the three was reachable by the walk; the files they name were inside
+# the derived set only because the protected-path byte register (removed
+# 2026-09-27) listed their paths and the walk tokenized it as shell. Each case
+# drives `_walk` over a miniature tree and names the one mechanism it needs.
+# --------------------------------------------------------------------------
+
+class _Tree:
+    def __init__(self, files: dict[str, str]) -> None:
+        self.files = files
+
+    def is_file(self, rel: str) -> bool:
+        return rel in self.files
+
+    def read(self, rel: str) -> str | None:
+        return self.files.get(rel)
+
+
+_JUDGE = "vibe-ic-marketplace/plugins/vibe-ic/programs/judge.py"
+
+
+def _seeds(verify: str, land: str = "#!/usr/bin/env bash\n") -> dict[str, str]:
+    return {"tools/gatekeeper-verify-merge.sh": verify,
+            "tools/gatekeeper-land.sh": land, _JUDGE: "VALUE = 1\n"}
+
+
+#: Outside `programs/`, so the cwd-relative rule cannot reach it and only the
+#: variable expansion can.
+_TOOL = "vibe-ic-marketplace/plugins/vibe-ic/tools/judge.py"
+
+
+def test_a_variable_the_same_file_assigns_is_expanded_mid_path():
+    files = _seeds('PLUGIN_REL="vibe-ic-marketplace/plugins/vibe-ic"\n'
+                   'VERDICT_PROG="$TRUSTED_REPO/$PLUGIN_REL/tools/judge.py"\n'
+                   'python3 "$VERDICT_PROG"\n')
+    files[_TOOL] = "VALUE = 1\n"
+    assert _TOOL in _mod()._walk(_Tree(files))
+
+
+def test_a_variable_the_file_does_not_assign_is_not_invented():
+    """The control: without the assignment nothing names the judge."""
+    files = _seeds('VERDICT_PROG="$TRUSTED_REPO/$PLUGIN_REL/tools/judge.py"\n'
+                   'python3 "$VERDICT_PROG"\n')
+    files[_TOOL] = "VALUE = 1\n"
+    assert _TOOL not in _mod()._walk(_Tree(files))
+
+
+def test_a_cwd_relative_plugin_program_is_reached():
+    tree = _Tree(_seeds('run "a gate" "$PLUGIN" python3 programs/judge.py\n'))
+    assert _JUDGE in _mod()._walk(tree)
+
+
+def test_a_file_a_module_reads_beside_itself_is_reached():
+    table = "vibe-ic-marketplace/plugins/vibe-ic/programs/judge_table.json"
+    files = _seeds('python3 "$ROOT/vibe-ic-marketplace/plugins/vibe-ic/'
+                   'programs/judge.py"\n')
+    files[_JUDGE] = ('from pathlib import Path\n'
+                     'TABLE = Path(__file__).with_name("judge_table.json")\n')
+    files[table] = "{}\n"
+    assert table in _mod()._walk(_Tree(files))

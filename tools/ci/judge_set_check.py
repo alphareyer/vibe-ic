@@ -71,7 +71,7 @@ it is a ratchet people route around.  Only LOSS is refused, and only loss is
 authorisable.
 """
 from __future__ import annotations
-import argparse, ast, subprocess, sys
+import argparse, ast, posixpath, re, subprocess, sys
 from pathlib import Path
 
 RC_OK = 0
@@ -86,6 +86,17 @@ SEARCH_DIRS = ("tools/ci", "tools",
                "vibe-ic-marketplace/plugins/vibe-ic/programs")
 #: A token is only a candidate path if it lands under one of these.
 PATH_PREFIXES = ("tools/", "vibe-ic-marketplace/")
+#: Where a cwd-relative `programs/...` token resolves: the gates run the plugin's
+#: programs as `"$PLUGIN" python3 programs/<name>.py`.
+PLUGIN_ROOT = "vibe-ic-marketplace/plugins/vibe-ic"
+#: `NAME="value"` on a line of its own -- the literal half of a shell variable a
+#: later `"$NAME/..."` token spells a path with. A value that runs a command is
+#: not a path and is not recorded.
+_SHELL_ASSIGN = re.compile(
+    r"^[ \t]*(?:export[ \t]+|readonly[ \t]+|local[ \t]+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)=(\"[^\"`\n]*\"|'[^'\n]*'|[^\s\"'`;()]+)[ \t]*$",
+    re.MULTILINE)
+_SHELL_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 
 
 class CannotLook(Exception):
@@ -207,6 +218,65 @@ def _shell_path_candidates(token: str) -> set[str]:
     while segments and segments[0].startswith("$"):
         segments.pop(0)          # $ROOT/... and ${RUNTIME_ROOT}/... alike
     out.add("/".join(segments))
+    # `"$PLUGIN" python3 programs/x.py` runs the plugin's program from its root.
+    for cand in list(out):
+        if cand.startswith("programs/"):
+            out.add(f"{PLUGIN_ROOT}/{cand}")
+    return out
+
+
+def _shell_assignments(text: str) -> dict[str, set[str]]:
+    """Every literal `NAME=value` in one shell file, all values kept."""
+    found: dict[str, set[str]] = {}
+    for name, value in _SHELL_ASSIGN.findall(text):
+        if value[:1] in "\"'":
+            value = value[1:-1]
+        found.setdefault(name, set()).add(value)
+    return found
+
+
+def _expand_shell_token(token: str, assigned: dict[str, set[str]],
+                        rounds: int = 4, cap: int = 32) -> set[str]:
+    """`token` with every `$NAME`/`${NAME}` this file assigns substituted.
+
+    `"$RUNTIME_SNAPSHOT/$PLUGIN_REL/programs/landing_merge_verdict.py"` is how
+    the verifier names the VERDICT it runs, and `PLUGIN_REL` is assigned a
+    literal in the same file. Popping leading `$` segments cannot recover that
+    path -- `$PLUGIN_REL` sits in the middle -- so the verdict, the selector
+    and three guards the verifier executes were outside the derived set. They
+    were only ever inside it because a deleted byte register happened to list
+    their paths. Variables this file does not assign are left alone, and the
+    original token is always kept, so this can only ADD members.
+    """
+    forms = {token}
+    for _ in range(rounds):
+        grown = set()
+        for form in forms:
+            match = _SHELL_VAR.search(form)
+            while match and (match.group(1) or match.group(2)) not in assigned:
+                match = _SHELL_VAR.search(form, match.end())
+            if not match:
+                grown.add(form)
+                continue
+            for value in assigned[match.group(1) or match.group(2)]:
+                grown.add(form[:match.start()] + value + form[match.end():])
+        if grown == forms or len(grown) > cap:
+            break
+        forms = grown
+    return forms | {token}
+
+
+def _python_sibling_reads(rel: str, node_tree) -> set[str]:
+    """Files a module opens beside itself: `Path(__file__)...with_name("x")`."""
+    out = set()
+    base = posixpath.dirname(rel)
+    for node in ast.walk(node_tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "with_name" and len(node.args) == 1
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+                and "/" not in node.args[0].value):
+            out.add(posixpath.join(base, node.args[0].value))
     return out
 
 
@@ -247,14 +317,19 @@ def _walk(tree) -> set[str]:
                         cand = f"{d}/{stem}"
                         if tree.is_file(cand) and cand not in seen:
                             queue.append(cand)
+            for cand in _python_sibling_reads(rel, node_tree):
+                if tree.is_file(cand) and cand not in seen:
+                    queue.append(cand)
         else:
             # a shell script: anything it names that exists here, it may run
+            assigned = _shell_assignments(text)
             for token in text.replace('"', " ").replace("'", " ").split():
                 token = token.strip("(){};|&,")
-                for cand in _shell_path_candidates(token):
-                    if (cand.startswith(PATH_PREFIXES) and tree.is_file(cand)
-                            and cand not in seen):
-                        queue.append(cand)
+                for form in _expand_shell_token(token, assigned):
+                    for cand in _shell_path_candidates(form):
+                        if (cand.startswith(PATH_PREFIXES) and tree.is_file(cand)
+                                and cand not in seen):
+                            queue.append(cand)
     return seen
 
 

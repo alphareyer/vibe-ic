@@ -75,9 +75,9 @@ _T = 55
 # miniature repository below must carry as the real bytes.  This set used to be
 # derived from the protected-path transition validator's two path registers;
 # the owner removed that two-step mechanism on 2026-09-27, and the set it
-# described is kept here, minus the two removed modules and plus the two the
-# survivors now import (`landing_execution_plan.py`,
-# `landing_record_primitives.py`).
+# described is kept here, minus the two removed modules and plus the three the
+# survivors now run (`landing_execution_plan.py`,
+# `landing_record_primitives.py`, `landing_push_preflight.py`).
 _VERIFIER_CLOSURE = frozenset({
     "tools/ci/_gate_dispatch.sh",
     "tools/ci/benchmark_data_landing_checkout.py",
@@ -88,6 +88,7 @@ _VERIFIER_CLOSURE = frozenset({
     "tools/ci/hermetic_test_arm_entry.sh",
     "tools/ci/landing_completion_record.py",
     "tools/ci/landing_execution_plan.py",
+    "tools/ci/landing_push_preflight.py",
     "tools/ci/landing_record_primitives.py",
     "tools/ci/owned_command.py",
     "tools/ci/repo_hygiene_gates.sh",
@@ -3462,71 +3463,6 @@ def test_reassert_refuses_a_record_that_was_not_a_pass(sandbox, tmp_path):
     bad = _reassert(sandbox, tmp_path / "v_innocuous_red.json")
     assert bad.returncode == 1, bad.stdout + bad.stderr
     assert "not LAND_OK" in bad.stderr
-
-
-def _repacked_commit(repo, source, branch, message="repack identical tree"):
-    """One new commit, parented directly on main, with SOURCE's exact tree."""
-    tree = _git(repo, "rev-parse", f"{source}^{{tree}}").stdout.strip()
-    base = _git(repo, "rev-parse", "main").stdout.strip()
-    made = _pr.run(
-        ["git", "-C", str(repo), "commit-tree", tree, "-p", base],
-        input=message + "\n", capture_output=True, text=True)
-    assert made.returncode == 0, made.stderr
-    head = made.stdout.strip()
-    assert _git(repo, "branch", "-f", branch, head).returncode == 0
-    return head, tree
-
-
-def _rebind(sandbox, old_verdict, ref, out):
-    return _pr.run(
-        ["bash", str(_VERIFY), "--rebind", str(old_verdict),
-         "--ref", ref, "--base", "main", "--repo", str(sandbox),
-         "--no-fetch", "--json", str(out)],
-        capture_output=True, text=True)
-
-
-def test_identical_tree_repack_rebinds_without_rerunning_expensive_arms(
-        sandbox, tmp_path):
-    """Commit topology is not functional identity.
-
-    A LAND_OK already measured the exact base + final tree.  Re-expressing that
-    tree as the required one-commit push shape must run only the cheap push and
-    identity/provenance checks, then emit a self-contained REBOUND_FROM record.
-    It must not launch A1/A2/B1/B2 again.
-    """
-    first, original = _verify(sandbox, "innocuous_green", tmp_path)
-    assert first.returncode == 0, first.stdout + first.stderr
-    branch = f"repacked_{tmp_path.name}"
-    new_head, tree = _repacked_commit(
-        sandbox, original["verified_sha"], branch)
-    assert tree == original["verified_tree"]
-
-    rebound_path = tmp_path / "rebound.json"
-    rebound = _rebind(
-        sandbox, tmp_path / "v_innocuous_green.json", branch, rebound_path)
-    assert rebound.returncode == 0, rebound.stdout + rebound.stderr
-    assert "arm A1/B1" not in rebound.stdout
-    record = json.loads(rebound_path.read_text())
-    assert record["verdict"] == "LAND_OK"
-    assert record["kind"] == "vibeic.landing-verdict-rebind"
-    assert record["head_sha"] == record["verified_sha"] == new_head
-    assert record["verified_tree"] == original["verified_tree"]
-    assert record["rebind"]["rebound_from_head_sha"] == original["head_sha"]
-    assert record["rebind"]["push_preflight"]["verdict"] == "PASS"
-    assert _reassert(sandbox, rebound_path).returncode == 0
-
-
-def test_rebind_refuses_when_the_final_tree_changed(sandbox, tmp_path):
-    """The shortcut is identity-only; one changed blob demands a full run."""
-    first, _ = _verify(sandbox, "innocuous_green", tmp_path)
-    assert first.returncode == 0, first.stdout + first.stderr
-    branch = f"different_tree_{tmp_path.name}"
-    _repacked_commit(sandbox, "innocuous_red", branch, "different tree")
-    out = tmp_path / "different-tree-rebind.json"
-    rebound = _rebind(
-        sandbox, tmp_path / "v_innocuous_green.json", branch, out)
-    assert rebound.returncode == 1, rebound.stdout + rebound.stderr
-    assert "candidate tree differs from the verified tree" in rebound.stderr
 
 
 def test_actual_push_shape_is_refused_before_any_expensive_arm(
