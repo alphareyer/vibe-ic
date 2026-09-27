@@ -2434,6 +2434,34 @@ def _evidence_tail(text: str, limit: int = 400) -> str:
     return cut[m.end():] if m else cut
 
 
+def _design_supplied_build_rtl(project: Path) -> List[Path]:
+    """The design sources the design's INPUT supplies, or [] when it supplies none.
+
+    THE DESIGN'S OWN IMPLEMENTATION OUTRANKS EVERY GENERATOR (D6). ORGANIC #403
+    put that rule inside `_try_deterministic_rtl_dispatch` alone, and behind its
+    `rtl_spec.json` lookup, so a doc-driven design never reached it. The other
+    program-first generators guarded only `phase2/stage1/rtl/`, never `input/`.
+    MEASURED before this change: `input/vendor_rtl/spm.v` on a design whose
+    L-docs state a serial-parallel multiplier ended with the generator's
+    `spm.v` in `rtl/`, and `consume_reused_ip_rtl` skipped because `rtl/` was
+    no longer empty. The supplied file was never staged and nothing said so.
+
+    This is the one definition of "supplied", and it is consume's own:
+    `discover_provided_build_rtl`, which drops testbenches and anything under
+    an oracle / harness segment. So a generator declines exactly when consume
+    has a design source to stage. Headers are left out: a tree that supplies
+    only a `.vh` supplies no module, and declining for it would leave `rtl/`
+    with no design at all. A probe failure returns [], so this can stop a
+    generator from overwriting, and can never stop one from generating.
+    """
+    try:
+        import reused_ip_rtl_consume as _consume_probe
+        return [f for f in _consume_probe.discover_provided_build_rtl(project)
+                if f.suffix in (".v", ".sv")]
+    except Exception:  # noqa: BLE001 — never block generation on the probe
+        return []
+
+
 def _try_spec_artifact_registry_rtl(
         project: Path, t0: float,
         phase1_plain_text: str = "") -> Optional[StepResult]:
@@ -2447,11 +2475,15 @@ def _try_spec_artifact_registry_rtl(
     reachable from every entry rather than from one harness.
 
     None means no emitter recognised the prompt, which is the handover to the
-    spec-to-rtl AI backup — a real answer, not a failure.
+    spec-to-rtl AI backup — a real answer, not a failure. None also when the
+    design supplies its own build RTL (`_design_supplied_build_rtl`): consume
+    stages that, and an emit here would pre-empt it.
     """
     text = phase1_plain_text or ""
     if not text.strip():
         return None
+    if _design_supplied_build_rtl(project):
+        return None  # D6 — the design's own implementation outranks an emit
     try:
         sys.path.insert(0, str(PROGRAMS_DIR))
         import deterministic_emit_chain as _chain      # noqa: PLC0415
@@ -2551,38 +2583,27 @@ def _try_deterministic_rtl_dispatch(project: Path, t0: float) -> Optional[StepRe
     # it was simply never staged, and the flow synthesised the generated
     # module instead.
     #
-    # The three legitimate source routes are already enumerated in ONE place
-    # (`reused_ip_rtl_consume.candidate_source_dirs`), so this asks THAT
-    # rather than re-deriving a second, drifting list. Failure to import or
-    # inspect leaves the prior behaviour: this guard must never be the reason
-    # a run cannot generate RTL, only the reason it declines to OVERWRITE.
-    try:
-        import reused_ip_rtl_consume as _consume_probe
-        _own = []
-        for _d in _consume_probe.candidate_source_dirs(project):
-            if not _d.is_dir():
-                continue
-            for _pat in ("*.v", "*.sv", "*.vhd", "*.vhdl"):
-                _own.extend(_d.rglob(_pat))
-            if _own:
-                break
-        if _own:
-            _rel = [str(f.relative_to(project)) for f in sorted(_own)[:5]]
-            return StepResult(
-                "rtl_gen", "NOT_APPLICABLE", time.time() - t0,
-                f"deterministic RTL generation DECLINED: the design ships its "
-                f"own build RTL ({len(_own)} file(s), e.g. {_rel}). A "
-                f"generated module would silently replace the "
-                f"implementation the design provided, because "
-                f"`consume_reused_ip_rtl` stages only into an empty "
-                f"phase2/stage1/rtl/. The spec at "
-                f"{spec.relative_to(project)} is left unused; remove the "
-                f"shipped RTL if the generator is meant to own this module.",
-                extras={"organic": 403,
-                        "declined_spec": str(spec.relative_to(project)),
-                        "design_rtl_sample": _rel}, declared_by=f"the design ships its own build RTL ({len(_own)} file(s), e.g. {_rel})")
-    except Exception:  # noqa: BLE001 — never block generation on the probe
-        pass
+    # "Ships its own build RTL" is `_design_supplied_build_rtl`, the definition
+    # every generator in `step_rtl_gen` now shares (D6). The probe that stood
+    # here globbed each source dir with no testbench filter, so a design whose
+    # only input RTL was `input/vendor_rtl/tb/*.v` declined generation, consume
+    # then staged nothing, and `rtl/` was left empty.
+    _own = _design_supplied_build_rtl(project)
+    if _own:
+        _rel = [str(f.relative_to(project)) for f in sorted(_own)[:5]]
+        return StepResult(
+            "rtl_gen", "NOT_APPLICABLE", time.time() - t0,
+            f"deterministic RTL generation DECLINED: the design ships its "
+            f"own build RTL ({len(_own)} file(s), e.g. {_rel}). A "
+            f"generated module would silently replace the "
+            f"implementation the design provided, because "
+            f"`consume_reused_ip_rtl` stages only into an empty "
+            f"phase2/stage1/rtl/. The spec at "
+            f"{spec.relative_to(project)} is left unused; remove the "
+            f"shipped RTL if the generator is meant to own this module.",
+            extras={"organic": 403,
+                    "declined_spec": str(spec.relative_to(project)),
+                    "design_rtl_sample": _rel}, declared_by=f"the design ships its own build RTL ({len(_own)} file(s), e.g. {_rel})")
 
     dispatcher = PROGRAMS_DIR / "deterministic_rtl_dispatcher.py"
     if not dispatcher.is_file():
@@ -2669,7 +2690,8 @@ def _try_serial_parallel_mul_rtl(project: Path, ic_class: str,
     emit it with NO LLM. Returns a PASS StepResult when the solver emits; None
     (fall through to the class/AI path) when it DEFERs, when the class is not
     arithmetic, or when RTL already exists (author guard) — so every
-    non-matching design keeps today's behaviour byte-for-byte.
+    non-matching design keeps today's behaviour byte-for-byte. None also when
+    the design supplies its own build RTL (`_design_supplied_build_rtl`).
     """
     _phase1_project_checkpoint(project)
     arith = {"digital_arithmetic_primitive", "digital_datapath",
@@ -2683,6 +2705,8 @@ def _try_serial_parallel_mul_rtl(project: Path, ic_class: str,
     if rtl_dir.is_dir() and (any(rtl_dir.rglob("*.v")) or
                              any(rtl_dir.rglob("*.sv"))):
         return None  # author/generator guard — never overwrite existing RTL
+    if _design_supplied_build_rtl(project):
+        return None  # D6 — consume stages the design's own RTL instead
     try:
         _phase1_project_checkpoint(project)
         r = _pr.run([sys.executable, str(solver), str(project), "--emit"],
@@ -2728,14 +2752,18 @@ def _try_canonical_primitive_rtl(
     FAIL-CLOSED, same contract as `_try_serial_parallel_mul_rtl`: returns None
     (fall through to the class-registry / AI path) when no shape tightly matches,
     when RTL already exists (author/generator guard — never overwrite the design's
-    own implementation), or when the solver is unavailable. A wrong emit is worse
-    than an honest DEFER, so every non-matching design keeps today's behaviour.
+    own implementation), when the design supplies its own build RTL under
+    input/ (`_design_supplied_build_rtl`), or when the solver is unavailable. A
+    wrong emit is worse than an honest DEFER, so every non-matching design keeps
+    today's behaviour.
     chip-AGNOSTIC: keyed on stated structure, never on a design's leaf name."""
     _phase1_project_checkpoint(project)
     rtl_dir = _pl.rtl_dir(project)
     if rtl_dir.is_dir() and (any(rtl_dir.rglob("*.v")) or
                              any(rtl_dir.rglob("*.sv"))):
         return None  # author/generator guard — never overwrite existing RTL
+    if _design_supplied_build_rtl(project):
+        return None  # D6 — consume stages the design's own RTL instead
     solver = PROGRAMS_DIR / "canonical_primitive_synth.py"
     if not solver.is_file():
         return None
@@ -4870,10 +4898,15 @@ def _try_phase1_behavioral_fsm_rtl_bound(
     existing structured-spec / canonical / authoring path.  The registry owns
     semantic recognition; this helper owns only raw-source gathering, an explicit
     unambiguous top name, the authored-RTL guard/provenance ledger, and staging.
+    It DEFERs when the design supplies its own build RTL under input/
+    (`_design_supplied_build_rtl`); ``force_regen`` does not override that,
+    because it speaks for rtl/, not for the design's input.
     """
     project_binding.require_current()
     if gathered.refusal is not None:
         return _phase1_plain_spec_refusal_result(t0, gathered.refusal)
+    if _design_supplied_build_rtl(project):
+        return None  # D6 — consume stages the design's own RTL instead
     desc = gathered.text
     sources = list(gathered.sources)
     deduped_sources = list(gathered.deduped_sources)
