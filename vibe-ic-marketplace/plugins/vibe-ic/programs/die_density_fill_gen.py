@@ -361,6 +361,76 @@ def sibling_passes(runner, script: str, timeout: int) -> List[str]:
     return seen
 
 
+#: F33 — the two named outcomes of reading the owning engine's own record.
+#: ABSENT: the record proves the engine's fill is NOT in this GDS, so the PDK
+#: generator's own pass fills those layers instead (the declared fallback).
+#: UNPROVEN: the record cannot say either way, so nothing is filled over them.
+OWNER_FILL_ABSENT = "OWNER_FILL_ABSENT"
+OWNER_FILL_UNPROVEN = "OWNER_FILL_UNPROVEN"
+
+
+def owner_fill_evidence(project: Path, report: Optional[str],
+                        gds: Path) -> Dict[str, Any]:
+    """Is the flow's own filler's output the very GDS this program will fill?
+
+    THE DEFECT THIS EXISTS FOR (F33). `--owned-layer` came from the fill
+    CONFIG the runner writes BEFORE its engine runs, and the contest test was
+    "the layer carries geometry" -- which routing always satisfies. So an
+    engine that FAILED, whose fill was never promoted, still cost the die the
+    PDK's metal pass: the metals shipped with no fill from either filler and
+    the step reported PASS. Measured once by lane mig104 with a wrong cell
+    name: the metals stayed unfilled and the deck reported M2.4.
+
+    A configuration is not a deposit. The only evidence that the engine's fill
+    is IN this GDS is the engine's own in-place record: a rewrite link naming
+    this path whose `sha_after` is the GDS's digest NOW.
+
+    Returns {"state": IN_GDS | ABSENT | UNPROVEN | ASSERTED, "cause": ...}.
+    ASSERTED is a caller that named owned layers and no record to prove them;
+    it is honoured as before and disclosed as unproven in the report.
+    """
+    if not report:
+        return {"state": "ASSERTED", "report": None,
+                "cause": "no owner report was given; the owned layers are the "
+                         "caller's assertion, not a measured deposit"}
+    rp = Path(report)
+    if not rp.is_absolute():
+        rp = project / rp
+    if not rp.is_file():
+        # The engine writes its report BEFORE it promotes anything, so no
+        # report means no promotion: none of its fill can be in this GDS.
+        return {"state": "ABSENT", "code": OWNER_FILL_ABSENT, "report": str(rp),
+                "cause": f"the fill engine left no report at {rp}; it did not "
+                         "run to a verdict, so none of its fill is in this GDS"}
+    try:
+        rec = json.loads(rp.read_text())
+    except (OSError, ValueError) as exc:
+        return {"state": "UNPROVEN", "code": OWNER_FILL_UNPROVEN,
+                "report": str(rp),
+                "cause": f"the fill engine's report is unreadable: {exc}"}
+    if not isinstance(rec, dict):
+        return {"state": "UNPROVEN", "code": OWNER_FILL_UNPROVEN,
+                "report": str(rp),
+                "cause": "the fill engine's report is not a JSON object"}
+    engine_said = (f"{rec.get('verdict') or rec.get('state') or '<no verdict>'}"
+                   f": {rec.get('reason') or rec.get('error') or '<no reason>'}")
+    now = _chain.sha256_file(gds)
+    links = _chain.links_for(_chain.project_rel(gds, project), [rec])
+    if now and any(l.get("sha_after") == now for l in links):
+        return {"state": "IN_GDS", "report": str(rp), "sha256": now,
+                "cause": f"the fill engine promoted its fill into this GDS "
+                         f"({engine_said})"}
+    if links or rec.get("gds_out"):
+        return {"state": "UNPROVEN", "code": OWNER_FILL_UNPROVEN,
+                "report": str(rp),
+                "cause": ("the fill engine says it promoted a filled layout "
+                          f"(gds_out={rec.get('gds_out')}), but no rewrite it "
+                          f"recorded ends at this GDS's digest {now}: whether "
+                          f"its fill is in this GDS cannot be told ({engine_said})")}
+    return {"state": "ABSENT", "code": OWNER_FILL_ABSENT, "report": str(rp),
+            "cause": f"the fill engine did not promote its fill ({engine_said})"}
+
+
 def _coverage_table(before: Dict[str, Any],
                     after: Dict[str, Any]) -> Dict[str, Any]:
     """Per GDS layer number: coverage over the die before and after, and the
@@ -389,7 +459,8 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
         out: Optional[str], in_place: bool, report: Optional[str],
         timeout: int,
         skip_passes: Optional[List[str]] = None,
-        owned_layers: Optional[List[int]] = None) -> Dict[str, Any]:
+        owned_layers: Optional[List[int]] = None,
+        owner_report: Optional[str] = None) -> Dict[str, Any]:
     rep = Path(report) if report else (project / _REPORT_REL)
     if not rep.is_absolute():
         rep = project / rep
@@ -564,6 +635,30 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
     # running each skip once says which layers that family contributes. A shape
     # CENSUS answers it in ~2 s per probe, so this costs one extra generator run
     # per family and nothing is guessed about a PDK's file names.
+    # F33 — AN OWNED LAYER IS ONE THE FLOW'S ENGINE ACTUALLY FILLED, IN THIS
+    # GDS. Its own record says so or it does not; see `owner_fill_evidence`.
+    owner: Optional[Dict[str, Any]] = None
+    claimed = list(owned_layers)
+    if owned_layers:
+        owner = owner_fill_evidence(project, owner_report, gds_path)
+        owner["owned_layers_claimed"] = claimed
+        common["owner_fill"] = owner
+        if owner["state"] == "UNPROVEN":
+            return done(dict(
+                common, owned_layers=claimed, state="FAIL",
+                code=OWNER_FILL_UNPROVEN,
+                reason=(f"{OWNER_FILL_UNPROVEN}: this flow's own filler owns "
+                        "layer(s) " + ", ".join(str(l) for l in claimed)
+                        + f", but {owner['cause']}. Filling them again could "
+                        "double-write a dummy layer, and leaving them out "
+                        "could ship them unfilled, so nothing was filled and "
+                        "the GDS is unchanged.")))
+        if owner["state"] == "ABSENT":
+            # The declared fallback: the PDK generator's own pass fills them.
+            owner["fill_engine_for_owned_layers"] = "pdk_generator"
+            owned_layers = []
+        else:
+            owner["fill_engine_for_owned_layers"] = "flow_engine"
     contested: List[int] = []
     probe_log: Dict[str, Any] = {}
     cen_in = census(runner, engine, gds_path, tmpdir / (gds_path.stem + ".census_in.json"),
@@ -571,7 +666,7 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
     if owned_layers and cen_in is not None:
         have = _layers_with_geometry(cen_in)
         contested = [l for l in owned_layers if have.get(l)]
-    common["owned_layers"] = owned_layers
+    common["owned_layers"] = claimed
     common["contested_layers"] = contested
 
     rc, transcript = generate(filled, skip_passes)
@@ -743,11 +838,19 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
                 "its declared size first — the ring is what makes the "
                 "bounding box the die.")))
 
+    fallback = ""
+    if owner and owner["state"] == "ABSENT":
+        common["code"] = OWNER_FILL_ABSENT
+        fallback = (f"; {OWNER_FILL_ABSENT}: layer(s) "
+                    + ", ".join(str(l) for l in claimed)
+                    + " were filled by the PDK generator, not by this flow's "
+                      f"own filler, because {owner['cause']}")
     return done(dict(
         common, state="PASS",
         reason=("the PDK's own density-fill generator filled the declared die: "
                 f"{len(gained)} layer(s) gained {added:.0f} um2 of dummy fill "
-                f"over a {die[2] - die[0]:.0f} x {die[3] - die[1]:.0f} um die")))
+                f"over a {die[2] - die[0]:.0f} x {die[3] - die[1]:.0f} um die"
+                + fallback)))
 
 
 def main(argv=None) -> int:
@@ -768,6 +871,12 @@ def main(argv=None) -> int:
                          "writes (repeatable). When the PDK generator would "
                          "write it too, the pass that does is DISCOVERED and "
                          "left out, so no dummy layer has two authors.")
+    ap.add_argument("--owner-report",
+                    help="the report of the filler that owns --owned-layer "
+                         "(F33). Its in-place record must end at this GDS's "
+                         "digest for the ownership to stand; a filler that "
+                         "did not promote leaves those layers to the PDK "
+                         "generator, and an unprovable one is refused.")
     ap.add_argument("--skip-pass", action="append", default=[],
                     help="a sibling script the PDK generator require_relatives "
                          "and THIS FLOW is providing itself (repeatable). Two "
@@ -790,7 +899,8 @@ def main(argv=None) -> int:
               args.die_width, args.die_height, args.cell, args.threads,
               args.ignore_active, args.out, args.in_place, args.report,
               args.timeout, skip_passes=args.skip_pass,
-              owned_layers=args.owned_layer)
+              owned_layers=args.owned_layer,
+              owner_report=args.owner_report)
     if args.json:
         o = Path(args.json)
         if not o.is_absolute():
