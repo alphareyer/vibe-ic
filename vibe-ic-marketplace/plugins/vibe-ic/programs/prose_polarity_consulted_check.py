@@ -119,6 +119,15 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "lec_run::parse_bmc_log":
+        "ONE YOSYS GRAMMAR, NO SENTENCE. The `sat` pass's own result lines, "
+        "`SAT proof finished - model found: FAIL!` and `... no model found: "
+        "SUCCESS!`, between `LEC_BMC_DEPTH_BEGIN <n>` markers lec_run itself "
+        "logs, and the model table's fixed `<step> <signal> <dec> <hex> <bin>` "
+        "rows. No denial can be spelled in it, and a rung with neither result "
+        "line is never read as either: the search is NOT_RUN at the last "
+        "completed depth. Falsifier: tests/test_lec_bmc_counterexample.py::"
+        "test_the_not_prose_claim_for_the_bmc_reader_is_falsifiable.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "

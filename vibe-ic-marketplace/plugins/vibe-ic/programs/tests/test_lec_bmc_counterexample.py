@@ -41,12 +41,17 @@ UNCLOSED = {"proven": 3, "unproven": 2, "total": 5, "equivalent": False,
 
 
 def _replay(monkeypatch, log: Path, rc: int):
-    """The container run, reduced to what the tool writes: its log."""
-    def fake(container, cmd, timeout=120, **_kw):
-        target = cmd.split("-l ", 1)[1].split(" ", 1)[0].strip("'")
-        shutil.copyfile(log, target)
+    """The container run, reduced to what the tool writes: its log, at the
+    path the command names (`-l`, also handed to the supervisor)."""
+    seen = []
+
+    def fake(container, cmd, timeout=120, *, marker=None, log_path=None, **_kw):
+        seen.append({"cmd": cmd, "timeout": timeout, "marker": marker})
+        assert str(Path(log_path).resolve()) in cmd
+        shutil.copyfile(log, log_path)
         return lec_run.subprocess.CompletedProcess(cmd, rc, "", "")
     monkeypatch.setattr(lec_run, "_docker", fake)
+    return seen
 
 
 # ── red on main ──────────────────────────────────────────────────────────────
@@ -90,9 +95,13 @@ def test_a_deadline_stop_is_not_run_with_the_depth_it_reached(
     """A real in-container `timeout` kill (rc 124) mid-rung: the completed
     depth is kept as a measured bound and the result is NOT_RUN, never
     NONE_WITHIN_BOUND."""
-    _replay(monkeypatch, PARTIAL_LOG, 124)
+    seen = _replay(monkeypatch, PARTIAL_LOG, 124)
     bmc = lec_run.run_bmc("c", "PREFIX\n", RESET, tmp_path, None,
                           deadline_s=4, depth_target=65536)
+    # The deadline is in the command (an in-container `timeout`), and the
+    # container-tree supervisor is asked for, not the host-client monitor.
+    assert "timeout" in seen[0]["cmd"] and seen[0]["timeout"] == 4
+    assert seen[0]["marker"]
     assert bmc["result"] == "NOT_RUN", bmc
     assert bmc["depth_reached"] == 128
     assert "4s deadline" in bmc["reason"] and "depth 128 of 65536" in bmc["reason"]
@@ -125,6 +134,20 @@ def test_the_script_asserts_the_declared_reset_then_compares(tmp_path):
     low = dict(RESET, resets=[{"port": "rst_n", "polarity": "active_low",
                                "asserted": 0}])
     assert "-set-at 1 in_rst_n 0" in lec_run.bmc_script("P\n", low, [1], "t")
+
+
+def test_the_not_prose_claim_for_the_bmc_reader_is_falsifiable():
+    """`_NOT_PROSE["lec_run::parse_bmc_log"]`: a rung with neither result
+    line is read as neither -- the search is NOT_RUN at the last completed
+    depth, never a counterexample and never 'none within bound'."""
+    cex = CEX_LOG.read_text().replace(
+        "SAT proof finished - model found: FAIL!", "")
+    got = lec_run.parse_bmc_log(cex, 16)
+    assert got["result"] == "NOT_RUN" and got["depth_reached"] == 1, got
+    none = NONE_LOG.read_text().replace(
+        "SAT proof finished - no model found: SUCCESS!", "")
+    got = lec_run.parse_bmc_log(none, 16)
+    assert got["result"] == "NOT_RUN" and got["depth_reached"] == 0, got
 
 
 # ── the reset comes from the declaration, or the search does not run ─────────
