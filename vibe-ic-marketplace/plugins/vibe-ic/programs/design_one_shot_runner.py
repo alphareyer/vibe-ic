@@ -19456,11 +19456,9 @@ def lec_inconclusive_reason_class(doc: dict) -> str:
         0 points compared       -> no_population      (the miter judged nothing)
         record unreadable       -> execution_error
 
-        points compared, none disproven, some unproven -> inconclusive
-                                   (FX_P2: the engines stopped without closing)
-
-    The FAIL branch — a recorded counterexample — needs no reason class: it is
-    a verdict about the design's netlist, not an absence of one.
+    The FAIL branch — points compared, nothing ran out, points unproven —
+    needs no reason class: it is a verdict about the design's netlist, not an
+    absence of one.
     """
     if not isinstance(doc, dict):
         return _V.ReasonClass.EXECUTION_ERROR.value
@@ -19479,15 +19477,7 @@ def lec_inconclusive_reason_class(doc: dict) -> str:
         compared = 0
     if compared <= 0:
         return _V.ReasonClass.NO_POPULATION.value
-    try:
-        non_eq = int(doc.get("non_equivalent_points") or 0)
-    except (TypeError, ValueError):
-        non_eq = 0
-    if non_eq > 0:
-        return ""          # a counterexample: FAIL, a verdict, no reason class
-    # FX_P2 — points compared, nothing ran out, none disproven: the engines
-    # stopped without closing them.
-    return _V.ReasonClass.INCONCLUSIVE.value
+    return ""
 
 
 def lec_exhausted_resource_note(doc: dict) -> str:
@@ -19597,40 +19587,13 @@ def lec_inconclusive_disposition(doc: dict) -> Tuple[str, str]:
                 f"NOT_MEASURED: the record is INCONCLUSIVE but names no "
                 f"unproven point ({proven} proven of {total}) — there is no "
                 f"open point to attribute a failure to")
-    if _int("non_equivalent_points") > 0:
-        # A COUNTEREXAMPLE is a measurement: the netlist and the RTL differ.
-        return ("FAIL",
-                f"the comparison RAN and found {_int('non_equivalent_points')} "
-                f"NON-EQUIVALENT point(s) ({proven} of {total} proven, "
-                f"{unproven} unproven) — a recorded counterexample, not a "
-                f"proof that did not close")
-    # FX_P2 (owner ruling, 2026-09-28): the comparison ran, nothing ran out,
-    # no counterexample exists, and points remain unproven after the plugin's
-    # engines stopped. That is NOT_MEASURED(inconclusive) naming the points and
-    # the engine limit -- never PASS (the equivalence is OPEN) and not FAIL
-    # (nothing ran and failed). R-0915-82's FAIL here was the correction for
-    # run16's SKIP; this keeps its substance (the open points are named, the
-    # step blocks the top-level PASS) under the one-run-one-verdict rule.
-    # MEASURED on subservient (reused serv, 8HD-4): 251/256 proven,
-    # `core.rf_mem_if.o_sram_wdata[0..4]` unproven, `equiv_induct -seq 16`
-    # proved nothing and the ladder stopped; `-seq 64`, `equiv_simple -seq 20`,
-    # `-undef` variants and a SAT temporal induction to depth 24 on the port
-    # miter (about 15 min) each proved nothing and found no counterexample.
-    cells = [str(c).lstrip("\\") for c in (doc.get("unproven_cells") or [])]
-    named = ", ".join(cells[:8]) + (f" (+{len(cells) - 8} more)"
-                                    if len(cells) > 8 else "")
-    ladder = doc.get("lec_ladder") if isinstance(doc.get("lec_ladder"),
-                                                 dict) else {}
-    limit = str(ladder.get("stopped_because") or doc.get("induction_wall_kind")
-                or "the ladder's last completed rung did not close them")
-    return (NOT_EXECUTED_STATUS,
-            f"NOT_MEASURED (inconclusive): the comparison RAN and did not "
-            f"close: {proven} of {total} point(s) proven, {unproven} "
-            f"unproven" + (f" — {named}" if named else "") + f". Engine "
-            f"limit: {limit}. No resource ran out and no counterexample was "
-            f"recorded; non-convergence is NOT non-equivalence and NOT a "
-            f"proof — the netlist's equivalence to the RTL is OPEN on these "
-            f"points, so this is never a PASS")
+    return ("FAIL",
+            f"the comparison RAN and did not close: {proven} of "
+            f"{total} point(s) proven, {unproven} unproven, and no resource "
+            f"ran out (budget_exhausted/exhausted_resource/progress_stalled all "
+            f"clear). Non-convergence is NOT non-equivalence — no counterexample "
+            f"was recorded — but the netlist's equivalence to the RTL is OPEN "
+            f"and every downstream sign-off is measured on that netlist")
 
 
 def lec_record_reuse_note(doc: dict) -> str:
