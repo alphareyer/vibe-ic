@@ -201,6 +201,70 @@ def entry_probe(python: str, entry: Path) -> subprocess.CompletedProcess:
                     cwd=subject, env=env)
 
 
+#: What a probe outcome IS, decided from the evidence the child leaves -- never
+#: from one generic sentence. The reason used to be "the trusted entry could
+#: not execute and report one synthetic test" for EVERY outcome but a pass, and
+#: the result kept none of the child's output, so a census failure (8HD-4,
+#: stack38: `probe_returncode 2` twice, host load 60-85) could not be
+#: attributed: an entry refusal, an interrupted session and a kill all read
+#: the same. A stall did worse: it escaped `preflight()` as an exception, and
+#: the CLI exited 2 through `exit_undetermined_on_stall` -- the refusal's own
+#: rc -- so a busy host read as a broken runtime.
+VERDICT_PASS = "PASS"
+VERDICT_REFUSE = "REFUSE"
+VERDICT_NOT_MEASURED = "NOT_MEASURED"
+#: Exit codes: 0 pass, 2 refuse (a runtime that cannot report), 3 not measured
+#: (the probe could not finish looking: stalled or stopped from outside).
+EXIT_NOT_MEASURED = 3
+_ENTRY_REFUSAL_MARK = "[NORECORD] trusted pytest entry:"
+_TAIL_LINES = 6
+
+
+def _tail(text: str) -> List[str]:
+    return [ln for ln in (text or "").splitlines() if ln.strip()][-_TAIL_LINES:]
+
+
+def _host_load() -> str:
+    try:
+        load1 = os.getloadavg()[0]
+    except OSError:
+        return "load unreadable"
+    return f"load1 {load1:.2f} over {os.cpu_count() or '?'} cores"
+
+
+def classify_probe(probe: Optional[subprocess.CompletedProcess],
+                   stalled: Optional[BaseException] = None,
+                   ) -> Tuple[str, str]:
+    """(verdict, cause) for one probe run, from what the child left behind.
+
+    PASS only for a recorded pass. NOT_MEASURED when the probe could not
+    finish looking: the progress supervisor stopped it as stalled (reported
+    with the host's load), or it was killed from outside. REFUSE for a
+    runtime that ran and could not report -- naming the entry's own refusal
+    line, or the runner's last words, so the reason says WHICH."""
+    if stalled is not None:
+        return (VERDICT_NOT_MEASURED,
+                f"STALLED: the probe made no forward progress and was stopped "
+                f"by the progress supervisor ({_host_load()}); nothing was "
+                f"learned about the runtime: {stalled}")
+    rc = probe.returncode
+    if rc == 0 and "1 passed" in probe.stdout:
+        return VERDICT_PASS, "the synthetic test ran and was reported"
+    signum = -rc if rc < 0 else (rc - 128 if 128 < rc <= 192 else 0)
+    if signum:
+        return (VERDICT_NOT_MEASURED,
+                f"the probe was killed by signal {signum} (rc {rc}, "
+                f"{_host_load()}); nothing was learned about the runtime")
+    refusal = [ln for ln in (probe.stderr or "").splitlines()
+               if ln.startswith(_ENTRY_REFUSAL_MARK)]
+    if refusal:
+        return VERDICT_REFUSE, f"the entry refused: {refusal[-1].strip()}"
+    last = (_tail(probe.stdout) or _tail(probe.stderr) or ["(no output)"])[-1]
+    return (VERDICT_REFUSE,
+            f"the runner ran and did not report the synthetic test (rc {rc}); "
+            f"its last line: {last.strip()}")
+
+
 def _runner_image_or_refusal() -> str:
     try:
         return runner_image()
@@ -301,7 +365,8 @@ def preflight(*, programs: Path, python: Optional[str] = None) -> Dict[str, obje
     entry = Path(programs) / "trusted_pytest_entry.py"
     lane = os.environ.get(HOST_LANE_ENV) or None
     if not entry.is_file():
-        return {"ok": False, "lane": lane, "isolated_import": False,
+        return {"ok": False, "verdict": VERDICT_REFUSE, "lane": lane,
+                "isolated_import": False,
                 "runner": "", "probe_returncode": None,
                 "reason": "trusted_pytest_entry.py is absent",
                 "lines": ["  REFUSE  the protected landing test runtime is not "
@@ -309,24 +374,44 @@ def preflight(*, programs: Path, python: Optional[str] = None) -> Dict[str, obje
                           f"          expected {entry}"]}
     isolated_ok, resolved = isolated_import_lane(python)
     if not isolated_ok and lane is None:
-        return {"ok": False, "lane": None, "isolated_import": False,
+        return {"ok": False, "verdict": VERDICT_REFUSE, "lane": None,
+                "isolated_import": False,
                 "runner": resolved, "probe_returncode": None,
                 "reason": "isolated interpreter cannot import the test runner "
                           "and no host lane is configured",
                 "lines": _refusal_lines(python=python, isolated_ok=False,
                                         resolved=resolved, lane=None, probe=None)}
-    probe = entry_probe(python, entry)
-    recorded = probe.returncode == 0 and "1 passed" in probe.stdout
-    if not recorded:
-        return {"ok": False, "lane": lane, "isolated_import": isolated_ok,
-                "runner": resolved, "probe_returncode": probe.returncode,
+    probe: Optional[subprocess.CompletedProcess] = None
+    stalled: Optional[BaseException] = None
+    try:
+        probe = entry_probe(python, entry)
+    except _pr.Stalled as exc:
+        stalled = exc
+    verdict, cause = classify_probe(probe, stalled)
+    tail = {"stdout": _tail(probe.stdout), "stderr": _tail(probe.stderr)} \
+        if probe is not None else {"stdout": [], "stderr": []}
+    if verdict == VERDICT_NOT_MEASURED:
+        return {"ok": False, "verdict": verdict, "lane": lane,
+                "isolated_import": isolated_ok, "runner": resolved,
+                "probe_returncode": None if probe is None else probe.returncode,
+                "probe_tail": tail, "reason": cause,
+                "lines": [f"  NOT_MEASURED  the landing test runtime probe "
+                          f"could not finish looking: {cause}",
+                          "          This is not a finding about the runtime; "
+                          "run the landing again when the host can give the "
+                          "probe the time it needs."]}
+    if verdict == VERDICT_REFUSE:
+        return {"ok": False, "verdict": verdict, "lane": lane,
+                "isolated_import": isolated_ok, "runner": resolved,
+                "probe_returncode": probe.returncode, "probe_tail": tail,
                 "reason": "the trusted entry could not execute and report one "
-                          "synthetic test",
+                          f"synthetic test: {cause}",
                 "lines": _refusal_lines(python=python, isolated_ok=isolated_ok,
                                         resolved=resolved, lane=lane, probe=probe)}
     where = "host lane" if lane is not None else "image lane"
     detail = f" ({HOST_LANE_ENV}={lane})" if lane is not None else ""
-    return {"ok": True, "lane": lane, "isolated_import": isolated_ok,
+    return {"ok": True, "verdict": VERDICT_PASS, "lane": lane,
+            "isolated_import": isolated_ok,
             "runner": resolved, "probe_returncode": 0,
             "reason": f"the protected landing test runtime executes and reports "
                       f"via the {where}",
@@ -353,7 +438,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         stream = sys.stdout if result["ok"] else sys.stderr
         for line in result["lines"]:                      # type: ignore[union-attr]
             print(line, file=stream)
-    return 0 if result["ok"] else 2
+    if result["ok"]:
+        return 0
+    return EXIT_NOT_MEASURED if result.get("verdict") == VERDICT_NOT_MEASURED else 2
 
 
 if __name__ == "__main__":
