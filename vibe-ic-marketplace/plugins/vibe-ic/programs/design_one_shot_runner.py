@@ -9339,6 +9339,14 @@ def step_step4_functional_evidence(project: Path,
                 f"NOT_MEASURED: step-4 evidence declaration unreadable: {exc}",
                 [str(vacuous_report.relative_to(project))])
         if not _found:
+            # No evidence AND no RTL: the tests had nothing to run against,
+            # because the input was never produced upstream. RTL present and
+            # still no evidence stays the FAIL below.
+            _upstream = _rtl_never_produced(
+                project, "step4_functional_evidence", ic_class)
+            if _upstream is not None:
+                _upstream.duration_s = time.time() - t0
+                return _upstream
             return StepResult(
                 "step4_functional_evidence", "FAIL", time.time() - t0,
                 "INCOMPLETE: no step-4 simulation evidence at any path the "
@@ -13986,6 +13994,48 @@ def _class_uses_aid_reference_tb(ic_class: Optional[str]) -> Tuple[bool, str]:
             f"half_duplex_bus={flags.get('half_duplex_bus')} — the AID "
             f"half-duplex single-wire reference TB (3-port clk/reset_n/"
             f"id_bus) cannot bind this interface family")
+
+
+def _rtl_never_produced(project: Path, name: str,
+                        ic_class: Optional[str] = None) -> Optional[StepResult]:
+    """The row for an RTL consumer whose RTL input was never produced, or None.
+
+    AN UPSTREAM ABSENCE IS NOT A FINDING ABOUT THE DESIGN. When step 1
+    (`rtl_gen`) hands the design to an author and nobody authors it, every RTL
+    consumer downstream has measured nothing. The pre-flight gate books that
+    for rtl_validate, sim, yosys_synth and dft_lec_chain: REFUSED TO RUN,
+    NOT_MEASURED(input_absent), and the step that owed the input is named.
+    MEASURED on lane rvp2's sha256 run (crypto_accelerator, rtl_gen waived to
+    spec-to-rtl): `step4_functional_evidence` and `fmeda_fault_injection` were
+    not behind that gate, and they booked the same absence as FAIL. So the one
+    red in the run was about a file nobody had been asked to write.
+
+    The input is the pre-flight's own declared pattern,
+    `phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v`. When it exists this
+    returns None and the caller judges the design exactly as before, so a real
+    FAIL over real RTL is untouched. With no digital RTL track at all (an
+    analog design) the answer is NOT_APPLICABLE, as the pre-flight gives
+    dft_lec_chain.
+    """
+    rtl_dir = _pl.rtl_dir(project)
+    if any(rtl_dir.glob("*.sv")) or any(rtl_dir.glob("*.v")):
+        return None
+    analog_absent, analog_reason = _analog_rtl_track_absent(project, ic_class)
+    if analog_absent:
+        return StepResult(name, "NOT_APPLICABLE", 0.0, analog_reason,
+                          declared_by=analog_reason)
+    rel = rtl_dir.relative_to(project) if rtl_dir.is_relative_to(project) \
+        else rtl_dir
+    return StepResult(
+        name, _spf.REFUSAL_STATUS, 0.0,
+        f"REFUSED TO RUN: the declared input {rel}/*.sv OR {rel}/*.v was "
+        f"never produced; its producer is step 1 (`rtl_gen`), which did not "
+        f"complete. NOTHING is known about this design from this step: the "
+        f"absence is upstream, not a finding about the design (the same "
+        f"booking rtl_validate, sim, yosys_synth and dft_lec_chain give it).",
+        extras={"refused_for": "absent_declared_input",
+                "absent_path": str(rel), "producer_step": "rtl_gen"},
+        reason_class=_spf.REFUSAL_REASON_CLASS)
 
 
 def _rtl_absent_refusal_detail(project: Path,
@@ -21393,7 +21443,8 @@ def fmeda_producer_command(flow_yaml: Optional[Path] = None) -> Optional[str]:
 
 
 def step_fmeda_fault_injection(project: Path,
-                               flow_yaml: Optional[Path] = None) -> StepResult:
+                               flow_yaml: Optional[Path] = None,
+                               ic_class: Optional[str] = None) -> StepResult:
     """Flow step FS1: run the FMEDA fault-injection producer.
 
     The flow's FS1 gate named `fmeda_fault_injection_coverage` as its first
@@ -21404,6 +21455,12 @@ def step_fmeda_fault_injection(project: Path,
     """
     t0 = time.time()
     name = "fmeda_fault_injection"
+    # The producer FAILs a missing --rtl-dir by design, which is right for a
+    # direct call and wrong for a run whose rtl_gen produced nothing: refuse
+    # before dispatch, as the pre-flight gate does for the other RTL consumers.
+    _upstream = _rtl_never_produced(project, name, ic_class)
+    if _upstream is not None:
+        return _upstream
     command = fmeda_producer_command(flow_yaml)
     if command is None:
         return StepResult(name, "NOT_MEASURED", time.time() - t0,
@@ -24589,7 +24646,7 @@ def main() -> int:
             "outside this run's declared window; step FS1 was not "
             "dispatched", declared_by=" ".join(_window_flags)))
     else:
-        plan.append(step_fmeda_fault_injection(project))
+        plan.append(step_fmeda_fault_injection(project, ic_class=ic_class))
 
     # Phase 2 only — Phase 3 lives in phase3_one_shot_runner.py and is
     # chained by phase23_one_shot_runner.py.
