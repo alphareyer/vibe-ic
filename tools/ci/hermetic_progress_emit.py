@@ -13,7 +13,7 @@ from typing import Any, Sequence
 
 _SPEC = importlib.util.spec_from_file_location(
     "_vibeic_progress_transition_json",
-    Path(__file__).resolve().with_name("protected_landing_transition.py"),
+    Path(__file__).resolve().with_name("landing_record_primitives.py"),
 )
 if _SPEC is None or _SPEC.loader is None:
     raise ImportError("strict JSON authority is unavailable")

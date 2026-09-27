@@ -41,8 +41,8 @@ chip-AGNOSTIC: nothing here reasons about any IC, vendor, SKU or process node.
 """
 from __future__ import annotations
 
+import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -60,16 +60,28 @@ _DELETED = (
     "tools/ci/test_pytest_finding_delta.py",
 )
 
-sys.path.insert(0, str(REPO / PLUGIN_REL / "programs" / "tests"))
-import _protected_transition_fixture as protected  # noqa: E402
+def _scrubbed_env() -> dict:
+    """`os.environ` without git's COMMAND-LINE-precedence config injection.
+
+    `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` outrank every
+    config file, so a host that exports them would decide the bytes of the
+    repository this harness builds.  (Moved here from the deleted synthetic
+    transition fixture, which was this file's only other import.)
+    """
+    out = dict(os.environ)
+    for name in list(out):
+        if name == "GIT_CONFIG_COUNT" or name.startswith(
+                ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            del out[name]
+    return out
 
 
 def _git(cwd, *args):
-    # `protected.scrubbed_env` — the harness's own environment must not be able
-    # to change the bytes of the repository the harness is building.
+    # The harness's own environment must not be able to change the bytes of
+    # the repository the harness is building.
     return subprocess.run(["git", *args], cwd=str(cwd), check=True,
                           capture_output=True, text=True,
-                          env=protected.scrubbed_env()).stdout.strip()
+                          env=_scrubbed_env()).stdout.strip()
 
 
 # ------------------------------------------------------------- the refusal

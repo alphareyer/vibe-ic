@@ -38,9 +38,9 @@ so a later `--write-baseline` that moves any of the three and leaves this block
 behind is RED. It cannot be silenced by deleting the block either: absence is a
 failure here, not an exemption.
 
-WHY IN THE TEST TREE. `step_internal_fail_bubble_up_check.py` is on
-`tools/ci/protected_landing_transition.json`, whose bytes may only move through a
-PREPARE+ACTIVATE pair. The guard needs none of the checker's runtime, and #1015's
+WHY IN THE TEST TREE. `step_internal_fail_bubble_up_check.py` was then on the
+protected-path byte register (removed 2026-09-27), whose bytes could only move
+through a two-landing pair. The guard needs none of the checker's runtime, and #1015's
 own argument applies unchanged: regenerating the baseline fixes today's number and
 nothing else - the predicate is what makes the record self-correcting.
 

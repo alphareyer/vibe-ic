@@ -107,7 +107,7 @@ def test_union_keeps_deleted_base_test_and_new_candidate_test(tmp_path):
     assert "programs/tests/test_foo.py" not in payload["candidate_selection"]
     assert "programs/tests/test_new.py" in payload["candidate_selection"]
     assert record["payload_sha256"] == S.hashlib.sha256(
-        S.transition.canonical_bytes(payload)).hexdigest()
+        S.primitives.canonical_bytes(payload)).hexdigest()
 
 
 def test_candidate_selector_rewrite_cannot_narrow_base_owned_result(tmp_path):

@@ -262,7 +262,6 @@ chip-AGNOSTIC.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import re
 import sys
@@ -500,41 +499,6 @@ class Verdict:
         if self.unmeasurable or self.incomplete:
             return "INCOMPLETE"
         return "READY" if self.ok else "BLOCKED"
-
-
-def read_protected_transition_receipt(
-        path: str, *, base_commit: str, candidate_commit: str,
-        base_tree: str, candidate_tree: str
-        ) -> tuple[Optional[dict], Optional[dict], str]:
-    """Load and bind BASE-owned protected-source evidence.
-
-    The validator is resolved by path from this verdict's own raw-attested
-    BASE snapshot.  Importing a same-named candidate module would let the
-    subject redefine the receipt it is meant to satisfy.
-    """
-    if not str(path).strip():
-        return None, None, "no protected landing transition receipt was supplied"
-    repo = Path(__file__).resolve().parents[4]
-    validator_path = repo / "tools" / "ci" / "protected_landing_transition.py"
-    try:
-        spec = importlib.util.spec_from_file_location(
-            "_trusted_protected_landing_transition", validator_path)
-        if spec is None or spec.loader is None:
-            raise ImportError("no loader")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        receipt = module.strict_load_receipt(
-            Path(path), oid_len=len(base_commit))
-        summary = module.validate_receipt_binding(
-            receipt,
-            base_commit=base_commit,
-            candidate_commit=candidate_commit,
-            base_tree=base_tree,
-            candidate_tree=candidate_tree,
-        )
-    except (ImportError, OSError, RuntimeError, ValueError, TypeError) as exc:
-        return None, None, str(exc)
-    return receipt, summary, ""
 
 
 # The verification TIERS. `merge-tree` is the strong path; `rebase-replay` is the
@@ -1547,8 +1511,8 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
             "gate red on both arms is owned by a live deadline is UNKNOWN here")
     else:
         # IMPORTED HERE, NOT AT MODULE SCOPE. This file is executed by the
-        # isolated trusted entry and its import graph is part of what the
-        # protected runtime pins; a top-level `sys.path` insertion in an
+        # isolated trusted entry and its import graph is part of the BASE
+        # runtime the verifier executes; a top-level `sys.path` insertion in an
         # authority file changes what every later import resolves to, and it
         # measurably broke two end-to-end cases when it was one.
         try:
@@ -1761,9 +1725,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="parent-owned routed-corpus manifest and independent "
                          "execution receipts; required by the trusted hygiene "
                          "judge for an EMPTY-to-expanded transition")
-    ap.add_argument("--protected-transition-receipt", default="",
-                    help="BASE-validator pre/post-identical receipt binding the "
-                         "atomic protected landing-runtime tuple")
     ap.add_argument("--maxfail", type=int, default=10,
                     help="the --maxfail gatekeeper-land.sh passes to pytest; "
                          "used only to tell truncation from a real absence")
@@ -1794,9 +1755,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="OS exit status of the candidate non-target gate arm")
     ap.add_argument("--red-since-ledger", default="",
                     help="tools/ci/gate_red_since.json as the BASE commit "
-                         "carries it. The acknowledgement policy is BASE-owned, "
-                         "like the protected transition manifest: a candidate "
-                         "must not be able to grant itself an amnesty. Absent "
+                         "carries it. The acknowledgement policy is BASE-owned: "
+                         "a candidate must not be able to grant itself an "
+                         "amnesty. Absent "
                          "means the inherited-red deadline is NOT evaluated, "
                          "and that is DISCLOSED rather than assumed clean")
     ap.add_argument("--red-since-repo", default="",
@@ -1925,15 +1886,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         a.base_hygiene_host, a.candidate_hygiene_host,
         a.trusted_transition_evidence)
 
-    protected_receipt, protected_transition, protected_error = (
-        read_protected_transition_receipt(
-            a.protected_transition_receipt,
-            base_commit=a.base_sha,
-            candidate_commit=a.verified_sha,
-            base_tree=a.base_tree,
-            candidate_tree=a.verified_tree,
-        ))
-
     debt_ledger = None
     debt_input_error = ""
     if a.red_since_ledger:
@@ -1979,13 +1931,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if a.gate_edited:
         v.notes.append("this branch edits the gate that judges it: "
                        + ", ".join(a.gate_edited))
-    if protected_error:
-        v.ok = False
-        v.unmeasurable = True
-        v.reasons.append(
-            "PROTECTED LANDING SOURCE TRANSITION IS UNMEASURED: "
-            + protected_error)
-        v.incomplete.append("PROTECTED_LANDING_SOURCE_TRANSITION_UNMEASURED")
 
     head = ("[PASS] landing_merge_verdict: LAND OK" if v.ok
             else "[FAIL] landing_merge_verdict: REFUSE")
@@ -2040,8 +1985,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # "asked and found nothing", because only one of those two says
             # anything about what this branch did to the hygiene suite.
             "hygiene_finding_delta": hygiene,
-            "protected_landing_transition": protected_transition,
-            "protected_transition_receipt": protected_receipt,
             "selection_size": len(selection),
             "dropped_selected_files": dropped,
             "candidate_run_truncated": truncated,

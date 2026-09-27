@@ -414,9 +414,8 @@ file, write it in your RESULT.md and it is applied at landing; do not edit it.
 |---|---|
 | `flow/phase1_phase2_phase3.yaml` | collided four times in one night |
 | `programs/INDEX.md`, `PROGRAM_INVENTORY.json`, the README counters | generated; both sides of a conflict are wrong and the merged tree is neither |
-| `tools/ci/protected_landing_transition.json` | a hash list rendered against one base; a text merge produces a manifest that matches no tree |
 
-Need a flow step, a gate clause, or a protected-path move? State it in RESULT.md
+Need a flow step or a gate clause? State it in RESULT.md
 as a request. It gets applied in one batch, in one commit.
 
 ## 7. What "done" means for every lane

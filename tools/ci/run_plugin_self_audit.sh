@@ -70,9 +70,7 @@ GATES=(
 # WHY THIS FILE AND NOT `repo_hygiene_gates.sh`: both are machine runners the
 # wiring audit counts, and this one is the stated home for exactly this class —
 # its own header says it "runs the plugin-source-auditing gates against the
-# vibe-ic plugin tree itself", which is what a pure source scan is. It is also
-# not in the protected-landing tuple, so wiring here does not need a
-# PREPARE/ACTIVATE pair to reach main.
+# vibe-ic plugin tree itself", which is what a pure source scan is.
 GATES_ROOT_FLAG=(
     # vibe-ic#381: no shipped code may choose which process to KILL by matching
     # a command line. Landed by ea51511ef1 (v1.11.95) WITHOUT a runner, which

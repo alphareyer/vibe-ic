@@ -200,9 +200,9 @@ _LAND_PROCESS_ENV = {
 }
 _TEST_PROCESS_ENV = {
     "VIBE_IC_BENCHMARK_DATA": CORPUS_PATH,
-    # Protected-runtime constant.  Keep it runner-owned so an ACTIVATE remains
-    # bootable by the preceding BASE verifier, which cannot know new caller
-    # arguments introduced by the candidate runtime.
+    # Runner-owned constant.  The BASE verifier executes this runner and cannot
+    # know new caller arguments a candidate might introduce, so the value lives
+    # here rather than being passed in.
     "VIBEIC_PYTEST_SEMANTIC_STALL_GRACE": "600",
 }
 _TEST_REVIEWED_ENV_NAMES = frozenset({

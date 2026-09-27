@@ -313,8 +313,8 @@ def test_the_function_is_not_silently_treated_as_a_missing_command(tmp_path):
 # invocation forwarded nothing, one caller called the tree a valid batch and
 # the other called it an illegal landing, in one gate run about one tree.
 #
-# A protected-path ceremony landing is structurally at least three commits, so
-# the un-forwarded form had no passing case: it refused every batch, always.
+# A batch landing is structurally more than one commit, so the un-forwarded
+# form had no passing case: it refused every batch, always.
 #
 # Driven through the REAL extracted function against a stub that records the
 # argv it was handed, so what is asserted is the WIRING and not the presence of

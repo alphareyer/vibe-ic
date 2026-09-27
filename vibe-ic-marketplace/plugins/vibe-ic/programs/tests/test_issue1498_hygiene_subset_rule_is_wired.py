@@ -44,7 +44,6 @@ chip-AGNOSTIC: nothing here reasons about any IC, vendor, SKU or process.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import re
 import sys
@@ -62,13 +61,6 @@ _PROG = _PROGRAMS / "landing_merge_verdict.py"
 _REPO_ROOT = _PROGRAMS.parents[3]
 _VERIFY = _REPO_ROOT / "tools" / "gatekeeper-verify-merge.sh"
 _LAND = _REPO_ROOT / "tools" / "gatekeeper-land.sh"
-
-_PROTECTED_SPEC = importlib.util.spec_from_file_location(
-    "_protected_landing_transition_for_issue1498",
-    _REPO_ROOT / "tools" / "ci" / "protected_landing_transition.py")
-assert _PROTECTED_SPEC and _PROTECTED_SPEC.loader
-_PROTECTED = importlib.util.module_from_spec(_PROTECTED_SPEC)
-_PROTECTED_SPEC.loader.exec_module(_PROTECTED)
 
 TREE = "a" * 40
 SHA = "c" * 40
@@ -463,71 +455,6 @@ _JUNIT_XML = (
     '</testsuites>')
 
 
-def _protected_receipt(tmp_path):
-    """A STEADY protected-transition receipt, the one the program requires.
-
-    `landing_merge_verdict` refuses without it ("PROTECTED LANDING SOURCE
-    TRANSITION IS UNMEASURED"), and nothing in THIS file is about that
-    transition -- it is a precondition, so it is built rather than asserted.
-    The runner profile is READ OUT OF the live manifest instead of transcribed:
-    a literal copy here would be one more thing to drift, and the drift would
-    show up as an unrelated refusal in an unrelated test.
-    """
-    manifest_doc = json.loads(
-        (_REPO_ROOT / _PROTECTED.MANIFEST_PATH).read_text(encoding="utf-8"))
-    paths = sorted(_PROTECTED.REQUIRED_AUTHORITY_PATHS
-                   | _PROTECTED.RUNTIME_PATHS)
-    observed = []
-    for index, path in enumerate(paths, 1):
-        roles = []
-        if path in _PROTECTED.REQUIRED_AUTHORITY_PATHS:
-            roles.append("authority")
-        if path in _PROTECTED.RUNTIME_PATHS:
-            roles.append("runtime")
-        observed.append({
-            "path": path,
-            "mode": "100755" if path.endswith(".sh") else "100644",
-            "blob_oid": f"{index:040x}",
-            "sha256": f"{index:064x}",
-            "size": index,
-            "roles": roles,
-        })
-    manifest = {
-        "path": _PROTECTED.MANIFEST_PATH, "mode": "100644",
-        "blob_oid": "d" * 40, "sha256": "e" * 64, "size": 123,
-    }
-    payload = {
-        "operation": "STEADY",
-        "base_commit": SHA, "base_tree": TREE,
-        "candidate_commit": SHA, "candidate_tree": TREE,
-        "base_manifest": manifest, "candidate_manifest": dict(manifest),
-        "runner": manifest_doc["runner"],
-        "base_transition_id": "landing-semantic-v1",
-        "candidate_transition_id": "landing-semantic-v1",
-        "base_current_state_id": "legacy-timeout-v1",
-        "base_next_state_id": "semantic-progress-v1",
-        "base_state_id": "legacy-timeout-v1",
-        "candidate_state_id": "legacy-timeout-v1",
-        "base_files": observed,
-        "candidate_files": json.loads(json.dumps(observed)),
-        "worktrees": [
-            {"role": "candidate-gates", "commit": SHA,
-             "tree": TREE, "complete": True},
-            {"role": "candidate-tests", "commit": SHA,
-             "tree": TREE, "complete": True},
-        ],
-    }
-    receipt = {
-        "schema": 1, "kind": _PROTECTED.RECEIPT_KIND, "complete": True,
-        "payload": payload,
-        "payload_sha256": hashlib.sha256(
-            _PROTECTED.canonical_bytes(payload)).hexdigest(),
-    }
-    path = tmp_path / "protected-transition.json"
-    path.write_bytes(_PROTECTED.canonical_bytes(receipt))
-    return path
-
-
 def _cli(tmp_path, hyg_base: Path, hyg_cand: Path, tag: str):
     """The real program, the real arguments, one junit pair shared by both arms.
 
@@ -553,7 +480,6 @@ def _cli(tmp_path, hyg_base: Path, hyg_cand: Path, tag: str):
          "--candidate-junit", str(junit),
          "--base-hygiene", str(hyg_base), "--candidate-hygiene", str(hyg_cand),
          "--base-hygiene-host", _HOST, "--candidate-hygiene-host", _HOST,
-         "--protected-transition-receipt", str(_protected_receipt(tmp_path)),
          "--json", str(out)],
         capture_output=True, text=True)
     # THE PROGRAM THAT NEVER STARTED MUST SAY SO.
@@ -626,7 +552,6 @@ def test_end_to_end_the_record_says_when_it_was_not_asked(tmp_path):
          "--base-land-log", str(land), "--selection", str(sel),
          "--base-selection", str(sel), "--base-junit", str(junit),
          "--candidate-junit", str(junit),
-         "--protected-transition-receipt", str(_protected_receipt(tmp_path)),
          "--json", str(out)],
         capture_output=True, text=True)
     # Exit code and the subject's own words BEFORE the record it may never have

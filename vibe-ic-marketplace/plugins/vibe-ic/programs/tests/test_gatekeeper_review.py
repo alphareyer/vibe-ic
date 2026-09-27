@@ -789,84 +789,19 @@ def test_a_program_that_finishes_INSIDE_the_bound_still_returns_its_own_rc(
 
 
 # ---------------------------------------------------------------------------
-# The two ADVISORY disclosures wired in because nothing else ran them.
+# The ADVISORY disclosure wired in because nothing else ran it.
 #
-# `content_pinned_authority_verified_only_at_merge` and
-# `corpus_cardinality_pin_scan` were authored, tested and merged, and then
-# reachable from no runner, no flow clause, no CI line and no skill. They are
+# `corpus_cardinality_pin_scan` was authored, tested and merged, and then
+# reachable from no runner, no flow clause, no CI line and no skill. It is
 # composed here — the gate a maintainer runs BEFORE every push — because that
-# is where an author-facing report is still cheap to act on. Neither may ever
-# block, and each must DISCLOSE an absent subject rather than report a clean
+# is where an author-facing report is still cheap to act on. It may never
+# block, and it must DISCLOSE an absent subject rather than report a clean
 # zero over a population nobody opened.
+#
+# (Its sibling, `content_pinned_authority_verified_only_at_merge`, read the
+# protected-path byte register that the owner removed on 2026-09-27, and went
+# with it.)
 # ---------------------------------------------------------------------------
-def _pinned_manifest(root: Path, entries: dict) -> None:
-    """Write a two-state transition manifest pinning `entries` {relpath: body}.
-
-    The schema is the shipped one — two named states, each with a `files` list
-    of {path, sha256} — so the denominator this exercises is the same
-    denominator the real manifest produces.
-    """
-    import hashlib
-    (root / "tools" / "ci").mkdir(parents=True, exist_ok=True)
-    files = []
-    for rel, body in entries.items():
-        p = root / rel
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(body)
-        files.append({"path": rel,
-                      "sha256": hashlib.sha256(body.encode()).hexdigest()})
-    (root / "tools" / "ci" / "protected_landing_transition.json").write_text(
-        json.dumps({"current": {"id": "before", "files": files},
-                    "next": {"id": "after", "files": files}}))
-
-
-def test_pinned_authority_advisory_reports_a_drifted_pin_without_blocking(
-        tmp_path):
-    """Same manifest, same denominator: one pinned file's CONTENT moves."""
-    root = tmp_path / "repo"
-    _pinned_manifest(root, {"tools/ci/a.py": "print(1)\n",
-                            "tools/ci/b.py": "print(2)\n"})
-    clean = gk.pinned_authority_gate(root)
-    assert clean.green and clean.rc == 0, clean
-    # The population is real in BOTH arms: two pinned paths, examined.
-    assert "hashing to neither:  0" in clean.summary, clean.summary
-    (root / "tools" / "ci" / "a.py").write_text("print(1)  # edited\n")
-    drifted = gk.pinned_authority_gate(root)
-    # It NOTICES ...
-    assert drifted.summary != clean.summary, (clean.summary, drifted.summary)
-    assert "1 pinned authority path(s)" in drifted.summary, drifted.summary
-    # ... and it still does NOT block. A mismatch on a branch that legitimately
-    # edits a pinned path is the EXPECTED state; blocking would refuse the very
-    # change the manifest exists to record.
-    assert drifted.rc == 0 and drifted.green, drifted
-
-
-def test_pinned_authority_discloses_an_absent_manifest_instead_of_passing(
-        tmp_path):
-    g = gk.pinned_authority_gate(tmp_path)
-    assert g.rc == -1, g            # NOT_APPLICABLE, not a pass
-    assert "CANNOT DETERMINE" in g.summary, g.summary
-    assert g.green                  # and still never blocking
-
-
-def test_pinned_authority_does_not_launder_an_unexpected_rc_into_a_report(
-        tmp_path, monkeypatch):
-    """A timeout's 124 must NOT arrive as "ADVISORY — ...".
-
-    Without `--strict` the program can only reach 0 or 2, so anything else is
-    the CALLER's defect, and printing an advisory line over a run that produced
-    no verdict is the empty-result-reads-as-clean shape.
-    """
-    root = tmp_path / "repo"
-    _pinned_manifest(root, {"tools/ci/a.py": "print(1)\n"})
-    monkeypatch.setattr(gk, "_run_program",
-                        lambda prog, args, **kw: (124, "", "UNDETERMINED"))
-    g = gk.pinned_authority_gate(root)
-    assert g.rc == -1, g
-    assert "unexpected rc 124" in g.summary, g.summary
-    assert "ADVISORY" not in g.summary, g.summary
-
-
 def test_corpus_pin_scan_advisory_counts_census_pins_without_blocking(
         tmp_path):
     """Same tests tree, one added assertion that pins the corpus CENSUS."""
@@ -902,7 +837,7 @@ def test_corpus_pin_scan_discloses_an_absent_tests_tree(tmp_path):
     assert g.green
 
 
-def test_both_advisories_are_in_the_verdict_and_neither_blocks(tmp_path):
+def test_the_advisory_is_in_the_verdict_and_does_not_block(tmp_path):
     """The wiring, not just the drivers: a full review() must LIST them."""
     repo, plugin = _build_clean_plugin(tmp_path, version="1.0.96")
     _write_ppa_answers(repo, plugin)
@@ -916,8 +851,8 @@ def test_both_advisories_are_in_the_verdict_and_neither_blocks(tmp_path):
         override_cur="1.0.96", override_prev="1.0.95",
     )
     by_name = {g.name: g for g in v.gates}
-    for name in ("content_pinned_authority_verified_only_at_merge",
-                 "corpus_cardinality_pin_scan"):
-        assert name in by_name, sorted(by_name)
-        assert by_name[name].green, by_name[name]
+    name = "corpus_cardinality_pin_scan"
+    assert name in by_name, sorted(by_name)
+    assert by_name[name].green, by_name[name]
+    assert "content_pinned_authority_verified_only_at_merge" not in by_name
     assert v.verdict == "MERGE_OK", v.blocking

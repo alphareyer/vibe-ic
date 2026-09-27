@@ -1926,7 +1926,7 @@ def _run_selection(cwd: Path, selection: List[Path],
     # (1) CAPABILITY. `-p pytest_timeout` is a HARD import -- pytest refuses to
     #     start at all when the module is absent. It is absent from the image
     #     this repo anchors (`ghcr.io/vibeic/vibeic-eda@sha256:66c33ff2e057...`,
-    #     `tools/ci/protected_landing_transition.json` .runner.image) and from
+    #     the hermetic landing runner's image at the time) and from
     #     every 0.2.x/0.3.x tag of it that is on this host; MEASURED there,
     #     every arm this function started died with `ImportError: Error
     #     importing plugin "pytest_timeout"` before collecting one test. The

@@ -88,7 +88,7 @@ HOST_LANE_ENV = "VIBEIC_TRUSTED_PYTEST_SITE"
 HOST_LANE_AUTO = "auto"
 
 #: The pinned runner image, spelled the way `trusted_pytest_entry`'s own tests
-#: and `tools/ci/protected_landing_transition.json` spell it.  A remedy that
+#: spell it.  A remedy that
 #: names a floating tag is not a remedy: a floating tag is how a host ends up
 #: with a runtime nobody pinned.
 #: Resolved the way the runner resolves it: the DIGEST is the identity and the
