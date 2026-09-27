@@ -678,3 +678,66 @@ def test_the_stream_checks_need_the_stream_and_nothing_else(tmp_path, step):
     contract._check_state({"gds": str(gds), "metrics": {}}, step_id=step)
     with pytest.raises(contract.Refusal, match="LL_STATE_MISSING"):
         contract._check_state({"metrics": {}}, step_id=step)
+
+
+# ── 37.3: the receipt of a LibreLane-promoted stream ────────────────────────
+def _promoted(tmp_path, verdict="PASS", defect=0, pairs=None, bytes_=b"finished stream"):
+    xor = importlib.import_module("gds_xor_check")
+    project = tmp_path / "p"
+    gds = project / "phase3/stage4/gds/chip.gds"
+    gds.parent.mkdir(parents=True)
+    gds.write_bytes(bytes_)
+    routed = project / "phase3/stage3/pnr/routed.def"
+    routed.parent.mkdir(parents=True)
+    routed.write_text("DESIGN chip ;\n")
+    folder = project / "phase3/librelane/37.3-klayout/01-vibeic-finishingxor"
+    metrics = {"vibeic__finishing_xor__defect__count": defect,
+               "vibeic__finishing_xor__design_pair__count": 38}
+    metrics.update({f"vibeic__finishing_xor__defect__count__pair:{k}": v
+                    for k, v in (pairs or {}).items()})
+    _put(folder / "state_out.json", {"metrics": metrics})
+    _put(project / "phase3/librelane/37.3-klayout-finishing-xor.json", {
+        "verdict": verdict, "reasons": [] if verdict != "NOT_MEASURED" else ["no core"],
+        "metrics": {"vibeic__finishing_xor__defect__count": {
+            "status": {"PASS": "MEASURED", "FAIL": "FAIL"}.get(verdict, "NOT_MEASURED"),
+            "value": defect, "folder": str(folder)}}})
+    _put(project / xor.LIBRELANE_PROMOTION_REL,
+         {"selection": "klayout", "canonical_sha256": contract.digest(gds)})
+    return xor, project, gds
+
+
+def test_a_clean_librelane_finishing_is_the_37_3_receipt(tmp_path):
+    xor, project, gds = _promoted(tmp_path)
+    assert xor.main([str(project)]) == 0
+    receipt = json.loads((project / xor.REPORT_REL).read_text())
+    assert receipt["verdict"] == "PASS"
+    assert receipt["reference"]["kind"] == "librelane_stream"
+    assert receipt["design_layer_differences"] == []
+    assert xor.judge_receipt(project, xor.REPORT_REL)[0] == 0
+
+
+def test_a_finishing_defect_names_its_design_pairs_and_fails(tmp_path):
+    xor, project, gds = _promoted(tmp_path, verdict="FAIL", defect=3,
+                                  pairs={"36_0": 2, "42_0": 1})
+    assert xor.main([str(project)]) == 1
+    receipt = json.loads((project / xor.REPORT_REL).read_text())
+    assert [(d["layer"], d["datatype"], d["differences"])
+            for d in receipt["design_layer_differences"]] == [(36, 0, 2), (42, 0, 1)]
+    assert xor.judge_receipt(project, xor.REPORT_REL)[0] == 1
+
+
+def test_an_unmeasured_finishing_is_not_a_zero(tmp_path):
+    xor, project, gds = _promoted(tmp_path, verdict="NOT_MEASURED", defect=None)
+    assert xor.main([str(project)]) == 2
+    assert xor.judge_receipt(project, xor.REPORT_REL)[0] == 2
+
+
+def test_other_bytes_than_the_promoted_stream_take_the_direct_comparison(tmp_path):
+    xor, project, gds = _promoted(tmp_path)
+    gds.write_bytes(b"a later rewrite")
+    assert xor.librelane_finishing_receipt(project, contract.digest(gds)) is None
+
+
+def test_the_drc_script_prints_a_per_pair_defect_metric():
+    script = (PLUGIN / "finishing_xor.drc").read_text()
+    assert "vibeic__finishing_xor__defect__count__pair:" in script

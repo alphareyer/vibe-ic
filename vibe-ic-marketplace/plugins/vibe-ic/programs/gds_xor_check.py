@@ -741,6 +741,79 @@ _JUDGE_CAPABILITY_ABSENT = "CAPABILITY_ABSENT"
 _JUDGE_ASKED_BEFORE_PRODUCER = "ASKED_BEFORE_PRODUCER"
 
 
+#: Step 37's LibreLane promotion record (librelane_step37.run).
+LIBRELANE_PROMOTION_REL = "phase3/librelane/37-promotion.json"
+
+
+def librelane_finishing_receipt(project: Path, live_sha256: str
+                                ) -> Optional[Dict[str, Any]]:
+    """The 37.3 receipt for a GDS step 37's LibreLane chain promoted, or None.
+
+    None unless ``37-promotion.json`` names these exact bytes
+    (``canonical_sha256`` == the shipped GDS's sha256). Then the promoted arm's
+    judged ``Vibeic.FinishingXOR`` record decides: PASS -> 0 design-layer
+    differences; a defect -> each design pair it names, from the State's
+    per-pair metrics; a record that cannot be read or was not measured ->
+    NOT_DETERMINED with its reason (never a zero).
+    """
+    promo_path = project / LIBRELANE_PROMOTION_REL
+    if not promo_path.is_file():
+        return None
+    try:
+        promo = json.loads(promo_path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(promo, dict) or promo.get("canonical_sha256") != live_sha256:
+        return None
+    arm = promo.get("selection")
+    rel = f"phase3/librelane/37.3-{arm}-finishing-xor.json"
+    base = {"reference": {"kind": "librelane_stream", "arm": arm,
+                          "promotion": LIBRELANE_PROMOTION_REL,
+                          "finishing_record": rel}}
+    try:
+        record = json.loads((project / rel).read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
+        return {"verdict": "NOT_DETERMINED", "rc": 2, "report": base,
+                "reason": f"step 37 promoted a LibreLane stream but its finishing "
+                          f"record {rel} is unreadable ({type(exc).__name__})"}
+    rows = record.get("metrics") or {}
+    defect = rows.get("vibeic__finishing_xor__defect__count") or {}
+    if record.get("verdict") not in ("PASS", "FAIL") or \
+            defect.get("status") not in ("MEASURED", "FAIL"):
+        return {"verdict": "NOT_DETERMINED", "rc": 2, "report": base,
+                "reason": f"{rel}: the finishing XOR was not measured "
+                          f"({'; '.join(record.get('reasons') or []) or record.get('verdict')})"}
+    state = {}
+    folder = defect.get("folder")
+    try:
+        state = json.loads((Path(folder) / "state_out.json").read_text()).get("metrics") or {}
+    except (OSError, ValueError, TypeError):
+        state = {}
+    prefix = "vibeic__finishing_xor__defect__count__pair:"
+    diffs = []
+    for key, value in sorted(state.items()):
+        if key.startswith(prefix) and isinstance(value, int) and value > 0:
+            layer, _, datatype = key[len(prefix):].partition("_")
+            diffs.append({"layer": int(layer), "datatype": int(datatype),
+                          "differences": value, "declared_by": "Vibeic.FinishingXOR"})
+    count = defect.get("value")
+    if count and not diffs:
+        diffs = [{"layer": None, "datatype": None, "differences": count,
+                  "declared_by": "Vibeic.FinishingXOR (no per-pair metric)"}]
+    report = dict(base, design_layer_differences=diffs,
+                  design__xor_difference__count=count,
+                  layers_compared=state.get("vibeic__finishing_xor__design_pair__count"),
+                  finishing_record_sha256=_sha256(project / rel))
+    if count == 0:
+        return {"verdict": "PASS", "rc": 0, "report": report,
+                "reason": f"step 37's LibreLane finishing XOR on the promoted "
+                          f"{arm} stream: 0 design geometry removed, covered or "
+                          f"touched ({rel})"}
+    return {"verdict": "FAIL", "rc": 1, "report": report,
+            "reason": f"step 37's LibreLane finishing XOR on the promoted {arm} "
+                      f"stream counted {count} defect(s) ({rel})"}
+
+
 def judge_receipt(project: Path, rel: str) -> Tuple[int, str, Dict[str, Any]]:
     """Decide step 37.3 from the receipt the PRODUCER wrote. Returns (rc, line, doc).
 
@@ -936,6 +1009,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                       f"the shipped GDS changed since the run attested it "
                       f"({ROUTE_EVIDENCE_REL} records {recorded[:16]}..., on disk "
                       f"{live[:16]}...), so this run's own pairing no longer holds")
+
+    # STEP 37 ON LIBRELANE (lane mig105). When the shipped bytes are exactly
+    # the stream LibreLane's step-37 chain promoted, the finishing comparison
+    # was already MEASURED inside that chain, by `Vibeic.FinishingXOR` on the
+    # promoted arm's own three streams (StreamOut, SealRing, Filler). The
+    # receipt is written from that judged record -- one instrument, one
+    # answer -- and nothing is re-streamed. Any other bytes fall through to
+    # the direct comparison below.
+    ll = librelane_finishing_receipt(project, live)
+    if ll is not None:
+        report.update(ll["report"])
+        return finish(ll["verdict"], ll["rc"], ll["reason"])
 
     try:
         import _klayout_launch as _kl

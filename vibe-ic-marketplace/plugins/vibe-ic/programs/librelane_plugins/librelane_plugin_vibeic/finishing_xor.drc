@@ -103,6 +103,8 @@ pre_pairs.keys.sort.each do |name|
   counts["added_touching"] += n_touch
   counts["added"] += n_added
   puts "%VIBEIC_PAIR #{name} removed=#{n_removed} added=#{n_added} in_core=#{n_core} touching=#{n_touch} fill_on_design=#{n_fill}"
+  n_defect = n_removed + n_fill + n_core + n_touch
+  puts "%OL_METRIC_I vibeic__finishing_xor__defect__count__pair:#{info.layer}_#{info.datatype} #{n_defect}" if n_defect > 0
 end
 
 defects = counts["removed"] + counts["fill_on_design"] + counts["added_in_core"] + counts["added_touching"]
