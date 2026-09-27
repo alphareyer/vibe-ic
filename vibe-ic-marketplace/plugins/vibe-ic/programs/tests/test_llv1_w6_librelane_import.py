@@ -420,36 +420,46 @@ SEG1_END = "Checker.NetlistAssignStatements"
 def _segment_project(tmp_path: Path) -> Path:
     """Segment 1 stops --to NetlistAssignStatements; segment 2 runs from
     CheckSDCFiles. Each flow.log is the real one cut the way LibreLane
-    writes a --to / --from run: the steps it ran, then its closing lines."""
+    (flows/sequential.py) writes a --to / --from run: `Skipping step` for
+    every step outside the range, the steps it ran, then its closing lines."""
     proj = tmp_path / "proj"
     for rel in (SEG1, SEG2):
         (proj / rel).parent.mkdir(parents=True)
         shutil.copytree(FIXTURES / "8HD-4" / "runs" / "cmp3", proj / rel)
     lines = _flow_lines(proj, SEG1)
-    head = lines[:_at(lines, "'OpenROAD.CheckSDCFiles'")]
+    cut = _at(lines, "'OpenROAD.CheckSDCFiles'")
+    head, rest = lines[:cut], lines[cut:]
     end = [l for l in lines if l.startswith("Saving views") or
            l.startswith("Flow complete.")]
     assert len(end) == 2
-    (proj / SEG1 / "flow.log").write_text("".join(head + end))
+
+    def skips(part):
+        return [f"Skipping step '{l.split(chr(39))[1]}'…\n" for l in part
+                if l.startswith("Running '") and "/" not in
+                l.split(" at ")[1].strip("'…\n").split("runs/cmp3/", 1)[1]]
+    (proj / SEG1 / "flow.log").write_text("".join(head + skips(rest) + end))
     # The trim kept state_out.json only for steps a rule imports; LibreLane
     # writes one for every step that returns, the declared end included.
     (proj / SEG1 / "09-checker-netlistassignstatements/state_out.json") \
         .write_text("{}\n")
     (proj / SEG2 / "flow.log").write_text(
-        "Starting…\n" + "".join(lines[_at(lines, "'OpenROAD.CheckSDCFiles'"):]))
+        "Starting…\n" + "".join(skips(head[1:]) + rest))
     return proj
 
 
-def test_a_to_segment_is_complete_at_its_declared_end(tmp_path):
+def test_an_import_that_ends_at_a_declared_to_is_refused(tmp_path):
+    """Review W6 wave 6: the steps after --to X are steps this import never
+    reached, not steps the flow does not perform. An import whose last
+    segment stops at --to is refused; the segment imports with the one that
+    continues it (test_two_segments_import_as_one_tree)."""
     import librelane_contract as C
     import librelane_import as LI
     proj = _segment_project(tmp_path)
-    doc = LI.import_run(proj, proj / SEG1, SEG1_END)
-    assert {r["canonical_path"] for r in _rows_of(doc)
-            if not r["canonical_path"].startswith("reports/")} == \
-        {"phase2/stage2/synth/netlist.v"}
-    assert doc["flow_status"]["to"] == SEG1_END
-    assert all(n["flow_complete"] is True for n in doc["not_performed"])
+    with pytest.raises(C.Refusal) as exc:
+        LI.import_run(proj, proj / SEG1, SEG1_END)
+    assert exc.value.code == "LL_IMPORT_ENDS_AT_TO"
+    assert SEG1_END in str(exc.value)
+    _nothing_written(proj)
     proj2 = _segment_project(tmp_path / "b")
     with pytest.raises(C.Refusal) as exc:
         LI.import_run(proj2, proj2 / SEG1, "OpenROAD.DetailedRouting")
@@ -601,8 +611,13 @@ def test_a_reimport_removes_what_the_same_runs_no_longer_perform(tmp_path):
     man = proj / MANIFEST
     doc = json.loads(man.read_text())
     stale = proj / "phase3/stage3/pnr/padring.def"
-    stale.write_text("an earlier import's pad ring\n")
-    doc["rows"].append({"canonical_path": "phase3/stage3/pnr/padring.def"})
+    # a VALID row the earlier import could have written (W0's validator
+    # reads the previous manifest before any of its paths is trusted)
+    row = dict(next(r for r in doc["rows"]
+                    if r["canonical_path"] == "phase3/stage3/pnr/floorplan.def"),
+               canonical_path="phase3/stage3/pnr/padring.def")
+    shutil.copyfile(proj / "phase3/stage3/pnr/floorplan.def", stale)
+    doc["rows"].append(row)
     man.write_text(json.dumps(doc))
     doc = _import(proj)
     assert not stale.exists()
@@ -686,3 +701,147 @@ def test_a_log_the_flow_does_not_name_is_not_a_source_log(tmp_path):
                   if r["canonical_path"] == "phase3/stage3/pnr/routed.def")
     assert [l["path"] for l in routed["source_logs"]] == \
         ["44-openroad-detailedrouting/openroad-detailedrouting.log"]
+
+
+# ── review W6 wave 6 ──────────────────────────────────────────────────────
+
+def _block(lines, needle):
+    """(start, end) of a top-level step's block in flow.log lines."""
+    i = _at(lines, needle)
+    j = next((k for k in range(i + 1, len(lines))
+              if lines[k].startswith("Running '") and "/" not in
+              lines[k].split("runs/cmp3/", 1)[1].split("'")[0]), len(lines))
+    return i, j
+
+
+def test_a_to_less_run_that_was_cut_short_is_refused(tmp_path):
+    """LibreLane --to X still prints `Flow complete.`; the steps after X are
+    `Skipping step` lines. Without a declared `to`, such a run used to import
+    as final with the rest read as steps the flow does not do."""
+    import librelane_contract as C
+    proj = _project(tmp_path)
+    lines = _flow_lines(proj)
+    _, end = _block(lines, "'OpenROAD.DetailedRouting'")
+    later = [l.split("'")[1] for l in lines[end:]
+             if l.startswith("Running '") and "/" not in
+             l.split("runs/cmp3/", 1)[1].split("'")[0]]
+    closing = [l for l in lines if l.startswith(("Saving views", "Flow complete."))]
+    (proj / RUN_REL / "flow.log").write_text("".join(
+        lines[:end] + [f"Skipping step '{n}'…\n" for n in later] + closing))
+    with pytest.raises(C.Refusal) as exc:
+        _import(proj)
+    assert exc.value.code == "LL_IMPORT_RUN_CUT_SHORT"
+    assert "stopped after OpenROAD.DetailedRouting" in str(exc.value)
+    _nothing_written(proj)
+
+
+def test_a_run_with_a_skipped_step_is_refused(tmp_path):
+    """--skip prints `Skipping step` between two started steps."""
+    import librelane_contract as C
+    proj = _project(tmp_path)
+    lines = _flow_lines(proj)
+    i, j = _block(lines, "'Netgen.LVS'")
+    (proj / RUN_REL / "flow.log").write_text(
+        "".join(lines[:i] + ["Skipping step 'LVS'…\n"] + lines[j:]))
+    with pytest.raises(C.Refusal) as exc:
+        _import(proj)
+    assert exc.value.code == "LL_IMPORT_STEPS_SKIPPED"
+    assert "LVS" in str(exc.value)
+    _nothing_written(proj)
+
+
+def test_a_rule_step_gated_off_is_refused_not_listed_as_not_performed(tmp_path):
+    """RUN_LVS=false: LibreLane prints its gating notice and skips. The flow
+    performs LVS; this run's config turned it off."""
+    import librelane_contract as C
+    proj = _project(tmp_path)
+    lines = _flow_lines(proj)
+    i, j = _block(lines, "'Netgen.LVS'")
+    (proj / RUN_REL / "flow.log").write_text("".join(
+        lines[:i]
+        + ["Gating variable for step 'Netgen.LVS' set to 'False'- the step "
+           "will be skipped.\n", "Skipping step 'LVS'…\n"] + lines[j:]))
+    with pytest.raises(C.Refusal) as exc:
+        _import(proj)
+    assert exc.value.code == "LL_IMPORT_RULE_STEP_GATED"
+    assert "Netgen.LVS" in str(exc.value)
+    _nothing_written(proj)
+
+
+def test_the_gated_steps_of_a_real_run_are_recorded(tmp_path):
+    proj = _project(tmp_path)
+    doc = _import(proj)
+    assert doc["flow_status"]["gated"] == [
+        "OpenROAD.RepairDesignPostGRT", "Odb.HeuristicDiodeInsertion",
+        "OpenROAD.ResizerTimingPostGRT", "Yosys.EQY"]
+    assert doc["flow_status"]["from_cut"] is False
+    assert doc["flow_status"]["to_cut"] is False
+
+
+def test_a_deferred_checker_error_is_blamed_not_the_last_step(tmp_path):
+    """Every step ran and LibreLane withheld `Flow complete.` because a
+    checker deferred its error: the refusal names that checker."""
+    import librelane_contract as C
+    proj = _project(tmp_path)
+    lines = _flow_lines(proj)
+    i = _at(lines, "'Checker.TrDRC'")
+    lines = [l for l in lines if not l.startswith("Flow complete.")]
+    lines.insert(i + 1, "2 Routing DRC errors found. - deferred\n")
+    (proj / RUN_REL / "flow.log").write_text("".join(lines))
+    with pytest.raises(C.Refusal) as exc:
+        _import(proj)
+    msg = str(exc.value)
+    assert exc.value.code == "LL_IMPORT_FLOW_INCOMPLETE"
+    folder = lines[i].split("runs/cmp3/", 1)[1].split("'")[0]
+    assert f"Checker.TrDRC at {folder}: 2 Routing DRC errors found." in msg, msg
+    assert "every step returned" in msg
+    assert "Misc.ReportManufacturability" not in msg
+    _nothing_written(proj)
+
+
+def test_a_lone_mid_flow_segment_is_refused(tmp_path):
+    """Segment 2 alone (--from): the steps before it are in no segment."""
+    import librelane_contract as C
+    import librelane_import as LI
+    proj = _segment_project(tmp_path)
+    with pytest.raises(C.Refusal) as exc:
+        LI.import_run(proj, proj / SEG2)
+    assert exc.value.code == "LL_IMPORT_STARTS_MID_FLOW"
+    _nothing_written(proj)
+
+
+def test_segments_may_name_different_tops(tmp_path):
+    """The Chip flow: segment 1 synthesizes the core, segment 2 lays out the
+    chip top. Each rule names its destinations by its segment's top."""
+    import librelane_import as LI
+    proj = _segment_project(tmp_path)
+    (proj / SEG2 / "resolved.json").write_text('{"DESIGN_NAME": "chip_x"}\n')
+    doc = LI.import_segments(proj, [(proj / SEG1, SEG1_END), (proj / SEG2, None)])
+    assert doc["top"] == "chip_x" and doc["tops"] == ["spm", "chip_x"]
+    assert [s["flow_status"]["design_name"] for s in doc["segments"]] == \
+        ["spm", "chip_x"]
+    got = {r["canonical_path"] for r in _rows_of(doc)}
+    for rel in ("phase3/stage4/gds/chip_x.gds", "phase3/stage3/extracted/chip_x.spef",
+                "phase3/stage3/extracted/spef_corners/chip_x.nom.spef",
+                "phase3/stage4/hardmacro/chip_x.lef",
+                "phase2/stage2/synth/netlist.v"):
+        assert rel in got, rel
+    assert not any("/spm." in p for p in got), sorted(got)
+
+
+def test_a_previous_manifest_that_does_not_validate_deletes_nothing(tmp_path):
+    """Its canonical paths decide what a re-import removes; a path W0's
+    validator rejects ('..' out of the project) is never acted on."""
+    import librelane_contract as C
+    proj = _project(tmp_path)
+    _import(proj)
+    precious = tmp_path / "outside_precious.txt"
+    precious.write_text("keep\n")
+    man = proj / MANIFEST
+    doc = json.loads(man.read_text())
+    doc["rows"].append(dict(doc["rows"][0], canonical_path="../outside_precious.txt"))
+    man.write_text(json.dumps(doc))
+    with pytest.raises(C.Refusal) as exc:
+        _import(proj)
+    assert exc.value.code == "LL_IMPORT_MANIFEST_UNREADABLE"
+    assert precious.read_text() == "keep\n"
