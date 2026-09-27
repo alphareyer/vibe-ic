@@ -51,7 +51,7 @@ import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 LOCK_FILENAME = ".runner.lock"
 
@@ -340,23 +340,34 @@ def reentrant_holder_pid(project: Path) -> Optional[int]:
     Nothing is written, so a caller that must not touch the project (a
     bounded Phase-3 window) makes the same decision as
     :func:`acquire_or_reenter`."""
+    return reentry_decision(project)[0]
+
+
+def reentry_decision(project: Path) -> Tuple[Optional[int], str]:
+    """:func:`reentrant_holder_pid` with the reason it decided so, for a
+    refusal that must say why re-entry was declined."""
     project = Path(project)
     token = os.environ.get(REENTRANCY_ENV, "")
     if not token:
-        return None
+        return None, f"no {REENTRANCY_ENV} token in the environment"
     try:
         holder_pid_s, holder_proj = token.split(":", 1)
         holder_pid = int(holder_pid_s)
     except (ValueError, AttributeError):
-        return None
-    if (holder_proj != str(project.resolve())
-            or holder_pid <= 0 or not _pid_alive(holder_pid)):
-        return None
+        return None, f"{REENTRANCY_ENV}={token!r} is not <pid>:<path>"
+    if holder_proj != str(project.resolve()):
+        return None, (f"{REENTRANCY_ENV} names project {holder_proj}, "
+                      f"not {project.resolve()}")
+    if holder_pid <= 0 or not _pid_alive(holder_pid):
+        return None, f"{REENTRANCY_ENV} names pid {holder_pid}, not alive"
     data = _read_lock(_lock_path(project))
     if data is None:
-        return None
+        return None, "the lock file is absent or unreadable"
     try:
         lock_pid = int(data.get("pid", -1))
     except (TypeError, ValueError):
-        return None
-    return holder_pid if lock_pid == holder_pid else None
+        return None, f"the lock file's pid {data.get('pid')!r} is not a pid"
+    if lock_pid != holder_pid:
+        return None, (f"{REENTRANCY_ENV} names pid {holder_pid}, but the "
+                      f"lock is held by pid {lock_pid}")
+    return holder_pid, f"{REENTRANCY_ENV} names the lock holder pid {holder_pid}"

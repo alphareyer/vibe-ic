@@ -24,6 +24,17 @@ import phase3_one_shot_runner as p3
 DEADLINE_S = 300
 
 
+def _running(pid: int) -> bool:
+    """A process that still runs. `kill(pid, 0)` (`_runner_lock._pid_alive`)
+    also succeeds on a zombie -- a child the group kill took down that no
+    one has reaped yet, as under a subreaper that reaps only at the end."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat.rsplit(")", 1)[-1].split()[0] not in ("Z", "X", "x")
+
+
 def _write_lock(project: Path, pid: int) -> bytes:
     lock = project / _runner_lock.LOCK_FILENAME
     lock.write_text(json.dumps({"pid": pid, "timestamp": "x",
@@ -70,27 +81,42 @@ def test_window_child_reenters_its_parents_lock(project):
     assert p3._phase3_file_manifest(project) == before
 
 
+def _assert_refusal_discloses(cp, project: Path, holder: int, why: str):
+    assert cp.returncode == 3
+    line = [l for l in cp.stderr.splitlines()
+            if l.startswith("CONCURRENT_RUN_REFUSED")]
+    assert line, cp.stderr
+    line = line[0]
+    assert f"pid={holder}" in line
+    assert "runner=vibe_ic_one_shot_runner" in line and "since=x" in line
+    assert str(project / _runner_lock.LOCK_FILENAME) in line
+    assert why in line, line
+    assert _runner_lock.REENTRANCY_ENV in line.split(why, 1)[1]
+
+
 def test_window_without_token_still_refuses_live_lock(project):
     lock_bytes = _write_lock(project, os.getpid())
     cp = _run_window(project, None)
-    assert cp.returncode == 3
-    assert "CONCURRENT_RUN_REFUSED" in cp.stderr
+    _assert_refusal_discloses(cp, project, os.getpid(), "no "
+                              + _runner_lock.REENTRANCY_ENV + " token")
     assert (project / _runner_lock.LOCK_FILENAME).read_bytes() == lock_bytes
 
 
 def test_window_token_for_other_project_still_refuses(project, tmp_path):
     _write_lock(project, os.getpid())
-    cp = _run_window(project, f"{os.getpid()}:{(tmp_path / 'other').resolve()}")
-    assert cp.returncode == 3
-    assert "CONCURRENT_RUN_REFUSED" in cp.stderr
+    other = (tmp_path / 'other').resolve()
+    cp = _run_window(project, f"{os.getpid()}:{other}")
+    _assert_refusal_discloses(cp, project, os.getpid(),
+                              f"names project {other}")
 
 
 def test_window_token_not_naming_the_live_holder_still_refuses(project,
                                                                 stranger):
     _write_lock(project, stranger)
     cp = _run_window(project, f"{os.getpid()}:{project.resolve()}")
-    assert cp.returncode == 3
-    assert "CONCURRENT_RUN_REFUSED" in cp.stderr
+    _assert_refusal_discloses(
+        cp, project, stranger,
+        f"names pid {os.getpid()}, but the lock is held by pid {stranger}")
 
 
 def test_reentrant_holder_pid_is_the_acquire_or_reenter_decision(
@@ -181,9 +207,9 @@ def test_enclosing_phase3_hang_is_stopped_by_the_watchdog(
     assert row.duration_s < 50
     orphan = int(pidfile.read_text())
     deadline = time.monotonic() + 10
-    while _runner_lock._pid_alive(orphan) and time.monotonic() < deadline:
+    while _running(orphan) and time.monotonic() < deadline:
         time.sleep(0.2)
-    alive = _runner_lock._pid_alive(orphan)
+    alive = _running(orphan)
     if alive:
         os.kill(orphan, 9)
     assert not alive, "the grandchild's process group outlived the stop"
@@ -199,7 +225,8 @@ def test_enclosing_phase3_failure_keeps_and_surfaces_stderr(
                         lambda *a: [sys.executable, "-c", fail])
     monkeypatch.setenv("VIBEIC_PHASE3_WINDOW_RUN_ID", "failrun")
     row = _enclose(project)
-    assert row.status == "NOT_MEASURED", row.detail
+    # Only the surfacing is this test's subject.  The status main gives a
+    # unit that ran and exited non-zero is not pinned here.
     assert "enclosing rc=7" in row.detail
     assert "line-29" in row.detail and "line-5\n" not in row.detail
     log = _window_log(project, "failrun")
@@ -207,3 +234,30 @@ def test_enclosing_phase3_failure_keeps_and_surfaces_stderr(
     err = capsys.readouterr().err
     assert "ENCLOSING_PHASE3_RC=7" in err and "line-29" in err
     assert str(log) in err
+
+
+def test_a_zombie_is_not_a_surviving_orphan():
+    """The liveness read the hang test relies on: an exited, unreaped child
+    is a zombie, which `kill(pid, 0)` still reports alive."""
+    child = subprocess.Popen(["true"])
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            state = Path(f"/proc/{child.pid}/stat").read_text()
+        except OSError:
+            break
+        if state.rsplit(")", 1)[-1].split()[0] == "Z":
+            break
+        time.sleep(0.05)
+    try:
+        assert _runner_lock._pid_alive(child.pid)
+        assert not _running(child.pid)
+    finally:
+        child.wait(timeout=10)
+    assert not _running(child.pid)
+    sleeper = subprocess.Popen(["sleep", "30"])
+    try:
+        assert _running(sleeper.pid)
+    finally:
+        sleeper.kill()
+        sleeper.wait(timeout=10)

@@ -73716,10 +73716,19 @@ def main() -> int:
                 live = False
             # The #588 token decides, read-only: the live holder may be
             # this run's own orchestrator, which this window re-enters.
-            parent = (_runner_lock.reentrant_holder_pid(project)
-                      if live else None)
+            parent, why = (_runner_lock.reentry_decision(project)
+                           if live else (None, ""))
             if live and parent is None:
-                print("CONCURRENT_RUN_REFUSED: live project runner lock",
+                print(f"CONCURRENT_RUN_REFUSED: project {project} is being "
+                      f"driven by a live runner (holder "
+                      f"pid={holder.get('pid')}, "
+                      f"runner={holder.get('runner', '?')}, "
+                      f"since={holder.get('timestamp', '?')}, "
+                      f"lock={source_lock}); this window did not re-enter "
+                      f"it: {why}. Wait for or stop the holder, or run the "
+                      f"window from that runner (its child environment "
+                      f"carries {_runner_lock.REENTRANCY_ENV}=<holder "
+                      f"pid>:<project>, which this window re-enters).",
                       file=sys.stderr)
                 return 3
             if parent is not None:
