@@ -227,6 +227,14 @@ IMPORT_RULES: Tuple[Rule, ...] = (
 _INSTANCE_SUFFIX = re.compile(r"-\d+$")
 _STARTING = "Starting…"
 _FLOW_COMPLETE = "Flow complete."
+_SAVING_VIEWS = "Saving views to '"
+#: LibreLane's flows/sequential.py: a step not executed in this invocation
+#: (outside --from/--to, or --skip), and the gating notice printed before a
+#: step whose RUN_* variable is off. steps/checker.py: a checker's deferred
+#: error, raised again at the end in place of `Flow complete.`.
+_SKIP_STEP_RE = re.compile(r"^Skipping step '(.+)'…$")
+_GATING_RE = re.compile(r"^Gating variable for step '([^']+)' set to 'False'")
+_DEFERRED_SUFFIX = " - deferred"
 #: A segment's declared terminal step: a LibreLane step class id.
 _STEP_ID = re.compile(r"^[A-Za-z][A-Za-z0-9]*\.[A-Za-z][A-Za-z0-9]*$")
 
@@ -275,7 +283,63 @@ def flow_status(flow_log: str) -> Dict[str, Any]:
         if m:
             last, after = (m.group(1), m.group(2)), i + 1
     return {"complete": _FLOW_COMPLETE in tail[after:],
+            # LibreLane saves the final views only after its step loop ends,
+            # before it raises the deferred errors that replace completion.
+            "saved_views": any(l.startswith(_SAVING_VIEWS)
+                               for l in tail[after:]),
             "last_started": last, "invocations": len(starts)}
+
+
+def _last_invocation(flow_log: str) -> List[str]:
+    lines = (flow_log or "").splitlines()
+    starts = [i for i, l in enumerate(lines) if l == _STARTING]
+    return lines[starts[-1] + 1:] if starts else lines
+
+
+def run_cuts(flow_log: str) -> Dict[str, List[str]]:
+    """Which steps the LAST invocation deliberately did not run.
+
+    ``before``: ``Skipping step`` lines before its first started step (the
+    ``--from`` signature); ``after``: after its last started step (``--to``);
+    ``between``: between two started steps (``--skip``). A skip right after
+    its ``Gating variable for step '<id>'`` notice is a RUN_* variable, not a
+    cut: its step id goes to ``gated``.
+    """
+    import instrument_calibration
+    instrument_calibration.assert_calibrated("librelane_import::run_cuts")
+    tail = _last_invocation(flow_log)
+    running = [i for i, l in enumerate(tail) if _tlp._RUNNING_RE.match(l)]
+    first = running[0] if running else len(tail)
+    last = running[-1] if running else -1
+    out: Dict[str, List[str]] = {"before": [], "between": [], "after": [],
+                                 "gated": []}
+    for i, line in enumerate(tail):
+        g = _GATING_RE.match(line)
+        if g:
+            out["gated"].append(g.group(1))
+            continue
+        m = _SKIP_STEP_RE.match(line)
+        if not m or (i and _GATING_RE.match(tail[i - 1])):
+            continue
+        key = "before" if i < first else "after" if i > last else "between"
+        out[key].append(m.group(1))
+    return out
+
+
+def deferred_errors(flow_log: str) -> List[Tuple[str, str, str]]:
+    """``(instance id, folder, message)`` for every deferred error the LAST
+    invocation logged, each in the block of the step that raised it."""
+    import instrument_calibration
+    instrument_calibration.assert_calibrated("librelane_import::deferred_errors")
+    out: List[Tuple[str, str, str]] = []
+    cur: Optional[Tuple[str, str]] = None
+    for line in _last_invocation(flow_log):
+        m = _tlp._RUNNING_RE.match(line)
+        if m:
+            cur = (m.group(1), m.group(2))
+        elif line.endswith(_DEFERRED_SUFFIX) and cur is not None:
+            out.append((cur[0], cur[1], line[:-len(_DEFERRED_SUFFIX)]))
+    return out
 
 
 def run_index(run_dir: Path) -> List[Ran]:
@@ -315,6 +379,19 @@ def _require_finished(run_dir: Path, index: List[Ran],
     text = (run_dir / "flow.log").read_text(errors="replace")
     status = flow_status(text)
     last = index[-1]
+    tops = [r for r in index if r.top_level]
+    if not status["complete"] and status["saved_views"]:
+        # The step loop ended (the final views were saved) and LibreLane
+        # still withheld `Flow complete.`: a checker's deferred error, raised
+        # at the end. Blame THAT step, not the last one that ran.
+        errs = deferred_errors(text)
+        where = "; ".join(f"{sid} at {_rel_to_run(run_dir, d)}: {msg}"
+                          for sid, d, msg in errs) or (
+            "flow.log names no deferred error (see LibreLane's console)")
+        raise Refusal(
+            "LL_IMPORT_FLOW_INCOMPLETE",
+            f"{run_dir}: every step returned, but LibreLane withheld "
+            f"'{_FLOW_COMPLETE}': {where}. A FAIL, never a partial import")
     if not status["complete"]:
         block = _tlp.step_block(text, last.instance, last.rel) or {}
         logs = ["/".join(p) for p in block.get("subprocess_logs", [])] or \
@@ -327,7 +404,21 @@ def _require_finished(run_dir: Path, index: List[Ran],
             f"started step {last.instance} at {last.rel} ({finished}); the "
             f"tool's own log: {', '.join(logs) or 'none on disk'}. LibreLane "
             "did not finish this run: a FAIL, never a partial import")
-    tops = [r for r in index if r.top_level]
+    cuts = run_cuts(text)
+    if cuts["between"]:
+        raise Refusal(
+            "LL_IMPORT_STEPS_SKIPPED",
+            f"{run_dir} ran with steps skipped (--skip): "
+            f"{', '.join(cuts['between'])}. Their outputs would read as steps "
+            "the flow does not perform")
+    if to is None and cuts["after"]:
+        raise Refusal(
+            "LL_IMPORT_RUN_CUT_SHORT",
+            f"{run_dir} stopped after {tops[-1].instance if tops else None} "
+            f"and skipped {len(cuts['after'])} later step(s) (first: "
+            f"{cuts['after'][0]}) — the --to signature; declare it "
+            "(RUN_DIR=<StepClass>) and import it with the segment that "
+            "continues it")
     if to is not None:
         end = tops[-1] if tops else None
         if end is None or end.step != to or not end.completed:
@@ -339,7 +430,18 @@ def _require_finished(run_dir: Path, index: List[Ran],
     return {"complete": True, "evidence": _FLOW_COMPLETE,
             "last_started": last.instance,
             "last_top_level": tops[-1].instance if tops else None,
-            "to": to, "invocations": status["invocations"]}
+            "to": to, "invocations": status["invocations"],
+            "from_cut": bool(cuts["before"]), "to_cut": bool(cuts["after"]),
+            "gated": cuts["gated"]}
+
+
+def _rel_to_run(run_dir: Path, printed: str) -> str:
+    """A folder as LibreLane printed it (``runs/<tag>/<dir>``), run-relative."""
+    parts = Path(printed).parts
+    if run_dir.name in parts:
+        k = len(parts) - 1 - parts[::-1].index(run_dir.name)
+        return "/".join(parts[k + 1:]) or printed
+    return printed
 
 
 def _select(index: List[Ran], rule: Rule) -> Tuple[Optional[Ran], str]:
@@ -702,7 +804,14 @@ def _previous_import(project: Path) -> Optional[Dict[str, Any]]:
         doc = _load(path)
     except (OSError, ValueError) as exc:
         raise Refusal("LL_IMPORT_MANIFEST_UNREADABLE", f"{path}: {exc}")
-    return doc if isinstance(doc, dict) else {}
+    # Its canonical paths decide what this import deletes: trust them only
+    # once W0's validator has (relative, inside the project, outside every
+    # run). The disk is not checked: the files may since have been removed.
+    problems = _efm.validate_manifest(doc, project, verify_disk=False)
+    if problems:
+        raise Refusal("LL_IMPORT_MANIFEST_UNREADABLE",
+                      f"{path} does not validate: {'; '.join(problems)}")
+    return doc
 
 
 def _fixed_dests(rule: Rule, project: Path, top: str) -> List[Path]:
@@ -728,7 +837,7 @@ def import_segments(project: Path,
     if not segments:
         raise Refusal("LL_IMPORT_NO_SEGMENTS", "no run to import")
     segs: List[Tuple[Path, Optional[str]]] = []
-    top: Optional[str] = None
+    top_of: Dict[Path, str] = {}
     for run_dir, to in segments:
         run_dir = Path(run_dir).resolve()
         try:
@@ -741,14 +850,15 @@ def import_segments(project: Path,
         name = _load(resolved).get("DESIGN_NAME") if resolved.is_file() else None
         if not isinstance(name, str) or not name:
             raise Refusal("LL_IMPORT_NO_DESIGN_NAME", str(resolved))
-        if top is not None and name != top:
-            raise Refusal("LL_IMPORT_SEGMENT_DESIGN_MISMATCH",
-                          f"{run_dir} is {name}, an earlier segment {top}")
-        top = name
+        # Segments may name different tops: on the Chip flow segment 1
+        # synthesizes the core and segment 2 lays out the chip top (plan W5,
+        # D7). Each rule names its destinations by ITS segment's top.
+        top_of[run_dir] = name
         segs.append((run_dir, to))
     if len({r for r, _ in segs}) != len(segs):
         raise Refusal("LL_IMPORT_SEGMENT_REPEATED", str([str(r) for r, _ in segs]))
-    assert top is not None
+    #: the layout's top: the last segment's (for rules no segment performed)
+    top = top_of[segs[-1][0]]
     run_rels = [r.relative_to(project).as_posix() for r, _ in segs]
 
     # ── plan: every refusal is raised here, before anything is written ──
@@ -760,6 +870,21 @@ def import_segments(project: Path,
         index = run_index(run_dir)
         status = _require_finished(run_dir, index, to)
         status["flow_log_sha256"] = "sha256:" + digest(run_dir / "flow.log")
+        status["design_name"] = top_of[run_dir]
+        if i == 0 and status["from_cut"]:
+            raise Refusal(
+                "LL_IMPORT_STARTS_MID_FLOW",
+                f"{run_dir} began mid-flow (--from): the steps before it are "
+                "in no segment of this import. Import it after the segment "
+                "that ran them")
+        if i == len(segs) - 1 and (to is not None or status["to_cut"]):
+            raise Refusal(
+                "LL_IMPORT_ENDS_AT_TO",
+                f"the import's last segment {run_dir} stopped at --to "
+                f"{to or status['last_top_level']}: the steps after it are in "
+                "no segment of this import, and would read as steps the flow "
+                "does not perform. Import it together with the segment that "
+                "continues it")
         indexes.append(index)
         segments.append({"name": f"segment-{i + 1}",
                          "run_dir": run_dir.relative_to(project).as_posix(),
@@ -791,6 +916,14 @@ def import_segments(project: Path,
                           f"{len(chosen)} segments: "
                           f"{', '.join(r.run_dir.name + '/' + r.rel for r in chosen)}")
         if not chosen:
+            gated = [s["run_dir"] for s in segments
+                     if rule.step in s["flow_status"]["gated"]]
+            if gated:
+                raise Refusal(
+                    "LL_IMPORT_RULE_STEP_GATED",
+                    f"flow step {rule.flow_step}: {rule.step} was gated off by "
+                    f"its RUN_* variable in {gated}; the flow performs it, this "
+                    "run's config turned it off")
             manifest["not_performed"].append({
                 "flow_step": rule.flow_step, "tool_step": rule.step,
                 "reason": "; ".join(dict.fromkeys(why)),
@@ -800,7 +933,8 @@ def import_segments(project: Path,
         if not ran.completed:
             raise Refusal("LL_IMPORT_STEP_NOT_COMPLETED",
                           f"{ran.instance} at {ran.rel} wrote no state_out.json")
-        plans.append(_plan_step(project, ran, rule, top, receipts))
+        plans.append(_plan_step(project, ran, rule, top_of[ran.run_dir],
+                                receipts))
     writes: Dict[Path, Path] = {}
     for plan in plans:
         for dest, src in plan.dests():
@@ -889,6 +1023,8 @@ def import_segments(project: Path,
             for row in prov:
                 fh.write(json.dumps(row) + "\n")
         extra = {"top": top, "removed": manifest["removed"]}
+        if len(set(top_of.values())) > 1:
+            extra["tops"] = [top_of[r] for r, _ in segs]
         if "openroad_log" in manifest:
             extra["openroad_log"] = manifest["openroad_log"]
         try:

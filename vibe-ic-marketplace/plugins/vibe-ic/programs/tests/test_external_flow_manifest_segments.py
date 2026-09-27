@@ -255,3 +255,40 @@ def test_null_is_the_one_other_measurement_a_segment_row_may_carry(tmp_path):
         for row in seg["rows"]:
             row["measurement"] = None
     assert _problems(proj, doc) == []
+
+
+# ── a manifest never records a run that did not finish (review W6 wave 6) ──
+
+@pytest.mark.parametrize("edit,why", [
+    (lambda d: d["flow_status"].update(complete=False),
+     "flow_status.complete is not true"),
+    (lambda d: d["flow_status"].pop("complete"),
+     "flow_status.complete is not true"),
+    (lambda d: d["not_performed"][0].update(flow_complete=False),
+     "not_performed[0]: flow_complete is not true"),
+    (lambda d: d["not_performed"].append("PadRing"),
+     "is not an object"),
+])
+def test_a_one_run_manifest_of_an_unfinished_run_is_refused(tmp_path, edit, why):
+    import _external_flow_manifest as M
+    proj = _one_run(tmp_path)
+    doc = _manifest(proj)
+    assert _problems(proj, doc) == [] and doc["not_performed"]
+    edit(doc)
+    probs = _problems(proj, doc)
+    assert any(why in p for p in probs), probs
+    with pytest.raises(M.ManifestError):
+        M.write_manifest(proj, flow="librelane", run_dir=doc["run_dir"],
+                         rows=doc["rows"], flow_status=doc.get("flow_status"),
+                         not_performed=doc["not_performed"])
+
+
+@pytest.mark.parametrize("seg_index", [0, 1])
+def test_a_segment_of_an_unfinished_run_is_refused(tmp_path, seg_index):
+    proj = _two_runs(tmp_path)
+    doc = _manifest(proj)
+    doc["segments"][seg_index]["flow_status"]["complete"] = False
+    name = doc["segments"][seg_index]["name"]
+    probs = _problems(proj, doc)
+    assert any(p.startswith(f"segment {name!r} flow_status.complete is not "
+                            "true") for p in probs), probs

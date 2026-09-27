@@ -53,7 +53,8 @@ segments. A one-element ``segments`` list is refused (one run is written
 flat), so every one-run reader sees exactly the flat form. Readers iterate
 ``segments_of(manifest)``, which yields the flat form as one segment.
 ``flow_status`` (flat: top-level) is the importer's record that the run
-finished. ``write_manifest``'s ``extra`` carries importer fields (never one
+finished: when present it must say ``complete: true``, and a
+``not_performed`` entry's ``flow_complete``, when present, must be true. ``write_manifest``'s ``extra`` carries importer fields (never one
 of the keys above).
 
 ONE WITNESS SCHEMA (orchestrator ruling, llf_r3)
@@ -476,8 +477,19 @@ def validate_manifest(manifest: Any, project: Path, *,
     flow = manifest.get("flow")
     if flow not in FLOWS:
         problems.append(f"flow {flow!r} is not one of {FLOWS}")
-    if not isinstance(manifest.get("not_performed", []), list):
+    nperf = manifest.get("not_performed", [])
+    if not isinstance(nperf, list):
         problems.append("not_performed, when present, is a list")
+    else:
+        # A step "not performed" by a run that did not finish is not a fact
+        # about the flow: the run stopped before it. Never recorded as one.
+        for i, n in enumerate(nperf):
+            if not isinstance(n, dict):
+                problems.append(f"not_performed[{i}] is not an object")
+            elif "flow_complete" in n and n["flow_complete"] is not True:
+                problems.append(f"not_performed[{i}]: flow_complete is not "
+                                "true: a run that did not finish records no "
+                                "step as not performed")
     if "segments" in manifest:
         segs = manifest["segments"]
         mixed = [k for k in ("run_dir", "rows", "flow_status") if k in manifest]
@@ -510,8 +522,12 @@ def validate_manifest(manifest: Any, project: Path, *,
             problems.append(f"{label}run_dir {run_dir!r} is not a "
                             "project-relative path")
             continue
-        if not isinstance(seg.get("flow_status", {}), dict):
+        fs = seg.get("flow_status", {"complete": True})
+        if not isinstance(fs, dict):
             problems.append(f"{label}flow_status, when present, is an object")
+        elif fs.get("complete") is not True:
+            problems.append(f"{label}flow_status.complete is not true: a run "
+                            "that did not finish is never imported")
         rows = seg["rows"]
         if not isinstance(rows, list):
             problems.append(f"{label}rows is not a list")
