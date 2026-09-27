@@ -56,13 +56,13 @@ WHAT IT WRITES
   log and sha256; the assembled file is itself a back-fill row.
 * ``phase3/librelane/import_manifest.json``: the segments (run_dir, declared
   ``to``, flow.log sha256, flow status); one row per imported file, in the
-  field names of the W0 import-manifest schema (flow step, canonical path,
-  tool-run path, sha256 on both sides, tool, tool step id, the source log that
-  witnessed it, exit code, measurement), where, as in W0, ``tool_run_path``
-  and ``source_log`` are relative to the row's ``run_dir`` (itself
-  project-relative, as in W19's witness); every rule no segment performed;
-  and every file an earlier import of the same runs wrote that this one
-  removed.
+  final field names of the W0 import-manifest schema (flow step, canonical
+  path, tool-run path, sha256 on both sides, tool, tool step id, step_dir,
+  the source logs the step's witness cites, exit code, measurement), where,
+  as in W0, ``tool_run_path``, ``step_dir`` and ``source_logs`` are relative
+  to the row's ``run_dir`` (itself project-relative, as in W19's witness);
+  every rule no segment performed; and every file an earlier import of the
+  same runs wrote that this one removed.
 
 ALL OR NOTHING
 --------------
@@ -435,31 +435,34 @@ def _step_logs(folder: Path) -> List[Path]:
     return logs
 
 
-def _source_log(ran: Ran, tool_file: Path) -> Optional[Path]:
-    """The transcript of the process that wrote ``tool_file``: a log in the
-    file's own directory (a corner subfolder has its own), else the step's
-    main log, which LibreLane names after the step folder."""
-    logs = _step_logs(ran.folder)
+def _source_logs(ran: Ran, tool_file: Path, cited: List[str]) -> List[Path]:
+    """The transcripts of the process that wrote ``tool_file``: the logs in
+    the file's own directory (a corner subfolder has its own), else the
+    step's main log, which LibreLane names after the step folder. Only logs
+    the step's witness cites (``cited``, run-relative) are named; a
+    back-fill cites none, so it names none."""
+    logs = [l for l in _step_logs(ran.folder)
+            if l.relative_to(ran.run_dir).as_posix() in cited]
     here = [l for l in logs if l.parent == tool_file.parent]
-    if len(here) == 1:
-        return here[0]
+    if here:
+        return here
     slug = re.sub(r"^\d+-", "", ran.folder.name) + ".log"
     main = [l for l in logs if l.parent == ran.folder and l.name == slug]
     if main:
-        return main[0]
+        return main
     top = [l for l in logs if l.parent == ran.folder]
-    return top[0] if len(top) == 1 else None
+    return top if len(top) == 1 else []
 
 
 def _file_row(project: Path, ran: Ran, tool_file: Path, dest: Path,
-              view: Optional[str] = None) -> Dict[str, Any]:
-    """One manifest row, in the field names of the W0 import-manifest schema
-    (``_external_flow_manifest``, lane llf), with W0's meaning:
-    ``tool_run_path`` and ``source_log`` are relative to the row's
-    ``run_dir``. ``measurement`` is the artefact-derived record, or None when
-    nothing can be stated about this file — never a guessed one. The flow
-    step and ``exit_code`` are filled in by the caller."""
-    log = _source_log(ran, tool_file)
+              cited: List[str], view: Optional[str] = None) -> Dict[str, Any]:
+    """One manifest row, in the final field names of the W0 import-manifest
+    schema (``vibe-ic/external-flow-import/2``, lane llf) and with W0's
+    meaning: ``tool_run_path``, ``step_dir`` and ``source_logs`` are relative
+    to the row's ``run_dir``, itself project-relative. ``measurement`` is the
+    artefact-derived record, or None when nothing can be stated about this
+    file — never a guessed one. The flow step and ``exit_code`` are filled
+    in by the caller."""
     rel = dest.relative_to(project).as_posix()
     row: Dict[str, Any] = {
         "run_dir": ran.run_dir.relative_to(project).as_posix(),
@@ -470,8 +473,10 @@ def _file_row(project: Path, ran: Ran, tool_file: Path, dest: Path,
         "flow": FLOW,
         "tool": _tlp.underlying_tool(ran.instance),
         "tool_step_id": ran.instance,
-        "source_log": log.relative_to(ran.run_dir).as_posix() if log else None,
-        "source_log_sha256": ("sha256:" + digest(log)) if log else None,
+        "step_dir": ran.rel,
+        "source_logs": [{"path": l.relative_to(ran.run_dir).as_posix(),
+                         "sha256": "sha256:" + digest(l)}
+                        for l in _source_logs(ran, tool_file, cited)],
         "measurement": _runner_measurement.derive(
             project, rel, _tlp.underlying_tool(ran.instance) or ""),
     }
@@ -824,7 +829,7 @@ def import_segments(project: Path,
             for dest in [d for d, _ in plan.dests()] + plan.receipts():
                 journal.touch(dest)
             outputs: Dict[str, Path] = {}
-            rows: List[Dict[str, Any]] = []
+            written: List[Tuple[Path, Path, Optional[str]]] = []
             for call in plan.views:
                 doc = handoff_to_direct(call.state_path, call.targets,
                                         call.receipt, path_map=call.path_map)
@@ -832,19 +837,21 @@ def import_segments(project: Path,
                     dest = Path(row["dest"])
                     source = Path(row["source"]).resolve()
                     outputs[dest.relative_to(project).as_posix()] = source
-                    rows.append(_file_row(project, plan.ran, source, dest,
-                                          view=view))
+                    written.append((source, dest, view))
             for path, dest in plan.files:
                 _copy(path, dest)
                 outputs[dest.relative_to(project).as_posix()] = path
-                rows.append(_file_row(project, plan.ran, path, dest))
+                written.append((path, dest, None))
+            row = _provenance_row(project, plan.ran, outputs)
+            cited = [l["path"] for l in (row.get("witness") or {}).get("logs", [])]
+            rows = [_file_row(project, plan.ran, src, dest, cited, view=view)
+                    for src, dest, view in written]
             files = [r for r in rows if "view" not in r]
             if plan.files_receipt is not None:
                 write_json(plan.files_receipt,
                            {"step": plan.ran.instance, "folder": plan.ran.rel,
                             "run_dir": plan.ran.run_dir.relative_to(project)
                             .as_posix(), "files": files})
-            row = _provenance_row(project, plan.ran, outputs)
             prov.append(row)
             kind = ("witnessed" if row.get("reconstructed") is False
                     else "reconstructed")
