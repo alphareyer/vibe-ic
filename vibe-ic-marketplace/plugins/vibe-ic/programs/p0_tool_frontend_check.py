@@ -257,16 +257,37 @@ def _all_in_supplied_ip(project: Path, log: str) -> tuple[bool, list[str]]:
     file, the files that are not)."""
     files = _use_before_declare_files(log)
     supplied = _supplied_ip_sources(project)
+    rtl = [str(p.resolve()) for p in rtl_source_files(project)]
     outside = []
     for name in files:
-        try:
-            key = str((project / name).resolve()) if not Path(name).is_absolute() \
-                else str(Path(name).resolve())
-        except OSError:
-            key = name
+        key = _diagnostic_file(name, rtl)
         if key not in supplied and name not in outside:
             outside.append(name)
     return bool(files) and not outside, outside
+
+
+def _diagnostic_file(name: str, rtl: list[str]) -> str | None:
+    """The RTL file (resolved) a slang diagnostic names, or None.
+
+    slang prints the path relative to ITS working directory, which is the
+    image's, not ours: MEASURED in vibeic-eda 0.3.83 on a project under
+    /home/reyerchu, `../../home/reyerchu/<project>/phase2/stage1/rtl/
+    serv_state.v:111:52: error: ...`. So a relative path is matched by path
+    SUFFIX (its leading `..` segments dropped) against the files slang was
+    handed, and only a UNIQUE match counts; an absolute path is resolved."""
+    if Path(name).is_absolute():
+        try:
+            return str(Path(name).resolve())
+        except OSError:
+            return None
+    parts = [part for part in Path(os.path.normpath(name)).parts]
+    while parts and parts[0] == "..":
+        parts.pop(0)
+    if not parts:
+        return None
+    tail = "/" + "/".join(parts)
+    hits = [path for path in rtl if path.endswith(tail)]
+    return hits[0] if len(hits) == 1 else None
 
 
 def check(project: Path, image: str | None = None) -> dict:

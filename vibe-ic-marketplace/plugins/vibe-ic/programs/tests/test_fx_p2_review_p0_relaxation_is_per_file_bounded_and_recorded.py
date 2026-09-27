@@ -158,6 +158,25 @@ def test_one_diagnostic_outside_the_ip_keeps_it_a_fail(monkeypatch, tmp_path):
     assert len(_yosys(calls)) == 1
 
 
+def test_a_cwd_relative_diagnostic_path_is_matched(monkeypatch, tmp_path):
+    """MEASURED in vibeic-eda 0.3.83 (this lane's E2E on subservient): slang
+    prints the path relative to the IMAGE's working directory --
+    `../../home/<user>/<project>/phase2/stage1/rtl/serv_state.v:111:52:` --
+    not the absolute path it was handed."""
+    root = _project(tmp_path)
+    ip = str((_rtl(root) / "ip_core.v").resolve()).lstrip("/")
+    calls = _fake(monkeypatch, LATE.replace("rtl/late.v", "../../" + ip))
+    r = F.check(root)
+    assert r["passed"] is True, r["findings"]
+    assert len(_yosys(calls)) == 2
+
+
+def test_an_ambiguous_bare_name_matches_nothing(tmp_path):
+    rtl = ["/p/a/ip_core.v", "/p/b/ip_core.v"]
+    assert F._diagnostic_file("ip_core.v", rtl) is None
+    assert F._diagnostic_file("../../p/a/ip_core.v", rtl) == "/p/a/ip_core.v"
+
+
 # ---- (6a) deadlines -------------------------------------------------------
 def test_every_invocation_carries_a_deadline_and_kills_its_container(
         monkeypatch, tmp_path):
