@@ -13,7 +13,14 @@ some earlier image:
 * every option of the two LibreLane CLIs vibe-ic invokes -- the flow CLI
   (``python3 -m librelane``) and the per-step CLI (``python3 -m
   librelane.steps run``) -- with its environment variable, its built-in
-  default and its option group, and the value it would silently take.
+  default and its option group, and the value it would silently take;
+* ``config_variables``: every configuration variable the read flows and their
+  steps declare, with its declared default, type, PDK flag and flows. A
+  default the declaration does not fix (a callable, a PDK-sourced variable,
+  an Optional with no default, declarations that disagree) is
+  ``default_measured: False`` with ``default`` None and a
+  ``not_measured_reason``; ``tool_registry(facts)`` hands the rows to
+  `staged_tool_config.resolve`.
 
 That last fact is the environment half of W22. MEASURED on 0.3.83: the image's
 own entrypoint (the login environment, reached with ``<image> --skip ...``)
@@ -121,6 +128,63 @@ def options(command, cli):
             row["default"] = None if p.default is None else json.loads(json.dumps(p.default, default=str))
         rows.append(row)
     return rows
+try:
+    import typing
+    from librelane.flows import Flow
+    # A declared default is the value the tool applies only when nothing else
+    # decides it. Each case below is a default the declaration does NOT fix.
+    WHY = {"callable_defaults": "a function decides the default at run time",
+           "pdk_defaults": "the PDK supplies the value at run time (Variable.pdk)",
+           "runtime_defaults": "Optional with no declared default: the step or the tool decides at run time",
+           "differing_defaults": "declared with different defaults; see defaults_by_flow"}
+
+    def optional(t):
+        return typing.get_origin(t) is typing.Union and type(None) in typing.get_args(t)
+    registry, first, by_flow = {}, {}, {}
+    for name in flows:
+        flow = Flow.factory.get(name)
+        if flow is None:
+            continue
+        declared = list(getattr(flow, "config_vars", None) or [])
+        for step in flow.Steps:
+            declared += list(step.get_all_config_variables())
+        for v in declared:
+            pdk = bool(getattr(v, "pdk", False))
+            if callable(v.default):
+                kind = "callable_defaults"
+            elif pdk:
+                kind = "pdk_defaults"
+            elif v.default is None and optional(v.type):
+                kind = "runtime_defaults"
+            else:
+                kind = None
+            default = None if kind else json.loads(json.dumps(v.default, default=str))
+            shown = default if kind is None else "<" + kind + ">"
+            by_flow.setdefault(v.name, {}).setdefault(name, shown)
+            row = registry.get(v.name)
+            if row is None:
+                row = registry[v.name] = {"default": default, "default_measured": kind is None,
+                                          "type": str(v.type), "pdk": pdk, "flows": []}
+                if kind:
+                    row["not_measured_reason"] = WHY[kind]
+                first[v.name] = shown
+            elif shown != first[v.name] and "defaults_by_flow" not in row:
+                # Two declarations disagree: neither is THE default, so the
+                # row says so itself (a resolver reads rows, not this record).
+                row.update(default=None, default_measured=False,
+                           not_measured_reason=WHY["differing_defaults"],
+                           defaults_by_flow=by_flow[v.name])
+            if name not in row["flows"]:
+                row["flows"].append(name)
+    out["config_variables"] = registry
+    for kind, why in WHY.items():
+        names = sorted(k for k, r in registry.items() if r.get("not_measured_reason") == why)
+        if names:
+            miss("config_variables." + kind,
+                 f"{len(names)} variable(s): {why}; e.g. {', '.join(names[:5])}")
+except Exception as exc:
+    out["config_variables"] = None
+    miss("config_variables", repr(exc))
 for cli, loader in (("flow", lambda: __import__("librelane.__main__", fromlist=["cli"]).cli),
                     ("step", lambda: __import__("librelane.steps.__main__", fromlist=["cli"]).cli.commands["run"])):
     try:
@@ -291,6 +355,25 @@ def flow_steps(facts: dict[str, Any], flow: str) -> list[str]:
         raise Refusal('LL_FLOW_UNRESOLVED',
                       f"{flow}: {(facts.get('not_measured') or {}).get('flows.' + flow) or 'not read'}")
     return list(steps)
+
+
+def tool_registry(facts: dict[str, Any]) -> dict[str, dict[str, Any]] | None:
+    """The image's LibreLane variable registry, in the shape
+    `staged_tool_config.resolve(tool_registry=)` takes: ``{VAR: {"default",
+    "default_measured", "type", "pdk", "flows"}}`` for every variable every
+    step of the read flows (and the flows themselves) declares. None when it
+    was not read (named in ``not_measured``), which the resolver records as
+    "registry not supplied" rather than inventing defaults.
+
+    ``default_measured: False`` means the declaration does not fix the value
+    the tool applies, and ``default`` is then None and is NOT that value. The
+    row says why in ``not_measured_reason``: a callable default, a PDK-sourced
+    variable (``pdk``), an Optional variable with no declared default (the
+    step or the tool decides at run time), or declarations that disagree
+    (``defaults_by_flow`` names each one). Each group is also counted in
+    ``not_measured`` as ``config_variables.<group>``."""
+    registry = facts.get('config_variables')
+    return registry if isinstance(registry, dict) else None
 
 
 def guarded_options(facts: dict[str, Any], cli: str = 'flow') -> list[dict[str, Any]] | None:

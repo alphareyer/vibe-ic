@@ -60,7 +60,29 @@ REAL_PROBE = {
     'not_measured': {},
     'librelane_version': '3.1.0.dev1',
     'openroad_version': '26Q3-3002-gda11f47e14',
-    'orfs_commit': 'c9c22caf9bf9cfe46c5a4236c6ec7e7ae9863cc3'}
+    'orfs_commit': 'c9c22caf9bf9cfe46c5a4236c6ec7e7ae9863cc3',
+    # An EXCERPT of config_variables: 5 of the 440 rows the 0.3.83 probe records (196 measured,
+    # 148 PDK-sourced, 96 decided at run time). The real probe also counts the last two groups
+    # in not_measured; that is left out of this snapshot, whose empty not_measured the
+    # test_facts_come_from_the_image_through_two_capped_named_containers pins.
+    'config_variables': {
+        'FP_CORE_UTIL': {'default': 50, 'default_measured': True, 'type': "<class 'decimal.Decimal'>",
+                         'pdk': False, 'flows': ['Classic', 'Chip']},
+        'PL_TARGET_DENSITY_PCT': {
+            'default': None, 'default_measured': False, 'type': 'typing.Optional[decimal.Decimal]',
+            'pdk': False, 'flows': ['Classic', 'Chip'],
+            'not_measured_reason': 'Optional with no declared default: the step or the tool decides at run time'},
+        'CTS_SINK_CLUSTERING_SIZE': {
+            'default': None, 'default_measured': False, 'type': 'typing.Optional[int]',
+            'pdk': False, 'flows': ['Classic', 'Chip'],
+            'not_measured_reason': 'Optional with no declared default: the step or the tool decides at run time'},
+        'CTS_DISTANCE_BETWEEN_BUFFERS': {'default': 0, 'default_measured': True,
+                                         'type': "<class 'decimal.Decimal'>", 'pdk': False,
+                                         'flows': ['Classic', 'Chip']},
+        'RT_MAX_LAYER': {
+            'default': None, 'default_measured': False, 'type': "<class 'str'>", 'pdk': True,
+            'flows': ['Classic', 'Chip'],
+            'not_measured_reason': 'the PDK supplies the value at run time (Variable.pdk)'}}}
 REAL_LOGIN = ('[INFO] USER_ID: 1000, GROUP_ID: 0\n'
               '[INFO] SKIPPING UI STARTUP\n'
               "[INFO] Executing command: 'timeout --kill-after=5 590 python3 -c ...'\n"
@@ -338,10 +360,17 @@ def test_facts_from_another_image_refuse(docker):
 _STAND_IN = {
     'librelane/__init__.py': "__version__ = '9.9.9'\n",
     'librelane/flows/__init__.py': textwrap.dedent('''
+        import pathlib, types, typing
+        def _v(name, default, type_=int, pdk=False):
+            return types.SimpleNamespace(name=name, default=default, type=type_, pdk=pdk)
         class _S:
-            def __init__(self, i): self.id = i
+            def __init__(self, i, variables): self.id, self._v = i, variables
+            def get_all_config_variables(self): return self._v
         class _F:
-            Steps = [_S('A.One'), _S('B.Two')]
+            config_vars = [_v('FLOW_LEVEL', 'x', str)]
+            Steps = [_S('A.One', [_v('UTIL', 50), _v('ROOT', pathlib.Path('/r')), _v('SHARED', 1),
+                                  _v('PDKV', None, str, pdk=True), _v('OPTV', None, typing.Optional[int])]),
+                     _S('B.Two', [_v('DYN', lambda: 3), _v('SHARED', 1)])]
         class _Factory:
             @staticmethod
             def get(name): return _F if name == 'Classic' else None
@@ -412,6 +441,97 @@ def test_the_probe_itself_guards_what_it_records(tmp_path):
     names = {tuple(r['opts']) for r in facts_mod.implicit_cli_values(record, 'bypass')}
     assert names == {('--pdk-root',), ('-p', '--pdk'), ('--ciel-pdk', '--manual-pdk')}
     assert {tuple(r['opts']) for r in facts_mod.implicit_cli_values(record, 'bypass', 'step')} == {('--pdk-root',)}
+
+
+def test_the_probe_itself_records_the_variable_registry(tmp_path):
+    reg = _run_probe(tmp_path)['config_variables']
+    assert reg['UTIL']['default'] == 50 and reg['UTIL']['default_measured'] is True
+    assert reg['ROOT']['default'] == '/r'                     # a Path default, as text
+    assert reg['FLOW_LEVEL']['default'] == 'x'                # the flow's own variables too
+    assert reg['SHARED']['default'] == 1 and reg['SHARED']['default_measured'] is True
+    assert reg['UTIL'] == {'default': 50, 'default_measured': True, 'type': "<class 'int'>",
+                           'pdk': False, 'flows': ['Classic']}
+
+
+@pytest.mark.parametrize('var, group, why', [
+    ('PDKV', 'pdk_defaults', 'the PDK supplies'),
+    ('OPTV', 'runtime_defaults', 'Optional with no declared default'),
+    ('DYN', 'callable_defaults', 'a function decides')])
+def test_a_default_the_declaration_does_not_fix_is_not_measured(tmp_path, var, group, why):
+    """Review W22REG: 148 PDK-sourced and 96 run-time variables on 0.3.83 were
+    recorded as measured defaults (RT_MAX_LAYER: None)."""
+    out = _run_probe(tmp_path)
+    row = out['config_variables'][var]
+    assert row['default_measured'] is False and row['default'] is None, row
+    assert row['not_measured_reason'].startswith(why), row
+    assert out['not_measured'][f'config_variables.{group}'].startswith(f'1 variable(s): {why}')
+
+
+def test_the_pdk_flag_is_recorded(tmp_path):
+    reg = _run_probe(tmp_path)['config_variables']
+    assert reg['PDKV']['pdk'] is True and reg['UTIL']['pdk'] is False
+
+
+_TWO_FLOWS = textwrap.dedent('''
+    import types
+    def _v(name, default): return types.SimpleNamespace(name=name, default=default, type=int, pdk=False)
+    class _S:
+        def __init__(self, i, variables): self.id, self._v = i, variables
+        def get_all_config_variables(self): return self._v
+    SAME = [f'LONG_VARIABLE_NAME_{i}' for i in range(30)]
+    class _Classic:
+        Steps = [_S('A.One', [_v('UTIL', 50), _v('SHARED', 1)] + [_v(n, 1) for n in SAME])]
+    class _Chip:
+        Steps = [_S('C.One', [_v('UTIL', 50), _v('SHARED', 2)] + [_v(n, 2) for n in SAME])]
+    class _Factory:
+        @staticmethod
+        def get(name): return {'Classic': _Classic, 'Chip': _Chip}.get(name)
+    class Flow:
+        factory = _Factory
+    ''')
+
+
+def _run_probe_with(tmp_path, overrides):
+    for rel, text in {**_STAND_IN, **overrides}.items():
+        path = tmp_path / 'pkg' / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    env = {**os.environ, 'PYTHONPATH': str(tmp_path / 'pkg'), 'PDK_ROOT': '/image/pdks', 'PATH': '/nonexistent'}
+    done = subprocess.run([sys.executable, '-c', facts_mod._PROBE, 'Classic,Chip', str(tmp_path / 'none')],
+                          capture_output=True, text=True, env=env, timeout=120)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def test_declarations_that_disagree_across_flows_are_not_measured_in_the_row(tmp_path):
+    """Review W22REG: the row itself carries the clash -- a resolver reads
+    rows, and a `not_measured` string is cut at 300 characters."""
+    out = _run_probe_with(tmp_path, {'librelane/flows/__init__.py': _TWO_FLOWS})
+    reg = out['config_variables']
+    shared = reg['SHARED']
+    assert shared['default'] is None and shared['default_measured'] is False, shared
+    clashing = [n for n, r in reg.items() if n.startswith('LONG_VARIABLE_NAME_')]
+    assert len(clashing) == 30 and all(reg[n]['default_measured'] is False for n in clashing)
+    assert shared['defaults_by_flow'] == {'Classic': 1, 'Chip': 2}
+    assert shared['not_measured_reason'].startswith('declared with different defaults')
+    assert out['not_measured']['config_variables.differing_defaults'].startswith('31 variable(s)')
+    assert reg['UTIL']['default'] == 50 and reg['UTIL']['default_measured'] is True
+    assert reg['UTIL']['flows'] == ['Classic', 'Chip']
+
+
+def test_the_registry_is_what_the_staged_config_resolver_takes(docker):
+    record = facts_mod.image_facts('ref')
+    registry = facts_mod.tool_registry(record)
+    assert registry['FP_CORE_UTIL']['default'] == 50
+    assert all('default' in row and 'default_measured' in row for row in registry.values())
+    # An unfixed default is None and says why, never a value the tool applies.
+    unfixed = {k: r for k, r in registry.items() if not r['default_measured']}
+    assert unfixed and all(r['default'] is None and r['not_measured_reason'] for r in unfixed.values())
+    probe = json.loads(json.dumps(REAL_PROBE))
+    del probe['config_variables']
+    docker.probe = probe
+    facts_mod._FACTS.clear()
+    assert facts_mod.tool_registry(facts_mod.image_facts('ref')) is None
 
 
 # ── the command line ───────────────────────────────────────────────────────
