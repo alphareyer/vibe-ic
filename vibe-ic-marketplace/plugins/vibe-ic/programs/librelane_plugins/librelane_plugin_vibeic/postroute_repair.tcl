@@ -163,6 +163,47 @@ if {[info exists ::env(VIBEIC_PRR_CENSUS_ONLY)] && $::env(VIBEIC_PRR_CENSUS_ONLY
     exit 0
 }
 
+# ---- the fanout limit, counted on the database ----------------------------
+# name -> load count for every driven signal net with more loads than the
+# declared cap (MAX_FANOUT_CONSTRAINT, the `set_max_fanout` the sign-off SDC
+# carries). A load is what STA counts: every input pin on the net and every
+# top-level output port. Counted here rather than by
+# sta::max_fanout_violation_count, which takes Signal 11 in a multi-corner
+# session (see vic_census). Without a declared cap the dict is empty and
+# the caller says the limit was not declared.
+proc vic_fanout_declared {} {
+    return [expr {[info exists ::env(MAX_FANOUT_CONSTRAINT)]
+                  && [string is double -strict $::env(MAX_FANOUT_CONSTRAINT)]}]
+}
+proc vic_fanout_over {} {
+    set out [dict create]
+    if {![vic_fanout_declared]} { return $out }
+    set cap $::env(MAX_FANOUT_CONSTRAINT)
+    foreach net [$::block getNets] {
+        if {[$net isSpecial] || [$net getSigType] in {POWER GROUND}} { continue }
+        set loads 0
+        set drivers 0
+        foreach it [$net getITerms] {
+            set io [[$it getMTerm] getIoType]
+            if {$io eq "OUTPUT"} { incr drivers } elseif {$io in {INPUT INOUT}} { incr loads }
+        }
+        foreach bt [$net getBTerms] {
+            set io [$bt getIoType]
+            if {$io eq "INPUT"} { incr drivers } elseif {$io in {OUTPUT INOUT}} { incr loads }
+        }
+        if {$drivers && $loads > $cap} { dict set out [$net getName] $loads }
+    }
+    return $out
+}
+# The nets over the cap in `now` that were not over it in `before`.
+proc vic_fanout_added {before now} {
+    set added [dict create]
+    dict for {name loads} $now {
+        if {![dict exists $before $name]} { dict set added $name $loads }
+    }
+    return $added
+}
+
 # ---- 4. repair ---------------------------------------------------------------
 set rd_args [list -verbose]
 append_if_exists_argument rd_args VIBEIC_PRR_MAX_WIRE_LENGTH -max_wire_length
@@ -183,6 +224,8 @@ lappend hold_args -setup_margin $::env(VIBEIC_PRR_SETUP_MARGIN)
 lappend hold_args -hold_margin $::env(VIBEIC_PRR_HOLD_MARGIN)
 lappend hold_args -max_buffer_percent $::env(VIBEIC_PRR_HOLD_MAX_BUFFER_PCT)
 log_cmd repair_timing {*}$hold_args
+# What repair_design left: every later edit in this step must keep it.
+set ::vic_fo_repaired [vic_fanout_over]
 
 # ---- 5. what changed -------------------------------------------------------
 set ::vic_created [list]
@@ -439,6 +482,68 @@ utl::metric_integer vibeic__prr__antenna__after_eco $::vic_ant_eco
 utl::metric_integer vibeic__prr__antenna__diodes [llength $::vic_diodes]
 vic_say "antenna after eco=$::vic_ant_eco diodes=[llength $::vic_diodes]"
 
+# ---- 6c. the limits repair_design set, kept ----------------------------------
+# cmp3 D14, MEASURED on spm x gf180mcuD (32-cand01): repair_design split
+# u_core/wire51 to the declared 4 loads, then repair_antennas put diode
+# ANTENNA_5 on that net as its 5th load -- a diode's pin is a load -- and the
+# candidate shipped max_fanout 5 > 4. A net the antenna phase pushed over the
+# cap gets a bounded repair_design round here (its buffers legalized alone,
+# their nets routed by the same scoped, guarded ECO route); re-verify below
+# refuses whatever is still over.
+set ::vic_fo_rounds 0
+# (the declared-cap test is spelled inline: this section is also exercised
+# on its own, with none of the procs above it)
+set ::vic_fo_declared [expr {[info exists ::env(MAX_FANOUT_CONSTRAINT)]
+    && [string is double -strict $::env(MAX_FANOUT_CONSTRAINT)]}]
+set ::vic_fo_added [expr {$::vic_fo_declared
+    ? [vic_fanout_added $::vic_fo_repaired [vic_fanout_over]] : [dict create]}]
+while {[dict size $::vic_fo_added] && $::vic_fo_rounds < 2} {
+    incr ::vic_fo_rounds
+    vic_say "round $::vic_fo_rounds: [dict size $::vic_fo_added] net(s) pushed over max_fanout $::env(MAX_FANOUT_CONSTRAINT) after repair_design: $::vic_fo_added"
+    set names [dict create]
+    foreach inst [$::block getInsts] { dict set names [$inst getName] [[$inst getMaster] getName] }
+    log_cmd repair_design {*}$rd_args
+    set mine [dict create]
+    foreach inst [$::block getInsts] {
+        set name [$inst getName]
+        if {![dict exists $names $name]
+            || [dict get $names $name] ne [[$inst getMaster] getName]} {
+            dict set mine $name $inst
+        }
+    }
+    if {[dict size $mine] == 0} { break }
+    set locked [list]
+    foreach inst [$::block getInsts] {
+        if {[dict exists $mine [$inst getName]]} { continue }
+        set status [$inst getPlacementStatus]
+        if {$status ni {LOCKED FIRM COVER}} {
+            lappend locked [list $inst $status]
+            $inst setPlacementStatus LOCKED
+        }
+    }
+    log_cmd detailed_placement \
+        -max_displacement [subst { $::env(PL_MAX_DISPLACEMENT_X) $::env(PL_MAX_DISPLACEMENT_Y) }]
+    foreach pair $locked { [lindex $pair 0] setPlacementStatus [lindex $pair 1] }
+    check_placement -verbose
+    global_connect
+    set ::vic_fo_dirty [dict create]
+    dict for {name inst} $mine {
+        lappend ::vic_created $inst
+        foreach it [$inst getITerms] {
+            set net [$it getNet]
+            if {$net ne "NULL" && [$net getSigType] ni {POWER GROUND}} {
+                dict set ::vic_fo_dirty [$net getName] $net
+            }
+        }
+    }
+    if {![vic_eco_route ::vic_fo_dirty drv_route]} {
+        puts stderr "VIBEIC_PRR_ECO_ROUTE_REFUSED: the fanout repair's scoped route added whole-design violations"
+        exit 1
+    }
+    set ::vic_fo_added [vic_fanout_added $::vic_fo_repaired [vic_fanout_over]]
+}
+utl::metric_integer vibeic__prr__fanout__rounds $::vic_fo_rounds
+
 # ---- 7. re-verify ------------------------------------------------------------
 # Router DRC: the fork's scoped route refuses a result with more whole-design
 # violations than it was given (DRT-0711/0712), which fails this step; the
@@ -467,6 +572,20 @@ vic_say "reverify route_drc=$::vic_drt antenna_nets=$::vic_ant unrouted_added=[l
 # the ECO report covers only the nets it was given).
 if {[llength $::vic_unrouted_new]} {
     puts stderr "VIBEIC_PRR_LOST_ROUTE_REFUSED: [llength $::vic_unrouted_new] signal net(s) the input had routed carry no wire after the repair: [lrange $::vic_unrouted_new 0 19]; the candidate is not written"
+    exit 1
+}
+
+if {!$::vic_fo_declared} {
+    # No declared cap: nothing to keep, and nothing is claimed kept.
+    utl::metric_integer vibeic__prr__fanout__added -1
+    vic_say "fanout limit: MAX_FANOUT_CONSTRAINT not declared; not measured"
+    set ::vic_fo_final [dict create]
+} else {
+    set ::vic_fo_final [vic_fanout_added $::vic_fo_repaired [vic_fanout_over]]
+    utl::metric_integer vibeic__prr__fanout__added [dict size $::vic_fo_final]
+}
+if {[dict size $::vic_fo_final]} {
+    puts stderr "LL_PRR_FANOUT_LIMIT_BROKEN: [dict size $::vic_fo_final] net(s) over max_fanout $::env(MAX_FANOUT_CONSTRAINT) that repair_design had within it: $::vic_fo_final; the candidate is not written"
     exit 1
 }
 

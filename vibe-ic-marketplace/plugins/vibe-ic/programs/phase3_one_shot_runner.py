@@ -23499,6 +23499,15 @@ def _dont_use_family_cells(cell_names: Sequence[str]) -> List[str]:
     return sorted({c for c in cell_names if any(r.fullmatch(c) for r in rx)})
 
 
+#: Step 32 on LibreLane takes the direct deck's dont_use families over its own
+#: resolved liberty (librelane_postroute_repair.repair_dont_use), so its
+#: repair_design never buffers with a delay cell (cmp3 D14).
+_STEP32_DONT_USE = (
+    lambda text: _dont_use_family_cells(_V1_6_596_RE_CELL_DECL.findall(text)),
+    "phase3_one_shot_runner._DONT_USE_FAMILY_PATTERNS (the direct deck's "
+    "resizer dont_use families) over the step's resolved CELL_LIBS")
+
+
 def _dont_use_family_fallback_tcl() -> str:
     """v1.2.86 — GENERAL, PDK-family fallback that excludes the physically
     unroutable characterization / low-power cell FAMILIES from the resizer/CTS/
@@ -44157,6 +44166,73 @@ def _record_route_promotion(project: Path, source: Path,
         return
 
 
+#: THE record of the last route PROMOTED over the one a routing session wrote,
+#: with the promoter's OWN measurement of what it promoted (cmp3 D15). The
+#: bare `routed_base_prerepair.def` marker says only that SOME promotion
+#: happened; this says which, of which bytes, and measured how.
+ROUTE_PROMOTION_REL = "reports/phase3/route_promotion.json"
+
+
+def _file_sha256(path: Path) -> Optional[str]:
+    try:
+        import hashlib as _hl
+        return _hl.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _route_promotion_write(project: Path, promoter: str, promoted_def: Path,
+                           measurement: Dict[str, Any]) -> None:
+    """Record a promotion: who, which DEF (by sha256), and its own measurement."""
+    _aa.write_text(Path(project) / ROUTE_PROMOTION_REL, json.dumps({
+        "promoter": promoter,
+        "promoted_def": str(promoted_def),
+        "promoted_def_sha256": _file_sha256(promoted_def),
+        "measurement": measurement,
+    }, indent=2) + "\n")
+
+
+def _route_promotion_read(project: Path) -> Optional[Dict[str, Any]]:
+    try:
+        doc = json.loads((Path(project) / ROUTE_PROMOTION_REL).read_text())
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _step32_own_measurement(report: Dict[str, Any]) -> Dict[str, Any]:
+    """What LibreLane step 32 measured on the candidate it adopted, on that
+    candidate's OWN output: `OpenROAD.CheckAntennas` after the repair step, and
+    the repair step's unrouted census (`vibeic__prr__unrouted__added`)."""
+    final = (report.get("final") or {})
+    adopted = report.get("adopted")
+    row = next((c for c in report.get("candidates") or []
+                if c.get("candidate") == adopted), {})
+    metrics = row.get("repair_metrics") or {}
+    unrouted = metrics.get("vibeic__prr__unrouted__added")
+    return {"antenna_nets": final.get("antenna_nets"),
+            "antenna_pins": final.get("antenna_pins"),
+            "antenna_source": final.get("antenna_state"),
+            "unrouted_added": unrouted if isinstance(unrouted, int)
+            and not isinstance(unrouted, bool) else None,
+            "unrouted_source": "Vibeic.PostRouteRepair vibeic__prr__unrouted__added"}
+
+
+def _promotion_unmeasured(m: Dict[str, Any]) -> str:
+    """Why a promoter may NOT promote its own output: the reason, or "" when
+    it measured antennas and the unrouted census on that output. A promoted
+    route nobody measured ships with an antenna verdict of UNMEASURED."""
+    missing = [k for k in ("antenna_nets", "antenna_pins", "unrouted_added")
+               if not isinstance(m.get(k), int) or isinstance(m.get(k), bool)]
+    if missing:
+        return ("the promoter did not measure its own output: "
+                + ", ".join(missing) + " absent")
+    if m["unrouted_added"] > 0:
+        return (f"the promoted route leaves {m['unrouted_added']} signal net(s) "
+                f"unrouted that its input had routed")
+    return ""
+
+
 def _cvg_apply_restore(pnr_out: Path, top: str, decision: dict,
                        restore_log: str, parsed: dict) -> Tuple[bool, str]:
     """Promote the RESTORED artefacts — only after the re-measurement agrees.
@@ -45016,6 +45092,10 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
             shutil.copy2(repaired_def, _topdef)
         _record_route_promotion(project, repaired_def, [routed, _topdef],
                                 "signoff_spef_repair")
+        _route_promotion_write(project, "signoff_spef_repair", routed, {
+            "antenna_source": "signoff_spef_repair.log (SHIP_ANT window)",
+            "unrouted_added": parsed.get("unrouted_nets"),
+            "unrouted_source": "signoff_spef_repair.log SHIP_UNROUTED_NETS"})
         _record_route_promotion(project, repaired_v, [_pnr_v],
                                 "signoff_spef_repair")
         _gds = pnr_out / f"{top}.gds"
@@ -45125,7 +45205,7 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
         project, mode=selected, image=image, pdk=str(pdk.name), pdk_root=pdk_root,
         sdc=sdc, derate=(_FLAT_OCV_DERATE_EARLY, _FLAT_OCV_DERATE_LATE),
         route_state=route_state, route_drc=route_drc, variant_arm=variant_arm,
-        pg_rules_tcl=pg_rules)
+        pg_rules_tcl=pg_rules, dont_use=_STEP32_DONT_USE)
     path = project / _llprr.REPORT_REL
     record = {"report": str(path.relative_to(project)), "report_sha256": _ll.digest(path),
               "mode": selected, "adopted": report.get("adopted"),
@@ -45133,11 +45213,24 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
     views: Dict[str, Path] = {}
     state = report.get("adopted_state")
     if report.get("verdict") == "PASS" and state and Path(state) != Path(route_state):
-        doc = json.loads(Path(state).read_text())
-        views = {"odb": Path(doc["odb"]), "def": Path(doc["def"])}
+        # cmp3 D15: a route is promoted only with its promoter's own antenna
+        # and unrouted measurement of it; without one the input route stays.
+        own = _step32_own_measurement(report)
+        refused = _promotion_unmeasured(own)
         pnr_out = _pl.pnr_dir(project)
         pnr_out.mkdir(parents=True, exist_ok=True)
+        if refused:
+            report["promotion_refused"] = refused
+            _aa.write_text(path, json.dumps(report, indent=2) + "\n")
+            record["promotion_refused"] = refused
+            _drv_promotion_disclose(pnr_out, "librelane_promotion_unmeasured",
+                                    f"{refused}; the input route was kept")
+            return {"views": views, "record": record}
+        doc = json.loads(Path(state).read_text())
+        views = {"odb": Path(doc["odb"]), "def": Path(doc["def"])}
         shutil.copy2(route_views["def"], pnr_out / "routed_base_prerepair.def")
+        _route_promotion_write(project, "librelane_step32_in_chain",
+                               Path(doc["def"]), own)
     return {"views": views, "record": record}
 
 
@@ -45163,6 +45256,15 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
                f"{report.get('baseline_antenna')} -> {report.get('final_antenna')} "
                f"over {len(report.get('corners') or [])} STA corner(s) "
                f"(OpenROAD.STAPostPNR, sign-off scene)")
+    refused = report.get("promotion_refused") or (
+        _promotion_unmeasured(_step32_own_measurement(report))
+        if report.get("adopted") and handed else "")
+    if refused:
+        _drv_promotion_disclose(pnr_out, "librelane_promotion_unmeasured",
+                                f"{refused}; the input route was kept")
+        return StepResult("postroute_repair_librelane", "PASS", time.time() - t0,
+                          f"{report.get('adopted')} adopted by the closure but NOT "
+                          f"promoted ({refused}); input route kept: {summary}")
     if not report.get("adopted"):
         _drv_promotion_disclose(
             pnr_out, "librelane_closure_kept_input",
@@ -45181,6 +45283,8 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
         _llprr.handoff(project, report, targets)
         if topdef.is_file():
             shutil.copy2(routed, topdef)
+        _route_promotion_write(project, "librelane_step32_after_route", routed,
+                               _step32_own_measurement(report))
         _record_route_promotion(project, routed, [routed, topdef],
                                 "postroute_repair_librelane")
         _record_route_promotion(project, netlist, [netlist],
@@ -45287,7 +45391,7 @@ def step_postroute_repair_librelane(project: Path, top: str, pdk: "PdkConfig",
             project, image=image, pdk=str(pdk.name), pdk_root=pdk_root,
             views={"def": routed, "nl": netlist, "sdc": sdc}, sdc=sdc,
             derate=(_FLAT_OCV_DERATE_EARLY, _FLAT_OCV_DERATE_LATE),
-            pg_rules_tcl=pg_rules, refill_tcl=refill)
+            pg_rules_tcl=pg_rules, refill_tcl=refill, dont_use=_STEP32_DONT_USE)
     except _ll.Refusal as exc:
         _drv_promotion_disclose(
             pnr_out, "librelane_refused",
@@ -68912,8 +69016,27 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
     # produced the route that ships.
     _ship_log = pnr_out / "signoff_spef_repair.log"
     _promoted = (pnr_out / "routed_base_prerepair.def").is_file()
+    # cmp3 D15 — WHICH promotion, of WHICH bytes. The marker alone was read as
+    # "signoff_spef_repair replaced the measured route"; MEASURED on spm (D11
+    # stack) it was LibreLane step 32's, promoted BEFORE the direct tail that
+    # then wrote -- and measured, 0/0 -- the DEF that ships, and this report
+    # said UNMEASURED. The promotion record settles it: a promoted DEF that is
+    # not byte-identical to the shipped one was superseded by a later routing
+    # session, whose own in-session check describes what ships; one that IS
+    # shipped is described by its promoter's own measurement, or by nothing.
+    _promotion = _route_promotion_read(project)
+    _promoter = (_promotion or {}).get("promoter")
+    _promoted_own: Optional[Dict[str, Any]] = None
+    if _promotion is not None:
+        _psha = _promotion.get("promoted_def_sha256")
+        if not (_psha and _psha == _file_sha256(def_file)):
+            _promoted = False
+        elif _promoter != "signoff_spef_repair":
+            _promoted = True
+            _promoted_own = _promotion.get("measurement") or {}
     _ship_txt = (_ship_log.read_text(errors="ignore")
-                 if (_promoted and _ship_log.is_file()) else "")
+                 if (_promoted and _promoted_own is None
+                     and _ship_log.is_file()) else "")
     _ship_measured = "SHIP_ANT_END" in _ship_txt
     pnr_log = pnr_out / "openroad.log"
     if pnr_log.is_file():
@@ -68970,7 +69093,19 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                 # G-SHIP-ANTENNA — override with the SHIPPING session's counts.
                 _measured_on = "the PnR route"
                 _shipped_unmeasured = False
-                if _promoted and _ship_measured:
+                _own_n = (_promoted_own or {}).get("antenna_nets")
+                _own_p = (_promoted_own or {}).get("antenna_pins")
+                if _promoted and _promoted_own is not None:
+                    if (isinstance(_own_n, int) and not isinstance(_own_n, bool)
+                            and isinstance(_own_p, int) and not isinstance(_own_p, bool)):
+                        net_viol, pin_viol = _own_n, _own_p
+                        have_counts = True
+                        _measured_on = (f"the PROMOTED {_promoter} route (the one "
+                                        f"that ships), measured by its promoter: "
+                                        f"{_promoted_own.get('antenna_source')}")
+                    else:
+                        _shipped_unmeasured = True
+                elif _promoted and _ship_measured:
                     _s_nets = re.findall(r"Found\s+(\d+)\s+net violations",
                                          _ship_txt)
                     _s_pins = re.findall(r"Found\s+(\d+)\s+pin violations",
@@ -68994,7 +69129,8 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     have_counts = False
                     net_viol = -1
                     pin_viol = -1
-                    _measured_on = ("NOTHING — signoff_spef_repair PROMOTED a "
+                    _measured_on = (f"NOTHING — {_promoter or 'signoff_spef_repair'} "
+                                    "PROMOTED a "
                                     "re-routed design over the shipped DEF and "
                                     "no antenna check ran on it")
                 if routing_incomplete:
@@ -69010,7 +69146,8 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                 _count_str = (
                     f"{net_viol} net violations, {pin_viol} pin violations"
                     if have_counts
-                    else ("unmeasured (signoff_spef_repair promoted a re-routed "
+                    else (f"unmeasured ({_promoter or 'signoff_spef_repair'} "
+                          "promoted a re-routed "
                           "design over the shipped DEF and no antenna check ran "
                           "on it)" if _shipped_unmeasured
                           else "unmeasured (detailed_route aborted; "
