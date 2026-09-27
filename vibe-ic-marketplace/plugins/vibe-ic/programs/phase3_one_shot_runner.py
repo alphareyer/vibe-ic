@@ -20400,11 +20400,33 @@ def _padring_core_inset_um(project: Optional[Path],
     cfg = getattr(pdk, "pdn_ring", None) or {}
     if cfg:
         try:
-            offset, clearance, _, _, footprint = _pdn_ring_dimensions(cfg)
+            offset, clearance, widths, _, footprint = _pdn_ring_dimensions(cfg)
         except ValueError as exc:
             return None, str(exc)
-        inset += offset + footprint + clearance
+        inset += offset + footprint + _pad_strap_gap_um(req, clearance, widths)
     return inset, ""
+
+
+def _pad_strap_gap_um(req: Dict[str, Any], clearance: float,
+                      ring_widths: List[float]) -> float:
+    """The gap to keep between the pad ring and the PDN ring.
+
+    At least the PDK's own clearance. pdngen connects a supply pad with
+    straps from its pins across that gap to the ring, and keeps a strap only
+    when it is longer than it is wide (vibeic/OpenROAD #33). MEASURED on
+    subservient x gf180mcuD: with the 0.46 um clearance the ground pad's
+    straps were 8.82-8.9 um long against 9.5-10.25 um wide, all were cut, and
+    the core's ground grid had no source (PSM-0069); 8 um more gap and the
+    same pad connected on every edge. The producer records how far beyond
+    the pad edge the ring's far edge must lie (`pad_strap_reach_um`, pin
+    width minus pin depth); the strap lands on a ring at least as wide as the
+    narrowest rail, so the gap must be `reach - min(ring widths)`, plus the
+    clearance again so the strap is strictly longer rather than square.
+    """
+    reach = req.get("pad_strap_reach_um")
+    if isinstance(reach, bool) or not isinstance(reach, (int, float)):
+        return clearance
+    return max(clearance, float(reach) - min(ring_widths) + clearance)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -36045,16 +36067,13 @@ def step_io_pad_chip_top_gen(project: Path, container: Optional[str] = None,
         if len(_pad_power) == 1 and len(_pad_ground) == 1:
             extra.extend(["--power-net", sorted(_pad_power)[0],
                           "--ground-net", sorted(_pad_ground)[0]])
-        # Which edges pdngen can strap a supply pad to the core ring from
-        # depends on the routing direction of the pad pin's layer, so the
-        # producer gets the directions of THIS run's tech LEF.
-        _pad_dirs = {name: direction for name, direction, _pitch, _width in
-                     _techlef_routing_layers(_read_pdk_text(
-                         getattr(pdk, "tech_lef", None), container) or "")
-                     if direction in ("HORIZONTAL", "VERTICAL")}
-        if _pad_dirs:
-            extra.extend(["--routing-layer-directions",
-                          json.dumps(_pad_dirs, sort_keys=True)])
+        # The supply pads are strapped to the PDN ring on the PDK's declared
+        # pad-connect layers; the producer measures the straps' geometry on
+        # those layers only, as pdngen's `-connect_to_pad_layers` does.
+        _pad_layers = list((getattr(pdk, "pdn_ring", None) or {}).get(
+            "connect_to_pad_layers") or [])
+        if _pad_layers:
+            extra.extend(["--pad-connect-layers", json.dumps(_pad_layers)])
         # IO auxiliary controls are SIGNAL pins.  Driving them directly from
         # the named POWER/GROUND nets leaves them outside both pdngen (not LEF
         # PG pins) and detailed routing (the rail nets are special), producing

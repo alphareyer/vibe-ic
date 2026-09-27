@@ -820,13 +820,6 @@ def _derive_supply_pad_pair(
     }
 
 
-#: The direction a strap runs from a pad on each side to the core ring: across
-#: the edge, so vertical from the south and north rows, horizontal from the
-#: east and west columns.
-_STRAP_DIRECTION = {"S": "VERTICAL", "N": "VERTICAL",
-                    "E": "HORIZONTAL", "W": "HORIZONTAL"}
-
-
 def _faces_core(rect: Tuple[float, float, float, float], side: str,
                 placed_size: Tuple[float, float]) -> bool:
     """Does a placed pin rectangle reach the pad edge that faces the core?
@@ -842,86 +835,107 @@ def _faces_core(rect: Tuple[float, float, float, float], side: str,
             "W": rect[2] >= w - eps, "E": rect[0] <= eps}[side]
 
 
-def _supply_edge_reach(pair: Sequence[Dict[str, object]],
-                       pin_ports: Dict[str, Dict[str, List[Tuple[str, Tuple[
-                           float, float, float, float]]]]],
-                       sizes: Dict[str, Tuple[float, float]],
-                       layer_directions: Optional[Dict[str, str]],
-                       ) -> Dict[str, object]:
-    """On which die edges can the PDN strap every supply cell to the core ring?
+def _supply_pad_strap_reach(pair: Sequence[Dict[str, object]],
+                            pin_ports: Dict[str, Dict[str, List[Tuple[str, Tuple[
+                                float, float, float, float]]]]],
+                            sizes: Dict[str, Tuple[float, float]],
+                            connect_layers: Optional[Sequence[str]],
+                            ) -> Dict[str, object]:
+    """How far from the pad edge the PDN ring must lie for pdngen to strap
+    each supply cell to it.
 
-    pdngen (`add_pdn_ring -connect_to_pads`) connects a supply pad by drawing
-    a strap from each of the pad's rail pins that reaches the core-facing edge
-    straight across to the ring. It is reliable when that strap runs in its
-    layer's preferred routing direction. Against that direction it was
-    MEASURED to drop the strap (subservient x gf180mcuD, OpenROAD 26Q3-2963):
-    the ground cell's only core-facing pins are 1.0 um deep on a vertical
-    layer, and on the west edge pdngen built all six straps and then cut every
-    one of them away. The core's whole ground grid was left without a source
-    (`PSM-0069 Check connectivity failed on VSS`, 1,697,622 unconnected
-    shapes), while the same cell on the south or north edge, and the power
-    cell with 4.655 um pins on the west edge, connected.
+    pdngen (`add_pdn_ring -connect_to_pads`) connects a supply pad with one
+    strap per core-facing pin of the net the pad supplies: from the pin's far
+    end, across the pad edge, to the far edge of that net's ring. The strap is
+    as wide as the pin. MEASURED (subservient x gf180mcuD, OpenROAD
+    26Q3-3002): pdngen keeps such a strap only when it is LONGER THAN IT IS
+    WIDE. It reads a strap's direction from its aspect ratio, so a shorter
+    strap counts as running along the edge, the pad's own obstruction at its
+    pad end is stretched over all of it, and it is cut away (vibeic/OpenROAD
+    #33). The ground cell's pins are 1.0 um deep and 9.5-10.25 um wide; its
+    straps were 8.82 um (west) and 8.9 um (north, a 2412 um die) long and the
+    core's ground grid was left without a source (PSM-0069). With the ring
+    8 um further out the same cell connected on every edge, and the power
+    cell (4.655 um pins) connected on every edge either way. The routing
+    direction of the pin's layer does not decide it.
 
-    So an edge is REACHED when every cell of the pair has a core-facing rail
-    pin on a layer whose preferred direction is the strap's. It is UNREACHED
-    when a cell's core-facing rail pins are all on layers routed across the
-    strap, and NOT_DETERMINED when the layer directions, the pin geometry or
-    the cell size is not in hand. Only the pin's layer and position are read,
-    from the IO LEF and the run's own tech LEF; no cell or layer is named.
+    So a strap needs `pin depth + pad-edge-to-ring-far-edge > pin width`, and
+    this returns, per cell and per edge, `reach_um = pin width - pin depth`:
+    the distance the ring's far edge must lie beyond the pad edge. Only the
+    pins on the net the cell supplies count (pdngen builds its straps per
+    ITerm, so an opposite-polarity ESD pin never sources this net), and only
+    on the declared pad-connect layers when they are given. `reach_um` is
+    the largest over the pair; the runner reserves it in the core inset.
+    Pin geometry and cell size come from the IO LEF; nothing is named.
     """
-    sides: Dict[str, Dict[str, object]] = {}
-    if not layer_directions:
-        return {"verdict": "NOT_DETERMINED",
-                "reason": "no routing-layer directions were supplied "
-                          "(--routing-layer-directions)",
-                "sides": sides}
-    for side in SIDES:
-        orient = PR.SIDE_ORIENT[side]
-        strap = _STRAP_DIRECTION[side]
-        cells: Dict[str, Dict[str, object]] = {}
-        for entry in pair:
-            master = str(entry["master"])
-            size = sizes.get(master)
-            rails = sorted(dict(entry.get("supply_connections") or {}))
-            ports = pin_ports.get(master) or {}
-            if not size or not any(ports.get(pin) for pin in rails):
-                cells[master] = {"verdict": "NOT_DETERMINED",
-                                 "reason": "the IO LEF gives this cell no "
-                                           "size or no rail-pin geometry"}
-                continue
+    layers = set(connect_layers or [])
+    cells: Dict[str, Dict[str, object]] = {}
+    worst: Optional[float] = None
+    undetermined = []
+    for entry in pair:
+        master = str(entry["master"])
+        net = entry.get("port")
+        size = sizes.get(master)
+        pins = sorted(pin for pin, pin_net in dict(
+            entry.get("supply_connections") or {}).items() if pin_net == net)
+        ports = pin_ports.get(master) or {}
+        if not size or not any(ports.get(pin) for pin in pins):
+            cells[master] = {"verdict": "NOT_DETERMINED", "net": net,
+                             "reason": "the IO LEF gives this cell no size or "
+                                       "no pin geometry on the net it supplies"}
+            undetermined.append(master)
+            continue
+        by_side: Dict[str, object] = {}
+        for side in SIDES:
+            orient = PR.SIDE_ORIENT[side]
             outline = PR.orient_rect((0.0, 0.0, size[0], size[1]), orient, size)
             placed_size = (outline[2] - outline[0], outline[3] - outline[1])
-            facing = []
-            for pin in rails:
+            straps = []
+            for pin in pins:
                 for layer, rect in ports.get(pin) or []:
+                    if layers and layer not in layers:
+                        continue
                     placed = PR.orient_rect(rect, orient, size)
-                    if _faces_core(placed, side, placed_size):
-                        facing.append({"pin": pin, "layer": layer,
-                                       "direction": layer_directions.get(layer)})
-            along = [f for f in facing if f["direction"] == strap]
-            unknown = [f for f in facing if f["direction"] is None]
-            if along:
-                verdict = "REACHED"
-            elif facing and not unknown:
-                verdict = "UNREACHED"
-            else:
-                verdict = "NOT_DETERMINED"
-            cells[master] = {"verdict": verdict, "strap_direction": strap,
-                             "core_facing_rail_pins": facing}
-        verdicts = {c["verdict"] for c in cells.values()}
-        side_verdict = ("UNREACHED" if "UNREACHED" in verdicts else
-                        "NOT_DETERMINED" if "NOT_DETERMINED" in verdicts else
-                        "REACHED")
-        sides[side] = {"verdict": side_verdict, "orient": orient,
-                       "cells": cells}
-    reached = [s for s in SIDES if sides[s]["verdict"] == "REACHED"]
-    return {"verdict": "REACHED" if reached else "NOT_DETERMINED",
-            "reached_sides": reached,
-            "reason": ("" if reached else
-                       "no edge is proven reachable for every supply cell, so "
-                       "the supply pads keep the shortest-edge rule and their "
-                       "ring connection is judged only by the PDN run"),
-            "sides": sides}
+                    if not _faces_core(placed, side, placed_size):
+                        continue
+                    across_x = side in ("E", "W")
+                    width = (placed[3] - placed[1]) if across_x else (placed[2] - placed[0])
+                    depth = (placed[2] - placed[0]) if across_x else (placed[3] - placed[1])
+                    straps.append({"pin": pin, "layer": layer,
+                                   "width_um": round(width, 6),
+                                   "depth_um": round(depth, 6),
+                                   "reach_um": round(width - depth, 6)})
+            by_side[side] = {"straps": straps,
+                             "reach_um": (max(s["reach_um"] for s in straps)
+                                          if straps else None)}
+        side_reach = [v["reach_um"] for v in by_side.values()
+                      if v["reach_um"] is not None]
+        if not side_reach:
+            cells[master] = {"verdict": "NOT_DETERMINED", "net": net,
+                             "reason": "no pin of the net this cell supplies "
+                                       "reaches its core-facing edge on a "
+                                       "pad-connect layer",
+                             "sides": by_side}
+            undetermined.append(master)
+            continue
+        cell_reach = max(side_reach)
+        worst = cell_reach if worst is None else max(worst, cell_reach)
+        cells[master] = {"verdict": "MEASURED", "net": net,
+                         "reach_um": cell_reach, "sides": by_side}
+    return {
+        "verdict": "NOT_DETERMINED" if undetermined or worst is None else "MEASURED",
+        "reach_um": None if undetermined else worst,
+        "connect_layers": sorted(layers) if layers else None,
+        "rule": ("pdngen keeps a pad strap only when it is longer than it is "
+                 "wide: pin depth + (pad edge to the net's ring far edge) > "
+                 "pin width. reach_um = pin width - pin depth, the distance "
+                 "the ring's far edge must lie beyond the pad edge"),
+        "reason": ("" if not undetermined else
+                   f"no strap geometry for {sorted(undetermined)}; the core "
+                   f"inset keeps the PDK's own clearance and the PDN run "
+                   f"judges the connection"),
+        "cells": cells,
+    }
 
 
 def _emit_verilog(top: str, core: str,
@@ -1111,7 +1125,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         tie_low_pin: Optional[str] = None,
         tie_liberty: Optional[str] = None,
         supply_plan: Optional[Dict[str, object]] = None,
-        layer_directions: Optional[Dict[str, str]] = None,
+        pad_connect_layers: Optional[Sequence[str]] = None,
         ) -> Tuple[int, Dict[str, object]]:
     rec: Dict[str, object] = {"program": PROGRAM, "verdict": "REFUSE",
                               "findings": [], "project": str(project)}
@@ -1329,16 +1343,17 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         pair, plan = _derive_supply_pad_pair(
             classes, sizes, pin_roles, prefix, power_net, ground_net,
             macro_sources)
-        # An edge the PDN cannot strap a supply cell to from is no edge for
-        # the pair (see `_supply_edge_reach`); the first LEF to give a master
-        # its pins is kept, as `pin_roles` keeps it.
+        # How far the PDN ring must stay from the pad edge for pdngen to strap
+        # this pair to it (see `_supply_pad_strap_reach`); the runner reserves
+        # it in the core inset. The first LEF to give a master its pins is
+        # kept, as `pin_roles` keeps it.
         pin_ports: Dict[str, Dict[str, List[Tuple[str, Tuple[
             float, float, float, float]]]]] = {}
         for text in per_lef:
             for master, master_pins in PR.parse_lef_pin_ports(text).items():
                 pin_ports.setdefault(master, master_pins)
-        reach = _supply_edge_reach(pair, pin_ports, sizes, layer_directions)
-        reachable = list(reach.get("reached_sides") or []) or list(SIDES)
+        strap_reach = _supply_pad_strap_reach(pair, pin_ports, sizes,
+                                              pad_connect_layers)
         # Without a measured current, one pair is the exploration baseline.
         # A same-run PSM plan may request more; it is never an input-side pad
         # assignment and it never changes the signal instances or their order.
@@ -1358,8 +1373,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         pair_width = sum(sizes[str(entry["master"])][0] for entry in pair)
         supply_placement: Dict[str, List[List[str]]] = {s: [] for s in SIDES}
         if supply_plan is None:
-            side = min(reachable,
-                       key=lambda s: (side_widths[s], SIDES.index(s)))
+            side = min(SIDES, key=lambda s: (side_widths[s], SIDES.index(s)))
             allocation = [side]
         else:
             die = float(supply_plan.get("die_side_um") or 0)
@@ -1412,7 +1426,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                                  for entry in pair]
                 legal[side] = []
                 final_widths[side] = {}
-                for count in range(pair_count + 1 if side in reachable else 1):
+                for count in range(pair_count + 1):
                     widths = base_widths + supply_widths * count
                     total = sum(widths)
                     if not widths:
@@ -1486,10 +1500,8 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         plan.update({
             "placement_side": allocation[0] if pair_count == 1 else None,
             "placement_basis": ("minimum pair on shortest signal edge" if pair_count == 1
-                                else "measured-current pairs balanced across legal sides; signal order retained")
-                               + (" the PDN can strap the pair from"
-                                  if reach["verdict"] == "REACHED" else ""),
-            "edge_reach": reach,
+                                else "measured-current pairs balanced across legal sides; signal order retained"),
+            "pad_strap_reach": strap_reach,
             "pair_count": pair_count,
             "pairs_by_side": {s: len(supply_placement[s]) for s in SIDES},
             "measured_supply_entry_plan": supply_plan,
@@ -1721,8 +1733,13 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         else:
             unsized.append(str(corner_master))
     ring_depth = (max(depth_terms.values()) + edge_um) if depth_terms else None
+    strap = (rec.get("power_pad_plan") or {}).get("pad_strap_reach") or {}
     rec["die_required_um"] = {
         "ring_depth_um": ring_depth,
+        # How far beyond the pad edge the PDN ring's far edge must lie for
+        # pdngen to keep the supply pads' straps (`_supply_pad_strap_reach`).
+        # None when there is no supply pair or its geometry is not measured.
+        "pad_strap_reach_um": strap.get("reach_um"),
         "ring_depth_terms_um": depth_terms,
         "ring_depth_masters_without_a_lef_size": sorted(set(unsized)),
         "ring_depth_basis": (
@@ -1771,10 +1788,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--tie-low-cell", default=None)
     ap.add_argument("--tie-low-pin", default=None)
     ap.add_argument("--tie-liberty", default=None)
-    ap.add_argument("--routing-layer-directions", default=None,
-                    help="JSON {layer: HORIZONTAL|VERTICAL} from the run's "
-                         "tech LEF; decides which edges the supply pads can "
-                         "be strapped to the core ring from")
+    ap.add_argument("--pad-connect-layers", default=None,
+                    help="JSON list of the layers the PDN connects pads on "
+                         "(the PDK's pdn_ring.connect_to_pad_layers); only "
+                         "supply-pad pins on them are measured for strap reach")
     ap.add_argument("--json", dest="out_json", default=None)
     args = ap.parse_args(list(argv) if argv is not None else None)
 
@@ -1788,8 +1805,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             project, pdk_root, pdk, args.power_net, args.ground_net,
             args.tie_high_cell, args.tie_high_pin,
             args.tie_low_cell, args.tie_low_pin, args.tie_liberty, plan,
-            json.loads(args.routing_layer_directions)
-            if args.routing_layer_directions else None)
+            json.loads(args.pad_connect_layers)
+            if args.pad_connect_layers else None)
     except Unavailable as exc:
         rc, rec = 2, {"program": PROGRAM, "verdict": "NOT_AVAILABLE",
                       "rule": exc.rule, "findings": [exc.message]}
