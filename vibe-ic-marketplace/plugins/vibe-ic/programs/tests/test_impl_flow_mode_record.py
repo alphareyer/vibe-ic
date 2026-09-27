@@ -306,3 +306,15 @@ def test_a_bare_null_image_is_a_damaged_record(project):
         IF.read_record(project)
     assert ei.value.reason_class == IF.IMPL_RECORD_UNREADABLE
     assert "image_capture" in str(ei.value)
+
+
+def test_filling_the_image_validates_first(project):
+    """Wave-6 review: the fill branch wrote without validating; an invalid
+    image made the record unreadable."""
+    IF.write_record(project, "librelane", resolved_by="t")
+    before = IF.record_path(project).read_bytes()
+    with pytest.raises(IF.ImplRefusal) as ei:
+        IF.write_record(project, "librelane", resolved_by="t", image=123)
+    assert ei.value.reason_class == IF.IMPL_RECORD_UNREADABLE
+    assert IF.record_path(project).read_bytes() == before
+    assert IF.read_record(project)["image"] is None
