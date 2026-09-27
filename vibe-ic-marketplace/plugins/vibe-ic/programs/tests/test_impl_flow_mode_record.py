@@ -10,6 +10,12 @@ Contracts:
   4. An in-place switch refuses with IMPL_MODE_CONFLICT, whichever way it
      goes, including against spans the REAL admission ledger admitted.
   5. A damaged record is a refusal, never the default.
+  6. Once a record exists it is the answer: later history (a flagged
+     admission row without `impl`) cannot lock the project out of its mode.
+     History -- the ledger AND default-flow output -- is asked when a record
+     is CREATED, by resolve() or by write_record().
+  7. The record's image is never silently frozen: a second dispatch on
+     another image refuses IMPL_IMAGE_CHANGED.
 """
 from __future__ import annotations
 
@@ -194,5 +200,83 @@ def test_a_tool_default_with_its_source_is_a_valid_record():
 
 
 def test_every_reason_class_is_distinct_and_named():
-    assert len(set(IF.REASON_CLASSES)) == 4
+    assert len(set(IF.REASON_CLASSES)) == len(IF.REASON_CLASSES) == 5
     assert all(r.startswith("IMPL_") for r in IF.REASON_CLASSES)
+
+
+def test_a_record_is_not_overruled_by_later_rows_without_impl(project):
+    """Correctness review MAJOR: a flagged admission row lacking `impl` (every
+    row between W1 and W2, or a site W2 misses) must not refuse the mode."""
+    IF.write_record(project, "librelane", resolved_by="front door")
+    _admit(project, {"entry_step": None})          # no `impl` in the config
+    assert IF.admitted_impls(project) == {IF.IMPL_DEFAULT}
+    assert IF.resolve(project, "librelane") == IF.IMPL_LIBRELANE
+    assert IF.write_record(project, "librelane", resolved_by="child")
+    with pytest.raises(IF.ImplRefusal) as ei:      # the default still refused
+        IF.resolve(project, None)
+    assert ei.value.reason_class == IF.IMPL_MODE_CONFLICT
+
+
+def test_creating_a_record_checks_the_ledger(project):
+    """Correctness review MINOR: write_record without resolve() first."""
+    _admit(project, {"entry_step": None})
+    with pytest.raises(IF.ImplRefusal) as ei:
+        IF.write_record(project, "librelane", resolved_by="t")
+    assert ei.value.reason_class == IF.IMPL_MODE_CONFLICT
+    assert not IF.record_path(project).exists()
+    assert IF.resolve(project, None) == IF.IMPL_DEFAULT
+
+
+def _prov(project, **row):
+    with (project / "provenance.jsonl").open("a") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
+@pytest.mark.parametrize("evidence", ["provenance", "producer", "step"])
+def test_default_flow_output_is_proof_of_a_mode(project, evidence):
+    """The phase-3 window admits into a deleted temp copy: its output stays."""
+    if evidence == "provenance":
+        _prov(project, tool="openroad", exit_code=0,
+              outputs={"phase3/stage3/pnr/top.def": "sha256:" + "0" * 64})
+    else:
+        side = project / "phase3" / "stage3" / "pnr" / (
+            "producer_identity.json" if evidence == "producer"
+            else "step_identity.json")
+        side.parent.mkdir(parents=True)
+        side.write_text("{}")
+    assert IF.admitted_impls(project) == set()
+    for call in (lambda: IF.resolve(project, "librelane"),
+                 lambda: IF.write_record(project, "librelane", resolved_by="t")):
+        with pytest.raises(IF.ImplRefusal) as ei:
+            call()
+        assert ei.value.reason_class == IF.IMPL_MODE_CONFLICT
+        assert "default-flow output" in str(ei.value)
+    assert not IF.record_path(project).exists()
+    assert IF.resolve(project, None) == IF.IMPL_DEFAULT
+
+
+def test_phase1_output_and_imported_rows_are_not_default_flow_output(project):
+    _prov(project, tool="yosys", exit_code=0,
+          outputs={"phase1/generated_docs/L1.json": "sha256:" + "0" * 64})
+    _prov(project, tool="openroad", attributed_to="librelane", exit_code=0,
+          outputs={"phase3/stage3/pnr/top.def": "sha256:" + "0" * 64})
+    assert IF.default_output_evidence(project) == []
+    assert IF.resolve(project, "librelane") == IF.IMPL_LIBRELANE
+
+
+def test_a_new_image_is_never_silently_frozen(project):
+    IF.write_record(project, "librelane", resolved_by="t", image="img-A")
+    assert IF.write_record(project, "librelane", resolved_by="t", image="img-A")
+    assert IF.write_record(project, "librelane", resolved_by="t")  # not given
+    with pytest.raises(IF.ImplRefusal) as ei:
+        IF.write_record(project, "librelane", resolved_by="t", image="img-B")
+    assert ei.value.reason_class == IF.IMPL_IMAGE_CHANGED
+    assert "img-A" in str(ei.value) and "img-B" in str(ei.value)
+    assert IF.read_record(project)["image"] == "img-A"
+
+
+def test_an_image_after_a_null_image_is_refused(project):
+    IF.write_record(project, "librelane", resolved_by="t")
+    with pytest.raises(IF.ImplRefusal) as ei:
+        IF.write_record(project, "librelane", resolved_by="t", image="img-A")
+    assert ei.value.reason_class == IF.IMPL_IMAGE_CHANGED
