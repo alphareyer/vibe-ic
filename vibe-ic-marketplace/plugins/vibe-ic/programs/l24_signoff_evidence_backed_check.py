@@ -532,6 +532,23 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
+def _phase3_record_predates_netlist(project: Path, rel: str,
+                                    newest_netlist: Optional[float]) -> bool:
+    """Is `rel` a PHASE-3 record written before this run's phase-2 netlist?
+
+    Only phase-3 records are dated: a phase-2 report (lint, LEC, a pre-layout
+    estimate) is legitimately older or newer than the netlist it sits beside.
+    With no netlist on disk nothing is dated, exactly as `_phase3_has_run`."""
+    if newest_netlist is None:
+        return False
+    parts = Path(rel).parts
+    if not (parts[:2] == ("reports", "phase3") or parts[:1] == ("phase3",)
+            or Path(rel).name == "phase3_one_shot.json"):
+        return False
+    path = Path(rel) if Path(rel).is_absolute() else project / rel
+    return path.is_file() and _mtime(path) < newest_netlist
+
+
 def _newest_phase2_netlist_mtime(project: Path) -> Optional[float]:
     """mtime of the newest synthesised netlist phase 2 wrote, or None."""
     d = _pl.synth_dir(project)
@@ -757,6 +774,7 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
     failures: List[str] = []
     msgs: List[str] = []
     phase3 = _phase3_has_run(project)
+    newest_netlist = _newest_phase2_netlist_mtime(project)
     for row in rows:
         if not isinstance(row, dict) or not row.get("stated"):
             continue
@@ -782,6 +800,16 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
                             f"{'/'.join(_signoff_tokens(check))}")
         measured = [(p, v) for p, v in found
                     if v is not None and v not in _ABSENT_VERDICTS]
+        # FX_P2 review: the SAME dating `_phase3_has_run` applies. A phase-3
+        # record older than this run's phase-2 netlist measured a netlist that
+        # no longer exists, so its PASS backs nothing here -- it is read as
+        # absent (NOT_YET_MEASURABLE before this run's phase 3, UNMET after).
+        # A stale FAILING record is left where it is: dating never turns a
+        # red into an absence.
+        stale = [(p, v) for p, v in measured
+                 if v not in _FAILING_VERDICTS
+                 and _phase3_record_predates_netlist(project, p, newest_netlist)]
+        measured = [pv for pv in measured if pv not in stale]
         record: Dict[str, Any] = {
             "check": check,
             "requirement": requirement,
@@ -790,6 +818,11 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
             "declared_records": list(declared_paths),
             "records_read": [{"path": p, "verdict": v} for p, v in found],
         }
+        if stale:
+            record["stale_records"] = [
+                {"path": p, "verdict": v,
+                 "why": "older than this run's phase-2 netlist"}
+                for p, v in stale]
         rows_out.append(record)
         if not measured:
             looked = ", ".join(p for p, _ in found[:4]) or "no report"
