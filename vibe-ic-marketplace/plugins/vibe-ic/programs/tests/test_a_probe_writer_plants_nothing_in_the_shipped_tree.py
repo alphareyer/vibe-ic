@@ -66,7 +66,36 @@ FORMER_WRITERS = {
          "::test_no_gold_cross_contamination":
         "the same import-time corpus write, through its import of "
         "test_protocol_detector_no_misfire",
+    _T + "test_flow_compliance_check_gate.py"
+         "::test_unclassified_rc2_is_incomplete":
+        "wrote and unlinked programs/_pytest_rc2_helper.py",
+    _T + "test_flow_compliance_check_gate.py"
+         "::test_check_program_exit_zero_rc1_still_fails":
+        "wrote and unlinked programs/_pytest_rc1_helper.py",
+    _T + "test_flow_compliance_check_gate.py"
+         "::test_crash_is_flagged_as_a_crash_at_any_checkout_depth":
+        "wrote and unlinked programs/_pytest_crash_helper.py, twice",
+    _T + "test_flow_compliance_check_gate.py"
+         "::test_a_real_verdict_is_not_mistaken_for_a_crash":
+        "wrote and unlinked programs/_pytest_{verdict,quoted_tb,"
+        "indented_err}_helper.py",
+    _T + "test_flow_compliance_check_gate.py"
+         "::test_rc0_and_rc2_are_not_misread_as_crashes":
+        "wrote and unlinked programs/_pytest_noisy_{pass,skip}_helper.py",
+    _T + "test_issue1446_scratch_root_guard.py"
+         "::test_every_line_of_this_cost_table_fires":
+        "created and removed a vibeic1446-probe-* directory in programs/, "
+        "the plugin root, plugins/, the marketplace dir and the repo root "
+        "(a mkdir probe asked of candidates already refused as in-tree)",
 }
+#: NOT watched here, and why. `test_issue1129_gatekeeper_prepare_landing.py::
+#: test_the_real_program_runs_against_this_repo_and_honours_its_boundary` ran
+#: the real landing preparation on the SHARED checkout (version bump across
+#: plugin.json, both marketplace manifests and the READMEs; INDEX.md; then
+#: `git checkout --`). It now runs from a private `--shared` clone and asserts
+#: that the program it ran lives there. It costs ~460 s (the census writer) and
+#: skips on any dirty tree, so re-running it in this child would double that
+#: cost and read as "did not PASS" whenever the suite runs on local edits.
 
 
 def test_the_audit_sees_a_write_and_only_a_write(tmp_path):
@@ -74,8 +103,12 @@ def test_the_audit_sees_a_write_and_only_a_write(tmp_path):
     and must NOT record the three things that fooled its first version: a tmp
     symlink farm pointing INTO the tree being deleted (that deletes links, not
     the tree), `shutil.rmtree` of a tmp dir run from a cwd inside the tree (it
-    removes entries by bare name relative to a directory fd), and an anonymous
-    `O_TMPFILE` opened on the tree's directory (it creates no entry)."""
+    removes entries by bare name relative to a directory fd), an anonymous
+    `O_TMPFILE` opened on the tree's directory (it creates no entry), and a
+    bare-name `os.open` relative to a directory fd outside the tree (the
+    event does not carry the fd), and `mkdir(exist_ok=True)` on a directory
+    that is already there. A bare-name builtin `open()` IS a write to the cwd,
+    and a NEW directory is a write, and both must still be seen."""
     root = tmp_path / "tree"
     (root / "programs").mkdir(parents=True)
     (root / "programs" / "real.py").write_text("x\n")
@@ -98,6 +131,16 @@ def test_the_audit_sees_a_write_and_only_a_write(tmp_path):
         if hasattr(os, "O_TMPFILE"):
             os.close(os.open(str(root / "programs"),
                              os.O_TMPFILE | os.O_RDWR, 0o600))
+        fd = os.open(str(scratch), os.O_RDONLY)
+        os.close(os.open("fd_relative.tmp", os.O_CREAT | os.O_WRONLY, 0o600,
+                         dir_fd=fd))
+        os.close(fd)
+        with open("cwd_relative.txt", "w") as fh:
+            fh.write("x")
+        os.remove("cwd_relative.txt")
+        (root / "programs").mkdir(exist_ok=True)
+        (root / "programs" / "new_dir").mkdir()
+        (root / "programs" / "new_dir").rmdir()
     """))
     work = tmp_path / "work"
     work.mkdir()
@@ -111,7 +154,11 @@ def test_the_audit_sees_a_write_and_only_a_write(tmp_path):
     seen = {(e["event"], e["path"]) for e in events}
     assert ("open", "programs/probe.py") in seen, events
     assert ("os.remove", "programs/probe.py") in seen, events
-    assert {e["path"] for e in events} == {"programs/probe.py"}, (
+    assert ("open", "cwd_relative.txt") in seen, events
+    assert ("os.mkdir", "programs/new_dir") in seen, events
+    assert {e["path"] for e in events} == {"programs/probe.py",
+                                          "cwd_relative.txt",
+                                          "programs/new_dir"}, (
         "the audit reported a write the child never made under the tree: "
         f"{sorted(seen)}")
     assert (root / "programs" / "real.py").read_text() == "x\n"
