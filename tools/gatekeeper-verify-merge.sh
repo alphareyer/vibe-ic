@@ -127,14 +127,6 @@
 #     gh pr merge 1021 --squash
 #     tools/gatekeeper-verify-merge.sh --reassert /tmp/v.json     # if time passed
 #
-# If ONLY the commit packaging changed after a complete verdict (same base,
-# final tree and canonical path/mode/blob delta), rebind that evidence instead
-# of re-running all expensive arms. The actual push population still has to
-# pass every cheap BASE-owned gate first:
-#
-#     tools/gatekeeper-verify-merge.sh --rebind /tmp/old.json \
-#       --ref <one-commit-ref> --json /tmp/rebound.json
-#
 # The verdict is about a BASE. If `origin/main` moves before the merge, the
 # verdict is stale — `--reassert` says so rather than letting a stale pass land.
 #
@@ -142,16 +134,11 @@
 #   gatekeeper-verify-merge.sh <pr-number> [options]
 #   gatekeeper-verify-merge.sh --ref <ref> [options]
 #   gatekeeper-verify-merge.sh --reassert <verdict.json>
-#   gatekeeper-verify-merge.sh --rebind <verdict.json> --ref <ref> --json <out>
 #
 # Options:
 #   --base <ref>        base the PR would land on          (default origin/main)
 #   --repo <path>       repository to operate on   (default: this script's repo)
 #   --json <path>       write the verdict JSON
-#   --rebind <path>     identity-only rebind of a complete prior LAND_OK;
-#                       requires an exact one-commit BASE parent, unchanged
-#                       final tree/delta, fresh protected tuple receipt, and
-#                       PASS from every cheap gate on the actual push range
 #   --no-fetch          do not touch the network (local refs must already exist)
 #   --require-version-bump
 #                       demand the version bump in the PR itself. OFF by
@@ -169,7 +156,7 @@
 #                       critical-path waits. Every bundle is terminal-validated.
 set -uo pipefail
 
-PR=""; REF=""; BASE="origin/main"; JSON_OUT=""; REASSERT=""; REBIND=""
+PR=""; REF=""; BASE="origin/main"; JSON_OUT=""; REASSERT=""
 NO_FETCH=0; KEEP=0; REQUIRE_VERSION_BUMP=0; BASE_GATE_CACHE=""
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO=""
@@ -196,12 +183,11 @@ while [ $# -gt 0 ]; do
     --repo)     REPO="${2:?}"; shift 2 ;;
     --json)     JSON_OUT="${2:?}"; shift 2 ;;
     --reassert) REASSERT="${2:?}"; shift 2 ;;
-    --rebind)   REBIND="${2:?}"; shift 2 ;;
     --no-fetch) NO_FETCH=1; shift ;;
     --keep)     KEEP=1; shift ;;
     --base-gate-cache) BASE_GATE_CACHE="${2:?}"; shift 2 ;;
     --require-version-bump) REQUIRE_VERSION_BUMP=1; shift ;;
-    -h|--help)  sed -n '1,149p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help)  sed -n '1,156p' "${BASH_SOURCE[0]}"; exit 0 ;;
     -*)         die "unknown option $1" ;;
     *)          [ -n "$PR" ] && die "more than one PR number given"
                 PR="$1"; shift ;;
@@ -217,35 +203,16 @@ if [ -n "$BASE_GATE_CACHE" ]; then
   BASE_GATE_CACHE=""
 fi
 
-# Fixed host provision point. No environment or candidate CLI can choose this
-# store. The operator invokes controller/tools/ci/protected_runtime_store.py
-# verify; it dispatches the exact externally active bundle's verifier.
-CONTROLLER_STORE=/var/lib/vibeic/landing-runtime
-CONTROLLER_HELPER="$CONTROLLER_STORE/controller/tools/ci/protected_runtime_store.py"
-CONTROLLER_MODE=0
-if [ -e "$CONTROLLER_STORE" ] || [ -L "$CONTROLLER_STORE" ]; then
-  [ -d "$CONTROLLER_STORE" ] && [ ! -L "$CONTROLLER_STORE" ] \
-    || die "controller runtime store is malformed; no legacy fallback"
-  PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$CONTROLLER_HELPER" bootstrap \
-    --verifier "$SELF/gatekeeper-verify-merge.sh" \
-    || die "running verifier has no external runtime authority"
-  CONTROLLER_MODE=1
-  SELF_REPO="$(cd "$SELF/.." && pwd)"
-else
-  SELF_REPO="$(git -C "$SELF" rev-parse --show-toplevel 2>/dev/null)"
-fi
+SELF_REPO="$(git -C "$SELF" rev-parse --show-toplevel 2>/dev/null)"
 [ -z "$REPO" ] && REPO="$SELF_REPO"
 [ -n "$REPO" ] || die "no repository (pass --repo)"
 REPO="$(cd "$REPO" && pwd)"
 G=(git -C "$REPO")
-[ -z "$REASSERT" ] || [ -z "$REBIND" ] \
-  || die "--reassert and --rebind are mutually exclusive"
 
 derive_push_range() {
   # Name the exact unpublished range when REF is a local branch.  If the head
   # is already published (or REF is an object id), re-run the cheap gates over
-  # the one base->head delta; a packaging rebind is constrained to one commit
-  # on BASE, so the two populations are then identical.
+  # the one base->head delta.
   local ref="$1" head="$2" base="$3" branch="" remote="" remote_sha=""
   case "$ref" in
     refs/heads/*) branch="${ref#refs/heads/}" ;;
@@ -276,8 +243,6 @@ derive_push_range() {
 # create. This is the time dimension of "verified the wrong tree", and it is the
 # cheap half — no worktree, no tests, just two `rev-parse`s.
 if [ -n "$REASSERT" ]; then
-  [ "$CONTROLLER_MODE" = 0 ] \
-    || die "controller runtime reassert requires a fresh verify; legacy reassert cannot authorize a bundle verdict"
   [ -f "$REASSERT" ] || die "--reassert: no such file: $REASSERT"
   read -r WAS_BASE WAS_HEAD WAS_VERDICT < <(python3 - "$REASSERT" <<'PY'
 import json, sys
@@ -316,106 +281,8 @@ PY
     || die "--reassert: recorded base has no verifier"
   [ "$REASSERT_VERIFIER_BLOB" = "$REASSERT_BASE_VERIFIER_BLOB" ] \
     || die "--reassert: running verifier is not the recorded BASE authority"
-  REASSERT_VALIDATOR="$SELF_REPO/tools/ci/protected_landing_transition.py"
-  REASSERT_VALIDATOR_BLOB="$(git -C "$SELF_REPO" hash-object --no-filters \
-    "$REASSERT_VALIDATOR" 2>/dev/null)" \
-    || die "--reassert: cannot hash the protected transition validator"
-  REASSERT_BASE_VALIDATOR_BLOB="$("${G[@]}" rev-parse \
-    "$WAS_BASE:tools/ci/protected_landing_transition.py" 2>/dev/null)" \
-    || die "--reassert: recorded base has no protected transition validator"
-  [ "$REASSERT_VALIDATOR_BLOB" = "$REASSERT_BASE_VALIDATOR_BLOB" ] \
-    || die "--reassert: transition validator is not the recorded BASE byte"
-  PYTHONDONTWRITEBYTECODE=1 python3 -B "$REASSERT_VALIDATOR" \
-      validate-verdict --verdict "$REASSERT" \
-      --expected-base "$WAS_BASE" --expected-head "$WAS_HEAD" \
-      --object-repo "$REPO" \
-    || die "--reassert: protected transition receipt is missing or changed"
   echo "REASSERT: OK — $BASE is still ${WAS_BASE:0:12}, head still ${WAS_HEAD:0:12}"
   exit 0
-fi
-
-# --------------------------------------------------------------- --rebind
-# A packaging rewrite changes commit ids, not functionality.  Re-running the
-# full differential verifier is justified only if the BASE or final tree changed.
-# This path proves they did not, re-runs the cheap BASE-owned push gates over
-# the actual unpublished range, rebuilds the protected tuple receipt for the
-# new one-commit head, and emits a self-contained REBOUND_FROM verdict.
-if [ -n "$REBIND" ]; then
-  [ "$CONTROLLER_MODE" = 0 ] \
-    || die "controller runtime rebind requires a fresh verify; legacy packaging receipts cannot authorize a bundle verdict"
-  [ -z "$PR" ] || die "--rebind accepts --ref, not a PR number"
-  [ -n "$REF" ] || die "--rebind requires --ref <new-head>"
-  [ -n "$JSON_OUT" ] || die "--rebind requires --json <rebound-verdict>"
-  [ -f "$REBIND" ] || die "--rebind: no such old verdict: $REBIND"
-  [ "$NO_FETCH" = "1" ] || "${G[@]}" fetch -q origin main 2>/dev/null
-  REBIND_BASE="$("${G[@]}" rev-parse "$BASE" 2>/dev/null)" \
-    || die "--rebind: cannot resolve $BASE"
-  REBIND_HEAD="$("${G[@]}" rev-parse "$REF" 2>/dev/null)" \
-    || die "--rebind: cannot resolve $REF"
-  REBIND_VERIFIER_BLOB="$(git -C "$SELF_REPO" hash-object --no-filters \
-    "$SELF/gatekeeper-verify-merge.sh" 2>/dev/null)" \
-    || die "--rebind: cannot hash the running verifier"
-  REBIND_BASE_VERIFIER_BLOB="$("${G[@]}" rev-parse \
-    "$REBIND_BASE:tools/gatekeeper-verify-merge.sh" 2>/dev/null)" \
-    || die "--rebind: base has no merge verifier"
-  [ "$REBIND_VERIFIER_BLOB" = "$REBIND_BASE_VERIFIER_BLOB" ] \
-    || die "--rebind: running verifier is not the exact BASE authority"
-  REBIND_VALIDATOR="$SELF_REPO/tools/ci/protected_landing_transition.py"
-  REBIND_VALIDATOR_BLOB="$(git -C "$SELF_REPO" hash-object --no-filters \
-    "$REBIND_VALIDATOR" 2>/dev/null)" \
-    || die "--rebind: cannot hash the transition validator"
-  REBIND_BASE_VALIDATOR_BLOB="$("${G[@]}" rev-parse \
-    "$REBIND_BASE:tools/ci/protected_landing_transition.py" 2>/dev/null)" \
-    || die "--rebind: base has no transition validator"
-  [ "$REBIND_VALIDATOR_BLOB" = "$REBIND_BASE_VALIDATOR_BLOB" ] \
-    || die "--rebind: transition validator is not the exact BASE byte"
-
-  REBIND_RUN="$(mktemp -d -t gkrebind.XXXXXX)"
-  REBIND_GATES="$REBIND_RUN/candidate-gates"
-  REBIND_TESTS="$REBIND_RUN/candidate-tests"
-  REBIND_PREFLIGHT="$REBIND_RUN/push-preflight.json"
-  REBIND_PROTECTED="$REBIND_RUN/protected-transition.json"
-  rebind_cleanup() {
-    "${G[@]}" worktree remove --force "$REBIND_GATES" >/dev/null 2>&1 || true
-    "${G[@]}" worktree remove --force "$REBIND_TESTS" >/dev/null 2>&1 || true
-    rm -rf "$REBIND_RUN"
-  }
-  rebind_signal_exit() {
-    local rc="$1"
-    trap - INT TERM
-    exit "$rc"
-  }
-  trap rebind_cleanup EXIT
-  trap 'rebind_signal_exit 130' INT
-  trap 'rebind_signal_exit 143' TERM
-  derive_push_range "$REF" "$REBIND_HEAD" "$REBIND_BASE"
-  echo "=== landing verdict packaging rebind ==="
-  echo "--- base=${REBIND_BASE:0:12} head=${REBIND_HEAD:0:12}"
-  echo "--- push-range=$PUSH_RANGE ($PUSH_RANGE_SOURCE)"
-  PYTHONDONTWRITEBYTECODE=1 python3 -B "$REBIND_VALIDATOR" push-preflight \
-      --object-repo "$REPO" --base "$REBIND_BASE" \
-      --candidate "$REBIND_HEAD" --push-range "$PUSH_RANGE" \
-      --receipt "$REBIND_PREFLIGHT"
-  REBIND_PREFLIGHT_RC=$?
-  if [ "$REBIND_PREFLIGHT_RC" -ne 0 ]; then
-    [ ! -f "$REBIND_PREFLIGHT" ] || cp "$REBIND_PREFLIGHT" "$JSON_OUT"
-    exit "$REBIND_PREFLIGHT_RC"
-  fi
-  "${G[@]}" worktree add -q --detach "$REBIND_GATES" "$REBIND_HEAD" \
-    || die "--rebind: cannot create candidate-gates worktree"
-  "${G[@]}" worktree add -q --detach "$REBIND_TESTS" "$REBIND_HEAD" \
-    || die "--rebind: cannot create candidate-tests worktree"
-  PYTHONDONTWRITEBYTECODE=1 python3 -B "$REBIND_VALIDATOR" verify \
-      --object-repo "$REPO" --base "$REBIND_BASE" \
-      --candidate "$REBIND_HEAD" --candidate-gates "$REBIND_GATES" \
-      --candidate-tests "$REBIND_TESTS" --receipt "$REBIND_PROTECTED" \
-    || die "--rebind: protected tuple could not be re-attested"
-  PYTHONDONTWRITEBYTECODE=1 python3 -B "$REBIND_VALIDATOR" rebind-verdict \
-      --object-repo "$REPO" --base "$REBIND_BASE" \
-      --candidate "$REBIND_HEAD" --old-verdict "$REBIND" \
-      --push-preflight "$REBIND_PREFLIGHT" \
-      --protected-transition "$REBIND_PROTECTED" --receipt "$JSON_OUT"
-  exit $?
 fi
 
 [ -n "$PR" ] || [ -n "$REF" ] || die "give a PR number or --ref <ref>"
@@ -441,19 +308,9 @@ BENCHMARK_A2_ADDED=0
 BENCHMARK_B2_ADDED=0
 BENCHMARK_POST_FAILURE=0
 TRUSTED_TRANSITION_EVIDENCE="$RUN/trusted-routed-transition-evidence.json"
-PROTECTED_PRE="$RUN/protected-landing-transition.pre.json"
-PROTECTED_POST="$RUN/protected-landing-transition.post.json"
-PROTECTED_PRE_SHA256=""
-PROTECTED_ARGS=()
-PROTECTED_OPERATION=""
 RUNTIME_AUTHORITY_COMMIT=""
-RUNTIME_SNAPSHOT="$RUN/protected-runtime"
-RUNTIME_RECORD="$RUN/protected-runtime.json"
-RUNTIME_SHA256=""
-RUNTIME_OBJECT_REPO="$REPO"
+RUNTIME_SNAPSHOT="$RUN/base-runtime"
 BASE_SELECTOR_SNAPSHOT="$WT_TRUSTED"
-SELECTOR_REPO_ARGS=()
-PUSH_RUNTIME_ARGS=()
 CAND_SUBJECT="$RUN/candidate-subject"
 BASE_SUBJECT="$RUN/base-subject"
 CAND_SUBJECT_RECORD="$RUN/candidate-subject.json"
@@ -525,54 +382,28 @@ run_owned_operational() {
     "${GATEKEEPER_OPERATIONAL_STALL_GRACE:-300}" -- "$@"
 }
 
-validate_protected_landing_transition() {
-  local receipt="$1"
-  if [ "$CONTROLLER_MODE" = 1 ]; then
-    PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$CONTROLLER_HELPER" subject-receipt \
-      --object-repo "$REPO" --base "$BASE_SHA" --candidate "$VERIFIED_SHA" \
-      --candidate-gates "$WT_CAND" --candidate-tests "$WT_CAND_TESTS" \
-      --runtime "$RUNTIME_SNAPSHOT" --expected-runtime-sha256 "$RUNTIME_SHA256" \
-      --record "$receipt"
-    return $?
-  fi
-  run_owned_operational "$TRUSTED_REPO" \
-    python3 "$TRUSTED_REPO/tools/ci/protected_landing_transition.py" verify \
-      --object-repo "$REPO" --base "$BASE_SHA" \
-      --candidate "$VERIFIED_SHA" \
-      --candidate-gates "$WT_CAND" \
-      --candidate-tests "$WT_CAND_TESTS" \
-      --receipt "$receipt"
-}
-
-materialize_protected_runtime() {
-  local selected runtime_root runtime_state
-  if [ "$CONTROLLER_MODE" = 1 ]; then
-    PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$CONTROLLER_HELPER" attest \
-      --runtime "$RUNTIME_SNAPSHOT" --expected-runtime-sha256 "$RUNTIME_SHA256" \
-      || die "externally approved runtime changed before arm launch"
-    return 0
-  fi
-  selected="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
-    "$TRUSTED_REPO/tools/ci/protected_landing_transition.py" select-runtime \
-      --receipt "$PROTECTED_PRE" \
-      --expected-base "$BASE_SHA" --expected-candidate "$VERIFIED_SHA" \
-      --expected-base-tree "$BASE_TREE" \
-      --expected-candidate-tree "$VERIFIED_TREE" \
-      --require-semantic-runtime)" \
-    || die "BASE-predeclared semantic landing runtime is not active"
-  IFS=$'\t' read -r runtime_root runtime_state <<< "$selected"
-  case "$runtime_root" in
-    candidate) RUNTIME_AUTHORITY_COMMIT="$VERIFIED_SHA" ;;
-    base) RUNTIME_AUTHORITY_COMMIT="$BASE_SHA" ;;
-    *) die "protected transition selected no executable runtime root" ;;
-  esac
-  echo "--- protected runtime=$runtime_root/$runtime_state"
-  run_owned_operational "$TRUSTED_REPO" \
-    python3 "$TRUSTED_REPO/tools/ci/protected_runtime_snapshot.py" \
-      materialize --object-repo "$REPO" --receipt "$PROTECTED_PRE" \
-      --base-snapshot "$TRUSTED_REPO" --snapshot "$RUNTIME_SNAPSHOT" \
-      --record "$RUNTIME_RECORD" \
-    || die "cannot materialize the one BASE-authorised landing runtime"
+# THE LANDING RUNTIME IS THE BASE.  Both arms execute one copy of the exact
+# BASE commit's tree, raw-attested against BASE's objects before any of it runs;
+# a candidate never supplies the code that judges it.  A change to that code
+# takes effect once it has landed -- one landing, not a PREPARE-then-ACTIVATE pair
+# (owner ruling 2026-09-27: "remove all such two-step push! THAT IS USELESS!").
+# The copy outlives the trusted snapshot, which is rematerialized after the
+# candidate arms, so every arm receipt binds the same runtime bytes.
+materialize_base_runtime() {
+  case "$RUNTIME_SNAPSHOT" in "$RUN"/*) ;; *) die "unsafe runtime snapshot path" ;; esac
+  [ ! -e "$RUNTIME_SNAPSHOT" ] || die "landing runtime already exists"
+  cp -a -- "$TRUSTED_REPO" "$RUNTIME_SNAPSHOT" \
+    || die "cannot materialize the BASE landing runtime"
+  # trusted-base-tools is parent-private (0700), while the runtime is consumed
+  # through a read-only bind by uid 65534: publish traverse/read on the root.
+  chmod 0755 "$RUNTIME_SNAPSHOT" || die "cannot publish the BASE landing runtime"
+  PYTHONDONTWRITEBYTECODE=1 python3 -B \
+      "$TRUSTED_REPO/tools/ci/trusted_worktree_attest.py" \
+      --object-repo "$REPO" --snapshot "$RUNTIME_SNAPSHOT" \
+      --expected-sha "$BASE_SHA" \
+    || die "BASE landing runtime failed raw-byte attestation"
+  RUNTIME_AUTHORITY_COMMIT="$BASE_SHA"
+  echo "--- landing runtime=base ${BASE_SHA:0:12}"
 }
 
 materialize_hermetic_git_subject() {
@@ -589,7 +420,6 @@ build_trusted_test_selection() {
     python3 "$RUNTIME_SNAPSHOT/tools/ci/trusted_test_selection.py" \
       --object-repo "$REPO" --base "$BASE_SHA" --candidate "$VERIFIED_SHA" \
       --selector-commit "$RUNTIME_AUTHORITY_COMMIT" \
-      "${SELECTOR_REPO_ARGS[@]}" \
       --selector-path "$RUNTIME_SNAPSHOT/$PLUGIN_REL/programs/ci_targeted_test_select.py" \
       --base-snapshot "$BASE_SELECTOR_SNAPSHOT" \
       --candidate-snapshot "$WT_CAND" \
@@ -780,35 +610,6 @@ PY
 }
 
 refresh_and_attest_trusted_tools() {
-  if [ "$CONTROLLER_MODE" = 1 ]; then
-    if [ -z "$RUNTIME_SHA256" ]; then
-      local selected
-      selected="$(PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$CONTROLLER_HELPER" \
-        select --output "$RUNTIME_SNAPSHOT")" \
-        || die "cannot select externally approved runtime"
-      IFS=$'\t' read -r RUNTIME_SHA256 RUNTIME_AUTHORITY_COMMIT RUNTIME_OBJECT_REPO <<< "$selected"
-      [ -n "$RUNTIME_SHA256" ] && [ -n "$RUNTIME_AUTHORITY_COMMIT" ] && [ -n "$RUNTIME_OBJECT_REPO" ] \
-        || die "controller selection omitted exact runtime provenance"
-      SELECTOR_REPO_ARGS=(--selector-object-repo "$RUNTIME_OBJECT_REPO")
-      PUSH_RUNTIME_ARGS=(--authority-object-repo "$RUNTIME_OBJECT_REPO"
-                         --authority-commit "$RUNTIME_AUTHORITY_COMMIT")
-    else
-      PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$CONTROLLER_HELPER" attest \
-        --runtime "$RUNTIME_SNAPSHOT" --expected-runtime-sha256 "$RUNTIME_SHA256" \
-        || die "runtime choice or bytes changed during verification"
-    fi
-    TRUSTED_REPO="$RUNTIME_SNAPSHOT"
-    BASE_SELECTOR_SNAPSHOT="$RUN/product-base-selection"
-    case "$BASE_SELECTOR_SNAPSHOT" in "$RUN"/*) ;; *) die "unsafe product snapshot path" ;; esac
-    rm -rf -- "$BASE_SELECTOR_SNAPSHOT"
-    mkdir -m 0700 -- "$BASE_SELECTOR_SNAPSHOT"
-    "${G[@]}" archive --format=tar "$BASE_SHA" | tar -xf - -C "$BASE_SELECTOR_SNAPSHOT" \
-      || die "cannot materialize product BASE for exact selection"
-    PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$TRUSTED_REPO/tools/ci/trusted_worktree_attest.py" \
-      --object-repo "$REPO" --snapshot "$BASE_SELECTOR_SNAPSHOT" --expected-sha "$BASE_SHA" \
-      || die "product BASE selection snapshot failed raw-byte attestation"
-    return 0
-  fi
   # Untrusted arms know RUN and share this uid.  Natural wrapper exit plus the
   # owned final census proves they have no surviving writer; only then discard
   # the old tool worktree, rematerialize BASE, and byte-attest every tracked
@@ -1189,7 +990,6 @@ BASE_TREE="$("${G[@]}" rev-parse "$BASE_SHA^{tree}" 2>/dev/null)" \
 # candidate may contain the same path, but it cannot use its edited verifier as
 # landing authority.  Phase 1 is therefore judged by the already-trusted old
 # verifier; after phase 1 lands, phase 2's unchanged verifier matches BASE.
-if [ "$CONTROLLER_MODE" = 0 ]; then
 SELF_VERIFIER_BLOB="$(git -C "$SELF_REPO" hash-object --no-filters \
   "$SELF/gatekeeper-verify-merge.sh" 2>/dev/null)" \
   || die "cannot hash the running verifier bytes"
@@ -1198,7 +998,6 @@ BASE_VERIFIER_BLOB="$("${G[@]}" rev-parse \
   || die "base does not carry the trusted merge verifier"
 [ "$SELF_VERIFIER_BLOB" = "$BASE_VERIFIER_BLOB" ] \
   || die "running verifier is not the exact base-owned verifier; invoke the copy from current main"
-fi
 if [ -n "$("${G[@]}" for-each-ref --format='%(refname)' refs/replace \
      2>/dev/null)" ]; then
   die "repository has active refs/replace; the verified object graph is not canonical"
@@ -1237,10 +1036,9 @@ fi
 echo "--- push-range=$PUSH_RANGE ($PUSH_RANGE_SOURCE)"
 PUSH_PREFLIGHT_RC=0
 PYTHONDONTWRITEBYTECODE=1 python3 -B \
-    "$TRUSTED_REPO/tools/ci/protected_landing_transition.py" push-preflight \
+    "$TRUSTED_REPO/tools/ci/landing_push_preflight.py" \
     --object-repo "$REPO" --base "$BASE_SHA" \
     --candidate "$HEAD_SHA" --push-range "$PUSH_RANGE" \
-    "${PUSH_RUNTIME_ARGS[@]}" \
     --receipt "$PUSH_PREFLIGHT_RECEIPT" \
   || PUSH_PREFLIGHT_RC=$?
 if [ "$PUSH_PREFLIGHT_RC" -ne 0 ]; then
@@ -1475,9 +1273,8 @@ done < <("${G[@]}" diff --name-only "$BASE_SHA" "$REBASED_SHA" -- \
             tools/ci/hermetic_progress_emit.py \
             tools/ci/hermetic_test_arm_entry.sh \
             tools/ci/landing_completion_record.py \
-            tools/ci/protected_landing_transition.py \
-            tools/ci/protected_landing_transition.json \
-            tools/ci/protected_runtime_snapshot.py \
+            tools/ci/landing_push_preflight.py \
+            tools/ci/landing_record_primitives.py \
             tools/ci/trusted_test_selection.py \
             tools/ci/trusted_worktree_attest.py tools/git-hooks/pre-push \
             "$PLUGIN_REL/programs/_owned_process_supervisor.py" \
@@ -1496,11 +1293,7 @@ if [ "$SHORT_CIRCUIT" = "0" ]; then
   prepare_benchmark_snapshots
   "${G[@]}" worktree add -q --detach "$WT_CAND_TESTS" "$VERIFIED_SHA" \
     || die "cannot create the candidate-test worktree"
-  validate_protected_landing_transition "$PROTECTED_PRE" \
-    || die "protected landing source tuple is not BASE-authorised"
-  PROTECTED_PRE_SHA256="$(sha256sum "$PROTECTED_PRE" | awk '{print $1}')" \
-    || die "cannot bind the pre-arm protected landing receipt"
-  materialize_protected_runtime
+  materialize_base_runtime
   build_trusted_test_selection
 
   # BETWEEN THE SELECTOR AND THE RUNNER, which is the position
@@ -1602,18 +1395,9 @@ if [ "$SHORT_CIRCUIT" = "0" ]; then
     "$B2_VALIDATION" landing-completion.json "$VERIFIED_SHA"
   B2_RC=$LAST_ARM_RC
 
-  # No BASE pathname or result existed while candidate code ran.  Rebuild the
-  # trusted authority and require the protected PRE receipt to reproduce byte
-  # for byte before creating the base wave.
+  # No BASE pathname or result existed while candidate code ran.  Rebuild and
+  # re-attest the trusted authority before creating the base wave.
   refresh_and_attest_trusted_tools
-  validate_protected_landing_transition "$PROTECTED_POST" \
-    || die "protected landing tuple cannot be re-attested after candidate exit"
-  [ "$(sha256sum "$PROTECTED_POST" | awk '{print $1}')" = \
-      "$PROTECTED_PRE_SHA256" ] \
-    || die "protected landing transition receipt changed across candidate arms"
-  cmp -s -- "$PROTECTED_PRE" "$PROTECTED_POST" \
-    || die "protected landing transition PRE/POST records differ"
-  PROTECTED_ARGS=(--protected-transition-receipt "$PROTECTED_POST")
 
   clear_base_wave_artifacts
   prepare_base_wave
@@ -1626,7 +1410,6 @@ if [ "$SHORT_CIRCUIT" = "0" ]; then
     python3 "$RUNTIME_SNAPSHOT/tools/ci/trusted_test_selection.py" \
       --object-repo "$REPO" --base "$BASE_SHA" --candidate "$VERIFIED_SHA" \
       --selector-commit "$RUNTIME_AUTHORITY_COMMIT" \
-      "${SELECTOR_REPO_ARGS[@]}" \
       --selector-path "$RUNTIME_SNAPSHOT/$PLUGIN_REL/programs/ci_targeted_test_select.py" \
       --base-snapshot "$BASE_SELECTOR_SNAPSHOT" \
       --candidate-snapshot "$WT_CAND" \
@@ -1715,11 +1498,6 @@ else
 fi
 
 # --------------------------------------------------------------- 7. the verdict
-if [ "$CONTROLLER_MODE" = 1 ]; then
-  PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$CONTROLLER_HELPER" attest \
-    --runtime "$RUNTIME_SNAPSHOT" --expected-runtime-sha256 "$RUNTIME_SHA256" \
-    || die "final judge runtime lost its external approval or byte identity"
-fi
 [ -f "$VERDICT_PROG" ] || die "no verdict program at $VERDICT_PROG"
 python3 "$VERDICT_PROG" \
   --base-sha "$BASE_SHA" --base-tree "$BASE_TREE" --head-sha "$HEAD_SHA" \
@@ -1732,7 +1510,6 @@ python3 "$VERDICT_PROG" \
   --base-junit "$BASE_JUNIT" --candidate-junit "$CAND_JUNIT" \
   "${HYG_ARGS[@]+"${HYG_ARGS[@]}"}" \
   "${TRANSITION_ARGS[@]+"${TRANSITION_ARGS[@]}"}" \
-  "${PROTECTED_ARGS[@]+"${PROTECTED_ARGS[@]}"}" \
   --candidate-gate-rc "$B2_RC" --require-composite-gate-record \
   --candidate-test-worktree-status "$B1_WORKTREE_STATUS" \
   --base-test-worktree-status "$A1_WORKTREE_STATUS" \

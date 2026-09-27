@@ -91,12 +91,6 @@ never re-implemented):
                                          red on the next reorganisation and
                                          reads as a regression in whatever
                                          change is in flight
-  * content_pinned_authority_verified_only_at_merge.py — ADVISORY: the
-                                         authority manifest's readers all ran
-                                         AT THE MERGE, so a pin that no longer
-                                         describes the tree was reported after
-                                         the point of repair; this is the early
-                                         reader, and it never blocks
   * ci_ran_at_all_check.py             — an absent CI run is DISCLOSED,
                                          never rendered as a passing one
   * ppa_pr_scope_check.py              — the PPA Appendix-C merge
@@ -237,8 +231,7 @@ from typing import Dict, List, Optional, Tuple
 # earlier, and one unguarded interpreter reddened two gates.
 #
 # WHY AN ASSIGNMENT HERE RATHER THAN `-B` AT THE CALLER. `-B` would have to be
-# added to `tools/gatekeeper-land.sh`, which is a PROTECTED landing-runtime path
-# whose every edit needs a base-authorised PREPARE/ACTIVATE transition. This
+# added to every caller, starting with `tools/gatekeeper-land.sh`. This
 # assignment is the same guarantee owned by the program that needs it, and it
 # holds however the program is started -- including the hand-run path this file
 # calls "the gate a maintainer runs", where no landing driver exists to export
@@ -874,62 +867,6 @@ def real_artefact_backing_gate(repo: Path, base: str, head: str) -> GateResult:
     summary = (body[0] if body else "(no output)")[:240]
     return GateResult("real_artefact_test_backing_check", 0,
                       f"ADVISORY — {summary}")
-
-
-# --------------------------------------------------------------------------
-# content_pinned_authority_verified_only_at_merge — ADVISORY.
-#
-# A tracked manifest pins the content hash of the protected authority paths,
-# and until now its ONLY readers ran AT THE MERGE: the merge-time verification
-# script, the manifest author, the trusted-selection helper, the census tool
-# and two unit tests. `tools/ci/repo_hygiene_gates.sh` mentions it exactly once
-# and that occurrence is a COMMENT, so no pre-merge check ever compared a pin
-# against the tree. The verdict was correct and arrived after the point of
-# repair, which is a different defect from a verdict that is wrong.
-#
-# This is where the early reader belongs: gatekeeper_review is the gate a
-# maintainer runs BEFORE every push, so the author learns that the manifest
-# describes no tree that exists while the manifest is still theirs to
-# re-render.
-#
-# NEVER BLOCKING, and NEVER `--strict`. A mismatch on a branch that legitimately
-# edits a pinned path is the EXPECTED state — blocking it would refuse the very
-# change the manifest exists to record — and the program's own header says
-# "VERDICT CLASS: ADVISORY ... it must stay advisory". Measured on this tree at
-# the time of wiring: 13 pinned paths hash to neither transition state, on
-# trunk, so a strict wiring here would refuse thirteen pre-existing changes
-# nothing on the producing side ever flagged. rc 2 is CANNOT DETERMINE (no
-# manifest under this root) and is disclosed as a skip, never as a pass.
-# --------------------------------------------------------------------------
-def pinned_authority_gate(repo: Path) -> GateResult:
-    name = "content_pinned_authority_verified_only_at_merge"
-    prog = _PROGRAMS_DIR / f"{name}.py"
-    if not prog.is_file():
-        return GateResult(name, -1, f"checker missing at {prog}")
-    rc, out, err = _run_program(prog, ["--root", str(repo)])
-    body = [ln.strip() for ln in (out.strip() or err.strip()).splitlines()
-            if ln.strip()]
-    if rc == 2:
-        return GateResult(name, -1,
-                          (body[0] if body else "cannot determine")[:240])
-    if rc != 0:
-        # Only 0 and 2 are verdicts this program can reach without `--strict`,
-        # which is not passed. Anything else (a timeout's 124, an argparse 3)
-        # is the CALLER's defect, and laundering it into an ADVISORY line would
-        # print a report over a run that never produced one.
-        return GateResult(name, -1,
-                          f"skipped — unexpected rc {rc}: "
-                          f"{(body[0] if body else '(no output)')[:200]}")
-    warn = [ln for ln in body if ln.startswith("[WARN]")]
-    neither = [ln for ln in body if ln.lower().startswith("hashing to neither")]
-    if warn:
-        summary = warn[0]
-    elif neither:
-        summary = neither[0]
-    else:
-        summary = (body[0] if body else "(no output)")
-    # rc is forced to 0 on the program's own written instruction.
-    return GateResult(name, 0, f"ADVISORY — {summary[:240]}")
 
 
 # --------------------------------------------------------------------------
@@ -2557,7 +2494,6 @@ def review(base: str, head: str, *,
     gates.append(real_artefact_backing_gate(repo, base, head))
     gates.append(corpus_pin_scan_gate(plugin_root))
     gates.append(acceptance_control_gate(repo, base, head))
-    gates.append(pinned_authority_gate(repo))
     gates.append(ppa_pr_scope_gate(repo, base, head))
     gates.append(loop_watchdog_gate(plugin_root))
     gates.append(plugin_audit_gate(plugin_root))

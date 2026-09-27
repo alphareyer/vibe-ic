@@ -62,7 +62,7 @@ numbers in the text.
 WHAT IS COMPARED, AND HOW
 =========================
 The pin is read from `--schedule` by `ast` and NEVER by import: the file it
-names is a protected path that imports two siblings at module scope, and a gate
+names is a landing-runtime file that imports two siblings at module scope, and a gate
 should not have to execute its subject to read a literal out of it.
 
 The live count comes from ONE `pytest --collect-only -q` over all the declared
@@ -77,8 +77,8 @@ BOTH SIDES COME FROM THE SUBJECT TREE, NOT FROM THE INSTRUMENT.  The question is
 whether the tree that ships is self-consistent, so a landing that adds a test AND
 moves the pin is green and a landing that adds one WITHOUT moving it is red.
 Reading the pin from the base instead would refuse the very landing that repairs
-it.  The candidate cannot cheat by moving the pin freely: the schedule is a
-protected path and only PREPARE/ACTIVATE can move it.
+it.  The candidate cannot cheat by moving the pin: the merge verifier executes
+the BASE copy of the schedule, so a moved pin governs nothing until it lands.
 
 EXIT CODES
 ==========
@@ -263,8 +263,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if findings:
         print("[FAIL] nested_progress_pin: %d of %d declared file(s) carry a "
               "stale item pin in %s. Move the pin in the same landing that "
-              "moved the population -- that file is a protected path, so the "
-              "move goes through tools/ci/protected_landing_prepare.sh."
+              "moved the population, in that same landing."
               % (len(findings), len(pinned), args.schedule), file=sys.stderr)
         return 1
     total = sum(len(nodes) for nodes in collected.values())

@@ -1982,7 +1982,7 @@ run "no gate is left neutered"          "$PLUGIN" python3 programs/neutered_gate
 #
 #   CAPABILITY, measured: `-p pytest_timeout` is a hard import, and
 #   `pytest-timeout` is absent from `ghcr.io/vibeic/vibeic-eda@sha256:66c33ff2`
-#   (the image named by `protected_landing_transition.json` .runner.image) and
+#   (the image the hermetic landing runner resolved at the time) and
 #   from every 0.2.x/0.3.x tag of it on this host. There, this exact line did
 #   not run 108 tests and report zero failures — it exited before collection
 #   with `ImportError: Error importing plugin "pytest_timeout"`. The only lane
@@ -1992,7 +1992,7 @@ run "no gate is left neutered"          "$PLUGIN" python3 programs/neutered_gate
 #
 #   DOCTRINE, already settled: `tools/gatekeeper-land.sh` dropped this idiom at
 #   v1.10.69 and TWO live tests forbid its return
-#   (`tools/ci/test_phase_b_activated_parity.py::test_the_activated_runtime_no_
+#   (`tools/ci/test_landing_runtime_invariants.py::test_the_activated_runtime_no_
 #   longer_uses_a_wall_clock_pytest_timeout` and
 #   `tools/ci/test_repo_tools_tests_gate.py::test_pytest_is_progress_supervised
 #   _without_an_elapsed_verdict`), `ci_harness_timeout_ceiling_check.py` reports
@@ -2174,7 +2174,8 @@ run "literal verdict keyword"           "$ROOT" python3 "$PG/literal_verdict_key
 #
 # FOUR SIBLINGS ARE ABSENT ON THEIR OWN WRITTEN INSTRUCTION.
 # `checker_population_is_structural_not_filename_shaped_census` and
-# `content_pinned_authority_verified_only_at_merge` reach a failing status only
+# `content_pinned_authority_verified_only_at_merge` (since removed, with the
+# protected-path two-step, on 2026-09-27) reach a failing status only
 # under `--strict`, and their docstrings say "THIS IS A CENSUS, NOT A GATE. IT
 # MUST NOT BE WIRED AS A BLOCKING CHECK" and "VERDICT CLASS: ADVISORY ... it must
 # stay advisory". Measured: `--strict` reddens this lane over 47 and 13
@@ -2492,7 +2493,8 @@ run_tolerating_uncheckable "protocol detector no-misfire matrix" "$ROOT" python3
 #
 # FOUR SIBLINGS ARE DELIBERATELY ABSENT, ON THEIR OWN WRITTEN INSTRUCTION.
 # `checker_population_is_structural_not_filename_shaped_census` and
-# `content_pinned_authority_verified_only_at_merge` only reach a failing status
+# `content_pinned_authority_verified_only_at_merge` (since removed, with the
+# protected-path two-step, on 2026-09-27) only reach a failing status
 # under `--strict`, and their docstrings say "THIS IS A CENSUS, NOT A GATE. IT
 # MUST NOT BE WIRED AS A BLOCKING CHECK" and "VERDICT CLASS: ADVISORY ... it must
 # stay advisory". Measured: `--strict` turns this lane red over 47 and 13

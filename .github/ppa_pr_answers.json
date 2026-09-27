@@ -18,7 +18,7 @@
     {
       "question": 3,
       "evidence": [
-        {"kind": "artefact", "ref": "vibe-ic-marketplace/plugins/vibe-ic/docs/PPA_INTERFACES.md", "sha256": "sha256:8db66acec0477adbcc48ac3814627c84b923fa1e8c770123a0855d4cc24fffa7"}
+        {"kind": "artefact", "ref": "vibe-ic-marketplace/plugins/vibe-ic/docs/PPA_INTERFACES.md", "sha256": "sha256:c00892d51ac449ce1c6e3d3ac008158fa8d4080c446471c9c7e4bb9e920fe971"}
       ]
     },
     {
@@ -62,7 +62,7 @@
     {
       "question": 12,
       "evidence": [
-        {"kind": "artefact", "ref": "vibe-ic-marketplace/plugins/vibe-ic/docs/PPA_INTERFACES.md", "sha256": "sha256:8db66acec0477adbcc48ac3814627c84b923fa1e8c770123a0855d4cc24fffa7"},
+        {"kind": "artefact", "ref": "vibe-ic-marketplace/plugins/vibe-ic/docs/PPA_INTERFACES.md", "sha256": "sha256:c00892d51ac449ce1c6e3d3ac008158fa8d4080c446471c9c7e4bb9e920fe971"},
         {"kind": "test", "ref": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_ppa_rc_corner_is_an_axis.py::test_conflicting_explicit_corner_declarations_are_all_preserved_and_rejected"}
       ]
     },

@@ -331,8 +331,13 @@ _LANDING_WINDOW_ANCHOR = "lane_emit_window"
 # more entry in `LANE_WINDOW_UNITS`. Every one of those sits ahead of the
 # top-level `lane_emit_window` call, so the entry-to-anchor prefix moves with
 # the whole file and the three lane bodies do not.
+# RE-PINNED with `_LANDING_SCRIPT_SHA256` when the protected-path two-step was
+# removed (owner ruling 2026-09-27): three comments in `gatekeeper-land.sh` that
+# described that ceremony were rewritten. No executable line moved, the anchor
+# did not move, and the three lane bodies are unchanged; this prefix and the
+# whole file are the two faces a comment edit ahead of the anchor moves.
 _LANDING_EXECUTION_PREFIX_SHA256 = (
-    'cae2bc03cb6ecd87ed806c5d4718bab91de215c4295cf47e2e23c84b47e2c1ba'
+    '9fb2b30048dccf46dede498dea0770646f46bb82342306354548f0246672bdb0'
 )
 # RE-PINNED when the landing gained its runtime PREFLIGHT. Both digests below
 # moved for one reason and it is stated here rather than left to `git log`: the
@@ -863,7 +868,8 @@ _LANDING_EXECUTION_PREFIX_SHA256 = (
 # move: the block adds no pytest invocation, no argument and no `rc` decision to
 # any lane. `pytest_per_file_junit.py` is not touched by this lane.
 #
-# THE ORDERING THIS COST US, recorded because it defeats the two-landing shape.
+# THE ORDERING THIS COST US (historical: the two-landing shape it describes was
+# removed with the protected-path two-step on 2026-09-27).
 # The PREPARE for #2176 (v1.19.74) authorised the patched `gatekeeper-land.sh`
 # WITHOUT this re-pin, and landed [PASS]. The ACTIVATE was then refused, because
 # this gate demands a byte change that the authorised `next` tuple does not
@@ -872,7 +878,7 @@ _LANDING_EXECUTION_PREFIX_SHA256 = (
 # can force a byte change must be satisfied BEFORE the PREPARE is rendered, not
 # between the two landings. See vibe-ic#2202.
 _LANDING_SCRIPT_SHA256 = (
-    '48d8710c86d1dde82563061ebf8d40c7660685a729b61fed0a2c7ef3ff3cea19'
+    'ebca0f4943ba415f74aff9891235c076daf7c1f3080d0d73d4bdcf62b97b6fda'
 )
 # The helper AST is not enough: a counterfeit CLI can define the expected
 # helper and never call it.  Bind the policy to the complete reviewed driver
@@ -984,9 +990,9 @@ _LANDING_SCRIPT_SHA256 = (
 # `_SEMANTIC_DRIVER_SHA256` is the ONLY one whose subject is the driver — the
 # other five hash `tools/gatekeeper-land.sh` (whole file, entry-to-anchor
 # execution prefix, and the three lane bodies), which this branch does not
-# touch. The driver's SECOND face is outside this file: its `sha256` row in
-# `tools/ci/protected_landing_transition.json`, re-authored from disk by the
-# PREPARE half of the protected-landing ceremony. Both faces moved together.
+# touch. The driver's SECOND face was then outside this file: its `sha256` row
+# in the protected-path byte register (removed 2026-09-27), re-authored from
+# disk by the first half of the two-step landing. Both faces moved together.
 #
 #   whole file (gatekeeper-land.sh)     254734ed2710…   unmoved, untouched
 #   execution prefix                    08be699b4bf9…   unmoved, untouched

@@ -184,7 +184,7 @@ def measure(prs: Sequence[int], node: str, checkout: Callable[[int], Optional[st
     # This argv used to read `-p pytest_timeout --timeout=180
     # --timeout-method=thread`. MEASURED 2026-08-20: `pytest-timeout` is absent
     # from the anchored runtime `ghcr.io/vibeic/vibeic-eda@sha256:66c33ff2…d01ff`
-    # (`tools/ci/protected_landing_transition.json` .runner.image) and from its
+    # (the hermetic landing runner's image at the time) and from its
     # newer 0.3.13 tag, and `-p <missing plugin>` is a HARD import that dies in
     # pytest's pre-parse. So inside the runtime this repo anchors, EVERY arm
     # this function started printed no summary line, `classify_run` read that as

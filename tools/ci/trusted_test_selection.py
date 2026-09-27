@@ -21,15 +21,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Sequence
 
 
-_TRANSITION_SPEC = importlib.util.spec_from_file_location(
-    "_vibeic_protected_landing_transition",
-    Path(__file__).resolve().with_name("protected_landing_transition.py"),
+_PRIMITIVES_SPEC = importlib.util.spec_from_file_location(
+    "_vibeic_landing_record_primitives",
+    Path(__file__).resolve().with_name("landing_record_primitives.py"),
 )
-if _TRANSITION_SPEC is None or _TRANSITION_SPEC.loader is None:
-    raise ImportError("protected landing transition authority is unavailable")
-transition = importlib.util.module_from_spec(_TRANSITION_SPEC)
-sys.modules[_TRANSITION_SPEC.name] = transition
-_TRANSITION_SPEC.loader.exec_module(transition)
+if _PRIMITIVES_SPEC is None or _PRIMITIVES_SPEC.loader is None:
+    raise ImportError("landing record primitives are unavailable")
+primitives = importlib.util.module_from_spec(_PRIMITIVES_SPEC)
+sys.modules[_PRIMITIVES_SPEC.name] = primitives
+_PRIMITIVES_SPEC.loader.exec_module(primitives)
 
 _ATTESTER_SPEC = importlib.util.spec_from_file_location(
     "_vibeic_trusted_selection_attester",
@@ -649,7 +649,7 @@ def _read_bound_file(path: Path, expected: dict[str, Any], what: str) -> bytes:
 
 
 def _changes(repo: Path, base: str, candidate: str) -> list[dict[str, Any]]:
-    raw = transition._git(  # type: ignore[attr-defined]
+    raw = primitives._git(  # type: ignore[attr-defined]
         repo,
         ["diff", "--name-status", "-z", "--find-renames", base, candidate],
         binary=True,
@@ -694,7 +694,7 @@ def _state(repo: Path, tree: dict[str, tuple[str, str]], full_path: str,
     mode, _oid = tree[full_path]
     if mode not in {"100644", "100755"}:
         raise Refusal(f"selected test is not a regular tracked file: {full_path}")
-    row = transition._observe_file(  # type: ignore[attr-defined]
+    row = primitives._observe_file(  # type: ignore[attr-defined]
         repo, full_path, tree[full_path], algorithm, oid_len)
     return {"present": True, **{key: row[key]
             for key in ("mode", "blob_oid", "sha256", "size")}}
@@ -726,23 +726,23 @@ def build(*, object_repo: Path, base: str, candidate: str,
           base_snapshot: Path, candidate_snapshot: Path,
           selector_object_repo: Path | None = None) -> dict[str, Any]:
     repo = object_repo.resolve(strict=True)
-    algorithm, oid_len = transition._object_format(repo)  # type: ignore[attr-defined]
-    base_commit, base_tree_oid = transition._commit_and_tree(  # type: ignore[attr-defined]
+    algorithm, oid_len = primitives._object_format(repo)  # type: ignore[attr-defined]
+    base_commit, base_tree_oid = primitives._commit_and_tree(  # type: ignore[attr-defined]
         repo, base, oid_len, "selection base")
-    candidate_commit, candidate_tree_oid = transition._commit_and_tree(  # type: ignore[attr-defined]
+    candidate_commit, candidate_tree_oid = primitives._commit_and_tree(  # type: ignore[attr-defined]
         repo, candidate, oid_len, "selection candidate")
     selector_repo = (selector_object_repo or repo).resolve(strict=True)
-    selector_algorithm, selector_oid_len = transition._object_format(selector_repo)
-    selector_commit_id, selector_tree_oid = transition._commit_and_tree(  # type: ignore[attr-defined]
+    selector_algorithm, selector_oid_len = primitives._object_format(selector_repo)
+    selector_commit_id, selector_tree_oid = primitives._commit_and_tree(  # type: ignore[attr-defined]
         selector_repo, selector_commit, selector_oid_len, "selection authority")
-    base_tree = transition._tree(repo, base_commit, oid_len)  # type: ignore[attr-defined]
-    candidate_tree = transition._tree(  # type: ignore[attr-defined]
+    base_tree = primitives._tree(repo, base_commit, oid_len)  # type: ignore[attr-defined]
+    candidate_tree = primitives._tree(  # type: ignore[attr-defined]
         repo, candidate_commit, oid_len)
-    selector_tree = transition._tree(  # type: ignore[attr-defined]
+    selector_tree = primitives._tree(  # type: ignore[attr-defined]
         selector_repo, selector_commit_id, selector_oid_len)
     if SELECTOR_REL not in selector_tree:
         raise Refusal("selected runtime has no trusted selector")
-    selector_record = transition._observe_file(  # type: ignore[attr-defined]
+    selector_record = primitives._observe_file(  # type: ignore[attr-defined]
         selector_repo, SELECTOR_REL, selector_tree[SELECTOR_REL], selector_algorithm, selector_oid_len)
     selector = _load_selector(selector_path, selector_record)
 
@@ -855,7 +855,7 @@ def build(*, object_repo: Path, base: str, candidate: str,
         "complete": True,
         "payload": payload,
         "payload_sha256": hashlib.sha256(
-            transition.canonical_bytes(payload)).hexdigest(),
+            primitives.canonical_bytes(payload)).hexdigest(),
     }
 
 
@@ -960,22 +960,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             base_snapshot=args.base_snapshot,
             candidate_snapshot=args.candidate_snapshot,
         )
-        _atomic_write(args.manifest, transition.canonical_bytes(record))
+        _atomic_write(args.manifest, primitives.canonical_bytes(record))
         _write_list(args.base_selection, record["payload"]["base_selection"])
         _write_list(
             args.candidate_selection,
             record["payload"]["candidate_selection"])
         _atomic_write(
             args.base_progress_plan,
-            transition.canonical_bytes(progress_plan(
+            primitives.canonical_bytes(progress_plan(
                 record["payload"]["base_selection"], scope="pytest:A1",
                 stall_grace_seconds=args.stall_grace_seconds)))
         _atomic_write(
             args.candidate_progress_plan,
-            transition.canonical_bytes(progress_plan(
+            primitives.canonical_bytes(progress_plan(
                 record["payload"]["candidate_selection"], scope="pytest:B1",
                 stall_grace_seconds=args.stall_grace_seconds)))
-    except (OSError, Refusal, transition.Refusal) as exc:
+    except (OSError, Refusal, primitives.Refusal) as exc:
         for path in (args.manifest, args.base_selection,
                      args.candidate_selection, args.base_progress_plan,
                      args.candidate_progress_plan):

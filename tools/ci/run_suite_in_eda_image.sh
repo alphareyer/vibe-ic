@@ -133,8 +133,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" \
   || die "cannot resolve the repository root"
 
 # The pinned runtime image. Spelled as a DIGEST, the way
-# `tools/ci/protected_landing_transition.json` and
-# `programs/landing_pytest_runtime_preflight.py` spell it: a floating tag is how
+# `programs/landing_pytest_runtime_preflight.py` spells it: a floating tag is how
 # a host ends up with a runtime nobody pinned.
 # THE DIGEST IS READ, NEVER COPIED. `tools/ci/hermetic_candidate_runner.py`
 # pins the runtime image as `IMAGE`, and that is the one place the fleet moves

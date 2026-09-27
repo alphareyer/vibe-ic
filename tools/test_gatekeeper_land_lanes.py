@@ -1546,7 +1546,6 @@ def test_the_judge_refuses_the_log_a_killed_stage_leaves(scheduler, work,
     longer missing.
     """
     sys.path.insert(0, str(_ROOT / _PLUGIN_REL / "programs" / "tests"))
-    import _protected_transition_fixture as protected
     import test_issue1498_hygiene_subset_rule_is_wired as hygiene
 
     proc = _run(scheduler, work, {"LANE_WIDTH": "4", "C_SEC": "60"},
@@ -1567,9 +1566,6 @@ def test_the_judge_refuses_the_log_a_killed_stage_leaves(scheduler, work,
 
     base, head = "a" * 40, "b" * 40
     base_tree, head_tree = "c" * 40, "d" * 40
-    receipt = protected.receipt_for(
-        tmp_path / "protected.json", base_commit=base, base_tree=base_tree,
-        candidate_commit=head, candidate_tree=head_tree)
     hygiene_record = hygiene._write(tmp_path, "hygiene.json",
         hygiene._record([hygiene._gate("neutral check", "PASS")]))
     verdict = subprocess.run(
@@ -1584,7 +1580,6 @@ def test_the_judge_refuses_the_log_a_killed_stage_leaves(scheduler, work,
          "--candidate-junit", str(tmp_path / "cand.xml"),
          "--verification-tier", "direct-push",
          "--candidate-gate-rc", "1", "--require-composite-gate-record",
-         "--protected-transition-receipt", str(receipt),
          "--base-hygiene", str(hygiene_record),
          "--candidate-hygiene", str(hygiene_record),
          "--base-hygiene-host", "test-host", "--candidate-hygiene-host", "test-host",

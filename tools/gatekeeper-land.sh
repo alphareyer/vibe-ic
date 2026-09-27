@@ -794,7 +794,7 @@ landing_unit_cheap_prose_polarity() {
 # LANDING MUST GO STALE, SO THE LANDING IS WHERE IT IS CAUGHT.
 #
 # `tools/ci/trusted_test_selection.py::HERMETIC_TEST_PROGRESS` pins the exact
-# collection denominator of four protected test files. `f5474d758` added an item
+# collection denominator of four nested-progress test files. `f5474d758` added an item
 # to one of them and did not move its pin, and nothing here refused: the guard
 # that knows — `tools/ci/test_trusted_test_selection.py::
 # test_nested_progress_schedule_matches_live_pytest_collection` — lives in
@@ -809,8 +809,9 @@ landing_unit_cheap_prose_polarity() {
 # BOTH SIDES FROM THE SUBJECT ($ROOT/$PLUGIN), the program from the instrument
 # ($PROGRAMS) — a landing that adds a test AND moves the pin must be green, and
 # reading the pin from the BASE would refuse exactly that landing. The subject
-# cannot cheat: the schedule is a protected path and only PREPARE/ACTIVATE moves
-# it.
+# still cannot cheat with it: the merge verifier executes the BASE copy of the
+# schedule, never the candidate's, so a moved schedule governs nothing until it
+# has landed.
 #
 # CHEAP: one `pytest --collect-only` over four files. MEASURED on 8HD-9 in the
 # pinned image (0.3.48), this lane's clone, three consecutive runs at load
@@ -2589,10 +2590,8 @@ run_gatekeeper_review() {
   # caller called the tree a valid batch and the other called it an illegal
   # landing, inside a single gate run, about a single tree.
   #
-  # That is not an edge case; it is every batch. A protected-path ceremony
-  # landing is structurally at least three commits — content, PREPARE, ACTIVATE —
-  # because splitting PREPARE from ACTIVATE is what makes `current` a state the
-  # repo actually had. So the un-forwarded form has no passing case at all: it
+  # That is not an edge case; it is every batch, and a batch is structurally
+  # more than one commit. So the un-forwarded form has no passing case at all: it
   # can only ever refuse, and a gate that can only refuse is the one people learn
   # to push past with `--no-verify`, which is exactly what the last push did.
   #

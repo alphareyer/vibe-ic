@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1369
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1369)
+- **Total programs (excluding helpers / shims):** 1367
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1367)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1360 |
+| `any` | 1358 |
 
 ## Alphabetical listing
 
@@ -259,7 +259,6 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `container_exec_deadline_check` | any | — | A `docker exec` whose deadline bounds the CLIENT and not the tool. |
 | `container_image_provenance` | any | — | record, and on request enforce, which IMAGE the run's `--container` actually executes. |
 | `container_login_banner_parse_check` | any | — | A login shell in the container prints two lines before the tool does. |
-| `content_pinned_authority_verified_only_at_merge` | any | — | An authority pin whose only reader runs after the point of repair. |
 | `control_substance_check` | any | — | how many of a change's pre-fix control tests actually OBSERVED A VALUE, and how many only noticed that something was absent. |
 | `conv_encoder_synth` | any | — | DETERMINISTIC solver for the CVDP convolutional encoder family (rate-1/n, constraint length K, generator polynomials stated as binary tap... |
 | `convergence_doctrine_present_check` | any | — | ORGANIC #716, corrected 2026-08-28. |
@@ -1316,7 +1315,6 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `transient_signal_latch_check` | any | — | Flag 1-cycle pulses read by multi-cycle FSMs without latching. |
 | `transition_coverage_check` | any | — | REAL transition-delay-fault (TDF) coverage gate for the LOC at-speed ATPG step. |
 | `transition_fault_atpg_run` | any | — | REAL open-source TRANSITION-DELAY-FAULT (TDF) ATPG via the forked vibeic/yosys SAT engine (launch-off-capture, 2-frame). |
-| `transition_manifest_describes_its_tree_check` | any | — | A commit's protected manifest must describe the tree that commit ships. |
 | `triage_note_answers_the_question_check` | any | — | A triage note that describes BEHAVIOUR does not say why the behaviour is OK. |
 | `triage_record_check` | any | — | self-consistency linter for benchmark residual-triage records (open-benchmark-methodology § 4 + § 6.4). |
 | `tristate_active_drive_check` | any | — | P1.1 deterministic gate |
@@ -1441,7 +1439,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1360 programs)
+### `any` (1358 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1674,7 +1672,6 @@ _(no programs in this group)_
 - `container_exec_deadline_check` — A `docker exec` whose deadline bounds the CLIENT and not the tool.
 - `container_image_provenance` — record, and on request enforce, which IMAGE the run's `--container` actually executes.
 - `container_login_banner_parse_check` — A login shell in the container prints two lines before the tool does.
-- `content_pinned_authority_verified_only_at_merge` — An authority pin whose only reader runs after the point of repair.
 - `control_substance_check` — how many of a change's pre-fix control tests actually OBSERVED A VALUE, and how many only noticed that something was absent.
 - `conv_encoder_synth` — DETERMINISTIC solver for the CVDP convolutional encoder family (rate-1/n, constraint length K, generator polynomials stated as binary tap...
 - `convergence_doctrine_present_check` — ORGANIC #716, corrected 2026-08-28.
@@ -2726,7 +2723,6 @@ _(no programs in this group)_
 - `transient_signal_latch_check` — Flag 1-cycle pulses read by multi-cycle FSMs without latching.
 - `transition_coverage_check` — REAL transition-delay-fault (TDF) coverage gate for the LOC at-speed ATPG step.
 - `transition_fault_atpg_run` — REAL open-source TRANSITION-DELAY-FAULT (TDF) ATPG via the forked vibeic/yosys SAT engine (launch-off-capture, 2-frame).
-- `transition_manifest_describes_its_tree_check` — A commit's protected manifest must describe the tree that commit ships.
 - `triage_note_answers_the_question_check` — A triage note that describes BEHAVIOUR does not say why the behaviour is OK.
 - `triage_record_check` — self-consistency linter for benchmark residual-triage records (open-benchmark-methodology § 4 + § 6.4).
 - `tristate_active_drive_check` — P1.1 deterministic gate

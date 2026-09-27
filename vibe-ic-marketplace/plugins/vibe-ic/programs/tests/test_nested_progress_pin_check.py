@@ -19,8 +19,8 @@ Pinned here in the order the gate can be wrong:
   * a collection that did not complete is rc 2, not rc 1 — a partial collection
     under-counts, and an under-count spent as a verdict reports a fresh pin as
     stale;
-  * `pinned_items` never IMPORTS the schedule. The real one is a protected path
-    that executes two sibling imports at module scope, and a gate should not
+  * `pinned_items` never IMPORTS the schedule. The real one is a landing-runtime
+    file that executes two sibling imports at module scope, and a gate should not
     have to run its subject to read a literal out of it — so the fixtures here
     are deliberately files that would fail to import.
 

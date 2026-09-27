@@ -69,32 +69,71 @@ _PROG = _PROGRAMS / "landing_merge_verdict.py"
 _REPO_ROOT = _PROGRAMS.parents[3]
 _VERIFY = _REPO_ROOT / "tools" / "gatekeeper-verify-merge.sh"
 _LAND = _REPO_ROOT / "tools" / "gatekeeper-land.sh"
-_PROTECTED_SPEC = importlib.util.spec_from_file_location(
-    "_protected_landing_transition_for_test",
-    _REPO_ROOT / "tools" / "ci" / "protected_landing_transition.py")
-assert _PROTECTED_SPEC and _PROTECTED_SPEC.loader
-_PROTECTED = importlib.util.module_from_spec(_PROTECTED_SPEC)
-_PROTECTED_SPEC.loader.exec_module(_PROTECTED)
 _T = 55
 
-# Synthetic receipts and BASE manifests use the shipped trusted declaration.
-# Candidate receipt fields never supply the validator's expected policy.
-#
-# THE IMAGE IS STATED, NOT RESOLVED (lane rfimg2). This was
-# `_PROTECTED.derived_runner()`, which resolves the runner image from THIS
-# HOST's docker at collection: inside the image (no docker) the whole file was
-# a collection error. The profile half is derived exactly as before; the image
-# half of a synthetic receipt is a record, so it is a stated immutable
-# reference (the pattern `derived_runner_profile` documents).
-from _stated_eda_image import stated_image  # noqa: E402
-_RUNNER_PROFILE = {**_PROTECTED.derived_runner_profile(), "image": stated_image()}
-# Completion imports the execution declaration by path. This additional
-# BASE-owned authority must travel in the miniature manifest and snapshot,
-# just as it does in the real approved runtime bundle.
-_FIXTURE_AUTHORITY_PATHS = _PROTECTED.REQUIRED_AUTHORITY_PATHS | {
+# THE FILES THE MERGE VERIFIER EXECUTES OUT OF THE BASE SNAPSHOT, which the
+# miniature repository below must carry as the real bytes.  This set used to be
+# derived from the protected-path transition validator's two path registers;
+# the owner removed that two-step mechanism on 2026-09-27, and the set it
+# described is kept here, minus the two removed modules and plus the three the
+# survivors now run (`landing_execution_plan.py`,
+# `landing_record_primitives.py`, `landing_push_preflight.py`).
+_VERIFIER_CLOSURE = frozenset({
+    "tools/ci/_gate_dispatch.sh",
+    "tools/ci/benchmark_data_landing_checkout.py",
+    "tools/ci/hermetic_candidate_runner.py",
+    "tools/ci/hermetic_git_subject.py",
+    "tools/ci/hermetic_landing_arm_receipt.py",
+    "tools/ci/hermetic_progress_emit.py",
+    "tools/ci/hermetic_test_arm_entry.sh",
+    "tools/ci/landing_completion_record.py",
     "tools/ci/landing_execution_plan.py",
-}
-_PROTECTED_SELECT_CONTROL_TESTS = (
+    "tools/ci/landing_push_preflight.py",
+    "tools/ci/landing_record_primitives.py",
+    "tools/ci/owned_command.py",
+    "tools/ci/repo_hygiene_gates.sh",
+    "tools/ci/routed_def_corpus.py",
+    "tools/ci/trusted_test_selection.py",
+    "tools/ci/trusted_worktree_attest.py",
+    "tools/gatekeeper-land.sh",
+    "tools/gatekeeper-verify-merge.sh",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/_atomic_artefact.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/_corpus_location.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/_crash_safe_scratch.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/_gate_usage_exit.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/_owned_process_supervisor.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/_progress_run.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/_prose_polarity.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/_pytest_progress_plugin.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/_routed_checker_progress.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/_semantic_child_progress.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/_vacuous_exit.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/_watchdog.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/ci_harness_timeout_ceiling_check.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/ci_targeted_test_select.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/drc_vacuous_pass_check.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/gate_process_attestation.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/generated_test_list_min_guard.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/hygiene_finding_delta.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/hygiene_shard_plan.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/landing_merge_verdict.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/landing_noop_verdict_check.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/macro_obs_geometry_intersect_check.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/matrix_mutation_ledger.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/policy_direction_pin_check.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/pytest_per_file_junit.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/repo_hygiene_parallel.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/step_internal_fail_bubble_up_check.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/step_metrics.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_flow_matrix_census_freshness.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_flow_matrix_coverage.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_matrix_artefact_mutation_channel.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_matrix_mutation_ledger.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/tool_diagnostic_id_acceptance.json",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/tool_diagnostic_id_gate.py",
+    "vibe-ic-marketplace/plugins/vibe-ic/programs/trusted_pytest_entry.py",
+})
+_SELECT_CONTROL_TESTS = (
     "programs/tests/test_ci_harness_timeout_ceiling_check.py",
     "programs/tests/test_gate_process_attestation.py",
     "programs/tests/test_landing_merge_verdict.py",
@@ -123,67 +162,6 @@ _RED_TEST_TIER_LOG = """=== gatekeeper landing gates — base=origin/main ===
   PASS  repo hygiene gates
 === FAILURES ABOVE — stamp removed; the pre-push hook will refuse ===
 """
-
-
-def _protected_receipt(tmp_path):
-    paths = sorted(_PROTECTED.REQUIRED_AUTHORITY_PATHS | _PROTECTED.RUNTIME_PATHS)
-    observed = []
-    for index, path in enumerate(paths, 1):
-        roles = []
-        if path in _PROTECTED.REQUIRED_AUTHORITY_PATHS:
-            roles.append("authority")
-        if path in _PROTECTED.RUNTIME_PATHS:
-            roles.append("runtime")
-        observed.append({
-            "path": path,
-            "mode": "100755" if path == "tools/gatekeeper-land.sh" else "100644",
-            "blob_oid": f"{index:040x}",
-            "sha256": f"{index:064x}",
-            "size": index,
-            "roles": roles,
-        })
-    manifest = {
-        "path": _PROTECTED.MANIFEST_PATH,
-        "mode": "100644",
-        "blob_oid": "d" * 40,
-        "sha256": "e" * 64,
-        "size": 123,
-    }
-    payload = {
-        "operation": "STEADY",
-        "base_commit": SHA,
-        "base_tree": TREE,
-        "candidate_commit": SHA,
-        "candidate_tree": TREE,
-        "base_manifest": manifest,
-        "candidate_manifest": dict(manifest),
-        "runner": json.loads(json.dumps(_RUNNER_PROFILE)),
-        "base_transition_id": "landing-semantic-v1",
-        "candidate_transition_id": "landing-semantic-v1",
-        "base_current_state_id": "legacy-timeout-v1",
-        "base_next_state_id": "semantic-progress-v1",
-        "base_state_id": "legacy-timeout-v1",
-        "candidate_state_id": "legacy-timeout-v1",
-        "base_files": observed,
-        "candidate_files": json.loads(json.dumps(observed)),
-        "worktrees": [
-            {"role": "candidate-gates", "commit": SHA,
-             "tree": TREE, "complete": True},
-            {"role": "candidate-tests", "commit": SHA,
-             "tree": TREE, "complete": True},
-        ],
-    }
-    receipt = {
-        "schema": 1,
-        "kind": _PROTECTED.RECEIPT_KIND,
-        "complete": True,
-        "payload": payload,
-        "payload_sha256": hashlib.sha256(
-            _PROTECTED.canonical_bytes(payload)).hexdigest(),
-    }
-    path = tmp_path / "protected-transition.json"
-    path.write_bytes(_PROTECTED.canonical_bytes(receipt))
-    return path
 
 
 def _delta(**kw):
@@ -910,7 +888,6 @@ def _cli(tmp_path, land_text, base_cases, cand_cases, sel, extra=(),
            "--land-log", str(tmp_path / "land.log"), *base_gate_args,
            "--selection", str(tmp_path / "sel.txt"), *base_sel_arg,
            "--base-junit", str(bj), "--candidate-junit", str(cj),
-           "--protected-transition-receipt", str(_protected_receipt(tmp_path)),
            "--base-hygiene", str(hyg_path), "--candidate-hygiene", str(hyg_path),
            "--base-hygiene-host", "test-host", "--candidate-hygiene-host", "test-host",
            "--json", str(tmp_path / "v.json"), *extra]
@@ -930,31 +907,7 @@ def test_cli_returns_zero_and_names_the_verified_commit(tmp_path):
     assert "LAND OK" in r.stdout
     assert doc["verdict"] == "LAND_OK"
     assert doc["verified_sha"] == SHA
-    assert doc["protected_landing_transition"]["operation"] == "STEADY"
-    assert doc["protected_transition_receipt"]["complete"] is True
-
-
-def test_cli_refuses_missing_or_tampered_protected_source_receipt(tmp_path):
-    missing = tmp_path / "missing-protected.json"
-    r, doc = _cli(
-        tmp_path, _GOOD_LOG, _CASE_OK, _CASE_OK, _SEL,
-        extra=("--protected-transition-receipt", str(missing)))
-    assert r.returncode == 2, r.stdout + r.stderr
-    assert doc["unmeasurable"] is True
-    assert any("PROTECTED LANDING SOURCE TRANSITION" in reason
-               for reason in doc["reasons"])
-
-    receipt_path = _protected_receipt(tmp_path)
-    receipt = json.loads(receipt_path.read_text())
-    receipt["payload"]["candidate_tree"] = OTHER_TREE
-    tampered = tmp_path / "tampered-protected.json"
-    tampered.write_text(json.dumps(receipt))
-    r, doc = _cli(
-        tmp_path, _GOOD_LOG, _CASE_OK, _CASE_OK, _SEL,
-        extra=("--protected-transition-receipt", str(tampered)))
-    assert r.returncode == 2, r.stdout + r.stderr
-    assert any("PROTECTED LANDING SOURCE TRANSITION" in reason
-               for reason in doc["reasons"])
+    assert not [key for key in doc if key.startswith("protected")], sorted(doc)
 
 
 def test_candidate_aggregate_norecord_is_an_absolute_refusal(tmp_path):
@@ -1247,7 +1200,6 @@ def test_a_base_arm_asked_for_files_that_produced_no_report_is_refused(tmp_path)
          "--base-selection", str(tmp_path / "sel_base.txt"),
          "--base-junit", str(tmp_path / "never_written.xml"),
          "--candidate-junit", str(cj),
-         "--protected-transition-receipt", str(_protected_receipt(tmp_path)),
          "--json", str(tmp_path / "v.json")],
         capture_output=True, text=True)
     doc = json.loads((tmp_path / "v.json").read_text())
@@ -1335,8 +1287,7 @@ def test_cli_returns_two_when_the_candidate_report_is_absent(tmp_path):
          "--land-log", str(tmp_path / "land.log"),
          "--selection", str(tmp_path / "sel.txt"),
          "--base-junit", str(tmp_path / "nope.xml"),
-         "--candidate-junit", str(tmp_path / "nope.xml"),
-         "--protected-transition-receipt", str(_protected_receipt(tmp_path))],
+         "--candidate-junit", str(tmp_path / "nope.xml")],
         capture_output=True, text=True)
     assert r.returncode == 2, r.stdout + r.stderr
 
@@ -1539,7 +1490,7 @@ def test_reading_one_arms_exit_code_cannot_byte_compile_the_shared_runtime(
         tmp_path):
     """THE INSTRUMENT WROTE INTO THE THING IT WAS MEASURING.
 
-    `validated_arm_exit` imports the arm-receipt helper OUT OF the protected
+    `validated_arm_exit` imports the arm-receipt helper OUT OF the BASE
     runtime snapshot, and that snapshot's TREE DIGEST is what every later arm's
     receipt is re-checked against.  It is invoked with
     `PYTHONDONTWRITEBYTECODE=1 python3 -I`, which reads as belt and braces and
@@ -1560,7 +1511,7 @@ def test_reading_one_arms_exit_code_cannot_byte_compile_the_shared_runtime(
     runtime = tmp_path / "runtime" / "tools" / "ci"
     runtime.mkdir(parents=True)
     for name in ("hermetic_landing_arm_receipt.py",
-                 "protected_landing_transition.py"):
+                 "landing_record_primitives.py"):
         shutil.copy2(_REPO_ROOT / "tools" / "ci" / name, runtime / name)
     before = sorted(path.name for path in runtime.iterdir())
 
@@ -1578,7 +1529,7 @@ def test_reading_one_arms_exit_code_cannot_byte_compile_the_shared_runtime(
     assert sorted(path.name for path in runtime.iterdir()) == before, \
         "reading an arm's exit code changed the runtime tree it read from"
     assert not list(runtime.rglob("__pycache__")), \
-        "the arm-exit reader byte-compiled the protected runtime snapshot"
+        "the arm-exit reader byte-compiled the BASE runtime snapshot"
 
 
 def test_the_candidate_arm_runs_without_a_maxfail_bound():
@@ -1994,62 +1945,6 @@ def _git(repo, *args, **kw):
 _BENCHMARK_TEST: dict[str, Path] = {}
 
 
-def _fixture_blob(raw):
-    digest = hashlib.sha1()
-    digest.update(f"blob {len(raw)}\0".encode("ascii"))
-    digest.update(raw)
-    return digest.hexdigest()
-
-
-def _write_activated_manifest(repo):
-    """A protected-landing manifest that models the repository AS IT IS.
-
-    RENAMED, and the direction of the tuple reversed with it.  The helper used
-    to write the LIVE bytes as `current` and synthetic `b"phase-b:"+path`
-    placeholders as `next`, which put the sandbox in the PRE-activation state —
-    the exact state `require_semantic_runtime` refuses by design, added by the
-    same commit that made the refusal mandatory.  Every end-to-end test in this
-    file therefore died at `materialize_protected_runtime` before any arm
-    existed.  The real repository is the opposite: its live protected bytes ARE
-    the manifest's `next` tuple, so a real landing resolves STEADY next -> next
-    and passes.  The synthetic bytes now stand in for the PRIOR state, which is
-    the one no longer on disk.
-    """
-    paths = sorted(_FIXTURE_AUTHORITY_PATHS | _PROTECTED.RUNTIME_PATHS)
-    role_rows = []
-    current = []
-    next_files = []
-    for rel in paths:
-        path = repo / rel
-        raw = path.read_bytes()
-        mode = "100755" if path.stat().st_mode & 0o111 else "100644"
-        roles = []
-        if rel in _FIXTURE_AUTHORITY_PATHS:
-            roles.append("authority")
-        if rel in _PROTECTED.RUNTIME_PATHS:
-            roles.append("runtime")
-        role_rows.append({"path": rel, "roles": roles})
-        past = b"phase-a:" + rel.encode() if rel in _PROTECTED.RUNTIME_PATHS else raw
-        current.append({
-            "path": rel, "mode": mode, "blob_oid": _fixture_blob(past),
-            "sha256": hashlib.sha256(past).hexdigest(), "size": len(past)})
-        next_files.append({
-            "path": rel, "mode": mode, "blob_oid": _fixture_blob(raw),
-            "sha256": hashlib.sha256(raw).hexdigest(), "size": len(raw)})
-    manifest = {
-        "schema": 1, "kind": _PROTECTED.MANIFEST_KIND,
-        "transition_id": "fixture-phase-b",
-        "manifest_path": _PROTECTED.MANIFEST_PATH,
-        "runner": json.loads(json.dumps(_RUNNER_PROFILE)),
-        "paths": role_rows,
-        "current": {"id": "fixture-current", "files": current},
-        "next": {"id": "fixture-next", "files": next_files},
-    }
-    target = repo / _PROTECTED.MANIFEST_PATH
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(_PROTECTED.canonical_bytes(manifest))
-
-
 @pytest.fixture(scope="module")
 def sandbox(tmp_path_factory):
     """A real git repo with the shape `gatekeeper-verify-merge.sh` expects."""
@@ -2089,7 +1984,7 @@ def sandbox(tmp_path_factory):
     for name in (
         "benchmark_data_landing_checkout.py",
         "owned_command.py",
-        "protected_landing_transition.py",
+        "landing_record_primitives.py",
         "_gate_dispatch.sh",
         "routed_def_corpus.py",
         "trusted_worktree_attest.py",
@@ -2146,8 +2041,7 @@ def sandbox(tmp_path_factory):
     # rest of the exact BASE-owned authority closure generically.  A newly
     # imported authority file must therefore be present before the manifest is
     # written instead of being silently omitted by this test repository.
-    for rel in sorted(
-            _FIXTURE_AUTHORITY_PATHS | _PROTECTED.RUNTIME_PATHS):
+    for rel in sorted(_VERIFIER_CLOSURE):
         destination = repo / rel
         if destination.exists():
             continue
@@ -2157,7 +2051,7 @@ def sandbox(tmp_path_factory):
         shutil.copy2(source, destination)
     (plugin / "programs/thing.py").write_text(_THING_SRC.format(v=1))
     (plugin / "programs/tests/test_thing.py").write_text(_THING_TEST)
-    for rel in _PROTECTED_SELECT_CONTROL_TESTS:
+    for rel in _SELECT_CONTROL_TESTS:
         control = plugin / rel
         control.parent.mkdir(parents=True, exist_ok=True)
         control.write_text("def test_fixture_control():\n    assert True\n")
@@ -2165,7 +2059,6 @@ def sandbox(tmp_path_factory):
     (repo / "contended.txt").write_text("base\n")
     # LAST, so it sees every program the lines above staged, stubs included.
     _stage_program_import_closure(plugin / "programs", _PROGRAMS)
-    _write_activated_manifest(repo)
     _git(repo, "init", "-q", "-b", "main")
     _git(repo, "config", "user.email", "t@localhost")
     _git(repo, "config", "user.name", "t")
@@ -2339,12 +2232,10 @@ def _routed_activation_repo(sandbox, tmp_path, base_already_expanded=False):
                         % _ROUTED_ACTIVATION_MARKER)
     land.write_text(text)
     (repo / _ROUTED_GATE_MARKER).write_text("routed corpus gate is dispatched\n")
-    tracked = ["tools/gatekeeper-land.sh", _ROUTED_GATE_MARKER,
-               _PROTECTED.MANIFEST_PATH]
+    tracked = ["tools/gatekeeper-land.sh", _ROUTED_GATE_MARKER]
     if base_already_expanded:
         (repo / _ROUTED_ACTIVATION_MARKER).write_text("already activated\n")
         tracked.append(_ROUTED_ACTIVATION_MARKER)
-    _write_activated_manifest(repo)
     _git(repo, "add", *tracked)
     assert _git(repo, "commit", "-qm",
                 "dispatch the routed corpus gate").returncode == 0
@@ -3412,9 +3303,7 @@ fi
 '''.replace("__HUNG_ARM__", hung_arm)
     assert needle in text
     land.write_text(text.replace(needle, hang + needle))
-    _write_activated_manifest(repo)
-    _git(repo, "add", "tools/gatekeeper-land.sh",
-         _PROTECTED.MANIFEST_PATH)
+    _git(repo, "add", "tools/gatekeeper-land.sh")
     assert _git(repo, "commit", "-qm", "make interrupt control").returncode == 0
     _git(repo, "checkout", "-q", "-b", "probe")
     (repo / "probe.txt").write_text("candidate\n")
@@ -3574,71 +3463,6 @@ def test_reassert_refuses_a_record_that_was_not_a_pass(sandbox, tmp_path):
     bad = _reassert(sandbox, tmp_path / "v_innocuous_red.json")
     assert bad.returncode == 1, bad.stdout + bad.stderr
     assert "not LAND_OK" in bad.stderr
-
-
-def _repacked_commit(repo, source, branch, message="repack identical tree"):
-    """One new commit, parented directly on main, with SOURCE's exact tree."""
-    tree = _git(repo, "rev-parse", f"{source}^{{tree}}").stdout.strip()
-    base = _git(repo, "rev-parse", "main").stdout.strip()
-    made = _pr.run(
-        ["git", "-C", str(repo), "commit-tree", tree, "-p", base],
-        input=message + "\n", capture_output=True, text=True)
-    assert made.returncode == 0, made.stderr
-    head = made.stdout.strip()
-    assert _git(repo, "branch", "-f", branch, head).returncode == 0
-    return head, tree
-
-
-def _rebind(sandbox, old_verdict, ref, out):
-    return _pr.run(
-        ["bash", str(_VERIFY), "--rebind", str(old_verdict),
-         "--ref", ref, "--base", "main", "--repo", str(sandbox),
-         "--no-fetch", "--json", str(out)],
-        capture_output=True, text=True)
-
-
-def test_identical_tree_repack_rebinds_without_rerunning_expensive_arms(
-        sandbox, tmp_path):
-    """Commit topology is not functional identity.
-
-    A LAND_OK already measured the exact base + final tree.  Re-expressing that
-    tree as the required one-commit push shape must run only the cheap push and
-    identity/provenance checks, then emit a self-contained REBOUND_FROM record.
-    It must not launch A1/A2/B1/B2 again.
-    """
-    first, original = _verify(sandbox, "innocuous_green", tmp_path)
-    assert first.returncode == 0, first.stdout + first.stderr
-    branch = f"repacked_{tmp_path.name}"
-    new_head, tree = _repacked_commit(
-        sandbox, original["verified_sha"], branch)
-    assert tree == original["verified_tree"]
-
-    rebound_path = tmp_path / "rebound.json"
-    rebound = _rebind(
-        sandbox, tmp_path / "v_innocuous_green.json", branch, rebound_path)
-    assert rebound.returncode == 0, rebound.stdout + rebound.stderr
-    assert "arm A1/B1" not in rebound.stdout
-    record = json.loads(rebound_path.read_text())
-    assert record["verdict"] == "LAND_OK"
-    assert record["kind"] == "vibeic.landing-verdict-rebind"
-    assert record["head_sha"] == record["verified_sha"] == new_head
-    assert record["verified_tree"] == original["verified_tree"]
-    assert record["rebind"]["rebound_from_head_sha"] == original["head_sha"]
-    assert record["rebind"]["push_preflight"]["verdict"] == "PASS"
-    assert _reassert(sandbox, rebound_path).returncode == 0
-
-
-def test_rebind_refuses_when_the_final_tree_changed(sandbox, tmp_path):
-    """The shortcut is identity-only; one changed blob demands a full run."""
-    first, _ = _verify(sandbox, "innocuous_green", tmp_path)
-    assert first.returncode == 0, first.stdout + first.stderr
-    branch = f"different_tree_{tmp_path.name}"
-    _repacked_commit(sandbox, "innocuous_red", branch, "different tree")
-    out = tmp_path / "different-tree-rebind.json"
-    rebound = _rebind(
-        sandbox, tmp_path / "v_innocuous_green.json", branch, out)
-    assert rebound.returncode == 1, rebound.stdout + rebound.stderr
-    assert "candidate tree differs from the verified tree" in rebound.stderr
 
 
 def test_actual_push_shape_is_refused_before_any_expensive_arm(

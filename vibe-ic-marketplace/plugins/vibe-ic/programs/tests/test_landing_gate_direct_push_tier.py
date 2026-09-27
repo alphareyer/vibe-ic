@@ -36,20 +36,11 @@ from pathlib import Path
 
 import pytest
 
-import _protected_transition_fixture as protected
-
 PROGRAMS = Path(__file__).resolve().parents[1]
 VERDICT = PROGRAMS / "landing_merge_verdict.py"
 
-# THE FOUR SYNTHETIC IDS THIS FILE JUDGES OVER. They are named once because the
-# protected-landing-transition receipt has to BIND all four: a receipt that
-# described some other (base, candidate) pair is one `validate_receipt_binding`
-# refuses, which is the property `test_a_protected_receipt_for_another_pair_
-# is_refused` exercises.
-# All four are HEX, because they are object ids and every reader of them says
-# so: `protected_landing_transition._oid` refuses a 40-character id that is not
-# lowercase hex, and a fixture that fed it `"t" * 40` would be refused for its
-# own alphabet rather than for anything this file is about.
+# THE FOUR SYNTHETIC IDS THIS FILE JUDGES OVER, named once. All four are HEX,
+# because they are object ids and every reader of them says so.
 BASE_SHA = "a" * 40
 BASE_TREE = "c" * 40
 HEAD_SHA = "b" * 40
@@ -121,20 +112,10 @@ def _junit(outcome: str | None, *, process_rc: str = "1") -> str:
         '</testsuites>')
 
 
-def _receipt(tmp_path: Path, *, base_commit: str = BASE_SHA,
-             base_tree: str = BASE_TREE, candidate_commit: str = HEAD_SHA,
-             candidate_tree: str = HEAD_TREE) -> Path:
-    """One STEADY protected-landing-transition receipt for these four ids."""
-    return protected.receipt_for(
-        tmp_path / "protected.json", base_commit=base_commit,
-        base_tree=base_tree, candidate_commit=candidate_commit,
-        candidate_tree=candidate_tree)
-
-
 def _run(tmp_path: Path, *, base: str | None, cand: str | None,
          tier: str = "direct-push", base_junit_written: bool = True,
          land_log: str = LAND_LOG, base_land_log: str | None = LAND_LOG,
-         base_selection: bool = True, receipt: Path | None | str = ""):
+         base_selection: bool = True):
     if base_junit_written:
         (tmp_path / "base.xml").write_text(_junit(base))
     (tmp_path / "cand.xml").write_text(_junit(cand))
@@ -160,17 +141,6 @@ def _run(tmp_path: Path, *, base: str | None, cand: str | None,
     if base_land_log is not None:
         (tmp_path / "base_land.log").write_text(base_land_log)
         argv += ["--base-land-log", str(tmp_path / "base_land.log")]
-    # THE PROTECTED-LANDING-TRANSITION RECEIPT IS AN INPUT HERE, not a subject.
-    # `read_protected_transition_receipt` refuses without one, and that refusal
-    # is UNMEASURABLE — so a file that omitted it would watch every case below
-    # answer rc 2 for the harness's silence rather than for the rule under
-    # test. The subject of this file is `decide()`; the receipt BUILDER is
-    # measured end to end in `tools/test_gatekeeper_land_differential.py`,
-    # against a real repository. `receipt=None` asks for the omission itself,
-    # which is what the paired control at the bottom of this file asserts on.
-    if receipt is not None:
-        argv += ["--protected-transition-receipt",
-                 str(_receipt(tmp_path) if receipt == "" else receipt)]
     cp = subprocess.run(argv, capture_output=True, text=True)
     record = json.loads((tmp_path / "verdict.json").read_text())
     return cp, record
@@ -325,7 +295,6 @@ def test_a_base_arm_that_did_not_finish_is_refused_not_subtracted(tmp_path):
          "--base-junit", str(tmp_path / "base.xml"),
          "--candidate-junit", str(tmp_path / "cand.xml"),
          "--verification-tier", "direct-push",
-         "--protected-transition-receipt", str(_receipt(tmp_path)),
          "--json", str(tmp_path / "verdict.json")],
         capture_output=True, text=True)
     rec = json.loads((tmp_path / "verdict.json").read_text())
@@ -391,11 +360,6 @@ def test_the_cross_tree_refusals_stay_armed_under_the_new_tier(tmp_path):
          "--base-junit", str(tmp_path / "base.xml"),
          "--candidate-junit", str(tmp_path / "cand.xml"),
          "--verification-tier", "direct-push",
-         # The receipt binds the tree the caller says it VERIFIED, so this case
-         # reaches the cross-tree rule instead of stopping at the protected
-         # tier: what is under test is that a wrong tree is still refused.
-         "--protected-transition-receipt",
-         str(_receipt(tmp_path, candidate_tree=OTHER_TREE)),
          "--json", str(tmp_path / "verdict.json")],
         capture_output=True, text=True)
     rec = json.loads((tmp_path / "verdict.json").read_text())
@@ -411,92 +375,6 @@ def test_the_merge_tiers_are_untouched_by_the_addition(tmp_path):
     _, weak = _run(tmp_path, base="failed", cand="failed", tier="rebase-replay")
     assert weak["squash_vs_rebase_cross_check"] == "NOT_PERFORMED"
     assert weak["tier_degraded"] is True
-
-
-# ------------------------------------- the protected tier, in both directions
-# Every case above SUPPLIES a protected-landing-transition receipt, which is
-# what lets them be about `decide()`. These two are the paired controls for
-# that supply: the tier must still refuse when the receipt is absent, and when
-# it describes some other landing. Without them a harness that had quietly
-# stopped passing the receipt — or a judge that had quietly stopped reading it
-# — would leave every test above green.
-
-
-def test_no_protected_receipt_is_unmeasurable_not_a_pass(tmp_path):
-    """An otherwise-clean landing with no receipt is UNKNOWN, and rc 2.
-
-    Not rc 1: "this branch broke something" and "whether this branch moved the
-    protected landing runtime could not be measured" are different events, and
-    a gate that could not tell them apart is the defect this repo exists to
-    hunt.
-    """
-    cp, rec = _run(tmp_path, base="failed", cand="failed", receipt=None)
-    assert cp.returncode == 2
-    assert rec["verdict"] == "REFUSE"
-    assert any("PROTECTED LANDING SOURCE TRANSITION IS UNMEASURED" in r
-               for r in rec["reasons"])
-
-
-def test_a_protected_receipt_for_another_pair_is_refused(tmp_path):
-    """A receipt is evidence about ONE (base, candidate) pair.
-
-    A receipt that measured a different base is not a weaker answer about this
-    landing — it is an answer about a tree nobody is about to create, and it
-    must not be readable as this one's.
-    """
-    other = _receipt(tmp_path, base_commit="f" * 40)
-    cp, rec = _run(tmp_path, base="failed", cand="failed", receipt=other)
-    assert cp.returncode == 2
-    assert any("does not bind the merge verdict" in r for r in rec["reasons"])
-
-
-def test_the_manifest_lists_every_path_the_code_protects():
-    """The two protected closures are declared TWICE, and nothing compared them.
-
-    MEASURED 2026-08-28: the timeout-as-verdict lane added
-    `programs/_progress_run.py` to both `RUNTIME_PATHS` and
-    `REQUIRED_AUTHORITY_PATHS` in `protected_landing_transition.py`, and to
-    NEITHER role in `protected_landing_transition.json`. Every receipt built
-    from that manifest then omitted a file the validator required, the verdict
-    came back `RC_CANNOT_MEASURE` instead of `RC_REFUSE`, and **fourteen cases
-    in this file went red on `assert 2 == 1`** — an arithmetic-looking failure
-    five files away from a data file nobody had opened. The shipped manifest was
-    also refused outright by `parse_manifest`, so the real protected-landing
-    path was broken on main, not merely the fixture.
-
-    This guard makes the next such addition fail HERE, naming the path and the
-    role, instead of surfacing as fourteen identical assertion errors.
-    """
-    import importlib.util as _ilu, json as _json
-    repo = Path(__file__).resolve()
-    while repo != repo.parent and not (repo / "tools" / "ci").is_dir():
-        repo = repo.parent
-    py = repo / "tools" / "ci" / "protected_landing_transition.py"
-    js = repo / "tools" / "ci" / "protected_landing_transition.json"
-    assert py.is_file() and js.is_file(), (py, js)
-    spec = _ilu.spec_from_file_location("_plt_guard", py)
-    mod = _ilu.module_from_spec(spec); spec.loader.exec_module(mod)
-    manifest = _json.loads(js.read_text(encoding="utf-8"))
-
-    for role, declared in (("runtime", mod.RUNTIME_PATHS),
-                           ("authority", mod.REQUIRED_AUTHORITY_PATHS)):
-        listed = {r["path"] for r in manifest["paths"] if role in r.get("roles", [])}
-        missing = sorted(set(declared) - listed)
-        extra = sorted(listed - set(declared))
-        assert not missing, (
-            f"{py.name} protects {missing} with role {role!r} and {js.name} "
-            f"does not list it. Every receipt built from that manifest omits "
-            f"the file, the validator cannot measure the transition, and the "
-            f"verdict is RC_CANNOT_MEASURE — which reads as `assert 2 == 1` in "
-            f"every case here that expected a refusal.")
-        assert not extra, (
-            f"{js.name} lists {extra} as {role!r} and the code does not protect "
-            f"it; a receipt would carry a file no validator checks, which is a "
-            f"claim of coverage that is not there.")
-        # Neither side may be empty, or both assertions above hold trivially.
-        assert declared and listed, (
-            f"the {role!r} closure is empty on one side — this guard would pass "
-            f"while protecting nothing")
 
 
 # ---------------------------------- the direct-push hygiene delta (vibe-ic#2176)

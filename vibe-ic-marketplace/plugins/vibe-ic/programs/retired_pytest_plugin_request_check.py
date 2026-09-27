@@ -22,8 +22,8 @@ RUNNER of the production tool `tools/core_agent/covered_by.py`.
 
 `-p <name>` is a HARD import: pytest refuses to start when the module is absent,
 dying in its pre-parse before collecting one test. `pytest-timeout` is absent
-from `ghcr.io/vibeic/vibeic-eda@sha256:66c33ff2...d01ff` -- the image
-`tools/ci/protected_landing_transition.json` names as `.runner.image` -- and from
+from `ghcr.io/vibeic/vibeic-eda@sha256:66c33ff2...d01ff` -- the image the
+hermetic landing runner then ran -- and from
 its newer 0.3.13 tag. MEASURED, the same 90 cases from the same tree::
 
     image sha256:66c33ff2 (py3.12 / pytest 9.0.3)   90 cases   30 red
@@ -137,7 +137,7 @@ RETIRED: Dict[str, Dict[str, str]] = {
         "reason":
             "absent from the anchored runner image "
             "ghcr.io/vibeic/vibeic-eda@sha256:66c33ff2...d01ff "
-            "(tools/ci/protected_landing_transition.json .runner.image) and "
+            "(the hermetic landing runner's image at the time) and "
             "from its newer 0.3.13 tag; `-p <name>` is a hard import, so the "
             "session dies in pytest's pre-parse before collecting one test. "
             "Retired at v1.10.69 for a second, independent reason: "
