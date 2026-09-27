@@ -62176,6 +62176,16 @@ def _post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(
             _files = [f for r in _roots if r.is_dir()
                       for f in sorted(r.rglob("*"))
                       if f.is_file() and f.suffix in (".v", ".sv")]
+            # A prompt may itself contain the target module's declaration.
+            # Treat that as interface evidence only when its exact L9 target
+            # matches; unlike shipped RTL, an example/other module in prose
+            # must never replace the selected top module.
+            _embedded_header = False
+            if not _files and l9.get("top_module"):
+                _prompt = _in / "phase1_prompt.md"
+                if _prompt.is_file():
+                    _files = [_prompt]
+                    _embedded_header = True
             if _files:
                 _tgt = (l9.get("top_module") or l1.get("ic_name") or None)
                 _rec = _rir.recover_from_files(_files, _tgt)
@@ -62189,18 +62199,25 @@ def _post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(
                 # design whose header was right there). Retry unpinned so the
                 # first module actually declared is used, and record that the
                 # name came from the RTL rather than from the prose.
-                if not _ports and _tgt:
+                if not _ports and _tgt and not _embedded_header:
                     _rec = _rir.recover_from_files(_files, None)
                     _ports = _rec.get("top_ports") or []
                     if _ports and _rec.get("top_module"):
                         l9["top_module"] = _rec["top_module"]
                         l9.setdefault("top_module_source", "shipped_rtl_header")
                 if _ports:
+                    _header_source = ("prompt RTL port header" if
+                                      _embedded_header else "shipped RTL port header")
+                    _strategy = ("prompt_rtl_header" if _embedded_header
+                                 else "shipped_rtl_header")
                     _rows = [{"name": q.get("name"), "mode": q.get("dir"),
                               "direction": q.get("dir"), "width": q.get("width"),
                               "io": "see design", "io_standard": None,
-                              "evidence": "shipped RTL port header",
-                              "extraction_strategy": "shipped_rtl_header"}
+                              "evidence": _header_source,
+                              "extraction_strategy": _strategy,
+                              **{key: q[key] for key in
+                                 ("msb", "lsb", "width_symbolic")
+                                 if q.get(key) is not None}}
                              for q in _ports if q.get("name")]
                     _existing = (l9.get("top_ports") or l9.get("ports")
                                  or l9.get("top_module_pins") or [])
@@ -62221,9 +62238,17 @@ def _post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(
                             if not _src:
                                 continue
                             _filled = []
-                            if e.get("width") in (None, "") and \
+                            if e.get("width") in (None, "", 0, "0") and \
                                     _src.get("width") is not None:
                                 e["width"] = _src["width"]; _filled.append("width")
+                            _same_width = (e.get("width") in (None, "", 0, "0") or
+                                           str(e.get("width")) ==
+                                           str(_src.get("width")))
+                            if _same_width:
+                                for _k in ("msb", "lsb", "width_symbolic"):
+                                    if e.get(_k) in (None, "") and \
+                                            _src.get(_k) is not None:
+                                        e[_k] = _src[_k]; _filled.append(_k)
                             _blank = ("", "none", "unknown")
                             for _k in ("mode", "direction"):
                                 if (str(e.get(_k) or "").lower() in _blank
@@ -62232,8 +62257,8 @@ def _post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(
                                     _filled.append(_k)
                             if _filled:
                                 e["evidence"] = (str(e.get("evidence") or "")
-                                                 + " | filled from shipped RTL "
-                                                 + "header: " + ",".join(_filled))
+                                                 + " | filled from " + _header_source
+                                                 + ": " + ",".join(_filled))
                         _existing = list(_existing) + [
                             r for r in _rows if str(r.get("name")) not in _seen]
                         _rows = _existing
@@ -62246,7 +62271,9 @@ def _post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(
                         l9["no_integration_in_input"] = False
                     _es = l9.setdefault("extraction_strategy", {})
                     if isinstance(_es, dict):
-                        _es["top_ports"] = "shipped_rtl_header_2026_08_25"
+                        _es["top_ports"] = (_strategy + "_2026_09_28" if
+                                            _embedded_header else
+                                            "shipped_rtl_header_2026_08_25")
                     # L1.pin_table gets the SAME enrichment, not the same
                     # defer-to-whoever-wrote-first. `l1_pin_bus_width_actionable
                     # _check` reads L1, so populating only L9 leaves the gate
@@ -62270,9 +62297,17 @@ def _post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(
                             _src = _by.get(_n)
                             if not _src:
                                 continue
-                            if _e.get("width") in (None, "") and \
+                            if _e.get("width") in (None, "", 0, "0") and \
                                     _src.get("width") is not None:
                                 _e["width"] = _src["width"]
+                            _same_width = (_e.get("width") in (None, "", 0, "0") or
+                                           str(_e.get("width")) ==
+                                           str(_src.get("width")))
+                            if _same_width:
+                                for _k in ("msb", "lsb", "width_symbolic"):
+                                    if _e.get(_k) in (None, "") and \
+                                            _src.get(_k) is not None:
+                                        _e[_k] = _src[_k]
                             _m = str(_e.get("mode") or "").lower()
                             if _m in ("", "none", "unknown") and _src.get("mode"):
                                 _e["mode"] = _M.get(str(_src["mode"]),
@@ -62292,8 +62327,9 @@ def _post_emit_crosswalk_l9_ports_to_l1_pin_table_v1_6_555(
                     _es = l9.setdefault("extraction_strategy", {})
                     if isinstance(_es, dict):
                         _es["top_ports_rtl_recovery"] = (
-                            f"no ports recovered from {len(_files)} shipped "
-                            f"RTL file(s); target={_tgt!r} "
+                            f"no ports recovered from {len(_files)} "
+                            f"{'prompt' if _embedded_header else 'shipped RTL'} "
+                            f"file(s); target={_tgt!r} "
                             f"source={_rec.get('source')!r}")
         except Exception as _exc:
             # Never let interface recovery break doc emission — the prose path

@@ -104,11 +104,27 @@ def test_a_continuation_chunk_inherits_the_previous_width():
     ports = _by_name(R.recover_interface_from_text(ANSI_RTL, "alu"))
     assert ports["a"]["width"] == 8
     assert ports["b"]["width"] == 8
+    assert (ports["a"]["msb"], ports["a"]["lsb"]) == (7, 0)
+    assert (ports["b"]["msb"], ports["b"]["lsb"]) == (7, 0)
 
 
 def test_a_new_direction_without_a_range_is_scalar_not_inherited():
     ports = _by_name(R.recover_interface_from_text(ANSI_RTL, "alu"))
     assert ports["zero"]["width"] == 1
+    assert "msb" not in ports["zero"] and "lsb" not in ports["zero"]
+
+
+def test_nonzero_lsb_keeps_declared_indices_not_only_width():
+    src = "module slice(input [7:2] paddr, output q); assign q = paddr[7]; endmodule"
+    port = _by_name(R.recover_interface_from_text(src, "slice"))["paddr"]
+    assert (port["width"], port["msb"], port["lsb"]) == (6, 7, 2)
+
+
+def test_unresolved_range_remains_symbolic_without_guessing_width():
+    src = "module variable_width(input [WIDTH-1:0] data); endmodule"
+    port = _by_name(R.recover_interface_from_text(src, "variable_width"))["data"]
+    assert port["width"] is None
+    assert port["width_symbolic"] == "WIDTH-1:0"
 
 
 def test_parameter_and_derived_parameter_widths_resolve():
