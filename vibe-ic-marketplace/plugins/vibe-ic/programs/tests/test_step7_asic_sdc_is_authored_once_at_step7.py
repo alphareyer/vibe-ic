@@ -222,3 +222,63 @@ def test_the_step7_record_is_part_of_pnr_identity(tmp_path):
     inputs, _k, _b = R._step_inputs(proj, "pnr", TOP, _Args())
     assert ("step7_asic_sdc", proj / CONS / R.ASIC_SDC_RECORD) in [
         (label, path) for label, path, _r in inputs]
+
+
+# --------------------------------------------------------------------------- #
+# the fanout ladder reads the run's OWN standard-cell library at step 7
+# --------------------------------------------------------------------------- #
+_LIB = ("/foss/pdks/ciel/gf180mcu/gf180mcuD/libs.ref/"
+        "gf180mcu_fd_sc_mcu7t5v0/lib/gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00.lib")
+_L9_FANOUT_TABLE = """# L9 constraints
+
+## Synthesis Fanout Limit
+
+| library | `MAX_FANOUT_CONSTRAINT` |
+|---|---|
+| `sky130_fd_sc_ls` | 5 |
+| `gf180mcu_*` | 4 |
+| 其他 | 工具預設 |
+"""
+
+
+def test_the_std_cell_library_comes_from_the_resolved_liberty(tmp_path):
+    """MEASURED on spm x gf180mcuD (DIE): with no liberty, the resolver read
+    the pad-ring record's IO-library paths and answered `gf180mcu_fd_io`."""
+    proj = _project(tmp_path)
+    rec = _pad_record(proj)
+    rec.write_text(json.dumps(dict(json.loads(rec.read_text()), io_lefs=[
+        "/foss/pdks/x/libs.ref/gf180mcu_fd_io/lib/gf180mcu_fd_io__tt.lib"])))
+    assert R._active_std_cell_library(proj, "gf180mcuD") == "gf180mcu_fd_io"
+    assert R._active_std_cell_library(proj, "gf180mcuD", _LIB) == \
+        "gf180mcu_fd_sc_mcu7t5v0"
+
+
+def test_step7_applies_l9s_per_library_fanout_cap(tmp_path, monkeypatch):
+    """The cap the design declares for its library reaches step 7's SDC
+    (before: missed at step 7, found at PnR only through the IO library)."""
+    proj = _project(tmp_path)
+    (proj / "input/docs").mkdir(parents=True)
+    (proj / "input/docs/L9_constraints_floorplan.md").write_text(_L9_FANOUT_TABLE)
+    pdk = PL._corner_pdk(monkeypatch, _LIB)
+    monkeypatch.setattr(R, "_liberty_drv_limits", lambda *a, **k: dict(_DRV))
+    _step7(proj, pdk)
+    text = (proj / CONS / f"{TOP}.asic.sdc").read_text()
+    assert "set_max_fanout 4 [current_design]" in text, text[-1200:]
+
+
+def test_the_pnr_derivation_changes_only_the_drv_scope(tmp_path, monkeypatch):
+    proj = _project(tmp_path)
+    (proj / "input/docs").mkdir(parents=True)
+    (proj / "input/docs/L9_constraints_floorplan.md").write_text(_L9_FANOUT_TABLE)
+    pdk = PL._corner_pdk(monkeypatch, _LIB)
+    monkeypatch.setattr(R, "_liberty_drv_limits", lambda *a, **k: dict(_DRV))
+    _step7(proj, pdk)
+    base = R._read_step7_asic_sdc(proj, TOP, pdk)[0]["text"]
+    _pad_record(proj)
+    got = R.asic_sdc_for_pnr(proj, TOP, pdk, "some-container")
+    assert got["derivation"]["applied"] is True
+    removed = [l for l in base.splitlines() if l not in got["text"].splitlines()]
+    assert all("[current_design]" in l or l.startswith("#") for l in removed), \
+        removed
+    assert "set_max_fanout 4 $_vibeic_drv_signal_in_ports" in got["text"]
+    assert "set_max_fanout 10" not in got["text"]

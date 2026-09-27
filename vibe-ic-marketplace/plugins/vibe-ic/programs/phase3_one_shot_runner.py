@@ -3606,6 +3606,7 @@ def _ensure_staged_sdc_drv(sdc_text: str, active_liberty: str,
                            project: Optional[Path] = None,
                            pdk_name: str = "",
                            supply_ports: Optional[Sequence[str]] = None,
+                           drv_block_out: Optional[Dict[str, Any]] = None,
                            ) -> Tuple[str, Dict[str, object]]:
     """Append the ACTIVE PDK's DRV limits to a staged/design-supplied SDC that
     declares none, so `repair_design` has a slew/cap target.
@@ -3701,6 +3702,9 @@ def _ensure_staged_sdc_drv(sdc_text: str, active_liberty: str,
             + " (not fabricated).")
     for _u in _fanout_unread:                 # UNREAD IS NOT EMPTY
         _fanout_note = (_fanout_note + "; " if _fanout_note else "") + _u
+    if drv_block_out is not None:
+        drv_block_out.update(slew_ns=slew, cap_pf=cap, note=note,
+                             max_fanout=fanout, fanout_note=_fanout_note)
     return text + _drv_constraints_sdc_block(
         slew, cap, note, max_fanout=fanout, fanout_note=_fanout_note,
         supply_ports=(_producer_supply_ports_for_drv(project)
@@ -4136,6 +4140,7 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
                             pdk_name: str = "",
                             staged_sdc_note: str = "",
                             supply_ports: Optional[Sequence[str]] = None,
+                            drv_block_out: Optional[Dict[str, Any]] = None,
                             ) -> str:
     """Build the minimal silicon-top auto-SDC text emitted by ``step_pnr`` when
     the project stages no ``constraints/*.sdc`` for silicon.
@@ -4335,6 +4340,10 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
             "# max_fanout UNRESOLVED and at least one tier could not be READ "
             "(unread is not empty): " + "; ".join(_fanout_unread) + "\n")
     sdc_text += _unread_fanout_comment
+    if drv_block_out is not None:
+        drv_block_out.update(slew_ns=drv_slew_ns, cap_pf=drv_cap_pf,
+                             note=drv_note, max_fanout=_l9_fanout,
+                             fanout_note=_fanout_note)
     sdc_text += _drv_constraints_sdc_block(
         drv_slew_ns, drv_cap_pf, drv_note,
         max_fanout=_l9_fanout, fanout_note=_fanout_note,
@@ -4389,7 +4398,9 @@ def _author_asic_sdc(project: Path, top: str, pdk: "PdkConfig",
                            "staged_sdc": None, "drv_parity": None,
                            "io_parity": None, "io_delay_contract": None,
                            "cts_fanout_target": None,
-                           "supply_ports": list(supply_ports)}
+                           "supply_ports": list(supply_ports),
+                           "drv_block": None}
+    _blk: Dict[str, Any] = {}
     if out["design_staged"]:
         try:
             out["staged_sdc"] = str(staged.relative_to(project))
@@ -4402,7 +4413,7 @@ def _author_asic_sdc(project: Path, top: str, pdk: "PdkConfig",
                                                  container)
         txt, out["drv_parity"] = _ensure_staged_sdc_drv(
             txt, str(pdk.liberty), container, project, pdk_name=str(pdk.name),
-            supply_ports=supply_ports)
+            supply_ports=supply_ports, drv_block_out=_blk)
         fm = _SDC_MAX_FANOUT_RE.search(txt)
         if fm:
             try:
@@ -4418,7 +4429,7 @@ def _author_asic_sdc(project: Path, top: str, pdk: "PdkConfig",
             drv_cap_pf=drv.get("max_capacitance_pf"),
             drv_note=str(drv.get("note") or ""),
             liberty_path=str(pdk.liberty), pdk_name=str(pdk.name),
-            supply_ports=supply_ports)
+            supply_ports=supply_ports, drv_block_out=_blk)
         try:
             io_ns, _ = _declared_io_delay_ns(project,
                                              _resolve_clock_spec(project)[0])
@@ -4429,11 +4440,13 @@ def _author_asic_sdc(project: Path, top: str, pdk: "PdkConfig",
             schema="vibe-ic/io-delay-contract/1")
         try:
             out["cts_fanout_target"] = (
-                _l9_declared_max_fanout(project, str(pdk.name))
+                _l9_declared_max_fanout(project, str(pdk.name),
+                                        str(pdk.liberty))
                 or _rtl_replication_fanout_bound(project)
                 or drv.get("max_fanout"))
         except Exception:                                    # noqa: BLE001
             out["cts_fanout_target"] = drv.get("max_fanout")
+    out["drv_block"] = _blk or None
     out["text"] = txt
     return out
 
@@ -4516,19 +4529,39 @@ def asic_sdc_for_pnr(project: Path, top: str, pdk: "PdkConfig",
     out["derivation"] = None
     supplies = _producer_supply_ports_for_drv(project)
     if supplies:
-        derived = _author_asic_sdc(project, top, pdk, container,
-                                   supply_ports=supplies)
+        # ONLY the DRV block's SCOPE changes: the block step 7 rendered is
+        # re-rendered from the SAME recorded arguments with the proven supply
+        # ports excluded, and swapped in place. No other input is re-read at
+        # PnR time (re-running the author did: it re-resolved the fanout
+        # ladder from PnR-time artefacts).
         io_rec = project / "reports" / "phase3" / "io_pad_chip_top.json"
-        out["derivation"] = {
+        der: Dict[str, Any] = {
             "name": ASIC_SDC_DERIVATION,
             "supply_ports": list(supplies),
             "from_record": str(io_rec.relative_to(project)),
             "from_record_sha256": _sha256_text(
                 io_rec.read_text(errors="replace")) if io_rec.is_file() else None,
-            "base_deck_sha256": rec["deck_sha256"],
-            "deck_sha256": _sha256_text(derived["text"])}
-        for k in ("text", "drv_parity", "cts_fanout_target"):
-            out[k] = derived[k]
+            "base_deck_sha256": rec["deck_sha256"]}
+        blk = rec.get("drv_block")
+        base_blk = (_drv_constraints_sdc_block(
+            blk["slew_ns"], blk["cap_pf"], blk["note"],
+            max_fanout=blk["max_fanout"], fanout_note=blk["fanout_note"],
+            supply_ports=()) if blk else "")
+        if not base_blk:
+            der.update(applied=False, reason="step 7's deck has no DRV block "
+                       "this plugin rendered, so there is no scope to narrow")
+        elif out["text"].count(base_blk) != 1:
+            der.update(applied=False, reason="step 7's DRV block is not "
+                       "present exactly once in its deck; left as authored")
+        else:
+            new_blk = _drv_constraints_sdc_block(
+                blk["slew_ns"], blk["cap_pf"], blk["note"],
+                max_fanout=blk["max_fanout"], fanout_note=blk["fanout_note"],
+                supply_ports=supplies)
+            out["text"] = out["text"].replace(base_blk, new_blk, 1)
+            der.update(applied=True)
+        der["deck_sha256"] = _sha256_text(out["text"])
+        out["derivation"] = der
     return out
 
 
@@ -19987,7 +20020,7 @@ def _synth_max_fanout(project: Path, pdk_name: str, liberty_path: str = "",
     """
     unread: List[str] = []
     try:
-        fo = (_l9_declared_max_fanout(project, pdk_name)
+        fo = (_l9_declared_max_fanout(project, pdk_name, liberty_path)
               or _rtl_replication_fanout_bound(project))
     except Exception as exc:  # noqa: BLE001
         fo = None
@@ -20130,7 +20163,8 @@ _LAST_FANOUT_SOURCE: Dict[str, str] = {}
 _RE_LIBS_REF_STDCELL = re.compile(r"libs\.ref/([A-Za-z0-9_]+)/(?:lib|techlef|lef)/")
 
 
-def _active_std_cell_library(project: Path, pdk: str = "") -> str:
+def _active_std_cell_library(project: Path, pdk: str = "",
+                             liberty_path: str = "") -> str:
     """Best-effort name of the standard-cell library THIS run builds against
     (e.g. the `<name>` in `<pdk>/libs.ref/<name>/lib/...`), or "" when it
     cannot be resolved yet.
@@ -20143,6 +20177,16 @@ def _active_std_cell_library(project: Path, pdk: str = "") -> str:
     chip-AGNOSTIC: reads the PDK path SHAPE out of this run's own artefacts;
     no library, PDK or chip name is written here."""
     del pdk  # the library is read from the resolved paths, not guessed from the PDK
+    # THE RESOLVED PDK LIBERTY FIRST (FX_STEP7_ASIC_SDC). It IS the library this
+    # run builds against, and it is known before any artefact below exists.
+    # MEASURED (spm x gf180mcuD DIE, 986343fef): with no liberty given, synth
+    # and step 7 resolved nothing (L9's per-library fanout row missed -> the
+    # PDK default 10), while at PnR time the glob below hit the pad-ring
+    # record's IO-library paths and returned `gf180mcu_fd_io` -- an IO library,
+    # not a standard-cell one -- which happened to match the `gf180mcu_*` row.
+    _m = _RE_LIBS_REF_STDCELL.search(str(liberty_path or ""))
+    if _m:
+        return _m.group(1)
     try:
         for rel in ("phase3/stage3/pnr/pnr.tcl",
                     "phase3/stage3/extracted/extract_" "*.tcl",
@@ -20160,7 +20204,8 @@ def _active_std_cell_library(project: Path, pdk: str = "") -> str:
 
 
 def _l9_declared_max_fanout(project: Path,
-                            pdk: str = "") -> Optional[int]:
+                            pdk: str = "",
+                            liberty_path: str = "") -> Optional[int]:
     """Return the design's L9-declared `SYNTH_MAX_FANOUT` cap as a positive int,
     or None when L9 declares none. Reads ONLY the L9 constraints/floorplan doc
     (input docs or the generated L9) — a blind-legal design input, same source +
@@ -20206,7 +20251,7 @@ def _l9_declared_max_fanout(project: Path,
     # rule the staged-flow-config tier below uses — a foreign library's row
     # never reaches this run, and a row with no number declares nothing.
     try:
-        _scl = _active_std_cell_library(project, pdk) or ""
+        _scl = _active_std_cell_library(project, pdk, liberty_path) or ""
     except Exception:                                        # noqa: BLE001
         _scl = ""
     for root in roots:
