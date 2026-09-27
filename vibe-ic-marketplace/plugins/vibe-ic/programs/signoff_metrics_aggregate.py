@@ -1013,6 +1013,25 @@ AXIS_ONLY_KEYS: frozenset = frozenset({
 })
 
 
+def _librelane_state_cell(project: Path, key: str) -> Optional[Cell]:
+    """Step 37.4 on LibreLane State (lane mig105).
+
+    When the flow step that measures ``key`` runs on LibreLane
+    (``phase3/librelane_switch.json``), the key is read from that chain's
+    judged ``state_out.json`` (`librelane_pv_signoff.state_metric`), bound by
+    sha256, and from nothing else. None: the step is not on LibreLane in this
+    run, so the direct rule below answers.
+    """
+    import librelane_pv_signoff as _pv
+    row = _pv.state_metric(project, key)
+    if row is None:
+        return None
+    if row["value"] == _pv.NOT_MEASURED:
+        return unmeasured(row["reason"], row.get("record", ""))
+    return Cell(row["value"], row["source"],
+                basis=f"LibreLane State, judged in {row['record']}")
+
+
 def aggregate(project: Path) -> tuple[dict, dict]:
     """``(metrics, report)`` — every key answered, measured or not."""
     metrics: dict = {}
@@ -1020,7 +1039,9 @@ def aggregate(project: Path) -> tuple[dict, dict]:
     rows = []
     for key, label, resolve in RULES:
         try:
-            cell = resolve(project)
+            cell = _librelane_state_cell(project, key)
+            if cell is None:
+                cell = resolve(project)
         except Exception as exc:                       # a broken artefact is a
             cell = unmeasured(                         # reason, never a crash
                 f"reading the source for this key raised "

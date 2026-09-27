@@ -49944,8 +49944,147 @@ def _try_svrf_native_drc(project: Path, top: str, pdk: PdkConfig,
                     "n_density_fill": n_den}})
 
 
+_STEP31_ORDER = ("PASS", "PASS_WITH_WAIVERS", "NOT_MEASURED", "FAIL")
+
+
+def _step31_librelane(project: Path, top: str, pdk: PdkConfig, half: str,
+                      publish: bool) -> StepResult:
+    """Canonical step 31, one half, measured by LibreLane (lane mig105).
+
+    ``librelane_pv_signoff.run_half`` runs ``Magic.DRC`` + ``KLayout.DRC`` +
+    ``KLayout.Density`` (``drc``) or ``Magic.SpiceExtraction`` + ``Netgen.LVS``
+    (``lvs``) on the shipped ``<top>.gds`` and the DEF it was streamed from, and
+    judges them: a producer that wrote nothing is NOT_MEASURED, never 0.  With
+    ``publish`` (mode ``librelane``) the tool's reports go where the existing
+    step-31 gates read: the KLayout deck's report to ``drc_signoff.rpt`` (only
+    when ``_signoff_drc_format`` calls it a sign-off deck's report, the same
+    predicate as the direct path) and netgen's report to ``lvs.rpt`` with
+    ``lvs_verdict.json``.  In ``dual`` nothing canonical is written.
+    """
+    t0 = time.time()
+    import librelane_pv_signoff as _pv
+    from librelane_contract import Refusal, resolve_image, resolve_pdk_root
+    pnr = _pl.pnr_dir(project)
+    try:
+        image = resolve_image(project)
+    except Refusal as exc:
+        return StepResult(half, "NOT_MEASURED", time.time() - t0, str(exc),
+                          reason_class=_V.ReasonClass.TOOL_ABSENT)
+    root = resolve_pdk_root(project, pdk.name, image=image)
+    if not root:
+        return StepResult(half, "NOT_MEASURED", time.time() - t0,
+                          "LL_PDK_ROOT_NOT_RESOLVABLE",
+                          reason_class=_V.ReasonClass.TOOL_ABSENT)
+    try:
+        record = _pv.run_half(project, image, Path(root), pdk.name, half,
+                              gds=pnr / f"{top}.gds", routed_def=pnr / f"{top}.def",
+                              netlist=pnr / f"{top}_pnr.v",
+                              sdc=pnr / "constraint.sdc")
+    except Refusal as exc:
+        if exc.code in ("LL_PV_VIEW_MISSING", "LL_BRIDGE_VIEW_MISSING"):
+            return StepResult(half, "NOT_MEASURED", time.time() - t0, str(exc),
+                              reason_class=_V.ReasonClass.INPUT_ABSENT)
+        return StepResult(half, "FAIL", time.time() - t0, f"LibreLane step 31: {exc}")
+    record_path = project / _pv.RECORD_REL.format(half=half)
+    extras: Dict[str, Any] = {"librelane_pv": str(record_path),
+                              "librelane_verdict": record["verdict"]}
+    outputs = [str(record_path)]
+    if publish:
+        folders = {row.get("step"): Path(row["folder"])
+                   for row in record["metrics"].values() if row.get("folder")}
+        try:
+            if half == "drc" and "KLayout.DRC" in folders:
+                lyrdb = folders["KLayout.DRC"] / "reports" / "drc.klayout.lyrdb"
+                if lyrdb.is_file() and _sdf.classify_file(lyrdb).is_signoff_deck:
+                    for dest in (project / "phase3" / "reports" / "drc.rpt",
+                                 project / "reports" / "phase3" / "drc_signoff.rpt"):
+                        extras.setdefault("published", []).append(
+                            _pv.publish_report(lyrdb.parent, lyrdb.name, dest))
+                        outputs.append(str(dest))
+            if half == "lvs" and "Netgen.LVS" in folders:
+                dest = _pl.reports_phase3_dir(project) / "lvs.rpt"
+                extras.setdefault("published", []).append(_pv.publish_report(
+                    folders["Netgen.LVS"] / "reports", "lvs.netgen.rpt", dest))
+                outputs.append(str(dest))
+                lvs = record["metrics"].get("design__lvs_error__count", {})
+                match = record["verdict"] == "PASS"
+                outputs.append(_write_lvs_verdict(
+                    project, "PASS" if match else (
+                        "FAIL" if lvs.get("status") == "FAIL" else "INCOMPLETE"),
+                    "LVS_MATCH_LIBRELANE_NETGEN" if match else
+                    f"LVS_LIBRELANE_{record['verdict']}",
+                    "; ".join(record["reasons"]) or
+                    "Netgen.LVS: circuits match uniquely (LibreLane chain)",
+                    {"generated_by": "librelane_pv_signoff.run_half (mig105)",
+                     "librelane_pv": str(record_path)}))
+        except Refusal as exc:
+            return StepResult(half, "FAIL", time.time() - t0,
+                              f"LibreLane step 31 publication: {exc}", outputs, extras)
+    status = {"PASS": "PASS", "FAIL": "FAIL"}.get(record["verdict"], "NOT_MEASURED")
+    detail = (f"LibreLane step 31 ({half}): {record['verdict']}"
+              + (f" -- {'; '.join(record['reasons'])}" if record["reasons"] else ""))
+    return StepResult(half, status, time.time() - t0, detail, outputs, extras,
+                      reason_class=(_V.ReasonClass.NOT_EXECUTED
+                                    if status == "NOT_MEASURED" else ""))
+
+
+def _step31_dispatch(project: Path, top: str, pdk: PdkConfig, half: str,
+                     direct: Callable[[], StepResult]) -> StepResult:
+    """Step 31's producer switch (``phase3/librelane_switch.json`` "31").
+
+    ``direct`` (the default, and every absent switch): the direct half,
+    unchanged.  ``librelane``: the tool's verdict is the step's.  ``dual``: the
+    direct half stays canonical, the tool half is measured beside it, and for
+    verification "better" is not the lower count -- BOTH must be clean, so the
+    row is the worse of the two and a clean/dirty split is named
+    ``LL_PV_ARMS_DISAGREE``.
+    """
+    from librelane_contract import Refusal, selected_mode
+    try:
+        mode = selected_mode(project, "31")
+    except Refusal as exc:
+        return StepResult(half, "FAIL", 0.0, str(exc))
+    if mode == "direct":
+        return direct()
+    t0 = time.time()
+    vacuous = _vacuous_on_unrouted(project, half, t0)
+    if vacuous is not None:
+        return vacuous
+    if mode == "librelane":
+        return _step31_librelane(project, top, pdk, half, publish=True)
+    direct_row = direct()
+    tool_row = _step31_librelane(project, top, pdk, half, publish=False)
+    rank = {word: index for index, word in enumerate(_STEP31_ORDER)}
+    worse = max((direct_row, tool_row), key=lambda r: rank.get(r.status, len(rank)))
+    clean = {r.status in ("PASS", "PASS_WITH_WAIVERS") for r in (direct_row, tool_row)
+             if r.status != "NOT_MEASURED"}
+    note = (" LL_PV_ARMS_DISAGREE: the direct half is "
+            f"{direct_row.status} and the LibreLane half is {tool_row.status}"
+            if len(clean) > 1 else "")
+    extras = dict(direct_row.extras)
+    extras.update({"dual_direct": direct_row.status, "dual_librelane": tool_row.status,
+                   "dual_librelane_detail": tool_row.detail,
+                   "librelane_pv": tool_row.extras.get("librelane_pv")})
+    return StepResult(half, worse.status, time.time() - t0,
+                      f"dual step 31 ({half}): direct {direct_row.status}, "
+                      f"LibreLane {tool_row.status}.{note} [direct: "
+                      f"{direct_row.detail}] [LibreLane: {tool_row.detail}]",
+                      list(direct_row.output_files) + list(tool_row.output_files),
+                      extras, reason_class=worse.reason_class,
+                      declared_by=worse.declared_by)
+
+
 def step_drc(project: Path, top: str, pdk: PdkConfig,
              container: str, candidate: bool = False) -> StepResult:
+    """Canonical step 31, DRC half: the producer switch, then the half."""
+    if candidate:
+        return _step_drc_direct(project, top, pdk, container, candidate)
+    return _step31_dispatch(project, top, pdk, "drc", lambda: _step_drc_direct(
+        project, top, pdk, container, candidate))
+
+
+def _step_drc_direct(project: Path, top: str, pdk: PdkConfig,
+                     container: str, candidate: bool = False) -> StepResult:
     t0 = time.time()
     if candidate and "sdr_candidates" not in Path(project).parts:
         return StepResult("drc", "FAIL", time.time() - t0,
@@ -50821,6 +50960,25 @@ def _write_extraction_preflight(project: Path, magicrc: str,
 def step_lvs(project: Path, top: str, pdk: PdkConfig,
              container: str,
              upstream_pnr: Optional[StepResult] = None) -> StepResult:
+    """Canonical step 31, LVS half: the producer switch, then the half.
+
+    The upstream-incomplete skip (#590) belongs to the step, not to one
+    producer: a pnr that died before its final writes is skipped on every
+    mode, by the direct half's own rule."""
+    _pnr_writes_done = bool(
+        (getattr(upstream_pnr, "extras", None) or {}).get(
+            "pnr_signoff_writes_complete"))
+    if (upstream_pnr is not None and upstream_pnr.status != "PASS"
+            and not _pnr_writes_done):
+        return _step_lvs_direct(project, top, pdk, container,
+                                upstream_pnr=upstream_pnr)
+    return _step31_dispatch(project, top, pdk, "lvs", lambda: _step_lvs_direct(
+        project, top, pdk, container, upstream_pnr=upstream_pnr))
+
+
+def _step_lvs_direct(project: Path, top: str, pdk: PdkConfig,
+                     container: str,
+                     upstream_pnr: Optional[StepResult] = None) -> StepResult:
     t0 = time.time()
     _vac = _vacuous_on_unrouted(project, "lvs", t0)
     if _vac is not None:
