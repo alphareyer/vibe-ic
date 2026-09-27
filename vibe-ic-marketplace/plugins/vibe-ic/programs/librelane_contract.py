@@ -1693,6 +1693,10 @@ def _class_default(project: Path, step: str, named: dict[str, Any],
 #:   23  librelane  vibe-ic's sta_report_check judges the tool's per-corner
 #:               reports in this mode (c).
 #:   32  librelane  Vibeic.PostRouteRepair inside the chain (e).
+#:   29  librelane  vibe-ic's own gate-level simulation (Vibeic.GateLevelSim)
+#:               over the tool's per-corner SDFs.
+#:   30  direct  LibreLane has no post-layout SPICE step; the tool arm is
+#:               only recorded beside vibe-ic's correlation.
 #: Steps absent here (the analog A6/A7 arms) keep the ordinary resolution;
 #: v1 refuses an analog design under the flag at the front door (decision 13).
 IMPL_STEP_MODES: dict[str, dict[str, str]] = {
@@ -1704,10 +1708,18 @@ IMPL_STEP_MODES: dict[str, dict[str, str]] = {
         '18': 'librelane', '19': 'librelane', '20': 'librelane',
         '21': 'librelane', '22': 'librelane', '23': 'librelane',
         '24': 'dual', '25': 'direct', '26': 'dual', '26.5ic': 'librelane',
+        '29': 'librelane', '30': 'direct',
         '31': 'dual', '32': 'librelane', '33': 'librelane', '34': 'librelane',
         '37': 'librelane', 'DT2': 'librelane', 'DT3': 'librelane',
     },
 }
+
+
+#: Every step some implementation-flow layer decides. A step outside it (the
+#: analog A6/A7 arms; v1 is digital only) never reads the record, so neither
+#: a damaged record nor a switch conflict can change its answer.
+IMPL_LAYER_STEPS: frozenset[str] = frozenset(
+    step for layer in IMPL_STEP_MODES.values() for step in layer)
 
 
 def impl_step_modes(project: Path) -> dict[str, str] | None:
@@ -1746,11 +1758,12 @@ def impl_step_modes(project: Path) -> dict[str, str] | None:
 
 def selected_mode(project: Path, step: str) -> str:
     """The flow-mode layer's answer when the project has an implementation
-    flow that decides the step, else the project's switch when it names the
+    flow that decides the step (a step no layer decides never reads the
+    record), else the project's switch when it names the
     step, else the production default for the step, else the design class's
     default (when the steps it continues resolve to LibreLane too), else
     `direct`. An invalid mode is refused, from either source."""
-    layer = impl_step_modes(project)
+    layer = impl_step_modes(project) if step in IMPL_LAYER_STEPS else None
     if layer is not None and step in layer:
         return layer[step]
     path = project / 'phase3/librelane_switch.json'
