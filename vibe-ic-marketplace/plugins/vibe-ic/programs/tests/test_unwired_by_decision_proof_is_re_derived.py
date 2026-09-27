@@ -97,16 +97,20 @@ def test_a_probe_naming_a_program_that_is_not_here_is_refused():
 def test_a_probe_that_raises_does_not_buy_the_exclusion(tmp_path):
     """"I could not check the proof" and "the proof went false" are
     indistinguishable from here, and one of them is a checker nobody runs
-    wearing a disclosure that stopped being true. Both must refuse."""
-    (PROGRAMS / "_tmp_raising_probe.py").write_text(
+    wearing a disclosure that stopped being true. Both must refuse.
+
+    The raising probe lives in a PRIVATE programs dir handed to
+    `evaluate_proof` as its `programs` argument. It used to be written into
+    the SHIPPED programs/ and unlinked in a `finally`, where every concurrent
+    worker listing programs/*.py could see it appear and vanish mid-read."""
+    programs = tmp_path / "programs"
+    programs.mkdir()
+    (programs / "_tmp_raising_probe.py").write_text(
         "def subject_count(root):\n    raise RuntimeError('boom')\n")
-    try:
-        holds, detail = A.evaluate_proof(PROGRAMS, ROOT, {
-            "reason": "z" * 400,
-            "proof": {"kind": "no_subject_in_tree",
-                      "probe": "_tmp_raising_probe:subject_count"}})
-    finally:
-        (PROGRAMS / "_tmp_raising_probe.py").unlink()
+    holds, detail = A.evaluate_proof(programs, ROOT, {
+        "reason": "z" * 400,
+        "proof": {"kind": "no_subject_in_tree",
+                  "probe": "_tmp_raising_probe:subject_count"}})
     assert not holds and "could not be run" in detail, detail
 
 

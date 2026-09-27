@@ -120,15 +120,21 @@ def _carries_documents(root) -> bool:
 
 
 def _ensure_synthetic_corpus():
-    """Materialize the committed synthetic corpus if it was cleaned (defensive)."""
+    """Build the synthetic corpus when no real corpus carries a document.
+
+    Into a PRIVATE per-process temp dir (`private_synthetic_benchmark_phase1`),
+    never into `_SYNTHETIC_BP`'s shipped location: this ran at import time, so
+    under xdist every worker collecting this module (or the matrix module,
+    which imports it) wrote the same shipped files while other workers read
+    them. The shipped path stays only as the fallback a failed build leaves
+    behind, and it is only ever READ."""
+    global _SYNTHETIC_BP
     if _carries_documents(_ENV_BP) or _carries_documents(_REPO_BP):
-        return
-    if _carries_documents(_SYNTHETIC_BP):
         return
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent / "fixtures"))
-        from synthetic_protocol_blobs import build_synthetic_benchmark_phase1
-        build_synthetic_benchmark_phase1(_SYNTHETIC_BP)
+        from synthetic_protocol_blobs import private_synthetic_benchmark_phase1
+        _SYNTHETIC_BP = private_synthetic_benchmark_phase1()
     except Exception:
         pass
 

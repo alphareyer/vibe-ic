@@ -30,7 +30,14 @@ if str(_PROG) not in sys.path:
 
 import phase1_evidence_grounding_check as G  # noqa: E402
 
-_FIX = _PROG / "tests" / "fixtures" / "synthetic_benchmark_phase1"
+# The synthetic corpus, built privately by its generator. This used to be the
+# shipped `tests/fixtures/synthetic_benchmark_phase1/`, which held a corpus only
+# when `test_protocol_detector_no_misfire` had written one there at import time,
+# so this file's population depended on which module a checkout had run first.
+sys.path.insert(0, str(_PROG / "tests" / "fixtures"))
+from synthetic_protocol_blobs import private_synthetic_benchmark_phase1  # noqa: E402
+
+_FIX = private_synthetic_benchmark_phase1()
 
 
 def _fixture_projects():

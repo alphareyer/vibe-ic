@@ -54,8 +54,21 @@ from pathlib import Path  # noqa: E402
 # Real private corpus when present, else the committed synthetic fixture so the
 # gold cross-contamination sweep ACTUALLY RUNS in the shipped tree.
 _REAL_BP = mod.DEFAULT_BP
-_SYNTHETIC_BP = Path(__file__).resolve().parent / "fixtures" / "synthetic_benchmark_phase1"
-BP = _REAL_BP if _REAL_BP.is_dir() else _SYNTHETIC_BP
+
+
+def _synthetic_bp() -> Path:
+    """The synthetic corpus, built privately by the generator. This module used
+    to read `fixtures/synthetic_benchmark_phase1/` in the shipped tree, which
+    held a corpus only when `test_protocol_detector_no_misfire` had written one
+    there at import time (the import below), so what this sweep read depended
+    on another module's side effect."""
+    import sys as _s
+    _s.path.insert(0, str(Path(__file__).resolve().parent / "fixtures"))
+    from synthetic_protocol_blobs import private_synthetic_benchmark_phase1
+    return private_synthetic_benchmark_phase1()
+
+
+BP = _REAL_BP if _REAL_BP.is_dir() else _synthetic_bp()
 
 
 # ORGANIC-20260531 (v0.2.32): the ~46 detectors lifted out of the runner's
