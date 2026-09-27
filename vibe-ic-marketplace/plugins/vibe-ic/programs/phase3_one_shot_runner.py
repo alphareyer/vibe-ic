@@ -45024,25 +45024,37 @@ def _librelane_postroute_repair_mode(project: Path) -> str:
         return "direct"
 
 
-def _postroute_repair_in_chain_report(project: Path) -> Optional[Dict[str, Any]]:
-    """The step-32 report `postroute_repair_after_route` wrote inside THIS
-    run's step-21 LibreLane chain, or None. Bound by sha256: the route handoff
-    receipt names the report it carried, so a report from another run (or a
-    route that ran direct) is never read as this run's."""
+def _postroute_repair_in_chain(project: Path) -> Tuple[Optional[Dict[str, Any]], str]:
+    """(the step-32 report `postroute_repair_after_route` wrote inside THIS
+    run's step-21 LibreLane chain, or None; why it is or is not that). Bound
+    by sha256: the route handoff receipt names the report it carried, so a
+    report from another run (or a route that ran direct) is never read as
+    this run's."""
     import librelane_contract as _ll  # noqa: PLC0415
     import librelane_postroute_repair as _llprr  # noqa: PLC0415
     if _ll.selected_mode(project, "21") == "direct":
-        return None
+        return None, "step 21 routed direct, so no LibreLane chain ran step 32"
     receipt = project / "reports/phase3/librelane_route_handoff.json"
     report = project / _llprr.REPORT_REL
     try:
         rec = (json.loads(receipt.read_text()).get("postroute_repair") or {})
-    except (OSError, ValueError):
-        return None
-    if not rec or not report.is_file() or rec.get("report_sha256") != _ll.digest(report):
-        return None
+    except (OSError, ValueError) as exc:
+        return None, f"{receipt.name} is unreadable ({type(exc).__name__})"
+    if not rec:
+        return None, (f"{receipt.name} names no step-32 report (the route handed "
+                      f"over its direct arm, or step 32 was direct in the chain)")
+    if not report.is_file() or rec.get("report_sha256") != _ll.digest(report):
+        return None, (f"{_llprr.REPORT_REL} is not the report {receipt.name} "
+                      f"bound by sha256")
     doc = json.loads(report.read_text())
-    return doc if doc.get("site") == "after_route" else None
+    if doc.get("site") != "after_route":
+        return None, f"{_llprr.REPORT_REL} was written at site {doc.get('site')!r}"
+    return doc, "the step-21 chain's own step-32 report"
+
+
+def _postroute_repair_in_chain_report(project: Path) -> Optional[Dict[str, Any]]:
+    """The in-chain step-32 report, or None (`_postroute_repair_in_chain`)."""
+    return _postroute_repair_in_chain(project)[0]
 
 
 def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
@@ -45182,7 +45194,7 @@ def step_postroute_repair_librelane(project: Path, top: str, pdk: "PdkConfig",
     if refused:
         return StepResult("postroute_repair_librelane", "FAIL", time.time() - t0,
                           refused, reason_class=_V.ReasonClass.INPUT_ABSENT)
-    in_chain = _postroute_repair_in_chain_report(project)
+    in_chain, in_chain_why = _postroute_repair_in_chain(project)
     if in_chain is not None:
         # Step 32 already ran inside step 21's LibreLane chain
         # (`postroute_repair_after_route`), and the tail wrote routed.def from
@@ -45190,6 +45202,13 @@ def step_postroute_repair_librelane(project: Path, top: str, pdk: "PdkConfig",
         # the same route twice.
         return _postroute_repair_librelane_result(
             project, pnr_out, in_chain, t0, handed=False, top=top)
+    else:
+        # Not in the chain: said, with the reason, before the repair runs on
+        # the routed database here instead (the report this run then writes
+        # carries `site: after_direct_route`).
+        print(f"[postroute_repair_librelane] PRR_NOT_IN_CHAIN: {in_chain_why}; "
+              f"repairing the routed database after the route instead",
+              file=sys.stderr)
     for view in (routed, netlist, sdc):
         if not view.is_file():
             _drv_promotion_disclose(

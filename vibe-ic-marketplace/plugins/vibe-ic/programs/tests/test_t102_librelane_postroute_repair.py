@@ -937,3 +937,20 @@ def test_every_geometry_step_reads_the_routes_tech_lef(tmp_path, monkeypatch):
         prr._prepare(project, image='img', pdk='pdk', pdk_root=tmp_path, sdc=sdc,
                      derate=(0.95, 1.05), pg_rules_tcl=None, refill_tcl=None, docker='docker')
     assert exc.value.code == 'LL_ROUTE_TECH_LEF_UNBOUND'
+
+
+def test_a_repair_not_found_in_the_chain_says_so_and_why(tmp_path, monkeypatch, capsys):
+    """silent_decline_audit: when step 32 is not taken from the step-21 chain,
+    the decline is disclosed with its reason before the after-route repair."""
+    runner = importlib.import_module('phase3_one_shot_runner')
+    import test_pad_connected_pdn_ring as ring_fixture
+    project = tmp_path / 'proj'
+    put(project / 'phase3/librelane_switch.json', {'steps': {'21': 'direct', '32': 'librelane'}})
+    pdk = ring_fixture._pdk(tmp_path, ring=None)
+    runner.step_postroute_repair_librelane(project, 'dut', pdk, 'unused')
+    err = capsys.readouterr().err
+    assert 'PRR_NOT_IN_CHAIN: step 21 routed direct' in err
+    put(project / 'phase3/librelane_switch.json', {'steps': {'21': 'librelane', '32': 'librelane'}})
+    put(project / 'reports/phase3/librelane_route_handoff.json', {'postroute_repair': None})
+    report, why = runner._postroute_repair_in_chain(project)
+    assert report is None and 'names no step-32 report' in why
