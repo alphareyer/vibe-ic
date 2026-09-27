@@ -2382,6 +2382,78 @@ _register(Instrument(
 ))
 
 
+
+# llv1 W5: the two-segment LibreLane driver reads two of the tool's own logs.
+# Samples: real LibreLane 3.1.0.dev1 runs in released vibeic-eda 0.3.83 by
+# digest (sha256:7a01d48e...), spm x gf180mcuD, on 192.168.1.121 under
+# /tmp/lla/spike on 2026-09-28 (LLV1_W5_spike.md); files copied unedited.
+_LL_WHOLE_PROV = ("Real LibreLane 3.1.0.dev1 (vibeic-eda 0.3.83 by digest), "
+                  "spm x gf180mcuD, 192.168.1.121 /tmp/lla/spike 2026-09-28: ")
+
+
+def _judge_ll_steps_from_log(text: str) -> Optional[str]:
+    import librelane_whole_flow as whole
+    tags = re.findall(r"Running '[^']+' at '(?:[^']*/)?runs/([^/']+)/", text)
+    steps = whole.steps_from_log(text, tags[0]) if tags else []
+    started = len(re.findall(r"Running '[^']+' at '", text))
+    if steps and started > len(steps):
+        return f"SUBSTEPS_EXCLUDED:{len(steps)}/{started}"
+    return None
+
+
+_register(Instrument(
+    name="librelane_whole_flow::steps_from_log",
+    reads="LibreLane run flow.log (`Running '<id>' at '<path>'` lines)",
+    ruling="llv1 W5", owner="lla",
+    why=("The driver checks each segment's steps against the image's own plan "
+         "from the run's log. A composite step (OpenROAD.RepairAntennas) logs "
+         "its sub-steps one folder deeper; counting them would make every "
+         "complete segment read as an unexpected step list."),
+    judge=_judge_ll_steps_from_log,
+    positive=Sample(
+        provenance=(_LL_WHOLE_PROV + "Classic segment 2 (s2cl, --from "
+                    "OpenROAD.CheckSDCFiles): 67 steps, 69 Running lines "
+                    "(RepairAntennas' two sub-steps). "
+                    "calibration/librelane_flow_log_composite_pos.log"),
+        artefact=_read("librelane_flow_log_composite_pos.log")),
+    expect="SUBSTEPS_EXCLUDED:67/69",
+    negative=Sample(
+        provenance=(_LL_WHOLE_PROV + "Classic segment 1 (s1cl, --to "
+                    "Checker.NetlistAssignStatements): 9 steps, no composite. "
+                    "calibration/librelane_flow_log_plain_neg.log"),
+        artefact=_read("librelane_flow_log_plain_neg.log")),
+))
+
+
+def _judge_ll_deferred_lines(text: str) -> Optional[str]:
+    import librelane_whole_flow as whole
+    lines = whole.deferred_lines(text)
+    return "DEFERRED_ONLY" if lines else None
+
+
+_register(Instrument(
+    name="librelane_whole_flow::deferred_lines",
+    reads="LibreLane run error.log",
+    ruling="llv1 W5", owner="lla",
+    why=("LibreLane exits 2 at the end of a COMPLETE run whose checkers "
+         "deferred findings. The driver returns those findings for vibe-ic's "
+         "gates to judge; any other error line is an aborted run and a FAIL."),
+    judge=_judge_ll_deferred_lines,
+    positive=Sample(
+        provenance=(_LL_WHOLE_PROV + "plain Classic run (refcl), all 76 steps "
+                    "ran, rc 2: '6 Magic DRC errors found. - deferred' and "
+                    "'3 KLayout DRC errors found. - deferred'. "
+                    "calibration/librelane_error_log_deferred_pos.log"),
+        artefact=_read("librelane_error_log_deferred_pos.log")),
+    expect="DEFERRED_ONLY",
+    negative=Sample(
+        provenance=(_LL_WHOLE_PROV + "Chip segment 2 (seg2) that stopped at "
+                    "Checker.DisconnectedPins, rc 2: '1 critical disconnected "
+                    "pins found.' is not deferred. "
+                    "calibration/librelane_error_log_abort_neg.log"),
+        artefact=_read("librelane_error_log_abort_neg.log")),
+))
+
 # ══════════════════════════════════════════════════════════════════════════
 #  THE RULE
 # ══════════════════════════════════════════════════════════════════════════
