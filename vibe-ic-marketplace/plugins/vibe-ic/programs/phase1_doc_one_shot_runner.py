@@ -51708,11 +51708,20 @@ def gen_l9_integration_spec(project: Path,
                             f"{_strat}+{_stgtop.EXTRACTION_STRATEGY}"
                             if _strat else _stgtop.EXTRACTION_STRATEGY)
                     continue
+                # FX_P2 — typed like every doc-derived row. The row IS the
+                # staged RTL's own port declaration, so its RTL name is a
+                # measured fact of the input, and no synonym was read for it:
+                # `aliases: []` says exactly that. MEASURED on subservient
+                # (reused serv): these rows were the 6 of 15 pins
+                # `l1_pin_table_aliases_typed_check` refused, and phase 2
+                # halted on a field the producer simply never wrote.
                 _new = {
                     "name": _rname,
                     "mode": _rp.get("direction") or "input",
                     "direction": _rp.get("direction") or "input",
                     "io": None,
+                    "rtl_name": _rname,
+                    "aliases": [],
                     "evidence": _rev,
                     "extraction_strategy": _stgtop.EXTRACTION_STRATEGY,
                 }
