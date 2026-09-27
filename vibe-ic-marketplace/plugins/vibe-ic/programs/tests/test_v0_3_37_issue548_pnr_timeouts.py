@@ -12,6 +12,7 @@
 import sys
 import time
 from pathlib import Path
+import pytest
 
 PROG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROG))
@@ -123,6 +124,7 @@ def _cost_ratio_within(fn, small, big, factor, floor, attempts=3):
     return False, best_small, best_big
 
 
+@pytest.mark.measures
 def test_reset_dependency_check_pattern_b_is_linear_not_quadratic(tmp_path):
     """Pattern B is O(N), which is what the rewrite was for (>300s before it).
 

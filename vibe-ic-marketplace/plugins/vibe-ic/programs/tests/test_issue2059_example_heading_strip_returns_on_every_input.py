@@ -289,6 +289,7 @@ DOC_WITH_BANNER = (
 )
 
 
+@pytest.mark.measures
 def test_a_banner_rule_does_not_stop_the_example_section_strip():
     """The whole point: this input previously never came back."""
     started = time.monotonic()
@@ -323,6 +324,7 @@ def test_a_document_with_no_example_heading_is_returned_unchanged():
         assert SE._strip_example_sections(text) == text, repr(text[:60])
 
 
+@pytest.mark.measures
 def test_extract_returns_on_a_document_carrying_a_banner_rule():
     """Through the public entry point, which is what `check()` reaches."""
     started = time.monotonic()
@@ -356,6 +358,7 @@ def _ufs_document():
                 + UFS_DOC + "; looked at " + ", ".join(str(t) for t in tried))
 
 
+@pytest.mark.measures
 def test_the_real_input_document_that_never_returned_now_returns():
     doc = _ufs_document()
     text = doc.read_text(encoding="utf-8", errors="replace")

@@ -78,6 +78,7 @@ def test_read_text_caps_text_artefact(tmp_path):
 
 
 # ── repro: a LARGE binary GDS must NOT hang / blow memory ───────────────
+@pytest.mark.measures
 def test_large_binary_gds_does_not_hang(tmp_path):
     """A multi-hundred-MB binary GDS must be processed in seconds, not
     materialized into a giant str + splitlines. We synthesize a 300 MB

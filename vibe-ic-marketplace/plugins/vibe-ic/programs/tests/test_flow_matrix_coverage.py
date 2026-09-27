@@ -643,6 +643,7 @@ def collect_items() -> Tuple[Dict, ...]:
     return _collect_items_from_paths(paths, PLUGIN_ROOT)
 
 
+@pytest.mark.measures
 def test_live_collection_relays_finite_semantic_progress_past_old_bound(
         monkeypatch, tmp_path):
     """Several completed collections may outlive a former total deadline."""
@@ -2247,6 +2248,7 @@ def test_outcome_relay_does_not_erase_a_real_child_predicate_failure(tmp_path):
         _cell_outcomes_from_reports(reports, {path.name: 1}, {"1"})
 
 
+@pytest.mark.measures
 def test_nested_outcome_run_outlives_old_fixed_bound_with_semantic_progress(
         monkeypatch, tmp_path):
     """Completed pytest items, not elapsed wall time, keep the child alive.
@@ -2332,6 +2334,7 @@ def test_nested_outcome_run_outlives_old_fixed_bound_with_semantic_progress(
                for rows in reports.values())
 
 
+@pytest.mark.measures
 def test_nested_outcome_run_is_killed_when_no_item_can_renew_the_window(
         monkeypatch, tmp_path):
     """The other direction: a window that renewals cannot reach still KILLS.

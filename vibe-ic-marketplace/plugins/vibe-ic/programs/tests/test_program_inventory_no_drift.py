@@ -397,6 +397,8 @@ def test_a_regeneration_closes_the_check_it_ships_with(tmp_path, monkeypatch):
         "is open again:\n  " + "\n  ".join(after))
 
 
+@pytest.mark.bookkeeping(regenerate="python3 programs/gen_program_inventory.py",
+                         match=r"rewrote a count that already agreed|the committed documents are not clean")
 def test_the_writer_is_idempotent_and_touches_nothing_that_agrees(
         tmp_path, monkeypatch):
     """The control on the write: an undrifted document is left BYTE-identical.

@@ -31,6 +31,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+import pytest
 
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
@@ -95,6 +96,7 @@ class ReadFlushedRealFsTest(unittest.TestCase):
         self.assertNotIn("Final result:", txt)
 
     # ── the scaled budget must not become a fixed sleep ──────────────────
+    @pytest.mark.measures
     def test_clean_exit_returns_as_soon_as_the_marker_present(self):
         self.rpt.write_text(MATCH_REPORT)
         t0 = time.time()

@@ -377,6 +377,7 @@ def test_worker_telemetry_does_not_subtract_an_absent_host_document():
     assert merged["parallel"]["complete"] is False
 
 
+@pytest.mark.measures
 def test_worker_waits_for_completion_while_progress_events_keep_advancing(
         tmp_path, monkeypatch):
     """A slow run is not killed for exceeding an estimated runtime.
@@ -423,6 +424,7 @@ def test_worker_classifies_silent_idle_process_as_stalled_not_timed_out(
     assert problem and "outcome=stalled" in problem
 
 
+@pytest.mark.measures
 @pytest.mark.parametrize("activity", ["chatty", "busy"])
 def test_output_and_cpu_cannot_renew_attestation_progress(
         tmp_path, monkeypatch, activity):
@@ -454,6 +456,7 @@ def test_output_and_cpu_cannot_renew_attestation_progress(
         assert "CHATTY_NOT_PROGRESS" in out
 
 
+@pytest.mark.measures
 def test_unassigned_self_hashed_attestations_cannot_renew_progress(
         tmp_path, monkeypatch):
     monkeypatch.setattr(P, "DEFAULT_POLL_S", 0.03)

@@ -22,6 +22,28 @@ if _tier is None:
     sys.modules["consistency_tier"] = _tier
     _spec.loader.exec_module(_tier)
 
-pytest_configure = _tier.pytest_configure
 pytest_collection_modifyitems = _tier.pytest_collection_modifyitems
 pytest_terminal_summary = _tier.pytest_terminal_summary
+
+
+# 2026-09-27 (owner) — the outcome-state tier, the same one module the plugin-root
+# conftest loads through `pytest_plugins` (`programs/_outcome_states.py`). The
+# tools/ci tests have the same classes of non-red failure — a docker-less or
+# tool-less host, a timing measurement under load — so they report the same
+# states. Registered, not re-exported by name: its `pytest_terminal_summary`
+# would otherwise collide with the consistency tier's above. `pytest_configure`
+# is a historic hook, so a plugin registered here still receives it.
+_STATES_PATH = _TIER.parent / "_outcome_states.py"
+
+
+def pytest_configure(config):
+    _tier.pytest_configure(config)
+    if config.pluginmanager.has_plugin("_outcome_states"):
+        return
+    states = sys.modules.get("_outcome_states")
+    if states is None:
+        spec = importlib.util.spec_from_file_location("_outcome_states", _STATES_PATH)
+        states = importlib.util.module_from_spec(spec)
+        sys.modules["_outcome_states"] = states
+        spec.loader.exec_module(states)
+    config.pluginmanager.register(states, "_outcome_states")
