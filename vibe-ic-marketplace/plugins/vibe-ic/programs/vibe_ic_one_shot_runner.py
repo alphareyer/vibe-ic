@@ -1188,8 +1188,8 @@ def _scan_rtl_files(files: List[Path]) -> Tuple[set, set]:
     instantiated only that way is still instantiated, not a second root.
 
     A module's own PARAMETERISED header (`module X #(...) (...);`) is not an
-    instantiation of X. The parameter group used to be matched with an
-    unbounded `[\s\S]*?`, which ran from that header into the body until any
+    instantiation of X. The parameter group is matched lazily and unbounded,
+    so from that header it ran into the body until any
     `) <word> (` -- e.g. `negedge rst) if (` -- and read X as instantiated,
     i.e. not a root. Declaration headers are masked before the search."""
     decls: set = set()

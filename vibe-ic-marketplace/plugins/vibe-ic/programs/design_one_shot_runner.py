@@ -21604,8 +21604,7 @@ def step_verilator_coverage(project: Path, top_name: str = "",
         [str(out_path.relative_to(project))])
 
 
-def step_arith_declaration_emit(project: Path,
-                                top_name: Optional[str] = None) -> StepResult:
+def step_arith_declaration_emit(project: Path) -> StepResult:
     """Run the deterministic `plugin_output/declaration.json` emitter.
 
     WHY THIS STEP EXISTS. `arith_declaration_emit.py` shipped as an ORPHAN:
@@ -21660,8 +21659,9 @@ def step_arith_declaration_emit(project: Path,
 
     A DESIGN THAT SUPPLIES ITS RTL. The contract emitter also records what the
     flow knows about supplied RTL (the staged files, the top, its ports) under
-    its own key, and it needs the top to do so: `top_name` resolved against the
-    staged modules (`_v661_resolve_dut_module`), never a name absent from rtl/.
+    its own key, and it needs the top to do so: `_v661_resolve_dut_module`
+    (synth-top override, then L9.top_module, then the unique graph root), never
+    a name absent from rtl/ -- so not the `--top-name` default `chip_top`.
     That record declares no free choice, so the file can now exist while the
     spec's required choices are still undeclared; the detail says which.
     """
@@ -21670,7 +21670,7 @@ def step_arith_declaration_emit(project: Path,
     _top_args: List[str] = []
     try:
         _l9t = _rcvar_l9_top_ports(project)
-        _top = _v661_resolve_dut_module(project, top_name or "",
+        _top = _v661_resolve_dut_module(project, "",
                                         _l9t[0] if _l9t else None)
         if _top:
             _top_args = ["--supplied-top", _top]
@@ -24561,7 +24561,7 @@ def main() -> int:
             "It is derived from the design's own RTL and the oracle TB's measured "
             "framing, not from any step's state, and the manifests this run does "
             "owe read it.")
-    plan.append(step_arith_declaration_emit(project, args.top_name))
+    plan.append(step_arith_declaration_emit(project))
     # MEASURE coverage before the manifests/audit read it. Nothing used to run
     # the measurement at all — see step_verilator_coverage's docstring.
     if _after_exit("sim"):

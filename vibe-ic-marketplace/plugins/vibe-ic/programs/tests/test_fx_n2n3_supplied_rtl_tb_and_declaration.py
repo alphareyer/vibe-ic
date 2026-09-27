@@ -301,24 +301,14 @@ def test_declared_choices_and_the_record_coexist(tmp_path):
 
 def test_runner_step_writes_the_record_with_the_resolved_top(tmp_path):
     """The phase-2 step resolves the top against the staged modules and hands
-    it over. Called the way the pre-fix signature accepts. RED on main: no
-    file."""
+    it over; its call site passes no top, and `--top-name` is `chip_top` by
+    default, which this design does not have. RED on main: no file."""
     import design_one_shot_runner as R
     project = _consumed_project(tmp_path)
     res = R.step_arith_declaration_emit(project)
     assert res.status == "NOT_MEASURED"
     assert (project / DECL_PATH).is_file(), res.detail
     assert "wrote only the supplied-RTL record" in res.detail, res.detail
-    decl = json.loads((project / DECL_PATH).read_text())
-    assert decl["supplied_rtl"]["top"]["value"] == "shift_top"
-
-
-def test_runner_step_never_hands_over_a_phantom_top(tmp_path):
-    """The call site passes `--top-name`, `chip_top` by default, which this
-    design does not have; the record still names the real top."""
-    import design_one_shot_runner as R
-    project = _consumed_project(tmp_path)
-    R.step_arith_declaration_emit(project, "chip_top")
     decl = json.loads((project / DECL_PATH).read_text())
     assert decl["supplied_rtl"]["top"]["value"] == "shift_top"
 
