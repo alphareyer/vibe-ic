@@ -311,6 +311,25 @@ cannot prove is intentional (e.g. an undeclared rename), **append** the
 appropriate relaxation block to the existing manifest — never overwrite the file
 wholesale, and never drop `reused_ip: true`.
 
+## Width and size parameters come from the documents (FX_D13)
+
+A parameter that sets a port width of the reused top (a memory size such as
+`memsize`, and what the IP derives from it, `aw = $clog2(memsize)`) is NOT
+yours to pick and is NOT the IP's default. The phase-2 step
+`reused_ip_parameters` runs `programs/reused_ip_param_derive.py` right after
+staging: it takes the value the documents state (L8/L9 `parameters[]`), checks
+it against the IP's own math and the port widths L9 states (directly, or
+through your `renamed_interfaces` pairs), and writes it into the staged top's
+header default (the original is kept in `.<top>__param_overrides.json`).
+Two documents that disagree, or a document the IP math contradicts, is a
+REFUSE naming both values and sources: report it, do not pick a side.
+
+When the step FAILs `UNRESOLVED`, several values the documents ALLOW fit. Pick
+one of the listed values only, with the reason from the input, and run
+`python3 programs/reused_ip_param_derive.py <project> --choose NAME=VALUE
+--apply`. The program re-verifies the choice against the allowed set and the
+widths and refuses anything else. Never edit the parameter by hand.
+
 ## Synthesis-safe parameters (`synth_safe_params`)
 
 When the catalog manifest for a pulled IP declares a `synth_safe_params`

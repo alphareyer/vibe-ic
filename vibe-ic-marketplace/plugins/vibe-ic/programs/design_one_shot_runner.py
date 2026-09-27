@@ -9889,6 +9889,72 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
                 "program_first": "professional_tb_gen"}, reason_class=_V.ReasonClass.PARTIAL_POPULATION)
 
 
+def step_reused_ip_parameters(project: Path) -> StepResult:
+    """A reused IP's width/size parameters take the DOCUMENTS' values (FX_D13).
+
+    ENFORCEMENT: blocking. ``reused_ip_param_derive`` derives each parameter
+    that sets a port width of the staged reused top from the design documents
+    (L8/L9 values, L9 port widths through the declared renames), checks them
+    against the IP's own parameter math, and writes a PASS into the staged
+    top's header defaults so every later elaboration builds that memory.
+    MEASURED on subservient: the documents say memsize 1024 (10-bit address),
+    the staged vendor top defaulted to 512 and was synthesised as staged.
+    A contradiction, or a choice only the AI backup can make, is this step's
+    FAIL; a top the program could not read is NOT_MEASURED.
+    """
+    t0 = time.time()
+    manifest = project / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+    try:
+        reused = json.loads(manifest.read_text(errors="replace")).get(
+            "reused_ip") is True
+    except (OSError, ValueError, AttributeError):
+        reused = False
+    if not reused:
+        return StepResult(
+            "reused_ip_parameters", "NOT_APPLICABLE", time.time() - t0,
+            "no reused IP: phase2/stage1/rtl/SOURCE_MANIFEST.json does not "
+            "declare reused_ip true",
+            declared_by="phase2/stage1/rtl/SOURCE_MANIFEST.json reused_ip")
+    report = project / "reports/phase2/reused_ip_parameters.json"
+    rc, out, err = _run([
+        sys.executable, str(PROGRAMS_DIR / "reused_ip_param_derive.py"),
+        str(project), "--apply", "--json", str(report),
+    ], cwd=project, timeout=300)
+    try:
+        payload = json.loads(report.read_text(errors="replace"))
+    except (OSError, ValueError):
+        payload = {}
+    verdict = str(payload.get("verdict") or "")
+    files = [str(report.relative_to(project))] if report.is_file() else []
+    detail = (out or err).strip()[:900]
+    if rc == 0 and verdict == "NOT_APPLICABLE":
+        return StepResult("reused_ip_parameters", "NOT_APPLICABLE",
+                          time.time() - t0, detail, files,
+                          declared_by=str(payload.get("top_file")
+                                          or "the reused top's header"))
+    if rc == 0:
+        return StepResult("reused_ip_parameters", "PASS", time.time() - t0,
+                          detail, files,
+                          extras={"overrides": payload.get("overrides") or {},
+                                  "applied": payload.get("applied") or {}})
+    if verdict == "NOT_MEASURED" or rc == 2 or not verdict:
+        return StepResult(
+            "reused_ip_parameters", "NOT_MEASURED", time.time() - t0,
+            f"reused_ip_param_derive rc={rc}: "
+            f"{payload.get('reason') or detail}", files,
+            reason_class=_V.ReasonClass.INPUT_ABSENT.value)
+    extras: Dict[str, Any] = {"findings": payload.get("findings") or []}
+    if verdict == "UNRESOLVED":
+        extras.update(
+            fallback_skill="catalog-glue-author",
+            undecided=payload.get("undecided") or {},
+            command=(f"python3 {PROGRAMS_DIR / 'reused_ip_param_derive.py'} "
+                     f"{project} --choose NAME=VALUE --apply"))
+    return StepResult("reused_ip_parameters", "FAIL", time.time() - t0,
+                      f"reused_ip_param_derive {verdict}: {detail}", files,
+                      extras=extras)
+
+
 def step_catalog_synth_safe_params(project: Path) -> StepResult:
     """Run step 1's catalog synth-safe gate inline, on the staged RTL (F28).
 
@@ -24609,6 +24675,19 @@ def main() -> int:
     # wrapper TAKES OVER the top name (port-rename, not module-rename). Best-
     # effort + polarity-safe; never gates.
     plan.append(step_reset_clock_variant_aliases(project, args.top_name))
+
+    # FX_D13 — a reused IP's width/size parameters take the documents' values,
+    # written into the staged top BEFORE anything elaborates it (step 1's
+    # catalog gate below, lint, synthesis, the testbenches).
+    if _before_entry("rtl_gen", _entry_site):
+        plan.append(StepResult(
+            "reused_ip_parameters", "NOT_APPLICABLE", 0.0,
+            f"run declared --entry-step {args.entry_step}; step 1 is upstream "
+            f"of it.", declared_by=f"--entry-step {args.entry_step}"))
+    elif _after_exit("rtl_gen"):
+        plan.append(_exit_sentinel("reused_ip_parameters"))
+    else:
+        plan.append(step_reused_ip_parameters(project))
 
     # F28 — step 1's catalog synth-safe gate, INLINE and blocking, on the RTL as
     # staged above (generator, reused-IP consume and aliases included): a
