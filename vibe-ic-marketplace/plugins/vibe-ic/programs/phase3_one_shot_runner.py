@@ -36612,6 +36612,19 @@ def _prepare_librelane_floorplan_for_route(
     core = str(record.get("core_module") or "")
     wrapper = project / record["chip_top_verilog"]
     netlist, _, _ = pnr_input_netlist(project, core)
+    # THE SAME CORE-CONNECTION BACKSTOP AS THE DIRECT RING (D2). A wrapper
+    # that names a port the selected core lacks (a phantom pad) or leaves one
+    # of its ports unconnected is refused here, before its PAD_* assignment
+    # reaches the tool; this path is the chip-path default.
+    try:
+        _validate_padring_core_connections(
+            netlist, wrapper, core,
+            str(record.get("chip_top_module") or "chip_top"))
+    except (OSError, ValueError) as exc:
+        msg = str(exc)
+        return _fail(msg.split(":", 1)[0]
+                     if msg.startswith("PADRING_CORE_")
+                     else "PADRING_CORE_INTERFACE_UNRESOLVED", msg)
     notes: List[str] = []
     pdk_args: List[str] = []
     try:

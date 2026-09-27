@@ -76,10 +76,11 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 # ---------------------------------------------------------------------------
 
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # THE POLARITY OF THE SENTENCE A VALUE IS READ OUT OF (vibe-ic#712).
 #
@@ -512,6 +513,7 @@ def bit_names(port: Dict[str, Any]) -> List[str]:
 def resolve_declared_pad_groups(
         placement: "PadPlacement",
         ports: "Any",
+        renames: "Sequence[Tuple[set, set]]" = (),
         ) -> Tuple[Dict[str, List[str]], List[Dict[str, Any]]]:
     """Resolve design-owned group rows against the design-owned port list.
 
@@ -520,6 +522,15 @@ def resolve_declared_pad_groups(
     family such as ``memory data bus``.  The resolver is strict, deterministic
     and auditable: every semantic atom of a selected port name must be present
     in the group statement, and a zero-match group is returned unresolved.
+
+    ``renames`` are the design's own declared (L9 names, RTL names) pairs
+    that phase 2's rename rule accepts (`accepted_renames`). A pair whose L9 name satisfies the SAME atom rule
+    carries that group's side to its RTL names present in ``ports``: the
+    document grouped the family under its illustrative name, the manifest
+    says which implemented ports that family became. Nothing fuzzier: a pair
+    is matched only through the exact rule above, an L9 name with no
+    semantic atom matches nothing, and a pair whose L9 names sit in two
+    groups puts its RTL names on two sides, which the caller refuses.
     """
     by_side: Dict[str, List[str]] = {}
     records: List[Dict[str, Any]] = []
@@ -531,17 +542,164 @@ def resolve_declared_pad_groups(
             port_atoms = group_atoms(name, port_name=True)
             if port_atoms and port_atoms <= statement_atoms:
                 matched.append(port)
+        via_rename: List[Dict[str, Any]] = []
+        for l9_names, rtl_names in renames:
+            carriers = []
+            for l9_name in sorted(l9_names):
+                l9_atoms = group_atoms(l9_name, port_name=True)
+                if l9_atoms and l9_atoms <= statement_atoms:
+                    carriers.append(l9_name)
+            if not carriers:
+                continue
+            for port in ports:
+                name = str(port.get("name") or "")
+                if name in rtl_names and port not in matched:
+                    matched.append(port)
+                    via_rename.append({"port": name, "l9": carriers,
+                                       "pair": {"l9": sorted(l9_names),
+                                                "rtl": sorted(rtl_names)}})
         nets = [net for port in matched for net in bit_names(port)]
         records.append({
             "side": side,
             "statement": statement,
             "statement_atoms": sorted(statement_atoms),
             "matched_ports": [str(p.get("name") or "") for p in matched],
+            "matched_via_rename": via_rename,
             "resolved_nets": list(nets),
         })
         if nets:
             by_side[side] = nets
     return by_side, records
+
+
+def declared_renames(project: Path) -> List[Tuple[set, set]]:
+    """The (L9 names, RTL names) pairs the design DECLARED on disk.
+
+    ONE READER for step 2's budget and step 15.5ic's ring (both through
+    `accepted_renames`, never raw): the reused-IP
+    SOURCE_MANIFEST's renamed-interface entries, read by the loader and
+    parser `l9_rtl_pin_consistency_check` already owns (absent manifest, or
+    `reused_ip` not true: no pair). Only the hand-authored pairs count; the
+    whole-interface pair that check derives in memory spans placement groups
+    and carries no side.
+    """
+    from l9_rtl_pin_consistency_check import (load_source_manifest,
+                                              _manifest_renamed_groups)
+    return [(set(l9), set(rtl)) for l9, rtl in
+            _manifest_renamed_groups(load_source_manifest(Path(project)) or {})
+            if l9 and rtl]
+
+
+def _port_width(port: Dict[str, Any]) -> Optional[int]:
+    """A port's width when it is a literal, else None (unknown)."""
+    width = port.get("width")
+    if isinstance(width, int) and not isinstance(width, bool) and width > 0:
+        return width
+    msb, lsb = port.get("msb"), port.get("lsb")
+    if (isinstance(msb, int) and isinstance(lsb, int)
+            and not isinstance(msb, bool) and not isinstance(lsb, bool)):
+        return abs(msb - lsb) + 1
+    return None
+
+
+def _port_direction(port: Dict[str, Any]) -> Optional[str]:
+    direction = str(port.get("direction") or port.get("dir")
+                    or port.get("mode") or "").strip().lower()
+    return direction or None
+
+
+def accept_renames(pairs: "Sequence[Tuple[set, set]]",
+                   l9_ports: Any, implemented: Any,
+                   ) -> Tuple[List[Tuple[set, set]], List[Dict[str, Any]]]:
+    """Split declared rename pairs into (accepted, rejected-with-reasons).
+
+    THE SAME ACCEPTANCE RULE `spec_conformance_check` applies to the same
+    SOURCE_MANIFEST pairs at phase 2, so a pair phase 2 calls "a defect in the
+    declaration" never gives a pad a side at step 2 or 15.5ic:
+      * every `l9` name is an L9 top_ports entry the implemented interface
+        does not carry;
+      * every `rtl` name is an implemented port L9 does not declare;
+      * direction agrees, and width agrees where both are literal.
+    L9 top_ports is the document's ports UNION the staged top's
+    (`phase1_doc_one_shot_runner`). An entry the staged-top harvest ALONE
+    added (its extraction strategy is exactly `_staged_top_module`'s) is the
+    RTL speaking, not the document, so it does not count as "L9 declares" --
+    otherwise every real rename target would read as a spec port.
+    ``implemented`` is None when the interface could not be read: then no
+    pair is accepted (the groups it would have carried stay unresolved and
+    the caller refuses), never all of them.
+    """
+    from _staged_top_module import EXTRACTION_STRATEGY as _STAGED_ONLY
+    l9_by_name: Dict[str, Dict[str, Any]] = {}
+    for port in l9_ports or []:
+        if isinstance(port, dict) and port.get("name"):
+            l9_by_name.setdefault(str(port["name"]), port)
+    doc_declared = {name for name, port in l9_by_name.items()
+                    if port.get("extraction_strategy") != _STAGED_ONLY}
+    impl_by_name: Optional[Dict[str, Dict[str, Any]]] = None
+    if implemented is not None:
+        impl_by_name = {}
+        for port in implemented:
+            if isinstance(port, dict) and port.get("name"):
+                impl_by_name.setdefault(str(port["name"]), port)
+    accepted: List[Tuple[set, set]] = []
+    rejected: List[Dict[str, Any]] = []
+    for l9_names, rtl_names in pairs:
+        reasons: List[str] = []
+        if impl_by_name is None:
+            reasons.append("the implemented interface could not be read")
+        else:
+            for name in sorted(l9_names):
+                if name not in l9_by_name:
+                    reasons.append(f"l9 {name!r} is no L9 top_ports entry")
+                elif name in impl_by_name:
+                    reasons.append(f"l9 {name!r} is still an implemented port")
+            for name in sorted(rtl_names):
+                if name not in impl_by_name:
+                    reasons.append(f"rtl {name!r} is no implemented port")
+                elif name in doc_declared:
+                    reasons.append(f"rtl {name!r} is a port L9 declares")
+        if not reasons:
+            for rtl_name in sorted(rtl_names):
+                rp = impl_by_name[rtl_name]
+                for l9_name in sorted(l9_names):
+                    sp = l9_by_name[l9_name]
+                    rd, sd = _port_direction(rp), _port_direction(sp)
+                    if rd and sd and rd != sd:
+                        reasons.append(f"rtl {rtl_name!r} is {rd}, l9 "
+                                       f"{l9_name!r} is {sd}")
+                    rw, sw = _port_width(rp), _port_width(sp)
+                    if rw is not None and sw is not None and rw != sw:
+                        reasons.append(f"rtl {rtl_name!r} is {rw} bit(s), l9 "
+                                       f"{l9_name!r} is {sw}")
+        if reasons:
+            rejected.append({"l9": sorted(l9_names), "rtl": sorted(rtl_names),
+                             "reasons": reasons})
+        else:
+            accepted.append((l9_names, rtl_names))
+    return accepted, rejected
+
+
+def read_l9_top_ports(project: Path) -> List[Dict[str, Any]]:
+    """L9 top_ports, or [] when absent/unreadable (every pair then fails
+    its `l9` check: nothing is accepted on a document nobody could read)."""
+    spec = Path(project) / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    try:
+        doc = json.loads(spec.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return []
+    ports = (doc.get("top_ports") or doc.get("ports") or []
+             if isinstance(doc, dict) else [])
+    return [p for p in ports if isinstance(p, dict)] if isinstance(
+        ports, list) else []
+
+
+def accepted_renames(project: Path, implemented: Any
+                     ) -> Tuple[List[Tuple[set, set]], List[Dict[str, Any]]]:
+    """`declared_renames` filtered by `accept_renames` against L9 and the
+    implemented interface: the ONE call step 2 and step 15.5ic both make."""
+    return accept_renames(declared_renames(project),
+                          read_l9_top_ports(project), implemented)
 
 
 # --------------------------------------------------------------------------- #
@@ -643,6 +801,8 @@ def derive_own_ring(project: Path, ports: Any) -> Dict[str, Any]:
         "documents_scanned": [], "documents_unreadable": [],
         "by_side": {}, "unresolved_tokens": [], "groups": [],
         "groups_unresolved": [], "parameter_defaults": {},
+        "renamed_interfaces": [], "renamed_interfaces_rejected": [],
+        "nets_on_two_sides": [],
     }
     placement, params, unreadable, scanned = read_project_placement(project)
     out["documents_scanned"] = list(scanned)
@@ -654,7 +814,12 @@ def derive_own_ring(project: Path, ports: Any) -> Dict[str, Any]:
     out["heading"] = placement.heading
     exact, unresolved = expand_side_ports(placement, params)
     out["unresolved_tokens"] = list(unresolved)
-    grouped, records = resolve_declared_pad_groups(placement, ports or [])
+    renames, rejected = accepted_renames(project, ports or [])
+    out["renamed_interfaces"] = [{"l9": sorted(l9), "rtl": sorted(rtl)}
+                                 for l9, rtl in renames]
+    out["renamed_interfaces_rejected"] = rejected
+    grouped, records = resolve_declared_pad_groups(placement, ports or [],
+                                                   renames=renames)
     out["groups"] = records
     out["groups_unresolved"] = [r["side"] for r in records
                                 if not r["resolved_nets"]]
@@ -671,6 +836,16 @@ def derive_own_ring(project: Path, ports: Any) -> Dict[str, Any]:
                 nets.append(net)
         by_side[side] = nets
     out["by_side"] = by_side
+    # A NET ON TWO EDGES is the contradiction step 15.5ic refuses as
+    # PORT_ON_TWO_SIDES (e.g. a declared rename whose L9 names sit in two
+    # groups). Reported, so the budget refuses it too instead of counting the
+    # net once and passing a ring the producer will not build.
+    sides_of: Dict[str, List[str]] = {}
+    for side in sorted(by_side):
+        for net in by_side[side]:
+            sides_of.setdefault(net, []).append(side)
+    out["nets_on_two_sides"] = sorted(n for n, sides in sides_of.items()
+                                      if len(sides) > 1)
     # ONE PAD PER NET, which is the design's own rule stated in the same
     # table, not this module's. The net IS the pad's identity here: an
     # INSTANCE name is the producer's to choose at 15.5ic, and inventing one

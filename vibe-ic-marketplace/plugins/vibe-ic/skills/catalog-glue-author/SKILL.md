@@ -170,6 +170,24 @@ and #712 (wrapper-exposed output) are **dead code without this file**.
 }
 ```
 
+> **`renamed_interfaces` also carry pad SIDES on a DIE (D2).** The pad-ring
+> producer (step 15.5ic) and the step-2 pad budget read these pairs through
+> `_l_doc_pad_placement.accepted_renames`, which keeps only a pair phase 2's
+> `spec_conformance_check` would accept (every `l9` name an L9 port the
+> implemented core lacks, every `rtl` name an implemented port L9 does not
+> declare, same direction, same width where both are literal); a rejected pair
+> is recorded under `renamed_interfaces_rejected` with its reasons and places
+> nothing. An accepted pair whose `l9` name falls in a
+> pad-placement GROUP row ("SRAM data bus") puts its `rtl` names on that row's
+> side. So keep every pair inside ONE placement group, never a whole interface
+> in one pair, and never mix widths or directions in one pair (each `rtl` name
+> is checked against each `l9` name): `{l9:[o_sram_data], rtl:[o_sram_wdata]}`,
+> `{l9:[o_sram_addr], rtl:[o_sram_waddr, o_sram_raddr]}`, ... A pair whose
+> `l9` names sit in two groups puts its RTL ports on two edges and is refused
+> (PORT_ON_TWO_SIDES); a group no accepted pair (and no implemented port)
+> reaches is refused (PAD_GROUP_UNRESOLVED at 15.5ic, DOES_NOT_FIT at step 2,
+> even when no RTL bit is left without a pad).
+
 > **`{l9, rtl}` schema (HARD doc-and-code contract, #775).** Every `{l9, rtl}`
 > dict above is parsed by `l9_rtl_pin_consistency_check._manifest_name_set()`:
 > for `flattened_buses` the `l9` value names the **L9 struct ROOT** the chip-top

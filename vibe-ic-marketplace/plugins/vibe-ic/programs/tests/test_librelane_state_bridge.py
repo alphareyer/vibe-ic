@@ -455,8 +455,8 @@ def test_floorplan_with_no_resolvable_image_is_not_measured_by_name(tmp_path, mo
 def test_librelane_floorplan_state_reaches_the_direct_routing_deck(tmp_path, monkeypatch):
     project = tmp_path / 'project'
     out_dir = project / 'phase3/stage3/pnr'
-    wrapper = write(out_dir / 'chip_top_io.v', 'module chip_top; endmodule\n')
-    netlist = write(project / 'phase3/stage2/core.v', 'module core; endmodule\n')
+    wrapper = write(out_dir / 'chip_top_io.v', 'module chip_top(a);\n  input a;\n  core u_core (.a(a));\nendmodule\n')
+    netlist = write(project / 'phase3/stage2/core.v', 'module core(a);\n  input a;\nendmodule\n')
     put(project / 'phase3/librelane_switch.json',
         {'steps': {'15': 'librelane', '15.5ic': 'librelane'}, 'pdk_root_host': str(tmp_path / 'pdkroot')})
     monkeypatch.setattr(runner, '_padring_chip_top_record', lambda p: {
@@ -536,11 +536,12 @@ def test_librelane_floorplan_state_reaches_the_direct_routing_deck(tmp_path, mon
 def test_padring_only_keeps_the_direct_taps_and_pdn(tmp_path, monkeypatch):
     project = tmp_path / 'project'
     out_dir = project / 'phase3/stage3/pnr'
-    wrapper = write(out_dir / 'chip_top_io.v', 'module chip_top; endmodule\n')
+    wrapper = write(out_dir / 'chip_top_io.v', 'module chip_top(a);\n  input a;\n  core u_core (.a(a));\nendmodule\n')
     put(project / 'phase3/librelane_switch.json', {'pdk_root_host': str(tmp_path)})
     monkeypatch.setattr(runner, '_padring_chip_top_record', lambda p: {
         'core_module': 'core', 'chip_top_verilog': str(wrapper.relative_to(project))})
-    monkeypatch.setattr(runner, 'pnr_input_netlist', lambda p, core: (wrapper, 'n', False))
+    netlist = write(project / 'phase3/stage2/core.v', 'module core(a);\n  input a;\nendmodule\n')
+    monkeypatch.setattr(runner, 'pnr_input_netlist', lambda p, core: (netlist, 'n', False))
     monkeypatch.setattr(runner, '_docker_exec', lambda *a, **k: (0, 'ok', ''))
     monkeypatch.setattr(contract, 'flow_segment', lambda image, first, last, **k: [first, last])
     monkeypatch.setattr(contract, 'resolve_step_configs', lambda p, i, pdk, ids, **k: {
@@ -570,11 +571,12 @@ def test_padring_only_keeps_the_direct_taps_and_pdn(tmp_path, monkeypatch):
 def test_a_failing_tool_gate_blocks_routing(tmp_path, monkeypatch):
     project = tmp_path / 'project'
     out_dir = project / 'phase3/stage3/pnr'
-    wrapper = write(out_dir / 'chip_top_io.v', 'module chip_top; endmodule\n')
+    wrapper = write(out_dir / 'chip_top_io.v', 'module chip_top(a);\n  input a;\n  core u_core (.a(a));\nendmodule\n')
     put(project / 'phase3/librelane_switch.json', {'pdk_root_host': str(tmp_path)})
     monkeypatch.setattr(runner, '_padring_chip_top_record', lambda p: {
         'core_module': 'core', 'chip_top_verilog': str(wrapper.relative_to(project))})
-    monkeypatch.setattr(runner, 'pnr_input_netlist', lambda p, core: (wrapper, 'n', False))
+    netlist = write(project / 'phase3/stage2/core.v', 'module core(a);\n  input a;\nendmodule\n')
+    monkeypatch.setattr(runner, 'pnr_input_netlist', lambda p, core: (netlist, 'n', False))
     monkeypatch.setattr(runner, '_docker_exec', lambda *a, **k: (0, 'ok', ''))
     monkeypatch.setattr(contract, 'flow_segment', lambda image, first, last, **k: [first, last])
     monkeypatch.setattr(contract, 'resolve_step_configs', lambda p, i, pdk, ids, **k: {
