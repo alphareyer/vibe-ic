@@ -201,15 +201,22 @@ def emit_prestaged_reused_ip_manifest(project: Path) -> Optional[Path]:
     # setdefault preserves any hand-authored / already-populated block untouched.
     mf.setdefault("renamed_interfaces", [])
     mf.setdefault("flattened_buses", [])
-    # D9 — PROGRAM FIRST: an EMPTY list is filled with the side-granular pairs
-    # the design's own records decide (`renamed_interface_derive`), each with
-    # its evidence; the ports they do not decide are listed for the
-    # catalog-glue-author step. An AUTHORED list is never rewritten -- it is
-    # verified, and the verdict is recorded beside it.
+    # D9 — PROGRAM FIRST, FOR PAD SIDES ONLY. `renamed_interface_derive`
+    # writes the side-granular pairs the design's own records decide under
+    # `derived_pad_pairs`, which only the pad-side reader
+    # (`_l_doc_pad_placement.declared_renames`, steps 2 and 15.5ic) reads. It
+    # never writes `renamed_interfaces`, so the NO-LEAK statement above still
+    # holds: the gates' renamed-group extraction sees the author's pairs and
+    # nothing else. Ports it cannot decide are listed for catalog-glue-author,
+    # and the pairs the pad side will read are checked, beside them.
     try:
         import renamed_interface_derive as _rid
         _rid.apply_to_manifest(project, mf)
     except Exception as exc:  # noqa: BLE001 — never block the emit
+        # A derivation that did not run leaves no pad-side pair behind: a
+        # stale one from an earlier emit would still give a side.
+        mf["derived_pad_pairs"] = []
+        mf.pop("renamed_interfaces_check", None)
         mf["renamed_interfaces_derivation"] = {
             "verdict": "NOT_MEASURED",
             "reason": f"renamed_interface_derive raised {type(exc).__name__}: {exc}"}

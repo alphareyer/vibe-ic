@@ -572,21 +572,37 @@ def resolve_declared_pad_groups(
     return by_side, records
 
 
+#: SOURCE_MANIFEST key for the pad-side pairs `renamed_interface_derive`
+#: derives. Read here and NOWHERE else: `spec_conformance_check` and
+#: `l9_rtl_pin_consistency_check` read `renamed_interfaces` as a declared
+#: rename, and a derived pair only establishes a side.
+DERIVED_PAD_PAIRS_KEY = "derived_pad_pairs"
+
+
 def declared_renames(project: Path) -> List[Tuple[set, set]]:
-    """The (L9 names, RTL names) pairs the design DECLARED on disk.
+    """The (L9 names, RTL names) pairs that give a renamed port its pad side.
 
     ONE READER for step 2's budget and step 15.5ic's ring (both through
-    `accepted_renames`, never raw): the reused-IP
-    SOURCE_MANIFEST's renamed-interface entries, read by the loader and
-    parser `l9_rtl_pin_consistency_check` already owns (absent manifest, or
-    `reused_ip` not true: no pair). Only the hand-authored pairs count; the
-    whole-interface pair that check derives in memory spans placement groups
-    and carries no side.
+    `accepted_renames`, never raw). From the reused-IP SOURCE_MANIFEST (absent,
+    or `reused_ip` not true: no pair) it reads exactly two keys:
+      * `renamed_interfaces`, the hand-authored pairs;
+      * `derived_pad_pairs` (`DERIVED_PAD_PAIRS_KEY`), the pairs
+        `renamed_interface_derive` derives from the design's own records.
+    This is the only reader of `derived_pad_pairs`. `spec_conformance_check`
+    and `l9_rtl_pin_consistency_check` read `renamed_interfaces` alone, as a
+    declared rename, and never the derived pairs: a derived pair is evidence
+    of a side, not of a rename. The whole-interface pair
+    `l9_rtl_pin_consistency_check` derives in memory is not read here either;
+    it spans placement groups and carries no side. Both keys are parsed by the
+    parser that check owns.
     """
     from l9_rtl_pin_consistency_check import (load_source_manifest,
                                               _manifest_renamed_groups)
-    return [(set(l9), set(rtl)) for l9, rtl in
-            _manifest_renamed_groups(load_source_manifest(Path(project)) or {})
+    manifest = load_source_manifest(Path(project)) or {}
+    authored = _manifest_renamed_groups(manifest)
+    derived = _manifest_renamed_groups(
+        {"renamed_interfaces": manifest.get(DERIVED_PAD_PAIRS_KEY) or []})
+    return [(set(l9), set(rtl)) for l9, rtl in authored + derived
             if l9 and rtl]
 
 

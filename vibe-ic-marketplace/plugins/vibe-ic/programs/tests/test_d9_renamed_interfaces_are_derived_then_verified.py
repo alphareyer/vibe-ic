@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""D9: the reused-IP manifest emits side-granular `renamed_interfaces` pairs
-the design's own records decide, and verifies every authored pair.
+"""D9: the reused-IP manifest emits the side-granular pad pairs the design's
+own records decide, and verifies every pair the pad side reads.
 
 MEASURED on subservient x gf180mcuD (v1.25.64): both manifest emitters wrote
 `renamed_interfaces: []`, so after D2 step 15.5ic refused PAD_GROUP_UNRESOLVED
@@ -12,6 +12,13 @@ and four pairs had to be authored by hand. Here, program first:
 A port no rule decides is listed UNRESOLVED for catalog-glue-author, whose
 pairs `--check` verifies (exact-atom rule, implemented ports) and refuses with
 a reason. An authored list is never rewritten (the landed merge contract).
+
+REVIEW WAVE 2 (BLOCKER, both lenses): the derived pairs used to go into
+`renamed_interfaces`, which `spec_conformance_check` and
+`l9_rtl_pin_consistency_check` read as DECLARED RENAMES, so the emitter relaxed
+both gates by itself on every reused IP with a pad placement. An R2 pair is a
+side, not a rename. The pairs now go to `derived_pad_pairs`, read only by
+`_l_doc_pad_placement.declared_renames`; `renamed_interfaces` stays authored.
 
 Also here: step 2's `aw = $clog2(memsize)` width, which masked the pad budget
 as UNDECIDED (ZERO_DENOMINATOR) on the same run.
@@ -127,20 +134,37 @@ def _check(proj, capsys):
 # --------------------------------------------------------------------------- #
 def test_the_emitter_derives_the_side_granular_pairs(tmp_path):
     mf = _emit(_project(tmp_path))
-    assert _lr(mf["renamed_interfaces"]) == EXPECTED
-    rules = {e["rtl"]: e["rule"] for p in mf["renamed_interfaces"]
-             for e in p["evidence"]}
-    assert rules == {"o_memory_waddr": "R1_read_write_split",
-                     "o_memory_raddr": "R1_read_write_split",
-                     "o_memory_wdata": "R1_read_write_split",
-                     "i_memory_rdata": "R1_read_write_split",
-                     "o_memory_wen": "R2_sole_remaining_side",
-                     "o_memory_ren": "R2_sole_remaining_side"}
+    assert _lr(mf["derived_pad_pairs"]) == EXPECTED
+    rules = {r: p["rule"] for p in mf["derived_pad_pairs"] for r in p["rtl"]}
+    assert rules == {"o_memory_waddr": "R1", "o_memory_raddr": "R1",
+                     "o_memory_wdata": "R1", "i_memory_rdata": "R1",
+                     "o_memory_wen": "R2", "o_memory_ren": "R2"}
     assert all(p["derived_by"] == "renamed_interface_derive"
-               and all(e["evidence"] for e in p["evidence"])
-               for p in mf["renamed_interfaces"])
+               and p["side"] in ("N", "S")
+               and all(e["because"] for e in p["evidence"])
+               for p in mf["derived_pad_pairs"])
+    # R1 carries the exact atom, R2 the shared family atom(s) and the side
+    by_rtl = {e["rtl"]: e for p in mf["derived_pad_pairs"]
+              for e in p["evidence"]}
+    assert (by_rtl["o_memory_waddr"]["atom"],
+            by_rtl["o_memory_waddr"]["side"]) == ("waddr", "S")
+    assert (by_rtl["o_memory_wen"]["family_atoms"],
+            by_rtl["o_memory_wen"]["side"]) == (["memory"], "S")
     assert mf["renamed_interfaces_derivation"]["verdict"] == "DERIVED"
     assert mf["renamed_interfaces_derivation"]["unresolved"] == []
+
+
+def test_a_side_only_pair_is_never_written_as_a_rename(tmp_path):
+    """RED on 3c5697945, which wrote {o_memory_cyc, o_memory_we} ->
+    {o_memory_ren, o_memory_wen} into `renamed_interfaces`: a read-enable is
+    not a cycle strobe. R2 knows only that they share `memory` and one side.
+    That pair may give the pads their side; it is never a declared rename."""
+    mf = _emit(_project(tmp_path))
+    assert mf["renamed_interfaces"] == []
+    r2 = [p for p in mf["derived_pad_pairs"] if p["rule"] == "R2"]
+    assert _lr(r2) == [{"l9": ["o_memory_cyc", "o_memory_we"],
+                        "rtl": ["o_memory_ren", "o_memory_wen"]}]
+    assert r2[0]["side"] == "S"
 
 
 def test_the_consume_emitter_derives_them_too(tmp_path):
@@ -153,7 +177,8 @@ def test_the_consume_emitter_derives_them_too(tmp_path):
     (proj / "input/vendor_rtl").rmdir()
     C.consume_reused_ip_rtl(proj)
     mf = json.loads((proj / "phase2/stage1/rtl/SOURCE_MANIFEST.json").read_text())
-    assert _lr(mf["renamed_interfaces"]) == EXPECTED
+    assert _lr(mf["derived_pad_pairs"]) == EXPECTED
+    assert mf["renamed_interfaces"] == []
 
 
 def test_the_derived_pairs_pass_the_check(tmp_path, capsys):
@@ -161,14 +186,16 @@ def test_the_derived_pairs_pass_the_check(tmp_path, capsys):
     _emit(proj)
     rc, res = _check(proj, capsys)
     assert rc == 0 and res["verdict"] == "PASS", res
-    assert {v["side"] for v in res["pairs"]} == {"N", "S"}
+    assert res["pairs"] == []          # nothing authored
+    assert {v["side"] for v in res["derived_pairs"]} == {"N", "S"}
+    assert all(v["verdict"] == "VERIFIED" for v in res["derived_pairs"])
 
 
 def test_the_direction_breaks_a_two_document_port_tie(tmp_path):
     """`o_memory_wdata` = w+{memory, data} matches BOTH o_memory_data and
     i_memory_data; the same-direction one is its pair."""
     mf = _emit(_project(tmp_path))
-    by_rtl = {r: p["l9"] for p in mf["renamed_interfaces"] for r in p["rtl"]}
+    by_rtl = {r: p["l9"] for p in mf["derived_pad_pairs"] for r in p["rtl"]}
     assert by_rtl["o_memory_wdata"] == ["o_memory_data"]
     assert by_rtl["i_memory_rdata"] == ["i_memory_data"]
 
@@ -183,7 +210,7 @@ _NO_DATA_IMPL = [p for p in IMPL if "data" not in p["name"]] + [
 def test_an_undecided_port_is_listed_for_the_glue_author(tmp_path, capsys):
     proj = _project(tmp_path, impl=_NO_DATA_IMPL)
     mf = _emit(proj)
-    assert _lr(mf["renamed_interfaces"]) == [
+    assert _lr(mf["derived_pad_pairs"]) == [
         {"l9": ["o_memory_addr"], "rtl": ["o_memory_raddr", "o_memory_waddr"]}]
     der = mf["renamed_interfaces_derivation"]
     assert der["verdict"] == "UNRESOLVED"
@@ -209,6 +236,7 @@ def test_an_authored_pair_that_verifies_completes_the_check(tmp_path, capsys):
     mf2 = _emit(proj)
     assert mf2["renamed_interfaces"] == mf["renamed_interfaces"]
     assert mf2["renamed_interfaces_check"]["verdict"] == "PASS"
+    assert mf2["derived_pad_pairs"] == mf["derived_pad_pairs"]
 
 
 @pytest.mark.parametrize("pair,why", [
@@ -252,6 +280,7 @@ def test_no_pad_placement_keeps_the_empty_scaffold(tmp_path, capsys):
     proj = _project(tmp_path, doc=None)
     mf = _emit(proj)
     assert mf["renamed_interfaces"] == []
+    assert mf["derived_pad_pairs"] == []
     assert mf["renamed_interfaces_derivation"]["verdict"] == "NOT_APPLICABLE"
     rc, res = _check(proj, capsys)
     assert rc == 2 and res["verdict"] == "NOT_APPLICABLE"
@@ -327,8 +356,8 @@ def test_a_derived_pair_with_a_width_disagreement_is_rejected_not_written(
     mf = _emit(proj)
     assert {"l9": ["o_memory_addr"],
             "rtl": ["o_memory_raddr", "o_memory_waddr"]} not in _lr(
-        mf["renamed_interfaces"])
-    assert len(mf["renamed_interfaces"]) == 3
+        mf["derived_pad_pairs"])
+    assert len(mf["derived_pad_pairs"]) == 3
     der = mf["renamed_interfaces_derivation"]
     assert [r["l9"] for r in der["rejected"]] == [["o_memory_addr"]]
     assert any("3 bit(s)" in x and "is 4" in x
@@ -376,3 +405,238 @@ def test_a_parameterised_rtl_width_is_read_exactly_before_acceptance(tmp_path):
     der = _emit(proj)["renamed_interfaces_derivation"]
     assert [r["l9"] for r in der["rejected"]] == [["o_memory_addr"]]
     assert any("3 bit(s)" in x for x in der["rejected"][0]["reasons"])
+
+
+# --------------------------------------------------------------------------- #
+# REVIEW WAVE 2 BLOCKER: a derived pair is a SIDE, never a declared rename
+# --------------------------------------------------------------------------- #
+#: The keys this program owns. Removing them leaves exactly what the landed
+#: emitter wrote before D9: the GAP-E2E-8 empty scaffold.
+_PROGRAM_KEYS = ("derived_pad_pairs", "renamed_interfaces_derivation",
+                 "renamed_interfaces_check")
+
+
+def _without_derivation(mf):
+    bare = {k: v for k, v in mf.items() if k not in _PROGRAM_KEYS}
+    bare["renamed_interfaces"] = [
+        e for e in (mf.get("renamed_interfaces") or [])
+        if e.get("derived_by") != "renamed_interface_derive"]
+    return bare
+
+
+def _stage_rtl(proj):
+    """Where consume stages it, and where both gates look for it."""
+    rtl = proj / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True, exist_ok=True)
+    (rtl / "core.v").write_text((proj / "input/vendor_rtl/core.v").read_text())
+
+
+def _gate_verdicts(proj, capsys):
+    """What the two landed phase-2 gates say about ``proj`` as it stands."""
+    import l9_rtl_pin_consistency_check as G
+    import spec_conformance_check as SC
+    capsys.readouterr()
+    # The gate's JSON contract reads `ports` (L9 names them `top_ports`); the
+    # same list, so the port comparison is MEASURED rather than vacuous.
+    l9 = json.loads((proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json")
+                    .read_text())
+    contract = proj / "spec_contract.json"
+    contract.write_text(json.dumps({"module": "core",
+                                    "ports": l9["top_ports"]}))
+    out = proj / "spec_conformance.json"
+    sc_rc = SC.main(["--spec", str(contract),
+                     "--rtl-dir", str(proj / "phase2/stage1/rtl"),
+                     "--top", "core", "--json", str(out)])
+    sc_stdout = capsys.readouterr().out
+    assert f"spec ports={len(l9['top_ports'])}(json)" in sc_stdout, sc_stdout
+    pin_rc = G.main(["l9_rtl_pin_consistency_check.py", str(proj)])
+    pin_stdout = capsys.readouterr().out
+    return {"spec_conformance": (sc_rc, sc_stdout, json.loads(out.read_text())),
+            "l9_rtl_pin_consistency": (pin_rc, pin_stdout)}
+
+
+def test_the_derivation_leaves_both_phase2_gates_byte_identical(
+        tmp_path, capsys):
+    """RED on 3c5697945: its pairs sat in `renamed_interfaces`, so
+    spec_conformance turned `port-missing` into `port-renamed-by-manifest` and
+    the pin gate tied the L9 pins off, on a fixture WITH a pad placement (the
+    landed GAP-E2E-8 test has none, which is why it stayed green)."""
+    proj = _project(tmp_path)
+    mf = _emit(proj)
+    assert mf["renamed_interfaces_derivation"]["verdict"] == "DERIVED"
+    _stage_rtl(proj)
+    mf_path = proj / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+    with_derivation = _gate_verdicts(proj, capsys)
+    mf_path.write_text(json.dumps(_without_derivation(mf), indent=2))
+    without = _gate_verdicts(proj, capsys)
+    assert with_derivation == without
+    # and an L9 port no AUTHORED pair covers is still a hard port-missing
+    missing = {f["symbol"] for f in with_derivation["spec_conformance"][2]
+               if f["rule"] == "port-missing" and f["severity"] == "ERROR"}
+    assert {"o_memory_cyc", "o_memory_we", "o_memory_addr"} <= missing
+    assert with_derivation["spec_conformance"][0] == 1
+    pin_rc, pin_stdout = with_derivation["l9_rtl_pin_consistency"]
+    assert pin_rc == 1 and "o_memory_cyc" in pin_stdout, pin_stdout
+
+
+def test_only_the_pad_side_reader_sees_the_derived_pairs(tmp_path):
+    """`declared_renames` (steps 2 and 15.5ic) carries the derived sides; the
+    parser both gates read their renames through returns nothing."""
+    import _l_doc_pad_placement as LPP
+    import l9_rtl_pin_consistency_check as G
+    proj = _project(tmp_path)
+    _emit(proj)
+    seen = sorted((sorted(a), sorted(b)) for a, b in LPP.declared_renames(proj))
+    assert seen == sorted((p["l9"], p["rtl"]) for p in EXPECTED)
+    assert G._manifest_renamed_groups(G.load_source_manifest(proj)) == []
+    # the point of D9 survives the move: the ring is whole, one side per net
+    ring = LPP.derive_own_ring(proj, IMPL)
+    assert ring["groups_unresolved"] == [] and ring["nets_on_two_sides"] == []
+    assert {"o_memory_wen", "o_memory_ren"} <= set(ring["by_side"]["S"])
+
+
+def test_a_pair_an_earlier_version_left_in_renamed_interfaces_is_moved(
+        tmp_path):
+    """A tree emitted by 3c5697945 holds program-stamped pairs in the rename
+    key. No author wrote them; re-emitting takes them out of it."""
+    proj = _project(tmp_path)
+    legacy = [dict(p, derived_by="renamed_interface_derive") for p in EXPECTED]
+    rtl = proj / "phase2/stage1/rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "SOURCE_MANIFEST.json").write_text(json.dumps(
+        {"reused_ip": True, "renamed_interfaces": legacy}))
+    mf = _emit(proj)
+    assert mf["renamed_interfaces"] == []
+    assert _lr(mf["derived_pad_pairs"]) == EXPECTED
+    assert _lr(mf["renamed_interfaces_derivation"][
+        "moved_out_of_renamed_interfaces"]) == EXPECTED
+
+
+# --------------------------------------------------------------------------- #
+# --check: every implemented port ends on EXACTLY one side (review MINOR)
+# --------------------------------------------------------------------------- #
+def test_check_refuses_a_pair_that_moves_a_placed_port_to_a_second_side(
+        tmp_path, capsys):
+    """RED on 3c5697945 (rc 0 PASS). `o_status` is on W by its group row; a
+    pair onto S would put it on two sides, which 15.5ic refuses."""
+    import _l_doc_pad_placement as LPP
+    proj = _project(tmp_path, impl=_NO_DATA_IMPL)
+    mf = _emit(proj)
+    mf["renamed_interfaces"] = [
+        {"l9": ["o_memory_we", "o_memory_cyc"],
+         "rtl": ["o_memory_wen", "o_memory_ren", "o_memory_ack"]},
+        {"l9": ["o_memory_we"], "rtl": ["o_status"]}]
+    (proj / "phase2/stage1/rtl/SOURCE_MANIFEST.json").write_text(json.dumps(mf))
+    assert LPP.derive_own_ring(proj, _NO_DATA_IMPL)["nets_on_two_sides"] == [
+        "o_status"]
+    rc, res = _check(proj, capsys)
+    assert rc == 1, res
+    refused = [v for v in res["pairs"] if v["verdict"] == "REFUSED"]
+    assert [v["pair"]["rtl"] for v in refused] == [["o_status"]]
+    assert "already have a side" in refused[0]["reason"]
+
+
+def test_check_fails_a_port_two_verified_pairs_put_on_two_sides(
+        tmp_path, capsys):
+    """RED on 3c5697945. Each pair verifies on its own; together they put
+    `o_memory_ack` on N and on S. "Covered" is not "exactly one side"."""
+    doc_only = [q if q["name"] != "o_memory_data" else
+                _p("o_memory_data", "output", False, 1) for q in DOC_ONLY]
+    proj = _project(tmp_path, impl=_NO_DATA_IMPL, doc_only=doc_only, manifest={
+        "reused_ip": True, "renamed_interfaces": [
+            {"l9": ["o_memory_addr"],
+             "rtl": ["o_memory_raddr", "o_memory_waddr"]},
+            {"l9": ["o_memory_we", "o_memory_cyc"],
+             "rtl": ["o_memory_wen", "o_memory_ren", "o_memory_ack"]},
+            {"l9": ["o_memory_data"], "rtl": ["o_memory_ack"]}]})
+    rc, res = _check(proj, capsys)
+    assert all(v["verdict"] == "VERIFIED" for v in res["pairs"]), res["pairs"]
+    assert rc == 1 and res["verdict"] == "FAIL"
+    assert res["ports_on_two_sides"] == {"o_memory_ack": ["N", "S"]}
+
+
+def test_a_port_an_exact_row_names_is_placed_even_if_its_range_is_open(
+        tmp_path):
+    """RED on 3c5697945. W names `o_memory_waddr[AW-1:0]` with AW undeclared.
+    The port is still the document's W port; deriving it onto S would put it
+    on two sides the moment AW is declared."""
+    import renamed_interface_derive as RID
+    doc = DOC.replace("| **West (W)** | status pin(s) |",
+                      "| **West (W)** | `o_status` / `o_memory_waddr[AW-1:0]` |")
+    assert doc != DOC
+    d = RID.derive(_project(tmp_path, doc=doc))
+    assert all("o_memory_waddr" not in p["rtl"] for p in d["pairs"]), d["pairs"]
+    assert "o_memory_waddr" not in d["unplaced_implemented_ports"]
+
+
+# --------------------------------------------------------------------------- #
+# re-emit refreshes the derivation, and the runner's note reads it
+# --------------------------------------------------------------------------- #
+def test_a_re_emit_refreshes_the_derivation(tmp_path):
+    """RED on 3c5697945: once its list was non-empty the second emit took the
+    "authored" branch and the first run's derivation stayed forever."""
+    doc_only = [q if q["name"] != "o_memory_addr" else
+                _p("o_memory_addr", "output", False, 4) for q in DOC_ONLY]
+    proj = _project(tmp_path, doc_only=doc_only)
+    first = _emit(proj)["renamed_interfaces_derivation"]
+    assert {u["port"] for u in first["unresolved"]} == {"o_memory_raddr",
+                                                        "o_memory_waddr"}
+    # the document is corrected: the address is 3 bits, as built
+    spec = proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    spec.write_text(json.dumps({"top_module": "core",
+                                "top_ports": IMPL + DOC_ONLY}))
+    mf = _emit(proj)
+    assert mf["renamed_interfaces_derivation"]["verdict"] == "DERIVED"
+    assert mf["renamed_interfaces_derivation"]["unresolved"] == []
+    assert mf["renamed_interfaces_check"]["verdict"] == "PASS"
+
+
+def _waive(proj):
+    import design_one_shot_runner as R
+    res = R.step_rtl_gen(proj, "digital_cmd_driven")
+    assert res.extras.get("fallback_skill") == "catalog-glue-author"
+    return res.detail
+
+
+def test_the_waive_does_not_name_a_port_the_author_has_since_paired(tmp_path):
+    """RED on 3c5697945: the note read the first run's derivation, so it kept
+    naming o_memory_ack/ren/wen after the author paired them."""
+    proj = _project(tmp_path, impl=_NO_DATA_IMPL)
+    assert "renamed_interfaces: 3 implemented port(s)" in _waive(proj)
+    mf_path = proj / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+    mf = json.loads(mf_path.read_text())
+    mf["renamed_interfaces"] = [
+        {"l9": ["o_memory_we", "o_memory_cyc"],
+         "rtl": ["o_memory_wen", "o_memory_ren", "o_memory_ack"]}]
+    mf_path.write_text(json.dumps(mf))
+    detail = _waive(proj)
+    assert "implemented port(s) have" not in detail, detail[-600:]
+    assert "o_memory_ack" not in detail
+
+
+def test_the_waive_names_a_refused_authored_pair(tmp_path):
+    """RED on 3c5697945: a REFUSED authored pair sat in the manifest and the
+    hand-off said nothing until 15.5ic refused."""
+    proj = _project(tmp_path, impl=_NO_DATA_IMPL)
+    _waive(proj)
+    mf_path = proj / "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+    mf = json.loads(mf_path.read_text())
+    mf["renamed_interfaces"] = [{"l9": ["i_memory_data"],
+                                 "rtl": ["o_memory_ack"]}]
+    mf_path.write_text(json.dumps(mf))
+    detail = _waive(proj)
+    assert "REFUSED" in detail and "o_memory_ack" in detail, detail[-600:]
+
+
+def test_the_waive_names_a_derivation_that_did_not_run(tmp_path, monkeypatch):
+    """RED on 3c5697945: an emitter exception was recorded as NOT_MEASURED in
+    the manifest and nowhere in the hand-off."""
+    import renamed_interface_derive as RID
+
+    def _boom(project, mf):
+        raise RuntimeError("derivation unavailable")
+
+    monkeypatch.setattr(RID, "apply_to_manifest", _boom)
+    detail = _waive(_project(tmp_path))
+    assert "did not run" in detail and "derivation unavailable" in detail, \
+        detail[-600:]

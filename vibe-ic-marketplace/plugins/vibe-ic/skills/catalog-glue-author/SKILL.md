@@ -188,32 +188,52 @@ and #712 (wrapper-exposed output) are **dead code without this file**.
 > reaches is refused (PAD_GROUP_UNRESOLVED at 15.5ic, DOES_NOT_FIT at step 2,
 > even when no RTL bit is left without a pad).
 
-> **`renamed_interfaces` — PROGRAM FIRST, then you, then the program again
-> (D9).** The manifest emitter runs `programs/renamed_interface_derive.py`: an
-> empty list is filled with the side-granular pairs the design's own records
-> decide (read/write split of a document port's atoms; the sole remaining
-> group side), each carrying `derived_by` + `evidence`, and it keeps ONLY the
-> pairs `accept_renames` accepts (the D2 rule above: a derived pair gives a pad
-> a side only if phase 2 accepts it). A derived pair the rule rejects is listed
-> in `renamed_interfaces_derivation.rejected` with its reasons, and its ports
-> stay unresolved. Ports it cannot decide are listed in
-> `renamed_interfaces_derivation.unresolved` with their candidate sides and
-> the reason. HARD RULES for this skill:
-> 1. If `renamed_interfaces_derivation.unresolved` is non-empty, you MUST author
->    a pair for every listed port. Returning with `renamed_interfaces: []` (or
->    with any listed port unpaired) is a failed hand-off, not a finished one.
+> **Pad sides for renamed ports — PROGRAM FIRST, then you, then the program
+> again (D9).** The manifest emitter runs `programs/renamed_interface_derive.py`.
+> It writes the side-granular pairs the design's own records decide (R1: a
+> read/write split of a document port's atoms; R2: the sole remaining group
+> side) under **`derived_pad_pairs`**, each carrying `derived_by`, `rule`
+> (`R1`/`R2`), `side` and `evidence`, and it keeps ONLY the pairs
+> `accept_renames` accepts (the D2 rule above). It **never writes
+> `renamed_interfaces`**. `derived_pad_pairs` is read by the pad side alone
+> (`_l_doc_pad_placement.declared_renames`, steps 2 and 15.5ic).
+> `spec_conformance_check` and `l9_rtl_pin_consistency_check` read
+> `renamed_interfaces` as a DECLARED RENAME, and an R2 pair is evidence of a
+> side, not of a rename. Do not copy a derived pair into `renamed_interfaces`
+> unless you are declaring that rename yourself. A derived pair the rule rejects
+> is listed in `renamed_interfaces_derivation.rejected` with its reasons, and its
+> ports stay unresolved. Ports it cannot decide are listed in
+> `renamed_interfaces_derivation.unresolved` with their candidate sides and the
+> reason. Every emit refreshes all three program keys. HARD RULES for this skill:
+> 1. For every port in `renamed_interfaces_derivation.unresolved`, do ONE of:
+>    - author a `renamed_interfaces` pair for it, when a document port really
+>      is its counterpart; or
+>    - report it as a finding, when it has none. That is the case whose reason
+>      reads "no document port shares an identifier atom with it", or when the
+>      document's placement simply does not place it. Report it as a document
+>      placement gap, and do NOT invent a pair to silence it: an authored pair
+>      also tells both phase-2 gates that the document port is delivered as
+>      this one.
+>    Returning with a listed port neither paired nor reported is a failed
+>    hand-off.
 > 2. One pair per placement GROUP: every `l9` name of a pair must fall in the
 >    same pad-placement group row by the exact-atom rule, and the pair must
 >    pass `accept_renames` (same direction; same width where both are literal).
->    Keep the program's derived pairs; add yours beside them. A port whose only
->    candidate pair is rejected for a WIDTH the document and the RTL disagree
->    on is not yours to pair around: report it, do not author a pair that hides
->    the disagreement.
+>    A port whose only candidate pair is rejected for a WIDTH the document and
+>    the RTL disagree on is not yours to pair around: report it, do not author a
+>    pair that hides the disagreement.
 > 3. Then run `python3 programs/renamed_interface_derive.py <project> --check`.
->    It must exit 0. rc 1 names each REFUSED pair (an `rtl` name the implemented
->    top lacks, an `l9` name L9 lacks, an `l9` name in no group row, names in
->    two groups, or any `accept_renames` reason) and each still-unpaired port;
->    fix the pair, never the check.
+>    It checks what the pad side will read (your pairs and the derived ones).
+>    rc 0 means every implemented port ends on EXACTLY ONE side. rc 1 names:
+>    - each REFUSED pair (an `rtl` name the implemented top lacks, an `rtl`
+>      name the document already places on another side, an `l9` name L9 lacks,
+>      an `l9` name in no group row, names in two groups, or any
+>      `accept_renames` reason);
+>    - each still-unpaired port;
+>    - each port on two sides.
+>    Fix the pair, never the check. A port you reported under rule 1 keeps
+>    rc 1. That is the honest state until the document places it, so say so in
+>    the hand-off.
 
 > **`{l9, rtl}` schema (HARD doc-and-code contract, #775).** Every `{l9, rtl}`
 > dict above is parsed by `l9_rtl_pin_consistency_check._manifest_name_set()`:
