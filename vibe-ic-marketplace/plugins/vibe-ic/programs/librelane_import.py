@@ -13,8 +13,32 @@ The run's OWN records, never folder ordinals:
     (``_tool_log_provenance.flow_log_steps``, a calibrated reader);
   * each folder's ``config.json`` names the step class that wrote it; the two
     must agree (an instance id is the class id, or the class id plus ``-N``).
-A rule names a step CLASS and takes its LAST completed run in flow order. A
-step counts as completed only when the flow started another step after it.
+A rule names a step CLASS and takes its one TOP-LEVEL run: a run nested inside
+a composite step (``Odb.DiodesOnPorts`` re-running ``DetailedPlacement``) is
+never the stage's database. A rule that names an anchor (``after``) takes the
+top-level run that follows the anchor's run. More than one candidate is
+refused by name, never chosen by position. The chosen step must have written
+its ``state_out.json`` (LibreLane writes it only after the step's ``run()``).
+
+A RUN IMPORTS ONLY WHEN IT FINISHED
+-----------------------------------
+LibreLane writes ``Flow complete.`` to flow.log only after every step it was
+asked to run returned (``--to`` included) and no deferred error is left; its
+failure message is printed after flow.log is closed, so a failed run simply
+stops. ``flow_status`` (a calibrated reader) reads the LAST invocation (from
+its ``Starting…`` line). Without ``Flow complete.`` after its last started step
+the import refuses (``LL_IMPORT_FLOW_INCOMPLETE``, naming that step, its folder
+and its transcripts): an aborted run is an honest FAIL with the tool's own
+log, never a partial import whose missing steps read as "not performed". A
+segment declared with ``to`` must also end at that step, finished.
+
+SEGMENTS
+--------
+The two-segment plan (W5) is ONE call: ``import_segments(project,
+[(seg1_run_dir, "Checker.NetlistAssignStatements"), (seg2_run_dir, None)])``
+(CLI: ``librelane_import.py <project> <seg1>=Checker.NetlistAssignStatements
+<seg2>``). Each rule is taken from the one segment that ran it (two segments
+running it is refused), and ``not_performed`` is computed over the union.
 
 WHAT IT WRITES
 --------------
@@ -30,11 +54,23 @@ WHAT IT WRITES
 * ``phase3/stage3/pnr/openroad.log`` assembled from the OpenROAD step logs in
   flow order. Every inserted section is bracketed by a marker naming its source
   log and sha256; the assembled file is itself a back-fill row.
-* ``phase3/librelane/import_manifest.json``: one row per imported file, in the
+* ``phase3/librelane/import_manifest.json``: the segments (run_dir, declared
+  ``to``, flow.log sha256, flow status); one row per imported file, in the
   field names of the W0 import-manifest schema (flow step, canonical path,
   tool-run path, sha256 on both sides, tool, tool step id, the source log that
-  witnessed it, exit code, measurement), plus every rule whose step this run
-  did not perform.
+  witnessed it, exit code, measurement), where, as in W0, ``tool_run_path``
+  and ``source_log`` are relative to the row's ``run_dir`` (itself
+  project-relative, as in W19's witness); every rule no segment performed;
+  and every file an earlier import of the same runs wrote that this one
+  removed.
+
+ALL OR NOTHING
+--------------
+Every rule is planned, and every refusal raised, BEFORE anything is written.
+The writes then run under a journal: if one still fails, every path is
+restored. A project whose manifest records an import of OTHER runs is refused
+(a different run needs a fresh project); re-importing the same runs removes
+the canonical files the earlier import wrote and this one does not.
 
 WHAT IT DOES NOT DO
 -------------------
@@ -45,17 +81,20 @@ kept vibe-ic decks own those (decision 11g). It judges nothing: a step this
 flow did not do is listed in ``not_performed`` for the verdict layer (W14).
 
 chip-AGNOSTIC: no design, PDK, corner or cell literal. The top comes from the
-run's own ``resolved.json``; corners come from the state.
+run's own ``resolved.json``; corners come from the state, and the nominal SPEF
+is the state corner the RCX step's own ``DEFAULT_CORNER`` matches.
 """
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import fnmatch
 import json
 import os
 import re
 import shutil
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -107,6 +146,12 @@ class Rule:
     flow_step: str
     step: str             # LibreLane step CLASS id
     sources: Tuple[Any, ...]
+    after: Optional[str] = None   # take the top-level run after this class's
+
+
+#: The View key of the nominal SPEF: resolved per run from the RCX step's own
+#: ``DEFAULT_CORNER`` (``_nominal_corner``), never from a corner literal.
+NOMINAL_SPEF = "spef:<nominal>"
 
 
 def _ll_reports(step: str) -> Dest:
@@ -144,15 +189,19 @@ IMPORT_RULES: Tuple[Rule, ...] = (
         View("def", lambda p, top, _: _pl.pnr_dir(p) / "routed.def"),
         View("odb", lambda p, top, _: _pl.pnr_dir(p) / "librelane_routed.odb"),
         # the router's own marker report, where the route arm hands it
+        # one match only: a second is refused, never picked by name order
         Files("*.drc", lambda p, top, _: _pl.pnr_dir(p) / "routed_router.drc.rpt"))),
     Rule("22", "OpenROAD.RCX", (
         View("spef:*", _corner_spef),
-        View("spef:nom_*", lambda p, top, _: _pl.extracted_dir(p) / f"{top}.spef"))),
+        View(NOMINAL_SPEF, lambda p, top, _: _pl.extracted_dir(p) / f"{top}.spef"))),
     Rule("23", "OpenROAD.STAPostPNR", (
         Files("summary.rpt", _ll_reports("23")),
         Files("*/*.rpt", _ll_reports("23")))),
+    # The post-route check: the top-level run after the detailed route (the
+    # flow also checks after global routing, and inside RepairAntennas).
     Rule("26", "OpenROAD.CheckAntennas", (
-        Files("reports/*.rpt", _ll_reports("26")),)),
+        Files("reports/*.rpt", _ll_reports("26")),),
+        after="OpenROAD.DetailedRouting"),
     Rule("31", "Magic.DRC", (Files("reports/*", _ll_reports("31")),)),
     Rule("31", "KLayout.DRC", (Files("reports/*", _ll_reports("31")),)),
     Rule("31", "Netgen.LVS", (Files("reports/*", _ll_reports("31")),)),
@@ -170,6 +219,10 @@ IMPORT_RULES: Tuple[Rule, ...] = (
 )
 
 _INSTANCE_SUFFIX = re.compile(r"-\d+$")
+_STARTING = "Starting…"
+_FLOW_COMPLETE = "Flow complete."
+#: A segment's declared terminal step: a LibreLane step class id.
+_STEP_ID = re.compile(r"^[A-Za-z][A-Za-z0-9]*\.[A-Za-z][A-Za-z0-9]*$")
 
 
 def _class_of(instance_id: str) -> str:
@@ -183,7 +236,40 @@ class Ran:
     step: str             # class id from the folder's own config.json
     rel: str              # folder relative to the run directory
     folder: Path
-    completed: bool
+    pos: int              # position in the flow's own start order
+    run_dir: Path
+
+    @property
+    def top_level(self) -> bool:
+        return "/" not in self.rel
+
+    @property
+    def completed(self) -> bool:
+        """LibreLane writes state_out.json only after the step's run()."""
+        return (self.folder / "state_out.json").is_file()
+
+
+def flow_status(flow_log: str) -> Dict[str, Any]:
+    """How the LAST invocation recorded in a run's flow.log ended.
+
+    flow.log is appended per invocation, each opening with ``Starting…``.
+    ``complete`` is True only when ``Flow complete.`` follows that
+    invocation's last started step. ``last_started`` is ``(instance id,
+    folder)`` of that step, or None; ``invocations`` counts ``Starting…``.
+    """
+    import instrument_calibration
+    instrument_calibration.assert_calibrated("librelane_import::flow_status")
+    lines = (flow_log or "").splitlines()
+    starts = [i for i, l in enumerate(lines) if l == _STARTING]
+    tail = lines[starts[-1] + 1:] if starts else lines
+    last: Optional[Tuple[str, str]] = None
+    after = 0
+    for i, line in enumerate(tail):
+        m = _tlp._RUNNING_RE.match(line)
+        if m:
+            last, after = (m.group(1), m.group(2)), i + 1
+    return {"complete": _FLOW_COMPLETE in tail[after:],
+            "last_started": last, "invocations": len(starts)}
 
 
 def run_index(run_dir: Path) -> List[Ran]:
@@ -213,9 +299,66 @@ def run_index(run_dir: Path) -> List[Ran]:
             raise Refusal("LL_IMPORT_STEP_MISMATCH",
                           f"flow.log started {instance} in {rel}, whose "
                           f"config.json names {recorded!r}")
-        out.append(Ran(instance, recorded, rel, folder,
-                       completed=i + 1 < len(started)))
+        out.append(Ran(instance, recorded, rel, folder, i, run_dir))
     return out
+
+
+def _require_finished(run_dir: Path, index: List[Ran],
+                      to: Optional[str]) -> Dict[str, Any]:
+    """The segment's flow status, or a named refusal citing the tool's logs."""
+    text = (run_dir / "flow.log").read_text(errors="replace")
+    status = flow_status(text)
+    last = index[-1]
+    if not status["complete"]:
+        block = _tlp.step_block(text, last.instance, last.rel) or {}
+        logs = ["/".join(p) for p in block.get("subprocess_logs", [])] or \
+            [l.relative_to(run_dir).as_posix() for l in _step_logs(last.folder)]
+        finished = ("it wrote its state_out.json" if last.completed
+                    else "it never wrote its state_out.json")
+        raise Refusal(
+            "LL_IMPORT_FLOW_INCOMPLETE",
+            f"{run_dir}/flow.log has no '{_FLOW_COMPLETE}' after its last "
+            f"started step {last.instance} at {last.rel} ({finished}); the "
+            f"tool's own log: {', '.join(logs) or 'none on disk'}. LibreLane "
+            "did not finish this run: a FAIL, never a partial import")
+    tops = [r for r in index if r.top_level]
+    if to is not None:
+        end = tops[-1] if tops else None
+        if end is None or end.step != to or not end.completed:
+            raise Refusal(
+                "LL_IMPORT_SEGMENT_END_MISMATCH",
+                f"{run_dir} was declared to run --to {to}, but its last "
+                f"top-level step is {end.instance if end else None}"
+                + ("" if end is None or end.completed else " (unfinished)"))
+    return {"complete": True, "evidence": _FLOW_COMPLETE,
+            "last_started": last.instance,
+            "last_top_level": tops[-1].instance if tops else None,
+            "to": to, "invocations": status["invocations"]}
+
+
+def _select(index: List[Ran], rule: Rule) -> Tuple[Optional[Ran], str]:
+    """The one top-level run a rule imports, or ``(None, why none)``."""
+    runs = [r for r in index if r.step == rule.step]
+    if not runs:
+        return None, f"the run's own flow.log never started {rule.step}"
+    cand = [r for r in runs if r.top_level]
+    if not cand:
+        return None, (f"{rule.step} ran only nested inside a composite step "
+                      f"({', '.join(r.rel for r in runs)}), never as a stage")
+    if rule.after:
+        anchors = [r.pos for r in index if r.step == rule.after and r.top_level]
+        if not anchors:
+            return None, (f"the run never ran {rule.after}, so no {rule.step} "
+                          "follows it")
+        cand = [r for r in cand if r.pos > anchors[-1]]
+        if not cand:
+            return None, f"no top-level {rule.step} ran after {rule.after}"
+    if len(cand) > 1:
+        raise Refusal("LL_IMPORT_AMBIGUOUS_STEP",
+                      f"flow step {rule.flow_step}: {len(cand)} top-level runs "
+                      f"of {rule.step} ({', '.join(r.rel for r in cand)}); "
+                      "the import never picks one by position")
+    return cand[0], ""
 
 
 def _duration_ms(folder: Path) -> Optional[int]:
@@ -244,7 +387,22 @@ def _recorded_root(value: str, rel: str) -> Optional[str]:
     return value[:value.index(marker)] if marker in value else None
 
 
-def _state_views(state: Dict[str, Any], key: str) -> List[Tuple[str, str]]:
+def _nominal_corner(ran: Ran, corners: List[str]) -> str:
+    """The state's SPEF corner key the step's own DEFAULT_CORNER matches."""
+    default = _load(ran.folder / "config.json").get("DEFAULT_CORNER")
+    if not isinstance(default, str) or not default:
+        raise Refusal("LL_IMPORT_NO_NOMINAL_CORNER",
+                      f"{ran.instance}: config.json states no DEFAULT_CORNER")
+    hits = [c for c in corners if fnmatch.fnmatchcase(default, c)]
+    if len(hits) != 1:
+        raise Refusal("LL_IMPORT_NO_NOMINAL_CORNER",
+                      f"{ran.instance}: DEFAULT_CORNER {default} matches "
+                      f"{hits or 'none'} of the state's corners {corners}")
+    return hits[0]
+
+
+def _state_views(state: Dict[str, Any], key: str,
+                 ran: Ran) -> List[Tuple[str, str]]:
     """``(view, corner)`` pairs a View source names; ``spef:*`` expands."""
     base, _, corner = key.partition(":")
     value = state.get(base)
@@ -252,9 +410,29 @@ def _state_views(state: Dict[str, Any], key: str) -> List[Tuple[str, str]]:
         return [(base, "")] if isinstance(value, str) and value else []
     if not isinstance(value, dict):
         return []
+    if key == NOMINAL_SPEF:
+        c = _nominal_corner(ran, sorted(value))
+        return [(f"{base}:{c}", c)]
     if corner == "*":
         return [(f"{base}:{c}", c) for c in sorted(value)]
     return [(key, corner)] if corner in value else []
+
+
+def _step_logs(folder: Path) -> List[Path]:
+    """The tool transcripts the step itself wrote (its folder and corner
+    subfolders), excluding nested sub-steps, which have their own config."""
+    logs = []
+    for p in sorted(folder.rglob("*.log")):
+        parent = p.parent
+        nested = False
+        while parent != folder:
+            if (parent / "config.json").is_file():
+                nested = True
+                break
+            parent = parent.parent
+        if not nested and p.is_file() and not p.is_symlink():
+            logs.append(p)
+    return logs
 
 
 def _source_log(ran: Ran, tool_file: Path) -> Optional[Path]:
@@ -276,21 +454,23 @@ def _source_log(ran: Ran, tool_file: Path) -> Optional[Path]:
 def _file_row(project: Path, ran: Ran, tool_file: Path, dest: Path,
               view: Optional[str] = None) -> Dict[str, Any]:
     """One manifest row, in the field names of the W0 import-manifest schema
-    (``_external_flow_manifest``, lane llf). ``measurement`` is the
-    artefact-derived record, or None when nothing can be stated about this
-    file — never a guessed one. The flow step and ``exit_code`` are filled in
-    by the caller."""
+    (``_external_flow_manifest``, lane llf), with W0's meaning:
+    ``tool_run_path`` and ``source_log`` are relative to the row's
+    ``run_dir``. ``measurement`` is the artefact-derived record, or None when
+    nothing can be stated about this file — never a guessed one. The flow
+    step and ``exit_code`` are filled in by the caller."""
     log = _source_log(ran, tool_file)
     rel = dest.relative_to(project).as_posix()
     row: Dict[str, Any] = {
+        "run_dir": ran.run_dir.relative_to(project).as_posix(),
         "canonical_path": rel,
-        "tool_run_path": tool_file.relative_to(project).as_posix(),
+        "tool_run_path": tool_file.relative_to(ran.run_dir).as_posix(),
         "canonical_sha256": "sha256:" + digest(dest),
         "tool_run_sha256": "sha256:" + digest(tool_file),
         "flow": FLOW,
         "tool": _tlp.underlying_tool(ran.instance),
         "tool_step_id": ran.instance,
-        "source_log": log.relative_to(project).as_posix() if log else None,
+        "source_log": log.relative_to(ran.run_dir).as_posix() if log else None,
         "source_log_sha256": ("sha256:" + digest(log)) if log else None,
         "measurement": _runner_measurement.derive(
             project, rel, _tlp.underlying_tool(ran.instance) or ""),
@@ -300,20 +480,52 @@ def _file_row(project: Path, ran: Ran, tool_file: Path, dest: Path,
     return row
 
 
-def _import_step(project: Path, run_dir: Path, ran: Ran, rule: Rule, top: str,
-                 receipts: Path) -> Tuple[Dict[str, Path], List[Dict[str, Any]]]:
+@dataclass
+class _ViewCall:
+    """One ``handoff_to_direct`` call, validated before anything is written."""
+    state_path: Path
+    targets: Dict[str, Path]
+    receipt: Path
+    path_map: Dict[str, str]
+    sources: Dict[str, Path]      # view -> the step's file it resolves to
+
+
+@dataclass
+class _StepPlan:
+    rule: Rule
+    ran: Ran
+    views: List[_ViewCall]
+    files: List[Tuple[Path, Path]]            # (tool file, canonical dest)
+    files_receipt: Optional[Path]
+
+    def dests(self) -> List[Tuple[Path, Path]]:
+        """Every (canonical dest, tool file) this step writes."""
+        out = [(d, c.sources[v]) for c in self.views
+               for v, d in c.targets.items()]
+        return out + [(d, s) for s, d in self.files]
+
+    def receipts(self) -> List[Path]:
+        return [c.receipt for c in self.views] + \
+            ([self.files_receipt] if self.files_receipt else [])
+
+
+def _plan_step(project: Path, ran: Ran, rule: Rule, top: str,
+               receipts: Path) -> _StepPlan:
+    """Resolve every source of one rule, raising every refusal it can meet;
+    writes nothing."""
+    run_dir = ran.run_dir
     state_path = ran.folder / "state_out.json"
     state = _load(state_path) if state_path.is_file() else {}
-    outputs: Dict[str, Path] = {}
-    rows: List[Dict[str, Any]] = []
     receipt = receipts / f"{rule.flow_step}_{ran.instance}.json"
+    plan = _StepPlan(rule, ran, [], [], None)
     for src in rule.sources:
         if isinstance(src, View):
-            pairs = _state_views(state, src.key)
+            pairs = _state_views(state, src.key, ran)
             if not pairs:
                 raise Refusal("LL_IMPORT_VIEW_MISSING",
                               f"{ran.instance} state has no {src.key}")
             targets: Dict[str, Path] = {}
+            sources: Dict[str, Path] = {}
             path_map: Dict[str, str] = {}
             for view, corner in pairs:
                 base, _, c = view.partition(":")
@@ -323,61 +535,86 @@ def _import_step(project: Path, run_dir: Path, ran: Ran, rule: Rule, top: str,
                     raise Refusal("LL_IMPORT_VIEW_NOT_OWN",
                                   f"{ran.instance} {view} = {value}: written by "
                                   "another step, not by this one")
-                path_map[root + "/" + run_dir.name] = str(run_dir)
+                guest = root + "/" + run_dir.name
+                path_map[guest] = str(run_dir)
+                source = Path(str(run_dir) + value[len(guest):])
+                if not source.is_file():
+                    raise Refusal("LL_IMPORT_VIEW_MISSING",
+                                  f"{ran.instance} {view}: {source}")
+                if source.is_symlink():
+                    raise Refusal("LL_IMPORT_SOURCE_SYMLINK", str(source))
                 targets[view] = src.dest(project, top, corner)
+                sources[view] = source.resolve()
             if len(set(path_map)) != 1:
                 raise Refusal("LL_IMPORT_VIEW_ROOTS", f"{ran.instance}: {path_map}")
-            doc = handoff_to_direct(
+            slug = src.key.replace(":", "_").replace("*", "all") \
+                .replace("<", "").replace(">", "")
+            plan.views.append(_ViewCall(
                 state_path, targets,
-                receipt.with_name(f"{receipt.stem}_{src.key.replace(':', '_').replace('*', 'all')}.json"),
-                path_map=path_map)
-            for view, row in doc["views"].items():
-                dest = Path(row["dest"])
-                outputs[dest.relative_to(project).as_posix()] = \
-                    Path(row["source"]).resolve()
-                rows.append(_file_row(project, ran, Path(row["source"]).resolve(),
-                                      dest, view=view))
+                receipt.with_name(f"{receipt.stem}_{slug}.json"),
+                path_map, sources))
         else:
             found = sorted(p for p in ran.folder.glob(src.pattern) if p.is_file())
             if not found:
                 raise Refusal("LL_IMPORT_FILE_MISSING",
                               f"{ran.instance}: no {src.pattern} in {ran.rel}")
             for path in found:
+                if path.is_symlink():
+                    raise Refusal("LL_IMPORT_SOURCE_SYMLINK", str(path))
                 rel = path.relative_to(ran.folder).as_posix()
-                dest = src.dest(project, top, rel)
-                _copy(path, dest)
-                outputs[dest.relative_to(project).as_posix()] = path
-                rows.append(_file_row(project, ran, path, dest))
-    files = [r for r in rows if "view" not in r]
-    if files:
-        write_json(receipt.with_name(f"{receipt.stem}_files.json"),
-                   {"step": ran.instance, "folder": ran.rel, "files": files})
-    return outputs, rows
+                plan.files.append((path, src.dest(project, top, rel)))
+    if plan.files:
+        plan.files_receipt = receipt.with_name(f"{receipt.stem}_files.json")
+    return plan
 
 
-def _step_logs(folder: Path) -> List[Path]:
-    """The tool transcripts the step itself wrote (its folder and corner
-    subfolders), excluding nested sub-steps, which have their own config."""
-    logs = []
-    for p in sorted(folder.rglob("*.log")):
-        parent = p.parent
-        nested = False
-        while parent != folder:
-            if (parent / "config.json").is_file():
-                nested = True
-                break
-            parent = parent.parent
-        if not nested and p.is_file() and not p.is_symlink():
-            logs.append(p)
-    return logs
+class _Journal:
+    """Every path the import writes, with what it held before, so a failure
+    after the first write restores the project exactly."""
+
+    def __init__(self, project: Path):
+        self.root = Path(tempfile.mkdtemp(prefix=".librelane_import.",
+                                          dir=project))
+        self.saved: Dict[Path, Optional[Path]] = {}
+
+    def touch(self, path: Path) -> None:
+        path = Path(path)
+        if path in self.saved:
+            return
+        if path.exists() or path.is_symlink():
+            keep = self.root / str(len(self.saved))
+            if path.is_symlink():
+                os.symlink(os.readlink(path), keep)
+            else:
+                shutil.copy2(path, keep)
+            self.saved[path] = keep
+        else:
+            self.saved[path] = None
+
+    def remove(self, path: Path) -> None:
+        self.touch(path)
+        if path.exists() or path.is_symlink():
+            path.unlink()
+
+    def rollback(self) -> None:
+        for path, keep in self.saved.items():
+            if path.exists() or path.is_symlink():
+                path.unlink()
+            if keep is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(keep, path)
+        self.close()
+
+    def close(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
 
 
-def _provenance_row(project: Path, run_dir: Path, ran: Ran,
+def _provenance_row(project: Path, ran: Ran,
                     outputs: Dict[str, Path]) -> Dict[str, Any]:
     """``outputs`` maps each canonical path to the file the step wrote."""
     try:
         row = _tlp.witnessed_row(
-            project, flow=FLOW, step_id=ran.instance, run_dir=run_dir,
+            project, flow=FLOW, step_id=ran.instance, run_dir=ran.run_dir,
             step_dir=ran.rel, outputs=outputs,
             duration_ms=_duration_ms(ran.folder))
     except _tlp.WitnessRefused as exc:
@@ -412,8 +649,9 @@ def _pnr_span(index: List[Ran]) -> List[Ran]:
             and not r.step.startswith("OpenROAD.STA")]
 
 
-def assemble_openroad_log(project: Path, run_dir: Path, index: List[Ran],
-                          dest: Path) -> Optional[Dict[str, Any]]:
+def assemble_openroad_log(project: Path, index: List[Ran], dest: Path,
+                          journal: Optional[_Journal] = None
+                          ) -> Optional[Dict[str, Any]]:
     """The PnR-span step transcripts in flow order, each bracketed by a marker
     that names its source log and sha256."""
     parts: List[str] = []
@@ -432,6 +670,8 @@ def assemble_openroad_log(project: Path, run_dir: Path, index: List[Ran],
             cited.append({"path": rel, "sha256": sha})
     if not cited:
         return None
+    if journal is not None:
+        journal.touch(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.is_symlink():
         dest.unlink()
@@ -441,76 +681,235 @@ def assemble_openroad_log(project: Path, run_dir: Path, index: List[Ran],
             "sources": cited}
 
 
-def import_run(project: Path, run_dir: Path) -> Dict[str, Any]:
-    """Import every rule's step from ``run_dir`` (inside ``project``)."""
-    project = Path(project).resolve()
-    run_dir = Path(run_dir).resolve()
+def _previous_import(project: Path) -> Optional[Dict[str, Any]]:
+    path = project / MANIFEST_REL
+    if not path.is_file():
+        return None
     try:
-        run_dir.relative_to(project)
-    except ValueError:
-        raise Refusal("LL_IMPORT_RUN_OUTSIDE_PROJECT", str(run_dir))
-    resolved = run_dir / "resolved.json"
-    top = _load(resolved).get("DESIGN_NAME") if resolved.is_file() else None
-    if not isinstance(top, str) or not top:
-        raise Refusal("LL_IMPORT_NO_DESIGN_NAME", str(resolved))
-    index = run_index(run_dir)
-    receipts = project / RECEIPT_DIR_REL
+        doc = _load(path)
+    except (OSError, ValueError) as exc:
+        raise Refusal("LL_IMPORT_MANIFEST_UNREADABLE", f"{path}: {exc}")
+    return doc if isinstance(doc, dict) else {}
+
+
+def _fixed_dests(rule: Rule, project: Path, top: str) -> List[Path]:
+    """The canonical paths a rule writes whatever the run holds (a View's
+    dest that does not depend on the corner)."""
+    out = []
+    for src in rule.sources:
+        if isinstance(src, View) and src.key.partition(":")[2] in ("", NOMINAL_SPEF[5:]):
+            out.append(src.dest(project, top, ""))
+    return out
+
+
+def import_segments(project: Path,
+                    segments: List[Tuple[Path, Optional[str]]]) -> Dict[str, Any]:
+    """Import the ordered segment runs (each inside ``project``) as one tree.
+
+    Each segment is ``(run_dir, to)``, ``to`` being the step class the run
+    was declared to stop at (``--to``), or None for a run to the flow's end.
+    Nothing is written unless every rule plans cleanly; see the module
+    docstring.
+    """
+    project = Path(project).resolve()
+    if not segments:
+        raise Refusal("LL_IMPORT_NO_SEGMENTS", "no run to import")
+    segs: List[Tuple[Path, Optional[str]]] = []
+    top: Optional[str] = None
+    for run_dir, to in segments:
+        run_dir = Path(run_dir).resolve()
+        try:
+            run_dir.relative_to(project)
+        except ValueError:
+            raise Refusal("LL_IMPORT_RUN_OUTSIDE_PROJECT", str(run_dir))
+        if to is not None and not _STEP_ID.match(to):
+            raise Refusal("LL_IMPORT_BAD_SEGMENT_END", repr(to))
+        resolved = run_dir / "resolved.json"
+        name = _load(resolved).get("DESIGN_NAME") if resolved.is_file() else None
+        if not isinstance(name, str) or not name:
+            raise Refusal("LL_IMPORT_NO_DESIGN_NAME", str(resolved))
+        if top is not None and name != top:
+            raise Refusal("LL_IMPORT_SEGMENT_DESIGN_MISMATCH",
+                          f"{run_dir} is {name}, an earlier segment {top}")
+        top = name
+        segs.append((run_dir, to))
+    if len({r for r, _ in segs}) != len(segs):
+        raise Refusal("LL_IMPORT_SEGMENT_REPEATED", str([str(r) for r, _ in segs]))
+    assert top is not None
+    run_rels = [r.relative_to(project).as_posix() for r, _ in segs]
+
+    # ── plan: every refusal is raised here, before anything is written ──
     manifest: Dict[str, Any] = {
-        "schema": "vibe-ic/librelane-import/1", "flow": FLOW,
-        "run_dir": run_dir.relative_to(project).as_posix(), "top": top,
-        "flow_log_sha256": digest(run_dir / "flow.log"),
-        "rows": [], "not_performed": []}
-    prov: List[Dict[str, Any]] = []
+        "schema": "vibe-ic/librelane-import/2", "flow": FLOW, "top": top,
+        "segments": [], "rows": [], "not_performed": [], "removed": []}
+    indexes: List[List[Ran]] = []
+    for run_dir, to in segs:
+        index = run_index(run_dir)
+        status = _require_finished(run_dir, index, to)
+        indexes.append(index)
+        manifest["segments"].append({
+            "run_dir": run_dir.relative_to(project).as_posix(), "to": to,
+            "flow_log_sha256": digest(run_dir / "flow.log"),
+            "flow_status": status})
+    previous = _previous_import(project)
+    if previous is not None:
+        before = [s.get("run_dir") for s in previous.get("segments") or []] \
+            or [previous.get("run_dir")]
+        if before != run_rels:
+            raise Refusal("LL_IMPORT_OTHER_RUN_PRESENT",
+                          f"{project / MANIFEST_REL} already records an import "
+                          f"of {before}; importing {run_rels} over it would "
+                          "leave files of both. A different run needs a fresh "
+                          "project")
+    receipts = project / RECEIPT_DIR_REL
+    plans: List[_StepPlan] = []
     for rule in IMPORT_RULES:
-        ran = [r for r in index if r.step == rule.step]
-        if not ran:
+        chosen = []
+        why: List[str] = []
+        for index in indexes:
+            ran, reason = _select(index, rule)
+            if ran is not None:
+                chosen.append(ran)
+            else:
+                why.append(reason)
+        if len(chosen) > 1:
+            raise Refusal("LL_IMPORT_SEGMENT_OVERLAP",
+                          f"flow step {rule.flow_step} ({rule.step}) ran in "
+                          f"{len(chosen)} segments: "
+                          f"{', '.join(r.run_dir.name + '/' + r.rel for r in chosen)}")
+        if not chosen:
             manifest["not_performed"].append({
                 "flow_step": rule.flow_step, "tool_step": rule.step,
-                "reason": f"the run's own flow.log never started {rule.step}"})
+                "reason": "; ".join(dict.fromkeys(why)),
+                "flow_complete": True})
             continue
-        last = ran[-1]
-        if not last.completed:
+        ran = chosen[0]
+        if not ran.completed:
             raise Refusal("LL_IMPORT_STEP_NOT_COMPLETED",
-                          f"{last.instance} is the last step the run started")
-        outputs, rows = _import_step(project, run_dir, last, rule, top, receipts)
-        row = _provenance_row(project, run_dir, last, outputs)
-        prov.append(row)
-        kind = "witnessed" if row.get("reconstructed") is False else "reconstructed"
-        for r in rows:
-            r.update({"step_id": rule.flow_step, "exit_code": row["exit_code"],
-                      "timestamp": row["timestamp"], "provenance": kind})
-            manifest["rows"].append(r)
-    log = assemble_openroad_log(project, run_dir, index,
-                                _pl.pnr_dir(project) / "openroad.log")
-    if log is not None:
-        manifest["openroad_log"] = log
-        prov.append(_runner_measurement.attach(project, {
-            "tool": "openroad", "command": "librelane_import.assemble_openroad_log",
-            "exit_code": 0, "duration_ms": None, "reconstructed": True,
-            "timestamp": _dt.datetime.now(_dt.timezone.utc)
-            .strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "outputs": {log["path"]: log["sha256"]},
-            "note": "assembled from LibreLane step logs; every section's "
-                    "marker cites its source log and sha256"}))
-    with (project / "provenance.jsonl").open("a") as fh:
-        for row in prov:
-            fh.write(json.dumps(row) + "\n")
-    write_json(project / MANIFEST_REL, manifest)
+                          f"{ran.instance} at {ran.rel} wrote no state_out.json")
+        plans.append(_plan_step(project, ran, rule, top, receipts))
+    writes: Dict[Path, Path] = {}
+    for plan in plans:
+        for dest, src in plan.dests():
+            if dest in writes and writes[dest] != src:
+                raise Refusal("LL_IMPORT_AMBIGUOUS_SOURCE",
+                              f"{dest.relative_to(project)} would be written "
+                              f"from both {writes[dest]} and {src}")
+            writes[dest] = src
+    stale = sorted({project / r["canonical_path"]
+                    for r in (previous or {}).get("rows") or []
+                    if isinstance(r, dict) and r.get("canonical_path")}
+                   - set(writes))
+    for entry in manifest["not_performed"]:
+        rule = next(r for r in IMPORT_RULES if r.step == entry["tool_step"]
+                    and r.flow_step == entry["flow_step"])
+        left = [d for d in _fixed_dests(rule, project, top)
+                if (d.exists() or d.is_symlink()) and d not in stale
+                and d not in writes]
+        if left:
+            raise Refusal("LL_IMPORT_STALE_CANONICAL",
+                          f"flow step {rule.flow_step} was not performed by "
+                          f"these runs, yet {[str(d.relative_to(project)) for d in left]} "
+                          "exists and no earlier import of these runs "
+                          "accounts for it")
+
+    # ── write, under a journal ──
+    journal = _Journal(project)
+    try:
+        for path in stale:
+            journal.remove(path)
+            manifest["removed"].append(path.relative_to(project).as_posix())
+        prov: List[Dict[str, Any]] = []
+        for plan in plans:
+            for dest in [d for d, _ in plan.dests()] + plan.receipts():
+                journal.touch(dest)
+            outputs: Dict[str, Path] = {}
+            rows: List[Dict[str, Any]] = []
+            for call in plan.views:
+                doc = handoff_to_direct(call.state_path, call.targets,
+                                        call.receipt, path_map=call.path_map)
+                for view, row in doc["views"].items():
+                    dest = Path(row["dest"])
+                    source = Path(row["source"]).resolve()
+                    outputs[dest.relative_to(project).as_posix()] = source
+                    rows.append(_file_row(project, plan.ran, source, dest,
+                                          view=view))
+            for path, dest in plan.files:
+                _copy(path, dest)
+                outputs[dest.relative_to(project).as_posix()] = path
+                rows.append(_file_row(project, plan.ran, path, dest))
+            files = [r for r in rows if "view" not in r]
+            if plan.files_receipt is not None:
+                write_json(plan.files_receipt,
+                           {"step": plan.ran.instance, "folder": plan.ran.rel,
+                            "run_dir": plan.ran.run_dir.relative_to(project)
+                            .as_posix(), "files": files})
+            row = _provenance_row(project, plan.ran, outputs)
+            prov.append(row)
+            kind = ("witnessed" if row.get("reconstructed") is False
+                    else "reconstructed")
+            for r in rows:
+                r.update({"step_id": plan.rule.flow_step,
+                          "exit_code": row["exit_code"],
+                          "timestamp": row["timestamp"], "provenance": kind})
+                manifest["rows"].append(r)
+        log = assemble_openroad_log(project, [r for ix in indexes for r in ix],
+                                    _pl.pnr_dir(project) / "openroad.log",
+                                    journal)
+        if log is not None:
+            manifest["openroad_log"] = log
+            prov.append(_runner_measurement.attach(project, {
+                "tool": "openroad",
+                "command": "librelane_import.assemble_openroad_log",
+                "exit_code": 0, "duration_ms": None, "reconstructed": True,
+                "timestamp": _dt.datetime.now(_dt.timezone.utc)
+                .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "outputs": {log["path"]: log["sha256"]},
+                "note": "assembled from LibreLane step logs; every section's "
+                        "marker cites its source log and sha256"}))
+        journal.touch(project / "provenance.jsonl")
+        journal.touch(project / MANIFEST_REL)
+        with (project / "provenance.jsonl").open("a") as fh:
+            for row in prov:
+                fh.write(json.dumps(row) + "\n")
+        write_json(project / MANIFEST_REL, manifest)
+    except BaseException:
+        journal.rollback()
+        raise
+    journal.close()
     return manifest
+
+
+def import_run(project: Path, run_dir: Path,
+               to: Optional[str] = None) -> Dict[str, Any]:
+    """Import one LibreLane run (inside ``project``); ``to`` is the step it
+    was declared to stop at, if any."""
+    return import_segments(project, [(run_dir, to)])
+
+
+def _segment_arg(text: str) -> Tuple[Path, Optional[str]]:
+    head, sep, tail = text.rpartition("=")
+    if sep and _STEP_ID.match(tail):
+        return Path(head), tail
+    return Path(text), None
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("project", type=Path)
-    ap.add_argument("run_dir", type=Path)
+    ap.add_argument("segments", nargs="+", type=_segment_arg,
+                    metavar="RUN_DIR[=TO_STEP]",
+                    help="each segment run in order; `=<StepClass>` declares "
+                         "the step the run was asked to stop at (--to)")
     a = ap.parse_args(argv)
     try:
-        doc = import_run(a.project, a.run_dir)
+        doc = import_segments(a.project, a.segments)
     except Refusal as exc:
         print(f"REFUSED {exc.code}: {exc}", file=sys.stderr)
         return 1
-    print(f"imported {len(doc['rows'])} file(s); "
-          f"{len(doc['not_performed'])} rule(s) not performed by this run")
+    print(f"imported {len(doc['rows'])} file(s) from {len(doc['segments'])} "
+          f"finished run(s); {len(doc['not_performed'])} rule(s) not "
+          "performed by them")
     return 0
 
 

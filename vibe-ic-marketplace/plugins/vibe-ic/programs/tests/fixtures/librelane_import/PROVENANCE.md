@@ -15,7 +15,11 @@ Each run: `librelane --manual-pdk --pdk gf180mcuD --run-tag cmp3 config.yaml`
 - `flow.log`: whole.
 - `resolved.json`: only `DESIGN_NAME`.
 - Every step folder that flow.log started: its `config.json`, reduced to
-  `meta` (the step class the importer cross-checks).
+  `meta` (the step class the importer cross-checks). The one exception is
+  `54-openroad-rcx/config.json`, which also keeps the step's own
+  `DEFAULT_CORNER` (`nom_tt_025C_5v00` in both source runs, read from each
+  source's own `54-openroad-rcx/config.json`): the importer takes the nominal
+  SPEF from it rather than from a corner literal.
 - For the LAST run of each step class that an `IMPORT_RULES` entry names:
   - `runtime.txt`;
   - `state_out.json` without `metrics`;
@@ -38,3 +42,10 @@ Two consequences of the cut, which the tests account for:
   either step's row.
 - A cut netlist, SPEF or GDS reads `measured: false` to
   `_runner_measurement`. On the real run it does not.
+
+## Why the run trees are tracked (review of W6)
+`.gitignore`'s `runs/` rule had dropped all 764 run files, so the branch once
+shipped this file alone. A narrow negation (the #1744 pattern) re-includes
+exactly `librelane_import/*/runs/`; nothing else under `tests/` is swept in.
+Both trees are small (about 0.9 MB each; the largest file is `flow.log`,
+28 KB), so nothing further was trimmed.
