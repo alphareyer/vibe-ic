@@ -455,7 +455,13 @@ def execute(
 
     def _route(out: str, err: str) -> Tuple[int, str, str]:
         image = _ll.resolve_image(project)
-        pdk_root = _ll.resolve_pdk_root(project)
+        # The contract's resolver for THIS design's PDK and image (F25): a
+        # declared root, else the image's own PDK materialised on the host --
+        # the same answer steps 15..20 and 32 get. MEASURED (T102 r4, spm
+        # with no switch file): without the PDK and image the resolver has
+        # only the declared sources, and the class-default route refused
+        # LL_PDK_ROOT_NOT_DECLARED where the class-default 15..20 had run.
+        pdk_root = _ll.resolve_pdk_root(project, str(pdk.name), image=image)
         if not pdk_root:
             return _refuse("LL_PDK_ROOT_NOT_DECLARED",
                            "phase3/librelane_switch.json pdk_root_host or "

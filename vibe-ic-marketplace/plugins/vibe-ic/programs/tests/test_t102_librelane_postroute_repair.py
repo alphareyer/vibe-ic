@@ -7,6 +7,7 @@ of a LibreLane step) is replaced by a writer of the step folders a real run
 leaves (`state_out.json` with the tool's metric names, the repair step's DEF).
 """
 import importlib
+from types import SimpleNamespace
 import json
 import os
 import re
@@ -877,3 +878,34 @@ def test_the_route_hook_hands_on_the_adopted_database_and_keeps_the_base(tmp_pat
     assert runner.postroute_repair_after_route(
         project=project, pdk=pdk, image='img', pdk_root=tmp_path, sdc=base_def, deck='',
         route_state=route_state, route_views={}, route_drc=0, variant_arm=None) is None
+
+
+def test_the_class_default_route_resolves_the_pdk_like_every_other_step(tmp_path, monkeypatch):
+    """r4: with no switch file the route asks the contract's resolver for THIS
+    design's PDK and image (materialised from the image), as 15..20 and 32 do;
+    measured on spm: asking with no PDK/image refused LL_PDK_ROOT_NOT_DECLARED."""
+    import test_librelane_route as tr
+    runner = tr.runner
+    project, out_dir, pnr_tcl = tr._route_project(tmp_path, {'steps': {'21': 'librelane'}})
+    (project / 'phase3/librelane_switch.json').unlink(missing_ok=True)
+
+    def docker(container, cmd, *a, **k):
+        for ext in ('odb', 'def', 'nl.v'):
+            write(out_dir / f'route_split/pre_route.{ext}', 'x\n')
+        return 0, '', ''
+    asked = {}
+
+    def resolver(*a, **k):
+        asked.update(args=a, kwargs=k)
+        return None
+    monkeypatch.setattr(runner, '_docker_exec', docker)
+    monkeypatch.setattr(runner, '_after_restore_tcl', lambda *a, **k: '')
+    monkeypatch.setattr(runner, '_container_mounts', lambda c: [])
+    monkeypatch.setattr(contract, 'resolve_pdk_root', resolver)
+    rc, out, _ = tr.route.execute(
+        runner, project=project, pdk=SimpleNamespace(name='pdkX'), container='c',
+        out_dir=out_dir, out_dir_c=str(out_dir), pnr_tcl=pnr_tcl, mode='librelane',
+        cmd=f'openroad {pnr_tcl} | tee {out_dir}/openroad.log', spare_plan=None,
+        exec_kwargs={})
+    assert asked['args'][:2] == (project, 'pdkX')
+    assert asked['kwargs']['image'] == contract.resolve_image(project)
