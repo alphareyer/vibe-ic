@@ -89,9 +89,14 @@ proc blk {method args} {
 set ::block blk
 
 foreach n {netA netB netC tie0 other} { mknet $n }
+# A supply net's straps are special wiring, never a dbWire; a pad net joined by
+# abutment needs none; `stub` is a net the INPUT already had unrouted.
 mknet VDD POWER 9
+set ::W(VDD) 0
 mknet pad_x SIGNAL 2 1
 set ::W(pad_x) 0
+mknet stub
+set ::W(stub) 0
 mkinst u1 other
 
 proc repair_antennas {args} {
@@ -124,7 +129,7 @@ set ::env(PL_MAX_DISPLACEMENT_Y) 100
 set ::env(STEP_DIR) [pwd]
 set ::vic_ant_before 0
 set ::vic_created [list]
-set ::vic_unrouted_before [dict create pad_x 1]
+set ::vic_unrouted_before [dict create stub 1]
 set ::vic_fillers 0
 '''
 
@@ -141,7 +146,11 @@ def run(tmp_path, unroutable=()):
     text = TCL.read_text()
     section = text[text.index(START):text.index(END)]
     script = (HARNESS + f'set ::UNROUTABLE {{{" ".join(unroutable)}}}\n'
-              + _script_procs(text) + section + 'puts "EXIT 0"\n')
+              + _script_procs(text)
+              # the input census, by the script's own instrument when it has one
+              + 'if {[llength [info commands vic_unrouted_nets]]} '
+                '{ set ::vic_unrouted_before [vic_unrouted_nets] }\n'
+              + section + 'puts "EXIT 0"\n')
     path = tmp_path / 'prr.tcl'
     path.write_text(script)
     return subprocess.run(['tclsh', str(path)], capture_output=True, text=True,
@@ -172,10 +181,13 @@ def test_a_route_the_candidate_cannot_hand_back_refuses_it(tmp_path):
 
 
 def test_a_net_the_input_already_lacked_is_not_the_candidates_loss(tmp_path):
-    """The pad net joined by abutment needs no wire; an input-unrouted net is
-    the input's, reported by the before/after counts, not refused here."""
+    """`stub` was unrouted in the INPUT: counted, not refused -- the input's
+    route is judged by step 21, not by this candidate. The pad net joined by
+    abutment and the supply net need no dbWire and are not counted at all."""
     out = run(tmp_path)
     assert out.returncode == 0, out.stdout + out.stderr
+    assert 'METRIC vibeic__prr__after__unrouted__count 1' in out.stdout, out.stdout
+    assert 'METRIC vibeic__prr__unrouted__added 0' in out.stdout
     assert 'pad_x' not in ' '.join(ln for ln in out.stdout.splitlines()
                                    if 'unrouted' in ln or 'ROUTED' in ln)
 
