@@ -171,6 +171,10 @@ def canonical_program_paths(programs_dir: Path) -> tuple[Path, ...]:
         programs_dir / "design_one_shot_runner.py",
         programs_dir / "phase3_one_shot_runner.py",
         programs_dir.parent / "flow" / "phase1_phase2_phase3.yaml",
+        # llv1 W2: the flow-mode record and the LibreLane contract decide
+        # what a flagged span runs, so they are part of the program identity.
+        programs_dir / "_impl_flow.py",
+        programs_dir / "librelane_contract.py",
     )
 
 
