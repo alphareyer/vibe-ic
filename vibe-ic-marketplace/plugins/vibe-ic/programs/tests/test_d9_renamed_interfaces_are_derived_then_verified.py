@@ -814,3 +814,142 @@ def test_an_open_range_token_leaves_the_check_not_measured(tmp_path, capsys):
     assert not any(n.startswith("o_memory_waddr") for n in
                    res["nets_without_side"] + list(res["nets_on_two_sides"]))
     assert mf["renamed_interfaces_check"]["verdict"] == "NOT_MEASURED"
+
+
+# --------------------------------------------------------------------------- #
+# REVIEW WAVE 6: an unknown bit extent is never a definite verdict
+# --------------------------------------------------------------------------- #
+_MACRO_STATUS_RTL = (lambda impl: "`define STATUS_W 4\n" + _verilog(impl).replace(
+    "[3:0] o_status", "[`STATUS_W-1:0] o_status"))
+
+
+def _rtl_width_unreadable(proj, impl, rewrite):
+    v = proj / "input/vendor_rtl/core.v"
+    v.write_text(rewrite(impl))
+    import renamed_interface_derive as RID
+    widths = {p["name"]: p["width"] for p in RID._rtl_top_ports(proj, "core")[1]}
+    return widths
+
+
+def test_an_rtl_width_the_header_cannot_state_takes_the_l9_width(
+        tmp_path, capsys):
+    """RED on ed2d863c7 (reviewer scen2, the Wishbone `sel` shape). The RTL
+    says `[DW/8-1:0]`, which the header reader cannot state; it was expanded
+    as ONE scalar net, so a port the document places in full (`[3:0]`) was a
+    FAIL and a "placement gap in the document". 15.5ic places by L9's width."""
+    impl = IMPL + [_p("o_status_sel", "output", True, 4)]
+    doc = (_GROUP_ROWS + "| **East (E)** | `clk` / `rst` |\n"
+           "| **West (W)** | `o_status` / `o_status_sel[3:0]` |\n")
+    proj = _project(tmp_path, impl=impl, doc=doc)
+    widths = _rtl_width_unreadable(proj, impl, lambda i: _verilog(i).replace(
+        "module core (", "module core #(parameter DW = 32) (").replace(
+        "[3:0] o_status_sel", "[DW/8-1:0] o_status_sel"))
+    assert widths["o_status_sel"] is None, widths      # the premise
+    mf = _emit(proj)
+    assert "o_status_sel" not in {u["port"] for u in
+                                  mf["renamed_interfaces_derivation"]["unresolved"]}
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (0, "PASS"), res
+    assert res["widths_from_l9"] == {"o_status_sel": 4}
+
+
+def test_a_macro_width_placed_in_full_is_not_a_document_gap(tmp_path, capsys):
+    """RED on ed2d863c7 (reviewer scenU): `[`STATUS_W-1:0]`, and the document
+    places all four bits on W."""
+    doc = _GROUP_ROWS + ("| **East (E)** | `clk` / `rst` |\n"
+                         "| **West (W)** | `o_status[3:0]` |\n")
+    proj = _project(tmp_path, impl=_IMPL_STATUS4, doc=doc)
+    assert _rtl_width_unreadable(proj, _IMPL_STATUS4,
+                                 _MACRO_STATUS_RTL)["o_status"] is None
+    mf = _emit(proj)
+    assert all("placement gap" not in u["reason"] for u in
+               mf["renamed_interfaces_derivation"]["unresolved"])
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (0, "PASS"), res
+
+
+def test_a_macro_width_on_two_sides_is_not_a_pass(tmp_path, capsys):
+    """RED on ed2d863c7 (reviewer scenV, rc 0 PASS). An exact row puts
+    o_status[3:0] on E and the group row `status pin(s)` puts o_status on W:
+    15.5ic refuses PORT_ON_TWO_SIDES."""
+    import _l_doc_pad_placement as LPP
+    doc = _GROUP_ROWS + ("| **East (E)** | `clk` / `rst` / `o_status[3:0]` |\n"
+                         "| **West (W)** | status pin(s) |\n")
+    proj = _project(tmp_path, impl=_IMPL_STATUS4, doc=doc)
+    _rtl_width_unreadable(proj, _IMPL_STATUS4, _MACRO_STATUS_RTL)
+    _emit(proj)
+    assert LPP.derive_own_ring(proj, _IMPL_STATUS4)["nets_on_two_sides"]
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (1, "FAIL"), res
+    assert res["nets_on_two_sides"] == {f"o_status[{b}]": ["E", "W"]
+                                        for b in range(4)}
+
+
+def test_a_width_nobody_states_is_not_measured_never_a_gap(tmp_path, capsys):
+    """RED on ed2d863c7. Neither the RTL header nor L9 states a number, so the
+    bits cannot be counted: NOT_MEASURED rc 3 with the port named, never a
+    FAIL that blames the document."""
+    doc = _GROUP_ROWS + ("| **East (E)** | `clk` / `rst` |\n"
+                         "| **West (W)** | `o_status[3:0]` |\n")
+    proj = _project(tmp_path, impl=_IMPL_STATUS4, doc=doc)
+    _rtl_width_unreadable(proj, _IMPL_STATUS4, _MACRO_STATUS_RTL)
+    spec = proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    l9 = json.loads(spec.read_text())
+    for q in l9["top_ports"]:
+        if q["name"] == "o_status":
+            q["width"] = "`STATUS_W"
+    spec.write_text(json.dumps(l9))
+    mf = _emit(proj)
+    assert all("placement gap" not in u["reason"] for u in
+               mf["renamed_interfaces_derivation"]["unresolved"])
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (3, "NOT_MEASURED"), res
+    assert res["unresolved_width_ports"] == ["o_status"]
+
+
+def test_an_open_range_token_split_is_not_measured_not_fail(tmp_path, capsys):
+    """RED on ed2d863c7 (reviewer scen (b): rc 1, nets on two sides). E names
+    `o_status[SW-1:2]` with SW undeclared and W names `o_status[1:0]`. Which
+    bits E means is unknown, so the overlap is not a defect yet."""
+    doc = (_GROUP_ROWS + "| **East (E)** | `clk` / `rst` / `o_status[SW-1:2]` |\n"
+           "| **West (W)** | `o_status[1:0]` |\n")
+    proj = _project(tmp_path, impl=_IMPL_STATUS4, doc=doc)
+    _emit(proj)
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (3, "NOT_MEASURED"), res
+    assert res["nets_on_two_sides"] == {} and res["nets_without_side"] == []
+    # declare SW and the same layout is decided: a legal split, PASS
+    declared = proj / "input/docs/L3_external_interface.md"
+    declared.write_text(declared.read_text() + "\n## Parameters\n\n| Parameter "
+                        "| Default |\n|---|---|\n| `SW` | 4 |\n")
+    _emit(proj)
+    rc, res = _check(proj, capsys)
+    assert (rc, res["verdict"]) == (0, "PASS"), res
+
+
+@pytest.mark.parametrize("rows,verdict", [
+    ("| **East (E)** | `clk` / `rst` |\n| **West (W)** | status pin(s) |\n",
+     "PASS"),
+    ("| **East (E)** | `clk` / `rst` |\n", None),
+], ids=["whole-port-one-side", "no-row-for-it"])
+def test_a_port_placed_whole_needs_no_width(tmp_path, capsys, rows, verdict):
+    """The paired half of 'a width nobody states': a group row places a port
+    WHOLE, so its answer does not depend on the width. One whole-port side is
+    PASS. The second id keeps the no-side case a FAIL whatever the width."""
+    doc = _GROUP_ROWS + rows
+    proj = _project(tmp_path, impl=_IMPL_STATUS4, doc=doc)
+    _rtl_width_unreadable(proj, _IMPL_STATUS4, _MACRO_STATUS_RTL)
+    spec = proj / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    l9 = json.loads(spec.read_text())
+    for q in l9["top_ports"]:
+        if q["name"] == "o_status":
+            q["width"] = "`STATUS_W"
+    spec.write_text(json.dumps(l9))
+    _emit(proj)
+    rc, res = _check(proj, capsys)
+    assert res["unresolved_width_ports"] == ["o_status"]
+    if verdict == "PASS":
+        assert (rc, res["verdict"]) == (0, "PASS"), res
+    else:
+        assert (rc, res["verdict"]) == (1, "FAIL"), res
+        assert "o_status" in res["nets_without_side"]

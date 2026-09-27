@@ -61,9 +61,12 @@ Exit codes (`--check`): 0 every implemented bit net ends on EXACTLY ONE side
 (directly, or by a verified pair), 1 a pair is refused, a net has no side, or a
 net sits on two sides (what 15.5ic refuses as PORT_WITHOUT_A_SIDE /
 PORT_ON_TWO_SIDES), 2 the question does not arise (no reused-IP manifest, no
-pad placement with group rows, or no readable port list), 3 NOT_MEASURED: a
-design document could not be read, so the placement is unknown. Each with its
-reason.
+pad placement with group rows, or no readable port list), 3 NOT_MEASURED: an
+extent the check cannot know, and no definite defect -- a design document that
+could not be read, a placement token whose bit range does not resolve from a
+declared parameter, or a port whose width neither its RTL header nor L9 states
+(an RTL width the header cannot state takes L9's, which 15.5ic places by).
+Each with its reason.
 
 chip-AGNOSTIC: identifiers come from the design's own documents and RTL only.
 """
@@ -241,7 +244,7 @@ def _direction(port: Dict[str, Any]) -> str:
 
 def _net_sides(placement, params: Dict[str, int],
                impl_ports: List[Dict[str, Any]],
-               renames: "List[Tuple[set, set]]" = ()) -> Dict[str, Set[str]]:
+               renames: "List[Tuple[set, set]]" = (), *, split: bool = False):
     """Side(s) of every bit net, placed the way step 15.5ic places them.
 
     Exact rows are expanded one pad per bit (`expand_side_ports`); group rows
@@ -249,26 +252,74 @@ def _net_sides(placement, params: Dict[str, int],
     ``renames``, of each paired rtl port). The one addition is an exact token
     whose bit range did not resolve (`o_x[AW-1:0]`, AW undeclared): it still
     names its port, so every bit of that port takes that side. Pairing `o_x`
-    onto another side would put it on two once AW is declared."""
+    onto another side would put it on two once AW is declared.
+
+    Those open-token sides are a claim about WHICH bits nobody can yet state,
+    so with ``split`` they come back apart, as ``(definite, open)``, and a
+    check can keep them out of its FAIL sets. Without ``split``, one merged
+    map (a port is placed either way)."""
     nets_of = {str(p["name"]): LPP.bit_names(p) for p in impl_ports}
-    sides: Dict[str, Set[str]] = {}
+    definite: Dict[str, Set[str]] = {}
+    from_open: Dict[str, Set[str]] = {}
     exact, unresolved = LPP.expand_side_ports(placement, params)
     for side, nets in exact.items():
         for net in nets:
-            sides.setdefault(net, set()).add(side)
+            definite.setdefault(net, set()).add(side)
     open_tokens = set(unresolved)
     for side, tokens in placement.side_signals.items():
         for token in tokens:
             m = _BASE_NAME.match(str(token))
             if token in open_tokens and m:
                 for net in nets_of.get(m.group(1), [m.group(1)]):
-                    sides.setdefault(net, set()).add(side)
+                    from_open.setdefault(net, set()).add(side)
     _grouped, records = LPP.resolve_declared_pad_groups(
         placement, impl_ports, renames=list(renames))
     for r in records:
         for net in r["resolved_nets"]:
-            sides.setdefault(net, set()).add(r["side"])
-    return sides
+            definite.setdefault(net, set()).add(r["side"])
+    if split:
+        return definite, from_open
+    merged = {n: set(s) for n, s in definite.items()}
+    for n, s in from_open.items():
+        merged.setdefault(n, set()).update(s)
+    return merged
+
+
+def _countable_ports(impl_ports: List[Dict[str, Any]],
+                     l9_ports: List[Dict[str, Any]]
+                     ) -> Tuple[List[Dict[str, Any]], Dict[str, int], List[str]]:
+    """(ports whose bits can be counted, widths taken from L9, ports nobody can
+    count).
+
+    AN UNREADABLE WIDTH NEVER BECOMES A NUMBER. The header reader returns no
+    width for a range it cannot state exactly (`[DW/8-1:0]`, a `` `define ``),
+    and `bit_names` would then make the port ONE scalar net, so that a port
+    the document places in full reads as unplaced. 15.5ic places by L9's width,
+    so a literal L9 width is used for the bits, and recorded. A port neither
+    states is returned in the third list: its bits are not counted, and the
+    caller says NOT_MEASURED rather than guess (the same rule step 2 follows:
+    an unreadable width is UNDECIDED)."""
+    l9_by_name = {str(p.get("name")): p for p in l9_ports if isinstance(p, dict)}
+    out: List[Dict[str, Any]] = []
+    from_l9: Dict[str, int] = {}
+    unknown: List[str] = []
+    for p in impl_ports:
+        if LPP._port_width(p) is not None:
+            out.append(p)
+            continue
+        name = str(p["name"])
+        l9 = l9_by_name.get(name) or {}
+        width = LPP._port_width(l9)
+        if width is None:
+            unknown.append(name)
+            out.append(p)
+            continue
+        q = dict(p, width=width)
+        if isinstance(l9.get("msb"), int) and isinstance(l9.get("lsb"), int):
+            q["msb"], q["lsb"] = l9["msb"], l9["lsb"]
+        out.append(q)
+        from_l9[name] = width
+    return out, from_l9, sorted(unknown)
 
 
 def _named_on(placement) -> Dict[str, Set[str]]:
@@ -282,9 +333,13 @@ def _named_on(placement) -> Dict[str, Set[str]]:
     return named
 
 
-def _document_sides(placement, params, impl_ports) -> Dict[str, Dict[str, Any]]:
+def _document_sides(placement, params, impl_ports,
+                    uncountable: "Tuple[str, ...] | List[str]" = ()
+                    ) -> Dict[str, Dict[str, Any]]:
     """Per implemented port: the sides the document gives it by itself (no
-    pair), and which of its bit nets got one."""
+    pair), and which of its bit nets got one. ``impl_ports`` carry countable
+    widths (`_countable_ports`); a port in ``uncountable`` is marked, so no
+    caller turns its unknown bit extent into a gap."""
     net_sides = _net_sides(placement, params, impl_ports)
     named = _named_on(placement)
     out: Dict[str, Dict[str, Any]] = {}
@@ -296,6 +351,7 @@ def _document_sides(placement, params, impl_ports) -> Dict[str, Dict[str, Any]]:
             "nets": nets, "placed_nets": placed,
             "sides": sorted({s for n in placed for s in net_sides[n]}
                             | named.get(name, set())),
+            "countable": name not in uncountable,
         }
     return out
 
@@ -312,7 +368,8 @@ def derive(project: Path) -> Dict[str, Any]:
     implemented = {str(p["name"]) for p in impl_ports}
     by_name = {str(p["name"]): p for p in l9_ports}
 
-    direct = _document_sides(placement, params, impl_ports)
+    counted, _from_l9, uncountable = _countable_ports(impl_ports, l9_ports)
+    direct = _document_sides(placement, params, counted, uncountable)
     unplaced = [n for n in sorted(implemented) if not direct[n]["sides"]]
 
     # Document ports the implemented core does not carry, each on the ONE
@@ -366,7 +423,7 @@ def derive(project: Path) -> Dict[str, Any]:
     for u in sorted(implemented):
         rec = direct[u]
         missing = [n for n in rec["nets"] if n not in rec["placed_nets"]]
-        if rec["sides"] and missing:
+        if rec["sides"] and missing and rec["countable"]:
             unresolved.append({
                 "port": u, "family_atoms": sorted(_atoms(u)),
                 "candidate_sides": rec["sides"], "candidate_doc_ports": [],
@@ -475,7 +532,8 @@ def verify(project: Path, pairs: List[Dict[str, Any]], *,
     impl_ports, _src = _implemented_ports(project, top, l9_ports)
     implemented = {str(p["name"]) for p in impl_ports}
     l9_names = {str(p["name"]) for p in l9_ports}
-    direct = _document_sides(placement, params, impl_ports)
+    counted, _from_l9, uncountable = _countable_ports(impl_ports, l9_ports)
+    direct = _document_sides(placement, params, counted, uncountable)
     from l9_rtl_pin_consistency_check import (_MANIFEST_RENAME_KEYS,
                                               _manifest_renamed_groups)
     # The parser reads only the rename keys; `derived_pad_pairs` entries are
@@ -542,7 +600,18 @@ def check(project: Path, pairs: Any,
     derivation). Every pair is verified, and the VERIFIED ones are applied the
     way 15.5ic applies them (`resolve_declared_pad_groups`, one pad per bit).
     A net with no side is PORT_WITHOUT_A_SIDE at 15.5ic; a net on two sides is
-    PORT_ON_TWO_SIDES."""
+    PORT_ON_TWO_SIDES.
+
+    AN UNKNOWN BIT EXTENT IS NEVER A DEFINITE VERDICT. Two things are unknown,
+    and neither enters the FAIL sets. Either one, with no definite defect,
+    makes the answer NOT_MEASURED (rc 3), never PASS:
+      * which bits an open-range token names (`o_x[SW-1:2]`, SW undeclared).
+        Its sides are kept apart (`_net_sides(split=True)`); a net is "on two
+        sides" only on two DEFINITE sides, and a net an open token reaches is
+        not "without a side";
+      * how many bits a port has, when neither its RTL header nor L9 states a
+        number (`_countable_ports`). Its bits are not counted. A port with no
+        side at all is still FAIL: that holds whatever its width."""
     d = d if d is not None else derive(project)
     if derived is None:
         derived = d["pairs"]
@@ -554,32 +623,67 @@ def check(project: Path, pairs: Any,
     top, l9_ports = _l9(project)
     placement, params = _placement(project)
     impl_ports, _src = _implemented_ports(project, top, l9_ports)
+    counted, from_l9, uncountable = _countable_ports(impl_ports, l9_ports)
     renames = [(set(v["pair"]["l9"]), set(v["pair"]["rtl"]))
                for v in authored_v + derived_v if v["verdict"] == "VERIFIED"]
-    net_sides = _net_sides(placement, params, impl_ports, renames)
-    nets = [n for p in impl_ports for n in LPP.bit_names(p)]
-    without = [n for n in nets if not net_sides.get(n)]
-    two = {n: sorted(net_sides[n]) for n in nets if len(net_sides.get(n, ())) > 1}
-    ports_without = [str(p["name"]) for p in impl_ports
-                     if any(n in without for n in LPP.bit_names(p))]
+    definite, from_open = _net_sides(placement, params, counted, renames,
+                                     split=True)
+    named = _named_on(placement)
+    nets = [n for p in counted if str(p["name"]) not in uncountable
+            for n in LPP.bit_names(p)]
+    without = [n for n in nets if not definite.get(n) and not from_open.get(n)]
+    # a port whose bits cannot be counted is still "without a side" when
+    # nothing places it at all -- that holds whatever its width is
+    without += [n for n in uncountable
+                if not definite.get(n) and not from_open.get(n)
+                and not named.get(n)]
+    two = {n: sorted(definite[n]) for n in nets if len(definite.get(n, ())) > 1}
+    # A group row or a pair places a port WHOLE, so for a port whose bits
+    # cannot be counted that answer holds whatever its width: one whole-port
+    # side is placed, two are on two sides. Only an exact row naming SOME of its
+    # bits leaves the extent open.
+    whole_only: List[str] = []
+    for n in uncountable:
+        if n in without or named.get(n) or from_open.get(n):
+            continue
+        whole = definite.get(n) or set()
+        if len(whole) > 1:
+            two[n] = sorted(whole)
+        whole_only.append(n)
+    ports_without = sorted({str(p["name"]) for p in counted
+                            if any(n in without for n in LPP.bit_names(p))}
+                           | {n for n in uncountable if n in without})
     refused = [v for v in authored_v + derived_v if v["verdict"] == "REFUSED"]
     # A token whose bit range does not resolve is PARTITION_UNRESOLVED at
     # 15.5ic and UNDECIDED at step 2: which bit lands where is unknown, so
-    # absent a definite defect the answer is NOT_MEASURED, never PASS.
+    # absent a definite defect the answer is NOT_MEASURED, never PASS. The
+    # same holds for a port whose bits nobody can count.
     _exact, open_tokens = LPP.expand_side_ports(placement, params)
+    open_width = [n for n in uncountable
+                  if n not in without and n not in whole_only]
+    unknown = open_tokens or open_width
     verdict = ("FAIL" if refused or without or two
-               else "NOT_MEASURED" if open_tokens else "PASS")
+               else "NOT_MEASURED" if unknown else "PASS")
     res = {"verdict": verdict,
            "pairs": authored_v, "derived_pairs": derived_v,
            "nets_without_side": without, "nets_on_two_sides": two,
-           "unpaired_implemented_ports": sorted(ports_without),
-           "unresolved_tokens": sorted(open_tokens), "derivation": d}
+           "unpaired_implemented_ports": ports_without,
+           "unresolved_tokens": sorted(open_tokens),
+           "unresolved_width_ports": sorted(uncountable),
+           "widths_from_l9": dict(sorted(from_l9.items())), "derivation": d}
     if verdict == "NOT_MEASURED":
-        res["reason"] = (f"the placement names token(s) whose bit range does "
-                         f"not resolve from a declared parameter "
-                         f"{sorted(open_tokens)} (15.5ic refuses "
-                         f"PARTITION_UNRESOLVED): which bit lands on which side "
-                         f"cannot be measured")
+        why = []
+        if open_tokens:
+            why.append(f"the placement names token(s) whose bit range does not "
+                       f"resolve from a declared parameter "
+                       f"{sorted(open_tokens)} (15.5ic refuses "
+                       f"PARTITION_UNRESOLVED)")
+        if open_width:
+            why.append(f"neither the RTL header nor L9 states a width for "
+                       f"{open_width}, and an exact row names some of its "
+                       f"bits")
+        res["reason"] = ("; ".join(why) + ": which bit lands on which side "
+                         "cannot be measured")
     return res
 
 
@@ -645,7 +749,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="verify the pairs the pad side reads (authored under "
                          "every rename key, and derived); rc 1 on a refused "
                          "pair, a bit net with no side, or a net on two sides; "
-                         "rc 3 when a design document could not be read")
+                         "rc 3 NOT_MEASURED when a design document could not "
+                         "be read, a placement token's bit range does not "
+                         "resolve, or a port's width is stated nowhere")
     ap.add_argument("--json", help="write the result here (atomic)")
     a = ap.parse_args(argv)
     project = Path(a.project).resolve()
