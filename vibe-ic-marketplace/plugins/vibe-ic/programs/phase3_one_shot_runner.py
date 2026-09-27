@@ -41171,12 +41171,33 @@ def _snap_dbu(v):
     return int(round(float(v) / grid_dbu)) * grid_dbu
 
 
+def _drop_child_texts():
+    """Clear the texts of every NON-top cell, in THIS working layout only.
+
+    Called immediately before a flatten and nowhere else: a flatten copies a
+    child's shapes into the top, so a library cell's pin label would become a
+    TOP-LEVEL label and an extraction with top_lvl_pins would promote every
+    labelled top net to a formal pin -- measured on spm, `.SUBCKT chip_top`
+    with 5,655 pins and collided names (`A|AB$17`) instead of the 38 the DEF
+    declares. In a GDS that KEEPS its hierarchy the same labels are the
+    library's pin definitions and must stay in their cells."""
+    _top_ids = set(c.cell_index() for c in ly.top_cells())
+    for cell in ly.each_cell():
+        if cell.cell_index() in _top_ids:
+            continue
+        for li in ly.layer_indexes():
+            cell.shapes(li).clear(pya.Shapes.STexts)
+
+
 def _snap_local_shapes():
     """Snap every cell's LOCAL geometry vertices to the grid."""
     n = 0
-    _top_ids = set(c.cell_index() for c in ly.top_cells())
-    for ci in range(ly.cells()):
-        cell = ly.cell(ci)
+    # LIVE cells only. The exotic-transform fallback below flattens with
+    # prune and then calls this again; a pruned cell leaves a hole in the
+    # index range, and `ly.cell(i)` for every i < ly.cells() then raises
+    # "Not a valid cell index" -- the whole snap died and the runner kept
+    # the un-snapped GDS (found by the N6 fallback test).
+    for cell in list(ly.each_cell()):
         # pya.Region carries POLYGONS ONLY, so the Region/clear/insert trip
         # below DESTROYS every text shape on the layer. Those texts are the
         # DEF PIN labels -- the only thing naming a top port -- so after this
@@ -41186,24 +41207,24 @@ def _snap_local_shapes():
         # image against a 4-pin DEF: streamout emits VDD/VNW/VPW/VSS, this
         # pass returns 0 of them.
         #
-        # Only the TOP cell's OWN texts are carried across. A child cell's
-        # texts are the foundry library's internal pin names; the layer-merge
-        # pass flattens the hierarchy, so a preserved child label becomes a
-        # TOP-LEVEL label and an extraction with top_lvl_pins promotes every
-        # labelled top net to a formal pin -- measured on spm, that gave
-        # `.SUBCKT chip_top` 5,655 pins with collided names (`A|AB$17`)
-        # instead of the 38 the DEF declares. Child texts were already dropped
-        # here before this repair, so leaving them dropped is not a
-        # regression. No polygon, grid, layer map or device content changes.
-        _keep_texts = cell.cell_index() in _top_ids
+        # EVERY cell's texts are carried across, not only the top's. A
+        # library cell's texts are its PIN LABELS: the foundry GDS names each
+        # pin there, and an extraction of the shipped GDS reads them to know
+        # which node of a cell is which pin. Carrying only the top's shipped
+        # std cells with ZERO labels (spm x gf180mcuD, N6: the Magic stream
+        # labelled 31 of 31 masters, this pass left 0 of 31) and an external
+        # Magic+Netgen LVS failed pin matching in every cell. The pollution
+        # the top-only rule was written against happens only when a FLATTEN
+        # lifts child texts into the top, so it is prevented at the flatten
+        # (`_drop_child_texts`, below and in the layer merge), not here.
+        # No polygon, grid, layer map or device content changes.
         for li in ly.layer_indexes():
             sh = cell.shapes(li)
             if sh.is_empty():
                 continue
             # Text VALUES, taken BEFORE clear(): a Shape handle read after
             # sh.clear() aborts the interpreter.
-            _texts = ([s_.text for s_ in sh.each() if s_.is_text()]
-                      if _keep_texts else [])
+            _texts = [s_.text for s_ in sh.each() if s_.is_text()]
             reg = pya.Region(sh)
             reg.snap(grid_dbu, grid_dbu)
             sh.clear()
@@ -41269,6 +41290,7 @@ for ci in range(ly.cells()):
 #     mag-1) case so hierarchy + memory are preserved.
 flattened = 0
 if nonorthogonal > 0:
+    _drop_child_texts()
     for tc in ly.top_cells():
         tc.flatten(-1, True)
         flattened += 1
@@ -41392,6 +41414,15 @@ if _ring_masters and _ring_ref_out:
 # on the top cell's own shapes.
 _keep_hier = os.environ.get("KEEP_HIERARCHY") == "1"
 if not _keep_hier:
+    # A library cell's pin labels belong to the CELL. The flatten would copy
+    # them into the top, where top_lvl_pins promotes every labelled net to a
+    # formal pin (5,655 on spm). So a flattened GDS carries only the top's own
+    # texts; a hierarchical one (KEEP_HIERARCHY=1) keeps every cell's labels.
+    _top_ids = set(c.cell_index() for c in ly.top_cells())
+    for ci in range(ly.cells()):
+        if ci not in _top_ids:
+            for li in ly.layer_indexes():
+                ly.cell(ci).shapes(li).clear(pya.Shapes.STexts)
     for tc in ly.top_cells():
         tc.flatten(-1, True)
 print("GDS_LAYER_MERGE_HIERARCHY %s" % ("kept" if _keep_hier else "flattened"))
