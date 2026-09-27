@@ -1107,8 +1107,41 @@ def parse_metrics_json(path) -> ParseOutcome:
             continue
         o.records.append(_record(metric, "MEASURED", unit, _scope(stage), src,
                                  value=value))
+    _via_singlecut_fraction(o, trail, source)
     o.note("METRICS_JSON_UNMAPPED_KEYS", count=len(unmapped), keys=unmapped)
     return o
+
+
+def _via_singlecut_fraction(o: "ParseOutcome", trail: Dict[str, List[Any]],
+                            source: Dict[str, Any]) -> None:
+    """The single-cut via fraction, DERIVED from the router's own two counts in
+    the SAME document (review row 35: a per-arm yield figure). DERIVED, so it
+    discloses and never enters a comparison; the comparable yield objective is
+    the MEASURED multi-cut count (`pareto.VIA_YIELD_OBJECTIVE`)."""
+    keys = ("detailedroute__route__vias__singlecut",
+            "detailedroute__route__vias__multicut")
+    values = [(trail.get(k) or [None])[-1] for k in keys]
+    if any(v is None for v in values):
+        return
+    src = dict(source)
+    src["key"] = list(keys)
+    src["selection"] = "last"
+    if any(not isinstance(v, int) or isinstance(v, bool) or v < 0 for v in values):
+        o.records.append(_record(
+            "route.via.singlecut.fraction", "INVALID", "1", _scope("detailed_route"),
+            src, reason=f"NON_COUNT: {dict(zip(keys, values))}"))
+        return
+    single, multi = values
+    if single + multi == 0:
+        o.records.append(_record(
+            "route.via.singlecut.fraction", "NOT_MEASURED", "1",
+            _scope("detailed_route"), src,
+            reason="NO_VIAS: the router counted no via, so there is no fraction"))
+        return
+    o.records.append(_record(
+        "route.via.singlecut.fraction", "DERIVED", "1", _scope("detailed_route"), src,
+        value=single / (single + multi),
+        formula=f"{keys[0]} / ({keys[0]} + {keys[1]}), same document"))
 
 
 def _apply_declared_authority(o: "ParseOutcome") -> None:

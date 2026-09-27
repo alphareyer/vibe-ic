@@ -119,6 +119,16 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "librelane_fill_dfm::lef_geometry":
+        "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
+        "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "
+        "installed LibreLane resolved them, read for two statements only: "
+        "`SIZE <w> BY <h> ;` and `CLASS <word>`, anchored at line start. Both "
+        "fields are numbers or one keyword, so no denial can be spelled, and a "
+        "master or site with no SIZE is not given one: every placed instance of "
+        "it makes `row_occupancy` NOT_MEASURED instead of a number. Falsifier: "
+        "tests/test_mig104_fill_dfm.py::test_the_not_prose_claim_for_the_lef_"
+        "reader_is_falsifiable.",
     "achieved_period_recorded_check::tool_setup_slack":
         "ONE OPENSTA RECORD. `worst slack max <v>` is report_worst_slack's fixed "
         "output inside a STAPostPNR corner report (the step-23 extra corner Tcl "

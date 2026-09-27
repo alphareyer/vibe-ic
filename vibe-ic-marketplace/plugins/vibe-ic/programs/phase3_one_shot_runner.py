@@ -47587,20 +47587,30 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         "die_finishing (in place) (phase3_one_shot_runner step_gds)",
         lambda: _die_finishing(project, top, pdk, gds_out,
                                             container))
-        # Per-layer density fill BEFORE the density checks / sign-off DRC read
-        # this GDS. Config-gated + NONFATAL; the note always discloses.
-        dfill_ok, dfill_note = _declared_transform_exec(project, gds_out, "gds:density_metal_fill", "klayout",
-        "density_metal_fill (in place) (phase3_one_shot_runner step_gds)",
-        lambda: _density_metal_fill(project, top, pdk, gds_out, container))
-        # DIE-WIDE fill by the PDK's own generator, LAST of the fill passes
-        # and still before the density checks / sign-off DRC read this GDS.
-        # The pass above measures and fills the streamed geometry's BOUNDING
-        # BOX; a foundry minimum-density rule is written over the entire DIE,
-        # and on a slot submission those are different rectangles. NONFATAL.
-        ddfill_ok, ddfill_note = _declared_transform_exec(project, gds_out, "gds:die_density_fill", "klayout",
-        "die_density_fill (in place) (phase3_one_shot_runner step_gds)",
-        lambda: _die_density_fill(project, top, pdk, gds_out,
-                                                   container))
+        # Step 34 on LibreLane (mig104): the tool arm fills a snapshot of the
+        # sealed stream; `librelane` skips the two direct passes below, `dual`
+        # runs both and `_step34_gds_ship` measures and selects.
+        _t34 = _step34_gds_tool_arm(project, pdk, gds_out)
+        if _t34 is None or _t34["mode"] == "dual":
+            # Per-layer density fill BEFORE the density checks / sign-off DRC read
+            # this GDS. Config-gated + NONFATAL; the note always discloses.
+            dfill_ok, dfill_note = _declared_transform_exec(project, gds_out, "gds:density_metal_fill", "klayout",
+            "density_metal_fill (in place) (phase3_one_shot_runner step_gds)",
+            lambda: _density_metal_fill(project, top, pdk, gds_out, container))
+            # DIE-WIDE fill by the PDK's own generator, LAST of the fill passes
+            # and still before the density checks / sign-off DRC read this GDS.
+            # The pass above measures and fills the streamed geometry's BOUNDING
+            # BOX; a foundry minimum-density rule is written over the entire DIE,
+            # and on a slot submission those are different rectangles. NONFATAL.
+            ddfill_ok, ddfill_note = _declared_transform_exec(project, gds_out, "gds:die_density_fill", "klayout",
+            "die_density_fill (in place) (phase3_one_shot_runner step_gds)",
+            lambda: _die_density_fill(project, top, pdk, gds_out,
+                                                       container))
+        else:
+            dfill_ok, dfill_note = ddfill_ok, ddfill_note = (False, _t34["not_run"])
+        if _t34 is not None:
+            dfill_ok, dfill_note = _step34_gds_ship(project, gds_out, _t34,
+                                                    (dfill_ok, dfill_note))
         # vibe-ic#613 — the port-label restore is a POST-streamout pass over the
         # finished GDS, so it belongs on BOTH engines. Gating it on the KLayout
         # path alone would have made "which streamout ran" decide whether a
@@ -47853,6 +47863,11 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     seal_ok, seal_note = _declared_transform_exec(project, gds_out, "gds:die_finishing", "klayout",
         "die_finishing (in place) (phase3_one_shot_runner step_gds)",
         lambda: _die_finishing(project, top, pdk, gds_out, container))
+    # Step 34 on LibreLane (mig104): the tool arm fills a snapshot of the
+    # sealed stream; `librelane` skips the three direct passes below, `dual`
+    # runs both and `_step34_gds_ship` measures and selects.
+    _t34 = _step34_gds_tool_arm(project, pdk, gds_out)
+    _t34_direct = _t34 is None or _t34["mode"] == "dual"
     # v1.3.83 — config-driven dummy-METAL fill AFTER merge, BEFORE the
     # sign-off DRC consumes this GDS (the deck's own density + spacing +
     # wide-metal rules then verify the fill honestly — no rule is waived).
@@ -47860,24 +47875,30 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         "dummy_fill (in place) (phase3_one_shot_runner step_gds)",
         lambda: _klayout_dummy_fill(project, top, pdk, container,
                                                gds_out)))
-                          if pdk.dummy_fill else
-                          (False, "no dummy_fill config"))
+                          if pdk.dummy_fill and _t34_direct else
+                          (False, "no dummy_fill config" if _t34_direct
+                           else _t34["not_run"]))
     # Per-layer DENSITY-TARGETED fill: measures each layer's worst density
     # window and tops it up to the foundry target, after the fixed dummy-fill
     # PATTERN above and before the density checks / sign-off DRC consume this
     # GDS. Config-gated + NONFATAL; the note always discloses the outcome.
-    dfill_ok, dfill_note = _declared_transform_exec(project, gds_out, "gds:density_metal_fill", "klayout",
+    dfill_ok, dfill_note = (_declared_transform_exec(project, gds_out, "gds:density_metal_fill", "klayout",
         "density_metal_fill (in place) (phase3_one_shot_runner step_gds)",
         lambda: _density_metal_fill(project, top, pdk, gds_out, container))
+        if _t34_direct else (False, _t34["not_run"]))
     # DIE-WIDE fill by the PDK's own generator, LAST of the fill passes and
     # still before the density checks / sign-off DRC read this GDS. The pass
     # above measures and fills the streamed geometry's BOUNDING BOX; a foundry
     # minimum-density rule is written over the entire DIE, and on a slot
     # submission those are different rectangles. NONFATAL, always disclosed.
-    ddfill_ok, ddfill_note = _declared_transform_exec(project, gds_out, "gds:die_density_fill", "klayout",
+    ddfill_ok, ddfill_note = (_declared_transform_exec(project, gds_out, "gds:die_density_fill", "klayout",
         "die_density_fill (in place) (phase3_one_shot_runner step_gds)",
         lambda: _die_density_fill(project, top, pdk, gds_out,
                                                container))
+        if _t34_direct else (False, _t34["not_run"]))
+    if _t34 is not None:
+        dfill_ok, dfill_note = _step34_gds_ship(project, gds_out, _t34,
+                                                (dfill_ok, dfill_note))
     # v1.3.91 — restore top PORT text labels + VDD/VSS rail markers LAST (after
     # merge/heal/fill so the labels/markers land on the final geometry): makes
     # the KLayout-streamed GDS LVS-able by the geometric extractor. Config-gated
@@ -55470,6 +55491,13 @@ def _signoff_gate_env(program: str, extra_argv: tuple, out_rel: str):
     return env
 
 
+#: Final-layout gates whose producer uses rc 1 for a MEASURED ADVISORY tier and
+#: names it in its document's `verdict` (flow step 35 declares
+#: `dfm_screen_check` a program output, not a gate: its advisory never FAILs
+#: the step). Row name -> the advisory verdict word the document carries.
+_ADVISORY_TIER_SIGNOFF_GATES = {"dfm_screen": "PASS_WITH_ADVISORIES"}
+
+
 def _run_declared_signoff_gate(project: Path, name: str, program: str,
                                out_rel: str,
                                extra_argv: tuple = ()) -> StepResult:
@@ -55538,6 +55566,21 @@ def _run_declared_signoff_gate(project: Path, name: str, program: str,
     if cp.returncode == 0:
         return StepResult(name, "PASS", time.time() - t0, detail, outputs)
     if cp.returncode == 1:
+        # An ADVISORY producer's rc 1 is a measured advisory, not a refusal
+        # (T77: spm final14 FAILed step 35 on a DFM screen whose own document
+        # said PASS_WITH_ADVISORIES, 0 errors). Its document decides; an
+        # absent, malformed or any other verdict still takes the FAIL path.
+        advisory = _ADVISORY_TIER_SIGNOFF_GATES.get(name)
+        if advisory and out_json.is_file():
+            try:
+                verdict = json.loads(out_json.read_text()).get("verdict")
+            except (OSError, ValueError, AttributeError):
+                verdict = None
+            if verdict == advisory:
+                return StepResult(name, "PASS", time.time() - t0,
+                                  f"ADVISORY ({verdict}): {detail}", outputs,
+                                  extras={"advisory_verdict": verdict},
+                                  disclosures=[_V.Disclosure.ADVISORY.value])
         return StepResult(name, "FAIL", time.time() - t0, detail, outputs)
     # rc 2 carries two meanings and BOTH are non-verdicts (`_gate_invocation`):
     # the gate could not read its inputs, or the caller invoked it wrongly.
@@ -69287,7 +69330,7 @@ def _v0_3_9_parse_row_utilization(log: str):
 
 def _emit_metal_fill(project: Path, top: str, pdk: PdkConfig,
                      container: str, filled_def: Path,
-                     notes: List[str]) -> bool:
+                     notes: List[str], *, _direct_arm: bool = False) -> bool:
     """OpenROAD filler_placement metal-fill stage (Step 34).
 
     Runs `filler_placement <fill masters>` on the routed DEF and writes
@@ -69295,7 +69338,13 @@ def _emit_metal_fill(project: Path, top: str, pdk: PdkConfig,
     from report_design_area. ECO-aware: spares are dont_touch in the routed
     DEF and filler_placement never removes placed instances, so spares
     survive. chip-AGNOSTIC — fill masters come from _filler_masters_for_pdk.
-    Best-effort. Returns True if filled.def was produced."""
+    Best-effort. Returns True if filled.def was produced.
+
+    Step 34 on LibreLane (`phase3/librelane_switch.json` "34", mig104): a
+    non-direct switch hands the step to `_step34_odb_half`, which calls back
+    here with `_direct_arm=True` for the direct arm of `dual`."""
+    if not _direct_arm and _step34_mode(project) != "direct":
+        return _step34_odb_half(project, top, pdk, container, filled_def, notes)
     pnr_out = _pl.pnr_dir(project)
     def_file = pnr_out / f"{top}.def"
     if not def_file.is_file():
@@ -69325,6 +69374,17 @@ def _emit_metal_fill(project: Path, top: str, pdk: PdkConfig,
     # the sparse threshold. chip-AGNOSTIC.
     sparse_fill_block = _build_sparse_die_aware_filler_tcl(
         fillers, slot_pinned_core=_slot_geometry(project) is not None)
+    # TF24 FOR THE FILL (mig104). `filler_placement` creates instances, and
+    # the PDN's `add_global_connection` rules are session state a DEF does not
+    # carry: this session never had them, so every decap/filler it placed kept
+    # its supply pins on no net. MEASURED (spm x gf180mcuD, 0.3.79, this
+    # producer on run23's own inputs): 274,148 of 304,990 supply pins of the
+    # filled.def it wrote on no net. The rules are the PnR deck's own
+    # (`_pg_global_connect_reassert_tcl`), registered after `read_def` and
+    # applied after the last insertion; the DEF is then judged by
+    # `pg_supply_pin_ownership_check` before it may stand as filled.def.
+    pg_rules_tcl = _pg_global_connect_reassert_tcl(_pnr_deck_pg_rules_text(pnr_out))
+    pg_apply_tcl = _postroute_pg_apply_tcl("METAL_FILL")
     tcl_path = out_dir / f"metal_fill_{top}.tcl"
     tcl_path.write_text(f"""
 read_lef {tech_lef_c}
@@ -69332,6 +69392,7 @@ read_lef {cell_lef_c}
 {macro_lefs_tcl}
 read_liberty {liberty_c}
 read_def {def_c}
+{pg_rules_tcl}
 puts "=== DESIGN AREA (pre-fill) ==="
 report_design_area
 # ECO-aware fill: filler_placement only ADDS filler instances into row
@@ -69382,7 +69443,7 @@ if {{[catch {{
 }} _rowerr]}} {{
   puts "ROW_UTILIZATION_PCT NA ($_rowerr)"
 }}
-write_def {filled_c}
+{pg_apply_tcl}write_def {filled_c}
 exit
 """)
     tcl_c = _to_container_path(str(tcl_path), container)
@@ -69396,6 +69457,20 @@ exit
     if not filled_def.is_file() or filled_def.stat().st_size == 0:
         notes.append(f"metal fill: filled.def not produced (rc={rc})")
         return False
+    # A filled DEF with a supply pin PROVEN off its net does not stand: it is
+    # kept beside, by name, and the step has no filled.def (TF24's refusal).
+    # NOT_MEASURED (a master no readable LEF defines) is published, never
+    # called clean, and does not refuse -- the post-route sites' rule.
+    _pgo = _postroute_pg_ownership_verdict(project, filled_def, pdk, container,
+                                           "metal_fill")
+    if _pgo.get("verdict") == "FAIL":
+        refused = filled_def.with_name("filled.pg_refused.def")
+        os.replace(filled_def, refused)
+        (pnr_out / "metal_fill.done").unlink(missing_ok=True)
+        notes.append(f"metal fill REFUSED ({refused.name}): {_pgo.get('reason')}")
+        return False
+    notes.append(f"metal fill supply ownership: {_pgo.get('verdict')} "
+                 f"({_pgo.get('reason')})")
     # Parse "Placed N filler instances" + utilization for the density report.
     placed_m = re.search(r"Placed\s+(\d+)\s+filler instances", log, re.I)
     placed_n = int(placed_m.group(1)) if placed_m else 0
@@ -69507,6 +69582,167 @@ exit
         f"metal fill: {placed_n} fillers placed → filled.def "
         f"({filled_def.stat().st_size} B)")
     return True
+
+
+# ---------------------------------------------------------------------------
+# Step 34 on LibreLane (`phase3/librelane_switch.json` "34"; mig104).
+#
+# ODB half: `OpenROAD.FillInsertion` on the ODB of the route that ships, its
+# DEF handed back as filled.def with the same density.{json,rpt} and done
+# marker the direct producer writes (`librelane_fill_dfm.
+# write_direct_schema_reports`), so `metal_fill_density_check`,
+# `spare_cell_preservation_check` and every other filled.def consumer judge
+# the TOOL's output unchanged. GDS half: `KLayout.Filler` -> `KLayout.Density`
+# -> `Checker.KLayoutDensity` after the seal ring (the Chip flow's order), in
+# place of the direct GDS fill passes. `dual` runs both arms and measures both
+# with the same PDK density deck; the lower count ships and a tie keeps the
+# direct arm. Every arm's evidence is in `librelane_fill_dfm.RECORD_REL`, and
+# `metal_fill_density_check` judges it; a refusal names itself, nothing falls
+# back.
+# ---------------------------------------------------------------------------
+
+def _step34_mode(project: Path) -> str:
+    from librelane_contract import selected_mode
+    return selected_mode(project, "34")
+
+
+def _step34_odb_half(project: Path, top: str, pdk: PdkConfig, container: str,
+                     filled_def: Path, notes: List[str]) -> bool:
+    """Step 34's ODB half on `OpenROAD.FillInsertion` (`librelane`), or both
+    arms (`dual`: the direct arm is `_emit_metal_fill` itself). Feasible =
+    produced, with no supply pin proven off its net; a tie keeps the direct
+    arm. Returns True when filled.def was produced."""
+    import librelane_contract as _llc
+    import librelane_fill_dfm as _lf
+    mode = _step34_mode(project)
+    pnr = _pl.pnr_dir(project)
+    routed = pnr / f"{top}.def"
+    arms = project / "phase3/tool_arms/34"
+    arms.mkdir(parents=True, exist_ok=True)
+    doc: Dict[str, Any] = {"mode": mode, "def_sha256": _sha256_file(routed)}
+    direct_ok, direct_pg = False, None
+    if mode == "dual":
+        direct_ok = _emit_metal_fill(project, top, pdk, container, filled_def,
+                                     notes, _direct_arm=True)
+        try:
+            direct_pg = json.loads((_pl.reports_phase3_dir(project) /
+                                    "postroute_pg_ownership_metal_fill.json").read_text())
+        except (OSError, ValueError):
+            direct_pg = None
+        doc["direct"] = {
+            "produced": direct_ok,
+            "filled_def_sha256": (_sha256_file(filled_def)
+                                  if direct_ok and filled_def.is_file() else None),
+            "supply_ownership": {k: (direct_pg or {}).get(k)
+                                 for k in ("verdict", "reason", "off_supply_pins")}}
+    else:
+        for stale in (filled_def, pnr / "metal_fill.done"):
+            stale.unlink(missing_ok=True)
+    tool: Optional[Dict[str, Any]] = None
+    try:
+        image, root = _librelane_step_ctx(project, "34", pdk.name)
+        tool = _lf.run_fill_insertion(project, image, root, pdk.name, routed_def=routed,
+                                      netlist=pnr / f"{top}_pnr.v",
+                                      sdc=pnr / "constraint.sdc")
+        _aa.write_json(project / _lf.CELLS_REL, _lf.cells_placed_record(tool))
+    except Exception as exc:  # a refusal names itself; nothing falls back
+        doc["refusal"] = str(exc)
+    doc["tool"] = tool
+    tool_ok = tool is not None and not tool.get("refusals")
+    if mode == "librelane":
+        ship = "librelane" if tool_ok else None
+    else:
+        feasible = {"direct": direct_ok and (direct_pg or {}).get("verdict") != "FAIL",
+                    "librelane": tool_ok}
+        ship = ("direct" if feasible["direct"] else
+                "librelane" if feasible["librelane"] else None)
+        doc["selection"] = {"feasible": feasible, "winner": ship,
+                            "rule": "feasible arms; a tie keeps the direct arm"}
+    doc["shipped"] = ship
+    if ship == "librelane":
+        _llc.handoff_to_direct(Path(tool["state"]), {"def": filled_def},
+                               arms / "odb_handoff.json")
+        _subject = _measured_subject(
+            project, top, [routed, filled_def],
+            tool_log=Path(tool["state"]).parent / "openroad-fillinsertion.log")
+        _lf.write_direct_schema_reports(project, tool, _subject,
+                                        _measured_subject_lines(_subject))
+        notes.append(f"metal fill (LibreLane OpenROAD.FillInsertion, {mode}): "
+                     f"{tool['census']['added']} cells placed "
+                     f"{tool['census']['per_class']}; supply ownership "
+                     f"{tool['supply_ownership'].get('verdict')}")
+    elif mode == "librelane":
+        notes.append("metal fill on LibreLane REFUSED: "
+                     + "; ".join((tool or {}).get("refusals")
+                                 or [str(doc.get("refusal"))]))
+    _lf.update_record(project, "odb", doc)
+    return ship is not None and filled_def.is_file()
+
+
+def _step34_gds_tool_arm(project: Path, pdk: PdkConfig,
+                         gds_out: Path) -> Optional[Dict[str, Any]]:
+    """Step 34's GDS tool arm on a snapshot of the sealed, unfilled stream:
+    `KLayout.Filler`, measured by the PDK density deck. None when the
+    step's switch is `direct` (the caller's own passes run unchanged)."""
+    mode = _step34_mode(project)
+    if mode == "direct":
+        return None
+    import librelane_fill_dfm as _lf
+    arms = project / "phase3/tool_arms/34"
+    arms.mkdir(parents=True, exist_ok=True)
+    prefill = arms / "prefill.gds"
+    shutil.copyfile(gds_out, prefill)
+    ctx: Dict[str, Any] = {"mode": mode, "pdk": pdk.name, "image": None,
+                           "root": None, "tool": None,
+                           "not_run": "not run: step 34's GDS fill is LibreLane KLayout.Filler",
+                           "doc": {"mode": mode, "prefill_sha256": _sha256_file(prefill)}}
+    try:
+        ctx["image"], ctx["root"] = _librelane_step_ctx(project, "34", pdk.name)
+        ctx["tool"] = _lf.run_density(project, ctx["image"], ctx["root"], pdk.name,
+                                      gds=prefill, lane="34-fill",
+                                      steps=_lf.GDS_FILL_STEPS)
+    except Exception as exc:  # a refusal names itself; nothing falls back
+        ctx["doc"]["tool_refusal"] = str(exc)
+    return ctx
+
+
+def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
+                     direct_fill: Tuple[bool, str]) -> Tuple[bool, str]:
+    """Decide which step-34 GDS fill ships, record both arms, and return the
+    (ok, note) the stream-out discloses for its density-fill slot. `dual`
+    measures the direct fill already in `gds_out` with the same deck."""
+    import librelane_fill_dfm as _lf
+    doc, tool = ctx["doc"], ctx["tool"]
+    direct = None
+    if ctx["mode"] == "dual":
+        try:
+            if ctx["image"] is None:
+                raise RuntimeError(doc.get("tool_refusal") or "no LibreLane image")
+            snap = project / "phase3/tool_arms/34/direct.filled.gds"
+            shutil.copyfile(gds_out, snap)
+            direct = _lf.run_density(project, ctx["image"], ctx["root"], ctx["pdk"],
+                                     gds=snap, lane="34-direct-density")
+        except Exception as exc:
+            doc["direct_refusal"] = str(exc)
+        doc["selection"] = _lf.select_gds_fill(project, direct, tool)
+        shipped = doc["selection"].get("winner") or "direct"
+    else:
+        shipped = "librelane" if tool else None
+    result = direct_fill
+    if shipped == "librelane" and tool:
+        filled = Path(tool["filler"]["filled_gds"])
+        _declared_transform_exec(project, gds_out, "gds:librelane_filler", "klayout",
+            "KLayout.Filler (LibreLane) (phase3_one_shot_runner step_gds)",
+            lambda: shutil.copyfile(filled, gds_out))
+        result = (True, f"LibreLane KLayout.Filler ({tool['filler']['script']}); PDK "
+                        f"density deck: {tool[_lf.DENSITY_METRIC]} error(s) "
+                        f"{tool.get('rules')}")
+    elif ctx["mode"] == "librelane":
+        result = (False, f"LibreLane KLayout.Filler REFUSED: {doc.get('tool_refusal')}")
+    doc.update({"shipped": shipped, "direct": direct, "librelane": tool,
+                "shipped_sha256": _sha256_file(gds_out) if shipped else None})
+    _lf.update_record(project, "gds", doc)
+    return result
 
 
 # ===========================================================================
