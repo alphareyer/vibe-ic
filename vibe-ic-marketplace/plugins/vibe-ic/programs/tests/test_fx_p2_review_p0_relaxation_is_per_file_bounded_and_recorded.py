@@ -172,15 +172,17 @@ def test_every_invocation_carries_a_deadline_and_kills_its_container(
     monkeypatch.setattr(F.shutil, "which",
                         lambda t: "/usr/bin/docker" if t == "docker" else None)
     monkeypatch.setattr(F.subprocess, "run", _run)
-    monkeypatch.setenv(F.DEADLINE_ENV, "7")
+    monkeypatch.setenv(getattr(F, "DEADLINE_ENV",
+                               "VIBEIC_P0_FRONTEND_TIMEOUT_S"), "7")
     try:
         F._invoke("yosys", ["-p", "x"], tmp_path, "img@sha256:" + "0" * 64)
     except subprocess.TimeoutExpired:
         pass
     else:
         raise AssertionError("a run past its deadline must not return")
+    assert seen[0][1] == 7, seen          # the run carried the deadline
+    assert len(seen) == 2, seen           # and its container was killed
     run, kill = seen
-    assert run[1] == 7
     name = run[0][run[0].index("--name") + 1]
     assert kill[0] == ["docker", "kill", name] and kill[1]
 
