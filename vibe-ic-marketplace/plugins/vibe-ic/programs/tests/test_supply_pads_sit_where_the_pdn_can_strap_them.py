@@ -222,6 +222,21 @@ def test_without_layer_directions_the_rule_is_not_claimed(
     assert "routing-layer" in plan["edge_reach"]["reason"]
 
 
+def test_a_pin_layer_with_no_stated_direction_is_not_judged(
+        tmp_path, monkeypatch):
+    """The tech LEF states a direction for `lh` only. The supply cells face
+    the core on `lv`, so no edge is REACHED or UNREACHED: it is not known."""
+    project, root = _tree(tmp_path, face_layer="lv")
+    rec = _produce(project, root, monkeypatch,
+                   tech_lef=TECH_LEF.replace("  DIRECTION VERTICAL ;\n", ""))
+    plan = rec["power_pad_plan"]
+    assert plan["placement_side"] == "W"
+    reach = plan.get("edge_reach", {})
+    assert reach.get("reached_sides") == []
+    assert {s: reach["sides"][s]["verdict"] for s in "SENW"} == {
+        s: "NOT_DETERMINED" for s in "SENW"}
+
+
 def test_an_edge_must_be_reached_by_every_cell_of_the_pair(
         tmp_path, monkeypatch):
     """The power cell reaches only the columns and the ground cell only the
