@@ -1338,41 +1338,61 @@ def test_expand_globs_glob_zero_matches_dropped(tmp_path):
 # pre-tapeout / digital-only projects to FAIL the canonical-flow
 # audit on those steps despite having legitimate skip-conditions.
 
-def test_unclassified_rc2_is_incomplete(tmp_path):
+@pytest.fixture
+def helper_programs_dir(tmp_path_factory, monkeypatch):
+    """A PRIVATE programs dir that `_resolve_program_cmd` resolves names in.
+
+    These tests used to plant their one-off helper programs in the SHIPPED
+    programs/ and unlink them in a `finally`, so every concurrent xdist worker
+    that lists programs/*.py saw `_pytest_*_helper.py` appear and vanish (the
+    race that failed `test_upstream_mirror_is_pinned` with FileNotFoundError on
+    8HD-8, 2026-09-28). The shadow holds a symlink to every real entry of
+    programs/, so every other `PROGRAMS_DIR` lookup the checker makes reads the
+    same bytes, and the helper is a real file there and nowhere else. It is
+    still reached BY NAME through the real resolver."""
+    import programs.flow_compliance_check as _fcc
+    real = Path(_fcc.PROGRAMS_DIR)
+    shadow = tmp_path_factory.mktemp("programs_shadow")
+    for entry in real.iterdir():
+        (shadow / entry.name).symlink_to(entry)
+    monkeypatch.setattr(_fcc, "PROGRAMS_DIR", shadow)
+    return shadow
+
+
+def _plant_helper(programs_dir, name, src):
+    assert Path(programs_dir).resolve() != (
+        Path(__file__).resolve().parent.parent), (
+        "refusing to plant a helper program in the shipped programs/")
+    helper = Path(programs_dir) / f"{name}.py"
+    assert not helper.exists(), helper
+    helper.write_text(src)
+    return helper
+
+
+def test_unclassified_rc2_is_incomplete(tmp_path, helper_programs_dir):
     """An rc-2 token without a typed absence basis is not a free N/A."""
     from programs.flow_compliance_check import (
         _check_program_exit_zero,
         _VACUOUS_HINT_PREFIX,
-        PROGRAMS_DIR,
     )
     # Plant a one-off helper program that exits 2.
-    helper = PROGRAMS_DIR / "_pytest_rc2_helper.py"
-    helper.write_text(
-        "import sys; print('verdict: SKIP'); sys.exit(2)\n"
-    )
-    try:
-        passed, snippet = _check_program_exit_zero(tmp_path, "_pytest_rc2_helper")
-        assert passed is True, "INCOMPLETE is not a manufactured design FAIL"
-        assert snippet.startswith("INCOMPLETE:"), snippet
-        assert not snippet.startswith(_VACUOUS_HINT_PREFIX)
-    finally:
-        helper.unlink(missing_ok=True)
+    _plant_helper(helper_programs_dir, "_pytest_rc2_helper",
+                  "import sys; print('verdict: SKIP'); sys.exit(2)\n")
+    passed, snippet = _check_program_exit_zero(tmp_path, "_pytest_rc2_helper")
+    assert passed is True, "INCOMPLETE is not a manufactured design FAIL"
+    assert snippet.startswith("INCOMPLETE:"), snippet
+    assert not snippet.startswith(_VACUOUS_HINT_PREFIX)
 
 
-def test_check_program_exit_zero_rc1_still_fails(tmp_path):
+def test_check_program_exit_zero_rc1_still_fails(tmp_path, helper_programs_dir):
     """rc=1 must still register as FAIL — the rc=2 carve-out doesn't
     affect rc=1 semantics."""
-    from programs.flow_compliance_check import (
-        _check_program_exit_zero, PROGRAMS_DIR,
-    )
-    helper = PROGRAMS_DIR / "_pytest_rc1_helper.py"
-    helper.write_text("import sys; print('FAIL: bad'); sys.exit(1)\n")
-    try:
-        passed, snippet = _check_program_exit_zero(tmp_path, "_pytest_rc1_helper")
-        assert passed is False
-        assert "FAIL: bad" in snippet
-    finally:
-        helper.unlink(missing_ok=True)
+    from programs.flow_compliance_check import _check_program_exit_zero
+    _plant_helper(helper_programs_dir, "_pytest_rc1_helper",
+                  "import sys; print('FAIL: bad'); sys.exit(1)\n")
+    passed, snippet = _check_program_exit_zero(tmp_path, "_pytest_rc1_helper")
+    assert passed is False
+    assert "FAIL: bad" in snippet
 
 
 # ─── CRASH vs VERDICT: the distinction must not depend on the path ────
@@ -1441,19 +1461,19 @@ def _deep_project(tmp_path):
     return deep
 
 
-def _run_helper(name, src, project):
-    from programs.flow_compliance_check import (
-        _check_program_exit_zero, PROGRAMS_DIR,
-    )
-    helper = PROGRAMS_DIR / f"{name}.py"
-    helper.write_text(src)
+def _run_helper(name, src, project, programs_dir):
+    """Plant `src` as program `name` in the PRIVATE `programs_dir` (the
+    `helper_programs_dir` fixture) and run it through the real checker."""
+    from programs.flow_compliance_check import _check_program_exit_zero
+    helper = _plant_helper(programs_dir, name, src)
     try:
         return _check_program_exit_zero(project, f"{name} .")
     finally:
         helper.unlink(missing_ok=True)
 
 
-def test_crash_is_flagged_as_a_crash_at_any_checkout_depth(tmp_path):
+def test_crash_is_flagged_as_a_crash_at_any_checkout_depth(
+        tmp_path, helper_programs_dir):
     """An unhandled exception is disclosed as one, short path or deep."""
     from programs.flow_compliance_check import (
         _CRASH_HINT_PREFIX, _OUTPUT_SNIPPET_CHARS, looks_like_python_traceback,
@@ -1469,7 +1489,8 @@ def test_crash_is_flagged_as_a_crash_at_any_checkout_depth(tmp_path):
     results = {}
     for label, project in (("shallow", shallow), ("deep", deep)):
         passed, snippet = _run_helper("_pytest_crash_helper",
-                                      _CRASH_HELPER_SRC, project)
+                                      _CRASH_HELPER_SRC, project,
+                                      helper_programs_dir)
         assert passed is False, f"{label}: a crash must not be a PASS"
         assert snippet.startswith(_CRASH_HINT_PREFIX), (
             f"{label} (path {len(str(project))} chars): the crash carries no "
@@ -1513,7 +1534,8 @@ _INDENTED_THEN_COL0_ERROR_SRC = (
 )
 
 
-def test_a_real_verdict_is_not_mistaken_for_a_crash(tmp_path):
+def test_a_real_verdict_is_not_mistaken_for_a_crash(
+        tmp_path, helper_programs_dir):
     """rc 1 with a substantive finding is never DISCLOSED as a crash.
 
     Three helpers, each built to trip a careless crash detector: one prints an
@@ -1562,12 +1584,14 @@ def test_a_real_verdict_is_not_mistaken_for_a_crash(tmp_path):
         f"would fail for the host's temp root rather than for the detector")
     deep = _deep_project(tmp_path)
     try:
-        _assert_a_real_verdict_is_not_a_crash(shallow, deep, _CRASH_HINT_PREFIX)
+        _assert_a_real_verdict_is_not_a_crash(shallow, deep, _CRASH_HINT_PREFIX,
+                                              helper_programs_dir)
     finally:
         shutil.rmtree(shallow, ignore_errors=True)
 
 
-def _assert_a_real_verdict_is_not_a_crash(shallow, deep, _CRASH_HINT_PREFIX):
+def _assert_a_real_verdict_is_not_a_crash(shallow, deep, _CRASH_HINT_PREFIX,
+                                          helper_programs_dir):
 
     for name, src, marker in (
         ("_pytest_verdict_helper", _VERDICT_HELPER_SRC, "verdict: FAIL"),
@@ -1577,7 +1601,8 @@ def _assert_a_real_verdict_is_not_a_crash(shallow, deep, _CRASH_HINT_PREFIX):
          "verdict: FAIL"),
     ):
         for label, project in (("shallow", shallow), ("deep", deep)):
-            passed, snippet = _run_helper(name, src, project)
+            passed, snippet = _run_helper(name, src, project,
+                                          helper_programs_dir)
             assert passed is False, f"{name}/{label}: rc 1 must stay a FAIL"
             assert not snippet.startswith(_CRASH_HINT_PREFIX), (
                 f"{name}/{label}: a real verdict was disclosed as a CRASH, "
@@ -1686,7 +1711,7 @@ def test_the_snippet_is_additive_and_names_what_it_dropped():
         f"nothing was elided, so nothing may claim it was: {short!r}")
 
 
-def test_rc0_and_rc2_are_not_misread_as_crashes(tmp_path):
+def test_rc0_and_rc2_are_not_misread_as_crashes(tmp_path, helper_programs_dir):
     """The crash branch sits AFTER the PASS / vacuous / waiver arms.
 
     A gate that exits 0 or 2 has reached a verdict; printing traceback-shaped
@@ -1704,7 +1729,7 @@ def test_rc0_and_rc2_are_not_misread_as_crashes(tmp_path):
         "sys.exit(0)\n"
     )
     passed, snippet = _run_helper("_pytest_noisy_pass_helper", noisy_pass,
-                                  tmp_path)
+                                  tmp_path, helper_programs_dir)
     assert passed is True, "rc 0 must stay a PASS"
     assert not snippet.startswith(_CRASH_HINT_PREFIX)
 
@@ -1715,7 +1740,7 @@ def test_rc0_and_rc2_are_not_misread_as_crashes(tmp_path):
         "sys.exit(2)\n"
     )
     passed, snippet = _run_helper("_pytest_noisy_skip_helper", noisy_skip,
-                                  tmp_path)
+                                  tmp_path, helper_programs_dir)
     assert passed is True, "rc 2 must not become a manufactured design FAIL"
     assert snippet.startswith("INCOMPLETE:")
     assert not snippet.startswith(_CRASH_HINT_PREFIX)

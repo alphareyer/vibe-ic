@@ -290,11 +290,40 @@ def test_the_tag_pattern_matches_the_consumers(tmp_path):
 # reason: killing a healthy item because a wall-clock estimate was crossed is a false
 # differential. Removing the mark without also removing the real census would restore
 # the session abort.
+#: Run INSIDE the private checkout: the program is imported from the checkout's
+#: own programs/, because its writers are bound to the location of the module
+#: that runs them (`HERE`, `REPO`, `INDEX`, `GEN_INDEX`), not to `repo`.
+_PREPARE_IN_CHECKOUT = (
+    "import json, sys\n"
+    "from pathlib import Path\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import gatekeeper_prepare_landing as G\n"
+    "repo = Path(sys.argv[2])\n"
+    "rc, notes, declared = G.prepare(repo, do_commit=False)\n"
+    "print(json.dumps({'rc': rc, 'rc_ok': G.RC_OK, 'notes': notes,\n"
+    "                  'declared': declared, 'here': str(G.HERE),\n"
+    "                  'dirty': sorted(G.dirty_paths(repo))}))\n")
+
+
 @pytest.mark.timeout(0)
-def test_the_real_program_runs_against_this_repo_and_honours_its_boundary():
+def test_the_real_program_runs_against_this_repo_and_honours_its_boundary(
+        tmp_path):
     """Driven against the REAL tree with the REAL writers, because a fixture
     that only ever exercises stand-ins would not notice the day a writer starts
-    scribbling outside what it declares."""
+    scribbling outside what it declares.
+
+    ON A PRIVATE CHECKOUT OF THIS COMMIT, never on the shared one. It used to
+    prepare the checkout the suite was running in: on any tip without a
+    `[vX.Y.Z]` tag it BUMPED the version in plugin.json, both marketplace
+    manifests and the READMEs, regenerated programs/INDEX.md, and then
+    `git checkout --` them back. Every concurrent worker that read one of those
+    files in between saw a version nobody assigned (or a truncated file), and
+    any other test's in-flight write to a tracked file was swept into this
+    test's boundary check and reverted by its `finally`. `suite_write_guard`
+    saw none of it: the writes were undone before its snapshot.
+
+    A `--shared` clone detached at the same commit is the same tree, byte for
+    byte, because this test only runs when the real tree is clean."""
     # <repo>/vibe-ic-marketplace/plugins/vibe-ic/programs -> parents[3] is <repo>.
     # Spelled by INDEX so a wrong count cannot make this test skip silently:
     # the first version of this line was `.parent.parent.parent`, one short,
@@ -305,16 +334,31 @@ def test_the_real_program_runs_against_this_repo_and_honours_its_boundary():
         f"this test must RUN against the real tree, not skip past it")
     if G.dirty_paths(repo_root):
         pytest.skip("tree already dirty — this test needs a clean tree to attribute")
-    rc, notes, declared = G.prepare(repo_root, do_commit=False)
-    try:
-        assert rc == G.RC_OK, notes
-        assert any("boundary honoured" in n for n in notes), notes
-        for p in G.dirty_paths(repo_root):
-            assert p in declared, (p, declared)
-    finally:
-        subprocess.run(["git", "-C", str(repo_root), "checkout", "--",
-                        *(G.dirty_paths(repo_root) or ["."])],
-                       capture_output=True, text=True)
+    sha = subprocess.run(["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+                         capture_output=True, text=True, check=True
+                         ).stdout.strip()
+    checkout = tmp_path / "checkout"
+    for argv in (["git", "clone", "-q", "--shared", "--no-checkout",
+                  str(repo_root), str(checkout)],
+                 ["git", "-C", str(checkout), "checkout", "-q", "--detach",
+                  sha]):
+        r = subprocess.run(argv, capture_output=True, text=True)
+        assert r.returncode == 0, (argv, r.stderr)
+    assert not G.dirty_paths(checkout), "the private checkout is not clean"
+    programs = checkout / PROGRAMS.relative_to(repo_root)
+    r = _pr.run([sys.executable, "-c", _PREPARE_IN_CHECKOUT, str(programs),
+                 str(checkout)],
+                cwd=str(checkout), capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-2000:]
+    import json
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["here"] == str(programs.resolve()), (
+        "the program ran from somewhere other than the private checkout, so "
+        f"its writers were not the checkout's: {out['here']}")
+    assert out["rc"] == out["rc_ok"], out["notes"]
+    assert any("boundary honoured" in n for n in out["notes"]), out["notes"]
+    for p in out["dirty"]:
+        assert p in out["declared"], (p, out["declared"])
 
 
 # ---------------------------------------------------------------------------
