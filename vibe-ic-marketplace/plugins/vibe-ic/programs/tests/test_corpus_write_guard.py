@@ -324,11 +324,9 @@ def test_the_tracked_cells_are_still_reached():
         for _dep in ("_progress_run.py", "_watchdog.py",
                      "hygiene_finding_delta.py", "_atomic_artefact.py"):
             shutil.copy2(_CORPUS_LOCATION.parent / _dep, resolver / _dep)
-        # ONE routed-DEF cell per (design, pdk) -- vibe-ic#2011. The producer
-        # refuses two routed cells of one design on ONE pdk, and a cell whose
-        # version directory states no PDK (`v1` alone) has no identity at all,
-        # so both planted cells carry `v<version>_<pdk>`. Two designs keep the
-        # planted count at two and stay legal.
+        # Identity is (design, pdk, version). A cell whose version directory
+        # states no PDK (`v1` alone) is refused; both planted cells therefore
+        # carry `v<version>_<pdk>`.
         for name in ("alpha", "beta"):
             cell = (clone
                     / f"benchmark-data/ic/fam_{name}/v1_openpdkx/phase3/stage3/pnr")

@@ -151,7 +151,7 @@ def _transition_subject(root: Path, *, activate: bool) -> Path:
           local def="$1" cell design
           cell="${{def%/phase3/stage3/pnr/routed.def}}"
           verdir="$(basename "$cell")"
-          design="$(basename "$(dirname "$cell")")/${{verdir#*_}}"
+          design="$(basename "$(dirname "$cell")")/${{verdir#*_}}/${{verdir%%_*}}"
           uncheckable_until 2027-02-28 "fixture has no macro LEF"
           run_tolerating_uncheckable "macro OBS not crossed ($design)" \
             "$PLUGIN" python3 programs/macro_obs_geometry_intersect_check.py "$cell"
@@ -657,16 +657,15 @@ def test_a_producer_that_claims_absence_and_prints_items_is_a_failure(tmp_path):
     assert label in [g["label"] for g in doc["gates"]]
 
 
-# --- vibe-ic#2011: a cell's gate-owner identity is (design, pdk) -------------
+# --- a cell's gate-owner identity is (design, pdk, version) -----------------
 #
 # The population used to be keyed by DESIGN. The first design published on two
 # PDKs (spm x sky130A + gf180mcuD, benchmark-data 5a92b920) made the producer
 # refuse the whole corpus UNDETERMINED -- correctly, because the four per-cell
 # labels carried the design alone and eight gates would have had four owners.
 # The corpus was right; the identity model was the defect. These tests pin the
-# migrated model in both directions: two PDKs are two cells with distinct
-# owners; two routed cells on ONE pdk, or a cell with no PDK at all, still
-# refuse -- by name, never as a silent duplicate or an invented identity.
+# migrated model in both directions: two PDKs and two versions on one PDK are
+# distinct owners; a cell with no PDK still refuses rather than inventing one.
 
 _PER_CELL_PREFIXES = ("macro OBS not crossed (", "DRC PASS is not vacuous (",
                       "inner FAILs reach the verdict (", "new tool diagnostic id (")
@@ -705,24 +704,25 @@ def test_one_design_on_two_pdks_is_two_cells_with_distinct_owners(tmp_path):
         "two cells of one design share a gate label -- duplicate owners, the "
         f"exact state the producer used to refuse the corpus over: {labels}")
     owners = {label[label.rindex("(") + 1:-1] for label in labels}
-    assert owners == {"logic/openpdkx", "logic/openpdky"}, owners
+    assert owners == {"logic/openpdkx/v1.2.3", "logic/openpdky/v1.5.0"}, owners
     assert not any(label.endswith("(logic)") for label in labels), (
         "the label still carries the design alone")
 
 
-def test_two_routed_cells_of_one_design_on_one_pdk_refuse_before_duplicate_owners(
+def test_two_versions_of_one_design_on_one_pdk_have_distinct_owners(
         tmp_path):
     external = _external(tmp_path)
-    _routed(external, "logic", "v1_openpdkx", tracked=True)
-    _routed(external, "logic", "v2_openpdkx", tracked=True)
+    on_v1 = _routed(external, "logic", "v1_openpdkx", tracked=True)
+    on_v2 = _routed(external, "logic", "v2_openpdkx", tracked=True)
 
     proc = _helper(str(external))
 
-    assert proc.returncode == 2, proc.stdout + proc.stderr
-    assert proc.stdout == ""
-    assert "two routed-DEF cells on the same PDK" in proc.stderr
-    assert "(logic/openpdkx)" in proc.stderr, "the refusal must name the pair"
-    assert "v1_openpdkx" in proc.stderr and "v2_openpdkx" in proc.stderr
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.splitlines() == sorted([str(on_v1), str(on_v2)])
+    labels = _shipped_list_labels(external)
+    assert len(labels) == len(set(labels)) == 8, labels
+    owners = {label[label.rindex("(") + 1:-1] for label in labels}
+    assert owners == {"logic/openpdkx/v1", "logic/openpdkx/v2"}, owners
 
 
 def test_a_cell_that_states_no_pdk_has_no_identity_and_is_refused(tmp_path):
@@ -772,9 +772,9 @@ def test_the_cell_identity_grammar_is_one_rule_in_two_languages():
     python = [H.routed_cell_identity("design", n) or "NONE" for n in cases]
     assert bash.stdout.splitlines() == python, list(
         zip(cases, bash.stdout.splitlines(), python))
-    assert python[:6] == ["design/gf180mcuD", "design/sky130A",
-                          "design/ihp-sg13g2", "design/a_b",
-                          "design/openpdkx", "design/x-y_z"]
+    assert python[:6] == ["design/gf180mcuD/v1.14.88", "design/sky130A/v1.5.65",
+                          "design/ihp-sg13g2/v1.5.58", "design/a_b/v3",
+                          "design/openpdkx/v1.2.3", "design/x-y_z/v10"]
     assert python[6:] == ["NONE"] * 6, (
         "a name with no PDK must be refused by BOTH spellings")
 
@@ -1595,7 +1595,7 @@ def _corpus_with_one_published_cell(tmp_path: Path) -> Path:
     Deliberately the same shape, so the ONLY difference between state B and
     state C is whether the population has a member. The version directory
     states a PDK because the gate-owner identity of a published cell is
-    (design, pdk) and the producer refuses a cell without one (vibe-ic#2011) —
+    (design, pdk, version) and the producer refuses a cell without one —
     measured: without it the producer answers UNDETERMINED, which would have
     made this "control" quietly re-measure state A.
     """

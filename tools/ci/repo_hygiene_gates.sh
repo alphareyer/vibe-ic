@@ -1326,14 +1326,14 @@ run "declaration scans strip comments"  "$ROOT" python3 "$PG/hdl_declaration_sca
 # repository-size cost, and that decision is not a side effect of making the
 # roll-up honest.
 #
-# THE CELL'S IDENTITY IN A LABEL IS (design, pdk), NOT design (vibe-ic#2011).
+# THE CELL'S IDENTITY IN A LABEL IS (design, pdk, version).
 # A published cell is `ic/<design>/v<version>_<pdk>/`, and the four labels
 # below used to carry `$(basename "$(dirname "$_cell")")` -- the DESIGN alone.
 # The first design published on two PDKs (spm x sky130A + gf180mcuD) would have
 # declared eight gates under four labels, two owners per identity, and the
 # producer refused the population outright rather than let that happen. The
-# label now carries `<design>/<pdk>`; the version stays OUT of it so a republish
-# on the same PDK is the same owner and anything keyed by label keeps meaning.
+# label now carries `<design>/<pdk>/v<version>`, so republished routed cells
+# on the same PDK retain distinct, auditable gate owners.
 #
 # ONE GRAMMAR, TWO LANGUAGES. `hygiene_finding_delta.routed_cell_identity`
 # owns this rule in Python (the producer's manifest and the landing judge both
@@ -1341,8 +1341,8 @@ run "declaration scans strip comments"  "$ROOT" python3 "$PG/hdl_declaration_sca
 # `test_the_cell_identity_grammar_is_one_rule_in_two_languages` pins the two
 # equal over the same inputs. The PDK is everything after the first `_` that
 # follows the dotted version, so `ihp-sg13g2` and a PDK carrying `_` survive.
-_ROUTED_CELL_GRAMMAR='^v[0-9]+(\.[0-9]+)*_(.+)$'
-# `_routed_cell_id <cell dir>` -> `<design>/<pdk>` on stdout, rc 1 (and no
+_ROUTED_CELL_GRAMMAR='^v([0-9]+(\.[0-9]+)*)_(.+)$'
+# `_routed_cell_id <cell dir>` -> `<design>/<pdk>/v<version>` on stdout, rc 1 (and no
 # output) when the version directory states no PDK. Pure, so it is safe to call
 # inside a label's `$( )`; the caller checks it ONCE in its own shell first so
 # a refusal reaches GATE_WIRING_ERRORS instead of dying inside a subshell.
@@ -1351,7 +1351,7 @@ _routed_cell_id() {
   _dir="$(basename "$1")"
   _design="$(basename "$(dirname "$1")")"
   [[ "$_dir" =~ $_ROUTED_CELL_GRAMMAR ]] || return 1
-  printf '%s/%s\n' "$_design" "${BASH_REMATCH[2]}"
+  printf '%s/%s/v%s\n' "$_design" "${BASH_REMATCH[3]}" "${BASH_REMATCH[1]}"
 }
 _per_published_cell_gates() {
   local _def="$1" _cell
@@ -1379,7 +1379,7 @@ _per_published_cell_gates() {
   # owner.
   if ! _routed_cell_id "$_cell" >/dev/null; then
     _gate_wiring_error "published cell $_cell states no PDK in its version \
-directory (expected v<version>_<pdk>); its (design, pdk) gate-owner identity \
+directory (expected v<version>_<pdk>); its (design, pdk, version) gate-owner identity \
 cannot be formed and its four per-cell gates were NOT declared (vibe-ic#2011)"
     return 0
   fi
@@ -1409,16 +1409,10 @@ cannot be formed and its four per-cell gates were NOT declared (vibe-ic#2011)"
   # Wired here rather than into a flow step because its argument IS a published
   # cell, so this loop is the one place the flow already hands it its subject.
   #
-  # `run_tolerating_uncheckable` is not a softening: the gate's own documented
-  # contract is rc 2 = NO_BASELINE, "no previous run; nothing compared", and on
-  # this corpus that is EVERY cell — no design carries two ROUTED cells of the
-  # same PDK (that is also the producer's identity rule, vibe-ic#2011), so
-  # `find_previous` has no earlier same-PDK run of the same design to compare
-  # against. rc 2 is therefore the expected answer today and must be LOUD and
-  # non-fatal; rc 1, a genuinely new diagnostic id, still fails the suite. The
-  # day an earlier same-PDK run is published beside a routed cell the
-  # comparison path becomes live without this line changing.
-  uncheckable_until 2027-02-28 "per published cell: the gate's own documented contract is rc 2 = NO_BASELINE, 'no previous run; nothing compared', and on this corpus that is EVERY cell — no design carries two cells of the same PDK, so find_previous has nothing to compare against. A genuinely new diagnostic id is still rc 1"
+  # rc 2 = NO_BASELINE remains possible for the earliest published version;
+  # later same-design, same-PDK versions are independently compared. rc 1,
+  # a genuinely new diagnostic id, still fails the suite.
+  uncheckable_until 2027-02-28 "per published cell: rc 2 = NO_BASELINE when no earlier same-design, same-PDK run exists; a genuinely new diagnostic id remains rc 1"
   run_tolerating_uncheckable "new tool diagnostic id ($(_routed_cell_id "$_cell"))" \
     "$PLUGIN" python3 programs/tool_diagnostic_id_gate.py "$_cell"
 }
