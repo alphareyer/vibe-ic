@@ -7447,24 +7447,70 @@ def _supplied_module_names(project: Path) -> set:
     return _module_names(_design_supplied_build_rtl(project))
 
 
-def _supplied_rtl_is_reused_ip(project: Path, staged: Sequence[Path]) -> bool:
-    """Is the supplied RTL REUSED IP (wrap it) rather than context RTL a task
-    modifies (start from it)? D10 review MAJOR 3.
+def _generated_tops(project: Path, rtl_dir: Path) -> set:
+    """The generator's own top: the L9 top when the generator emitted it,
+    else the ROOTS of the generated instantiation graph (defined, never
+    instantiated). Instantiations are read by the closure preflight's own
+    module-item parser."""
+    emitted = _emitted_modules(rtl_dir)
+    top, _files = _supplied_rtl_defining_declared_top(project)
+    if top and top in emitted:
+        return {top}
+    try:
+        import staged_rtl_closure_preflight as _pf
+        inst: set = set()
+        for f in rtl_dir.rglob("*"):
+            if f.is_file() and f.suffix in (".v", ".sv"):
+                inst |= {m for m, _ in _pf._instantiations(
+                    _pf._strip_comments(f.read_text(errors="replace")))}
+    except Exception:  # noqa: BLE001 — no graph: no top, so never "full"
+        return set()
+    return emitted - inst
 
-    Reused IP when it arrives under `input/vendor_rtl/` (the reused-IP input
-    root, #542/#732), or when the SOURCE_MANIFEST declares `reused_ip: true`
-    through the runner's own loader (`_is_reused_ip_project`) -- EXCEPT a
-    manifest that is only consume's own staging record
-    (`rtl_strategy: design_provided_rtl_plus_ai_glue`): consume writes that
-    for ANY supplied RTL, so on a re-run it would turn every completion /
-    functional-modification task's context RTL into "reused IP"."""
-    vendor = (project / "input" / "vendor_rtl").resolve()
-    for f in staged:
-        try:
-            f.resolve().relative_to(vendor)
-            return True
-        except ValueError:
+
+def _yield_generated_modules(project: Path, rtl_dir: Path,
+                             overlap: Sequence[str]) -> Dict[str, Any]:
+    """PARTIAL overlap: drop only the generated files that define a module
+    the input supplies. A dropped file that ALSO defined other modules takes
+    them with it; they are returned as `modules_now_owed`, never silently
+    lost. Returns the record (supplied file per replaced module)."""
+    supplied_by: Dict[str, str] = {}
+    for f in _design_supplied_build_rtl(project):
+        for m in sorted(_module_names([f])):
+            supplied_by.setdefault(m, str(f.relative_to(project)))
+    dropped: List[str] = []
+    owed: set = set()
+    for f in sorted(rtl_dir.rglob("*")):
+        if not (f.is_file() and f.suffix in (".v", ".sv")):
             continue
+        mods = _module_names([f])
+        if mods & set(overlap):
+            owed |= mods - set(supplied_by)
+            dropped.append(f.name)
+            f.unlink()
+    return {"replaced_by": {m: supplied_by[m] for m in sorted(overlap)},
+            "dropped_generated_files": dropped,
+            "modules_now_owed": sorted(owed)}
+
+
+def _declared_reused_ip(project: Path) -> bool:
+    """Does a SOURCE_MANIFEST DECLARE the supplied RTL reused IP?
+
+    Two declaration paths, both supported by consume
+    (`candidate_source_dirs`): `input/SOURCE_MANIFEST.json` (design input) and
+    `phase2/stage1/rtl/SOURCE_MANIFEST.json` through the runner's own loader
+    (`_is_reused_ip_project`). The latter does NOT count when it is only
+    consume's own staging record (`rtl_strategy:
+    design_provided_rtl_plus_ai_glue`): consume writes that for ANY supplied
+    RTL, so on a re-run it would turn every completion task's context RTL into
+    "reused IP"."""
+    try:
+        mf_in = json.loads((project / "input" / "SOURCE_MANIFEST.json")
+                           .read_text(errors="replace"))
+        if isinstance(mf_in, dict) and mf_in.get("reused_ip") is True:
+            return True
+    except (OSError, ValueError):
+        pass
     if not _is_reused_ip_project(project):
         return False
     try:
@@ -7475,16 +7521,41 @@ def _supplied_rtl_is_reused_ip(project: Path, staged: Sequence[Path]) -> bool:
     return mf.get("rtl_strategy") != "design_provided_rtl_plus_ai_glue"
 
 
+def _split_supplied_roles(project: Path, staged: Sequence[Path]
+                          ) -> Tuple[List[Path], List[Path]]:
+    """(reused IP, context RTL), decided PER FILE (review_wave4a MINOR).
+
+    A file is reused IP when it arrives under `input/vendor_rtl/` (the
+    reused-IP input root, #542/#732) or when a manifest declares the supplied
+    RTL reused IP (`_declared_reused_ip`). Everything else -- `input/rtl/`,
+    `design_src/**/rtl` -- is CONTEXT RTL a task completes or modifies. One
+    vendor file never turns the context RTL beside it into "do not author"."""
+    if _declared_reused_ip(project):
+        return list(staged), []
+    vendor = (project / "input" / "vendor_rtl").resolve()
+    ip: List[Path] = []
+    ctx: List[Path] = []
+    for f in staged:
+        try:
+            f.resolve().relative_to(vendor)
+            ip.append(f)
+        except ValueError:
+            ctx.append(f)
+    return ip, ctx
+
+
 def _rtl_gen_supplied_design_handoff(
         project: Path, t0: float, ic_class: str, config: Dict[str, Any],
         _staged: List[Path], note: str = "",
         extra: Optional[Dict[str, Any]] = None) -> StepResult:
     """The hand-off for RTL the input supplies (D10): catalog-glue for REUSED
     IP, and for context RTL a spec-to-rtl WAIVE that starts FROM it."""
-    if _supplied_rtl_is_reused_ip(project, _staged):
+    _ip, _ctx = _split_supplied_roles(project, _staged)
+    if not _ctx:
         return _rtl_gen_reused_ip_handoff(project, t0, ic_class, config,
                                           _staged, note, extra)
-    _rel = [str(f.relative_to(project)) for f in _staged]
+    _rel = [str(f.relative_to(project)) for f in _ctx]
+    _ip_rel = [str(f.relative_to(project)) for f in _ip]
     _hint, _hint_extras = _stage_author_knowledge_digests(project)
     _sk_hint, _sk_extras = _stage_fallback_skill(project, "spec-to-rtl")
     return StepResult(
@@ -7494,12 +7565,17 @@ def _rtl_gen_supplied_design_handoff(
         f"`consume_reused_ip_rtl` stages it into phase2/stage1/rtl/, and it "
         f"is the STARTING POINT: use skill `spec-to-rtl` to complete or "
         f"modify that RTL in place as the spec requires, not to replace it "
-        f"with a design written from scratch." + (note or "")
+        f"with a design written from scratch."
+        + (f" The input ALSO supplies reused IP ({_ip_rel[:5]}): keep those "
+           f"files as they are and build around them." if _ip_rel else "")
+        + (note or "")
         + _sk_hint + _hint,
         extras={"fallback_skill": "spec-to-rtl",
                 "class_config": config,
-                "supplied_build_rtl": _rel,
+                "supplied_build_rtl": _rel + _ip_rel,
                 "supplied_rtl_role": "starting_point",
+                "supplied_rtl_roles": {"starting_point": _rel,
+                                       "reused_ip": _ip_rel},
                 **(extra or {}), **_sk_extras, **_hint_extras})
 
 
@@ -8185,8 +8261,8 @@ def _step_rtl_gen_bound(
             note=(f" Class generator {gen_name!r} DECLINED: {_rel} define(s) "
                   f"the declared top {_sup_top!r}, and a generated "
                   f"{_sup_top!r} would sit beside it in phase2/stage1/rtl/ as "
-                  f"a second definition. Supplied IP that does not define the "
-                  f"top does not decline the generator."),
+                  f"a second definition. Supplied modules that do not cover the "
+                  f"design replace only the generated files defining them."),
             extra={"declined_generator": gen_name, "declared_top": _sup_top,
                    "design_rtl_sample": _rel})
 
@@ -8299,16 +8375,26 @@ def _step_rtl_gen_bound(
     emitted_any = rtl_dir.is_dir() and any(
         p.is_file() for p in rtl_dir.iterdir())
     if rc == 0 and emitted_any:
-        # D10 review MAJOR 2 — THE GENERATOR'S OWN OUTPUT LIST decides, not
-        # only the L9 top: a real data_converter declares its chip as the top
-        # while this generator emits `cic_decimator`, and a supplied
-        # `cic_decimator.v` was then replaced by the generated one. Any module
-        # the generator EMITTED that the supplied RTL also defines means the
-        # design supplies that part: the generated tree is discarded, the
-        # prior rtl/ restored, and the supplied RTL handed off. Supplied IP
-        # the generated design only INSTANTIATES (no overlap) is unaffected.
-        _overlap = sorted(_emitted_modules(rtl_dir)
-                          & _supplied_module_names(project))
+        # D10 review — THE GENERATOR'S OWN OUTPUT LIST decides, not only the
+        # L9 top (a real data_converter names its chip as top while this
+        # generator emits `cic_decimator`). Two cases, never confused
+        # (review_wave4a MAJOR, orchestrator ruling):
+        #   FULL coverage -- the supplied RTL defines the generator's own top
+        #     (`_generated_tops`): the design is supplied, the generated tree
+        #     is discarded and the supplied RTL handed off;
+        #   PARTIAL overlap -- the supplied RTL defines SOME emitted modules:
+        #     only the generated files defining them are dropped, the rest of
+        #     the generated design stays, and consume's closure path stages
+        #     the supplied modules into the now-open tree (first-wins).
+        # Supplied IP the generated design only INSTANTIATES (no overlap) is
+        # unaffected.
+        _supplied_mods = _supplied_module_names(project)
+        _overlap = sorted(_emitted_modules(rtl_dir) & _supplied_mods)
+        _gen_tops = _generated_tops(project, rtl_dir)
+        _partial: Dict[str, Any] = {}
+        if _overlap and not (_gen_tops and _gen_tops <= _supplied_mods):
+            _partial = _yield_generated_modules(project, rtl_dir, _overlap)
+            _overlap = []
         if _overlap:
             shutil.rmtree(rtl_dir, ignore_errors=True)
             if had_prior_rtl and backup_dir.exists():
@@ -8318,9 +8404,11 @@ def _step_rtl_gen_bound(
                 project, t0, ic_class, config,
                 _design_supplied_build_rtl(project),
                 note=(f" Class generator {gen_name!r} ran and was DISCARDED: "
-                      f"the input supplies module(s) {_overlap} it emitted."),
+                      f"the input supplies its top {sorted(_gen_tops)} "
+                      f"(and module(s) {_overlap} it emitted)."),
                 extra={"declined_generator": gen_name,
-                       "overlapping_modules": _overlap})
+                       "overlapping_modules": _overlap,
+                       "generated_tops": sorted(_gen_tops)})
         files = sorted(p.name for p in rtl_dir.iterdir() if p.is_file())
         # ENFORCE power-up determinism on the freshly emitted RTL (before any
         # downstream lint/synth/sim). Plugin-level sediment of the rtl_hygiene
@@ -8343,13 +8431,34 @@ def _step_rtl_gen_bound(
         project_binding.require_current()
         # Generation succeeded — keep backup_dir as a safety mirror.
         # (Not deleted: lets a fresh agent diff prior-vs-new on demand.)
-        return StepResult("rtl_gen", "PASS",
+        _pnote = ""
+        _pstatus = "PASS"
+        _pextras: Optional[Dict[str, Any]] = None
+        if _partial:
+            _pextras = {"supplied_replaces_generated": _partial}
+            _pnote = (f"; the input supplies module(s) "
+                      f"{sorted(_partial['replaced_by'])} — the generated "
+                      f"file(s) {_partial['dropped_generated_files']} were "
+                      f"dropped and consume stages the supplied one(s) "
+                      f"into the rest of this generated design")
+            if _partial["modules_now_owed"]:
+                # A dropped file also defined modules the input does NOT
+                # supply: say which, and route them to the class author.
+                _pstatus = "PASS_WITH_WAIVERS"
+                _fbk = config.get("fallback_skill") or "spec-to-rtl"
+                _sk_hint, _sk_extras = _stage_fallback_skill(project, _fbk)
+                _pextras.update({"fallback_skill": _fbk, **_sk_extras})
+                _pnote += (f"; module(s) {_partial['modules_now_owed']} "
+                           f"shared a dropped file and are now OWED: provide "
+                           f"them with skill `{_fbk}`" + _sk_hint)
+        return StepResult("rtl_gen", _pstatus,
                           time.time() - t0,
                           f"{len(files)} RTL files emitted via "
                           f"{gen_name} (class={config.get('name')}, "
                           f"stale → {backup_dir.name}/{fix_note}"
-                          f"{preserved_note})",
-                          [str(rtl_dir / f) for f in files])
+                          f"{preserved_note}){_pnote}",
+                          [str(rtl_dir / f) for f in files],
+                          extras=_pextras)
     # Generation crashed or produced nothing. Restore prior rtl/ so
     # the project is not left in an unrecoverable empty-rtl state.
     if had_prior_rtl and backup_dir.exists():
