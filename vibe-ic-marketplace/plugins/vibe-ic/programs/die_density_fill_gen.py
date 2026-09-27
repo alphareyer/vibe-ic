@@ -75,6 +75,10 @@ NAMED, DISCLOSED skip (rc 2 + the `VACUOUS_PASS:` sentinel), never a silent
 "filled". A generator that ran and deposited nothing, and a fill whose frame
 did not cover the die, are FAILs with the measurement in the report -- the GDS
 is left untouched in the first case and disclosed as core-only in the second.
+An `--owned-layer` stands only when the owning filler's `--owner-report` proves
+its fill is IN this GDS (F33): a filler that did not promote leaves those
+layers to the PDK generator (OWNER_FILL_ABSENT, disclosed), and one whose
+promotion cannot be tied to this GDS is refused (OWNER_FILL_UNPROVEN).
 
 chip/PDK-AGNOSTIC: the generator path, the die rectangle and the top-cell name
 are all INPUTS. No foundry, PDK, vendor, layer number or design literal appears
