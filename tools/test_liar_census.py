@@ -1928,24 +1928,24 @@ def test_the_mutation_must_be_HOLLOW_and_not_merely_truncated(
     assert "hollowed to {}" in out, out
 
 
-def test_the_mutation_is_derived_from_the_ARTEFACT_not_from_a_schema():
+def test_the_mutation_is_derived_from_the_ARTEFACT_not_from_a_schema(tmp_path):
     """`_mutations` reads the shape off the file, so it stays chip-AGNOSTIC and
-    does not rot when a report gains a key."""
-    d = Path(__file__).resolve().parent
+    does not rot when a report gains a key.
+
+    The four artefacts live in tmp_path. They used to be written beside this
+    file, into the shipped tools/, and unlinked in a `finally`; `_mutations`
+    reads only the file it is handed, so where it sits proves nothing."""
+    d = tmp_path
     obj, arr, txt, empty = (d / "_m1.json", d / "_m2.json", d / "_m3.rpt", d / "_m4.json")
-    try:
-        obj.write_text('{"a": 1}')
-        arr.write_text('[1, 2]')
-        txt.write_text("not json at all")
-        empty.write_text("{}")
-        assert [p for _l, p in lc._mutations(obj)] == ["{}", ""]
-        assert [p for _l, p in lc._mutations(arr)] == ["[]", ""]
-        assert [p for _l, p in lc._mutations(txt)] == [""]
-        # an ALREADY hollow container has no hollow mutation to make
-        assert [p for _l, p in lc._mutations(empty)] == [""]
-    finally:
-        for f in (obj, arr, txt, empty):
-            f.unlink(missing_ok=True)
+    obj.write_text('{"a": 1}')
+    arr.write_text('[1, 2]')
+    txt.write_text("not json at all")
+    empty.write_text("{}")
+    assert [p for _l, p in lc._mutations(obj)] == ["{}", ""]
+    assert [p for _l, p in lc._mutations(arr)] == ["[]", ""]
+    assert [p for _l, p in lc._mutations(txt)] == [""]
+    # an ALREADY hollow container has no hollow mutation to make
+    assert [p for _l, p in lc._mutations(empty)] == [""]
 
 
 def test_an_OR_alternative_whose_sibling_still_carries_content_is_declined(
