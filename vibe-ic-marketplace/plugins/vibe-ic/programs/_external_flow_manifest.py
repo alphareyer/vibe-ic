@@ -346,10 +346,17 @@ def validate_row(row: Any, project: Path, run_dir: Any, *,
         # that is not exactly that reading -- a self-report, a hand edit, a
         # measured:true over a DEF with no components -- is refused, and so is
         # any record where the artefact supports none (it must be null).
-        if row["measurement"] is not None and not link:
+        # EQUAL TO THE DERIVATION, BOTH WAYS: null is honest only where the
+        # artefact yields no reading -- a null over an artefact that DOES
+        # read would hide a measurement (a measured:false included).
+        if not link:
             derived = derived_measurement(project, row["canonical_path"],
                                           row["tool"])
-            if derived is None:
+            if row["measurement"] is None and derived is not None:
+                problems.append("'measurement' is null but the imported "
+                                "artefact yields a derived record; it must be "
+                                "that record")
+            elif row["measurement"] is not None and derived is None:
                 problems.append("'measurement' must be null: nothing can be "
                                 "derived from the imported artefact")
             elif row["measurement"] != derived:

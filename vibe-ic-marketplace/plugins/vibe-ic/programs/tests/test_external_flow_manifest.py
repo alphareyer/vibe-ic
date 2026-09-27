@@ -145,15 +145,44 @@ def test_the_old_single_log_witness_is_refused_by_the_real_check(world):
 
 
 def test_an_undeclared_measurement_is_honestly_unmeasured(world):
+    """null is the honest UNDECLARED state for an artefact nothing can read
+    (a LEF): the entry carries no record and the check says UNMEASURED."""
     project, run = world
-    row = _row(project, run, measurement=None)
+    lef = "phase3/stage4/hardmacro/top.lef"
+    (run / STEP / "top.lef").write_text("MACRO top\nEND top\n")
+    (project / lef).parent.mkdir(parents=True)
+    shutil.copyfile(run / STEP / "top.lef", project / lef)
+    row = _row(project, run, canonical_path=lef,
+               tool_run_path=run / STEP / "top.lef", measurement=None)
     assert M.validate_row(row, project, RUN) == []
     entry = M.to_provenance_entry(row, project, RUN)
     assert "measurement" not in entry
     (project / "provenance.jsonl").write_text(json.dumps(entry) + "\n")
-    r = _check(project, "--require-measured")
+    r = subprocess.run([sys.executable, str(CHECK), str(project),
+                        "--output", lef, "--tool", "openroad",
+                        "--require-measured"],
+                       capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stdout
     assert "UNMEASURED" in r.stdout and "INCOMPLETE:" in r.stdout
+
+
+@pytest.mark.parametrize("components", ["3", "0"])
+def test_a_null_cannot_hide_a_derivable_measurement(world, components):
+    """Wave-6 review MAJOR: the row's measurement must EQUAL the derivation --
+    null only where the artefact yields none. A DEF reads (COMPONENTS 3 ->
+    measured, COMPONENTS 0 -> TOOL_DID_NOT_RUN), so null over it is refused,
+    the hard miss included."""
+    project, run = world
+    text = DEF_TEXT.replace("COMPONENTS 3", f"COMPONENTS {components}")
+    (run / SRC).write_text(text)
+    (project / CANON).write_text(text)
+    assert M.derived_measurement(project, CANON, "openroad") is not None
+    row = _row(project, run, measurement=None)
+    assert any("is null but the imported artefact yields a derived record" in p
+               for p in M.validate_row(row, project, RUN))
+    with pytest.raises(M.ManifestError, match="is null but"):
+        M.to_provenance_entry(row, project, RUN)
+    assert M.validate_row(row, project, RUN, verify_disk=False) == []
 
 
 def test_no_tool_version_is_none_with_a_disclosure(world):
