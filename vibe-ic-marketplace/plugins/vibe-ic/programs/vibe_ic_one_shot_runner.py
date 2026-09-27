@@ -70,6 +70,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 import _path_layout as _pl
+import _phase1_producer_identity as _p1id  # FX_STALE_LDOCS
 import _audit_scope                     # R-0915-150 (one scope predicate)
 import _runner_lock
 import canonical_run_admission as _canonical_admission
@@ -418,6 +419,9 @@ _EXPERT_AI_UNREAD = "HANDOFF_EMITTED"
 #: every such run and move the L documents the delivered answer was authored
 #: against.
 _P1_MODE_EXPERT_SECOND_PASS = "expert_second_pass"
+#: FX_STALE_LDOCS — a generated L doc no longer holds the bytes phase 1
+#: recorded: neither regenerated over the edit nor reused as current.
+_P1_MODE_REFUSED = "refused_generated_doc_edited"
 
 
 def _expert_answer_pending(project: Path) -> Tuple[bool, str]:
@@ -490,12 +494,6 @@ def _phase1_decision(project: Path, force_skip: bool) -> Tuple[bool, str]:
     """
     if force_skip:
         return (False, "")
-    p1_struct = project / "input" / "phase1_structured.yaml"
-    p1_prompt = project / "input" / "phase1_prompt.md"
-    docs = project / "input" / "docs"
-    # phase1/input_doc/ is the canonical Path-B raw-corpus location.
-    input_doc = (_pl.input_doc_dir(project)
-                 if hasattr(_pl, "input_doc_dir") else None)
     gd = _pl.generated_docs_dir(project)
     L_count = len(list(gd.glob("L*.json"))) if gd.is_dir() else 0
     # Already has the full L-doc set → the EXTRACTION has nothing to do.
@@ -506,7 +504,78 @@ def _phase1_decision(project: Path, force_skip: bool) -> Tuple[bool, str]:
         pending, _why = _expert_answer_pending(project)
         if pending:
             return (True, _P1_MODE_EXPERT_SECOND_PASS)
+        # FX_STALE_LDOCS — and "the L documents exist" is not "they are what
+        # the CURRENT producer would write". A skip keyed on existence is a
+        # stale cache: a phase-1 producer fix never reached an existing
+        # project (measured, subservient f4). Reuse needs the producer's own
+        # identity to match; see `_phase1_producer_identity`.
+        fresh = _phase1_freshness(project)
+        if fresh["state"] == _p1id.REUSE:
+            return (False, "")
+        if fresh["state"] == _p1id.REFUSE:
+            return (False, _P1_MODE_REFUSED)
+        # REGENERATE — but only from DESIGN INPUT. L docs with no input behind
+        # them were HANDED to this project; they ARE its input, and input is
+        # never regenerated or judged stale.
+        if _design_input_present(project):
+            return (True, "docs")
         return (False, "")
+    return _phase1_decision_from_inputs(project)
+
+
+def _stale_generated_docs_note(run_phase1: bool, force_skip: bool,
+                               fresh: Optional[Dict[str, Any]],
+                               skipped_by: str) -> Optional[str]:
+    """The disclosure a phase-1-skipping run owes when it reads stale docs.
+
+    FX_STALE_LDOCS (5). A window / entry-step run keeps its contract -- it
+    does not run phase 1 -- but it READS the generated docs. When they are not
+    what the current producer would write, that is DISCLOSED by name. Not a
+    FAIL: nothing was found wrong with the design, and a FAIL would say it
+    was. Not a PASS either: `_demote_for_stale_generated_docs` turns a PASS
+    over docs whose currency is not established into NOT_MEASURED, with this
+    sentence as the reason."""
+    if run_phase1 or not force_skip or fresh is None \
+            or fresh.get("state") == _p1id.REUSE:
+        return None
+    return (f"STALE_GENERATED_DOCS: this run skipped phase 1 ({skipped_by}) "
+            f"and read generated L docs that are {fresh.get('state')} "
+            f"({fresh.get('reason')}): {fresh.get('why')}")
+
+
+def _demote_for_stale_generated_docs(overall: str, why: Optional[str],
+                                     reasons: List[str]) -> str:
+    """A green verdict over stale docs is NOT_MEASURED, never red, never green."""
+    if why and overall in ("PASS", "PASS_WITH_WAIVERS"):
+        reasons.append(why)
+        return "NOT_MEASURED"
+    return overall
+
+
+def _design_input_present(project: Path) -> bool:
+    """Is there design input phase 1 could extract from? The same predicate
+    the no-L-docs branch uses, asked on its own."""
+    return _phase1_decision_from_inputs(project) == (True, "docs")
+
+
+def _phase1_freshness(project: Path) -> Dict[str, Any]:
+    """`_phase1_producer_identity.assess` against THIS plugin's programs."""
+    try:
+        return _p1id.assess(project, PROGRAMS_DIR)
+    except Exception as exc:                               # noqa: BLE001
+        return {"state": _p1id.REGENERATE,
+                "reason": _p1id.NO_PRODUCER_IDENTITY,
+                "why": f"the producer identity could not be read ({exc})"}
+
+
+def _phase1_decision_from_inputs(project: Path) -> Tuple[bool, str]:
+    """The no-L-docs half of `_phase1_decision`: which design input exists."""
+    p1_struct = project / "input" / "phase1_structured.yaml"
+    p1_prompt = project / "input" / "phase1_prompt.md"
+    docs = project / "input" / "docs"
+    input_doc = (_pl.input_doc_dir(project)
+                 if hasattr(_pl, "input_doc_dir") else None)
+
     def _has_extractable(d: Path) -> bool:
         # #583 — "populated" means at least one real, non-empty,
         # non-hidden document (a .gitkeep placeholder must not flip a
@@ -1784,7 +1853,34 @@ def main() -> int:
         print(f"[bounded] SKIPPED {refresh} -- {why}")
         return why
     run_phase1, p1_mode = _phase1_decision(project, _force_skip_p1)
-    if run_phase1:
+    # FX_STALE_LDOCS — what the generated L docs on disk ARE, asked once and
+    # carried into the report whatever is decided from it.
+    _gd_now = _pl.generated_docs_dir(project)
+    _p1_fresh = (_phase1_freshness(project)
+                 if _gd_now.is_dir() and len(list(_gd_now.glob("L*.json"))) >= 13
+                 else None)
+    _p1_stale_why = None
+    if _p1_fresh is not None:
+        print(f"[phase1] generated L docs: {_p1_fresh['state']} "
+              f"({_p1_fresh['reason']}) — {_p1_fresh['why']}")
+    if run_phase1 and p1_mode == "docs" and _p1_fresh is not None \
+            and _p1_fresh["state"] == _p1id.REGENERATE:
+        advisories.append(
+            f"phase1 REGENERATED the generated L docs — "
+            f"{_p1_fresh['reason']}: {_p1_fresh['why']}")
+    _p1_stale_why = _stale_generated_docs_note(
+        run_phase1, _force_skip_p1, _p1_fresh,
+        "--skip-phase1" if args.skip_phase1
+        else "its entry step is past phase 1")
+    if _p1_stale_why:
+        advisories.append(_p1_stale_why)
+    if p1_mode == _P1_MODE_REFUSED:
+        advisories.append(
+            f"phase1 REFUSED — {_p1_fresh['reason'] if _p1_fresh else ''}: "
+            f"{_p1_fresh['why'] if _p1_fresh else ''}")
+        plan.append(("phase1", "NOT_MEASURED", 1))
+        halted_at = "phase1"
+    elif run_phase1:
         runner = _phase_runner("phase1")
         p1_args = [str(project), "--ic-name", args.ic_name]
         # #2204 — the second pass of the expert hand-off. The extraction is
@@ -2386,6 +2482,8 @@ def main() -> int:
     if _ai_pending and overall in ("PASS", "PASS_WITH_WAIVERS"):
         overall = "NOT_MEASURED"
         _rollup_why.extend(_ai_pending.values())
+    overall = _demote_for_stale_generated_docs(overall, _p1_stale_why,
+                                               _rollup_why)
     # A verdict that moved must say which phase moved it, in the report a reader
     # actually opens — not only on stdout.
     for _why in _rollup_why:
@@ -2415,6 +2513,9 @@ def main() -> int:
         # a second copy of the rule that drifts from it.
         "completion_audit_axis": _audit_axis,
         "demoted_phases": _demoted,
+        # FX_STALE_LDOCS — whether the generated L docs were reused,
+        # regenerated or refused, and why (None: fewer than 13 existed).
+        "phase1_generated_docs": _p1_fresh,
     }
     _fd_bounded = _fd_bounded or _p3_window_ran or _p3_skip_by_exit
     _phase_for_ai = {"D1": "phase1", "1": "phase2", "4": "phase2",

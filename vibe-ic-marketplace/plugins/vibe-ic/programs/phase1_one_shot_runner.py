@@ -1594,7 +1594,62 @@ def _czl9_sufficiency_gate(project: Path) -> Tuple[bool, str]:
 
 # ── Top-level dispatcher ───────────────────────────────────────────
 
+#: The project THIS invocation of `_main` resolved (None until it has one).
+#: Read only by `main`, right after `_main` returns, to stamp the identity.
+_RUN = {"project": None, "second_track_only": False, "extracting": False}
+
+
 def main() -> int:
+    """Phase 1, RECORDED, then stamped with its producer identity.
+
+    FX_STALE_LDOCS. The front door reuses generated L docs only when they are
+    what the CURRENT producer would write (`_phase1_producer_identity.assess`),
+    so phase 1 has to say who wrote them: it runs inside `_step_recorder`'s
+    Recorder -- the flow's existing record of the code a step ACTUALLY ran --
+    and, as its last act, stamps `phase1/step_identity.json` (kind `phase1`).
+
+    Stamped only when THIS run dispatched extraction (a refused or locked-out
+    run did not, and must not claim the docs on disk). A `--second-track-only` pass
+    is not the doc producer: it refreshes the recorded output digests of the
+    docs it legitimately rewrote and leaves the producer's recording alone."""
+    import _step_recorder as _rec_mod
+    import _phase1_producer_identity as _pid
+    _RUN.update(project=None, second_track_only=False, extracting=False)
+    # A second-track pass is judged by CONTENT, not by clock: a filesystem
+    # mtime is coarser than time.time(), and "mtime >= start" missed docs
+    # written in the first tick (measured: 2 runs in 3).
+    before = _pid.docs_snapshot(_project_arg())
+    recorder = _rec_mod.Recorder(PROGRAMS_DIR)
+    with recorder:
+        rc = _main()
+    project = _RUN["project"]
+    try:
+        after = _pid.docs_snapshot(project)
+        if project is not None and after:
+            if _RUN["extracting"]:
+                _pid.stamp(project, recorder)
+            elif _RUN["second_track_only"] and after != before:
+                _pid.restamp_outputs(project)
+    except Exception as exc:                               # noqa: BLE001
+        print(f"[phase1] producer identity NOT stamped ({exc}); the next run "
+              f"will regenerate these docs rather than trust them",
+              file=sys.stderr)
+    return rc
+
+
+def _project_arg() -> Optional[Path]:
+    """The project positional, read the way `_main`'s parser will read it."""
+    for tok in sys.argv[1:]:
+        if not tok.startswith("-"):
+            try:
+                return Path(tok).resolve()
+            except OSError:
+                return None
+        break
+    return None
+
+
+def _main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("project", type=Path)
@@ -1624,6 +1679,7 @@ def main() -> int:
     if not project.is_dir():
         print(f"ERROR: not a directory: {project}", file=sys.stderr)
         return 2
+    _RUN.update(project=project, second_track_only=bool(args.second_track_only))
 
     # ORGANIC #588 — single-driver lock, honored by the standalone phase
     # runner too (not just the orchestrator). Re-enters cleanly when the
@@ -1639,6 +1695,11 @@ def main() -> int:
     # of it, so it runs the second track alone and re-runs nothing.
     if args.second_track_only:
         return run_second_pass_only(project, args.ic_name)
+    # FX_STALE_LDOCS — from here on THIS run is the doc producer: `main`
+    # stamps its identity over whatever docs it leaves, even byte-identical
+    # ones (a changed producer that happens to write the same bytes is still
+    # the producer of record, or every later run would regenerate forever).
+    _RUN["extracting"] = True
 
     # PASS 1 BEGINS HERE, so this is where an EARLIER pass's coverage-only sidecar stops being
     # this project's answer. R-0915-160. Below the second-pass short-circuit on purpose: the

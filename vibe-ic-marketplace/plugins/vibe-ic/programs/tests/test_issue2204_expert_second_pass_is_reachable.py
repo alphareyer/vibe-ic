@@ -62,6 +62,7 @@ if str(_PROGRAMS) not in sys.path:
     sys.path.insert(0, str(_PROGRAMS))
 
 import vibe_ic_one_shot_runner as ORCH        # noqa: E402
+import _p1_identity_fixture  # noqa: E402  FX_STALE_LDOCS
 import phase1_one_shot_runner as P1           # noqa: E402
 import phase1_expert_parse_track as TRACK     # noqa: E402
 import _path_layout as _pl                    # noqa: E402
@@ -144,6 +145,10 @@ def _project(tmp_path: Path, name: str, *, l_docs: int = 28,
         }))
     if answer:
         _answer_path(p).write_text(json.dumps(_ANSWER))
+    # FX_STALE_LDOCS (orchestrator ruling 2026-09-28): the planted L docs stand
+    # for "phase 1 already ran", so they carry the identity phase 1 stamps.
+    # Without it the front door would -- correctly -- regenerate them.
+    _p1_identity_fixture.stamp_current(p)
     return p
 
 
@@ -323,6 +328,7 @@ def test_a_delivered_answer_is_consumed_and_the_front_door_then_skips(tmp_path):
     gd.mkdir(parents=True)
     for i in range(1, 29):
         (gd / f"L{i}_LAYER.json").write_text(json.dumps({"doc_id": f"L{i}"}))
+    _p1_identity_fixture.stamp_current(p)      # FX_STALE_LDOCS, as `_project`
 
     argv = [sys.executable, str(_PROGRAMS / "phase1_expert_parse_track.py"),
             str(p)]
@@ -414,6 +420,7 @@ def test_the_dispatched_argv_actually_consumes_the_answer(tmp_path):
     gd.mkdir(parents=True)
     for i in range(1, 29):
         (gd / f"L{i}_LAYER.json").write_text(json.dumps({"doc_id": f"L{i}"}))
+    _p1_identity_fixture.stamp_current(p)      # FX_STALE_LDOCS, as `_project`
     # PASS 1, for real — this is what writes HANDOFF_EMITTED and the pack.
     cp1 = subprocess.run(
         [sys.executable, str(_PROGRAMS / "phase1_expert_parse_track.py"),
@@ -491,6 +498,9 @@ def refused_then_corrected(tmp_path, request):
     (p / "input/docs/spec.md").write_text(
         "# Counter specification\n\nThe counter accepts an external clock at "
         "the REFCLK terminal and presents a 16-bit count.\n")
+    # FX_STALE_LDOCS — the input was rewritten after `_project` stamped; the
+    # planted docs stand for a phase 1 over THIS input, so stamp again.
+    _p1_identity_fixture.stamp_current(p)
     answer = {"expectations": [{
         "id": "prompt-named-external-clock", "layer": "L9_INTERFACE",
         "field_path": "top_ports",
