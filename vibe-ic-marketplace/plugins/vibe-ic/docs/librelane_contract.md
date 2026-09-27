@@ -219,8 +219,6 @@ Refusals: `LL_ROUTE_DECK_UNSPLITTABLE`, `LL_ROUTE_CHECKPOINT_MISSING`, `LL_PDK_R
 
 Refusals: `LL_PV_VIEW_MISSING`, `LL_PV_HALF_UNKNOWN`, `LL_PV_REPORT_MISSING`, `LL_ROUTE_TECH_LEF_UNBOUND`, `LL_FINISHING_CORE_UNDECLARED`, `LL_STATE_CHANGED`, and any `run_chain` refusal. Fork PRs (sent): vibeic/librelane#16 (checkers and ReportManufacturability: an absent metric is NOT_MEASURED), #18 (`xor.drc` census), #19 (`KLayout.LVS` runs any declared runset).
 
-## Step 32: post-route repair (T102, opt-in)
-
 ## Cut-over of 21 and 32 on the chip path (T99 + T102 r4)
 
 **The default.** `CLASS_PRODUCTION_DEFAULTS['chip_pad_ring']` also sets `21` (routing, T99) and `32` (post-route repair) to `librelane`: a chip-path design with no switch runs LL15..20 → LL21 → `Vibeic.PostRouteRepair` → tail. `CLASS_DEFAULT_REQUIRES['32'] = ('21',)`: step 32's default is the repair inside 21's LibreLane chain, so naming 21 anything but `librelane` takes 32 back to the deck's own post-route repair; 21 needs nothing (it routes after direct 19/20 too). The direct route and the direct step 32 stay as the opt-out and `dual` arms; nothing was deleted. Evidence: spm with no switch file vs the same code with 21/32 forced direct (T102 report r4).

@@ -487,6 +487,13 @@ def _prepare(project: Path, *, image: str, pdk: str, pdk_root: Path, sdc: Path,
     source = "the deck's SDC + the sign-off STA's flat-OCV derate"
     overlay = {"PNR_SDC_FILE": (str(scene.resolve()), source),
                "SIGNOFF_SDC_FILE": (str(scene.resolve()), source)}
+    # T105: every LibreLane geometry step reads the tech LEF the route read
+    # (the flow's via-legalized LEF, bound by sha256), never the PDK's own.
+    # Here that is OpenROAD.RCX (DEF + RCX_LEF) and the direct-route bridge's
+    # DEF -> ODB; an APPLIED record whose file is not found by its hash
+    # refuses LL_ROUTE_TECH_LEF_UNBOUND.
+    import librelane_pv_signoff as _pv
+    overlay.update(_pv.tech_lef_overlay(project) or {})
     ids = [REPAIR_STEP, *MEASURE_STEPS]
     configs = _ll.resolve_step_configs(project, image, pdk, ids, pdk_root=pdk_root,
                                        folder="32-config", overlay=overlay, docker=docker)

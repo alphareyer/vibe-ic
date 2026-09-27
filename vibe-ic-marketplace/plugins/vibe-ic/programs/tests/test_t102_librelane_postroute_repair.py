@@ -909,3 +909,31 @@ def test_the_class_default_route_resolves_the_pdk_like_every_other_step(tmp_path
         exec_kwargs={})
     assert asked['args'][:2] == (project, 'pdkX')
     assert asked['kwargs']['image'] == contract.resolve_image(project)
+
+
+def test_every_geometry_step_reads_the_routes_tech_lef(tmp_path, monkeypatch):
+    """T105: the route's via-legalized tech LEF, bound by sha256, is what
+    step 32's RCX and bridge read; an APPLIED record whose file is gone
+    refuses by name instead of falling back to the PDK's LEF."""
+    import librelane_pv_signoff as pv
+    project = tmp_path / 'proj'
+    sdc = write(project / 'phase3/stage3/pnr/constraint.sdc', '')
+    lef = write(project / 'phase3/stage3/pnr/active_via_legalized.tlef', 'VERSION 5.8 ;\n')
+    put(project / pv.VIA_LEGALIZATION_REL, {'status': 'APPLIED', 'derived_tech_lef': str(lef),
+                                            'derived_sha256': contract.digest(lef)})
+    seen = {}
+
+    def configs(project_, image, pdk, ids, *, pdk_root, folder, overlay, docker):
+        seen.update(overlay)
+        root = project_ / 'phase3/librelane' / folder
+        return {i: put(root / f'{i}.json', {'meta': {'step': i}, 'STA_CORNERS': CORNERS})
+                for i in ids}
+    monkeypatch.setattr(contract, 'resolve_step_configs', configs)
+    prr._prepare(project, image='img', pdk='pdk', pdk_root=tmp_path, sdc=sdc,
+                 derate=(0.95, 1.05), pg_rules_tcl=None, refill_tcl=None, docker='docker')
+    assert seen['TECH_LEFS'][0] == {'*': str(lef.resolve())}
+    lef.write_text('changed\n')
+    with pytest.raises(contract.Refusal) as exc:
+        prr._prepare(project, image='img', pdk='pdk', pdk_root=tmp_path, sdc=sdc,
+                     derate=(0.95, 1.05), pg_rules_tcl=None, refill_tcl=None, docker='docker')
+    assert exc.value.code == 'LL_ROUTE_TECH_LEF_UNBOUND'
