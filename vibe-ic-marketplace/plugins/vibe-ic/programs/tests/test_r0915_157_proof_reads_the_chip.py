@@ -69,7 +69,9 @@ def _engine():
     if missing:
         skip_not_verified(
             f"{missing} not on PATH, so no harness can be proved here",
-            "tools/ci/run_suite_in_eda_image.sh -- programs/tests/test_r0915_157_proof_reads_the_chip.py")
+            # the helper also serves test_r0915_157_proof_is_about_the_built_chip
+            "tools/ci/run_suite_in_eda_image.sh -- programs/tests/test_r0915_157_proof_reads_the_chip.py"
+            " programs/tests/test_r0915_157_proof_is_about_the_built_chip.py")
 
 
 def _step5(project: Path, top: str = "m"):
