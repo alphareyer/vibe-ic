@@ -205,6 +205,21 @@ def test_the_measured_input_gap_is_still_named(tmp_path):
     assert rc == 2 and msg.startswith(GATE.NOT_MEASURED_PREFIX), (rc, msg)
 
 
+def test_a_missing_named_image_is_the_inputs_gap_whatever_it_expects(tmp_path):
+    """MEASURED in this lane's own E2E on subservient: hello_hex names
+    hello.hex (absent from the input) and expects a UART string "115200
+    baud". The number in the expected half must not make it the stated-vector
+    family's: nothing can run it without the image."""
+    hex_num = {"name": "hello_hex", "kind": "functional_vector",
+               "stimulus": "hello.hex",
+               "expected": 'GPIO 輸出 "Hello" UART 字串(115200 baud rate)'}
+    proj = _project(tmp_path, [PASSING, hex_num], {PASSING["name"]: "PASS"})
+    gap = _gap(proj, hex_num)
+    assert gap is not None and gap["missing_from_input"] == ["hello.hex"], gap
+    rc, _msg = GATE._evaluate(proj)
+    assert rc == 2
+
+
 # ---------------------------------------------------------------------------
 # (4) a coverage goal: the instrument's own receipt, or it stays a refusal
 # ---------------------------------------------------------------------------
