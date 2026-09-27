@@ -1526,28 +1526,36 @@ def _run_docker(
             (f"timeout -k {_CE.DEFAULT_KILL_GRACE_S} {deadline} bash -c "
              + shlex.quote(_localise_mounted_paths(_inner, project, _pdk))),
         ]
-        if supervised:
-            # The engine IS a descendant here, so the DEFAULT host probe reads
-            # it directly and the default kill reaches the whole process group
-            # (`run_supervised`'s own factory sets start_new_session=True).
-            res = _wd.run_host_supervised(local_cmd, **_sup_kw)
-            if res.outcome == "launch_error":
+        # The engine runs in a throwaway cwd, as it does in the container
+        # (image WORKDIR, discarded by --rm): it writes PLY tables and its
+        # `thr0x…/tb.sv` relative to `.`, and the caller's cwd is not its
+        # scratch space (F35). See `_container_exec.local_engine_cwd`.
+        with _CE.local_engine_cwd() as scratch:
+            if supervised:
+                # The engine IS a descendant here, so the DEFAULT host probe
+                # reads it directly and the default kill reaches the whole
+                # process group (`run_supervised`'s own factory sets
+                # start_new_session=True).
+                res = _wd.run_host_supervised(local_cmd, cwd=scratch, **_sup_kw)
+                if res.outcome == "launch_error":
+                    return 127, "", (
+                        "no docker client and no `bash` on PATH — the ATPG "
+                        "engine could not be reached by either route")
+                return res.rc, res.out, res.err
+            try:
+                r = subprocess.run(local_cmd, capture_output=True, text=True,
+                                   cwd=scratch,
+                                   timeout=deadline + _CE.CLIENT_GRACE_S)
+                return r.returncode, r.stdout, r.stderr
+            except subprocess.TimeoutExpired:
+                return 124, "", (
+                    f"local backstop fired after "
+                    f"{deadline + _CE.CLIENT_GRACE_S}s: the in-process "
+                    f"deadline ({deadline}s) did not fire first")
+            except FileNotFoundError:
                 return 127, "", (
                     "no docker client and no `bash` on PATH — the ATPG engine "
                     "could not be reached by either route")
-            return res.rc, res.out, res.err
-        try:
-            r = subprocess.run(local_cmd, capture_output=True, text=True,
-                               timeout=deadline + _CE.CLIENT_GRACE_S)
-            return r.returncode, r.stdout, r.stderr
-        except subprocess.TimeoutExpired:
-            return 124, "", (
-                f"local backstop fired after {deadline + _CE.CLIENT_GRACE_S}s: "
-                f"the in-process deadline ({deadline}s) did not fire first")
-        except FileNotFoundError:
-            return 127, "", (
-                "no docker client and no `bash` on PATH — the ATPG engine "
-                "could not be reached by either route")
 
     # A unique name ONLY when there is a supervisor that might have to reap it.
     # `--rm` looks self-cleaning and is not: killing the client leaves the

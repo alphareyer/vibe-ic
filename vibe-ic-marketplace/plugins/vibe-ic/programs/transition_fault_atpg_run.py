@@ -608,10 +608,13 @@ def _run_in_docker(project: Path, shell_cmd: str, timeout: int,
         # route that needs a docker client and NOT on the route that runs
         # in-image, which is the only one #2063 exists to serve. One contract,
         # both surfaces; `_far._atpg_supervision_kw` is the single spelling.
-        res = _wd.run_host_supervised(
-            local_cmd,
-            **_far._atpg_supervision_kw(float(timeout), _ceiling_notice,
-                                        stall_grace_s))
+        # A throwaway cwd, as the container route has (F35): the engine
+        # writes relative to `.`, and the caller's cwd is not its scratch.
+        with _CE.local_engine_cwd() as scratch:
+            res = _wd.run_host_supervised(
+                local_cmd, cwd=scratch,
+                **_far._atpg_supervision_kw(float(timeout), _ceiling_notice,
+                                            stall_grace_s))
         if res.outcome == "launch_error":
             return 127, "", "bash not found in PATH"
         return res.rc, res.out, _CE.annotate_local_exec(res.rc, res.err,

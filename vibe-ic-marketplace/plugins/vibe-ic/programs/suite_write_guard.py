@@ -70,7 +70,10 @@ guarantee:
     to the test, and costs one `git status` per test (measured 0.10 s on this
     repo, so ~53 min over a 32 k-test suite) — which is why it is opt-in and
     session mode is the default;
-  * it sees what git sees. A write outside the repo is not its subject.
+  * it sees what git sees. A write outside the repo is not its subject —
+    with ONE named extension: when pytest is invoked from ANOTHER checkout of
+    this same tree, that checkout is measured too, because every writer that
+    names no directory lands in the cwd (see `_cwd_sibling_root`, F35).
   * a DETACHED COPY of this tree (a `cp -al` mirror, an unpacked tarball, a
     scratch dir under a `$TMPDIR` that happens to sit inside some unrelated
     checkout) has no `git status` that describes it. The guard declines it as
@@ -454,6 +457,62 @@ def _repo_root(config) -> Path:
     return root
 
 
+def _cwd_sibling_root(config, repo: Path):
+    """The OTHER checkout a relative-path writer lands in, or None.
+
+    THE INVOCATION-DIRECTORY BLIND SPOT (F35)
+    -----------------------------------------
+    `_repo_root` answers "which tree holds this guard", and that is the tree
+    whose tests are running. It is NOT always the tree a write lands in. Any
+    writer that names no directory writes into the PROCESS cwd, which is the
+    directory pytest was invoked from — and nothing forces that to be the same
+    checkout. Measured in the vibeic-eda image (uid 1000, /home/reyerchu
+    bind): the ATPG engine's local route inherits the cwd, and its PLY parser
+    (`outputdir='.'`) and its per-thread simulation dir (`thr0x…/tb.sv`) land
+    there. Run from checkout B's plugin root against checkout A's tests, the
+    three files appeared in B while this guard — measuring A — printed
+    `[PASS] … wrote nothing` and the session exited 0. Run from A itself, the
+    same test is RED; so the blind spot was which tree was looked at, not the
+    uid, the bind, or the classification.
+
+    So the invocation directory is measured too, but ONLY when its repository
+    is another checkout of the SAME tree: one that tracks this file at the
+    same repository-relative path. That is the precise shape of the defect,
+    and it is the line #1412 draws from the other side — an UNRELATED ambient
+    repository (a scratch dir under some other checkout) is not this tree's
+    subject and still is not measured. A cwd that is the subject itself, or no
+    repository at all, adds nothing. Any failure to look here is not a new way
+    to fail the session: it leaves the primary measurement exactly as before.
+    """
+    try:
+        cwd = Path(config.invocation_params.dir).resolve()
+        rel = Path(__file__).resolve().relative_to(repo)
+    except (AttributeError, ValueError, OSError):
+        return None
+    try:
+        top = Path(_git(cwd, "rev-parse", "--show-toplevel",
+                        timeout=_DISCOVERY_TIMEOUT_S).strip()).resolve()
+        if top == repo:
+            return None
+        _git(top, "ls-files", "--error-unmatch", "--", rel.as_posix(),
+             timeout=_DISCOVERY_TIMEOUT_S)
+    except NotChecked:
+        return None
+    return top
+
+
+def _merge_results(results) -> dict:
+    """One report from several trees; extra trees' paths are made absolute so
+    a reader can tell WHICH checkout a path is in."""
+    merged = {"findings": [], "blocking": [], "advisory": []}
+    for root, res, primary in results:
+        for key in merged:
+            for f in res[key]:
+                merged[key].append(f if primary else
+                                   dict(f, path=f"{root}/{f['path']}"))
+    return merged
+
+
 def pytest_configure(config):
     # Under xdist every worker would snapshot and compare the SAME tree, so the
     # report would be printed N times and a write attributed to whichever
@@ -475,6 +534,15 @@ def pytest_configure(config):
         _STATE["mode"] = mode
     except NotChecked as exc:
         _STATE["not_checked"] = str(exc)
+        return
+    sibling = _cwd_sibling_root(config, repo)
+    if sibling is not None:
+        try:
+            _STATE["extra"] = [(sibling, snapshot(sibling))]
+        except NotChecked as exc:
+            # Loud, and not a failure: the primary tree is still measured.
+            print(f"WRITE_GUARD_NOT_CHECKED: the invocation checkout "
+                  f"{sibling} could not be measured — {exc}", file=sys.stderr)
 
 
 def pytest_runtest_teardown(item):
@@ -499,10 +567,18 @@ def pytest_sessionfinish(session, exitstatus):
     if "baseline" not in _STATE:
         return
     try:
-        result = compare(_STATE["baseline"], snapshot(_STATE["repo"]))
+        parts = [(_STATE["repo"],
+                  compare(_STATE["baseline"], snapshot(_STATE["repo"])), True)]
     except NotChecked as exc:
         print(f"\nWRITE_GUARD_NOT_CHECKED: {exc}", file=sys.stderr)
         return
+    for root, base in _STATE.get("extra", []):
+        try:
+            parts.append((root, compare(base, snapshot(root)), False))
+        except NotChecked as exc:
+            print(f"\nWRITE_GUARD_NOT_CHECKED: the invocation checkout "
+                  f"{root} could not be re-measured — {exc}", file=sys.stderr)
+    result = _merge_results(parts)
     _STATE["result"] = result
     report = format_report(result, where="this pytest session")
     print("\n" + report)
