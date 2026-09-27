@@ -1198,6 +1198,17 @@ _NOT_PROSE: Dict[str, str] = {
         "The direct precedents are the other tool-artefact readers in this "
         "register: `lec_post_layout_check::_parse_liberty_pins` and "
         "`phase3_one_shot_runner::_pdk_declared_routing_layers`.",
+    "phase3_one_shot_runner::_pdk_cell_spice_models":
+        "Tcl `set ::env(CELL_SPICE_MODELS) \"<path>\"` (or `[glob \"<pattern>\"]`) "
+        "productions, read out of the PDK's OWN shipped librelane/OpenLane flow "
+        "config to learn which standard-cell SPICE models step 31's shipped-GDS "
+        "LVS reads. Machine-written Tcl assignment syntax: no form DENIES a "
+        "value, a key is assigned or unassigned. Unassigned is a REFUSAL here "
+        "(empty list + reason -> the arm is NOT_MEASURED, never a pass), and so "
+        "is a `$::env(...)` the run cannot resolve and a declared file that "
+        "does not exist. Same claim, same grammar, same file as "
+        "`_pdk_declared_routing_layers`. Falsifier: tests/test_fx_lvs_signs_off_"
+        "the_shipped_gds.py::test_a_declared_model_that_does_not_exist_is_refused.",
     "phase3_one_shot_runner::_pdk_declared_routing_layers":
         "Tcl `set ::env(NAME) \"value\"` productions, read out of the PDK's "
         "OWN shipped librelane/OpenLane flow config to learn the routing "

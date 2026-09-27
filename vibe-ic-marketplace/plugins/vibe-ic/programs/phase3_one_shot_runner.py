@@ -54493,10 +54493,12 @@ def _run_shipped_gds_lvs(project: Path, top: str, pdk: "PdkConfig",
            f"PNL={shlex.quote(c(pnl))} TOP={shlex.quote(cell_top)} "
            f"NETGEN_SETUP={shlex.quote(netgen_setup)} "
            f"LVS_RPT={shlex.quote(c(lvs_rpt))} && ")
+    netgen_log = work / "netgen.log"
     rc, out, err = _declared_session_exec(
-        container, env + f"netgen -batch source {c(lvs_tcl)}",
-        [lvs_rpt, lvs_json], marker=c(lvs_tcl),
-        hard_ceiling_s=_SHIPPED_GDS_LVS_CEILING_S)
+        container, env + f"netgen -batch source {c(lvs_tcl)} 2>&1 | "
+                         f"tee {c(netgen_log)}",
+        [lvs_rpt, lvs_json, netgen_log], marker=c(lvs_tcl),
+        log_path=netgen_log, hard_ceiling_s=_SHIPPED_GDS_LVS_CEILING_S)
     if rc in (_RC_STALLED, _RC_ABORTED, 124):
         _docker_timeout_isolate([lvs_rpt])
         return _not_measured(
@@ -54526,11 +54528,11 @@ def _run_shipped_gds_lvs(project: Path, top: str, pdk: "PdkConfig",
             "LVS_SHIPPED_GDS_MISMATCH",
             f"netgen: the shipped layout {record['layout']} does NOT match "
             f"the routed database's powered netlist; "
-            f"{len(pin_ev)} pin-mismatch line(s)"
+            f"{len(pin_ev)} pin-evidence line(s)"
             + (f", first: {pin_ev[0]}" if pin_ev else "")
-            + f". Report {record['report']}",
-            pin_mismatch_evidence=pin_ev[:40],
-            pin_mismatch_count=len(pin_ev))
+            + f". Report {record['report']}, transcript "
+            f"{_project_rel(project, netgen_log)}",
+            pin_mismatch_evidence=pin_ev[:40])
     return _fail(
         "LVS_SHIPPED_GDS_NO_TERMINAL_VERDICT",
         f"netgen exited (rc={rc}) with no terminal verdict in "
@@ -54621,7 +54623,7 @@ def _compose_lvs_signoff(project: Path, def_row: StepResult,
                    "shipped_gds_record": gds_rec_rel,
                    "routed_def_lvs": def_row.status,
                    "routed_def_finding": def_row.extras.get("finding")})
-    for key in ("pin_mismatch_evidence", "pin_mismatch_count", "supervision"):
+    for key in ("pin_mismatch_evidence", "supervision"):
         if worse_gds and key in gds_row.extras:
             extras[key] = gds_row.extras[key]
     return StepResult(
