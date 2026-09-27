@@ -158,6 +158,11 @@ class ProducerRecorder:
             q = self._under_root(getattr(mod, "__file__", None))
             if q is not None:
                 files.add(q)
+        # ONE `seen` for every launched script, seeded with what this process
+        # already loaded: each closure then parses only files not yet known.
+        # MEASURED: a fresh `seen` per script re-parsed the same large modules
+        # for every launch and cost ~220 s on a ~40 s phase 1.
+        seen = set(files)
         for tok in sorted(self._launched):
             for cand in (Path(tok), self._root / tok,
                          self._root / Path(tok).name):
@@ -165,7 +170,7 @@ class ProducerRecorder:
                 if q is not None:
                     files.add(q)
                     files.update(p.resolve() for p in
-                                 _sr._static_imports(q, self._root))
+                                 _sr._static_imports(q, self._root, seen))
                     break
         if not files:
             return None, ("no plugin module was loaded by phase 1, so what it "
