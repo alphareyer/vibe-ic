@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1366
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1366)
+- **Total programs (excluding helpers / shims):** 1367
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1367)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1357 |
+| `any` | 1358 |
 
 ## Alphabetical listing
 
@@ -1276,6 +1276,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `synth_wrapper_check` | any | — | Deterministic compliance check for synth-wrapper-gen. |
 | `synth_wrapper_gen` | any | — | auto-generate synthesis wrapper for inout-port designs. |
 | `table_lut_synth` | any | — | a DETERMINISTIC solver for the CVDP TABLE-DRIVEN COMBINATIONAL family: a combinational function FULLY specified by an enumerated table st... |
+| `tap_row_coverage_check` | any | — | does every active cell have a well tie in ITS OWN WELL ISLAND within the distance the PDK's DRC deck requires? Judged on the TOOL's DEF. |
 | `tapeout_checklist_gen` | any | — | emit Step 36 (v2.3) reports/audit/tapeout_checklist.json. |
 | `tapeout_declaration_check` | any | — | judge the declaration step 0.5ic wrote. |
 | `tapeout_declaration_gen` | any | — | write the physical and implementation contract. |
@@ -1438,7 +1439,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1357 programs)
+### `any` (1358 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2683,6 +2684,7 @@ _(no programs in this group)_
 - `synth_wrapper_check` — Deterministic compliance check for synth-wrapper-gen.
 - `synth_wrapper_gen` — auto-generate synthesis wrapper for inout-port designs.
 - `table_lut_synth` — a DETERMINISTIC solver for the CVDP TABLE-DRIVEN COMBINATIONAL family: a combinational function FULLY specified by an enumerated table st...
+- `tap_row_coverage_check` — does every active cell have a well tie in ITS OWN WELL ISLAND within the distance the PDK's DRC deck requires? Judged on the TOOL's DEF.
 - `tapeout_checklist_gen` — emit Step 36 (v2.3) reports/audit/tapeout_checklist.json.
 - `tapeout_declaration_check` — judge the declaration step 0.5ic wrote.
 - `tapeout_declaration_gen` — write the physical and implementation contract.

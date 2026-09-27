@@ -831,6 +831,42 @@ def declared_route_on_disk(project: Path, has_slots: bool
     return route, None
 
 
+#: The operator's slot catalogue, beside the declaration (step 0.5ic).
+SLOTS_REL = "input/submission_template/slots"
+
+
+def requests_pad_ring(project: Path) -> bool:
+    """Step 15.5ic's design-dependent condition: does this die carry a pad ring?
+
+    ONE predicate for every reader. The phase-3 runner asks it before it builds
+    the ring, and `librelane_contract.design_class` asks it to pick the
+    production default of steps 15..20 for the chip path (T96). Two copies of
+    one condition are two answers waiting to differ, and a gate that reads its
+    step's producer through the contract must see the producer the runner ran.
+
+    A ring is requested by a self-tape-out (`SELF_TAPEOUT.txt`) or a slot
+    catalogue on disk, unless the delivery DECLARES itself a `HARDMACRO`: a
+    hardmacro is placed inside somebody else's die, which owns the pads
+    (a6a45babe). The deliverable is read through `answer()`, so an owner-only
+    answer nobody attested is no answer; an absent, unreadable or unanswered
+    declaration leaves the catalogue's request standing.
+    """
+    slot_dir = project / SLOTS_REL
+    if not ((project / SELF_TAPEOUT_REL).is_file()
+            or (slot_dir.is_dir() and any(slot_dir.glob("*.yaml")))):
+        return False
+    path = project / DECLARATION_REL
+    if not path.is_file():
+        return True
+    doc, err = load(path)
+    if err is not None or not isinstance(doc, dict):
+        return True
+    got = answer(doc, "deliverable")
+    if not is_answered(got):
+        return True
+    return str(got).strip().upper() != DELIVERABLE_HARDMACRO
+
+
 def applicable(q: Question, deliverable: Any) -> bool:
     """Is `q` required for this deliverable?
 

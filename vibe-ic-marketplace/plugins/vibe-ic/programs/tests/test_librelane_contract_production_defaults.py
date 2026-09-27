@@ -7,11 +7,13 @@ opts out by naming the step `direct` in its switch file. Before this table,
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 import _plugin_tree  # noqa: F401 — puts programs/ on sys.path
 import librelane_contract as LC
+import _owner_declared as _OD  # noqa: E402 — tests/, the one attestation fixture
 
 
 def _switch(tmp_path, steps):
@@ -47,3 +49,104 @@ def test_an_invalid_mode_is_refused_from_either_source(tmp_path, monkeypatch):
 def test_every_production_default_is_a_mode_the_contract_knows():
     assert all(m in ("direct", "librelane", "dual")
                for m in LC.PRODUCTION_DEFAULTS.values())
+
+
+# ── T96: the chip path's class defaults for steps 15..20 ────────────────────
+_CHAIN = ("15", "15.5ic", "17", "18", "19", "20")
+
+
+def _chip(tmp_path, deliverable="DIE", *, marker="SELF_TAPEOUT.txt"):
+    """A project the flow routes onto the chip path (step 15.5ic's condition):
+    a self-tape-out marker (or a slot file) beside a declaration."""
+    st = tmp_path / "input" / "submission_template"
+    st.mkdir(parents=True, exist_ok=True)
+    if marker == "slots":
+        (st / "slots").mkdir(exist_ok=True)
+        (st / "slots" / "s1.yaml").write_text("name: s1\n")
+    else:
+        (st / marker).write_text("# self tape-out\n")
+    if deliverable is not None:
+        (st / "tapeout_declaration.json").write_text(json.dumps(_OD.attest(
+            {"schema": "vibe-ic/tapeout_declaration/1",
+             "answers": {"deliverable": deliverable}})))
+    return tmp_path
+
+
+def test_the_chip_path_runs_15_to_20_on_librelane_with_no_switch(tmp_path):
+    project = _chip(tmp_path)
+    assert LC.design_class(project) == LC.DESIGN_CLASS_CHIP_PAD_RING
+    assert {s: LC.selected_mode(project, s) for s in _CHAIN} == dict.fromkeys(_CHAIN, "librelane")
+    # outside the cut-over, nothing moves
+    for step in ("9", "16", "21", "22", "37"):
+        assert LC.selected_mode(project, step) == "direct"
+
+
+def test_a_slot_catalogue_is_the_chip_path_too(tmp_path):
+    project = _chip(tmp_path, deliverable=None, marker="slots")
+    assert LC.selected_mode(project, "15") == "librelane"
+
+
+@pytest.mark.parametrize("fixture", ["core_only", "hardmacro"])
+def test_a_design_with_no_pad_ring_keeps_direct(tmp_path, fixture):
+    project = (tmp_path if fixture == "core_only"
+               else _chip(tmp_path, deliverable="HARDMACRO", marker="slots"))
+    assert LC.design_class(project) is None
+    assert {LC.selected_mode(project, s) for s in _CHAIN} == {"direct"}
+    assert LC.class_defaults_in_force(project) == {}
+
+
+def test_the_class_predicate_is_the_runners_15_5ic_condition(tmp_path):
+    import phase3_one_shot_runner as R
+    for project, want in ((tmp_path / "a", False),
+                          (_chip(tmp_path / "b"), True),
+                          (_chip(tmp_path / "c", deliverable="HARDMACRO", marker="slots"), False),
+                          (_chip(tmp_path / "d", deliverable="NOT_DETERMINED", marker="slots"), True)):
+        project.mkdir(parents=True, exist_ok=True)
+        assert R._chip_path_requests_pad_ring(project) is want
+        assert (LC.design_class(project) is not None) is want
+
+
+def test_an_opt_out_takes_the_steps_that_continue_it_back_to_direct(tmp_path):
+    project = _chip(tmp_path)
+    _switch(project, {"15.5ic": "direct"})
+    assert {s: LC.selected_mode(project, s) for s in _CHAIN} == {
+        "15": "direct", "15.5ic": "direct", "17": "direct", "18": "direct",
+        "19": "librelane", "20": "librelane"}
+    _switch(project, {"15": "direct"})       # the step-15 direct arm under a tool ring
+    assert {s: LC.selected_mode(project, s) for s in _CHAIN} == {
+        "15": "direct", "15.5ic": "librelane", "17": "direct", "18": "direct",
+        "19": "librelane", "20": "librelane"}
+    _switch(project, {"20": "direct"})       # 19/20 are one deck region
+    assert (LC.selected_mode(project, "19"), LC.selected_mode(project, "20")) == ("direct", "direct")
+    _switch(project, {"18": "direct"})       # 18 is inserted inside 17's placement
+    assert (LC.selected_mode(project, "17"), LC.selected_mode(project, "18")) == ("direct", "direct")
+    assert LC.selected_mode(project, "15") == "librelane"
+
+
+def test_the_switch_and_a_step_wide_default_outrank_the_class(tmp_path, monkeypatch):
+    project = _chip(tmp_path)
+    _switch(project, {"19": "dual", "20": "dual"})
+    assert (LC.selected_mode(project, "19"), LC.selected_mode(project, "20")) == ("dual", "dual")
+    monkeypatch.setitem(LC.PRODUCTION_DEFAULTS, "15", "direct")
+    assert LC.selected_mode(project, "15") == "direct"
+    assert "15" not in LC.class_defaults_in_force(project)
+    assert "19" not in LC.class_defaults_in_force(project)
+
+
+def test_every_class_default_is_a_mode_the_contract_knows():
+    for defaults in LC.CLASS_PRODUCTION_DEFAULTS.values():
+        assert set(defaults.values()) <= {"direct", "librelane", "dual"}
+    assert set(LC.CLASS_DEFAULT_REQUIRES) <= set(
+        LC.CLASS_PRODUCTION_DEFAULTS[LC.DESIGN_CLASS_CHIP_PAD_RING])
+
+
+def test_the_class_default_is_part_of_the_admission_identity(tmp_path):
+    import phase3_one_shot_runner as R
+    assert R._librelane_admission_facts(tmp_path) == {}
+    project = _chip(tmp_path / "chip")
+    facts = R._librelane_admission_facts(project)
+    assert facts["librelane_class_defaults"] == dict.fromkeys(_CHAIN, "librelane")
+    assert facts["librelane_contract_sha256"] == LC.digest(Path(LC.__file__))
+    _switch(project, dict.fromkeys(_CHAIN, "direct"))
+    facts = R._librelane_admission_facts(project)
+    assert "librelane_class_defaults" not in facts and "librelane_switch" in facts
