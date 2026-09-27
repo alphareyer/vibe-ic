@@ -2,12 +2,18 @@
 
 Docker is substituted at the process edge; everything above it is the real
 module. The probe replies below are the real output of the shipped probes on
-vibeic-eda 0.3.83 (2026-09-28, 8HD-9), with the flow step lists shortened and
-the provenance map cut to two tools.
+vibeic-eda 0.3.83 (2026-09-28, 8HD-9), with the flow step lists shortened, the
+provenance map cut to two tools, and the CLI option lists cut to the PDK group
+plus two options outside it. `test_the_probe_itself_*` runs the shipped probe
+SCRIPT on the host against a stand-in `librelane` package, so what the probe
+records is tested, not only what the module does with a record.
 """
 import importlib
 import json
+import os
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,19 +25,34 @@ facts_mod = importlib.import_module('librelane_image_facts')
 contract = importlib.import_module('librelane_contract')
 
 IMAGE_ID = 'sha256:' + 'a' * 64
+OTHER_ID = 'sha256:' + 'c' * 64
+
+
+def _opt(name, opts, envvar=(), group=None, default=None, bypass=None, measured=True):
+    return {'name': name, 'opts': list(opts), 'envvar': list(envvar), 'group': group,
+            'default': default, 'default_measured': measured,
+            'bypass_env': bypass if bypass is not None else {v: None for v in envvar}}
+
+
+REAL_CLIS = {
+    'flow': [
+        _opt('jobs', ['-j', '--jobs'], default=32),
+        _opt('use_ciel', ['--volare-pdk', '--ciel-pdk', '--manual-pdk'], group='PDK options', default=True),
+        _opt('pdk_root', ['--pdk-root'], ['PDK_ROOT'], 'PDK options', bypass={'PDK_ROOT': '/foss/pdks'}),
+        _opt('pdk', ['-p', '--pdk'], ['PDK'], 'PDK options', 'sky130A'),
+        _opt('scl', ['-s', '--scl'], ['STD_CELL_LIBRARY'], 'PDK options'),
+        _opt('pad', ['--pad'], ['PAD_CELL_LIBRARY'], 'PDK options'),
+        _opt('condensed', ['--condensed', '--full'], default=False)],
+    'step': [
+        _opt('output', ['-o', '--output'], default='/foss/designs/STEP_RUN_<timestamp>'),
+        _opt('pdk_root', ['--pdk-root'], default='/foss/pdks'),
+        _opt('condensed', ['--condensed', '--full'], default=False)],
+}
 REAL_PROBE = {
     'flows': {'Classic': ['Verilator.Lint', 'Checker.LintTimingConstructs', 'Yosys.Synthesis'],
               'Chip': ['Verilator.Lint', 'Checker.LintTimingConstructs', 'Yosys.Synthesis',
                        'OpenROAD.PadRing']},
-    'cli_options': [
-        {'opts': ['--pdk-root'], 'envvar': ['PDK_ROOT'], 'default': None,
-         'bypass_env': {'PDK_ROOT': '/foss/pdks'}},
-        {'opts': ['-p', '--pdk'], 'envvar': ['PDK'], 'default': 'sky130A',
-         'bypass_env': {'PDK': None}},
-        {'opts': ['-s', '--scl'], 'envvar': ['STD_CELL_LIBRARY'], 'default': None,
-         'bypass_env': {'STD_CELL_LIBRARY': None}},
-        {'opts': ['--pad'], 'envvar': ['PAD_CELL_LIBRARY'], 'default': None,
-         'bypass_env': {'PAD_CELL_LIBRARY': None}}],
+    'clis': REAL_CLIS,
     'provenance': {'librelane': {'ref': '9cf849541fb02082c5890cbbf2cab4d796a9f8f9',
                                  'repo': 'https://github.com/vibeic/librelane.git',
                                  'tool': 'librelane'},
@@ -42,35 +63,53 @@ REAL_PROBE = {
     'orfs_commit': 'c9c22caf9bf9cfe46c5a4236c6ec7e7ae9863cc3'}
 REAL_LOGIN = ('[INFO] USER_ID: 1000, GROUP_ID: 0\n'
               '[INFO] SKIPPING UI STARTUP\n'
-              "[INFO] Executing command: 'python3 -c ...'\n"
+              "[INFO] Executing command: 'timeout --kill-after=5 590 python3 -c ...'\n"
               'VIBEIC_LOGIN_ENV {"PAD_CELL_LIBRARY": null, "PDK": "ihp-sg13g2", '
               '"PDK_ROOT": "/foss/pdks", "STD_CELL_LIBRARY": "sg13g2_stdcell"}\n')
+EXPLICIT = ['--manual-pdk', '--pdk-root', '/pdk', '--pdk', 'target', '--scl', 'lib', 'c.yaml']
 
 
 class FakeDocker:
-    """Answers the four docker calls image_facts makes, and records each."""
+    """Answers every docker call image_facts makes, records each with the
+    deadline it was given, and can make one kind of call time out."""
 
-    def __init__(self, probe=REAL_PROBE, probe_rc=0, login=REAL_LOGIN, login_rc=0,
-                 labels=None):
-        self.calls = []
+    def __init__(self, probe=REAL_PROBE, probe_rc=0, login=REAL_LOGIN, login_rc=0, labels=None):
+        self.calls, self.deadlines = [], []
         self.probe, self.probe_rc = probe, probe_rc
         self.login, self.login_rc = login, login_rc
         self.labels = {'org.opencontainers.image.version': '0.3.83'} if labels is None else labels
+        self.ids = {}
+        self.hang = None  # 'probe' | 'login' | 'inspect'
 
-    def __call__(self, argv, **_kw):
+    def kind(self, argv):
+        if argv[1:3] == ['image', 'inspect']:
+            return 'id' if '{{json .Id}}' in argv[4] else 'inspect'
+        if argv[1:3] == ['rm', '-f']:
+            return 'rm'
+        return 'probe' if '--entrypoint' in argv else 'login'
+
+    def __call__(self, argv, **kw):
         argv = list(argv)
         self.calls.append(argv)
-        if argv[1:3] == ['image', 'inspect'] and '{{json .Id}}' in argv[4]:
+        self.deadlines.append(kw.get('timeout'))
+        kind = self.kind(argv)
+        if self.hang == kind:
+            raise subprocess.TimeoutExpired(argv, kw.get('timeout'))
+        if kind == 'id':
+            image_id = self.ids.get(argv[-1], IMAGE_ID)
             return SimpleNamespace(returncode=0, stderr='',
-                                   stdout=f'"{IMAGE_ID}" ["PDK_ROOT=/foss/pdks","PATH=/bin"]\n')
-        if argv[1:3] == ['image', 'inspect']:
+                                   stdout=f'"{image_id}" ["PDK_ROOT=/foss/pdks","PATH=/bin"]\n')
+        if kind == 'inspect':
             return SimpleNamespace(returncode=0, stderr='', stdout=json.dumps(self.labels))
-        if argv[1] == 'run' and '--entrypoint' in argv:
+        if kind == 'rm':
+            return SimpleNamespace(returncode=0, stderr='', stdout='')
+        if kind == 'probe':
             out = self.probe if isinstance(self.probe, str) else json.dumps(self.probe)
             return SimpleNamespace(returncode=self.probe_rc, stdout=out + '\n', stderr='boom')
-        if argv[1] == 'run':
-            return SimpleNamespace(returncode=self.login_rc, stdout=self.login, stderr='')
-        raise AssertionError(f'unexpected docker call {argv}')
+        return SimpleNamespace(returncode=self.login_rc, stdout=self.login, stderr='')
+
+    def of(self, kind):
+        return [c for c in self.calls if self.kind(c) == kind]
 
 
 @pytest.fixture
@@ -83,38 +122,87 @@ def docker(monkeypatch):
     return fake
 
 
-def test_facts_come_from_the_image_through_two_capped_containers(docker):
+def _value(argv, flag):
+    return argv[argv.index(flag) + 1]
+
+
+# ── what is read, and how ──────────────────────────────────────────────────
+
+def test_facts_come_from_the_image_through_two_capped_named_containers(docker):
     record = facts_mod.image_facts('repo@sha256:' + 'b' * 64)
-    runs = [c for c in docker.calls if c[1] == 'run']
-    assert len(runs) == 2, docker.calls
-    bypass, login = runs
-    for argv in runs:
-        assert argv[argv.index('--memory') + 1] == '3g', argv
-        assert argv[argv.index('--memory-swap') + 1] == '3g', argv
+    bypass, login = docker.of('probe'), docker.of('login')
+    assert len(bypass) == len(login) == 1, docker.calls
+    for argv in bypass + login:
+        assert _value(argv, '--memory') == _value(argv, '--memory-swap') == '3g', argv
         assert argv.index('--memory') < argv.index(IMAGE_ID), argv
-        assert argv[argv.index('--network') + 1] == 'none', argv
-    assert bypass[bypass.index('--entrypoint') + 1] == 'python3'
+        assert _value(argv, '--network') == 'none', argv
+        assert _value(argv, '--name').startswith('vibeic_llfacts'), argv
+    assert _value(bypass[0], '--entrypoint') == 'timeout'
     # the login environment is only reachable through the image's own entrypoint
-    assert '--entrypoint' not in login and login[login.index(IMAGE_ID) + 1] == '--skip', login
-    assert sorted(login[login.index('-c') + 2:]) == [
+    assert '--entrypoint' not in login[0] and login[0][login[0].index(IMAGE_ID) + 1:][:2] == ['--skip', 'timeout']
+    assert sorted(login[0][login[0].index('-c') + 2:]) == [
         'PAD_CELL_LIBRARY', 'PDK', 'PDK_ROOT', 'STD_CELL_LIBRARY'], login
-    assert record['image_id'] == IMAGE_ID
-    assert record['image_version_label'] == '0.3.83'
+    assert record['image_id'] == IMAGE_ID and record['image_version_label'] == '0.3.83'
     assert record['librelane_version'] == '3.1.0.dev1'
     assert record['provenance']['librelane']['ref'].startswith('9cf849541f')
-    assert record['orfs_commit'].startswith('c9c22caf9')
-    assert record['not_measured'] == {}
-    pdk = next(o for o in record['cli_options'] if '--pdk' in o['opts'])
+    assert record['orfs_commit'].startswith('c9c22caf9') and record['not_measured'] == {}
+    pdk = next(o for o in record['clis']['flow'] if o['name'] == 'pdk')
     assert pdk['login_env'] == {'PDK': 'ihp-sg13g2'} and pdk['bypass_env'] == {'PDK': None}
 
 
-def test_facts_are_read_once_per_reference_and_again_for_another(docker):
-    facts_mod.image_facts('ref-one')
-    first = len(docker.calls)
-    facts_mod.image_facts('ref-one')
-    assert len(docker.calls) == first
-    facts_mod.image_facts('ref-two')
-    assert len(docker.calls) == 2 * first
+def test_every_tool_run_has_a_deadline(docker):
+    facts_mod.image_facts('ref')
+    assert docker.deadlines and all(isinstance(d, (int, float)) and 0 < d < 10 ** 4
+                                    for d in docker.deadlines), list(zip(docker.calls, docker.deadlines))
+
+
+def test_the_container_bounds_its_own_command_before_the_client(docker):
+    facts_mod.image_facts('ref', deadline_s=120)
+    [probe], [login] = docker.of('probe'), docker.of('login')
+    at = probe.index('--kill-after=5')
+    assert _value(probe, '--entrypoint') == 'timeout' and probe[at - 1] == IMAGE_ID, probe
+    assert 0 < int(probe[at + 1]) < 120, probe
+    at = login.index('--kill-after=5')
+    assert login[at - 2:at] == ['--skip', 'timeout'] and 0 < int(login[at + 1]) < 120, login
+
+
+def test_a_facts_probe_past_its_deadline_is_removed_by_name_and_refused(docker):
+    docker.hang = 'probe'
+    with pytest.raises(contract.Refusal, match=r'LL_IMAGE_FACTS_UNREADABLE.*deadline'):
+        facts_mod.image_facts('ref')
+    [probe] = docker.of('probe')
+    assert docker.of('rm') == [['docker', 'rm', '-f', _value(probe, '--name')]]
+
+
+def test_a_login_probe_past_its_deadline_is_named_not_read_as_unset(docker):
+    docker.hang = 'login'
+    record = facts_mod.image_facts('ref', deadline_s=30)
+    assert 'deadline' in record['not_measured']['login_env']
+    [login] = docker.of('login')
+    assert docker.of('rm') == [['docker', 'rm', '-f', _value(login, '--name')]]
+    assert 'environment NOT_MEASURED' in {r['source'] for r in facts_mod.implicit_cli_values(record, 'login')}
+    # `--pad` is left to an environment nobody measured: refused, not read as unset
+    with pytest.raises(contract.Refusal, match=r'--pad would take None from environment NOT_MEASURED'):
+        facts_mod.require_explicit_cli_options(record, EXPLICIT, 'login', image_id=IMAGE_ID)
+    facts_mod.require_explicit_cli_options(record, EXPLICIT[:-1] + ['--pad', 'p', 'c.yaml'],
+                                           'login', image_id=IMAGE_ID)
+
+
+def test_a_label_inspect_past_its_deadline_is_named(docker):
+    docker.hang = 'inspect'
+    record = facts_mod.image_facts('ref')
+    assert 'deadline' in record['not_measured']['image_version_label']
+
+
+def test_facts_are_cached_per_image_id_so_a_moved_tag_is_read_again(docker):
+    first = facts_mod.image_facts('repo:latest')
+    probes = len(docker.of('probe'))
+    assert facts_mod.image_facts('repo:latest')['image_id'] == IMAGE_ID
+    assert len(docker.of('probe')) == probes
+    docker.ids['repo:latest'] = OTHER_ID      # the tag moved to a new image
+    moved = facts_mod.image_facts('repo:latest')
+    assert moved['image_id'] == OTHER_ID and len(docker.of('probe')) == probes + 1
+    assert first['image_id'] == IMAGE_ID
 
 
 def test_flow_steps_are_the_images_own_order(docker):
@@ -138,12 +226,11 @@ def test_an_unmeasured_login_environment_is_named_not_read_as_unset(docker):
     docker.login_rc, docker.login = 127, 'exec: --skip: not found\n'
     record = facts_mod.image_facts('ref')
     assert 'login_env' in record['not_measured']
-    assert all(o['login_env'] is None for o in record['cli_options'])
+    assert all(o['login_env'] is None for rows in record['clis'].values() for o in rows)
     rows = facts_mod.implicit_cli_values(record, 'login')
-    assert {r['source'] for r in rows} == {'environment NOT_MEASURED'}
+    assert 'environment NOT_MEASURED' in {r['source'] for r in rows}
     with pytest.raises(contract.Refusal, match='LL_IMAGE_ENV_DEFAULT'):
-        facts_mod.require_explicit_cli_options(
-            record, ['--pdk-root', '/pdk', '--pdk', 'x', '--scl', 'y', 'cfg.yaml'], 'login')
+        facts_mod.require_explicit_cli_options(record, EXPLICIT, 'login', image_id=IMAGE_ID)
 
 
 def test_a_missing_label_is_named(docker):
@@ -151,27 +238,42 @@ def test_a_missing_label_is_named(docker):
     assert 'image_version_label' in facts_mod.image_facts('ref')['not_measured']
 
 
+# ── the guard ──────────────────────────────────────────────────────────────
+
 def test_the_login_environment_cannot_choose_the_pdk_or_the_cell_library(docker):
     """CMP3's first LibreLane attempt: through the image's entrypoint the CLI
     took the image's PDK and cell library from the environment."""
     record = facts_mod.image_facts('ref')
     base = ['--manual-pdk', '--pdk-root', '/pdk', 'config.yaml']
     with pytest.raises(contract.Refusal, match='LL_IMAGE_ENV_DEFAULT') as refused:
-        facts_mod.require_explicit_cli_options(record, base, 'login')
+        facts_mod.require_explicit_cli_options(record, base, 'login', image_id=IMAGE_ID)
     text = str(refused.value)
     assert "--pdk would take 'ihp-sg13g2' from env PDK" in text
     assert "--scl would take 'sg13g2_stdcell' from env STD_CELL_LIBRARY" in text
     with pytest.raises(contract.Refusal, match=r'--scl would take'):
-        facts_mod.require_explicit_cli_options(record, base + ['--pdk', 'target'], 'login')
+        facts_mod.require_explicit_cli_options(record, base + ['--pdk', 'target'], 'login',
+                                               image_id=IMAGE_ID)
+    facts_mod.require_explicit_cli_options(record, EXPLICIT, 'login', image_id=IMAGE_ID)
     facts_mod.require_explicit_cli_options(
-        record, base + ['--pdk', 'target', '--scl', 'lib'], 'login')
-    facts_mod.require_explicit_cli_options(
-        record, ['--manual-pdk', '--pdk-root=/pdk', '-p', 'target', '-s', 'lib', 'c.yaml'], 'login')
+        record, ['--manual-pdk', '--pdk-root=/pdk', '-p', 'target', '-s', 'lib', 'c.yaml'],
+        'login', image_id=IMAGE_ID)
+
+
+def test_the_builtin_ciel_default_cannot_choose_the_pdk_version(docker):
+    """`--ciel-pdk/--manual-pdk` reads no variable and defaults to fetching the
+    PDK through Ciel at LibreLane's own pinned version, replacing an explicit
+    `--pdk-root`. It is in the PDK group, so it is guarded."""
+    record = facts_mod.image_facts('ref')
+    argv = ['--pdk-root', '/pdk', '--pdk', 't', 'c.yaml']
+    with pytest.raises(contract.Refusal, match=r'--manual-pdk would take True from CLI default'):
+        facts_mod.require_explicit_cli_options(record, argv, 'bypass', image_id=IMAGE_ID)
+    facts_mod.require_explicit_cli_options(record, ['--manual-pdk'] + argv, 'bypass', image_id=IMAGE_ID)
+    facts_mod.require_explicit_cli_options(record, ['--ciel-pdk'] + argv, 'bypass', image_id=IMAGE_ID)
+    names = {o['name'] for o in facts_mod.guarded_options(record)}
+    assert names == {'use_ciel', 'pdk_root', 'pdk', 'scl', 'pad'}   # jobs, condensed are not
 
 
 def test_bypassing_the_entrypoint_still_leaves_the_pdk_root_and_the_builtin_pdk(docker):
-    """An overridden --entrypoint drops the login PDK, but PDK_ROOT is image
-    configuration and --pdk has a built-in default: both are still implicit."""
     record = facts_mod.image_facts('ref')
     rows = {tuple(r['opts']): r for r in facts_mod.implicit_cli_values(record, 'bypass')}
     assert rows[('--pdk-root',)] == {'opts': ['--pdk-root'], 'source': 'env PDK_ROOT',
@@ -179,17 +281,146 @@ def test_bypassing_the_entrypoint_still_leaves_the_pdk_root_and_the_builtin_pdk(
     assert rows[('-p', '--pdk')]['source'] == 'CLI default'
     assert ('-s', '--scl') not in rows
     with pytest.raises(contract.Refusal, match=r'--pdk-root would take'):
-        facts_mod.require_explicit_cli_options(record, ['--pdk', 't', 'c.yaml'], 'bypass')
+        facts_mod.require_explicit_cli_options(record, ['--manual-pdk', '--pdk', 't', 'c.yaml'],
+                                               'bypass', image_id=IMAGE_ID)
     facts_mod.require_explicit_cli_options(
-        record, ['--pdk-root', '/pdk', '--pdk', 't', 'c.yaml'], 'bypass')
+        record, ['--manual-pdk', '--pdk-root', '/pdk', '--pdk', 't', 'c.yaml'], 'bypass', image_id=IMAGE_ID)
     with pytest.raises(contract.Refusal, match='LL_INVALID_ENTRYPOINT'):
         facts_mod.implicit_cli_values(record, 'shell')
 
 
+def test_the_per_step_cli_pdk_root_default_is_guarded(docker):
+    """`librelane.steps run --pdk-root` takes its default from PDK_ROOT at
+    import time (no `envvar=`); the step CLI declares no option groups, so it is
+    guarded as the same parameter as the flow CLI's `--pdk-root`."""
+    record = facts_mod.image_facts('ref')
+    step = ['--id', 'X.Y', '-c', 'cfg.json', '-i', 'in.json', '-o', 'out']
+    with pytest.raises(contract.Refusal, match=r"step CLI: --pdk-root would take '/foss/pdks' from CLI default"):
+        facts_mod.require_explicit_cli_options(record, step, 'bypass', image_id=IMAGE_ID, cli='step')
+    facts_mod.require_explicit_cli_options(record, step + ['--pdk-root', '/pdk'], 'bypass',
+                                           image_id=IMAGE_ID, cli='step')
+    with pytest.raises(contract.Refusal, match='LL_INVALID_CLI'):
+        facts_mod.guarded_options(record, 'eject')
+
+
+def test_a_callable_default_is_unknown_not_absent(docker):
+    probe = json.loads(json.dumps(REAL_PROBE))
+    scl = next(o for o in probe['clis']['flow'] if o['name'] == 'scl')
+    scl['default_measured'] = False
+    docker.probe = probe
+    record = facts_mod.image_facts('ref')
+    rows = {tuple(r['opts']): r for r in facts_mod.implicit_cli_values(record, 'bypass')}
+    assert rows[('-s', '--scl')] == {'opts': ['-s', '--scl'], 'source': 'CLI default NOT_MEASURED',
+                                     'value': None}
+    with pytest.raises(contract.Refusal, match=r'--scl would take None from CLI default NOT_MEASURED'):
+        facts_mod.require_explicit_cli_options(record, ['--manual-pdk', '--pdk-root', '/p', '--pdk', 't'],
+                                               'bypass', image_id=IMAGE_ID)
+
+
+def test_an_unread_cli_leaves_the_guard_scope_unknown(docker):
+    probe = json.loads(json.dumps(REAL_PROBE))
+    probe['clis'] = {'flow': [], 'step': None}
+    docker.probe = probe
+    record = facts_mod.image_facts('ref')
+    assert facts_mod.guarded_options(record) is None
+    with pytest.raises(contract.Refusal, match=r'LL_IMAGE_ENV_DEFAULT: flow CLI: \(scope\).*NOT_MEASURED'):
+        facts_mod.require_explicit_cli_options(record, EXPLICIT, 'bypass', image_id=IMAGE_ID)
+
+
+def test_facts_from_another_image_refuse(docker):
+    record = facts_mod.image_facts('ref')
+    with pytest.raises(contract.Refusal, match='LL_IMAGE_FACTS_STALE'):
+        facts_mod.require_explicit_cli_options(record, EXPLICIT, 'bypass', image_id=OTHER_ID)
+
+
+# ── the probe script itself, on a stand-in LibreLane ──────────────────────
+
+_STAND_IN = {
+    'librelane/__init__.py': "__version__ = '9.9.9'\n",
+    'librelane/flows/__init__.py': textwrap.dedent('''
+        class _S:
+            def __init__(self, i): self.id = i
+        class _F:
+            Steps = [_S('A.One'), _S('B.Two')]
+        class _Factory:
+            @staticmethod
+            def get(name): return _F if name == 'Classic' else None
+        class Flow:
+            factory = _Factory
+        '''),
+    'librelane/__main__.py': textwrap.dedent('''
+        import click, types
+        @click.command()
+        @click.option('--pdk-root', envvar='PDK_ROOT', default=None)
+        @click.option('-p', '--pdk', envvar='PDK', default='builtinPDK')
+        @click.option('--ciel-pdk/--manual-pdk', 'use_ciel', default=True)
+        @click.option('-j', '--jobs', default=lambda: 4)
+        @click.argument('config_files', nargs=-1)
+        def cli(**kw): pass
+        _g = {p.name: p for p in cli.params}
+        cli.option_groups = [types.SimpleNamespace(title='PDK', options=[_g['pdk_root'], _g['pdk'], _g['use_ciel']])]
+        '''),
+    'librelane/steps/__init__.py': '',
+    'librelane/steps/__main__.py': textwrap.dedent('''
+        import click, os
+        @click.group()
+        def cli(): pass
+        @cli.command()
+        @click.option('--pdk-root', default=os.environ.pop('PDK_ROOT', None))
+        @click.option('--id')
+        def run(**kw): pass
+        '''),
+}
+
+
+def _run_probe(tmp_path):
+    for rel, text in _STAND_IN.items():
+        path = tmp_path / 'pkg' / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    env = {**os.environ, 'PYTHONPATH': str(tmp_path / 'pkg'), 'PDK_ROOT': '/image/pdks', 'PATH': '/nonexistent'}
+    done = subprocess.run([sys.executable, '-c', facts_mod._PROBE, 'Classic,Chip', str(tmp_path / 'none')],
+                          capture_output=True, text=True, env=env, timeout=120)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout.strip().splitlines()[-1])
+
+
+def test_the_probe_itself_records_builtin_and_callable_defaults(tmp_path):
+    out = _run_probe(tmp_path)
+    # shape-free first: the no-variable PDK flag is recorded at all, and the
+    # callable default is named as unread
+    assert '--manual-pdk' in json.dumps(out), out
+    assert any('jobs' in key for key in out['not_measured']), out['not_measured']
+    flow = {o['name']: o for o in out['clis']['flow']}
+    assert flow['use_ciel']['opts'] == ['--ciel-pdk', '--manual-pdk']
+    assert (flow['use_ciel']['default'], flow['use_ciel']['group'], flow['use_ciel']['envvar']) == (True, 'PDK', [])
+    assert flow['pdk']['default'] == 'builtinPDK' and flow['pdk_root']['bypass_env'] == {'PDK_ROOT': '/image/pdks'}
+    assert flow['jobs']['default'] is None and flow['jobs']['default_measured'] is False
+    assert 'clis.flow.jobs.default' in out['not_measured']
+    assert 'config_files' not in flow    # an argument, not an option
+    step = {o['name']: o for o in out['clis']['step']}
+    assert step['pdk_root']['default'] == '/image/pdks' and step['pdk_root']['envvar'] == []
+    assert out['flows'] == {'Classic': ['A.One', 'B.Two'], 'Chip': None}
+    assert out['librelane_version'] == '9.9.9'
+
+
+def test_the_probe_itself_guards_what_it_records(tmp_path):
+    record = {'image_id': IMAGE_ID, **_run_probe(tmp_path)}
+    for rows in record['clis'].values():
+        for o in rows:
+            o['login_env'] = {v: None for v in o['envvar']}
+    names = {tuple(r['opts']) for r in facts_mod.implicit_cli_values(record, 'bypass')}
+    assert names == {('--pdk-root',), ('-p', '--pdk'), ('--ciel-pdk', '--manual-pdk')}
+    assert {tuple(r['opts']) for r in facts_mod.implicit_cli_values(record, 'bypass', 'step')} == {('--pdk-root',)}
+
+
+# ── the command line ───────────────────────────────────────────────────────
+
 def test_the_cli_writes_the_record_atomically(docker, tmp_path, capsys):
     out = tmp_path / 'facts.json'
-    assert facts_mod.main(['ref', '--out', str(out)]) == 0
-    assert json.loads(out.read_text())['image_id'] == IMAGE_ID
+    assert facts_mod.main(['ref', '--deadline', '60', '--out', str(out)]) == 0
+    written = json.loads(out.read_text())
+    assert written['image_id'] == IMAGE_ID and written['deadline_s'] == 60
     assert json.loads(capsys.readouterr().out)['image_version_label'] == '0.3.83'
     docker.probe_rc = 1
     facts_mod._FACTS.clear()
