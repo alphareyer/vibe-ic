@@ -198,7 +198,8 @@ def supply_geometry(project: Path, image: str, odb: Path, nets: List[str],
     log = folder / 'supply_geometry.log'
     if _run_openroad(project, image, tcl, log, mounts):
         raise Refusal('LL_VSRC_GEOMETRY_FAILED', str(log))
-    out: Dict[str, Any] = {'pads': {}, 'bterms': [], 'missing_pads': [], 'missing_nets': []}
+    out: Dict[str, Any] = {'pads': {}, 'bterms': [], 'missing_pads': [], 'missing_nets': [],
+                           'searched': f'{odb} (probe log {log})'}
     for line in log.read_text(errors='replace').splitlines():
         words = line.split()
         if not words:
@@ -225,8 +226,11 @@ def declared_sources(geometry: Dict[str, Any], vdd_nets: List[str],
     """PSM source rows from the declared pads' BTerms, and whether PSM's own
     BTerm default is that same model (`coincident`)."""
     nets = list(dict.fromkeys([*vdd_nets, *gnd_nets]))
+    searched = geometry.get('searched') or 'the supply geometry passed in'
     if geometry.get('missing_pads'):
-        raise Refusal('LL_VSRC_PAD_MISSING', ', '.join(geometry['missing_pads']))
+        raise Refusal('LL_VSRC_PAD_MISSING',
+                      f"declared supply pad instance(s) {', '.join(geometry['missing_pads'])} "
+                      f'not in the block of {searched}')
     rows: Dict[str, List[Dict[str, Any]]] = {net: [] for net in nets}
     outside: List[str] = []
     hosting = {pad: 0 for pad in geometry.get('pads', {})}
@@ -247,7 +251,7 @@ def declared_sources(geometry: Dict[str, Any], vdd_nets: List[str],
                       f'declared supply net(s) with no BTerm on a declared pad: {unsourced}')
     if idle:
         raise Refusal('LL_VSRC_PAD_TERMINAL_MISSING',
-                      f'declared supply pad(s) hosting no supply BTerm: {idle}')
+                      f'declared supply pad(s) hosting no BTerm of {nets} in {searched}: {idle}')
     return {'sources': rows, 'bterms_outside_declared_pads': outside,
             'coincident': not outside}
 
@@ -657,7 +661,7 @@ def run_antenna_gds(project: Path, image: str, pdk_root: Path, pdk: str, *,
     if not runset:
         raise Refusal('LL_ANTENNA_RUNSET_UNDECLARED', f'{pdk}: KLAYOUT_ANTENNA_RUNSET')
     if not Path(gds).is_file():
-        raise Refusal('LL_GDS_MISSING', str(gds))
+        raise Refusal('LL_GDS_MISSING', f'no stream file at {Path(gds)}')
     mounts = [(pdk_root / pdk, f'/pdk/{pdk}')]
     state = state_from_direct(project, image, configs['KLayout.Antenna'], {'gds': gds},
                               project / 'phase3/librelane/26-config/bridge-gds',
