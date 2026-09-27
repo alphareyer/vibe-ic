@@ -1494,6 +1494,96 @@ def _plugin_digests(step_id: str) -> dict[str, str]:
             for path in files if path.is_file()}
 
 
+#: The steps whose config must carry the die the run itself settled on:
+#: step 15's floorplan sizes the die, and 15.5ic's PadRing (`pad_cfg.tcl`)
+#: reads `$::env(DIE_AREA)`, which LibreLane never exports for a null value.
+_DIE_STEPS = frozenset({'OpenROAD.Floorplan', 'OpenROAD.PadRing'})
+
+
+def _rect_differs(a: Any, b: Any) -> bool:
+    return len(a) != len(b) or any(abs(x - y) > 1e-6 for x, y in zip(a, b))
+
+
+def _whole(rect: list[float]) -> list[float | int]:
+    return [int(v) if float(v).is_integer() else v for v in rect]
+
+
+def _runner_floorplan(project: Path) -> tuple[list | None, list | None, dict[str, str], str]:
+    """(die, core, sources, why) from the run's one floorplan authority.
+
+    `phase3_one_shot_runner.step_pnr` writes `floorplan_rectangles.json`
+    before it hands steps 15/15.5ic to LibreLane; it is read through
+    `_declared_die`, the one reader of that record. The core is the slot's
+    `floorplan_rect_um` when the record names one, else the die inset by
+    `core_pad_um` -- the direct deck's own `-core_area`.
+    """
+    import _declared_die as DD
+    die, why, record = DD.declared(project)
+    if die is None:
+        return None, None, {}, why
+    die = _whole(die)
+    base = DD.FLOORPLAN_RECTANGLES_REL
+    sources = {'DIE_AREA': (f"{base}.die_rect_um - {why} "
+                            f"({record.get('program') or 'the run'})")}
+    rect, pad = record.get('floorplan_rect_um'), record.get('core_pad_um')
+    core = None
+    if rect is not None:
+        core = _whole([float(v) for v in _rect(rect, f'{base}.floorplan_rect_um')])
+        sources['CORE_AREA'] = f'{base}.floorplan_rect_um (the slot core)'
+    elif isinstance(pad, (int, float)) and not isinstance(pad, bool) and pad >= 0:
+        core = _whole([die[0] + pad, die[1] + pad, die[2] - pad, die[3] - pad])
+        sources['CORE_AREA'] = (f'{base}.die_rect_um inset by {base}.core_pad_um '
+                                f'({pad}) - the direct deck\'s -core_area')
+    return die, core, sources, why
+
+
+def _apply_runner_floorplan(project: Path, config: dict, sources: dict,
+                            step_ids: list[str]) -> None:
+    """Give a 15/15.5ic chain the die the run settled on, when none is declared.
+
+    A declared die wins and must agree with the run's record; a declared
+    `relative` sizing cannot carry a pad ring; a PadRing that neither source
+    gives a die is refused before the tool, never left to die at pad_cfg.tcl.
+    """
+    if not _DIE_STEPS & set(step_ids):
+        return
+    padring = 'OpenROAD.PadRing' in step_ids
+    if config.get('FP_SIZING') == 'relative':
+        if padring:
+            raise Refusal('LL_PADRING_DIE_RELATIVE_DECLARED',
+                          f"{sources.get('FP_SIZING')} = relative: a utilisation-sized "
+                          'floorplan cannot carry a pad ring')
+        return
+    die, core, derived, why = _runner_floorplan(project)
+    if die is not None:
+        if 'DIE_AREA' in config:
+            if _rect_differs(config['DIE_AREA'], die):
+                raise Refusal('LL_DERIVED_DIE_CONFLICT',
+                              f"declared {config['DIE_AREA']} ({sources['DIE_AREA']}) vs "
+                              f"the run's {die} ({derived['DIE_AREA']})")
+        else:
+            _set(config, sources, 'DIE_AREA', die, derived['DIE_AREA'])
+        _set(config, sources, 'FP_SIZING', config.get('FP_SIZING') or 'absolute',
+             sources.get('FP_SIZING') or derived['DIE_AREA'])
+        if 'CORE_AREA' not in config and core is not None:
+            _set(config, sources, 'CORE_AREA', core, derived['CORE_AREA'])
+    if 'DIE_AREA' in config and 'CORE_AREA' in config:
+        d, c = config['DIE_AREA'], config['CORE_AREA']
+        if not (c[0] >= d[0] and c[1] >= d[1] and c[2] <= d[2] and c[3] <= d[3]):
+            raise Refusal('LL_DERIVED_CORE_OUTSIDE_DIE',
+                          f"{c} ({sources['CORE_AREA']}) vs {d} ({sources['DIE_AREA']})")
+    template = config.get('FP_DEF_TEMPLATE')
+    if template and 'DIE_AREA' in config:
+        stated = _def_die_area(project / str(template).removeprefix('dir::'))
+        if stated is not None and _rect_differs(stated, config['DIE_AREA']):
+            raise Refusal('LL_DEF_TEMPLATE_DIE_MISMATCH',
+                          f"{template} DIEAREA {stated} vs {config['DIE_AREA']} "
+                          f"({sources['DIE_AREA']})")
+    if padring and 'DIE_AREA' not in config:
+        raise Refusal('LL_PADRING_DIE_UNDERIVABLE',
+                      f'no declared answers.die_area_um and {why}')
+
+
 def resolve_step_configs(project: Path, image: str, pdk: str,
                          step_ids: list[str], *, pdk_root: Path,
                          docker: str = 'docker',
@@ -1511,9 +1601,10 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     root.mkdir(parents=True, exist_ok=True)
     design = root / 'design.json'
     emitted = emit_config(project, pdk, design)
-    if overlay:
+    if _DIE_STEPS & set(step_ids) or overlay:
         sources = _load(design.with_suffix('.provenance.json'))
-        for key, (value, source) in overlay.items():
+        _apply_runner_floorplan(project, emitted, sources, step_ids)
+        for key, (value, source) in (overlay or {}).items():
             for older in _LEVER_SUPERSEDES.get(key, ()):
                 if older in emitted:
                     emitted.pop(older)
