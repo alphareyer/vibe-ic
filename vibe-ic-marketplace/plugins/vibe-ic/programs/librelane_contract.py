@@ -1711,6 +1711,15 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
                 emitted.pop(older)
                 sources[older] = f'superseded by {key} ({source})'
         _set(emitted, sources, key, value, source)
+    # The explicit overlay outranks every declared or derived rectangle, and
+    # the rules that judged those judged them BEFORE it; what the tool is
+    # handed is judged here, whoever supplied each half.
+    die, core = emitted.get('DIE_AREA'), emitted.get('CORE_AREA')
+    if die and core and not (core[0] >= die[0] and core[1] >= die[1] and
+                             core[2] <= die[2] and core[3] <= die[3]):
+        raise Refusal('LL_CONFIG_CORE_OUTSIDE_DIE',
+                      f"CORE_AREA {core} ({sources.get('CORE_AREA')}) vs "
+                      f"DIE_AREA {die} ({sources.get('DIE_AREA')})")
     write_json(design, emitted)
     write_json(design.with_suffix('.provenance.json'), sources)
     requested = root / 'steps.json'
