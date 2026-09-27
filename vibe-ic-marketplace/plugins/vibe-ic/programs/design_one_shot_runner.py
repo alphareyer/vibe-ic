@@ -9421,6 +9421,26 @@ def step_step4_functional_evidence(project: Path,
     oracle_detail = (oracle_out or oracle_err).strip()
     outputs = [str(vacuous_report.relative_to(project)),
                str(oracle_report.relative_to(project))]
+    # FX_P2 — the gate's NOT_MEASURED (rc 2, and its REPORT says so with a
+    # reason class): declared cases the design input supplies no stimulus for.
+    # The report decides, not the bare rc — rc 2 is also the gate's VACUOUS.
+    _oracle_verdict, _oracle_reason = "", None
+    try:
+        _orep = json.loads(oracle_report.read_text(errors="replace"))
+        _oracle_verdict = str(_orep.get("verdict") or "")
+        _oracle_reason = _V.step_reason_for_gate_reason(
+            _orep.get("reason_class"))
+    except (OSError, ValueError, AttributeError):
+        pass
+    if (oracle_rc == 2 and _oracle_verdict == "NOT_MEASURED"
+            and _oracle_reason is not None):
+        return StepResult(
+            "step4_functional_evidence", "NOT_MEASURED", time.time() - t0,
+            f"cpu functional evidence: {oracle_detail} [{instr_detail}]",
+            outputs,
+            extras={"fallback_skill": "testbench-gen",
+                    "program_first": "professional_tb_gen"},
+            reason_class=_oracle_reason)
     if oracle_rc != 0:
         return StepResult(
             "step4_functional_evidence", "FAIL", time.time() - t0,
