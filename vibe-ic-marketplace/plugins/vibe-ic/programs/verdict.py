@@ -592,8 +592,31 @@ def validate_step_row(row: Any) -> None:
             or getattr(row, "attribution", "")):
         row.waiver_rows = [WaiverRow(
             id=name,
-            reason=(getattr(row, "detail", "") or "")[:400] or
+            reason=_whole_token_head(getattr(row, "detail", "") or "", 400) or
             "waived with no reason recorded at the site").to_dict()]
+
+
+def _whole_token_head(text: str, limit: int) -> str:
+    """At most `limit` characters of `text`, never ending inside a token.
+
+    FX_P2 — a raw `[:400]` cut the step detail mid-PATH. MEASURED on
+    subservient (8HD-4, 2026-09-28): the derived waiver row of `rtl_gen` ended
+    "READ THE SKILL AT THIS PATH, NOT BY NAME: `/tmp/vibeic-rtl-step-<id>/run`"
+    -- the first 5 characters of the project name. The record's path remap
+    matches whole paths only, so the half path survived into the published
+    phase-2 record, and `project_outputs_in_tree_check` refused it as a
+    dangling external reference and halted phase 2. A path is one token and
+    half a path is not evidence (#2061 R-01, `_evidence_head`): the window now
+    keeps a token whole or drops it. A text inside the limit is unchanged."""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    if not text[limit].isspace():
+        cut = max(head.rfind(" "), head.rfind("\n"), head.rfind("\t"))
+        # not even one token fits: keep the first one WHOLE, as
+        # `_evidence_head` keeps a first line whole.
+        head = head[:cut] if cut > 0 else text.split(None, 1)[0]
+    return head.rstrip()
 
 
 # ── the ONE boundary with the GATE reason vocabulary ─────────────────────
