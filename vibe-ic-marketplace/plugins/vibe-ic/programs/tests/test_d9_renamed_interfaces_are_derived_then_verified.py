@@ -30,6 +30,7 @@ sys.path.insert(0, str(PROGRAMS))
 sys.path.insert(0, str(TESTS))
 
 import staged_rtl_reused_ip_manifest_emit as SRM        # noqa: E402
+from _staged_top_module import EXTRACTION_STRATEGY as STAGED  # noqa: E402
 
 DOC = """# L3 — External Interface
 
@@ -47,8 +48,14 @@ The I/O cell library is delegated to the PDK i/o pad defaults.
 
 
 def _p(name, direction, staged, width=1):
-    return {"name": name, "direction": direction, "width": width,
+    """An L9 top_ports entry as phase 1 writes it: a staged-top port carries
+    the staged-top harvest's extraction strategy (D2's `accept_renames` reads
+    that as the RTL speaking, not the document)."""
+    port = {"name": name, "direction": direction, "width": width,
             "declared_by_staged_top": staged}
+    if staged:
+        port["extraction_strategy"] = STAGED
+    return port
 
 
 IMPL = [_p("clk", "input", True), _p("rst", "input", True),
@@ -302,3 +309,70 @@ def test_the_waive_names_the_ports_the_glue_author_must_pair(
     assert said is owed, res.detail[-600:]
     if owed:
         assert "o_memory_ack" in res.detail and "--check" in res.detail
+
+
+
+# --------------------------------------------------------------------------- #
+# D2's acceptance rule: a derived pair gives a side only if phase 2 accepts it
+# --------------------------------------------------------------------------- #
+def test_a_derived_pair_with_a_width_disagreement_is_rejected_not_written(
+        tmp_path, capsys):
+    """The subservient shape: the document says a 4-bit address (memsize it
+    declares), the RTL was built 3 bits wide. R1 still DERIVES the pair, and
+    the acceptance rule rejects it: it is reported with the reason, never
+    written, and its ports stay unresolved."""
+    doc_only = [q if q["name"] != "o_memory_addr" else
+                _p("o_memory_addr", "output", False, 4) for q in DOC_ONLY]
+    proj = _project(tmp_path, doc_only=doc_only)
+    mf = _emit(proj)
+    assert {"l9": ["o_memory_addr"],
+            "rtl": ["o_memory_raddr", "o_memory_waddr"]} not in _lr(
+        mf["renamed_interfaces"])
+    assert len(mf["renamed_interfaces"]) == 3
+    der = mf["renamed_interfaces_derivation"]
+    assert [r["l9"] for r in der["rejected"]] == [["o_memory_addr"]]
+    assert any("3 bit(s)" in x and "is 4" in x
+               for x in der["rejected"][0]["reasons"])
+    unresolved = {u["port"]: u for u in der["unresolved"]}
+    assert set(unresolved) == {"o_memory_raddr", "o_memory_waddr"}
+    assert "accept_renames" in unresolved["o_memory_waddr"]["reason"]
+    rc, res = _check(proj, capsys)
+    assert rc == 1
+    assert set(res["unpaired_implemented_ports"]) == {"o_memory_raddr",
+                                                      "o_memory_waddr"}
+
+
+def test_an_authored_pair_the_acceptance_rule_rejects_is_refused(
+        tmp_path, capsys):
+    proj = _project(tmp_path, impl=_NO_DATA_IMPL, manifest={
+        "reused_ip": True, "renamed_interfaces": [
+            {"l9": ["o_memory_addr"],
+             "rtl": ["o_memory_raddr", "o_memory_waddr"]},
+            {"l9": ["o_memory_we", "o_memory_cyc"],
+             "rtl": ["o_memory_wen", "o_memory_ren"]},
+            # same group, but i_memory_data is an INPUT and o_memory_ack an output
+            {"l9": ["i_memory_data"], "rtl": ["o_memory_ack"]}]})
+    rc, res = _check(proj, capsys)
+    assert rc == 1
+    refused = [v for v in res["pairs"] if v["verdict"] == "REFUSED"]
+    assert len(refused) == 1 and "is output, l9" in refused[0]["reason"]
+
+
+def test_a_parameterised_rtl_width_is_read_exactly_before_acceptance(tmp_path):
+    """subservient's own shape: `[aw-1:0]` with `aw = $clog2(memsize)`. The
+    width comes from the header's own defaults (step 2's exact readers), so
+    the derivation rejects the pair 15.5ic would reject, instead of accepting
+    it on an unknown width."""
+    doc_only = [q if q["name"] != "o_memory_addr" else
+                _p("o_memory_addr", "output", False, 4) for q in DOC_ONLY]
+    proj = _project(tmp_path, doc_only=doc_only)
+    v = proj / "input/vendor_rtl/core.v"
+    v.write_text(v.read_text()
+                 .replace("module core (", "module core #(parameter memsize = 8,\n"
+                          "  parameter aw = $clog2(memsize)) (")
+                 .replace("[2:0] o_memory_waddr", "[aw-1:0] o_memory_waddr")
+                 .replace("[2:0] o_memory_raddr", "[aw-1:0] o_memory_raddr"))
+    assert "[aw-1:0] o_memory_waddr" in v.read_text()
+    der = _emit(proj)["renamed_interfaces_derivation"]
+    assert [r["l9"] for r in der["rejected"]] == [["o_memory_addr"]]
+    assert any("3 bit(s)" in x for x in der["rejected"][0]["reasons"])
