@@ -84,6 +84,14 @@ ASKED_BEFORE_PRODUCER = "ASKED_BEFORE_PRODUCER"
 #: or when the subject was FOUND and merely not examined.
 NOT_APPLICABLE_BY_STRUCTURE = _sa.NOT_APPLICABLE_BY_STRUCTURE
 
+#: llv1 W14 / owner decision 5 — the implementation flow the run was
+#: dispatched with (``--librelane``) was given this step and did not perform
+#: it. NOT skip-eligible: a gap the flag caused must never read as the
+#: harmless skip CAPABILITY_ABSENT is. It is not a design failure either, so
+#: it lands in the INCOMPLETE tier, and the record names the remedy (run the
+#: default flow, or a flow that performs the step).
+FLOW_DOES_NOT_PERFORM = "FLOW_DOES_NOT_PERFORM"
+
 REASON_CLASSES = (
     DESIGN_DECLARED_NA,
     NOT_APPLICABLE_BY_STRUCTURE,
@@ -93,6 +101,7 @@ REASON_CLASSES = (
     BLOCKED_BY_UPSTREAM,
     EXECUTION_ERROR,
     ZERO_DENOMINATOR,
+    FLOW_DOES_NOT_PERFORM,
 )
 REASON_CLASS_SET = frozenset(REASON_CLASSES)
 
@@ -111,6 +120,7 @@ INCOMPLETE = frozenset({
     BLOCKED_BY_UPSTREAM,
     EXECUTION_ERROR,
     ZERO_DENOMINATOR,
+    FLOW_DOES_NOT_PERFORM,
 })
 
 

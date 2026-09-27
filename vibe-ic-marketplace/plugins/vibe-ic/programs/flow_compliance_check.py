@@ -4834,6 +4834,9 @@ _VACUOUS_CLASS_TO_ROW_CLASS = {
     # A tool this checkout cannot reach. The row word for it already exists.
     _reason_taxonomy.CAPABILITY_ABSENT: _T.ReasonClass.TOOL_ABSENT.value,
     _reason_taxonomy.EXECUTION_ERROR: _T.ReasonClass.EXECUTION_ERROR.value,
+    # llv1 W14: the flow the run was dispatched with did not perform the step.
+    _reason_taxonomy.FLOW_DOES_NOT_PERFORM:
+        _T.ReasonClass.FLOW_DOES_NOT_PERFORM.value,
 }
 
 

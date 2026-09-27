@@ -57,6 +57,10 @@ def one_record_per_reason_class():
         (T.BLOCKED_BY_UPSTREAM, "BLOCKED", "the producing step has not run"),
         (T.EXECUTION_ERROR, "INCOMPLETE", "the caller supplied the wrong path"),
         (T.ZERO_DENOMINATOR, "INCOMPLETE", "0 of 13 documents were examined"),
+        # llv1 W14: the flow the run was dispatched with did not perform it.
+        (T.FLOW_DOES_NOT_PERFORM, "INCOMPLETE",
+         "the librelane flow did not perform this step; remedy: run the "
+         "default flow"),
     ]
     return [
         F._p0_gate_record(

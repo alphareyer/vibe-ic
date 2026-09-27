@@ -265,6 +265,15 @@ class ReasonClass(str, enum.Enum):
     #: shape of a non-PASS, whichever verdict carries it.
     MISSING_ARTEFACT = "missing_artefact"
 
+    #: The implementation flow the run was dispatched with (``--librelane``)
+    #: was given this step and did not perform it. Not red: nothing about the
+    #: design failed. Never a PASS: nothing was examined. The reason names the
+    #: remedy (run the default flow, or a flow that performs the step). Owner
+    #: decision 5 (llv1 W14): `tool_absent`/CAPABILITY_ABSENT would have read
+    #: as a harmless skip for a gap the flag itself caused. A tool run that
+    #: FAILED is `Verdict.FAIL` (decision 8), never this.
+    FLOW_DOES_NOT_PERFORM = "flow_does_not_perform"
+
 
 class Disclosure(str, enum.Enum):
     """Informational facts about a result that are NOT outcomes.

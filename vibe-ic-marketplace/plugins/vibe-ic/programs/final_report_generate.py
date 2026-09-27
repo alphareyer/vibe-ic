@@ -637,6 +637,19 @@ def _runner_step_record(project: Path, step: str):
     return "", {}
 
 
+def _render_impl_section(project: Path) -> List[str]:
+    """The implementation-flow section, echoed from the phase-3 (else phase-2)
+    one-shot record's `impl` / `step_producers`. `[]` when neither record
+    names a flow (every default run)."""
+    import _impl_outcomes as _io
+    for name in ("phase3_one_shot.json", "phase2_one_shot.json"):
+        rec = _find_report(project, name)
+        j = _safe_json(rec) if rec else None
+        if isinstance(j, dict) and j.get("impl"):
+            return _io.summary_lines(j)
+    return []
+
+
 def _verdict_from_json(j: Optional[Any]) -> Optional[str]:
     """The stated verdict inside a PV JSON artefact, or None when the artefact
     is not a dict / states none. Producers use different field names, so they
@@ -2765,6 +2778,10 @@ def _render(project: Path, run_audit: bool = True,
     # 9-class set and looks for them in either AGENT_REPORT.md or
     # reports/final_summary.md). #461: the same table is pre-written to
     # disk before the internal audit so the gate sees current hashes.
+    # llv1 W14: which flow implemented the design, and who produced each step
+    # the flag changes. Nothing is emitted for the default flow.
+    md.extend(_render_impl_section(project))
+
     md.extend(_render_attestation_section(project))
 
     # Self-attestation

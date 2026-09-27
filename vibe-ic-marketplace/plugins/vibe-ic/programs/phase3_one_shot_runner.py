@@ -76187,6 +76187,10 @@ def main() -> int:
     }
     if verdict_note:
         summary["verdict_note"] = verdict_note
+    # llv1 W14: the implementation flow and each step's producer. {} for the
+    # default flow, so a default run's record is byte-for-byte unchanged.
+    import _impl_outcomes as _io
+    summary.update(_io.report_fields(project))
     # Per-step output view — <project>/steps/<phase>/<stage>/<id>_<slug>/.
     # A phase3-driven run used to end with NO steps tree (only the top
     # orchestrator built one), so the backend evidence had no per-step folder
