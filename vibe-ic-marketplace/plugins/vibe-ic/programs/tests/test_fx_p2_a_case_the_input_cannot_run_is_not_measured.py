@@ -170,6 +170,19 @@ def test_a_case_that_ran_and_failed_stays_fail(tmp_path):
     assert BOOT["name"] in msg
 
 
+def test_an_input_shaped_case_that_ran_and_failed_stays_fail(tmp_path):
+    """The input-gap classifier is asked ONLY about a case that did not run.
+    A case whose text looks exactly like an input gap, but which the record
+    says EXECUTED and FAILED, is a FAIL -- nothing may move it to
+    NOT_MEASURED."""
+    proj = _project(tmp_path, [BOOT, HEX, PROSE],
+                    {BOOT["name"]: "PASS", HEX["name"]: "FAIL",
+                     PROSE["name"]: "PASS"})
+    rc, msg = GATE._evaluate(proj)
+    assert rc == 1, (rc, msg)
+    assert HEX["name"] in msg
+
+
 def test_a_case_this_flow_could_run_stays_blocking(tmp_path):
     """A family claims the boot case; its non-execution is this flow's."""
     proj = _project(tmp_path, [BOOT, HEX], {})
