@@ -238,8 +238,12 @@ and #712 (wrapper-exposed output) are **dead code without this file**.
 >      `accept_renames` reason);
 >    - each net with no side (`nets_without_side`);
 >    - each net on two sides (`nets_on_two_sides`).
->    rc 3 means a design document could not be read (NOT_MEASURED, with the
->    reason): fix the document, not the pairs. Fix the pair, never the check. A
+>    rc 3 is NOT_MEASURED, with the reason: the check cannot know an extent.
+>    That is a design document that could not be read, a placement token whose
+>    bit range does not resolve from a declared parameter (`o_x[SW-1:2]`, SW
+>    undeclared), or a port whose width neither its RTL header nor L9 states.
+>    Fix the document or the declaration, not the pairs. An RTL width the header
+>    cannot state (`[DW/8-1:0]`) is counted at L9's width, as 15.5ic does. Fix the pair, never the check. A
 >    port you reported under rule 1 keeps rc 1. That is the honest state until
 >    the document places it, so say so in the hand-off.
 

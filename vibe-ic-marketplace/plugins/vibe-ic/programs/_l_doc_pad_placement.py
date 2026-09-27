@@ -584,14 +584,16 @@ def declared_renames(project: Path) -> List[Tuple[set, set]]:
 
     ONE READER for step 2's budget and step 15.5ic's ring (both through
     `accepted_renames`, never raw). From the reused-IP SOURCE_MANIFEST (absent,
-    or `reused_ip` not true: no pair) it reads exactly two keys:
-      * `renamed_interfaces`, the hand-authored pairs;
+    or `reused_ip` not true: no pair) it reads:
+      * the hand-authored pairs, under every rename key the gates' parser
+        `_manifest_renamed_groups` reads (`_MANIFEST_RENAME_KEYS`:
+        `renamed_interfaces`, `renamed_buses`, `interface_renames`);
       * `derived_pad_pairs` (`DERIVED_PAD_PAIRS_KEY`), the pairs
         `renamed_interface_derive` derives from the design's own records.
     This is the only reader of `derived_pad_pairs`. `spec_conformance_check`
-    and `l9_rtl_pin_consistency_check` read `renamed_interfaces` alone, as a
-    declared rename, and never the derived pairs: a derived pair is evidence
-    of a side, not of a rename. The whole-interface pair
+    and `l9_rtl_pin_consistency_check` read the rename keys, as declared
+    renames, and never the derived pairs: a derived pair is evidence of a
+    side, not of a rename. The whole-interface pair
     `l9_rtl_pin_consistency_check` derives in memory is not read here either;
     it spans placement groups and carries no side. Both keys are parsed by the
     parser that check owns.
