@@ -86,12 +86,17 @@ def _l9(project: Path) -> Tuple[str, List[Dict[str, Any]]]:
     return str(doc.get("top_module") or ""), ports
 
 
-def _rtl_top_ports(project: Path, top: str) -> Optional[Tuple[str, Set[str]]]:
-    """(file, port names) of the IMPLEMENTED top, from the staged RTL first and
-    the design's vendor RTL second. None when no file defines ``top``."""
+def _rtl_top_ports(project: Path, top: str
+                   ) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+    """(file, ports) of the IMPLEMENTED top, from the staged RTL first and the
+    design's vendor RTL second; each port carries its direction and, where the
+    header's own defaults state it exactly, its width (the step-2 readers:
+    literals, then `$clog2`/name expressions). None when no file defines
+    ``top``."""
     if not top:
         return None
-    from slot_pad_budget_check import parse_top_ports
+    from slot_pad_budget_check import (parse_top_ports, top_parameter_defaults,
+                                       top_parameter_derived_defaults)
     roots = [_pl.rtl_dir(project), project / "input" / "vendor_rtl"]
     for root in roots:
         if not root.is_dir():
@@ -103,24 +108,41 @@ def _rtl_top_ports(project: Path, top: str) -> Optional[Tuple[str, Set[str]]]:
                 continue
             if not re.search(r"\bmodule\s+" + re.escape(top) + r"\b", text):
                 continue
-            ports = parse_top_ports(text, top)
+            params = top_parameter_defaults(text, top)
+            params.update({k: v["value"] for k, v in
+                           top_parameter_derived_defaults(text, top,
+                                                          params).items()})
+            ports = parse_top_ports(text, top, params)
             if ports:
                 return (str(f.relative_to(project)),
-                        {str(p["name"]) for p in ports})
+                        [{"name": str(p["name"]),
+                          "direction": p.get("dir") or p.get("direction"),
+                          "width": p.get("width")} for p in ports])
     return None
 
 
-def _implemented(project: Path, top: str, l9_ports: List[Dict[str, Any]]
-                 ) -> Tuple[Set[str], str]:
+def _implemented_ports(project: Path, top: str,
+                       l9_ports: List[Dict[str, Any]]
+                       ) -> Tuple[List[Dict[str, Any]], str]:
     rtl = _rtl_top_ports(project, top)
     if rtl is not None:
         return rtl[1], f"{rtl[0]}: module {top} port list"
-    staged = {str(p["name"]) for p in l9_ports
-              if p.get("declared_by_staged_top") is True}
+    staged = [p for p in l9_ports if p.get("declared_by_staged_top") is True]
     if staged:
         return staged, f"{L9_REL}: top_ports[declared_by_staged_top=true]"
     raise NotApplicable(f"no RTL defines the top module {top!r} and L9 "
                         "labels no port as declared by the staged top")
+
+
+def _implemented(project: Path, top: str, l9_ports: List[Dict[str, Any]]
+                 ) -> Tuple[Set[str], str]:
+    ports, source = _implemented_ports(project, top, l9_ports)
+    return {str(p["name"]) for p in ports}, source
+
+
+def _acceptance(pairs: List[Tuple[set, set]], l9_ports, impl_ports):
+    """D2's `accept_renames`: phase 2's own acceptance rule for a pair."""
+    return LPP.accept_renames(pairs, l9_ports, impl_ports)
 
 
 def _placement(project: Path):
@@ -160,13 +182,14 @@ def derive(project: Path) -> Dict[str, Any]:
     project = Path(project)
     top, l9_ports = _l9(project)
     placement, params = _placement(project)
-    implemented, impl_source = _implemented(project, top, l9_ports)
+    impl_ports, impl_source = _implemented_ports(project, top, l9_ports)
+    implemented = {str(p["name"]) for p in impl_ports}
     by_name = {str(p["name"]): p for p in l9_ports}
 
     exact, _unres = LPP.expand_side_ports(placement, params)
     placed: Set[str] = {n.split("[")[0] for nets in exact.values() for n in nets}
-    impl_ports = [by_name.get(n) or {"name": n} for n in sorted(implemented)]
-    _grouped, records = LPP.resolve_declared_pad_groups(placement, impl_ports)
+    impl_named = [by_name.get(n) or {"name": n} for n in sorted(implemented)]
+    _grouped, records = LPP.resolve_declared_pad_groups(placement, impl_named)
     for r in records:
         placed.update(r["matched_ports"])
     unplaced = [n for n in sorted(implemented) if n not in placed]
@@ -249,11 +272,30 @@ def derive(project: Path) -> Dict[str, Any]:
         key = tuple(sorted(decided[u]["l9"]))
         grouped.setdefault(key, []).append(u)
         evidence.setdefault(key, []).append({"rtl": u, **decided[u]})
+    # A DERIVED PAIR GIVES A SIDE ONLY IF PHASE 2 ACCEPTS IT (D2's rule). A
+    # rejected one is reported with its reasons, and its ports stay unresolved
+    # with that reason: a width the document and the RTL disagree on is a
+    # finding, never something a derivation papers over.
+    _acc, rejected = _acceptance(
+        [(set(k), set(v)) for k, v in sorted(grouped.items())],
+        l9_ports, impl_ports)
+    rejected_keys = {tuple(r["l9"]) for r in rejected}
+    for r in rejected:
+        for u in r["rtl"]:
+            unresolved.append({
+                "port": u, "family_atoms": sorted(_atoms(u)),
+                "candidate_sides": [decided[u]["side"]],
+                "candidate_doc_ports": r["l9"],
+                "reason": ("its derived pair was rejected by the rename "
+                           "acceptance rule (accept_renames): "
+                           + "; ".join(r["reasons"]))})
     pairs = [{"l9": list(k), "rtl": sorted(v), "derived_by": PROGRAM,
-              "evidence": evidence[k]} for k, v in sorted(grouped.items())]
+              "evidence": evidence[k]} for k, v in sorted(grouped.items())
+             if k not in rejected_keys]
     return {"implemented_ports_source": impl_source,
             "unplaced_implemented_ports": unplaced,
-            "pairs": pairs, "unresolved": unresolved}
+            "pairs": pairs, "unresolved": unresolved,
+            "rejected": rejected}
 
 
 # --------------------------------------------------------------------------- #
@@ -264,7 +306,8 @@ def verify(project: Path, pairs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     project = Path(project)
     top, l9_ports = _l9(project)
     placement, _params = _placement(project)
-    implemented, _src = _implemented(project, top, l9_ports)
+    impl_ports, _src = _implemented_ports(project, top, l9_ports)
+    implemented = {str(p["name"]) for p in impl_ports}
     l9_names = {str(p["name"]) for p in l9_ports}
     from l9_rtl_pin_consistency_check import _manifest_renamed_groups
     out: List[Dict[str, Any]] = []
@@ -289,6 +332,10 @@ def verify(project: Path, pairs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if len(sides) > 1:
             why.append(f"l9 names sit in {len(sides)} groups {sides}: one "
                        "pair per placement group")
+        if l9s and rtls:
+            _a, _r = _acceptance([(l9s, rtls)], l9_ports, impl_ports)
+            for r in _r:
+                why.extend(x for x in r["reasons"] if x not in " ".join(why))
         out.append({"pair": {"l9": sorted(l9s), "rtl": sorted(rtls)},
                     "verdict": "REFUSED" if why else "VERIFIED",
                     "side": sides[0] if len(sides) == 1 else None,
@@ -328,6 +375,7 @@ def apply_to_manifest(project: Path, mf: Dict[str, Any]) -> Dict[str, Any]:
     mf["renamed_interfaces"] = d["pairs"]
     mf["renamed_interfaces_derivation"] = {
         "verdict": "UNRESOLVED" if d["unresolved"] else "DERIVED",
+        "rejected": d["rejected"],
         "program": PROGRAM,
         "implemented_ports_source": d["implemented_ports_source"],
         "unresolved": d["unresolved"],
