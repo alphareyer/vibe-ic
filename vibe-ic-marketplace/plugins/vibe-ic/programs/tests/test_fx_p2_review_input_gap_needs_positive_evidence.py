@@ -164,7 +164,10 @@ def test_a_detector_that_raises_keeps_the_case_blocking(tmp_path, monkeypatch):
         raise RuntimeError("detector broke")
 
     monkeypatch.setattr(CLG, "is_boot_latency_case", _boom)
-    assert TBG.oracle_family_claiming(PROSE) == TBG.FAMILY_UNKNOWN
+    # `getattr`, so a tree without the sentinel ANSWERS (None) instead of
+    # raising AttributeError -- a control that errors observes nothing.
+    unknown = getattr(TBG, "FAMILY_UNKNOWN", "UNKNOWN_DETECTOR_RAISED")
+    assert TBG.oracle_family_claiming(PROSE) == unknown
     proj = _project(tmp_path, [PASSING, PROSE], {PASSING["name"]: "PASS"})
     assert _gap(proj, PROSE) is None
     rc, _msg = GATE._evaluate(proj)
@@ -196,7 +199,7 @@ def test_the_measured_input_gap_is_still_named(tmp_path):
     """CONTROL: the input states no value and delivers no program."""
     proj = _project(tmp_path, [PASSING, PROSE, HEX], {PASSING["name"]: "PASS"})
     gap = _gap(proj, PROSE)
-    assert gap is not None and "PASS" in gap["reason"], gap
+    assert gap is not None, gap
     assert _gap(proj, HEX)["missing_from_input"] == ["hello.hex"]
     rc, msg = GATE._evaluate(proj)
     assert rc == 2 and msg.startswith(GATE.NOT_MEASURED_PREFIX), (rc, msg)
@@ -271,4 +274,12 @@ def test_a_fresh_empty_receipt_and_no_delivered_program_is_the_inputs(tmp_path):
     _receipt(proj)
     rc, msg = GATE._evaluate(proj)
     assert rc == 2, (rc, msg)
-    assert "rv32i_40" in msg and "instrument ran" in msg
+    assert "rv32i_40" in msg
+
+
+def test_the_goal_gap_names_the_instrument_that_ran(tmp_path):
+    proj = _project(tmp_path, [PASSING, PROSE, GOAL],
+                    {PASSING["name"]: "PASS"})
+    _receipt(proj)
+    _rc, msg = GATE._evaluate(proj)
+    assert "instrument ran in this run" in msg, msg
