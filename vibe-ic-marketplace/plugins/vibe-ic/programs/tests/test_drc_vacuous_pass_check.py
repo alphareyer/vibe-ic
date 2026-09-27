@@ -897,6 +897,69 @@ def test_empty_router_report_is_zero_when_its_own_step_says_so(tmp_path):
     assert not any(f.rule == "DRC_REPORT_EMPTY" for f in res.findings)
 
 
+def test_sdr_pre_repair_empty_snapshot_uses_exact_router_provenance(tmp_path):
+    """The pre-repair file is a COPY of the source router's empty report,
+    not a second checker whose empty output needs its own verdict."""
+    _write_gds(tmp_path / "chip_top.gds", n_shapes=512)
+    pnr = tmp_path / "phase3" / "stage3" / "pnr"
+    pnr.mkdir(parents=True)
+    (pnr / "routed_router.drc.rpt").write_bytes(b"")
+    (pnr / "routed.drc.rpt").write_text(_router_projection(0))
+    for name in ("sdr_transaction", "sdr_transaction_reconverge"):
+        txn = pnr / name
+        txn.mkdir()
+        (txn / "pre_repair_router.drc.rpt").write_bytes(b"")
+
+    res = dvp.audit(tmp_path)
+    assert res.verdict == "PASS"
+    assert res.passed is True
+    assert sum(f.rule == "DRC_REPORT_EMPTY_IS_ZERO" for f in res.findings) == 3
+    assert not any(f.rule == "DRC_REPORT_EMPTY" for f in res.findings)
+
+
+def test_sdr_snapshot_without_its_source_router_report_still_refuses(tmp_path):
+    _write_gds(tmp_path / "chip_top.gds", n_shapes=512)
+    pnr = tmp_path / "phase3" / "stage3" / "pnr"
+    txn = pnr / "sdr_transaction"
+    txn.mkdir(parents=True)
+    (pnr / "routed.drc.rpt").write_text(_router_projection(0))
+    (txn / "pre_repair_router.drc.rpt").write_bytes(b"")
+
+    res = dvp.audit(tmp_path)
+    assert res.verdict == "INCONCLUSIVE"
+    assert any(f.rule == "DRC_REPORT_EMPTY" for f in res.findings)
+
+
+def test_sdr_snapshot_with_nonzero_final_route_still_refuses(tmp_path):
+    _write_gds(tmp_path / "chip_top.gds", n_shapes=512)
+    pnr = tmp_path / "phase3" / "stage3" / "pnr"
+    txn = pnr / "sdr_transaction"
+    txn.mkdir(parents=True)
+    (pnr / "routed_router.drc.rpt").write_bytes(b"")
+    (pnr / "routed.drc.rpt").write_text(_router_projection(7))
+    (txn / "pre_repair_router.drc.rpt").write_bytes(b"")
+
+    res = dvp.audit(tmp_path)
+    assert res.verdict == "INCONCLUSIVE"
+    assert any(f.rule == "DRC_REPORT_EMPTY" for f in res.findings)
+
+
+def test_empty_final_drc_report_is_not_a_transaction_snapshot(tmp_path):
+    _write_gds(tmp_path / "chip_top.gds", n_shapes=512)
+    pnr = tmp_path / "phase3" / "stage3" / "pnr"
+    pnr.mkdir(parents=True)
+    (pnr / "routed_router.drc.rpt").write_bytes(b"")
+    (pnr / "routed.drc.rpt").write_text(_router_projection(0))
+    signoff = tmp_path / "phase3" / "reports"
+    signoff.mkdir()
+    (signoff / "drc_signoff.rpt").write_bytes(b"")
+
+    res = dvp.audit(tmp_path)
+    assert res.verdict == "INCONCLUSIVE"
+    assert any(f.rule == "DRC_REPORT_EMPTY" and
+               f.file.endswith("drc_signoff.rpt") for f in res.findings)
+
+
 def test_deleting_the_projection_takes_the_pass_away(tmp_path):
     """THE DIRECTION THAT MATTERS. The rule is keyed on PROOF, so removing a
     file can only ever remove proof -- never buy a pass. Same tree as above

@@ -100,6 +100,10 @@ Honest-failure contract
                                     CONTRADICTION when it is not. Emptiness
                                     never speaks for itself: see
                                     `emitted_empty_proof`
+  - 0-byte SDR pre-repair snapshot -> zero only when its exact source router
+                                    report is also empty AND the source step's
+                                    final OpenROAD count is zero; otherwise
+                                    INCONCLUSIVE
   - measured layout has 0 shapes -> INCONCLUSIVE (exit 1)  -- the bug, decisive
   - subject-kind candidates disagree and none is named -> INCONCLUSIVE (exit 1)
                                     -- NOT_MEASURED, the subject is unknown
@@ -371,6 +375,40 @@ def completion_proof(fp: Path) -> Optional[Path]:
 _PROOF_MAX_BYTES = 8 << 20
 
 
+def _transaction_snapshot_proof(fp: Path, in_scope: Sequence[Path]
+                                ) -> Optional[Tuple[Path, int]]:
+    """Prove an SDR pre-repair snapshot copied a clean router report.
+
+    The phase-3 producer copies ``routed_router.drc.rpt`` into either SDR
+    transaction directory as ``pre_repair_router.drc.rpt``. A clean router
+    writes the source as zero bytes; its sibling ``routed.drc.rpt`` states the
+    tool's final count. This is a provenance edge, not a second DRC run.
+    Require both exact source files in the discovered population and a parsed
+    final count of zero. A missing source or a dirty route stays INCONCLUSIVE.
+    """
+    if (fp.name != "pre_repair_router.drc.rpt" or fp.parent.name not in
+            ("sdr_transaction", "sdr_transaction_reconverge")):
+        return None
+    pnr = fp.parent.parent
+    source = pnr / "routed_router.drc.rpt"
+    projection = pnr / "routed.drc.rpt"
+    if source not in in_scope or projection not in in_scope:
+        return None
+    try:
+        if projection.stat().st_size > _PROOF_MAX_BYTES:
+            return None
+        if _read_input_bytes(source) != b"":
+            return None
+        text = _read_input_text(projection, errors="replace")
+    except OSError:
+        return None
+    if _sdf.classify_text(text).kind != _sdf.OPENROAD:
+        return None
+    if _sdf.router_iter_last_count(text) != 0:
+        return None
+    return projection, 0
+
+
 def emitted_empty_proof(fp: Path, in_scope: Sequence[Path]
                         ) -> Optional[Tuple[Path, int]]:
     """The step's own record that the tool WROTE `fp` and what it counted.
@@ -404,11 +442,11 @@ def emitted_empty_proof(fp: Path, in_scope: Sequence[Path]
     same property: there is no file whose REMOVAL buys a pass. Deleting the
     sibling deletes the proof.
 
-    STEP-LOCAL, and the ascent `_databases_beside` allows is deliberately NOT
-    taken. Only `fp.parent` is searched, and only among reports THIS RUN
-    ALREADY DISCOVERED, so a finished checker in another step cannot speak for
-    this one -- the cross-step attribution error `DRC_STEP_NEVER_REPORTED`
-    exists to refuse.
+    STEP-LOCAL, except the exact SDR pre-repair snapshot provenance edge. The
+    generic search uses only `fp.parent`, among reports THIS RUN ALREADY
+    DISCOVERED; a finished checker in another step cannot speak for this one.
+    The SDR exception requires its source report in the parent router step
+    plus that same step's parsed final zero count.
 
     Returns ``(sibling, final_count)`` or ``None``. A count > 0 is returned
     too, and is a CONTRADICTION for the caller to refuse: a route that ended
@@ -439,7 +477,7 @@ def emitted_empty_proof(fp: Path, in_scope: Sequence[Path]
         if n is None:
             continue
         return cand, int(n)
-    return None
+    return _transaction_snapshot_proof(fp, in_scope)
 
 
 _LAYOUT_GLOBS = ["*.gds", "*.gds.gz", "*.gdsii", "*.GDS",
@@ -1970,13 +2008,19 @@ def audit(path: Path, layout: Optional[Path] = None,
             rec["empty_reads_as_zero"] = True
             rec["emitted_proof"] = str(sibling)
             rec["emitted_proof_count"] = 0
+        snapshot = (fp.name == "pre_repair_router.drc.rpt" and fp.parent.name
+                    in ("sdr_transaction", "sdr_transaction_reconverge"))
+        explanation = (
+            "the exact source router report is also empty and its step's "
+            "final OpenROAD count is 0 — this file is a copy, not a second "
+            "DRC run"
+            if snapshot else
+            f"this step's own {Path(sibling).name} states its tool ended on "
+            "0 violation(s) — the tool writes one record per violation")
         result.findings.append(Finding(
             rule="DRC_REPORT_EMPTY_IS_ZERO", severity="INFO",
-            message=f"DRC report file is 0 bytes AND this step's own "
-                    f"{Path(sibling).name} states its tool ended on 0 "
-                    f"violation(s) — a tool that writes one record per "
-                    f"violation and nothing else has written an empty report "
-                    f"because it had nothing to write. Read as ZERO, and NOT "
+            message=f"DRC report file is 0 bytes AND {explanation}. "
+                    f"Read as ZERO, and NOT "
                     f"as a measurement: this file attests nothing on its own, "
                     f"and the verdict in this scope still comes from the "
                     f"report(s) that stated a count.",
