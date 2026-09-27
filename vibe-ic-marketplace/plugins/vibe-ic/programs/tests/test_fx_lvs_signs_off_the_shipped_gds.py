@@ -265,3 +265,34 @@ def test_a_declared_model_that_does_not_exist_is_refused(tmp_path):
     root = pdk_tree(tmp_path, config=CONFIG.replace('.spice"', '.spi"'))
     files, why = runner._pdk_cell_spice_models(_pdk(root), None)
     assert files == [] and "does not exist" in why
+
+
+def test_placed_hard_macros_are_read_and_abstracted_by_name(tmp_path,
+                                                            monkeypatch):
+    """A hard macro the routed DEF places: OpenROAD must read its LEF to write
+    the powered netlist, and the extraction compares it by its pins (its own
+    LVS verified its devices). A macro the DEF does not place is neither."""
+    root = pdk_tree(tmp_path)
+    macro_lef = tmp_path / "macros.lef"
+    macro_lef.write_text("MACRO acme_macro\nEND acme_macro\n"
+                         "MACRO acme_unused\nEND acme_unused\n")
+    project = _project(tmp_path, gds=b"labelled")
+    (project / "phase3" / "stage3" / "pnr" / f"{TOP}.def").write_text(
+        f"VERSION 5.8 ;\nDESIGN {TOP} ;\nCOMPONENTS 2 ;\n"
+        f"- u_mac acme_macro + PLACED ( 0 0 ) N ;\n"
+        f"- u_inv {LIB}__inv_1 + PLACED ( 0 0 ) N ;\n"
+        f"END COMPONENTS\nEND DESIGN\n")
+    tools = Recorder(answer_tools(RoutedDefTools(MATCH), TOP))
+    monkeypatch.setattr(runner, "_docker_exec", tools)
+    monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
+    import dataclasses
+    pdk = dataclasses.replace(_pdk(root), macro_lefs=[str(macro_lef)])
+    row = runner.step_lvs(project, TOP, pdk, "x")
+    assert row.extras["shipped_gds_lvs"] == "PASS", row.detail
+    work = project / "phase3" / "stage3" / "extracted" / "shipped_gds"
+    assert f"read_lef {{{macro_lef}}}" in (
+        work / "write_powered_netlist.tcl").read_text()
+    magic = [c for c in tools.calls if "magic" in c and "GDS=" in c]
+    assert len(magic) == 1 and "ABSTRACT_CELLS=acme_macro " in magic[0], magic
+    rec = json.loads((project / row.extras["shipped_gds_record"]).read_text())
+    assert rec["abstracted_cells"] == ["acme_macro"]

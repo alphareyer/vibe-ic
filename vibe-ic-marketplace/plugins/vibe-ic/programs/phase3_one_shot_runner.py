@@ -54197,7 +54197,8 @@ _PDK_TCL_ENV_REF_RE = re.compile(
 
 #: LibreLane's `scripts/magic/extract_spice.tcl`, `MAGIC_EXT_USE_GDS` branch:
 #: read the stream, annotate the cells' port order from the PDK's SPICE models,
-#: abstract the hard macros (`MAGIC_EXT_ABSTRACT_CELLS`), then a device-level
+#: abstract the hard macros and pad cells the DEF places
+#: (`MAGIC_EXT_ABSTRACT_CELLS`), then a device-level
 #: hierarchical extraction with `extract unique` (LibreLane's default `all`).
 _MAGIC_SHIPPED_GDS_EXT2SPICE_TCL = """\
 crashbackups stop
@@ -54310,19 +54311,6 @@ def _pdk_existing_files(pattern: str, container: Optional[str],
     return [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
 
 
-def _lef_macro_names(lef_paths: List[str]) -> List[str]:
-    """The MACRO names the hard-macro LEFs declare (the cells the shipped-GDS
-    extraction abstracts, as LibreLane's `MAGIC_EXT_ABSTRACT_CELLS` does)."""
-    names: List[str] = []
-    for f in lef_paths or []:
-        try:
-            text = Path(f).read_text(errors="replace")
-        except OSError:
-            continue
-        names.extend(re.findall(r"^\s*MACRO\s+(\S+)", text, re.M))
-    return list(dict.fromkeys(names))
-
-
 def _shipped_gds_lvs_record(project: Path, doc: Dict[str, Any]) -> str:
     path = _pl.reports_phase3_dir(project) / "lvs_shipped_gds_verdict.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -54398,10 +54386,12 @@ def _run_shipped_gds_lvs(project: Path, top: str, pdk: "PdkConfig",
     pnl = work / f"{cell_top}.pnl.v"
     pnl_log = work / "write_powered_netlist.log"
     pnl_tcl = work / "write_powered_netlist.tcl"
-    lefs = [str(pdk.tech_lef), str(pdk.cell_lef)] + [str(f) for f in
-                                                     pdk.macro_lefs]
+    # Hard macros and pad-ring IO cells the DEF places: the same LEFs every
+    # deck that re-opens the routed DEF reads (container paths already).
+    extra_lefs = _def_reopen_extra_lefs_c(def_file, pdk, container)
     pnl_tcl.write_text(
-        "".join(f"read_lef {{{c(f)}}}\n" for f in lefs)
+        "".join(f"read_lef {{{f}}}\n" for f in
+                [c(pdk.tech_lef), c(pdk.cell_lef)] + extra_lefs)
         + f"read_def {{{c(def_file)}}}\n"
         + f"write_verilog -include_pwr_gnd {{{c(pnl)}}}\nexit\n")
     rc, _out, err = _declared_session_exec(
@@ -54430,7 +54420,12 @@ def _run_shipped_gds_lvs(project: Path, top: str, pdk: "PdkConfig",
     ext_log = work / "ext2spice.log"
     ext_tcl = work / f"ext2spice_{cell_top}.tcl"
     ext_tcl.write_text(_MAGIC_SHIPPED_GDS_EXT2SPICE_TCL)
-    abstract = _lef_macro_names([str(f) for f in pdk.macro_lefs])
+    # Those cells are compared by their pins, not re-extracted to devices
+    # (LibreLane's `MAGIC_EXT_ABSTRACT_CELLS`): a hard macro is verified by its
+    # own LVS, a pad by its library. Recorded, so the scope is never implicit.
+    placed = {m for _, m in _def_reopen_resolution(def_file).components}
+    abstract = sorted({n for f in extra_lefs for n in _LEF_MACRO_NAME_RE.findall(
+        _read_pdk_text(f, container) or "") if n in placed})
     record["abstracted_cells"] = abstract
     env = (
         f'export CAD_ROOT="${{CAD_ROOT:-$(dirname "$(dirname '
