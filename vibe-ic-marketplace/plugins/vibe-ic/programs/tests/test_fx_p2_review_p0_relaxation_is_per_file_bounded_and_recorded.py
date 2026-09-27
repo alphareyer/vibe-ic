@@ -278,3 +278,39 @@ def test_an_unrelaxed_pass_prints_no_disclosure(monkeypatch, tmp_path,
     evidence = json.loads(out.split("TOOL_EVIDENCE:", 1)[1])
     assert "disclosures" not in evidence
     assert "strict_exit_code" not in evidence["tools"]["Yosys.JsonHeader"]
+
+
+def test_the_flows_own_ledger_row_carries_the_disclosure(monkeypatch, tmp_path,
+                                                         capsys):
+    """The clause names no `--json`, so the audit's gate_execution_ledger row
+    (what stage1_compliance.json publishes) held only rc/verdict and the
+    relaxation reached no record of the run. The gate's REAL stdout, through
+    the audit's real snippet and recorder, must land its DISCLOSURE lines on
+    the row."""
+    import flow_compliance_check as FCC
+    root = _project(tmp_path)
+    _fake(monkeypatch, _in(root, "ip_core.v"))
+    monkeypatch.setattr(sys, "argv", ["flow_step_output_content_check.py",
+                                      str(root), "--mode", "rtl"])
+    assert C.main() == 0
+    stdout = capsys.readouterr().out
+    snippet = FCC.output_snippet(stdout, "")
+
+    def _inner(project, cmd):
+        return FCC._ProgramCheckOutcome(True, snippet, 0)
+
+    monkeypatch.setattr(FCC, "__check_program_exit_zero", _inner)
+    cmd = "flow_step_output_content_check . --mode rtl"
+    before = len(FCC._GATE_LEDGER)
+    FCC._check_program_exit_zero(root, cmd)
+    row = FCC._GATE_LEDGER[-1]
+    assert len(FCC._GATE_LEDGER) == before + 1 and row["cmd"] == cmd
+    assert row["verdict"] == "PASS"
+    assert any(d.startswith("DECLARATION_ORDER_RELAXED")
+               for d in row.get("disclosures", [])), row
+
+
+def test_a_gate_that_discloses_nothing_gets_no_disclosure_field():
+    import flow_compliance_check as FCC
+    assert FCC.gate_stdout_disclosures("PASS: rtl output content\n"
+                                       "TOOL_EVIDENCE: {}\n") == []
