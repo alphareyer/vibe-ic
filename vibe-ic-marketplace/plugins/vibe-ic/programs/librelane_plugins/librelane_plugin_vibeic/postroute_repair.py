@@ -19,7 +19,10 @@ and `OpenROAD.RCX`, on the routed ODB:
    database carries plus `VIBEIC_PRR_PG_RULES_TCL`), and an ECO route: only
    the nets touching a created, resized or moved cell lose their wires and
    are routed again (`detailed_route -nets`);
-4. re-verify: the ECO route's DRC count, `check_antennas`, and the
+4. antenna residue: when the ECO route added antenna-violating nets,
+   OpenROAD's `repair_antennas` (the PDK's DIODE_CELL) and a scoped route of
+   the new diodes' nets only;
+5. re-verify: the ECO route's DRC count, `check_antennas`, and the
    before/after census on the same parasitics.
 
 It JUDGES NOTHING and adopts nothing.  One run is one CANDIDATE; the
@@ -45,7 +48,7 @@ from librelane.steps.step import MetricsUpdate, Step, ViewsUpdate
 
 __all__ = ["PostRouteRepair"]
 
-_DRT_VARS = ("DRT_THREADS", "DRT_OPT_ITERS")
+_DRT_VARS = ("DRT_THREADS", "DRT_OPT_ITERS", "DRT_ANTENNA_REPAIR_MARGIN")
 
 
 @Step.factory.register()
@@ -128,6 +131,14 @@ class PostRouteRepair(ResizerStep):
                 "nets that share a violation with a routed net and route "
                 "again.",
                 default=2,
+            ),
+            Variable(
+                "VIBEIC_PRR_ANTENNA_REPAIR",
+                bool,
+                "When the ECO route added antenna-violating nets, run "
+                "OpenROAD's repair_antennas with the PDK's DIODE_CELL and "
+                "route only the new diodes' nets again (scoped, guarded).",
+                default=True,
             ),
             Variable(
                 "VIBEIC_PRR_CENSUS_ONLY",

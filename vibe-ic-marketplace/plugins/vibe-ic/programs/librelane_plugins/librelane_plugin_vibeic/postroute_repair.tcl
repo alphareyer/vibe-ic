@@ -272,43 +272,105 @@ proc vic_violation_neighbours {drc named} {
 # set is routed again, at most VIBEIC_PRR_ECO_EXPANSIONS times. Every attempt
 # is measured by the same guard against ITS entry, and each entry is taken
 # after the set's wires are gone, so an attempt can only return a route no
-# worse than the one it was given.
-set ::vic_eco_attempts 0
-set ::vic_eco_ok 1
-if {[dict size $::vic_dirty] > 0} {
+# worse than the one it was given. Returns 1 when a route was accepted.
+proc vic_eco_route {varname tag} {
+    upvar #0 $varname dirty
+    if {[dict size $dirty] == 0} { return 1 }
     set_thread_count $::env(DRT_THREADS)
-    set ::vic_eco_ok 0
     set limit [expr {[info exists ::env(VIBEIC_PRR_ECO_EXPANSIONS)]
                      ? $::env(VIBEIC_PRR_ECO_EXPANSIONS) : 2}]
+    set attempt 0
     while {1} {
-        dict for {name net} $::vic_dirty {
+        dict for {name net} $dirty {
             set wire [$net getWire]
             if {$wire ne "NULL"} { odb::dbWire_destroy $wire }
             $net setWireOrdered 0
         }
         source $::env(SCRIPTS_DIR)/openroad/common/grt.tcl
-        set drc $::env(STEP_DIR)/eco_route.$::vic_eco_attempts.drc
+        set drc $::env(STEP_DIR)/${tag}.$attempt.drc
         set drt_args [list -droute_end_iter $::env(DRT_OPT_ITERS) -or_seed 42 -verbose 1 \
-                          -output_drc $drc -nets [dict keys $::vic_dirty]]
+                          -output_drc $drc -nets [dict keys $dirty]]
+        incr attempt
         incr ::vic_eco_attempts
         if {![catch {log_cmd detailed_route {*}$drt_args} err]} {
-            set ::vic_eco_ok 1
             file copy -force $drc $::env(STEP_DIR)/eco_route.drc
-            break
+            return 1
         }
-        vic_say "eco attempt $::vic_eco_attempts refused: $err"
-        set more [vic_violation_neighbours $drc $::vic_dirty]
-        if {$::vic_eco_attempts > $limit || [dict size $more] == 0} { break }
-        vic_say "eco expands by [dict size $more] neighbour net(s): [dict keys $more]"
-        set ::vic_dirty [dict merge $::vic_dirty $more]
+        vic_say "$tag attempt $attempt refused: $err"
+        set more [vic_violation_neighbours $drc $dirty]
+        if {$attempt > $limit || [dict size $more] == 0} { return 0 }
+        vic_say "$tag expands by [dict size $more] neighbour net(s): [dict keys $more]"
+        set dirty [dict merge $dirty $more]
     }
 }
+
+set ::vic_eco_attempts 0
+set ::vic_eco_ok [vic_eco_route ::vic_dirty eco_route]
 utl::metric_integer vibeic__prr__eco_attempt__count $::vic_eco_attempts
 utl::metric_integer vibeic__prr__eco_net__final_count [dict size $::vic_dirty]
 if {!$::vic_eco_ok} {
     puts stderr "VIBEIC_PRR_ECO_ROUTE_REFUSED: the scoped route added whole-design violations on every attempt ($::vic_eco_attempts); the candidate is not written"
     exit 1
 }
+
+# ---- 6b. antenna residue -> the tool's antenna repair ----------------------
+# review70 step 32: route each residual to the instrument that repairs it.
+# MEASURED on the spm LL15..21 chain (T102 r2): the DRV repair's ECO route
+# took antenna-violating nets 0 -> 1, and the candidate was refused for it.
+# A candidate that ADDED antenna violations gets OpenROAD's own
+# `repair_antennas` (the PDK's DIODE_CELL, as LibreLane's drt.tcl runs it);
+# only the new diodes are legalized, and only their nets are routed again,
+# by the same scoped, guarded route. The judge downstream still counts.
+set ::vic_ant_eco [check_antennas]
+set ::vic_diodes [list]
+if {$::vic_ant_eco > $::vic_ant_before && [info exists ::env(DIODE_CELL)]
+    && $::env(VIBEIC_PRR_ANTENNA_REPAIR)} {
+    set names [dict create]
+    foreach inst [$::block getInsts] { dict set names [$inst getName] 1 }
+    set ant_args [list [lindex [split $::env(DIODE_CELL) "/"] 0]]
+    append_if_exists_argument ant_args DRT_ANTENNA_REPAIR_MARGIN -ratio_margin
+    if {[catch {log_cmd repair_antennas {*}$ant_args} err]} {
+        vic_say "antenna repair refused: $err"
+    }
+    foreach inst [$::block getInsts] {
+        if {![dict exists $names [$inst getName]]} { lappend ::vic_diodes $inst }
+    }
+    if {[llength $::vic_diodes]} {
+        set mine [dict create]
+        foreach inst $::vic_diodes { dict set mine [$inst getName] 1 }
+        set locked [list]
+        foreach inst [$::block getInsts] {
+            if {[dict exists $mine [$inst getName]]} { continue }
+            set status [$inst getPlacementStatus]
+            if {$status ni {LOCKED FIRM COVER}} {
+                lappend locked [list $inst $status]
+                $inst setPlacementStatus LOCKED
+            }
+        }
+        log_cmd detailed_placement \
+            -max_displacement [subst { $::env(PL_MAX_DISPLACEMENT_X) $::env(PL_MAX_DISPLACEMENT_Y) }]
+        foreach pair $locked { [lindex $pair 0] setPlacementStatus [lindex $pair 1] }
+        check_placement -verbose
+        global_connect
+        set ::vic_ant_dirty [dict create]
+        foreach inst $::vic_diodes {
+            lappend ::vic_created $inst
+            foreach it [$inst getITerms] {
+                set net [$it getNet]
+                if {$net ne "NULL" && [$net getSigType] ni {POWER GROUND}} {
+                    dict set ::vic_ant_dirty [$net getName] $net
+                }
+            }
+        }
+        if {![vic_eco_route ::vic_ant_dirty antenna_route]} {
+            puts stderr "VIBEIC_PRR_ECO_ROUTE_REFUSED: the antenna repair's scoped route added whole-design violations"
+            exit 1
+        }
+    }
+}
+utl::metric_integer vibeic__prr__antenna__after_eco $::vic_ant_eco
+utl::metric_integer vibeic__prr__antenna__diodes [llength $::vic_diodes]
+vic_say "antenna after eco=$::vic_ant_eco diodes=[llength $::vic_diodes]"
 
 # ---- 7. re-verify ------------------------------------------------------------
 # Router DRC: the fork's scoped route refuses a result with more whole-design
