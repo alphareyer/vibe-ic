@@ -7706,24 +7706,42 @@ def _rtl_gen_reused_ip_handoff(
                 f"(reused_ip:true) so #659/#711/#712 pin-gate "
                 f"relaxations are live."
                 if _mf_emitted else "")
-    # D9: name ports with no derived pad-group pair in the author hand-off.
-    _rid_unresolved = []
+    # D9 — what the glue author still owes for pad sides, read from
+    # the check this emit just refreshed (authored + derived pairs),
+    # so a port paired since the last run is not named again.
+    _rid_der, _rid_chk = {}, {}
     if _mf_emitted:
         try:
-            _rid_unresolved = (json.loads(
-                (project / _mf_emitted).read_text())
-                .get("renamed_interfaces_derivation") or {}
-            ).get("unresolved") or []
+            _rid_mf = json.loads((project / _mf_emitted).read_text())
+            _rid_der = _rid_mf.get("renamed_interfaces_derivation") or {}
+            _rid_chk = _rid_mf.get("renamed_interfaces_check") or {}
         except (OSError, ValueError, AttributeError):
-            _rid_unresolved = []
-    if _rid_unresolved:
+            _rid_der, _rid_chk = {}, {}
+    if _rid_der.get("verdict") == "NOT_MEASURED":
         _mf_note += (
-            f" renamed_interfaces: {len(_rid_unresolved)} "
-            f"implemented port(s) have no derivable pad-group pair "
-            f"({', '.join(str(u.get('port')) for u in _rid_unresolved[:8])})"
-            f" — author one pair per placement group, then "
-            f"`renamed_interface_derive.py <project> --check` must "
-            f"exit 0.")
+            f" renamed_interfaces: the pad-side derivation did not "
+            f"run ({_rid_der.get('reason')}); no port got a side "
+            f"from it.")
+    elif _rid_chk.get("verdict") == "FAIL":
+        _unpaired = _rid_chk.get("unpaired_implemented_ports") or []
+        _refused = [v for v in (_rid_chk.get("pairs") or [])
+                    + (_rid_chk.get("derived_pairs") or [])
+                    if v.get("verdict") == "REFUSED"]
+        _two = _rid_chk.get("ports_on_two_sides") or {}
+        _mf_note += (
+            f" renamed_interfaces: {len(_unpaired)} implemented "
+            f"port(s) have no pad side"
+            + (f" ({', '.join(str(u) for u in _unpaired[:8])})"
+               if _unpaired else "")
+            + (f", {len(_refused)} pair(s) REFUSED ("
+               + "; ".join(f"{v['pair']}: {v.get('reason')}"
+                           for v in _refused[:3]) + ")"
+               if _refused else "")
+            + (f", port(s) on two sides {_two}" if _two else "")
+            + " — author one pair per placement group (or report a "
+            "port with no document counterpart as a placement "
+            "gap), then `renamed_interface_derive.py <project> "
+            "--check` must exit 0.")
     # Authoring handoff (`catalog-glue-author` still authors the
     # chip_top wrapper by hand) — so it gets the digests too.
     _hint, _hint_extras = _stage_author_knowledge_digests(project)
