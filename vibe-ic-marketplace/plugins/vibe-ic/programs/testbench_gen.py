@@ -1267,11 +1267,11 @@ def case_input_gap(project: Path, case: dict,
       * this run's own `sim/tb/` holds a testbench for it that is more than the
         substance floor (the flow had one and did not execute it);
       * an oracle family claims it, or a family's detector could not answer
-        (`FAMILY_UNKNOWN`);
+        (`FAMILY_UNKNOWN`) -- including the stated-vector family for every
+        case whose expected half STATES a checkable value: the input supplied
+        both halves, so the missing piece is a driver;
       * it states no stimulus at all (no evidence either way);
-      * every image its stimulus names IS in the design input;
-      * it names no image and its expected half STATES a checkable value --
-        the input supplied both halves, so the missing piece is a driver.
+      * every image its stimulus names IS in the design input.
     The input's gap is exactly: a named image absent from `input/**`, or no
     named image, no delivered program and an expected half that states no
     value (e.g. "PASS" -- the verdict of a program the input never delivers).
@@ -1296,8 +1296,6 @@ def case_input_gap(project: Path, case: dict,
     present = _input_file_leaves(project)
     missing = [n for n in named if n.lower() not in present]
     if named and not missing:
-        return None
-    if not named and states_a_checkable_answer(case):
         return None
     looked = list(_DELIVERED_TB_DIRS) + ["input/** (every file, by name)"]
     expected = str(case.get("expected") or "").strip()
