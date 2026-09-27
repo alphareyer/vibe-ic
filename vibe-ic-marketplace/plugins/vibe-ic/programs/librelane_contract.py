@@ -239,12 +239,18 @@ def emit_config(project: Path, pdk: str, output: Path) -> dict:
     c = clocks[0]
     _set(result, sources, 'CLOCK_PERIOD', c.get('period_ns'), 'L8_TIMING_WAVEFORM.clock_domains[primary].period_ns')
     _set(result, sources, 'CLOCK_PORT', c.get('source_pin'), 'L8_TIMING_WAVEFORM.clock_domains[primary].source_pin')
-    rtl = project / 'phase2/stage1/rtl' / (str(l9.get('top_module', '')) + '.v')
+    # The design's whole build closure (cmp3 D8): the read phase-3 synthesis
+    # and the Step-5 proof take (`_chip_synth_read.chip_rtl_files`), not the
+    # one file named after the top -- a multi-file core (subservient) lost
+    # every submodule, and Yosys.JsonHeader stopped on the first of them.
+    import _chip_synth_read as CSR
+    rtl = CSR.chip_rtl_files(project / 'phase2/stage1/rtl')
     chip_top = project / 'phase3/stage3/pnr/chip_top_io.v'
-    if rtl.is_file() and chip_top.is_file():
-        _set(result, sources, 'VERILOG_FILES', ['dir::' + str(rtl.relative_to(project)),
-                                                'dir::' + str(chip_top.relative_to(project))],
-             'L9_INTEGRATION_SPEC.top_module + phase3/stage3/pnr/chip_top_io.v')
+    if rtl and chip_top.is_file():
+        _set(result, sources, 'VERILOG_FILES',
+             ['dir::' + str(path.relative_to(project)) for path in (*rtl, chip_top)],
+             '_chip_synth_read.chip_rtl_files(phase2/stage1/rtl) (the read phase-3 '
+             'synthesis and the Step-5 proof take) + phase3/stage3/pnr/chip_top_io.v')
     sdc = project / 'phase3/stage3/pnr/constraint.sdc'
     if sdc.is_file():
         for key in ('PNR_SDC_FILE', 'SIGNOFF_SDC_FILE'):
@@ -1649,6 +1655,34 @@ def _apply_layout_top(project: Path, config: dict, sources: dict) -> None:
          f"{source} (the pad-carrying top around the core {core!r})")
 
 
+def _check_synthesised_read(project: Path, config: dict, sources: dict) -> None:
+    """A layout chain reads the RTL the netlist was synthesised from, or refuses.
+
+    Phase-3 synthesis records the read it built (`chip_read_built.json`,
+    every file with its sha256). The chain's VERILOG_FILES, minus the chip-top
+    wrapper step 15.5ic wrote after synthesis, must be that read exactly.
+    """
+    import _chip_synth_read as CSR
+    record_path = CSR.built_record_path(project)
+    files = config.get('VERILOG_FILES')
+    if not files or not record_path.is_file():
+        return
+    wrapper = 'phase3/stage3/pnr/chip_top_io.v'
+    paths = [project / str(f).removeprefix('dir::') for f in files]
+    read = [p for p in paths if p.resolve() != (project / wrapper).resolve()]
+    built = _load(record_path)
+    # The define decision and the top are synthesis's own; only the file
+    # read is this chain's to match.
+    differences = CSR.chip_read_differences(
+        {'files': built.get('files') or []},
+        {'files': [{'name': p.name, 'sha256': digest(p)} for p in read]})
+    rel = record_path.relative_to(project)
+    if differences:
+        raise Refusal('LL_LAYOUT_RTL_NOT_THE_SYNTHESISED_READ',
+                      f"VERILOG_FILES vs {rel}: {'; '.join(differences)}")
+    sources['VERILOG_FILES'] += f'; equals {rel} (file names and sha256)'
+
+
 def resolve_step_configs(project: Path, image: str, pdk: str,
                          step_ids: list[str], *, pdk_root: Path,
                          docker: str = 'docker',
@@ -1666,18 +1700,18 @@ def resolve_step_configs(project: Path, image: str, pdk: str,
     root.mkdir(parents=True, exist_ok=True)
     design = root / 'design.json'
     emitted = emit_config(project, pdk, design)
-    if _DIE_STEPS & set(step_ids) or overlay or layout_top(project):
-        sources = _load(design.with_suffix('.provenance.json'))
-        _apply_runner_floorplan(project, emitted, sources, step_ids)
-        _apply_layout_top(project, emitted, sources)
-        for key, (value, source) in (overlay or {}).items():
-            for older in _LEVER_SUPERSEDES.get(key, ()):
-                if older in emitted:
-                    emitted.pop(older)
-                    sources[older] = f'superseded by {key} ({source})'
-            _set(emitted, sources, key, value, source)
-        write_json(design, emitted)
-        write_json(design.with_suffix('.provenance.json'), sources)
+    sources = _load(design.with_suffix('.provenance.json'))
+    _check_synthesised_read(project, emitted, sources)
+    _apply_runner_floorplan(project, emitted, sources, step_ids)
+    _apply_layout_top(project, emitted, sources)
+    for key, (value, source) in (overlay or {}).items():
+        for older in _LEVER_SUPERSEDES.get(key, ()):
+            if older in emitted:
+                emitted.pop(older)
+                sources[older] = f'superseded by {key} ({source})'
+        _set(emitted, sources, key, value, source)
+    write_json(design, emitted)
+    write_json(design.with_suffix('.provenance.json'), sources)
     requested = root / 'steps.json'
     write_json(requested, step_ids)
     script = '''import json,sys
