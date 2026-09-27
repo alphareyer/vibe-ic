@@ -12,11 +12,13 @@ Two owner rulings on the gate F9 wired:
    spawn from a copy of the runner and requires the contradiction back. The
    audit cannot see whether ``main`` calls the step at all, so a second arm
    reads ``main``'s plan appends and requires the uncalled step to be seen.
-2. The input declares serv as its reuse; the glue never instantiates it. Yosys's
+2. (F28, F28b) The input declares serv as its reuse; the glue never instantiates it. Yosys's
    ``hierarchy -top`` drops every serv module, so the gate judged zero rows and
    answered PASS. It now FAILs with ``CATALOG_REUSE_DECLARED_NOT_INSTANTIATED``.
    An IP only the pull record names is not held to that (the design never said
-   it would use it), which the control below pins.
+   it would use it), which the control below pins. F28b: the same holds for a
+   declared IP whose manifest declares NO synth-safe parameter (picorv32); it
+   used to stand down as DESIGN_DECLARED_NA without elaborating anything.
 
 Real Yosys (host, else the EDA image), as in test_f9. ``tempfile.mkdtemp``
 rather than ``tmp_path``: in the EDA image ``tmp_path`` carries a newline.
@@ -138,6 +140,60 @@ def test_the_unsafe_path_keeps_its_own_code(root):
     _, report = _step1_verdict(p)
     assert report['verdict'] == 'FAIL'
     assert report['failure_codes'] == ['CATALOG_SYNTH_SAFE_VALUE_NOT_PINNED']
+
+
+# -- F28b: reachability does not depend on synth-safe parameters -----------
+
+#: picorv32's manifest carries no ``synth_safe_params``; this L2 matches it and
+#: names it, so it is the design's declared reuse.
+L2_DECLARES_PICORV32 = {'cpu_isa': 'rv32i', 'cpu_arch': 'multi-cycle',
+                        'description': 'The design reuses the picorv32 core '
+                                       'from the IP catalog.'}
+
+
+def _picorv32_design(root, glue):
+    p = _design(root, glue, L2_DECLARES_PICORV32)
+    (p / 'phase2/stage1/rtl/serv_top.v').rename(p / 'phase2/stage1/rtl/picorv32.v')
+    return p
+
+
+def test_a_declared_ip_without_synth_safe_params_the_top_never_reaches_fails(root):
+    p = _picorv32_design(root, 'unreached')
+    result, report = _step1_verdict(p)
+    assert report['declaration']['declared_catalog_reuse'] == ['picorv32']
+    assert report['ips'] == []          # nothing to judge a value of ...
+    assert (report['verdict'], result.status) == ('FAIL', 'FAIL'), report
+    assert report['failure_codes'] == [CODE]   # ... and still owed to the top
+    assert report['reached_ips'] == []
+
+
+def test_a_declared_ip_without_synth_safe_params_that_is_reached_passes(root):
+    p = _picorv32_design(root, 'pinned')
+    result, report = _step1_verdict(p)
+    assert (report['verdict'], result.status) == ('PASS', 'PASS'), report
+    assert report['reached_ips'] == ['picorv32']
+    assert report['instances'] == []
+
+
+def test_the_runner_step_fails_a_declared_ip_without_params_it_never_reaches(root):
+    import design_one_shot_runner as dor
+    sr = dor.step_catalog_synth_safe_params(_picorv32_design(root, 'unreached'))
+    assert (sr.status, sr.extras['failure_codes']) == ('FAIL', [CODE]), sr
+
+
+def test_a_declared_ip_naming_no_rtl_file_is_refused_never_passed(root, monkeypatch):
+    # The refusal arm: with no file to own a module, "not reached" cannot be
+    # read, so the gate refuses (rc 1) before elaborating anything.
+    import importlib
+    gate = importlib.import_module('catalog_synth_safe_params_check')
+    p = _picorv32_design(root, 'pinned')
+    monkeypatch.setattr(gate, 'judged_ips', lambda project, declared: [
+        {'ip_name': 'picorv32', 'files': [], 'params': {}, 'manifest': None,
+         'declared': True}])
+    assert gate.main([str(p)]) == 1
+    report = json.loads((p / REPORT).read_text())
+    assert (report['verdict'], 'yosys' in report) == ('NOT_MEASURED', False), report
+    assert "['picorv32'] names no RTL file" in report['reason']
 
 
 # -- ruling 1: the runner blocks on it inline ------------------------------
