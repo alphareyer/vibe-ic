@@ -125,3 +125,25 @@ def test_the_victim_passes_after_the_leaking_file():
                         "test_emitter_writes_then_refreshes_its_own_output"
                         "[_emit_case_golden_oracle]"), out[-3000:]
     assert cp.returncode == 0, out[-3000:]
+
+
+def test_a_file_keeps_its_own_registrations_for_its_own_tests(tmp_path):
+    """The restore must not reach INTO the registering file.
+
+    `test_issue626_m1_pairs_the_designs_own_def` loads its own
+    `def_gds_port_power_restore` at collection, and one of its tests loads a
+    program that imports that name and must get the same object. Restoring an
+    earlier importer's copy for that file's own tests failed it -- only when
+    something collected earlier had imported the module (xdist; every worker
+    collects the whole suite), never with the file alone."""
+    first = tmp_path / "test_aaa_imports_it_first.py"
+    first.write_text(
+        "import sys\nsys.path.insert(0, %r)\n"
+        "import def_gds_port_power_restore  # noqa: F401\n\n"
+        "def test_imported():\n    pass\n" % str(_TESTS.parent))
+    cp = _pytest(first, _TESTS / "test_issue626_m1_pairs_the_designs_own_def.py")
+    out = cp.stdout + cp.stderr
+    assert _passed(out, "test_issue626_m1_pairs_the_designs_own_def.py::"
+                        "test_the_label_check_and_the_merge_share_ONE_rule"), \
+        out[-3000:]
+    assert cp.returncode == 0, out[-3000:]

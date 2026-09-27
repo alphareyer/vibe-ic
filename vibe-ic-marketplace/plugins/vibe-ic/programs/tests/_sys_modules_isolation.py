@@ -20,8 +20,9 @@ So the restore lives in one place instead of 101. Around the collection of
 every test module and around every test, an entry that named a PROGRAM module
 (one whose file lives under `programs/`) and now names a different object, or
 nothing, is put back. Nothing else is touched:
-  * a test's own copy stays bound in the test's globals, and stays registered
-    for the duration of the test that registered it;
+  * a test module's own tests still see what that module registered while it
+    was collected (installed for each of its tests, removed after), and a
+    test's own registrations stay for the duration of that test;
   * entries a test ADDS are left alone -- that is an ordinary first import,
     and every later importer shares it;
   * non-program modules (stdlib, third-party, stubs of those) are not ours to
@@ -62,19 +63,49 @@ def restore_program_modules(before: Dict[str, object]) -> list:
     return restored
 
 
+#: test-module path -> the program entries that module registered (or removed:
+#: None) while it was collected. Its OWN tests run against that view.
+_OWN_VIEW: Dict[str, Dict[str, object]] = {}
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_make_collect_report(collector):
+    """Record what collecting this test module did to program entries, then
+    undo it for everybody else.
+
+    Undoing it for the module's OWN tests too was a regression, measured:
+    `test_issue626_m1_pairs_the_designs_own_def` loads its own
+    `def_gds_port_power_restore` at collection and, in a test, loads a program
+    that imports that name and must get the SAME object. With another file's
+    copy put back, it got that one and failed -- but only when an earlier file
+    had imported the module, i.e. under xdist, never with the file alone."""
     if not isinstance(collector, pytest.Module):
         yield
         return
     before = dict(sys.modules)
     yield
+    own: Dict[str, object] = {}
+    for name, mod in list(sys.modules.items()):
+        if before.get(name) is not mod and _is_program(mod):
+            own[name] = mod
+    for name, mod in before.items():
+        if name not in sys.modules and _is_program(mod):
+            own[name] = None
+    if own:
+        _OWN_VIEW[str(collector.path)] = own
     restore_program_modules(before)
 
 
 @pytest.fixture(autouse=True)
-def _program_modules_are_restored_after_each_test():
+def _program_modules_are_restored_after_each_test(request):
+    """Run each test against its own module's collection-time view, and
+    leave the global view as it found it."""
     before = dict(sys.modules)
+    for name, mod in _OWN_VIEW.get(str(request.node.path), {}).items():
+        if mod is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = mod
     yield
     restore_program_modules(before)
 
