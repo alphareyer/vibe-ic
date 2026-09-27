@@ -175,3 +175,12 @@ def test_an_explicit_overlay_still_outranks_the_chip_top(tmp_path, resolver):
     configs, sources = resolve(tmp_path, p, ['OpenROAD.GlobalPlacement'],
                                overlay={'DESIGN_NAME': ('other', 'test overlay')})
     assert json.loads(configs['OpenROAD.GlobalPlacement'].read_text())['DESIGN_NAME'] == 'other'
+
+
+def test_a_record_naming_one_module_twice_is_no_chip_top(tmp_path, resolver):
+    """A record whose chip top IS its core wrapped nothing: no substitution,
+    and no conflict against a declared name either."""
+    p = chip(tmp_path, record=dict(RECORD, chip_top_module='core'), top_cell='other')
+    configs, sources = resolve(tmp_path, p, ['OpenROAD.GlobalPlacement'])
+    assert json.loads(configs['OpenROAD.GlobalPlacement'].read_text())['DESIGN_NAME'] == 'other'
+    assert sources['DESIGN_NAME'].endswith('answers.top_cell')
