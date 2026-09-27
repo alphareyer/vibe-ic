@@ -483,7 +483,9 @@ def _file_row(project: Path, ran: Ran, tool_file: Path, dest: Path,
         "source_logs": [{"path": l.relative_to(ran.run_dir).as_posix(),
                          "sha256": "sha256:" + digest(l)}
                         for l in _source_logs(ran, tool_file, cited)],
-        "measurement": _runner_measurement.derive(
+        # W0's rule: the one measurement a row may carry is the record read
+        # from the imported artefact itself, or null.
+        "measurement": _efm.derived_measurement(
             project, rel, _tlp.underlying_tool(ran.instance) or ""),
     }
     if view:
