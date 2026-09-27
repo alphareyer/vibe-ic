@@ -1449,11 +1449,96 @@ def _class_default(project: Path, step: str, named: dict[str, Any],
     return mode
 
 
+#: The flow-mode layer (llv1 W3): the mode of every switchable step under a
+#: project-wide implementation flow (`_impl_flow`, the `--librelane` record).
+#: It sits ABOVE the switch file, `PRODUCTION_DEFAULTS` and the class
+#: defaults, and exists only when the project carries a non-default record;
+#: a project without one never reaches it, so its answers are unchanged.
+#:
+#: Under `librelane` LibreLane produces the step, EXCEPT where the owner's
+#: ruling keeps vibe-ic's check because LibreLane's default is weaker (the
+#: eight places of COMMON.md). There the step is `dual` when its `librelane`
+#: mode would REPLACE vibe-ic's judgement, and `direct` when vibe-ic alone
+#: does the step:
+#:   2   direct  P0's blocking lint list (i). LibreLane's own lint is not lost:
+#:               Verilator.Lint + its three checkers are the first four steps
+#:               of segment 1 (MEASURED, spike 2026-09-28), so the phase-2 arm
+#:               is not run a second time.
+#:   3/4/5 direct  CDC, simulation and formal are vibe-ic's (no LibreLane step).
+#:   8   dual    `librelane` replaces the SDC semantic checks with OpenSTA's
+#:               read verdict; both must pass (a: the spec SDC is kept).
+#:   13  direct  vibe-ic LEC on the exact netlist segment 2 consumes (b); the
+#:               EQY arm is off by default and skips gf180 in LibreLane.
+#:   24  dual    LibreLane's IR is static and report-only; vibe-ic's budget
+#:               gates judge too (d).
+#:   25  direct  LibreLane has no EM step; vibe-ic runs it on the tool's ODB.
+#:   26  dual    Classic reports antenna violations without gating on them;
+#:               `librelane` would drop vibe-ic's own antenna re-read (h).
+#:   31  dual    LibreLane's reduced DRC deck, no ERC, LVS from a DEF
+#:               extraction; vibe-ic's step-31 decks stay (g).
+#:   23  librelane  vibe-ic's sta_report_check judges the tool's per-corner
+#:               reports in this mode (c).
+#:   32  librelane  Vibeic.PostRouteRepair inside the chain (e).
+#: Steps absent here (the analog A6/A7 arms) keep the ordinary resolution;
+#: v1 refuses an analog design under the flag at the front door (decision 13).
+IMPL_STEP_MODES: dict[str, dict[str, str]] = {
+    'librelane': {
+        '2': 'direct', '3': 'direct', '4': 'direct', '5': 'direct',
+        '7': 'librelane', '8': 'dual', '9': 'librelane', '10': 'librelane',
+        '13': 'direct',
+        '15': 'librelane', '15.5ic': 'librelane', '17': 'librelane',
+        '18': 'librelane', '19': 'librelane', '20': 'librelane',
+        '21': 'librelane', '22': 'librelane', '23': 'librelane',
+        '24': 'dual', '25': 'direct', '26': 'dual', '26.5ic': 'librelane',
+        '31': 'dual', '32': 'librelane', '33': 'librelane', '34': 'librelane',
+        '37': 'librelane', 'DT2': 'librelane', 'DT3': 'librelane',
+    },
+}
+
+
+def impl_step_modes(project: Path) -> dict[str, str] | None:
+    """The flow-mode layer in force for `project`, or None (the default flow).
+
+    None whenever the project has no implementation-flow record, without
+    reading anything else. A record that cannot be read refuses by its own
+    reason class, never falls back to the per-step answers: guessing the
+    default for a flagged project is the in-place switch decision 20 refuses.
+    A switch file naming a step the layer decides refuses the run with
+    `IMPL_SWITCH_CONFLICT` (decision 18), whichever answer either gives.
+    """
+    import _impl_flow
+    if not _impl_flow.record_path(project).exists():
+        return None
+    try:
+        impl = _impl_flow.recorded_impl(project)
+    except _impl_flow.ImplRefusal as exc:
+        raise Refusal(exc.reason_class, exc.detail) from None
+    layer = IMPL_STEP_MODES.get(impl)
+    if layer is None:
+        raise Refusal(_impl_flow.IMPL_NOT_YET_SUPPORTED,
+                      f"no flow-mode layer for '{impl}' in this release")
+    path = project / 'phase3/librelane_switch.json'
+    named = _load(path).get('steps', {}) if path.is_file() else {}
+    clash = sorted(step for step in named if step in layer)
+    if clash:
+        raise Refusal('IMPL_SWITCH_CONFLICT',
+                      f"{path} names step(s) {clash}, which the project's "
+                      f"'{impl}' flow ({_impl_flow.FLAG_FOR[impl]}) decides; "
+                      'a step is chosen by the flag or by the switch file, '
+                      'never both. Remove them from the switch file, or run '
+                      'the default flow.')
+    return dict(layer)
+
+
 def selected_mode(project: Path, step: str) -> str:
-    """The project's switch when it names the step, else the production
-    default for the step, else the design class's default (when the steps
-    it continues resolve to LibreLane too), else `direct`. An invalid mode is
-    refused, from either source."""
+    """The flow-mode layer's answer when the project has an implementation
+    flow that decides the step, else the project's switch when it names the
+    step, else the production default for the step, else the design class's
+    default (when the steps it continues resolve to LibreLane too), else
+    `direct`. An invalid mode is refused, from either source."""
+    layer = impl_step_modes(project)
+    if layer is not None and step in layer:
+        return layer[step]
     path = project / 'phase3/librelane_switch.json'
     steps = _load(path).get('steps', {}) if path.is_file() else {}
     if step in steps:
@@ -1471,13 +1556,16 @@ def class_defaults_in_force(project: Path) -> dict[str, str]:
     """The steps this project runs on a class default rather than its switch:
     `{step: mode}` for every class-default step the switch does not name and
     whose default survives `CLASS_DEFAULT_REQUIRES`. Empty for a project
-    outside every class."""
+    outside every class, and for a project under an implementation flow,
+    whose layer decides every class-default step."""
+    layer = impl_step_modes(project)
     path = project / 'phase3/librelane_switch.json'
     steps = _load(path).get('steps', {}) if path.is_file() else {}
     cls = design_class(project)
     return {step: selected_mode(project, step)
             for step in CLASS_PRODUCTION_DEFAULTS.get(cls or '', {})
             if step not in steps and step not in PRODUCTION_DEFAULTS
+            and step not in (layer or {})
             and _class_default(project, step, steps) is not None}
 
 
