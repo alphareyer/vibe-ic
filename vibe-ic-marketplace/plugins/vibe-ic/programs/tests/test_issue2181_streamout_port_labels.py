@@ -24,9 +24,11 @@ layout; the post-fix GDS carries exactly the **38** ports `routed.def` declares
 (`clk p rst y x[0..31] VDD VSS`, layer 81/10), and a full re-extraction of it
 yields `.SUBCKT chip_top` with **38** formal pins.
 
-Only the TOP cell's own texts are carried across. Preserving every cell's texts
-instead yields 5,655 pins with collided names (`A|AB$17`) once the merge pass
-flattens the hierarchy and `top_lvl_pins` promotes each labelled top net.
+Only the TOP cell's own texts survive a FLATTEN. Preserving every cell's texts
+through one yields 5,655 pins with collided names (`A|AB$17`) once the merge pass
+flattens the hierarchy and `top_lvl_pins` promotes each labelled top net. (N6
+moved that rule from the snap to the flattens: a hierarchical GDS now keeps
+the library cells' pin labels.)
 
 Locally verifiable here: that both Region passes carry texts, that the values
 are copied out BEFORE `clear()` (reading a Shape handle after clear aborts the
@@ -42,11 +44,23 @@ import phase3_one_shot_runner as R  # noqa: E402
 
 
 def test_grid_snap_carries_the_top_cells_texts():
+    """The top cell's texts survive the snap -- and, since N6, every other
+    cell's too. The top-only rule this test used to pin inside the snap
+    (`_keep_texts = cell.cell_index() in _top_ids`) now sits where its hazard
+    is, immediately before each FLATTEN (`_drop_child_texts()` in the snap's
+    exotic-transform fallback; the STexts clear in the layer merge), so a
+    flattened GDS still carries only the top's own labels -- the 5,655-pin
+    measurement below -- while the shipped hierarchical GDS keeps the library
+    cells' pin labels (N6: 0 of 31 cells labelled before, 31 of 31 after).
+    Behaviour is pinned in test_n6_shipped_std_cells_keep_their_pin_labels."""
     s = R._GDS_GRID_SNAP_PY
     assert "is_text()" in s, "the snap pass must carry texts across Region"
     assert "_top_ids = set(c.cell_index() for c in ly.top_cells())" in s
-    assert "_keep_texts = cell.cell_index() in _top_ids" in s
-    assert "if _keep_texts else []" in s
+    body = s.split("def _snap_local_shapes")[1].split("return n")[0]
+    assert "_texts = [s_.text for s_ in sh.each() if s_.is_text()]" in body
+    i_drop = s.index("_drop_child_texts()\n    for tc in ly.top_cells():")
+    assert i_drop < s.index("tc.flatten(-1, True)", i_drop), (
+        "a flatten must be preceded by the child-text clear")
 
 
 def test_layer_merge_carries_texts():
