@@ -611,8 +611,9 @@ vic_say "antenna after eco=$::vic_ant_eco diodes=[llength $::vic_diodes]"
 # ANTENNA_5 on that net as its 5th load -- a diode's pin is a load -- and the
 # candidate shipped max_fanout 5 > 4. A net the antenna phase pushed over the
 # cap gets a bounded repair_design round here (its buffers legalized alone,
-# their nets routed by the same scoped, guarded ECO route); re-verify below
-# refuses whatever is still over.
+# their nets routed by the same scoped, guarded ECO route). The first round
+# always runs: antenna repair can also create capacitance or slew residue.
+# Re-verify below refuses whatever is still over.
 set ::vic_fo_rounds 0
 # (the declared-cap test is spelled inline: this section is also exercised
 # on its own, with none of the procs above it)
@@ -620,9 +621,9 @@ set ::vic_fo_declared [expr {[info exists ::env(VIBEIC_PRR_MAX_FANOUT)]
     && [string is double -strict $::env(VIBEIC_PRR_MAX_FANOUT)]}]
 set ::vic_fo_added [expr {$::vic_fo_declared
     ? [vic_fanout_added $::vic_fo_repaired [vic_fanout_over]] : [dict create]}]
-while {[dict size $::vic_fo_added] && $::vic_fo_rounds < 2} {
+while {$::vic_fo_rounds == 0 || ([dict size $::vic_fo_added] && $::vic_fo_rounds < 2)} {
     incr ::vic_fo_rounds
-    vic_say "round $::vic_fo_rounds: [dict size $::vic_fo_added] net(s) pushed over max_fanout $::env(VIBEIC_PRR_MAX_FANOUT) after repair_design: $::vic_fo_added"
+    vic_say "round $::vic_fo_rounds: [dict size $::vic_fo_added] net(s) pushed over max_fanout after antenna repair: $::vic_fo_added"
     set names [dict create]
     foreach inst [$::block getInsts] { dict set names [$inst getName] [[$inst getMaster] getName] }
     log_cmd repair_design {*}$rd_args

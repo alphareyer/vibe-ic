@@ -443,13 +443,13 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
         _ledger_append(impl, row)
         print(f"candidate {lane} refused: {row['reason']}")
         return 0
-    # The same STAPostPNR census the sign-off gate reads must show closure,
-    # not merely fewer rows than the input. Its limits come from the design's
-    # own SDC; a residual fanout, slew or capacitance row cannot ship.
+    # An unmeasured DRV census cannot be promoted. Measured residue remains a
+    # step failure, but the closure may adopt a strictly improving route and
+    # must not keep a worse input solely because both routes still have DRV.
     drv = measurement.get("drv_count")
-    if type(drv) is not int or drv != 0:
+    if type(drv) is not int:
         row.update(decision="REFUSED",
-                   reason=("post-route DRV remains above the declared limits "
+                   reason=("post-route DRV was not measured "
                            f"(OpenROAD.STAPostPNR count={drv!r})"))
         _ledger_append(impl, row)
         print(f"candidate {lane} refused: {row['reason']}")
@@ -751,9 +751,15 @@ def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path
     blocks it. A missing or malformed STAPostPNR census leaves no fresh output,
     so the declared-output check refuses it instead of accepting a marker.
     """
+    def refuse(reason: str) -> None:
+        report["declared_repair_publication"] = {
+            "status": "NOT_MEASURED", "reason": reason}
+        write_json(source, report)
+
     if report.get("verdict") != "PASS":
+        refuse(f"step 32 verdict {report.get('verdict')!r} is not PASS")
         return
-    baseline = report.get("baseline") or {}
+    baseline = report.get("input_baseline") or report.get("baseline") or {}
     final = report.get("final") or {}
     floors = report.get("floors") or {}
     before = [baseline.get(k) for k in ("drv_count", "setup_ws_min", "hold_ws_min")]
@@ -763,13 +769,16 @@ def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path
     if (any(type(v) is not int for v in (before[0], after[0])) or
             any(type(v) not in (int, float) or not math.isfinite(v)
                 for v in (*before[1:], *after[1:], setup_floor, hold_floor))):
+        refuse("the input/final STAPostPNR census or timing floors are missing")
         return
     import librelane_contract as _ll
     # The trigger describes the INPUT route; a successfully repaired output
     # does not retroactively make its repair unnecessary.
     adopted = report.get("adopted")
+    route_changed = bool(report.get("route_state") and report.get("adopted_state")
+                         and Path(report["adopted_state"]) != Path(report["route_state"]))
     needed = bool(before[0] or before[1] < setup_floor or
-                  before[2] < hold_floor or adopted)
+                  before[2] < hold_floor or route_changed or adopted)
     candidates = report.get("candidates") or []
     adopted_row = next((row for row in candidates
                         if row.get("candidate") == adopted and
@@ -783,17 +792,33 @@ def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path
                    (after_state := final.get("sta_state_sha256")) and
                    after_state == (adopted_row.get("measurement") or {}).get(
                        "sta_state_sha256")) else [])
+    if not changes and route_changed and report.get("selected_arm") != "postdrt":
+        after_state = final.get("sta_state_sha256")
+        if after_state:
+            changes = [{"selected_arm": report.get("selected_arm"),
+                        "route_state": report.get("adopted_state"),
+                        "sta_state_sha256": after_state}]
     re_verified = bool(changes and after[0] == 0 and
                        after[1] >= setup_floor and after[2] >= hold_floor and
                        final.get("antenna_nets") == 0)
     out = project / DECLARED_REPAIR_REL
+    action = ("candidate_adopted" if adopted else
+              "alternate_route_selected" if route_changed else "input_route_kept")
+    refused = [str(row.get("reason") or row.get("closure_reason"))
+               for row in candidates if row.get("decision") == "REFUSED"
+               or row.get("closure_decision") == "ROLLED_BACK"]
+    residual = {"drv_count": after[0],
+                "setup_below_floor": after[1] < setup_floor,
+                "hold_below_floor": after[2] < hold_floor,
+                "refused_candidates": refused}
     write_json(out / "postroute_timing_repair_decision.json", {
         "repair_needed": needed,
-        "action": "candidate_adopted" if adopted else "input_route_kept",
+        "action": action,
         "candidate": adopted,
         "baseline": dict(zip(("drv_count", "setup_ws_min", "hold_ws_min"), before)),
         "final": dict(zip(("drv_count", "setup_ws_min", "hold_ws_min"), after)),
         "floors": floors,
+        "residual": residual,
         "source_report": str(source.relative_to(project)),
         "source_report_sha256": _ll.digest(source),
         "measured_by": "OpenROAD.STAPostPNR at every declared corner",
@@ -993,8 +1018,9 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     report.update({k: chosen[k] for k in ("baseline", "final", "adopted", "adopted_state",
                                            "final_antenna", "baseline_antenna",
                                            "final_supply_ownership", "candidates",
-                                           "closure", "baseline_repair_metrics")
+                                           "closure", "baseline_repair_metrics", "floors")
                    if k in chosen})
+    report["input_baseline"] = arms["postdrt"]["baseline"]
     report["selected_arm"] = sel["selection"]
     _set_final_fanout_verdict(report)
     write_json(out, report)

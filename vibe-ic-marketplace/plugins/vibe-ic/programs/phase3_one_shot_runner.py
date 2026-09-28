@@ -62962,6 +62962,13 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # stays gated on `timing_repair_needed`, so a non-timing failure withholds the
     # certificate WITHOUT firing a repair that does not address it.
     _repair_decision = _repair_dec.decide(mc_ocv_stance, tns_zero, project=project)
+    # This canonical decision supersedes the LibreLane pre-stream decision.
+    # Its log described that earlier decision and must not certify a fallback
+    # in which this pass applied no repair.
+    _prior_repair_log = postroute_timing_repair_out / "repair_log.json"
+    if _prior_repair_log.is_file():
+        _prior_repair_log.unlink()
+        notes.append("superseded pre-stream repair_log.json before the canonical decision")
     _no_repair_flag = postroute_timing_repair_out / "no_repair_needed.flag"
     if not _repair_decision["repair_needed"]:
         # No violation at the authoritative basis → no post-route repair needed.

@@ -330,6 +330,14 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
     _blocking = _nontiming_block_domains(data, decision)
     stats["nontiming_block_domains"] = _blocking
 
+    _residual = (decision or {}).get("residual") if isinstance(decision, dict) else None
+    _residual = _residual if isinstance(_residual, dict) else {}
+    _kept_with_drv = ((decision or {}).get("action") == "input_route_kept"
+                      and type(_residual.get("drv_count")) is int
+                      and _residual["drv_count"] > 0)
+    _kept_with_timing = ((decision or {}).get("action") == "input_route_kept"
+                         and (_residual.get("setup_below_floor") is True
+                              or _residual.get("hold_below_floor") is True))
     if _blocking:
         findings.append(Finding(
             "ERROR", "REPAIR_BLOCKED_ON_NONTIMING_SIGNOFF",
@@ -341,6 +349,18 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
             f"decision action: {(decision or {}).get('action')!r}; "
             f"timing_repair_needed: "
             f"{(decision or {}).get('timing_repair_needed', data.get('timing_repair_needed'))!r}"))
+    elif _kept_with_drv:
+        findings.append(Finding(
+            "ERROR", "REPAIR_REFUSED_RESIDUAL_DRV",
+            f"the input route was kept with {_residual['drv_count']} measured "
+            "post-route DRV violation(s); re-running sign-off cannot repair it",
+            "; ".join(str(x) for x in _residual.get("refused_candidates") or [])[:500]))
+    elif _kept_with_timing:
+        findings.append(Finding(
+            "ERROR", "REPAIR_REFUSED_RESIDUAL_TIMING",
+            "the input route was kept below its declared timing floor; "
+            "the closure needs a new candidate",
+            "; ".join(str(x) for x in _residual.get("refused_candidates") or [])[:500]))
     else:
         if not isinstance(changes, list) or len(changes) == 0:
             findings.append(Finding(

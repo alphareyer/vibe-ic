@@ -518,27 +518,42 @@ def test_a_hard_repair_that_makes_setup_negative_is_rejected(tmp_path, monkeypat
     assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
 
 
-def test_a_fanout_reduction_with_one_remaining_violation_is_refused(
+def test_a_fanout_reduction_with_one_remaining_violation_is_adopted_but_not_signed_off(
         tmp_path, monkeypatch):
     project, arm, impl, shim = _scenario_impl(
         tmp_path, baseline=(5.0, 0.4, (0, 0, 4)),
         candidates=[_cand(1.6, 0.4, (0, 0, 1))])
     ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
     run = ctl.run_controller('postroute.repair_drv')
-    assert run.iterations[0].decision == 'ROLLED_BACK'
-    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+    assert run.iterations[0].decision == 'PROMOTED'
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] == '32-cand01'
     row = json.loads((arm / prr.LEDGER).read_text())['candidates'][0]
-    assert row['decision'] == 'REFUSED'
-    assert 'STAPostPNR count=1' in row['reason']
+    assert row['measurement']['drv_count'] == 1
+    assert row['decision'] != 'REFUSED'
 
 
-def test_the_deck_repairs_drv_again_after_both_timing_passes():
+def test_hold_closure_can_adopt_with_unchanged_measured_drv_residue(
+        tmp_path, monkeypatch):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, -0.335, (0, 0, 1)),
+        candidates=[_cand(4.999, 0.326, (0, 0, 1))])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_hold')
+    assert run.iterations[0].decision == 'PROMOTED'
+    final = json.loads((impl / prr.CURRENT).read_text())
+    assert final['measurement']['hold_ws_min'] == 0.326
+    assert final['measurement']['drv_count'] == 1
+
+
+def test_the_deck_repairs_drv_after_timing_and_antenna_cell_insertion():
     tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
     calls = [m.start() for m in re.finditer(r'^log_cmd repair_design', tcl, re.M)]
-    assert len(calls) == 2
+    assert len(calls) >= 3
     assert calls[0] < tcl.index('log_cmd repair_timing {*}$setup_args')
     assert tcl.index('log_cmd repair_timing {*}$hold_args') < calls[1]
     assert calls[1] < tcl.index('vic_census after_timing_drv_recheck')
+    assert tcl.index('log_cmd repair_antennas {*}$ant_args') < calls[-1]
+    assert calls[-1] < tcl.index('# ---- 7. re-verify')
 
 
 def test_timing_cannot_remove_the_buffers_that_closed_declared_fanout():
@@ -1082,6 +1097,22 @@ def test_in_chain_tool_refusal_invalidates_the_prior_declared_decision(
     assert not (output / 'repair_log.json').exists()
 
 
+def test_unmeasured_publication_names_its_missing_floor_in_step32_report(
+        tmp_path, monkeypatch):
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': _base(4.0, 0.2)})
+    monkeypatch.setattr(prr, 'declared_timing_floor', lambda project, sdc: {})
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    record = json.loads((project / prr.REPORT_REL).read_text())
+    assert record['declared_repair_publication']['status'] == 'NOT_MEASURED'
+    assert 'timing floors' in record['declared_repair_publication']['reason']
+    assert report['declared_repair_publication'] == record['declared_repair_publication']
+    assert not (project / prr.DECLARED_REPAIR_REL /
+                'postroute_timing_repair_decision.json').exists()
+
+
 def test_in_chain_residual_drv_replaces_a_stale_clean_decision_before_stream(
         tmp_path, monkeypatch):
     import flow_step_output_content_check as content
@@ -1098,13 +1129,35 @@ def test_in_chain_residual_drv_replaces_a_stale_clean_decision_before_stream(
     report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
                               pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
                               route_state=route, route_drc=0, programs_dir=shim)
-    assert report['verdict'] == 'PASS' and report['adopted'] is None
+    assert report['verdict'] == 'PASS' and report['adopted'] == '32-cand01'
     assert json.loads(decision.read_text())['repair_needed'] is True
     assert not (output / 'no_repair_needed.flag').exists()
-    assert json.loads((output / 'repair_log.json').read_text())['candidates'][0]['decision'] == 'REFUSED'
+    assert json.loads((output / 'repair_log.json').read_text())['final']['drv_count'] == 1
     assert content.check(project, 'repair') == []
     errors = [f.category for f in audit.audit(project)[0] if f.severity == 'ERROR']
-    assert 'EMPTY_CHANGES' in errors and 'NOT_REVERIFIED' in errors
+    assert 'NOT_REVERIFIED' in errors
+
+
+def test_refused_candidate_names_the_residual_drv_in_the_audit(tmp_path, monkeypatch):
+    import postroute_timing_repair_audit as audit
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': {'def': _def(True), 'sta_metrics': _sta_metrics(0.8, 0.4, (0, 0, 4)),
+                    'antenna_metrics': _ant(0),
+                    'repair_metrics': {'vibeic__prr__changed': 0}},
+        '32-cand01': _cand(-0.05, 0.4, (0, 0, 1))})
+    # The baseline has measured DRV residue; no candidate may trade setup
+    # below its floor to clear it.
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    assert report['adopted'] is None
+    decision_path = project / prr.DECLARED_REPAIR_REL / 'postroute_timing_repair_decision.json'
+    decision = json.loads(decision_path.read_text())
+    assert decision['action'] == 'input_route_kept'
+    assert decision['residual']['drv_count'] > 0
+    errors = [f.category for f in audit.audit(project)[0] if f.severity == 'ERROR']
+    assert 'REPAIR_REFUSED_RESIDUAL_DRV' in errors
+    assert 'EMPTY_CHANGES' not in errors and 'NOT_REVERIFIED' not in errors
 
 
 def test_dual_runs_three_arms_and_selects_by_hold_then_setup(tmp_path, monkeypatch):
@@ -1133,6 +1186,33 @@ def test_dual_runs_three_arms_and_selects_by_hold_then_setup(tmp_path, monkeypat
     assert report['arms']['pregrt']['closure'] == [], 'arm A is the route alone'
     assert report['selected_arm'] == 'postdrt', report['selection']
     assert report['adopted'] == '32-postdrt-cand01'
+
+
+def test_dual_publishes_decision_from_step32_input_when_pregrt_route_wins(
+        tmp_path, monkeypatch):
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-postdrt-base': _base(4.0, -0.3),
+        '32-pregrt-base': _base(4.2, 0.10),
+        '32-pregrt_postdrt-base': _base(4.1, 0.05)})
+    pre_state = put(project / 'phase3/librelane/21-route-pregrt/13-fill/state_out.json',
+                    {'odb': 'p.odb', 'def': 'p.def'})
+
+    def variant_arm(lane, extra):
+        return {'final': pre_state, 'route_drc': [{'run': 'drt-run-0', 'markers': 0}]}
+
+    report = prr.run_in_chain(project, mode='dual', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, variant_arm=variant_arm,
+                              programs_dir=shim)
+    decision = json.loads((project / prr.DECLARED_REPAIR_REL /
+                           'postroute_timing_repair_decision.json').read_text())
+    assert report['selected_arm'] == 'pregrt'
+    assert report['floors'] and report['input_baseline']['hold_ws_min'] == -0.3
+    assert decision['repair_needed'] is True
+    assert decision['action'] == 'alternate_route_selected'
+    assert decision['baseline']['hold_ws_min'] == -0.3
+    assert decision['final']['hold_ws_min'] == 0.10
+    assert not (project / prr.DECLARED_REPAIR_REL / 'no_repair_needed.flag').exists()
 
 
 def test_dual_never_selects_an_arm_with_a_route_or_antenna_violation(tmp_path, monkeypatch):
