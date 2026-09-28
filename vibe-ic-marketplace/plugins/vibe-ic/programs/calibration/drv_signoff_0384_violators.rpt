@@ -1,0 +1,40 @@
+max slew
+
+Pin u2/A ^
+max slew    0.030000
+slew        0.032395
+--------------------
+Slack      -0.002395 (VIOLATED)
+Pin u1/Y ^
+max slew    0.030000
+slew        0.032394
+--------------------
+Slack      -0.002394 (VIOLATED)
+
+max fanout
+
+Pin A  
+max fanout      0
+fanout          1
+-----------------
+Slack          -0 (VIOLATED)
+Pin u1/Y  
+max fanout      0
+fanout          1
+-----------------
+Slack          -0 (VIOLATED)
+
+max capacitance
+
+Pin A ^
+max capacitance    0.004000
+capacitance        0.008176
+---------------------------
+Slack             -0.004176 (VIOLATED)
+
+Pin u1/Y ^
+max capacitance    0.004000
+capacitance        0.005707
+---------------------------
+Slack             -0.001707 (VIOLATED)
+
