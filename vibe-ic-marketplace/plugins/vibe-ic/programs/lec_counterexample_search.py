@@ -114,6 +114,12 @@ def not_run(reason: str, point_names: List[str], *, run_identity: str = "") -> D
             "initial_state_policy": INITIAL_STATE_POLICY}
 
 
+def _valid_point_names(names: Any) -> bool:
+    return (isinstance(names, list) and bool(names)
+            and all(isinstance(name, str) and bool(name.strip())
+                    for name in names))
+
+
 def residual_search_evidence_error(search: Dict[str, Any],
                                    point_names: List[str]) -> str:
     """Name missing provenance before a residual is classified NOT_PROVEN."""
@@ -136,7 +142,10 @@ def residual_search_evidence_error(search: Dict[str, Any],
         return f"{outcome} has no run identity"
     if search.get("tool") != "yosys":
         return f"{outcome} has no Yosys tool identity"
-    if not point_names or sorted(search.get("point_names") or []) != sorted(point_names):
+    search_names = search.get("point_names")
+    if not _valid_point_names(search_names):
+        return f"{outcome} has invalid point_names: expected non-empty strings in a list"
+    if not _valid_point_names(point_names) or sorted(search_names) != sorted(point_names):
         return f"{outcome} is not bound to the named residual points"
     if outcome == "NOT_RUN":
         if search.get("completeness") not in ("UNKNOWN", "BOUNDED", "COMPLETE"):
@@ -167,6 +176,7 @@ def complete_resolution_valid(search: Dict[str, Any], point_names: List[str]) ->
         and search["bound_cycles"] > 0
         and search.get("bound_source")
         and search.get("run_identity")
-        and point_names
-        and sorted(search.get("point_names") or []) == sorted(point_names)
+        and _valid_point_names(point_names)
+        and _valid_point_names(search.get("point_names"))
+        and sorted(search["point_names"]) == sorted(point_names)
     )
