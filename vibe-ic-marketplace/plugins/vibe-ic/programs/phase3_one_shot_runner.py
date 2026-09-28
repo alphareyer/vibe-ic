@@ -46511,6 +46511,21 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
     direct paths (after a direct route); inside the LL21 chain the tail
     already wrote them."""
     import librelane_postroute_repair as _llprr  # noqa: PLC0415
+    _trigger = report.get("repair_trigger")
+    _trigger = _trigger if isinstance(_trigger, dict) else None
+    if (_trigger is not None and _trigger.get("action") == "NOT_MEASURED"
+            and not report.get("adopted")):
+        # The input route's census did not measure every metric the trigger
+        # needs, so the closure never judged whether a repair was needed. That
+        # is not a repair step that passed, and not an unsupported tool.
+        _why = _llprr.trigger_disclosure(_trigger)
+        _drv_promotion_disclose(
+            pnr_out, "repair_trigger_not_measured",
+            "the input route's census left the repair trigger NOT_MEASURED, so "
+            "the closure did not run and the input route was kept: " + _why)
+        return StepResult("postroute_repair_librelane", "NOT_MEASURED",
+                          time.time() - t0, f"LL_PRR_TRIGGER_NOT_MEASURED: {_why}",
+                          reason_class=_V.ReasonClass.INCONCLUSIVE)
     if report.get("verdict") != "PASS":
         _drv_promotion_disclose(pnr_out, "postroute_repair_refused",
                                 str(report.get("reason") or report.get("code")))
@@ -46539,13 +46554,21 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
                           "was not established by step 32",
                           reason_class=_V.ReasonClass.INCONCLUSIVE)
     if not report.get("adopted"):
-        _drv_promotion_disclose(
-            pnr_out, "librelane_closure_kept_input",
-            "the closure adopted no candidate, so the input route was kept: "
-            + "; ".join(f"{r.get('controller')}: {r.get('outcome')}"
-                        for r in report.get("closure") or []))
+        if _trigger is not None and _trigger.get("action") != "RUN":
+            # Measured clean input: the closure was deliberately not run.
+            _why = ("the input route measured no violation, so the closure did "
+                    "not run and the input route was kept: "
+                    + _llprr.trigger_disclosure(_trigger))
+        else:
+            _why = ("the closure adopted no candidate, so the input route was "
+                    "kept: "
+                    + ("; ".join(f"{r.get('controller')}: {r.get('outcome')}"
+                                 for r in report.get("closure") or [])
+                       or "no controller outcome was recorded"))
+        _drv_promotion_disclose(pnr_out, "librelane_closure_kept_input", _why)
         return StepResult("postroute_repair_librelane", "PASS", time.time() - t0,
-                          f"no candidate adopted (input route kept): {summary}")
+                          f"no candidate adopted (input route kept): {summary}; "
+                          + _why)
     routed = pnr_out / "routed.def"
     netlist = pnr_out / f"{top}_pnr.v"
     if handed:
@@ -63120,7 +63143,30 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             "setup_worst_slack_ns": _repair_decision["setup_worst_slack_ns"],
             "hold_worst_slack_ns": _repair_decision["hold_worst_slack_ns"],
         }
-        if not _repair_decision["timing_repair_needed"]:
+        _sta_rel = str(_sta_for_repair.relative_to(project))
+        _rerun_sta = (f"Re-run post-route STA ({_sta_rel}) and confirm it "
+                      "reports measured timing slack or TNS/WNS before "
+                      "deciding whether repair is needed.")
+        # Subscript reads (decide() always sets the key), never `.get()`: the
+        # closed-loop prover treats a method call on the decision as a possible
+        # mutation and stops following the path to the repair actuator below.
+        if (not _repair_decision["timing_repair_needed"]
+                and _repair_decision["timing_basis_status"] == "NOT_MEASURED"
+                and not _repair_decision["nontiming_failures"]):
+            # The selected STA carries no setup/hold number at all (absent,
+            # unreadable or header-only). That is neither a violation the
+            # timing deck could repair nor a failed non-timing domain, and
+            # sending the agent to non-timing triage would diagnose a domain
+            # nothing measured. Its own action, source and remediation.
+            _repair_decision["action"] = "timing_not_measured"
+            _repair_decision["sta_source"] = _sta_rel
+            _repair_decision["remediation"] = _rerun_sta
+            notes.append(
+                "post-route timing NOT_MEASURED: " + _repair_decision["reason"]
+                + f" — {_sta_rel} reports no setup/hold slack or TNS/WNS; "
+                "no_repair_needed.flag deliberately NOT written and no repair "
+                "fired. " + _rerun_sta)
+        elif not _repair_decision["timing_repair_needed"]:
             # v1.7.64 — a NON-TIMING sign-off domain failed while timing is
             # clean. postroute_timing_repair.tcl repairs timing and would not touch
             # the failing domain, so firing it here would be theatre; writing
@@ -63129,11 +63175,18 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             # gate then reports NO_REPAIR_ARTIFACT / FAIL, which is the honest
             # outcome, and hands off to domain-specific triage.
             _repair_decision["action"] = "repair_required_non_timing"
+            _timing_unmeasured = (
+                _repair_decision["timing_basis_status"] == "NOT_MEASURED")
+            if _timing_unmeasured:
+                _repair_decision["sta_source"] = _sta_rel
+                _repair_decision["remediation"] = _rerun_sta
             notes.append(
                 "post-route repair REQUIRED (non-timing): " + _repair_decision["reason"]
                 + " — no_repair_needed.flag deliberately NOT written; the "
                 "timing-repair pass does not apply; triage the named "
-                "sign-off domain(s).")
+                "sign-off domain(s)."
+                + (" Timing is also NOT_MEASURED: " + _rerun_sta
+                   if _timing_unmeasured else ""))
         elif _repair_decision["mc_ocv_available"] and repair_tcl_path.is_file():
             # AUTO-TRIGGER FIRES: run the multi-corner-aware post-route repair.
             notes.append(

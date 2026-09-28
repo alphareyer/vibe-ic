@@ -8,8 +8,12 @@ inspects the authoritative post-route STA result and emits the appropriate
 artefact. An unreadable timing basis emits ``measurement_not_available.json``
 and a non-success exit, without claiming a repair or a clean sign-off.
 
-  * post-route TNS == 0 (or no slack violations) → `no_repair_needed.flag`
+  * measured timing clean (TNS / WNS / worst slack >= 0, every path MET)
+    → `no_repair_needed.flag`
   * else → `repair_log.json` with a structured summary of remaining violations
+
+DRV and minimum-pulse-width violator rows are not timing paths: they are
+disclosed as ``non_path_violations`` beside the verdict and do not decide it.
 
 chip-AGNOSTIC: works with any OpenROAD-style sta.rpt format.
 
@@ -32,50 +36,154 @@ import postroute_timing_repair_decision as _repair_dec  # noqa: E402
 import plugin_manifest_discovery as _pmd  # noqa: E402  (#800 ONE version reader)
 
 
-def _parse_sta_for_violations(sta_text: str) -> dict:
-    """Return dict with WNS/TNS approximation and violation list.
+#: A signed number as OpenSTA prints it.
+_NUM = r"[+\-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+\-]?\d+)?"
+#: The summary lines: `tns 0.00` / `tns max 0.00` (report_tns), `wns max -0.1`
+#: (report_wns), `worst slack max 0.38` (report_worst_slack). Older builds omit
+#: the max/min token; this image prints it. Both spellings are one measurement.
+_SUMMARY_RE = re.compile(
+    rf"\b(tns|wns|worst[ \t]+slack)(?:[ \t]+(?:max|min))?[ \t]+({_NUM})(?![\w.])",
+    re.IGNORECASE)
+#: A report_checks path end: `0.38   slack (MET)` / `-0.05 slack (VIOLATED)`.
+_PATH_SLACK_RE = re.compile(
+    r"\bslack[ \t]*(?:\([ \t]*(MET|VIOLATED)[ \t]*\)|(MET|VIOLATED)\b)",
+    re.IGNORECASE)
+#: report_check_types' path-group table (recovery/removal and the sign-off
+#: worst-path listing): a `Group  Slack` header, then `<group>  <slack>` rows.
+_GROUP_HEADER_RE = re.compile(r"^\s*Group\s+Slack\s*$", re.IGNORECASE)
+_GROUP_ROW_RE = re.compile(
+    rf"^\s*\S+\s+({_NUM})(?:\s+\((MET|VIOLATED)\))?\s*$", re.IGNORECASE)
+#: Tables whose rows carry a `(VIOLATED)` tag but are NOT a timing path: the
+#: DRV limits and the minimum pulse width. Same titles `extract_drv`
+#: (sta_corner_record_completeness_check) recognises.
+_NON_PATH_TITLES = {
+    "max slew": "max_slew", "max transition": "max_slew",
+    "max capacitance": "max_capacitance", "max cap": "max_capacitance",
+    "max fanout": "max_fanout", "min pulse width": "min_pulse_width",
+}
+_NON_PATH_TITLE_RE = re.compile(
+    r"^\s*(max\s+(?:slew|transition|capacitance|cap|fanout)|min\s+pulse\s+width)\s*$",
+    re.IGNORECASE)
+#: A limit table's column header, for a build that prints no title line.
+_LIMIT_HEADER_RE = re.compile(
+    r"^\s*Pin\s+Limit\s+(Slew|Transition|Cap(?:acitance)?|Fanout)\s+Slack\s*$",
+    re.IGNORECASE)
+_PULSE_HEADER_RE = re.compile(r"^\s*Pin\s+Width\s+Width\s+Slack\s*$",
+                              re.IGNORECASE)
+#: Any other check title opens a table that is not one of the above.
+_OTHER_TITLE_RE = re.compile(
+    r"^\s*(recovery|removal|setup|hold|clock\s+gating|data\s+check|"
+    r"latch\s+check|max\s+skew|unconstrained)\b.*$", re.IGNORECASE)
+#: Lines that end any open table: section banners, emitter stamps, a path.
+_TABLE_END_RE = re.compile(
+    r"^\s*(===|SIGNOFF_|STA_|OCV_|Startpoint:|Endpoint:)")
+_ROW_TAG_RE = re.compile(r"\((VIOLATED)\)", re.IGNORECASE)
+_TRAILING_NEG_RE = re.compile(rf"\s(-(?:\d+(?:\.\d*)?|\.\d+))\s*$")
+_MAX_ROWS = 20
 
-    Detection priority:
-      1. Explicit `tns <value>` / `wns <value>` lines (OpenSTA report_tns).
-      2. Per-path "slack (MET)" lines with no "VIOLATED" anywhere.
-      3. Fall through: assume TNS!=0 (conservative).
+
+def _parse_sta_for_violations(sta_text: str) -> dict:
+    """Classify one STA report into a timing measurement and the rest.
+
+    ``timing_measurement``:
+      * VIOLATED -- a negative TNS / WNS / worst slack, a ``slack (VIOLATED)``
+        path, a negative path-group slack, or a ``(VIOLATED)`` row that no
+        known non-path table owns (never silently cleared);
+      * CLEAN -- at least one timing number (TNS / WNS / worst slack, a path
+        slack or a path-group slack) and none of the above;
+      * NOT_MEASURED -- no timing number at all.
+
+    ``(VIOLATED)`` rows in the DRV (max slew / capacitance / fanout) and
+    minimum-pulse-width tables are not path slacks. They are reported in
+    ``non_path_violations`` and do not decide the timing measurement; the
+    sign-off DRV verdict belongs to Step 23's record gate.
     """
     out = {
         "tns_zero": False,
         "wns_negative": False,
         "timing_measurement": "NOT_MEASURED",
         "violation_paths": [],
+        "non_path_violations": {"count": 0, "by_check": {}, "rows": []},
         "raw_lines_inspected": 0,
     }
-    out["raw_lines_inspected"] = len(sta_text.splitlines())
-    # OpenROAD/OpenSTA style: "tns 0.00" or "wns 0.00"
-    tns_m = re.search(r"\btns\s+([+\-]?\d+(?:\.\d+)?)", sta_text, re.I)
-    wns_m = re.search(r"\bwns\s+([+\-]?\d+(?:\.\d+)?)", sta_text, re.I)
-    if tns_m:
-        out["tns_zero"] = float(tns_m.group(1)) >= 0
-    if wns_m:
-        out["wns_negative"] = float(wns_m.group(1)) < 0
+    lines = sta_text.splitlines()
+    out["raw_lines_inspected"] = len(lines)
+    tns: list = []
+    wns: list = []
+    evidence = 0
+    violated = False
+    unowned: list = []
+    table = None        # None | "group" | "other" | a _NON_PATH_TITLES value
+    npv = out["non_path_violations"]
 
-    upper = sta_text.upper()
-    has_violated = "VIOLATED" in upper
-    if ((tns_m and float(tns_m.group(1)) < 0)
-            or (wns_m and float(wns_m.group(1)) < 0)
-            or re.search(r"\bslack\s*(?:\(VIOLATED\)|VIOLATED\b)",
-                         sta_text, re.I)):
+    for raw in lines:
+        line = raw.strip()
+        for kind, num in _SUMMARY_RE.findall(raw):
+            value = float(num)
+            evidence += 1
+            violated = violated or value < 0
+            (tns if kind.lower() == "tns" else wns).append(value)
+        path = _PATH_SLACK_RE.search(raw)
+        if path:
+            evidence += 1
+            if (path.group(1) or path.group(2)).upper() == "VIOLATED":
+                violated = True
+                if len(out["violation_paths"]) < _MAX_ROWS:
+                    out["violation_paths"].append(line)
+            continue
+        if _TABLE_END_RE.match(raw):
+            table = None
+            continue
+        title = _NON_PATH_TITLE_RE.match(raw)
+        header = _LIMIT_HEADER_RE.match(raw)
+        if title:
+            table = _NON_PATH_TITLES[re.sub(r"\s+", " ", title.group(1).lower())]
+            continue
+        if header:
+            word = header.group(1).lower()
+            table = ("max_slew" if word in ("slew", "transition") else
+                     "max_fanout" if word == "fanout" else "max_capacitance")
+            continue
+        if _PULSE_HEADER_RE.match(raw):
+            table = "min_pulse_width"
+            continue
+        if _GROUP_HEADER_RE.match(raw):
+            table = "group"
+            continue
+        if _OTHER_TITLE_RE.match(raw):
+            table = "other"
+            continue
+        tagged = bool(_ROW_TAG_RE.search(raw))
+        row = _GROUP_ROW_RE.match(raw) if table == "group" else None
+        if row:
+            evidence += 1
+            if float(row.group(1)) < 0 or (row.group(2) or "").upper() == "VIOLATED":
+                violated = True
+                if len(out["violation_paths"]) < _MAX_ROWS:
+                    out["violation_paths"].append(line)
+            continue
+        if table in _NON_PATH_TITLES.values():
+            if tagged or (_TRAILING_NEG_RE.search(raw) and len(line.split()) >= 3):
+                npv["count"] += 1
+                npv["by_check"][table] = npv["by_check"].get(table, 0) + 1
+                if len(npv["rows"]) < _MAX_ROWS:
+                    npv["rows"].append(line)
+            continue
+        if tagged:
+            # A violator row whose table this parser cannot name. Refusing to
+            # read it as clean is the conservative direction.
+            unowned.append(line)
+
+    if unowned:
+        violated = True
+        out["violation_paths"].extend(unowned[:max(0, _MAX_ROWS - len(out["violation_paths"]))])
+    if violated:
         out["timing_measurement"] = "VIOLATED"
-    elif tns_m and out["tns_zero"] and not out["wns_negative"]:
+    elif evidence:
         out["timing_measurement"] = "CLEAN"
-    # Per-path MET-only OpenROAD report_checks output
-    if not tns_m and not wns_m:
-        # Heuristic: if every reported "slack (...)" is MET, design is clean.
-        slack_lines = re.findall(r"slack \(([^)]+)\)", sta_text, re.I)
-        if slack_lines and all("MET" in s.upper() for s in slack_lines) \
-           and not has_violated:
-            out["tns_zero"] = True
-            out["wns_negative"] = False
-            out["timing_measurement"] = "CLEAN"
-        elif has_violated:
-            out["wns_negative"] = True
+    measured = out["timing_measurement"]
+    out["tns_zero"] = all(v >= 0 for v in tns) if tns else measured == "CLEAN"
+    out["wns_negative"] = any(v < 0 for v in wns) if wns else measured == "VIOLATED"
     return out
 
 
@@ -150,6 +258,14 @@ def main(argv=None) -> int:
     summary["timing_repair_needed"] = decision["timing_repair_needed"]
     if decision["nontiming_failures"]:
         summary["nontiming_failures"] = decision["nontiming_failures"]
+    if info["non_path_violations"]["count"]:
+        # Disclosed, not judged here: Step 23's STA record gate owns the DRV
+        # verdict. Folding these rows into the timing verdict would call a
+        # slew limit a setup/hold violation (or, with no timing number,
+        # a measurement of timing).
+        summary["non_path_violations"] = info["non_path_violations"]
+    _rerun_sta = ("Re-run post-route STA and confirm it reports measured timing "
+                  "slack or TNS/WNS before deciding whether repair is needed.")
 
     # A readable report header is not a timing measurement. Keep this state
     # separate from a measured repair demand and from a non-timing failure.
@@ -164,8 +280,7 @@ def main(argv=None) -> int:
             (postroute_timing_repair_dir / stale).unlink(missing_ok=True)
         status_path = postroute_timing_repair_dir / "measurement_not_available.json"
         remediation = (
-            "Re-run post-route STA and confirm it reports measured timing "
-            "slack or TNS/WNS before deciding whether repair is needed."
+            _rerun_sta
             if decision["timing_basis_status"] == "NOT_MEASURED" else
             "Re-run the incomplete non-timing sign-off domain(s) before "
             "deciding whether repair is needed.")
@@ -180,6 +295,8 @@ def main(argv=None) -> int:
             "trigger_reason": decision["reason"],
             "remediation": remediation,
         }
+        if info["non_path_violations"]["count"]:
+            status["non_path_violations"] = info["non_path_violations"]
         _aa.write_json(status_path, status)
         summary.update(verdict="NOT_MEASURED",
                        artefact=str(status_path.relative_to(project)),
@@ -194,6 +311,7 @@ def main(argv=None) -> int:
 
     if not decision["repair_needed"]:
         flag = postroute_timing_repair_dir / "no_repair_needed.flag"
+        npv = info["non_path_violations"]
         flag.write_text(
             "no_repair_needed\n"
             f"# Generated by {_pmd.emitted_by('postroute_timing_repair_status_gen')} from "
@@ -204,6 +322,11 @@ def main(argv=None) -> int:
             "# (multi-corner OCV when available, else single-corner tt STA),\n"
             "# and no hard failure in the non-timing sign-off domains\n"
             "# (IR drop / EM / SI / LVS / ERC / antenna / density / PERC).\n"
+            + (f"# Disclosed, not judged here: {npv['count']} non-path violator "
+               "row(s) in the same report ("
+               + ", ".join(f"{k} x{v}" for k, v in sorted(npv["by_check"].items()))
+               + "); the sign-off DRV verdict belongs to Step 23's STA record "
+               "gate.\n" if npv["count"] else "")
         )
         summary["verdict"] = "PASS"
         summary["artefact"] = str(flag.relative_to(project))
@@ -226,6 +349,7 @@ def main(argv=None) -> int:
             # EMPTY_CHANGES / NOT_REVERIFIED: this record demands repair; it
             # does not fabricate one.
             "trigger_basis": decision["basis"],
+            "timing_basis_status": decision["timing_basis_status"],
             "timing_repair_needed": decision["timing_repair_needed"],
             "nontiming_failures": decision["nontiming_failures"],
             "trigger_reason": decision["reason"],
@@ -237,8 +361,14 @@ def main(argv=None) -> int:
                             "timing-repair pass does not apply. Triage the "
                             "named domain(s) (IR drop / "
                             "EM / SI / PV) and re-run the failing sign-off "
-                            "step, then re-run phase3_one_shot_runner."),
+                            "step, then re-run phase3_one_shot_runner."
+                            + (" Timing is also NOT_MEASURED at "
+                               f"{sta_rpt.relative_to(project)}: " + _rerun_sta
+                               if decision["timing_basis_status"] == "NOT_MEASURED"
+                               else "")),
         }
+        if info["non_path_violations"]["count"]:
+            minimal["non_path_violations"] = info["non_path_violations"]
         # ORGANIC #564 — do NOT clobber a schema-complete repair record an
         # agent or prior repair pass already wrote. A real repair_log.json carries the
         # remediation provenance (changes / re_verified / affected_steps)
@@ -265,6 +395,7 @@ def main(argv=None) -> int:
             merged["wns_negative"] = info["wns_negative"]
             merged["tns_zero"] = info["tns_zero"]
             merged["raw_lines_inspected"] = info["raw_lines_inspected"]
+            merged["timing_basis_status"] = decision["timing_basis_status"]
             merged.setdefault("verdict", "REPAIR_REQUIRED")
             merged["status_refreshed_by"] = "postroute_timing_repair_status_gen (merge; "
             merged["status_refreshed_by"] += "preserved existing repair record)"

@@ -50,19 +50,31 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 
 def post_route_timing_violation_measured(sta_rpt: Path) -> bool:
-    """A negative timing number or violated path in the selected STA report."""
+    """A measured setup/hold violation in the selected STA report.
+
+    A thin wrapper over the ONE Step-32 report parser
+    (``postroute_timing_repair_status_gen._parse_sta_for_violations``), so a
+    caller of this module cannot get a second, divergent reading of the same
+    report. An unreadable report is not a violation.
+    """
     try:
-        text = sta_rpt.read_text(errors="replace")
+        text = Path(sta_rpt).read_text(errors="replace")
     except OSError:
         return False
-    if re.search(r"\b(?:tns|wns)\s+-(?:\d+(?:\.\d*)?|\.\d+)\b", text, re.I):
-        return True
-    return bool(re.search(r"\bslack\s*\(VIOLATED\)", text, re.I))
+    # Imported here: the status generator imports this module at load time.
+    # Its directory is put on sys.path the way the sibling programs do, so a
+    # by-path load of this module can still reach it (vibe-ic#2104).
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    from postroute_timing_repair_status_gen import _parse_sta_for_violations
+    return _parse_sta_for_violations(text)["timing_measurement"] == "VIOLATED"
 
 
 def _load_stance(stance: Union["Path", str, dict, None]) -> Optional[dict]:
@@ -339,6 +351,13 @@ def decide(stance: Union["Path", str, dict, None],
         exactly the pre-v1.7.64 timing-only behaviour.
       signoff_reports: OPTIONAL ``{domain: parsed_dict}`` override, so a caller
         can supply verdicts without touching the filesystem.
+      single_corner_evidence: OPTIONAL measured state of the single-corner
+        report ("CLEAN" / "VIOLATED" / "NOT_MEASURED", from
+        ``postroute_timing_repair_status_gen._parse_sta_for_violations``). It
+        outranks ``single_corner_clean``; NOT_MEASURED fires no timing repair
+        and withholds the no-repair certificate. The multi-corner OCV basis,
+        when authoritative, replaces it. Echoed as ``timing_basis_status``
+        ("LEGACY_BOOLEAN" when omitted).
 
     Returns a dict:
       basis:            "multi_corner_ocv" | "single_corner_tt" — the TIMING
@@ -425,6 +444,7 @@ def decide(stance: Union["Path", str, dict, None],
     if declared_hold:
         out["timing_repair_needed"] = True
         out["repair_needed"] = True
+        out["timing_basis_status"] = "VIOLATED"
         out["hold_worst_slack_ns"] = min(
             [v["slack_ns"] for v in declared_hold]
             + ([out["hold_worst_slack_ns"]]
@@ -481,8 +501,14 @@ def decide(stance: Union["Path", str, dict, None],
                 "NOTHING is known about them: "
                 + ", ".join(f"{r['domain']}({r['signal']})"
                             for r in out["nontiming_not_determined"]))
+        # An unmeasured timing basis is not "no timing violation": nothing
+        # judged setup/hold, so the reason must not claim a timing result.
+        lead = ("timing NOT_MEASURED at basis " + out["basis"]
+                + " (no setup/hold result to judge), and "
+                if out["timing_basis_status"] == "NOT_MEASURED"
+                else "no timing violation, but ")
         out["reason"] = (
-            "no timing violation, but " + "; ".join(parts)
+            lead + "; ".join(parts)
             + " — Step 32 may not certify 'no repair needed' over a sign-off "
               "domain that failed or that never produced a verdict")
     else:

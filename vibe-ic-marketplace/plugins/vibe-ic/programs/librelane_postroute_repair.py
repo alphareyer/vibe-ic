@@ -347,6 +347,33 @@ def measured_repair_trigger(measurement: Dict[str, Any]) -> Dict[str, Any]:
             "values": {key: measurement.get(key) for key in needed}}
 
 
+def trigger_disclosure(trigger: Dict[str, Any]) -> str:
+    """One line naming what the repair trigger measured and decided."""
+    values = trigger.get("values") or {}
+    return (f"repair trigger {trigger.get('action')} on {trigger.get('basis')}: "
+            f"violated={', '.join(trigger.get('violated') or []) or 'none'}; "
+            f"missing={', '.join(trigger.get('missing') or []) or 'none'}; "
+            "values " + ", ".join(f"{k}={values.get(k)!r}" for k in sorted(values)))
+
+
+def _stamp_verdict(report: Dict[str, Any]) -> None:
+    """PASS only when the trigger measured its input. A NOT_MEASURED trigger
+    ran no closure because it could not tell a clean route from a violated
+    one, and that is reported as such -- not as a repair step that passed."""
+    baseline = report.get("input_baseline") or report.get("baseline") or {}
+    _set_census_verdict(report, baseline, report.get("final") or {})
+    trigger = report.get("repair_trigger") or {}
+    if trigger.get("action") == "NOT_MEASURED":
+        reason = (trigger_disclosure(trigger) + " -- the input route's census "
+                  "did not measure every metric the trigger needs, so the "
+                  "closure did not run and the input route was kept")
+        if report["verdict"] == "PASS":
+            report.update(verdict="NOT_MEASURED", code="LL_PRR_TRIGGER_NOT_MEASURED",
+                          reason=reason)
+        else:
+            report["reason"] = "; ".join(filter(None, (report.get("reason"), reason)))
+
+
 def measure(impl: Path, domain: str, json_out: Path) -> int:
     """The closure's measurement: one number about the ADOPTED candidate."""
     import librelane_contract as _ll
@@ -972,7 +999,7 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
                             derate=derate, aocv_table=aocv_table,
                             registry=registry, programs_dir=programs_dir,
                             floors=declared_timing_floor(project, sdc)))
-    _set_census_verdict(report, report["baseline"], report["final"])
+    _stamp_verdict(report)
     write_json(out, report)
     _publish_declared_repair(project, report, out)
     return report
@@ -1080,7 +1107,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
                   floors=declared_timing_floor(project, sdc))
     if mode != "dual":
         report.update(close_arm(project, "librelane", route_state, **common))
-        _set_census_verdict(report, report["baseline"], report["final"])
+        _stamp_verdict(report)
         write_json(out, report)
         _publish_declared_repair(project, report, out)
         return report
@@ -1117,8 +1144,9 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
                                            "closure", "baseline_repair_metrics", "floors")
                    if k in chosen})
     report["input_baseline"] = arms["postdrt"]["baseline"]
+    report["repair_trigger"] = chosen.get("repair_trigger")
     report["selected_arm"] = sel["selection"]
-    _set_census_verdict(report, report["input_baseline"], report["final"])
+    _stamp_verdict(report)
     write_json(out, report)
     _publish_declared_repair(project, report, out)
     return report
