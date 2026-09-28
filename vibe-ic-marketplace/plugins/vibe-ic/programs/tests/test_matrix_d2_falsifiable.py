@@ -899,6 +899,28 @@ def _f_drv_promotion_contradicted(p: Path) -> None:
     _w(p, _DRV_SIGNOFF_RPT, _drv_signoff_report(3))
 
 
+def _f_drv_signoff_bad_sdc(p: Path) -> None:
+    """A present DRV bundle whose sign-off SDC widens declared fanout 4."""
+    import hashlib
+    sdc = _w(p, "phase3/stage3/sta/signoff.sdc",
+             "set_max_fanout 10 [current_design]\n"
+             "set_max_transition 3 [current_design]\n"
+             "set_max_capacitance 0.2 [current_design]\n")
+    sdc_ref = {"path": str(sdc),
+               "sha256": hashlib.sha256(sdc.read_bytes()).hexdigest()}
+    values = {"fanout": 4, "slew_ns": 3, "cap_pf": .2,
+              "period_ns": 24, "io_delay_ns": 4.8,
+              "default_fanout_ceiling": 10}
+    _w(p, "reports/phase3/sta/drv_signoff_bundle.json", {
+        "identity": {"run_id": "matrix-drv-bad-sdc", "tree_sha": "fixture",
+                     "spec_version": "matrix"},
+        "frozen": {"sources": {"signoff_sdc": sdc_ref["sha256"]},
+                   "values": values, "scope": "whole final netlist"},
+        "current": {"sources": {"signoff_sdc": sdc_ref}, "values": values,
+                    "scope": "whole final netlist"},
+        "stages": [], "scenes": [], "pins": {}})
+
+
 def _f_assumed_clock_undisclosed(p: Path) -> None:
     """A sign-off record measured against a clock period NOBODY STATED, which
     does not say so — vibe-ic#2091's defect, and the input #2126's clause needs.
@@ -2399,6 +2421,7 @@ FIXTURES: Dict[str, Callable[[Path], None]] = {
     "HOLD_CORNER_CONTRADICTED": _f_hold_corner_contradicted,
     "STA_ARCHITECTURAL_RESIDUAL": _f_sta_architectural_residual,
     "DRV_PROMOTION_CONTRADICTED": _f_drv_promotion_contradicted,
+    "DRV_SIGNOFF_BAD_SDC": _f_drv_signoff_bad_sdc,
     "ASSUMED_CLOCK_UNDISCLOSED": _f_assumed_clock_undisclosed,
     "CLOCK_TARGET_RECORDS_DISAGREE": _f_clock_target_records_disagree,
     "GDS_BAD": _f_gds_bad,
@@ -2736,6 +2759,10 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
     ("23", "drv_promotion_corroboration_check . --json "
            "reports/phase3/sta/drv_promotion_corroboration.json"):
         "DRV_PROMOTION_CONTRADICTED",
+    # A missing bundle is honestly NOT_MEASURED. This present bundle violates
+    # the declared fanout with an SDC value of 10, so the gate must reach FAIL.
+    ("23", "drv_signoff_judge . --json reports/phase3/sta/drv_signoff.json"):
+        "DRV_SIGNOFF_BAD_SDC",
     # ── 2026-08-06: the three steps whose ONLY red was an empty directory ──
     # Each of these programs was in UNREDDENED, so each step's cell rested
     # entirely on its `files_exist` sibling answering "nothing is there". The
@@ -3543,6 +3570,30 @@ def _tier(project: Path, command: str) -> Tuple[str, str]:
     _prepare_report_dirs(project, command)
     passed, out = FCC._check_program_exit_zero(project, command)
     return _classify(passed, out), out
+
+
+def test_d2_drv_signoff_fixture_reddens_on_the_wrong_sdc_value(tmp_path):
+    import hashlib
+    command = "drv_signoff_judge . --json reports/phase3/sta/drv_signoff.json"
+    project = _build_project(tmp_path, "drv", "DRV_SIGNOFF_BAD_SDC")
+    tier, _ = _tier(project, command)
+    result = json.loads((project / "reports/phase3/sta/drv_signoff.json").read_text())
+    assert tier == RED
+    assert any("sign-off SDC set_max_fanout != declared value" in item
+               for item in result["failures"])
+    sdc = project / "phase3/stage3/sta/signoff.sdc"
+    sdc.write_text(sdc.read_text().replace("set_max_fanout 10", "set_max_fanout 4"))
+    bundle_path = project / "reports/phase3/sta/drv_signoff_bundle.json"
+    bundle = json.loads(bundle_path.read_text())
+    sha = hashlib.sha256(sdc.read_bytes()).hexdigest()
+    bundle["current"]["sources"]["signoff_sdc"]["sha256"] = sha
+    bundle["frozen"]["sources"]["signoff_sdc"] = sha
+    bundle_path.write_text(json.dumps(bundle))
+    (project / "reports/phase3/sta/drv_signoff.json").unlink()
+    _tier(project, command)
+    repaired = json.loads((project / "reports/phase3/sta/drv_signoff.json").read_text())
+    assert not any("sign-off SDC set_max_fanout != declared value" in item
+                   for item in repaired["failures"])
 
 
 def test_d2_sta_residual_fixture_reddens_only_beyond_the_physical_bound(
