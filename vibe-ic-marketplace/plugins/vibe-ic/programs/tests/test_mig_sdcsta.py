@@ -211,6 +211,8 @@ def test_sdc_syntax_check_defers_to_opensta_when_step8_is_switched(tmp_path):
 def test_step10_tool_path_publishes_and_blocks_on_a_black_box(tmp_path, monkeypatch):
     runner = importlib.import_module("phase3_one_shot_runner")
     p = design(tmp_path)
+    put(runner._pl.synth_dir(p) / "cal_chain_synth.v",
+        "module cal_chain(input clk); endmodule\n")
     libs = p / "input/pdk/liberty"
     libs.mkdir(parents=True)
     for name in ("x_ss_125C.lib", "x_tt_025C.lib"):
@@ -233,6 +235,11 @@ def test_step10_tool_path_publishes_and_blocks_on_a_black_box(tmp_path, monkeypa
         config = json.loads((folder / "config.json").read_text())
         config["PNR_SDC_FILE"] = str(sdc)
         put(folder / "config.json", config)
+        # Match run_prelayout's state input: the report must identify the
+        # current mapped netlist, not sta_folder's unrelated fixture n.v.
+        state = json.loads((folder / "state_out.json").read_text())
+        state["nl"] = str(netlist)
+        put(folder / "state_out.json", state)
         return folder
 
     monkeypatch.setattr(prelayout, "run_prelayout", tool)
