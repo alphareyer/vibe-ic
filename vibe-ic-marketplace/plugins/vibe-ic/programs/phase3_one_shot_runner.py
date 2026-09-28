@@ -72163,10 +72163,19 @@ exit
     count_lines = list(re.finditer(
         r"(?im)^\s*(?:\[(?:INFO|WARNING|ERROR)(?: [A-Z0-9-]+)?\]\s*)?"
         r"(?:found\s+)?(\d+)\s+floating\s+(nets?|pins?)\.?(?:\s*)$", log))
+    # Tcl catches these commands, so OpenROAD can exit zero after one failed
+    # while the other command has left a plausible zero-count diagnostic.
+    measurement_errors = re.findall(
+        r"(?m)^[ \t]*ERC_(?:FN|METRICS)_NONFATAL:[^\r\n]*", log)
     for match in count_lines:
         kind = "net" if match.group(2).lower().startswith("net") else "pin"
         float_counts[kind] = max(float_counts[kind], int(match.group(1)))
-    floating = sum(float_counts.values()) if count_lines and rc == 0 else None
+    floating = (sum(float_counts.values())
+                if count_lines and rc == 0 and not measurement_errors else None)
+    not_determined_reason = ("ERC_SUBCOMMAND_FAILED" if measurement_errors
+                             else "ERC_TOOL_FAILED" if rc != 0
+                             else "ERC_COUNT_MISSING" if not count_lines
+                             else None)
     # v0.3.16 #514: classify the verbose floats by owner so the runner can
     # tell benign design-for-ECO spare-cell I/O from a real functional
     # float. Best-effort (the classifier lives in its own program).
@@ -72188,7 +72197,11 @@ exit
         f"ERC floating net count: {float_counts['net'] if floating is not None else 'NOT_DETERMINED'}\n"
         f"ERC floating pin count: {float_counts['pin'] if floating is not None else 'NOT_DETERMINED'}\n"
         f"ERC clean: {'YES' if floating == 0 else 'NOT_DETERMINED' if floating is None else 'NO (review floating nets)'}\n"
-        "\n# === report_floating_nets / report_erc_metrics stdout ===\n"
+        + (f"ERC not determined reason: {not_determined_reason}\n"
+           if not_determined_reason else "")
+        + ("ERC measurement errors: " + "; ".join(measurement_errors) + "\n"
+           if measurement_errors else "")
+        + "\n# === report_floating_nets / report_erc_metrics stdout ===\n"
         + ("\n".join(erc_lines) or "(no ERC lines captured)") + "\n"
         "\n# === full ERC log (last 2 KB) ===\n" + log[-2000:] + "\n"
         "# end of erc.rpt\n")
@@ -72206,6 +72219,8 @@ exit
         "floating_net_count": float_counts["net"] if floating is not None else None,
         "floating_pin_count": float_counts["pin"] if floating is not None else None,
         "tool_returncode": rc,
+        "not_determined_reason": not_determined_reason,
+        "measurement_errors": measurement_errors,
         "clean": floating == 0,
         "source": str(erc_rpt.relative_to(project)),
         "verdict": _erc_verdict,

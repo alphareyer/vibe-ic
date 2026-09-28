@@ -1060,6 +1060,56 @@ _ERC_STDOUT = """=== ERC: floating nets ===
 
 
 class TestErcReport:
+    @pytest.mark.parametrize("failure_marker", (
+        "ERC_FN_NONFATAL", "ERC_METRICS_NONFATAL"))
+    def test_erc_subcommand_failure_is_not_clean(
+            self, tmp_path, monkeypatch, failure_marker):
+        project = _mk_project(tmp_path)
+        rpt3 = runner._pl.reports_phase3_dir(project)
+        rpt3.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(runner, "_to_container_path", lambda p, c: p)
+        error = f"{failure_marker}: simulated command failed"
+        stdout = ("=== ERC: floating nets ===\n"
+                  "[INFO] 0 floating nets.\n"
+                  "=== ERC metrics ===\n" + error + "\n")
+        monkeypatch.setattr(runner, "_docker_exec",
+                            lambda c, cmd, timeout=0, **_: (0, stdout, ""))
+
+        assert runner._emit_erc_report(
+            project, "chip_top", _fake_pdk(), "x", rpt3 / "erc.rpt", [])
+        result = json.loads((rpt3 / "erc.json").read_text())
+        report = (rpt3 / "erc.rpt").read_text()
+        assert result["tool_returncode"] == 0
+        assert result["floating_nets"] is None
+        assert result["clean"] is False
+        assert result["verdict"] == "NOT_DETERMINED"
+        assert result["not_determined_reason"] == "ERC_SUBCOMMAND_FAILED"
+        assert result["measurement_errors"] == [error]
+        assert "ERC clean: NOT_DETERMINED" in report
+        assert error in report
+
+    def test_erc_gate_rejects_caught_error_even_with_zero_count(
+            self, tmp_path, monkeypatch):
+        project = _mk_project(tmp_path)
+        rpt3 = runner._pl.reports_phase3_dir(project)
+        rpt3.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(runner, "_to_container_path", lambda p, c: p)
+        stdout = ("=== ERC: floating nets ===\n"
+                  "[INFO] 0 floating nets.\n"
+                  "=== ERC metrics ===\n"
+                  "ERC_METRICS_NONFATAL: simulated command failed\n")
+        monkeypatch.setattr(runner, "_docker_exec",
+                            lambda c, cmd, timeout=0, **_: (0, stdout, ""))
+        assert runner._emit_erc_report(
+            project, "chip_top", _fake_pdk(), "x", rpt3 / "erc.rpt", [])
+
+        import erc_density_check as erc_gate
+        findings, stats = [], {}
+        erc_gate._check_erc(project, findings, stats)
+        assert stats["erc_checked"] is True
+        assert [f.category for f in findings] == ["ERC_NOT_DETERMINED"]
+        assert "ERC_METRICS_NONFATAL" in findings[0].message
+
     def test_missing_openroad_count_is_not_zero(self, tmp_path, monkeypatch):
         project = _mk_project(tmp_path)
         rpt3 = runner._pl.reports_phase3_dir(project)

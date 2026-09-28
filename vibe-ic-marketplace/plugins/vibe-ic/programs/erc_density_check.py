@@ -349,6 +349,20 @@ def _check_erc(project_dir: Path, findings: List[Finding], stats: dict) -> None:
         findings.append(Finding("ERROR", "ERC_EMPTY", f"{erc} is empty"))
         return
 
+    # The producer records a caught OpenROAD command failure in the report.
+    # A zero count from the other command cannot establish a clean screen.
+    subcommand_error = re.search(
+        r"(?m)^[ \t]*(ERC_(?:FN|METRICS)_NONFATAL):[^\r\n]*", text)
+    undetermined = re.search(
+        r"(?im)^[ \t]*ERC clean[ \t]*[:=][ \t]*NOT_DETERMINED\b", text)
+    if subcommand_error or undetermined:
+        reason = (subcommand_error.group(1) if subcommand_error
+                  else "ERC clean: NOT_DETERMINED")
+        findings.append(Finding(
+            "ERROR", "ERC_NOT_DETERMINED",
+            f"{erc} has incomplete ERC measurements ({reason})"))
+        return
+
     floating = None
     m = re.search(r"ERC floating nets\s*[:=]\s*([0-9]+)", text, re.I)
     if m is None:
