@@ -16,8 +16,9 @@ THE RULE, program first. For every parameter the reused top declares in its
 
   * DOCUMENT VALUES are collected with their source: an L8_RTL_CONSTANTS
     ``parameters[]`` entry (an ``override`` entry's ``value``, else its
-    ``default``) and an L9 ``parameters[]`` entry's ``default``. Two different
-    stated values REFUSE (``DOC_PARAMETER_CONTRADICTION``), naming both.
+    ``default``) and an L9 ``parameters[]`` entry. An explicit design override
+    outranks a table default; conflicting values at the same rank REFUSE
+    (``DOC_PARAMETER_CONTRADICTION``), naming both.
   * WIDTH EVIDENCE: a port of the reused top whose range uses the parameter,
     and whose width the DOCUMENT states -- an L9 top_ports entry of the same
     name that the document (not the staged-top harvest alone) declares, or the
@@ -77,7 +78,7 @@ import re  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any, Dict, List, Optional, Tuple  # noqa: E402
 
-from _atomic_artefact import write_json  # noqa: E402
+from _atomic_artefact import write_bytes, write_json  # noqa: E402
 
 PROGRAM = "reused_ip_param_derive"
 REPORT_REL = "reports/phase2/reused_ip_parameters.json"
@@ -287,6 +288,7 @@ def document_parameter_values(project: Path) -> Dict[str, Dict[str, Any]]:
             field = "value" if entry.get("override") else "default"
             val = _as_int(entry.get(field))
             src = {"document": rel, "field": f"parameters[{name}].{field}",
+                   "rank": "override" if entry.get("override") else "default",
                    "source": entry.get("source"),
                    "extraction_strategy": entry.get("extraction_strategy")}
             if val is not None:
@@ -296,6 +298,14 @@ def document_parameter_values(project: Path) -> Dict[str, Dict[str, Any]]:
                 slot["allowed"].append(dict(src, field=f"parameters[{name}].type",
                                             values=allowed))
     return out
+
+
+def selected_statements(info: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Keep all evidence, but decide from the highest document rank present."""
+    stated = info.get("stated") or []
+    if any(s.get("rank") == "override" for s in stated):
+        return [s for s in stated if s.get("rank") == "override"]
+    return list(stated)
 
 
 #: Phase 1's own markers for a width that is NOT a document statement.
@@ -337,15 +347,21 @@ def stated_width(entry: Dict[str, Any]) -> Optional[int]:
 def width_pairs(manifest: Dict[str, Any]) -> List[Tuple[Dict[str, Any], str]]:
     """The rename pairs that may carry a DOCUMENT width onto an RTL port.
 
-    Authored ``renamed_interfaces`` entries, and program-derived
+    Authored rename entries through the same parser as the pad side and gates,
+    and program-derived
     ``derived_pad_pairs`` entries whose ``rule`` is ``R1`` ONLY: R1 pairs one
     document port with the implemented ports it split into (read/write), so
     the document's width is theirs. An R2 pair joins ports that merely share
     a family atom and a pad side, which says nothing about a width."""
+    from l9_rtl_pin_consistency_check import (
+        _MANIFEST_RENAME_KEYS, _manifest_renamed_groups)
     out: List[Tuple[Dict[str, Any], str]] = []
-    for pair in manifest.get("renamed_interfaces") or []:
-        if isinstance(pair, dict):
-            out.append((pair, f"{MANIFEST_REL} renamed_interfaces"))
+    for key in _MANIFEST_RENAME_KEYS:
+        for l9_names, rtl_names in _manifest_renamed_groups(
+                {key: manifest.get(key)}):
+            if l9_names and rtl_names:
+                out.append(({"l9": sorted(l9_names), "rtl": sorted(rtl_names)},
+                            f"{MANIFEST_REL} {key}"))
     from _l_doc_pad_placement import DERIVED_PAD_PAIRS_KEY
     for pair in manifest.get(DERIVED_PAD_PAIRS_KEY) or []:
         if isinstance(pair, dict) and str(pair.get("rule") or "") == "R1":
@@ -412,14 +428,29 @@ def derive(project: Path, choose: Optional[Dict[str, int]] = None
     explicit = dict(choose or {})
     rec: Dict[str, Any] = {"program": PROGRAM, "parameters": {},
                            "overrides": {}, "findings": []}
+    for rel in (L8_REL, L9_REL):
+        path_doc = project / rel
+        if _read_json(path_doc) is None:
+            rec.update(verdict="NOT_MEASURED", rc=2,
+                       reason=f"{rel} is absent, unreadable, or not a JSON object",
+                       reason_class=("input_absent" if not path_doc.exists()
+                                     else "execution_error"))
+            return rec
     top, text, path = _top_and_text(project)
     rec["top"] = top
     # A VERIFIED AI CHOICE IS REMEMBERED, AND RE-VERIFIED. `--apply` records it
     # in the sidecar; every later run (the runner never passes --choose) takes
     # it back as a choice and judges it against the documents AS THEY ARE NOW.
     recorded: Dict[str, int] = {}
+    side: Dict[str, Any] = {}
     if top:
-        side = _read_json(sidecar_path(project, top)) or {}
+        side_path = sidecar_path(project, top)
+        side = _read_json(side_path) or {}
+        if side_path.exists() and not side:
+            rec.update(verdict="NOT_MEASURED", rc=2,
+                       reason=f"{side_path.relative_to(project)} is unreadable",
+                       reason_class="execution_error")
+            return rec
         for k, v in (side.get("ai_choice") or {}).items():
             if _as_int(v) is not None:
                 recorded[str(k)] = int(_as_int(v))
@@ -431,15 +462,37 @@ def derive(project: Path, choose: Optional[Dict[str, int]] = None
                            f"no file under {RTL_REL} defines module {top}"))
         return rec
     rec["top_file"] = str(path.relative_to(project))
-    header = header_parameters(text, top)
-    if header is None:
+    observed_header = header_parameters(text, top)
+    if observed_header is None:
         rec.update(verdict="NOT_MEASURED", rc=2,
                    reason=f"module {top} header could not be read")
         return rec
-    if not header:
+    if not observed_header:
         rec.update(verdict="NOT_APPLICABLE", rc=0,
                    reason=f"module {top} declares no parameter")
         return rec
+    prior_applied = dict(side.get("applied") or {})
+    prior_original = dict(side.get("original") or {})
+    # The staged header is an OUTPUT of this program. Reconstruct the vendor
+    # defaults from the sidecar before evaluating the IP's parameter math.
+    # An external edit that disagrees with the sidecar cannot be called either
+    # the vendor default or this program's applied value.
+    header = []
+    for name, expr in observed_header:
+        if name in prior_applied:
+            if name not in prior_original or expr.strip() != str(
+                    prior_applied[name]).strip():
+                rec.update(verdict="NOT_MEASURED", rc=2,
+                           reason=(f"staged header parameter {name} disagrees "
+                                   "with its recorded applied/original defaults"),
+                           reason_class="execution_error")
+                return rec
+            header.append((name, str(prior_original[name])))
+        else:
+            header.append((name, expr))
+    rec["vendor_defaults_from"] = (
+        str(sidecar_path(project, top).relative_to(project))
+        if prior_applied else rec["top_file"])
     names = [n for n, _e in header]
     exprs = dict(header)
     derived_params = {n for n, e in header
@@ -509,14 +562,16 @@ def derive(project: Path, choose: Optional[Dict[str, int]] = None
             "document_values": info["stated"],
             "document_allowed": info["allowed"]}
         rec["parameters"][name] = entry
-        stated = sorted({s["value"] for s in info["stated"]})
+        selected = selected_statements(info)
+        entry["selected_document_values"] = selected
+        stated = sorted({s["value"] for s in selected})
         if len(stated) > 1:
             refusals.append({
                 "rule": "DOC_PARAMETER_CONTRADICTION", "parameter": name,
                 "message": (f"the documents state {name} = "
                             + " and ".join(f"{s['value']} ({s['document']} "
                                            f"{s['field']}, from {s['source']})"
-                                           for s in info["stated"]))})
+                                           for s in selected))})
             continue
         if stated and name not in derived_params:
             fixed[name] = stated[0]
@@ -528,9 +583,10 @@ def derive(project: Path, choose: Optional[Dict[str, int]] = None
     stated_derived = {}
     for name in names:
         info = doc_vals.get(name) or {"stated": []}
-        stated = sorted({s["value"] for s in info["stated"]})
+        selected = selected_statements(info)
+        stated = sorted({s["value"] for s in selected})
         if name in in_scope and name in derived_params and len(stated) == 1:
-            stated_derived[name] = (stated[0], info["stated"][0])
+            stated_derived[name] = (stated[0], selected[0])
 
     def derived_mismatches(fixed_now: Dict[str, int]) -> List[str]:
         vals_now = evaluate_header(header, fixed_now)
@@ -564,6 +620,14 @@ def derive(project: Path, choose: Optional[Dict[str, int]] = None
                    + [d for d in stated_derived if d in reach[name]])
         allowed = sorted({v for a in entry["document_allowed"]
                           for v in a["values"]})
+        if name in choose and (not depends or not allowed):
+            refusals.append({
+                "rule": "CHOICE_NOT_ALLOWED_BY_DOCUMENTS",
+                "parameter": name,
+                "message": (f"{name} = {choose[name]} was chosen earlier, but "
+                            "the current documents provide no allowed value "
+                            "list and dependent width evidence for it")})
+            continue
         if not depends or not allowed:
             continue
         fits = [v for v in allowed
@@ -635,6 +699,9 @@ def derive(project: Path, choose: Optional[Dict[str, int]] = None
             "decided_by", "ip_default" if name in in_scope else "out_of_scope")
     rec["overrides"] = {n: v for n, v in fixed.items()
                         if n not in derived_params and v != ip_default[n]}
+    rec["restore_defaults"] = {
+        n: prior_original[n] for n in prior_applied
+        if n in prior_original and n not in rec["overrides"]}
     rec["ai_choice"] = {n: e["value"] for n, e in rec["parameters"].items()
                         if e.get("decided_by") == "ai_choice_verified"}
     rec["resolved"] = final
@@ -676,6 +743,7 @@ def apply_overrides(project: Path, rec: Dict[str, Any]) -> Dict[str, Any]:
     Returns ``{name: {"from": old_expr, "to": value}}`` for what changed.
 
     THE EDIT IS FOUND WHERE THE PARSER READS. The value span of each override
+    or restoration
     comes from `_header_chunks` over the BLANKED header (comments and string
     contents are spaces of the same length), the same chunks
     `header_parameters` reads the defaults from, so a comment that mentions
@@ -692,7 +760,9 @@ def apply_overrides(project: Path, rec: Dict[str, Any]) -> Dict[str, Any]:
     top = rec["top"]
     changed: Dict[str, Any] = {}
     overrides = dict(rec.get("overrides") or {})
-    if overrides:
+    restorations = dict(rec.get("restore_defaults") or {})
+    targets = dict(restorations, **overrides)
+    if targets:
         text = path.read_text(errors="replace")
         span = _header_block(text, top)
         if span is None or span == (-1, -1):
@@ -706,34 +776,38 @@ def apply_overrides(project: Path, rec: Dict[str, Any]) -> Dict[str, Any]:
                                  f"{top} header of {path}")
             chunks[name] = (start + vs, start + ve)
         edits = []
-        for name, value in sorted(overrides.items()):
+        for name, value in sorted(targets.items()):
             if name not in chunks:
                 raise ValueError(f"no default for parameter {name} in the "
                                  f"{top} header of {path}")
             vs, ve = chunks[name]
-            changed[name] = {"from": text[vs:ve], "to": value}
-            edits.append((vs, ve, str(value)))
-        new = text
-        for vs, ve, value in sorted(edits, reverse=True):
-            new = new[:vs] + value + new[ve:]
-        from _atomic_artefact import write_text
-        write_text(path, new)
-        after = header_parameters(new, top)
-        got = evaluate_header(after or [], {})
-        wrong = {n: got.get(n) for n, v in overrides.items()
-                 if got.get(n) != v}
-        if wrong:
-            write_text(path, text)
-            raise ValueError(f"the header read back after the edit does not "
-                             f"carry the overrides: wanted {overrides}, got "
-                             f"{wrong}; {path} restored")
+            if text[vs:ve].strip() != str(value).strip():
+                changed[name] = {"from": text[vs:ve], "to": value}
+                edits.append((vs, ve, str(value)))
+        if edits:
+            new = text
+            for vs, ve, value in sorted(edits, reverse=True):
+                new = new[:vs] + value + new[ve:]
+            from _atomic_artefact import write_text
+            write_text(path, new)
+            after = header_parameters(new, top)
+            got = evaluate_header(after or [], {})
+            wanted = rec.get("resolved") or {}
+            wrong = {n: got.get(n) for n in targets
+                     if got.get(n) != wanted.get(n)}
+            if wrong:
+                write_text(path, text)
+                raise ValueError(f"the header read back after the edit does not "
+                                 f"carry the overrides/restorations: wanted "
+                                 f"{wanted}, got {wrong}; {path} restored")
     side = sidecar_path(project, top)
     prior = _read_json(side) or {}
     original = dict(prior.get("original") or {})
     for name, ch in changed.items():
+        if name not in overrides:
+            continue
         original.setdefault(name, ch["from"])
-    applied = dict(prior.get("applied") or {})
-    applied.update({n: str(v) for n, v in overrides.items()})
+    applied = {n: str(v) for n, v in overrides.items()}
     ai_choice = dict(rec.get("ai_choice") or {})
     if changed or ai_choice or prior:
         write_json(side, {
@@ -790,20 +864,46 @@ def main(argv: Optional[List[str]] = None) -> int:
     project = Path(a.project)
     rec = derive(project, choose)
     if a.apply and rec.get("verdict") == "PASS":
+        mutable = [project / rec["top_file"],
+                   sidecar_path(project, rec["top"]),
+                   project / MANIFEST_REL]
+        before: Dict[Path, Optional[bytes]] = {}
         try:
-            rec["applied"] = apply_overrides(project, rec)
-        except (OSError, ValueError) as exc:
+            before = {p: p.read_bytes() if p.exists() else None
+                      for p in mutable}
+        except OSError as exc:
             rec.update(verdict="NOT_MEASURED", rc=2,
-                       reason=f"the overrides could not be applied: {exc}")
-        if rec.get("applied"):
+                       reason=f"the mutable inputs could not be snapshotted: {exc}",
+                       reason_class="execution_error")
+        if before:
+            try:
+                rec["applied"] = apply_overrides(project, rec)
+            except (OSError, ValueError) as exc:
+                rec.update(verdict="NOT_MEASURED", rc=2,
+                           reason=f"the overrides could not be applied: {exc}",
+                           reason_class="execution_error")
+        if rec.get("applied") and rec.get("verdict") == "PASS":
             try:
                 rec["derived_pad_pairs_refreshed"] = \
                     refresh_derived_pad_pairs(project)
             except Exception as exc:  # noqa: BLE001 — named, never swallowed
+                rollback_errors = []
+                for p, data in before.items():
+                    try:
+                        if data is None:
+                            p.unlink(missing_ok=True)
+                        else:
+                            write_bytes(p, data)
+                    except OSError as restore_exc:
+                        rollback_errors.append(f"{p}: {restore_exc}")
+                rec["applied"] = {}
                 rec.update(verdict="NOT_MEASURED", rc=2,
                            reason=(f"the header changed but the pad pairs "
                                    f"derived from it could not be refreshed: "
-                                   f"{type(exc).__name__}: {exc}"))
+                                   f"{type(exc).__name__}: {exc}"
+                                   + (f"; rollback failed: {rollback_errors}"
+                                      if rollback_errors else "; inputs restored")),
+                           reason_class="execution_error")
     prior = _read_json(sidecar_path(project, rec["top"])) if rec.get("top") \
         else None
     if prior:

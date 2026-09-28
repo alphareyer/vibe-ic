@@ -131,11 +131,12 @@ def test_the_documents_memsize_reaches_the_staged_top(tmp_path):
     side = json.loads(D.sidecar_path(p, "widget").read_text())
     assert side["applied"] == {"memsize": "1024"}
     assert side["original"] == {"memsize": "512"}
-    # idempotent: a second run finds nothing left to override
+    # idempotent: the vendor-relative override remains recorded, with no edit
     before = (p / "phase2/stage1/rtl/widget.v").read_text()
     assert D.main([str(p), "--apply"]) == 0
     assert (p / "phase2/stage1/rtl/widget.v").read_text() == before
-    assert json.loads((p / D.REPORT_REL).read_text())["overrides"] == {}
+    assert json.loads((p / D.REPORT_REL).read_text())["overrides"] == {
+        "memsize": 1024}
 
 
 def test_a_feature_switch_a_document_states_is_not_applied(tmp_path):
@@ -162,7 +163,8 @@ def test_the_harvested_rtl_width_is_not_document_evidence(tmp_path):
 # contradictions refuse, naming both values and their sources
 # --------------------------------------------------------------------------- #
 def test_two_documents_that_disagree_refuse(tmp_path):
-    l9 = _l9(parameters=[_param("memsize", 512, source="L9.md")])
+    l9 = _l9(parameters=[_param("memsize", 512, override=True,
+                                source="L9.md")])
     p = _project(tmp_path, l9=l9)
     assert D.main([str(p), "--apply"]) == 1
     rec = json.loads((p / D.REPORT_REL).read_text())
@@ -697,3 +699,150 @@ def test_the_pad_pairs_derived_at_the_ip_default_are_refreshed(tmp_path):
         == [(["o_memory_addr"], ["o_memory_raddr", "o_memory_waddr"], "R1")]
     rec = json.loads((p / D.REPORT_REL).read_text())
     assert rec["derived_pad_pairs_refreshed"]["derived_pad_pairs"] == 1
+
+
+def test_a_removed_document_override_restores_the_vendor_default(tmp_path):
+    p = _project(tmp_path)
+    assert D.main([str(p), "--apply"]) == 0
+    assert _header_default(p, "memsize") == "1024"
+    (p / D.L8_REL).write_text(json.dumps({"parameters": []}))
+    (p / D.L9_REL).write_text(json.dumps(_l9(addr_width=9)))
+    assert D.main([str(p), "--apply"]) == 0
+    rec = json.loads((p / D.REPORT_REL).read_text())
+    side = json.loads(D.sidecar_path(p, "widget").read_text())
+    assert rec["verdict"] == "PASS" and rec["overrides"] == {}
+    assert rec["parameters"]["memsize"]["ip_default"] == 512
+    assert rec["parameters"]["memsize"]["decided_by"] == "ip_default"
+    assert _header_default(p, "memsize") == "512"
+    assert side["original"] == {"memsize": "512"}
+    assert side["applied"] == {}
+
+
+def test_a_recorded_choice_with_no_document_permission_refuses(tmp_path):
+    p = _project(tmp_path, l8=ALLOW_600_1000_1024)
+    assert D.main([str(p), "--choose", "memsize=1000", "--apply"]) == 0
+    (p / D.L8_REL).write_text(json.dumps(
+        {"parameters": [_param("memsize", None)]}))
+    assert D.main([str(p), "--apply"]) == 1
+    rec = json.loads((p / D.REPORT_REL).read_text())
+    assert rec["verdict"] == "REFUSE"
+    assert any(f["rule"] == "CHOICE_NOT_ALLOWED_BY_DOCUMENTS"
+               for f in rec["findings"])
+    assert _header_default(p, "memsize") == "1000"
+    assert json.loads(D.sidecar_path(p, "widget").read_text())["ai_choice"] \
+        == {"memsize": 1000}
+
+
+@pytest.mark.parametrize("contents", [None, '{"parameters": [', '[]'],
+                         ids=["absent", "truncated", "wrong-shape"])
+def test_an_unreadable_l8_cannot_pass_at_the_ip_default(tmp_path, contents):
+    p = _project(tmp_path, l8=[], pairs=[])
+    l8 = p / D.L8_REL
+    if contents is None:
+        l8.unlink()
+    else:
+        l8.write_text(contents)
+    assert D.main([str(p)]) == 2
+    rec = json.loads((p / D.REPORT_REL).read_text())
+    assert rec["verdict"] == "NOT_MEASURED"
+    assert D.L8_REL in rec["reason"]
+
+
+def test_an_l8_override_outranks_the_documented_vendor_default(tmp_path):
+    p = _project(tmp_path, l8=[
+        _param("memsize", 512, allowed=[256, 512, 1024, 2048]),
+        _param("memsize", 1024, override=True)])
+    rec = D.derive(p)
+    assert rec["verdict"] == "PASS", rec["findings"]
+    assert rec["overrides"] == {"memsize": 1024}
+    selected = rec["parameters"]["memsize"]["selected_document_values"]
+    assert [s["value"] for s in selected] == [1024]
+    assert selected[0]["field"].endswith(".value")
+
+
+@pytest.mark.parametrize("key,pair", [
+    ("renamed_buses", {"l9": ["o_mem_addr"],
+                        "rtl": ["o_mem_waddr", "o_mem_raddr"]}),
+    ("renamed_interfaces", {"from": ["o_mem_addr"],
+                            "to": ["o_mem_waddr", "o_mem_raddr"]}),
+    ("interface_renames", {"typical": ["o_mem_addr"],
+                           "actual": ["o_mem_waddr", "o_mem_raddr"]}),
+])
+def test_every_authored_rename_spelling_carries_document_width(
+        tmp_path, key, pair):
+    p = _project(tmp_path, l8=[_param("memsize", None,
+                                     allowed=[256, 512, 1024, 2048])], pairs=[])
+    mf = p / D.MANIFEST_REL
+    manifest = json.loads(mf.read_text())
+    manifest[key] = [pair]
+    mf.write_text(json.dumps(manifest))
+    rec = D.derive(p)
+    assert rec["verdict"] == "PASS", rec["findings"]
+    assert rec["overrides"] == {"memsize": 1024}
+    assert {w["port"] for w in rec["width_evidence"]} == {
+        "o_mem_waddr", "o_mem_raddr"}
+
+
+def test_pre_entry_rechecks_a_previous_refusal(tmp_path):
+    """Execute the runner's actual pre-entry branch with a stale FAIL report."""
+    p = _project(tmp_path)
+    report = p / D.REPORT_REL
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({"verdict": "REFUSE", "rc": 1}))
+    main = next(f for f in ast.parse(RUNNER.read_text()).body
+                if isinstance(f, ast.FunctionDef) and f.name == "main")
+    assignment = next(n for n in ast.walk(main)
+                      if isinstance(n, ast.Assign) and any(
+                          isinstance(t, ast.Name) and t.id == "_entry_params"
+                          for t in n.targets)
+                      and isinstance(n.value, ast.Call))
+    branch = next((n for n in ast.walk(main)
+                   if isinstance(n, ast.If) and n.body == [assignment]),
+                  assignment)
+    calls = []
+    env = {"project": p, "_entry_staged": type("Staged", (), {"extras": {}})(),
+           "_entry_params": None,
+           "step_reused_ip_parameters": lambda project: calls.append(project)}
+    code = compile(ast.fix_missing_locations(
+        ast.Module(body=[branch], type_ignores=[])), str(RUNNER), "exec")
+    exec(code, env)
+    assert calls == [p]
+
+
+def test_refresh_failure_rolls_back_header_and_sidecar(tmp_path, monkeypatch):
+    p = _project(tmp_path)
+    header = p / D.RTL_REL / "widget.v"
+    original = header.read_text()
+    side = D.sidecar_path(p, "widget")
+    def fail_refresh(project):
+        raise RuntimeError("refresh probe")
+    monkeypatch.setattr(D, "refresh_derived_pad_pairs", fail_refresh)
+    assert D.main([str(p), "--apply"]) == 2
+    rec = json.loads((p / D.REPORT_REL).read_text())
+    assert rec["verdict"] == "NOT_MEASURED"
+    assert rec["reason_class"] == "execution_error"
+    assert header.read_text() == original
+    assert not side.exists()
+
+
+def test_runner_classifies_parse_and_apply_failures_as_execution_errors(
+        tmp_path, monkeypatch):
+    import design_one_shot_runner as R
+    p = _project(tmp_path)
+    (p / D.MANIFEST_REL).write_text("{")
+    sr = R.step_reused_ip_parameters(p)
+    assert sr.status == "NOT_MEASURED"
+    assert sr.reason_class == "execution_error"
+    (p / D.MANIFEST_REL).write_text(json.dumps({"reused_ip": True}))
+    def failed_apply(cmd, **kwargs):
+        report = p / D.REPORT_REL
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps({
+            "verdict": "NOT_MEASURED", "rc": 2,
+            "reason": "the header changed but refresh failed",
+            "reason_class": "execution_error"}))
+        return 2, "", ""
+    monkeypatch.setattr(R, "_run", failed_apply)
+    sr = R.step_reused_ip_parameters(p)
+    assert sr.status == "NOT_MEASURED"
+    assert sr.reason_class == "execution_error"

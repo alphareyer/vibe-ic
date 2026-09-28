@@ -9914,12 +9914,12 @@ def step_reused_ip_parameters(project: Path) -> StepResult:
         return StepResult(
             "reused_ip_parameters", "NOT_MEASURED", time.time() - t0,
             f"phase2/stage1/rtl/SOURCE_MANIFEST.json could not be read: {exc}",
-            reason_class=_V.ReasonClass.INPUT_ABSENT.value)
+            reason_class=_V.ReasonClass.EXECUTION_ERROR.value)
     if not isinstance(doc, dict):
         return StepResult(
             "reused_ip_parameters", "NOT_MEASURED", time.time() - t0,
             "phase2/stage1/rtl/SOURCE_MANIFEST.json is not a JSON object",
-            reason_class=_V.ReasonClass.INPUT_ABSENT.value)
+            reason_class=_V.ReasonClass.EXECUTION_ERROR.value)
     if doc.get("reused_ip") is not True:
         return StepResult(
             "reused_ip_parameters", "NOT_APPLICABLE", time.time() - t0,
@@ -9966,7 +9966,8 @@ def step_reused_ip_parameters(project: Path) -> StepResult:
             "reused_ip_parameters", "NOT_MEASURED", time.time() - t0,
             f"reused_ip_param_derive rc={rc}: "
             f"{payload.get('reason') or detail}", files,
-            reason_class=_V.ReasonClass.INPUT_ABSENT.value)
+            reason_class=(payload.get("reason_class")
+                          or _V.ReasonClass.EXECUTION_ERROR.value))
     extras: Dict[str, Any] = {"findings": payload.get("findings") or []}
     if verdict == "UNRESOLVED":
         extras.update(
@@ -24477,13 +24478,10 @@ def main() -> int:
         # phase2/stage1/rtl/ already holds RTL, so the later dispatch of the
         # same step is a no-op rather than a second copy.
         _entry_staged = step_reused_ip_consume(project, args.top_name)
-        # FX_D13 — the documents' parameter values are part of staging the
-        # reused IP: whenever this run staged it (or no record of applying
-        # them exists yet), apply them now, whatever step the run enters at.
-        if ((_entry_staged.extras or {}).get("staged")
-                or not (project / "reports/phase2/reused_ip_parameters.json"
-                        ).is_file()):
-            _entry_params = step_reused_ip_parameters(project)
+        # FX_D13 — a prior report may describe older documents or a refusal.
+        # Re-evaluate the staged IP before entering any later step. The rule
+        # is idempotent when its inputs and header already agree.
+        _entry_params = step_reused_ip_parameters(project)
         _adm = _spf.entry_admission(project, "design_one_shot_runner",
                                     str(args.entry_step))
         if not _adm["admitted"]:
