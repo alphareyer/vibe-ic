@@ -107,6 +107,22 @@ def test_upstream_spells_the_two_abstraction_knobs_the_way_we_emit_them():
         f"{path}: `-hide` is no longer conditioned on MAGIC_WRITE_FULL_LEF.")
 
 
+def test_upstream_refuses_a_cell_the_gds_does_not_carry_before_loading_it():
+    """Since vibeic-eda 0.3.83: `load` of an absent cell silently creates an
+    empty one, so the GDS route checks the cell exists and exits 1 first."""
+    text, path = _upstream_text()
+    m = re.search(r"if \{ \$::env\(MAGIC_LEF_WRITE_USE_GDS\) \} \{(.*?)\} else \{",
+                  text, re.S)
+    assert m, f"{path}: the two-route branch on MAGIC_LEF_WRITE_USE_GDS is gone."
+    route = m.group(1)
+    guard = route.find("[cellname list exists $::env(DESIGN_NAME)] == 0")
+    assert guard != -1, f"{path}: the GDS route no longer checks the cell exists."
+    assert "exit 1" in route[guard:], f"{path}: an absent cell is no longer refused."
+    assert route.find("gds read") < guard < route.find("load $::env(DESIGN_NAME)"), (
+        f"{path}: the existence check no longer sits between `gds read` and "
+        f"the `load` it protects.")
+
+
 # ── OUR half ────────────────────────────────────────────────────────────────
 
 def test_we_take_the_default_route_geometry_from_gds_ports_from_def():
@@ -132,3 +148,14 @@ def test_pinonly_is_emitted_only_when_asked():
                                          pinonly=True)
     assert "-pinonly" not in g.build_lef_tcl("t", "g", "d", "o", full_lef=False,
                                              pinonly=False)
+
+
+def test_a_cell_the_gds_does_not_carry_is_refused_before_it_is_loaded():
+    """Upstream's guard, mirrored: without it `load top` made an EMPTY cell
+    and the DEF read hung ports on it -- a LEF with pins and no geometry."""
+    tcl = GEN.build_lef_tcl("top", "a.gds", "b.def", "o.lef",
+                            full_lef=False, pinonly=False)
+    guard = tcl.find("[cellname list exists top] == 0")
+    assert guard != -1, tcl
+    assert tcl.find("gds read a.gds") < guard < tcl.find("load top"), tcl
+    assert "exit 1" in tcl[guard:tcl.find("load top")], tcl
