@@ -545,6 +545,19 @@ def test_hold_closure_can_adopt_with_unchanged_measured_drv_residue(
     assert final['measurement']['drv_count'] == 1
 
 
+def test_unmeasured_candidate_drv_is_still_refused(tmp_path, monkeypatch):
+    candidate = _cand(4.999, 0.326, (0, 0, 0))
+    key = next(k for k in candidate['sta_metrics'] if 'max_fanout_violation' in k)
+    del candidate['sta_metrics'][key]
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, -0.335, (0, 0, 1)),
+        candidates=[candidate])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_hold')
+    assert run.iterations[0].decision == 'ROLLED_BACK'
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+
+
 def test_the_deck_repairs_drv_after_timing_and_antenna_cell_insertion():
     tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
     calls = [m.start() for m in re.finditer(r'^log_cmd repair_design', tcl, re.M)]
@@ -554,6 +567,35 @@ def test_the_deck_repairs_drv_after_timing_and_antenna_cell_insertion():
     assert calls[1] < tcl.index('vic_census after_timing_drv_recheck')
     assert tcl.index('log_cmd repair_antennas {*}$ant_args') < calls[-1]
     assert calls[-1] < tcl.index('# ---- 7. re-verify')
+
+
+def test_post_antenna_drv_recheck_runs_even_without_a_fanout_row(tmp_path):
+    tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    start = tcl.index('set ::vic_fo_rounds 0')
+    end = tcl.index('# ---- 7. re-verify', start)
+    section = tmp_path / 'post_antenna_drv.tcl'
+    section.write_text(tcl[start:end])
+    harness = textwrap.dedent(r"""
+        namespace eval utl { proc metric_integer {args} {} }
+        set ::env(VIBEIC_PRR_MAX_FANOUT) 4
+        set ::vic_fo_repaired [dict create]
+        set ::calls 0
+        set rd_args [list]
+        set ::block block
+        proc block {method args} {if {$method eq "getInsts"} {return {}}}
+        proc vic_fanout_over {} {return [dict create]}
+        proc vic_fanout_added {before now} {return [dict create]}
+        proc vic_say {line} {puts $line}
+        proc log_cmd {name args} {
+            if {$name eq "repair_design"} {incr ::calls}
+        }
+        source __SECTION__
+        puts "DRV_RECHECK_CALLS $::calls"
+    """).replace('__SECTION__', str(section))
+    run = subprocess.run(['tclsh'], input=harness, text=True,
+                         capture_output=True, check=False)
+    assert run.returncode == 0, run.stderr
+    assert 'DRV_RECHECK_CALLS 1' in run.stdout, run.stdout
 
 
 def test_timing_cannot_remove_the_buffers_that_closed_declared_fanout():
