@@ -459,7 +459,8 @@ def _oracles_that_actually_ran(project: Path) -> dict:
     with theirs.
     """
     declared = _declared_l10_case_ids(project)
-    record = _l10x.load_record(project)
+    l10 = _pl.generated_docs_dir(project) / "L10_TEST_CASES.json"
+    record = _l10x.load_record(project, l10)
     executed: list = []
     not_executed: list = []
     for case_id in declared:
@@ -554,8 +555,9 @@ def _coverage_goal_summary(project: Path) -> dict:
     measured by a separate instrument, so the Step-4 record reads as two
     populations rather than one mixed number."""
     gd = _pl.generated_docs_dir(project)
+    l10 = gd / "L10_TEST_CASES.json"
     rows, _process_only = _split_executable(_declared_rows(
-        gd / "L10_TEST_CASES.json", ("test_cases", "cases", "vectors")))
+        l10, ("test_cases", "cases", "vectors")))
     rows, _design_na = split_design_declared_na(
         rows, design_selected_options(project))
     _vectors, goals = _cgc.partition(rows)
@@ -563,7 +565,7 @@ def _coverage_goal_summary(project: Path) -> dict:
     # The execution record arms the scenario pass-rate instrument (a goal
     # measured by the L10 cases bound to it that ran their own oracle).
     summary = _cgc.measure_goals(goals, totals, rows,
-                                 _l10x.load_record(project))
+                                 _l10x.load_record(project, l10))
     summary["totals_source"] = source
     return summary
 

@@ -159,6 +159,32 @@ def test_a_failed_case_defeats_a_two_case_100_percent_goal_even_if_one_did_not_r
     assert row["failed"] == ["a"], row
     assert "a" in row["why"] and "b" in row["why"], row
 
+def test_a_failed_case_makes_the_goal_unreachable_even_with_a_missing_case(tmp_path):
+    goal = dict(GOALS[1], covered_by=["failed_vector", "missing_vector"])
+    p = _project(tmp_path, [dict(VEC, name="failed_vector"),
+                            dict(VEC, name="missing_vector"), goal])
+    _record(p, {"failed_vector": "FAIL"})
+    row = _rows(W._coverage_goal_summary(p))[goal["name"]]
+    assert row["verdict"] == G.FAIL, row
+    assert row["failed"] == ["failed_vector"]
+    assert "missing_vector" in row["why"]
+
+
+def test_changed_l10_cannot_reuse_an_old_pass_record(tmp_path):
+    goal = dict(GOALS[1], covered_by=[VEC["name"]])
+    p = _project(tmp_path, [VEC, goal])
+    _record(p, {VEC["name"]: "PASS"})
+    l10 = p / "phase1" / "generated_docs" / "L10_TEST_CASES.json"
+    doc = json.loads(l10.read_text())
+    doc["test_cases"][0]["stimulus"] = "changed stimulus"
+    l10.write_text(json.dumps(doc))
+    row = _rows(W._coverage_goal_summary(p))[goal["name"]]
+    assert row["verdict"] == G.NOT_MEASURED, row
+    assert "execution_record_l10_hash_mismatch" in row["why"]
+    ran = W._oracles_that_actually_ran(p)
+    assert ran["executed_count"] == 0, ran
+    assert ran["record_reason"] == "execution_record_l10_hash_mismatch"
+
 
 def test_a_case_can_declare_the_goal_it_covers(tmp_path):
     vec = dict(VEC, covers=[GOALS[1]["name"]])
