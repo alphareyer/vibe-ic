@@ -45,7 +45,7 @@ old decap-count proxy:
   * EM report absent / unreadable / no parseable segments  → SKIPPED (rc 3)
   * Jmax reference (tech LEF or jmax JSON) absent           → SKIPPED (rc 3)
   * report + Jmax present but NO segment maps to a Jmax     → SKIPPED (rc 3)
-  * conductor width unproved for any segment                 → NOT_MEASURED (rc 3)
+  * conductor/cut geometry unproved for any segment           → NOT_MEASURED (rc 3)
   * every segment measured and under margined Jmax           → PASS   (rc 0)
   * any screened segment at/over margined Jmax              → FAIL   (rc 1)
   * bad CLI argument                                        → error  (rc 2)
@@ -123,12 +123,19 @@ foreach _eg_n [[ord::get_db_block] getNets] {
         if {$_eg_v eq "NULL"} {continue}
         foreach _eg_b [$_eg_v getBoxes] {
           set _eg_l [$_eg_b getTechLayer]
-          if {$_eg_l eq "NULL" || [$_eg_l getRoutingLevel] <= 0} {continue}
+          if {$_eg_l eq "NULL"} {continue}
+          if {[$_eg_l getType] eq "CUT"} {
+            set _eg_source via_cut
+          } elseif {[$_eg_l getRoutingLevel] > 0} {
+            set _eg_source via_metal
+          } else {
+            continue
+          }
           puts $_eg_f [join [list [$_eg_n getName] [$_eg_l getName] \
             [expr {double($_eg_vx+[$_eg_b xMin])/$_eg_dbu}] \
             [expr {double($_eg_vy+[$_eg_b yMin])/$_eg_dbu}] \
             [expr {double($_eg_vx+[$_eg_b xMax])/$_eg_dbu}] \
-            [expr {double($_eg_vy+[$_eg_b yMax])/$_eg_dbu}] via_metal] "\t"]
+            [expr {double($_eg_vy+[$_eg_b yMax])/$_eg_dbu}] $_eg_source] "\t"]
         }
       } else {
         set _eg_l [$_eg_s getTechLayer]
@@ -233,6 +240,21 @@ def parse_lef_jmax(text: str) -> Dict[str, Dict[str, Any]]:
                 "jmax_per_cut_A": dc * 1e-3,  # LEF cut DCCURRENTDENSITY is mA/cut
             }
     return table
+
+
+def _lef_cut_between_routing(text: str) -> Dict[frozenset[str], str]:
+    """Map adjacent routing layers to their single intervening tech-LEF cut."""
+    layers = []
+    for m in _LAYER_BLOCK_RE.finditer(text):
+        tm = _TYPE_RE.search(m.group(2))
+        if tm:
+            layers.append((m.group(1).lower(), tm.group(1).lower()))
+    out = {}
+    for (lower, low_type), (cut, cut_type), (upper, high_type) in zip(
+            layers, layers[1:], layers[2:]):
+        if (low_type, cut_type, high_type) == ("routing", "cut", "routing"):
+            out[frozenset((lower, upper))] = cut
+    return out
 
 
 def parse_json_jmax(data: Any) -> Dict[str, Dict[str, Any]]:
@@ -442,6 +464,161 @@ _DEF_LOCAL_WIRE_RE = re.compile(
     r"(?:ROUTED|NEW)\s+(\S+)\s+(\d+)\s+\+\s+SHAPE\s+"
     r"(?:STRIPE|RING|FOLLOWPIN)\s+"
     r"\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)")
+_DEF_VIAS_SECTION_RE = re.compile(r"\bVIAS\s+\d+\s*;(.*?)\bEND\s+VIAS\b", re.DOTALL)
+_DEF_VIA_LAYERS_RE = re.compile(r"\+\s+LAYERS\s+(\S+)\s+(\S+)\s+(\S+)", re.I)
+_DEF_VIA_ROWCOL_RE = re.compile(r"\+\s+ROWCOL\s+(\d+)\s+(\d+)", re.I)
+_DEF_VIA_CUTSIZE_RE = re.compile(r"\+\s+CUTSIZE\s+\d+\s+\d+", re.I)
+_DEF_VIA_RECT_RE = re.compile(r"\+\s+RECT\s+(\S+)\s+\(\s*-?\d+\s+-?\d+\s*\)\s+\(\s*-?\d+\s+-?\d+\s*\)", re.I)
+_DEF_VIA_PLACEMENT_RE = re.compile(
+    r"\(\s*(-?\d+)\s+(-?\d+)\s*\)\s+(\S+)", re.I)
+
+
+def _def_via_cuts(def_path: Optional[Path],
+                  cut_between: Dict[frozenset[str], str]
+                  ) -> Tuple[int, Dict[Tuple[str, frozenset[str], int, int],
+                                    Tuple[str, int]]]:
+    """Index proven DEF PG via placements by net, metal pair and DBU point.
+
+    A named via must have a matching DEF definition and a positive cut count.
+    Ambiguous placements are left unindexed, so they cannot create a PASS.
+    """
+    if def_path is None or not cut_between:
+        return 0, {}
+    try:
+        text = def_path.read_text(errors="replace")
+    except OSError:
+        return 0, {}
+    dbm = _DEF_DBU_RE.search(text)
+    sm = _DEF_SNET_SECTION_RE.search(text)
+    vm = _DEF_VIAS_SECTION_RE.search(text)
+    if not dbm or not sm or not vm or int(dbm.group(1)) <= 0:
+        return 0, {}
+    definitions = {}
+    for statement in vm.group(1).split(";"):
+        nm = re.match(r"\s*-\s+(\S+)", statement)
+        lm = _DEF_VIA_LAYERS_RE.search(statement)
+        if not nm:
+            continue
+        rect_layers = [layer.lower() for layer in
+                       _DEF_VIA_RECT_RE.findall(statement)]
+        if lm:
+            lower, cut, upper = (s.lower() for s in lm.groups())
+            pair = frozenset((lower, upper))
+            if cut_between.get(pair) != cut:
+                continue
+        else:
+            matches = [(pair, cut) for pair, cut in cut_between.items()
+                       if cut in rect_layers and pair.issubset(rect_layers)]
+            if len(matches) != 1:
+                continue
+            pair, cut = matches[0]
+        rc = _DEF_VIA_ROWCOL_RE.search(statement)
+        if rc:
+            cuts = int(rc.group(1)) * int(rc.group(2))
+        elif _DEF_VIA_CUTSIZE_RE.search(statement):
+            cuts = 1
+        else:
+            cuts = rect_layers.count(cut)
+        if cuts > 0:
+            definitions[nm.group(1).lower()] = (pair, cut, cuts)
+    index = {}
+    ambiguous = set()
+    for statement in sm.group(1).split(";"):
+        nm = re.match(r"\s*-\s+(\S+)", statement)
+        if not nm:
+            continue
+        net = nm.group(1).lower()
+        for x, y, name in _DEF_VIA_PLACEMENT_RE.findall(statement):
+            via = definitions.get(name.lower())
+            if via is None:
+                continue
+            pair, cut, cuts = via
+            key = (net, pair, int(x), int(y))
+            value = (cut, cuts)
+            if key in index and index[key] != value:
+                ambiguous.add(key)
+            else:
+                index[key] = value
+    for key in ambiguous:
+        index.pop(key, None)
+    return int(dbm.group(1)), index
+
+
+def _segment_via_cuts(seg: Dict[str, Any], dbu: int,
+                      via_index: Dict[Tuple[str, frozenset[str], int, int],
+                                      Tuple[str, int]]) -> Optional[Tuple[str, int]]:
+    if not dbu:
+        return None
+    points = seg.get("points_um")
+    if not points:
+        return None
+    pair = frozenset((seg["layer0"].lower(), seg["layer1"].lower()))
+    net = str(seg["net"]).lower()
+    matches = set()
+    for point in points:
+        if any(v is None or not math.isfinite(v) for v in point):
+            continue
+        x, y = (round(v * dbu) for v in point)
+        if abs(point[0] * dbu - x) > 0.5 or abs(point[1] * dbu - y) > 0.5:
+            continue
+        via = via_index.get((net, pair, x, y))
+        if via:
+            matches.add(via)
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def _segment_corner_via_cut(
+        seg: Dict[str, Any], dbu: int,
+        via_index: Dict[Tuple[str, frozenset[str], int, int], Tuple[str, int]],
+        metal_indexes: Tuple[Dict[Tuple[str, str, int, int],
+                                  List[Tuple[float, ...]]], ...]
+        ) -> Optional[Dict[str, Any]]:
+    """Prove one named via at a PSM virtual edge's orthogonal corner.
+
+    A PSM diagonal may represent two Manhattan metal legs joined by a via.
+    The via can sit at either orthogonal corner rather than at a PSM node.
+    Require a same-net metal path from each PSM endpoint to the via on its
+    respective layer. Charging all edge current to one cut is conservative.
+    """
+    if dbu <= 0:
+        return None
+    points = seg.get("points_um")
+    if not points or any(v is None or not math.isfinite(v)
+                         for point in points for v in point):
+        return None
+    (x0, y0), (x1, y1) = points
+    if x0 == x1 or y0 == y1:
+        return None
+    pair = frozenset((seg["layer0"].lower(), seg["layer1"].lower()))
+    net = str(seg["net"]).lower()
+    matches = []
+    for x, y in ((x0, y1), (x1, y0)):
+        rx, ry = round(x * dbu), round(y * dbu)
+        if abs(x * dbu - rx) > 0.5 or abs(y * dbu - ry) > 0.5:
+            continue
+        via = via_index.get((net, pair, rx, ry))
+        if via and via[1] > 0:
+            legs = (
+                dict(seg, layer0=seg["layer0"], layer1=seg["layer0"],
+                     points_um=(points[0], (x, y))),
+                dict(seg, layer0=seg["layer1"], layer1=seg["layer1"],
+                     points_um=((x, y), points[1])),
+            )
+            leg_widths = []
+            for leg in legs:
+                proof = next((width for index in metal_indexes
+                              if (width := _segment_geometry_width(leg, index))
+                              is not None), None)
+                if proof is None:
+                    break
+                leg_widths.append(proof[0])
+            if len(leg_widths) != 2:
+                continue
+            matches.append({"cut_layer": via[0], "via_center_um":
+                            [rx / dbu, ry / dbu],
+                            "array_cut_count": via[1],
+                            "metal_leg_widths_um": leg_widths})
+    return matches[0] if len(matches) == 1 else None
 
 
 def _def_pg_local_rects(def_path: Path) -> Dict[Tuple[str, str], List[Tuple[float, ...]]]:
@@ -515,6 +692,32 @@ def _odb_pg_geometry_rects(path: Path
     return out
 
 
+def _odb_pg_cut_rects(path: Path
+                      ) -> Dict[Tuple[str, str], List[Tuple[float, ...]]]:
+    """Read placed, net-owned via cut rectangles from the same-DEF ODB dump."""
+    out: Dict[Tuple[str, str], List[Tuple[float, ...]]] = {}
+    try:
+        with path.open(newline="", errors="replace") as fh:
+            for row in csv.DictReader(fh, delimiter="\t"):
+                if row.get("source") != "via_cut":
+                    continue
+                try:
+                    x0, y0, x1, y1 = (float(row[k]) for k in
+                                      ("x0_um", "y0_um", "x1_um", "y1_um"))
+                    if (not all(math.isfinite(v) for v in (x0, y0, x1, y1))
+                            or x1 <= x0 or y1 <= y0):
+                        continue
+                    out.setdefault((str(row["net"]).lower(),
+                                    str(row["layer"]).lower()), []).append(
+                                        (x0, y0, x1, y1,
+                                         min(x1 - x0, y1 - y0), "via_cut"))
+                except (KeyError, ValueError, TypeError):
+                    continue
+    except OSError:
+        return {}
+    return out
+
+
 _GEOMETRY_TILE_UM = 20.0  # spatial index only; never an EM or width limit
 
 
@@ -549,6 +752,54 @@ def _point_metal_boxes(
     return list(found.values())
 
 
+def _segment_odb_via_cut(
+        seg: Dict[str, Any], cut_layer: str, dbu: int,
+        index: Dict[Tuple[str, str, int, int], List[Tuple[float, ...]]]
+        ) -> Optional[List[Dict[str, Any]]]:
+    """Match a PSM interlayer edge to an actual same-net placed cut.
+
+    A node inside a cut, or a positive-length intersection with the virtual
+    edge, proves at least one physical cut.  Counting only one bounds its
+    current per cut conservatively; neighbouring array cuts are not credited
+    without an explicit PSM current-sharing witness.
+    """
+    if dbu <= 0:
+        return None
+    key = (str(seg["net"]).lower(), cut_layer.lower())
+    matched: Dict[Tuple[float, ...], Dict[str, Any]] = {}
+    points = seg.get("points_um")
+    if not points or any(v is None or not math.isfinite(v)
+                         for point in points for v in point):
+        return None
+    (x0, y0), (x1, y1) = points
+    boxes: Dict[int, Tuple[float, ...]] = {}
+    for xtile in range(math.floor(min(x0, x1) / _GEOMETRY_TILE_UM),
+                       math.floor(max(x0, x1) / _GEOMETRY_TILE_UM) + 1):
+        for ytile in range(math.floor(min(y0, y1) / _GEOMETRY_TILE_UM),
+                           math.floor(max(y0, y1) / _GEOMETRY_TILE_UM) + 1):
+            for box in index.get((*key, xtile, ytile), []):
+                boxes[id(box)] = box
+    for box in boxes.values():
+        low, high = 0.0, 1.0
+        for start, delta, lo, hi in ((x0, x1 - x0, box[0], box[2]),
+                                     (y0, y1 - y0, box[1], box[3])):
+            if delta == 0:
+                if not lo <= start <= hi:
+                    break
+            else:
+                t0, t1 = (lo - start) / delta, (hi - start) / delta
+                low, high = max(low, min(t0, t1)), min(high, max(t0, t1))
+        else:
+            if high > low or (x0 == x1 and y0 == y1 and
+                              box[0] <= x0 <= box[2] and
+                              box[1] <= y0 <= box[3]):
+                coords = box[:4]
+                matched[coords] = {"cut_bbox_um": list(coords),
+                                   "psm_edge_um": [list(points[0]),
+                                                   list(points[1])]}
+    return list(matched.values()) or None
+
+
 def _metal_contact_width(a: Tuple[float, ...], b: Tuple[float, ...]) -> float:
     """Shared edge/area width, capped by each real conductor's minor width."""
     x_overlap = min(a[2], b[2]) - max(a[0], b[0])
@@ -564,20 +815,27 @@ def _metal_contact_width(a: Tuple[float, ...], b: Tuple[float, ...]) -> float:
 
 def _contact_result(
         contacts: List[Tuple[float, List[str]]]
-        ) -> Tuple[Optional[Tuple[float, List[str]]], bool]:
+        ) -> Tuple[Optional[Tuple[Any, ...]], bool]:
     if not contacts:
         return None, False
     widths = [width for width, _ in contacts]
-    if max(widths) - min(widths) > 1e-6:
-        return None, True
-    return (min(widths), sorted({source for _, names in contacts
-                                 for source in names})), False
+    different = max(widths) - min(widths) > 1e-6
+    sources = sorted({source for _, names in contacts for source in names})
+    if different:
+        # Every candidate is a real same-net contact path.  The smallest
+        # width bounds current density from above even if PSM does not say
+        # which physical path carries this virtual edge's current.
+        candidates = sorted(({"width_um": width, "sources": names}
+                             for width, names in contacts),
+                            key=lambda item: (item["width_um"], item["sources"]))
+        return (min(widths), sources, candidates), True
+    return (min(widths), sources), False
 
 
 def _direct_metal_contact(
         first: List[Tuple[float, ...]], second: List[Tuple[float, ...]]
-        ) -> Tuple[Optional[Tuple[float, List[str]]], bool]:
-    """Prove contact between endpoint conductors; reject width ambiguity."""
+        ) -> Tuple[Optional[Tuple[Any, ...]], bool]:
+    """Prove direct endpoint contact; retain a conservative width bound."""
     contacts: List[Tuple[float, str, str]] = []
     for a in first:
         for b in second:
@@ -595,8 +853,8 @@ def _bridged_metal_contact(
         points: Tuple[Tuple[float, float], Tuple[float, float]],
         index: Dict[Tuple[str, str, int, int], List[Tuple[float, ...]]],
         bridge_count: int = 1
-        ) -> Tuple[Optional[Tuple[float, List[str]]], bool]:
-    """Prove a short, unambiguous same-net contact chain between PSM nodes.
+        ) -> Tuple[Optional[Tuple[Any, ...]], bool]:
+    """Prove a short same-net contact chain between PSM nodes.
 
     Search only rectangles intersecting the nodes' bounding tiles.  One or
     two intermediate rectangles cover a follow-pin rail or abutting IO cells.
@@ -701,12 +959,12 @@ def _segment_geometry_width(
             if usable:
                 width, source = max(usable)
                 return width, [source]
-        contact, ambiguous = _direct_metal_contact(first, second)
-        if contact or ambiguous:
+        contact, _ = _direct_metal_contact(first, second)
+        if contact:
             return contact
-        bridged, ambiguous = _bridged_metal_contact(
+        bridged, _ = _bridged_metal_contact(
             key, first, second, ((x0, y0), (x1, y1)), index)
-        if bridged or ambiguous:
+        if bridged:
             return bridged
         twice, _ = _bridged_metal_contact(
             key, first, second, ((x0, y0), (x1, y1)), index, 2)
@@ -775,14 +1033,6 @@ def _geometry_gap_reason(
     (x0, y0), (x1, y1) = pts
     diagonal = x0 != x1 and y0 != y1
     if diagonal:
-        if family == "two_shapes":
-            _, ambiguous = _direct_metal_contact(a, b)
-            if not ambiguous:
-                _, ambiguous = _bridged_metal_contact(key, a, b, pts, index)
-            if not ambiguous:
-                _, ambiguous = _bridged_metal_contact(key, a, b, pts, index, 2)
-            if ambiguous:
-                return "psm_virtual_diagonal_ambiguous_contact_width", family
         if family == "one_shape":
             source = (a or b)[0][5]
             return f"psm_virtual_diagonal_leaves_{source}", family
@@ -860,7 +1110,15 @@ def discover_def_pg_min_widths(root: Optional[Path]) -> Dict[str, float]:
 # ---------------------------------------------------------------------------
 def _screen_segment(seg: Dict[str, Any], table: Dict[str, Dict[str, Any]],
                     margin: float, blacks_n: float,
-                    def_widths: Optional[Dict[str, float]] = None
+                    def_widths: Optional[Dict[str, float]] = None,
+                    cut_between: Optional[Dict[frozenset[str], str]] = None,
+                    via_dbu: int = 0,
+                    via_index: Optional[Dict[Tuple[str, frozenset[str], int, int],
+                                             Tuple[str, int]]] = None,
+                    via_cut_index: Optional[Dict[Tuple[str, str, int, int],
+                                                 List[Tuple[float, ...]]]] = None,
+                    metal_indexes: Tuple[Dict[Tuple[str, str, int, int],
+                                              List[Tuple[float, ...]]], ...] = ()
                     ) -> Dict[str, Any]:
     """Screen one segment → dict with status in
     {ok, offender, unscreened}. Numeric detail included when screened."""
@@ -873,17 +1131,49 @@ def _screen_segment(seg: Dict[str, Any], table: Dict[str, Dict[str, Any]],
     if l0 != l1:
         cut = table.get(l0) if table.get(l0, {}).get("kind") == "cut" else None
         cut = cut or (table.get(l1) if table.get(l1, {}).get("kind") == "cut" else None)
+        cuts = 1 if cut else None
+        cut_count_source = "psm_explicit_cut_layer" if cut else None
+        cut_geometry = None
+        if cut is None:
+            cut_name = (cut_between or {}).get(frozenset((l0, l1)))
+            cut = table.get(cut_name) if cut_name else None
+            if cut is not None and cut.get("kind") == "cut":
+                matched = _segment_via_cuts(seg, via_dbu, via_index or {})
+                if matched and matched[0] == cut_name:
+                    cuts = matched[1]
+                    cut_count_source = "def_named_via_array"
+                if not cuts:
+                    corner = _segment_corner_via_cut(
+                        seg, via_dbu, via_index or {}, metal_indexes)
+                    if corner and corner["cut_layer"] == cut_name:
+                        cuts = 1
+                        cut_count_source = "def_named_corner_via_single_cut_bound"
+                        cut_geometry = [corner]
+                if not cuts and via_cut_index:
+                    cut_geometry = _segment_odb_via_cut(
+                        seg, cut_name, via_dbu, via_cut_index)
+                    if cut_geometry:
+                        cuts = 1
+                        cut_count_source = "odb_placed_cut_single_cut_bound"
         if cut is None:
             return {"status": "unscreened", "net": net,
                     "layer": f"{seg['layer0']}->{seg['layer1']}",
                     "reason": "via_cut_layer_not_in_jmax_reference",
                     "current_A": cur}
+        if not cuts:
+            return {"status": "unscreened", "net": net,
+                    "layer": cut["orig_name"],
+                    "reason": "via_cut_geometry_unavailable", "current_A": cur}
         limit = cut["jmax_per_cut_A"]
-        util = cur / limit if limit > 0 else math.inf
+        per_cut = cur / cuts
+        util = per_cut / limit if limit > 0 else math.inf
         offender = util >= (1.0 - margin)
         return {"status": "offender" if offender else "ok", "net": net,
                 "layer": cut["orig_name"], "basis": "per_cut",
-                "current_A": cur, "value_A_per_cut": cur,
+                "current_A": cur, "cut_count": cuts,
+                "cut_count_source": cut_count_source,
+                **({"cut_geometry": cut_geometry} if cut_geometry else {}),
+                "value_A_per_cut": per_cut,
                 "limit_A_per_cut": limit, "utilization": util,
                 "lifetime_ratio": _lifetime_ratio(util, blacks_n)}
 
@@ -950,7 +1240,7 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
              def_path: Optional[Path] = None,
              pg_geometry_path: Optional[Path] = None
              ) -> Tuple[str, Dict[str, Any]]:
-    """Return (verdict, report). verdict in {PASS, FAIL, SKIPPED}."""
+    """Return (verdict, report) with complete metal and cut coverage required."""
     rep: Dict[str, Any] = {
         "program": "em_current_density_check", "version": VERSION,
         "margin": margin, "blacks_n": blacks_n, "findings": [],
@@ -991,6 +1281,16 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
                                 "message": serr})
         return "SKIPPED", rep
 
+    cut_between = {}
+    layer_source = tech_lef or jmax_path
+    if layer_source and layer_source.suffix.lower() in (".lef", ".tlef"):
+        try:
+            cut_between = _lef_cut_between_routing(
+                layer_source.read_text(errors="replace"))
+        except OSError:
+            pass
+    via_dbu, via_index = _def_via_cuts(def_path, cut_between)
+
     n_total = n_screened = n_unscreened = 0
     offenders: List[Dict[str, Any]] = []
     worst_util = -1.0
@@ -998,11 +1298,15 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
     per_layer: Dict[str, Dict[str, Any]] = {}
     unscreened_reasons: Dict[str, int] = {}
     unscreened_by_net_layer: Dict[str, int] = {}
+    unscreened_by_layer: Dict[str, int] = {}
     unmeasured_shape_families: Dict[str, int] = {}
+    conservative_width_bounds: List[Dict[str, Any]] = []
 
     local_rects = _geometry_index(_def_pg_local_rects(def_path)) if def_path else {}
     odb_rects = (_geometry_index(_odb_pg_geometry_rects(pg_geometry_path))
                  if pg_geometry_path else {})
+    odb_cut_rects = (_geometry_index(_odb_pg_cut_rects(pg_geometry_path))
+                     if pg_geometry_path else {})
     local_width_uses = 0
     odb_width_uses = 0
     not_measured_segments: List[Dict[str, Any]] = []
@@ -1024,9 +1328,19 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
                 else:
                     local_width_uses += 1
                 measured["geometry_sources"] = geometry[1]
-        r = _screen_segment(measured, table, margin, blacks_n, def_widths)
+                if len(geometry) > 2:
+                    measured["width_candidate_contacts"] = geometry[2]
+                    measured["width_bound"] = "minimum_proven_same_net_contact"
+        r = _screen_segment(measured, table, margin, blacks_n, def_widths,
+                            cut_between, via_dbu, via_index, odb_cut_rects,
+                            (odb_rects, local_rects))
         if "geometry_sources" in measured and r["status"] != "unscreened":
             r["geometry_sources"] = measured["geometry_sources"]
+        if "width_candidate_contacts" in measured and r["status"] != "unscreened":
+            r["width_candidate_contacts"] = measured["width_candidate_contacts"]
+            r["width_bound"] = measured["width_bound"]
+            r["points_um"] = seg.get("points_um")
+            conservative_width_bounds.append(r)
         if r["status"] == "unscreened":
             if r["reason"] == "segment_conductor_geometry_unproven":
                 reason, family = _geometry_gap_reason(
@@ -1040,6 +1354,8 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
             net_layer = f"{seg['net']}:{seg['layer0']}"
             unscreened_by_net_layer[net_layer] = (
                 unscreened_by_net_layer.get(net_layer, 0) + 1)
+            unscreened_by_layer[r["layer"]] = (
+                unscreened_by_layer.get(r["layer"], 0) + 1)
             if len(not_measured_segments) < max(1, top_offenders):
                 not_measured_segments.append(dict(r, status="NOT_MEASURED",
                                                   points_um=seg.get("points_um")))
@@ -1069,7 +1385,9 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
         "segments_unscreened": n_unscreened,
         "unscreened_reasons": unscreened_reasons,
         "unscreened_by_net_layer": unscreened_by_net_layer,
+        "unscreened_by_layer": unscreened_by_layer,
         "unmeasured_shape_families": unmeasured_shape_families,
+        "conservative_width_bounds": conservative_width_bounds,
         "worst_utilization": (round(worst_util, 6) if worst_util >= 0 else None),
         "worst_case_lifetime_ratio": (round(min_life, 4) if min_life is not None else None),
         "per_layer": {k: {"segments": v["segments"],
@@ -1084,7 +1402,9 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
 
     # (3b) report present + Jmax present but nothing mapped → SKIPPED, never PASS
     if n_screened == 0:
-        geometry_missing = any(k.startswith("psm_") for k in unscreened_reasons)
+        geometry_missing = any(k.startswith("psm_") or
+                               k == "via_cut_geometry_unavailable"
+                               for k in unscreened_reasons)
         empty_verdict = "NOT_MEASURED" if geometry_missing else "SKIPPED"
         rep["verdict"] = empty_verdict
         rep["pass"] = False
@@ -1100,6 +1420,7 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
 
     # (4) verdict
     offenders.sort(key=lambda o: o["utilization"], reverse=True)
+    rep["offender_count"] = len(offenders)
     if offenders:
         rep["verdict"] = "FAIL"
         rep["pass"] = False
@@ -1108,7 +1429,8 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
         for o in offenders[:max(1, top_offenders)]:
             if o.get("basis") == "per_cut":
                 msg = (f"net={o['net']} via-layer={o['layer']} "
-                       f"current={o['current_A']:.3e} A >= "
+                       f"current/cut={o['value_A_per_cut']:.3e} A "
+                       f"({o['current_A']:.3e} A / {o['cut_count']} cuts) >= "
                        f"{(1 - margin) * o['limit_A_per_cut']:.3e} A "
                        f"(Jmax/cut={o['limit_A_per_cut']:.3e} A, "
                        f"margin={margin})")
@@ -1133,7 +1455,7 @@ def evaluate(em_path: Optional[Path], jmax_path: Optional[Path],
         rep["findings"].append({
             "severity": "NOT_MEASURED", "rule": "EM_SEGMENT_GEOMETRY_UNPROVEN",
             "message": f"{n_unscreened} of {n_total} segment(s) lack a proven "
-                       "same-net conductor cross section or Jmax"})
+                       "same-net conductor/cut geometry or Jmax"})
         return "NOT_MEASURED", rep
 
     rep["verdict"] = "PASS"
@@ -1236,6 +1558,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     def_file = Path(args.def_file) if args.def_file else None
     geometry_file = Path(args.pg_geometry) if args.pg_geometry else None
 
+    def_path = Path(args.def_file) if args.def_file else None
+    if def_path is not None and not def_path.is_file():
+        def_path = None
     verdict, rep = evaluate(em_path, jmax_path, tech_lef, args.margin,
                             args.blacks_n, args.net, args.top_offenders,
                             def_path=def_file, pg_geometry_path=geometry_file)
