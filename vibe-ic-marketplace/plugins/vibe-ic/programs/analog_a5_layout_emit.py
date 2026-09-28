@@ -131,6 +131,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _atomic_artefact as _aa  # noqa: E402 — vibe-ic#1082
 import _gate_denominator as _den  # noqa: E402 — no clean list without a denominator
 import _path_layout as _pl  # noqa: E402
+import _analog_producer_common as _pc  # noqa: E402 — content identity
 import analog_a5_pdk_device_limits as _lim  # noqa: E402
 from _analog_a_check_common import load_block_list  # noqa: E402
 import magic_gencell_layout_lib as _gl  # noqa: E402
@@ -3018,6 +3019,16 @@ def emit_block(project: Path, block: str, stage: Stage, magicrc: str,
     # gate reads geometry, not provenance, so it PASSes that layout for a
     # netlist the PDK forbids. Deleting someone else's artefact is not this
     # producer's call; saying so, in the record it owns, is.
+    # WHICH NETLIST THIS LAYOUT IS OF, by content. The path alone named a
+    # netlist that A3 later re-emitted with different devices, and A7 then
+    # extracted a layout of the OLD netlist and compared it with the new one:
+    # MEASURED (delta_sigma, ihp-sg13g2) that read as
+    # A7_RCX_DEVICE_INVENTORY_MISMATCH, cap_cmim 23 vs 78, while the extraction
+    # matched the netlist actually drawn device for device. Provenance comments
+    # are excluded (`content_digest`), so a byte-identical re-emission keeps
+    # the identity.
+    report["netlist_content_sha256"] = _pc.content_digest(
+        sp.read_text(errors="replace"))
     stale = bdir / "layout.mag" if (bdir / "layout.mag").is_file() else None
     if stale:
         report["layout_present_before_this_run"] = str(stale)

@@ -33,6 +33,7 @@ import pytest
 
 import _plugin_tree  # noqa: F401 — puts programs/ on sys.path
 import _eda_pin as PIN
+import _analog_producer_common as PC
 import analog_a7_post_layout_emit as A7
 import analog_real_corner_sweep as ARS
 from _stated_eda_image import stated_image, state_the_image  # noqa: E402
@@ -175,11 +176,13 @@ def _project(tmp_path: Path, tb: str = TB, spec: dict = None) -> Path:
     (tech_dir / "t.tech").write_text(TECH)
     (tech_dir / "t-extract.tech").write_text(TECH_EXTRACT)
     (b / "blk.gds").write_bytes(b"\x00\x06\x00\x02\x02\x58")
-    (b / "layout_provenance.json").write_text(json.dumps(
-        {"pdk_sources": {"magic_tech": str(tech_dir / "t.tech")}}))
     (b / "blk.sp").write_text(
         ".lib ../../../models/m.lib tt\n.subckt blk a b vss\n"
         "X0 a b vss vss nfet w=1u l=1u\n.ends blk\n")
+    (b / "layout_provenance.json").write_text(json.dumps({
+        "producer": "analog_a5_layout_emit", "result": "OK",
+        "pdk_sources": {"magic_tech": str(tech_dir / "t.tech")},
+        "netlist_content_sha256": PC.content_digest((b / "blk.sp").read_text())}))
     (b / "tb_blk.sp").write_text(tb)
     if spec is not None:
         (b / "spec.json").write_text(json.dumps(spec))

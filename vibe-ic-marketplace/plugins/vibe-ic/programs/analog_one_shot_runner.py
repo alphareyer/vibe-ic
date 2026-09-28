@@ -326,6 +326,44 @@ def _effective_analog_pdk(args, project: Path) -> str:
     return (_declared_l19_target(project) or "").strip()
 
 
+def _a5_emitter_pdk_flags(project: Path, block: str, args,
+                          container: str) -> tuple[List[str], str]:
+    """Bind A5's gencells to the PDK selected by this run and its A3 netlist.
+
+    The emitter's own default is only usable when the run states no process.
+    A named process must resolve to the installed directory holding Magic's
+    gencells; an unresolved selector is an environment gap, never permission
+    to draw in the emitter's unrelated default family.
+    """
+    requested = _effective_analog_pdk(args, project)
+    prov = project / "phase3" / "analog" / block / "netlist_provenance.json"
+    try:
+        doc = json.loads(prov.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        doc = {}
+    pdk = doc.get("pdk") if isinstance(doc, dict) else None
+    bound = ((pdk.get("registry_family") or pdk.get("family") or "")
+             if isinstance(pdk, dict) else "")
+    if requested and bound and _families_agree(requested, bound) is False:
+        return [], (f"A5_PDK_CONTRADICTION: this run selected {requested}, "
+                    f"but the current A3 netlist bound {bound}")
+    selector = bound or requested
+    if not selector:
+        return [], ""
+    try:
+        import analog_pdk_availability as _apa  # noqa: PLC0415
+        res = _apa.resolve_pdk(selector, project=None, container=container)
+    except Exception as exc:
+        return [], (f"ENV_UNAVAILABLE: A5 could not resolve the selected "
+                    f"PDK {selector}: {type(exc).__name__}: {exc}")
+    root = str(res.get("pdk_root") or "")
+    family = str(res.get("matched_dir") or "")
+    if not (res.get("available") and root and family):
+        return [], (f"ENV_UNAVAILABLE: A5 could not resolve Magic gencells "
+                    f"for the selected PDK {selector}: {res.get('reason')}")
+    return ["--pdk-root", str(Path(root).parent), "--family", family], ""
+
+
 #: What a sub-producer prints when the ENVIRONMENT, not the design, is what
 #: stopped it. Matched on the producer's own words rather than on an exit code,
 #: because the exit code it uses (2) is shared with the design-side refusals
@@ -601,6 +639,55 @@ def _a5_emit_reason(cp) -> str:
             "invoke skill `analog-layout`")
 
 
+def _a5_emitter_verdict(tier: str) -> tuple[str, str]:
+    """Apply the producer's result tier to both redraw and first draw."""
+    if tier == "PDK_CONTRADICTION":
+        return "NOT_MEASURED", _V.ReasonClass.INPUT_ABSENT
+    if tier == "ENV_UNAVAILABLE":
+        return "NOT_MEASURED", _V.ReasonClass.TOOL_ABSENT
+    if tier in ("FORBIDDEN", "REFUSED", "TOOL_ERROR", "SHORTED",
+                "CLAMPED_GEOMETRY", "NO_GENCELL", "UNREADABLE_NETLIST"):
+        return "FAIL", ""
+    return "NOT_MEASURED", _V.ReasonClass.EXECUTION_ERROR
+
+
+def _a5_record_stamp(path: Path) -> tuple | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
+
+
+def _a5_current_emitter_report(cp, block: str, record_path: Path,
+                               previous_stamp: tuple | None) -> dict:
+    """Read this run's A5 report, never an unchanged old provenance record.
+
+    A5 prints a progress line before its JSON when a per-block draw ran.
+    An early environment refusal prints only JSON and writes no block record.
+    """
+    stdout = cp.stdout or ""
+    try:
+        report, _ = json.JSONDecoder().raw_decode(stdout[stdout.index("{"):])
+    except (ValueError, TypeError):
+        report = {}
+    if isinstance(report, dict):
+        blocks = report.get("blocks")
+        current = blocks.get(block) if isinstance(blocks, dict) else None
+        if isinstance(current, dict) and current:
+            return current
+        if report.get("result") not in (None, "NOT_OK"):
+            return report
+    if _a5_record_stamp(record_path) != previous_stamp:
+        try:
+            current = json.loads(record_path.read_text())
+        except (OSError, ValueError):
+            current = {}
+        if isinstance(current, dict) and current.get("block") == block:
+            return current
+    return {}
+
+
 def _emit_deterministic_stub(project: Path, bname: str,
                               step_name: str) -> List[Path]:
     """Emit minimal-substance artefacts for the given (block, step)
@@ -835,6 +922,66 @@ def _artefact_producer_fingerprint(project: Path, block: str,
         v = prov.get("producer_fingerprint")
         return str(v) if v else None
     return None
+
+
+def a5_stale_layout_redraw(project: Path, block: str, args=None
+                           ) -> Optional[Dict[str, Any]]:
+    """Redraw a layout that is not of the CURRENT A3 netlist, before the A5
+    gate grades it. None when there is nothing to redraw.
+
+    The A5 emitter used to run only when the layout was MISSING (the gate's
+    rc 2). A layout drawn from an EARLIER netlist is present and geometrically
+    sound, so the gate passed it and nothing redrew it. MEASURED (delta_sigma,
+    ihp-sg13g2): a 09-15 layout of a 360-device netlist stood under the
+    09-16 335-device A3 netlist through A6 (LVS `match` about the old netlist)
+    to A7 (A7_RCX_DEVICE_INVENTORY_MISMATCH after a 3 h simulation). The
+    identity is `_analog_producer_common.layout_identity_of_block`; only a
+    measured STALE redraws, UNVERIFIED leaves the layout as it is."""
+    import _analog_producer_common as _pcm  # noqa: PLC0415
+    bdir = project / "phase3" / "analog" / block
+    sp = bdir / f"{block}.sp"
+    emit = PROGRAMS_DIR / "analog_a5_layout_emit.py"
+    if not ((bdir / "layout_provenance.json").is_file() and sp.is_file()
+            and emit.is_file()):
+        return None
+    ident, why = _pcm.layout_identity_of_block(bdir, sp)
+    if ident != "STALE":
+        return None
+    container = (getattr(args, "container", None)
+                 or os.environ.get("VIBEIC_ANALOG_CONTAINER")
+                 or _pin.default_container_name())
+    pdk_flags, pdk_gap = _a5_emitter_pdk_flags(
+        project, block, args, container)
+    if pdk_gap:
+        return {"because": why, "emitter_rc": 2,
+                "emitter_result": ("ENV_UNAVAILABLE" if pdk_gap.startswith(
+                    "ENV_UNAVAILABLE:") else "PDK_CONTRADICTION"),
+                "emitter_reason": pdk_gap}
+    record_path = bdir / "layout_provenance.json"
+    previous_stamp = _a5_record_stamp(record_path)
+    cp = _pr.run([sys.executable, str(emit), str(project), "--block", block,
+                  "--container", container, *pdk_flags],
+                 capture_output=True, text=True)
+    print(f"[A5] {block}: layout was not of the current netlist ({why}); "
+          f"redrawn by {emit.name} rc={cp.returncode}")
+    out = {"because": why, "emitter_rc": cp.returncode}
+    if cp.returncode != 0:
+        # A preexisting record describes an earlier attempt. Only stdout from
+        # this invocation or a changed, block-matched record may classify it.
+        current = _a5_current_emitter_report(
+            cp, block, record_path, previous_stamp)
+        if not current and cp.returncode == 2:
+            current = {"result": "USAGE_ERROR",
+                       "reason": (cp.stderr or cp.stdout or
+                                  "A5 emitter rc 2 without a named result")}
+        out["emitter_result"] = str(current.get("result") or "").strip()
+        reason = str(current.get("reason") or "").strip()
+        # the refusal is the LAST line magic printed (`Error parsing ...`)
+        tail = reason.splitlines()[-1] if reason else (
+            (cp.stdout or cp.stderr or "").strip().splitlines() or ["?"])[-1]
+        out["emitter_reason"] = (f"{current.get('result') or 'rc ' + str(cp.returncode)}"
+                                 f": {tail[:400]}")
+    return out
 
 
 def producer_reuse_decision(project: Path, block: str,
@@ -1508,6 +1655,23 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     _pre_cp = None
                 if _pre_cp is not None and _pre_cp.returncode == 0:
                     _emitted = {"prod": _prod, "cp": _pre_cp}
+        _a5_redrawn = (a5_stale_layout_redraw(project, bname, args)
+                       if step_name == "A5_layout" else None)
+        if _a5_redrawn and _a5_redrawn.get("emitter_rc") != 0:
+            # The layout on disk is of ANOTHER netlist and this one could not
+            # be drawn: grading the old geometry would certify a design that
+            # does not exist. Preserve the emitter's tier: unavailable Magic
+            # is not a defect in the circuit, and a crashed producer did not
+            # measure whether the circuit can be laid out.
+            _tier = _a5_redrawn.get("emitter_result") or ""
+            _rc = _a5_redrawn.get("emitter_rc")
+            _status, _reason = _a5_emitter_verdict(_tier)
+            return StepResult(
+                step_name, bname, _status, time.time() - t0,
+                f"A5_LAYOUT_NOT_REDRAWN: {_a5_redrawn.get('emitter_reason')}",
+                extras={"layout_redrawn": _a5_redrawn,
+                        "verdict_tier": _tier or f"rc {_rc}"},
+                reason_class=_reason)
         cp = _pr.run(cmd, capture_output=True, text=True)
         if cp.returncode == 0:
             # v1.6.129 (#50 Fix 2) — distinguish a real PASS (artefact
@@ -1614,6 +1778,9 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
             if _reuse.get("applies"):
                 _extras = dict(_extras or {})
                 _extras["producer_reuse"] = _reuse
+            if _a5_redrawn:
+                _extras = dict(_extras or {})
+                _extras["layout_redrawn"] = _a5_redrawn
             _status = "PASS"
             if _emitted:
                 # THIS step ran the producer and the gate then certified what
@@ -1836,6 +2003,20 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     _a7_tail = ((a7_cp.stderr or "").strip().splitlines()
                                 or (a7_cp.stdout or "").strip().splitlines()
                                 or ["no output"])[-1]
+                    # ADC_A5_A7_E2E: an honest gap from the tool arm (its
+                    # input -- a layout of THIS netlist, the A3 deck -- is not
+                    # on disk) is NOT_MEASURED with the producer's own words.
+                    # Falling through to the skill hand-off let the gate WAIVE
+                    # the missing comparison, and a refused step read as
+                    # PASS_WITH_WAIVERS.
+                    if a7_cp.returncode == _pc.RC_HONEST_GAP:
+                        return StepResult(
+                            step_name, bname, _V.Verdict.NOT_MEASURED.value,
+                            time.time() - t0, f"{a7_prog.name}: {_a7_tail}",
+                            extras={"producer": a7_prog.name,
+                                    "producer_rc": a7_cp.returncode,
+                                    "mode": _a7_mode},
+                            reason_class=_V.ReasonClass.INPUT_ABSENT)
                     if a7_cp.returncode == 1:
                         return StepResult(
                             step_name, bname, "FAIL", time.time() - t0,
@@ -1880,15 +2061,32 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
             if step_name == "A5_layout":
                 emit_prog = PROGRAMS_DIR / "analog_a5_layout_emit.py"
                 if emit_prog.is_file():
+                    emit_container = (getattr(args, "container", None)
+                                      or os.environ.get("VIBEIC_ANALOG_CONTAINER")
+                                      or _pin.default_container_name())
+                    pdk_flags, pdk_gap = _a5_emitter_pdk_flags(
+                        project, bname, args, emit_container)
+                    if pdk_gap:
+                        return StepResult(
+                            step_name, bname, "NOT_MEASURED", time.time() - t0,
+                            pdk_gap, extras={"producer": emit_prog.name,
+                                             "verdict_tier": (
+                                                 "ENV_UNAVAILABLE" if pdk_gap.startswith(
+                                                     "ENV_UNAVAILABLE:") else
+                                                 "PDK_CONTRADICTION")},
+                            reason_class=(_V.ReasonClass.TOOL_ABSENT
+                                          if pdk_gap.startswith("ENV_UNAVAILABLE:")
+                                          else _V.ReasonClass.INPUT_ABSENT))
                     em_cmd = [sys.executable, str(emit_prog), str(project),
                               "--block", bname,
-                              "--container",
-                              (getattr(args, "container", None)
-                               or os.environ.get("VIBEIC_ANALOG_CONTAINER") or _pin.default_container_name())]
+                              "--container", emit_container, *pdk_flags]
+                    provenance = (project / "phase3" / "analog" / bname
+                                  / "layout_provenance.json")
+                    prior_provenance = _a5_record_stamp(provenance)
                     em_cp = _pr.run(em_cmd, capture_output=True, text=True)
                     lay = (project / "phase3" / "analog" / bname
                            / "layout.mag")
-                    if lay.is_file():
+                    if lay.is_file() and em_cp.returncode == 0:
                         cp_real = _pr.run(cmd, capture_output=True, text=True)
                         tail = (em_cp.stdout.strip().splitlines()[-1]
                                 if em_cp.stdout else "layout emitted")
@@ -1906,16 +2104,21 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                             step_name, bname, "FAIL", time.time() - t0,
                             (cp_real.stdout.strip().splitlines()[-1]
                              if cp_real.stdout else tail))
-                    # NOTHING was written, which is the honest outcome when
-                    # the tool or the PDK is absent. Report WHY, naming the
-                    # tool, instead of falling through to an anonymous
-                    # deferral — and never write a layout.mag to cover it.
-                    why = _a5_emit_reason(em_cp)
+                    # A refused draw can leave no geometry (or partial
+                    # geometry). The emitter's current result, not layout
+                    # presence, determines whether this is a design failure
+                    # or an unmeasured tool/input gap.
+                    report = _a5_current_emitter_report(
+                        em_cp, bname, provenance, prior_provenance)
+                    tier = str(report.get("result") or "").strip()
+                    status, reason = _a5_emitter_verdict(tier)
+                    why = str(report.get("reason") or _a5_emit_reason(em_cp))
                     return StepResult(
-                        step_name, bname, "NOT_MEASURED", time.time() - t0, why,
+                        step_name, bname, status, time.time() - t0, why,
                         extras={"producer": emit_prog.name,
                                 "producer_rc": em_cp.returncode,
-                                "suggested_skill": skill}, reason_class=_V.ReasonClass.TOOL_ABSENT)
+                                "verdict_tier": tier or f"rc {em_cp.returncode}",
+                                "suggested_skill": skill}, reason_class=reason)
 
             if step_name == "A4_corner_sweep":
                 real_prog = PROGRAMS_DIR / "analog_real_corner_sweep.py"

@@ -516,6 +516,30 @@ def _check_block(project: Path, block: str) -> Tuple[str, List[dict]]:
 
     rel = str(bdir.relative_to(project))
 
+    # THE PAIR MUST BE ONE DESIGN (FX_A7_RCX_INVENTORY). LVS of a layout drawn
+    # from an EARLIER netlist against the current one is a mismatch about the
+    # history, not the layout -- and an old `comp.json` saying `match` about
+    # that earlier netlist would read as a pass for this one. STALE is refused
+    # by name; UNVERIFIED (no digest, the recorded netlist unreadable) does not
+    # block, the same contract as A7.
+    stale_pair = False
+    src = next((p for pat in (f"{block}.sp", f"{block}.spice", f"{block}.cir")
+                for p in sorted(bdir.glob(pat))), None)
+    if src is not None and (bdir / "layout_provenance.json").is_file():
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _analog_producer_common as _pc  # noqa: PLC0415
+        ident, why = _pc.layout_identity_of_block(bdir, src)
+        if ident == "STALE":
+            stale_pair = True
+            findings.append({
+                "block": block, "rule": "A6_LAYOUT_NOT_OF_THIS_NETLIST",
+                "rel_path": f"{rel}/layout_provenance.json",
+                "detail": (f"the layout was drawn from a different netlist "
+                           f"than {src.name} ({why}); re-run A5 on the "
+                           f"current A3 netlist -- no LVS verdict about this "
+                           f"pair is evidence"),
+            })
+
     drc_count, drc_ev = _drc_violations(bdir)
     if drc_count is None:
         findings.append({
@@ -535,8 +559,10 @@ def _check_block(project: Path, block: str) -> Tuple[str, List[dict]]:
             "detail": f"DRC reports {drc_count} violation(s) (must be 0)",
         })
 
-    lvs_ok, lvs_ev = _lvs_match(bdir)
-    if lvs_ok is None:
+    lvs_ok, lvs_ev = (None, "") if stale_pair else _lvs_match(bdir)
+    if stale_pair:
+        pass                            # refused above, by name
+    elif lvs_ok is None:
         findings.append({
             "block": block, "rule": "A6_PV_LVS_NO_EVIDENCE",
             "rel_path": f"{rel}/lvs.report|comp.json|lvs_match.flag",

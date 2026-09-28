@@ -83,6 +83,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import _analog_producer_common as _pc
+from _analog_producer_common import layout_netlist_identity  # noqa: E402,F401
 from _atomic_artefact import write_json, write_text
 import _watchdog as wd
 
@@ -416,16 +417,23 @@ def summed_device_models(tech_text: str) -> set:
     return out
 
 
-def _close(a: Optional[float], b: Optional[float], rel: float = 1e-3) -> bool:
+def _close(a: Optional[float], b: Optional[float], rel: float = 1e-3,
+           abs_tol: float = 0.0) -> bool:
     if a is None or b is None:
         return a is None and b is None
-    return abs(a - b) <= rel * max(abs(a), abs(b), 1e-30)
+    return abs(a - b) <= max(rel * max(abs(a), abs(b), 1e-30), abs_tol)
 
 
-def device_inventory(a3: List[dict], rcx: List[dict], summed: set) -> dict:
+def device_inventory(a3: List[dict], rcx: List[dict], summed: set,
+                     *, layout_grid_m: float = 0.0) -> dict:
     """Compare two device inventories (see the module docstring). Values are
     matched with a 1e-3 relative tolerance: Magic writes 5 significant
-    digits (`115.384u` comes back `0.11538m`)."""
+    digits (`115.384u` comes back `0.11538m`). For non-summed devices, A5's
+    attested Magic layout grid also permits at most half a grid of drawing
+    snap. No grid is inferred when A5 did not attest one."""
+    if not math.isfinite(layout_grid_m) or layout_grid_m < 0:
+        raise ValueError("layout_grid_m must be a finite nonnegative length")
+    snap_tol = layout_grid_m / 2 + (1e-15 if layout_grid_m else 0.0)
     diffs: List[str] = []
     models = sorted({d["model"] for d in a3} | {d["model"] for d in rcx})
     for model in models:
@@ -454,14 +462,19 @@ def device_inventory(a3: List[dict], rcx: List[dict], summed: set) -> dict:
                               for d in devs for _ in range(int(round(d["m"]))))
             x, y = expand(mine), expand(theirs)
             if len(x) != len(y) or not all(
-                    _close(p[0], q[0]) and _close(p[1], q[1])
+                    _close(p[0], q[0], abs_tol=snap_tol)
+                    and _close(p[1], q[1], abs_tol=snap_tol)
                     for p, q in zip(x, y)):
                 diffs.append(f"{model}: (w, l) multiset A3={len(x)} "
                              f"extracted={len(y)} device(s) differ")
-    return {"result": "MISMATCH" if diffs else "MATCH",
-            "a3_devices": len(a3), "extracted_devices": len(rcx),
-            "summed_models": sorted(summed & set(models)),
-            "differences": diffs}
+    out = {"result": "MISMATCH" if diffs else "MATCH",
+           "a3_devices": len(a3), "extracted_devices": len(rcx),
+           "summed_models": sorted(summed & set(models)),
+           "differences": diffs}
+    if layout_grid_m:
+        out["layout_grid_um"] = layout_grid_m * 1e6
+        out["maximum_grid_snap_um"] = snap_tol * 1e6
+    return out
 
 
 def rcx_nets(rcx_text: str, block: str) -> Tuple[set, set]:
@@ -1045,6 +1058,41 @@ def run(project: Path, block: str, container: str, image: str,
         if not need.is_file():
             return _refuse(record, record_path, "A7_INPUT_ABSENT",
                            f"{need.relative_to(project)} (owed by {owner})", 2)
+    # THE PAIR MUST BE ONE DESIGN before anything is extracted or simulated:
+    # a layout of an earlier netlist extracts faithfully and then disagrees
+    # with the current one, which reads as a layout that lost devices.
+    try:
+        lay_doc = json.loads(lay.read_text())
+    except (OSError, ValueError):
+        lay_doc = {}
+    ident, ident_detail = layout_netlist_identity(
+        lay_doc if isinstance(lay_doc, dict) else {},
+        netlist.read_text(errors="replace"))
+    # A legacy path names mutable bytes. If A3 rewrites that path in place,
+    # reading it now can appear to MATCH even though A5 drew an older deck.
+    # Only A5's successful, content-bound draw record proves this pairing.
+    if ident == "MATCH" and not (
+            isinstance(lay_doc, dict)
+            and lay_doc.get("producer") == "analog_a5_layout_emit"
+            and lay_doc.get("result") == "OK"
+            and isinstance(lay_doc.get("netlist_content_sha256"), str)
+            and lay_doc["netlist_content_sha256"]):
+        ident = "UNVERIFIED"
+        ident_detail = ("a mutable legacy netlist path or incomplete A5 "
+                        "record cannot prove which netlist this layout drew")
+    record["layout_netlist_identity"] = {"state": ident, "detail": ident_detail}
+    if ident == "STALE":
+        return _refuse(record, record_path, "A7_LAYOUT_NOT_OF_THIS_NETLIST",
+                       f"{gds.relative_to(project)} was drawn from a different "
+                       f"netlist than {netlist.relative_to(project)} ("
+                       f"{ident_detail}); re-run A5 on the current A3 netlist",
+                       2)
+    if ident != "MATCH":
+        return _refuse(record, record_path, "A7_LAYOUT_IDENTITY_UNVERIFIED",
+                       f"{gds.relative_to(project)} cannot be proved to be "
+                       f"a layout of {netlist.relative_to(project)} ("
+                       f"{ident_detail}); re-run A5 to record the current "
+                       "netlist identity", 2)
     try:
         tech = layout_tech(bdir)
     except ValueError as exc:
@@ -1217,14 +1265,25 @@ def run(project: Path, block: str, container: str, image: str,
             return _refuse(record, record_path, "A7_RCX_PARASITIC_FREE",
                            f"{rcx.name}: depth {audit.depth} — a re-simulation "
                            f"of it is the pre-layout circuit again", 1)
-        inventory = device_inventory(a3_devices,
-                                     device_instances(rcx_text, block), summed)
+        try:
+            lambda_per_um = float(lay_doc.get("lambda_per_um") or 0)
+        except (TypeError, ValueError):
+            lambda_per_um = 0.0
+        layout_grid_m = (1e-6 / lambda_per_um
+                         if math.isfinite(lambda_per_um) and lambda_per_um > 0
+                         else 0.0)
+        inventory = device_inventory(
+            a3_devices, device_instances(rcx_text, block), summed,
+            layout_grid_m=layout_grid_m)
         corner["device_inventory"] = inventory
         if inventory["result"] != "MATCH":
             record["corners"] = corners
             return _refuse(record, record_path,
                            "A7_RCX_DEVICE_INVENTORY_MISMATCH",
-                           f"{rcx.name}: {'; '.join(inventory['differences'])}",
+                           f"{rcx.name}: {'; '.join(inventory['differences'])}"
+                           + ("" if ident == "MATCH" else
+                              f" [layout/netlist identity {ident}: "
+                              f"{ident_detail}]"),
                            1)
         try:
             post_text, mapping = post_layout_netlist(

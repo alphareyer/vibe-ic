@@ -206,6 +206,58 @@ def content_digest(text: str) -> str:
     return hashlib.sha256(("\n".join(body) + "\n").encode("utf-8")).hexdigest()
 
 
+def layout_netlist_identity(lay_doc: dict, netlist_text: str) -> tuple:
+    """Is the A5 layout a layout OF the netlist A7 compares it with?
+
+    `(state, detail)`, state one of MATCH / STALE / UNVERIFIED. A5 records the
+    netlist's content digest (`netlist_content_sha256`); a record written
+    before it did carries only the netlist PATH, and that file -- when it can
+    still be read -- is compared by content instead. Provenance comments never
+    count (`content_digest`), so a byte-identical re-emission is a MATCH."""
+    current = content_digest(netlist_text)
+    # A5 writes its record on EVERY outcome. A record whose own result is not
+    # OK drew nothing, so the layout on disk is from an EARLIER run and the
+    # digest it carries is not the layout's: MEASURED, a redraw the gencell
+    # refused left the 09-15 layout under a record naming the 09-16 netlist.
+    result = lay_doc.get("result")
+    if result not in (None, "OK"):
+        return ("STALE",
+                f"A5's latest record did not draw this layout (result "
+                f"{result}); the layout on disk is from an earlier run")
+    recorded = lay_doc.get("netlist_content_sha256")
+    if isinstance(recorded, str) and recorded:
+        return (("MATCH" if recorded == current else "STALE"),
+                f"layout_provenance netlist_content_sha256={recorded[:12]} vs "
+                f"current A3 netlist {current[:12]}")
+    path = lay_doc.get("netlist")
+    try:
+        drawn = Path(path).read_text(errors="replace") if path else None
+    except OSError:
+        drawn = None
+    if drawn is None:
+        return ("UNVERIFIED", "layout_provenance records no netlist digest and "
+                              f"its netlist path is not readable ({path})")
+    other = content_digest(drawn)
+    return (("MATCH" if other == current else "STALE"),
+            f"the netlist A5 drew ({path}, content {other[:12]}) vs the current "
+            f"A3 netlist (content {current[:12]}); no digest was recorded")
+
+def layout_identity_of_block(bdir: Path, netlist: Path) -> tuple:
+    """`layout_netlist_identity` for a block directory: A5's
+    `layout_provenance.json` against the netlist file on disk. A record that
+    cannot be read is UNVERIFIED, never STALE -- the check refuses only on a
+    measured disagreement."""
+    try:
+        doc = json.loads((bdir / "layout_provenance.json").read_text())
+    except (OSError, ValueError):
+        doc = {}
+    try:
+        text = netlist.read_text(errors="replace")
+    except OSError:
+        return ("UNVERIFIED", f"{netlist} could not be read")
+    return layout_netlist_identity(doc if isinstance(doc, dict) else {}, text)
+
+
 def json_content_digest(raw: str) -> Optional[str]:
     """sha256 over a JSON artefact's CONTENT, with its `_provenance` removed.
 

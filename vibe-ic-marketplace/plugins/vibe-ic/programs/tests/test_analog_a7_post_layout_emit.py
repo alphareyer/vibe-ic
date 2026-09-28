@@ -24,6 +24,7 @@ import pytest
 
 import _plugin_tree  # noqa: F401 — puts programs/ on sys.path
 import _eda_pin as PIN
+import _analog_producer_common as PC
 import analog_a7_post_layout_emit as A7
 
 PROGRAMS = Path(_plugin_tree.plugin_path("programs"))
@@ -165,11 +166,13 @@ def _project(tmp_path: Path) -> Path:
     (tech_dir / "t.tech").write_text(TECH)
     (tech_dir / "t-extract.tech").write_text(TECH_EXTRACT)
     (b / "blk.gds").write_bytes(b"\x00\x06\x00\x02\x02\x58")
-    (b / "layout_provenance.json").write_text(json.dumps(
-        {"pdk_sources": {"magic_tech": str(tech_dir / "t.tech")}}))
     (b / "blk.sp").write_text(
         ".lib ../../../models/m.lib tt\n.subckt blk a b vss\n"
         "X0 a b vss vss nfet w=1u l=1u\n.ends blk\n")
+    (b / "layout_provenance.json").write_text(json.dumps({
+        "producer": "analog_a5_layout_emit", "result": "OK",
+        "pdk_sources": {"magic_tech": str(tech_dir / "t.tech")},
+        "netlist_content_sha256": PC.content_digest((b / "blk.sp").read_text())}))
     (b / "tb_blk.sp").write_text(
         ".include blk.sp\nV1 a 0 1.8\nX1 a b 0 blk\n.op\n.end\n")
     (b / "corner_results.json").write_text(json.dumps(
@@ -230,6 +233,37 @@ def test_the_producer_writes_a_comparison_the_a7_gate_certifies(stub):
                          str(project), "--block", "blk"],
                         capture_output=True, text=True)
     assert cp.returncode == 0, cp.stdout + cp.stderr
+
+
+def test_rcx_inventory_accepts_only_the_layouts_declared_grid_snap(stub):
+    """A5's Magic grid is 0.01 um; a 2.25326 um cap draws as 2.25 um.
+
+    The extracted device still has the same model, count and physical shape
+    within half the attested grid. A farther change remains a mismatch.
+    """
+    project = _project(stub)
+    bdir = project / "phase3/analog/blk"
+    net = bdir / "blk.sp"
+    net.write_text(net.read_text().replace(
+        ".ends blk\n", "Xcap a b cap_cmim w=10u l=2.25326u\n.ends blk\n"))
+    lay = bdir / "layout_provenance.json"
+    provenance = json.loads(lay.read_text())
+    provenance.update(lambda_per_um=100,
+                      netlist_content_sha256=PC.content_digest(net.read_text()))
+    lay.write_text(json.dumps(provenance))
+    _rcx(stub, RCX_RC.replace(
+        ".ends\n", "Xcap a b cap_cmim w=10u l=2.25u\n.ends\n"))
+
+    assert A7.run(project, "blk", "vibeic-eda", IMAGE, ["ngspice()"]) == 0
+    record = json.loads((bdir / "a7_post_layout.json").read_text())
+    assert record["corners"][0]["device_inventory"]["result"] == "MATCH"
+    assert record["corners"][0]["device_inventory"]["layout_grid_um"] == 0.01
+
+    a3 = A7.device_instances(net.read_text(), "blk")
+    farther = A7.device_instances(RCX_RC.replace(
+        ".ends\n", "Xcap a b cap_cmim w=10u l=2.26u\n.ends\n"), "blk")
+    assert A7.device_inventory(a3, farther, set(),
+                               layout_grid_m=1e-8)["result"] == "MISMATCH"
 
 
 def test_a_parasitic_free_extraction_is_refused_and_writes_no_comparison(
