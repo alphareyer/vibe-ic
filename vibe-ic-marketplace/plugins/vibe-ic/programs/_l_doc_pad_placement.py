@@ -835,9 +835,10 @@ def read_project_placement(project: Path
         try:
             text = path.read_text(errors="replace")
         except OSError as exc:
-            unreadable.append({"file": _rel(path, project), "reason": str(exc)})
+            unreadable.append({"file": project_relative(path, project),
+                               "reason": str(exc)})
             continue
-        rel = _rel(path, project)
+        rel = project_relative(path, project)
         scanned.append(rel)
         try:
             for name, value in parse_parameter_defaults(text).items():
@@ -855,7 +856,12 @@ def read_project_placement(project: Path
     return placement, params, unreadable, scanned
 
 
-def _rel(path: Path, project: Path) -> str:
+def project_relative(path: Path, project: Path) -> str:
+    """Record paths in the run relative to its root across bind mounts.
+
+    Preserve absolute spelling for paths outside the run so consumers can
+    identify and judge external references.
+    """
     try:
         return str(path.relative_to(project))
     except ValueError:

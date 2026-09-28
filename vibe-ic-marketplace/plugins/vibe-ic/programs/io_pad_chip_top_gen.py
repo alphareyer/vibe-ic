@@ -268,12 +268,12 @@ def _drop_unimplemented_optional_ports(
         if absent and p.get("optional") is True:
             dropped.append({"name": p.get("name"), "optional": True,
                             "evidence": p.get("evidence"),
-                            "netlist": str(netlist)})
+                            "netlist": LPP.project_relative(netlist, project)})
         elif absent and p.get("declared_by_staged_top") is False:
             dropped.append({"name": p.get("name"),
                             "declared_by_staged_top": False,
                             "evidence": p.get("evidence"),
-                            "netlist": str(netlist)})
+                            "netlist": LPP.project_relative(netlist, project)})
         else:
             kept.append(p)
     return kept, dropped
@@ -305,9 +305,12 @@ def _check_scan_interface(project: Path,
     missing = [name for name in controls
                if actual.get(name) != "input" or declared.get(name) != "input"]
     evidence = {"selected_scan_netlist": True, "selection": note,
-                "netlist": str(netlist), "netlist_sha256": _sha256(netlist),
-                "scan_metadata": str(meta_path), "scan_metadata_sha256": _sha256(meta_path),
-                "integration_spec": str(spec), "integration_spec_sha256": _sha256(spec),
+                "netlist": LPP.project_relative(netlist, project),
+                "netlist_sha256": _sha256(netlist),
+                "scan_metadata": LPP.project_relative(meta_path, project),
+                "scan_metadata_sha256": _sha256(meta_path),
+                "integration_spec": LPP.project_relative(spec, project),
+                "integration_spec_sha256": _sha256(spec),
                 "functional_mode": mode, "unconnected_controls": missing,
                 "unconnected_scan_outputs": [name for name in
                     [str((mode or {}).get("scan_out_port") or "")]
@@ -347,7 +350,7 @@ def _declared_test_access(project: Path, ports: Sequence[Dict[str, object]]):
     try:
         plan = json.loads(path.read_text())
     except (OSError, ValueError) as exc:
-        refuse(f"cannot read {path}: {exc}")
+        refuse(f"cannot read {LPP.project_relative(path, project)}: {exc}")
     if not isinstance(plan, dict) or plan.get("schema") != "vibeic.dft-test-access.v1":
         refuse("test access needs schema vibeic.dft-test-access.v1")
     if plan.get("mapping") != "dedicated_pads" or not plan.get("authority"):
@@ -399,7 +402,8 @@ def _declared_test_access(project: Path, ports: Sequence[Dict[str, object]]):
             refuse(f"invalid direction or side for scan port {name!r}")
         additions.append({"name": name, "direction": expected[name], "width": 1})
         sides[side].append(name)
-    record = {"declaration": str(path), "declaration_sha256": _sha256(path),
+    record = {"declaration": LPP.project_relative(path, project),
+              "declaration_sha256": _sha256(path),
               "authority": plan["authority"], "mapping": plan["mapping"],
               "netlist_sha256": _sha256(netlist),
               "scan_metadata_sha256": _sha256(meta_path),
@@ -1542,8 +1546,9 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
         supply_plan: Optional[Dict[str, object]] = None,
         pad_connect_layers: Optional[Sequence[str]] = None,
         ) -> Tuple[int, Dict[str, object]]:
+    # Name the run and its files independently of the container's bind mount.
     rec: Dict[str, object] = {"program": PROGRAM, "verdict": "REFUSE",
-                              "findings": [], "project": str(project)}
+                              "findings": [], "project": project.name}
 
     placement, params, unreadable, scanned = LPP.read_project_placement(project)
     rec["documents_scanned"] = scanned
@@ -1841,7 +1846,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                 raise Refusal("SUPPLY_ENTRY_FLOORPLAN_MISSING",
                               f"requested_pairs={pair_count}, die_side_um={die:g}; "
                               "the preceding PnR pass wrote no floorplan DEF at "
-                              f"{PR.FLOORPLAN_DEF_REL} under {project}")
+                              f"{PR.FLOORPLAN_DEF_REL} in this run")
             try:
                 prior_die = PR.read_def(floorplan)
             except (PR.DefError, OSError) as exc:
