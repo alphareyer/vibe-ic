@@ -373,9 +373,17 @@ def measure_scenario_goal(case: dict, stated: float, rows: Sequence[dict],
             not_run.append(f"{c} ({why})")
     out.update(passed=passed, failed=failed)
     if not_run:
-        out.update(verdict=NOT_MEASURED, why=(
-            f"case {name!r}: {len(not_run)} of {len(bound)} bound case(s) did "
-            f"not run their own oracle: {'; '.join(not_run[:4])}"))
+        # Unrun cases cannot rescue a target above the best possible rate.
+        # Keep achieved_pct unset: the final rate has not been measured.
+        maximum = 100.0 * (len(passed) + len(not_run)) / len(bound)
+        out["maximum_possible_pct"] = maximum
+        out["verdict"] = FAIL if maximum < stated else NOT_MEASURED
+        out["why"] = (
+            f"case {name!r}: {len(passed)} passed, {len(failed)} failed, and "
+            f"{len(not_run)} of {len(bound)} bound case(s) did not run their "
+            f"own oracle; at most {maximum:g}% can pass vs the {stated:g}% "
+            f"stated; failed: {', '.join(failed) if failed else 'none'}; "
+            f"not run: {'; '.join(not_run[:4])}")
         return out
     rate = 100.0 * len(passed) / len(bound)
     out["achieved_pct"] = rate
