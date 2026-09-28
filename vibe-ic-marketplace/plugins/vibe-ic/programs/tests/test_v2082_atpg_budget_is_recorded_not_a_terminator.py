@@ -272,6 +272,16 @@ _STAT = ("12 (fault) R 1 12 12 0 -1 4194304 100 0 0 0 %d %d 0 0 20 0 1 0 900 "
          "0 0 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0\n")
 
 
+#: The container the fake runner stands in for. `docker_exec_argv` still asks
+#: the REAL engine whether this name runs the pinned image, and docker resolves
+#: a name by exact name OR by unique ID prefix. The old fixture name "c" is a
+#: hex ID prefix: MEASURED on 8HD-3 (main 2ed9f9104), `docker inspect c`
+#: resolved to an unrelated service container, the attach guard raised
+#: CONTAINER_IMAGE_MISMATCH, and the probe returned None before the fake runner
+#: was ever called. Non-hex characters can never be an ID prefix.
+_FIXTURE_CONTAINER = "vibeic-probe-fixture-no-such-container"
+
+
 class _ExecRec:
     def __init__(self, rc, stdout):
         self.rc, self.stdout, self.calls = rc, stdout, []
@@ -291,7 +301,7 @@ def test_a_vanishing_pid_does_not_blind_the_cpu_probe():
     a working job."""
     ticks = os.sysconf("SC_CLK_TCK")
     rec = _ExecRec(1, _STAT % (3 * ticks, 1 * ticks))
-    probe = DWD.ephemeral_container_cpu_probe("c", runner=rec)
+    probe = DWD.ephemeral_container_cpu_probe(_FIXTURE_CONTAINER, runner=rec)
     assert probe(None) == pytest.approx(4.0), (
         "a non-zero exit with real stat lines was read as NO READING")
 
@@ -301,9 +311,9 @@ def test_an_absent_container_is_no_reading_not_zero():
     `ProgressMeter`; 0.0 would look like a progress RESET and could keep a
     genuinely hung job alive forever."""
     rec = _ExecRec(1, "")
-    assert DWD.ephemeral_container_cpu_probe("c", runner=rec)(None) is None
+    assert DWD.ephemeral_container_cpu_probe(_FIXTURE_CONTAINER, runner=rec)(None) is None
     rec = _ExecRec(0, "not a stat line at all\n")
-    assert DWD.ephemeral_container_cpu_probe("c", runner=rec)(None) is None
+    assert DWD.ephemeral_container_cpu_probe(_FIXTURE_CONTAINER, runner=rec)(None) is None
 
 
 def test_the_reap_names_the_container_this_call_minted():
