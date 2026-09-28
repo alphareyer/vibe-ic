@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 import pytest
+from _hostpaths import require_repo
 
 _HERE = Path(__file__).resolve().parent
 _PROG = _HERE.parent / "clock_plan_check.py"
@@ -102,6 +103,66 @@ def test_pass_minimal_single_clock_shape(tmp_path):
     assert rc == 0
     assert report["verdict"] == "PASS"
     assert report["num_clocks"] == 1
+
+
+def test_two_sdc_names_on_one_physical_clock_share_the_observed_root(tmp_path):
+    """FPGA and silicon names may refer to one real input and CTS root."""
+    project = tmp_path / "aliases"
+    _write_sdc(project,
+               "create_clock -name core_clk -period 20 [get_ports clk_in]\n")
+    _write_sdc(project,
+               "create_clock -name prototype_clk -period 20 "
+               "[get_ports clk_in]\n",
+               "phase2/stage1/fpga/top.sdc")
+    _write_plan(project, {"clocks": [
+        {"name": "core_clk", "period_ns": 20, "source": "clk_in"},
+        {"name": "prototype_clk", "period_ns": 20, "source": "clk_in"},
+    ]})
+    config = project / "phase3/librelane/19-config/OpenROAD.CTS.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"CLOCK_PORT": "core_clk",
+                                  "CLOCK_NET": None,
+                                  "meta": {"step": "OpenROAD.CTS"}}))
+    (_cts_dir(project) / "clock_tree.rpt").write_text(
+        '[INFO CTS-0007] Net "clk_in" found for clock "core_clk".\n')
+
+    rc, report = _run(project, tmp_path)
+    rules = {f["rule"] for f in report["findings"]}
+    assert rc == 0, rules
+    assert "LIBRELANE_CLOCKS_MATCH_SDC" in rules
+    assert "CTS_CLOCKS_SEEN" in rules
+
+
+def test_a_different_clock_source_still_requires_its_own_root(tmp_path):
+    project = tmp_path / "two_roots"
+    _write_sdc(project,
+               "create_clock -name core_clk -period 20 [get_ports clk_in]\n"
+               "create_clock -name aux_clk -period 20 [get_ports aux_in]\n")
+    _write_plan(project, {"clocks": [
+        {"name": "core_clk", "period_ns": 20, "source": "clk_in"},
+        {"name": "aux_clk", "period_ns": 20, "source": "aux_in"},
+    ]})
+    config = project / "phase3/librelane/19-config/OpenROAD.CTS.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"CLOCK_PORT": "core_clk",
+                                  "CLOCK_NET": None,
+                                  "meta": {"step": "OpenROAD.CTS"}}))
+    (_cts_dir(project) / "clock_tree.rpt").write_text(
+        '[INFO CTS-0007] Net "clk_in" found for clock "core_clk".\n')
+
+    rc, report = _run(project, tmp_path)
+    rules = {f["rule"] for f in report["findings"]}
+    assert rc == 1
+    assert "LIBRELANE_CLOCK_MISSING" in rules
+    assert "CTS_CLOCK_MISSING" in rules
+
+
+def test_checked_in_silicon_sdc_source_excludes_tcl_closing_bracket():
+    sdc = require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs", "tests",
+        "fixtures", "stage3_on_pass_review", "accept_subservient", "phase3",
+        "stage3", "pnr", "constraint.sdc")
+    assert mod._sdc_primary_clock_sources([sdc]) == {"clk": "clk"}
 
 
 def test_pass_sdc_clock_present_in_plan(tmp_path):
