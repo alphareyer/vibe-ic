@@ -2366,18 +2366,38 @@ def _check_lvs(project_dir: Path) -> AuditResult:
     # transcripts must say MATCH, and a mismatch token in either is
     # authoritative. A named report that is not on disk is refused.
     _shipped_rel = _lvs_shipped_gds_report_rel(project_dir)
+    missing_shipped = False
+    shipped_arm = None
+    try:
+        _verdict_doc = json.loads((project_dir / "reports" / "phase3" /
+                                   "lvs_verdict.json").read_text())
+        shipped_arm = _verdict_doc.get("shipped_gds_arm")
+    except (OSError, ValueError):
+        _verdict_doc = {}
     if _shipped_rel:
         _shipped = project_dir / _shipped_rel
         if _shipped.is_file():
             if _shipped not in scoped_files:
                 scoped_files = list(scoped_files) + [_shipped]
         else:
+            missing_shipped = True
             result.findings.append(Finding(
                 rule="LVS_SHIPPED_GDS_REPORT_MISSING", severity="ERROR",
                 message=(f"the runner's LVS verdict names the shipped-GDS "
                          f"netgen report {_shipped_rel}, which is not on disk "
                          f"-- the sign-off compare cannot be re-derived."),
                 file=str(_shipped)))
+    elif isinstance(shipped_arm, dict):
+        missing_shipped = True
+        result.findings.append(Finding(
+            rule="LVS_SHIPPED_GDS_REPORT_MISSING", severity="ERROR",
+            message="the verdict carries a shipped-GDS arm but names no report"))
+    if isinstance(shipped_arm, dict) and str(shipped_arm.get("status", "")).upper() != "PASS":
+        result.findings.append(Finding(
+            rule="LVS_SHIPPED_GDS_NOT_COMPARED", severity="ERROR",
+            message=("the shipped-GDS arm is "
+                     f"{shipped_arm.get('status')}; its compare cannot certify the layout")))
+        missing_shipped = True
 
     categories_re = {
         "instance": re.compile(r"instance", re.I),
@@ -2432,7 +2452,15 @@ def _check_lvs(project_dir: Path) -> AuditResult:
     # a real LVS fail even when the topology line says 'Circuits match
     # uniquely') and the Final-result guard (a per-subcell 'match uniquely'
     # line in a truncated hierarchical run is INCOMPLETE, never a PASS).
-    _verdict_cls = _lvt.classify(blob)
+    _per_report = []
+    for fp in scoped_files:
+        try:
+            _per_report.append(_lvt.classify(fp.read_text(errors="replace")))
+        except OSError:
+            _per_report.append("INCOMPLETE")
+    _verdict_cls = ("MISMATCH" if "MISMATCH" in _per_report else
+                    "INCOMPLETE" if any(v != "MATCH" for v in _per_report)
+                    else _lvt.classify(blob))
     matched = _verdict_cls == "MATCH"
     mismatched = _verdict_cls == "MISMATCH"
     if mismatched:
@@ -2458,7 +2486,8 @@ def _check_lvs(project_dir: Path) -> AuditResult:
     # PASS requires: a conclusive MATCH verdict AND a mismatch category
     # keyword found (report structure) AND an authentic tool signature.
     result.passed = (own_design and verdict == "MATCH"
-                     and len(cats_found) > 0 and authentic)
+                     and len(cats_found) > 0 and authentic
+                     and not missing_shipped)
     result.subject_files = [str(f) for f in files]
     result.summary = {"files_found": len(files), "categories_found": cats_found,
                       "design_binding": design_binding,

@@ -111,6 +111,16 @@ def evaluate(blob: str) -> Dict[str, object]:
 
 
 def check(target: Path) -> Dict[str, object]:
+    if target.is_dir():
+        try:
+            verdict_doc = json.loads((target / "reports" / "phase3" /
+                                      "lvs_verdict.json").read_text())
+        except (OSError, ValueError):
+            verdict_doc = {}
+        if str(verdict_doc.get("status", "")).upper() == "BLOCKED":
+            return {"tapeout_verdict": "BLOCKED", "passed": False,
+                    "detail": ("runner records shipped-layout LVS as BLOCKED: "
+                               f"{verdict_doc.get('finding', 'unverified')}")}
     rpt = _find_report(target)
     if rpt is None:
         return {"tapeout_verdict": "IO_ERROR", "passed": False,

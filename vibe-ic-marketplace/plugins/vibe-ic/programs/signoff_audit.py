@@ -586,6 +586,16 @@ def _evaluate_lvs(project_dir: Path):
     not be imported or the report could not be read — an UNVERIFIABLE state
     that is treated as missing evidence, never as a pass.
     """
+    verdict_path = project_dir / "reports" / "phase3" / "lvs_verdict.json"
+    try:
+        verdict_doc = json.loads(verdict_path.read_text())
+    except (OSError, ValueError):
+        verdict_doc = {}
+    if str(verdict_doc.get("status", "")).upper() == "BLOCKED":
+        return _find_lvs_report(project_dir), {
+            "tapeout_verdict": "BLOCKED", "passed": False,
+            "detail": ("runner records shipped-layout LVS as BLOCKED: "
+                       f"{verdict_doc.get('finding', 'unverified')}")}
     rpt = _find_lvs_report(project_dir)
     if rpt is None:
         return None, None

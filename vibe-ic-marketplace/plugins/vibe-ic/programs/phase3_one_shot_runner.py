@@ -35108,7 +35108,8 @@ def _sdr_candidate_signoff_clean_in_shadow(project: Path, top: Optional[str],
             return False, f"drc_fail:{','.join(rules)}"
         if drc.status != "PASS":
             return False, f"drc_measurement_failed:{drc.status.lower()}"
-        lvs = step_lvs(project, top, pdk, container)
+        lvs = step_lvs(project, top, pdk, container, _direct=True,
+                       _skip_shipped_gds=True)
         if lvs.status != "PASS":
             return False, f"lvs_fail:{lvs.status.lower()}"
         verdict = project / "reports" / "phase3" / "lvs_verdict.json"
@@ -51413,7 +51414,8 @@ def _write_extraction_preflight(project: Path, magicrc: str,
 def step_lvs(project: Path, top: str, pdk: PdkConfig,
              container: str,
              upstream_pnr: Optional[StepResult] = None, *,
-             _direct: bool = False) -> StepResult:
+             _direct: bool = False,
+             _skip_shipped_gds: bool = False) -> StepResult:
     # Step 31's producer switch (mig105). The upstream-incomplete skip (#590)
     # below belongs to the step, not to one producer: a pnr that died before
     # its final writes is skipped on every mode, so the switch is consulted
@@ -51784,6 +51786,8 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
     # the project-local one above, which belongs to the DEF arm).
     _def_row = _run_extraction_lvs(project, top, pdk, container, def_file,
                                    netlist, magicrc, local_setup_c, t0)
+    if _skip_shipped_gds:
+        return _def_row
     _gds_row = _run_shipped_gds_lvs(project, top, pdk, container, def_file,
                                     magicrc, netgen_setup, t0)
     return _compose_lvs_signoff(project, _def_row, _gds_row, t0)
@@ -54282,7 +54286,20 @@ def _pdk_cell_spice_models(pdk: "PdkConfig", container: Optional[str]
         re.M)
     for rel in _PDK_FLOW_CONFIG_RELPATHS:
         cfg = f"{root}/{rel}"
-        text = _read_pdk_text(cfg, container)
+        try:
+            text = Path(cfg).read_text(errors="ignore")
+        except OSError:
+            if not container:
+                continue
+            absent = "__VIBEIC_PDK_CONFIG_ABSENT__"
+            probe = (f"if [ -f {shlex.quote(cfg)} ]; then "
+                     f"cat {shlex.quote(cfg)}; else echo {absent}; fi")
+            rc, text, err = _docker_exec(container, probe, timeout=60)
+            if rc != 0:
+                return [], (f"{rel} could not be read from container "
+                            f"(rc={rc}): {(err or text or '').strip()[:240]}")
+            if absent in (text or ""):
+                continue
         if not text:
             continue
         m = key_re.search(text)
@@ -54305,7 +54322,10 @@ def _pdk_cell_spice_models(pdk: "PdkConfig", container: Optional[str]
                 lambda mm: env[mm.group(1)], word).split())
         files: List[str] = []
         for pat in pats:
-            found = _pdk_existing_files(pat, container, "[glob" in expr)
+            found, probe_error = _pdk_existing_files(
+                pat, container, "[glob" in expr, with_error=True)
+            if probe_error:
+                return [], f"{rel}:{_PDK_CELL_SPICE_KEY} probe failed: {probe_error}"
             if not found:
                 return [], (f"{rel}:{_PDK_CELL_SPICE_KEY} declares {pat}, "
                             f"which does not exist")
@@ -54318,7 +54338,7 @@ def _pdk_cell_spice_models(pdk: "PdkConfig", container: Optional[str]
 
 
 def _pdk_existing_files(pattern: str, container: Optional[str],
-                        is_glob: bool) -> List[str]:
+                        is_glob: bool, *, with_error: bool = False):
     """The files `pattern` names, host first then inside `container`."""
     import glob as _glob
     if is_glob:
@@ -54326,12 +54346,15 @@ def _pdk_existing_files(pattern: str, container: Optional[str],
     else:
         hits = [pattern] if os.path.isfile(pattern) else []
     if hits or not container:
-        return hits
+        return (hits, None) if with_error else hits
     probe = (f"for f in {pattern}; do [ -f \"$f\" ] && echo \"$f\"; done"
              if is_glob else
              f"[ -f {shlex.quote(pattern)} ] && echo {shlex.quote(pattern)}")
-    rc, out, _err = _docker_exec(container, probe, timeout=60)
-    return [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    rc, out, err = _docker_exec(container, probe, timeout=60)
+    result = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    if with_error:
+        return result, (f"rc={rc}: {(err or '').strip()[:240]}" if rc else None)
+    return result
 
 
 def _placed_lef_masters(def_file: Path, lefs: List[str],
@@ -54363,6 +54386,13 @@ def _run_shipped_gds_lvs(project: Path, top: str, pdk: "PdkConfig",
     work.mkdir(parents=True, exist_ok=True)
     rpt_dir = _pl.reports_phase3_dir(project)
     rpt_dir.mkdir(parents=True, exist_ok=True)
+    # A session wrapper may restore products that were not rewritten. This
+    # arm owns these outputs; remove the prior run before invoking any tools.
+    for stale in (work / f"{top}.pnl.v", work / f"{top}_extracted.spice",
+                  work / _mio.FEEDBACK_NAMES[0], work / "ext2spice.log",
+                  work / "netgen.log", rpt_dir / "lvs_shipped_gds.rpt",
+                  rpt_dir / "lvs_shipped_gds.json"):
+        stale.unlink(missing_ok=True)
     gds = _pl.pnr_dir(project) / f"{top}.gds"
     cell_top, _top_note = _streamout_top(def_file, top)
     record: Dict[str, Any] = {
@@ -54403,8 +54433,13 @@ def _run_shipped_gds_lvs(project: Path, top: str, pdk: "PdkConfig",
     record["layout_sha256"] = _file_sha256(gds)
     spice_models, spice_src = _pdk_cell_spice_models(pdk, container)
     if not spice_models:
-        return _not_measured("LVS_SHIPPED_GDS_NO_CELL_SPICE", spice_src,
-                             _V.ReasonClass.TOOL_ABSENT)
+        _probe_failed = ("could not be read" in spice_src
+                         or "probe failed" in spice_src)
+        return _not_measured(
+            "LVS_SHIPPED_GDS_PDK_PROBE_FAILED" if _probe_failed else
+            "LVS_SHIPPED_GDS_NO_CELL_SPICE", spice_src,
+            _V.ReasonClass.EXECUTION_ERROR if _probe_failed else
+            _V.ReasonClass.TOOL_ABSENT)
     record["cell_spice_models"] = spice_models
     record["cell_spice_source"] = spice_src
     if not _tool_in_path(container, "openroad"):
@@ -54438,6 +54473,10 @@ def _run_shipped_gds_lvs(project: Path, top: str, pdk: "PdkConfig",
             "LVS_SHIPPED_GDS_STALLED",
             f"openroad writing the powered netlist was stopped (rc={rc})",
             _V.ReasonClass.STALLED, supervision=_supervision_evidence(err or ""))
+    if rc != 0:
+        return _not_measured("LVS_SHIPPED_GDS_OPENROAD_ERROR",
+                             f"openroad exited rc={rc}; powered netlist is untrusted",
+                             _V.ReasonClass.EXECUTION_ERROR)
     if not pnl.is_file() or pnl.stat().st_size == 0:
         return _not_measured(
             "LVS_SHIPPED_GDS_NO_SCHEMATIC",
@@ -54485,6 +54524,14 @@ def _run_shipped_gds_lvs(project: Path, top: str, pdk: "PdkConfig",
         mlog = ext_log.read_text(errors="replace")
     except OSError:
         mlog = (out or "") + (err or "")
+    if rc != 0:
+        return _not_measured("LVS_SHIPPED_GDS_MAGIC_ERROR",
+                             f"Magic exited rc={rc}; extraction did not complete",
+                             _V.ReasonClass.EXECUTION_ERROR)
+    if "MAGIC_EXT2SPICE_DONE" not in mlog:
+        return _not_measured("LVS_SHIPPED_GDS_MAGIC_INCOMPLETE",
+                             "Magic did not write MAGIC_EXT2SPICE_DONE to its fresh log",
+                             _V.ReasonClass.EXECUTION_ERROR)
     if not spice_out.is_file() or spice_out.stat().st_size == 0:
         return _fail(
             "LVS_SHIPPED_GDS_EXTRACTION_NO_NETLIST",
@@ -54532,6 +54579,14 @@ def _run_shipped_gds_lvs(project: Path, top: str, pdk: "PdkConfig",
             f"netgen comparing the shipped GDS was stopped (rc={rc}); no "
             f"terminal verdict", _V.ReasonClass.STALLED,
             supervision=_supervision_evidence(err or ""))
+    if rc != 0 and not lvs_rpt.is_file():
+        return _not_measured("LVS_SHIPPED_GDS_NETGEN_ERROR",
+                             f"netgen exited rc={rc} without writing a fresh report",
+                             _V.ReasonClass.EXECUTION_ERROR)
+    if rc != 0:
+        return _not_measured("LVS_SHIPPED_GDS_NETGEN_ERROR",
+                             f"netgen exited rc={rc}; report is not accepted",
+                             _V.ReasonClass.EXECUTION_ERROR)
     rpt_txt = _read_lvs_report_flushed(lvs_rpt, rc=rc)
     blob = (out or "") + "\n" + (err or "") + "\n" + rpt_txt
     cls = _lvt.classify(blob)
@@ -54568,11 +54623,10 @@ def _run_shipped_gds_lvs(project: Path, top: str, pdk: "PdkConfig",
 def _compose_lvs_signoff(project: Path, def_row: StepResult,
                          gds_row: StepResult, t0: float) -> StepResult:
     """Step 31 = the WORSE of the two arms (both must be clean, as in the dual
-    rule of `_step31_dispatch`). The worse arm owns the canonical record: when
-    the shipped-GDS arm is strictly worse, `lvs_verdict.json` carries its
-    verdict (BLOCKED for a not-verified one) and `lvs.rpt` its netgen report
-    (the routed-DEF transcript kept as `lvs_routed_def.rpt`); otherwise the
-    routed-DEF arm's record stands. Either way both arms are recorded."""
+    rule of `_step31_dispatch`). The worse arm owns the canonical record:
+    `lvs_verdict.json` records the shipped-GDS status and its named report;
+    `lvs.rpt` remains the routed-DEF producer's declared output. Otherwise the
+    routed-DEF arm's verdict stands. Either way both arms are recorded."""
     rank = {word: i for i, word in enumerate(_STEP31_ORDER)}
     worse_gds = (rank.get(gds_row.status, len(rank))
                  > rank.get(def_row.status, len(rank)))
@@ -54601,22 +54655,8 @@ def _compose_lvs_signoff(project: Path, def_row: StepResult,
                                        ("status", "finding", "message")}},
     }
     if worse_gds:
-        canonical = rpt_dir / "lvs.rpt"
-        # Only a report THIS run's netgen wrote (the record names it); a file
-        # left by an earlier run is never promoted.
-        shipped_rpt = project / str(gds_doc.get("report") or "")
-        if (gds_row.status == "FAIL" and gds_doc.get("report")
-                and shipped_rpt.is_file()):
-            if canonical.is_file():
-                shutil.copyfile(canonical, rpt_dir / "lvs_routed_def.rpt")
-                arms["routed_def_arm"]["report"] = \
-                    "reports/phase3/lvs_routed_def.rpt"
-            text = shipped_rpt.read_text(errors="replace")
-            _declared_transform_exec(
-                project, canonical, "lvs:shipped_gds", "netgen",
-                "write the shipped-GDS netgen result into lvs.rpt "
-                "(phase3_one_shot_runner)",
-                lambda: canonical.write_text(text), input_path=shipped_rpt)
+        # lvs.rpt remains the routed-DEF producer's declared output. The
+        # verdict points consumers to the shipped arm's separately named file.
         word = "FAIL" if gds_row.status == "FAIL" else "BLOCKED"
         verdict = _write_lvs_verdict(
             project, word, gds_row.extras.get("finding") or "LVS_SHIPPED_GDS",
@@ -54625,7 +54665,11 @@ def _compose_lvs_signoff(project: Path, def_row: StepResult,
                 " -- the layout that ships was NOT verified, so NOTHING is "
                 "known about its LVS state whatever the routed-DEF arm said. "
                 "Not a pass."),
-            extras={**arms, "shipped_gds": gds_doc})
+            extras={**arms, "shipped_gds": gds_doc,
+                    "compare_performed": bool(gds_doc.get("report")
+                                                and gds_doc.get("netgen_rc") == 0),
+                    "compare_evidence": (gds_doc.get("report")
+                                         if gds_doc.get("netgen_rc") == 0 else None)})
         status, reason_class = gds_row.status, gds_row.reason_class
         finding = gds_row.extras.get("finding")
     else:

@@ -27,14 +27,18 @@ chip/PDK-AGNOSTIC: a synthetic PDK tree and a synthetic design.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import eda_report_audit as audit  # noqa: E402
+import signoff_audit  # noqa: E402
+import lvs_tapeout_signoff_check as tapeout_lvs  # noqa: E402
 import phase3_one_shot_runner as runner  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -149,11 +153,11 @@ def test_a_shipped_gds_that_fails_pin_matching_fails_the_step(
     assert row.extras["routed_def_lvs"] == "PASS"
     assert v["status"] == "FAIL" and v["finding"] == "LVS_SHIPPED_GDS_MISMATCH"
     assert v["routed_def_arm"]["status"] == "PASS"
-    # The canonical transcript the Step-31 gate reads is the shipped compare;
-    # the routed-DEF transcript is kept beside it.
+    # lvs.rpt remains the routed-DEF producer's output; the named shipped
+    # report is independently consumed by the sign-off gate.
     rpt = project / "reports" / "phase3"
-    assert "failed pin matching" in (rpt / "lvs.rpt").read_text()
-    assert "match uniquely" in (rpt / "lvs_routed_def.rpt").read_text()
+    assert "match uniquely" in (rpt / "lvs.rpt").read_text()
+    assert "failed pin matching" in (rpt / "lvs_shipped_gds.rpt").read_text()
     gate = audit._check_lvs(project)
     assert gate.passed is False
     assert gate.summary.get("terminal_verdict") == "MISMATCH", gate.summary
@@ -185,6 +189,117 @@ def test_the_gate_rederives_the_shipped_transcript(tmp_path, monkeypatch):
     gate = audit._check_lvs(project)
     assert gate.passed is False
     assert gate.summary.get("terminal_verdict") == "MISMATCH"
+
+
+def test_the_gate_requires_a_terminal_verdict_in_each_arm(tmp_path, monkeypatch):
+    project, row, v, _t = _run(tmp_path, monkeypatch, gds=b"labelled")
+    assert row.status == "PASS"
+    report = project / v["shipped_gds"]["report"]
+    report.write_text(netgen_report(TOP, "Netlists match uniquely.\n"))
+    gate = audit._check_lvs(project)
+    assert not gate.passed and gate.summary["terminal_verdict"] == "INCOMPLETE"
+
+
+def test_missing_named_shipped_report_refuses_gate(tmp_path, monkeypatch):
+    project, row, v, _t = _run(tmp_path, monkeypatch, gds=b"labelled")
+    assert row.status == "PASS"
+    (project / v["shipped_gds"]["report"]).unlink()
+    gate = audit._check_lvs(project)
+    assert not gate.passed
+    assert any(f.rule == "LVS_SHIPPED_GDS_REPORT_MISSING" for f in gate.findings)
+
+
+def test_shipped_extraction_refusal_does_not_pass_on_def_match(tmp_path, monkeypatch):
+    root = pdk_tree(tmp_path)
+    project = _project(tmp_path, gds=b"labelled")
+    tools = Recorder(answer_tools(RoutedDefTools(MATCH), TOP))
+    monkeypatch.setattr(runner, "_docker_exec", tools)
+    monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
+    session = runner._declared_session_exec
+    def magic_writes_no_netlist(*args, **kwargs):
+        if "magic -dnull" in str(args[1]) and " GDS=" in str(args[1]):
+            log = project / "phase3/stage3/extracted/shipped_gds/ext2spice.log"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text("MAGIC_EXT2SPICE_DONE\n")
+            return 0, "", ""
+        return session(*args, **kwargs)
+    monkeypatch.setattr(runner, "_declared_session_exec", magic_writes_no_netlist)
+    row = runner.step_lvs(project, TOP, _pdk(root), "x")
+    verdict = json.loads((project / "reports/phase3/lvs_verdict.json").read_text())
+    assert row.status == "FAIL"
+    assert row.extras["finding"] == "LVS_SHIPPED_GDS_EXTRACTION_NO_NETLIST"
+    assert verdict["compare_performed"] is False
+    gate = audit._check_lvs(project)
+    assert not gate.passed
+
+
+def test_tapeout_lvs_readers_honour_shipped_blocked_verdict(tmp_path):
+    project = tmp_path / "p"
+    rpt = project / "reports/phase3/lvs.rpt"
+    rpt.parent.mkdir(parents=True)
+    rpt.write_text(netgen_report(TOP, MATCH))
+    (rpt.parent / "lvs_verdict.json").write_text(json.dumps(
+        {"status": "BLOCKED", "finding": "LVS_SHIPPED_GDS_ABSENT"}))
+    _, result = signoff_audit._evaluate_lvs(project)
+    assert result["passed"] is False and result["tapeout_verdict"] == "BLOCKED"
+    result = tapeout_lvs.check(project)
+    assert result["passed"] is False and result["tapeout_verdict"] == "BLOCKED"
+
+
+def test_sdr_shadow_admission_calls_routed_def_only_lvs(tmp_path, monkeypatch):
+    project = tmp_path / "shadow"
+    project.mkdir()
+    pdk = _pdk(pdk_tree(tmp_path))
+    pdk.drc_deck = "synthetic-deck"
+    def gds(*args, **kwargs):
+        layout = project / "phase3/stage3/pnr" / f"{TOP}.gds"
+        layout.parent.mkdir(parents=True, exist_ok=True)
+        layout.write_bytes(b"candidate")
+        future_ns = time.time_ns() + 2_000_000_000
+        os.utime(layout, ns=(future_ns, future_ns))
+        return runner.StepResult("gds", "PASS", 0, "ok")
+    def drc(*args, **kwargs):
+        report = project / "phase3/reports/drc.rpt"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text('<report-database><items/></report-database>')
+        future_ns = time.time_ns() + 2_000_000_000
+        os.utime(report, ns=(future_ns, future_ns))
+        return runner.StepResult("drc", "PASS", 0, "ok")
+    called = {}
+    def lvs(*args, **kwargs):
+        called.update(kwargs)
+        v = project / "reports/phase3/lvs_verdict.json"
+        v.parent.mkdir(parents=True, exist_ok=True)
+        v.write_text('{"status":"PASS"}')
+        future_ns = time.time_ns() + 2_000_000_000
+        os.utime(v, ns=(future_ns, future_ns))
+        return runner.StepResult("lvs", "PASS", 0, "ok")
+    monkeypatch.setattr(runner, "step_gds", gds)
+    monkeypatch.setattr(runner, "step_drc", drc)
+    monkeypatch.setattr(runner, "step_lvs", lvs)
+    admitted, reason = runner._sdr_candidate_signoff_clean_in_shadow(
+        project, TOP, pdk, "x")
+    assert admitted, reason
+    assert called.get("_skip_shipped_gds") is True
+
+
+def test_second_run_netgen_crash_cannot_reuse_prior_report(tmp_path, monkeypatch):
+    project, row, _v, tools = _run(tmp_path, monkeypatch, gds=b"labelled")
+    assert row.status == "PASS"
+    (project / "phase3/stage3/pnr/widget.gds").write_bytes(b"unlabelled")
+    original = runner._docker_exec
+    def crash(container, cmd, timeout=0, **kw):
+        if "netgen -batch source" in cmd:
+            return 137, "", "killed"
+        return original(container, cmd, timeout=timeout, **kw)
+    monkeypatch.setattr(runner, "_docker_exec", crash)
+    # call the public step again in the same project; prior products are stale.
+    root = pdk_tree(tmp_path)
+    tools2 = Recorder(crash)
+    monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
+    row2 = runner.step_lvs(project, TOP, _pdk(root), "x")
+    assert row2.status == "NOT_MEASURED", (row2.status, row2.detail)
+    assert row2.extras["finding"] == "LVS_SHIPPED_GDS_NETGEN_ERROR"
 
 
 def test_no_shipped_gds_is_not_verified_never_a_pass(tmp_path, monkeypatch):
@@ -265,6 +380,28 @@ def test_a_declared_model_that_does_not_exist_is_refused(tmp_path):
     root = pdk_tree(tmp_path, config=CONFIG.replace('.spice"', '.spi"'))
     files, why = runner._pdk_cell_spice_models(_pdk(root), None)
     assert files == [] and "does not exist" in why
+
+
+def test_unreadable_pdk_config_is_not_reported_as_undeclared(tmp_path, monkeypatch):
+    root = pdk_tree(tmp_path, config=None)
+    monkeypatch.setattr(runner, "_docker_exec",
+                        lambda *a, **k: (137, "", "exec failed"))
+    files, why = runner._pdk_cell_spice_models(_pdk(root), "x")
+    assert not files and "could not be read" in why
+
+
+def test_failed_pdk_model_probe_is_not_reported_as_missing_file(
+        tmp_path, monkeypatch):
+    config = ('set ::env(CELL_SPICE_MODELS) [glob '
+              '"$::env(PDK_ROOT)/$::env(PDK)/libs.ref/'
+              '$::env(STD_CELL_LIBRARY)/spice/*.spice"]\n')
+    root = pdk_tree(tmp_path, config=config)
+    for f in (root / "libs.ref" / LIB / "spice").glob("*.spice"):
+        f.unlink()
+    monkeypatch.setattr(runner, "_docker_exec",
+                        lambda *a, **k: (137, "", "exec failed"))
+    files, why = runner._pdk_cell_spice_models(_pdk(root), "x")
+    assert not files and "probe failed" in why and "rc=137" in why
 
 
 def test_placed_hard_macros_are_read_and_abstracted_by_name(tmp_path,
