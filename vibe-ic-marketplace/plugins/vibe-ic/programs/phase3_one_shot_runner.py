@@ -3794,10 +3794,28 @@ def _resolve_staged_silicon_sdc(project: Path) -> Optional[Path]:
         flow_owned = (
             _sdc.generated_top_entity(head) is not None
             or "# Auto-generated minimal SDC for silicon top " in _lead_text
+            or _is_step7_output(project, candidate)
         )
         if not flow_owned:
             return candidate
     return None
+
+
+def _is_step7_output(project: Path, candidate: Path) -> bool:
+    """Is ``candidate`` the file step 7's producer wrote (its record names it
+    and the bytes still match)? A deck derived from a DESIGN SDC carries no
+    auto-SDC banner, so without this the legacy fallback read step 7's own
+    output back as design input on the next run (review_wave7)."""
+    try:
+        rec = json.loads((_pl.constraints_dir(project)
+                          / _ppa_timing.ASIC_SDC_RECORD)
+                         .read_text(errors="replace"))
+        own = project / str(rec.get("path") or "")
+        return (own.is_file() and own.resolve() == candidate.resolve()
+                and hashlib.sha256(candidate.read_bytes()).hexdigest()
+                == rec.get("sha256"))
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 # A flow-templated SDC parameterises the whole deck on ``::env(...)``
@@ -57707,9 +57725,14 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     _step7 = _ppa_timing.emit_step7_asic_sdc(
         _runner_module(), project, top, pdk, container)
     design_staged = bool(_step7["design_staged"])
-    runner_sdc.write_text(_step7["text"])
     written.append(str(project / _step7["path"]))
-    written.append(str(runner_sdc))
+    # THE PnR DECK IS NOT STEP 7's TO CLOBBER (review_wave7). Written only
+    # when absent, as before: a deck already there is the PnR-consistent one
+    # (it may carry the pad-ring derivation), and this step runs BEFORE the
+    # PnR cache decision, so a cache hit would never write it back.
+    if not runner_sdc.is_file():
+        runner_sdc.write_text(_step7["text"])
+        written.append(str(runner_sdc))
     notes.append(
         (f"SDC: design-staged {_step7['staged_sdc']} — unit-rescaled + "
          f"DRV/IO parity (step 7's producer, the chain step_pnr loads). "
@@ -57718,8 +57741,7 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
         if design_staged else
         f"SDC: design staged none — runner auto-SDC, step 7's producer "
         f"({_step7['path']}, sha256 {_step7['sha256'][:12]})")
-    canon_sdc = _ppa_timing.step7_asic_sdc_path(
-        _runner_module(), project, top, design_staged)
+    canon_sdc = project / _step7["path"]
 
     # --- Steps 7/8/10 opt-in tool path (phase3/librelane_switch.json) ----
     import librelane_contract as _llc

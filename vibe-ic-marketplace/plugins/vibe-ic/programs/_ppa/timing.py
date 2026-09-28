@@ -1247,7 +1247,7 @@ def author_asic_sdc(rt: Any, project: Path, top: str, pdk: Any,
     staged = rt._resolve_staged_silicon_sdc(project)
     out: Dict[str, Any] = {"design_staged": bool(staged and staged.is_file()),
                            "staged_sdc": None, "drv_parity": None,
-                           "io_parity": None, "rt.io_delay_contract": None,
+                           "io_parity": None, "io_delay_contract": None,
                            "cts_fanout_target": None,
                            "supply_ports": list(supply_ports),
                            "drv_block": None}
@@ -1286,7 +1286,7 @@ def author_asic_sdc(rt: Any, project: Path, top: str, pdk: Any,
                                              rt._resolve_clock_spec(project)[0])
         except Exception:                                    # noqa: BLE001
             io_ns = None
-        out["rt.io_delay_contract"] = dict(
+        out["io_delay_contract"] = dict(
             rt.io_delay_contract(io_ns, 2.0, rt.io_delay_source()),
             schema="vibe-ic/io-delay-contract/1")
         try:
@@ -1300,6 +1300,57 @@ def author_asic_sdc(rt: Any, project: Path, top: str, pdk: Any,
     out["drv_block"] = _blk or None
     out["text"] = txt
     return out
+
+
+def asic_sdc_input_digest(rt: Any, project: Path, top: str, pdk: Any
+                          ) -> Tuple[str, Dict[str, str]]:
+    """(digest, {input: sha256}) of what `author_asic_sdc` can read.
+
+    A conservative SUPERSET, because regenerating costs one call and reusing
+    a stale deck costs a wrong sign-off: the resolved design SDC, the Phase-1
+    documents, the design's input tree, the staged RTL (clock port), the
+    Phase-2 emitted SDCs (not step 7's own outputs), the PDK name + liberty
+    path, the I/O-delay source and the authoring code itself."""
+    project = Path(project)
+    items: Dict[str, str] = {}
+
+    def _add(f: Path) -> None:
+        try:
+            items[str(f.relative_to(project))] = hashlib.sha256(
+                f.read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            pass
+    staged = rt._resolve_staged_silicon_sdc(project)
+    items["@staged_sdc"] = (str(staged.relative_to(project))
+                            if staged is not None and staged.is_file()
+                            else "")
+    if staged is not None and staged.is_file():
+        _add(staged)
+    own = {f"{top}.sdc", f"{top}.asic.sdc", ASIC_SDC_RECORD}
+    for root, pats in ((project / "phase1" / "generated_docs", ("*.json",)),
+                       (project / "input", ("**/*",)),
+                       (rt._pl.rtl_dir(project), ("*.v", "*.sv")),
+                       (rt._pl.fpga_early_dir(project), ("*.sdc",)),
+                       (rt._pl.constraints_dir(project), ("*.sdc",))):
+        if not root.is_dir():
+            continue
+        for pat in pats:
+            for f in sorted(root.glob(pat)):
+                if f.is_file() and not (f.parent == rt._pl.constraints_dir(
+                        project) and f.name in own):
+                    _add(f)
+    items["@pdk"] = str(getattr(pdk, "name", ""))
+    items["@liberty"] = str(getattr(pdk, "liberty", ""))
+    items["@io_delay_source"] = str(rt.io_delay_source())
+    for code in (Path(__file__), Path(rt.__file__)):
+        try:
+            items["@code:" + code.name] = hashlib.sha256(
+                code.read_bytes()).hexdigest()
+        except OSError:
+            pass
+    items = dict(sorted(items.items()))
+    return (hashlib.sha256(json.dumps(items, sort_keys=True).encode())
+            .hexdigest(), items)
 
 
 def step7_asic_sdc_path(rt: Any, project: Path, top: str,
@@ -1316,8 +1367,17 @@ def emit_step7_asic_sdc(rt: Any, project: Path, top: str, pdk: Any,
                         container: str) -> Dict[str, Any]:
     """STEP 7's producer: author the design-intent SDC and write it to the
     declared path with its record. Returns the record (with `path`)."""
+    digest, inputs = asic_sdc_input_digest(rt, project, top, pdk)
     authored = author_asic_sdc(rt, project, top, pdk, container, supply_ports=())
     path = step7_asic_sdc_path(rt, project, top, authored["design_staged"])
+    staged = rt._resolve_staged_silicon_sdc(project)
+    if (staged is not None and staged.is_file()
+            and staged.resolve() == path.resolve()):
+        # DESIGN INPUT IS READ-ONLY (review_wave7). The resolved design SDC is
+        # the legacy `constraints/<top>.sdc` itself; writing step 7's
+        # rescaled, parity-augmented, stamped deck there would feed it back
+        # as design input and process it again on the next run.
+        path = rt._pl.constraints_dir(project) / f"{top}.asic.sdc"
     path.parent.mkdir(parents=True, exist_ok=True)
     stamped = rt._stamp_sdc_provenance(authored["text"], pdk.name)
     rt._aa.write_text(path, stamped)
@@ -1328,7 +1388,8 @@ def emit_step7_asic_sdc(rt: Any, project: Path, top: str, pdk: Any,
                 "sha256": _sha256_text(stamped),
                 "deck_sha256": _sha256_text(authored["text"]),
                 "split": {"design_intent": "this file",
-                          "pnr_time": ASIC_SDC_DERIVATION}})
+                          "pnr_time": ASIC_SDC_DERIVATION},
+                "input_digest": digest, "inputs": inputs})
     rt._aa.write_json(path.parent / ASIC_SDC_RECORD, rec)
     rec["text"] = authored["text"]
     return rec
@@ -1352,6 +1413,15 @@ def read_step7_asic_sdc(rt: Any, project: Path, top: str, pdk: Any
     if rec.get("top") != top or rec.get("pdk") != str(pdk.name):
         return None, (f"step-7 SDC was authored for top {rec.get('top')!r} / "
                       f"PDK {rec.get('pdk')!r}, not {top!r} / {pdk.name!r}")
+    # BOUND TO ITS INPUTS (review_wave7): a deck is current only while
+    # everything it was authored from is unchanged.
+    digest, inputs = asic_sdc_input_digest(rt, project, top, pdk)
+    if digest != rec.get("input_digest"):
+        was = rec.get("inputs") or {}
+        changed = sorted(k for k in set(was) | set(inputs)
+                         if was.get(k) != inputs.get(k))
+        return None, (f"the step-7 SDC's inputs changed since step 7: "
+                      f"{changed[:8]}")
     # The file is the provenance stamp line + the deck (exactly what the
     # canonical step-7 copy has always been). A deck that already carried a
     # stamp had it rewritten in place, so it is not recoverable byte-exactly:

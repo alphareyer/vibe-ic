@@ -275,3 +275,97 @@ def test_the_pnr_derivation_changes_only_the_drv_scope(tmp_path, monkeypatch):
         removed
     assert "set_max_fanout 4 $_vibeic_drv_signal_in_ports" in got["text"]
     assert "set_max_fanout 10" not in got["text"]
+
+
+# =========================================================================== #
+# review_wave7 (step 7)
+# =========================================================================== #
+def test_the_io_delay_contract_reaches_pnr_under_its_own_key(tmp_path,
+                                                            monkeypatch):
+    """MAJOR: an `rt.` rename also hit the dict KEY ("rt.io_delay_contract"),
+    so step_pnr's `_asic.get("io_delay_contract")` was always None and
+    reports/phase3/io_delay_contract.json was never written again."""
+    proj = _project(tmp_path)
+    pdk = _pdk(monkeypatch)
+    _step7(proj, pdk)
+    got = T.asic_sdc_for_pnr(R, proj, TOP, pdk, "some-container")
+    io_ns, _ = R._declared_io_delay_ns(proj, R._resolve_clock_spec(proj)[0])
+    assert got["io_delay_contract"] == dict(
+        R.io_delay_contract(io_ns, 2.0, R.io_delay_source()),
+        schema="vibe-ic/io-delay-contract/1")
+    src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
+    step_pnr_src = src.split("def step_pnr(", 1)[1].split("\ndef ", 1)[0]
+    assert '_asic.get("io_delay_contract")' in step_pnr_src
+
+
+def test_step7_never_clobbers_the_pnr_deck(tmp_path, monkeypatch):
+    """MAJOR: step 7 overwrote pnr/constraint.sdc every run, BEFORE the PnR
+    cache decision; on a cache hit the derived (pad-ring-scoped) deck was
+    gone. The PnR deck is written only when absent."""
+    proj = _project(tmp_path)
+    pdk = _pdk(monkeypatch, drv=_DRV)
+    _step7(proj, pdk)
+    _pad_record(proj)
+    derived = T.asic_sdc_for_pnr(R, proj, TOP, pdk, "some-container")["text"]
+    deck = proj / "phase3/stage3/pnr/constraint.sdc"
+    deck.write_text(derived)                   # what step_pnr leaves behind
+    _step7(proj, pdk)                          # a re-run, cache hit next
+    assert deck.read_text() == derived
+    assert "producer-proven supply ports excluded" in deck.read_text()
+
+
+def test_a_legacy_design_sdc_is_never_overwritten(tmp_path, monkeypatch):
+    """MAJOR: when the design's own SDC IS the legacy constraints/<top>.sdc,
+    step 7 wrote its rescaled, stamped deck over it; the next run read that
+    back as design input and rescaled it again. Two runs under a ps liberty:
+    the design file is byte-identical and the period is the same."""
+    lib = tmp_path / "ps.lib"
+    lib.write_text('library (ps_lib) {\n  time_unit : "1ps";\n'
+                   '  capacitive_load_unit (1,ff);\n}\n')
+    proj = _project(tmp_path)
+    legacy = proj / CONS / f"{TOP}.sdc"
+    legacy.parent.mkdir(parents=True)
+    design = "create_clock -name core_clock -period 10.0 [get_ports clk]\n"
+    legacy.write_text(design)
+    pdk = PL._corner_pdk(monkeypatch, str(lib))
+    periods = []
+    for _ in range(2):
+        _step7(proj, pdk)
+        rec = _record(proj)
+        assert rec["path"] == str(CONS / f"{TOP}.asic.sdc")
+        assert rec["staged_sdc"] == str(CONS / f"{TOP}.sdc")
+        clk = [l for l in (proj / rec["path"]).read_text().splitlines()
+               if "create_clock" in l][0]
+        periods.append(clk)
+        assert legacy.read_text() == design
+    assert periods[0] == periods[1] and "10000" in periods[0], periods
+
+
+def test_an_input_changed_after_step7_regenerates_the_deck(tmp_path,
+                                                          monkeypatch):
+    """MAJOR: the record bound only sha/top/PDK, so a run that skipped step 7
+    reused a deck authored from older inputs, recorded regenerated=null."""
+    proj = _project(tmp_path)
+    pdk = _pdk(monkeypatch)
+    _step7(proj, pdk)
+    l8 = proj / "phase1/generated_docs/L8_TIMING_WAVEFORM.json"
+    l8.write_text(l8.read_text().replace("25.0", "40.0"))
+    got = T.asic_sdc_for_pnr(R, proj, TOP, pdk, "some-container")
+    assert "inputs changed since step 7" in got["regenerated"]
+    assert "phase1/generated_docs/L8_TIMING_WAVEFORM.json" in got["regenerated"]
+    assert "-period 40" in got["text"]
+
+
+def test_a_run_whose_step7_deferred_regenerates_at_pnr(tmp_path, monkeypatch):
+    """Fewer than 2 corners: step_prelayout_signoff returns NOT_MEASURED
+    before step 7's producer; PnR regenerates through it and says why."""
+    proj = _project(tmp_path)
+
+    class _OneCorner:
+        name = "sky130A"
+        liberty = "/foss/pdks/x/nom.lib"
+    res = R.step_prelayout_signoff(proj, TOP, _OneCorner(), "no-such-container")
+    assert res.status == "NOT_MEASURED"
+    monkeypatch.setattr(R, "_liberty_drv_limits", lambda *a, **k: {})
+    got = T.asic_sdc_for_pnr(R, proj, TOP, _OneCorner(), "no-such-container")
+    assert got["regenerated"] and "no step-7 record" in got["regenerated"]
