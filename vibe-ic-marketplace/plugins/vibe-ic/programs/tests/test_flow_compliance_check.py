@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json, subprocess, sys
 from pathlib import Path
+import pytest
 
 PROG = Path(__file__).resolve().parent.parent / "flow_compliance_check.py"
 
@@ -424,7 +425,9 @@ def test_missing_step_file_is_retained_in_citation_verdict(tmp_path):
     assert cited.check(tmp_path, {"cited_artefacts": citations})[0] == "NOT_MEASURED"
 
 
-def test_missing_output_file_spellings_cannot_pass_citation_check():
+@pytest.mark.parametrize("missing", (
+    "phase3/stage3/pnr/top routed.def", "routed.def"))
+def test_missing_output_file_spellings_cannot_pass_citation_check(missing):
     """StepResult.output_files names citations even when their names lack a suffix shape."""
     sys.path.insert(0, str(PROG.parent))
     import _cited_artefacts as cited
@@ -434,18 +437,17 @@ def test_missing_output_file_spellings_cannot_pass_citation_check():
                           "flow", "phase1_phase2_phase3.yaml")
     project = source.parent.parent
     present = str(source.relative_to(project))
-    for missing in ("phase3/stage3/pnr/top routed.def", "routed.def"):
-        citations = cited.bind(project, {"steps": [{
-            "output_files": [missing, present],
-            "detail": "PASS with no file named plainword",
-        }]})
-        verdict, rows = cited.check(project, {"cited_artefacts": citations})
-        assert citations[present] == cited.digest(source)
-        assert citations.get(missing) == "MISSING"
-        assert verdict == "NOT_MEASURED"
-        assert any(row["path"] == missing and row["reason"] == "MISSING_CITATION"
-                   for row in rows)
-        assert "plainword" not in citations
+    citations = cited.bind(project, {"steps": [{
+        "output_files": [missing, present],
+        "detail": "unmentioned.def",
+    }]})
+    verdict, rows = cited.check(project, {"cited_artefacts": citations})
+    assert citations[present] == cited.digest(source)
+    assert verdict == "NOT_MEASURED"
+    assert citations.get(missing) == "MISSING"
+    assert any(row["path"] == missing and row["reason"] == "MISSING_CITATION"
+               for row in rows)
+    assert "unmentioned.def" not in citations
 
 
 def test_present_root_output_file_is_hashed_alongside_missing_file(tmp_path):
@@ -460,8 +462,8 @@ def test_present_root_output_file_is_hashed_alongside_missing_file(tmp_path):
     }]})
     verdict, _ = cited.check(tmp_path, {"cited_artefacts": citations})
     assert citations["top.def"] == cited.digest(present)
-    assert citations.get(missing) == "MISSING"
     assert verdict == "NOT_MEASURED"
+    assert citations.get(missing) == "MISSING"
 
 
 def test_recheck_preserves_the_run_cited_audit(tmp_path):
