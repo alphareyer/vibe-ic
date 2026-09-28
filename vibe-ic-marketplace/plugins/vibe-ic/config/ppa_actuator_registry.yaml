@@ -352,6 +352,10 @@ actuators:
         - "{hold_max_buffer_pct}"
         - "--repair-tns-pct"
         - "{repair_tns_pct}"
+        - "--drv-only"
+        - "{drv_only}"
+        - "--slew-margin-pct"
+        - "{slew_margin_pct}"
     parameters:
       setup_margin_ns: {type: number, unit: ns, minimum: 0, maximum: 1.0, default: 0}
       setup_sequence:
@@ -379,6 +383,8 @@ actuators:
           The hold-fix skill's 5 % guardrail is the ceiling; above it is
           REFUSED, not clamped.
       repair_tns_pct: {type: number, unit: percent, minimum: 0, maximum: 100, default: 100}
+      drv_only: {type: boolean, default: false}
+      slew_margin_pct: {type: number, unit: percent, minimum: 0, maximum: 50, default: 0}
     preconditions:
       - {kind: file_nonempty, path: "current.json"}
       - {kind: file_nonempty, path: "context.json"}
@@ -484,7 +490,7 @@ controllers:
     objective_domain: timing.drv
     actuator: timing.repair_setup
     plan:
-      - {}
+      - {drv_only: true, slew_margin_pct: 50}
     stop:
       max_iterations: 1
       plateau_patience: 1
