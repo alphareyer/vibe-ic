@@ -84,16 +84,20 @@ def test_stream_simulator_deck_keeps_circuit_and_accuracy_cards(tmp_path):
     import analog_ngspice_stream as stream
 
     source = _deck(tmp_path / "out.wrdata").replace(
-        ".save v(out)", ".options reltol=1e-5 abstol=1e-12 method=gear\n.save v(out)")
+        ".save v(out)", ".options reltol=1e-5 abstol=1e-12 method=gear\n"
+        ".save v(out) v(unused_diagnostic)\n.save v(another_unused_diagnostic)")
     plan, reason = stream.plan(source)
     assert reason is None
     rendered = stream.simulator_deck(source, plan)
     assert "r1 in out 1k" in rendered
     assert ".options reltol=1e-5 abstol=1e-12 method=gear" in rendered
     assert ".tran 10n 100u" in rendered
+    assert ".save v(out)\n" in rendered
+    assert "unused_diagnostic" not in rendered
     assert ".control" not in rendered
     threaded = stream.simulator_deck(source, plan, num_threads=2)
-    assert ".control\nset num_threads=2\n.endc\n.tran 10n 100u" in threaded
+    assert (".control\nset num_threads=2\n.endc\n"
+            ".save v(out)\n.tran 10n 100u") in threaded
     assert ".options reltol=1e-5 abstol=1e-12 method=gear" in threaded
 
 

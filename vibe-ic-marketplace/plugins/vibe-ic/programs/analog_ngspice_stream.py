@@ -51,10 +51,11 @@ def plan(deck: str):
         return None, "requires_one_control_block"
     if "analog_incremental_decimator: mode=incremental" not in deck:
         return None, "requires_incremental_decode_declaration"
-    save = _SAVE.search(deck)
-    if save is None:
+    save_cards = list(_SAVE.finditer(deck))
+    if not save_cards:
         return None, "no_declared_save_vectors"
-    saved = {v.lower() for v in _VECTOR.findall(save.group(1))}
+    saved = {v.lower() for card in save_cards
+             for v in _VECTOR.findall(card.group(1))}
     lines = []
     tran = None
     measures = []
@@ -122,20 +123,26 @@ def plan(deck: str):
         return {"tran": tran, "stop_s": _si(tran[1]),
                 "measures": measures, "exports": exports,
                 "lets": lets, "echoes": echoes, "clock": clock,
-                "thresholds": thresholds}, None
+                "thresholds": thresholds,
+                "saved_vectors": sorted(used)}, None
     except (ValueError, IndexError) as exc:
         return None, f"unreadable_measurement_definition:{exc}"
 
 
 def simulator_deck(deck: str, contract: dict, num_threads: int | None = None):
-    """Move only the transient card outside control for ngspice raw streaming."""
+    """Move the transient outside control and save only measured vectors."""
     text = _CARD.sub("", deck, count=1)
+    # A delivered deck may save diagnostic nodes that no declared A4
+    # measurement reads. Keep those cards in the original definition, but
+    # pass ONLY the vectors actually consumed to ngspice's raw pipe.
+    text = _SAVE.sub("", text)
     end = re.search(r"(?im)^\s*\.end\s*$", text)
     if end is None:
         raise ValueError("no .end card")
     controls = (f".control\nset num_threads={num_threads}\n.endc\n"
                 if num_threads is not None else "")
     return (text[:end.start()] + controls
+            + ".save " + " ".join(contract["saved_vectors"]) + "\n"
             + f".tran {contract['tran'][0]} {contract['tran'][1]}\n"
             + text[end.start():])
 
