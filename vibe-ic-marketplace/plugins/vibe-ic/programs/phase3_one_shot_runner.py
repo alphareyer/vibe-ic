@@ -41224,6 +41224,42 @@ def _lef_normalize_macro_origin(lef_text: str
     return "".join(out), origins
 
 
+def _record_stream_inputs(project: Path, container: str, gds_out: Path,
+                          engine: str, recipe: Path, def_file: Path, top: str,
+                          files: Dict[str, str], scalars: Dict[str, str],
+                          rcfile: Optional[str] = None) -> None:
+    """Record what this stream-out READ, beside the GDS it wrote.
+
+    Step 37.3 re-streams the routed DEF as its pre-finishing reference and
+    needs exactly this set; see `_stream_input_record` for why it must be
+    RECORDED here rather than re-assembled there. `files` is the recipe
+    environment as the tool received it; each path is hashed where it resolves
+    (host, else inside the container) by the same reader the step identity
+    uses. Best-effort: a failure is printed and never fails the stream, and
+    gds_xor_check then refuses by naming the absent record.
+    """
+    try:
+        import _stream_input_record as _sir  # noqa: PLC0415
+        paths = [p for k in _sir.FILE_KEYS
+                 for p in _sir.split_paths(files.get(k, ""))]
+        if rcfile:
+            paths.append(rcfile)
+        hashes = (_step_pdk_hasher(container)(sorted(set(paths)))
+                  if paths else {})
+        rec = _sir.build(
+            engine=engine, output=gds_out, top=top, project=project,
+            project_c=_to_container_path(str(project), container),
+            recipe=recipe, def_file=def_file, files=files, scalars=scalars,
+            rcfile=rcfile, hashes=hashes)
+        where = _sir.write(gds_out, rec)
+        print(f"[gds] stream-out input record: {where.name} ({engine}, "
+              f"{len(_sir.all_entries(rec))} input(s), "
+              f"{len(rec['unhashed'])} unhashed)")
+    except Exception as exc:  # noqa: BLE001 -- never fatal to the stream
+        print(f"[gds] the stream-out input record was NOT written "
+              f"({type(exc).__name__}: {exc}); step 37.3 will refuse by name")
+
+
 def _magic_def_to_gds(project: Path, top: str, pdk: PdkConfig,
                       container: str, gds_out: Path
                       ) -> Tuple[bool, str]:
@@ -41308,6 +41344,9 @@ def _magic_def_to_gds(project: Path, top: str, pdk: PdkConfig,
         f"magic -dnull -noconsole -rcfile {magicrc} {tcl_c}"
     )
     rc, out, err = _docker_exec(container, cmd, marker=tcl_c, outputs=[gds_out])
+    _record_stream_inputs(project, container, gds_out, "magic", tcl, def_file,
+                          top, {"LEFS": lefs, "CELL_GDS": cell_gds_c,
+                                "MACRO_GDS": macro_gds_c}, {}, rcfile=magicrc)
     transcript = out + "\n" + err
     # PERSIST IT. The KLayout engine beside this one already writes
     # `stream_out.log` and states why: those lines are the only evidence of
@@ -48464,6 +48503,12 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         f"klayout -zz -b -r {script_c}"
     )
     rc, out, err = _docker_exec(container, cmd, marker=script_c, outputs=[gds_out])
+    _record_stream_inputs(project, container, gds_out, "klayout", script,
+                          def_file, top,
+                          {"LEFS": lefs, "CELL_GDS": cell_gds_c,
+                           "MACRO_GDS": macro_gds_arg,
+                           "LEFDEF_MAP": lefdef_map_c},
+                          {"STDCELL_MARKER_LAYER": marker_arg})
     # v1.3.83 — persist the streamout transcript: the resolution prints
     # (MACRO_RESOLUTION_MODE / CELL_GDS macro-resolved / STDCELL_MARKER)
     # are the only evidence of WHAT went into the sign-off GDS; swallowing

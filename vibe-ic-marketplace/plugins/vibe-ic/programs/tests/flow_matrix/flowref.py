@@ -69,15 +69,15 @@ OR a sim ``*.log`` OR a ``pass.flag``; a ``drc_clean.flag`` OR a ``.lyrdb``).
 The consumer splits on the literal ``" OR "`` (spaces included) and strips each
 alternative — :func:`split_any_of` reproduces exactly that.
 
-Live entry census — 193<!--figure:required_output_entries--> entries over
+Live entry census — 196<!--figure:required_output_entries--> entries over
 68<!--figure:required_output_steps--> steps, classified by
 :func:`classify_output` (digits derived; see the anchor note in §1):
 
-    FILE          139<!--figure:required_outputs_file-->
+    FILE          140<!--figure:required_outputs_file-->
         plain relative path, no wildcard, no " OR "
-    GLOB          28<!--figure:required_outputs_glob-->
+    GLOB          29<!--figure:required_outputs_glob-->
         wildcard, no " OR " (e.g. ``phase1/generated_docs/L13_*.json``)
-    ANY_OF        26<!--figure:required_outputs_any_of-->
+    ANY_OF        27<!--figure:required_outputs_any_of-->
         contains " OR " (each alternative may itself be a glob; one entry —
         step 4 — uses a recursive ``**`` alternative)
     PROGRAM_EXIT   0<!--figure:required_outputs_program_exit-->
@@ -85,7 +85,7 @@ Live entry census — 193<!--figure:required_output_entries--> entries over
 
 **Contradiction with the brief, reported deliberately**: there is NO
 ``program_exit_zero: "<cmd>"`` form anywhere in ``required_outputs``. All
-193<!--figure:required_output_entries--> entries are plain strings; not one contains the token ``program_exit_zero``.
+196<!--figure:required_output_entries--> entries are plain strings; not one contains the token ``program_exit_zero``.
 That form exists only inside ``gate`` clauses (§3). :data:`PROGRAM_EXIT` is
 still returned by :func:`classify_output` for forward compatibility, but on the
 current yaml it never fires — a sibling that branches on it is writing dead
@@ -123,12 +123,12 @@ two could not be reconciled by a reader and only one of them was derived.
 
     program_exit_zero          140<!--figure:gate_clauses_program_exit_zero-->  MANDATORY
     advisory_program_exit_zero 77<!--figure:gate_clauses_advisory_program_exit_zero-->  NON-BLOCKING
-    files_exist                35<!--figure:gate_clauses_files_exist-->
+    files_exist                37<!--figure:gate_clauses_files_exist-->
     optional_program_exit_zero 27<!--figure:gate_clauses_optional_program_exit_zero-->  conditional
     json_field_true             1<!--figure:gate_clauses_json_field_true-->
     ------------------------------
-    total                     280<!--figure:gate_clauses_total-->, of which
-                              203<!--figure:blocking_clauses--> block
+    total                     282<!--figure:gate_clauses_total-->, of which
+                              205<!--figure:blocking_clauses--> block
 
 Three different exit-zero kinds with three different force levels:
   * ``program_exit_zero``          — blocking.

@@ -58,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # reads this receipt. An unimportable helper is a broken installation and must
 # say so at import time, not degrade the guarantee silently.
 from _atomic_artefact import write_json as _atomic_write_json
+import _stream_input_record as _sir  # noqa: E402
 
 GATE = "gds_xor_check"
 REPORT_REL = "reports/phase3/gds_xor.json"
@@ -504,55 +505,38 @@ def reanchored(project: Path, recorded: str) -> str:
     return recorded
 
 
-def lef_set_from_the_run(project: Path) -> Dict[str, str]:
-    """{"LEFS": ...} assembled from READINGS only, never a path convention.
+#: The stream-out's OWN record of what it read, written beside the GDS it
+#: streamed and keyed on that output's stem (`_stream_input_record`). The
+#: re-stream reads it and nothing else: an earlier revision assembled the LEF
+#: set from `technology_units.json`, the pad-ring IO record and a registry glob,
+#: which is empty for every design without an IO ring -- MEASURED on fxspm1's
+#: spm integration run, step 37.3 NOT_MEASURED for a GDS the flow had streamed.
+STREAM_INPUTS_REL_FMT = "phase3/stage3/pnr/{stem}.stream_inputs.json"
 
-    `step_gds` builds LEFS as `[tech_lef, cell_lef] + macro_lefs`. Each piece has a
-    recorded or DECLARED source, and this takes them from there:
-      * tech LEF   the run's own `reports/phase3/technology_units.json` -- and its
-                   value is the LEGALIZED tlef in the pnr dir, which is better than
-                   any declaration because the run patched it;
-      * macro LEFs the run's own `reports/phase3/io_pad_chip_top.json`
-                   `io_library_lefs` (15 views on run21);
-      * cell LEF   `pdk_registry.json`'s DECLARED `cell_lef_glob`, resolved against
-                   the PDK volume the run recorded, through the same reader 15.5ic
-                   and 37.5ic use.
-    Returns {} when any of the three is unavailable, and the caller then REFUSES --
-    a re-stream missing a library is the defect that produced 776,403 phantom
-    differences, so it must never be attempted half-resolved.
+
+def _inputs_hold_the_recorded_bytes(runner, pairs: List[Tuple[str, str]],
+                                    timeout: int) -> Tuple[bool, str]:
+    """Does each `(tool-side path, sha256)` hold those bytes WHERE THE TOOL RUNS?
+
+    Asked in the runner's own environment -- a PDK file inside the container has
+    no host copy -- through `sha256sum -c --status`, whose EXIT CODE is the
+    answer; nothing is read out of its text. On a failure each input is asked
+    alone, so the refusal names the one that moved.
     """
-    tech = ((_json(project / "reports/phase3/technology_units.json") or {})
-            .get("tech_lef"))
-    io_rec = _json(project / "reports/phase3/io_pad_chip_top.json") or {}
-    macros = [x for x in (io_rec.get("io_library_lefs") or []) if isinstance(x, str)]
-    if not isinstance(tech, str) or not tech or not macros:
-        return {}
-    try:
-        import _pdk_layer_authority as authority
-        reader, _why = authority.reader_the_run_recorded(project)
-        pdk = ((_json(project / "reports/phase3/general_precheck.json") or {})
-               .get("technology") or {}).get("pdk")
-        volume, _how, _tried = authority.resolve_volume(pdk, reader=reader)
-        if volume is None:
-            return {}
-        entry = next((e for e in (json.loads(
-            (Path(__file__).resolve().parent / "pdk_registry.json")
-            .read_text()).get("pdks") or []) if e.get("name") == pdk), None)
-        glob_rel = (entry or {}).get("cell_lef_glob")
-        if not isinstance(glob_rel, str) or not glob_rel:
-            return {}
-        cells = authority._query(volume / glob_rel.rsplit("/", 1)[0], "glob",
-                                 glob_rel.rsplit("/", 1)[1], reader=reader)
-    except Exception:                                      # pragma: no cover
-        return {}
-    cells = [c for c in (cells or []) if isinstance(c, str)]
-    if not cells:
-        return {}
-    # Re-anchor the RUN-PRODUCED entries (tech LEF, the IO views the run resolved)
-    # to this project; the PDK cell LEFs are already container-side and are left be.
-    tech = reanchored(project, tech)
-    macros = [reanchored(project, m) for m in macros]
-    return {"LEFS": ";".join([tech] + sorted(cells) + macros)}
+    def check(some: List[Tuple[str, str]]) -> int:
+        sums = "".join(f"{sha}  {path}\n" for path, sha in some)
+        rc, _so, _se = runner.run_argv(
+            ["bash", "-c", 'printf "%s" "$VIBEIC_XOR_SUMS" | sha256sum -c --status -'],
+            {"VIBEIC_XOR_SUMS": sums}, timeout=timeout)
+        return rc
+    if check(pairs) == 0:
+        return True, ""
+    for path, sha in pairs:
+        if check([(path, sha)]) != 0:
+            return False, (f"{path} does not hold the bytes the stream-out read "
+                           f"(recorded sha256 {sha[:16]}...)")
+    return False, ("the recorded inputs do not verify as a set although each "
+                   "verifies alone")
 
 
 def _def_design_name(def_file: Optional[Path]) -> str:
@@ -676,56 +660,127 @@ def resolve_reference(project: Path, top: str,
     return None, "restreamed", {
         "kind": "restreamed",
         "note": (f"{rel} is absent, so the reference was re-streamed through the "
-                 f"run's own {STREAMOUT_SCRIPT_REL}; stream-out nondeterminism can "
+                 f"run's own recorded stream-out (engine, recipe and inputs under "
+                 f"`stream_inputs`); stream-out nondeterminism can "
                  f"move a count here, so any nonzero design-layer difference must "
                  f"be attributed per layer before it is read as a fidelity finding"),
     }
 
 
-def stream_reference(runner, scratch: Path, dfile: Path, out: Path, timeout: int
-                     ) -> Tuple[int, str, str]:
+def stream_reference(runner, scratch: Path, dfile: Path, out: Path, timeout: int,
+                     *, stem: Optional[str] = None) -> Tuple[int, str, str]:
     """Stream the routed DEF to GDS: the PRE-FINISHING reference.
 
-    Same engine the run used for the shipped GDS (`streamout_engine: klayout` on
-    run21), so the comparison is not confounded by a second writer's conventions.
+    From the run's own record of its stream-out (`STREAM_INPUTS_REL_FMT`, keyed
+    on `stem`, the shipped GDS's): the same engine and recipe, and every input
+    it names, each proven to hold the bytes it held then. Any gap is a refusal
+    that names it -- rc 127, never an assembled substitute, because a reference
+    missing one library produces a confident wrong answer about the design.
     """
     project = scratch.parent
-    own = project / STREAMOUT_SCRIPT_REL
-    if not own.is_file():
-        return 127, "", (f"{STREAMOUT_SCRIPT_REL} is absent, so the run's own "
-                         f"stream-out recipe cannot be reused and this program "
-                         f"will not substitute one of its own")
-    env, _cited = restream_env_from_transcript(project)
-    env.update(lef_set_from_the_run(project))
-    if "LEFS" not in env:
+    rec_rel = STREAM_INPUTS_REL_FMT.format(stem=stem or dfile.stem)
+    rec, why = _sir.read(project / rec_rel)
+    if rec is None:
+        if not (project / STREAMOUT_SCRIPT_REL).is_file():
+            return 127, "", (f"{rec_rel} is {why} and {STREAMOUT_SCRIPT_REL} is "
+                             f"absent, so the run's own stream-out recipe cannot "
+                             f"be reused and this program will not substitute "
+                             f"one of its own")
         return 127, "", (
-            "the run records no LEF set for its stream-out (no tech LEF in "
-            "reports/phase3/technology_units.json, or no cell LEF resolvable from "
-            "pdk_registry.json's declared cell_lef_glob), and inventing one is how "
-            "a reference ends up measuring the wrong thing")
-    if "CELL_GDS" not in env:
-        return 127, "", (f"no {STREAMOUT_LOG_GLOB} names a CELL_GDS substitution, so a "
-                         f"re-stream would resolve no standard-cell geometry and "
-                         f"every layer would differ for that reason alone")
-    top = dfile.stem
-    env.update({"TOP": top, "DEF": str(dfile), "GDS_OUT": str(out)})
-    # Only the PROJECT-side paths are translated. LEFDEF_MAP / CELL_GDS /
-    # MACRO_GDS are already container-side PDK paths as the transcript recorded
-    # them, and translating them again would corrupt them.
-    # LEFS is a ";"-joined MIXTURE: container-side PDK paths plus host-side paths
-    # to LEFs this run produced. `path_keys` translates a key whose whole value is
-    # one path, so the mixed key is translated entry by entry here -- only the
-    # entries that actually lie inside the project, leaving the PDK's own paths
-    # exactly as the transcript recorded them.
-    translated = []
-    for one in env["LEFS"].split(";"):
-        cand = Path(one)
-        if cand.is_file() and runner.covers(cand):
-            translated.append(str(runner.cpath(cand)))
-        else:
-            translated.append(one)
-    env["LEFS"] = ";".join(translated)
-    return runner.run(own, env, path_keys=("DEF", "GDS_OUT"), timeout=timeout)
+            f"the run records no stream-out input set: {rec_rel} is {why}. The "
+            f"stream-out step writes it beside the GDS it streamed (engine, "
+            f"recipe, LEFs, cell/macro GDS, layer map, each with its sha256), "
+            f"and this program will not assemble one from other records -- a "
+            f"reference missing one library measures the wrong thing")
+    recipe_rel = (rec.get("recipe") or {}).get("project_rel")
+    if (not isinstance(recipe_rel, str) or not recipe_rel
+            or Path(recipe_rel).is_absolute()
+            or Path(recipe_rel).as_posix() != recipe_rel
+            or ".." in Path(recipe_rel).parts):
+        return 127, "", (f"recorded recipe path {recipe_rel!r} is not a "
+                         "canonical path within the current project")
+    own = project / recipe_rel
+    try:
+        recipe_target = own.resolve(strict=True)
+    except OSError:
+        return 127, "", (f"recorded recipe {recipe_rel} is absent from the "
+                         "current project")
+    if not recipe_target.is_relative_to(project.resolve()):
+        return 127, "", (f"recorded recipe {recipe_rel} resolves outside the "
+                         "current project")
+    if not recipe_target.is_file():
+        return 127, "", (f"recorded recipe {recipe_rel} is not a file in the "
+                         "current project")
+    if _sha256(own) != (rec.get("recipe") or {}).get("sha256"):
+        return 127, "", (f"{recipe_rel} changed since the stream-out ran "
+                         f"({rec_rel} records a different sha256), so running it "
+                         f"again would not reproduce that stream")
+    def_rec = rec.get("def") or {}
+    if def_rec.get("sha256") != _sha256(dfile):
+        return 127, "", (f"the recorded stream-out read "
+                         f"{def_rec.get('project_rel')} (sha256 "
+                         f"{str(def_rec.get('sha256'))[:16]}...), not the DEF this "
+                         f"check compares ({dfile.name}), so the reference would "
+                         f"be of a different layout")
+    unhashed = [e["path"] for e in _sir.all_entries(rec) if not e.get("sha256")]
+    if unhashed:
+        return 127, "", (f"{rec_rel} carries no sha256 for {len(unhashed)} "
+                         f"input(s) (first: {unhashed[0]}), so a re-stream cannot "
+                         f"prove it reads what the stream-out read")
+
+    # Resolve the whole recorded set before asking the tool to hash anything.
+    # A project input belongs to this copy of the run: falling back to the old
+    # absolute path would verify the original's bytes and call an incomplete
+    # copy reproducible. External inputs alone retain their absolute paths.
+    resolved: Dict[int, str] = {}
+    project_real = project.resolve()
+    entries = _sir.all_entries(rec)
+    for entry in entries:
+        rel = entry.get("project_rel")
+        if rel is None:
+            path = entry.get("path")
+            if not isinstance(path, str) or not Path(path).is_absolute():
+                return 127, "", (f"recorded external input {path!r} has no "
+                                 "absolute tool path")
+            resolved[id(entry)] = path
+            continue
+        if (not isinstance(rel, str) or not rel
+                or Path(rel).is_absolute() or Path(rel).as_posix() != rel
+                or ".." in Path(rel).parts):
+            return 127, "", (f"recorded project-relative input {rel!r} is "
+                             "not a canonical path within the current project")
+        candidate = project / rel
+        try:
+            target = candidate.resolve(strict=True)
+        except OSError:
+            return 127, "", (f"recorded project-relative input {rel} is "
+                             "absent from the current project")
+        if not target.is_relative_to(project_real):
+            return 127, "", (f"recorded project-relative input {rel} resolves "
+                             "outside the current project")
+        if not target.is_file():
+            return 127, "", (f"recorded project-relative input {rel} is not "
+                             "a file in the current project")
+        resolved[id(entry)] = str(runner.cpath(candidate))
+
+    def resolve(entry: Dict[str, Any]) -> str:
+        """Use only the paths checked above for both hashing and stream-out."""
+        return resolved[id(entry)]
+
+    ok, why = _inputs_hold_the_recorded_bytes(
+        runner, [(resolve(e), e["sha256"]) for e in entries],
+        timeout)
+    if not ok:
+        return 127, "", f"{why}, so a re-stream would not read what the stream-out read"
+    env: Dict[str, Any] = dict(_sir.iter_env(rec, resolve))
+    env["TOP"] = rec.get("top") or dfile.stem
+    if rec["engine"] == "klayout":
+        env.update({"DEF": str(dfile), "GDS_OUT": str(out)})
+        return runner.run(own, env, path_keys=("DEF", "GDS_OUT"), timeout=timeout)
+    env.update({"DEF": runner.cpath(dfile), "GDS_OUT": runner.cpath(out)})
+    return runner.run_argv(["magic", "-dnull", "-noconsole", "-rcfile",
+                            resolve(rec["rcfile"]), runner.cpath(own)],
+                           env, timeout=timeout)
 
 
 
@@ -1046,14 +1101,25 @@ def main(argv: Optional[List[str]] = None) -> int:
             reference = kept
         else:
             reference = Path(scratch) / "pre_finishing.gds"
+            rec_rel = STREAM_INPUTS_REL_FMT.format(stem=shipped.stem)
+            rec, _why = _sir.read(project / rec_rel)
+            report["reference"]["stream_inputs"] = (
+                {"path": rec_rel, "engine": rec["engine"],
+                 "inputs": len(_sir.all_entries(rec))} if rec else
+                {"path": rec_rel, "absent": _why})
             rc, so, se = stream_reference(runner, Path(scratch), dfile,
-                                          reference, timeout)
+                                          reference, timeout, stem=shipped.stem)
             if rc != 0 or not reference.is_file():
                 return finish("NOT_DETERMINED", 2,
                               f"re-streaming the pre-finishing reference from "
                               f"{att.get('def')} failed (rc={rc}): "
                               f"{(se or so or '').strip()[:220]}")
             report["reference"]["streamed_from"] = att.get("def")
+            # What the tool's own transcript says it resolved, beside the record
+            # of what it was handed -- disclosure for a reader, not an input.
+            _t_env, cited = restream_env_from_transcript(project)
+            if cited:
+                report["reference"]["stream_transcript"] = cited
         report["reference"]["bytes"] = reference.stat().st_size
         rc, so, se = run_xor(runner, Path(scratch), shipped, reference,
                              timeout)
