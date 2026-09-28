@@ -161,6 +161,12 @@ class LocalReader:
         except OSError:
             return None
 
+    def read_bytes(self, path: str) -> Optional[bytes]:
+        try:
+            return Path(path).read_bytes()
+        except OSError:
+            return None
+
 
 class ContainerReader:
     """A running container's filesystem, read with `docker exec`.
@@ -201,6 +207,14 @@ class ContainerReader:
     def read_text(self, path: str) -> Optional[str]:
         rc, out = self._run(self.container, ["cat", path])
         return out if rc == 0 else None
+
+    def read_bytes(self, path: str) -> Optional[bytes]:
+        try:
+            cp = subprocess.run(["docker", "exec", self.container, "cat", path],
+                                capture_output=True, timeout=180)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return cp.stdout if cp.returncode == 0 else None
 
 
 class ImageReader:
@@ -269,6 +283,17 @@ class ImageReader:
     def read_text(self, path: str) -> Optional[str]:
         rc, out = self._ask("read", "cat", path)
         return out if rc == 0 else None
+
+    def read_bytes(self, path: str) -> Optional[bytes]:
+        import _docker_memory as _dmem
+        try:
+            cp = subprocess.run(
+                ["docker", "run", *_dmem.docker_memory_flags(), "--rm", "--init",
+                 "--entrypoint", "/bin/sh", self.image, "-c",
+                 "cat " + shlex.quote(path)], capture_output=True, timeout=180)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return cp.stdout if cp.returncode == 0 else None
 
 
 #: The run's OWN receipt of where its tools ran: the container it used, the image

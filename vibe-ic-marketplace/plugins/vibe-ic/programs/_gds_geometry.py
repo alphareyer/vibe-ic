@@ -59,6 +59,7 @@ chip/PDK-AGNOSTIC: nothing here names a vendor, a process, a layer or a design.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import math
 import struct
 from dataclasses import dataclass, field
@@ -230,6 +231,47 @@ def _read_bytes(path: Path) -> bytes:
         with gzip.open(path, "rb") as fh:
             return fh.read()
     return path.read_bytes()
+
+
+def cell_content_hashes(raw: bytes) -> Dict[str, str]:
+    """Hash GDS structure records with stream units, excluding BGNSTR timestamps.
+
+    Streamout tools may restamp a structure when copying it. STRNAME through
+    ENDSTR, including every element record and property, must remain byte for
+    byte identical to a PDK library structure for a foundry-cell claim.
+    Duplicate names and incomplete structures cannot establish that claim.
+    """
+    cells: Dict[str, str] = {}
+    body: Optional[bytearray] = None
+    name: Optional[str] = None
+    units: Optional[bytes] = None
+    for rt, dtype, payload in _iter_records(raw):
+        kind = _RT.get(rt)
+        if kind == "UNITS":
+            if units is not None or body is not None:
+                raise GdsError("duplicate or misplaced GDS UNITS")
+            units = struct.pack(">HBB", len(payload) + 4, rt, dtype) + payload
+        if kind == "BGNSTR":
+            if body is not None:
+                raise GdsError("nested GDS structure")
+            body, name = bytearray(), None
+            continue
+        if body is None:
+            continue
+        body.extend(struct.pack(">HBB", len(payload) + 4, rt, dtype))
+        body.extend(payload)
+        if kind == "STRNAME":
+            if name is not None:
+                raise GdsError("structure has more than one STRNAME")
+            name = payload.rstrip(b"\x00").decode("ascii", "replace")
+        elif kind == "ENDSTR":
+            if not name or name in cells or units is None:
+                raise GdsError("unnamed, duplicate, or unitless GDS structure")
+            cells[name] = hashlib.sha256(units + body).hexdigest()
+            body, name = None, None
+    if body is not None:
+        raise GdsError("unterminated GDS structure")
+    return cells
 
 
 def read_layout(path: Path) -> Layout:
