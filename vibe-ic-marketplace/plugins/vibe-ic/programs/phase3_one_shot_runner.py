@@ -51189,6 +51189,8 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
         cell_internal_rules=(_geo_rules | _sem_rules))
     user_vios = sum(user_per_rule.values())
     cell_vios = sum(cell_per_rule.values())
+    waiver_rows: List[Dict[str, str]] = []
+    attribution = ""
     if vios == 0:
         status = "PASS"
         detail = f"violations=0 report={rpt.name}"
@@ -51198,7 +51200,7 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
         # Re-tier to WAIVED: production OpenMPW sign-off routinely
         # waives these via per-cell foundry confidence. The verdict
         # propagates to PASS_WITH_WAIVERS at the runner level.
-        status = "WAIVED"
+        status = _V.Verdict.PASS_WITH_WAIVERS.value
         top_rules = sorted(cell_per_rule.items(),
                            key=lambda kv: -kv[1])[:5]
         rules_brief = ", ".join(f"{name}={cnt}"
@@ -51234,6 +51236,10 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
             "review_required": True,
             "ticket": "TAPEOUT-AUTOGEN-DRC-CELLLIB",
         }
+        waiver_rows = [_V.WaiverRow(
+            id=extras["ticket"],
+            reason=extras["waiver_reason"],
+            owner="foundry sign-off reviewer").to_dict()]
     else:
         # User-routing violations present — FAIL (NOT WAIVED).
         # These are sign-off-blocking spacing / antenna defects on
@@ -51459,7 +51465,8 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
     except Exception:  # nosec — canonical mirror is best-effort provenance
         pass
     return StepResult("drc", status, time.time() - t0,
-                      detail, [str(rpt)], extras=extras)
+                      detail, [str(rpt)], extras=extras,
+                      waiver_rows=waiver_rows, attribution=attribution)
 
 
 # ---------------------------------------------------------------------------
