@@ -290,3 +290,38 @@ def test_a_copy_cannot_satisfy_project_input_through_an_outside_symlink(
     assert rc == 127, se
     assert f"{PNR}/{link.name}" in se and "current project" in se, se
     assert tool.calls == [], "an alias outside the copy must not launch the tool"
+
+
+def test_a_copy_cannot_satisfy_its_recipe_through_an_outside_symlink(
+        tmp_path, monkeypatch):
+    """A recorded recipe must be owned by the current copy of the project."""
+    import shutil
+    project, dfile, recipe, files, rcfile = _core_run(tmp_path, engine="magic")
+    _produce(monkeypatch, project, dfile, recipe, files, rcfile, "magic")
+    copy = tmp_path / "copy" / "spm"
+    shutil.copytree(project, copy)
+    link = copy / PNR / recipe.name
+    link.unlink()
+    link.symlink_to(recipe)
+
+    tool = _Tool()
+    rc, _so, se = G.stream_reference(tool, copy / "scratch",
+                                     copy / PNR / "spm.def", copy / "o.gds",
+                                     60, stem="spm")
+    assert rc == 127 and f"{PNR}/{recipe.name}" in se, se
+    assert "outside the current project" in se, se
+    assert tool.calls == [], "an outside recipe must not launch the tool"
+
+
+def test_a_recorded_recipe_path_must_be_canonical(tmp_path, monkeypatch):
+    project, dfile, recipe, files, rcfile = _core_run(tmp_path, engine="magic")
+    rec_path = _produce(monkeypatch, project, dfile, recipe, files, rcfile, "magic")
+    rec = json.loads(rec_path.read_text())
+    rec["recipe"]["project_rel"] = f"{PNR}/../pnr/{recipe.name}"
+    rec_path.write_text(json.dumps(rec))
+
+    tool = _Tool()
+    rc, _so, se = G.stream_reference(tool, project / "scratch", dfile,
+                                     project / "o.gds", 60, stem="spm")
+    assert rc == 127 and "canonical path" in se, se
+    assert tool.calls == []

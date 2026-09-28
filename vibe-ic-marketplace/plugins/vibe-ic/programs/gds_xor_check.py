@@ -693,11 +693,24 @@ def stream_reference(runner, scratch: Path, dfile: Path, out: Path, timeout: int
             f"and this program will not assemble one from other records -- a "
             f"reference missing one library measures the wrong thing")
     recipe_rel = (rec.get("recipe") or {}).get("project_rel")
-    own = project / recipe_rel if recipe_rel else None
-    if own is None or not own.is_file():
-        return 127, "", (f"{recipe_rel or 'the recorded recipe'} is absent, so "
-                         f"the run's own stream-out recipe cannot be reused and "
-                         f"this program will not substitute one of its own")
+    if (not isinstance(recipe_rel, str) or not recipe_rel
+            or Path(recipe_rel).is_absolute()
+            or Path(recipe_rel).as_posix() != recipe_rel
+            or ".." in Path(recipe_rel).parts):
+        return 127, "", (f"recorded recipe path {recipe_rel!r} is not a "
+                         "canonical path within the current project")
+    own = project / recipe_rel
+    try:
+        recipe_target = own.resolve(strict=True)
+    except OSError:
+        return 127, "", (f"recorded recipe {recipe_rel} is absent from the "
+                         "current project")
+    if not recipe_target.is_relative_to(project.resolve()):
+        return 127, "", (f"recorded recipe {recipe_rel} resolves outside the "
+                         "current project")
+    if not recipe_target.is_file():
+        return 127, "", (f"recorded recipe {recipe_rel} is not a file in the "
+                         "current project")
     if _sha256(own) != (rec.get("recipe") or {}).get("sha256"):
         return 127, "", (f"{recipe_rel} changed since the stream-out ran "
                          f"({rec_rel} records a different sha256), so running it "
