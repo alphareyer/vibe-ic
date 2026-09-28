@@ -45,6 +45,7 @@ if str(PROG) not in sys.path:
 
 import l10_coverage_goal_classify as G           # noqa: E402
 import cpu_functional_oracle_waiver_check as W   # noqa: E402
+import _l10_execution as X                       # noqa: E402
 
 # ── the design's own rows, transcribed (the corpus is not on main) ─────────
 VEC_KAV = {"name": "fips1804_sha256_abc", "kind": "known_answer_vector",
@@ -264,7 +265,7 @@ def test_no_goal_is_ever_reported_as_executed(tmp_path):
 def _executed_record(name, verdict, tb):
     return {"available": True, "rows": {name: {
         "verdict": verdict, "raw": verdict, "sim_executed": True,
-        "tb_file": str(tb), "detail": ""}}}
+        "tb_file": str(tb), "detail": "", **X.capture_tb_identity(tb)}}}
 
 
 def test_a_generated_golden_oracle_cannot_measure_its_own_scenario_goal(tmp_path):
@@ -284,7 +285,7 @@ def test_an_executed_own_failure_stays_bound_even_with_declared_links(tmp_path):
     record = _executed_record("protocol", "FAIL", tb)
     record["rows"]["vecA"] = {"verdict": "PASS", "raw": "PASS",
                                   "sim_executed": True, "tb_file": str(tb),
-                                  "detail": ""}
+                                  "detail": "", **X.capture_tb_identity(tb)}
     row = G.measure_scenario_goal(goal, 100.0, [goal, vec], record)
     assert row["verdict"] == G.FAIL
     assert row["bound_cases"] == ["vecA", "protocol"]
