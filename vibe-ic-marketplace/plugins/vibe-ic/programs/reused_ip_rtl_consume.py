@@ -38,8 +38,13 @@ chip / vendor / SKU literal anywhere.
 from __future__ import annotations
 
 import json
+import os as _os
 import re
 import shutil
+import sys as _sys
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -440,6 +445,29 @@ def _unresolved_module_refs(files: List[Path]) -> List[str]:
 
 
 def consume_reused_ip_rtl(project: Path) -> Dict:
+    """Stage the design's provided build RTL (`_consume_reused_ip_rtl`), then
+    apply any pinned upstream ERRATUM that binds the design's declared reused
+    IP to the STAGED copy (`reused_ip_erratum`). The input tree is never
+    written; a design no erratum binds is staged byte-identical to its input.
+    The erratum record rides on the result as ``errata`` and its one-line
+    disclosures as ``deviation_disclosures``."""
+    result = _consume_reused_ip_rtl(project)
+    rtl_dir = project / "phase2" / "stage1" / "rtl"
+    if rtl_dir.is_dir():
+        try:
+            import reused_ip_erratum as _erratum
+            errata = _erratum.apply_errata(project, rtl_dir)
+        except Exception as exc:  # noqa: BLE001 — staging never crashes
+            errata = {"error": f"erratum step unavailable: {exc!r}",
+                      "rows": [], "disclosures": []}
+        if errata.get("rows") or errata.get("error"):
+            result["errata"] = errata
+            result["deviation_disclosures"] = list(
+                errata.get("disclosures") or [])
+    return result
+
+
+def _consume_reused_ip_rtl(project: Path) -> Dict:
     """DETERMINISTIC reused-IP CONSUME: stage the design's provided build RTL
     into ``phase2/stage1/rtl/`` so synth can find a top.
 
