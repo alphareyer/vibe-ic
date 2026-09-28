@@ -1508,6 +1508,13 @@ _NOT_PROSE: Dict[str, str] = {
         "unknown name, ambiguous placement, or missing matching cut layer "
         "produces no cut count and leaves the EM segment unscreened; the "
         "unmatched-via regression proves that this cannot yield PASS.",
+    "em_current_density_check::_def_via_array_index":
+        "DEF VIAS CUTSIZE/CUTSPACING/ROWCOL/RECT and SPECIALNETS via placement "
+        "are fixed machine grammar with numeric coordinates and no negated "
+        "form. A missing definition, ambiguous placement, or unmatched cut "
+        "layer yields no exact array count; an over-limit one-cut bound then "
+        "stays NOT_MEASURED. The split-array and missing-geometry EM tests "
+        "exercise that refusal.",
     "pdk_analog_characterize::simulator_provenance":
         "The scan reads ngspice's machine/tool version banner, not a design "
         "document. A version token has no surrounding natural-language denial "
