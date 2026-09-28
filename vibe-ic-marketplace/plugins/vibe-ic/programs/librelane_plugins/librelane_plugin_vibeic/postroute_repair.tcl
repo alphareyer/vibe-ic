@@ -318,12 +318,14 @@ utl::metric_integer vibeic__prr__removed__count $::vic_removed
 set ::vic_changed [expr {[llength $::vic_created] + [llength $::vic_resized] + $::vic_removed}]
 utl::metric_integer vibeic__prr__changed $::vic_changed
 set ::vic_fanout_pending [expr {[dict size [vic_fanout_target_limits]] > 0}]
-if {$::vic_changed == 0 && !$::vic_fanout_pending} {
+if {$::vic_changed == 0} {
+  if {!$::vic_fanout_pending} {
     # A repair that changed no instance hands back the INPUT database
     # (PostRouteRepair.run): re-routing an identical netlist is a fresh
     # route with its own quality lottery (v1.8.43: 13 new min-area islands).
     vic_say "no-op: the repair changed no instance; the input database is the candidate"
     exit 0
+  }
 }
 
 # ---- 6. legalize, supply, reroute ------------------------------------------
@@ -701,6 +703,13 @@ proc vic_close_data_fanout {} {
     }
     if {![llength $targets]} { return 1 }
     if {$buffer_master eq ""} {
+        if {[vic_fanout_declared]} {
+            set pending [vic_fanout_added $::vic_fo_repaired [vic_fanout_over]]
+            utl::metric_integer vibeic__prr__fanout__added [dict size $pending]
+            if {[dict size $pending]} {
+                puts stderr "LL_PRR_FANOUT_LIMIT_BROKEN: [dict size $pending] net(s) over max_fanout $::env(VIBEIC_PRR_MAX_FANOUT) that became newly over or worsened after repair_design: $pending; the candidate is not written"
+            }
+        }
         puts stderr "PRR_FANOUT_BUFFER_UNAVAILABLE: residual data fanout requires SYNTH_BUFFER_CELL"
         return 0
     }
