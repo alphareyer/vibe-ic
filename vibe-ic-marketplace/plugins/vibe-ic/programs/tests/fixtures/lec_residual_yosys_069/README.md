@@ -3,7 +3,8 @@
 Captured on 2026-09-29 on 8hd-3 with `ghcr.io/vibeic/vibeic-eda:0.3.85`
 (`sha256:70ebc4fba7b456855f8711b70ffe0b94dff7152e5c354545201dc7a486ab469c`),
 Yosys 0.69+ (git 4d572059c). The `.ys` scripts and RTL in this directory are
-inputs; the `.log`, `.il` and `.json` files are raw tool output. Each proof
+inputs; the `.log`, `.il` and `.json` files are tool output. Only trailing
+spaces in Yosys's ASCII banner were stripped from the logs for clean diffs. Each proof
 script was run as `yosys -s /work/<script>.ys` with this directory mounted at
 `/work`. The two search scripts read the corresponding emitted equivalence IL.
 
