@@ -41,6 +41,29 @@ def tool_stop_reason(code: str | None) -> str | None:
     return TOOL_STOP_REASONS.get(code) if code else None
 
 
+def _tool_stop_session_rcs() -> dict[str, int]:
+    """Each stop as the exit code a PnR session reports for the same event:
+    the watchdog's stall kill and the ceiling's 124. A chain that runs inside
+    step_pnr's session (steps 19/20, 21) answers with these, so step_pnr books
+    its own stall and a LibreLane stall by one rule."""
+    import _watchdog as _wd
+    return {'LL_TOOL_STALLED': _wd.RC_STALLED, 'LL_TOOL_DEADLINE': 124}
+
+
+def tool_stop_session_rc(code: str | None) -> int | None:
+    """The session exit code for a tool-stop refusal code, else None."""
+    return _tool_stop_session_rcs().get(code) if code else None
+
+
+def session_stop_reason(rc: int | None) -> str | None:
+    """The NOT_MEASURED reason class for a session exit code that means the
+    tool was stopped (see `_tool_stop_session_rcs`), else None."""
+    for code, stop_rc in _tool_stop_session_rcs().items():
+        if rc == stop_rc:
+            return TOOL_STOP_REASONS[code]
+    return None
+
+
 #: How every container this module (and librelane_signoff) starts is bounded.
 #: Two kinds, bounded two different ways:
 #:
