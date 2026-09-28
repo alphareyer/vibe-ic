@@ -288,3 +288,17 @@ def test_bond_fed_rails_reads_one_level_down_through_a_resistor():
         == ["VCCD"]
     assert PR.bond_fed_rails(subs, "lib__vssio_hvc_clamped_pad",
                              "VSSIO_PAD")[0] == ["VSSIO"]
+
+
+def test_the_not_prose_claim_for_the_liberty_supply_view_is_falsifiable():
+    """The `_NOT_PROSE` claim: only Liberty productions are read. A commented
+    `is_pad` or `voltage_map` -- the one place prose can sit in a Liberty
+    file -- must lend no value. Remove the comment blanking and this fails."""
+    lib = ('library (io) {\n  voltage_map ("VA", 1.8);\n'
+           '/*\n  voltage_map ("VB", 1.8);\n*/\n'
+           '  cell ("c") {\n    pin ("P") {\n      direction : "inout";\n'
+           '/* this pin is NOT the pad:\n      is_pad : "true";\n*/\n'
+           '    }\n  }\n}\n')
+    view = PR.parse_liberty_supply_view(lib)
+    assert view["voltage_map"] == {"VA": 1.8}
+    assert view["cells"]["c"]["pins"]["P"] == {"direction": "inout"}

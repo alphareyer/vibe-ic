@@ -766,7 +766,13 @@ _LIB_NOM_VOLTAGE_RE = re.compile(r'^\s*nom_voltage\s*:\s*([-0-9.eE+]+)\s*;',
 
 
 def parse_liberty_supply_view(text: str) -> Dict[str, object]:
-    """`{voltage_map, nom_voltage, cells: {cell: {pg_pins, pins}}}`."""
+    """`{voltage_map, nom_voltage, cells: {cell: {pg_pins, pins}}}`.
+
+    Comments are blanked first (length and line breaks kept): an attribute
+    written inside `/* ... */` is not an attribute of the library."""
+    text = re.sub(r"/\*.*?\*/",
+                  lambda m: re.sub(r"[^\n]", " ", m.group(0)), text,
+                  flags=re.S)
     vmap: Dict[str, float] = {}
     for name, value in _LIB_VOLTAGE_MAP_RE.findall(text):
         try:

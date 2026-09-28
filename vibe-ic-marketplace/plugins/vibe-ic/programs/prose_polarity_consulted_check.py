@@ -1534,6 +1534,20 @@ _NOT_PROSE: Dict[str, str] = {
         "was spelled. Consulting `_prose_polarity` on a directory entry would "
         "add a branch that can never fire, and a call that can never fire is "
         "a green light rather than a check.",
+    "_pad_ring::parse_liberty_supply_view":
+        "LIBERTY GROUP/ATTRIBUTE GRAMMAR, NO SENTENCE. The matched text is "
+        "`voltage_map ( <name> , <number> )`, `nom_voltage : <number> ;`, "
+        "the `cell ( <name> )`, `pin ( <name> )` and `pg_pin ( <name> )` "
+        "group heads, and the simple attributes pg_type / voltage_name / "
+        "is_pad / related_power_pin / related_ground_pin / direction, each "
+        "`<attr> : <value> ;` -- productions of the Liberty format the PDK's "
+        "IO library ships, whose values are a number, a keyword or a pin "
+        "name, so no denial can be spelled: Liberty has no way to write 'this "
+        "pin is NOT the pad'. Comments are blanked before anything is read, "
+        "so a sentence (or a commented-out attribute) cannot lend a value. "
+        "An attribute that is absent stays absent and its consumer refuses. "
+        "Falsifier: tests/test_fx_supply_pad_pair_multi_rail.py::test_the_"
+        "not_prose_claim_for_the_liberty_supply_view_is_falsifiable.",
     "_pad_ring::parse_def":
         "LEF/DEF 5.8 UNITS / DIEAREA / COMPONENTS records. The matched text is "
         "`UNITS DISTANCE MICRONS <n> ;`, `DIEAREA ( x y ) ( x y ) ;` and the "
