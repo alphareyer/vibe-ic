@@ -47,7 +47,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _path_layout as _pl  # noqa: E402  — #525 shared timeout resolver
 import _audit_verdict  # noqa: E402  — the ONE reader of the audit's verdict + rc
-import verdict as _V  # noqa: E402  — the five-word vocabulary
+import verdict as _V  # noqa: E402  — the shared verdict vocabulary
 
 #: The audit word that means 'could not measure', from the vocabulary, not a literal.
 _V_NOT_MEASURED = _V.Verdict.NOT_MEASURED.value
@@ -132,6 +132,34 @@ _SUMMARY_LEGACY_RE = re.compile(
 _TOTAL_REQ = 34
 
 
+def _lec_open_proofs(project: Path) -> list[dict]:
+    """Carry the producer's residual census into the completion record."""
+    out = []
+    for rel in ("reports/lec.json", "reports/phase3/lec_post_layout.json"):
+        try:
+            doc = json.loads((project / rel).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict):
+            continue
+        try:
+            count = int(doc.get("unproven_points") or 0)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0:
+            continue
+        search = doc.get("counterexample_search") or {}
+        out.append({
+            "source": rel,
+            "total_points": doc.get("total_points") or doc.get("miter_points"),
+            "proven_points": doc.get("proven_points"),
+            "unproven_points": count,
+            "unproven_point_names": doc.get("unproven_point_names") or [],
+            "counterexample_search": search if isinstance(search, dict) else {},
+        })
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=(
@@ -160,6 +188,7 @@ def main():
     summary_match = _SUMMARY_RE.search(output) or _SUMMARY_LEGACY_RE.search(output)
 
     overall = (audit.word or "UNKNOWN").upper()
+    lec_open_proofs = _lec_open_proofs(project) if overall == "NOT_PROVEN" else []
     waived_count = 0
     if summary_match:
         steps_total = int(summary_match.group(1))
@@ -202,6 +231,16 @@ def main():
                 "justification, then re-run."
             ),
         ))
+    elif overall == "NOT_PROVEN":
+        census = "; ".join(
+            f"{r['unproven_points']} of {r['total_points'] or 'unknown'} unproven "
+            f"({r['source']}, search="
+            f"{r['counterexample_search'].get('result', 'NOT_RUN')})"
+            for r in lec_open_proofs) or "point census unavailable in producer reports"
+        findings.append(Finding(
+            severity="WARNING", category="LEC_NOT_PROVEN",
+            message=f"Phase 2+3 is not complete: LEC NOT_PROVEN; {census}.",
+            details="Inspect the producer reports for point names, SAT bound, tool version and run identity; absent fields remain unknown."))
     elif overall == "PASS_WITH_WAIVERS":
         findings.append(Finding(
             severity="INFO",
@@ -236,6 +275,7 @@ def main():
             "executed_pass": executed_pass,
             "executed_total": executed_total,
             "waived_deferred": waived_count,
+            "lec_open_proofs": lec_open_proofs,
             "canonical_step_count": _TOTAL_REQ,
             "structurally_complete": structurally_complete,
             # AND THE STRONGEST CLAIM IN THIS DOCUMENT NEEDS BOTH. Keyed on the bare word,
@@ -276,6 +316,11 @@ def main():
             print()
             print("  ⛔ Phase 2+3 completion is NOT authorised. This is an inability to")
             print("     certify, NOT a defect found in the design.")
+        elif overall == "NOT_PROVEN":
+            print("[NOT_PROVEN] phase23_completion_self_audit_check")
+            print("  Overall: NOT_PROVEN — LEC has unproven points and no counterexample was established.")
+            print(f"  executed PASS: {executed_pass}/{executed_total} (canonical 34)")
+            print("  Phase 2+3 completion is not authorised; see the LEC search record and point list.")
         elif overall == _V_NOT_MEASURED:
             # THE WORD #2572 MADE REACHABLE. It used to match no alternative in the old
             # regex, read as "UNKNOWN", and print `[FAIL]` -- an absence labelled a defect.

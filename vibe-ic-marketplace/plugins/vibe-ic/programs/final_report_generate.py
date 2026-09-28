@@ -231,6 +231,7 @@ ROLLUP_ORDER = (
     "PASS_WITH_ATTRIBUTION",
     "PASS_WITH_WAIVERS",
     "NOT_APPLICABLE",
+    "NOT_PROVEN",
     "NOT_MEASURED",
     "FAIL",
     NO_VERDICT,
@@ -1042,7 +1043,7 @@ _TALLY_LABEL_TO_BUCKET = _build_tally_label_map()
 #: tally, and that is what stops the report's own prose bullet matching and
 #: producing agreement by construction.
 TALLY_MANDATORY_BUCKETS = frozenset(
-    {"PASS", "FAIL", "PASS_WITH_WAIVERS", "NOT_MEASURED", "NOT_APPLICABLE"})
+    {"PASS", "FAIL", "PASS_WITH_WAIVERS", "NOT_PROVEN", "NOT_MEASURED", "NOT_APPLICABLE"})
 
 
 def _parse_audit_tally(audit_text: str) -> Optional[Dict[str, int]]:
@@ -1301,6 +1302,7 @@ def _counts_snapshot(
               or rollup.get("PASS_WITH_WAIVERS", 0))
     skipped = rollup.get("NOT_APPLICABLE", 0)
     fail = rollup.get("FAIL", 0)
+    not_proven = rollup.get("NOT_PROVEN", 0)
     # R-0915-85 — `MISSING` is gone as a bucket: a declared output that does
     # not exist is `FAIL(missing_artefact)`, so it is already inside `fail`.
     # The snapshot key is KEPT and set to 0 rather than removed, because
@@ -1329,6 +1331,7 @@ def _counts_snapshot(
         "skipped_manufacturing": skipped_manufacturing,
         "skipped_midflow": skipped_midflow,
         "fail": fail,
+        "not_proven": not_proven,
         "missing": missing,
         "no_verdict": no_verdict,
         "executed_pass": executed_pass,
@@ -2296,6 +2299,7 @@ def _render(project: Path, run_audit: bool = True,
     skipped_n = snap["skipped"]
     vacuous_n = snap["vacuous"]
     fail_n = snap["fail"]
+    not_proven_n = snap["not_proven"]
     executed_pass = snap["executed_pass"]
     executed_total = snap["executed_total"]
     md.append(f"- PASS={pass_n} → executed PASS={executed_pass} — every "
@@ -2321,6 +2325,9 @@ def _render(project: Path, run_audit: bool = True,
                   "shape; check whether it should be a real PASS for your flow.")
     if fail_n:
         md.append(f"- **FAIL={fail_n}** — blocking; do not claim PASS.")
+    if not_proven_n:
+        md.append(f"- **NOT_PROVEN={not_proven_n}** — LEC has unresolved proof "
+                  "points; see the bounded counterexample search record.")
     if snap.get("no_verdict"):
         # ORGANIC #428 — never fold this into MISSING: it says the verdict
         # could not be READ, not that an output is absent.
@@ -2333,7 +2340,10 @@ def _render(project: Path, run_audit: bool = True,
     md.append(f"Per the SOLE ACCEPTANCE CRITERION: `executed PASS = "
               f"{executed_pass}/{executed_total}, deferred = {waived_n} pending "
               f"foundry sign-off`. Engineering Phase 2+3 "
-              + ("complete." if overall in ("PASS", "PASS_WITH_WAIVERS") else "INCOMPLETE — fix FAILs before claiming."))
+              + ("complete." if overall in ("PASS", "PASS_WITH_WAIVERS")
+                 else "INCOMPLETE — LEC proof points remain open."
+                 if overall == "NOT_PROVEN" else
+                 "INCOMPLETE — inspect the outstanding verdicts before claiming."))
     md.append("")
 
     # Stage-level summary

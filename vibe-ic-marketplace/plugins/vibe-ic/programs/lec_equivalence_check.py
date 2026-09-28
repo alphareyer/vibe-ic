@@ -82,6 +82,7 @@ import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Optional, Tuple
+import lec_counterexample_search as lec_cex
 
 # Import the structural port-abort classifier. It replaces a FALSE diagnosis
 # ("RTL and post-DFT netlist differ") with a truthful one ("equiv_make aborted
@@ -152,12 +153,17 @@ class Finding:
 @dataclass
 class AuditResult:
     program: str = GATE
+    verdict: str = "FAIL"
     passed: bool = False
     inconclusive: bool = False
     equivalent: Optional[bool] = None
     compared_points: Optional[int] = None
     non_equivalent_points: Optional[int] = None
     unproven_points: Optional[int] = None
+    total_points: Optional[int] = None
+    proven_points: Optional[int] = None
+    unproven_point_names: List[str] = field(default_factory=list)
+    counterexample_search: dict = field(default_factory=dict)
     evidence_source: str = ""          # "json" | "json+rpt" | "rpt"
     # #2068 — the budget-exhausted, verdict-less terminal state. NOT a verdict
     # and NOT a waiver: nothing was decided, so nothing can be waived. When
@@ -484,6 +490,13 @@ def audit(project: Path) -> AuditResult:
     res.compared_points = compared
     res.non_equivalent_points = non_equiv
     res.unproven_points = unproven
+    res.total_points = _first_count(lc, ("total_points", "miter_points"))
+    res.proven_points = _first_count(lc, ("proven_points", "proved_points"))
+    res.unproven_point_names = [str(x) for x in
+                                (doc.get("unproven_point_names") or [])]
+    res.counterexample_search = (doc.get("counterexample_search")
+                                 if isinstance(doc.get("counterexample_search"), dict)
+                                 else {})
 
     res.summary = {
         "json_present": True,
@@ -536,6 +549,60 @@ def audit(project: Path) -> AuditResult:
         res.passed = False
         res.inconclusive = False
         return res
+
+    # An equiv_status residual is not evidence of non-equivalence: Yosys puts
+    # a real mismatch in that same bucket. Require the independent SAT miter
+    # result before assigning the third outcome. Missing legacy search records
+    # are named NOT_RUN, never read as a negative search result.
+    if (unproven or 0) > 0 and (res.total_points or 0) > 0:
+        search = res.counterexample_search
+        outcome = str(search.get("result") or "NOT_RUN")
+        if not search:
+            search = {"result": "NOT_RUN",
+                      "reason": "producer supplied no counterexample search record"}
+            res.counterexample_search = search
+        res.summary.update(total_points=res.total_points,
+                           proven_points=res.proven_points,
+                           unproven_point_names=res.unproven_point_names,
+                           counterexample_search=search)
+        if outcome == "COUNTEREXAMPLE" or (non_equiv or 0) > 0:
+            res.findings.append(Finding(
+                rule="LEC_NOT_EQUIVALENT", severity="ERROR",
+                message=(f"SAT miter found a counterexample for "
+                         f"{res.unproven_point_names}; trace: "
+                         f"{search.get('trace', 'see producer report')}"),
+                file=LEC_JSON_REL))
+            return res
+        if (len(res.unproven_point_names) == unproven
+                and lec_cex.complete_resolution_valid(
+                    search, res.unproven_point_names)):
+            res.verdict = "PROVEN_EQUIVALENT"
+            res.passed = True
+            res.proven_points = res.total_points
+            res.unproven_points = 0
+            return res
+        res.verdict = "NOT_PROVEN"
+        res.findings.append(Finding(
+            rule="LEC_NOT_PROVEN", severity="WARNING",
+            message=(f"LEC NOT_PROVEN: {unproven} of {res.total_points} points "
+                     f"unproven; {search.get('method', 'counterexample search')} "
+                     f"K={search.get('bound_cycles', 'unknown')} cycles: "
+                     f"{outcome} ({search.get('reason', 'no counterexample found')})."),
+            file=LEC_JSON_REL))
+        return res
+
+    # A complete SAT result may have discharged the producer's original
+    # residual. The final count is then zero, but the searched point names
+    # remain as provenance. Refuse a bare zero count with no deciding search.
+    if res.unproven_point_names and unproven == 0:
+        if not lec_cex.complete_resolution_valid(
+                res.counterexample_search, res.unproven_point_names):
+            res.findings.append(Finding(
+                rule="LEC_SAT_DISPOSITION_UNBOUND", severity="ERROR",
+                message="The report erased an equivalence residual without a "
+                        "complete, named combinational SAT result.",
+                file=LEC_JSON_REL))
+            return res
 
     # --- (b0) #2068 — BUDGET EXHAUSTED WITH NO VERDICT: a terminal state of
     # its own, and the one state that is NOT waivable ----------------------
@@ -921,6 +988,8 @@ def audit(project: Path) -> AuditResult:
             file=LEC_JSON_REL))
 
     res.passed = (equivalent is True) and not res.findings
+    if res.passed:
+        res.verdict = "PROVEN_EQUIVALENT"
     # Guard: if equivalent is True and the only positive evidence is the
     # .rpt success line (no numeric compared count), we accept it as PASS
     # since Yosys printed the canonical proof line — but only if (b)/(c)/(d)
@@ -964,6 +1033,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     # same reason the waiver sentinel is: the consumer reads only the trailing
     # 300 chars of stdout and requires the token at line-start, so a long line
     # would be sliced mid-string and the disclosure would be lost.
+    if result.verdict == "NOT_PROVEN":
+        print(result.findings[-1].message)
+        return 5
+
     if result.not_measured:
         print(f"LEC NOT_MEASURED: step budget exhausted "
               f"(resource: {result.exhausted_resource}) with no verdict — "
