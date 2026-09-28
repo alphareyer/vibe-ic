@@ -1273,5 +1273,369 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return RC_OK
 
 
+
+# =========================================================================== #
+# STEP 7 — THE ASIC SDC, AUTHORED ONCE (FX_STEP7_ASIC_SDC)
+# =========================================================================== #
+# Constraint AUTHORING, not extraction: it lives here because the runner's PPA
+# ledger routes SDC/timing logic to this module. It composes the runner's own
+# (ledgered) SDC builders, which it receives as ``rt`` -- the runner module --
+# so this module never imports the runner and no builder is duplicated.
+#
+ASIC_SDC_RECORD = "asic_sdc.json"
+ASIC_SDC_DERIVATION = "pad_ring_supply_port_drv_scope"
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def author_asic_sdc(rt: Any, project: Path, top: str, pdk: Any,
+                    container: str,
+                    supply_ports: Sequence[str] = ()) -> Dict[str, Any]:
+    """THE author of the silicon SDC (what `step_pnr` did inline).
+
+    Design-staged SDC (`rt._resolve_staged_silicon_sdc`) -> unit rescale, DRV /
+    driving-cell reconcile, DRV and I/O-delay parity; else the runner's
+    auto-SDC. ``supply_ports`` is the only PnR-time input (see above).
+    Returns the deck text plus every record the old inline code wrote."""
+    staged = rt._resolve_staged_silicon_sdc(project)
+    out: Dict[str, Any] = {"design_staged": bool(staged and staged.is_file()),
+                           "staged_sdc": None, "drv_parity": None,
+                           "io_parity": None, "io_delay_contract": None,
+                           "cts_fanout_target": None,
+                           "supply_ports": list(supply_ports),
+                           "drv_block": None}
+    _blk: Dict[str, Any] = {}
+    if out["design_staged"]:
+        try:
+            out["staged_sdc"] = str(staged.relative_to(project))
+        except ValueError:
+            out["staged_sdc"] = str(staged)
+        txt = rt._scale_sdc_to_liberty_units(staged.read_text(), str(pdk.liberty))
+        txt = rt._reconcile_staged_sdc_drv(txt, pdk.name, str(pdk.liberty),
+                                        container)
+        txt = rt._reconcile_staged_sdc_driving_cell(txt, str(pdk.liberty),
+                                                 container)
+        txt, out["drv_parity"] = rt._ensure_staged_sdc_drv(
+            txt, str(pdk.liberty), container, project, pdk_name=str(pdk.name),
+            supply_ports=supply_ports, drv_block_out=_blk)
+        fm = rt._SDC_MAX_FANOUT_RE.search(txt)
+        if fm:
+            try:
+                out["cts_fanout_target"] = int(float(fm.group(2)))
+            except ValueError:
+                pass
+        txt, out["io_parity"] = rt._ensure_staged_sdc_io_delay(txt, project)
+    else:
+        drv = rt._liberty_drv_limits(str(pdk.liberty), container)
+        txt = rt._build_auto_silicon_sdc(
+            project, top=top,
+            drv_slew_ns=drv.get("max_transition_ns"),
+            drv_cap_pf=drv.get("max_capacitance_pf"),
+            drv_note=str(drv.get("note") or ""),
+            liberty_path=str(pdk.liberty), pdk_name=str(pdk.name),
+            container=container,
+            supply_ports=supply_ports, drv_block_out=_blk)
+        try:
+            io_ns, _ = rt._declared_io_delay_ns(project,
+                                             rt._resolve_clock_spec(project)[0])
+        except Exception:                                    # noqa: BLE001
+            io_ns = None
+        out["io_delay_contract"] = dict(
+            rt.io_delay_contract(io_ns, 2.0, rt.io_delay_source()),
+            schema="vibe-ic/io-delay-contract/1")
+        try:
+            out["cts_fanout_target"] = (
+                rt._l9_declared_max_fanout(project, str(pdk.name),
+                                        str(pdk.liberty))
+                or rt._rtl_replication_fanout_bound(project)
+                or drv.get("max_fanout"))
+        except Exception:                                    # noqa: BLE001
+            out["cts_fanout_target"] = drv.get("max_fanout")
+    out["drv_block"] = _blk or None
+    out["text"] = txt
+    return out
+
+
+def asic_sdc_input_digest(rt: Any, project: Path, top: str, pdk: Any
+                          ) -> Tuple[str, Dict[str, str]]:
+    """(digest, {input: sha256}) of what `author_asic_sdc` can read.
+
+    A conservative SUPERSET, because regenerating costs one call and reusing
+    a stale deck costs a wrong sign-off: the resolved design SDC, the Phase-1
+    documents, the design's input tree, the staged RTL (clock port), the
+    Phase-2 emitted SDCs (not step 7's own outputs), the run's container
+    record, the PDK name + liberty bytes, the I/O-delay source and the
+    authoring code itself."""
+    project = Path(project)
+    items: Dict[str, str] = {}
+
+    def _add(f: Path) -> None:
+        try:
+            items[str(f.relative_to(project))] = hashlib.sha256(
+                f.read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            pass
+    staged = rt._resolve_staged_silicon_sdc(project)
+    items["@staged_sdc"] = (str(staged.relative_to(project))
+                            if staged is not None and staged.is_file()
+                            else "")
+    if staged is not None and staged.is_file():
+        _add(staged)
+    own = {f"{top}.sdc", f"{top}.asic.sdc", ASIC_SDC_RECORD}
+    for root, pats in ((project / "phase1" / "generated_docs", ("*.json",)),
+                       (project / "generated_docs", ("*.json",)),
+                       (project / "input", ("**/*",)),
+                       (rt._pl.rtl_dir(project), ("*.v", "*.sv")),
+                       (project / "rtl", ("*.v", "*.sv")),
+                       (project / "phase2" / "rtl", ("*.v", "*.sv")),
+                       (rt._pl.fpga_early_dir(project), ("*.sdc",)),
+                       (rt._pl.constraints_dir(project), ("*.sdc",))):
+        if not root.is_dir():
+            continue
+        for pat in pats:
+            for f in sorted(root.glob(pat)):
+                if f.is_file() and not (f.parent == rt._pl.constraints_dir(
+                        project) and f.name in own):
+                    _add(f)
+    # These are the exact config locations _resolve_clock_spec consults.
+    for f in (project / "config.json",
+              *sorted(project.glob("baseline/*/config.json")),
+              *sorted(project.glob("plugin_output/openlane_workdir/config.json")),
+              *sorted(project.glob("plugin_output/openlane_workdir_*/config.json"))):
+        if f.is_file():
+            _add(f)
+    _add(project / "reports" / "container_image.json")
+    items["@pdk"] = str(getattr(pdk, "name", ""))
+    liberty = Path(str(getattr(pdk, "liberty", "")))
+    items["@liberty"] = str(liberty)
+    try:
+        # Liberty usually lives outside the project, so `_add` (which uses a
+        # project-relative key) cannot hash it. Bind the bytes explicitly.
+        items["@liberty_sha256"] = hashlib.sha256(liberty.read_bytes()).hexdigest()
+    except OSError:
+        items["@liberty_sha256"] = "UNREADABLE"
+    items["@io_delay_source"] = str(rt.io_delay_source())
+    for code in (Path(__file__), Path(rt.__file__)):
+        try:
+            items["@code:" + code.name] = hashlib.sha256(
+                code.read_bytes()).hexdigest()
+        except OSError:
+            pass
+    items = dict(sorted(items.items()))
+    return (hashlib.sha256(json.dumps(items, sort_keys=True).encode())
+            .hexdigest(), items)
+
+
+def step7_asic_sdc_path(rt: Any, project: Path, top: str,
+                        design_staged: bool) -> Path:
+    """The declared step-7 file. A design-staged deck keeps `<top>.sdc` (its
+    canonical copy); the runner's own deck is `<top>.asic.sdc`, so it is never
+    mistaken for a design-staged `<top>.sdc` (its banner already keeps it out
+    of `rt._resolve_staged_silicon_sdc`)."""
+    return rt._pl.constraints_dir(project) / (
+        f"{top}.sdc" if design_staged else f"{top}.asic.sdc")
+
+
+def _step7_record_output_path(project: Path, constraints: Path,
+                              rel: str) -> Optional[Path]:
+    """Resolve one canonical Step-7 output without opening an external file."""
+    if not rel:
+        return None
+    relative = Path(rel)
+    if (relative.is_absolute() or relative.as_posix() != rel
+            or ".." in relative.parts or relative.parent !=
+            constraints.relative_to(project)):
+        return None
+    try:
+        project_root = project.resolve(strict=True)
+        constraints_root = constraints.resolve(strict=True)
+        if not constraints_root.is_relative_to(project_root):
+            return None
+        resolved = (project / relative).resolve(strict=True)
+        if resolved.parent != constraints_root or not resolved.is_file():
+            return None
+        return resolved
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def owned_step7_outputs(rt: Any, project: Path) -> Dict[str, str]:
+    """Hash-verified Step-7 copies, including paths from earlier runs.
+
+    An old ``<top>.sdc`` can outlive a record that now points to
+    ``<top>.asic.sdc``. Keep its ownership only while its bytes still match;
+    a changed file is available to the legacy design-input resolver again.
+    The top-level path/sha pair supports records written before this ledger.
+    """
+    project = Path(project)
+    constraints = rt._pl.constraints_dir(project)
+    try:
+        rec = json.loads((constraints / ASIC_SDC_RECORD).read_text(
+            errors="replace"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(rec, dict):
+        return {}
+    candidates = rec.get("owned_outputs")
+    candidates = dict(candidates) if isinstance(candidates, dict) else {}
+    if isinstance(rec.get("path"), str) and isinstance(rec.get("sha256"), str):
+        candidates[rec["path"]] = rec["sha256"]
+    owned: Dict[str, str] = {}
+    for rel, digest in candidates.items():
+        if not isinstance(rel, str) or not isinstance(digest, str):
+            continue
+        path = _step7_record_output_path(project, constraints, rel)
+        if path is None:
+            continue
+        try:
+            if hashlib.sha256(path.read_bytes()).hexdigest() == digest:
+                owned[rel] = digest
+        except OSError:
+            continue
+    return owned
+
+
+def emit_step7_asic_sdc(rt: Any, project: Path, top: str, pdk: Any,
+                        container: str) -> Dict[str, Any]:
+    """STEP 7's producer: author the design-intent SDC and write it to the
+    declared path with its record. Returns the record (with `path`)."""
+    digest, inputs = asic_sdc_input_digest(rt, project, top, pdk)
+    authored = author_asic_sdc(rt, project, top, pdk, container, supply_ports=())
+    path = step7_asic_sdc_path(rt, project, top, authored["design_staged"])
+    staged = rt._resolve_staged_silicon_sdc(project)
+    if (staged is not None and staged.is_file()
+            and staged.resolve() == path.resolve()):
+        # DESIGN INPUT IS READ-ONLY (review_wave7). The resolved design SDC is
+        # the legacy `constraints/<top>.sdc` itself; writing step 7's
+        # rescaled, parity-augmented, stamped deck there would feed it back
+        # as design input and process it again on the next run.
+        path = rt._pl.constraints_dir(project) / f"{top}.asic.sdc"
+    # A higher-priority input SDC may have made a hand-authored legacy
+    # `<top>.sdc` non-resolved.  It is still design input, never our target.
+    if path.is_file() and not rt._is_step7_output(project, path):
+        path = rt._pl.constraints_dir(project) / f"{top}.asic.sdc"
+    owned = owned_step7_outputs(rt, project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamped = rt._stamp_sdc_provenance(authored["text"], pdk.name)
+    rt._aa.write_text(path, stamped)
+    rec = {k: v for k, v in authored.items() if k != "text"}
+    rec.update({"schema": "vibe-ic/step7-asic-sdc/1", "step": 7,
+                "top": top, "pdk": str(pdk.name),
+                "path": str(path.relative_to(project)),
+                "sha256": _sha256_text(stamped),
+                "deck_sha256": _sha256_text(authored["text"]),
+                "split": {"design_intent": "this file",
+                          "pnr_time": ASIC_SDC_DERIVATION},
+                "input_digest": digest, "inputs": inputs})
+    owned[rec["path"]] = rec["sha256"]
+    rec["owned_outputs"] = dict(sorted(owned.items()))
+    rt._aa.write_json(path.parent / ASIC_SDC_RECORD, rec)
+    rec["text"] = authored["text"]
+    return rec
+
+
+def read_step7_asic_sdc(rt: Any, project: Path, top: str, pdk: Any
+                        ) -> Tuple[Optional[Dict[str, Any]], str]:
+    """(record with `text`, "") when step 7's SDC is present, unmodified and
+    for this top and PDK; else (None, why)."""
+    project = Path(project)
+    constraints = rt._pl.constraints_dir(project)
+    rec_path = constraints / ASIC_SDC_RECORD
+    try:
+        rec = json.loads(rec_path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None, f"no step-7 record ({rec_path.relative_to(project)})"
+    if not isinstance(rec, dict):
+        return None, "step-7 record is malformed"
+    rel = rec.get("path")
+    path = (_step7_record_output_path(project, constraints, rel)
+            if isinstance(rel, str) else None)
+    if path is None:
+        return None, f"step-7 SDC {rel} is absent or outside constraints"
+    text = path.read_text(errors="replace")
+    if _sha256_text(text) != rec.get("sha256"):
+        return None, f"step-7 SDC {rec.get('path')} changed after step 7"
+    if rec.get("top") != top or rec.get("pdk") != str(pdk.name):
+        return None, (f"step-7 SDC was authored for top {rec.get('top')!r} / "
+                      f"PDK {rec.get('pdk')!r}, not {top!r} / {pdk.name!r}")
+    # BOUND TO ITS INPUTS (review_wave7): a deck is current only while
+    # everything it was authored from is unchanged.
+    digest, inputs = asic_sdc_input_digest(rt, project, top, pdk)
+    if digest != rec.get("input_digest"):
+        was = rec.get("inputs") or {}
+        changed = sorted(k for k in set(was) | set(inputs)
+                         if was.get(k) != inputs.get(k))
+        return None, (f"the step-7 SDC's inputs changed since step 7: "
+                      f"{changed[:8]}")
+    # The file is the provenance stamp line + the deck (exactly what the
+    # canonical step-7 copy has always been). A deck that already carried a
+    # stamp had it rewritten in place, so it is not recoverable byte-exactly:
+    # that case is answered by regenerating, never by guessing.
+    stamp = rt._stamp_sdc_provenance("", str(pdk.name))
+    deck = text[len(stamp):] if text.startswith(stamp) else None
+    if deck is None or _sha256_text(deck) != rec.get("deck_sha256"):
+        return None, ("the step-7 deck could not be recovered byte-exactly "
+                      "from its stamped file")
+    return dict(rec, text=deck), ""
+
+
+def asic_sdc_for_pnr(rt: Any, project: Path, top: str, pdk: Any,
+                     container: str) -> Dict[str, Any]:
+    """The SDC `step_pnr` loads: step 7's file, plus the named PnR-time
+    derivation when the pad-ring producer proves supply ports. Regenerates
+    step 7's file through `emit_step7_asic_sdc` (never a second author) when
+    it is absent or stale, and records why."""
+    rec, why = read_step7_asic_sdc(rt, project, top, pdk)
+    regenerated = None
+    if rec is None:
+        regenerated = why
+        rec = emit_step7_asic_sdc(rt, project, top, pdk, container)
+    out = dict(rec)
+    out["step7_sha256"] = rec["sha256"]
+    out["regenerated"] = regenerated
+    out["derivation"] = None
+    supplies = rt._producer_supply_ports_for_drv(project)
+    if supplies:
+        # ONLY the DRV block's SCOPE changes: the block step 7 rendered is
+        # re-rendered from the SAME recorded arguments with the proven supply
+        # ports excluded, and swapped in place. No other input is re-read at
+        # PnR time (re-running the author did: it re-resolved the fanout
+        # ladder from PnR-time artefacts).
+        io_rec = project / "reports" / "phase3" / "io_pad_chip_top.json"
+        der: Dict[str, Any] = {
+            "name": ASIC_SDC_DERIVATION,
+            "supply_ports": list(supplies),
+            "from_record": str(io_rec.relative_to(project)),
+            "from_record_sha256": _sha256_text(
+                io_rec.read_text(errors="replace")) if io_rec.is_file() else None,
+            "base_deck_sha256": rec["deck_sha256"]}
+        blk = rec.get("drv_block")
+        # The block's R8 source lines are part of what step 7 rendered, so
+        # the same recorded sources are passed back (absent -> "").
+        base_blk = (rt._drv_constraints_sdc_block(
+            blk["slew_ns"], blk["cap_pf"], blk["note"],
+            max_fanout=blk["max_fanout"], fanout_note=blk["fanout_note"],
+            supply_ports=(), slew_source=blk.get("slew_source") or "",
+            cap_source=blk.get("cap_source") or "") if blk else "")
+        if not base_blk:
+            der.update(applied=False, reason="step 7's deck has no DRV block "
+                       "this plugin rendered, so there is no scope to narrow")
+        elif out["text"].count(base_blk) != 1:
+            der.update(applied=False, reason="step 7's DRV block is not "
+                       "present exactly once in its deck; left as authored")
+        else:
+            new_blk = rt._drv_constraints_sdc_block(
+                blk["slew_ns"], blk["cap_pf"], blk["note"],
+                max_fanout=blk["max_fanout"], fanout_note=blk["fanout_note"],
+                supply_ports=supplies, slew_source=blk.get("slew_source") or "",
+                cap_source=blk.get("cap_source") or "")
+            out["text"] = out["text"].replace(base_blk, new_blk, 1)
+            der.update(applied=True)
+        der["deck_sha256"] = _sha256_text(out["text"])
+        out["derivation"] = der
+    return out
+
 if __name__ == "__main__":                                   # pragma: no cover
     raise SystemExit(main())

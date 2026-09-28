@@ -968,6 +968,17 @@ _NOT_PROSE: Dict[str, str] = {
         "position of every card kind and requires the span to be the "
         "neutral-name span with the name substituted, while the same strings "
         "read as prose are denied. Owner: lane rfa7 (T130).",
+    "analog_a7_post_layout_emit::measurement_span":
+        "NGSPICE TRANSIENT CARD GRAMMAR, NO SENTENCE. The deck supplies "
+        "`tran <step> <stop>` and `meas tran <name>` cards with fixed "
+        "`from=`/`to=`/`at=`/`td=` fields. Comment lines are skipped; a "
+        "card names a measurement or it does not, with no denial form. "
+        "Only parsed time fields determine the stop and unresolved fields "
+        "hold the declared stop. Falsifier: test_t130_a7_budget.py::"
+        "test_the_not_prose_claim_for_the_span_reader_is_falsifiable; it "
+        "puts every identifier-shaped denial word into every card name "
+        "position and compares the result with a neutral-name deck while "
+        "proving those words do deny actual prose.",
     "analog_a7_post_layout_emit::_echo_without":
         "An ngspice `echo \"MEAS k1=\" $&v1 \" k2=\" $&v2` CARD, rebuilt "
         "without the `key= $&var` pairs whose variable `remap_probes` took "
@@ -1353,6 +1364,16 @@ _NOT_PROSE: Dict[str, str] = {
         "SDC is a Tcl command grammar: a clock is created by the command or it "
         "is not, and no neighbouring text can deny it -- a disabled clock is a "
         "deleted or commented command, which the strip removes before matching.",
+    "phase3_one_shot_runner::_build_auto_silicon_sdc":
+        "The builder's direct text match reads only Liberty's fixed-format "
+        "`time_unit : <number><unit>` attribute. C-style and line comments "
+        "are blanked before matching, so a disabled unit cannot replace "
+        "the active one. Design-doc claims and SDC inputs are read by "
+        "delegated resolvers that consult their own contracts; this builder "
+        "records their already resolved DRV arguments. Falsifier: "
+        "test_step7_asic_sdc_is_authored_once_at_step7.py::"
+        "test_commented_liberty_time_unit_cannot_scale_the_auto_sdc, which "
+        "compares commented ps claims with the active ns attribute.",
     "phase3_one_shot_runner::_select_placement_arm":
         "The runner's OWN marker line `DIRECT_ARM_CHECK_PLACEMENT_VIOLATIONS <n>`, "
         "printed by `_build_check_placement_verdict_tcl` in the arm deck this "

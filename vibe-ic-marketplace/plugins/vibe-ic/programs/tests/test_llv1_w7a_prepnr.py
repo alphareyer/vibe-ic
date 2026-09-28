@@ -130,6 +130,13 @@ def staged(monkeypatch, tmp_path):
 
     state = SimpleNamespace(assign="PASS", fp_fail=False, ring=True,
                             chip_top="PASS", chip_top_reason="")
+    # The seam's LOCAL record check is what these tests exercise, as they were
+    # written before FXPORT's reader existed. With FX_STEP7_ASIC_SDC in the
+    # tree `read_step7_asic_sdc` is present, so it is removed here; a test of
+    # the delegation installs its own reader, and the real reader's handover
+    # is exercised in test_step7_asic_sdc_is_authored_once_at_step7.py.
+    from _ppa import timing as _timing
+    monkeypatch.delattr(_timing, "read_step7_asic_sdc", raising=False)
     monkeypatch.setattr(r, "set_invocation_provenance_sink",
                         lambda p: order.append("provenance_sink"))
     monkeypatch.setattr(r, "_padring_producer_dispatch", _padring)

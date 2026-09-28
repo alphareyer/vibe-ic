@@ -93,6 +93,7 @@ import _reference_flow_boundary as _rfb
 import _source_record_merge as _srm  # per-source merge: silence cannot erase
 from _ppa import power as _ppa_power                              # noqa: E402
 from _ppa import area as _ppa_area                                # noqa: E402
+from _ppa import timing as _ppa_timing                            # noqa: E402
 from _ppa import pdn_em_presweep as _ppa_presweep                # noqa: E402
 from _ppa.power import pdn_ring_dimensions as _pdn_ring_dimensions
 import floorplan_contract as _fpc  # design-declared fixed floorplan + DRV limits
@@ -2540,6 +2541,8 @@ def _phase2_emitted_period_ns(project: Path, top: str = "") -> Optional[float]:
     fpga_dir = _pl.fpga_early_dir(project)
     stage2_dir = _pl.constraints_dir(project)
     self_copy = (stage2_dir / f"{top}.sdc") if top else None
+    # Step 7's own runner-authored deck is a product of THIS resolution too.
+    self_step7 = (stage2_dir / f"{top}.asic.sdc") if top else None
     _p2_roots = (str(fpga_dir), str(stage2_dir))
     periods: List[float] = []
     for c in _sdc.collect_create_clocks(project, extra_dirs=[fpga_dir, stage2_dir]):
@@ -2552,6 +2555,8 @@ def _phase2_emitted_period_ns(project: Path, top: str = "") -> Optional[float]:
             continue
         if self_copy is not None and src == str(self_copy):
             continue  # never inherit from our own prior-run canon copy
+        if self_step7 is not None and src == str(self_step7):
+            continue  # nor from step 7's own runner-authored deck
         p = c.get("period_ns")
         if isinstance(p, (int, float)) and p > 0:
             periods.append(float(p))
@@ -3618,7 +3623,10 @@ def _reconcile_staged_sdc_driving_cell(sdc_text: str, active_liberty: str,
 def _ensure_staged_sdc_drv(sdc_text: str, active_liberty: str,
                            container: str = "",
                            project: Optional[Path] = None,
-                           pdk_name: str = "") -> Tuple[str, Dict[str, object]]:
+                           pdk_name: str = "",
+                           supply_ports: Optional[Sequence[str]] = None,
+                           drv_block_out: Optional[Dict[str, Any]] = None,
+                           ) -> Tuple[str, Dict[str, object]]:
     """Append the ACTIVE PDK's DRV limits to a staged/design-supplied SDC that
     declares none, so `repair_design` has a slew/cap target.
 
@@ -3713,9 +3721,15 @@ def _ensure_staged_sdc_drv(sdc_text: str, active_liberty: str,
             + " (not fabricated).")
     for _u in _fanout_unread:                 # UNREAD IS NOT EMPTY
         _fanout_note = (_fanout_note + "; " if _fanout_note else "") + _u
+    if drv_block_out is not None:
+        drv_block_out.update(slew_ns=slew, cap_pf=cap, note=note,
+                             max_fanout=fanout, fanout_note=_fanout_note,
+                             slew_source=str(drv.get("slew_source") or ""),
+                             cap_source=str(drv.get("cap_source") or ""))
     return text + _drv_constraints_sdc_block(
         slew, cap, note, max_fanout=fanout, fanout_note=_fanout_note,
-        supply_ports=_producer_supply_ports_for_drv(project),
+        supply_ports=(_producer_supply_ports_for_drv(project)
+                      if supply_ports is None else tuple(supply_ports)),
         slew_source=str(drv.get("slew_source") or ""),
         cap_source=str(drv.get("cap_source") or "")), info
 
@@ -3802,10 +3816,29 @@ def _resolve_staged_silicon_sdc(project: Path) -> Optional[Path]:
         flow_owned = (
             _sdc.generated_top_entity(head) is not None
             or "# Auto-generated minimal SDC for silicon top " in _lead_text
+            # The step-7 producer reserves this filename. Its contents can be
+            # a transformed design deck and therefore need not carry an auto
+            # banner or still match the latest record.
+            or (candidate.parent == _pl.constraints_dir(project)
+                and candidate.name.endswith(".asic.sdc"))
+            or _is_step7_output(project, candidate)
         )
         if not flow_owned:
             return candidate
     return None
+
+
+def _is_step7_output(project: Path, candidate: Path) -> bool:
+    """Is ``candidate`` a hash-verified Step-7 copy from any prior run?
+
+    A copy derived from a design SDC has no auto banner. The current record
+    path alone loses ownership when Step 7 switches to an automatic deck.
+    """
+    try:
+        rel = str(candidate.relative_to(project))
+    except ValueError:
+        return False
+    return rel in _ppa_timing.owned_step7_outputs(sys.modules[__name__], project)
 
 
 # A flow-templated SDC parameterises the whole deck on ``::env(...)``
@@ -4156,7 +4189,10 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
                             liberty_path: str = "",
                             pdk_name: str = "",
                             staged_sdc_note: str = "",
-                            container: str = "") -> str:
+                            container: str = "",
+                            supply_ports: Optional[Sequence[str]] = None,
+                            drv_block_out: Optional[Dict[str, Any]] = None,
+                            ) -> str:
     """Build the minimal silicon-top auto-SDC text emitted by ``step_pnr`` when
     the project stages no ``constraints/*.sdc`` for silicon.
 
@@ -4205,8 +4241,15 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
         try:
             import re as _re_tu
             _lib_head = Path(liberty_path).read_text(errors="ignore")[:200000]
+            # Liberty comments are not declarations. A commented ps unit
+            # before the live ns unit must never tighten every SDC path 1000x.
+            _lib_head = _re_tu.sub(
+                r"/\*.*?\*/|//[^\n]*",
+                lambda m: _re_tu.sub(r"[^\n]", " ", m.group()),
+                _lib_head, flags=_re_tu.S)
             _m_tu = _re_tu.search(
-                r'time_unit\s*:\s*"(\d+(?:\.\d+)?)\s*([pnum]?s)"', _lib_head)
+                r'\btime_unit\s*:\s*"(\d+(?:\.\d+)?)\s*([pnum]?s)"',
+                _lib_head)
             if _m_tu:
                 _tu_scale = (float(_m_tu.group(1)) *
                              {"ps": 1e-3, "ns": 1.0,
@@ -4365,14 +4408,60 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
     # from Liberty is already expressed in that Liberty's own time_unit.
     _env_slew_scale = (1.0 if _env_slew and
                        _env_slew[1].startswith("liberty default ") else _tu_scale)
+    # FX_STEP7_ASIC_SDC: record the DRV block's arguments exactly as rendered
+    # (the environment-resolved values and their sources), so the PnR-time
+    # scope derivation re-renders the SAME block and finds it in the deck.
+    _blk_slew = float(_env_slew[0]) * _env_slew_scale if _env_slew else None
+    _blk_cap = float(_env_cap[0]) if _env_cap else None
+    _blk_slew_src = _env_slew[1] if _env_slew else ""
+    _blk_cap_src = _env_cap[1] if _env_cap else ""
+    if drv_block_out is not None:
+        drv_block_out.update(slew_ns=_blk_slew, cap_pf=_blk_cap,
+                             note=drv_note, max_fanout=_l9_fanout,
+                             fanout_note=_fanout_note,
+                             slew_source=_blk_slew_src, cap_source=_blk_cap_src)
     sdc_text += _drv_constraints_sdc_block(
-        float(_env_slew[0]) * _env_slew_scale if _env_slew else None,
-        float(_env_cap[0]) if _env_cap else None, drv_note,
+        _blk_slew, _blk_cap, drv_note,
         max_fanout=_l9_fanout, fanout_note=_fanout_note,
-        supply_ports=_producer_supply_ports_for_drv(project),
-        slew_source=_env_slew[1] if _env_slew else "",
-        cap_source=_env_cap[1] if _env_cap else "")
+        supply_ports=(_producer_supply_ports_for_drv(project)
+                      if supply_ports is None else tuple(supply_ports)),
+        slew_source=_blk_slew_src, cap_source=_blk_cap_src)
     return sdc_text
+
+
+# ---------------------------------------------------------------------------
+# STEP 7 — THE ASIC SDC, AUTHORED ONCE (FX_STEP7_ASIC_SDC)
+# ---------------------------------------------------------------------------
+# MEASURED (lane lls W23: spm x gf180mcuD, HARDMACRO, main 76a277544): step 7
+# FAILed on its own because its declared output `phase2/stage2/constraints/
+# *.sdc` was never produced. The ASIC SDC was authored INSIDE `step_pnr` (and a
+# second copy of the same four-call chain inside `step_prelayout_signoff`),
+# and step 7's canonical file was written only when the design staged an SDC.
+#
+# Now ONE author (`_ppa.timing.author_asic_sdc`, the code `step_pnr` ran
+# inline) and ONE step-7 producer (`_ppa.timing.emit_step7_asic_sdc`) writing
+# the declared path plus a sha-bound record. `step_pnr` READS that file
+# (`_ppa.timing.asic_sdc_for_pnr`); it
+# regenerates it through the same producer only when it is absent, stale or
+# made for another PDK, and says so.
+#
+# THE HONEST SPLIT. Everything the SDC states is design intent known at step
+# 7: the clock (L8/L9/L1 or the staged SDC), I/O delays, the design's own
+# exceptions, the synthesis fanout ladder, and liberty-derived units / DRV
+# limits / driving cell (PDK facts, not placement). ONE input is PnR-time: the
+# supply ports the pad-ring producer (step 15.5ic, `io_pad_chip_top.json`)
+# proves, which are excluded from the signal-only DRV scope. Step 7 authors
+# with NO supply ports; `step_pnr` applies that exclusion as a NAMED
+# derivation (`pad_ring_supply_port_drv_scope`), recorded with both shas, and
+# only when the producer names supply ports (a DIE with a generated pad ring).
+# The code is `_ppa.timing` (the runner's PPA ledger routes SDC logic there);
+# the runner passes itself as ``rt`` so the SDC builders above are composed,
+# never duplicated.
+ASIC_SDC_RECORD = _ppa_timing.ASIC_SDC_RECORD
+
+
+def _runner_module():
+    return sys.modules[__name__]
 
 
 # ---------------------------------------------------------------------------
@@ -19249,6 +19338,15 @@ def _step_inputs(project: Path, kind: str, top: str, args: Any,
         # follows the resolver; where it came from is DISCLOSED instead.
         _add("sdc", _sdc)
         knobs["sdc_staged"] = "yes" if _sdc else "no"
+        # Step 7 is outside step_pnr's recorder. Bind its authored deck by
+        # value, so a builder-only change invalidates the routed outputs.
+        # Absent records remain cacheable under their existing policy.
+        try:
+            _r = json.loads((_pl.constraints_dir(project)
+                             / _ppa_timing.ASIC_SDC_RECORD).read_text())
+            knobs["step7_deck_sha256"] = str(_r.get("deck_sha256") or "")
+        except (OSError, ValueError, AttributeError):
+            knobs["step7_deck_sha256"] = ""
         if _sdc is not None:
             try:
                 _in_design = Path(_sdc).resolve().is_relative_to(
@@ -20025,7 +20123,8 @@ _LAST_FANOUT_SOURCE: Dict[str, str] = {}
 _RE_LIBS_REF_STDCELL = re.compile(r"libs\.ref/([A-Za-z0-9_]+)/(?:lib|techlef|lef)/")
 
 
-def _active_std_cell_library(project: Path, pdk: str = "") -> str:
+def _active_std_cell_library(project: Path, pdk: str = "",
+                             liberty_path: str = "") -> str:
     """Best-effort name of the standard-cell library THIS run builds against
     (e.g. the `<name>` in `<pdk>/libs.ref/<name>/lib/...`), or "" when it
     cannot be resolved yet.
@@ -20038,6 +20137,23 @@ def _active_std_cell_library(project: Path, pdk: str = "") -> str:
     chip-AGNOSTIC: reads the PDK path SHAPE out of this run's own artefacts;
     no library, PDK or chip name is written here."""
     del pdk  # the library is read from the resolved paths, not guessed from the PDK
+    # THE RESOLVED PDK LIBERTY FIRST (FX_STEP7_ASIC_SDC). It IS the library this
+    # run builds against, and it is known before any artefact below exists.
+    # MEASURED (spm x gf180mcuD DIE, 986343fef): with no liberty given, synth
+    # and step 7 resolved nothing (L9's per-library fanout row missed -> the
+    # PDK default 10), while at PnR time the glob below hit the pad-ring
+    # record's IO-library paths and returned `gf180mcu_fd_io` -- an IO library,
+    # not a standard-cell one -- which happened to match the `gf180mcu_*` row.
+    # The liberty path is read by the SAME resolver `_l9_declared_max_fanout`
+    # uses (`declared_clock_period.library_name_from_liberty`), so the two
+    # never name different libraries for one liberty.
+    try:
+        import declared_clock_period as _dcp
+        _lib = _dcp.library_name_from_liberty(str(liberty_path or ""))
+    except Exception:                                        # noqa: BLE001
+        _lib = ""
+    if _lib:
+        return _lib
     try:
         for rel in ("phase3/stage3/pnr/pnr.tcl",
                     "phase3/stage3/extracted/extract_" "*.tcl",
@@ -38266,125 +38382,48 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # told the identical number the SDC and sign-off already use — set in
     # BOTH branches below (staged / auto SDC), never fabricated (§4.05: reused
     # from the same DRV resolution, not invented here).
-    _cts_fanout_target: Optional[int] = None
+    # STEP 7 AUTHORS, STEP 15 READS (FX_STEP7_ASIC_SDC). The deck below is
+    # step 7's file (`asic_sdc_for_pnr`), sha-bound in
+    # `constraint_sdc_provenance.json`; it is regenerated through step 7's own
+    # producer only when absent/stale (an --entry-step window on an old
+    # project), and the one PnR-time addition -- excluding the pad-ring
+    # producer's proven supply ports from the DRV scope -- is the named
+    # derivation recorded beside it. The records the inline author wrote
+    # (DRV/I-O parity, the I/O-delay contract, the CTS fanout target) are
+    # written from the same authored result, so every consumer is unchanged.
     project_sdc_silicon = _resolve_staged_silicon_sdc(project)
-    if project_sdc_silicon and project_sdc_silicon.is_file():
-        # benchmark-spm-asap7 — staged SDCs are ns/pF-authored; rescale
-        # numerics into the ACTIVE PDK liberty's declared units (ASAP7:
-        # ps/fF) instead of a verbatim copy that reads 1000× too tight.
-        # A9 (#169): the unit rescale fixes the UNITS but a staged SDC also
-        # carries the ORIGINATING PDK's DRV *values* (set_max_transition /
-        # set_max_capacitance). When this SDC's provenance stamp names a
-        # DIFFERENT PDK than the active one, re-derive those limits from the
-        # active liberty (or drop them). No stamp (hand-authored SDC) or a
-        # matching stamp → byte-identical, so sky130/nangate are unchanged.
-        _staged_sdc = _scale_sdc_to_liberty_units(
-            project_sdc_silicon.read_text(), str(pdk.liberty))
-        _staged_sdc = _reconcile_staged_sdc_drv(
-            _staged_sdc, pdk.name, str(pdk.liberty), container)
-        # A9 — reconcile a stale `set_driving_cell` cell NAME the same way the
-        # DRV LIMITS were reconciled above: a foreign-PDK reference-flow SDC
-        # (e.g. a Nangate `BUF_X2`) would otherwise abort read_sdc under the
-        # active PDK (STA-0453) and stop the entire backend before floorplan.
-        _staged_sdc = _reconcile_staged_sdc_driving_cell(
-            _staged_sdc, str(pdk.liberty), container)
-        # TAPEOUT-SIGNOFF (DRV) parity — a design-supplied SDC that declares NO
-        # set_max_transition / set_max_capacitance reached PnR with no DRV
-        # target at all, so repair_design never repaired the slews (the
-        # auto-SDC else-branch below has had this since TAPEOUT-SIGNOFF; the
-        # staged branch never did). Supply ONLY the absent limits, ONLY from
-        # the active liberty; a design-declared limit is never overridden.
-        _staged_sdc, _drv_parity = _ensure_staged_sdc_drv(
-            _staged_sdc, str(pdk.liberty), container, project,
-            pdk_name=str(pdk.name))
-        # Read the FINAL effective value back out of the SDC text (not just
-        # `added_max_fanout`, which is None when the design's OWN staged SDC
-        # already declared one — that value must reach CTS too, same as a
-        # liberty-derived fallback would).
-        _cts_fm = _SDC_MAX_FANOUT_RE.search(_staged_sdc)
-        if _cts_fm:
+    _asic = _ppa_timing.asic_sdc_for_pnr(
+        _runner_module(), project, top, pdk, container)
+    _cts_fanout_target: Optional[int] = _asic.get("cts_fanout_target")
+    for _key, _name in (("drv_parity", "sdc_drv_parity.json"),
+                        ("io_parity", "sdc_io_delay_parity.json")):
+        if _asic.get(_key) is not None:
+            if (_asic[_key] or {}).get("note"):
+                print(f"[phase3][sdc-{_key.split('_')[0]}] "
+                      f"{_asic[_key]['note']}", file=sys.stderr)
             try:
-                _cts_fanout_target = int(float(_cts_fm.group(2)))
-            except ValueError:
+                (out_dir / _name).write_text(
+                    json.dumps(_asic[_key], indent=2, default=str))
+            except Exception:
                 pass
-        if _drv_parity.get("note"):
-            print(f"[phase3][sdc-drv] {_drv_parity['note']}", file=sys.stderr)
-        try:
-            (out_dir / "sdc_drv_parity.json").write_text(
-                json.dumps(_drv_parity, indent=2, default=str))
-        except Exception:
-            pass
-        # I/O-delay parity — the staged branch must not be LOOSER than the
-        # auto-SDC branch it now takes precedence over. A design SDC that
-        # declares only `create_clock` would otherwise leave every primary I/O
-        # untimed, and a real violation would vanish by subtraction rather than
-        # by repair. Supplies ONLY the absent delays, against the design's OWN
-        # clock name; a design-declared delay is never overridden.
-        _staged_sdc, _io_parity = _ensure_staged_sdc_io_delay(
-            _staged_sdc, project)
-        if _io_parity.get("note"):
-            print(f"[phase3][sdc-io] {_io_parity['note']}", file=sys.stderr)
-        try:
-            (out_dir / "sdc_io_delay_parity.json").write_text(
-                json.dumps(_io_parity, indent=2, default=str))
-        except Exception:
-            pass
-        sdc.write_text(_staged_sdc)
-    else:
-        # v1.6.560 sub-defect B: derive CLOCK_PERIOD from project sources
-        # (L9 markdown / config.json / baseline config) before falling back
-        # to the legacy 20 ns. Chip-AGNOSTIC — works for any IC whose L9
-        # mentions a clock period in the docs.
-        #
-        # v1.6.595 — for #403 P2 ORGANIC. Pass top name into the
-        # resolver so the RTL-header scan can prioritise the
-        # canonical top module file (e.g. `chip_top.v`) over other
-        # RTL files in the search root. Resolver also walks
-        # phase1/generated_docs/L8 + L9 JSON before falling back to
-        # legacy config.json or the literal `clk`. Any IC whose
-        # clock port follows Wishbone / AXI / Caravel naming
-        # conventions now produces a valid SDC.
-        #
-        # TAPEOUT-SIGNOFF (DRV): resolve set_max_transition / set_max_capacitance
-        # from THIS PDK's liberty so the resizer fixes slews (the single-corner-
-        # closure confounder). Chip/PDK-AGNOSTIC — the numbers come from the
-        # liberty, not a literal; a liberty declaring none yields an honest
-        # disclosure and NO fabricated limit (§4.05).
-        _drv = _liberty_drv_limits(str(pdk.liberty), container)
-        sdc.write_text(_build_auto_silicon_sdc(
-            project, top=top,
-            drv_slew_ns=_drv.get("max_transition_ns"),
-            drv_cap_pf=_drv.get("max_capacitance_pf"),
-            drv_note=str(_drv.get("note") or ""),
-            liberty_path=str(pdk.liberty),
-            pdk_name=str(pdk.name), container=container))
-        # WHAT THE BOUNDARY PATHS ARE TIMED AGAINST, as a record a gate can
-        # read. The SDC says it in comments; a sign-off consumer should not
-        # have to parse comments to learn whether an external delay came from
-        # the design, from this plugin, or was omitted entirely.
-        try:
-            _io_ns_rec, _ = _declared_io_delay_ns(
-                project, _resolve_clock_spec(project)[0])
-        except Exception:                                    # noqa: BLE001
-            _io_ns_rec = None
+    if _asic.get("io_delay_contract") is not None:
         _aa.write_json(
             project / "reports" / "phase3" / "io_delay_contract.json",
-            dict(io_delay_contract(_io_ns_rec, 2.0, io_delay_source()),
-                 **{"schema": "vibe-ic/io-delay-contract/1",
-                    "sdc": str(sdc)}))
-        # Same CTS-clustering target as the staged branch above; the
-        # auto-SDC path has no design SDC to declare a fanout cap in, so
-        # priority collapses to L9 / RTL-replication / liberty default —
-        # `_build_auto_silicon_sdc` does not emit `set_max_fanout` text (a
-        # separate, non-blocking gap; CTS reads this value directly, not by
-        # re-parsing the SDC).
-        try:
-            _cts_fanout_target = (
-                _l9_declared_max_fanout(project, str(pdk.name), str(pdk.liberty))
-                or _rtl_replication_fanout_bound(project)
-                or _drv.get("max_fanout"))
-        except Exception:
-            _cts_fanout_target = _drv.get("max_fanout")
+            dict(_asic["io_delay_contract"], sdc=str(sdc)))
+    sdc.write_text(_asic["text"])
+    _aa.write_json(out_dir / "constraint_sdc_provenance.json", {
+        "schema": "vibe-ic/pnr-sdc-provenance/1",
+        "step7_sdc": _asic["path"],
+        "step7_sha256": _asic["step7_sha256"],
+        "step7_deck_sha256": _asic["deck_sha256"],
+        "deck_sha256": hashlib.sha256(
+            _asic["text"].encode("utf-8")).hexdigest(),
+        "regenerated_by_step7_producer": _asic["regenerated"],
+        "pnr_time_derivation": _asic["derivation"]})
+    if _asic["regenerated"]:
+        print(f"[phase3] step 7's ASIC SDC regenerated by its own producer "
+              f"before PnR: {_asic['regenerated']}", file=sys.stderr)
+    # CR1: the declared-vs-applied SDC knob report reads the deck PnR loads.
     _knob_parity.write_sdc_report(
         project, sdc, pdk=str(pdk.name),
         library=_active_std_cell_library(project, str(pdk.name)))
@@ -59078,70 +59117,37 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     # sign-off green by SUBTRACTION. Same four calls, same order, same
     # arguments as `step_pnr`, so the SDC the pre-layout STA reads is the SDC
     # PnR will read.
+    # STEP 7's PRODUCER (FX_STEP7_ASIC_SDC): the ONE author step_pnr also
+    # loads from, writing the declared `phase2/stage2/constraints/*.sdc` in
+    # BOTH cases -- a design-staged deck as `<top>.sdc` (the canonical copy it
+    # always was), the runner's own as `<top>.asic.sdc`, which its banner keeps
+    # out of `_resolve_staged_silicon_sdc` (no laundering). The pre-layout STA
+    # reads the same deck PnR will, from the same bytes.
     runner_sdc = pnr_out / "constraint.sdc"
-    staged_sdc = _resolve_staged_silicon_sdc(project)
-    design_staged = bool(staged_sdc and staged_sdc.is_file())
+    _step7 = _ppa_timing.emit_step7_asic_sdc(
+        _runner_module(), project, top, pdk, container)
+    design_staged = bool(_step7["design_staged"])
+    written.append(str(project / _step7["path"]))
+    # THE PnR DECK IS NOT STEP 7's TO CLOBBER (review_wave7). Written only
+    # when absent, as before: a deck already there is the PnR-consistent one
+    # (it may carry the pad-ring derivation), and this step runs BEFORE the
+    # PnR cache decision, so a cache hit would never write it back.
     if not runner_sdc.is_file():
-        if design_staged:
-            _txt = _scale_sdc_to_liberty_units(
-                staged_sdc.read_text(), str(pdk.liberty))
-            _txt = _reconcile_staged_sdc_drv(
-                _txt, str(pdk.name), str(pdk.liberty), container)
-            _txt = _reconcile_staged_sdc_driving_cell(
-                _txt, str(pdk.liberty), container)
-            _txt, _drv_parity = _ensure_staged_sdc_drv(
-                _txt, str(pdk.liberty), container, project,
-                pdk_name=str(pdk.name))
-            _txt, _io_parity = _ensure_staged_sdc_io_delay(_txt, project)
-            runner_sdc.write_text(_txt)
-            # Carry the parity DISCLOSURES, not just the fact of the chain:
-            # "supplied set_output_delay against the design's own clock" is
-            # the sentence that makes a later reader able to tell a
-            # design-declared limit from one this step added.
-            notes.append(
-                f"SDC: design-staged {staged_sdc} — unit-rescaled + DRV/IO "
-                f"parity (same chain as step_pnr). "
-                + " ".join(str(p.get("note") or "")
-                           for p in (_drv_parity, _io_parity)).strip())
-        else:
-            _drv = _liberty_drv_limits(str(pdk.liberty), container)
-            runner_sdc.write_text(_build_auto_silicon_sdc(
-                project, top=top,
-                drv_slew_ns=_drv.get("max_transition_ns"),
-                drv_cap_pf=_drv.get("max_capacitance_pf"),
-                drv_note=str(_drv.get("note") or ""),
-                liberty_path=str(pdk.liberty),
-                pdk_name=str(pdk.name), container=container))
-            notes.append("SDC: design staged none — runner auto-SDC")
+        runner_sdc.write_text(_step7["text"])
         written.append(str(runner_sdc))
     import declared_knob_applied_parity_check as _knob_parity
     _knob_parity.write_sdc_report(
         project, runner_sdc, pdk=str(pdk.name),
         library=_active_std_cell_library(project, str(pdk.name)))
-
-    # --- Step 7b: canonical staged SDC copy (constraints/<top>.sdc) -------
-    # ONLY when the SDC is genuinely DESIGN-staged. `canon_sdc` lands in
-    # `phase2/stage2/constraints`, which is the LAST fallback
-    # `_resolve_staged_silicon_sdc` searches — so copying the runner's OWN
-    # auto-SDC there hands step_pnr, later in this same run, a file it will
-    # resolve as "design-staged" and put through the staged branch. MEASURED
-    # on a liberty declaring `time_unit : "1ps"` and a project staging no SDC:
-    # `_build_auto_silicon_sdc` already scales into lib units and emits
-    # `-period 20000`; re-resolved as staged, `_scale_sdc_to_liberty_units`
-    # scales it a SECOND time to `-period 2e+07` — 1000x too LOOSE, i.e. every
-    # path passes. `staged_sdc_survey.json` would also record `consumed:
-    # phase2/stage2/constraints/<top>.sdc`, asserting the design staged an SDC
-    # when it staged none. A design-staged SDC cannot be laundered this way:
-    # `input/constraints` outranks `phase2/stage2/constraints` in the shared
-    # resolver, so the design's own file still wins. When the runner
-    # fabricated the deck, authoring the canonical copy is left to
-    # `step_canonicalize_artefacts` — the step that owns it — which runs after
-    # step_pnr has settled what the SDC actually is.
-    canon_sdc = constraints_out / f"{top}.sdc"
-    if design_staged and runner_sdc.is_file() and not canon_sdc.is_file():
-        canon_sdc.write_text(
-            _stamp_sdc_provenance(runner_sdc.read_text(), pdk.name))
-        written.append(str(canon_sdc))
+    notes.append(
+        (f"SDC: design-staged {_step7['staged_sdc']} — unit-rescaled + "
+         f"DRV/IO parity (step 7's producer, the chain step_pnr loads). "
+         + " ".join(str((_step7.get(k) or {}).get("note") or "")
+                    for k in ("drv_parity", "io_parity")).strip())
+        if design_staged else
+        f"SDC: design staged none — runner auto-SDC, step 7's producer "
+        f"({_step7['path']}, sha256 {_step7['sha256'][:12]})")
+    canon_sdc = project / _step7["path"]
 
     # --- Steps 7/8/10 opt-in tool path (phase3/librelane_switch.json) ----
     import librelane_contract as _llc
@@ -59336,13 +59342,10 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                     "undeclared report is not evidence of either basis; left "
                     "in place, reported, NOT counted as clean")
 
-    # `canon_sdc` is deliberately NOT part of this predicate when the design
-    # staged no SDC (see Step 7b): the artefact this step owns pre-layout is
-    # the deck the pre-layout STA actually read plus the PVT matrix. Asserting
-    # on `canon_sdc` would make the honest "left to the owning step" path
-    # report WARN.
+    # Step 7's declared SDC is now written in BOTH cases (FX_STEP7_ASIC_SDC),
+    # so it is part of the predicate unconditionally.
     ok = runner_sdc.is_file() and pvt_path.is_file() and (
-        canon_sdc.is_file() or not design_staged) and _pre_pnr_ok
+        canon_sdc.is_file()) and _pre_pnr_ok
     detail = (f"pre-layout stage-2 sign-off emitted BEFORE PnR: "
               f"{len(written)} artefact(s)"
               + ("; " + "; ".join(notes[-2:]) if notes else ""))
@@ -60898,7 +60901,11 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # --- Step 7: SDC + pvt_matrix.json ----------------------------------
     runner_sdc = pnr_out / "constraint.sdc"
     canon_sdc = constraints_out / f"{top}.sdc"
-    if runner_sdc.is_file() and not canon_sdc.is_file():
+    # Step 7 has its own producer now (`emit_step7_asic_sdc`); when its record
+    # is here, the declared file exists and a second copy would only disagree
+    # with it (the PnR deck may carry the named pad-ring derivation).
+    if (runner_sdc.is_file() and not canon_sdc.is_file()
+            and not (constraints_out / ASIC_SDC_RECORD).is_file()):
         # A9 (#169) — stamp the staged copy with the active PDK's provenance so
         # a LATER run under a DIFFERENT PDK detects that this SDC's DRV limits
         # are stale (`_reconcile_staged_sdc_drv`). The stamp is an SDC comment,
