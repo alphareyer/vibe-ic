@@ -566,6 +566,26 @@ def test_producer_relabel_cannot_hide_independent_fold_failure(tmp_path):
     assert doc["summary"]["denominator"]["examined"] > 0
 
 
+def test_missing_window_cannot_hide_a_recounted_fold_failure(tmp_path):
+    proj = _relabel_dropped_fold(tmp_path / "missing_window")
+    rp = proj / "reports/phase3/si_mcf_sta.json"
+    producer = json.loads(rp.read_text())
+    producer["windows_json"] = str(proj / "missing-windows.json")
+    rp.write_text(json.dumps(producer))
+
+    r, doc = _run(proj)
+    cats = _categories(doc)
+    assert "PRODUCER_NOT_MEASURED" in cats, cats
+    assert "NO_WINDOWS" in cats, cats
+    assert "FOLD_NOT_APPLIED" in cats, cats
+    assert (r.returncode, doc["verdict"]) == (G.RC_FAIL, "FAIL"), doc
+    assert doc["summary"]["corners_checked"] == ["setup", "hold"], doc
+    assert doc["summary"]["denominator"]["examined"] > 0, doc
+    assert doc["summary"]["vacuous"] is False, doc
+    assert all(value["mode"] == "window-independent-floor"
+               for value in doc["recount"].values()), doc
+
+
 def test_producer_relabel_preserves_step27_failure(tmp_path):
     import flow_compliance_check as F
     proj = _relabel_dropped_fold(tmp_path / "relabel_flow")
