@@ -126,10 +126,18 @@ def _claims(run_dir: Path) -> Tuple[List[Tuple[str, str]], List[str]]:
     manifest = run_dir / IMPORT_MANIFEST_REL
     if manifest.exists():
         doc = _load(manifest, "import manifest")
-        doc = doc if isinstance(doc, dict) else {}
-        rows = doc.get("rows") if isinstance(doc.get("rows"), list) else []
-        flows = sorted(({doc.get("flow")} | {r.get("flow") for r in rows if isinstance(r, dict)})
-                       - {None})
+        if not isinstance(doc, dict):
+            raise IdentityRefusal(PUBLISH_IMPL_UNREADABLE,
+                                  f"import manifest {manifest} is not an object")
+        rows = doc.get("rows", [])
+        if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
+            raise IdentityRefusal(PUBLISH_IMPL_UNREADABLE,
+                                  f"import manifest {manifest} has malformed rows")
+        raw_flows = [doc.get("flow")] + [r.get("flow") for r in rows]
+        if any(flow is not None and not isinstance(flow, str) for flow in raw_flows):
+            raise IdentityRefusal(PUBLISH_IMPL_UNREADABLE,
+                                  f"import manifest {manifest} has a non-string flow")
+        flows = sorted({flow for flow in raw_flows if flow is not None})
         # the manifest exists only on a flagged import: one that names no
         # flow still claims SOME external flow, and cannot be read as default
         for flow in flows or ["(the manifest names no flow)"]:
@@ -142,12 +150,16 @@ def _claims(run_dir: Path) -> Tuple[List[Tuple[str, str]], List[str]]:
             lines = []
             unread.append(f"provenance.jsonl: {exc}")
         counted: Dict[str, int] = {}
-        for raw in lines:
+        for n, raw in enumerate(lines, 1):
             try:
                 row = json.loads(raw)
             except json.JSONDecodeError:
+                unread.append(f"provenance.jsonl line {n}: not a JSON object")
                 continue
-            flow = row.get("attributed_to") if isinstance(row, dict) else None
+            if not isinstance(row, dict):
+                unread.append(f"provenance.jsonl line {n}: not a JSON object")
+                continue
+            flow = row.get("attributed_to")
             if flow in _FLAGGED:
                 counted[flow] = counted.get(flow, 0) + 1
         for flow, n in sorted(counted.items()):

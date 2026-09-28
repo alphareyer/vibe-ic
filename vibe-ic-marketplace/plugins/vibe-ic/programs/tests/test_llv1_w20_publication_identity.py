@@ -74,6 +74,7 @@ def test_a_default_run_keeps_its_slot_and_carries_no_impl_record(tmp_path):
 
 
 @pytest.mark.parametrize("damage", ["truncated_report", "torn_ledger", "provenance_byte",
+                                    "torn_provenance",
                                     "report_impl_not_a_mode"])
 def test_a_damaged_side_file_does_not_change_a_default_run(tmp_path, damage):
     """Review W20: none of these runs ever saw a flag. The side file is
@@ -90,6 +91,9 @@ def test_a_damaged_side_file_does_not_change_a_default_run(tmp_path, damage):
     elif damage == "provenance_byte":
         with (run / "provenance.jsonl").open("ab") as fh:
             fh.write(b'{"tool": "x\xff"}\n')
+    elif damage == "torn_provenance":
+        with (run / "provenance.jsonl").open("a") as fh:
+            fh.write('{"tool": "x"\n')
     else:
         report.write_text(json.dumps({"impl": {"pnr": "openroad"}}))
     dest_root = tmp_path / "benchmark-data"
@@ -101,6 +105,9 @@ def test_a_damaged_side_file_does_not_change_a_default_run(tmp_path, damage):
     assert got["impl"] == "vibe-ic"
     if damage != "provenance_byte":      # a replaced byte still parses the other rows
         assert got["impl_unread"], got
+    if damage == "torn_provenance":
+        assert any("provenance.jsonl line 2: not a JSON object" in item
+                   for item in got["impl_unread"]), got["impl_unread"]
 
 
 # ── a flagged run is not published in v1 ─────────────────────────────────
@@ -223,6 +230,26 @@ def test_a_damaged_record_is_never_read_as_the_default(tmp_path):
     path.write_text("{not json")
     dest_root = tmp_path / "benchmark-data"
     _refused_writing_nothing(_publish(run, dest_root), dest_root, "PUBLISH_IMPL_UNREADABLE")
+
+
+def test_a_missing_record_and_truncated_import_manifest_refuse(tmp_path):
+    run = base._make_run(tmp_path)
+    manifest = run / IMPORT_MANIFEST_REL
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"flow": "librelane", "rows": [')
+    dest_root = tmp_path / "benchmark-data"
+    _refused_writing_nothing(_publish(run, dest_root), dest_root,
+                             "PUBLISH_IMPL_UNREADABLE")
+
+
+@pytest.mark.parametrize("value", [["librelane"], 3])
+def test_malformed_manifest_flow_type_refuses_by_name(tmp_path, value):
+    run = base._make_run(tmp_path)
+    manifest = run / IMPORT_MANIFEST_REL
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(json.dumps({"flow": value, "rows": []}))
+    with pytest.raises(_pub_id().IdentityRefusal, match="PUBLISH_IMPL_UNREADABLE"):
+        _pub_id().run_identity(run)
 
 
 # ── kept for the day the owner opens flagged publication ──────────────────
