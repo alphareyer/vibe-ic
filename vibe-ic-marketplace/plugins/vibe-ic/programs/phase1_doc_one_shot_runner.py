@@ -61256,8 +61256,7 @@ def _v1_6_397_merge_clock_domains(clock_domains: list) -> list:
 def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
         project: Path) -> None:
     """v1.6.311 — for #210 P1 ORGANIC. Mirror
-    L8_RTL_CONSTANTS.clock_domains into L9.clock_domains (when
-    L9 slot is empty/missing) and derive L9.resets[] from
+    L8_RTL_CONSTANTS.clock_domains into L9.clock_domains and derive L9.resets[] from
     L9.top_ports whose names match the conventional reset shape.
 
     Chip-AGNOSTIC: the reset-port regex uses only the
@@ -61282,6 +61281,24 @@ def _post_emit_mirror_clock_resets_to_l9_v1_6_311(
             l9["clock_domains"] = [dict(cd) if isinstance(cd, dict)
                                    else cd for cd in l8_cds]
             changed = True
+        elif isinstance(existing, list):
+            # L9 may already have a primary clock when the staged SDC adds a
+            # second domain to L8 later in this run. Preserve each L9 row's
+            # own facts, and add only a newly declared, distinct L8 clock.
+            l19 = _try_load_l_doc(project, "L19_CONSTRAINTS_PDK") or {}
+            target = str((l19.get("fields") or {}).get("pdk_target") or "").lower()
+            names = {str(cd.get("name") or "").lower()
+                     for cd in existing if isinstance(cd, dict)}
+            for cd in l8_cds:
+                if not isinstance(cd, dict):
+                    continue
+                name = str(cd.get("name") or "").strip()
+                scope = str(cd.get("pdk_scoped_target") or "").lower()
+                if not name or name.lower() in names or (scope and scope != target):
+                    continue
+                existing.append(dict(cd))
+                names.add(name.lower())
+                changed = True
     # v1.6.510 — for #352 P3 ORGANIC. Mirror L8.synthesis_targets
     # into L9.synthesis_targets when the L9 slot is empty/missing.
     # Same mirror pattern as L8.clock_domains above. Chip-AGNOSTIC.
@@ -67909,6 +67926,11 @@ def main() -> int:
               file=sys.stderr)
     for _msg in clock_contract_conflicts:
         print(f"      {_msg}", file=sys.stderr)
+
+    # The staged SDC and reference-flow readers run after the first L8→L9
+    # mirror. They can add another L8 clock domain. Reconcile the final L8
+    # population now, before the layer gates and Phase 2 read L9.
+    _post_emit_mirror_clock_resets_to_l9_v1_6_311(project)
 
     # ------------------------------------------------------------------
     # POST-EMIT L-DOC GATES (batch layergate-1, + portability)
