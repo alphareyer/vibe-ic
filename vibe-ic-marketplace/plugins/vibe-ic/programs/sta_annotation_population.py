@@ -12,12 +12,15 @@ from pathlib import Path
 OFF_DIE = 'OFF_DIE_DRIVER_NOT_IN_SPEF'
 
 
-def classify(body, def_file, io_masters=None):
+def classify(body, def_file, io_masters=None, *, strict_geometry=False,
+             abutted_nets=None, pg_arc_free=None):
     """Typed annotation population. `io_masters` is the set of IO-cell master
     names from the run's own LEF inventory, used ONLY to recognise a pad cell's
     off-die terminal; absent, that class is unavailable and such a driver stays
     REQUIRED_OR_UNKNOWN, so an absent inventory can never widen what passes."""
     result = {'complete': False, 'drivers': [], 'reason': None}
+    abutted_nets = set(abutted_nets or ())
+    pg_arc_free = set(pg_arc_free or ())
     match = re.search(r'^Found (\d+) unannotated drivers\.\n(.*?)^Found (\d+) partially unannotated drivers\.$', body, re.M | re.S)
     if not match:
         result['reason'] = 'missing native annotation counts'
@@ -122,12 +125,16 @@ def classify(body, def_file, io_masters=None):
         if inst is None and not evidence and len(net_uses.get(driver, ())) == 1:
             evidence = [(driver, net_uses[driver][0])]
             inferred = {'net': driver, 'use': net_uses[driver][0], 'statements': 1}
-        if evidence and len(set(evidence)) == 1 and all(use in ('POWER', 'GROUND') for net, use in evidence):
+        if (evidence and len(set(evidence)) == 1 and
+                all(use in ('POWER', 'GROUND') for net, use in evidence) and
+                (not strict_geometry or driver in pg_arc_free)):
             classification = 'EXPLICIT_PG_NOT_SIGNAL_PARASITICS'
         elif not evidence and inst in linked and driver in disconnected:
             classification = 'NATIVE_UNCONNECTED_OUTPUT'
         elif _off_die(driver, inst, evidence, top_pins, masters, io_masters,
-                      nets_with_top_pin):
+                      nets_with_top_pin) and (
+                          not strict_geometry or
+                          (len(evidence) == 1 and evidence[0][0] in abutted_nets)):
             classification = OFF_DIE
         else:
             classification = 'REQUIRED_OR_UNKNOWN'
@@ -141,6 +148,9 @@ def classify(body, def_file, io_masters=None):
         result['drivers'].append(row)
     result['complete'] = all(row['classification'] != 'REQUIRED_OR_UNKNOWN'
                              for row in result['drivers'])
+    if strict_geometry:
+        result['abutted_nets'] = sorted(abutted_nets)
+        result['pg_arc_free_drivers'] = sorted(pg_arc_free)
     # CONDITION (b): disclosed by name and count, so a reader sees what was
     # excluded and why without re-deriving it.
     off = [row['driver'] for row in result['drivers']

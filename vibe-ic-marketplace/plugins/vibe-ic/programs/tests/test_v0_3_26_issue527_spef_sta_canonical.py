@@ -134,6 +134,26 @@ def test_no_repair_flag_gates_on_spef_not_estimate(tmp_path, monkeypatch):
     assert not (p / "phase3/stage3/postroute_timing_repair/no_repair_needed.flag").is_file()
 
 
+def test_single_corner_fallback_clears_the_prior_librelane_repair_log(
+        tmp_path, monkeypatch):
+    import postroute_timing_repair_audit as audit
+    p = _proj(tmp_path, est_text=EST_MET_TNS0)
+    out = p / "phase3/stage3/postroute_timing_repair"
+    out.mkdir(parents=True)
+    stale = out / "repair_log.json"
+    stale.write_text(json.dumps({"changes": [{"candidate": "old"}],
+                                 "re_verified": True}))
+    monkeypatch.setattr(R, "_docker_exec", _fake_docker(SPEF_VIOLATED))
+    monkeypatch.setattr(R, "_to_container_path", lambda s, c: s)
+    R.step_canonicalize_artefacts(p, "chip_top", _pdk(), "x")
+    decision = json.loads((out / "postroute_timing_repair_decision.json").read_text())
+    assert decision["repair_needed"] is True
+    assert decision["action"] == "repair_required_single_corner_fallback"
+    assert stale.exists() is False
+    errors = [f.category for f in audit.audit(p)[0] if f.severity == "ERROR"]
+    assert "NO_REPAIR_ARTIFACT" in errors
+
+
 def test_negative_no_spef_behavior_unchanged(tmp_path, monkeypatch):
     # NEGATIVE (#527): no SPEF → estimate-based copy is canonical, the MET
     # flag is written from it, and no discrepancy artifact appears.

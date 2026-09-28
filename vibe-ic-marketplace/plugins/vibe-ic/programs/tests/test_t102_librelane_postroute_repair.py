@@ -150,6 +150,16 @@ def _sta_metrics(setup, hold, drv=(0, 0, 0), corners=CORNERS):
     return metrics
 
 
+def _named_fixture(metrics, names=None):
+    members = []
+    for c in CORNERS:
+        for kind in ('slew', 'cap', 'fanout'):
+            n = metrics[f'design__max_{kind}_violation__count__corner:{c}']
+            pins = (names or {}).get(kind, [f'{kind}_{i}/Z' for i in range(n)])
+            members.extend(f'{c}|{kind}|{pin}' for pin in pins[:n])
+    return {'verdict': 'MEASURED', 'members': sorted(members), 'rows': [], 'errors': []}
+
+
 def test_the_summary_is_the_worst_of_every_declared_corner():
     s = prr.summarize(_sta_metrics(0.7, 0.1, (2, 1, 0)), CORNERS)
     assert s['setup_ws_min'] == 0.7 and s['hold_ws_min'] == 0.1
@@ -270,6 +280,27 @@ SHIM = textwrap.dedent('''\
                 doc = {"metrics": spec.get("antenna_metrics", {})}
             else:
                 doc = {"metrics": spec["sta_metrics"] if step.endswith("STAPostPNR") else {}}
+                if step.endswith("STAPostPNR"):
+                    suffix = lane[3:]
+                    arm_name = suffix.rsplit('-', 1)[0] if '-' in suffix else ''
+                    arm = project / prr.ARM_REL
+                    context = arm / arm_name / prr.IMPL_DIR / prr.CONTEXT if arm_name else arm / prr.IMPL_DIR / prr.CONTEXT
+                    for corner in prr._load(context)["corners"]:
+                        text = []
+                        for kind, heading in (("slew", "max slew"),
+                                              ("cap", "max capacitance"),
+                                              ("fanout", "max fanout")):
+                            n = spec["sta_metrics"].get(
+                                f"design__max_{kind}_violation__count__corner:{corner}", 0)
+                            pins = spec.get("drv_names", {}).get(
+                                kind, [f"{kind}_{j}/Z" for j in range(n)])
+                            if n:
+                                text += [heading, "", "Pin Limit Value Slack", "----------------------"]
+                                text += [f"{pin} 4 5 -1 (VIOLATED)" for pin in pins[:n]]
+                                text.append("")
+                        report = folder / corner / "checks.rpt"
+                        report.parent.mkdir(parents=True, exist_ok=True)
+                        report.write_text("\\n".join(text) + "\\n")
             (folder / "state_out.json").write_text(json.dumps(doc))
             folders.append(folder)
         return folders
@@ -298,6 +329,7 @@ def _scenario_impl(tmp_path, baseline, candidates):
     put(impl / prr.CURRENT, {'candidate': None, 'repair_input': str(input_state),
                             'repair_state': str(input_state),
                             'measurement': dict(prr.summarize(_sta_metrics(*baseline), CORNERS),
+                                                named_drv=_named_fixture(_sta_metrics(*baseline)),
                                                 antenna_nets=0, sta_state=str(sta),
                                                 sta_state_sha256=contract.digest(sta))})
     scenario = {f'32-cand{i:02d}': c for i, c in enumerate(candidates, 1)}
@@ -319,9 +351,11 @@ def _ant(nets):
                                     'antenna__violating__pins': nets}
 
 
-def _cand(setup, hold, drv=(0, 0, 0), *, changed=1, owned=True, antenna=0):
+def _cand(setup, hold, drv=(0, 0, 0), *, changed=1, owned=True, antenna=0,
+          drv_names=None):
     return {'def': _def(owned), 'sta_metrics': _sta_metrics(setup, hold, drv),
             'antenna_metrics': _ant(antenna),
+            'drv_names': drv_names or {},
             'repair_metrics': {'vibeic__prr__changed': changed}}
 
 
@@ -348,6 +382,32 @@ def test_the_ll21_max_fanout_repair_is_adopted_with_setup_still_met(tmp_path, mo
     assert json.loads((impl / prr.CURRENT).read_text())['candidate'] == '32-cand01'
 
 
+@pytest.mark.parametrize('changed', [0, 1])
+def test_residual_fanout_refuses_even_a_noop_candidate(tmp_path, monkeypatch, changed):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, 0.2, (0, 0, 3)),
+        candidates=[_cand(4.0, 0.2, (0, 0, 3), changed=changed)])
+    _controller(impl, arm, shim, monkeypatch, tmp_path).run_controller(
+        'postroute.repair_drv')
+    rows = json.loads((arm / prr.LEDGER).read_text())['candidates']
+    assert rows[0]['decision'] == 'REFUSED'
+    assert rows[0]['fanout']['verdict'] == 'FAIL'
+    assert rows[0]['fanout']['violations'] == 3
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+
+
+def test_routed_fanout_failure_blocks_the_phase3_step(tmp_path):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    result = runner._postroute_repair_librelane_result(
+        tmp_path, tmp_path / 'pnr',
+        {'verdict': 'FAIL', 'code': 'LL_PRR_FANOUT_VIOLATION',
+         'reason': 'declared postroute max fanout has 3 residual violations'},
+        0.0, handed=False)
+    assert result.status == 'FAIL'
+    assert 'LL_PRR_FANOUT_VIOLATION' in result.detail
+    assert result.reason_class == ''
+
+
 def test_a_hard_repair_that_makes_setup_negative_is_rejected(tmp_path, monkeypatch):
     project, arm, impl, shim = _scenario_impl(
         tmp_path, baseline=(0.8, 0.391, (0, 0, 3)),
@@ -357,6 +417,161 @@ def test_a_hard_repair_that_makes_setup_negative_is_rejected(tmp_path, monkeypat
     assert run.iterations[0].decision == 'ROLLED_BACK'
     assert 'below its floor 0.0' in run.iterations[0].decision_reason
     assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+
+
+def test_a_fanout_reduction_with_one_remaining_violation_is_adopted_but_not_signed_off(
+        tmp_path, monkeypatch):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, 0.4, (0, 0, 4)),
+        candidates=[_cand(1.6, 0.4, (0, 0, 1))])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_drv')
+    assert run.iterations[0].decision == 'PROMOTED'
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] == '32-cand01'
+    row = json.loads((arm / prr.LEDGER).read_text())['candidates'][0]
+    assert row['measurement']['drv_count'] == 1
+    assert row['decision'] != 'REFUSED'
+    assert row['decision'] == 'PROPOSED'
+    assert row['fanout']['verdict'] == 'FAIL'
+    assert row['fanout']['violations'] == 1
+
+
+def test_hold_closure_cannot_adopt_with_unchanged_measured_drv_residue(
+        tmp_path, monkeypatch):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, -0.335, (0, 0, 1)),
+        candidates=[_cand(4.999, 0.326, (0, 0, 1))])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_hold')
+    assert run.iterations[0].decision == 'ROLLED_BACK'
+    final = json.loads((impl / prr.CURRENT).read_text())
+    assert final['candidate'] is None
+    assert final['measurement']['hold_ws_min'] == -0.335
+    assert final['measurement']['drv_count'] == 1
+
+
+def test_unmeasured_candidate_drv_is_still_refused(tmp_path, monkeypatch):
+    candidate = _cand(4.999, 0.326, (0, 0, 0))
+    key = next(k for k in candidate['sta_metrics'] if 'max_fanout_violation' in k)
+    del candidate['sta_metrics'][key]
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, -0.335, (0, 0, 1)),
+        candidates=[candidate])
+    ctl = _controller(impl, arm, shim, monkeypatch, tmp_path)
+    run = ctl.run_controller('postroute.repair_hold')
+    assert run.iterations[0].decision == 'ROLLED_BACK'
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+
+def test_lower_count_with_a_new_named_violator_keeps_the_input(tmp_path, monkeypatch):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, 0.4, (0, 0, 4)),
+        candidates=[_cand(1.6, 0.4, (0, 0, 1),
+                          drv_names={'fanout': ['new_driver/Z']})])
+    _controller(impl, arm, shim, monkeypatch, tmp_path).run_controller(
+        'postroute.repair_drv')
+    row = json.loads((arm / prr.LEDGER).read_text())['candidates'][0]
+    assert row['decision'] == 'REFUSED'
+    assert row['named_drv_delta']['added'] == [
+        'nom_ss_125C_4v50|fanout|new_driver/Z']
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] is None
+
+
+def test_residual_progress_is_the_next_bounded_repair_input(tmp_path, monkeypatch):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, 0.4, (0, 0, 4)),
+        candidates=[_cand(4.0, 0.4, (0, 0, 2)),
+                    _cand(3.0, 0.4, (0, 0, 1)),
+                    _cand(2.0, 0.4, (0, 0, 0))])
+    run = _controller(impl, arm, shim, monkeypatch, tmp_path).run_controller(
+        'postroute.repair_drv')
+    assert [it.decision for it in run.iterations] == ['PROMOTED'] * 3
+    rows = json.loads((arm / prr.LEDGER).read_text())['candidates']
+    assert [r['from'] for r in rows] == [None, '32-cand01', '32-cand02']
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] == '32-cand03'
+
+
+def test_residual_repair_stalls_after_first_nonimproving_candidate(tmp_path, monkeypatch):
+    project, arm, impl, shim = _scenario_impl(
+        tmp_path, baseline=(5.0, 0.4, (0, 0, 4)),
+        candidates=[_cand(4.0, 0.4, (0, 0, 2)),
+                    _cand(3.0, 0.4, (0, 0, 2))])
+    run = _controller(impl, arm, shim, monkeypatch, tmp_path).run_controller(
+        'postroute.repair_drv')
+    assert [it.decision for it in run.iterations] == ['PROMOTED', 'ROLLED_BACK']
+    assert json.loads((impl / prr.CURRENT).read_text())['candidate'] == '32-cand01'
+
+
+def test_progress_candidate_is_handed_on_but_keeps_step_fail(tmp_path):
+    runner = importlib.import_module('phase3_one_shot_runner')
+    pnr = tmp_path / 'pnr'
+    write(pnr / 'routed.def', 'routed\n')
+    write(pnr / 'dut_pnr.v', 'module dut; endmodule\n')
+    result = runner._postroute_repair_librelane_result(
+        tmp_path, pnr,
+        {'verdict': 'FAIL', 'code': 'LL_PRR_FANOUT_VIOLATION',
+         'reason': 'one residual', 'progress_adopted': True,
+         'adopted': '32-cand01', 'baseline': {'drv_count': 36},
+         'final': {'drv_count': 9, 'antenna_nets': 0, 'antenna_pins': 0,
+                   'antenna_state': 'candidate antenna census'},
+         'candidates': [{'candidate': '32-cand01',
+                         'repair_metrics': {'vibeic__prr__unrouted__added': 0}}],
+         'corners': CORNERS,
+         'final_supply_ownership': {'verdict': 'PASS'}},
+        0.0, handed=False, top='dut')
+    assert result.status == 'FAIL'
+    assert not (pnr / runner._DRV_PROMOTION_CLAIM).exists()
+    disclosure = json.loads((pnr / runner._DRV_PROMOTION_NOT_RUN).read_text())
+    assert disclosure['not_run_stage'] == 'postroute_repair_progress_fail'
+
+
+def test_the_deck_repairs_drv_after_timing_and_antenna_cell_insertion():
+    tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    calls = [m.start() for m in re.finditer(r'^\s*log_cmd repair_design', tcl, re.M)]
+    assert len(calls) >= 3
+    assert calls[0] < tcl.index('log_cmd repair_timing {*}$setup_args')
+    assert tcl.index('log_cmd repair_timing {*}$hold_args') < calls[1]
+    assert calls[1] < tcl.index('vic_census after_timing_drv_recheck')
+    assert tcl.index('log_cmd repair_antennas {*}$ant_args') < calls[-1]
+    assert calls[-1] < tcl.index('# ---- 7. re-verify')
+
+
+def test_post_antenna_drv_recheck_runs_even_without_a_fanout_row(tmp_path):
+    tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    after_antenna = tcl[tcl.index('log_cmd repair_antennas'):]
+    assert len(re.findall(r'^\s*log_cmd repair_design', after_antenna, re.M)) == 1
+    start = tcl.index('set ::vic_fo_rounds 0')
+    end = tcl.index('# ---- 7. re-verify', start)
+    section = tmp_path / 'post_antenna_drv.tcl'
+    section.write_text(tcl[start:end])
+    harness = textwrap.dedent(r"""
+        namespace eval utl { proc metric_integer {args} {} }
+        set ::env(VIBEIC_PRR_MAX_FANOUT) 4
+        set ::vic_fo_repaired [dict create]
+        set ::calls 0
+        set rd_args [list]
+        set ::block block
+        proc block {method args} {if {$method eq "getInsts"} {return {}}}
+        proc vic_fanout_over {} {return [dict create]}
+        proc vic_fanout_added {before now} {return [dict create]}
+        proc vic_say {line} {puts $line}
+        proc log_cmd {name args} {
+            if {$name eq "repair_design"} {incr ::calls}
+        }
+        source __SECTION__
+        puts "DRV_RECHECK_CALLS $::calls"
+    """).replace('__SECTION__', str(section))
+    run = subprocess.run(['tclsh'], input=harness, text=True,
+                         capture_output=True, check=False)
+    assert run.returncode == 0, run.stderr
+    assert 'DRV_RECHECK_CALLS 1' in run.stdout, run.stdout
+
+
+def test_timing_cannot_remove_the_buffers_that_closed_declared_fanout():
+    tcl = (STEP_DIR / 'postroute_repair.tcl').read_text()
+    assert re.search(r'^set setup_args \[list -setup -verbose -skip_buffer_removal\]$',
+                     tcl, re.M)
+    assert re.search(r'^set hold_args \[list -hold -verbose -skip_buffer_removal\]$',
+                     tcl, re.M)
 
 
 def test_a_hard_repair_stops_at_the_declared_floor(tmp_path, monkeypatch):
@@ -814,6 +1029,131 @@ def test_in_the_chain_the_route_state_is_repaired_without_a_bridge(tmp_path, mon
         "the LL21 route's fillers are LibreLane's; the refill is too"
 
 
+def test_in_chain_clean_census_replaces_a_stale_repair_decision_before_stream(
+        tmp_path, monkeypatch):
+    import flow_step_output_content_check as content
+    import postroute_timing_repair_audit as audit
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': _base(4.0, 0.2)})
+    decision = put(project / 'phase3/stage3/postroute_timing_repair' /
+                   'postroute_timing_repair_decision.json', {'repair_needed': True})
+    write(decision.parent / 'repair_log.json', '{}\n')
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    assert report['verdict'] == 'PASS' and report['adopted'] is None
+    assert json.loads(decision.read_text())['repair_needed'] is False
+    assert not (decision.parent / 'repair_log.json').exists()
+    assert content.check(project, 'repair') == []
+    assert not [f for f in audit.audit(project)[0] if f.severity == 'ERROR']
+
+
+def test_in_chain_adopted_repair_keeps_its_input_trigger_and_passes_audit(
+        tmp_path, monkeypatch):
+    import postroute_timing_repair_audit as audit
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': _base(4.026052, -0.335),
+        '32-cand01': _cand(4.025948, 0.326)})
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    output = project / 'phase3/stage3/postroute_timing_repair'
+    decision = json.loads((output / 'postroute_timing_repair_decision.json').read_text())
+    log = json.loads((output / 'repair_log.json').read_text())
+    assert report['adopted'] == '32-cand01'
+    assert decision['repair_needed'] is True
+    assert decision['baseline']['hold_ws_min'] < 0 < decision['final']['hold_ws_min']
+    assert log['changes'][0]['candidate'] == report['adopted']
+    assert log['re_verified'] is True
+    assert not (output / 'no_repair_needed.flag').exists()
+    assert not [f for f in audit.audit(project)[0] if f.severity == 'ERROR']
+
+
+def test_in_chain_tool_refusal_invalidates_the_prior_declared_decision(
+        tmp_path, monkeypatch):
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {})
+    output = project / 'phase3/stage3/postroute_timing_repair'
+    decision = put(output / 'postroute_timing_repair_decision.json',
+                   {'repair_needed': False})
+    write(output / 'no_repair_needed.flag', 'stale\n')
+    write(output / 'repair_log.json', '{}\n')
+    monkeypatch.setattr(prr, 'fork_capability',
+                        lambda image, docker='docker': {'capable': False, 'image': image})
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    assert report['verdict'] != 'PASS'
+    assert not decision.exists()
+    assert not (output / 'no_repair_needed.flag').exists()
+    assert not (output / 'repair_log.json').exists()
+
+
+def test_unmeasured_publication_names_its_missing_floor_in_step32_report(
+        tmp_path, monkeypatch):
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': _base(4.0, 0.2)})
+    monkeypatch.setattr(prr, 'declared_timing_floor', lambda project, sdc: {})
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    record = json.loads((project / prr.REPORT_REL).read_text())
+    publication = record.get('declared_repair_publication')
+    status = (publication or {}).get('status', 'MISSING')
+    assert status == 'NOT_MEASURED'
+    assert 'timing floors' in publication.get('reason', '')
+    assert report.get('declared_repair_publication') == publication
+    assert not (project / prr.DECLARED_REPAIR_REL /
+                'postroute_timing_repair_decision.json').exists()
+
+
+def test_in_chain_residual_drv_replaces_a_stale_clean_decision_before_stream(
+        tmp_path, monkeypatch):
+    import flow_step_output_content_check as content
+    import postroute_timing_repair_audit as audit
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': {'def': _def(True), 'sta_metrics': _sta_metrics(5.0, 0.4, (0, 0, 4)),
+                    'antenna_metrics': _ant(0),
+                    'repair_metrics': {'vibeic__prr__changed': 0}},
+        '32-cand01': _cand(1.6, 0.4, (0, 0, 1))})
+    output = project / 'phase3/stage3/postroute_timing_repair'
+    decision = put(output / 'postroute_timing_repair_decision.json',
+                   {'repair_needed': False})
+    write(output / 'no_repair_needed.flag', 'stale estimate\n')
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    assert report['verdict'] == 'FAIL' and report['adopted'] == '32-cand01'
+    assert report['code'] == 'LL_PRR_FANOUT_VIOLATION'
+    assert report['final_fanout']['violations'] == 1
+    assert json.loads(decision.read_text())['repair_needed'] is True
+    assert not (output / 'no_repair_needed.flag').exists()
+    assert json.loads((output / 'repair_log.json').read_text())['candidates'][0]['decision'] == 'PROPOSED'
+    assert content.check(project, 'repair') == []
+    errors = [f.category for f in audit.audit(project)[0] if f.severity == 'ERROR']
+    assert 'NOT_REVERIFIED' in errors
+
+def test_refused_candidate_names_the_residual_drv_in_the_audit(tmp_path, monkeypatch):
+    import postroute_timing_repair_audit as audit
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-base': {'def': _def(True), 'sta_metrics': _sta_metrics(0.8, 0.4, (0, 0, 4)),
+                    'antenna_metrics': _ant(0),
+                    'repair_metrics': {'vibeic__prr__changed': 0}},
+        '32-cand01': _cand(-0.05, 0.4, (0, 0, 1))})
+    # The baseline has measured DRV residue; no candidate may trade setup
+    # below its floor to clear it.
+    report = prr.run_in_chain(project, mode='librelane', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, programs_dir=shim)
+    assert report['adopted'] is None
+    decision_path = project / prr.DECLARED_REPAIR_REL / 'postroute_timing_repair_decision.json'
+    decision = json.loads(decision_path.read_text())
+    assert decision['action'] == 'input_route_kept'
+    assert (decision.get('residual') or {}).get('drv_count', 0) > 0
+    errors = [f.category for f in audit.audit(project)[0] if f.severity == 'ERROR']
+    assert 'REPAIR_REFUSED_RESIDUAL_DRV' in errors
+    assert 'EMPTY_CHANGES' not in errors and 'NOT_REVERIFIED' not in errors
+
+
 def test_dual_runs_three_arms_and_selects_by_hold_then_setup(tmp_path, monkeypatch):
     """review70 step 32 dual: A = the pre-DRT repair (step 21's LibreLane
     route with the flow's RUN_POST_GRT_* gates on), B = this repair after
@@ -840,6 +1180,34 @@ def test_dual_runs_three_arms_and_selects_by_hold_then_setup(tmp_path, monkeypat
     assert report['arms']['pregrt']['closure'] == [], 'arm A is the route alone'
     assert report['selected_arm'] == 'postdrt', report['selection']
     assert report['adopted'] == '32-postdrt-cand01'
+
+
+def test_dual_publishes_decision_from_step32_input_when_pregrt_route_wins(
+        tmp_path, monkeypatch):
+    project, shim, sdc, route = _chain_setup(tmp_path, monkeypatch, {
+        '32-postdrt-base': _base(4.0, -0.3),
+        '32-pregrt-base': _base(4.2, 0.10),
+        '32-pregrt_postdrt-base': _base(4.1, 0.05)})
+    pre_state = put(project / 'phase3/librelane/21-route-pregrt/13-fill/state_out.json',
+                    {'odb': 'p.odb', 'def': 'p.def'})
+
+    def variant_arm(lane, extra):
+        return {'final': pre_state, 'route_drc': [{'run': 'drt-run-0', 'markers': 0}]}
+
+    report = prr.run_in_chain(project, mode='dual', image='img', pdk='pdk',
+                              pdk_root=tmp_path, sdc=sdc, derate=(0.95, 1.05),
+                              route_state=route, route_drc=0, variant_arm=variant_arm,
+                              programs_dir=shim)
+    assert report['selected_arm'] == 'pregrt'
+    assert report.get('floors', {}) == report['arms']['pregrt']['floors']
+    assert (report.get('input_baseline') or {}).get('hold_ws_min') == -0.3
+    decision = json.loads((project / prr.DECLARED_REPAIR_REL /
+                           'postroute_timing_repair_decision.json').read_text())
+    assert decision['repair_needed'] is True
+    assert decision['action'] == 'alternate_route_selected'
+    assert decision['baseline']['hold_ws_min'] == -0.3
+    assert decision['final']['hold_ws_min'] == 0.10
+    assert not (project / prr.DECLARED_REPAIR_REL / 'no_repair_needed.flag').exists()
 
 
 def test_dual_never_selects_an_arm_with_a_route_or_antenna_violation(tmp_path, monkeypatch):

@@ -219,12 +219,13 @@ def _run_step_gds(tmp_path: Path, monkeypatch, *, tamper_after_stream: bool):
 
     def _exec(container, cmd, *a, **kw):
         outs = kw.get("outputs") or []
-        if any(Path(o) == gds for o in outs):      # the stream-out session
-            gds.write_bytes(b"GDS as streamed\n")
+        if any(Path(o).suffix == ".gds" for o in outs):
+            streamed = Path(outs[0])
+            streamed.write_bytes(b"GDS as streamed\n")
             R._log_invocation(cmd, 0, 1, marker=kw.get("marker"),
                               container=None, outputs=outs)
             if tamper_after_stream:                # between stream-out and fill
-                with gds.open("ab") as fh:
+                with streamed.open("ab") as fh:
                     fh.write(b"edited by hand\n")
         return 0, "", ""
 
@@ -232,6 +233,7 @@ def _run_step_gds(tmp_path: Path, monkeypatch, *, tamper_after_stream: bool):
     monkeypatch.setattr(R, "_tool_in_path", lambda c, t: True)
     monkeypatch.setattr(R, "_to_container_path", lambda p, c: str(p))
     monkeypatch.setattr(R, "_vacuous_on_unrouted", lambda *a, **k: None)
+    monkeypatch.setattr(R, "_gds_substance_gate", lambda *a, **k: None)
     monkeypatch.setattr(R, "_magic_def_to_gds",
                         lambda *a, **k: (False, "forced"))
     for name in _REWRITERS:                        # each rewrites the GDS
@@ -259,17 +261,24 @@ def test_an_untampered_gds_flow_leaves_zero_unexplained_rows(tmp_path,
     _v, findings = C.audit(proj)
     assert not [f for f in findings if GDS in f.detail
                 and f.rule == "PROVENANCE_HASH_MISMATCH"], findings
-    steps = [r.get("producing_step") for r in _rows(proj)
-             if GDS in (r.get("outputs") or {})]
+    chain = [r for r in _rows(proj)
+             if r.get("record") == "declared_transform"]
+    steps = [r.get("producing_step") for r in chain]
     assert "gds:layer_merge" in steps and "gds:die_density_fill" in steps, steps
+    assert steps[-1] == "gds:finishing"
+    source = next(iter(chain[0]["inputs"]))
+    assert source != GDS and (proj / source).read_bytes() == b"GDS as streamed\n"
+    for prev, nxt in zip(chain, chain[1:]):
+        assert nxt["inputs"] == prev["outputs"]
 
 
 def test_a_gds_edited_between_stream_out_and_fill_fails(tmp_path, monkeypatch):
     proj, gds = _run_step_gds(tmp_path, monkeypatch, tamper_after_stream=True)
     assert b"_density_metal_fill" in gds.read_bytes(), "the fill still RAN"
-    assert GDS in _declined(proj)
+    stream = next(iter(_rows(proj)[0]["outputs"]))
+    assert stream in _declined(proj)
     declared = [r for r in _rows(proj) if GDS in (r.get("outputs") or {})]
-    assert len(declared) == 1, declared            # only the stream-out
+    assert len(declared) == 0, declared
     assert "PROVENANCE_HASH_MISMATCH" in _rules(proj)[1]
 
 

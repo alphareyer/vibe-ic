@@ -293,9 +293,22 @@ STA_LOG = ("Reading timing models for corner {c}…\n"
 
 def _sta_folder(tmp_path, *, setup=1.0, hold=0.4, ideal=(), derate=True, drop=None, spefs=None):
     folder = tmp_path / 'sta'
+    pnr = tmp_path / 'phase3/stage3/pnr'
+    netlist = write(pnr / 'spm_pnr.v', 'module chip_top; endmodule\n')
+    routed_def = write(pnr / 'spm.def', 'VERSION 5.8 ;\nDESIGN chip_top ;\nEND DESIGN\n')
+    timed_netlist = write(folder / 'chip_top.nl.v', netlist.read_text())
+    timed_def = write(folder / 'chip_top.def', routed_def.read_text())
+    odb = write(folder / 'chip_top.odb', 'database\n')
+    write(tmp_path / 'w/c.sdc', 'create_clock -period 24 [get_ports clk]\n')
+    write(tmp_path / 'w/extra.tcl', '# corner derate\n')
+    for rc in ('nom', 'min', 'max'):
+        write(tmp_path / 'w' / f'{rc}.spef', '*SPEF "IEEE 1481-1998"\n')
     metrics = {}
     for c in CORNERS:
         process = c.split('_', 1)[1]
+        for family in ('sc', 'io'):
+            write(tmp_path / 'pdk/libs.ref' / family / 'lib' / f'{family}__{process}.lib',
+                  f'library ({family}) {{}}\n')
         write(folder / c / 'sta.log', STA_LOG.format(c=c, p=process))
         write(folder / c / 'unpropagated.rpt', '\n'.join(ideal))
         if derate:
@@ -306,7 +319,8 @@ def _sta_folder(tmp_path, *, setup=1.0, hold=0.4, ideal=(), derate=True, drop=No
             metrics[f'{metric}__corner:{c}'] = value
     if drop:
         metrics.pop(drop)
-    put(folder / 'state_out.json', {'metrics': metrics, 'nl': '/w/spm_pnr.v', 'sdc': '/w/c.sdc',
+    put(folder / 'state_out.json', {'metrics': metrics, 'nl': str(timed_netlist),
+                                    'def': str(timed_def), 'odb': str(odb), 'sdc': '/w/c.sdc',
                                     'spef': spefs or {p: f'/w/{p.strip("*_")}.spef' for p in RULESETS}})
     put(folder / 'config.json', {'meta': {'step': 'OpenROAD.STAPostPNR'}, 'DESIGN_NAME': 'chip_top',
                                  'SIGNOFF_SDC_FILE': '/w/c.sdc', 'TIME_DERATING_CONSTRAINT': 5,
@@ -344,9 +358,17 @@ def _arm_edge(values, calls):
     def fake(cmd, **_):
         calls.append(cmd)
         corner = next(x.split('=', 1)[1] for x in cmd if str(x).startswith('VIBEIC_ARM_CORNER='))
+        arm_dir = Path(next(x.split('=', 1)[1] for x in cmd
+                            if str(x).startswith('VIBEIC_ARM_DIR=')))
+        write(arm_dir / 'annotation.rpt',
+              'Found 0 unannotated drivers.\nFound 0 partially unannotated drivers.\n')
         row = values(corner)
         return SimpleNamespace(returncode=0, stderr='', stdout=''.join(
-            f'VIBEIC_ARM {k} {v}\n' for k, v in row.items()))
+            f'VIBEIC_ARM {k} {v}\n' for k, v in row.items()) +
+            'STA_ANNOTATION_UNROUTED_NETS: 0\n'
+            'STA_ANNOTATION_ABUTTED_NETS: 0\n'
+            'STA_ANNOTATION_UNROUTED_SHAPE_BLIND: 0\n'
+            'STA_ANNOTATION_CENSUS_COMPLETE: 1\n')
     return fake
 
 
@@ -359,10 +381,14 @@ def test_standalone_opensta_agreeing_on_every_corner_is_agree(tmp_path, monkeypa
     folder = _sta_folder(tmp_path)
     calls = []
     monkeypatch.setattr(signoff.subprocess, 'run', _arm_edge(_same, calls))
-    doc = signoff.agreement(tmp_path, 'img', folder, [], tmp_path / 'agree.json')
+    doc = signoff.agreement(tmp_path, 'img', folder,
+                            [(tmp_path / 'pdk', '/pdk/x'), (tmp_path / 'w', '/w')],
+                            tmp_path / 'agree.json',
+                            logical_top='spm')
     assert doc['verdict'] == 'AGREE' and len(calls) == len(CORNERS)
     first = next(c for c in calls if f'VIBEIC_ARM_CORNER={CORNERS[0]}' in c)
-    assert first[first.index('--entrypoint') + 1] == 'sta'
+    assert first[first.index('--entrypoint') + 1] == 'openroad'
+    assert 'read_db $::env(VIBEIC_ARM_ODB)' in (tmp_path / 'phase3/tool_arms/23/openroad_odb/arm.tcl').read_text()
     assert '--memory' in first   # every docker run carries the ceiling
     # the same inputs the tool read: its corner libraries, SPEF, SDC and extra Tcl
     assert 'VIBEIC_ARM_LIBS=/pdk/x/libs.ref/sc/lib/sc__tt_025C_5v00.lib /pdk/x/libs.ref/io/lib/io__tt_025C_5v00.lib' in first
@@ -373,8 +399,23 @@ def test_a_corner_the_engines_disagree_on_is_a_refusal_not_a_pick(tmp_path, monk
     folder = _sta_folder(tmp_path)
     monkeypatch.setattr(signoff.subprocess, 'run', _arm_edge(
         lambda c: {**_same(c), 'hold_ws': 0.3} if c == CORNERS[2] else _same(c), []))
-    doc = signoff.agreement(tmp_path, 'img', folder, [], tmp_path / 'agree.json')
+    doc = signoff.agreement(tmp_path, 'img', folder,
+                            [(tmp_path / 'pdk', '/pdk/x'), (tmp_path / 'w', '/w')],
+                            tmp_path / 'agree.json',
+                            logical_top='spm')
     assert doc['verdict'] == 'DISAGREE' and doc['disagreeing_corners'] == [CORNERS[2]]
+
+
+def test_matching_timing_cannot_hide_a_stale_final_netlist(tmp_path, monkeypatch):
+    folder = _sta_folder(tmp_path)
+    write(tmp_path / 'phase3/stage3/pnr/spm_pnr.v', 'module different; endmodule\n')
+    monkeypatch.setattr(signoff.subprocess, 'run', _arm_edge(_same, []))
+    doc = signoff.agreement(tmp_path, 'img', folder,
+                            [(tmp_path / 'pdk', '/pdk/x'), (tmp_path / 'w', '/w')],
+                            tmp_path / 'agree.json',
+                            logical_top='spm')
+    assert doc['verdict'] == 'NOT_MEASURED'
+    assert doc['final_views_match'] is False
 
 
 OCV = '''=== SETUP corner: process=SS liberty=/foss/pdks/x/libs.ref/sc/lib/sc__ss_125C_4v50.lib, SPEF=spm.max.spef ===

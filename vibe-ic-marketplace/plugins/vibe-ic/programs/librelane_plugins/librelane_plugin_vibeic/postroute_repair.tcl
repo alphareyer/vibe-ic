@@ -176,12 +176,60 @@ proc vic_fanout_declared {} {
     return [expr {[info exists ::env(VIBEIC_PRR_MAX_FANOUT)]
                   && [string is double -strict $::env(VIBEIC_PRR_MAX_FANOUT)]}]
 }
+# OpenSTA's violator table applies each driver's own SDC/Liberty limit and
+# omits constant drivers. max_fanout_check_limit is only the worst pin's limit.
+proc vic_fanout_target_limits {} {
+    set report "$::env(STEP_DIR)/prr_fanout_violators.rpt"
+    if {[catch {report_check_types -max_fanout -violators -max_count 1000000 > $report} err]} {
+        error "PRR_FANOUT_REPORT_FAILED: $err"
+    }
+    set fh [open $report]
+    set rows [split [read $fh] "\n"]
+    close $fh
+    set targets [dict create]
+    foreach row $rows {
+        if {![string match "*(VIOLATED)*" $row]} { continue }
+        if {![regexp {^\s*(\S+)\s+(\S+).*\(VIOLATED\)\s*$} $row -> pin limit]
+            || ![string is double -strict $limit]} {
+            error "PRR_FANOUT_REPORT_UNPARSEABLE: $row"
+        }
+        if {$limit < 2} {
+            vic_say "fanout closure skips unsupported limit=$limit on $pin"
+            continue
+        }
+        set pins [get_pins -quiet $pin]
+        if {[llength $pins] != 1} { error "PRR_FANOUT_PIN_UNRESOLVED: $pin" }
+        set sta_nets [get_nets -quiet -of_objects $pins]
+        if {[llength $sta_nets] != 1} { error "PRR_FANOUT_NET_UNRESOLVED: $pin" }
+        set name [get_name [lindex $sta_nets 0]]
+        set net [$::block findNet $name]
+        if {$net eq "NULL" || [$net isSpecial] || [$net getSigType] ne "SIGNAL"} { continue }
+        if {[$net isDoNotTouch]} {
+            vic_say "fanout closure skips protected net=$name"
+            continue
+        }
+        set protected 0
+        foreach it [$net getITerms] {
+            if {[[$it getInst] isDoNotTouch]} { set protected 1; break }
+        }
+        if {$protected} {
+            vic_say "fanout closure skips protected load on net=$name"
+            continue
+        }
+        if {![dict exists $targets $name] || $limit < [dict get $targets $name]} {
+            dict set targets $name $limit
+        }
+    }
+    return $targets
+}
 proc vic_fanout_over {} {
     set out [dict create]
     if {![vic_fanout_declared]} { return $out }
     set cap $::env(VIBEIC_PRR_MAX_FANOUT)
+    set eligible [vic_fanout_target_limits]
     foreach net [$::block getNets] {
         if {[$net isSpecial] || [$net getSigType] in {POWER GROUND}} { continue }
+        if {![dict exists $eligible [$net getName]]} { continue }
         set loads 0
         set drivers 0
         foreach it [$net getITerms] {
@@ -215,7 +263,9 @@ append_if_exists_argument rd_args VIBEIC_PRR_SLEW_MARGIN_PCT -slew_margin
 append_if_exists_argument rd_args VIBEIC_PRR_CAP_MARGIN_PCT -cap_margin
 log_cmd repair_design {*}$rd_args
 
-set setup_args [list -setup -verbose]
+# Removing a buffer can merge the very fanout tree repair_design just built.
+# Let timing resize and add cells, then judge the complete result after RCX.
+set setup_args [list -setup -verbose -skip_buffer_removal]
 lappend setup_args -setup_margin $::env(VIBEIC_PRR_SETUP_MARGIN)
 lappend setup_args -max_buffer_percent $::env(VIBEIC_PRR_SETUP_MAX_BUFFER_PCT)
 append_if_exists_argument setup_args VIBEIC_PRR_SETUP_REPAIR_TNS_PCT -repair_tns
@@ -223,13 +273,19 @@ log_cmd repair_timing {*}$setup_args
 
 # Hold after setup (review70 step 32: T60 moved spm SS hold -0.39 -> +0.039
 # only once hold ran after setup), and never at setup's expense.
-set hold_args [list -hold -verbose]
+set hold_args [list -hold -verbose -skip_buffer_removal]
 lappend hold_args -setup_margin $::env(VIBEIC_PRR_SETUP_MARGIN)
 lappend hold_args -hold_margin $::env(VIBEIC_PRR_HOLD_MARGIN)
 lappend hold_args -max_buffer_percent $::env(VIBEIC_PRR_HOLD_MAX_BUFFER_PCT)
 log_cmd repair_timing {*}$hold_args
 # What repair_design left: every later edit in this step must keep it.
 set ::vic_fo_repaired [vic_fanout_over]
+
+# Resizing and hold repair can disturb a fanout tree even with buffer removal
+# disabled. Re-run design repair after both timing passes; the post-route
+# STAPostPNR census decides whether every DRV row closed before adoption.
+log_cmd repair_design {*}$rd_args
+vic_census after_timing_drv_recheck
 
 # ---- 5. what changed -------------------------------------------------------
 set ::vic_created [list]
@@ -254,7 +310,8 @@ utl::metric_integer vibeic__prr__removed__count $::vic_removed
 
 set ::vic_changed [expr {[llength $::vic_created] + [llength $::vic_resized] + $::vic_removed}]
 utl::metric_integer vibeic__prr__changed $::vic_changed
-if {$::vic_changed == 0} {
+set ::vic_fanout_pending [expr {[dict size [vic_fanout_target_limits]] > 0}]
+if {$::vic_changed == 0 && !$::vic_fanout_pending} {
     # A repair that changed no instance hands back the INPUT database
     # (PostRouteRepair.run): re-routing an identical netlist is a fresh
     # route with its own quality lottery (v1.8.43: 13 new min-area islands).
@@ -492,8 +549,9 @@ vic_say "antenna after eco=$::vic_ant_eco diodes=[llength $::vic_diodes]"
 # ANTENNA_5 on that net as its 5th load -- a diode's pin is a load -- and the
 # candidate shipped max_fanout 5 > 4. A net the antenna phase pushed over the
 # cap gets a bounded repair_design round here (its buffers legalized alone,
-# their nets routed by the same scoped, guarded ECO route); re-verify below
-# refuses whatever is still over.
+# their nets routed by the same scoped, guarded ECO route). The first round
+# always runs: antenna repair can also create capacitance or slew residue.
+# Re-verify below refuses whatever is still over.
 set ::vic_fo_rounds 0
 # (the declared-cap test is spelled inline: this section is also exercised
 # on its own, with none of the procs above it)
@@ -501,9 +559,9 @@ set ::vic_fo_declared [expr {[info exists ::env(VIBEIC_PRR_MAX_FANOUT)]
     && [string is double -strict $::env(VIBEIC_PRR_MAX_FANOUT)]}]
 set ::vic_fo_added [expr {$::vic_fo_declared
     ? [vic_fanout_added $::vic_fo_repaired [vic_fanout_over]] : [dict create]}]
-while {[dict size $::vic_fo_added] && $::vic_fo_rounds < 2} {
+while {$::vic_fo_rounds == 0 || ([dict size $::vic_fo_added] && $::vic_fo_rounds < 2)} {
     incr ::vic_fo_rounds
-    vic_say "round $::vic_fo_rounds: [dict size $::vic_fo_added] net(s) pushed over max_fanout $::env(VIBEIC_PRR_MAX_FANOUT) after repair_design: $::vic_fo_added"
+    vic_say "round $::vic_fo_rounds: [dict size $::vic_fo_added] net(s) pushed over max_fanout after antenna repair: $::vic_fo_added"
     set names [dict create]
     foreach inst [$::block getInsts] { dict set names [$inst getName] [[$inst getMaster] getName] }
     log_cmd repair_design {*}$rd_args
@@ -547,6 +605,210 @@ while {[dict size $::vic_fo_added] && $::vic_fo_rounds < 2} {
     set ::vic_fo_added [vic_fanout_added $::vic_fo_repaired [vic_fanout_over]]
 }
 utl::metric_integer vibeic__prr__fanout__rounds $::vic_fo_rounds
+
+
+# ---- 6d. residual data fanout closure --------------------------------------
+proc vic_close_data_fanout {} {
+    set ::vic_fanout_modified 0
+    set target_limits [vic_fanout_target_limits]
+    set diode_master [expr {[info exists ::env(DIODE_CELL)]
+                            ? [lindex [split $::env(DIODE_CELL) /] 0] : ""}]
+    set buffer_master [expr {[info exists ::env(SYNTH_BUFFER_CELL)]
+                             ? [lindex [split $::env(SYNTH_BUFFER_CELL) /] 0] : ""}]
+    set targets [list]
+    dict for {net_name pin_limit} $target_limits {
+        set net [$::block findNet $net_name]
+        if {$net eq "NULL"} { continue }
+        set limit [expr {int(floor($pin_limit))}]
+        set sinks [list]
+        set diode_sinks [list]
+        set drivers 0
+        foreach it [$net getITerms] {
+            if {[$it getIoType] eq "OUTPUT"} { incr drivers; continue }
+            if {[$it getIoType] ne "INPUT"} { continue }
+            set inst [$it getInst]
+            set pin "[$inst getName]/[[$it getMTerm] getName]"
+            if {$diode_master ne "" && [[$inst getMaster] getName] eq $diode_master} {
+                lappend diode_sinks $pin
+            } else {
+                lappend sinks $pin
+            }
+        }
+        if {$drivers != 1 || [llength $sinks] + [llength $diode_sinks] <= $limit} {
+            continue
+        }
+        # Keep the diode on its protected net when possible.  Moving the gate
+        # load first preserves its protection; the final antenna census still
+        # judges the routed candidate.
+        lappend targets [list $net_name $limit [concat [lsort -dictionary $sinks] \
+                                                 [lsort -dictionary $diode_sinks]]]
+    }
+    if {![llength $targets]} { return 1 }
+    if {$buffer_master eq ""} {
+        puts stderr "PRR_FANOUT_BUFFER_UNAVAILABLE: residual data fanout requires SYNTH_BUFFER_CELL"
+        return 0
+    }
+    set created [list]
+    set ::vic_fanout_dirty [dict create]
+    foreach target [lsort -dictionary -index 0 $targets] {
+        lassign $target net_name limit pins
+        set net [$::block findNet $net_name]
+        if {$net eq "NULL"} { continue }
+        dict set ::vic_fanout_dirty $net_name $net
+        set remaining [llength $pins]
+        while {$remaining > $limit} {
+            set take [expr {min($limit, $remaining - $limit + 1)}]
+            set group [lrange $pins 0 [expr {$take - 1}]]
+            set pins [lrange $pins $take end]
+            set serial [llength $created]
+            set name "vic_prr_fanout_${serial}"
+            while {[$::block findInst $name] ne "NULL"} {
+                incr serial
+                set name "vic_prr_fanout_${serial}"
+            }
+            set before [dict create]
+            foreach old [$::block getInsts] { dict set before [$old getName] 1 }
+            if {[catch {insert_buffer -buffer_cell $buffer_master \
+                    -load_pins [get_pins $group] -buffer_name $name \
+                    -net_name "${name}_net"} err]} {
+                puts stderr "PRR_FANOUT_INSERT_FAILED: $net_name: $err"
+                return 0
+            }
+            set inserted [list]
+            foreach newer [$::block getInsts] {
+                if {![dict exists $before [$newer getName]]} { lappend inserted $newer }
+            }
+            if {[llength $inserted] != 1} {
+                puts stderr "PRR_FANOUT_INSERT_MISSING: $name created [llength $inserted] instances"
+                return 0
+            }
+            set inst [lindex $inserted 0]
+            set name [$inst getName]
+            lappend created $inst
+            lappend ::vic_created $inst
+            set new_input ""
+            foreach it [$inst getITerms] {
+                set touched [$it getNet]
+                if {$touched ne "NULL" && [$touched getSigType] ni {POWER GROUND}} {
+                    dict set ::vic_fanout_dirty [$touched getName] $touched
+                }
+                if {[$it getIoType] eq "INPUT" && $touched eq $net} {
+                    set new_input "$name/[[$it getMTerm] getName]"
+                }
+            }
+            if {$new_input eq ""} {
+                puts stderr "PRR_FANOUT_INPUT_MISSING: $name"
+                return 0
+            }
+            lappend pins $new_input
+            set remaining [llength $pins]
+            vic_say "fanout split net=$net_name moved=$take remaining=$remaining"
+        }
+    }
+    if {![llength $created]} { return 1 }
+    set ::vic_fanout_modified 1
+    set mine [dict create]
+    foreach inst $created { dict set mine [$inst getName] 1 }
+    set locked [list]
+    foreach inst [$::block getInsts] {
+        if {[dict exists $mine [$inst getName]]} { continue }
+        set status [$inst getPlacementStatus]
+        if {$status ni {LOCKED FIRM COVER}} {
+            lappend locked [list $inst $status]
+            $inst setPlacementStatus LOCKED
+        }
+    }
+    log_cmd detailed_placement \
+        -max_displacement [subst { $::env(PL_MAX_DISPLACEMENT_X) $::env(PL_MAX_DISPLACEMENT_Y) }]
+    foreach pair $locked { [lindex $pair 0] setPlacementStatus [lindex $pair 1] }
+    check_placement -verbose
+    global_connect
+    if {![vic_eco_route ::vic_fanout_dirty fanout_route]} {
+        puts stderr "PRR_FANOUT_ROUTE_REFUSED: scoped reroute failed"
+        return 0
+    }
+    utl::metric_integer vibeic__prr__fanout__buffers [llength $created]
+    incr ::vic_changed [llength $created]
+    vic_say "fanout closure buffers=[llength $created] nets=[dict size $::vic_fanout_dirty]"
+    return 1
+}
+if {![vic_close_data_fanout]} {
+    puts stderr "PRR_FANOUT_CLOSURE_REFUSED: candidate is not written"
+    exit 1
+}
+utl::metric_integer vibeic__prr__changed $::vic_changed
+
+# Splitting and rerouting a data net can expose antenna violations.  Give
+# OpenROAD two bounded chances to add diodes, then close any new fanout again.
+# The final census below still refuses a candidate whose residue remains.
+if {$::vic_fanout_modified} {
+    set ::vic_fanout_ant [check_antennas]
+    set ::vic_fanout_ant_rounds 0
+    while {$::vic_fanout_ant > $::vic_ant_before && $::vic_fanout_ant_rounds < 2
+           && [info exists ::env(DIODE_CELL)] && $::env(VIBEIC_PRR_ANTENNA_REPAIR)} {
+        incr ::vic_fanout_ant_rounds
+        set routed [vic_routed_nets]
+        set names [dict create]
+        foreach inst [$::block getInsts] { dict set names [$inst getName] 1 }
+        set ant_args [list [lindex [split $::env(DIODE_CELL) "/"] 0]]
+        append_if_exists_argument ant_args DRT_ANTENNA_REPAIR_MARGIN -ratio_margin
+        if {[catch {log_cmd repair_antennas {*}$ant_args} err]} {
+            puts stderr "PRR_FANOUT_ANTENNA_REPAIR_FAILED: $err"
+            exit 1
+        }
+        set mine [dict create]
+        foreach inst [$::block getInsts] {
+            if {![dict exists $names [$inst getName]]} { dict set mine [$inst getName] $inst }
+        }
+        if {[dict size $mine]} {
+            set locked [list]
+            foreach inst [$::block getInsts] {
+                if {[dict exists $mine [$inst getName]]} { continue }
+                set status [$inst getPlacementStatus]
+                if {$status ni {LOCKED FIRM COVER}} {
+                    lappend locked [list $inst $status]
+                    $inst setPlacementStatus LOCKED
+                }
+            }
+            log_cmd detailed_placement \
+                -max_displacement [subst { $::env(PL_MAX_DISPLACEMENT_X) $::env(PL_MAX_DISPLACEMENT_Y) }]
+            foreach pair $locked { [lindex $pair 0] setPlacementStatus [lindex $pair 1] }
+            global_connect
+        }
+        set dirty [dict create]
+        dict for {name inst} $mine {
+            lappend ::vic_created $inst
+            foreach it [$inst getITerms] {
+                set net [$it getNet]
+                if {$net ne "NULL" && [$net getSigType] ni {POWER GROUND}} {
+                    dict set dirty [$net getName] $net
+                }
+            }
+        }
+        if {[llength [info commands grt::repaired_net_names]]} {
+            foreach name [grt::repaired_net_names] {
+                set net [$::block findNet $name]
+                if {$net ne "NULL"} { dict set dirty $name $net }
+            }
+        }
+        dict for {name net} [vic_lost_routes $routed] { dict set dirty $name $net }
+        set ::vic_fanout_ant_dirty $dirty
+        if {![vic_eco_route ::vic_fanout_ant_dirty fanout_antenna_route]} {
+            puts stderr "PRR_FANOUT_ANTENNA_ROUTE_REFUSED: candidate is not written"
+            exit 1
+        }
+        if {![vic_close_data_fanout]} {
+            puts stderr "PRR_FANOUT_CLOSURE_REFUSED: after antenna repair"
+            exit 1
+        }
+        set ::vic_fanout_ant [check_antennas]
+    }
+    utl::metric_integer vibeic__prr__fanout__antenna_rounds $::vic_fanout_ant_rounds
+    if {$::vic_fanout_ant > $::vic_ant_before} {
+        puts stderr "PRR_FANOUT_ANTENNA_RESIDUE: $::vic_fanout_ant violating nets after bounded repair"
+        exit 1
+    }
+}
 
 # ---- 7. re-verify ------------------------------------------------------------
 # Router DRC: the fork's scoped route refuses a result with more whole-design
@@ -607,6 +869,10 @@ if {$::vic_fillers > 0} {
 }
 
 vic_annotate after
+# The consumer runs RCX + STAPostPNR on both changed and no-op candidates.
+# Its fresh per-corner OpenROAD processes count max-fanout violations and
+# refuse any residual (or disclose NOT_MEASURED).  Do not call the counter in
+# this multi-corner repair session: CheckFanouts::check has signalled 11 here.
 vic_census after
 
 unset_dont_touch_objects

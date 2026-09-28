@@ -421,8 +421,11 @@ def _placement_producer(tmp_path, monkeypatch, *, spare_record=True):
 def test_step17_continues_the_step15_chain_through_the_spare_step(tmp_path, monkeypatch):
     project, out_dir, seen, result, consumer, plan = _placement_producer(tmp_path, monkeypatch)
     assert result.status == 'PASS', result.detail
-    # one chain: the tool's own segment through DetailedPlacement, then spares
-    assert seen['steps'][-3:] == ['OpenROAD.RepairDesignPostGPL', 'OpenROAD.DetailedPlacement',
+    # The first placement repair can create over-limit first-level buffers.
+    # Close those with the same SDC before the tool's final placement and spares.
+    assert seen['steps'][-4:] == ['OpenROAD.RepairDesignPostGPL',
+                                  'Vibeic.PostGPLFanoutClosure',
+                                  'OpenROAD.DetailedPlacement',
                                   'Vibeic.InsertSpareCells']
     # declared inputs only: the runner's plan, its tie cell, the switch levers
     ov = seen['overlay']

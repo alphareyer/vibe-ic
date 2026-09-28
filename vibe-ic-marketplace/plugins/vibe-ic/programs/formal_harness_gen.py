@@ -1872,6 +1872,79 @@ def _unresolved_declaration_rows(decl: dict) -> List[dict]:
     return rows
 
 
+def _flow_generated_core_binding(project: Optional[Path], declared_top: Optional[str],
+                                 core: ModuleIface, rtl_modules: set) -> Tuple[dict, str]:
+    """L9's recorded core interface for a DIE whose chip_top is flow generated.
+
+    Step 5 precedes pad-ring generation.  L9 is the input used by that producer
+    to connect the core; a later pad-ring record may corroborate it.  A missing
+    or ambiguous entry is never inferred from a similar RTL signal name.
+    """
+    if project is None or declared_top != "chip_top" or declared_top in rtl_modules:
+        return {}, "the declared top is not an absent flow-generated chip_top"
+    try:
+        import _tapeout_declaration as _td
+        route = project / _td.DECLARATION_REL
+        decision = json.loads(route.read_text(errors="replace"))
+        if decision.get("schema") != _td.SCHEMA or _td.answer(
+                decision, "deliverable") != _td.DELIVERABLE_DIE:
+            return {}, "the owner declaration does not select a DIE"
+        l9_path = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+        l9 = json.loads(l9_path.read_text(errors="replace"))
+    except (OSError, ValueError, AttributeError, TypeError) as exc:
+        return {}, f"DIE/L9 binding evidence could not be read: {exc}"
+    if not isinstance(l9, dict) or l9.get("top_module") != core.name:
+        return {}, "L9 top_module does not identify the harness core"
+    entries = l9.get("top_ports")
+    if not isinstance(entries, list) or not entries:
+        return {}, "L9 top_ports has no recorded interface"
+    by_external: Dict[str, List[str]] = {}
+    by_core: Dict[str, List[str]] = {}
+    rtl_inputs = {p.name for p in core.ports
+                  if p.direction == "input" and _is_scalar(p.width)}
+    for row in entries:
+        if not isinstance(row, dict):
+            continue
+        external = row.get("name")
+        # The pad-ring producer's u_core binding is .name(core_name).  L9
+        # describes that exact port; it does not authorize an arbitrary rename.
+        internal = external
+        if not (isinstance(external, str) and isinstance(internal, str)
+                and _IDENT_RE.fullmatch(external) and _IDENT_RE.fullmatch(internal)):
+            continue
+        if row.get("core_port", external) != external:
+            continue
+        if row.get("direction", row.get("mode")) != "input":
+            continue
+        if row.get("width") != 1:
+            continue
+        by_external.setdefault(external, []).append(internal)
+        by_core.setdefault(internal, []).append(external)
+    mapping = {external: targets[0] for external, targets in by_external.items()
+               if len(targets) == 1 and len(by_core.get(targets[0], [])) == 1
+               and targets[0] in rtl_inputs}
+    pad_path = project / "reports/phase3/io_pad_chip_top.json"
+    if pad_path.is_file():
+        try:
+            pad = json.loads(pad_path.read_text(errors="replace"))
+        except (OSError, ValueError) as exc:
+            return {}, f"pad-ring binding record could not be read: {exc}"
+        if (not isinstance(pad, dict) or pad.get("verdict") != "WROTE"
+                or pad.get("chip_top_module") != declared_top
+                or pad.get("core_module") != core.name
+                or not isinstance(pad.get("pad_instances"), dict)):
+            return {}, "pad-ring record does not identify this generated wrapper and core"
+        counts: Dict[str, int] = {}
+        for inst in pad["pad_instances"].values():
+            if isinstance(inst, dict) and inst.get("direction") == "input":
+                port = inst.get("port")
+                if isinstance(port, str):
+                    counts[port] = counts.get(port, 0) + 1
+        mapping = {outer: inner for outer, inner in mapping.items()
+                   if counts.get(outer) == 1}
+    return mapping, f"{l9_path}:top_module,top_ports"
+
+
 def generate(project: Optional[Path] = None, top: Optional[str] = None,
              rtl: Optional[List[Path]] = None,
              out: Optional[Path] = None,
@@ -1999,6 +2072,35 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
     _inputs = {p.name for p in (_subj.ports if _subj else iface.ports)
                if p.direction == "input" and _is_scalar(p.width)}
     _pre_refused: Dict[str, str] = {}
+    _core_map, _map_source = _flow_generated_core_binding(
+        project, _decl_top, iface, set(_known))
+    _mapped_core = bool(_core_map) and _decl_top not in _known
+    if _decl_top not in _known and _decl_top == "chip_top":
+        mapped = []
+        for original in declared:
+            row = dict(original)
+            rule = row.get("program_rule")
+            if rule:
+                signals = {c.get("signal") for c in rule.get("claims") or []
+                           if c.get("signal")}
+                if not signals or any(s not in _core_map for s in signals):
+                    _pre_refused[str(row["id"])] = (
+                        f"no unambiguous flow-recorded core port for {sorted(signals)}; "
+                        + _map_source)
+                else:
+                    row["program_rule"] = dict(rule, claims=[
+                        dict(c, signal=_core_map.get(c.get("signal"), c.get("signal")))
+                        for c in rule.get("claims") or []])
+                    row["core_binding"] = {
+                        "declared_top": _decl_top, "core_top": dut_top,
+                        "ports": {s: _core_map[s] for s in sorted(signals)},
+                        "source": _map_source}
+                    if row.get("binding"):
+                        row["binding"] = dict(row["binding"],
+                                              declared_port=row["binding"]["port"],
+                                              port=_core_map[row["binding"]["port"]])
+            mapped.append(row)
+        declared = mapped
     for o in declared:
         for c in (o.get("program_rule") or {}).get("claims") or []:
             if c.get("signal") and c["signal"] not in _inputs:
@@ -2048,7 +2150,7 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
     # (review round 4, H1).
     _top_found = (_decl_top is not None and _decl_top in _known
                   and dut_top == _decl_top and selection == "declared_top")
-    if not _top_found:
+    if not (_top_found or _mapped_core):
         for o in declared:
             if o.get("program_rule"):
                 _pre_refused.setdefault(str(o["id"]), (
@@ -2061,7 +2163,7 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
                       "nothing here"))
     _facts, _facts_why = (None, "not computed")
     _simdef = ""
-    if _top_found and project is not None and _pl is not None and any(
+    if (_top_found or _mapped_core) and project is not None and _pl is not None and any(
             str(o["id"]) not in _pre_refused and o.get("program_rule")
             for o in declared):
         _resets = sorted({c["signal"] for o in declared
@@ -2085,7 +2187,7 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
                         f"cannot be known at Step 5; the program closes "
                         f"nothing on a read that may not be the chip's"))
         _facts, _facts_why = netlist_state(
-            rtl_files, _decl_top, _pl.formal_dir(project) / "l8_netlist",
+            rtl_files, _subj_name, _pl.formal_dir(project) / "l8_netlist",
             container, _resets, clock, _simdef)
         if _facts is not None and _facts.get("outside_class"):
             # R-0915-155: EVERY ruled obligation — structural and temporal —
@@ -2201,17 +2303,21 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
             # the R-0915-155 gate is re-applied by the check that answers
             "clock": clock,
             # R-0915-157: the chip's define decision, the same read the proof uses
-            "simdef": _simdef if _top_found else "",
+            "simdef": _simdef if (_top_found or _mapped_core) else "",
             "resets": sorted({c["signal"] for o in declared
                               for c in (o.get("program_rule") or {}).get("claims") or []
                               if c.get("rule", "").startswith("reset_")
                               and c.get("signal") in _inputs}),
             "rtl_files": [str(f) for f in rtl_files],
         }
-    if _top_found and project is not None and _pl is not None:
+    if (_top_found or _mapped_core) and project is not None and _pl is not None:
         # R-0915-157 round 9: the module the program-closed proof is ABOUT;
         # `formal_property_run` records the exact chip read under it.
-        contract["chip_read_top"] = _decl_top
+        contract["chip_read_top"] = _subj_name
+    if _mapped_core:
+        contract["flow_generated_core_binding"] = {
+            "declared_top": _decl_top, "core_top": dut_top,
+            "source": _map_source, "ports": _core_map}
     if l8_obs:
         contract["observers"] = [
             {"wire": o.wire, "net": f"dut.{o.net}", "width": o.width}
@@ -2225,8 +2331,9 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
         # HOW this module was reached. A property proven on a sub-module is a
         # weaker statement than one proven on the declared top, and a consumer
         # that cannot tell them apart is reading an adjacent measurement.
-        "selection": selection,
-        "proves_declared_top": selection == "declared_top",
+        "selection": "flow_generated_core" if _mapped_core else selection,
+        "proves_declared_top": _top_found,
+        "flow_generated_core_binding": _mapped_core,
         "harness_module": f"formal_{dut_top}",
         "harness_path": str(out_path),
         "dut_file": str(dut_file),

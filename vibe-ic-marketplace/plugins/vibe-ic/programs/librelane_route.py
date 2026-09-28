@@ -733,7 +733,17 @@ def execute(
         trc, tout, terr = _session(tail, "pnr_route_tail.tcl", True, [])
         summary = (f"\nPNR_ROUTE_HANDOFF: selected={selected} "
                    f"receipt={handoff.relative_to(project)}\n")
-        return trc, (out or "") + summary + (tout or ""), (err or "") + (terr or "")
+        # step_pnr's receipt writer checks THIS invocation's returned output,
+        # not merely the on-disk log (which could belong to an older route).
+        # Return only the selected arm's own route transcript, in the same
+        # order in which it was spliced into openroad.log above.
+        if selected == "openroad":
+            selected_route = (arm / "openroad.log").read_text(errors="replace")
+        else:
+            selected_route = (arms_root / selected / "route.log").read_text(
+                errors="replace")
+        return (trc, (out or "") + "\n" + selected_route + summary + (tout or ""),
+                (err or "") + (terr or ""))
 
     if cts_hold is not None:
         # Steps 19/20 on LibreLane: their split runs the head and the CTS/hold

@@ -25,13 +25,18 @@ of 6 ps of setup (SHIP_WNS_POSTROUTE -1.234340664617269 -> -1.2403163291940147).
 
 Every assertion here fails against the pre-fix runner.
 """
+import json
+import hashlib
 import re
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import phase3_one_shot_runner as R  # noqa: E402
+import librelane_postroute_repair as PRR  # noqa: E402
 
 
 DIODE = "somepdk_fd_sc__antenna"
@@ -194,3 +199,93 @@ def test_no_promotion_leaves_the_pnr_verdict_exactly_as_it_was(tmp_path):
     assert "0 net violations, 0 pin violations" in txt
     assert "antenna clean: YES" in txt
     assert "antenna measured on: the PnR route" in txt
+
+
+def _write_step32_evidence(proj, *, steps=None, site="after_route",
+                           adopted="32-cand01", verdict="PASS", bound=True,
+                           promotion=True):
+    """Write the actual switch, route receipt, report and D15 promotion record."""
+    steps = steps or {"21": "librelane", "32": "librelane"}
+    (proj / "phase3" / "librelane_switch.json").write_text(
+        json.dumps({"steps": steps}))
+    candidate = proj / "phase3" / "candidate.def"
+    candidate.write_text("DESIGN candidate ;\nEND DESIGN\n")
+    state = proj / "phase3" / "candidate_state.json"
+    state.write_text(json.dumps({"def": str(candidate)}))
+    report = {
+        "step": "32", "mode": steps["32"], "site": site,
+        "adopted": adopted, "adopted_state": str(state), "verdict": verdict,
+        "final": {"antenna_nets": 0, "antenna_pins": 0,
+                  "antenna_state": "OpenROAD.CheckAntennas"},
+        "candidates": [{"candidate": "32-cand01", "repair_metrics": {
+            "vibeic__prr__unrouted__added": 0}}],
+    }
+    path = proj / PRR.REPORT_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report))
+    receipt = proj / "reports" / "phase3" / "librelane_route_handoff.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(json.dumps({"postroute_repair": {
+        "report": PRR.REPORT_REL,
+        "report_sha256": hashlib.sha256(path.read_bytes()).hexdigest()
+        if bound else "0" * 64,
+        "adopted": adopted, "mode": steps["32"]}}))
+    if promotion:
+        record = {
+            "promoter": "librelane_step32_in_chain",
+            "promoted_def": str(candidate),
+            "promoted_def_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+            "measurement": {"antenna_nets": 0, "antenna_pins": 0,
+                            "antenna_source": "OpenROAD.CheckAntennas",
+                            "unrouted_added": 0,
+                            "unrouted_source": "Vibeic.PostRouteRepair "
+                                               "vibeic__prr__unrouted__added"},
+        }
+        (receipt.parent / "route_promotion.json").write_text(json.dumps(record))
+    return proj
+
+
+def test_receipt_bound_ll21_adoption_uses_the_pnr_tail(tmp_path):
+    proj = _write_step32_evidence(_write_run(tmp_path, promoted=True,
+                                              ship_log=None))
+    ok, rpt, _ = _emit(proj, tmp_path)
+    assert ok
+    txt = rpt.read_text()
+    assert "antenna clean: YES" in txt
+    assert "antenna measured on: the PnR tail after LL21 step-32 adoption" in txt
+
+
+@pytest.mark.parametrize("case", ["direct_route", "receipt_mismatch",
+                                  "nothing_adopted", "unmeasured_verdict"])
+def test_unbound_step32_cannot_borrow_pnr_antenna_count(tmp_path, case):
+    kwargs = {
+        "direct_route": {"steps": {"21": "direct", "32": "librelane"},
+                         "site": "after_direct_route", "promotion": False},
+        "receipt_mismatch": {"bound": False},
+        "nothing_adopted": {"adopted": None},
+        "unmeasured_verdict": {"verdict": "NOT_MEASURED"},
+    }[case]
+    proj = _write_step32_evidence(_write_run(tmp_path, promoted=True,
+                                              ship_log=None), **kwargs)
+    ok, rpt, _ = _emit(proj, tmp_path)
+    assert ok
+    txt = rpt.read_text()
+    assert "antenna clean: NO" in txt
+    assert "antenna measured on: NOTHING" in txt
+    assert "signoff_spef_repair PROMOTED" not in txt
+    assert json.loads((rpt.parent / "antenna.json").read_text())["clean"] is False
+
+
+def test_stale_clean_signoff_log_cannot_override_bound_ll21_tail(tmp_path):
+    stale = ("SHIP_ANT_BEGIN\n[INFO ANT-0002] Found 0 net violations.\n"
+             "[INFO ANT-0001] Found 0 pin violations.\nSHIP_ANT_END\n")
+    tail = ("[INFO ANT-0002] Found 3 net violations.\n"
+            "[INFO ANT-0001] Found 0 pin violations.\nANTENNA_POSTROUTE_DONE\n")
+    proj = _write_step32_evidence(_write_run(tmp_path, promoted=True,
+                                              ship_log=stale, pnr_log_extra=tail))
+    ok, rpt, _ = _emit(proj, tmp_path)
+    assert ok
+    txt = rpt.read_text()
+    assert "antenna clean: NO" in txt
+    assert "3 net violations, 0 pin violations" in txt
+    assert "STALE signoff_spef_repair.log NOT READ" in txt

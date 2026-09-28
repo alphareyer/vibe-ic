@@ -292,6 +292,23 @@ def _read(name: str) -> Callable[[], str]:
     return _load
 
 
+def _judge_named_drv_checks(sample: Tuple[str, int]) -> Optional[str]:
+    """Run the shipped parser on a native OpenSTA check table and its count."""
+    import librelane_postroute_repair as P
+    with tempfile.TemporaryDirectory() as root:
+        scene = "cal_tt"
+        folder = Path(root) / scene
+        folder.mkdir()
+        (folder / "checks.rpt").write_text(sample[0])
+        census = P.named_drv_census(Path(root), [scene], {
+            "slew": {scene: 0}, "cap": {scene: 0},
+            "fanout": {scene: sample[1]}})
+    return ("TWO_NAMED_FANOUT_DRIVERS"
+            if census["verdict"] == "MEASURED" and
+            census["members"] == ["cal_tt|fanout|A", "cal_tt|fanout|u1/ZN"]
+            else None)
+
+
 # ---- 1. the route-abort classification (antenna producer), R-0915-69 ------
 
 def _judge_route_abort(log_txt: str) -> Optional[str]:
@@ -708,6 +725,60 @@ def _register(inst: Instrument) -> None:
     if inst.name in INSTRUMENTS:                       # pragma: no cover
         raise AssertionError(f"duplicate instrument {inst.name}")
     INSTRUMENTS[inst.name] = inst
+
+
+def _judge_native_antenna_rdb(report: str) -> Optional[str]:
+    import eda_report_audit as audit
+    count = audit._antenna_klayout_count(report)
+    return f"ANTENNA_VIOLATIONS={count}" if count else None
+
+
+_register(Instrument(
+    name="eda_report_audit::_antenna_klayout_count",
+    reads="the PDK-native KLayout antenna report database",
+    ruling="U5 geometry antenna native-deck acceptance",
+    owner="u5",
+    why=("A native KLayout report has an empty top-level description and "
+         "<name>ANT.*</name> categories. The old classifier missed the XML "
+         "name elements and called a measured clean run unmeasured."),
+    judge=_judge_native_antenna_rdb,
+    positive=Sample(
+        provenance=("Real KLayout 0.30.9 PDK-native `decks=antenna` RDB from "
+                    "a synthetic poly gate with a long conductor, generated "
+                    "on 8HD-6 in vibeic-eda 0.3.84; ANT.1 fires once. "
+                    "Rule SHA-256 f82e2aed8c5c7b9d92146b135affe78c1d2779511e8be0062d0d4e52b499567f."),
+        artefact=_read("native_antenna_violation.lyrdb")),
+    expect="ANTENNA_VIOLATIONS=1",
+    negative=Sample(
+        provenance=("Same real tool, PDK and synthetic gate, with the poly "
+                    "conductor shortened; 24 ANT categories and zero items."),
+        artefact=_read("native_antenna_clean.lyrdb")),
+))
+
+
+_register(Instrument(
+    name="librelane_postroute_repair::named_drv_census",
+    reads="each scene's OpenSTA report_check_types -violators checks.rpt",
+    ruling="2026-09-28 named DRV candidate adoption; a count alone cannot identify churn",
+    owner="spmic",
+    why=("Step 32 must retain only a strict subset of named pin-scene-kind "
+         "violations. These paired reports were emitted by native OpenSTA "
+         "on the same two-inverter calibration netlist and Liberty, with "
+         "only set_max_fanout changed; an empty report must stay empty."),
+    judge=_judge_named_drv_checks,
+    positive=Sample(
+        provenance=("Native OpenSTA in pinned vibeic-eda 0.3.84: "
+                    "cal_fanout_chain.v, gf180mcu 7t TT Liberty, "
+                    "set_max_fanout 0.5, report_check_types -max_slew "
+                    "-max_cap -max_fanout -violators; two named rows."),
+        artefact=lambda: (_read("cal_fanout_positive.rpt")(), 2)),
+    expect="TWO_NAMED_FANOUT_DRIVERS",
+    negative=Sample(
+        provenance=("Same native OpenSTA image, netlist, Liberty and report "
+                    "command with set_max_fanout 2: the tool wrote an empty "
+                    "checks.rpt and zero violation count."),
+        artefact=lambda: (_read("cal_fanout_negative.rpt")(), 0)),
+))
 
 
 _register(Instrument(

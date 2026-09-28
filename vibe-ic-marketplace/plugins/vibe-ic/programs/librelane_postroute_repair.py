@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -73,7 +74,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _atomic_artefact import write_json  # noqa: E402
+from _atomic_artefact import write_json, write_text  # noqa: E402
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
 
 STEP = "32"
@@ -90,6 +91,7 @@ CONTEXT = "context.json"
 CURRENT = "current.json"
 LEDGER = "candidates.json"
 REPORT_REL = "reports/phase3/librelane_postroute_repair.json"
+DECLARED_REPAIR_REL = "phase3/stage3/postroute_timing_repair"
 #: The controllers this step runs, in order: setup, then hold (hold after
 #: setup), then design rules. Each is declared in the actuator registry.
 CONTROLLERS = ("postroute.repair_setup", "postroute.repair_hold",
@@ -222,6 +224,116 @@ def summarize(metrics: Dict[str, Any], corners: Sequence[str]) -> Dict[str, Any]
     return out
 
 
+_CHECK_HEADINGS = {"max slew": "slew", "max cap": "cap",
+                   "max capacitance": "cap", "max fanout": "fanout"}
+
+
+def named_drv_census(sta_folder: Path, corners: Sequence[str],
+                     counts: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Bind each STAPostPNR count to the *named* violators in its own report.
+
+    An equal or smaller aggregate may exchange one failing driver for another.
+    The step-32 progress policy therefore needs the complete (scene, kind, pin)
+    set. A truncated/unreadable table cannot authorise candidate adoption.
+    """
+    import instrument_calibration as _cal
+    try:
+        _cal.assert_calibrated("librelane_postroute_repair::named_drv_census")
+    except _cal.Uncalibrated as exc:
+        return {"verdict": "NOT_MEASURED", "members": [], "rows": [],
+                "errors": [f"uncalibrated OpenSTA check grammar: {exc}"]}
+    members: List[str] = []
+    rows: List[Dict[str, str]] = []
+    errors: List[str] = []
+    for corner in corners:
+        path = sta_folder / corner / "checks.rpt"
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError as exc:
+            errors.append(f"{corner}: checks.rpt unreadable ({type(exc).__name__})")
+            continue
+        found = {kind: set() for kind in ("slew", "cap", "fanout")}
+        section = None
+        in_table = False
+        for line in lines:
+            stripped = line.strip()
+            heading = _CHECK_HEADINGS.get(stripped.lower())
+            if heading:
+                section, in_table = heading, False
+                continue
+            if section is None:
+                continue
+            if stripped.startswith("Pin") and "Limit" in stripped:
+                in_table = True
+                continue
+            if in_table and not stripped:
+                section, in_table = None, False
+                continue
+            if in_table and "(VIOLATED)" in stripped:
+                fields = stripped.split()
+                pin = fields[0]
+                key = f"{corner}|{section}|{pin}"
+                if pin in found[section]:
+                    errors.append(f"{corner}: duplicate {section} driver {pin}")
+                found[section].add(pin)
+                members.append(key)
+                rows.append({"scene": corner, "kind": section, "pin": pin,
+                             "limit": fields[1] if len(fields) > 1 else "",
+                             "actual": fields[2] if len(fields) > 2 else ""})
+        for kind in found:
+            expected = (counts.get(kind) or {}).get(corner)
+            if type(expected) is not int or len(found[kind]) != expected:
+                errors.append(f"{corner}: {kind} named {len(found[kind])} != "
+                              f"STAPostPNR count {expected!r}")
+    return {"verdict": "MEASURED" if corners and not errors else "NOT_MEASURED",
+            "members": sorted(members), "rows": rows, "errors": errors,
+            "source": "each STAPostPNR scene's checks.rpt plus State metric counts"}
+
+
+def _member_set(measurement: Dict[str, Any]) -> Optional[set[str]]:
+    named = measurement.get("named_drv") or {}
+    members = named.get("members")
+    if (named.get("verdict") != "MEASURED" or not isinstance(members, list)
+            or any(not isinstance(x, str) for x in members)
+            or len(members) != len(set(members))
+            or type(measurement.get("drv_count")) is not int
+            or len(members) != measurement["drv_count"]):
+        return None
+    return set(members)
+
+
+def fanout_residue(measurement: Dict[str, Any], corners: Sequence[str]) -> Dict[str, Any]:
+    """BLOCKING: judge routed fanout from STAPostPNR's separate corner runs.
+
+    The repair session is multi-corner; its OpenSTA fanout counter has crashed
+    inside CheckFanouts.  STAPostPNR owns a fresh, single-corner process for
+    each declared corner.  A missing count is never interpreted as zero.
+    """
+    values = (measurement.get("drv") or {}).get("fanout") or {}
+    missing = [c for c in corners if not isinstance(values.get(c), int)
+               or isinstance(values.get(c), bool) or values[c] < 0]
+    if not corners or missing:
+        return {"verdict": "NOT_MEASURED", "violations": None,
+                "reason": f"STAPostPNR fanout count absent in corners: {missing or ['<none declared>']}"}
+    count = sum(values[c] for c in corners)
+    return {"verdict": "FAIL" if count else "PASS", "violations": count,
+            "source": "OpenROAD.STAPostPNR per-corner routed State metrics"}
+
+
+def _set_final_fanout_verdict(report: Dict[str, Any]) -> None:
+    fanout = fanout_residue(report.get("final") or {}, report.get("corners") or [])
+    report["final_fanout"] = fanout
+    report["verdict"] = fanout["verdict"]
+    report["progress_adopted"] = bool(report.get("adopted") and
+                                      fanout["verdict"] == "FAIL")
+    if fanout["verdict"] != "PASS":
+        report["code"] = ("LL_PRR_FANOUT_VIOLATION" if fanout["verdict"] == "FAIL"
+                          else "LL_PRR_FANOUT_NOT_MEASURED")
+        report["reason"] = (f"declared postroute max fanout has "
+                            f"{fanout['violations']} residual violations"
+                            if fanout["verdict"] == "FAIL" else fanout["reason"])
+
+
 def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
                lane: str) -> Tuple[Path, Dict[str, Any]]:
     """The repair step (a candidate, or the census) then RCX + STAPostPNR:
@@ -235,9 +347,11 @@ def _candidate(ctx: Dict[str, Any], config: Path, state: Path,
         mounts=[(Path(h), g) for h, g in ctx["mounts"]], lane=lane)
     sta_state = folders[-1] / "state_out.json"
     summary = summarize(_load(sta_state).get("metrics") or {}, ctx["corners"])
+    named = named_drv_census(folders[-1], ctx["corners"], summary["drv"])
     antenna = antenna_census(folders[1])
     return folders[0], {"sta_state": str(sta_state),
                         "sta_state_sha256": _ll.digest(sta_state), **summary,
+                        "named_drv": named,
                         "antenna_nets": antenna["antenna__violating__nets"],
                         "antenna_pins": antenna["antenna__violating__pins"],
                         "antenna_state": str(folders[1] / "state_out.json")}
@@ -358,6 +472,41 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
     row.update(repair_state=str(repaired), measurement=measurement,
                repair_metrics={k: v for k, v in metrics.items()
                                if k.startswith("vibeic__prr__")})
+    row["fanout"] = fanout_residue(measurement, ctx["corners"])
+    before_members = _member_set(cur.get("measurement") or {})
+    after_members = _member_set(measurement)
+    if before_members is None or after_members is None:
+        row.update(decision="REFUSED", reason="named STAPostPNR DRV census "
+                   "is missing, truncated, or disagrees with State counts")
+        _ledger_append(impl, row)
+        print(f"candidate {lane} refused: {row['reason']}")
+        return 0
+    row["named_drv_delta"] = {"removed": sorted(before_members - after_members),
+                              "added": sorted(after_members - before_members)}
+    # Residual candidates can become the next repair starting point, but only
+    # if they remove at least one *named* (scene, kind, pin) and add none.
+    # The final verdict remains FAIL until the set is empty.
+    if after_members and not after_members < before_members:
+        row.update(decision="REFUSED", reason="residual DRV set is not a strict "
+                   "named subset of the adopted state")
+        _ledger_append(impl, row)
+        print(f"candidate {lane} refused: {row['reason']}")
+        return 0
+    if after_members:
+        floors = ctx.get("floors") or {}
+        for domain, key in (("setup", "setup_ws_min"), ("hold", "hold_ws_min")):
+            floor = (floors.get(domain) or [0.0])[0]
+            slack = measurement.get(key)
+            if (type(floor) not in (int, float) or
+                    type(slack) not in (int, float) or
+                    not math.isfinite(floor) or not math.isfinite(slack) or
+                    slack < floor):
+                row.update(decision="REFUSED", reason=(
+                    f"residual DRV candidate {domain} slack {slack!r} "
+                    f"is below declared floor {floor!r}"))
+                _ledger_append(impl, row)
+                print(f"candidate {lane} refused: {row['reason']}")
+                return 0
     pg = (supply_ownership(ctx, Path(state["def"]))
           if metrics.get("vibeic__prr__changed") != 0 else
           {"verdict": "NOT_APPLICABLE", "reason": "no instance changed; the input DEF"})
@@ -380,6 +529,19 @@ def actuate(impl: Path, params: Dict[str, Any]) -> int:
         _ledger_append(impl, row)
         print(f"candidate {lane} refused: {row['reason']}")
         return 0
+    # An unmeasured DRV census cannot be promoted. Measured residue remains a
+    # step failure, but the closure may adopt a strictly improving route and
+    # must not keep a worse input solely because both routes still have DRV.
+    drv = measurement.get("drv_count")
+    if type(drv) is not int:
+        row.update(decision="REFUSED",
+                   reason=("post-route DRV was not measured "
+                           f"(OpenROAD.STAPostPNR count={drv!r})"))
+        _ledger_append(impl, row)
+        print(f"candidate {lane} refused: {row['reason']}")
+        return 0
+    # A residual candidate is retained only as progress for the next bounded
+    # iteration. The enclosing step still fails its declared DRV sign-off.
     write_json(impl / CURRENT, {
         "candidate": lane, "repair_input": str(repaired),
         "repair_state": str(repaired), "repair_folder": str(folder),
@@ -644,6 +806,120 @@ def close_arm(project: Path, name: str, state0: Path, *, image: str, pdk: str,
     return report
 
 
+def _clear_declared_repair(project: Path) -> None:
+    """A new step-32 attempt invalidates any prior decision and outcome."""
+    out = project / DECLARED_REPAIR_REL
+    for name in ("postroute_timing_repair_decision.json", "repair_log.json",
+                 "no_repair_needed.flag"):
+        (out / name).unlink(missing_ok=True)
+
+
+def _publish_declared_repair(project: Path, report: Dict[str, Any], source: Path) -> None:
+    """Publish step 32's measured decision before the pre-stream gate.
+
+    The later canonicalize pass cannot write this declaration when pre-stream
+    blocks it. A missing or malformed STAPostPNR census leaves no fresh output,
+    so the declared-output check refuses it instead of accepting a marker.
+    """
+    def refuse(reason: str) -> None:
+        report["declared_repair_publication"] = {
+            "status": "NOT_MEASURED", "reason": reason}
+        write_json(source, report)
+
+    # A measured residual is still a failed step, but its repair trigger and
+    # adopted physical progress must be published before pre-stream checks.
+    # Keep every other failed or unmeasured report from claiming a decision.
+    measured_residual = (report.get("verdict") == "FAIL" and
+                         report.get("code") == "LL_PRR_FANOUT_VIOLATION" and
+                         (report.get("final_fanout") or {}).get("verdict") == "FAIL")
+    if report.get("verdict") != "PASS" and not measured_residual:
+        refuse(f"step 32 verdict {report.get('verdict')!r} has no measured DRV decision")
+        return
+    baseline = report.get("input_baseline") or report.get("baseline") or {}
+    final = report.get("final") or {}
+    floors = report.get("floors") or {}
+    before = [baseline.get(k) for k in ("drv_count", "setup_ws_min", "hold_ws_min")]
+    after = [final.get(k) for k in ("drv_count", "setup_ws_min", "hold_ws_min")]
+    setup_floor = (floors.get("setup") or [None])[0]
+    hold_floor = (floors.get("hold") or [None])[0]
+    if (any(type(v) is not int for v in (before[0], after[0])) or
+            any(type(v) not in (int, float) or not math.isfinite(v)
+                for v in (*before[1:], *after[1:], setup_floor, hold_floor))):
+        refuse("the input/final STAPostPNR census or timing floors are missing")
+        return
+    import librelane_contract as _ll
+    # The trigger describes the INPUT route; a successfully repaired output
+    # does not retroactively make its repair unnecessary.
+    adopted = report.get("adopted")
+    route_changed = bool(report.get("route_state") and report.get("adopted_state")
+                         and Path(report["adopted_state"]) != Path(report["route_state"]))
+    needed = bool(before[0] or before[1] < setup_floor or
+                  before[2] < hold_floor or route_changed or adopted)
+    candidates = report.get("candidates") or []
+    adopted_row = next((row for row in candidates
+                        if row.get("candidate") == adopted and
+                        row.get("closure_decision") == "PROMOTED"), None)
+    changed = ((adopted_row.get("repair_metrics") or {}).get("vibeic__prr__changed")
+               if adopted_row else None)
+    changes = ([{"candidate": adopted,
+                 "changed_instances": changed,
+                 "sta_state_sha256": after_state}]
+               if (type(changed) is int and changed > 0 and
+                   (after_state := final.get("sta_state_sha256")) and
+                   after_state == (adopted_row.get("measurement") or {}).get(
+                       "sta_state_sha256")) else [])
+    if not changes and route_changed and report.get("selected_arm") != "postdrt":
+        after_state = final.get("sta_state_sha256")
+        if after_state:
+            changes = [{"selected_arm": report.get("selected_arm"),
+                        "route_state": report.get("adopted_state"),
+                        "sta_state_sha256": after_state}]
+    re_verified = bool(changes and after[0] == 0 and
+                       after[1] >= setup_floor and after[2] >= hold_floor and
+                       final.get("antenna_nets") == 0)
+    out = project / DECLARED_REPAIR_REL
+    action = ("candidate_adopted" if adopted else
+              "alternate_route_selected" if route_changed else "input_route_kept")
+    refused = [str(row.get("reason") or row.get("closure_reason"))
+               for row in candidates if row.get("decision") == "REFUSED"
+               or row.get("closure_decision") == "ROLLED_BACK"]
+    residual = {"drv_count": after[0],
+                "setup_below_floor": after[1] < setup_floor,
+                "hold_below_floor": after[2] < hold_floor,
+                "refused_candidates": refused}
+    write_json(out / "postroute_timing_repair_decision.json", {
+        "repair_needed": needed,
+        "action": action,
+        "candidate": adopted,
+        "baseline": dict(zip(("drv_count", "setup_ws_min", "hold_ws_min"), before)),
+        "final": dict(zip(("drv_count", "setup_ws_min", "hold_ws_min"), after)),
+        "floors": floors,
+        "residual": residual,
+        "source_report": str(source.relative_to(project)),
+        "source_report_sha256": _ll.digest(source),
+        "measured_by": "OpenROAD.STAPostPNR at every declared corner",
+    })
+    flag = out / "no_repair_needed.flag"
+    log = out / "repair_log.json"
+    if needed:
+        if flag.is_file():
+            flag.unlink()
+        write_json(log, {
+            "source_report": str(source.relative_to(project)),
+            "source_report_sha256": _ll.digest(source),
+            "candidates": candidates,
+            "adopted": adopted,
+            "changes": changes,
+            "re_verified": re_verified,
+            "baseline": baseline,
+            "final": final,
+        })
+    else:
+        if log.is_file():
+            log.unlink()
+        write_text(flag, "STAPostPNR: declared timing floors and DRV are met\n")
+
+
 def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
         views: Dict[str, Path], sdc: Path, derate: Tuple[float, float],
         pg_rules_tcl: Optional[Path] = None, refill_tcl: Optional[Path] = None,
@@ -659,6 +935,7 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
     report: Dict[str, Any] = {"step": STEP, "mode": "librelane", "image": image,
                               "site": "after_direct_route"}
     out = project / REPORT_REL
+    _clear_declared_repair(project)
     if _refused_by_tool(report, fork_capability(image, docker), out):
         return report
     configs, corners, mounts = _prepare(
@@ -674,8 +951,9 @@ def run(project: Path, *, image: str, pdk: str, pdk_root: Path,
                             configs=configs, corners=corners, mounts=mounts,
                             registry=registry, programs_dir=programs_dir,
                             floors=declared_timing_floor(project, sdc)))
-    report["verdict"] = "PASS"
+    _set_final_fanout_verdict(report)
     write_json(out, report)
+    _publish_declared_repair(project, report, out)
     return report
 
 
@@ -766,6 +1044,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     report: Dict[str, Any] = {"step": STEP, "mode": mode, "image": image,
                               "site": "after_route", "route_state": str(route_state)}
     out = project / REPORT_REL
+    _clear_declared_repair(project)
     if _refused_by_tool(report, fork_capability(image, docker), out):
         return report
     configs, corners, mounts = _prepare(
@@ -777,8 +1056,9 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
                   floors=declared_timing_floor(project, sdc))
     if mode != "dual":
         report.update(close_arm(project, "librelane", route_state, **common))
-        report["verdict"] = "PASS"
+        _set_final_fanout_verdict(report)
         write_json(out, report)
+        _publish_declared_repair(project, report, out)
         return report
     if variant_arm is None:
         raise ValueError("LL_PRR_DUAL_NEEDS_LL21: the pre-DRT arm is step 21's "
@@ -801,7 +1081,7 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     scope = {"step": STEP, "corners": ",".join(corners),
              "measured_by": "OpenROAD.CheckAntennas + RCX + STAPostPNR (sign-off scene)"}
     sel = select_dual(project, arms, drcs, scope)
-    report.update(arms=arms, route_drc=drcs, selection=sel)
+    report.update(arms=arms, route_drc=drcs, selection=sel, corners=corners)
     chosen = arms.get(sel.get("selection"))
     if chosen is None:
         report.update(verdict="NOT_MEASURED", code="LL_PRR_DUAL_UNDETERMINED")
@@ -810,11 +1090,13 @@ def run_in_chain(project: Path, *, mode: str, image: str, pdk: str, pdk_root: Pa
     report.update({k: chosen[k] for k in ("baseline", "final", "adopted", "adopted_state",
                                            "final_antenna", "baseline_antenna",
                                            "final_supply_ownership", "candidates",
-                                           "closure", "baseline_repair_metrics")
+                                           "closure", "baseline_repair_metrics", "floors")
                    if k in chosen})
+    report["input_baseline"] = arms["postdrt"]["baseline"]
     report["selected_arm"] = sel["selection"]
-    report["verdict"] = "PASS"
+    _set_final_fanout_verdict(report)
     write_json(out, report)
+    _publish_declared_repair(project, report, out)
     return report
 
 

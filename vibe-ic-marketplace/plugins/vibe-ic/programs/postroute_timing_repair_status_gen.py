@@ -19,6 +19,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -28,6 +29,34 @@ sys.path.insert(0, str(Path(__file__).parent))
 import _path_layout as _pl  # noqa: E402
 import postroute_timing_repair_decision as _repair_dec  # noqa: E402
 import plugin_manifest_discovery as _pmd  # noqa: E402  (#800 ONE version reader)
+
+
+def _measured_step32_decision(project: Path, output: Path):
+    """Read the producer's receipt, bound to its measured source report.
+
+    The status generator may add a timing trigger, but it cannot certify that
+    no repair was needed after Step 32 measured a DRV trigger. An unreadable or
+    stale receipt cannot authorize the opposite flag either.
+    """
+    path = output / "postroute_timing_repair_decision.json"
+    if not path.is_file():
+        return None
+    try:
+        row = json.loads(path.read_text())
+        if not isinstance(row, dict) or not isinstance(row.get("repair_needed"), bool):
+            raise ValueError("repair_needed is not a boolean")
+        rel = row.get("source_report")
+        digest = row.get("source_report_sha256")
+        if not isinstance(rel, str) or not isinstance(digest, str):
+            raise ValueError("measured source or sha256 absent")
+        source = (project / rel).resolve()
+        if not source.is_relative_to(project.resolve()) or not source.is_file():
+            raise ValueError("measured source is absent or outside project")
+        if hashlib.sha256(source.read_bytes()).hexdigest() != digest:
+            raise ValueError("measured source sha256 changed")
+        return row
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Step-32 decision invalid: {exc}") from exc
 
 
 def _parse_sta_for_violations(sta_text: str) -> dict:
@@ -122,6 +151,25 @@ def main(argv=None) -> int:
     # still produced `no_repair_needed.flag` and a clean postroute_timing_repair_audit.
     decision = _repair_dec.decide(stance_path, single_corner_clean,
                                project=project)
+    try:
+        measured_step32 = _measured_step32_decision(
+            project, postroute_timing_repair_dir)
+    except ValueError as exc:
+        (postroute_timing_repair_dir / "no_repair_needed.flag").unlink(missing_ok=True)
+        print(f"NOT_MEASURED: {exc}", file=sys.stderr)
+        return 2
+    if measured_step32 and measured_step32["repair_needed"]:
+        baseline = measured_step32.get("baseline")
+        final = measured_step32.get("final")
+        baseline = baseline if isinstance(baseline, dict) else {}
+        final = final if isinstance(final, dict) else {}
+        decision["repair_needed"] = True
+        decision["basis"] += "+measured_step32"
+        decision["reason"] += (
+            f"; Step 32 measured repair_needed=true "
+            f"(action={measured_step32.get('action')}, "
+            f"baseline_drv={baseline.get('drv_count')}, "
+            f"final_drv={final.get('drv_count')})")
     summary = {
         "program": "postroute_timing_repair_status_gen",
         "version": "1.1.0",
@@ -137,6 +185,8 @@ def main(argv=None) -> int:
     summary["timing_repair_needed"] = decision["timing_repair_needed"]
     if decision["nontiming_failures"]:
         summary["nontiming_failures"] = decision["nontiming_failures"]
+    if measured_step32 is not None:
+        summary["measured_step32_repair_needed"] = measured_step32["repair_needed"]
 
     if not decision["repair_needed"]:
         flag = postroute_timing_repair_dir / "no_repair_needed.flag"
@@ -157,6 +207,8 @@ def main(argv=None) -> int:
         (postroute_timing_repair_dir / "no_repair_summary.json").write_text(
             json.dumps(summary, indent=2) + "\n")
     else:
+        (postroute_timing_repair_dir / "no_repair_needed.flag").unlink(missing_ok=True)
+        (postroute_timing_repair_dir / "no_repair_summary.json").unlink(missing_ok=True)
         log_path = postroute_timing_repair_dir / "repair_log.json"
         minimal = {
             "program": "postroute_timing_repair_status_gen",

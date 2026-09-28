@@ -359,6 +359,35 @@ def test_an_empty_report_with_the_routers_final_zero_is_a_measured_zero(tmp_path
             "phase3/stage3/pnr/routed_router.drc.receipt.json"]}
 
 
+@pytest.mark.parametrize("case", ["valid", "missing", "count3", "stale_def"])
+def test_all_empty_router_consumers_use_the_same_receipt_decision(tmp_path, case):
+    project = _empty_scope(tmp_path, _LL_ROUTE_LOG)
+    pnr = R._pl.pnr_dir(project)
+    receipt = pnr / R.ROUTER_DRC_RECEIPT_NAME
+    if case == "missing":
+        receipt.unlink()
+    elif case == "count3":
+        doc = json.loads(receipt.read_text())
+        doc["final_drt_count"] = doc["current_invocation_count"] = 3
+        receipt.write_text(json.dumps(doc))
+    elif case == "stale_def":
+        with (pnr / "routed.def").open("a") as fh:
+            fh.write("# changed route\n")
+    accepted = case == "valid"
+    assert (A._empty_router_drc_receipt(pnr / R.ROUTER_DRC_REPORT_NAME)
+            is not None) == accepted
+    block = R._router_drc_report_block(pnr, _LL_ROUTE_LOG)
+    assert ("DRC_EMPTY_ZERO_CORROBORATED" in block) == accepted
+    assert ("DRC_EMPTY_NOT_MEASURED" in block) != accepted
+    rc, payload = _drc_audit(project)
+    assert (rc == 0 and payload["passed"]) == accepted
+    written = []
+    R._emit_router_drc_report(project, pnr, project / "reports/phase3", written)
+    projected = (pnr / "routed.drc.rpt").read_text()
+    assert ("DRC clean: YES" in projected) == accepted
+    assert ("DRC_EMPTY_NOT_MEASURED" in projected) != accepted
+
+
 def test_changed_empty_report_subject_invalidates_router_receipt(tmp_path):
     project = _empty_scope(tmp_path, _LL_ROUTE_LOG)
     routed_def = R._pl.pnr_dir(project) / "routed.def"

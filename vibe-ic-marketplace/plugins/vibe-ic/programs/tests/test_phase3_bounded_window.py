@@ -72,6 +72,10 @@ def test_gds_window_preserves_outside_files_and_marks_downstream(tmp_path, monke
         "reports/audit/steps_view.json",
         "reports/orchestrator/phase3_one_shot.json",
         "reports/phase3/gds_admission.json",
+        "reports/write_ledger.json",
+        "steps/index.json",
+        "steps/phase3/stage4/37_gdsii_output_after_routed_layout_pre_stream_admi/outputs.json",
+        "steps/phase3/stage4/37_gdsii_output_after_routed_layout_pre_stream_admi/written.json",
     }
     assert set(changed) <= allowed_reports | {
         "phase3/stage3/pnr/top.gds", "phase3/stage4/gds/top.gds"}, changed
@@ -207,6 +211,10 @@ def test_real_gds_step_with_container_write_keeps_other_stage_files(tmp_path, mo
         "reports/audit/steps_view.json",
         "reports/orchestrator/phase3_one_shot.json",
         "reports/phase3/gds_admission.json",
+        "reports/write_ledger.json",
+        "steps/index.json",
+        "steps/phase3/stage4/37_gdsii_output_after_routed_layout_pre_stream_admi/outputs.json",
+        "steps/phase3/stage4/37_gdsii_output_after_routed_layout_pre_stream_admi/written.json",
     }
     # Step 37's own declared outputs: the stream, its transcript, and the
     # record plus recipe that step 37.3 re-streams from.

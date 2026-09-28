@@ -910,6 +910,93 @@ def _declared_transform_exec(project: Optional[Path], path: Path, step: str,
     return result
 
 
+def _declare_immutable_transform(project: Path, source: Path, output: Path,
+                                 step: str, tool: str, command: str) -> bool:
+    """Declare a finished output only when its preserved input is ledgered.
+
+    The tool's original bytes remain at ``source``.  The finishing writer may
+    work on ``output`` until it is complete; this one record then binds the
+    two *different* paths and their actual digests.  A missing or stale input
+    declaration cannot be repaired by claiming the current output digest.
+    """
+    source, output = Path(source), Path(output)
+    in_rel, out_rel = _project_rel(project, source), _project_rel(project, output)
+    in_sha, out_sha = _file_sha256(source), _file_sha256(output)
+    declared = _newest_declared_sha(project, in_rel) if in_rel else None
+    if (not in_rel or not out_rel or in_rel == out_rel or not in_sha or
+            not out_sha or declared != in_sha):
+        if in_rel and in_sha and declared and declared != in_sha:
+            _record_unexplained_rewrite(project, in_rel, declared, in_sha, step)
+        return False
+    entry = {
+        "record": "declared_transform", "tool": tool, "command": command,
+        "producing_step": step, "exit_code": 0, "duration_ms": None,
+        "timestamp": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "inputs": {in_rel: in_sha}, "outputs": {out_rel: out_sha},
+    }
+    _rmeas.attach(project, entry)
+    with (Path(project) / "provenance.jsonl").open("a") as stream:
+        stream.write(json.dumps(entry) + "\n")
+    return True
+
+
+class _GdsTransformChain:
+    """Keep every successful finishing state while the delivery path is built.
+
+    Existing GDS writers work in place.  Their working path is deliberately
+    unledgered until publication; after each changed pass, a separate snapshot
+    is declared from the preceding immutable head.  The pre-pass comparison
+    catches an edit to the working file between two finishing writers.
+    """
+
+    def __init__(self, project: Path, source: Path, working: Path,
+                 *, declare: bool = True):
+        self.project, self.head, self.working = project, source, working
+        self.declare = declare and (project / "provenance.jsonl").is_file()
+        self.failed: Optional[str] = None
+        self.count = 0
+
+    def run(self, _unused: Optional[Path], path: Path, step: str,
+            tool: str, command: str, run: Callable[[], Any]) -> Any:
+        if Path(path) != self.working:
+            self.failed = f"{step}: unexpected GDS working path"
+        if self.failed:
+            return run()
+        before = _file_sha256(self.working)
+        head_sha = _file_sha256(self.head)
+        if before != head_sha:
+            self.failed = f"{step}: GDS changed between declared transforms"
+            return run()
+        if self.declare and _newest_declared_sha(
+                self.project, _project_rel(self.project, self.head) or "") != head_sha:
+            self.failed = f"{step}: GDS input does not match its declaration"
+            return run()
+        result = run()
+        after = _file_sha256(self.working)
+        if after is None:
+            self.failed = f"{step}: GDS writer removed its output"
+            return result
+        if after == before:
+            return result
+        self.count += 1
+        snapshot = self.head.parent / f"{self.working.stem}.{self.count}.{time.time_ns()}.gds"
+        shutil.copyfile(self.working, snapshot)
+        if self.declare and not _declare_immutable_transform(
+                self.project, self.head, snapshot, step, tool, command):
+            self.failed = f"{step}: GDS transform input was not declared"
+            return result
+        self.head = snapshot
+        return result
+
+    def finish(self, command: str) -> bool:
+        if self.failed or _file_sha256(self.working) != _file_sha256(self.head):
+            return False
+        return (not self.declare or _declare_immutable_transform(
+            self.project, self.head, self.working, "gds:finishing", "klayout",
+            command))
+
+
 def set_invocation_provenance_sink(project: Optional[Path]) -> None:
     """Point per-invocation logging at `<project>/provenance.jsonl`, or None to
     disable. Unset means no logging at all — a library caller (several gates
@@ -19785,7 +19872,7 @@ def _synth_max_fanout(project: Path, pdk_name: str, liberty_path: str = "",
     """
     unread: List[str] = []
     try:
-        fo = (_l9_declared_max_fanout(project, pdk_name)
+        fo = (_l9_declared_max_fanout(project, pdk_name, liberty_path)
               or _rtl_replication_fanout_bound(project))
     except Exception as exc:  # noqa: BLE001
         fo = None
@@ -19911,7 +19998,7 @@ def _active_std_cell_library(project: Path, pdk: str = "") -> str:
 
 
 def _l9_declared_max_fanout(project: Path,
-                            pdk: str = "") -> Optional[int]:
+                            pdk: str = "", liberty_path: str = "") -> Optional[int]:
     """Return the design's L9-declared `SYNTH_MAX_FANOUT` cap as a positive int,
     or None when L9 declares none. Reads ONLY the L9 constraints/floorplan doc
     (input docs or the generated L9) — a blind-legal design input, same source +
@@ -19957,7 +20044,9 @@ def _l9_declared_max_fanout(project: Path,
     # rule the staged-flow-config tier below uses — a foreign library's row
     # never reaches this run, and a row with no number declares nothing.
     try:
-        _scl = _active_std_cell_library(project, pdk) or ""
+        import declared_clock_period as _dcp
+        _scl = (_dcp.library_name_from_liberty(liberty_path)
+                or _active_std_cell_library(project, pdk) or "")
     except Exception:                                        # noqa: BLE001
         _scl = ""
     for root in roots:
@@ -19992,8 +20081,7 @@ def _l9_declared_max_fanout(project: Path,
     # wrong run. §4.05: a declaration is READ, never fabricated — no config,
     # no matching scope, or a non-positive value all leave this None.
     try:
-        _drv = _fpc.declared_drv_limits(project, pdk or "",
-                                        _active_std_cell_library(project, pdk))
+        _drv = _fpc.declared_drv_limits(project, pdk or "", _scl)
         _fo_cfg = _drv.get("max_fanout")
         if isinstance(_fo_cfg, int) and _fo_cfg > 0:
             _LAST_FANOUT_SOURCE["note"] = (
@@ -20054,12 +20142,12 @@ def _l9_library_scoped_fanout(text: str, library: str,
     before a glob. A row with no positive integer declares nothing. No
     `library` and no `pdk` -> None: a per-library value is never applied to a
     run whose library is unknown."""
-    import fnmatch as _fnm
+    import declared_clock_period as _dcp
     actual = [a.lower() for a in (library, pdk) if a]
     if not actual:
         return None
     col = None
-    best = None
+    rows = []
     for line in text.splitlines():
         # Strip Markdown emphasis (`**x**`) and code ticks only: a single `*`
         # is the key's own glob (`gf180mcu_*`) and must survive.
@@ -20081,16 +20169,15 @@ def _l9_library_scoped_fanout(text: str, library: str,
         m = re.fullmatch(r"\*{0,2}\s*(\d+)\s*\*{0,2}", val)
         if not key or not m or int(m.group(1)) <= 0:
             continue
-        for a in actual:
-            if key == a:
-                rank = 0
-            elif _fnm.fnmatchcase(a, key):
-                rank = 1
-            else:
-                continue
-            if best is None or rank < best[0]:
-                best = (rank, int(m.group(1)), cells[0])
-    return (best[1], best[2]) if best else None
+        rows.append({"key": key, "cap": int(m.group(1)),
+                     "display_key": cells[0]})
+    matches = _dcp.match_rows(rows, actual)
+    if not matches:
+        return None
+    # Preserve the documented exact-row precedence while sharing the clock
+    # resolver's library-family matching rule (including separator collapse).
+    best = min(matches, key=lambda row: 0 if row["key"] in actual else 1)
+    return best["cap"], best["display_key"]
 
 
 def _rtl_replication_fanout_bound(project: Path) -> Optional[int]:
@@ -24777,6 +24864,15 @@ def _write_router_drc_receipt(out_dir: Path, routed_def: Path,
     return receipt
 
 
+def _empty_router_report_status(pnr_out: Path) -> Tuple[bool, Optional[Path]]:
+    """Use the audit's one digest-bound decision for the router's empty report."""
+    report = pnr_out / ROUTER_DRC_REPORT_NAME
+    if not report.is_file() or report.stat().st_size != 0:
+        return False, None
+    from eda_report_audit import _empty_router_drc_receipt  # noqa: PLC0415
+    return True, _empty_router_drc_receipt(report)
+
+
 def _router_drc_report_block(pnr_out: Path, log_text: str) -> str:
     """The router's OWN DRC report for this route, as a block for
     `routed.drc.rpt` -- or a named statement of why there is none.
@@ -24805,9 +24901,13 @@ def _router_drc_report_block(pnr_out: Path, log_text: str) -> str:
         body = rpt.read_text(errors="ignore").strip()
         head = (f"# source: detailed_route -output_drc "
                 f"{ROUTER_DRC_REPORT_NAME} ({len(body)} B)\n")
-        return head + (body if body else
-                       "# (the router wrote an EMPTY report -- it found no "
-                       "residual violations)")
+        if body:
+            return head + body
+        _, receipt = _empty_router_report_status(pnr_out)
+        return head + ("# DRC_EMPTY_ZERO_CORROBORATED: current digest-bound "
+                       "route receipt proves final count zero"
+                       if receipt else "# DRC_EMPTY_NOT_MEASURED: no current "
+                       "digest-bound route receipt proves final count zero")
     if "ROUTE_DRC_REPORT_UNSUPPORTED" in log_text:
         return ("# UNAVAILABLE: this OpenROAD build's detailed_route does not\n"
                 "# accept -output_drc (the run logged "
@@ -26186,6 +26286,7 @@ def _repair_design_margin_tcl(marker: str, extra: str = "") -> str:
 def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
                                  membership_path: Optional[str] = None,
                                  stage: Optional[str] = None,
+                                 emit_abutted_names: bool = False,
                                  ) -> str:
     """v1.8.43 — POST-REROUTE routing-integrity CHECK. Emits
     ``<PFX>_UNROUTED_NETS: <n> <up to 12 names>``.
@@ -26350,6 +26451,9 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
         "    if {$_one} {\n"
         "      incr _abut\n"
         "      lappend _abna [$_net getName]\n"
+        + (f"      puts \"{marker_prefix}_ABUTTED_NET: [$_net getName]\"\n"
+           if emit_abutted_names else "")
+        +
         "      if {[llength $_abn] < 12} { lappend _abn [$_net getName] }\n"
         "    } else {\n"
         "      incr _unr\n"
@@ -36806,6 +36910,9 @@ def _prepare_librelane_floorplan_for_route(
         # that `Odb.SetPowerConnections` declares; it reads the declared RTL.
         steps = ["Yosys.JsonHeader"] + _ll.flow_segment(
             image, "OpenROAD.Floorplan", last)
+        if placement is not None:
+            repair_index = steps.index("OpenROAD.RepairDesignPostGPL")
+            steps.insert(repair_index + 1, "Vibeic.PostGPLFanoutClosure")
         pdn_cfg = _ll.emit_pdn_cfg(image, str(pdk.name),
                                    project / "phase3/librelane/15-config/pdn_cfg.tcl")
         overlay = ({"PDN_CFG": (str(pdn_cfg.resolve()),
@@ -37430,7 +37537,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         # re-parsing the SDC).
         try:
             _cts_fanout_target = (
-                _l9_declared_max_fanout(project, str(pdk.name))
+                _l9_declared_max_fanout(project, str(pdk.name), str(pdk.liberty))
                 or _rtl_replication_fanout_bound(project)
                 or _drv.get("max_fanout"))
         except Exception:
@@ -45566,7 +45673,7 @@ def postroute_repair_after_route(*, project: Path, pdk: "PdkConfig", image: str,
               "selected_arm": report.get("selected_arm")}
     views: Dict[str, Path] = {}
     state = report.get("adopted_state")
-    if report.get("verdict") == "PASS" and state and Path(state) != Path(route_state):
+    if (report.get("verdict") == "PASS" or report.get("progress_adopted")) and state and Path(state) != Path(route_state):
         # cmp3 D15: a route is promoted only with its promoter's own antenna
         # and unrouted measurement of it; without one the input route stays.
         own = _step32_own_measurement(report)
@@ -45602,13 +45709,18 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
     direct paths (after a direct route); inside the LL21 chain the tail
     already wrote them."""
     import librelane_postroute_repair as _llprr  # noqa: PLC0415
-    if report.get("verdict") != "PASS":
-        _drv_promotion_disclose(pnr_out, "tool_unsupported",
+    progress = (report.get("verdict") == "FAIL" and
+                report.get("code") == "LL_PRR_FANOUT_VIOLATION" and
+                report.get("progress_adopted") is True and report.get("adopted"))
+    if report.get("verdict") != "PASS" and not progress:
+        _drv_promotion_disclose(pnr_out, "postroute_repair_refused",
                                 str(report.get("reason") or report.get("code")))
-        return StepResult("postroute_repair_librelane", "NOT_MEASURED",
+        return StepResult("postroute_repair_librelane",
+                          "FAIL" if report.get("verdict") == "FAIL" else "NOT_MEASURED",
                           time.time() - t0,
                           f"{report.get('code')}: {report.get('reason')}",
-                          reason_class=_V.ReasonClass.EXECUTION_ERROR)
+                          reason_class=(_V.ReasonClass.EXECUTION_ERROR
+                                        if report.get("verdict") != "FAIL" else ""))
     base, final = report.get("baseline") or {}, report.get("final") or {}
     summary = (f"setup {base.get('setup_ws_min')} -> {final.get('setup_ws_min')} ns, "
                f"hold {base.get('hold_ws_min')} -> {final.get('hold_ws_min')} ns, "
@@ -45651,20 +45763,28 @@ def _postroute_repair_librelane_result(project: Path, pnr_out: Path,
                                 "postroute_repair_librelane")
         _record_route_promotion(project, netlist, [netlist],
                                 "postroute_repair_librelane")
-    _drv_promotion_clear(pnr_out)
-    _aa.write_json(pnr_out / _DRV_PROMOTION_CLAIM, {
-        "program": "librelane_postroute_repair", "promoted": True,
-        "claim_basis": ("OpenROAD.STAPostPNR design__max_{slew,cap,fanout}"
-                        "_violation__count summed over every STA corner, "
-                        "sign-off scene"),
-        "candidate": report.get("adopted"),
-        "drv_before": base.get("drv_count"), "drv_after": final.get("drv_count"),
-        "wns_before": base.get("setup_ws_min"), "wns_postroute": final.get("setup_ws_min"),
-        "report": str(project / _llprr.REPORT_REL)})
+    if progress:
+        (pnr_out / _DRV_PROMOTION_CLAIM).unlink(missing_ok=True)
+        _drv_promotion_disclose(
+            pnr_out, "postroute_repair_progress_fail",
+            f"adopted {report.get('adopted')} as strictly improved named DRV "
+            f"progress ({base.get('drv_count')} -> {final.get('drv_count')}); "
+            "residual fanout is a sign-off FAIL")
+    else:
+        _drv_promotion_clear(pnr_out)
+        _aa.write_json(pnr_out / _DRV_PROMOTION_CLAIM, {
+            "program": "librelane_postroute_repair", "promoted": True,
+            "claim_basis": ("OpenROAD.STAPostPNR design__max_{slew,cap,fanout}"
+                            "_violation__count summed over every STA corner, "
+                            "sign-off scene"),
+            "candidate": report.get("adopted"),
+            "drv_before": base.get("drv_count"), "drv_after": final.get("drv_count"),
+            "wns_before": base.get("setup_ws_min"), "wns_postroute": final.get("setup_ws_min"),
+            "report": str(project / _llprr.REPORT_REL)})
     _gds = pnr_out / f"{top}.gds"
     if top and _gds.is_file():
         _gds.unlink()   # step_gds re-derives from the promoted route
-    return StepResult("postroute_repair_librelane", "PASS", time.time() - t0,
+    return StepResult("postroute_repair_librelane", "FAIL" if progress else "PASS", time.time() - t0,
                       f"ADOPTED {report.get('adopted')}"
                       + (f" (dual arm {report['selected_arm']})"
                          if report.get("selected_arm") else "")
@@ -48272,6 +48392,10 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     pnr_dir = _pl.pnr_dir(project)
     def_file = pnr_dir / f"{top}.def"
     gds_out = pnr_dir / f"{top}.gds"
+    # Each tool invocation gets its own retained stream.  Finishing works on
+    # the canonical delivery path, whose digest is declared only at the end.
+    stream_gds = pnr_dir / "streamout" / f"{top}.{time.time_ns()}.gds"
+    stream_gds.parent.mkdir(parents=True, exist_ok=True)
     for _old_lvs in (gds_out.with_suffix(".lvs.gds"),
                      gds_out.with_suffix(".lvs.gds.receipt.json")):
         _old_lvs.unlink(missing_ok=True)
@@ -48353,7 +48477,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
             "port-label restore)")
     else:
         magic_ok, magic_transcript = _magic_def_to_gds(
-            project, top, pdk, container, gds_out)
+            project, top, pdk, container, stream_gds)
     # sha256×sky130A / #SS-SETUP — FORCE klayout streamout (A/B probe). Magic's
     # native geometry merge fuses the met2 landings of a STACKED via1+via2 into a
     # shape the KLayout deck reads as enclosure-deficient (m2.4/m2.5) even though
@@ -48364,17 +48488,42 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         magic_ok, magic_transcript = False, (
             "magic streamout forced-skip (VIBEIC_FORCE_KLAYOUT_STREAMOUT=1): "
             "avoid the stacked-via met2-enclosure merge artefact")
-    if magic_ok and gds_out.is_file():
+    if magic_ok and stream_gds.is_file():
+        shutil.copyfile(stream_gds, gds_out)
+        # The recipe is recorded beside the retained raw stream.  Publish the
+        # same input set beside the delivery path consumed by Step 37.3.
+        try:
+            import _stream_input_record as _sir
+            stream_record, _why = _sir.read(_sir.record_path(stream_gds))
+            if stream_record is not None:
+                stream_record["output"] = gds_out.name
+                _sir.write(gds_out, stream_record)
+        except Exception as exc:
+            print(f"[gds] Magic stream-out input record not published: {exc}")
+        chain = _GdsTransformChain(project, stream_gds, gds_out, declare=not candidate)
         # ORGANIC #600 — manufacturing-grid snap before signoff DRC.
-        snap_ok, snap_note = _declared_transform_exec(project, gds_out, "gds:grid_snap", "klayout",
+        snap_ok, snap_note = chain.run(None, gds_out, "gds:grid_snap", "klayout",
         "grid_snap (in place) (phase3_one_shot_runner step_gds)",
         lambda: _gds_grid_snap(project, top, pdk, container,
                                             gds_out))
+        # The XOR reference is the actual pre-finishing layout from this run.
+        # Retain it after grid snap and bind it to the routed DEF, as on the
+        # KLayout arm, so a re-stream is unnecessary and cannot drift.
+        prefinish_gds = pnr_dir / f"{top}.prefinish.gds"
+        shutil.copyfile(gds_out, prefinish_gds)
+        prefinish_gds.with_suffix(".gds.receipt.json").write_text(json.dumps({
+            "program": "phase3_one_shot_runner", "artefact": prefinish_gds.name,
+            "sha256": _sha256_file(prefinish_gds),
+            "size": prefinish_gds.stat().st_size,
+            "mtime_ns": prefinish_gds.stat().st_mtime_ns,
+            "top": str(top), "streamed_from_def": def_file.name,
+            "def_sha256": _sha256_file(def_file), "engine": "magic",
+        }, indent=2) + "\n")
         # Step 26.5ic — die finishing (the PDK's OWN seal ring), BEFORE the
         # fill and before the sign-off DRC/LVS read this GDS, so the ring is
         # verified with the rest of the die instead of appearing after its
         # evidence.
-        seal_ok, seal_note = _declared_transform_exec(project, gds_out, "gds:die_finishing", "klayout",
+        seal_ok, seal_note = chain.run(None, gds_out, "gds:die_finishing", "klayout",
         "die_finishing (in place) (phase3_one_shot_runner step_gds)",
         lambda: _die_finishing(project, top, pdk, gds_out,
                                             container))
@@ -48385,7 +48534,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         if _t34 is None or _t34["mode"] == "dual":
             # Per-layer density fill BEFORE the density checks / sign-off DRC read
             # this GDS. Config-gated + NONFATAL; the note always discloses.
-            dfill_ok, dfill_note = _declared_transform_exec(project, gds_out, "gds:density_metal_fill", "klayout",
+            dfill_ok, dfill_note = chain.run(None, gds_out, "gds:density_metal_fill", "klayout",
             "density_metal_fill (in place) (phase3_one_shot_runner step_gds)",
             lambda: _density_metal_fill(project, top, pdk, gds_out, container))
             # DIE-WIDE fill by the PDK's own generator, LAST of the fill passes
@@ -48393,7 +48542,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
             # The pass above measures and fills the streamed geometry's BOUNDING
             # BOX; a foundry minimum-density rule is written over the entire DIE,
             # and on a slot submission those are different rectangles. NONFATAL.
-            ddfill_ok, ddfill_note = _declared_transform_exec(project, gds_out, "gds:die_density_fill", "klayout",
+            ddfill_ok, ddfill_note = chain.run(None, gds_out, "gds:die_density_fill", "klayout",
             "die_density_fill (in place) (phase3_one_shot_runner step_gds)",
             lambda: _die_density_fill(project, top, pdk, gds_out,
                                                        container))
@@ -48401,45 +48550,15 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
             dfill_ok, dfill_note = ddfill_ok, ddfill_note = (False, _t34["not_run"])
         if _t34 is not None:
             dfill_ok, dfill_note = _step34_gds_ship(project, gds_out, _t34,
-                                                    (dfill_ok, dfill_note))
+                                                    (dfill_ok, dfill_note), chain=chain)
         # vibe-ic#613 — the port-label restore is a POST-streamout pass over the
         # finished GDS, so it belongs on BOTH engines. Gating it on the KLayout
         # path alone would have made "which streamout ran" decide whether a
         # sign-off GDS can be pin-matched. Last, so labels land on final geometry.
-        label_ok, label_note = _declared_transform_exec(project, gds_out, "gds:port_labels", "klayout",
+        label_ok, label_note = chain.run(None, gds_out, "gds:port_labels", "klayout",
         "port_labels (in place) (phase3_one_shot_runner step_gds)",
         lambda: _restore_port_labels_if_missing(
             project, top, pdk, container, gds_out, def_file))
-        # R-0915-148 — THIS BRANCH RETAINS NO FINISHING BOUNDARY, SO IT MUST NOT
-        # LEAVE SOMEBODY ELSE'S LYING AROUND.
-        #
-        # Only the KLayout branch writes `{top}.prefinish.gds`. Magic retains
-        # nothing and, until now, deleted nothing -- and nothing anywhere in the
-        # plugin ever unlinked one. So an earlier KLayout invocation (or one forced
-        # with VIBEIC_FORCE_KLAYOUT_STREAMOUT=1) left a boundary in the project, a
-        # later Magic invocation in the same directory left it there STALE, and
-        # `gds_xor_check` would compare this run's GDS against the previous run's
-        # layout under the banner "design-layer differences expected to be exactly
-        # 0" -- reporting any routing change between the two runs as a design FAIL
-        # about a layout nobody asked about.
-        #
-        # An absent boundary is a KNOWN, handled state: the consumer re-streams.
-        # A stale one is not. So this branch removes what it did not produce, and
-        # says so.
-        for _stale in sorted(pnr_dir.glob("*.prefinish.gds")):
-            try:
-                _stale_rec = _stale.with_suffix(".gds.receipt.json")
-                _stale.unlink()
-                if _stale_rec.is_file():
-                    _stale_rec.unlink()
-                print(f"[gds] removed a finishing boundary this run did not "
-                      f"produce ({_stale.name}): the magic stream-out retains "
-                      f"none, and a stale one would be compared as if it were "
-                      f"this run's")
-            except OSError as _stale_exc:                  # pragma: no cover
-                print(f"[gds] could NOT remove the stale finishing boundary "
-                      f"{_stale.name} ({type(_stale_exc).__name__}: "
-                      f"{_stale_exc}); gds_xor_check must refuse it by receipt")
 
         # #306 — BOTH stream-out engines get the substance gate. A stub GDS
         # out of Magic is the same defect as a stub GDS out of KLayout, and
@@ -48453,6 +48572,9 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
                 # failure is losing it when a reader most needs it: "which
                 # streamout produced this bad GDS" is the first question.
                 extras={"streamout_engine": "magic"})
+        if not chain.finish("finish the retained Magic stream for sign-off"):
+            return StepResult("gds", "FAIL", time.time() - t0,
+                              chain.failed or "GDS finishing input has no matching tool declaration")
         return StepResult(
             "gds", "PASS", time.time() - t0,
             f"gds={gds_out.name} size={gds_out.stat().st_size} "
@@ -48481,7 +48603,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # container and host paths are not visible there.
     script_c = _to_container_path(str(script), container)
     def_c = _to_container_path(str(def_file), container)
-    gds_out_c = _to_container_path(str(gds_out), container)
+    gds_out_c = _to_container_path(str(stream_gds), container)
     # Include macro LEFs + macro PA-GDS so hard-macro outlines flatten
     # into the merged GDS. chip-AGNOSTIC.
     lef_list = [pdk.tech_lef, pdk.cell_lef] + list(pdk.macro_lefs)
@@ -48552,13 +48674,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         f"STDCELL_MARKER_LAYER=\"{marker_arg}\" && "
         f"klayout -zz -b -r {script_c}"
     )
-    rc, out, err = _docker_exec(container, cmd, marker=script_c, outputs=[gds_out])
-    _record_stream_inputs(project, container, gds_out, "klayout", script,
-                          def_file, top,
-                          {"LEFS": lefs, "CELL_GDS": cell_gds_c,
-                           "MACRO_GDS": macro_gds_arg,
-                           "LEFDEF_MAP": lefdef_map_c},
-                          {"STDCELL_MARKER_LAYER": marker_arg})
+    rc, out, err = _docker_exec(container, cmd, marker=script_c, outputs=[stream_gds])
     # v1.3.83 — persist the streamout transcript: the resolution prints
     # (MACRO_RESOLUTION_MODE / CELL_GDS macro-resolved / STDCELL_MARKER)
     # are the only evidence of WHAT went into the sign-off GDS; swallowing
@@ -48568,11 +48684,19 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
         stream_log.write_text((out or "") + ("\n" + err if err else ""))
     except Exception:
         pass
-    if rc != 0 or not gds_out.is_file():
+    if rc != 0 or not stream_gds.is_file():
         return StepResult("gds", "FAIL", time.time() - t0,
                           f"rc={rc} log_tail={(out+err)[-1500:]}")
+    shutil.copyfile(stream_gds, gds_out)
+    _record_stream_inputs(project, container, gds_out, "klayout", script,
+                          def_file, top,
+                          {"LEFS": lefs, "CELL_GDS": cell_gds_c,
+                           "MACRO_GDS": macro_gds_arg,
+                           "LEFDEF_MAP": lefdef_map_c},
+                          {"STDCELL_MARKER_LAYER": marker_arg})
+    chain = _GdsTransformChain(project, stream_gds, gds_out, declare=not candidate)
     # ORGANIC #600 — manufacturing-grid snap before signoff DRC.
-    snap_ok, snap_note = _declared_transform_exec(project, gds_out, "gds:grid_snap", "klayout",
+    snap_ok, snap_note = chain.run(None, gds_out, "gds:grid_snap", "klayout",
         "grid_snap (in place) (phase3_one_shot_runner step_gds)",
         lambda: _gds_grid_snap(project, top, pdk, container, gds_out))
     # ORGANIC #601 — KLayout streamout does NOT merge abutting same-layer
@@ -48580,7 +48704,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # DRC removes boundary edge-pair false m1.2. Magic-merge cannot be
     # assumed (it core-dumps on the very DEFs that force this fallback), so
     # the merge is KLayout-native. Never ship an un-merged KLayout GDS.
-    merge_ok, merge_note = _declared_transform_exec(project, gds_out, "gds:layer_merge", "klayout",
+    merge_ok, merge_note = chain.run(None, gds_out, "gds:layer_merge", "klayout",
         "layer_merge (in place) (phase3_one_shot_runner step_gds)",
         lambda: _klayout_merge_layers(project, top, pdk, container,
                                                  gds_out))
@@ -48588,7 +48712,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # router's same-net metal shapes left in the (0, min-space) no-man's land
     # (config-gated; each max_bridge_um < the layer min-space so it can only
     # merge same-net shapes, never short or mask a different-net violation).
-    heal_ok, heal_note = ((_declared_transform_exec(project, gds_out, "gds:same_net_heal", "klayout",
+    heal_ok, heal_note = ((chain.run(None, gds_out, "gds:same_net_heal", "klayout",
         "same_net_heal (in place) (phase3_one_shot_runner step_gds)",
         lambda: _klayout_same_net_heal(project, top, pdk, container,
                                                   gds_out)))
@@ -48657,7 +48781,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # GDS. That is LibreLane's chip-flow order, SealRing -> Filler -> Density;
     # adding the ring later would put metal on the die after Step 31 signed it
     # off — the artefact changing after the evidence.
-    seal_ok, seal_note = _declared_transform_exec(project, gds_out, "gds:die_finishing", "klayout",
+    seal_ok, seal_note = chain.run(None, gds_out, "gds:die_finishing", "klayout",
         "die_finishing (in place) (phase3_one_shot_runner step_gds)",
         lambda: _die_finishing(project, top, pdk, gds_out, container))
     # Step 34 on LibreLane (mig104): the tool arm fills a snapshot of the
@@ -48668,7 +48792,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # v1.3.83 — config-driven dummy-METAL fill AFTER merge, BEFORE the
     # sign-off DRC consumes this GDS (the deck's own density + spacing +
     # wide-metal rules then verify the fill honestly — no rule is waived).
-    fill_ok, fill_note = ((_declared_transform_exec(project, gds_out, "gds:dummy_fill", "klayout",
+    fill_ok, fill_note = ((chain.run(None, gds_out, "gds:dummy_fill", "klayout",
         "dummy_fill (in place) (phase3_one_shot_runner step_gds)",
         lambda: _klayout_dummy_fill(project, top, pdk, container,
                                                gds_out)))
@@ -48679,7 +48803,7 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # window and tops it up to the foundry target, after the fixed dummy-fill
     # PATTERN above and before the density checks / sign-off DRC consume this
     # GDS. Config-gated + NONFATAL; the note always discloses the outcome.
-    dfill_ok, dfill_note = (_declared_transform_exec(project, gds_out, "gds:density_metal_fill", "klayout",
+    dfill_ok, dfill_note = (chain.run(None, gds_out, "gds:density_metal_fill", "klayout",
         "density_metal_fill (in place) (phase3_one_shot_runner step_gds)",
         lambda: _density_metal_fill(project, top, pdk, gds_out, container))
         if _t34_direct else (False, _t34["not_run"]))
@@ -48688,19 +48812,19 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     # above measures and fills the streamed geometry's BOUNDING BOX; a foundry
     # minimum-density rule is written over the entire DIE, and on a slot
     # submission those are different rectangles. NONFATAL, always disclosed.
-    ddfill_ok, ddfill_note = (_declared_transform_exec(project, gds_out, "gds:die_density_fill", "klayout",
+    ddfill_ok, ddfill_note = (chain.run(None, gds_out, "gds:die_density_fill", "klayout",
         "die_density_fill (in place) (phase3_one_shot_runner step_gds)",
         lambda: _die_density_fill(project, top, pdk, gds_out,
                                                container))
         if _t34_direct else (False, _t34["not_run"]))
     if _t34 is not None:
         dfill_ok, dfill_note = _step34_gds_ship(project, gds_out, _t34,
-                                                (dfill_ok, dfill_note))
+                                                (dfill_ok, dfill_note), chain=chain)
     # v1.3.91 — restore top PORT text labels + VDD/VSS rail markers LAST (after
     # merge/heal/fill so the labels/markers land on the final geometry): makes
     # the KLayout-streamed GDS LVS-able by the geometric extractor. Config-gated
     # (no-op for OSS PDKs).
-    label_ok, label_note = _declared_transform_exec(project, gds_out, "gds:port_labels", "klayout",
+    label_ok, label_note = chain.run(None, gds_out, "gds:port_labels", "klayout",
         "port_labels (in place) (phase3_one_shot_runner step_gds)",
         lambda: _restore_port_labels_if_missing(
         project, top, pdk, container, gds_out, def_file))
@@ -48760,6 +48884,9 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
             # failure is losing it when a reader most needs it: "which
             # streamout produced this bad GDS" is the first question.
             extras={"streamout_engine": "klayout"})
+    if not chain.finish("finish the retained KLayout stream for sign-off"):
+        return StepResult("gds", "FAIL", time.time() - t0,
+                          chain.failed or "GDS finishing input has no matching tool declaration")
     return StepResult("gds", "PASS", time.time() - t0,
                       f"gds={gds_out.name} size={gds_out.stat().st_size} "
                       f"{'[' + _top_note + '] ' if _top_note else ''}"
@@ -52005,6 +52132,25 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
             + ("routed-DEF " if not def_file.is_file() else "")
             + ("gate-netlist" if not netlist.is_file() else "")
             + " — run PnR first (#443/#509)", reason_class=_V.ReasonClass.INPUT_ABSENT)
+    # The step-23 fresh ODB scene and LVS must name the same final physical
+    # circuit. The GDS producer streams this very DEF and, on the LibreLane
+    # arm, the same PnR netlist. An LVS fallback to a pre-route schematic
+    # after timing would otherwise make both isolated checks look plausible.
+    _agreement_path = (project / "phase3/tool_arms/23/engine_agreement.json")
+    if _agreement_path.is_file():
+        try:
+            _agreement = json.loads(_agreement_path.read_text())
+            _bound = _agreement["bound_final_views"]
+            _same = (
+                _agreement.get("final_views_match") is True and
+                _bound["netlist"]["final_sha256"] == _sha256_file(netlist) and
+                _bound["def"]["final_sha256"] == _sha256_file(def_file))
+        except (OSError, ValueError, KeyError, TypeError):
+            _same = False
+        if not _same:
+            return StepResult("lvs", "FAIL", time.time() - t0,
+                              "STA_LVS_GDS_NETLIST_IDENTITY_MISMATCH: step-23 "
+                              "timed a different ODB/DEF or netlist than final LVS/GDS")
     # ORGANIC-20260606 #477 — run-completion honesty check (b): a 0-byte
     # layout source must NEVER feed a "clean" LVS. Extracting from an empty
     # DEF yields an empty netlist + a meaningless compare; FAIL here BEFORE
@@ -55037,7 +55183,8 @@ def _v1_6_620_append_pv_signoff_provenance(project: Path, top: str) -> List[str]
             # the measured run produced"). Overwriting it with a reconstructed
             # entry carrying the CURRENT digest would turn that FAIL into a
             # PASS, which is the same class of defect this change closes.
-            if _prev.get("measured") or _prev.get("record") == "invocation":
+            if (_prev.get("measured") or _prev.get("record") in
+                    ("invocation", "declared_transform")):
                 continue
             _prev_sha = str((_prev.get("outputs") or {}).get(rel, ""))
             if _prev_sha == _sha(fp) and str(_prev.get("tool")) == tool:
@@ -59139,7 +59286,7 @@ def _canonical_step_condition(project: Path, step_id: str
 _DRC_ATTRIBUTION_JOBS_BASE = (
     ("drc_report_check", "reports/phase3/drc_router.json",
      "reports/phase3/drc_router.rpt",
-     ("--mode", "drc", "--under", "phase3/stage3/pnr",
+     ("--mode", "drc", "--under", "phase3/stage3/pnr/routed_router.drc.rpt",
       "--under", "reports/phase3/drc_router.rpt")),
     ("drc_report_check", "reports/phase3/drc_signoff.json",
      "reports/phase3/drc_signoff.rpt",
@@ -60116,6 +60263,21 @@ def _emit_router_drc_report(project: Path, pnr_out: Path, rpt_phase3: Path,
     routed_drc = pnr_out / "routed.drc.rpt"
     log_path = pnr_out / "openroad.log"
     if log_path.is_file():
+        is_empty, zero_receipt = _empty_router_report_status(pnr_out)
+        if is_empty and zero_receipt is None:
+            # A transcript alone cannot identify which invocation wrote the
+            # zero-byte report. Keep both declared outputs, but give neither
+            # a parseable zero that another DRC consumer could credit.
+            body = ("# OpenROAD router DRC: DRC_EMPTY_NOT_MEASURED\n"
+                    "# The final report is empty without a current "
+                    "digest-bound route receipt.\n")
+            _aa.write_text(routed_drc, body)
+            rpt_phase3.mkdir(parents=True, exist_ok=True)
+            _aa.write_text(rpt_phase3 / "drc_router.rpt", body)
+            for path in (routed_drc, rpt_phase3 / "drc_router.rpt"):
+                if str(path) not in written:
+                    written.append(str(path))
+            return
         log_text = log_path.read_text(errors="ignore")
         # Keep the raw "violation"/DRT log lines for the reviewer-context block.
         router_drc_block = _router_drc_report_block(pnr_out, log_text)
@@ -60193,7 +60355,7 @@ def _emit_router_drc_report(project: Path, pnr_out: Path, rpt_phase3: Path,
             f"{full_log_tail}\n"
             f"# end of routed.drc.rpt\n"
         )
-        routed_drc.write_text(body)
+        _aa.write_text(routed_drc, body)
         if str(routed_drc) not in written:
             written.append(str(routed_drc))
         # Mirror to reports/phase3/ where the gate's --json output lands
@@ -61637,7 +61799,8 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # OpenROAD/Magic extraction the runner just invoked. chip-AGNOSTIC:
         # keyed on the canonical extracted-SPEF path, not any chip name.
         spef_rel = f"phase3/stage3/extracted/{top}.spef"
-        if spef_out.is_file() and spef_rel not in existing:
+        if (spef_out.is_file() and spef_rel not in existing
+                and _newest_declared_sha(project, spef_rel) is None):
             spef_entry = {
                 "tool": "openroad",
                 "command": ("openroad -no_init -exit (RC extraction → SPEF) "
@@ -62172,6 +62335,13 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # stays gated on `timing_repair_needed`, so a non-timing failure withholds the
     # certificate WITHOUT firing a repair that does not address it.
     _repair_decision = _repair_dec.decide(mc_ocv_stance, tns_zero, project=project)
+    # This canonical decision supersedes the LibreLane pre-stream decision.
+    # Its log described that earlier decision and must not certify a fallback
+    # in which this pass applied no repair.
+    _prior_repair_log = postroute_timing_repair_out / "repair_log.json"
+    if _prior_repair_log.is_file():
+        _prior_repair_log.unlink()
+        notes.append("superseded pre-stream repair_log.json before the canonical decision")
     _no_repair_flag = postroute_timing_repair_out / "no_repair_needed.flag"
     if not _repair_decision["repair_needed"]:
         # No violation at the authoritative basis → no post-route repair needed.
@@ -62790,11 +62960,13 @@ def _worst_slack(text: str) -> Optional[float]:
     """#527 — worst (minimum) slack parsed from an OpenSTA/OpenROAD report:
     `<value> slack (MET|VIOLATED)` path-table lines and/or `worst slack <v>`
     summary lines. None when no slack value is parseable."""
+    summaries = [float(m.group(1)) for m in re.finditer(
+        r"^worst\s+slack\s+(?:max|min)?\s*([-+]?\d+(?:\.\d+)?)\s*$",
+        text, re.I | re.M)]
+    if summaries:
+        return min(summaries)
     vals = [float(m.group(1)) for m in re.finditer(
-        r"(-?\d+(?:\.\d+)?)\s+slack\s*\((?:MET|VIOLATED)\)", text)]
-    for m in re.finditer(
-            r"worst\s+slack\s+(?:max|min)?\s*(-?\d+(?:\.\d+)?)", text, re.I):
-        vals.append(float(m.group(1)))
+        r"([-+]?\d+(?:\.\d+)?)\s+slack\s*\((?:MET|VIOLATED)\)", text)]
     return min(vals) if vals else None
 
 
@@ -64161,12 +64333,17 @@ def _parse_mcorner_ocv_slacks(rpt_text: str) -> Tuple[Optional[float],
                                                       Optional[float]]:
     """Parse (setup_wns, hold_wns) from an ``sta_mcorner_ocv*.rpt`` body — the
     per-corner worst slack under the ``=== SETUP/HOLD corner:`` section headers
-    the OCV emitter writes. None for a section that is absent/unparseable."""
+    the OCV emitter writes. A DRV table also has negative ``slack`` rows; those
+    are not timing WNS. None for an absent or ambiguous timing summary."""
     parts = re.split(r"^=== (SETUP|HOLD) corner:", rpt_text, flags=re.MULTILINE)
     setup_wns = hold_wns = None
     for i in range(1, len(parts) - 1, 2):
         kind, sec = parts[i], parts[i + 1]
-        ws = _worst_slack(sec)
+        mode = "max" if kind == "SETUP" else "min"
+        values = re.findall(
+            rf"^worst slack {mode}\s+([-+]?\d+(?:\.\d+)?)\s*$",
+            sec, flags=re.MULTILINE)
+        ws = float(values[0]) if len(values) == 1 else None
         if kind == "SETUP":
             setup_wns = ws
         elif kind == "HOLD":
@@ -64815,7 +64992,9 @@ def _emit_spef(project: Path, top: str, pdk: PdkConfig, container: str,
     tech_lef_c = _to_container_path(str(pdk.tech_lef), container)
     cell_lef_c = _to_container_path(str(pdk.cell_lef), container)
     liberty_c = _to_container_path(str(pdk.liberty), container)
-    spef_c = _to_container_path(str(spef_out), container)
+    raw_spef = spef_out.parent / "raw" / f"{spef_out.stem}.{time.time_ns()}.spef"
+    raw_spef.parent.mkdir(parents=True, exist_ok=True)
+    spef_c = _to_container_path(str(raw_spef), container)
     # A routed chip DEF names IO masters as well as standard cells. Reuse
     # the same DEF-driven library resolver as the other reopening consumers.
     macro_lefs_tcl = _extra_lef_read_block(
@@ -64926,9 +65105,10 @@ exit
     # A SPEF left by an earlier extraction (another ruleset, another route)
     # must not survive a failed re-extraction as if this one produced it: the
     # declaration recorded beside it would then vouch for bytes it never made.
+    # A failed re-extraction cannot leave an older canonical SPEF looking new.
     spef_out.unlink(missing_ok=True)
-    rc, out, err = _docker_exec(container, cmd, marker=tcl_c, outputs=[spef_out])
-    if not spef_out.is_file() or spef_out.stat().st_size == 0:
+    rc, out, err = _docker_exec(container, cmd, marker=tcl_c, outputs=[raw_spef])
+    if not raw_spef.is_file() or raw_spef.stat().st_size == 0:
         notes.append(
             f"SPEF extraction did not produce {spef_out.name} "
             f"(rc={rc}). Tool: openroad. "
@@ -64949,7 +65129,16 @@ exit
     # GATED: only runs when the SPEF is grounded-ONLY (no captable coupling to
     # double-count) and the geometry actually yields coupling; NONFATAL — any
     # error leaves the valid grounded SPEF intact.  Disable: VIBEIC_SPEF_COUPLING=0.
+    shutil.copyfile(raw_spef, spef_out)
     _emit_spef_coupling_augment(def_file, pdk.tech_lef, spef_out, notes)
+    if ((project / "provenance.jsonl").is_file()
+            and not _declare_immutable_transform(
+                project, raw_spef, spef_out, "spef:extraction_finishing",
+                "openroad", "publish and augment retained OpenRCX SPEF")):
+        spef_out.unlink(missing_ok=True)
+        notes.append("SPEF transform refused: OpenRCX input has no matching "
+                     "tool declaration")
+        return False
     return True
 
 
@@ -65477,7 +65666,9 @@ def _librelane_signoff_record(project: Path, top: str, pdk: PdkConfig,
             corners = _ls.corner_timing(sta_folder)
             judged = _ls.judge_timing(corners)
             engines = _ls.agreement(project, result["image"], sta_folder,
-                                    result["mounts"], arms / "23/engine_agreement.json")
+                                    result["mounts"], arms / "23/engine_agreement.json",
+                                    io_masters=_io_masters_for(project),
+                                    logical_top=top)
             deck = (_ls.deck_agreement(ocv_rpt.read_text(errors="replace"), sta_folder,
                                        arms / "23/deck_agreement.json",
                                        spef_dir=corner_dir)
@@ -69906,6 +70097,8 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
     _promotion = _route_promotion_read(project)
     _promoter = (_promotion or {}).get("promoter")
     _promoted_own: Optional[Dict[str, Any]] = None
+    _promotion_refusal = ""
+    _ll21_handed = False
     if _promotion is not None:
         _psha = _promotion.get("promoted_def_sha256")
         if _psha and _psha == _route_file_sha256(def_file):
@@ -69923,8 +70116,67 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
             # never credited with the PnR session's count.
             _promoted = True
             _promoted_own = {}
+    # A LibreLane step 32 and signoff_spef_repair cannot run in the same
+    # invocation. A signoff log beside this route belongs to an older run.
+    # The in-chain handoff is accepted only through its receipt's report hash;
+    # a bare marker or an unbound route-promotion record cannot certify it.
+    if _librelane_postroute_repair_mode(project) != "direct":
+        if _promoter == "librelane_step32_in_chain":
+            _chain, _why = _postroute_repair_in_chain(project)
+            _state = (_chain or {}).get("adopted_state")
+            _state_def = None
+            if _state:
+                try:
+                    _state_def = Path(json.loads(Path(_state).read_text())["def"])
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+            if (not _chain or not _chain.get("adopted")
+                    or _chain.get("verdict") != "PASS"
+                    or _state_def is None
+                    or _route_file_sha256(_state_def) !=
+                    (_promotion or {}).get("promoted_def_sha256")
+                    or (_promotion or {}).get("measurement") !=
+                    _step32_own_measurement(_chain)):
+                _promotion_refusal = (_why if not _chain else
+                                      "the receipt-bound step-32 report, adopted "
+                                      "route and promotion measurement disagree")
+                _promoted = True
+                _promoted_own = {}
+            else:
+                _promoted = False
+                _promoted_own = None
+                _ll21_handed = True
+        elif _promoter == "librelane_step32_after_route":
+            import librelane_postroute_repair as _llprr  # noqa: PLC0415
+            try:
+                _after = json.loads((project / _llprr.REPORT_REL).read_text())
+                _state_def = Path(json.loads(Path(_after["adopted_state"]).read_text())["def"])
+            except (OSError, ValueError, KeyError, TypeError):
+                _after, _state_def = {}, None
+            if (_after.get("site") != "after_direct_route"
+                    or not _after.get("adopted") or _after.get("verdict") != "PASS"
+                    or _state_def is None
+                    or _route_file_sha256(_state_def) != _route_file_sha256(def_file)
+                    or (_promotion or {}).get("promoted_def_sha256") !=
+                    _route_file_sha256(def_file)
+                    or (_promotion or {}).get("measurement") !=
+                    _step32_own_measurement(_after)):
+                _promotion_refusal = ("the after-direct-route step-32 report "
+                                      "is not bound to the shipped DEF and "
+                                      "its own antenna measurement")
+                _promoted = True
+                _promoted_own = {}
+            else:
+                _promoted = True
+                _promoted_own = (_promotion or {}).get("measurement") or {}
+        elif _promoted:
+            _promotion_refusal = ("no route-promotion record binds this "
+                                  "LibreLane step-32 route to its report")
+            _promoter = "postroute_repair_librelane"
+            _promoted_own = {}
     _ship_txt = (_ship_log.read_text(errors="ignore")
-                 if (_promoted and _promoted_own is None
+                 if (_librelane_postroute_repair_mode(project) == "direct"
+                     and _promoted and _promoted_own is None
                      and _ship_log.is_file()) else "")
     _ship_measured = "SHIP_ANT_END" in _ship_txt
     pnr_log = pnr_out / "openroad.log"
@@ -69980,7 +70232,8 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     net_viol = -1  # could not measure (ANT-0008 after failed route)
                     pin_viol = -1
                 # G-SHIP-ANTENNA — override with the SHIPPING session's counts.
-                _measured_on = "the PnR route"
+                _measured_on = ("the PnR tail after LL21 step-32 adoption"
+                                if _ll21_handed else "the PnR route")
                 _shipped_unmeasured = False
                 _own_n = (_promoted_own or {}).get("antenna_nets")
                 _own_p = (_promoted_own or {}).get("antenna_pins")
@@ -70021,7 +70274,9 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     _measured_on = (f"NOTHING — {_promoter or 'signoff_spef_repair'} "
                                     "PROMOTED a "
                                     "re-routed design over the shipped DEF and "
-                                    "no antenna check ran on it")
+                                    "no antenna check bound to this run ran on it"
+                                    + (f" ({_promotion_refusal})"
+                                       if _promotion_refusal else ""))
                 if routing_incomplete:
                     clean = False
                     verdict = "FAIL"
@@ -70081,6 +70336,11 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     "# last change to the route. The extraction gate (step 31) is\n"
                     "# what measures what that change did.\n"
                     if (_unverified_after and not routing_incomplete) else "")
+                _stale_ship_note = (
+                    "\n# STALE signoff_spef_repair.log NOT READ: step 32 ran on "
+                    "LibreLane in this invocation.\n"
+                    if (_librelane_postroute_repair_mode(project) != "direct"
+                        and _ship_log.is_file()) else "")
                 _subject = _measured_subject(project, top, [def_file],
                                              tool_log=pnr_log)
                 antenna_rpt.write_text(
@@ -70144,13 +70404,18 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                        f"can continue, so it is NOT visible as a routing "
                        f"failure)\n" if pins_unaccessed else "")
                     + _incomplete_note + _cosmetic_note
-                    + _unverified_note)
+                    + _unverified_note + _stale_ship_note)
                 _aa.write_text(antenna_rpt.parent / "antenna.json", json.dumps({
                     "tool": "openroad",
                     "mode": "antenna_check_in_session_post_repair",
                     "net_violations": net_viol if have_counts else None,
                     "pin_violations": pin_viol if have_counts else None,
                     "clean": clean,
+                    "promoted_by": _promoter,
+                    "promotion_binding_refusal": _promotion_refusal or None,
+                    "stale_signoff_spef_repair_log": (
+                        _rel_to_project(_ship_log, project)
+                        if _stale_ship_note else None),
                     # G-SHIP-ANTENNA — WHICH state of the design the numbers
                     # above describe. A count and the route it was taken on are
                     # two facts; publishing only the first is how a clean PnR
@@ -71244,7 +71509,8 @@ def _step34_gds_tool_arm(project: Path, pdk: PdkConfig,
 
 
 def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
-                     direct_fill: Tuple[bool, str]) -> Tuple[bool, str]:
+                     direct_fill: Tuple[bool, str],
+                     chain: Optional[_GdsTransformChain] = None) -> Tuple[bool, str]:
     """Decide which step-34 GDS fill ships, record both arms, and return the
     (ok, note) the stream-out discloses for its density-fill slot. `dual`
     measures the direct fill already in `gds_out` with the same deck."""
@@ -71268,7 +71534,7 @@ def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
     result = direct_fill
     if shipped == "librelane" and tool:
         filled = Path(tool["filler"]["filled_gds"])
-        _declared_transform_exec(project, gds_out, "gds:librelane_filler", "klayout",
+        (chain.run if chain else _declared_transform_exec)(None, gds_out, "gds:librelane_filler", "klayout",
             "KLayout.Filler (LibreLane) (phase3_one_shot_runner step_gds)",
             lambda: shutil.copyfile(filled, gds_out))
         result = (True, f"LibreLane KLayout.Filler ({tool['filler']['script']}); PDK "
@@ -74879,6 +75145,14 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
         "dispatched_sites": selected,
         "stale_downstream": stale}, indent=2) + "\n")
     audit_doc = json.loads(audit.read_text())
+    # The enclosing unit published the selected producer outputs. Refresh
+    # those steps' own write records before check_step consumes attribution;
+    # the collector's only_steps path carries every unselected row unchanged.
+    # Building this view in a disposable clone left the project's old
+    # written.json in place and gave the gate a false resolver disagreement.
+    report["steps_view"] = _pl.emit_steps_view(
+        project, PROGRAMS_DIR, runner="phase3_one_shot_runner",
+        only_steps=window_ids)
     gate_results = _phase3_window_full_gate_audit(project, window_ids)
     audit_doc["audit_kind"] = "bounded_full_declared_gates"
     audit_doc["declared_gate_checks"] = gate_results
@@ -74899,23 +75173,6 @@ def _run_phase3_window(project: Path, top: str, pdk: PdkConfig,
         "refresh": "flow_compliance_check.check_step", "kind": "executed",
         "why": "all gate clauses of selected canonical steps ran on an isolated copy"}
     audit.write_text(json.dumps(audit_doc, indent=2) + "\n")
-    # The steps-view emitter refreshes every steps/* write record. Isolate it
-    # and publish only its bounded report, preserving every unselected record.
-    import tempfile
-    with tempfile.TemporaryDirectory(prefix="phase3-steps-view-",
-                                     dir=project.parent) as temp:
-        isolated = Path(temp) / project.name
-        _phase3_window_clone(project, isolated)
-        report["steps_view"] = _pl.emit_steps_view(
-            isolated, PROGRAMS_DIR, runner="phase3_one_shot_runner",
-            only_steps=window_ids)
-        source_view = _pl.report_path(isolated, "steps_view.json")
-        if source_view.is_file():
-            target_view = _pl.report_path(project, "steps_view.json")
-            target_view.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_view, target_view)
-            report["steps_view"]["steps_root"] = str(project / "steps")
-            report["steps_view"]["record_path"] = str(target_view)
     out.write_text(json.dumps(report, indent=2) + "\n")
     print(f"[phase3] bounded sites={selected}; changed={len(changed)}; "
           f"stale={list(stale)}")

@@ -1,0 +1,7 @@
+max fanout
+
+Pin                                   Limit Fanout  Slack
+---------------------------------------------------------
+A                                         0      1     -0 (VIOLATED)
+u1/ZN                                     0      1     -0 (VIOLATED)
+

@@ -148,15 +148,14 @@ def test_the_runner_records_the_sha_it_already_computes():
         "the receipt does not bind the boundary to the DEF it was streamed from")
 
 
-def test_the_magic_branch_removes_a_boundary_it_did_not_produce():
-    """SOURCE PIN on the other half: only the KLayout branch retains a boundary, so
-    the Magic branch must not leave an earlier run's behind."""
+def test_the_magic_branch_replaces_a_stale_boundary_with_its_own_receipt():
+    """Magic now retains this run's pre-finishing bytes and their DEF basis."""
     src = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
     i = src.index('extras={"streamout_engine": "magic"')
-    window = src[max(0, i - 4000):i]
-    assert 'glob("*.prefinish.gds")' in window, (
-        "the magic stream-out branch does not clear a stale finishing boundary")
-    assert "_stale.unlink()" in window
+    window = src[src.index("if magic_ok and stream_gds.is_file():"):i]
+    assert 'shutil.copyfile(gds_out, prefinish_gds)' in window
+    assert '"engine": "magic"' in window
+    assert '"def_sha256": _sha256_file(def_file)' in window
 
 
 # ── (b) a reference layout never enters the pack ───────────────────────────

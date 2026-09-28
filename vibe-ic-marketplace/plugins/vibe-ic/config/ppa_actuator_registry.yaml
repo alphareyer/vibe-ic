@@ -467,13 +467,19 @@ controllers:
       wall_seconds: 28800
 
   postroute.repair_drv:
-    summary: Close post-route max slew / capacitance / fanout.
+    summary: >-
+      Close post-route max slew / capacitance / fanout. A residual candidate
+      may become the next starting point only when its named violator set is
+      a strict subset and timing remains within declared limits. Three
+      bounded attempts stop after the first stall; residual DRV remains FAIL.
     objective_domain: timing.drv
     actuator: timing.repair_setup
     plan:
       - {}
+      - {}
+      - {}
     stop:
-      max_iterations: 1
+      max_iterations: 3
       plateau_patience: 1
       wall_seconds: 14400
 

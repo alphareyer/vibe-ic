@@ -30,9 +30,10 @@ The derate has a declared source or none is applied: a PDK that declares no
 which the sign-off rigor gate reads as the absence it is.
 
 The dual for step 23 is an AGREEMENT check, not a pick: `agreement` re-times
-every corner STAPostPNR analysed, with the same netlist, SDC, SPEF, liberty
-files and extra Tcl, in the image's standalone OpenSTA (`sta`, a second
-engine binary), and compares worst slack, TNS and violating-endpoint counts
+every corner STAPostPNR analysed, from its final ODB with the same SDC, SPEF,
+liberty files and extra Tcl, in a fresh OpenROAD process. It binds the timed
+ODB's route view and netlist to the files used for GDS/LVS by sha256, then
+compares worst slack, TNS and violating-endpoint counts
 for setup and hold.  A disagreement is an instrument refusal
 (`LL_STA_ARMS_DISAGREE`), never a choice of the better number.
 
@@ -52,6 +53,7 @@ from typing import Any, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _atomic_artefact import write_json  # noqa: E402
 import _docker_memory as _dmem  # noqa: E402 — every `docker run` carries the ceiling
+import _path_layout as _pl  # noqa: E402
 from librelane_contract import (Refusal, _load, digest, handoff_to_direct,  # noqa: E402
                                 resolve_step_configs, run_chain, run_container,
                                 state_from_direct)
@@ -543,16 +545,33 @@ def critical_nets(sta_folder: Path, corner: str, paths: int = 5) -> list[str]:
     return out
 
 
-# --- the agreement arm: standalone OpenSTA on the same inputs ---------------
+# --- the agreement arm: fresh ODB STA on the final scene inputs -------------
 
 _STA_LIBRARY_RE = re.compile(
     r"^Reading cell library for the '([^']+)' corner at '([^']+)'", re.M)
 _ARM_LINE = re.compile(r'^VIBEIC_ARM (\S+) (\S+)$', re.M)
 
+
+def _abutted_geometry_census(log: str) -> dict:
+    """Accept only a complete ODB proof of zero-wire, touching terminal shapes."""
+    def count(label):
+        rows = re.findall(rf'^STA_ANNOTATION_{label}:\s*(\d+)\b', log, re.M)
+        return int(rows[0]) if len(rows) == 1 else None
+    names = re.findall(r'^STA_ANNOTATION_ABUTTED_NET:\s*(\S+)\s*$', log, re.M)
+    abutted = count('ABUTTED_NETS')
+    unrouted = count('UNROUTED_NETS')
+    blind = count('UNROUTED_SHAPE_BLIND')
+    complete = re.findall(r'^STA_ANNOTATION_CENSUS_COMPLETE:\s*1\s*$', log, re.M)
+    valid = (len(complete) == 1 and abutted is not None and
+             unrouted == 0 and blind == 0 and
+             len(names) == abutted and len(set(names)) == len(names))
+    return {'complete': valid, 'abutted_nets': sorted(names) if valid else [],
+            'unrouted_nets': unrouted, 'shape_blind_nets': blind,
+            'basis': 'same final ODB: no dbWire and all terminal shapes connected'}
+
 _ARM_TCL = r'''set_cmd_units -time ns -capacitance pF -current mA -voltage V -resistance kOhm -distance um
 foreach _l $::env(VIBEIC_ARM_LIBS) { read_liberty $_l }
-read_verilog $::env(VIBEIC_ARM_NETLIST)
-link_design $::env(VIBEIC_ARM_TOP)
+read_db $::env(VIBEIC_ARM_ODB)
 set ::env(OPENLANE_SDC_IDEAL_CLOCKS) 0
 read_sdc $::env(VIBEIC_ARM_SDC)
 set_propagated_clock [all_clocks]
@@ -582,28 +601,81 @@ def _arm_values(text: str) -> dict[str, Optional[float]]:
 
 
 def agreement(project: Path, image: str, sta_folder: Path, mounts: list[tuple[Path, str]],
-              output: Path, *, tolerance_ns: float = 1e-3, docker: str = 'docker') -> dict:
-    """Re-time every analysed corner in standalone `sta`; compare with the tool."""
+              output: Path, *, tolerance_ns: float = 1e-3, docker: str = 'docker',
+              io_masters: Optional[set[str]] = None,
+              logical_top: Optional[str] = None) -> dict:
+    """Re-time every analysed corner from final ODB in a fresh OpenROAD process."""
     state = _load(sta_folder / 'state_out.json')
     config = _load(sta_folder / 'config.json') if (sta_folder / 'config.json').is_file() else {}
     tool = corner_timing(sta_folder)
     spefs = state.get('spef') or {}
-    arms = project / 'phase3/tool_arms/23/opensta'
+    arms = project / 'phase3/tool_arms/23/openroad_odb'
     arms.mkdir(parents=True, exist_ok=True)
-    (arms / 'arm.tcl').write_text(_ARM_TCL)
+    # The separate OpenSTA process measures the annotation population on the
+    # very same final views used for the independent timing comparison. OpenSTA
+    # includes PG terminals, disconnected spare outputs and off-die terminals
+    # in its raw driver count; retain every name and classify it from DEF/LEF.
+    from phase3_one_shot_runner import (_sta_link_census_tcl,
+                                       _routing_integrity_check_tcl)
+    annotation_tcl = (
+        'set _vibeic_annotation [file join $::env(VIBEIC_ARM_DIR) annotation.rpt]\n'
+        'set _f [open $_vibeic_annotation w]\n'
+        + _sta_link_census_tcl() +
+        'close $_f\n'
+        'report_parasitic_annotation -report_unannotated >> $_vibeic_annotation\n')
+    geometry_tcl = (_routing_integrity_check_tcl(
+        'STA_ANNOTATION', emit_abutted_names=True) +
+        'puts "STA_ANNOTATION_CENSUS_COMPLETE: $::_vic_routing_integrity_complete"\n')
+    (arms / 'arm.tcl').write_text(_ARM_TCL + geometry_tcl + annotation_tcl)
     rows: dict[str, Any] = {}
     disagree: list[str] = []
+    unmeasured: list[str] = []
+    from sta_annotation_population import classify
+    def host_view(value: str) -> Path:
+        for host, guest in mounts:
+            if value.startswith(guest.rstrip('/') + '/'):
+                return Path(host) / value[len(guest.rstrip('/')) + 1:]
+        return Path(value)
+
+    pnr = _pl.pnr_dir(project)
+    final_netlist = pnr / (str(logical_top or '') + '_pnr.v')
+    final_def = pnr / (str(logical_top or '') + '.def')
+    bound_views = {}
+    for key, candidate, final in (('netlist', state.get('nl'), final_netlist),
+                                  ('def', state.get('def'), final_def)):
+        source = Path(candidate or '')
+        bound_views[key] = {'sta_path': str(source), 'final_path': str(final),
+                            'sta_sha256': digest(source) if source.is_file() else None,
+                            'final_sha256': digest(final) if final.is_file() else None}
+    odb = Path(state.get('odb') or '')
+    bound_views['odb'] = {'path': str(odb),
+                          'sha256': digest(odb) if odb.is_file() else None}
+    views_match = (bound_views['odb']['sha256'] is not None and
+                   all(bound_views[k]['sta_sha256'] is not None and
+                       bound_views[k]['sta_sha256'] == bound_views[k]['final_sha256']
+                       for k in ('netlist', 'def')))
     for corner, measured in tool.items():
         log = (sta_folder / corner / 'sta.log').read_text(errors='replace')
         libs = [path for name, path in _STA_LIBRARY_RE.findall(log) if name == corner]
         matched = [p for pattern, p in spefs.items() if fnmatch.fnmatch(corner, pattern)]
         if not libs or len(matched) != 1:
             rows[corner] = {'verdict': 'NOT_MEASURED', 'libs': libs, 'spef_matches': len(matched)}
-            disagree.append(corner)
+            unmeasured.append(corner)
             continue
+        inputs = {'odb': state.get('odb'), 'netlist': state.get('nl'),
+                  'def': state.get('def'),
+                  'sdc': config.get('SIGNOFF_SDC_FILE') or state.get('sdc'),
+                  'spef': matched[0]}
+        input_sha = {key: (digest(host_view(value)) if value and
+                            host_view(value).is_file() else None)
+                     for key, value in inputs.items()}
+        liberty_sha = {path: (digest(host_view(path)) if host_view(path).is_file()
+                              else None) for path in libs}
+        input_complete = (all(input_sha.values()) and all(liberty_sha.values()))
         folder = arms / corner
         folder.mkdir(parents=True, exist_ok=True)
         env = {'VIBEIC_ARM_LIBS': ' '.join(libs), 'VIBEIC_ARM_NETLIST': state['nl'],
+               'VIBEIC_ARM_ODB': state['odb'],
                'VIBEIC_ARM_TOP': str(config.get('DESIGN_NAME') or ''),
                'VIBEIC_ARM_SDC': str(config.get('SIGNOFF_SDC_FILE') or state['sdc']),
                'VIBEIC_ARM_SPEF': matched[0], 'VIBEIC_ARM_CORNER': corner,
@@ -619,28 +691,52 @@ def agreement(project: Path, image: str, sta_folder: Path, mounts: list[tuple[Pa
                *_dmem.docker_memory_flags(), *volumes]
         for key, value in env.items():
             cmd += ['-e', f'{key}={value}']
-        cmd += ['--entrypoint', 'sta', image, '-no_init', '-no_splash', '-exit', str(arms / 'arm.tcl')]
+        cmd += ['--entrypoint', 'openroad', image, '-no_init', '-exit', str(arms / 'arm.tcl')]
         completed = run_container(cmd, supervised=True, log=folder / 'sta.log')
         (folder / 'sta.log').write_text(completed.stdout + '\n' + completed.stderr)
         arm = _arm_values(completed.stdout)
+        geometry = _abutted_geometry_census(completed.stdout)
+        annotation_path = folder / 'annotation.rpt'
+        annotation = (classify(annotation_path.read_text(errors='replace'),
+                               Path(state.get('def') or ''), io_masters=io_masters,
+                               strict_geometry=True,
+                               abutted_nets=geometry['abutted_nets'])
+                      if annotation_path.is_file() else
+                      {'complete': False, 'reason': 'fresh OpenSTA annotation report absent'})
+        annotation['required_unannotated_drivers'] = sum(
+            row['classification'] == 'REQUIRED_OR_UNKNOWN'
+            for row in annotation.get('drivers', []))
         compared: dict[str, Any] = {}
-        ok = completed.returncode == 0
+        valid = (completed.returncode == 0 and geometry['complete'] and
+                 annotation['complete'] and
+                 views_match and input_complete)
+        ok = True
         for key in ('setup_ws', 'setup_tns', 'setup_vio', 'hold_ws', 'hold_tns', 'hold_vio',
                     'max_slew_vio', 'max_cap_vio'):
             a, b = arm.get(key), measured.get(key)
             same = (a is not None and b is not None and
                     (abs(a - b) <= tolerance_ns if not key.endswith('vio') else a == b))
-            compared[key] = {'opensta': a, 'stapostpnr': b, 'agree': same}
+            compared[key] = {'openroad_odb': a, 'stapostpnr': b, 'agree': same}
             ok = ok and same
-        rows[corner] = {'verdict': 'AGREE' if ok else 'DISAGREE', 'rc': completed.returncode,
-                        'libs': libs, 'spef': matched[0], 'metrics': compared}
-        if not ok:
+        verdict = 'NOT_MEASURED' if not valid else 'AGREE' if ok else 'DISAGREE'
+        rows[corner] = {'verdict': verdict, 'rc': completed.returncode,
+                        'libs': libs, 'spef': matched[0], 'metrics': compared,
+                        'input_sha256': input_sha, 'liberty_sha256': liberty_sha,
+                        'annotation': annotation,
+                        'geometry_census': geometry,
+                        'annotation_sha256': digest(annotation_path) if annotation_path.is_file() else None}
+        if verdict == 'DISAGREE':
             disagree.append(corner)
-    verdict = ('NOT_MEASURED' if not rows else 'DISAGREE' if disagree else 'AGREE')
+        elif verdict == 'NOT_MEASURED':
+            unmeasured.append(corner)
+    verdict = ('NOT_MEASURED' if not rows or unmeasured else
+               'DISAGREE' if disagree else 'AGREE')
     document = {'verdict': verdict, 'tolerance_ns': tolerance_ns, 'corners': rows,
-                'disagreeing_corners': disagree, 'tool_step': str(sta_folder),
+                'disagreeing_corners': disagree, 'unmeasured_corners': unmeasured,
+                'tool_step': str(sta_folder),
                 'tool_state_sha256': digest(sta_folder / 'state_out.json'),
-                'arm': 'standalone OpenSTA (sta) in the same image, same netlist/SDC/SPEF/liberty/extra Tcl'}
+                'bound_final_views': bound_views, 'final_views_match': views_match,
+                'arm': 'fresh OpenROAD from final ODB; sha-bound GDS/LVS netlist and DEF; scene SDC/SPEF/Liberty/extra Tcl'}
     write_json(output, document)
     return document
 

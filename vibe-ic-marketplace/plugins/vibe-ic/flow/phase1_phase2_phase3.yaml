@@ -5292,6 +5292,9 @@ steps:
       # output, and Step 21 gates read it.  It is route evidence, not an
       # external input and not a Step-37.4 aggregation artefact.
       - "phase3/stage3/pnr/openroad.log"
+      # The final router's native -output_drc report. Iteration snapshots
+      # (`*.iterN.rpt`) are diagnostics for older routes, not final subjects.
+      - "phase3/stage3/pnr/routed_router.drc.rpt"
       # The router-DRC report the phase-3 runner actually emits is
       # `routed.drc.rpt` (phase3_one_shot_runner.py, Step-21 emitter). Nothing
       # in the plugin has ever written `phase3/stage3/pnr/drc.rpt` — that
@@ -5363,7 +5366,7 @@ steps:
         # report of its own — its PASS was earned entirely by the DRC reports
         # of the nested clean_run_* snapshots underneath it. rc=1 there is the
         # correct verdict, and it is the rc=1 path having been SEEN to execute.
-        - program_exit_zero: "drc_report_check . --mode drc --under phase3/stage3/pnr --under reports/phase3/drc_router.rpt --json reports/phase3/drc_router.json"
+        - program_exit_zero: "drc_report_check . --mode drc --under phase3/stage3/pnr/routed_router.drc.rpt --under reports/phase3/drc_router.rpt --json reports/phase3/drc_router.json"
         # Anti-fabrication: all 5 stage DEFs must be byte-distinct,
         # size-monotone, instance-count growing, and routed.def must
         # contain `+ ROUTED` geometry. Added 2026-04-22 after bench-a
@@ -6418,28 +6421,25 @@ steps:
         # output and files_found went 1 -> 2.
         - program_exit_zero: "antenna_report_check . --mode antenna --under reports/phase3/antenna.rpt --json reports/phase3/antenna_signoff.json"
         # INDEPENDENT GDS-geometry antenna sign-off (the authoritative second
-        # opinion the flow never had). Reconstructs the as-fabricated
-        # connectivity from the streamed GDS and computes per-net
-        # metal_area/gate_area with STAGED connectivity — at the layer-k etch
-        # stage only layers 1..k exist, so an upper-metal jumper cannot relieve
-        # a lower-stage antenna, a relief the router's final-netlist model DOES
-        # credit. It also runs cumulative-antenna-area (CAA) charge sharing,
-        # which a per-layer check structurally cannot see, and CROSS-CHECKS its
-        # count against reports/phase3/antenna.rpt: a clean/dirty DISAGREEMENT
-        # is a hard FAIL so a router-vs-geometry inconsistency is surfaced
-        # rather than averaged away.
+        # opinion the flow never had). A PDK-native KLayout deck measures its
+        # own ANT rules on the streamed GDS. A PDK-declared JSON geometry deck
+        # uses the vendored staged-connectivity and CAA engine instead. Both
+        # CROSS-CHECK against reports/phase3/antenna.rpt: a clean/dirty
+        # DISAGREEMENT is a hard FAIL. Do not ascribe the JSON engine's staged
+        # or CAA rule coverage to a native PDK deck unless that deck declares it.
         #
-        # OPT-IN by PDK: the layer stack and per-metal ratio bounds are foundry
-        # data, so the gate runs only where the PDK integrator has placed a deck
-        # config. Without one there is nothing to measure geometry against and
-        # Step 26 keeps exactly its previous verdict. WITH one, the gate always
+        # OPT-IN by PDK: a bridge geometry config OR the image-bound PDK-root
+        # receipt selects the PDK's native KLayout antenna deck. The latter
+        # discovers the rule within the selected tree and records deck/GDS/
+        # RDB/transcript SHA-256. Without either there is no geometry target
+        # to measure and Step 26 keeps exactly its previous verdict. WITH one, the gate always
         # reports: if KLayout or the deck engine is unavailable it exits 2 with
         # a NAMED disclosure -> VACUOUS-PASS, never a bare PASS earned by a
         # checker that did not run. (`gds_antenna_deck_check --strict` turns
         # that disclosure into a hard FAIL for a production tapeout.)
         - optional_program_exit_zero:
             command: "gds_antenna_deck_check . --json reports/phase2/gates/gate_oxide_geom_deck.json"
-            condition_files_exist: ["signoff/gate_oxide_deck.json", "input/pdk/bridge/gate_oxide_deck.json"]
+            condition_files_exist: ["signoff/gate_oxide_deck.json", "input/pdk/bridge/gate_oxide_deck.json", "phase3/librelane_pdk_root.provenance.json"]
             absent_condition_reason: >-
               Both triggers are PDK-PROVIDED sign-off decks -- inputs to this
               step, not results of it. Without a gate-oxide deck there is no
