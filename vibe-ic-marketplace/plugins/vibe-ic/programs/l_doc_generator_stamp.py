@@ -628,4 +628,3 @@ def _record_flow_write(path: Path, emitter: str) -> None:
             f"l_doc_generator_stamp.dump:{emitter}")
     except Exception:                                      # noqa: BLE001
         pass
-
