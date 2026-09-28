@@ -157,6 +157,24 @@ def test_a_block_with_no_rtl_module_is_skipped_not_passed(tmp_path: Path):
     assert M.main([str(p)]) == 2
 
 
+def test_cold_a8_finds_supplied_build_rtl_before_phase2_stages_it(tmp_path: Path):
+    """A8 runs before Phase 2, so its inline blocking gate must still see the
+    supplied design RTL through the consume step's input-only discovery."""
+    p = tmp_path / "proj"
+    b = p / "phase3" / "analog" / "blk"
+    b.mkdir(parents=True)
+    (b / "topology.json").write_text(json.dumps(
+        {"ports": ["vin", "vout"], "rails": {}}))
+    (p / "input" / "rtl").mkdir(parents=True)
+    (p / "input" / "rtl" / "top.v").write_text(
+        "module blk (input vin, output bit_out); endmodule\n")
+    r = M.check_block(p, "blk")
+    assert r["compared"] is True
+    assert r["agree"] is False
+    assert r["rtl_source"] == "input/rtl/top.v"
+    assert r["missing_in_rtl"] == ["vout"]
+
+
 # ---------------------------------------------------------------------------
 # vibe-ic#2010 — the three hygiene findings on this checker, each pinned by a
 # control that FAILS against the v1.15.49 code and passes after.

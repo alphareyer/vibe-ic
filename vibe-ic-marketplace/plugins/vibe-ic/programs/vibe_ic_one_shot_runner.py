@@ -1993,6 +1993,75 @@ def main() -> int:
         print(f"[flow] {flow_top_note}", flush=True)
         advisories.append(f"flow {flow_top_note}")
 
+    # ---------------- Analog A1..A8 ----------------
+    # FX_ADC_PHASE_ORDER — DISPATCHED BEFORE PHASE 2, reported after it.
+    #
+    # The A-track reads phase-1 artefacts (L5_ADI_SPEC / the block list) and,
+    # for A8's inline macro/RTL comparison, may read supplied build RTL under
+    # input/ through the same §4.05-safe discovery Phase 2 uses. It reads no
+    # Phase-2-produced RTL. Phase 2, though, JUDGES the A-track: its
+    # Step-4 acceptance run reads A4's corner records, and its final audit
+    # (`flow_compliance_check --phase 2`) judges A1..A9, which the flow yaml
+    # declares `phase_scope: agnostic` (R-0915-158: in BOTH scopes). With the
+    # A-track dispatched after phase 2, both read artefacts that did not exist
+    # yet. MEASURED on u_hawaii_adc (IC_STATUS_0928): the phase-2 audit FAILed
+    # "Step A1: Analog Spec Extraction (missing_artefact)" and every A2..A9
+    # upstream_failed, and that FAIL made phase 2 -- and the run -- red however
+    # the A-track itself then did. Running the producer before its judge is the
+    # ordering the flow yaml already implies (A1 blocks_on D1 only).
+    #
+    # The plan ROW is still appended after phase 2 (`_analog_row`), so the
+    # run's phase order as reported is unchanged.
+    # Non-blocking on FAIL. Dispatches off the single run_analog decision
+    # computed above (#459) so the A-track invocation and phase2's
+    # --skip-analog forwarding never disagree. The decision is sourced from
+    # phase1 artefacts (L5_ADI_SPEC / analog_block_list), which are produced
+    # before this point — phase2 does not emit them — so moving the decision
+    # ahead of phase2 is behaviourally identical for analog/mixed-signal.
+    # ORGANIC (GAP-ANALOG-1) — an analog / mixed-signal IC (run_analog==True) has
+    # its silicon flow in this A-track, NOT the digital phase2. Its digital phase2
+    # legitimately has NO synthesizable RTL (class rtl_gen=null), so phase2 FAILs
+    # and sets halted_at="phase2" — but that is the EXPECTED digital outcome, not a
+    # reason to skip the IC's OWN analog track. Previously `if not halted_at`
+    # gated the A-track OUT on that expected digital FAIL, so an analog-only IC
+    # could NEVER reach its analog flow via the one-shot entry. Dispatch the
+    # A-track whenever run_analog AND phase1 did not itself halt (phase1 emits the
+    # L5_ADI_SPEC the A-track needs); a phase2 digital halt does NOT block it. The
+    # A-track stays non-blocking, and phase3's digital PnR remains correctly gated
+    # on halted_at (a pure-analog IC still skips the digital PnR).
+    _analog_dispatch = (run_analog and not _p3_skip_by_exit
+                        and halted_at in ("", "phase2"))
+    if _analog_dispatch:
+        runner = _phase_runner("analog")
+        # `--pdk` REACHES THE ANALOG TRACK. Until now this was the only phase
+        # invocation that forwarded nothing: phase1 (above) and phase3 (below)
+        # both pass the operator's `--pdk` on, and the A-track — the one track
+        # whose every step is a PDK-bound simulation or a PDK-bound rule deck —
+        # was given only the container. A run driven with `--pdk <X>` therefore
+        # produced analog evidence that had nothing to do with `<X>`; measured
+        # on `u_hawaii_adc`, a run invoked with `--pdk sky130A` wrote
+        # `layout_provenance.json` naming ihp-sg13g2 twelve times, sky130A zero
+        # times, and raised no mismatch advisory. The label on that run was the
+        # only thing sky130A about it.
+        #
+        # `auto` is the argparse default and means "the design decides"; it is
+        # not a selector, so it is not forwarded — same test the phase1 site
+        # uses, so the two cannot drift apart.
+        _analog_args = [str(project), "--container", args.container]
+        if args.pdk and str(args.pdk).strip().lower() != "auto":
+            _analog_args += ["--pdk", str(args.pdk).strip()]
+        _phase_started["analog"] = time.time()
+        rc = _run_phase("ANALOG A1..A8", runner, _analog_args, env=_phase_env)
+        rep = _read_report(_pl.report_path(project, "analog_one_shot.json"))
+        verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
+        _analog_row = ("analog", verdict, rc)
+        reports["analog"] = rep
+        # Analog FAIL is logged but does NOT halt the digital flow —
+        # downstream Phase 3 still proceeds (analog hardmacros land
+        # via Step 14 floorplan in a future iteration).
+    else:
+        _analog_row = ("analog", "SKIPPED", 0)
+
     # ---------------- Phase 2 ----------------
     if not halted_at:
         runner = _phase_runner("phase2")
@@ -2058,68 +2127,18 @@ def main() -> int:
     else:
         plan.append(("phase2", "SKIPPED", 0))
 
-    # ---------------- Analog A1..A8 ----------------
-    # Non-blocking on FAIL. Dispatches off the single run_analog decision
-    # computed above (#459) so the A-track invocation and phase2's
-    # --skip-analog forwarding never disagree. The decision is sourced from
-    # phase1 artefacts (L5_ADI_SPEC / analog_block_list), which are produced
-    # before this point — phase2 does not emit them — so moving the decision
-    # ahead of phase2 is behaviourally identical for analog/mixed-signal.
-    # ORGANIC (GAP-ANALOG-1) — an analog / mixed-signal IC (run_analog==True) has
-    # its silicon flow in this A-track, NOT the digital phase2. Its digital phase2
-    # legitimately has NO synthesizable RTL (class rtl_gen=null), so phase2 FAILs
-    # and sets halted_at="phase2" — but that is the EXPECTED digital outcome, not a
-    # reason to skip the IC's OWN analog track. Previously `if not halted_at`
-    # gated the A-track OUT on that expected digital FAIL, so an analog-only IC
-    # could NEVER reach its analog flow via the one-shot entry. Dispatch the
-    # A-track whenever run_analog AND phase1 did not itself halt (phase1 emits the
-    # L5_ADI_SPEC the A-track needs); a phase2 digital halt does NOT block it. The
-    # A-track stays non-blocking, and phase3's digital PnR remains correctly gated
-    # on halted_at (a pure-analog IC still skips the digital PnR).
-    _analog_dispatch = (run_analog and not _p3_skip_by_exit
-                        and halted_at in ("", "phase2"))
-    if _analog_dispatch:
-        runner = _phase_runner("analog")
-        # `--pdk` REACHES THE ANALOG TRACK. Until now this was the only phase
-        # invocation that forwarded nothing: phase1 (above) and phase3 (below)
-        # both pass the operator's `--pdk` on, and the A-track — the one track
-        # whose every step is a PDK-bound simulation or a PDK-bound rule deck —
-        # was given only the container. A run driven with `--pdk <X>` therefore
-        # produced analog evidence that had nothing to do with `<X>`; measured
-        # on `u_hawaii_adc`, a run invoked with `--pdk sky130A` wrote
-        # `layout_provenance.json` naming ihp-sg13g2 twelve times, sky130A zero
-        # times, and raised no mismatch advisory. The label on that run was the
-        # only thing sky130A about it.
-        #
-        # `auto` is the argparse default and means "the design decides"; it is
-        # not a selector, so it is not forwarded — same test the phase1 site
-        # uses, so the two cannot drift apart.
-        _analog_args = [str(project), "--container", args.container]
-        if args.pdk and str(args.pdk).strip().lower() != "auto":
-            _analog_args += ["--pdk", str(args.pdk).strip()]
-        _phase_started["analog"] = time.time()
-        rc = _run_phase("ANALOG A1..A8", runner, _analog_args, env=_phase_env)
-        rep = _read_report(_pl.report_path(project, "analog_one_shot.json"))
-        verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
-        plan.append(("analog", verdict, rc))
-        reports["analog"] = rep
-        # Analog FAIL is logged but does NOT halt the digital flow —
-        # downstream Phase 3 still proceeds (analog hardmacros land
-        # via Step 14 floorplan in a future iteration).
-    else:
-        plan.append(("analog", "SKIPPED", 0))
+
+    plan.append(_analog_row)
 
     # ORGANIC #2064 — RE-EVALUATE THE ANALOG ACCEPTANCE, NOW THAT A4 HAS RUN.
     #
     # `design_one_shot_runner` emits and runs the acceptance checks beside the
-    # L10 unit-TB pair, which is where Step 4 reads their JUnit — and that is
-    # BEFORE this A-track, so on a COLD project every clause is honestly
-    # NOT_MEASURED ("flow step A4 has not produced a corner record"). The
-    # checks are pure record reads with no simulator, so re-running them here,
-    # after A4 has written its records, is cheap and idempotent, and the
-    # refreshed JUnit is what the whole-flow audit below and at the end of the
-    # run actually reads. Non-blocking and byte-for-byte a no-op for a design
-    # with no analog verification plan.
+    # L10 unit-TB pair, which is where Step 4 reads their JUnit. The A-track
+    # has already run on this front-door path, so this is a cheap idempotent
+    # refresh of the record-read checks, not a promised future measurement.
+    # The refreshed JUnit is what the whole-flow audit below and at the end of
+    # the run reads. Non-blocking and byte-for-byte a no-op for a design with
+    # no analog verification plan.
     if _analog_dispatch:
         _acc_json = _pl.report_path(project, "analog/analog_acceptance_run.json")
         _run_phase("ANALOG ACCEPTANCE (re-evaluated after A4)",
