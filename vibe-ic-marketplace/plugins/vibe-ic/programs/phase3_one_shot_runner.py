@@ -33298,6 +33298,23 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
         # are not in the ODB, and probe F measured the whole repair recipe
         # working once they are read back.
         lines = [ln for ln in lines if not ln.startswith("read_lef ")]
+        lef_lines: List[str] = []
+    else:
+        # A DEF RESTORE READS THE LEFS AFTER THE TIMING LIBRARIES. `read_def`
+        # ends in OpenROAD's liberty-to-LEF check (dbNetwork::
+        # checkLibertyCellsWithoutLef), which marks every liberty cell with no
+        # LEF master DONT-USE. A liberty read AFTER the LEF is linked to the
+        # masters only when it is the first (dbNetwork::readLibertyAfter skips
+        # a cell that already has one); a LEF read after the libraries links
+        # every corner (dbNetwork::makeCell). The parent deck reads LEF first,
+        # so with three corners the child's second and third corner were
+        # unlinked: MEASURED on OpenROAD 26Q3-3020 over a subservient x
+        # gf180mcuD checkpoint, `ORD-2056 ... 458 liberty cell(s) do not have
+        # LEF masters and will be marked as dont-use` (2 corners x 229 cells)
+        # with LEF first, none with the libraries first. The ODB leg already
+        # reads the libraries before its `read_db`, and is silent.
+        lef_lines = [ln for ln in lines if ln.startswith("read_lef ")]
+        lines = [ln for ln in lines if not ln.startswith("read_lef ")]
     # A deck that loads LibreLane's placed DEF (steps 15..18,
     # `librelane_contract.placement_consumer_tcl`) has no netlist block: its
     # `read_def` line is the design-load site the checkpoint replaces.
@@ -33341,6 +33358,8 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
         _load = [
             "# RESUMED SESSION — the design is restored from the route checkpoint",
             "# instead of rebuilt from the netlist (see _build_pnr_resume_tcl_text).",
+            *(["# LEFs after the timing libraries: see _pnr_deck_from_checkpoint."]
+              + lef_lines if lef_lines else []),
             f"read_def {checkpoint_def_c}",
         ]
     lines[i_rv:i_ld + 1] = _load + (
@@ -36173,7 +36192,10 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
     for name, extra in specs:
         prog = PROGRAMS_DIR / name
         if not prog.is_file():  # pragma: no cover - shipped tree always has it
-            status = "ENV_UNAVAILABLE"
+            # NOT_MEASURED / tool_absent is the word that replaced the deleted
+            # ENV_UNAVAILABLE, which `StepResult` refuses (UnknownVerdictWord).
+            status, reason = (_V.Verdict.NOT_MEASURED.value,
+                              _V.ReasonClass.TOOL_ABSENT.value)
             notes.append(f"{name}: program absent")
             break
         if container:
@@ -36218,8 +36240,13 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
         status = "FAIL"
         notes.append("producer/gate returned rc=0 but required output(s) are "
                      f"absent: {missing}")
+    # The reason class computed above travels with the row: a NOT_MEASURED
+    # without one is refused by `StepResult` (ValueError), which turned a
+    # producer's rc-2 refusal into a crash of the whole runner.
     return StepResult("pad_ring_gen", status, time.time() - t0,
-                      "; ".join(notes) or "no producer ran", out_files)
+                      "; ".join(notes) or "no producer ran", out_files,
+                      reason_class=(reason if status == _V.Verdict.NOT_MEASURED.value
+                                    else ""))
 
 
 def _validate_padring_core_connections(netlist: Path, wrapper: Path,
@@ -47996,7 +48023,8 @@ def _step_gds_direct(project: Path, top: str, pdk: PdkConfig,
     if candidate:
         if "sdr_candidates" not in Path(project).parts:
             return StepResult("gds", "NOT_MEASURED", 0.0,
-                              "candidate stream requires private SDR scratch")
+                              "candidate stream requires private SDR scratch",
+                              reason_class=_V.ReasonClass.NOT_EXECUTED.value)
     else:
         digest, refusal = _layout_basis(project, top, pdk, container)
         if refusal or not _ga.gate_passed(project, digest):

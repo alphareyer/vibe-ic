@@ -1064,3 +1064,42 @@ def test_a_deck_with_no_odb_still_restores_from_the_def(tmp_path):
     assert not [ln for ln in body if ln.startswith("read_db ")]
     # and it keeps its LEFs, because nothing restored them
     assert [ln for ln in body if ln.startswith("read_lef ")]
+
+
+# --------------------------------------- LEFs after the timing libraries (ORD-2056)
+
+def _load_order(deck: str):
+    body = deck.splitlines()
+    return ([i for i, ln in enumerate(body) if ln.startswith("read_lef ")],
+            [i for i, ln in enumerate(body) if ln.startswith("read_liberty ")],
+            [i for i, ln in enumerate(body) if ln.startswith("read_def ")],
+            [ln for ln in body if ln.startswith("read_lef ")])
+
+
+def test_a_def_restored_child_reads_its_lefs_after_every_liberty(tmp_path):
+    """`read_def` ends in OpenROAD's liberty-to-LEF check, which marks a
+    liberty cell with no LEF master dont-use. A liberty read after the LEF is
+    linked only if it is the first corner, so the parent deck's LEF-first order
+    left 2 of 3 corners unlinked in every DEF-restored child: MEASURED
+    `ORD-2056 ... 458 liberty cell(s) ... marked as dont-use` on OpenROAD
+    26Q3-3020, and none with the libraries read first."""
+    deck = _full_pnr_tcl(tmp_path)
+    lefs_parent = [ln for ln in deck.splitlines() if ln.startswith("read_lef ")]
+    assert lefs_parent, "the fixture deck must read LEFs"
+    child = R._build_pnr_sdr_child_tcl_text(
+        deck, checkpoint_def_c="/out/sdr_transaction/pre_repair.def", stage=SITE1)
+    lef, lib, rdef, lefs_child = _load_order(child)
+    assert lib and rdef, (lib, rdef)
+    assert min(lef) > max(lib), f"a LEF is read before a liberty: {lef} vs {lib}"
+    assert max(lef) < min(rdef), "the LEFs must be in place before read_def"
+    assert lefs_child == lefs_parent, "every LEF, once, in the parent's order"
+
+
+def test_PAIRED_the_odb_leg_still_reads_no_lef(tmp_path):
+    """The ODB carries the tech and the libs; its leg must stay LEF-free."""
+    deck = _full_pnr_tcl(tmp_path)
+    child = R._build_pnr_sdr_child_tcl_text(
+        deck, checkpoint_def_c="/out/sdr_transaction/pre_repair.def",
+        stage=SITE1, restore_odb_c="/out/sdr_transaction/ckpt.odb")
+    lef, lib, _, _ = _load_order(child)
+    assert not lef and lib

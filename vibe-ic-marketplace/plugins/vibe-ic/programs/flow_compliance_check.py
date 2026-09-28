@@ -10203,6 +10203,53 @@ _P0_GATE_DECLARES_REASON_CLASS: frozenset = frozenset({
 })
 
 
+#: Gates whose deciding line cannot carry what they flagged (a 200-character
+#: cap, #2084) and which write it IN FULL to a `--json` report the umbrella
+#: publishes as the record's `evidence.flagged` (lane fxlvs, D1: the spm
+#: integration run's only FAIL was recorded as "... exits 1 on: reports/audit/
+#: phase23_completion_audit.json:", and the path it failed on was lost).
+_P0_GATE_NAMES_WHAT_IT_FLAGS: frozenset = frozenset({
+    "project_outputs_in_tree_check",
+})
+
+#: Gates that read `reports/**` and so would judge THIS AUDIT's own document.
+#: The flow YAML gives it to the audit and to no step (P0's entry: "declaring
+#: it here would make P0 ... judge a file P0 does not produce"); every version
+#: visible while the audit runs is superseded by the one written after P0 --
+#: MEASURED (D1): a nested scoped pass this audit runs as a step gate writes it
+#: with `command_argv` naming the audit's private receipt scratch, and P0 then
+#: failed the run on that live scratch path. They are told which record is the
+#: auditor's, and disclose that they did not judge it.
+_P0_GATE_TOLD_THE_AUDITORS_RECORD: frozenset = frozenset({
+    "project_outputs_in_tree_check",
+})
+
+
+def _p0_flagged_report_path(gate_name: str,
+                            scratch_dir: Optional[Path]) -> Optional[Path]:
+    """Where a flag-naming gate writes its full `flagged` list, or None."""
+    if gate_name not in _P0_GATE_NAMES_WHAT_IT_FLAGS or scratch_dir is None:
+        return None
+    return scratch_dir / f"{gate_name}.flagged.json"
+
+
+def _p0_flagged(gate_name: str, scratch_dir: Optional[Path]) -> List[str]:
+    """The gate's own `flagged` list, each as "<file> → <path> (<class>)".
+
+    Empty on anything else: an absent or unreadable report changes nothing."""
+    path = _p0_flagged_report_path(gate_name, scratch_dir)
+    if path is None or not path.is_file():
+        return []
+    try:
+        rows = json.loads(path.read_text(errors="replace")).get("flagged")
+    except (OSError, ValueError, AttributeError):
+        return []
+    if not isinstance(rows, list):
+        return []
+    return [f"{r.get('file')} → {r.get('path')} ({r.get('class')})"
+            for r in rows if isinstance(r, dict)]
+
+
 def _p0_declared_report_path(gate_name: str, project: Path,
                              scratch_dir: Optional[Path]) -> Optional[Path]:
     """Where a declaring gate's `--json` report is written, or None."""
@@ -10269,6 +10316,16 @@ def _structural_gate_argv(gate_name: str,
     if _declared is not None:
         _declared.parent.mkdir(parents=True, exist_ok=True)
         argv += ["--json", str(_declared)]
+    # D1 — somewhere to name what it flagged in full, and whose record the
+    # audit's own document is.
+    _flagged = _p0_flagged_report_path(gate_name, scratch_dir)
+    if _flagged is not None:
+        _flagged.parent.mkdir(parents=True, exist_ok=True)
+        argv += ["--json", str(_flagged)]
+    if gate_name in _P0_GATE_TOLD_THE_AUDITORS_RECORD:
+        argv += ["--auditor-record", _pl.report_path(
+            project, "phase23_completion_audit.json").relative_to(
+                project).as_posix()]
     return argv
 
 
@@ -11502,8 +11559,11 @@ def _run_structural_rtl_gates(project: Path,
                     "evidence": f"{gate_name}.py + flow/phase1_phase2_phase3.yaml",
                 })
             else:
-                return _p0_gate_record(gate_name, "FAIL", first_line,
-                                       {"exit_code": 1})
+                _fail_ev: Dict[str, Any] = {"exit_code": 1}
+                _named = _p0_flagged(gate_name, gate_scratch_dir)
+                if _named:
+                    _fail_ev["flagged"] = _named
+                return _p0_gate_record(gate_name, "FAIL", first_line, _fail_ev)
         # A PASS contributes no line to any bucket — which is exactly why
         # `passed_gate_count` could never be recovered by reading the reasons
         # list, and was 0 for the artifact's entire history. It contributes a
