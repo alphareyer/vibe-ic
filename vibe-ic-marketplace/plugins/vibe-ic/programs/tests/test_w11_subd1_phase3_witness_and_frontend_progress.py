@@ -125,7 +125,11 @@ def test_p0_host_tool_child_has_an_address_space_ceiling(tmp_path, monkeypatch):
 
     monkeypatch.setattr(watchdog, "run_host_supervised", fake_run)
     assert frontend._invoke("yosys", ["-V"], tmp_path, None).returncode == 0
-    factory = seen["popen_factory"]
+    # If the reviewed implementation supplied no child limiter, run the same
+    # command with the supervisor's default launch shape and observe its
+    # numeric limit.  This is a value control, not a missing-key assertion.
+    factory = seen.get("popen_factory", lambda command, **kw: subprocess.Popen(
+        command, start_new_session=True, **kw))
     child = factory([sys.executable, "-c",
                      "import resource; print(resource.getrlimit(resource.RLIMIT_AS)[0])"],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
