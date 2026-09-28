@@ -1,0 +1,14 @@
+{
+  "schema": "vibeic.gds_text_layer_map/1",
+  "drop_text_pairs": ["58/0"],
+  "source": [
+    "https://github.com/google/globalfoundries-pdk-libs-gf180mcu_fd_io",
+    "https://github.com/fossi-foundation/open-pdks/blob/main/gf180mcu/librelane/config.tcl",
+    "PDK:libs.tech/klayout/tech/gf180mcu.lyp",
+    "PDK:libs.tech/klayout/tech/gf180mcu.map",
+    "PDK:libs.tech/magic/gf180mcuD.tech",
+    "https://gf180mcu-pdk.readthedocs.io/en/latest/physical_verification/design_manual/drm_04_3.html"
+  ],
+  "observed_io_gds_sha256": "806def042390f614dca0c7e1e11504788b0d23073115aa41e1246d21f4a78c82",
+  "reason": "The foundry IO GDS contains TEXT-only labels on 58/0, but the distributed gf180mcuD KLayout layer table, DEF map, Magic technology, and published mask numbering do not define 58/0. Drop only this undocumented annotation at stream-out; any geometry on 58/0 is refused."
+}
