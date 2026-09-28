@@ -129,6 +129,20 @@ def test_pass_pdn_evidence_from_specialnets_def(tmp_path):
     assert "SPECIALNETS" in rep["pdn_evidence"]
 
 
+def test_specialnet_roles_are_authoritative_without_name_tokens(tmp_path):
+    d = _pnr_dir(tmp_path)
+    _write(d, "floorplan.def", _GOOD_FLOORPLAN)
+    _write(d, "pnr.tcl", "read_lef tech.lef\nread_def floorplan.def\n")
+    _write(d, "routed.def", "VERSION 5.8 ;\nDESIGN chip_top ;\n"
+           "SPECIALNETS 2 ;\n"
+           "- SUPPLY_A ( u1 P ) + USE POWER ;\n"
+           "- RETURN_A ( u1 G ) + USE GROUND ;\n"
+           "END SPECIALNETS\nEND DESIGN\n")
+    rc, report = _run(tmp_path)
+    assert rc == 0 and report["verdict"] == "PASS"
+    assert "PDN_STRAPS_OK" in _rules(report)
+
+
 def test_pass_util_not_derivable_falls_back_to_components(tmp_path):
     """No log utilization → checker must NOT fabricate one; falls back to
     COMPONENTS>0 and still PASSes a good floorplan."""

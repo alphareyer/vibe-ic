@@ -37,10 +37,14 @@ substance:
        (a) ``pnr.tcl`` containing ``add_pdn_stripe`` / ``add_pdn_ring`` /
            ``pdngen`` / ``define_pdn_grid``, OR
        (b) a DEF (floorplan or any later stage in pnr/) carrying a
-           ``SPECIALNETS`` section with a power/ground net
-           (VDD/VSS/VPWR/VGND/vccd*/vssd* …).
+           ``SPECIALNETS`` section declaring ``+ USE POWER`` or
+           ``+ USE GROUND``. The DEF role, not the net name, is authoritative.
        A bare ``pdn.done`` marker with NO strap evidence anywhere does
        NOT satisfy this — "no PG straps" is a real FAIL.
+  6. Built stripe census — only ``SHAPE STRIPE`` geometry on explicitly
+       POWER/GROUND special nets counts. A budget in apply mode blocks when
+       either role is short; without a budget, ambiguous role evidence is
+       reported as NOT_MEASURED instead of a clean built grid.
 
 Verdicts
 --------
@@ -53,6 +57,8 @@ Verdicts
                  The step blocks_on synth+LEC, so an absent floorplan at
                  this gate is a real failure, never a vacuous pass.
 * WAIVED (rc=0) — waivers.json declares the step waived (ticket + reason).
+* NOT_MEASURED (rc=2) — apparent DEF stripe metal lacks a complete typed
+                        POWER/GROUND pair; no built PDN is certified.
 * SKIP  (rc=2) — project dir not found (operational, not a chip failure).
 
 chip-AGNOSTIC. No vendor / IC / tool-specific number is hard-coded; the
@@ -100,16 +106,6 @@ import _declared_die as _dd                                    # noqa: E402
 
 _GATE_NAME = "floorplan_pdn_check"
 _GATE_LABEL = "floorplan_pdn"
-
-# Power / ground net-name tokens used to recognise a PG SPECIALNET. These
-# are the universal industry / sky130 / generic-PDK conventions, not a
-# chip-specific literal: VDD/VSS (generic), VPWR/VGND + VPB/VNB (sky130
-# std-cell), vccd*/vssd* (Caravel user/power domains). Matched case-
-# insensitively as whole tokens.
-_PG_NET_TOKENS = (
-    "vdd", "vss", "vpwr", "vgnd", "vccd", "vssd", "vdda", "vssa",
-    "vccpst", "vsspst", "vpb", "vnb", "power", "ground",
-)
 
 # pnr.tcl PDN command tokens (OpenROAD pdngen flow).
 _PDN_TCL_TOKENS = (
@@ -180,7 +176,6 @@ def _parse_floorplan_def(path: Path):
     }
 
     in_components = False
-    in_specialnets = False
     for raw in text.splitlines():
         s = raw.strip()
         if not s:
@@ -218,21 +213,23 @@ def _parse_floorplan_def(path: Path):
             out["n_component_lines"] += 1
             continue
 
-        if s.startswith("SPECIALNETS"):
-            in_specialnets = True
-            continue
-        if s.startswith("END SPECIALNETS"):
-            in_specialnets = False
-            continue
-        if in_specialnets and s.startswith("-"):
-            # "- VDD ( ... )" → first token after the dash is the net name.
-            parts = s.split()
-            if len(parts) >= 2:
-                net = parts[1].strip().lower()
-                if any(tok in net for tok in _PG_NET_TOKENS):
-                    out["has_specialnets_pg"] = True
-
+    # Net names do not confer a supply role; the SPECIALNET's + USE does.
+    out["has_specialnets_pg"] = any(
+        _specialnet_role(net) in ("POWER", "GROUND")
+        for net in _specialnet_records(text))
     return out
+
+
+def _specialnet_records(text: str) -> list[str]:
+    section = re.search(r"\bSPECIALNETS\s+\d+\s*;(.*?)\bEND\s+SPECIALNETS\b",
+                        re.sub(r"(?m)#.*$", "", text), re.S | re.I)
+    return (re.split(r"(?m)^\s*-\s+", section.group(1))[1:]
+            if section else [])
+
+
+def _specialnet_role(net: str) -> str | None:
+    match = re.search(r"\+\s+USE\s+([A-Za-z_]+)\b", net, re.I)
+    return match.group(1).upper() if match else None
 
 
 def _any_def_has_pg_specialnets(pnr: Path):
@@ -243,21 +240,9 @@ def _any_def_has_pg_specialnets(pnr: Path):
             text = defp.read_text(errors="replace")
         except OSError:
             continue
-        in_sn = False
-        for raw in text.splitlines():
-            s = raw.strip()
-            if s.startswith("SPECIALNETS"):
-                in_sn = True
-                continue
-            if s.startswith("END SPECIALNETS"):
-                in_sn = False
-                continue
-            if in_sn and s.startswith("-"):
-                parts = s.split()
-                if len(parts) >= 2:
-                    net = parts[1].strip().lower()
-                    if any(tok in net for tok in _PG_NET_TOKENS):
-                        return True, defp.name
+        if any(_specialnet_role(net) in ("POWER", "GROUND")
+               for net in _specialnet_records(text)):
+            return True, defp.name
     return False, None
 
 
@@ -290,31 +275,28 @@ def _def_stripe_census(pnr: Path) -> dict:
     """Count tool-written PG STRIPE shapes by supply role and layer."""
     path = pnr / "floorplan.def"
     try:
-        body = re.sub(r"(?m)#.*$", "", path.read_text(errors="replace"))
+        body = path.read_text(errors="replace")
     except OSError:
         return {"status": "NOT_MEASURED", "count": None, "source": str(path)}
-    section = re.search(r"\bSPECIALNETS\s+\d+\s*;(.*?)\bEND\s+SPECIALNETS\b",
-                        body, re.S | re.I)
-    if not section:
-        return {"status": "MEASURED", "count": 0, "source": str(path)}
     count = 0
+    non_pg_stripes = 0
     by_role_layer = {"POWER": {}, "GROUND": {}}
-    for net in re.split(r"(?m)^\s*-\s+", section.group(1))[1:]:
-        name = net.split(None, 1)[0].lower() if net.split() else ""
-        if any(token in name for token in _PG_NET_TOKENS):
-            role_match = re.search(r"\+\s+USE\s+(POWER|GROUND)\b", net, re.I)
-            role = role_match.group(1).upper() if role_match else None
-            shapes = re.findall(
-                r"\b(?:ROUTED|NEW)\s+(\S+)\b[^;\n]*?\bSHAPE\s+STRIPE\b",
-                net, re.I)
+    for net in _specialnet_records(body):
+        role = _specialnet_role(net)
+        shapes = re.findall(
+            r"\b(?:ROUTED|NEW)\s+(\S+)\b[^;\n]*?\bSHAPE\s+STRIPE\b",
+            net, re.I)
+        if role in by_role_layer:
             count += len(shapes)
-            if role:
-                for layer in shapes:
-                    key = layer.lower()
-                    rows = by_role_layer[role]
-                    rows[key] = rows.get(key, 0) + 1
+            for layer in shapes:
+                key = layer.lower()
+                rows = by_role_layer[role]
+                rows[key] = rows.get(key, 0) + 1
+        else:
+            non_pg_stripes += len(shapes)
     return {"status": "MEASURED", "count": count,
-            "by_role_layer": by_role_layer, "source": str(path)}
+            "by_role_layer": by_role_layer,
+            "non_pg_stripes": non_pg_stripes, "source": str(path)}
 
 
 def _measured_utilization(pnr: Path):
@@ -586,6 +568,13 @@ def main(argv=None) -> int:
         budget = {}
     census = _def_stripe_census(pnr)
     extra["def_stripe_census"] = census
+    non_pg = census.get("non_pg_stripes", 0)
+    if non_pg:
+        findings.append({
+            "severity": "ADVISORY", "rule": "PDN_DEF_STRAP_ROLE_NOT_PG",
+            "message": f"ignored {non_pg} DEF STRIPE shape(s) whose net is not "
+                       "declared + USE POWER or GROUND; they cannot prove a PDN grid",
+        })
     rows = budget.get("rows") or []
     required = (2 * sum(int(row.get("required_groups") or 0) for row in rows)
                 if budget.get("verdict") == "CANDIDATE" else 2)
@@ -598,8 +587,13 @@ def main(argv=None) -> int:
                 found = census.get("by_role_layer", {}).get(role, {}).get(layer, 0)
                 if found < groups:
                     shortfalls.append(f"{role}/{layer}: {found} < {groups}")
-    elif census["status"] == "MEASURED" and census["count"] < required:
-        shortfalls.append(f"total: {census['count']} < {required}")
+    elif census["status"] == "MEASURED":
+        # Without a pitch budget, a total of two can still be two stripes on
+        # one rail. Require at least one built stripe for each DEF supply role.
+        for role in ("POWER", "GROUND"):
+            found = sum(census.get("by_role_layer", {}).get(role, {}).values())
+            if found < 1:
+                shortfalls.append(f"{role}: {found} < 1")
     if census["status"] == "MEASURED" and shortfalls:
         blocking = budget.get("mode") == "apply"
         findings.append({
@@ -615,9 +609,19 @@ def main(argv=None) -> int:
         findings.append({"severity": "ADVISORY", "rule": "PDN_DEF_STRAPS_NOT_MEASURED",
                          "message": "floorplan DEF could not be read for strap census"})
 
-    verdict = "FAIL" if fail else "PASS"
+    role_totals = {
+        role: sum(census.get("by_role_layer", {}).get(role, {}).values())
+        for role in ("POWER", "GROUND")}
+    # An advisory grid with no typed supply role but apparent STRIPE metal,
+    # or only one typed rail, cannot be certified as a built two-rail PDN.
+    role_undetermined = (census["status"] == "MEASURED"
+                         and budget.get("mode") != "apply"
+                         and ((non_pg > 0 and census["count"] == 0)
+                              or (census["count"] > 0
+                                  and any(v == 0 for v in role_totals.values()))))
+    verdict = "FAIL" if fail else "NOT_MEASURED" if role_undetermined else "PASS"
     _emit(args, project, verdict, findings, extra)
-    return 1 if fail else 0
+    return 1 if fail else 2 if role_undetermined else 0
 
 
 if __name__ == "__main__":

@@ -201,6 +201,43 @@ def test_built_three_group_grid_passes_and_reverse_mutation_fails(tmp_path):
     assert _check(project)[0] == 1
 
 
+def test_declared_power_roles_count_with_arbitrary_net_names(tmp_path):
+    project = _project(tmp_path, 6)
+    path = project / "phase3/stage3/pnr/floorplan.def"
+    body = path.read_text().replace("- VDD ( c1 VDD )", "- SUPPLY_A ( c1 SUPPLY_A )")
+    body = body.replace("- VSS ( c1 VSS )", "- RETURN_A ( c1 RETURN_A )")
+    path.write_text(body)
+    rc, report = _check(project)
+    assert rc == 0 and report["verdict"] == "PASS"
+    census = report["def_stripe_census"]
+    assert census["count"] == 6
+    assert census["by_role_layer"] == {"POWER": {"m5": 3},
+                                       "GROUND": {"m5": 3}}
+
+
+def test_signal_stripes_without_budget_cannot_certify_pdn(tmp_path):
+    project = _project(tmp_path, 2)
+    path = project / "phase3/stage3/pnr/floorplan.def"
+    path.write_text(path.read_text().replace("+ USE POWER", "+ USE SIGNAL")
+                    .replace("+ USE GROUND", "+ USE SIGNAL"))
+    (project / "reports/phase3/floorplan_rectangles.json").write_text("{}")
+    rc, report = _check(project)
+    assert rc == 2 and report["verdict"] == "NOT_MEASURED"
+    assert report["def_stripe_census"]["count"] == 0
+    assert "PDN_DEF_STRAP_ROLE_NOT_PG" in {f["rule"] for f in report["findings"]}
+
+
+def test_no_budget_still_requires_both_supply_roles(tmp_path):
+    project = _project(tmp_path, 6)
+    path = project / "phase3/stage3/pnr/floorplan.def"
+    path.write_text(path.read_text().replace("+ USE GROUND", "+ USE POWER"))
+    (project / "reports/phase3/floorplan_rectangles.json").write_text("{}")
+    rc, report = _check(project)
+    assert rc == 2 and report["verdict"] == "NOT_MEASURED"
+    assert report["def_stripe_census"]["by_role_layer"]["GROUND"] == {}
+    assert "PDN_DEF_STRAP_SHORTFALL" in {f["rule"] for f in report["findings"]}
+
+
 def test_six_stripes_on_one_rail_do_not_count_as_three_groups(tmp_path):
     project = _project(tmp_path, 6)
     path = project / "phase3/stage3/pnr/floorplan.def"
