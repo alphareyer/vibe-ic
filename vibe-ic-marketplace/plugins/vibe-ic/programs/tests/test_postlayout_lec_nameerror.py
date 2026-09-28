@@ -369,3 +369,145 @@ def test_source_signoff_emit_does_not_raise_out_of_the_step():
     window = src[call:call + 1600]
     assert "signoff_failures.append" in window
     assert "raise RuntimeError" not in window
+
+
+# ---------------------------------------------------------------------------
+# The post-layout producer's residual decision, driven through the REAL
+# `_emit_lec_post_layout` with every yosys run faked at `_docker_exec`. The
+# fakes write the files the real runs would: the terminal equivalence IL, the
+# flattened search miter, the WaveJSON dump.
+# ---------------------------------------------------------------------------
+
+def _post_fake(monkeypatch, proof_logs, search_log="", flat="", trace_doc=None):
+    """`proof_logs` is consumed one per equivalence run, the last repeating."""
+    import re
+    runs = []
+
+    def fake_exec(_container, cmd, timeout=1800, **_kw):
+        if "yosys -V" in cmd:
+            return 0, "Yosys 0.69", ""
+        if "libprobe" in cmd or "yosys -s" not in cmd:
+            return 0, "", ""
+        script = Path(re.search(r"yosys -s (\S+)", cmd).group(1)).read_text()
+        for path in re.findall(r"write_rtlil (\S+)", script):
+            Path(path).write_text(flat if "lec_post_cex_flat" in path
+                                  else "module \\equiv\nend\n")
+        for path in re.findall(r"-dump_json (\S+)", script):
+            Path(path).write_text(json.dumps(trace_doc or {}))
+        for path in re.findall(r"write_json (\S+)", script):
+            Path(path).write_text(json.dumps(
+                {"modules": {TOP: {"netnames": {"u1.A": {}, "u1.B": {}}}}}))
+        if "equiv_miter" in script:
+            return 0, search_log, ""
+        runs.append(cmd)
+        return 0, proof_logs[min(len(runs), len(proof_logs)) - 1], ""
+
+    monkeypatch.setattr(R, "_docker_exec", fake_exec)
+    return runs
+
+
+def _unproven(total=3, unproven=1):
+    def parse(_text):
+        return {"verdict": "UNPROVEN", "proven": total - unproven,
+                "unproven": unproven, "total": total, "non_equivalent": None,
+                "equivalent": False, "sat_unsupported_cells": []}
+    return parse
+
+
+def _emit_post(tmp_path):
+    lib = tmp_path / "corner_tt.lib"
+    lib.write_text("library(t){}\n")
+    project = _routed_project(tmp_path)
+    out_json = R._pl.reports_phase3_dir(project) / "lec_post_layout.json"
+    verdict = R._emit_lec_post_layout(
+        project, TOP, _pdk(str(lib), str(lib)), "nocontainer",
+        out_json, out_json.with_suffix(".rpt"), [])
+    return verdict, json.loads(out_json.read_text())
+
+
+def test_postlayout_producer_keeps_a_stateful_model_not_proven(
+        tmp_path, stub_container, monkeypatch):
+    """The up/down-counter model (verbatim SAT output, see
+    test_lec_counterexample_candidate) reaches the post-layout producer."""
+    import test_lec_counterexample_candidate as F
+    monkeypatch.delattr(LEC, "classify_pin_permutation_points")
+    monkeypatch.setattr(LEC, "parse_equiv_log", _unproven(total=1))
+    _post_fake(monkeypatch,
+               ["  Unproven $equiv $auto$x: \\y_gold \\y_gate\n"],
+               F.COUNTER_LOG, F.COUNTER_FLAT, F.COUNTER_JSON)
+    verdict, doc = _emit_post(tmp_path)
+    assert doc["counterexample_search"]["result"] != "COUNTEREXAMPLE"
+    assert doc["counterexample_search"]["result"] == "CANDIDATE_COUNTEREXAMPLE"
+    assert verdict == "NOT_PROVEN"
+    assert doc["verdict_explanation"].startswith("NOT_PROVEN")
+    assert LEC.evaluate_report(doc)["result"] == "NOT_PROVEN"
+
+
+def test_postlayout_producer_names_the_bits_of_a_multi_bit_residual(
+        tmp_path, stub_container, monkeypatch):
+    monkeypatch.delattr(LEC, "classify_pin_permutation_points")
+    monkeypatch.setattr(LEC, "parse_equiv_log", _unproven(total=4, unproven=2))
+    _post_fake(monkeypatch, [
+        "  Unproven $equiv $auto$x1: \\q_gold [0] \\q_gate [0]\n"
+        "  Unproven $equiv $auto$x2: \\q_gold [1] \\q_gate [1]\n"])
+    # No terminal IL: the search cannot run, and says so.
+    monkeypatch.setattr(R, "_to_container_path",
+                        lambda p, c: str(p).replace("lec_post_layout_final.il",
+                                                    "elsewhere.il"))
+    verdict, doc = _emit_post(tmp_path)
+    assert doc["unproven_point_names"] == ["q[0]", "q[1]"]
+    assert doc["counterexample_search"]["point_names"] == ["q[0]", "q[1]"]
+    assert verdict == "NOT_PROVEN"
+    assert LEC.evaluate_report(doc)["result"] == "NOT_PROVEN"
+
+
+def test_postlayout_producer_says_why_it_cannot_name_the_residual(
+        tmp_path, stub_container, monkeypatch):
+    monkeypatch.delattr(LEC, "classify_pin_permutation_points")
+    monkeypatch.setattr(LEC, "parse_equiv_log", _unproven(total=4, unproven=2))
+    _post_fake(monkeypatch, [
+        "  Unproven $equiv $auto$x1: \\q_gold [0] \\q_gate [0]\n"
+        "  Unproven $equiv $auto$x2: 1'0 \\q_gate [1]\n"])
+    verdict, doc = _emit_post(tmp_path)
+    assert verdict == "RUN_ERROR"
+    assert "named 1" in doc["counterexample_search_error"]
+    result = LEC.evaluate_report(doc)
+    assert result["verdict"] == "RUN_ERROR"
+    assert "named 1" in result["findings"][0]
+
+
+def test_postlayout_discarded_reproof_does_not_name_the_residual(
+        tmp_path, stub_container, monkeypatch):
+    """A pin-rename re-proof that moves the denominator is DISCARDED and the
+    first pass's counts stand, so the names and the state evidence published
+    beside those counts must be the first pass's too."""
+    first = ("=== equiv ===\n     1   $equiv\n     1   $and\n"
+             "  Unproven $equiv $auto$x: \\u1.A_gold \\u1.A_gate\n")
+    second = ("SECOND PASS\n=== equiv ===\n     1   $dff\n"
+              "  Unproven $equiv $auto$y: \\u9.B_gold \\u9.B_gate\n")
+    monkeypatch.setattr(LEC, "parse_equiv_log", lambda text: {
+        "verdict": "UNPROVEN", "proven": 1 if "SECOND" in text else 2,
+        "unproven": 1, "total": 2 if "SECOND" in text else 3,
+        "non_equivalent": None, "equivalent": False,
+        "sat_unsupported_cells": []})
+    calls = {"n": 0}
+
+    def classify(names, *_a, **_k):
+        calls["n"] += 1
+        return {"accepted": ([{"instance": "u1", "point": n} for n in names]
+                             if calls["n"] > 1 else []), "rejected": []}
+
+    monkeypatch.setattr(LEC, "classify_pin_permutation_points", classify)
+    monkeypatch.setattr(LEC, "build_pin_correspondence_renames",
+                        lambda accepted, *_a, **_k: (
+                            ([("u1.A", "u1.B")],
+                             [{"instance": "u1", "renames": ["u1.A"]}])
+                            if accepted else ([], [])))
+    _post_fake(monkeypatch, [first, first, second])
+    _verdict, doc = _emit_post(tmp_path)
+    assert doc["pin_permutation_reproof"]["denominator_moved"] == {
+        "first_pass": 3, "second_pass": 2}
+    assert doc["total_points"] == 3
+    assert doc["unproven_point_names"] == ["u1.A"]
+    assert doc["counterexample_search"]["point_names"] == ["u1.A"]
+    assert doc["miter_stateless"] is True
