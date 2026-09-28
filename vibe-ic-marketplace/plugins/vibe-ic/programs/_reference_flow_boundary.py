@@ -38,6 +38,7 @@ design, vendor, or PDK-SKU literal appears here or is needed.
 from __future__ import annotations
 
 import json
+import re
 from typing import FrozenSet, Tuple
 
 # Directory-name vocabulary for trees that are oracle END TO END — a known-good
@@ -75,6 +76,52 @@ OFF_LIMITS_TREE_SEGMENTS: FrozenSet[str] = frozenset(
 # File extensions that carry RECIPE (flow configuration) and are therefore
 # legitimate to parse for declared knobs.
 RECIPE_SUFFIXES: Tuple[str, ...] = (".mk", ".tcl")
+
+# Words that, standing as a whole word of a FILE NAME (or of a directory name)
+# inside a staged reference flow, say the file records a RESULT the known-good
+# run achieved rather than a setting: `orfs_rules.json`, `golden.mk`,
+# `expected_results.tcl`, `metrics/`. Judged on the NAME, before the file is
+# opened, for every extension -- a recipe suffix does not make a golden file a
+# recipe. A reader that needs the stricter rule (staged tool configs, llv1 W21)
+# applies it; `is_oracle_qor_rules` stays the content test for the mixed tree.
+ORACLE_NAME_WORDS: FrozenSet[str] = frozenset({
+    "golden", "expected", "result", "results", "metric", "metrics",
+    "metadata", "rule", "rules",
+})
+#: ONE vocabulary for the name rule: the result words above AND every oracle
+#: tree word (`oracle`, `solution(s)`, `answer(s)`, `ground_truth`, ...), so a
+#: file NAMED `oracle.mk` or `ground_truth_qor.tcl` is judged like an
+#: `oracle/` directory (review wave 8: the tree words were segment-only).
+ORACLE_NAME_VOCABULARY: FrozenSet[str] = ORACLE_NAME_WORDS | ORACLE_TREE_SEGMENTS
+# A name is split into words at every non-letter (`.`, `_`, `-`, digits,
+# spaces) and at a lower-to-upper case change, so `golden2.mk`,
+# `results1/`, `golden flow.mk`, `GoldenConfig.mk` and `expectedQoR.tcl` all
+# carry their word. A multi-word entry (`ground_truth`) matches as consecutive
+# words.
+_NAME_WORD_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+")
+
+
+def name_words(name: str) -> list:
+    """The lower-case words of ``name`` (see `_NAME_WORD_RE`)."""
+    return [w.lower() for w in _NAME_WORD_RE.findall(name or "")]
+
+
+def has_name_word(name: str, vocabulary) -> bool:
+    """True when ``name`` carries an entry of ``vocabulary`` as whole words."""
+    words = name_words(name)
+    for entry in vocabulary:
+        seq = entry.split("_")
+        n = len(seq)
+        if any(words[i:i + n] == seq for i in range(len(words) - n + 1)):
+            return True
+    return False
+
+
+def is_oracle_name(name: str) -> bool:
+    """True when ``name`` (a file or directory name, extension included) has
+    an `ORACLE_NAME_VOCABULARY` entry as whole words. Pure; the file is not
+    read."""
+    return has_name_word(name, ORACLE_NAME_VOCABULARY)
 
 
 def is_oracle_qor_rules(text: str) -> bool:
