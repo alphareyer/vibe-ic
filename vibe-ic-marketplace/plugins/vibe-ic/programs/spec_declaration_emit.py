@@ -1459,6 +1459,65 @@ def supplied_rtl_record(project: Path,
                                     "module %r has no parseable ANSI header "
                                     "in the staged files" % top)}
     return record
+def _outside_contract(overrides: Dict[str, Any], names: List[str],
+                      existing: Dict[str, Any], prior: Dict[str, Any]
+                      ) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    """(fields to write, {field: why refused}) for the author's declarations
+    that name no contract field. A value that states no choice is refused by
+    name exactly as a contract field's would be; `null` is a retraction."""
+    keep: Dict[str, Any] = {}
+    refused: Dict[str, str] = {}
+    prior_outside = prior.get("declared_outside_contract", {})
+    if not isinstance(prior_outside, dict):
+        prior_outside = {}
+    # Producer records share declaration.json with authored free choices.  They
+    # are facts written by their producer, never declarations an author may
+    # retract or replace through --set/--from-json.
+    owned = {SUPPLIED_RTL_KEY, "ip_catalog_used", "ai_authored_files"}
+    for k, v in overrides.items():
+        if k in names:
+            continue
+        prior_entry = prior_outside.get(k)
+        author_owned = (isinstance(prior_entry, dict)
+                        and prior_entry.get("provenance") == "author_declared")
+        if k in owned:
+            refused[k] = "%s is written by the flow, not declared by an author" % k
+            continue
+        if k in existing and not author_owned:
+            refused[k] = "%s already exists as a producer-owned declaration key" % k
+            continue
+        if v is UNDETERMINED:
+            keep[k] = v
+            continue
+        why = _placeholder_reason(v)
+        if why is not None:
+            refused[k] = why
+        else:
+            keep[k] = v
+    # A normal runner re-invokes this emitter without --set. Preserve a prior
+    # authored outside-contract declaration only while its value still matches.
+    for k, entry in prior_outside.items():
+        if k in keep or k in refused or k not in existing or not isinstance(entry, dict):
+            continue
+        if entry.get("provenance") == "author_declared" and "value" in entry and _same_declared_value(existing[k], entry["value"]):
+            keep[k] = entry["value"]
+    return keep, refused
+
+
+def _report_outside(outside: Dict[str, Any], refused: Dict[str, str],
+                    written: bool, stream, not_written_reason: str = "") -> None:
+    for k, v in sorted(outside.items()):
+        if not written:
+            print("  NOT written: %s (declared outside the spec's contract; "
+                  "%s)" % (k, not_written_reason), file=stream)
+        elif v is UNDETERMINED:
+            print("  retracted outside the contract: %s" % k, file=stream)
+        else:
+            print("  declared outside the spec's contract (no contract field "
+                  "of that name; kept as the author's declaration): %s = %r"
+                  % (k, v), file=stream)
+    for k, why in sorted(refused.items()):
+        print("  REFUSED, not written: %s — %s" % (k, why), file=stream)
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -1829,6 +1888,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             existing_unreadable = True
     sidecar = out_path.with_name(out_path.stem + ".provenance.json")
     prior = _load_prior_provenance(sidecar)
+    # A field the author declares that the spec's contract does not list is
+    # retained with provenance, except a producer-owned declaration fact.
+    outside, outside_refused = _outside_contract(overrides, names, existing,
+                                                  prior)
 
     status = resolve(contract, overrides, rtl_declared, existing, prior)
 
@@ -1876,6 +1939,9 @@ def main(argv: Optional[List[str]] = None) -> int:
               "No contract field written — a default-filled declaration would "
               "turn the required-artifact gate green against a value nobody "
               "chose.", file=sys.stderr)
+        _report_outside(outside, outside_refused, written=False,
+                        stream=sys.stderr,
+                        not_written_reason="no free choice is written while a REQUIRED field is undetermined")
         for r in rtl_rejected:
             print("  NOT read from %s:%d — %s: %s"
                   % (r["file"], r["line"], r["reason"], r["text"]),
@@ -1901,6 +1967,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("  Declare at least one with --set <field>=<value>, or correct "
               "the spec clause that demands a declaration with no substance.",
               file=sys.stderr)
+        _report_outside(outside, outside_refused, written=False,
+                        stream=sys.stderr,
+                        not_written_reason="no contract field was determined")
         return 4
 
     # --- write -------------------------------------------------------------
@@ -1921,6 +1990,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             # — or by carrying a placeholder that states no choice, so nothing
             # a designer actually declared is dropped by accident.
             declaration.pop(n, None)
+    for k, v in outside.items():
+        if v is UNDETERMINED:
+            declaration.pop(k, None)             # an explicit retraction
+        else:
+            declaration[k] = v
+    # Deliberately last: no author override can replace a fresh flow record.
     supplied = supplied_rtl_record(project, args.supplied_top)
     if supplied is not None:
         declaration[SUPPLIED_RTL_KEY] = supplied
@@ -1943,7 +2018,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             n for n, e in status.items() if e.get("recovered_from_prose")),
         "existing_without_recorded_provenance": unverified,
         "preserved_foreign_keys": sorted(
-            k for k in existing if k not in status),
+            k for k in existing if k not in status and k not in outside
+            and k != SUPPLIED_RTL_KEY),
+        "declared_outside_contract": {
+            k: ({"status": "retracted", "provenance": "author_declared"}
+                if v is UNDETERMINED else
+                {"value": v, "provenance": "author_declared"})
+            for k, v in sorted(outside.items())},
+        "refused_outside_contract": outside_refused,
         "rtl_declaration_scan": {
             "enabled": bool(args.from_rtl_declaration),
             "accepted": sorted(rtl_declared),
@@ -1953,6 +2035,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print("spec_declaration_emit: PASS — %d/%d contract field(s) declared -> %s"
           % (n_determined, len(status), out_path))
+    _report_outside(outside, outside_refused, written=True, stream=sys.stdout)
     if undetermined_optional:
         print("  informational field(s) OMITTED as undetermined (not "
               "defaulted): %s" % ", ".join(undetermined_optional))

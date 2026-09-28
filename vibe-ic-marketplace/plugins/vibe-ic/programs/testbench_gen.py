@@ -993,7 +993,31 @@ def _emit_case_stated_vector_bus(project: Path, case: dict, dut_module: str,
             {"case": str(name),
              "evidence": case.get("evidence") or case.get("citation"),
              "provenance": "GENERATED_FROM_STATED_VECTOR"})
+        _known_answer_vector_driven_later(report, str(name), case,
+                                          "_emit_case_stated_vector_bus")
     return f
+
+
+def _known_answer_vector_driven_later(report: dict, name: str, case: dict,
+                                      rung: str) -> None:
+    """A known-answer vector the known-answer rung refused and a LATER rung of
+    the same ladder drove: it is driven, not unbound.
+
+    MEASURED (sha256 x sky130A, front door): the census read "0 bound,
+    3 unbound -- the vectors exist and could NOT be driven" while this rung had
+    written all three TBs and they passed. The known-answer rung records its
+    refusal before the ladder moves on; the record must end in the state the
+    case ends in. The first refusal is kept on the row, not discarded."""
+    unbound = report.get("known_answer_vector_unbound") or []
+    hit = [u for u in unbound
+           if isinstance(u, dict) and str(u.get("case")) == name]
+    if not hit:
+        return
+    report["known_answer_vector_unbound"] = [u for u in unbound
+                                             if u not in hit]
+    report.setdefault("known_answer_vector_cases", []).append(
+        {"case": name, "citation": case.get("citation"),
+         "driven_by": rung, "first_refusal": hit[0].get("reason")})
 
 
 # ── R-0915-89(ii): the run must SAY which oracles it did not write ──────────
