@@ -227,6 +227,98 @@ def discover_provided_build_rtl(project: Path) -> List[Path]:
     return files
 
 
+_UNSTAGEABLE_HDL_EXTS = (".vhd", ".vhdl")
+_RE_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+
+
+def declares_a_module(path: Path) -> bool:
+    """True when the file (comments stripped) declares a Verilog module."""
+    try:
+        text = _RE_COMMENT.sub("", path.read_text(errors="ignore"))
+    except OSError:
+        return False
+    return bool(_RE_MODULE_DECL.search(text))
+
+
+def discover_supplied_design_sources(project: Path) -> List[Path]:
+    """The DESIGN sources the input supplies: `discover_provided_build_rtl`
+    (no testbench, no oracle / harness segment) narrowed to `.v` / `.sv`
+    files that declare a module.
+
+    D10: the one answer to "does the input supply a design", read by the
+    runner's generator deferrals, its reused-IP hand-off and the #732 vendor
+    manifest. A header, or a module-less `.v` of `define lines (the common
+    `*_defines.v` include), supplies no module: counting it made every
+    generator decline and left rtl/ with no design. It is still STAGED by
+    consume beside the design, because the design may include it."""
+    return [f for f in discover_provided_build_rtl(project)
+            if f.suffix in (".v", ".sv") and declares_a_module(f)]
+
+
+def _sha256(path: Path) -> Optional[str]:
+    import hashlib
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def unstaged_supplied_design_sources(project: Path) -> List[Path]:
+    """The supplied design sources that are NOT already in rtl/.
+
+    D10 review (MAJOR): "the supplied RTL was not staged" is a claim about
+    rtl/, so it is checked against rtl/. A supplied source counts as staged
+    when rtl/ holds a file of the same name with the same sha256, or when this
+    program's own SOURCE_MANIFEST `staged_from_input_sha256` records it with
+    the input's CURRENT sha256 and rtl/ still holds its copy (it was staged
+    from these bytes, and the copy may since have been edited in place). A
+    source changed after staging, or whose copy was deleted, is reported. MEASURED before: a
+    second consume, and every rtl_gen re-run after consume, reported the
+    supplied spm.v as NOT staged while rtl/spm.v was byte-identical to it."""
+    rtl_dir = project / "phase2" / "stage1" / "rtl"
+    listed: Dict[str, str] = {}
+    try:
+        mf = json.loads((rtl_dir / _MANIFEST_NAME).read_text(errors="replace"))
+        if isinstance(mf, dict) and isinstance(
+                mf.get("staged_from_input_sha256"), dict):
+            listed = {str(k): str(v)
+                      for k, v in mf["staged_from_input_sha256"].items()}
+    except (OSError, ValueError):
+        listed = {}
+    out: List[Path] = []
+    for f in discover_supplied_design_sources(project):
+        try:
+            rel = str(f.relative_to(project))
+        except ValueError:
+            rel = str(f)
+        twin = rtl_dir / f.name
+        # Listed as staged AND the input still has the bytes it was staged
+        # with AND rtl/ still holds its copy (which may be edited in place).
+        if rel in listed and listed[rel] == _sha256(f) and twin.is_file():
+            continue
+        if twin.is_file() and _sha256(twin) == _sha256(f):
+            continue
+        out.append(f)
+    return out
+
+
+def discover_supplied_unstageable_hdl(project: Path) -> List[Path]:
+    """Supplied HDL this program cannot stage (VHDL), screened like
+    `discover_provided_build_rtl`. Named so it is never silently dropped."""
+    out: List[Path] = []
+    for src_dir in candidate_source_dirs(project):
+        for ext in _UNSTAGEABLE_HDL_EXTS:
+            for f in sorted(src_dir.rglob(f"*{ext}")):
+                try:
+                    rel = f.relative_to(src_dir)
+                except ValueError:
+                    continue
+                if (f.is_file() and not _is_oracle_parts(rel.parts[:-1])
+                        and not _is_tb_file(f) and f not in out):
+                    out.append(f)
+    return out
+
+
 def _derive_ip_list(staged_paths: List[Path]) -> List[str]:
     """Structural ip_list = the ``module <name>`` declarations across the staged
     files (falls back to file stems). chip-AGNOSTIC."""
@@ -278,6 +370,16 @@ def emit_consume_manifest(project: Path, staged_paths: List[Path],
     prov = mf.get("staged_from_input")
     if not isinstance(prov, list) or not prov:
         mf["staged_from_input"] = sorted(provenance)
+    # D10 review — the BYTES each source had when this call staged it. "Listed
+    # as staged" is only true while the input still has those bytes (an
+    # in-place edit of the rtl/ copy stays allowed; a changed input does not).
+    shas = mf.get("staged_from_input_sha256")
+    shas = dict(shas) if isinstance(shas, dict) else {}
+    for rel in provenance:
+        sha = _sha256(project / rel)
+        if sha:
+            shas[rel] = sha
+    mf["staged_from_input_sha256"] = dict(sorted(shas.items()))
     # EMPTY reconciliation scaffold (GAP-E2E-8 parity) — an empty scaffold
     # reconciles ZERO ports, so l9_rtl_pin_consistency_check's verdict is
     # byte-for-byte unchanged until a real pairing is authored.
@@ -375,6 +477,22 @@ def consume_reused_ip_rtl(project: Path) -> Dict:
                 f"phase2/stage1/rtl/ already holds {len(existing)} RTL file(s) "
                 f"— a deterministic generator / author owns it; CONSUME "
                 f"skipped")
+            # D10 — say what that skip left out. The design's own input
+            # RTL not being built is the one fact a reader of this line needs.
+            _left = unstaged_supplied_design_sources(project)
+            if _left:
+                _rel = []
+                for f in _left:
+                    try:
+                        _rel.append(str(f.relative_to(project)))
+                    except ValueError:
+                        _rel.append(str(f))
+                result["supplied_rtl_not_staged"] = _rel
+                result["reason"] += (
+                    f". The input SUPPLIES {len(_rel)} design source(s) "
+                    f"({', '.join(_rel[:5])}) and they were NOT staged: the "
+                    f"build uses what rtl/ already holds, not the supplied "
+                    f"RTL")
             return result
         result["pre_existing_rtl"] = sorted(f.name for f in existing)
         result["unresolved_module_refs"] = unresolved
