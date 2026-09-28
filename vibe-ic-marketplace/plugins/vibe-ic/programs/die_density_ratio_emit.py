@@ -28,7 +28,16 @@ def measure(gds: Path, specs: dict, die: list[float]) -> dict:
     if area <= 0:
         raise ValueError('DIE_AREA has no positive area')
     dbu = layout.dbu
-    die_box = k.Region(k.Box(*[round(v / dbu) for v in (x1, y1, x2, y2)]))
+    die_box_db = k.Box(*[round(v / dbu) for v in (x1, y1, x2, y2)])
+    # KLayout's foundry deck divides by extent, the streamed top-cell bbox.
+    # Refuse a declared die that disagrees with that denominator.
+    bbox = top.bbox()
+    if any(abs(a - b) > 1 for a, b in zip(
+            (bbox.left, bbox.bottom, bbox.right, bbox.top),
+            (die_box_db.left, die_box_db.bottom,
+             die_box_db.right, die_box_db.top))):
+        raise ValueError('DIE_AREA differs from KLayout density extent')
+    die_box = k.Region(die_box_db)
     rows = {}
     for rule, spec in specs.items():
         row = dict(spec)
