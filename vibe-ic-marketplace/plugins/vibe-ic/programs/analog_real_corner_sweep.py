@@ -993,7 +993,7 @@ SIM_DEADLINE_S_PER_TRAN_NS = 0.5
 SIM_DEADLINE_CEILING_S = 7200
 
 _TRAN_RE = re.compile(
-    r"^\s*tran\s+\S+\s+([0-9.eE+-]+)\s*([munpf]?)s?\b", re.M | re.I)
+    r"^\s*\.?tran\s+\S+\s+([0-9.eE+-]+)\s*([munpf]?)s?\b", re.M | re.I)
 _TIME_SCALE = {"": 1e9, "m": 1e6, "u": 1e3, "n": 1.0, "p": 1e-3, "f": 1e-6}
 
 
@@ -1056,7 +1056,7 @@ def _corner_reservation(container):
 
 
 def _run_ngspice(container, sp_in_container, cwd=None, deck_text=None,
-                 run_to_completion=False, corner_job=None):
+                 run_to_completion=False, corner_job=None, deadline_s=None):
     """Run ngspice -b on a deck. `cwd` (optional) runs ngspice FROM that
     directory — the model lib's own directory, so any deck-relative output /
     scratch file lands beside it.
@@ -1095,7 +1095,23 @@ def _run_ngspice(container, sp_in_container, cwd=None, deck_text=None,
     halves were required and neither was wired: every call below passes cwd=None.
 
     When cwd is None the invocation is unchanged (the open-PDK sky130/gf180
-    decks include their model lib by ABSOLUTE path). chip-AGNOSTIC."""
+    decks include their model lib by ABSOLUTE path).
+
+    `deadline_s` is a caller's OWN declared budget, in seconds (T130: A7
+    derives one per deck from the clocks it simulates). It must be a positive
+    number: 0 is GNU `timeout`'s "no deadline", and a caller that states a
+    budget and hands over 0 has stated none -- refused here rather than run
+    unbounded behind a budget that exists only in the caller's record. It
+    cannot be combined with `run_to_completion`, which is the opposite
+    request. chip-AGNOSTIC."""
+    if deadline_s is not None:
+        if run_to_completion:
+            raise ValueError("_run_ngspice: deadline_s and run_to_completion "
+                             "are opposite requests")
+        if not deadline_s or deadline_s <= 0:
+            raise ValueError(
+                f"_run_ngspice: deadline_s={deadline_s!r} is `timeout 0` -- "
+                f"no deadline at all; a stated budget must be positive")
     ngspice_bin = _resolve_ngspice(container) or "ngspice"
     prefix = f"cd {shlex.quote(cwd)} && " if cwd else ""
     # (A) Ask for the STRUCTURED per-.measure sidecar when this build supports
@@ -1106,7 +1122,8 @@ def _run_ngspice(container, sp_in_container, cwd=None, deck_text=None,
     if _supports_json_measure(container, ngspice_bin):
         json_path = f"{sp_in_container}.measure.json"
         json_flag = f"--json-measure={shlex.quote(json_path)} "
-    deadline = 0 if run_to_completion else sim_deadline_s(deck_text or "")
+    deadline = (int(-(-deadline_s // 1)) if deadline_s is not None  # ceil
+                else 0 if run_to_completion else sim_deadline_s(deck_text or ""))
     command = (f"{prefix}{shlex.quote(ngspice_bin)} -b {json_flag}"
                f"{shlex.quote(sp_in_container)} 2>&1")
     if corner_job is None:
