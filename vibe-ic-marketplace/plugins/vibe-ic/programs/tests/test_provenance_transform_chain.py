@@ -158,6 +158,54 @@ def test_magic_fill_retains_stream_and_declares_finished_head(tmp_path, monkeypa
     assert "PROVENANCE_HASH_MISMATCH" in {f.rule for f in C.audit(project)[1]}
 
 
+def test_partial_failing_fill_cannot_publish_a_finished_gds(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    pdk = SimpleNamespace(drc_deck=None, stdcell_marker_layer=None,
+                          dummy_fill=None, same_net_heal=None,
+                          port_label_restore=None)
+    monkeypatch.setattr(R, "_layout_basis", lambda *a: ("basis", None))
+    monkeypatch.setattr(R._ga, "gate_passed", lambda *a: True)
+    monkeypatch.setattr(R, "_vacuous_on_unrouted", lambda *a: None)
+    monkeypatch.setattr(R, "_streamout_top", lambda *a: ("unit", ""))
+    monkeypatch.setattr(R, "publish_database_unit_declaration",
+                        lambda *a: {"verdict": "PASS", "reason": "fixture"})
+    monkeypatch.setattr(R, "publish_tapeout_declarations",
+                        lambda *a: {"published": [], "not_determined": [],
+                                    "already_answered": []})
+
+    def stream(_project, _top, _pdk, _container, path):
+        path.write_bytes(b"streamed layout")
+        R._log_invocation("layout gds write", 0, 1, outputs=[path])
+        return True, "streamed"
+
+    def partial_fill(_project, _top, _pdk, path, _container):
+        path.write_bytes(path.read_bytes() + b" + incomplete fill")
+        R._log_invocation("layout partial fill", 1, 1, outputs=[path])
+        return False, "fill failed rc=1"
+
+    monkeypatch.setattr(R, "_magic_def_to_gds", stream)
+    monkeypatch.setattr(R, "_gds_grid_snap", lambda *a: (False, "no snap"))
+    monkeypatch.setattr(R, "_die_finishing", lambda *a: (False, "no seal"))
+    monkeypatch.setattr(R, "_step34_gds_tool_arm", lambda *a: None)
+    monkeypatch.setattr(R, "_density_metal_fill", partial_fill)
+    monkeypatch.setattr(R, "_die_density_fill", lambda *a: (False, "no die fill"))
+    monkeypatch.setattr(R, "_restore_port_labels_if_missing",
+                        lambda *a: (False, "no labels"))
+    monkeypatch.setattr(R, "_gds_substance_gate", lambda *a: None)
+    try:
+        result = R._step_gds_direct(project, "unit", pdk, "fake")
+    finally:
+        R.set_invocation_provenance_sink(None)
+
+    assert result.status == "FAIL", result.detail
+    assert "gds:density_metal_fill" in result.detail
+    assert "rc=1" in result.detail
+    assert (project / "phase3/stage3/pnr/unit.gds").read_bytes().endswith(
+        b"incomplete fill")
+    assert not any(row.get("record") == "declared_transform"
+                   for row in _rows(project))
+
+
 def test_reextracted_spef_retains_openrcx_bytes_and_declares_augmentation(tmp_path,
                                                                          monkeypatch):
     project = _project(tmp_path)

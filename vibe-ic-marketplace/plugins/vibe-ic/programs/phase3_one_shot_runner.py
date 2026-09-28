@@ -984,6 +984,14 @@ class _GdsTransformChain:
             return result
         if after == before:
             return result
+        # A failed tool can leave a partial in-place GDS.  The byte change
+        # proves only that it wrote, not that its native operation completed.
+        # Every changed finishing writer must report explicit success before
+        # its bytes can become a declared transform or the final delivery.
+        if not (isinstance(result, tuple) and result and result[0] is True):
+            note = result[1] if isinstance(result, tuple) and len(result) > 1 else result
+            self.failed = f"{step}: GDS writer did not complete: {note}"
+            return result
         self.count += 1
         snapshot = self.head.parent / f"{self.working.stem}.{self.count}.{time.time_ns()}.gds"
         shutil.copyfile(self.working, snapshot)
@@ -72260,9 +72268,12 @@ def _step34_gds_ship(project: Path, gds_out: Path, ctx: Dict[str, Any],
     result = direct_fill
     if shipped == "librelane" and tool:
         filled = Path(tool["filler"]["filled_gds"])
+        def _copy_filled() -> Tuple[bool, str]:
+            shutil.copyfile(filled, gds_out)
+            return True, "LibreLane filler copied"
         (chain.run if chain else _declared_transform_exec)(None, gds_out, "gds:librelane_filler", "klayout",
             "KLayout.Filler (LibreLane) (phase3_one_shot_runner step_gds)",
-            lambda: shutil.copyfile(filled, gds_out))
+            _copy_filled)
         result = (True, f"LibreLane KLayout.Filler ({tool['filler']['script']}); PDK "
                         f"density deck: {tool[_lf.DENSITY_METRIC]} error(s) "
                         f"{tool.get('rules')}")
