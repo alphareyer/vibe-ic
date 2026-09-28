@@ -155,14 +155,17 @@ def test_docs_written_by_an_older_producer_are_regenerated(tmp_path,
     assert _fresh(proj, plug)["reason"] == "PRODUCER_CHANGED"
 
 
-def test_producer_change_precedes_unread_expert_answer_and_archives_its_pack(
+def test_producer_change_precedes_unread_answer_but_keeps_identical_root(
         tmp_path, monkeypatch):
     plug, proj = _plugin(tmp_path), _project(tmp_path)
     _phase1(proj, plug)
     pack = proj / "reports/audit/phase1/expert_parse_track_pack"
-    pack.mkdir(parents=True)
-    (pack / "l_doc_expectations.json").write_text('{"expectations": []}')
-    (pack / "ic_expert_agent_handoff.json").write_text('{"role": "expert"}')
+    assert TRACK.ai_subtrack(proj, "# spec", pack)["status"] == "HANDOFF_EMITTED"
+    answer = pack / "l_doc_expectations.json"
+    answer.write_text(json.dumps({"expectations": [{
+        "id": "input-fact", "layer": "L1_DOC", "requirement": "the input fact",
+        "expected_tokens": ["spec"], "evidence": ["input/docs/spec.md"],
+    }]}))
     src = plug / "programs/fake_l_producer.py"
     src.write_text(src.read_text() + "\n# revised producer\n")
     # The old decision consumed the delivered answer before checking whether
@@ -170,8 +173,31 @@ def test_producer_change_precedes_unread_expert_answer_and_archives_its_pack(
     assert _decide(proj, plug, monkeypatch) == (True, "docs")
     archive = PID.supersede_docs(proj, "PRODUCER_CHANGED")
     assert archive is not None
-    assert (archive / "expert_parse_track_pack/l_doc_expectations.json").is_file()
-    assert not pack.exists()
+    assert answer.is_file()
+    _load(plug).produce(proj)  # same L-doc bytes after a code-only change
+    assert TRACK.ai_subtrack(proj, "# spec", pack)["status"] == "CONSUMED"
+    assert answer.is_file()
+
+
+def test_changed_root_retires_answer_before_the_expert_consumer_reads_it(
+        tmp_path):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    pack = proj / "reports/audit/phase1/expert_parse_track_pack"
+    assert TRACK.ai_subtrack(proj, "# spec", pack)["status"] == "HANDOFF_EMITTED"
+    answer = pack / "l_doc_expectations.json"
+    answer.write_text('{"expectations": []}')
+    doc = proj / "phase1/generated_docs/L1_DOC.json"
+    doc.write_bytes(doc.read_bytes() + b"\n")
+    assert PID.record_derivation(
+        proj, doc.name, hashlib.sha256(doc.read_bytes()).hexdigest(),
+        "later-flow-writer")
+    result = TRACK.ai_subtrack(proj, "# spec", pack)
+    assert result["status"] == "HANDOFF_EMITTED"
+    assert "EXPERT_ROOT_CHANGED" in result["reason"]
+    assert not answer.exists()
+    assert (Path(result["stale_pack_archived_at"])
+            / "l_doc_expectations.json").is_file()
 
 
 def test_real_l_doc_flow_rewrite_refuses_the_old_expert_reading(
