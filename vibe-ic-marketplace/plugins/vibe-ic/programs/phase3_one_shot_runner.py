@@ -33298,6 +33298,23 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
         # are not in the ODB, and probe F measured the whole repair recipe
         # working once they are read back.
         lines = [ln for ln in lines if not ln.startswith("read_lef ")]
+        lef_lines: List[str] = []
+    else:
+        # A DEF RESTORE READS THE LEFS AFTER THE TIMING LIBRARIES. `read_def`
+        # ends in OpenROAD's liberty-to-LEF check (dbNetwork::
+        # checkLibertyCellsWithoutLef), which marks every liberty cell with no
+        # LEF master DONT-USE. A liberty read AFTER the LEF is linked to the
+        # masters only when it is the first (dbNetwork::readLibertyAfter skips
+        # a cell that already has one); a LEF read after the libraries links
+        # every corner (dbNetwork::makeCell). The parent deck reads LEF first,
+        # so with three corners the child's second and third corner were
+        # unlinked: MEASURED on OpenROAD 26Q3-3020 over a subservient x
+        # gf180mcuD checkpoint, `ORD-2056 ... 458 liberty cell(s) do not have
+        # LEF masters and will be marked as dont-use` (2 corners x 229 cells)
+        # with LEF first, none with the libraries first. The ODB leg already
+        # reads the libraries before its `read_db`, and is silent.
+        lef_lines = [ln for ln in lines if ln.startswith("read_lef ")]
+        lines = [ln for ln in lines if not ln.startswith("read_lef ")]
     # A deck that loads LibreLane's placed DEF (steps 15..18,
     # `librelane_contract.placement_consumer_tcl`) has no netlist block: its
     # `read_def` line is the design-load site the checkpoint replaces.
@@ -33341,6 +33358,8 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
         _load = [
             "# RESUMED SESSION — the design is restored from the route checkpoint",
             "# instead of rebuilt from the netlist (see _build_pnr_resume_tcl_text).",
+            *(["# LEFs after the timing libraries: see _pnr_deck_from_checkpoint."]
+              + lef_lines if lef_lines else []),
             f"read_def {checkpoint_def_c}",
         ]
     lines[i_rv:i_ld + 1] = _load + (
