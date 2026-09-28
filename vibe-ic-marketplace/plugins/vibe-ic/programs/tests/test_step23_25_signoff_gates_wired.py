@@ -276,6 +276,9 @@ def test_runner_exposes_every_declared_signoff_gate():
         # named a different number entirely. Registering the new member here is
         # the intended response to this set equality, not a repair of it.
         "clock_target_record_agreement_check.py",
+        # DRV needs a fresh capture plan and all PVT/RC receipts. This fixture
+        # only supplies STA/EM report files, so its row stays NOT_MEASURED.
+        "drv_signoff_judge.py",
     }, wired
 
 
@@ -343,7 +346,9 @@ def test_signoff_gates_pass_a_clean_project(tmp_path):
     # never a defect: the sign-off population grew.
     import phase3_one_shot_runner as _R
     assert len(results) == len(_R._DECLARED_SIGNOFF_GATES)
-    assert [r.status for r in results] == ["PASS"] * len(results), [
+    statuses = {r.name: r.status for r in results}
+    assert statuses.pop("drv_signoff") == "NOT_MEASURED"
+    assert set(statuses.values()) == {"PASS"}, [
         (r.name, r.status, r.detail) for r in results]
 
 

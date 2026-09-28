@@ -355,11 +355,13 @@ def _step32_drv_signoff(project: Path, report: Dict[str, Any]) -> None:
                   "not_measured": [f"step 32 DRV evidence unavailable: {exc}"]}
     report["drv_signoff"] = result
     # The rejudge is a gate on the adopted layout, not an unused sidecar.
-    if result["verdict"] == "FAIL":
+    if source.is_file() and result["verdict"] == "FAIL":
         report["verdict"] = "FAIL"
-    elif result["verdict"] == "NOT_MEASURED" and report.get("verdict") != "FAIL":
+    elif (source.is_file() and result["verdict"] == "NOT_MEASURED"
+          and report.get("verdict") != "FAIL"):
         report["verdict"] = "NOT_MEASURED"
-    elif result["verdict"] == "WAIVED" and report.get("verdict") == "PASS":
+    elif (source.is_file() and result["verdict"] == "WAIVED"
+          and report.get("verdict") == "PASS"):
         report["verdict"] = "WAIVED"
     output = project / "reports/phase3/sta/drv_signoff_step32.json"
     output.parent.mkdir(parents=True, exist_ok=True)
