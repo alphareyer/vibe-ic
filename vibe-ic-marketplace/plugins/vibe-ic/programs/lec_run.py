@@ -6699,6 +6699,55 @@ def main(argv: Optional[List[str]] = None) -> int:
         report["verdict_explanation"] = (
             f"{report.get('verdict_explanation') or ''} Counterexample search "
             f"could not start: {report['counterexample_search_unavailable']}.").strip()
+    if ((report.get("unproven_points") or 0) > 0
+            and not _search_has_no_model and not checkpoint_enabled
+            and not final_equiv_il.is_file()):
+        # The checkpoint-off recipe is intentionally write-free. Only a named
+        # residual justifies a second, budgeted execution to capture its final
+        # RTLIL. Refuse the capture if the repeated proof reports different
+        # point counts or names; SAT must examine the same residual.
+        _capture = {"status": "NOT_RUN", "reason": "step budget exhausted"}
+        _capture_budget = budget.next_attempt_budget()
+        if _capture_budget > 0:
+            _capture_script = rpt_out.parent / f"lec_equiv_capture.{invocation_id}.ys"
+            try:
+                _capture_text = (ys_host.read_text(encoding="utf-8")
+                                 + f"write_rtlil {final_equiv_il.resolve()}\n")
+                _capture_script.write_text(_capture_text, encoding="utf-8")
+                _capture_launched, _capture_log = run_yosys_equiv(
+                    container, str(_capture_script.resolve()),
+                    timeout=_capture_budget, workdir=equiv_workdir)
+                _capture_rpt = rpt_out.parent / f"lec_equiv_capture.{invocation_id}.rpt"
+                _atomic_write_bytes(_capture_rpt, _capture_log.encode("utf-8"))
+                _capture_status = _capture_log.rfind("Executing EQUIV_STATUS pass")
+                _capture_names = (
+                    unproven_names(_capture_log[_capture_status:])
+                    if _capture_status >= 0 else unproven_names(_capture_log))
+                _same_residual = (
+                    final_status_counts(raw) is not None
+                    and final_status_counts(_capture_log) == final_status_counts(raw)
+                    and _capture_names == _residual_names)
+                if not (_capture_launched and _same_residual
+                        and final_equiv_il.is_file()):
+                    final_equiv_il.unlink(missing_ok=True)
+                _capture = {
+                    "status": ("CAPTURED" if final_equiv_il.is_file()
+                               else "NOT_RUN"),
+                    "reason": ("same named residual and final counts"
+                               if final_equiv_il.is_file() else
+                               "capture did not reproduce the named residual"),
+                    "script_sha256": _sha256_bytes(
+                        _capture_text.encode("utf-8")),
+                    "script": str(_capture_script.relative_to(project)),
+                    "proof_log_sha256": _sha256_bytes(
+                        _capture_log.encode("utf-8")),
+                    "proof_log": str(_capture_rpt.relative_to(project)),
+                    "budget_sec": _capture_budget,
+                }
+            except OSError as _exc:
+                final_equiv_il.unlink(missing_ok=True)
+                _capture = {"status": "NOT_RUN", "reason": str(_exc)}
+        report["counterexample_handoff_capture"] = _capture
     if (report.get("unproven_points") or 0) > 0 and not _search_has_no_model:
         _stateless, _stateless_evidence = miter_is_stateless(raw)
         report["miter_stateless"] = _stateless
