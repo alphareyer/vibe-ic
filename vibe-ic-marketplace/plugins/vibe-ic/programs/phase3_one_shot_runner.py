@@ -58596,14 +58596,23 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                          f"{_arm.relative_to(project)}; direct arm published")
     # Compose pre_pnr_timing.rpt from a GENUINE per-corner report (setup-worst
     # SS preferred, else TT/FF/any) — NOT a copy of the post-route sta.rpt.
-    # Re-compose when a stale pre_pnr_timing.rpt from an earlier post-route
-    # round is present: its body would carry STA_BASIS: POST_ROUTE_* under this
-    # step's PRE-LAYOUT header — the precise contradiction sta_report_check
-    # flags. A genuinely pre-layout report (or an absent one) is left alone.
+    # Re-compose when the basis or the timed inputs changed. A PRE_LAYOUT
+    # stamp alone cannot bind an old result to this netlist and SDC.
     pre_pnr = sta_out / "pre_pnr_timing.rpt"
+    _pre_nl_sha = _file_sha256(_pl.synth_dir(project) / f"{top}_synth.v")
+    _pre_sdc_sha = _file_sha256(runner_sdc)
+
+    def _current_prelayout_report(body: str) -> bool:
+        return bool(
+            _sta_basis.declared_basis(body) == "PRE_LAYOUT"
+            and _pre_nl_sha and _pre_sdc_sha
+            and re.search(r"(?m)^STA_BASIS_NETLIST_SHA256: "
+                          + re.escape(_pre_nl_sha) + r"$", body)
+            and re.search(r"(?m)^STA_BASIS_SDC_SHA256: "
+                          + re.escape(_pre_sdc_sha) + r"$", body))
+
     _pre_pnr_stale = (pre_pnr.is_file()
-                      and _sta_basis.declared_basis(pre_pnr.read_text())
-                      != "PRE_LAYOUT")
+                      and not _current_prelayout_report(pre_pnr.read_text()))
     if not pre_pnr.is_file() or _pre_pnr_stale:
         # BLOCKING-1 (2026-08-05 review). The source must be chosen by what the
         # corner report DECLARES, not by its filename. Forcing the basis in
@@ -58619,8 +58628,7 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
         # does not own.
         def _prelayout_src(cand: Path) -> bool:
             try:
-                return (_sta_basis.declared_basis(cand.read_text())
-                        == "PRE_LAYOUT")
+                return _current_prelayout_report(cand.read_text())
             except OSError:
                 return False
 
@@ -58642,9 +58650,8 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
             notes.append(
                 "pre-layout compose REFUSED corner report(s) "
                 + ", ".join(_rejected)
-                + " — they do not declare STA_BASIS PRE_LAYOUT, and a "
-                  "pre-layout report composed from a post-route body is the "
-                  "contradiction this step exists to remove")
+                + " — they do not declare current PRE_LAYOUT netlist/SDC "
+                  "identity; an unbound report cannot establish current timing")
         if src is not None:
             pre_pnr.write_text(
                 "# PRE-LAYOUT STA (Step 10) — genuine OpenSTA on the synth\n"
@@ -58677,10 +58684,11 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
     # Step 10 scoring MISSING against an absent report is the honest outcome,
     # and a WARN says so where the run can see it.
     _pre_pnr_basis: Optional[str] = None
-    _pre_pnr_ok = True
+    _pre_pnr_ok = pre_pnr.is_file()
     if pre_pnr.is_file():
-        _pre_pnr_basis = _sta_basis.declared_basis(pre_pnr.read_text())
-        if _pre_pnr_basis != "PRE_LAYOUT":
+        _pre_pnr_body = pre_pnr.read_text()
+        _pre_pnr_basis = _sta_basis.declared_basis(_pre_pnr_body)
+        if not _current_prelayout_report(_pre_pnr_body):
             _pre_pnr_ok = False
             if _pre_pnr_basis == "POST_ROUTE":
                 _q = pre_pnr.parent / (pre_pnr.name + ".stale_basis")
@@ -58699,6 +58707,20 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                         f"pre_pnr_timing.rpt declares POST_ROUTE and could "
                         f"NOT be quarantined ({exc}) — a post-route body is "
                         f"published under a PRE-LAYOUT header")
+            elif _pre_pnr_basis == "PRE_LAYOUT":
+                _q = pre_pnr.parent / (pre_pnr.name + ".stale_input")
+                try:
+                    pre_pnr.replace(_q)
+                    notes.append(
+                        "pre_pnr_timing.rpt has stale/absent netlist or SDC "
+                        f"identity and no current corner could replace it; "
+                        f"quarantined to {_q.name}; Step 10 is MISSING")
+                    if str(pre_pnr) in written:
+                        written.remove(str(pre_pnr))
+                except OSError as exc:
+                    notes.append(
+                        f"pre_pnr_timing.rpt input identity is stale and "
+                        f"could NOT be quarantined ({exc})")
             else:
                 notes.append(
                     "pre_pnr_timing.rpt carries NO recognised STA_BASIS stamp "
@@ -58722,7 +58744,8 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
         # reads clean at a glance, which is the whole failure mode.
         detail = (f"pre-layout basis UNSUBSTANTIATED "
                   f"(pre_pnr_timing.rpt declared "
-                  f"{_pre_pnr_basis or 'no STA_BASIS'}, not PRE_LAYOUT) — "
+                  f"{_pre_pnr_basis or 'no STA_BASIS'}, current input identity "
+                  f"{'missing' if not _pre_pnr_ok else 'verified'}) — "
                   + detail)
     # Tool path: the gates judge the tool's own output, and they block.
     _ll_verdicts = [(step, _ll[key]) for step, key in (("8", "sdc"), ("10", "slack"))
