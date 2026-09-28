@@ -674,7 +674,7 @@ def _per_corner_analysis(project: Path, native: Any,
 
 def _required_sta_corners(project: Path, required: Any,
                           declared_paths: Tuple[str, ...]) -> Dict[str, Any]:
-    """Bind explicit L24 process obligations to the declared audit's native bytes.
+    """Bind L24 STA obligations to each measured process x RC scene.
 
     Aggregate PASS/counts and unrelated discovered reports cannot supply a
     missing corner. This checks native setup/hold readings, not library or
@@ -691,6 +691,48 @@ def _required_sta_corners(project: Path, required: Any,
             or any(not isinstance(c, str) or c not in {"SS", "TT", "FF", "SF", "FS"}
                    for c in required)):
         issues.append("required process corners are malformed or unknown")
+        return out
+    import librelane_contract as ll_contract
+    try:
+        mode = ll_contract.selected_mode(project, '23')
+        if mode != 'direct':
+            arm = native.read_tool_arm(project)
+            judged = native.evaluate_tool(project, arm)
+            table = judged['corners']
+            out['scene_table'] = []
+            for process in required:
+                for rc in ('min', 'nom', 'max'):
+                    matches = [r for r in table if r.get('rc_corner') == rc
+                               and str(r.get('process') or '').upper() == process]
+                    if len(matches) != 1:
+                        row = {'process': process, 'rc_corner': rc,
+                               'measurement_status': 'NOT_MEASURED',
+                               'reason': f'{len(matches)} matching scene reports'}
+                    else:
+                        scene = matches[0]
+                        row = {k: scene.get(k) for k in
+                               ('corner', 'process', 'rc_corner', 'liberties', 'spef',
+                                'spef_sha256', 'source', 'source_sha256',
+                                'setup_wns_ns', 'hold_wns_ns', 'measurement_status',
+                                'scope_gaps')}
+                        if row['measurement_status'] == 'MEASURED' and any(
+                                not isinstance(row[k], (int, float)) or
+                                not math.isfinite(row[k]) or row[k] < 0
+                                for k in ('setup_wns_ns', 'hold_wns_ns')):
+                            row['measurement_status'] = 'FAIL'
+                    out['scene_table'].append(row)
+                    if row['measurement_status'] != 'MEASURED':
+                        issues.append(f"({process}, {rc}) scene {row['measurement_status']}: "
+                                      f"{row.get('reason') or row.get('scope_gaps')}")
+            out['covered'] = [process for process in required
+                              if all(r['measurement_status'] == 'MEASURED'
+                                     for r in out['scene_table']
+                                     if str(r['process']).upper() == process)]
+            out['missing'] = sorted(set(required) - set(out['covered']))
+            out['scene_source'] = judged['declaration_sources']['tool_record']
+            return out
+    except (ll_contract.Refusal, OSError, ValueError, KeyError, TypeError) as exc:
+        issues.append(f'STAPostPNR scene evidence NOT_MEASURED: {exc}')
         return out
     roles: Dict[str, set] = {c: set() for c in required}
     # Other flow-declared STA gates publish their own schemas (corner record,

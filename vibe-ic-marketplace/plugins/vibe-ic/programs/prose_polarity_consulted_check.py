@@ -136,6 +136,13 @@ _NOT_PROSE: Dict[str, str] = {
         "negated value cannot satisfy either grammar and falls through to "
         "the pinned PDK tier. Falsifier: tests/test_capture_cr8_sdc_environment.py"
         "::test_negated_table_value_is_not_a_design_declaration.",
+    "librelane_signoff::_liberty_header_pvt":
+        "ONE MACHINE GRAMMAR, NO SENTENCE. Liberty header nom_process, "
+        "nom_voltage and nom_temperature are numeric attributes anchored at "
+        "line start and terminated by semicolons. A missing or duplicate field "
+        "returns no PVT, and the scene becomes NOT_MEASURED. A denial cannot "
+        "be encoded in this grammar. Falsifier: "
+        "tests/test_sta9_scene_binding.py::test_wrong_liberty_header_is_not_measured.",
     "librelane_fill_dfm::lef_geometry":
         "ONE MACHINE GRAMMAR, NO SENTENCE. LEF `MACRO <name> ... END <name>` and "
         "`SITE <name> ... END <name>` blocks from the PDK's own LEFs as the "

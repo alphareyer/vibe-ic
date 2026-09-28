@@ -425,6 +425,40 @@ SIGNOFF_RECORD = 'reports/phase3/sta_postpnr_signoff.json'
 _TIMED_VIEWS = ('def', 'nl', 'sdc', 'spef')
 
 
+def _liberty_host_path(project: Path, liberty: str,
+                       expected_image: str | None = None) -> Path | None:
+    """Resolve the tool's /pdk view through the run's recorded PDK mount."""
+    path = Path(liberty)
+    if path.is_file():
+        return path
+    provenance = project / 'phase3/librelane_pdk_root.provenance.json'
+    try:
+        doc = _load(provenance)
+        if expected_image and doc.get('derivation', {}).get('image') != expected_image:
+            return None
+        root = Path(doc['path'])
+        pdk = doc.get('derivation', {}).get('pdk')
+        guest = f'/pdk/{pdk}' if pdk else None
+        if guest and (liberty == guest or liberty.startswith(guest + '/')):
+            mapped = root / pdk / liberty[len(guest):].lstrip('/')
+            return mapped if mapped.is_file() else None
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def _liberty_header_pvt(path: Path) -> dict[str, float] | None:
+    """Read the three declared Liberty header values, with no filename guesses."""
+    head = path.open(errors='replace').read(16384)
+    values = {}
+    for key in ('nom_process', 'nom_voltage', 'nom_temperature'):
+        hits = re.findall(r'(?m)^\s*' + key + r'\s*:\s*([-+]?\d+(?:\.\d+)?)\s*;', head)
+        if len(hits) != 1:
+            return None
+        values[key] = float(hits[0])
+    return values
+
+
 def step23_tool_arm(project: Path, artefacts: tuple[str, ...] = (CORNER_REPORT,)) -> Optional[dict]:
     """What a step-23 gate judges when step 23 runs `librelane` or `dual`.
 
@@ -479,16 +513,61 @@ def step23_tool_arm(project: Path, artefacts: tuple[str, ...] = (CORNER_REPORT,)
     corners: dict[str, Any] = {}
     for name in declared:
         matched = [p for p in spefs if fnmatch.fnmatch(name, p)]
-        libs = [lib for p, row in (config.get('CELL_LIBS') or {}).items()
-                if fnmatch.fnmatch(name, p) for lib in row]
-        pvt = parse_liberty_pvt(libs[0]) if len(libs) == 1 else None
-        gaps = dict(pvt.gaps) if pvt else {'process': f'{len(libs)} cell liberties bound'}
+        libs = []
+        for field in ('CELL_LIBS', 'PAD_LIBS', 'EXTRA_LIBS'):
+            declared_libs = config.get(field) or {}
+            if isinstance(declared_libs, dict):
+                libs.extend(lib for p, group in declared_libs.items()
+                            if fnmatch.fnmatch(name, p) for lib in group)
+            elif isinstance(declared_libs, list):
+                libs.extend(lib for lib in declared_libs if isinstance(lib, str))
+        pvt = parse_liberty_pvt(libs[0]) if libs else None
+        gaps = dict(pvt.gaps) if pvt else {'process': 'no cell Liberty bound'}
+        rc = rc_corner(matched[0]) if len(matched) == 1 else None
+        spef = str(spefs[matched[0]]) if rc else None
+        if rc and (not name.startswith(rc + '_') or
+                   not Path(spef).name.endswith(f'.{rc}.spef')):
+            gaps['rc_corner'] = 'scene, SPEF pattern and SPEF filename disagree'
+        log = folder / name / 'sta.log'
+        log_text = log.read_text(errors='replace') if log.is_file() else ''
+        logged_libs = re.findall(
+            r"(?m)^Reading cell library for the '([^']+)' corner at '([^']+)'", log_text)
+        logged_spefs = re.findall(
+            r"(?m)^Reading top-level design parasitics for the '([^']+)' corner at '([^']+)'", log_text)
+        if not libs or sorted(logged_libs) != sorted((name, lib) for lib in libs):
+            gaps['liberty'] = 'scene log and configured cell Liberty disagree'
+        if spef is None or logged_spefs != [(name, spef)]:
+            gaps['spef'] = 'scene log and configured SPEF disagree'
+        liberty_views = []
+        scene_process = name.split('_', 2)[1].lower() if '_' in name else None
+        for lib in libs:
+            host = _liberty_host_path(project, lib,
+                                      (receipt.get('input') or {}).get('image'))
+            header = _liberty_header_pvt(host) if host else None
+            lib_pvt = parse_liberty_pvt(lib)
+            liberty_views.append({'path': lib, 'sha256': digest(host) if host else None,
+                                  'header_pvt': header})
+            if header is None or lib_pvt.gaps:
+                gaps['liberty_header_pvt'] = 'Liberty bytes or header PVT unavailable'
+            elif (lib_pvt.voltage_v != header['nom_voltage'] or
+                  lib_pvt.temperature_c != header['nom_temperature'] or
+                  not pvt or lib_pvt.process != pvt.process or
+                  lib_pvt.voltage_v != pvt.voltage_v or
+                  lib_pvt.temperature_c != pvt.temperature_c or
+                  lib_pvt.process != scene_process):
+                gaps['liberty_header_pvt'] = 'scene, Liberty filename and header PVT disagree'
         row: dict[str, Any] = {
-            'rc_corner': rc_corner(matched[0]) if len(matched) == 1 else None,
+            'rc_corner': rc,
             'process': pvt.process if pvt else None,
             'voltage_v': pvt.voltage_v if pvt else None,
             'temperature_c': pvt.temperature_c if pvt else None,
-            'liberty': libs[0] if len(libs) == 1 else None,
+            'liberty': libs[0] if libs else None,
+            'liberties': liberty_views,
+            'liberty_sha256': liberty_views[0]['sha256'] if liberty_views else None,
+            'liberty_header_pvt': liberty_views[0]['header_pvt'] if liberty_views else None,
+            'spef': spef,
+            'spef_sha256': timed.get(spef) if spef else None,
+            'sta_log': str(log), 'sta_log_sha256': digest(log) if log.is_file() else None,
             'metrics': {k: metrics.get(f'{m}__corner:{name}') for k, m in TIMING_METRICS.items()},
             'files': {}}
         if len(matched) != 1:
