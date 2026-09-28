@@ -60329,6 +60329,12 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             if _signoff_regen(mirror, primary_def):
                 written.extend(_publish_artefact_mirror(
                     spef_sta_rpt, mirror, project, "_emit_spef_sta"))
+    elif not (spef_out.is_file() and spef_out.stat().st_size > 0):
+        # N5 review 2: the declared-corner sweep cannot run without the run's
+        # own parasitics, and until now that wrote no record at all -- the
+        # producer is only called WITH a SPEF. Every declared (corner, check)
+        # is recorded NOT_MEASURED with this reason, replacing any older record.
+        _record_declared_corners_without_parasitics(project, spef_out)
     spef_sta_ok = (spef_sta_attempt_ok is not False
                    and spef_sta_rpt.is_file() and spef_sta_rpt.stat().st_size > 0)
 
@@ -63070,6 +63076,30 @@ def _sta_native_census_complete(body, def_file=None, io_masters=None):
             and not any(x.endswith(' UNRESOLVED') for x in instances))
 
 
+def _record_declared_corners_without_parasitics(project: Path,
+                                                spef_path: Path) -> Optional[Path]:
+    """Write the declared-corner record when step 22 left no non-empty SPEF:
+    every (corner, check) the design's own STA requirement states is
+    NOT_MEASURED, with the reason. Nothing is written when the design states
+    no corner (there is no obligation to record)."""
+    from l24_signoff_requirements_extract import extract_signoff_requirements
+    import _declared_process_record as _dpr
+    obligations = extract_signoff_requirements(project) or {}
+    required = sorted({c for row in obligations.get('signoff_requirements', [])
+                       if row.get('check') == 'STA' and row.get('stated')
+                       for c in row.get('corners', [])})
+    if not required:
+        return None
+    why = (f"step 22 left no non-empty SPEF at "
+           f"{_rel_to_project(spef_path, project)}; the declared-corner "
+           f"post-route sweep times the run's own parasitics, so it did not run")
+    try:
+        return _dpr.write(project, _dpr.build(required, status='NOT_RUN',
+                                              reason=why, report=None))
+    except Exception:  # noqa: BLE001 — the record never blocks the step
+        return None
+
+
 def _emit_declared_process_sta(project, top, pdk, container, spef_path,
                                rpt_out, notes, required):
     """Own fresh canonical native sections for explicit input process obligations.
@@ -63084,9 +63114,59 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     destination = rpt_out
     rpt_out = rpt_out.with_name(rpt_out.name + ".attempt-" + uuid.uuid4().hex)
     from sta_corner_record_completeness_check import _split_sections, extract_slacks
+    # N5 — ONE RECORD PER (DECLARED CORNER, CHECK), WRITTEN EVERY TIME. Until
+    # now a refusal left only a note and an `.attempt-*` file, so the sign-off
+    # gate saw no row for FF-setup / SS-hold / TT at all and the reason the
+    # sweep did not count lived nowhere a reader of the record would look.
+    import _declared_process_record as _dpr
+    sources = {}      # corner -> source rows, filled once inputs resolve
+    native_logs = []  # the tool's own out/err of a failed invocation
+    attempted = False
 
-    def refuse(reason):
+    def attempt_path():
+        if rpt_out.is_file():
+            return rpt_out
+        partial = rpt_out.with_suffix(rpt_out.suffix + '.timeout.partial')
+        return partial if partial.is_file() else None
+
+    def write_record(status, reason, values=None, row_reasons=None,
+                     census=None, promoted=False):
+        # review wave 7 (MINOR): a refused record names the `.attempt-*`
+        # report its MEASURED rows were read from, with its sha256, and the
+        # population beside it -- `report` stays the promoted basis only.
+        attempt = None
+        if not promoted and attempted:
+            kept = attempt_path()
+            # A first-corner error may happen before Tcl opens the report.
+            # Record the attempted path and native log even then; a missing
+            # sha256 states explicitly that no report bytes survived.
+            named = kept or rpt_out
+            pop = named.with_name(named.name + '.population.json')
+            attempt = {'path': _rel_to_project(named, project),
+                       'sha256': ((_file_sha256(kept) or '').replace('sha256:', '') or None)
+                       if kept is not None else None,
+                       'population': (_rel_to_project(pop, project)
+                                      if pop.is_file() else None),
+                       'native_logs': [_rel_to_project(x, project)
+                                       for x in native_logs]}
+        try:
+            _dpr.write(project, _dpr.build(
+                required, status=status, reason=reason,
+                report=(_rel_to_project(destination, project) if promoted
+                        else None),
+                values=values, row_reasons=row_reasons, census=census,
+                sources=sources, promoted=promoted, attempt_report=attempt))
+        except Exception as exc:                          # pragma: no cover
+            notes.append(f'declared process STA record not written: {exc}')
+
+    def refuse(reason, values=None, row_reasons=None, census=None):
+        # A refusal BEFORE any invocation ran measured nothing, so every row
+        # carries this reason. A refusal AFTER one keeps every row that WAS
+        # measured (review waves 5 and 7): `values` / `row_reasons` say which
+        # -- including a native failure at a LATER corner, whose earlier
+        # corners' sections are already in the attempt report.
         notes.append('declared process STA refused: ' + reason)
+        write_record('REFUSED', reason, values, row_reasons, census)
         return False
 
     def tq(value):
@@ -63132,6 +63212,31 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
         if io_views and set(families) != declared_families:
             return refuse('incomplete IO family inventory for ' + c)
         inventory[c] = list(dict.fromkeys([lib] + ios + [str(x) for x in (pdk.macro_libs or [])]))
+    # Every section names the files it timed AND their sha256, so the record
+    # says which bytes a slack describes. The liberty lives inside the EDA
+    # image; `_step_pdk_hasher` hashes it where it resolves.
+    _lib_digest = _step_pdk_hasher(container)(
+        sorted({x for c in required for x in inventory[c]}))
+    _host_digest = {f: (_file_sha256(f) or '').replace('sha256:', '')
+                    for f in (netlist, sdc, spef_path)}
+    for c in required:
+        _lib = inventory[c][0]
+        sources[c] = {
+            'liberty': _lib, 'liberty_sha256': _lib_digest.get(_lib) or None,
+            'spef': _rel_to_project(spef_path, project),
+            'spef_sha256': _host_digest[spef_path] or None,
+            'spef_rc_corner': 'nom',
+            'netlist': _rel_to_project(netlist, project),
+            'netlist_sha256': _host_digest[netlist] or None,
+            'sdc': _rel_to_project(sdc, project), 'sdc_sha256': _host_digest[sdc] or None,
+            # every other view the same STA run reads (IO-pad and macro
+            # liberties), each with its own digest -- review wave 5
+            'other_liberties': [
+                {'path': x, 'kind': ('io' if x in io_views else 'macro'),
+                 'sha256': _lib_digest.get(x) or None}
+                for x in inventory[c][1:]]}
+    failed = None     # (corner, reason) of the first native failure
+    dispatch_corner = None
     try:
         rpt_out.parent.mkdir(parents=True, exist_ok=True)
         report = _to_container_path(str(rpt_out), container)
@@ -63150,6 +63255,12 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
                              f'STA_BASIS_LIBERTY: {views[0]}', f'STA_BASIS_NETLIST: {inputs[0]}',
                              f'STA_BASIS_SDC: {inputs[1]}', f'STA_BASIS_SPEF: {inputs[2]}',
                              'STA_BASIS_CORNER: nom',
+                             f'STA_BASIS_SHA256_LIBERTY: {sources[c]["liberty_sha256"] or "UNAVAILABLE"}',
+                             f'STA_BASIS_SHA256_SPEF: {sources[c]["spef_sha256"] or "UNAVAILABLE"}',
+                             f'STA_BASIS_SHA256_NETLIST: {sources[c]["netlist_sha256"] or "UNAVAILABLE"}',
+                             f'STA_BASIS_SHA256_SDC: {sources[c]["sdc_sha256"] or "UNAVAILABLE"}',
+                             ] + [f'STA_BASIS_SHA256_{o["kind"].upper()}_LIBERTY: {o["sha256"] or "UNAVAILABLE"} {_to_container_path(o["path"], container)}'
+                                  for o in sources[c]['other_liberties']] + [
                              f'OCV_DERATE_APPLIED early={_FLAT_OCV_DERATE_EARLY} late={_FLAT_OCV_DERATE_LATE} flat-OCV'] + [f'STA_BASIS_IO_LIBERTY: {_to_container_path(x, container)}' for x in inventory[c][1:] if x in io_views]:
                     tcl += f'puts $_f {tq(line)}\n'
                 if j == 0:
@@ -63162,35 +63273,103 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
             path = rpt_out.parent / f'sta_declared_{c.lower()}.tcl'
             scripts.append((c, path, tcl))
         for c, path, tcl in scripts:
+            dispatch_corner = c
             path.write_text(tcl)
             mapped = _to_container_path(str(path), container)
+            attempted = True
             rc, out, err = _docker_exec(container, f'sta -no_init -exit {shlex.quote(mapped)} 2>&1', marker=mapped, isolate=[rpt_out], inputs=[netlist, sdc, spef_path, path] + ([_pl.pnr_dir(project) / f'{top}.def'] if (_pl.pnr_dir(project) / f'{top}.def').is_file() else []) + [Path(x) for x in inventory[c] if Path(x).is_file()])
-            if rc != 0 or re.search(r'(?mi)^\s*Error(?:\s|:)', out + '\n' + err):
-                return refuse(f'native execution failed rc={rc}; partial report is not complete')
+            if rc != 0 or re.search(r'(?mi)^\s*Error(?:\s|:)', (out or '') + '\n' + (err or '')):
+                # The tool's own words are KEPT, verbatim, and the reason
+                # points at them -- the reason itself parses nothing out of
+                # the tool's free-form message.
+                _log = rpt_out.with_name(rpt_out.name + f'.{c}.native.log')
+                try:
+                    _log.write_text((out or '') + '\n' + (err or ''))
+                    native_logs.append(_log)
+                    _where = f'; the tool\'s own output: {_rel_to_project(_log, project)}'
+                except OSError as exc:                    # pragma: no cover
+                    _where = f'; its output could not be kept: {exc}'
+                failed = (c, f'native execution failed rc={rc} at {c}{_where}')
+                break
     except (OSError, ValueError) as exc:
-        return refuse(str(exc))
-    if not rpt_out.is_file():
+        if not attempted or dispatch_corner is None:
+            return refuse(str(exc))
+        failed = (dispatch_corner, f'native dispatch failed at {dispatch_corner}: {exc}')
+    kept = attempt_path()
+    if kept is None and failed is None:
         return refuse('native report absent')
     measured = set()
     populations = {}
     from sta_annotation_population import classify
-    sections = _split_sections(rpt_out.read_text(errors='replace'))
+    sections = _split_sections(kept.read_text(errors='replace')) if kept else []
     def_file = _pl.pnr_dir(project) / f'{top}.def'
     io_masters = _io_masters_for(project)
     for role, corner, body in sections:
         if role == 'SETUP':
             populations[corner] = classify(body, def_file, io_masters=io_masters)
-    rpt_out.with_name(rpt_out.name + '.population.json').write_text(json.dumps(populations, indent=2) + '\n')
+    if kept is not None:
+        kept.with_name(kept.name + '.population.json').write_text(
+            json.dumps(populations, indent=2) + '\n')
+    # Measure EVERY section first, then decide: a refusal must not erase a
+    # slack the run measured (review wave 5).
+    values = {}
+    row_reasons = {}
+    census = {}
+    census_refusal = None
+    seen = {(corner, role) for role, corner, _b in sections}
     for role, corner, body in sections:
-        if role == 'SETUP' and not _sta_native_census_complete(body, def_file,
-                                                              io_masters=io_masters):
-            return refuse(f'{corner}: incomplete linked-master or parasitic annotation census')
+        if role == 'SETUP':
+            if _sta_native_census_complete(body, def_file, io_masters=io_masters):
+                census[corner] = 'COMPLETE'
+            else:
+                _unknown = [d['driver'] for d in
+                            (populations.get(corner) or {}).get('drivers') or []
+                            if d.get('classification') == 'REQUIRED_OR_UNKNOWN']
+                # review wave 7: the list is a population -- say its size,
+                # and say when it is cut and where the rest is
+                _names = (f'{len(_unknown)} unclassified unannotated driver(s): '
+                          + ', '.join(_unknown[:8])
+                          + (f', ... (+{len(_unknown) - 8} more; see '
+                             f'{_rel_to_project(kept, project)}.population.json)'
+                             if len(_unknown) > 8 else '')) if _unknown else ''
+                census[corner] = 'INCOMPLETE' + (f': {_names}' if _names else '')
+                if census_refusal is None:
+                    census_refusal = (f'{corner}: incomplete linked-master or parasitic annotation census'
+                                      + (f' ({_names})' if _names else ''))
         if role in ('SETUP', 'HOLD'):
             value = extract_slacks(body).get('setup_wns_ns' if role == 'SETUP' else 'hold_wns_ns')
             if value is not None and math.isfinite(value):
                 measured.add((corner, role))
+                values[(corner, role)] = value
+            else:
+                row_reasons[(corner, role)] = (
+                    f'no finite {role.lower()} slack in the {corner} section')
+    for c in required:
+        for role in ('SETUP', 'HOLD'):
+            if (c, role) not in seen:
+                row_reasons[(c, role)] = (
+                    f'no {role} section for {c} in the native report')
+    if failed is not None:
+        # review wave 7 (MAJOR): each corner is its own `sta` call, in
+        # `required` order. The corners that finished keep their slacks; the
+        # failed corner's rows (whatever partial section it wrote) and every
+        # corner after it carry their OWN reason.
+        _order = list(required)
+        _stop = _order.index(failed[0])
+        for c in _order[_stop:]:
+            for role in ('SETUP', 'HOLD'):
+                values.pop((c, role), None)
+                measured.discard((c, role))
+                row_reasons[(c, role)] = (
+                    failed[1] if c == failed[0]
+                    else f'not run: sweep stopped at {failed[0]}')
+        return refuse(failed[1] + '; the corners before it keep their measured slacks',
+                      values, row_reasons, census)
+    if census_refusal is not None:
+        return refuse(census_refusal, values, row_reasons, census)
     if measured != {(c, role) for c in required for role in ('SETUP', 'HOLD')}:
-        return refuse('native process/role measurements incomplete')
+        return refuse('native process/role measurements incomplete',
+                      values, row_reasons, census)
     # R-0915-128 condition (b): the promoted report states, in its own header,
     # which drivers were excluded from the annotation census and why. A LEADING
     # COMMENT BLOCK ONLY: `_split_sections` keys on the `=== SETUP/HOLD` headers
@@ -63203,11 +63382,29 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     if _lines:
         _lines.append('# STA_ANNOTATION_OFF_DIE basis: '
                       + next(iter(_off.values())).get('basis', ''))
+    # review wave 7: the supply ports excluded by a same-name net match are a
+    # derivation too, and are disclosed beside the off-die ones
+    _inf = {c: (populations.get(c) or {}).get('supply_by_same_name_net') or {}
+            for c in populations}
+    _inf_lines = [f'# STA_ANNOTATION_PG_BY_NAME {c}: {d["disclosure"]}'
+                  for c, d in sorted(_inf.items()) if d.get('count')]
+    if _inf_lines:
+        _inf_lines.append('# STA_ANNOTATION_PG_BY_NAME basis: '
+                          + next(d for d in _inf.values() if d.get('count')).get('basis', ''))
+    _lines += _inf_lines
+    if _lines:
+        disclosure = rpt_out.with_name(rpt_out.name + '.disclosure.tmp')
         try:
-            rpt_out.write_text('\n'.join(_lines) + '\n'
-                               + rpt_out.read_text(errors='replace'))
-        except OSError as exc:                             # pragma: no cover
-            return refuse(f'could not disclose the off-die census: {exc}')
+            disclosure.write_text('\n'.join(_lines) + '\n'
+                                  + rpt_out.read_text(errors='replace'))
+            disclosure.replace(rpt_out)
+        except OSError as exc:
+            try:
+                disclosure.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return refuse(f'could not disclose the annotation exclusions: {exc}',
+                          values, row_reasons, census)
     rpt_out.replace(destination)
     # R-0915-123 / ORGANIC-443. THE ATTESTATION NAMES THE PATH THAT SURVIVES.
     # `rpt_out` is a transient: every check above reads it, and the line before
@@ -63228,6 +63425,7 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     _log_surviving_artefact(
         [destination], produced_by="_emit_declared_process_sta",
         marker=str(destination))
+    write_record('MEASURED', None, values, row_reasons, census, promoted=True)
     return True
 
 
