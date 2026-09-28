@@ -1925,7 +1925,7 @@ def main() -> int:
         _p1_fresh, _p1_design_input, _p1_skipped_by)
     if _p1_stale_why:
         advisories.append(_p1_stale_why)
-    if p1_mode in (_P1_MODE_REFUSED, _P1_MODE_EXPERT_STALE):
+    if p1_mode == _P1_MODE_REFUSED or p1_mode == _P1_MODE_EXPERT_STALE:
         refusal = (_expert_root_stale(project)
                    if p1_mode == _P1_MODE_EXPERT_STALE else
                    f"{_p1_fresh['reason'] if _p1_fresh else ''}: "
