@@ -980,10 +980,16 @@ def _check_artifacts(run_dir: Path, req: List[str]) -> Dict[str, object]:
     per-token findings + the list of missing/empty tokens."""
     findings: Dict[str, object] = {}
     missing: List[str] = []
+    adopted_views = _adopted_route_views(run_dir)
     for tok, pat in zip(req, _norm_artifact_globs(req)):
         hit = None
         nbytes = 0
-        for p in run_dir.glob(pat):
+        kind = tok.strip().lstrip(".").lower()
+        if adopted_views is not None and kind in ("def", "spef"):
+            candidates = adopted_views.get(kind, [])
+        else:
+            candidates = run_dir.glob(pat)
+        for p in candidates:
             try:
                 if p.is_file() and p.stat().st_size > 0:
                     hit = p
@@ -998,6 +1004,48 @@ def _check_artifacts(run_dir: Path, req: List[str]) -> Dict[str, object]:
             missing.append(tok)
     return {"findings": findings, "missing": missing,
             "any_present": any(v["ok"] for v in findings.values()) if findings else False}
+
+
+def _adopted_route_views(run_dir: Path) -> Optional[Dict[str, List[Path]]]:
+    """Read the route the closure actually adopted, when it adopted one.
+
+    A broken adoption receipt must not fall back to an arbitrary older DEF or
+    SPEF. ``None`` means there was no adopted candidate to select.
+    """
+    report = run_dir / "reports/phase3/librelane_postroute_repair.json"
+    if not report.is_file():
+        return None
+    try:
+        doc = json.loads(report.read_text())
+        adopted = doc.get("adopted")
+        if not adopted:
+            return None
+        root = run_dir.resolve()
+        state_path = Path(doc["adopted_state"])
+        if not state_path.is_absolute():
+            state_path = root / state_path
+        state_path = state_path.resolve()
+        if not state_path.is_relative_to(root):
+            return {"def": [], "spef": []}
+        state = json.loads(state_path.read_text())
+        if state.get("candidate") not in (None, adopted):
+            return {"def": [], "spef": []}
+
+        def inside(value: object) -> List[Path]:
+            if not isinstance(value, str) or not value:
+                return []
+            path = Path(value)
+            if not path.is_absolute():
+                path = root / path
+            path = path.resolve()
+            return [path] if path.is_relative_to(root) else []
+
+        spef = state.get("spef")
+        spefs = list(spef.values()) if isinstance(spef, dict) else [spef]
+        return {"def": inside(state.get("def")),
+                "spef": [p for value in spefs for p in inside(value)]}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return {"def": [], "spef": []}
 
 
 # ---------------------------------------------------------------------------

@@ -393,6 +393,72 @@ def test_an_out_of_window_drc_fail_does_not_decide_window_9_to_30(
     assert "rows of steps outside the window: drc (31) FAIL" in row.detail
 
 
+def test_window_refuses_report_pointing_into_discarded_copy(project, monkeypatch):
+    report = _rows(("sta_signoff", "PASS", "", ""))
+    report["verdict"] = "PASS"
+    output = "reports/phase3/sta/post_route_summary.json"
+    code = ("import json, pathlib, sys\n"
+            "iso = pathlib.Path(sys.argv[1])\n"
+            f"out = iso / {output!r}\n"
+            "out.parent.mkdir(parents=True, exist_ok=True)\n"
+            "out.write_text(json.dumps({'input_def': str(iso / 'phase3/input.def')}))\n"
+            "report = iso / 'reports/orchestrator/phase3_one_shot.json'\n"
+            "report.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"report.write_text(json.dumps({report!r}))\n"
+            f"print({BANNER!r})\n")
+    row = _enclose_with(project, monkeypatch, code, "outside-input", steps=("23",))
+    assert row.status == "NOT_MEASURED", row.detail
+    assert not (project / output).exists()
+    assert "outside project" in row.detail
+
+
+def test_window_publishes_in_tree_input_with_provenance(project, monkeypatch):
+    input_def = project / "phase3/input.def"
+    input_def.parent.mkdir(parents=True)
+    input_def.write_text("source DEF")
+    report = _rows(("sta_signoff", "PASS", "", ""))
+    report["verdict"] = "PASS"
+    output = "reports/phase3/sta/post_route_summary.json"
+    code = ("import json, pathlib, sys\n"
+            "iso = pathlib.Path(sys.argv[1])\n"
+            f"out = iso / {output!r}\n"
+            "out.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"out.write_text(json.dumps({{'input_def': {str(input_def)!r}}}))\n"
+            "report = iso / 'reports/orchestrator/phase3_one_shot.json'\n"
+            "report.parent.mkdir(parents=True, exist_ok=True)\n"
+            f"report.write_text(json.dumps({report!r}))\n"
+            f"print({BANNER!r})\n")
+    row = _enclose_with(project, monkeypatch, code, "inside-input", steps=("23",))
+    assert row.status == "PASS", row.detail
+    assert (project / output).is_file()
+    receipt = project / "reports/audit/windows/inside-input/publication.json"
+    assert receipt.is_file()
+    publication = json.loads(receipt.read_text())
+    assert publication["status"] == "PUBLISHED"
+    assert output in publication["outputs"]
+    assert "phase3/input.def" in publication["inputs"]
+
+
+def test_window_does_not_replace_a_run_cited_artefact(project, monkeypatch):
+    import hashlib
+    output = "reports/phase3/sta/post_route_summary.json"
+    target = project / output
+    target.parent.mkdir(parents=True)
+    target.write_text('{"old_run":true}')
+    report_path = project / "reports/orchestrator/phase3_one_shot.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text(json.dumps({
+        "verdict": "PASS", "steps": [], "cited_artefacts": {
+            output: hashlib.sha256(target.read_bytes()).hexdigest()}}))
+    report = _rows(("sta_signoff", "PASS", "", ""))
+    report["verdict"] = "PASS"
+    code = _unit(report, rc=0, outputs=(output,))
+    row = _enclose_with(project, monkeypatch, code, "cited-output", steps=("23",))
+    assert row.status == "NOT_MEASURED", row.detail
+    assert "run-cited artefact" in row.detail
+    assert target.read_text() == '{"old_run":true}'
+
+
 def _rows_main_emits():
     """Every StepResult row name `phase3_one_shot_runner` spells literally,
     plus its declared gate tables: the rows a report can carry. The

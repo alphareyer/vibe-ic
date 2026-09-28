@@ -209,6 +209,38 @@ def test_complete_result_with_artifacts_passes(tmp_path):
     assert rep.capture_candidate is None
 
 
+def test_required_route_views_follow_the_adopted_candidate(tmp_path):
+    (tmp_path / "RESULT.md").write_text(_REAL_RESULT)
+    _mk_final_summary(tmp_path)
+    stale = tmp_path / "phase3/librelane/32-cand06/old.def"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("stale candidate")
+    (stale.parent / "old.spef").write_text("stale candidate")
+    adopted = tmp_path / "phase3/librelane/32-cand05/state_out.json"
+    adopted.parent.mkdir(parents=True)
+    chosen_def = adopted.parent / "chosen.def"
+    chosen_spef = adopted.parent / "chosen.spef"
+    chosen_def.write_text("adopted DEF")
+    chosen_spef.write_text("adopted SPEF")
+    adopted.write_text(json.dumps({"candidate": "32-cand05",
+                                   "def": str(chosen_def),
+                                   "spef": {"nom": str(chosen_spef)}}))
+    report = tmp_path / "reports/phase3/librelane_postroute_repair.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({"adopted": "32-cand05",
+                                  "adopted_state": str(adopted)}))
+    rep = R.check(tmp_path, require_artifacts=["def", "spef"])
+    found = rep.evidence["required_artifacts"]
+    assert found["def"]["found"] == str(chosen_def)
+    assert found["spef"]["found"] == str(chosen_spef)
+    assert rep.state == "COMPLETE"
+
+    chosen_spef.unlink()
+    rep = R.check(tmp_path, require_artifacts=["def", "spef"])
+    assert rep.state == "DECLARED_ARTIFACT_MISSING"
+    assert "spef" in rep.evidence["missing_artifacts"]
+
+
 def test_complete_result_wins_over_live_process(tmp_path):
     # once COMPLETE, a lingering live process does not downgrade to in-progress
     (tmp_path / "RESULT.md").write_text(_REAL_RESULT)

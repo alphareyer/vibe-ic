@@ -371,3 +371,49 @@ def test_missing_required_hint_flags_genuinely_absent(tmp_path):
     for label in ("generated_docs", "extraction_patterns.json", "waivers.json",
                   "reports/extraction_coverage_report.md"):
         assert label in missing
+
+
+def test_changed_cited_artefact_is_not_run_evidence(tmp_path):
+    artefact = tmp_path / "phase3/route.def"
+    artefact.parent.mkdir(parents=True)
+    artefact.write_text("changed after the run")
+    report = tmp_path / "reports/orchestrator/phase3_one_shot.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({
+        "verdict": "PASS", "steps": [],
+        "cited_artefacts": {"phase3/route.def": "0" * 64},
+    }))
+    flow = tmp_path / "flow.yaml"
+    flow.write_text("version: 2\nflow_name: phase1_phase2_phase3\n"
+                    "total_steps: 1\nsteps:\n  - id: '1'\n"
+                    "    name: route\n    stage: stage3\n"
+                    "    required_outputs: ['phase3/route.def']\n"
+                    "    gate:\n      files_exist: ['phase3/route.def']\n")
+    _run(tmp_path, ("--strict", "--flow-def", str(flow)))
+    audit = json.loads((tmp_path / "reports/audit/phase23_completion_audit.json")
+                       .read_text())
+    assert audit["verdict"] == "NOT_MEASURED"
+    assert audit.get("citation_verdict") == "NOT_MEASURED"
+    assert any(row.get("path") == "phase3/route.def"
+               and row.get("status") == "NOT_MEASURED"
+               and row.get("reason") == "STALE_CITATION"
+               for row in audit.get("cited_artefact_checks", []))
+
+
+def test_recheck_preserves_the_run_cited_audit(tmp_path):
+    audit_path = tmp_path / "reports/audit/phase23_completion_audit.json"
+    audit_path.parent.mkdir(parents=True)
+    audit_path.write_text('{"verdict":"PASS","scope":{"whole_flow":true}}\n')
+    original = audit_path.read_bytes()
+    import hashlib
+    report = tmp_path / "reports/orchestrator/phase3_one_shot.json"
+    report.parent.mkdir(parents=True)
+    report.write_text(json.dumps({"verdict": "PASS", "steps": [],
+                                  "cited_artefacts": {
+                                      "reports/audit/phase23_completion_audit.json":
+                                      hashlib.sha256(original).hexdigest()}}))
+    _run(tmp_path, ("--strict",))
+    assert audit_path.read_bytes() == original
+    receipts = list(audit_path.parent.glob("phase23_completion_audit.*.json"))
+    assert len(receipts) == 1
+    assert len(receipts[0].stem.split(".")[-1]) == 64

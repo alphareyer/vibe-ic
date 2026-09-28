@@ -192,6 +192,8 @@ _AUDITOR_IDENTITY_KEYS = ("program", "written_by")
 AUDITOR_OUTPUT_PATHS = (
     "reports/audit/phase23_completion_audit.json",
 )
+_RECHECK_AUDIT_RE = re.compile(
+    r"^reports/audit/phase23_completion_audit\.[0-9a-f]{64}\.json$")
 
 
 
@@ -205,7 +207,8 @@ def is_auditor_output(project: Path, path: Path) -> bool:
     # minted by `_auditor_write` and by nothing else, so a new auditor mechanism is covered the
     # day it is written instead of the day somebody notices. It still recognises all four OLD
     # shapes, because leftovers in them exist on every tree produced before this change.
-    if rel in AUDITOR_OUTPUT_PATHS or _pl_shapes.is_auditor_inprogress_name(rel):
+    if (rel in AUDITOR_OUTPUT_PATHS or _RECHECK_AUDIT_RE.fullmatch(rel)
+            or _pl_shapes.is_auditor_inprogress_name(rel)):
         return True
     if _SUPERSEDED_RE.search(rel):
         return True
