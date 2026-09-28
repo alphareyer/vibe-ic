@@ -103,6 +103,8 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Tuple
 import _path_layout as _pl
+import _owner_waiver
+import fpga_board_capability as _fpga_cap
 
 
 TOOL_MARKERS = [
@@ -324,9 +326,7 @@ def inspect(project: Path, min_scenarios: int = 1) -> List[Finding]:
 # consumer reading rc can mistake it for a pass. A manifest that CLAIMS a pass
 # with no physical class behind it stays a FAIL: that is the forged-JSON case
 # this gate exists for, not an absence.
-RULING_FPGA_EXCLUDED = ("owner 2026-09-25: steps 6 and 39 (FPGA on-board) are "
-                        "excluded from the IC PASS goal; reported NOT_MEASURED, "
-                        "never PASS")
+RULING_FPGA_EXCLUDED = _fpga_cap.OWNER_EXCLUSION_RULING
 
 
 def physical_evidence_files(project: Path) -> List[str]:
@@ -358,9 +358,8 @@ def _manifest_claims_pass(project: Path) -> bool:
 
 # ── waiver plumbing (same contract as final_test_attestation_check.py) ──
 # Deliberately identical to the sibling gate: a waiver is an entry in the
-# project's `waivers.json`, written by `waivers_materialize.py` from the
-# machinery-sanctioned ENV_UNAVAILABLE auto-waivers (or hand-authored with a
-# named approver). It is NOT a field inside the manifest this gate audits.
+# project's owner-approved `waivers.json`. It is NOT a field inside the
+# manifest this gate audits.
 _STEP_ID = "39"
 _STEP_LABEL = "fpga_on_board_attestation"
 
@@ -378,6 +377,7 @@ def _load_waivers(project: Path) -> List[dict]:
 def _step_waived(project: Path, *step_labels: str) -> dict | None:
     """Return the waivers.json entry covering this step, or None."""
     wanted = [str(s).strip() for s in step_labels if str(s).strip()]
+    document = _we_document(project)
     for w in _load_waivers(project):
         if not isinstance(w, dict):
             continue
@@ -385,8 +385,21 @@ def _step_waived(project: Path, *step_labels: str) -> dict | None:
         ticket = str(w.get("ticket", "") or "")
         for lbl in wanted:
             if sid == lbl or (lbl in ticket and not lbl.isdigit()):
+                reason = _owner_waiver.refusal(w, document)
+                if reason:
+                    print(f"OWNER WAIVER REFUSED — step {sid}: {reason}",
+                          file=sys.stderr)
+                    continue
                 return w
     return None
+
+
+def _we_document(project: Path) -> dict:
+    try:
+        data = json.loads((project / "waivers.json").read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
 def _write_report(json_path: str | None, payload: dict) -> None:
@@ -429,10 +442,8 @@ def main(argv: List[str] | None = None) -> int:
     # the real pure-digital run emits). Only an explicit WAIVED manifest backed
     # by a real waiver short-circuits.
     #
-    # The sanctioned no-rig route is UNCHANGED and still resolves: on a
-    # disclosed FPGA-skip project, waivers_materialize.py already writes the
-    # ENV_UNAVAILABLE cap-gap waiver for id 39, and flow_compliance_check
-    # applies it at the step level.
+    # Board absence is reported separately as NOT_MEASURED by the compliance
+    # audit. It never grants this attestation gate a machine waiver.
     manifest_path = project / "reports/phase2/fpga/on_board_pass.json"
     if manifest_path.exists():
         try:

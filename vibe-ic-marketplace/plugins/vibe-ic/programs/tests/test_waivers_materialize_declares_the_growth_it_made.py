@@ -81,9 +81,11 @@ def project(tmp_path, monkeypatch):
     (p / "reports/phase2/fpga").mkdir(parents=True)
     (p / "reports/phase2/fpga/quartus_map_audit.json").write_text(
         json.dumps({"verdict": "SKIP", "sof_present": False}))
-    monkeypatch.setattr(wm, "sanctioned_auto_waivers",
-                        lambda _project: {k: dict(v)
-                                          for k, v in SANCTIONED.items()})
+    # Historical machine records are fixture input. The retired materializer
+    # must leave their growth declaration and bytes untouched.
+    doc = {"waived_steps": [dict(SANCTIONED[39]), dict(SANCTIONED[6])]}
+    wm.declare_growth(doc)
+    (p / "waivers.json").write_text(json.dumps(doc, indent=2))
     return p
 
 

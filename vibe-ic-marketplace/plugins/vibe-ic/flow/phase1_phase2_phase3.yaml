@@ -27,10 +27,9 @@
 # PASS/FAIL matrix. Declaring "PASS" without compliance_check exit 0
 # is a process violation — see flow-orchestrate/SKILL.md.
 #
-# Skipping a step requires a machine-readable waiver in
-# <project>/waivers.json with a documented justification; waivers still
-# appear in the compliance report as SKIPPED and must be reviewed by a
-# human before tape-out.
+# Only an owner-approved, dated record in <project>/waivers.json may waive a
+# step. A step with no measurement remains NOT_MEASURED; the owner-excluded
+# FPGA board steps 6 and 39 stay visible and never count as PASS.
 
 version: 2
 flow_name: phase1_phase2_phase3

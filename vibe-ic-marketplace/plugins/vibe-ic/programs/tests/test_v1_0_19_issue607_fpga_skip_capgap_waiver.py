@@ -66,11 +66,10 @@ def test_predicate_disclosed_skip():
     assert F._fpga_skip_disclosed(Path(_t.mkdtemp())) is False  # no audit
 
 
-def test_disclosed_skip_synthesises_waiver(tmp_path):
+def test_disclosed_skip_does_not_synthesise_waiver(tmp_path):
     _proj(tmp_path, {"verdict": "SKIP", "sof_present": False})
     w = F._load_waivers(tmp_path)
-    assert EARLY in w and w[EARLY].get("_env_unavailable") is True
-    assert w[EARLY].get("_fpga_skip") is True
+    assert w == {}
 
 
 def test_disclosed_skip_waives_step(tmp_path):

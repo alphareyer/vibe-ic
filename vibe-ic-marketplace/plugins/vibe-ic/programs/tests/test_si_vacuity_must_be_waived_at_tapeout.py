@@ -96,7 +96,7 @@ Final result: Circuits match uniquely.
 _GOOD_REASON = ("Extraction produced a grounded-only SPEF for this partition; "
                 "crosstalk-delay is signed off by the foundry-side commercial "
                 "SI deck against the same routed DEF.")
-_GOOD_APPROVER = "A. Reviewer (tape-out review board)"
+_GOOD_APPROVER = "reyerchu"
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +175,8 @@ def _waive(proj: Path, **over) -> Path:
     entry = {"id": sa._TAPEOUT_STEP_ID,
              "reason": _GOOD_REASON,
              "approver": _GOOD_APPROVER,
+             "approved_at": "2026-09-28",
+             "owner_statement": "I approve this named SI vacuity for this run.",
              sa.SI_DISCLOSURE_FIELD: ["SPEF_NO_COUPLING_PAIRS"]}
     for k, v in over.items():
         if v is None:
@@ -949,6 +951,7 @@ def test_the_documented_waiver_example_satisfies_its_sibling_gates(tmp_path):
             "approver": _GOOD_APPROVER,
             "approved_at": datetime.datetime.now().isoformat(
                 timespec="seconds"),
+            "owner_statement": "I approve this named SI vacuity for this run.",
             "review_required": True,
             "ticket": "TRACKER-1234",
             sa.SI_DISCLOSURE_FIELD: ["SPEF_NO_COUPLING_PAIRS"]}]}, indent=2))
@@ -979,14 +982,19 @@ def test_the_runners_own_auto_waiver_entry_cannot_accept_an_si_vacuity(
     r = sa._check_tapeout(tmp_path)
     sa._emit_tapeout_waiver_entry(tmp_path, r)
 
-    doc = json.loads((tmp_path / "waivers.json").read_text())
-    minted = [e for e in doc["waived_steps"]
-              if str(e.get("id")) == str(sa._TAPEOUT_STEP_ID)]
-    assert minted, "the auto-emitter did not write its entry — test is stale"
-    assert all(sa.SI_DISCLOSURE_FIELD not in e for e in minted)
+    assert not (tmp_path / "waivers.json").exists()
     assert sa._si_vacuity_disclosures(tmp_path) == {}
     assert sa._check_tapeout(tmp_path).passed is False
     assert _rc(tmp_path) == 1
+
+
+def test_machine_approver_cannot_accept_si_vacuity(tmp_path):
+    _five_pillars(tmp_path)
+    _si_vacuous(tmp_path)
+    _waive(tmp_path, approver="field-agent-attest (signoff tier)")
+    result = sa._check_tapeout(tmp_path)
+    assert result.passed is False
+    assert _si(result)["waiver_approver"] == ""
 
 
 def test_a_second_run_does_not_inherit_a_pass_from_the_first(tmp_path):
@@ -1412,6 +1420,8 @@ def _waive_every_vacuity(project: Path) -> Path:
             "id": sa._TAPEOUT_STEP_ID,
             "reason": _GOOD_REASON,
             "approver": _GOOD_APPROVER,
+            "approved_at": "2026-09-28",
+            "owner_statement": "I approve these named SI vacuities for this run.",
             sa.SI_DISCLOSURE_FIELD: sorted(
                 {code for _, code in _VACUITY_BRANCHES}),
         }]}, indent=2))

@@ -164,22 +164,11 @@ def test_disclosed_predicate_none_when_target_matches_deck(tmp_path):
 
 # ───────────────────────── unit: waiver synthesis ──────────────────────────
 
-def test_load_waivers_synthesises_all_affected_a_steps(tmp_path):
+def test_disclosed_substitution_synthesises_no_approval(tmp_path):
     proj = tmp_path / "chip"
     _build_fixture(proj, disclose=True)
     waivers = fc._load_waivers(proj)
-    for sid in fc._PDK_SUBSTITUTION_AFFECTED_A_STEPS:
-        assert sid in waivers, sid
-        w = waivers[sid]
-        # mirrors the digital ENV_UNAVAILABLE waiver shape exactly.
-        assert w["verdict_tier"] == "ENV_UNAVAILABLE"
-        assert w["_env_unavailable"] is True
-        assert w["_pdk_substitution"] is True
-        assert w["review_required"] is True
-        assert w["ticket"] == fc._PDK_SUBSTITUTION_TICKET
-        assert w["evidence"]                       # non-empty pointer
-        assert "PDK_SUBSTITUTION" in w["reason"]
-        assert "not executed-PASS" in w["reason"]
+    assert waivers == {}
 
 
 def test_load_waivers_empty_when_undisclosed(tmp_path):
@@ -199,7 +188,7 @@ def test_a_steps_in_env_map_and_os_blocked_list():
 
 # ───────────────────── ACCEPTANCE (verbatim from the issue) ─────────────────
 
-def test_acceptance_a3_waived_deferred_with_disclosure_then_fail_without(
+def test_acceptance_a3_disclosure_does_not_waive_the_failure(
         tmp_path):
     """`flow_compliance_check.py <proj> --strict` →
        disclosed  : A3 = WAIVED-DEFERRED w/ named pdk-substitution reason,
@@ -207,29 +196,12 @@ def test_acceptance_a3_waived_deferred_with_disclosure_then_fail_without(
        undisclosed: A3 hard-FAILs."""
     proj = tmp_path / "chip"
 
-    # ── disclosed → WAIVED-DEFERRED ───────────────────────────────────────
+    # A producer's disclosure is evidence, not the owner's approval.
     _build_fixture(proj, disclose=True)
     _, out = _run_strict(proj)
     a3 = _a3_block(out)
-    # R-0915-85 — the STEP LINE carries the word `PASS_WITH_WAIVERS`;
-    # `WAIVED-DEFERRED` survives as the TALLY line's contract label and is
-    # asserted on the tally, not on the step. Both are checked so neither can
-    # go quiet.
-    assert "PASS_WITH_WAIVERS" in a3, out
-    assert "WAIVED-DEFERRED=" in out, out
-    assert "pdk-substitution" in a3.lower() or "PDK_SUBSTITUTION" in a3
-    assert fc._PDK_SUBSTITUTION_TICKET in a3
-    assert "review_required=True" in a3
-    # NOT counted as executed-PASS: A3 status is not PASS, and the deferral
-    # reason says so explicitly.
-    # R-0915-85 — `[PASS` is now a PREFIX of the deferral's own word, so the
-    # old form asserts the opposite of what it means. The property is that A3
-    # is not a FULL pass; the tally's executed-PASS numerator is what that
-    # costs, and the line below says it in words.
-    assert "[PASS             ]" not in a3, a3
-    assert "not executed-PASS" in a3
-    # the named target + substitute appear so the reason is honest.
-    assert _TARGET_PDK in a3
+    assert "[FAIL" in a3, out
+    assert "PASS_WITH_WAIVERS" not in a3
 
     # ── remove the disclosure → A3 hard-FAILs ─────────────────────────────
     # Strip the marker line from BOTH decks (predicate a fails).

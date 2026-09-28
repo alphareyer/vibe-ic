@@ -99,7 +99,9 @@ def _project(tmp_path: Path, *, disclosed: bool, measured: bool,
             "reason": ("The instrument this step reads was offline for the "
                        "whole run window, so it is deferred to re-run on "
                        "bring-up (test fixture)."),
-            "approver": "f10-test-harness",
+            "approver": "reyerchu",
+            "approved_at": "2026-09-26",
+            "owner_statement": "I approve this specific measured-step deferral.",
             "ticket": "TEST-F10",
             "review_required": True,
             "evidence": ["reports/waiver_evidence.md"],

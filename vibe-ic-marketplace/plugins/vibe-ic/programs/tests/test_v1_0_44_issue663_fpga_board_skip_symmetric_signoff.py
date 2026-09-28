@@ -78,13 +78,10 @@ def test_final_signoff_id_in_board_step_set():
 
 
 # ── POSITIVE: disclosed skip auto-defers BOTH board steps ─────────────────
-def test_disclosed_skip_synthesises_waiver_for_both_board_steps(tmp_path):
+def test_disclosed_skip_never_synthesises_waiver_for_board_steps(tmp_path):
     _proj(tmp_path, {"verdict": "SKIP", "sof_present": False})
     w = F._load_waivers(tmp_path)
-    for sid in (EARLY, FINAL):
-        assert sid in w, f"board step {sid} not auto-deferred"
-        assert w[sid].get("_env_unavailable") is True
-        assert w[sid].get("_fpga_skip") is True
+    assert w == {}
 
 
 def test_disclosed_skip_defers_final_signoff_step(tmp_path):
