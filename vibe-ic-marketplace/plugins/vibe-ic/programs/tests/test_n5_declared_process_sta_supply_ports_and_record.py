@@ -36,10 +36,29 @@ from pathlib import Path
 
 import pytest
 
+import _declared_process_record as declared_process_record
 import phase3_one_shot_runner as p3
 import sta_corner_record_completeness_check as gate
 from sta_annotation_population import classify
 from test_declared_process_sta_producer import scene  # noqa: F401  (fixture)
+
+
+def test_declared_process_record_keeps_measured_rows_on_refusal(tmp_path):
+    record = declared_process_record.build(
+        ("slow", "fast"), status="REFUSED", reason="sweep incomplete",
+        report=None, values={("slow", "SETUP"): -0.25},
+        row_reasons={("fast", "HOLD"): "native run stopped"},
+        sources={"slow": {"spef_sha256": "a" * 64}},
+        attempt_report={"path": "reports/sta.attempt", "sha256": "b" * 64})
+    path = declared_process_record.write(tmp_path, record)
+    written = json.loads(path.read_text())
+    measured = written["corners"]["slow"]["setup"]
+    assert (measured["status"], measured["wns_ns"], measured["promoted"]) == (
+        "MEASURED", -0.25, False)
+    assert measured["spef_sha256"] == "a" * 64
+    assert written["corners"]["fast"]["hold"]["reason"] == "native run stopped"
+    assert written["attempt_report"]["path"] == "reports/sta.attempt"
+    assert written["report"] is None
 
 _CENSUS_WITH_SUPPLY_PORTS = (
     "STA_LINK_INSTANCE u1 core/INV\n"
