@@ -206,3 +206,66 @@ def test_the_census_is_taken_before_the_repair_and_checked_after_the_reroute():
         < at('set ::vic_unrouted_after [vic_unrouted_nets]') < at('write_views')
     # the input census is the baseline the loss is measured against
     assert at('set ::vic_unrouted_before [vic_unrouted_nets]') < at('log_cmd repair_design')
+
+
+def _global_route_loss_replay(tmp_path, *, unrouteable=()):
+    """Run the shipped ECO proc with a GRT side effect seen on the routed chip.
+
+    The tool's grt.tcl drops an existing wire outside the original ECO set;
+    detailed_route routes exactly the names passed to -nets.
+    """
+    body = TCL.read_text()
+    start = body.index('proc vic_eco_route {varname tag}')
+    end = body.index('\nset ::vic_eco_attempts 0', start)
+    grt = tmp_path / 'openroad/common/grt.tcl'
+    grt.parent.mkdir(parents=True)
+    grt.write_text('set ::W(other) 0\n')
+    script = (HARNESS + _script_procs(body) + r'''
+rename netcall original_netcall
+proc netcall {name sig terms abut method args} {
+    if {$method eq "setWireOrdered"} { return }
+    return [original_netcall $name $sig $terms $abut $method {*}$args]
+}
+namespace eval odb {
+    proc dbWire_destroy {wire} { set ::W([string range $wire 5 end]) 0 }
+}
+proc set_thread_count {n} {}
+proc log_cmd {command args} {
+    if {$command ne "detailed_route"} { error "unexpected command $command" }
+    set i [lsearch -exact $args -nets]
+    set nets [lindex $args [expr {$i + 1}]]
+    foreach n $nets {
+        if {$n ni $::UNROUTABLE} { set ::W($n) 1 }
+    }
+    set j [lsearch -exact $args -output_drc]
+    close [open [lindex $args [expr {$j + 1}]] w]
+}
+set ::env(SCRIPTS_DIR) [pwd]
+set ::env(STEP_DIR) [pwd]
+set ::env(DRT_THREADS) 1
+set ::env(DRT_OPT_ITERS) 1
+set ::env(VIBEIC_PRR_ECO_EXPANSIONS) 2
+set ::vic_dirty [dict create netA [dict get $::nets netA]]
+set ::vic_eco_attempts 0
+'''.replace('set ::vic_dirty', f'set ::UNROUTABLE {{{" ".join(unrouteable)}}}\nset ::vic_dirty')
+              + body[start:end]
+              + '\nset outcome [vic_eco_route ::vic_dirty eco_route]\n'
+                'puts "RESULT $outcome $::W(other) [lsort [dict keys $::vic_dirty]]"\n')
+    deck = tmp_path / 'eco.tcl'
+    deck.write_text(script)
+    return subprocess.run(['tclsh', str(deck)], capture_output=True, text=True,
+                          cwd=tmp_path, timeout=30)
+
+
+def test_global_route_loss_joins_the_scoped_eco_route(tmp_path):
+    out = _global_route_loss_replay(tmp_path)
+    assert out.returncode == 0, out.stderr
+    assert 'RESULT 1 1 netA other' in out.stdout, out.stdout
+    assert (tmp_path / 'eco_route.drc').is_file()
+
+
+def test_unrecoverable_global_route_loss_refuses_the_candidate(tmp_path):
+    out = _global_route_loss_replay(tmp_path, unrouteable=('other',))
+    assert out.returncode == 0, out.stderr
+    assert 'RESULT 0 0 netA other' in out.stdout, out.stdout
+    assert not (tmp_path / 'eco_route.drc').exists()

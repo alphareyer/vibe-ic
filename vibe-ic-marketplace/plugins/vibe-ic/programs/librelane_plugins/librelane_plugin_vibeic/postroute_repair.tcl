@@ -328,6 +328,9 @@ proc vic_violation_neighbours {drc named} {
 proc vic_eco_route {varname tag} {
     upvar #0 $varname dirty
     if {[dict size $dirty] == 0} { return 1 }
+    # global_route may remove wires outside the nominal ECO set. Keep the
+    # complete entry route as the obligation for every scoped retry.
+    set expected [vic_routed_nets]
     set_thread_count $::env(DRT_THREADS)
     set limit [expr {[info exists ::env(VIBEIC_PRR_ECO_EXPANSIONS)]
                      ? $::env(VIBEIC_PRR_ECO_EXPANSIONS) : 2}]
@@ -339,12 +342,35 @@ proc vic_eco_route {varname tag} {
             $net setWireOrdered 0
         }
         source $::env(SCRIPTS_DIR)/openroad/common/grt.tcl
+        set grt_lost [vic_lost_routes $expected]
+        set added 0
+        dict for {name net} $grt_lost {
+            if {![dict exists $dirty $name]} {
+                dict set dirty $name $net
+                incr added
+            }
+        }
+        if {$added} {
+            vic_say "$tag global_route took $added routed net(s) outside the ECO set; adding them to -nets"
+        }
         set drc $::env(STEP_DIR)/${tag}.$attempt.drc
         set drt_args [list -droute_end_iter $::env(DRT_OPT_ITERS) -or_seed 42 -verbose 1 \
                           -output_drc $drc -nets [dict keys $dirty]]
         incr attempt
         incr ::vic_eco_attempts
         if {![catch {log_cmd detailed_route {*}$drt_args} err]} {
+            set lost [vic_lost_routes $expected]
+            dict for {name net} $dirty {
+                if {[vic_needs_wire $net] && [$net getWire] eq "NULL"} {
+                    dict set lost $name $net
+                }
+            }
+            if {[dict size $lost]} {
+                vic_say "$tag scoped route left [dict size $lost] required net(s) without wire: [dict keys $lost]"
+                if {$attempt > $limit} { return 0 }
+                set dirty [dict merge $dirty $lost]
+                continue
+            }
             file copy -force $drc $::env(STEP_DIR)/eco_route.drc
             return 1
         }
