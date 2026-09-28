@@ -200,6 +200,47 @@ def test_changed_root_retires_answer_before_the_expert_consumer_reads_it(
             / "l_doc_expectations.json").is_file()
 
 
+@pytest.mark.parametrize("missing_evidence", ["schema", "digest"])
+@pytest.mark.parametrize("change_root", [False, True])
+def test_answer_without_a_verifiable_prior_root_gets_a_new_handoff(
+        tmp_path, missing_evidence, change_root):
+    plug, proj = _plugin(tmp_path), _project(tmp_path)
+    _phase1(proj, plug)
+    pack = proj / "reports/audit/phase1/expert_parse_track_pack"
+    assert TRACK.ai_subtrack(proj, "# spec", pack)["status"] == "HANDOFF_EMITTED"
+    answer = pack / "l_doc_expectations.json"
+    old_answer = {"expectations": [{
+        "id": "input-fact", "layer": "L1_DOC", "requirement": "the input fact",
+        "expected_tokens": ["spec"], "evidence": ["input/docs/spec.md"],
+    }]}
+    answer.write_text(json.dumps(old_answer))
+    old_sha = hashlib.sha256(answer.read_bytes()).hexdigest()
+    schema_path = pack / "authoring_schema.json"
+    if missing_evidence == "schema":
+        schema_path.unlink()
+    else:
+        prior = json.loads(schema_path.read_text())
+        prior["phase1_root"].pop("digest")
+        schema_path.write_text(json.dumps(prior))
+    if change_root:
+        doc = proj / "phase1/generated_docs/L1_DOC.json"
+        doc.write_bytes(doc.read_bytes() + b"\n")
+        assert PID.record_derivation(
+            proj, doc.name, hashlib.sha256(doc.read_bytes()).hexdigest(),
+            "later-flow-writer")
+
+    result = TRACK.ai_subtrack(proj, "# spec", pack)
+    assert result["status"] == "HANDOFF_EMITTED"
+    assert "EXPERT_PRIOR_ROOT_UNVERIFIABLE" in result["reason"]
+    assert "answer_sha256" not in result
+    assert not answer.exists()
+    archive = Path(result["stale_pack_archived_at"])
+    assert json.loads((archive / "l_doc_expectations.json").read_text()) == old_answer
+    assert hashlib.sha256((archive / "l_doc_expectations.json").read_bytes()).hexdigest() == old_sha
+    assert json.loads(schema_path.read_text())["phase1_root"]["digest"] == (
+        TRACK.phase1_root_identity(proj)["digest"])
+
+
 def test_real_l_doc_flow_rewrite_refuses_the_old_expert_reading(
         tmp_path, monkeypatch):
     plug, proj = _plugin(tmp_path), _project(tmp_path)
