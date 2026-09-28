@@ -14053,17 +14053,16 @@ def _delivery_declares_absence(project: Path, spec: Any
     hardmacro exposes pins, gets no pad ring and no die ring.
 
     THE CONDITION MUST READ THE DECLARATION, NOT THE ROUTER'S LEFTOVERS, and it
-    reads it through the one function the flow already has for the question --
-    `submission_template_check.slot_rules_are_owed` -- so the run and the audit
-    cannot hold two opinions about one design's route.
+    reads it through `_tapeout_declaration.die_outputs_owed`, the same
+    predicate the pad-ring producer uses.
 
     CONSERVATIVE IN THE SAME DIRECTION AS `_l_doc_declares_absence`. Absence of
     a declaration is not a declaration of absence: a missing or unparseable
     declaration, a `deliverable` that is not the declared-absent word,
-    NOT_DETERMINED, DIE, a SELF_TAPEOUT route, or ANY affirmative
-    `operator_template.path`/`.slot` binding all return ``None`` and the step
-    RUNS and is held to its outputs. Only a design that positively declared a
-    die-less delivery AND bought no slot stands these steps down.
+    NOT_DETERMINED, DIE or a SELF_TAPEOUT route return ``None`` and the step
+    RUNS and is held to its outputs. An affirmative operator binding beside
+    HARDMACRO raises the named route contradiction; it cannot pick an output
+    obligation. Only a declared pure HARDMACRO stands these steps down.
     """
     if not isinstance(spec, dict):
         return None
@@ -14110,15 +14109,14 @@ def _delivery_declares_absence(project: Path, spec: Any
     corroboration = str(spec.get("corroborated_by")
                         or "no_operator_slot").strip().lower()
     if corroboration == "no_operator_slot":
+        import _tapeout_declaration as _td_mod  # noqa: PLC0415
         try:
-            import _tapeout_declaration as _td_mod  # noqa: PLC0415
             owed = _td_mod.die_outputs_owed(project)
+        except _td_mod.DeliveryRouteContradiction:
+            raise
         except Exception:  # noqa: BLE001 — cannot read the route: run the step
             return None
-        # None is the bought-slot HARDMACRO dispute. Preserve the landed
-        # #2277 owed-output verdict until the owner rules; the producer sees
-        # the same sentinel and preserves its own pre-existing behavior.
-        if owed is not False:
+        if owed:
             return None
         _why_corroborated = "no operator slot is bound"
     elif corroboration == "owner_attestation":

@@ -1,9 +1,4 @@
-"""The unresolved bought-slot contract and the shared one-line ruling seam.
-
-The fixture is the landed #2277 declaration fixture, including owner
-attestation and the fetched catalogue. An operator binding, not the catalogue,
-is the one changed input in the disputed case.
-"""
+"""Owner's IC versus IP route ruling at step 0.5ic and both consumers."""
 import sys
 from pathlib import Path
 
@@ -15,39 +10,77 @@ if str(PROGRAMS) not in sys.path:
 
 import _tapeout_declaration as TD  # noqa: E402
 import flow_compliance_check as F  # noqa: E402
+import phase1_one_shot_runner as R  # noqa: E402
+import tapeout_declaration_check as CHECK  # noqa: E402
+import tapeout_declaration_gen as GEN  # noqa: E402
 import test_issue2277_hardmacro_owes_no_die_steps as BASE  # noqa: E402
 
+MESSAGE = ("deliverable HARDMACRO (IP path) contradicts a bought shuttle slot "
+           "(IC path); declare one route in input/step_0_5ic_answers.json")
 
-@pytest.mark.parametrize("name,options,owed,ring", [
-    ("macro_no_slot", {}, False, False),
-    ("macro_bought_slot", {"operator": {"path": "t.yaml", "slot": "slot_1x1"}},
-     None, False),
-    ("die_bought_slot", {"deliverable": "DIE",
-                         "operator": {"path": "t.yaml", "slot": "slot_1x1"}},
-     True, True),
-    ("self_tapeout", {"deliverable": "DIE", "self_tapeout": True},
-     True, True),
-])
-def test_four_routes_report_the_pending_ruling_explicitly(
-        tmp_path, name, options, owed, ring):
-    project = BASE._project(tmp_path / name, **options)
-    assert TD.die_outputs_owed(project) is owed
-    assert TD.requests_pad_ring(project) is ring
-    live = owed is not False
-    for sid in ("15.5ic", "26.5ic", "37.5ic"):
+
+def _case(tmp_path, *, deliverable="HARDMACRO", bought=False,
+          self_tapeout=False):
+    operator = ({"path": "t.yaml", "slot": "slot_1x1"} if bought else None)
+    return BASE._project(tmp_path, deliverable=deliverable,
+                         operator=operator, self_tapeout=self_tapeout)
+
+
+def test_four_routes_share_one_predicate_and_refuse_the_contradiction(tmp_path):
+    """The three valid routes keep their outputs; the fourth selects neither."""
+    valid = []
+    for name, opts, owed, ring in (
+        ("ip", {}, False, False),
+        ("shuttle_die", {"deliverable": "DIE", "bought": True}, True, True),
+        ("self_die", {"deliverable": "DIE", "self_tapeout": True}, True, True),
+    ):
+        project = _case(tmp_path / name, **opts)
+        valid.append((project, owed))
+        assert TD.requests_pad_ring(project) is ring
+        for sid in ("15.5ic", "26.5ic", "37.5ic"):
+            assert F._check_condition(
+                project, BASE._steps()[sid]["condition"]) is owed
         assert F._check_condition(
-            project, BASE._steps()[sid]["condition"]) is live
+            project, BASE._steps()["37.5ip"]["condition"]) is (not owed)
 
-
-@pytest.mark.parametrize("ruling", [True, False])
-def test_either_owner_ruling_changes_producer_and_audit_together(
-        tmp_path, monkeypatch, ruling):
-    project = BASE._project(
-        tmp_path, operator={"path": "t.yaml", "slot": "slot_1x1"})
-    original = TD.die_outputs_owed
-    assert original(project) is None
-    monkeypatch.setattr(TD, "die_outputs_owed", lambda _project: ruling)
-    assert TD.requests_pad_ring(project) is ruling
+    bought = _case(tmp_path / "contradiction", bought=True)
+    refusal = None
+    try:
+        TD.requests_pad_ring(bought)
+    except ValueError as exc:
+        refusal = str(exc)
+    assert refusal == MESSAGE
     for sid in ("15.5ic", "26.5ic", "37.5ic"):
-        assert F._check_condition(
-            project, BASE._steps()[sid]["condition"]) is ruling
+        with pytest.raises(ValueError,
+                           match="HARDMACRO.*bought shuttle slot"):
+            F._check_condition(bought, BASE._steps()[sid]["condition"])
+    for project, owed in valid:
+        assert TD.die_outputs_owed(project) is owed
+
+
+def test_step_0_5ic_refuses_before_any_producer(tmp_path, monkeypatch, capsys):
+    project = _case(tmp_path, bought=True)
+    dispatched = []
+
+    def no_producer(*_args, **_kwargs):
+        dispatched.append(True)
+        raise RuntimeError("producer dispatched")
+
+    monkeypatch.setattr(R._wd, "run_host_supervised", no_producer)
+    try:
+        rc = R._run_step_0_5ic(project)
+    except RuntimeError:
+        rc = None
+    assert dispatched == []
+    assert rc == 1
+    assert MESSAGE in capsys.readouterr().err
+
+
+def test_direct_route_producer_and_gate_refuse_by_name(tmp_path, capsys):
+    project = _case(tmp_path, bought=True)
+    assert GEN.main([str(project)]) == 1
+    assert MESSAGE in capsys.readouterr().err
+    rec = CHECK.evaluate(project)
+    assert any(r["rule"] == "HARDMACRO_BOUGHT_SLOT_CONTRADICTION"
+               and r["message"] == MESSAGE
+               for r in rec["refusals"])

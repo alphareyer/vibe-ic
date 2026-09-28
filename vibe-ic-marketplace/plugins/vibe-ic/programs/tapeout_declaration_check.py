@@ -119,6 +119,11 @@ def evaluate(project: Path,
     refusals: List[Dict[str, Any]] = []
     doc: Optional[Dict[str, Any]] = None
 
+    if TD.bought_slot_hardmacro(project):
+        refusals.append({"rule": "HARDMACRO_BOUGHT_SLOT_CONTRADICTION",
+                         "message": TD.BOUGHT_SLOT_HARDMACRO_MESSAGE,
+                         "path": "input/step_0_5ic_answers.json"})
+
     if not decl_path.is_file():
         refusals.append({
             "rule": RULE_DECLARATION_ABSENT,

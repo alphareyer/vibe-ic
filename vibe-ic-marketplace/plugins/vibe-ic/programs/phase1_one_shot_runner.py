@@ -1126,6 +1126,14 @@ def _run_step_0_5ic(project: Path, pdk: str = "") -> int:
               f"no answer, and must not be recorded as one", file=sys.stderr)
         return 1
 
+    # BLOCKING route admission, before fetch, ingest, declaration or Phase-1
+    # extraction. The owner declared HARDMACRO and a shuttle purchase to be
+    # mutually exclusive; neither downstream consumer may choose a side.
+    if _TD.bought_slot_hardmacro(project):
+        print(f"      REFUSED: {_TD.BOUGHT_SLOT_HARDMACRO_MESSAGE}",
+              file=sys.stderr)
+        return 1
+
     template, slot, reason = None, None, None
     if answers:
         operator = answers.get("operator_template")

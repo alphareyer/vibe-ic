@@ -835,27 +835,56 @@ def declared_route_on_disk(project: Path, has_slots: bool
 SLOTS_REL = "input/submission_template/slots"
 
 
-def die_outputs_owed(project: Path) -> Optional[bool]:
-    """Whether this delivery owes die-level outputs; None needs an owner ruling.
+BOUGHT_SLOT_HARDMACRO_MESSAGE = (
+    "deliverable HARDMACRO (IP path) contradicts a bought shuttle slot "
+    "(IC path); declare one route in input/step_0_5ic_answers.json"
+)
 
-    The unresolved case is an owner-declared HARDMACRO with an operator slot
-    binding. The declaration schema says a macro has no die edge, while the
-    landed #2277 flow conditions keep the die rows live for a purchase. Keep
-    that disagreement explicit at this one seam until the owner chooses the
-    interpretation. Changing the final ``return None`` to ``True`` or
-    ``False`` selects either reading for both the producer and the audit.
+
+class DeliveryRouteContradiction(ValueError):
+    """BLOCKING: the design declared the IP and IC routes together."""
+
+
+def bought_slot_hardmacro(project: Path) -> bool:
+    """Read the owner's staged route answer, not the operator's catalogue."""
+    import _submission_template as ST
+    own, err = load(project / ST.DESIGN_ANSWERS_REL)
+    if err is not None or not isinstance(own, dict):
+        return False
+    if answer(own, "deliverable") != DELIVERABLE_HARDMACRO:
+        return False
+    operator = own.get("operator_template")
+    return isinstance(operator, dict) and any(
+        isinstance(operator.get(key), str) and bool(operator[key].strip())
+        for key in ("path", "slot")
+    )
+
+
+def die_outputs_owed(project: Path) -> bool:
+    """One IC/IP predicate for pad production and die-output admission.
+
+    A contradictory route raises by name. Missing or uncertain deliverable
+    authority retains the die obligation; an attested pure HARDMACRO has none.
     """
+    if bought_slot_hardmacro(project):
+        raise DeliveryRouteContradiction(BOUGHT_SLOT_HARDMACRO_MESSAGE)
     path = project / DECLARATION_REL
     doc, err = load(path)
     if err is not None or not isinstance(doc, dict):
         return True
     if answer(doc, "deliverable") != DELIVERABLE_HARDMACRO:
         return True
+    # A generated, owner-attested declaration can be the only available input
+    # in a direct Phase-3 consumer or a legacy run. With no staged slot answer,
+    # a catalogue alone is still only information, never a purchase.
+    import _submission_template as ST
+    if not (project / ST.DESIGN_ANSWERS_REL).exists():
+        return False
     from submission_template_check import slot_rules_are_owed
     slot_owed, _why = slot_rules_are_owed(project, None)
     if not slot_owed:
         return False
-    return None  # HARDMACRO + bought/uncertain slot: owner ruling pending
+    return True
 
 
 def requests_pad_ring(project: Path) -> bool:
@@ -868,17 +897,15 @@ def requests_pad_ring(project: Path) -> bool:
     step's producer through the contract must see the producer the runner ran.
 
     A ring is requested by a self-tape-out (`SELF_TAPEOUT.txt`) or a slot
-    catalogue on disk, unless the delivery declares itself a `HARDMACRO`
-    without a slot. An owner-only answer nobody attested is no answer; an
-    absent, unreadable or unanswered declaration leaves the request standing.
-    The bought-slot HARDMACRO remains explicitly unresolved. Until the owner
-    rules, its production behavior stays the existing no-ring behavior.
+    catalogue on disk, unless the delivery is a pure `HARDMACRO`. A bought
+    slot with that declaration is refused before either route can be selected.
     """
+    owed = die_outputs_owed(project)
     slot_dir = project / SLOTS_REL
     if not ((project / SELF_TAPEOUT_REL).is_file()
             or (slot_dir.is_dir() and any(slot_dir.glob("*.yaml")))):
         return False
-    return die_outputs_owed(project) is True
+    return owed
 
 
 def applicable(q: Question, deliverable: Any) -> bool:

@@ -124,11 +124,12 @@ def test_a_self_tapeout_keeps_the_row_live(tmp_path, sid):
 
 
 @pytest.mark.parametrize("sid", _DIE_STEPS)
-def test_a_hardmacro_that_BOUGHT_a_slot_keeps_the_row_live(tmp_path, sid):
-    """An affirmative operator binding is a purchase, and a purchase goes
-    through that operator whatever the delivery word says."""
-    assert _runs(_project(tmp_path, operator={"path": "t.yaml",
-                                              "slot": "slot_1x1"}), sid) is True
+def test_a_hardmacro_that_BOUGHT_a_slot_is_refused(tmp_path, sid):
+    """The owner's IP and IC route declarations cannot both be accepted."""
+    with pytest.raises(ValueError,
+                       match="HARDMACRO.*bought shuttle slot"):
+        _runs(_project(tmp_path, operator={"path": "t.yaml",
+                                          "slot": "slot_1x1"}), sid)
 
 
 @pytest.mark.parametrize("sid", _DIE_STEPS)
