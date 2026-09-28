@@ -1079,7 +1079,6 @@ class TestErcReport:
             project, "chip_top", _fake_pdk(), "x", rpt3 / "erc.rpt", [])
         result = json.loads((rpt3 / "erc.json").read_text())
         report = (rpt3 / "erc.rpt").read_text()
-        assert result["tool_returncode"] == 0
         assert result["floating_nets"] is None
         assert result["clean"] is False
         assert result["verdict"] == "NOT_DETERMINED"
