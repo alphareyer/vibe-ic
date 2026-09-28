@@ -1810,7 +1810,9 @@ for step_id in json.loads(Path(requested).read_text()):
         "step": step_id,
         "inputs": [getattr(f, "id", None) or f.value.id for f in target.inputs],
         "outputs": [getattr(f, "id", None) or f.value.id for f in target.outputs],
-        "variables": {var.name: var.default for var in target.get_all_config_variables()}},
+        # (LibreLane's Variable always carries `default`, None when it has none.)
+        "variables": {var.name: getattr(var, "default", None)
+                      for var in target.get_all_config_variables()}},
         default=str) + "\\n")
 # The flow's own gates (`Flow.gating_config_vars`): a flow skips a step whose
 # gating variable is false; a caller running steps one by one must too.
