@@ -347,6 +347,23 @@ def test_rc2_needs_an_explicit_nonapplicable_verdict(tmp_path, line, expected):
     assert result == ([] if expected == "NOT_APPLICABLE" else ["fake_json_check"])
 
 
+def test_a_gate_failure_without_own_json_cites_the_run_receipt(tmp_path, capsys):
+    gates = tmp_path / "gates"
+    gates.mkdir()
+    (gates / "fake_json_check.py").write_text(
+        'import sys\nprint("[FAIL] no report")\nsys.exit(1)\n')
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    result = R._run_layergate2(
+        proj, gates=(("fake_json_check", "fake"),), gate_dir=gates)
+    assert result == ["fake_json_check"]
+    assert result.failed == ["fake_json_check"]
+    out = capsys.readouterr().out
+    cited = out.split("FAIL — blocks phase1 (see ", 1)[1].split(")", 1)[0]
+    assert (proj / cited).is_file(), cited
+    assert json.loads((proj / cited).read_text())["verdict"] == "FAIL"
+
+
 def test_the_tail_failure_line_names_the_report_directory():
     src = RUNNER.read_text()
     assert "— see reports/phase1/\")" not in src
