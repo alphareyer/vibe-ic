@@ -13830,24 +13830,16 @@ def _load_waivers(project: Path, max_step: int = 40) -> Dict[int, Dict[str, str]
                     _ev_ind.disclosure(step_name, _assess) +
                     f" The step (flow step {sid}) remains WAIVED-DEFERRED on "
                     f"ticket {ticket}; review_required stays true.")
-            out[sid] = {
-                "id": sid,
-                "reason": (
+            out[sid] = _owner_waiver.ValidatedOwnerEnvWaiver(
+                w, data, step_id=sid,
+                reason=(
                     f"ENV_UNAVAILABLE: {rationale[:200]} "
                     f"[ticket={ticket}, review_required={reviewer_required}, "
                     f"evidence={_assess.describe()}"
                     + ("" if _assess.corroborated
                        else ", NO independent corroboration") + "]"
                 ),
-                "approver": w.get("approver",
-                                  "field-agent-attest (ENV_UNAVAILABLE tier)"),
-                "ticket": ticket,
-                "verdict_tier": tier,
-                "review_required": reviewer_required,
-                "evidence": evidence,
-                "evidence_assessment": _assess.as_dict(),
-                "_env_unavailable": True,
-            }
+                evidence_assessment=_assess.as_dict())
         # Check execution conditions on the remaining owner-approved entries.
         _refuse_stale_waivers(project, out)
         return out
